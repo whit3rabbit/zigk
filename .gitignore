@@ -1,0 +1,39 @@
+# Zig build artifacts
+zig-cache/
+zig-out/
+.zig-cache/
+
+# Build outputs
+*.o
+*.a
+*.so
+*.elf
+*.bin
+*.iso
+*.img
+
+# Editor and IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.log
+
+# Environment files
+.env
+.env.*
+
+# Generated documentation
+docs/_build/
+
+# QEMU and emulator artifacts
+*.qcow2
+*.vdi
