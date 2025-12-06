@@ -16,7 +16,7 @@
 ## Path Conventions
 
 - **Kernel code**: `src/kernel/`
-- **HAL layer**: `src/kernel/hal/` or `src/arch/x86_64/`
+- **HAL layer**: `src/arch/x86_64/`
 - **Library code**: `src/lib/`
 - **Test programs**: `tests/userland/`
 
@@ -29,7 +29,7 @@
 - [ ] T001 Verify spec 003-microkernel-userland-networking scheduler exists in src/kernel/sched/
 - [ ] T002 Verify spec 003-microkernel-userland-networking dispatch table exists in src/kernel/syscall/table.zig (Linux ABI per spec 005)
 - [ ] T003 Verify spec 006-sysv-abi-init process creation exists in src/kernel/process/task.zig
-- [ ] T004 [P] Create src/kernel/hal/ directory structure for timer and entropy HAL
+- [ ] T004 [P] Create src/arch/ directory structure for timer and entropy HAL
 - [ ] T005 [P] Create src/lib/ directory for PRNG library code
 - [ ] T006 [P] Create tests/userland/ directory for test binaries
 
@@ -51,7 +51,7 @@
 
 ### Crash Diagnostics (FR-032-034 from archived/004)
 
-- [ ] T013a Implement dump_registers() helper for exception handlers in src/hal/x86_64/debug.zig
+- [ ] T013a Implement dump_registers() helper for exception handlers in src/arch/x86_64/debug.zig
 - [ ] T013b Page fault handler prints CR2 (fault address) and RIP (instruction pointer)
 
 **Checkpoint**: Architecture is hardened against silent killers - safe to proceed with feature implementation
@@ -66,11 +66,11 @@
 
 ### HAL Layer
 
-- [ ] T014 [P] Implement rdtsc() inline assembly wrapper in src/kernel/hal/timer.zig
-- [ ] T015 [P] Implement CPUID check for RDRAND support in src/kernel/hal/entropy.zig
-- [ ] T016 [P] Implement rdrand() inline assembly wrapper in src/kernel/hal/entropy.zig
-- [ ] T017 Implement TSC calibration using PIT in src/kernel/hal/timer.zig (use interrupt-driven delay per T013)
-- [ ] T018 Implement collectTscEntropy() with timing jitter in src/kernel/hal/entropy.zig
+- [ ] T014 [P] Implement rdtsc() inline assembly wrapper in src/arch/timer.zig
+- [ ] T015 [P] Implement CPUID check for RDRAND support in src/arch/entropy.zig
+- [ ] T016 [P] Implement rdrand() inline assembly wrapper in src/arch/entropy.zig
+- [ ] T017 Implement TSC calibration using PIT in src/arch/timer.zig (use interrupt-driven delay per T013)
+- [ ] T018 Implement collectTscEntropy() with timing jitter in src/arch/entropy.zig
 
 ### Core Data Structures
 
@@ -275,9 +275,9 @@
 **Phase 2 (Foundational)**:
 ```
 # Can run in parallel - different files:
-T014: src/kernel/hal/timer.zig (rdtsc)
-T015: src/kernel/hal/entropy.zig (CPUID check)
-T016: src/kernel/hal/entropy.zig (rdrand)
+T014: src/arch/timer.zig (rdtsc)
+T015: src/arch/entropy.zig (CPUID check)
+T016: src/arch/entropy.zig (rdrand)
 T019: src/lib/prng.zig
 T020-T021: src/kernel/process/fd_table.zig (enums/structs)
 T023-T025: src/kernel/time/types.zig (structs)
@@ -298,9 +298,9 @@ US4 (getrandom): T063-T070
 
 ```bash
 # Launch all HAL tasks in parallel:
-Task: "T014 Implement rdtsc() in src/kernel/hal/timer.zig"
-Task: "T015 Implement CPUID check in src/kernel/hal/entropy.zig"
-Task: "T016 Implement rdrand() in src/kernel/hal/entropy.zig"
+Task: "T014 Implement rdtsc() in src/arch/timer.zig"
+Task: "T015 Implement CPUID check in src/arch/entropy.zig"
+Task: "T016 Implement rdrand() in src/arch/entropy.zig"
 
 # Launch all data structure tasks in parallel:
 Task: "T019 Implement Xoroshiro128Plus in src/lib/prng.zig"
