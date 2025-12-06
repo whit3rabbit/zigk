@@ -48,7 +48,8 @@ zigk/
     │   ├── irq/               # Generic IRQ dispatch logic
     │   ├── time/              # Generic timekeeping (clock_gettime)
     │   ├── panic.zig          # Panic handler
-    │   └── printk.zig         # Logging abstraction (calls arch.serial)
+    │   └── debug/             # Debug/logging subsystem
+    │       └── console.zig    # Generic writer wrapping arch.serial
     │
     ├── mm/                    # [Spec 003] Memory Management
     │   ├── heap.zig           # Free-list allocator (Coalescing logic)

@@ -31,16 +31,18 @@ Based on plan.md structure:
 **Purpose**: Build system and core booting infrastructure
 
 - [ ] T001 Create project directory structure per plan.md layout
-- [ ] T002 Configure build.zig with freestanding x86_64 target using b.createModule() and root_module (Zig 0.15.x pattern), Limine integration, uapi module exposure to kernel and userland, AND test runner step for host-based unit tests
+- [ ] T002 Configure build.zig with freestanding x86_64 target using b.createModule() and root_module (Zig 0.15.x pattern), Limine integration, uapi module exposure to kernel and userland, AND unit test step that compiles tests/ files against the HOST target (not freestanding) for logic verification (heap, lists), mocking hardware dependencies where necessary
 - [ ] T003 [P] Add limine.zig bindings as build dependency in build.zig.zon
 - [ ] T004 [P] Create limine.conf bootloader configuration
 - [ ] T005 Create src/kernel/main.zig with Limine entry point and requests (framebuffer, memory_map, hhdm, modules)
-- [ ] T006 [P] Implement src/lib/serial.zig for debug output (COM1, 115200 baud)
+- [ ] T005a [P] Create src/config.zig for kernel configuration constants (default stack size, debug enabled, version string)
+- [ ] T006 [P] Implement src/arch/x86_64/serial.zig for COM1 output (using port I/O via arch module)
 - [ ] T006a [P] Implement src/kernel/panic.zig with panic handler (FR-004 from archived/002)
 - [ ] T006b [P] Implement stack guard canary __stack_chk_guard in src/kernel/stack_guard.zig (FR-009 from archived/002)
 - [ ] T006c [P] Implement __stack_chk_fail handler that calls panic (FR-010 from archived/002)
 - [ ] T006d Enable stack smashing protection in build.zig if supported (FR-008 from archived/002)
-- [ ] T007 [P] Implement src/lib/console.zig for framebuffer text rendering
+- [ ] T006e [P] Implement std.log override in src/kernel/main.zig to use the console writer
+- [ ] T007 [P] Implement src/kernel/debug/console.zig as generic writer wrapping arch-specific serial driver
 
 ### Shared uapi Module
 
