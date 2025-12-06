@@ -36,10 +36,37 @@ Based on plan.md structure:
 - [ ] T004 [P] Create limine.conf bootloader configuration
 - [ ] T005 Create src/kernel/main.zig with Limine entry point and requests (framebuffer, memory_map, hhdm, modules)
 - [ ] T006 [P] Implement src/lib/serial.zig for debug output (COM1, 115200 baud)
+- [ ] T006a [P] Implement src/kernel/panic.zig with panic handler (FR-004 from archived/002)
+- [ ] T006b [P] Implement stack guard canary __stack_chk_guard in src/kernel/stack_guard.zig (FR-009 from archived/002)
+- [ ] T006c [P] Implement __stack_chk_fail handler that calls panic (FR-010 from archived/002)
+- [ ] T006d Enable stack smashing protection in build.zig if supported (FR-008 from archived/002)
 - [ ] T007 [P] Implement src/lib/console.zig for framebuffer text rendering
 - [ ] T008 Verify kernel boots to "ZigK booting..." message in QEMU
 
 **Checkpoint**: Kernel boots and displays debug output
+
+---
+
+## Phase 1.5: HAL Infrastructure (Constitution Compliance)
+
+**Purpose**: Establish HAL module structure per contracts/hal-interface.md before drivers are implemented
+
+**CRITICAL**: Drivers implemented in later phases MUST import from hal module only, never use inline assembly directly
+
+### HAL Module Structure
+
+- [ ] T008a Create src/hal/hal.zig unified interface re-exporting all x86_64 modules
+- [ ] T008b Create src/hal/x86_64/ directory structure per hal-interface.md
+- [ ] T008c [P] Create src/hal/x86_64/port_io.zig with inb/outb/inw/outw/inl/outl functions
+- [ ] T008d [P] Create src/hal/x86_64/cpu.zig with CR/MSR/interrupt control functions
+- [ ] T008e [P] Verify src/lib/serial.zig uses hal.port for I/O (no direct port access)
+
+### HAL Enforcement Verification
+
+- [ ] T008f Add build.zig check: files in src/drivers/ MUST NOT contain "asm volatile" except for memory barriers
+- [ ] T008g Document in CLAUDE.md: drivers MUST import hal, not x86_64 modules directly
+
+**Checkpoint**: HAL layer exists; all port I/O flows through hal.port
 
 ---
 
@@ -72,6 +99,16 @@ Based on plan.md structure:
 - [ ] T021 Implement free() with forward/backward coalescing (FR-002b/c)
 - [ ] T022 Add allocation count tracking for hygiene verification (Principle IX)
 - [ ] T023 Verify heap alloc/free cycles via serial debug output
+
+### Heap Allocator Verification (Enhanced)
+
+- [ ] T023a Create tests/unit/heap_fuzz.zig with randomized heap testing
+- [ ] T023b Fuzz test performs 10,000 random alloc/free sequences with varying sizes (8 bytes to 64KB)
+- [ ] T023c Fuzz test verifies coalescing by checking free block count decreases after adjacent frees
+- [ ] T023d Fuzz test verifies no memory corruption by writing patterns to allocated blocks and checking on free
+- [ ] T023e Run heap fuzz test before Phase 7 (Networking) to ensure allocator stability
+
+**Verification**: Heap fuzz test passes 10,000 iterations without corruption or fragmentation
 
 **Checkpoint**: Memory management complete - PMM allocates pages, VMM maps them, Heap provides dynamic allocation
 
@@ -118,7 +155,26 @@ Based on plan.md structure:
 - [ ] T043a [P] Implement page fault (vector 14) handler in src/hal/x86_64/idt.zig with error code parsing and serial debug output (FR-005)
 - [ ] T043b Verify page fault handler catches invalid memory access without triple fault
 
-**Checkpoint**: Interrupt infrastructure complete - exceptions handled, IRQs routed
+### FPU/SSE State Preservation (FR-FPU-01 through FR-FPU-07)
+
+- [ ] T043c Add 512-byte aligned FPU state area to Thread structure in src/kernel/thread.zig (FR-FPU-04)
+- [ ] T043d Implement FXSAVE in interrupt entry stub in src/hal/x86_64/interrupts.zig (FR-FPU-02)
+- [ ] T043e Implement FXRSTOR in interrupt exit stub in src/hal/x86_64/interrupts.zig (FR-FPU-03)
+- [ ] T043f Verify build.zig disables SSE/MMX for kernel code only (FR-FPU-05)
+- [ ] T043g [P] (Optional) Implement CR0.TS lazy FPU switching with #NM handler in src/hal/x86_64/fpu.zig (FR-FPU-07)
+
+### Stack Guard Pages (FR-029-031 from archived/004)
+
+- [ ] T043h Allocate N+1 pages for kernel stacks with bottom page unmapped (guard page)
+- [ ] T043i Verify stack overflow triggers page fault at guard page address
+- [ ] T043j Page fault handler logs faulting thread ID and fault address for guard page faults
+
+### Crash Diagnostics (FR-032-034 from archived/004)
+
+- [ ] T043k Page fault handler prints CR2 (fault address) and RIP (instruction pointer)
+- [ ] T043l Implement dump_registers() helper for exception handlers in src/hal/x86_64/debug.zig
+
+**Checkpoint**: Interrupt infrastructure complete - exceptions handled, IRQs routed, FPU state preserved
 
 ---
 
@@ -207,16 +263,16 @@ Based on plan.md structure:
 - [ ] T074 [US3] Configure IA32_FMASK to clear IF (disable interrupts on entry)
 - [ ] T075 [US3] Implement syscall_entry: **CLI first** (Big Kernel Lock) → SWAPGS → switch stack (FR-023a)
 - [ ] T076 [US3] Implement user pointer validation with interrupts disabled (FR-023b)
-- [ ] T077 [US3] Implement syscall dispatch table in src/kernel/syscall.zig
+- [ ] T077 [US3] Create src/kernel/syscall/ directory with table.zig (dispatch) and handlers.zig
 
-### Basic Syscalls
+### Basic Syscalls (Linux x86_64 ABI - see specs/syscall-table.md)
 
-- [ ] T078 [P] [US3] Implement SYS_EXIT (0) in src/kernel/syscall.zig
-- [ ] T079 [P] [US3] Implement SYS_WRITE (1) - write to console in src/kernel/syscall.zig
-- [ ] T080 [P] [US3] Implement SYS_READ_CHAR (2) - read from keyboard ASCII buffer
-- [ ] T081 [P] [US3] Implement SYS_YIELD (3) - yield timeslice
-- [ ] T082 [P] [US3] Implement SYS_GETPID (4) - return thread ID
-- [ ] T083 [P] [US3] Implement SYS_SLEEP (5) - block thread for milliseconds
+- [ ] T078 [P] [US3] Implement sys_exit (60) in src/kernel/syscall/
+- [ ] T079 [P] [US3] Implement sys_write (1) - write to console in src/kernel/syscall/
+- [ ] T080 [P] [US3] Implement sys_read (0) - read from keyboard/FD in src/kernel/syscall/
+- [ ] T081 [P] [US3] Implement sys_sched_yield (24) - yield timeslice
+- [ ] T082 [P] [US3] Implement sys_getpid (39) - return thread ID
+- [ ] T083 [P] [US3] Implement sys_nanosleep (35) - block thread for timespec duration
 
 ### User Page Tables
 
@@ -311,7 +367,9 @@ Based on plan.md structure:
 
 ### Verification
 
-- [ ] T131 [US1] Run QEMU with TAP networking and static IP
+- [ ] T131 [US1] Run QEMU with TAP networking and static IP (requires sudo)
+- [ ] T131a [US1] **Fallback**: Run QEMU with SLIRP mode using port forwarding (no sudo required)
+- [ ] T131b [US1] SLIRP verification: kernel binds UDP 5555, host sends to localhost:5555
 - [ ] T132 [US1] Verify `ping <kernel-ip>` receives replies <100ms (SC-001)
 - [ ] T133 [US1] Use tcpdump on host to verify packet byte order
 
@@ -349,10 +407,11 @@ Based on plan.md structure:
 - [ ] T140 [US5] Implement UDP checksum calculation (optional for MVP)
 - [ ] T141 [US5] Implement port-based dispatch for incoming UDP
 
-### UDP Syscalls
+### Socket Syscalls (Linux x86_64 ABI - see specs/syscall-table.md)
 
-- [ ] T142 [US5] Implement SYS_SEND_UDP (6) in src/kernel/syscall.zig
-- [ ] T143 [US5] Implement SYS_RECV_UDP (7) in src/kernel/syscall.zig
+- [ ] T141a [US5] Implement sys_socket (41) - create UDP socket handle in src/kernel/syscall/
+- [ ] T142 [US5] Implement sys_sendto (44) in src/kernel/syscall/
+- [ ] T143 [US5] Implement sys_recvfrom (45) in src/kernel/syscall/
 - [ ] T144 [US5] Document byte order in syscall interface (FR-019d)
 
 ### Verification
@@ -387,12 +446,12 @@ Based on plan.md structure:
 - [ ] T153 [US7] Implement FD allocation/deallocation
 - [ ] T154 [US7] Validate FD indices before access (FR-027f)
 
-### File Syscalls
+### File Syscalls (Linux x86_64 ABI - see specs/syscall-table.md)
 
-- [ ] T155 [US7] Implement SYS_OPEN (13) - lookup file, allocate FD (FR-027b)
-- [ ] T156 [US7] Implement SYS_CLOSE (14) - release FD (FR-027e)
-- [ ] T157 [US7] Implement SYS_READ (15) - read from file position (FR-027c)
-- [ ] T158 [US7] Implement SYS_SEEK (16) - update position (SEEK_SET/CUR/END) (FR-027d)
+- [ ] T155 [US7] Implement sys_open (2) - lookup file, allocate FD (FR-027b)
+- [ ] T156 [US7] Implement sys_close (3) - release FD (FR-027e)
+- [ ] T157 [US7] Implement sys_read (0) - read from file position (FR-027c)
+- [ ] T158 [US7] Implement sys_lseek (8) - update position (SEEK_SET/CUR/END) (FR-027d)
 
 ### Verification
 
@@ -414,11 +473,11 @@ Based on plan.md structure:
 - [ ] T161 [US8] Add heap_break and heap_limit to Thread struct
 - [ ] T162 [US8] Set initial program break after BSS segment (FR-028d)
 
-### SYS_SBRK Implementation
+### sys_brk Implementation (Linux x86_64 ABI - see specs/syscall-table.md)
 
-- [ ] T163 [US8] Implement SYS_SBRK (17) in src/kernel/syscall.zig (FR-028)
-- [ ] T164 [US8] Handle sbrk(0) returning current break (FR-028a)
-- [ ] T165 [US8] Handle sbrk(n) expanding heap, mapping pages on demand (FR-028b)
+- [ ] T163 [US8] Implement sys_brk (12) in src/kernel/syscall/ (FR-028)
+- [ ] T164 [US8] Handle brk(0) returning current break (FR-028a)
+- [ ] T165 [US8] Handle brk(addr) expanding heap, mapping pages on demand (FR-028b)
 - [ ] T166 [US8] Map new pages with user-accessible permissions (FR-028c)
 - [ ] T167 [US8] Return -ENOMEM on insufficient physical memory
 
@@ -437,14 +496,14 @@ Based on plan.md structure:
 
 **Independent Test**: Userland writes test pattern, appears on screen
 
-### Framebuffer Info Syscall
+### Framebuffer Info Syscall (ZigK Custom Extensions 1000+ - see specs/syscall-table.md)
 
-- [ ] T170 [US9] Implement SYS_GET_FB_INFO (10) returning width/height/pitch/bpp (FR-029)
+- [ ] T170 [US9] Implement sys_get_fb_info (1000) returning width/height/pitch/bpp (FR-029)
 - [ ] T171 [US9] Parse Limine framebuffer response for pixel format
 
 ### Framebuffer Mapping
 
-- [ ] T172 [US9] Implement SYS_MAP_FB (11) in src/kernel/syscall.zig (FR-029a)
+- [ ] T172 [US9] Implement sys_map_fb (1001) in src/kernel/syscall/ (FR-029a)
 - [ ] T173 [US9] Map framebuffer physical pages with user-accessible + write-through flags (FR-029b)
 - [ ] T174 [US9] Get framebuffer physical address from Limine response (FR-029c)
 - [ ] T175 [US9] **Security**: Only allow framebuffer region mapping (FR-029d)
@@ -464,15 +523,15 @@ Based on plan.md structure:
 
 **Independent Test**: Press key, read make code; release key, read break code
 
-### Scancode Syscall
+### Scancode Syscall (ZigK Custom Extensions 1000+ - see specs/syscall-table.md)
 
-- [ ] T178 [US10] Implement SYS_READ_SCANCODE (9) in src/kernel/syscall.zig (FR-030)
+- [ ] T178 [US10] Implement sys_read_scancode (1002) in src/kernel/syscall/ (FR-030)
 - [ ] T179 [US10] Return scancode from scancode buffer (implemented in US6)
 - [ ] T180 [US10] Return -EAGAIN when buffer empty (non-blocking)
 
-### Time Syscall (for games)
+### Time Syscall (Linux x86_64 ABI - see specs/syscall-table.md)
 
-- [ ] T181 [P] [US10] Implement SYS_GET_TIME (8) returning system tick count
+- [x] T181 [P] [US10] DEFERRED TO SPEC 007: sys_clock_gettime (228) - see Spec 007 Phase 5 (T064-T072)
 
 ### Verification
 
@@ -504,10 +563,21 @@ Based on plan.md structure:
 
 ### Integration Tests
 
-- [ ] T190 Create tests/integration/ping_test.sh for 10-minute ping flood
+**QEMU Network Modes**:
+- **TAP Mode** (requires sudo): `-netdev tap,id=n0,ifname=tap0,script=no -device e1000,netdev=n0`
+- **SLIRP Mode** (no sudo): `-netdev user,id=n0,hostfwd=udp::5555-:5555 -device e1000,netdev=n0`
+
+- [ ] T190 Create tests/integration/ping_test.sh for 10-minute ping flood (TAP mode, requires sudo)
+- [ ] T190a **Fallback**: Create tests/integration/slirp_test.sh for SLIRP-based network testing (no sudo)
+- [ ] T190b SLIRP test: kernel binds UDP 5555, host sends to localhost:5555, verify echo
+- [ ] T190c Implement loopback network interface in src/net/loopback.zig (per archived/004 US10)
+- [ ] T190d Loopback self-test: send ICMP echo to 127.0.0.1, verify reply through stack
+- [ ] T190e Run loopback test in QEMU with no network device to verify stack logic
 - [ ] T191 Create tests/integration/tcpdump_verify.sh for packet format validation
 - [ ] T192 Verify kernel stable for 10+ minutes under ping load (SC-006)
 - [ ] T193 Verify shell responsive during network activity
+
+**Checkpoint**: Network tests pass in at least one mode (TAP, SLIRP, or loopback)
 
 ### Debug Infrastructure
 

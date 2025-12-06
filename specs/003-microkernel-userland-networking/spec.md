@@ -7,6 +7,8 @@
 
 **Architecture Note**: This is technically a **Monolithic Kernel** (drivers compile into the kernel binary, running in Ring 0). The branch name retains "microkernel" for historical reasons. In a true microkernel, drivers run as separate userspace processes (Ring 3).
 
+**Merged Spec**: This specification subsumes Spec 001 (Minimal Bootable Kernel). Phase 1 covers: boot via Limine, framebuffer initialization, CPU halt, and bootable disk image creation. Spec 001 has been archived to `specs/_archived/001-minimal-kernel/`.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - ICMP Ping Reply (Priority: P1)
@@ -215,6 +217,15 @@ A userland application can read raw keyboard scancodes (make/break codes) for ga
 - **FR-009b**: Double Fault handler (vector 0x08) MUST use IST entry 1 to ensure it has a valid stack even when the original stack overflowed
 - **FR-009c**: All IDT interrupt stubs MUST ensure RSP is 16-byte aligned before calling Zig handler functions (SysV ABI requirement; CPU pushes 40 bytes, so alignment padding may be needed)
 - **FR-009d**: Failure to align stack for interrupt handlers will cause random GPF crashes when compiler uses SSE/AVX instructions for memcpy or string formatting
+
+**FPU/SSE State Preservation**
+- **FR-FPU-01**: System MUST preserve FPU/SSE state (XMM0-XMM15, MXCSR) across interrupts for userland processes
+- **FR-FPU-02**: Interrupt entry stubs MUST execute FXSAVE to save FPU state to thread context
+- **FR-FPU-03**: Interrupt exit stubs MUST execute FXRSTOR to restore FPU state from thread context
+- **FR-FPU-04**: Thread context structure MUST include 512-byte aligned FXSAVE area
+- **FR-FPU-05**: Kernel code MUST NOT use FPU/SSE (disabled via build.zig cpu_features_sub)
+- **FR-FPU-06**: Userland code MAY use FPU/SSE instructions freely
+- **FR-FPU-07**: (Optional) System MAY implement lazy FPU context switching using CR0.TS and #NM exception
 
 **Multitasking**
 - **FR-010**: System MUST implement a preemptive scheduler with time-slice-based switching

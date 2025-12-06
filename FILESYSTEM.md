@@ -1,4 +1,4 @@
-Based on the detailed specifications provided—specifically the requirements for ARM portability (Spec 008), the microkernel/modular design (Spec 003), and the Linux syscall compatibility layer (Spec 005)—here is a recommended file tree structure.
+Based on the detailed specifications provided--specifically the requirements for ARM portability (Spec 008), the microkernel/modular design (Spec 003), and the Linux syscall compatibility layer (Spec 005)--here is a recommended file tree structure.
 
 This structure mirrors the **Linux Kernel** organization to ensure familiarity for OS developers, while leveraging **Zig's** module system to enforce the strict HAL layering required by your Constitution.
 
@@ -10,9 +10,22 @@ zigk/
 ├── build.zig.zon              # Dependencies (limine-zig)
 ├── limine.conf                # Bootloader config
 ├── specs/                     # Design documents (as provided)
+│   ├── 001-minimal-kernel/    # Complete: Minimal bootable kernel
+│   ├── 003-microkernel.../    # Complete: Microkernel with userland & networking
+│   ├── 007-linux-compat.../   # Complete: Linux compatibility layer
+│   ├── 009-spec-consistency/  # Complete: Cross-spec consistency unification
+│   ├── syscall-table.md       # Authoritative Linux syscall numbers
+│   ├── shared/                # Shared policies (zig-version, gotchas)
+│   └── archived/              # Superseded specs (002,004,005,006,008)
+│       └── README.md          # Documents merge destinations
 ├── tools/                     # Build scripts (ISO creation, QEMU runners)
 └── src/
-    ├── main.zig               # Kernel Entry Point (kmain)
+    ├── kernel/
+    │   ├── main.zig           # Kernel Entry Point (kmain) - Limine requests
+    │   └── syscall/           # [Spec 005/007] Modular syscall handlers
+    │       ├── table.zig      # Dispatch table (Linux x86_64 ABI numbers)
+    │       ├── handlers.zig   # Core syscall implementations
+    │       └── process.zig    # Process-related syscalls (wait4, exit, etc.)
     ├── config.zig             # Compile-time configuration (Debug flags, constants)
     │
     ├── arch/                  # [Spec 008] Architecture Specifics (The HAL)
@@ -122,3 +135,17 @@ const hal_mod = b.createModule(.{ .root_source_file = .{ .path = hal_path } });
 // Kernel module depends on HAL, but HAL depends on nothing generic
 kernel.root_module.addImport("hal", hal_mod);
 ```
+
+### Archived Specifications
+
+The following specs were consolidated into active specs (003, 007) as of 2025-12-06:
+
+| Archived Spec | Requirements Merged Into |
+|---------------|-------------------------|
+| 002-kernel-infrastructure | Spec 003 Phase 1 (panic, stack protection) |
+| 004-kernel-stability-arch | Spec 003 Phase 3 (FPU/SSE, stack guards), Spec 007 Phase 1.5 (crash diagnostics) |
+| 005-linux-syscall-compat | `specs/syscall-table.md` (authoritative table) |
+| 006-sysv-abi-init | Spec 003 userland (crt0), Spec 007 (arch_prctl) |
+| 008-arm-hal-portability | Spec 003 Phase 1.5 (HAL tasks), contracts/hal-interface.md |
+
+See `specs/archived/README.md` for full details.
