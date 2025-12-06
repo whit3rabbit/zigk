@@ -17,7 +17,7 @@
 
 Based on plan.md structure:
 - Kernel: `src/kernel/`
-- HAL: `src/hal/x86_64/`
+- HAL: `src/arch/x86_64/`
 - Drivers: `src/drivers/`
 - Network: `src/net/`
 - Filesystem: `src/fs/`
@@ -31,7 +31,7 @@ Based on plan.md structure:
 **Purpose**: Build system and core booting infrastructure
 
 - [ ] T001 Create project directory structure per plan.md layout
-- [ ] T002 Configure build.zig with freestanding x86_64 target and Limine integration
+- [ ] T002 Configure build.zig with freestanding x86_64 target, Limine integration, uapi module exposure to kernel and userland, AND test runner step for host-based unit tests
 - [ ] T003 [P] Add limine.zig bindings as build dependency in build.zig.zon
 - [ ] T004 [P] Create limine.conf bootloader configuration
 - [ ] T005 Create src/kernel/main.zig with Limine entry point and requests (framebuffer, memory_map, hhdm, modules)
@@ -41,6 +41,14 @@ Based on plan.md structure:
 - [ ] T006c [P] Implement __stack_chk_fail handler that calls panic (FR-010 from archived/002)
 - [ ] T006d Enable stack smashing protection in build.zig if supported (FR-008 from archived/002)
 - [ ] T007 [P] Implement src/lib/console.zig for framebuffer text rendering
+
+### Shared uapi Module
+
+- [ ] T007a Create src/uapi/ directory structure per FILESYSTEM.md
+- [ ] T007b Create src/uapi/syscalls.zig with syscall numbers from specs/syscall-table.md
+- [ ] T007c Create src/uapi/errno.zig with Linux errno constants (EPERM through ENOSYS)
+- [ ] T007d Create src/uapi/abi.zig with shared structs (Timespec, SockAddr, Stat)
+
 - [ ] T008 Verify kernel boots to "ZigK booting..." message in QEMU
 
 **Checkpoint**: Kernel boots and displays debug output
@@ -55,10 +63,10 @@ Based on plan.md structure:
 
 ### HAL Module Structure
 
-- [ ] T008a Create src/hal/hal.zig unified interface re-exporting all x86_64 modules
-- [ ] T008b Create src/hal/x86_64/ directory structure per hal-interface.md
-- [ ] T008c [P] Create src/hal/x86_64/port_io.zig with inb/outb/inw/outw/inl/outl functions
-- [ ] T008d [P] Create src/hal/x86_64/cpu.zig with CR/MSR/interrupt control functions
+- [ ] T008a Create src/arch/root.zig unified interface re-exporting all x86_64 modules
+- [ ] T008b Create src/arch/x86_64/ directory structure per hal-interface.md
+- [ ] T008c [P] Create src/arch/x86_64/port_io.zig with inb/outb/inw/outw/inl/outl functions
+- [ ] T008d [P] Create src/arch/x86_64/cpu.zig with CR/MSR/interrupt control functions
 - [ ] T008e [P] Verify src/lib/serial.zig uses hal.port for I/O (no direct port access)
 
 ### HAL Enforcement Verification
@@ -85,10 +93,10 @@ Based on plan.md structure:
 
 ### VMM (Virtual Memory Manager)
 
-- [ ] T013 Create src/hal/x86_64/paging.zig with PageTableEntry packed struct (FR-001)
+- [ ] T013 Create src/arch/x86_64/paging.zig with PageTableEntry packed struct (FR-001)
 - [ ] T014 Implement HHDM offset extraction from Limine response (FR-005a/b)
-- [ ] T015 Implement physToVirt()/virtToPhys() using HHDM offset in src/hal/x86_64/paging.zig
-- [ ] T016 Implement 4-level page table creation (PML4 → PDPT → PD → PT) in src/hal/x86_64/paging.zig
+- [ ] T015 Implement physToVirt()/virtToPhys() using HHDM offset in src/arch/x86_64/paging.zig
+- [ ] T016 Implement 4-level page table creation (PML4 → PDPT → PD → PT) in src/arch/x86_64/paging.zig
 - [ ] T017 Implement mapPage() with kernel/user permission flags (FR-003/FR-004)
 
 ### Heap Allocator
@@ -106,7 +114,7 @@ Based on plan.md structure:
 - [ ] T023b Fuzz test performs 10,000 random alloc/free sequences with varying sizes (8 bytes to 64KB)
 - [ ] T023c Fuzz test verifies coalescing by checking free block count decreases after adjacent frees
 - [ ] T023d Fuzz test verifies no memory corruption by writing patterns to allocated blocks and checking on free
-- [ ] T023e Run heap fuzz test before Phase 7 (Networking) to ensure allocator stability
+- [ ] T023e Run heap fuzz test before Phase 7 (Networking) to ensure allocator stability. Execute via `zig build test` on host using std.heap.page_allocator as backing allocator for unit test isolation from kernel runtime.
 
 **Verification**: Heap fuzz test passes 10,000 iterations without corruption or fragmentation
 
@@ -120,48 +128,48 @@ Based on plan.md structure:
 
 ### GDT Setup
 
-- [ ] T024 Create src/hal/x86_64/gdt.zig with GDTEntry packed struct
+- [ ] T024 Create src/arch/x86_64/gdt.zig with GDTEntry packed struct
 - [ ] T025 Define kernel code (0x08), kernel data (0x10), user data (0x18), user code (0x20) segments
-- [ ] T026 Implement TSSDescriptor (16 bytes spanning two slots) in src/hal/x86_64/gdt.zig
-- [ ] T027 Implement LGDT inline assembly in src/hal/x86_64/gdt.zig
+- [ ] T026 Implement TSSDescriptor (16 bytes spanning two slots) in src/arch/x86_64/gdt.zig
+- [ ] T027 Implement LGDT inline assembly in src/arch/x86_64/gdt.zig
 
 ### TSS Configuration
 
-- [ ] T028 Create TSS structure with rsp0, IST array in src/hal/x86_64/gdt.zig
+- [ ] T028 Create TSS structure with rsp0, IST array in src/arch/x86_64/gdt.zig
 - [ ] T029 Allocate 4KB Double Fault stack for IST[0] (FR-009a)
 - [ ] T030 Configure TSS.ist[0] to point to Double Fault stack (FR-009b)
 - [ ] T031 Implement LTR instruction to load TSS
 
 ### IDT Setup
 
-- [ ] T032 Create src/hal/x86_64/idt.zig with IDTGate packed struct (16 bytes)
+- [ ] T032 Create src/arch/x86_64/idt.zig with IDTGate packed struct (16 bytes)
 - [ ] T033 Implement interrupt stub generator with **16-byte RSP alignment** (FR-009c/d)
 - [ ] T034 Configure 256 IDT gates with proper gate types (0xE = interrupt)
 - [ ] T035 Configure Double Fault (vector 8) to use IST index 1
-- [ ] T036 Implement LIDT inline assembly in src/hal/x86_64/idt.zig
+- [ ] T036 Implement LIDT inline assembly in src/arch/x86_64/idt.zig
 - [ ] T037 Implement InterruptContext structure for saved register state
 
 ### PIC Configuration
 
-- [ ] T038 Create src/hal/x86_64/pic.zig with PIC initialization
-- [ ] T039 Remap IRQ0-15 to vectors 0x20-0x2F in src/hal/x86_64/pic.zig
-- [ ] T040 Implement interrupt masking functions in src/hal/x86_64/pic.zig
-- [ ] T041 Implement EOI (End of Interrupt) sending in src/hal/x86_64/pic.zig
+- [ ] T038 Create src/arch/x86_64/pic.zig with PIC initialization
+- [ ] T039 Remap IRQ0-15 to vectors 0x20-0x2F in src/arch/x86_64/pic.zig
+- [ ] T040 Implement interrupt masking functions in src/arch/x86_64/pic.zig
+- [ ] T041 Implement EOI (End of Interrupt) sending in src/arch/x86_64/pic.zig
 
 ### Verification
 
 - [ ] T042 Implement division by zero exception handler for testing
 - [ ] T043 Verify exception handler runs without triple fault
-- [ ] T043a [P] Implement page fault (vector 14) handler in src/hal/x86_64/idt.zig with error code parsing and serial debug output (FR-005)
+- [ ] T043a [P] Implement page fault (vector 14) handler in src/arch/x86_64/idt.zig with error code parsing and serial debug output (FR-005)
 - [ ] T043b Verify page fault handler catches invalid memory access without triple fault
 
 ### FPU/SSE State Preservation (FR-FPU-01 through FR-FPU-07)
 
 - [ ] T043c Add 512-byte aligned FPU state area to Thread structure in src/kernel/thread.zig (FR-FPU-04)
-- [ ] T043d Implement FXSAVE in interrupt entry stub in src/hal/x86_64/interrupts.zig (FR-FPU-02)
-- [ ] T043e Implement FXRSTOR in interrupt exit stub in src/hal/x86_64/interrupts.zig (FR-FPU-03)
+- [ ] T043d Implement FXSAVE in interrupt entry stub in src/arch/x86_64/interrupts.zig (FR-FPU-02)
+- [ ] T043e Implement FXRSTOR in interrupt exit stub in src/arch/x86_64/interrupts.zig (FR-FPU-03)
 - [ ] T043f Verify build.zig disables SSE/MMX for kernel code only (FR-FPU-05)
-- [ ] T043g [P] (Optional) Implement CR0.TS lazy FPU switching with #NM handler in src/hal/x86_64/fpu.zig (FR-FPU-07)
+- [ ] T043g [P] (Optional) Implement CR0.TS lazy FPU switching with #NM handler in src/arch/x86_64/fpu.zig (FR-FPU-07)
 
 ### Stack Guard Pages (FR-029-031 from archived/004)
 
@@ -172,7 +180,7 @@ Based on plan.md structure:
 ### Crash Diagnostics (FR-032-034 from archived/004)
 
 - [ ] T043k Page fault handler prints CR2 (fault address) and RIP (instruction pointer)
-- [ ] T043l Implement dump_registers() helper for exception handlers in src/hal/x86_64/debug.zig
+- [ ] T043l Implement dump_registers() helper for exception handlers in src/arch/x86_64/debug.zig
 
 **Checkpoint**: Interrupt infrastructure complete - exceptions handled, IRQs routed, FPU state preserved
 
@@ -186,7 +194,7 @@ Based on plan.md structure:
 
 ### Timer (PIT)
 
-- [ ] T044 [US2] Create src/hal/x86_64/pit.zig with PIT configuration
+- [ ] T044 [US2] Create src/arch/x86_64/pit.zig with PIT configuration
 - [ ] T045 [US2] Configure PIT Channel 0 for 100Hz (10ms quantum)
 - [ ] T046 [US2] Enable IRQ0 (timer) in PIC
 
@@ -249,6 +257,33 @@ Based on plan.md structure:
 
 ---
 
+## Phase 5.5: Userland Runtime (crt0)
+
+**Purpose**: Minimal C runtime providing userland entry point, stack setup, and syscall wrappers
+
+**CRITICAL**: Must be complete before Phase 6 (Ring 3 Userland Shell) can execute
+
+### Entry Point
+
+- [ ] T070a Create src/user/crt0.zig with _start export as userland entry point
+- [ ] T070b Implement stack frame setup (RBP initialization, RSP 16-byte alignment per SysV ABI)
+- [ ] T070c Call extern main() and pass return value to sys_exit
+
+### Syscall Wrappers
+
+- [ ] T070d Create src/user/lib/syscall.zig with inline assembly syscall instruction
+- [ ] T070e Implement syscall wrappers: sys_exit (60), sys_write (1), sys_read (0)
+- [ ] T070f Implement syscall wrappers: sys_brk (12), sys_sched_yield (24), sys_nanosleep (35)
+- [ ] T070g Implement syscall wrappers: sys_getpid (39), sys_clock_gettime (228), sys_getrandom (318)
+
+### Build Integration
+
+- [ ] T070h Update build.zig to link crt0.zig as entry point for all userland executables
+
+**Checkpoint**: Userland programs can start via _start and make syscalls
+
+---
+
 ## Phase 6: User Story 3 - Ring 3 Userland Shell (Priority: P2)
 
 **Goal**: Userland shell runs in Ring 3 with syscall interface
@@ -257,13 +292,15 @@ Based on plan.md structure:
 
 ### Syscall Infrastructure
 
-- [ ] T071 [US3] Create src/hal/x86_64/syscall.zig with MSR configuration
+- [ ] T071 [US3] Create src/arch/x86_64/syscall.zig with MSR configuration
 - [ ] T072 [US3] Configure IA32_STAR with kernel/user segment selectors
 - [ ] T073 [US3] Configure IA32_LSTAR with syscall_entry address
 - [ ] T074 [US3] Configure IA32_FMASK to clear IF (disable interrupts on entry)
 - [ ] T075 [US3] Implement syscall_entry: **CLI first** (Big Kernel Lock) → SWAPGS → switch stack (FR-023a)
 - [ ] T076 [US3] Implement user pointer validation with interrupts disabled (FR-023b)
 - [ ] T077 [US3] Create src/kernel/syscall/ directory with table.zig (dispatch) and handlers.zig
+
+**Note**: All syscall handlers MUST import syscall numbers from `@import("uapi").syscalls` to ensure kernel/userland consistency.
 
 ### Basic Syscalls (Linux x86_64 ABI - see specs/syscall-table.md)
 
@@ -293,6 +330,8 @@ Based on plan.md structure:
 - [ ] T092 [US3] Implement basic command parsing (help, echo) (FR-026)
 - [ ] T093 [US3] Create src/user/lib/syscall.zig with syscall wrappers for userland
 
+**Note**: Userland syscall wrappers MUST import numbers from `@import("uapi").syscalls` - same source as kernel.
+
 ### Verification
 
 - [ ] T094 [US3] Boot kernel, verify shell prompt appears
@@ -311,7 +350,7 @@ Based on plan.md structure:
 
 ### PCI Enumeration
 
-- [ ] T097 [US1] Create src/hal/x86_64/pci.zig with PCI configuration space access
+- [ ] T097 [US1] Create src/arch/x86_64/pci.zig with PCI configuration space access
 - [ ] T098 [US1] Implement PCI device enumeration (bus/device/function scan)
 - [ ] T099 [US1] Find E1000 device (vendor 0x8086, device 0x100E)
 - [ ] T100 [US1] Read BAR0 for MMIO base address
