@@ -51,7 +51,7 @@ This document defines the syscall interface between userland and kernel. All sys
 
 ## Syscall Definitions
 
-### SYS_EXIT (0)
+### sys_exit (60)
 
 Terminate the calling thread.
 
@@ -69,7 +69,7 @@ fn sys_exit(status: i32) noreturn
 
 ---
 
-### SYS_WRITE (1)
+### sys_write (1)
 
 Write to a file descriptor.
 
@@ -97,7 +97,7 @@ fn sys_write(fd: u32, buf: [*]const u8, count: usize) isize
 
 ---
 
-### SYS_READ (2)
+### sys_read (0)
 
 Read from a file descriptor.
 
@@ -124,9 +124,9 @@ fn sys_read(fd: u32, buf: [*]u8, count: usize) isize
 
 ---
 
-### SYS_GETCHAR (3)
+### sys_getchar (1004)
 
-Read a single character from keyboard.
+Read a single character from keyboard. (ZigK convenience extension)
 
 **Signature**:
 ```zig
@@ -146,9 +146,9 @@ fn sys_getchar() i32
 
 ---
 
-### SYS_PUTCHAR (4)
+### sys_putchar (1005)
 
-Write a single character to display.
+Write a single character to display. (ZigK convenience extension)
 
 **Signature**:
 ```zig
@@ -168,13 +168,13 @@ fn sys_putchar(c: u8) i32
 
 ---
 
-### SYS_YIELD (5)
+### sys_sched_yield (24)
 
 Voluntarily yield the CPU to another thread.
 
 **Signature**:
 ```zig
-fn sys_yield() i32
+fn sys_sched_yield() i32
 ```
 
 **Arguments**: None
@@ -189,31 +189,35 @@ fn sys_yield() i32
 
 ---
 
-### SYS_SLEEP (6)
+### sys_nanosleep (35)
 
-Sleep for specified milliseconds.
+Sleep for specified duration.
 
 **Signature**:
 ```zig
-fn sys_sleep(ms: u32) i32
+fn sys_nanosleep(req: *const Timespec, rem: ?*Timespec) i32
 ```
 
 **Arguments**:
-- `rdi`: Milliseconds to sleep
+- `rdi`: Pointer to Timespec struct with requested sleep duration
+- `rsi`: Optional pointer to Timespec for remaining time (if interrupted)
 
-**Returns**: 0 on success
+**Returns**: 0 on success, -EINTR if interrupted
 
-**Errors**: None
+**Errors**:
+- EFAULT: Invalid pointer
+- EINTR: Sleep interrupted by signal
 
 **Behavior**:
 - Thread moves to blocked state
 - Timer interrupt wakes thread after delay
+- If interrupted, remaining time written to rem (if non-null)
 
 ---
 
-### SYS_GETPID (7)
+### sys_getpid (39)
 
-Get current thread ID.
+Get current process/thread ID.
 
 **Signature**:
 ```zig
@@ -228,62 +232,67 @@ fn sys_getpid() u32
 
 ---
 
-### SYS_SEND_UDP (10)
+### sys_sendto (44)
 
-Send a UDP packet.
+Send a message on a socket (UDP).
 
 **Signature**:
 ```zig
-fn sys_send_udp(dest_ip: u32, dest_port: u16, src_port: u16, data: [*]const u8, len: usize) isize
+fn sys_sendto(fd: i32, buf: [*]const u8, len: usize, flags: i32, dest_addr: *const sockaddr, addrlen: u32) isize
 ```
 
 **Arguments**:
-- `rdi`: Destination IP (network byte order)
-- `rsi`: Destination port (network byte order)
-- `rdx`: Source port (network byte order)
-- `r10`: Pointer to data buffer
-- `r8`: Data length
+- `rdi`: Socket file descriptor
+- `rsi`: Pointer to data buffer
+- `rdx`: Data length
+- `r10`: Flags (0 for default)
+- `r8`: Pointer to sockaddr_in with destination IP/port
+- `r9`: Size of sockaddr structure
 
 **Returns**: Number of bytes sent, or negative error
 
 **Errors**:
-- EFAULT: Data buffer invalid
-- EINVAL: Invalid port or length
+- EBADF: Invalid socket file descriptor
+- EFAULT: Data buffer or address invalid
+- EINVAL: Invalid flags or address length
 - ENOMEM: No TX descriptors available
 - EAGAIN: ARP resolution pending
 
 **Behavior**:
-- Triggers ARP if MAC unknown
+- Triggers ARP if destination MAC unknown
 - Returns -EAGAIN if waiting for ARP reply
+- Uses sockaddr_in for IPv4 addresses
 
 ---
 
-### SYS_RECV_UDP (11)
+### sys_recvfrom (45)
 
-Receive a UDP packet (non-blocking).
+Receive a message from a socket (UDP).
 
 **Signature**:
 ```zig
-fn sys_recv_udp(port: u16, buf: [*]u8, max_len: usize, src_ip: *u32, src_port: *u16) isize
+fn sys_recvfrom(fd: i32, buf: [*]u8, len: usize, flags: i32, src_addr: ?*sockaddr, addrlen: ?*u32) isize
 ```
 
 **Arguments**:
-- `rdi`: Local port to receive on
+- `rdi`: Socket file descriptor
 - `rsi`: Pointer to receive buffer
 - `rdx`: Maximum bytes to receive
-- `r10`: Pointer to store source IP
-- `r8`: Pointer to store source port
+- `r10`: Flags (0 for default, MSG_DONTWAIT for non-blocking)
+- `r8`: Optional pointer to store source address
+- `r9`: Optional pointer to address length (in/out)
 
 **Returns**: Number of bytes received, or negative error
 
 **Errors**:
-- EFAULT: Buffer address invalid
-- EINVAL: Invalid port
-- EAGAIN: No packet available
+- EBADF: Invalid socket file descriptor
+- EFAULT: Buffer or address invalid
+- EINVAL: Invalid flags
+- EAGAIN: No packet available (non-blocking mode)
 
 ---
 
-### SYS_OPEN (20)
+### sys_open (2)
 
 Open a file from InitRD.
 
@@ -311,7 +320,7 @@ fn sys_open(path: [*:0]const u8, flags: u32) i32
 
 ---
 
-### SYS_CLOSE (21)
+### sys_close (3)
 
 Close a file descriptor.
 
@@ -334,9 +343,9 @@ fn sys_close(fd: u32) i32
 
 ---
 
-### SYS_FILE_READ (22)
+### sys_read for files (0)
 
-Read from an open file descriptor.
+Read from an open file descriptor. (Uses sys_read - same syscall number as stdin read)
 
 **Signature**:
 ```zig
@@ -361,13 +370,13 @@ fn sys_file_read(fd: u32, buf: [*]u8, count: usize) isize
 
 ---
 
-### SYS_SEEK (23)
+### sys_lseek (8)
 
 Seek to position in file.
 
 **Signature**:
 ```zig
-fn sys_seek(fd: u32, offset: i64, whence: u32) i64
+fn sys_lseek(fd: u32, offset: i64, whence: u32) i64
 ```
 
 **Arguments**:
@@ -388,35 +397,35 @@ fn sys_seek(fd: u32, offset: i64, whence: u32) i64
 
 ---
 
-### SYS_SBRK (30)
+### sys_brk (12)
 
-Extend the userland heap.
+Change the program break (heap end).
 
 **Signature**:
 ```zig
-fn sys_sbrk(increment: isize) isize
+fn sys_brk(brk: usize) isize
 ```
 
 **Arguments**:
-- `rdi`: Number of bytes to extend (or 0 to query)
+- `rdi`: New program break address (or 0 to query current break)
 
-**Returns**: Previous program break address, or -ENOMEM
+**Returns**: Current program break address on success, or unchanged break on error
 
 **Errors**:
-- ENOMEM: Cannot allocate more memory
-- EINVAL: Negative increment would reduce break below base
+- ENOMEM: Cannot allocate more memory (returns current break, not -ENOMEM)
 
 **Behavior**:
-- If increment == 0: returns current break without modification
-- If increment > 0: extends heap, maps new pages if needed
+- If brk == 0: returns current break without modification
+- If brk > current: extends heap, maps new pages if needed
+- If brk < current: shrinks heap (unimplemented in MVP, returns current break)
 - New pages are zeroed and have user+write permissions
 - Break is rounded up to page boundary
 
 ---
 
-### SYS_GET_FB_INFO (40)
+### sys_get_fb_info (1001)
 
-Get framebuffer information.
+Get framebuffer information. (ZigK custom extension)
 
 **Signature**:
 ```zig
@@ -450,9 +459,9 @@ const FramebufferInfo = extern struct {
 
 ---
 
-### SYS_MMAP_FB (41)
+### sys_map_fb (1002)
 
-Map framebuffer into userland address space.
+Map framebuffer into userland address space. (ZigK custom extension)
 
 **Signature**:
 ```zig
@@ -476,9 +485,9 @@ fn sys_mmap_fb() isize
 
 ---
 
-### SYS_READ_SCANCODE (50)
+### sys_read_scancode (1003)
 
-Read raw keyboard scancode.
+Read raw keyboard scancode. (ZigK custom extension)
 
 **Signature**:
 ```zig
@@ -502,28 +511,34 @@ fn sys_read_scancode() i32
 
 ## Syscall Number Summary
 
+### Linux x86_64 ABI Syscalls
+
 | Number | Name | Description |
 |--------|------|-------------|
-| 0 | SYS_EXIT | Terminate thread |
-| 1 | SYS_WRITE | Write to FD |
-| 2 | SYS_READ_CHAR | Read ASCII character (blocking) |
-| 3 | SYS_YIELD | Yield CPU |
-| 4 | SYS_GETPID | Get thread ID |
-| 5 | SYS_SLEEP | Sleep for ms |
-| 6 | SYS_SEND_UDP | Send UDP packet |
-| 7 | SYS_RECV_UDP | Receive UDP packet |
-| 8 | SYS_GET_TIME | Get system ticks |
-| 9 | SYS_READ_SCANCODE | Read raw scancode |
-| 10 | SYS_GET_FB_INFO | Get framebuffer info |
-| 11 | SYS_MAP_FB | Map framebuffer |
-| 12 | SYS_MMAP | Map memory (anonymous/framebuffer) |
-| 13 | SYS_OPEN | Open InitRD file |
-| 14 | SYS_CLOSE | Close file descriptor |
-| 15 | SYS_READ | Read from file |
-| 16 | SYS_SEEK | Seek in file |
-| 17 | SYS_SBRK | Extend heap |
+| 0 | sys_read | Read from file descriptor |
+| 1 | sys_write | Write to file descriptor |
+| 2 | sys_open | Open file from InitRD |
+| 3 | sys_close | Close file descriptor |
+| 8 | sys_lseek | Seek in file |
+| 12 | sys_brk | Change program break (heap) |
+| 24 | sys_sched_yield | Yield CPU timeslice |
+| 35 | sys_nanosleep | Sleep for duration |
+| 39 | sys_getpid | Get process/thread ID |
+| 44 | sys_sendto | Send UDP message |
+| 45 | sys_recvfrom | Receive UDP message |
+| 60 | sys_exit | Terminate thread |
 
-**Byte Order Note**: All multi-byte syscall parameters use host byte order (Little Endian). The kernel converts to network byte order (Big Endian) internally for network operations (SYS_SEND_UDP, SYS_RECV_UDP).
+### ZigK Custom Extensions (1000+)
+
+| Number | Name | Description |
+|--------|------|-------------|
+| 1001 | sys_get_fb_info | Get framebuffer info |
+| 1002 | sys_map_fb | Map framebuffer to userspace |
+| 1003 | sys_read_scancode | Read raw keyboard scancode |
+| 1004 | sys_getchar | Read single ASCII char (convenience) |
+| 1005 | sys_putchar | Write single char (convenience) |
+
+**Byte Order Note**: All multi-byte syscall parameters use host byte order (Little Endian). The kernel converts to network byte order (Big Endian) internally for network operations (sys_sendto, sys_recvfrom).
 
 ---
 
@@ -606,8 +621,9 @@ pub fn syscall1(num: u64, a0: u64) isize {
 
 // ... syscall2 through syscall6
 
+// Linux ABI syscalls
 pub fn exit(status: i32) noreturn {
-    _ = syscall1(0, @bitCast(@as(i64, status)));
+    _ = syscall1(60, @bitCast(@as(i64, status)));
     unreachable;
 }
 
@@ -616,54 +632,53 @@ pub fn write(fd: u32, buf: []const u8) isize {
 }
 
 pub fn read(fd: u32, buf: []u8) isize {
-    return syscall3(2, fd, @intFromPtr(buf.ptr), buf.len);
+    return syscall3(0, fd, @intFromPtr(buf.ptr), buf.len);
 }
 
-pub fn getchar() i32 {
-    return @truncate(syscall0(3));
+pub fn sched_yield() void {
+    _ = syscall0(24);
 }
 
-pub fn putchar(c: u8) void {
-    _ = syscall1(4, c);
-}
-
-pub fn yield() void {
-    _ = syscall0(5);
+pub fn getpid() u32 {
+    return @truncate(syscall0(39));
 }
 
 // File operations (InitRD)
 pub fn open(path: [*:0]const u8, flags: u32) i32 {
-    return @truncate(syscall2(20, @intFromPtr(path), flags));
+    return @truncate(syscall2(2, @intFromPtr(path), flags));
 }
 
 pub fn close(fd: u32) i32 {
-    return @truncate(syscall1(21, fd));
+    return @truncate(syscall1(3, fd));
 }
 
-pub fn file_read(fd: u32, buf: []u8) isize {
-    return syscall3(22, fd, @intFromPtr(buf.ptr), buf.len);
-}
-
-pub fn seek(fd: u32, offset: i64, whence: u32) i64 {
-    return @bitCast(syscall3(23, fd, @bitCast(offset), whence));
+pub fn lseek(fd: u32, offset: i64, whence: u32) i64 {
+    return @bitCast(syscall3(8, fd, @bitCast(offset), whence));
 }
 
 // Dynamic heap
-pub fn sbrk(increment: isize) isize {
-    return syscall1(30, @bitCast(increment));
+pub fn brk(addr: usize) usize {
+    return @bitCast(syscall1(12, addr));
 }
 
-// Framebuffer
+// ZigK custom extensions (1000+)
 pub fn get_fb_info(info: *FramebufferInfo) i32 {
-    return @truncate(syscall1(40, @intFromPtr(info)));
+    return @truncate(syscall1(1001, @intFromPtr(info)));
 }
 
-pub fn mmap_fb() isize {
-    return syscall0(41);
+pub fn map_fb() isize {
+    return syscall0(1002);
 }
 
-// Raw keyboard
 pub fn read_scancode() i32 {
-    return @truncate(syscall0(50));
+    return @truncate(syscall0(1003));
+}
+
+pub fn getchar() i32 {
+    return @truncate(syscall0(1004));
+}
+
+pub fn putchar(c: u8) void {
+    _ = syscall1(1005, c);
 }
 ```

@@ -40,8 +40,11 @@ Reserved range: 1000-1999
 | Number | Name | Signature | Implementing Spec |
 |--------|------|-----------|-------------------|
 | 1000 | sys_debug_log | (buf, len) -> ssize_t | 007 |
-| 1001 | sys_map_fb | (info_ptr) -> addr | 003 |
-| 1002 | sys_read_scancode | () -> i32 | 003 |
+| 1001 | sys_get_fb_info | (info_ptr) -> i32 | 003 |
+| 1002 | sys_map_fb | () -> addr | 003 |
+| 1003 | sys_read_scancode | () -> i32 | 003 |
+| 1004 | sys_getchar | () -> i32 | 003 |
+| 1005 | sys_putchar | (c: u8) -> i32 | 003 |
 
 ## Register Convention
 
