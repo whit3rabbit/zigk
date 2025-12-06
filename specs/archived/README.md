@@ -6,6 +6,7 @@ These specifications were superseded by consolidation into active specs. Their r
 
 | Archived Spec | Description | Requirements Merged Into |
 |---------------|-------------|-------------------------|
+| 001-minimal-kernel | Minimal bootable kernel (boot, framebuffer, halt) | Spec 003 Phase 1 (T001-T008) |
 | 002-kernel-infrastructure | Serial logging, panic handler, stack protection | Spec 003 Phase 1 (T006a-d) |
 | 004-kernel-stability-arch | FPU/SSE state, spinlocks, stack guards, crash diagnostics | Spec 003 Phase 3 (hardware), Spec 007 Phase 1.5 (process) |
 | 005-linux-syscall-compat | Linux syscall numbers, errno codes | `specs/syscall-table.md` (authoritative table) |
