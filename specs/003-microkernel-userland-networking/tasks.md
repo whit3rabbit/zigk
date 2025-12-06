@@ -31,7 +31,7 @@ Based on plan.md structure:
 **Purpose**: Build system and core booting infrastructure
 
 - [ ] T001 Create project directory structure per plan.md layout
-- [ ] T002 Configure build.zig with freestanding x86_64 target, Limine integration, uapi module exposure to kernel and userland, AND test runner step for host-based unit tests
+- [ ] T002 Configure build.zig with freestanding x86_64 target using b.createModule() and root_module (Zig 0.15.x pattern), Limine integration, uapi module exposure to kernel and userland, AND test runner step for host-based unit tests
 - [ ] T003 [P] Add limine.zig bindings as build dependency in build.zig.zon
 - [ ] T004 [P] Create limine.conf bootloader configuration
 - [ ] T005 Create src/kernel/main.zig with Limine entry point and requests (framebuffer, memory_map, hhdm, modules)
