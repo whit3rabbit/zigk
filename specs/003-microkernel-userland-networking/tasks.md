@@ -230,7 +230,7 @@ Based on plan.md structure:
 
 ### IRQ1 Handler
 
-- [ ] T058 [US6] Create src/drivers/keyboard.zig with IRQ1 handler
+- [ ] T058 [US6] Create src/drivers/keyboard.zig with IRQ1 handler (MUST import arch module for I/O, MUST NOT use inline assembly directly)
 - [ ] T059 [US6] Implement port 0x60 scancode reading
 - [ ] T060 [US6] Implement scancode-to-ASCII translation table
 - [ ] T061 [US6] Implement **dual buffers**: ASCII ring buffer (256) + scancode ring buffer (64) (FR-030b)
@@ -358,7 +358,7 @@ Based on plan.md structure:
 
 ### E1000 Driver
 
-- [ ] T101 [US1] Create src/drivers/e1000.zig with register offset definitions
+- [ ] T101 [US1] Create src/drivers/e1000.zig with register offset definitions (MUST import arch module for I/O, MUST NOT use inline assembly directly)
 - [ ] T102 [US1] Implement device reset (CTRL.RST)
 - [ ] T103 [US1] Read MAC address from EEPROM/RAL
 - [ ] T104 [US1] Allocate RX/TX descriptor rings (16 entries each)
