@@ -57,6 +57,10 @@ const Scheduler = struct {
 
     /// Idle thread - always available as a fallback
     idle_thread: ?*Thread = null,
+
+    /// Per-CPU kernel GS data pointer (for syscall stack switching)
+    /// Set by main.zig during initialization
+    gs_data: ?*hal.syscall.KernelGsData = null,
 };
 
 /// Add a thread to the back of the ready queue
@@ -133,6 +137,13 @@ fn idleThreadEntry() void {
         // HLT waits for the next interrupt (timer, keyboard, etc.)
         hal.cpu.halt();
     }
+}
+
+/// Set the per-CPU kernel GS data pointer
+/// Called by main.zig during initialization before scheduler starts
+/// This pointer is used to update kernel_stack on context switch for SYSCALL
+pub fn setGsData(gs_data: *hal.syscall.KernelGsData) void {
+    scheduler.gs_data = gs_data;
 }
 
 /// Initialize the scheduler
@@ -345,6 +356,12 @@ pub fn timerTick(frame: *hal.idt.InterruptFrame) *hal.idt.InterruptFrame {
 
         // Update TSS.rsp0 for the new thread's kernel stack
         gdt.setKernelStack(next.kernel_stack_top);
+
+        // Update kernel GS data for SYSCALL instruction
+        // The syscall entry stub reads %gs:0 to get kernel stack
+        if (scheduler.gs_data) |gs_data| {
+            gs_data.kernel_stack = next.kernel_stack_top;
+        }
 
         // Switch page tables if different (for userland threads)
         if (next.cr3 != 0) {

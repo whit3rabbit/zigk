@@ -44,6 +44,7 @@ pub export fn dispatch_syscall(frame: *SyscallFrame) callconv(.c) void {
         syscalls.SYS_EXIT => handlers.sys_exit(args[0]),
         syscalls.SYS_EXIT_GROUP => handlers.sys_exit_group(args[0]),
         syscalls.SYS_CLOCK_GETTIME => handlers.sys_clock_gettime(args[0], args[1]),
+        syscalls.SYS_WAIT4 => handlers.sys_wait4(args[0], args[1], args[2], args[3]),
         syscalls.SYS_GETRANDOM => random.sys_getrandom(args[0], args[1], @truncate(args[2])),
 
         // ZigK custom syscalls

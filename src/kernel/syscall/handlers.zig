@@ -41,6 +41,16 @@ pub fn sys_exit_group(status: usize) isize {
     return sys_exit(status);
 }
 
+/// sys_wait4 (61) - Wait for process state change
+/// MVP: Returns -ECHILD (no child processes) since we do not track parent/child yet
+pub fn sys_wait4(pid: usize, wstatus: usize, options: usize, rusage: usize) isize {
+    _ = pid;
+    _ = wstatus;
+    _ = options;
+    _ = rusage;
+    return Errno.ECHILD.toReturn();
+}
+
 /// sys_getpid (39) - Get process ID
 ///
 /// MVP: Returns thread ID since we don't have processes yet.

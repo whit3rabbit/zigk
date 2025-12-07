@@ -6,6 +6,7 @@
 
 const multiboot2 = @import("multiboot2");
 const hal = @import("hal");
+const syscall_arch = hal.syscall;
 const console = @import("console");
 const config = @import("config");
 const pmm = @import("pmm");
@@ -30,6 +31,15 @@ comptime {
     _ = &syscall_table.dispatch_syscall;
 }
 
+/// Per-CPU kernel data for syscall entry (GS segment)
+/// For SMP, this would be an array indexed by CPU ID
+var bsp_gs_data: syscall_arch.KernelGsData = .{
+    .kernel_stack = 0,
+    .user_stack = 0,
+    .current_thread = 0,
+    .scratch = 0,
+};
+
 // External symbols from boot32.S
 extern fn multiboot2_info_ptr() u32;
 extern fn multiboot2_magic() u32;
@@ -39,6 +49,10 @@ extern fn multiboot2_magic() u32;
 export fn _start() noreturn {
     // Initialize HAL (serial port, GDT, PIC, IDT, interrupts)
     hal.init();
+
+    // Initialize GS base for syscalls - points to per-CPU data
+    // kernel_stack will be updated by scheduler on context switch
+    syscall_arch.setKernelGsBase(@intFromPtr(&bsp_gs_data));
 
     // Connect console to interrupt handlers for debug output
     hal.interrupts.setConsoleWriter(&console.print);
@@ -136,6 +150,9 @@ export fn _start() noreturn {
     // Initialize scheduler (creates idle thread, registers timer handler)
     sched.init();
 
+    // Register GS data with scheduler for syscall stack switching
+    sched.setGsData(&bsp_gs_data);
+
     // Log interrupt infrastructure status
     console.print("\n");
     console.info("Interrupt infrastructure initialized:", .{});
@@ -150,12 +167,118 @@ export fn _start() noreturn {
     console.info("Kernel initialization complete", .{});
 
     // Create test threads to verify scheduler
-    createTestThreads();
+    // Create test threads to verify scheduler
+    // createTestThreads();
+
+    // Load Shell
+    loadShell(boot_info);
 
     // Start the scheduler - this does not return
     // The boot thread becomes part of the idle loop
     console.info("Starting scheduler...", .{});
+    // Start the scheduler - this does not return
+    // The boot thread becomes part of the idle loop
+    console.info("Starting scheduler...", .{});
     sched.start();
+}
+
+/// Load the shell module into a new user address space and create a thread
+fn loadShell(boot_info: *const multiboot2.BootInfo) void {
+    console.info("Searching for shell module...", .{});
+
+    var mod_iter = multiboot2.modules(boot_info);
+    while (mod_iter.next()) |mod| {
+        const cmdline = mod.cmdline();
+        // Check if cmdline contains "shell"
+        var is_shell = false;
+        var i: usize = 0;
+        const shell_str = "shell";
+        // Simple manual string search
+        while (cmdline[i] != 0) : (i += 1) {
+            var j: usize = 0;
+            var match = true;
+            while (j < shell_str.len) : (j += 1) {
+                if (cmdline[i + j] != shell_str[j]) {
+                    match = false;
+                    break;
+                }
+            }
+            if (match) {
+                is_shell = true;
+                break;
+            }
+        }
+
+        if (is_shell) {
+            console.info("Found shell module: {s} ({d} bytes)", .{cmdline, mod.size()});
+
+            // Create user address space
+            const pml4_phys = vmm.createAddressSpace() catch |err| {
+                console.err("Failed to create shell address space: {}", .{err});
+                return;
+            };
+
+            // Switch to new address space temporarily to map code
+            // Actually, we can just map it using the physical address of the shell data
+            // The shell module is already loaded in memory by GRUB at mod.mod_start
+            
+            // Allocate user pages for the shell code/data at 0x400000
+            // We need to map [0x400000, 0x400000 + size] to [mod_start, mod_end]
+            // Note: In a real OS we'd copy it to anonymous pages, but for MVP XIP (Execute In Place) 
+            // from the module load address is fine, OR we map the module physical pages to 0x400000.
+            // Let's map the module physical pages directly.
+
+            const shell_virt_base: u64 = 0x400000;
+            const shell_size = mod.size();
+            const shell_phys_start = mod.mod_start;
+
+            console.info("Mapping shell to {x} (phys {x})", .{shell_virt_base, shell_phys_start});
+
+            // We need to map with USER + RW + PRESENT flags
+            // RW needed for data section (MVP doesn't separate sections)
+            const flags = hal.paging.PageFlags{
+                .writable = true,
+                .user = true,
+            };
+
+            vmm.mapRange(pml4_phys, shell_virt_base, shell_phys_start, shell_size, flags) catch |err| {
+                console.err("Failed to map shell: {}", .{err});
+                return;
+            };
+
+            // Allocate and map a user stack (e.g. at 0xF0000000)
+            const stack_virt_top: u64 = 0xF0000000;
+            const stack_size: usize = 32 * 1024; // 32KB stack
+            const stack_virt_base = stack_virt_top - stack_size;
+
+            console.info("Creating user stack at {x}-{x}", .{stack_virt_base, stack_virt_top});
+
+            // Iterate pages and alloc/map
+            var addr = stack_virt_base;
+            while (addr < stack_virt_top) : (addr += pmm.PAGE_SIZE) {
+                 vmm.allocAndMapPage(pml4_phys, addr, flags) catch |err| {
+                    console.err("Failed to map stack page: {}", .{err});
+                    return;
+                };
+            }
+
+            // Create the user thread
+            const shell_thread = thread.createUserThread(shell_virt_base, .{
+                .name = "shell",
+                .cr3 = pml4_phys,
+                .user_stack_top = stack_virt_top,
+            }) catch |err| {
+                console.err("Failed to create shell thread: {}", .{err});
+                return;
+            };
+
+            sched.addThread(shell_thread);
+            console.info("Shell thread created (tid={d})", .{shell_thread.tid});
+            return;
+        }
+    }
+
+    console.warn("Shell module not found!", .{});
 }
 
 /// Create test threads to verify scheduler operation
