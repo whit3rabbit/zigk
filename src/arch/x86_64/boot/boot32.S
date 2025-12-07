@@ -92,8 +92,8 @@ efi_boot_services_tag:
 efi_entry_tag:
     .short 9                    /* type: EFI amd64 entry address */
     .short 0                    /* flags */
-    .long 12                    /* size */
-    .long _efi_start64          /* 64-bit entry point */
+    .long 16                    /* size: 2+2+4+8 = 16 bytes */
+    .quad _efi_start64          /* 64-bit entry point (must be .quad, not .long) */
 
     /* End tag */
     .align 8
