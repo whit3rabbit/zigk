@@ -15,8 +15,10 @@ const sched = @import("sched");
 const keyboard = @import("keyboard");
 const fd_mod = @import("fd");
 const devfs = @import("devfs");
+const user_vmm = @import("user_vmm");
 
 const Errno = uapi.errno.Errno;
+const UserVmm = user_vmm.UserVmm;
 const FdTable = fd_mod.FdTable;
 const FileDescriptor = fd_mod.FileDescriptor;
 
@@ -51,6 +53,31 @@ fn getGlobalFdTable() *FdTable {
     console.info("FD: Global FD table initialized with stdin/stdout/stderr", .{});
 
     return global_fd_table.?;
+}
+
+// =============================================================================
+// Global User VMM (MVP single-process)
+// =============================================================================
+// In Phase 4 (Process model), this moves to per-process UserVmm.
+// For now, use a single global instance for the MVP.
+
+var global_user_vmm: ?*UserVmm = null;
+
+/// Get or initialize the global UserVmm
+fn getGlobalUserVmm() *UserVmm {
+    if (global_user_vmm) |vmm| {
+        return vmm;
+    }
+
+    // First access - initialize the UserVmm
+    // Use current thread's CR3 if available, else create new address space
+    global_user_vmm = UserVmm.init() catch {
+        console.err("UserVmm: Failed to create global UserVmm", .{});
+        @panic("Cannot create UserVmm");
+    };
+
+    console.info("UserVmm: Global UserVmm initialized", .{});
+    return global_user_vmm.?;
 }
 
 // =============================================================================
@@ -486,32 +513,54 @@ pub fn sys_close(fd_num: usize) isize {
 }
 
 /// sys_mmap (9) - Map memory pages
-/// MVP: Returns -ENOMEM (no userspace memory management)
+///
+/// Maps virtual memory into the process address space.
+/// Currently supports anonymous mappings only.
+///
+/// Args:
+///   addr: Hint address (0 for kernel choice), exact address if MAP_FIXED
+///   len: Size in bytes
+///   prot: Protection flags (PROT_READ, PROT_WRITE, PROT_EXEC)
+///   flags: Map flags (MAP_ANONYMOUS, MAP_PRIVATE, MAP_FIXED)
+///   fd: File descriptor (ignored for MAP_ANONYMOUS)
+///   offset: File offset (ignored for MAP_ANONYMOUS)
+///
+/// Returns: Mapped address on success, negative errno on error
 pub fn sys_mmap(addr: usize, len: usize, prot: usize, flags: usize, fd: usize, offset: usize) isize {
-    _ = addr;
-    _ = len;
-    _ = prot;
-    _ = flags;
-    _ = fd;
+    _ = fd; // File mappings not supported
     _ = offset;
-    return Errno.ENOMEM.toReturn();
+
+    const uvmm = getGlobalUserVmm();
+    return uvmm.mmap(@intCast(addr), len, @truncate(prot), @truncate(flags));
 }
 
 /// sys_mprotect (10) - Set memory protection
-/// MVP: Returns -ENOMEM (no userspace memory management)
+///
+/// Changes protection on a region of memory.
+///
+/// Args:
+///   addr: Start address (must be page-aligned)
+///   len: Size in bytes
+///   prot: New protection flags
+///
+/// Returns: 0 on success, negative errno on error
 pub fn sys_mprotect(addr: usize, len: usize, prot: usize) isize {
-    _ = addr;
-    _ = len;
-    _ = prot;
-    return Errno.ENOMEM.toReturn();
+    const uvmm = getGlobalUserVmm();
+    return uvmm.mprotect(@intCast(addr), len, @truncate(prot));
 }
 
 /// sys_munmap (11) - Unmap memory pages
-/// MVP: Returns -EINVAL (no userspace memory management)
+///
+/// Unmaps a region of memory from the process address space.
+///
+/// Args:
+///   addr: Start address (must be page-aligned)
+///   len: Size in bytes
+///
+/// Returns: 0 on success, negative errno on error
 pub fn sys_munmap(addr: usize, len: usize) isize {
-    _ = addr;
-    _ = len;
-    return Errno.EINVAL.toReturn();
+    const uvmm = getGlobalUserVmm();
+    return uvmm.munmap(@intCast(addr), len);
 }
 
 /// sys_socket (41) - Create a socket

@@ -1,0 +1,530 @@
+// User Virtual Memory Manager
+//
+// Manages userspace virtual address allocations via mmap/munmap/mprotect.
+// Tracks Virtual Memory Areas (VMAs) per-process for memory region management.
+//
+// Design:
+//   - Simple linked list of VMAs per process
+//   - First-fit address allocation for mmap without hint
+//   - Anonymous mappings only (MAP_ANONYMOUS) for MVP
+//   - Interfaces with VMM for actual page table operations
+//   - Interfaces with PMM for physical page allocation
+//
+// Linux mmap flags supported:
+//   - MAP_ANONYMOUS: Memory not backed by file
+//   - MAP_PRIVATE: Private copy-on-write (MVP: just private)
+//   - MAP_FIXED: Use exact address (no address search)
+//
+// Linux protection flags (PROT_*):
+//   - PROT_READ: Pages can be read
+//   - PROT_WRITE: Pages can be written
+//   - PROT_EXEC: Pages can be executed
+//   - PROT_NONE: Pages cannot be accessed
+
+const std = @import("std");
+const hal = @import("hal");
+const vmm = @import("vmm");
+const pmm = @import("pmm");
+const heap = @import("heap");
+const console = @import("console");
+const uapi = @import("uapi");
+
+const paging = hal.paging;
+const PageFlags = paging.PageFlags;
+const Errno = uapi.errno.Errno;
+
+// =============================================================================
+// Linux mmap Constants (from linux/mman.h)
+// =============================================================================
+
+// Protection flags
+pub const PROT_NONE: u32 = 0x0;
+pub const PROT_READ: u32 = 0x1;
+pub const PROT_WRITE: u32 = 0x2;
+pub const PROT_EXEC: u32 = 0x4;
+
+// Map flags
+pub const MAP_SHARED: u32 = 0x01;
+pub const MAP_PRIVATE: u32 = 0x02;
+pub const MAP_FIXED: u32 = 0x10;
+pub const MAP_ANONYMOUS: u32 = 0x20;
+pub const MAP_ANON: u32 = MAP_ANONYMOUS; // Alias
+
+// =============================================================================
+// User Address Space Boundaries
+// =============================================================================
+
+/// Start of user mappable region (above null guard and executable)
+const USER_MMAP_START: u64 = 0x0000_1000_0000_0000; // 16 TB
+/// End of user space
+const USER_MMAP_END: u64 = 0x0000_7FFF_FFFF_FFFF; // 128 TB
+
+// =============================================================================
+// Virtual Memory Area (VMA)
+// =============================================================================
+
+/// Virtual Memory Area - tracks a contiguous region of virtual memory
+pub const Vma = struct {
+    /// Start virtual address (page-aligned)
+    start: u64,
+    /// End virtual address (exclusive, page-aligned)
+    end: u64,
+    /// Protection flags (PROT_READ, PROT_WRITE, PROT_EXEC)
+    prot: u32,
+    /// Map flags (MAP_PRIVATE, MAP_ANONYMOUS, etc.)
+    flags: u32,
+
+    /// Linked list pointers
+    next: ?*Vma,
+    prev: ?*Vma,
+
+    /// Get size in bytes
+    pub fn size(self: *const Vma) usize {
+        return @intCast(self.end - self.start);
+    }
+
+    /// Get size in pages
+    pub fn pageCount(self: *const Vma) usize {
+        return self.size() / pmm.PAGE_SIZE;
+    }
+
+    /// Check if address is within this VMA
+    pub fn contains(self: *const Vma, addr: u64) bool {
+        return addr >= self.start and addr < self.end;
+    }
+
+    /// Check if this VMA overlaps with a range
+    pub fn overlaps(self: *const Vma, start: u64, end: u64) bool {
+        return self.start < end and start < self.end;
+    }
+
+    /// Convert protection flags to PageFlags
+    pub fn toPageFlags(self: *const Vma) PageFlags {
+        return .{
+            .writable = (self.prot & PROT_WRITE) != 0,
+            .user = true,
+            .no_execute = (self.prot & PROT_EXEC) == 0,
+        };
+    }
+};
+
+// =============================================================================
+// User VMM State (per-process)
+// =============================================================================
+
+/// User Virtual Memory Manager state
+/// One instance per process/thread in MVP (moves to Process in Phase 4)
+pub const UserVmm = struct {
+    /// Page table physical address (PML4)
+    pml4_phys: u64,
+
+    /// Head of VMA linked list (sorted by start address)
+    vma_head: ?*Vma,
+
+    /// Number of VMAs
+    vma_count: usize,
+
+    /// Total mapped bytes
+    total_mapped: usize,
+
+    /// Initialize a new UserVmm with a fresh address space
+    pub fn init() !*UserVmm {
+        const alloc = heap.allocator();
+
+        // Create new page table
+        const pml4 = vmm.createAddressSpace() catch {
+            return error.OutOfMemory;
+        };
+
+        const self = try alloc.create(UserVmm);
+        self.* = UserVmm{
+            .pml4_phys = pml4,
+            .vma_head = null,
+            .vma_count = 0,
+            .total_mapped = 0,
+        };
+
+        return self;
+    }
+
+    /// Initialize with existing page table
+    pub fn initWithPml4(pml4_phys: u64) !*UserVmm {
+        const alloc = heap.allocator();
+
+        const self = try alloc.create(UserVmm);
+        self.* = UserVmm{
+            .pml4_phys = pml4_phys,
+            .vma_head = null,
+            .vma_count = 0,
+            .total_mapped = 0,
+        };
+
+        return self;
+    }
+
+    /// Destroy the UserVmm and free all resources
+    pub fn deinit(self: *UserVmm) void {
+        const alloc = heap.allocator();
+
+        // Free all VMAs and their physical pages
+        var vma = self.vma_head;
+        while (vma) |v| {
+            const next = v.next;
+
+            // Unmap and free physical pages for this VMA
+            self.freeVmaPages(v);
+
+            // Free VMA struct
+            alloc.destroy(v);
+            vma = next;
+        }
+
+        // Destroy address space (frees page tables)
+        vmm.destroyAddressSpace(self.pml4_phys);
+
+        // Free self
+        alloc.destroy(self);
+    }
+
+    /// Map anonymous memory region
+    /// addr: Hint address (0 = kernel chooses), must be page-aligned if MAP_FIXED
+    /// len: Size in bytes (will be rounded up to page size)
+    /// prot: Protection flags (PROT_READ, PROT_WRITE, PROT_EXEC)
+    /// flags: Map flags (MAP_ANONYMOUS | MAP_PRIVATE required)
+    /// Returns: Start address of mapping, or negative errno
+    pub fn mmap(self: *UserVmm, addr: u64, len: usize, prot: u32, flags: u32) isize {
+        // Validate flags - only anonymous private mappings supported
+        if ((flags & MAP_ANONYMOUS) == 0) {
+            return Errno.ENOSYS.toReturn(); // File mappings not supported
+        }
+
+        // Calculate page-aligned size
+        if (len == 0) {
+            return Errno.EINVAL.toReturn();
+        }
+        const aligned_len = std.mem.alignForward(usize, len, pmm.PAGE_SIZE);
+        const page_count = aligned_len / pmm.PAGE_SIZE;
+
+        // Determine mapping address
+        var map_addr: u64 = undefined;
+
+        if ((flags & MAP_FIXED) != 0) {
+            // MAP_FIXED: use exact address
+            if (!paging.isPageAligned(addr)) {
+                return Errno.EINVAL.toReturn();
+            }
+            if (addr < USER_MMAP_START or addr + aligned_len > USER_MMAP_END) {
+                return Errno.ENOMEM.toReturn();
+            }
+            // Check for overlap with existing VMAs
+            if (self.findOverlappingVma(addr, addr + aligned_len) != null) {
+                // MAP_FIXED with overlap: unmap existing first
+                // For MVP, just fail - proper impl would munmap the overlap
+                return Errno.ENOMEM.toReturn();
+            }
+            map_addr = addr;
+        } else {
+            // Find free address range
+            map_addr = self.findFreeRange(aligned_len) orelse {
+                return Errno.ENOMEM.toReturn();
+            };
+        }
+
+        // Allocate physical pages
+        const phys_pages = pmm.allocZeroedPages(page_count) orelse {
+            return Errno.ENOMEM.toReturn();
+        };
+
+        // Create page flags from protection
+        const page_flags = protToPageFlags(prot);
+
+        // Map pages into address space
+        vmm.mapRange(self.pml4_phys, map_addr, phys_pages, aligned_len, page_flags) catch {
+            // Mapping failed, free physical pages
+            pmm.freePages(phys_pages, page_count);
+            return Errno.ENOMEM.toReturn();
+        };
+
+        // Create VMA to track this mapping
+        const vma = self.createVma(map_addr, map_addr + aligned_len, prot, flags) catch {
+            // VMA creation failed, unmap and free
+            self.unmapRange(map_addr, aligned_len);
+            pmm.freePages(phys_pages, page_count);
+            return Errno.ENOMEM.toReturn();
+        };
+
+        // Insert VMA into list
+        self.insertVma(vma);
+        self.total_mapped += aligned_len;
+
+        console.debug("UserVmm: mmap {x}-{x} prot={x} flags={x}", .{
+            map_addr,
+            map_addr + aligned_len,
+            prot,
+            flags,
+        });
+
+        return @bitCast(map_addr);
+    }
+
+    /// Unmap memory region
+    /// addr: Start address (must be page-aligned)
+    /// len: Size in bytes (will be rounded up)
+    /// Returns: 0 on success, negative errno on error
+    pub fn munmap(self: *UserVmm, addr: u64, len: usize) isize {
+        if (!paging.isPageAligned(addr)) {
+            return Errno.EINVAL.toReturn();
+        }
+
+        if (len == 0) {
+            return Errno.EINVAL.toReturn();
+        }
+
+        const aligned_len = std.mem.alignForward(usize, len, pmm.PAGE_SIZE);
+        const end_addr = addr + aligned_len;
+
+        // Find VMAs that overlap with the range
+        var vma = self.vma_head;
+        while (vma) |v| {
+            const next = v.next;
+
+            if (v.overlaps(addr, end_addr)) {
+                // This VMA overlaps - handle partial/full unmapping
+                if (addr <= v.start and end_addr >= v.end) {
+                    // Full overlap: remove entire VMA
+                    self.freeVmaPages(v);
+                    self.removeVma(v);
+                    self.total_mapped -= v.size();
+
+                    const alloc = heap.allocator();
+                    alloc.destroy(v);
+                } else if (addr <= v.start) {
+                    // Partial from start: shrink VMA
+                    const unmap_end = @min(end_addr, v.end);
+                    self.unmapRange(v.start, @intCast(unmap_end - v.start));
+                    self.total_mapped -= @intCast(unmap_end - v.start);
+                    v.start = unmap_end;
+                } else if (end_addr >= v.end) {
+                    // Partial from end: shrink VMA
+                    const unmap_start = @max(addr, v.start);
+                    self.unmapRange(unmap_start, @intCast(v.end - unmap_start));
+                    self.total_mapped -= @intCast(v.end - unmap_start);
+                    v.end = unmap_start;
+                } else {
+                    // Hole in middle: split VMA (complex, skip for MVP)
+                    // Just unmap the middle portion
+                    self.unmapRange(addr, aligned_len);
+                    self.total_mapped -= aligned_len;
+                    // TODO: Split VMA into two
+                }
+            }
+
+            vma = next;
+        }
+
+        console.debug("UserVmm: munmap {x}-{x}", .{ addr, end_addr });
+        return 0;
+    }
+
+    /// Change memory protection
+    /// addr: Start address (must be page-aligned)
+    /// len: Size in bytes (will be rounded up)
+    /// prot: New protection flags
+    /// Returns: 0 on success, negative errno on error
+    pub fn mprotect(self: *UserVmm, addr: u64, len: usize, prot: u32) isize {
+        if (!paging.isPageAligned(addr)) {
+            return Errno.EINVAL.toReturn();
+        }
+
+        if (len == 0) {
+            return 0; // Success for zero length
+        }
+
+        const aligned_len = std.mem.alignForward(usize, len, pmm.PAGE_SIZE);
+        const end_addr = addr + aligned_len;
+
+        // Find VMAs that overlap with the range
+        var found_any = false;
+        var vma = self.vma_head;
+        while (vma) |v| {
+            if (v.overlaps(addr, end_addr)) {
+                found_any = true;
+
+                // Update VMA protection
+                v.prot = prot;
+
+                // Update page table entries for this VMA
+                const new_flags = protToPageFlags(prot);
+                const update_start = @max(addr, v.start);
+                const update_end = @min(end_addr, v.end);
+
+                // Update each page in the range
+                var page_addr = update_start;
+                while (page_addr < update_end) : (page_addr += pmm.PAGE_SIZE) {
+                    // Get current physical address
+                    if (vmm.translate(self.pml4_phys, page_addr)) |phys| {
+                        // Remap with new flags
+                        vmm.unmapPage(self.pml4_phys, page_addr) catch {};
+                        vmm.mapPage(self.pml4_phys, page_addr, phys, new_flags) catch {};
+                    }
+                }
+            }
+            vma = v.next;
+        }
+
+        if (!found_any) {
+            return Errno.ENOMEM.toReturn();
+        }
+
+        console.debug("UserVmm: mprotect {x}-{x} prot={x}", .{ addr, end_addr, prot });
+        return 0;
+    }
+
+    // =========================================================================
+    // Internal helpers
+    // =========================================================================
+
+    /// Find a free virtual address range of given size
+    fn findFreeRange(self: *UserVmm, size: usize) ?u64 {
+        var search_addr: u64 = USER_MMAP_START;
+
+        // Walk VMAs looking for a gap
+        var vma = self.vma_head;
+        while (vma) |v| {
+            // Check if there's space before this VMA
+            if (search_addr + size <= v.start) {
+                return search_addr;
+            }
+            // Move past this VMA
+            search_addr = v.end;
+            vma = v.next;
+        }
+
+        // Check if there's space after all VMAs
+        if (search_addr + size <= USER_MMAP_END) {
+            return search_addr;
+        }
+
+        return null;
+    }
+
+    /// Find VMA that overlaps with given range
+    fn findOverlappingVma(self: *UserVmm, start: u64, end: u64) ?*Vma {
+        var vma = self.vma_head;
+        while (vma) |v| {
+            if (v.overlaps(start, end)) {
+                return v;
+            }
+            vma = v.next;
+        }
+        return null;
+    }
+
+    /// Create a new VMA struct
+    fn createVma(self: *UserVmm, start: u64, end: u64, prot: u32, flags: u32) !*Vma {
+        _ = self;
+        const alloc = heap.allocator();
+        const vma = try alloc.create(Vma);
+        vma.* = Vma{
+            .start = start,
+            .end = end,
+            .prot = prot,
+            .flags = flags,
+            .next = null,
+            .prev = null,
+        };
+        return vma;
+    }
+
+    /// Insert VMA into sorted list
+    fn insertVma(self: *UserVmm, vma: *Vma) void {
+        self.vma_count += 1;
+
+        // Empty list
+        if (self.vma_head == null) {
+            self.vma_head = vma;
+            return;
+        }
+
+        // Find insertion point (sorted by start address)
+        var prev: ?*Vma = null;
+        var curr = self.vma_head;
+
+        while (curr) |c| {
+            if (vma.start < c.start) {
+                break;
+            }
+            prev = c;
+            curr = c.next;
+        }
+
+        // Insert between prev and curr
+        vma.prev = prev;
+        vma.next = curr;
+
+        if (prev) |p| {
+            p.next = vma;
+        } else {
+            self.vma_head = vma;
+        }
+
+        if (curr) |c| {
+            c.prev = vma;
+        }
+    }
+
+    /// Remove VMA from list
+    fn removeVma(self: *UserVmm, vma: *Vma) void {
+        self.vma_count -= 1;
+
+        if (vma.prev) |p| {
+            p.next = vma.next;
+        } else {
+            self.vma_head = vma.next;
+        }
+
+        if (vma.next) |n| {
+            n.prev = vma.prev;
+        }
+
+        vma.next = null;
+        vma.prev = null;
+    }
+
+    /// Unmap a range of pages (does not free physical memory)
+    fn unmapRange(self: *UserVmm, start: u64, len: usize) void {
+        const page_count = len / pmm.PAGE_SIZE;
+        var i: usize = 0;
+        while (i < page_count) : (i += 1) {
+            const addr = start + i * pmm.PAGE_SIZE;
+            vmm.unmapPage(self.pml4_phys, addr) catch {};
+        }
+    }
+
+    /// Free physical pages for a VMA and unmap them
+    fn freeVmaPages(self: *UserVmm, vma: *Vma) void {
+        const page_count = vma.pageCount();
+        var i: usize = 0;
+        while (i < page_count) : (i += 1) {
+            const addr = vma.start + i * pmm.PAGE_SIZE;
+            // Get physical address before unmapping
+            if (vmm.translate(self.pml4_phys, addr)) |phys| {
+                vmm.unmapPage(self.pml4_phys, addr) catch {};
+                pmm.freePage(phys);
+            }
+        }
+    }
+};
+
+// =============================================================================
+// Helper Functions
+// =============================================================================
+
+/// Convert PROT_* flags to PageFlags
+fn protToPageFlags(prot: u32) PageFlags {
+    return .{
+        .writable = (prot & PROT_WRITE) != 0,
+        .user = true,
+        .no_execute = (prot & PROT_EXEC) == 0,
+    };
+}
