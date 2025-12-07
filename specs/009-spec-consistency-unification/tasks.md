@@ -27,7 +27,7 @@
 
 - [X] T001 Verify specs/001-minimal-kernel/spec.md exists and is readable
 - [X] T002 [P] Verify specs/003-microkernel-userland-networking/spec.md exists and is readable
-- [X] T003 [P] Verify specs/006-sysv-abi-init/spec.md exists and is readable
+- [X] T003 [P] Verify specs/003-microkernel-userland-networking/spec.md can receive crt0 additions (spec 006 does not exist)
 - [X] T004 [P] Verify specs/007-linux-compat-layer/spec.md exists and is readable
 - [X] T005 [P] Verify CLAUDE.md exists at repository root
 - [X] T006 Create backup of all files to be modified (optional but recommended)
@@ -170,23 +170,27 @@
 
 ## Phase 8: User Story 6 - Userland Entry Point crt0 (Priority: P2)
 
-**Goal**: Spec 006 documents crt0 implementation for argc/argv parsing.
+**Goal**: Spec 003 documents crt0 implementation for argc/argv parsing.
 
-**Independent Test**: `grep -ci "crt0" specs/006-sysv-abi-init/spec.md` returns >= 1.
+**Note**: Originally planned for spec 006-sysv-abi-init, but that spec does not exist.
+crt0 requirements have been added to spec 003 (microkernel-userland-networking) which
+already covers userland shell and syscalls.
+
+**Independent Test**: `grep -ci "crt0" specs/003-microkernel-userland-networking/spec.md` returns >= 1.
 
 ### Implementation for User Story 6
 
-- [X] T050 [US6] Identify Process or Entry Point section in specs/006-sysv-abi-init/spec.md
-- [X] T051 [US6] Add "CRT0 Implementation" section per contracts/amendments.md
-- [X] T052 [US6] Add stack layout diagram (argc at RSP, argv at RSP+8, envp calculation)
-- [X] T053 [US6] Add CRT0 responsibilities list (7 steps)
+- [X] T050 [US6] Identify Userland section in specs/003-microkernel-userland-networking/spec.md
+- [X] T051 [US6] Add "Userland Entry Point (CRT0)" section after Raw Keyboard Input
+- [X] T052 [US6] Add stack layout diagram (argc at RSP, argv at RSP+8)
+- [X] T053 [US6] Add FR-CRT-01 through FR-CRT-05 requirements
 - [X] T054 [US6] Add reference _start implementation in Zig
-- [X] T055 [US6] Add linker requirement note (programs must link with crt0)
+- [X] T055 [US6] Add CRT0 to Key Entities section
 
 ### Verification for User Story 6
 
-- [X] T056 [US6] Run `grep -ci "crt0" specs/006-sysv-abi-init/spec.md` - verify >= 3
-- [X] T057 [US6] Run `grep -c "_start\|argc\|argv" specs/006-sysv-abi-init/spec.md` - verify >= 3
+- [X] T056 [US6] Run `grep -ci "crt0" specs/003-microkernel-userland-networking/spec.md` - verify >= 3
+- [X] T057 [US6] Run `grep -c "_start\|argc\|argv" specs/003-microkernel-userland-networking/spec.md` - verify >= 3
 
 **Checkpoint**: US6 complete - crt0 entry point documented for userland programs
 
@@ -203,7 +207,7 @@
 - [X] T060 [P] Run `grep -r "0\.13\|0\.14" specs/ CLAUDE.md` - verify no old Zig versions
 - [X] T061 [P] Run `grep -c "Spinlock" specs/003-microkernel-userland-networking/spec.md` - verify present
 - [X] T062 [P] Run `grep -ci "endian\|byte order" specs/003-microkernel-userland-networking/spec.md` - verify present
-- [X] T063 [P] Run `grep -ci "crt0" specs/006-sysv-abi-init/spec.md` - verify present
+- [X] T063 [P] Run `grep -ci "crt0" specs/003-microkernel-userland-networking/spec.md` - verify present
 - [X] T064 [P] Run `grep -ci "vfs" specs/007-linux-compat-layer/spec.md` - verify present
 - [X] T065 [P] Run `grep -c "root_module" CLAUDE.md` - verify build patterns present
 
@@ -234,23 +238,22 @@
 - **User Story 3 (P2)**: Independent - different file than US1/US2
 - **User Story 4 (P2)**: Same file as US3 (spec 003) - run after US3
 - **User Story 5 (P2)**: Independent - different file (spec 007)
-- **User Story 6 (P2)**: Independent - different file (spec 006)
+- **User Story 6 (P2)**: Same file as US3/US4 (spec 003) - run after US4
 
 ### Parallel Opportunities
 
 **Phase 1 (Setup)** - All [P] tasks can run in parallel:
 ```
 T002: Verify spec 003
-T003: Verify spec 006
+T003: Verify spec 003 can receive crt0 (spec 006 does not exist)
 T004: Verify spec 007
 T005: Verify CLAUDE.md
 ```
 
-**User Stories 3, 5, 6** (after US1/US2) - Different files, can run in parallel:
+**User Stories 3, 4, 5, 6** (after US1/US2) - Partial parallelism:
 ```
-US3/US4: specs/003-microkernel-userland-networking/spec.md
-US5: specs/007-linux-compat-layer/spec.md
-US6: specs/006-sysv-abi-init/spec.md
+US3/US4/US6: specs/003-microkernel-userland-networking/spec.md (sequential)
+US5: specs/007-linux-compat-layer/spec.md (parallel with US3/US4/US6)
 ```
 
 **Phase 9 (Polish)** - All verification tasks can run in parallel:
@@ -263,17 +266,15 @@ T058-T065: All grep verification commands
 ## Parallel Example: P2 User Stories
 
 ```bash
-# After US1 and US2 complete, launch P2 stories in parallel:
+# After US1 and US2 complete, launch P2 stories:
 
-# Terminal 1: US3 + US4 (same file, sequential)
+# Terminal 1: US3 + US4 + US6 (same file spec 003, sequential)
 Task: "T029-T035 Spinlock in spec 003"
 Task: "T036-T042 Endianness in spec 003"
+Task: "T050-T057 crt0 in spec 003"
 
-# Terminal 2: US5
+# Terminal 2: US5 (can run in parallel with Terminal 1)
 Task: "T043-T049 VFS shim in spec 007"
-
-# Terminal 3: US6
-Task: "T050-T057 crt0 in spec 006"
 ```
 
 ---
@@ -308,7 +309,7 @@ Task: "T050-T057 crt0 in spec 006"
 | Spinlock Documented (P2) | T029-T035 | Spec 003 has Spinlock section |
 | Endianness Documented (P2) | T036-T042 | Spec 003 has byte order section |
 | VFS Shim Documented (P2) | T043-T049 | Spec 007 has VFS section |
-| crt0 Documented (P2) | T050-T057 | Spec 006 has crt0 section |
+| crt0 Documented (P2) | T050-T057 | Spec 003 has crt0 section |
 | Feature Complete | T058-T069 | All verifications pass |
 
 ---
@@ -337,6 +338,6 @@ Task: "T050-T057 crt0 in spec 006"
 - [Story] label maps task to specific user story for traceability
 - This is a documentation-only feature - no code compilation or QEMU testing required
 - Verification is via grep/diff commands, not unit tests
-- US3 and US4 modify the same file (spec 003) - run sequentially within that file
+- US3, US4, and US6 modify the same file (spec 003) - run sequentially within that file
 - Commit after each user story or logical group
 - Stop at any checkpoint to validate independently

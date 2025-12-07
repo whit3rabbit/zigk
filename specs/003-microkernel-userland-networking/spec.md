@@ -361,6 +361,40 @@ const UdpHeader = extern struct {
 - **FR-030c**: Scancode buffer MUST be at least 64 entries to handle rapid key events
 - **FR-030d**: When scancode buffer is full, oldest entries MUST be dropped (ring buffer behavior)
 
+**Userland Entry Point (CRT0)**
+
+- **FR-CRT-01**: A crt0 implementation MUST be provided for userland programs
+- **FR-CRT-02**: crt0 MUST read argc from RSP per SysV ABI stack layout
+- **FR-CRT-03**: crt0 MUST extract argv array pointers from RSP+8
+- **FR-CRT-04**: crt0 MUST call main(argc, argv) with correct arguments
+- **FR-CRT-05**: crt0 MUST call sys_exit with main's return value on completion
+
+**Stack Layout at _start**:
+```
+RSP+0:   argc (u64)
+RSP+8:   argv[0] (pointer)
+RSP+16:  argv[1]
+...
+RSP+8*(argc+1): NULL (argv terminator)
+```
+
+**Reference Implementation**:
+```zig
+export fn _start() callconv(.Naked) noreturn {
+    asm volatile (
+        \\xor %%rbp, %%rbp
+        \\mov (%%rsp), %%rdi
+        \\lea 8(%%rsp), %%rsi
+        \\and $-16, %%rsp
+        \\call main
+        \\mov %%rax, %%rdi
+        \\mov $60, %%rax
+        \\syscall
+    );
+    unreachable;
+}
+```
+
 ### Key Entities
 
 - **Page Table**: Hierarchical structure mapping virtual addresses to physical addresses with permission bits
@@ -375,6 +409,7 @@ const UdpHeader = extern struct {
 - **InitRD File Entry**: {name: [32]u8, offset: u64, size: u64} mapping filename to InitRD data region
 - **Framebuffer Mapping**: Userland-accessible virtual address range mapped to video memory physical pages
 - **Scancode Buffer**: Ring buffer (64 entries) storing raw PS/2 keyboard scan codes for game input
+- **CRT0**: C runtime zero, the entry point code that sets up argc/argv and calls main()
 
 ## Success Criteria *(mandatory)*
 
