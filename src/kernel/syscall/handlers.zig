@@ -7,13 +7,51 @@
 // Note: These are MVP implementations. Full implementations will
 // require proper process management, file descriptors, etc.
 
+const std = @import("std");
 const uapi = @import("uapi");
 const console = @import("console");
 const hal = @import("hal");
 const sched = @import("sched");
 const keyboard = @import("keyboard");
+const fd_mod = @import("fd");
+const devfs = @import("devfs");
 
 const Errno = uapi.errno.Errno;
+const FdTable = fd_mod.FdTable;
+const FileDescriptor = fd_mod.FileDescriptor;
+
+// =============================================================================
+// Global FD Table (MVP single-process)
+// =============================================================================
+// In Phase 4 (Process model), this moves to per-process FD tables.
+// For now, use a single global table for the MVP.
+
+var global_fd_table: ?*FdTable = null;
+var fd_table_initialized: bool = false;
+
+/// Get or initialize the global FD table
+fn getGlobalFdTable() *FdTable {
+    if (global_fd_table) |table| {
+        return table;
+    }
+
+    // First access - initialize the table
+    global_fd_table = fd_mod.createFdTable() catch {
+        console.err("FD: Failed to create global FD table", .{});
+        @panic("Cannot create FD table");
+    };
+
+    // Pre-populate stdin/stdout/stderr
+    devfs.createStdFds(global_fd_table.?) catch {
+        console.err("FD: Failed to create standard FDs", .{});
+        @panic("Cannot create standard FDs");
+    };
+
+    fd_table_initialized = true;
+    console.info("FD: Global FD table initialized with stdin/stdout/stderr", .{});
+
+    return global_fd_table.?;
+}
 
 // =============================================================================
 // User Pointer Validation
@@ -256,59 +294,9 @@ pub fn sys_clock_gettime(clk_id: usize, tp_ptr: usize) isize {
 
 /// sys_read (0) - Read from file descriptor
 ///
-/// MVP: Only supports stdin (fd 0) via keyboard driver.
-pub fn sys_read(fd: usize, buf_ptr: usize, count: usize) isize {
-    // Only support stdin for MVP
-    if (fd != 0) {
-        return Errno.EBADF.toReturn();
-    }
-
-    if (buf_ptr == 0) {
-        return Errno.EFAULT.toReturn();
-    }
-
-    if (count == 0) {
-        return 0;
-    }
-
-    const buf: [*]u8 = @ptrFromInt(buf_ptr);
-
-    // Read characters from keyboard
-    // For MVP, read one character at a time (blocking)
-    var bytes_read: usize = 0;
-    while (bytes_read < count) {
-        // Try to get a character from keyboard buffer
-        if (keyboard.getChar()) |c| {
-            buf[bytes_read] = c;
-            bytes_read += 1;
-
-            // Return after newline (line-buffered mode)
-            if (c == '\n') {
-                break;
-            }
-        } else {
-            // No character available
-            if (bytes_read > 0) {
-                // Return what we have
-                break;
-            }
-            // Nothing read yet, yield and try again
-            sched.yield();
-        }
-    }
-
-    return @intCast(bytes_read);
-}
-
-/// sys_write (1) - Write to file descriptor
-///
-/// MVP: Supports stdout (1) and stderr (2) via serial console.
-pub fn sys_write(fd: usize, buf_ptr: usize, count: usize) isize {
-    // Only support stdout and stderr for MVP
-    if (fd != 1 and fd != 2) {
-        return Errno.EBADF.toReturn();
-    }
-
+/// Reads up to count bytes from fd into buf.
+/// Uses FD table to dispatch to appropriate device read operation.
+pub fn sys_read(fd_num: usize, buf_ptr: usize, count: usize) isize {
     if (count == 0) {
         return 0;
     }
@@ -318,12 +306,58 @@ pub fn sys_write(fd: usize, buf_ptr: usize, count: usize) isize {
         return Errno.EFAULT.toReturn();
     }
 
+    // Get FD from table
+    const table = getGlobalFdTable();
+    const fd = table.get(@intCast(fd_num)) orelse {
+        return Errno.EBADF.toReturn();
+    };
+
+    // Check if FD is readable
+    if (!fd.isReadable()) {
+        return Errno.EBADF.toReturn();
+    }
+
+    // Call device read operation
+    const read_fn = fd.ops.read orelse {
+        return Errno.ENOSYS.toReturn();
+    };
+
+    const buf: [*]u8 = @ptrFromInt(buf_ptr);
+    return read_fn(fd, buf, count);
+}
+
+/// sys_write (1) - Write to file descriptor
+///
+/// Writes up to count bytes from buf to fd.
+/// Uses FD table to dispatch to appropriate device write operation.
+pub fn sys_write(fd_num: usize, buf_ptr: usize, count: usize) isize {
+    if (count == 0) {
+        return 0;
+    }
+
+    // Validate user buffer pointer
+    if (!isValidUserPtr(buf_ptr, count)) {
+        return Errno.EFAULT.toReturn();
+    }
+
+    // Get FD from table
+    const table = getGlobalFdTable();
+    const fd = table.get(@intCast(fd_num)) orelse {
+        return Errno.EBADF.toReturn();
+    };
+
+    // Check if FD is writable
+    if (!fd.isWritable()) {
+        return Errno.EBADF.toReturn();
+    }
+
+    // Call device write operation
+    const write_fn = fd.ops.write orelse {
+        return Errno.ENOSYS.toReturn();
+    };
+
     const buf: [*]const u8 = @ptrFromInt(buf_ptr);
-
-    // Write to serial console
-    console.print(buf[0..count]);
-
-    return @intCast(count);
+    return write_fn(fd, buf, count);
 }
 
 /// sys_brk (12) - Change data segment size (heap)
@@ -393,27 +427,62 @@ pub fn sys_read_scancode() isize {
 // Stub Handlers (Return appropriate error codes)
 // =============================================================================
 
-/// sys_open (2) - Open a file
-/// MVP: Returns -ENOENT (no filesystem)
+/// sys_open (2) - Open a file or device
+///
+/// Opens a file/device and returns a new file descriptor.
+/// Currently only supports device files in /dev/.
 pub fn sys_open(path_ptr: usize, flags: usize, mode: usize) isize {
-    _ = flags;
-    _ = mode;
+    _ = mode; // Mode is ignored for device files
+
     // Validate path pointer (assume max path length of 4096)
-    if (!isValidUserString(path_ptr, 4096)) {
+    const max_path: usize = 4096;
+    if (!isValidUserString(path_ptr, max_path)) {
         return Errno.EFAULT.toReturn();
     }
-    // No filesystem in MVP
-    return Errno.ENOENT.toReturn();
+
+    // Read path string from userspace
+    const path_bytes: [*]const u8 = @ptrFromInt(path_ptr);
+
+    // Find null terminator (max 4096 chars)
+    var path_len: usize = 0;
+    while (path_len < max_path and path_bytes[path_len] != 0) : (path_len += 1) {}
+
+    if (path_len == 0) {
+        return Errno.ENOENT.toReturn();
+    }
+
+    const path = path_bytes[0..path_len];
+
+    // Look up device by path
+    const ops = devfs.lookupDevice(path) orelse {
+        // Not a known device
+        return Errno.ENOENT.toReturn();
+    };
+
+    // Create new file descriptor
+    const fd = fd_mod.createFd(ops, @truncate(flags), null) catch {
+        return Errno.ENOMEM.toReturn();
+    };
+
+    // Allocate FD number and install
+    const table = getGlobalFdTable();
+    const fd_num = table.allocFdNum() orelse {
+        // Table is full - in MVP we just leak the FD
+        // Full implementation would free it here
+        return Errno.EMFILE.toReturn();
+    };
+
+    table.install(fd_num, fd);
+
+    return @intCast(fd_num);
 }
 
 /// sys_close (3) - Close a file descriptor
-/// MVP: Returns -EBADF for all FDs except pre-opened 0/1/2
-pub fn sys_close(fd: usize) isize {
-    // Pre-opened FDs (stdin/stdout/stderr) cannot be closed in MVP
-    if (fd <= 2) {
-        return 0; // Pretend success
-    }
-    return Errno.EBADF.toReturn();
+///
+/// Closes the file descriptor and releases associated resources.
+pub fn sys_close(fd_num: usize) isize {
+    const table = getGlobalFdTable();
+    return table.close(@intCast(fd_num));
 }
 
 /// sys_mmap (9) - Map memory pages

@@ -206,6 +206,16 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // Create FD module (File Descriptor table)
+    const fd_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/fd.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    fd_module.addImport("heap", heap_module);
+    fd_module.addImport("console", console_module);
+    fd_module.addImport("uapi", uapi_module);
+
     // Create Ring Buffer module (generic circular buffer)
     const ring_buffer_module = b.createModule(.{
         .root_source_file = b.path("src/lib/ring_buffer.zig"),
@@ -224,6 +234,19 @@ pub fn build(b: *std.Build) void {
     keyboard_module.addImport("ring_buffer", ring_buffer_module);
     keyboard_module.addImport("console", console_module);
     keyboard_module.addImport("uapi", uapi_module);
+
+    // Create DevFS module (device filesystem shim)
+    const devfs_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/devfs.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    devfs_module.addImport("fd", fd_module);
+    devfs_module.addImport("console", console_module);
+    devfs_module.addImport("hal", hal_module);
+    devfs_module.addImport("keyboard", keyboard_module);
+    devfs_module.addImport("sched", sched_module);
+    devfs_module.addImport("uapi", uapi_module);
 
     // Create syscall random module
     const syscall_random_module = b.createModule(.{
@@ -255,6 +278,8 @@ pub fn build(b: *std.Build) void {
     syscall_handlers_module.addImport("sched", sched_module);
     syscall_handlers_module.addImport("keyboard", keyboard_module);
     syscall_handlers_module.addImport("thread", thread_module);
+    syscall_handlers_module.addImport("fd", fd_module);
+    syscall_handlers_module.addImport("devfs", devfs_module);
 
     // Create syscall dispatch table module
     const syscall_table_module = b.createModule(.{
