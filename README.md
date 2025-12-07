@@ -37,84 +37,26 @@ See [BOOT.md](BOOT.md) for technical details on:
 
 If you see `invalid accelerator hvf`, the TCG flag is missing.
 
+### UEFI Booting (macOS fix)
+If you get "No bootable device", your ISO is likely UEFI-only (common on macOS). Pass the path to your OVMF firmware:
+
+```bash
+# Example for Homebrew (Intel)
+zig build run -Dbios=/usr/local/share/qemu/edk2-x86_64-code.fd
+
+# Example for Homebrew (Apple Silicon)
+zig build run -Dbios=/opt/homebrew/share/qemu/edk2-x86_64-code.fd
+```
+
 ## Docker Build (Recommended)
 
 Docker provides a consistent build environment across all platforms and handles all dependencies automatically.
 
 ### Quick Start
 
-```bash
-# Build the kernel
-./tools/docker-build.sh build
-
-# Build bootable ISO
-./tools/docker-build.sh iso
-
-# Run unit tests
-./tools/docker-build.sh test
-
-# Interactive development shell
-./tools/docker-build.sh shell
-
-# Clean build artifacts
-./tools/docker-build.sh clean
-```
-
-### Using Docker Compose
-
-```bash
-# Build kernel
-docker compose run build
-
-# Build ISO
-docker compose run build-iso
-
-# Run tests
-docker compose run test
-
-# Interactive shell with QEMU available
-docker compose run dev
-```
-
-### Multi-Architecture Builds
-
-The Docker setup supports building for multiple architectures:
-
-```bash
-# Build for x86_64 (current)
-docker compose run build-x86_64
-
-# Build for aarch64 (future)
-docker compose run build-aarch64
-
-# Build all architectures
-./tools/docker-build.sh all
-```
-
-### Building the Docker Image
-
-```bash
-# Build the base image
-docker build -t zigk-builder .
-
-# Build with QEMU support for testing
-docker build --target dev -t zigk-builder:dev .
-```
+See [BUILD.md](BUILD.md#docker-build-recommended) for detailed instructions.
 
 ## Project Structure
-
-```
-zigk/
-├── build.zig              # Build configuration
-
-├── src/
-│   ├── arch/x86_64/       # HAL (hardware abstraction)
-│   ├── kernel/            # Core subsystems
-│   ├── drivers/           # Device drivers
-│   ├── lib/               # Shared utilities
-│   └── uapi/              # Userspace API definitions
-└── tests/unit/            # Host-side unit tests
-```
 
 See [FILESYSTEM.md](FILESYSTEM.md) for detailed structure.
 

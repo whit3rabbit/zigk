@@ -41,7 +41,7 @@ inline fn syscall0(number: usize) usize {
     return asm volatile ("syscall"
         : [ret] "={rax}" (-> usize),
         : [number] "{rax}" (number),
-        : "rcx", "r11", "memory"
+        : .{ .rcx = true, .r11 = true, .memory = true }
     );
 }
 
@@ -51,7 +51,7 @@ inline fn syscall1(number: usize, arg1: usize) usize {
         : [ret] "={rax}" (-> usize),
         : [number] "{rax}" (number),
           [arg1] "{rdi}" (arg1),
-        : "rcx", "r11", "memory"
+        : .{ .rcx = true, .r11 = true, .memory = true }
     );
 }
 
@@ -62,7 +62,7 @@ inline fn syscall2(number: usize, arg1: usize, arg2: usize) usize {
         : [number] "{rax}" (number),
           [arg1] "{rdi}" (arg1),
           [arg2] "{rsi}" (arg2),
-        : "rcx", "r11", "memory"
+        : .{ .rcx = true, .r11 = true, .memory = true }
     );
 }
 
@@ -74,7 +74,7 @@ inline fn syscall3(number: usize, arg1: usize, arg2: usize, arg3: usize) usize {
           [arg1] "{rdi}" (arg1),
           [arg2] "{rsi}" (arg2),
           [arg3] "{rdx}" (arg3),
-        : "rcx", "r11", "memory"
+        : .{ .rcx = true, .r11 = true, .memory = true }
     );
 }
 
@@ -88,7 +88,7 @@ inline fn syscall4(number: usize, arg1: usize, arg2: usize, arg3: usize, arg4: u
           [arg2] "{rsi}" (arg2),
           [arg3] "{rdx}" (arg3),
           [arg4] "{r10}" (arg4),
-        : "rcx", "r11", "memory"
+        : .{ .rcx = true, .r11 = true, .memory = true }
     );
 }
 
@@ -102,7 +102,7 @@ inline fn syscall5(number: usize, arg1: usize, arg2: usize, arg3: usize, arg4: u
           [arg3] "{rdx}" (arg3),
           [arg4] "{r10}" (arg4),
           [arg5] "{r8}" (arg5),
-        : "rcx", "r11", "memory"
+        : .{ .rcx = true, .r11 = true, .memory = true }
     );
 }
 
@@ -117,7 +117,7 @@ inline fn syscall6(number: usize, arg1: usize, arg2: usize, arg3: usize, arg4: u
           [arg4] "{r10}" (arg4),
           [arg5] "{r8}" (arg5),
           [arg6] "{r9}" (arg6),
-        : "rcx", "r11", "memory"
+        : .{ .rcx = true, .r11 = true, .memory = true }
     );
 }
 
@@ -448,4 +448,130 @@ pub fn print(str: []const u8) void {
 /// Write to stderr (convenience wrapper)
 pub fn eprint(str: []const u8) void {
     _ = write(STDERR_FILENO, str.ptr, str.len) catch {};
+}
+
+// =============================================================================
+// Socket Operations (sys_socket, sys_bind, sys_sendto, sys_recvfrom)
+// =============================================================================
+
+/// Address family constants
+pub const AF_INET: i32 = 2;
+
+/// Socket type constants
+pub const SOCK_STREAM: i32 = 1; // TCP
+pub const SOCK_DGRAM: i32 = 2; // UDP
+
+/// Socket address structure (IPv4)
+/// Compatible with Linux sockaddr_in
+pub const SockAddrIn = extern struct {
+    family: u16, // AF_INET
+    port: u16, // Network byte order
+    addr: u32, // Network byte order
+    zero: [8]u8, // Padding
+
+    /// Create sockaddr from IP (host order) and port (host order)
+    pub fn init(ip: u32, port_host: u16) SockAddrIn {
+        return .{
+            .family = @as(u16, @intCast(AF_INET)),
+            .port = @byteSwap(port_host),
+            .addr = @byteSwap(ip),
+            .zero = [_]u8{0} ** 8,
+        };
+    }
+
+    /// Get port in host byte order
+    pub fn getPort(self: *const SockAddrIn) u16 {
+        return @byteSwap(self.port);
+    }
+
+    /// Get address in host byte order
+    pub fn getAddr(self: *const SockAddrIn) u32 {
+        return @byteSwap(self.addr);
+    }
+};
+
+/// Create a socket
+/// Returns socket file descriptor (>= 3) or error
+pub fn socket(domain: i32, sock_type: i32, protocol: i32) SyscallError!i32 {
+    const ret = syscall3(
+        syscalls.SYS_SOCKET,
+        @bitCast(@as(isize, domain)),
+        @bitCast(@as(isize, sock_type)),
+        @bitCast(@as(isize, protocol)),
+    );
+    if (isError(ret)) return errorFromReturn(ret);
+    return @truncate(@as(isize, @bitCast(ret)));
+}
+
+/// Bind socket to local address
+pub fn bind(fd: i32, addr: *const SockAddrIn) SyscallError!void {
+    const ret = syscall3(
+        syscalls.SYS_BIND,
+        @bitCast(@as(isize, fd)),
+        @intFromPtr(addr),
+        @sizeOf(SockAddrIn),
+    );
+    if (isError(ret)) return errorFromReturn(ret);
+}
+
+/// Send data on socket to destination
+/// Returns number of bytes sent
+pub fn sendto(fd: i32, buf: []const u8, dest_addr: *const SockAddrIn) SyscallError!usize {
+    const ret = syscall6(
+        syscalls.SYS_SENDTO,
+        @bitCast(@as(isize, fd)),
+        @intFromPtr(buf.ptr),
+        buf.len,
+        0, // flags
+        @intFromPtr(dest_addr),
+        @sizeOf(SockAddrIn),
+    );
+    if (isError(ret)) return errorFromReturn(ret);
+    return ret;
+}
+
+/// Receive data from socket
+/// Returns number of bytes received
+/// src_addr is filled with sender's address if non-null
+pub fn recvfrom(fd: i32, buf: []u8, src_addr: ?*SockAddrIn) SyscallError!usize {
+    var addrlen: u32 = @sizeOf(SockAddrIn);
+    const src_addr_ptr: usize = if (src_addr) |a| @intFromPtr(a) else 0;
+    const addrlen_ptr: usize = if (src_addr != null) @intFromPtr(&addrlen) else 0;
+
+    const ret = syscall6(
+        syscalls.SYS_RECVFROM,
+        @bitCast(@as(isize, fd)),
+        @intFromPtr(buf.ptr),
+        buf.len,
+        0, // flags
+        src_addr_ptr,
+        addrlen_ptr,
+    );
+    if (isError(ret)) return errorFromReturn(ret);
+    return ret;
+}
+
+/// Parse dotted-decimal IP string to u32 (host byte order)
+pub fn parseIp(str: []const u8) ?u32 {
+    var ip: u32 = 0;
+    var octet: u32 = 0;
+    var dot_count: usize = 0;
+
+    for (str) |c| {
+        if (c >= '0' and c <= '9') {
+            octet = octet * 10 + (c - '0');
+            if (octet > 255) return null;
+        } else if (c == '.') {
+            ip = (ip << 8) | octet;
+            octet = 0;
+            dot_count += 1;
+            if (dot_count > 3) return null;
+        } else {
+            return null;
+        }
+    }
+
+    if (dot_count != 3) return null;
+    ip = (ip << 8) | octet;
+    return ip;
 }

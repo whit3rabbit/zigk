@@ -12,6 +12,7 @@
 const uapi = @import("uapi");
 const handlers = @import("handlers.zig");
 const random = @import("random.zig");
+const net_syscalls = @import("net.zig");
 const syscalls = uapi.syscalls;
 const console = @import("console");
 const hal = @import("hal");
@@ -53,10 +54,11 @@ pub export fn dispatch_syscall(frame: *SyscallFrame) callconv(.c) void {
         syscalls.SYS_GETUID => handlers.sys_getuid(),
         syscalls.SYS_GETGID => handlers.sys_getgid(),
 
-        // Networking (stubs for Phase 7)
-        syscalls.SYS_SOCKET => handlers.sys_socket(args[0], args[1], args[2]),
-        syscalls.SYS_SENDTO => handlers.sys_sendto(args[0], args[1], args[2], args[3], args[4], args[5]),
-        syscalls.SYS_RECVFROM => handlers.sys_recvfrom(args[0], args[1], args[2], args[3], args[4], args[5]),
+        // Networking
+        syscalls.SYS_SOCKET => net_syscalls.sys_socket(args[0], args[1], args[2]),
+        syscalls.SYS_BIND => net_syscalls.sys_bind(args[0], args[1], args[2]),
+        syscalls.SYS_SENDTO => net_syscalls.sys_sendto(args[0], args[1], args[2], args[3], args[4], args[5]),
+        syscalls.SYS_RECVFROM => net_syscalls.sys_recvfrom(args[0], args[1], args[2], args[3], args[4], args[5]),
 
         // Process control (stubs)
         syscalls.SYS_FORK => handlers.sys_fork(),

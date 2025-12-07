@@ -110,8 +110,10 @@ pub fn writeByte(byte: u8) void {
     if (!initialized) return;
 
     // Wait until transmit buffer is empty
-    while (!isTxReady()) {
-        // Spin wait
+    var retries: usize = 100000;
+    while (!isTxReady() and retries > 0) {
+        retries -= 1;
+        asm volatile ("pause");
     }
     io.outb(current_port + DATA, byte);
 }

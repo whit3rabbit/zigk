@@ -63,6 +63,10 @@ pub const SYS_GETPID: usize = 39;
 /// (domain, type, protocol) -> fd
 pub const SYS_SOCKET: usize = 41;
 
+/// Bind a socket to an address
+/// (fd, addr, addrlen) -> int
+pub const SYS_BIND: usize = 49;
+
 /// Send a message on a socket
 /// (fd, buf, len, flags, addr, addrlen) -> ssize_t
 pub const SYS_SENDTO: usize = 44;

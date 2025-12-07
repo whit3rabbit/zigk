@@ -24,6 +24,15 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
+# Force x86_64 platform for GRUB compatibility (grub-pc-bin is x86-only)
+DOCKER_PLATFORM="linux/amd64"
+
+# Detect Apple Silicon - x86_64 emulation under Rosetta/QEMU is unreliable for Zig
+IS_APPLE_SILICON=false
+if [[ "$(uname -s)" == "Darwin" ]] && [[ "$(uname -m)" == "arm64" ]]; then
+    IS_APPLE_SILICON=true
+fi
+
 log_info() {
     echo -e "${GREEN}[INFO]${NC} $1"
 }
@@ -54,6 +63,7 @@ build_image() {
     local target="${1:-builder}"
     log_info "Building Docker image (target: $target)..."
     docker build \
+        --platform "$DOCKER_PLATFORM" \
         --target "$target" \
         -t "zigk-builder:$target" \
         "$PROJECT_ROOT"
@@ -72,6 +82,7 @@ run_in_container() {
 
     log_info "Running: $cmd"
     docker run --rm \
+        --platform "$DOCKER_PLATFORM" \
         -v "$PROJECT_ROOT:/workspace" \
         -w /workspace \
         "zigk-builder:$target" \
@@ -97,6 +108,7 @@ cmd_test() {
 cmd_shell() {
     log_info "Opening interactive shell..."
     docker run --rm -it \
+        --platform "$DOCKER_PLATFORM" \
         -v "$PROJECT_ROOT:/workspace" \
         -w /workspace \
         "zigk-builder:dev" \
@@ -155,9 +167,26 @@ Examples:
 EOF
 }
 
+# Check for Apple Silicon and warn about emulation issues
+check_apple_silicon() {
+    if [[ "$IS_APPLE_SILICON" == "true" ]]; then
+        log_warn "Apple Silicon detected. Docker builds use x86_64 emulation which is unreliable for Zig."
+        log_warn "Recommended: Use native build instead:"
+        log_warn "  1. Install GRUB: brew install x86_64-elf-grub"
+        log_warn "  2. Build directly: zig build iso"
+        echo ""
+        read -p "Continue with Docker anyway? [y/N] " -n 1 -r
+        echo ""
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            exit 0
+        fi
+    fi
+}
+
 # Main
 main() {
     check_docker
+    check_apple_silicon
 
     local command="${1:-build}"
     shift || true

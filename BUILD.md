@@ -26,6 +26,29 @@ zig build
 ```
 Artifact: `zig-out/bin/kernel.elf`
 
+### Build Configuration
+You can customize the build using `-D` flags with `zig build`.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `-Dversion=[string]` | "0.1.0" | Kernel version string |
+| `-Dname=[string]` | "ZigK" | Kernel name |
+| `-Dstack-size=[int]` | 16384 | Default thread stack size in bytes |
+| `-Dheap-size=[int]` | 2097152 | Kernel heap size in bytes (2MB) |
+| `-Dmax-threads=[int]` | 64 | Maximum number of threads |
+| `-Dtimer-hz=[int]` | 100 | Timer frequency in Hz |
+| `-Dserial-baud=[int]` | 115200 | Serial port baud rate |
+| `-Ddebug=[bool]` | true | Enable debug output |
+| `-Ddebug-memory=[bool]` | false | Enable verbose memory allocation logging |
+| `-Ddebug-scheduler=[bool]` | false | Enable verbose scheduler logging |
+| `-Ddebug-network=[bool]` | false | Enable verbose network logging |
+| `-Dbios=[string]` | null | Path to BIOS/UEFI firmware (e.g. OVMF.fd) for QEMU |
+
+Example:
+```bash
+zig build -Dheap-size=4194304 -Ddebug=false
+```
+
 ### 2. Create Bootable ISO
 To build the OS image (`zigk.iso`):
 ```bash
@@ -42,6 +65,19 @@ Artifact: `zigk.iso`
 To build and immediately run the ISO in QEMU:
 ```bash
 zig build run
+```
+
+#### macOS / UEFI Boot
+On macOS, if you encounter "No bootable device", it is likely because the generated ISO is UEFI-only. You must explicitly pass the path to the OVMF firmware (found in your QEMU installation).
+
+**Apple Silicon (Homebrew)**:
+```bash
+zig build run -Dbios=/opt/homebrew/share/qemu/edk2-x86_64-code.fd
+```
+
+**Intel Mac (Homebrew)**:
+```bash
+zig build run -Dbios=/usr/local/share/qemu/edk2-x86_64-code.fd
 ```
 
 ### 4. Running Tests

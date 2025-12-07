@@ -44,10 +44,7 @@ const console = if (is_freestanding) @import("console") else struct {
     }
 };
 
-const config = if (is_freestanding) @import("config") else struct {
-    pub const debug_memory: bool = false;
-    pub const heap_size: usize = 2 * 1024 * 1024;
-};
+const config = @import("config");
 
 // Sync module for Spinlock - thread-safe heap operations
 const sync = if (is_freestanding)

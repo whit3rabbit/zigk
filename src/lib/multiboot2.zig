@@ -321,3 +321,37 @@ pub fn countUsableMemory(boot_info: *const BootInfo) u64 {
     }
     return total;
 }
+
+/// Find ACPI old RSDP tag (ACPI 1.0, type 14)
+pub fn findAcpiOldTag(boot_info: *const BootInfo) ?*const AcpiOldTag {
+    if (findTag(boot_info, .acpi_old)) |tag| {
+        return @ptrCast(tag);
+    }
+    return null;
+}
+
+/// Find ACPI new RSDP tag (ACPI 2.0+, type 15)
+pub fn findAcpiNewTag(boot_info: *const BootInfo) ?*const AcpiNewTag {
+    if (findTag(boot_info, .acpi_new)) |tag| {
+        return @ptrCast(tag);
+    }
+    return null;
+}
+
+/// Get pointer to RSDP data from either ACPI tag
+/// Prefers ACPI 2.0+ (new) tag if both are present
+/// Returns pointer to the RSDP structure (after the tag header)
+pub fn getAcpiRsdpPtr(boot_info: *const BootInfo) ?[*]const u8 {
+    // Try ACPI 2.0+ tag first (preferred)
+    if (findAcpiNewTag(boot_info)) |tag| {
+        // RSDP data follows immediately after the tag header
+        return @as([*]const u8, @ptrCast(tag)) + @sizeOf(Tag);
+    }
+
+    // Fall back to ACPI 1.0 tag
+    if (findAcpiOldTag(boot_info)) |tag| {
+        return @as([*]const u8, @ptrCast(tag)) + @sizeOf(Tag);
+    }
+
+    return null;
+}

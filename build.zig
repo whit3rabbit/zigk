@@ -26,6 +26,8 @@ pub fn build(b: *std.Build) void {
     const debug_memory = b.option(bool, "debug-memory", "Enable verbose memory allocation logging") orelse false;
     const debug_scheduler = b.option(bool, "debug-scheduler", "Enable verbose scheduler logging") orelse false;
     const debug_network = b.option(bool, "debug-network", "Enable verbose network logging") orelse false;
+    // NEW: Option to pass BIOS/UEFI firmware path
+    const qemu_bios = b.option([]const u8, "bios", "Path to BIOS/UEFI firmware (e.g. OVMF.fd) for QEMU");
 
     // Create kernel config options module
     const config_options = b.addOptions();
@@ -73,6 +75,15 @@ pub fn build(b: *std.Build) void {
     console_module.addImport("hal", hal_module);
     console_module.addImport("config", config_module);
 
+    // Create ACPI module (RSDP/MCFG parsing for PCIe ECAM)
+    const acpi_module = b.createModule(.{
+        .root_source_file = b.path("src/arch/x86_64/acpi/root.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    acpi_module.addImport("hal", hal_module);
+    acpi_module.addImport("console", console_module);
+
     // Create PMM module (Physical Memory Manager)
     const pmm_module = b.createModule(.{
         .root_source_file = b.path("src/kernel/pmm.zig"),
@@ -95,6 +106,17 @@ pub fn build(b: *std.Build) void {
     vmm_module.addImport("config", config_module);
     vmm_module.addImport("pmm", pmm_module);
 
+    // Create PCI module (PCIe ECAM enumeration)
+    const pci_module = b.createModule(.{
+        .root_source_file = b.path("src/drivers/pci/root.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    pci_module.addImport("hal", hal_module);
+    pci_module.addImport("vmm", vmm_module);
+    pci_module.addImport("console", console_module);
+    pci_module.addImport("acpi", acpi_module);
+
     // Create Sync module (Spinlock and synchronization primitives)
     const sync_module = b.createModule(.{
         .root_source_file = b.path("src/kernel/sync.zig"),
@@ -102,6 +124,26 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     sync_module.addImport("hal", hal_module);
+
+    // Create E1000e driver module (Intel 82574L NIC)
+    const e1000e_module = b.createModule(.{
+        .root_source_file = b.path("src/drivers/net/e1000e.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    e1000e_module.addImport("hal", hal_module);
+    e1000e_module.addImport("pci", pci_module);
+    e1000e_module.addImport("vmm", vmm_module);
+    e1000e_module.addImport("pmm", pmm_module);
+    e1000e_module.addImport("sync", sync_module);
+    e1000e_module.addImport("console", console_module);
+
+    // Create Network Stack module (full stack: core, ethernet, ipv4, transport)
+    const net_module = b.createModule(.{
+        .root_source_file = b.path("src/net/root.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
 
     // Create PRNG module (Kernel entropy/random)
     const prng_module = b.createModule(.{
@@ -192,6 +234,15 @@ pub fn build(b: *std.Build) void {
     syscall_random_module.addImport("uapi", uapi_module);
     syscall_random_module.addImport("prng", prng_module);
 
+    // Create syscall net module (socket syscalls)
+    const syscall_net_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/syscall/net.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    syscall_net_module.addImport("uapi", uapi_module);
+    syscall_net_module.addImport("net", net_module);
+
     // Create syscall handlers module
     const syscall_handlers_module = b.createModule(.{
         .root_source_file = b.path("src/kernel/syscall/handlers.zig"),
@@ -203,6 +254,7 @@ pub fn build(b: *std.Build) void {
     syscall_handlers_module.addImport("hal", hal_module);
     syscall_handlers_module.addImport("sched", sched_module);
     syscall_handlers_module.addImport("keyboard", keyboard_module);
+    syscall_handlers_module.addImport("thread", thread_module);
 
     // Create syscall dispatch table module
     const syscall_table_module = b.createModule(.{
@@ -215,6 +267,7 @@ pub fn build(b: *std.Build) void {
     syscall_table_module.addImport("console", console_module);
     syscall_table_module.addImport("handlers.zig", syscall_handlers_module);
     syscall_table_module.addImport("random.zig", syscall_random_module);
+    syscall_table_module.addImport("net.zig", syscall_net_module);
 
     // Create kernel executable
     const kernel = b.addExecutable(.{
@@ -242,6 +295,10 @@ pub fn build(b: *std.Build) void {
 
     kernel.root_module.addImport("multiboot2", multiboot2_module);
     kernel.root_module.addImport("hal", hal_module);
+    kernel.root_module.addImport("acpi", acpi_module);
+    kernel.root_module.addImport("pci", pci_module);
+    kernel.root_module.addImport("e1000e", e1000e_module);
+    kernel.root_module.addImport("net", net_module);
     kernel.root_module.addImport("config", config_module);
     kernel.root_module.addImport("console", console_module);
     kernel.root_module.addImport("pmm", pmm_module);
@@ -278,27 +335,46 @@ pub fn build(b: *std.Build) void {
     const install_bin = b.addInstallFile(kernel_bin.getOutput(), "bin/kernel.bin");
     b.getInstallStep().dependOn(&install_bin.step);
 
-    // Create run step for QEMU
-    const run_cmd = b.addSystemCommand(&.{
-        "qemu-system-x86_64",
-        "-M", "q35",
-        "-m", "128M",
-        "-cdrom", "zigk.iso",
-        "-serial", "stdio",
-        "-no-reboot",
-        "-no-shutdown",
-        "-accel", "tcg",
+    // Create user modules
+    // Create syscall library module for user access
+    const syscall_lib = b.createModule(.{
+        .root_source_file = b.path("src/user/lib/syscall.zig"),
+        .target = kernel_target,
+        .optimize = optimize, 
     });
-    run_cmd.step.dependOn(&kernel.step);
+    // Need to add uapi dependency to syscall lib
+    syscall_lib.addImport("uapi", uapi_module);
 
-    const run_step = b.step("run", "Build and run the kernel in QEMU");
-    run_step.dependOn(&run_cmd.step);
+    const shell_mod = b.createModule(.{
+        .root_source_file = b.path("src/user/shell/main.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+        .code_model = .small, // User code doesn't need kernel code model
+    });
+    shell_mod.addImport("syscall", syscall_lib);
+
+    const shell = b.addExecutable(.{
+        .name = "shell.elf",
+        .root_module = shell_mod,
+    });
+    shell.setLinkerScript(b.path("src/user/linker.ld"));
+    // shell.entry = .disabled; // let Zig find _start
+
+    // Create flat binary for shell
+    const shell_bin = b.addObjCopy(shell.getEmittedBin(), .{
+        .format = .bin,
+    });
+
+    const install_shell = b.addInstallFile(shell_bin.getOutput(), "bin/shell.bin");
+    b.getInstallStep().dependOn(&install_shell.step);
 
     // Create ISO build step using GRUB2 (Multiboot2 bootloader)
     const iso_cmd = b.addSystemCommand(&.{
         "sh", "-c",
-        \\mkdir -p iso_root/boot/grub && \
+        \\mkdir -p iso_root/boot/grub iso_root/boot/modules && \
         \\cp zig-out/bin/kernel.bin iso_root/boot/ && \
+        \\cp zig-out/bin/shell.bin iso_root/boot/modules/ && \
+        \\cp src/arch/x86_64/boot/grub.cfg iso_root/boot/grub/ && \
         \\if command -v x86_64-elf-grub-mkrescue >/dev/null 2>&1; then \
         \\    x86_64-elf-grub-mkrescue -o zigk.iso iso_root 2>/dev/null; \
         \\elif command -v grub-mkrescue >/dev/null 2>&1; then \
@@ -313,6 +389,33 @@ pub fn build(b: *std.Build) void {
     const iso_step = b.step("iso", "Build bootable ISO image");
     iso_step.dependOn(&iso_cmd.step);
 
+    // Create run step for QEMU
+    const run_cmd = b.addSystemCommand(&.{
+        "qemu-system-x86_64",
+        "-M", "q35",
+        "-m", "128M",
+        "-cdrom", "zigk.iso",
+        "-serial", "stdio",
+        "-no-reboot",
+        "-no-shutdown",
+        "-accel", "tcg",
+    });
+    
+    // NEW: Inject -bios argument if provided
+    if (qemu_bios) |bios_path| {
+        if (std.mem.endsWith(u8, bios_path, ".fd") or std.mem.endsWith(u8, bios_path, ".FD")) {
+            run_cmd.addArgs(&.{"-drive", b.fmt("if=pflash,format=raw,readonly=on,file={s}", .{bios_path})});
+        } else {
+            run_cmd.addArgs(&.{"-bios", bios_path});
+        }
+    }
+    run_cmd.step.dependOn(&iso_cmd.step);
+
+    const run_step = b.step("run", "Build and run the kernel in QEMU");
+    run_step.dependOn(&run_cmd.step);
+
+
+
     // Host-side unit tests
     const test_module = b.createModule(.{
         .root_source_file = b.path("tests/unit/main.zig"),
@@ -321,6 +424,11 @@ pub fn build(b: *std.Build) void {
     });
 
     const test_config_options = b.addOptions();
+    test_config_options.addOption([]const u8, "version", version);
+    test_config_options.addOption([]const u8, "name", kernel_name);
+    test_config_options.addOption(usize, "max_threads", max_threads);
+    test_config_options.addOption(u32, "timer_hz", timer_hz);
+    test_config_options.addOption(u32, "serial_baud", serial_baud);
     test_config_options.addOption(bool, "debug_memory", debug_memory);
     test_config_options.addOption(usize, "heap_size", heap_size_opt);
     test_config_options.addOption(usize, "default_stack_size", stack_size);

@@ -1,0 +1,249 @@
+// File Descriptor Table
+//
+// Manages per-thread file descriptor tables for I/O operations.
+// Each open file/device/socket is represented by a FileDescriptor
+// with pluggable operations (read/write/close).
+//
+// Design:
+//   - Fixed-size FD table (MAX_FDS entries)
+//   - FDs 0/1/2 pre-populated for stdin/stdout/stderr
+//   - Reference counting for shared FDs (fork)
+//   - Device-agnostic via FileOps vtable
+
+const std = @import("std");
+const heap = @import("heap");
+const console = @import("console");
+const uapi = @import("uapi");
+
+const Errno = uapi.errno.Errno;
+
+/// Maximum number of file descriptors per thread/process
+pub const MAX_FDS: usize = 256;
+
+/// File descriptor flags (Linux O_* flags we care about)
+pub const O_RDONLY: u32 = 0x0000;
+pub const O_WRONLY: u32 = 0x0001;
+pub const O_RDWR: u32 = 0x0002;
+pub const O_ACCMODE: u32 = 0x0003; // Mask for access mode
+pub const O_CREAT: u32 = 0x0040;
+pub const O_TRUNC: u32 = 0x0200;
+pub const O_APPEND: u32 = 0x0400;
+pub const O_NONBLOCK: u32 = 0x0800;
+
+/// File operations vtable
+/// Devices/files implement these to provide I/O functionality
+pub const FileOps = struct {
+    /// Read data from file into buffer
+    /// Returns bytes read, 0 for EOF, or negative errno
+    read: ?*const fn (fd: *FileDescriptor, buf: [*]u8, count: usize) isize,
+
+    /// Write data from buffer to file
+    /// Returns bytes written or negative errno
+    write: ?*const fn (fd: *FileDescriptor, buf: [*]const u8, count: usize) isize,
+
+    /// Close the file and release resources
+    /// Called when refcount reaches 0
+    close: ?*const fn (fd: *FileDescriptor) isize,
+
+    /// Seek to position (optional, for seekable files)
+    seek: ?*const fn (fd: *FileDescriptor, offset: i64, whence: u32) isize,
+
+    /// Get file status (optional)
+    stat: ?*const fn (fd: *FileDescriptor, stat_buf: *anyopaque) isize,
+
+    /// I/O control (optional, for device-specific operations)
+    ioctl: ?*const fn (fd: *FileDescriptor, request: u64, arg: u64) isize,
+};
+
+/// File descriptor structure
+/// Represents an open file, device, socket, or pipe
+pub const FileDescriptor = struct {
+    /// Operations vtable for this file type
+    ops: *const FileOps,
+
+    /// Device/file specific data (e.g., device instance, socket state)
+    private_data: ?*anyopaque,
+
+    /// Open flags (O_RDONLY, O_WRONLY, O_RDWR, etc.)
+    flags: u32,
+
+    /// Reference count for shared FDs
+    refcount: u32,
+
+    /// Current file position (for seekable files)
+    position: u64,
+
+    /// Increment reference count
+    pub fn ref(self: *FileDescriptor) void {
+        self.refcount += 1;
+    }
+
+    /// Decrement reference count, returns true if FD should be freed
+    pub fn unref(self: *FileDescriptor) bool {
+        if (self.refcount == 0) {
+            console.warn("FD: unref on zero refcount", .{});
+            return true;
+        }
+        self.refcount -= 1;
+        return self.refcount == 0;
+    }
+
+    /// Check if file is readable
+    pub fn isReadable(self: *const FileDescriptor) bool {
+        const mode = self.flags & O_ACCMODE;
+        return mode == O_RDONLY or mode == O_RDWR;
+    }
+
+    /// Check if file is writable
+    pub fn isWritable(self: *const FileDescriptor) bool {
+        const mode = self.flags & O_ACCMODE;
+        return mode == O_WRONLY or mode == O_RDWR;
+    }
+};
+
+/// File descriptor table
+/// One per thread/process, holds all open FDs
+pub const FdTable = struct {
+    /// Array of FD pointers (null = unused slot)
+    fds: [MAX_FDS]?*FileDescriptor,
+
+    /// Number of open FDs
+    count: usize,
+
+    /// Initialize an empty FD table
+    pub fn init() FdTable {
+        return FdTable{
+            .fds = [_]?*FileDescriptor{null} ** MAX_FDS,
+            .count = 0,
+        };
+    }
+
+    /// Allocate a new FD number (lowest available)
+    /// Returns FD number or null if table is full
+    pub fn allocFdNum(self: *FdTable) ?u32 {
+        for (self.fds, 0..) |fd, i| {
+            if (fd == null) {
+                return @intCast(i);
+            }
+        }
+        return null;
+    }
+
+    /// Allocate a specific FD number
+    /// Returns true if successful, false if already in use
+    pub fn allocSpecificFd(self: *FdTable, fd_num: u32) bool {
+        if (fd_num >= MAX_FDS) return false;
+        if (self.fds[fd_num] != null) return false;
+        return true;
+    }
+
+    /// Install an FD at a specific slot
+    /// Caller must have already allocated the slot
+    pub fn install(self: *FdTable, fd_num: u32, fd: *FileDescriptor) void {
+        if (fd_num >= MAX_FDS) {
+            console.err("FD: install with invalid fd_num {d}", .{fd_num});
+            return;
+        }
+        if (self.fds[fd_num] != null) {
+            console.warn("FD: overwriting existing fd {d}", .{fd_num});
+        }
+        self.fds[fd_num] = fd;
+        self.count += 1;
+    }
+
+    /// Get FD by number
+    pub fn get(self: *const FdTable, fd_num: u32) ?*FileDescriptor {
+        if (fd_num >= MAX_FDS) return null;
+        return self.fds[fd_num];
+    }
+
+    /// Remove FD from table (does not free or close)
+    pub fn remove(self: *FdTable, fd_num: u32) ?*FileDescriptor {
+        if (fd_num >= MAX_FDS) return null;
+        const fd = self.fds[fd_num];
+        if (fd != null) {
+            self.fds[fd_num] = null;
+            self.count -= 1;
+        }
+        return fd;
+    }
+
+    /// Close an FD by number
+    /// Decrements refcount and calls close op if refcount reaches 0
+    pub fn close(self: *FdTable, fd_num: u32) isize {
+        const fd = self.remove(fd_num) orelse {
+            return Errno.EBADF.toReturn();
+        };
+
+        // Decrement refcount
+        if (fd.unref()) {
+            // Refcount reached 0, call close op if present
+            if (fd.ops.close) |close_fn| {
+                _ = close_fn(fd);
+            }
+            // Free the FileDescriptor
+            const alloc = heap.allocator();
+            alloc.destroy(fd);
+        }
+
+        return 0;
+    }
+
+    /// Duplicate the FD table (for fork)
+    /// Creates a new table with same FDs, incremented refcounts
+    pub fn dup(self: *const FdTable) !*FdTable {
+        const alloc = heap.allocator();
+        const new_table = try alloc.create(FdTable);
+        new_table.* = FdTable.init();
+
+        // Copy all FDs and increment refcounts
+        for (self.fds, 0..) |maybe_fd, i| {
+            if (maybe_fd) |fd| {
+                fd.ref();
+                new_table.fds[i] = fd;
+                new_table.count += 1;
+            }
+        }
+
+        return new_table;
+    }
+
+    /// Close all FDs in the table
+    pub fn closeAll(self: *FdTable) void {
+        var i: u32 = 0;
+        while (i < MAX_FDS) : (i += 1) {
+            if (self.fds[i] != null) {
+                _ = self.close(i);
+            }
+        }
+    }
+};
+
+/// Create a new FileDescriptor
+pub fn createFd(ops: *const FileOps, flags: u32, private_data: ?*anyopaque) !*FileDescriptor {
+    const alloc = heap.allocator();
+    const fd = try alloc.create(FileDescriptor);
+    fd.* = FileDescriptor{
+        .ops = ops,
+        .private_data = private_data,
+        .flags = flags,
+        .refcount = 1,
+        .position = 0,
+    };
+    return fd;
+}
+
+/// Create a new FdTable
+pub fn createFdTable() !*FdTable {
+    const alloc = heap.allocator();
+    const table = try alloc.create(FdTable);
+    table.* = FdTable.init();
+    return table;
+}
+
+/// Destroy an FdTable (closes all FDs and frees table)
+pub fn destroyFdTable(table: *FdTable) void {
+    table.closeAll();
+    const alloc = heap.allocator();
+    alloc.destroy(table);
+}

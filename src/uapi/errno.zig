@@ -137,13 +137,39 @@ pub const Errno = enum(i32) {
     /// Identifier removed
     EIDRM = 43,
 
+    // Socket errors
+
+    /// Socket operation on non-socket
+    ENOTSOCK = 88,
+
+    /// Protocol not supported
+    EPROTONOSUPPORT = 93,
+
+    /// Socket type not supported
+    ESOCKTNOSUPPORT = 94,
+
+    /// Address family not supported
+    EAFNOSUPPORT = 97,
+
+    /// Address already in use
+    EADDRINUSE = 98,
+
+    /// Cannot assign requested address
+    EADDRNOTAVAIL = 99,
+
     // Network errors (commonly used)
+
+    /// Network is down
+    ENETDOWN = 100,
 
     /// Network is unreachable
     ENETUNREACH = 101,
 
     /// Connection reset by peer
     ECONNRESET = 104,
+
+    /// Connection timed out
+    ETIMEDOUT = 110,
 
     /// Connection refused
     ECONNREFUSED = 111,
@@ -212,8 +238,16 @@ pub const ENOTEMPTY = Errno.ENOTEMPTY;
 pub const ELOOP = Errno.ELOOP;
 pub const ENOMSG = Errno.ENOMSG;
 pub const EIDRM = Errno.EIDRM;
+pub const ENOTSOCK = Errno.ENOTSOCK;
+pub const EPROTONOSUPPORT = Errno.EPROTONOSUPPORT;
+pub const ESOCKTNOSUPPORT = Errno.ESOCKTNOSUPPORT;
+pub const EAFNOSUPPORT = Errno.EAFNOSUPPORT;
+pub const EADDRINUSE = Errno.EADDRINUSE;
+pub const EADDRNOTAVAIL = Errno.EADDRNOTAVAIL;
+pub const ENETDOWN = Errno.ENETDOWN;
 pub const ENETUNREACH = Errno.ENETUNREACH;
 pub const ECONNRESET = Errno.ECONNRESET;
+pub const ETIMEDOUT = Errno.ETIMEDOUT;
 pub const ECONNREFUSED = Errno.ECONNREFUSED;
 pub const EHOSTUNREACH = Errno.EHOSTUNREACH;
 pub const EALREADY = Errno.EALREADY;

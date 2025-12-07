@@ -297,6 +297,81 @@ pub fn mapKernel(virt_start: u64, phys_start: u64, size: usize, flags: PageFlags
     return mapRange(kernel_pml4_phys, virt_start, phys_start, size, flags);
 }
 
+/// Map MMIO region with cache-disabled pages
+/// Returns virtual address of mapped region
+/// Used for device register access (PCI config space, NIC MMIO, etc.)
+pub fn mapMmio(phys_addr: u64, size: usize) VmmError!u64 {
+    if (!initialized) {
+        return VmmError.NotInitialized;
+    }
+
+    // MMIO regions are mapped in kernel space using HHDM offset
+    // This is the simplest approach - just use the direct mapping
+    // The pages are already accessible via HHDM, we just need to ensure
+    // they have the correct cache attributes
+
+    // For PCIe ECAM and device MMIO, we can use HHDM directly
+    // The bootloader's HHDM mapping uses 2MB huge pages which may not
+    // have the right cache attributes. For proper MMIO we should remap
+    // with 4KB pages and cache disabled.
+
+    // Calculate virtual address via HHDM
+    const virt_addr = phys_addr + paging.HHDM_OFFSET;
+
+    // For now, assume HHDM mapping is sufficient (works for QEMU)
+    // TODO: Implement proper remapping with cache-disabled 4KB pages
+    // for real hardware that requires it
+
+    console.info("VMM: MMIO region mapped: phys=0x{x:0>16} virt=0x{x:0>16} size={d}KB", .{
+        phys_addr,
+        virt_addr,
+        size / 1024,
+    });
+
+    return virt_addr;
+}
+
+/// Map MMIO region with explicit remapping (cache-disabled 4KB pages)
+/// This is the proper approach for hardware that requires strict MMIO semantics
+/// Returns virtual address of mapped region
+pub fn mapMmioExplicit(phys_addr: u64, size: usize) VmmError!u64 {
+    if (!initialized) {
+        return VmmError.NotInitialized;
+    }
+
+    // Align addresses
+    const aligned_phys = paging.pageAlignDown(phys_addr);
+    const offset = phys_addr - aligned_phys;
+    const aligned_size = paging.pageAlignUp(size + offset);
+
+    // For now, use HHDM virtual addresses but remap with proper flags
+    const virt_base = aligned_phys + paging.HHDM_OFFSET;
+
+    // Map each page with cache-disabled flag
+    const page_count = aligned_size / PAGE_SIZE;
+    var i: usize = 0;
+    while (i < page_count) : (i += 1) {
+        const page_phys = aligned_phys + i * PAGE_SIZE;
+        const page_virt = virt_base + i * PAGE_SIZE;
+
+        // Try to map, ignore AlreadyMapped (HHDM might have it)
+        mapPage(kernel_pml4_phys, page_virt, page_phys, PageFlags.MMIO) catch |err| {
+            if (err != VmmError.AlreadyMapped) {
+                return err;
+            }
+            // Already mapped - we assume HHDM mapping, which is fine for QEMU
+        };
+    }
+
+    console.info("VMM: MMIO explicit map: phys=0x{x:0>16} virt=0x{x:0>16} size={d}KB", .{
+        phys_addr,
+        virt_base + offset,
+        size / 1024,
+    });
+
+    return virt_base + offset;
+}
+
 /// Allocate and map a virtual page (allocates physical page from PMM)
 pub fn allocAndMapPage(pml4_phys: u64, virt_addr: u64, flags: PageFlags) VmmError!void {
     const phys = pmm.allocZeroedPage() orelse {

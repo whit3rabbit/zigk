@@ -8,7 +8,7 @@
 # For different architectures, set KERNEL_ARCH build arg:
 #   docker build --build-arg KERNEL_ARCH=aarch64 -t zigk-builder-arm .
 
-ARG ZIG_VERSION=0.14.0
+ARG ZIG_VERSION=0.15.1
 
 
 FROM debian:bookworm-slim AS base
@@ -35,10 +35,10 @@ RUN case "${TARGETARCH}" in \
         arm64) ZIG_ARCH="aarch64" ;; \
         *) echo "Unsupported architecture: ${TARGETARCH}" && exit 1 ;; \
     esac && \
-    curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-linux-${ZIG_ARCH}-${ZIG_VERSION}.tar.xz" \
+    curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-${ZIG_ARCH}-linux-${ZIG_VERSION}.tar.xz" \
         -o /tmp/zig.tar.xz && \
     tar -xf /tmp/zig.tar.xz -C /opt && \
-    mv /opt/zig-linux-${ZIG_ARCH}-${ZIG_VERSION} /opt/zig && \
+    mv /opt/zig-${ZIG_ARCH}-linux-${ZIG_VERSION} /opt/zig && \
     rm /tmp/zig.tar.xz
 
 ENV PATH="/opt/zig:${PATH}"

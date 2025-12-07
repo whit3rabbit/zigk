@@ -132,9 +132,10 @@ pub inline fn haltForever() noreturn {
 
 /// Invalidate TLB entry for a specific address
 pub inline fn invlpg(addr: u64) void {
-    asm volatile ("invlpg (%[addr])"
+    const ptr: *const u8 = @ptrFromInt(addr);
+    asm volatile ("invlpg %[p]"
         :
-        : [addr] "r" (addr),
+        : [p] "m" (ptr.*),
         : .{ .memory = true }
     );
 }

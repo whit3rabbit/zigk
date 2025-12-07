@@ -16,6 +16,7 @@ pub const fpu = @import("fpu.zig");
 pub const debug = @import("debug.zig");
 pub const entropy = @import("entropy.zig");
 pub const syscall = @import("syscall.zig");
+pub const mmio = @import("mmio.zig");
 
 /// Initialize all x86_64 HAL subsystems
 pub fn init() void {

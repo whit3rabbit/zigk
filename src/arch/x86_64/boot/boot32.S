@@ -69,16 +69,7 @@ address_tag_end:
 
     /* Information request tag - ask for memory map */
 
-    /* Framebuffer tag - optional, request text mode */
-    .align 8
-framebuffer_tag:
-    .short 5                    /* type: framebuffer */
-    .short 1                    /* flags: optional */
-    .long 20                    /* size */
-    .long 0                     /* width (0 = no preference) */
-    .long 0                     /* height */
-    .long 0                     /* depth */
-framebuffer_tag_end:
+
 
     /* Entry address tag - specify our entry point */
     .align 8
@@ -88,6 +79,21 @@ entry_tag:
     .long 12                    /* size */
     .long _start32              /* entry point */
 entry_tag_end:
+
+    /* EFI boot services tag - required for EFI entry */
+    .align 8
+efi_boot_services_tag:
+    .short 7                    /* type: EFI boot services */
+    .short 0                    /* flags */
+    .long 8                     /* size */
+
+    /* EFI amd64 entry address tag - 64-bit entry point for UEFI boot */
+    .align 8
+efi_entry_tag:
+    .short 9                    /* type: EFI amd64 entry address */
+    .short 0                    /* flags */
+    .long 12                    /* size */
+    .long _efi_start64          /* 64-bit entry point */
 
     /* End tag */
     .align 8
@@ -258,6 +264,124 @@ _start64:
      */
     movabsq $_start, %rax
     jmp *%rax
+
+/* ============================================================================
+ * 64-bit EFI Entry Point
+ * ============================================================================
+ * Entry conditions (EFI amd64 with boot services):
+ *   - EAX = Multiboot2 magic (0x36D76289)
+ *   - EBX = Physical address of Multiboot2 information structure
+ *   - CPU in 64-bit long mode
+ *   - Paging enabled with identity mapping
+ *   - Interrupts disabled
+ *   - GDT loaded with flat descriptors
+ *
+ * We need to:
+ *   1. Save Multiboot2 info pointer and magic
+ *   2. Verify magic
+ *   3. Set up our own page tables (identity + HHDM + higher-half)
+ *   4. Load our own GDT
+ *   5. Jump to shared _start64 code
+ * ============================================================================ */
+.global _efi_start64
+_efi_start64:
+    /* Disable interrupts (should already be disabled) */
+    cli
+
+    /* Debug: Output 'E' to serial port to confirm EFI entry */
+    movw $0x3F8, %dx            /* COM1 base */
+    movb $'E', %al
+    outb %al, %dx
+
+    /* Save Multiboot2 info pointer (EBX) and magic (EAX) */
+    movl %ebx, (multiboot2_info_ptr)
+    movl %eax, (multiboot2_magic)
+
+    /* Verify Multiboot2 magic */
+    cmpl $MULTIBOOT2_BOOTLOADER_MAGIC, %eax
+    jne .efi_halt
+
+    /* Set up stack for page table setup */
+    movq $boot_stack_top, %rsp
+
+    /* Clear page tables */
+    movq $pml4, %rdi
+    movq $(4096 * 5 / 8), %rcx   /* 5 page tables, 4096 bytes each, 8 bytes per iteration */
+    xorq %rax, %rax
+    rep stosq
+
+    /* Set up PML4 entries */
+    /* PML4[0] = &pml3_identity | PAGE_FLAGS */
+    movq $pml3_identity, %rax
+    orq $PAGE_FLAGS, %rax
+    movq %rax, (pml4)
+
+    /* PML4[256] = &pml3_hhdm | PAGE_FLAGS (for HHDM at 0xFFFF800000000000) */
+    movq $pml3_hhdm, %rax
+    orq $PAGE_FLAGS, %rax
+    movq %rax, (pml4 + 256 * 8)
+
+    /* PML4[511] = &pml3_kernel | PAGE_FLAGS (for kernel at 0xFFFFFFFF80000000) */
+    movq $pml3_kernel, %rax
+    orq $PAGE_FLAGS, %rax
+    movq %rax, (pml4 + 511 * 8)
+
+    /* Set up PDPT for identity mapping - map first 4GB using 1GB pages */
+    /* Note: For immediates >= 0x80000000, use register as intermediate */
+    movq $(0x00000000 | PAGE_FLAGS_HUGE), %rax
+    movq %rax, (pml3_identity + 0 * 8)
+    movq $(0x40000000 | PAGE_FLAGS_HUGE), %rax
+    movq %rax, (pml3_identity + 1 * 8)
+    movq $(0x80000000 | PAGE_FLAGS_HUGE), %rax
+    movq %rax, (pml3_identity + 2 * 8)
+    movq $(0xC0000000 | PAGE_FLAGS_HUGE), %rax
+    movq %rax, (pml3_identity + 3 * 8)
+
+    /* Set up PDPT for HHDM - also map first 4GB */
+    movq $(0x00000000 | PAGE_FLAGS_HUGE), %rax
+    movq %rax, (pml3_hhdm + 0 * 8)
+    movq $(0x40000000 | PAGE_FLAGS_HUGE), %rax
+    movq %rax, (pml3_hhdm + 1 * 8)
+    movq $(0x80000000 | PAGE_FLAGS_HUGE), %rax
+    movq %rax, (pml3_hhdm + 2 * 8)
+    movq $(0xC0000000 | PAGE_FLAGS_HUGE), %rax
+    movq %rax, (pml3_hhdm + 3 * 8)
+
+    /* Set up PDPT for kernel higher-half
+     * pml3_kernel[510] = &pml2_kernel | PAGE_FLAGS
+     */
+    movq $pml2_kernel, %rax
+    orq $PAGE_FLAGS, %rax
+    movq %rax, (pml3_kernel + 510 * 8)
+
+    /* Set up PD for kernel - map first 1GB using 2MB pages */
+    movq $0, %rcx                   /* Counter */
+    movq $pml2_kernel, %rdi         /* Destination */
+.efi_fill_pml2:
+    movq %rcx, %rax
+    shlq $21, %rax                  /* Multiply by 2MB */
+    orq $PAGE_FLAGS_HUGE, %rax
+    movq %rax, (%rdi)
+    addq $8, %rdi
+    incq %rcx
+    cmpq $512, %rcx
+    jl .efi_fill_pml2
+
+    /* Load our PML4 into CR3 - replaces UEFI's page tables */
+    movq $pml4, %rax
+    movq %rax, %cr3
+
+    /* Load our 64-bit GDT */
+    lgdt (gdt64_ptr)
+
+    /* Far return to reload CS and jump to shared 64-bit code */
+    pushq $0x08                     /* New CS selector */
+    pushq $_start64                 /* Target address */
+    lretq
+
+.efi_halt:
+    hlt
+    jmp .efi_halt
 
 /* ============================================================================
  * Data Section - Page Tables and GDT

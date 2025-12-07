@@ -26,6 +26,7 @@ pub const SYS_SCHED_YIELD = syscalls.SYS_SCHED_YIELD;
 pub const SYS_NANOSLEEP = syscalls.SYS_NANOSLEEP;
 pub const SYS_GETPID = syscalls.SYS_GETPID;
 pub const SYS_SOCKET = syscalls.SYS_SOCKET;
+pub const SYS_BIND = syscalls.SYS_BIND;
 pub const SYS_SENDTO = syscalls.SYS_SENDTO;
 pub const SYS_RECVFROM = syscalls.SYS_RECVFROM;
 pub const SYS_FORK = syscalls.SYS_FORK;
