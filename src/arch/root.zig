@@ -26,6 +26,10 @@ pub const gdt = arch.gdt;
 pub const idt = arch.idt;
 pub const pic = arch.pic;
 pub const interrupts = arch.interrupts;
+pub const fpu = arch.fpu;
+pub const debug = arch.debug;
+pub const entropy = arch.entropy;
+pub const syscall = arch.syscall;
 
 /// Initialize the Hardware Abstraction Layer
 /// Must be called early in kernel boot before using any HAL functions

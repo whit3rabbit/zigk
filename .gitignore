@@ -12,6 +12,10 @@ zig-out/
 *.iso
 *.img
 
+# ISO staging directory (created by zig build iso)
+iso_root/boot/kernel.bin
+iso_root/boot/grub/fonts/
+
 # Editor and IDE files
 .vscode/
 .idea/
@@ -38,3 +42,4 @@ docs/_build/
 # QEMU and emulator artifacts
 *.qcow2
 *.vdi
+*.fd

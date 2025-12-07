@@ -1,0 +1,64 @@
+// Syscall Dispatch Table
+//
+// Dispatches syscalls to their handlers based on syscall number.
+// All syscall numbers are imported from uapi.syscalls to ensure
+// kernel/userland consistency (single source of truth).
+//
+// Syscall Convention (x86_64 Linux ABI):
+//   RAX = syscall number
+//   RDI, RSI, RDX, R10, R8, R9 = arguments 1-6
+//   RAX = return value (or negative errno on error)
+
+const uapi = @import("uapi");
+const handlers = @import("handlers.zig");
+const random = @import("random.zig");
+const syscalls = uapi.syscalls;
+const console = @import("console");
+const hal = @import("hal");
+
+/// Syscall frame from arch-specific entry
+pub const SyscallFrame = hal.syscall.SyscallFrame;
+
+/// Type signature for all syscall handlers
+/// Takes 6 arguments (unused args are ignored by handlers)
+const SyscallHandler = *const fn (arg1: usize, arg2: usize, arg3: usize, arg4: usize, arg5: usize, arg6: usize) isize;
+
+/// Dispatch a syscall and return the result
+/// Called from the assembly syscall entry point
+pub export fn dispatch_syscall(frame: *SyscallFrame) callconv(.c) void {
+    const syscall_num = frame.getSyscallNumber();
+    const args = frame.getArgs();
+
+    // Dispatch based on syscall number
+    const result = switch (syscall_num) {
+        // Linux x86_64 ABI syscalls
+        syscalls.SYS_READ => handlers.sys_read(args[0], args[1], args[2]),
+        syscalls.SYS_WRITE => handlers.sys_write(args[0], args[1], args[2]),
+        syscalls.SYS_BRK => handlers.sys_brk(args[0]),
+        syscalls.SYS_SCHED_YIELD => handlers.sys_sched_yield(),
+        syscalls.SYS_NANOSLEEP => handlers.sys_nanosleep(args[0], args[1]),
+        syscalls.SYS_GETPID => handlers.sys_getpid(),
+        syscalls.SYS_GETPPID => handlers.sys_getppid(),
+        syscalls.SYS_GETUID => handlers.sys_getuid(),
+        syscalls.SYS_GETGID => handlers.sys_getgid(),
+        syscalls.SYS_EXIT => handlers.sys_exit(args[0]),
+        syscalls.SYS_EXIT_GROUP => handlers.sys_exit_group(args[0]),
+        syscalls.SYS_CLOCK_GETTIME => handlers.sys_clock_gettime(args[0], args[1]),
+        syscalls.SYS_GETRANDOM => random.sys_getrandom(args[0], args[1], @truncate(args[2])),
+
+        // ZigK custom syscalls
+        syscalls.SYS_DEBUG_LOG => handlers.sys_debug_log(args[0], args[1]),
+        syscalls.SYS_PUTCHAR => handlers.sys_putchar(args[0]),
+        syscalls.SYS_GETCHAR => handlers.sys_getchar(),
+        syscalls.SYS_READ_SCANCODE => handlers.sys_read_scancode(),
+
+        // Unknown syscall
+        else => blk: {
+            console.debug("Unknown syscall: {d}", .{syscall_num});
+            break :blk uapi.errno.ENOSYS.toReturn();
+        },
+    };
+
+    // Set return value in frame
+    frame.setReturnSigned(result);
+}

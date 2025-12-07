@@ -1,7 +1,8 @@
 // Physical Memory Manager (PMM)
 //
 // Manages physical page frames using a bitmap allocator.
-// Parses the Limine memory map to identify usable regions.
+// Parses memory map to identify usable regions.
+// Supports Multiboot2 boot protocol.
 //
 // Design:
 //   - Bitmap-based allocator: 1 bit per 4KB page
@@ -9,13 +10,14 @@
 //   - Uses HHDM for all physical memory access
 //
 // Memory Layout (after init):
-//   - Kernel and modules: Reserved by Limine (kernel_and_modules)
+//   - Kernel and modules: Reserved by bootloader
 //   - Bitmap: Placed in first usable region large enough
 //   - Free pages: All usable regions minus bitmap and reserved areas
 
 const hal = @import("hal");
 const console = @import("console");
 const config = @import("config");
+const multiboot2 = @import("multiboot2");
 
 const paging = hal.paging;
 
@@ -36,53 +38,38 @@ var memory_end: u64 = 0;
 // Track if PMM is initialized
 var initialized: bool = false;
 
-/// Memory region descriptor from Limine
-pub const MemoryRegion = struct {
-    base: u64,
-    length: u64,
-    kind: MemoryKind,
-};
 
-pub const MemoryKind = enum(u64) {
-    usable = 0,
-    reserved = 1,
-    acpi_reclaimable = 2,
-    acpi_nvs = 3,
-    bad_memory = 4,
-    bootloader_reclaimable = 5,
-    kernel_and_modules = 6,
-    framebuffer = 7,
-};
 
-/// Initialize PMM from Limine memory map
+/// Initialize PMM from Multiboot2 memory map
 /// Must be called after paging.init() sets up HHDM
-pub fn init(entries: []const *anyopaque, entry_count: u64, hhdm_offset: u64) !void {
+pub fn init(mmap: *const multiboot2.MmapTag) !void {
+
+
     if (initialized) {
         return error.AlreadyInitialized;
     }
 
-    // Initialize HAL paging with HHDM offset
-    paging.init(hhdm_offset);
-
-    console.info("PMM: Scanning memory map ({d} entries)...", .{entry_count});
+    console.info("PMM: Scanning Multiboot2 memory map...", .{});
 
     // First pass: find memory bounds and count usable pages
     var usable_memory: u64 = 0;
     var highest_addr: u64 = 0;
     var lowest_usable: u64 = 0xFFFFFFFFFFFFFFFF;
+    var entry_count: u32 = 0;
 
-    for (entries[0..entry_count]) |entry_ptr| {
-        const entry: *const MemoryMapEntry = @ptrCast(@alignCast(entry_ptr));
-        const end_addr = entry.base + entry.length;
+    var iter = mmap.entries();
+    while (iter.next()) |entry| {
+        entry_count += 1;
+        const end_addr = entry.base_addr + entry.length;
 
         if (end_addr > highest_addr) {
             highest_addr = end_addr;
         }
 
-        if (entry.kind == .usable) {
+        if (entry.mem_type == .available) {
             usable_memory += entry.length;
-            if (entry.base < lowest_usable) {
-                lowest_usable = entry.base;
+            if (entry.base_addr < lowest_usable) {
+                lowest_usable = entry.base_addr;
             }
         }
     }
@@ -94,25 +81,32 @@ pub fn init(entries: []const *anyopaque, entry_count: u64, hhdm_offset: u64) !vo
     total_pages = @intCast(highest_addr / PAGE_SIZE);
     bitmap_size = (total_pages + 7) / 8; // Round up to bytes
 
-    console.info("PMM: Total pages: {d}, Bitmap size: {d} KB", .{ total_pages, bitmap_size / 1024 });
+    console.info("PMM: {d} entries, Total pages: {d}, Bitmap size: {d} KB", .{
+        entry_count,
+        total_pages,
+        bitmap_size / 1024,
+    });
 
     // Second pass: find a usable region for the bitmap
-    var bitmap_region: ?*const MemoryMapEntry = null;
     var bitmap_phys: u64 = 0;
+    var found_region = false;
 
-    for (entries[0..entry_count]) |entry_ptr| {
-        const entry: *const MemoryMapEntry = @ptrCast(@alignCast(entry_ptr));
-
+    iter = mmap.entries();
+    while (iter.next()) |entry| {
         // Need a usable region large enough for bitmap + some pages
-        if (entry.kind == .usable and entry.length >= bitmap_size + PAGE_SIZE * 16) {
-            bitmap_region = entry;
+        // Also ensure we're not in the first 1MB (reserved for legacy)
+        if (entry.mem_type == .available and
+            entry.length >= bitmap_size + PAGE_SIZE * 16 and
+            entry.base_addr >= 0x100000)
+        {
             // Align bitmap to page boundary
-            bitmap_phys = paging.pageAlignUp(entry.base);
+            bitmap_phys = paging.pageAlignUp(entry.base_addr);
+            found_region = true;
             break;
         }
     }
 
-    if (bitmap_region == null) {
+    if (!found_region) {
         console.err("PMM: No suitable region for bitmap!", .{});
         return error.NoMemoryForBitmap;
     }
@@ -126,12 +120,11 @@ pub fn init(entries: []const *anyopaque, entry_count: u64, hhdm_offset: u64) !vo
     @memset(bitmap[0..bitmap_size], 0xFF);
 
     // Third pass: mark usable regions as free in bitmap
-    for (entries[0..entry_count]) |entry_ptr| {
-        const entry: *const MemoryMapEntry = @ptrCast(@alignCast(entry_ptr));
-
-        if (entry.kind == .usable) {
-            const start_page = paging.pageAlignUp(entry.base) / PAGE_SIZE;
-            const end_page = paging.pageAlignDown(entry.base + entry.length) / PAGE_SIZE;
+    iter = mmap.entries();
+    while (iter.next()) |entry| {
+        if (entry.mem_type == .available) {
+            const start_page = paging.pageAlignUp(entry.base_addr) / PAGE_SIZE;
+            const end_page = paging.pageAlignDown(entry.base_addr + entry.length) / PAGE_SIZE;
 
             var page = start_page;
             while (page < end_page) : (page += 1) {
@@ -141,15 +134,37 @@ pub fn init(entries: []const *anyopaque, entry_count: u64, hhdm_offset: u64) !vo
         }
     }
 
+    // Reserve first 1MB (legacy BIOS area, bootloader code)
+    const first_mb_pages = 0x100000 / PAGE_SIZE;
+    var i: usize = 0;
+    while (i < first_mb_pages) : (i += 1) {
+        if (!isBitSet(i)) {
+            setBit(i);
+            if (free_pages > 0) free_pages -= 1;
+        }
+    }
+
     // Reserve bitmap pages
     const bitmap_pages = paging.pagesToCover(bitmap_size);
     const bitmap_start_page = bitmap_phys / PAGE_SIZE;
 
-    var i: u64 = 0;
+    i = 0;
     while (i < bitmap_pages) : (i += 1) {
         if (!isBitSet(bitmap_start_page + i)) {
             setBit(bitmap_start_page + i);
-            free_pages -= 1;
+            if (free_pages > 0) free_pages -= 1;
+        }
+    }
+
+    // Reserve kernel memory (assume kernel is loaded at 1MB and extends to ~4MB)
+    // The exact range depends on kernel size - boot32.S + kernel code
+    const kernel_start_page = 0x100000 / PAGE_SIZE;
+    const kernel_end_page = 0x400000 / PAGE_SIZE;
+    var page = kernel_start_page;
+    while (page < kernel_end_page) : (page += 1) {
+        if (!isBitSet(page)) {
+            setBit(page);
+            if (free_pages > 0) free_pages -= 1;
         }
     }
 
@@ -161,12 +176,7 @@ pub fn init(entries: []const *anyopaque, entry_count: u64, hhdm_offset: u64) !vo
     });
 }
 
-/// Limine memory map entry structure
-const MemoryMapEntry = extern struct {
-    base: u64,
-    length: u64,
-    kind: MemoryKind,
-};
+
 
 /// Allocate a single physical page
 /// Returns physical address of allocated page, or null if OOM

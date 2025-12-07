@@ -1,0 +1,30 @@
+# Build artifacts
+zig-out/
+zig-cache/
+.zig-cache/
+zigk.iso
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Git
+.git/
+.gitignore
+
+# Documentation (not needed for build)
+*.md
+!limine.conf
+
+# Specs (not needed for build)
+specs/
+
+# macOS
+.DS_Store
+
+# Temporary files
+*.tmp
+*.log

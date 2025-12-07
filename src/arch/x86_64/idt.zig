@@ -288,15 +288,34 @@ pub fn registerIrqHandler(irq: Irq, handler: InterruptHandler) void {
 
 /// Common interrupt dispatcher (called from assembly stubs)
 /// Must be exported as 'dispatch_interrupt' to match the assembly call
-export fn dispatch_interrupt(frame: *InterruptFrame) callconv(.c) void {
+/// Returns the interrupt frame pointer to restore (may be different for context switch)
+export fn dispatch_interrupt(frame: *InterruptFrame) callconv(.c) *InterruptFrame {
     const vector: u8 = @truncate(frame.vector);
 
     if (handlers[vector]) |handler| {
+        // Call the handler - it may modify the frame or request a context switch
+        // For context switch, we use the new_frame mechanism in interrupts.zig
         handler(frame);
-    } else {
-        // Unhandled interrupt - for now just return
-        // In a real kernel, we might want to log or panic
     }
+
+    // Check if we need to switch to a different frame (context switch)
+    // The new_frame pointer is set by the timer handler when switching threads
+    if (new_frame) |nf| {
+        new_frame = null;
+        return nf;
+    }
+
+    // Return the same frame (no context switch)
+    return frame;
+}
+
+/// New frame pointer for context switch
+/// Set by timer handler to indicate we should switch to a different thread
+var new_frame: ?*InterruptFrame = null;
+
+/// Set the new frame for context switch (called by scheduler)
+pub fn setNewFrame(frame: *InterruptFrame) void {
+    new_frame = frame;
 }
 
 // Assembly helper defined in asm_helpers.S

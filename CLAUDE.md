@@ -3,8 +3,8 @@
 Auto-generated from all feature plans. Last updated: 2025-12-06
 
 ## Active Technologies
-- Zig 0.15.x - freestanding x86_64 target + Limine bootloader v7.x+, limine-zig bindings
-- InitRD via Limine Modules (flat file or TAR archive abstraction)
+- Zig 0.15.x - freestanding x86_64 target + GRUB2 (Multiboot2)
+- InitRD via Multiboot2 Modules
 - N/A (no filesystem for MVP)
 
 ## Project Structure

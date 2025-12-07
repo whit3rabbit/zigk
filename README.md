@@ -1,44 +1,150 @@
-# zigk
+# ZigK
 
-Doom.wad file can be found here: 
+A minimal x86_64 microkernel written in Zig, using GRUB2 with Multiboot2 protocol.
 
-https://archive.org/download/theultimatedoom_doom2_doom.wad/DOOM.WAD%20%28For%20GZDoom%29/DOOM.WAD
+## Features
 
-Since you are on an ARM64 (Apple Silicon) host trying to run an x86_64 guest, you **cannot use hardware virtualization**.
+- Multiboot2 boot protocol via GRUB2
+- Physical Memory Manager (bitmap allocator)
+- Virtual Memory Manager (4-level paging)
+- Kernel heap (thread-safe, coalescing free-list)
+- GDT/IDT/PIC initialization
+- PS/2 keyboard driver
+- Serial console output (COM1)
+- Round-robin scheduler with thread support
 
-### The Core Issue: Emulation vs. Virtualization
-*   **Virtualization (`accel=hvf`)**: Runs code directly on the CPU. Requires the guest architecture (x86_64) to match the host (ARM64). **You cannot use this.**
-*   **Emulation (`accel=tcg`)**: Translates x86_64 instructions to ARM64 in real-time. **You must use this.**
+## Building an Running
 
-### Impact on Your Workflow
-1.  **Performance:** Your kernel will run significantly slower (approx. 5-10x slower) than on a native x86 machine.
-    *   *Boot time:* Instead of instantaneous, it might take 1-2 seconds.
-    *   *Input lag:* You might notice slight latency in the shell or keyboard interrupts.
-2.  **Accuracy:** QEMU's TCG (Tiny Code Generator) is extremely accurate. If your kernel boots in TCG, it is highly likely to boot on real hardware. It handles the Limine protocol and memory mapping correctly.
+See [BUILD.md](BUILD.md) for detailed instructions on:
+- Setting up the development environment
+- Building the kernel
+- Creating bootable ISOs
+- Running in QEMU (including Apple Silicon support)
 
-### Required Changes to `build.zig`
-You need to ensure your QEMU command explicitly forces software emulation, or QEMU might try to default to HVF and fail.
+## Boot Process
 
-**Update your `build.zig` QEMU step to use these flags:**
+See [BOOT.md](BOOT.md) for technical details on:
+- Multiboot2 protocol implementation
+- Boot process flow
+- Header structures and Flat Binary loading strategy
+- Boot time: 1-2 seconds instead of instantaneous
+- Slight input latency possible
 
-```zig
-// In your QEMU run step
-.args = &.{
-    "qemu-system-x86_64",
-    "-cdrom", "zig-out/iso/zigk.iso",
-    "-m", "128M",
-    "-serial", "stdio",
-    // CRITICAL FLAGS FOR MACOS ARM64:
-    "-accel", "tcg",        // Force software emulation (Tiny Code Generator)
-    "-cpu", "qemu64",       // Use a generic CPU model that TCG handles well
-    "-d", "int,cpu_reset",  // Keep debug logging enabled so you can see if it hangs
-}
+**Required flags** (already set in build.zig):
+```
+-accel tcg    # Force software emulation
 ```
 
-### Recommendation
-**Do not change your target architecture.** Stick to `x86_64` for the kernel.
-*   Porting a kernel to ARM64 (AArch64) is much harder for a beginner (more complex boot protocol, device tree vs. ACPI/PCI).
-*   The performance hit from TCG is acceptable for a hobby kernel. You aren't doing heavy number crunching; you are just booting and printing text.
+If you see `invalid accelerator hvf`, the TCG flag is missing.
 
-**Verification:**
-If you see the error message `qemu-system-x86_64: -accel hvf: invalid accelerator hvf`, it means you forgot the `-accel tcg` flag.
+## Docker Build (Recommended)
+
+Docker provides a consistent build environment across all platforms and handles all dependencies automatically.
+
+### Quick Start
+
+```bash
+# Build the kernel
+./tools/docker-build.sh build
+
+# Build bootable ISO
+./tools/docker-build.sh iso
+
+# Run unit tests
+./tools/docker-build.sh test
+
+# Interactive development shell
+./tools/docker-build.sh shell
+
+# Clean build artifacts
+./tools/docker-build.sh clean
+```
+
+### Using Docker Compose
+
+```bash
+# Build kernel
+docker compose run build
+
+# Build ISO
+docker compose run build-iso
+
+# Run tests
+docker compose run test
+
+# Interactive shell with QEMU available
+docker compose run dev
+```
+
+### Multi-Architecture Builds
+
+The Docker setup supports building for multiple architectures:
+
+```bash
+# Build for x86_64 (current)
+docker compose run build-x86_64
+
+# Build for aarch64 (future)
+docker compose run build-aarch64
+
+# Build all architectures
+./tools/docker-build.sh all
+```
+
+### Building the Docker Image
+
+```bash
+# Build the base image
+docker build -t zigk-builder .
+
+# Build with QEMU support for testing
+docker build --target dev -t zigk-builder:dev .
+```
+
+## Project Structure
+
+```
+zigk/
+├── build.zig              # Build configuration
+
+├── src/
+│   ├── arch/x86_64/       # HAL (hardware abstraction)
+│   ├── kernel/            # Core subsystems
+│   ├── drivers/           # Device drivers
+│   ├── lib/               # Shared utilities
+│   └── uapi/              # Userspace API definitions
+└── tests/unit/            # Host-side unit tests
+```
+
+See [FILESYSTEM.md](FILESYSTEM.md) for detailed structure.
+
+## Architecture
+
+ZigK follows a strict HAL (Hardware Abstraction Layer) design:
+
+- **src/arch/** - Only location for inline assembly and hardware access
+- **src/kernel/** - Architecture-agnostic kernel code
+- **src/drivers/** - Bus-agnostic device drivers
+
+All kernel code accesses hardware through the `hal` module interface.
+
+## Architecture Notes
+
+### Multiboot2 Boot Process
+
+ZigK uses GRUB2 with the Multiboot2 protocol. The boot process:
+
+1. GRUB2 loads kernel at physical address 1MB (0x100000)
+2. GRUB2 calls 32-bit entry point `_start32` with Multiboot2 info in EBX
+3. Bootstrap code (`boot32.S`) sets up page tables:
+   - Identity map: 0x00000000 -> 0x00000000 (first 4GB)
+   - Higher-half: 0xFFFFFFFF80000000 -> 0x00000000 (kernel)
+   - HHDM: 0xFFFF800000000000 -> 0x00000000 (physical memory access)
+4. Bootstrap enables long mode and jumps to 64-bit `_start` in Zig
+5. Kernel initializes using Multiboot2 memory map
+
+This approach works around a Zig 0.15.x linker regression where virtual addresses in linker scripts are ignored. Multiboot2 loads at physical addresses, allowing the kernel to set up its own virtual memory mapping.
+
+## License
+
+MIT

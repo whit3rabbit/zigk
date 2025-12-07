@@ -1,9 +1,10 @@
 // ZigK Kernel Entry Point
 //
 // This is the main entry point for the ZigK microkernel.
-// It is called by the Limine bootloader after initial setup.
+// It is called by the boot32.S bootstrap code after switching to 64-bit mode.
+// Entry: RDI contains the physical address of the Multiboot2 boot information.
 
-const limine = @import("limine");
+const multiboot2 = @import("multiboot2");
 const hal = @import("hal");
 const console = @import("console");
 const config = @import("config");
@@ -11,20 +12,29 @@ const pmm = @import("pmm");
 const vmm = @import("vmm");
 const heap = @import("heap");
 const keyboard = @import("keyboard");
+const sched = @import("sched");
+const thread = @import("thread");
+const stack_guard = @import("stack_guard");
+const prng = @import("prng");
 
-// Limine Base Revision - required for protocol compatibility
-pub export var base_revision: limine.BaseRevision = .{ .revision = 3 };
+// Syscall dispatch table - must be imported to compile dispatch_syscall symbol
+// called from asm_helpers.S _syscall_entry
+const syscall_table = @import("syscall_table");
 
-// Limine Requests - bootloader fills responses at load time
-pub export var framebuffer_request: limine.FramebufferRequest = .{};
-pub export var hhdm_request: limine.HhdmRequest = .{};
-pub export var memmap_request: limine.MemoryMapRequest = .{};
-pub export var module_request: limine.ModuleRequest = .{};
+// Force linking of symbols used by external code (assembly or compiler-inserted)
+comptime {
+    // Stack canary symbols used by compiler-inserted stack protection
+    _ = &stack_guard.__stack_chk_guard;
+    _ = &stack_guard.__stack_chk_fail;
+    // Syscall dispatcher called from _syscall_entry in asm_helpers.S
+    _ = &syscall_table.dispatch_syscall;
+}
 
-// Global state initialized from Limine responses
-var hhdm_offset: u64 = 0;
+// External symbols from boot32.S
+extern fn multiboot2_info_ptr() u32;
+extern fn multiboot2_magic() u32;
 
-/// Kernel entry point - called by Limine bootloader
+/// Kernel entry point - called by boot32.S after mode switch
 /// This function must be exported and named _start for the linker
 export fn _start() noreturn {
     // Initialize HAL (serial port, GDT, PIC, IDT, interrupts)
@@ -40,52 +50,91 @@ export fn _start() noreturn {
     console.print("========================================\n");
     console.print("\n");
 
-    // Verify Limine protocol revision
-    if (!base_revision.is_supported()) {
-        console.err("Limine base revision not supported!", .{});
+    // Get Multiboot2 info from saved pointer in boot32.S
+    // The physical address needs to be converted to virtual via HHDM
+    const mb2_info_phys = @as(*const u32, @ptrFromInt(@intFromPtr(&multiboot2_info_ptr))).*;
+    const mb2_magic = @as(*const u32, @ptrFromInt(@intFromPtr(&multiboot2_magic))).*;
+
+    // Verify Multiboot2 magic
+    if (mb2_magic != multiboot2.BOOTLOADER_MAGIC) {
+        console.err("Invalid Multiboot2 magic: {x} (expected {x})", .{ mb2_magic, multiboot2.BOOTLOADER_MAGIC });
         halt();
     }
-    console.info("Limine protocol revision verified", .{});
+    console.info("Multiboot2 magic verified", .{});
 
-    // Initialize HHDM (Higher Half Direct Map)
-    if (hhdm_request.response) |hhdm| {
-        hhdm_offset = hhdm.offset;
-        console.info("HHDM offset: {x}", .{hhdm_offset});
-    } else {
-        console.err("HHDM not available!", .{});
-        halt();
+    // Convert Multiboot2 info address to virtual (using HHDM)
+    const mb2_info_virt = hal.paging.HHDM_OFFSET + mb2_info_phys;
+    const boot_info: *const multiboot2.BootInfo = @ptrFromInt(mb2_info_virt);
+
+    console.info("Multiboot2 info at phys={x} virt={x} size={d}", .{
+        mb2_info_phys,
+        mb2_info_virt,
+        boot_info.total_size,
+    });
+
+    // Log bootloader name if available
+    if (multiboot2.findBootLoaderNameTag(boot_info)) |name_tag| {
+        const name = name_tag.name();
+        console.info("Bootloader: {s}", .{name});
     }
 
     // Parse memory map
-    if (memmap_request.response) |memmap| {
-        console.info("Memory map entries: {d}", .{memmap.entry_count});
-        logMemoryMap(memmap);
+    if (multiboot2.findMmapTag(boot_info)) |mmap| {
+        logMemoryMap(mmap);
     } else {
         console.err("Memory map not available!", .{});
         halt();
     }
 
     // Check for framebuffer (optional for serial-only testing)
-    if (framebuffer_request.response) |fb_response| {
-        if (fb_response.framebuffer_count > 0) {
-            const fb = fb_response.framebuffers()[0];
-            console.info("Framebuffer: {d}x{d} @ {x}", .{ fb.width, fb.height, fb.address });
-        }
+    if (multiboot2.findFramebufferTag(boot_info)) |fb| {
+        console.info("Framebuffer: {d}x{d} @ {x}", .{
+            fb.framebuffer_width,
+            fb.framebuffer_height,
+            fb.framebuffer_addr,
+        });
     } else {
         console.warn("No framebuffer available (serial-only mode)", .{});
     }
 
-    // Check for InitRD modules
-    if (module_request.response) |mod_response| {
-        console.info("Loaded modules: {d}", .{mod_response.module_count});
+    // Check for loaded modules
+    var mod_count: u32 = 0;
+    var mod_iter = multiboot2.modules(boot_info);
+    while (mod_iter.next()) |mod| {
+        console.info("Module: {s} @ {x}-{x} ({d} bytes)", .{
+            mod.cmdline(),
+            mod.mod_start,
+            mod.mod_end,
+            mod.size(),
+        });
+        mod_count += 1;
+    }
+    if (mod_count > 0) {
+        console.info("Loaded modules: {d}", .{mod_count});
     }
 
     // Initialize memory management subsystems
-    initMemoryManagement();
+    initMemoryManagement(boot_info);
+
+    // Initialize entropy subsystem (RDRAND/RDTSC detection)
+    // Must be done before PRNG which depends on hardware entropy
+    hal.entropy.init();
+    console.info("Entropy source: {s}", .{if (hal.entropy.hasRdrand()) "RDRAND" else "RDTSC (fallback)"});
+
+    // Initialize kernel PRNG (seeds from hardware entropy)
+    // Must be done before stack_guard which uses PRNG for canary
+    prng.init();
+
+    // Initialize stack guard canary with randomized value
+    // Must be done BEFORE scheduler creates any threads
+    stack_guard.init();
 
     // Initialize keyboard driver and register with HAL
     keyboard.init();
     hal.interrupts.setKeyboardHandler(&keyboard.handleIrq);
+
+    // Initialize scheduler (creates idle thread, registers timer handler)
+    sched.init();
 
     // Log interrupt infrastructure status
     console.print("\n");
@@ -94,18 +143,76 @@ export fn _start() noreturn {
     console.info("  PIC remapped to vectors 32-47", .{});
     console.info("  IDT installed with 48 handlers", .{});
     console.info("  Keyboard driver registered", .{});
+    console.info("  Scheduler initialized", .{});
+    console.info("  PRNG seeded, stack canary randomized", .{});
 
     console.print("\n");
     console.info("Kernel initialization complete", .{});
 
-    // Optional: Test interrupt handling with divide by zero
-    // Uncomment to test exception handlers:
-    // testDivideByZero();
+    // Create test threads to verify scheduler
+    createTestThreads();
 
-    console.info("Entering halt loop...", .{});
+    // Start the scheduler - this does not return
+    // The boot thread becomes part of the idle loop
+    console.info("Starting scheduler...", .{});
+    sched.start();
+}
 
-    // Halt - kernel is not yet fully functional
-    halt();
+/// Create test threads to verify scheduler operation
+fn createTestThreads() void {
+    console.info("Creating test threads...", .{});
+
+    // Create thread A - prints 'A' periodically
+    const thread_a = thread.createKernelThread(testThreadA, .{
+        .name = "test-A",
+    }) catch |err| {
+        console.err("Failed to create thread A: {}", .{err});
+        return;
+    };
+    sched.addThread(thread_a);
+    console.info("Created thread A (tid={d})", .{thread_a.tid});
+
+    // Create thread B - prints 'B' periodically
+    const thread_b = thread.createKernelThread(testThreadB, .{
+        .name = "test-B",
+    }) catch |err| {
+        console.err("Failed to create thread B: {}", .{err});
+        return;
+    };
+    sched.addThread(thread_b);
+    console.info("Created thread B (tid={d})", .{thread_b.tid});
+}
+
+/// Test thread A - prints 'A' and yields
+fn testThreadA() void {
+    var count: u32 = 0;
+    while (count < 10) : (count += 1) {
+        console.print("A");
+        // Busy wait a bit (no sleep syscall yet)
+        busyWait(100000);
+    }
+    console.info("\nThread A completed", .{});
+    sched.exit();
+}
+
+/// Test thread B - prints 'B' and yields
+fn testThreadB() void {
+    var count: u32 = 0;
+    while (count < 10) : (count += 1) {
+        console.print("B");
+        // Busy wait a bit (no sleep syscall yet)
+        busyWait(100000);
+    }
+    console.info("\nThread B completed", .{});
+    sched.exit();
+}
+
+/// Simple busy wait loop
+fn busyWait(iterations: u32) void {
+    var i: u32 = 0;
+    while (i < iterations) : (i += 1) {
+        asm volatile ("pause");
+    }
 }
 
 /// Test interrupt handling by triggering a divide by zero exception
@@ -123,18 +230,67 @@ fn testDivideByZero() void {
     );
 }
 
+/// Test stack overflow detection by triggering a guard page fault
+/// This function recurses until it overflows the stack, triggering
+/// the guard page fault handler which should print stack overflow info.
+/// WARNING: This will halt the kernel - only use for testing!
+fn testStackOverflow() void {
+    console.warn("Testing stack overflow detection...", .{});
+    // Create a thread that will overflow its stack
+    const overflow_thread = thread.createKernelThread(stackOverflowThread, .{
+        .name = "overflow-test",
+        .stack_size = 4096, // Small stack to overflow quickly
+    }) catch |err| {
+        console.err("Failed to create overflow test thread: {}", .{err});
+        return;
+    };
+    sched.addThread(overflow_thread);
+    console.info("Created stack overflow test thread (tid={d})", .{overflow_thread.tid});
+}
+
+/// Thread entry point that deliberately overflows its stack
+/// Uses recursion with a large local buffer to quickly overflow
+fn stackOverflowThread() void {
+    console.info("Stack overflow test thread started, recursing...", .{});
+    recursiveStackConsumer(0);
+}
+
+/// Recursive function that consumes stack space until overflow
+/// Uses noinline to prevent tail-call optimization
+fn recursiveStackConsumer(depth: u32) void {
+    // Large buffer to consume stack quickly
+    var buffer: [256]u8 = undefined;
+
+    // Prevent buffer from being optimized away
+    buffer[0] = @truncate(depth);
+
+    // Touch the buffer to ensure it's actually on the stack
+    for (buffer, 0..) |*b, i| {
+        b.* = @truncate(i ^ depth);
+    }
+
+    // Print progress occasionally
+    if (depth % 10 == 0) {
+        console.printf("  Recursion depth: {d}\n", .{depth});
+    }
+
+    // Recurse until stack overflow - no escape condition
+    // The guard page will catch this
+    @call(.never_inline, recursiveStackConsumer, .{depth + 1});
+}
+
 /// Initialize PMM, VMM, and Heap
-/// Must be called after parsing Limine responses
-fn initMemoryManagement() void {
+/// Uses Multiboot2 memory map
+fn initMemoryManagement(boot_info: *const multiboot2.BootInfo) void {
     console.print("\n");
     console.info("Initializing memory management...", .{});
 
-    // Initialize PMM from memory map
-    if (memmap_request.response) |memmap| {
-        // Cast entries for PMM init
-        const entries: []const *anyopaque = @ptrCast(memmap.entries_ptr[0..memmap.entry_count]);
+    // Initialize paging with HHDM offset (fixed for Multiboot2)
+    hal.paging.init(hal.paging.HHDM_OFFSET);
 
-        pmm.init(entries, memmap.entry_count, hhdm_offset) catch |err| {
+    // Initialize PMM from Multiboot2 memory map
+    if (multiboot2.findMmapTag(boot_info)) |mmap| {
+        pmm.init(mmap) catch |err| {
             console.err("PMM initialization failed: {}", .{err});
             halt();
         };
@@ -167,48 +323,50 @@ fn initMemoryManagement() void {
 }
 
 /// Log memory map entries for debugging
-fn logMemoryMap(memmap: *limine.MemoryMapResponse) void {
+fn logMemoryMap(mmap: *const multiboot2.MmapTag) void {
     var usable_memory: u64 = 0;
     var total_memory: u64 = 0;
+    var entry_count: u32 = 0;
 
-    for (memmap.entries()) |entry| {
+    var iter = mmap.entries();
+    while (iter.next()) |entry| {
+        entry_count += 1;
         total_memory += entry.length;
 
-        const type_str = switch (entry.kind) {
-            .usable => blk: {
+        const type_str = switch (entry.mem_type) {
+            .available => blk: {
                 usable_memory += entry.length;
-                break :blk "Usable";
+                break :blk "Available";
             },
             .reserved => "Reserved",
             .acpi_reclaimable => "ACPI Reclaimable",
             .acpi_nvs => "ACPI NVS",
             .bad_memory => "Bad Memory",
-            .bootloader_reclaimable => "Bootloader Reclaimable",
-            .kernel_and_modules => "Kernel/Modules",
-            .framebuffer => "Framebuffer",
+            else => "Unknown",
         };
 
         if (config.debug_memory) {
             console.printf("  {x} - {x} ({s})\n", .{
-                entry.base,
-                entry.base + entry.length,
+                entry.base_addr,
+                entry.base_addr + entry.length,
                 type_str,
             });
         }
     }
 
+    console.info("Memory map entries: {d}", .{entry_count});
     console.info("Total memory: {d} MB", .{total_memory / (1024 * 1024)});
     console.info("Usable memory: {d} MB", .{usable_memory / (1024 * 1024)});
 }
 
 /// Convert physical address to virtual using HHDM
 pub fn physToVirt(phys: u64) [*]u8 {
-    return @ptrFromInt(phys + hhdm_offset);
+    return @ptrFromInt(phys + hal.paging.HHDM_OFFSET);
 }
 
 /// Convert virtual address to physical using HHDM
 pub fn virtToPhys(virt: u64) u64 {
-    return virt - hhdm_offset;
+    return virt - hal.paging.HHDM_OFFSET;
 }
 
 /// Halt the kernel (disables interrupts and loops forever)
@@ -217,9 +375,24 @@ fn halt() noreturn {
 }
 
 // Custom panic handler for freestanding environment
+//
+// SMP Panic Requirements (for future multi-core support):
+// When SMP is implemented, this handler must be updated to:
+// 1. Set an atomic global panic flag before any output
+// 2. Send NMI IPI to all Application Processors (APs)
+// 3. APs should check panic flag in their main loops and halt
+// 4. BSP (Bootstrap Processor) waits briefly for APs before final halt
+//
+// Without this, other cores continue executing potentially corrupted state.
+// Reference: Intel SDM Vol 3A, Chapter 10 (APIC) for IPI mechanisms.
 pub fn panic(msg: []const u8, _: ?*@import("std").builtin.StackTrace, _: ?usize) noreturn {
-    // Disable interrupts to prevent further issues
+    // Disable interrupts to prevent further issues on this core
     hal.cpu.disableInterrupts();
+
+    // TODO(SMP): When multi-core is implemented:
+    // 1. @atomicStore(&global_panic_flag, true, .seq_cst);
+    // 2. lapic.sendBroadcastNmi(); // Send NMI to all other cores
+    // 3. Brief spin waiting for APs to acknowledge (with timeout)
 
     console.print("\n!!! KERNEL PANIC !!!\n");
     console.print("Message: ");

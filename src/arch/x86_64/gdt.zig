@@ -210,10 +210,10 @@ fn loadGdt(gdt_ptr: *const GdtPtr) void {
 }
 
 /// Reload segment registers after loading new GDT
-/// Sets data segment selectors. CS is set by Limine and remains valid.
+/// Sets data segment selectors. CS is set by Bootloader and remains valid.
 /// In long mode, segment bases are ignored (except FS/GS), only DPL matters.
 fn reloadSegments() void {
-    // Limine already set CS to a valid kernel code segment
+    // Bootloader already set CS to a valid kernel code segment
     // We just need to reload data segment registers
     asm volatile (
         \\mov %[ds], %%ds

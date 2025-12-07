@@ -12,6 +12,10 @@ pub const gdt = @import("gdt.zig");
 pub const idt = @import("idt.zig");
 pub const pic = @import("pic.zig");
 pub const interrupts = @import("interrupts.zig");
+pub const fpu = @import("fpu.zig");
+pub const debug = @import("debug.zig");
+pub const entropy = @import("entropy.zig");
+pub const syscall = @import("syscall.zig");
 
 /// Initialize all x86_64 HAL subsystems
 pub fn init() void {
@@ -29,4 +33,10 @@ pub fn init() void {
 
     // Register interrupt handlers
     interrupts.init();
+
+    // Initialize FPU subsystem for state save/restore
+    fpu.init();
+
+    // Initialize SYSCALL/SYSRET MSRs for fast system calls
+    syscall.init();
 }

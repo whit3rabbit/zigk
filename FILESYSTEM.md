@@ -4,13 +4,15 @@ Based on the detailed specifications provided--specifically the requirements for
 
 This structure mirrors the **Linux Kernel** organization to ensure familiarity for OS developers, while leveraging **Zig's** module system to enforce the strict HAL layering required by the Constitution.
 
-## Current Implementation Status (2025-12-06)
+## Current Implementation Status (2025-12-07)
 
 ```text
 zigk/
 ├── build.zig                  # [IMPL] Master build logic (Zig 0.15.x)
 ├── build.zig.zon              # [IMPL] Dependencies
-├── limine.conf                # [IMPL] Bootloader config
+
+├── BOOT.md                # [New] Boot process documentation
+├── BUILD.md               # [New] Build instructions
 ├── CLAUDE.md                  # Project instructions
 ├── FILESYSTEM.md              # This file
 ├── specs/                     # Design documents
@@ -27,13 +29,21 @@ zigk/
     ├── config.zig             # [IMPL] Kernel configuration constants
     │
     ├── lib/
-    │   ├── limine.zig         # [IMPL] Limine bootloader bindings
-    │   └── ring_buffer.zig    # [IMPL] Generic comptime ring buffer
+
+    │   ├── ring_buffer.zig    # [IMPL] Generic comptime ring buffer
+    │   └── prng.zig           # [IMPL] Xoroshiro128+ PRNG (kernel entropy)
     │
     ├── uapi/                  # [IMPL] UserSpace API (Shared Headers)
     │   ├── root.zig           # [IMPL] UAPI module root
     │   ├── syscalls.zig       # [IMPL] Syscall numbers (Linux ABI + ZigK)
     │   └── errno.zig          # [IMPL] Linux-compatible error codes
+    │
+    ├── user/                  # [IMPL] Userland Runtime (Ring 3)
+    │   ├── root.zig           # [IMPL] Userland module root
+    │   ├── crt0.zig           # [IMPL] Entry point (_start, SysV ABI)
+    │   ├── linker.ld          # [IMPL] Userland linker script
+    │   └── lib/
+    │       └── syscall.zig    # [IMPL] Syscall wrappers (all Linux + ZigK)
     │
     ├── drivers/               # [IMPL] Device Drivers
     │   └── keyboard.zig       # [IMPL] PS/2 keyboard (dual ring buffers)
@@ -50,30 +60,102 @@ zigk/
     │       ├── idt.zig        # [IMPL] IDT configuration
     │       ├── interrupts.zig # [IMPL] Interrupt handlers + keyboard callback
     │       ├── pic.zig        # [IMPL] 8259 PIC configuration
-    │       ├── asm_helpers.S  # [IMPL] Assembly helpers (lgdt, lidt)
+    │       ├── fpu.zig        # [IMPL] FPU/SSE state management
+    │       ├── debug.zig      # [IMPL] Register dump for exceptions
+    │       ├── entropy.zig    # [IMPL] Hardware entropy (RDRAND/RDTSC)
+    │       ├── asm_helpers.S  # [IMPL] Assembly helpers (lgdt, lidt, rdrand, rdtsc)
     │       └── boot/
     │           └── linker.ld  # [IMPL] Kernel linker script
     │
     └── kernel/                # Core kernel subsystems
-        ├── main.zig           # [IMPL] Kernel entry, Limine requests, init
+        ├── main.zig           # [IMPL] Kernel entry, Multiboot2 init
         ├── pmm.zig            # [IMPL] Physical Memory Manager (bitmap)
         ├── vmm.zig            # [IMPL] Virtual Memory Manager (4-level paging)
         ├── heap.zig           # [IMPL] Kernel heap (thread-safe, coalescing)
         ├── sync.zig           # [IMPL] IRQ-safe Spinlock primitives
-        ├── syscall/           # [TODO] Syscall handlers
+        ├── thread.zig         # [IMPL] Thread structure, states, context
+        ├── sched.zig          # [IMPL] Round-robin scheduler, idle thread
+        ├── stack_guard.zig    # [IMPL] Stack canary support (PRNG-randomized)
+        ├── syscall/           # [IMPL] Syscall handlers
+        │   └── random.zig     # [IMPL] sys_getrandom (syscall 318)
         └── debug/
             └── console.zig    # [IMPL] Debug console (serial writer)
 ```
 
 **Legend:** [IMPL] = Implemented, [TODO] = Not yet implemented
 
+## Module Reference (New Files)
+
+### `src/arch/x86_64/entropy.zig`
+Hardware entropy source module for RDRAND and RDTSC instructions.
+
+| Export | Type | Description |
+|--------|------|-------------|
+| `init()` | `fn` | Initialize entropy subsystem, detect RDRAND via CPUID |
+| `hasRdrand()` | `fn` | Check if RDRAND instruction is available |
+| `rdrand64()` | `fn` | Get 64-bit random from RDRAND (returns `?u64`) |
+| `rdtsc()` | `fn` | Read Time Stamp Counter (always available) |
+| `getHardwareEntropy()` | `fn` | Best-effort entropy: RDRAND with RDTSC fallback |
+| `isInitialized()` | `fn` | Check if module has been initialized |
+
+**Imports:** `cpu.zig`
+**External deps:** `_asm_rdrand64`, `_asm_rdtsc` from `asm_helpers.S`
+
+---
+
+### `src/lib/prng.zig`
+Kernel-wide PRNG using xoroshiro128+ algorithm.
+
+| Export | Type | Description |
+|--------|------|-------------|
+| `init()` | `fn` | Seed PRNG from hardware entropy (call before scheduler) |
+| `next()` | `fn` | Generate 64-bit random value (thread-safe) |
+| `fill(buf)` | `fn` | Fill byte slice with random data |
+| `isInitialized()` | `fn` | Check if PRNG has been seeded |
+| `range(max)` | `fn` | Random value in `[0, max)` with rejection sampling |
+
+**Imports:** `hal` (for entropy), `sync` (for Spinlock)
+
+---
+
+### `src/kernel/syscall/random.zig`
+Linux sys_getrandom syscall implementation (syscall 318).
+
+| Export | Type | Description |
+|--------|------|-------------|
+| `GRND_NONBLOCK` | `u32` | Flag constant (0x1) |
+| `GRND_RANDOM` | `u32` | Flag constant (0x2) |
+| `sys_getrandom(buf_ptr, buflen, flags)` | `fn` | Fill userspace buffer with random bytes |
+
+**Imports:** `uapi` (for errno), `prng`
+**Returns:** Bytes written on success, `-EFAULT` or `-EINVAL` on error
+
+---
+
+### `src/kernel/heap.zig` (Updated)
+Added secure memory deallocation helper.
+
+| New Export | Type | Description |
+|------------|------|-------------|
+| `freeSecure(ptr, size)` | `fn` | Zero memory before freeing (prevents info leaks) |
+
+---
+
+### `src/arch/x86_64/asm_helpers.S` (Updated)
+Added assembly helpers for entropy instructions.
+
+| New Export | Signature | Description |
+|------------|-----------|-------------|
+| `_asm_rdrand64` | `(success: *u8) -> u64` | Execute RDRAND, set success flag |
+| `_asm_rdtsc` | `() -> u64` | Execute RDTSC, return 64-bit counter |
+
 ## Planned Structure (Full Specification)
 
 ```text
 zigk/
 ├── build.zig                  # Master build logic (Architecture selection FR-019)
-├── build.zig.zon              # Dependencies (limine-zig)
-├── limine.conf                # Bootloader config
+├── build.zig.zon              # Dependencies
+
 ├── specs/                     # Design documents
 │   ├── 001-minimal-kernel/    # Complete: Minimal bootable kernel
 │   ├── 003-microkernel.../    # Complete: Microkernel with userland & networking
@@ -91,22 +173,28 @@ zigk/
 └── src/
     ├── config.zig             # Compile-time configuration (Debug flags, constants)
     ├── lib/
-    │   └── limine.zig         # Limine bootloader bindings
+
+    │   ├── ring_buffer.zig    # Generic comptime ring buffer
+    │   └── prng.zig           # Xoroshiro128+ PRNG (kernel entropy)
     │
     ├── arch/                  # [Spec 008] Architecture Specifics (The HAL)
     │   │                      # ONLY place for Inline Assembly & Volatile MMIO
     │   ├── root.zig           # Architecture-agnostic HAL interface
     │   ├── x86_64/            # Current Target
     │   │   ├── root.zig       # x86_64 HAL root module
-    │   │   ├── boot/          # linker.ld, multiboot/limine headers
+    │   │   ├── boot/          # linker.ld, multiboot headers
     │   │   ├── cpu.zig        # CR/MSR/interrupt control, CPUID
     │   │   ├── io.zig         # Port I/O (outb/inb)
     │   │   ├── serial.zig     # COM1 implementation
     │   │   ├── paging.zig     # 4-level page table management
     │   │   ├── gdt.zig        # GDT/TSS configuration
-    │   │   ├── idt.zig        # IDT configuration, interrupt stubs
+    │   │   ├── idt.zig        # IDT configuration
+    │   │   ├── interrupts.zig # Interrupt handlers, ISR stubs
     │   │   ├── pic.zig        # 8259 PIC configuration
     │   │   ├── pit.zig        # Programmable Interval Timer
+    │   │   ├── fpu.zig        # FPU/SSE state management
+    │   │   ├── entropy.zig    # Hardware entropy (RDRAND/RDTSC)
+    │   │   ├── asm_helpers.S  # Assembly helpers (lgdt, lidt, rdrand, rdtsc)
     │   │   └── syscall.zig    # SYSCALL/SYSRET configuration
     │   │
     │   └── aarch64/           # [Spec 008] Future Target (Stubbed)
@@ -118,11 +206,13 @@ zigk/
     │   ├── pmm.zig            # Physical Memory Manager (bitmap allocator)
     │   ├── vmm.zig            # Virtual Memory Manager (4-level paging)
     │   ├── heap.zig           # Kernel heap (coalescing free-list)
+    │   ├── sync.zig           # IRQ-safe spinlock primitives
     │   ├── thread.zig         # Thread structure, states
-    │   ├── scheduler.zig      # Round-robin scheduler, idle thread
+    │   ├── sched.zig          # Round-robin scheduler, idle thread
     │   ├── panic.zig          # Panic handler
     │   ├── syscall/           # Modular syscall handlers
     │   │   ├── table.zig      # Dispatch table (Linux x86_64 ABI)
+    │   │   ├── random.zig     # sys_getrandom (syscall 318)
     │   │   ├── handlers.zig   # Core syscall implementations
     │   │   └── process.zig    # Process syscalls (wait4, exit, etc.)
     │   └── debug/
@@ -146,6 +236,7 @@ zigk/
     │
     ├── uapi/                  # [Spec 005] UserSpace API (Shared Headers)
     │   │                      # Imported by both Kernel and Userland apps
+    │   ├── root.zig           # UAPI module root
     │   ├── syscalls.zig       # Syscall numbers (from syscall-table.md)
     │   ├── errno.zig          # Linux-compatible error codes
     │   └── abi.zig            # Structs: timespec, sockaddr, stat

@@ -67,7 +67,17 @@ fn writeFormat(comptime fmt: []const u8, args: anytype) void {
             // Found {s} string placeholder
             if (arg_index < args_fields.len) {
                 const arg = @field(args, args_fields[arg_index].name);
-                print(arg);
+                // Handle both []const u8 and [*:0]const u8 types
+                const ArgType = @TypeOf(arg);
+                if (ArgType == []const u8) {
+                    print(arg);
+                } else if (@typeInfo(ArgType) == .pointer) {
+                    // Null-terminated string pointer - convert to slice
+                    const ptr: [*:0]const u8 = arg;
+                    var len: usize = 0;
+                    while (ptr[len] != 0) : (len += 1) {}
+                    print(ptr[0..len]);
+                }
                 arg_index += 1;
             }
             i += 3;

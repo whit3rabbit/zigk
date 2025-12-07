@@ -58,10 +58,16 @@ isr_common:
     push %r15
 
     # Call the Zig dispatcher with frame pointer as first argument
+    # dispatch_interrupt returns the frame pointer to restore (in RAX)
+    # This enables context switching by returning a different frame
     mov %rsp, %rdi
     call dispatch_interrupt
 
-    # Restore all registers
+    # Switch to the returned frame pointer (may be different for context switch)
+    # RAX contains the new stack pointer from dispatch_interrupt
+    mov %rax, %rsp
+
+    # Restore all registers from the (possibly new) stack
     pop %r15
     pop %r14
     pop %r13
@@ -81,7 +87,7 @@ isr_common:
     # Skip vector and error code
     add $16, %rsp
 
-    # Return from interrupt
+    # Return from interrupt (to possibly new thread)
     iretq
 
 # Generate exception stubs (vectors 0-31)
@@ -117,6 +123,141 @@ isr_stub_no_error 28         # #HV - Hypervisor Injection
 isr_stub_with_error 29       # #VC - VMM Communication Exception
 isr_stub_with_error 30       # #SX - Security Exception
 isr_stub_no_error 31         # Reserved
+
+# Entropy helpers - RDRAND and RDTSC
+# These instructions are not supported by Zig's inline assembler
+
+# u64 _asm_rdrand64(u8* success)
+# Attempts to get 64-bit random value from RDRAND
+# Returns random value in RAX, sets *success = 1 on success, 0 on failure
+.global _asm_rdrand64
+.type _asm_rdrand64, @function
+_asm_rdrand64:
+    rdrand %rax
+    jnc .rdrand_fail
+    movb $1, (%rdi)        # *success = 1
+    ret
+.rdrand_fail:
+    movb $0, (%rdi)        # *success = 0
+    xor %rax, %rax         # return 0
+    ret
+
+# u64 _asm_rdtsc()
+# Returns 64-bit Time Stamp Counter value
+.global _asm_rdtsc
+.type _asm_rdtsc, @function
+_asm_rdtsc:
+    rdtsc
+    shl $32, %rdx
+    or %rdx, %rax
+    ret
+
+# =============================================================================
+# SYSCALL Entry Point
+# =============================================================================
+#
+# Entry state (set by CPU on SYSCALL):
+#   RCX = return RIP
+#   R11 = return RFLAGS
+#   RAX = syscall number
+#   RDI, RSI, RDX, R10, R8, R9 = arguments 1-6
+#   RSP = still user stack! (SYSCALL does NOT switch stacks)
+#
+# We need to:
+#   1. Save user RSP (it's about to be overwritten)
+#   2. SWAPGS to get kernel GS (points to KernelGsData)
+#   3. Load kernel stack from GS:0
+#   4. Save all registers on kernel stack
+#   5. Call syscall dispatcher
+#   6. Restore registers
+#   7. SWAPGS back
+#   8. SYSRET to user
+#
+.global _syscall_entry
+.type _syscall_entry, @function
+_syscall_entry:
+    # SYSCALL has cleared IF (via FMASK), so interrupts are disabled
+    # This is our Big Kernel Lock
+
+    # SWAPGS: swap GS.base with IA32_KERNEL_GS_BASE
+    # After this, GS points to KernelGsData
+    swapgs
+
+    # Save user RSP to KernelGsData.user_stack (GS:8)
+    mov %rsp, %gs:8
+
+    # Load kernel stack from KernelGsData.kernel_stack (GS:0)
+    mov %gs:0, %rsp
+
+    # Now we're on kernel stack. Save all registers for SyscallFrame.
+    # Push in reverse order so struct fields match stack layout.
+
+    # Save user RSP on kernel stack
+    push %gs:8              # user_rsp
+
+    # Save RCX and R11 (saved by CPU, contain return info)
+    push %r11               # Return RFLAGS
+    push %rcx               # Return RIP
+
+    # Save RAX (syscall number)
+    push %rax
+
+    # Save syscall arguments (in case handler clobbers them)
+    push %rdi               # arg1
+    push %rsi               # arg2
+    push %rdx               # arg3
+    push %r10               # arg4
+    push %r8                # arg5
+    push %r9                # arg6
+
+    # Save callee-saved registers
+    push %rbx
+    push %rbp
+    push %r12
+    push %r13
+    push %r14
+    push %r15
+
+    # Call syscall dispatcher with frame pointer as argument
+    # void dispatch_syscall(SyscallFrame* frame)
+    mov %rsp, %rdi
+    call dispatch_syscall
+
+    # Return value is in RAX, already in the frame via setReturnValue()
+
+    # Restore all registers
+    pop %r15
+    pop %r14
+    pop %r13
+    pop %r12
+    pop %rbp
+    pop %rbx
+
+    pop %r9
+    pop %r8
+    pop %r10
+    pop %rdx
+    pop %rsi
+    pop %rdi
+
+    pop %rax                # Return value (set by dispatcher)
+
+    pop %rcx                # Return RIP
+    pop %r11                # Return RFLAGS
+
+    # Load user RSP back
+    pop %rsp
+
+    # SWAPGS: restore user GS
+    swapgs
+
+    # Return to userspace
+    # SYSRETQ: sets CS=STAR[63:48]+16, SS=STAR[63:48]+8, RIP=RCX, RFLAGS=R11
+    sysretq
+
+# =============================================================================
+# IRQ Stubs
+# =============================================================================
 
 # Generate IRQ stubs (vectors 32-47)
 isr_stub_no_error 32         # Timer (IRQ0)

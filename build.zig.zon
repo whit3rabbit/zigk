@@ -5,16 +5,11 @@
     .fingerprint = 0x921c2afbc9db26fc,
 
     .dependencies = .{
-        .limine = .{
-            .url = "git+https://github.com/limine-bootloader/limine-zig?ref=trunk#4281ba905cabe6d8ccd3e062d2e48364c3485172",
-            .hash = "limine_zig-0.0.0-1TjwQOl6AACYbbHZxh6lCxJ-WMBUoz03PUuBZhpKlxQs",
-        },
     },
 
     .paths = .{
         "build.zig",
         "build.zig.zon",
         "src",
-        "limine.conf",
     },
 }

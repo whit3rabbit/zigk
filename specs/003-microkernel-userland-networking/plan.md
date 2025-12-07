@@ -9,7 +9,7 @@ Build a microkernel with complete memory management (4-level paging, heap alloca
 
 ## Technical Context
 
-**Language/Version**: Zig 0.13.x/0.14.x - freestanding x86_64 target
+**Language/Version**: Zig 0.15.x - freestanding x86_64 target
 **Primary Dependencies**: Limine bootloader v7.x+, limine-zig bindings
 **Storage**: InitRD via Limine Modules (flat file or TAR archive abstraction)
 **Testing**: QEMU x86_64 with E1000 networking, host-side tcpdump/Wireshark for network verification

@@ -12,7 +12,7 @@
 // Virtual Address Layout (x86_64 canonical):
 //   0x0000_0000_0000_0000 - 0x0000_7FFF_FFFF_FFFF: User space (128 TB)
 //   0xFFFF_8000_0000_0000 - 0xFFFF_FFFF_FFFF_FFFF: Kernel space (128 TB)
-//     - HHDM starts at offset provided by Limine (typically 0xFFFF_8000_0000_0000)
+//     - HHDM starts at offset provided by Bootloader (typically 0xFFFF_8000_0000_0000)
 
 const hal = @import("hal");
 const console = @import("console");
@@ -62,7 +62,7 @@ pub fn init() VmmError!void {
 
     console.info("VMM: Kernel PML4 at phys {x}", .{kernel_pml4_phys});
 
-    // Copy higher-half entries from current page tables (set up by Limine)
+    // Copy higher-half entries from current page tables (set up by Bootloader)
     // This preserves HHDM and kernel mappings
     const current_pml4_phys = paging.getCurrentPageTable();
     const current_pml4 = paging.getTablePtr(current_pml4_phys);

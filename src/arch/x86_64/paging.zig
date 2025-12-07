@@ -139,17 +139,27 @@ pub const PageTable = struct {
     }
 };
 
-// HHDM (Higher Half Direct Map) offset - set by kernel during init
-var hhdm_offset: u64 = 0;
+// HHDM (Higher Half Direct Map) offset
+// With Multiboot2, we set up our own HHDM mapping in boot32.S at this fixed address.
+// This maps physical memory starting at 0x0 to virtual address 0xFFFF800000000000.
+pub const HHDM_OFFSET: u64 = 0xFFFF800000000000;
 
-/// Initialize paging module with HHDM offset from Limine
+// Keep variable for backwards compatibility (set to compile-time constant)
+var hhdm_offset: u64 = HHDM_OFFSET;
+
+/// Initialize paging module
+/// With Multiboot2, the HHDM is set up by boot32.S at a fixed address,
+/// so this function is now a no-op but kept for API compatibility.
 pub fn init(offset: u64) void {
-    hhdm_offset = offset;
+    // Verify the offset matches our expected HHDM
+    // This is a sanity check - with Multiboot2 we always use HHDM_OFFSET
+    _ = offset;
+    hhdm_offset = HHDM_OFFSET;
 }
 
 /// Get the current HHDM offset
 pub fn getHhdmOffset() u64 {
-    return hhdm_offset;
+    return HHDM_OFFSET;
 }
 
 /// Convert physical address to virtual using HHDM

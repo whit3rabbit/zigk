@@ -12,17 +12,47 @@ pub fn build(b: *std.Build) void {
         .abi = .none,
     });
 
-    // Create config module
+    // ============================================================
+    // Build-time Configuration Options
+    // ============================================================
+    const version = b.option([]const u8, "version", "Kernel version string") orelse "0.1.0";
+    const kernel_name = b.option([]const u8, "name", "Kernel name") orelse "ZigK";
+    const stack_size = b.option(usize, "stack-size", "Default thread stack size in bytes") orelse 16 * 1024;
+    const heap_size_opt = b.option(usize, "heap-size", "Kernel heap size in bytes") orelse 2 * 1024 * 1024;
+    const max_threads = b.option(usize, "max-threads", "Maximum number of threads") orelse 64;
+    const timer_hz = b.option(u32, "timer-hz", "Timer frequency in Hz") orelse 100;
+    const serial_baud = b.option(u32, "serial-baud", "Serial port baud rate") orelse 115200;
+    const debug_enabled = b.option(bool, "debug", "Enable debug output") orelse true;
+    const debug_memory = b.option(bool, "debug-memory", "Enable verbose memory allocation logging") orelse false;
+    const debug_scheduler = b.option(bool, "debug-scheduler", "Enable verbose scheduler logging") orelse false;
+    const debug_network = b.option(bool, "debug-network", "Enable verbose network logging") orelse false;
+
+    // Create kernel config options module
+    const config_options = b.addOptions();
+    config_options.addOption([]const u8, "version", version);
+    config_options.addOption([]const u8, "name", kernel_name);
+    config_options.addOption(usize, "default_stack_size", stack_size);
+    config_options.addOption(usize, "heap_size", heap_size_opt);
+    config_options.addOption(usize, "max_threads", max_threads);
+    config_options.addOption(u32, "timer_hz", timer_hz);
+    config_options.addOption(u32, "serial_baud", serial_baud);
+    config_options.addOption(bool, "debug_enabled", debug_enabled);
+    config_options.addOption(bool, "debug_memory", debug_memory);
+    config_options.addOption(bool, "debug_scheduler", debug_scheduler);
+    config_options.addOption(bool, "debug_network", debug_network);
+
+    // Create config module from build options
     const config_module = b.createModule(.{
-        .root_source_file = b.path("src/config.zig"),
+        .root_source_file = config_options.getOutput(),
         .target = kernel_target,
         .optimize = optimize,
     });
 
-    // Create local limine module (Zig 0.15.x compatible)
-    // Note: Using local bindings because upstream limine-zig uses deprecated usingnamespace
-    const limine_module = b.createModule(.{
-        .root_source_file = b.path("src/lib/limine.zig"),
+
+
+    // Create Multiboot2 module (boot protocol parsing)
+    const multiboot2_module = b.createModule(.{
+        .root_source_file = b.path("src/lib/multiboot2.zig"),
         .target = kernel_target,
         .optimize = optimize,
     });
@@ -52,6 +82,7 @@ pub fn build(b: *std.Build) void {
     pmm_module.addImport("hal", hal_module);
     pmm_module.addImport("console", console_module);
     pmm_module.addImport("config", config_module);
+    pmm_module.addImport("multiboot2", multiboot2_module);
 
     // Create VMM module (Virtual Memory Manager)
     const vmm_module = b.createModule(.{
@@ -65,13 +96,21 @@ pub fn build(b: *std.Build) void {
     vmm_module.addImport("pmm", pmm_module);
 
     // Create Sync module (Spinlock and synchronization primitives)
-    // NOTE: Created before heap because heap depends on sync
     const sync_module = b.createModule(.{
         .root_source_file = b.path("src/kernel/sync.zig"),
         .target = kernel_target,
         .optimize = optimize,
     });
     sync_module.addImport("hal", hal_module);
+
+    // Create PRNG module (Kernel entropy/random)
+    const prng_module = b.createModule(.{
+        .root_source_file = b.path("src/lib/prng.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    prng_module.addImport("hal", hal_module);
+    prng_module.addImport("sync", sync_module);
 
     // Create Heap module (Kernel Heap Allocator)
     const heap_module = b.createModule(.{
@@ -82,6 +121,41 @@ pub fn build(b: *std.Build) void {
     heap_module.addImport("console", console_module);
     heap_module.addImport("config", config_module);
     heap_module.addImport("sync", sync_module);
+
+    // Create Thread module (Thread management and creation)
+    const thread_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/thread.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    thread_module.addImport("hal", hal_module);
+    thread_module.addImport("pmm", pmm_module);
+    thread_module.addImport("vmm", vmm_module);
+    thread_module.addImport("heap", heap_module);
+    thread_module.addImport("console", console_module);
+    thread_module.addImport("config", config_module);
+
+    // Create Scheduler module (Thread scheduling)
+    const sched_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/sched.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    sched_module.addImport("hal", hal_module);
+    sched_module.addImport("thread", thread_module);
+    sched_module.addImport("sync", sync_module);
+    sched_module.addImport("console", console_module);
+    sched_module.addImport("config", config_module);
+
+    // Create Stack Guard module (stack canary support)
+    const stack_guard_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/stack_guard.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    stack_guard_module.addImport("hal", hal_module);
+    stack_guard_module.addImport("console", console_module);
+    stack_guard_module.addImport("prng", prng_module);
 
     // Create UAPI module (syscall numbers, errno codes)
     const uapi_module = b.createModule(.{
@@ -109,20 +183,64 @@ pub fn build(b: *std.Build) void {
     keyboard_module.addImport("console", console_module);
     keyboard_module.addImport("uapi", uapi_module);
 
-    // Create kernel executable using Zig 0.15.x createModule pattern
+    // Create syscall random module
+    const syscall_random_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/syscall/random.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    syscall_random_module.addImport("uapi", uapi_module);
+    syscall_random_module.addImport("prng", prng_module);
+
+    // Create syscall handlers module
+    const syscall_handlers_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/syscall/handlers.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    syscall_handlers_module.addImport("uapi", uapi_module);
+    syscall_handlers_module.addImport("console", console_module);
+    syscall_handlers_module.addImport("hal", hal_module);
+    syscall_handlers_module.addImport("sched", sched_module);
+    syscall_handlers_module.addImport("keyboard", keyboard_module);
+
+    // Create syscall dispatch table module
+    const syscall_table_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/syscall/table.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    syscall_table_module.addImport("uapi", uapi_module);
+    syscall_table_module.addImport("hal", hal_module);
+    syscall_table_module.addImport("console", console_module);
+    syscall_table_module.addImport("handlers.zig", syscall_handlers_module);
+    syscall_table_module.addImport("random.zig", syscall_random_module);
+
+    // Create kernel executable
     const kernel = b.addExecutable(.{
         .name = "kernel.elf",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/kernel/main.zig"),
             .target = kernel_target,
             .optimize = optimize,
-            // Kernel code model disables Red Zone (critical for interrupt handling)
             .code_model = .kernel,
+            .pic = false,
         }),
     });
 
+    // Force non-relocatable executable
+    // Note: Try internal linker first, switch to LLD if needed
+    kernel.pie = false;
+
+    // Force strict memory layout for kernel
+    // ensures the ELF headers and first segment start at 1MB
+    // and prevents large alignment gaps in the file
+    kernel.link_z_max_page_size = 4096;
+
+
     // Add module imports to kernel
-    kernel.root_module.addImport("limine", limine_module);
+
+    kernel.root_module.addImport("multiboot2", multiboot2_module);
     kernel.root_module.addImport("hal", hal_module);
     kernel.root_module.addImport("config", config_module);
     kernel.root_module.addImport("console", console_module);
@@ -132,16 +250,33 @@ pub fn build(b: *std.Build) void {
     kernel.root_module.addImport("sync", sync_module);
     kernel.root_module.addImport("uapi", uapi_module);
     kernel.root_module.addImport("keyboard", keyboard_module);
+    kernel.root_module.addImport("thread", thread_module);
+    kernel.root_module.addImport("sched", sched_module);
+    kernel.root_module.addImport("stack_guard", stack_guard_module);
+    kernel.root_module.addImport("prng", prng_module);
+    kernel.root_module.addImport("syscall_random", syscall_random_module);
+    kernel.root_module.addImport("syscall_table", syscall_table_module);
 
     // Add assembly helpers for x86_64 (ISR stubs, lgdt, lidt)
-    // These cannot be expressed in Zig inline assembly due to operand constraints
     kernel.addAssemblyFile(b.path("src/arch/x86_64/asm_helpers.S"));
+
+    // Add Multiboot2 bootstrap code (32-bit entry, page tables, mode switch)
+    kernel.addAssemblyFile(b.path("src/arch/x86_64/boot/boot32.S"));
 
     // Set linker script for kernel memory layout
     kernel.setLinkerScript(b.path("src/arch/x86_64/boot/linker.ld"));
 
     // Install kernel artifact
     b.installArtifact(kernel);
+
+    // Create flat binary using objcopy
+    const kernel_bin = b.addObjCopy(kernel.getEmittedBin(), .{
+        .format = .bin,
+    });
+    
+    // Install the binary
+    const install_bin = b.addInstallFile(kernel_bin.getOutput(), "bin/kernel.bin");
+    b.getInstallStep().dependOn(&install_bin.step);
 
     // Create run step for QEMU
     const run_cmd = b.addSystemCommand(&.{
@@ -152,7 +287,6 @@ pub fn build(b: *std.Build) void {
         "-serial", "stdio",
         "-no-reboot",
         "-no-shutdown",
-        // Apple Silicon requires TCG accelerator for x86_64 emulation
         "-accel", "tcg",
     });
     run_cmd.step.dependOn(&kernel.step);
@@ -160,41 +294,48 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Build and run the kernel in QEMU");
     run_step.dependOn(&run_cmd.step);
 
-    // Create ISO build step
+    // Create ISO build step using GRUB2 (Multiboot2 bootloader)
     const iso_cmd = b.addSystemCommand(&.{
         "sh", "-c",
-        \\mkdir -p iso_root/boot/limine && \
-        \\cp zig-out/bin/kernel.elf iso_root/boot/ && \
-        \\cp limine.conf iso_root/boot/limine/ && \
-        \\xorriso -as mkisofs -b boot/limine/limine-bios-cd.bin \
-        \\    -no-emul-boot -boot-load-size 4 -boot-info-table \
-        \\    --efi-boot boot/limine/limine-uefi-cd.bin \
-        \\    -efi-boot-part --efi-boot-image --protective-msdos-label \
-        \\    iso_root -o zigk.iso 2>/dev/null || \
-        \\xorriso -as mkisofs -b boot/limine/limine-bios-cd.bin \
-        \\    -no-emul-boot -boot-load-size 4 -boot-info-table \
-        \\    iso_root -o zigk.iso
+        \\mkdir -p iso_root/boot/grub && \
+        \\cp zig-out/bin/kernel.bin iso_root/boot/ && \
+        \\if command -v x86_64-elf-grub-mkrescue >/dev/null 2>&1; then \
+        \\    x86_64-elf-grub-mkrescue -o zigk.iso iso_root 2>/dev/null; \
+        \\elif command -v grub-mkrescue >/dev/null 2>&1; then \
+        \\    grub-mkrescue -o zigk.iso iso_root 2>/dev/null; \
+        \\else \
+        \\    echo "Error: grub-mkrescue not found. Install x86_64-elf-grub (macOS) or grub-pc-bin (Linux)"; \
+        \\    exit 1; \
+        \\fi
     });
     iso_cmd.step.dependOn(b.getInstallStep());
 
     const iso_step = b.step("iso", "Build bootable ISO image");
     iso_step.dependOn(&iso_cmd.step);
 
-    // Host-side unit tests (runs on host, not freestanding)
-    // For testing heap, data structures, and other logic
+    // Host-side unit tests
     const test_module = b.createModule(.{
         .root_source_file = b.path("tests/unit/main.zig"),
-        // Use native target for host-side testing
         .target = b.graph.host,
         .optimize = optimize,
     });
 
-    // Create heap module for host testing (non-freestanding)
+    const test_config_options = b.addOptions();
+    test_config_options.addOption(bool, "debug_memory", debug_memory);
+    test_config_options.addOption(usize, "heap_size", heap_size_opt);
+    test_config_options.addOption(usize, "default_stack_size", stack_size);
+    test_config_options.addOption(bool, "debug_enabled", debug_enabled);
+    test_config_options.addOption(bool, "debug_scheduler", debug_scheduler);
+    test_config_options.addOption(bool, "debug_network", debug_network);
+
+    const test_config_module = test_config_options.createModule();
+
     const heap_test_module = b.createModule(.{
         .root_source_file = b.path("src/kernel/heap.zig"),
         .target = b.graph.host,
         .optimize = optimize,
     });
+    heap_test_module.addImport("config", test_config_module);
 
     test_module.addImport("heap", heap_test_module);
 

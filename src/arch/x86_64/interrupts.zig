@@ -6,6 +6,7 @@
 const idt = @import("idt.zig");
 const pic = @import("pic.zig");
 const cpu = @import("cpu.zig");
+const debug = @import("debug.zig");
 
 // Import console for output (will be set up during init)
 var console_writer: ?*const fn ([]const u8) void = null;
@@ -13,6 +14,28 @@ var console_writer: ?*const fn ([]const u8) void = null;
 // Keyboard IRQ handler callback (set by keyboard driver)
 // This allows the HAL to call into the keyboard driver without importing it
 var keyboard_handler: ?*const fn () void = null;
+
+// Timer IRQ handler callback (set by scheduler)
+// Returns a new frame pointer for context switching
+// This allows the scheduler to perform preemptive context switches
+var timer_handler: ?*const fn (*idt.InterruptFrame) *idt.InterruptFrame = null;
+
+// Guard page fault handler callback (set by scheduler/thread module)
+// Called when a page fault might be a stack overflow
+// Returns thread info if the fault is in a guard page: (tid, name, stack_base, stack_top)
+// Returns null if not a guard page fault
+pub const GuardPageInfo = struct {
+    thread_id: u32,
+    thread_name: []const u8,
+    stack_base: u64,
+    stack_top: u64,
+};
+var guard_page_checker: ?*const fn (u64) ?GuardPageInfo = null;
+
+// #NM (Device Not Available) handler callback for lazy FPU switching
+// Called when a thread attempts to use FPU/SSE with CR0.TS set
+// Returns true if handled (FPU state restored), false if not handled
+var fpu_access_handler: ?*const fn () bool = null;
 
 /// Exception names for debugging
 const exception_names = [_][]const u8{
@@ -67,6 +90,8 @@ pub fn init() void {
 /// Set the console writer for debug output
 pub fn setConsoleWriter(writer: *const fn ([]const u8) void) void {
     console_writer = writer;
+    // Also set up debug module console writer
+    debug.setConsoleWriter(writer);
 }
 
 /// Set the keyboard handler callback
@@ -75,9 +100,42 @@ pub fn setKeyboardHandler(handler: *const fn () void) void {
     keyboard_handler = handler;
 }
 
+/// Set the timer handler callback
+/// This allows the scheduler to register its timer tick handler
+/// The handler receives the current frame and returns the frame to restore
+/// (may be different for context switch)
+pub fn setTimerHandler(handler: *const fn (*idt.InterruptFrame) *idt.InterruptFrame) void {
+    timer_handler = handler;
+}
+
+/// Set the guard page checker callback
+/// This allows the scheduler/thread module to provide thread info for stack overflow detection
+/// The callback is called with a fault address and returns thread info if in a guard page
+pub fn setGuardPageChecker(checker: *const fn (u64) ?GuardPageInfo) void {
+    guard_page_checker = checker;
+}
+
+/// Set the FPU access handler callback for lazy FPU switching
+/// This allows the scheduler to handle #NM exceptions when threads access FPU
+pub fn setFpuAccessHandler(handler: *const fn () bool) void {
+    fpu_access_handler = handler;
+}
+
 /// Generic exception handler
 fn exceptionHandler(frame: *idt.InterruptFrame) void {
     const vector: u8 = @truncate(frame.vector);
+
+    // Handle #NM (Device Not Available) for lazy FPU switching
+    // This is not an error - it's how we implement lazy FPU save/restore
+    if (vector == 7) {
+        if (fpu_access_handler) |handler| {
+            if (handler()) {
+                // FPU state restored, thread can continue
+                return;
+            }
+        }
+        // If no handler or handler failed, fall through to error handling
+    }
 
     // Print exception info
     if (console_writer) |write| {
@@ -96,37 +154,32 @@ fn exceptionHandler(frame: *idt.InterruptFrame) void {
         14 => {
             // Page fault - CR2 contains faulting address
             const cr2 = cpu.readCr2();
-            if (console_writer) |write| {
-                write("CR2 (faulting address): ");
-                printHex(cr2);
-                write("\n");
 
-                // Decode error code
-                const err = frame.error_code;
-                write("  Cause: ");
-                if (err & 1 == 0) {
-                    write("Page not present");
-                } else {
-                    write("Protection violation");
+            // Check if this is a stack guard page fault
+            if (guard_page_checker) |checker| {
+                if (checker(cr2)) |guard_info| {
+                    // This is a stack overflow - print detailed diagnostic
+                    debug.printStackOverflowDiagnostic(
+                        guard_info.thread_id,
+                        guard_info.thread_name,
+                        cr2,
+                        guard_info.stack_base,
+                        guard_info.stack_top,
+                    );
+                    // Use debug module for full register dump
+                    debug.dumpRegisters(frame);
+                    debug.dumpControlRegisters();
+                    if (console_writer) |write| {
+                        write("\nSystem halted due to stack overflow.\n");
+                    }
+                    cpu.halt();
+                    return;
                 }
-                if (err & 2 != 0) {
-                    write(", Write access");
-                } else {
-                    write(", Read access");
-                }
-                if (err & 4 != 0) {
-                    write(", User mode");
-                } else {
-                    write(", Supervisor mode");
-                }
-                if (err & 8 != 0) {
-                    write(", Reserved bit set");
-                }
-                if (err & 16 != 0) {
-                    write(", Instruction fetch");
-                }
-                write("\n");
             }
+
+            // Regular page fault - use debug module for detailed output
+            debug.dumpPageFaultInfo(frame);
+            debug.dumpControlRegisters();
         },
         8 => {
             // Double fault - always fatal
@@ -168,8 +221,16 @@ fn irqHandler(frame: *idt.InterruptFrame) void {
     // Handle specific IRQs
     switch (irq) {
         0 => {
-            // Timer IRQ - just acknowledge for now
-            // A real kernel would update tick count, check for preemption, etc.
+            // Timer IRQ - delegate to scheduler for preemption
+            if (timer_handler) |handler| {
+                // The handler returns the frame to restore (possibly different thread)
+                const new_frame = handler(frame);
+                // Signal dispatch_interrupt to use this frame instead
+                if (new_frame != frame) {
+                    idt.setNewFrame(new_frame);
+                }
+            }
+            // If no timer handler, just acknowledge and continue
         },
         1 => {
             // Keyboard IRQ - delegate to keyboard driver

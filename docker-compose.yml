@@ -1,0 +1,107 @@
+# ZigK Docker Compose Configuration
+# Multi-architecture kernel build orchestration
+#
+# Usage:
+#   docker compose run build          # Build kernel
+#   docker compose run build-iso      # Build ISO image
+#   docker compose run test           # Run unit tests
+#   docker compose run dev            # Interactive shell with QEMU
+
+services:
+  # Base build service
+  build:
+    build:
+      context: .
+      target: builder
+    volumes:
+      - .:/workspace
+      - build-cache:/workspace/zig-cache
+      - build-out:/workspace/zig-out
+    working_dir: /workspace
+    command: zig build
+
+  # Build ISO image
+  build-iso:
+    build:
+      context: .
+      target: builder
+    volumes:
+      - .:/workspace
+      - build-cache:/workspace/zig-cache
+      - build-out:/workspace/zig-out
+    working_dir: /workspace
+    command: zig build iso
+
+  # Run unit tests
+  test:
+    build:
+      context: .
+      target: builder
+    volumes:
+      - .:/workspace
+      - build-cache:/workspace/zig-cache
+    working_dir: /workspace
+    command: zig build test
+
+  # Development environment with QEMU
+  dev:
+    build:
+      context: .
+      target: dev
+    volumes:
+      - .:/workspace
+      - build-cache:/workspace/zig-cache
+      - build-out:/workspace/zig-out
+    working_dir: /workspace
+    stdin_open: true
+    tty: true
+    command: /bin/bash
+
+  # x86_64 target build
+  build-x86_64:
+    build:
+      context: .
+      target: builder
+    volumes:
+      - .:/workspace
+      - build-cache:/workspace/zig-cache
+      - build-out:/workspace/zig-out
+    working_dir: /workspace
+    environment:
+      - ZIGK_TARGET_ARCH=x86_64
+    command: zig build
+
+  # aarch64 target build (future)
+  build-aarch64:
+    build:
+      context: .
+      target: builder
+    volumes:
+      - .:/workspace
+      - build-cache:/workspace/zig-cache
+      - build-out:/workspace/zig-out
+    working_dir: /workspace
+    environment:
+      - ZIGK_TARGET_ARCH=aarch64
+    command: zig build -Dtarget=aarch64-freestanding
+
+  # Build all architectures
+  build-all:
+    build:
+      context: .
+      target: builder
+    volumes:
+      - .:/workspace
+      - build-cache:/workspace/zig-cache
+      - build-out:/workspace/zig-out
+    working_dir: /workspace
+    command: >
+      sh -c "
+        echo '=== Building x86_64 ===' &&
+        zig build &&
+        echo '=== x86_64 complete ==='
+      "
+
+volumes:
+  build-cache:
+  build-out:
