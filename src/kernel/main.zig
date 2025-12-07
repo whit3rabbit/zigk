@@ -7,6 +7,10 @@ const limine = @import("limine");
 const hal = @import("hal");
 const console = @import("console");
 const config = @import("config");
+const pmm = @import("pmm");
+const vmm = @import("vmm");
+const heap = @import("heap");
+const keyboard = @import("keyboard");
 
 // Limine Base Revision - required for protocol compatibility
 pub export var base_revision: limine.BaseRevision = .{ .revision = 3 };
@@ -23,8 +27,11 @@ var hhdm_offset: u64 = 0;
 /// Kernel entry point - called by Limine bootloader
 /// This function must be exported and named _start for the linker
 export fn _start() noreturn {
-    // Initialize HAL (serial port first for debug output)
+    // Initialize HAL (serial port, GDT, PIC, IDT, interrupts)
     hal.init();
+
+    // Connect console to interrupt handlers for debug output
+    hal.interrupts.setConsoleWriter(&console.print);
 
     // Print boot banner
     console.print("\n");
@@ -73,12 +80,90 @@ export fn _start() noreturn {
         console.info("Loaded modules: {d}", .{mod_response.module_count});
     }
 
+    // Initialize memory management subsystems
+    initMemoryManagement();
+
+    // Initialize keyboard driver and register with HAL
+    keyboard.init();
+    hal.interrupts.setKeyboardHandler(&keyboard.handleIrq);
+
+    // Log interrupt infrastructure status
+    console.print("\n");
+    console.info("Interrupt infrastructure initialized:", .{});
+    console.info("  GDT loaded with TSS", .{});
+    console.info("  PIC remapped to vectors 32-47", .{});
+    console.info("  IDT installed with 48 handlers", .{});
+    console.info("  Keyboard driver registered", .{});
+
     console.print("\n");
     console.info("Kernel initialization complete", .{});
+
+    // Optional: Test interrupt handling with divide by zero
+    // Uncomment to test exception handlers:
+    // testDivideByZero();
+
     console.info("Entering halt loop...", .{});
 
     // Halt - kernel is not yet fully functional
     halt();
+}
+
+/// Test interrupt handling by triggering a divide by zero exception
+/// This should print an exception message and halt
+fn testDivideByZero() void {
+    console.warn("Testing divide by zero exception...", .{});
+    // Inline assembly to trigger divide by zero
+    // This will cause exception vector 0 to fire
+    asm volatile (
+        \\xor %%ecx, %%ecx
+        \\div %%ecx
+        :
+        :
+        : .{ .eax = true, .ecx = true, .edx = true }
+    );
+}
+
+/// Initialize PMM, VMM, and Heap
+/// Must be called after parsing Limine responses
+fn initMemoryManagement() void {
+    console.print("\n");
+    console.info("Initializing memory management...", .{});
+
+    // Initialize PMM from memory map
+    if (memmap_request.response) |memmap| {
+        // Cast entries for PMM init
+        const entries: []const *anyopaque = @ptrCast(memmap.entries_ptr[0..memmap.entry_count]);
+
+        pmm.init(entries, memmap.entry_count, hhdm_offset) catch |err| {
+            console.err("PMM initialization failed: {}", .{err});
+            halt();
+        };
+    } else {
+        console.err("Cannot initialize PMM: no memory map!", .{});
+        halt();
+    }
+
+    // Initialize VMM with kernel page tables
+    vmm.init() catch |err| {
+        console.err("VMM initialization failed: {}", .{err});
+        halt();
+    };
+
+    // Initialize kernel heap
+    // Allocate heap pages from PMM
+    const heap_pages = config.heap_size / pmm.PAGE_SIZE;
+    const heap_phys = pmm.allocZeroedPages(heap_pages) orelse {
+        console.err("Failed to allocate heap pages!", .{});
+        halt();
+    };
+
+    // Convert to virtual address via HHDM for heap init
+    const heap_virt = hal.paging.physToVirt(heap_phys);
+    heap.init(@intFromPtr(heap_virt), config.heap_size);
+
+    console.info("Memory management initialized", .{});
+    pmm.printStats();
+    heap.printStats();
 }
 
 /// Log memory map entries for debugging

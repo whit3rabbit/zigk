@@ -43,6 +43,72 @@ pub fn build(b: *std.Build) void {
     console_module.addImport("hal", hal_module);
     console_module.addImport("config", config_module);
 
+    // Create PMM module (Physical Memory Manager)
+    const pmm_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/pmm.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    pmm_module.addImport("hal", hal_module);
+    pmm_module.addImport("console", console_module);
+    pmm_module.addImport("config", config_module);
+
+    // Create VMM module (Virtual Memory Manager)
+    const vmm_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/vmm.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    vmm_module.addImport("hal", hal_module);
+    vmm_module.addImport("console", console_module);
+    vmm_module.addImport("config", config_module);
+    vmm_module.addImport("pmm", pmm_module);
+
+    // Create Sync module (Spinlock and synchronization primitives)
+    // NOTE: Created before heap because heap depends on sync
+    const sync_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/sync.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    sync_module.addImport("hal", hal_module);
+
+    // Create Heap module (Kernel Heap Allocator)
+    const heap_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/heap.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    heap_module.addImport("console", console_module);
+    heap_module.addImport("config", config_module);
+    heap_module.addImport("sync", sync_module);
+
+    // Create UAPI module (syscall numbers, errno codes)
+    const uapi_module = b.createModule(.{
+        .root_source_file = b.path("src/uapi/root.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+
+    // Create Ring Buffer module (generic circular buffer)
+    const ring_buffer_module = b.createModule(.{
+        .root_source_file = b.path("src/lib/ring_buffer.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+
+    // Create Keyboard driver module
+    const keyboard_module = b.createModule(.{
+        .root_source_file = b.path("src/drivers/keyboard.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    keyboard_module.addImport("hal", hal_module);
+    keyboard_module.addImport("sync", sync_module);
+    keyboard_module.addImport("ring_buffer", ring_buffer_module);
+    keyboard_module.addImport("console", console_module);
+    keyboard_module.addImport("uapi", uapi_module);
+
     // Create kernel executable using Zig 0.15.x createModule pattern
     const kernel = b.addExecutable(.{
         .name = "kernel.elf",
@@ -60,6 +126,16 @@ pub fn build(b: *std.Build) void {
     kernel.root_module.addImport("hal", hal_module);
     kernel.root_module.addImport("config", config_module);
     kernel.root_module.addImport("console", console_module);
+    kernel.root_module.addImport("pmm", pmm_module);
+    kernel.root_module.addImport("vmm", vmm_module);
+    kernel.root_module.addImport("heap", heap_module);
+    kernel.root_module.addImport("sync", sync_module);
+    kernel.root_module.addImport("uapi", uapi_module);
+    kernel.root_module.addImport("keyboard", keyboard_module);
+
+    // Add assembly helpers for x86_64 (ISR stubs, lgdt, lidt)
+    // These cannot be expressed in Zig inline assembly due to operand constraints
+    kernel.addAssemblyFile(b.path("src/arch/x86_64/asm_helpers.S"));
 
     // Set linker script for kernel memory layout
     kernel.setLinkerScript(b.path("src/arch/x86_64/boot/linker.ld"));
@@ -106,13 +182,24 @@ pub fn build(b: *std.Build) void {
 
     // Host-side unit tests (runs on host, not freestanding)
     // For testing heap, data structures, and other logic
+    const test_module = b.createModule(.{
+        .root_source_file = b.path("tests/unit/main.zig"),
+        // Use native target for host-side testing
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+
+    // Create heap module for host testing (non-freestanding)
+    const heap_test_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/heap.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+
+    test_module.addImport("heap", heap_test_module);
+
     const unit_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/unit/main.zig"),
-            // Use native target for host-side testing
-            .target = b.graph.host,
-            .optimize = optimize,
-        }),
+        .root_module = test_module,
     });
 
     const run_unit_tests = b.addRunArtifact(unit_tests);

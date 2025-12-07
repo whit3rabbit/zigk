@@ -88,35 +88,35 @@ Based on plan.md structure:
 
 ### PMM (Physical Memory Manager)
 
-- [ ] T009 Create src/kernel/pmm.zig with bitmap allocator structure
-- [ ] T010 Implement Limine memory map parsing in src/kernel/pmm.zig
-- [ ] T011 Implement page allocation/deallocation in src/kernel/pmm.zig
-- [ ] T012 Reserve kernel pages and 2MB heap region in src/kernel/pmm.zig
+- [x] T009 Create src/kernel/pmm.zig with bitmap allocator structure
+- [x] T010 Implement Limine memory map parsing in src/kernel/pmm.zig
+- [x] T011 Implement page allocation/deallocation in src/kernel/pmm.zig
+- [x] T012 Reserve kernel pages and 2MB heap region in src/kernel/pmm.zig
 
 ### VMM (Virtual Memory Manager)
 
-- [ ] T013 Create src/arch/x86_64/paging.zig with PageTableEntry packed struct (FR-001)
-- [ ] T014 Implement HHDM offset extraction from Limine response (FR-005a/b)
-- [ ] T015 Implement physToVirt()/virtToPhys() using HHDM offset in src/arch/x86_64/paging.zig
-- [ ] T016 Implement 4-level page table creation (PML4 → PDPT → PD → PT) in src/arch/x86_64/paging.zig
-- [ ] T017 Implement mapPage() with kernel/user permission flags (FR-003/FR-004)
+- [x] T013 Create src/arch/x86_64/paging.zig with PageTableEntry packed struct (FR-001)
+- [x] T014 Implement HHDM offset extraction from Limine response (FR-005a/b)
+- [x] T015 Implement physToVirt()/virtToPhys() using HHDM offset in src/arch/x86_64/paging.zig
+- [x] T016 Implement 4-level page table creation (PML4 -> PDPT -> PD -> PT) in src/kernel/vmm.zig
+- [x] T017 Implement mapPage() with kernel/user permission flags (FR-003/FR-004)
 
 ### Heap Allocator
 
-- [ ] T018 Create src/kernel/heap.zig with free-list allocator structure
-- [ ] T019 Implement block header/footer with boundary tags for coalescing (FR-002a)
-- [ ] T020 Implement alloc() with first-fit search in src/kernel/heap.zig
-- [ ] T021 Implement free() with forward/backward coalescing (FR-002b/c)
-- [ ] T022 Add allocation count tracking for hygiene verification (Principle IX)
-- [ ] T023 Verify heap alloc/free cycles via serial debug output
+- [x] T018 Create src/kernel/heap.zig with free-list allocator structure
+- [x] T019 Implement block header/footer with boundary tags for coalescing (FR-002a)
+- [x] T020 Implement alloc() with first-fit search in src/kernel/heap.zig
+- [x] T021 Implement free() with forward/backward coalescing (FR-002b/c)
+- [x] T022 Add allocation count tracking for hygiene verification (Principle IX)
+- [x] T023 Verify heap alloc/free cycles via serial debug output
 
 ### Heap Allocator Verification (Enhanced)
 
-- [ ] T023a Create tests/unit/heap_fuzz.zig with randomized heap testing
-- [ ] T023b Fuzz test performs 10,000 random alloc/free sequences with varying sizes (8 bytes to 64KB)
-- [ ] T023c Fuzz test verifies coalescing by checking free block count decreases after adjacent frees
-- [ ] T023d Fuzz test verifies no memory corruption by writing patterns to allocated blocks and checking on free
-- [ ] T023e Run heap fuzz test before Phase 7 (Networking) to ensure allocator stability. Execute via `zig build test` on host using std.heap.page_allocator as backing allocator for unit test isolation from kernel runtime.
+- [x] T023a Create tests/unit/heap_fuzz.zig with randomized heap testing
+- [x] T023b Fuzz test performs 10,000 random alloc/free sequences with varying sizes (8 bytes to 64KB)
+- [x] T023c Fuzz test verifies coalescing by checking free block count decreases after adjacent frees
+- [x] T023d Fuzz test verifies no memory corruption by writing patterns to allocated blocks and checking on free
+- [x] T023e Run heap fuzz test before Phase 7 (Networking) to ensure allocator stability. Execute via `zig build test` on host using std.heap.page_allocator as backing allocator for unit test isolation from kernel runtime.
 
 **Verification**: Heap fuzz test passes 10,000 iterations without corruption or fragmentation
 

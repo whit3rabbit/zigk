@@ -105,7 +105,10 @@ pub fn hasData() bool {
 }
 
 /// Write a single byte to the serial port (blocking)
+/// Silently returns if serial port is not initialized
 pub fn writeByte(byte: u8) void {
+    if (!initialized) return;
+
     // Wait until transmit buffer is empty
     while (!isTxReady()) {
         // Spin wait
@@ -114,7 +117,10 @@ pub fn writeByte(byte: u8) void {
 }
 
 /// Read a single byte from the serial port (blocking)
+/// Returns 0 if serial port is not initialized
 pub fn readByte() u8 {
+    if (!initialized) return 0;
+
     // Wait until data is available
     while (!hasData()) {
         // Spin wait

@@ -21,6 +21,11 @@ pub const arch = switch (builtin.cpu.arch) {
 pub const io = arch.io;
 pub const cpu = arch.cpu;
 pub const serial = arch.serial;
+pub const paging = arch.paging;
+pub const gdt = arch.gdt;
+pub const idt = arch.idt;
+pub const pic = arch.pic;
+pub const interrupts = arch.interrupts;
 
 /// Initialize the Hardware Abstraction Layer
 /// Must be called early in kernel boot before using any HAL functions

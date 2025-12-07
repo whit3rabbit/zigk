@@ -89,6 +89,13 @@ kernel.root_module.cpu_features_sub.add(.mmx);
 - **Types**: Use explicit integer widths (`u64`, `usize`).
 - **Naming**: `snake_case` for functions/vars, `PascalCase` for structs/types.
 
+## 3.1 Zig 0.15.x Inline Assembly Limitations
+- **Clobber syntax**: Use `.{ .rax = true, .memory = true }` not `"rax", "memory"`.
+- **Register constraints**: Use `"{rdi}"` for specific registers, `"r"` for any register.
+- **Memory operands with lgdt/lidt**: Zig's inline asm cannot express indirect memory operands like `lgdt (%rdi)`. Use a separate `.S` assembly file (see `src/arch/x86_64/asm_helpers.S`).
+- **Naked functions**: Can ONLY contain inline assembly, no Zig code or function calls.
+- **comptime asm blocks**: Symbols defined in `comptime { asm(...) }` may not link across modules. Put assembly and its callers in the same file, or use a separate `.S` file added via `addAssemblyFile()` in build.zig.
+
 ## 4. Execution & Testing
 - **Emulation**: We use QEMU.
 - **Apple Silicon**: ALWAYS use `-accel tcg` for x86_64 emulation on ARM hosts.

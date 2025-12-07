@@ -1,15 +1,80 @@
-Based on the detailed specifications provided--specifically the requirements for ARM portability (Spec 008), the microkernel/modular design (Spec 003), and the Linux syscall compatibility layer (Spec 005)--here is a recommended file tree structure.
+# ZigK Filesystem Structure
 
-This structure mirrors the **Linux Kernel** organization to ensure familiarity for OS developers, while leveraging **Zig's** module system to enforce the strict HAL layering required by your Constitution.
+Based on the detailed specifications provided--specifically the requirements for ARM portability (Spec 008), the microkernel/modular design (Spec 003), and the Linux syscall compatibility layer (Spec 005)--here is the file tree structure.
 
-### Recommended File Structure
+This structure mirrors the **Linux Kernel** organization to ensure familiarity for OS developers, while leveraging **Zig's** module system to enforce the strict HAL layering required by the Constitution.
+
+## Current Implementation Status (2025-12-06)
+
+```text
+zigk/
+├── build.zig                  # [IMPL] Master build logic (Zig 0.15.x)
+├── build.zig.zon              # [IMPL] Dependencies
+├── limine.conf                # [IMPL] Bootloader config
+├── CLAUDE.md                  # Project instructions
+├── FILESYSTEM.md              # This file
+├── specs/                     # Design documents
+│   ├── 003-microkernel.../    # Active: Memory, scheduler, networking
+│   ├── 007-linux-compat.../   # Active: Linux compatibility layer
+│   ├── 009-spec-consistency/  # Complete: Spec unification
+│   ├── syscall-table.md       # Authoritative syscall numbers
+│   └── shared/                # Zig version policy, gotchas
+├── tests/
+│   └── unit/
+│       ├── main.zig           # [IMPL] Test runner entry
+│       └── heap_fuzz.zig      # [IMPL] Heap allocator fuzz tests (10,000 ops)
+└── src/
+    ├── config.zig             # [IMPL] Kernel configuration constants
+    │
+    ├── lib/
+    │   ├── limine.zig         # [IMPL] Limine bootloader bindings
+    │   └── ring_buffer.zig    # [IMPL] Generic comptime ring buffer
+    │
+    ├── uapi/                  # [IMPL] UserSpace API (Shared Headers)
+    │   ├── root.zig           # [IMPL] UAPI module root
+    │   ├── syscalls.zig       # [IMPL] Syscall numbers (Linux ABI + ZigK)
+    │   └── errno.zig          # [IMPL] Linux-compatible error codes
+    │
+    ├── drivers/               # [IMPL] Device Drivers
+    │   └── keyboard.zig       # [IMPL] PS/2 keyboard (dual ring buffers)
+    │
+    ├── arch/                  # HAL - ONLY place for inline assembly
+    │   ├── root.zig           # [IMPL] Architecture-agnostic HAL interface
+    │   └── x86_64/
+    │       ├── root.zig       # [IMPL] x86_64 HAL root module
+    │       ├── cpu.zig        # [IMPL] CR/MSR/interrupt control
+    │       ├── io.zig         # [IMPL] Port I/O (inb/outb)
+    │       ├── serial.zig     # [IMPL] COM1 serial driver
+    │       ├── paging.zig     # [IMPL] 4-level page table management
+    │       ├── gdt.zig        # [IMPL] GDT/TSS configuration
+    │       ├── idt.zig        # [IMPL] IDT configuration
+    │       ├── interrupts.zig # [IMPL] Interrupt handlers + keyboard callback
+    │       ├── pic.zig        # [IMPL] 8259 PIC configuration
+    │       ├── asm_helpers.S  # [IMPL] Assembly helpers (lgdt, lidt)
+    │       └── boot/
+    │           └── linker.ld  # [IMPL] Kernel linker script
+    │
+    └── kernel/                # Core kernel subsystems
+        ├── main.zig           # [IMPL] Kernel entry, Limine requests, init
+        ├── pmm.zig            # [IMPL] Physical Memory Manager (bitmap)
+        ├── vmm.zig            # [IMPL] Virtual Memory Manager (4-level paging)
+        ├── heap.zig           # [IMPL] Kernel heap (thread-safe, coalescing)
+        ├── sync.zig           # [IMPL] IRQ-safe Spinlock primitives
+        ├── syscall/           # [TODO] Syscall handlers
+        └── debug/
+            └── console.zig    # [IMPL] Debug console (serial writer)
+```
+
+**Legend:** [IMPL] = Implemented, [TODO] = Not yet implemented
+
+## Planned Structure (Full Specification)
 
 ```text
 zigk/
 ├── build.zig                  # Master build logic (Architecture selection FR-019)
 ├── build.zig.zon              # Dependencies (limine-zig)
 ├── limine.conf                # Bootloader config
-├── specs/                     # Design documents (as provided)
+├── specs/                     # Design documents
 │   ├── 001-minimal-kernel/    # Complete: Minimal bootable kernel
 │   ├── 003-microkernel.../    # Complete: Microkernel with userland & networking
 │   ├── 007-linux-compat.../   # Complete: Linux compatibility layer
@@ -19,134 +84,114 @@ zigk/
 │   └── archived/              # Superseded specs (002,004,005,006,008)
 │       └── README.md          # Documents merge destinations
 ├── tools/                     # Build scripts (ISO creation, QEMU runners)
+├── tests/
+│   └── unit/
+│       ├── main.zig           # Test runner entry point
+│       └── heap_fuzz.zig      # Heap allocator fuzz tests
 └── src/
-    ├── kernel/
-    │   ├── main.zig           # Kernel Entry Point (kmain) - Limine requests
-    │   └── syscall/           # [Spec 005/007] Modular syscall handlers
-    │       ├── table.zig      # Dispatch table (Linux x86_64 ABI numbers)
-    │       ├── handlers.zig   # Core syscall implementations
-    │       └── process.zig    # Process-related syscalls (wait4, exit, etc.)
     ├── config.zig             # Compile-time configuration (Debug flags, constants)
+    ├── lib/
+    │   └── limine.zig         # Limine bootloader bindings
     │
     ├── arch/                  # [Spec 008] Architecture Specifics (The HAL)
     │   │                      # ONLY place for Inline Assembly & Volatile MMIO
+    │   ├── root.zig           # Architecture-agnostic HAL interface
     │   ├── x86_64/            # Current Target
+    │   │   ├── root.zig       # x86_64 HAL root module
     │   │   ├── boot/          # linker.ld, multiboot/limine headers
-    │   │   ├── mm/            # Paging bits (PTE definitions)
-    │   │   ├── cpu.zig        # GDT, IDT, Control Registers
+    │   │   ├── cpu.zig        # CR/MSR/interrupt control, CPUID
     │   │   ├── io.zig         # Port I/O (outb/inb)
     │   │   ├── serial.zig     # COM1 implementation
-    │   │   └── time.zig       # PIT/TSC implementation
+    │   │   ├── paging.zig     # 4-level page table management
+    │   │   ├── gdt.zig        # GDT/TSS configuration
+    │   │   ├── idt.zig        # IDT configuration, interrupt stubs
+    │   │   ├── pic.zig        # 8259 PIC configuration
+    │   │   ├── pit.zig        # Programmable Interval Timer
+    │   │   └── syscall.zig    # SYSCALL/SYSRET configuration
     │   │
     │   └── aarch64/           # [Spec 008] Future Target (Stubbed)
     │       ├── boot/
-    │       ├── mm/
     │       └── uart.zig       # PL011 implementation
     │
-    ├── kernel/                # [Spec 004] Core Kernel Subsystems (Arch-Agnostic)
-    │   ├── sched/             # Scheduler, Thread structs, Idle Thread
-    │   ├── irq/               # Generic IRQ dispatch logic
-    │   ├── time/              # Generic timekeeping (clock_gettime)
+    ├── kernel/                # Core Kernel Subsystems (Arch-Agnostic)
+    │   ├── main.zig           # Kernel entry point
+    │   ├── pmm.zig            # Physical Memory Manager (bitmap allocator)
+    │   ├── vmm.zig            # Virtual Memory Manager (4-level paging)
+    │   ├── heap.zig           # Kernel heap (coalescing free-list)
+    │   ├── thread.zig         # Thread structure, states
+    │   ├── scheduler.zig      # Round-robin scheduler, idle thread
     │   ├── panic.zig          # Panic handler
-    │   └── debug/             # Debug/logging subsystem
+    │   ├── syscall/           # Modular syscall handlers
+    │   │   ├── table.zig      # Dispatch table (Linux x86_64 ABI)
+    │   │   ├── handlers.zig   # Core syscall implementations
+    │   │   └── process.zig    # Process syscalls (wait4, exit, etc.)
+    │   └── debug/
     │       └── console.zig    # Generic writer wrapping arch.serial
     │
-    ├── mm/                    # [Spec 003] Memory Management
-    │   ├── heap.zig           # Free-list allocator (Coalescing logic)
-    │   ├── pmm.zig            # Physical Page Allocator (Bitmap)
-    │   └── vmm.zig            # Generic Virtual Memory logic
-    │
     ├── drivers/               # [Spec 003] Device Drivers (Bus Agnostic)
-    │   ├── pci/               # PCI Enumeration logic
-    │   ├── net/               # Network Drivers
-    │   │   └── e1000.zig      # Intel E1000 Driver
-    │   └── input/
-    │       └── keyboard.zig   # Scancode logic
+    │   ├── pci.zig            # PCI enumeration logic
+    │   ├── e1000.zig          # Intel E1000 NIC driver
+    │   └── keyboard.zig       # PS/2 keyboard driver
     │
     ├── net/                   # [Spec 003/007] Networking Stack
-    │   ├── core/              # PacketBuffer, Socket structs
-    │   ├── ipv4/              # IP Layer, ARP Cache
-    │   ├── ethernet/          # Frame parsing
-    │   └── transport/         # UDP/TCP logic
+    │   ├── ethernet.zig       # Ethernet frame parsing
+    │   ├── arp.zig            # ARP cache and resolution
+    │   ├── ip.zig             # IPv4 layer
+    │   ├── icmp.zig           # ICMP (ping) handling
+    │   └── udp.zig            # UDP transport
     │
     ├── fs/                    # [Spec 003] Virtual File System
-    │   ├── initrd/            # TAR/USTAR parser
-    │   └── file.zig           # File Descriptor table logic
+    │   ├── initrd.zig         # TAR/USTAR parser
+    │   └── fd.zig             # File descriptor table
     │
     ├── uapi/                  # [Spec 005] UserSpace API (Shared Headers)
     │   │                      # Imported by both Kernel and Userland apps
-    │   ├── syscalls.zig       # Syscall numbers (Arch-aware mapping)
+    │   ├── syscalls.zig       # Syscall numbers (from syscall-table.md)
     │   ├── errno.zig          # Linux-compatible error codes
     │   └── abi.zig            # Structs: timespec, sockaddr, stat
     │
-    └── usr/                   # [Spec 003] Userland Applications (Ring 3)
-        ├── lib/               # Mini-libc (malloc, printf, start.zig)
-        ├── shell/             # The Shell application
-        └── doom/              # Doomgeneric port
+    └── user/                  # [Spec 003] Userland Applications (Ring 3)
+        ├── crt0.zig           # C runtime entry point
+        ├── lib/
+        │   ├── syscall.zig    # Userland syscall wrappers
+        │   └── libc.zig       # Mini libc (malloc, printf)
+        └── shell.zig          # Shell application
 ```
 
-### Key Design Decisions & rationale
+## Key Design Decisions
 
-#### 1. The `arch/` Directory (The HAL)
-*   **Requirement:** *Spec 008 User Story 1 (Strict HAL Boundary).*
-*   **Linux Parallel:** Matches `arch/x86`, `arch/arm64`.
-*   **Zig Implementation:** In `build.zig`, you map the module alias `hal` to `src/arch/{target}/root.zig`.
-*   **Rule:** This is the **only** place where `asm volatile` or direct hardware addresses (0x3F8, 0xB8000) are allowed. The rest of the kernel imports `hal` and calls generic functions like `hal.console.write()`.
+### 1. The `arch/` Directory (The HAL)
+- **Requirement:** Spec 008 User Story 1 (Strict HAL Boundary)
+- **Linux Parallel:** Matches `arch/x86`, `arch/arm64`
+- **Zig Implementation:** In `build.zig`, the module alias `hal` maps to `src/arch/root.zig`
+- **Rule:** This is the **only** place where `asm volatile` or direct hardware addresses are allowed
 
-#### 2. `uapi/` (User API)
-*   **Requirement:** *Spec 005 (Linux Syscall Compat) & Spec 008 (Arch-aware Syscalls).*
-*   **Linux Parallel:** Matches `include/uapi`.
-*   **Purpose:** These files are shared. The kernel uses them to define the ABI it implements. Userland programs (Shell, Doom) import them to know which register to put values in for `syscall` instructions. This ensures the kernel and userland never disagree on the value of `EAGAIN` or `SYS_write`.
+### 2. `uapi/` (User API)
+- **Requirement:** Spec 005 (Linux Syscall Compat) & Spec 008 (Arch-aware Syscalls)
+- **Linux Parallel:** Matches `include/uapi`
+- **Purpose:** Shared between kernel and userland to ensure ABI consistency
 
-#### 3. `mm/` vs `mem/`
-*   **Requirement:** *Spec 003 Phase 1 (Memory).*
-*   **Linux Parallel:** Matches Linux `mm/` (Memory Management).
-*   **Structure:**
-    *   `pmm.zig`: Handles the raw resource (physical RAM).
-    *   `vmm.zig`: Handles the abstraction (Page tables).
-    *   `heap.zig`: Handles kernel-internal dynamic memory (`alloc`/`free`).
+### 3. Memory Management (`kernel/`)
+- **Structure:**
+  - `pmm.zig`: Bitmap-based physical page allocator
+  - `vmm.zig`: 4-level page table management, HHDM integration
+  - `heap.zig`: Free-list allocator with immediate coalescing
 
-#### 4. `net/` vs `drivers/net/`
-*   **Requirement:** *Spec 003 User Story 3 (Network Buffer Ownership).*
-*   **Linux Parallel:** Linux strictly separates the *stack* (`net/`) from the *hardware* (`drivers/net/`).
-*   **Why:** Your `e1000.zig` (in `drivers/`) should just push raw bytes into a `PacketBuffer`. The code in `net/ipv4/` shouldn't care if those bytes came from an E1000, a Realtek card, or the Loopback interface (*Spec 004 US 10*).
+### 4. `net/` vs `drivers/`
+- **Linux Parallel:** Strictly separates stack (`net/`) from hardware (`drivers/`)
+- **Why:** Network stack code should not care about hardware specifics
 
-#### 5. `usr/` (Embedded Userland)
-*   **Requirement:** *Spec 003 User Story 3 (Ring 3 Userland).*
-*   **Context:** Since you are building a monolithic binary (initially) or an ISO with modules, having userland source in-tree allows the build system to compile the kernel, then compile the shell using the kernel's `uapi`, and bundle them together into the ISO in one `zig build` command.
+### 5. `user/` (Embedded Userland)
+- **Requirement:** Spec 003 User Story 3 (Ring 3 Userland)
+- **Purpose:** Single `zig build` compiles kernel + userland + bundles into ISO
 
-### Modular Build Configuration
+## File Size Guidelines
 
-In your `build.zig`, you can enforce this modularity programmatically:
+Keep individual files under 500 lines where practical:
+- **paging.zig:** ~200 lines (page table structures and helpers)
+- **pmm.zig:** ~300 lines (bitmap allocator)
+- **vmm.zig:** ~220 lines (virtual memory management)
+- **heap.zig:** ~520 lines (free-list allocator with tests support)
+- **heap_fuzz.zig:** ~370 lines (comprehensive fuzz tests)
 
-```zig
-// build.zig pseudocode
-const target_arch = target.result.cpu.arch;
-
-// Select HAL based on architecture (Spec 008)
-const hal_path = switch (target_arch) {
-    .x86_64 => "src/arch/x86_64/root.zig",
-    .aarch64 => "src/arch/aarch64/root.zig",
-    else => @panic("Unsupported architecture"),
-};
-
-// Create the HAL module
-const hal_mod = b.createModule(.{ .root_source_file = .{ .path = hal_path } });
-
-// Kernel module depends on HAL, but HAL depends on nothing generic
-kernel.root_module.addImport("hal", hal_mod);
-```
-
-### Archived Specifications
-
-The following specs were consolidated into active specs (003, 007) as of 2025-12-06:
-
-| Archived Spec | Requirements Merged Into |
-|---------------|-------------------------|
-| 002-kernel-infrastructure | Spec 003 Phase 1 (panic, stack protection) |
-| 004-kernel-stability-arch | Spec 003 Phase 3 (FPU/SSE, stack guards), Spec 007 Phase 1.5 (crash diagnostics) |
-| 005-linux-syscall-compat | `specs/syscall-table.md` (authoritative table) |
-| 006-sysv-abi-init | Spec 003 userland (crt0), Spec 007 (arch_prctl) |
-| 008-arm-hal-portability | Spec 003 Phase 1.5 (HAL tasks), contracts/hal-interface.md |
-
-See `specs/archived/README.md` for full details.
+For larger subsystems, split into multiple files in a directory.
