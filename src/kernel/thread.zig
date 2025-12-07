@@ -68,12 +68,27 @@ pub const Thread = struct {
     /// Used for lazy FPU switching - only save/restore if thread actually used FPU
     fpu_used: bool,
 
+    /// FS segment base for Thread Local Storage (TLS)
+    /// Set via arch_prctl(ARCH_SET_FS), restored on context switch
+    fs_base: u64,
+
     /// Thread name for debugging (null-terminated, max 31 chars + null)
     name: [32]u8,
 
     /// Doubly-linked list pointers for ready queue
     next: ?*Thread,
     prev: ?*Thread,
+
+    // Process hierarchy (for wait4/fork)
+
+    /// Parent thread (null for init thread)
+    parent: ?*Thread,
+    /// First child thread (head of child list)
+    first_child: ?*Thread,
+    /// Next sibling (for child list traversal)
+    next_sibling: ?*Thread,
+    /// Exit status (set on exit, read by wait4)
+    exit_status: i32,
 
     /// Get thread name as a slice
     pub fn getName(self: *const Thread) []const u8 {
@@ -113,6 +128,9 @@ pub const ThreadOptions = struct {
 
     /// Priority (reserved for future use)
     priority: u8 = 128,
+
+    /// Initial user stack pointer (for user threads)
+    user_stack_top: u64 = 0,
 };
 
 // Thread ID counter - atomically incremented for each new thread
@@ -189,9 +207,14 @@ pub fn createKernelThread(
         .cr3 = options.cr3,
         .fpu_state = fpu.FpuState.init(),
         .fpu_used = false, // Lazy FPU: will be set true on first FPU access
+        .fs_base = 0, // TLS base, set via arch_prctl
         .name = [_]u8{0} ** 32,
         .next = null,
         .prev = null,
+        .parent = null,
+        .first_child = null,
+        .next_sibling = null,
+        .exit_status = 0,
     };
 
     // Set thread name
@@ -211,6 +234,89 @@ pub fn createKernelThread(
             thread.tid,
             thread.kernel_stack_base,
             thread.kernel_stack_top,
+        });
+    }
+
+    return thread;
+}
+
+/// Create a new user thread
+/// Thread starts in Ready state
+pub fn createUserThread(
+    entry: u64,
+    options: ThreadOptions,
+) ThreadError!*Thread {
+     // Check thread limit
+    if (active_thread_count >= config.max_threads) {
+        console.warn("Thread: Max thread limit ({d}) reached", .{config.max_threads});
+        return ThreadError.TooManyThreads;
+    }
+
+    // Determine kernel stack size for this thread (default if not specified)
+    // Note: User threads still need a kernel stack for syscalls/interrupts
+    var stack_size = options.stack_size;
+    if (stack_size == 0) stack_size = config.default_stack_size;
+
+    const aligned_stack_size = std.mem.alignForward(usize, stack_size, pmm.PAGE_SIZE);
+    const stack_pages = aligned_stack_size / pmm.PAGE_SIZE;
+    const total_pages = stack_pages + 1; // +1 for guard page
+
+    // Allocate physical pages for kernel stack
+    const stack_phys = pmm.allocPages(stack_pages) orelse {
+        console.err("Thread: Failed to allocate {d} stack pages", .{stack_pages});
+        return ThreadError.OutOfMemory;
+    };
+    errdefer pmm.freePages(stack_phys, stack_pages);
+
+    // Calculate virtual addresses for kernel stack (HHDM)
+    const stack_base_virt = @intFromPtr(paging.physToVirt(stack_phys));
+    const guard_page_virt = stack_base_virt - pmm.PAGE_SIZE;
+    const stack_top_virt = stack_base_virt + aligned_stack_size;
+
+    // Allocate thread structure
+    const alloc = heap.allocator();
+    const thread = alloc.create(Thread) catch {
+        pmm.freePages(stack_phys, stack_pages);
+        return ThreadError.OutOfMemory;
+    };
+    errdefer alloc.destroy(thread);
+
+    // Initialize thread structure
+    thread.* = Thread{
+        .tid = allocateTid(),
+        .state = .Ready,
+        .kernel_rsp = 0, // Will be set below
+        .kernel_stack_base = guard_page_virt,
+        .kernel_stack_top = stack_top_virt, // This is RSP0
+        .kernel_stack_pages = total_pages,
+        .user_stack_top = options.user_stack_top,
+        .cr3 = options.cr3, // Must be provided for user thread
+        .fpu_state = fpu.FpuState.init(),
+        .fpu_used = false,
+        .fs_base = 0, // TLS base, set via arch_prctl
+        .name = [_]u8{0} ** 32,
+        .next = null,
+        .prev = null,
+        .parent = null,
+        .first_child = null,
+        .next_sibling = null,
+        .exit_status = 0,
+    };
+
+    thread.setName(options.name);
+
+    // Set up initial stack frame for context switch (iretq to user mode)
+    thread.kernel_rsp = setupUserStack(stack_top_virt, entry, options.user_stack_top);
+
+    // Update statistics
+    total_threads_created += 1;
+    active_thread_count += 1;
+
+    if (config.debug_scheduler) {
+        console.info("Thread: Created user '{s}' (tid={d}, cr3={x})", .{
+            thread.getName(),
+            thread.tid,
+            thread.cr3,
         });
     }
 
@@ -280,6 +386,70 @@ fn setupInitialStack(stack_top: u64, entry_rip: u64) u64 {
     return sp;
 }
 
+/// Set up initial kernel stack for switching to user mode
+fn setupUserStack(kernel_stack_top: u64, entry_rip: u64, user_stack_top: u64) u64 {
+    var sp = kernel_stack_top;
+
+    // Build interrupt frame for iretq to Ring 3
+    // Stack layout (pushed by CPU on interrupt / expected by iretq):
+    // SS (user data)
+    // RSP (user stack)
+    // RFLAGS
+    // CS (user code)
+    // RIP (user entry)
+
+    // SS
+    sp -= 8;
+    writeStackU64(sp, hal.gdt.USER_DATA); // User data selector with RPL 3 already set in GDT module
+
+    // RSP (User Stack)
+    sp -= 8;
+    writeStackU64(sp, user_stack_top);
+
+    // RFLAGS
+    sp -= 8;
+    // IF=1 (interrupts enabled), Reserved(1)=1, IOPL=0
+    writeStackU64(sp, 0x202); 
+
+    // CS
+    sp -= 8;
+    writeStackU64(sp, hal.gdt.USER_CODE); // User code selector with RPL 3
+
+    // RIP
+    sp -= 8;
+    writeStackU64(sp, entry_rip);
+
+    // --- End of IRETQ frame ---
+
+    // Now push values that isr_common expects to pop
+
+    // Error code and vector (fake)
+    sp -= 8;
+    writeStackU64(sp, 0); // error_code
+    sp -= 8;
+    writeStackU64(sp, 0); // vector
+
+    // General purpose registers
+    var i: usize = 0;
+    while (i < 15) : (i += 1) { // 15 registers (RAX..R15)
+        sp -= 8;
+        writeStackU64(sp, 0);
+    }
+
+    // Segment registers (DS, ES, FS, GS) - pop all in isr_common?
+    // Wait, isr_common usually doesn't push/pop segment registers in 64-bit mode 
+    // because they are ignored or handled differently. 
+    // Let's check isr_common logic - assuming standard "pushall" excludes segments in long mode 
+    // unless swapgs is involved.
+    
+    // NOTE: In our isr_common (asm_helpers.S), we need to ensure we return correctly.
+    // If isr_common does `swapgs` checking, it expects to return to user mode.
+    // The checking is usually based on CS in the IRETQ frame.
+    // Since we set CS to USER_CODE, isr_common's exit path should handle swapgs if needed.
+
+    return sp;
+}
+
 /// Write a u64 value to a stack address
 fn writeStackU64(addr: u64, value: u64) void {
     const ptr: *u64 = @ptrFromInt(addr);
@@ -317,4 +487,84 @@ pub fn getActiveThreadCount() u32 {
 /// Get total threads ever created
 pub fn getTotalThreadsCreated() u32 {
     return total_threads_created;
+}
+
+// =============================================================================
+// Process Hierarchy Management (for wait4/fork)
+// =============================================================================
+
+/// Add a child thread to a parent's child list
+pub fn addChild(parent: *Thread, child: *Thread) void {
+    child.parent = parent;
+    child.next_sibling = parent.first_child;
+    parent.first_child = child;
+}
+
+/// Remove a child thread from its parent's child list
+pub fn removeChild(parent: *Thread, child: *Thread) void {
+    // Clear parent reference
+    child.parent = null;
+
+    // Remove from sibling list
+    if (parent.first_child == child) {
+        // Child is first in list
+        parent.first_child = child.next_sibling;
+    } else {
+        // Find child's predecessor in sibling list
+        var prev: ?*Thread = parent.first_child;
+        while (prev) |p| {
+            if (p.next_sibling == child) {
+                p.next_sibling = child.next_sibling;
+                break;
+            }
+            prev = p.next_sibling;
+        }
+    }
+
+    child.next_sibling = null;
+}
+
+/// Find a zombie child matching the target PID
+/// pid = -1: any child, pid > 0: specific child
+pub fn findZombieChild(parent: *Thread, target_pid: i32) ?*Thread {
+    var child = parent.first_child;
+    while (child) |c| {
+        if (c.state == .Zombie) {
+            if (target_pid == -1) {
+                // Any zombie child
+                return c;
+            } else if (target_pid > 0 and c.tid == @as(u32, @intCast(target_pid))) {
+                // Specific child
+                return c;
+            }
+        }
+        child = c.next_sibling;
+    }
+    return null;
+}
+
+/// Check if parent has any living (non-zombie) children
+pub fn hasLivingChildren(parent: *Thread, target_pid: i32) bool {
+    var child = parent.first_child;
+    while (child) |c| {
+        if (c.state != .Zombie) {
+            if (target_pid == -1) {
+                return true;
+            } else if (target_pid > 0 and c.tid == @as(u32, @intCast(target_pid))) {
+                return true;
+            }
+        }
+        child = c.next_sibling;
+    }
+    return false;
+}
+
+/// Check if parent has any children at all
+pub fn hasAnyChildren(parent: *Thread) bool {
+    return parent.first_child != null;
+}
+
+/// Set thread exit status (called during exit)
+pub fn setExitStatus(thread: *Thread, status: i32) void {
+    thread.exit_status = status;
 }

@@ -61,8 +61,8 @@ pub fn sys_exit(status: usize) isize {
     const exit_code: i32 = @truncate(@as(isize, @bitCast(status)));
     console.debug("sys_exit: code={d}", .{exit_code});
 
-    // Tell scheduler to exit current thread
-    sched.exit();
+    // Tell scheduler to exit current thread with status
+    sched.exitWithStatus(exit_code);
 
     // Should not return, but if it does, return the status
     return @bitCast(status);
@@ -76,13 +76,63 @@ pub fn sys_exit_group(status: usize) isize {
 }
 
 /// sys_wait4 (61) - Wait for process state change
-/// MVP: Returns -ECHILD (no child processes) since we do not track parent/child yet
-pub fn sys_wait4(pid: usize, wstatus: usize, options: usize, rusage: usize) isize {
-    _ = pid;
-    _ = wstatus;
-    _ = options;
-    _ = rusage;
-    return Errno.ECHILD.toReturn();
+/// Full implementation with zombie reaping and parent/child tracking
+pub fn sys_wait4(pid_arg: usize, wstatus_ptr: usize, options: usize, rusage_ptr: usize) isize {
+    _ = rusage_ptr; // rusage not implemented
+
+    const thread = @import("thread");
+
+    const current = sched.getCurrentThread() orelse {
+        return Errno.ESRCH.toReturn();
+    };
+
+    // Interpret pid argument
+    const target_pid: i32 = @bitCast(@as(u32, @truncate(pid_arg)));
+    const wnohang = (options & 1) != 0; // WNOHANG flag
+
+    // Loop until we find a zombie child or no children remain
+    while (true) {
+        // Check for zombie children
+        if (thread.findZombieChild(current, target_pid)) |zombie| {
+            // Found a zombie - reap it
+
+            // Write exit status if pointer provided
+            if (wstatus_ptr != 0) {
+                if (isValidUserPtr(wstatus_ptr, @sizeOf(i32))) {
+                    const wstatus: *i32 = @ptrFromInt(wstatus_ptr);
+                    // Linux wait status encoding: exit_status << 8
+                    wstatus.* = (zombie.exit_status & 0xFF) << 8;
+                }
+            }
+
+            // Save TID before destroying
+            const reaped_tid = zombie.tid;
+
+            // Remove from parent's child list and destroy
+            thread.removeChild(current, zombie);
+            thread.destroyThread(zombie);
+
+            return @intCast(reaped_tid);
+        }
+
+        // No zombie found - check if we have any children at all
+        if (!thread.hasAnyChildren(current)) {
+            return Errno.ECHILD.toReturn();
+        }
+
+        // Check if any living children match the target
+        if (target_pid > 0 and !thread.hasLivingChildren(current, target_pid)) {
+            return Errno.ECHILD.toReturn();
+        }
+
+        // WNOHANG: don't block, return 0 if no zombies
+        if (wnohang) {
+            return 0;
+        }
+
+        // Block and wait for child to exit
+        sched.block();
+    }
 }
 
 /// sys_getpid (39) - Get process ID
@@ -444,13 +494,57 @@ pub fn sys_execve(path_ptr: usize, argv_ptr: usize, envp_ptr: usize) isize {
     return Errno.ENOSYS.toReturn();
 }
 
+// arch_prctl operation codes (Linux ABI)
+const ARCH_SET_GS: usize = 0x1001;
+const ARCH_SET_FS: usize = 0x1002;
+const ARCH_GET_FS: usize = 0x1003;
+const ARCH_GET_GS: usize = 0x1004;
+
 /// sys_arch_prctl (158) - Set architecture-specific thread state
-/// MVP: Returns -ENOSYS (thread state management not implemented)
+///
+/// Manages FS/GS segment bases for Thread Local Storage (TLS).
+/// Only FS operations are supported; GS is reserved for kernel use.
+///
+/// Args:
+///   code - Operation: ARCH_SET_FS (0x1002) or ARCH_GET_FS (0x1003)
+///   addr - For SET: new FS base value. For GET: pointer to store current value.
+///
+/// Returns:
+///   0 on success
+///   -EINVAL for unsupported operation codes
+///   -EFAULT for invalid user pointer (GET only)
 pub fn sys_arch_prctl(code: usize, addr: usize) isize {
-    _ = code;
-    _ = addr;
-    // Used for setting FS/GS base for TLS - not needed in MVP
-    return Errno.ENOSYS.toReturn();
+    const curr = sched.getCurrentThread() orelse {
+        // No current thread - should not happen in normal operation
+        return Errno.ESRCH.toReturn();
+    };
+
+    switch (code) {
+        ARCH_SET_FS => {
+            // Store FS base in thread struct for context switch restoration
+            curr.fs_base = addr;
+            // Write to IA32_FS_BASE MSR for immediate effect
+            hal.cpu.writeMsr(hal.cpu.IA32_FS_BASE, addr);
+            return 0;
+        },
+        ARCH_GET_FS => {
+            // Validate user pointer
+            if (!isValidUserPtr(addr, @sizeOf(u64))) {
+                return Errno.EFAULT.toReturn();
+            }
+            // Write current FS base to user pointer
+            const ptr: *u64 = @ptrFromInt(addr);
+            ptr.* = curr.fs_base;
+            return 0;
+        },
+        ARCH_SET_GS, ARCH_GET_GS => {
+            // GS is reserved for kernel use (SWAPGS, per-CPU data)
+            return Errno.EINVAL.toReturn();
+        },
+        else => {
+            return Errno.EINVAL.toReturn();
+        },
+    }
 }
 
 /// sys_get_fb_info (1001) - Get framebuffer info

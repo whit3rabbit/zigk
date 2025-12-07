@@ -274,20 +274,46 @@ pub fn unblock(t: *Thread) void {
     }
 }
 
-/// Exit the current thread
+/// Exit the current thread (default status 0)
 /// Thread will be marked as zombie and removed from scheduling
 pub fn exit() void {
+    exitWithStatus(0);
+}
+
+/// Exit the current thread with a specific exit status
+/// Thread will be marked as zombie and parent will be woken if waiting
+pub fn exitWithStatus(status: i32) void {
     const held = scheduler.lock.acquire();
 
     if (scheduler.current) |curr| {
+        // Set exit status
+        thread.setExitStatus(curr, status);
+
+        // Mark as zombie
         curr.state = .Zombie;
         scheduler.current = null;
 
         if (config.debug_scheduler) {
-            console.info("Sched: Thread '{s}' (tid={d}) exited", .{
+            console.info("Sched: Thread '{s}' (tid={d}) exited with status {d}", .{
                 curr.getName(),
                 curr.tid,
+                status,
             });
+        }
+
+        // Wake parent if blocked in wait4
+        if (curr.parent) |parent| {
+            if (parent.state == .Blocked) {
+                // Parent may be waiting for this child
+                // Wake parent so it can check for zombies
+                addToReadyQueue(parent);
+                if (config.debug_scheduler) {
+                    console.debug("Sched: Woke parent '{s}' (tid={d})", .{
+                        parent.getName(),
+                        parent.tid,
+                    });
+                }
+            }
         }
     }
 
@@ -369,6 +395,12 @@ pub fn timerTick(frame: *hal.idt.InterruptFrame) *hal.idt.InterruptFrame {
             if (next.cr3 != current_cr3) {
                 hal.cpu.writeCr3(next.cr3);
             }
+        }
+
+        // Restore FS base for TLS (set by arch_prctl ARCH_SET_FS)
+        // Only restore if thread has a non-zero FS base to avoid unnecessary MSR writes
+        if (next.fs_base != 0) {
+            hal.cpu.writeMsr(hal.cpu.IA32_FS_BASE, next.fs_base);
         }
 
         // Lazy FPU: Set CR0.TS to trigger #NM on first FPU access
