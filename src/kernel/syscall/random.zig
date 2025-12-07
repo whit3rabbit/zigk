@@ -22,6 +22,19 @@ const prng = @import("prng");
 pub const GRND_NONBLOCK: u32 = 0x1;
 pub const GRND_RANDOM: u32 = 0x2;
 
+// User pointer validation (duplicated from handlers.zig due to module constraints)
+const USER_SPACE_START: u64 = 0x0000_0000_0040_0000;
+const USER_SPACE_END: u64 = 0x0000_7FFF_FFFF_FFFF;
+
+fn isValidUserPtr(ptr: usize, len: usize) bool {
+    if (ptr == 0) return false;
+    if (ptr < USER_SPACE_START or ptr > USER_SPACE_END) return false;
+    const end_addr = @addWithOverflow(ptr, len);
+    if (end_addr[1] != 0) return false;
+    if (end_addr[0] > USER_SPACE_END) return false;
+    return true;
+}
+
 /// sys_getrandom(buf: [*]u8, buflen: usize, flags: u32) -> isize
 ///
 /// Fill buffer with random bytes from kernel PRNG.
@@ -39,11 +52,6 @@ pub fn sys_getrandom(buf_ptr: usize, buflen: usize, flags: u32) isize {
     // Silence unused parameter warning - flags are accepted but MVP ignores them
     _ = flags;
 
-    // FR-RAND-05: Validate buffer pointer
-    if (buf_ptr == 0) {
-        return uapi.errno.EFAULT.toReturn();
-    }
-
     // Sanity check buffer length (prevent DoS via huge allocation)
     // Linux limits to 256 bytes for GRND_RANDOM, 33554432 for GRND_NONBLOCK
     // We use a conservative 1MB limit for MVP
@@ -57,9 +65,12 @@ pub fn sys_getrandom(buf_ptr: usize, buflen: usize, flags: u32) isize {
         return 0;
     }
 
+    // FR-RAND-05: Validate buffer pointer is in userspace
+    if (!isValidUserPtr(buf_ptr, buflen)) {
+        return uapi.errno.EFAULT.toReturn();
+    }
+
     // FR-RAND-02: Fill buffer with random data from PRNG
-    // Safety: In kernel context, we trust the userspace pointer is valid.
-    // TODO: When userspace memory validation is implemented, add bounds check.
     const buf: [*]u8 = @ptrFromInt(buf_ptr);
     prng.fill(buf[0..buflen]);
 

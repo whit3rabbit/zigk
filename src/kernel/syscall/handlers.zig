@@ -16,6 +16,40 @@ const keyboard = @import("keyboard");
 const Errno = uapi.errno.Errno;
 
 // =============================================================================
+// User Pointer Validation
+// =============================================================================
+
+/// Userspace address range boundaries
+/// User code lives below the kernel in the canonical lower half
+const USER_SPACE_START: u64 = 0x0000_0000_0040_0000; // 4MB (above null guard)
+const USER_SPACE_END: u64 = 0x0000_7FFF_FFFF_FFFF; // Top of canonical lower half
+
+/// Validate that a user pointer is within the userspace address range.
+/// Returns true if the pointer appears valid for userspace access.
+/// Note: This is a basic bounds check - does not verify page mapping.
+pub fn isValidUserPtr(ptr: usize, len: usize) bool {
+    // Null pointer is never valid
+    if (ptr == 0) return false;
+
+    // Check pointer is in userspace range
+    if (ptr < USER_SPACE_START or ptr > USER_SPACE_END) return false;
+
+    // Check for overflow
+    const end_addr = @addWithOverflow(ptr, len);
+    if (end_addr[1] != 0) return false; // Overflow occurred
+
+    // Check end is still in userspace
+    if (end_addr[0] > USER_SPACE_END) return false;
+
+    return true;
+}
+
+/// Validate a user string pointer (null-terminated, max length)
+pub fn isValidUserString(ptr: usize, max_len: usize) bool {
+    return isValidUserPtr(ptr, max_len);
+}
+
+// =============================================================================
 // Process Control
 // =============================================================================
 
@@ -102,13 +136,12 @@ pub fn sys_sched_yield() isize {
 /// MVP: Busy-waits for the duration. Full implementation would
 /// block the thread and use a timer to wake it.
 pub fn sys_nanosleep(req_ptr: usize, rem_ptr: usize) isize {
-    // Validate request pointer
-    if (req_ptr == 0) {
+    // Validate request pointer is in userspace
+    if (!isValidUserPtr(req_ptr, @sizeOf(Timespec))) {
         return Errno.EFAULT.toReturn();
     }
 
     // Read timespec from userspace
-    // TODO: Proper user pointer validation
     const req: *const Timespec = @ptrFromInt(req_ptr);
 
     // Validate timespec values
@@ -226,15 +259,15 @@ pub fn sys_write(fd: usize, buf_ptr: usize, count: usize) isize {
         return Errno.EBADF.toReturn();
     }
 
-    if (buf_ptr == 0 and count > 0) {
-        return Errno.EFAULT.toReturn();
-    }
-
     if (count == 0) {
         return 0;
     }
 
-    // TODO: Proper user pointer validation
+    // Validate user buffer pointer
+    if (!isValidUserPtr(buf_ptr, count)) {
+        return Errno.EFAULT.toReturn();
+    }
+
     const buf: [*]const u8 = @ptrFromInt(buf_ptr);
 
     // Write to serial console
@@ -304,4 +337,132 @@ pub fn sys_read_scancode() isize {
     }
     // No scancode available
     return Errno.EAGAIN.toReturn();
+}
+
+// =============================================================================
+// Stub Handlers (Return appropriate error codes)
+// =============================================================================
+
+/// sys_open (2) - Open a file
+/// MVP: Returns -ENOENT (no filesystem)
+pub fn sys_open(path_ptr: usize, flags: usize, mode: usize) isize {
+    _ = flags;
+    _ = mode;
+    // Validate path pointer (assume max path length of 4096)
+    if (!isValidUserString(path_ptr, 4096)) {
+        return Errno.EFAULT.toReturn();
+    }
+    // No filesystem in MVP
+    return Errno.ENOENT.toReturn();
+}
+
+/// sys_close (3) - Close a file descriptor
+/// MVP: Returns -EBADF for all FDs except pre-opened 0/1/2
+pub fn sys_close(fd: usize) isize {
+    // Pre-opened FDs (stdin/stdout/stderr) cannot be closed in MVP
+    if (fd <= 2) {
+        return 0; // Pretend success
+    }
+    return Errno.EBADF.toReturn();
+}
+
+/// sys_mmap (9) - Map memory pages
+/// MVP: Returns -ENOMEM (no userspace memory management)
+pub fn sys_mmap(addr: usize, len: usize, prot: usize, flags: usize, fd: usize, offset: usize) isize {
+    _ = addr;
+    _ = len;
+    _ = prot;
+    _ = flags;
+    _ = fd;
+    _ = offset;
+    return Errno.ENOMEM.toReturn();
+}
+
+/// sys_mprotect (10) - Set memory protection
+/// MVP: Returns -ENOMEM (no userspace memory management)
+pub fn sys_mprotect(addr: usize, len: usize, prot: usize) isize {
+    _ = addr;
+    _ = len;
+    _ = prot;
+    return Errno.ENOMEM.toReturn();
+}
+
+/// sys_munmap (11) - Unmap memory pages
+/// MVP: Returns -EINVAL (no userspace memory management)
+pub fn sys_munmap(addr: usize, len: usize) isize {
+    _ = addr;
+    _ = len;
+    return Errno.EINVAL.toReturn();
+}
+
+/// sys_socket (41) - Create a socket
+/// MVP: Returns -ENOSYS (networking not implemented)
+pub fn sys_socket(domain: usize, sock_type: usize, protocol: usize) isize {
+    _ = domain;
+    _ = sock_type;
+    _ = protocol;
+    // Networking will be implemented in Phase 7
+    return Errno.ENOSYS.toReturn();
+}
+
+/// sys_sendto (44) - Send a message on a socket
+/// MVP: Returns -ENOSYS (networking not implemented)
+pub fn sys_sendto(fd: usize, buf_ptr: usize, len: usize, flags: usize, addr_ptr: usize, addrlen: usize) isize {
+    _ = fd;
+    _ = buf_ptr;
+    _ = len;
+    _ = flags;
+    _ = addr_ptr;
+    _ = addrlen;
+    return Errno.ENOSYS.toReturn();
+}
+
+/// sys_recvfrom (45) - Receive a message from a socket
+/// MVP: Returns -ENOSYS (networking not implemented)
+pub fn sys_recvfrom(fd: usize, buf_ptr: usize, len: usize, flags: usize, addr_ptr: usize, addrlen_ptr: usize) isize {
+    _ = fd;
+    _ = buf_ptr;
+    _ = len;
+    _ = flags;
+    _ = addr_ptr;
+    _ = addrlen_ptr;
+    return Errno.ENOSYS.toReturn();
+}
+
+/// sys_fork (57) - Create a child process
+/// MVP: Returns -ENOSYS (process forking not implemented)
+pub fn sys_fork() isize {
+    return Errno.ENOSYS.toReturn();
+}
+
+/// sys_execve (59) - Execute a program
+/// MVP: Returns -ENOSYS (process execution not implemented)
+pub fn sys_execve(path_ptr: usize, argv_ptr: usize, envp_ptr: usize) isize {
+    _ = path_ptr;
+    _ = argv_ptr;
+    _ = envp_ptr;
+    return Errno.ENOSYS.toReturn();
+}
+
+/// sys_arch_prctl (158) - Set architecture-specific thread state
+/// MVP: Returns -ENOSYS (thread state management not implemented)
+pub fn sys_arch_prctl(code: usize, addr: usize) isize {
+    _ = code;
+    _ = addr;
+    // Used for setting FS/GS base for TLS - not needed in MVP
+    return Errno.ENOSYS.toReturn();
+}
+
+/// sys_get_fb_info (1001) - Get framebuffer info
+/// MVP: Returns -ENODEV (no framebuffer driver)
+pub fn sys_get_fb_info(info_ptr: usize) isize {
+    _ = info_ptr;
+    // Framebuffer driver not implemented
+    return Errno.ENODEV.toReturn();
+}
+
+/// sys_map_fb (1002) - Map framebuffer into process address space
+/// MVP: Returns -ENODEV (no framebuffer driver)
+pub fn sys_map_fb() isize {
+    return Errno.ENODEV.toReturn();
 }
