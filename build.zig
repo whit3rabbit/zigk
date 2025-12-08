@@ -144,6 +144,7 @@ pub fn build(b: *std.Build) void {
         .target = kernel_target,
         .optimize = optimize,
     });
+    net_module.addImport("hal", hal_module);
 
     // Create PRNG module (Kernel entropy/random)
     const prng_module = b.createModule(.{
@@ -261,6 +262,22 @@ pub fn build(b: *std.Build) void {
     devfs_module.addImport("sched", sched_module);
     devfs_module.addImport("uapi", uapi_module);
 
+    // Create Process module (process abstraction for fork/exec/wait)
+    const process_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/process.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    process_module.addImport("heap", heap_module);
+    process_module.addImport("console", console_module);
+    process_module.addImport("fd", fd_module);
+    process_module.addImport("devfs", devfs_module);
+    process_module.addImport("user_vmm", user_vmm_module);
+    process_module.addImport("vmm", vmm_module);
+    process_module.addImport("pmm", pmm_module);
+    process_module.addImport("hal", hal_module);
+    process_module.addImport("uapi", uapi_module);
+
     // Create syscall random module
     const syscall_random_module = b.createModule(.{
         .root_source_file = b.path("src/kernel/syscall/random.zig"),
@@ -278,6 +295,8 @@ pub fn build(b: *std.Build) void {
     });
     syscall_net_module.addImport("uapi", uapi_module);
     syscall_net_module.addImport("net", net_module);
+    syscall_net_module.addImport("sched", sched_module);
+    syscall_net_module.addImport("thread", thread_module);
 
     // Create syscall handlers module
     const syscall_handlers_module = b.createModule(.{
@@ -294,6 +313,10 @@ pub fn build(b: *std.Build) void {
     syscall_handlers_module.addImport("fd", fd_module);
     syscall_handlers_module.addImport("devfs", devfs_module);
     syscall_handlers_module.addImport("user_vmm", user_vmm_module);
+    syscall_handlers_module.addImport("process", process_module);
+    syscall_handlers_module.addImport("vmm", vmm_module);
+    syscall_handlers_module.addImport("pmm", pmm_module);
+    syscall_handlers_module.addImport("heap", heap_module);
 
     // Create syscall dispatch table module
     const syscall_table_module = b.createModule(.{

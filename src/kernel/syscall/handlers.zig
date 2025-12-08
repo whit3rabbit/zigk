@@ -16,68 +16,95 @@ const keyboard = @import("keyboard");
 const fd_mod = @import("fd");
 const devfs = @import("devfs");
 const user_vmm = @import("user_vmm");
+const process_mod = @import("process");
+const vmm = @import("vmm");
+const pmm = @import("pmm");
+const heap = @import("heap");
 
 const Errno = uapi.errno.Errno;
 const UserVmm = user_vmm.UserVmm;
 const FdTable = fd_mod.FdTable;
 const FileDescriptor = fd_mod.FileDescriptor;
+const Process = process_mod.Process;
+
+// =============================================================================
+// Current Process Tracking
+// =============================================================================
+// For Phase 4, we track the current process. Falls back to init process
+// when no explicit current process is set.
+
+var current_process: ?*Process = null;
+
+/// Get the current process (init if none set)
+pub fn getCurrentProcess() *Process {
+    if (current_process) |proc| {
+        return proc;
+    }
+
+    // First access - get or create init process
+    current_process = process_mod.getInitProcess() catch {
+        console.err("Process: Failed to create init process", .{});
+        @panic("Cannot create init process");
+    };
+
+    console.info("Process: Using init process (pid={})", .{current_process.?.pid});
+    return current_process.?;
+}
+
+/// Set the current process (for context switching)
+pub fn setCurrentProcess(proc: *Process) void {
+    current_process = proc;
+}
 
 // =============================================================================
 // Global FD Table (MVP single-process)
 // =============================================================================
-// In Phase 4 (Process model), this moves to per-process FD tables.
-// For now, use a single global table for the MVP.
+// In Phase 4 (Process model), this uses the current process's FD table.
+// Falls back to global for backward compatibility.
 
 var global_fd_table: ?*FdTable = null;
 var fd_table_initialized: bool = false;
 
-/// Get or initialize the global FD table
+/// Get the FD table for the current process
 fn getGlobalFdTable() *FdTable {
+    // Use current process's FD table if available
+    if (current_process) |proc| {
+        return proc.fd_table;
+    }
+
+    // Fallback to global for backward compatibility
     if (global_fd_table) |table| {
         return table;
     }
 
-    // First access - initialize the table
-    global_fd_table = fd_mod.createFdTable() catch {
-        console.err("FD: Failed to create global FD table", .{});
-        @panic("Cannot create FD table");
-    };
-
-    // Pre-populate stdin/stdout/stderr
-    devfs.createStdFds(global_fd_table.?) catch {
-        console.err("FD: Failed to create standard FDs", .{});
-        @panic("Cannot create standard FDs");
-    };
-
-    fd_table_initialized = true;
-    console.info("FD: Global FD table initialized with stdin/stdout/stderr", .{});
-
-    return global_fd_table.?;
+    // First access - use init process's FD table
+    const init_proc = getCurrentProcess();
+    return init_proc.fd_table;
 }
 
 // =============================================================================
 // Global User VMM (MVP single-process)
 // =============================================================================
-// In Phase 4 (Process model), this moves to per-process UserVmm.
-// For now, use a single global instance for the MVP.
+// In Phase 4 (Process model), this uses the current process's UserVmm.
+// Falls back to global for backward compatibility.
 
 var global_user_vmm: ?*UserVmm = null;
 
-/// Get or initialize the global UserVmm
+/// Get the UserVmm for the current process
 fn getGlobalUserVmm() *UserVmm {
-    if (global_user_vmm) |vmm| {
-        return vmm;
+    // Use current process's UserVmm if available
+    if (current_process) |proc| {
+        return proc.user_vmm;
     }
 
-    // First access - initialize the UserVmm
-    // Use current thread's CR3 if available, else create new address space
-    global_user_vmm = UserVmm.init() catch {
-        console.err("UserVmm: Failed to create global UserVmm", .{});
-        @panic("Cannot create UserVmm");
-    };
+    // Fallback to global for backward compatibility
+    if (global_user_vmm) |uvmm| {
+        return uvmm;
+    }
 
-    console.info("UserVmm: Global UserVmm initialized", .{});
-    return global_user_vmm.?;
+    // First access - use init process's UserVmm
+    const init_proc = getCurrentProcess();
+    return init_proc.user_vmm;
 }
 
 // =============================================================================
@@ -598,9 +625,104 @@ pub fn sys_recvfrom(fd: usize, buf_ptr: usize, len: usize, flags: usize, addr_pt
 }
 
 /// sys_fork (57) - Create a child process
-/// MVP: Returns -ENOSYS (process forking not implemented)
+///
+/// Creates a new process by duplicating the calling process.
+/// The child process has:
+///   - Copied address space (all VMAs and their contents)
+///   - Duplicated file descriptor table
+///   - Parent set to the calling process
+///
+/// Returns:
+///   - Child PID to parent process
+///   - 0 to child process
+///   - Negative errno on error
 pub fn sys_fork() isize {
-    return Errno.ENOSYS.toReturn();
+    const thread = @import("thread");
+
+    // Get current process
+    const parent_proc = getCurrentProcess();
+
+    // Fork the process (copies address space and FDs)
+    const child_proc = process_mod.forkProcess(parent_proc) catch |err| {
+        console.err("sys_fork: Failed to fork process: {}", .{err});
+        return Errno.ENOMEM.toReturn();
+    };
+
+    // Get current thread to copy its state
+    const parent_thread = sched.getCurrentThread() orelse {
+        // No current thread - this shouldn't happen
+        process_mod.destroyProcess(child_proc);
+        return Errno.ESRCH.toReturn();
+    };
+
+    // Create child thread
+    // The child thread needs to be set up to return 0 from this syscall
+    const child_thread = thread.createUserThread(
+        0, // Entry point will be set from parent's saved state
+        .{
+            .name = parent_thread.getName(),
+            .cr3 = child_proc.cr3,
+            .user_stack_top = parent_thread.user_stack_top,
+        },
+    ) catch {
+        process_mod.destroyProcess(child_proc);
+        return Errno.ENOMEM.toReturn();
+    };
+
+    // Copy parent's kernel stack frame to child
+    // This makes the child resume at the same point as parent
+    copyThreadState(parent_thread, child_thread);
+
+    // Set child's return value to 0 (RAX in syscall return)
+    // The return value is stored in the saved interrupt frame
+    setForkChildReturn(child_thread);
+
+    // Set up parent-child relationship in thread hierarchy
+    thread.addChild(parent_thread, child_thread);
+
+    // Add child thread to scheduler
+    sched.addThread(child_thread);
+
+    // Return child PID to parent
+    return @intCast(child_proc.pid);
+}
+
+/// Copy thread state from parent to child for fork
+fn copyThreadState(parent: *@import("thread").Thread, child: *@import("thread").Thread) void {
+    // Copy the saved interrupt frame from parent's kernel stack
+    // The frame contains all registers including RIP (resume point)
+    const frame_size: usize = 23 * 8; // 15 GPRs + vec + err + 5 iretq values
+
+    const parent_frame_ptr: [*]u8 = @ptrFromInt(parent.kernel_rsp);
+    const child_frame_ptr: [*]u8 = @ptrFromInt(child.kernel_rsp);
+
+    @memcpy(child_frame_ptr[0..frame_size], parent_frame_ptr[0..frame_size]);
+
+    // Copy FS base (TLS)
+    child.fs_base = parent.fs_base;
+}
+
+/// Set the child's return value to 0 for fork
+/// Modifies RAX in the saved interrupt frame
+fn setForkChildReturn(child: *@import("thread").Thread) void {
+    // The interrupt frame has RAX as the first GPR after vec/err
+    // Stack layout (from bottom, growing down):
+    // [SS, RSP, RFLAGS, CS, RIP, err, vec, RAX, RBX, ...]
+    // RAX is at offset 14*8 from the top of the frame
+
+    // The child's kernel_rsp points to the bottom of the saved frame
+    // RAX is at offset (frame_size - 8*1) from kernel_rsp
+    // Actually, RAX is the first GPR pushed, so it's at the highest address
+    // in the GPR section
+
+    // Frame layout from low to high addresses (kernel_rsp points here):
+    // R15, R14, R13, R12, R11, R10, R9, R8, RDI, RSI, RBP, RDX, RCX, RBX, RAX
+    // vec, err, RIP, CS, RFLAGS, RSP, SS
+
+    // RAX is 14 u64s from kernel_rsp
+    const rax_offset: usize = 14 * 8;
+    const rax_ptr: *u64 = @ptrFromInt(child.kernel_rsp + rax_offset);
+    rax_ptr.* = 0; // Child gets 0 from fork()
 }
 
 /// sys_execve (59) - Execute a program

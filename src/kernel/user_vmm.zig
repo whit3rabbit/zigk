@@ -421,7 +421,8 @@ pub const UserVmm = struct {
     }
 
     /// Create a new VMA struct
-    fn createVma(self: *UserVmm, start: u64, end: u64, prot: u32, flags: u32) !*Vma {
+    /// Public for use by process fork
+    pub fn createVma(self: *UserVmm, start: u64, end: u64, prot: u32, flags: u32) !*Vma {
         _ = self;
         const alloc = heap.allocator();
         const vma = try alloc.create(Vma);
@@ -437,7 +438,8 @@ pub const UserVmm = struct {
     }
 
     /// Insert VMA into sorted list
-    fn insertVma(self: *UserVmm, vma: *Vma) void {
+    /// Public for use by process fork
+    pub fn insertVma(self: *UserVmm, vma: *Vma) void {
         self.vma_count += 1;
 
         // Empty list
