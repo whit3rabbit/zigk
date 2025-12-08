@@ -278,6 +278,19 @@ pub fn build(b: *std.Build) void {
     process_module.addImport("hal", hal_module);
     process_module.addImport("uapi", uapi_module);
 
+    // Create ELF loader module (for execve)
+    const elf_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/elf.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    elf_module.addImport("hal", hal_module);
+    elf_module.addImport("vmm", vmm_module);
+    elf_module.addImport("pmm", pmm_module);
+    elf_module.addImport("heap", heap_module);
+    elf_module.addImport("console", console_module);
+    elf_module.addImport("uapi", uapi_module);
+
     // Create syscall random module
     const syscall_random_module = b.createModule(.{
         .root_source_file = b.path("src/kernel/syscall/random.zig"),
@@ -317,6 +330,7 @@ pub fn build(b: *std.Build) void {
     syscall_handlers_module.addImport("vmm", vmm_module);
     syscall_handlers_module.addImport("pmm", pmm_module);
     syscall_handlers_module.addImport("heap", heap_module);
+    syscall_handlers_module.addImport("elf", elf_module);
 
     // Create syscall dispatch table module
     const syscall_table_module = b.createModule(.{

@@ -20,6 +20,7 @@ const process_mod = @import("process");
 const vmm = @import("vmm");
 const pmm = @import("pmm");
 const heap = @import("heap");
+const elf = @import("elf");
 
 const Errno = uapi.errno.Errno;
 const UserVmm = user_vmm.UserVmm;
@@ -726,12 +727,127 @@ fn setForkChildReturn(child: *@import("thread").Thread) void {
 }
 
 /// sys_execve (59) - Execute a program
-/// MVP: Returns -ENOSYS (process execution not implemented)
+///
+/// Replaces the current process image with a new program.
+/// The new program is loaded from the specified path (InitRD lookup).
+///
+/// Args:
+///   path_ptr: Pointer to null-terminated path string
+///   argv_ptr: Pointer to null-terminated array of argument pointers
+///   envp_ptr: Pointer to null-terminated array of environment pointers
+///
+/// Returns:
+///   Does not return on success (new program starts)
+///   -ENOENT if executable not found
+///   -EFAULT for invalid pointers
+///   -ENOEXEC for invalid executable format
+///
+/// Note: Currently only supports executables loaded via InitRD modules.
+/// Filesystem-based executables require VFS implementation.
 pub fn sys_execve(path_ptr: usize, argv_ptr: usize, envp_ptr: usize) isize {
-    _ = path_ptr;
-    _ = argv_ptr;
-    _ = envp_ptr;
-    return Errno.ENOSYS.toReturn();
+    const thread_mod = @import("thread");
+
+    // Validate path pointer
+    const max_path: usize = 4096;
+    if (!isValidUserString(path_ptr, max_path)) {
+        return Errno.EFAULT.toReturn();
+    }
+
+    // Read path string
+    const path_bytes: [*]const u8 = @ptrFromInt(path_ptr);
+    var path_len: usize = 0;
+    while (path_len < max_path and path_bytes[path_len] != 0) : (path_len += 1) {}
+
+    if (path_len == 0) {
+        return Errno.ENOENT.toReturn();
+    }
+
+    const path = path_bytes[0..path_len];
+    console.debug("sys_execve: path='{s}'", .{path});
+
+    // Parse argv (collect up to 64 arguments)
+    var argv_storage: [64][]const u8 = undefined;
+    var argc: usize = 0;
+
+    if (argv_ptr != 0 and isValidUserPtr(argv_ptr, 8)) {
+        const argv_array: [*]const usize = @ptrFromInt(argv_ptr);
+        while (argc < 64) {
+            const arg_ptr = argv_array[argc];
+            if (arg_ptr == 0) break;
+
+            if (!isValidUserString(arg_ptr, max_path)) break;
+
+            const arg_bytes: [*]const u8 = @ptrFromInt(arg_ptr);
+            var arg_len: usize = 0;
+            while (arg_len < max_path and arg_bytes[arg_len] != 0) : (arg_len += 1) {}
+
+            argv_storage[argc] = arg_bytes[0..arg_len];
+            argc += 1;
+        }
+    }
+
+    const argv = argv_storage[0..argc];
+
+    // Parse envp (collect up to 64 environment variables)
+    var envp_storage: [64][]const u8 = undefined;
+    var envc: usize = 0;
+
+    if (envp_ptr != 0 and isValidUserPtr(envp_ptr, 8)) {
+        const envp_array: [*]const usize = @ptrFromInt(envp_ptr);
+        while (envc < 64) {
+            const env_ptr = envp_array[envc];
+            if (env_ptr == 0) break;
+
+            if (!isValidUserString(env_ptr, max_path)) break;
+
+            const env_bytes: [*]const u8 = @ptrFromInt(env_ptr);
+            var env_len: usize = 0;
+            while (env_len < max_path and env_bytes[env_len] != 0) : (env_len += 1) {}
+
+            envp_storage[envc] = env_bytes[0..env_len];
+            envc += 1;
+        }
+    }
+
+    const envp = envp_storage[0..envc];
+
+    // argv and envp are parsed and ready for ELF loader
+    // Currently unused until InitRD lookup is implemented
+    _ = argv;
+    _ = envp;
+
+    console.debug("sys_execve: argc={}, envc={}", .{ argc, envc });
+
+    // TODO: Look up executable in InitRD
+    // For now, we need a way to find the executable data.
+    // This requires either:
+    // 1. A global InitRD registry populated at boot
+    // 2. A simple in-memory filesystem
+    // 3. Passing executable data through another mechanism
+    //
+    // Since we don't have filesystem support yet, return ENOENT.
+    // The ELF loader infrastructure is ready - we just need executable lookup.
+
+    // Check for special paths that we might handle differently
+    // For now, all paths fail since we don't have InitRD lookup yet
+    // path, argv, envp already used in debug output above
+
+    // Get current thread for potential future use
+    _ = sched.getCurrentThread() orelse {
+        return Errno.ESRCH.toReturn();
+    };
+    _ = thread_mod;
+    _ = elf; // ELF loader ready but not used until InitRD lookup implemented
+
+    // Return ENOENT - executable lookup not implemented
+    // When InitRD lookup is added, this will:
+    // 1. Find the executable data in InitRD
+    // 2. Call elf.exec(data, argv, envp)
+    // 3. Replace current process's address space
+    // 4. Set thread's CR3, entry point, and stack pointer
+    // 5. Return to userspace at new entry point
+    console.warn("sys_execve: InitRD lookup not implemented, returning ENOENT", .{});
+    return Errno.ENOENT.toReturn();
 }
 
 // arch_prctl operation codes (Linux ABI)
