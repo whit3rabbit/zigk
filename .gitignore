@@ -43,3 +43,5 @@ docs/_build/
 *.qcow2
 *.vdi
 *.fd
+*.dSYM/
+limine/limine.dSYM/
