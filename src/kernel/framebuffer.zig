@@ -1,14 +1,14 @@
 // Framebuffer State Management
 //
-// Captures and stores framebuffer information from Multiboot2 boot info.
+// Captures and stores framebuffer information from bootloader.
 // Provides a global accessor for syscall handlers to query framebuffer state.
 //
-// The framebuffer physical address and dimensions are captured at boot time
-// from the Multiboot2 framebuffer tag. This allows userspace programs to:
+// The framebuffer physical address and dimensions are captured at boot time.
+// This allows userspace programs to:
 //   1. Query framebuffer info via sys_get_fb_info (1001)
 //   2. Map framebuffer memory via sys_map_fb (1002)
 
-const multiboot2 = @import("multiboot2");
+const limine = @import("limine");
 const console = @import("console");
 
 /// Framebuffer state captured at boot
@@ -60,42 +60,37 @@ var state: FramebufferState = .{
     .available = false,
 };
 
-/// Initialize framebuffer state from Multiboot2 boot info
+/// Initialize framebuffer state from Limine framebuffer request
 /// Called once during kernel initialization (after PMM, before scheduler)
-pub fn init(boot_info: *const multiboot2.BootInfo) void {
-    const fb_tag = multiboot2.findFramebufferTag(boot_info) orelse {
-        console.warn("Framebuffer: No framebuffer tag found (serial-only mode)", .{});
+pub fn initFromLimine(fb_request: *const limine.FramebufferRequest) void {
+    const fb_response = fb_request.response orelse {
+        console.warn("Framebuffer: No response (serial-only mode)", .{});
         return;
     };
 
-    // Capture basic framebuffer info
-    state.phys_addr = fb_tag.framebuffer_addr;
-    state.width = fb_tag.framebuffer_width;
-    state.height = fb_tag.framebuffer_height;
-    state.pitch = fb_tag.framebuffer_pitch;
-    state.bpp = fb_tag.framebuffer_bpp;
-    state.size = @as(usize, fb_tag.framebuffer_pitch) * @as(usize, fb_tag.framebuffer_height);
-
-    // Extract RGB color info if available
-    if (multiboot2.getRgbColorInfo(fb_tag)) |color_info| {
-        state.red_shift = color_info.red_field_position;
-        state.red_mask_size = color_info.red_mask_size;
-        state.green_shift = color_info.green_field_position;
-        state.green_mask_size = color_info.green_mask_size;
-        state.blue_shift = color_info.blue_field_position;
-        state.blue_mask_size = color_info.blue_mask_size;
-    } else {
-        // Default to common 32-bit BGRA format if no color info
-        // This is typical for QEMU/GRUB framebuffers
-        if (fb_tag.framebuffer_bpp == 32) {
-            state.blue_shift = 0;
-            state.blue_mask_size = 8;
-            state.green_shift = 8;
-            state.green_mask_size = 8;
-            state.red_shift = 16;
-            state.red_mask_size = 8;
-        }
+    if (fb_response.framebuffer_count == 0) {
+        console.warn("Framebuffer: No framebuffers available (serial-only mode)", .{});
+        return;
     }
+
+    // Use the first framebuffer
+    const fb = fb_response.framebuffers()[0];
+
+    // Capture basic framebuffer info
+    state.phys_addr = fb.address;
+    state.width = @intCast(fb.width);
+    state.height = @intCast(fb.height);
+    state.pitch = @intCast(fb.pitch);
+    state.bpp = @truncate(fb.bpp);
+    state.size = @as(usize, @intCast(fb.pitch)) * @as(usize, @intCast(fb.height));
+
+    // Extract RGB color info from Limine framebuffer structure
+    state.red_shift = fb.red_mask_shift;
+    state.red_mask_size = fb.red_mask_size;
+    state.green_shift = fb.green_mask_shift;
+    state.green_mask_size = fb.green_mask_size;
+    state.blue_shift = fb.blue_mask_shift;
+    state.blue_mask_size = fb.blue_mask_size;
 
     state.available = true;
 

@@ -17,6 +17,11 @@ const Ipv4Header = packet.Ipv4Header;
 const EthernetHeader = packet.EthernetHeader;
 const Interface = interface.Interface;
 
+// Forward declarations to avoid circular dependencies if possible,
+// but we need to call them. circular imports are allowed in Zig if done right.
+const tcp = @import("tcp.zig");
+const udp = @import("udp.zig");
+
 /// ICMP message types
 pub const TYPE_ECHO_REPLY: u8 = 0;
 pub const TYPE_DEST_UNREACHABLE: u8 = 3;
@@ -33,6 +38,7 @@ pub const CODE_NET_UNREACHABLE: u8 = 0;
 pub const CODE_HOST_UNREACHABLE: u8 = 1;
 pub const CODE_PROTO_UNREACHABLE: u8 = 2;
 pub const CODE_PORT_UNREACHABLE: u8 = 3;
+pub const CODE_FRAGMENTATION_NEEDED: u8 = 4; // RFC 1191: PMTUD
 
 /// Process an incoming ICMP packet
 pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
@@ -65,8 +71,7 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
             return true;
         },
         TYPE_DEST_UNREACHABLE => {
-            // Could notify transport layer
-            return true;
+            return handleDestUnreachable(pkt, icmp);
         },
         else => {
             // Unknown or unsupported type
@@ -152,6 +157,83 @@ fn handleEchoRequest(iface: *Interface, req_pkt: *PacketBuffer, icmp_len: usize)
 
     // Transmit reply
     return iface.transmit(reply_buf[0..total_len]);
+}
+
+/// Handle ICMP Destination Unreachable messages
+/// Specifically handles Code 4 (Fragmentation Needed) for PMTUD (RFC 1191)
+fn handleDestUnreachable(pkt: *PacketBuffer, icmp: *const IcmpHeader) bool {
+    // ICMP Destination Unreachable format:
+    // Bytes 0-1: Type (3) + Code
+    // Bytes 2-3: Checksum
+    // Bytes 4-5: Unused (for most codes) or Next-Hop MTU (for Code 4)
+    // Bytes 6-7: Next-Hop MTU (RFC 1191, only valid for Code 4)
+    // Bytes 8+: Original IP header + first 8 bytes of original datagram
+
+    if (icmp.code == CODE_FRAGMENTATION_NEEDED) {
+        // Extract next-hop MTU from ICMP message
+        // Per RFC 1191, bytes 6-7 contain the next-hop MTU in network byte order
+        // The identifier/sequence fields in IcmpHeader overlay bytes 4-7
+        // So: identifier = bytes 4-5 (unused), sequence = bytes 6-7 (MTU)
+        const next_hop_mtu = @byteSwap(icmp.sequence);
+
+        // RFC 1191: If MTU field is 0, use "plateau" table
+        // For simplicity, we use a conservative estimate based on common MTUs
+        var effective_mtu: u16 = next_hop_mtu;
+        if (next_hop_mtu == 0) {
+            // Old-style ICMP without MTU field - use conservative MTU
+            // Common plateau: 1492 (PPPoE), 1006, 508, 296
+            effective_mtu = 1006;
+        }
+
+        // Extract original destination IP from the embedded IP header
+        // The original IP header starts 8 bytes after ICMP header start
+        const orig_ip_offset = pkt.transport_offset + packet.ICMP_HEADER_SIZE;
+        if (orig_ip_offset + packet.IP_HEADER_SIZE <= pkt.len) {
+            const orig_ip: *const Ipv4Header = @ptrCast(@alignCast(&pkt.data[orig_ip_offset]));
+            const original_dst = orig_ip.getDstIp();
+
+            // Update PMTU cache for this destination
+            ipv4.updatePmtu(original_dst, effective_mtu);
+        }
+    }
+
+    // Other codes (Network/Host/Protocol/Port Unreachable)
+    // Notify transport layer of connection failures
+    
+    // Parse original IP header to get protocol and ports
+    const orig_ip_offset = pkt.transport_offset + packet.ICMP_HEADER_SIZE;
+    if (orig_ip_offset + packet.IP_HEADER_SIZE > pkt.len) return true;
+    
+    const orig_ip: *const Ipv4Header = @ptrCast(@alignCast(&pkt.data[orig_ip_offset]));
+    const orig_ip_len = orig_ip.getHeaderLength();
+    
+    // Check if we have enough data for transport header (at least 8 bytes)
+    const transport_offset = orig_ip_offset + orig_ip_len;
+    if (transport_offset + 8 > pkt.len) return true;
+    
+    const orig_transport_data = pkt.data[transport_offset..][0..8];
+    const src_ip = orig_ip.getSrcIp(); // This should be US (or one of our IPs)
+    const dst_ip = orig_ip.getDstIp(); // The remote host
+    
+    // Determine Protocol
+    switch (orig_ip.protocol) {
+        ipv4.PROTO_TCP => {
+            // Extract ports (src=local, dst=remote from original packet perspective)
+            // TCP: Src Port (0-1), Dst Port (2-3)
+            const local_port = (@as(u16, orig_transport_data[0]) << 8) | orig_transport_data[1];
+            const remote_port = (@as(u16, orig_transport_data[2]) << 8) | orig_transport_data[3];
+            
+            tcp.handleIcmpError(
+                src_ip, local_port,
+                dst_ip, remote_port,
+                icmp.icmp_type, icmp.code
+            );
+        },
+        // UDP integration can be added later
+        else => {},
+    }
+
+    return true;
 }
 
 /// Verify ICMP checksum

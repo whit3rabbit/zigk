@@ -12,7 +12,7 @@
 //   Return: RAX=result or -errno
 
 // =============================================================================
-// Linux x86_64 ABI Syscalls
+// Linux x86_64 ABI Syscalls (numerical order)
 // =============================================================================
 
 /// Read from a file descriptor
@@ -31,6 +31,10 @@ pub const SYS_OPEN: usize = 2;
 /// (fd) -> int
 pub const SYS_CLOSE: usize = 3;
 
+/// Wait for some event on a set of file descriptors
+/// (ufds, nfds, timeout) -> int
+pub const SYS_POLL: usize = 7;
+
 /// Map memory pages
 /// (addr, len, prot, flags, fd, off) -> addr
 pub const SYS_MMAP: usize = 9;
@@ -47,9 +51,21 @@ pub const SYS_MUNMAP: usize = 11;
 /// (brk) -> addr
 pub const SYS_BRK: usize = 12;
 
+/// Perform device-specific control operations
+/// (fd, cmd, arg) -> int
+pub const SYS_IOCTL: usize = 16;
+
+/// Examine multiple file descriptors
+/// (nfds, readfds, writefds, exceptfds, timeout) -> int
+pub const SYS_SELECT: usize = 23;
+
 /// Yield the processor
 /// () -> int
 pub const SYS_SCHED_YIELD: usize = 24;
+
+/// Duplicate a file descriptor
+/// (oldfd, newfd) -> int
+pub const SYS_DUP2: usize = 33;
 
 /// High-resolution sleep
 /// (req, rem) -> int
@@ -63,9 +79,13 @@ pub const SYS_GETPID: usize = 39;
 /// (domain, type, protocol) -> fd
 pub const SYS_SOCKET: usize = 41;
 
-/// Bind a socket to an address
+/// Connect socket to address
 /// (fd, addr, addrlen) -> int
-pub const SYS_BIND: usize = 49;
+pub const SYS_CONNECT: usize = 42;
+
+/// Accept connection on socket
+/// (fd, addr, addrlen) -> fd
+pub const SYS_ACCEPT: usize = 43;
 
 /// Send a message on a socket
 /// (fd, buf, len, flags, addr, addrlen) -> ssize_t
@@ -74,6 +94,43 @@ pub const SYS_SENDTO: usize = 44;
 /// Receive a message from a socket
 /// (fd, buf, len, flags, addr, addrlen) -> ssize_t
 pub const SYS_RECVFROM: usize = 45;
+
+/// Send a message on a socket with scatter/gather I/O
+/// (fd, msg, flags) -> ssize_t
+pub const SYS_SENDMSG: usize = 46;
+
+/// Receive a message from a socket with scatter/gather I/O
+/// (fd, msg, flags) -> ssize_t
+pub const SYS_RECVMSG: usize = 47;
+
+/// Shut down part of a full-duplex connection
+/// (fd, how) -> int
+/// how: 0=SHUT_RD, 1=SHUT_WR, 2=SHUT_RDWR
+pub const SYS_SHUTDOWN: usize = 48;
+
+/// Bind a socket to an address
+/// (fd, addr, addrlen) -> int
+pub const SYS_BIND: usize = 49;
+
+/// Listen for connections on socket
+/// (fd, backlog) -> int
+pub const SYS_LISTEN: usize = 50;
+
+/// Get local socket address
+/// (fd, addr, addrlen) -> int
+pub const SYS_GETSOCKNAME: usize = 51;
+
+/// Get peer socket address
+/// (fd, addr, addrlen) -> int
+pub const SYS_GETPEERNAME: usize = 52;
+
+/// Set socket options
+/// (fd, level, optname, optval, optlen) -> int
+pub const SYS_SETSOCKOPT: usize = 54;
+
+/// Get socket options
+/// (fd, level, optname, optval, optlen) -> int
+pub const SYS_GETSOCKOPT: usize = 55;
 
 /// Create a child process
 /// () -> pid_t
@@ -91,6 +148,14 @@ pub const SYS_EXIT: usize = 60;
 /// (pid, wstatus, options, rusage) -> pid_t
 pub const SYS_WAIT4: usize = 61;
 
+/// Get system information
+/// (name) -> int
+pub const SYS_UNAME: usize = 63;
+
+/// Manipulate file descriptor flags (e.g., O_NONBLOCK)
+/// (fd, cmd, arg) -> int
+pub const SYS_FCNTL: usize = 72;
+
 /// Get user ID
 /// () -> uid_t
 pub const SYS_GETUID: usize = 102;
@@ -107,6 +172,14 @@ pub const SYS_GETPPID: usize = 110;
 /// (code, addr) -> int
 pub const SYS_ARCH_PRCTL: usize = 158;
 
+/// Get host name
+/// (name, len) -> int
+pub const SYS_GETHOSTNAME: usize = 170;
+
+/// Set host name
+/// (name, len) -> int
+pub const SYS_SETHOSTNAME: usize = 171;
+
 /// Get time from a clock
 /// (clk_id, tp) -> int
 pub const SYS_CLOCK_GETTIME: usize = 228;
@@ -114,6 +187,22 @@ pub const SYS_CLOCK_GETTIME: usize = 228;
 /// Exit all threads in process
 /// (code) -> noreturn
 pub const SYS_EXIT_GROUP: usize = 231;
+
+/// Wait for I/O events on an epoll instance
+/// (epfd, events, maxevents, timeout) -> int
+pub const SYS_EPOLL_WAIT: usize = 232;
+
+/// Control an epoll instance
+/// (epfd, op, fd, event) -> int
+pub const SYS_EPOLL_CTL: usize = 233;
+
+/// Open file relative to a directory FD
+/// (dfd, filename, flags, mode) -> int
+pub const SYS_OPENAT: usize = 257;
+
+/// Create an epoll instance
+/// (flags) -> int
+pub const SYS_EPOLL_CREATE1: usize = 291;
 
 /// Get random bytes
 /// (buf, count, flags) -> ssize_t

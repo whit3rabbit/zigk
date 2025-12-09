@@ -75,15 +75,28 @@ pub fn sendDatagram(
     dst_port: u16,
     data: []const u8,
 ) bool {
+    return sendDatagramWithTos(iface, dst_ip, src_port, dst_port, data, 0);
+}
+
+/// Send a UDP datagram with explicit ToS value
+/// tos: Type of Service / DSCP value (0 = normal service)
+pub fn sendDatagramWithTos(
+    iface: *Interface,
+    dst_ip: u32,
+    src_port: u16,
+    dst_port: u16,
+    data: []const u8,
+    tos: u8,
+) bool {
     if (data.len > MAX_UDP_PAYLOAD) {
         return false;
     }
 
     // Resolve destination MAC
+    // Resolve destination MAC
     const next_hop = iface.getGateway(dst_ip);
-    const dst_mac = arp.resolveOrRequest(iface, next_hop) orelse {
-        return false;
-    };
+    var dst_mac = arp.resolve(next_hop) orelse [_]u8{ 0, 0, 0, 0, 0, 0 };
+    const have_mac = (arp.resolve(next_hop) != null);
 
     // Calculate sizes
     const eth_len = packet.ETH_HEADER_SIZE;
@@ -105,7 +118,7 @@ pub fn sendDatagram(
     // Build IP header
     const ip: *Ipv4Header = @ptrCast(@alignCast(&buf[eth_len]));
     ip.version_ihl = 0x45;
-    ip.tos = 0;
+    ip.tos = tos;
     ip.setTotalLength(@truncate(ip_len + udp_len));
     ip.identification = @byteSwap(ipv4.getNextId());
     ip.flags_fragment = @byteSwap(@as(u16, 0x4000));
@@ -132,8 +145,26 @@ pub fn sendDatagram(
     const udp_data = buf[eth_len + ip_len ..][0..udp_len];
     udp_hdr.checksum = checksum.udpChecksum(ip.src_ip, ip.dst_ip, udp_data);
 
-    // Transmit
-    return iface.transmit(buf[0..total_len]);
+    // Transmit or Queue
+    if (have_mac) {
+        return iface.transmit(buf[0..total_len]);
+    } else {
+        // Create wrapper packet buffer for queueing
+        var pkt = PacketBuffer.init(&buf, total_len);
+        pkt.eth_offset = 0;
+        pkt.ip_offset = eth_len;
+        pkt.transport_offset = eth_len + ip_len;
+        
+        // Try resolve again with packet to queue
+        if (arp.resolveOrRequest(iface, next_hop, &pkt)) |mac| {
+            // Resolved immediately (race condition or just appeared)
+            @memcpy(&eth.dst_mac, &mac);
+            return iface.transmit(buf[0..total_len]);
+        }
+        
+        // Queued successfully
+        return true;
+    }
 }
 
 /// Calculate payload length from UDP header

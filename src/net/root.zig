@@ -1,12 +1,9 @@
-// Network Stack Module
-//
-// Main entry point for the ZigK network stack.
-// Re-exports all protocol layers.
-
-pub const core = @import("core/root.zig");
-pub const ethernet = @import("ethernet/root.zig");
-pub const ipv4 = @import("ipv4/root.zig");
+const std = @import("std");
+const core = @import("core/root.zig");
+const ethernet = @import("ethernet/root.zig");
+const ipv4 = @import("ipv4/root.zig");
 pub const transport = @import("transport/root.zig");
+const dns = @import("dns/root.zig");
 
 // Re-export key types from core
 pub const PacketBuffer = core.PacketBuffer;
@@ -35,8 +32,15 @@ pub const ICMP_HEADER_SIZE = core.ICMP_HEADER_SIZE;
 
 // Network stack initialization
 // Called from kernel main after NIC driver is initialized
-pub fn init(iface: *Interface) void {
-    // Clear ARP cache
+pub fn init(iface: *Interface, allocator: std.mem.Allocator) void {
+    // Initialize layers with allocator
+    ipv4.ipv4.init(allocator); // Includes ARP init
+    
+    // Initialize Transport Layer (TCP/Sockets) which now uses dynamic memory
+    transport.initSockets(iface, allocator);
+    transport.initTcp(iface, allocator);
+
+    // Clear ARP cache (redundant if init clears it, but kept for logic)
     ipv4.arp.clearCache();
 
     // Mark interface as up

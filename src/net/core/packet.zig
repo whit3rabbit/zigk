@@ -15,6 +15,8 @@ pub const MAX_PACKET_SIZE: usize = 2048;
 pub const ETH_HEADER_SIZE: usize = 14;
 /// IPv4 header size (minimum, without options)
 pub const IP_HEADER_SIZE: usize = 20;
+/// TCP header size (minimum, without options)
+pub const TCP_HEADER_SIZE: usize = 20;
 /// UDP header size
 pub const UDP_HEADER_SIZE: usize = 8;
 /// ICMP header size
@@ -22,12 +24,10 @@ pub const ICMP_HEADER_SIZE: usize = 8;
 
 /// Packet buffer for zero-copy networking
 pub const PacketBuffer = struct {
-    /// Pointer to raw packet data
-    data: [*]u8,
-    /// Total data length
+    /// Slice to raw packet data (covers capacity)
+    data: []u8,
+    /// Current used length
     len: usize,
-    /// Buffer capacity
-    capacity: usize,
 
     /// Layer offsets (set during parsing/building)
     eth_offset: usize,
@@ -44,14 +44,19 @@ pub const PacketBuffer = struct {
     ethertype: u16,
     ip_protocol: u8,
 
+    /// Packet delivery flags (set during IP processing)
+    is_broadcast: bool,
+    is_multicast: bool,
+
     const Self = @This();
 
-    /// Initialize from raw buffer
-    pub fn init(data: [*]u8, len: usize, capacity: usize) Self {
+    /// Initialize from raw buffer slice
+    /// data: The backing storage slice (defines capacity)
+    /// len: The initial used length (usually 0 for new packets, or data.len for wrappers)
+    pub fn init(data: []u8, len: usize) Self {
         return Self{
             .data = data,
             .len = len,
-            .capacity = capacity,
             .eth_offset = 0,
             .ip_offset = 0,
             .transport_offset = 0,
@@ -61,27 +66,30 @@ pub const PacketBuffer = struct {
             .src_port = 0,
             .ethertype = 0,
             .ip_protocol = 0,
+            .is_broadcast = false,
+            .is_multicast = false,
         };
     }
 
     /// Get Ethernet header pointer
-    pub fn ethHeader(self: *const Self) *EthernetHeader {
-        return @ptrCast(@alignCast(self.data + self.eth_offset));
+    pub fn ethHeader(self: *const Self) *align(1) EthernetHeader {
+        // Safe access via slice bounds checking
+        return @ptrCast(&self.data[self.eth_offset]);
     }
 
     /// Get IPv4 header pointer
-    pub fn ipHeader(self: *const Self) *Ipv4Header {
-        return @ptrCast(@alignCast(self.data + self.ip_offset));
+    pub fn ipHeader(self: *const Self) *align(1) Ipv4Header {
+        return @ptrCast(&self.data[self.ip_offset]);
     }
 
     /// Get UDP header pointer
-    pub fn udpHeader(self: *const Self) *UdpHeader {
-        return @ptrCast(@alignCast(self.data + self.transport_offset));
+    pub fn udpHeader(self: *const Self) *align(1) UdpHeader {
+        return @ptrCast(&self.data[self.transport_offset]);
     }
 
     /// Get ICMP header pointer
-    pub fn icmpHeader(self: *const Self) *IcmpHeader {
-        return @ptrCast(@alignCast(self.data + self.transport_offset));
+    pub fn icmpHeader(self: *const Self) *align(1) IcmpHeader {
+        return @ptrCast(&self.data[self.transport_offset]);
     }
 
     /// Get payload slice
@@ -100,7 +108,7 @@ pub const PacketBuffer = struct {
         return self.len - self.payload_offset;
     }
 
-    /// Get raw data slice
+    /// Get raw data slice (used portion)
     pub fn getData(self: *const Self) []u8 {
         return self.data[0..self.len];
     }
@@ -117,7 +125,7 @@ pub const PacketBuffer = struct {
 
     /// Copy data into packet at current position
     pub fn appendData(self: *Self, src: []const u8) bool {
-        if (self.len + src.len > self.capacity) {
+        if (self.len + src.len > self.data.len) {
             return false;
         }
         @memcpy(self.data[self.len..][0..src.len], src);

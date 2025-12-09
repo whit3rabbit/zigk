@@ -5,6 +5,7 @@
 // Handles IPv4 packet parsing, validation, and building.
 // Dispatches to ICMP, UDP based on protocol field.
 
+const std = @import("std");
 const packet = @import("../core/packet.zig");
 const interface = @import("../core/interface.zig");
 const checksum = @import("../core/checksum.zig");
@@ -14,10 +15,14 @@ const PacketBuffer = packet.PacketBuffer;
 const Ipv4Header = packet.Ipv4Header;
 const EthernetHeader = packet.EthernetHeader;
 const Interface = interface.Interface;
+const hal = @import("hal");
+const entropy = hal.entropy;
+const reassembly = @import("reassembly.zig");
 
 // Forward declarations for transport protocols
 const icmp = @import("../transport/icmp.zig");
 const udp = @import("../transport/udp.zig");
+const tcp = @import("../transport/tcp.zig");
 
 /// IP protocol numbers
 pub const PROTO_ICMP: u8 = 1;
@@ -27,8 +32,209 @@ pub const PROTO_UDP: u8 = 17;
 /// Default TTL for outgoing packets
 pub const DEFAULT_TTL: u8 = 64;
 
+// ============================================================================
+// IPv4 Options Constants (RFC 791, RFC 7126)
+// ============================================================================
+
+/// IP option types
+pub const IPOPT_EOL: u8 = 0; // End of Options List
+pub const IPOPT_NOP: u8 = 1; // No Operation (padding)
+pub const IPOPT_SEC: u8 = 130; // Security (obsolete)
+pub const IPOPT_RR: u8 = 7; // Record Route
+pub const IPOPT_TS: u8 = 68; // Timestamp
+pub const IPOPT_LSRR: u8 = 131; // Loose Source Routing
+pub const IPOPT_SSRR: u8 = 137; // Strict Source Routing
+
+/// Minimum IP header size (without options)
+pub const IP_HEADER_MIN: usize = 20;
+
+/// Maximum IP header size (with 40 bytes of options)
+pub const IP_HEADER_MAX: usize = 60;
+
 /// IP identification counter for fragmentation
-var ip_id_counter: u16 = 0;
+/// IP identification counter (removed in favor of randomization)
+// var ip_id_counter: u16 = 0;
+
+/// Initialize IPv4 subsystem
+pub fn init(allocator: std.mem.Allocator) void {
+    arp.init(allocator);
+    reassembly.init();
+}
+
+// ============================================================================
+// Path MTU Discovery (RFC 1191)
+// ============================================================================
+
+/// Default MTU for Ethernet
+pub const DEFAULT_MTU: u16 = 1500;
+
+/// Minimum MTU per RFC 791 (all hosts must accept 576-byte datagrams)
+pub const MIN_MTU: u16 = 576;
+
+/// Maximum number of PMTU cache entries
+const PMTU_CACHE_SIZE: usize = 16;
+
+/// PMTU cache entry timeout (conceptual - no timer in MVP)
+/// After this many "accesses" we should refresh the entry
+const PMTU_ENTRY_AGE_LIMIT: u32 = 1000;
+
+/// Path MTU cache entry
+const PmtuEntry = struct {
+    destination_ip: u32, // 0 = empty slot
+    mtu: u16, // Discovered MTU
+    age: u32, // Access counter for LRU-ish aging
+};
+
+/// PMTU cache (simple array with LRU-ish replacement)
+var pmtu_cache: [PMTU_CACHE_SIZE]PmtuEntry = [_]PmtuEntry{.{
+    .destination_ip = 0,
+    .mtu = DEFAULT_MTU,
+    .age = 0,
+}} ** PMTU_CACHE_SIZE;
+
+/// Global age counter for cache entries
+var pmtu_age_counter: u32 = 0;
+
+/// Look up PMTU for a destination IP
+/// Returns DEFAULT_MTU if no entry exists
+pub fn lookupPmtu(dst_ip: u32) u16 {
+    for (&pmtu_cache) |*entry| {
+        if (entry.destination_ip == dst_ip) {
+            // Update age on access
+            pmtu_age_counter +%= 1;
+            entry.age = pmtu_age_counter;
+            return entry.mtu;
+        }
+    }
+    return DEFAULT_MTU;
+}
+
+/// Update PMTU cache with a new (lower) MTU value
+/// Called when we receive ICMP Fragmentation Needed (Type 3 Code 4)
+pub fn updatePmtu(dst_ip: u32, new_mtu: u16) void {
+    // Clamp MTU to valid range
+    const mtu = if (new_mtu < MIN_MTU) MIN_MTU else new_mtu;
+
+    pmtu_age_counter +%= 1;
+
+    // First, check if entry already exists
+    for (&pmtu_cache) |*entry| {
+        if (entry.destination_ip == dst_ip) {
+            // Only update if new MTU is smaller (PMTUD reduces, never increases)
+            // To increase, we'd need explicit "probe" support (RFC 4821)
+            if (mtu < entry.mtu) {
+                entry.mtu = mtu;
+            }
+            entry.age = pmtu_age_counter;
+            return;
+        }
+    }
+
+    // Entry doesn't exist - find slot (empty or oldest)
+    var oldest_idx: usize = 0;
+    var oldest_age: u32 = pmtu_cache[0].age;
+
+    for (pmtu_cache, 0..) |entry, i| {
+        // Prefer empty slots
+        if (entry.destination_ip == 0) {
+            oldest_idx = i;
+            break;
+        }
+        // Track oldest for LRU replacement
+        if (entry.age < oldest_age) {
+            oldest_age = entry.age;
+            oldest_idx = i;
+        }
+    }
+
+    // Insert new entry
+    pmtu_cache[oldest_idx] = .{
+        .destination_ip = dst_ip,
+        .mtu = mtu,
+        .age = pmtu_age_counter,
+    };
+}
+
+/// Get effective MSS for a destination considering PMTU
+/// MSS = MTU - IP header - TCP header
+pub fn getEffectiveMss(dst_ip: u32) u16 {
+    const mtu = lookupPmtu(dst_ip);
+    // MSS = MTU - 20 (IP header) - 20 (TCP header minimum)
+    const overhead: u16 = 40;
+    return if (mtu > overhead) mtu - overhead else MIN_MTU - overhead;
+}
+
+// ============================================================================
+// IPv4 Options Validation (RFC 791, RFC 7126)
+// ============================================================================
+
+/// Validate IPv4 options without processing them
+/// Returns true if options are valid (or absent), false if malformed
+/// This is a security-focused validation that drops dangerous source routing
+pub fn validateOptions(pkt: *const PacketBuffer, header_len: usize) bool {
+    // No options present if header is minimum size
+    if (header_len <= IP_HEADER_MIN) {
+        return true;
+    }
+
+    // Validate header doesn't exceed packet length
+    if (pkt.ip_offset + header_len > pkt.len) {
+        return false;
+    }
+
+    const options_start = pkt.ip_offset + IP_HEADER_MIN;
+    const options_end = pkt.ip_offset + header_len;
+    var offset = options_start;
+
+    // Walk through options list
+    while (offset < options_end) {
+        const option_type = pkt.data[offset];
+
+        // End of Options List - valid termination
+        if (option_type == IPOPT_EOL) {
+            return true;
+        }
+
+        // No Operation (single byte padding)
+        if (option_type == IPOPT_NOP) {
+            offset += 1;
+            continue;
+        }
+
+        // All other options have type + length + data format
+        // Length field is at offset + 1
+        if (offset + 1 >= options_end) {
+            return false; // Truncated option (no length byte)
+        }
+
+        const option_len = pkt.data[offset + 1];
+
+        // Length must be at least 2 (type + length bytes)
+        if (option_len < 2) {
+            return false; // Invalid length
+        }
+
+        // Length must not exceed remaining options space
+        if (offset + option_len > options_end) {
+            return false; // Option extends beyond header
+        }
+
+        // Security check: drop dangerous source routing options (RFC 7126)
+        // LSRR and SSRR allow attackers to bypass firewalls
+        const option_num = option_type & 0x1F;
+        if (option_num == 3 or option_num == 9) {
+            // LSRR (131 = 0x83) has num=3, SSRR (137 = 0x89) has num=9
+            // Drop packets with source routing for security
+            return false;
+        }
+
+        // Skip to next option
+        offset += option_len;
+    }
+
+    // Reached end of options area without EOOL - still valid
+    return true;
+}
 
 /// Process an incoming IPv4 packet
 pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
@@ -52,6 +258,12 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
 
     const header_len = @as(usize, ihl) * 4;
 
+    // Validate IP options if present (RFC 791, RFC 7126)
+    // This also drops dangerous source routing options for security
+    if (!validateOptions(pkt, header_len)) {
+        return false;
+    }
+
     // Validate header checksum
     const header_bytes = pkt.data[pkt.ip_offset..][0..header_len];
     if (!checksum.verifyIpChecksum(header_bytes)) {
@@ -64,55 +276,113 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
         return false;
     }
 
-    // Check if packet is for us
+    // Check if packet is for us (unicast, broadcast, or multicast)
     const dst_ip = ip.getDstIp();
-    if (dst_ip != iface.ip_addr and dst_ip != 0xFFFFFFFF) {
-        // Not for us and not broadcast - drop
+
+    // Determine packet type and whether we should accept it
+    if (dst_ip == iface.ip_addr) {
+        // Unicast to our IP - accept
+        pkt.is_broadcast = false;
+        pkt.is_multicast = false;
+    } else if (dst_ip == 0xFFFFFFFF) {
+        // Limited broadcast - accept
+        pkt.is_broadcast = true;
+        pkt.is_multicast = false;
+    } else if (isBroadcast(dst_ip, iface.netmask)) {
+        // Directed broadcast - accept
+        pkt.is_broadcast = true;
+        pkt.is_multicast = false;
+    } else if (isMulticast(dst_ip)) {
+        // Multicast - accept (UDP layer will filter by group membership)
+        pkt.is_broadcast = false;
+        pkt.is_multicast = true;
+    } else {
+        // Not for us - drop
         return false;
     }
 
     // Check for fragmentation - we don't support it in MVP
+    // Check for fragmentation
     // MF (More Fragments) bit or Fragment Offset != 0
     const flags_frag = @byteSwap(ip.flags_fragment);
     const mf_bit = (flags_frag >> 13) & 0x1;
     const frag_offset = flags_frag & 0x1FFF;
 
+    var payload_slice: []u8 = &[_]u8{};
+    var is_reassembled = false;
+    var reassembly_id: usize = 0;
+
     if (mf_bit != 0 or frag_offset != 0) {
-        // Fragmented packet - drop for now
-        return false;
+        // Fragmented packet - attempt reassembly
+        const payload_len = total_len - header_len;
+        const current_payload = pkt.data[pkt.ip_offset + header_len..][0..payload_len];
+        
+        if (reassembly.processFragment(
+            ip.getSrcIp(),
+            ip.getDstIp(),
+            ip.protocol,
+            @byteSwap(ip.identification),
+            frag_offset,
+            mf_bit != 0,
+            current_payload
+        )) |res| {
+            payload_slice = res.slice;
+            reassembly_id = res.entry_id;
+            is_reassembled = true;
+        } else {
+            return true; // Consumed (stored or incomplete), stop processing
+        }
+    } else {
+        // Not fragmented
+        payload_slice = pkt.data[pkt.ip_offset + header_len..][0..(total_len - header_len)];
     }
 
     // Set transport layer offset
+    
+    if (is_reassembled) {
+        // Ensure we free the reassembly entry when done
+        defer reassembly.freeEntry(reassembly_id);
+        
+        // Create a temporary PacketBuffer on stack for the reassembled data
+        // We rely on the reassembly buffer being valid for this scope
+        var virt_pkt = PacketBuffer.init(payload_slice, payload_slice.len);
+        
+        // Copy relevant metadata from original packet
+        virt_pkt.src_ip = pkt.src_ip;
+        virt_pkt.src_port = pkt.src_port; 
+        virt_pkt.ip_protocol = ip.protocol;
+        
+        virt_pkt.eth_offset = 0;
+        virt_pkt.ip_offset = 0;
+        virt_pkt.transport_offset = 0;
+        
+        // Dispatch
+         switch (ip.protocol) {
+            PROTO_ICMP => return icmp.processPacket(iface, &virt_pkt),
+            PROTO_UDP => return udp.processPacket(iface, &virt_pkt),
+            PROTO_TCP => return tcp.processPacket(iface, &virt_pkt),
+            else => return false,
+        }
+    }
+
+    // Normal non-fragmented path (using original pkt)
     pkt.transport_offset = pkt.ip_offset + header_len;
     pkt.ip_protocol = ip.protocol;
-
-    // Record source IP
-    pkt.src_ip = ip.getSrcIp();
-
-    // Calculate payload offset (after transport header)
-    // This will be set by transport layer
-
-    // Dispatch based on protocol
+    // pkt.src_ip already set above
+    
+    // Dispatch based on protocol (existing code)
     switch (ip.protocol) {
-        PROTO_ICMP => {
-            return icmp.processPacket(iface, pkt);
-        },
-        PROTO_UDP => {
-            return udp.processPacket(iface, pkt);
-        },
-        PROTO_TCP => {
-            // TCP not implemented
-            return false;
-        },
-        else => {
-            return false;
-        },
+        PROTO_ICMP => return icmp.processPacket(iface, pkt),
+        PROTO_UDP => return udp.processPacket(iface, pkt),
+        PROTO_TCP => return tcp.processPacket(iface, pkt),
+        else => return false,
     }
 }
+// Removed original switch block to avoid duplication
 
-/// Build an IPv4 packet header
 /// Assumes Ethernet header is already in place
 /// Sets up IP header and returns pointer to payload area
+/// tos: Type of Service / DSCP value for the packet
 pub fn buildPacket(
     iface: *const Interface,
     pkt: *PacketBuffer,
@@ -120,20 +390,32 @@ pub fn buildPacket(
     protocol: u8,
     payload_len: usize,
 ) bool {
+    return buildPacketWithTos(iface, pkt, dst_ip, protocol, payload_len, 0);
+}
+
+/// Build an IPv4 packet header with explicit ToS value
+/// tos: Type of Service / DSCP value (0 = normal service)
+pub fn buildPacketWithTos(
+    iface: *const Interface,
+    pkt: *PacketBuffer,
+    dst_ip: u32,
+    protocol: u8,
+    payload_len: usize,
+    tos: u8,
+) bool {
     // IP header starts after Ethernet header
     pkt.ip_offset = packet.ETH_HEADER_SIZE;
     pkt.transport_offset = pkt.ip_offset + packet.IP_HEADER_SIZE;
 
-    const ip: *Ipv4Header = @ptrCast(@alignCast(pkt.data + pkt.ip_offset));
+    const ip: *Ipv4Header = @ptrCast(@alignCast(&pkt.data[pkt.ip_offset]));
 
     // Version 4, IHL 5 (20 bytes, no options)
     ip.version_ihl = 0x45;
-    ip.tos = 0;
+    ip.tos = tos;
     ip.setTotalLength(@truncate(packet.IP_HEADER_SIZE + payload_len));
 
-    // Increment ID for each packet
-    ip_id_counter +%= 1;
-    ip.identification = @byteSwap(ip_id_counter);
+    // Random ID for each packet
+    ip.identification = @byteSwap(getNextId());
 
     // Don't Fragment flag set, no fragmentation offset
     ip.flags_fragment = @byteSwap(@as(u16, 0x4000));
@@ -159,10 +441,9 @@ pub fn sendPacket(iface: *Interface, pkt: *PacketBuffer, dst_ip: u32) bool {
     const next_hop = iface.getGateway(dst_ip);
 
     // Resolve MAC address
-    const dst_mac = arp.resolveOrRequest(iface, next_hop) orelse {
-        // ARP not resolved yet - packet will be dropped
-        // A real implementation would queue the packet
-        return false;
+    const dst_mac = arp.resolveOrRequest(iface, next_hop, pkt) orelse {
+        // ARP not resolved yet - packet queued in ARP module
+        return true;
     };
 
     // Build Ethernet header
@@ -172,8 +453,90 @@ pub fn sendPacket(iface: *Interface, pkt: *PacketBuffer, dst_ip: u32) bool {
     const ip = pkt.ipHeader();
     pkt.len = pkt.ip_offset + ip.getTotalLength();
 
-    // Transmit
+    // Check if fragmentation is needed
+    // PacketBuffer contains Eth + IP + Payload. `pkt.len` is total length.
+    if (pkt.len > iface.mtu) {
+        // Fragmentation needed
+        return sendFragmentedPacket(iface, pkt, dst_mac);
+    }
+
+    // Transmit normally
     return ethernet.sendFrame(iface, pkt);
+}
+
+/// Send a packet fragmented into multiple IP datagrams
+fn sendFragmentedPacket(iface: *Interface, pkt: *PacketBuffer, dst_mac: [6]u8) bool {
+    // Original IP header
+    const orig_ip = pkt.ipHeader();
+
+    const ip_header_len = orig_ip.getHeaderLength();
+    
+    // Total payload to fragment (everything after IP header)
+    // This includes Transport Header + Data
+    const payload_start = pkt.ip_offset + ip_header_len;
+    const payload = pkt.data[payload_start..pkt.len];
+    
+    // Max payload per fragment (MTU - IP Header), aligned to 8 bytes
+    const mtu_payload = (iface.mtu - ip_header_len) & ~@as(u16, 7);
+    
+    var offset: usize = 0;
+    while (offset < payload.len) {
+        // Calculate chunk size
+        const remaining = payload.len - offset;
+        const chunk_len = @min(remaining, mtu_payload);
+        const last_frag = (chunk_len == remaining);
+        
+        // Build fragment packet
+        var frag_buf: [packet.MAX_PACKET_SIZE]u8 = undefined;
+        var frag_pkt = PacketBuffer.init(&frag_buf, 0);
+        
+        // 1. Build Ethernet Header (recycle buildFrame)
+        ethernet.buildFrame(iface, &frag_pkt, dst_mac, ethernet.ETHERTYPE_IPV4);
+        
+        // 2. Build IP Header
+        const frag_ip_offset = packet.ETH_HEADER_SIZE;
+        frag_pkt.ip_offset = frag_ip_offset;
+        frag_pkt.transport_offset = frag_ip_offset + ip_header_len; // roughly
+        
+        const frag_ip: *Ipv4Header = @ptrCast(@alignCast(frag_buf[frag_ip_offset..].ptr));
+        
+        // Copy original IP header fields
+        frag_ip.* = orig_ip.*;
+        
+        // Update lengths
+        const total_len = ip_header_len + chunk_len;
+        frag_ip.setTotalLength(@truncate(total_len));
+        
+        // Update fragmentation fields
+        // ID is same as original
+        const frag_off_val = (offset / 8);
+        var flags = frag_off_val & 0x1FFF;
+        if (!last_frag) {
+            flags |= 0x2000; // Set MF bit (bit 13)
+        }
+        frag_ip.flags_fragment = @byteSwap(@as(u16, @truncate(flags)));
+        
+        // Recalculate checksum
+        frag_ip.checksum = 0;
+        const header_bytes = frag_buf[frag_ip_offset..][0..ip_header_len];
+        frag_ip.checksum = checksum.ipChecksum(header_bytes);
+        
+        // 3. Copy Payload Chunk
+        const payload_dest = frag_ip_offset + ip_header_len;
+        @memcpy(frag_buf[payload_dest..][0..chunk_len], payload[offset..][0..chunk_len]);
+        
+        // Update fragment packet length
+        frag_pkt.len = payload_dest + chunk_len;
+        
+        // Transmit fragment
+        if (!ethernet.sendFrame(iface, &frag_pkt)) {
+            return false;
+        }
+        
+        offset += chunk_len;
+    }
+    
+    return true;
 }
 
 /// Decrement TTL and update checksum (for routing, if we ever support it)
@@ -198,8 +561,9 @@ pub fn decrementTtl(pkt: *PacketBuffer) bool {
 
 /// Get next IP identification value
 pub fn getNextId() u16 {
-    ip_id_counter +%= 1;
-    return ip_id_counter;
+    // Use hardware entropy for unpredictable IP IDs
+    // Prevents idle scanning and information leaks
+    return @truncate(entropy.getHardwareEntropy());
 }
 
 /// Check if IP is broadcast (all 1s or directed broadcast)

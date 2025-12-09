@@ -297,20 +297,34 @@ fn loadSegment(
     };
 
     // Allocate and map pages
-    var pages_mapped: usize = 0;
+    const alloc = heap.allocator();
+    var mapped_pages = std.ArrayListUnmanaged(u64){};
+    defer mapped_pages.deinit(alloc);
+
+    var page_index: usize = 0;
     var current_vaddr = vaddr_aligned;
 
-    while (pages_mapped < page_count) : (pages_mapped += 1) {
+    while (page_index < page_count) : (page_index += 1) {
         // Allocate a physical page
         const phys_page = pmm.allocPage() orelse {
-            // TODO: Clean up already allocated pages on error
+            cleanupMappedSegment(pml4_phys, vaddr_aligned, page_size, mapped_pages.items);
             return ElfError.OutOfMemory;
         };
 
         // Map it
         vmm.mapPage(pml4_phys, current_vaddr, phys_page, page_flags) catch {
             pmm.freePage(phys_page);
+            cleanupMappedSegment(pml4_phys, vaddr_aligned, page_size, mapped_pages.items);
             return ElfError.MappingFailed;
+        };
+
+        // Track mapped page for unwinding on later errors
+        mapped_pages.append(alloc, phys_page) catch {
+            // Drop the mapping we just added and free the page
+            vmm.unmapPage(pml4_phys, current_vaddr) catch {};
+            pmm.freePage(phys_page);
+            cleanupMappedSegment(pml4_phys, vaddr_aligned, page_size, mapped_pages.items);
+            return ElfError.OutOfMemory;
         };
 
         // Zero the page first (important for BSS)
@@ -336,6 +350,16 @@ fn loadSegment(
     }
 
     // BSS (p_memsz > p_filesz) is already zeroed since we zero pages on allocation
+
+}
+
+/// Cleanup helper for partial segment loads
+fn cleanupMappedSegment(pml4_phys: u64, start_vaddr: u64, page_size: usize, pages: []const u64) void {
+    for (pages, 0..) |phys, idx| {
+        const virt = start_vaddr + @as(u64, idx) * @as(u64, page_size);
+        vmm.unmapPage(pml4_phys, virt) catch {};
+        pmm.freePage(phys);
+    }
 }
 
 /// Copy data to userspace virtual address

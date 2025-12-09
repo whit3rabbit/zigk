@@ -519,12 +519,12 @@ pub fn sys_open(path_ptr: usize, flags: usize, mode: usize) isize {
     const fd = fd_mod.createFd(ops, @truncate(flags), null) catch {
         return Errno.ENOMEM.toReturn();
     };
+    const alloc = heap.allocator();
+    errdefer alloc.destroy(fd);
 
     // Allocate FD number and install
     const table = getGlobalFdTable();
     const fd_num = table.allocFdNum() orelse {
-        // Table is full - in MVP we just leak the FD
-        // Full implementation would free it here
         return Errno.EMFILE.toReturn();
     };
 

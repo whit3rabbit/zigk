@@ -52,9 +52,16 @@ pub fn build(b: *std.Build) void {
 
 
 
-    // Create Multiboot2 module (boot protocol parsing)
-    const multiboot2_module = b.createModule(.{
-        .root_source_file = b.path("src/lib/multiboot2.zig"),
+    // Create UAPI module (syscall numbers, errno codes)
+    const uapi_module = b.createModule(.{
+        .root_source_file = b.path("src/uapi/root.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+
+    // Create Limine module (boot protocol parsing)
+    const limine_module = b.createModule(.{
+        .root_source_file = b.path("src/lib/limine.zig"),
         .target = kernel_target,
         .optimize = optimize,
     });
@@ -65,6 +72,14 @@ pub fn build(b: *std.Build) void {
         .target = kernel_target,
         .optimize = optimize,
     });
+
+    // Create Sync module (Spinlock and synchronization primitives)
+    const sync_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/sync.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    sync_module.addImport("hal", hal_module);
 
     // Create console module (debug output)
     const console_module = b.createModule(.{
@@ -93,7 +108,8 @@ pub fn build(b: *std.Build) void {
     pmm_module.addImport("hal", hal_module);
     pmm_module.addImport("console", console_module);
     pmm_module.addImport("config", config_module);
-    pmm_module.addImport("multiboot2", multiboot2_module);
+    pmm_module.addImport("limine", limine_module);
+    pmm_module.addImport("sync", sync_module);
 
     // Create VMM module (Virtual Memory Manager)
     const vmm_module = b.createModule(.{
@@ -117,13 +133,6 @@ pub fn build(b: *std.Build) void {
     pci_module.addImport("console", console_module);
     pci_module.addImport("acpi", acpi_module);
 
-    // Create Sync module (Spinlock and synchronization primitives)
-    const sync_module = b.createModule(.{
-        .root_source_file = b.path("src/kernel/sync.zig"),
-        .target = kernel_target,
-        .optimize = optimize,
-    });
-    sync_module.addImport("hal", hal_module);
 
     // Create E1000e driver module (Intel 82574L NIC)
     const e1000e_module = b.createModule(.{
@@ -138,13 +147,6 @@ pub fn build(b: *std.Build) void {
     e1000e_module.addImport("sync", sync_module);
     e1000e_module.addImport("console", console_module);
 
-    // Create Network Stack module (full stack: core, ethernet, ipv4, transport)
-    const net_module = b.createModule(.{
-        .root_source_file = b.path("src/net/root.zig"),
-        .target = kernel_target,
-        .optimize = optimize,
-    });
-    net_module.addImport("hal", hal_module);
 
     // Create PRNG module (Kernel entropy/random)
     const prng_module = b.createModule(.{
@@ -154,6 +156,18 @@ pub fn build(b: *std.Build) void {
     });
     prng_module.addImport("hal", hal_module);
     prng_module.addImport("sync", sync_module);
+
+    // Create Network Stack module (full stack: core, ethernet, ipv4, transport)
+    const net_module = b.createModule(.{
+        .root_source_file = b.path("src/net/root.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    net_module.addImport("hal", hal_module);
+    net_module.addImport("uapi", uapi_module);
+    net_module.addImport("prng", prng_module);
+
+
 
     // Create Heap module (Kernel Heap Allocator)
     const heap_module = b.createModule(.{
@@ -200,12 +214,7 @@ pub fn build(b: *std.Build) void {
     stack_guard_module.addImport("console", console_module);
     stack_guard_module.addImport("prng", prng_module);
 
-    // Create UAPI module (syscall numbers, errno codes)
-    const uapi_module = b.createModule(.{
-        .root_source_file = b.path("src/uapi/root.zig"),
-        .target = kernel_target,
-        .optimize = optimize,
-    });
+
 
     // Create FD module (File Descriptor table)
     const fd_module = b.createModule(.{
@@ -297,7 +306,7 @@ pub fn build(b: *std.Build) void {
         .target = kernel_target,
         .optimize = optimize,
     });
-    framebuffer_module.addImport("multiboot2", multiboot2_module);
+    framebuffer_module.addImport("limine", limine_module);
     framebuffer_module.addImport("console", console_module);
 
     // Create syscall random module
@@ -319,6 +328,7 @@ pub fn build(b: *std.Build) void {
     syscall_net_module.addImport("net", net_module);
     syscall_net_module.addImport("sched", sched_module);
     syscall_net_module.addImport("thread", thread_module);
+    syscall_net_module.addImport("hal", hal_module);
 
     // Create syscall handlers module
     const syscall_handlers_module = b.createModule(.{
@@ -368,18 +378,19 @@ pub fn build(b: *std.Build) void {
     });
 
     // Force non-relocatable executable
-    // Note: Try internal linker first, switch to LLD if needed
     kernel.pie = false;
 
-    // Force strict memory layout for kernel
-    // ensures the ELF headers and first segment start at 1MB
-    // and prevents large alignment gaps in the file
+    // Note: Zig's internal linker ignores some linker script features (virtual addresses).
+    // For now, we rely on Limine loading at physical addresses and setting up HHDM.
+    // The kernel accesses its own code via identity mapping provided by Limine.
+
+    // Smaller page alignment to reduce ELF file size gaps
     kernel.link_z_max_page_size = 4096;
 
 
     // Add module imports to kernel
 
-    kernel.root_module.addImport("multiboot2", multiboot2_module);
+    kernel.root_module.addImport("limine", limine_module);
     kernel.root_module.addImport("hal", hal_module);
     kernel.root_module.addImport("acpi", acpi_module);
     kernel.root_module.addImport("pci", pci_module);
@@ -404,8 +415,7 @@ pub fn build(b: *std.Build) void {
     // Add assembly helpers for x86_64 (ISR stubs, lgdt, lidt)
     kernel.addAssemblyFile(b.path("src/arch/x86_64/asm_helpers.S"));
 
-    // Add Multiboot2 bootstrap code (32-bit entry, page tables, mode switch)
-    kernel.addAssemblyFile(b.path("src/arch/x86_64/boot/boot32.S"));
+    // Note: boot32.S is no longer needed - Limine handles 64-bit entry directly
 
     // Set linker script for kernel memory layout
     kernel.setLinkerScript(b.path("src/arch/x86_64/boot/linker.ld"));
@@ -455,21 +465,53 @@ pub fn build(b: *std.Build) void {
     const install_shell = b.addInstallFile(shell_bin.getOutput(), "bin/shell.bin");
     b.getInstallStep().dependOn(&install_shell.step);
 
-    // Create ISO build step using GRUB2 (Multiboot2 bootloader)
+    const httpd_mod = b.createModule(.{
+        .root_source_file = b.path("src/user/httpd/main.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+        .code_model = .small,
+    });
+    httpd_mod.addImport("syscall", syscall_lib);
+
+    const httpd = b.addExecutable(.{
+        .name = "httpd.elf",
+        .root_module = httpd_mod,
+    });
+    httpd.setLinkerScript(b.path("src/user/linker.ld"));
+
+    const httpd_bin = b.addObjCopy(httpd.getEmittedBin(), .{ .format = .bin });
+    const install_httpd = b.addInstallFile(httpd_bin.getOutput(), "bin/httpd.bin");
+    b.getInstallStep().dependOn(&install_httpd.step);
+
+    // Create ISO build step using Limine bootloader
+    // Use v5.x binary branch which has prebuilt files
     const iso_cmd = b.addSystemCommand(&.{
         "sh", "-c",
-        \\mkdir -p iso_root/boot/grub iso_root/boot/modules && \
-        \\cp zig-out/bin/kernel.bin iso_root/boot/ && \
+        \\set -e && \
+        \\LIMINE_DIR="limine" && \
+        \\if [ ! -f "$LIMINE_DIR/limine-bios-cd.bin" ]; then \
+        \\    rm -rf "$LIMINE_DIR" && \
+        \\    echo "Downloading Limine binary branch..." && \
+        \\    git clone --depth 1 --branch v5.x-branch-binary https://github.com/limine-bootloader/limine.git "$LIMINE_DIR" && \
+        \\    make -C "$LIMINE_DIR"; \
+        \\fi && \
+        \\mkdir -p iso_root/boot/modules iso_root/EFI/BOOT && \
+        \\cp zig-out/bin/kernel.elf iso_root/boot/ && \
         \\cp zig-out/bin/shell.bin iso_root/boot/modules/ && \
-        \\cp src/arch/x86_64/boot/grub.cfg iso_root/boot/grub/ && \
-        \\if command -v x86_64-elf-grub-mkrescue >/dev/null 2>&1; then \
-        \\    x86_64-elf-grub-mkrescue -o zigk.iso iso_root 2>/dev/null; \
-        \\elif command -v grub-mkrescue >/dev/null 2>&1; then \
-        \\    grub-mkrescue -o zigk.iso iso_root 2>/dev/null; \
-        \\else \
-        \\    echo "Error: grub-mkrescue not found. Install x86_64-elf-grub (macOS) or grub-pc-bin (Linux)"; \
-        \\    exit 1; \
-        \\fi
+        \\cp zig-out/bin/httpd.bin iso_root/boot/modules/ && \
+        \\cp limine.conf iso_root/ && \
+        \\cp "$LIMINE_DIR"/limine-bios.sys iso_root/boot/ && \
+        \\cp "$LIMINE_DIR"/limine-bios-cd.bin iso_root/boot/ && \
+        \\cp "$LIMINE_DIR"/limine-uefi-cd.bin iso_root/boot/ && \
+        \\cp "$LIMINE_DIR"/BOOTX64.EFI iso_root/EFI/BOOT/ && \
+        \\cp "$LIMINE_DIR"/BOOTIA32.EFI iso_root/EFI/BOOT/ 2>/dev/null || true && \
+        \\xorriso -as mkisofs -b boot/limine-bios-cd.bin \
+        \\    -no-emul-boot -boot-load-size 4 -boot-info-table \
+        \\    --efi-boot boot/limine-uefi-cd.bin \
+        \\    -efi-boot-part --efi-boot-image --protective-msdos-label \
+        \\    iso_root -o zigk.iso && \
+        \\"$LIMINE_DIR"/limine bios-install zigk.iso && \
+        \\echo "ISO created: zigk.iso"
     });
     iso_cmd.step.dependOn(b.getInstallStep());
 

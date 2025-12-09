@@ -80,20 +80,10 @@ entry_tag:
     .long _start32              /* entry point */
 entry_tag_end:
 
-    /* EFI boot services tag - required for EFI entry */
-    .align 8
-efi_boot_services_tag:
-    .short 7                    /* type: EFI boot services */
-    .short 0                    /* flags */
-    .long 8                     /* size */
-
-    /* EFI amd64 entry address tag - 64-bit entry point for UEFI boot */
-    .align 8
-efi_entry_tag:
-    .short 9                    /* type: EFI amd64 entry address */
-    .short 0                    /* flags */
-    .long 16                    /* size: 2+2+4+8 = 16 bytes */
-    .quad _efi_start64          /* 64-bit entry point (must be .quad, not .long) */
+    /* NOTE: EFI entry tags removed for debugging.
+     * GRUB2 Multiboot2 implementation may not fully support EFI entry tags.
+     * Testing with legacy entry point to verify basic boot works.
+     */
 
     /* End tag */
     .align 8
@@ -112,6 +102,13 @@ multiboot2_header_end:
 _start32:
     /* Disable interrupts */
     cli
+
+    /* Debug: Output 'B' to serial port and QEMU debug port */
+    movw $0x3F8, %dx
+    movb $'B', %al
+    outb %al, %dx
+    movw $0xE9, %dx             /* QEMU debug port */
+    outb %al, %dx
 
     /* Save Multiboot2 info pointer (EBX) and magic (EAX) */
     movl %ebx, (multiboot2_info_ptr)
@@ -288,9 +285,48 @@ _efi_start64:
     /* Disable interrupts (should already be disabled) */
     cli
 
-    /* Debug: Output 'E' to serial port to confirm EFI entry */
-    movw $0x3F8, %dx            /* COM1 base */
+    /* Initialize serial port COM1 (0x3F8) for debug output */
+    movw $0x3F8, %dx
+
+    /* Disable interrupts (IER = 0) */
+    addw $1, %dx                /* 0x3F9 = IER */
+    xorb %al, %al
+    outb %al, %dx
+
+    /* Enable DLAB to set baud rate */
+    addw $2, %dx                /* 0x3FB = LCR */
+    movb $0x80, %al
+    outb %al, %dx
+
+    /* Set baud rate divisor to 1 (115200 baud) */
+    movw $0x3F8, %dx            /* 0x3F8 = DLL (with DLAB=1) */
+    movb $0x01, %al
+    outb %al, %dx
+    incw %dx                    /* 0x3F9 = DLH */
+    xorb %al, %al
+    outb %al, %dx
+
+    /* 8N1, disable DLAB */
+    addw $2, %dx                /* 0x3FB = LCR */
+    movb $0x03, %al
+    outb %al, %dx
+
+    /* Enable FIFO, clear, 14-byte threshold */
+    decw %dx                    /* 0x3FA = FCR */
+    movb $0xC7, %al
+    outb %al, %dx
+
+    /* Set DTR, RTS, OUT2 */
+    incw %dx
+    incw %dx                    /* 0x3FC = MCR */
+    movb $0x0B, %al
+    outb %al, %dx
+
+    /* Debug: Output 'E' to serial port and QEMU debug port */
+    movw $0x3F8, %dx            /* COM1 data */
     movb $'E', %al
+    outb %al, %dx
+    movw $0xE9, %dx             /* QEMU debug port */
     outb %al, %dx
 
     /* Save Multiboot2 info pointer (EBX) and magic (EAX) */

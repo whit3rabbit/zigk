@@ -168,6 +168,12 @@ pub const Errno = enum(i32) {
     /// Connection reset by peer
     ECONNRESET = 104,
 
+    /// Transport endpoint is already connected
+    EISCONN = 106,
+
+    /// Transport endpoint is not connected
+    ENOTCONN = 107,
+
     /// Connection timed out
     ETIMEDOUT = 110,
 
@@ -252,6 +258,8 @@ pub const ECONNREFUSED = Errno.ECONNREFUSED;
 pub const EHOSTUNREACH = Errno.EHOSTUNREACH;
 pub const EALREADY = Errno.EALREADY;
 pub const EINPROGRESS = Errno.EINPROGRESS;
+pub const EISCONN = Errno.EISCONN;
+pub const ENOTCONN = Errno.ENOTCONN;
 
 /// EWOULDBLOCK is typically the same as EAGAIN on Linux
 pub const EWOULDBLOCK = EAGAIN;

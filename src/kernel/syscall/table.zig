@@ -56,9 +56,18 @@ pub export fn dispatch_syscall(frame: *SyscallFrame) callconv(.c) void {
 
         // Networking
         syscalls.SYS_SOCKET => net_syscalls.sys_socket(args[0], args[1], args[2]),
-        syscalls.SYS_BIND => net_syscalls.sys_bind(args[0], args[1], args[2]),
+        syscalls.SYS_CONNECT => net_syscalls.sys_connect(args[0], args[1], args[2]),
+        syscalls.SYS_ACCEPT => net_syscalls.sys_accept(args[0], args[1], args[2]),
         syscalls.SYS_SENDTO => net_syscalls.sys_sendto(args[0], args[1], args[2], args[3], args[4], args[5]),
         syscalls.SYS_RECVFROM => net_syscalls.sys_recvfrom(args[0], args[1], args[2], args[3], args[4], args[5]),
+        syscalls.SYS_BIND => net_syscalls.sys_bind(args[0], args[1], args[2]),
+        syscalls.SYS_LISTEN => net_syscalls.sys_listen(args[0], args[1]),
+        syscalls.SYS_SETSOCKOPT => net_syscalls.sys_setsockopt(args[0], args[1], args[2], args[3], args[4]),
+        syscalls.SYS_GETSOCKOPT => net_syscalls.sys_getsockopt(args[0], args[1], args[2], args[3], args[4]),
+        syscalls.SYS_SHUTDOWN => net_syscalls.sys_shutdown(args[0], args[1]),
+        syscalls.SYS_GETSOCKNAME => net_syscalls.sys_getsockname(args[0], args[1], args[2]),
+        syscalls.SYS_GETPEERNAME => net_syscalls.sys_getpeername(args[0], args[1], args[2]),
+        syscalls.SYS_POLL => net_syscalls.sys_poll(args[0], args[1], @as(isize, @bitCast(args[2]))),
 
         // Process control (stubs)
         syscalls.SYS_FORK => handlers.sys_fork(),

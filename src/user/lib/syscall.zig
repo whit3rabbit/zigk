@@ -595,3 +595,67 @@ pub fn parseIp(str: []const u8) ?u32 {
     ip = (ip << 8) | octet;
     return ip;
 }
+
+// =============================================================================
+// I/O Multiplexing (poll)
+// =============================================================================
+
+pub const PollFd = uapi.poll.PollFd;
+pub const POLLIN = uapi.poll.POLLIN;
+pub const POLLOUT = uapi.poll.POLLOUT;
+pub const POLLERR = uapi.poll.POLLERR;
+pub const POLLHUP = uapi.poll.POLLHUP;
+pub const POLLNVAL = uapi.poll.POLLNVAL;
+
+/// Wait for events on file descriptors
+/// ufds: Array of PollFd structures
+/// timeout: Timeout in milliseconds (-1 for infinite)
+/// Returns number of descriptors with events, or error
+pub fn poll(ufds: []PollFd, timeout: i32) SyscallError!usize {
+    const ret = syscall3(
+        syscalls.SYS_POLL,
+        @intFromPtr(ufds.ptr),
+        ufds.len,
+        @bitCast(@as(isize, timeout))
+    );
+    if (isError(ret)) return errorFromReturn(ret);
+    return ret;
+}
+
+// TCP specific syscalls (accept, listen, shutdown, connect)
+
+/// Listen for connections on a socket
+pub fn listen(fd: i32, backlog: i32) SyscallError!void {
+    const ret = syscall2(syscalls.SYS_LISTEN, @bitCast(@as(isize, fd)), @bitCast(@as(isize, backlog)));
+    if (isError(ret)) return errorFromReturn(ret);
+}
+
+/// Accept a connection on a socket
+/// Returns new file descriptor for the connection
+pub fn accept(fd: i32, addr: ?*SockAddrIn) SyscallError!i32 {
+    var addrlen: u32 = @sizeOf(SockAddrIn);
+    const addr_ptr: usize = if (addr) |a| @intFromPtr(a) else 0;
+    const addrlen_ptr: usize = if (addr != null) @intFromPtr(&addrlen) else 0;
+    
+    const ret = syscall3(syscalls.SYS_ACCEPT, @bitCast(@as(isize, fd)), addr_ptr, addrlen_ptr);
+    if (isError(ret)) return errorFromReturn(ret);
+    return @truncate(@as(isize, @bitCast(ret)));
+}
+
+/// Initiate a connection on a socket
+pub fn connect(fd: i32, addr: *const SockAddrIn) SyscallError!void {
+    const ret = syscall3(
+        syscalls.SYS_CONNECT, 
+        @bitCast(@as(isize, fd)), 
+        @intFromPtr(addr), 
+        @sizeOf(SockAddrIn)
+    );
+    if (isError(ret)) return errorFromReturn(ret);
+}
+
+/// Shut down part of a full-duplex connection
+/// how: 0=SHUT_RD, 1=SHUT_WR, 2=SHUT_RDWR
+pub fn shutdown(fd: i32, how: i32) SyscallError!void {
+     const ret = syscall2(syscalls.SYS_SHUTDOWN, @bitCast(@as(isize, fd)), @bitCast(@as(isize, how)));
+     if (isError(ret)) return errorFromReturn(ret);
+}

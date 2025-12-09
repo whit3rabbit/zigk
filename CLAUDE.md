@@ -1,18 +1,14 @@
 # zigk Development Guidelines
 
-Auto-generated from all feature plans. Last updated: 2025-12-06
+The biggest gain from Zig is moving runtime crashes (segmentation faults, unaligned access, buffer overflows) into compile-time errors or safe panics. By switching pointers to slices and using the Allocator interface, the stack becomes memory-safe and highly portable.
 
 ## Active Technologies
 - Zig 0.15.x - freestanding x86_64 target + GRUB2 (Multiboot2)
-- InitRD via Multiboot2 Modules
-- N/A (no filesystem for MVP)
+- limine
 
 ## Project Structure
 
-```text
-src/
-tests/
-```
+Refer to `filesystem.md` for project structure.
 
 ## Commands
 

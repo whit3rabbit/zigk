@@ -17,7 +17,8 @@
 const hal = @import("hal");
 const console = @import("console");
 const config = @import("config");
-const multiboot2 = @import("multiboot2");
+const limine = @import("limine");
+const sync = @import("sync");
 
 const paging = hal.paging;
 
@@ -30,6 +31,7 @@ var bitmap_size: usize = 0; // Size in bytes
 var total_pages: usize = 0;
 var free_pages: usize = 0;
 var allocated_pages: usize = 0;
+var pmm_lock: sync.Spinlock = .{};
 
 // Memory bounds
 var memory_start: u64 = 0;
@@ -40,36 +42,33 @@ var initialized: bool = false;
 
 
 
-/// Initialize PMM from Multiboot2 memory map
+/// Initialize PMM from Limine memory map
 /// Must be called after paging.init() sets up HHDM
-pub fn init(mmap: *const multiboot2.MmapTag) !void {
-
-
+pub fn initFromLimine(memmap: *const limine.MemoryMapResponse) !void {
     if (initialized) {
         return error.AlreadyInitialized;
     }
 
-    console.info("PMM: Scanning Multiboot2 memory map...", .{});
+    console.info("PMM: Scanning Limine memory map...", .{});
+
+    const entries = memmap.entries();
 
     // First pass: find memory bounds and count usable pages
     var usable_memory: u64 = 0;
     var highest_addr: u64 = 0;
     var lowest_usable: u64 = 0xFFFFFFFFFFFFFFFF;
-    var entry_count: u32 = 0;
 
-    var iter = mmap.entries();
-    while (iter.next()) |entry| {
-        entry_count += 1;
-        const end_addr = entry.base_addr + entry.length;
+    for (entries) |entry| {
+        const end_addr = entry.base + entry.length;
 
         if (end_addr > highest_addr) {
             highest_addr = end_addr;
         }
 
-        if (entry.mem_type == .available) {
+        if (entry.kind == .usable) {
             usable_memory += entry.length;
-            if (entry.base_addr < lowest_usable) {
-                lowest_usable = entry.base_addr;
+            if (entry.base < lowest_usable) {
+                lowest_usable = entry.base;
             }
         }
     }
@@ -82,7 +81,7 @@ pub fn init(mmap: *const multiboot2.MmapTag) !void {
     bitmap_size = (total_pages + 7) / 8; // Round up to bytes
 
     console.info("PMM: {d} entries, Total pages: {d}, Bitmap size: {d} KB", .{
-        entry_count,
+        entries.len,
         total_pages,
         bitmap_size / 1024,
     });
@@ -91,16 +90,15 @@ pub fn init(mmap: *const multiboot2.MmapTag) !void {
     var bitmap_phys: u64 = 0;
     var found_region = false;
 
-    iter = mmap.entries();
-    while (iter.next()) |entry| {
+    for (entries) |entry| {
         // Need a usable region large enough for bitmap + some pages
         // Also ensure we're not in the first 1MB (reserved for legacy)
-        if (entry.mem_type == .available and
+        if (entry.kind == .usable and
             entry.length >= bitmap_size + PAGE_SIZE * 16 and
-            entry.base_addr >= 0x100000)
+            entry.base >= 0x100000)
         {
             // Align bitmap to page boundary
-            bitmap_phys = paging.pageAlignUp(entry.base_addr);
+            bitmap_phys = paging.pageAlignUp(entry.base);
             found_region = true;
             break;
         }
@@ -120,11 +118,10 @@ pub fn init(mmap: *const multiboot2.MmapTag) !void {
     @memset(bitmap[0..bitmap_size], 0xFF);
 
     // Third pass: mark usable regions as free in bitmap
-    iter = mmap.entries();
-    while (iter.next()) |entry| {
-        if (entry.mem_type == .available) {
-            const start_page = paging.pageAlignUp(entry.base_addr) / PAGE_SIZE;
-            const end_page = paging.pageAlignDown(entry.base_addr + entry.length) / PAGE_SIZE;
+    for (entries) |entry| {
+        if (entry.kind == .usable) {
+            const start_page = paging.pageAlignUp(entry.base) / PAGE_SIZE;
+            const end_page = paging.pageAlignDown(entry.base + entry.length) / PAGE_SIZE;
 
             var page = start_page;
             while (page < end_page) : (page += 1) {
@@ -156,11 +153,11 @@ pub fn init(mmap: *const multiboot2.MmapTag) !void {
         }
     }
 
-    // Reserve kernel memory (assume kernel is loaded at 1MB and extends to ~4MB)
-    // The exact range depends on kernel size - boot32.S + kernel code
-    const kernel_start_page = 0x100000 / PAGE_SIZE;
+    // Reserve kernel and module pages (Limine marks these as kernel_and_modules)
+    // We don't need to manually reserve them as they're not marked usable
+    // But we reserve memory up to 4MB for safety margin
     const kernel_end_page = 0x400000 / PAGE_SIZE;
-    var page = kernel_start_page;
+    var page: usize = 0x100000 / PAGE_SIZE;
     while (page < kernel_end_page) : (page += 1) {
         if (!isBitSet(page)) {
             setBit(page);
@@ -185,6 +182,9 @@ pub fn allocPage() ?u64 {
         console.err("PMM: Not initialized!", .{});
         return null;
     }
+
+    const held = pmm_lock.acquire();
+    defer held.release();
 
     if (free_pages == 0) {
         console.warn("PMM: Out of memory!", .{});
@@ -226,6 +226,9 @@ pub fn allocPage() ?u64 {
 /// Returns physical address of first page, or null if OOM
 pub fn allocPages(count: usize) ?u64 {
     if (!initialized or count == 0) return null;
+
+    const held = pmm_lock.acquire();
+    defer held.release();
 
     if (free_pages < count) {
         console.warn("PMM: Not enough free pages ({d} requested, {d} available)", .{ count, free_pages });
@@ -272,6 +275,9 @@ pub fn allocPages(count: usize) ?u64 {
 /// Free a single physical page
 pub fn freePage(phys_addr: u64) void {
     if (!initialized) return;
+
+    const held = pmm_lock.acquire();
+    defer held.release();
 
     if (!paging.isPageAligned(phys_addr)) {
         console.err("PMM: Attempt to free non-aligned address {x}!", .{phys_addr});
