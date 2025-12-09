@@ -291,6 +291,15 @@ pub fn build(b: *std.Build) void {
     elf_module.addImport("console", console_module);
     elf_module.addImport("uapi", uapi_module);
 
+    // Create framebuffer module (for fb syscalls)
+    const framebuffer_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/framebuffer.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    framebuffer_module.addImport("multiboot2", multiboot2_module);
+    framebuffer_module.addImport("console", console_module);
+
     // Create syscall random module
     const syscall_random_module = b.createModule(.{
         .root_source_file = b.path("src/kernel/syscall/random.zig"),
@@ -331,6 +340,7 @@ pub fn build(b: *std.Build) void {
     syscall_handlers_module.addImport("pmm", pmm_module);
     syscall_handlers_module.addImport("heap", heap_module);
     syscall_handlers_module.addImport("elf", elf_module);
+    syscall_handlers_module.addImport("framebuffer", framebuffer_module);
 
     // Create syscall dispatch table module
     const syscall_table_module = b.createModule(.{
@@ -389,6 +399,7 @@ pub fn build(b: *std.Build) void {
     kernel.root_module.addImport("prng", prng_module);
     kernel.root_module.addImport("syscall_random", syscall_random_module);
     kernel.root_module.addImport("syscall_table", syscall_table_module);
+    kernel.root_module.addImport("framebuffer", framebuffer_module);
 
     // Add assembly helpers for x86_64 (ISR stubs, lgdt, lidt)
     kernel.addAssemblyFile(b.path("src/arch/x86_64/asm_helpers.S"));

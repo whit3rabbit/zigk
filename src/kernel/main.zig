@@ -17,6 +17,7 @@ const sched = @import("sched");
 const thread = @import("thread");
 const stack_guard = @import("stack_guard");
 const prng = @import("prng");
+const framebuffer = @import("framebuffer");
 
 // Syscall dispatch table - must be imported to compile dispatch_syscall symbol
 // called from asm_helpers.S _syscall_entry
@@ -100,16 +101,9 @@ export fn _start() noreturn {
         halt();
     }
 
-    // Check for framebuffer (optional for serial-only testing)
-    if (multiboot2.findFramebufferTag(boot_info)) |fb| {
-        console.info("Framebuffer: {d}x{d} @ {x}", .{
-            fb.framebuffer_width,
-            fb.framebuffer_height,
-            fb.framebuffer_addr,
-        });
-    } else {
-        console.warn("No framebuffer available (serial-only mode)", .{});
-    }
+    // Initialize framebuffer state (captures Multiboot2 framebuffer info)
+    // This is optional - serial-only mode works without framebuffer
+    framebuffer.init(boot_info);
 
     // Check for loaded modules
     var mod_count: u32 = 0;

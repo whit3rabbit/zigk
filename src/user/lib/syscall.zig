@@ -378,12 +378,32 @@ pub fn getrandom(buf: [*]u8, count: usize, flags: u32) SyscallError!usize {
 // =============================================================================
 
 /// Framebuffer info structure
+/// Contains dimensions, pitch, bits per pixel, and RGB channel layout.
+/// Use red/green/blue_shift and _mask_size to construct pixel values:
+///   pixel = (red << red_shift) | (green << green_shift) | (blue << blue_shift)
 pub const FramebufferInfo = extern struct {
+    /// Width in pixels
     width: u32,
+    /// Height in pixels
     height: u32,
+    /// Bytes per scanline (may include padding beyond width * bytes_per_pixel)
     pitch: u32,
+    /// Bits per pixel (typically 32 for modern displays)
     bpp: u32,
-    // Pixel format info could be added here
+    /// Bit position of red channel (e.g., 16 for BGRA)
+    red_shift: u8,
+    /// Number of bits in red channel (typically 8)
+    red_mask_size: u8,
+    /// Bit position of green channel (e.g., 8 for BGRA)
+    green_shift: u8,
+    /// Number of bits in green channel (typically 8)
+    green_mask_size: u8,
+    /// Bit position of blue channel (e.g., 0 for BGRA)
+    blue_shift: u8,
+    /// Number of bits in blue channel (typically 8)
+    blue_mask_size: u8,
+    /// Reserved for alignment
+    _reserved: [2]u8 = .{ 0, 0 },
 };
 
 /// Write debug message to kernel log

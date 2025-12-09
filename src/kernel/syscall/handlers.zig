@@ -21,6 +21,7 @@ const vmm = @import("vmm");
 const pmm = @import("pmm");
 const heap = @import("heap");
 const elf = @import("elf");
+const framebuffer = @import("framebuffer");
 
 const Errno = uapi.errno.Errno;
 const UserVmm = user_vmm.UserVmm;
@@ -904,15 +905,109 @@ pub fn sys_arch_prctl(code: usize, addr: usize) isize {
 }
 
 /// sys_get_fb_info (1001) - Get framebuffer info
-/// MVP: Returns -ENODEV (no framebuffer driver)
+///
+/// Copies framebuffer dimensions and pixel format to userspace struct.
+/// Returns 0 on success, -ENODEV if no framebuffer available,
+/// -EFAULT for invalid pointer.
 pub fn sys_get_fb_info(info_ptr: usize) isize {
-    _ = info_ptr;
-    // Framebuffer driver not implemented
-    return Errno.ENODEV.toReturn();
+    // Validate user pointer (FramebufferInfo is 24 bytes: 4*u32 + 6*u8 + 2*u8 padding)
+    const info_size: usize = 24;
+    if (!isValidUserPtr(info_ptr, info_size)) {
+        return Errno.EFAULT.toReturn();
+    }
+
+    // Get framebuffer state from module (returns null if not available)
+    const fb_state = framebuffer.getState() orelse {
+        return Errno.ENODEV.toReturn();
+    };
+
+    // Copy framebuffer info to userspace
+    // The struct layout must match FramebufferInfo in user/lib/syscall.zig
+    const info_bytes: [*]u8 = @ptrFromInt(info_ptr);
+
+    // Width (u32, offset 0)
+    @as(*align(1) u32, @ptrCast(info_bytes + 0)).* = fb_state.width;
+    // Height (u32, offset 4)
+    @as(*align(1) u32, @ptrCast(info_bytes + 4)).* = fb_state.height;
+    // Pitch (u32, offset 8)
+    @as(*align(1) u32, @ptrCast(info_bytes + 8)).* = fb_state.pitch;
+    // Bpp (u32, offset 12) - extend u8 to u32 for struct field
+    @as(*align(1) u32, @ptrCast(info_bytes + 12)).* = @as(u32, fb_state.bpp);
+    // Red shift (u8, offset 16)
+    info_bytes[16] = fb_state.red_shift;
+    // Red mask size (u8, offset 17)
+    info_bytes[17] = fb_state.red_mask_size;
+    // Green shift (u8, offset 18)
+    info_bytes[18] = fb_state.green_shift;
+    // Green mask size (u8, offset 19)
+    info_bytes[19] = fb_state.green_mask_size;
+    // Blue shift (u8, offset 20)
+    info_bytes[20] = fb_state.blue_shift;
+    // Blue mask size (u8, offset 21)
+    info_bytes[21] = fb_state.blue_mask_size;
+    // Reserved bytes (offset 22-23)
+    info_bytes[22] = 0;
+    info_bytes[23] = 0;
+
+    console.debug("sys_get_fb_info: {d}x{d}x{d}", .{
+        fb_state.width,
+        fb_state.height,
+        fb_state.bpp,
+    });
+
+    return 0;
 }
 
 /// sys_map_fb (1002) - Map framebuffer into process address space
-/// MVP: Returns -ENODEV (no framebuffer driver)
+///
+/// Maps the physical framebuffer memory into the calling process's
+/// address space at a fixed virtual address. Returns the virtual
+/// address on success, or negative errno on failure.
+///
+/// Returns:
+///   Virtual address on success (positive)
+///   -ENODEV if no framebuffer available
+///   -ENOMEM if mapping failed
 pub fn sys_map_fb() isize {
-    return Errno.ENODEV.toReturn();
+    // Get framebuffer state from module
+    const fb_state = framebuffer.getState() orelse {
+        return Errno.ENODEV.toReturn();
+    };
+
+    // Get current process for page table
+    const proc = getCurrentProcess();
+
+    // Fixed virtual address for framebuffer in user space
+    // Using high address to avoid conflicts with heap/stack
+    const fb_virt_base: u64 = 0x0000_4000_0000_0000; // 64 TB mark
+
+    // Calculate page-aligned size
+    const fb_size = std.mem.alignForward(usize, fb_state.size, pmm.PAGE_SIZE);
+
+    // Page flags for framebuffer: user accessible, writable, write-through for MMIO
+    // Note: present/accessed/dirty are set automatically by the page table code
+    const flags = hal.paging.PageFlags{
+        .writable = true,
+        .user = true,
+        .write_through = true, // Write-through for framebuffer coherency
+        .cache_disable = false,
+        .global = false,
+        .no_execute = true, // Framebuffer is data, not code
+    };
+
+    // Map framebuffer physical memory into user address space
+    vmm.mapRange(proc.cr3, fb_virt_base, fb_state.phys_addr, fb_size, flags) catch |err| {
+        console.err("sys_map_fb: Failed to map FB: {}", .{err});
+        return Errno.ENOMEM.toReturn();
+    };
+
+    console.debug("sys_map_fb: Mapped FB at virt={x} (phys={x}, size={d})", .{
+        fb_virt_base,
+        fb_state.phys_addr,
+        fb_size,
+    });
+
+    // Return the mapped virtual address
+    // Cast to isize - this is safe because the address is well below isize max
+    return @bitCast(fb_virt_base);
 }

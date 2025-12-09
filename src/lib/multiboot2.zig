@@ -208,6 +208,28 @@ pub const FramebufferType = enum(u8) {
     _,
 };
 
+/// RGB color information (follows FramebufferTag when type == .rgb)
+/// Defines bit positions and sizes for each color channel in the pixel format.
+/// For example, 32-bit BGRA: blue_position=0, green_position=8, red_position=16
+pub const RgbColorInfo = extern struct {
+    red_field_position: u8,
+    red_mask_size: u8,
+    green_field_position: u8,
+    green_mask_size: u8,
+    blue_field_position: u8,
+    blue_mask_size: u8,
+};
+
+/// Get RGB color info from framebuffer tag (only valid when type == .rgb)
+/// Returns null for indexed or EGA text modes.
+pub fn getRgbColorInfo(fb_tag: *const FramebufferTag) ?*const RgbColorInfo {
+    if (fb_tag.framebuffer_type != .rgb) return null;
+    // Color info immediately follows the fixed-size FramebufferTag struct
+    const base = @intFromPtr(fb_tag);
+    const offset = @sizeOf(FramebufferTag);
+    return @ptrFromInt(base + offset);
+}
+
 /// ACPI old RSDP tag (type 14)
 pub const AcpiOldTag = extern struct {
     tag: Tag,
