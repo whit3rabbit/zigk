@@ -87,10 +87,6 @@ zig build test
 ```
 
 ## Troubleshooting
-**"grub-mkrescue not found"**:
-- **Linux**: Install `grub-common` and `xorriso`.
-- **macOS**: Install via Homebrew: `brew install x86_64-elf-grub xorriso`.
-
-**"no multiboot header found"**:
-- Ensure you are building the ISO correctly (the build script handles flat binary conversion).
-- Verify `src/arch/x86_64/boot/boot32.S` and `linker.ld` address tags match.
+**ISO creation fails**:
+- Ensure `xorriso` is installed: `brew install xorriso` (macOS) or `apt install xorriso` (Linux).
+- Check that the `limine/` directory contains the bootloader binaries.

@@ -29,7 +29,6 @@ zigk/
 └── src/
     ├── lib/                   # Kernel-agnostic libraries
     │   ├── limine.zig         # Limine boot protocol definitions
-    │   ├── multiboot2.zig     # Multiboot2 header definitions
     │   ├── prng.zig           # Xoroshiro128+ PRNG
     │   └── ring_buffer.zig    # Generic comptime ring buffer
     │
@@ -194,7 +193,6 @@ A device-independent TCP/IP stack implementing Layer 2 (Ethernet), Layer 3 (IPv4
 | File | Description |
 |------|-------------|
 | `limine.zig` | Zig definitions for Limine Boot Protocol. |
-| `multiboot2.zig` | Multiboot2 information structure parsing. |
 | `prng.zig` | Xoroshiro128+ PRNG, seeded by `arch.entropy`. |
 | `ring_buffer.zig` | Generic, thread-safe compile-time ring buffer. |
 
@@ -212,4 +210,4 @@ A device-independent TCP/IP stack implementing Layer 2 (Ethernet), Layer 3 (IPv4
 1. **Strict HAL Layering**: `src/arch` is the **only** location for `asm` blocks and direct hardware access.
 2. **Separate Drivers/Stack**: Network drivers (`src/drivers/net`) are decoupled from protocols (`src/net`).
 3. **Unified UAPI**: `src/uapi` is shared between kernel and userland for ABI compatibility.
-4. **Limine Boot**: Primary bootloader is Limine v5.x (Multiboot2 support retained for compatibility).
+4. **Limine Boot**: Primary bootloader is Limine v5.x.

@@ -1,59 +1,95 @@
 # Boot Process Documentation
 
 ## Overview
-ZigK uses the **Multiboot2** protocol for booting. This allows it to be loaded by compliant bootloaders like GRUB2.
-The kernel is compiled as a 64-bit ELF binary but is linked and loaded as a **Flat Binary** at a fixed physical address to ensure compatibility with linker section layouts.
+
+ZigK uses the **Limine Bootloader** (v5.x protocol) for booting. The kernel is compiled as a standard 64-bit ELF executable and loaded into the higher half of virtual memory.
 
 ## Boot Flow
-1.  **BIOS/UEFI** hands control to the Bootloader (GRUB2).
-2.  **GRUB2** reads the ISO/Disk and locates the Multiboot2 Header.
-3.  **GRUB2** loads the kernel binary into memory at physical address `0x01000000` (16MB).
-4.  **GRUB2** transitions to 32-bit Protected Mode and jumps to the kernel entry point (`_start32`).
-5.  **Kernel Bootstrap (`boot32.S`)**:
-    - Disables interrupts.
-    - Sets up provisional page tables (Identity + Higher-Half + HHDM).
-    - Enables PAE, Long Mode (EFER.LME), and Paging (CR0.PG).
-    - Jumps to 64-bit Long Mode code (`_start64`).
-6.  **Kernel Main**:
-    - `_start64` sets up the stack and jumps to Zig `kmain`.
 
-## Multiboot2 Header Layout
-The kernel includes a Multiboot2 header within the first 32KB of the binary. This header specifies how the bootloader should load the kernel.
+1. **BIOS/UEFI** hands control to Limine.
+2. **Limine** reads `limine.cfg` and locates the kernel and modules.
+3. **Limine** loads:
+   - `kernel.elf` - The OS kernel
+   - `shell.elf` - Userland shell module
+   - (Optional) `initrd.tar` - Filesystem module
+4. **Limine** sets up:
+   - 64-bit Long Mode with paging enabled
+   - Higher Half Direct Map (HHDM) for physical memory access
+   - Framebuffer (if available)
+   - Memory map
+5. **Limine** jumps directly to the kernel entry point `_start` defined in `src/kernel/main.zig`.
+6. **Kernel Initialization**:
+   - Validates Limine protocol requests (HHDM, Framebuffer, Memory Map)
+   - Initializes HAL (GDT/IDT/Serial/PIC)
+   - Sets up Memory Management (PMM/VMM/Heap)
+   - Initializes scheduler and creates idle thread
+   - Scans modules to load the init process (shell or httpd)
+   - Starts the scheduler
 
-**Magic Value:** `0xE85250D6`
-**Architecture:** `0` (i386/Protected Mode)
-**Load Address:** `0x01000000` (16MB)
+## Memory Layout
 
-### Header Structure (ASCII Chart)
+### Virtual Address Space
 
-```text
-+-------------------+----------------+-----------------------------------------+
-| Field             | Value (Hex)    | Description                             |
-+-------------------+----------------+-----------------------------------------+
-| Magic             | 0xE85250D6     | Multiboot2 Magic Number                 |
-| Architecture      | 0x00000000     | i386 (Protected Mode)                   |
-| Header Length     | [Calculated]   | Total size of header + tags             |
-| Checksum          | [Calculated]   | -(Magic + Arch + Length)                |
-+-------------------+----------------+-----------------------------------------+
-| Tag: Address (Type 2)                                                        |
-+-------------------+----------------+-----------------------------------------+
-| Type              | 0x0002         | Address Tag                             |
-| Flags             | 0x0001         | Required (Bootloader must process)      |
-| Size              | 24 bytes       |                                         |
-| Header Addr       | 0x01000000     | Physical address of this header         |
-| Load Addr         | 0x01000000     | Physical address to load segment at     |
-| Load End Addr     | 0x00000000     | 0 = Load entire file                    |
-| BSS End Addr      | 0x01500000     | Physical address end of BSS (Reserved)  |
-+-------------------+----------------+-----------------------------------------+
-| Tag: End (Type 0)                                                            |
-+-------------------+----------------+-----------------------------------------+
-| Type              | 0x0000         | End Tag                                 |
-| Flags             | 0x0000         |                                         |
-| Size              | 8 bytes        |                                         |
-+-------------------+----------------+-----------------------------------------+
+```
+0x0000_0000_0000_0000 - 0x0000_7FFF_FFFF_FFFF  User space (128 TB)
+0xFFFF_8000_0000_0000 - 0xFFFF_FFFF_7FFF_FFFF  HHDM (physical memory access)
+0xFFFF_FFFF_8000_0000 - 0xFFFF_FFFF_FFFF_FFFF  Kernel (top 2 GB)
 ```
 
-## Why Flat Binary?
-We use a valid ELF64 binary during compilation but strip it to a Flat Binary (`kernel.bin`) for the final ISO.
-This is done because standard linkers (like LLD) may introduce alignment gaps between ELF sections (e.g., jumping from 1MB to 2MB).
-The Multiboot2 **Address Tag** forces the bootloader to load the file as a contiguous block at `0x01000000`, bypassing ELF parsing logic that might fail due to these gaps.
+### Key Addresses
+
+| Region | Virtual Address | Description |
+|--------|----------------|-------------|
+| Kernel Base | `0xFFFFFFFF80000000` | Kernel code and data |
+| HHDM Base | `0xFFFF800000000000` | Direct map of physical memory |
+| Kernel Stacks | `0xFFFFA00000000000` | Per-thread kernel stacks |
+| User Stack | `0xF0000000` (top) | Default user stack location |
+
+## Limine Configuration
+
+The bootloader is configured via `limine.cfg`:
+
+```ini
+TIMEOUT=5
+SERIAL=yes
+VERBOSE=yes
+
+:ZigK Microkernel
+PROTOCOL=limine
+KERNEL_PATH=boot:///boot/kernel.elf
+MODULE_PATH=boot:///boot/modules/shell.elf
+MODULE_CMDLINE=shell
+```
+
+## Limine Requests
+
+The kernel declares Limine requests in `src/kernel/main.zig`:
+
+- **Base Revision** - Protocol version check
+- **HHDM Request** - Higher Half Direct Map offset
+- **Memory Map Request** - Physical memory regions
+- **Framebuffer Request** - Display buffer
+- **Module Request** - Loaded modules (shell, httpd, initrd)
+- **Kernel Address Request** - Kernel physical/virtual base
+
+## Building and Running
+
+```bash
+# Build kernel and create ISO
+zig build iso
+
+# Run in QEMU (macOS with Apple Silicon)
+zig build run -Dbios=/opt/homebrew/share/qemu/edk2-x86_64-code.fd
+
+# Or manually with UEFI
+qemu-system-x86_64 -M q35 -m 256M -cdrom zigk.iso \
+  -drive if=pflash,format=raw,readonly=on,file=/opt/homebrew/share/qemu/edk2-x86_64-code.fd \
+  -serial stdio -display none -accel tcg
+```
+
+## Key Files
+
+- `limine.cfg` - Bootloader configuration
+- `src/lib/limine.zig` - Limine protocol bindings
+- `src/kernel/main.zig` - Kernel entry point
+- `src/arch/x86_64/boot/linker.ld` - Kernel linker script

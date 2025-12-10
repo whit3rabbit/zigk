@@ -126,7 +126,7 @@ export fn _start() noreturn {
     // Optional - serial-only mode works without framebuffer
     framebuffer.initFromLimine(&framebuffer_request);
 
-    // Check for loaded modules (shell, etc.)
+    // Check for loaded modules (shell, initrd, etc.)
     if (module_request.response) |mod_response| {
         const mods = mod_response.modules();
         console.info("Loaded modules: {d}", .{mods.len});
@@ -137,6 +137,9 @@ export fn _start() noreturn {
                 mod.size,
             });
         }
+
+        // Initialize InitRD if present
+        initInitRD(mods);
     }
 
     // Initialize memory management subsystems
@@ -308,6 +311,47 @@ fn loadInitProcess() void {
 
     sched.addThread(user_thread);
     console.info("Init process started (pid={d}, tid={d})", .{ proc.pid, user_thread.tid });
+}
+
+/// Initialize InitRD filesystem from Limine modules
+/// Searches for a module with "initrd" in its cmdline or path
+fn initInitRD(mods: []const *limine.Module) void {
+    const get_str = struct {
+        fn call(ptr: [*:0]const u8) []const u8 {
+            if (@intFromPtr(ptr) == 0) return "";
+            return ptr[0..strlen(ptr)];
+        }
+    }.call;
+
+    for (mods) |mod| {
+        const cmdline = get_str(mod.cmdline);
+        const path = get_str(mod.path);
+
+        // Check if this module is an initrd (by cmdline or path)
+        if (containsStr(cmdline, "initrd") or containsStr(path, "initrd") or
+            containsStr(cmdline, ".tar") or containsStr(path, ".tar"))
+        {
+            // Get module data as slice
+            const data = @as([*]const u8, @ptrFromInt(mod.address))[0..mod.size];
+
+            // Initialize the global InitRD instance
+            fs.initrd.InitRD.init(data);
+
+            console.info("InitRD: Initialized from module ({d} bytes)", .{mod.size});
+
+            // List files in initrd for debugging
+            var iter = fs.initrd.InitRD.instance.listFiles();
+            var file_count: usize = 0;
+            while (iter.next()) |_| {
+                file_count += 1;
+            }
+            console.info("InitRD: {d} files found", .{file_count});
+            return;
+        }
+    }
+
+    // No initrd found - this is not an error, just informational
+    console.info("InitRD: No initrd module found (filesystem empty)", .{});
 }
 
 /// Initialize PMM, VMM, and Heap using Limine memory map

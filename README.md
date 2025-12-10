@@ -1,19 +1,21 @@
 # ZigK
 
-A minimal x86_64 microkernel written in Zig, using GRUB2 with Multiboot2 protocol.
+A minimal x86_64 microkernel written in Zig, using the Limine bootloader.
 
 ## Features
 
-- Multiboot2 boot protocol via GRUB2
-- Physical Memory Manager (bitmap allocator)
+- Limine boot protocol (v5.x)
+- Physical Memory Manager (bitmap allocator with refcounting)
 - Virtual Memory Manager (4-level paging)
 - Kernel heap (thread-safe, coalescing free-list)
 - GDT/IDT/PIC initialization
 - PS/2 keyboard driver
 - Serial console output (COM1)
 - Round-robin scheduler with thread support
+- ELF loader for userspace programs
+- Syscall interface (Linux-compatible numbers)
 
-## Building an Running
+## Building and Running
 
 See [BUILD.md](BUILD.md) for detailed instructions on:
 - Setting up the development environment
@@ -24,35 +26,36 @@ See [BUILD.md](BUILD.md) for detailed instructions on:
 ## Boot Process
 
 See [BOOT.md](BOOT.md) for technical details on:
-- Multiboot2 protocol implementation
+- Limine protocol implementation
 - Boot process flow
-- Header structures and Flat Binary loading strategy
-- Boot time: 1-2 seconds instead of instantaneous
-- Slight input latency possible
+- Memory layout
 
-**Required flags** (already set in build.zig):
-```
--accel tcg    # Force software emulation
-```
-
-If you see `invalid accelerator hvf`, the TCG flag is missing.
-
-### UEFI Booting (macOS fix)
-If you get "No bootable device", your ISO is likely UEFI-only (common on macOS). Pass the path to your OVMF firmware:
+### Quick Start
 
 ```bash
-# Example for Homebrew (Intel)
-zig build run -Dbios=/usr/local/share/qemu/edk2-x86_64-code.fd
+# Build and create ISO
+zig build iso
 
-# Example for Homebrew (Apple Silicon)
+# Run in QEMU (macOS Apple Silicon)
 zig build run -Dbios=/opt/homebrew/share/qemu/edk2-x86_64-code.fd
+
+# Run in QEMU (macOS Intel)
+zig build run -Dbios=/usr/local/share/qemu/edk2-x86_64-code.fd
+```
+
+### UEFI Booting
+
+The kernel requires UEFI firmware on macOS. Pass the path to your OVMF/EDK2 firmware:
+
+```bash
+qemu-system-x86_64 -M q35 -m 256M -cdrom zigk.iso \
+  -drive if=pflash,format=raw,readonly=on,file=/opt/homebrew/share/qemu/edk2-x86_64-code.fd \
+  -serial stdio -accel tcg
 ```
 
 ## Docker Build (Recommended)
 
 Docker provides a consistent build environment across all platforms and handles all dependencies automatically.
-
-### Quick Start
 
 See [BUILD.md](BUILD.md#docker-build-recommended) for detailed instructions.
 
@@ -70,22 +73,48 @@ ZigK follows a strict HAL (Hardware Abstraction Layer) design:
 
 All kernel code accesses hardware through the `hal` module interface.
 
-## Architecture Notes
+### Limine Boot Process
 
-### Multiboot2 Boot Process
+1. BIOS/UEFI loads Limine bootloader
+2. Limine reads `limine.cfg` and loads kernel ELF + modules
+3. Limine sets up 64-bit long mode with HHDM (Higher Half Direct Map)
+4. Limine jumps to kernel entry point `_start` in Zig
+5. Kernel initializes using Limine memory map and module info
 
-ZigK uses GRUB2 with the Multiboot2 protocol. The boot process:
+## InitRD (Initial RAM Disk)
 
-1. GRUB2 loads kernel at physical address 1MB (0x100000)
-2. GRUB2 calls 32-bit entry point `_start32` with Multiboot2 info in EBX
-3. Bootstrap code (`boot32.S`) sets up page tables:
-   - Identity map: 0x00000000 -> 0x00000000 (first 4GB)
-   - Higher-half: 0xFFFFFFFF80000000 -> 0x00000000 (kernel)
-   - HHDM: 0xFFFF800000000000 -> 0x00000000 (physical memory access)
-4. Bootstrap enables long mode and jumps to 64-bit `_start` in Zig
-5. Kernel initializes using Multiboot2 memory map
+The kernel supports loading files from a TAR-format initial ramdisk. This allows userspace programs to access configuration files, scripts, or other resources at boot time.
 
-This approach works around a Zig 0.15.x linker regression where virtual addresses in linker scripts are ignored. Multiboot2 loads at physical addresses, allowing the kernel to set up its own virtual memory mapping.
+### Creating an InitRD
+
+```bash
+# Create a directory with files to include
+mkdir -p initrd_contents/etc
+echo "root:x:0:0:root:/root:/bin/sh" > initrd_contents/etc/passwd
+
+# Create USTAR TAR archive (required format)
+tar --format=ustar -cvf initrd.tar -C initrd_contents .
+```
+
+### Adding InitRD to Boot
+
+1. Copy `initrd.tar` to `iso_root/boot/`:
+   ```bash
+   cp initrd.tar iso_root/boot/initrd.tar
+   ```
+
+2. Add module entry to `limine.cfg`:
+   ```
+   MODULE_PATH=boot:///boot/initrd.tar
+   MODULE_CMDLINE=initrd
+   ```
+
+3. Rebuild and run:
+   ```bash
+   zig build run -Dbios=/opt/homebrew/share/qemu/edk2-x86_64-code.fd
+   ```
+
+The kernel auto-detects modules with "initrd" or ".tar" in their cmdline/path and initializes the filesystem.
 
 ## License
 

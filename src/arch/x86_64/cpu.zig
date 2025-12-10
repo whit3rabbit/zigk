@@ -121,6 +121,7 @@ pub inline fn halt() void {
     asm volatile ("hlt");
 }
 
+
 /// Halt with interrupts disabled (for panic)
 pub inline fn haltForever() noreturn {
     while (true) {
@@ -128,14 +129,25 @@ pub inline fn haltForever() noreturn {
     }
 }
 
+/// Atomically enable interrupts and halt
+/// Used for race-free idle loops: guarantees CPU halts even if interrupt
+/// occurred immediately after STI but before HLT
+pub inline fn enableAndHalt() void {
+    asm volatile ("sti; hlt");
+}
+
+
 // TLB Operations
 
 /// Invalidate TLB entry for a specific address
+/// The invlpg instruction only needs the address, not memory contents
 pub inline fn invlpg(addr: u64) void {
-    const ptr: *const u8 = @ptrFromInt(addr);
-    asm volatile ("invlpg %[p]"
+    // Use invlpg with memory operand syntax - the address is passed directly
+    // We cast to a pointer type that Zig can use with the "m" constraint
+    // but the instruction only uses the address, not the contents
+    asm volatile ("invlpg (%[addr])"
         :
-        : [p] "m" (ptr.*),
+        : [addr] "r" (addr),
         : .{ .memory = true }
     );
 }
@@ -143,6 +155,16 @@ pub inline fn invlpg(addr: u64) void {
 /// Flush entire TLB by reloading CR3
 pub inline fn flushTlb() void {
     writeCr3(readCr3());
+}
+
+/// Flush entire TLB including global pages
+/// Requires toggling CR4.PGE (Page Global Enable)
+pub inline fn flushTlbGlobal() void {
+    const cr4 = readCr4();
+    // Clear PGE (bit 7)
+    writeCr4(cr4 & ~@as(u64, 1 << 7));
+    // Restore PGE (bit 7)
+    writeCr4(cr4 | (1 << 7));
 }
 
 // CPUID

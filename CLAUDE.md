@@ -26,6 +26,12 @@ zig build              # Build kernel + userland
 zig build iso          # Create bootable ISO
 zig build run          # Build ISO and run in QEMU
 zig build test         # Run unit tests
+
+Mode,Command,Safety Checks,Optimizations,Best For
+Debug,zig build -Doptimize=Debug,On,Off,Development
+ReleaseSafe,zig build -Doptimize=ReleaseSafe,On,On,Production (Secure)
+ReleaseFast,zig build -Doptimize=ReleaseFast,Off,On,Raw Speed (Gaming/Sim)
+ReleaseSmall,zig build -Doptimize=ReleaseSmall,Off,Size,Embedded
 ```
 
 For macOS with Apple Silicon:
@@ -91,6 +97,42 @@ asm volatile ("out %[data], %[port]"
 - `src/kernel/main.zig` - Kernel entry point
 - `src/arch/x86_64/asm_helpers.S` - Low-level assembly routines
 - `limine.cfg` - Bootloader configuration
+- `src/fs/initrd.zig` - InitRD TAR filesystem parser
+
+## InitRD Setup
+
+The kernel loads an optional InitRD (Initial RAM Disk) in USTAR TAR format. Files in the initrd are accessible via `sys_open` syscalls.
+
+### Creating InitRD
+
+```bash
+# Create contents directory
+mkdir -p initrd_contents/etc
+echo "config data" > initrd_contents/etc/config
+
+# Create USTAR TAR (required format)
+tar --format=ustar -cvf initrd.tar -C initrd_contents .
+
+# Copy to ISO root
+cp initrd.tar iso_root/boot/initrd.tar
+```
+
+### Limine Configuration
+
+Add to `limine.cfg` after the kernel module:
+
+```
+MODULE_PATH=boot:///boot/initrd.tar
+MODULE_CMDLINE=initrd
+```
+
+### Detection Logic
+
+The kernel (`src/kernel/main.zig:initInitRD`) scans Limine modules for:
+- Cmdline containing "initrd" or ".tar"
+- Path containing "initrd" or ".tar"
+
+When found, it initializes `fs.initrd.InitRD.instance` with the module data.
 
 ## Agent Instructions
 
@@ -98,3 +140,33 @@ asm volatile ("out %[data], %[port]"
 - Use subagents for research or context7 for documentation
 - No emojis or em dashes
 - Comments explain "why", not "what"
+
+## Zig Best Practices for Speed and Slice Safety
+
+| Rule | Rationale (Security) |
+| :--- | :--- |
+| **1. Use Safe Build Modes by Default** | Compile your code with **`Debug`** (default) or **`ReleaseSafe`** (optimized, but with checks). These modes automatically enable **array bounds checking** and **integer overflow checking**, which are the main defense against buffer overruns when working with slices. |
+| **2. Leverage Slices (`[]T`) and Const Slices (`[]const T`)** | Slices explicitly carry their length, which the compiler uses for the bounds checks mentioned above. Avoid using raw "many-item pointers" (`[*]T`) unless you are very certain you know the length and are manually managing safety.  |
+| **3. Use `[]const T` for Read-Only Data** | Pass slices as `[]const T` whenever a function doesn't need to modify the data. This provides a compile-time guarantee that data cannot be accidentally changed, improving code safety and clarity. |
+| **4. Avoid Dangling Slices/Pointers** | **Never** return a slice or pointer to memory allocated on a function's stack (a local variable that goes out of scope). This leads to **use-after-free** bugs. For memory that must persist beyond the current scope, use an **allocator** to manage heap memory, or ensure the slice points to a memory region with an explicitly managed lifetime. |
+| **5. Be Explicit with Lifetime Management (Allocators)** | When allocating slices on the heap (e.g., using `std.mem.Allocator.alloc`), use `defer` to ensure the memory is freed. The `GeneralPurposeAllocator` (`std.heap.GeneralPurposeAllocator`) in debug builds is excellent for runtime detection of memory leaks, use-after-free, and double-free errors. |
+| **6. Only Disable Safety for Bottlenecks** | For extreme performance gains, you can selectively disable runtime safety checks using `@setRuntimeSafety(false)` or compile with **`ReleaseFast`**. However, this should be **isolated** to small, heavily-tested functions, as it sacrifices the core security feature (bounds checking) that slices provide. |
+| **7. Minimize Heap Allocations** | Heap allocations are slow. Prefer stack-allocated arrays and slices of those arrays, or use specialized allocators like **Arena Allocators** (`std.heap.ArenaAllocator`) to reduce allocation/deallocation overhead for temporary data. Slices themselves are cheap views, not allocations. |
+| **8. Optimize Slicing Operations** | The Zig compiler is smart. Repeated slicing operations (e.g., slicing a slice) are often optimized into a single, efficient operation at compile time, leading to a zero-cost abstraction. Trust the built-in slicing (`array[start..end]`) before resorting to manual pointer manipulation. |
+| **9. Prefer Contiguous Memory Access** | Use slices to process large, contiguous blocks of memory (arrays) with simple loops (`for (slice) |item|`). This maximizes **data locality** and allows the compiler and hardware to make better use of **CPU caches** and potentially use **SIMD** instructions for vectorized operations. |
+
+* **Handle All Errors (Avoid Panics):** Use Zig's `error` unions and the `try`/`catch` keywords. This prevents unexpected control flow interruptions and promotes explicit error handling, making resource management (like freeing slice memory) more reliable, especially with `defer` and `errdefer`.
+* **Avoid Unsafe C-style Idioms:** Zig's standard library and slices replace many C idioms like null-terminated strings (Zig uses `[:0]const u8` when needed for C interop, but `[]const u8` for pure Zig strings) and raw pointer arithmetic. Use the Zig-native slices and functions for better safety.
+* **No undefined:** Avoid var x: i32 = undefined; unless you have a strict performance reason and initialize it immediately after.
+* **No try in defer:** Do not put code that can fail inside a defer block (it swallows errors).
+* **Checked Arithmetic:** Zig checks integer overflow by default. Use wrapping operators (e.g., +% for wrapping add) only if you explicitly want that behavior.
+* **comptime:** Static Verification
+This is Zig's "killer feature" for both speed and security. You can run arbitrary Zig code during compilation.
+Best Practice: Use comptime checks to enforce invariants that C would check at runtime (or assert).
+Speed Benefit: Pre-calculate complex lookup tables or math at compile time so the runtime cost is zero.
+```
+fn Matrix(comptime rows: usize, comptime cols: usize) type {
+    if (rows != cols) @compileError("Matrix must be square!");
+    return [rows][cols]f32;
+}
+```

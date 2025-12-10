@@ -2,7 +2,7 @@
 //
 // Manages physical page frames using a bitmap allocator.
 // Parses memory map to identify usable regions.
-// Supports Multiboot2 boot protocol.
+// Uses Limine boot protocol for memory map.
 //
 // Design:
 //   - Bitmap-based allocator: 1 bit per 4KB page
@@ -28,8 +28,12 @@ pub const PAGE_SIZE: usize = paging.PAGE_SIZE;
 // PMM State
 // Bitmap as slice enables Zig bounds checking on all accesses.
 // Initialized to empty slice; set properly in initFromLimine().
+// PMM State
+// Bitmap as slice enables Zig bounds checking on all accesses.
+// Initialized to empty slice; set properly in initFromLimine().
 var bitmap: []u8 = &[_]u8{};
-var bitmap_size: usize = 0; // Size in bytes (redundant with bitmap.len but kept for clarity)
+var bitmap_size: usize = 0; // Size in bytes
+var refcounts: []u8 = &[_]u8{}; // Refcount array (new)
 var total_pages: usize = 0;
 var free_pages: usize = 0;
 var allocated_pages: usize = 0;
@@ -42,7 +46,32 @@ var memory_end: u64 = 0;
 // Track if PMM is initialized
 var initialized: bool = false;
 
+// Helper to get refcount safely
+pub fn getRefcount(phys_addr: u64) u8 {
+    if (phys_addr >= memory_end) return 0;
+    const page = phys_addr / PAGE_SIZE;
+    if (page >= refcounts.len) return 0;
+    return refcounts[page];
+}
 
+/// Increment reference count for a page
+pub fn refPage(phys_addr: u64) void {
+    if (!initialized) return;
+    
+    // Lock effectively protects the refcount
+    const held = pmm_lock.acquire();
+    defer held.release();
+
+    const page = phys_addr / PAGE_SIZE;
+    if (page >= total_pages) return;
+
+    // Check for overflow
+    if (refcounts[page] == 255) {
+        console.panic("PMM: Refcount overflow for page {x}", .{phys_addr});
+    }
+
+    refcounts[page] += 1;
+}
 
 /// Initialize PMM from Limine memory map
 /// Must be called after paging.init() sets up HHDM
@@ -76,51 +105,86 @@ pub fn initFromLimine(memmap: *const limine.MemoryMapResponse) !void {
     }
 
     memory_start = lowest_usable;
-    memory_end = highest_addr;
 
-    // Calculate total pages in the address space
-    total_pages = @intCast(highest_addr / PAGE_SIZE);
-    bitmap_size = (total_pages + 7) / 8; // Round up to bytes
+    // Find the highest address of usable memory (not just any memory type)
+    // This prevents allocating massive metadata for sparse address spaces
+    var highest_usable_end: u64 = 0;
+    for (entries) |entry| {
+        if (entry.kind == .usable) {
+            const end_addr = entry.base + entry.length;
+            if (end_addr > highest_usable_end) {
+                highest_usable_end = end_addr;
+            }
+        }
+    }
 
-    console.info("PMM: {d} entries, Total pages: {d}, Bitmap size: {d} KB", .{
+    // Cap memory_end at highest usable address to avoid tracking huge sparse regions
+    // QEMU often reports high addresses for reserved regions we don't need to track
+    memory_end = highest_usable_end;
+
+    // Calculate total pages based on usable memory range only
+    total_pages = @intCast(memory_end / PAGE_SIZE);
+
+    // Sizes for metadata
+    bitmap_size = (total_pages + 7) / 8; // Bit per page
+    const refcounts_size = total_pages;  // Byte per page
+
+    const total_metadata = bitmap_size + refcounts_size;
+
+    console.info("PMM: {d} entries, Tracking {d} pages ({d} MB)", .{
         entries.len,
         total_pages,
+        (total_pages * PAGE_SIZE) / (1024 * 1024),
+    });
+    console.info("PMM Metadata: Bitmap {d} KB, Refcounts {d} KB", .{
         bitmap_size / 1024,
+        refcounts_size / 1024,
     });
 
-    // Second pass: find a usable region for the bitmap
-    var bitmap_phys: u64 = 0;
+    // Second pass: find a usable region for the bitmap AND refcounts
+    var metadata_phys: u64 = 0;
     var found_region = false;
 
     for (entries) |entry| {
-        // Need a usable region large enough for bitmap + some pages
-        // Also ensure we're not in the first 1MB (reserved for legacy)
+        // Need a usable region large enough for all metadata + safety margin
         if (entry.kind == .usable and
-            entry.length >= bitmap_size + PAGE_SIZE * 16 and
+            entry.length >= total_metadata + PAGE_SIZE * 32 and
             entry.base >= 0x100000)
         {
-            // Align bitmap to page boundary
-            bitmap_phys = paging.pageAlignUp(entry.base);
+            // Align metadata to page boundary
+            metadata_phys = paging.pageAlignUp(entry.base);
             found_region = true;
             break;
         }
     }
 
     if (!found_region) {
-        console.err("PMM: No suitable region for bitmap!", .{});
+        console.err("PMM: No suitable region for metadata!", .{});
         return error.NoMemoryForBitmap;
     }
 
-    // Map bitmap using HHDM and create bounded slice
-    const bitmap_ptr: [*]u8 = paging.physToVirt(bitmap_phys);
-    bitmap = bitmap_ptr[0..bitmap_size];
+    // Map metadata arrays using HHDM
+    const base_ptr: [*]u8 = paging.physToVirt(metadata_phys);
+    
+    // Bitmap comes first
+    bitmap = base_ptr[0..bitmap_size];
+    
+    // Refcounts follows bitmap, aligned to next page boundary for safety/cache?
+    // Packed tightly is checking byte alignment, which is fine.
+    // Let's just point slightly after bitmap
+    const refcounts_offset = bitmap_size;
+    refcounts = base_ptr[refcounts_offset .. refcounts_offset + refcounts_size];
 
-    console.info("PMM: Bitmap at phys {x}, virt {x}, size {d}", .{ bitmap_phys, @intFromPtr(bitmap.ptr), bitmap.len });
+    console.info("PMM: Metadata at phys {x}", .{ metadata_phys });
 
     // Initialize bitmap: mark all pages as used (1 = used, 0 = free)
     @memset(bitmap, 0xFF);
+    
+    // Initialize refcounts: default to 1 (reserved/used)
+    // We will clear refcounts for free pages shortly
+    @memset(refcounts, 1);
 
-    // Third pass: mark usable regions as free in bitmap
+    // Third pass: mark usable regions as free
     for (entries) |entry| {
         if (entry.kind == .usable) {
             const start_page = paging.pageAlignUp(entry.base) / PAGE_SIZE;
@@ -129,44 +193,44 @@ pub fn initFromLimine(memmap: *const limine.MemoryMapResponse) !void {
             var page = start_page;
             while (page < end_page) : (page += 1) {
                 clearBit(page);
+                // Free pages have refcount 0
+                refcounts[page] = 0;
                 free_pages += 1;
             }
         }
     }
 
-    // Reserve first 1MB (legacy BIOS area, bootloader code)
-    const first_mb_pages = 0x100000 / PAGE_SIZE;
-    var i: usize = 0;
-    while (i < first_mb_pages) : (i += 1) {
-        if (!isBitSet(i)) {
-            setBit(i);
-            if (free_pages > 0) free_pages -= 1;
+    // Helper to reserve a range (set bit and refcount=1)
+    const reserveRange = struct {
+        fn reserve(start: usize, count: usize) void {
+            var i: usize = 0;
+            while (i < count) : (i += 1) {
+                const p = start + i;
+                if (p < total_pages and !isBitSet(p)) {
+                    setBit(p);
+                    refcounts[p] = 1;
+                    if (free_pages > 0) free_pages -= 1;
+                } else if (p < total_pages) {
+                    // Already set, just ensure refcount is 1
+                    refcounts[p] = 1; 
+                }
+            }
         }
-    }
+    }.reserve;
 
-    // Reserve bitmap pages
-    const bitmap_pages = paging.pagesToCover(bitmap_size);
-    const bitmap_start_page = bitmap_phys / PAGE_SIZE;
+    // Reserve first 1MB (legacy)
+    reserveRange(0, 0x100000 / PAGE_SIZE);
 
-    i = 0;
-    while (i < bitmap_pages) : (i += 1) {
-        if (!isBitSet(bitmap_start_page + i)) {
-            setBit(bitmap_start_page + i);
-            if (free_pages > 0) free_pages -= 1;
-        }
-    }
+    // Reserve metadata pages (Bitmap + Refcounts)
+    const metadata_pages = paging.pagesToCover(total_metadata);
+    const metadata_start_page = metadata_phys / PAGE_SIZE;
+    reserveRange(metadata_start_page, metadata_pages);
 
-    // Reserve kernel and module pages (Limine marks these as kernel_and_modules)
-    // We don't need to manually reserve them as they're not marked usable
-    // But we reserve memory up to 4MB for safety margin
-    const kernel_end_page = 0x400000 / PAGE_SIZE;
-    var page: usize = 0x100000 / PAGE_SIZE;
-    while (page < kernel_end_page) : (page += 1) {
-        if (!isBitSet(page)) {
-            setBit(page);
-            if (free_pages > 0) free_pages -= 1;
-        }
-    }
+    // Reserve kernel and module safety margin (up to 4MB or higher if needed)
+    // Limine usually marks modules as specialized types, but 'usable' excludes them.
+    // However, we did a memset(0xFF) initially, effectively reserving everything not explicitly 'usable'.
+    // The previous code explicitly re-reserved 1MB-4MB. We should keep that.
+    reserveRange(0x100000 / PAGE_SIZE, (0x400000 - 0x100000) / PAGE_SIZE);
 
     initialized = true;
 
@@ -207,6 +271,7 @@ pub fn allocPage() ?u64 {
 
                 if (!isBitSet(page_num)) {
                     setBit(page_num);
+                    refcounts[page_num] = 1; // Initial refcount
                     free_pages -= 1;
                     allocated_pages += 1;
 
@@ -258,6 +323,7 @@ pub fn allocPages(count: usize) ?u64 {
             i = 0;
             while (i < count) : (i += 1) {
                 setBit(start_page + i);
+                refcounts[start_page + i] = 1;
             }
             free_pages -= count;
             allocated_pages += count;
@@ -277,6 +343,7 @@ pub fn allocPages(count: usize) ?u64 {
 }
 
 /// Free a single physical page
+/// Decrements refcount; if 0, marks as free.
 pub fn freePage(phys_addr: u64) void {
     if (!initialized) return;
 
@@ -295,19 +362,31 @@ pub fn freePage(phys_addr: u64) void {
     }
 
     if (!isBitSet(page_num)) {
-        console.warn("PMM: Double-free detected at {x}!", .{phys_addr});
+        console.warn("PMM: Double-free/Unallocated free detected at {x}!", .{phys_addr});
         return;
     }
 
-    clearBit(page_num);
-    free_pages += 1;
-
-    if (allocated_pages > 0) {
-        allocated_pages -= 1;
+    // Decrement refcount
+    if (refcounts[page_num] > 0) {
+        refcounts[page_num] -= 1;
+    } else {
+        console.panic("PMM: Refcount underflow for page {x}", .{phys_addr});
     }
 
-    if (config.debug_memory) {
-        console.debug("PMM: Freed page {x}", .{phys_addr});
+    // Only actually free if refcount dropped to 0
+    if (refcounts[page_num] == 0) {
+        clearBit(page_num);
+        free_pages += 1;
+        if (allocated_pages > 0) {
+            allocated_pages -= 1;
+        }
+        if (config.debug_memory) {
+            console.debug("PMM: Freed page {x} (refcount=0)", .{phys_addr});
+        }
+    } else {
+        if (config.debug_memory) {
+            console.debug("PMM: Decremented refcount for {x} to {d}", .{ phys_addr, refcounts[page_num] });
+        }
     }
 }
 

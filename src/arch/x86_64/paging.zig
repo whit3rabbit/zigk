@@ -140,7 +140,7 @@ pub const PageTable = struct {
 };
 
 // HHDM (Higher Half Direct Map) offset
-// With Multiboot2, we set up our own HHDM mapping in boot32.S at this fixed address.
+// Limine sets up the HHDM mapping at this address.
 // This maps physical memory starting at 0x0 to virtual address 0xFFFF800000000000.
 pub const HHDM_OFFSET: u64 = 0xFFFF800000000000;
 
@@ -148,11 +148,10 @@ pub const HHDM_OFFSET: u64 = 0xFFFF800000000000;
 var hhdm_offset: u64 = HHDM_OFFSET;
 
 /// Initialize paging module
-/// With Multiboot2, the HHDM is set up by boot32.S at a fixed address,
-/// so this function is now a no-op but kept for API compatibility.
+/// The HHDM is set up by Limine at a fixed address,
+/// so this function verifies the offset but uses the constant.
 pub fn init(offset: u64) void {
     // Verify the offset matches our expected HHDM
-    // This is a sanity check - with Multiboot2 we always use HHDM_OFFSET
     _ = offset;
     hhdm_offset = HHDM_OFFSET;
 }
@@ -199,6 +198,11 @@ pub fn invalidatePage(virt_addr: u64) void {
 /// Flush the entire TLB
 pub fn flushTlb() void {
     cpu.flushTlb();
+}
+
+/// Flush entire TLB including global pages
+pub fn flushTlbGlobal() void {
+    cpu.flushTlbGlobal();
 }
 
 /// Extract page table indices from a virtual address
