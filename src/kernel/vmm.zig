@@ -22,7 +22,7 @@ const pmm = @import("pmm");
 const paging = hal.paging;
 const PageTableEntry = paging.PageTableEntry;
 const PageTable = paging.PageTable;
-const PageFlags = paging.PageFlags;
+pub const PageFlags = paging.PageFlags;
 
 // Constants
 pub const PAGE_SIZE: usize = paging.PAGE_SIZE;
@@ -234,6 +234,118 @@ pub fn translate(pml4_phys: u64, virt_addr: u64) ?u64 {
 /// Check if a virtual address is mapped
 pub fn isMapped(pml4_phys: u64, virt_addr: u64) bool {
     return translate(pml4_phys, virt_addr) != null;
+}
+
+/// Check if a user page is mapped with user-accessible permissions.
+/// This verifies the user bit is set at ALL levels of the page table hierarchy.
+/// Returns false if the page is not mapped or any level lacks user permission.
+pub fn isUserPageMapped(pml4_phys: u64, virt_addr: u64) bool {
+    const indices = paging.getIndices(virt_addr);
+    const pml4 = paging.getTablePtr(pml4_phys);
+
+    // Check PML4 entry
+    if (!pml4.entries[indices.pml4].isPresent()) return false;
+    if (!pml4.entries[indices.pml4].user_accessible) return false;
+
+    const pdpt = paging.getTablePtr(pml4.entries[indices.pml4].getPhysAddr());
+
+    // Check PDPT entry
+    if (!pdpt.entries[indices.pdpt].isPresent()) return false;
+    if (!pdpt.entries[indices.pdpt].user_accessible) return false;
+
+    // 1GB huge page check
+    if (pdpt.entries[indices.pdpt].isHugePage()) {
+        return true; // User bit already checked
+    }
+
+    const pd = paging.getTablePtr(pdpt.entries[indices.pdpt].getPhysAddr());
+
+    // Check PD entry
+    if (!pd.entries[indices.pd].isPresent()) return false;
+    if (!pd.entries[indices.pd].user_accessible) return false;
+
+    // 2MB huge page check
+    if (pd.entries[indices.pd].isHugePage()) {
+        return true; // User bit already checked
+    }
+
+    const pt = paging.getTablePtr(pd.entries[indices.pd].getPhysAddr());
+
+    // Check PT entry (leaf)
+    if (!pt.entries[indices.pt].isPresent()) return false;
+    if (!pt.entries[indices.pt].user_accessible) return false;
+
+    return true;
+}
+
+/// Check if a user page is mapped with write permission.
+/// Verifies both user-accessible AND writable flags at the leaf level.
+pub fn isUserPageWritable(pml4_phys: u64, virt_addr: u64) bool {
+    const indices = paging.getIndices(virt_addr);
+    const pml4 = paging.getTablePtr(pml4_phys);
+
+    // Navigate to leaf, checking user bit at each level
+    if (!pml4.entries[indices.pml4].isPresent()) return false;
+    if (!pml4.entries[indices.pml4].user_accessible) return false;
+
+    const pdpt = paging.getTablePtr(pml4.entries[indices.pml4].getPhysAddr());
+    if (!pdpt.entries[indices.pdpt].isPresent()) return false;
+    if (!pdpt.entries[indices.pdpt].user_accessible) return false;
+
+    if (pdpt.entries[indices.pdpt].isHugePage()) {
+        return pdpt.entries[indices.pdpt].writable;
+    }
+
+    const pd = paging.getTablePtr(pdpt.entries[indices.pdpt].getPhysAddr());
+    if (!pd.entries[indices.pd].isPresent()) return false;
+    if (!pd.entries[indices.pd].user_accessible) return false;
+
+    if (pd.entries[indices.pd].isHugePage()) {
+        return pd.entries[indices.pd].writable;
+    }
+
+    const pt = paging.getTablePtr(pd.entries[indices.pd].getPhysAddr());
+    if (!pt.entries[indices.pt].isPresent()) return false;
+    if (!pt.entries[indices.pt].user_accessible) return false;
+
+    return pt.entries[indices.pt].writable;
+}
+
+/// Verify an entire range of user memory is mapped and accessible.
+/// Iterates over all pages in the range and checks user permission.
+/// Returns false if any page in the range fails the check.
+pub fn verifyUserRange(pml4_phys: u64, start: u64, len: usize) bool {
+    if (len == 0) return true;
+
+    // Align start down to page boundary
+    const aligned_start = paging.pageAlignDown(start);
+    const end = start + len;
+
+    // Check each page in the range
+    var addr = aligned_start;
+    while (addr < end) : (addr += PAGE_SIZE) {
+        if (!isUserPageMapped(pml4_phys, addr)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// Verify user memory range with write permission check.
+/// Used for buffers that will be written to (e.g., sys_read output).
+pub fn verifyUserRangeWritable(pml4_phys: u64, start: u64, len: usize) bool {
+    if (len == 0) return true;
+
+    const aligned_start = paging.pageAlignDown(start);
+    const end = start + len;
+
+    var addr = aligned_start;
+    while (addr < end) : (addr += PAGE_SIZE) {
+        if (!isUserPageWritable(pml4_phys, addr)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 /// Create a new user address space

@@ -35,13 +35,13 @@ pub const console_ops = FileOps{
 
 /// Read from console (keyboard input)
 /// Blocking read - waits for input if buffer is empty
-fn consoleRead(fd: *FileDescriptor, buf: [*]u8, count: usize) isize {
+fn consoleRead(fd: *FileDescriptor, buf: []u8) isize {
     _ = fd; // Console has no per-fd state
 
-    if (count == 0) return 0;
+    if (buf.len == 0) return 0;
 
     var bytes_read: usize = 0;
-    while (bytes_read < count) {
+    while (bytes_read < buf.len) {
         if (keyboard.getChar()) |c| {
             buf[bytes_read] = c;
             bytes_read += 1;
@@ -65,15 +65,15 @@ fn consoleRead(fd: *FileDescriptor, buf: [*]u8, count: usize) isize {
 }
 
 /// Write to console (serial output)
-fn consoleWrite(fd: *FileDescriptor, buf: [*]const u8, count: usize) isize {
+fn consoleWrite(fd: *FileDescriptor, buf: []const u8) isize {
     _ = fd; // Console has no per-fd state
 
-    if (count == 0) return 0;
+    if (buf.len == 0) return 0;
 
     // Write to serial console
-    console.print(buf[0..count]);
+    console.print(buf);
 
-    return @intCast(count);
+    return @intCast(buf.len);
 }
 
 // =============================================================================
@@ -91,18 +91,16 @@ pub const null_ops = FileOps{
 };
 
 /// Read from /dev/null always returns EOF (0 bytes)
-fn nullRead(fd: *FileDescriptor, buf: [*]u8, count: usize) isize {
+fn nullRead(fd: *FileDescriptor, buf: []u8) isize {
     _ = fd;
     _ = buf;
-    _ = count;
     return 0; // EOF
 }
 
 /// Write to /dev/null always succeeds
-fn nullWrite(fd: *FileDescriptor, buf: [*]const u8, count: usize) isize {
+fn nullWrite(fd: *FileDescriptor, buf: []const u8) isize {
     _ = fd;
-    _ = buf;
-    return @intCast(count); // Discard all data
+    return @intCast(buf.len); // Discard all data
 }
 
 // =============================================================================
@@ -120,20 +118,19 @@ pub const zero_ops = FileOps{
 };
 
 /// Read from /dev/zero fills buffer with zeros
-fn zeroRead(fd: *FileDescriptor, buf: [*]u8, count: usize) isize {
+fn zeroRead(fd: *FileDescriptor, buf: []u8) isize {
     _ = fd;
 
     // Fill buffer with zeros
-    @memset(buf[0..count], 0);
+    @memset(buf, 0);
 
-    return @intCast(count);
+    return @intCast(buf.len);
 }
 
 /// Write to /dev/zero always succeeds (same as /dev/null)
-fn zeroWrite(fd: *FileDescriptor, buf: [*]const u8, count: usize) isize {
+fn zeroWrite(fd: *FileDescriptor, buf: []const u8) isize {
     _ = fd;
-    _ = buf;
-    return @intCast(count);
+    return @intCast(buf.len);
 }
 
 // =============================================================================

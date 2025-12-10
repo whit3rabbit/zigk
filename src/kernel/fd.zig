@@ -32,14 +32,20 @@ pub const O_NONBLOCK: u32 = 0x0800;
 
 /// File operations vtable
 /// Devices/files implement these to provide I/O functionality
+///
+/// Note: read/write use slices ([]u8, []const u8) instead of pointer+count.
+/// This enforces bounds checking at the type level - the slice length
+/// IS the count, preventing buffer overflows.
 pub const FileOps = struct {
     /// Read data from file into buffer
     /// Returns bytes read, 0 for EOF, or negative errno
-    read: ?*const fn (fd: *FileDescriptor, buf: [*]u8, count: usize) isize,
+    /// Buffer is a slice - its .len is the maximum bytes to read
+    read: ?*const fn (fd: *FileDescriptor, buf: []u8) isize,
 
     /// Write data from buffer to file
     /// Returns bytes written or negative errno
-    write: ?*const fn (fd: *FileDescriptor, buf: [*]const u8, count: usize) isize,
+    /// Buffer is a slice - its .len is the byte count to write
+    write: ?*const fn (fd: *FileDescriptor, buf: []const u8) isize,
 
     /// Close the file and release resources
     /// Called when refcount reaches 0

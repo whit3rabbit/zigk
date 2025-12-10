@@ -16,13 +16,14 @@ fn id(a: u64, b: u64) [4]u64 {
 }
 
 // Base Revision - required for protocol compatibility check
-// Limine sets magic[0] to 0 if revision is supported
+// Per Limine protocol: if the requested revision is supported, the bootloader
+// sets the revision field to 0. If unsupported, it remains unchanged.
 pub const BaseRevision = extern struct {
     magic: [2]u64 = .{ 0xf9562b2d5c95a6c8, 0x6a7b384944536bdc },
     revision: u64,
 
     pub fn is_supported(self: *const BaseRevision) bool {
-        return self.magic[0] == 0;
+        return self.revision == 0;
     }
 };
 

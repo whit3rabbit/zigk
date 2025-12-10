@@ -246,6 +246,16 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // Create FS module
+    const fs_module = b.createModule(.{
+        .root_source_file = b.path("src/fs/root.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    fs_module.addImport("fd", fd_module);
+    fs_module.addImport("heap", heap_module);
+    fs_module.addImport("uapi", uapi_module);
+
     // Create Keyboard driver module
     const keyboard_module = b.createModule(.{
         .root_source_file = b.path("src/drivers/keyboard.zig"),
@@ -309,6 +319,16 @@ pub fn build(b: *std.Build) void {
     framebuffer_module.addImport("limine", limine_module);
     framebuffer_module.addImport("console", console_module);
 
+    // Create user memory validation module (shared by all syscall modules)
+    const user_mem_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/syscall/user_mem.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    user_mem_module.addImport("console", console_module);
+    user_mem_module.addImport("vmm", vmm_module);
+    user_mem_module.addImport("sched", sched_module);
+
     // Create syscall random module
     const syscall_random_module = b.createModule(.{
         .root_source_file = b.path("src/kernel/syscall/random.zig"),
@@ -317,6 +337,7 @@ pub fn build(b: *std.Build) void {
     });
     syscall_random_module.addImport("uapi", uapi_module);
     syscall_random_module.addImport("prng", prng_module);
+    syscall_random_module.addImport("user_mem", user_mem_module);
 
     // Create syscall net module (socket syscalls)
     const syscall_net_module = b.createModule(.{
@@ -329,6 +350,7 @@ pub fn build(b: *std.Build) void {
     syscall_net_module.addImport("sched", sched_module);
     syscall_net_module.addImport("thread", thread_module);
     syscall_net_module.addImport("hal", hal_module);
+    syscall_net_module.addImport("user_mem", user_mem_module);
 
     // Create syscall handlers module
     const syscall_handlers_module = b.createModule(.{
@@ -351,6 +373,8 @@ pub fn build(b: *std.Build) void {
     syscall_handlers_module.addImport("heap", heap_module);
     syscall_handlers_module.addImport("elf", elf_module);
     syscall_handlers_module.addImport("framebuffer", framebuffer_module);
+    syscall_handlers_module.addImport("fs", fs_module);
+    syscall_handlers_module.addImport("user_mem", user_mem_module);
 
     // Create syscall dispatch table module
     const syscall_table_module = b.createModule(.{
@@ -366,6 +390,8 @@ pub fn build(b: *std.Build) void {
     syscall_table_module.addImport("net.zig", syscall_net_module);
 
     // Create kernel executable
+    // NOTE: red_zone must be disabled for kernel code to prevent stack corruption
+    // from interrupts. code_model=kernel enables top-2GB addressing.
     const kernel = b.addExecutable(.{
         .name = "kernel.elf",
         .root_module = b.createModule(.{
@@ -374,15 +400,15 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .code_model = .kernel,
             .pic = false,
+            .red_zone = false,
         }),
+        // WORKAROUND: Zig 0.15.x has a regression (#25069) where the self-hosted backend
+        // doesn't properly use linker scripts. Force LLVM backend to fix higher-half linking.
+        .use_llvm = true,
     });
 
     // Force non-relocatable executable
     kernel.pie = false;
-
-    // Note: Zig's internal linker ignores some linker script features (virtual addresses).
-    // For now, we rely on Limine loading at physical addresses and setting up HHDM.
-    // The kernel accesses its own code via identity mapping provided by Limine.
 
     // Smaller page alignment to reduce ELF file size gaps
     kernel.link_z_max_page_size = 4096;
@@ -411,6 +437,10 @@ pub fn build(b: *std.Build) void {
     kernel.root_module.addImport("syscall_random", syscall_random_module);
     kernel.root_module.addImport("syscall_table", syscall_table_module);
     kernel.root_module.addImport("framebuffer", framebuffer_module);
+    kernel.root_module.addImport("fs", fs_module);
+    kernel.root_module.addImport("elf", elf_module);
+    kernel.root_module.addImport("process", process_module);
+    kernel.root_module.addImport("syscall_handlers", syscall_handlers_module);
 
     // Add assembly helpers for x86_64 (ISR stubs, lgdt, lidt)
     kernel.addAssemblyFile(b.path("src/arch/x86_64/asm_helpers.S"));
@@ -457,12 +487,8 @@ pub fn build(b: *std.Build) void {
     shell.setLinkerScript(b.path("src/user/linker.ld"));
     // shell.entry = .disabled; // let Zig find _start
 
-    // Create flat binary for shell
-    const shell_bin = b.addObjCopy(shell.getEmittedBin(), .{
-        .format = .bin,
-    });
-
-    const install_shell = b.addInstallFile(shell_bin.getOutput(), "bin/shell.bin");
+    // Install shell as ELF (required for proper ELF loading in kernel)
+    const install_shell = b.addInstallArtifact(shell, .{});
     b.getInstallStep().dependOn(&install_shell.step);
 
     const httpd_mod = b.createModule(.{
@@ -479,8 +505,8 @@ pub fn build(b: *std.Build) void {
     });
     httpd.setLinkerScript(b.path("src/user/linker.ld"));
 
-    const httpd_bin = b.addObjCopy(httpd.getEmittedBin(), .{ .format = .bin });
-    const install_httpd = b.addInstallFile(httpd_bin.getOutput(), "bin/httpd.bin");
+    // Install httpd as ELF (required for proper ELF loading in kernel)
+    const install_httpd = b.addInstallArtifact(httpd, .{});
     b.getInstallStep().dependOn(&install_httpd.step);
 
     // Create ISO build step using Limine bootloader
@@ -497,9 +523,9 @@ pub fn build(b: *std.Build) void {
         \\fi && \
         \\mkdir -p iso_root/boot/modules iso_root/EFI/BOOT && \
         \\cp zig-out/bin/kernel.elf iso_root/boot/ && \
-        \\cp zig-out/bin/shell.bin iso_root/boot/modules/ && \
-        \\cp zig-out/bin/httpd.bin iso_root/boot/modules/ && \
-        \\cp limine.conf iso_root/ && \
+        \\cp zig-out/bin/shell.elf iso_root/boot/modules/ && \
+        \\cp zig-out/bin/httpd.elf iso_root/boot/modules/ && \
+        \\cp limine.cfg iso_root/boot/ && \
         \\cp "$LIMINE_DIR"/limine-bios.sys iso_root/boot/ && \
         \\cp "$LIMINE_DIR"/limine-bios-cd.bin iso_root/boot/ && \
         \\cp "$LIMINE_DIR"/limine-uefi-cd.bin iso_root/boot/ && \

@@ -24,6 +24,10 @@ const thread = @import("thread");
 const stack_guard = @import("stack_guard");
 const prng = @import("prng");
 const framebuffer = @import("framebuffer");
+const fs = @import("fs");
+const elf = @import("elf");
+const process_mod = @import("process");
+const handlers = @import("syscall_handlers");
 
 // Syscall dispatch table - must be imported to compile dispatch_syscall symbol
 // called from asm_helpers.S _syscall_entry
@@ -44,7 +48,7 @@ comptime {
 // Limine scans for magic IDs and patches response pointers at boot time.
 // ============================================================================
 
-pub export var base_revision linksection(".limine_requests") = limine.BaseRevision{ .revision = 3 };
+pub export var base_revision linksection(".limine_requests") = limine.BaseRevision{ .revision = 1 };
 pub export var hhdm_request linksection(".limine_requests") = limine.HhdmRequest{};
 pub export var memmap_request linksection(".limine_requests") = limine.MemoryMapRequest{};
 pub export var module_request linksection(".limine_requests") = limine.ModuleRequest{};
@@ -180,6 +184,8 @@ export fn _start() noreturn {
 }
 
 /// Load the init process (httpd or shell) into a new user address space
+/// Creates a proper Process struct with FD table (stdin/stdout/stderr pre-opened)
+/// and uses the ELF loader to parse and load the executable.
 fn loadInitProcess() void {
     console.info("Searching for init module...", .{});
 
@@ -221,49 +227,57 @@ fn loadInitProcess() void {
 
     console.info("Found init module: {s} ({d} bytes)", .{ process_name, mod.size });
 
-    // Create user address space
-    const pml4_phys = vmm.createAddressSpace() catch |err| {
-        console.err("Failed to create user address space: {}", .{err});
+    // Step 1: Create Process with FD table (stdin/stdout/stderr pre-opened by devfs)
+    const proc = process_mod.createProcess(null) catch |err| {
+        console.err("Failed to create init process: {}", .{err});
         return;
     };
 
-    const prog_virt_base: u64 = 0x400000;
-    const prog_size = mod.size;
-    const prog_phys_start = mod.address;
+    // Step 2: Set as current process so syscall handlers can access FD table
+    handlers.setCurrentProcess(proc);
+    console.info("Created process pid={d} with FD table", .{proc.pid});
 
-    console.info("Mapping {s} to {x} (phys {x})", .{ process_name, prog_virt_base, prog_phys_start });
+    // Step 3: Get module data as slice for ELF loader
+    const mod_data = @as([*]const u8, @ptrFromInt(mod.address))[0..mod.size];
 
-    // Map code/data with USER + RW + PRESENT flags
-    const flags = hal.paging.PageFlags{
-        .writable = true,
-        .user = true,
-    };
-
-    vmm.mapRange(pml4_phys, prog_virt_base, prog_phys_start, prog_size, flags) catch |err| {
-        console.err("Failed to map program: {}", .{err});
+    // Step 4: Load ELF into process's address space
+    // The ELF loader will parse headers, validate, and map PT_LOAD segments
+    const load_base: u64 = 0x400000; // Default load base for non-PIE executables
+    const load_result = elf.load(mod_data, proc.cr3, load_base) catch |err| {
+        console.err("ELF load failed: {}", .{err});
         return;
     };
+    console.info("ELF: Loaded at {x}-{x}, entry={x}", .{
+        load_result.base_addr,
+        load_result.end_addr,
+        load_result.entry_point,
+    });
 
-    // Allocate and map a user stack (e.g. at 0xF0000000)
+    // Step 5: Allocate and map user stack in process's address space
     const stack_virt_top: u64 = 0xF0000000;
     const stack_size: usize = 32 * 1024; // 32KB stack
     const stack_virt_base = stack_virt_top - stack_size;
 
     console.info("Creating user stack at {x}-{x}", .{ stack_virt_base, stack_virt_top });
 
-    // Iterate pages and alloc/map
+    const stack_flags = hal.paging.PageFlags{
+        .writable = true,
+        .user = true,
+    };
+
+    // Allocate and map stack pages
     var addr = stack_virt_base;
     while (addr < stack_virt_top) : (addr += pmm.PAGE_SIZE) {
-        vmm.allocAndMapPage(pml4_phys, addr, flags) catch |err| {
+        vmm.allocAndMapPage(proc.cr3, addr, stack_flags) catch |err| {
             console.err("Failed to map stack page: {}", .{err});
             return;
         };
     }
 
-    // Create the user thread
-    const user_thread = thread.createUserThread(prog_virt_base, .{
+    // Step 6: Create user thread with entry point from ELF header
+    const user_thread = thread.createUserThread(load_result.entry_point, .{
         .name = process_name,
-        .cr3 = pml4_phys,
+        .cr3 = proc.cr3,
         .user_stack_top = stack_virt_top,
     }) catch |err| {
         console.err("Failed to create user thread: {}", .{err});
@@ -271,7 +285,7 @@ fn loadInitProcess() void {
     };
 
     sched.addThread(user_thread);
-    console.info("Init process started (tid={d})", .{user_thread.tid});
+    console.info("Init process started (pid={d}, tid={d})", .{ proc.pid, user_thread.tid });
 }
 
 /// Initialize PMM, VMM, and Heap using Limine memory map

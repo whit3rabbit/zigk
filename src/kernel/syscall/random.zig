@@ -17,23 +17,15 @@
 
 const uapi = @import("uapi");
 const prng = @import("prng");
+const user_mem = @import("user_mem");
 
 // getrandom flags (Linux ABI)
 pub const GRND_NONBLOCK: u32 = 0x1;
 pub const GRND_RANDOM: u32 = 0x2;
 
-// User pointer validation (duplicated from handlers.zig due to module constraints)
-const USER_SPACE_START: u64 = 0x0000_0000_0040_0000;
-const USER_SPACE_END: u64 = 0x0000_7FFF_FFFF_FFFF;
-
-fn isValidUserPtr(ptr: usize, len: usize) bool {
-    if (ptr == 0) return false;
-    if (ptr < USER_SPACE_START or ptr > USER_SPACE_END) return false;
-    const end_addr = @addWithOverflow(ptr, len);
-    if (end_addr[1] != 0) return false;
-    if (end_addr[0] > USER_SPACE_END) return false;
-    return true;
-}
+// Use consolidated user pointer validation with permission checking
+const isValidUserAccess = user_mem.isValidUserAccess;
+const AccessMode = user_mem.AccessMode;
 
 /// sys_getrandom(buf: [*]u8, buflen: usize, flags: u32) -> isize
 ///
@@ -65,8 +57,9 @@ pub fn sys_getrandom(buf_ptr: usize, buflen: usize, flags: u32) isize {
         return 0;
     }
 
-    // FR-RAND-05: Validate buffer pointer is in userspace
-    if (!isValidUserPtr(buf_ptr, buflen)) {
+    // FR-RAND-05: Validate buffer pointer with write permission
+    // (kernel writes random bytes to user buffer)
+    if (!isValidUserAccess(buf_ptr, buflen, AccessMode.Write)) {
         return uapi.errno.EFAULT.toReturn();
     }
 

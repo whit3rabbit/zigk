@@ -306,3 +306,90 @@ pub const ArpHeader = extern struct {
         return @byteSwap(self.target_ip);
     }
 };
+
+// =============================================================================
+// Safe Header Accessors with Bounds Checking
+// =============================================================================
+// These functions provide safe access to protocol headers from raw byte slices.
+// Unlike direct @ptrCast, they verify the buffer has sufficient space before
+// returning a pointer, preventing out-of-bounds access.
+
+/// Get Ethernet header from buffer with bounds checking.
+/// Returns null if buffer is too small to contain an Ethernet header.
+pub fn getEthHeader(buf: []const u8, offset: usize) ?*const EthernetHeader {
+    if (offset + ETH_HEADER_SIZE > buf.len) return null;
+    return @ptrCast(@alignCast(&buf[offset]));
+}
+
+/// Get mutable Ethernet header from buffer with bounds checking.
+pub fn getEthHeaderMut(buf: []u8, offset: usize) ?*EthernetHeader {
+    if (offset + ETH_HEADER_SIZE > buf.len) return null;
+    return @ptrCast(@alignCast(&buf[offset]));
+}
+
+/// Get IPv4 header from buffer with bounds checking.
+/// Returns null if buffer is too small to contain an IPv4 header.
+pub fn getIpv4Header(buf: []const u8, offset: usize) ?*const Ipv4Header {
+    if (offset + IP_HEADER_SIZE > buf.len) return null;
+    return @ptrCast(@alignCast(&buf[offset]));
+}
+
+/// Get mutable IPv4 header from buffer with bounds checking.
+pub fn getIpv4HeaderMut(buf: []u8, offset: usize) ?*Ipv4Header {
+    if (offset + IP_HEADER_SIZE > buf.len) return null;
+    return @ptrCast(@alignCast(&buf[offset]));
+}
+
+/// Get UDP header from buffer with bounds checking.
+/// Returns null if buffer is too small to contain a UDP header.
+pub fn getUdpHeader(buf: []const u8, offset: usize) ?*const UdpHeader {
+    if (offset + UDP_HEADER_SIZE > buf.len) return null;
+    return @ptrCast(@alignCast(&buf[offset]));
+}
+
+/// Get mutable UDP header from buffer with bounds checking.
+pub fn getUdpHeaderMut(buf: []u8, offset: usize) ?*UdpHeader {
+    if (offset + UDP_HEADER_SIZE > buf.len) return null;
+    return @ptrCast(@alignCast(&buf[offset]));
+}
+
+/// Get ICMP header from buffer with bounds checking.
+/// Returns null if buffer is too small to contain an ICMP header.
+pub fn getIcmpHeader(buf: []const u8, offset: usize) ?*const IcmpHeader {
+    if (offset + ICMP_HEADER_SIZE > buf.len) return null;
+    return @ptrCast(@alignCast(&buf[offset]));
+}
+
+/// Get mutable ICMP header from buffer with bounds checking.
+pub fn getIcmpHeaderMut(buf: []u8, offset: usize) ?*IcmpHeader {
+    if (offset + ICMP_HEADER_SIZE > buf.len) return null;
+    return @ptrCast(@alignCast(&buf[offset]));
+}
+
+/// Get ARP header from buffer with bounds checking.
+/// Returns null if buffer is too small to contain an ARP header.
+pub fn getArpHeader(buf: []const u8, offset: usize) ?*const ArpHeader {
+    const arp_size = @sizeOf(ArpHeader);
+    if (offset + arp_size > buf.len) return null;
+    return @ptrCast(@alignCast(&buf[offset]));
+}
+
+/// Get mutable ARP header from buffer with bounds checking.
+pub fn getArpHeaderMut(buf: []u8, offset: usize) ?*ArpHeader {
+    const arp_size = @sizeOf(ArpHeader);
+    if (offset + arp_size > buf.len) return null;
+    return @ptrCast(@alignCast(&buf[offset]));
+}
+
+/// Generic header accessor with bounds checking.
+/// Use for any fixed-size header type.
+pub fn getHeaderAs(comptime T: type, buf: []const u8, offset: usize) ?*const T {
+    if (offset + @sizeOf(T) > buf.len) return null;
+    return @ptrCast(@alignCast(&buf[offset]));
+}
+
+/// Generic mutable header accessor with bounds checking.
+pub fn getHeaderAsMut(comptime T: type, buf: []u8, offset: usize) ?*T {
+    if (offset + @sizeOf(T) > buf.len) return null;
+    return @ptrCast(@alignCast(&buf[offset]));
+}

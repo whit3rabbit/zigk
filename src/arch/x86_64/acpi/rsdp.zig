@@ -25,11 +25,12 @@ pub const Rsdp = extern struct {
     const Self = @This();
 
     /// Validate RSDP v1 checksum (sum of first 20 bytes must be 0)
+    /// Uses std.mem.asBytes for safe bounded access instead of raw pointer cast
     pub fn validateChecksum(self: *const Self) bool {
-        const bytes: [*]const u8 = @ptrCast(self);
+        const bytes = std.mem.asBytes(self);
         var sum: u8 = 0;
-        for (0..20) |i| {
-            sum +%= bytes[i];
+        for (bytes[0..20]) |b| {
+            sum +%= b;
         }
         return sum == 0;
     }
@@ -70,11 +71,12 @@ pub const Rsdp2 = extern struct {
     const Self = @This();
 
     /// Validate extended checksum (sum of all 36 bytes must be 0)
+    /// Uses std.mem.asBytes for safe bounded access instead of raw pointer cast
     pub fn validateExtendedChecksum(self: *const Self) bool {
-        const bytes: [*]const u8 = @ptrCast(self);
+        const bytes = std.mem.asBytes(self);
         var sum: u8 = 0;
-        for (0..36) |i| {
-            sum +%= bytes[i];
+        for (bytes) |b| {
+            sum +%= b;
         }
         return sum == 0;
     }
@@ -105,12 +107,22 @@ pub const SdtHeader = extern struct {
 
     const Self = @This();
 
+    /// Maximum reasonable ACPI table size (16MB sanity limit)
+    pub const MAX_TABLE_SIZE: u32 = 16 * 1024 * 1024;
+
     /// Validate table checksum (sum of all bytes must be 0)
+    /// Returns false if length is invalid or checksum fails
     pub fn validateChecksum(self: *const Self) bool {
-        const bytes: [*]const u8 = @ptrCast(self);
+        // Sanity check: table length must be reasonable
+        if (self.length < @sizeOf(SdtHeader) or self.length > MAX_TABLE_SIZE) {
+            return false;
+        }
+
+        // Get table bytes as slice with known bounds
+        const table_bytes = self.asBytes() orelse return false;
         var sum: u8 = 0;
-        for (0..self.length) |i| {
-            sum +%= bytes[i];
+        for (table_bytes) |b| {
+            sum +%= b;
         }
         return sum == 0;
     }
@@ -120,14 +132,28 @@ pub const SdtHeader = extern struct {
         return std.mem.eql(u8, &self.signature, sig);
     }
 
-    /// Get pointer to table data after header
-    pub fn getData(self: *const Self) [*]const u8 {
-        return @as([*]const u8, @ptrCast(self)) + @sizeOf(SdtHeader);
+    /// Get the entire table as a byte slice (header + data)
+    /// Returns null if length field is invalid
+    pub fn asBytes(self: *const Self) ?[]const u8 {
+        if (self.length < @sizeOf(SdtHeader) or self.length > MAX_TABLE_SIZE) {
+            return null;
+        }
+        const ptr: [*]const u8 = @ptrCast(self);
+        return ptr[0..self.length];
+    }
+
+    /// Get pointer to table data after header as a bounded slice
+    /// Returns empty slice if length is invalid
+    pub fn getData(self: *const Self) []const u8 {
+        const data_len = self.getDataLength();
+        if (data_len == 0) return &[_]u8{};
+        const base: [*]const u8 = @ptrCast(self);
+        return base[@sizeOf(SdtHeader)..][0..data_len];
     }
 
     /// Get data length (total length minus header)
     pub fn getDataLength(self: *const Self) usize {
-        if (self.length < @sizeOf(SdtHeader)) return 0;
+        if (self.length < @sizeOf(SdtHeader) or self.length > MAX_TABLE_SIZE) return 0;
         return self.length - @sizeOf(SdtHeader);
     }
 };
@@ -146,12 +172,25 @@ pub const Rsdt = extern struct {
         return data_len / @sizeOf(u32);
     }
 
-    /// Get table entry at index
-    pub fn getEntry(self: *const Self, index: usize) ?*const SdtHeader {
-        if (index >= self.getEntryCount()) return null;
+    /// Get table entries as bounded slice of u32 addresses
+    /// Returns null if data is too small or misaligned
+    fn getEntries(self: *const Self) ?[]const u32 {
+        const data = self.header.getData();
+        const count = self.getEntryCount();
+        if (count == 0 or data.len < count * @sizeOf(u32)) return null;
 
-        const entries: [*]const u32 = @ptrCast(@alignCast(self.header.getData()));
+        // Safe reinterpret of bytes as u32 array
+        const ptr: [*]const u32 = @ptrCast(@alignCast(data.ptr));
+        return ptr[0..count];
+    }
+
+    /// Get table entry at index with bounds checking
+    pub fn getEntry(self: *const Self, index: usize) ?*const SdtHeader {
+        const entries = self.getEntries() orelse return null;
+        if (index >= entries.len) return null;
+
         const phys: u64 = entries[index];
+        if (phys == 0) return null; // Null entry
         return @ptrCast(@alignCast(paging.physToVirt(phys)));
     }
 
@@ -183,12 +222,25 @@ pub const Xsdt = extern struct {
         return data_len / @sizeOf(u64);
     }
 
-    /// Get table entry at index
-    pub fn getEntry(self: *const Self, index: usize) ?*const SdtHeader {
-        if (index >= self.getEntryCount()) return null;
+    /// Get table entries as bounded slice of u64 addresses
+    /// Returns null if data is too small or misaligned
+    fn getEntries(self: *const Self) ?[]const u64 {
+        const data = self.header.getData();
+        const count = self.getEntryCount();
+        if (count == 0 or data.len < count * @sizeOf(u64)) return null;
 
-        const entries: [*]const u64 = @ptrCast(@alignCast(self.header.getData()));
+        // Safe reinterpret of bytes as u64 array
+        const ptr: [*]const u64 = @ptrCast(@alignCast(data.ptr));
+        return ptr[0..count];
+    }
+
+    /// Get table entry at index with bounds checking
+    pub fn getEntry(self: *const Self, index: usize) ?*const SdtHeader {
+        const entries = self.getEntries() orelse return null;
+        if (index >= entries.len) return null;
+
         const phys = entries[index];
+        if (phys == 0) return null; // Null entry
         return @ptrCast(@alignCast(paging.physToVirt(phys)));
     }
 

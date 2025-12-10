@@ -13,6 +13,7 @@ const sched = @import("sched");
 const hal = @import("hal");
 const thread = @import("thread");
 const Thread = thread.Thread;
+const user_mem = @import("user_mem");
 
 /// Wake function for blocked threads - called from TCP/socket layer
 fn wakeBlockedThread(opaque_thread: ?*anyopaque) void {
@@ -44,19 +45,10 @@ pub fn init() void {
     }
 }
 
-/// Userspace address range boundaries (same as handlers.zig)
-const USER_SPACE_START: u64 = 0x0000_0000_0040_0000;
-const USER_SPACE_END: u64 = 0x0000_7FFF_FFFF_FFFF;
-
-/// Validate user pointer
-fn isValidUserPtr(ptr: usize, len: usize) bool {
-    if (ptr == 0) return false;
-    if (ptr < USER_SPACE_START or ptr > USER_SPACE_END) return false;
-    const end_addr = @addWithOverflow(ptr, len);
-    if (end_addr[1] != 0) return false;
-    if (end_addr[0] > USER_SPACE_END) return false;
-    return true;
-}
+// Use consolidated user pointer validation with permission checking
+const isValidUserPtr = user_mem.isValidUserPtr;
+const isValidUserAccess = user_mem.isValidUserAccess;
+const AccessMode = user_mem.AccessMode;
 
 /// sys_socket (41) - Create a socket
 /// (domain, type, protocol) -> fd
@@ -117,12 +109,12 @@ pub fn sys_sendto(
         return Errno.ENOTSOCK.toReturn();
     }
 
-    // Validate buffer
-    if (!isValidUserPtr(buf_ptr, len)) {
+    // Validate buffer with read permission (kernel reads from user buffer)
+    if (!isValidUserAccess(buf_ptr, len, AccessMode.Read)) {
         return Errno.EFAULT.toReturn();
     }
 
-    // Validate destination address
+    // Validate destination address (small struct, bounds check sufficient)
     if (!isValidUserPtr(dest_addr_ptr, @sizeOf(socket.SockAddrIn))) {
         return Errno.EFAULT.toReturn();
     }
@@ -158,8 +150,8 @@ pub fn sys_recvfrom(
         return Errno.ENOTSOCK.toReturn();
     }
 
-    // Validate buffer
-    if (!isValidUserPtr(buf_ptr, len)) {
+    // Validate buffer with write permission (kernel writes to user buffer)
+    if (!isValidUserAccess(buf_ptr, len, AccessMode.Write)) {
         return Errno.EFAULT.toReturn();
     }
 

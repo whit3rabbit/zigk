@@ -31,24 +31,36 @@ pub const McfgHeader = extern struct {
         return (data_len - 8) / @sizeOf(McfgEntry);
     }
 
-    /// Get entry at index
-    pub fn getEntry(self: *const Self, index: usize) ?*const McfgEntry {
-        if (index >= self.getEntryCount()) return null;
+    /// Get MCFG entries as bounded slice
+    /// Returns null if data is invalid or too small
+    pub fn getEntries(self: *const Self) ?[]const McfgEntry {
+        const data = self.header.getData();
+        // Data starts with 8 reserved bytes, then McfgEntry array
+        if (data.len < 8) return null;
 
-        // Entries start after header + reserved bytes
-        const entries_start = @intFromPtr(self) + @sizeOf(rsdp.SdtHeader) + 8;
-        const entry_ptr = entries_start + (index * @sizeOf(McfgEntry));
-        return @ptrFromInt(entry_ptr);
+        const count = self.getEntryCount();
+        if (count == 0) return null;
+
+        const entries_data = data[8..];
+        if (entries_data.len < count * @sizeOf(McfgEntry)) return null;
+
+        const ptr: [*]const McfgEntry = @ptrCast(@alignCast(entries_data.ptr));
+        return ptr[0..count];
+    }
+
+    /// Get entry at index with bounds checking
+    pub fn getEntry(self: *const Self, index: usize) ?*const McfgEntry {
+        const entries = self.getEntries() orelse return null;
+        if (index >= entries.len) return null;
+        return &entries[index];
     }
 
     /// Find entry for specific segment and bus range
     pub fn findSegment(self: *const Self, segment: u16) ?*const McfgEntry {
-        const count = self.getEntryCount();
-        for (0..count) |i| {
-            if (self.getEntry(i)) |entry| {
-                if (entry.pci_segment == segment) {
-                    return entry;
-                }
+        const entries = self.getEntries() orelse return null;
+        for (entries) |*entry| {
+            if (entry.pci_segment == segment) {
+                return entry;
             }
         }
         return null;
@@ -162,19 +174,22 @@ pub fn logMcfgInfo(rsdp_ptr: *const rsdp.Rsdp) void {
     };
 
     const mcfg: *const McfgHeader = @ptrCast(@alignCast(mcfg_table));
-    const entry_count = mcfg.getEntryCount();
 
-    console.info("ACPI: MCFG table found with {d} entries", .{entry_count});
+    // Use bounded slice iteration instead of index-based loop
+    const entries = mcfg.getEntries() orelse {
+        console.warn("ACPI: Invalid MCFG entries", .{});
+        return;
+    };
 
-    for (0..entry_count) |i| {
-        if (mcfg.getEntry(i)) |entry| {
-            console.info("  Segment {d}: ECAM base=0x{x:0>16}, buses {d}-{d}, size={d}MB", .{
-                entry.pci_segment,
-                entry.base_address,
-                entry.start_bus,
-                entry.end_bus,
-                entry.getRegionSize() / (1024 * 1024),
-            });
-        }
+    console.info("ACPI: MCFG table found with {d} entries", .{entries.len});
+
+    for (entries) |entry| {
+        console.info("  Segment {d}: ECAM base=0x{x:0>16}, buses {d}-{d}, size={d}MB", .{
+            entry.pci_segment,
+            entry.base_address,
+            entry.start_bus,
+            entry.end_bus,
+            entry.getRegionSize() / (1024 * 1024),
+        });
     }
 }

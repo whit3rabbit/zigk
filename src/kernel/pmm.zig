@@ -26,8 +26,10 @@ const paging = hal.paging;
 pub const PAGE_SIZE: usize = paging.PAGE_SIZE;
 
 // PMM State
-var bitmap: [*]u8 = undefined;
-var bitmap_size: usize = 0; // Size in bytes
+// Bitmap as slice enables Zig bounds checking on all accesses.
+// Initialized to empty slice; set properly in initFromLimine().
+var bitmap: []u8 = &[_]u8{};
+var bitmap_size: usize = 0; // Size in bytes (redundant with bitmap.len but kept for clarity)
 var total_pages: usize = 0;
 var free_pages: usize = 0;
 var allocated_pages: usize = 0;
@@ -109,13 +111,14 @@ pub fn initFromLimine(memmap: *const limine.MemoryMapResponse) !void {
         return error.NoMemoryForBitmap;
     }
 
-    // Map bitmap using HHDM
-    bitmap = paging.physToVirt(bitmap_phys);
+    // Map bitmap using HHDM and create bounded slice
+    const bitmap_ptr: [*]u8 = paging.physToVirt(bitmap_phys);
+    bitmap = bitmap_ptr[0..bitmap_size];
 
-    console.info("PMM: Bitmap at phys {x}, virt {x}", .{ bitmap_phys, @intFromPtr(bitmap) });
+    console.info("PMM: Bitmap at phys {x}, virt {x}, size {d}", .{ bitmap_phys, @intFromPtr(bitmap.ptr), bitmap.len });
 
     // Initialize bitmap: mark all pages as used (1 = used, 0 = free)
-    @memset(bitmap[0..bitmap_size], 0xFF);
+    @memset(bitmap, 0xFF);
 
     // Third pass: mark usable regions as free in bitmap
     for (entries) |entry| {
@@ -192,8 +195,9 @@ pub fn allocPage() ?u64 {
     }
 
     // Search bitmap for first free page
+    // Using bitmap.len for bounds - slice provides automatic bounds checking
     var byte_idx: usize = 0;
-    while (byte_idx < bitmap_size) : (byte_idx += 1) {
+    while (byte_idx < bitmap.len) : (byte_idx += 1) {
         if (bitmap[byte_idx] != 0xFF) {
             // Found a byte with at least one free bit
             var bit: u3 = 0;
@@ -356,21 +360,35 @@ pub fn allocZeroedPages(count: usize) ?u64 {
 }
 
 // Bitmap helper functions
+// These now include explicit bounds checks that panic on overflow.
+// The slice access would also bounds-check, but explicit checks give better error messages.
 
 fn setBit(page_num: usize) void {
     const byte_idx = page_num / 8;
+    if (byte_idx >= bitmap.len) {
+        console.err("PMM: setBit overflow - page {d}, byte_idx {d}, bitmap.len {d}", .{ page_num, byte_idx, bitmap.len });
+        @panic("PMM: bitmap overflow in setBit");
+    }
     const bit_idx: u3 = @intCast(page_num % 8);
     bitmap[byte_idx] |= (@as(u8, 1) << bit_idx);
 }
 
 fn clearBit(page_num: usize) void {
     const byte_idx = page_num / 8;
+    if (byte_idx >= bitmap.len) {
+        console.err("PMM: clearBit overflow - page {d}, byte_idx {d}, bitmap.len {d}", .{ page_num, byte_idx, bitmap.len });
+        @panic("PMM: bitmap overflow in clearBit");
+    }
     const bit_idx: u3 = @intCast(page_num % 8);
     bitmap[byte_idx] &= ~(@as(u8, 1) << bit_idx);
 }
 
 fn isBitSet(page_num: usize) bool {
     const byte_idx = page_num / 8;
+    if (byte_idx >= bitmap.len) {
+        console.err("PMM: isBitSet overflow - page {d}, byte_idx {d}, bitmap.len {d}", .{ page_num, byte_idx, bitmap.len });
+        @panic("PMM: bitmap overflow in isBitSet");
+    }
     const bit_idx: u3 = @intCast(page_num % 8);
     return (bitmap[byte_idx] & (@as(u8, 1) << bit_idx)) != 0;
 }

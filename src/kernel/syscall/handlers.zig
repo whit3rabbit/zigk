@@ -23,7 +23,15 @@ const heap = @import("heap");
 const elf = @import("elf");
 const framebuffer = @import("framebuffer");
 
+const mman_defs = uapi.mman;
+const fs = @import("fs");
+const user_mem = @import("user_mem");
 const Errno = uapi.errno.Errno;
+
+// Re-export validation functions from user_mem for local use
+const isValidUserPtr = user_mem.isValidUserPtr;
+const isValidUserAccess = user_mem.isValidUserAccess;
+const AccessMode = user_mem.AccessMode;
 const UserVmm = user_vmm.UserVmm;
 const FdTable = fd_mod.FdTable;
 const FileDescriptor = fd_mod.FileDescriptor;
@@ -113,35 +121,7 @@ fn getGlobalUserVmm() *UserVmm {
 // User Pointer Validation
 // =============================================================================
 
-/// Userspace address range boundaries
-/// User code lives below the kernel in the canonical lower half
-const USER_SPACE_START: u64 = 0x0000_0000_0040_0000; // 4MB (above null guard)
-const USER_SPACE_END: u64 = 0x0000_7FFF_FFFF_FFFF; // Top of canonical lower half
 
-/// Validate that a user pointer is within the userspace address range.
-/// Returns true if the pointer appears valid for userspace access.
-/// Note: This is a basic bounds check - does not verify page mapping.
-pub fn isValidUserPtr(ptr: usize, len: usize) bool {
-    // Null pointer is never valid
-    if (ptr == 0) return false;
-
-    // Check pointer is in userspace range
-    if (ptr < USER_SPACE_START or ptr > USER_SPACE_END) return false;
-
-    // Check for overflow
-    const end_addr = @addWithOverflow(ptr, len);
-    if (end_addr[1] != 0) return false; // Overflow occurred
-
-    // Check end is still in userspace
-    if (end_addr[0] > USER_SPACE_END) return false;
-
-    return true;
-}
-
-/// Validate a user string pointer (null-terminated, max length)
-pub fn isValidUserString(ptr: usize, max_len: usize) bool {
-    return isValidUserPtr(ptr, max_len);
-}
 
 // =============================================================================
 // Process Control
@@ -357,8 +337,9 @@ pub fn sys_read(fd_num: usize, buf_ptr: usize, count: usize) isize {
         return 0;
     }
 
-    // Validate user buffer pointer
-    if (!isValidUserPtr(buf_ptr, count)) {
+    // Validate user buffer pointer with write permission check
+    // (kernel writes to user buffer, so user needs write permission)
+    if (!isValidUserAccess(buf_ptr, count, AccessMode.Write)) {
         return Errno.EFAULT.toReturn();
     }
 
@@ -378,8 +359,10 @@ pub fn sys_read(fd_num: usize, buf_ptr: usize, count: usize) isize {
         return Errno.ENOSYS.toReturn();
     };
 
+    // Create slice from validated user pointer
+    // FileOps now takes slices for type-enforced bounds checking
     const buf: [*]u8 = @ptrFromInt(buf_ptr);
-    return read_fn(fd, buf, count);
+    return read_fn(fd, buf[0..count]);
 }
 
 /// sys_write (1) - Write to file descriptor
@@ -391,8 +374,9 @@ pub fn sys_write(fd_num: usize, buf_ptr: usize, count: usize) isize {
         return 0;
     }
 
-    // Validate user buffer pointer
-    if (!isValidUserPtr(buf_ptr, count)) {
+    // Validate user buffer pointer with read permission check
+    // (kernel reads from user buffer, so user needs read permission)
+    if (!isValidUserAccess(buf_ptr, count, AccessMode.Read)) {
         return Errno.EFAULT.toReturn();
     }
 
@@ -412,20 +396,13 @@ pub fn sys_write(fd_num: usize, buf_ptr: usize, count: usize) isize {
         return Errno.ENOSYS.toReturn();
     };
 
+    // Create slice from validated user pointer
+    // FileOps now takes slices for type-enforced bounds checking
     const buf: [*]const u8 = @ptrFromInt(buf_ptr);
-    return write_fn(fd, buf, count);
+    return write_fn(fd, buf[0..count]);
 }
 
-/// sys_brk (12) - Change data segment size (heap)
-///
-/// MVP: Not implemented - returns current break (0).
-/// Full implementation requires process memory management.
-pub fn sys_brk(addr: usize) isize {
-    // For MVP, just return the requested address
-    // This is a stub that pretends to work
-    _ = addr;
-    return 0;
-}
+
 
 // =============================================================================
 // ZigK Custom Syscalls
@@ -490,46 +467,50 @@ pub fn sys_read_scancode() isize {
 pub fn sys_open(path_ptr: usize, flags: usize, mode: usize) isize {
     _ = mode; // Mode is ignored for device files
 
-    // Validate path pointer (assume max path length of 4096)
-    const max_path: usize = 4096;
-    if (!isValidUserString(path_ptr, max_path)) {
+    // Validate and read path string from userspace
+    const path = user_mem.userStringToSlice(path_ptr, user_mem.MAX_PATH_LEN) orelse {
         return Errno.EFAULT.toReturn();
-    }
-
-    // Read path string from userspace
-    const path_bytes: [*]const u8 = @ptrFromInt(path_ptr);
-
-    // Find null terminator (max 4096 chars)
-    var path_len: usize = 0;
-    while (path_len < max_path and path_bytes[path_len] != 0) : (path_len += 1) {}
-
-    if (path_len == 0) {
-        return Errno.ENOENT.toReturn();
-    }
-
-    const path = path_bytes[0..path_len];
-
-    // Look up device by path
-    const ops = devfs.lookupDevice(path) orelse {
-        // Not a known device
-        return Errno.ENOENT.toReturn();
     };
 
-    // Create new file descriptor
-    const fd = fd_mod.createFd(ops, @truncate(flags), null) catch {
+    if (path.len == 0) {
+        return Errno.ENOENT.toReturn();
+    }
+
+    // Look up device by devfs
+    if (devfs.lookupDevice(path)) |ops| {
+        // Create device FD
+        const fd = fd_mod.createFd(ops, @truncate(flags), null) catch {
+            return Errno.ENOMEM.toReturn();
+        };
+        const alloc = heap.allocator();
+        errdefer alloc.destroy(fd);
+
+        const table = getGlobalFdTable();
+        const fd_num = table.allocFdNum() orelse {
+            return Errno.EMFILE.toReturn();
+        };
+
+        table.install(fd_num, fd);
+        return @intCast(fd_num);
+    }
+
+    // Fallback: InitRD
+    // Note: This is where we would check a real VFS in the future
+    const fd = fs.initrd.InitRD.instance.openFile(path, @truncate(flags)) catch |err| {
+        if (err == error.FileNotFound) {
+            return Errno.ENOENT.toReturn();
+        }
         return Errno.ENOMEM.toReturn();
     };
     const alloc = heap.allocator();
     errdefer alloc.destroy(fd);
 
-    // Allocate FD number and install
     const table = getGlobalFdTable();
     const fd_num = table.allocFdNum() orelse {
         return Errno.EMFILE.toReturn();
     };
 
     table.install(fd_num, fd);
-
     return @intCast(fd_num);
 }
 
@@ -746,24 +727,15 @@ fn setForkChildReturn(child: *@import("thread").Thread) void {
 /// Note: Currently only supports executables loaded via InitRD modules.
 /// Filesystem-based executables require VFS implementation.
 pub fn sys_execve(path_ptr: usize, argv_ptr: usize, envp_ptr: usize) isize {
-    const thread_mod = @import("thread");
-
-    // Validate path pointer
-    const max_path: usize = 4096;
-    if (!isValidUserString(path_ptr, max_path)) {
+    // Validate and read path string from userspace
+    const path = user_mem.userStringToSlice(path_ptr, user_mem.MAX_PATH_LEN) orelse {
         return Errno.EFAULT.toReturn();
-    }
+    };
 
-    // Read path string
-    const path_bytes: [*]const u8 = @ptrFromInt(path_ptr);
-    var path_len: usize = 0;
-    while (path_len < max_path and path_bytes[path_len] != 0) : (path_len += 1) {}
-
-    if (path_len == 0) {
+    if (path.len == 0) {
         return Errno.ENOENT.toReturn();
     }
 
-    const path = path_bytes[0..path_len];
     console.debug("sys_execve: path='{s}'", .{path});
 
     // Parse argv (collect up to 64 arguments)
@@ -776,13 +748,9 @@ pub fn sys_execve(path_ptr: usize, argv_ptr: usize, envp_ptr: usize) isize {
             const arg_ptr = argv_array[argc];
             if (arg_ptr == 0) break;
 
-            if (!isValidUserString(arg_ptr, max_path)) break;
-
-            const arg_bytes: [*]const u8 = @ptrFromInt(arg_ptr);
-            var arg_len: usize = 0;
-            while (arg_len < max_path and arg_bytes[arg_len] != 0) : (arg_len += 1) {}
-
-            argv_storage[argc] = arg_bytes[0..arg_len];
+            // Use consolidated string parsing
+            const arg_slice = user_mem.userStringToSlice(arg_ptr, user_mem.MAX_PATH_LEN) orelse break;
+            argv_storage[argc] = arg_slice;
             argc += 1;
         }
     }
@@ -799,13 +767,9 @@ pub fn sys_execve(path_ptr: usize, argv_ptr: usize, envp_ptr: usize) isize {
             const env_ptr = envp_array[envc];
             if (env_ptr == 0) break;
 
-            if (!isValidUserString(env_ptr, max_path)) break;
-
-            const env_bytes: [*]const u8 = @ptrFromInt(env_ptr);
-            var env_len: usize = 0;
-            while (env_len < max_path and env_bytes[env_len] != 0) : (env_len += 1) {}
-
-            envp_storage[envc] = env_bytes[0..env_len];
+            // Use consolidated string parsing
+            const env_slice = user_mem.userStringToSlice(env_ptr, user_mem.MAX_PATH_LEN) orelse break;
+            envp_storage[envc] = env_slice;
             envc += 1;
         }
     }
@@ -813,42 +777,162 @@ pub fn sys_execve(path_ptr: usize, argv_ptr: usize, envp_ptr: usize) isize {
     const envp = envp_storage[0..envc];
 
     // argv and envp are parsed and ready for ELF loader
-    // Currently unused until InitRD lookup is implemented
-    _ = argv;
-    _ = envp;
+    // Using them below in elf.exec
 
     console.debug("sys_execve: argc={}, envc={}", .{ argc, envc });
 
-    // TODO: Look up executable in InitRD
-    // For now, we need a way to find the executable data.
-    // This requires either:
-    // 1. A global InitRD registry populated at boot
-    // 2. A simple in-memory filesystem
-    // 3. Passing executable data through another mechanism
-    //
-    // Since we don't have filesystem support yet, return ENOENT.
-    // The ELF loader infrastructure is ready - we just need executable lookup.
-
-    // Check for special paths that we might handle differently
-    // For now, all paths fail since we don't have InitRD lookup yet
-    // path, argv, envp already used in debug output above
-
-    // Get current thread for potential future use
-    _ = sched.getCurrentThread() orelse {
-        return Errno.ESRCH.toReturn();
+    // Look up executable in InitRD
+    const file = fs.initrd.InitRD.instance.findFile(path) orelse {
+        // Executable not found
+        return Errno.ENOENT.toReturn();
     };
-    _ = thread_mod;
-    _ = elf; // ELF loader ready but not used until InitRD lookup implemented
 
-    // Return ENOENT - executable lookup not implemented
-    // When InitRD lookup is added, this will:
-    // 1. Find the executable data in InitRD
-    // 2. Call elf.exec(data, argv, envp)
-    // 3. Replace current process's address space
-    // 4. Set thread's CR3, entry point, and stack pointer
-    // 5. Return to userspace at new entry point
-    console.warn("sys_execve: InitRD lookup not implemented, returning ENOENT", .{});
-    return Errno.ENOENT.toReturn();
+    // Load and execute ELF
+    // This creates a new address space and sets up the stack
+    const result = elf.exec(file.data, argv, envp) catch |err| {
+        console.err("sys_execve: Failed to exec: {}", .{err});
+        return Errno.ENOEXEC.toReturn();
+    };
+
+    console.debug("sys_execve: Loaded ELF entry={x} stack={x} cr3={x}", .{
+        result.entry_point,
+        result.stack_pointer,
+        result.pml4_phys,
+    });
+
+    const current_thread = sched.getCurrentThread().?;
+    const current_proc = getCurrentProcess();
+
+    // Save old CR3 to destroy later
+    // const old_cr3 = current_proc.cr3; // TODO: Implement destroyAddressSpace
+
+    // Update process/thread state
+    current_proc.cr3 = result.pml4_phys;
+    current_proc.heap_start = result.heap_start;
+    current_proc.heap_break = result.heap_start;
+    current_thread.cr3 = result.pml4_phys;
+
+    // Switch to new address space immediately
+    hal.cpu.writeCr3(result.pml4_phys);
+
+    // Update the saved interrupt frame to return to the new entry point
+    // The syscall handler returns to `asm_syscall_entry` which does `sysret` or `iret`.
+    // We need to modify the SAVED state on the kernel stack so that when we return,
+    // we go to the new entry point with the new stack.
+
+    // Calculate pointer to saved registers on kernel stack
+    // See `copyThreadState` for layout
+    const check_frame_size: usize = 23 * 8;
+    _ = check_frame_size; // suppress unused
+
+    // The kernel stack at syscall entry has:
+    // [SS, RSP, RFLAGS, CS, RIP] (pushed by CPU/stub)
+    // We need to find where these are.
+    // getCurrentThread().kernel_rsp points to the TOP of the saved frame (lowest address).
+    
+    // Frame layout (low to high):
+    // R15...RAX, vec, err, RIP, CS, RFLAGS, RSP, SS
+    
+    const kernel_stack_ptr: usize = current_thread.kernel_rsp;
+    
+    // Offsets from bottom of frame (kernel_rsp):
+    // RIP is at offset 17 * 8 (15 GPRs + vec + err)
+    // RSP is at offset 20 * 8 (RIP + CS + RFLAGS)
+    
+    const rip_offset = 17 * 8;
+    const rsp_offset = 20 * 8;
+    
+    const stack_ptr: [*]u64 = @ptrFromInt(kernel_stack_ptr);
+    
+    // Update RIP (entry point)
+    stack_ptr[rip_offset / 8] = result.entry_point;
+    
+    // Update RSP (user stack pointer)
+    stack_ptr[rsp_offset / 8] = result.stack_pointer;
+
+    // TODO: Destroy old address space
+    // vmm.destroyAddressSpace(old_cr3);
+
+    // Return to userspace (doesn't actually return to caller, but resumes modified context)
+    // The return value of this function (RAX) is ignored because we overwrote the context?
+    // Actually, syscall dispatcher puts return value into RAX *after* we return.
+    // If we return 0, RAX becomes 0.
+    // But we want to start cleanly. RAX is usually 0 on entry?
+    // Let's return 0.
+    return 0;
+}
+
+
+/// sys_brk (12) - Change data segment size
+pub fn sys_brk(addr: u64) isize {
+    const proc = getCurrentProcess();
+
+    // If addr is 0, return current break
+    if (addr == 0) {
+        return @intCast(proc.heap_break);
+    }
+
+    // Checking inputs
+    // We only support growing the heap for now, or keeping it same.
+    // Shrinking is valid but complicates things (need to unmap).
+    // Also need to check if new break is valid (e.g. not overlapping stack or kernel)
+    
+    // Check if less than start (invalid)
+    if (addr < proc.heap_start) {
+        return @intCast(proc.heap_break);
+    }
+
+    // Align to page size for mapping
+    const current_break_aligned = std.mem.alignForward(u64, proc.heap_break, pmm.PAGE_SIZE);
+    const new_break_aligned = std.mem.alignForward(u64, addr, pmm.PAGE_SIZE);
+
+    if (new_break_aligned > current_break_aligned) {
+        // Growing heap
+        const size_to_map = new_break_aligned - current_break_aligned;
+        const pages_to_map = size_to_map / pmm.PAGE_SIZE;
+
+        // Allocate and map pages
+        // We can use UserVmm or just direct mapping.
+        // Process struct has user_vmm field.
+        
+        // TODO: Use proc.user_vmm logic to track VMAs?
+        // For MVP, we just map the pages directly into the page table.
+        // Ideally we should update VMA list too.
+        
+        // Let's use vmm directly first for simplicity, but we need physical pages.
+        var i: usize = 0;
+        while (i < pages_to_map) : (i += 1) {
+            const phys_page = pmm.allocPage() orelse {
+                // OOM - should cleanup already mapped pages?
+                // For MVP, just fail. Real implementation needs rollback.
+                return Errno.ENOMEM.toReturn();
+            };
+            
+            const vaddr = current_break_aligned + (i * pmm.PAGE_SIZE);
+            
+            const flags = vmm.PageFlags{
+                .writable = true,
+                .user = true,
+                .no_execute = true, // Heap should not be executable
+            };
+
+            vmm.mapPage(proc.cr3, vaddr, phys_page, flags) catch {
+                pmm.freePage(phys_page);
+                return Errno.ENOMEM.toReturn();
+            };
+            
+            // Zero the page (security)
+            const ptr: [*]u8 = hal.paging.physToVirt(phys_page);
+            @memset(ptr[0..pmm.PAGE_SIZE], 0);
+        }
+    } else if (new_break_aligned < current_break_aligned) {
+        // Shrinking heap - not implemented yet
+        // Would need to unmap pages and free physical memory
+    }
+
+    // Update break
+    proc.heap_break = addr;
+    return @intCast(addr);
 }
 
 // arch_prctl operation codes (Linux ABI)
@@ -1011,3 +1095,5 @@ pub fn sys_map_fb() isize {
     // Cast to isize - this is safe because the address is well below isize max
     return @bitCast(fb_virt_base);
 }
+
+

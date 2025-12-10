@@ -548,6 +548,7 @@ pub const ExecResult = struct {
     entry_point: u64,
     stack_pointer: u64,
     pml4_phys: u64,
+    heap_start: u64,
 };
 
 /// Load and prepare an ELF executable for execution
@@ -592,9 +593,13 @@ pub fn exec(
         return error.OutOfMemory;
     };
 
+    // Calculate initial heap start (aligned to page boundary)
+    const heap_start = std.mem.alignForward(u64, load_result.end_addr, pmm.PAGE_SIZE);
+
     return ExecResult{
         .entry_point = load_result.entry_point,
         .stack_pointer = sp,
         .pml4_phys = pml4_phys,
+        .heap_start = heap_start,
     };
 }

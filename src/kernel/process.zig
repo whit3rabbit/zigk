@@ -77,6 +77,10 @@ pub const Process = struct {
     /// Reference count (for multi-threaded processes)
     refcount: u32,
 
+    /// Heap management
+    heap_start: u64,
+    heap_break: u64,
+
     // =========================================================================
     // Process Hierarchy Methods
     // =========================================================================
@@ -237,6 +241,8 @@ pub fn createProcess(parent: ?*Process) !*Process {
         .user_vmm = user_vmm,
         .cr3 = user_vmm.pml4_phys,
         .refcount = 1,
+        .heap_start = 0,
+        .heap_break = 0,
     };
 
     // Add to parent's children list
@@ -278,6 +284,8 @@ pub fn forkProcess(parent: *Process) !*Process {
         .user_vmm = child_vmm,
         .cr3 = child_vmm.pml4_phys,
         .refcount = 1,
+        .heap_start = parent.heap_start,
+        .heap_break = parent.heap_break,
     };
 
     // Add to parent's children list
