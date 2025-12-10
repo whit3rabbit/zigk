@@ -64,11 +64,11 @@ else
 
 // Constants
 pub const ALIGNMENT: usize = 16; // 16-byte alignment for SSE compatibility
-pub const MIN_BLOCK_SIZE: usize = 32; // Minimum block size including header/footer
+pub const MIN_BLOCK_SIZE: usize = 64; // Minimum block size (32 hdr + 16 payload + 16 ftr)
 
 // Block header stored at the start of each block
 // Using u64 fields for alignment and easy manipulation
-pub const BlockHeader = struct {
+pub const BlockHeader = extern struct {
     // Size of the entire block including header and footer
     // Lowest bit indicates if block is allocated (1) or free (0)
     size_and_flags: usize,
@@ -76,6 +76,10 @@ pub const BlockHeader = struct {
     prev_free: ?*BlockHeader,
     // Pointer to next free block (only valid when block is free)
     next_free: ?*BlockHeader,
+    
+    // Padding to ensure 32-byte size (16-byte alignment of payload)
+    // 3 * 8 = 24 bytes, need 8 more to reach 32
+    _padding: usize = 0,
 
     const ALLOCATED_FLAG: usize = 1;
     const SIZE_MASK: usize = ~@as(usize, ALLOCATED_FLAG);
@@ -139,8 +143,13 @@ pub const BlockHeader = struct {
 };
 
 // Block footer stored at the end of each block for backward coalescing
-pub const BlockFooter = struct {
+// Block footer stored at the end of each block for backward coalescing
+// Using extern struct to guarantee layout
+pub const BlockFooter = extern struct {
     size: usize, // Matches the size in header (without flags)
+    // Padding to ensure 16-byte size (preserves alignment for next block)
+    // 1 * 8 = 8 bytes, need 8 more to reach 16
+    _padding: usize = 0,
 };
 
 // Heap state (protected by heap_lock)
@@ -183,10 +192,12 @@ pub fn init(start: usize, size: usize) void {
     initial_block.size_and_flags = block_size; // Not allocated
     initial_block.prev_free = null;
     initial_block.next_free = null;
+    initial_block._padding = 0; // Hygiene
 
     // Set footer
     const footer = initial_block.getFooter();
     footer.size = block_size;
+    footer._padding = 0; // Hygiene
 
     // Initialize free list
     free_list_head = initial_block;
@@ -320,6 +331,7 @@ pub fn free(ptr: [*]u8) void {
     // Update footer
     const footer = coalesced_block.getFooter();
     footer.size = coalesced_size;
+    footer._padding = 0; // Hygiene
 
     // Add to free list
     addToFreeList(coalesced_block);
@@ -476,6 +488,7 @@ fn allocateFromBlock(block: *BlockHeader, required_size: usize) ?[*]u8 {
         // Update footer for allocated block
         var footer = block.getFooter();
         footer.size = required_size;
+        footer._padding = 0; // Hygiene
 
         // Create new free block
         const new_block: *BlockHeader = @ptrFromInt(@intFromPtr(block) + required_size);
@@ -483,10 +496,12 @@ fn allocateFromBlock(block: *BlockHeader, required_size: usize) ?[*]u8 {
         new_block.setAllocated(false);
         new_block.prev_free = null;
         new_block.next_free = null;
+        new_block._padding = 0; // Hygiene
 
         // Set footer for new block
         const new_footer = new_block.getFooter();
         new_footer.size = remaining;
+        new_footer._padding = 0; // Hygiene
 
         // Add new block to free list (this increments free_block_count)
         addToFreeList(new_block);

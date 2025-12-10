@@ -16,7 +16,7 @@ Build and run commands for Zig 0.15.x freestanding kernel:
 
 ```bash
 zig build              # Build kernel
-zig build run -Dbios=/opt/homebrew/share/qemu/edk2-x86_64-code.fd        # Build and run in QEMU on OSX
+timeout 45 zig build run -Dbios=/opt/homebrew/share/qemu/edk2-x86_64-code.fd 2>&1 | head -120   # Build and debug kernel in QEMU on OSX
 zig build test         # Run tests
 ```
 

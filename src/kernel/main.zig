@@ -198,10 +198,20 @@ fn loadInitProcess() void {
     var selected_mod: ?*limine.Module = null;
     var process_name: []const u8 = "init";
 
+    // Helper to safely get string from Limine pointer
+    const get_str = struct {
+        fn call(ptr: [*:0]const u8) []const u8 {
+            if (@intFromPtr(ptr) == 0) return "";
+            return ptr[0..strlen(ptr)];
+        }
+    }.call;
+
     // Priority 1: HTTPD
     for (mods) |mod| {
-        const cmdline = mod.cmdline[0..strlen(mod.cmdline)];
-        if (containsStr(cmdline, "httpd")) {
+        const cmdline = get_str(mod.cmdline);
+        const path = get_str(mod.path);
+        
+        if (containsStr(cmdline, "httpd") or containsStr(path, "httpd")) {
             selected_mod = mod;
             process_name = "httpd";
             break;
@@ -211,13 +221,21 @@ fn loadInitProcess() void {
     // Priority 2: Shell
     if (selected_mod == null) {
         for (mods) |mod| {
-            const cmdline = mod.cmdline[0..strlen(mod.cmdline)];
-            if (containsStr(cmdline, "shell")) {
+            const cmdline = get_str(mod.cmdline);
+            const path = get_str(mod.path);
+            
+            if (containsStr(cmdline, "shell") or containsStr(path, "shell")) {
                 selected_mod = mod;
                 process_name = "shell";
                 break;
             }
         }
+    }
+
+    // Fallback: If only one module exists, use it regardless of name
+    if (selected_mod == null and mods.len == 1) {
+        selected_mod = mods[0];
+        console.warn("No matching cmdline found, defaulting to first module", .{});
     }
 
     const mod = selected_mod orelse {

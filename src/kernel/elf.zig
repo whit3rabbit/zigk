@@ -520,8 +520,10 @@ pub fn setupStack(
     sp -= 8;
     writeU64ToUserspace(pml4_phys, sp, argc);
 
-    // Ensure 16-byte alignment for ABI
-    sp = sp & ~@as(u64, 15);
+    // REMOVED: sp = sp & ~@as(u64, 15);
+    // Rationale: This alignment AFTER writing argc effectively "pops" argc
+    // if sp was not already aligned, causing _start to read garbage.
+    // crt0 handles the 16-byte alignment before calling main.
 
     console.debug("ELF: Stack setup complete, sp={x}", .{sp});
 

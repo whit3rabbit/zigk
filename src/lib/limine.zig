@@ -131,7 +131,10 @@ pub const ModuleResponse = extern struct {
     }
 };
 
+// Module structure - matches limine_file in limine.h
+// Note: revision field is first, followed by address and size
 pub const Module = extern struct {
+    revision: u64,
     address: u64,
     size: u64,
     path: [*:0]const u8,
