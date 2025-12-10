@@ -12,6 +12,12 @@ pub fn print(str: []const u8) void {
     hal.serial.writeString(str);
 }
 
+/// Print a string to the debug console without locking
+/// UNSAFE: Use only in panic/crash situations
+pub fn printUnsafe(str: []const u8) void {
+    hal.serial.writeStringUnsafe(str);
+}
+
 /// Print a formatted string to the debug console
 /// Note: In freestanding mode, we implement a minimal formatter
 pub fn printf(comptime fmt: []const u8, args: anytype) void {
@@ -207,4 +213,11 @@ pub fn warn(comptime fmt: []const u8, args: anytype) void {
 
 pub fn err(comptime fmt: []const u8, args: anytype) void {
     log(.err, fmt, args);
+}
+
+pub fn panic(comptime fmt: []const u8, args: anytype) noreturn {
+    print("\n[PANIC] ");
+    printf(fmt, args);
+    print("\n");
+    hal.cpu.haltForever();
 }

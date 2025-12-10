@@ -38,12 +38,21 @@ pub const TarHeader = extern struct {
         return self.name[0..end];
     }
 
-    pub fn getSize(self: *const @This()) usize {
+    pub fn getSize(self: *const @This()) ?usize {
         var size: usize = 0;
         for (self.size) |c| {
             if (c == ' ' or c == 0) break;
             if (c < '0' or c > '7') break;
-            size = size * 8 + (c - '0');
+
+            // Checked multiplication to detect overflow
+            const mul_result = @mulWithOverflow(size, 8);
+            if (mul_result[1] != 0) return null;
+
+            // Checked addition to detect overflow
+            const add_result = @addWithOverflow(mul_result[0], c - '0');
+            if (add_result[1] != 0) return null;
+
+            size = add_result[0];
         }
         return size;
     }
@@ -91,23 +100,40 @@ pub const InitRD = struct {
             if (!header.isValid()) break;
 
             const name = header.getName();
-            const size = header.getSize();
+            const size = header.getSize() orelse break; // Overflow in size field
+
+            // Calculate data bounds with overflow checking
+            const data_start_result = @addWithOverflow(offset, 512);
+            if (data_start_result[1] != 0) break;
+            const data_start = data_start_result[0];
+
+            const data_end_result = @addWithOverflow(data_start, size);
+            if (data_end_result[1] != 0) break;
+            const data_end = data_end_result[0];
+
+            // Validate data bounds before slicing
+            if (data_end > self.data.len) break;
 
             // Check if this is the file we are looking for
-            // For MVP, we ignore directories and assume flat structure or exact match
             if (header.isRegularFile() and std.mem.eql(u8, name, search_name)) {
                 return InitRDFile{
                     .name = name,
-                    .data = self.data[offset + 512 .. offset + 512 + size],
+                    .data = self.data[data_start..data_end],
                 };
             }
 
-            // Advance to next header
-            // Data is padded to 512-byte boundary
-            const data_blocks = (size + 511) / 512;
-            // Next header is at current offset + header + data blocks
-            const next_offset = offset + 512 + (data_blocks * 512);
-            
+            // Calculate next offset with overflow checking
+            const padded_size_result = @addWithOverflow(size, 511);
+            if (padded_size_result[1] != 0) break;
+            const data_blocks = padded_size_result[0] / 512;
+
+            const block_bytes_result = @mulWithOverflow(data_blocks, 512);
+            if (block_bytes_result[1] != 0) break;
+
+            const next_offset_result = @addWithOverflow(data_start, block_bytes_result[0]);
+            if (next_offset_result[1] != 0) break;
+            const next_offset = next_offset_result[0];
+
             if (next_offset > self.data.len) break;
             offset = next_offset;
         }
@@ -207,17 +233,37 @@ pub const FileIterator = struct {
             if (!header.isValid()) return null;
 
             const name = header.getName();
-            const size = header.getSize();
-            const data_offset = self.offset + 512;
+            const size = header.getSize() orelse return null; // Overflow in size field
 
-            // Advance to next header
-            const data_blocks = (size + 511) / 512;
-            self.offset += 512 + (data_blocks * 512);
+            // Calculate data bounds with overflow checking
+            const data_start_result = @addWithOverflow(self.offset, 512);
+            if (data_start_result[1] != 0) return null;
+            const data_start = data_start_result[0];
+
+            const data_end_result = @addWithOverflow(data_start, size);
+            if (data_end_result[1] != 0) return null;
+            const data_end = data_end_result[0];
+
+            // Validate data bounds before slicing
+            if (data_end > self.initrd.data.len) return null;
+
+            // Calculate next offset with overflow checking
+            const padded_size_result = @addWithOverflow(size, 511);
+            if (padded_size_result[1] != 0) return null;
+            const data_blocks = padded_size_result[0] / 512;
+
+            const block_bytes_result = @mulWithOverflow(data_blocks, 512);
+            if (block_bytes_result[1] != 0) return null;
+
+            const next_offset_result = @addWithOverflow(data_start, block_bytes_result[0]);
+            if (next_offset_result[1] != 0) return null;
+
+            self.offset = next_offset_result[0];
 
             if (header.isRegularFile()) {
                 return InitRDFile{
                     .name = name,
-                    .data = self.initrd.data[data_offset .. data_offset + size],
+                    .data = self.initrd.data[data_start..data_end],
                 };
             }
         }

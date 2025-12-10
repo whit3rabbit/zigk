@@ -143,7 +143,7 @@ pub const Gdt = extern struct {
 };
 
 // GDT pointer structure for LGDT instruction
-const GdtPtr = packed struct {
+const GdtPtr = packed struct(u80) {
     limit: u16,
     base: u64,
 };

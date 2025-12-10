@@ -49,6 +49,8 @@ pub const MAP_PRIVATE: u32 = 0x02;
 pub const MAP_FIXED: u32 = 0x10;
 pub const MAP_ANONYMOUS: u32 = 0x20;
 pub const MAP_ANON: u32 = MAP_ANONYMOUS; // Alias
+/// Internal flag for MMIO/device mappings - skip returning pages to PMM
+pub const MAP_DEVICE: u32 = 0x1000;
 
 // =============================================================================
 // User Address Space Boundaries
@@ -507,12 +509,15 @@ pub const UserVmm = struct {
     fn freeVmaPages(self: *UserVmm, vma: *Vma) void {
         const page_count = vma.pageCount();
         var i: usize = 0;
+        const should_free_phys = (vma.flags & MAP_DEVICE) == 0;
         while (i < page_count) : (i += 1) {
             const addr = vma.start + i * pmm.PAGE_SIZE;
             // Get physical address before unmapping
             if (vmm.translate(self.pml4_phys, addr)) |phys| {
                 vmm.unmapPage(self.pml4_phys, addr) catch {};
-                pmm.freePage(phys);
+                if (should_free_phys) {
+                    pmm.freePage(phys);
+                }
             }
         }
     }

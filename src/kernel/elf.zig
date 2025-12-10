@@ -134,6 +134,7 @@ pub const ElfError = error{
     SegmentTooLarge,
     TotalMemoryExceeded,
     TooManySegments,
+    InvalidAddressRange,
 };
 
 // =============================================================================
@@ -324,6 +325,24 @@ fn loadSegment(
     base: u64,
 ) ElfError!void {
     const vaddr = base + phdr.p_vaddr;
+    const seg_end = vaddr + phdr.p_memsz;
+
+    if (seg_end < vaddr) {
+        console.err("ELF: Segment address overflow vaddr={x} memsz={x}", .{ vaddr, phdr.p_memsz });
+        return ElfError.InvalidAddressRange;
+    }
+
+    if (seg_end >= vmm.KERNEL_BASE) {
+        console.err("ELF: Segment overlaps kernel space: {x}-{x}", .{ vaddr, seg_end });
+        return ElfError.InvalidAddressRange;
+    }
+
+    const stack_base = DEFAULT_STACK_TOP - DEFAULT_STACK_SIZE;
+    const stack_top = DEFAULT_STACK_TOP;
+    if (vaddr < stack_top and seg_end > stack_base) {
+        console.err("ELF: Segment overlaps user stack reservation: {x}-{x}", .{ vaddr, seg_end });
+        return ElfError.InvalidAddressRange;
+    }
 
     // Page-align the addresses
     const page_size = pmm.PAGE_SIZE;

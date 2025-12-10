@@ -8,8 +8,8 @@ const interface = @import("../../core/interface.zig");
 
 pub const Interface = interface.Interface;
 
-/// Global socket table (dynamic list of pointers to sockets)
-pub var socket_table: std.ArrayList(?*types.Socket) = undefined;
+/// Global socket table (fixed-size pointer array)
+pub var socket_table: [types.MAX_SOCKETS]?*types.Socket = [_]?*types.Socket{null} ** types.MAX_SOCKETS;
 pub var socket_allocator: std.mem.Allocator = undefined;
 /// Socket allocation lock
 var lock: sync.Lock = sync.noop_lock;
@@ -29,7 +29,8 @@ pub fn socketLock() *sync.Lock {
 pub fn init(iface: *Interface, allocator: std.mem.Allocator) void {
     global_iface = iface;
     socket_allocator = allocator;
-    socket_table = std.ArrayList(?*types.Socket).init(allocator);
+    socket_table = [_]?*types.Socket{null} ** types.MAX_SOCKETS;
+    next_ephemeral_port = 49152;
 }
 
 pub fn getInterface() ?*Interface {
@@ -37,8 +38,21 @@ pub fn getInterface() ?*Interface {
 }
 
 pub fn getSocket(sock_fd: usize) ?*types.Socket {
-    if (sock_fd >= socket_table.items.len) return null;
-    return socket_table.items[sock_fd];
+    if (sock_fd >= types.MAX_SOCKETS) return null;
+    return socket_table[sock_fd];
+}
+
+pub fn getSocketTable() []?*types.Socket {
+    return socket_table[0..];
+}
+
+fn findFreeSlot() ?usize {
+    for (socket_table, 0..) |entry, idx| {
+        if (entry == null) {
+            return idx;
+        }
+    }
+    return null;
 }
 
 /// Allocate an ephemeral port
@@ -54,7 +68,7 @@ pub fn allocateEphemeralPort() u16 {
 
         // Check if port is in use
         var in_use = false;
-        for (socket_table.items) |maybe_socket| {
+        for (socket_table) |maybe_socket| {
              if (maybe_socket) |sock| {
                 if (sock.allocated and sock.local_port == port) {
                     in_use = true;
@@ -75,7 +89,7 @@ pub fn allocateEphemeralPort() u16 {
 }
 
 pub fn findByPort(port: u16) ?*types.Socket {
-    for (socket_table.items) |maybe_socket| {
+    for (socket_table) |maybe_socket| {
         if (maybe_socket) |sock| {
             if (sock.allocated and sock.local_port == port) {
                 return sock;
@@ -83,4 +97,21 @@ pub fn findByPort(port: u16) ?*types.Socket {
         }
     }
     return null;
+}
+
+pub fn reserveSlot() ?usize {
+    return findFreeSlot();
+}
+
+pub fn installSocket(slot: usize, sock: *types.Socket) bool {
+    if (slot >= types.MAX_SOCKETS) return false;
+    if (socket_table[slot] != null) return false;
+    socket_table[slot] = sock;
+    return true;
+}
+
+pub fn clearSlot(slot: usize) void {
+    if (slot < types.MAX_SOCKETS) {
+        socket_table[slot] = null;
+    }
 }

@@ -160,6 +160,17 @@ pub fn writeString(str: []const u8) void {
     }
 }
 
+/// Write a string to the serial port without acquiring the lock
+/// UNSAFE: Use only in panic/crash situations where deadlock is possible
+pub fn writeStringUnsafe(str: []const u8) void {
+    for (str) |byte| {
+        if (byte == '\n') {
+            writeByteUnlocked('\r');
+        }
+        writeByteUnlocked(byte);
+    }
+}
+
 /// Writer interface compatible with std.io.Writer pattern
 pub const Writer = struct {
     pub fn write(_: *const Writer, bytes: []const u8) error{}!usize {

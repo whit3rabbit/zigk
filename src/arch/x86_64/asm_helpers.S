@@ -117,38 +117,146 @@ isr_common:
     # Return from interrupt (to possibly new thread)
     iretq
 
+# Paranoid ISR - For NMI, #DF, #MC that might interrupt syscall gap
+# Does NOT support context switching (ignores return value of dispatch)
+# Uses RBX as swap flag (preserved by C ABI)
+.global isr_paranoid
+isr_paranoid:
+    # Save all registers
+    push %rax
+    push %rbx
+    push %rcx
+    push %rdx
+    push %rbp
+    push %rsi
+    push %rdi
+    push %r8
+    push %r9
+    push %r10
+    push %r11
+    push %r12
+    push %r13
+    push %r14
+    push %r15
+
+    # Determine SWAPGS
+    xor %ebx, %ebx        # RBX = 0 (Swap Flag)
+
+    # Check 1: User Mode Checks (CS & 3 == 3)
+    testb $3, 144(%rsp)
+    jnz .Lparanoid_swap
+
+    # Check 2: Kernel Mode Gap Check (MSR_GS_BASE)
+    # If GS_BASE is positive (0 or User address), we are in the gap or user space
+    # If GS_BASE is negative (Kernel address 0xFFFF...), we are in kernel
+    push %rax
+    push %rcx
+    push %rdx
+    
+    mov $0xC0000101, %ecx # MSR_GS_BASE
+    rdmsr
+    test %edx, %edx       # Test high 32 bits
+    
+    pop %rdx
+    pop %rcx
+    pop %rax
+    
+    js .Lparanoid_no_swap # Negative -> Kernel GS -> No swap needed
+
+.Lparanoid_swap:
+    swapgs
+    mov $1, %ebx          # Set Flag = 1
+
+.Lparanoid_no_swap:
+    # Call Dispatcher
+    mov %rsp, %rdi
+    
+    # Align stack if needed
+    test $0xF, %rsp
+    jz 1f
+    sub $8, %rsp
+    call dispatch_interrupt
+    add $8, %rsp
+    jmp 2f
+1:
+    call dispatch_interrupt
+2:
+
+    # Restore GS if needed
+    test %rbx, %rbx
+    jz .Lparanoid_restore
+    swapgs
+
+.Lparanoid_restore:
+    pop %r15
+    pop %r14
+    pop %r13
+    pop %r12
+    pop %r11
+    pop %r10
+    pop %r9
+    pop %r8
+    pop %rdi
+    pop %rsi
+    pop %rbp
+    pop %rdx
+    pop %rcx
+    pop %rbx
+    pop %rax
+
+    # Skip vector/error
+    add $16, %rsp
+    iretq
+
+.macro isr_stub_paranoid vec
+.global isr_stub_\vec
+.type isr_stub_\vec, @function
+isr_stub_\vec:
+    push $0
+    push $\vec
+    jmp isr_paranoid
+.endm
+
+.macro isr_stub_paranoid_error vec
+.global isr_stub_\vec
+.type isr_stub_\vec, @function
+isr_stub_\vec:
+    push $\vec
+    jmp isr_paranoid
+.endm
+
 # Generate exception stubs (vectors 0-31)
-isr_stub_no_error 0          # #DE - Divide Error
-isr_stub_no_error 1          # #DB - Debug
-isr_stub_no_error 2          # NMI
-isr_stub_no_error 3          # #BP - Breakpoint
-isr_stub_no_error 4          # #OF - Overflow
-isr_stub_no_error 5          # #BR - Bound Range
-isr_stub_no_error 6          # #UD - Invalid Opcode
-isr_stub_no_error 7          # #NM - Device Not Available
-isr_stub_with_error 8        # #DF - Double Fault
-isr_stub_no_error 9          # Coprocessor Segment Overrun
-isr_stub_with_error 10       # #TS - Invalid TSS
-isr_stub_with_error 11       # #NP - Segment Not Present
-isr_stub_with_error 12       # #SS - Stack Segment Fault
-isr_stub_with_error 13       # #GP - General Protection Fault
-isr_stub_with_error 14       # #PF - Page Fault
+isr_stub_no_error 0          # #DE
+isr_stub_no_error 1          # #DB (Debug can be paranoid? Use common for now)
+isr_stub_paranoid 2          # NMI - PARANOID
+isr_stub_no_error 3          # #BP
+isr_stub_no_error 4          # #OF
+isr_stub_no_error 5          # #BR
+isr_stub_no_error 6          # #UD
+isr_stub_no_error 7          # #NM
+isr_stub_paranoid_error 8    # #DF - PARANOID
+isr_stub_no_error 9          # Coprocessor
+isr_stub_with_error 10       # #TS
+isr_stub_with_error 11       # #NP
+isr_stub_with_error 12       # #SS
+isr_stub_with_error 13       # #GP
+isr_stub_with_error 14       # #PF
 isr_stub_no_error 15         # Reserved
-isr_stub_no_error 16         # #MF - x87 FPU Error
-isr_stub_with_error 17       # #AC - Alignment Check
-isr_stub_no_error 18         # #MC - Machine Check
-isr_stub_no_error 19         # #XM - SIMD Exception
-isr_stub_no_error 20         # #VE - Virtualization Exception
-isr_stub_with_error 21       # #CP - Control Protection Exception
+isr_stub_no_error 16         # #MF
+isr_stub_with_error 17       # #AC
+isr_stub_paranoid 18         # #MC - PARANOID
+isr_stub_no_error 19         # #XM
+isr_stub_no_error 20         # #VE
+isr_stub_with_error 21       # #CP
 isr_stub_no_error 22         # Reserved
 isr_stub_no_error 23         # Reserved
 isr_stub_no_error 24         # Reserved
 isr_stub_no_error 25         # Reserved
 isr_stub_no_error 26         # Reserved
 isr_stub_no_error 27         # Reserved
-isr_stub_no_error 28         # #HV - Hypervisor Injection
-isr_stub_with_error 29       # #VC - VMM Communication Exception
-isr_stub_with_error 30       # #SX - Security Exception
+isr_stub_no_error 28         # #HV
+isr_stub_with_error 29       # #VC
+isr_stub_with_error 30       # #SX
 isr_stub_no_error 31         # Reserved
 
 # Entropy helpers - RDRAND and RDTSC

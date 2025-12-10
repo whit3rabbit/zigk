@@ -9,98 +9,129 @@
 //   RDI, RSI, RDX, R10, R8, R9 = arguments 1-6
 //   RAX = return value (or negative errno on error)
 
+const std = @import("std");
 const uapi = @import("uapi");
 const handlers = @import("handlers.zig");
+const net = @import("net.zig");
 const random = @import("random.zig");
-const net_syscalls = @import("net.zig");
-const syscalls = uapi.syscalls;
 const console = @import("console");
 const hal = @import("hal");
 
 /// Syscall frame from arch-specific entry
 pub const SyscallFrame = hal.syscall.SyscallFrame;
 
-/// Type signature for all syscall handlers
-/// Takes 6 arguments (unused args are ignored by handlers)
-const SyscallHandler = *const fn (arg1: usize, arg2: usize, arg3: usize, arg4: usize, arg5: usize, arg6: usize) isize;
-
 /// Dispatch a syscall and return the result
 /// Called from the assembly syscall entry point
 pub export fn dispatch_syscall(frame: *SyscallFrame) callconv(.c) void {
     const syscall_num = frame.getSyscallNumber();
+    // Pre-calculate valid handlers at comptime to generate clean switch cases
+    const handler_entries = comptime blk: {
+        @setEvalBranchQuota(10000);
+        const SyscallEntry = struct { value: usize, module: type, name: []const u8 };
+        var entries: []const SyscallEntry = &.{};
+        const decls = @typeInfo(uapi.syscalls).@"struct".decls;
+        
+        for (decls) |decl| {
+            const val = @field(uapi.syscalls, decl.name);
+            
+            // Check if it's a usize constant (syscall number)
+                if (@TypeOf(val) == usize) {
+                    const name = toSyscallName(decl.name);
+                    var mod: ?type = null;
+
+                    if (@hasDecl(net, name)) {
+                        mod = net;
+                    } else if (@hasDecl(handlers, name)) {
+                        mod = handlers;
+                    } else if (@hasDecl(random, name)) {
+                        mod = random;
+                    }
+
+                    if (mod) |m| {
+                        entries = entries ++ @as([]const SyscallEntry, &.{ .{ .value = val, .module = m, .name = name } });
+                    }
+                }
+            }
+        break :blk entries;
+    };
+
     const args = frame.getArgs();
 
-    // Dispatch based on syscall number
-    const result = switch (syscall_num) {
-        // Linux x86_64 ABI syscalls - I/O
-        syscalls.SYS_READ => handlers.sys_read(args[0], args[1], args[2]),
-        syscalls.SYS_WRITE => handlers.sys_write(args[0], args[1], args[2]),
-        syscalls.SYS_OPEN => handlers.sys_open(args[0], args[1], args[2]),
-        syscalls.SYS_CLOSE => handlers.sys_close(args[0]),
-
-        // Memory management (stubs)
-        syscalls.SYS_MMAP => handlers.sys_mmap(args[0], args[1], args[2], args[3], args[4], args[5]),
-        syscalls.SYS_MPROTECT => handlers.sys_mprotect(args[0], args[1], args[2]),
-        syscalls.SYS_MUNMAP => handlers.sys_munmap(args[0], args[1]),
-        syscalls.SYS_BRK => handlers.sys_brk(args[0]),
-
-        // Scheduling
-        syscalls.SYS_SCHED_YIELD => handlers.sys_sched_yield(),
-        syscalls.SYS_NANOSLEEP => handlers.sys_nanosleep(args[0], args[1]),
-
-        // Process info
-        syscalls.SYS_GETPID => handlers.sys_getpid(),
-        syscalls.SYS_GETPPID => handlers.sys_getppid(),
-        syscalls.SYS_GETUID => handlers.sys_getuid(),
-        syscalls.SYS_GETGID => handlers.sys_getgid(),
-
-        // Networking
-        syscalls.SYS_SOCKET => net_syscalls.sys_socket(args[0], args[1], args[2]),
-        syscalls.SYS_CONNECT => net_syscalls.sys_connect(args[0], args[1], args[2]),
-        syscalls.SYS_ACCEPT => net_syscalls.sys_accept(args[0], args[1], args[2]),
-        syscalls.SYS_SENDTO => net_syscalls.sys_sendto(args[0], args[1], args[2], args[3], args[4], args[5]),
-        syscalls.SYS_RECVFROM => net_syscalls.sys_recvfrom(args[0], args[1], args[2], args[3], args[4], args[5]),
-        syscalls.SYS_BIND => net_syscalls.sys_bind(args[0], args[1], args[2]),
-        syscalls.SYS_LISTEN => net_syscalls.sys_listen(args[0], args[1]),
-        syscalls.SYS_SETSOCKOPT => net_syscalls.sys_setsockopt(args[0], args[1], args[2], args[3], args[4]),
-        syscalls.SYS_GETSOCKOPT => net_syscalls.sys_getsockopt(args[0], args[1], args[2], args[3], args[4]),
-        syscalls.SYS_SHUTDOWN => net_syscalls.sys_shutdown(args[0], args[1]),
-        syscalls.SYS_GETSOCKNAME => net_syscalls.sys_getsockname(args[0], args[1], args[2]),
-        syscalls.SYS_GETPEERNAME => net_syscalls.sys_getpeername(args[0], args[1], args[2]),
-        syscalls.SYS_POLL => net_syscalls.sys_poll(args[0], args[1], @as(isize, @bitCast(args[2]))),
-
-        // Process control (stubs)
-        syscalls.SYS_FORK => handlers.sys_fork(),
-        // execve is special: it needs the frame to redirect execution
-        syscalls.SYS_EXECVE => handlers.sys_execve(frame, args[0], args[1], args[2]),
-        syscalls.SYS_EXIT => handlers.sys_exit(args[0]),
-        syscalls.SYS_WAIT4 => handlers.sys_wait4(args[0], args[1], args[2], args[3]),
-        syscalls.SYS_EXIT_GROUP => handlers.sys_exit_group(args[0]),
-
-        // Thread state
-        syscalls.SYS_ARCH_PRCTL => handlers.sys_arch_prctl(args[0], args[1]),
-
-        // Time
-        syscalls.SYS_CLOCK_GETTIME => handlers.sys_clock_gettime(args[0], args[1]),
-
-        // Random
-        syscalls.SYS_GETRANDOM => random.sys_getrandom(args[0], args[1], @truncate(args[2])),
-
-        // ZigK custom syscalls
-        syscalls.SYS_DEBUG_LOG => handlers.sys_debug_log(args[0], args[1]),
-        syscalls.SYS_GET_FB_INFO => handlers.sys_get_fb_info(args[0]),
-        syscalls.SYS_MAP_FB => handlers.sys_map_fb(),
-        syscalls.SYS_READ_SCANCODE => handlers.sys_read_scancode(),
-        syscalls.SYS_GETCHAR => handlers.sys_getchar(),
-        syscalls.SYS_PUTCHAR => handlers.sys_putchar(args[0]),
-
-        // Unknown syscall
-        else => blk: {
-            console.debug("Unknown syscall: {d}", .{syscall_num});
-            break :blk uapi.errno.ENOSYS.toReturn();
-        },
+    // Use unrolled linear dispatch to avoid switch syntax limitations
+    // LLVM will optimize this into a jump table/switch
+    const result = blk: {
+        inline for (handler_entries) |entry| {
+            if (entry.value == syscall_num) {
+                break :blk callHandler(@field(entry.module, entry.name), frame, args);
+            }
+        }
+        
+        // Default handler for unknown/unimplemented syscalls
+        console.debug("Unknown or unimplemented syscall: {d}", .{syscall_num});
+        break :blk uapi.errno.ENOSYS.toReturn();
     };
 
     // Set return value in frame
     frame.setReturnSigned(result);
+}
+
+/// Helper to call a handler with correct arguments
+/// Automatically maps frame pointer and register arguments
+inline fn callHandler(comptime func: anytype, frame: *SyscallFrame, args: [6]usize) isize {
+    const FuncType = @TypeOf(func);
+    const type_info = @typeInfo(FuncType);
+    
+    // Handle function definitions directly vs function pointers if necessary
+    // Functions are usually .Fn in Zig, but let's be safe
+    const info = switch (type_info) {
+        .@"fn" => |f| f,
+        else => @compileError("Syscall handler must be a function: " ++ @typeName(FuncType)),
+    };
+    
+    const ArgsTuple = std.meta.ArgsTuple(FuncType);
+    var call_args: ArgsTuple = undefined;
+    
+    comptime var arg_idx = 0;
+    
+    inline for (info.params, 0..) |param, i| {
+        // Special case: Pass frame pointer if requested
+        if (param.type == *SyscallFrame) {
+            call_args[i] = frame;
+        } else {
+            // Otherwise consume a register argument
+            if (arg_idx >= 6) {
+                @compileError("Syscall handler requires too many arguments");
+            }
+            const ArgType = param.type.?;
+            switch (@typeInfo(ArgType)) {
+                .int => |int_info| {
+                    if (int_info.signedness == .signed) {
+                        call_args[i] = @as(ArgType, @truncate(@as(isize, @bitCast(args[arg_idx]))));
+                    } else {
+                        call_args[i] = @as(ArgType, @truncate(args[arg_idx]));
+                    }
+                },
+                .pointer => call_args[i] = @ptrFromInt(args[arg_idx]),
+                else => {
+                    if (@sizeOf(ArgType) == @sizeOf(usize)) {
+                        call_args[i] = @as(ArgType, @bitCast(args[arg_idx]));
+                    } else {
+                        @compileError("Unsupported syscall argument type: " ++ @typeName(ArgType));
+                    }
+                },
+            }
+            arg_idx += 1;
+        }
+    }
+    
+    return @call(.auto, func, call_args);
+}
+
+/// Convert "SYS_NAME" to "sys_name" at comptime
+fn toSyscallName(comptime name: []const u8) []const u8 {
+    var buffer: [name.len]u8 = undefined;
+    for (name, 0..) |c, i| {
+        buffer[i] = std.ascii.toLower(c);
+    }
+    return buffer[0..name.len];
 }

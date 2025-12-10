@@ -535,6 +535,31 @@ pub fn build(b: *std.Build) void {
     const install_httpd = b.addInstallArtifact(httpd, .{});
     b.getInstallStep().dependOn(&install_httpd.step);
 
+    // Compile C integration tests
+    const c_tests = [_][]const u8{
+        "test_stdio",
+        "test_devnull",
+        "test_wait4",
+        "test_clock",
+        "test_random",
+    };
+
+    const test_step_build = b.step("build-tests", "Build C integration tests");
+
+    inline for (c_tests) |test_name| {
+        const test_exe = b.addSystemCommand(&.{
+            "zig", "cc",
+            "-target", "x86_64-linux-musl",
+            "-static",
+            "-o", "zig-out/bin/" ++ test_name,
+            "tests/userland/" ++ test_name ++ ".c",
+        });
+        test_step_build.dependOn(&test_exe.step);
+    }
+    
+    // Ensure tests are built before ISO is created
+    b.getInstallStep().dependOn(test_step_build);
+
     // Create ISO build step using Limine bootloader
     // Use v5.x binary branch which has prebuilt files
     const iso_cmd = b.addSystemCommand(&.{
@@ -551,6 +576,11 @@ pub fn build(b: *std.Build) void {
         \\cp zig-out/bin/kernel.elf iso_root/boot/ && \
         \\cp zig-out/bin/shell.elf iso_root/boot/modules/ && \
         \\cp zig-out/bin/httpd.elf iso_root/boot/modules/ && \
+        \\cp zig-out/bin/test_stdio iso_root/boot/modules/ && \
+        \\cp zig-out/bin/test_devnull iso_root/boot/modules/ && \
+        \\cp zig-out/bin/test_wait4 iso_root/boot/modules/ && \
+        \\cp zig-out/bin/test_clock iso_root/boot/modules/ && \
+        \\cp zig-out/bin/test_random iso_root/boot/modules/ && \
         \\cp limine.cfg iso_root/boot/ && \
         \\cp "$LIMINE_DIR"/limine-bios.sys iso_root/boot/ && \
         \\cp "$LIMINE_DIR"/limine-bios-cd.bin iso_root/boot/ && \
@@ -574,7 +604,7 @@ pub fn build(b: *std.Build) void {
     const run_cmd = b.addSystemCommand(&.{
         "qemu-system-x86_64",
         "-M", "q35",
-        "-m", "128M",
+        "-m", "256M",
         "-cdrom", "zigk.iso",
         "-serial", "stdio",
         "-no-reboot",

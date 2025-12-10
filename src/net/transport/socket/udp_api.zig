@@ -124,7 +124,8 @@ pub fn deliverUdpPacket(pkt: *packet.PacketBuffer) bool {
     if (pkt.is_broadcast or pkt.is_multicast) {
         var delivered = false;
 
-        for (state.getSocketTable()) |*sock| {
+        for (state.getSocketTable()) |maybe_sock| {
+            const sock = maybe_sock orelse continue;
             if (!sock.allocated) continue;
             if (sock.sock_type != types.SOCK_DGRAM) continue;
             if (sock.local_port != dst_port) continue;

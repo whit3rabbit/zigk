@@ -128,7 +128,7 @@ pub const IdtGate = packed struct(u128) {
 };
 
 // IDT pointer for LIDT instruction
-const IdtPtr = packed struct {
+const IdtPtr = packed struct(u80) {
     limit: u16,
     base: u64,
 };

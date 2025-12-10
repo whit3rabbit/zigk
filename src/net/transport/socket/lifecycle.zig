@@ -20,23 +20,7 @@ pub fn socket(family: i32, sock_type: i32, protocol: i32) errors.SocketError!usi
     lock.acquire();
     defer lock.release();
 
-    // Check for free slot in existing table
-    for (state.socket_table.items, 0..) |maybe_sock, i| {
-        if (maybe_sock == null) {
-            // Found empty slot, reuse it
-            const new_sock = state.socket_allocator.create(types.Socket) catch return errors.SocketError.NoSocketsAvailable;
-            new_sock.* = types.Socket.init();
-            new_sock.allocated = true;
-            new_sock.family = family;
-            new_sock.sock_type = sock_type;
-            new_sock.protocol = protocol;
-
-            state.socket_table.items[i] = new_sock;
-            return i;
-        }
-    }
-
-    // No free slot, append new one
+    const slot = state.reserveSlot() orelse return errors.SocketError.NoSocketsAvailable;
     const new_sock = state.socket_allocator.create(types.Socket) catch return errors.SocketError.NoSocketsAvailable;
     new_sock.* = types.Socket.init();
     new_sock.allocated = true;
@@ -44,12 +28,12 @@ pub fn socket(family: i32, sock_type: i32, protocol: i32) errors.SocketError!usi
     new_sock.sock_type = sock_type;
     new_sock.protocol = protocol;
 
-    state.socket_table.append(state.socket_allocator, new_sock) catch {
+    if (!state.installSocket(slot, new_sock)) {
         state.socket_allocator.destroy(new_sock);
         return errors.SocketError.NoSocketsAvailable;
-    };
+    }
 
-    return state.socket_table.items.len - 1;
+    return slot;
 }
 
 /// Bind socket to local address/port
@@ -65,7 +49,7 @@ pub fn bind(sock_fd: usize, addr: *const types.SockAddrIn) errors.SocketError!vo
 
     // Check port isn't already in use
     if (port != 0) {
-        for (state.socket_table.items) |maybe_other| {
+        for (state.getSocketTable()) |maybe_other| {
             if (maybe_other) |other| {
                 if (other.allocated and other.local_port == port) {
                     return errors.SocketError.AddrInUse;
@@ -88,7 +72,7 @@ pub fn close(sock_fd: usize) errors.SocketError!void {
 
     // Close TCP connection if present
     if (sock.tcb) |tcb| {
-        tcp.closeTcb(tcb); // Assumed to be updated in tcp.zig or re-exported via root
+        tcp.close(tcb);
         sock.tcb = null;
     }
 
@@ -97,12 +81,12 @@ pub fn close(sock_fd: usize) errors.SocketError!void {
     // The Socket struct accept_queue holds pointers to TCBs.
     for (&sock.accept_queue) |*entry| {
         if (entry.*) |tcb| {
-             tcp.closeTcb(tcb);
+            tcp.close(tcb);
             entry.* = null;
         }
     }
 
     // Free memory
     state.socket_allocator.destroy(sock);
-    state.socket_table.items[sock_fd] = null;
+    state.clearSlot(sock_fd);
 }
