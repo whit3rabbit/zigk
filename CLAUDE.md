@@ -9,18 +9,15 @@ A Zig-based microkernel for x86_64 using the Limine bootloader protocol.
 
 ## Project Structure
 
-```
-src/
-  arch/       # Hardware abstraction (x86_64, aarch64)
-  kernel/     # Core kernel (scheduler, heap, syscalls, ELF loader)
-  drivers/    # Device drivers
-  fs/         # Filesystem (devfs, initrd)
-  net/        # TCP/IP stack, sockets
-  lib/        # Shared libraries (limine bindings)
-  user/       # Userland programs (shell, httpd)
-  uapi/       # User-kernel API definitions
-specs/        # Feature specifications
-```
+See [FILESYSTEM.md](FILESYSTEM.md) for complete directory layout. Key directories:
+
+- `src/arch/` - HAL (x86_64, aarch64) - ONLY place for inline assembly
+- `src/kernel/` - Core kernel (scheduler, heap, syscalls, ELF loader)
+- `src/net/` - TCP/IP stack, sockets, DNS
+- `src/fs/` - Filesystem (initrd)
+- `src/drivers/` - Device drivers (PCI, E1000e NIC)
+- `src/user/` - Userland programs (shell, httpd)
+- `specs/` - Feature specifications
 
 ## Commands
 
@@ -88,6 +85,7 @@ asm volatile ("out %[data], %[port]"
 
 ## Key Files
 
+- `FILESYSTEM.md` - Complete project structure
 - `specs/syscall-table.md` - Authoritative syscall numbers
 - `src/lib/limine.zig` - Limine protocol bindings
 - `src/kernel/main.zig` - Kernel entry point

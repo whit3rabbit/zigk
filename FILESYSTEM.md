@@ -1,32 +1,31 @@
 # ZigK Filesystem Structure
 
-Based on the [latest complete file listing](./FILESYSTEM.md) as of 2025-12-08.
-This structure mirrors the **Linux Kernel** organization to ensure familiarity for OS developers, while leveraging **Zig's** module system to enforce the strict HAL layering required by the Constitution.
+This structure mirrors the **Linux Kernel** organization while leveraging **Zig's** module system to enforce strict HAL layering.
 
 ## Current Implementation Status
 
 ```text
 zigk/
-├── build.zig                  # Master build logic (Zig 0.13.0+)
+├── build.zig                  # Master build logic (Zig 0.15.x)
 ├── build.zig.zon              # Dependencies
+├── limine.cfg                 # Limine bootloader configuration
 ├── BOOT.md                    # Boot process documentation
 ├── BUILD.md                   # Build instructions
+├── CLAUDE.md                  # AI assistant guidelines
 ├── FILESYSTEM.md              # This file
 ├── README.md                  # Project overview
-├── Dockerfile                 # Docker build environment
-├── docker-compose.yml         # Container orchestration
-├── specs/                     # Design documents (Requirements, Contracts)
-│   ├── 003-microkernel.../    # Active: Microkernel, Userland, Networking
-│   ├── 007-linux-compat.../   # Active: Linux compatibility layer
-│   ├── 009-spec-consistency/  # Active: Spec unification
+├── specs/                     # Design documents
+│   ├── 003-microkernel.../    # Microkernel, Userland, Networking
+│   ├── 007-linux-compat.../   # Linux compatibility layer
+│   ├── 009-spec-consistency/  # Spec unification
 │   ├── archived/              # Superseded specs
-│   └── shared/                # Shared policies (zig-version, gotchas)
+│   ├── shared/                # Shared policies (zig-version, gotchas)
+│   └── syscall-table.md       # Authoritative syscall numbers
 ├── tests/
 │   ├── unit/                  # Unit tests
 │   │   ├── main.zig           # Test runner
 │   │   └── heap_fuzz.zig      # Allocator fuzzing
 │   └── integration/           # Integration tests
-├── docs/                      # General documentation
 └── src/
     ├── lib/                   # Kernel-agnostic libraries
     │   ├── limine.zig         # Limine boot protocol definitions
@@ -37,7 +36,8 @@ zigk/
     ├── uapi/                  # UserSpace API (Shared Headers)
     │   ├── root.zig           # UAPI module root
     │   ├── syscalls.zig       # Syscall numbers (Linux ABI)
-    │   └── errno.zig          # Linux-compatible error codes
+    │   ├── errno.zig          # Linux-compatible error codes
+    │   └── poll.zig           # Poll event definitions
     │
     ├── user/                  # Userland Runtime (Ring 3)
     │   ├── root.zig           # Module root
@@ -45,8 +45,14 @@ zigk/
     │   ├── linker.ld          # Userland linker script
     │   ├── lib/
     │   │   └── syscall.zig    # Syscall wrappers
-    │   └── shell/
-    │       └── main.zig       # User shell application
+    │   ├── shell/
+    │   │   └── main.zig       # User shell application
+    │   └── httpd/
+    │       └── main.zig       # HTTP server application
+    │
+    ├── fs/                    # Filesystem Implementations
+    │   ├── root.zig           # Module root
+    │   └── initrd.zig         # Initial ramdisk (TAR format)
     │
     ├── drivers/               # Device Drivers
     │   ├── keyboard.zig       # PS/2 keyboard driver
@@ -60,6 +66,7 @@ zigk/
     │
     ├── net/                   # Network Stack (Protocol Layers)
     │   ├── root.zig           # Stack entry point
+    │   ├── sync.zig           # Network synchronization
     │   ├── core/              # Core packet handling
     │   │   ├── root.zig
     │   │   ├── interface.zig  # Network interface management
@@ -71,7 +78,12 @@ zigk/
     │   ├── ipv4/              # IPv4 Layer 3
     │   │   ├── root.zig
     │   │   ├── ipv4.zig       # Packet processing
-    │   │   └── arp.zig        # ARP resolution
+    │   │   ├── arp.zig        # ARP resolution
+    │   │   └── reassembly.zig # IP fragment reassembly
+    │   ├── dns/               # DNS Client
+    │   │   ├── root.zig
+    │   │   ├── dns.zig        # DNS protocol
+    │   │   └── client.zig     # DNS resolver
     │   └── transport/         # L4 Protocols
     │       ├── root.zig
     │       ├── udp.zig        # UDP implementation
@@ -100,17 +112,14 @@ zigk/
     │           ├── tcp_api.zig
     │           ├── options.zig
     │           ├── poll.zig
-    │           └── control.zig
+    │           ├── control.zig
+    │           └── errors.zig
     │
     ├── arch/                  # HAL - ONLY place for inline assembly
     │   ├── root.zig           # Architecture-agnostic HAL interface
     │   ├── x86_64/            # x86_64 Implementation
     │   │   ├── root.zig       # Exports
-    │   │   ├── boot/          # Boot code
-    │   │   │   ├── boot32.S   # Multiboot2 entry
-    │   │   │   ├── linker.ld  # Kernel linker script
-    │   │   │   └── grub.cfg   # GRUB configuration
-    │   │   ├── asm_helpers.S  # Assembly routines
+    │   │   ├── asm_helpers.S  # Assembly routines (lgdt, lidt, etc.)
     │   │   ├── cpu.zig        # CPU features/control
     │   │   ├── serial.zig     # Serial port (UART)
     │   │   ├── debug.zig      # Debug facilities
@@ -123,10 +132,13 @@ zigk/
     │   │   ├── mmio.zig       # Memory Mapped I/O
     │   │   ├── paging.zig     # Page tables
     │   │   ├── pic.zig        # 8259 PIC
-    │   │   └── syscall.zig    # SYSENTER/SYSEXIT setup
+    │   │   ├── syscall.zig    # SYSCALL/SYSRET setup
+    │   │   └── acpi/          # ACPI Tables
+    │   │       ├── root.zig
+    │   │       ├── rsdp.zig   # Root System Description
+    │   │       └── mcfg.zig   # PCI MCFG table
     │   └── aarch64/           # ARM64 Stub
-    │       ├── boot/
-    │       └── mm/
+    │       └── (placeholder)
     │
     └── kernel/                # Core Kernel Subsystems
         ├── main.zig           # Kernel entry point
@@ -141,7 +153,7 @@ zigk/
         ├── fd.zig             # File Descriptors
         ├── devfs.zig          # Device Filesystem
         ├── elf.zig            # ELF Loader
-        ├── framebuffer.zig    # Graphics (Limine/Multiboot)
+        ├── framebuffer.zig    # Graphics (Limine framebuffer)
         ├── stack_guard.zig    # Stack protections
         ├── debug/
         │   └── console.zig    # Kernel console
@@ -149,52 +161,55 @@ zigk/
             ├── handlers.zig   # Main dispatch logic
             ├── table.zig      # Syscall table
             ├── net.zig        # Network syscalls
-            └── random.zig     # Entropy syscalls
+            ├── random.zig     # Entropy syscalls
+            └── user_mem.zig   # User memory validation
 ```
 
-## Module Reference (Detailed)
+## Module Reference
 
 ### `src/net/` (Network Stack)
 A device-independent TCP/IP stack implementing Layer 2 (Ethernet), Layer 3 (IPv4/ARP), and Layer 4 (UDP/TCP/ICMP).
 
 | Submodule | Description |
 |-----------|-------------|
-| `core` | Defines `PacketBuffer`, `Interface`, and check-summing utilities. Manages the lifecycle of network packets. |
-| `ethernet` | Handles Ethernet II frames. Dispatches packets to IPv4 or ARP based on EtherType. |
-| `ipv4` | Handles IPv4 packet routing and validation. Manages the ARP cache for address resolution. |
-| `transport` | Implements socket-based protocols. `udp.zig` handles datagrams, `icmp.zig` handles Echo Request/Reply. |
+| `core` | Defines `PacketBuffer`, `Interface`, and checksumming utilities. |
+| `ethernet` | Handles Ethernet II frames. Dispatches to IPv4 or ARP based on EtherType. |
+| `ipv4` | Handles IPv4 packet routing, validation, and fragment reassembly. |
+| `dns` | DNS client for hostname resolution. |
+| `transport` | Socket-based protocols: UDP datagrams, TCP streams, ICMP echo. |
+
+### `src/fs/` (Filesystem)
+| File | Description |
+|------|-------------|
+| `initrd.zig` | TAR-format initial ramdisk for loading files at boot. |
 
 ### `src/drivers/pci/` (PCI Subsystem)
-Enumerates via legacy Port I/O (initially) or ECAM (future) to discover devices.
-
 | File | Description |
 |------|-------------|
 | `enumeration.zig` | Scans PCI bus/slot/function combinations. |
-| `device.zig` | Defines `PCIDevice` struct and BAR (Base Address Register) parsing. |
-| `ecam.zig` | Support for PCIe Enhanced Configuration Access Mechanism. |
+| `device.zig` | Defines `PCIDevice` struct and BAR parsing. |
+| `ecam.zig` | PCIe Enhanced Configuration Access Mechanism. |
 
 ### `src/lib/` (Kernel Libraries)
-Standalone libraries used by the kernel but not dependent on kernel internals.
-
 | File | Description |
 |------|-------------|
-| `limine.zig` | Zig definitions for the Limine Boot Protocol requests and responses. |
-| `multiboot2.zig` | Structs and tags for parsing the Multiboot2 information structure provided by GRUB. |
-| `prng.zig` | `Xoroshiro128+` pseudo-random number generator, seeded by `arch.entropy`. |
-| `ring_buffer.zig` | A generic, thread-safe (when used with locks) compile-time ring buffer. |
+| `limine.zig` | Zig definitions for Limine Boot Protocol. |
+| `multiboot2.zig` | Multiboot2 information structure parsing. |
+| `prng.zig` | Xoroshiro128+ PRNG, seeded by `arch.entropy`. |
+| `ring_buffer.zig` | Generic, thread-safe compile-time ring buffer. |
 
 ### `src/kernel/syscall/`
-Architecture-independent handlers for system calls.
-
 | File | Description |
 |------|-------------|
-| `handlers.zig` | Maps register values from `arch` to kernel function calls. |
-| `table.zig` | Arrays of function pointers indexed by syscall number. |
-| `net.zig` | Implements `socket`, `bind`, `connect`, `sendto`, `recvfrom`. |
-| `random.zig` | Implements `getrandom` (syscall 318). |
+| `handlers.zig` | Maps register values to kernel function calls. |
+| `table.zig` | Function pointers indexed by syscall number. |
+| `net.zig` | `socket`, `bind`, `connect`, `sendto`, `recvfrom`. |
+| `random.zig` | `getrandom` (syscall 318). |
+| `user_mem.zig` | Validates and copies user memory safely. |
 
 ## Key Design Principles
 
-1.  **Strict HAL Layering**: The `src/arch` directory is the **only** allowed location for `asm` blocks and direct hardware register access. All other kernel code must use HAL abstractions.
-2.  **Separate Drivers/Stack**: Network drivers (`src/drivers/net`) are decoupled from the protocol stack (`src/net`). They communicate via generic `Interface` and `PacketBuffer` structures.
-3.  **Unified UAPI**: `src/uapi` is shared source code between the Kernel and Userland applications to guarantee ABI compatibility for struct definitions and constant values.
+1. **Strict HAL Layering**: `src/arch` is the **only** location for `asm` blocks and direct hardware access.
+2. **Separate Drivers/Stack**: Network drivers (`src/drivers/net`) are decoupled from protocols (`src/net`).
+3. **Unified UAPI**: `src/uapi` is shared between kernel and userland for ABI compatibility.
+4. **Limine Boot**: Primary bootloader is Limine v5.x (Multiboot2 support retained for compatibility).
