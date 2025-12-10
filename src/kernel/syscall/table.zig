@@ -71,7 +71,8 @@ pub export fn dispatch_syscall(frame: *SyscallFrame) callconv(.c) void {
 
         // Process control (stubs)
         syscalls.SYS_FORK => handlers.sys_fork(),
-        syscalls.SYS_EXECVE => handlers.sys_execve(args[0], args[1], args[2]),
+        // execve is special: it needs the frame to redirect execution
+        syscalls.SYS_EXECVE => handlers.sys_execve(frame, args[0], args[1], args[2]),
         syscalls.SYS_EXIT => handlers.sys_exit(args[0]),
         syscalls.SYS_WAIT4 => handlers.sys_wait4(args[0], args[1], args[2], args[3]),
         syscalls.SYS_EXIT_GROUP => handlers.sys_exit_group(args[0]),

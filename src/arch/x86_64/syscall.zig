@@ -142,4 +142,24 @@ pub const SyscallFrame = extern struct {
     pub fn setReturnSigned(self: *SyscallFrame, value: isize) void {
         self.rax = @bitCast(value);
     }
+
+    /// Set the return RIP (for execve - redirect execution to new entry point)
+    pub fn setReturnRip(self: *SyscallFrame, rip: u64) void {
+        self.rcx = rip;
+    }
+
+    /// Set the user stack pointer (for execve - use new stack)
+    pub fn setUserRsp(self: *SyscallFrame, rsp: u64) void {
+        self.user_rsp = rsp;
+    }
+
+    /// Get the return RIP
+    pub fn getReturnRip(self: *const SyscallFrame) u64 {
+        return self.rcx;
+    }
+
+    /// Get the user stack pointer
+    pub fn getUserRsp(self: *const SyscallFrame) u64 {
+        return self.user_rsp;
+    }
 };

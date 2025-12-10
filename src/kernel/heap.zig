@@ -230,13 +230,34 @@ pub fn alloc(size: usize) ?[*]u8 {
         return null;
     }
 
+    // Security: Reject obviously excessive allocation requests
+    // This prevents integer overflow in size calculations below
+    const max_alloc_size: usize = 1024 * 1024 * 1024; // 1 GB max single allocation
+    if (size > max_alloc_size) {
+        if (is_freestanding and config.debug_memory) {
+            console.warn("Heap: Rejecting excessive allocation: {d} bytes", .{size});
+        }
+        return null;
+    }
+
     // Acquire lock for thread-safe access to heap state
     const held = heap_lock.acquire();
     defer held.release();
 
     // Calculate required block size (header + payload + footer, aligned)
+    // Using checked arithmetic to detect overflow
     const payload_size = alignUp(size, ALIGNMENT);
-    const required_size = @sizeOf(BlockHeader) + payload_size + @sizeOf(BlockFooter);
+    const overhead = @sizeOf(BlockHeader) + @sizeOf(BlockFooter);
+
+    // Check for overflow: payload_size + overhead must not wrap
+    if (payload_size > std.math.maxInt(usize) - overhead) {
+        if (is_freestanding and config.debug_memory) {
+            console.warn("Heap: Size overflow detected for allocation of {d} bytes", .{size});
+        }
+        return null;
+    }
+
+    const required_size = payload_size + overhead;
     const min_size = @max(required_size, MIN_BLOCK_SIZE);
 
     // First-fit search through free list

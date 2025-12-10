@@ -43,6 +43,9 @@ const LCR_DLAB: u8 = 0x80; // Divisor Latch Access Bit
 // Current serial port configuration
 var current_port: u16 = COM1;
 var initialized: bool = false;
+var lock = std.atomic.Value(bool).init(false);
+
+const std = @import("std");
 
 /// Initialize the serial port with specified baud rate
 /// Default: 115200 baud, 8N1 (8 data bits, no parity, 1 stop bit)
@@ -109,6 +112,16 @@ pub fn hasData() bool {
 pub fn writeByte(byte: u8) void {
     if (!initialized) return;
 
+    // Acquire lock
+    while (lock.swap(true, .acquire)) {
+        asm volatile ("pause");
+    }
+    defer lock.store(false, .release);
+
+    writeByteUnlocked(byte);
+}
+
+fn writeByteUnlocked(byte: u8) void {
     // Wait until transmit buffer is empty
     var retries: usize = 100000;
     while (!isTxReady() and retries > 0) {
@@ -132,12 +145,18 @@ pub fn readByte() u8 {
 
 /// Write a string to the serial port
 pub fn writeString(str: []const u8) void {
+    // Acquire lock to ensure atomic output of the string
+    while (lock.swap(true, .acquire)) {
+        asm volatile ("pause");
+    }
+    defer lock.store(false, .release);
+
     for (str) |byte| {
         // Convert LF to CRLF for terminal compatibility
         if (byte == '\n') {
-            writeByte('\r');
+            writeByteUnlocked('\r');
         }
-        writeByte(byte);
+        writeByteUnlocked(byte);
     }
 }
 

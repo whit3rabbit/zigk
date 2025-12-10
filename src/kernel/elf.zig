@@ -101,6 +101,21 @@ pub const Elf64_Phdr = extern struct {
 };
 
 // =============================================================================
+// ELF Loader Limits (Security)
+// =============================================================================
+
+/// Maximum size of a single segment (128 MB)
+/// Prevents malicious ELF files from exhausting memory via large p_memsz
+pub const MAX_SEGMENT_SIZE: u64 = 128 * 1024 * 1024;
+
+/// Maximum total process memory from all segments (256 MB)
+/// Prevents DoS via many small segments
+pub const MAX_TOTAL_MEMORY: u64 = 256 * 1024 * 1024;
+
+/// Maximum number of PT_LOAD segments
+pub const MAX_LOAD_SEGMENTS: u32 = 64;
+
+// =============================================================================
 // ELF Loader Errors
 // =============================================================================
 
@@ -116,6 +131,9 @@ pub const ElfError = error{
     OutOfMemory,
     MappingFailed,
     BufferTooSmall,
+    SegmentTooLarge,
+    TotalMemoryExceeded,
+    TooManySegments,
 };
 
 // =============================================================================
@@ -223,16 +241,43 @@ pub fn load(data: []const u8, pml4_phys: u64, load_base: u64) ElfError!ElfLoadRe
     const phdr_ptr: [*]const Elf64_Phdr = @ptrCast(@alignCast(data.ptr + ehdr.e_phoff));
     const phdrs = phdr_ptr[0..ehdr.e_phnum];
 
-    // Track address range
+    // Track address range and total memory for security limits
     var lowest_addr: u64 = std.math.maxInt(u64);
     var highest_addr: u64 = 0;
     var load_count: u32 = 0;
+    var total_memory: u64 = 0;
 
     // Load each PT_LOAD segment
     for (phdrs) |*phdr| {
         if (phdr.p_type != PT_LOAD) {
             continue;
         }
+
+        // Security: Check segment count limit
+        if (load_count >= MAX_LOAD_SEGMENTS) {
+            console.err("ELF: Too many PT_LOAD segments (max {})", .{MAX_LOAD_SEGMENTS});
+            return ElfError.TooManySegments;
+        }
+
+        // Security: Check individual segment size limit
+        if (phdr.p_memsz > MAX_SEGMENT_SIZE) {
+            console.err("ELF: Segment too large: {} bytes (max {} MB)", .{
+                phdr.p_memsz,
+                MAX_SEGMENT_SIZE / (1024 * 1024),
+            });
+            return ElfError.SegmentTooLarge;
+        }
+
+        // Security: Check total memory limit (with overflow protection)
+        if (total_memory > MAX_TOTAL_MEMORY - phdr.p_memsz) {
+            console.err("ELF: Total memory exceeded: {} + {} > {} MB", .{
+                total_memory,
+                phdr.p_memsz,
+                MAX_TOTAL_MEMORY / (1024 * 1024),
+            });
+            return ElfError.TotalMemoryExceeded;
+        }
+        total_memory += phdr.p_memsz;
 
         // Calculate virtual address with base offset
         const vaddr = actual_base + phdr.p_vaddr;

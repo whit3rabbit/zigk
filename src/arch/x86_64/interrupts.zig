@@ -155,6 +155,14 @@ fn exceptionHandler(frame: *idt.InterruptFrame) void {
             // Page fault - CR2 contains faulting address
             const cr2 = cpu.readCr2();
 
+            // Check if we are in a safe copy region
+            const rip = frame.rip;
+            if (rip >= @intFromPtr(&_asm_copy_user_start) and rip < @intFromPtr(&_asm_copy_user_end)) {
+                // Redirect to fixup handler
+                frame.rip = @intFromPtr(&_asm_copy_user_fixup);
+                return;
+            }
+
             // Check if this is a stack guard page fault
             if (guard_page_checker) |checker| {
                 if (checker(cr2)) |guard_info| {
@@ -207,6 +215,11 @@ fn exceptionHandler(frame: *idt.InterruptFrame) void {
     }
     cpu.halt();
 }
+
+// External symbols for safe copy fixup
+extern const _asm_copy_user_start: anyopaque;
+extern const _asm_copy_user_end: anyopaque;
+extern const _asm_copy_user_fixup: anyopaque;
 
 /// Generic IRQ handler
 fn irqHandler(frame: *idt.InterruptFrame) void {

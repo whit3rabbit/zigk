@@ -180,12 +180,41 @@ pub fn unmapPage(pml4_phys: u64, virt_addr: u64) VmmError!void {
     // Clear the entry
     pt.entries[indices.pt] = PageTableEntry.empty();
 
+    // Cleanup empty tables recursively
+    if (isTableEmpty(pt)) {
+        const pt_phys = pd.entries[indices.pd].getPhysAddr();
+        pmm.freePage(pt_phys);
+        pd.entries[indices.pd] = PageTableEntry.empty();
+
+        if (isTableEmpty(pd)) {
+            const pd_phys = pdpt.entries[indices.pdpt].getPhysAddr();
+            pmm.freePage(pd_phys);
+            pdpt.entries[indices.pdpt] = PageTableEntry.empty();
+
+            if (isTableEmpty(pdpt)) {
+                // Determine PDPT phys addr? 
+                // We got pdpt from pml4.entries[indices.pml4]
+                const pdpt_phys = pml4.entries[indices.pml4].getPhysAddr();
+                pmm.freePage(pdpt_phys);
+                pml4.entries[indices.pml4] = PageTableEntry.empty();
+            }
+        }
+    }
+
     // Invalidate TLB
     paging.invalidatePage(virt_addr);
 
     if (config.debug_memory) {
         console.debug("VMM: Unmapped {x}", .{virt_addr});
     }
+}
+
+/// Check if a page table is completely empty
+fn isTableEmpty(table: *const PageTable) bool {
+    for (table.entries) |entry| {
+        if (entry.isPresent()) return false;
+    }
+    return true;
 }
 
 /// Translate virtual address to physical

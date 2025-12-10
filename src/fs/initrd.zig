@@ -106,7 +106,10 @@ pub const InitRD = struct {
             // Data is padded to 512-byte boundary
             const data_blocks = (size + 511) / 512;
             // Next header is at current offset + header + data blocks
-            offset += 512 + (data_blocks * 512);
+            const next_offset = offset + 512 + (data_blocks * 512);
+            
+            if (next_offset > self.data.len) break;
+            offset = next_offset;
         }
         return null;
     }

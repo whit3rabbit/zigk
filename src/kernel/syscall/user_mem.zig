@@ -47,48 +47,31 @@ pub fn isValidUserPtr(ptr: usize, len: usize) bool {
     return true;
 }
 
-/// Validate a user string pointer (null-terminated, max length)
-/// Alias for isValidUserPtr - the max_len bounds the search area
-pub fn isValidUserString(ptr: usize, max_len: usize) bool {
-    return isValidUserPtr(ptr, max_len);
-}
+/// Copy a null-terminated string from user memory to a kernel buffer.
+/// Returns a slice of the kernel buffer containing the string (excluding null).
+/// Returns error.Fault if a fault occurs before null is found.
+/// Returns error.NameTooLong if null is not found within the buffer.
+pub fn copyStringFromUser(dest: []u8, src: usize) ![]u8 {
+    if (dest.len == 0) return &[_]u8{};
+    if (src == 0) return error.Fault;
 
-/// Convert a user string pointer to a Zig slice.
-/// Searches for null terminator up to max_len bytes.
-/// Returns null if pointer is invalid or no null terminator found within max_len.
-///
-/// This replaces manual strlen-style loops throughout syscall handlers.
-pub fn userStringToSlice(ptr: usize, max_len: usize) ?[]const u8 {
-    if (!isValidUserPtr(ptr, max_len)) return null;
+    // Use raw copy to pull as much as possible
+    const rem = _asm_copy_from_user(dest.ptr, @ptrFromInt(src), dest.len);
+    const copied = dest.len - rem;
 
-    const bytes: [*]const u8 = @ptrFromInt(ptr);
-    var len: usize = 0;
-    while (len < max_len and bytes[len] != 0) : (len += 1) {}
+    // Search for null terminator in what we managed to copy
+    if (std.mem.indexOfScalar(u8, dest[0..copied], 0)) |len| {
+        return dest[0..len];
+    }
 
-    // Return the slice (may be empty if first char is null)
-    return bytes[0..len];
-}
+    // No null terminator found
+    if (rem > 0) {
+        // We hit a fault before finding the terminator
+        return error.Fault;
+    }
 
-/// Convert a user buffer pointer to a Zig slice.
-/// Returns null if pointer validation fails.
-///
-/// Note: This does NOT copy the data - it creates a slice pointing to user memory.
-/// The caller must ensure the data is accessed safely (e.g., via copy or HHDM).
-pub fn userBufferToSlice(ptr: usize, len: usize) ?[]u8 {
-    if (len == 0) return &[_]u8{};
-    if (!isValidUserPtr(ptr, len)) return null;
-
-    const bytes: [*]u8 = @ptrFromInt(ptr);
-    return bytes[0..len];
-}
-
-/// Convert a user buffer pointer to a const slice.
-pub fn userBufferToConstSlice(ptr: usize, len: usize) ?[]const u8 {
-    if (len == 0) return &[_]u8{};
-    if (!isValidUserPtr(ptr, len)) return null;
-
-    const bytes: [*]const u8 = @ptrFromInt(ptr);
-    return bytes[0..len];
+    // Buffer filled but no null terminator
+    return error.NameTooLong;
 }
 
 // =============================================================================
@@ -146,6 +129,31 @@ pub fn isValidUserAccess(ptr: usize, len: usize, mode: AccessMode) bool {
     }
 }
 
+
+
+// =============================================================================
+// Safe Copy Primitives (Assembly)
+// =============================================================================
+
+extern fn _asm_copy_from_user(dest: *anyopaque, src: *const anyopaque, len: usize) usize;
+extern fn _asm_copy_to_user(dest: *anyopaque, src: *const anyopaque, len: usize) usize;
+
+/// Copy data from user memory to kernel memory safely.
+/// Returns number of bytes NOT copied (0 on success).
+/// On fault, returns remaining bytes.
+pub fn copyFromUser(dest: []u8, src: usize) usize {
+    if (!isValidUserPtr(src, dest.len)) return dest.len;
+    return _asm_copy_from_user(dest.ptr, @ptrFromInt(src), dest.len);
+}
+
+/// Copy data from kernel memory to user memory safely.
+/// Returns number of bytes NOT copied (0 on success).
+/// On fault, returns remaining bytes.
+pub fn copyToUser(dest: usize, src: []const u8) usize {
+    if (!isValidUserPtr(dest, src.len)) return src.len;
+    return _asm_copy_to_user(@ptrFromInt(dest), src.ptr, src.len);
+}
+
 // =============================================================================
 // UserPtr - Type-Safe Wrapper for User Pointers
 // =============================================================================
@@ -167,7 +175,8 @@ pub const UserPtrError = error{
 /// ```
 /// // In syscall handler
 /// const buf = UserPtr.from(buf_ptr);
-/// const slice = buf.toSlice(count, .Write) catch return Errno.EFAULT.toReturn();
+/// var kbuf: [64]u8 = undefined;
+/// const len = buf.copyToKernel(&kbuf) catch return Errno.EFAULT.toReturn();
 /// ```
 pub const UserPtr = struct {
     /// Raw user-space address (not directly accessible)
@@ -188,44 +197,43 @@ pub const UserPtr = struct {
         return self.addr;
     }
 
-    /// Convert to a mutable slice with full validation.
-    /// Verifies bounds, page mapping, and permissions.
-    /// Returns error.Fault if any check fails.
-    pub fn toSlice(self: UserPtr, len: usize, mode: AccessMode) UserPtrError![]u8 {
-        if (len == 0) return &[_]u8{};
-        if (!isValidUserAccess(self.addr, len, mode)) return error.Fault;
-        const bytes: [*]u8 = @ptrFromInt(self.addr);
-        return bytes[0..len];
+    /// Copy data from user memory to a kernel buffer.
+    /// Returns error.Fault if the copy fails (pointer invalid or unmapped).
+    /// Returns the number of bytes copied (always equal to buf.len on success).
+    pub fn copyToKernel(self: UserPtr, buf: []u8) UserPtrError!usize {
+        if (copyFromUser(buf, self.addr) != 0) {
+            return error.Fault;
+        }
+        return buf.len;
     }
 
-    /// Convert to a const slice with full validation.
-    /// Verifies bounds, page mapping, and read permissions.
-    pub fn toConstSlice(self: UserPtr, len: usize) UserPtrError![]const u8 {
-        if (len == 0) return &[_]u8{};
-        if (!isValidUserAccess(self.addr, len, .Read)) return error.Fault;
-        const bytes: [*]const u8 = @ptrFromInt(self.addr);
-        return bytes[0..len];
-    }
-
-    /// Convert to a null-terminated string slice with validation.
-    /// Searches for null terminator up to max_len bytes.
-    pub fn toString(self: UserPtr, max_len: usize) UserPtrError![]const u8 {
-        return userStringToSlice(self.addr, max_len) orelse error.Fault;
+    /// Copy data from a kernel buffer to user memory.
+    /// Returns error.Fault if the copy fails.
+    /// Returns the number of bytes copied (always equal to buf.len on success).
+    pub fn copyFromKernel(self: UserPtr, buf: []const u8) UserPtrError!usize {
+        if (copyToUser(self.addr, buf) != 0) {
+            return error.Fault;
+        }
+        return buf.len;
     }
 
     /// Read a single value of type T from user memory.
     /// Useful for reading structs or integers from syscall arguments.
     pub fn readValue(self: UserPtr, comptime T: type) UserPtrError!T {
-        if (!isValidUserAccess(self.addr, @sizeOf(T), .Read)) return error.Fault;
-        const ptr: *const T = @ptrFromInt(self.addr);
-        return ptr.*;
+        var val: T = undefined;
+        const bytes = std.mem.asBytes(&val);
+        if (copyFromUser(bytes, self.addr) != 0) {
+            return error.Fault;
+        }
+        return val;
     }
 
-    /// Get a pointer to write a single value of type T to user memory.
-    /// Caller must write through the returned pointer.
-    pub fn writePtr(self: UserPtr, comptime T: type) UserPtrError!*T {
-        if (!isValidUserAccess(self.addr, @sizeOf(T), .Write)) return error.Fault;
-        return @ptrFromInt(self.addr);
+    /// Write a single value of type T to user memory.
+    pub fn writeValue(self: UserPtr, val: anytype) UserPtrError!void {
+        const bytes = std.mem.asBytes(&val);
+        if (copyToUser(self.addr, bytes) != 0) {
+            return error.Fault;
+        }
     }
 
     /// Offset this pointer by a byte count, returning a new UserPtr.
@@ -234,3 +242,5 @@ pub const UserPtr = struct {
         return .{ .addr = self.addr +% bytes };
     }
 };
+
+const std = @import("std");

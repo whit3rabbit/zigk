@@ -60,12 +60,39 @@ isr_common:
     # Call the Zig dispatcher with frame pointer as first argument
     # dispatch_interrupt returns the frame pointer to restore (in RAX)
     # This enables context switching by returning a different frame
+    # SWAPGS if coming from User Mode (CS & 3 == 3)
+    # Stack: [regs (120)] [vec (8)] [err (8)] [rip (8)] [cs (8)] ...
+    # CS is at offset 120 + 16 + 8 = 144 (0x90)
+    testb $3, 144(%rsp)
+    jz 1f
+    swapgs
+1:
+
+    # Call the Zig dispatcher with frame pointer as first argument
+    # dispatch_interrupt returns the frame pointer to restore (in RAX)
+    # This enables context switching by returning a different frame
     mov %rsp, %rdi
+    
+    # Ensure 16-byte stack alignment before call (ABI requirement)
+    # If RSP is not aligned (0x8), subtract 8. We restore from RAX anyway.
+    test $0xF, %rsp
+    jz 2f
+    sub $8, %rsp
+2:
     call dispatch_interrupt
 
     # Switch to the returned frame pointer (may be different for context switch)
     # RAX contains the new stack pointer from dispatch_interrupt
+    # Switch to the returned frame pointer (may be different for context switch)
+    # RAX contains the new stack pointer from dispatch_interrupt
     mov %rax, %rsp
+
+    # SWAPGS if returning to User Mode (CS & 3 == 3)
+    # Check CS at new stack location (offset 144)
+    testb $3, 144(%rsp)
+    jz 1f
+    swapgs
+1:
 
     # Restore all registers from the (possibly new) stack
     pop %r15
@@ -276,3 +303,49 @@ isr_stub_no_error 44         # Mouse (IRQ12)
 isr_stub_no_error 45         # FPU (IRQ13)
 isr_stub_no_error 46         # Primary ATA (IRQ14)
 isr_stub_no_error 47         # Secondary ATA (IRQ15)
+
+# =============================================================================
+# Safe User Copy
+# =============================================================================
+
+# usize _asm_copy_from_user(void* dest, const void* src, usize len)
+# Returns number of bytes NOT copied (0 on success)
+# On fault, returns remaining bytes (len - copied)
+.global _asm_copy_from_user
+.type _asm_copy_from_user, @function
+_asm_copy_from_user:
+    # RDI = dest, RSI = src, RDX = len
+    mov %rdx, %rcx  # Counter for rep movsb
+    mov %rdx, %rax  # Save original length to calculate result
+    
+    # Check for zero length
+    test %rcx, %rcx
+    jz .Lcopy_done
+
+    # Perform copy with fault handling
+    # If a page fault occurs on the read (RSI), handler will jump to .Lcopy_fixup
+.global _asm_copy_user_start
+_asm_copy_user_start:
+    rep movsb
+.global _asm_copy_user_end
+_asm_copy_user_end:
+
+.Lcopy_done:
+    xor %rax, %rax  # Success: return 0 bytes remaining
+    ret
+
+# Fixup handler for page faults during copy
+# The #PF handler redirects here.
+# RCX contains remaining bytes.
+.global _asm_copy_user_fixup
+_asm_copy_user_fixup:
+    mov %rcx, %rax  # Return remaining bytes
+    ret
+
+# usize _asm_copy_to_user(void* dest, const void* src, usize len)
+# Same as copy_from_user but writes to user memory (dest)
+# Implementation is identical since movsb faults on either src or dest
+.global _asm_copy_to_user
+.type _asm_copy_to_user, @function
+_asm_copy_to_user:
+    jmp _asm_copy_from_user

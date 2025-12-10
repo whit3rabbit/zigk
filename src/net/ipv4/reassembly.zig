@@ -13,10 +13,13 @@ const PacketBuffer = packet.PacketBuffer;
 const MAX_IP_PACKET_SIZE: usize = 65535;
 
 /// Maximum time to hold fragments (seconds)
-const REASSEMBLY_TIMEOUT: u64 = 30; // Reduced to mitigate DoS (RFC 791 suggests 60-120s)
+/// Reduced from RFC 791's 60-120s to mitigate reassembly DoS attacks
+const REASSEMBLY_TIMEOUT: u64 = 15;
 
 /// Maximum concurrent reassemblies
-const MAX_REASSEMBLIES: usize = 8;
+/// Increased from 8 to handle more simultaneous fragmented flows
+/// while still limiting memory usage (each entry uses ~64KB)
+const MAX_REASSEMBLIES: usize = 32;
 
 /// Fragment reassembly entry
 const ReassemblyEntry = struct {
@@ -203,37 +206,58 @@ const Allocation = struct {
     index: usize,
 };
 
-/// Allocate a cache entry (free or oldest/LRU)
+/// Simple pseudo-random number for eviction (no external dependencies)
+var eviction_counter: usize = 0;
+
+/// Allocate a cache entry with improved eviction policy
+/// Policy:
+///   1. Return any free entry
+///   2. Evict any entry that has timed out
+///   3. Evict oldest entry (LRU-like)
+///   4. If all entries are young (possible DoS), use random eviction
 fn allocateEntry() ?Allocation {
-    // 1. Find free
+    // 1. Find free entry first (fast path)
     for (&cache, 0..) |*e, i| {
         if (!e.used) return Allocation{ .ptr = e, .index = i };
     }
-    
-    // 2. Evict oldest (timeout)
+
+    // 2. Find timed-out entry or track oldest
     var oldest_idx: usize = 0;
-    var min_time: u64 = current_tick;
-    var found_oldest = false;
-    
+    var oldest_age: u64 = 0;
+    var youngest_age: u64 = std.math.maxInt(u64);
+
     for (&cache, 0..) |*e, i| {
-        // Handle wraparound roughly
         const age = current_tick -% e.timer;
-        if (age > REASSEMBLY_TIMEOUT) {
-            return Allocation{ .ptr = e, .index = i }; // Found timed out entry
+
+        // Immediately evict timed-out entries
+        if (age >= REASSEMBLY_TIMEOUT) {
+            return Allocation{ .ptr = e, .index = i };
         }
-        if (e.timer < min_time) {
-            min_time = e.timer;
+
+        // Track oldest for LRU
+        if (age > oldest_age) {
+            oldest_age = age;
             oldest_idx = i;
-            found_oldest = true;
+        }
+
+        // Track youngest to detect attack scenario
+        if (age < youngest_age) {
+            youngest_age = age;
         }
     }
-    
-    // 3. Force evict oldest if necessary
-    if (found_oldest) {
-        return Allocation{ .ptr = &cache[oldest_idx], .index = oldest_idx };
+
+    // 3. If all entries are very young (likely attack), use random eviction
+    // to prevent attacker from predicting which flows will be evicted
+    const attack_threshold: u64 = 2; // All entries less than 2 ticks old
+    if (youngest_age < attack_threshold and oldest_age < attack_threshold) {
+        // Use simple counter-based pseudo-random index
+        eviction_counter +%= 1;
+        const random_idx = eviction_counter % MAX_REASSEMBLIES;
+        return Allocation{ .ptr = &cache[random_idx], .index = random_idx };
     }
-    // Fallback: evict 0
-    return Allocation{ .ptr = &cache[0], .index = 0 };
+
+    // 4. Normal case: evict oldest (LRU)
+    return Allocation{ .ptr = &cache[oldest_idx], .index = oldest_idx };
 }
 
 /// Update holes by removing the covered range [start, end)

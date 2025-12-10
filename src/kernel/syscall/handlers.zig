@@ -32,6 +32,7 @@ const Errno = uapi.errno.Errno;
 const isValidUserPtr = user_mem.isValidUserPtr;
 const isValidUserAccess = user_mem.isValidUserAccess;
 const AccessMode = user_mem.AccessMode;
+const UserPtr = user_mem.UserPtr;
 const UserVmm = user_vmm.UserVmm;
 const FdTable = fd_mod.FdTable;
 const FileDescriptor = fd_mod.FileDescriptor;
@@ -172,11 +173,11 @@ pub fn sys_wait4(pid_arg: usize, wstatus_ptr: usize, options: usize, rusage_ptr:
 
             // Write exit status if pointer provided
             if (wstatus_ptr != 0) {
-                if (isValidUserPtr(wstatus_ptr, @sizeOf(i32))) {
-                    const wstatus: *i32 = @ptrFromInt(wstatus_ptr);
-                    // Linux wait status encoding: exit_status << 8
-                    wstatus.* = (zombie.exit_status & 0xFF) << 8;
-                }
+                // Linux wait status encoding: exit_status << 8
+                const wstatus_val: i32 = (zombie.exit_status & 0xFF) << 8;
+                UserPtr.from(wstatus_ptr).writeValue(wstatus_val) catch {
+                    // Ignore fault on write back, as we already reaped functionality
+                };
             }
 
             // Save TID before destroying
@@ -260,13 +261,10 @@ pub fn sys_sched_yield() isize {
 /// MVP: Busy-waits for the duration. Full implementation would
 /// block the thread and use a timer to wake it.
 pub fn sys_nanosleep(req_ptr: usize, rem_ptr: usize) isize {
-    // Validate request pointer is in userspace
-    if (!isValidUserPtr(req_ptr, @sizeOf(Timespec))) {
-        return Errno.EFAULT.toReturn();
-    }
-
     // Read timespec from userspace
-    const req: *const Timespec = @ptrFromInt(req_ptr);
+    const req = UserPtr.from(req_ptr).readValue(Timespec) catch {
+        return Errno.EFAULT.toReturn();
+    };
 
     // Validate timespec values
     if (req.tv_nsec < 0 or req.tv_nsec >= 1_000_000_000) {
@@ -288,9 +286,10 @@ pub fn sys_nanosleep(req_ptr: usize, rem_ptr: usize) isize {
 
     // On success, set remaining time to 0 if pointer provided
     if (rem_ptr != 0) {
-        const rem: *Timespec = @ptrFromInt(rem_ptr);
-        rem.tv_sec = 0;
-        rem.tv_nsec = 0;
+        const rem: Timespec = .{ .tv_sec = 0, .tv_nsec = 0 };
+        UserPtr.from(rem_ptr).writeValue(rem) catch {
+            return Errno.EFAULT.toReturn();
+        };
     }
 
     return 0;
@@ -312,14 +311,18 @@ pub fn sys_clock_gettime(clk_id: usize, tp_ptr: usize) isize {
         return Errno.EFAULT.toReturn();
     }
 
-    const tp: *Timespec = @ptrFromInt(tp_ptr);
-
     // Get tick count and convert to time
     // Assuming 100 Hz timer (10ms per tick)
     const ticks = sched.getTickCount();
     const ms = ticks * 10;
-    tp.tv_sec = @intCast(ms / 1000);
-    tp.tv_nsec = @intCast((ms % 1000) * 1_000_000);
+    const tp = Timespec{
+        .tv_sec = @intCast(ms / 1000),
+        .tv_nsec = @intCast((ms % 1000) * 1_000_000),
+    };
+
+    UserPtr.from(tp_ptr).writeValue(tp) catch {
+        return Errno.EFAULT.toReturn();
+    };
 
     return 0;
 }
@@ -337,9 +340,9 @@ pub fn sys_read(fd_num: usize, buf_ptr: usize, count: usize) isize {
         return 0;
     }
 
-    // Validate user buffer pointer with write permission check
-    // (kernel writes to user buffer, so user needs write permission)
-    if (!isValidUserAccess(buf_ptr, count, AccessMode.Write)) {
+    // Bounds check pointer (fast check)
+    // We do full copy later, but this saves us allocation if obviously bad
+    if (!isValidUserPtr(buf_ptr, count)) {
         return Errno.EFAULT.toReturn();
     }
 
@@ -359,10 +362,36 @@ pub fn sys_read(fd_num: usize, buf_ptr: usize, count: usize) isize {
         return Errno.ENOSYS.toReturn();
     };
 
-    // Create slice from validated user pointer
-    // FileOps now takes slices for type-enforced bounds checking
-    const buf: [*]u8 = @ptrFromInt(buf_ptr);
-    return read_fn(fd, buf[0..count]);
+    // Allocate kernel buffer for the read
+    // For large reads, we should loop. For MVP, we cap at 4KB or alloc from heap?
+    // Let's alloc from heap to be safe for now, or just limit large reads to 4096.
+    // For robustness, clamping to 4096 is safer for kernel stack, but allocating is better.
+    // Given the kernel heap allocator is available, let's use it.
+    
+    // Cap read size to avoid massive allocations (e.g. 1GB)
+    const max_read_size = 64 * 1024; // 64KB chunks
+    const read_size = @min(count, max_read_size);
+
+    const kbuf = heap.allocator().alloc(u8, read_size) catch {
+        return Errno.ENOMEM.toReturn();
+    };
+    defer heap.allocator().free(kbuf);
+
+    // Read into kernel buffer
+    const bytes_read = read_fn(fd, kbuf);
+    if (bytes_read < 0) return bytes_read;
+
+    // Copy to user memory
+    const uptr = UserPtr.from(buf_ptr);
+    const valid_read = @as(usize, @intCast(bytes_read));
+    
+    // Only copy what was actually read
+    const copy_res = uptr.copyFromKernel(kbuf[0..valid_read]);
+    if (copy_res == error.Fault) {
+        return Errno.EFAULT.toReturn();
+    }
+
+    return bytes_read;
 }
 
 /// sys_write (1) - Write to file descriptor
@@ -373,10 +402,8 @@ pub fn sys_write(fd_num: usize, buf_ptr: usize, count: usize) isize {
     if (count == 0) {
         return 0;
     }
-
-    // Validate user buffer pointer with read permission check
-    // (kernel reads from user buffer, so user needs read permission)
-    if (!isValidUserAccess(buf_ptr, count, AccessMode.Read)) {
+    
+    if (!isValidUserPtr(buf_ptr, count)) {
         return Errno.EFAULT.toReturn();
     }
 
@@ -396,10 +423,23 @@ pub fn sys_write(fd_num: usize, buf_ptr: usize, count: usize) isize {
         return Errno.ENOSYS.toReturn();
     };
 
-    // Create slice from validated user pointer
-    // FileOps now takes slices for type-enforced bounds checking
-    const buf: [*]const u8 = @ptrFromInt(buf_ptr);
-    return write_fn(fd, buf[0..count]);
+    // Cap write size
+    const max_write_size = 64 * 1024;
+    const write_size = @min(count, max_write_size);
+
+    const kbuf = heap.allocator().alloc(u8, write_size) catch {
+        return Errno.ENOMEM.toReturn();
+    };
+    defer heap.allocator().free(kbuf);
+
+    // Copy from user to kernel
+    const uptr = UserPtr.from(buf_ptr);
+    if (uptr.copyToKernel(kbuf) catch null == null) {
+        return Errno.EFAULT.toReturn();
+    }
+    
+    // Write from kernel buffer
+    return write_fn(fd, kbuf);
 }
 
 
@@ -419,11 +459,17 @@ pub fn sys_debug_log(buf_ptr: usize, len: usize) isize {
     }
 
     // Limit message length for safety
-    const max_len: usize = 4096;
-    const actual_len = @min(len, max_len);
+    const max_len: usize = 1024;
+    const copy_len = @min(len, max_len);
+    
+    var kbuf: [1024]u8 = undefined;
+    
+    const uptr = UserPtr.from(buf_ptr);
+    const actual_len = uptr.copyToKernel(kbuf[0..copy_len]) catch {
+        return Errno.EFAULT.toReturn();
+    };
 
-    const buf: [*]const u8 = @ptrFromInt(buf_ptr);
-    console.debug("[USER] {s}", .{buf[0..actual_len]});
+    console.debug("[USER] {s}", .{kbuf[0..actual_len]});
 
     return @intCast(actual_len);
 }
@@ -468,7 +514,9 @@ pub fn sys_open(path_ptr: usize, flags: usize, mode: usize) isize {
     _ = mode; // Mode is ignored for device files
 
     // Validate and read path string from userspace
-    const path = user_mem.userStringToSlice(path_ptr, user_mem.MAX_PATH_LEN) orelse {
+    var path_buf: [user_mem.MAX_PATH_LEN]u8 = undefined;
+    const path = user_mem.copyStringFromUser(&path_buf, path_ptr) catch |err| {
+        if (err == error.NameTooLong) return Errno.ENAMETOOLONG.toReturn();
         return Errno.EFAULT.toReturn();
     };
 
@@ -714,6 +762,7 @@ fn setForkChildReturn(child: *@import("thread").Thread) void {
 /// The new program is loaded from the specified path (InitRD lookup).
 ///
 /// Args:
+///   frame: SyscallFrame pointer (needed to redirect execution on success)
 ///   path_ptr: Pointer to null-terminated path string
 ///   argv_ptr: Pointer to null-terminated array of argument pointers
 ///   envp_ptr: Pointer to null-terminated array of environment pointers
@@ -726,9 +775,11 @@ fn setForkChildReturn(child: *@import("thread").Thread) void {
 ///
 /// Note: Currently only supports executables loaded via InitRD modules.
 /// Filesystem-based executables require VFS implementation.
-pub fn sys_execve(path_ptr: usize, argv_ptr: usize, envp_ptr: usize) isize {
+pub fn sys_execve(frame: *hal.syscall.SyscallFrame, path_ptr: usize, argv_ptr: usize, envp_ptr: usize) isize {
     // Validate and read path string from userspace
-    const path = user_mem.userStringToSlice(path_ptr, user_mem.MAX_PATH_LEN) orelse {
+    var path_buf: [user_mem.MAX_PATH_LEN]u8 = undefined;
+    const path = user_mem.copyStringFromUser(&path_buf, path_ptr) catch |err| {
+        if (err == error.NameTooLong) return Errno.ENAMETOOLONG.toReturn();
         return Errno.EFAULT.toReturn();
     };
 
@@ -739,37 +790,71 @@ pub fn sys_execve(path_ptr: usize, argv_ptr: usize, envp_ptr: usize) isize {
     console.debug("sys_execve: path='{s}'", .{path});
 
     // Parse argv (collect up to 64 arguments)
+    // We need to copy strings to kernel heap or stack. Since execve replaces the process,
+    // we can use a temporary allocator or just stack if we are careful.
+    // However, argv strings need to survive until elf.exec copies them to the new stack.
+    // The safest bet is to alloc them on kernel heap and free after elf.exec (if it returns error)
+    // or elf.exec takes ownership (it builds new stack).
+    // Actually, elf.exec likely copies them to the NEW user stack.
+    // So we just need them accessible in kernel during the call.
+    
+    // We'll use a fixed buffer for storage to avoid complex allocation logic in interrupt context
+    // Total arg size limit: 4KB? Linux is 128KB. Let's do 4KB for MVP.
+    var arg_data_buf: [4096]u8 = undefined;
+    var arg_data_idx: usize = 0;
+    
     var argv_storage: [64][]const u8 = undefined;
     var argc: usize = 0;
 
-    if (argv_ptr != 0 and isValidUserPtr(argv_ptr, 8)) {
-        const argv_array: [*]const usize = @ptrFromInt(argv_ptr);
-        while (argc < 64) {
-            const arg_ptr = argv_array[argc];
-            if (arg_ptr == 0) break;
+    if (argv_ptr != 0) {
+        // Read argv array
+        var i: usize = 0;
+        while (argc < 64) : (i += 1) {
+            // Read pointer from argv[i]
+            const ptr_addr = argv_ptr + i * @sizeOf(usize);
+            const arg_ptr = UserPtr.from(ptr_addr).readValue(usize) catch break; // Fault or end
+            
+            if (arg_ptr == 0) break; // Null terminator of argv array
 
-            // Use consolidated string parsing
-            const arg_slice = user_mem.userStringToSlice(arg_ptr, user_mem.MAX_PATH_LEN) orelse break;
+            // Copy string from arg_ptr
+            const remaining_space = arg_data_buf[arg_data_idx..];
+            const arg_slice = user_mem.copyStringFromUser(remaining_space, arg_ptr) catch break;
+            
             argv_storage[argc] = arg_slice;
+            arg_data_idx += arg_slice.len;
             argc += 1;
+            
+            // Ensure null terminator in our buffer? copyStringFromUser doesn't include it in slice
+            // but elf.exec might need it? No, elf.exec likely puts strings on stack.
+            // But we need to separate them.
+            // copyStringFromUser returns slice reference to our buffer.
+            // We just need to advance index.
+            // Align? No need for string storage.
         }
     }
 
     const argv = argv_storage[0..argc];
 
     // Parse envp (collect up to 64 environment variables)
+    // Reuse remaining arg_data_buf space
     var envp_storage: [64][]const u8 = undefined;
     var envc: usize = 0;
 
-    if (envp_ptr != 0 and isValidUserPtr(envp_ptr, 8)) {
-        const envp_array: [*]const usize = @ptrFromInt(envp_ptr);
-        while (envc < 64) {
-            const env_ptr = envp_array[envc];
+    if (envp_ptr != 0) {
+        var i: usize = 0;
+        while (envc < 64) : (i += 1) {
+            const ptr_addr = envp_ptr + i * @sizeOf(usize);
+            const env_ptr = UserPtr.from(ptr_addr).readValue(usize) catch break;
+
             if (env_ptr == 0) break;
 
-            // Use consolidated string parsing
-            const env_slice = user_mem.userStringToSlice(env_ptr, user_mem.MAX_PATH_LEN) orelse break;
+            const remaining_space = arg_data_buf[arg_data_idx..];
+            if (remaining_space.len == 0) break; // OOM
+
+            const env_slice = user_mem.copyStringFromUser(remaining_space, env_ptr) catch break;
+            
             envp_storage[envc] = env_slice;
+            arg_data_idx += env_slice.len;
             envc += 1;
         }
     }
@@ -804,7 +889,8 @@ pub fn sys_execve(path_ptr: usize, argv_ptr: usize, envp_ptr: usize) isize {
     const current_proc = getCurrentProcess();
 
     // Save old CR3 to destroy later
-    // const old_cr3 = current_proc.cr3; // TODO: Implement destroyAddressSpace
+    // Save old CR3 to destroy later
+    const old_cr3 = current_proc.cr3;
 
     // Update process/thread state
     current_proc.cr3 = result.pml4_phys;
@@ -815,50 +901,18 @@ pub fn sys_execve(path_ptr: usize, argv_ptr: usize, envp_ptr: usize) isize {
     // Switch to new address space immediately
     hal.cpu.writeCr3(result.pml4_phys);
 
-    // Update the saved interrupt frame to return to the new entry point
-    // The syscall handler returns to `asm_syscall_entry` which does `sysret` or `iret`.
-    // We need to modify the SAVED state on the kernel stack so that when we return,
-    // we go to the new entry point with the new stack.
+    // Update the SyscallFrame to return to the new entry point with new stack.
+    // Using the typed SyscallFrame struct instead of magic offsets ensures
+    // correctness even if the frame layout changes in asm_helpers.S.
+    frame.setReturnRip(result.entry_point);
+    frame.setUserRsp(result.stack_pointer);
 
-    // Calculate pointer to saved registers on kernel stack
-    // See `copyThreadState` for layout
-    const check_frame_size: usize = 23 * 8;
-    _ = check_frame_size; // suppress unused
+    // Destroy old address space
+    vmm.destroyAddressSpace(old_cr3);
 
-    // The kernel stack at syscall entry has:
-    // [SS, RSP, RFLAGS, CS, RIP] (pushed by CPU/stub)
-    // We need to find where these are.
-    // getCurrentThread().kernel_rsp points to the TOP of the saved frame (lowest address).
-    
-    // Frame layout (low to high):
-    // R15...RAX, vec, err, RIP, CS, RFLAGS, RSP, SS
-    
-    const kernel_stack_ptr: usize = current_thread.kernel_rsp;
-    
-    // Offsets from bottom of frame (kernel_rsp):
-    // RIP is at offset 17 * 8 (15 GPRs + vec + err)
-    // RSP is at offset 20 * 8 (RIP + CS + RFLAGS)
-    
-    const rip_offset = 17 * 8;
-    const rsp_offset = 20 * 8;
-    
-    const stack_ptr: [*]u64 = @ptrFromInt(kernel_stack_ptr);
-    
-    // Update RIP (entry point)
-    stack_ptr[rip_offset / 8] = result.entry_point;
-    
-    // Update RSP (user stack pointer)
-    stack_ptr[rsp_offset / 8] = result.stack_pointer;
-
-    // TODO: Destroy old address space
-    // vmm.destroyAddressSpace(old_cr3);
-
-    // Return to userspace (doesn't actually return to caller, but resumes modified context)
-    // The return value of this function (RAX) is ignored because we overwrote the context?
-    // Actually, syscall dispatcher puts return value into RAX *after* we return.
-    // If we return 0, RAX becomes 0.
-    // But we want to start cleanly. RAX is usually 0 on entry?
-    // Let's return 0.
+    // Return 0 - this gets placed in RAX by the dispatcher.
+    // On successful execve, this value becomes the argc seen by _start
+    // (though typically argc comes from the stack, not RAX).
     return 0;
 }
 

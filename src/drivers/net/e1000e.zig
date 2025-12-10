@@ -16,6 +16,8 @@ const vmm = @import("vmm");
 const pmm = @import("pmm");
 const sync = @import("sync");
 const console = @import("console");
+const thread = @import("thread");
+const sched = @import("sched");
 
 const mmio = hal.mmio;
 
@@ -173,12 +175,12 @@ pub const E1000e = struct {
     /// MAC address
     mac_addr: [6]u8,
 
-    /// RX descriptor ring
-    rx_ring: [*]RxDesc,
+    /// RX descriptor ring (volatile: hardware modifies status fields)
+    rx_ring: [*]volatile RxDesc,
     rx_ring_phys: u64,
 
-    /// TX descriptor ring
-    tx_ring: [*]TxDesc,
+    /// TX descriptor ring (volatile: hardware modifies status fields)
+    tx_ring: [*]volatile TxDesc,
     tx_ring_phys: u64,
 
     /// RX packet buffers (one per descriptor)
@@ -206,6 +208,9 @@ pub const E1000e = struct {
     tx_packets: u64,
     rx_bytes: u64,
     tx_bytes: u64,
+
+    /// Worker thread for packet processing
+    worker_thread: ?*thread.Thread,
 
     const Self = @This();
 
@@ -274,6 +279,7 @@ pub const E1000e = struct {
             .tx_packets = 0,
             .rx_bytes = 0,
             .tx_bytes = 0,
+            .worker_thread = null,
         };
 
         // Reset device
@@ -304,6 +310,13 @@ pub const E1000e = struct {
 
         // Enable interrupts
         driver.enableInterrupts();
+
+        // Create worker thread
+        driver.worker_thread = try thread.createKernelThread(workerEntry, .{
+            .name = "net_worker",
+            .priority = 10, // High priority
+        });
+        sched.addThread(driver.worker_thread.?);
 
         // Enable RX and TX
         driver.enableRxTx();
@@ -361,14 +374,16 @@ pub const E1000e = struct {
             return error.OutOfMemory;
         };
         self.rx_ring_phys = rx_ring_phys;
-        self.rx_ring = @ptrCast(@alignCast(hal.paging.physToVirt(rx_ring_phys)));
+        // Cast to volatile pointer - hardware modifies descriptor status fields
+        self.rx_ring = @ptrCast(@volatileCast(@as([*]RxDesc, @ptrCast(@alignCast(hal.paging.physToVirt(rx_ring_phys))))));
 
         // Allocate TX descriptor ring
         const tx_ring_phys = pmm.allocZeroedPage() orelse {
             return error.OutOfMemory;
         };
         self.tx_ring_phys = tx_ring_phys;
-        self.tx_ring = @ptrCast(@alignCast(hal.paging.physToVirt(tx_ring_phys)));
+        // Cast to volatile pointer - hardware modifies descriptor status fields
+        self.tx_ring = @ptrCast(@volatileCast(@as([*]TxDesc, @ptrCast(@alignCast(hal.paging.physToVirt(tx_ring_phys))))));
 
         // Allocate RX packet buffers
         for (0..RX_DESC_COUNT) |i| {
@@ -581,6 +596,17 @@ pub const E1000e = struct {
         }
     }
 
+    /// Worker thread entry point
+    pub fn workerLoop(self: *Self) void {
+        while (true) {
+            // Block until woken by ISR
+            sched.block();
+            
+            // Process received packets
+            self.processRx(&defaultRxCallback);
+        }
+    }
+
     /// Check if there are packets waiting
     pub fn hasPackets(self: *Self) bool {
         const desc = &self.rx_ring[self.rx_cur];
@@ -597,8 +623,10 @@ pub const E1000e = struct {
         const icr = self.readReg(Reg.ICR);
 
         if ((icr & INT.RXT0) != 0 or (icr & INT.RXDMT0) != 0) {
-            // RX interrupt - process received packets
-            self.processRx(&defaultRxCallback);
+            // RX interrupt - wake worker thread
+            if (self.worker_thread) |t| {
+                sched.unblock(t);
+            }
         }
 
         if ((icr & INT.LSC) != 0) {
@@ -651,6 +679,13 @@ pub fn getDriver() ?*E1000e {
 pub fn irqHandler() void {
     if (getDriver()) |driver| {
         driver.handleIrq();
+    }
+}
+
+/// Static worker entry point
+fn workerEntry() void {
+    if (getDriver()) |driver| {
+        driver.workerLoop();
     }
 }
 
