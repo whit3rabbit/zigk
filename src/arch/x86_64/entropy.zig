@@ -79,12 +79,24 @@ pub fn getHardwareEntropy() u64 {
         // Fall through to RDTSC
     }
 
-    // Fallback: use RDTSC
-    // Mix multiple samples to increase entropy
+    // Fallback: use RDTSC with improved mixing
+    // This is still weak entropy but we mix multiple sources
+    // to reduce predictability on VMs and embedded systems
     const tsc1 = rdtsc();
     const tsc2 = rdtsc();
-    // XOR samples together - timing difference adds entropy
-    return tsc1 ^ (tsc2 << 7) ^ (tsc2 >> 5);
+    const tsc3 = rdtsc();
+
+    // Mix with stack address (changes each call due to call depth)
+    var stack_addr: usize = undefined;
+    const addr_entropy: u64 = @intFromPtr(&stack_addr);
+
+    // XOR samples together with different rotations
+    // Timing differences between TSC reads add entropy
+    var result = tsc1 ^ (tsc2 << 7) ^ (tsc2 >> 5);
+    result ^= (tsc3 << 13) ^ (tsc3 >> 11);
+    result ^= (addr_entropy << 17) ^ (addr_entropy >> 23);
+
+    return result;
 }
 
 /// Check if entropy subsystem has been initialized

@@ -114,3 +114,20 @@ pub fn range(max: u64) u64 {
         }
     }
 }
+
+/// Mix additional entropy into PRNG state
+/// Call this after initialization to incorporate runtime entropy sources
+/// (e.g., MAC address, RTC time, jiffies)
+/// Thread-safe
+pub fn mixEntropy(additional: u64) void {
+    const held = prng_lock.acquire();
+    defer held.release();
+
+    // Mix into state using XOR and bit rotation
+    state[0] ^= additional;
+    state[1] ^= rotl(additional, 23);
+
+    // Run a few rounds to diffuse the new entropy
+    _ = nextUnsafe();
+    _ = nextUnsafe();
+}

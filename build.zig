@@ -179,6 +179,25 @@ pub fn build(b: *std.Build) void {
     heap_module.addImport("config", config_module);
     heap_module.addImport("sync", sync_module);
 
+    // Create List module (generic intrusive list)
+    const list_module = b.createModule(.{
+        .root_source_file = b.path("src/lib/list.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+
+    // Create Kernel Stack module (dedicated stack allocator with guard pages)
+    const kernel_stack_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/kernel_stack.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    kernel_stack_module.addImport("hal", hal_module);
+    kernel_stack_module.addImport("pmm", pmm_module);
+    kernel_stack_module.addImport("vmm", vmm_module);
+    kernel_stack_module.addImport("console", console_module);
+    kernel_stack_module.addImport("sync", sync_module);
+
     // Create Thread module (Thread management and creation)
     const thread_module = b.createModule(.{
         .root_source_file = b.path("src/kernel/thread.zig"),
@@ -191,6 +210,7 @@ pub fn build(b: *std.Build) void {
     thread_module.addImport("heap", heap_module);
     thread_module.addImport("console", console_module);
     thread_module.addImport("config", config_module);
+    thread_module.addImport("kernel_stack", kernel_stack_module);
 
     // Create Scheduler module (Thread scheduling)
     const sched_module = b.createModule(.{
@@ -203,6 +223,8 @@ pub fn build(b: *std.Build) void {
     sched_module.addImport("sync", sync_module);
     sched_module.addImport("console", console_module);
     sched_module.addImport("config", config_module);
+    sched_module.addImport("list", list_module);
+    sched_module.addImport("kernel_stack", kernel_stack_module);
 
     // Create Stack Guard module (stack canary support)
     const stack_guard_module = b.createModule(.{
@@ -329,29 +351,6 @@ pub fn build(b: *std.Build) void {
     user_mem_module.addImport("vmm", vmm_module);
     user_mem_module.addImport("sched", sched_module);
 
-    // Create syscall random module
-    const syscall_random_module = b.createModule(.{
-        .root_source_file = b.path("src/kernel/syscall/random.zig"),
-        .target = kernel_target,
-        .optimize = optimize,
-    });
-    syscall_random_module.addImport("uapi", uapi_module);
-    syscall_random_module.addImport("prng", prng_module);
-    syscall_random_module.addImport("user_mem", user_mem_module);
-
-    // Create syscall net module (socket syscalls)
-    const syscall_net_module = b.createModule(.{
-        .root_source_file = b.path("src/kernel/syscall/net.zig"),
-        .target = kernel_target,
-        .optimize = optimize,
-    });
-    syscall_net_module.addImport("uapi", uapi_module);
-    syscall_net_module.addImport("net", net_module);
-    syscall_net_module.addImport("sched", sched_module);
-    syscall_net_module.addImport("thread", thread_module);
-    syscall_net_module.addImport("hal", hal_module);
-    syscall_net_module.addImport("user_mem", user_mem_module);
-
     // Create syscall handlers module
     const syscall_handlers_module = b.createModule(.{
         .root_source_file = b.path("src/kernel/syscall/handlers.zig"),
@@ -375,6 +374,32 @@ pub fn build(b: *std.Build) void {
     syscall_handlers_module.addImport("framebuffer", framebuffer_module);
     syscall_handlers_module.addImport("fs", fs_module);
     syscall_handlers_module.addImport("user_mem", user_mem_module);
+
+    // Create syscall random module
+    const syscall_random_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/syscall/random.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    syscall_random_module.addImport("uapi", uapi_module);
+    syscall_random_module.addImport("prng", prng_module);
+    syscall_random_module.addImport("user_mem", user_mem_module);
+
+    // Create syscall net module (socket syscalls)
+    const syscall_net_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/syscall/net.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    syscall_net_module.addImport("uapi", uapi_module);
+    syscall_net_module.addImport("net", net_module);
+    syscall_net_module.addImport("sched", sched_module);
+    syscall_net_module.addImport("thread", thread_module);
+    syscall_net_module.addImport("hal", hal_module);
+    syscall_net_module.addImport("user_mem", user_mem_module);
+    syscall_net_module.addImport("handlers", syscall_handlers_module);
+    syscall_net_module.addImport("heap", heap_module);
+    syscall_net_module.addImport("fd", fd_module);
 
     // Create syscall dispatch table module
     const syscall_table_module = b.createModule(.{
@@ -432,6 +457,7 @@ pub fn build(b: *std.Build) void {
     kernel.root_module.addImport("keyboard", keyboard_module);
     kernel.root_module.addImport("thread", thread_module);
     kernel.root_module.addImport("sched", sched_module);
+    kernel.root_module.addImport("kernel_stack", kernel_stack_module);
     kernel.root_module.addImport("stack_guard", stack_guard_module);
     kernel.root_module.addImport("prng", prng_module);
     kernel.root_module.addImport("syscall_random", syscall_random_module);

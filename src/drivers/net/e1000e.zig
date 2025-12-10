@@ -36,6 +36,7 @@ const Reg = struct {
 
     // Interrupt
     pub const ICR: u64 = 0x00C0;        // Interrupt Cause Read
+    pub const ITR: u64 = 0x00C4;        // Interrupt Throttle Rate
     pub const ICS: u64 = 0x00C8;        // Interrupt Cause Set
     pub const IMS: u64 = 0x00D0;        // Interrupt Mask Set
     pub const IMC: u64 = 0x00D8;        // Interrupt Mask Clear
@@ -48,6 +49,7 @@ const Reg = struct {
     pub const RDH: u64 = 0x2810;        // RX Descriptor Head
     pub const RDT: u64 = 0x2818;        // RX Descriptor Tail
     pub const RDTR: u64 = 0x2820;       // RX Delay Timer
+    pub const RADV: u64 = 0x282C;       // RX Interrupt Absolute Delay
 
     // Transmit
     pub const TCTL: u64 = 0x0400;       // Transmit Control
@@ -57,6 +59,11 @@ const Reg = struct {
     pub const TDLEN: u64 = 0x3808;      // TX Descriptor Length
     pub const TDH: u64 = 0x3810;        // TX Descriptor Head
     pub const TDT: u64 = 0x3818;        // TX Descriptor Tail
+    pub const TXDCTL: u64 = 0x3828;     // TX Descriptor Control
+    pub const TADV: u64 = 0x382C;       // TX Interrupt Absolute Delay
+
+    // Statistics
+    pub const MPC: u64 = 0x4010;        // Missed Packets Count (cleared on read)
 
     // Receive Address (MAC)
     pub const RAL0: u64 = 0x5400;       // Receive Address Low (MAC bytes 0-3)
@@ -67,6 +74,7 @@ const Reg = struct {
 };
 
 // Device Control Register bits
+// Reference: 82574L Datasheet Section 13.4.1
 const CTRL = struct {
     pub const FD: u32 = 1 << 0;         // Full Duplex
     pub const LRST: u32 = 1 << 3;       // Link Reset
@@ -76,6 +84,16 @@ const CTRL = struct {
     pub const RST: u32 = 1 << 26;       // Device Reset
     pub const VME: u32 = 1 << 30;       // VLAN Mode Enable
     pub const PHY_RST: u32 = 1 << 31;   // PHY Reset
+};
+
+// Device Status Register bits
+// Reference: 82574L Datasheet Section 13.4.2
+const STATUS = struct {
+    pub const FD: u32 = 1 << 0;         // Full Duplex indication
+    pub const LU: u32 = 1 << 1;         // Link Up indication
+    pub const SPEED_SHIFT: u5 = 6;      // Speed bits [7:6]
+    pub const SPEED_MASK: u32 = 0b11 << 6;
+    // Speed values: 00=10Mb/s, 01=100Mb/s, 10=1000Mb/s, 11=reserved
 };
 
 // Receive Control Register bits
@@ -124,6 +142,7 @@ const INT = struct {
 // ============================================================================
 
 /// Legacy RX Descriptor (16 bytes)
+/// Reference: 82574L Datasheet Section 3.2.3
 pub const RxDesc = extern struct {
     buffer_addr: u64,       // Physical address of receive buffer
     length: u16,            // Received packet length
@@ -134,9 +153,27 @@ pub const RxDesc = extern struct {
 
     pub const STATUS_DD: u8 = 1 << 0;   // Descriptor Done
     pub const STATUS_EOP: u8 = 1 << 1;  // End of Packet
+
+    comptime {
+        if (@sizeOf(@This()) != 16) @compileError("RxDesc must be 16 bytes");
+    }
+};
+
+/// RX Descriptor Error bits
+/// Reference: 82574L Datasheet Section 3.2.3.2
+const RXERR = struct {
+    pub const CE: u8 = 1 << 0;     // CRC Error or Alignment Error
+    pub const SE: u8 = 1 << 1;     // Symbol Error (invalid symbol)
+    pub const SEQ: u8 = 1 << 2;    // Sequence Error
+    pub const RSV: u8 = 1 << 3;    // Reserved
+    pub const CXE: u8 = 1 << 4;    // Carrier Extension Error
+    pub const TCPE: u8 = 1 << 5;   // TCP/UDP Checksum Error
+    pub const IPE: u8 = 1 << 6;    // IP Checksum Error
+    pub const RXE: u8 = 1 << 7;    // RX Data Error (FIFO overrun)
 };
 
 /// Legacy TX Descriptor (16 bytes)
+/// Reference: 82574L Datasheet Section 3.3.3
 pub const TxDesc = extern struct {
     buffer_addr: u64,       // Physical address of transmit buffer
     length: u16,            // Packet length
@@ -150,6 +187,10 @@ pub const TxDesc = extern struct {
     pub const CMD_IFCS: u8 = 1 << 1;    // Insert FCS/CRC
     pub const CMD_RS: u8 = 1 << 3;      // Report Status
     pub const STATUS_DD: u8 = 1 << 0;   // Descriptor Done
+
+    comptime {
+        if (@sizeOf(@This()) != 16) @compileError("TxDesc must be 16 bytes");
+    }
 };
 
 // ============================================================================
@@ -208,6 +249,15 @@ pub const E1000e = struct {
     tx_packets: u64,
     rx_bytes: u64,
     tx_bytes: u64,
+    /// Error counters
+    rx_errors: u64,
+    rx_crc_errors: u64,
+    rx_dropped: u64,
+    tx_dropped: u64,
+
+    /// TX watchdog state
+    tx_watchdog_last_tdh: u32,
+    tx_watchdog_stall_count: u16,
 
     /// Worker thread for packet processing
     worker_thread: ?*thread.Thread,
@@ -279,6 +329,12 @@ pub const E1000e = struct {
             .tx_packets = 0,
             .rx_bytes = 0,
             .tx_bytes = 0,
+            .rx_errors = 0,
+            .rx_crc_errors = 0,
+            .rx_dropped = 0,
+            .tx_dropped = 0,
+            .tx_watchdog_last_tdh = 0,
+            .tx_watchdog_stall_count = 0,
             .worker_thread = null,
         };
 
@@ -333,16 +389,9 @@ pub const E1000e = struct {
         self.writeReg(Reg.CTRL, CTRL.RST);
 
         // Wait for reset to complete (RST bit clears)
-        var i: usize = 0;
-        while (i < 1000) : (i += 1) {
-            if ((self.readReg(Reg.CTRL) & CTRL.RST) == 0) {
-                break;
-            }
-            // Small delay
-            var j: usize = 0;
-            while (j < 1000) : (j += 1) {
-                asm volatile ("pause");
-            }
+        // Reference: 82574L Datasheet Section 13.4.1 - reset completes when RST bit clears
+        if (!mmio.poll32(self.mmio_base + Reg.CTRL, CTRL.RST, 0, 1_000_000)) {
+            console.warn("E1000e: Reset timeout (RST bit stuck)", .{});
         }
 
         // Disable interrupts during setup
@@ -463,7 +512,12 @@ pub const E1000e = struct {
         self.writeReg(Reg.TDH, 0);
         self.writeReg(Reg.TDT, 0);
 
-        // Set Inter-Packet Gap (standard values for gigabit)
+        // Set Inter-Packet Gap
+        // Reference: 82574L Datasheet Section 13.4.34 "Transmit IPG Register"
+        // IPGT (bits 9:0) = 10: Minimum inter-packet gap (IPG) for back-to-back packets
+        // IPGR1 (bits 19:10) = 10: Part 1 of IPG for non-back-to-back
+        // IPGR2 (bits 29:20) = 10: Part 2 of IPG for non-back-to-back
+        // Values are in units of link clock cycles (8ns at 1Gbps)
         self.writeReg(Reg.TIPG, (10 << 0) | (10 << 10) | (10 << 20));
 
         self.tx_cur = 0;
@@ -477,8 +531,26 @@ pub const E1000e = struct {
         }
     }
 
+    /// Configure interrupt throttle rate to reduce CPU load under high packet rates
+    /// Reference: 82574L Datasheet Section 13.4.18 "Interrupt Throttling"
+    fn configureInterruptThrottle(self: *Self) void {
+        // RDTR: RX Delay Timer - delay RX interrupt by N microseconds
+        // This coalesces multiple packets into fewer interrupts
+        self.writeReg(Reg.RDTR, 256); // ~256us delay before RX interrupt
+
+        // RADV: RX Absolute Delay - maximum time to delay RX interrupt
+        // Ensures packets are delivered even if threshold not met
+        self.writeReg(Reg.RADV, 512); // Maximum 512us absolute delay
+
+        // TADV: TX Absolute Delay - maximum time to delay TX completion interrupt
+        self.writeReg(Reg.TADV, 128); // Maximum 128us for TX
+    }
+
     /// Enable interrupts
     fn enableInterrupts(self: *Self) void {
+        // Configure interrupt coalescing to reduce interrupt frequency under load
+        self.configureInterruptThrottle();
+
         // Enable RX timer, RX descriptor minimum threshold, link status change
         self.writeReg(Reg.IMS, INT.RXT0 | INT.RXDMT0 | INT.LSC);
     }
@@ -491,7 +563,10 @@ pub const E1000e = struct {
         self.writeReg(Reg.RCTL, rctl);
 
         // Enable transmitter
+        // Reference: 82574L Datasheet Section 13.4.37 "Transmit Control Register"
         // Pad short packets, collision threshold and distance for full duplex
+        // CT (Collision Threshold) = 15: Standard value for half-duplex (unused in FD)
+        // COLD (Collision Distance) = 64: Standard for gigabit (512 bit times)
         const tctl = TCTL.EN | TCTL.PSP |
             (@as(u32, 15) << TCTL.CT_SHIFT) |
             (@as(u32, 64) << TCTL.COLD_SHIFT);
@@ -521,6 +596,7 @@ pub const E1000e = struct {
         const desc = &self.tx_ring[self.tx_cur];
         if ((desc.status & TxDesc.STATUS_DD) == 0) {
             // Descriptor not done, TX ring full
+            self.tx_dropped += 1;
             return false;
         }
 
@@ -541,6 +617,8 @@ pub const E1000e = struct {
 
         // Advance tail pointer
         self.tx_cur = @truncate((@as(u32, self.tx_cur) + 1) % TX_DESC_COUNT);
+        // Memory barrier ensures descriptor writes are visible to NIC before tail update
+        mmio.writeBarrier();
         self.writeReg(Reg.TDT, self.tx_cur);
 
         self.tx_packets += 1;
@@ -569,10 +647,11 @@ pub const E1000e = struct {
 
             // Check for errors
             if (desc.errors != 0) {
-                console.warn("E1000e: RX error {x}", .{desc.errors});
+                self.logRxErrors(desc.errors);
             } else if ((desc.status & RxDesc.STATUS_EOP) != 0) {
                 // Valid packet received
-                const len = desc.length;
+                // Clamp length to buffer size to prevent OOB access from malicious/faulty hardware
+                const len: u16 = @min(desc.length, BUFFER_SIZE);
                 const buf = self.rx_buffers[self.rx_cur];
 
                 self.rx_packets += 1;
@@ -591,18 +670,71 @@ pub const E1000e = struct {
             const old_cur = self.rx_cur;
             self.rx_cur = @truncate((@as(u32, self.rx_cur) + 1) % RX_DESC_COUNT);
 
+            // Memory barrier ensures descriptor reset is visible to NIC before tail update
+            mmio.writeBarrier();
             // Tell hardware about the returned descriptor
             self.writeReg(Reg.RDT, old_cur);
+        }
+    }
+
+    /// Log decoded RX errors and update statistics
+    fn logRxErrors(self: *Self, errors: u8) void {
+        // Update statistics
+        self.rx_errors += 1;
+        if ((errors & RXERR.CE) != 0) {
+            self.rx_crc_errors += 1;
+        }
+
+        var buf: [48]u8 = undefined;
+        var len: usize = 0;
+
+        if ((errors & RXERR.CE) != 0) {
+            @memcpy(buf[len..][0..4], "CRC ");
+            len += 4;
+        }
+        if ((errors & RXERR.SE) != 0) {
+            @memcpy(buf[len..][0..4], "SYM ");
+            len += 4;
+        }
+        if ((errors & RXERR.SEQ) != 0) {
+            @memcpy(buf[len..][0..4], "SEQ ");
+            len += 4;
+        }
+        if ((errors & RXERR.TCPE) != 0) {
+            @memcpy(buf[len..][0..5], "TCPE ");
+            len += 5;
+        }
+        if ((errors & RXERR.IPE) != 0) {
+            @memcpy(buf[len..][0..4], "IPE ");
+            len += 4;
+        }
+        if ((errors & RXERR.RXE) != 0) {
+            @memcpy(buf[len..][0..5], "FIFO ");
+            len += 5;
+        }
+
+        if (len > 0) {
+            console.warn("E1000e: RX errors: {s}(0x{x:0>2})", .{ buf[0..len], errors });
+        } else {
+            console.warn("E1000e: RX error 0x{x:0>2}", .{errors});
         }
     }
 
     /// Worker thread entry point
     pub fn workerLoop(self: *Self) void {
         while (true) {
-            // Block until woken by ISR
-            sched.block();
+            // Disable interrupts to check queue emptiness safely
+            // This prevents the race where an ISR runs after we check but before we block
+            const flags = hal.cpu.disableInterrupts();
+            if (!self.hasPackets()) {
+                // Queue is empty, safe to block.
+                // sched.block() sets state to .Blocked.
+                // If ISR fires after we unlock inside block/yield, unblock() sees .Blocked -> .Ready.
+                sched.block();
+            }
+            hal.cpu.restoreInterrupts(flags);
             
-            // Process received packets
+            // Process received packets (drains the ring)
             self.processRx(&defaultRxCallback);
         }
     }
@@ -611,6 +743,106 @@ pub const E1000e = struct {
     pub fn hasPackets(self: *Self) bool {
         const desc = &self.rx_ring[self.rx_cur];
         return (desc.status & RxDesc.STATUS_DD) != 0;
+    }
+
+    // ========================================================================
+    // TX Watchdog
+    // ========================================================================
+
+    /// TX watchdog threshold - number of consecutive stall checks before reset
+    const TX_WATCHDOG_THRESHOLD: u16 = 100;
+
+    /// Check for TX ring stall and reset if stuck
+    /// Call periodically from timer tick or worker thread
+    pub fn checkTxWatchdog(self: *Self) void {
+        const tdh = self.readReg(Reg.TDH);
+        const tdt = self.readReg(Reg.TDT);
+
+        // If TDH == TDT, ring is empty - no stall possible
+        if (tdh == tdt) {
+            self.tx_watchdog_stall_count = 0;
+            return;
+        }
+
+        // If TDH hasn't moved and ring not empty, potential stall
+        if (tdh == self.tx_watchdog_last_tdh) {
+            self.tx_watchdog_stall_count += 1;
+            if (self.tx_watchdog_stall_count >= TX_WATCHDOG_THRESHOLD) {
+                console.err("E1000e: TX watchdog triggered (TDH={d} TDT={d})", .{ tdh, tdt });
+                self.resetTx();
+            }
+        } else {
+            self.tx_watchdog_stall_count = 0;
+        }
+        self.tx_watchdog_last_tdh = tdh;
+    }
+
+    /// Reset TX subsystem after watchdog timeout
+    fn resetTx(self: *Self) void {
+        console.warn("E1000e: Resetting TX subsystem", .{});
+
+        // Disable transmitter
+        var tctl = self.readReg(Reg.TCTL);
+        tctl &= ~TCTL.EN;
+        self.writeReg(Reg.TCTL, tctl);
+
+        // Reset head and tail pointers
+        self.writeReg(Reg.TDH, 0);
+        self.writeReg(Reg.TDT, 0);
+        self.tx_cur = 0;
+
+        // Mark all descriptors as done
+        for (0..TX_DESC_COUNT) |i| {
+            self.tx_ring[i].status = TxDesc.STATUS_DD;
+        }
+
+        // Re-enable transmitter
+        tctl |= TCTL.EN;
+        self.writeReg(Reg.TCTL, tctl);
+
+        // Reset watchdog state
+        self.tx_watchdog_stall_count = 0;
+        self.tx_watchdog_last_tdh = 0;
+
+        console.info("E1000e: TX reset complete", .{});
+    }
+
+    // ========================================================================
+    // Link State
+    // ========================================================================
+
+    /// Handle link status change - decode and log speed/duplex
+    fn handleLinkChange(self: *Self) void {
+        const status = self.readReg(Reg.STATUS);
+        const link_up = (status & STATUS.LU) != 0;
+
+        if (link_up) {
+            const duplex: []const u8 = if ((status & STATUS.FD) != 0) "Full" else "Half";
+            const speed_bits = (status & STATUS.SPEED_MASK) >> STATUS.SPEED_SHIFT;
+            const speed: []const u8 = switch (speed_bits) {
+                0 => "10",
+                1 => "100",
+                2 => "1000",
+                else => "?",
+            };
+            console.info("E1000e: Link UP - {s}Mbps {s} Duplex", .{ speed, duplex });
+        } else {
+            console.info("E1000e: Link DOWN", .{});
+        }
+    }
+
+    /// Get link speed in Mbps (0 if link down)
+    pub fn getLinkSpeed(self: *const Self) u16 {
+        const status = self.readReg(Reg.STATUS);
+        if ((status & STATUS.LU) == 0) return 0; // Link down
+
+        const speed_bits = (status & STATUS.SPEED_MASK) >> STATUS.SPEED_SHIFT;
+        return switch (speed_bits) {
+            0 => 10,
+            1 => 100,
+            2 => 1000,
+            else => 0,
+        };
     }
 
     // ========================================================================
@@ -630,10 +862,8 @@ pub const E1000e = struct {
         }
 
         if ((icr & INT.LSC) != 0) {
-            // Link status change
-            const status = self.readReg(Reg.STATUS);
-            const link_up = (status & 2) != 0;
-            console.info("E1000e: Link {s}", .{if (link_up) "UP" else "DOWN"});
+            // Link status change - decode speed and duplex
+            self.handleLinkChange();
         }
     }
 
@@ -643,13 +873,75 @@ pub const E1000e = struct {
     }
 
     /// Get statistics
-    pub fn getStats(self: *const Self) struct { rx_packets: u64, tx_packets: u64, rx_bytes: u64, tx_bytes: u64 } {
+    pub fn getStats(self: *const Self) struct {
+        rx_packets: u64,
+        tx_packets: u64,
+        rx_bytes: u64,
+        tx_bytes: u64,
+        rx_errors: u64,
+        rx_crc_errors: u64,
+        rx_dropped: u64,
+        tx_dropped: u64,
+    } {
         return .{
             .rx_packets = self.rx_packets,
             .tx_packets = self.tx_packets,
             .rx_bytes = self.rx_bytes,
             .tx_bytes = self.tx_bytes,
+            .rx_errors = self.rx_errors,
+            .rx_crc_errors = self.rx_crc_errors,
+            .rx_dropped = self.rx_dropped,
+            .tx_dropped = self.tx_dropped,
         };
+    }
+
+    // ========================================================================
+    // Driver Cleanup
+    // ========================================================================
+
+    /// Deinitialize driver and release resources
+    /// Call before hot-unplug or driver reload
+    pub fn deinit(self: *Self) void {
+        console.info("E1000e: Deinitializing driver", .{});
+
+        // Disable interrupts
+        self.writeReg(Reg.IMC, 0xFFFFFFFF);
+
+        // Disable RX and TX
+        self.writeReg(Reg.RCTL, 0);
+        self.writeReg(Reg.TCTL, 0);
+
+        // Reset device to known state
+        self.writeReg(Reg.CTRL, CTRL.RST);
+
+        // Free RX packet buffers
+        for (0..RX_DESC_COUNT) |i| {
+            if (self.rx_buffers_phys[i] != 0) {
+                pmm.freePage(self.rx_buffers_phys[i]);
+                self.rx_buffers_phys[i] = 0;
+            }
+        }
+
+        // Free TX packet buffers
+        for (0..TX_DESC_COUNT) |i| {
+            if (self.tx_buffers_phys[i] != 0) {
+                pmm.freePage(self.tx_buffers_phys[i]);
+                self.tx_buffers_phys[i] = 0;
+            }
+        }
+
+        // Free descriptor rings
+        if (self.rx_ring_phys != 0) {
+            pmm.freePage(self.rx_ring_phys);
+            self.rx_ring_phys = 0;
+        }
+        if (self.tx_ring_phys != 0) {
+            pmm.freePage(self.tx_ring_phys);
+            self.tx_ring_phys = 0;
+        }
+
+        driver_initialized = false;
+        console.info("E1000e: Deinitialized", .{});
     }
 };
 

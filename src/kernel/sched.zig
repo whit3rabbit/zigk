@@ -23,6 +23,8 @@ const thread = @import("thread");
 const sync = @import("sync");
 const console = @import("console");
 const config = @import("config");
+const list = @import("list");
+const kernel_stack = @import("kernel_stack");
 
 const Thread = thread.Thread;
 const ThreadState = thread.ThreadState;
@@ -37,14 +39,11 @@ const Scheduler = struct {
     /// Currently executing thread (null before first schedule)
     current: ?*Thread = null,
 
-    /// Ready queue head (oldest waiting thread)
-    ready_head: ?*Thread = null,
+    /// Ready queue using intrusive linked list
+    ready_queue: list.IntrusiveDoublyLinkedList(Thread) = .{},
 
-    /// Ready queue tail (newest waiting thread)
-    ready_tail: ?*Thread = null,
-
-    /// Number of threads in ready queue
-    ready_count: usize = 0,
+    /// Sorted sleep list head (wake_time ascending)
+    sleep_head: ?*Thread = null,
 
     /// System tick counter (incremented on each timer IRQ)
     tick_count: u64 = 0,
@@ -66,78 +65,116 @@ const Scheduler = struct {
 /// Add a thread to the back of the ready queue
 fn addToReadyQueue(t: *Thread) void {
     t.state = .Ready;
-    t.next = null;
-    t.prev = scheduler.ready_tail;
-
-    if (scheduler.ready_tail) |tail| {
-        tail.next = t;
-    } else {
-        scheduler.ready_head = t;
-    }
-    scheduler.ready_tail = t;
-    scheduler.ready_count += 1;
+    scheduler.ready_queue.append(t);
 
     if (config.debug_scheduler) {
         console.debug("Sched: Added '{s}' (tid={d}) to ready queue (count={d})", .{
             t.getName(),
             t.tid,
-            scheduler.ready_count,
+            scheduler.ready_queue.count,
         });
     }
 }
 
 /// Remove and return the thread at the front of the ready queue
 fn removeFromReadyQueue() ?*Thread {
-    const head = scheduler.ready_head orelse return null;
-
-    scheduler.ready_head = head.next;
-    if (scheduler.ready_head) |new_head| {
-        new_head.prev = null;
-    } else {
-        scheduler.ready_tail = null;
+    const thread_ptr = scheduler.ready_queue.popFirst();
+    if (thread_ptr) |t| {
+        if (config.debug_scheduler) {
+            console.debug("Sched: Removed '{s}' (tid={d}) from ready queue (count={d})", .{
+                t.getName(),
+                t.tid,
+                scheduler.ready_queue.count,
+            });
+        }
     }
-
-    head.next = null;
-    head.prev = null;
-    scheduler.ready_count -= 1;
-
-    if (config.debug_scheduler) {
-        console.debug("Sched: Removed '{s}' (tid={d}) from ready queue (count={d})", .{
-            head.getName(),
-            head.tid,
-            scheduler.ready_count,
-        });
-    }
-
-    return head;
+    return thread_ptr;
 }
 
 /// Remove a specific thread from the ready queue
 fn removeThreadFromQueue(t: *Thread) void {
-    if (t.prev) |prev| {
-        prev.next = t.next;
+    scheduler.ready_queue.remove(t);
+}
+
+fn insertSleepThread(t: *Thread) void {
+    t.sleep_next = null;
+    t.sleep_prev = null;
+
+    if (scheduler.sleep_head) |head| {
+        if (t.wake_time <= head.wake_time) {
+            t.sleep_next = head;
+            head.sleep_prev = t;
+            scheduler.sleep_head = t;
+            return;
+        }
+
+        var cursor = head;
+        while (cursor.sleep_next) |next| {
+            if (t.wake_time <= next.wake_time) {
+                t.sleep_next = next;
+                t.sleep_prev = cursor;
+                next.sleep_prev = t;
+                cursor.sleep_next = t;
+                return;
+            }
+            cursor = next;
+        }
+
+        cursor.sleep_next = t;
+        t.sleep_prev = cursor;
     } else {
-        scheduler.ready_head = t.next;
+        scheduler.sleep_head = t;
+    }
+}
+
+fn removeFromSleepList(t: *Thread) void {
+    if (t.sleep_prev) |prev| {
+        prev.sleep_next = t.sleep_next;
+    } else if (scheduler.sleep_head == t) {
+        scheduler.sleep_head = t.sleep_next;
     }
 
-    if (t.next) |next| {
-        next.prev = t.prev;
-    } else {
-        scheduler.ready_tail = t.prev;
+    if (t.sleep_next) |next| {
+        next.sleep_prev = t.sleep_prev;
     }
 
-    t.next = null;
-    t.prev = null;
-    scheduler.ready_count -= 1;
+    t.sleep_next = null;
+    t.sleep_prev = null;
+    t.wake_time = 0;
+}
+
+fn wakeSleepingThreads(now: u64) void {
+    while (scheduler.sleep_head) |t| {
+        if (t.wake_time > now) break;
+        removeFromSleepList(t);
+        if (t.state == .Blocked) {
+            addToReadyQueue(t);
+        }
+    }
 }
 
 /// Idle thread entry point - runs when no other threads are ready
+/// Idle thread entry point - runs when no other threads are ready
 fn idleThreadEntry() void {
     while (true) {
-        // HLT waits for the next interrupt (timer, keyboard, etc.)
-        hal.cpu.halt();
+        // Disable interrupts to check state
+        hal.cpu.disableInterrupts();
+        
+        // If there's work (though unlikely since we're the idle thread),
+        // enable interrupts and yield/halt for next tick.
+        if (scheduler.ready_queue.count > 0) {
+            hal.cpu.enableInterrupts();
+            hal.cpu.halt();
+            continue;
+        }
+        
+        // No work: atomically enable interrupts and halt
+        // This prevents the race where an interrupt fires *after* we decide to sleep
+        // but *before* the HLT instruction, causing missed wakeups.
+        hal.cpu.enableAndHalt();
     }
 }
+
 
 /// Set the per-CPU kernel GS data pointer
 /// Called by main.zig during initialization before scheduler starts
@@ -232,29 +269,57 @@ pub fn getTickCount() u64 {
 
 /// Yield the current thread's remaining time slice
 /// The thread remains ready and will be rescheduled
+///
+/// IMPORTANT: This function atomically enables interrupts and halts.
+/// This is required because syscalls run with IF=0 (Big Kernel Lock).
+/// Without enabling interrupts, the timer IRQ cannot fire to trigger
+/// a context switch, causing a deadlock.
 pub fn yield() void {
-    // Trigger a software interrupt to force a context switch
-    // For now, we just wait for the next timer tick
-    // TODO: Implement software interrupt for immediate yield
-    hal.cpu.halt();
+    // Atomically enable interrupts and halt (STI; HLT sequence)
+    // The timer IRQ will fire, call timerTick(), and potentially
+    // switch to another thread. When we're scheduled again,
+    // execution resumes after this call.
+    hal.cpu.enableAndHalt();
 }
 
 /// Block the current thread
-/// Thread will not be scheduled until unblocked
+/// Thread will not be scheduled until explicitly unblocked via unblock()
+///
+/// IMPORTANT: This function sets the thread state to Blocked, then atomically
+/// enables interrupts and halts. The next timer tick will context-switch to
+/// another thread. Because state is Blocked, this thread will NOT be added
+/// to the ready queue. It will only run again after unblock() is called.
+///
+/// This is required because syscalls run with IF=0 (Big Kernel Lock).
+/// Without enabling interrupts and halting, the timer IRQ cannot fire,
+/// causing a deadlock.
 pub fn block() void {
-    const held = scheduler.lock.acquire();
-    defer held.release();
+    {
+        const held = scheduler.lock.acquire();
+        defer held.release();
 
-    if (scheduler.current) |curr| {
-        curr.state = .Blocked;
-        // Don't add to ready queue - thread is blocked
-        if (config.debug_scheduler) {
-            console.debug("Sched: Thread '{s}' (tid={d}) blocked", .{
-                curr.getName(),
-                curr.tid,
-            });
+        if (scheduler.current) |curr| {
+            removeFromSleepList(curr);
+            curr.state = .Blocked;
+            curr.wake_time = 0;
+            // Don't add to ready queue - thread is blocked
+            if (config.debug_scheduler) {
+                console.debug("Sched: Thread '{s}' (tid={d}) blocked", .{
+                    curr.getName(),
+                    curr.tid,
+                });
+            }
         }
     }
+
+    // After releasing the lock, atomically enable interrupts and halt.
+    // The timer IRQ will fire and timerTick() will:
+    //   1. Save our context (kernel_rsp)
+    //   2. See state == .Blocked, so NOT add us to ready queue
+    //   3. Switch to another thread
+    // When unblock() is called on us, we're added to ready queue.
+    // When scheduled again, execution resumes here.
+    hal.cpu.enableAndHalt();
 }
 
 /// Unblock a thread
@@ -264,6 +329,7 @@ pub fn unblock(t: *Thread) void {
     defer held.release();
 
     if (t.state == .Blocked) {
+        removeFromSleepList(t);
         addToReadyQueue(t);
         if (config.debug_scheduler) {
             console.debug("Sched: Thread '{s}' (tid={d}) unblocked", .{
@@ -272,6 +338,32 @@ pub fn unblock(t: *Thread) void {
             });
         }
     }
+}
+
+/// Put the current thread to sleep until tick_count reaches the target
+pub fn sleepForTicks(ticks: u64) void {
+    if (ticks == 0) {
+        return;
+    }
+
+    {
+        const held = scheduler.lock.acquire();
+        defer held.release();
+
+        if (scheduler.current) |curr| {
+            removeFromSleepList(curr);
+            curr.state = .Blocked;
+            const max_tick: u64 = std.math.maxInt(u64);
+            const wake_tick = if (ticks > max_tick - scheduler.tick_count)
+                max_tick
+            else
+                scheduler.tick_count + ticks;
+            curr.wake_time = wake_tick;
+            insertSleepThread(curr);
+        }
+    }
+
+    hal.cpu.enableAndHalt();
 }
 
 /// Exit the current thread (default status 0)
@@ -338,6 +430,7 @@ pub fn timerTick(frame: *hal.idt.InterruptFrame) *hal.idt.InterruptFrame {
     defer held.release();
 
     scheduler.tick_count += 1;
+    wakeSleepingThreads(scheduler.tick_count);
 
     // Don't schedule if scheduler isn't running yet
     if (!scheduler.running) {
@@ -438,7 +531,7 @@ pub fn getStats() SchedulerStats {
 
     return .{
         .tick_count = scheduler.tick_count,
-        .ready_count = scheduler.ready_count,
+        .ready_count = scheduler.ready_queue.count,
         .is_running = scheduler.running,
         .current_tid = if (scheduler.current) |c| c.tid else null,
     };
@@ -482,7 +575,7 @@ pub fn checkGuardPage(fault_addr: u64) ?GuardPageInfo {
     }
 
     // Check all threads in ready queue
-    var t = scheduler.ready_head;
+    var t = scheduler.ready_queue.head;
     while (t) |curr_thread| {
         if (isInGuardPage(fault_addr, curr_thread)) {
             return GuardPageInfo{
@@ -493,6 +586,19 @@ pub fn checkGuardPage(fault_addr: u64) ?GuardPageInfo {
             };
         }
         t = curr_thread.next;
+    }
+
+    // Additional check: if fault is in kernel_stack region guard page
+    // (for cases where thread lookup failed but it's still a stack overflow)
+    if (kernel_stack.isGuardPage(fault_addr)) {
+        if (kernel_stack.getStackInfoForGuardFault(fault_addr)) |info| {
+            return GuardPageInfo{
+                .thread_id = 0, // Unknown thread
+                .thread_name = "<unknown>",
+                .stack_base = info.stack_base,
+                .stack_top = info.stack_top,
+            };
+        }
     }
 
     return null;

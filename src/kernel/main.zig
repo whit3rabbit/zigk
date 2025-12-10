@@ -18,6 +18,7 @@ const config = @import("config");
 const pmm = @import("pmm");
 const vmm = @import("vmm");
 const heap = @import("heap");
+const kernel_stack = @import("kernel_stack");
 const keyboard = @import("keyboard");
 const sched = @import("sched");
 const thread = @import("thread");
@@ -41,6 +42,9 @@ comptime {
     // Syscall dispatcher called from _syscall_entry in asm_helpers.S
     _ = &syscall_table.dispatch_syscall;
 }
+
+// Disable error return traces globally to safe memory/stack space
+pub const os_has_error_return_trace = false;
 
 // ============================================================================
 // Limine Request Structures
@@ -328,6 +332,13 @@ fn initMemoryManagement() void {
         halt();
     };
 
+    // Initialize kernel stack allocator (for proper guard page protection)
+    // This must be done after VMM is ready since it uses VMM for page mapping
+    kernel_stack.init() catch |err| {
+        console.err("Kernel stack allocator initialization failed: {}", .{err});
+        halt();
+    };
+
     // Initialize kernel heap
     // Allocate heap pages from PMM
     const heap_pages = config.heap_size / pmm.PAGE_SIZE;
@@ -421,10 +432,10 @@ pub fn panic(msg: []const u8, _: ?*@import("std").builtin.StackTrace, _: ?usize)
     // Disable interrupts to prevent further issues on this core
     hal.cpu.disableInterrupts();
 
-    console.print("\n!!! KERNEL PANIC !!!\n");
-    console.print("Message: ");
-    console.print(msg);
-    console.print("\n");
+    console.printUnsafe("\n!!! KERNEL PANIC !!!\n");
+    console.printUnsafe("Message: ");
+    console.printUnsafe(msg);
+    console.printUnsafe("\n");
 
     halt();
 }

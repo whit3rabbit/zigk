@@ -77,7 +77,7 @@ var global_fd_table: ?*FdTable = null;
 var fd_table_initialized: bool = false;
 
 /// Get the FD table for the current process
-fn getGlobalFdTable() *FdTable {
+pub fn getGlobalFdTable() *FdTable {
     // Use current process's FD table if available
     if (current_process) |proc| {
         return proc.fd_table;
@@ -267,22 +267,36 @@ pub fn sys_nanosleep(req_ptr: usize, rem_ptr: usize) isize {
     };
 
     // Validate timespec values
-    if (req.tv_nsec < 0 or req.tv_nsec >= 1_000_000_000) {
+    if (req.tv_sec < 0 or req.tv_nsec < 0 or req.tv_nsec >= 1_000_000_000) {
         return Errno.EINVAL.toReturn();
     }
 
-    // Calculate total nanoseconds to sleep
-    // For MVP, we just yield repeatedly (no real timing)
-    // Full implementation would use PIT or HPET for timing
-    const total_ns: i64 = req.tv_sec * 1_000_000_000 + req.tv_nsec;
-
-    // Simple busy-wait with yields (not accurate, just for MVP)
-    // Each yield is approximately 10ms with default timer frequency
-    const yields_needed = @max(1, @divTrunc(total_ns, 10_000_000));
-    var i: i64 = 0;
-    while (i < yields_needed) : (i += 1) {
-        sched.yield();
+    const sec_u: u64 = @intCast(req.tv_sec);
+    if (sec_u > std.math.maxInt(u64) / 1_000_000_000) {
+        return Errno.EINVAL.toReturn();
     }
+
+    const sec_ns: u64 = sec_u * 1_000_000_000;
+    const nsec_u: u64 = @intCast(req.tv_nsec);
+    if (sec_ns > std.math.maxInt(u64) - nsec_u) {
+        return Errno.EINVAL.toReturn();
+    }
+
+    const total_ns = sec_ns + nsec_u;
+    if (total_ns == 0) {
+        if (rem_ptr != 0) {
+            const rem: Timespec = .{ .tv_sec = 0, .tv_nsec = 0 };
+            UserPtr.from(rem_ptr).writeValue(rem) catch {
+                return Errno.EFAULT.toReturn();
+            };
+        }
+        return 0;
+    }
+
+    const tick_ns: u64 = 10_000_000;
+    const duration_ticks = std.math.divCeil(u64, total_ns, tick_ns) catch unreachable;
+
+    sched.sleepForTicks(duration_ticks);
 
     // On success, set remaining time to 0 if pointer provided
     if (rem_ptr != 0) {
@@ -461,11 +475,15 @@ pub fn sys_debug_log(buf_ptr: usize, len: usize) isize {
     // Limit message length for safety
     const max_len: usize = 1024;
     const copy_len = @min(len, max_len);
-    
-    var kbuf: [1024]u8 = undefined;
-    
+
+    // Allocate buffer on heap to preserve stack space
+    const kbuf = heap.allocator().alloc(u8, copy_len) catch {
+        return Errno.ENOMEM.toReturn();
+    };
+    defer heap.allocator().free(kbuf);
+
     const uptr = UserPtr.from(buf_ptr);
-    const actual_len = uptr.copyToKernel(kbuf[0..copy_len]) catch {
+    const actual_len = uptr.copyToKernel(kbuf) catch {
         return Errno.EFAULT.toReturn();
     };
 
@@ -513,9 +531,14 @@ pub fn sys_read_scancode() isize {
 pub fn sys_open(path_ptr: usize, flags: usize, mode: usize) isize {
     _ = mode; // Mode is ignored for device files
 
+    // Allocate path buffer on heap to preserve stack space
+    const path_buf = heap.allocator().alloc(u8, user_mem.MAX_PATH_LEN) catch {
+        return Errno.ENOMEM.toReturn();
+    };
+    defer heap.allocator().free(path_buf);
+
     // Validate and read path string from userspace
-    var path_buf: [user_mem.MAX_PATH_LEN]u8 = undefined;
-    const path = user_mem.copyStringFromUser(&path_buf, path_ptr) catch |err| {
+    const path = user_mem.copyStringFromUser(path_buf, path_ptr) catch |err| {
         if (err == error.NameTooLong) return Errno.ENAMETOOLONG.toReturn();
         return Errno.EFAULT.toReturn();
     };
@@ -588,8 +611,22 @@ pub fn sys_mmap(addr: usize, len: usize, prot: usize, flags: usize, fd: usize, o
     _ = fd; // File mappings not supported
     _ = offset;
 
+    // Enforce per-process memory limit (DoS protection)
+    const proc = getCurrentProcess();
+    const aligned_len = std.mem.alignForward(usize, len, pmm.PAGE_SIZE);
+    if (proc.rss_current + aligned_len > proc.rlimit_as) {
+        return Errno.ENOMEM.toReturn();
+    }
+
     const uvmm = getGlobalUserVmm();
-    return uvmm.mmap(@intCast(addr), len, @truncate(prot), @truncate(flags));
+    const result = uvmm.mmap(@intCast(addr), len, @truncate(prot), @truncate(flags));
+
+    // Update RSS on successful mapping
+    if (result >= 0) {
+        proc.rss_current += aligned_len;
+    }
+
+    return result;
 }
 
 /// sys_mprotect (10) - Set memory protection
@@ -776,9 +813,14 @@ fn setForkChildReturn(child: *@import("thread").Thread) void {
 /// Note: Currently only supports executables loaded via InitRD modules.
 /// Filesystem-based executables require VFS implementation.
 pub fn sys_execve(frame: *hal.syscall.SyscallFrame, path_ptr: usize, argv_ptr: usize, envp_ptr: usize) isize {
+    // Allocate path buffer on heap to preserve stack space
+    const path_buf = heap.allocator().alloc(u8, user_mem.MAX_PATH_LEN) catch {
+        return Errno.ENOMEM.toReturn();
+    };
+    defer heap.allocator().free(path_buf);
+
     // Validate and read path string from userspace
-    var path_buf: [user_mem.MAX_PATH_LEN]u8 = undefined;
-    const path = user_mem.copyStringFromUser(&path_buf, path_ptr) catch |err| {
+    const path = user_mem.copyStringFromUser(path_buf, path_ptr) catch |err| {
         if (err == error.NameTooLong) return Errno.ENAMETOOLONG.toReturn();
         return Errno.EFAULT.toReturn();
     };
@@ -789,54 +831,55 @@ pub fn sys_execve(frame: *hal.syscall.SyscallFrame, path_ptr: usize, argv_ptr: u
 
     console.debug("sys_execve: path='{s}'", .{path});
 
-    // Parse argv (collect up to 64 arguments)
-    // We need to copy strings to kernel heap or stack. Since execve replaces the process,
-    // we can use a temporary allocator or just stack if we are careful.
-    // However, argv strings need to survive until elf.exec copies them to the new stack.
-    // The safest bet is to alloc them on kernel heap and free after elf.exec (if it returns error)
-    // or elf.exec takes ownership (it builds new stack).
-    // Actually, elf.exec likely copies them to the NEW user stack.
-    // So we just need them accessible in kernel during the call.
-    
-    // We'll use a fixed buffer for storage to avoid complex allocation logic in interrupt context
-    // Total arg size limit: 4KB? Linux is 128KB. Let's do 4KB for MVP.
-    var arg_data_buf: [4096]u8 = undefined;
+    // Parse argv and envp (collect up to 64 arguments each)
+    // Heap-allocate the data buffer (128KB like Linux) to avoid stack overflow
+    // and return proper E2BIG error if arguments exceed limit.
+    const MAX_ARG_SIZE = 128 * 1024; // 128KB like Linux ARG_MAX
+    const alloc = heap.allocator();
+    const arg_data_buf = alloc.alloc(u8, MAX_ARG_SIZE) catch {
+        return Errno.ENOMEM.toReturn();
+    };
+    defer alloc.free(arg_data_buf);
+
     var arg_data_idx: usize = 0;
-    
     var argv_storage: [64][]const u8 = undefined;
     var argc: usize = 0;
 
     if (argv_ptr != 0) {
-        // Read argv array
         var i: usize = 0;
         while (argc < 64) : (i += 1) {
-            // Read pointer from argv[i]
             const ptr_addr = argv_ptr + i * @sizeOf(usize);
-            const arg_ptr = UserPtr.from(ptr_addr).readValue(usize) catch break; // Fault or end
-            
+            const arg_ptr = UserPtr.from(ptr_addr).readValue(usize) catch break;
+
             if (arg_ptr == 0) break; // Null terminator of argv array
 
-            // Copy string from arg_ptr
             const remaining_space = arg_data_buf[arg_data_idx..];
-            const arg_slice = user_mem.copyStringFromUser(remaining_space, arg_ptr) catch break;
-            
+            // Return E2BIG if we've exhausted the argument buffer
+            if (remaining_space.len == 0) {
+                return Errno.E2BIG.toReturn();
+            }
+
+            const arg_slice = user_mem.copyStringFromUser(remaining_space, arg_ptr) catch |err| {
+                if (err == error.NameTooLong) return Errno.E2BIG.toReturn();
+                return Errno.EFAULT.toReturn();
+            };
+
             argv_storage[argc] = arg_slice;
-            arg_data_idx += arg_slice.len;
+            arg_data_idx += arg_slice.len + 1; // +1 for null terminator space
             argc += 1;
-            
-            // Ensure null terminator in our buffer? copyStringFromUser doesn't include it in slice
-            // but elf.exec might need it? No, elf.exec likely puts strings on stack.
-            // But we need to separate them.
-            // copyStringFromUser returns slice reference to our buffer.
-            // We just need to advance index.
-            // Align? No need for string storage.
+        }
+        // Check if we hit the 64 argument limit
+        if (argc == 64) {
+            const ptr_addr = argv_ptr + 64 * @sizeOf(usize);
+            if (UserPtr.from(ptr_addr).readValue(usize)) |arg_ptr| {
+                if (arg_ptr != 0) return Errno.E2BIG.toReturn(); // More than 64 args
+            } else |_| {}
         }
     }
 
     const argv = argv_storage[0..argc];
 
     // Parse envp (collect up to 64 environment variables)
-    // Reuse remaining arg_data_buf space
     var envp_storage: [64][]const u8 = undefined;
     var envc: usize = 0;
 
@@ -849,12 +892,18 @@ pub fn sys_execve(frame: *hal.syscall.SyscallFrame, path_ptr: usize, argv_ptr: u
             if (env_ptr == 0) break;
 
             const remaining_space = arg_data_buf[arg_data_idx..];
-            if (remaining_space.len == 0) break; // OOM
+            // Return E2BIG if we've exhausted the argument buffer
+            if (remaining_space.len == 0) {
+                return Errno.E2BIG.toReturn();
+            }
 
-            const env_slice = user_mem.copyStringFromUser(remaining_space, env_ptr) catch break;
-            
+            const env_slice = user_mem.copyStringFromUser(remaining_space, env_ptr) catch |err| {
+                if (err == error.NameTooLong) return Errno.E2BIG.toReturn();
+                return Errno.EFAULT.toReturn();
+            };
+
             envp_storage[envc] = env_slice;
-            arg_data_idx += env_slice.len;
+            arg_data_idx += env_slice.len + 1; // +1 for null terminator space
             envc += 1;
         }
     }
@@ -936,9 +985,25 @@ pub fn sys_brk(addr: u64) isize {
         return @intCast(proc.heap_break);
     }
 
+    // Check upper bound - must not exceed user space
+    if (addr > user_mem.USER_SPACE_END) {
+        return @intCast(proc.heap_break);
+    }
+
+    // Enforce per-process memory limit (DoS protection)
+    const new_heap_size = addr - proc.heap_start;
+    if (proc.rss_current + new_heap_size > proc.rlimit_as) {
+        return Errno.ENOMEM.toReturn();
+    }
+
     // Align to page size for mapping
     const current_break_aligned = std.mem.alignForward(u64, proc.heap_break, pmm.PAGE_SIZE);
     const new_break_aligned = std.mem.alignForward(u64, addr, pmm.PAGE_SIZE);
+
+    // Aligned value must also be within bounds (alignment could push it over)
+    if (new_break_aligned > user_mem.USER_SPACE_END) {
+        return @intCast(proc.heap_break);
+    }
 
     if (new_break_aligned > current_break_aligned) {
         // Growing heap
@@ -972,16 +1037,30 @@ pub fn sys_brk(addr: u64) isize {
 
             vmm.mapPage(proc.cr3, vaddr, phys_page, flags) catch {
                 pmm.freePage(phys_page);
+
+                // Rollback: Unmap and free pages successfully mapped in this call
+                var j: usize = 0;
+                while (j < i) : (j += 1) {
+                    const rollback_addr = current_break_aligned + (j * pmm.PAGE_SIZE);
+                    if (vmm.translate(proc.cr3, rollback_addr)) |paddr| {
+                         pmm.freePage(paddr);
+                         vmm.unmapPage(proc.cr3, rollback_addr) catch {};
+                    }
+                }
                 return Errno.ENOMEM.toReturn();
             };
             
             // Zero the page (security)
-            const ptr: [*]u8 = hal.paging.physToVirt(phys_page);
+            const ptr: [*]u8 = @ptrCast(hal.paging.physToVirt(phys_page));
             @memset(ptr[0..pmm.PAGE_SIZE], 0);
+
+            // Track RSS for resource limit enforcement
+            proc.rss_current += pmm.PAGE_SIZE;
         }
     } else if (new_break_aligned < current_break_aligned) {
         // Shrinking heap - not implemented yet
         // Would need to unmap pages and free physical memory
+        // TODO: Decrement proc.rss_current when implemented
     }
 
     // Update break
@@ -1139,6 +1218,21 @@ pub fn sys_map_fb() isize {
         return Errno.ENOMEM.toReturn();
     };
 
+    const fb_vma = proc.user_vmm.createVma(
+        fb_virt_base,
+        fb_virt_base + fb_size,
+        user_vmm.PROT_READ | user_vmm.PROT_WRITE,
+        user_vmm.MAP_SHARED | user_vmm.MAP_DEVICE,
+    ) catch {
+        var offset: usize = 0;
+        while (offset < fb_size) : (offset += pmm.PAGE_SIZE) {
+            vmm.unmapPage(proc.cr3, fb_virt_base + offset) catch {};
+        }
+        return Errno.ENOMEM.toReturn();
+    };
+    proc.user_vmm.insertVma(fb_vma);
+    proc.user_vmm.total_mapped += fb_size;
+
     console.debug("sys_map_fb: Mapped FB at virt={x} (phys={x}, size={d})", .{
         fb_virt_base,
         fb_state.phys_addr,
@@ -1149,5 +1243,3 @@ pub fn sys_map_fb() isize {
     // Cast to isize - this is safe because the address is well below isize max
     return @bitCast(fb_virt_base);
 }
-
-

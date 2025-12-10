@@ -81,6 +81,12 @@ pub const Process = struct {
     heap_start: u64,
     heap_break: u64,
 
+    /// Resource limits (DoS protection)
+    /// Maximum virtual address space size (default 256 MB)
+    rlimit_as: u64 = 256 * 1024 * 1024,
+    /// Current resident set size (tracked for enforcement)
+    rss_current: u64 = 0,
+
     // =========================================================================
     // Process Hierarchy Methods
     // =========================================================================

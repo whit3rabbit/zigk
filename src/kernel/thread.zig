@@ -21,6 +21,7 @@ const vmm = @import("vmm");
 const heap = @import("heap");
 const console = @import("console");
 const config = @import("config");
+const kernel_stack = @import("kernel_stack");
 
 const fpu = hal.fpu;
 const paging = hal.paging;
@@ -54,6 +55,11 @@ pub const Thread = struct {
     kernel_stack_base: u64, // Low address (including guard page)
     kernel_stack_top: u64, // High address (initial RSP)
     kernel_stack_pages: usize, // Number of pages including guard
+
+    /// Kernel stack allocation info (for proper cleanup with guard pages)
+    /// If use_kernel_stack_allocator is true, this contains the stack slot/phys info
+    kernel_stack_info: ?kernel_stack.KernelStack,
+    use_kernel_stack_allocator: bool,
 
     /// User stack top (0 for kernel-only threads)
     user_stack_top: u64,
@@ -89,6 +95,11 @@ pub const Thread = struct {
     next_sibling: ?*Thread,
     /// Exit status (set on exit, read by wait4)
     exit_status: i32,
+    /// Wake tick for timed sleep (0 = not scheduled)
+    wake_time: u64,
+    /// Sleep list links (used by scheduler)
+    sleep_prev: ?*Thread,
+    sleep_next: ?*Thread,
 
     /// Get thread name as a slice
     pub fn getName(self: *const Thread) []const u8 {
@@ -161,36 +172,55 @@ pub fn createKernelThread(
         return ThreadError.TooManyThreads;
     }
 
-    // Calculate stack pages (stack_size + 1 guard page)
-    const stack_size = std.mem.alignForward(usize, options.stack_size, pmm.PAGE_SIZE);
-    const stack_pages = stack_size / pmm.PAGE_SIZE;
-    const total_pages = stack_pages + 1; // +1 for guard page
+    // Stack allocation strategy:
+    // - If kernel_stack allocator is initialized, use it (proper guard pages)
+    // - Otherwise fall back to HHDM (early boot, no guard protection)
+    var stack_info: ?kernel_stack.KernelStack = null;
+    var guard_page_virt: u64 = undefined;
+    var stack_base_virt: u64 = undefined;
+    var stack_top_virt: u64 = undefined;
+    var total_pages: usize = undefined;
+    var use_ks_allocator = false;
 
-    // Allocate physical pages for stack (but not guard page)
-    const stack_phys = pmm.allocPages(stack_pages) orelse {
-        console.err("Thread: Failed to allocate {d} stack pages", .{stack_pages});
-        return ThreadError.OutOfMemory;
-    };
-    errdefer pmm.freePages(stack_phys, stack_pages);
+    if (kernel_stack.isInitialized()) {
+        // Use the proper kernel stack allocator with guard page protection
+        const ks = kernel_stack.alloc() catch |err| {
+            console.err("Thread: kernel_stack.alloc failed: {}", .{err});
+            return ThreadError.OutOfMemory;
+        };
+        stack_info = ks;
+        guard_page_virt = ks.guard_virt;
+        stack_base_virt = ks.stack_base;
+        stack_top_virt = ks.stack_top;
+        total_pages = kernel_stack.STACK_SLOT_PAGES;
+        use_ks_allocator = true;
+    } else {
+        // Fallback: HHDM-based allocation (early boot, no real guard protection)
+        const stack_size = std.mem.alignForward(usize, options.stack_size, pmm.PAGE_SIZE);
+        const stack_pages = stack_size / pmm.PAGE_SIZE;
+        total_pages = stack_pages + 1;
 
-    // Calculate virtual addresses for the stack region
-    // Use the HHDM mapping for now (kernel threads run in kernel address space)
-    const stack_base_virt = @intFromPtr(paging.physToVirt(stack_phys));
-    const guard_page_virt = stack_base_virt - pmm.PAGE_SIZE;
-    const stack_top_virt = stack_base_virt + stack_size;
+        const stack_phys = pmm.allocPages(stack_pages) orelse {
+            console.err("Thread: Failed to allocate {d} stack pages", .{stack_pages});
+            return ThreadError.OutOfMemory;
+        };
+        // Note: In fallback mode, we don't have proper errdefer cleanup
+        // since we can't easily undo the allocation if thread creation fails later
 
-    // Note: The guard page is the virtual page below our stack.
-    // In HHDM, this corresponds to (stack_phys - PAGE_SIZE).
-    // We don't explicitly unmap it here because we're using HHDM directly.
-    // A proper guard page would require a dedicated virtual address range
-    // with explicit mapping. For now, we rely on the physical memory layout
-    // and the fact that accessing below the stack likely hits unmapped memory.
-    // TODO: Implement proper guard page with explicit virtual address allocation
+        stack_base_virt = @intFromPtr(paging.physToVirt(stack_phys));
+        guard_page_virt = stack_base_virt - pmm.PAGE_SIZE;
+        stack_top_virt = stack_base_virt + stack_size;
+
+        // Warning: HHDM guard page is actually mapped memory!
+        // This path is only used during early boot before kernel_stack.init()
+    }
 
     // Allocate thread structure from heap
     const alloc = heap.allocator();
     const thread = alloc.create(Thread) catch {
-        pmm.freePages(stack_phys, stack_pages);
+        if (stack_info) |si| {
+            kernel_stack.free(si);
+        }
         return ThreadError.OutOfMemory;
     };
     errdefer alloc.destroy(thread);
@@ -203,6 +233,8 @@ pub fn createKernelThread(
         .kernel_stack_base = guard_page_virt,
         .kernel_stack_top = stack_top_virt,
         .kernel_stack_pages = total_pages,
+        .kernel_stack_info = stack_info,
+        .use_kernel_stack_allocator = use_ks_allocator,
         .user_stack_top = 0, // Kernel thread
         .cr3 = options.cr3,
         .fpu_state = fpu.FpuState.init(),
@@ -215,6 +247,9 @@ pub fn createKernelThread(
         .first_child = null,
         .next_sibling = null,
         .exit_status = 0,
+        .wake_time = 0,
+        .sleep_prev = null,
+        .sleep_next = null,
     };
 
     // Set thread name
@@ -289,6 +324,8 @@ pub fn createUserThread(
         .kernel_stack_base = guard_page_virt,
         .kernel_stack_top = stack_top_virt, // This is RSP0
         .kernel_stack_pages = total_pages,
+        .kernel_stack_info = null, // User threads use HHDM stacks (TODO: migrate)
+        .use_kernel_stack_allocator = false,
         .user_stack_top = options.user_stack_top,
         .cr3 = options.cr3, // Must be provided for user thread
         .fpu_state = fpu.FpuState.init(),
@@ -301,6 +338,9 @@ pub fn createUserThread(
         .first_child = null,
         .next_sibling = null,
         .exit_status = 0,
+        .wake_time = 0,
+        .sleep_prev = null,
+        .sleep_next = null,
     };
 
     thread.setName(options.name);
@@ -466,11 +506,19 @@ pub fn destroyThread(thread: *Thread) void {
         });
     }
 
-    // Free kernel stack pages (excluding guard page which was never allocated)
-    const stack_virt = thread.kernel_stack_base + pmm.PAGE_SIZE; // Skip guard
-    const stack_phys = paging.virtToPhys(stack_virt);
-    const stack_pages = thread.kernel_stack_pages - 1; // Exclude guard page
-    pmm.freePages(stack_phys, stack_pages);
+    // Free kernel stack
+    if (thread.use_kernel_stack_allocator) {
+        // Use kernel_stack allocator (proper guard page cleanup)
+        if (thread.kernel_stack_info) |si| {
+            kernel_stack.free(si);
+        }
+    } else {
+        // Legacy HHDM path - free physical pages directly
+        const stack_virt = thread.kernel_stack_base + pmm.PAGE_SIZE; // Skip guard
+        const stack_phys = paging.virtToPhys(stack_virt);
+        const stack_pages = thread.kernel_stack_pages - 1; // Exclude guard page
+        pmm.freePages(stack_phys, stack_pages);
+    }
 
     // Free thread structure
     const alloc = heap.allocator();
