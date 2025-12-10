@@ -24,7 +24,7 @@ pub const McfgHeader = extern struct {
     const Self = @This();
 
     /// Get number of MCFG entries
-    pub fn getEntryCount(self: *const Self) usize {
+    pub fn getEntryCount(self: *align(1) const Self) usize {
         // Data length minus reserved bytes, divided by entry size
         const data_len = self.header.getDataLength();
         if (data_len < 8) return 0;
@@ -33,7 +33,7 @@ pub const McfgHeader = extern struct {
 
     /// Get MCFG entries as bounded slice
     /// Returns null if data is invalid or too small
-    pub fn getEntries(self: *const Self) ?[]const McfgEntry {
+    pub fn getEntries(self: *align(1) const Self) ?[]align(1) const McfgEntry {
         const data = self.header.getData();
         // Data starts with 8 reserved bytes, then McfgEntry array
         if (data.len < 8) return null;
@@ -44,19 +44,19 @@ pub const McfgHeader = extern struct {
         const entries_data = data[8..];
         if (entries_data.len < count * @sizeOf(McfgEntry)) return null;
 
-        const ptr: [*]const McfgEntry = @ptrCast(@alignCast(entries_data.ptr));
+        const ptr: [*]align(1) const McfgEntry = @ptrCast(entries_data.ptr);
         return ptr[0..count];
     }
 
     /// Get entry at index with bounds checking
-    pub fn getEntry(self: *const Self, index: usize) ?*const McfgEntry {
+    pub fn getEntry(self: *align(1) const Self, index: usize) ?*align(1) const McfgEntry {
         const entries = self.getEntries() orelse return null;
         if (index >= entries.len) return null;
         return &entries[index];
     }
 
     /// Find entry for specific segment and bus range
-    pub fn findSegment(self: *const Self, segment: u16) ?*const McfgEntry {
+    pub fn findSegment(self: *align(1) const Self, segment: u16) ?*align(1) const McfgEntry {
         const entries = self.getEntries() orelse return null;
         for (entries) |*entry| {
             if (entry.pci_segment == segment) {
@@ -69,7 +69,7 @@ pub const McfgHeader = extern struct {
 
 /// MCFG entry describing one PCI segment's ECAM region
 /// Each entry is 16 bytes
-pub const McfgEntry = extern struct {
+pub const McfgEntry = packed struct {
     base_address: u64,      // ECAM base address for this segment
     pci_segment: u16,       // PCI segment group number (usually 0)
     start_bus: u8,          // First bus number covered
@@ -80,14 +80,14 @@ pub const McfgEntry = extern struct {
 
     /// Calculate size of ECAM region for this entry
     /// Each bus has 32 devices * 8 functions * 4KB = 256KB per bus
-    pub fn getRegionSize(self: *const Self) usize {
+    pub fn getRegionSize(self: *align(1) const Self) usize {
         const bus_count: usize = @as(usize, self.end_bus - self.start_bus) + 1;
         // 32 devices * 8 functions * 4096 bytes = 1MB per bus
         return bus_count * 32 * 8 * 4096;
     }
 
     /// Calculate config space address for a specific device
-    pub fn getConfigAddress(self: *const Self, bus: u8, device: u5, func: u3) ?u64 {
+    pub fn getConfigAddress(self: *align(1) const Self, bus: u8, device: u5, func: u3) ?u64 {
         // Check bus is in range
         if (bus < self.start_bus or bus > self.end_bus) {
             return null;
@@ -112,28 +112,28 @@ pub const EcamInfo = struct {
 
 /// Find MCFG table and extract ECAM information for segment 0
 /// This is the most common case - single PCI segment
-pub fn findEcamBase(rsdp_ptr: *const rsdp.Rsdp) ?EcamInfo {
+pub fn findEcamBase(rsdp_ptr: *align(1) const rsdp.Rsdp) ?EcamInfo {
     // Find MCFG table
-    const mcfg_table = rsdp.findTable(rsdp_ptr, &MCFG_SIGNATURE) orelse {
+    const mcfg_table = rsdp.findTable(rsdp_ptr, MCFG_SIGNATURE) orelse {
         console.warn("ACPI: MCFG table not found", .{});
         return null;
     };
+    console.info("Debug: mcfg_table found at 0x{x}", .{@intFromPtr(mcfg_table)});
 
     // Validate it's actually MCFG
-    if (!mcfg_table.hasSignature(&MCFG_SIGNATURE)) {
+    if (!mcfg_table.hasSignature(MCFG_SIGNATURE)) {
         console.warn("ACPI: Invalid MCFG signature", .{});
         return null;
     }
 
-    const mcfg: *const McfgHeader = @ptrCast(@alignCast(mcfg_table));
+    console.info("Debug: casting to McfgHeader", .{});
+    const mcfg: *align(1) const McfgHeader = @ptrCast(mcfg_table);
+    console.info("Debug: cast success, finding segment 0", .{});
 
     // Look for segment 0 (most common)
-    const entry = mcfg.findSegment(0) orelse {
-        // Try first entry if segment 0 not found
-        mcfg.getEntry(0) orelse {
-            console.warn("ACPI: No MCFG entries found", .{});
-            return null;
-        };
+    const entry = mcfg.findSegment(0) orelse mcfg.getEntry(0) orelse {
+        console.warn("ACPI: No MCFG entries found", .{});
+        return null;
     };
 
     return EcamInfo{
@@ -146,12 +146,12 @@ pub fn findEcamBase(rsdp_ptr: *const rsdp.Rsdp) ?EcamInfo {
 }
 
 /// Find MCFG table and extract ECAM information for a specific segment
-pub fn findEcamBaseForSegment(rsdp_ptr: *const rsdp.Rsdp, segment: u16) ?EcamInfo {
-    const mcfg_table = rsdp.findTable(rsdp_ptr, &MCFG_SIGNATURE) orelse {
+pub fn findEcamBaseForSegment(rsdp_ptr: *align(1) const rsdp.Rsdp, segment: u16) ?EcamInfo {
+    const mcfg_table = rsdp.findTable(rsdp_ptr, MCFG_SIGNATURE) orelse {
         return null;
     };
 
-    const mcfg: *const McfgHeader = @ptrCast(@alignCast(mcfg_table));
+    const mcfg: *align(1) const McfgHeader = @ptrCast(mcfg_table);
 
     const entry = mcfg.findSegment(segment) orelse {
         return null;
@@ -167,13 +167,13 @@ pub fn findEcamBaseForSegment(rsdp_ptr: *const rsdp.Rsdp, segment: u16) ?EcamInf
 }
 
 /// Log MCFG table information for debugging
-pub fn logMcfgInfo(rsdp_ptr: *const rsdp.Rsdp) void {
-    const mcfg_table = rsdp.findTable(rsdp_ptr, &MCFG_SIGNATURE) orelse {
+pub fn logMcfgInfo(rsdp_ptr: *align(1) const rsdp.Rsdp) void {
+    const mcfg_table = rsdp.findTable(rsdp_ptr, MCFG_SIGNATURE) orelse {
         console.warn("ACPI: MCFG table not found", .{});
         return;
     };
 
-    const mcfg: *const McfgHeader = @ptrCast(@alignCast(mcfg_table));
+    const mcfg: *align(1) const McfgHeader = @ptrCast(mcfg_table);
 
     // Use bounded slice iteration instead of index-based loop
     const entries = mcfg.getEntries() orelse {

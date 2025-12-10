@@ -262,6 +262,10 @@ pub const E1000e = struct {
     /// Worker thread for packet processing
     worker_thread: ?*thread.Thread,
 
+    /// RX Packet Callback (from higher layers)
+    rx_callback: ?*const fn ([]u8) void,
+
+
     const Self = @This();
 
     // ========================================================================
@@ -336,6 +340,7 @@ pub const E1000e = struct {
             .tx_watchdog_last_tdh = 0,
             .tx_watchdog_stall_count = 0,
             .worker_thread = null,
+            .rx_callback = null,
         };
 
         // Reset device
@@ -600,6 +605,26 @@ pub const E1000e = struct {
             return false;
         }
 
+        // Memory barrier: ensure we see all hardware writes to descriptor
+        // before reading any dependent data (buffer contents, other fields)
+        mmio.readBarrier();
+
+        // Additional safety check: verify hardware head pointer
+        // This guards against race conditions where DD is set but hardware
+        // is still fetching the descriptor (e.g., during rapid retransmit).
+        const tdh = self.readReg(Reg.TDH);
+        if (self.tx_cur == tdh) {
+            // Hardware head is at our current position - ring might be full
+            // or hardware hasn't advanced. Check if there's actually work pending.
+            const tdt = self.readReg(Reg.TDT);
+            if (tdh != tdt) {
+                // There's pending work and head is at our position - ring is full
+                self.tx_dropped += 1;
+                return false;
+            }
+            // tdh == tdt means ring is empty, we're safe to proceed
+        }
+
         // Copy data to buffer
         const buf = self.tx_buffers[self.tx_cur];
         @memcpy(buf[0..data.len], data);
@@ -644,6 +669,11 @@ pub const E1000e = struct {
             if ((desc.status & RxDesc.STATUS_DD) == 0) {
                 break; // No more packets
             }
+
+            // Memory barrier: ensure we see all hardware writes (packet data, length)
+            // before reading buffer contents. Critical for correctness on weakly-ordered
+            // architectures and prevents speculative loads from reading stale data.
+            mmio.readBarrier();
 
             // Check for errors
             if (desc.errors != 0) {
@@ -725,7 +755,7 @@ pub const E1000e = struct {
         while (true) {
             // Disable interrupts to check queue emptiness safely
             // This prevents the race where an ISR runs after we check but before we block
-            const flags = hal.cpu.disableInterrupts();
+            const flags = hal.cpu.disableInterruptsSaveFlags();
             if (!self.hasPackets()) {
                 // Queue is empty, safe to block.
                 // sched.block() sets state to .Blocked.
@@ -735,14 +765,30 @@ pub const E1000e = struct {
             hal.cpu.restoreInterrupts(flags);
             
             // Process received packets (drains the ring)
-            self.processRx(&defaultRxCallback);
+            if (self.rx_callback) |cb| {
+                self.processRx(cb);
+            } else {
+                self.processRx(&defaultRxCallback);
+            }
         }
     }
 
     /// Check if there are packets waiting
+    /// Note: Caller should use processRx() to actually read packets, which
+    /// has proper memory barriers. This is just a quick poll check.
     pub fn hasPackets(self: *Self) bool {
         const desc = &self.rx_ring[self.rx_cur];
-        return (desc.status & RxDesc.STATUS_DD) != 0;
+        const has_packet = (desc.status & RxDesc.STATUS_DD) != 0;
+        if (has_packet) {
+            // Ensure subsequent reads see hardware writes
+            mmio.readBarrier();
+        }
+        return has_packet;
+    }
+
+    /// Set RX callback for packet processing
+    pub fn setRxCallback(self: *Self, callback: *const fn ([]u8) void) void {
+        self.rx_callback = callback;
     }
 
     // ========================================================================
@@ -993,3 +1039,5 @@ pub fn initFromPci(devices: *const pci.DeviceList, pci_ecam: *const pci.Ecam) !*
     driver_initialized = true;
     return driver;
 }
+
+

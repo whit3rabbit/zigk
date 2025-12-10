@@ -35,8 +35,8 @@ test "heap: basic alloc and free" {
     const ptr3 = heap.alloc(300) orelse return error.OutOfMemory;
 
     // Verify allocations are distinct
-    try testing.expect(@intFromPtr(ptr1) != @intFromPtr(ptr2));
-    try testing.expect(@intFromPtr(ptr2) != @intFromPtr(ptr3));
+    try testing.expect(@intFromPtr(ptr1.ptr) != @intFromPtr(ptr2.ptr));
+    try testing.expect(@intFromPtr(ptr2.ptr) != @intFromPtr(ptr3.ptr));
 
     // Free in different order
     heap.free(ptr2);
@@ -102,7 +102,7 @@ test "heap: memory pattern integrity" {
     initHeap();
 
     const sizes = [_]usize{ 16, 32, 64, 128, 256, 512, 1024, 2048 };
-    var allocations: [sizes.len]?[*]u8 = undefined;
+    var allocations: [sizes.len]?[]u8 = undefined;
 
     // Allocate with patterns
     for (sizes, 0..) |size, i| {
@@ -140,7 +140,7 @@ test "heap: integrity check" {
     initHeap();
 
     // Do some allocations
-    var ptrs: [10]?[*]u8 = undefined;
+    var ptrs: [10]?[]u8 = undefined;
     for (&ptrs) |*p| {
         p.* = heap.alloc(100);
     }
@@ -168,7 +168,7 @@ test "heap: fuzz 10000 random operations" {
 
     const max_allocations = 100;
     var allocations: [max_allocations]struct {
-        ptr: ?[*]u8,
+        ptr: ?[]u8,
         size: usize,
         pattern: u8,
     } = undefined;
@@ -248,7 +248,7 @@ test "heap: coalescing reduces free block count" {
 
     // Allocate many small blocks
     const num_blocks = 50;
-    var ptrs: [num_blocks]?[*]u8 = undefined;
+    var ptrs: [num_blocks]?[]u8 = undefined;
 
     for (&ptrs) |*p| {
         p.* = heap.alloc(64);
@@ -338,7 +338,7 @@ test "heap: std.mem.Allocator interface" {
 test "heap: interleaved alloc free" {
     initHeap();
 
-    var ptrs: [20]?[*]u8 = [_]?[*]u8{null} ** 20;
+    var ptrs: [20]?[]u8 = [_]?[]u8{null} ** 20;
 
     // Interleaved pattern
     for (0..5) |round| {

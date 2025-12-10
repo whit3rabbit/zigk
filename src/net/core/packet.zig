@@ -139,21 +139,22 @@ pub const PacketBuffer = struct {
 // ============================================================================
 
 /// Ethernet header (14 bytes)
+/// Note: align(1) allows casting from unaligned packet buffer offsets
 pub const EthernetHeader = extern struct {
     dst_mac: [6]u8,
     src_mac: [6]u8,
-    ethertype: u16, // Network byte order
+    ethertype: u16, // Network byte order, unaligned access safe
 
     pub const ETHERTYPE_IPV4: u16 = 0x0008; // 0x0800 in network order
     pub const ETHERTYPE_ARP: u16 = 0x0608;  // 0x0806 in network order
 
     /// Get ethertype in host byte order
-    pub fn getEthertype(self: *const EthernetHeader) u16 {
+    pub fn getEthertype(self: *align(1) const EthernetHeader) u16 {
         return @byteSwap(self.ethertype);
     }
 
     /// Set ethertype from host byte order
-    pub fn setEthertype(self: *EthernetHeader, value: u16) void {
+    pub fn setEthertype(self: *align(1) EthernetHeader, value: u16) void {
         self.ethertype = @byteSwap(value);
     }
 };
@@ -176,42 +177,42 @@ pub const Ipv4Header = extern struct {
     pub const PROTO_UDP: u8 = 17;
 
     /// Get IP version
-    pub fn getVersion(self: *const Ipv4Header) u4 {
+    pub fn getVersion(self: *align(1) const Ipv4Header) u4 {
         return @truncate(self.version_ihl >> 4);
     }
 
     /// Get header length in bytes
-    pub fn getHeaderLength(self: *const Ipv4Header) usize {
+    pub fn getHeaderLength(self: *align(1) const Ipv4Header) usize {
         return @as(usize, self.version_ihl & 0x0F) * 4;
     }
 
     /// Get total length in host byte order
-    pub fn getTotalLength(self: *const Ipv4Header) u16 {
+    pub fn getTotalLength(self: *align(1) const Ipv4Header) u16 {
         return @byteSwap(self.total_length);
     }
 
     /// Set total length from host byte order
-    pub fn setTotalLength(self: *Ipv4Header, value: u16) void {
+    pub fn setTotalLength(self: *align(1) Ipv4Header, value: u16) void {
         self.total_length = @byteSwap(value);
     }
 
     /// Get source IP in host byte order
-    pub fn getSrcIp(self: *const Ipv4Header) u32 {
+    pub fn getSrcIp(self: *align(1) const Ipv4Header) u32 {
         return @byteSwap(self.src_ip);
     }
 
     /// Get destination IP in host byte order
-    pub fn getDstIp(self: *const Ipv4Header) u32 {
+    pub fn getDstIp(self: *align(1) const Ipv4Header) u32 {
         return @byteSwap(self.dst_ip);
     }
 
     /// Set source IP from host byte order
-    pub fn setSrcIp(self: *Ipv4Header, value: u32) void {
+    pub fn setSrcIp(self: *align(1) Ipv4Header, value: u32) void {
         self.src_ip = @byteSwap(value);
     }
 
     /// Set destination IP from host byte order
-    pub fn setDstIp(self: *Ipv4Header, value: u32) void {
+    pub fn setDstIp(self: *align(1) Ipv4Header, value: u32) void {
         self.dst_ip = @byteSwap(value);
     }
 };
@@ -224,32 +225,32 @@ pub const UdpHeader = extern struct {
     checksum: u16,
 
     /// Get source port in host byte order
-    pub fn getSrcPort(self: *const UdpHeader) u16 {
+    pub fn getSrcPort(self: *align(1) const UdpHeader) u16 {
         return @byteSwap(self.src_port);
     }
 
     /// Get destination port in host byte order
-    pub fn getDstPort(self: *const UdpHeader) u16 {
+    pub fn getDstPort(self: *align(1) const UdpHeader) u16 {
         return @byteSwap(self.dst_port);
     }
 
     /// Set source port from host byte order
-    pub fn setSrcPort(self: *UdpHeader, value: u16) void {
+    pub fn setSrcPort(self: *align(1) UdpHeader, value: u16) void {
         self.src_port = @byteSwap(value);
     }
 
     /// Set destination port from host byte order
-    pub fn setDstPort(self: *UdpHeader, value: u16) void {
+    pub fn setDstPort(self: *align(1) UdpHeader, value: u16) void {
         self.dst_port = @byteSwap(value);
     }
 
     /// Get length in host byte order
-    pub fn getLength(self: *const UdpHeader) u16 {
+    pub fn getLength(self: *align(1) const UdpHeader) u16 {
         return @byteSwap(self.length);
     }
 
     /// Set length from host byte order
-    pub fn setLength(self: *UdpHeader, value: u16) void {
+    pub fn setLength(self: *align(1) UdpHeader, value: u16) void {
         self.length = @byteSwap(value);
     }
 };
@@ -266,12 +267,12 @@ pub const IcmpHeader = extern struct {
     pub const TYPE_ECHO_REQUEST: u8 = 8;
 
     /// Get identifier in host byte order
-    pub fn getIdentifier(self: *const IcmpHeader) u16 {
+    pub fn getIdentifier(self: *align(1) const IcmpHeader) u16 {
         return @byteSwap(self.identifier);
     }
 
     /// Get sequence in host byte order
-    pub fn getSequence(self: *const IcmpHeader) u16 {
+    pub fn getSequence(self: *align(1) const IcmpHeader) u16 {
         return @byteSwap(self.sequence);
     }
 };
@@ -292,17 +293,17 @@ pub const ArpHeader = extern struct {
     pub const OP_REPLY: u16 = 0x0200;   // 2 in network byte order
 
     /// Get operation in host byte order
-    pub fn getOperation(self: *const ArpHeader) u16 {
+    pub fn getOperation(self: *align(1) const ArpHeader) u16 {
         return @byteSwap(self.operation);
     }
 
     /// Get sender IP in host byte order
-    pub fn getSenderIp(self: *const ArpHeader) u32 {
+    pub fn getSenderIp(self: *align(1) const ArpHeader) u32 {
         return @byteSwap(self.sender_ip);
     }
 
     /// Get target IP in host byte order
-    pub fn getTargetIp(self: *const ArpHeader) u32 {
+    pub fn getTargetIp(self: *align(1) const ArpHeader) u32 {
         return @byteSwap(self.target_ip);
     }
 };
@@ -316,80 +317,80 @@ pub const ArpHeader = extern struct {
 
 /// Get Ethernet header from buffer with bounds checking.
 /// Returns null if buffer is too small to contain an Ethernet header.
-pub fn getEthHeader(buf: []const u8, offset: usize) ?*const EthernetHeader {
+pub fn getEthHeader(buf: []const u8, offset: usize) ?*align(1) const EthernetHeader {
     if (offset + ETH_HEADER_SIZE > buf.len) return null;
-    return @ptrCast(@alignCast(&buf[offset]));
+    return @ptrCast(&buf[offset]);
 }
 
 /// Get mutable Ethernet header from buffer with bounds checking.
-pub fn getEthHeaderMut(buf: []u8, offset: usize) ?*EthernetHeader {
+pub fn getEthHeaderMut(buf: []u8, offset: usize) ?*align(1) EthernetHeader {
     if (offset + ETH_HEADER_SIZE > buf.len) return null;
-    return @ptrCast(@alignCast(&buf[offset]));
+    return @ptrCast(&buf[offset]);
 }
 
 /// Get IPv4 header from buffer with bounds checking.
 /// Returns null if buffer is too small to contain an IPv4 header.
-pub fn getIpv4Header(buf: []const u8, offset: usize) ?*const Ipv4Header {
+pub fn getIpv4Header(buf: []const u8, offset: usize) ?*align(1) const Ipv4Header {
     if (offset + IP_HEADER_SIZE > buf.len) return null;
-    return @ptrCast(@alignCast(&buf[offset]));
+    return @ptrCast(&buf[offset]);
 }
 
 /// Get mutable IPv4 header from buffer with bounds checking.
-pub fn getIpv4HeaderMut(buf: []u8, offset: usize) ?*Ipv4Header {
+pub fn getIpv4HeaderMut(buf: []u8, offset: usize) ?*align(1) Ipv4Header {
     if (offset + IP_HEADER_SIZE > buf.len) return null;
-    return @ptrCast(@alignCast(&buf[offset]));
+    return @ptrCast(&buf[offset]);
 }
 
 /// Get UDP header from buffer with bounds checking.
 /// Returns null if buffer is too small to contain a UDP header.
-pub fn getUdpHeader(buf: []const u8, offset: usize) ?*const UdpHeader {
+pub fn getUdpHeader(buf: []const u8, offset: usize) ?*align(1) const UdpHeader {
     if (offset + UDP_HEADER_SIZE > buf.len) return null;
-    return @ptrCast(@alignCast(&buf[offset]));
+    return @ptrCast(&buf[offset]);
 }
 
 /// Get mutable UDP header from buffer with bounds checking.
-pub fn getUdpHeaderMut(buf: []u8, offset: usize) ?*UdpHeader {
+pub fn getUdpHeaderMut(buf: []u8, offset: usize) ?*align(1) UdpHeader {
     if (offset + UDP_HEADER_SIZE > buf.len) return null;
-    return @ptrCast(@alignCast(&buf[offset]));
+    return @ptrCast(&buf[offset]);
 }
 
 /// Get ICMP header from buffer with bounds checking.
 /// Returns null if buffer is too small to contain an ICMP header.
-pub fn getIcmpHeader(buf: []const u8, offset: usize) ?*const IcmpHeader {
+pub fn getIcmpHeader(buf: []const u8, offset: usize) ?*align(1) const IcmpHeader {
     if (offset + ICMP_HEADER_SIZE > buf.len) return null;
-    return @ptrCast(@alignCast(&buf[offset]));
+    return @ptrCast(&buf[offset]);
 }
 
 /// Get mutable ICMP header from buffer with bounds checking.
-pub fn getIcmpHeaderMut(buf: []u8, offset: usize) ?*IcmpHeader {
+pub fn getIcmpHeaderMut(buf: []u8, offset: usize) ?*align(1) IcmpHeader {
     if (offset + ICMP_HEADER_SIZE > buf.len) return null;
-    return @ptrCast(@alignCast(&buf[offset]));
+    return @ptrCast(&buf[offset]);
 }
 
 /// Get ARP header from buffer with bounds checking.
 /// Returns null if buffer is too small to contain an ARP header.
-pub fn getArpHeader(buf: []const u8, offset: usize) ?*const ArpHeader {
+pub fn getArpHeader(buf: []const u8, offset: usize) ?*align(1) const ArpHeader {
     const arp_size = @sizeOf(ArpHeader);
     if (offset + arp_size > buf.len) return null;
-    return @ptrCast(@alignCast(&buf[offset]));
+    return @ptrCast(&buf[offset]);
 }
 
 /// Get mutable ARP header from buffer with bounds checking.
-pub fn getArpHeaderMut(buf: []u8, offset: usize) ?*ArpHeader {
+pub fn getArpHeaderMut(buf: []u8, offset: usize) ?*align(1) ArpHeader {
     const arp_size = @sizeOf(ArpHeader);
     if (offset + arp_size > buf.len) return null;
-    return @ptrCast(@alignCast(&buf[offset]));
+    return @ptrCast(&buf[offset]);
 }
 
 /// Generic header accessor with bounds checking.
 /// Use for any fixed-size header type.
-pub fn getHeaderAs(comptime T: type, buf: []const u8, offset: usize) ?*const T {
+pub fn getHeaderAs(comptime T: type, buf: []const u8, offset: usize) ?*align(1) const T {
     if (offset + @sizeOf(T) > buf.len) return null;
-    return @ptrCast(@alignCast(&buf[offset]));
+    return @ptrCast(&buf[offset]);
 }
 
 /// Generic mutable header accessor with bounds checking.
-pub fn getHeaderAsMut(comptime T: type, buf: []u8, offset: usize) ?*T {
+pub fn getHeaderAsMut(comptime T: type, buf: []u8, offset: usize) ?*align(1) T {
     if (offset + @sizeOf(T) > buf.len) return null;
-    return @ptrCast(@alignCast(&buf[offset]));
+    return @ptrCast(&buf[offset]);
 }

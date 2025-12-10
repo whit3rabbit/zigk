@@ -26,7 +26,7 @@ pub const Rsdp = extern struct {
 
     /// Validate RSDP v1 checksum (sum of first 20 bytes must be 0)
     /// Uses std.mem.asBytes for safe bounded access instead of raw pointer cast
-    pub fn validateChecksum(self: *const Self) bool {
+    pub fn validateChecksum(self: *align(1) const Self) bool {
         const bytes = std.mem.asBytes(self);
         var sum: u8 = 0;
         for (bytes[0..20]) |b| {
@@ -36,19 +36,19 @@ pub const Rsdp = extern struct {
     }
 
     /// Check if signature is valid
-    pub fn hasValidSignature(self: *const Self) bool {
+    pub fn hasValidSignature(self: *align(1) const Self) bool {
         return std.mem.eql(u8, &self.signature, &RSDP_SIGNATURE);
     }
 
     /// Check if this is ACPI 2.0+ (has extended fields)
-    pub fn isVersion2(self: *const Self) bool {
+    pub fn isVersion2(self: *align(1) const Self) bool {
         return self.revision >= 2;
     }
 
     /// Get RSDT virtual address using HHDM
-    pub fn getRsdtVirt(self: *const Self) *const SdtHeader {
+    pub fn getRsdtVirt(self: *align(1) const Self) *align(1) const SdtHeader {
         const phys: u64 = self.rsdt_address;
-        return @ptrCast(@alignCast(paging.physToVirt(phys)));
+        return @ptrCast(paging.physToVirt(phys));
     }
 };
 
@@ -72,7 +72,7 @@ pub const Rsdp2 = extern struct {
 
     /// Validate extended checksum (sum of all 36 bytes must be 0)
     /// Uses std.mem.asBytes for safe bounded access instead of raw pointer cast
-    pub fn validateExtendedChecksum(self: *const Self) bool {
+    pub fn validateExtendedChecksum(self: *align(1) const Self) bool {
         const bytes = std.mem.asBytes(self);
         var sum: u8 = 0;
         for (bytes) |b| {
@@ -82,12 +82,12 @@ pub const Rsdp2 = extern struct {
     }
 
     /// Get XSDT virtual address using HHDM
-    pub fn getXsdtVirt(self: *const Self) *const SdtHeader {
-        return @ptrCast(@alignCast(paging.physToVirt(self.xsdt_address)));
+    pub fn getXsdtVirt(self: *align(1) const Self) *align(1) const SdtHeader {
+        return @ptrCast(paging.physToVirt(self.xsdt_address));
     }
 
     /// Get as base RSDP for v1 compatibility
-    pub fn asRsdp(self: *const Self) *const Rsdp {
+    pub fn asRsdp(self: *align(1) const Self) *align(1) const Rsdp {
         return @ptrCast(self);
     }
 };
@@ -112,7 +112,7 @@ pub const SdtHeader = extern struct {
 
     /// Validate table checksum (sum of all bytes must be 0)
     /// Returns false if length is invalid or checksum fails
-    pub fn validateChecksum(self: *const Self) bool {
+    pub fn validateChecksum(self: *align(1) const Self) bool {
         // Sanity check: table length must be reasonable
         if (self.length < @sizeOf(SdtHeader) or self.length > MAX_TABLE_SIZE) {
             return false;
@@ -128,13 +128,13 @@ pub const SdtHeader = extern struct {
     }
 
     /// Check if table has specific signature
-    pub fn hasSignature(self: *const Self, sig: *const [4]u8) bool {
-        return std.mem.eql(u8, &self.signature, sig);
+    pub fn hasSignature(self: *align(1) const Self, sig: [4]u8) bool {
+        return std.mem.eql(u8, &self.signature, &sig);
     }
 
     /// Get the entire table as a byte slice (header + data)
     /// Returns null if length field is invalid
-    pub fn asBytes(self: *const Self) ?[]const u8 {
+    pub fn asBytes(self: *align(1) const Self) ?[]const u8 {
         if (self.length < @sizeOf(SdtHeader) or self.length > MAX_TABLE_SIZE) {
             return null;
         }
@@ -144,7 +144,7 @@ pub const SdtHeader = extern struct {
 
     /// Get pointer to table data after header as a bounded slice
     /// Returns empty slice if length is invalid
-    pub fn getData(self: *const Self) []const u8 {
+    pub fn getData(self: *align(1) const Self) []const u8 {
         const data_len = self.getDataLength();
         if (data_len == 0) return &[_]u8{};
         const base: [*]const u8 = @ptrCast(self);
@@ -152,7 +152,7 @@ pub const SdtHeader = extern struct {
     }
 
     /// Get data length (total length minus header)
-    pub fn getDataLength(self: *const Self) usize {
+    pub fn getDataLength(self: *align(1) const Self) usize {
         if (self.length < @sizeOf(SdtHeader) or self.length > MAX_TABLE_SIZE) return 0;
         return self.length - @sizeOf(SdtHeader);
     }
@@ -167,35 +167,35 @@ pub const Rsdt = extern struct {
     const Self = @This();
 
     /// Get number of table entries
-    pub fn getEntryCount(self: *const Self) usize {
+    pub fn getEntryCount(self: *align(1) const Self) usize {
         const data_len = self.header.getDataLength();
         return data_len / @sizeOf(u32);
     }
 
     /// Get table entries as bounded slice of u32 addresses
-    /// Returns null if data is too small or misaligned
-    fn getEntries(self: *const Self) ?[]const u32 {
+    /// Returns null if data is too small
+    fn getEntries(self: *align(1) const Self) ?[]align(1) const u32 {
         const data = self.header.getData();
         const count = self.getEntryCount();
         if (count == 0 or data.len < count * @sizeOf(u32)) return null;
 
-        // Safe reinterpret of bytes as u32 array
-        const ptr: [*]const u32 = @ptrCast(@alignCast(data.ptr));
+        // Safe reinterpret of bytes as u32 array with alignment 1
+        const ptr: [*]align(1) const u32 = @ptrCast(data.ptr);
         return ptr[0..count];
     }
 
     /// Get table entry at index with bounds checking
-    pub fn getEntry(self: *const Self, index: usize) ?*const SdtHeader {
+    pub fn getEntry(self: *align(1) const Self, index: usize) ?*align(1) const SdtHeader {
         const entries = self.getEntries() orelse return null;
         if (index >= entries.len) return null;
 
         const phys: u64 = entries[index];
         if (phys == 0) return null; // Null entry
-        return @ptrCast(@alignCast(paging.physToVirt(phys)));
+        return @ptrCast(paging.physToVirt(phys));
     }
 
     /// Find table by signature
-    pub fn findTable(self: *const Self, signature: *const [4]u8) ?*const SdtHeader {
+    pub fn findTable(self: *align(1) const Self, signature: [4]u8) ?*align(1) const SdtHeader {
         const count = self.getEntryCount();
         for (0..count) |i| {
             if (self.getEntry(i)) |table| {
@@ -217,35 +217,35 @@ pub const Xsdt = extern struct {
     const Self = @This();
 
     /// Get number of table entries
-    pub fn getEntryCount(self: *const Self) usize {
+    pub fn getEntryCount(self: *align(1) const Self) usize {
         const data_len = self.header.getDataLength();
         return data_len / @sizeOf(u64);
     }
 
     /// Get table entries as bounded slice of u64 addresses
-    /// Returns null if data is too small or misaligned
-    fn getEntries(self: *const Self) ?[]const u64 {
+    /// Returns null if data is too small
+    fn getEntries(self: *align(1) const Self) ?[]align(1) const u64 {
         const data = self.header.getData();
         const count = self.getEntryCount();
         if (count == 0 or data.len < count * @sizeOf(u64)) return null;
 
-        // Safe reinterpret of bytes as u64 array
-        const ptr: [*]const u64 = @ptrCast(@alignCast(data.ptr));
+        // Safe reinterpret of bytes as u64 array with alignment 1
+        const ptr: [*]align(1) const u64 = @ptrCast(data.ptr);
         return ptr[0..count];
     }
 
     /// Get table entry at index with bounds checking
-    pub fn getEntry(self: *const Self, index: usize) ?*const SdtHeader {
+    pub fn getEntry(self: *align(1) const Self, index: usize) ?*align(1) const SdtHeader {
         const entries = self.getEntries() orelse return null;
         if (index >= entries.len) return null;
 
         const phys = entries[index];
         if (phys == 0) return null; // Null entry
-        return @ptrCast(@alignCast(paging.physToVirt(phys)));
+        return @ptrCast(paging.physToVirt(phys));
     }
 
     /// Find table by signature
-    pub fn findTable(self: *const Self, signature: *const [4]u8) ?*const SdtHeader {
+    pub fn findTable(self: *align(1) const Self, signature: [4]u8) ?*align(1) const SdtHeader {
         const count = self.getEntryCount();
         for (0..count) |i| {
             if (self.getEntry(i)) |table| {
@@ -260,53 +260,49 @@ pub const Xsdt = extern struct {
 
 /// Find an ACPI table by signature, searching XSDT first (if available), then RSDT
 /// Returns null if table not found or RSDP is invalid
-pub fn findTable(rsdp_ptr: *const Rsdp, signature: *const [4]u8) ?*const SdtHeader {
-    // Validate RSDP
-    if (!rsdp_ptr.hasValidSignature()) {
+pub fn findTable(rsdp_ptr: *align(1) const Rsdp, signature: [4]u8) ?*align(1) const SdtHeader {
+    // 1. Validate Signature (Manual)
+    const ptr = @as([*]const u8, @ptrCast(rsdp_ptr));
+    if (!std.mem.eql(u8, ptr[0..8], &RSDP_SIGNATURE)) {
         console.warn("ACPI: Invalid RSDP signature", .{});
         return null;
     }
 
-    if (!rsdp_ptr.validateChecksum()) {
+    // 2. Validate Checksum (Manual)
+    var sum: u8 = 0;
+    for (ptr[0..@sizeOf(Rsdp)]) |b| {
+        sum +%= b;
+    }
+    if (sum != 0) {
         console.warn("ACPI: Invalid RSDP checksum", .{});
         return null;
     }
 
+    // 3. Logic to traverse tables (Rest of logic)
     // If ACPI 2.0+, prefer XSDT (64-bit addresses)
     if (rsdp_ptr.isVersion2()) {
-        const rsdp2: *const Rsdp2 = @ptrCast(rsdp_ptr);
-
-        if (!rsdp2.validateExtendedChecksum()) {
-            console.warn("ACPI: Invalid RSDP2 extended checksum, falling back to RSDT", .{});
-        } else if (rsdp2.xsdt_address != 0) {
-            const xsdt: *const Xsdt = @ptrCast(rsdp2.getXsdtVirt());
-
-            if (!xsdt.header.validateChecksum()) {
-                console.warn("ACPI: Invalid XSDT checksum, falling back to RSDT", .{});
-            } else {
-                if (xsdt.findTable(signature)) |table| {
-                    return table;
+        const rsdp2: *align(1) const Rsdp2 = @ptrCast(rsdp_ptr);
+        if (rsdp2.validateExtendedChecksum()) {
+            if (rsdp2.xsdt_address != 0) {
+                const xsdt: *align(1) const Xsdt = @ptrCast(rsdp2.getXsdtVirt());
+                if (xsdt.header.validateChecksum()) {
+                    if (xsdt.findTable(signature)) |table| {
+                        return table;
+                    }
                 }
-                // Table not in XSDT, don't fall back to RSDT
-                return null;
             }
         }
     }
 
-    // Fall back to RSDT (32-bit addresses)
-    if (rsdp_ptr.rsdt_address == 0) {
-        console.warn("ACPI: No RSDT address in RSDP", .{});
-        return null;
+    // Fall back to RSDT
+    if (rsdp_ptr.rsdt_address != 0) {
+        const rsdt: *align(1) const Rsdt = @ptrCast(rsdp_ptr.getRsdtVirt());
+        if (rsdt.header.validateChecksum()) {
+            return rsdt.findTable(signature);
+        }
     }
 
-    const rsdt: *const Rsdt = @ptrCast(rsdp_ptr.getRsdtVirt());
-
-    if (!rsdt.header.validateChecksum()) {
-        console.warn("ACPI: Invalid RSDT checksum", .{});
-        return null;
-    }
-
-    return rsdt.findTable(signature);
+    return null;
 }
 
 /// Log RSDP information for debugging

@@ -266,8 +266,12 @@ fn logDevice(dev: *const PciDevice) void {
 }
 
 /// Initialize PCI subsystem with ECAM from ACPI
-pub fn initFromAcpi(rsdp_ptr: anytype) !struct { ecam: Ecam, devices: DeviceList } {
+pub fn initFromAcpi(rsdp_address: u64) !struct { ecam: Ecam, devices: DeviceList } {
     const acpi = @import("acpi");
+
+    // Cast address to RSDP pointer
+    const rsdp_ptr = @as(*align(1) const acpi.rsdp.Rsdp, @ptrFromInt(rsdp_address));
+    console.info("Debug: rsdp_ptr created, calling findEcamBase", .{});
 
     // Find ECAM base from MCFG table
     const ecam_info = acpi.mcfg.findEcamBase(rsdp_ptr) orelse {

@@ -60,7 +60,17 @@ const Scheduler = struct {
     /// Per-CPU kernel GS data pointer (for syscall stack switching)
     /// Set by main.zig during initialization
     gs_data: ?*hal.syscall.KernelGsData = null,
+
+    /// Callback function to be called on every timer tick
+    tick_callback: ?*const fn () void = null,
 };
+
+/// Set the timer tick callback function
+pub fn setTickCallback(callback: *const fn () void) void {
+    const held = scheduler.lock.acquire();
+    defer held.release();
+    scheduler.tick_callback = callback;
+}
 
 /// Add a thread to the back of the ready queue
 fn addToReadyQueue(t: *Thread) void {
@@ -431,6 +441,11 @@ pub fn timerTick(frame: *hal.idt.InterruptFrame) *hal.idt.InterruptFrame {
 
     scheduler.tick_count += 1;
     wakeSleepingThreads(scheduler.tick_count);
+
+    // Call registered timer callback (e.g. for TCP timers)
+    if (scheduler.tick_callback) |cb| {
+        cb();
+    }
 
     // Don't schedule if scheduler isn't running yet
     if (!scheduler.running) {

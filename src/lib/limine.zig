@@ -199,3 +199,15 @@ pub const EntryPointRequest = extern struct {
 pub const EntryPointResponse = extern struct {
     revision: u64,
 };
+
+// RSDP Request and Response (for ACPI)
+pub const RsdpRequest = extern struct {
+    id: [4]u64 = id(0xc5e77b6b397e7b43, 0x27637845accdcf3c),
+    revision: u64 = 0,
+    response: ?*RsdpResponse = null,
+};
+
+pub const RsdpResponse = extern struct {
+    revision: u64,
+    address: u64,
+};

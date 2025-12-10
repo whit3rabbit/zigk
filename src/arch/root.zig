@@ -30,6 +30,7 @@ pub const fpu = arch.fpu;
 pub const debug = arch.debug;
 pub const entropy = arch.entropy;
 pub const syscall = arch.syscall;
+pub const mmio = arch.mmio;
 
 /// Initialize the Hardware Abstraction Layer
 /// Must be called early in kernel boot before using any HAL functions

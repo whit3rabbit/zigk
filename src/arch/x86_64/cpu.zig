@@ -107,6 +107,23 @@ pub inline fn disableInterrupts() void {
     asm volatile ("cli");
 }
 
+/// Disable interrupts and return saved RFLAGS (for save/restore pattern)
+pub inline fn disableInterruptsSaveFlags() u64 {
+    const rflags = asm volatile ("pushfq; pop %[ret]"
+        : [ret] "=r" (-> u64),
+    );
+    asm volatile ("cli");
+    return rflags;
+}
+
+/// Restore interrupt state from saved RFLAGS
+pub inline fn restoreInterrupts(saved_flags: u64) void {
+    // Only restore IF bit - use sti if it was set, otherwise leave cli
+    if ((saved_flags & (1 << 9)) != 0) {
+        asm volatile ("sti");
+    }
+}
+
 /// Check if interrupts are enabled via RFLAGS.IF
 pub inline fn interruptsEnabled() bool {
     const rflags = asm volatile ("pushfq; pop %[ret]"

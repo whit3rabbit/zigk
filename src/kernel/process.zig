@@ -22,6 +22,7 @@ const user_vmm_mod = @import("user_vmm");
 const vmm = @import("vmm");
 const pmm = @import("pmm");
 const hal = @import("hal");
+const sched = @import("sched");
 const uapi = @import("uapi");
 
 const FdTable = fd_mod.FdTable;
@@ -191,9 +192,23 @@ var next_pid: u32 = 1; // PID 0 reserved for kernel
 var process_count: u32 = 0;
 
 fn allocatePid() u32 {
-    const pid = next_pid;
-    next_pid += 1;
-    return pid;
+    const max_attempts = @as(usize, process_count) + 1;
+    var attempts: usize = 0;
+
+    while (attempts <= max_attempts) : (attempts += 1) {
+        if (next_pid == 0) {
+            next_pid = 1;
+        }
+
+        const candidate = next_pid;
+        next_pid +%= 1;
+
+        if (findProcessByPid(candidate) == null) {
+            return candidate;
+        }
+    }
+
+    console.panic("Process: PID space exhausted", .{});
 }
 
 // =============================================================================
@@ -303,11 +318,37 @@ pub fn forkProcess(parent: *Process) !*Process {
     return child;
 }
 
+/// Exit the current process with the given status.
+/// Marks the owning Process as Zombie (if present) and delegates
+/// the thread teardown to the scheduler.
+pub fn exit(status: i32) noreturn {
+    if (sched.getCurrentThread()) |curr| {
+        if (curr.process) |proc_opaque| {
+            const proc: *Process = @ptrCast(@alignCast(proc_opaque));
+            proc.exitWithStatus(status);
+        }
+    }
+
+    sched.exitWithStatus(status);
+    unreachable;
+}
+
 /// Copy a UserVmm (for fork) - creates new address space with copied pages
 fn copyUserVmm(src: *UserVmm) !*UserVmm {
     // Create new address space
     const dst = try UserVmm.init();
     errdefer dst.deinit();
+
+    const cleanupMappedRange = struct {
+        fn call(dst_vmm: *UserVmm, virt_start: u64, phys_start: u64, page_count: usize) void {
+            var i: usize = 0;
+            while (i < page_count) : (i += 1) {
+                const virt = virt_start + i * pmm.PAGE_SIZE;
+                vmm.unmapPage(dst_vmm.pml4_phys, virt) catch {};
+            }
+            pmm.freePages(phys_start, page_count);
+        }
+    }.call;
 
     // Copy each VMA
     var vma = src.vma_head;
@@ -341,12 +382,13 @@ fn copyUserVmm(src: *UserVmm) !*UserVmm {
         // Map pages in destination address space
         const page_flags = v.toPageFlags();
         vmm.mapRange(dst.pml4_phys, v.start, phys_pages, v.size(), page_flags) catch {
-            pmm.freePages(phys_pages, page_count);
+            cleanupMappedRange(dst, v.start, phys_pages, page_count);
             return error.OutOfMemory;
         };
 
         // Create VMA in destination
         const dst_vma = dst.createVma(v.start, v.end, v.prot, v.flags) catch {
+            cleanupMappedRange(dst, v.start, phys_pages, page_count);
             return error.OutOfMemory;
         };
         dst.insertVma(dst_vma);
@@ -368,6 +410,7 @@ pub fn destroyProcess(proc: *Process) void {
     const alloc = heap.allocator();
 
     console.debug("Process: Destroying pid={}", .{proc.pid});
+    proc.state = .Dead;
 
     // Reparent children to init (or let them become orphans for now)
     var child = proc.first_child;

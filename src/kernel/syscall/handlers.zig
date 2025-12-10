@@ -136,18 +136,16 @@ pub fn sys_exit(status: usize) isize {
     const exit_code: i32 = @truncate(@as(isize, @bitCast(status)));
     console.debug("sys_exit: code={d}", .{exit_code});
 
-    // Tell scheduler to exit current thread with status
-    sched.exitWithStatus(exit_code);
-
-    // Should not return, but if it does, return the status
-    return @bitCast(status);
+    process_mod.exit(exit_code);
+    unreachable;
 }
 
 /// sys_exit_group (231) - Exit all threads in process group
 ///
 /// MVP: Same as sys_exit since we don't have process groups yet.
 pub fn sys_exit_group(status: usize) isize {
-    return sys_exit(status);
+    process_mod.exit(@truncate(@as(isize, @bitCast(status))));
+    unreachable;
 }
 
 /// sys_wait4 (61) - Wait for process state change
@@ -185,7 +183,13 @@ pub fn sys_wait4(pid_arg: usize, wstatus_ptr: usize, options: usize, rusage_ptr:
 
             // Remove from parent's child list and destroy
             thread.removeChild(current, zombie);
-            thread.destroyThread(zombie);
+            const proc_opaque = thread.destroyThread(zombie);
+            if (proc_opaque) |ptr| {
+                const proc = @as(*process_mod.Process, @ptrCast(@alignCast(ptr)));
+                if (proc.unref()) {
+                    process_mod.destroyProcess(proc);
+                }
+            }
 
             return @intCast(reaped_tid);
         }
@@ -655,7 +659,21 @@ pub fn sys_mprotect(addr: usize, len: usize, prot: usize) isize {
 /// Returns: 0 on success, negative errno on error
 pub fn sys_munmap(addr: usize, len: usize) isize {
     const uvmm = getGlobalUserVmm();
-    return uvmm.munmap(@intCast(addr), len);
+    const result = uvmm.munmap(@intCast(addr), len);
+
+    // Update RSS on successful unmap (mirrors sys_mmap increment)
+    if (result == 0) {
+        const aligned_len = std.mem.alignForward(usize, len, pmm.PAGE_SIZE);
+        const proc = getCurrentProcess();
+        if (proc.rss_current >= aligned_len) {
+            proc.rss_current -= aligned_len;
+        } else {
+            // Underflow protection - reset to 0 if accounting got out of sync
+            proc.rss_current = 0;
+        }
+    }
+
+    return result;
 }
 
 /// sys_socket (41) - Create a socket
@@ -731,6 +749,7 @@ pub fn sys_fork() isize {
             .name = parent_thread.getName(),
             .cr3 = child_proc.cr3,
             .user_stack_top = parent_thread.user_stack_top,
+            .process = @ptrCast(child_proc),
         },
     ) catch {
         process_mod.destroyProcess(child_proc);
@@ -835,6 +854,7 @@ pub fn sys_execve(frame: *hal.syscall.SyscallFrame, path_ptr: usize, argv_ptr: u
     // Heap-allocate the data buffer (128KB like Linux) to avoid stack overflow
     // and return proper E2BIG error if arguments exceed limit.
     const MAX_ARG_SIZE = 128 * 1024; // 128KB like Linux ARG_MAX
+    const MAX_ARG_STRLEN = 4096; // 4KB per-argument limit (like Linux PAGE_SIZE)
     const alloc = heap.allocator();
     const arg_data_buf = alloc.alloc(u8, MAX_ARG_SIZE) catch {
         return Errno.ENOMEM.toReturn();
@@ -863,6 +883,11 @@ pub fn sys_execve(frame: *hal.syscall.SyscallFrame, path_ptr: usize, argv_ptr: u
                 if (err == error.NameTooLong) return Errno.E2BIG.toReturn();
                 return Errno.EFAULT.toReturn();
             };
+
+            // Per-argument length limit (security hardening)
+            if (arg_slice.len > MAX_ARG_STRLEN) {
+                return Errno.E2BIG.toReturn();
+            }
 
             argv_storage[argc] = arg_slice;
             arg_data_idx += arg_slice.len + 1; // +1 for null terminator space
@@ -901,6 +926,11 @@ pub fn sys_execve(frame: *hal.syscall.SyscallFrame, path_ptr: usize, argv_ptr: u
                 if (err == error.NameTooLong) return Errno.E2BIG.toReturn();
                 return Errno.EFAULT.toReturn();
             };
+
+            // Per-argument length limit (security hardening)
+            if (env_slice.len > MAX_ARG_STRLEN) {
+                return Errno.E2BIG.toReturn();
+            }
 
             envp_storage[envc] = env_slice;
             arg_data_idx += env_slice.len + 1; // +1 for null terminator space

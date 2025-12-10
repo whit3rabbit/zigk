@@ -134,18 +134,7 @@ pub fn build(b: *std.Build) void {
     pci_module.addImport("acpi", acpi_module);
 
 
-    // Create E1000e driver module (Intel 82574L NIC)
-    const e1000e_module = b.createModule(.{
-        .root_source_file = b.path("src/drivers/net/e1000e.zig"),
-        .target = kernel_target,
-        .optimize = optimize,
-    });
-    e1000e_module.addImport("hal", hal_module);
-    e1000e_module.addImport("pci", pci_module);
-    e1000e_module.addImport("vmm", vmm_module);
-    e1000e_module.addImport("pmm", pmm_module);
-    e1000e_module.addImport("sync", sync_module);
-    e1000e_module.addImport("console", console_module);
+
 
 
     // Create PRNG module (Kernel entropy/random)
@@ -166,7 +155,6 @@ pub fn build(b: *std.Build) void {
     net_module.addImport("hal", hal_module);
     net_module.addImport("uapi", uapi_module);
     net_module.addImport("prng", prng_module);
-
 
 
     // Create Heap module (Kernel Heap Allocator)
@@ -235,6 +223,22 @@ pub fn build(b: *std.Build) void {
     stack_guard_module.addImport("hal", hal_module);
     stack_guard_module.addImport("console", console_module);
     stack_guard_module.addImport("prng", prng_module);
+
+
+    // Create E1000e driver module (Intel 82574L NIC)
+    const e1000e_module = b.createModule(.{
+        .root_source_file = b.path("src/drivers/net/e1000e.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    e1000e_module.addImport("hal", hal_module);
+    e1000e_module.addImport("pci", pci_module);
+    e1000e_module.addImport("vmm", vmm_module);
+    e1000e_module.addImport("pmm", pmm_module);
+    e1000e_module.addImport("sync", sync_module);
+    e1000e_module.addImport("console", console_module);
+    e1000e_module.addImport("thread", thread_module);
+    e1000e_module.addImport("sched", sched_module);
 
 
 
@@ -318,6 +322,7 @@ pub fn build(b: *std.Build) void {
     process_module.addImport("pmm", pmm_module);
     process_module.addImport("hal", hal_module);
     process_module.addImport("uapi", uapi_module);
+    process_module.addImport("sched", sched_module);
 
     // Create ELF loader module (for execve)
     const elf_module = b.createModule(.{

@@ -81,6 +81,12 @@ pub const Thread = struct {
     /// Thread name for debugging (null-terminated, max 31 chars + null)
     name: [32]u8,
 
+    /// Owning process (for cleanup)
+    /// Opaque pointer to avoid circular dependency
+    process: ?*anyopaque,
+
+
+
     /// Doubly-linked list pointers for ready queue
     next: ?*Thread,
     prev: ?*Thread,
@@ -117,6 +123,11 @@ pub const Thread = struct {
     }
 };
 
+comptime {
+    // FXSAVE/FXRSTOR require 16-byte alignment for the FPU state area
+    std.debug.assert(@alignOf(Thread) >= 16);
+}
+
 /// Thread creation errors
 pub const ThreadError = error{
     OutOfMemory,
@@ -142,6 +153,9 @@ pub const ThreadOptions = struct {
 
     /// Initial user stack pointer (for user threads)
     user_stack_top: u64 = 0,
+
+    /// Owning process (optional)
+    process: ?*anyopaque = null,
 };
 
 // Thread ID counter - atomically incremented for each new thread
@@ -195,7 +209,8 @@ pub fn createKernelThread(
         total_pages = kernel_stack.STACK_SLOT_PAGES;
         use_ks_allocator = true;
     } else {
-        // Fallback: HHDM-based allocation (early boot, no real guard protection)
+        // Fallback: HHDM-based allocation (early boot)
+        // NOTE: We still create a proper guard page by unmapping the HHDM page
         const stack_size = std.mem.alignForward(usize, options.stack_size, pmm.PAGE_SIZE);
         const stack_pages = stack_size / pmm.PAGE_SIZE;
         total_pages = stack_pages + 1;
@@ -211,8 +226,14 @@ pub fn createKernelThread(
         guard_page_virt = stack_base_virt - pmm.PAGE_SIZE;
         stack_top_virt = stack_base_virt + stack_size;
 
-        // Warning: HHDM guard page is actually mapped memory!
-        // This path is only used during early boot before kernel_stack.init()
+        // Unmap the guard page in HHDM to provide stack overflow protection
+        // even during early boot. This page is part of the HHDM linear map
+        // so unmapping it creates a hole that will fault on access.
+        vmm.unmapPage(vmm.getKernelPml4(), guard_page_virt) catch |err| {
+            // If unmap fails, log warning but continue - better to have a thread
+            // without guard protection than no thread at all during early boot
+            console.warn("Thread: Failed to unmap guard page {x}: {}", .{ guard_page_virt, err });
+        };
     }
 
     // Allocate thread structure from heap
@@ -250,6 +271,7 @@ pub fn createKernelThread(
         .wake_time = 0,
         .sleep_prev = null,
         .sleep_next = null,
+        .process = null,
     };
 
     // Set thread name
@@ -341,6 +363,7 @@ pub fn createUserThread(
         .wake_time = 0,
         .sleep_prev = null,
         .sleep_next = null,
+        .process = options.process,
     };
 
     thread.setName(options.name);
@@ -498,7 +521,7 @@ fn writeStackU64(addr: u64, value: u64) void {
 
 /// Destroy a thread and free its resources
 /// Thread must be in Zombie state and removed from all queues
-pub fn destroyThread(thread: *Thread) void {
+pub fn destroyThread(thread: *Thread) ?*anyopaque {
     if (config.debug_scheduler) {
         console.info("Thread: Destroying '{s}' (tid={d})", .{
             thread.getName(),
@@ -520,11 +543,17 @@ pub fn destroyThread(thread: *Thread) void {
         pmm.freePages(stack_phys, stack_pages);
     }
 
+    // Capture process pointer before destroying thread
+    const proc = thread.process;
+    thread.process = null;
+
     // Free thread structure
     const alloc = heap.allocator();
     alloc.destroy(thread);
 
     active_thread_count -= 1;
+    
+    return proc;
 }
 
 /// Get the current count of active threads

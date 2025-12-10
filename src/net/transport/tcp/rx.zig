@@ -139,7 +139,7 @@ fn processListenPacket(
 
     // Scale peer window if negotiated
     if (new_tcb.wscale_ok) {
-        new_tcb.snd_wnd = @as(u32, new_tcb.snd_wnd) << new_tcb.snd_wscale;
+        new_tcb.snd_wnd = @as(u32, new_tcb.snd_wnd) << @as(u5, @intCast(new_tcb.snd_wscale));
     }
 
     // Link to parent for accept queue
@@ -264,7 +264,7 @@ fn processSynSent(tcb: *Tcb, pkt: *PacketBuffer, tcp_hdr: *TcpHeader) bool {
     // Record peer's window (apply scaling if negotiated)
     const raw_window = tcp_hdr.getWindow();
     tcb.snd_wnd = if (tcb.wscale_ok)
-        @as(u32, raw_window) << tcb.snd_wscale
+        @as(u32, raw_window) << @as(u5, @intCast(tcb.snd_wscale))
     else
         raw_window;
 

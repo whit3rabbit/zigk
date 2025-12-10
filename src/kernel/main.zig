@@ -29,6 +29,9 @@ const fs = @import("fs");
 const elf = @import("elf");
 const process_mod = @import("process");
 const handlers = @import("syscall_handlers");
+const net = @import("net");
+const pci = @import("pci");
+const e1000e = @import("e1000e");
 
 // Syscall dispatch table - must be imported to compile dispatch_syscall symbol
 // called from asm_helpers.S _syscall_entry
@@ -58,6 +61,7 @@ pub export var memmap_request linksection(".limine_requests") = limine.MemoryMap
 pub export var module_request linksection(".limine_requests") = limine.ModuleRequest{};
 pub export var framebuffer_request linksection(".limine_requests") = limine.FramebufferRequest{};
 pub export var kernel_address_request linksection(".limine_requests") = limine.KernelAddressRequest{};
+pub export var rsdp_request linksection(".limine_requests") = limine.RsdpRequest{};
 
 /// Per-CPU kernel data for syscall entry (GS segment)
 /// For SMP, this would be an array indexed by CPU ID
@@ -180,6 +184,9 @@ export fn _start() noreturn {
 
     console.print("\n");
     console.info("Kernel initialization complete", .{});
+
+    // Initialize network (PCI + E1000e + Net Stack)
+    initNetwork();
 
     // Load Init Process (httpd or shell) from modules
     loadInitProcess();
@@ -304,6 +311,7 @@ fn loadInitProcess() void {
         .name = process_name,
         .cr3 = proc.cr3,
         .user_stack_top = stack_virt_top,
+        .process = @ptrCast(proc),
     }) catch |err| {
         console.err("Failed to create user thread: {}", .{err});
         return;
@@ -482,4 +490,67 @@ pub fn panic(msg: []const u8, _: ?*@import("std").builtin.StackTrace, _: ?usize)
     console.printUnsafe("\n");
 
     halt();
+}
+
+// ============================================================================
+// Network Initialization
+// ============================================================================
+
+var net_interface: net.Interface = undefined;
+
+fn txWrapper(data: []const u8) bool {
+    if (e1000e.getDriver()) |driver| {
+        return driver.transmit(data);
+    }
+    return false;
+}
+
+fn rxCallbackAdapter(data: []u8) void {
+    // Wrap data in PacketBuffer and pass to network stack
+    var pkt = net.PacketBuffer.init(data, data.len);
+    _ = net.processFrame(&net_interface, &pkt);
+}
+
+fn initNetwork() void {
+    console.print("\n");
+    console.info("Initializing network subsystem...", .{});
+
+    // 1. Get RSDP for PCI ECAM
+    if (rsdp_request.response) |resp| {
+        console.info("Debug: RSDP response at 0x{x}", .{resp.address});
+    }
+    const rsdp_response = rsdp_request.response orelse {
+        console.warn("RSDP not found (BIOS boot without ACPI?), network disabled.", .{});
+        return;
+    };
+    const rsdp_addr = rsdp_response.address;
+    console.info("Debug: Calling pci.initFromAcpi with 0x{x}", .{rsdp_addr});
+
+    // 2. Initialize PCI
+    const pci_res = pci.initFromAcpi(rsdp_addr) catch |err| {
+        console.err("PCI init failed: {}", .{err});
+        return;
+    };
+    
+    // 3. Initialize E1000e
+    const nic_driver = e1000e.initFromPci(&pci_res.devices, &pci_res.ecam) catch |err| {
+        console.warn("E1000e init failed (no supported NIC?): {}", .{err});
+        return;
+    };
+
+    // 4. Setup Interface
+    const mac = nic_driver.getMacAddress();
+    net_interface = net.Interface.init("eth0", mac);
+    net_interface.setTransmitFn(txWrapper);
+
+    // 5. Initialize Network Stack
+    net.init(&net_interface, heap.allocator());
+
+    // 6. Register Callbacks
+    nic_driver.setRxCallback(rxCallbackAdapter);
+    sched.setTickCallback(net.transport.tcpProcessTimers);
+
+    console.info("Network initialized (MAC={x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2})", .{
+        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+    });
 }

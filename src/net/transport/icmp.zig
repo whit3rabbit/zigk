@@ -96,7 +96,7 @@ fn handleEchoRequest(iface: *Interface, req_pkt: *PacketBuffer, icmp_len: usize)
 
     // Resolve destination MAC
     const next_hop = iface.getGateway(src_ip);
-    const dst_mac = arp.resolveOrRequest(iface, next_hop) orelse {
+    const dst_mac = arp.resolveOrRequest(iface, next_hop, null) orelse {
         // Can't resolve MAC - drop reply
         // A real implementation would queue this
         return false;
@@ -161,7 +161,7 @@ fn handleEchoRequest(iface: *Interface, req_pkt: *PacketBuffer, icmp_len: usize)
 
 /// Handle ICMP Destination Unreachable messages
 /// Specifically handles Code 4 (Fragmentation Needed) for PMTUD (RFC 1191)
-fn handleDestUnreachable(pkt: *PacketBuffer, icmp: *const IcmpHeader) bool {
+fn handleDestUnreachable(pkt: *PacketBuffer, icmp: *align(1) const IcmpHeader) bool {
     // ICMP Destination Unreachable format:
     // Bytes 0-1: Type (3) + Code
     // Bytes 2-3: Checksum
@@ -270,7 +270,7 @@ pub fn sendEchoRequest(
 ) bool {
     // Resolve destination MAC
     const next_hop = iface.getGateway(dst_ip);
-    const dst_mac = arp.resolveOrRequest(iface, next_hop) orelse {
+    const dst_mac = arp.resolveOrRequest(iface, next_hop, null) orelse {
         return false;
     };
 
@@ -348,7 +348,7 @@ pub fn sendDestUnreachable(
 
     // Resolve MAC
     const next_hop = iface.getGateway(src_ip);
-    const dst_mac = arp.resolveOrRequest(iface, next_hop) orelse {
+    const dst_mac = arp.resolveOrRequest(iface, next_hop, null) orelse {
         return false;
     };
 

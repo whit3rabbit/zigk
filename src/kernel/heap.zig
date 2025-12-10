@@ -225,7 +225,7 @@ pub fn reset() void {
 
 /// Allocate memory from the heap
 /// Thread-safe: acquires heap_lock for the duration of the operation
-pub fn alloc(size: usize) ?[*]u8 {
+pub fn alloc(size: usize) ?[]u8 {
     if (!initialized or size == 0) {
         return null;
     }
@@ -279,12 +279,12 @@ pub fn alloc(size: usize) ?[*]u8 {
 
 /// Free previously allocated memory
 /// Thread-safe: acquires heap_lock for the duration of the operation
-pub fn free(ptr: [*]u8) void {
+pub fn free(buf: []u8) void {
     if (!initialized) {
         return;
     }
 
-    const ptr_addr = @intFromPtr(ptr);
+    const ptr_addr = @intFromPtr(buf.ptr);
     if (ptr_addr < heap_start or ptr_addr >= heap_end) {
         if (is_freestanding) {
             console.warn("Heap: Invalid free at {x}", .{ptr_addr});
@@ -363,9 +363,9 @@ pub fn free(ptr: [*]u8) void {
 }
 
 /// Reallocate memory (grow or shrink)
-pub fn realloc(ptr: [*]u8, old_size: usize, new_size: usize) ?[*]u8 {
+pub fn realloc(buf: []u8, old_size: usize, new_size: usize) ?[]u8 {
     if (new_size == 0) {
-        free(ptr);
+        free(buf);
         return null;
     }
 
@@ -378,19 +378,19 @@ pub fn realloc(ptr: [*]u8, old_size: usize, new_size: usize) ?[*]u8 {
     const copy_size = @min(old_size, new_size);
 
     // Copy data
-    const src = ptr[0..copy_size];
+    const src = buf[0..copy_size];
     const dst = new_ptr[0..copy_size];
     @memcpy(dst, src);
 
-    free(ptr);
+    free(buf);
     return new_ptr;
 }
 
 /// Allocate zeroed memory
-pub fn allocZeroed(size: usize) ?[*]u8 {
-    const ptr = alloc(size) orelse return null;
-    @memset(ptr[0..size], 0);
-    return ptr;
+pub fn allocZeroed(size: usize) ?[]u8 {
+    const slice = alloc(size) orelse return null;
+    @memset(slice[0..size], 0);
+    return slice;
 }
 
 /// Get total allocated bytes (for leak detection)
@@ -471,7 +471,8 @@ fn stdAlloc(_: *anyopaque, len: usize, ptr_align: std.mem.Alignment, _: usize) ?
         // Cannot satisfy alignment requirement
         return null;
     }
-    return alloc(len);
+    const slice = alloc(len) orelse return null;
+    return slice.ptr;
 }
 
 fn stdResize(_: *anyopaque, buf: []u8, _: std.mem.Alignment, new_len: usize, _: usize) bool {
@@ -488,12 +489,12 @@ fn stdRemap(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) ?[
 }
 
 fn stdFree(_: *anyopaque, buf: []u8, _: std.mem.Alignment, _: usize) void {
-    free(buf.ptr);
+    free(buf);
 }
 
 // Internal helper functions
 
-fn allocateFromBlock(block: *BlockHeader, required_size: usize) ?[*]u8 {
+fn allocateFromBlock(block: *BlockHeader, required_size: usize) ?[]u8 {
     const block_size = block.getSize();
 
     // Remove from free list first (this decrements free_block_count)
@@ -539,7 +540,7 @@ fn allocateFromBlock(block: *BlockHeader, required_size: usize) ?[*]u8 {
         console.debug("Heap: Allocated {d} bytes at {x}", .{ payload_size, @intFromPtr(block.getPayload()) });
     }
 
-    return block.getPayload();
+    return block.getPayload()[0..payload_size];
 }
 
 fn addToFreeList(block: *BlockHeader) void {

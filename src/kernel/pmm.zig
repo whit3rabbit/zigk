@@ -322,6 +322,9 @@ pub fn allocPages(count: usize) ?u64 {
             // Mark all pages as allocated
             i = 0;
             while (i < count) : (i += 1) {
+                if (isBitSet(start_page + i)) {
+                    @panic("PMM: allocPages found bit set during allocation phase");
+                }
                 setBit(start_page + i);
                 refcounts[start_page + i] = 1;
             }

@@ -13,7 +13,7 @@ pub fn processTimers() void {
     // Advance timestamp counter (assumes ~1ms per tick)
     state.connection_timestamp +%= 1;
 
-    for (&state.tcb_pool) |*tcb| {
+    for (state.tcb_pool.items) |tcb| {
         if (!tcb.allocated) continue;
 
         // Check state-based timeout (garbage collection)
@@ -127,7 +127,7 @@ pub fn handleIcmpError(local_ip: u32, local_port: u16, remote_ip: u32, remote_po
 }
 
 /// Get state timeout in milliseconds (0 = no timeout)
-pub fn getStateTimeout(tcp_state: @TypeOf(state.tcb_pool[0].state)) u64 {
+pub fn getStateTimeout(tcp_state: @TypeOf(state.tcb_pool.items[0].state)) u64 {
     const timeouts = c.STATE_TIMEOUT_MS{};
     return switch (tcp_state) {
         .Closed => timeouts.closed,

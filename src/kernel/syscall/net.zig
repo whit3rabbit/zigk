@@ -380,7 +380,7 @@ pub fn sys_accept(fd: usize, addr_ptr: usize, addrlen_ptr: usize) isize {
                 // Disable interrupts to atomically set blocked_thread before
                 // entering Blocked state. This prevents a wake event from
                 // occurring between setting blocked_thread and blocking.
-                hal.cpu.disableInterrupts();
+                _ = hal.cpu.disableInterrupts();
                 sock.blocked_thread = current;
                 // block() sets state to Blocked then enables interrupts and
                 // halts. When we return, interrupts are enabled.
@@ -439,7 +439,7 @@ pub fn sys_connect(fd: usize, addr_ptr: usize, addrlen: usize) isize {
                     // Disable interrupts to atomically set blocked_thread before
                     // entering Blocked state. This prevents a wake event from
                     // occurring between setting blocked_thread and blocking.
-                    hal.cpu.disableInterrupts();
+                    _ = hal.cpu.disableInterrupts();
                     // Set blocked_thread on TCB so TCP layer can wake us
                     if (socket.getTcb(ctx.socket_idx)) |tcb| {
                         tcb.blocked_thread = current;

@@ -15,6 +15,7 @@ const PacketBuffer = packet.PacketBuffer;
 const Ipv4Header = packet.Ipv4Header;
 const EthernetHeader = packet.EthernetHeader;
 const Interface = interface.Interface;
+const heap = @import("heap");
 const hal = @import("hal");
 const entropy = hal.entropy;
 const reassembly = @import("reassembly.zig");
@@ -478,6 +479,12 @@ fn sendFragmentedPacket(iface: *Interface, pkt: *PacketBuffer, dst_mac: [6]u8) b
     
     // Max payload per fragment (MTU - IP Header), aligned to 8 bytes
     const mtu_payload = (iface.mtu - ip_header_len) & ~@as(u16, 7);
+
+    const alloc = heap.allocator();
+    const frag_buf = alloc.alloc(u8, packet.MAX_PACKET_SIZE) catch {
+        return false;
+    };
+    defer alloc.free(frag_buf);
     
     var offset: usize = 0;
     while (offset < payload.len) {
@@ -487,8 +494,7 @@ fn sendFragmentedPacket(iface: *Interface, pkt: *PacketBuffer, dst_mac: [6]u8) b
         const last_frag = (chunk_len == remaining);
         
         // Build fragment packet
-        var frag_buf: [packet.MAX_PACKET_SIZE]u8 = undefined;
-        var frag_pkt = PacketBuffer.init(&frag_buf, 0);
+        var frag_pkt = PacketBuffer.init(frag_buf, 0);
         
         // 1. Build Ethernet Header (recycle buildFrame)
         ethernet.buildFrame(iface, &frag_pkt, dst_mac, ethernet.ETHERTYPE_IPV4);

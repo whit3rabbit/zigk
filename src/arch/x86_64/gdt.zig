@@ -70,6 +70,11 @@ pub const GdtEntry = packed struct(u64) {
             .base_high = 0,
         };
     }
+
+    // Compile-time verification of struct size for hardware compatibility
+    comptime {
+        if (@sizeOf(Self) != 8) @compileError("GdtEntry must be exactly 8 bytes");
+    }
 };
 
 // TSS Descriptor (16 bytes, spans two GDT slots)
@@ -104,29 +109,42 @@ pub const TssDescriptor = packed struct(u128) {
             .reserved = 0,
         };
     }
+
+    // Compile-time verification of struct size for hardware compatibility
+    comptime {
+        if (@sizeOf(Self) != 16) @compileError("TssDescriptor must be exactly 16 bytes");
+    }
 };
 
 // Task State Segment (TSS) structure for x86_64
-// Size: 104 bytes minimum
+// Size: 104 bytes (matches Intel SDM Table 7-2)
+// Uses align(1) on all fields to match hardware layout without C ABI padding
 pub const Tss = extern struct {
-    reserved0: u32 = 0,
+    reserved0: u32 align(1) = 0,
     // RSP values for privilege level transitions (ring 3 -> ring 0, etc.)
-    rsp0: u64 = 0, // Kernel stack pointer (used on syscall/interrupt from ring 3)
-    rsp1: u64 = 0,
-    rsp2: u64 = 0,
-    reserved1: u64 = 0,
+    rsp0: u64 align(1) = 0, // Kernel stack pointer (used on syscall/interrupt from ring 3)
+    rsp1: u64 align(1) = 0,
+    rsp2: u64 align(1) = 0,
+    reserved1: u64 align(1) = 0,
     // Interrupt Stack Table (IST) - separate stacks for specific interrupts
     // IST[0] is unused (index 1-7 in hardware)
-    ist1: u64 = 0, // Double fault stack
-    ist2: u64 = 0,
-    ist3: u64 = 0,
-    ist4: u64 = 0,
-    ist5: u64 = 0,
-    ist6: u64 = 0,
-    ist7: u64 = 0,
-    reserved2: u64 = 0,
-    reserved3: u16 = 0,
-    iopb_offset: u16 = @sizeOf(Tss), // I/O permission bitmap offset (points past TSS = no IOPB)
+    ist1: u64 align(1) = 0, // Double fault stack
+    ist2: u64 align(1) = 0,
+    ist3: u64 align(1) = 0,
+    ist4: u64 align(1) = 0,
+    ist5: u64 align(1) = 0,
+    ist6: u64 align(1) = 0,
+    ist7: u64 align(1) = 0,
+    reserved2: u64 align(1) = 0,
+    reserved3: u16 align(1) = 0,
+    iopb_offset: u16 align(1) = 104, // I/O permission bitmap offset (points past TSS = no IOPB)
+
+    // Compile-time verification of struct size and field offsets for hardware compatibility
+    comptime {
+        if (@sizeOf(Tss) != 104) @compileError("Tss must be exactly 104 bytes");
+        if (@offsetOf(Tss, "rsp0") != 4) @compileError("rsp0 must be at offset 4");
+        if (@offsetOf(Tss, "iopb_offset") != 102) @compileError("iopb_offset must be at offset 102");
+    }
 };
 
 // GDT structure with all entries
@@ -140,6 +158,13 @@ pub const Gdt = extern struct {
     user_code: GdtEntry = GdtEntry.codeSegment(3),
     tss_low: u64 = 0, // TSS descriptor low 8 bytes
     tss_high: u64 = 0, // TSS descriptor high 8 bytes
+
+    // Compile-time verification of struct size and alignment
+    comptime {
+        // 5 GdtEntry (8 bytes each) + 2 u64 (8 bytes each) = 56 bytes
+        if (@sizeOf(Gdt) != 56) @compileError("Gdt must be exactly 56 bytes");
+        if (@alignOf(Gdt) < 8) @compileError("Gdt must be at least 8-byte aligned");
+    }
 };
 
 // GDT pointer structure for LGDT instruction

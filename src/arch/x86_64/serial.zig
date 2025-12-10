@@ -5,6 +5,7 @@
 // This driver is in src/arch/ because it requires direct port I/O access.
 
 const io = @import("io.zig");
+const cpu = @import("cpu.zig");
 
 // COM port base addresses
 pub const COM1: u16 = 0x3F8;
@@ -102,6 +103,25 @@ inline fn isTxReady() bool {
     return (io.inb(current_port + LSR) & LSR_TX_HOLDING_EMPTY) != 0;
 }
 
+fn acquireLockWithIrqSave() bool {
+    const interrupts_were_enabled = cpu.interruptsEnabled();
+    if (interrupts_were_enabled) {
+        cpu.disableInterrupts();
+    }
+
+    while (lock.swap(true, .acquire)) {
+        asm volatile ("pause");
+    }
+    return interrupts_were_enabled;
+}
+
+fn releaseLock(interrupts_were_enabled: bool) void {
+    lock.store(false, .release);
+    if (interrupts_were_enabled) {
+        cpu.enableInterrupts();
+    }
+}
+
 /// Check if data is available to read
 pub fn hasData() bool {
     return (io.inb(current_port + LSR) & LSR_DATA_READY) != 0;
@@ -112,11 +132,9 @@ pub fn hasData() bool {
 pub fn writeByte(byte: u8) void {
     if (!initialized) return;
 
-    // Acquire lock
-    while (lock.swap(true, .acquire)) {
-        asm volatile ("pause");
-    }
-    defer lock.store(false, .release);
+    // Acquire lock with interrupts disabled on this core to avoid ISR deadlocks
+    const interrupts_were_enabled = acquireLockWithIrqSave();
+    defer releaseLock(interrupts_were_enabled);
 
     writeByteUnlocked(byte);
 }
@@ -146,10 +164,9 @@ pub fn readByte() u8 {
 /// Write a string to the serial port
 pub fn writeString(str: []const u8) void {
     // Acquire lock to ensure atomic output of the string
-    while (lock.swap(true, .acquire)) {
-        asm volatile ("pause");
-    }
-    defer lock.store(false, .release);
+    // Interrupts are disabled while the lock is held to prevent ISR deadlocks
+    const interrupts_were_enabled = acquireLockWithIrqSave();
+    defer releaseLock(interrupts_were_enabled);
 
     for (str) |byte| {
         // Convert LF to CRLF for terminal compatibility

@@ -48,7 +48,7 @@ const ARP_TIMEOUT: u64 = 1200;
 const ARP_MAX_RETRIES: u8 = 3;
 
 /// Global ARP cache list
-var arp_cache: std.ArrayList(ArpEntry) = undefined;
+var arp_cache: std.ArrayListUnmanaged(ArpEntry) = .{};
 var arp_allocator: std.mem.Allocator = undefined;
 
 /// Simple tick counter for timers
@@ -70,7 +70,7 @@ pub fn setLock(l: sync.Lock) void {
 /// Initialize ARP subsystem
 pub fn init(allocator: std.mem.Allocator) void {
     arp_allocator = allocator;
-    arp_cache = std.ArrayList(ArpEntry).init(allocator);
+    arp_cache = .{};
 }
 
 /// Process an incoming ARP packet
@@ -195,7 +195,9 @@ pub fn resolve(ip: u32) ?[6]u8 {
 }
 
 /// Resolve IP to MAC, sending ARP request if not cached
-pub fn resolveOrRequest(iface: *Interface, ip: u32, pkt: ?*const PacketBuffer) ?[6]u8 {
+pub fn resolveOrRequest(iface: *Interface, ip: u32, pkt_opaque: ?*const anyopaque) ?[6]u8 {
+    const pkt: ?*const PacketBuffer = if (pkt_opaque) |p| @ptrCast(@alignCast(p)) else null;
+
     lock.acquire();
     defer lock.release();
 

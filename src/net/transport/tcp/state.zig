@@ -1,7 +1,7 @@
 const std = @import("std");
 const c = @import("constants.zig");
 const types = @import("types.zig");
-const Interface = @import("../../core/interface.zig").Interface;
+pub const Interface = @import("../../core/interface.zig").Interface;
 const sync = @import("../../sync.zig");
 const hal = @import("hal");
 const entropy = hal.entropy;
@@ -10,7 +10,7 @@ pub const TcpState = types.TcpState;
 pub const Tcb = types.Tcb;
 
 /// TCB pool (list of active TCBs)
-pub var tcb_pool: std.ArrayList(*Tcb) = undefined;
+pub var tcb_pool: std.ArrayListUnmanaged(*Tcb) = .{};
 pub var tcp_allocator: std.mem.Allocator = undefined;
 
 /// Connection hash table (for fast lookup)
@@ -18,7 +18,7 @@ pub var tcp_allocator: std.mem.Allocator = undefined;
 pub var tcb_hash: [c.TCB_HASH_SIZE]?*Tcb = [_]?*Tcb{null} ** c.TCB_HASH_SIZE;
 
 /// Listening TCBs
-pub var listen_tcbs: std.ArrayList(*Tcb) = undefined;
+pub var listen_tcbs: std.ArrayListUnmanaged(*Tcb) = .{};
 
 /// Global network interface
 pub var global_iface: ?*Interface = null;
@@ -49,8 +49,9 @@ pub fn setLock(l: sync.Lock) void {
 pub fn init(iface: *Interface, allocator: std.mem.Allocator) void {
     global_iface = iface;
     tcp_allocator = allocator;
-    tcb_pool = std.ArrayList(*Tcb).init(allocator);
-    listen_tcbs = std.ArrayList(*Tcb).init(allocator);
+    tcp_allocator = allocator;
+    tcb_pool = .{};
+    listen_tcbs = .{};
 
     // Clear hash table
     for (&tcb_hash) |*entry| {

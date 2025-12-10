@@ -125,6 +125,11 @@ pub const IdtGate = packed struct(u128) {
             .offset_high = @truncate(handler >> 32),
         };
     }
+
+    // Compile-time verification of struct size for hardware compatibility
+    comptime {
+        if (@sizeOf(Self) != 16) @compileError("IdtGate must be exactly 16 bytes in long mode");
+    }
 };
 
 // IDT pointer for LIDT instruction

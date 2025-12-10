@@ -4,6 +4,7 @@
 // All kernel code should use this module for debug output rather than
 // importing architecture-specific serial drivers directly.
 
+const std = @import("std");
 const hal = @import("hal");
 const config = @import("config");
 
@@ -216,8 +217,11 @@ pub fn err(comptime fmt: []const u8, args: anytype) void {
 }
 
 pub fn panic(comptime fmt: []const u8, args: anytype) noreturn {
-    print("\n[PANIC] ");
-    printf(fmt, args);
-    print("\n");
+    var buf: [256]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, fmt, args) catch "panic formatting failed";
+
+    printUnsafe("\n[PANIC] ");
+    printUnsafe(msg);
+    printUnsafe("\n");
     hal.cpu.haltForever();
 }
