@@ -6,7 +6,7 @@ ZigK uses the **Limine Bootloader** (v5.x protocol) for booting. The kernel is c
 
 **Developer Reference**: 
 
-For detailed byte-level layouts, struct alignments, and hardware interface specifications, see **[docs/BOOT_ARCHITECTURE.md](docs/BOOT_ARCHITECTURE.md)**.
+For detailed byte-level layouts, struct alignments, and hardware interface specifications, see **[BOOT_ARCHITECTURE.md](BOOT_ARCHITECTURE.md)**.
 
 ## Boot Flow
 
@@ -76,6 +76,82 @@ The kernel declares Limine requests in `src/kernel/main.zig`:
 - **Module Request** - Loaded modules (shell, httpd, initrd)
 - **Kernel Address Request** - Kernel physical/virtual base
 
+## ELF Loading and Userland Binaries
+
+### Freestanding Entry Points in Zig
+
+For userland programs targeting `freestanding`, the `_start` symbol must be explicitly exported:
+
+```zig
+// CORRECT: Entry point is exported and visible to linker
+export fn _start() callconv(.naked) noreturn {
+    asm volatile (
+        \\    mov $1, %%rax
+        \\    ...
+    );
+}
+
+// WRONG: comptime asm does NOT export symbols
+comptime {
+    asm(
+        \\.global _start
+        \\_start:
+        \\    ...
+    );
+}
+```
+
+The `comptime { asm(...) }` pattern generates assembly but does not create a symbol the linker can find. The result is an ELF with `e_entry = 0`.
+
+### Diagnosing ELF Entry Point Issues
+
+If a userland binary crashes immediately on first instruction:
+
+1. **Check the ELF entry point**: `llvm-objdump --file-headers binary`
+   - `start address: 0x0000000000000000` means the linker didn't find `_start`
+
+2. **Check symbol table**: `llvm-objdump --syms binary | grep _start`
+   - `*UND*` (undefined) means the symbol doesn't exist in the binary
+
+3. **Verify opcodes at entry**: The ELF loader logs first 4 bytes
+   - `00 00 00 00` = memory is zeroed, copy failed or wrong entry
+   - Valid x86 prologue often starts with `55` (push rbp) or similar
+
+### ELF Loader Error Handling
+
+The ELF loader (`src/kernel/elf.zig`) must handle translation failures explicitly. Silent failures in `copyToUserspace` can leave mapped pages zeroed, causing immediate crashes when userspace executes.
+
+Pattern for safe segment loading:
+```zig
+// copyToUserspace returns error if VMM translation fails
+try copyToUserspace(pml4_phys, vaddr, src);
+```
+
+### Auxiliary Vector (auxv)
+
+Static ELF binaries (especially those using musl or glibc) require auxiliary vector entries on the stack. The kernel passes these via `setupStack`:
+
+| AT_* Constant | Value | Description |
+|---------------|-------|-------------|
+| AT_PHDR (3)   | addr  | Address of program headers in memory |
+| AT_PHENT (4)  | 56    | Size of each program header entry |
+| AT_PHNUM (5)  | count | Number of program headers |
+| AT_PAGESZ (6) | 4096  | System page size |
+| AT_ENTRY (9)  | addr  | Original entry point |
+
+Without these, C runtime initialization may fail silently or crash.
+
+### Linker Script Requirements
+
+Userland linker scripts (`src/user/linker.ld`) must specify:
+
+```ld
+ENTRY(_start)           /* Must match exported symbol */
+USER_BASE = 0x400000;   /* Load address in user space */
+```
+
+The `ENTRY` directive only works if the symbol exists in the object files.
+
 ## Troubleshooting & Debugging
 
 If the kernel fails to boot or panics early, consider the following:
@@ -95,6 +171,47 @@ The framebuffer log may scroll too fast or be initialized too late. Rely on the 
 *   **"Integer Overflow" Panic**:
     *   **Cause**: Zig's safety checks (enabled in Debug/ReleaseSafe) catch overflows that other languages ignore.
     *   **Hint**: Check loop counters (e.g., `u3` cannot hold 8) and bitwise operations on differing integer widths (e.g., `~u32` inside `u64`). Use `+%` for wrapping addition if intentional.
+
+### 3. SWAPGS and Syscall Entry Crashes
+
+If syscall entry faults at `mov %rsp, %gs:8` with CR2 = 0x8 (or similar low address), the GS base MSRs are misconfigured.
+
+**The SWAPGS Dance:**
+
+x86_64 uses two MSRs for the GS segment base:
+- `IA32_GS_BASE` (0xC0000101) - Current GS base
+- `IA32_KERNEL_GS_BASE` (0xC0000102) - Swapped with GS_BASE by SWAPGS
+
+The `SWAPGS` instruction atomically exchanges these two values. Both interrupt handlers (isr_common) and syscall entry use SWAPGS to switch between user and kernel GS.
+
+**Required State:**
+
+| Mode | GS_BASE | KERNEL_GS_BASE |
+|------|---------|----------------|
+| Kernel (after entry SWAPGS) | &kernel_gs_data | user_gs (0) |
+| User (after exit SWAPGS) | user_gs (0) | &kernel_gs_data |
+
+**Initialization (before first user process):**
+
+```zig
+// CORRECT: Set GS_BASE for kernel, leave KERNEL_GS_BASE as 0
+hal.cpu.writeMsr(hal.cpu.IA32_GS_BASE, @intFromPtr(&bsp_gs_data));
+
+// WRONG: Setting KERNEL_GS_BASE directly
+// syscall_arch.setKernelGsBase(@intFromPtr(&bsp_gs_data));
+```
+
+**Why this matters:**
+
+1. Kernel boots with GS_BASE = undefined, KERNEL_GS_BASE = 0
+2. If you set KERNEL_GS_BASE = &kernel_data (wrong approach):
+   - First SWAPGS to user: GS_BASE = &kernel_data, KERNEL_GS_BASE = undefined
+   - Syscall SWAPGS: GS_BASE = undefined (crash!)
+3. If you set GS_BASE = &kernel_data (correct approach):
+   - First SWAPGS to user: GS_BASE = 0 (user), KERNEL_GS_BASE = &kernel_data
+   - Syscall SWAPGS: GS_BASE = &kernel_data (works!)
+
+The first context switch to user mode (via `isr_common` IRETQ) does SWAPGS, which swaps the values. So you must set GS_BASE initially so it ends up in KERNEL_GS_BASE after that first swap.
 
 ## Building and Running
 

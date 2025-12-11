@@ -17,6 +17,7 @@ pub const debug = @import("debug.zig");
 pub const entropy = @import("entropy.zig");
 pub const syscall = @import("syscall.zig");
 pub const mmio = @import("mmio.zig");
+pub const pit = @import("pit.zig");
 
 /// Initialize all x86_64 HAL subsystems
 pub fn init() void {
@@ -40,4 +41,7 @@ pub fn init() void {
 
     // Initialize SYSCALL/SYSRET MSRs for fast system calls
     syscall.init();
+
+    // Initialize PIT to 100Hz for scheduler
+    pit.init(100);
 }

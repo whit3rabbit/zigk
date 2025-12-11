@@ -127,6 +127,7 @@ pub const ElfError = error{
     InvalidMachine,
     InvalidType,
     InvalidPhdrSize,
+    InvalidHeaderSize,
     NoLoadSegments,
     OutOfMemory,
     MappingFailed,
@@ -151,6 +152,16 @@ pub const ElfLoadResult = struct {
     end_addr: u64,
     /// Whether executable is PIE
     is_pie: bool,
+    /// Address of Program Headers (for AT_PHDR)
+    phdr_addr: u64,
+    /// Number of Program Headers (for AT_PHNUM)
+    phnum: u16,
+};
+
+/// Auxiliary Vector Entry (for AT_* values passed to _start)
+pub const AuxEntry = struct {
+    id: u64,
+    value: u64,
 };
 
 // =============================================================================
@@ -247,6 +258,19 @@ pub fn load(data: []const u8, pml4_phys: u64, load_base: u64) ElfError!ElfLoadRe
     var highest_addr: u64 = 0;
     var load_count: u32 = 0;
     var total_memory: u64 = 0;
+    var phdr_vaddr: u64 = 0;
+
+    // First pass: Find PT_PHDR for auxiliary vector
+    for (phdrs) |*phdr| {
+        if (phdr.p_type == PT_PHDR) {
+            phdr_vaddr = actual_base + phdr.p_vaddr;
+            break;
+        }
+    }
+    // Fallback if no PT_PHDR: use base + offset
+    if (phdr_vaddr == 0) {
+        phdr_vaddr = actual_base + ehdr.e_phoff;
+    }
 
     // Load each PT_LOAD segment
     for (phdrs) |*phdr| {
@@ -309,11 +333,35 @@ pub fn load(data: []const u8, pml4_phys: u64, load_base: u64) ElfError!ElfLoadRe
 
     console.info("ELF: Loaded {} segments, entry={x}", .{ load_count, entry });
 
+    // Verify entry point contains actual code (not zeros from failed copy)
+    if (vmm.translate(pml4_phys, entry)) |phys| {
+        const entry_page_offset = entry & (pmm.PAGE_SIZE - 1);
+        const ptr: [*]u8 = paging.physToVirt(phys);
+        const opcodes = ptr[entry_page_offset..][0..@min(4, pmm.PAGE_SIZE - entry_page_offset)];
+        console.debug("ELF: Entry {x} opcodes: {x} {x} {x} {x}", .{
+            entry,
+            if (opcodes.len > 0) opcodes[0] else 0,
+            if (opcodes.len > 1) opcodes[1] else 0,
+            if (opcodes.len > 2) opcodes[2] else 0,
+            if (opcodes.len > 3) opcodes[3] else 0,
+        });
+        // All zeros at entry point means copy likely failed
+        if (opcodes.len >= 2 and opcodes[0] == 0 and opcodes[1] == 0) {
+            console.err("ELF: CRITICAL - Entry point contains zeros! Copy failed.", .{});
+            return ElfError.MappingFailed;
+        }
+    } else {
+        console.err("ELF: Entry point {x} is not mapped!", .{entry});
+        return ElfError.MappingFailed;
+    }
+
     return ElfLoadResult{
         .entry_point = entry,
         .base_addr = lowest_addr,
         .end_addr = highest_addr,
         .is_pie = is_pie,
+        .phdr_addr = phdr_vaddr,
+        .phnum = ehdr.e_phnum,
     };
 }
 
@@ -409,8 +457,16 @@ fn loadSegment(
         // Get source data
         const src = data[phdr.p_offset..][0..phdr.p_filesz];
 
+        // Debug: Log what we're copying
+        console.debug("ELF: Copying {d} bytes from offset {x} to vaddr {x}", .{ phdr.p_filesz, phdr.p_offset, vaddr });
+        if (src.len >= 4) {
+            console.debug("ELF: First 4 bytes: {x} {x} {x} {x}", .{ src[0], src[1], src[2], src[3] });
+        }
+
         // Copy to destination (may span multiple pages)
-        copyToUserspace(pml4_phys, vaddr, src);
+        try copyToUserspace(pml4_phys, vaddr, src);
+    } else {
+        console.debug("ELF: Segment has filesz=0 (BSS only)", .{});
     }
 
     // BSS (p_memsz > p_filesz) is already zeroed since we zero pages on allocation
@@ -428,7 +484,8 @@ fn cleanupMappedSegment(pml4_phys: u64, start_vaddr: u64, page_size: usize, page
 
 /// Copy data to userspace virtual address
 /// Handles page boundaries by looking up each page's physical address
-fn copyToUserspace(pml4_phys: u64, vaddr: u64, data: []const u8) void {
+/// Returns error if address translation fails (indicates mapping bug)
+fn copyToUserspace(pml4_phys: u64, vaddr: u64, data: []const u8) ElfError!void {
     const page_size = pmm.PAGE_SIZE;
     var offset: usize = 0;
     var current_vaddr = vaddr;
@@ -446,6 +503,10 @@ fn copyToUserspace(pml4_phys: u64, vaddr: u64, data: []const u8) void {
 
             // Copy data
             @memcpy(dest, data[offset..][0..bytes_in_page]);
+        } else {
+            // CRITICAL: Translation failed for a page we should have just mapped
+            console.err("ELF: copyToUserspace failed - vaddr={x} not mapped (pml4={x})", .{ current_vaddr, pml4_phys });
+            return ElfError.MappingFailed;
         }
 
         offset += bytes_in_page;
@@ -463,11 +524,14 @@ pub const DEFAULT_STACK_SIZE: usize = 2 * 1024 * 1024;
 /// Default stack top address (below kernel space)
 pub const DEFAULT_STACK_TOP: u64 = 0x7FFF_FFFF_F000;
 
-/// Set up the initial user stack with argc, argv, envp
+/// Set up the initial user stack with argc, argv, envp, auxv
 ///
 /// Stack layout (growing downward):
 ///   [envp strings]
 ///   [argv strings]
+///   [padding to 16 bytes]
+///   auxv NULL terminator (0, 0)
+///   auxv entries...
 ///   NULL (envp terminator)
 ///   envp[n-1]..envp[0] pointers
 ///   NULL (argv terminator)
@@ -481,6 +545,7 @@ pub const DEFAULT_STACK_TOP: u64 = 0x7FFF_FFFF_F000;
 ///   stack_size: Stack size in bytes
 ///   argv: Argument strings (can be empty)
 ///   envp: Environment strings (can be empty)
+///   auxv: Auxiliary vector entries (for AT_PHDR, etc.)
 ///
 /// Returns: Initial RSP value
 pub fn setupStack(
@@ -489,6 +554,7 @@ pub fn setupStack(
     stack_size: usize,
     argv: []const []const u8,
     envp: []const []const u8,
+    auxv: []const AuxEntry,
 ) !u64 {
     const page_size = pmm.PAGE_SIZE;
     const stack_base = stack_top - stack_size;
@@ -538,7 +604,7 @@ pub fn setupStack(
         i -= 1;
         sp -= envp[i].len + 1; // +1 for null terminator
         envp_ptrs[i] = sp;
-        copyToUserspace(pml4_phys, sp, envp[i]);
+        try copyToUserspace(pml4_phys, sp, envp[i]);
         // Write null terminator
         writeToUserspace(pml4_phys, sp + envp[i].len, &[_]u8{0});
     }
@@ -549,12 +615,26 @@ pub fn setupStack(
         i -= 1;
         sp -= argv[i].len + 1;
         argv_ptrs[i] = sp;
-        copyToUserspace(pml4_phys, sp, argv[i]);
+        try copyToUserspace(pml4_phys, sp, argv[i]);
         writeToUserspace(pml4_phys, sp + argv[i].len, &[_]u8{0});
     }
 
     // Align to 16 bytes
     sp = sp & ~@as(u64, 15);
+
+    // Push auxv NULL terminator (AT_NULL = 0, 0)
+    sp -= 16;
+    writeU64ToUserspace(pml4_phys, sp, 0); // id = AT_NULL
+    writeU64ToUserspace(pml4_phys, sp + 8, 0); // value = 0
+
+    // Push auxv entries (in reverse order)
+    var j: usize = auxv.len;
+    while (j > 0) {
+        j -= 1;
+        sp -= 16;
+        writeU64ToUserspace(pml4_phys, sp, auxv[j].id);
+        writeU64ToUserspace(pml4_phys, sp + 8, auxv[j].value);
+    }
 
     // Push NULL terminator for envp
     sp -= 8;
@@ -594,15 +674,19 @@ pub fn setupStack(
     return sp;
 }
 
-/// Write a u64 to userspace
+/// Write a u64 to userspace (stack setup - log errors but continue)
 fn writeU64ToUserspace(pml4_phys: u64, vaddr: u64, value: u64) void {
     const bytes = std.mem.toBytes(value);
     writeToUserspace(pml4_phys, vaddr, &bytes);
 }
 
-/// Write bytes to userspace (handles page boundaries)
+/// Write bytes to userspace (stack setup - log errors but continue)
 fn writeToUserspace(pml4_phys: u64, vaddr: u64, data: []const u8) void {
-    copyToUserspace(pml4_phys, vaddr, data);
+    // Stack pages are mapped immediately before this call, so translation
+    // failures indicate a severe bug. Log but continue.
+    copyToUserspace(pml4_phys, vaddr, data) catch |err| {
+        console.err("ELF: writeToUserspace failed at {x}: {}", .{ vaddr, err });
+    };
 }
 
 // =============================================================================
@@ -654,7 +738,16 @@ pub fn exec(
     const stack_top = DEFAULT_STACK_TOP;
     const stack_size = DEFAULT_STACK_SIZE;
 
-    const sp = setupStack(pml4_phys, stack_top, stack_size, argv, envp) catch |err| {
+    // Construct basic auxiliary vector
+    const auxv = [_]AuxEntry{
+        .{ .id = 3, .value = load_result.phdr_addr }, // AT_PHDR
+        .{ .id = 4, .value = 56 }, // AT_PHENT (sizeof Elf64_Phdr)
+        .{ .id = 5, .value = load_result.phnum }, // AT_PHNUM
+        .{ .id = 6, .value = 4096 }, // AT_PAGESZ
+        .{ .id = 9, .value = load_result.entry_point }, // AT_ENTRY
+    };
+
+    const sp = setupStack(pml4_phys, stack_top, stack_size, argv, envp, &auxv) catch |err| {
         console.err("ELF: Stack setup failed: {}", .{err});
         return error.OutOfMemory;
     };

@@ -81,7 +81,15 @@ export fn _start() noreturn {
 
     // Initialize GS base for syscalls - points to per-CPU data
     // kernel_stack will be updated by scheduler on context switch
-    syscall_arch.setKernelGsBase(@intFromPtr(&bsp_gs_data));
+    //
+    // SWAPGS dance requires:
+    //   Kernel mode: GS_BASE = &kernel_data, KERNEL_GS_BASE = user_gs (0)
+    //   User mode:   GS_BASE = user_gs (0),  KERNEL_GS_BASE = &kernel_data
+    //
+    // First SWAPGS (isr_common returning to user) swaps these.
+    // So we set GS_BASE here, not KERNEL_GS_BASE.
+    // KERNEL_GS_BASE is already 0 from syscall.init().
+    hal.cpu.writeMsr(hal.cpu.IA32_GS_BASE, @intFromPtr(&bsp_gs_data));
 
     // Connect console to interrupt handlers for debug output
     hal.interrupts.setConsoleWriter(&console.print);
@@ -220,15 +228,29 @@ fn loadInitProcess() void {
         }
     }.call;
 
-    // Priority 1: HTTPD
+    // Priority 0: ASM Test (Sanity Check)
     for (mods) |mod| {
         const cmdline = get_str(mod.cmdline);
         const path = get_str(mod.path);
         
-        if (containsStr(cmdline, "httpd") or containsStr(path, "httpd")) {
+        if (containsStr(cmdline, "test_asm") or containsStr(path, "test_asm")) {
             selected_mod = mod;
-            process_name = "httpd";
+            process_name = "test_asm";
             break;
+        }
+    }
+
+    // Priority 1: HTTPD
+    if (selected_mod == null) {
+        for (mods) |mod| {
+            const cmdline = get_str(mod.cmdline);
+            const path = get_str(mod.path);
+            
+            if (containsStr(cmdline, "httpd") or containsStr(path, "httpd")) {
+                selected_mod = mod;
+                process_name = "httpd";
+                break;
+            }
         }
     }
 
@@ -285,37 +307,67 @@ fn loadInitProcess() void {
         load_result.entry_point,
     });
 
-    // Step 5: Allocate and map user stack in process's address space
+    // Step 5: Allocate and map user stack with arguments
+    // We use the ELF helper to set up the stack according to x86_64 ABI
+    // (argc, argv, envp, auxv)
     const stack_virt_top: u64 = 0xF0000000;
     const stack_size: usize = 32 * 1024; // 32KB stack
-    const stack_virt_base = stack_virt_top - stack_size;
 
-    console.info("Creating user stack at {x}-{x}", .{ stack_virt_base, stack_virt_top });
+    const argv = [_][]const u8{process_name};
+    const envp = [_][]const u8{};
 
-    const stack_flags = hal.paging.PageFlags{
-        .writable = true,
-        .user = true,
+    // Auxiliary Vector (Required for static binaries to find PHDRs)
+    const auxv = [_]elf.AuxEntry{
+        .{ .id = 3, .value = load_result.phdr_addr }, // AT_PHDR
+        .{ .id = 4, .value = 56 }, // AT_PHENT
+        .{ .id = 5, .value = load_result.phnum }, // AT_PHNUM
+        .{ .id = 6, .value = 4096 }, // AT_PAGESZ
+        .{ .id = 9, .value = load_result.entry_point }, // AT_ENTRY
     };
 
-    // Allocate and map stack pages
-    var addr = stack_virt_base;
-    while (addr < stack_virt_top) : (addr += pmm.PAGE_SIZE) {
-        vmm.allocAndMapPage(proc.cr3, addr, stack_flags) catch |err| {
-            console.err("Failed to map stack page: {}", .{err});
-            return;
-        };
-    }
+    console.info("Creating user stack at {x} (size={d})", .{ stack_virt_top, stack_size });
+
+    // setupStack allocates pages, maps them, and pushes args
+    const initial_rsp = elf.setupStack(
+        proc.cr3,
+        stack_virt_top,
+        stack_size,
+        &argv,
+        &envp,
+        &auxv,
+    ) catch |err| {
+        console.err("Failed to setup user stack: {}", .{err});
+        return;
+    };
+
+    console.info("User stack created (rsp={x})", .{initial_rsp});
 
     // Step 6: Create user thread with entry point from ELF header
     const user_thread = thread.createUserThread(load_result.entry_point, .{
         .name = process_name,
         .cr3 = proc.cr3,
-        .user_stack_top = stack_virt_top,
+        .user_stack_top = initial_rsp,
         .process = @ptrCast(proc),
     }) catch |err| {
         console.err("Failed to create user thread: {}", .{err});
         return;
     };
+
+    // Hack: Manually set up TCB/TLS for Musl
+    // Musl static binaries may crash if %fs:0 is not accessible or doesn't point to itself
+    // We allocate a page, map it, write self-pointer, and set fs_base.
+    if (pmm.allocZeroedPage()) |tcb_page| {
+        const tcb_virt: u64 = 0xB000_0000; // Arbitrary user address
+        if (vmm.mapPage(proc.cr3, tcb_virt, tcb_page, .{ .writable = true, .user = true })) |_| {
+            // Write self-pointer to TCB (first 8 bytes)
+            const tcb_ptr: [*]u64 = @ptrCast(@alignCast(hal.paging.physToVirt(tcb_page)));
+            tcb_ptr[0] = tcb_virt;
+            user_thread.fs_base = tcb_virt;
+            console.debug("Init: Manually initialized TLS/TCB at {x}", .{tcb_virt});
+        } else |_| {
+             pmm.freePage(tcb_page);
+        }
+    }
 
     sched.addThread(user_thread);
     console.info("Init process started (pid={d}, tid={d})", .{ proc.pid, user_thread.tid });

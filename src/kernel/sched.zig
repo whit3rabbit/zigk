@@ -284,7 +284,24 @@ pub fn getTickCount() u64 {
 /// This is required because syscalls run with IF=0 (Big Kernel Lock).
 /// Without enabling interrupts, the timer IRQ cannot fire to trigger
 /// a context switch, causing a deadlock.
+///
+/// SAFETY: Calling yield() while holding spinlocks will cause deadlock.
+/// In debug builds, this is detected and panics.
 pub fn yield() void {
+    // Debug check: detect yield while holding locks (deadlock prevention)
+    if (std.debug.runtime_safety) {
+        if (scheduler.current) |t| {
+            if (t.lock_depth > 0) {
+                console.err("PANIC: yield() called with {d} lock(s) held by thread '{s}' (tid={d})", .{
+                    t.lock_depth,
+                    t.getName(),
+                    t.tid,
+                });
+                @panic("yield with spinlocks held - deadlock");
+            }
+        }
+    }
+
     // Atomically enable interrupts and halt (STI; HLT sequence)
     // The timer IRQ will fire, call timerTick(), and potentially
     // switch to another thread. When we're scheduled again,
@@ -441,6 +458,10 @@ pub fn timerTick(frame: *hal.idt.InterruptFrame) *hal.idt.InterruptFrame {
 
     scheduler.tick_count += 1;
     wakeSleepingThreads(scheduler.tick_count);
+
+    if (scheduler.tick_count % 100 == 0) {
+        console.debug("Sched: Tick {d}", .{scheduler.tick_count});
+    }
 
     // Call registered timer callback (e.g. for TCP timers)
     if (scheduler.tick_callback) |cb| {
