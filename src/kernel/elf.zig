@@ -335,18 +335,18 @@ pub fn load(data: []const u8, pml4_phys: u64, load_base: u64) ElfError!ElfLoadRe
 
     // Verify entry point contains actual code (not zeros from failed copy)
     if (vmm.translate(pml4_phys, entry)) |phys| {
-        const entry_page_offset = entry & (pmm.PAGE_SIZE - 1);
+        // Note: phys already includes page offset from translate()
         const ptr: [*]u8 = paging.physToVirt(phys);
-        const opcodes = ptr[entry_page_offset..][0..@min(4, pmm.PAGE_SIZE - entry_page_offset)];
+        const opcodes = ptr[0..4];
         console.debug("ELF: Entry {x} opcodes: {x} {x} {x} {x}", .{
             entry,
-            if (opcodes.len > 0) opcodes[0] else 0,
-            if (opcodes.len > 1) opcodes[1] else 0,
-            if (opcodes.len > 2) opcodes[2] else 0,
-            if (opcodes.len > 3) opcodes[3] else 0,
+            opcodes[0],
+            opcodes[1],
+            opcodes[2],
+            opcodes[3],
         });
         // All zeros at entry point means copy likely failed
-        if (opcodes.len >= 2 and opcodes[0] == 0 and opcodes[1] == 0) {
+        if (opcodes[0] == 0 and opcodes[1] == 0) {
             console.err("ELF: CRITICAL - Entry point contains zeros! Copy failed.", .{});
             return ElfError.MappingFailed;
         }
@@ -498,8 +498,9 @@ fn copyToUserspace(pml4_phys: u64, vaddr: u64, data: []const u8) ElfError!void {
         // Look up physical address
         if (vmm.translate(pml4_phys, current_vaddr)) |phys| {
             // Get kernel-accessible pointer via HHDM
+            // Note: phys already includes page offset from translate()
             const dest_ptr: [*]u8 = paging.physToVirt(phys);
-            const dest = dest_ptr[page_offset..][0..bytes_in_page];
+            const dest = dest_ptr[0..bytes_in_page];
 
             // Copy data
             @memcpy(dest, data[offset..][0..bytes_in_page]);
