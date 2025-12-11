@@ -5,6 +5,7 @@ const types = @import("types.zig");
 const state = @import("state.zig");
 const errors = @import("errors.zig");
 const scheduler = @import("scheduler.zig");
+const hal = @import("hal");
 
 /// Mark socket as listening for connections (TCP only)
 pub fn listen(sock_fd: usize, backlog_arg: usize) errors.SocketError!void {
@@ -49,17 +50,24 @@ pub fn accept(sock_fd: usize, peer_addr: ?*types.SockAddrIn) errors.SocketError!
         return errors.SocketError.InvalidArg;
     }
 
-    // Check accept queue
+    // Check accept queue - block if empty and socket is blocking
     if (sock.accept_count == 0) {
         if (sock.blocking) {
             if (scheduler.blockFn()) |block_fn| {
                 const get_current = scheduler.currentThreadFn() orelse return errors.SocketError.SystemError;
-                sock.blocked_thread = get_current();
 
                 while (sock.accept_count == 0) {
+                    // Disable interrupts to close race window between setting
+                    // blocked_thread and entering Blocked state. If a connection
+                    // completes after this point, queueAcceptConnection will see
+                    // blocked_thread set and wake us after block_fn() halts.
+                    _ = hal.cpu.disableInterrupts();
+                    sock.blocked_thread = get_current();
+                    // block_fn() sets state=Blocked then atomically enables
+                    // interrupts and halts (STI; HLT sequence)
                     block_fn();
+                    sock.blocked_thread = null;
                 }
-                sock.blocked_thread = null;
             } else {
                 return errors.SocketError.WouldBlock;
             }

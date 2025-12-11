@@ -214,6 +214,9 @@ pub fn build(b: *std.Build) void {
     sched_module.addImport("list", list_module);
     sched_module.addImport("kernel_stack", kernel_stack_module);
 
+    // Break circular dependency shim
+    sync_module.addImport("sched", sched_module);
+
     // Create Stack Guard module (stack canary support)
     const stack_guard_module = b.createModule(.{
         .root_source_file = b.path("src/kernel/stack_guard.zig"),
@@ -565,6 +568,24 @@ pub fn build(b: *std.Build) void {
     // Ensure tests are built before ISO is created
     b.getInstallStep().dependOn(test_step_build);
 
+    // ASM Test (Minimal userland sanity check)
+    // ASM Test (Minimal userland sanity check)
+    const test_asm = b.addExecutable(.{
+        .name = "test_asm",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/user/test_asm.zig"),
+            .target = b.resolveTargetQuery(.{
+                .cpu_arch = .x86_64,
+                .os_tag = .freestanding,
+                .abi = .none,
+            }),
+            .optimize = optimize,
+        }),
+    });
+    test_asm.setLinkerScript(b.path("src/user/linker.ld"));
+    const install_test_asm = b.addInstallArtifact(test_asm, .{});
+    b.getInstallStep().dependOn(&install_test_asm.step);
+
     // Create ISO build step using Limine bootloader
     // Use v5.x binary branch which has prebuilt files
     const iso_cmd = b.addSystemCommand(&.{
@@ -586,6 +607,7 @@ pub fn build(b: *std.Build) void {
         \\cp zig-out/bin/test_wait4 iso_root/boot/modules/ && \
         \\cp zig-out/bin/test_clock iso_root/boot/modules/ && \
         \\cp zig-out/bin/test_random iso_root/boot/modules/ && \
+        \\cp zig-out/bin/test_asm iso_root/boot/modules/ && \
         \\cp limine.cfg iso_root/boot/ && \
         \\cp "$LIMINE_DIR"/limine-bios.sys iso_root/boot/ && \
         \\cp "$LIMINE_DIR"/limine-bios-cd.bin iso_root/boot/ && \

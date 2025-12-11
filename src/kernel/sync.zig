@@ -14,6 +14,9 @@ const std = @import("std");
 // HAL layer for interrupt control - only place these operations are permitted
 const is_freestanding = @import("builtin").os.tag == .freestanding;
 
+// Scheduler access for lock_depth tracking (yield safety check)
+const sched = if (is_freestanding) @import("sched") else null;
+
 // In freestanding mode, use real HAL; in tests, use stubs
 const hal_cpu = if (is_freestanding)
     @import("hal").cpu
@@ -60,6 +63,15 @@ pub const Spinlock = struct {
         /// Release the lock and restore interrupt state
         /// This MUST be called exactly once per acquire()
         pub fn release(self: Held) void {
+            // Decrement lock depth before releasing
+            if (is_freestanding) {
+                if (sched.getCurrentThread()) |t| {
+                    if (t.lock_depth > 0) {
+                        t.lock_depth -= 1;
+                    }
+                }
+            }
+
             // Unlock with release ordering - ensures all writes are visible
             // before the lock is released
             self.lock.locked.store(0, .release);
@@ -106,6 +118,13 @@ pub const Spinlock = struct {
         // cmpxchgWeak with .acquire ordering already provides acquire semantics
         // No additional fence needed
 
+        // Track lock depth for yield safety check
+        if (is_freestanding) {
+            if (sched.getCurrentThread()) |t| {
+                t.lock_depth += 1;
+            }
+        }
+
         return .{
             .lock = self,
             .irq_state = irq_was_enabled,
@@ -127,6 +146,12 @@ pub const Spinlock = struct {
 
         if (prev == null) {
             // cmpxchgStrong with .acquire ordering already provides acquire semantics
+            // Track lock depth for yield safety check
+            if (is_freestanding) {
+                if (sched.getCurrentThread()) |t| {
+                    t.lock_depth += 1;
+                }
+            }
             return .{
                 .lock = self,
                 .irq_state = irq_was_enabled,

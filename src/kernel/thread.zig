@@ -78,6 +78,10 @@ pub const Thread = struct {
     /// Set via arch_prctl(ARCH_SET_FS), restored on context switch
     fs_base: u64,
 
+    /// Number of spinlocks currently held by this thread
+    /// Used to detect unsafe yield() calls while holding locks
+    lock_depth: u32 = 0,
+
     /// Thread name for debugging (null-terminated, max 31 chars + null)
     name: [32]u8,
 

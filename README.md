@@ -17,7 +17,7 @@ A minimal x86_64 microkernel written in Zig, using the Limine bootloader.
 
 ## Building and Running
 
-See [BUILD.md](BUILD.md) for detailed instructions on:
+See [BUILD.md](docs/BUILD.md) for detailed instructions on:
 - Setting up the development environment
 - Building the kernel
 - Creating bootable ISOs
@@ -25,7 +25,7 @@ See [BUILD.md](BUILD.md) for detailed instructions on:
 
 ## Boot Process
 
-See [BOOT.md](BOOT.md) for technical details on:
+See [BOOT.md](docs/BOOT.md) for technical details on:
 - Limine protocol implementation
 - Boot process flow
 - Memory layout

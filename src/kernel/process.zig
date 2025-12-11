@@ -412,16 +412,45 @@ pub fn destroyProcess(proc: *Process) void {
     console.debug("Process: Destroying pid={}", .{proc.pid});
     proc.state = .Dead;
 
-    // Reparent children to init (or let them become orphans for now)
-    var child = proc.first_child;
-    while (child) |c| {
-        const next = c.next_sibling;
-        c.parent = null;
-        c.next_sibling = null;
-        // In full implementation: reparent to init
-        child = next;
+    // Reparent children to init (PID 1) per POSIX semantics
+    // This prevents zombie leaks when parent exits before children
+    if (proc.first_child != null) {
+        const init_opt: ?*Process = getInitProcess() catch null;
+
+        // Only reparent if init exists and we're not destroying init itself
+        if (init_opt) |init| {
+            if (init != proc) {
+                var child = proc.first_child;
+                while (child) |c| {
+                    const next = c.next_sibling;
+                    c.next_sibling = null;
+                    init.addChild(c);
+                    child = next;
+                }
+                proc.first_child = null;
+            } else {
+                // Destroying init itself - orphan children (edge case)
+                var child = proc.first_child;
+                while (child) |c| {
+                    const next = c.next_sibling;
+                    c.parent = null;
+                    c.next_sibling = null;
+                    child = next;
+                }
+                proc.first_child = null;
+            }
+        } else {
+            // Init not available (early boot) - orphan children
+            var child = proc.first_child;
+            while (child) |c| {
+                const next = c.next_sibling;
+                c.parent = null;
+                c.next_sibling = null;
+                child = next;
+            }
+            proc.first_child = null;
+        }
     }
-    proc.first_child = null;
 
     // Free file descriptor table
     fd_mod.destroyFdTable(proc.fd_table);

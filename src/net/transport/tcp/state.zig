@@ -36,6 +36,13 @@ pub var lock: sync.Lock = sync.noop_lock;
 /// Secret key for ISN generation (RFC 6528)
 var secret_key: u64 = 0;
 
+/// Counter for ISN generations since last re-seed
+var isn_generation_count: u32 = 0;
+
+/// Re-seed secret key every N ISN generations for defense-in-depth
+/// Prevents long-term key exposure from compromising all future ISNs
+const ISN_RESEED_THRESHOLD: u32 = 10000;
+
 /// Timestamp counter for TCP timestamps (RFC 7323)
 /// Increments with each call, providing monotonic values
 var tcp_timestamp_counter: u32 = 0;
@@ -213,16 +220,29 @@ pub fn removeFromListenTable(tcb: *Tcb) void {
 /// Generate Initial Sequence Number (RFC 6528)
 /// Uses hardware entropy + counter for unpredictability
 /// ISN = M + F(localip, localport, remoteip, remoteport, secret_key)
+/// Secret key is periodically re-seeded for defense-in-depth
 pub fn generateIsn(l_ip: u32, l_port: u16, r_ip: u32, r_port: u16) u32 {
     // M = Timer (isn_counter)
     isn_counter +%= 1;
+    isn_generation_count +%= 1;
+
+    // Periodically re-seed secret key with fresh entropy
+    // XOR mixing preserves existing entropy while adding new randomness
+    if (isn_generation_count >= ISN_RESEED_THRESHOLD) {
+        secret_key ^= entropy.getHardwareEntropy();
+        isn_generation_count = 0;
+    }
 
     // F = Simple hash of 4-tuple + secret
     var k = secret_key;
-    k +%= l_ip; k *%= 0x9e3779b97f4a7c15;
-    k +%= r_ip; k *%= 0x9e3779b97f4a7c15;
-    k +%= l_port; k *%= 0x9e3779b97f4a7c15;
-    k +%= r_port; k *%= 0x9e3779b97f4a7c15;
+    k +%= l_ip;
+    k *%= 0x9e3779b97f4a7c15;
+    k +%= r_ip;
+    k *%= 0x9e3779b97f4a7c15;
+    k +%= l_port;
+    k *%= 0x9e3779b97f4a7c15;
+    k +%= r_port;
+    k *%= 0x9e3779b97f4a7c15;
     k ^= (k >> 30);
     k *%= 0xbf58476d1ce4e5b9;
     k ^= (k >> 27);

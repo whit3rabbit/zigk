@@ -64,8 +64,26 @@ pub fn sys_getrandom(buf_ptr: usize, buflen: usize, flags: u32) isize {
     }
 
     // FR-RAND-02: Fill buffer with random data from PRNG
-    const buf: [*]u8 = @ptrFromInt(buf_ptr);
-    prng.fill(buf[0..buflen]);
+    // Use safe copy: generate in kernel buffer, then copy to user
+    // For small buffers use stack, for larger use chunked approach
+    const STACK_BUF_SIZE: usize = 256;
+    var stack_buf: [STACK_BUF_SIZE]u8 = undefined;
+
+    const uptr = user_mem.UserPtr.from(buf_ptr);
+    var remaining = buflen;
+    var offset: usize = 0;
+
+    while (remaining > 0) {
+        const chunk_size = @min(remaining, STACK_BUF_SIZE);
+        prng.fill(stack_buf[0..chunk_size]);
+
+        _ = uptr.offset(offset).copyFromKernel(stack_buf[0..chunk_size]) catch {
+            return uapi.errno.EFAULT.toReturn();
+        };
+
+        offset += chunk_size;
+        remaining -= chunk_size;
+    }
 
     return @intCast(buflen);
 }

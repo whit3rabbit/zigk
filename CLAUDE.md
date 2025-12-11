@@ -9,7 +9,7 @@ A Zig-based microkernel for x86_64 using the Limine bootloader protocol.
 
 ## Project Structure
 
-See [FILESYSTEM.md](FILESYSTEM.md) for complete directory layout. Key directories:
+See [FILESYSTEM.md](docs/FILESYSTEM.md) for complete directory layout. Key directories:
 
 - `src/arch/` - HAL (x86_64, aarch64) - ONLY place for inline assembly
 - `src/kernel/` - Core kernel (scheduler, heap, syscalls, ELF loader)
@@ -18,6 +18,8 @@ See [FILESYSTEM.md](FILESYSTEM.md) for complete directory layout. Key directorie
 - `src/drivers/` - Device drivers (PCI, E1000e NIC)
 - `src/user/` - Userland programs (shell, httpd)
 - `specs/` - Feature specifications
+
+When creating new files or folders, update this document.
 
 ## Commands
 
@@ -40,6 +42,8 @@ zig build run -Dbios=/opt/homebrew/share/qemu/edk2-x86_64-code.fd
 ```
 
 ## Architecture Rules
+
+See [BOOT_ARCHITECTURE.md](docs/BOOT_ARCHITECTURE.md) for boot process details.
 
 ### HAL Barrier (Strict Layering)
 - **FORBIDDEN**: `asm volatile`, direct port I/O, or CPU register access outside `src/arch/`
@@ -91,7 +95,7 @@ asm volatile ("out %[data], %[port]"
 
 ## Key Files
 
-- `FILESYSTEM.md` - Complete project structure
+- `docs/FILESYSTEM.md` - Complete project structure
 - `specs/syscall-table.md` - Authoritative syscall numbers
 - `src/lib/limine.zig` - Limine protocol bindings
 - `src/kernel/main.zig` - Kernel entry point

@@ -196,6 +196,13 @@ fn exceptionHandler(frame: *idt.InterruptFrame) void {
             }
         },
         13 => {
+            // Handle non-canonical pointers during user copy (#GP instead of #PF)
+            const rip = frame.rip;
+            if (rip >= @intFromPtr(&_asm_copy_user_start) and rip < @intFromPtr(&_asm_copy_user_end)) {
+                frame.rip = @intFromPtr(&_asm_copy_user_fixup);
+                return;
+            }
+
             // General protection fault
             if (frame.error_code != 0) {
                 if (console_writer) |write| {

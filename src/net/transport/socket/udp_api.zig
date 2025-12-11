@@ -7,6 +7,7 @@ const types = @import("types.zig");
 const state = @import("state.zig");
 const errors = @import("errors.zig");
 const scheduler = @import("scheduler.zig");
+const hal = @import("hal");
 
 pub fn sendto(
     sock_fd: usize,
@@ -64,21 +65,29 @@ pub fn recvfrom(
     // Blocking path uses scheduler if available
     if (scheduler.blockFn()) |block_fn| {
         const get_current = scheduler.currentThreadFn() orelse return errors.SocketError.SystemError;
-        sock.blocked_thread = get_current();
 
-        while (!sock.hasData()) {
-            block_fn();
-        }
-
-        sock.blocked_thread = null;
-
-        if (sock.dequeuePacket(buf, &src_ip, &src_port)) |len| {
-            if (src_addr) |addr| {
-                addr.* = types.SockAddrIn.init(src_ip, src_port);
+        while (true) {
+            // Try to dequeue data with interrupts enabled
+            if (sock.dequeuePacket(buf, &src_ip, &src_port)) |len| {
+                if (src_addr) |addr| {
+                    addr.* = types.SockAddrIn.init(src_ip, src_port);
+                }
+                return len;
             }
-            return len;
+
+            // No data available - block atomically
+            // Disable interrupts to close race window between setting
+            // blocked_thread and entering Blocked state. If a packet
+            // arrives after this point, the interrupt handler will see
+            // blocked_thread set and wake us after block_fn() halts.
+            _ = hal.cpu.disableInterrupts();
+            sock.blocked_thread = get_current();
+            // block_fn() sets state=Blocked then atomically enables
+            // interrupts and halts (STI; HLT sequence)
+            block_fn();
+            sock.blocked_thread = null;
+            // Loop back to check for data
         }
-        return errors.SocketError.SystemError;
     }
 
     // Fallback: spin-wait for data (no scheduler)

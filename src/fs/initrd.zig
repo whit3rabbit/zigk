@@ -91,7 +91,7 @@ pub const InitRD = struct {
         var offset: usize = 0;
         // Need at least 512 bytes for a header
         while (offset + 512 <= self.data.len) {
-            const header: *const TarHeader = @ptrCast(@alignCast(self.data.ptr + offset));
+            const header: *const TarHeader = @ptrCast(self.data.ptr + offset);
 
             // Check for end of archive (two zero blocks, checking first char suffices for now)
             if (header.name[0] == 0) break;
@@ -225,9 +225,7 @@ pub const FileIterator = struct {
 
     pub fn next(self: *@This()) ?InitRDFile {
         while (self.offset + 512 <= self.initrd.data.len) {
-            const header: *const TarHeader = @ptrCast(@alignCast(
-                self.initrd.data.ptr + self.offset,
-            ));
+            const header: *const TarHeader = @ptrCast(self.initrd.data.ptr + self.offset);
 
             if (header.name[0] == 0) return null;
             if (!header.isValid()) return null;

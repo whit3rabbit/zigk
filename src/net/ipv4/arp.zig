@@ -277,7 +277,10 @@ fn updateCache(iface: *Interface, ip: u32, mac: [6]u8, state: ArpState) !void {
     entry.pending_len = 0;
 }
 
-/// Get a slot for a new entry (reusing free/stale or appending)
+/// Maximum ARP cache entries (DoS protection)
+const MAX_ARP_ENTRIES: usize = 256;
+
+/// Get a slot for a new entry (reusing free/stale or LRU eviction)
 fn findFreeEntry() !*ArpEntry {
     // First pass: look for free entry
     for (arp_cache.items) |*entry| {
@@ -287,26 +290,57 @@ fn findFreeEntry() !*ArpEntry {
     }
 
     // Second pass: look for oldest stale entry to recycle
-    var oldest: ?*ArpEntry = null;
-    var oldest_time: u64 = current_tick;
+    var oldest_stale: ?*ArpEntry = null;
+    var oldest_stale_time: u64 = current_tick;
 
     for (arp_cache.items) |*entry| {
-        if (entry.state == .stale and entry.timestamp < oldest_time) {
-            oldest = entry;
-            oldest_time = entry.timestamp;
+        if (entry.state == .stale and entry.timestamp < oldest_stale_time) {
+            oldest_stale = entry;
+            oldest_stale_time = entry.timestamp;
         }
     }
 
-    if (oldest) |entry| {
+    if (oldest_stale) |entry| {
         return entry;
     }
 
-    // Third pass: if we have too many entries, evict oldest reachable (LRU)
-    // For now, let's just append if not too huge? 
-    // Or stick to a limit. Let's grow for now, memory is dynamic!
-    // But we should limit it eventually.
-    
-    // Just append a new one
+    // Check if at capacity - must evict via LRU
+    if (arp_cache.items.len >= MAX_ARP_ENTRIES) {
+        // Third pass: evict oldest reachable (LRU)
+        var oldest_reachable: ?*ArpEntry = null;
+        var oldest_reachable_time: u64 = current_tick;
+
+        for (arp_cache.items) |*entry| {
+            if (entry.state == .reachable and entry.timestamp < oldest_reachable_time) {
+                oldest_reachable = entry;
+                oldest_reachable_time = entry.timestamp;
+            }
+        }
+
+        if (oldest_reachable) |entry| {
+            return entry;
+        }
+
+        // Fourth pass: evict oldest incomplete entry
+        var oldest_incomplete: ?*ArpEntry = null;
+        var oldest_incomplete_time: u64 = current_tick;
+
+        for (arp_cache.items) |*entry| {
+            if (entry.state == .incomplete and entry.timestamp < oldest_incomplete_time) {
+                oldest_incomplete = entry;
+                oldest_incomplete_time = entry.timestamp;
+            }
+        }
+
+        if (oldest_incomplete) |entry| {
+            return entry;
+        }
+
+        // Cache full with no evictable entries (should not happen)
+        return error.OutOfMemory;
+    }
+
+    // Under capacity: append new entry
     const new_entry = try arp_cache.addOne(arp_allocator);
     new_entry.state = .free;
     return new_entry;

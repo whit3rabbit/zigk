@@ -13,8 +13,27 @@ pub fn processTimers() void {
     // Advance timestamp counter (assumes ~1ms per tick)
     state.connection_timestamp +%= 1;
 
-    for (state.tcb_pool.items) |tcb| {
+    // Iterate backwards to safely handle swapRemove during iteration.
+    // When freeTcb() calls swapRemove(), the last element moves to current index.
+    // Backward iteration ensures we don't skip any elements.
+    var i: usize = state.tcb_pool.items.len;
+    while (i > 0) {
+        i -= 1;
+        const tcb = state.tcb_pool.items[i];
         if (!tcb.allocated) continue;
+
+        // Orphan TCB detection: TCBs without a parent socket (except Listen state)
+        // These can occur if a socket is closed while the TCP state machine is
+        // still processing (e.g., FIN_WAIT, CLOSING states). Use aggressive timeout.
+        if (tcb.parent_socket == null and tcb.state != .Listen) {
+            const orphan_timeout: u32 = 30_000; // 30 seconds for orphaned TCBs
+            const age = state.connection_timestamp -% tcb.created_at;
+            if (age > orphan_timeout) {
+                tcb.state = .Closed;
+                state.freeTcb(tcb);
+                continue;
+            }
+        }
 
         // Check state-based timeout (garbage collection)
         const state_timeout = getStateTimeout(tcb.state);

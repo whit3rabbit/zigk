@@ -56,6 +56,9 @@ pub export fn dispatch_syscall(frame: *SyscallFrame) callconv(.c) void {
     };
 
     const args = frame.getArgs();
+    
+    // Log every syscall for debugging
+    console.debug("Syscall: #{d} (args: {x} {x} {x})", .{syscall_num, args[0], args[1], args[2]});
 
     // Use unrolled linear dispatch to avoid switch syntax limitations
     // LLVM will optimize this into a jump table/switch

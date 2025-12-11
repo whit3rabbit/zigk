@@ -438,8 +438,11 @@ pub fn sys_write(fd_num: usize, buf_ptr: usize, count: usize) isize {
 
     // Call device write operation
     const write_fn = fd.ops.write orelse {
+        console.warn("Syscall: Write on FD {} not supported", .{fd_num});
         return Errno.ENOSYS.toReturn();
     };
+
+    console.debug("Syscall: write(fd={}, count={})", .{fd_num, count});
 
     // Cap write size
     const max_write_size = 64 * 1024;
@@ -466,6 +469,39 @@ pub fn sys_write(fd_num: usize, buf_ptr: usize, count: usize) isize {
 // ZigK Custom Syscalls
 // =============================================================================
 
+/// Escape control characters in user-supplied strings for safe logging.
+/// Replaces non-printable characters with ^X notation to prevent:
+/// - ANSI escape code injection (terminal manipulation)
+/// - Kernel log spoofing (fake [KERNEL] prefixes)
+/// - Screen clearing or cursor manipulation
+/// Returns the number of bytes written to output.
+fn escapeControlChars(input: []const u8, output: []u8) usize {
+    var out_idx: usize = 0;
+    for (input) |c| {
+        if (out_idx + 2 >= output.len) break;
+        if (c >= 0x20 and c <= 0x7E) {
+            // Printable ASCII - pass through
+            output[out_idx] = c;
+            out_idx += 1;
+        } else if (c == '\n' or c == '\t') {
+            // Allow newline and tab
+            output[out_idx] = c;
+            out_idx += 1;
+        } else if (c < 32) {
+            // Control character (0x00-0x1F) - escape as ^X
+            output[out_idx] = '^';
+            output[out_idx + 1] = c + 64; // ^@ for 0, ^A for 1, etc.
+            out_idx += 2;
+        } else {
+            // High bytes (0x7F-0xFF) - escape as ^?
+            output[out_idx] = '^';
+            output[out_idx + 1] = '?';
+            out_idx += 2;
+        }
+    }
+    return out_idx;
+}
+
 /// sys_debug_log (1000) - Write debug message to kernel log
 pub fn sys_debug_log(buf_ptr: usize, len: usize) isize {
     if (buf_ptr == 0 and len > 0) {
@@ -491,7 +527,12 @@ pub fn sys_debug_log(buf_ptr: usize, len: usize) isize {
         return Errno.EFAULT.toReturn();
     };
 
-    console.debug("[USER] {s}", .{kbuf[0..actual_len]});
+    // Sanitize output: escape control characters to prevent log injection
+    // Double size to account for ^X escaping of control chars
+    var sanitized: [2048]u8 = undefined;
+    const sanitized_len = escapeControlChars(kbuf[0..actual_len], &sanitized);
+
+    console.debug("[USER] {s}", .{sanitized[0..sanitized_len]});
 
     return @intCast(actual_len);
 }
@@ -722,7 +763,7 @@ pub fn sys_recvfrom(fd: usize, buf_ptr: usize, len: usize, flags: usize, addr_pt
 ///   - Child PID to parent process
 ///   - 0 to child process
 ///   - Negative errno on error
-pub fn sys_fork() isize {
+pub fn sys_fork(frame: *hal.syscall.SyscallFrame) isize {
     const thread = @import("thread");
 
     // Get current process
@@ -758,7 +799,7 @@ pub fn sys_fork() isize {
 
     // Copy parent's kernel stack frame to child
     // This makes the child resume at the same point as parent
-    copyThreadState(parent_thread, child_thread);
+    copyThreadState(frame, parent_thread, child_thread);
 
     // Set child's return value to 0 (RAX in syscall return)
     // The return value is stored in the saved interrupt frame
@@ -775,15 +816,38 @@ pub fn sys_fork() isize {
 }
 
 /// Copy thread state from parent to child for fork
-fn copyThreadState(parent: *@import("thread").Thread, child: *@import("thread").Thread) void {
-    // Copy the saved interrupt frame from parent's kernel stack
-    // The frame contains all registers including RIP (resume point)
-    const frame_size: usize = 23 * 8; // 15 GPRs + vec + err + 5 iretq values
+fn copyThreadState(
+    parent_frame: *hal.syscall.SyscallFrame,
+    parent: *@import("thread").Thread,
+    child: *@import("thread").Thread,
+) void {
+    // Build a fresh interrupt frame for the child using the live syscall frame.
+    const child_frame: *hal.idt.InterruptFrame = @ptrFromInt(child.kernel_rsp);
 
-    const parent_frame_ptr: [*]u8 = @ptrFromInt(parent.kernel_rsp);
-    const child_frame_ptr: [*]u8 = @ptrFromInt(child.kernel_rsp);
-
-    @memcpy(child_frame_ptr[0..frame_size], parent_frame_ptr[0..frame_size]);
+    child_frame.* = .{
+        .r15 = parent_frame.r15,
+        .r14 = parent_frame.r14,
+        .r13 = parent_frame.r13,
+        .r12 = parent_frame.r12,
+        .r11 = 0, // Clobbered by SYSCALL, leave zeroed for cleanliness
+        .r10 = parent_frame.r10,
+        .r9 = parent_frame.r9,
+        .r8 = parent_frame.r8,
+        .rdi = parent_frame.rdi,
+        .rsi = parent_frame.rsi,
+        .rbp = parent_frame.rbp,
+        .rdx = parent_frame.rdx,
+        .rcx = parent_frame.rcx, // RCX is clobbered by SYSCALL; keep value for parity
+        .rbx = parent_frame.rbx,
+        .rax = parent_frame.rax,
+        .vector = 0,
+        .error_code = 0,
+        .rip = parent_frame.getReturnRip(),
+        .cs = hal.gdt.USER_CODE,
+        .rflags = parent_frame.r11,
+        .rsp = parent_frame.getUserRsp(),
+        .ss = hal.gdt.USER_DATA,
+    };
 
     // Copy FS base (TLS)
     child.fs_base = parent.fs_base;
@@ -806,10 +870,8 @@ fn setForkChildReturn(child: *@import("thread").Thread) void {
     // R15, R14, R13, R12, R11, R10, R9, R8, RDI, RSI, RBP, RDX, RCX, RBX, RAX
     // vec, err, RIP, CS, RFLAGS, RSP, SS
 
-    // RAX is 14 u64s from kernel_rsp
-    const rax_offset: usize = 14 * 8;
-    const rax_ptr: *u64 = @ptrFromInt(child.kernel_rsp + rax_offset);
-    rax_ptr.* = 0; // Child gets 0 from fork()
+    const frame: *hal.idt.InterruptFrame = @ptrFromInt(child.kernel_rsp);
+    frame.rax = 0; // Child gets 0 from fork()
 }
 
 /// sys_execve (59) - Execute a program
@@ -986,6 +1048,9 @@ pub fn sys_execve(frame: *hal.syscall.SyscallFrame, path_ptr: usize, argv_ptr: u
     frame.setReturnRip(result.entry_point);
     frame.setUserRsp(result.stack_pointer);
 
+    // Clear inherited register state so the new program starts with clean GPRs.
+    zeroExecveRegisters(frame);
+
     // Destroy old address space
     vmm.destroyAddressSpace(old_cr3);
 
@@ -993,6 +1058,27 @@ pub fn sys_execve(frame: *hal.syscall.SyscallFrame, path_ptr: usize, argv_ptr: u
     // On successful execve, this value becomes the argc seen by _start
     // (though typically argc comes from the stack, not RAX).
     return 0;
+}
+
+/// Zero general-purpose registers in the syscall frame for execve
+/// Keeps RIP (rcx) and RSP intact; sets RFLAGS to a clean user value.
+fn zeroExecveRegisters(frame: *hal.syscall.SyscallFrame) void {
+    frame.r15 = 0;
+    frame.r14 = 0;
+    frame.r13 = 0;
+    frame.r12 = 0;
+    frame.rbp = 0;
+    frame.rbx = 0;
+    frame.r9 = 0;
+    frame.r8 = 0;
+    frame.r10 = 0;
+    frame.rdx = 0;
+    frame.rsi = 0;
+    frame.rdi = 0;
+    frame.rax = 0;
+    // rcx holds return RIP for SYSRET; keep as set by setReturnRip
+    // Provide clean user RFLAGS (IF=1, reserved bit 1 set)
+    frame.r11 = 0x202;
 }
 
 
@@ -1136,9 +1222,10 @@ pub fn sys_arch_prctl(code: usize, addr: usize) isize {
             if (!isValidUserPtr(addr, @sizeOf(u64))) {
                 return Errno.EFAULT.toReturn();
             }
-            // Write current FS base to user pointer
-            const ptr: *u64 = @ptrFromInt(addr);
-            ptr.* = curr.fs_base;
+            // Write current FS base to user pointer using safe copy
+            UserPtr.from(addr).writeValue(curr.fs_base) catch {
+                return Errno.EFAULT.toReturn();
+            };
             return 0;
         },
         ARCH_SET_GS, ARCH_GET_GS => {
@@ -1157,44 +1244,47 @@ pub fn sys_arch_prctl(code: usize, addr: usize) isize {
 /// Returns 0 on success, -ENODEV if no framebuffer available,
 /// -EFAULT for invalid pointer.
 pub fn sys_get_fb_info(info_ptr: usize) isize {
-    // Validate user pointer (FramebufferInfo is 24 bytes: 4*u32 + 6*u8 + 2*u8 padding)
+    // FramebufferInfo is 24 bytes: 4*u32 + 6*u8 + 2*u8 padding
     const info_size: usize = 24;
-    if (!isValidUserPtr(info_ptr, info_size)) {
-        return Errno.EFAULT.toReturn();
-    }
 
     // Get framebuffer state from module (returns null if not available)
     const fb_state = framebuffer.getState() orelse {
         return Errno.ENODEV.toReturn();
     };
 
-    // Copy framebuffer info to userspace
-    // The struct layout must match FramebufferInfo in user/lib/syscall.zig
-    const info_bytes: [*]u8 = @ptrFromInt(info_ptr);
+    // Build framebuffer info in kernel buffer first
+    // Struct layout must match FramebufferInfo in user/lib/syscall.zig
+    var info_buf: [info_size]u8 = undefined;
 
     // Width (u32, offset 0)
-    @as(*align(1) u32, @ptrCast(info_bytes + 0)).* = fb_state.width;
+    std.mem.writeInt(u32, info_buf[0..4], fb_state.width, .little);
     // Height (u32, offset 4)
-    @as(*align(1) u32, @ptrCast(info_bytes + 4)).* = fb_state.height;
+    std.mem.writeInt(u32, info_buf[4..8], fb_state.height, .little);
     // Pitch (u32, offset 8)
-    @as(*align(1) u32, @ptrCast(info_bytes + 8)).* = fb_state.pitch;
+    std.mem.writeInt(u32, info_buf[8..12], fb_state.pitch, .little);
     // Bpp (u32, offset 12) - extend u8 to u32 for struct field
-    @as(*align(1) u32, @ptrCast(info_bytes + 12)).* = @as(u32, fb_state.bpp);
+    std.mem.writeInt(u32, info_buf[12..16], @as(u32, fb_state.bpp), .little);
     // Red shift (u8, offset 16)
-    info_bytes[16] = fb_state.red_shift;
+    info_buf[16] = fb_state.red_shift;
     // Red mask size (u8, offset 17)
-    info_bytes[17] = fb_state.red_mask_size;
+    info_buf[17] = fb_state.red_mask_size;
     // Green shift (u8, offset 18)
-    info_bytes[18] = fb_state.green_shift;
+    info_buf[18] = fb_state.green_shift;
     // Green mask size (u8, offset 19)
-    info_bytes[19] = fb_state.green_mask_size;
+    info_buf[19] = fb_state.green_mask_size;
     // Blue shift (u8, offset 20)
-    info_bytes[20] = fb_state.blue_shift;
+    info_buf[20] = fb_state.blue_shift;
     // Blue mask size (u8, offset 21)
-    info_bytes[21] = fb_state.blue_mask_size;
+    info_buf[21] = fb_state.blue_mask_size;
     // Reserved bytes (offset 22-23)
-    info_bytes[22] = 0;
-    info_bytes[23] = 0;
+    info_buf[22] = 0;
+    info_buf[23] = 0;
+
+    // Copy to userspace using safe copy (handles faults gracefully)
+    const uptr = UserPtr.from(info_ptr);
+    _ = uptr.copyFromKernel(&info_buf) catch {
+        return Errno.EFAULT.toReturn();
+    };
 
     console.debug("sys_get_fb_info: {d}x{d}x{d}", .{
         fb_state.width,
