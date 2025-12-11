@@ -133,13 +133,23 @@ pub fn mapPage(pml4_phys: u64, virt_addr: u64, phys_addr: u64, flags: PageFlags)
 }
 
 /// Map a range of pages
+/// On failure, all previously mapped pages in this call are unmapped (rollback)
 pub fn mapRange(pml4_phys: u64, virt_start: u64, phys_start: u64, size: usize, flags: PageFlags) VmmError!void {
     const page_count = (size + PAGE_SIZE - 1) / PAGE_SIZE;
-    var i: usize = 0;
+    var mapped_count: usize = 0;
 
-    while (i < page_count) : (i += 1) {
-        const virt = virt_start + i * PAGE_SIZE;
-        const phys = phys_start + i * PAGE_SIZE;
+    // Rollback on failure: unmap all pages we successfully mapped
+    errdefer {
+        var j: usize = 0;
+        while (j < mapped_count) : (j += 1) {
+            const virt = virt_start + j * PAGE_SIZE;
+            unmapPage(pml4_phys, virt) catch {};
+        }
+    }
+
+    while (mapped_count < page_count) : (mapped_count += 1) {
+        const virt = virt_start + mapped_count * PAGE_SIZE;
+        const phys = phys_start + mapped_count * PAGE_SIZE;
         try mapPage(pml4_phys, virt, phys, flags);
     }
 }
@@ -472,7 +482,7 @@ pub fn mapMmio(phys_addr: u64, size: usize) VmmError!u64 {
     // TODO: Implement proper remapping with cache-disabled 4KB pages
     // for real hardware that requires it
 
-    console.info("VMM: MMIO region mapped: phys=0x{x:0>16} virt=0x{x:0>16} size={d}KB", .{
+    console.info("VMM: MMIO region mapped: phys=0x{x} virt=0x{x} size={d}KB", .{
         phys_addr,
         virt_addr,
         size / 1024,

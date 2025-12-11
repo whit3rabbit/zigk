@@ -34,7 +34,7 @@ pub const Ecam = struct {
         const bus_count: usize = @as(usize, end_bus - start_bus) + 1;
         const size = bus_count * 32 * 8 * 4096;
 
-        console.info("PCI ECAM: Mapping phys=0x{x:0>16}, buses {d}-{d}, size={d}MB", .{
+        console.info("PCI ECAM: Mapping phys=0x{x}, buses {d}-{d}, size={d}MB", .{
             ecam_phys,
             start_bus,
             end_bus,

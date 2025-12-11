@@ -22,157 +22,21 @@ pub fn printUnsafe(str: []const u8) void {
 /// Print a formatted string to the debug console
 /// Note: In freestanding mode, we implement a minimal formatter
 pub fn printf(comptime fmt: []const u8, args: anytype) void {
-    // Use a simple inline formatter since std.fmt may not be available
-    writeFormat(fmt, args);
+    std.fmt.format(writer, fmt, args) catch {};
 }
 
 /// Writer interface for compatibility with std patterns
-pub const Writer = struct {
-    const Self = @This();
-
-    pub fn write(_: Self, bytes: []const u8) error{}!usize {
+const ConsoleRawWriter = struct {
+    pub const Error = error{};
+    pub fn write(self: ConsoleRawWriter, bytes: []const u8) Error!usize {
+        _ = self;
         print(bytes);
         return bytes.len;
-    }
-
-    pub fn writeAll(self: Self, bytes: []const u8) error{}!void {
-        _ = try self.write(bytes);
-    }
-
-    pub fn writeByte(_: Self, byte: u8) error{}!void {
-        hal.serial.writeByte(byte);
-    }
-
-    pub fn writeBytesNTimes(self: Self, bytes: []const u8, n: usize) error{}!void {
-        for (0..n) |_| {
-            try self.writeAll(bytes);
-        }
     }
 };
 
 /// Global writer instance
-pub const writer = Writer{};
-
-// Simple format string implementation for freestanding
-fn writeFormat(comptime fmt: []const u8, args: anytype) void {
-    const ArgsType = @TypeOf(args);
-    const args_fields = @typeInfo(ArgsType).@"struct".fields;
-
-    comptime var arg_index: usize = 0;
-    comptime var i: usize = 0;
-
-    inline while (i < fmt.len) {
-        if (fmt[i] == '{' and i + 1 < fmt.len and fmt[i + 1] == '}') {
-            // Found {} placeholder
-            if (arg_index < args_fields.len) {
-                const arg = @field(args, args_fields[arg_index].name);
-                writeArg(arg);
-                arg_index += 1;
-            }
-            i += 2;
-        } else if (fmt[i] == '{' and i + 2 < fmt.len and fmt[i + 1] == 's' and fmt[i + 2] == '}') {
-            // Found {s} string placeholder
-            if (arg_index < args_fields.len) {
-                const arg = @field(args, args_fields[arg_index].name);
-                // Handle both []const u8 and [*:0]const u8 types
-                // Handle both []const u8 and [*:0]const u8 types
-                const ArgType = @TypeOf(arg);
-                const type_info = @typeInfo(ArgType);
-                if (type_info == .pointer and type_info.pointer.size == .slice and type_info.pointer.child == u8) {
-                    print(arg);
-                } else if (type_info == .pointer) {
-                    // Null-terminated string pointer - convert to slice
-                    const ptr: [*:0]const u8 = arg;
-                    var len: usize = 0;
-                    while (ptr[len] != 0) : (len += 1) {}
-                    print(ptr[0..len]);
-                }
-                arg_index += 1;
-            }
-            i += 3;
-        } else if (fmt[i] == '{' and i + 2 < fmt.len and fmt[i + 1] == 'd' and fmt[i + 2] == '}') {
-            // Found {d} decimal placeholder
-            if (arg_index < args_fields.len) {
-                const arg = @field(args, args_fields[arg_index].name);
-                writeDecimal(arg);
-                arg_index += 1;
-            }
-            i += 3;
-        } else if (fmt[i] == '{' and i + 2 < fmt.len and fmt[i + 1] == 'x' and fmt[i + 2] == '}') {
-            // Found {x} hex placeholder
-            if (arg_index < args_fields.len) {
-                const arg = @field(args, args_fields[arg_index].name);
-                writeHex(arg);
-                arg_index += 1;
-            }
-            i += 3;
-        } else {
-            hal.serial.writeByte(fmt[i]);
-            i += 1;
-        }
-    }
-}
-
-fn writeArg(arg: anytype) void {
-    const T = @TypeOf(arg);
-    switch (@typeInfo(T)) {
-        .pointer => |ptr| {
-            if (ptr.size == .Slice and ptr.child == u8) {
-                print(arg);
-            } else {
-                writeHex(@intFromPtr(arg));
-            }
-        },
-        .int, .comptime_int => writeDecimal(arg),
-        .bool => print(if (arg) "true" else "false"),
-        else => print("[?]"),
-    }
-}
-
-fn writeDecimal(value: anytype) void {
-    const T = @TypeOf(value);
-    if (@typeInfo(T) == .comptime_int or @typeInfo(T) == .int) {
-        var buf: [20]u8 = undefined;
-        var v: u64 = if (value < 0) @intCast(-value) else @intCast(value);
-        var i: usize = buf.len;
-
-        if (v == 0) {
-            hal.serial.writeByte('0');
-            return;
-        }
-
-        while (v > 0) : (i -= 1) {
-            buf[i - 1] = @intCast((v % 10) + '0');
-            v /= 10;
-        }
-
-        if (@typeInfo(T) == .int and @typeInfo(T).int.signedness == .signed and value < 0) {
-            hal.serial.writeByte('-');
-        }
-
-        print(buf[i..]);
-    }
-}
-
-fn writeHex(value: anytype) void {
-    const hex_chars = "0123456789abcdef";
-    var buf: [16]u8 = undefined;
-    var v: u64 = @intCast(value);
-    var i: usize = buf.len;
-
-    if (v == 0) {
-        print("0x0");
-        return;
-    }
-
-    while (v > 0) : (i -= 1) {
-        buf[i - 1] = hex_chars[@intCast(v & 0xF)];
-        v >>= 4;
-    }
-
-    print("0x");
-    print(buf[i..]);
-}
+pub const writer = std.io.GenericWriter(ConsoleRawWriter, ConsoleRawWriter.Error, ConsoleRawWriter.write){ .context = ConsoleRawWriter{} };
 
 /// Log levels for structured logging
 pub const LogLevel = enum {

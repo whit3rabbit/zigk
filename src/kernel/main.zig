@@ -527,13 +527,13 @@ fn initNetwork() void {
     console.info("Debug: Calling pci.initFromAcpi with 0x{x}", .{rsdp_addr});
 
     // 2. Initialize PCI
-    const pci_res = pci.initFromAcpi(rsdp_addr) catch |err| {
+    const pci_res = pci.initFromAcpi(heap.allocator(), rsdp_addr) catch |err| {
         console.err("PCI init failed: {}", .{err});
         return;
     };
     
     // 3. Initialize E1000e
-    const nic_driver = e1000e.initFromPci(&pci_res.devices, &pci_res.ecam) catch |err| {
+    const nic_driver = e1000e.initFromPci(pci_res.devices, &pci_res.ecam) catch |err| {
         console.warn("E1000e init failed (no supported NIC?): {}", .{err});
         return;
     };
