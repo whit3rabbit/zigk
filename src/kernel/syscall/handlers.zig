@@ -133,10 +133,9 @@ fn getGlobalUserVmm() *UserVmm {
 /// Note: In MVP, this terminates the current thread. Full implementation
 /// would terminate the entire process (all threads).
 pub fn sys_exit(status: usize) isize {
+    // Linux exit status encoding: (status & 0xFF) << 8
     const exit_code: i32 = @truncate(@as(isize, @bitCast(status)));
-    console.debug("sys_exit: code={d}", .{exit_code});
-
-    process_mod.exit(exit_code);
+    process_mod.exit((exit_code & 0xFF) << 8);
     unreachable;
 }
 
@@ -144,7 +143,8 @@ pub fn sys_exit(status: usize) isize {
 ///
 /// MVP: Same as sys_exit since we don't have process groups yet.
 pub fn sys_exit_group(status: usize) isize {
-    process_mod.exit(@truncate(@as(isize, @bitCast(status))));
+    const exit_code: i32 = @truncate(@as(isize, @bitCast(status)));
+    process_mod.exit((exit_code & 0xFF) << 8);
     unreachable;
 }
 
@@ -155,7 +155,7 @@ pub fn sys_wait4(pid_arg: usize, wstatus_ptr: usize, options: usize, rusage_ptr:
 
     const thread = @import("thread");
 
-    const current = sched.getCurrentThread() orelse {
+    const current_thread = sched.getCurrentThread() orelse {
         return Errno.ESRCH.toReturn();
     };
 
@@ -165,24 +165,65 @@ pub fn sys_wait4(pid_arg: usize, wstatus_ptr: usize, options: usize, rusage_ptr:
 
     // Loop until we find a zombie child or no children remain
     while (true) {
-        // Check for zombie children
-        if (thread.findZombieChild(current, target_pid)) |zombie| {
+        var found_zombie: ?*thread.Thread = null;
+        var has_children = false;
+        var has_matching_child = false;
+
+        // Iterate children list manually to check Process PID
+        var child_node = current_thread.first_child;
+        while (child_node) |child| {
+            // Get next sibling early since we might remove 'child'
+            child_node = child.next_sibling;
+
+            // Get child process PID
+            var child_pid: i32 = 0;
+            if (child.process) |p_ptr| {
+                const proc = @as(*process_mod.Process, @ptrCast(@alignCast(p_ptr)));
+                child_pid = @intCast(proc.pid);
+            } else {
+                // Kernel thread child? Skip or use TID as PID?
+                child_pid = @intCast(child.tid);
+            }
+
+            // Check if this child matches target_pid
+            const matches = if (target_pid == -1) true else (child_pid == target_pid);
+
+            if (matches) {
+                has_children = true;
+                has_matching_child = true;
+
+                if (child.state == .Zombie) {
+                    found_zombie = child;
+                    break;
+                }
+            } else if (target_pid == -1) {
+                // Should be covered by matches=true above, but for clarity
+                 has_children = true;
+            }
+        }
+
+        if (found_zombie) |zombie| {
             // Found a zombie - reap it
+            
+            // Get PID before destroying
+            var reaped_pid: i32 = 0;
+            if (zombie.process) |p_ptr| {
+                const proc = @as(*process_mod.Process, @ptrCast(@alignCast(p_ptr)));
+                reaped_pid = @intCast(proc.pid);
+            } else {
+                reaped_pid = @intCast(zombie.tid);
+            }
 
             // Write exit status if pointer provided
             if (wstatus_ptr != 0) {
-                // Linux wait status encoding: exit_status << 8
-                const wstatus_val: i32 = (zombie.exit_status & 0xFF) << 8;
-                UserPtr.from(wstatus_ptr).writeValue(wstatus_val) catch {
+                // Directly write exit_status (already encoded by sys_exit or crash handler)
+                UserPtr.from(wstatus_ptr).writeValue(zombie.exit_status) catch {
                     // Ignore fault on write back, as we already reaped functionality
                 };
             }
 
-            // Save TID before destroying
-            const reaped_tid = zombie.tid;
-
             // Remove from parent's child list and destroy
-            thread.removeChild(current, zombie);
+            thread.removeChild(current_thread, zombie);
             const proc_opaque = thread.destroyThread(zombie);
             if (proc_opaque) |ptr| {
                 const proc = @as(*process_mod.Process, @ptrCast(@alignCast(ptr)));
@@ -191,16 +232,15 @@ pub fn sys_wait4(pid_arg: usize, wstatus_ptr: usize, options: usize, rusage_ptr:
                 }
             }
 
-            return @intCast(reaped_tid);
+            return @intCast(reaped_pid);
         }
 
-        // No zombie found - check if we have any children at all
-        if (!thread.hasAnyChildren(current)) {
+        // No zombie found
+        if (!has_matching_child and target_pid > 0) {
             return Errno.ECHILD.toReturn();
         }
-
-        // Check if any living children match the target
-        if (target_pid > 0 and !thread.hasLivingChildren(current, target_pid)) {
+        
+        if (!has_children and target_pid == -1) {
             return Errno.ECHILD.toReturn();
         }
 
@@ -244,6 +284,40 @@ pub fn sys_getuid() isize {
 /// MVP: Always returns 0 (root group).
 pub fn sys_getgid() isize {
     return 0;
+}
+
+// =============================================================================
+// Signal and Thread Control
+// =============================================================================
+
+/// sys_rt_sigprocmask (14) - Examine and change blocked signals
+///
+/// MVP: Returns 0 (success) but does nothing. 
+/// musl uses this during startup/shutdown.
+pub fn sys_rt_sigprocmask(how: usize, set_ptr: usize, oldset_ptr: usize, sigsetsize: usize) isize {
+    _ = how;
+    _ = set_ptr;
+    _ = oldset_ptr;
+    _ = sigsetsize;
+    // TODO: Implement signal masking
+    return 0;
+}
+
+/// sys_set_tid_address (218) - Set pointer to thread ID
+///
+/// Args:
+///   tidptr: Pointer to int where kernel writes TID on thread exit (and futex wake)
+///
+/// Returns: Thread ID
+///
+/// MVP: Returns current TID. musl uses this for thread cancellation/cleanup.
+pub fn sys_set_tid_address(tidptr: usize) isize {
+    _ = tidptr; // We should store this in the Thread struct if we supported it
+    
+    if (sched.getCurrentThread()) |t| {
+        return t.tid;
+    }
+    return 1;
 }
 
 // =============================================================================
@@ -461,6 +535,64 @@ pub fn sys_write(fd_num: usize, buf_ptr: usize, count: usize) isize {
     
     // Write from kernel buffer
     return write_fn(fd, kbuf);
+}
+
+/// sys_writev (20) - Write data from multiple buffers
+///
+/// Args:
+///   fd: File descriptor
+///   bvec_ptr: Pointer to iovec array
+///   count: Number of iovec structs
+///
+/// Returns: Total bytes written or error
+pub fn sys_writev(fd: usize, bvec_ptr: usize, count: usize) isize {
+    const Iovec = extern struct {
+        base: usize,
+        len: usize,
+    };
+
+    if (count == 0) return 0;
+    if (count > 1024) return Errno.EINVAL.toReturn();
+
+    // Copy iovecs from user
+    // const iovec_size = @sizeOf(Iovec);
+    // const total_iovec_size = iovec_size * count; // Unused
+    
+    const kvecs = heap.allocator().alloc(Iovec, count) catch {
+        return Errno.ENOMEM.toReturn();
+    };
+    defer heap.allocator().free(kvecs);
+
+    const uptr = UserPtr.from(bvec_ptr);
+    if (uptr.copyToKernel(std.mem.sliceAsBytes(kvecs)) catch null == null) {
+        return Errno.EFAULT.toReturn();
+    }
+
+    var total_written: isize = 0;
+
+    for (kvecs) |vec| {
+        if (vec.len == 0) continue;
+        
+        const res = sys_write(fd, vec.base, vec.len);
+        if (res < 0) {
+            if (total_written > 0) return total_written;
+            return res;
+        }
+        total_written += res;
+    }
+    
+    return total_written;
+}
+
+/// sys_ioctl (16) - Control device
+/// 
+/// MVP: Returns -ENOTTY (inappropriate ioctl for device)
+/// This is sufficient for musl isatty() checks.
+pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) isize {
+    _ = fd;
+    _ = cmd;
+    _ = arg;
+    return Errno.ENOTTY.toReturn();
 }
 
 

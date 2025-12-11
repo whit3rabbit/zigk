@@ -37,6 +37,11 @@ var guard_page_checker: ?*const fn (u64) ?GuardPageInfo = null;
 // Returns true if handled (FPU state restored), false if not handled
 var fpu_access_handler: ?*const fn () bool = null;
 
+// User crash handler callback (set by scheduler)
+// Called when a user thread causes an exception (e.g. Page Fault)
+// Args: vector, error_code
+var crash_handler: ?*const fn (u8, u64) noreturn = null;
+
 /// Exception names for debugging
 const exception_names = [_][]const u8{
     "Divide Error (#DE)",
@@ -100,6 +105,11 @@ pub fn setKeyboardHandler(handler: *const fn () void) void {
     keyboard_handler = handler;
 }
 
+/// Set the crash handler callback
+pub fn setCrashHandler(handler: *const fn (u8, u64) noreturn) void {
+    crash_handler = handler;
+}
+
 /// Set the timer handler callback
 /// This allows the scheduler to register its timer tick handler
 /// The handler receives the current frame and returns the frame to restore
@@ -122,6 +132,7 @@ pub fn setFpuAccessHandler(handler: *const fn () bool) void {
 }
 
 /// Generic exception handler
+/// Generic exception handler
 fn exceptionHandler(frame: *idt.InterruptFrame) void {
     const vector: u8 = @truncate(frame.vector);
 
@@ -135,6 +146,13 @@ fn exceptionHandler(frame: *idt.InterruptFrame) void {
             }
         }
         // If no handler or handler failed, fall through to error handling
+    }
+
+    // Check for user mode exception (CS RPL == 3)
+    if ((frame.cs & 3) == 3) {
+        if (crash_handler) |handler| {
+             handler(vector, frame.error_code);
+        }
     }
 
     // Print exception info

@@ -173,6 +173,7 @@ export fn _start() noreturn {
     // Initialize keyboard driver and register with HAL
     keyboard.init();
     hal.interrupts.setKeyboardHandler(&keyboard.handleIrq);
+    hal.interrupts.setCrashHandler(handleCrash);
 
     // Initialize scheduler (creates idle thread, registers timer handler)
     sched.init();
@@ -542,6 +543,25 @@ pub fn panic(msg: []const u8, _: ?*@import("std").builtin.StackTrace, _: ?usize)
     console.printUnsafe("\n");
 
     halt();
+}
+
+/// Handle user process crashes (exceptions in user mode)
+fn handleCrash(vector: u8, err_code: u64) noreturn {
+    // Map exception vector to POSIX signal
+    const signal: i32 = switch (vector) {
+        0 => 8,  // #DE -> SIGFPE
+        6 => 4,  // #UD -> SIGILL
+        13, 14 => 11, // #GP, #PF -> SIGSEGV
+        else => 11, // Default to SIGSEGV
+    };
+
+    if (config.debug_scheduler) {
+        console.warn("Process crashed! Vector={d} Code={x} Signal={d}", .{ vector, err_code, signal });
+    }
+
+    // Terminate the process with signal status
+    // Signal status is stored in bits 0-6 of exit_status
+    process_mod.exit(signal);
 }
 
 // ============================================================================

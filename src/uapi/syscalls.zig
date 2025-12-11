@@ -55,6 +55,14 @@ pub const SYS_BRK: usize = 12;
 /// (fd, cmd, arg) -> int
 pub const SYS_IOCTL: usize = 16;
 
+/// Write data from multiple buffers
+/// (fd, iov, iovcnt) -> ssize_t
+pub const SYS_WRITEV: usize = 20;
+
+/// Examine and change blocked signals
+/// (how, set, oldset, sigsetsize) -> int
+pub const SYS_RT_SIGPROCMASK: usize = 14;
+
 /// Examine multiple file descriptors
 /// (nfds, readfds, writefds, exceptfds, timeout) -> int
 pub const SYS_SELECT: usize = 23;
@@ -172,17 +180,21 @@ pub const SYS_GETPPID: usize = 110;
 /// (code, addr) -> int
 pub const SYS_ARCH_PRCTL: usize = 158;
 
-/// Get host name
-/// (name, len) -> int
-pub const SYS_GETHOSTNAME: usize = 170;
-
 /// Set host name
 /// (name, len) -> int
-pub const SYS_SETHOSTNAME: usize = 171;
+pub const SYS_SETHOSTNAME: usize = 170;
+
+/// Set domain name
+/// (name, len) -> int
+pub const SYS_SETDOMAINNAME: usize = 171;
 
 /// Get time from a clock
 /// (clk_id, tp) -> int
 pub const SYS_CLOCK_GETTIME: usize = 228;
+
+/// Set pointer to thread ID
+/// (tidptr) -> pid_t
+pub const SYS_SET_TID_ADDRESS: usize = 218;
 
 /// Exit all threads in process
 /// (code) -> noreturn

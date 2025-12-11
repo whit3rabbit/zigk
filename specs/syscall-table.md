@@ -46,8 +46,8 @@ All specifications MUST reference this table.
 | 104 | sys_getgid | () -> gid_t | 005 |
 | 110 | sys_getppid | () -> pid_t | 005 |
 | 158 | sys_arch_prctl | (code, addr) -> int | 006 |
-| 170 | sys_gethostname | (name, len) -> int | Future |
-| 171 | sys_sethostname | (name, len) -> int | Future |
+| 170 | sys_sethostname | (name, len) -> int | Future |
+| 171 | sys_setdomainname | (name, len) -> int | Future |
 | 228 | sys_clock_gettime | (clk_id, tp) -> int | 007 |
 | 231 | sys_exit_group | (code) -> noreturn | 005 |
 | 232 | sys_epoll_wait | (epfd, events, maxevents, timeout) -> int | Future |
