@@ -12,7 +12,7 @@ const pci = @import("pci");
 
 // Host Controller Drivers
 pub const xhci = @import("xhci/root.zig");
-// pub const ehci = @import("ehci/root.zig");  // TODO: Phase 6
+pub const ehci = @import("ehci/root.zig");
 
 // Common types
 pub const types = @import("types.zig");
