@@ -59,6 +59,7 @@ pub const PT_DYNAMIC: u32 = 2; // Dynamic linking info
 pub const PT_INTERP: u32 = 3; // Interpreter path
 pub const PT_NOTE: u32 = 4; // Auxiliary info
 pub const PT_PHDR: u32 = 6; // Program header table
+pub const PT_TLS: u32 = 7; // Thread-local storage segment
 pub const PT_GNU_STACK: u32 = 0x6474e551; // Stack flags
 
 /// Program header flags
@@ -164,6 +165,8 @@ pub const ElfLoadResult = struct {
     phdr_addr: u64,
     /// Number of Program Headers (for AT_PHNUM)
     phnum: u16,
+    /// TLS segment header (if present)
+    tls_phdr: ?Elf64_Phdr = null,
 };
 
 /// Auxiliary Vector Entry (for AT_* values passed to _start)
@@ -267,12 +270,14 @@ pub fn load(data: []const u8, pml4_phys: u64, load_base: u64) ElfError!ElfLoadRe
     var load_count: u32 = 0;
     var total_memory: u64 = 0;
     var phdr_vaddr: u64 = 0;
+    var tls_phdr: ?Elf64_Phdr = null;
 
-    // First pass: Find PT_PHDR for auxiliary vector
+    // First pass: Find PT_PHDR and PT_TLS
     for (phdrs) |*phdr| {
         if (phdr.p_type == PT_PHDR) {
             phdr_vaddr = actual_base + phdr.p_vaddr;
-            break;
+        } else if (phdr.p_type == PT_TLS) {
+            tls_phdr = phdr.*;
         }
     }
     // Fallback if no PT_PHDR: use base + offset
@@ -380,6 +385,7 @@ pub fn load(data: []const u8, pml4_phys: u64, load_base: u64) ElfError!ElfLoadRe
         .is_pie = is_pie,
         .phdr_addr = phdr_vaddr,
         .phnum = ehdr.e_phnum,
+        .tls_phdr = tls_phdr,
     };
 }
 
@@ -701,6 +707,87 @@ pub fn setupStack(
     console.debug("ELF: Stack setup complete, sp={x}", .{sp});
 
     return sp;
+}
+
+/// Set up TLS/TCB for a new thread
+///
+/// Allocates memory for the TLS block (tdata + tbss) and TCB.
+/// Copies the initial TLS image from the ELF file.
+/// Sets up the self-pointer in the TCB.
+///
+/// Returns: The FS base address (pointer to TCB)
+pub fn setupTls(
+    pml4_phys: u64,
+    phdr: Elf64_Phdr,
+    file_data: []const u8,
+    preferred_tp: u64,
+) !u64 {
+    // TCB pointer (TP) must be aligned to p_align
+    // We use the preferred_tp as a starting point and align it up
+    const align_mask = phdr.p_align - 1;
+    const tp = (preferred_tp + align_mask) & ~align_mask;
+
+    // TLS data is located at tp - aligned_size
+    // According to x86_64 ABI Variant II
+    const tls_size = std.mem.alignForward(u64, phdr.p_memsz, phdr.p_align);
+    const tls_start = tp - tls_size;
+
+    // We need to map memory covering [tls_start, tp + tcb_size]
+    // Allocate at least 1 page for TCB (Musl uses struct pthread)
+    const tcb_size = 4096;
+
+    // Align allocation to page boundaries
+    const page_size = pmm.PAGE_SIZE;
+    // Ensure we start allocating at a page boundary below or at tls_start
+    const alloc_start = tls_start & ~(page_size - 1);
+    // Ensure we end allocating at a page boundary above or at tp + tcb_size
+    const alloc_end = std.mem.alignForward(u64, tp + tcb_size, page_size);
+    const total_size = alloc_end - alloc_start;
+    const page_count = total_size / page_size;
+
+    console.debug("ELF: Setting up TLS at {x} (tp={x}, size={d})", .{ alloc_start, tp, tls_size });
+
+    // Allocate and map pages
+    const page_flags = PageFlags{
+        .writable = true,
+        .user = true,
+        .no_execute = true, // TLS/TCB should not be executable
+    };
+
+    var current_vaddr = alloc_start;
+    var i: usize = 0;
+    while (i < page_count) : (i += 1) {
+        const phys_page = pmm.allocPage() orelse return ElfError.OutOfMemory;
+
+        vmm.mapPage(pml4_phys, current_vaddr, phys_page, page_flags) catch {
+            pmm.freePage(phys_page);
+            return ElfError.MappingFailed;
+        };
+
+        // Zero the page (handles tbss and TCB init)
+        const page_ptr: [*]u8 = paging.physToVirt(phys_page);
+        @memset(page_ptr[0..page_size], 0);
+
+        current_vaddr += page_size;
+    }
+
+    // Copy TLS template data (tdata)
+    if (phdr.p_filesz > 0) {
+        if (phdr.p_offset + phdr.p_filesz > file_data.len) {
+            console.err("ELF: TLS segment out of file bounds", .{});
+            return ElfError.BufferTooSmall;
+        }
+
+        // We need to copy to tls_start. We can use copyToUserspace.
+        const src = file_data[phdr.p_offset..][0..phdr.p_filesz];
+        try copyToUserspace(pml4_phys, tls_start, src);
+    }
+
+    // Set up TCB self-pointer at TP (first 8 bytes)
+    // This is required for %fs:0 to work
+    try writeU64ToUserspace(pml4_phys, tp, tp);
+
+    return tp;
 }
 
 /// Check that stack pointer is within bounds

@@ -481,20 +481,42 @@ fn loadInitProcess() void {
         return;
     };
 
-    // Hack: Manually set up TCB/TLS for Musl
-    // Musl static binaries may crash if %fs:0 is not accessible or doesn't point to itself
-    // We allocate a page, map it, write self-pointer, and set fs_base.
-    if (pmm.allocZeroedPage()) |tcb_page| {
-        const tcb_virt: u64 = 0xB000_0000; // Arbitrary user address
-        if (vmm.mapPage(proc.cr3, tcb_virt, tcb_page, .{ .writable = true, .user = true })) |_| {
-            // Write self-pointer to TCB (first 8 bytes)
-            const tcb_ptr: [*]u64 = @ptrCast(@alignCast(hal.paging.physToVirt(tcb_page)));
-            tcb_ptr[0] = tcb_virt;
-            user_thread.fs_base = tcb_virt;
-            console.debug("Init: Manually initialized TLS/TCB at {x}", .{tcb_virt});
-        } else |_| {
-             pmm.freePage(tcb_page);
+    // Set up TCB/TLS using ELF header information
+    // Musl static binaries may crash if %fs:0 is not accessible or doesn't point to itself.
+    const tls_base_addr: u64 = 0xB000_0000; // Preferred address for TCB
+    var fs_base: u64 = 0;
+
+    if (load_result.tls_phdr) |phdr| {
+        // Use TLS segment from ELF
+        if (elf.setupTls(proc.cr3, phdr, mod_data, tls_base_addr)) |tp| {
+            fs_base = tp;
+            console.info("Init: Initialized TLS at {x} (size={d})", .{ tp, phdr.p_memsz });
+        } else |err| {
+            console.warn("Init: Failed to setup TLS: {}", .{err});
         }
+    } else {
+        // Fallback for binaries without PT_TLS (but expecting TCB at fs:0)
+        // Allocate a minimal TCB
+        console.warn("Init: No PT_TLS found, creating minimal TCB", .{});
+        const minimal_phdr = elf.Elf64_Phdr{
+            .p_type = elf.PT_TLS,
+            .p_flags = elf.PF_R | elf.PF_W,
+            .p_offset = 0,
+            .p_vaddr = 0,
+            .p_paddr = 0,
+            .p_filesz = 0,
+            .p_memsz = 0,
+            .p_align = 16, // Default alignment
+        };
+        if (elf.setupTls(proc.cr3, minimal_phdr, mod_data, tls_base_addr)) |tp| {
+            fs_base = tp;
+        } else |err| {
+            console.warn("Init: Failed to setup minimal TCB: {}", .{err});
+        }
+    }
+
+    if (fs_base != 0) {
+        user_thread.fs_base = fs_base;
     }
 
     sched.addThread(user_thread);
