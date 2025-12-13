@@ -38,16 +38,25 @@ var initialized: bool = false;
 
 /// Errors that can occur during VMM operations
 pub const VmmError = error{
+    /// VMM has not been initialized yet
     NotInitialized,
+    /// Physical memory allocation failed
     OutOfMemory,
+    /// Virtual or physical address is invalid (not aligned or out of bounds)
     InvalidAddress,
+    /// Page is already mapped
     AlreadyMapped,
+    /// Page is not mapped
     NotMapped,
+    /// Invalid page flags
     InvalidFlags,
 };
 
 /// Initialize VMM with kernel page tables
-/// Called after PMM is initialized
+///
+/// Allocates a new PML4 for the kernel, copies higher-half kernel mappings
+/// from the bootloader's page table, and activates the new table.
+/// Must be called after PMM is initialized.
 pub fn init() VmmError!void {
     if (initialized) {
         return;
@@ -88,8 +97,15 @@ pub fn getKernelPml4() u64 {
     return kernel_pml4_phys;
 }
 
-/// Map a virtual page to a physical page
-/// Allocates intermediate page tables as needed
+/// Map a single 4KB virtual page to a physical page
+///
+/// Allocates intermediate page tables (PML4 -> PDPT -> PD -> PT) as needed.
+///
+/// Arguments:
+///   pml4_phys: Physical address of the PML4 table
+///   virt_addr: Virtual address to map (must be 4KB aligned)
+///   phys_addr: Physical address to map to (must be 4KB aligned)
+///   flags: Page flags (present, writable, user, etc.)
 pub fn mapPage(pml4_phys: u64, virt_addr: u64, phys_addr: u64, flags: PageFlags) VmmError!void {
     if (!initialized) {
         return VmmError.NotInitialized;
@@ -133,8 +149,13 @@ pub fn mapPage(pml4_phys: u64, virt_addr: u64, phys_addr: u64, flags: PageFlags)
     paging.invalidatePage(virt_addr);
 }
 
-/// Map a range of pages
-/// On failure, all previously mapped pages in this call are unmapped (rollback)
+/// Map a contiguous range of pages
+///
+/// Maps `size` bytes starting from `virt_start` to `phys_start`.
+/// Both addresses and size must be page-aligned (handled by caller or helper logic).
+///
+/// On failure, all pages mapped during this call are unmapped (rollback)
+/// to ensure atomic-like behavior.
 pub fn mapRange(pml4_phys: u64, virt_start: u64, phys_start: u64, size: usize, flags: PageFlags) VmmError!void {
     // Check for size overflow: size + PAGE_SIZE - 1 must not wrap
     if (size > std.math.maxInt(usize) - (PAGE_SIZE - 1)) {
@@ -160,6 +181,10 @@ pub fn mapRange(pml4_phys: u64, virt_start: u64, phys_start: u64, size: usize, f
 }
 
 /// Unmap a virtual page
+///
+/// Removes the mapping for the specified virtual address.
+/// If the unmap results in empty page tables, they are freed recursively.
+/// Also invalidates the TLB entry for the unmapped address.
 pub fn unmapPage(pml4_phys: u64, virt_addr: u64) VmmError!void {
     if (!initialized) {
         return VmmError.NotInitialized;
@@ -241,7 +266,11 @@ fn isTableEmpty(table: *const PageTable) bool {
     return true;
 }
 
-/// Translate virtual address to physical
+/// Translate a virtual address to a physical address
+///
+/// Traverses the page table hierarchy to find the physical address.
+/// Supports 4KB, 2MB, and 1GB pages.
+/// Returns null if the address is not mapped.
 pub fn translate(pml4_phys: u64, virt_addr: u64) ?u64 {
     const indices = paging.getIndices(virt_addr);
     const pml4 = paging.getTablePtr(pml4_phys);

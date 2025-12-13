@@ -5,6 +5,9 @@
 ///
 /// This avoids the need for a separate Node allocation for each element,
 /// which is critical for scheduler queues and other low-level structures.
+///
+/// Requirements:
+///   T must have mutable `next: ?*T` and `prev: ?*T` fields.
 pub fn IntrusiveDoublyLinkedList(comptime T: type) type {
     return struct {
         head: ?*T = null,

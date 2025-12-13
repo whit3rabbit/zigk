@@ -9,7 +9,8 @@
 //
 // Register Convention (x86_64):
 //   Entry: RAX=number, RDI=arg1, RSI=arg2, RDX=arg3, R10=arg4, R8=arg5, R9=arg6
-//   Return: RAX=result or -errno
+//   Return: RAX=result (if >= 0) or -errno (if < 0)
+//   Clobbers: RCX, R11 (as per SYSCALL instruction)
 
 // =============================================================================
 // Linux x86_64 ABI Syscalls (numerical order)

@@ -26,15 +26,16 @@ const paging = hal.paging;
 // Constants
 pub const PAGE_SIZE: usize = paging.PAGE_SIZE;
 
-// PMM State
-// Bitmap as slice enables Zig bounds checking on all accesses.
-// Initialized to empty slice; set properly in initFromLimine().
-// PMM State
-// Bitmap as slice enables Zig bounds checking on all accesses.
-// Initialized to empty slice; set properly in initFromLimine().
+/// PMM internal state
+///
+/// The bitmap tracks allocation status (1 bit per page).
+/// 0 = Free, 1 = Allocated/Reserved.
+///
+/// Refcounts track shared ownership (e.g., CoW or shared memory).
+/// 0 = Free, >0 = Allocated.
 var bitmap: []u8 = &[_]u8{};
 var bitmap_size: usize = 0; // Size in bytes
-var refcounts: []u16 = &[_]u16{}; // Refcount array (new)
+var refcounts: []u16 = &[_]u16{}; // Refcount array
 var total_pages: usize = 0;
 var free_pages: usize = 0;
 var allocated_pages: usize = 0;
@@ -75,7 +76,12 @@ pub fn refPage(phys_addr: u64) void {
 }
 
 /// Initialize PMM from Limine memory map
-/// Must be called after paging.init() sets up HHDM
+///
+/// Parses the memory map to identify usable RAM.
+/// Reserves memory for PMM metadata (bitmap + refcounts).
+/// Marks kernel, modules, and reserved regions as allocated.
+///
+/// Must be called after paging.init() sets up HHDM.
 pub fn initFromLimine(memmap: *const limine.MemoryMapResponse) !void {
     if (initialized) {
         return error.AlreadyInitialized;

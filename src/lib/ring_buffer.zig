@@ -14,6 +14,10 @@
 const std = @import("std");
 
 /// Generic ring buffer with comptime-specified capacity
+///
+/// Features overwrite-on-overflow semantics: if the buffer is full,
+/// pushing a new element overwrites the oldest element.
+///
 /// T: Element type (e.g., u8 for bytes)
 /// capacity: Maximum number of elements (must be power of 2 for efficient modulo)
 pub fn RingBuffer(comptime T: type, comptime capacity: usize) type {

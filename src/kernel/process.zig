@@ -77,10 +77,12 @@ pub const Process = struct {
     cr3: u64,
 
     /// Reference count (for multi-threaded processes)
+    /// When refcount drops to 0, the process structure is freed.
     refcount: u32,
 
-    /// Heap management
+    /// Heap start address (base of the program break)
     heap_start: u64,
+    /// Heap break (current top of the heap)
     heap_break: u64,
 
     /// Resource limits (DoS protection)
@@ -229,7 +231,10 @@ fn allocatePid() u32 {
 var init_process: ?*Process = null;
 
 /// Get or create the init process (PID 1)
-/// This is the ancestor of all user processes
+///
+/// This is the ancestor of all user processes.
+/// If it doesn't exist yet, it is created.
+/// Init process has no parent (null).
 pub fn getInitProcess() !*Process {
     if (init_process) |init| {
         return init;
@@ -246,6 +251,9 @@ pub fn getInitProcess() !*Process {
 // =============================================================================
 
 /// Create a new process with fresh resources
+///
+/// Allocates a new PID, file descriptor table (with stdio), and address space.
+/// If `parent` is provided, the new process is added as a child.
 pub fn createProcess(parent: ?*Process) !*Process {
     const alloc = heap.allocator();
 
@@ -292,6 +300,13 @@ pub fn createProcess(parent: ?*Process) !*Process {
 }
 
 /// Fork a process - create child with copied address space and FDs
+///
+/// Performs a deep copy of the parent's resources:
+/// - File Descriptor Table (dup)
+/// - User Address Space (copy pages, no COW yet)
+/// - Heap state
+///
+/// The new process is added as a child of the parent.
 pub fn forkProcess(parent: *Process) !*Process {
     const alloc = heap.allocator();
 
