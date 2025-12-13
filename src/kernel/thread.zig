@@ -313,31 +313,64 @@ pub fn createUserThread(
         return ThreadError.TooManyThreads;
     }
 
-    // Determine kernel stack size for this thread (default if not specified)
-    // Note: User threads still need a kernel stack for syscalls/interrupts
-    var stack_size = options.stack_size;
-    if (stack_size == 0) stack_size = config.default_stack_size;
+    // Stack allocation strategy:
+    // - If kernel_stack allocator is initialized, use it (proper guard pages)
+    // - Otherwise fall back to HHDM (early boot, no guard protection)
+    var stack_info: ?kernel_stack.KernelStack = null;
+    var guard_page_virt: u64 = undefined;
+    var stack_base_virt: u64 = undefined;
+    var stack_top_virt: u64 = undefined;
+    var total_pages: usize = undefined;
+    var use_ks_allocator = false;
 
-    const aligned_stack_size = std.mem.alignForward(usize, stack_size, pmm.PAGE_SIZE);
-    const stack_pages = aligned_stack_size / pmm.PAGE_SIZE;
-    const total_pages = stack_pages + 1; // +1 for guard page
+    // Fallback variables for cleanup
+    var fallback_stack_phys: u64 = undefined;
+    var fallback_stack_pages: usize = 0;
 
-    // Allocate physical pages for kernel stack
-    const stack_phys = pmm.allocPages(stack_pages) orelse {
-        console.err("Thread: Failed to allocate {d} stack pages", .{stack_pages});
-        return ThreadError.OutOfMemory;
-    };
-    errdefer pmm.freePages(stack_phys, stack_pages);
+    if (kernel_stack.isInitialized()) {
+        const ks = kernel_stack.alloc() catch |err| {
+            console.err("Thread: kernel_stack.alloc failed for user thread: {}", .{err});
+            return ThreadError.OutOfMemory;
+        };
+        stack_info = ks;
+        guard_page_virt = ks.guard_virt;
+        stack_base_virt = ks.stack_base;
+        stack_top_virt = ks.stack_top;
+        total_pages = kernel_stack.STACK_SLOT_PAGES;
+        use_ks_allocator = true;
+    } else {
+        // Fallback: HHDM-based allocation
+        // Note: User threads still need a kernel stack for syscalls/interrupts
+        var stack_size = options.stack_size;
+        if (stack_size == 0) stack_size = config.default_stack_size;
 
-    // Calculate virtual addresses for kernel stack (HHDM)
-    const stack_base_virt = @intFromPtr(paging.physToVirt(stack_phys));
-    const guard_page_virt = stack_base_virt - pmm.PAGE_SIZE;
-    const stack_top_virt = stack_base_virt + aligned_stack_size;
+        const aligned_stack_size = std.mem.alignForward(usize, stack_size, pmm.PAGE_SIZE);
+        const stack_pages = aligned_stack_size / pmm.PAGE_SIZE;
+        total_pages = stack_pages + 1; // +1 for guard page
+
+        // Allocate physical pages for kernel stack
+        const stack_phys = pmm.allocPages(stack_pages) orelse {
+            console.err("Thread: Failed to allocate {d} stack pages", .{stack_pages});
+            return ThreadError.OutOfMemory;
+        };
+
+        fallback_stack_phys = stack_phys;
+        fallback_stack_pages = stack_pages;
+
+        // Calculate virtual addresses for kernel stack (HHDM)
+        stack_base_virt = @intFromPtr(paging.physToVirt(stack_phys));
+        guard_page_virt = stack_base_virt - pmm.PAGE_SIZE;
+        stack_top_virt = stack_base_virt + aligned_stack_size;
+    }
 
     // Allocate thread structure
     const alloc = heap.allocator();
     const thread = alloc.create(Thread) catch {
-        pmm.freePages(stack_phys, stack_pages);
+        if (use_ks_allocator) {
+            if (stack_info) |si| kernel_stack.free(si);
+        } else if (fallback_stack_pages > 0) {
+            pmm.freePages(fallback_stack_phys, fallback_stack_pages);
+        }
         return ThreadError.OutOfMemory;
     };
     errdefer alloc.destroy(thread);
@@ -350,8 +383,8 @@ pub fn createUserThread(
         .kernel_stack_base = guard_page_virt,
         .kernel_stack_top = stack_top_virt, // This is RSP0
         .kernel_stack_pages = total_pages,
-        .kernel_stack_info = null, // User threads use HHDM stacks (TODO: migrate)
-        .use_kernel_stack_allocator = false,
+        .kernel_stack_info = stack_info,
+        .use_kernel_stack_allocator = use_ks_allocator,
         .user_stack_top = options.user_stack_top,
         .cr3 = options.cr3, // Must be provided for user thread
         .fpu_state = fpu.FpuState.init(),
