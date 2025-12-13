@@ -36,8 +36,10 @@ const fpu = hal.fpu;
 /// Process tree lock (moved here to avoid circular dep with sync/process)
 pub var process_tree_lock: sync.Spinlock = .{};
 
+/// Global scheduler instance
 var scheduler = Scheduler{};
 
+/// Scheduler internal state structure
 const Scheduler = struct {
     /// Currently executing thread (null before first schedule)
     current: ?*Thread = null,
@@ -109,6 +111,13 @@ fn removeThreadFromQueue(t: *Thread) void {
     scheduler.ready_queue.remove(t);
 }
 
+/// Insert a thread into the sorted sleep list
+///
+/// The list is sorted by wake_time in ascending order.
+/// This allows O(1) checking of the head for expired timers.
+///
+/// Arguments:
+///   t: Thread to insert (must have wake_time set)
 fn insertSleepThread(t: *Thread) void {
     t.sleep_next = null;
     t.sleep_prev = null;
@@ -140,6 +149,7 @@ fn insertSleepThread(t: *Thread) void {
     }
 }
 
+/// Remove a thread from the sleep list
 fn removeFromSleepList(t: *Thread) void {
     if (t.sleep_prev) |prev| {
         prev.sleep_next = t.sleep_next;
@@ -156,6 +166,10 @@ fn removeFromSleepList(t: *Thread) void {
     t.wake_time = 0;
 }
 
+/// Wake up threads whose sleep timer has expired
+///
+/// Checks the head of the sorted sleep list against the current tick count.
+/// If wake_time <= now, the thread is removed from the list and added to the ready queue.
 fn wakeSleepingThreads(now: u64) void {
     while (scheduler.sleep_head) |t| {
         if (t.wake_time > now) break;

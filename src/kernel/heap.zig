@@ -66,8 +66,11 @@ else
 pub const ALIGNMENT: usize = 16; // 16-byte alignment for SSE compatibility
 pub const MIN_BLOCK_SIZE: usize = 64; // Minimum block size (32 hdr + 16 payload + 16 ftr)
 
-// Block header stored at the start of each block
-// Using u64 fields for alignment and easy manipulation
+/// Block header stored at the start of each block.
+///
+/// Contains the block size and allocation flag (in one field).
+/// For free blocks, it contains pointers to the previous and next free blocks (intrusive list).
+/// Also contains a magic number for heap corruption detection.
 pub const BlockHeader = extern struct {
     // Size of the entire block including header and footer
     // Lowest bit indicates if block is allocated (1) or free (0)
@@ -167,8 +170,10 @@ pub const BlockHeader = extern struct {
     }
 };
 
-// Block footer stored at the end of each block for backward coalescing
-// Using extern struct to guarantee layout
+/// Block footer stored at the end of each block.
+///
+/// Used for immediate coalescing: allows finding the start of the previous block
+/// from the current block's header address.
 pub const BlockFooter = extern struct {
     size: usize, // Matches the size in header (without flags)
     // Padding to ensure 16-byte size (preserves alignment for next block)
@@ -194,8 +199,13 @@ var initialized: bool = false;
 var heap_lock: sync.Spinlock = .{};
 
 /// Initialize the heap with a memory region
-/// In kernel context, this is called with memory from VMM
-/// In test context, this is called with memory from backing allocator
+///
+/// Sets up the initial free block covering the entire region.
+/// Alignments are enforced.
+///
+/// Arguments:
+///   start: Virtual address of the heap memory
+///   size: Size of the heap in bytes
 pub fn init(start: usize, size: usize) void {
     if (initialized) {
         return;
@@ -252,7 +262,12 @@ pub fn reset() void {
 }
 
 /// Allocate memory from the heap
-/// Thread-safe: acquires heap_lock for the duration of the operation
+///
+/// Uses a first-fit strategy to find a suitable free block.
+/// Splits the block if it is significantly larger than requested.
+/// Thread-safe: acquires global heap lock.
+///
+/// Returns: Slice to allocated memory, or null if OOM.
 pub fn alloc(size: usize) ?[]u8 {
     if (!initialized or size == 0) {
         return null;
@@ -306,7 +321,10 @@ pub fn alloc(size: usize) ?[]u8 {
 }
 
 /// Free previously allocated memory
-/// Thread-safe: acquires heap_lock for the duration of the operation
+///
+/// Marks the block as free and attempts to coalesce it with adjacent free blocks
+/// (both previous and next) to reduce fragmentation.
+/// Thread-safe: acquires global heap lock.
 pub fn free(buf: []u8) void {
     if (!initialized) {
         return;

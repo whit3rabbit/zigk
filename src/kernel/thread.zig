@@ -40,7 +40,9 @@ pub const ThreadState = enum(u8) {
 };
 
 /// Thread structure
-/// All fields are protected by the scheduler lock when accessed from other threads
+///
+/// Represents an execution context in the kernel.
+/// All fields are protected by the scheduler lock when accessed from other threads.
 pub const Thread = struct {
     /// Unique thread identifier (never reused)
     tid: u32,
@@ -49,7 +51,8 @@ pub const Thread = struct {
     state: ThreadState,
 
     /// Saved kernel stack pointer
-    /// Points to saved interrupt frame during context switch
+    /// Points to saved interrupt frame (ISR stack) during context switch.
+    /// This is the stack pointer loaded into RSP when this thread is scheduled.
     kernel_rsp: u64,
 
     /// Kernel stack bounds (for guard page and allocation tracking)
@@ -180,8 +183,14 @@ fn allocateTid() u32 {
 }
 
 /// Create a new kernel thread
-/// Entry point is a function that takes no arguments and returns void
-/// Thread starts in Ready state
+///
+/// Allocates a thread structure and a kernel stack.
+/// Sets up the initial stack frame to simulate a return from interrupt into `entry`.
+/// The thread is added to the global list but not the ready queue (use `sched.addThread`).
+///
+/// Arguments:
+///   entry: Function to execute (must not return)
+///   options: Configuration options (name, stack size, etc.)
 pub fn createKernelThread(
     entry: *const fn () void,
     options: ThreadOptions,
@@ -305,7 +314,13 @@ pub fn createKernelThread(
 }
 
 /// Create a new user thread
-/// Thread starts in Ready state
+///
+/// Similar to kernel thread, but sets up the stack for a return to Ring 3 (User Mode).
+/// Requires a valid CR3 (address space) and user stack pointer.
+///
+/// Arguments:
+///   entry: User virtual address of entry point
+///   options: Thread options (must include cr3 and user_stack_top)
 pub fn createUserThread(
     entry: u64,
     options: ThreadOptions,
@@ -427,8 +442,14 @@ pub fn createUserThread(
     return thread;
 }
 
-/// Set up initial stack frame so thread can be switched to
-/// Returns the initial RSP value
+/// Set up initial stack frame for a kernel thread
+///
+/// Builds a fake interrupt frame on the kernel stack.
+/// When the scheduler switches to this thread using `iretq`, the CPU will:
+/// 1. Pop CS, RIP, RFLAGS, RSP, SS (privilege level change or not).
+/// 2. Jump to `entry_rip` with the specified stack.
+///
+/// Returns the adjusted stack pointer (initial RSP).
 fn setupInitialStack(stack_top: u64, entry_rip: u64) u64 {
     var sp = stack_top;
 
