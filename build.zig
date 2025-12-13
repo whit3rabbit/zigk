@@ -459,6 +459,20 @@ pub fn build(b: *std.Build) void {
     user_mem_module.addImport("vmm", vmm_module);
     user_mem_module.addImport("sched", sched_module);
 
+    // Create Pipe module (IPC)
+    const pipe_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/pipe.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    pipe_module.addImport("heap", heap_module);
+    pipe_module.addImport("fd", fd_module);
+    pipe_module.addImport("sched", sched_module);
+    pipe_module.addImport("sync", sync_module);
+    pipe_module.addImport("uapi", uapi_module);
+    pipe_module.addImport("console", console_module);
+    pipe_module.addImport("hal", hal_module);
+
     // Create syscall handlers module
     const syscall_handlers_module = b.createModule(.{
         .root_source_file = b.path("src/kernel/syscall/handlers.zig"),
@@ -481,6 +495,7 @@ pub fn build(b: *std.Build) void {
     syscall_handlers_module.addImport("elf", elf_module);
     syscall_handlers_module.addImport("framebuffer", framebuffer_module);
     syscall_handlers_module.addImport("fs", fs_module);
+    syscall_handlers_module.addImport("pipe", pipe_module);
     syscall_handlers_module.addImport("user_mem", user_mem_module);
 
     // Create syscall random module

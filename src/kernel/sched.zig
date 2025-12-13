@@ -26,7 +26,7 @@ const config = @import("config");
 const list = @import("list");
 const kernel_stack = @import("kernel_stack");
 
-const Thread = thread.Thread;
+pub const Thread = thread.Thread;
 const ThreadState = thread.ThreadState;
 const gdt = hal.gdt;
 const fpu = hal.fpu;

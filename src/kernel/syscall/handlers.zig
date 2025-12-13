@@ -25,7 +25,7 @@ const framebuffer = @import("framebuffer");
 
 const mman_defs = uapi.mman;
 const fs = @import("fs");
-const pipe_mod = @import("../pipe.zig");
+const pipe_mod = @import("pipe");
 const user_mem = @import("user_mem");
 const Errno = uapi.errno.Errno;
 const SyscallError = uapi.errno.SyscallError;
@@ -885,6 +885,7 @@ pub fn sys_fstat(fd_num: usize, stat_buf: usize) SyscallError!usize {
         const res = stat_fn(fd, &kstat);
         if (res < 0) {
              const errno_val: i32 = @intCast(-res);
+             _ = errno_val;
              // Map errors? EIO?
              // Just return EIO for now if unknown
              return error.EIO;
@@ -1004,14 +1005,14 @@ pub fn sys_getdents64(fd_num: usize, dirp: usize, count: usize) SyscallError!usi
         // Write fixed part
         const ent_bytes = std.mem.asBytes(&ent);
 
-        buf_uptr.offset(bytes_written).copyFromKernel(ent_bytes) catch return error.EFAULT;
+        _ = buf_uptr.offset(bytes_written).copyFromKernel(ent_bytes) catch return error.EFAULT;
 
         // Write name
         const name_offset = bytes_written + @offsetOf(uapi.dirent.Dirent64, "d_name");
-        buf_uptr.offset(name_offset).copyFromKernel(file.name) catch return error.EFAULT;
+        _ = buf_uptr.offset(name_offset).copyFromKernel(file.name) catch return error.EFAULT;
 
         // Write null terminator and padding
-        buf_uptr.offset(name_offset + name_len).writeValue(@as(u8, 0)) catch return error.EFAULT;
+        _ = buf_uptr.offset(name_offset + name_len).writeValue(@as(u8, 0)) catch return error.EFAULT;
 
         bytes_written += aligned_reclen;
 
@@ -1038,7 +1039,7 @@ pub fn sys_getcwd(buf_ptr: usize, size: usize) SyscallError!usize {
     const uptr = UserPtr.from(buf_ptr);
 
     // Copy path
-    uptr.copyFromKernel(proc.cwd[0..cwd_len]) catch return error.EFAULT;
+    _ = uptr.copyFromKernel(proc.cwd[0..cwd_len]) catch return error.EFAULT;
 
     // Null terminate
     uptr.offset(cwd_len).writeValue(@as(u8, 0)) catch return error.EFAULT;
@@ -1092,21 +1093,26 @@ pub fn sys_fcntl(fd_num: usize, cmd: usize, arg: usize) SyscallError!usize {
         if (arg > std.math.maxInt(u32)) return error.EINVAL;
         const min_fd: u32 = @truncate(arg);
 
-        if (min_fd >= FdTable.MAX_FDS) return error.EINVAL;
+        if (min_fd >= fd_mod.MAX_FDS) return error.EINVAL;
 
         // Find lowest available FD >= min_fd
-        // We need to implement allocFdNumFrom in FdTable
         // For now, allocFdNum checks from 0.
-        // We can manually check.
-        var i = min_fd;
-        while (i < FdTable.MAX_FDS) : (i += 1) {
-            if (table.fds[i] == null) {
-                fd.ref();
-                table.install(i, fd);
-                return i;
+        // We need to loop manually.
+        var i: u32 = min_fd;
+        var found_fd: ?u32 = null;
+        while (i < fd_mod.MAX_FDS) : (i += 1) {
+            if (table.get(i) == null) {
+                found_fd = i;
+                break;
             }
         }
-        return error.EMFILE;
+        if (found_fd) |new_fd_num| {
+            fd.ref();
+            table.install(new_fd_num, fd);
+            return new_fd_num;
+        } else {
+            return error.EMFILE;
+        }
     }
 
     // F_GETFD (1)
@@ -1132,10 +1138,10 @@ pub fn sys_fcntl(fd_num: usize, cmd: usize, arg: usize) SyscallError!usize {
         // Modify flags (only O_APPEND, O_ASYNC, O_DIRECT, O_NOATIME, O_NONBLOCK)
         const new_flags = @as(u32, @truncate(arg));
         // We only care about O_NONBLOCK for now
-        if ((new_flags & uapi.poll.O_NONBLOCK) != 0) {
-            fd.flags |= uapi.poll.O_NONBLOCK;
+        if ((new_flags & fd_mod.O_NONBLOCK) != 0) {
+            fd.flags |= fd_mod.O_NONBLOCK;
         } else {
-            fd.flags &= ~uapi.poll.O_NONBLOCK;
+            fd.flags &= ~fd_mod.O_NONBLOCK;
         }
         return 0;
     }
@@ -1323,7 +1329,7 @@ pub fn sys_open(path_ptr: usize, flags: usize, mode: usize) SyscallError!usize {
             .ioctl = null,
         };
 
-        const fd = fd_mod.createFd(&dir_ops, @truncate(flags) | fd_mod.O_RDONLY, null) catch {
+        const fd = fd_mod.createFd(&dir_ops, @as(u32, @truncate(flags)) | fd_mod.O_RDONLY, null) catch {
             return error.ENOMEM;
         };
         errdefer alloc.destroy(fd);
@@ -1376,7 +1382,6 @@ pub fn sys_dup(oldfd: usize) SyscallError!usize {
         return switch (err) {
             error.BadFd => error.EBADF,
             error.MFile => error.EMFILE,
-            else => error.EMFILE,
         };
     };
     return newfd;
@@ -1388,7 +1393,6 @@ pub fn sys_dup2(oldfd: usize, newfd: usize) SyscallError!usize {
     const result = table.dup2(@intCast(oldfd), @intCast(newfd)) catch |err| {
         return switch (err) {
             error.BadFd => error.EBADF,
-            else => error.EBADF,
         };
     };
     return result;
@@ -1406,7 +1410,6 @@ pub fn sys_pipe(pipefd_ptr: usize) SyscallError!usize {
         return switch (err) {
             error.MFile => error.EMFILE,
             error.OutOfMemory => error.ENOMEM,
-            else => error.ENOMEM,
         };
     };
 
@@ -1415,9 +1418,9 @@ pub fn sys_pipe(pipefd_ptr: usize) SyscallError!usize {
     fds_i32[0] = @intCast(fds[0]);
     fds_i32[1] = @intCast(fds[1]);
 
-    uptr.copyFromKernel(std.mem.sliceAsBytes(&fds_i32)) catch {
+    _ = uptr.copyFromKernel(std.mem.sliceAsBytes(&fds_i32)) catch {
         // Close FDs if copy fails
-        const table = getGlobalFdTable();
+        // const table = getGlobalFdTable();
         _ = table.close(fds[0]);
         _ = table.close(fds[1]);
         return error.EFAULT;
