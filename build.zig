@@ -213,6 +213,7 @@ pub fn build(b: *std.Build) void {
     thread_module.addImport("console", console_module);
     thread_module.addImport("config", config_module);
     thread_module.addImport("kernel_stack", kernel_stack_module);
+    thread_module.addImport("uapi", uapi_module);
 
     // Create Scheduler module (Thread scheduling)
     const sched_module = b.createModule(.{

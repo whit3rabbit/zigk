@@ -10,6 +10,7 @@ pub const syscalls = @import("syscalls.zig");
 pub const errno = @import("errno.zig");
 pub const poll = @import("poll.zig");
 pub const abi = @import("abi.zig");
+pub const signal = @import("signal.zig");
 
 // Re-export commonly used types
 pub const Errno = errno.Errno;
