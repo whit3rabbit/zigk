@@ -411,6 +411,147 @@ pub const UserVmm = struct {
         return 0;
     }
 
+    /// Expand heap VMA and map new pages
+    /// old_brk: Current heap break (page aligned)
+    /// new_brk: New heap break (page aligned)
+    /// Returns: 0 on success, negative errno on error
+    /// Note: Caller must update process RSS accounting
+    pub fn expandHeap(self: *UserVmm, old_brk: u64, new_brk: u64) isize {
+        if (new_brk <= old_brk) return 0;
+
+        const size = new_brk - old_brk;
+        const page_count = size / pmm.PAGE_SIZE;
+
+        // Standard heap protection and flags
+        const prot = PROT_READ | PROT_WRITE;
+        const flags = MAP_PRIVATE | MAP_ANONYMOUS;
+        const page_flags = protToPageFlags(prot);
+
+        // Map pages one by one to avoid requiring contiguous physical memory
+        var i: usize = 0;
+        while (i < page_count) : (i += 1) {
+            // Allocate single page
+            const phys_page = pmm.allocPage() orelse {
+                // Allocation failed - rollback previous pages
+                var j: usize = 0;
+                while (j < i) : (j += 1) {
+                    const rollback_addr = old_brk + (j * pmm.PAGE_SIZE);
+                    if (vmm.translate(self.pml4_phys, rollback_addr)) |paddr| {
+                        vmm.unmapPage(self.pml4_phys, rollback_addr) catch {};
+                        pmm.freePage(paddr);
+                    }
+                }
+                return Errno.ENOMEM.toReturn();
+            };
+
+            // Zero the page (security)
+            const ptr: [*]u8 = @ptrCast(hal.paging.physToVirt(phys_page));
+            @memset(ptr[0..pmm.PAGE_SIZE], 0);
+
+            // Map the page
+            const vaddr = old_brk + (i * pmm.PAGE_SIZE);
+            vmm.mapPage(self.pml4_phys, vaddr, phys_page, page_flags) catch {
+                // Mapping failed - free this page
+                pmm.freePage(phys_page);
+
+                // Rollback previous pages
+                var j: usize = 0;
+                while (j < i) : (j += 1) {
+                    const rollback_addr = old_brk + (j * pmm.PAGE_SIZE);
+                    if (vmm.translate(self.pml4_phys, rollback_addr)) |paddr| {
+                        vmm.unmapPage(self.pml4_phys, rollback_addr) catch {};
+                        pmm.freePage(paddr);
+                    }
+                }
+                return Errno.ENOMEM.toReturn();
+            };
+        }
+
+        const rollbackNewPages = struct {
+            fn run(vmm_instance: *UserVmm, start: u64, count: usize) void {
+                var j: usize = 0;
+                while (j < count) : (j += 1) {
+                    const rollback_addr = start + (j * pmm.PAGE_SIZE);
+                    if (vmm.translate(vmm_instance.pml4_phys, rollback_addr)) |paddr| {
+                        vmm.unmapPage(vmm_instance.pml4_phys, rollback_addr) catch {};
+                        pmm.freePage(paddr);
+                    }
+                }
+            }
+        }.run;
+
+        // Update or create VMA
+        // Check if we can extend existing heap VMA
+        // Safe check for overlap to prevent underflow if old_brk is 0 (though heap starts > 0)
+        const check_addr = if (old_brk > 0) old_brk - 1 else 0;
+        if (self.findOverlappingVma(check_addr, old_brk)) |vma| {
+            // Found VMA ending at old_brk, extend it
+            if (vma.end == old_brk and vma.prot == prot and vma.flags == flags) {
+                vma.end = new_brk;
+            } else {
+                // Different attributes or gap - create new VMA
+                const new_vma = self.createVma(old_brk, new_brk, prot, flags) catch {
+                    rollbackNewPages(self, old_brk, page_count);
+                    return Errno.ENOMEM.toReturn();
+                };
+                self.insertVma(new_vma);
+            }
+        } else {
+            // No preceding VMA - create new one
+            const new_vma = self.createVma(old_brk, new_brk, prot, flags) catch {
+                rollbackNewPages(self, old_brk, page_count);
+                return Errno.ENOMEM.toReturn();
+            };
+            self.insertVma(new_vma);
+        }
+
+        self.total_mapped += size;
+        return 0;
+    }
+
+    /// Shrink heap VMA and unmap pages
+    /// old_brk: Current heap break (page aligned)
+    /// new_brk: New heap break (page aligned)
+    /// Returns: 0 on success
+    /// Note: Caller must update process RSS accounting
+    pub fn shrinkHeap(self: *UserVmm, old_brk: u64, new_brk: u64) void {
+        if (new_brk >= old_brk) return;
+
+        const size = old_brk - new_brk;
+
+        // Unmap and free physical pages
+        var offset: u64 = 0;
+        while (offset < size) : (offset += pmm.PAGE_SIZE) {
+            const vaddr = new_brk + offset;
+            if (vmm.translate(self.pml4_phys, vaddr)) |phys| {
+                vmm.unmapPage(self.pml4_phys, vaddr) catch {};
+                pmm.freePage(phys);
+            }
+        }
+
+        // Update VMA
+        if (self.findOverlappingVma(new_brk, old_brk)) |vma| {
+            // If VMA covers the range being shrunk
+            if (vma.end > new_brk) {
+                if (vma.start >= new_brk) {
+                    // Fully remove VMA if it starts after new break
+                    self.removeVma(vma);
+                    const alloc = heap.allocator();
+                    alloc.destroy(vma);
+                } else {
+                    // Shrink VMA
+                    vma.end = new_brk;
+                }
+            }
+        }
+
+        if (self.total_mapped >= size) {
+            self.total_mapped -= size;
+        } else {
+            self.total_mapped = 0;
+        }
+    }
+
     // =========================================================================
     // Internal helpers
     // =========================================================================
