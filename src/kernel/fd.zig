@@ -201,7 +201,7 @@ pub const FdTable = struct {
 
     /// Duplicate the FD table (for fork)
     /// Creates a new table with same FDs, incremented refcounts
-    pub fn dup(self: *const FdTable) !*FdTable {
+    pub fn clone(self: *const FdTable) !*FdTable {
         const alloc = heap.allocator();
         const new_table = try alloc.create(FdTable);
         new_table.* = FdTable.init();
@@ -216,6 +216,40 @@ pub const FdTable = struct {
         }
 
         return new_table;
+    }
+
+    /// Duplicate a single FD to the lowest available slot
+    pub fn dup(self: *FdTable, old_fd: u32) !u32 {
+        const fd = self.get(old_fd) orelse return error.BadFd;
+        const new_fd = self.allocFdNum() orelse return error.MFile;
+        fd.ref();
+        self.install(new_fd, fd);
+        return new_fd;
+    }
+
+    /// Duplicate a single FD to a specific slot
+    pub fn dup2(self: *FdTable, old_fd: u32, new_fd: u32) !u32 {
+        if (old_fd == new_fd) {
+            // Check if old_fd is valid
+            if (self.get(old_fd) == null) return error.BadFd;
+            return new_fd;
+        }
+
+        const fd = self.get(old_fd) orelse return error.BadFd;
+
+        if (new_fd >= MAX_FDS) return error.BadFd;
+
+        // Close new_fd if open
+        if (self.fds[new_fd] != null) {
+            _ = self.close(new_fd);
+        }
+
+        // Install new FD
+        fd.ref();
+        self.fds[new_fd] = fd;
+        self.count += 1;
+
+        return new_fd;
     }
 
     /// Close all FDs in the table
