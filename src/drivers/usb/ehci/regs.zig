@@ -108,7 +108,7 @@ pub const PortSc = packed struct(u32) {
     oca: bool,          // Over-current Active
     occ: bool,          // Over-current Change
     fpr: bool,          // Force Port Resume
-    suspend: bool,      // Suspend
+    @"suspend": bool,   // Suspend
     reset: bool,        // Port Reset
     _rsvd0: u1 = 0,
     line_status: u2,    // Line Status
