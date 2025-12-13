@@ -223,6 +223,18 @@ pub const O_EXCL: i32 = 0o200;
 pub const O_TRUNC: i32 = 0o1000;
 pub const O_APPEND: i32 = 0o2000;
 
+/// Seek whence constants
+pub const SEEK_SET: i32 = 0;
+pub const SEEK_CUR: i32 = 1;
+pub const SEEK_END: i32 = 2;
+
+/// Reposition read/write file offset
+pub fn lseek(fd: i32, offset: isize, whence: i32) SyscallError!usize {
+    const ret = syscall3(syscalls.SYS_LSEEK, @bitCast(@as(isize, fd)), @bitCast(offset), @bitCast(@as(isize, whence)));
+    if (isError(ret)) return errorFromReturn(ret);
+    return ret;
+}
+
 /// Open a file
 pub fn open(path: [*:0]const u8, flags: i32, mode: u32) SyscallError!i32 {
     const ret = syscall3(syscalls.SYS_OPEN, @intFromPtr(path), @bitCast(@as(isize, flags)), mode);
