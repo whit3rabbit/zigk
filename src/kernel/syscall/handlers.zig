@@ -301,14 +301,53 @@ pub fn sys_getgid() SyscallError!usize {
 
 /// sys_rt_sigprocmask (14) - Examine and change blocked signals
 ///
-/// MVP: Returns 0 (success) but does nothing.
-/// musl uses this during startup/shutdown.
+/// Implements signal masking (SIG_BLOCK, SIG_UNBLOCK, SIG_SETMASK).
+/// Returns 0 on success, negative errno on error.
 pub fn sys_rt_sigprocmask(how: usize, set_ptr: usize, oldset_ptr: usize, sigsetsize: usize) SyscallError!usize {
-    _ = how;
-    _ = set_ptr;
-    _ = oldset_ptr;
-    _ = sigsetsize;
-    // TODO: Implement signal masking
+    if (sigsetsize != @sizeOf(uapi.signal.SigSet)) {
+        return error.EINVAL;
+    }
+
+    const current_thread = sched.getCurrentThread() orelse {
+        return error.ESRCH;
+    };
+
+    // Store old set if requested
+    if (oldset_ptr != 0) {
+        UserPtr.from(oldset_ptr).writeValue(current_thread.sigmask) catch {
+            return error.EFAULT;
+        };
+    }
+
+    // If set_ptr is NULL, we are just querying
+    if (set_ptr == 0) {
+        return 0;
+    }
+
+    const new_set = UserPtr.from(set_ptr).readValue(uapi.signal.SigSet) catch {
+        return error.EFAULT;
+    };
+
+    // Apply change based on 'how'
+    switch (how) {
+        uapi.signal.SIG_BLOCK => {
+            current_thread.sigmask |= new_set;
+        },
+        uapi.signal.SIG_UNBLOCK => {
+            current_thread.sigmask &= ~new_set;
+        },
+        uapi.signal.SIG_SETMASK => {
+            current_thread.sigmask = new_set;
+        },
+        else => {
+            return error.EINVAL;
+        },
+    }
+
+    // SIGKILL and SIGSTOP cannot be blocked
+    uapi.signal.sigdelset(&current_thread.sigmask, uapi.signal.SIGKILL);
+    uapi.signal.sigdelset(&current_thread.sigmask, uapi.signal.SIGSTOP);
+
     return 0;
 }
 

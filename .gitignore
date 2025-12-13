@@ -52,3 +52,8 @@ docs/_build/
 *.fd
 *.dSYM/
 limine/limine.dSYM/
+
+# Tools
+tools/zig_install/
+tools/zig_index.json
+tools/zig.tar.xz

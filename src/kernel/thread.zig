@@ -22,6 +22,7 @@ const heap = @import("heap");
 const console = @import("console");
 const config = @import("config");
 const kernel_stack = @import("kernel_stack");
+const uapi = @import("uapi");
 
 const fpu = hal.fpu;
 const paging = hal.paging;
@@ -89,7 +90,8 @@ pub const Thread = struct {
     /// Opaque pointer to avoid circular dependency
     process: ?*anyopaque,
 
-
+    /// Blocked signals mask
+    sigmask: uapi.signal.SigSet,
 
     /// Doubly-linked list pointers for ready queue
     next: ?*Thread,
@@ -276,6 +278,7 @@ pub fn createKernelThread(
         .sleep_prev = null,
         .sleep_next = null,
         .process = null,
+        .sigmask = 0,
     };
 
     // Set thread name
@@ -368,6 +371,7 @@ pub fn createUserThread(
         .sleep_prev = null,
         .sleep_next = null,
         .process = options.process,
+        .sigmask = 0,
     };
 
     thread.setName(options.name);
