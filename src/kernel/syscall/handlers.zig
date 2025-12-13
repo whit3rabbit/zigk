@@ -1261,9 +1261,8 @@ pub fn sys_read_scancode() SyscallError!usize {
 /// sys_open (2) - Open a file or device
 ///
 /// Opens a file/device and returns a new file descriptor.
-/// Currently only supports device files in /dev/.
 pub fn sys_open(path_ptr: usize, flags: usize, mode: usize) SyscallError!usize {
-    _ = mode; // Mode is ignored for device files
+    _ = mode; // Mode is ignored for now
 
     // Allocate path buffer on heap to preserve stack space
     const path_buf = heap.allocator().alloc(u8, user_mem.MAX_PATH_LEN) catch {
@@ -1281,81 +1280,26 @@ pub fn sys_open(path_ptr: usize, flags: usize, mode: usize) SyscallError!usize {
         return error.ENOENT;
     }
 
-    // Look up device by devfs
-    if (devfs.lookupDevice(path)) |ops| {
-        // Create device FD
-        const fd = fd_mod.createFd(ops, @truncate(flags), null) catch {
-            return error.ENOMEM;
+    // Use VFS to open file
+    const fd = fs.vfs.Vfs.open(path, @truncate(flags)) catch |err| {
+        return switch (err) {
+            error.NotFound => error.ENOENT,
+            error.AccessDenied => error.EACCES,
+            error.InvalidPath => error.ENOENT, // or EINVAL
+            error.NameTooLong => error.ENAMETOOLONG,
+            error.IOError => error.EIO,
+            error.NoMemory => error.ENOMEM,
+            error.IsDirectory => error.EISDIR, // If we don't support opening dirs yet?
+            else => error.EIO,
         };
-        const alloc = heap.allocator();
-        errdefer alloc.destroy(fd);
-
-        const table = getGlobalFdTable();
-        const fd_num = table.allocFdNum() orelse {
-            return error.EMFILE;
-        };
-
-        table.install(fd_num, fd);
-        return fd_num;
-    }
-
-    // Handle opening the root directory "/"
-    if (std.mem.eql(u8, path, "/")) {
-        // Create a special FD for root directory
-        const alloc = heap.allocator();
-
-        // Use a dummy file handle for now.
-        // Ideally we should have DirectoryOps in FileOps.
-        // For InitRD, we don't have a real directory object.
-        // We'll create a fake file that represents the directory.
-
-        // This is a bit of a hack for MVP ls support.
-        // A cleaner way would be InitRD.openDir().
-
-        // Let's create a "root dir" file entry in InitRD on the fly?
-        // No, InitRD struct is const data.
-
-        // Create a dummy FD with special directory operations?
-        // Or just fail open() on "/" but let getdents handle it?
-        // getdents takes an FD. So we must return a valid FD.
-
-        // Let's define empty operations for directory.
-        const dir_ops = fd_mod.FileOps{
-            .read = null, // Cannot read directory as file
-            .write = null,
-            .close = null, // Nothing to free
-            .seek = null,
-            .stat = null,
-            .ioctl = null,
-        };
-
-        const fd = fd_mod.createFd(&dir_ops, @as(u32, @truncate(flags)) | fd_mod.O_RDONLY, null) catch {
-            return error.ENOMEM;
-        };
-        errdefer alloc.destroy(fd);
-
-        const table = getGlobalFdTable();
-        const fd_num = table.allocFdNum() orelse {
-            return error.EMFILE;
-        };
-
-        table.install(fd_num, fd);
-        return fd_num;
-    }
-
-    // Fallback: InitRD
-    // Note: This is where we would check a real VFS in the future
-    const fd = fs.initrd.InitRD.instance.openFile(path, @truncate(flags)) catch |err| {
-        if (err == error.FileNotFound) {
-            return error.ENOENT;
-        }
-        return error.ENOMEM;
     };
+
     const alloc = heap.allocator();
     errdefer alloc.destroy(fd);
 
     const table = getGlobalFdTable();
     const fd_num = table.allocFdNum() orelse {
+        alloc.destroy(fd);
         return error.EMFILE;
     };
 

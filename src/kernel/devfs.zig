@@ -15,6 +15,7 @@ const keyboard = @import("keyboard");
 const sched = @import("sched");
 const uapi = @import("uapi");
 const ahci = @import("ahci");
+const vfs = @import("fs").vfs; // Import VFS for Error type
 
 const FileDescriptor = fd_mod.FileDescriptor;
 const FileOps = fd_mod.FileOps;
@@ -149,32 +150,89 @@ fn zeroWrite(fd: *FileDescriptor, buf: []const u8) isize {
 
 /// Device entry for path lookup
 const DeviceEntry = struct {
-    path: []const u8,
+    name: []const u8,
     ops: *const FileOps,
 };
 
 /// Registered devices
+/// Names are relative to /dev/
 const devices = [_]DeviceEntry{
-    .{ .path = "/dev/console", .ops = &console_ops },
-    .{ .path = "/dev/tty", .ops = &console_ops }, // Alias for console
-    .{ .path = "/dev/stdin", .ops = &console_ops },
-    .{ .path = "/dev/stdout", .ops = &console_ops },
-    .{ .path = "/dev/stderr", .ops = &console_ops },
-    .{ .path = "/dev/null", .ops = &null_ops },
-    .{ .path = "/dev/zero", .ops = &zero_ops },
-    .{ .path = "/dev/sda", .ops = &ahci.adapter.block_ops },
+    .{ .name = "console", .ops = &console_ops },
+    .{ .name = "tty", .ops = &console_ops }, // Alias for console
+    .{ .name = "stdin", .ops = &console_ops },
+    .{ .name = "stdout", .ops = &console_ops },
+    .{ .name = "stderr", .ops = &console_ops },
+    .{ .name = "null", .ops = &null_ops },
+    .{ .name = "zero", .ops = &zero_ops },
+    .{ .name = "sda", .ops = &ahci.adapter.block_ops },
 };
 
 /// Look up device operations by path
 /// Returns null if path is not a known device
 pub fn lookupDevice(path: []const u8) ?*const FileOps {
+    // Path should be relative to /dev, e.g. "console", "null"
+    // But existing code passes absolute path?
+    // Let's support both for now or check usage.
+
+    // Check if path starts with /dev/
+    const name = if (std.mem.startsWith(u8, path, "/dev/"))
+        path[5..]
+    else
+        path;
+
     for (devices) |dev| {
-        if (std.mem.eql(u8, path, dev.path)) {
+        if (std.mem.eql(u8, name, dev.name)) {
             return dev.ops;
         }
     }
     return null;
 }
+
+/// Open a device (VFS interface)
+fn devfsOpen(ctx: ?*anyopaque, path: []const u8, flags: u32) vfs.Error!*fd_mod.FileDescriptor {
+    _ = ctx;
+
+    // Path is relative to /dev mount point.
+    // e.g. "console", "null", "sda" (without leading / if mounted at /dev)
+
+    // Remove leading slash if present (path passed from VFS might have it or not depending on normalization)
+    // VFS currently passes path relative to mount point. If mount is /dev, and we ask for /dev/console, path is /console.
+    // If we ask for /dev, path is /.
+
+    const name = if (path.len > 0 and path[0] == '/') path[1..] else path;
+
+    const ops = lookupDevice(name) orelse return vfs.Error.NotFound;
+
+    // For block devices, we need special handling to set private_data (port number)
+    // Currently lookupDevice just returns ops.
+    // We should improve this to support device instances.
+
+    var private_data: ?*anyopaque = null;
+
+    if (std.mem.eql(u8, name, "sda")) {
+        // Assume port 0 for sda
+        // We need to check if port 0 exists
+        if (ahci.root.getController()) |controller| {
+             if (controller.getPort(0)) |_| {
+                 private_data = @ptrFromInt(0);
+             } else {
+                 return vfs.Error.NotFound;
+             }
+        } else {
+            return vfs.Error.NotFound;
+        }
+    }
+
+    const fd = fd_mod.createFd(ops, flags, private_data) catch return vfs.Error.NoMemory;
+    return fd;
+}
+
+/// DevFS filesystem interface
+pub const dev_fs = vfs.FileSystem{
+    .context = null,
+    .open = devfsOpen,
+    .unmount = null,
+};
 
 /// Create pre-opened FDs for stdin/stdout/stderr (FDs 0/1/2)
 /// Called during thread/process initialization
