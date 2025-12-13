@@ -258,6 +258,7 @@ pub fn build(b: *std.Build) void {
     e1000e_module.addImport("thread", thread_module);
     e1000e_module.addImport("sched", sched_module);
     e1000e_module.addImport("heap", heap_module);
+    e1000e_module.addImport("net", net_module);
 
     // Create AHCI driver module (SATA storage controller)
     const ahci_module = b.createModule(.{

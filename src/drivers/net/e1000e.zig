@@ -39,6 +39,7 @@
 //   - Linux kernel: drivers/net/ethernet/intel/e1000e/
 //   - OSDev Wiki: Intel Ethernet i217
 
+const std = @import("std");
 const hal = @import("hal");
 const pci = @import("pci");
 const vmm = @import("vmm");
@@ -48,6 +49,7 @@ const console = @import("console");
 const thread = @import("thread");
 const sched = @import("sched");
 const heap = @import("heap");
+const net = @import("net");
 
 const mmio = hal.mmio;
 
@@ -888,6 +890,41 @@ pub const E1000e = struct {
         }
     }
 
+    /// Update multicast hardware filter from interface state.
+    /// Uses IEEE 802.3 CRC32 hash (12 MSB bits) per Intel 82574L spec.
+    pub fn applyMulticastFilter(self: *Self, iface: *const net.Interface) void {
+        // If host wants all multicast or no entries exist, enable MPE and clear table.
+        // RFC 1112: host must receive joined groups; we fall back to all-multicast
+        // when no precise filter is available.
+        self.clearMulticastTable();
+        var rctl = self.readRctl();
+
+        const addrs = iface.getMulticastMacs();
+        if (iface.accept_all_multicast or addrs.len == 0) {
+            rctl.multicast_promisc = true;
+            self.writeRctl(rctl);
+            return;
+        }
+
+        // Program hash table for joined multicast MACs.
+        rctl.multicast_promisc = false;
+        self.writeRctl(rctl);
+
+        for (addrs) |mac| {
+            var crc = std.hash.crc.Crc32.init();
+            crc.update(&mac);
+            // Intel uses 12 MSB bits of reflected CRC (bits 31:20)
+            const hash: u12 = @truncate(crc.final() >> 20);
+            const reg_index = hash >> 5; // Upper 7 bits select MTA register
+            const bit_index: u5 = @intCast(hash & 0x1F); // Lower 5 bits select bit within register
+
+            const mta_reg = Reg.MTA_BASE + @as(u64, reg_index) * 4;
+            var val = self.readReg(mta_reg);
+            val |= @as(u32, 1) << bit_index;
+            self.writeReg(mta_reg, val);
+        }
+    }
+
     /// Configure interrupt throttle rate to reduce CPU load under high packet rates
     /// Reference: 82574L Datasheet Section 13.4.18 "Interrupt Throttling"
     fn configureInterruptThrottle(self: *Self) void {
@@ -998,6 +1035,8 @@ pub const E1000e = struct {
         self.writeRctl(.{
             .enable = true,
             .broadcast_accept = true,
+            // Accept multicast in hardware; software filter enforces RFC 1112 memberships
+            .multicast_promisc = true,
             .buffer_size = 0, // 2048 bytes
             .strip_crc = true,
         });
@@ -1688,5 +1727,3 @@ pub fn initFromPci(devices: *const pci.DeviceList, pci_ecam: *const pci.Ecam) !*
     @atomicStore(bool, &driver_initialized, true, .release);
     return driver;
 }
-
-

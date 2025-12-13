@@ -181,10 +181,11 @@ pub const Virtqueue = struct {
 
             self.desc[idx].addr = hal.paging.virtToPhys(@intFromPtr(buf.ptr));
             self.desc[idx].len = @intCast(buf.len);
-            self.desc[idx].flags = if (out_bufs.len > 1 or in_bufs.len > 0) VIRTQ_DESC_F_NEXT else 0;
+            self.desc[idx].flags = 0;
 
             if (prev) |p| {
                 self.desc[p].next = idx;
+                self.desc[p].flags |= VIRTQ_DESC_F_NEXT;
             }
             prev = idx;
         }
