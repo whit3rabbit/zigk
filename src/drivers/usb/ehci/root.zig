@@ -131,7 +131,7 @@ pub const Controller = struct {
     }
 
     /// Perform BIOS Handoff (OS ownership)
-    fn biosHandoff(self: *Self, eecp: u8) !void {
+    fn biosHandoff(_: *Self, eecp: u8) !void {
         if (eecp == 0) return;
 
         console.info("EHCI: Checking for BIOS ownership at offset {x}", .{eecp});

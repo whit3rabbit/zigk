@@ -35,8 +35,8 @@ pub fn initFromPci(devices: *const pci.DeviceList, ecam: *const pci.Ecam) void {
     // Probe for XHCI controllers
     xhci.probe(devices, ecam);
 
-    // TODO: Probe for EHCI controllers (Phase 6)
-    // ehci.probe(devices, ecam);
+    // Probe for EHCI controllers
+    ehci.probe(devices, ecam);
 
     console.info("USB: Initialization complete", .{});
 }
