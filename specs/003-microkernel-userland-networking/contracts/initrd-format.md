@@ -267,7 +267,7 @@ cp initrd.tar iso/boot/initrd.tar
 ```limine
 PROTOCOL=limine
 
-/zigk
+/zscapek
     PROTOCOL=limine
     KERNEL_PATH=boot:///kernel.elf
     MODULE_PATH=boot:///initrd.tar

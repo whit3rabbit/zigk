@@ -97,7 +97,7 @@ The kernel uses an IRQ-safe Spinlock for mutual exclusion...
 ```markdown
 ### Byte Order Requirements
 
-ZigK runs on x86_64 (Little Endian). Network protocols use Big Endian.
+Zscapek runs on x86_64 (Little Endian). Network protocols use Big Endian.
 [copy full section from contracts/amendments.md]
 ```
 

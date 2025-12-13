@@ -16,7 +16,7 @@ pub fn build(b: *std.Build) void {
     // Build-time Configuration Options
     // ============================================================
     const version = b.option([]const u8, "version", "Kernel version string") orelse "0.1.0";
-    const kernel_name = b.option([]const u8, "name", "Kernel name") orelse "ZigK";
+    const kernel_name = b.option([]const u8, "name", "Kernel name") orelse "Zscapek";
     const stack_size = b.option(usize, "stack-size", "Default thread stack size in bytes") orelse 16 * 1024;
     const heap_size_opt = b.option(usize, "heap-size", "Kernel heap size in bytes") orelse 2 * 1024 * 1024;
     const max_threads = b.option(usize, "max-threads", "Maximum number of threads") orelse 64;
@@ -368,6 +368,7 @@ pub fn build(b: *std.Build) void {
     video_module.addImport("virtio", virtio_module);
     video_module.addImport("pci", pci_module);
     video_module.addImport("console", console_module);
+    video_module.addImport("heap", heap_module);
 
     // Create Mouse driver module
     const mouse_module = b.createModule(.{
@@ -431,6 +432,7 @@ pub fn build(b: *std.Build) void {
     });
     framebuffer_module.addImport("limine", limine_module);
     framebuffer_module.addImport("console", console_module);
+    framebuffer_module.addImport("hal", hal_module);
 
     // Create user memory validation module (shared by all syscall modules)
     const user_mem_module = b.createModule(.{
@@ -706,9 +708,9 @@ pub fn build(b: *std.Build) void {
         \\    -no-emul-boot -boot-load-size 4 -boot-info-table \
         \\    --efi-boot boot/limine-uefi-cd.bin \
         \\    -efi-boot-part --efi-boot-image --protective-msdos-label \
-        \\    iso_root -o zigk.iso && \
-        \\"$LIMINE_DIR"/limine bios-install zigk.iso && \
-        \\echo "ISO created: zigk.iso"
+        \\    iso_root -o zscapek.iso && \
+        \\"$LIMINE_DIR"/limine bios-install zscapek.iso && \
+        \\echo "ISO created: zscapek.iso"
     });
     iso_cmd.step.dependOn(b.getInstallStep());
 
@@ -720,7 +722,7 @@ pub fn build(b: *std.Build) void {
         "qemu-system-x86_64",
         "-M", "q35",
         "-m", "256M",
-        "-cdrom", "zigk.iso",
+        "-cdrom", "zscapek.iso",
         "-device", "qemu-xhci,id=xhci",
         "-device", "virtio-gpu-pci",
         "-serial", "stdio",

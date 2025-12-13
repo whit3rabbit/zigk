@@ -12,9 +12,18 @@ pub fn socket(family: i32, sock_type: i32, protocol: i32) errors.SocketError!usi
         return errors.SocketError.AfNotSupported;
     }
 
-    if (sock_type != types.SOCK_DGRAM and sock_type != types.SOCK_STREAM) {
+    // Mask off flags like SOCK_NONBLOCK, SOCK_CLOEXEC
+    // These valid flags are defined in uapi.socket (or standard Linux ABI)
+    // For now we just mask the known type bits
+    const SOCK_TYPE_MASK = 0xF; // types.SOCK_DGRAM/STREAM are small integers
+    const type_masked = sock_type & SOCK_TYPE_MASK;
+
+    if (type_masked != types.SOCK_DGRAM and type_masked != types.SOCK_STREAM) {
         return errors.SocketError.TypeNotSupported;
     }
+    
+    // TODO: Handle SOCK_NONBLOCK/CLOEXEC if we support them in the future
+    // For now, we accept them but ignore them to allow initialization.
 
     const lock = state.socketLock();
     lock.acquire();

@@ -1,4 +1,4 @@
-/* ZigK Userland Linker Script for x86_64
+/* Zscapek Userland Linker Script for x86_64
  * Userland programs are loaded at a fixed virtual address in user space
  * The kernel maps this region with Ring 3 permissions
  */

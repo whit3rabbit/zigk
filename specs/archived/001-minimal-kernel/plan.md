@@ -147,7 +147,7 @@ Core logic in `main.zig`, infrastructure in dedicated modules (serial, panic, ss
    - Run `limine bios-install` for BIOS boot support
 
 5. **QEMU Run Step**
-   - `qemu-system-x86_64 -cdrom zigk.iso -m 128M -serial stdio`
+   - `qemu-system-x86_64 -cdrom zscapek.iso -m 128M -serial stdio`
 
 ### Linker Script Requirements
 
@@ -162,7 +162,7 @@ Core logic in `main.zig`, infrastructure in dedicated modules (serial, panic, ss
 ```conf
 timeout: 0
 
-/ZigK
+/Zscapek
     protocol: limine
     kernel_path: boot():/boot/kernel.elf
 ```
@@ -183,7 +183,7 @@ pub export var base_revision: limine.BaseRevision = .{ .revision = 2 };
 ```zig
 export fn _start() callconv(.C) noreturn {
     serial.init();
-    serial.writeString("ZigK booting...\n");
+    serial.writeString("Zscapek booting...\n");
 
     // 1. Verify base revision accepted
     if (!base_revision.is_supported()) {
@@ -301,9 +301,9 @@ brew install xorriso qemu
 | Criterion | Method |
 |-----------|--------|
 | Kernel compiles | `zig build` succeeds |
-| ISO created | `zigk.iso` exists, valid ISO format |
+| ISO created | `zscapek.iso` exists, valid ISO format |
 | QEMU boots | No triple fault, reaches kernel |
-| Serial output | "ZigK booting..." appears in terminal |
+| Serial output | "Zscapek booting..." appears in terminal |
 | Framebuffer works | Screen fills with dark blue color |
 | CPU halts | QEMU shows 0% CPU after init |
 

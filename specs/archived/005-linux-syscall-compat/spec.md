@@ -9,15 +9,15 @@
 
 ### User Story 1 - Run Static C "Hello World" (Priority: P1)
 
-As a kernel developer, I want to compile a simple C program on Linux using static linking and run it directly on ZigK without modification, proving basic Linux binary compatibility.
+As a kernel developer, I want to compile a simple C program on Linux using static linking and run it directly on Zscapek without modification, proving basic Linux binary compatibility.
 
 **Why this priority**: This is the minimal proof that Linux ABI compatibility works. If a static "Hello World" runs, the core syscall dispatch (write, exit) is correct, and the path is open for more complex software.
 
-**Independent Test**: Compile `int main() { write(1, "Hello\n", 6); return 0; }` with `gcc -static -o hello hello.c` on Linux, copy to ZigK initrd, and verify it prints "Hello" and exits cleanly.
+**Independent Test**: Compile `int main() { write(1, "Hello\n", 6); return 0; }` with `gcc -static -o hello hello.c` on Linux, copy to Zscapek initrd, and verify it prints "Hello" and exits cleanly.
 
 **Acceptance Scenarios**:
 
-1. **Given** a statically-linked Linux x86_64 binary using sys_write(1) and sys_exit(60), **When** executed on ZigK, **Then** it produces correct output and exits with the specified code.
+1. **Given** a statically-linked Linux x86_64 binary using sys_write(1) and sys_exit(60), **When** executed on Zscapek, **Then** it produces correct output and exits with the specified code.
 2. **Given** a Linux binary calling syscall 1 (write) with fd=1, **When** executed, **Then** the output appears on the console/serial.
 3. **Given** a Linux binary calling syscall 60 (exit) with code 0, **When** executed, **Then** the process terminates and the scheduler removes it.
 
@@ -25,15 +25,15 @@ As a kernel developer, I want to compile a simple C program on Linux using stati
 
 ### User Story 2 - Run Zig Programs with Standard Library (Priority: P1)
 
-As a kernel developer, I want to compile Zig programs targeting `x86_64-linux-musl` and have `std.debug.print` work correctly on ZigK.
+As a kernel developer, I want to compile Zig programs targeting `x86_64-linux-musl` and have `std.debug.print` work correctly on Zscapek.
 
-**Why this priority**: Zig is the native development language for ZigK. If Zig's standard library works, developers can use familiar debugging and I/O patterns without custom OS ports.
+**Why this priority**: Zig is the native development language for Zscapek. If Zig's standard library works, developers can use familiar debugging and I/O patterns without custom OS ports.
 
-**Independent Test**: Compile a Zig program with `std.debug.print("Test\n", .{})` targeting linux-musl, run on ZigK, and verify output appears.
+**Independent Test**: Compile a Zig program with `std.debug.print("Test\n", .{})` targeting linux-musl, run on Zscapek, and verify output appears.
 
 **Acceptance Scenarios**:
 
-1. **Given** a Zig program compiled with `-target x86_64-linux-musl`, **When** it calls std.debug.print, **Then** the output appears correctly on ZigK.
+1. **Given** a Zig program compiled with `-target x86_64-linux-musl`, **When** it calls std.debug.print, **Then** the output appears correctly on Zscapek.
 2. **Given** Zig's std library using syscall 1 (write), **When** the program runs, **Then** writes to stdout (fd 1) appear on the console.
 3. **Given** a Zig program that exits normally, **When** main() returns, **Then** the exit syscall terminates the process cleanly.
 
@@ -41,11 +41,11 @@ As a kernel developer, I want to compile Zig programs targeting `x86_64-linux-mu
 
 ### User Story 3 - Network Socket Operations (Priority: P2)
 
-As a kernel developer, I want standard socket syscalls (socket, sendto, recvfrom) to work so that networking code compiled for Linux can run on ZigK.
+As a kernel developer, I want standard socket syscalls (socket, sendto, recvfrom) to work so that networking code compiled for Linux can run on Zscapek.
 
 **Why this priority**: Network compatibility enables standard socket-based applications. Using Berkeley socket API numbers (41, 44, 45) means Python's socket module and similar can eventually work.
 
-**Independent Test**: Create a UDP echo client using socket/sendto/recvfrom syscalls on Linux, run it on ZigK against loopback, and verify packets are sent and received.
+**Independent Test**: Create a UDP echo client using socket/sendto/recvfrom syscalls on Linux, run it on Zscapek against loopback, and verify packets are sent and received.
 
 **Acceptance Scenarios**:
 
@@ -103,11 +103,11 @@ As a kernel developer, I want read (0), open (2), and close (3) syscalls to work
 
 ---
 
-### User Story 7 - Custom ZigK Extensions (Priority: P3)
+### User Story 7 - Custom Zscapek Extensions (Priority: P3)
 
-As a kernel developer, I want ZigK-specific features (framebuffer, scancodes) accessible via syscalls in the 1000+ range so they don't conflict with future Linux syscalls.
+As a kernel developer, I want Zscapek-specific features (framebuffer, scancodes) accessible via syscalls in the 1000+ range so they don't conflict with future Linux syscalls.
 
-**Why this priority**: Custom features are needed for ZigK's unique capabilities (graphical output, direct keyboard access) while preserving Linux compatibility for standard operations.
+**Why this priority**: Custom features are needed for Zscapek's unique capabilities (graphical output, direct keyboard access) while preserving Linux compatibility for standard operations.
 
 **Independent Test**: Call syscall 1000 (get_fb_info), syscall 1001 (map_fb), and syscall 1002 (read_scancode) and verify they work correctly.
 
@@ -158,9 +158,9 @@ As a kernel developer, I want ZigK-specific features (framebuffer, scancodes) ac
 - **FR-016**: sys_socket MUST return a file descriptor for the requested socket type.
 - **FR-017**: sys_sendto and sys_recvfrom MUST accept sockaddr structures for addressing.
 
-**ZigK Custom Extensions**
+**Zscapek Custom Extensions**
 
-- **FR-018**: Kernel MUST reserve syscall numbers 1000+ for ZigK-specific extensions.
+- **FR-018**: Kernel MUST reserve syscall numbers 1000+ for Zscapek-specific extensions.
 - **FR-019**: Kernel MUST implement syscall 1000 for get_framebuffer_info.
 - **FR-020**: Kernel MUST implement syscall 1001 for map_framebuffer.
 - **FR-021**: Kernel MUST implement syscall 1002 for read_scancode.
@@ -182,13 +182,13 @@ As a kernel developer, I want ZigK-specific features (framebuffer, scancodes) ac
 
 ### Measurable Outcomes
 
-- **SC-001**: Static Linux x86_64 "Hello World" binary runs correctly on ZigK with no modifications.
+- **SC-001**: Static Linux x86_64 "Hello World" binary runs correctly on Zscapek with no modifications.
 - **SC-002**: Zig programs compiled with `-target x86_64-linux-musl` produce correct std.debug.print output.
 - **SC-003**: C programs using malloc/free (via brk) allocate and access memory correctly.
 - **SC-004**: UDP network programs using socket/sendto/recvfrom transmit packets successfully.
 - **SC-005**: Programs calling getpid receive a valid process ID.
 - **SC-006**: Programs calling nanosleep pause for the correct duration (within 10% accuracy).
-- **SC-007**: ZigK custom syscalls (1000+) function without conflicting with Linux numbers.
+- **SC-007**: Zscapek custom syscalls (1000+) function without conflicting with Linux numbers.
 - **SC-008**: Unimplemented syscalls return -ENOSYS consistently.
 
 ## Assumptions

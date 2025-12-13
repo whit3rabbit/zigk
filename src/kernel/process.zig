@@ -24,6 +24,7 @@ const pmm = @import("pmm");
 const hal = @import("hal");
 const sched = @import("sched");
 const uapi = @import("uapi");
+// const sync = @import("sync"); // Removed to avoid cycle
 
 const FdTable = fd_mod.FdTable;
 const UserVmm = user_vmm_mod.UserVmm;
@@ -94,6 +95,9 @@ pub const Process = struct {
 
     /// Add a child process
     pub fn addChild(self: *Process, child: *Process) void {
+        const held = sched.process_tree_lock.acquire();
+        defer held.release();
+
         child.parent = self;
         child.next_sibling = self.first_child;
         self.first_child = child;
@@ -101,6 +105,9 @@ pub const Process = struct {
 
     /// Remove a child from this process's children list
     pub fn removeChild(self: *Process, child: *Process) void {
+        const held = sched.process_tree_lock.acquire();
+        defer held.release();
+
         child.parent = null;
 
         if (self.first_child == child) {
@@ -189,11 +196,14 @@ pub const Process = struct {
 // =============================================================================
 
 var next_pid: u32 = 1; // PID 0 reserved for kernel
-var process_count: u32 = 0;
+var process_count = std.atomic.Value(u32).init(0);
 
 fn allocatePid() u32 {
-    const max_attempts = @as(usize, process_count) + 1;
+    const max_attempts = @as(usize, process_count.load(.monotonic)) + 1;
     var attempts: usize = 0;
+
+    const held = sched.process_tree_lock.acquire();
+    defer held.release();
 
     while (attempts <= max_attempts) : (attempts += 1) {
         if (next_pid == 0) {
@@ -203,7 +213,8 @@ fn allocatePid() u32 {
         const candidate = next_pid;
         next_pid +%= 1;
 
-        if (findProcessByPid(candidate) == null) {
+        // findProcessByPidLocked required to avoid deadlock (lock already held)
+        if (findProcessByPidLocked(candidate) == null) {
             return candidate;
         }
     }
@@ -271,7 +282,7 @@ pub fn createProcess(parent: ?*Process) !*Process {
         p.addChild(proc);
     }
 
-    process_count += 1;
+    _ = process_count.fetchAdd(1, .monotonic);
     console.debug("Process: Created pid={} (parent={})", .{
         proc.pid,
         if (parent) |p| p.pid else 0,
@@ -312,7 +323,7 @@ pub fn forkProcess(parent: *Process) !*Process {
     // Add to parent's children list
     parent.addChild(child);
 
-    process_count += 1;
+    _ = process_count.fetchAdd(1, .monotonic);
     console.info("Process: Forked pid={} from parent pid={}", .{ child.pid, parent.pid });
 
     return child;
@@ -501,7 +512,7 @@ pub fn destroyProcess(proc: *Process) void {
     // Free process struct
     alloc.destroy(proc);
 
-    process_count -= 1;
+    _ = process_count.fetchSub(1, .monotonic);
 }
 
 // =============================================================================
@@ -510,12 +521,18 @@ pub fn destroyProcess(proc: *Process) void {
 
 /// Get current process count
 pub fn getProcessCount() u32 {
-    return process_count;
+    return process_count.load(.Monotonic);
 }
 
 /// Find process by PID
 /// Note: Linear search - optimize if needed
 pub fn findProcessByPid(target_pid: u32) ?*Process {
+    const held = sched.process_tree_lock.acquire();
+    defer held.release();
+    return findProcessByPidLocked(target_pid);
+}
+
+fn findProcessByPidLocked(target_pid: u32) ?*Process {
     // Check init process
     if (init_process) |init| {
         if (init.pid == target_pid) {

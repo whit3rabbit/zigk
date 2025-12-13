@@ -460,12 +460,6 @@ pub fn sys_read(fd_num: usize, buf_ptr: usize, count: usize) SyscallError!usize 
         return 0;
     }
 
-    // Bounds check pointer (fast check)
-    // We do full copy later, but this saves us allocation if obviously bad
-    if (!isValidUserPtr(buf_ptr, count)) {
-        return error.EFAULT;
-    }
-
     // Get FD from table
     const table = getGlobalFdTable();
     const fd = table.get(@intCast(fd_num)) orelse {
@@ -491,6 +485,11 @@ pub fn sys_read(fd_num: usize, buf_ptr: usize, count: usize) SyscallError!usize 
     // Cap read size to avoid massive allocations (e.g. 1GB)
     const max_read_size = 64 * 1024; // 64KB chunks
     const read_size = @min(count, max_read_size);
+
+    // Validate buffer for write before consuming device data to avoid data loss
+    if (!isValidUserAccess(buf_ptr, read_size, AccessMode.Write)) {
+        return error.EFAULT;
+    }
 
     const kbuf = heap.allocator().alloc(u8, read_size) catch {
         return error.ENOMEM;
@@ -724,7 +723,7 @@ pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) SyscallError!usize {
 
 
 // =============================================================================
-// ZigK Custom Syscalls
+// Zscapek Custom Syscalls
 // =============================================================================
 
 /// Escape control characters in user-supplied strings for safe logging.
@@ -736,21 +735,24 @@ pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) SyscallError!usize {
 fn escapeControlChars(input: []const u8, output: []u8) usize {
     var out_idx: usize = 0;
     for (input) |c| {
-        if (out_idx + 2 >= output.len) break;
         if (c >= 0x20 and c <= 0x7E) {
+            if (out_idx >= output.len) break;
             // Printable ASCII - pass through
             output[out_idx] = c;
             out_idx += 1;
         } else if (c == '\n' or c == '\t') {
+            if (out_idx >= output.len) break;
             // Allow newline and tab
             output[out_idx] = c;
             out_idx += 1;
         } else if (c < 32) {
+            if (out_idx + 1 >= output.len) break;
             // Control character (0x00-0x1F) - escape as ^X
             output[out_idx] = '^';
             output[out_idx + 1] = c + 64; // ^@ for 0, ^A for 1, etc.
             out_idx += 2;
         } else {
+            if (out_idx + 1 >= output.len) break;
             // High bytes (0x7F-0xFF) - escape as ^?
             output[out_idx] = '^';
             output[out_idx + 1] = '?';
@@ -1354,6 +1356,12 @@ pub fn sys_execve(frame: *hal.syscall.SyscallFrame, path_ptr: usize, argv_ptr: u
         result.pml4_phys,
     });
 
+    // Vulnerability Fix: Ensure entry_point is canonical low-half address
+    // sysretq throws #GP if RCX (return RIP) is non-canonical.
+    if (!user_mem.isValidUserPtr(result.entry_point, 1)) {
+        return error.EFAULT;
+    }
+
     const current_thread = sched.getCurrentThread().?;
     const current_proc = getCurrentProcess();
 
@@ -1413,6 +1421,23 @@ fn zeroExecveRegisters(frame: *hal.syscall.SyscallFrame) void {
 /// sys_brk (12) - Change data segment size
 pub fn sys_brk(addr: u64) SyscallError!usize {
     const proc = getCurrentProcess();
+
+    const rollbackNewPages = struct {
+        fn run(p: *Process, start: u64, len: u64) void {
+            var offset: u64 = 0;
+            const page_size: u64 = pmm.PAGE_SIZE;
+            while (offset < len) : (offset += page_size) {
+                const vaddr = start + offset;
+                if (vmm.translate(p.cr3, vaddr)) |paddr| {
+                    pmm.freePage(paddr);
+                    vmm.unmapPage(p.cr3, vaddr) catch {};
+                    if (p.rss_current >= page_size) {
+                        p.rss_current -= page_size;
+                    }
+                }
+            }
+        }
+    }.run;
 
     // If addr is 0, return current break
     if (addr == 0) {
@@ -1501,6 +1526,36 @@ pub fn sys_brk(addr: u64) SyscallError!usize {
             // Track RSS for resource limit enforcement
             proc.rss_current += pmm.PAGE_SIZE;
         }
+
+        // Track heap VMA so mmap search logic sees the allocated range
+        const mapped_len: usize = @intCast(size_to_map);
+        var heap_vma: ?*user_vmm.Vma = null;
+        var cursor = proc.user_vmm.vma_head;
+        while (cursor) |vma| {
+            if (vma.contains(proc.heap_start)) {
+                heap_vma = vma;
+                break;
+            }
+            cursor = vma.next;
+        }
+
+        if (heap_vma) |vma| {
+            if (vma.end < new_break_aligned) {
+                vma.end = new_break_aligned;
+            }
+        } else {
+            const new_vma = proc.user_vmm.createVma(
+                current_break_aligned,
+                new_break_aligned,
+                user_vmm.PROT_READ | user_vmm.PROT_WRITE,
+                user_vmm.MAP_PRIVATE | user_vmm.MAP_ANONYMOUS,
+            ) catch {
+                rollbackNewPages(proc, current_break_aligned, size_to_map);
+                return error.ENOMEM;
+            };
+            proc.user_vmm.insertVma(new_vma);
+        }
+        proc.user_vmm.total_mapped += mapped_len;
     } else if (new_break_aligned < current_break_aligned) {
         // Shrinking heap - not implemented yet
         // Would need to unmap pages and free physical memory

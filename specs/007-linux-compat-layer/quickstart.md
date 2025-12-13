@@ -334,7 +334,7 @@ int main() {
 zig build
 
 # Run in QEMU
-qemu-system-x86_64 -cdrom zigk.iso -serial stdio
+qemu-system-x86_64 -cdrom zscapek.iso -serial stdio
 
 # Expected output from test programs:
 # stdout works

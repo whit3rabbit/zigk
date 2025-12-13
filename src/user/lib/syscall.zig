@@ -1,4 +1,4 @@
-// ZigK Userland Syscall Wrappers
+// Zscapek Userland Syscall Wrappers
 //
 // Provides type-safe wrappers around x86_64 syscall instruction.
 // All syscall numbers are imported from uapi to ensure kernel/userland consistency.
@@ -374,7 +374,7 @@ pub fn getrandom(buf: [*]u8, count: usize, flags: u32) SyscallError!usize {
 }
 
 // =============================================================================
-// ZigK Custom Extensions (1000+)
+// Zscapek Custom Extensions (1000+)
 // =============================================================================
 
 /// Framebuffer info structure

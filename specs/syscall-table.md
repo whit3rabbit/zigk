@@ -1,6 +1,6 @@
-# ZigK Authoritative Syscall Table
+# Zscapek Authoritative Syscall Table
 
-This is the single source of truth for all syscall numbers in ZigK.
+This is the single source of truth for all syscall numbers in Zscapek.
 All specifications MUST reference this table.
 
 ## Linux x86_64 ABI Syscalls
@@ -57,7 +57,7 @@ All specifications MUST reference this table.
 | 291 | sys_epoll_create1 | (flags) -> int | Future |
 | 318 | sys_getrandom | (buf, count, flags) -> ssize_t | 007 |
 
-## ZigK Custom Extensions
+## Zscapek Custom Extensions
 
 Reserved range: 1000-1999
 
@@ -116,6 +116,6 @@ Return:
 ## Notes
 
 - All standard syscalls follow Linux x86_64 ABI for maximum compatibility
-- Custom ZigK extensions (1000+) are for kernel-specific features not covered by Linux syscalls
+- Custom Zscapek extensions (1000+) are for kernel-specific features not covered by Linux syscalls
 - Error codes are returned as negative values (e.g., -ENOENT = -2)
 - Syscall implementations may be spread across multiple specs; the "Implementing Spec" column indicates primary ownership

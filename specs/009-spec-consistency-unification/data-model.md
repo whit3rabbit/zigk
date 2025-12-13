@@ -33,7 +33,7 @@ SyscallEntry:
 
 - Each `SyscallEntry` is referenced by one or more spec documents
 - All specs MUST use numbers from this table
-- Custom ZigK extensions use numbers 1000+
+- Custom Zscapek extensions use numbers 1000+
 
 ### Example Entry
 

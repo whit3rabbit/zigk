@@ -1,4 +1,4 @@
-// ZigK Error Numbers
+// Zscapek Error Numbers
 //
 // Standard Linux errno values for syscall error returns.
 // Error codes are returned as negative values in RAX (e.g., -ENOENT = -2).

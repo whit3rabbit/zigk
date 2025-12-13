@@ -3,7 +3,7 @@
 **Feature Branch**: `009-spec-consistency-unification`
 **Date**: 2025-12-05
 
-This document consolidates research findings for harmonizing ZigK specifications.
+This document consolidates research findings for harmonizing Zscapek specifications.
 
 ---
 
@@ -11,7 +11,7 @@ This document consolidates research findings for harmonizing ZigK specifications
 
 ### Authoritative Syscall Numbers
 
-The Linux x86_64 syscall numbers are defined in the kernel source at `arch/x86/entry/syscalls/syscall_64.tbl`. Key syscalls for ZigK compatibility:
+The Linux x86_64 syscall numbers are defined in the kernel source at `arch/x86/entry/syscalls/syscall_64.tbl`. Key syscalls for Zscapek compatibility:
 
 | Syscall | Number | Arguments |
 |---------|--------|-----------|
@@ -64,12 +64,12 @@ syscall return:
   R11 = destroyed (contains RFLAGS for sysret)
 ```
 
-### Custom ZigK Extensions
+### Custom Zscapek Extensions
 
-To avoid conflicts with current and future Linux syscalls, ZigK-specific syscalls should use numbers 548+. The Linux kernel reserves numbers up to ~547 as of kernel 6.x.
+To avoid conflicts with current and future Linux syscalls, Zscapek-specific syscalls should use numbers 548+. The Linux kernel reserves numbers up to ~547 as of kernel 6.x.
 
-Recommended ZigK custom syscall range:
-- 1000-1999: ZigK kernel extensions (conservative)
+Recommended Zscapek custom syscall range:
+- 1000-1999: Zscapek kernel extensions (conservative)
 - 548-999: Alternative if smaller numbers preferred
 
 ### Conflict Resolution
@@ -148,7 +148,7 @@ The `.code_model = .kernel` setting automatically disables the Red Zone. For exp
 kernel_module.cpu_features_sub.add(.red_zone);
 ```
 
-### Verified build.zig Template for ZigK
+### Verified build.zig Template for Zscapek
 
 ```zig
 const std = @import("std");

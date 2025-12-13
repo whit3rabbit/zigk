@@ -4,12 +4,16 @@ const font_types = @import("font/types.zig");
 const psf = @import("font/psf.zig");
 const ansi = @import("ansi.zig");
 const sync = @import("sync");
+const hal = @import("hal");
 
 const MAX_COLS = 200;
 const HISTORY_ROWS = 2000;
 
 // Static buffer to avoid stack overflow (400KB BSS)
 var history_buffer: [HISTORY_ROWS][MAX_COLS]u8 = undefined;
+
+// Static pixel buffer for rendering to avoid kernel stack overflow
+var static_pixel_buf: [32 * 32]u32 = undefined;
 
 // Global lock protects the global history_buffer
 // This is correct because history_buffer is global, not per-instance
@@ -173,6 +177,9 @@ pub const Console = struct {
     }
 
     pub fn write(self: *Console, text: []const u8) void {
+        const irq_state = hal.cpu.disableInterruptsSaveFlags();
+        defer hal.cpu.restoreInterrupts(irq_state);
+        
         const held = history_lock.acquire();
         defer held.release();
         
@@ -186,6 +193,9 @@ pub const Console = struct {
     }
 
     pub fn scrollUp(self: *Console, lines: usize) void {
+        const irq_state = hal.cpu.disableInterruptsSaveFlags();
+        defer hal.cpu.restoreInterrupts(irq_state);
+        
         const held = history_lock.acquire();
         defer held.release();
         
@@ -197,6 +207,9 @@ pub const Console = struct {
     }
 
     pub fn scrollDown(self: *Console, lines: usize) void {
+        const irq_state = hal.cpu.disableInterruptsSaveFlags();
+        defer hal.cpu.restoreInterrupts(irq_state);
+
         const held = history_lock.acquire();
         defer held.release();
         
@@ -287,7 +300,9 @@ pub const Console = struct {
         
         const glyph = self.current_font.getGlyph(char);
         
-        var pixel_buf: [32 * 32]u32 = undefined;
+        // Use static buffer protected by lock (caller holds history_lock)
+        // var pixel_buf: [32 * 32]u32 = undefined; // REMOVED stack allocation
+        
         if (font_w > 32 or font_h > 32) return;
         
         // Resolve colors
@@ -309,11 +324,11 @@ pub const Console = struct {
                if (row_start + byte_offset < glyph.len) {
                    const byte = glyph[row_start + byte_offset];
                    const is_set = (byte & (@as(u8, 1) << @as(u3, @truncate(col % 8)))) != 0;
-                   pixel_buf[row * font_w + col] = if (is_set) fg_u32 else bg_u32;
+                   static_pixel_buf[row * font_w + col] = if (is_set) fg_u32 else bg_u32;
                } 
            }
         }
-        self.device.drawBuffer(x, y, font_w, font_h, pixel_buf[0..(font_w*font_h)]);
+        self.device.drawBuffer(x, y, font_w, font_h, static_pixel_buf[0..(font_w*font_h)]);
         self.markDirty(x, y, font_w, font_h);
     }
     

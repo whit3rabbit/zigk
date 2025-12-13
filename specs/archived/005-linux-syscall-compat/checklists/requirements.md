@@ -35,5 +35,5 @@
 - 23 functional requirements defined across 5 categories
 - 8 measurable success criteria specified
 - Syscall number mapping documented clearly for Linux x86_64 ABI
-- Custom ZigK extensions placed in 1000+ range to avoid conflicts
+- Custom Zscapek extensions placed in 1000+ range to avoid conflicts
 - Ready for `/speckit.clarify` or `/speckit.plan`

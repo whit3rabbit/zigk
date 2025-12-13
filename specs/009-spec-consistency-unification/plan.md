@@ -7,7 +7,7 @@
 
 ## Summary
 
-Harmonize all ZigK specifications by: (1) unifying syscall numbers to Linux x86_64 ABI, (2) standardizing on Zig 0.15.x, (3) adding Spinlock infrastructure documentation, (4) clarifying endianness requirements, (5) defining VFS shim for /dev/ paths, and (6) specifying crt0 entry point requirements. This resolves cross-specification contradictions that would otherwise block implementation.
+Harmonize all Zscapek specifications by: (1) unifying syscall numbers to Linux x86_64 ABI, (2) standardizing on Zig 0.15.x, (3) adding Spinlock infrastructure documentation, (4) clarifying endianness requirements, (5) defining VFS shim for /dev/ paths, and (6) specifying crt0 entry point requirements. This resolves cross-specification contradictions that would otherwise block implementation.
 
 ## Technical Context
 

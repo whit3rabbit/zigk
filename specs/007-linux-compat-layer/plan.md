@@ -7,7 +7,7 @@
 
 ## Summary
 
-Implement Linux runtime infrastructure for complete userland compatibility: pre-opened standard file descriptors (0, 1, 2), wait4 syscall for shell process control, clock_gettime for timekeeping, and getrandom for entropy/hash map seeding. This complements specs 005-linux-syscall-compat and 006-sysv-abi-init to enable running standard C and Zig programs on ZigK.
+Implement Linux runtime infrastructure for complete userland compatibility: pre-opened standard file descriptors (0, 1, 2), wait4 syscall for shell process control, clock_gettime for timekeeping, and getrandom for entropy/hash map seeding. This complements specs 005-linux-syscall-compat and 006-sysv-abi-init to enable running standard C and Zig programs on Zscapek.
 
 ## Technical Context
 
@@ -116,7 +116,7 @@ tests/
     └── test_prng.zig        # Unit test for PRNG
 ```
 
-**Structure Decision**: Single kernel project following established ZigK patterns. Syscalls organized by domain (process, time, random). HAL layer isolates hardware access (RDRAND, TSC, PIT). Test programs are static C binaries loaded via InitRD.
+**Structure Decision**: Single kernel project following established Zscapek patterns. Syscalls organized by domain (process, time, random). HAL layer isolates hardware access (RDRAND, TSC, PIT). Test programs are static C binaries loaded via InitRD.
 
 ## Complexity Tracking
 

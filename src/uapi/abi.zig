@@ -1,4 +1,4 @@
-// ZigK ABI Assertions
+// Zscapek ABI Assertions
 //
 // Comptime verification that userland-visible structs match Linux x86_64 ABI.
 // These checks run at compile time and prevent ABI drift.
@@ -139,10 +139,10 @@ pub const PollFd = extern struct {
 };
 
 // =============================================================================
-// ZigK-specific ABI Layouts
+// Zscapek-specific ABI Layouts
 // =============================================================================
 
-/// FramebufferInfo - ZigK syscall ABI for sys_get_fb_info
+/// FramebufferInfo - Zscapek syscall ABI for sys_get_fb_info
 /// Must be 24 bytes: 4*u32 + 6*u8 + 2*u8 padding
 pub const FramebufferInfo = extern struct {
     width: u32,

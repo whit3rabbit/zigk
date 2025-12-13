@@ -41,8 +41,9 @@ pub const Ecam = struct {
             size / (1024 * 1024),
         });
 
-        // Map ECAM region to virtual address space
-        const base_virt = vmm.mapMmio(ecam_phys, size) catch |err| {
+        // Map ECAM region to virtual address space with an explicit mapping.
+        // ECAM is often in a high MMIO hole that may not be covered by the HHDM map.
+        const base_virt = vmm.mapMmioExplicit(ecam_phys, size) catch |err| {
             console.err("PCI ECAM: Failed to map MMIO region: {}", .{err});
             return error.MappingFailed;
         };

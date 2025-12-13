@@ -1,10 +1,10 @@
 # Boot Architecture & ABI Reference
 
-This document provides the definitive technical reference for ZigK's boot process, struct alignments, memory layout, and hardware interfaces. It is intended for kernel developers needing byte-level precision.
+This document provides the definitive technical reference for Zscapek's boot process, struct alignments, memory layout, and hardware interfaces. It is intended for kernel developers needing byte-level precision.
 
 ## 1. Virtual Memory Map (x86_64)
 
-ZigK uses the standard Higher Half Kernel model.
+Zscapek uses the standard Higher Half Kernel model.
 
 ```text
 0xFFFF_FFFF_FFFF_FFFF  ─── Top of Memory
@@ -206,7 +206,7 @@ When an interrupt occurs:
 ```
 
 ### Syscall Interface (Linux ABI)
-ZigK implements a subset of the Linux ABI.
+Zscapek implements a subset of the Linux ABI.
 
 | Register | Purpose |
 |---|---|

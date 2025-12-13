@@ -1,4 +1,4 @@
-# Quickstart: ZigK Minimal Kernel
+# Quickstart: Zscapek Minimal Kernel
 
 Build and run a minimal x86_64 kernel that boots via Limine, paints the screen,
 and outputs debug messages via serial port.
@@ -39,7 +39,7 @@ This will:
 1. Compile the kernel to `zig-out/bin/kernel.elf`
 2. Download Limine bootloader binaries (first run only)
 3. Assemble ISO filesystem
-4. Create `zigk.iso` with xorriso
+4. Create `zscapek.iso` with xorriso
 5. Launch QEMU with the ISO and serial output
 
 ### Expected Result
@@ -48,7 +48,7 @@ This will:
 - **Terminal**: Serial output showing boot messages
 
 ```
-ZigK booting...
+Zscapek booting...
 Framebuffer filled. Halting.
 ```
 
@@ -65,13 +65,13 @@ This confirms:
 zig build iso
 ```
 
-Creates `zigk.iso` without launching QEMU. Use for testing on real hardware
+Creates `zscapek.iso` without launching QEMU. Use for testing on real hardware
 or with a different emulator.
 
 ## Project Structure
 
 ```
-zigk/
+zscapek/
 ├── build.zig          # Build system
 ├── build.zig.zon      # Dependencies (limine-zig)
 ├── limine.conf        # Bootloader configuration
@@ -82,7 +82,7 @@ zigk/
 │   ├── ssp.zig        # Stack smashing protection symbols
 │   └── linker.ld      # Memory layout (high-half kernel)
 ├── limine/            # Limine bootloader (git clone, gitignored)
-└── zigk.iso           # Output (after build)
+└── zscapek.iso           # Output (after build)
 ```
 
 ## Troubleshooting
@@ -124,7 +124,7 @@ Check:
 3. Run with debug flags:
 
 ```bash
-qemu-system-x86_64 -cdrom zigk.iso -serial stdio -d int,cpu_reset -no-reboot
+qemu-system-x86_64 -cdrom zscapek.iso -serial stdio -d int,cpu_reset -no-reboot
 ```
 
 ### No Serial Output
@@ -152,7 +152,7 @@ For development, run QEMU with verbose debugging:
 
 ```bash
 qemu-system-x86_64 \
-    -cdrom zigk.iso \
+    -cdrom zscapek.iso \
     -serial stdio \
     -d int,cpu_reset \
     -no-reboot \

@@ -2,7 +2,7 @@
 
 ## Overview
 
-ZigK uses the **Limine Bootloader** (v5.x protocol) for booting. The kernel is compiled as a standard 64-bit ELF executable and loaded into the higher half of virtual memory.
+Zscapek uses the **Limine Bootloader** (v5.x protocol) for booting. The kernel is compiled as a standard 64-bit ELF executable and loaded into the higher half of virtual memory.
 
 **Developer Reference**: 
 
@@ -58,7 +58,7 @@ TIMEOUT=5
 SERIAL=yes
 VERBOSE=yes
 
-:ZigK Microkernel
+:Zscapek Microkernel
 PROTOCOL=limine
 KERNEL_PATH=boot:///boot/kernel.elf
 MODULE_PATH=boot:///boot/modules/shell.elf
@@ -169,7 +169,7 @@ The framebuffer log may scroll too fast or be initialized too late. Rely on the 
     *   **Cause 1**: Unaligned memory access, often when reading packed ACPI structs.
     *   **Fix**: Ensure all pointers to packed structs (like `*Rsdp` or `*McfgBase`) are cast with `align(1)`, e.g., `@as(*align(1) const T, ptr)`.
     *   **Cause 2**: CS register pointing to wrong GDT entry (e.g., TSS selector 0x28 instead of KERNEL_CODE 0x08).
-    *   **Fix**: The GDT initialization must reload CS via far return after loading the new GDT. Limine bootloader uses a different GDT layout where kernel code may be at a different index than ZigK's GDT. See "GDT Initialization and CS Reload" section below.
+    *   **Fix**: The GDT initialization must reload CS via far return after loading the new GDT. Limine bootloader uses a different GDT layout where kernel code may be at a different index than Zscapek's GDT. See "GDT Initialization and CS Reload" section below.
 *   **"Integer Overflow" Panic**:
     *   **Cause**: Zig's safety checks (enabled in Debug/ReleaseSafe) catch overflows that other languages ignore.
     *   **Hint**: Check loop counters (e.g., `u3` cannot hold 8) and bitwise operations on differing integer widths (e.g., `~u32` inside `u64`). Use `+%` for wrapping addition if intentional.
@@ -217,11 +217,11 @@ The first context switch to user mode (via `isr_common` IRETQ) does SWAPGS, whic
 
 ### 4. GDT Initialization and CS Reload
 
-When the kernel loads its own GDT, it must also reload the CS register. The Limine bootloader uses its own GDT with a different layout than ZigK's GDT.
+When the kernel loads its own GDT, it must also reload the CS register. The Limine bootloader uses its own GDT with a different layout than Zscapek's GDT.
 
 **The Problem:**
 
-| GDT Index | Limine GDT | ZigK GDT |
+| GDT Index | Limine GDT | Zscapek GDT |
 |-----------|------------|----------|
 | 0 | Null | Null |
 | 1 (0x08) | Kernel Code | Kernel Code |
@@ -230,7 +230,7 @@ When the kernel loads its own GDT, it must also reload the CS register. The Limi
 | 4 (0x20) | ? | User Code |
 | 5 (0x28) | Kernel Code (16-bit?) | **TSS** |
 
-If the GDT is loaded but CS is not reloaded, CS still contains the old selector value. When ZigK's GDT is active, that selector now points to the TSS entry instead of kernel code. The next `iretq` instruction triggers a GP fault with error code 0x28.
+If the GDT is loaded but CS is not reloaded, CS still contains the old selector value. When Zscapek's GDT is active, that selector now points to the TSS entry instead of kernel code. The next `iretq` instruction triggers a GP fault with error code 0x28.
 
 **The Fix:**
 
@@ -275,7 +275,7 @@ zig build iso
 zig build run -Dbios=/opt/homebrew/share/qemu/edk2-x86_64-code.fd
 
 # Or manually with UEFI
-qemu-system-x86_64 -M q35 -m 256M -cdrom zigk.iso \
+qemu-system-x86_64 -M q35 -m 256M -cdrom zscapek.iso \
   -drive if=pflash,format=raw,readonly=on,file=/opt/homebrew/share/qemu/edk2-x86_64-code.fd \
   -serial stdio -display none -accel tcg
 ```

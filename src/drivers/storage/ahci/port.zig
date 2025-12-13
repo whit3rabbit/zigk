@@ -16,6 +16,12 @@ const hal = @import("hal");
 const hba = @import("hba.zig");
 const fis = @import("fis.zig");
 
+const term = @import("std").os.linux; // Not used here directly but good practice to keep std imports clean
+// We need assembly for memory barriers
+fn memoryBarrier() void {
+    asm volatile ("mfence" ::: "memory");
+}
+
 const timing = hal.timing;
 
 // Port Timeout Constants (milliseconds)
@@ -480,7 +486,10 @@ pub fn stopEngine(base: u64) bool {
 
     // Clear ST
     cmd.st = false;
+    // Clear ST
+    cmd.st = false;
     writeCmd(base, cmd);
+    memoryBarrier();
 
     // Wait for CR to clear (1s timeout per Linux kernel)
     var timeout_ms: u32 = ENGINE_STOP_MS;
@@ -496,7 +505,10 @@ pub fn stopEngine(base: u64) bool {
 
     // Clear FRE
     cmd.fre = false;
+    // Clear FRE
+    cmd.fre = false;
     writeCmd(base, cmd);
+    memoryBarrier();
 
     // Wait for FR to clear (1s timeout)
     timeout_ms = ENGINE_STOP_MS;
@@ -523,10 +535,12 @@ pub fn startEngine(base: u64) void {
     var cmd = readCmd(base);
     cmd.fre = true;
     writeCmd(base, cmd);
+    memoryBarrier();
 
     cmd = readCmd(base);
     cmd.st = true;
     writeCmd(base, cmd);
+    memoryBarrier();
 }
 
 /// Perform a port reset (COMRESET)

@@ -34,7 +34,7 @@ pub const PAGE_SIZE: usize = paging.PAGE_SIZE;
 // Initialized to empty slice; set properly in initFromLimine().
 var bitmap: []u8 = &[_]u8{};
 var bitmap_size: usize = 0; // Size in bytes
-var refcounts: []u8 = &[_]u8{}; // Refcount array (new)
+var refcounts: []u16 = &[_]u16{}; // Refcount array (new)
 var total_pages: usize = 0;
 var free_pages: usize = 0;
 var allocated_pages: usize = 0;
@@ -48,7 +48,7 @@ var memory_end: u64 = 0;
 var initialized: bool = false;
 
 // Helper to get refcount safely
-pub fn getRefcount(phys_addr: u64) u8 {
+pub fn getRefcount(phys_addr: u64) u16 {
     if (phys_addr >= memory_end) return 0;
     const page = phys_addr / PAGE_SIZE;
     if (page >= refcounts.len) return 0;
@@ -67,7 +67,7 @@ pub fn refPage(phys_addr: u64) void {
     if (page >= total_pages) return;
 
     // Check for overflow
-    if (refcounts[page] == 255) {
+    if (refcounts[page] == std.math.maxInt(u16)) {
         console.panic("PMM: Refcount overflow for page {x}", .{phys_addr});
     }
 
@@ -136,9 +136,9 @@ pub fn initFromLimine(memmap: *const limine.MemoryMapResponse) !void {
 
     // Sizes for metadata
     bitmap_size = (total_pages + 7) / 8; // Bit per page
-    const refcounts_size = total_pages;  // Byte per page
-
-    const total_metadata = bitmap_size + refcounts_size;
+    const refcounts_size = total_pages * @sizeOf(u16); // 16-bit per page
+    const refcounts_offset = std.mem.alignForward(usize, bitmap_size, @alignOf(u16));
+    const total_metadata = refcounts_offset + refcounts_size;
 
     console.info("PMM: {d} entries, Tracking {d} pages ({d} MB)", .{
         entries.len,
@@ -178,11 +178,9 @@ pub fn initFromLimine(memmap: *const limine.MemoryMapResponse) !void {
     // Bitmap comes first
     bitmap = base_ptr[0..bitmap_size];
     
-    // Refcounts follows bitmap, aligned to next page boundary for safety/cache?
-    // Packed tightly is checking byte alignment, which is fine.
-    // Let's just point slightly after bitmap
-    const refcounts_offset = bitmap_size;
-    refcounts = base_ptr[refcounts_offset .. refcounts_offset + refcounts_size];
+    // Refcounts follow bitmap with alignment for u16 entries
+    const refcount_bytes = base_ptr[refcounts_offset .. refcounts_offset + refcounts_size];
+    refcounts = @alignCast(std.mem.bytesAsSlice(u16, refcount_bytes));
 
     console.info("PMM: Metadata at phys {x}", .{ metadata_phys });
 

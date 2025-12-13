@@ -254,6 +254,37 @@ pub const Virtqueue = struct {
         hal.mmio.memoryBarrier();
         return self.last_used_idx != self.used.idx;
     }
+
+    /// Reset virtqueue state after a device reset
+    pub fn reset(self: *Self) void {
+        const desc_slice = self.desc[0..self.size];
+        @memset(desc_slice, VirtqDesc{
+            .addr = 0,
+            .len = 0,
+            .flags = 0,
+            .next = 0,
+        });
+
+        if (self.size > 0) {
+            var i: u16 = 0;
+            while (i < self.size - 1) : (i += 1) {
+                self.desc[i].next = i + 1;
+            }
+            self.desc[self.size - 1].next = 0;
+        }
+
+        self.free_head = 0;
+        self.num_free = self.size;
+        self.last_used_idx = 0;
+
+        self.avail.flags = 0;
+        self.avail.idx = 0;
+        @memset(self.avail.ring[0..self.size], 0);
+
+        self.used.flags = 0;
+        self.used.idx = 0;
+        @memset(self.used.ring[0..self.size], VirtqUsedElem{ .id = 0, .len = 0 });
+    }
 };
 
 /// Align value up to alignment boundary

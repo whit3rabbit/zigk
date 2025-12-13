@@ -1,11 +1,11 @@
-// ZigK Syscall Numbers
+// Zscapek Syscall Numbers
 //
 // Single source of truth for syscall numbers matching specs/syscall-table.md.
 // All kernel and userland code MUST use these constants.
 //
 // Convention:
 //   - Linux x86_64 ABI syscalls use standard numbers (0-999)
-//   - ZigK custom extensions use range 1000-1999
+//   - Zscapek custom extensions use range 1000-1999
 //
 // Register Convention (x86_64):
 //   Entry: RAX=number, RDI=arg1, RSI=arg2, RDX=arg3, R10=arg4, R8=arg5, R9=arg6
@@ -226,7 +226,7 @@ pub const SYS_EPOLL_CREATE1: usize = 291;
 pub const SYS_GETRANDOM: usize = 318;
 
 // =============================================================================
-// ZigK Custom Extensions (1000-1999)
+// Zscapek Custom Extensions (1000-1999)
 // =============================================================================
 
 /// Write debug message to kernel log

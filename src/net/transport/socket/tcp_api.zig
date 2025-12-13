@@ -3,6 +3,7 @@
 const tcp = @import("../tcp.zig");
 const types = @import("types.zig");
 const state = @import("state.zig");
+const tcp_state = @import("../tcp/state.zig");
 const errors = @import("errors.zig");
 const scheduler = @import("scheduler.zig");
 const hal = @import("hal");
@@ -50,37 +51,57 @@ pub fn accept(sock_fd: usize, peer_addr: ?*types.SockAddrIn) errors.SocketError!
         return errors.SocketError.InvalidArg;
     }
 
-    // Check accept queue - block if empty and socket is blocking
-    if (sock.accept_count == 0) {
-        if (sock.blocking) {
-            if (scheduler.blockFn()) |block_fn| {
-                const get_current = scheduler.currentThreadFn() orelse return errors.SocketError.SystemError;
+    var accepted_tcb: ?*tcp.Tcb = null;
 
-                while (sock.accept_count == 0) {
-                    // Disable interrupts to close race window between setting
-                    // blocked_thread and entering Blocked state. If a connection
-                    // completes after this point, queueAcceptConnection will see
-                    // blocked_thread set and wake us after block_fn() halts.
-                    _ = hal.cpu.disableInterrupts();
+    while (accepted_tcb == null) {
+        // Disable interrupts to close race window between check and block
+        hal.cpu.disableInterrupts();
+        tcp_state.lock.acquire();
+
+        // Check accept queue - block if empty and socket is blocking
+        if (sock.accept_count == 0) {
+            if (sock.blocking) {
+                if (scheduler.blockFn()) |block_fn| {
+                    const get_current = scheduler.currentThreadFn() orelse {
+                        tcp_state.lock.release();
+                        hal.cpu.enableInterrupts();
+                        return errors.SocketError.SystemError;
+                    };
+
                     sock.blocked_thread = get_current();
+                    tcp_state.lock.release(); // Interrupts remain disabled
+
                     // block_fn() sets state=Blocked then atomically enables
                     // interrupts and halts (STI; HLT sequence)
                     block_fn();
                     sock.blocked_thread = null;
+                    continue;
+                } else {
+                    tcp_state.lock.release();
+                    hal.cpu.enableInterrupts();
+                    return errors.SocketError.WouldBlock;
                 }
             } else {
+                tcp_state.lock.release();
+                hal.cpu.enableInterrupts();
                 return errors.SocketError.WouldBlock;
             }
-        } else {
-            return errors.SocketError.WouldBlock;
         }
-    }
 
-    // Dequeue connection
-    const tcb = sock.accept_queue[sock.accept_tail] orelse return errors.SocketError.WouldBlock;
-    sock.accept_queue[sock.accept_tail] = null;
-    sock.accept_tail = (sock.accept_tail + 1) % types.ACCEPT_QUEUE_SIZE;
-    sock.accept_count -= 1;
+        // Dequeue connection under TCP lock
+        const tcb = sock.accept_queue[sock.accept_tail] orelse {
+            tcp_state.lock.release();
+            hal.cpu.enableInterrupts();
+            return errors.SocketError.WouldBlock;
+        };
+        sock.accept_queue[sock.accept_tail] = null;
+        sock.accept_tail = (sock.accept_tail + 1) % types.ACCEPT_QUEUE_SIZE;
+        sock.accept_count -= 1;
+        tcp_state.lock.release();
+        hal.cpu.enableInterrupts();
+        accepted_tcb = tcb;
+    }
+    const tcb = accepted_tcb.?;
 
     // Allocate new socket for this connection
     const new_sock_fd = @import("lifecycle.zig").socket(types.AF_INET, types.SOCK_STREAM, 0) catch {

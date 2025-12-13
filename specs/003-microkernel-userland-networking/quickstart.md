@@ -14,7 +14,7 @@
 | xorriso | Any | ISO creation | `brew install xorriso` |
 | Git | Any | Source control | `brew install git` |
 
-**Note**: All ZigK specifications target Zig 0.15.x. See CLAUDE.md for build patterns.
+**Note**: All Zscapek specifications target Zig 0.15.x. See CLAUDE.md for build patterns.
 
 ### Verify Installation
 
@@ -30,8 +30,8 @@ xorriso --version
 
 ```bash
 # Clone repository (if not already done)
-git clone https://github.com/your-repo/zigk.git
-cd zigk
+git clone https://github.com/your-repo/zscapek.git
+cd zscapek
 
 # Build and run in QEMU
 zig build run
@@ -57,7 +57,7 @@ zig-out/
 ├── bin/
 │   └── kernel.elf     # Kernel ELF binary
 └── iso/
-    └── zigk.iso       # Bootable ISO image
+    └── zscapek.iso       # Bootable ISO image
 ```
 
 ---
@@ -72,13 +72,13 @@ zig-out/
 # macOS ARM64 (Apple Silicon)
 qemu-system-x86_64 \
     -accel tcg \
-    -cdrom zig-out/iso/zigk.iso \
+    -cdrom zig-out/iso/zscapek.iso \
     -m 128M \
     -serial stdio
 
 # Intel/AMD (native)
 qemu-system-x86_64 \
-    -cdrom zig-out/iso/zigk.iso \
+    -cdrom zig-out/iso/zscapek.iso \
     -m 128M \
     -serial stdio
 ```
@@ -88,7 +88,7 @@ qemu-system-x86_64 \
 ```bash
 # Add -accel tcg on Apple Silicon
 qemu-system-x86_64 \
-    -cdrom zig-out/iso/zigk.iso \
+    -cdrom zig-out/iso/zscapek.iso \
     -m 128M \
     -serial stdio \
     -netdev user,id=net0,hostfwd=udp::5555-:5555 \
@@ -102,7 +102,7 @@ With TAP networking (requires root):
 ```bash
 # Terminal 1: Run QEMU with TAP (add -accel tcg on Apple Silicon)
 sudo qemu-system-x86_64 \
-    -cdrom zig-out/iso/zigk.iso \
+    -cdrom zig-out/iso/zscapek.iso \
     -m 128M \
     -serial stdio \
     -netdev tap,id=net0,ifname=tap0,script=no,downscript=no \
@@ -119,7 +119,7 @@ ping 10.0.2.15  # Kernel's default IP
 ```bash
 # Terminal 1: Run QEMU with GDB server (add -accel tcg on Apple Silicon)
 qemu-system-x86_64 \
-    -cdrom zig-out/iso/zigk.iso \
+    -cdrom zig-out/iso/zscapek.iso \
     -m 128M \
     -serial stdio \
     -s -S  # -s: GDB on port 1234, -S: pause at start
@@ -224,7 +224,7 @@ zig build run -- -d int
 ### Boot Verification
 
 - [ ] QEMU starts without triple fault
-- [ ] Serial output shows "ZigK booting..."
+- [ ] Serial output shows "Zscapek booting..."
 - [ ] Framebuffer shows console output
 
 ### Memory Verification
@@ -352,7 +352,7 @@ Add to `limine.conf`:
 ```limine
 PROTOCOL=limine
 
-/ZigK
+/Zscapek
     PROTOCOL=limine
     KERNEL_PATH=boot:///kernel.elf
     MODULE_PATH=boot:///initrd.tar
@@ -376,7 +376,7 @@ PROTOCOL=limine
 ```bash
 # Terminal 1: Run QEMU with TAP
 sudo qemu-system-x86_64 \
-    -cdrom zig-out/iso/zigk.iso \
+    -cdrom zig-out/iso/zscapek.iso \
     -m 128M \
     -netdev tap,id=net0,ifname=tap0,script=no,downscript=no \
     -device e1000,netdev=net0,mac=52:54:00:12:34:56

@@ -106,7 +106,7 @@ As a kernel developer, I want a crt0 implementation that sets up argc/argv from 
 1. **Given** crt0 is implemented, **When** a userland program's _start is called, **Then** it reads argc from the stack
 2. **Given** crt0 extracts argv pointers, **When** main(argc, argv) is called, **Then** arguments are accessible
 3. **Given** a shell command "echo hello world", **When** echo is spawned, **Then** argc=3 and argv=["echo", "hello", "world"]
-4. **Given** Zig userland code, **When** compiled for ZigK, **Then** it uses the provided crt0 to initialize std.os arguments
+4. **Given** Zig userland code, **When** compiled for Zscapek, **Then** it uses the provided crt0 to initialize std.os arguments
 
 ---
 
@@ -127,7 +127,7 @@ As a kernel developer, I want a crt0 implementation that sets up argc/argv from 
 - **FR-SYS-01**: All specs MUST use Linux x86_64 syscall numbers for standard operations.
 - **FR-SYS-02**: Spec 003 MUST be amended to change SYS_READ from 2 to 0 and remove custom numbering.
 - **FR-SYS-03**: A consolidated syscall table MUST be maintained in a single authoritative location.
-- **FR-SYS-04**: Custom ZigK extensions MUST use syscall numbers 1000+ to avoid Linux conflicts.
+- **FR-SYS-04**: Custom Zscapek extensions MUST use syscall numbers 1000+ to avoid Linux conflicts.
 
 **Zig Version Standardization**
 

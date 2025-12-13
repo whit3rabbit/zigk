@@ -13,12 +13,12 @@ As a kernel developer, I need the initial user stack to contain argc, argv, envp
 
 **Why this priority**: This is the foundation for running any standard compiled program. Without the correct stack layout, libc's _start code reads garbage and crashes before main() is even called.
 
-**Independent Test**: Load a static C program compiled with musl/glibc that prints argc and argv[0], and verify it produces correct output on ZigK.
+**Independent Test**: Load a static C program compiled with musl/glibc that prints argc and argv[0], and verify it produces correct output on Zscapek.
 
 **Acceptance Scenarios**:
 
 1. **Given** a user process starting, **When** the kernel jumps to the entry point, **Then** RSP points to argc, followed by argv pointers, NULL, envp pointers, NULL, and auxiliary vectors.
-2. **Given** a C program accessing argv[0], **When** it runs on ZigK, **Then** it correctly reads the program name from the stack.
+2. **Given** a C program accessing argv[0], **When** it runs on Zscapek, **Then** it correctly reads the program name from the stack.
 3. **Given** a program compiled with stack canaries (SSP), **When** it starts, **Then** AT_RANDOM provides 16 bytes for canary initialization.
 
 ---
@@ -43,7 +43,7 @@ As a kernel developer, I need the FS segment base register to be settable by use
 
 As a kernel developer, I need a standard mmap syscall so that modern memory allocators (mimalloc, jemalloc, Python's allocator) can request large memory regions without relying solely on brk.
 
-**Why this priority**: Modern allocators strongly prefer mmap for large allocations. Without it, complex software will either fail or fall back to inefficient brk-based allocation, limiting what can run on ZigK.
+**Why this priority**: Modern allocators strongly prefer mmap for large allocations. Without it, complex software will either fail or fall back to inefficient brk-based allocation, limiting what can run on Zscapek.
 
 **Independent Test**: Run a program that uses mmap to allocate anonymous memory, writes to it, and reads it back correctly.
 
@@ -235,7 +235,7 @@ All userland programs MUST link with crt0. Failure to include crt0 results in cr
 
 ### Measurable Outcomes
 
-- **SC-001**: Static C programs (musl-linked) correctly read argc and argv[0] from the stack on ZigK.
+- **SC-001**: Static C programs (musl-linked) correctly read argc and argv[0] from the stack on Zscapek.
 - **SC-002**: Programs using errno (via TLS) preserve error values correctly across syscalls.
 - **SC-003**: mmap-based allocations succeed for anonymous memory up to available physical memory.
 - **SC-004**: AT_RANDOM provides 16 bytes that differ between process launches.

@@ -1,4 +1,4 @@
-// ZigK Soak Test
+// Zscapek Soak Test
 //
 // Long-running stability test for detecting slow memory leaks,
 // resource exhaustion, and kernel stability issues under sustained load.

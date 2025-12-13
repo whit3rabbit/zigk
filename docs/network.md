@@ -1,6 +1,6 @@
-# ZigK Network Stack
+# Zscapek Network Stack
 
-This document describes the network stack implementation in ZigK.
+This document describes the network stack implementation in Zscapek.
 
 ## Architecture Overview
 

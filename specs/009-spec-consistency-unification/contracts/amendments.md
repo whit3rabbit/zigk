@@ -137,7 +137,7 @@ Explicit locking prepares for transition from BKL to fine-grained locking in spe
 ```markdown
 ### Byte Order Requirements
 
-ZigK runs on x86_64 (Little Endian). Network protocols use Big Endian.
+Zscapek runs on x86_64 (Little Endian). Network protocols use Big Endian.
 
 | Domain | Byte Order | Conversion |
 |--------|-----------|------------|
@@ -319,9 +319,9 @@ CLAUDE.md guides AI code generation. Outdated patterns cause build failures.
 
 ### Content
 ```markdown
-# ZigK Authoritative Syscall Table
+# Zscapek Authoritative Syscall Table
 
-This is the single source of truth for all syscall numbers in ZigK.
+This is the single source of truth for all syscall numbers in Zscapek.
 All specifications MUST reference this table.
 
 ## Linux x86_64 ABI Syscalls
@@ -347,7 +347,7 @@ All specifications MUST reference this table.
 | 231 | sys_exit_group | (code) -> noreturn | 005 |
 | 318 | sys_getrandom | (buf, count, flags) -> ssize_t | 007 |
 
-## ZigK Custom Extensions
+## Zscapek Custom Extensions
 
 Reserved range: 1000-1999
 

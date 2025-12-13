@@ -1,121 +1,91 @@
-# ZigK
+# Zscapek
+[![ISO Release Build](https://github.com/whit3rabbit/zigk/actions/workflows/build-iso.yml/badge.svg?event=release)](https://github.com/whit3rabbit/zigk/actions/workflows/build-iso.yml)
 
-A minimal x86_64 microkernel written in Zig, using the Limine bootloader.
+Zscapek is a 64-bit modular monolithic operating system kernel written in Zig. It targets the x86_64 architecture and utilizes the Limine bootloader.
 
-## Features
-
-- Limine boot protocol (v5.x)
-- Physical Memory Manager (bitmap allocator with refcounting)
-- Virtual Memory Manager (4-level paging)
-- Kernel heap (thread-safe, coalescing free-list)
-- GDT/IDT/PIC initialization
-- PS/2 keyboard driver
-- Serial console output (COM1)
-- Round-robin scheduler with thread support
-- ELF loader for userspace programs
-- Syscall interface (Linux-compatible numbers)
-
-## Building and Running
-
-See [BUILD.md](docs/BUILD.md) for detailed instructions on:
-- Setting up the development environment
-- Building the kernel
-- Creating bootable ISOs
-- Running in QEMU (including Apple Silicon support)
-
-## Boot Process
-
-See [BOOT.md](docs/BOOT.md) for technical details on:
-- Limine protocol implementation
-- Boot process flow
-- Memory layout
-
-### Quick Start
-
-```bash
-# Build and create ISO
-zig build iso
-
-# Run in QEMU (macOS Apple Silicon)
-zig build run -Dbios=/opt/homebrew/share/qemu/edk2-x86_64-code.fd
-
-# Run in QEMU (macOS Intel)
-zig build run -Dbios=/usr/local/share/qemu/edk2-x86_64-code.fd
-```
-
-### UEFI Booting
-
-The kernel requires UEFI firmware on macOS. Pass the path to your OVMF/EDK2 firmware:
-
-```bash
-qemu-system-x86_64 -M q35 -m 256M -cdrom zigk.iso \
-  -drive if=pflash,format=raw,readonly=on,file=/opt/homebrew/share/qemu/edk2-x86_64-code.fd \
-  -serial stdio -accel tcg
-```
-
-## Docker Build (Recommended)
-
-Docker provides a consistent build environment across all platforms and handles all dependencies automatically.
-
-See [BUILD.md](BUILD.md#docker-build-recommended) for detailed instructions.
-
-## Project Structure
-
-See [FILESYSTEM.md](FILESYSTEM.md) for detailed structure.
+While the project uses a clean module structure to separate concerns, it operates as a monolithic kernel. Device drivers, the network stack, and file system logic run in kernel space (Ring 0) to maximize performance and simplify hardware access.
 
 ## Architecture
 
-ZigK follows a strict HAL (Hardware Abstraction Layer) design:
+Zscapek is designed with a modular monolithic architecture. Unlike a microkernel, essential system services and drivers are compiled directly into the kernel binary.
 
-- **src/arch/** - Only location for inline assembly and hardware access
-- **src/kernel/** - Architecture-agnostic kernel code
-- **src/drivers/** - Bus-agnostic device drivers
+- **Privilege Level:** Drivers (Network, Storage, GPU) and the TCP/IP stack execute in Ring 0.
+- **Memory Model:** The kernel utilizes a Higher Half Direct Map (HHDM) for physical memory access.
+- **System Calls:** Userspace interacts with the kernel via a Linux-compatible syscall ABI (interrupt 0x80/syscall instruction) rather than IPC message passing.
+- **Further reading:** Boot flow and memory layout are detailed in [docs/BOOT.md](docs/BOOT.md) and [docs/BOOT_ARCHITECTURE.md](docs/BOOT_ARCHITECTURE.md). The HAL boundary and directory map are in [docs/FILESYSTEM.md](docs/FILESYSTEM.md).
 
-All kernel code accesses hardware through the `hal` module interface.
+## Features
 
-### Limine Boot Process
+### Core Kernel
+- **Memory Management:**
+  - Physical Memory Manager (PMM) using bitmap allocation.
+  - Virtual Memory Manager (VMM) supporting 4-level paging.
+  - Slab-like kernel heap allocator with immediate coalescing.
+  - Userspace Virtual Memory Area (VMA) tracking for `mmap` and `brk`.
+  - Compiler-inserted stack guard protection seeded via hardware entropy.
+- **Scheduling:**
+  - Preemptive Round-Robin scheduler.
+  - Support for kernel and user threads.
+  - Process model supporting `fork`, `execve`, and `waitpid`.
 
-1. BIOS/UEFI loads Limine bootloader
-2. Limine reads `limine.cfg` and loads kernel ELF + modules
-3. Limine sets up 64-bit long mode with HHDM (Higher Half Direct Map)
-4. Limine jumps to kernel entry point `_start` in Zig
-5. Kernel initializes using Limine memory map and module info
+### Networking
+Zscapek includes a native, in-kernel TCP/IP stack.
+- **Protocols:** Ethernet, ARP, IPv4, ICMP, UDP, and TCP.
+- **TCP Support:** Implements RFC 793 state machine, sliding windows, retransmission timers, and congestion control.
+- **Socket API:** BSD-style interface supporting `socket`, `bind`, `connect`, `accept`, `listen`, `send`, and `recv`.
+- **Driver:** Intel E1000e (PCIe Gigabit Ethernet) driver with NAPI-style interrupt handling.
 
-## InitRD (Initial RAM Disk)
+### Hardware Support
+- **Bus:** PCI enumeration with BAR mapping and MSI/MSI-X interrupt support.
+- **Video:**
+  - VirtIO-GPU driver for paravirtualized 2D acceleration.
+  - UEFI Framebuffer fallback.
+  - Double-buffered console with ANSI escape code support.
+- **Storage:** AHCI (SATA) driver implementing DMA Scatter/Gather.
+- **Input:** PS/2 Keyboard and Mouse drivers.
+- **Interrupts:** APIC and I/O APIC support.
+- **Entropy:** RDRAND (Intel/AMD) support with RDTSC fallback.
 
-The kernel supports loading files from a TAR-format initial ramdisk. This allows userspace programs to access configuration files, scripts, or other resources at boot time.
+### Userspace
+- **ELF64 Loader:** Parses and loads static binaries.
+- **InitRD:** TAR-based initial ramdisk for loading user programs.
+- **System Services:**
+  - **Shell:** Interactive shell with basic command processing.
+  - **HTTPD:** Multi-threaded web server demonstrating the kernel TCP stack.
+- **CRT0:** Custom C Runtime startup code.
 
-### Creating an InitRD
+## Build and Run
+
+See [docs/BUILD.md](docs/BUILD.md) for platform-specific notes and Docker-based builds.
+
+### Requirements
+- Zig 0.15.x
+- QEMU (for emulation)
+- xorriso (for ISO generation)
+
+### Compilation
+To build the kernel, userspace programs, and generate the bootable ISO:
 
 ```bash
-# Create a directory with files to include
-mkdir -p initrd_contents/etc
-echo "root:x:0:0:root:/root:/bin/sh" > initrd_contents/etc/passwd
-
-# Create USTAR TAR archive (required format)
-tar --format=ustar -cvf initrd.tar -C initrd_contents .
+zig build -Doptimize=ReleaseSafe
 ```
 
-### Adding InitRD to Boot
+### Running in QEMU
+To run the system with networking and VirtIO-GPU enabled:
 
-1. Copy `initrd.tar` to `iso_root/boot/`:
-   ```bash
-   cp initrd.tar iso_root/boot/initrd.tar
-   ```
+```bash
+zig build run
+```
 
-2. Add module entry to `limine.cfg`:
-   ```
-   MODULE_PATH=boot:///boot/initrd.tar
-   MODULE_CMDLINE=initrd
-   ```
+This configuration forwards local port 8080 to the guest port 80. Once the system boots and the `httpd` process starts, the web server is accessible at `http://localhost:8080`.
 
-3. Rebuild and run:
-   ```bash
-   zig build run -Dbios=/opt/homebrew/share/qemu/edk2-x86_64-code.fd
-   ```
+## Roadmap
 
-The kernel auto-detects modules with "initrd" or ".tar" in their cmdline/path and initializes the filesystem.
+- **SMP:** Symmetric Multiprocessing support.
+- **VFS:** Abstract Virtual File System to unify InitRD and AHCI storage.
+- **Dynamic Linking:** Support for shared object (`.so`) loading.
+- **VirtIO Net:** Paravirtualized network driver implementation.
 
 ## License
 
-MIT
+MIT License

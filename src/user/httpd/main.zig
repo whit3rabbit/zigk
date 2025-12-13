@@ -126,8 +126,8 @@ fn handleClient(pfd: *syscall.PollFd) void {
         "Content-Type: text/html\r\n" ++
         "Connection: close\r\n" ++
         "\r\n" ++
-        "<html><head><title>ZigK HTTPD</title></head>" ++
-        "<body><h1>Hello from ZigK!</h1>" ++
+        "<html><head><title>Zscapek HTTPD</title></head>" ++
+        "<body><h1>Hello from Zscapek!</h1>" ++
         "<p>This is a microkernel running a userspace HTTP server.</p>" ++
         "<p>Powered by Zig poll() implementation.</p>" ++
         "</body></html>";

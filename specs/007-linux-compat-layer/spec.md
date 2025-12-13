@@ -19,7 +19,7 @@ Standard libraries (C, Zig, Python) assume that when a process starts, file desc
 
 1. **Given** the kernel creates a new user process, **When** it jumps to the entry point, **Then** FD 0 is mapped to keyboard input (stdin)
 2. **Given** a new user process starts, **When** it writes to FD 1 or FD 2, **Then** output appears on the console/framebuffer without any prior open() call
-3. **Given** a C program using `printf("Hello")`, **When** it runs on ZigK, **Then** the output appears correctly via the pre-opened FD 1
+3. **Given** a C program using `printf("Hello")`, **When** it runs on Zscapek, **Then** the output appears correctly via the pre-opened FD 1
 4. **Given** a userland process closes FD 0, 1, or 2, **When** a subsequent open() is called, **Then** the lowest available FD number is returned (standard behavior)
 
 ---
@@ -174,7 +174,7 @@ This is a kernel lookup table, not a filesystem. No inodes, no directory operati
 ### Measurable Outcomes
 
 - **SC-001**: Static C "Hello World" using printf (which writes to FD 1) prints correctly without explicit open() calls.
-- **SC-002**: Zig programs using std.debug.print produce correct output on ZigK.
+- **SC-002**: Zig programs using std.debug.print produce correct output on Zscapek.
 - **SC-003**: Shell waits for child processes to complete before displaying the next prompt.
 - **SC-004**: Programs using CLOCK_MONOTONIC measure elapsed time within 10% accuracy.
 - **SC-005**: Programs calling clock_gettime with CLOCK_REALTIME receive a valid Unix timestamp.
@@ -188,7 +188,7 @@ This is a kernel lookup table, not a filesystem. No inodes, no directory operati
 
 This specification, combined with 005-linux-syscall-compat and 006-sysv-abi-init, provides the following syscall coverage:
 
-| Linux ID | Name             | ZigK MVP Implementation Notes                          |
+| Linux ID | Name             | Zscapek MVP Implementation Notes                          |
 |----------|------------------|--------------------------------------------------------|
 | 0        | sys_read         | Read from Console (FD 0) or InitRD files              |
 | 1        | sys_write        | Write to Console (FD 1/2)                              |
@@ -212,7 +212,7 @@ This specification, combined with 005-linux-syscall-compat and 006-sysv-abi-init
 
 **Custom Extensions (1000+)**:
 
-| ZigK ID | Name              | Implementation Notes                                   |
+| Zscapek ID | Name              | Implementation Notes                                   |
 |---------|-------------------|--------------------------------------------------------|
 | 1000    | sys_debug_log     | Bypass FD 1 for kernel debugging                       |
 | 1001    | sys_map_fb        | Map framebuffer into userspace                         |

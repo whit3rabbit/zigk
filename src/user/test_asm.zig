@@ -1,4 +1,4 @@
-// Minimal test userland program for ZigK
+// Minimal test userland program for Zscapek
 // Uses direct syscalls to print "Hello" and exit
 
 const std = @import("std");

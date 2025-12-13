@@ -1,6 +1,6 @@
 # Graphics and Debugging Subsystem
 
-This document describes the design and implementation of the graphics and debugging subsystem in ZigK.
+This document describes the design and implementation of the graphics and debugging subsystem in Zscapek.
 
 ## Overview
 

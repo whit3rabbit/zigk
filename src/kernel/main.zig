@@ -1,6 +1,6 @@
-// ZigK Kernel Entry Point
+// Zscapek Kernel Entry Point
 //
-// This is the main entry point for the ZigK microkernel.
+// This is the main entry point for the Zscapek microkernel.
 // It is called by Limine bootloader in 64-bit long mode with paging enabled.
 //
 // Limine Entry Conditions:
@@ -215,9 +215,8 @@ export fn _start() noreturn {
     // Initialize Graphical Console if framebuffer is available
     // Initialize Graphical Console if framebuffer is available
     if (framebuffer.getState()) |fb_state| {
-        // Limine provides the framebuffer address as a VIRTUAL address (already HHDM mapped).
-        // Calling physToVirt on it would add HHDM offset again, causing overflow.
-        const virt_addr = fb_state.phys_addr;
+        // fb_state.phys_addr is physical. Convert to kernel virtual (HHDM).
+        const virt_addr = @intFromPtr(hal.paging.physToVirt(fb_state.phys_addr));
         
         // Initialize Framebuffer Driver (direct mode initially, before PMM is ready)
         const video_mode = video_driver.interface.VideoMode{
@@ -702,6 +701,10 @@ fn rxCallbackAdapter(data: []u8) void {
     // Wrap data in PacketBuffer and pass to network stack
     var pkt = net.PacketBuffer.init(data, data.len);
     _ = net.processFrame(&net_interface, &pkt);
+
+    // Free the buffer allocated by the driver
+    // This was allocated in drivers/net/e1000e.zig:processRxLimited via heap.allocator().alloc
+    heap.allocator().free(data);
 }
 
 fn initNetwork() void {

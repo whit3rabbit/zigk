@@ -32,7 +32,7 @@ You can customize the build using `-D` flags with `zig build`.
 | Option | Default | Description |
 |--------|---------|-------------|
 | `-Dversion=[string]` | "0.1.0" | Kernel version string |
-| `-Dname=[string]` | "ZigK" | Kernel name |
+| `-Dname=[string]` | "Zscapek" | Kernel name |
 | `-Dstack-size=[int]` | 16384 | Default thread stack size in bytes |
 | `-Dheap-size=[int]` | 2097152 | Kernel heap size in bytes (2MB) |
 | `-Dmax-threads=[int]` | 64 | Maximum number of threads |
@@ -50,11 +50,11 @@ zig build -Dheap-size=4194304 -Ddebug=false
 ```
 
 ### 2. Create Bootable ISO
-To build the OS image (`zigk.iso`):
+To build the OS image (`zscapek.iso`):
 ```bash
 zig build iso
 ```
-Artifact: `zigk.iso`
+Artifact: `zscapek.iso`
 
 **Note**: This step performs the following:
 1.  Compiles `kernel.elf`.

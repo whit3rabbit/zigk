@@ -11,6 +11,7 @@ const console = @import("console");
 const std = @import("std");
 const ecam = @import("ecam.zig");
 const device = @import("device.zig");
+const hal = @import("hal");
 
 const Ecam = ecam.Ecam;
 const PciDevice = device.PciDevice;
@@ -128,11 +129,19 @@ fn checkFunction(pci: *const Ecam, bus: u8, dev: u5, func: u3, devices: *DeviceL
 
 /// Read all BARs for a device
 fn readBars(pci: *const Ecam, dev: *PciDevice) void {
-    // Enable Memory Space before probing BARs
-    // Some devices (like QEMU XHCI) may not respond to BAR reads until enabled
     const orig_cmd = pci.read16(dev.bus, dev.device, dev.func, ConfigReg.COMMAND);
-    const enabled_cmd = orig_cmd | device.Command.MEMORY_SPACE | device.Command.IO_SPACE;
-    pci.write16(dev.bus, dev.device, dev.func, ConfigReg.COMMAND, enabled_cmd);
+    const disabled_cmd = orig_cmd & ~(device.Command.MEMORY_SPACE | device.Command.IO_SPACE);
+    pci.write16(dev.bus, dev.device, dev.func, ConfigReg.COMMAND, disabled_cmd);
+
+    // Restore original command register after sizing to avoid changing device state.
+    defer pci.write16(dev.bus, dev.device, dev.func, ConfigReg.COMMAND, orig_cmd);
+
+    // CRITICAL: Disable interrupts during BAR sizing.
+    // Writing 0xFFFFFFFF to the BAR register temporarily unmaps the device or puts it in an invalid state.
+    // If an interrupt (e.g. from the same device or another device sharing the bus) fires in between,
+    // the ISR might try to access the device and crash or read garbage.
+    hal.cpu.disableInterrupts();
+    defer hal.cpu.enableInterrupts();
 
     var i: u8 = 0;
     while (i < 6) : (i += 1) {

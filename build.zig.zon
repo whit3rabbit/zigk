@@ -1,8 +1,8 @@
 .{
-    .name = .zigk,
+    .name = .zscapek,
     .version = "0.1.0",
     .minimum_zig_version = "0.15.0",
-    .fingerprint = 0x921c2afbc9db26fc,
+    .fingerprint = 0x93d1fdedda1c44bd,
 
     .dependencies = .{
     },

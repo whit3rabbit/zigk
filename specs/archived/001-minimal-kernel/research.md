@@ -172,7 +172,7 @@ boot time and complexity.
 ```
 timeout: 0
 
-/ZigK
+/Zscapek
     protocol: limine
     kernel_path: boot():/boot/kernel.elf
 ```
@@ -221,13 +221,13 @@ xorriso -as mkisofs \
     -efi-boot-part \
     --efi-boot-image \
     --protective-msdos-label \
-    iso_root -o zigk.iso
+    iso_root -o zscapek.iso
 ```
 
 ### Post-Processing
 
 ```bash
-limine bios-install zigk.iso
+limine bios-install zscapek.iso
 ```
 
 Required for BIOS boot capability on the ISO.
@@ -270,14 +270,14 @@ available for debugging when needed.
 ### Basic Run Command
 
 ```bash
-qemu-system-x86_64 -cdrom zigk.iso -m 128M
+qemu-system-x86_64 -cdrom zscapek.iso -m 128M
 ```
 
 ### Debug Configuration
 
 ```bash
 qemu-system-x86_64 \
-    -cdrom zigk.iso \
+    -cdrom zscapek.iso \
     -m 128M \
     -serial stdio \
     -d int,cpu_reset \

@@ -33,6 +33,9 @@ const fpu = hal.fpu;
 
 /// Scheduler state
 /// All fields protected by the scheduler lock
+/// Process tree lock (moved here to avoid circular dep with sync/process)
+pub var process_tree_lock: sync.Spinlock = .{};
+
 var scheduler = Scheduler{};
 
 const Scheduler = struct {
@@ -278,16 +281,16 @@ pub fn getTickCount() u64 {
 /// In debug builds, this is detected and panics.
 pub fn yield() void {
     // Debug check: detect yield while holding locks (deadlock prevention)
-    if (std.debug.runtime_safety) {
-        if (scheduler.current) |t| {
-            if (t.lock_depth > 0) {
-                console.err("PANIC: yield() called with {d} lock(s) held by thread '{s}' (tid={d})", .{
-                    t.lock_depth,
-                    t.getName(),
-                    t.tid,
-                });
-                @panic("yield with spinlocks held - deadlock");
-            }
+    // Debug check: detect yield while holding locks (deadlock prevention)
+    // CRITICAL: Always check this, even in release builds, to prevent silent deadlocks.
+    if (scheduler.current) |t| {
+        if (t.lock_depth > 0) {
+            console.err("PANIC: yield() called with {d} lock(s) held by thread '{s}' (tid={d})", .{
+                t.lock_depth,
+                t.getName(),
+                t.tid,
+            });
+            @panic("yield with spinlocks held - deadlock");
         }
     }
 

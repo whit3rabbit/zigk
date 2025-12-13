@@ -1,21 +1,28 @@
-# ZigK Filesystem Structure
+# Zscapek Filesystem Structure
 
 This structure mirrors the Linux kernel organization while keeping Zig modules aligned to the HAL boundary.
 
 ## Current Implementation Status
 
 ```text
-zigk/
+zscapek/
+├── .github/
+│   └── workflows/
+│       └── build-iso.yml     # GitHub Actions workflow to build release ISO
 ├── AGENTS.md                # AI agent instructions
 ├── CLAUDE.md                # Assistant guidelines
 ├── README.md                # Project overview
 ├── build.zig                # Build graph (Zig 0.15.x)
 ├── build.zig.zon            # Dependencies
+├── Dockerfile               # Container build (local toolchain)
+├── docker-compose.yml       # Compose helper for reproducible builds
 ├── docs/                    # Project documentation
 │   ├── BOOT.md              # Boot process
 │   ├── BOOT_ARCHITECTURE.md # Limine + kernel handoff details
 │   ├── BUILD.md             # Build and run instructions
-│   └── FILESYSTEM.md        # This file
+│   ├── FILESYSTEM.md        # This file
+│   ├── GRAPHICS.md          # Framebuffer/console details
+│   └── network.md           # Network stack design
 ├── specs/                   # Design documents
 │   ├── 003-microkernel-userland-networking/
 │   ├── 007-linux-compat-layer/
@@ -29,19 +36,24 @@ zigk/
 ├── tests/
 │   ├── unit/                # Kernel unit tests
 │   │   ├── main.zig         # Test runner
-│   │   └── heap_fuzz.zig    # Allocator fuzzing
-│   └── userland/            # Syscall/user ABI validation (C)
-│       ├── test_clock.c
-│       ├── test_devnull.c
-│       ├── test_random.c
-│       ├── test_stdio.c
-│       └── test_wait4.c
+│   │   ├── heap_fuzz.zig    # Allocator fuzzing
+│   │   ├── vmm_test.zig     # VMM unit coverage
+│   │   └── tcp_types_test.zig # TCP type packing/endianness tests
+│   ├── userland/            # Syscall/user ABI validation (C/Zig)
+│   │   ├── test_clock.c
+│   │   ├── test_devnull.c
+│   │   ├── test_random.c
+│   │   ├── test_stdio.c
+│   │   ├── test_wait4.c
+│   │   └── soak_test.zig    # Long-running syscall soak test
+│   └── scripts/
+│       └── fuzz_packets.py  # Network fuzzer harness
 ├── iso_root/                # ISO staging (Limine config + modules)
 ├── limine/                  # Limine bootloader binaries and headers
 ├── limine.cfg               # Bootloader configuration
 ├── options.o                # Zig build options cache
 ├── zig-out/                 # Build outputs
-├── zigk.iso                 # Generated ISO image
+├── zscapek.iso              # Generated ISO image
 └── src/
     ├── arch/                # HAL - ONLY place for inline assembly
     │   ├── root.zig         # Architecture-neutral HAL interface
@@ -79,6 +91,7 @@ zigk/
     │   ├── user_vmm.zig
     │   ├── kernel_stack.zig
     │   ├── stack_guard.zig
+    │   ├── dma_allocator.zig
     │   ├── thread.zig
     │   ├── process.zig
     │   ├── sched.zig
@@ -98,13 +111,45 @@ zigk/
     │
     ├── drivers/
     │   ├── keyboard.zig
+    │   ├── mouse.zig
+    │   ├── input/
+    │   │   ├── keyboard_layout.zig
+    │   │   └── layout.zig
     │   ├── net/
     │   │   └── e1000e.zig
-    │   └── pci/
+    │   ├── pci/
+    │   │   ├── root.zig
+    │   │   ├── enumeration.zig
+    │   │   ├── ecam.zig
+    │   │   ├── capabilities.zig
+    │   │   ├── device.zig
+    │   │   └── msi.zig
+    │   ├── serial/
+    │   │   └── uart.zig
+    │   ├── storage/
+    │   │   └── ahci/
+    │   │       ├── root.zig
+    │   │       ├── hba.zig
+    │   │       ├── port.zig
+    │   │       ├── command.zig
+    │   │       └── fis.zig
+    │   ├── usb/
+    │   │   ├── root.zig
+    │   │   └── types.zig
+    │   ├── video/
+    │   │   ├── root.zig
+    │   │   ├── interface.zig
+    │   │   ├── framebuffer.zig
+    │   │   ├── console.zig
+    │   │   ├── ansi.zig
+    │   │   ├── font.zig
+    │   │   ├── virtio_gpu.zig
+    │   │   └── font/
+    │   │       ├── psf.zig
+    │   │       └── types.zig
+    │   └── virtio/
     │       ├── root.zig
-    │       ├── enumeration.zig
-    │       ├── ecam.zig
-    │       └── device.zig
+    │       └── common.zig
     │
     ├── fs/
     │   ├── root.zig
@@ -131,6 +176,7 @@ zigk/
     │   │   ├── root.zig
     │   │   ├── arp.zig
     │   │   ├── ipv4.zig
+    │   │   ├── pmtu.zig
     │   │   └── reassembly.zig
     │   ├── dns/
     │   │   ├── root.zig
@@ -170,6 +216,7 @@ zigk/
     ├── uapi/
     │   ├── root.zig
     │   ├── syscalls.zig
+    │   ├── abi.zig
     │   ├── errno.zig
     │   └── poll.zig
     │
@@ -181,6 +228,7 @@ zigk/
         │   └── syscall.zig
         ├── shell/
         │   └── main.zig
+        ├── test_asm.zig
         └── httpd/
             └── main.zig
 ```
@@ -197,6 +245,7 @@ zigk/
 | `user_vmm.zig` | User address space creation and cloning. |
 | `kernel_stack.zig` | Guarded kernel stack allocator in a dedicated VA range (unmapped guard pages). |
 | `stack_guard.zig` | Guard page protections shared across stacks. |
+| `dma_allocator.zig` | DMA-safe allocator for page-aligned, device-visible buffers. |
 | `thread.zig` | Thread creation and context management. |
 | `process.zig` | Process lifecycle and address space wiring. |
 | `sched.zig` | Scheduler core. |
@@ -230,14 +279,74 @@ A device-independent TCP/IP stack implementing Ethernet, IPv4/ARP, DNS, and sock
 ### `src/fs/` (Filesystem)
 | File | Description |
 |------|-------------|
+| `root.zig` | Filesystem registry and init hooks. |
 | `initrd.zig` | TAR-format initial ramdisk for loading files at boot. |
 
 ### `src/drivers/pci/` (PCI Subsystem)
 | File | Description |
 |------|-------------|
+| `root.zig` | PCI subsystem root. |
 | `enumeration.zig` | Scans PCI bus/slot/function combinations. |
 | `device.zig` | Defines `PCIDevice` struct and BAR parsing. |
 | `ecam.zig` | PCIe Enhanced Configuration Access Mechanism. |
+| `capabilities.zig` | Capability list parsing helpers. |
+| `msi.zig` | MSI/MSI-X setup helpers. |
+
+### `src/drivers/storage/ahci/` (SATA)
+| File | Description |
+|------|-------------|
+| `root.zig` | AHCI driver entry and HBA discovery. |
+| `hba.zig` | HBA register definitions and init helpers. |
+| `port.zig` | Port bring-up, command submission, and IRQ handling. |
+| `command.zig` | Command header/table composition. |
+| `fis.zig` | SATA FIS structures for command/result exchange. |
+
+### `src/drivers/video/` (Display Console)
+| File | Description |
+|------|-------------|
+| `root.zig` | Video driver registry. |
+| `interface.zig` | Driver-neutral interface for console backends. |
+| `framebuffer.zig` | Framebuffer abstraction and modes. |
+| `console.zig` | Double-buffered console implementation. |
+| `ansi.zig` | ANSI escape parsing. |
+| `font.zig` | Font loader/renderer wiring. |
+| `font/psf.zig` | PSF font parsing. |
+| `font/types.zig` | PSF font types. |
+| `virtio_gpu.zig` | Virtio-GPU driver for paravirtualized output. |
+
+### `src/drivers/net/`
+| File | Description |
+|------|-------------|
+| `e1000e.zig` | Intel e1000e PCIe network driver with RX/TX rings. |
+
+### `src/drivers/input/`
+| File | Description |
+|------|-------------|
+| `keyboard_layout.zig` | Keymap tables. |
+| `layout.zig` | Layout selection and lookup. |
+
+### `src/drivers/` (top-level device entries)
+| File | Description |
+|------|-------------|
+| `keyboard.zig` | PS/2 keyboard driver entry. |
+| `mouse.zig` | PS/2 mouse driver entry. |
+
+### `src/drivers/serial/`
+| File | Description |
+|------|-------------|
+| `uart.zig` | 16550-compatible UART driver (serial console). |
+
+### `src/drivers/usb/`
+| File | Description |
+|------|-------------|
+| `root.zig` | USB stack scaffold. |
+| `types.zig` | Shared USB descriptor/types. |
+
+### `src/drivers/virtio/`
+| File | Description |
+|------|-------------|
+| `root.zig` | Virtio driver registry. |
+| `common.zig` | Virtio queue setup and feature negotiation helpers. |
 
 ### `src/lib/` (Kernel Libraries)
 | File | Description |
@@ -252,6 +361,7 @@ A device-independent TCP/IP stack implementing Ethernet, IPv4/ARP, DNS, and sock
 |------|-------------|
 | `root.zig` | UAPI module root. |
 | `syscalls.zig` | Syscall numbers (Linux ABI). |
+| `abi.zig` | ABI layouts shared with userland. |
 | `errno.zig` | Linux-compatible error codes. |
 | `poll.zig` | Poll event definitions. |
 
@@ -262,6 +372,7 @@ A device-independent TCP/IP stack implementing Ethernet, IPv4/ARP, DNS, and sock
 | `linker.ld` | Userland linker script. |
 | `lib/syscall.zig` | Syscall wrappers. |
 | `shell/main.zig` | Shell application. |
+| `test_asm.zig` | Minimal assembly sanity test program. |
 | `httpd/main.zig` | HTTP server application. |
 
 ## Key Design Principles

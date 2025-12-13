@@ -6,7 +6,7 @@
 
 ## Executive Summary
 
-This document consolidates research findings for implementing a x86_64 microkernel with memory management, interrupt handling, preemptive multitasking, E1000 networking, and Ring 3 userland. All decisions comply with the ZigK Constitution principles.
+This document consolidates research findings for implementing a x86_64 microkernel with memory management, interrupt handling, preemptive multitasking, E1000 networking, and Ring 3 userland. All decisions comply with the Zscapek Constitution principles.
 
 ---
 

@@ -64,7 +64,7 @@
 - [ ] T018 Add ISO assembly step to build.zig at repository root
 - [ ] T019 Add xorriso ISO creation step to build.zig at repository root
 - [ ] T020 Add QEMU run step to build.zig at repository root
-- [ ] T021 [P] Create limine.conf with ZigK boot entry at repository root
+- [ ] T021 [P] Create limine.conf with Zscapek boot entry at repository root
 
 **Implementation Note for T017**:
 > Limine binary download in build.zig is complex (requires std.http or shell commands).
@@ -135,7 +135,7 @@
 
 **Spec Reference**: US3 - Bootable Image Creation
 
-**Independent Test**: `zig build iso` produces zigk.iso that boots in QEMU
+**Independent Test**: `zig build iso` produces zscapek.iso that boots in QEMU
 
 **Acceptance Criteria**:
 - Build command produces bootable disk image
@@ -150,7 +150,7 @@
 - [ ] T032 [US3] Add `zig build iso` step (build ISO without running QEMU) to build.zig at repository root
 - [ ] T033 [US3] Verify ISO structure contains boot/kernel.elf and boot/limine/ directory
 
-**Checkpoint**: `zig build iso` produces valid zigk.iso
+**Checkpoint**: `zig build iso` produces valid zscapek.iso
 
 ---
 
@@ -158,7 +158,7 @@
 
 **Purpose**: Final validation and documentation
 
-- [ ] T034 [P] Verify serial output shows "ZigK booting..." via `zig build run`
+- [ ] T034 [P] Verify serial output shows "Zscapek booting..." via `zig build run`
 - [ ] T035 [P] Verify kernel boots without triple fault via `zig build run`
 - [ ] T036 [P] Verify dark blue color displays correctly in QEMU (uniform, no artifacts)
 - [ ] T037 [P] Verify CPU halts (QEMU shows ~0% CPU usage after boot)
@@ -348,7 +348,7 @@ const dark_blue: u32 = 0x00400000;
 | Build System | `zig build` succeeds (with stub or actual kernel) |
 | User Story 1 | `zig build` compiles kernel with framebuffer fill |
 | User Story 2 | `zig build run` shows dark blue with ~0% CPU |
-| User Story 3 | `zig build iso` produces valid zigk.iso |
+| User Story 3 | `zig build iso` produces valid zscapek.iso |
 | Polish | README has instructions, serial output verified, all verifications pass |
 
 ---

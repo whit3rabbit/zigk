@@ -14,6 +14,7 @@ const vmm = @import("vmm");
 const hal = @import("hal");
 const console = @import("console");
 const sync = @import("sync");
+const heap = @import("heap");
 
 // GPU Command Types
 const VIRTIO_GPU_CMD_GET_DISPLAY_INFO: u32 = 0x0100;
@@ -173,10 +174,12 @@ pub const VirtioGpuDriver = struct {
     common_cfg: ?*volatile virtio.VirtioPciCommonCfg,
     notify_base: u64,
     notify_off_multiplier: u32,
+    device_failed: bool = false,
 
     // Mapped BAR virtual addresses (for 64-bit BARs outside HHDM)
-    bar4_virt: u64,
-    bar4_size: usize,
+    // Mapped BAR virtual addresses (lazy loaded)
+    // bar_mappings[i] stores virt address of BAR i, or 0 if not mapped
+    bar_mappings: [6]u64 = .{ 0, 0, 0, 0, 0, 0 },
 
     const Self = @This();
 
@@ -243,14 +246,16 @@ pub const VirtioGpuDriver = struct {
         const driver = &driver_instance;
 
         driver.pci_device = pci_dev;
-        driver.mmio_base = bar4.base;
-        driver.bar4_virt = bar4_virt;
-        driver.bar4_size = bar4.size;
         driver.resource_id = 0;
         driver.next_resource_id = 1;
         driver.common_cfg = null;
         driver.notify_base = 0;
         driver.notify_off_multiplier = 0;
+        driver.device_failed = false;
+        
+        // Initialize BAR mappings
+        // We know BAR4 is already mapped, so cache it
+        driver.bar_mappings[4] = bar4_virt;
 
         // Find VirtIO capabilities (before enabling bus master)
         if (!driver.findCapabilities(pci_dev, ecam)) {
@@ -350,30 +355,37 @@ pub const VirtioGpuDriver = struct {
                     continue;
                 }
 
-                // For BAR4 (the main VirtIO config BAR), use our pre-mapped virtual address
-                // For other BARs, try HHDM (may not work for 64-bit addresses outside 4GB)
-                var bar_virt: u64 = 0;
-                if (bar_idx == 4) {
-                    bar_virt = self.bar4_virt;
-                } else if (bar_phys < 0x100000000) { // 4GB limit
-                     bar_virt = @intFromPtr(hal.paging.physToVirt(bar_phys));
-                } else {
-                     // Try to map it if we haven't? 
-                     // For now, if it's a 64-bit BAR not pre-mapped (like BAR4 was), we might be in trouble.
-                     // But the fix was to genericize.
-                     // If bar_idx matches our pre-mapped region, use it.
-                     if (bar_idx == 4) {
-                         bar_virt = self.bar4_virt;
+                // Get virtual address for this BAR, mapping it if necessary
+                var bar_virt: u64 = self.bar_mappings[bar_idx];
+                
+                if (bar_virt == 0) {
+                     // Not mapped yet. Try to map it.
+                     if (bar_phys < 0x100000000) {
+                         // 32-bit physical address, use direct HHDM mapping
+                         bar_virt = @intFromPtr(hal.paging.physToVirt(bar_phys));
+                         self.bar_mappings[bar_idx] = bar_virt;
                      } else {
-                         // Fallback for other BARs
-                         if (bar_phys < 0x100000000) {
-                             bar_virt = @intFromPtr(hal.paging.physToVirt(bar_phys));
+                         // 64-bit physical address outside HHDM
+                         // Need explicit mapping
+                         const bar_size = pci_dev.bar[bar_idx].size;
+                         if (bar_size == 0) {
+                              console.warn("VirtIO-GPU: BAR{d} has size 0, cannot map", .{bar_idx});
                          } else {
-                             console.warn("VirtIO-GPU: BAR{d} at {x} outside HHDM range and not explicitly mapped", .{ bar_idx, bar_phys });
-                             cap_ptr = ecam.read8(pci_dev.bus, pci_dev.device, pci_dev.func, cap_ptr + 1);
-                             continue;
+                              if (vmm.mapMmioExplicit(bar_phys, bar_size)) |vaddr| {
+                                  bar_virt = vaddr;
+                                  self.bar_mappings[bar_idx] = bar_virt;
+                                  console.debug("VirtIO-GPU: Lazily mapped BAR{d} at {x} to {x}", .{bar_idx, bar_phys, bar_virt});
+                              } else |err| {
+                                  console.err("VirtIO-GPU: Failed to lazy map BAR{d}: {}", .{bar_idx, err});
+                              }
                          }
                      }
+                }
+                
+                if (bar_virt == 0) {
+                     console.warn("VirtIO-GPU: Skipping capability in unmappable BAR{d}", .{bar_idx});
+                     cap_ptr = ecam.read8(pci_dev.bus, pci_dev.device, pci_dev.func, cap_ptr + 1);
+                     continue;
                 }
 
                 switch (cfg_type) {
@@ -471,9 +483,33 @@ pub const VirtioGpuDriver = struct {
         return true;
     }
 
+    fn resetDevice(self: *Self) void {
+        if (self.common_cfg) |cfg| {
+            cfg.device_status = 0;
+            hal.mmio.memoryBarrier();
+        }
+    }
+
+    fn recoverAfterTimeout(self: *Self) void {
+        // Stop the device so it drops all in-flight descriptors
+        self.resetDevice();
+        self.ctrl_vq.reset();
+        self.device_failed = false;
+
+        // Attempt to bring the device back so subsequent commands can proceed
+        if (!self.initDevice()) {
+            self.device_failed = true;
+            console.err("VirtIO-GPU: Failed to reinitialize after timeout", .{});
+        }
+    }
+
     fn sendCommand(self: *Self, cmd: []const u8, resp: []u8) bool {
         const held = self.cmd_lock.acquire();
         defer held.release();
+
+        if (self.device_failed) {
+            return false;
+        }
 
         // Add command to virtqueue
         const out_bufs = [_][]const u8{cmd};
@@ -496,13 +532,14 @@ pub const VirtioGpuDriver = struct {
             }
             
             if (hal.timing.hasTimedOut(start_tsc, timeout_us)) {
-                 break;
+                break;
             }
             
             hal.cpu.pause();
         }
 
         console.err("VirtIO-GPU: Command timeout", .{});
+        self.recoverAfterTimeout();
         return false;
     }
 
@@ -551,12 +588,56 @@ pub const VirtioGpuDriver = struct {
     }
 
     fn createFramebufferResource(self: *Self) bool {
-        // Allocate framebuffer memory
+        // Allocate framebuffer memory using scattered pages to avoid fragmentation
         const fb_size = @as(usize, self.pitch) * self.height;
         const pages_needed = (fb_size + 4095) / 4096;
+        const allocator = heap.allocator();
 
-        self.fb_phys = pmm.allocZeroedPages(pages_needed) orelse return false;
-        self.fb_virt = @ptrCast(@alignCast(hal.paging.physToVirt(self.fb_phys)));
+        // Use a fixed virtual region for the framebuffer (256GB offset from kernel base)
+        const FB_VIRT_BASE = vmm.KERNEL_BASE + 0x4000000000;
+        self.fb_virt = @ptrFromInt(FB_VIRT_BASE);
+        // We don't have a single physical address anymore, but keep first one for reference
+        self.fb_phys = 0; 
+
+        // Prepare SG list
+        var entries = std.ArrayListUnmanaged(VirtioGpuMemEntry){};
+        defer entries.deinit(allocator);
+
+        const kernel_pml4 = vmm.getKernelPml4();
+
+        var i: usize = 0;
+        while (i < pages_needed) : (i += 1) {
+            const phys = pmm.allocZeroedPage() orelse {
+                console.err("VirtIO-GPU: Failed to allocate framebuffer page {}", .{i});
+                // Cleanup: iterate backwards unmapping/freeing?
+                // For this critical failure, we leak for now or need complex rollback.
+                return false;
+            };
+
+            if (i == 0) self.fb_phys = phys;
+
+            // Map to contiguous virtual space
+            const virt_addr = FB_VIRT_BASE + i * 4096;
+            // Map as writable, present, no-execute (NX implied if not set?)
+            // VMM default flags usually include NX for data.
+            // Using default kernel flags (writable | present/global).
+            const flags = vmm.PageFlags{ .writable = true, .global = true };
+            
+            vmm.mapPage(kernel_pml4, virt_addr, phys, flags) catch |err| {
+                console.err("VirtIO-GPU: Failed to map framebuffer page: {}", .{err});
+                pmm.freePage(phys);
+                return false;
+            };
+
+            entries.append(allocator, .{
+                .addr = phys,
+                .length = 4096,
+                ._padding = 0,
+            }) catch {
+                console.err("VirtIO-GPU: Failed to append SG entry", .{});
+                return false;
+            };
+        }
 
         // Create 2D resource
         self.resource_id = self.next_resource_id;
@@ -584,10 +665,19 @@ pub const VirtioGpuDriver = struct {
             return false;
         }
 
-        // Attach backing memory
-        // We need to send both the header and the memory entry
-        var attach_buf: [4096]u8 align(4096) = undefined;
-        const attach_cmd: *VirtioGpuResourceAttachBacking = @ptrCast(@alignCast(&attach_buf));
+        // Attach backing memory using Scatter-Gather list
+        // Allocate command buffer from heap because it exceeds 4KB cmd_buf
+        const attach_header_size = @sizeOf(VirtioGpuResourceAttachBacking);
+        const entries_size = entries.items.len * @sizeOf(VirtioGpuMemEntry);
+        const total_size = attach_header_size + entries_size;
+
+        const attach_buf = allocator.alloc(u8, total_size) catch {
+            console.err("VirtIO-GPU: Failed to allocate attach command buffer", .{});
+            return false;
+        };
+        defer allocator.free(attach_buf);
+
+        const attach_cmd: *VirtioGpuResourceAttachBacking = @ptrCast(@alignCast(attach_buf.ptr));
         attach_cmd.* = .{
             .hdr = .{
                 .type_ = VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING,
@@ -597,20 +687,15 @@ pub const VirtioGpuDriver = struct {
                 .ring_idx = 0,
             },
             .resource_id = self.resource_id,
-            .nr_entries = 1,
+            .nr_entries = @intCast(entries.items.len),
         };
 
-        // Memory entry follows the header
-        const mem_entry: *VirtioGpuMemEntry = @ptrCast(@alignCast(&attach_buf[@sizeOf(VirtioGpuResourceAttachBacking)]));
-        mem_entry.* = .{
-            .addr = self.fb_phys,
-            .length = @intCast(fb_size),
-        };
+        // Copy SG entries after header
+        const entries_dest = attach_buf[attach_header_size..];
+        const entries_src = std.mem.sliceAsBytes(entries.items);
+        @memcpy(entries_dest, entries_src);
 
-        const attach_len = @sizeOf(VirtioGpuResourceAttachBacking) + @sizeOf(VirtioGpuMemEntry);
-        const attach_bytes = attach_buf[0..attach_len];
-
-        if (!self.sendCommand(attach_bytes, resp_bytes)) {
+        if (!self.sendCommand(attach_buf, resp_bytes)) {
             return false;
         }
 
@@ -635,7 +720,7 @@ pub const VirtioGpuDriver = struct {
             return false;
         }
 
-        console.debug("VirtIO-GPU: Framebuffer resource created, id={d}", .{self.resource_id});
+        console.debug("VirtIO-GPU: Framebuffer resource created, id={d}, pages={d}", .{self.resource_id, pages_needed});
         return true;
     }
 

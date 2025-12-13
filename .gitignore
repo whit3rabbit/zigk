@@ -37,6 +37,7 @@ Thumbs.db
 *.tmp
 *.log
 *.xml
+*.txt
 
 # Environment files
 .env

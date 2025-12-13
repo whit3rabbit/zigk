@@ -43,7 +43,7 @@
 - [X] T007 Create specs/syscall-table.md with Linux x86_64 syscall numbers from contracts/amendments.md
 - [X] T008 Add syscall register convention section (RAX, RDI, RSI, RDX, R10, R8, R9)
 - [X] T009 Add Linux errno constants table (EPERM through ENOSYS)
-- [X] T010 Add ZigK custom extensions section (reserved range 1000-1999, empty for now)
+- [X] T010 Add Zscapek custom extensions section (reserved range 1000-1999, empty for now)
 - [X] T011 Verify specs/syscall-table.md is syntactically valid markdown
 
 **Checkpoint**: Authoritative syscall table exists - spec amendments can now reference it

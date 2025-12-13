@@ -11,6 +11,7 @@
 const std = @import("std");
 const limine = @import("limine");
 const console = @import("console");
+const hal = @import("hal");
 
 /// Framebuffer state captured at boot
 /// Contains all information needed for sys_get_fb_info and sys_map_fb
@@ -78,7 +79,13 @@ pub fn initFromLimine(fb_request: *const limine.FramebufferRequest) void {
     const fb = fb_response.framebuffers()[0];
 
     // Capture basic framebuffer info
-    state.phys_addr = fb.address;
+    // Limine protocol maps framebuffer in HHDM, so address is virtual.
+    // Convert to physical address for sys_map_fb.
+    if (fb.address >= hal.paging.HHDM_OFFSET) {
+        state.phys_addr = fb.address - hal.paging.HHDM_OFFSET;
+    } else {
+        state.phys_addr = fb.address;
+    }
     state.width = @intCast(fb.width);
     state.height = @intCast(fb.height);
     state.pitch = @intCast(fb.pitch);

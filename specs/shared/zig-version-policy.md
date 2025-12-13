@@ -1,6 +1,6 @@
 # Zig Version Policy
 
-**Target Version**: Zig 0.15.x (current stable target for ZigK)
+**Target Version**: Zig 0.15.x (current stable target for Zscapek)
 
 ## Build System Patterns (0.15.x)
 

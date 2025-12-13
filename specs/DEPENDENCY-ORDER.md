@@ -1,6 +1,6 @@
-# ZigK Specification Dependency Order
+# Zscapek Specification Dependency Order
 
-This document defines the correct implementation order for ZigK specifications.
+This document defines the correct implementation order for Zscapek specifications.
 
 ## Implementation Sequence
 
@@ -62,7 +62,7 @@ The following can be implemented in parallel after their dependencies are met:
 
 | After Spec | Validation |
 |------------|------------|
-| 003 Phase 1 | Kernel boots with "ZigK booting..." message |
+| 003 Phase 1 | Kernel boots with "Zscapek booting..." message |
 | 003 Phase 7 | `ping <kernel-ip>` receives replies |
 | 003 Phase 6 | Shell prompt appears, keyboard input works |
 | 007 Phase 3 | `write(1, "hello", 5)` works without open() |

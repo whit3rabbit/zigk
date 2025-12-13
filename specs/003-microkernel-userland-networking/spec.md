@@ -281,7 +281,7 @@ defer held.release();
 
 **Byte Order Requirements**
 
-ZigK runs on x86_64 (Little Endian). Network protocols use Big Endian.
+Zscapek runs on x86_64 (Little Endian). Network protocols use Big Endian.
 
 | Domain | Byte Order | Conversion |
 |--------|-----------|------------|

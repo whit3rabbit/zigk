@@ -4,7 +4,7 @@
 **Date**: 2025-12-05
 **Status**: Complete
 
-This document consolidates research findings for implementing Linux runtime infrastructure syscalls in ZigK.
+This document consolidates research findings for implementing Linux runtime infrastructure syscalls in Zscapek.
 
 ---
 

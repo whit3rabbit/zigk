@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Packet Fuzzer for ZigK Network Stack
+Packet Fuzzer for Zscapek Network Stack
 
 Sends malformed network packets to test driver and protocol stack robustness.
 Designed to find crashes, hangs, and resource leaks in the kernel network code.
@@ -26,7 +26,7 @@ Test Categories:
     6. Truncated packets
     7. Oversized packets
 
-Author: ZigK Development Team
+Author: Zscapek Development Team
 """
 
 import argparse
@@ -336,7 +336,7 @@ class PacketFuzzer:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Network packet fuzzer for ZigK kernel testing"
+        description="Network packet fuzzer for Zscapek kernel testing"
     )
     parser.add_argument(
         "--target", "-t",

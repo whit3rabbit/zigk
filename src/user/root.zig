@@ -1,4 +1,4 @@
-// ZigK Userland Module Root
+// Zscapek Userland Module Root
 //
 // Provides userland runtime components:
 //   - crt0: Entry point with SysV ABI stack setup

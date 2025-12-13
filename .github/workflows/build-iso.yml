@@ -1,0 +1,32 @@
+name: Build ISO
+
+on:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+jobs:
+  build-iso:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xorriso mtools make nasm
+
+      - name: Set up Zig
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          zig-version: 0.15.0
+
+      - name: Build release ISO
+        run: zig build iso -Doptimize=ReleaseSafe
+
+      - name: Upload ISO artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zscapek-iso
+          path: zscapek.iso

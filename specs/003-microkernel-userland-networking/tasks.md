@@ -51,7 +51,7 @@ Based on plan.md structure:
 - [x] T007c Create src/uapi/errno.zig with Linux errno constants (EPERM through ENOSYS)
 - [ ] T007d Create src/uapi/abi.zig with shared structs (Timespec, SockAddr, Stat)
 
-- [x] T008 Verify kernel boots to "ZigK booting..." message in QEMU
+- [x] T008 Verify kernel boots to "Zscapek booting..." message in QEMU
 
 **Checkpoint**: Kernel boots and displays debug output
 
@@ -537,7 +537,7 @@ Based on plan.md structure:
 
 **Independent Test**: Userland writes test pattern, appears on screen
 
-### Framebuffer Info Syscall (ZigK Custom Extensions 1000+ - see specs/syscall-table.md)
+### Framebuffer Info Syscall (Zscapek Custom Extensions 1000+ - see specs/syscall-table.md)
 
 - [ ] T170 [US9] Implement sys_get_fb_info (1000) returning width/height/pitch/bpp (FR-029)
 - [ ] T171 [US9] Parse Limine framebuffer response for pixel format
@@ -564,7 +564,7 @@ Based on plan.md structure:
 
 **Independent Test**: Press key, read make code; release key, read break code
 
-### Scancode Syscall (ZigK Custom Extensions 1000+ - see specs/syscall-table.md)
+### Scancode Syscall (Zscapek Custom Extensions 1000+ - see specs/syscall-table.md)
 
 - [ ] T178 [US10] Implement sys_read_scancode (1002) in src/kernel/syscall/ (FR-030)
 - [ ] T179 [US10] Return scancode from scancode buffer (implemented in US6)

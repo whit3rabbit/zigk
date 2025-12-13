@@ -1,4 +1,4 @@
-# zigk Development Guidelines
+# zscapek Development Guidelines
 
 A Zig-based microkernel for x86_64 using the Limine bootloader protocol.
 

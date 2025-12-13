@@ -126,7 +126,7 @@ fn sys_read(fd: u32, buf: [*]u8, count: usize) isize
 
 ### sys_getchar (1004)
 
-Read a single character from keyboard. (ZigK convenience extension)
+Read a single character from keyboard. (Zscapek convenience extension)
 
 **Signature**:
 ```zig
@@ -148,7 +148,7 @@ fn sys_getchar() i32
 
 ### sys_putchar (1005)
 
-Write a single character to display. (ZigK convenience extension)
+Write a single character to display. (Zscapek convenience extension)
 
 **Signature**:
 ```zig
@@ -425,7 +425,7 @@ fn sys_brk(brk: usize) isize
 
 ### sys_get_fb_info (1001)
 
-Get framebuffer information. (ZigK custom extension)
+Get framebuffer information. (Zscapek custom extension)
 
 **Signature**:
 ```zig
@@ -461,7 +461,7 @@ const FramebufferInfo = extern struct {
 
 ### sys_map_fb (1002)
 
-Map framebuffer into userland address space. (ZigK custom extension)
+Map framebuffer into userland address space. (Zscapek custom extension)
 
 **Signature**:
 ```zig
@@ -487,7 +487,7 @@ fn sys_mmap_fb() isize
 
 ### sys_read_scancode (1003)
 
-Read raw keyboard scancode. (ZigK custom extension)
+Read raw keyboard scancode. (Zscapek custom extension)
 
 **Signature**:
 ```zig
@@ -528,7 +528,7 @@ fn sys_read_scancode() i32
 | 45 | sys_recvfrom | Receive UDP message |
 | 60 | sys_exit | Terminate thread |
 
-### ZigK Custom Extensions (1000+)
+### Zscapek Custom Extensions (1000+)
 
 | Number | Name | Description |
 |--------|------|-------------|
@@ -661,7 +661,7 @@ pub fn brk(addr: usize) usize {
     return @bitCast(syscall1(12, addr));
 }
 
-// ZigK custom extensions (1000+)
+// Zscapek custom extensions (1000+)
 pub fn get_fb_info(info: *FramebufferInfo) i32 {
     return @truncate(syscall1(1001, @intFromPtr(info)));
 }
