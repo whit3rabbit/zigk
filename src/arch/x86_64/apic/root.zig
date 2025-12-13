@@ -296,28 +296,56 @@ pub fn freeMsiVector(vector: u8) void {
     msi_vector_bitmap[byte_idx] &= ~(@as(u8, 1) << bit);
 }
 
-/// Allocate multiple contiguous MSI vectors (for MSI-X)
-pub fn allocateMsiVectors(count: u8) ?[]const u8 {
-    // For now, allocate individually (not truly contiguous)
-    // TODO: Implement contiguous allocation if needed for power-of-2 MSI
-    var vectors: [32]u8 = undefined;
-    var allocated: u8 = 0;
+/// Allocate multiple contiguous MSI vectors (for MSI-X or MSI multi-message)
+/// Returns the base vector of the allocated block.
+/// The block is guaranteed to be aligned to `count` (power of 2).
+pub fn allocateMsiVectors(count: u8) ?u8 {
+    if (count == 0) return null;
+    if (!std.math.isPowerOfTwo(count)) return null;
 
-    while (allocated < count) {
-        if (allocateMsiVector()) |v| {
-            vectors[allocated] = v;
-            allocated += 1;
-        } else {
-            // Failed - free what we allocated
-            for (0..allocated) |i| {
-                freeMsiVector(vectors[i]);
-            }
-            return null;
-        }
+    var base: u16 = Vectors.MSI_BASE;
+
+    // Align base to count
+    const rem = base % count;
+    if (rem != 0) {
+        base += (count - rem);
     }
 
-    // Return static slice (caller must copy if needed)
-    return vectors[0..count];
+    while (base + count - 1 <= Vectors.MSI_END) : (base += count) {
+        var free = true;
+        var i: u16 = 0;
+        while (i < count) : (i += 1) {
+            const vector = @as(u8, @intCast(base + i));
+            const offset = vector - Vectors.MSI_BASE;
+            const byte_idx = offset / 8;
+            const bit: u3 = @truncate(offset % 8);
+            if ((msi_vector_bitmap[byte_idx] & (@as(u8, 1) << bit)) != 0) {
+                free = false;
+                break;
+            }
+        }
+
+        if (free) {
+            i = 0;
+            while (i < count) : (i += 1) {
+                const vector = @as(u8, @intCast(base + i));
+                const offset = vector - Vectors.MSI_BASE;
+                const byte_idx = offset / 8;
+                const bit: u3 = @truncate(offset % 8);
+                msi_vector_bitmap[byte_idx] |= (@as(u8, 1) << bit);
+            }
+            return @as(u8, @intCast(base));
+        }
+    }
+    return null;
+}
+
+/// Free multiple contiguous MSI vectors
+pub fn freeMsiVectors(base: u8, count: u8) void {
+    var i: u16 = 0;
+    while (i < count) : (i += 1) {
+        freeMsiVector(@as(u8, @intCast(base + i)));
+    }
 }
 
 // ============================================================================
