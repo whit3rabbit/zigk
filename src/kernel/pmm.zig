@@ -14,6 +14,7 @@
 //   - Bitmap: Placed in first usable region large enough
 //   - Free pages: All usable regions minus bitmap and reserved areas
 
+const std = @import("std");
 const hal = @import("hal");
 const console = @import("console");
 const config = @import("config");
@@ -90,6 +91,10 @@ pub fn initFromLimine(memmap: *const limine.MemoryMapResponse) !void {
     var lowest_usable: u64 = 0xFFFFFFFFFFFFFFFF;
 
     for (entries) |entry| {
+        // Skip malformed entries where base + length would overflow
+        if (entry.base > std.math.maxInt(u64) - entry.length) {
+            continue;
+        }
         const end_addr = entry.base + entry.length;
 
         if (end_addr > highest_addr) {
@@ -111,6 +116,10 @@ pub fn initFromLimine(memmap: *const limine.MemoryMapResponse) !void {
     var highest_usable_end: u64 = 0;
     for (entries) |entry| {
         if (entry.kind == .usable) {
+            // Skip malformed entries where base + length would overflow
+            if (entry.base > std.math.maxInt(u64) - entry.length) {
+                continue;
+            }
             const end_addr = entry.base + entry.length;
             if (end_addr > highest_usable_end) {
                 highest_usable_end = end_addr;
@@ -187,6 +196,10 @@ pub fn initFromLimine(memmap: *const limine.MemoryMapResponse) !void {
     // Third pass: mark usable regions as free
     for (entries) |entry| {
         if (entry.kind == .usable) {
+            // Skip malformed entries where base + length would overflow
+            if (entry.base > std.math.maxInt(u64) - entry.length) {
+                continue;
+            }
             const start_page = paging.pageAlignUp(entry.base) / PAGE_SIZE;
             const end_page = paging.pageAlignDown(entry.base + entry.length) / PAGE_SIZE;
 

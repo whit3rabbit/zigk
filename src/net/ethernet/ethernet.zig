@@ -3,7 +3,16 @@
 // Handles Ethernet II frame parsing and building.
 // Dispatches to IPv4 or ARP based on ethertype.
 //
-// RFC 894: Standard for transmission of IP datagrams over Ethernet
+// Complies with:
+// - IEEE 802.3 (Ethernet)
+// - RFC 894: Standard for transmission of IP datagrams over Ethernet
+//
+// Frame Format (Ethernet II):
+// +--------------+--------------+-----------+----------------------+
+// | Dest MAC (6) | Src MAC (6)  | Type (2)  | Payload (46-1500)    |
+// +--------------+--------------+-----------+----------------------+
+// | Frame Check Sequence (4) - Handled by Nic Hardware usually     |
+// +----------------------------------------------------------------+
 
 const packet = @import("../core/packet.zig");
 const interface = @import("../core/interface.zig");

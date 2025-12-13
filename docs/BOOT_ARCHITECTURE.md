@@ -110,6 +110,9 @@ Defined in `src/arch/x86_64/gdt.zig`.
 *   **T**: Type (Read/Write/Execute flags)
 *   **L**: Long Mode (1 for 64-bit code)
 
+**Critical Note on GDT Loading:**
+After loading a new GDT with `lgdt`, the segment registers (DS, ES, SS, FS, GS) can be reloaded with simple `mov` instructions. However, **CS cannot be loaded directly**. It must be reloaded via a far jump (`ljmp`) or far return (`lretq`). Failure to reload CS after switching GDTs will leave CS pointing to the old GDT's selector, which may now reference a completely different descriptor type (e.g., TSS instead of code segment), causing a GP fault on the next `iretq`.
+
 ### IDT Gate Descriptor (16 Bytes)
 **Critical Difference**: In Long Mode (64-bit), interrupt gates are 16 bytes, not 8.
 Defined in `src/arch/x86_64/idt.zig`.

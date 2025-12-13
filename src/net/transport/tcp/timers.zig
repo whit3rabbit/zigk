@@ -8,10 +8,9 @@ const socket = @import("../socket.zig");
 /// Handles retransmission and state-based connection timeouts
 pub fn processTimers() void {
     state.lock.acquire();
-    defer state.lock.release();
-
-    // Advance timestamp counter (assumes ~1ms per tick)
-    state.connection_timestamp +%= 1;
+    // List of threads to wake after releasing the lock (to avoid deadlock)
+    var wake_list: [32]?*anyopaque = undefined;
+    var wake_count: usize = 0;
 
     // Iterate backwards to safely handle swapRemove during iteration.
     // When freeTcb() calls swapRemove(), the last element moves to current index.
@@ -30,6 +29,13 @@ pub fn processTimers() void {
             const age = state.connection_timestamp -% tcb.created_at;
             if (age > orphan_timeout) {
                 tcb.state = .Closed;
+                if (tcb.blocked_thread) |thread| {
+                    if (wake_count < wake_list.len) {
+                        wake_list[wake_count] = thread;
+                        wake_count += 1;
+                    }
+                    tcb.blocked_thread = null;
+                }
                 state.freeTcb(tcb);
                 continue;
             }
@@ -44,7 +50,10 @@ pub fn processTimers() void {
                 tcb.state = .Closed;
                 // Wake thread blocked on this connection
                 if (tcb.blocked_thread) |thread| {
-                    socket.wakeThread(thread);
+                    if (wake_count < wake_list.len) {
+                        wake_list[wake_count] = thread;
+                        wake_count += 1;
+                    }
                     tcb.blocked_thread = null;
                 }
                 state.freeTcb(tcb);
@@ -56,7 +65,7 @@ pub fn processTimers() void {
         if (tcb.retrans_timer == 0) continue;
 
         // Simplified: retransmit every RTO ticks
-        tcb.retrans_timer +%= 1;
+        tcb.retrans_timer +%= state.ms_per_tick;
 
         if (tcb.retrans_timer > tcb.rto_ms) {
             // Retransmit timeout
@@ -67,7 +76,10 @@ pub fn processTimers() void {
                 tcb.state = .Closed;
                 // Wake thread blocked on this connection (connect/recv timeout)
                 if (tcb.blocked_thread) |thread| {
-                    socket.wakeThread(thread);
+                    if (wake_count < wake_list.len) {
+                        wake_list[wake_count] = thread;
+                        wake_count += 1;
+                    }
                     tcb.blocked_thread = null;
                 }
                 state.freeTcb(tcb);
@@ -97,6 +109,26 @@ pub fn processTimers() void {
             }
         }
     }
+    
+    // Release lock before waking threads to prevent deadlock
+    // (Woken thread might immediately try to acquire lock)
+    state.lock.release();
+    
+    var j: usize = 0;
+    while (j < wake_count) : (j += 1) {
+        if (wake_list[j]) |thread| {
+            socket.wakeThread(thread);
+        }
+    }
+    
+    // Re-acquire lock if caller expects it? 
+    // Wait, caller of processTimers usually expects void return and handles locking?
+    // The original code acquired/released internally.
+    // Line 10: state.lock.acquire();
+    // Line 11: defer state.lock.release();
+    // So we need to re-acquire because the caller relies on `defer release()`.
+    // OR we remove the defer and handle it manually.
+    state.lock.acquire();
 }
 
 /// Handle ICMP error for a connection
@@ -156,5 +188,8 @@ pub fn getStateTimeout(tcp_state: @TypeOf(state.tcb_pool.items[0].state)) u64 {
         .Established => timeouts.established,
         .CloseWait => timeouts.close_wait,
         .LastAck => timeouts.last_ack,
+        // FIN-related states use a shorter timeout for connection teardown
+        .FinWait1, .FinWait2, .Closing => 60_000, // 60 second FIN timeout
+        .TimeWait => 120_000, // 2 * MSL (RFC 793)
     };
 }

@@ -10,6 +10,8 @@ const testing = std.testing;
 // Import all test modules
 // The test runner will automatically discover and run tests from these
 const heap_tests = @import("heap_fuzz.zig");
+const tcp_types_test = @import("tcp_types_test.zig");
+const vmm_test = @import("vmm_test.zig");
 
 test "placeholder test" {
     // Placeholder test to verify test infrastructure works
@@ -19,4 +21,6 @@ test "placeholder test" {
 // Reference imported modules to ensure they are compiled
 comptime {
     _ = heap_tests;
+    _ = tcp_types_test;
+    _ = vmm_test;
 }

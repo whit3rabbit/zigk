@@ -341,9 +341,9 @@ fn copyUserVmm(src: *UserVmm) !*UserVmm {
 
     const cleanupMappedRange = struct {
         fn call(dst_vmm: *UserVmm, virt_start: u64, phys_start: u64, page_count: usize) void {
-            var i: usize = 0;
-            while (i < page_count) : (i += 1) {
-                const virt = virt_start + i * pmm.PAGE_SIZE;
+            var idx: usize = 0;
+            while (idx < page_count) : (idx += 1) {
+                const virt = virt_start + idx * pmm.PAGE_SIZE;
                 vmm.unmapPage(dst_vmm.pml4_phys, virt) catch {};
             }
             pmm.freePages(phys_start, page_count);
@@ -353,8 +353,49 @@ fn copyUserVmm(src: *UserVmm) !*UserVmm {
     // Copy each VMA
     var vma = src.vma_head;
     while (vma) |v| {
-        // Allocate physical pages for this VMA
         const page_count = v.pageCount();
+        const page_flags = v.toPageFlags();
+
+        // Handle MAP_DEVICE VMAs specially - share the same physical memory
+        // This is used for framebuffer and other MMIO regions that should
+        // point to the same hardware in parent and child
+        if ((v.flags & user_vmm_mod.MAP_DEVICE) != 0) {
+            // Map the same physical pages (shared hardware mapping)
+            var i: usize = 0;
+            while (i < page_count) : (i += 1) {
+                const src_virt = v.start + i * pmm.PAGE_SIZE;
+                if (vmm.translate(src.pml4_phys, src_virt)) |src_phys| {
+                    // Map same physical address in child - shared device memory
+                    vmm.mapPage(dst.pml4_phys, src_virt, src_phys, page_flags) catch {
+                        // Cleanup partial mappings
+                        var j: usize = 0;
+                        while (j < i) : (j += 1) {
+                            const virt = v.start + j * pmm.PAGE_SIZE;
+                            vmm.unmapPage(dst.pml4_phys, virt) catch {};
+                        }
+                        return error.OutOfMemory;
+                    };
+                }
+            }
+
+            // Create VMA in destination (same flags including MAP_DEVICE)
+            const dst_vma = dst.createVma(v.start, v.end, v.prot, v.flags) catch {
+                // Cleanup mappings on VMA alloc failure
+                var cleanup_idx: usize = 0;
+                while (cleanup_idx < page_count) : (cleanup_idx += 1) {
+                    const virt = v.start + cleanup_idx * pmm.PAGE_SIZE;
+                    vmm.unmapPage(dst.pml4_phys, virt) catch {};
+                }
+                return error.OutOfMemory;
+            };
+            dst.insertVma(dst_vma);
+            dst.total_mapped += v.size();
+
+            vma = v.next;
+            continue;
+        }
+
+        // Normal VMA: allocate new physical pages and copy data
         const phys_pages = pmm.allocPages(page_count) orelse {
             return error.OutOfMemory;
         };
@@ -380,7 +421,6 @@ fn copyUserVmm(src: *UserVmm) !*UserVmm {
         }
 
         // Map pages in destination address space
-        const page_flags = v.toPageFlags();
         vmm.mapRange(dst.pml4_phys, v.start, phys_pages, v.size(), page_flags) catch {
             cleanupMappedRange(dst, v.start, phys_pages, page_count);
             return error.OutOfMemory;

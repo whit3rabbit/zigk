@@ -8,6 +8,7 @@
 //   1. Query framebuffer info via sys_get_fb_info (1001)
 //   2. Map framebuffer memory via sys_map_fb (1002)
 
+const std = @import("std");
 const limine = @import("limine");
 const console = @import("console");
 
@@ -82,7 +83,14 @@ pub fn initFromLimine(fb_request: *const limine.FramebufferRequest) void {
     state.height = @intCast(fb.height);
     state.pitch = @intCast(fb.pitch);
     state.bpp = @truncate(fb.bpp);
-    state.size = @as(usize, @intCast(fb.pitch)) * @as(usize, @intCast(fb.height));
+
+    // Calculate size with overflow check (pitch * height)
+    const pitch_usize: usize = @intCast(fb.pitch);
+    const height_usize: usize = @intCast(fb.height);
+    state.size = std.math.mul(usize, pitch_usize, height_usize) catch {
+        console.err("Framebuffer: Size overflow pitch={d} height={d}", .{ fb.pitch, fb.height });
+        return; // Leave state.available = false
+    };
 
     // Extract RGB color info from Limine framebuffer structure
     state.red_shift = fb.red_mask_shift;

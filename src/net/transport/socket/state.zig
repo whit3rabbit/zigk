@@ -8,8 +8,9 @@ const interface = @import("../../core/interface.zig");
 
 pub const Interface = interface.Interface;
 
-/// Global socket table (fixed-size pointer array)
-pub var socket_table: [types.MAX_SOCKETS]?*types.Socket = [_]?*types.Socket{null} ** types.MAX_SOCKETS;
+/// Global socket table (dynamic array)
+/// Stores pointers to sockets. Null entries are free slots.
+pub var socket_table: std.ArrayList(?*types.Socket) = undefined;
 pub var socket_allocator: std.mem.Allocator = undefined;
 /// Socket allocation lock
 var lock: sync.Lock = sync.noop_lock;
@@ -29,7 +30,7 @@ pub fn socketLock() *sync.Lock {
 pub fn init(iface: *Interface, allocator: std.mem.Allocator) void {
     global_iface = iface;
     socket_allocator = allocator;
-    socket_table = [_]?*types.Socket{null} ** types.MAX_SOCKETS;
+    socket_table = .{};
     next_ephemeral_port = 49152;
 }
 
@@ -38,37 +39,43 @@ pub fn getInterface() ?*Interface {
 }
 
 pub fn getSocket(sock_fd: usize) ?*types.Socket {
-    if (sock_fd >= types.MAX_SOCKETS) return null;
-    return socket_table[sock_fd];
+    if (sock_fd >= socket_table.items.len) return null;
+    return socket_table.items[sock_fd];
 }
 
 pub fn getSocketTable() []?*types.Socket {
-    return socket_table[0..];
+    return socket_table.items;
 }
 
 fn findFreeSlot() ?usize {
-    for (socket_table, 0..) |entry, idx| {
+    // Try to find an existing empty slot (reuse index)
+    for (socket_table.items, 0..) |entry, idx| {
         if (entry == null) {
             return idx;
         }
     }
-    return null;
+    // No free slots, append new one
+    // We return the index of the new element (current len)
+    return socket_table.items.len;
 }
 
-/// Allocate an ephemeral port
+/// Allocate an ephemeral port. Returns 0 on failure.
 pub fn allocateEphemeralPort() u16 {
     // Find unused port in ephemeral range (49152-65535)
     var attempts: u16 = 0;
-    while (attempts < 1000) : (attempts += 1) {
+    while (attempts < 16384) : (attempts += 1) { // Cover full ephemeral range
         const port = next_ephemeral_port;
-        next_ephemeral_port += 1;
-        if (next_ephemeral_port > 65535) { // u16 wrap implies this check is technically redundant if using +%= but explicit is clearer
+        
+        // Advance with wrapping logic
+        if (next_ephemeral_port == 65535) {
             next_ephemeral_port = 49152;
+        } else {
+            next_ephemeral_port += 1;
         }
 
         // Check if port is in use
         var in_use = false;
-        for (socket_table) |maybe_socket| {
+        for (socket_table.items) |maybe_socket| {
              if (maybe_socket) |sock| {
                 if (sock.allocated and sock.local_port == port) {
                     in_use = true;
@@ -82,14 +89,11 @@ pub fn allocateEphemeralPort() u16 {
         }
     }
 
-    // Fallback - return next port anyway
-    const port = next_ephemeral_port;
-    if (next_ephemeral_port < 65535) next_ephemeral_port += 1 else next_ephemeral_port = 49152;
-    return port;
+    return 0; // No free ports
 }
 
 pub fn findByPort(port: u16) ?*types.Socket {
-    for (socket_table) |maybe_socket| {
+    for (socket_table.items) |maybe_socket| {
         if (maybe_socket) |sock| {
             if (sock.allocated and sock.local_port == port) {
                 return sock;
@@ -104,14 +108,23 @@ pub fn reserveSlot() ?usize {
 }
 
 pub fn installSocket(slot: usize, sock: *types.Socket) bool {
-    if (slot >= types.MAX_SOCKETS) return false;
-    if (socket_table[slot] != null) return false;
-    socket_table[slot] = sock;
-    return true;
+    // Note: We don't check MAX_SOCKETS anymore
+    
+    if (slot < socket_table.items.len) {
+        // Reuse slot
+        if (socket_table.items[slot] != null) return false;
+        socket_table.items[slot] = sock;
+        return true;
+    } else if (slot == socket_table.items.len) {
+        // Append - Zig 0.15 requires passing allocator
+        socket_table.append(socket_allocator, sock) catch return false;
+        return true;
+    }
+    return false; // Slot gap (should not happen with findFreeSlot)
 }
 
 pub fn clearSlot(slot: usize) void {
-    if (slot < types.MAX_SOCKETS) {
-        socket_table[slot] = null;
+    if (slot < socket_table.items.len) {
+        socket_table.items[slot] = null;
     }
 }

@@ -4,6 +4,13 @@
 const packet = @import("../../core/packet.zig");
 const tcp_types = @import("../tcp/types.zig");
 const scheduler = @import("scheduler.zig");
+const uapi = @import("uapi");
+
+// Re-export ABI types (canonical definitions with comptime size checks)
+pub const IpMreq = uapi.abi.IpMreq;
+pub const TimeVal = uapi.abi.TimeVal;
+pub const SockAddrIn = uapi.abi.SockAddrIn;
+pub const SockAddr = uapi.abi.SockAddr;
 
 // Network byte order helpers (x86_64 is little-endian, network is big-endian)
 pub fn htons(v: u16) u16 {
@@ -48,82 +55,14 @@ pub const IP_RECVTOS: i32 = 13;
 /// Maximum multicast group memberships per socket
 pub const MAX_MULTICAST_GROUPS: usize = 8;
 
-/// Maximum sockets in the system
-pub const MAX_SOCKETS: usize = 16;
+/// Default soft limit (table grows dynamically)
+pub const MAX_SOCKETS: usize = 1024;
 
 /// Maximum packets in socket receive queue
 pub const SOCKET_RX_QUEUE_SIZE: usize = 8;
 
 /// Maximum pending connections for listen()
 pub const ACCEPT_QUEUE_SIZE: usize = 8;
-
-/// IP multicast request structure (Linux-compatible)
-/// Used with IP_ADD_MEMBERSHIP and IP_DROP_MEMBERSHIP
-pub const IpMreq = extern struct {
-    imr_multiaddr: u32, // Multicast group IP (network byte order)
-    imr_interface: u32, // Interface IP (network byte order, 0 = any)
-
-    pub fn getMultiaddr(self: *const IpMreq) u32 {
-        return @byteSwap(self.imr_multiaddr);
-    }
-
-    pub fn getInterface(self: *const IpMreq) u32 {
-        return @byteSwap(self.imr_interface);
-    }
-};
-
-/// Timeval structure for timeout socket options (Linux-compatible)
-/// Uses i64 for Y2038 safety
-pub const TimeVal = extern struct {
-    tv_sec: i64,
-    tv_usec: i64,
-
-    pub fn toMillis(self: TimeVal) u64 {
-        if (self.tv_sec < 0) return 0;
-        const sec_ms: u64 = @intCast(self.tv_sec * 1000);
-        const usec_ms: u64 = @intCast(@divFloor(self.tv_usec, 1000));
-        return sec_ms + usec_ms;
-    }
-
-    pub fn fromMillis(ms: u64) TimeVal {
-        return .{
-            .tv_sec = @intCast(ms / 1000),
-            .tv_usec = @intCast((ms % 1000) * 1000),
-        };
-    }
-};
-
-/// Socket address structure (IPv4)
-/// Compatible with Linux sockaddr_in
-pub const SockAddrIn = extern struct {
-    family: u16, // AF_INET
-    port: u16, // Network byte order
-    addr: u32, // Network byte order
-    zero: [8]u8, // Padding
-
-    pub fn init(ip: u32, port_host: u16) SockAddrIn {
-        return .{
-            .family = @as(u16, @intCast(AF_INET)),
-            .port = @byteSwap(port_host),
-            .addr = @byteSwap(ip),
-            .zero = [_]u8{0} ** 8,
-        };
-    }
-
-    pub fn getPort(self: *const SockAddrIn) u16 {
-        return @byteSwap(self.port);
-    }
-
-    pub fn getAddr(self: *const SockAddrIn) u32 {
-        return @byteSwap(self.addr);
-    }
-};
-
-/// Generic socket address (for API compatibility)
-pub const SockAddr = extern struct {
-    family: u16,
-    data: [14]u8,
-};
 
 /// Received packet entry in queue
 const RxQueueEntry = struct {

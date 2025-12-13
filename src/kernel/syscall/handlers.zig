@@ -27,6 +27,7 @@ const mman_defs = uapi.mman;
 const fs = @import("fs");
 const user_mem = @import("user_mem");
 const Errno = uapi.errno.Errno;
+const SyscallError = uapi.errno.SyscallError;
 
 // Re-export validation functions from user_mem for local use
 const isValidUserPtr = user_mem.isValidUserPtr;
@@ -150,13 +151,13 @@ pub fn sys_exit_group(status: usize) isize {
 
 /// sys_wait4 (61) - Wait for process state change
 /// Full implementation with zombie reaping and parent/child tracking
-pub fn sys_wait4(pid_arg: usize, wstatus_ptr: usize, options: usize, rusage_ptr: usize) isize {
+pub fn sys_wait4(pid_arg: usize, wstatus_ptr: usize, options: usize, rusage_ptr: usize) SyscallError!usize {
     _ = rusage_ptr; // rusage not implemented
 
     const thread = @import("thread");
 
     const current_thread = sched.getCurrentThread() orelse {
-        return Errno.ESRCH.toReturn();
+        return error.ESRCH;
     };
 
     // Interpret pid argument
@@ -198,27 +199,35 @@ pub fn sys_wait4(pid_arg: usize, wstatus_ptr: usize, options: usize, rusage_ptr:
                 }
             } else if (target_pid == -1) {
                 // Should be covered by matches=true above, but for clarity
-                 has_children = true;
+                has_children = true;
             }
         }
 
         if (found_zombie) |zombie| {
             // Found a zombie - reap it
-            
+
             // Get PID before destroying
-            var reaped_pid: i32 = 0;
+            var reaped_pid: usize = 0;
             if (zombie.process) |p_ptr| {
                 const proc = @as(*process_mod.Process, @ptrCast(@alignCast(p_ptr)));
-                reaped_pid = @intCast(proc.pid);
+                reaped_pid = proc.pid;
             } else {
                 reaped_pid = @intCast(zombie.tid);
             }
 
             // Write exit status if pointer provided
             if (wstatus_ptr != 0) {
+                // Use Process exit status as the source of truth if available
+                var status: i32 = zombie.exit_status;
+                if (zombie.process) |p_ptr| {
+                    const proc = @as(*process_mod.Process, @ptrCast(@alignCast(p_ptr)));
+                    status = proc.exit_status;
+                }
+
                 // Directly write exit_status (already encoded by sys_exit or crash handler)
-                UserPtr.from(wstatus_ptr).writeValue(zombie.exit_status) catch {
-                    // Ignore fault on write back, as we already reaped functionality
+                UserPtr.from(wstatus_ptr).writeValue(status) catch {
+                    // Check for error.Fault in the catch block and return error.EFAULT instead of proceeding
+                    return error.EFAULT;
                 };
             }
 
@@ -232,16 +241,16 @@ pub fn sys_wait4(pid_arg: usize, wstatus_ptr: usize, options: usize, rusage_ptr:
                 }
             }
 
-            return @intCast(reaped_pid);
+            return reaped_pid;
         }
 
         // No zombie found
         if (!has_matching_child and target_pid > 0) {
-            return Errno.ECHILD.toReturn();
+            return error.ECHILD;
         }
-        
+
         if (!has_children and target_pid == -1) {
-            return Errno.ECHILD.toReturn();
+            return error.ECHILD;
         }
 
         // WNOHANG: don't block, return 0 if no zombies
@@ -257,9 +266,9 @@ pub fn sys_wait4(pid_arg: usize, wstatus_ptr: usize, options: usize, rusage_ptr:
 /// sys_getpid (39) - Get process ID
 ///
 /// MVP: Returns thread ID since we don't have processes yet.
-pub fn sys_getpid() isize {
+pub fn sys_getpid() SyscallError!usize {
     if (sched.getCurrentThread()) |t| {
-        return t.tid;
+        return @intCast(t.tid);
     }
     // No current thread (shouldn't happen in normal operation)
     return 1;
@@ -268,21 +277,21 @@ pub fn sys_getpid() isize {
 /// sys_getppid (110) - Get parent process ID
 ///
 /// MVP: Always returns 0 (init process has no parent).
-pub fn sys_getppid() isize {
+pub fn sys_getppid() SyscallError!usize {
     return 0;
 }
 
 /// sys_getuid (102) - Get user ID
 ///
 /// MVP: Always returns 0 (root).
-pub fn sys_getuid() isize {
+pub fn sys_getuid() SyscallError!usize {
     return 0;
 }
 
 /// sys_getgid (104) - Get group ID
 ///
 /// MVP: Always returns 0 (root group).
-pub fn sys_getgid() isize {
+pub fn sys_getgid() SyscallError!usize {
     return 0;
 }
 
@@ -292,9 +301,9 @@ pub fn sys_getgid() isize {
 
 /// sys_rt_sigprocmask (14) - Examine and change blocked signals
 ///
-/// MVP: Returns 0 (success) but does nothing. 
+/// MVP: Returns 0 (success) but does nothing.
 /// musl uses this during startup/shutdown.
-pub fn sys_rt_sigprocmask(how: usize, set_ptr: usize, oldset_ptr: usize, sigsetsize: usize) isize {
+pub fn sys_rt_sigprocmask(how: usize, set_ptr: usize, oldset_ptr: usize, sigsetsize: usize) SyscallError!usize {
     _ = how;
     _ = set_ptr;
     _ = oldset_ptr;
@@ -311,11 +320,11 @@ pub fn sys_rt_sigprocmask(how: usize, set_ptr: usize, oldset_ptr: usize, sigsets
 /// Returns: Thread ID
 ///
 /// MVP: Returns current TID. musl uses this for thread cancellation/cleanup.
-pub fn sys_set_tid_address(tidptr: usize) isize {
+pub fn sys_set_tid_address(tidptr: usize) SyscallError!usize {
     _ = tidptr; // We should store this in the Thread struct if we supported it
-    
+
     if (sched.getCurrentThread()) |t| {
-        return t.tid;
+        return @intCast(t.tid);
     }
     return 1;
 }
@@ -325,7 +334,7 @@ pub fn sys_set_tid_address(tidptr: usize) isize {
 // =============================================================================
 
 /// sys_sched_yield (24) - Yield processor to other threads
-pub fn sys_sched_yield() isize {
+pub fn sys_sched_yield() SyscallError!usize {
     sched.yield();
     return 0;
 }
@@ -338,26 +347,26 @@ pub fn sys_sched_yield() isize {
 ///
 /// MVP: Busy-waits for the duration. Full implementation would
 /// block the thread and use a timer to wake it.
-pub fn sys_nanosleep(req_ptr: usize, rem_ptr: usize) isize {
+pub fn sys_nanosleep(req_ptr: usize, rem_ptr: usize) SyscallError!usize {
     // Read timespec from userspace
     const req = UserPtr.from(req_ptr).readValue(Timespec) catch {
-        return Errno.EFAULT.toReturn();
+        return error.EFAULT;
     };
 
     // Validate timespec values
     if (req.tv_sec < 0 or req.tv_nsec < 0 or req.tv_nsec >= 1_000_000_000) {
-        return Errno.EINVAL.toReturn();
+        return error.EINVAL;
     }
 
     const sec_u: u64 = @intCast(req.tv_sec);
     if (sec_u > std.math.maxInt(u64) / 1_000_000_000) {
-        return Errno.EINVAL.toReturn();
+        return error.EINVAL;
     }
 
     const sec_ns: u64 = sec_u * 1_000_000_000;
     const nsec_u: u64 = @intCast(req.tv_nsec);
     if (sec_ns > std.math.maxInt(u64) - nsec_u) {
-        return Errno.EINVAL.toReturn();
+        return error.EINVAL;
     }
 
     const total_ns = sec_ns + nsec_u;
@@ -365,7 +374,7 @@ pub fn sys_nanosleep(req_ptr: usize, rem_ptr: usize) isize {
         if (rem_ptr != 0) {
             const rem: Timespec = .{ .tv_sec = 0, .tv_nsec = 0 };
             UserPtr.from(rem_ptr).writeValue(rem) catch {
-                return Errno.EFAULT.toReturn();
+                return error.EFAULT;
             };
         }
         return 0;
@@ -380,11 +389,30 @@ pub fn sys_nanosleep(req_ptr: usize, rem_ptr: usize) isize {
     if (rem_ptr != 0) {
         const rem: Timespec = .{ .tv_sec = 0, .tv_nsec = 0 };
         UserPtr.from(rem_ptr).writeValue(rem) catch {
-            return Errno.EFAULT.toReturn();
+            return error.EFAULT;
         };
     }
 
     return 0;
+}
+
+/// sys_select (23) - Synchronous I/O multiplexing
+///
+/// Args:
+///   nfds: Highest-numbered file descriptor + 1
+///   readfds: FD set to watch for read readiness
+///   writefds: FD set to watch for write readiness
+///   exceptfds: FD set to watch for exceptions
+///   timeout: Maximum wait time
+///
+/// MVP: Returns -ENOSYS (not implemented)
+pub fn sys_select(nfds: usize, readfds: usize, writefds: usize, exceptfds: usize, timeout: usize) SyscallError!usize {
+    _ = nfds;
+    _ = readfds;
+    _ = writefds;
+    _ = exceptfds;
+    _ = timeout;
+    return error.ENOSYS;
 }
 
 /// Timespec structure (Linux compatible)
@@ -396,11 +424,11 @@ pub const Timespec = extern struct {
 /// sys_clock_gettime (228) - Get time from a clock
 ///
 /// MVP: Returns tick count converted to timespec.
-pub fn sys_clock_gettime(clk_id: usize, tp_ptr: usize) isize {
+pub fn sys_clock_gettime(clk_id: usize, tp_ptr: usize) SyscallError!usize {
     _ = clk_id; // Ignore clock ID for MVP (all clocks return same value)
 
     if (tp_ptr == 0) {
-        return Errno.EFAULT.toReturn();
+        return error.EFAULT;
     }
 
     // Get tick count and convert to time
@@ -413,7 +441,7 @@ pub fn sys_clock_gettime(clk_id: usize, tp_ptr: usize) isize {
     };
 
     UserPtr.from(tp_ptr).writeValue(tp) catch {
-        return Errno.EFAULT.toReturn();
+        return error.EFAULT;
     };
 
     return 0;
@@ -427,7 +455,7 @@ pub fn sys_clock_gettime(clk_id: usize, tp_ptr: usize) isize {
 ///
 /// Reads up to count bytes from fd into buf.
 /// Uses FD table to dispatch to appropriate device read operation.
-pub fn sys_read(fd_num: usize, buf_ptr: usize, count: usize) isize {
+pub fn sys_read(fd_num: usize, buf_ptr: usize, count: usize) SyscallError!usize {
     if (count == 0) {
         return 0;
     }
@@ -435,23 +463,23 @@ pub fn sys_read(fd_num: usize, buf_ptr: usize, count: usize) isize {
     // Bounds check pointer (fast check)
     // We do full copy later, but this saves us allocation if obviously bad
     if (!isValidUserPtr(buf_ptr, count)) {
-        return Errno.EFAULT.toReturn();
+        return error.EFAULT;
     }
 
     // Get FD from table
     const table = getGlobalFdTable();
     const fd = table.get(@intCast(fd_num)) orelse {
-        return Errno.EBADF.toReturn();
+        return error.EBADF;
     };
 
     // Check if FD is readable
     if (!fd.isReadable()) {
-        return Errno.EBADF.toReturn();
+        return error.EBADF;
     }
 
     // Call device read operation
     const read_fn = fd.ops.read orelse {
-        return Errno.ENOSYS.toReturn();
+        return error.ENOSYS;
     };
 
     // Allocate kernel buffer for the read
@@ -459,62 +487,72 @@ pub fn sys_read(fd_num: usize, buf_ptr: usize, count: usize) isize {
     // Let's alloc from heap to be safe for now, or just limit large reads to 4096.
     // For robustness, clamping to 4096 is safer for kernel stack, but allocating is better.
     // Given the kernel heap allocator is available, let's use it.
-    
+
     // Cap read size to avoid massive allocations (e.g. 1GB)
     const max_read_size = 64 * 1024; // 64KB chunks
     const read_size = @min(count, max_read_size);
 
     const kbuf = heap.allocator().alloc(u8, read_size) catch {
-        return Errno.ENOMEM.toReturn();
+        return error.ENOMEM;
     };
     defer heap.allocator().free(kbuf);
 
-    // Read into kernel buffer
+    // Read into kernel buffer (legacy isize return from device ops)
     const bytes_read = read_fn(fd, kbuf);
-    if (bytes_read < 0) return bytes_read;
+    if (bytes_read < 0) {
+        // Device ops return negative errno - convert to SyscallError
+        // For now, map common errors; device layer will migrate separately
+        const errno_val: i32 = @intCast(-bytes_read);
+        return switch (errno_val) {
+            5 => error.EIO,
+            11 => error.EAGAIN,
+            14 => error.EFAULT,
+            else => error.EIO,
+        };
+    }
 
     // Copy to user memory
     const uptr = UserPtr.from(buf_ptr);
     const valid_read = @as(usize, @intCast(bytes_read));
-    
+
     // Only copy what was actually read
     const copy_res = uptr.copyFromKernel(kbuf[0..valid_read]);
     if (copy_res == error.Fault) {
-        return Errno.EFAULT.toReturn();
+        return error.EFAULT;
     }
 
-    return bytes_read;
+    return valid_read;
 }
 
 /// sys_write (1) - Write to file descriptor
 ///
 /// Writes up to count bytes from buf to fd.
 /// Uses FD table to dispatch to appropriate device write operation.
-pub fn sys_write(fd_num: usize, buf_ptr: usize, count: usize) isize {
+pub fn sys_write(fd_num: usize, buf_ptr: usize, count: usize) SyscallError!usize {
     if (count == 0) {
         return 0;
     }
-    
+
     if (!isValidUserPtr(buf_ptr, count)) {
-        return Errno.EFAULT.toReturn();
+        return error.EFAULT;
     }
 
     // Get FD from table
     const table = getGlobalFdTable();
     const fd = table.get(@intCast(fd_num)) orelse {
-        return Errno.EBADF.toReturn();
+        return error.EBADF;
     };
 
     // Check if FD is writable
     if (!fd.isWritable()) {
-        return Errno.EBADF.toReturn();
+        return error.EBADF;
     }
 
     // Call device write operation
-    const write_fn = fd.ops.write orelse {
+    if (fd.ops.write == null) {
         console.warn("Syscall: Write on FD {} not supported", .{fd_num});
-        return Errno.ENOSYS.toReturn();
-    };
+        return error.ENOSYS;
+    }
 
     console.debug("Syscall: write(fd={}, count={})", .{fd_num, count});
 
@@ -523,17 +561,38 @@ pub fn sys_write(fd_num: usize, buf_ptr: usize, count: usize) isize {
     const write_size = @min(count, max_write_size);
 
     const kbuf = heap.allocator().alloc(u8, write_size) catch {
-        return Errno.ENOMEM.toReturn();
+        return error.ENOMEM;
     };
     defer heap.allocator().free(kbuf);
 
     // Copy from user to kernel
     const uptr = UserPtr.from(buf_ptr);
     if (uptr.copyToKernel(kbuf) catch null == null) {
-        return Errno.EFAULT.toReturn();
+        return error.EFAULT;
     }
-    
-    // Write from kernel buffer
+
+    // Write from kernel buffer (legacy isize return from device ops)
+    // Acquire lock for atomicity
+    const held = fd.lock.acquire();
+    defer held.release();
+
+    const bytes_written = do_write_locked(fd, kbuf);
+    if (bytes_written < 0) {
+        const errno_val: i32 = @intCast(-bytes_written);
+        return switch (errno_val) {
+            5 => error.EIO,
+            11 => error.EAGAIN,
+            14 => error.EFAULT,
+            32 => error.EPIPE,
+            else => error.EIO,
+        };
+    }
+    return @intCast(bytes_written);
+}
+
+/// Helper for locked write operations
+fn do_write_locked(fd: *FileDescriptor, kbuf: []const u8) isize {
+    const write_fn = fd.ops.write orelse return -5; // EIO
     return write_fn(fd, kbuf);
 }
 
@@ -545,54 +604,121 @@ pub fn sys_write(fd_num: usize, buf_ptr: usize, count: usize) isize {
 ///   count: Number of iovec structs
 ///
 /// Returns: Total bytes written or error
-pub fn sys_writev(fd: usize, bvec_ptr: usize, count: usize) isize {
+pub fn sys_writev(fd: usize, bvec_ptr: usize, count: usize) SyscallError!usize {
     const Iovec = extern struct {
         base: usize,
         len: usize,
     };
 
     if (count == 0) return 0;
-    if (count > 1024) return Errno.EINVAL.toReturn();
+    if (count > 1024) return error.EINVAL;
 
     // Copy iovecs from user
-    // const iovec_size = @sizeOf(Iovec);
-    // const total_iovec_size = iovec_size * count; // Unused
-    
     const kvecs = heap.allocator().alloc(Iovec, count) catch {
-        return Errno.ENOMEM.toReturn();
+        return error.ENOMEM;
     };
     defer heap.allocator().free(kvecs);
 
     const uptr = UserPtr.from(bvec_ptr);
     if (uptr.copyToKernel(std.mem.sliceAsBytes(kvecs)) catch null == null) {
-        return Errno.EFAULT.toReturn();
+        return error.EFAULT;
     }
 
-    var total_written: isize = 0;
+    var total_written: usize = 0;
+
+    // Acquire FD lock once for the entire vector operation
+    // This ensures output from other threads doesn't interleave between vectors
+    const table = getGlobalFdTable();
+    const fd_obj = table.get(@intCast(fd)) orelse {
+        // Should have been checked by sys_write logically, but here we need the object for locking
+        // However, sys_write checks it internally. We need it here to lock.
+        // Let's rely on sys_write checking EBADF, but we need the lock.
+        // Actually, we should check invalid FD here before loop.
+        return error.EBADF;
+    };
+    
+    // Check if writable
+    if (!fd_obj.isWritable()) {
+        return error.EBADF;
+    }
+
+    const held = fd_obj.lock.acquire();
+    defer held.release();
 
     for (kvecs) |vec| {
         if (vec.len == 0) continue;
+
+        // Perform write using our locked helper
+        // We reuse sys_write logic but bypass its internal locking
+        // Wait, sys_write does user-copy and allocation. We can't easily reuse do_write_locked directly
+        // without duplicating the allocation/copy logic.
+        //
+        // Refactoring plan:
+        // 1. We should probably NOT reuse sys_write directly if it takes a lock.
+        // 2. We should extract the allocation and user-copy logic of sys_write into a helper 'prepare_write'
+        // 3. OR, since we are already holding the lock here, we can't call sys_write if sys_write also takes the lock (Deadlock!).
+        //
+        // Correct approach: Implement the body of the loop here, replicating necessary logic, OR make a helper.
+        // Given complexity, let's call a helper that does alloc+copy+write_locked.
         
-        const res = sys_write(fd, vec.base, vec.len);
-        if (res < 0) {
+        // Helper: prepare_and_write_locked
+        const res = perform_write_locked(fd_obj, vec.base, vec.len) catch |err| {
             if (total_written > 0) return total_written;
-            return res;
-        }
+            return err;
+        };
         total_written += res;
     }
-    
+
     return total_written;
 }
 
+/// Helper: Allocates buffer, copies from user, and calls do_write_locked.
+/// Caller must hold fd.lock.
+fn perform_write_locked(fd: *FileDescriptor, buf_ptr: usize, count: usize) SyscallError!usize {
+    if (count == 0) return 0;
+    
+    if (!isValidUserPtr(buf_ptr, count)) {
+        return error.EFAULT;
+    }
+
+    // Cap write size
+    const max_write_size = 64 * 1024;
+    const write_size = @min(count, max_write_size);
+
+    const kbuf = heap.allocator().alloc(u8, write_size) catch {
+        return error.ENOMEM;
+    };
+    defer heap.allocator().free(kbuf);
+
+    // Copy from user to kernel
+    const uptr = UserPtr.from(buf_ptr);
+    if (uptr.copyToKernel(kbuf) catch null == null) {
+        return error.EFAULT;
+    }
+
+    const bytes_written = do_write_locked(fd, kbuf);
+    if (bytes_written < 0) {
+        const errno_val: i32 = @intCast(-bytes_written);
+        return switch (errno_val) {
+            5 => error.EIO,
+            11 => error.EAGAIN,
+            14 => error.EFAULT,
+            32 => error.EPIPE,
+            else => error.EIO,
+        };
+    }
+    return @intCast(bytes_written);
+}
+
 /// sys_ioctl (16) - Control device
-/// 
+///
 /// MVP: Returns -ENOTTY (inappropriate ioctl for device)
 /// This is sufficient for musl isatty() checks.
-pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) isize {
+pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) SyscallError!usize {
     _ = fd;
     _ = cmd;
     _ = arg;
-    return Errno.ENOTTY.toReturn();
+    return error.ENOTTY;
 }
 
 
@@ -635,9 +761,9 @@ fn escapeControlChars(input: []const u8, output: []u8) usize {
 }
 
 /// sys_debug_log (1000) - Write debug message to kernel log
-pub fn sys_debug_log(buf_ptr: usize, len: usize) isize {
+pub fn sys_debug_log(buf_ptr: usize, len: usize) SyscallError!usize {
     if (buf_ptr == 0 and len > 0) {
-        return Errno.EFAULT.toReturn();
+        return error.EFAULT;
     }
 
     if (len == 0) {
@@ -650,13 +776,13 @@ pub fn sys_debug_log(buf_ptr: usize, len: usize) isize {
 
     // Allocate buffer on heap to preserve stack space
     const kbuf = heap.allocator().alloc(u8, copy_len) catch {
-        return Errno.ENOMEM.toReturn();
+        return error.ENOMEM;
     };
     defer heap.allocator().free(kbuf);
 
     const uptr = UserPtr.from(buf_ptr);
     const actual_len = uptr.copyToKernel(kbuf) catch {
-        return Errno.EFAULT.toReturn();
+        return error.EFAULT;
     };
 
     // Sanitize output: escape control characters to prevent log injection
@@ -666,11 +792,11 @@ pub fn sys_debug_log(buf_ptr: usize, len: usize) isize {
 
     console.debug("[USER] {s}", .{sanitized[0..sanitized_len]});
 
-    return @intCast(actual_len);
+    return actual_len;
 }
 
 /// sys_putchar (1005) - Write single character to console
-pub fn sys_putchar(c: usize) isize {
+pub fn sys_putchar(c: usize) SyscallError!usize {
     const char: u8 = @truncate(c);
     // Use HAL serial driver directly for single character output
     hal.serial.writeByte(char);
@@ -678,7 +804,7 @@ pub fn sys_putchar(c: usize) isize {
 }
 
 /// sys_getchar (1004) - Read single character from keyboard (blocking)
-pub fn sys_getchar() isize {
+pub fn sys_getchar() SyscallError!usize {
     while (true) {
         if (keyboard.getChar()) |c| {
             return c;
@@ -689,12 +815,12 @@ pub fn sys_getchar() isize {
 }
 
 /// sys_read_scancode (1003) - Read raw keyboard scancode (non-blocking)
-pub fn sys_read_scancode() isize {
+pub fn sys_read_scancode() SyscallError!usize {
     if (keyboard.getScancode()) |scancode| {
         return scancode;
     }
     // No scancode available
-    return Errno.EAGAIN.toReturn();
+    return error.EAGAIN;
 }
 
 // =============================================================================
@@ -705,69 +831,117 @@ pub fn sys_read_scancode() isize {
 ///
 /// Opens a file/device and returns a new file descriptor.
 /// Currently only supports device files in /dev/.
-pub fn sys_open(path_ptr: usize, flags: usize, mode: usize) isize {
+pub fn sys_open(path_ptr: usize, flags: usize, mode: usize) SyscallError!usize {
     _ = mode; // Mode is ignored for device files
 
     // Allocate path buffer on heap to preserve stack space
     const path_buf = heap.allocator().alloc(u8, user_mem.MAX_PATH_LEN) catch {
-        return Errno.ENOMEM.toReturn();
+        return error.ENOMEM;
     };
     defer heap.allocator().free(path_buf);
 
     // Validate and read path string from userspace
     const path = user_mem.copyStringFromUser(path_buf, path_ptr) catch |err| {
-        if (err == error.NameTooLong) return Errno.ENAMETOOLONG.toReturn();
-        return Errno.EFAULT.toReturn();
+        if (err == error.NameTooLong) return error.ENAMETOOLONG;
+        return error.EFAULT;
     };
 
     if (path.len == 0) {
-        return Errno.ENOENT.toReturn();
+        return error.ENOENT;
     }
 
     // Look up device by devfs
     if (devfs.lookupDevice(path)) |ops| {
         // Create device FD
         const fd = fd_mod.createFd(ops, @truncate(flags), null) catch {
-            return Errno.ENOMEM.toReturn();
+            return error.ENOMEM;
         };
         const alloc = heap.allocator();
         errdefer alloc.destroy(fd);
 
         const table = getGlobalFdTable();
         const fd_num = table.allocFdNum() orelse {
-            return Errno.EMFILE.toReturn();
+            return error.EMFILE;
         };
 
         table.install(fd_num, fd);
-        return @intCast(fd_num);
+        return fd_num;
     }
 
     // Fallback: InitRD
     // Note: This is where we would check a real VFS in the future
     const fd = fs.initrd.InitRD.instance.openFile(path, @truncate(flags)) catch |err| {
         if (err == error.FileNotFound) {
-            return Errno.ENOENT.toReturn();
+            return error.ENOENT;
         }
-        return Errno.ENOMEM.toReturn();
+        return error.ENOMEM;
     };
     const alloc = heap.allocator();
     errdefer alloc.destroy(fd);
 
     const table = getGlobalFdTable();
     const fd_num = table.allocFdNum() orelse {
-        return Errno.EMFILE.toReturn();
+        return error.EMFILE;
     };
 
     table.install(fd_num, fd);
-    return @intCast(fd_num);
+    return fd_num;
 }
 
 /// sys_close (3) - Close a file descriptor
 ///
 /// Closes the file descriptor and releases associated resources.
-pub fn sys_close(fd_num: usize) isize {
+pub fn sys_close(fd_num: usize) SyscallError!usize {
     const table = getGlobalFdTable();
-    return table.close(@intCast(fd_num));
+    const result = table.close(@intCast(fd_num));
+    if (result < 0) {
+        return error.EBADF;
+    }
+    return 0;
+}
+
+/// sys_lseek (8) - Reposition read/write file offset
+///
+/// Repositions the file offset of the open file description associated
+/// with the file descriptor fd to the argument offset according to whence.
+///
+/// Args:
+///   fd: File descriptor
+///   offset: Offset value (interpretation depends on whence)
+///   whence: 0=SEEK_SET (absolute), 1=SEEK_CUR (relative to current), 2=SEEK_END (relative to end)
+///
+/// Returns: New offset position on success, negative errno on error
+pub fn sys_lseek(fd_num: usize, offset: i64, whence: u32) SyscallError!usize {
+    const table = getGlobalFdTable();
+
+    // Get the file descriptor
+    const file_desc = table.get(@intCast(fd_num)) orelse {
+        return error.EBADF;
+    };
+
+    // Check if the file supports seeking
+    const seek_fn = file_desc.ops.seek orelse {
+        // Device doesn't support seeking (e.g., pipes, sockets, console)
+        return error.ESPIPE;
+    };
+
+    // Validate whence
+    if (whence > 2) {
+        return error.EINVAL;
+    }
+
+    // Call the device-specific seek operation (legacy isize return)
+    const result = seek_fn(file_desc, offset, whence);
+    if (result < 0) {
+        const errno_val: i32 = @intCast(-result);
+        return switch (errno_val) {
+            9 => error.EBADF,
+            22 => error.EINVAL,
+            29 => error.ESPIPE,
+            else => error.EINVAL,
+        };
+    }
+    return @intCast(result);
 }
 
 /// sys_mmap (9) - Map memory pages
@@ -784,7 +958,7 @@ pub fn sys_close(fd_num: usize) isize {
 ///   offset: File offset (ignored for MAP_ANONYMOUS)
 ///
 /// Returns: Mapped address on success, negative errno on error
-pub fn sys_mmap(addr: usize, len: usize, prot: usize, flags: usize, fd: usize, offset: usize) isize {
+pub fn sys_mmap(addr: usize, len: usize, prot: usize, flags: usize, fd: usize, offset: usize) SyscallError!usize {
     _ = fd; // File mappings not supported
     _ = offset;
 
@@ -792,7 +966,7 @@ pub fn sys_mmap(addr: usize, len: usize, prot: usize, flags: usize, fd: usize, o
     const proc = getCurrentProcess();
     const aligned_len = std.mem.alignForward(usize, len, pmm.PAGE_SIZE);
     if (proc.rss_current + aligned_len > proc.rlimit_as) {
-        return Errno.ENOMEM.toReturn();
+        return error.ENOMEM;
     }
 
     const uvmm = getGlobalUserVmm();
@@ -801,9 +975,16 @@ pub fn sys_mmap(addr: usize, len: usize, prot: usize, flags: usize, fd: usize, o
     // Update RSS on successful mapping
     if (result >= 0) {
         proc.rss_current += aligned_len;
+        return @intCast(result);
     }
 
-    return result;
+    // Convert negative errno
+    const errno_val: i32 = @intCast(-result);
+    return switch (errno_val) {
+        12 => error.ENOMEM,
+        22 => error.EINVAL,
+        else => error.ENOMEM,
+    };
 }
 
 /// sys_mprotect (10) - Set memory protection
@@ -816,9 +997,19 @@ pub fn sys_mmap(addr: usize, len: usize, prot: usize, flags: usize, fd: usize, o
 ///   prot: New protection flags
 ///
 /// Returns: 0 on success, negative errno on error
-pub fn sys_mprotect(addr: usize, len: usize, prot: usize) isize {
+pub fn sys_mprotect(addr: usize, len: usize, prot: usize) SyscallError!usize {
     const uvmm = getGlobalUserVmm();
-    return uvmm.mprotect(@intCast(addr), len, @truncate(prot));
+    const result = uvmm.mprotect(@intCast(addr), len, @truncate(prot));
+    if (result < 0) {
+        const errno_val: i32 = @intCast(-result);
+        return switch (errno_val) {
+            12 => error.ENOMEM,
+            22 => error.EINVAL,
+            13 => error.EACCES,
+            else => error.EINVAL,
+        };
+    }
+    return 0;
 }
 
 /// sys_munmap (11) - Unmap memory pages
@@ -830,7 +1021,7 @@ pub fn sys_mprotect(addr: usize, len: usize, prot: usize) isize {
 ///   len: Size in bytes
 ///
 /// Returns: 0 on success, negative errno on error
-pub fn sys_munmap(addr: usize, len: usize) isize {
+pub fn sys_munmap(addr: usize, len: usize) SyscallError!usize {
     const uvmm = getGlobalUserVmm();
     const result = uvmm.munmap(@intCast(addr), len);
 
@@ -844,43 +1035,48 @@ pub fn sys_munmap(addr: usize, len: usize) isize {
             // Underflow protection - reset to 0 if accounting got out of sync
             proc.rss_current = 0;
         }
+        return 0;
     }
 
-    return result;
+    const errno_val: i32 = @intCast(-result);
+    return switch (errno_val) {
+        22 => error.EINVAL,
+        else => error.EINVAL,
+    };
 }
 
 /// sys_socket (41) - Create a socket
 /// MVP: Returns -ENOSYS (networking not implemented)
-pub fn sys_socket(domain: usize, sock_type: usize, protocol: usize) isize {
+pub fn sys_socket(domain: usize, sock_type: usize, protocol: usize) SyscallError!usize {
     _ = domain;
     _ = sock_type;
     _ = protocol;
     // Networking will be implemented in Phase 7
-    return Errno.ENOSYS.toReturn();
+    return error.ENOSYS;
 }
 
 /// sys_sendto (44) - Send a message on a socket
 /// MVP: Returns -ENOSYS (networking not implemented)
-pub fn sys_sendto(fd: usize, buf_ptr: usize, len: usize, flags: usize, addr_ptr: usize, addrlen: usize) isize {
+pub fn sys_sendto(fd: usize, buf_ptr: usize, len: usize, flags: usize, addr_ptr: usize, addrlen: usize) SyscallError!usize {
     _ = fd;
     _ = buf_ptr;
     _ = len;
     _ = flags;
     _ = addr_ptr;
     _ = addrlen;
-    return Errno.ENOSYS.toReturn();
+    return error.ENOSYS;
 }
 
 /// sys_recvfrom (45) - Receive a message from a socket
 /// MVP: Returns -ENOSYS (networking not implemented)
-pub fn sys_recvfrom(fd: usize, buf_ptr: usize, len: usize, flags: usize, addr_ptr: usize, addrlen_ptr: usize) isize {
+pub fn sys_recvfrom(fd: usize, buf_ptr: usize, len: usize, flags: usize, addr_ptr: usize, addrlen_ptr: usize) SyscallError!usize {
     _ = fd;
     _ = buf_ptr;
     _ = len;
     _ = flags;
     _ = addr_ptr;
     _ = addrlen_ptr;
-    return Errno.ENOSYS.toReturn();
+    return error.ENOSYS;
 }
 
 /// sys_fork (57) - Create a child process
@@ -895,7 +1091,7 @@ pub fn sys_recvfrom(fd: usize, buf_ptr: usize, len: usize, flags: usize, addr_pt
 ///   - Child PID to parent process
 ///   - 0 to child process
 ///   - Negative errno on error
-pub fn sys_fork(frame: *hal.syscall.SyscallFrame) isize {
+pub fn sys_fork(frame: *hal.syscall.SyscallFrame) SyscallError!usize {
     const thread = @import("thread");
 
     // Get current process
@@ -904,14 +1100,14 @@ pub fn sys_fork(frame: *hal.syscall.SyscallFrame) isize {
     // Fork the process (copies address space and FDs)
     const child_proc = process_mod.forkProcess(parent_proc) catch |err| {
         console.err("sys_fork: Failed to fork process: {}", .{err});
-        return Errno.ENOMEM.toReturn();
+        return error.ENOMEM;
     };
 
     // Get current thread to copy its state
     const parent_thread = sched.getCurrentThread() orelse {
         // No current thread - this shouldn't happen
         process_mod.destroyProcess(child_proc);
-        return Errno.ESRCH.toReturn();
+        return error.ESRCH;
     };
 
     // Create child thread
@@ -926,7 +1122,7 @@ pub fn sys_fork(frame: *hal.syscall.SyscallFrame) isize {
         },
     ) catch {
         process_mod.destroyProcess(child_proc);
-        return Errno.ENOMEM.toReturn();
+        return error.ENOMEM;
     };
 
     // Copy parent's kernel stack frame to child
@@ -944,7 +1140,7 @@ pub fn sys_fork(frame: *hal.syscall.SyscallFrame) isize {
     sched.addThread(child_thread);
 
     // Return child PID to parent
-    return @intCast(child_proc.pid);
+    return child_proc.pid;
 }
 
 /// Copy thread state from parent to child for fork
@@ -1025,21 +1221,21 @@ fn setForkChildReturn(child: *@import("thread").Thread) void {
 ///
 /// Note: Currently only supports executables loaded via InitRD modules.
 /// Filesystem-based executables require VFS implementation.
-pub fn sys_execve(frame: *hal.syscall.SyscallFrame, path_ptr: usize, argv_ptr: usize, envp_ptr: usize) isize {
+pub fn sys_execve(frame: *hal.syscall.SyscallFrame, path_ptr: usize, argv_ptr: usize, envp_ptr: usize) SyscallError!usize {
     // Allocate path buffer on heap to preserve stack space
     const path_buf = heap.allocator().alloc(u8, user_mem.MAX_PATH_LEN) catch {
-        return Errno.ENOMEM.toReturn();
+        return error.ENOMEM;
     };
     defer heap.allocator().free(path_buf);
 
     // Validate and read path string from userspace
     const path = user_mem.copyStringFromUser(path_buf, path_ptr) catch |err| {
-        if (err == error.NameTooLong) return Errno.ENAMETOOLONG.toReturn();
-        return Errno.EFAULT.toReturn();
+        if (err == error.NameTooLong) return error.ENAMETOOLONG;
+        return error.EFAULT;
     };
 
     if (path.len == 0) {
-        return Errno.ENOENT.toReturn();
+        return error.ENOENT;
     }
 
     console.debug("sys_execve: path='{s}'", .{path});
@@ -1051,7 +1247,7 @@ pub fn sys_execve(frame: *hal.syscall.SyscallFrame, path_ptr: usize, argv_ptr: u
     const MAX_ARG_STRLEN = 4096; // 4KB per-argument limit (like Linux PAGE_SIZE)
     const alloc = heap.allocator();
     const arg_data_buf = alloc.alloc(u8, MAX_ARG_SIZE) catch {
-        return Errno.ENOMEM.toReturn();
+        return error.ENOMEM;
     };
     defer alloc.free(arg_data_buf);
 
@@ -1070,17 +1266,17 @@ pub fn sys_execve(frame: *hal.syscall.SyscallFrame, path_ptr: usize, argv_ptr: u
             const remaining_space = arg_data_buf[arg_data_idx..];
             // Return E2BIG if we've exhausted the argument buffer
             if (remaining_space.len == 0) {
-                return Errno.E2BIG.toReturn();
+                return error.E2BIG;
             }
 
             const arg_slice = user_mem.copyStringFromUser(remaining_space, arg_ptr) catch |err| {
-                if (err == error.NameTooLong) return Errno.E2BIG.toReturn();
-                return Errno.EFAULT.toReturn();
+                if (err == error.NameTooLong) return error.E2BIG;
+                return error.EFAULT;
             };
 
             // Per-argument length limit (security hardening)
             if (arg_slice.len > MAX_ARG_STRLEN) {
-                return Errno.E2BIG.toReturn();
+                return error.E2BIG;
             }
 
             argv_storage[argc] = arg_slice;
@@ -1091,7 +1287,7 @@ pub fn sys_execve(frame: *hal.syscall.SyscallFrame, path_ptr: usize, argv_ptr: u
         if (argc == 64) {
             const ptr_addr = argv_ptr + 64 * @sizeOf(usize);
             if (UserPtr.from(ptr_addr).readValue(usize)) |arg_ptr| {
-                if (arg_ptr != 0) return Errno.E2BIG.toReturn(); // More than 64 args
+                if (arg_ptr != 0) return error.E2BIG; // More than 64 args
             } else |_| {}
         }
     }
@@ -1113,17 +1309,17 @@ pub fn sys_execve(frame: *hal.syscall.SyscallFrame, path_ptr: usize, argv_ptr: u
             const remaining_space = arg_data_buf[arg_data_idx..];
             // Return E2BIG if we've exhausted the argument buffer
             if (remaining_space.len == 0) {
-                return Errno.E2BIG.toReturn();
+                return error.E2BIG;
             }
 
             const env_slice = user_mem.copyStringFromUser(remaining_space, env_ptr) catch |err| {
-                if (err == error.NameTooLong) return Errno.E2BIG.toReturn();
-                return Errno.EFAULT.toReturn();
+                if (err == error.NameTooLong) return error.E2BIG;
+                return error.EFAULT;
             };
 
             // Per-argument length limit (security hardening)
             if (env_slice.len > MAX_ARG_STRLEN) {
-                return Errno.E2BIG.toReturn();
+                return error.E2BIG;
             }
 
             envp_storage[envc] = env_slice;
@@ -1142,14 +1338,14 @@ pub fn sys_execve(frame: *hal.syscall.SyscallFrame, path_ptr: usize, argv_ptr: u
     // Look up executable in InitRD
     const file = fs.initrd.InitRD.instance.findFile(path) orelse {
         // Executable not found
-        return Errno.ENOENT.toReturn();
+        return error.ENOENT;
     };
 
     // Load and execute ELF
     // This creates a new address space and sets up the stack
     const result = elf.exec(file.data, argv, envp) catch |err| {
         console.err("sys_execve: Failed to exec: {}", .{err});
-        return Errno.ENOEXEC.toReturn();
+        return error.ENOEXEC;
     };
 
     console.debug("sys_execve: Loaded ELF entry={x} stack={x} cr3={x}", .{
@@ -1215,7 +1411,7 @@ fn zeroExecveRegisters(frame: *hal.syscall.SyscallFrame) void {
 
 
 /// sys_brk (12) - Change data segment size
-pub fn sys_brk(addr: u64) isize {
+pub fn sys_brk(addr: u64) SyscallError!usize {
     const proc = getCurrentProcess();
 
     // If addr is 0, return current break
@@ -1227,7 +1423,7 @@ pub fn sys_brk(addr: u64) isize {
     // We only support growing the heap for now, or keeping it same.
     // Shrinking is valid but complicates things (need to unmap).
     // Also need to check if new break is valid (e.g. not overlapping stack or kernel)
-    
+
     // Check if less than start (invalid)
     if (addr < proc.heap_start) {
         return @intCast(proc.heap_break);
@@ -1241,7 +1437,7 @@ pub fn sys_brk(addr: u64) isize {
     // Enforce per-process memory limit (DoS protection)
     const new_heap_size = addr - proc.heap_start;
     if (proc.rss_current + new_heap_size > proc.rlimit_as) {
-        return Errno.ENOMEM.toReturn();
+        return error.ENOMEM;
     }
 
     // Align to page size for mapping
@@ -1261,22 +1457,22 @@ pub fn sys_brk(addr: u64) isize {
         // Allocate and map pages
         // We can use UserVmm or just direct mapping.
         // Process struct has user_vmm field.
-        
+
         // TODO: Use proc.user_vmm logic to track VMAs?
         // For MVP, we just map the pages directly into the page table.
         // Ideally we should update VMA list too.
-        
+
         // Let's use vmm directly first for simplicity, but we need physical pages.
         var i: usize = 0;
         while (i < pages_to_map) : (i += 1) {
             const phys_page = pmm.allocPage() orelse {
                 // OOM - should cleanup already mapped pages?
                 // For MVP, just fail. Real implementation needs rollback.
-                return Errno.ENOMEM.toReturn();
+                return error.ENOMEM;
             };
-            
+
             const vaddr = current_break_aligned + (i * pmm.PAGE_SIZE);
-            
+
             const flags = vmm.PageFlags{
                 .writable = true,
                 .user = true,
@@ -1291,13 +1487,13 @@ pub fn sys_brk(addr: u64) isize {
                 while (j < i) : (j += 1) {
                     const rollback_addr = current_break_aligned + (j * pmm.PAGE_SIZE);
                     if (vmm.translate(proc.cr3, rollback_addr)) |paddr| {
-                         pmm.freePage(paddr);
-                         vmm.unmapPage(proc.cr3, rollback_addr) catch {};
+                        pmm.freePage(paddr);
+                        vmm.unmapPage(proc.cr3, rollback_addr) catch {};
                     }
                 }
-                return Errno.ENOMEM.toReturn();
+                return error.ENOMEM;
             };
-            
+
             // Zero the page (security)
             const ptr: [*]u8 = @ptrCast(hal.paging.physToVirt(phys_page));
             @memset(ptr[0..pmm.PAGE_SIZE], 0);
@@ -1335,10 +1531,10 @@ const ARCH_GET_GS: usize = 0x1004;
 ///   0 on success
 ///   -EINVAL for unsupported operation codes
 ///   -EFAULT for invalid user pointer (GET only)
-pub fn sys_arch_prctl(code: usize, addr: usize) isize {
+pub fn sys_arch_prctl(code: usize, addr: usize) SyscallError!usize {
     const curr = sched.getCurrentThread() orelse {
         // No current thread - should not happen in normal operation
-        return Errno.ESRCH.toReturn();
+        return error.ESRCH;
     };
 
     switch (code) {
@@ -1352,20 +1548,20 @@ pub fn sys_arch_prctl(code: usize, addr: usize) isize {
         ARCH_GET_FS => {
             // Validate user pointer
             if (!isValidUserPtr(addr, @sizeOf(u64))) {
-                return Errno.EFAULT.toReturn();
+                return error.EFAULT;
             }
             // Write current FS base to user pointer using safe copy
             UserPtr.from(addr).writeValue(curr.fs_base) catch {
-                return Errno.EFAULT.toReturn();
+                return error.EFAULT;
             };
             return 0;
         },
         ARCH_SET_GS, ARCH_GET_GS => {
             // GS is reserved for kernel use (SWAPGS, per-CPU data)
-            return Errno.EINVAL.toReturn();
+            return error.EINVAL;
         },
         else => {
-            return Errno.EINVAL.toReturn();
+            return error.EINVAL;
         },
     }
 }
@@ -1375,13 +1571,13 @@ pub fn sys_arch_prctl(code: usize, addr: usize) isize {
 /// Copies framebuffer dimensions and pixel format to userspace struct.
 /// Returns 0 on success, -ENODEV if no framebuffer available,
 /// -EFAULT for invalid pointer.
-pub fn sys_get_fb_info(info_ptr: usize) isize {
+pub fn sys_get_fb_info(info_ptr: usize) SyscallError!usize {
     // FramebufferInfo is 24 bytes: 4*u32 + 6*u8 + 2*u8 padding
     const info_size: usize = 24;
 
     // Get framebuffer state from module (returns null if not available)
     const fb_state = framebuffer.getState() orelse {
-        return Errno.ENODEV.toReturn();
+        return error.ENODEV;
     };
 
     // Build framebuffer info in kernel buffer first
@@ -1415,7 +1611,7 @@ pub fn sys_get_fb_info(info_ptr: usize) isize {
     // Copy to userspace using safe copy (handles faults gracefully)
     const uptr = UserPtr.from(info_ptr);
     _ = uptr.copyFromKernel(&info_buf) catch {
-        return Errno.EFAULT.toReturn();
+        return error.EFAULT;
     };
 
     console.debug("sys_get_fb_info: {d}x{d}x{d}", .{
@@ -1437,10 +1633,10 @@ pub fn sys_get_fb_info(info_ptr: usize) isize {
 ///   Virtual address on success (positive)
 ///   -ENODEV if no framebuffer available
 ///   -ENOMEM if mapping failed
-pub fn sys_map_fb() isize {
+pub fn sys_map_fb() SyscallError!usize {
     // Get framebuffer state from module
     const fb_state = framebuffer.getState() orelse {
-        return Errno.ENODEV.toReturn();
+        return error.ENODEV;
     };
 
     // Get current process for page table
@@ -1467,7 +1663,7 @@ pub fn sys_map_fb() isize {
     // Map framebuffer physical memory into user address space
     vmm.mapRange(proc.cr3, fb_virt_base, fb_state.phys_addr, fb_size, flags) catch |err| {
         console.err("sys_map_fb: Failed to map FB: {}", .{err});
-        return Errno.ENOMEM.toReturn();
+        return error.ENOMEM;
     };
 
     const fb_vma = proc.user_vmm.createVma(
@@ -1480,7 +1676,7 @@ pub fn sys_map_fb() isize {
         while (offset < fb_size) : (offset += pmm.PAGE_SIZE) {
             vmm.unmapPage(proc.cr3, fb_virt_base + offset) catch {};
         }
-        return Errno.ENOMEM.toReturn();
+        return error.ENOMEM;
     };
     proc.user_vmm.insertVma(fb_vma);
     proc.user_vmm.total_mapped += fb_size;
@@ -1492,6 +1688,5 @@ pub fn sys_map_fb() isize {
     });
 
     // Return the mapped virtual address
-    // Cast to isize - this is safe because the address is well below isize max
-    return @bitCast(fb_virt_base);
+    return @intCast(fb_virt_base);
 }

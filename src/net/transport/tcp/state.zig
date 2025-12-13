@@ -36,6 +36,13 @@ pub var lock: sync.Lock = sync.noop_lock;
 /// Secret key for ISN generation (RFC 6528)
 var secret_key: u64 = 0;
 
+/// TCP State Machine
+//
+// Complies with:
+// - RFC 793: Transmission Control Protocol (State Diagram)
+//
+// Manages the state of Transmission Control Blocks (TCBs).
+// Handles state transitions (e.g. CLOSED -> LISTEN -> SYN_RCVD).
 /// Counter for ISN generations since last re-seed
 var isn_generation_count: u32 = 0;
 
@@ -52,8 +59,18 @@ pub fn setLock(l: sync.Lock) void {
     lock = l;
 }
 
+/// Milliseconds per timer tick (default 1ms for 1000Hz)
+pub var ms_per_tick: u32 = 1;
+
 /// Initialize TCP subsystem
-pub fn init(iface: *Interface, allocator: std.mem.Allocator) void {
+pub fn init(iface: *Interface, allocator: std.mem.Allocator, ticks_per_sec: u32) void {
+    if (ticks_per_sec > 0) {
+        ms_per_tick = 1000 / ticks_per_sec;
+        if (ms_per_tick == 0) ms_per_tick = 1;
+    }
+    lock.acquire();
+    defer lock.release();
+
     global_iface = iface;
     tcp_allocator = allocator;
     tcp_allocator = allocator;

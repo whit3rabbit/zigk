@@ -3,12 +3,41 @@
 // Implements a driver for the Intel 82574L Gigabit Ethernet Controller.
 // Uses MMIO for register access and legacy descriptors for RX/TX.
 //
-// Features:
-//   - Receive and transmit packet handling
-//   - Interrupt-driven packet reception
-//   - MAC address retrieval from EEPROM/RAL
+// Architecture follows Linux kernel's drivers/net/ethernet/intel/e1000e/netdev.c
+// with adaptations for Zig and this kernel's threading model.
 //
-// Reference: Intel 82574L Gigabit Ethernet Controller Datasheet
+// Features:
+//   - Receive and transmit packet handling with ring buffers
+//   - NAPI-style interrupt coalescing and polling
+//   - Hardware checksum offloading (IP, TCP, UDP)
+//   - MSI-X interrupt support (falls back to legacy INTx)
+//   - TX watchdog for stuck transmit detection
+//
+// Ring Buffer Model:
+//   Both RX and TX use circular descriptor rings. Each descriptor is 16 bytes
+//   and points to a packet buffer. Hardware and software coordinate via HEAD
+//   and TAIL pointers:
+//
+//   RX: Hardware writes packets, software reads them
+//       HEAD = hardware's next write position (hardware advances after write)
+//       TAIL = software's release pointer (one beyond last valid for hardware)
+//       Available = (TAIL - HEAD + N) mod N
+//
+//   TX: Software writes packets, hardware transmits them
+//       HEAD = hardware's next read position (hardware advances after transmit)
+//       TAIL = software's submit pointer (one beyond last packet to send)
+//       Pending = (TAIL - HEAD + N) mod N
+//
+// Memory Barriers:
+//   - readBarrier() (lfence): Used after checking descriptor status before
+//     reading data. Ensures we see hardware's writes to all descriptor fields.
+//   - writeBarrier() (sfence): Used after writing descriptor contents before
+//     updating TAIL. Ensures hardware sees our writes before the pointer update.
+//
+// References:
+//   - Intel 82574L Gigabit Ethernet Controller Datasheet (316080)
+//   - Linux kernel: drivers/net/ethernet/intel/e1000e/
+//   - OSDev Wiki: Intel Ethernet i217
 
 const hal = @import("hal");
 const pci = @import("pci");
@@ -18,6 +47,7 @@ const sync = @import("sync");
 const console = @import("console");
 const thread = @import("thread");
 const sched = @import("sched");
+const heap = @import("heap");
 
 const mmio = hal.mmio;
 
@@ -51,6 +81,9 @@ const Reg = struct {
     pub const RDTR: u64 = 0x2820;       // RX Delay Timer
     pub const RADV: u64 = 0x282C;       // RX Interrupt Absolute Delay
 
+    // Receive Checksum Control
+    pub const RXCSUM: u64 = 0x5000;     // Receive Checksum Control
+
     // Transmit
     pub const TCTL: u64 = 0x0400;       // Transmit Control
     pub const TIPG: u64 = 0x0410;       // TX Inter-Packet Gap
@@ -71,19 +104,57 @@ const Reg = struct {
 
     // Multicast Table Array
     pub const MTA_BASE: u64 = 0x5200;   // Multicast Table Array (128 entries)
+
+    // MSI-X Registers (82574L specific)
+    pub const IVAR: u64 = 0x00E4;        // Interrupt Vector Allocation
+    pub const EITR0: u64 = 0x00E8;       // Extended Interrupt Throttle Rate 0
+    pub const EITR1: u64 = 0x00EC;       // Extended Interrupt Throttle Rate 1
+    pub const EITR2: u64 = 0x00F0;       // Extended Interrupt Throttle Rate 2
+    pub const EIAC: u64 = 0x00DC;        // Extended Interrupt Auto Clear
+    pub const EIAM: u64 = 0x00E0;        // Extended Interrupt Auto Mask
+    pub const EICS: u64 = 0x00E8;        // Extended Interrupt Cause Set
+    pub const EIMS: u64 = 0x00D4;        // Extended Interrupt Mask Set (read-only set)
+    pub const EIMC: u64 = 0x00D8;        // Extended Interrupt Mask Clear (write-only clear)
 };
 
-// Device Control Register bits
-// Reference: 82574L Datasheet Section 13.4.1
-const CTRL = struct {
-    pub const FD: u32 = 1 << 0;         // Full Duplex
-    pub const LRST: u32 = 1 << 3;       // Link Reset
-    pub const ASDE: u32 = 1 << 5;       // Auto-Speed Detection Enable
-    pub const SLU: u32 = 1 << 6;        // Set Link Up
-    pub const ILOS: u32 = 1 << 7;       // Invert Loss of Signal
-    pub const RST: u32 = 1 << 26;       // Device Reset
-    pub const VME: u32 = 1 << 30;       // VLAN Mode Enable
-    pub const PHY_RST: u32 = 1 << 31;   // PHY Reset
+/// Device Control Register (CTRL) bit layout
+/// Reference: 82574L Datasheet Section 13.4.1
+pub const DeviceCtl = packed struct(u32) {
+    full_duplex: bool = false,           // Bit 0: FD
+    _reserved_1_2: u2 = 0,               // Bits 1-2: Reserved
+    link_reset: bool = false,            // Bit 3: LRST
+    _reserved_4: bool = false,           // Bit 4: Reserved
+    auto_speed_detect: bool = false,     // Bit 5: ASDE
+    set_link_up: bool = false,           // Bit 6: SLU
+    invert_loss_of_signal: bool = false, // Bit 7: ILOS
+    speed_selection: u2 = 0,             // Bits 8-9: Speed selection
+    _reserved_10: bool = false,          // Bit 10: Reserved
+    force_speed: bool = false,           // Bit 11: Force Speed
+    force_duplex: bool = false,          // Bit 12: Force Duplex
+    _reserved_13_17: u5 = 0,             // Bits 13-17: Reserved
+    sdp0_data: bool = false,             // Bit 18: SDP0 Data
+    sdp1_data: bool = false,             // Bit 19: SDP1 Data
+    sdp0_iodir: bool = false,            // Bit 20: SDP0 I/O Direction
+    sdp1_iodir: bool = false,            // Bit 21: SDP1 I/O Direction
+    _reserved_22_25: u4 = 0,             // Bits 22-25: Reserved
+    device_reset: bool = false,          // Bit 26: RST
+    rx_flow_control: bool = false,       // Bit 27: RFCE
+    tx_flow_control: bool = false,       // Bit 28: TFCE
+    _reserved_29: bool = false,          // Bit 29: Reserved
+    vlan_mode: bool = false,             // Bit 30: VME
+    phy_reset: bool = false,             // Bit 31: PHY_RST
+
+    comptime {
+        if (@sizeOf(@This()) != 4) @compileError("DeviceCtl must be 4 bytes");
+    }
+
+    pub fn fromRaw(raw: u32) DeviceCtl {
+        return @bitCast(raw);
+    }
+
+    pub fn toRaw(self: DeviceCtl) u32 {
+        return @bitCast(self);
+    }
 };
 
 // Device Status Register bits
@@ -96,37 +167,91 @@ const STATUS = struct {
     // Speed values: 00=10Mb/s, 01=100Mb/s, 10=1000Mb/s, 11=reserved
 };
 
-// Receive Control Register bits
-const RCTL = struct {
-    pub const EN: u32 = 1 << 1;         // Receiver Enable
-    pub const SBP: u32 = 1 << 2;        // Store Bad Packets
-    pub const UPE: u32 = 1 << 3;        // Unicast Promiscuous
-    pub const MPE: u32 = 1 << 4;        // Multicast Promiscuous
-    pub const LPE: u32 = 1 << 5;        // Long Packet Enable
-    pub const LBM_NONE: u32 = 0 << 6;   // Loopback Mode: None
-    pub const RDMTS_HALF: u32 = 0 << 8; // RX Descriptor Min Threshold: 1/2
-    pub const MO_36: u32 = 0 << 12;     // Multicast Offset: bits [47:36]
-    pub const BAM: u32 = 1 << 15;       // Broadcast Accept Mode
-    pub const BSIZE_2048: u32 = 0 << 16; // Buffer Size: 2048 bytes
-    pub const BSIZE_1024: u32 = 1 << 16;
-    pub const BSIZE_512: u32 = 2 << 16;
-    pub const BSIZE_256: u32 = 3 << 16;
-    pub const VFE: u32 = 1 << 18;       // VLAN Filter Enable
-    pub const CFIEN: u32 = 1 << 19;     // Canonical Form Indicator Enable
-    pub const CFI: u32 = 1 << 20;       // Canonical Form Indicator
-    pub const SECRC: u32 = 1 << 26;     // Strip Ethernet CRC
+/// Receive Control Register (RCTL) bit layout
+/// Reference: 82574L Datasheet Section 13.4.22
+pub const ReceiveCtl = packed struct(u32) {
+    _reserved_0: bool = false,           // Bit 0: Reserved
+    enable: bool = false,                // Bit 1: EN - Receiver Enable
+    store_bad_packets: bool = false,     // Bit 2: SBP - Store Bad Packets
+    unicast_promisc: bool = false,       // Bit 3: UPE - Unicast Promiscuous
+    multicast_promisc: bool = false,     // Bit 4: MPE - Multicast Promiscuous
+    long_packet: bool = false,           // Bit 5: LPE - Long Packet Enable
+    loopback_mode: u2 = 0,               // Bits 6-7: LBM - Loopback Mode
+    rdmts: u2 = 0,                       // Bits 8-9: RDMTS - RX Desc Min Threshold
+    _reserved_10_11: u2 = 0,             // Bits 10-11: Reserved
+    multicast_offset: u2 = 0,            // Bits 12-13: MO - Multicast Offset
+    _reserved_14: bool = false,          // Bit 14: Reserved
+    broadcast_accept: bool = false,      // Bit 15: BAM - Broadcast Accept Mode
+    buffer_size: u2 = 0,                 // Bits 16-17: BSIZE - Buffer Size
+    vlan_filter: bool = false,           // Bit 18: VFE - VLAN Filter Enable
+    cfien: bool = false,                 // Bit 19: CFIEN - CFI Enable
+    cfi: bool = false,                   // Bit 20: CFI - Canonical Form Indicator
+    _reserved_21_22: u2 = 0,             // Bits 21-22: Reserved
+    dpf: bool = false,                   // Bit 23: DPF - Discard Pause Frames
+    pmcf: bool = false,                  // Bit 24: PMCF - Pass MAC Control Frames
+    _reserved_25: bool = false,          // Bit 25: Reserved
+    strip_crc: bool = false,             // Bit 26: SECRC - Strip Ethernet CRC
+    _reserved_27_31: u5 = 0,             // Bits 27-31: Reserved
+
+    comptime {
+        if (@sizeOf(@This()) != 4) @compileError("ReceiveCtl must be 4 bytes");
+    }
+
+    pub fn fromRaw(raw: u32) ReceiveCtl {
+        return @bitCast(raw);
+    }
+
+    pub fn toRaw(self: ReceiveCtl) u32 {
+        return @bitCast(self);
+    }
+
+    /// Buffer size in bytes based on BSIZE field
+    pub fn getBufferSize(self: ReceiveCtl) u16 {
+        return switch (self.buffer_size) {
+            0 => 2048,
+            1 => 1024,
+            2 => 512,
+            3 => 256,
+        };
+    }
 };
 
-// Transmit Control Register bits
-const TCTL = struct {
-    pub const EN: u32 = 1 << 1;         // Transmit Enable
-    pub const PSP: u32 = 1 << 3;        // Pad Short Packets
-    pub const CT_SHIFT: u5 = 4;         // Collision Threshold shift
-    pub const COLD_SHIFT: u5 = 12;      // Collision Distance shift
-    pub const RTLC: u32 = 1 << 24;      // Re-transmit on Late Collision
+// Receive Checksum Control bits
+const RXCSUM = struct {
+    pub const IPOFL: u32 = 1 << 8;      // IP Checksum Offload Enable
+    pub const TUOFL: u32 = 1 << 9;      // TCP/UDP Checksum Offload Enable
 };
 
-// Interrupt bits
+/// Transmit Control Register (TCTL) bit layout
+/// Reference: 82574L Datasheet Section 13.4.37
+pub const TransmitCtl = packed struct(u32) {
+    _reserved_0: bool = false,           // Bit 0: Reserved
+    enable: bool = false,                // Bit 1: EN - Transmitter Enable
+    _reserved_2: bool = false,           // Bit 2: Reserved
+    pad_short_packets: bool = false,     // Bit 3: PSP - Pad Short Packets
+    collision_threshold: u8 = 0,         // Bits 4-11: CT - Collision Threshold
+    collision_distance: u10 = 0,         // Bits 12-21: COLD - Collision Distance
+    swxoff: bool = false,                // Bit 22: SWXOFF - Software XOFF
+    _reserved_23: bool = false,          // Bit 23: Reserved
+    retransmit_late_coll: bool = false,  // Bit 24: RTLC - Retransmit on Late Collision
+    _reserved_25: bool = false,          // Bit 25: Reserved
+    unortx: bool = false,                // Bit 26: UNORTX - Underrun No Retransmit
+    _reserved_27_31: u5 = 0,             // Bits 27-31: Reserved
+
+    comptime {
+        if (@sizeOf(@This()) != 4) @compileError("TransmitCtl must be 4 bytes");
+    }
+
+    pub fn fromRaw(raw: u32) TransmitCtl {
+        return @bitCast(raw);
+    }
+
+    pub fn toRaw(self: TransmitCtl) u32 {
+        return @bitCast(self);
+    }
+};
+
+// Interrupt bits (legacy constants for backward compatibility)
 const INT = struct {
     pub const TXDW: u32 = 1 << 0;       // TX Descriptor Written Back
     pub const TXQE: u32 = 1 << 1;       // TX Queue Empty
@@ -135,6 +260,38 @@ const INT = struct {
     pub const RXDMT0: u32 = 1 << 4;     // RX Descriptor Min Threshold
     pub const RXO: u32 = 1 << 6;        // RX Overrun
     pub const RXT0: u32 = 1 << 7;       // RX Timer Interrupt
+};
+
+/// Interrupt Cause Register (ICR) bit layout
+/// Reference: 82574L Datasheet Section 13.4.17
+/// Type-safe packed struct for cleaner interrupt handling
+pub const InterruptCause = packed struct(u32) {
+    tx_desc_written: bool = false,      // Bit 0: TXDW
+    tx_queue_empty: bool = false,       // Bit 1: TXQE
+    link_status_change: bool = false,   // Bit 2: LSC
+    rx_seq_error: bool = false,         // Bit 3: RXSEQ
+    rx_desc_min_threshold: bool = false, // Bit 4: RXDMT0
+    _reserved_5: bool = false,          // Bit 5: reserved
+    rx_overrun: bool = false,           // Bit 6: RXO
+    rx_timer: bool = false,             // Bit 7: RXT0
+    _reserved_8_31: u24 = 0,            // Bits 8-31: reserved/other causes
+
+    comptime {
+        if (@sizeOf(@This()) != 4) @compileError("InterruptCause must be 4 bytes");
+    }
+
+    pub fn fromRaw(raw: u32) InterruptCause {
+        return @bitCast(raw);
+    }
+
+    pub fn toRaw(self: InterruptCause) u32 {
+        return @bitCast(self);
+    }
+
+    /// Check if any RX interrupt is pending
+    pub fn hasRxInterrupt(self: InterruptCause) bool {
+        return self.rx_timer or self.rx_desc_min_threshold;
+    }
 };
 
 // ============================================================================
@@ -185,6 +342,7 @@ pub const TxDesc = extern struct {
 
     pub const CMD_EOP: u8 = 1 << 0;     // End of Packet
     pub const CMD_IFCS: u8 = 1 << 1;    // Insert FCS/CRC
+    pub const CMD_IC: u8 = 1 << 2;      // Insert Checksum
     pub const CMD_RS: u8 = 1 << 3;      // Report Status
     pub const STATUS_DD: u8 = 1 << 0;   // Descriptor Done
 
@@ -198,9 +356,9 @@ pub const TxDesc = extern struct {
 // ============================================================================
 
 /// Number of RX descriptors (must be multiple of 8)
-pub const RX_DESC_COUNT: usize = 32;
+pub const RX_DESC_COUNT: usize = 512;
 /// Number of TX descriptors (must be multiple of 8)
-pub const TX_DESC_COUNT: usize = 32;
+pub const TX_DESC_COUNT: usize = 512;
 /// Size of each packet buffer
 pub const BUFFER_SIZE: usize = 2048;
 
@@ -212,6 +370,8 @@ pub const BUFFER_SIZE: usize = 2048;
 pub const E1000e = struct {
     /// MMIO base virtual address
     mmio_base: u64,
+    /// MMIO region size (used for bounds checking)
+    mmio_size: usize,
 
     /// MAC address
     mac_addr: [6]u8,
@@ -241,10 +401,10 @@ pub const E1000e = struct {
     /// IRQ line for this device
     irq_line: u8,
 
-    /// Lock for thread-safe access
+    /// Lock for thread-safe access to driver state
     lock: sync.Spinlock,
 
-    /// Statistics
+    /// Statistics (protected by lock)
     rx_packets: u64,
     tx_packets: u64,
     rx_bytes: u64,
@@ -263,8 +423,22 @@ pub const E1000e = struct {
     worker_thread: ?*thread.Thread,
 
     /// RX Packet Callback (from higher layers)
+    /// Callback receives ownership of packet - MUST free via heap.allocator().free()
     rx_callback: ?*const fn ([]u8) void,
 
+    /// Shutdown flag for clean worker thread termination
+    /// Use @atomicLoad/@atomicStore for thread-safe access
+    shutdown_requested: bool,
+
+    /// MSI-X state
+    msix_enabled: bool,
+    msix_table_base: u64,
+    /// MSI-X vectors: [0]=RX, [1]=TX, [2]=Other
+    msix_vectors: [3]u8,
+
+    /// PCI device reference (for MSI-X configuration)
+    pci_dev: *const pci.PciDevice,
+    pci_ecam: *const pci.Ecam,
 
     const Self = @This();
 
@@ -272,12 +446,47 @@ pub const E1000e = struct {
     // Register Access
     // ========================================================================
 
+    /// Read a 32-bit device register with bounds checking
+    /// Panics if offset is outside mapped MMIO region (indicates driver bug)
     fn readReg(self: *const Self, offset: u64) u32 {
+        if (offset + 4 > self.mmio_size) {
+            @panic("E1000e: MMIO read out of bounds");
+        }
         return mmio.read32(self.mmio_base + offset);
     }
 
+    /// Write a 32-bit device register with bounds checking
+    /// Panics if offset is outside mapped MMIO region (indicates driver bug)
     fn writeReg(self: *Self, offset: u64, value: u32) void {
+        if (offset + 4 > self.mmio_size) {
+            @panic("E1000e: MMIO write out of bounds");
+        }
         mmio.write32(self.mmio_base + offset, value);
+    }
+
+    // Typed register accessors for packed structs
+    fn readCtrl(self: *const Self) DeviceCtl {
+        return DeviceCtl.fromRaw(self.readReg(Reg.CTRL));
+    }
+
+    fn writeCtrl(self: *Self, ctrl: DeviceCtl) void {
+        self.writeReg(Reg.CTRL, ctrl.toRaw());
+    }
+
+    fn readRctl(self: *const Self) ReceiveCtl {
+        return ReceiveCtl.fromRaw(self.readReg(Reg.RCTL));
+    }
+
+    fn writeRctl(self: *Self, rctl: ReceiveCtl) void {
+        self.writeReg(Reg.RCTL, rctl.toRaw());
+    }
+
+    fn readTctl(self: *const Self) TransmitCtl {
+        return TransmitCtl.fromRaw(self.readReg(Reg.TCTL));
+    }
+
+    fn writeTctl(self: *Self, tctl: TransmitCtl) void {
+        self.writeReg(Reg.TCTL, tctl.toRaw());
     }
 
     // ========================================================================
@@ -314,17 +523,29 @@ pub const E1000e = struct {
 
         // Allocate driver state (using static for now, should use heap)
         const driver = &driver_instance;
+
+        // Cleanup previous allocations if any (prevents memory leak on re-init)
+        if (driver.rx_ring_phys != 0 or driver.tx_ring_phys != 0) {
+            console.warn("E1000e: Cleaning up previous allocations before re-init", .{});
+            driver.freeRings();
+        }
+
         driver.* = Self{
             .mmio_base = mmio_base,
+            .mmio_size = bar.size,
             .mac_addr = [_]u8{0} ** 6,
+            // Ring pointers set by allocateRings() - undefined until then
+            // We check rx_ring_phys != 0 before any access
             .rx_ring = undefined,
             .rx_ring_phys = 0,
             .tx_ring = undefined,
             .tx_ring_phys = 0,
+            // Buffer pointer arrays populated by allocateRings()
+            // Cannot zero-init [*]u8 pointers in Zig, but _phys arrays track validity
             .rx_buffers = undefined,
-            .rx_buffers_phys = undefined,
+            .rx_buffers_phys = [_]u64{0} ** RX_DESC_COUNT,
             .tx_buffers = undefined,
-            .tx_buffers_phys = undefined,
+            .tx_buffers_phys = [_]u64{0} ** TX_DESC_COUNT,
             .rx_cur = 0,
             .tx_cur = 0,
             .irq_line = pci_dev.irq_line,
@@ -341,6 +562,12 @@ pub const E1000e = struct {
             .tx_watchdog_stall_count = 0,
             .worker_thread = null,
             .rx_callback = null,
+            .msix_enabled = false,
+            .msix_table_base = 0,
+            .msix_vectors = [_]u8{0} ** 3,
+            .pci_dev = pci_dev,
+            .pci_ecam = pci_ecam,
+            .shutdown_requested = false,
         };
 
         // Reset device
@@ -359,6 +586,7 @@ pub const E1000e = struct {
 
         // Allocate descriptor rings and buffers
         try driver.allocateRings();
+        errdefer driver.freeRings(); // Cleanup if subsequent init steps fail
 
         // Initialize RX
         driver.initRx();
@@ -369,7 +597,10 @@ pub const E1000e = struct {
         // Clear multicast table
         driver.clearMulticastTable();
 
-        // Enable interrupts
+        // Try to enable MSI-X (falls back to legacy if not available)
+        driver.initMsix();
+
+        // Enable interrupts (uses MSI-X or legacy based on initMsix result)
         driver.enableInterrupts();
 
         // Create worker thread
@@ -391,11 +622,13 @@ pub const E1000e = struct {
         console.info("E1000e: Resetting device...", .{});
 
         // Set the reset bit
-        self.writeReg(Reg.CTRL, CTRL.RST);
+        self.writeCtrl(.{ .device_reset = true });
 
         // Wait for reset to complete (RST bit clears)
         // Reference: 82574L Datasheet Section 13.4.1 - reset completes when RST bit clears
-        if (!mmio.poll32(self.mmio_base + Reg.CTRL, CTRL.RST, 0, 1_000_000)) {
+        // 100ms timeout is generous for reset operation
+        const reset_mask = (DeviceCtl{ .device_reset = true }).toRaw();
+        if (!mmio.poll32Timed(self.mmio_base + Reg.CTRL, reset_mask, 0, 100_000)) {
             console.warn("E1000e: Reset timeout (RST bit stuck)", .{});
         }
 
@@ -422,39 +655,69 @@ pub const E1000e = struct {
     }
 
     /// Allocate descriptor rings and packet buffers
+    /// Uses errdefer to clean up previously allocated pages on failure
     fn allocateRings(self: *Self) !void {
-        // Allocate RX descriptor ring (must be 16-byte aligned, use full page)
-        const rx_ring_phys = pmm.allocZeroedPage() orelse {
+        // Calculate number of pages needed for rings
+        // 512 descriptors * 16 bytes = 8192 bytes (2 pages)
+        const rx_ring_size = RX_DESC_COUNT * @sizeOf(RxDesc);
+        const rx_ring_pages = (rx_ring_size + pmm.PAGE_SIZE - 1) / pmm.PAGE_SIZE;
+
+        // Allocate RX descriptor ring (must be physically contiguous)
+        const rx_ring_phys = pmm.allocZeroedPages(rx_ring_pages) orelse {
             return error.OutOfMemory;
         };
+        errdefer pmm.freePages(rx_ring_phys, rx_ring_pages);
+
         self.rx_ring_phys = rx_ring_phys;
         // Cast to volatile pointer - hardware modifies descriptor status fields
         self.rx_ring = @ptrCast(@volatileCast(@as([*]RxDesc, @ptrCast(@alignCast(hal.paging.physToVirt(rx_ring_phys))))));
 
+        // Calculate number of pages needed for TX ring
+        const tx_ring_size = TX_DESC_COUNT * @sizeOf(TxDesc);
+        const tx_ring_pages = (tx_ring_size + pmm.PAGE_SIZE - 1) / pmm.PAGE_SIZE;
+
         // Allocate TX descriptor ring
-        const tx_ring_phys = pmm.allocZeroedPage() orelse {
+        const tx_ring_phys = pmm.allocZeroedPages(tx_ring_pages) orelse {
             return error.OutOfMemory;
         };
+        errdefer pmm.freePages(tx_ring_phys, tx_ring_pages);
+
         self.tx_ring_phys = tx_ring_phys;
         // Cast to volatile pointer - hardware modifies descriptor status fields
         self.tx_ring = @ptrCast(@volatileCast(@as([*]TxDesc, @ptrCast(@alignCast(hal.paging.physToVirt(tx_ring_phys))))));
 
-        // Allocate RX packet buffers
+        // Allocate RX packet buffers with cleanup tracking
+        var rx_buffers_allocated: usize = 0;
+        errdefer {
+            for (0..rx_buffers_allocated) |i| {
+                pmm.freePage(self.rx_buffers_phys[i]);
+            }
+        }
+
         for (0..RX_DESC_COUNT) |i| {
             const buf_phys = pmm.allocZeroedPage() orelse {
                 return error.OutOfMemory;
             };
             self.rx_buffers_phys[i] = buf_phys;
             self.rx_buffers[i] = hal.paging.physToVirt(buf_phys);
+            rx_buffers_allocated += 1;
         }
 
-        // Allocate TX packet buffers
+        // Allocate TX packet buffers with cleanup tracking
+        var tx_buffers_allocated: usize = 0;
+        errdefer {
+            for (0..tx_buffers_allocated) |i| {
+                pmm.freePage(self.tx_buffers_phys[i]);
+            }
+        }
+
         for (0..TX_DESC_COUNT) |i| {
             const buf_phys = pmm.allocZeroedPage() orelse {
                 return error.OutOfMemory;
             };
             self.tx_buffers_phys[i] = buf_phys;
             self.tx_buffers[i] = hal.paging.physToVirt(buf_phys);
+            tx_buffers_allocated += 1;
         }
 
         console.info("E1000e: Allocated {d} RX and {d} TX descriptors", .{
@@ -463,76 +726,165 @@ pub const E1000e = struct {
         });
     }
 
+    /// Free descriptor rings and packet buffers (lightweight cleanup without device reset)
+    /// Used for errdefer cleanup if init fails after allocateRings, or before re-initialization
+    fn freeRings(self: *Self) void {
+        // Free RX packet buffers
+        for (0..RX_DESC_COUNT) |i| {
+            if (self.rx_buffers_phys[i] != 0) {
+                pmm.freePage(self.rx_buffers_phys[i]);
+                self.rx_buffers_phys[i] = 0;
+            }
+        }
+
+        // Free TX packet buffers
+        for (0..TX_DESC_COUNT) |i| {
+            if (self.tx_buffers_phys[i] != 0) {
+                pmm.freePage(self.tx_buffers_phys[i]);
+                self.tx_buffers_phys[i] = 0;
+            }
+        }
+
+        // Free descriptor rings
+        if (self.rx_ring_phys != 0) {
+            const rx_ring_size = RX_DESC_COUNT * @sizeOf(RxDesc);
+            const rx_ring_pages = (rx_ring_size + pmm.PAGE_SIZE - 1) / pmm.PAGE_SIZE;
+            pmm.freePages(self.rx_ring_phys, rx_ring_pages);
+            self.rx_ring_phys = 0;
+        }
+        if (self.tx_ring_phys != 0) {
+            const tx_ring_size = TX_DESC_COUNT * @sizeOf(TxDesc);
+            const tx_ring_pages = (tx_ring_size + pmm.PAGE_SIZE - 1) / pmm.PAGE_SIZE;
+            pmm.freePages(self.tx_ring_phys, tx_ring_pages);
+            self.tx_ring_phys = 0;
+        }
+    }
+
     /// Initialize RX subsystem
+    ///
+    /// Sets up the receive descriptor ring and configures hardware registers.
+    /// This follows the Intel 82574L initialization sequence (Datasheet 14.5).
+    ///
+    /// Ring Buffer Model (matches Linux e1000e):
+    /// - HEAD (RDH): Hardware's write position, advances after each receive
+    /// - TAIL (RDT): Software's "release" pointer, one beyond last valid descriptor
+    /// - Hardware writes to descriptors from HEAD to TAIL-1 (inclusive)
+    /// - Available descriptors = (TAIL - HEAD + N) mod N (0 when HEAD == TAIL)
+    ///
+    /// Initial state: HEAD=0, TAIL=N-1
+    /// - Hardware can write to descriptors 0 through N-2 (N-1 total)
+    /// - Descriptor N-1 serves as the initial "stopper"
     fn initRx(self: *Self) void {
-        // Initialize RX descriptors
+        // Initialize all RX descriptors with buffer addresses
+        // Each descriptor points to a pre-allocated 4KB page for packet data
         for (0..RX_DESC_COUNT) |i| {
             self.rx_ring[i] = RxDesc{
                 .buffer_addr = self.rx_buffers_phys[i],
-                .length = 0,
-                .checksum = 0,
-                .status = 0,
+                .length = 0, // Hardware will set actual length
+                .checksum = 0, // Hardware will compute if offload enabled
+                .status = 0, // DD=0 means descriptor is available
                 .errors = 0,
-                .special = 0,
+                .special = 0, // VLAN tag, set by hardware
             };
         }
 
-        // Set RX descriptor base address
+        // Program descriptor ring base address (64-bit physical address)
+        // Must be 16-byte aligned per Intel spec
         self.writeReg(Reg.RDBAL, @truncate(self.rx_ring_phys));
         self.writeReg(Reg.RDBAH, @truncate(self.rx_ring_phys >> 32));
 
-        // Set RX descriptor length (in bytes)
+        // Set descriptor ring length in bytes (must be 128-byte aligned)
+        // Hardware uses this to calculate ring wrap
         self.writeReg(Reg.RDLEN, RX_DESC_COUNT * @sizeOf(RxDesc));
 
-        // Set head and tail pointers
+        // Enable hardware checksum offloading
+        // IPOFL: IP checksum offload - hardware verifies IPv4 header checksum
+        // TUOFL: TCP/UDP checksum offload - hardware verifies L4 checksum
+        // Results are reported in descriptor status/errors fields
+        self.writeReg(Reg.RXCSUM, RXCSUM.IPOFL | RXCSUM.TUOFL);
+
+        // Initialize head and tail pointers
+        // HEAD = 0: hardware starts writing at descriptor 0
+        // TAIL = N-1: hardware can use descriptors 0 to N-2, leaving N-1 as stopper
+        //
+        // Note: We could set TAIL = N (wrapped to 0) per strict Intel spec
+        // interpretation, but TAIL = N-1 is the common convention that ensures
+        // HEAD != TAIL initially (avoiding the ambiguous "empty" state).
         self.writeReg(Reg.RDH, 0);
         self.writeReg(Reg.RDT, RX_DESC_COUNT - 1);
 
+        // Software read position starts at 0 (same as HEAD)
         self.rx_cur = 0;
     }
 
     /// Initialize TX subsystem
+    ///
+    /// Sets up the transmit descriptor ring and configures hardware registers.
+    /// This follows the Intel 82574L initialization sequence (Datasheet 14.4).
+    ///
+    /// TX Ring Buffer Model (opposite of RX):
+    /// - HEAD (TDH): Hardware's read position, advances after transmitting
+    /// - TAIL (TDT): Software's "submit" pointer, one beyond last packet to send
+    /// - Software writes packets to descriptors and advances TAIL
+    /// - Hardware transmits from HEAD to TAIL-1, then advances HEAD
+    /// - Available slots = N - ((TAIL - HEAD + N) mod N) - 1
+    ///
+    /// Initial state: HEAD=0, TAIL=0
+    /// - Ring is empty (HEAD == TAIL)
+    /// - All descriptors marked DD=1 (completed) so transmit() can use them
     fn initTx(self: *Self) void {
-        // Initialize TX descriptors as empty
+        // Initialize all TX descriptors as "completed" (DD=1)
+        // This allows transmit() to immediately use any descriptor.
+        // Each descriptor has a pre-allocated buffer for packet data.
         for (0..TX_DESC_COUNT) |i| {
             self.tx_ring[i] = TxDesc{
                 .buffer_addr = self.tx_buffers_phys[i],
                 .length = 0,
-                .cso = 0,
-                .cmd = 0,
-                .status = TxDesc.STATUS_DD, // Mark as done initially
-                .css = 0,
-                .special = 0,
+                .cso = 0, // Checksum offset
+                .cmd = 0, // Command bits (EOP, RS, etc.)
+                .status = TxDesc.STATUS_DD, // Mark as done/available
+                .css = 0, // Checksum start
+                .special = 0, // VLAN tag
             };
         }
 
-        // Set TX descriptor base address
+        // Program descriptor ring base address (64-bit physical address)
+        // Must be 16-byte aligned per Intel spec
         self.writeReg(Reg.TDBAL, @truncate(self.tx_ring_phys));
         self.writeReg(Reg.TDBAH, @truncate(self.tx_ring_phys >> 32));
 
-        // Set TX descriptor length
+        // Set descriptor ring length in bytes (must be 128-byte aligned)
         self.writeReg(Reg.TDLEN, TX_DESC_COUNT * @sizeOf(TxDesc));
 
-        // Set head and tail pointers
+        // Initialize head and tail pointers to 0 (empty ring)
+        // Unlike RX where we pre-fill descriptors, TX starts empty.
+        // Software will advance TDT as packets are queued for transmission.
         self.writeReg(Reg.TDH, 0);
         self.writeReg(Reg.TDT, 0);
 
-        // Set Inter-Packet Gap
+        // Configure Inter-Packet Gap timing
         // Reference: 82574L Datasheet Section 13.4.34 "Transmit IPG Register"
-        // IPGT (bits 9:0) = 10: Minimum inter-packet gap (IPG) for back-to-back packets
+        //
+        // IPGT (bits 9:0) = 10: Minimum IPG for back-to-back packets
+        //   - IEEE 802.3 specifies 96 bit times minimum
+        //   - Value 10 = 10 * 8ns = 80ns at 1Gbps (close to 96 bit times)
+        //
         // IPGR1 (bits 19:10) = 10: Part 1 of IPG for non-back-to-back
         // IPGR2 (bits 29:20) = 10: Part 2 of IPG for non-back-to-back
-        // Values are in units of link clock cycles (8ns at 1Gbps)
+        //   - Used for collision recovery timing in half-duplex mode
+        //   - Not critical for full-duplex gigabit operation
         self.writeReg(Reg.TIPG, (10 << 0) | (10 << 10) | (10 << 20));
 
+        // Software write position starts at 0
         self.tx_cur = 0;
     }
 
     /// Clear multicast table array
+    /// The MTA has 128 32-bit entries per Intel 82574L datasheet
     fn clearMulticastTable(self: *Self) void {
-        var i: u64 = 0;
-        while (i < 128) : (i += 1) {
-            self.writeReg(Reg.MTA_BASE + i * 4, 0);
+        const MTA_ENTRY_COUNT: usize = 128;
+        for (0..MTA_ENTRY_COUNT) |i| {
+            self.writeReg(Reg.MTA_BASE + @as(u64, i) * 4, 0);
         }
     }
 
@@ -551,45 +903,144 @@ pub const E1000e = struct {
         self.writeReg(Reg.TADV, 128); // Maximum 128us for TX
     }
 
+    /// Initialize MSI-X if available
+    /// Falls back to legacy interrupts if MSI-X not supported
+    fn initMsix(self: *Self) void {
+        // Check for MSI-X capability
+        const msix_cap = pci.findMsix(self.pci_ecam, self.pci_dev);
+        if (msix_cap == null) {
+            console.info("E1000e: MSI-X not available, using legacy interrupts", .{});
+            return;
+        }
+
+        const cap = msix_cap.?;
+
+        // 82574L has 5 MSI-X vectors, but we only use 3:
+        // Vector 0: RX interrupts
+        // Vector 1: TX interrupts
+        // Vector 2: Other (link status, etc.)
+        if (cap.table_size < 3) {
+            console.warn("E1000e: Not enough MSI-X vectors ({d})", .{cap.table_size});
+            return;
+        }
+
+        // Enable MSI-X
+        const alloc = pci.enableMsix(self.pci_ecam, self.pci_dev, &cap, 0);
+        if (alloc == null) {
+            console.warn("E1000e: Failed to enable MSI-X", .{});
+            return;
+        }
+
+        self.msix_table_base = alloc.?.table_base;
+
+        // Get APIC ID for interrupt delivery (use BSP for now)
+        const dest_apic_id: u8 = 0;
+
+        // Allocate vectors - use base vectors starting from 0x30
+        // In a real implementation, these would be dynamically allocated
+        const base_vector: u8 = 0x30;
+        self.msix_vectors[0] = base_vector; // RX
+        self.msix_vectors[1] = base_vector + 1; // TX
+        self.msix_vectors[2] = base_vector + 2; // Other
+
+        // Configure MSI-X table entries
+        pci.configureMsixEntry(self.msix_table_base, 0, self.msix_vectors[0], dest_apic_id);
+        pci.configureMsixEntry(self.msix_table_base, 1, self.msix_vectors[1], dest_apic_id);
+        pci.configureMsixEntry(self.msix_table_base, 2, self.msix_vectors[2], dest_apic_id);
+
+        // Configure IVAR register to route interrupts to MSI-X vectors
+        // 82574L IVAR format (per Intel datasheet):
+        // Bits 2:0   - RX Queue 0 vector
+        // Bit 3      - RX Queue 0 valid
+        // Bits 6:4   - RX Queue 1 vector
+        // Bit 7      - RX Queue 1 valid
+        // Bits 10:8  - TX Queue 0 vector
+        // Bit 11     - TX Queue 0 valid
+        // Bits 14:12 - TX Queue 1 vector
+        // Bit 15     - TX Queue 1 valid
+        // Bits 18:16 - Other vector
+        // Bit 19     - Other valid
+        const ivar: u32 = (0 | (1 << 3)) | // RX0 -> vector 0, valid
+            ((@as(u32, 1) << 8) | (1 << 11)) | // TX0 -> vector 1, valid
+            ((@as(u32, 2) << 16) | (1 << 19)); // Other -> vector 2, valid
+        self.writeReg(Reg.IVAR, ivar);
+
+        // Enable MSI-X vectors
+        pci.enableMsixVectors(self.pci_ecam, self.pci_dev, &cap);
+
+        // Disable legacy INTx
+        pci.msi.disableIntx(self.pci_ecam, self.pci_dev);
+
+        self.msix_enabled = true;
+        console.info("E1000e: MSI-X enabled with {d} vectors", .{@as(u8, 3)});
+    }
+
     /// Enable interrupts
     fn enableInterrupts(self: *Self) void {
         // Configure interrupt coalescing to reduce interrupt frequency under load
         self.configureInterruptThrottle();
 
-        // Enable RX timer, RX descriptor minimum threshold, link status change
-        self.writeReg(Reg.IMS, INT.RXT0 | INT.RXDMT0 | INT.LSC);
+        if (self.msix_enabled) {
+            // Use extended interrupt mask for MSI-X
+            // Enable: RX, TX, and Other causes
+            // These map to the MSI-X vectors via IVAR
+            self.writeReg(Reg.EIMS, INT.RXT0 | INT.RXDMT0 | INT.LSC | INT.TXDW);
+        } else {
+            // Legacy: Enable RX timer, RX descriptor minimum threshold, link status change
+            self.writeReg(Reg.IMS, INT.RXT0 | INT.RXDMT0 | INT.LSC);
+        }
     }
 
     /// Enable RX and TX
     fn enableRxTx(self: *Self) void {
         // Enable receiver
         // Accept broadcast, unicast to our MAC, 2048 byte buffers, strip CRC
-        const rctl = RCTL.EN | RCTL.BAM | RCTL.BSIZE_2048 | RCTL.SECRC;
-        self.writeReg(Reg.RCTL, rctl);
+        self.writeRctl(.{
+            .enable = true,
+            .broadcast_accept = true,
+            .buffer_size = 0, // 2048 bytes
+            .strip_crc = true,
+        });
 
         // Enable transmitter
         // Reference: 82574L Datasheet Section 13.4.37 "Transmit Control Register"
         // Pad short packets, collision threshold and distance for full duplex
         // CT (Collision Threshold) = 15: Standard value for half-duplex (unused in FD)
         // COLD (Collision Distance) = 64: Standard for gigabit (512 bit times)
-        const tctl = TCTL.EN | TCTL.PSP |
-            (@as(u32, 15) << TCTL.CT_SHIFT) |
-            (@as(u32, 64) << TCTL.COLD_SHIFT);
-        self.writeReg(Reg.TCTL, tctl);
+        self.writeTctl(.{
+            .enable = true,
+            .pad_short_packets = true,
+            .collision_threshold = 15,
+            .collision_distance = 64,
+        });
 
         // Set link up
-        var ctrl = self.readReg(Reg.CTRL);
-        ctrl |= CTRL.SLU;
-        self.writeReg(Reg.CTRL, ctrl);
+        var ctrl = self.readCtrl();
+        ctrl.set_link_up = true;
+        self.writeCtrl(ctrl);
     }
 
     // ========================================================================
     // Packet Transmission
     // ========================================================================
 
-    /// Transmit a packet
-    /// Returns true on success, false if TX ring is full
+    /// Transmit a packet (similar to Linux e1000_xmit_frame)
+    ///
+    /// Queues a packet for transmission by:
+    /// 1. Finding an available descriptor (DD=1 means hardware finished with it)
+    /// 2. Copying packet data to the descriptor's buffer
+    /// 3. Setting up descriptor fields (length, command, checksum offload)
+    /// 4. Advancing TDT to notify hardware
+    ///
+    /// TX Ring Flow:
+    /// - Software writes to descriptor at tx_cur, advances TDT = tx_cur + 1
+    /// - Hardware reads from TDH, transmits, sets DD=1, advances TDH
+    /// - Ring is full when (TDT + 1) mod N == TDH
+    /// - Ring is empty when TDT == TDH
+    ///
+    /// Returns true on success, false if TX ring is full or packet invalid
     pub fn transmit(self: *Self, data: []const u8) bool {
+        // Validate packet size
         if (data.len > BUFFER_SIZE or data.len == 0) {
             return false;
         }
@@ -597,53 +1048,107 @@ pub const E1000e = struct {
         const held = self.lock.acquire();
         defer held.release();
 
-        // Check if current descriptor is available
+        // Check if current descriptor is available (DD=1 means completed)
         const desc = &self.tx_ring[self.tx_cur];
         if ((desc.status & TxDesc.STATUS_DD) == 0) {
-            // Descriptor not done, TX ring full
+            // Hardware hasn't finished with this descriptor yet
             self.tx_dropped += 1;
             return false;
         }
 
-        // Memory barrier: ensure we see all hardware writes to descriptor
-        // before reading any dependent data (buffer contents, other fields)
+        // Memory barrier: ensure we see hardware's writes to status field
+        // before we read or overwrite any descriptor fields
         mmio.readBarrier();
 
-        // Additional safety check: verify hardware head pointer
-        // This guards against race conditions where DD is set but hardware
-        // is still fetching the descriptor (e.g., during rapid retransmit).
+        // Additional safety check: verify against hardware head pointer
+        // This guards against a race where DD is set but hardware is still
+        // reading the descriptor data (possible during rapid retransmission)
         const tdh = self.readReg(Reg.TDH);
         if (self.tx_cur == tdh) {
-            // Hardware head is at our current position - ring might be full
-            // or hardware hasn't advanced. Check if there's actually work pending.
+            // Our position equals hardware head - could be empty or full
             const tdt = self.readReg(Reg.TDT);
             if (tdh != tdt) {
-                // There's pending work and head is at our position - ring is full
+                // TDH != TDT means there's pending work, and hardware head
+                // is at our position - this descriptor is in use
                 self.tx_dropped += 1;
                 return false;
             }
-            // tdh == tdt means ring is empty, we're safe to proceed
+            // TDH == TDT means ring is empty, safe to proceed
         }
 
-        // Copy data to buffer
+        // Parse packet for hardware checksum offloading
+        // E1000e can insert TCP/UDP checksums if we provide CSS (start) and CSO (offset)
+        var css: u8 = 0; // Checksum Start: byte offset where checksum calculation begins
+        var cso: u8 = 0; // Checksum Offset: byte offset within L4 header for checksum field
+        var cmd_extra: u8 = 0;
+
+        // Attempt checksum offload for IPv4 + TCP/UDP packets
+        // Minimum size: Ethernet (14) + IPv4 minimum (20) = 34 bytes
+        if (data.len >= 34) {
+            // Parse EtherType at offset 12-13 (big endian)
+            const eth_type = (@as(u16, data[12]) << 8) | data[13];
+
+            if (eth_type == 0x0800) { // IPv4
+                // IPv4 header: version/IHL at offset 14, protocol at offset 23
+                const ver_ihl = data[14];
+                const ip_ver = ver_ihl >> 4;
+                const ip_ihl = ver_ihl & 0x0F; // Header length in 32-bit words
+
+                if (ip_ver == 4 and ip_ihl >= 5) {
+                    const ip_header_len = @as(usize, ip_ihl) * 4;
+                    const l4_offset = 14 + ip_header_len;
+                    const ip_proto = data[23];
+
+                    // Verify packet has enough data for L4 header
+                    if (l4_offset + 8 <= data.len) {
+                        if (ip_proto == 6) { // TCP
+                            // TCP checksum is at offset 16 within TCP header
+                            // CSO is absolute offset from packet start per Intel spec
+                            css = @intCast(l4_offset);
+                            cso = @intCast(l4_offset + 16);
+                            cmd_extra = TxDesc.CMD_IC;
+                        } else if (ip_proto == 17) { // UDP
+                            // UDP checksum is at offset 6 within UDP header
+                            // CSO is absolute offset from packet start per Intel spec
+                            css = @intCast(l4_offset);
+                            cso = @intCast(l4_offset + 6);
+                            cmd_extra = TxDesc.CMD_IC;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Copy packet data to descriptor's pre-allocated buffer
         const buf = self.tx_buffers[self.tx_cur];
         @memcpy(buf[0..data.len], data);
 
-        // Set up descriptor
+        // Configure descriptor for transmission
+        // CMD_EOP: End of Packet (entire packet in one descriptor)
+        // CMD_IFCS: Insert Frame Check Sequence (hardware appends CRC)
+        // CMD_RS: Report Status (hardware will set DD when complete)
+        // CMD_IC: Insert Checksum (if checksum offload is configured)
         desc.* = TxDesc{
             .buffer_addr = self.tx_buffers_phys[self.tx_cur],
             .length = @truncate(data.len),
-            .cso = 0,
-            .cmd = TxDesc.CMD_EOP | TxDesc.CMD_IFCS | TxDesc.CMD_RS,
-            .status = 0,
-            .css = 0,
+            .cso = cso,
+            .cmd = TxDesc.CMD_EOP | TxDesc.CMD_IFCS | TxDesc.CMD_RS | cmd_extra,
+            .status = 0, // Clear DD; hardware will set it after transmission
+            .css = css,
             .special = 0,
         };
 
-        // Advance tail pointer
+        // Advance software tail pointer
         self.tx_cur = @truncate((@as(u32, self.tx_cur) + 1) % TX_DESC_COUNT);
-        // Memory barrier ensures descriptor writes are visible to NIC before tail update
+
+        // Write barrier ensures descriptor contents are visible to hardware
+        // before we update TDT. Without this, hardware might see the new
+        // tail but stale descriptor data.
         mmio.writeBarrier();
+
+        // Notify hardware by writing TDT
+        // Per Intel spec: TDT points one beyond the last valid descriptor
+        // Setting TDT = tx_cur queues the descriptor we just wrote
         self.writeReg(Reg.TDT, self.tx_cur);
 
         self.tx_packets += 1;
@@ -658,53 +1163,132 @@ pub const E1000e = struct {
 
     /// Process received packets
     /// Calls callback for each received packet
-    pub fn processRx(self: *Self, callback: *const fn ([]u8) void) void {
+    /// Batch size for RDT updates (same as Linux E1000_RX_BUFFER_WRITE)
+    /// Updating RDT every N descriptors reduces register write overhead while
+    /// ensuring hardware doesn't starve during large batch processing.
+    const RX_BUFFER_WRITE: usize = 16;
+
+    /// Process received packets with a budget (NAPI-style polling)
+    ///
+    /// Implements a receive path similar to Linux e1000_clean_rx_irq:
+    /// - Processes up to `limit` packets per call
+    /// - Updates RDT periodically to return descriptors to hardware
+    /// - Uses memory barriers to ensure descriptor visibility
+    ///
+    /// RDT (Receive Descriptor Tail) Semantics:
+    /// Per Intel 82574L Datasheet Section 3.2.6: "The tail pointer points to
+    /// one location beyond the last valid descriptor in the descriptor ring."
+    /// Hardware writes to descriptors from HEAD to TAIL-1 (inclusive).
+    /// Setting RDT = rx_cur means hardware can use all descriptors up to rx_cur-1.
+    ///
+    /// Returns number of packets processed
+    pub fn processRxLimited(self: *Self, callback: *const fn ([]u8) void, limit: usize) usize {
         const held = self.lock.acquire();
         defer held.release();
 
-        while (true) {
+        var processed: usize = 0;
+        var batch_count: usize = 0;
+
+        while (processed < limit) {
             const desc = &self.rx_ring[self.rx_cur];
 
-            // Check if descriptor has a packet
+            // Check if descriptor has a packet (DD = Descriptor Done)
             if ((desc.status & RxDesc.STATUS_DD) == 0) {
-                break; // No more packets
+                break; // No more packets ready
             }
 
-            // Memory barrier: ensure we see all hardware writes (packet data, length)
-            // before reading buffer contents. Critical for correctness on weakly-ordered
-            // architectures and prevents speculative loads from reading stale data.
+            // Memory barrier: ensure we see all hardware writes to descriptor
+            // fields before reading length/data. Required because hardware and
+            // software access the same memory without locks.
             mmio.readBarrier();
 
-            // Check for errors
+            // Check for receive errors
             if (desc.errors != 0) {
                 self.logRxErrors(desc.errors);
             } else if ((desc.status & RxDesc.STATUS_EOP) != 0) {
-                // Valid packet received
-                // Clamp length to buffer size to prevent OOB access from malicious/faulty hardware
-                const len: u16 = @min(desc.length, BUFFER_SIZE);
-                const buf = self.rx_buffers[self.rx_cur];
+                // Valid complete packet received (EOP = End of Packet)
+                // Clamp length to buffer size and validate minimum Ethernet frame size
+                const raw_len: usize = @min(@as(usize, desc.length), BUFFER_SIZE);
 
-                self.rx_packets += 1;
-                self.rx_bytes += len;
+                // Minimum Ethernet frame: 14 bytes (6 dst + 6 src + 2 ethertype)
+                // Packets smaller than this are malformed and should be dropped
+                if (raw_len < 14) {
+                    self.rx_dropped += 1;
+                } else {
+                    const buf = self.rx_buffers[self.rx_cur];
 
-                // Call callback with packet data
-                callback(buf[0..len]);
+                    // Copy packet to heap-allocated buffer to avoid use-after-free.
+                    // The descriptor buffer will be reused immediately, so we must
+                    // copy before returning the descriptor to hardware.
+                    // Callback takes ownership and MUST free via heap.allocator().free()
+                    if (heap.allocator().alloc(u8, raw_len)) |packet| {
+                        @memcpy(packet, buf[0..raw_len]);
+
+                        self.rx_packets += 1;
+                        self.rx_bytes += raw_len;
+
+                        callback(packet);
+                    } else |_| {
+                        self.rx_dropped += 1;
+                    }
+                }
             }
 
-            // Reset descriptor for reuse
+            // Reset descriptor for hardware reuse:
+            // - Clear status so DD=0 (hardware will set DD=1 after writing)
+            // - Clear errors and length (hardware will overwrite)
+            // - Buffer address is unchanged (we reuse buffers)
             desc.status = 0;
             desc.errors = 0;
             desc.length = 0;
 
-            // Update tail pointer to return descriptor to hardware
-            const old_cur = self.rx_cur;
+            // Advance to next descriptor
             self.rx_cur = @truncate((@as(u32, self.rx_cur) + 1) % RX_DESC_COUNT);
+            processed += 1;
+            batch_count += 1;
 
-            // Memory barrier ensures descriptor reset is visible to NIC before tail update
-            mmio.writeBarrier();
-            // Tell hardware about the returned descriptor
-            self.writeReg(Reg.RDT, old_cur);
+            // Periodic RDT update (like Linux E1000_RX_BUFFER_WRITE)
+            // This prevents hardware starvation during large batch processing.
+            // Without periodic updates, hardware could run out of descriptors
+            // while software is still processing a large batch.
+            if (batch_count >= RX_BUFFER_WRITE) {
+                self.updateRdt();
+                batch_count = 0;
+            }
         }
+
+        // Final RDT update for any remaining processed descriptors
+        if (batch_count > 0) {
+            self.updateRdt();
+        }
+
+        return processed;
+    }
+
+    /// Update RDT register to return processed descriptors to hardware
+    ///
+    /// Per Intel 82574L Datasheet: RDT points one beyond the last valid
+    /// descriptor. Setting RDT = rx_cur makes descriptors from HEAD to
+    /// rx_cur-1 available for hardware to write to.
+    ///
+    /// Note: If rx_cur == HEAD (software caught up completely), this results
+    /// in zero available descriptors momentarily. This is acceptable because:
+    /// 1. Hardware has internal packet buffering
+    /// 2. The next interrupt/poll will process new packets quickly
+    /// 3. This matches the Intel-specified behavior
+    fn updateRdt(self: *Self) void {
+        // Write barrier ensures all descriptor resets are visible to hardware
+        // before we update the tail pointer. Without this, hardware might see
+        // the new tail but stale descriptor contents.
+        mmio.writeBarrier();
+
+        // RDT = rx_cur per Intel spec: "one beyond the last valid descriptor"
+        self.writeReg(Reg.RDT, self.rx_cur);
+    }
+
+    /// Process all received packets (legacy wrapper)
+    pub fn processRx(self: *Self, callback: *const fn ([]u8) void) void {
+        _ = self.processRxLimited(callback, RX_DESC_COUNT);
     }
 
     /// Log decoded RX errors and update statistics
@@ -751,26 +1335,37 @@ pub const E1000e = struct {
     }
 
     /// Worker thread entry point
+    /// Worker thread entry point (NAPI-style polling)
     pub fn workerLoop(self: *Self) void {
-        while (true) {
-            // Disable interrupts to check queue emptiness safely
-            // This prevents the race where an ISR runs after we check but before we block
-            const flags = hal.cpu.disableInterruptsSaveFlags();
-            if (!self.hasPackets()) {
-                // Queue is empty, safe to block.
-                // sched.block() sets state to .Blocked.
-                // If ISR fires after we unlock inside block/yield, unblock() sees .Blocked -> .Ready.
-                sched.block();
-            }
-            hal.cpu.restoreInterrupts(flags);
-            
-            // Process received packets (drains the ring)
-            if (self.rx_callback) |cb| {
-                self.processRx(cb);
+        const BATCH_LIMIT = 64;
+
+        while (!@atomicLoad(bool, &self.shutdown_requested, .acquire)) {
+            const cb = self.rx_callback orelse &defaultRxCallback;
+
+            // Process a batch of packets
+            const processed = self.processRxLimited(cb, BATCH_LIMIT);
+
+            if (processed < BATCH_LIMIT) {
+                // We drained the ring (or close to it).
+                // Re-enable interrupts and block.
+
+                const flags = hal.cpu.disableInterruptsSaveFlags();
+                // Double check emptiness to avoid race condition where packet arrives
+                // right after processRxLimited returns but before we block.
+                // Also check shutdown to avoid blocking during teardown.
+                if (!self.hasPackets() and !@atomicLoad(bool, &self.shutdown_requested, .acquire)) {
+                    // Re-enable RX interrupts (Timer and Min Threshold)
+                    self.writeReg(Reg.IMS, INT.RXT0 | INT.RXDMT0);
+                    sched.block();
+                }
+                hal.cpu.restoreInterrupts(flags);
             } else {
-                self.processRx(&defaultRxCallback);
+                // We hit the batch limit, there might be more packets.
+                // Yield to scheduler to allow other threads to run, but keep polling.
+                sched.yield();
             }
         }
+        // Clean exit - worker thread terminates
     }
 
     /// Check if there are packets waiting
@@ -828,9 +1423,9 @@ pub const E1000e = struct {
         console.warn("E1000e: Resetting TX subsystem", .{});
 
         // Disable transmitter
-        var tctl = self.readReg(Reg.TCTL);
-        tctl &= ~TCTL.EN;
-        self.writeReg(Reg.TCTL, tctl);
+        var tctl = self.readTctl();
+        tctl.enable = false;
+        self.writeTctl(tctl);
 
         // Reset head and tail pointers
         self.writeReg(Reg.TDH, 0);
@@ -843,8 +1438,8 @@ pub const E1000e = struct {
         }
 
         // Re-enable transmitter
-        tctl |= TCTL.EN;
-        self.writeReg(Reg.TCTL, tctl);
+        tctl.enable = true;
+        self.writeTctl(tctl);
 
         // Reset watchdog state
         self.tx_watchdog_stall_count = 0;
@@ -895,20 +1490,46 @@ pub const E1000e = struct {
     // Interrupt Handler
     // ========================================================================
 
-    /// Handle interrupt from NIC
+    /// Handle interrupt from NIC (similar to Linux e1000_intr)
+    ///
+    /// Implements NAPI-style interrupt handling:
+    /// 1. Read ICR to determine interrupt cause (also clears the interrupt)
+    /// 2. For RX: mask further RX interrupts and wake worker thread
+    /// 3. Worker thread polls RX ring until empty, then re-enables interrupts
+    ///
+    /// This approach (interrupt -> mask -> poll -> unmask) prevents interrupt
+    /// storms during high packet rates while maintaining low latency for
+    /// light traffic. Matches Linux NAPI (New API) design.
+    ///
+    /// Interrupt sources handled:
+    /// - RXT0 (RX Timer): Packet received, timer expired
+    /// - RXDMT0 (RX Desc Min Threshold): RX ring getting full
+    /// - LSC (Link Status Change): Link up/down event
     pub fn handleIrq(self: *Self) void {
-        // Read ICR to get interrupt cause and clear interrupt
-        const icr = self.readReg(Reg.ICR);
+        // Read ICR to get interrupt cause and clear pending interrupt.
+        // Reading ICR is atomic with clearing on 82574L.
+        const icr = InterruptCause.fromRaw(self.readReg(Reg.ICR));
 
-        if ((icr & INT.RXT0) != 0 or (icr & INT.RXDMT0) != 0) {
-            // RX interrupt - wake worker thread
+        if (icr.hasRxInterrupt()) {
+            // RX interrupt - transition to polling mode
+            //
+            // Mask RX interrupts (IMC = Interrupt Mask Clear) to prevent
+            // further interrupts while we're polling. The worker thread
+            // will re-enable them via IMS after draining the RX queue.
+            //
+            // This is the core of NAPI: interrupt to wake, poll to drain,
+            // re-enable when done.
+            self.writeReg(Reg.IMC, INT.RXT0 | INT.RXDMT0);
+
+            // Wake the worker thread to process received packets
             if (self.worker_thread) |t| {
                 sched.unblock(t);
             }
         }
 
-        if ((icr & INT.LSC) != 0) {
-            // Link status change - decode speed and duplex
+        if (icr.link_status_change) {
+            // Link status change - log new link state
+            // This handles cable plug/unplug and auto-negotiation completion
             self.handleLinkChange();
         }
     }
@@ -918,8 +1539,9 @@ pub const E1000e = struct {
         return self.mac_addr;
     }
 
-    /// Get statistics
-    pub fn getStats(self: *const Self) struct {
+    /// Get statistics (thread-safe)
+    /// Acquires lock to ensure consistent snapshot of all counters
+    pub fn getStats(self: *Self) struct {
         rx_packets: u64,
         tx_packets: u64,
         rx_bytes: u64,
@@ -929,6 +1551,9 @@ pub const E1000e = struct {
         rx_dropped: u64,
         tx_dropped: u64,
     } {
+        self.lock.acquire();
+        defer self.lock.release();
+
         return .{
             .rx_packets = self.rx_packets,
             .tx_packets = self.tx_packets,
@@ -950,15 +1575,25 @@ pub const E1000e = struct {
     pub fn deinit(self: *Self) void {
         console.info("E1000e: Deinitializing driver", .{});
 
+        // Signal worker thread to exit
+        @atomicStore(bool, &self.shutdown_requested, true, .release);
+
+        // Wake worker if it's blocked waiting for packets
+        if (self.worker_thread) |wt| {
+            sched.unblock(wt);
+            // Note: In a full implementation, we would join the thread here
+            // to ensure it has exited before freeing resources
+        }
+
         // Disable interrupts
         self.writeReg(Reg.IMC, 0xFFFFFFFF);
 
         // Disable RX and TX
-        self.writeReg(Reg.RCTL, 0);
-        self.writeReg(Reg.TCTL, 0);
+        self.writeRctl(.{});
+        self.writeTctl(.{});
 
         // Reset device to known state
-        self.writeReg(Reg.CTRL, CTRL.RST);
+        self.writeCtrl(.{ .device_reset = true });
 
         // Free RX packet buffers
         for (0..RX_DESC_COUNT) |i| {
@@ -978,15 +1613,24 @@ pub const E1000e = struct {
 
         // Free descriptor rings
         if (self.rx_ring_phys != 0) {
-            pmm.freePage(self.rx_ring_phys);
+            const rx_ring_size = RX_DESC_COUNT * @sizeOf(RxDesc);
+            const rx_ring_pages = (rx_ring_size + pmm.PAGE_SIZE - 1) / pmm.PAGE_SIZE;
+            pmm.freePages(self.rx_ring_phys, rx_ring_pages);
             self.rx_ring_phys = 0;
         }
         if (self.tx_ring_phys != 0) {
-            pmm.freePage(self.tx_ring_phys);
+            const tx_ring_size = TX_DESC_COUNT * @sizeOf(TxDesc);
+            const tx_ring_pages = (tx_ring_size + pmm.PAGE_SIZE - 1) / pmm.PAGE_SIZE;
+            pmm.freePages(self.tx_ring_phys, tx_ring_pages);
             self.tx_ring_phys = 0;
         }
 
-        driver_initialized = false;
+        // Unmap MMIO
+        vmm.unmapMmio(self.mmio_base, self.mmio_size);
+
+        // Use release ordering to ensure all cleanup is visible before
+        // other threads see driver_initialized = false
+        @atomicStore(bool, &driver_initialized, false, .release);
         console.info("E1000e: Deinitialized", .{});
     }
 };
@@ -996,7 +1640,9 @@ pub const E1000e = struct {
 // ============================================================================
 
 /// Static driver instance (for single NIC)
+/// Note: driver_instance fields are undefined until driver_initialized is true
 var driver_instance: E1000e = undefined;
+/// Use atomic operations to safely check from multiple threads (IRQ handler, getDriver)
 var driver_initialized: bool = false;
 
 /// Default RX callback (just logs packets for now)
@@ -1006,8 +1652,9 @@ fn defaultRxCallback(data: []u8) void {
 }
 
 /// Get the driver instance (if initialized)
+/// Thread-safe: uses atomic load on driver_initialized flag
 pub fn getDriver() ?*E1000e {
-    if (driver_initialized) {
+    if (@atomicLoad(bool, &driver_initialized, .acquire)) {
         return &driver_instance;
     }
     return null;
@@ -1036,7 +1683,9 @@ pub fn initFromPci(devices: *const pci.DeviceList, pci_ecam: *const pci.Ecam) !*
     };
 
     const driver = try E1000e.init(nic, pci_ecam);
-    driver_initialized = true;
+    // Use release ordering to ensure all driver initialization is visible
+    // before other threads see driver_initialized = true
+    @atomicStore(bool, &driver_initialized, true, .release);
     return driver;
 }
 

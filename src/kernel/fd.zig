@@ -14,6 +14,7 @@ const std = @import("std");
 const heap = @import("heap");
 const console = @import("console");
 const uapi = @import("uapi");
+const sync = @import("sync");
 
 const Errno = uapi.errno.Errno;
 
@@ -78,6 +79,9 @@ pub const FileDescriptor = struct {
 
     /// Current file position (for seekable files)
     position: u64,
+
+    /// Lock for atomic operations (e.g. writev)
+    lock: sync.Spinlock,
 
     /// Increment reference count
     pub fn ref(self: *FileDescriptor) void {
@@ -235,6 +239,7 @@ pub fn createFd(ops: *const FileOps, flags: u32, private_data: ?*anyopaque) !*Fi
         .flags = flags,
         .refcount = 1,
         .position = 0,
+        .lock = .{},
     };
     return fd;
 }

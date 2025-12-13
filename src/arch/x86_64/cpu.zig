@@ -153,6 +153,12 @@ pub inline fn enableAndHalt() void {
     asm volatile ("sti; hlt");
 }
 
+/// CPU spin-loop hint
+/// Improves performance in spin-wait loops by reducing CPU power consumption
+/// and memory order violations
+pub inline fn pause() void {
+    asm volatile ("pause");
+}
 
 // TLB Operations
 
@@ -216,4 +222,15 @@ pub inline fn cpuid(leaf: u32, subleaf: u32) CpuidResult {
         .ecx = ecx,
         .edx = edx,
     };
+}
+
+/// Read Time Stamp Counter (TSC)
+pub inline fn rdtsc() u64 {
+    var low: u32 = undefined;
+    var high: u32 = undefined;
+    asm volatile ("rdtsc"
+        : [low] "={eax}" (low),
+          [high] "={edx}" (high),
+    );
+    return (@as(u64, high) << 32) | low;
 }

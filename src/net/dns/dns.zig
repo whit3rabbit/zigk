@@ -27,9 +27,13 @@ pub const Header = extern struct {
     pub fn getFlags(self: Header) u16 { return @byteSwap(self.flags); }
     pub fn getQdCount(self: Header) u16 { return @byteSwap(self.qd_count); }
     pub fn getAnCount(self: Header) u16 { return @byteSwap(self.an_count); }
-    
+
     pub fn setFlags(self: *Header, f: u16) void { self.flags = @byteSwap(f); }
     pub fn setQdCount(self: *Header, c: u16) void { self.qd_count = @byteSwap(c); }
+
+    comptime {
+        if (@sizeOf(@This()) != 12) @compileError("DNS Header must be 12 bytes");
+    }
 };
 
 /// DNS Flags

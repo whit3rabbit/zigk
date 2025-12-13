@@ -50,6 +50,7 @@ pub fn parseOptions(pkt: *const PacketBuffer, tcp_hdr: *const TcpHeader, opts: *
             },
             c.TCPOPT_MSS => {
                 // MSS option: Kind(1) + Length(1) + MSS(2)
+                if (i + 1 >= options_end) return;
                 if (i + c.TCPOLEN_MSS > options_end) return;
                 if (pkt.data[i + 1] != c.TCPOLEN_MSS) {
                     i += pkt.data[i + 1];
@@ -62,6 +63,7 @@ pub fn parseOptions(pkt: *const PacketBuffer, tcp_hdr: *const TcpHeader, opts: *
             },
             c.TCPOPT_WINDOW => {
                 // Window Scale option: Kind(1) + Length(1) + ShiftCount(1)
+                if (i + 1 >= options_end) return;
                 if (i + c.TCPOLEN_WINDOW > options_end) return;
                 if (pkt.data[i + 1] != c.TCPOLEN_WINDOW) {
                     i += pkt.data[i + 1];
@@ -73,6 +75,7 @@ pub fn parseOptions(pkt: *const PacketBuffer, tcp_hdr: *const TcpHeader, opts: *
             },
             c.TCPOPT_SACK_PERM => {
                 // SACK Permitted option: Kind(1) + Length(1), no data
+                if (i + 1 >= options_end) return;
                 if (i + c.TCPOLEN_SACK_PERM > options_end) return;
                 if (pkt.data[i + 1] != c.TCPOLEN_SACK_PERM) {
                     i += pkt.data[i + 1];
@@ -83,6 +86,7 @@ pub fn parseOptions(pkt: *const PacketBuffer, tcp_hdr: *const TcpHeader, opts: *
             },
             c.TCPOPT_TIMESTAMP => {
                 // Timestamp option: Kind(1) + Length(1) + TSval(4) + TSecr(4)
+                if (i + 1 >= options_end) return;
                 if (i + c.TCPOLEN_TIMESTAMP > options_end) return;
                 if (pkt.data[i + 1] != c.TCPOLEN_TIMESTAMP) {
                     i += pkt.data[i + 1];

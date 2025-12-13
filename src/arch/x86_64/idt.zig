@@ -140,6 +140,7 @@ const IdtPtr = packed struct(u80) {
 
 // Interrupt frame pushed by CPU on interrupt/exception
 // This is the minimal frame; handlers may push additional registers
+// Layout must match asm_helpers.S:isr_common
 pub const InterruptFrame = extern struct {
     // Pushed by our stub
     r15: u64,
@@ -168,6 +169,16 @@ pub const InterruptFrame = extern struct {
     rflags: u64,
     rsp: u64,
     ss: u64,
+
+    // 22 u64 fields = 176 bytes
+    comptime {
+        if (@sizeOf(InterruptFrame) != 176) @compileError("InterruptFrame must be 176 bytes (must match asm_helpers.S)");
+        // Verify cs is at offset 144 as expected by assembly
+        if (@offsetOf(InterruptFrame, "cs") != 144) @compileError("cs must be at offset 144");
+        if (@offsetOf(InterruptFrame, "ss") != 168) @compileError("ss must be at offset 168");
+        if (@offsetOf(InterruptFrame, "vector") != 120) @compileError("vector must be at offset 120");
+        if (@offsetOf(InterruptFrame, "rax") != 112) @compileError("rax must be at offset 112");
+    }
 };
 
 // Static IDT
@@ -181,74 +192,27 @@ var handlers: [IDT_ENTRIES]?InterruptHandler = [_]?InterruptHandler{null} ** IDT
 
 // ISR Stubs - defined in asm_helpers.S
 // Each stub: pushes error/dummy, pushes vector, saves regs, calls dispatcher
+// All 256 stubs are generated using comptime @extern
 
-// External references to the assembly stubs
-extern fn isr_stub_0() callconv(.c) void;
-extern fn isr_stub_1() callconv(.c) void;
-extern fn isr_stub_2() callconv(.c) void;
-extern fn isr_stub_3() callconv(.c) void;
-extern fn isr_stub_4() callconv(.c) void;
-extern fn isr_stub_5() callconv(.c) void;
-extern fn isr_stub_6() callconv(.c) void;
-extern fn isr_stub_7() callconv(.c) void;
-extern fn isr_stub_8() callconv(.c) void;
-extern fn isr_stub_9() callconv(.c) void;
-extern fn isr_stub_10() callconv(.c) void;
-extern fn isr_stub_11() callconv(.c) void;
-extern fn isr_stub_12() callconv(.c) void;
-extern fn isr_stub_13() callconv(.c) void;
-extern fn isr_stub_14() callconv(.c) void;
-extern fn isr_stub_15() callconv(.c) void;
-extern fn isr_stub_16() callconv(.c) void;
-extern fn isr_stub_17() callconv(.c) void;
-extern fn isr_stub_18() callconv(.c) void;
-extern fn isr_stub_19() callconv(.c) void;
-extern fn isr_stub_20() callconv(.c) void;
-extern fn isr_stub_21() callconv(.c) void;
-extern fn isr_stub_22() callconv(.c) void;
-extern fn isr_stub_23() callconv(.c) void;
-extern fn isr_stub_24() callconv(.c) void;
-extern fn isr_stub_25() callconv(.c) void;
-extern fn isr_stub_26() callconv(.c) void;
-extern fn isr_stub_27() callconv(.c) void;
-extern fn isr_stub_28() callconv(.c) void;
-extern fn isr_stub_29() callconv(.c) void;
-extern fn isr_stub_30() callconv(.c) void;
-extern fn isr_stub_31() callconv(.c) void;
-extern fn isr_stub_32() callconv(.c) void;
-extern fn isr_stub_33() callconv(.c) void;
-extern fn isr_stub_34() callconv(.c) void;
-extern fn isr_stub_35() callconv(.c) void;
-extern fn isr_stub_36() callconv(.c) void;
-extern fn isr_stub_37() callconv(.c) void;
-extern fn isr_stub_38() callconv(.c) void;
-extern fn isr_stub_39() callconv(.c) void;
-extern fn isr_stub_40() callconv(.c) void;
-extern fn isr_stub_41() callconv(.c) void;
-extern fn isr_stub_42() callconv(.c) void;
-extern fn isr_stub_43() callconv(.c) void;
-extern fn isr_stub_44() callconv(.c) void;
-extern fn isr_stub_45() callconv(.c) void;
-extern fn isr_stub_46() callconv(.c) void;
-extern fn isr_stub_47() callconv(.c) void;
+const std = @import("std");
 
-// Stub table for IDT setup
-const stub_table = [_]*const fn () callconv(.c) void{
-    isr_stub_0,  isr_stub_1,  isr_stub_2,  isr_stub_3,
-    isr_stub_4,  isr_stub_5,  isr_stub_6,  isr_stub_7,
-    isr_stub_8,  isr_stub_9,  isr_stub_10, isr_stub_11,
-    isr_stub_12, isr_stub_13, isr_stub_14, isr_stub_15,
-    isr_stub_16, isr_stub_17, isr_stub_18, isr_stub_19,
-    isr_stub_20, isr_stub_21, isr_stub_22, isr_stub_23,
-    isr_stub_24, isr_stub_25, isr_stub_26, isr_stub_27,
-    isr_stub_28, isr_stub_29, isr_stub_30, isr_stub_31,
-    isr_stub_32, isr_stub_33, isr_stub_34, isr_stub_35,
-    isr_stub_36, isr_stub_37, isr_stub_38, isr_stub_39,
-    isr_stub_40, isr_stub_41, isr_stub_42, isr_stub_43,
-    isr_stub_44, isr_stub_45, isr_stub_46, isr_stub_47,
+// Get stub pointer by vector number using comptime extern references
+fn getStubPtr(comptime vec: usize) *const fn () callconv(.c) void {
+    const stub_name = std.fmt.comptimePrint("isr_stub_{d}", .{vec});
+    return @extern(*const fn () callconv(.c) void, .{ .name = stub_name });
+}
+
+// Stub table for IDT setup - generated at comptime from assembly stubs
+const stub_table = blk: {
+    @setEvalBranchQuota(100000);
+    var table: [IDT_ENTRIES]*const fn () callconv(.c) void = undefined;
+    for (0..IDT_ENTRIES) |i| {
+        table[i] = getStubPtr(i);
+    }
+    break :blk table;
 };
 
-/// Initialize the IDT with exception and IRQ handlers
+/// Initialize the IDT with exception, IRQ, and MSI-X handlers
 pub fn init() void {
     // Set up exception handlers (vectors 0-31)
     for (0..32) |i| {
@@ -263,6 +227,13 @@ pub fn init() void {
 
     // Set up IRQ handlers (vectors 32-47)
     for (32..48) |i| {
+        const handler_addr = @intFromPtr(stub_table[i]);
+        idt_table[i] = IdtGate.interrupt(handler_addr, 0);
+    }
+
+    // Set up MSI/MSI-X handlers (vectors 48-255)
+    // These are available for PCI devices using Message Signaled Interrupts
+    for (48..IDT_ENTRIES) |i| {
         const handler_addr = @intFromPtr(stub_table[i]);
         idt_table[i] = IdtGate.interrupt(handler_addr, 0);
     }
@@ -298,19 +269,15 @@ export fn dispatch_interrupt(frame: *InterruptFrame) callconv(.c) *InterruptFram
     const vector: u8 = @truncate(frame.vector);
 
     if (handlers[vector]) |handler| {
-        // Call the handler - it may modify the frame or request a context switch
-        // For context switch, we use the new_frame mechanism in interrupts.zig
         handler(frame);
     }
 
     // Check if we need to switch to a different frame (context switch)
-    // The new_frame pointer is set by the timer handler when switching threads
     if (new_frame) |nf| {
         new_frame = null;
         return nf;
     }
 
-    // Return the same frame (no context switch)
     return frame;
 }
 

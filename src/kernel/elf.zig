@@ -86,6 +86,10 @@ pub const Elf64_Ehdr = extern struct {
     e_shentsize: u16, // Size of section header entry
     e_shnum: u16, // Number of section header entries
     e_shstrndx: u16, // Section name string table index
+
+    comptime {
+        if (@sizeOf(@This()) != 64) @compileError("Elf64_Ehdr must be 64 bytes");
+    }
 };
 
 /// ELF64 program header
@@ -98,6 +102,10 @@ pub const Elf64_Phdr = extern struct {
     p_filesz: u64, // Size in file
     p_memsz: u64, // Size in memory
     p_align: u64, // Alignment
+
+    comptime {
+        if (@sizeOf(@This()) != 56) @compileError("Elf64_Phdr must be 56 bytes");
+    }
 };
 
 // =============================================================================
@@ -304,8 +312,18 @@ pub fn load(data: []const u8, pml4_phys: u64, load_base: u64) ElfError!ElfLoadRe
         }
         total_memory += phdr.p_memsz;
 
-        // Calculate virtual address with base offset
+        // Calculate virtual address with base offset (with overflow check)
+        if (actual_base > std.math.maxInt(u64) - phdr.p_vaddr) {
+            console.err("ELF: Base + p_vaddr overflow: base={x} vaddr={x}", .{ actual_base, phdr.p_vaddr });
+            return ElfError.InvalidAddressRange;
+        }
         const vaddr = actual_base + phdr.p_vaddr;
+
+        // Calculate end address (with overflow check)
+        if (vaddr > std.math.maxInt(u64) - phdr.p_memsz) {
+            console.err("ELF: vaddr + p_memsz overflow: vaddr={x} memsz={x}", .{ vaddr, phdr.p_memsz });
+            return ElfError.InvalidAddressRange;
+        }
         const vaddr_end = vaddr + phdr.p_memsz;
 
         // Update address range
@@ -604,10 +622,11 @@ pub fn setupStack(
     while (i > 0) {
         i -= 1;
         sp -= envp[i].len + 1; // +1 for null terminator
+        try checkStackBounds(sp, stack_base);
         envp_ptrs[i] = sp;
         try copyToUserspace(pml4_phys, sp, envp[i]);
         // Write null terminator
-        writeToUserspace(pml4_phys, sp + envp[i].len, &[_]u8{0});
+        try writeToUserspace(pml4_phys, sp + envp[i].len, &[_]u8{0});
     }
 
     // Push argv strings (in reverse order)
@@ -615,55 +634,64 @@ pub fn setupStack(
     while (i > 0) {
         i -= 1;
         sp -= argv[i].len + 1;
+        try checkStackBounds(sp, stack_base);
         argv_ptrs[i] = sp;
         try copyToUserspace(pml4_phys, sp, argv[i]);
-        writeToUserspace(pml4_phys, sp + argv[i].len, &[_]u8{0});
+        try writeToUserspace(pml4_phys, sp + argv[i].len, &[_]u8{0});
     }
 
     // Align to 16 bytes
     sp = sp & ~@as(u64, 15);
+    try checkStackBounds(sp, stack_base);
 
     // Push auxv NULL terminator (AT_NULL = 0, 0)
     sp -= 16;
-    writeU64ToUserspace(pml4_phys, sp, 0); // id = AT_NULL
-    writeU64ToUserspace(pml4_phys, sp + 8, 0); // value = 0
+    try checkStackBounds(sp, stack_base);
+    try writeU64ToUserspace(pml4_phys, sp, 0); // id = AT_NULL
+    try writeU64ToUserspace(pml4_phys, sp + 8, 0); // value = 0
 
     // Push auxv entries (in reverse order)
     var j: usize = auxv.len;
     while (j > 0) {
         j -= 1;
         sp -= 16;
-        writeU64ToUserspace(pml4_phys, sp, auxv[j].id);
-        writeU64ToUserspace(pml4_phys, sp + 8, auxv[j].value);
+        try checkStackBounds(sp, stack_base);
+        try writeU64ToUserspace(pml4_phys, sp, auxv[j].id);
+        try writeU64ToUserspace(pml4_phys, sp + 8, auxv[j].value);
     }
 
     // Push NULL terminator for envp
     sp -= 8;
-    writeU64ToUserspace(pml4_phys, sp, 0);
+    try checkStackBounds(sp, stack_base);
+    try writeU64ToUserspace(pml4_phys, sp, 0);
 
     // Push envp pointers
     i = envc;
     while (i > 0) {
         i -= 1;
         sp -= 8;
-        writeU64ToUserspace(pml4_phys, sp, envp_ptrs[i]);
+        try checkStackBounds(sp, stack_base);
+        try writeU64ToUserspace(pml4_phys, sp, envp_ptrs[i]);
     }
 
     // Push NULL terminator for argv
     sp -= 8;
-    writeU64ToUserspace(pml4_phys, sp, 0);
+    try checkStackBounds(sp, stack_base);
+    try writeU64ToUserspace(pml4_phys, sp, 0);
 
     // Push argv pointers
     i = argc;
     while (i > 0) {
         i -= 1;
         sp -= 8;
-        writeU64ToUserspace(pml4_phys, sp, argv_ptrs[i]);
+        try checkStackBounds(sp, stack_base);
+        try writeU64ToUserspace(pml4_phys, sp, argv_ptrs[i]);
     }
 
     // Push argc
     sp -= 8;
-    writeU64ToUserspace(pml4_phys, sp, argc);
+    try checkStackBounds(sp, stack_base);
+    try writeU64ToUserspace(pml4_phys, sp, argc);
 
     // REMOVED: sp = sp & ~@as(u64, 15);
     // Rationale: This alignment AFTER writing argc effectively "pops" argc
@@ -675,18 +703,27 @@ pub fn setupStack(
     return sp;
 }
 
-/// Write a u64 to userspace (stack setup - log errors but continue)
-fn writeU64ToUserspace(pml4_phys: u64, vaddr: u64, value: u64) void {
-    const bytes = std.mem.toBytes(value);
-    writeToUserspace(pml4_phys, vaddr, &bytes);
+/// Check that stack pointer is within bounds
+inline fn checkStackBounds(sp: u64, stack_base: u64) !void {
+    if (sp < stack_base) {
+        console.err("ELF: Stack overflow - sp={x} below stack_base={x}", .{ sp, stack_base });
+        return error.StackOverflow;
+    }
 }
 
-/// Write bytes to userspace (stack setup - log errors but continue)
-fn writeToUserspace(pml4_phys: u64, vaddr: u64, data: []const u8) void {
+/// Write a u64 to userspace (stack setup - propagate errors)
+fn writeU64ToUserspace(pml4_phys: u64, vaddr: u64, value: u64) !void {
+    const bytes = std.mem.toBytes(value);
+    try writeToUserspace(pml4_phys, vaddr, &bytes);
+}
+
+/// Write bytes to userspace (stack setup - propagate errors)
+fn writeToUserspace(pml4_phys: u64, vaddr: u64, data: []const u8) !void {
     // Stack pages are mapped immediately before this call, so translation
-    // failures indicate a severe bug. Log but continue.
+    // failures indicate a severe bug.
     copyToUserspace(pml4_phys, vaddr, data) catch |err| {
         console.err("ELF: writeToUserspace failed at {x}: {}", .{ vaddr, err });
+        return err;
     };
 }
 

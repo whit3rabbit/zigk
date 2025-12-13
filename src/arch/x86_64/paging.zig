@@ -34,6 +34,11 @@ pub const VirtualAddress = packed struct {
     pub fn toU64(self: VirtualAddress) u64 {
         return @bitCast(self);
     }
+
+    comptime {
+        if (@sizeOf(@This()) != 8) @compileError("VirtualAddress must be 8 bytes");
+        if (@bitSizeOf(@This()) != 64) @compileError("VirtualAddress must be 64 bits");
+    }
 };
 
 /// Page Table Entry for x86_64 4-level paging
@@ -104,6 +109,10 @@ pub const PageTableEntry = packed struct(u64) {
     /// Check if entry maps a huge page (2MB or 1GB)
     pub fn isHugePage(self: Self) bool {
         return self.huge_page;
+    }
+
+    comptime {
+        if (@sizeOf(@This()) != 8) @compileError("PageTableEntry must be 8 bytes");
     }
 };
 

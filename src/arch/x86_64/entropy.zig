@@ -103,3 +103,35 @@ pub fn getHardwareEntropy() u64 {
 pub fn isInitialized() bool {
     return initialized;
 }
+
+/// Fill a buffer with hardware entropy (for sys_getrandom)
+/// Uses RDRAND directly when available for cryptographic-quality randomness
+/// Falls back to getHardwareEntropy() if RDRAND unavailable
+pub fn fillWithHardwareEntropy(buf: []u8) void {
+    var offset: usize = 0;
+
+    while (offset < buf.len) {
+        // Get 8 bytes of entropy
+        const entropy: u64 = if (rdrand_available) blk: {
+            // Try RDRAND with retries
+            var attempts: u32 = 0;
+            while (attempts < 10) : (attempts += 1) {
+                if (rdrand64()) |value| {
+                    break :blk value;
+                }
+            }
+            // Fallback if RDRAND keeps failing
+            break :blk getHardwareEntropy();
+        } else getHardwareEntropy();
+
+        // Copy bytes to buffer
+        const bytes = @as(*const [8]u8, @ptrCast(&entropy));
+        const remaining = buf.len - offset;
+        const to_copy = @min(remaining, 8);
+
+        for (0..to_copy) |i| {
+            buf[offset + i] = bytes[i];
+        }
+        offset += to_copy;
+    }
+}

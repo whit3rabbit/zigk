@@ -7,6 +7,7 @@ const idt = @import("idt.zig");
 const pic = @import("pic.zig");
 const cpu = @import("cpu.zig");
 const debug = @import("debug.zig");
+const apic = @import("apic/root.zig");
 
 // Import console for output (will be set up during init)
 var console_writer: ?*const fn ([]const u8) void = null;
@@ -14,6 +15,10 @@ var console_writer: ?*const fn ([]const u8) void = null;
 // Keyboard IRQ handler callback (set by keyboard driver)
 // This allows the HAL to call into the keyboard driver without importing it
 var keyboard_handler: ?*const fn () void = null;
+
+// Mouse IRQ handler callback (set by mouse driver)
+// This allows the HAL to call into the mouse driver without importing it
+var mouse_handler: ?*const fn () void = null;
 
 // Timer IRQ handler callback (set by scheduler)
 // Returns a new frame pointer for context switching
@@ -105,6 +110,12 @@ pub fn setKeyboardHandler(handler: *const fn () void) void {
     keyboard_handler = handler;
 }
 
+/// Set the mouse handler callback
+/// This allows the mouse driver to register its IRQ handler
+pub fn setMouseHandler(handler: *const fn () void) void {
+    mouse_handler = handler;
+}
+
 /// Set the crash handler callback
 pub fn setCrashHandler(handler: *const fn (u8, u64) noreturn) void {
     crash_handler = handler;
@@ -131,7 +142,6 @@ pub fn setFpuAccessHandler(handler: *const fn () bool) void {
     fpu_access_handler = handler;
 }
 
-/// Generic exception handler
 /// Generic exception handler
 fn exceptionHandler(frame: *idt.InterruptFrame) void {
     const vector: u8 = @truncate(frame.vector);
@@ -251,9 +261,12 @@ fn irqHandler(frame: *idt.InterruptFrame) void {
     const vector: u8 = @truncate(frame.vector);
     const irq = vector - pic.IRQ_OFFSET;
 
-    // Check for spurious IRQ
-    if (pic.isSpurious(irq)) {
-        return;
+    // In APIC mode, we use LAPIC vectors directly
+    // In PIC mode, check for spurious IRQ
+    if (!apic.isActive()) {
+        if (pic.isSpurious(irq)) {
+            return;
+        }
     }
 
     // Handle specific IRQs
@@ -262,10 +275,15 @@ fn irqHandler(frame: *idt.InterruptFrame) void {
             // Timer IRQ - delegate to scheduler for preemption
             if (timer_handler) |handler| {
                 // The handler returns the frame to restore (possibly different thread)
-                const new_frame = handler(frame);
+                const returned_frame = handler(frame);
                 // Signal dispatch_interrupt to use this frame instead
-                if (new_frame != frame) {
-                    idt.setNewFrame(new_frame);
+                if (returned_frame != frame) {
+                    @import("console").debug("irqHandler: ctx switch old={x} new={x}", .{
+                        @intFromPtr(frame), @intFromPtr(returned_frame),
+                    });
+                    idt.setNewFrame(returned_frame);
+                } else {
+                    @import("console").debug("irqHandler: NO switch (same frame {x})", .{@intFromPtr(frame)});
                 }
             }
             // If no timer handler, just acknowledge and continue
@@ -279,13 +297,27 @@ fn irqHandler(frame: *idt.InterruptFrame) void {
                 _ = @import("io.zig").inb(0x60);
             }
         },
+        12 => {
+            // Mouse IRQ - delegate to mouse driver
+            if (mouse_handler) |handler| {
+                handler();
+            } else {
+                // Fallback: read data to acknowledge (prevents mouse lockup)
+                _ = @import("io.zig").inb(0x60);
+            }
+        },
         else => {
-            // Unhandled IRQ
+            // Unhandled IRQ - log for debugging (rate-limited)
+            logUnexpectedIrq(irq);
         },
     }
 
-    // Send EOI to PIC
-    pic.sendEoi(irq);
+    // Send EOI - use APIC or PIC depending on mode
+    if (apic.isActive()) {
+        apic.lapic.sendEoi();
+    } else {
+        pic.sendEoi(irq);
+    }
 }
 
 /// Print interrupt frame (register dump)
@@ -373,4 +405,181 @@ fn printHex(value: u64) void {
     }
 
     write(&buf);
+}
+
+// Rate-limited logging for unexpected IRQs
+var unexpected_irq_count: u32 = 0;
+var last_unexpected_irq: u8 = 0xFF;
+
+fn logUnexpectedIrq(irq: u8) void {
+    unexpected_irq_count +%= 1;
+
+    // Log first occurrence of each IRQ, then rate-limit
+    if (irq != last_unexpected_irq or unexpected_irq_count <= 1) {
+        last_unexpected_irq = irq;
+        if (console_writer) |write| {
+            write("[WARN] Unexpected IRQ: ");
+            const hex_chars = "0123456789ABCDEF";
+            var buf: [2]u8 = undefined;
+            buf[0] = hex_chars[irq >> 4];
+            buf[1] = hex_chars[irq & 0x0F];
+            write(&buf);
+            write("\n");
+        }
+    }
+}
+
+// =============================================================================
+// MSI-X Vector Allocator
+// =============================================================================
+// Manages allocation of interrupt vectors for MSI-X devices.
+// Vectors 64-127 are the primary MSI-X range (64 vectors available).
+// Vectors 128-255 are reserved for future expansion.
+
+/// First vector available for MSI-X allocation
+pub const MSIX_VECTOR_START: u8 = 64;
+
+/// Last vector available for MSI-X allocation (exclusive)
+pub const MSIX_VECTOR_END: u8 = 128;
+
+/// Maximum number of MSI-X vectors available
+pub const MSIX_VECTOR_COUNT: u8 = MSIX_VECTOR_END - MSIX_VECTOR_START;
+
+/// Bitmap tracking allocated MSI-X vectors (64 vectors = 1 u64)
+var msix_allocated: u64 = 0;
+
+/// MSI-X handler callbacks indexed by vector offset (0-63 maps to vectors 64-127)
+var msix_handlers: [MSIX_VECTOR_COUNT]?*const fn (*idt.InterruptFrame) void = [_]?*const fn (*idt.InterruptFrame) void{null} ** MSIX_VECTOR_COUNT;
+
+/// Allocation result for MSI-X vectors
+pub const MsixVectorAllocation = struct {
+    /// First allocated vector number
+    first_vector: u8,
+    /// Number of vectors allocated
+    count: u8,
+};
+
+/// Allocate one or more contiguous MSI-X vectors
+/// Returns null if not enough contiguous vectors are available
+pub fn allocateMsixVectors(count: u8) ?MsixVectorAllocation {
+    if (count == 0 or count > MSIX_VECTOR_COUNT) {
+        return null;
+    }
+
+    // Find 'count' contiguous free vectors
+    const mask: u64 = (@as(u64, 1) << @truncate(count)) - 1;
+
+    var offset: u6 = 0;
+    while (offset <= MSIX_VECTOR_COUNT - count) : (offset += 1) {
+        const shifted_mask = mask << offset;
+        if ((msix_allocated & shifted_mask) == 0) {
+            // Found free slot - mark as allocated
+            msix_allocated |= shifted_mask;
+            return MsixVectorAllocation{
+                .first_vector = MSIX_VECTOR_START + offset,
+                .count = count,
+            };
+        }
+    }
+
+    return null; // No contiguous block available
+}
+
+/// Allocate a single MSI-X vector
+pub fn allocateMsixVector() ?u8 {
+    const alloc = allocateMsixVectors(1) orelse return null;
+    return alloc.first_vector;
+}
+
+/// Free previously allocated MSI-X vectors
+pub fn freeMsixVectors(first_vector: u8, count: u8) void {
+    if (first_vector < MSIX_VECTOR_START or first_vector >= MSIX_VECTOR_END) {
+        return;
+    }
+
+    const offset: u6 = @truncate(first_vector - MSIX_VECTOR_START);
+    const actual_count = @min(count, MSIX_VECTOR_END - first_vector);
+    const mask: u64 = (@as(u64, 1) << @truncate(actual_count)) - 1;
+
+    // Clear allocation bits
+    msix_allocated &= ~(mask << offset);
+
+    // Clear handlers
+    for (offset..offset + actual_count) |i| {
+        msix_handlers[i] = null;
+    }
+}
+
+/// Free a single MSI-X vector
+pub fn freeMsixVector(vector: u8) void {
+    freeMsixVectors(vector, 1);
+}
+
+/// Register a handler for an MSI-X vector
+/// The vector must have been previously allocated
+pub fn registerMsixHandler(vector: u8, handler: *const fn (*idt.InterruptFrame) void) bool {
+    if (vector < MSIX_VECTOR_START or vector >= MSIX_VECTOR_END) {
+        return false;
+    }
+
+    const offset: u6 = @truncate(vector - MSIX_VECTOR_START);
+
+    // Check that vector is allocated
+    if ((msix_allocated & (@as(u64, 1) << offset)) == 0) {
+        return false;
+    }
+
+    msix_handlers[offset] = handler;
+
+    // Also register with IDT
+    idt.registerHandler(vector, msixHandler);
+
+    return true;
+}
+
+/// Unregister an MSI-X handler
+pub fn unregisterMsixHandler(vector: u8) void {
+    if (vector < MSIX_VECTOR_START or vector >= MSIX_VECTOR_END) {
+        return;
+    }
+
+    const offset: u6 = @truncate(vector - MSIX_VECTOR_START);
+    msix_handlers[offset] = null;
+    idt.unregisterHandler(vector);
+}
+
+/// Generic MSI-X interrupt handler
+/// Dispatches to device-specific handlers and sends EOI
+fn msixHandler(frame: *idt.InterruptFrame) void {
+    const vector: u8 = @truncate(frame.vector);
+
+    if (vector >= MSIX_VECTOR_START and vector < MSIX_VECTOR_END) {
+        const offset: u6 = @truncate(vector - MSIX_VECTOR_START);
+        if (msix_handlers[offset]) |handler| {
+            handler(frame);
+        }
+    }
+
+    // Send EOI to LAPIC (MSI-X always uses APIC)
+    apic.lapic.sendEoi();
+}
+
+/// Get the number of free MSI-X vectors
+pub fn getFreeMsixVectorCount() u8 {
+    var count: u8 = 0;
+    var remaining = ~msix_allocated;
+    while (remaining != 0) : (remaining &= remaining - 1) {
+        count += 1;
+    }
+    // Only count vectors in our range
+    return @min(count, MSIX_VECTOR_COUNT);
+}
+
+/// Check if a specific vector is allocated
+pub fn isMsixVectorAllocated(vector: u8) bool {
+    if (vector < MSIX_VECTOR_START or vector >= MSIX_VECTOR_END) {
+        return false;
+    }
+    const offset: u6 = @truncate(vector - MSIX_VECTOR_START);
+    return (msix_allocated & (@as(u64, 1) << offset)) != 0;
 }

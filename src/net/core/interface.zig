@@ -3,6 +3,7 @@
 // Represents a network interface (NIC) and provides a common API
 // for the network stack to send/receive packets.
 
+const std = @import("std");
 const packet = @import("packet.zig");
 const PacketBuffer = packet.PacketBuffer;
 
@@ -125,48 +126,18 @@ pub const Interface = struct {
 
     /// Get interface name as slice
     pub fn getName(self: *const Self) []const u8 {
-        var len: usize = 0;
-        while (len < 16 and self.name[len] != 0) : (len += 1) {}
+        const len = std.mem.indexOfScalar(u8, &self.name, 0) orelse self.name.len;
         return self.name[0..len];
     }
 };
 
 /// Convert IP address to dotted-decimal string (for logging)
-pub fn ipToString(ip: u32, buf: []u8) []u8 {
+pub fn ipToString(ip: u32, buf: []u8) []const u8 {
     const a: u8 = @truncate(ip >> 24);
     const b: u8 = @truncate(ip >> 16);
     const c: u8 = @truncate(ip >> 8);
     const d: u8 = @truncate(ip);
-
-    var pos: usize = 0;
-    pos += writeDecimal(buf[pos..], a);
-    buf[pos] = '.';
-    pos += 1;
-    pos += writeDecimal(buf[pos..], b);
-    buf[pos] = '.';
-    pos += 1;
-    pos += writeDecimal(buf[pos..], c);
-    buf[pos] = '.';
-    pos += 1;
-    pos += writeDecimal(buf[pos..], d);
-
-    return buf[0..pos];
-}
-
-fn writeDecimal(buf: []u8, value: u8) usize {
-    if (value >= 100) {
-        buf[0] = '0' + value / 100;
-        buf[1] = '0' + (value / 10) % 10;
-        buf[2] = '0' + value % 10;
-        return 3;
-    } else if (value >= 10) {
-        buf[0] = '0' + value / 10;
-        buf[1] = '0' + value % 10;
-        return 2;
-    } else {
-        buf[0] = '0' + value;
-        return 1;
-    }
+    return std.fmt.bufPrint(buf, "{d}.{d}.{d}.{d}", .{ a, b, c, d }) catch "0.0.0.0";
 }
 
 /// Parse dotted-decimal IP string to u32

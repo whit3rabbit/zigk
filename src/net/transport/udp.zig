@@ -1,9 +1,18 @@
 // UDP Protocol Implementation
 //
-// RFC 768: User Datagram Protocol
+// Complies with:
+// - RFC 768: User Datagram Protocol
 //
 // Provides connectionless datagram service for applications.
-// Will be expanded with socket integration in Phase 6.
+//
+// Header Format:
+// +-----------+-----------+
+// | Source Port | Dest Port |
+// +-----------+-----------+
+// | Length    | Checksum  |
+// +-----------+-----------+
+// | Data ...              |
+// +-----------------------+
 
 const packet = @import("../core/packet.zig");
 const interface = @import("../core/interface.zig");
@@ -47,8 +56,10 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
 
     // Verify UDP checksum (if non-zero)
     if (udp_hdr.checksum != 0) {
+        // Use safe slice access from packet buffer
         const udp_data = pkt.data[pkt.transport_offset..][0..udp_len];
-        const calc_checksum = checksum.udpChecksum(ip.src_ip, ip.dst_ip, udp_data);
+        // Use stored IPs from packet metadata to support reassembled packets
+        const calc_checksum = checksum.udpChecksum(pkt.src_ip, pkt.dst_ip, udp_data);
         if (calc_checksum != 0 and udp_hdr.checksum != calc_checksum) {
             // Checksum mismatch
             return false;

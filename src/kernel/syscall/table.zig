@@ -50,6 +50,8 @@ pub export fn dispatch_syscall(frame: *SyscallFrame) callconv(.c) void {
                     if (mod) |m| {
                         entries = entries ++ @as([]const SyscallEntry, &.{ .{ .value = val, .module = m, .name = name } });
                     }
+                    // Note: Syscalls without handlers will return ENOSYS at runtime.
+                    // This allows incremental syscall implementation during development.
                 }
             }
         break :blk entries;
@@ -80,22 +82,23 @@ pub export fn dispatch_syscall(frame: *SyscallFrame) callconv(.c) void {
 
 /// Helper to call a handler with correct arguments
 /// Automatically maps frame pointer and register arguments
+/// Supports both legacy handlers (returning isize) and new error union handlers (returning SyscallError!usize)
 inline fn callHandler(comptime func: anytype, frame: *SyscallFrame, args: [6]usize) isize {
     const FuncType = @TypeOf(func);
     const type_info = @typeInfo(FuncType);
-    
+
     // Handle function definitions directly vs function pointers if necessary
     // Functions are usually .Fn in Zig, but let's be safe
     const info = switch (type_info) {
         .@"fn" => |f| f,
         else => @compileError("Syscall handler must be a function: " ++ @typeName(FuncType)),
     };
-    
+
     const ArgsTuple = std.meta.ArgsTuple(FuncType);
     var call_args: ArgsTuple = undefined;
-    
+
     comptime var arg_idx = 0;
-    
+
     inline for (info.params, 0..) |param, i| {
         // Special case: Pass frame pointer if requested
         if (param.type == *SyscallFrame) {
@@ -126,8 +129,27 @@ inline fn callHandler(comptime func: anytype, frame: *SyscallFrame, args: [6]usi
             arg_idx += 1;
         }
     }
-    
-    return @call(.auto, func, call_args);
+
+    // Determine return type handling at comptime
+    const ReturnType = info.return_type.?;
+
+    // Legacy handler returning isize directly
+    if (ReturnType == isize) {
+        return @call(.auto, func, call_args);
+    }
+
+    // New error union handler returning SyscallError!usize
+    const return_info = @typeInfo(ReturnType);
+    if (return_info == .error_union) {
+        const result = @call(.auto, func, call_args);
+        if (result) |value| {
+            return @as(isize, @intCast(value));
+        } else |err| {
+            return uapi.errno.errorToReturn(err);
+        }
+    }
+
+    @compileError("Syscall handler must return isize or SyscallError!usize, got: " ++ @typeName(ReturnType));
 }
 
 /// Convert "SYS_NAME" to "sys_name" at comptime

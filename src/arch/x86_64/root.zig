@@ -18,6 +18,8 @@ pub const entropy = @import("entropy.zig");
 pub const syscall = @import("syscall.zig");
 pub const mmio = @import("mmio.zig");
 pub const pit = @import("pit.zig");
+pub const timing = @import("timing.zig");
+pub const apic = @import("apic/root.zig");
 
 /// Initialize all x86_64 HAL subsystems
 pub fn init() void {
@@ -42,6 +44,9 @@ pub fn init() void {
     // Initialize SYSCALL/SYSRET MSRs for fast system calls
     syscall.init();
 
-    // Initialize PIT to 100Hz for scheduler
+    // Calibrate TSC for timing utilities (uses PIT channel 2, not channel 0)
+    timing.calibrate();
+
+    // Initialize PIT channel 0 to 100Hz for scheduler
     pit.init(100);
 }

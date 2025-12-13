@@ -31,6 +31,9 @@ pub const debug = arch.debug;
 pub const entropy = arch.entropy;
 pub const syscall = arch.syscall;
 pub const mmio = arch.mmio;
+pub const pit = arch.pit;
+pub const apic = arch.apic;
+pub const timing = arch.timing;
 
 /// Initialize the Hardware Abstraction Layer
 /// Must be called early in kernel boot before using any HAL functions

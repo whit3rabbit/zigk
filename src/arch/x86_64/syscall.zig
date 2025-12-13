@@ -80,6 +80,7 @@ pub fn getKernelGsBase() u64 {
 
 /// Per-CPU kernel data structure accessed via GS segment
 /// This structure is pointed to by KERNEL_GS_BASE and accessed after SWAPGS
+/// Layout must match asm_helpers.S:_syscall_entry GS offsets
 pub const KernelGsData = extern struct {
     /// Kernel stack pointer (top of stack) for this CPU
     kernel_stack: u64,
@@ -89,6 +90,10 @@ pub const KernelGsData = extern struct {
     current_thread: u64,
     /// Scratch space for syscall entry
     scratch: u64,
+
+    comptime {
+        if (@sizeOf(KernelGsData) != 32) @compileError("KernelGsData must be 32 bytes (must match asm_helpers.S)");
+    }
 };
 
 /// Syscall frame pushed on kernel stack by syscall entry handler
@@ -161,5 +166,10 @@ pub const SyscallFrame = extern struct {
     /// Get the user stack pointer
     pub fn getUserRsp(self: *const SyscallFrame) u64 {
         return self.user_rsp;
+    }
+
+    // 16 u64 fields = 128 bytes
+    comptime {
+        if (@sizeOf(SyscallFrame) != 128) @compileError("SyscallFrame must be 128 bytes (must match asm_helpers.S:_syscall_entry)");
     }
 };

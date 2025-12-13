@@ -1,6 +1,9 @@
 // IPv4 Protocol Implementation
 //
-// RFC 791: Internet Protocol
+// Complies with:
+// - RFC 791: Internet Protocol
+// - RFC 1191: Path MTU Discovery
+// - RFC 7126: Recommendations on Filtering of IP Options
 //
 // Handles IPv4 packet parsing, validation, and building.
 // Dispatches to ICMP, UDP based on protocol field.
@@ -11,6 +14,7 @@ const interface = @import("../core/interface.zig");
 const checksum = @import("../core/checksum.zig");
 const ethernet = @import("../ethernet/ethernet.zig");
 const arp = @import("arp.zig");
+const pmtu = @import("pmtu.zig");
 const PacketBuffer = packet.PacketBuffer;
 const Ipv4Header = packet.Ipv4Header;
 const EthernetHeader = packet.EthernetHeader;
@@ -66,103 +70,20 @@ pub fn init(allocator: std.mem.Allocator) void {
 // Path MTU Discovery (RFC 1191)
 // ============================================================================
 
-/// Default MTU for Ethernet
-pub const DEFAULT_MTU: u16 = 1500;
+// Logic moved to pmtu.zig
+pub const DEFAULT_MTU = pmtu.DEFAULT_MTU;
+pub const MIN_MTU = pmtu.MIN_MTU;
 
-/// Minimum MTU per RFC 791 (all hosts must accept 576-byte datagrams)
-pub const MIN_MTU: u16 = 576;
-
-/// Maximum number of PMTU cache entries
-const PMTU_CACHE_SIZE: usize = 16;
-
-/// PMTU cache entry timeout (conceptual - no timer in MVP)
-/// After this many "accesses" we should refresh the entry
-const PMTU_ENTRY_AGE_LIMIT: u32 = 1000;
-
-/// Path MTU cache entry
-const PmtuEntry = struct {
-    destination_ip: u32, // 0 = empty slot
-    mtu: u16, // Discovered MTU
-    age: u32, // Access counter for LRU-ish aging
-};
-
-/// PMTU cache (simple array with LRU-ish replacement)
-var pmtu_cache: [PMTU_CACHE_SIZE]PmtuEntry = [_]PmtuEntry{.{
-    .destination_ip = 0,
-    .mtu = DEFAULT_MTU,
-    .age = 0,
-}} ** PMTU_CACHE_SIZE;
-
-/// Global age counter for cache entries
-var pmtu_age_counter: u32 = 0;
-
-/// Look up PMTU for a destination IP
-/// Returns DEFAULT_MTU if no entry exists
 pub fn lookupPmtu(dst_ip: u32) u16 {
-    for (&pmtu_cache) |*entry| {
-        if (entry.destination_ip == dst_ip) {
-            // Update age on access
-            pmtu_age_counter +%= 1;
-            entry.age = pmtu_age_counter;
-            return entry.mtu;
-        }
-    }
-    return DEFAULT_MTU;
+    return pmtu.lookupPmtu(dst_ip);
 }
 
-/// Update PMTU cache with a new (lower) MTU value
-/// Called when we receive ICMP Fragmentation Needed (Type 3 Code 4)
 pub fn updatePmtu(dst_ip: u32, new_mtu: u16) void {
-    // Clamp MTU to valid range
-    const mtu = if (new_mtu < MIN_MTU) MIN_MTU else new_mtu;
-
-    pmtu_age_counter +%= 1;
-
-    // First, check if entry already exists
-    for (&pmtu_cache) |*entry| {
-        if (entry.destination_ip == dst_ip) {
-            // Only update if new MTU is smaller (PMTUD reduces, never increases)
-            // To increase, we'd need explicit "probe" support (RFC 4821)
-            if (mtu < entry.mtu) {
-                entry.mtu = mtu;
-            }
-            entry.age = pmtu_age_counter;
-            return;
-        }
-    }
-
-    // Entry doesn't exist - find slot (empty or oldest)
-    var oldest_idx: usize = 0;
-    var oldest_age: u32 = pmtu_cache[0].age;
-
-    for (pmtu_cache, 0..) |entry, i| {
-        // Prefer empty slots
-        if (entry.destination_ip == 0) {
-            oldest_idx = i;
-            break;
-        }
-        // Track oldest for LRU replacement
-        if (entry.age < oldest_age) {
-            oldest_age = entry.age;
-            oldest_idx = i;
-        }
-    }
-
-    // Insert new entry
-    pmtu_cache[oldest_idx] = .{
-        .destination_ip = dst_ip,
-        .mtu = mtu,
-        .age = pmtu_age_counter,
-    };
+    pmtu.updatePmtu(dst_ip, new_mtu);
 }
 
-/// Get effective MSS for a destination considering PMTU
-/// MSS = MTU - IP header - TCP header
 pub fn getEffectiveMss(dst_ip: u32) u16 {
-    const mtu = lookupPmtu(dst_ip);
-    // MSS = MTU - 20 (IP header) - 20 (TCP header minimum)
-    const overhead: u16 = 40;
-    return if (mtu > overhead) mtu - overhead else MIN_MTU - overhead;
+    return pmtu.getEffectiveMss(dst_ip);
 }
 
 // ============================================================================
@@ -279,6 +200,10 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
 
     // Check if packet is for us (unicast, broadcast, or multicast)
     const dst_ip = ip.getDstIp();
+    
+    // Store destination IP in packet metadata for transport layers
+    // Important for reassembled packets where the IP header is virtual/stripped
+    pkt.dst_ip = dst_ip;
 
     // Determine packet type and whether we should accept it
     if (dst_ip == iface.ip_addr) {
@@ -350,6 +275,7 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
         
         // Copy relevant metadata from original packet
         virt_pkt.src_ip = pkt.src_ip;
+        virt_pkt.dst_ip = pkt.dst_ip;
         virt_pkt.src_port = pkt.src_port; 
         virt_pkt.ip_protocol = ip.protocol;
         
@@ -442,10 +368,28 @@ pub fn sendPacket(iface: *Interface, pkt: *PacketBuffer, dst_ip: u32) bool {
     const next_hop = iface.getGateway(dst_ip);
 
     // Resolve MAC address
-    const dst_mac = arp.resolveOrRequest(iface, next_hop, pkt) orelse {
-        // ARP not resolved yet - packet queued in ARP module
-        return true;
-    };
+    // Resolve MAC address
+    // Check for broadcast (255.255.255.255 or subnet broadcast)
+    var dst_mac: [6]u8 = undefined;
+
+    if (isBroadcast(dst_ip, iface.netmask) or dst_ip == 0xFFFFFFFF) {
+        dst_mac = ethernet.BROADCAST_MAC;
+    } else if (isMulticast(dst_ip)) {
+        // Construct IPv4 Multicast MAC: 01:00:5E:xx:xx:xx
+        // Lower 23 bits of IP address mapped to MAC
+        dst_mac[0] = 0x01;
+        dst_mac[1] = 0x00;
+        dst_mac[2] = 0x5E;
+        dst_mac[3] = @truncate((dst_ip >> 16) & 0x7F);
+        dst_mac[4] = @truncate((dst_ip >> 8) & 0xFF);
+        dst_mac[5] = @truncate(dst_ip & 0xFF);
+    } else {
+        // Unicast - resolve via ARP
+        dst_mac = arp.resolveOrRequest(iface, next_hop, pkt) orelse {
+            // ARP not resolved yet - packet queued in ARP module
+            return true;
+        };
+    }
 
     // Build Ethernet header
     ethernet.buildFrame(iface, pkt, dst_mac, ethernet.ETHERTYPE_IPV4);
@@ -504,7 +448,7 @@ fn sendFragmentedPacket(iface: *Interface, pkt: *PacketBuffer, dst_mac: [6]u8) b
         frag_pkt.ip_offset = frag_ip_offset;
         frag_pkt.transport_offset = frag_ip_offset + ip_header_len; // roughly
         
-        const frag_ip: *Ipv4Header = @ptrCast(@alignCast(frag_buf[frag_ip_offset..].ptr));
+        const frag_ip: *Ipv4Header = @ptrCast(@alignCast(&frag_buf[frag_ip_offset]));
         
         // Copy original IP header fields
         frag_ip.* = orig_ip.*;

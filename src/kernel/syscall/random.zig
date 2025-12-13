@@ -11,13 +11,15 @@
 //
 // Returns: Number of bytes written, or negative errno
 //
-// Note: This MVP implementation uses a PRNG seeded from RDRAND/RDTSC.
-// The entropy pool is always "ready" so GRND_NONBLOCK has no effect.
-// For cryptographic needs, use RDRAND directly via hal.entropy.
+// Note: This implementation uses RDRAND directly for cryptographic-quality
+// randomness when available. The entropy pool is always "ready" so
+// GRND_NONBLOCK has no effect.
 
 const uapi = @import("uapi");
 const prng = @import("prng");
 const user_mem = @import("user_mem");
+
+const SyscallError = uapi.errno.SyscallError;
 
 // getrandom flags (Linux ABI)
 pub const GRND_NONBLOCK: u32 = 0x1;
@@ -27,7 +29,7 @@ pub const GRND_RANDOM: u32 = 0x2;
 const isValidUserAccess = user_mem.isValidUserAccess;
 const AccessMode = user_mem.AccessMode;
 
-/// sys_getrandom(buf: [*]u8, buflen: usize, flags: u32) -> isize
+/// sys_getrandom(buf: [*]u8, buflen: usize, flags: u32) -> SyscallError!usize
 ///
 /// Fill buffer with random bytes from kernel PRNG.
 ///
@@ -38,9 +40,9 @@ const AccessMode = user_mem.AccessMode;
 ///
 /// Returns:
 ///   Number of bytes written on success
-///   -EFAULT if buf_ptr is null
-///   -EINVAL if buflen exceeds reasonable limit
-pub fn sys_getrandom(buf_ptr: usize, buflen: usize, flags: u32) isize {
+///   error.EFAULT if buf_ptr is invalid
+///   error.EINVAL if buflen exceeds reasonable limit
+pub fn sys_getrandom(buf_ptr: usize, buflen: usize, flags: u32) SyscallError!usize {
     // Silence unused parameter warning - flags are accepted but MVP ignores them
     _ = flags;
 
@@ -49,7 +51,7 @@ pub fn sys_getrandom(buf_ptr: usize, buflen: usize, flags: u32) isize {
     // We use a conservative 1MB limit for MVP
     const MAX_BUFLEN: usize = 1024 * 1024;
     if (buflen > MAX_BUFLEN) {
-        return uapi.errno.EINVAL.toReturn();
+        return error.EINVAL;
     }
 
     // Zero-length request is valid, returns 0
@@ -60,10 +62,10 @@ pub fn sys_getrandom(buf_ptr: usize, buflen: usize, flags: u32) isize {
     // FR-RAND-05: Validate buffer pointer with write permission
     // (kernel writes random bytes to user buffer)
     if (!isValidUserAccess(buf_ptr, buflen, AccessMode.Write)) {
-        return uapi.errno.EFAULT.toReturn();
+        return error.EFAULT;
     }
 
-    // FR-RAND-02: Fill buffer with random data from PRNG
+    // FR-RAND-02: Fill buffer with random data from hardware entropy (RDRAND)
     // Use safe copy: generate in kernel buffer, then copy to user
     // For small buffers use stack, for larger use chunked approach
     const STACK_BUF_SIZE: usize = 256;
@@ -75,15 +77,15 @@ pub fn sys_getrandom(buf_ptr: usize, buflen: usize, flags: u32) isize {
 
     while (remaining > 0) {
         const chunk_size = @min(remaining, STACK_BUF_SIZE);
-        prng.fill(stack_buf[0..chunk_size]);
+        prng.fillFromHardwareEntropy(stack_buf[0..chunk_size]);
 
         _ = uptr.offset(offset).copyFromKernel(stack_buf[0..chunk_size]) catch {
-            return uapi.errno.EFAULT.toReturn();
+            return error.EFAULT;
         };
 
         offset += chunk_size;
         remaining -= chunk_size;
     }
 
-    return @intCast(buflen);
+    return buflen;
 }

@@ -59,6 +59,80 @@ See [BOOT_ARCHITECTURE.md](docs/BOOT_ARCHITECTURE.md) for boot process details.
 - Syscall numbers follow Linux x86_64 ABI (see `specs/syscall-table.md`)
 - Error codes use standard Linux errno values
 
+## Syscall Handlers
+
+Syscall handlers are located in `src/kernel/syscall/` and follow specific conventions.
+
+### Handler Files
+- `handlers.zig` - General syscalls (read, write, open, close, mmap, fork, execve, etc.)
+- `net.zig` - Network syscalls (socket, bind, listen, accept, connect, etc.)
+- `random.zig` - Random number syscalls (getrandom)
+- `table.zig` - Dispatch table (auto-discovers handlers at comptime)
+
+### Naming Convention
+Handler functions MUST be named `sys_<syscall_name>` in lowercase:
+```zig
+pub fn sys_read(...) SyscallError!usize { ... }
+pub fn sys_getrandom(...) SyscallError!usize { ... }
+pub fn sys_socket(...) SyscallError!usize { ... }
+```
+
+The dispatch table (`table.zig`) uses comptime reflection to match `SYS_READ` from `uapi/syscalls.zig` to `sys_read` in handler modules.
+
+### Error Handling Pattern
+
+**Required**: Use Zig error unions with `SyscallError`:
+```zig
+const SyscallError = uapi.errno.SyscallError;
+
+pub fn sys_read(fd: usize, buf_ptr: usize, count: usize) SyscallError!usize {
+    if (!isValidUserPtr(buf_ptr, count)) {
+        return error.EFAULT;
+    }
+    // ... implementation ...
+    return bytes_read;
+}
+```
+
+**Forbidden** (legacy pattern, do not use in new code):
+```zig
+pub fn sys_read(...) isize {
+    if (!isValidUserPtr(buf_ptr, count)) {
+        return Errno.EFAULT.toReturn();  // Don't do this
+    }
+    return @intCast(bytes_read);
+}
+```
+
+### Error Conversion
+
+The dispatch layer (`callHandler` in `table.zig`) automatically converts error unions to negative errno values at the syscall boundary. Handlers should never manually convert errors.
+
+For subsystem errors (e.g., socket layer), create a conversion helper:
+```zig
+fn socketErrorToSyscallError(err: socket.SocketError) SyscallError {
+    return switch (err) {
+        socket.SocketError.AddrInUse => error.EADDRINUSE,
+        socket.SocketError.WouldBlock => error.EAGAIN,
+        // ... complete mapping
+    };
+}
+```
+
+### Exception: Non-returning Handlers
+Handlers that never return (e.g., `sys_exit`, `sys_exit_group`) may use `isize` since there is no success value:
+```zig
+pub fn sys_exit(status: usize) isize {
+    process.exit(@truncate(status));
+    unreachable;
+}
+```
+
+### Adding New Syscalls
+1. Add syscall number to `src/uapi/syscalls.zig` as `SYS_NAME`
+2. Create handler as `pub fn sys_name(...) SyscallError!usize` in appropriate file
+3. Dispatch table auto-discovers it at comptime (no manual registration needed)
+
 ## Coding Style
 
 - **Version**: Zig 0.15.x
@@ -174,3 +248,4 @@ fn Matrix(comptime rows: usize, comptime cols: usize) type {
     return [rows][cols]f32;
 }
 ```
+- .error is a reserved word in Zig

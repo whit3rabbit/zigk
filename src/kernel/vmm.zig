@@ -14,6 +14,7 @@
 //   0xFFFF_8000_0000_0000 - 0xFFFF_FFFF_FFFF_FFFF: Kernel space (128 TB)
 //     - HHDM starts at offset provided by Bootloader (typically 0xFFFF_8000_0000_0000)
 
+const std = @import("std");
 const hal = @import("hal");
 const console = @import("console");
 const config = @import("config");
@@ -135,6 +136,10 @@ pub fn mapPage(pml4_phys: u64, virt_addr: u64, phys_addr: u64, flags: PageFlags)
 /// Map a range of pages
 /// On failure, all previously mapped pages in this call are unmapped (rollback)
 pub fn mapRange(pml4_phys: u64, virt_start: u64, phys_start: u64, size: usize, flags: PageFlags) VmmError!void {
+    // Check for size overflow: size + PAGE_SIZE - 1 must not wrap
+    if (size > std.math.maxInt(usize) - (PAGE_SIZE - 1)) {
+        return VmmError.InvalidAddress;
+    }
     const page_count = (size + PAGE_SIZE - 1) / PAGE_SIZE;
     var mapped_count: usize = 0;
 
@@ -365,6 +370,9 @@ pub fn isUserPageWritable(pml4_phys: u64, virt_addr: u64) bool {
 pub fn verifyUserRange(pml4_phys: u64, start: u64, len: usize) bool {
     if (len == 0) return true;
 
+    // Check for address overflow: start + len must not wrap
+    if (start > std.math.maxInt(u64) - len) return false;
+
     // Align start down to page boundary
     const aligned_start = paging.pageAlignDown(start);
     const end = start + len;
@@ -383,6 +391,9 @@ pub fn verifyUserRange(pml4_phys: u64, start: u64, len: usize) bool {
 /// Used for buffers that will be written to (e.g., sys_read output).
 pub fn verifyUserRangeWritable(pml4_phys: u64, start: u64, len: usize) bool {
     if (len == 0) return true;
+
+    // Check for address overflow: start + len must not wrap
+    if (start > std.math.maxInt(u64) - len) return false;
 
     const aligned_start = paging.pageAlignDown(start);
     const end = start + len;
@@ -530,6 +541,18 @@ pub fn mapMmioExplicit(phys_addr: u64, size: usize) VmmError!u64 {
     });
 
     return virt_base + offset;
+}
+
+/// Unmap MMIO region
+/// Safe to call on HHDM-mapped regions (will be ignored)
+pub fn unmapMmio(virt_addr: u64, size: usize) void {
+    if (!initialized) return;
+    
+    // Current implementation of mapMmio uses HHDM (identity map + offset).
+    // Unmapping these pages would destroy the direct map which handles all physical memory.
+    // So for now, this is a no-op until mapMmio is upgraded to mapMmioExplicit.
+    // When that happens, this should use unmapPage loop.
+    console.debug("VMM: unmapMmio {x} (size {d}) - HHDM preserved", .{virt_addr, size});
 }
 
 /// Allocate and map a virtual page (allocates physical page from PMM)

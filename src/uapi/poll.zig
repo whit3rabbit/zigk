@@ -15,6 +15,10 @@ pub const POLLRDHUP: u16 = 0x2000;
 
 pub const PollFd = extern struct {
     fd: i32,
-    events: u16,
-    revents: u16,
+    events: i16,
+    revents: i16,
+
+    comptime {
+        if (@sizeOf(@This()) != 8) @compileError("PollFd must be 8 bytes");
+    }
 };

@@ -31,6 +31,11 @@ pub const SYS_OPEN: usize = 2;
 /// (fd) -> int
 pub const SYS_CLOSE: usize = 3;
 
+/// Reposition read/write file offset
+/// (fd, offset, whence) -> off_t
+/// whence: 0=SEEK_SET, 1=SEEK_CUR, 2=SEEK_END
+pub const SYS_LSEEK: usize = 8;
+
 /// Wait for some event on a set of file descriptors
 /// (ufds, nfds, timeout) -> int
 pub const SYS_POLL: usize = 7;

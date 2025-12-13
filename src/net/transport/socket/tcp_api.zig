@@ -145,8 +145,46 @@ pub fn connect(sock_fd: usize, dest_addr: *const types.SockAddrIn) errors.Socket
     tcb.tos = sock.tos;
 
     // Connection started - SYN sent
-    // For blocking mode, caller (syscall layer) handles blocking
-    // until state changes to Established or Closed
+    
+    // Handle blocking if requested
+    if (sock.blocking) {
+        if (scheduler.blockFn()) |block_fn| {
+            const get_current = scheduler.currentThreadFn() orelse return errors.SocketError.SystemError;
+            
+            // Loop until state changes from SynSent (or error occurs)
+            while (tcb.state == .SynSent) {
+                 // Disable interrupts to close race window
+                 _ = hal.cpu.disableInterrupts();
+                 
+                 // Check state again after locking
+                 if (tcb.state != .SynSent) {
+                     hal.cpu.enableInterrupts();
+                     break;
+                 }
+                 
+                 sock.blocked_thread = get_current();
+                 // Important: tcb.blocked_thread must also be set for TCP layer to wake us
+                 // when the handshake completes (SYN-SENT processing in rx.zig wakes this)
+                 tcb.blocked_thread = sock.blocked_thread; 
+                 
+                 block_fn(); // Implies enable interrupts + halt
+                 
+                 sock.blocked_thread = null;
+                 tcb.blocked_thread = null;
+            }
+        } else {
+             // If no scheduler (e.g. early boot), we can't block safely
+             return errors.SocketError.WouldBlock;
+        }
+    }
+    
+    // Check final state logic matched checkConnectStatus
+    switch (tcb.state) {
+        .Established => return,
+        .Closed => return errors.SocketError.ConnectionRefused,
+        .SynSent => return errors.SocketError.WouldBlock, // Should not happen if we blocked
+        else => return, // Other states might imply connected or closing
+    }
 }
 
 /// Get TCB for a socket (for syscall layer to set blocked_thread)

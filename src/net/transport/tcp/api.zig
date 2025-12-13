@@ -72,43 +72,55 @@ pub fn close(tcb: *Tcb) void {
     defer state.lock.release();
 
     switch (tcb.state) {
-        .Listen => {
-            state.removeFromListenTable(tcb);
-            state.freeTcb(tcb);
-        },
-        .SynSent => {
-            state.freeTcb(tcb);
-        },
         .SynReceived, .Established => {
-            // Send FIN
+            // Active close: send FIN and enter FIN-WAIT-1
             _ = tx.sendFin(tcb);
             tcb.snd_nxt +%= 1; // FIN consumes one seq
-            tcb.state = .LastAck; // Simplified: skip FIN-WAIT states
-            tcb.retrans_timer = 1;
         },
         .CloseWait => {
             // Send FIN
             _ = tx.sendFin(tcb);
             tcb.snd_nxt +%= 1;
-            tcb.state = .LastAck;
-            tcb.retrans_timer = 1;
         },
         .LastAck => {},
-        .Closed => {
-            state.freeTcb(tcb);
-        },
+        // Connection is already closing - no action needed
+        .FinWait1, .FinWait2, .Closing, .TimeWait => {},
+        else => {},
     }
+
+    // Always detach from global tables so process teardown can't leave dangling TCBs
+    if (tcb.state == .Listen) {
+        state.removeFromListenTable(tcb);
+    }
+
+    // Drop any scheduler references that could point at torn-down threads
+    tcb.blocked_thread = null;
+    tcb.parent_socket = null;
+    tcb.state = .Closed;
+
+    // Removes from hash + timer pool and frees memory
+    state.freeTcb(tcb);
 }
 
 /// Send FIN for shutdown(SHUT_WR) - public wrapper
-/// Called from socket layer for half-close semantics
-/// Note: This is a simplified implementation that doesn't track FIN-WAIT states
+/// Called from socket layer for half-close semantics (RFC 793 compliant)
 pub fn sendFinPacket(tcb: *Tcb) void {
-    if (tcb.state == .Established or tcb.state == .CloseWait) {
-        _ = tx.sendFin(tcb);
-        tcb.snd_nxt +%= 1; // FIN consumes one sequence number
-        // Note: Proper implementation would transition to FIN_WAIT_1/LAST_ACK
-        // For MVP, we keep the state to allow continued receives
+    switch (tcb.state) {
+        .Established, .SynReceived => {
+            // Active close: ESTABLISHED/SYN-RECEIVED -> FIN-WAIT-1
+            _ = tx.sendFin(tcb);
+            tcb.snd_nxt +%= 1; // FIN consumes one sequence number
+            tcb.state = .FinWait1;
+            tcb.retrans_timer = 1; // Start retransmit timer
+        },
+        .CloseWait => {
+            // Passive close completion: CLOSE-WAIT -> LAST-ACK
+            _ = tx.sendFin(tcb);
+            tcb.snd_nxt +%= 1;
+            tcb.state = .LastAck;
+            tcb.retrans_timer = 1;
+        },
+        else => {},
     }
 }
 
@@ -147,27 +159,27 @@ pub fn recv(tcb: *Tcb, buf: []u8) TcpError!usize {
     state.lock.acquire();
     defer state.lock.release();
 
-    if (tcb.state == .Closed) {
-        return TcpError.NotConnected;
-    }
-
+    // Check availability first logic
     const available = tcb.recvBufferAvailable();
 
-    // EOF condition: CloseWait with empty buffer
-    if (available == 0 and tcb.state == .CloseWait) {
-        return 0; // EOF
+    if (available > 0) {
+        const copy_len = @min(buf.len, available);
+
+        for (0..copy_len) |i| {
+            buf[i] = tcb.recv_buf[tcb.recv_tail];
+            tcb.recv_tail = (tcb.recv_tail + 1) % c.BUFFER_SIZE;
+        }
+
+        return copy_len;
     }
 
-    if (available == 0) {
-        return TcpError.WouldBlock;
+    // No data available - check channel state
+    switch (tcb.state) {
+        // Clean disconnect / EOF
+        .CloseWait, .LastAck, .Closing, .TimeWait, .Closed => return 0,
+        // Connected but empty - Wait
+        .Established, .FinWait1, .FinWait2 => return TcpError.WouldBlock,
+        // Not connected logic
+        .Listen, .SynSent, .SynReceived => return TcpError.NotConnected,
     }
-
-    const copy_len = @min(buf.len, available);
-
-    for (0..copy_len) |i| {
-        buf[i] = tcb.recv_buf[tcb.recv_tail];
-        tcb.recv_tail = (tcb.recv_tail + 1) % c.BUFFER_SIZE;
-    }
-
-    return copy_len;
 }

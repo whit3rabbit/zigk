@@ -90,6 +90,9 @@ pub fn build(b: *std.Build) void {
     console_module.addImport("hal", hal_module);
     console_module.addImport("config", config_module);
 
+    // HAL needs console for APIC debug output (circular but Zig handles it)
+    hal_module.addImport("console", console_module);
+
     // Create ACPI module (RSDP/MCFG parsing for PCIe ECAM)
     const acpi_module = b.createModule(.{
         .root_source_file = b.path("src/arch/x86_64/acpi/root.zig"),
@@ -155,7 +158,7 @@ pub fn build(b: *std.Build) void {
     net_module.addImport("hal", hal_module);
     net_module.addImport("uapi", uapi_module);
     net_module.addImport("prng", prng_module);
-
+    net_module.addImport("console", console_module);
 
     // Create Heap module (Kernel Heap Allocator)
     const heap_module = b.createModule(.{
@@ -166,6 +169,17 @@ pub fn build(b: *std.Build) void {
     heap_module.addImport("console", console_module);
     heap_module.addImport("config", config_module);
     heap_module.addImport("sync", sync_module);
+
+    // Create DMA Allocator module (Physical memory allocator with std.mem.Allocator interface)
+    const dma_allocator_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/dma_allocator.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    dma_allocator_module.addImport("pmm", pmm_module);
+    dma_allocator_module.addImport("hal", hal_module);
+    dma_allocator_module.addImport("heap", heap_module);
+    dma_allocator_module.addImport("console", console_module);
 
     // Create List module (generic intrusive list)
     const list_module = b.createModule(.{
@@ -242,8 +256,31 @@ pub fn build(b: *std.Build) void {
     e1000e_module.addImport("console", console_module);
     e1000e_module.addImport("thread", thread_module);
     e1000e_module.addImport("sched", sched_module);
+    e1000e_module.addImport("heap", heap_module);
 
+    // Create AHCI driver module (SATA storage controller)
+    const ahci_module = b.createModule(.{
+        .root_source_file = b.path("src/drivers/storage/ahci/root.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    ahci_module.addImport("pci", pci_module);
+    ahci_module.addImport("vmm", vmm_module);
+    ahci_module.addImport("pmm", pmm_module);
+    ahci_module.addImport("console", console_module);
+    ahci_module.addImport("hal", hal_module);
 
+    // Create USB driver module (XHCI/EHCI host controllers)
+    const usb_module = b.createModule(.{
+        .root_source_file = b.path("src/drivers/usb/root.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    usb_module.addImport("hal", hal_module);
+    usb_module.addImport("pci", pci_module);
+    usb_module.addImport("vmm", vmm_module);
+    usb_module.addImport("pmm", pmm_module);
+    usb_module.addImport("console", console_module);
 
     // Create FD module (File Descriptor table)
     const fd_module = b.createModule(.{
@@ -254,6 +291,7 @@ pub fn build(b: *std.Build) void {
     fd_module.addImport("heap", heap_module);
     fd_module.addImport("console", console_module);
     fd_module.addImport("uapi", uapi_module);
+    fd_module.addImport("sync", sync_module);
 
     // Create User VMM module (userspace memory management for mmap/munmap)
     const user_vmm_module = b.createModule(.{
@@ -296,6 +334,51 @@ pub fn build(b: *std.Build) void {
     keyboard_module.addImport("ring_buffer", ring_buffer_module);
     keyboard_module.addImport("console", console_module);
     keyboard_module.addImport("uapi", uapi_module);
+    keyboard_module.addImport("sched", sched_module);
+    keyboard_module.addImport("thread", thread_module);
+
+    // Create Serial driver module
+    const serial_module = b.createModule(.{
+        .root_source_file = b.path("src/drivers/serial/uart.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    serial_module.addImport("hal", hal_module);
+    serial_module.addImport("sync", sync_module);
+
+    // Create VirtIO common module
+    const virtio_module = b.createModule(.{
+        .root_source_file = b.path("src/drivers/virtio/root.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    virtio_module.addImport("pmm", pmm_module);
+    virtio_module.addImport("hal", hal_module);
+
+    // Create Video driver module
+    const video_module = b.createModule(.{
+        .root_source_file = b.path("src/drivers/video/root.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    video_module.addImport("sync", sync_module);
+    video_module.addImport("pmm", pmm_module);
+    video_module.addImport("vmm", vmm_module);
+    video_module.addImport("hal", hal_module);
+    video_module.addImport("virtio", virtio_module);
+    video_module.addImport("pci", pci_module);
+    video_module.addImport("console", console_module);
+
+    // Create Mouse driver module
+    const mouse_module = b.createModule(.{
+        .root_source_file = b.path("src/drivers/mouse.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    mouse_module.addImport("hal", hal_module);
+    mouse_module.addImport("sync", sync_module);
+    mouse_module.addImport("ring_buffer", ring_buffer_module);
+    mouse_module.addImport("console", console_module);
 
     // Create DevFS module (device filesystem shim)
     const devfs_module = b.createModule(.{
@@ -454,6 +537,8 @@ pub fn build(b: *std.Build) void {
     kernel.root_module.addImport("acpi", acpi_module);
     kernel.root_module.addImport("pci", pci_module);
     kernel.root_module.addImport("e1000e", e1000e_module);
+    kernel.root_module.addImport("ahci", ahci_module);
+    kernel.root_module.addImport("usb", usb_module);
     kernel.root_module.addImport("net", net_module);
     kernel.root_module.addImport("config", config_module);
     kernel.root_module.addImport("console", console_module);
@@ -463,6 +548,9 @@ pub fn build(b: *std.Build) void {
     kernel.root_module.addImport("sync", sync_module);
     kernel.root_module.addImport("uapi", uapi_module);
     kernel.root_module.addImport("keyboard", keyboard_module);
+    kernel.root_module.addImport("serial_driver", serial_module);
+    kernel.root_module.addImport("video_driver", video_module);
+    kernel.root_module.addImport("mouse", mouse_module);
     kernel.root_module.addImport("thread", thread_module);
     kernel.root_module.addImport("sched", sched_module);
     kernel.root_module.addImport("kernel_stack", kernel_stack_module);
@@ -633,6 +721,8 @@ pub fn build(b: *std.Build) void {
         "-M", "q35",
         "-m", "256M",
         "-cdrom", "zigk.iso",
+        "-device", "qemu-xhci,id=xhci",
+        "-device", "virtio-gpu-pci",
         "-serial", "stdio",
         "-no-reboot",
         "-no-shutdown",

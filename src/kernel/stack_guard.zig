@@ -35,14 +35,14 @@ pub export fn __stack_chk_fail() noreturn {
     hal.cpu.disableInterrupts();
 
     // Print diagnostic
-    console.print("\n");
-    console.print("!!! STACK SMASHING DETECTED !!!\n");
-    console.print("\n");
-    console.print("A stack buffer overflow has corrupted the stack canary.\n");
-    console.print("This is a critical security violation.\n");
-    console.print("\n");
-    console.print("The system will now halt to prevent potential exploitation.\n");
-    console.print("\n");
+    console.printUnsafe("\n");
+    console.printUnsafe("!!! STACK SMASHING DETECTED !!!\n");
+    console.printUnsafe("\n");
+    console.printUnsafe("A stack buffer overflow has corrupted the stack canary.\n");
+    console.printUnsafe("This is a critical security violation.\n");
+    console.printUnsafe("\n");
+    console.printUnsafe("The system will now halt to prevent potential exploitation.\n");
+    console.printUnsafe("\n");
 
     // In a real kernel, we would:
     // 1. Log the faulting thread/process
@@ -60,11 +60,11 @@ pub fn init() void {
     // Generate random canary from kernel PRNG
     var random_value = prng.next();
 
-    // Apply canary constraints for improved overflow detection:
-    // - Low byte = 0x00: catches string-based overflows (null terminator)
-    // - Include 0x0a (newline), 0x0d (CR), 0xff: catches common exploit patterns
-    random_value &= ~@as(u64, 0xFF); // Clear low byte (becomes 0x00)
-    random_value |= 0x00000aff_0a0d_0000; // Embed detection bytes in high bits
+    // Apply canary constraint for string overflow detection:
+    // Low byte = 0x00 catches null-terminated string overflows
+    // NOTE: We preserve full entropy in upper bits (previously reduced to ~40 bits
+    // by overwriting with fixed pattern 0x00000aff_0a0d_0000)
+    random_value &= ~@as(u64, 0xFF); // Clear low byte only (becomes 0x00)
 
     __stack_chk_guard = random_value;
 

@@ -17,7 +17,8 @@ pub fn icmpChecksum(data: []const u8) u16 {
 
 /// Calculate UDP checksum with pseudo-header
 /// src_ip and dst_ip should be in network byte order
-pub fn udpChecksum(src_ip: u32, dst_ip: u32, udp_data: []const u8) u16 {
+/// udp_segment_with_header must include the UDP header and payload
+pub fn udpChecksum(src_ip: u32, dst_ip: u32, udp_segment_with_header: []const u8) u16 {
     var sum: u32 = 0;
 
     // Pseudo-header: src_ip, dst_ip, zero, protocol, udp_length
@@ -26,18 +27,18 @@ pub fn udpChecksum(src_ip: u32, dst_ip: u32, udp_data: []const u8) u16 {
     sum += @as(u32, @truncate(dst_ip >> 16));
     sum += @as(u32, @truncate(dst_ip));
     sum += 17; // UDP protocol
-    sum += @as(u32, @truncate(udp_data.len));
+    sum += @as(u32, @truncate(udp_segment_with_header.len));
 
     // UDP header + data
     var i: usize = 0;
-    while (i + 1 < udp_data.len) : (i += 2) {
-        const word = (@as(u32, udp_data[i]) << 8) | @as(u32, udp_data[i + 1]);
+    while (i + 1 < udp_segment_with_header.len) : (i += 2) {
+        const word = (@as(u32, udp_segment_with_header[i]) << 8) | @as(u32, udp_segment_with_header[i + 1]);
         sum += word;
     }
 
     // Handle odd byte
-    if (i < udp_data.len) {
-        sum += @as(u32, udp_data[i]) << 8;
+    if (i < udp_segment_with_header.len) {
+        sum += @as(u32, udp_segment_with_header[i]) << 8;
     }
 
     // Fold 32-bit sum to 16 bits

@@ -27,6 +27,25 @@ pub const IntelDeviceId = struct {
     pub const E1000E_82583V: u16 = 0x150C;
 };
 
+/// VirtIO Device IDs (non-transitional, modern)
+pub const VirtioDeviceId = struct {
+    // Modern (non-transitional) device IDs (0x1040 + device_type)
+    pub const GPU: u16 = 0x1050; // 0x1040 + 16 (GPU device type)
+    pub const INPUT: u16 = 0x1052; // 0x1040 + 18 (input device type)
+    pub const NETWORK: u16 = 0x1041; // 0x1040 + 1
+    pub const BLOCK: u16 = 0x1042; // 0x1040 + 2
+    pub const CONSOLE: u16 = 0x1043; // 0x1040 + 3
+    pub const RNG: u16 = 0x1044; // 0x1040 + 4
+    pub const BALLOON: u16 = 0x1045; // 0x1040 + 5
+
+    // Legacy (transitional) device IDs
+    pub const LEGACY_NETWORK: u16 = 0x1000;
+    pub const LEGACY_BLOCK: u16 = 0x1001;
+    pub const LEGACY_BALLOON: u16 = 0x1002;
+    pub const LEGACY_CONSOLE: u16 = 0x1003;
+    pub const LEGACY_RNG: u16 = 0x1005;
+};
+
 /// PCI Class Codes
 pub const ClassCode = struct {
     pub const UNCLASSIFIED: u8 = 0x00;
@@ -61,6 +80,56 @@ pub const NetworkSubclass = struct {
     pub const INFINIBAND: u8 = 0x07;
     pub const FABRIC: u8 = 0x08;
     pub const OTHER: u8 = 0x80;
+};
+
+/// Serial Bus Controller Subclass Codes (Class 0x0C)
+pub const SerialBusSubclass = struct {
+    pub const FIREWIRE: u8 = 0x00;
+    pub const ACCESS_BUS: u8 = 0x01;
+    pub const SSA: u8 = 0x02;
+    pub const USB: u8 = 0x03;
+    pub const FIBRE_CHANNEL: u8 = 0x04;
+    pub const SMBUS: u8 = 0x05;
+    pub const INFINIBAND: u8 = 0x06;
+    pub const IPMI: u8 = 0x07;
+    pub const SERCOS: u8 = 0x08;
+    pub const CANBUS: u8 = 0x09;
+};
+
+/// USB Controller Programming Interface (ProgIF) values
+/// These identify the specific USB host controller type
+pub const UsbProgIf = struct {
+    pub const UHCI: u8 = 0x00; // Universal Host Controller Interface (USB 1.1, Intel)
+    pub const OHCI: u8 = 0x10; // Open Host Controller Interface (USB 1.1, others)
+    pub const EHCI: u8 = 0x20; // Enhanced Host Controller Interface (USB 2.0)
+    pub const XHCI: u8 = 0x30; // Extensible Host Controller Interface (USB 3.x)
+    pub const UNSPECIFIED: u8 = 0x80;
+    pub const USB_DEVICE: u8 = 0xFE; // USB device (not host controller)
+};
+
+/// PCI Capability IDs
+pub const CapabilityId = struct {
+    pub const PM: u8 = 0x01; // Power Management
+    pub const AGP: u8 = 0x02; // AGP
+    pub const VPD: u8 = 0x03; // Vital Product Data
+    pub const SLOT_ID: u8 = 0x04; // Slot Identification
+    pub const MSI: u8 = 0x05; // Message Signaled Interrupts
+    pub const COMPACT_PCI: u8 = 0x06; // CompactPCI Hot Swap
+    pub const PCIX: u8 = 0x07; // PCI-X
+    pub const HYPERTRANSPORT: u8 = 0x08; // HyperTransport
+    pub const VENDOR: u8 = 0x09; // Vendor Specific
+    pub const DEBUG: u8 = 0x0A; // Debug Port
+    pub const RESOURCE_CTRL: u8 = 0x0B; // CompactPCI Central Resource Control
+    pub const HOT_PLUG: u8 = 0x0C; // PCI Hot-Plug
+    pub const BRIDGE_SUBSYS_VID: u8 = 0x0D; // Bridge Subsystem Vendor ID
+    pub const AGP8X: u8 = 0x0E; // AGP 8x
+    pub const SECURE: u8 = 0x0F; // Secure Device
+    pub const PCIE: u8 = 0x10; // PCI Express
+    pub const MSIX: u8 = 0x11; // MSI-X
+    pub const SATA: u8 = 0x12; // SATA Data/Index Configuration
+    pub const ADVANCED_FEATURES: u8 = 0x13; // Advanced Features
+    pub const ENHANCED_ALLOC: u8 = 0x14; // Enhanced Allocation
+    pub const FLATTENING_PORTAL: u8 = 0x15; // Flattening Portal Bridge
 };
 
 /// PCI Configuration Space Register Offsets
@@ -215,6 +284,48 @@ pub const PciDevice = struct {
             self.subclass == NetworkSubclass.ETHERNET;
     }
 
+    /// Check if device is a USB controller (any type)
+    pub fn isUsbController(self: *const Self) bool {
+        return self.class_code == ClassCode.SERIAL_BUS and
+            self.subclass == SerialBusSubclass.USB;
+    }
+
+    /// Check if device is an XHCI (USB 3.x) controller
+    pub fn isXhciController(self: *const Self) bool {
+        return self.isUsbController() and self.prog_if == UsbProgIf.XHCI;
+    }
+
+    /// Check if device is an EHCI (USB 2.0) controller
+    pub fn isEhciController(self: *const Self) bool {
+        return self.isUsbController() and self.prog_if == UsbProgIf.EHCI;
+    }
+
+    /// Check if device is a UHCI (USB 1.1 Intel) controller
+    pub fn isUhciController(self: *const Self) bool {
+        return self.isUsbController() and self.prog_if == UsbProgIf.UHCI;
+    }
+
+    /// Check if device is an OHCI (USB 1.1 Open) controller
+    pub fn isOhciController(self: *const Self) bool {
+        return self.isUsbController() and self.prog_if == UsbProgIf.OHCI;
+    }
+
+    /// Check if device is a VirtIO device
+    pub fn isVirtio(self: *const Self) bool {
+        return self.vendor_id == VendorId.VIRTIO;
+    }
+
+    /// Check if device is a VirtIO-GPU
+    pub fn isVirtioGpu(self: *const Self) bool {
+        return self.vendor_id == VendorId.VIRTIO and
+            self.device_id == VirtioDeviceId.GPU;
+    }
+
+    /// Check if device is a display controller
+    pub fn isDisplayController(self: *const Self) bool {
+        return self.class_code == ClassCode.DISPLAY;
+    }
+
     /// Get the first valid MMIO BAR (for NIC drivers)
     pub fn getMmioBar(self: *const Self) ?Bar {
         for (self.bar) |b| {
@@ -314,6 +425,59 @@ pub const DeviceList = struct {
         for (self.devices[0..self.count]) |*dev| {
             if (dev.isE1000()) {
                 return dev;
+            }
+        }
+        return null;
+    }
+
+    /// Find first USB controller of a specific type by ProgIF
+    pub fn findUsbController(self: *const DeviceList, prog_if: u8) ?*const PciDevice {
+        for (self.devices[0..self.count]) |*dev| {
+            if (dev.isUsbController() and dev.prog_if == prog_if) {
+                return dev;
+            }
+        }
+        return null;
+    }
+
+    /// Find first XHCI (USB 3.x) controller
+    pub fn findXhciController(self: *const DeviceList) ?*const PciDevice {
+        return self.findUsbController(UsbProgIf.XHCI);
+    }
+
+    /// Find first EHCI (USB 2.0) controller
+    pub fn findEhciController(self: *const DeviceList) ?*const PciDevice {
+        return self.findUsbController(UsbProgIf.EHCI);
+    }
+
+    /// Find first UHCI (USB 1.1 Intel) controller
+    pub fn findUhciController(self: *const DeviceList) ?*const PciDevice {
+        return self.findUsbController(UsbProgIf.UHCI);
+    }
+
+    /// Find first OHCI (USB 1.1 Open) controller
+    pub fn findOhciController(self: *const DeviceList) ?*const PciDevice {
+        return self.findUsbController(UsbProgIf.OHCI);
+    }
+
+    /// Find any USB controller (returns first found, prefers XHCI > EHCI > UHCI > OHCI)
+    pub fn findAnyUsbController(self: *const DeviceList) ?*const PciDevice {
+        if (self.findXhciController()) |dev| return dev;
+        if (self.findEhciController()) |dev| return dev;
+        if (self.findUhciController()) |dev| return dev;
+        if (self.findOhciController()) |dev| return dev;
+        return null;
+    }
+
+    /// Find device by class, subclass, and optionally prog_if
+    pub fn findByClass(self: *const DeviceList, class_code: u8, subclass: u8, prog_if: ?u8) ?*const PciDevice {
+        for (self.devices[0..self.count]) |*dev| {
+            if (dev.class_code == class_code and dev.subclass == subclass) {
+                if (prog_if) |pif| {
+                    if (dev.prog_if == pif) return dev;
+                } else {
+                    return dev;
+                }
             }
         }
         return null;

@@ -457,6 +457,10 @@ fn setupInitialStack(stack_top: u64, entry_rip: u64) u64 {
 fn setupUserStack(kernel_stack_top: u64, entry_rip: u64, user_stack_top: u64) u64 {
     var sp = kernel_stack_top;
 
+    console.debug("setupUserStack: top={x} entry={x} user_sp={x}", .{
+        kernel_stack_top, entry_rip, user_stack_top,
+    });
+
     // Build interrupt frame for iretq to Ring 3
     // Stack layout (pushed by CPU on interrupt / expected by iretq):
     // SS (user data)
@@ -467,6 +471,7 @@ fn setupUserStack(kernel_stack_top: u64, entry_rip: u64, user_stack_top: u64) u6
 
     // SS
     sp -= 8;
+    const ss_addr = sp;
     writeStackU64(sp, hal.gdt.USER_DATA); // User data selector with RPL 3 already set in GDT module
 
     // RSP (User Stack)
@@ -476,10 +481,11 @@ fn setupUserStack(kernel_stack_top: u64, entry_rip: u64, user_stack_top: u64) u6
     // RFLAGS
     sp -= 8;
     // IF=1 (interrupts enabled), Reserved(1)=1, IOPL=0
-    writeStackU64(sp, 0x202); 
+    writeStackU64(sp, 0x202);
 
     // CS
     sp -= 8;
+    const cs_addr = sp;
     writeStackU64(sp, hal.gdt.USER_CODE); // User code selector with RPL 3
 
     // RIP
@@ -503,16 +509,15 @@ fn setupUserStack(kernel_stack_top: u64, entry_rip: u64, user_stack_top: u64) u6
         writeStackU64(sp, 0);
     }
 
-    // Segment registers (DS, ES, FS, GS) - pop all in isr_common?
-    // Wait, isr_common usually doesn't push/pop segment registers in 64-bit mode 
-    // because they are ignored or handled differently. 
-    // Let's check isr_common logic - assuming standard "pushall" excludes segments in long mode 
-    // unless swapgs is involved.
-    
-    // NOTE: In our isr_common (asm_helpers.S), we need to ensure we return correctly.
-    // If isr_common does `swapgs` checking, it expects to return to user mode.
-    // The checking is usually based on CS in the IRETQ frame.
-    // Since we set CS to USER_CODE, isr_common's exit path should handle swapgs if needed.
+    // Verify the values we wrote by reading them back
+    const cs_ptr: *const u64 = @ptrFromInt(cs_addr);
+    const ss_ptr: *const u64 = @ptrFromInt(ss_addr);
+    console.debug("setupUserStack: CS at {x} = {x} (expect 0x23), SS at {x} = {x} (expect 0x1b)", .{
+        cs_addr, cs_ptr.*, ss_addr, ss_ptr.*,
+    });
+    console.debug("setupUserStack: returning kernel_rsp={x} (frame size={d})", .{
+        sp, kernel_stack_top - sp,
+    });
 
     return sp;
 }

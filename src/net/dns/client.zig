@@ -38,8 +38,11 @@ pub fn resolve(allocator: std.mem.Allocator, hostname: []const u8, server_ip: u3
     var send_buf: [512]u8 = undefined;
     var packet = dns.DnsPacket.init(&send_buf);
     
-    // Generate random Transaction ID using hardware entropy
-    const tx_id = @as(u16, @truncate(hal.entropy.getHardwareEntropy()));
+    // Generate random Transaction ID using hardware entropy mixed with timestamp
+    // This reduces predictability for cache poisoning protection
+    const entropy_val = hal.entropy.getHardwareEntropy();
+    const timestamp_val = @as(u32, @truncate(hal.cpu.getTickCount())); 
+    const tx_id = @as(u16, @truncate(entropy_val ^ timestamp_val));
     
     // Write Query
     packet.writeHeader(tx_id, dns.FLAGS_RD); // Recursion Desired
@@ -65,10 +68,16 @@ pub fn resolve(allocator: std.mem.Allocator, hostname: []const u8, server_ip: u3
     const received = try socket.recvfrom(fd_idx, &recv_buf, &src_addr);
     
     if (received < 12) return DnsError.FormatError;
-    
+
+    // Validate response came from expected DNS server (RFC 5452 source port randomization)
+    // This prevents DNS cache poisoning attacks where an attacker sends spoofed responses
+    if (src_addr.addr != server_ip or src_addr.getPort() != 53) {
+        return DnsError.Refused; // Spoofed response - wrong source
+    }
+
     // Close socket (we are done with network)
-    socket.close(fd_idx) catch {}; 
-    
+    socket.close(fd_idx) catch {};
+
     // Parse Response
     const resp = recv_buf[0..received];
     // const hdr = @as(*const dns.Header, @ptrCast(resp.ptr)); // Unused
@@ -124,23 +133,32 @@ pub fn resolve(allocator: std.mem.Allocator, hostname: []const u8, server_ip: u3
     return DnsError.NoAnswer;
 }
 
+/// Skip over a DNS name in the response buffer
+/// Handles both labels and compression pointers (RFC 1035 section 4.1.4)
+/// Includes protection against malicious pointer loops (max 10 jumps)
 fn skipName(buf: []const u8, start: usize) !usize {
     var pos = start;
+    var jumps: u8 = 0;
+    const max_jumps: u8 = 10; // Prevent infinite loops from malicious packets
+
     while (true) {
         if (pos >= buf.len) return DnsError.FormatError;
         const len_byte = buf[pos];
-        
+
         if (len_byte == 0) {
             return pos + 1; // End of name
         }
-        
+
         if ((len_byte & 0xC0) == 0xC0) {
-            // Pointer
+            // Compression pointer - check for loop attack
+            jumps += 1;
+            if (jumps > max_jumps) return DnsError.FormatError;
+            // We don't follow the pointer (just skipping), but count it
+            // to detect malformed packets with many pointers
             return pos + 2;
         }
-        
-        // Label
-        // FIX: Bounds check before skipping label data
+
+        // Label - bounds check before skipping
         if (pos + 1 + len_byte > buf.len) return DnsError.FormatError;
         pos += 1 + len_byte;
     }

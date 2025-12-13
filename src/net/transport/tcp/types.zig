@@ -4,14 +4,14 @@ const c = @import("constants.zig");
 // in network byte order. Kept here to preserve the original documentation
 // around flag helpers.
 pub const TcpHeader = extern struct {
-    src_port: u16,
-    dst_port: u16,
-    seq_num: u32,
-    ack_num: u32,
-    data_offset_flags: u16, // 4-bit offset, 4 reserved, 8 flags
-    window: u16,
-    checksum: u16,
-    urgent_ptr: u16,
+    src_port: u16 align(1),
+    dst_port: u16 align(1),
+    seq_num: u32 align(1),
+    ack_num: u32 align(1),
+    data_offset_flags: u16 align(1),
+    window: u16 align(1),
+    checksum: u16 align(1),
+    urgent_ptr: u16 align(1),
 
     const Self = @This();
 
@@ -23,69 +23,66 @@ pub const TcpHeader = extern struct {
     pub const FLAG_ACK: u16 = 0x0010;
     pub const FLAG_URG: u16 = 0x0020;
 
-    pub fn getSrcPort(self: *const Self) u16 {
+    pub fn getSrcPort(self: *align(1) const Self) u16 {
         return @byteSwap(self.src_port);
     }
-
-    pub fn getDstPort(self: *const Self) u16 {
+    pub fn getDstPort(self: *align(1) const Self) u16 {
         return @byteSwap(self.dst_port);
     }
-
-    pub fn getSeqNum(self: *const Self) u32 {
+    pub fn getSeqNum(self: *align(1) const Self) u32 {
         return @byteSwap(self.seq_num);
     }
-
-    pub fn getAckNum(self: *const Self) u32 {
+    pub fn getAckNum(self: *align(1) const Self) u32 {
         return @byteSwap(self.ack_num);
     }
-
-    pub fn getWindow(self: *const Self) u16 {
+    pub fn getWindow(self: *align(1) const Self) u16 {
         return @byteSwap(self.window);
     }
 
     /// Get data offset in bytes (header length including options)
-    pub fn getDataOffset(self: *const Self) usize {
+    pub fn getDataOffset(self: *align(1) const Self) usize {
         const dof = @byteSwap(self.data_offset_flags);
         return @as(usize, (dof >> 12) & 0xF) * 4;
     }
 
     /// Get TCP flags
-    pub fn getFlags(self: *const Self) u16 {
+    pub fn getFlags(self: *align(1) const Self) u16 {
         return @byteSwap(self.data_offset_flags) & 0x3F;
     }
 
-    pub fn hasFlag(self: *const Self, flag: u16) bool {
+    pub fn hasFlag(self: *align(1) const Self, flag: u16) bool {
         return (self.getFlags() & flag) != 0;
     }
 
-    pub fn setSrcPort(self: *Self, port: u16) void {
+    pub fn setSrcPort(self: *align(1) Self, port: u16) void {
         self.src_port = @byteSwap(port);
     }
-
-    pub fn setDstPort(self: *Self, port: u16) void {
+    pub fn setDstPort(self: *align(1) Self, port: u16) void {
         self.dst_port = @byteSwap(port);
     }
-
-    pub fn setSeqNum(self: *Self, seq: u32) void {
+    pub fn setSeqNum(self: *align(1) Self, seq: u32) void {
         self.seq_num = @byteSwap(seq);
     }
-
-    pub fn setAckNum(self: *Self, ack: u32) void {
+    pub fn setAckNum(self: *align(1) Self, ack: u32) void {
         self.ack_num = @byteSwap(ack);
     }
-
-    pub fn setWindow(self: *Self, win: u16) void {
+    pub fn setWindow(self: *align(1) Self, win: u16) void {
         self.window = @byteSwap(win);
     }
 
     /// Set data offset (header length / 4) and flags
-    pub fn setDataOffsetFlags(self: *Self, header_words: u4, flags: u16) void {
+    pub fn setDataOffsetFlags(self: *align(1) Self, header_words: u4, flags: u16) void {
         const dof = (@as(u16, header_words) << 12) | (flags & 0x3F);
         self.data_offset_flags = @byteSwap(dof);
+    }
+
+    comptime {
+        if (@sizeOf(TcpHeader) != 20) @compileError("TcpHeader must be 20 bytes");
     }
 };
 
 /// TCP connection states (RFC 793 section 3.2)
+/// Full state machine for proper connection teardown
 pub const TcpState = enum(u8) {
     /// No connection
     Closed = 0,
@@ -97,10 +94,18 @@ pub const TcpState = enum(u8) {
     SynReceived = 3,
     /// Connection open, data transfer
     Established = 4,
-    /// Received FIN, waiting for application to close
-    CloseWait = 5,
-    /// FIN sent after CLOSE-WAIT, waiting for ACK
-    LastAck = 6,
+    /// FIN sent, waiting for ACK of FIN (active close initiated)
+    FinWait1 = 5,
+    /// FIN-ACK received, waiting for peer's FIN
+    FinWait2 = 6,
+    /// Received FIN, waiting for application to close (passive close)
+    CloseWait = 7,
+    /// Both sides sent FIN simultaneously, waiting for ACKs
+    Closing = 8,
+    /// FIN sent after CloseWait, waiting for ACK
+    LastAck = 9,
+    /// Both FINs exchanged, waiting 2*MSL before releasing resources
+    TimeWait = 10,
 };
 
 /// TCP Control Block - per-connection state
@@ -321,9 +326,16 @@ pub const Tcb = struct {
     }
 
     /// Calculate current receive window (space in recv buffer)
+    /// When window scaling is negotiated (RFC 7323), the advertised window
+    /// must be right-shifted by our scale factor before sending in TCP header.
     pub fn currentRecvWindow(self: *const Self) u16 {
         const space = c.BUFFER_SIZE - self.recvBufferAvailable();
-        return @intCast(@min(space, c.RECV_WINDOW_SIZE));
+        // Apply window scaling - peer will left-shift by rcv_wscale
+        const scaled = if (self.wscale_ok)
+            space >> @intCast(self.rcv_wscale)
+        else
+            space;
+        return @intCast(@min(scaled, 65535));
     }
 };
 

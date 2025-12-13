@@ -20,6 +20,9 @@ pub fn sendto(
     // Auto-bind if not bound
     if (sock.local_port == 0) {
         sock.local_port = state.allocateEphemeralPort();
+        if (sock.local_port == 0) {
+            return errors.SocketError.AddrNotAvail;
+        }
     }
 
     const dst_ip = dest_addr.getAddr();
@@ -35,6 +38,39 @@ pub fn sendto(
 
     // Use socket's ToS value for IP header
     if (udp.sendDatagramWithTos(iface, dst_ip, sock.local_port, dst_port, data, sock.tos)) {
+        // Multicast Loopback
+        // If sending to a multicast group, deliver a copy to local sockets that are members
+        if (ipv4.isMulticast(dst_ip)) {
+            state.socketLock().acquire();
+            defer state.socketLock().release();
+            
+            // Iterate all sockets to find matching subscribers
+            for (state.getSocketTable()) |maybe_s| {
+                const s = maybe_s orelse continue;
+                if (!s.allocated) continue;
+                if (s.sock_type != types.SOCK_DGRAM) continue;
+                
+                // Must match destination port (and be bound to the group or INADDR_ANY)
+                if (s.local_port != dst_port) continue;
+                // For multicast, we don't strictly enforce local_addr match if it's a specific IP,
+                // passing 0 (INADDR_ANY) matches, but also if s.local_addr is set, the socket
+                // should still receive multicast if it joined the group.
+                // Standard behavior: if bound to specific IP, only receive if dest IP matches limit
+                // OR if it's multicast.
+                
+                // Check multicast membership
+                if (!s.isMulticastMember(dst_ip)) continue;
+                
+                // Enqueue packet
+                if (s.enqueuePacket(data, iface.ip_addr, sock.local_port)) {
+                    // Wake if blocked
+                    if (s.blocked_thread) |thread| {
+                        scheduler.wakeThread(thread);
+                        s.blocked_thread = null;
+                    }
+                }
+            }
+        }
         return data.len;
     }
 
@@ -52,7 +88,11 @@ pub fn recvfrom(
     var src_port: u16 = 0;
 
     // Non-blocking: check queue and return immediately
+    // Disable interrupts to prevent race with ISR enqueuing packets
     if (!sock.blocking) {
+        const saved_flags = hal.cpu.disableInterruptsSaveFlags();
+        defer hal.cpu.restoreInterrupts(saved_flags);
+
         if (sock.dequeuePacket(buf, &src_ip, &src_port)) |len| {
             if (src_addr) |addr| {
                 addr.* = types.SockAddrIn.init(src_ip, src_port);
@@ -90,17 +130,27 @@ pub fn recvfrom(
         }
     }
 
-    // Fallback: spin-wait for data (no scheduler)
-    var spin_count: usize = 0;
-    while (spin_count < 1000000) : (spin_count += 1) {
+    // Fallback: poll with HLT (no scheduler available)
+    // This saves power compared to busy-spinning and respects socket timeout
+    const timeout_ticks: usize = if (sock.rcv_timeout_ms > 0)
+        @intCast(sock.rcv_timeout_ms / 10) // ~10ms per tick approximation
+    else
+        1000; // Default 10 second timeout when no explicit timeout set
+
+    var ticks: usize = 0;
+    while (ticks < timeout_ticks) : (ticks += 1) {
+        // Check for data with interrupts disabled to avoid race
+        const flags = hal.cpu.disableInterruptsSaveFlags();
         if (sock.dequeuePacket(buf, &src_ip, &src_port)) |len| {
+            hal.cpu.restoreInterrupts(flags);
             if (src_addr) |addr| {
                 addr.* = types.SockAddrIn.init(src_ip, src_port);
             }
             return len;
         }
-        // Yield CPU (basic spin)
-        asm volatile ("pause");
+        // HLT atomically enables interrupts and halts until next interrupt
+        // This is much more power-efficient than busy-spinning with pause
+        asm volatile ("sti; hlt");
     }
 
     return errors.SocketError.TimedOut;
@@ -109,6 +159,11 @@ pub fn recvfrom(
 /// Deliver a received UDP packet to the appropriate socket(s)
 /// For broadcast/multicast packets, delivers to ALL matching sockets
 pub fn deliverUdpPacket(pkt: *packet.PacketBuffer) bool {
+    // Acquire global socket lock to prevent UAF (Use-After-Free)
+    // if a socket is closed (freed) while we are iterating.
+    state.socketLock().acquire();
+    defer state.socketLock().release();
+
     const udp_hdr = pkt.udpHeader();
     const dst_port = udp_hdr.getDstPort();
     const ip_hdr = pkt.ipHeader();
@@ -141,11 +196,13 @@ pub fn deliverUdpPacket(pkt: *packet.PacketBuffer) bool {
 
             // Check address binding
             // Socket must be bound to INADDR_ANY or the specific destination
-            if (sock.local_addr != 0 and sock.local_addr != dst_ip) continue;
+            if (sock.local_addr != 0 and sock.local_addr != dst_ip and !pkt.is_multicast) continue;
 
             // For multicast, also check group membership
             if (pkt.is_multicast) {
                 if (!sock.isMulticastMember(dst_ip)) continue;
+                // Note: we skip local_addr check for multicast so sockets bound to
+                // specific interfaces can still receive multicast if they joined
             }
 
             // Deliver to this socket

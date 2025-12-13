@@ -25,6 +25,10 @@ pub const BaseRevision = extern struct {
     pub fn is_supported(self: *const BaseRevision) bool {
         return self.revision == 0;
     }
+
+    comptime {
+        if (@sizeOf(BaseRevision) != 24) @compileError("BaseRevision must be 24 bytes (Limine protocol)");
+    }
 };
 
 // Framebuffer Request and Response
@@ -161,6 +165,10 @@ pub const Uuid = extern struct {
     b: u16,
     c: u16,
     d: [8]u8,
+
+    comptime {
+        if (@sizeOf(Uuid) != 16) @compileError("Uuid must be 16 bytes");
+    }
 };
 
 // Kernel Address Request (for getting kernel physical/virtual addresses)

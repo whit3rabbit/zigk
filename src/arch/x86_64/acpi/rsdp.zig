@@ -50,6 +50,10 @@ pub const Rsdp = extern struct {
         const phys: u64 = self.rsdt_address;
         return @ptrCast(paging.physToVirt(phys));
     }
+
+    comptime {
+        if (@sizeOf(Rsdp) != 20) @compileError("Rsdp must be 20 bytes (ACPI 1.0 spec)");
+    }
 };
 
 /// ACPI RSDP v2 structure (ACPI 2.0+)
@@ -64,7 +68,7 @@ pub const Rsdp2 = extern struct {
 
     // Extended fields (ACPI 2.0+)
     length: u32,            // Total structure length (36)
-    xsdt_address: u64,      // 64-bit physical address of XSDT
+    xsdt_address: u64 align(1),      // 64-bit physical address of XSDT
     extended_checksum: u8,  // Checksum of entire structure
     reserved: [3]u8,
 
@@ -89,6 +93,10 @@ pub const Rsdp2 = extern struct {
     /// Get as base RSDP for v1 compatibility
     pub fn asRsdp(self: *align(1) const Self) *align(1) const Rsdp {
         return @ptrCast(self);
+    }
+
+    comptime {
+        if (@sizeOf(Rsdp2) != 36) @compileError("Rsdp2 must be 36 bytes (ACPI 2.0 spec)");
     }
 };
 
@@ -155,6 +163,10 @@ pub const SdtHeader = extern struct {
     pub fn getDataLength(self: *align(1) const Self) usize {
         if (self.length < @sizeOf(SdtHeader) or self.length > MAX_TABLE_SIZE) return 0;
         return self.length - @sizeOf(SdtHeader);
+    }
+
+    comptime {
+        if (@sizeOf(SdtHeader) != 36) @compileError("SdtHeader must be 36 bytes (ACPI spec)");
     }
 };
 

@@ -115,6 +115,13 @@ pub fn range(max: u64) u64 {
     }
 }
 
+/// Fill buffer with hardware entropy directly (for sys_getrandom)
+/// Uses RDRAND when available for cryptographic-quality randomness
+/// This bypasses the PRNG and goes straight to hardware
+pub fn fillFromHardwareEntropy(buf: []u8) void {
+    hal.entropy.fillWithHardwareEntropy(buf);
+}
+
 /// Mix additional entropy into PRNG state
 /// Call this after initialization to incorporate runtime entropy sources
 /// (e.g., MAC address, RTC time, jiffies)

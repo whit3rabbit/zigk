@@ -81,7 +81,12 @@ pub const Vma = struct {
     prev: ?*Vma,
 
     /// Get size in bytes
+    /// Assumes invariant: end >= start (enforced at VMA creation)
     pub fn size(self: *const Vma) usize {
+        // Defensive: validate invariant to prevent underflow
+        if (self.end < self.start) {
+            return 0;
+        }
         return @intCast(self.end - self.start);
     }
 
@@ -215,6 +220,10 @@ pub const UserVmm = struct {
             if (!paging.isPageAligned(addr)) {
                 return Errno.EINVAL.toReturn();
             }
+            // Check for overflow: addr + aligned_len must not wrap
+            if (addr > std.math.maxInt(u64) - aligned_len) {
+                return Errno.ENOMEM.toReturn();
+            }
             if (addr < USER_MMAP_START or addr + aligned_len > USER_MMAP_END) {
                 return Errno.ENOMEM.toReturn();
             }
@@ -283,6 +292,11 @@ pub const UserVmm = struct {
         }
 
         const aligned_len = std.mem.alignForward(usize, len, pmm.PAGE_SIZE);
+
+        // Check for overflow: addr + aligned_len must not wrap
+        if (addr > std.math.maxInt(u64) - aligned_len) {
+            return Errno.EINVAL.toReturn();
+        }
         const end_addr = addr + aligned_len;
 
         // Find VMAs that overlap with the range
@@ -313,11 +327,21 @@ pub const UserVmm = struct {
                     self.total_mapped -= @intCast(v.end - unmap_start);
                     v.end = unmap_start;
                 } else {
-                    // Hole in middle: split VMA (complex, skip for MVP)
-                    // Just unmap the middle portion
+                    // Hole in middle: split VMA
+                    // Create new VMA for the right part first to handle OOM cleanly
+                    const right_vma = self.createVma(end_addr, v.end, v.prot, v.flags) catch {
+                        return Errno.ENOMEM.toReturn();
+                    };
+
+                    // Unmap the middle portion
                     self.unmapRange(addr, aligned_len);
                     self.total_mapped -= aligned_len;
-                    // TODO: Split VMA into two
+
+                    // Shrink existing VMA to be the left part
+                    v.end = addr;
+
+                    // Insert the new VMA (right part)
+                    self.insertVma(right_vma);
                 }
             }
 
@@ -343,6 +367,11 @@ pub const UserVmm = struct {
         }
 
         const aligned_len = std.mem.alignForward(usize, len, pmm.PAGE_SIZE);
+
+        // Check for overflow: addr + aligned_len must not wrap
+        if (addr > std.math.maxInt(u64) - aligned_len) {
+            return Errno.EINVAL.toReturn();
+        }
         const end_addr = addr + aligned_len;
 
         // Find VMAs that overlap with the range
@@ -393,6 +422,10 @@ pub const UserVmm = struct {
         // Walk VMAs looking for a gap
         var vma = self.vma_head;
         while (vma) |v| {
+            // Check for overflow: search_addr + size must not wrap
+            if (search_addr > std.math.maxInt(u64) - size) {
+                return null; // Would overflow, no valid range possible
+            }
             // Check if there's space before this VMA
             if (search_addr + size <= v.start) {
                 return search_addr;
@@ -400,6 +433,11 @@ pub const UserVmm = struct {
             // Move past this VMA
             search_addr = v.end;
             vma = v.next;
+        }
+
+        // Check for overflow before final bounds check
+        if (search_addr > std.math.maxInt(u64) - size) {
+            return null;
         }
 
         // Check if there's space after all VMAs

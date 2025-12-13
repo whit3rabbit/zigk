@@ -77,9 +77,12 @@ pub const BlockHeader = extern struct {
     // Pointer to next free block (only valid when block is free)
     next_free: ?*BlockHeader,
     
-    // Padding to ensure 32-byte size (16-byte alignment of payload)
-    // 3 * 8 = 24 bytes, need 8 more to reach 32
-    _padding: usize = 0,
+    // Magic number for integrity verification
+    // Repurposing padding field (was 8 bytes)
+    magic: usize = ALLOCATOR_MAGIC,
+
+    // "HEAPZIGK" in hex
+    pub const ALLOCATOR_MAGIC: usize = 0x48454150_5A49474B;
 
     const ALLOCATED_FLAG: usize = 1;
     const SIZE_MASK: usize = ~@as(usize, ALLOCATED_FLAG);
@@ -125,14 +128,30 @@ pub const BlockHeader = extern struct {
     }
 
     /// Get previous block in memory using its footer
+    /// Returns null if no valid previous block exists or if corruption is detected
     pub fn getPrevBlock(self: *BlockHeader, start_addr: usize) ?*BlockHeader {
         const self_addr = @intFromPtr(self);
         if (self_addr <= start_addr) {
             return null;
         }
 
+        // Defensive check: ensure we have room to read the footer
+        // Must have at least BlockFooter size between start_addr and self_addr
+        const footer_size = @sizeOf(BlockFooter);
+        if (self_addr < start_addr + footer_size) {
+            return null;
+        }
+
         // Read footer of previous block
-        const prev_footer: *BlockFooter = @ptrFromInt(self_addr - @sizeOf(BlockFooter));
+        const prev_footer: *BlockFooter = @ptrFromInt(self_addr - footer_size);
+
+        // Defensive check: validate footer size before subtraction
+        // Corrupted footer could have size > self_addr, causing underflow
+        if (prev_footer.size > self_addr or prev_footer.size < MIN_BLOCK_SIZE) {
+            // Corrupted footer detected - size is impossible
+            return null;
+        }
+
         const prev_addr = self_addr - prev_footer.size;
         if (prev_addr < start_addr) {
             return null;
@@ -140,9 +159,14 @@ pub const BlockHeader = extern struct {
 
         return @ptrFromInt(prev_addr);
     }
+
+    // 4 usize fields = 32 bytes on x86_64
+    comptime {
+        if (@sizeOf(BlockHeader) != 32) @compileError("BlockHeader must be 32 bytes");
+        if (@alignOf(BlockHeader) != 8) @compileError("BlockHeader must have 8-byte alignment");
+    }
 };
 
-// Block footer stored at the end of each block for backward coalescing
 // Block footer stored at the end of each block for backward coalescing
 // Using extern struct to guarantee layout
 pub const BlockFooter = extern struct {
@@ -150,6 +174,10 @@ pub const BlockFooter = extern struct {
     // Padding to ensure 16-byte size (preserves alignment for next block)
     // 1 * 8 = 8 bytes, need 8 more to reach 16
     _padding: usize = 0,
+
+    comptime {
+        if (@sizeOf(BlockFooter) != 16) @compileError("BlockFooter must be 16 bytes");
+    }
 };
 
 // Heap state (protected by heap_lock)
@@ -174,9 +202,9 @@ pub fn init(start: usize, size: usize) void {
     }
 
     // Align start up and size down
-    heap_start = alignUp(start, ALIGNMENT);
+    heap_start = std.mem.alignForward(usize, start, ALIGNMENT);
     const adjusted_size = size - (heap_start - start);
-    heap_end = heap_start + alignDown(adjusted_size, ALIGNMENT);
+    heap_end = heap_start + std.mem.alignBackward(usize, adjusted_size, ALIGNMENT);
 
     if (heap_end <= heap_start + MIN_BLOCK_SIZE) {
         if (is_freestanding) {
@@ -192,7 +220,7 @@ pub fn init(start: usize, size: usize) void {
     initial_block.size_and_flags = block_size; // Not allocated
     initial_block.prev_free = null;
     initial_block.next_free = null;
-    initial_block._padding = 0; // Hygiene
+    initial_block.magic = BlockHeader.ALLOCATOR_MAGIC;
 
     // Set footer
     const footer = initial_block.getFooter();
@@ -246,7 +274,7 @@ pub fn alloc(size: usize) ?[]u8 {
 
     // Calculate required block size (header + payload + footer, aligned)
     // Using checked arithmetic to detect overflow
-    const payload_size = alignUp(size, ALIGNMENT);
+    const payload_size = std.mem.alignForward(usize, size, ALIGNMENT);
     const overhead = @sizeOf(BlockHeader) + @sizeOf(BlockFooter);
 
     // Check for overflow: payload_size + overhead must not wrap
@@ -298,6 +326,14 @@ pub fn free(buf: []u8) void {
 
     // Get block header from payload pointer
     const header: *BlockHeader = @ptrFromInt(ptr_addr - @sizeOf(BlockHeader));
+
+    // Verify magic number before touching anything else
+    if (header.magic != BlockHeader.ALLOCATOR_MAGIC) {
+        if (is_freestanding) {
+            console.panic("Heap: Corruption detected! Invalid magic {x} at {x}", .{header.magic, ptr_addr});
+        }
+        return;
+    }
 
     if (!header.isAllocated()) {
         if (is_freestanding) {
@@ -428,6 +464,14 @@ pub fn checkIntegrity() bool {
         const header: *BlockHeader = @ptrFromInt(addr);
         const size = header.getSize();
 
+        // Check magic
+        if (header.magic != BlockHeader.ALLOCATOR_MAGIC) {
+            if (is_freestanding) {
+                 console.err("Heap: Corrupt block magic at {x}", .{addr});
+            }
+            return false;
+        }
+
         if (size < MIN_BLOCK_SIZE or addr + size > heap_end) {
             if (is_freestanding) {
                 console.err("Heap: Corrupt block at {x}, size={d}", .{ addr, size });
@@ -468,7 +512,13 @@ fn stdAlloc(_: *anyopaque, len: usize, ptr_align: std.mem.Alignment, _: usize) ?
     // std.mem.Alignment.toByteUnits returns usize (not optional in 0.15.x)
     const align_bytes = ptr_align.toByteUnits();
     if (align_bytes > ALIGNMENT) {
-        // Cannot satisfy alignment requirement
+        // Log warning when alignment cannot be satisfied
+        // This helps debug unexpected allocation failures (e.g., SIMD requiring 32/64-byte alignment)
+        console.warn("Heap: Unsupported alignment {d} > {d} for {d} byte allocation", .{
+            align_bytes,
+            ALIGNMENT,
+            len,
+        });
         return null;
     }
     const slice = alloc(len) orelse return null;
@@ -506,6 +556,8 @@ fn allocateFromBlock(block: *BlockHeader, required_size: usize) ?[]u8 {
         // Split: create new free block from remainder
         block.setSize(required_size);
         block.setAllocated(true);
+        // Magic should already be set, but ensure it stays
+        block.magic = BlockHeader.ALLOCATOR_MAGIC;
 
         // Update footer for allocated block
         var footer = block.getFooter();
@@ -518,7 +570,7 @@ fn allocateFromBlock(block: *BlockHeader, required_size: usize) ?[]u8 {
         new_block.setAllocated(false);
         new_block.prev_free = null;
         new_block.next_free = null;
-        new_block._padding = 0; // Hygiene
+        new_block.magic = BlockHeader.ALLOCATOR_MAGIC;
 
         // Set footer for new block
         const new_footer = new_block.getFooter();
@@ -573,14 +625,6 @@ fn removeFromFreeList(block: *BlockHeader) void {
     if (free_block_count > 0) {
         free_block_count -= 1;
     }
-}
-
-fn alignUp(value: usize, alignment: usize) usize {
-    return (value + alignment - 1) & ~(alignment - 1);
-}
-
-fn alignDown(value: usize, alignment: usize) usize {
-    return value & ~(alignment - 1);
 }
 
 /// Debug: Print heap statistics

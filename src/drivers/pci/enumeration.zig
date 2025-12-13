@@ -127,36 +127,53 @@ fn checkFunction(pci: *const Ecam, bus: u8, dev: u5, func: u3, devices: *DeviceL
 }
 
 /// Read all BARs for a device
-/// Read all BARs for a device
 fn readBars(pci: *const Ecam, dev: *PciDevice) void {
+    // Enable Memory Space before probing BARs
+    // Some devices (like QEMU XHCI) may not respond to BAR reads until enabled
+    const orig_cmd = pci.read16(dev.bus, dev.device, dev.func, ConfigReg.COMMAND);
+    const enabled_cmd = orig_cmd | device.Command.MEMORY_SPACE | device.Command.IO_SPACE;
+    pci.write16(dev.bus, dev.device, dev.func, ConfigReg.COMMAND, enabled_cmd);
+
     var i: u8 = 0;
     while (i < 6) : (i += 1) {
         // Calculate BAR offset based on type 0 header
         const bar_offset = ConfigReg.BAR0 + (i * 4);
         const bar_value = pci.read32(dev.bus, dev.device, dev.func, @intCast(bar_offset));
 
-        if (bar_value == 0) continue;
+        // Probe BAR by writing all 1s and reading back size mask
+        // This works even when bar_value is 0 (firmware didn't assign base)
+        pci.write32(dev.bus, dev.device, dev.func, @intCast(bar_offset), 0xFFFFFFFF);
+        const size_mask = pci.read32(dev.bus, dev.device, dev.func, @intCast(bar_offset));
+        pci.write32(dev.bus, dev.device, dev.func, @intCast(bar_offset), bar_value);
+
+        // Debug: Log BAR probe results for devices with interesting patterns
+        if (bar_value == 0 and size_mask != 0 and size_mask != 0xFFFFFFFF) {
+            console.debug("PCI: {d}:{d}.{d} BAR{d}: value=0 but size_mask=0x{x} (unassigned BAR)", .{
+                dev.bus, dev.device, dev.func, i, size_mask,
+            });
+        }
+
+        // If size_mask is 0 or all 1s, BAR doesn't exist
+        if (size_mask == 0 or size_mask == 0xFFFFFFFF) {
+            continue;
+        }
 
         var bar = Bar.unused();
 
-        if ((bar_value & 1) == 1) {
+        // Use size_mask to determine BAR type (more reliable than bar_value when base is 0)
+        if ((size_mask & 1) == 1) {
             // I/O Space
             bar.bar_type = .io;
             bar.is_mmio = false;
             bar.base = bar_value & 0xFFFFFFFC;
-            
-            // Determine size
-            pci.write32(dev.bus, dev.device, dev.func, @intCast(bar_offset), 0xFFFFFFFF);
-            const size_mask = pci.read32(dev.bus, dev.device, dev.func, @intCast(bar_offset));
-            pci.write32(dev.bus, dev.device, dev.func, @intCast(bar_offset), bar_value);
 
             if ((size_mask & 0xFFFFFFFC) != 0) {
                 bar.size = (~(size_mask & 0xFFFFFFFC)) +% 1;
             }
         } else {
-            // Memory Space
-            const is_64bit = (bar_value & 0x4) != 0;
-            const is_prefetch = (bar_value & 0x8) != 0;
+            // Memory Space - determine type from size_mask since bar_value might be 0
+            const is_64bit = (size_mask & 0x4) != 0;
+            const is_prefetch = (size_mask & 0x8) != 0;
 
             bar.is_mmio = true;
             bar.is_64bit = is_64bit;
@@ -164,44 +181,37 @@ fn readBars(pci: *const Ecam, dev: *PciDevice) void {
             bar.bar_type = if (is_64bit) .mmio_64bit else .mmio_32bit;
 
             var base: u64 = bar_value & 0xFFFFFFF0;
+            var size: u64 = 0;
 
             if (is_64bit) {
                 const bar_upper = pci.read32(dev.bus, dev.device, dev.func, @intCast(bar_offset + 4));
                 base |= (@as(u64, bar_upper) << 32);
-            }
-            bar.base = base;
 
-            // Determine size
-            pci.write32(dev.bus, dev.device, dev.func, @intCast(bar_offset), 0xFFFFFFFF);
-            if (is_64bit) {
+                // Probe upper BAR for 64-bit size
                 pci.write32(dev.bus, dev.device, dev.func, @intCast(bar_offset + 4), 0xFFFFFFFF);
-            }
-
-            const size_mask_low = pci.read32(dev.bus, dev.device, dev.func, @intCast(bar_offset));
-            
-            if (is_64bit) {
                 const size_mask_high = pci.read32(dev.bus, dev.device, dev.func, @intCast(bar_offset + 4));
-                // Restore
-                pci.write32(dev.bus, dev.device, dev.func, @intCast(bar_offset), bar_value);
-                pci.write32(dev.bus, dev.device, dev.func, @intCast(bar_offset + 4), @truncate(base >> 32));
+                pci.write32(dev.bus, dev.device, dev.func, @intCast(bar_offset + 4), bar_upper);
 
-                const mask64 = (@as(u64, size_mask_high) << 32) | (size_mask_low & 0xFFFFFFF0);
+                const mask64 = (@as(u64, size_mask_high) << 32) | (size_mask & 0xFFFFFFF0);
                 if (mask64 != 0) {
-                    bar.size = (~mask64) +% 1;
+                    size = (~mask64) +% 1;
                 }
             } else {
-                // Restore
-                pci.write32(dev.bus, dev.device, dev.func, @intCast(bar_offset), bar_value);
-                
-                const mask32 = size_mask_low & 0xFFFFFFF0;
+                const mask32 = size_mask & 0xFFFFFFF0;
                 if (mask32 != 0) {
-                    bar.size = (~mask32) +% 1;
+                    size = (~mask32) +% 1;
                 }
             }
 
+            bar.base = base;
+            bar.size = size;
+
+            // Store BAR first, then skip next register for 64-bit BARs
+            dev.bar[i] = bar;
             if (is_64bit) {
-                i += 1; // Skip next BAR register
+                i += 1; // Skip next BAR register (upper 32 bits already consumed)
             }
+            continue;
         }
 
         dev.bar[i] = bar;

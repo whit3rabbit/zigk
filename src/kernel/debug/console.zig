@@ -8,15 +8,57 @@ const std = @import("std");
 const hal = @import("hal");
 const config = @import("config");
 
+/// Console Backend Interface
+pub const Backend = struct {
+    context: ?*anyopaque,
+    writeFn: *const fn (context: ?*anyopaque, str: []const u8) void,
+    scrollFn: ?*const fn (context: ?*anyopaque, lines: usize, up: bool) void = null,
+};
+
+var backends: [4]Backend = undefined;
+var backend_count: usize = 0;
+
+/// Add a new output backend
+pub fn addBackend(backend: Backend) void {
+    if (backend_count < backends.len) {
+        backends[backend_count] = backend;
+        backend_count += 1;
+    }
+}
+
 /// Print a string to the debug console
 pub fn print(str: []const u8) void {
-    hal.serial.writeString(str);
+    if (backend_count == 0) {
+        // Fallback to HAL serial until backends are registered
+        hal.serial.writeString(str);
+        return;
+    }
+
+    for (backends[0..backend_count]) |b| {
+        b.writeFn(b.context, str);
+    }
 }
 
 /// Print a string to the debug console without locking
 /// UNSAFE: Use only in panic/crash situations
 pub fn printUnsafe(str: []const u8) void {
-    hal.serial.writeStringUnsafe(str);
+    // Try to use backends if available, but skip locks if possible?
+    // Our backends (uart, console) are currently lock-free or simple.
+    // However, for unsafe panic, maybe just dump to HAL serial for valid output.
+    hal.serial.writeStringUnsafe(str); 
+}
+
+/// Scroll standard output up/down
+pub fn scroll(lines: usize, up: bool) void {
+    if (backend_count == 0) return;
+    
+    // Only scroll the first backend usually (graphical console)
+    // Or iterate all? Typically only one graphical console exists.
+    for (backends[0..backend_count]) |b| {
+        if (b.scrollFn) |scrollFn| {
+            scrollFn(b.context, lines, up);
+        }
+    }
 }
 
 /// Print a formatted string to the debug console

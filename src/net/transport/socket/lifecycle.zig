@@ -70,6 +70,9 @@ pub fn close(sock_fd: usize) errors.SocketError!void {
 
     const sock = state.getSocket(sock_fd) orelse return errors.SocketError.BadFd;
 
+    // 1. Remove from table prevent new lookups (UAF protection)
+    state.clearSlot(sock_fd);
+
     // Close TCP connection if present
     if (sock.tcb) |tcb| {
         tcp.close(tcb);
@@ -88,5 +91,4 @@ pub fn close(sock_fd: usize) errors.SocketError!void {
 
     // Free memory
     state.socket_allocator.destroy(sock);
-    state.clearSlot(sock_fd);
 }

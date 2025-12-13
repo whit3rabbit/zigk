@@ -121,3 +121,30 @@ pub fn pollAny32(addr: u64, mask: u32, max_iterations: usize) bool {
     }
     return false;
 }
+
+const timing = @import("timing.zig");
+
+/// Poll a 32-bit register with real timeout in microseconds
+/// Uses calibrated TSC for accurate wall-clock timing
+pub fn poll32Timed(addr: u64, mask: u32, expected: u32, timeout_us: u64) bool {
+    const start = timing.rdtsc();
+    while (!timing.hasTimedOut(start, timeout_us)) {
+        if ((read32(addr) & mask) == expected) {
+            return true;
+        }
+        asm volatile ("pause" ::: .{ .memory = true });
+    }
+    return false;
+}
+
+/// Poll a 32-bit register until any bit in mask is set, with real timeout
+pub fn pollAny32Timed(addr: u64, mask: u32, timeout_us: u64) bool {
+    const start = timing.rdtsc();
+    while (!timing.hasTimedOut(start, timeout_us)) {
+        if ((read32(addr) & mask) != 0) {
+            return true;
+        }
+        asm volatile ("pause" ::: .{ .memory = true });
+    }
+    return false;
+}

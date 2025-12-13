@@ -11,6 +11,7 @@ All specifications MUST reference this table.
 | 1 | sys_write | (fd, buf, count) -> ssize_t | 005 |
 | 2 | sys_open | (path, flags, mode) -> fd | 007 |
 | 3 | sys_close | (fd) -> int | 005 |
+| 8 | sys_lseek | (fd, offset, whence) -> off_t | 005 |
 | 7 | sys_poll | (ufds, nfds, timeout) -> int | Future |
 | 9 | sys_mmap | (addr, len, prot, flags, fd, off) -> addr | 005 |
 | 10 | sys_mprotect | (addr, len, prot) -> int | 006 |

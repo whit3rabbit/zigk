@@ -1,9 +1,16 @@
 // ICMP Protocol Implementation
 //
-// RFC 792: Internet Control Message Protocol
+// Complies with:
+// - RFC 792: Internet Control Message Protocol
+// - RFC 1122: Requirements for Internet Hosts -- Communication Layers
 //
 // Implements Echo Request/Reply (ping) functionality.
 // Other ICMP types are parsed but not actively used.
+//
+// Message Format:
+// +-----------+--------+-----------+-------------------------+
+// | Type (1)  | Code(1)| Checksum(2)| Data (depends on Type)  |
+// +-----------+--------+-----------+-------------------------+
 
 const packet = @import("../core/packet.zig");
 const interface = @import("../core/interface.zig");

@@ -42,6 +42,7 @@ fn consoleRead(fd: *FileDescriptor, buf: []u8) isize {
 
     var bytes_read: usize = 0;
     while (bytes_read < buf.len) {
+        // First try non-blocking read for any buffered characters
         if (keyboard.getChar()) |c| {
             buf[bytes_read] = c;
             bytes_read += 1;
@@ -53,11 +54,19 @@ fn consoleRead(fd: *FileDescriptor, buf: []u8) isize {
         } else {
             // No character available
             if (bytes_read > 0) {
-                // Return what we have
+                // Return what we have (partial line)
                 break;
             }
-            // Nothing read yet, yield and try again
-            sched.yield();
+            // Nothing read yet - block until character available
+            // This properly sleeps the thread instead of busy-waiting
+            const c = keyboard.getCharBlocking();
+            buf[bytes_read] = c;
+            bytes_read += 1;
+
+            // Return after newline (line-buffered mode)
+            if (c == '\n') {
+                break;
+            }
         }
     }
 

@@ -1,16 +1,23 @@
-
 // TCP Protocol Implementation
 //
-// RFC 793/9293: Transmission Control Protocol
+// Complies with:
+// - RFC 793: Transmission Control Protocol
+// - RFC 1122: Requirements for Internet Hosts -- Communication Layers
+// - RFC 7323: TCP Extensions for High Performance (Window Scaling, Timestamps)
 //
-// Provides reliable, ordered, connection-oriented byte stream delivery.
-// This is a minimal implementation with:
+// Provides reliable, connection-oriented packet stream delivery.
+//
+// Architecture:
+// - root.zig: Entry point and packet dispatch
+// - state.zig: State Machine (RFC 793 event processing)
+// - rx.zig: Input processing (Segment arrival)
+// - tx.zig: Output processing (Segment transmission)
+// - timers.zig: Retransmission and timeouts
+// - options.zig: TCP Options parsing/buildingementation with:
 //   - 7-state machine (CLOSED, LISTEN, SYN-SENT, SYN-RECEIVED, ESTABLISHED, CLOSE-WAIT, LAST-ACK)
 //   - Fixed 8KB receive window (no auto-tuning)
 //   - Timeout-based retransmission (no fast retransmit)
 //   - In-order delivery only (out-of-order segments dropped)
-//
-// Deferred features: congestion control, SACK, window scaling, TIME-WAIT
 
 const constants = @import("constants.zig");
 const types = @import("types.zig");

@@ -32,13 +32,15 @@ pub const ICMP_HEADER_SIZE = core.ICMP_HEADER_SIZE;
 
 // Network stack initialization
 // Called from kernel main after NIC driver is initialized
-pub fn init(iface: *Interface, allocator: std.mem.Allocator) void {
+// Network stack initialization
+// Called from kernel main after NIC driver is initialized
+pub fn init(iface: *Interface, allocator: std.mem.Allocator, ticks_per_sec: u32) void {
     // Initialize layers with allocator
     ipv4.ipv4.init(allocator); // Includes ARP init
     
     // Initialize Transport Layer (TCP/Sockets) which now uses dynamic memory
     transport.initSockets(iface, allocator);
-    transport.initTcp(iface, allocator);
+    transport.initTcp(iface, allocator, ticks_per_sec);
 
     // Clear ARP cache (redundant if init clears it, but kept for logic)
     ipv4.arp.clearCache();

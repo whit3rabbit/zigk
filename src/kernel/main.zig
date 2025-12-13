@@ -10,6 +10,7 @@
 //   - Stack already set up
 //   - Interrupts disabled (we set up our own IDT)
 
+const std = @import("std");
 const limine = @import("limine");
 const hal = @import("hal");
 const syscall_arch = hal.syscall;
@@ -20,6 +21,7 @@ const vmm = @import("vmm");
 const heap = @import("heap");
 const kernel_stack = @import("kernel_stack");
 const keyboard = @import("keyboard");
+const mouse = @import("mouse");
 const sched = @import("sched");
 const thread = @import("thread");
 const stack_guard = @import("stack_guard");
@@ -32,6 +34,11 @@ const handlers = @import("syscall_handlers");
 const net = @import("net");
 const pci = @import("pci");
 const e1000e = @import("e1000e");
+const usb = @import("usb");
+const acpi = @import("acpi");
+
+const serial_driver = @import("serial_driver");
+const video_driver = @import("video_driver");
 
 // Syscall dispatch table - must be imported to compile dispatch_syscall symbol
 // called from asm_helpers.S _syscall_entry
@@ -48,6 +55,35 @@ comptime {
 
 // Disable error return traces globally to safe memory/stack space
 pub const os_has_error_return_trace = false;
+
+// =============================================================================
+// std.log Integration
+// =============================================================================
+// Redirect std.log.* calls to kernel console. This allows third-party Zig
+// libraries to log correctly and provides a standard logging interface.
+
+pub const std_options: std.Options = .{
+    .logFn = kernelLogFn,
+    .log_level = .debug,
+};
+
+fn kernelLogFn(
+    comptime level: std.log.Level,
+    comptime scope: @TypeOf(.EnumLiteral),
+    comptime format: []const u8,
+    args: anytype,
+) void {
+    _ = scope;
+    const prefix = switch (level) {
+        .debug => "[DEBUG] ",
+        .info => "[INFO]  ",
+        .warn => "[WARN]  ",
+        .err => "[ERROR] ",
+    };
+    console.print(prefix);
+    console.printf(format, args);
+    console.print("\n");
+}
 
 // ============================================================================
 // Limine Request Structures
@@ -72,12 +108,50 @@ var bsp_gs_data: syscall_arch.KernelGsData = .{
     .scratch = 0,
 };
 
+// Global driver instances
+var uart: serial_driver.Serial = undefined;
+var fb_driver_direct: video_driver.DirectFramebufferDriver = undefined;
+var fb_driver_buffered: video_driver.BufferedFramebufferDriver = undefined;
+var fb_is_buffered: bool = false;
+var graph_console: video_driver.console.Console = undefined;
+
+// Wrapper for UART backend
+fn uartWriteWrapper(ctx: ?*anyopaque, str: []const u8) void {
+    const s: *serial_driver.Serial = @ptrCast(@alignCast(ctx));
+    s.write(str);
+}
+
+// Wrapper for Video backend
+fn videoWriteWrapper(ctx: ?*anyopaque, str: []const u8) void {
+    const c: *video_driver.console.Console = @ptrCast(@alignCast(ctx));
+    c.write(str);
+}
+
+// Wrapper for Scrolling
+fn videoScrollWrapper(ctx: ?*anyopaque, lines: usize, up: bool) void {
+    const c: *video_driver.console.Console = @ptrCast(@alignCast(ctx));
+    if (up) {
+        c.scrollUp(lines);
+    } else {
+        c.scrollDown(lines);
+    }
+}
+
 /// Kernel entry point - called by Limine bootloader
 /// Entry point is specified in linker script as _start
 export fn _start() noreturn {
     // Initialize HAL (serial port, GDT, PIC, IDT, interrupts)
     // This must be first - serial is needed for any debug output
     hal.init();
+
+    // Initialize Serial Driver (UART)
+    uart = serial_driver.Serial.init();
+    
+    // Register UART as console backend
+    console.addBackend(.{
+        .context = @ptrCast(&uart),
+        .writeFn = uartWriteWrapper,
+    });
 
     // Initialize GS base for syscalls - points to per-CPU data
     // kernel_stack will be updated by scheduler on context switch
@@ -137,6 +211,44 @@ export fn _start() noreturn {
     // Initialize framebuffer from Limine response
     // Optional - serial-only mode works without framebuffer
     framebuffer.initFromLimine(&framebuffer_request);
+    
+    // Initialize Graphical Console if framebuffer is available
+    // Initialize Graphical Console if framebuffer is available
+    if (framebuffer.getState()) |fb_state| {
+        // Limine provides the framebuffer address as a VIRTUAL address (already HHDM mapped).
+        // Calling physToVirt on it would add HHDM offset again, causing overflow.
+        const virt_addr = fb_state.phys_addr;
+        
+        // Initialize Framebuffer Driver (direct mode initially, before PMM is ready)
+        const video_mode = video_driver.interface.VideoMode{
+            .width = fb_state.width,
+            .height = fb_state.height,
+            .pitch = fb_state.pitch,
+            .bpp = fb_state.bpp,
+            .addr = virt_addr,
+            .red_mask_size = fb_state.red_mask_size,
+            .red_field_position = fb_state.red_shift,
+            .green_mask_size = fb_state.green_mask_size,
+            .green_field_position = fb_state.green_shift,
+            .blue_mask_size = fb_state.blue_mask_size,
+            .blue_field_position = fb_state.blue_shift,
+        };
+        fb_driver_direct = video_driver.DirectFramebufferDriver.initDirect(video_mode);
+
+        // Initialize Graphical Console (will switch to buffered driver after PMM init)
+        graph_console = video_driver.console.Console.init(fb_driver_direct.device());
+        
+        // Register Graphical Console as backend
+        console.addBackend(.{
+            .context = @ptrCast(&graph_console),
+            .writeFn = videoWriteWrapper,
+            .scrollFn = videoScrollWrapper,
+        });
+        
+        console.info("Graphics: Initialized {d}x{d}x{d} framebuffer", .{
+            fb_state.width, fb_state.height, fb_state.bpp
+        });
+    }
 
     // Check for loaded modules (shell, initrd, etc.)
     if (module_request.response) |mod_response| {
@@ -144,7 +256,7 @@ export fn _start() noreturn {
         console.info("Loaded modules: {d}", .{mods.len});
         for (mods) |mod| {
             console.info("  Module: {s} @ {x} ({d} bytes)", .{
-                mod.cmdline[0..strlen(mod.cmdline)],
+                std.mem.span(mod.cmdline),
                 mod.address,
                 mod.size,
             });
@@ -170,9 +282,18 @@ export fn _start() noreturn {
     // Must be done BEFORE scheduler creates any threads
     stack_guard.init();
 
+    // Initialize APIC (replaces legacy PIC for interrupt handling)
+    // Must be done before keyboard/scheduler to route IRQs correctly
+    initApic();
+
     // Initialize keyboard driver and register with HAL
     keyboard.init();
     hal.interrupts.setKeyboardHandler(&keyboard.handleIrq);
+
+    // Initialize mouse driver and register with HAL
+    mouse.init();
+    hal.interrupts.setMouseHandler(&mouse.handleIrq);
+
     hal.interrupts.setCrashHandler(handleCrash);
 
     // Initialize scheduler (creates idle thread, registers timer handler)
@@ -188,6 +309,7 @@ export fn _start() noreturn {
     console.info("  PIC remapped to vectors 32-47", .{});
     console.info("  IDT installed with 48 handlers", .{});
     console.info("  Keyboard driver registered", .{});
+    console.info("  Mouse driver registered", .{});
     console.info("  Scheduler initialized", .{});
     console.info("  PRNG seeded, stack canary randomized", .{});
 
@@ -196,6 +318,12 @@ export fn _start() noreturn {
 
     // Initialize network (PCI + E1000e + Net Stack)
     initNetwork();
+
+    // Initialize USB (XHCI controllers)
+    initUsb();
+
+    // Try to initialize VirtIO-GPU (paravirtualized GPU)
+    initVirtioGpu();
 
     // Load Init Process (httpd or shell) from modules
     loadInitProcess();
@@ -225,7 +353,7 @@ fn loadInitProcess() void {
     const get_str = struct {
         fn call(ptr: [*:0]const u8) []const u8 {
             if (@intFromPtr(ptr) == 0) return "";
-            return ptr[0..strlen(ptr)];
+            return std.mem.span(ptr);
         }
     }.call;
 
@@ -234,7 +362,7 @@ fn loadInitProcess() void {
         const cmdline = get_str(mod.cmdline);
         const path = get_str(mod.path);
         
-        if (containsStr(cmdline, "test_asm") or containsStr(path, "test_asm")) {
+        if (std.mem.indexOf(u8, cmdline, "test_asm") != null or std.mem.indexOf(u8, path, "test_asm") != null) {
             selected_mod = mod;
             process_name = "test_asm";
             break;
@@ -247,7 +375,7 @@ fn loadInitProcess() void {
             const cmdline = get_str(mod.cmdline);
             const path = get_str(mod.path);
             
-            if (containsStr(cmdline, "httpd") or containsStr(path, "httpd")) {
+            if (std.mem.indexOf(u8, cmdline, "httpd") != null or std.mem.indexOf(u8, path, "httpd") != null) {
                 selected_mod = mod;
                 process_name = "httpd";
                 break;
@@ -261,7 +389,7 @@ fn loadInitProcess() void {
             const cmdline = get_str(mod.cmdline);
             const path = get_str(mod.path);
             
-            if (containsStr(cmdline, "shell") or containsStr(path, "shell")) {
+            if (std.mem.indexOf(u8, cmdline, "shell") != null or std.mem.indexOf(u8, path, "shell") != null) {
                 selected_mod = mod;
                 process_name = "shell";
                 break;
@@ -380,7 +508,7 @@ fn initInitRD(mods: []const *limine.Module) void {
     const get_str = struct {
         fn call(ptr: [*:0]const u8) []const u8 {
             if (@intFromPtr(ptr) == 0) return "";
-            return ptr[0..strlen(ptr)];
+            return std.mem.span(ptr);
         }
     }.call;
 
@@ -389,8 +517,8 @@ fn initInitRD(mods: []const *limine.Module) void {
         const path = get_str(mod.path);
 
         // Check if this module is an initrd (by cmdline or path)
-        if (containsStr(cmdline, "initrd") or containsStr(path, "initrd") or
-            containsStr(cmdline, ".tar") or containsStr(path, ".tar"))
+        if (std.mem.indexOf(u8, cmdline, "initrd") != null or std.mem.indexOf(u8, path, "initrd") != null or
+            std.mem.indexOf(u8, cmdline, ".tar") != null or std.mem.indexOf(u8, path, ".tar") != null)
         {
             // Get module data as slice
             const data = @as([*]const u8, @ptrFromInt(mod.address))[0..mod.size];
@@ -457,7 +585,22 @@ fn initMemoryManagement() void {
     heap.init(@intFromPtr(heap_virt), config.heap_size);
 
     console.info("Memory management initialized", .{});
-    pmm.printStats();
+    
+    // Now that PMM is ready, try to enable Double Buffering for graphical console
+    // Attempt to create a buffered driver using the same video mode
+    if (video_driver.BufferedFramebufferDriver.initWithBackBuffer(fb_driver_direct.mode)) |buffered| {
+        fb_driver_buffered = buffered;
+        fb_is_buffered = true;
+        // Reinitialize console with buffered driver
+        graph_console = video_driver.console.Console.init(fb_driver_buffered.device());
+        console.info("Graphics: Double Buffering enabled", .{});
+    }
+
+
+
+
+
+
     heap.printStats();
 }
 
@@ -496,30 +639,6 @@ fn logMemoryMap(memmap: *const limine.MemoryMapResponse) void {
     console.info("Memory map entries: {d}", .{entries.len});
     console.info("Total memory: {d} MB", .{total_memory / (1024 * 1024)});
     console.info("Usable memory: {d} MB", .{usable_memory / (1024 * 1024)});
-}
-
-/// Calculate string length (null-terminated)
-fn strlen(s: [*:0]const u8) usize {
-    var len: usize = 0;
-    while (s[len] != 0) : (len += 1) {}
-    return len;
-}
-
-/// Check if haystack contains needle
-fn containsStr(haystack: []const u8, needle: []const u8) bool {
-    if (needle.len > haystack.len) return false;
-    var i: usize = 0;
-    while (i + needle.len <= haystack.len) : (i += 1) {
-        var match = true;
-        for (needle, 0..) |c, j| {
-            if (haystack[i + j] != c) {
-                match = false;
-                break;
-            }
-        }
-        if (match) return true;
-    }
-    return false;
 }
 
 /// Convert physical address to virtual using HHDM
@@ -569,6 +688,8 @@ fn handleCrash(vector: u8, err_code: u64) noreturn {
 // ============================================================================
 
 var net_interface: net.Interface = undefined;
+var pci_devices: ?*const pci.DeviceList = null;
+var pci_ecam: ?pci.Ecam = null;  // Store by value, not pointer (avoid dangling reference)
 
 fn txWrapper(data: []const u8) bool {
     if (e1000e.getDriver()) |driver| {
@@ -603,7 +724,11 @@ fn initNetwork() void {
         console.err("PCI init failed: {}", .{err});
         return;
     };
-    
+
+    // Save PCI state for other subsystems (USB, VirtIO)
+    pci_devices = pci_res.devices;
+    pci_ecam = pci_res.ecam;  // Copy by value to avoid dangling reference
+
     // 3. Initialize E1000e
     const nic_driver = e1000e.initFromPci(pci_res.devices, &pci_res.ecam) catch |err| {
         console.warn("E1000e init failed (no supported NIC?): {}", .{err});
@@ -616,7 +741,7 @@ fn initNetwork() void {
     net_interface.setTransmitFn(txWrapper);
 
     // 5. Initialize Network Stack
-    net.init(&net_interface, heap.allocator());
+    net.init(&net_interface, heap.allocator(), 100);
 
     // 6. Register Callbacks
     nic_driver.setRxCallback(rxCallbackAdapter);
@@ -625,4 +750,126 @@ fn initNetwork() void {
     console.info("Network initialized (MAC={x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2})", .{
         mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
     });
+}
+
+// ============================================================================
+// USB Initialization
+// ============================================================================
+
+fn initUsb() void {
+    console.print("\n");
+    console.info("Initializing USB subsystem...", .{});
+
+    const devices = pci_devices orelse {
+        console.warn("USB: PCI not initialized, skipping USB", .{});
+        return;
+    };
+
+    var ecam = pci_ecam orelse {
+        console.warn("USB: PCI ECAM not available, skipping USB", .{});
+        return;
+    };
+
+    usb.initFromPci(devices, &ecam);
+}
+
+// ============================================================================
+// VirtIO-GPU Initialization
+// ============================================================================
+
+var virtio_gpu_driver: ?*video_driver.VirtioGpuDriver = null;
+
+fn initVirtioGpu() void {
+    console.print("\n");
+    console.info("Checking for VirtIO-GPU...", .{});
+
+    const devices = pci_devices orelse {
+        console.info("VirtIO-GPU: PCI not initialized, skipping", .{});
+        return;
+    };
+
+    var ecam = pci_ecam orelse {
+        console.info("VirtIO-GPU: PCI ECAM not available, skipping", .{});
+        return;
+    };
+
+    // Scan for VirtIO-GPU device
+    for (devices.devices[0..devices.count]) |*dev| {
+        if (dev.isVirtioGpu()) {
+            console.info("VirtIO-GPU: Found device at {d}:{d}.{d}", .{ dev.bus, dev.device, dev.func });
+
+            // Try to initialize the driver
+            if (video_driver.VirtioGpuDriver.init(dev, &ecam)) |driver| {
+                virtio_gpu_driver = driver;
+
+                // Switch console to use VirtIO-GPU
+                graph_console = video_driver.console.Console.init(driver.device());
+                console.info("VirtIO-GPU: Console switched to paravirtualized GPU", .{});
+                return;
+            } else {
+                console.warn("VirtIO-GPU: Driver initialization failed", .{});
+            }
+        }
+    }
+
+    console.info("VirtIO-GPU: No device found, using framebuffer", .{});
+}
+
+/// Initialize APIC subsystem (replaces legacy PIC)
+fn initApic() void {
+    console.print("\n");
+    console.info("Initializing APIC subsystem...", .{});
+
+    // Get RSDP from Limine
+    const rsdp_response = rsdp_request.response orelse {
+        console.warn("RSDP not found, using legacy PIC mode", .{});
+        hal.apic.setLegacyPicMode(); // Explicitly set interrupt mode for proper EOI handling
+        return;
+    };
+    const rsdp_ptr: *align(1) const acpi.Rsdp = @ptrFromInt(rsdp_response.address);
+
+    // Parse MADT to get APIC topology
+    const madt_info = acpi.parseMadt(rsdp_ptr) orelse {
+        console.warn("MADT not found, using legacy PIC mode", .{});
+        hal.apic.setLegacyPicMode(); // Explicitly set interrupt mode for proper EOI handling
+        return;
+    };
+
+    acpi.logMadtInfo(&madt_info);
+
+    // Convert MADT info to APIC init info
+    // We need to convert the ioapic array to the local IoApicInfo type
+    var io_apics: [hal.apic.ioapic.MAX_IOAPICS]hal.apic.IoApicInfo = undefined;
+    for (madt_info.io_apics[0..madt_info.io_apic_count], 0..) |ioapic, i| {
+        io_apics[i] = .{
+            .id = ioapic.id,
+            .addr = ioapic.addr,
+            .gsi_base = ioapic.gsi_base,
+        };
+    }
+
+    // Convert overrides
+    var overrides: [16]?hal.apic.InterruptOverride = [_]?hal.apic.InterruptOverride{null} ** 16;
+    for (madt_info.overrides, 0..) |maybe_ovr, i| {
+        if (maybe_ovr) |ovr| {
+            overrides[i] = .{
+                .source_irq = ovr.source_irq,
+                .gsi = ovr.gsi,
+                .polarity = @enumFromInt(@intFromEnum(ovr.polarity)),
+                .trigger_mode = @enumFromInt(@intFromEnum(ovr.trigger_mode)),
+            };
+        }
+    }
+
+    const apic_init_info = hal.apic.ApicInitInfo{
+        .local_apic_addr = madt_info.local_apic_addr,
+        .io_apics = io_apics[0..madt_info.io_apic_count],
+        .overrides = &overrides,
+        .pcat_compat = madt_info.pcat_compat,
+    };
+
+    // Initialize APIC
+    hal.apic.init(&apic_init_info);
+
+    console.info("APIC subsystem initialized", .{});
 }

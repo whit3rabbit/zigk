@@ -166,22 +166,11 @@ fn wakeSleepingThreads(now: u64) void {
 /// Idle thread entry point - runs when no other threads are ready
 /// Idle thread entry point - runs when no other threads are ready
 fn idleThreadEntry() void {
+    // Just enable interrupts and halt loop.
+    // We rely on the timer interrupt to preempt us when work is available.
+    hal.cpu.enableInterrupts();
     while (true) {
-        // Disable interrupts to check state
-        hal.cpu.disableInterrupts();
-        
-        // If there's work (though unlikely since we're the idle thread),
-        // enable interrupts and yield/halt for next tick.
-        if (scheduler.ready_queue.count > 0) {
-            hal.cpu.enableInterrupts();
-            hal.cpu.halt();
-            continue;
-        }
-        
-        // No work: atomically enable interrupts and halt
-        // This prevents the race where an interrupt fires *after* we decide to sleep
-        // but *before* the HLT instruction, causing missed wakeups.
-        hal.cpu.enableAndHalt();
+        hal.cpu.halt();
     }
 }
 
@@ -339,7 +328,20 @@ pub fn block() void {
         }
     }
 
-    // After releasing the lock, atomically enable interrupts and halt.
+    // Mitigation for "Spurious Halt" race:
+    // If an interrupt fired immediately after lock release, we might have been
+    // preempted, blocked, unblocked, and rescheduled ALREADY.
+    // In that case, our state is now Running, and we should NOT halt.
+    hal.cpu.disableInterrupts();
+    if (scheduler.current) |curr| {
+        if (curr.state == .Running) {
+            // We were preempted and woken up already
+            hal.cpu.enableInterrupts();
+            return;
+        }
+    }
+
+    // After releasing the lock (and verifying state), atomically enable interrupts and halt.
     // The timer IRQ will fire and timerTick() will:
     //   1. Save our context (kernel_rsp)
     //   2. See state == .Blocked, so NOT add us to ready queue
@@ -453,10 +455,18 @@ pub fn exitWithStatus(status: i32) void {
 /// frame: Pointer to the current thread's saved interrupt frame
 /// Returns: Pointer to the frame to restore (same if no switch, different if switched)
 pub fn timerTick(frame: *hal.idt.InterruptFrame) *hal.idt.InterruptFrame {
+    // DEBUG: Entry point - use info level to ensure visibility
+    console.info("timerTick: ENTER frame={x} cs={x} ss={x}", .{
+        @intFromPtr(frame), frame.cs, frame.ss,
+    });
+
     const held = scheduler.lock.acquire();
     defer held.release();
 
     scheduler.tick_count += 1;
+    console.info("timerTick: tick={d} running={} current={}", .{
+        scheduler.tick_count, scheduler.running, scheduler.current != null,
+    });
     wakeSleepingThreads(scheduler.tick_count);
 
     if (scheduler.tick_count % 100 == 0) {
@@ -492,15 +502,22 @@ pub fn timerTick(frame: *hal.idt.InterruptFrame) *hal.idt.InterruptFrame {
     }
 
     // Select next thread to run
+    console.info("timerTick: ready_queue count={d}", .{scheduler.ready_queue.count});
     var next_thread = removeFromReadyQueue();
 
     // If no threads ready, use idle thread
     if (next_thread == null) {
+        console.info("timerTick: no ready threads, using idle", .{});
         next_thread = scheduler.idle_thread;
         // Idle thread doesn't go in ready queue, just runs directly
+    } else {
+        console.info("timerTick: got thread from queue '{s}'", .{next_thread.?.getName()});
     }
 
     const next = next_thread.?;
+    console.info("timerTick: next thread '{s}' state={} kernel_rsp={x}", .{
+        next.getName(), @intFromEnum(next.state), next.kernel_rsp,
+    });
 
     // If switching to a different thread, update TSS and potentially CR3
     if (scheduler.current != next) {
@@ -527,8 +544,12 @@ pub fn timerTick(frame: *hal.idt.InterruptFrame) *hal.idt.InterruptFrame {
         }
 
         // Restore FS base for TLS (set by arch_prctl ARCH_SET_FS)
-        // Only restore if thread has a non-zero FS base to avoid unnecessary MSR writes
-        if (next.fs_base != 0) {
+        // Optimization: Only write MSR if value actually changed
+        // We must check against the PREVIOUS thread's FS base (curr), not 0.
+        // This ensures that if we switch from a thread with TLS (fs!=0) to
+        // one without (fs=0), we correctly clear the MSR.
+        const current_fs = if (scheduler.current) |c| c.fs_base else 0;
+        if (next.fs_base != current_fs) {
             hal.cpu.writeMsr(hal.cpu.IA32_FS_BASE, next.fs_base);
         }
 
@@ -542,6 +563,16 @@ pub fn timerTick(frame: *hal.idt.InterruptFrame) *hal.idt.InterruptFrame {
 
     next.state = .Running;
     scheduler.current = next;
+
+    // DEBUG: Verify the interrupt frame before context switch
+    const frame_ptr: *hal.idt.InterruptFrame = @ptrFromInt(next.kernel_rsp);
+    console.debug("timerTick: switch to '{s}' tid={d} kernel_rsp={x}", .{
+        next.getName(), next.tid, next.kernel_rsp,
+    });
+    console.debug("timerTick: frame.cs={x} frame.ss={x} frame.rip={x} rflags={x}", .{
+        frame_ptr.cs, frame_ptr.ss, frame_ptr.rip, frame_ptr.rflags,
+    });
+    console.debug("timerTick: EXIT returning {x}", .{next.kernel_rsp});
 
     // Return the new thread's saved interrupt frame
     // isr_common will pop registers from this location and iretq

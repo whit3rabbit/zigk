@@ -39,6 +39,9 @@ pub const PacketBuffer = struct {
     src_mac: [6]u8,
     src_ip: u32,
     src_port: u16,
+    
+    /// Destination information (essential for reassembled packets where IP header is stripped)
+    dst_ip: u32,
 
     /// Protocol info
     ethertype: u16,
@@ -50,20 +53,22 @@ pub const PacketBuffer = struct {
 
     const Self = @This();
 
-    /// Initialize from raw buffer slice
+    /// Initialize from raw packet buffer
     /// data: The backing storage slice (defines capacity)
     /// len: The initial used length (usually 0 for new packets, or data.len for wrappers)
     pub fn init(data: []u8, len: usize) Self {
         return Self{
             .data = data,
             .len = len,
-            .eth_offset = 0,
+            // Reserve headroom for outgoing packets (len == 0), otherwise assume received packet (offset 0)
+            .eth_offset = if (len == 0) 128 else 0,
             .ip_offset = 0,
             .transport_offset = 0,
             .payload_offset = 0,
             .src_mac = [_]u8{0} ** 6,
             .src_ip = 0,
             .src_port = 0,
+            .dst_ip = 0,
             .ethertype = 0,
             .ip_protocol = 0,
             .is_broadcast = false,
@@ -157,6 +162,10 @@ pub const EthernetHeader = extern struct {
     pub fn setEthertype(self: *align(1) EthernetHeader, value: u16) void {
         self.ethertype = @byteSwap(value);
     }
+
+    comptime {
+        if (@sizeOf(EthernetHeader) != 14) @compileError("EthernetHeader must be 14 bytes");
+    }
 };
 
 /// IPv4 header (20 bytes minimum)
@@ -215,6 +224,10 @@ pub const Ipv4Header = extern struct {
     pub fn setDstIp(self: *align(1) Ipv4Header, value: u32) void {
         self.dst_ip = @byteSwap(value);
     }
+
+    comptime {
+        if (@sizeOf(Ipv4Header) != 20) @compileError("Ipv4Header must be 20 bytes");
+    }
 };
 
 /// UDP header (8 bytes)
@@ -253,6 +266,10 @@ pub const UdpHeader = extern struct {
     pub fn setLength(self: *align(1) UdpHeader, value: u16) void {
         self.length = @byteSwap(value);
     }
+
+    comptime {
+        if (@sizeOf(UdpHeader) != 8) @compileError("UdpHeader must be 8 bytes");
+    }
 };
 
 /// ICMP header (8 bytes)
@@ -275,6 +292,10 @@ pub const IcmpHeader = extern struct {
     pub fn getSequence(self: *align(1) const IcmpHeader) u16 {
         return @byteSwap(self.sequence);
     }
+
+    comptime {
+        if (@sizeOf(IcmpHeader) != 8) @compileError("IcmpHeader must be 8 bytes");
+    }
 };
 
 /// ARP header (28 bytes for IPv4 over Ethernet)
@@ -285,9 +306,9 @@ pub const ArpHeader = extern struct {
     proto_len: u8,      // Protocol address length (4 for IPv4)
     operation: u16,     // Operation (1 = request, 2 = reply)
     sender_mac: [6]u8,
-    sender_ip: u32,
+    sender_ip: u32 align(1),
     target_mac: [6]u8,
-    target_ip: u32,
+    target_ip: u32 align(1),
 
     pub const OP_REQUEST: u16 = 0x0100; // 1 in network byte order
     pub const OP_REPLY: u16 = 0x0200;   // 2 in network byte order
@@ -305,6 +326,10 @@ pub const ArpHeader = extern struct {
     /// Get target IP in host byte order
     pub fn getTargetIp(self: *align(1) const ArpHeader) u32 {
         return @byteSwap(self.target_ip);
+    }
+
+    comptime {
+        if (@sizeOf(ArpHeader) != 28) @compileError("ArpHeader must be 28 bytes");
     }
 };
 

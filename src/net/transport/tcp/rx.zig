@@ -1,8 +1,10 @@
+const std = @import("std");
 const c = @import("constants.zig");
 const types = @import("types.zig");
 const state = @import("state.zig");
 const options = @import("options.zig");
 const tx = @import("tx.zig");
+const console = @import("console");
 
 const packet = @import("../../core/packet.zig");
 const socket = @import("../socket.zig");
@@ -19,8 +21,13 @@ const seqLte = types.seqLte;
 const seqGt = types.seqGt;
 const seqGte = types.seqGte;
 
-/// Process an incoming TCP packet
-/// Returns true if packet was handled
+/// TCP Input Processing
+//
+// Complies with:
+// - RFC 793: SEGMENT ARRIVAL (Section 3.9)
+//
+// Handles incoming TCP segments, state transitions, and data buffering.
+// Implements the "SEGMENT ARRIVAL" event processing logic.f packet was handled
 pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
     state.lock.acquire();
     defer state.lock.release();
@@ -40,16 +47,25 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
     }
 
     // Verify TCP checksum
-    const ip_payload_len = ip_hdr.getTotalLength() - ip_hdr.getHeaderLength();
-    const tcp_segment = pkt.data[pkt.transport_offset..][0..ip_payload_len];
-    const calc_checksum = @import("checksum.zig").tcpChecksum(ip_hdr.src_ip, ip_hdr.dst_ip, tcp_segment);
+    // Note: for reassembled packets, pkt.ipHeader() might point to invalid/virtual IP header at offset 0
+    // so we must use the stored IP addresses in the packet metadata.
+    // However, we still need payload length.
+    
+    // Safety check: for reassembled packets, len should be mostly payload.
+    // For normal packets, we calculated payload len from IP header previously.
+    // Let's use the slice length directly from packet buffer data/len which is safe.
+    
+    const tcp_segment = pkt.data[pkt.transport_offset..pkt.len];
+    
+    // Use stored IPs for checksum to support reassembled packets
+    const calc_checksum = @import("checksum.zig").tcpChecksum(pkt.src_ip, pkt.dst_ip, tcp_segment);
 
     if (calc_checksum != 0 and tcp_hdr.checksum != calc_checksum) {
         return false; // Bad checksum
     }
 
     // Look up connection
-    const local_ip = ip_hdr.getDstIp();
+    const local_ip = pkt.dst_ip;
     const local_port = tcp_hdr.getDstPort();
     const remote_ip = ip_hdr.getSrcIp();
     const remote_port = tcp_hdr.getSrcPort();
@@ -138,8 +154,13 @@ fn processListenPacket(
     }
 
     // Scale peer window if negotiated
+    // RFC 7323: MUST clamp window scale to 14 if greater
     if (new_tcb.wscale_ok) {
-        new_tcb.snd_wnd = @as(u32, new_tcb.snd_wnd) << @as(u5, @intCast(new_tcb.snd_wscale));
+        const scale: u5 = if (new_tcb.snd_wscale > 14) blk: {
+            console.warn("TCP: Illegal window scaling value {} > 14 received, using 14", .{new_tcb.snd_wscale});
+            break :blk 14;
+        } else @intCast(new_tcb.snd_wscale);
+        new_tcb.snd_wnd = @as(u32, new_tcb.snd_wnd) << scale;
     }
 
     // Link to parent for accept queue
@@ -173,13 +194,17 @@ fn processEstablishedPacket(tcb: *Tcb, pkt: *PacketBuffer, tcp_hdr: *TcpHeader) 
         return handleRst(tcb);
     }
 
-    // Dispatch based on state
+    // Dispatch based on state (RFC 793 state machine)
     switch (tcb.state) {
         .SynSent => return processSynSent(tcb, pkt, tcp_hdr),
         .SynReceived => return processSynReceived(tcb, tcp_hdr),
         .Established => return processEstablished(tcb, pkt, tcp_hdr),
+        .FinWait1 => return processFinWait1(tcb, tcp_hdr),
+        .FinWait2 => return processFinWait2(tcb, tcp_hdr),
         .CloseWait => return processCloseWait(tcb, tcp_hdr),
+        .Closing => return processClosing(tcb, tcp_hdr),
         .LastAck => return processLastAck(tcb, tcp_hdr),
+        .TimeWait => return processTimeWait(tcb, tcp_hdr),
         else => return false,
     }
 }
@@ -262,11 +287,15 @@ fn processSynSent(tcb: *Tcb, pkt: *PacketBuffer, tcp_hdr: *TcpHeader) bool {
     }
 
     // Record peer's window (apply scaling if negotiated)
+    // RFC 7323: MUST clamp window scale to 14 if greater
     const raw_window = tcp_hdr.getWindow();
-    tcb.snd_wnd = if (tcb.wscale_ok)
-        @as(u32, raw_window) << @as(u5, @intCast(tcb.snd_wscale))
-    else
-        raw_window;
+    tcb.snd_wnd = if (tcb.wscale_ok) blk: {
+        const scale: u5 = if (tcb.snd_wscale > 14) inner: {
+            console.warn("TCP: Illegal window scaling value {} > 14 received, using 14", .{tcb.snd_wscale});
+            break :inner 14;
+        } else @intCast(tcb.snd_wscale);
+        break :blk @as(u32, raw_window) << scale;
+    } else raw_window;
 
     // Transition to ESTABLISHED
     tcb.state = .Established;
@@ -315,7 +344,15 @@ fn processSynReceived(tcb: *Tcb, tcp_hdr: *TcpHeader) bool {
                     parent_sock.blocked_thread = null;
                 }
             }
+        } else {
+            // Failed to queue (backlog full) - reject connection to prevent "zombie" TCB leak
+            rejectUnqueuedConnection(tcb);
+            return true;
         }
+    } else {
+        // No parent socket - drop the half-open connection and reset the peer
+        rejectUnqueuedConnection(tcb);
+        return true;
     }
 
     return true;
@@ -341,14 +378,16 @@ fn processEstablished(tcb: *Tcb, pkt: *PacketBuffer, tcp_hdr: *TcpHeader) bool {
             // Congestion Control (RFC 5681)
             const acked_bytes = ack -% tcb.snd_una;
             if (tcb.cwnd < tcb.ssthresh) {
-                // Slow Start
-                tcb.cwnd += @min(acked_bytes, tcb.mss);
+                // Slow Start: use saturating add to prevent overflow
+                tcb.cwnd = std.math.add(u32, tcb.cwnd, @min(acked_bytes, tcb.mss)) catch std.math.maxInt(u32);
             } else {
                 // Congestion Avoidance
                 // Increment approx 1 MSS per RTT: cwnd += MSS * MSS / cwnd
                 // We use max(1, ...) to ensure forward progress
                 const inc = @max(1, (@as(u64, tcb.mss) * tcb.mss) / tcb.cwnd);
-                tcb.cwnd += @as(u32, @truncate(inc));
+                // Clamp increment to u32 range before adding (saturating arithmetic)
+                const inc_clamped: u32 = if (inc > std.math.maxInt(u32)) std.math.maxInt(u32) else @truncate(inc);
+                tcb.cwnd = std.math.add(u32, tcb.cwnd, inc_clamped) catch std.math.maxInt(u32);
             }
 
             tcb.snd_una = ack;
@@ -444,4 +483,87 @@ fn processLastAck(tcb: *Tcb, tcp_hdr: *TcpHeader) bool {
         }
     }
     return true;
+}
+
+/// Process packet in FIN-WAIT-1 state (we sent FIN, waiting for ACK and peer's FIN)
+fn processFinWait1(tcb: *Tcb, tcp_hdr: *TcpHeader) bool {
+    const has_ack = tcp_hdr.hasFlag(TcpHeader.FLAG_ACK);
+    const has_fin = tcp_hdr.hasFlag(TcpHeader.FLAG_FIN);
+
+    // Process ACK of our FIN
+    if (has_ack) {
+        const ack = tcp_hdr.getAckNum();
+        if (ack == tcb.snd_nxt) {
+            // Our FIN has been ACKed
+            if (has_fin) {
+                // Simultaneous close: peer also sent FIN
+                // FIN-WAIT-1 + FIN + ACK -> TIME-WAIT
+                tcb.rcv_nxt +%= 1; // Peer's FIN consumes one seq
+                tcb.state = .TimeWait;
+                tcb.retrans_timer = 0;
+                // Start 2*MSL timer (simplified: use created_at for timeout tracking)
+                tcb.created_at = state.connection_timestamp;
+                _ = tx.sendAck(tcb);
+            } else {
+                // Only our FIN ACKed -> FIN-WAIT-2
+                tcb.state = .FinWait2;
+                tcb.retrans_timer = 0;
+            }
+            return true;
+        }
+    }
+
+    // Process peer's FIN without ACK of our FIN (simultaneous close)
+    if (has_fin) {
+        tcb.rcv_nxt +%= 1;
+        tcb.state = .Closing; // FIN-WAIT-1 + FIN (no ACK) -> CLOSING
+        _ = tx.sendAck(tcb);
+    }
+
+    return true;
+}
+
+/// Process packet in FIN-WAIT-2 state (our FIN ACKed, waiting for peer's FIN)
+fn processFinWait2(tcb: *Tcb, tcp_hdr: *TcpHeader) bool {
+    // Waiting for peer's FIN
+    if (tcp_hdr.hasFlag(TcpHeader.FLAG_FIN)) {
+        tcb.rcv_nxt +%= 1;
+        tcb.state = .TimeWait;
+        tcb.created_at = state.connection_timestamp; // Start 2*MSL timer
+        _ = tx.sendAck(tcb);
+    }
+    return true;
+}
+
+/// Process packet in CLOSING state (both sent FIN, waiting for ACK of our FIN)
+fn processClosing(tcb: *Tcb, tcp_hdr: *TcpHeader) bool {
+    // Waiting for ACK of our FIN
+    if (tcp_hdr.hasFlag(TcpHeader.FLAG_ACK)) {
+        const ack = tcp_hdr.getAckNum();
+        if (ack == tcb.snd_nxt) {
+            // Our FIN ACKed -> TIME-WAIT
+            tcb.state = .TimeWait;
+            tcb.retrans_timer = 0;
+            tcb.created_at = state.connection_timestamp; // Start 2*MSL timer
+        }
+    }
+    return true;
+}
+
+/// Process packet in TIME-WAIT state (both FINs exchanged, waiting 2*MSL)
+fn processTimeWait(tcb: *Tcb, tcp_hdr: *TcpHeader) bool {
+    // In TIME-WAIT, we may receive retransmitted FINs - just ACK them
+    if (tcp_hdr.hasFlag(TcpHeader.FLAG_FIN)) {
+        // Reset the 2*MSL timer
+        tcb.created_at = state.connection_timestamp;
+        _ = tx.sendAck(tcb);
+    }
+    // Note: TIME-WAIT timeout and TCB cleanup is handled by the timer tick function
+    return true;
+}
+
+/// Reject a connection we cannot queue by sending RST and freeing the TCB
+fn rejectUnqueuedConnection(tcb: *Tcb) void {
+    _ = tx.sendRst(tcb);
+    state.freeTcb(tcb);
 }

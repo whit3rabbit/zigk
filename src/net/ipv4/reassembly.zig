@@ -156,9 +156,20 @@ pub fn processFragment(
     }
     
     const e = entry.?;
+
+    // Calculate fragment position with overflow protection
+    // frag_offset is in 8-byte units, max value 65535 -> max start = 524,280
     const start = @as(usize, frag_offset) * 8;
+
+    // Validate start is within bounds (frag_offset * 8 can exceed MAX_IP_PACKET_SIZE)
+    if (start >= MAX_IP_PACKET_SIZE) return null; // Fragment offset too large
+
+    // Check for overflow: start + payload.len must not wrap
+    if (payload.len > MAX_IP_PACKET_SIZE - start) return null; // Would exceed max packet size
+
     const end = start + payload.len;
-    
+
+    // Double-check bounds (redundant but defensive)
     if (end > MAX_IP_PACKET_SIZE) return null; // Too large
 
     // Update total length if this is the last fragment
@@ -174,10 +185,15 @@ pub fn processFragment(
 
     // Copy data to buffer
     @memcpy(e.buffer[start..end], payload);
-    
+
     // Update holes
     updateHoles(e, start, end);
-    
+
+    // Check if entry was invalidated (e.g., too many holes)
+    if (!e.used) {
+        return null; // Reassembly failed due to complexity
+    }
+
     // Check completion
     if (isComplete(e)) {
         const payload_slice = e.buffer[0..e.total_len];
@@ -274,7 +290,13 @@ fn updateHoles(e: *ReassemblyEntry, start: usize, end: usize) void {
         
         // Case 2: Fragment inside hole - split hole
         if (start > h.start and end < h.end) {
-            if (e.hole_count >= 16) return; // Too many holes
+            if (e.hole_count >= 16) {
+                // Cannot split hole - too many fragments. Mark entry invalid.
+                // This prevents leaving the reassembly in an inconsistent state
+                // where data was copied but holes don't reflect actual gaps.
+                e.used = false;
+                return;
+            }
             const new_hole = ReassemblyEntry.Hole{ .start = end, .end = h.end };
             h.end = start;
             e.holes[e.hole_count] = new_hole;

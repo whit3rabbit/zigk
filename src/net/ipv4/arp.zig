@@ -1,9 +1,17 @@
 // ARP Protocol Implementation
 //
-// RFC 826: Ethernet Address Resolution Protocol
+// Complies with:
+// - RFC 826: Ethernet Address Resolution Protocol
 //
 // Maintains an ARP cache for IP-to-MAC resolution.
 // Handles ARP requests/replies for local addresses.
+//
+// Packet Format:
+// +-----------+-----------+---------+---------+-----------+
+// | HW Type(2)| Pro Type(2)| HW Len(1)| Pro Len(1)| Op(2) |
+// +-----------+-----------+---------+---------+-----------+
+// | Sender HA (6) | Sender IP (4) | Target HA (6) | Target IP (4) |
+// +-------------------------------------------------------+
 
 const std = @import("std");
 const packet = @import("../core/packet.zig");
@@ -29,6 +37,9 @@ pub const ArpState = enum {
 
 /// ARP cache entry
 pub const ArpEntry = struct {
+    /// Small fixed-size queue to handle bursts
+    pub const QUEUE_SIZE: usize = 4;
+    
     ip_addr: u32,
     mac_addr: [6]u8,
     state: ArpState,
@@ -36,9 +47,15 @@ pub const ArpEntry = struct {
     timestamp: u64,
     /// Retry count for incomplete entries
     retries: u8,
-    /// Pending packet to send when resolved (one packet deep queue for MVP)
-    pending_pkt: [packet.MAX_PACKET_SIZE]u8,
-    pending_len: usize,
+    /// Pending packet to send when resolved.
+    /// WARNING: Only stores ONE packet per incomplete entry (MVP limitation).
+    /// Multiple packets sent to an unresolved IP will cause earlier packets
+    /// to be silently dropped. For production use, implement a proper queue.
+    pending_pkts: [QUEUE_SIZE][packet.MAX_PACKET_SIZE]u8,
+    pending_lens: [QUEUE_SIZE]usize,
+    queue_head: u8,
+    queue_tail: u8,
+    queue_count: u8,
 };
 
 /// ARP cache timeout in seconds (simplified - 20 minutes)
@@ -109,6 +126,8 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
     // Learn sender's MAC address (ARP snooping)
     // Only if sender IP is on our subnet
     if (iface.isLocalSubnet(sender_ip)) {
+        // Cache update failure is non-fatal - peer may still be reachable via
+        // explicit ARP request. Silently ignore to avoid log spam in high-traffic scenarios.
         updateCache(iface, sender_ip, arp.sender_mac, .reachable) catch {};
     }
 
@@ -209,9 +228,12 @@ pub fn resolveOrRequest(iface: *Interface, ip: u32, pkt_opaque: ?*const anyopaqu
     for (arp_cache.items) |*entry| {
         if (entry.ip_addr == ip and entry.state == .incomplete) {
             if (pkt) |p| {
-                if (p.len <= packet.MAX_PACKET_SIZE) {
-                    @memcpy(entry.pending_pkt[0..p.len], p.data[0..p.len]);
-                    entry.pending_len = p.len;
+                if (p.len <= packet.MAX_PACKET_SIZE and entry.queue_count < ArpEntry.QUEUE_SIZE) {
+                    // Enqueue packet
+                    @memcpy(entry.pending_pkts[entry.queue_tail][0..p.len], p.data[0..p.len]);
+                    entry.pending_lens[entry.queue_tail] = p.len;
+                    entry.queue_tail = (entry.queue_tail + 1) % @as(u8, @intCast(ArpEntry.QUEUE_SIZE));
+                    entry.queue_count += 1;
                 }
             }
 
@@ -229,12 +251,16 @@ pub fn resolveOrRequest(iface: *Interface, ip: u32, pkt_opaque: ?*const anyopaqu
         entry.state = .incomplete;
         entry.timestamp = current_tick;
         entry.retries = 1;
-        entry.pending_len = 0;
+        entry.queue_head = 0;
+        entry.queue_tail = 0;
+        entry.queue_count = 0;
 
         if (pkt) |p| {
              if (p.len <= packet.MAX_PACKET_SIZE) {
-                @memcpy(entry.pending_pkt[0..p.len], p.data[0..p.len]);
-                entry.pending_len = p.len;
+                @memcpy(entry.pending_pkts[entry.queue_tail][0..p.len], p.data[0..p.len]);
+                entry.pending_lens[entry.queue_tail] = p.len;
+                entry.queue_tail = 1; // (0 + 1) % QUEUE_SIZE
+                entry.queue_count = 1;
             }
         }
 
@@ -254,14 +280,26 @@ fn updateCache(iface: *Interface, ip: u32, mac: [6]u8, state: ArpState) !void {
             entry.timestamp = current_tick;
             entry.retries = 0;
 
-            if (entry.pending_len > 0) {
-                const eth: *EthernetHeader = @ptrCast(@alignCast(&entry.pending_pkt));
-                @memcpy(&eth.dst_mac, &mac);
-                @memcpy(&eth.src_mac, &iface.mac_addr);
-                eth.setEthertype(ethernet.ETHERTYPE_IPV4);
-                
-                _ = iface.transmit(entry.pending_pkt[0..entry.pending_len]);
-                entry.pending_len = 0;
+            if (entry.queue_count > 0) {
+                // Flush pending packets
+                var i: u8 = 0;
+                while (i < entry.queue_count) : (i += 1) {
+                    const idx = (entry.queue_head +% i) % @as(u8, @intCast(ArpEntry.QUEUE_SIZE));
+                    const len = entry.pending_lens[idx];
+                    
+                    if (len > 0) {
+                        const eth: *EthernetHeader = @ptrCast(@alignCast(&entry.pending_pkts[idx]));
+                        @memcpy(&eth.dst_mac, &mac);
+                        @memcpy(&eth.src_mac, &iface.mac_addr);
+                        eth.setEthertype(ethernet.ETHERTYPE_IPV4);
+                        
+                        _ = iface.transmit(entry.pending_pkts[idx][0..len]);
+                    }
+                }
+                // Clear queue
+                entry.queue_count = 0;
+                entry.queue_head = 0;
+                entry.queue_tail = 0;
             }
             return;
         }
@@ -274,7 +312,9 @@ fn updateCache(iface: *Interface, ip: u32, mac: [6]u8, state: ArpState) !void {
     entry.state = state;
     entry.timestamp = current_tick;
     entry.retries = 0;
-    entry.pending_len = 0;
+    entry.queue_head = 0;
+    entry.queue_tail = 0;
+    entry.queue_count = 0;
 }
 
 /// Maximum ARP cache entries (DoS protection)
@@ -348,6 +388,8 @@ fn findFreeEntry() !*ArpEntry {
 
 /// Age ARP cache entries
 pub fn ageCache() void {
+    lock.acquire();
+    defer lock.release();
     var i: usize = 0;
     while (i < arp_cache.items.len) {
         var entry = &arp_cache.items[i];

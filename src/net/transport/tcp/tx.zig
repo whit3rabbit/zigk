@@ -18,6 +18,14 @@ const Interface = interface.Interface;
 const TcpHeader = types.TcpHeader;
 const Tcb = types.Tcb;
 
+// TCP Output Processing
+//
+// Complies with:
+// - RFC 793: SEGMENTATION
+// - RFC 1122: Requirements for Internet Hosts (Sender SWS Avoidance)
+// - RFC 1191: Path MTU Discovery (MSS calculation)
+//
+// Handles construction and transmission of TCP segments.
 /// Send a TCP segment
 fn sendSegment(
     tcb: *Tcb,
@@ -400,7 +408,38 @@ pub fn transmitPendingData(tcb: *Tcb) bool {
 
     const flight_size = tcb.snd_nxt -% tcb.snd_una;
     if (flight_size >= eff_wnd) {
-        return true; // Window full
+        // Window full
+        
+        // Zero Window Probe (ZWP) Logic (RFC 793)
+        // If window is 0, we must periodically send a segment to force an ACK
+        // and discover when the window re-opens.
+        if (eff_wnd == 0 and buffered > 0) {
+            // Ensure timer is running to trigger probes
+            if (tcb.retrans_timer == 0) {
+                tcb.retrans_timer = 1; 
+            }
+            
+            // If this call is from the timer (flight_size == 0 due to reset),
+            // OR if we have no data in flight, send 1 byte probe.
+            if (flight_size == 0) {
+                 // Force 1 byte send for probe
+                 // send_len is implicitly 1
+                 
+                 // Build probe segment
+                 var data_buf: [1]u8 = undefined;
+                 const idx = tcb.send_tail % c.BUFFER_SIZE;
+                 data_buf[0] = tcb.send_buf[idx];
+                 
+                 // Send segment
+                 if (sendSegment(tcb, TcpHeader.FLAG_ACK | TcpHeader.FLAG_PSH, tcb.snd_nxt, tcb.rcv_nxt, &data_buf)) {
+                    tcb.snd_nxt +%= 1;
+                    // Timer is already running (checked above)
+                    return true;
+                 }
+            }
+        }
+        
+        return true; 
     }
 
     // Available window

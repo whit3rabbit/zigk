@@ -99,6 +99,10 @@ pub const McfgEntry = packed struct {
             (@as(u64, device) << 15) |
             (@as(u64, func) << 12);
     }
+
+    comptime {
+        if (@sizeOf(McfgEntry) != 16) @compileError("McfgEntry must be 16 bytes (PCI Firmware Spec)");
+    }
 };
 
 /// Result of MCFG lookup

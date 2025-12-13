@@ -131,6 +131,16 @@ pub fn alloc() StackError!KernelStack {
     vmm.mapRange(kernel_pml4, stack_base, stack_phys, STACK_PAGES * PAGE_SIZE, flags) catch {
         return StackError.MappingFailed;
     };
+
+    // Explicitly unmap the guard page to ensure no stale mappings exist
+    // from previous uses of this slot. This enforces the "guard" property.
+    vmm.unmapPage(kernel_pml4, guard_virt) catch |err| {
+        // If it's already unmapped (error.PageNotPresent), that's fine.
+        // Any other error is concerning but likely recoverable/ignorable for a guard page.
+        if (err != error.PageNotPresent) {
+            console.warn("KernelStack: Failed to unmap guard page {x}: {}", .{ guard_virt, err });
+        }
+    };
     errdefer {
         // Unmap on error - note we only mapped stack_base, not guard
         var i: usize = 0;

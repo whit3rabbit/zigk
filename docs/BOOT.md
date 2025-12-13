@@ -166,8 +166,10 @@ The framebuffer log may scroll too fast or be initialized too late. Rely on the 
     *   **Cause**: Triple Fault or Stack Overflow.
     *   **Hint**: If it happens during deep recursions or large iterations (like PCI enumeration), check your stack usage. The kernel stack is small (typically 16KB). **Allocate large structures (e.g., arrays of devices) on the Heap.**
 *   **"General Protection Fault" (GPF)**:
-    *   **Cause**: Unaligned memory access, often when reading packed ACPI structs.
+    *   **Cause 1**: Unaligned memory access, often when reading packed ACPI structs.
     *   **Fix**: Ensure all pointers to packed structs (like `*Rsdp` or `*McfgBase`) are cast with `align(1)`, e.g., `@as(*align(1) const T, ptr)`.
+    *   **Cause 2**: CS register pointing to wrong GDT entry (e.g., TSS selector 0x28 instead of KERNEL_CODE 0x08).
+    *   **Fix**: The GDT initialization must reload CS via far return after loading the new GDT. Limine bootloader uses a different GDT layout where kernel code may be at a different index than ZigK's GDT. See "GDT Initialization and CS Reload" section below.
 *   **"Integer Overflow" Panic**:
     *   **Cause**: Zig's safety checks (enabled in Debug/ReleaseSafe) catch overflows that other languages ignore.
     *   **Hint**: Check loop counters (e.g., `u3` cannot hold 8) and bitwise operations on differing integer widths (e.g., `~u32` inside `u64`). Use `+%` for wrapping addition if intentional.
@@ -212,6 +214,56 @@ hal.cpu.writeMsr(hal.cpu.IA32_GS_BASE, @intFromPtr(&bsp_gs_data));
    - Syscall SWAPGS: GS_BASE = &kernel_data (works!)
 
 The first context switch to user mode (via `isr_common` IRETQ) does SWAPGS, which swaps the values. So you must set GS_BASE initially so it ends up in KERNEL_GS_BASE after that first swap.
+
+### 4. GDT Initialization and CS Reload
+
+When the kernel loads its own GDT, it must also reload the CS register. The Limine bootloader uses its own GDT with a different layout than ZigK's GDT.
+
+**The Problem:**
+
+| GDT Index | Limine GDT | ZigK GDT |
+|-----------|------------|----------|
+| 0 | Null | Null |
+| 1 (0x08) | Kernel Code | Kernel Code |
+| 2 (0x10) | Kernel Data | Kernel Data |
+| 3 (0x18) | ? | User Data |
+| 4 (0x20) | ? | User Code |
+| 5 (0x28) | Kernel Code (16-bit?) | **TSS** |
+
+If the GDT is loaded but CS is not reloaded, CS still contains the old selector value. When ZigK's GDT is active, that selector now points to the TSS entry instead of kernel code. The next `iretq` instruction triggers a GP fault with error code 0x28.
+
+**The Fix:**
+
+After loading the new GDT with `lgdt`, reload CS via a far return:
+
+```zig
+fn reloadSegments() void {
+    asm volatile (
+        // Reload data segments
+        \\mov %[ds], %%ds
+        \\mov %[ds], %%es
+        \\mov %[ds], %%ss
+        \\xor %%eax, %%eax
+        \\mov %%ax, %%fs
+        \\mov %%ax, %%gs
+        // Reload CS via far return (push CS:RIP, then lretq)
+        \\pushq %[cs]
+        \\lea 1f(%%rip), %%rax
+        \\pushq %%rax
+        \\lretq
+        \\1:
+        :
+        : [ds] "r" (@as(u16, KERNEL_DATA)),
+          [cs] "r" (@as(u64, KERNEL_CODE)),
+        : .{ .rax = true, .memory = true }
+    );
+}
+```
+
+**Symptoms if CS is not reloaded:**
+- GP fault (#GP) with error code 0x28 (or other GDT index)
+- Fault occurs at `iretq` instruction in interrupt return path
+- Debugging shows CS contains unexpected selector value
 
 ## Building and Running
 
