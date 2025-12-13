@@ -19,6 +19,7 @@ const hal = @import("hal");
 const console = @import("console");
 const config = @import("config");
 const pmm = @import("pmm");
+const sync = @import("sync");
 
 const paging = hal.paging;
 const PageTableEntry = paging.PageTableEntry;
@@ -31,10 +32,15 @@ pub const PAGE_SIZE: usize = paging.PAGE_SIZE;
 // Kernel address space boundaries
 pub const KERNEL_BASE: u64 = 0xFFFF_8000_0000_0000;
 pub const USER_SPACE_END: u64 = 0x0000_7FFF_FFFF_FFFF;
+pub const MMIO_BASE: u64 = 0xFFFF_A000_0000_0000;
 
 // VMM State
 var kernel_pml4_phys: u64 = 0;
 var initialized: bool = false;
+
+// MMIO Allocator State
+var mmio_current: u64 = MMIO_BASE;
+var mmio_lock: sync.Spinlock = .{};
 
 /// Errors that can occur during VMM operations
 pub const VmmError = error{
@@ -501,34 +507,8 @@ pub fn mapKernel(virt_start: u64, phys_start: u64, size: usize, flags: PageFlags
 /// Returns virtual address of mapped region
 /// Used for device register access (PCI config space, NIC MMIO, etc.)
 pub fn mapMmio(phys_addr: u64, size: usize) VmmError!u64 {
-    if (!initialized) {
-        return VmmError.NotInitialized;
-    }
-
-    // MMIO regions are mapped in kernel space using HHDM offset
-    // This is the simplest approach - just use the direct mapping
-    // The pages are already accessible via HHDM, we just need to ensure
-    // they have the correct cache attributes
-
-    // For PCIe ECAM and device MMIO, we can use HHDM directly
-    // The bootloader's HHDM mapping uses 2MB huge pages which may not
-    // have the right cache attributes. For proper MMIO we should remap
-    // with 4KB pages and cache disabled.
-
-    // Calculate virtual address via HHDM
-    const virt_addr = phys_addr + paging.HHDM_OFFSET;
-
-    // For now, assume HHDM mapping is sufficient (works for QEMU)
-    // TODO: Implement proper remapping with cache-disabled 4KB pages
-    // for real hardware that requires it
-
-    console.info("VMM: MMIO region mapped: phys=0x{x} virt=0x{x} size={d}KB", .{
-        phys_addr,
-        virt_addr,
-        size / 1024,
-    });
-
-    return virt_addr;
+    // Legacy wrapper - use explicit mapping logic now
+    return mapMmioExplicit(phys_addr, size);
 }
 
 /// Map MMIO region with explicit remapping (cache-disabled 4KB pages)
@@ -544,8 +524,18 @@ pub fn mapMmioExplicit(phys_addr: u64, size: usize) VmmError!u64 {
     const offset = phys_addr - aligned_phys;
     const aligned_size = paging.pageAlignUp(size + offset);
 
-    // For now, use HHDM virtual addresses but remap with proper flags
-    const virt_base = aligned_phys + paging.HHDM_OFFSET;
+    // Allocate virtual address range from MMIO space
+    const held = mmio_lock.acquire();
+    const virt_base = mmio_current;
+
+    // Check for overflow or collision with other regions (basic check)
+    if (std.math.maxInt(u64) - virt_base < aligned_size) {
+        held.release();
+        return VmmError.OutOfMemory;
+    }
+
+    mmio_current += aligned_size;
+    held.release();
 
     // Map each page with cache-disabled flag
     const page_count = aligned_size / PAGE_SIZE;
@@ -554,12 +544,14 @@ pub fn mapMmioExplicit(phys_addr: u64, size: usize) VmmError!u64 {
         const page_phys = aligned_phys + i * PAGE_SIZE;
         const page_virt = virt_base + i * PAGE_SIZE;
 
-        // Try to map, ignore AlreadyMapped (HHDM might have it)
         mapPage(kernel_pml4_phys, page_virt, page_phys, PageFlags.MMIO) catch |err| {
-            if (err != VmmError.AlreadyMapped) {
-                return err;
+            // Rollback on failure: unmap pages mapped so far
+            var j: usize = 0;
+            while (j < i) : (j += 1) {
+                const cleanup_virt = virt_base + j * PAGE_SIZE;
+                unmapPage(kernel_pml4_phys, cleanup_virt) catch {};
             }
-            // Already mapped - we assume HHDM mapping, which is fine for QEMU
+            return err;
         };
     }
 
@@ -573,15 +565,26 @@ pub fn mapMmioExplicit(phys_addr: u64, size: usize) VmmError!u64 {
 }
 
 /// Unmap MMIO region
-/// Safe to call on HHDM-mapped regions (will be ignored)
 pub fn unmapMmio(virt_addr: u64, size: usize) void {
     if (!initialized) return;
-    
-    // Current implementation of mapMmio uses HHDM (identity map + offset).
-    // Unmapping these pages would destroy the direct map which handles all physical memory.
-    // So for now, this is a no-op until mapMmio is upgraded to mapMmioExplicit.
-    // When that happens, this should use unmapPage loop.
-    console.debug("VMM: unmapMmio {x} (size {d}) - HHDM preserved", .{virt_addr, size});
+
+    const aligned_virt = paging.pageAlignDown(virt_addr);
+    const offset = virt_addr - aligned_virt;
+    const aligned_size = paging.pageAlignUp(size + offset);
+
+    // Unmap the pages
+    // Note: We do not reclaim the virtual address space (bump allocator),
+    // but we must release the page table entries and TLB entries.
+    const page_count = aligned_size / PAGE_SIZE;
+    var i: usize = 0;
+    while (i < page_count) : (i += 1) {
+        const page_virt = aligned_virt + i * PAGE_SIZE;
+        unmapPage(kernel_pml4_phys, page_virt) catch |err| {
+            console.warn("VMM: Failed to unmap MMIO page {x}: {}", .{ page_virt, err });
+        };
+    }
+
+    console.debug("VMM: unmapMmio {x} (size {d})", .{ virt_addr, size });
 }
 
 /// Allocate and map a virtual page (allocates physical page from PMM)
