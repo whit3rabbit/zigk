@@ -473,6 +473,19 @@ pub fn build(b: *std.Build) void {
     pipe_module.addImport("console", console_module);
     pipe_module.addImport("hal", hal_module);
 
+    // Create Signal module
+    const signal_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/signal.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    signal_module.addImport("sched", sched_module);
+    signal_module.addImport("thread", thread_module);
+    signal_module.addImport("uapi", uapi_module);
+    signal_module.addImport("hal", hal_module);
+    signal_module.addImport("user_mem", user_mem_module);
+    signal_module.addImport("console", console_module);
+
     // Create syscall handlers module
     const syscall_handlers_module = b.createModule(.{
         .root_source_file = b.path("src/kernel/syscall/handlers.zig"),
@@ -497,6 +510,7 @@ pub fn build(b: *std.Build) void {
     syscall_handlers_module.addImport("fs", fs_module);
     syscall_handlers_module.addImport("pipe", pipe_module);
     syscall_handlers_module.addImport("user_mem", user_mem_module);
+    syscall_handlers_module.addImport("signal", signal_module);
 
     // Create syscall random module
     const syscall_random_module = b.createModule(.{
@@ -536,6 +550,7 @@ pub fn build(b: *std.Build) void {
     syscall_table_module.addImport("handlers.zig", syscall_handlers_module);
     syscall_table_module.addImport("random.zig", syscall_random_module);
     syscall_table_module.addImport("net.zig", syscall_net_module);
+    syscall_table_module.addImport("signal", signal_module);
 
     // Create kernel executable
     // NOTE: red_zone must be disabled for kernel code to prevent stack corruption
@@ -595,6 +610,7 @@ pub fn build(b: *std.Build) void {
     kernel.root_module.addImport("elf", elf_module);
     kernel.root_module.addImport("process", process_module);
     kernel.root_module.addImport("syscall_handlers", syscall_handlers_module);
+    kernel.root_module.addImport("signal", signal_module);
 
     // Add assembly helpers for x86_64 (ISR stubs, lgdt, lidt)
     kernel.addAssemblyFile(b.path("src/arch/x86_64/asm_helpers.S"));

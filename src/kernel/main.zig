@@ -300,6 +300,7 @@ export fn _start() noreturn {
     sched.init();
 
     // Initialize signal handling subsystem (registers checker hook)
+    const signal = @import("signal");
     signal.init();
 
     // Register GS data with scheduler for syscall stack switching

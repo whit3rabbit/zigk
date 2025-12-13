@@ -11,7 +11,7 @@ const sched = @import("sched");
 const thread = @import("thread");
 const uapi = @import("uapi");
 const hal = @import("hal");
-const user_mem = @import("syscall/user_mem.zig");
+const user_mem = @import("user_mem");
 const console = @import("console");
 
 const UserPtr = user_mem.UserPtr;
@@ -108,17 +108,22 @@ fn setupSignalFrame(frame: *hal.idt.InterruptFrame, signum: usize, action: uapi.
             .rcx = frame.rcx,
             .rax = frame.rax,
             .rip = frame.rip,
-            .cs = frame.cs,
+            .cs = @truncate(frame.cs),
             .rflags = frame.rflags,
             .rsp = frame.rsp,
             .ss = frame.ss,
+            .gs = 0,
+            .fs = 0,
+            .pad0 = 0,
             .err = frame.error_code,
             .trapno = frame.vector,
             .oldmask = 0, // TODO: Save current signal mask
             .cr2 = 0, // TODO: Save CR2 for page faults
             .fpstate = 0, // TODO: Save FPU state
+            .reserved = [_]u64{0} ** 8,
         },
         .sigmask = sched.getCurrentThread().?.sigmask,
+        ._pad = [_]u8{0} ** 128,
     };
 
     // Write ucontext to stack

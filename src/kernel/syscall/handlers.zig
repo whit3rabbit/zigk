@@ -2110,8 +2110,8 @@ pub fn sys_brk(addr: u64) SyscallError!usize {
     }
 
     // Align to page size for mapping
-    const current_break_aligned = std.mem.alignForward(u64, proc.heap_break, pmm.PAGE_SIZE);
-    const new_break_aligned = std.mem.alignForward(u64, addr, pmm.PAGE_SIZE);
+    const current_break_aligned = std.mem.alignForward(usize, proc.heap_break, pmm.PAGE_SIZE);
+    const new_break_aligned = std.mem.alignForward(usize, addr, pmm.PAGE_SIZE);
 
     // Aligned value must also be within bounds (alignment could push it over)
     if (new_break_aligned > user_mem.USER_SPACE_END) {

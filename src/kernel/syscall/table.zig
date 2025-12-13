@@ -16,7 +16,7 @@ const net = @import("net.zig");
 const random = @import("random.zig");
 const console = @import("console");
 const hal = @import("hal");
-const signal = @import("../signal.zig");
+const signal = @import("signal");
 
 /// Syscall frame from arch-specific entry
 pub const SyscallFrame = hal.syscall.SyscallFrame;
