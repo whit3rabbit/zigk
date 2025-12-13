@@ -57,3 +57,5 @@ limine/limine.dSYM/
 tools/zig_install/
 tools/zig_index.json
 tools/zig.tar.xz
+tools/zig/
+tools/zig

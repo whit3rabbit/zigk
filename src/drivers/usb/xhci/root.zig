@@ -296,10 +296,51 @@ pub const Controller = struct {
 
     /// Set up interrupt handling
     fn setupInterrupts(self: *Self) !void {
-        // For initial implementation, use polling mode
-        // TODO: Add MSI-X support with proper table mapping
-        self.msix_vectors = null;
-        console.info("XHCI: Using polling mode for events", .{});
+        // Try to enable MSI-X
+        if (pci.findMsix(self.pci_ecam, self.pci_dev)) |msix_cap| {
+            console.info("XHCI: Found MSI-X capability, attempting to enable...", .{});
+
+            // Allocate 1 vector
+            if (interrupts.allocateMsixVector()) |vector| {
+                // Register handler
+                if (interrupts.registerMsixHandler(vector, handleInterrupt)) {
+                    // Enable MSI-X
+                    // Note: We pass 0 for bar_virt to let enableMsix map it
+                    if (pci.enableMsix(self.pci_ecam, self.pci_dev, &msix_cap, 0)) |msix_alloc| {
+                        // Configure vector 0 to point to our allocated vector and BSP
+                        // Use current CPU ID or 0 (BSP)
+                        const dest_id: u8 = @truncate(hal.apic.lapic.getId());
+                        pci.configureMsixEntry(msix_alloc.table_base, 0, vector, dest_id);
+
+                        // Unmask vectors
+                        pci.enableMsixVectors(self.pci_ecam, self.pci_dev, &msix_cap);
+
+                        // Disable legacy INTx
+                        pci.msi.disableIntx(self.pci_ecam, self.pci_dev);
+
+                        self.msix_vectors = interrupts.MsixVectorAllocation{
+                            .first_vector = vector,
+                            .count = 1,
+                        };
+
+                        console.info("XHCI: MSI-X enabled with vector {}", .{vector});
+                    } else {
+                        console.err("XHCI: Failed to enable MSI-X capability", .{});
+                        interrupts.unregisterMsixHandler(vector);
+                        interrupts.freeMsixVector(vector);
+                    }
+                } else {
+                    console.err("XHCI: Failed to register MSI-X handler", .{});
+                    interrupts.freeMsixVector(vector);
+                }
+            } else {
+                console.warn("XHCI: Failed to allocate MSI-X vector, falling back to polling", .{});
+            }
+        }
+
+        if (self.msix_vectors == null) {
+            console.info("XHCI: Using polling mode for events", .{});
+        }
 
         // Enable interrupter
         const intr0_base = self.runtime_base + regs.Runtime.interrupter(0);
@@ -468,8 +509,8 @@ fn handleInterrupt(frame: *idt.InterruptFrame) void {
 fn processEvent(ctrl: *Controller, event: *const trb.Trb) void {
     // Validate event pointer is within Event Ring bounds
     const event_addr = @intFromPtr(event);
-    const ring_base = @intFromPtr(ctrl.event_ring.ring);
-    const ring_end = ring_base + ctrl.event_ring.segment_size * @sizeOf(trb.Trb);
+    const ring_base = @intFromPtr(ctrl.event_ring.trbs);
+    const ring_end = ring_base + ctrl.event_ring.size * @sizeOf(trb.Trb);
 
     if (event_addr < ring_base or event_addr >= ring_end) {
         console.err("XHCI: Invalid event pointer {x}", .{event_addr});
