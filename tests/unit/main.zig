@@ -12,6 +12,7 @@ const testing = std.testing;
 const heap_tests = @import("heap_fuzz.zig");
 const tcp_types_test = @import("tcp_types_test.zig");
 const vmm_test = @import("vmm_test.zig");
+const msi_allocator_test = @import("msi_allocator_test.zig");
 
 test "placeholder test" {
     // Placeholder test to verify test infrastructure works
@@ -23,4 +24,5 @@ comptime {
     _ = heap_tests;
     _ = tcp_types_test;
     _ = vmm_test;
+    _ = msi_allocator_test;
 }
