@@ -299,6 +299,9 @@ export fn _start() noreturn {
     // Initialize scheduler (creates idle thread, registers timer handler)
     sched.init();
 
+    // Initialize signal handling subsystem (registers checker hook)
+    signal.init();
+
     // Register GS data with scheduler for syscall stack switching
     sched.setGsData(&bsp_gs_data);
 
