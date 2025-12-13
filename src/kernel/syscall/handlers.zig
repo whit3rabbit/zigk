@@ -351,6 +351,114 @@ pub fn sys_rt_sigprocmask(how: usize, set_ptr: usize, oldset_ptr: usize, sigsets
     return 0;
 }
 
+/// sys_rt_sigaction (13) - Examine and change a signal action
+///
+/// Args:
+///   signum: Signal number
+///   act_ptr: Pointer to new SigAction struct (or NULL)
+///   oldact_ptr: Pointer to store old SigAction struct (or NULL)
+///   sigsetsize: Size of sigset_t (should be 8 bytes)
+///
+/// Returns: 0 on success, negative errno on error.
+pub fn sys_rt_sigaction(signum: usize, act_ptr: usize, oldact_ptr: usize, sigsetsize: usize) SyscallError!usize {
+    if (sigsetsize != @sizeOf(uapi.signal.SigSet)) {
+        return error.EINVAL;
+    }
+
+    if (signum == 0 or signum > 64) {
+        return error.EINVAL;
+    }
+
+    // SIGKILL and SIGSTOP cannot be caught, blocked, or ignored
+    if (signum == uapi.signal.SIGKILL or signum == uapi.signal.SIGSTOP) {
+        return error.EINVAL;
+    }
+
+    const current_thread = sched.getCurrentThread() orelse {
+        return error.ESRCH;
+    };
+
+    // Store old action if requested
+    if (oldact_ptr != 0) {
+        const old_action = current_thread.signal_actions[signum - 1];
+        UserPtr.from(oldact_ptr).writeValue(old_action) catch {
+            return error.EFAULT;
+        };
+    }
+
+    // If act_ptr is NULL, we are just querying
+    if (act_ptr == 0) {
+        return 0;
+    }
+
+    // Read new action
+    const new_action = UserPtr.from(act_ptr).readValue(uapi.signal.SigAction) catch {
+        return error.EFAULT;
+    };
+
+    // Update action table
+    current_thread.signal_actions[signum - 1] = new_action;
+
+    return 0;
+}
+
+/// sys_rt_sigreturn (15) - Return from signal handler and restore context
+///
+/// This syscall is called by the signal trampoline. It restores the user context
+/// saved on the stack (ucontext_t).
+///
+/// MVP: Does not return (returns via iretq with restored context).
+pub fn sys_rt_sigreturn(frame: *hal.syscall.SyscallFrame) SyscallError!usize {
+    // Get user stack pointer
+    const user_rsp = frame.getUserRsp();
+
+    // Read ucontext from stack
+    // It should be at the top of the stack (after handler popped return address)
+    const ucontext = UserPtr.from(user_rsp).readValue(uapi.signal.UContext) catch {
+        // If we can't read the context, we can't restore state.
+        // This is a fatal error for the thread.
+        console.err("sys_rt_sigreturn: Failed to read ucontext from {x}", .{user_rsp});
+        sched.exitWithStatus(128 + 11); // SIGSEGV
+        unreachable;
+    };
+
+    // Restore registers from mcontext
+    // We update the syscall frame, which will be used to restore state on return
+    const mc = ucontext.mcontext;
+
+    frame.r15 = mc.r15;
+    frame.r14 = mc.r14;
+    frame.r13 = mc.r13;
+    frame.r12 = mc.r12;
+    frame.r11 = mc.r11;
+    frame.r10 = mc.r10;
+    frame.r9 = mc.r9;
+    frame.r8 = mc.r8;
+    frame.rdi = mc.rdi;
+    frame.rsi = mc.rsi;
+    frame.rbp = mc.rbp;
+    frame.rbx = mc.rbx;
+    frame.rdx = mc.rdx;
+    frame.rcx = mc.rcx;
+    frame.rax = mc.rax;
+
+    // Restore special registers
+    // Note: We don't restore CS, SS, GS, FS blindly as it might be unsafe
+    // But we should restore RFLAGS and RIP
+    frame.setReturnRip(mc.rip);
+    frame.setUserRsp(mc.rsp); // Restore stack pointer
+    frame.r11 = mc.rflags; // Sysret restores RFLAGS from R11
+
+    // Restore signal mask
+    if (sched.getCurrentThread()) |t| {
+        t.sigmask = ucontext.sigmask;
+    }
+
+    // Return value is ignored since we overwrote RAX/RDI/RSI etc.
+    // The syscall exit stub will restore registers from frame.
+    return 0; // Dummy return
+}
+
 /// sys_set_tid_address (218) - Set pointer to thread ID
 ///
 /// Args:

@@ -273,12 +273,20 @@ export fn dispatch_interrupt(frame: *InterruptFrame) callconv(.c) *InterruptFram
     }
 
     // Check if we need to switch to a different frame (context switch)
+    var ret_frame = frame;
     if (new_frame) |nf| {
         new_frame = null;
-        return nf;
+        ret_frame = nf;
     }
 
-    return frame;
+    // If we are returning to user mode (CS RPL == 3), check for pending signals
+    if ((ret_frame.cs & 3) == 3) {
+        if (signal_checker) |checker| {
+            ret_frame = checker(ret_frame);
+        }
+    }
+
+    return ret_frame;
 }
 
 /// New frame pointer for context switch
@@ -288,6 +296,16 @@ var new_frame: ?*InterruptFrame = null;
 /// Set the new frame for context switch (called by scheduler)
 pub fn setNewFrame(frame: *InterruptFrame) void {
     new_frame = frame;
+}
+
+// Signal checker hook (set by scheduler/interrupts module)
+// Called before returning to user mode to check for pending signals
+// Returns potentially modified frame (if signal delivery set up)
+var signal_checker: ?*const fn (*InterruptFrame) *InterruptFrame = null;
+
+/// Set the signal checker hook
+pub fn setSignalChecker(checker: *const fn (*InterruptFrame) *InterruptFrame) void {
+    signal_checker = checker;
 }
 
 // Assembly helper defined in asm_helpers.S

@@ -96,6 +96,12 @@ pub const Thread = struct {
     /// Blocked signals mask
     sigmask: uapi.signal.SigSet,
 
+    /// Pending signals bitmap
+    pending_signals: u64,
+
+    /// Signal actions table (index 0 is unused, 1-64 correspond to signals)
+    signal_actions: [64]uapi.signal.SigAction,
+
     /// Doubly-linked list pointers for ready queue
     next: ?*Thread,
     prev: ?*Thread,
@@ -288,6 +294,8 @@ pub fn createKernelThread(
         .sleep_next = null,
         .process = null,
         .sigmask = 0,
+        .pending_signals = 0,
+        .signal_actions = [_]uapi.signal.SigAction{std.mem.zeroes(uapi.signal.SigAction)} ** 64,
     };
 
     // Set thread name
@@ -420,6 +428,8 @@ pub fn createUserThread(
         .sleep_next = null,
         .process = options.process,
         .sigmask = 0,
+        .pending_signals = 0,
+        .signal_actions = [_]uapi.signal.SigAction{std.mem.zeroes(uapi.signal.SigAction)} ** 64,
     };
 
     thread.setName(options.name);
