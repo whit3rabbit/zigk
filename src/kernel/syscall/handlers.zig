@@ -25,6 +25,7 @@ const framebuffer = @import("framebuffer");
 
 const mman_defs = uapi.mman;
 const fs = @import("fs");
+const pipe_mod = @import("../pipe.zig");
 const user_mem = @import("user_mem");
 const Errno = uapi.errno.Errno;
 const SyscallError = uapi.errno.SyscallError;
@@ -776,6 +777,372 @@ pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) SyscallError!usize {
     return error.ENOTTY;
 }
 
+/// sys_stat (4) - Get file status
+pub fn sys_stat(path_ptr: usize, stat_buf: usize) SyscallError!usize {
+    // Allocate path buffer
+    const path_buf = heap.allocator().alloc(u8, user_mem.MAX_PATH_LEN) catch {
+        return error.ENOMEM;
+    };
+    defer heap.allocator().free(path_buf);
+
+    const path = user_mem.copyStringFromUser(path_buf, path_ptr) catch |err| {
+        if (err == error.NameTooLong) return error.ENAMETOOLONG;
+        return error.EFAULT;
+    };
+
+    if (path.len == 0) return error.ENOENT;
+
+    // Handle root directory explicitly
+    if (std.mem.eql(u8, path, "/") or std.mem.eql(u8, path, "/.")) {
+        if (!isValidUserAccess(stat_buf, @sizeOf(uapi.stat.Stat), AccessMode.Write)) {
+            return error.EFAULT;
+        }
+
+        const stat = uapi.stat.Stat{
+            .dev = 0,
+            .ino = 1, // Root inode
+            .nlink = 2,
+            .mode = 0o0040755, // S_IFDIR | 0755
+            .uid = 0,
+            .gid = 0,
+            .rdev = 0,
+            .size = 4096,
+            .blksize = 512,
+            .blocks = 8,
+            .atime = 0,
+            .atime_nsec = 0,
+            .mtime = 0,
+            .mtime_nsec = 0,
+            .ctime = 0,
+            .ctime_nsec = 0,
+            .__pad0 = 0,
+            .__unused = [_]i64{0} ** 3,
+        };
+
+        UserPtr.from(stat_buf).writeValue(stat) catch return error.EFAULT;
+        return 0;
+    }
+
+    // Check InitRD
+    if (fs.initrd.InitRD.instance.findFile(path)) |file| {
+        if (!isValidUserAccess(stat_buf, @sizeOf(uapi.stat.Stat), AccessMode.Write)) {
+            return error.EFAULT;
+        }
+
+        const stat = uapi.stat.Stat{
+            .dev = 0,
+            .ino = 0,
+            .nlink = 1,
+            .mode = 0o100755, // Regular file, rwxr-xr-x
+            .uid = 0,
+            .gid = 0,
+            .rdev = 0,
+            .size = @intCast(file.data.len),
+            .blksize = 512,
+            .blocks = @intCast((file.data.len + 511) / 512),
+            .atime = 0,
+            .atime_nsec = 0,
+            .mtime = 0,
+            .mtime_nsec = 0,
+            .ctime = 0,
+            .ctime_nsec = 0,
+            .__pad0 = 0,
+            .__unused = [_]i64{0} ** 3,
+        };
+
+        UserPtr.from(stat_buf).writeValue(stat) catch return error.EFAULT;
+        return 0;
+    }
+
+    return error.ENOENT;
+}
+
+/// sys_lstat (6) - Get file status (no follow)
+pub fn sys_lstat(path_ptr: usize, stat_buf: usize) SyscallError!usize {
+    return sys_stat(path_ptr, stat_buf);
+}
+
+/// sys_fstat (5) - Get file status by FD
+pub fn sys_fstat(fd_num: usize, stat_buf: usize) SyscallError!usize {
+    const table = getGlobalFdTable();
+    const fd = table.get(@intCast(fd_num)) orelse return error.EBADF;
+
+    if (!isValidUserAccess(stat_buf, @sizeOf(uapi.stat.Stat), AccessMode.Write)) {
+        return error.EFAULT;
+    }
+
+    // Use device specific stat if available
+    if (fd.ops.stat) |stat_fn| {
+        // We need to pass the kernel address of the struct, but stat_fn takes *anyopaque.
+        // Wait, fd.ops.stat signature is:
+        // stat: ?*const fn (fd: *FileDescriptor, stat_buf: *anyopaque) isize,
+        // The stat_buf arg usually expects a kernel pointer to fill.
+
+        var kstat: uapi.stat.Stat = undefined;
+        // Zero initialize
+        @memset(std.mem.asBytes(&kstat), 0);
+
+        const res = stat_fn(fd, &kstat);
+        if (res < 0) {
+             const errno_val: i32 = @intCast(-res);
+             // Map errors? EIO?
+             // Just return EIO for now if unknown
+             return error.EIO;
+        }
+
+        // Copy to user
+        UserPtr.from(stat_buf).writeValue(kstat) catch return error.EFAULT;
+        return 0;
+    }
+
+    // Fallback generic stat
+    // Check if it's our dummy root directory FD (private_data == null)
+    const is_dir = fd.private_data == null;
+    const mode: u32 = if (is_dir) 0o0040755 else 0o0020600; // Directory or Char Device
+
+    const stat = uapi.stat.Stat{
+        .dev = 0,
+        .ino = @intCast(fd_num),
+        .nlink = if (is_dir) 2 else 1,
+        .mode = mode,
+        .uid = 0,
+        .gid = 0,
+        .rdev = 0,
+        .size = 0,
+        .blksize = 512,
+        .blocks = 0,
+        .atime = 0,
+        .atime_nsec = 0,
+        .mtime = 0,
+        .mtime_nsec = 0,
+        .ctime = 0,
+        .ctime_nsec = 0,
+        .__pad0 = 0,
+        .__unused = [_]i64{0} ** 3,
+    };
+
+    UserPtr.from(stat_buf).writeValue(stat) catch return error.EFAULT;
+    return 0;
+}
+
+/// sys_getdents64 (217) - Get directory entries
+pub fn sys_getdents64(fd_num: usize, dirp: usize, count: usize) SyscallError!usize {
+    // Validate buffer
+    if (!isValidUserAccess(dirp, count, AccessMode.Write)) {
+        return error.EFAULT;
+    }
+
+    // For now, only InitRD root directory is supported
+    // Check if FD corresponds to a directory.
+    // Since we don't have open(directory) properly yet, let's assume if they call
+    // sys_open("/", ...), they get an FD pointing to root.
+    // But sys_open("/") fails in current impl (InitRD openFile).
+
+    // We need to implement opening directories.
+    // For MVP, if fd is not a valid file FD, maybe it's a dir FD?
+    // Or we hack it: if they open a special path.
+
+    // For `ls` to work, it needs to open the current directory.
+    // We implemented `sys_getcwd` but `sys_open` fails on dirs.
+
+    // Let's fix `sys_open` to handle "/" by creating a dummy FD for root dir.
+
+    const table = getGlobalFdTable();
+    const fd = table.get(@intCast(fd_num)) orelse return error.EBADF;
+
+    // Check if this is our dummy root directory FD
+    // We identify it by having null private_data (hack for MVP)
+    // Real implementation should have explicit type checking.
+    if (fd.private_data != null) {
+        return error.ENOTDIR;
+    }
+
+    // Use InitRD iterator
+    // We need to store iteration state (offset) in the FD.
+    // But our dummy FD has null private_data.
+    // We can use fd.position as the offset into the tar file.
+
+    // InitRD Iterator needs a pointer to InitRD.
+    const initrd = &fs.initrd.InitRD.instance;
+    var iterator = fs.initrd.FileIterator{
+        .initrd = initrd,
+        .offset = @intCast(fd.position),
+    };
+
+    var bytes_written: usize = 0;
+    const buf_uptr = UserPtr.from(dirp);
+
+    while (iterator.next()) |file| {
+        // Construct linux_dirent64
+        // struct linux_dirent64 {
+        //    ino64_t        d_ino;    /* 64-bit inode number */
+        //    off64_t        d_off;    /* 64-bit offset to next structure */
+        //    unsigned short d_reclen; /* Size of this dirent */
+        //    unsigned char  d_type;   /* File type */
+        //    char           d_name[]; /* Filename (null-terminated) */
+        // };
+
+        // Calculate size: header + name + null
+        const name_len = file.name.len;
+        const reclen = @sizeOf(uapi.dirent.Dirent64) + name_len + 1;
+        const aligned_reclen = std.mem.alignForward(usize, reclen, 8); // Align to 8 bytes
+
+        if (bytes_written + aligned_reclen > count) {
+            // No more space
+            break;
+        }
+
+        // We need to construct this manually byte-by-byte or use a struct
+        var ent: uapi.dirent.Dirent64 = .{
+            .d_ino = 1, // Dummy inode
+            .d_off = @intCast(iterator.offset), // Offset of NEXT entry
+            .d_reclen = @intCast(aligned_reclen),
+            .d_type = 8, // DT_REG (regular file)
+            .d_name = undefined,
+        };
+
+        // Write fixed part
+        const ent_bytes = std.mem.asBytes(&ent);
+
+        buf_uptr.offset(bytes_written).copyFromKernel(ent_bytes) catch return error.EFAULT;
+
+        // Write name
+        const name_offset = bytes_written + @offsetOf(uapi.dirent.Dirent64, "d_name");
+        buf_uptr.offset(name_offset).copyFromKernel(file.name) catch return error.EFAULT;
+
+        // Write null terminator and padding
+        buf_uptr.offset(name_offset + name_len).writeValue(@as(u8, 0)) catch return error.EFAULT;
+
+        bytes_written += aligned_reclen;
+
+        // Update FD position to next offset
+        fd.position = iterator.offset;
+    }
+
+    return bytes_written;
+}
+
+/// sys_getcwd (79) - Get current working directory
+pub fn sys_getcwd(buf_ptr: usize, size: usize) SyscallError!usize {
+    const proc = getCurrentProcess();
+    const cwd_len = proc.cwd_len;
+
+    if (size < cwd_len + 1) {
+        return error.ERANGE;
+    }
+
+    if (!isValidUserAccess(buf_ptr, size, AccessMode.Write)) {
+        return error.EFAULT;
+    }
+
+    const uptr = UserPtr.from(buf_ptr);
+
+    // Copy path
+    uptr.copyFromKernel(proc.cwd[0..cwd_len]) catch return error.EFAULT;
+
+    // Null terminate
+    uptr.offset(cwd_len).writeValue(@as(u8, 0)) catch return error.EFAULT;
+
+    return cwd_len + 1; // Return length including null? Linux returns length of string including null.
+}
+
+/// sys_chdir (80) - Change working directory
+pub fn sys_chdir(path_ptr: usize) SyscallError!usize {
+    const path_buf = heap.allocator().alloc(u8, user_mem.MAX_PATH_LEN) catch {
+        return error.ENOMEM;
+    };
+    defer heap.allocator().free(path_buf);
+
+    const path = user_mem.copyStringFromUser(path_buf, path_ptr) catch |err| {
+        if (err == error.NameTooLong) return error.ENAMETOOLONG;
+        return error.EFAULT;
+    };
+
+    if (path.len == 0) return error.ENOENT;
+
+    // Verify path exists (in InitRD)
+    // Note: InitRD is flat, so only "/" is a directory.
+    // All other paths are files.
+
+    if (std.mem.eql(u8, path, "/") or std.mem.eql(u8, path, "/.")) {
+        const proc = getCurrentProcess();
+        proc.cwd[0] = '/';
+        proc.cwd_len = 1;
+        return 0;
+    }
+
+    return error.ENOENT;
+}
+
+/// sys_mkdir (83) - Create directory
+pub fn sys_mkdir(path_ptr: usize, mode: usize) SyscallError!usize {
+    _ = path_ptr;
+    _ = mode;
+    return error.EROFS; // Read-only filesystem
+}
+
+/// sys_fcntl (72) - File control
+pub fn sys_fcntl(fd_num: usize, cmd: usize, arg: usize) SyscallError!usize {
+    const table = getGlobalFdTable();
+    const fd = table.get(@intCast(fd_num)) orelse return error.EBADF;
+
+    // F_DUPFD (0)
+    if (cmd == 0) {
+        // Fix potential panic if arg > u32.max (DoS)
+        if (arg > std.math.maxInt(u32)) return error.EINVAL;
+        const min_fd: u32 = @truncate(arg);
+
+        if (min_fd >= FdTable.MAX_FDS) return error.EINVAL;
+
+        // Find lowest available FD >= min_fd
+        // We need to implement allocFdNumFrom in FdTable
+        // For now, allocFdNum checks from 0.
+        // We can manually check.
+        var i = min_fd;
+        while (i < FdTable.MAX_FDS) : (i += 1) {
+            if (table.fds[i] == null) {
+                fd.ref();
+                table.install(i, fd);
+                return i;
+            }
+        }
+        return error.EMFILE;
+    }
+
+    // F_GETFD (1)
+    if (cmd == 1) {
+        // Return flags (FD_CLOEXEC)
+        // We don't track FD_CLOEXEC in flags yet (it's separate from O_ flags).
+        return 0;
+    }
+
+    // F_SETFD (2)
+    if (cmd == 2) {
+        // Set flags
+        return 0;
+    }
+
+    // F_GETFL (3)
+    if (cmd == 3) {
+        return fd.flags;
+    }
+
+    // F_SETFL (4)
+    if (cmd == 4) {
+        // Modify flags (only O_APPEND, O_ASYNC, O_DIRECT, O_NOATIME, O_NONBLOCK)
+        const new_flags = @as(u32, @truncate(arg));
+        // We only care about O_NONBLOCK for now
+        if ((new_flags & uapi.poll.O_NONBLOCK) != 0) {
+            fd.flags |= uapi.poll.O_NONBLOCK;
+        } else {
+            fd.flags &= ~uapi.poll.O_NONBLOCK;
+        }
+        return 0;
+    }
+
+    return error.EINVAL;
+}
+
 
 
 // =============================================================================
@@ -926,6 +1293,50 @@ pub fn sys_open(path_ptr: usize, flags: usize, mode: usize) SyscallError!usize {
         return fd_num;
     }
 
+    // Handle opening the root directory "/"
+    if (std.mem.eql(u8, path, "/")) {
+        // Create a special FD for root directory
+        const alloc = heap.allocator();
+
+        // Use a dummy file handle for now.
+        // Ideally we should have DirectoryOps in FileOps.
+        // For InitRD, we don't have a real directory object.
+        // We'll create a fake file that represents the directory.
+
+        // This is a bit of a hack for MVP ls support.
+        // A cleaner way would be InitRD.openDir().
+
+        // Let's create a "root dir" file entry in InitRD on the fly?
+        // No, InitRD struct is const data.
+
+        // Create a dummy FD with special directory operations?
+        // Or just fail open() on "/" but let getdents handle it?
+        // getdents takes an FD. So we must return a valid FD.
+
+        // Let's define empty operations for directory.
+        const dir_ops = fd_mod.FileOps{
+            .read = null, // Cannot read directory as file
+            .write = null,
+            .close = null, // Nothing to free
+            .seek = null,
+            .stat = null,
+            .ioctl = null,
+        };
+
+        const fd = fd_mod.createFd(&dir_ops, @truncate(flags) | fd_mod.O_RDONLY, null) catch {
+            return error.ENOMEM;
+        };
+        errdefer alloc.destroy(fd);
+
+        const table = getGlobalFdTable();
+        const fd_num = table.allocFdNum() orelse {
+            return error.EMFILE;
+        };
+
+        table.install(fd_num, fd);
+        return fd_num;
+    }
+
     // Fallback: InitRD
     // Note: This is where we would check a real VFS in the future
     const fd = fs.initrd.InitRD.instance.openFile(path, @truncate(flags)) catch |err| {
@@ -955,6 +1366,63 @@ pub fn sys_close(fd_num: usize) SyscallError!usize {
     if (result < 0) {
         return error.EBADF;
     }
+    return 0;
+}
+
+/// sys_dup (32) - Duplicate a file descriptor
+pub fn sys_dup(oldfd: usize) SyscallError!usize {
+    const table = getGlobalFdTable();
+    const newfd = table.dup(@intCast(oldfd)) catch |err| {
+        return switch (err) {
+            error.BadFd => error.EBADF,
+            error.MFile => error.EMFILE,
+            else => error.EMFILE,
+        };
+    };
+    return newfd;
+}
+
+/// sys_dup2 (33) - Duplicate a file descriptor to a specific slot
+pub fn sys_dup2(oldfd: usize, newfd: usize) SyscallError!usize {
+    const table = getGlobalFdTable();
+    const result = table.dup2(@intCast(oldfd), @intCast(newfd)) catch |err| {
+        return switch (err) {
+            error.BadFd => error.EBADF,
+            else => error.EBADF,
+        };
+    };
+    return result;
+}
+
+/// sys_pipe (22) - Create a pipe
+pub fn sys_pipe(pipefd_ptr: usize) SyscallError!usize {
+    if (!isValidUserPtr(pipefd_ptr, 2 * @sizeOf(u32))) {
+        return error.EFAULT;
+    }
+
+    const table = getGlobalFdTable();
+    var fds: [2]u32 = undefined;
+    pipe_mod.createPipe(&fds, table) catch |err| {
+        return switch (err) {
+            error.MFile => error.EMFILE,
+            error.OutOfMemory => error.ENOMEM,
+            else => error.ENOMEM,
+        };
+    };
+
+    const uptr = UserPtr.from(pipefd_ptr);
+    var fds_i32: [2]i32 = undefined;
+    fds_i32[0] = @intCast(fds[0]);
+    fds_i32[1] = @intCast(fds[1]);
+
+    uptr.copyFromKernel(std.mem.sliceAsBytes(&fds_i32)) catch {
+        // Close FDs if copy fails
+        const table = getGlobalFdTable();
+        _ = table.close(fds[0]);
+        _ = table.close(fds[1]);
+        return error.EFAULT;
+    };
+
     return 0;
 }
 

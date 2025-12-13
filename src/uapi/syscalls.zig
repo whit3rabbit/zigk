@@ -32,6 +32,18 @@ pub const SYS_OPEN: usize = 2;
 /// (fd) -> int
 pub const SYS_CLOSE: usize = 3;
 
+/// Get file status
+/// (path, statbuf) -> int
+pub const SYS_STAT: usize = 4;
+
+/// Get file status
+/// (fd, statbuf) -> int
+pub const SYS_FSTAT: usize = 5;
+
+/// Get file status (do not follow symlinks)
+/// (path, statbuf) -> int
+pub const SYS_LSTAT: usize = 6;
+
 /// Reposition read/write file offset
 /// (fd, offset, whence) -> off_t
 /// whence: 0=SEEK_SET, 1=SEEK_CUR, 2=SEEK_END
@@ -65,6 +77,10 @@ pub const SYS_IOCTL: usize = 16;
 /// (fd, iov, iovcnt) -> ssize_t
 pub const SYS_WRITEV: usize = 20;
 
+/// Create a pipe
+/// (pipefd) -> int
+pub const SYS_PIPE: usize = 22;
+
 /// Examine and change blocked signals
 /// (how, set, oldset, sigsetsize) -> int
 pub const SYS_RT_SIGPROCMASK: usize = 14;
@@ -76,6 +92,10 @@ pub const SYS_SELECT: usize = 23;
 /// Yield the processor
 /// () -> int
 pub const SYS_SCHED_YIELD: usize = 24;
+
+/// Duplicate a file descriptor
+/// (oldfd) -> newfd
+pub const SYS_DUP: usize = 32;
 
 /// Duplicate a file descriptor
 /// (oldfd, newfd) -> int
@@ -170,6 +190,22 @@ pub const SYS_UNAME: usize = 63;
 /// (fd, cmd, arg) -> int
 pub const SYS_FCNTL: usize = 72;
 
+/// Get directory entries
+/// (fd, dirp, count) -> int
+pub const SYS_GETDENTS: usize = 78;
+
+/// Get current working directory
+/// (buf, size) -> char *
+pub const SYS_GETCWD: usize = 79;
+
+/// Change working directory
+/// (path) -> int
+pub const SYS_CHDIR: usize = 80;
+
+/// Create a directory
+/// (path, mode) -> int
+pub const SYS_MKDIR: usize = 83;
+
 /// Get user ID
 /// () -> uid_t
 pub const SYS_GETUID: usize = 102;
@@ -197,6 +233,10 @@ pub const SYS_SETDOMAINNAME: usize = 171;
 /// Get time from a clock
 /// (clk_id, tp) -> int
 pub const SYS_CLOCK_GETTIME: usize = 228;
+
+/// Get directory entries (64-bit)
+/// (fd, dirp, count) -> int
+pub const SYS_GETDENTS64: usize = 217;
 
 /// Set pointer to thread ID
 /// (tidptr) -> pid_t
