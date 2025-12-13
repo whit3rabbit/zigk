@@ -165,9 +165,36 @@ const initrd_ops = fd.FileOps{
     .write = initrdWrite, // Read-only
     .close = initrdClose,
     .seek = initrdSeek,
-    .stat = null, // TODO
+    .stat = initrdStat,
     .ioctl = null,
 };
+
+fn initrdStat(file_desc: *fd.FileDescriptor, stat_buf: *anyopaque) isize {
+    const file: *InitRDFile = @ptrCast(@alignCast(file_desc.private_data));
+    const stat: *uapi.stat.Stat = @ptrCast(@alignCast(stat_buf));
+
+    stat.* = .{
+        .dev = 0,
+        .ino = 0,
+        .nlink = 1,
+        .mode = 0o100755, // Regular file
+        .uid = 0,
+        .gid = 0,
+        .rdev = 0,
+        .size = @intCast(file.data.len),
+        .blksize = 512,
+        .blocks = @intCast((file.data.len + 511) / 512),
+        .atime = 0,
+        .atime_nsec = 0,
+        .mtime = 0,
+        .mtime_nsec = 0,
+        .ctime = 0,
+        .ctime_nsec = 0,
+        .__pad0 = 0,
+        .__unused = [_]i64{0} ** 3,
+    };
+    return 0;
+}
 
 fn initrdRead(file_desc: *fd.FileDescriptor, buf: []u8) isize {
     const file: *InitRDFile = @ptrCast(@alignCast(file_desc.private_data));

@@ -11,6 +11,8 @@ pub const errno = @import("errno.zig");
 pub const poll = @import("poll.zig");
 pub const abi = @import("abi.zig");
 pub const signal = @import("signal.zig");
+pub const stat = @import("stat.zig");
+pub const dirent = @import("dirent.zig");
 
 // Re-export commonly used types
 pub const Errno = errno.Errno;
@@ -61,6 +63,15 @@ pub const SYS_GETPPID = syscalls.SYS_GETPPID;
 pub const SYS_ARCH_PRCTL = syscalls.SYS_ARCH_PRCTL;
 pub const SYS_CLOCK_GETTIME = syscalls.SYS_CLOCK_GETTIME;
 pub const SYS_EXIT_GROUP = syscalls.SYS_EXIT_GROUP;
+pub const SYS_DUP = syscalls.SYS_DUP;
+pub const SYS_STAT = syscalls.SYS_STAT;
+pub const SYS_FSTAT = syscalls.SYS_FSTAT;
+pub const SYS_LSTAT = syscalls.SYS_LSTAT;
+pub const SYS_PIPE = syscalls.SYS_PIPE;
+pub const SYS_GETDENTS64 = syscalls.SYS_GETDENTS64;
+pub const SYS_MKDIR = syscalls.SYS_MKDIR;
+pub const SYS_CHDIR = syscalls.SYS_CHDIR;
+pub const SYS_GETCWD = syscalls.SYS_GETCWD;
 pub const SYS_EPOLL_WAIT = syscalls.SYS_EPOLL_WAIT;
 pub const SYS_EPOLL_CTL = syscalls.SYS_EPOLL_CTL;
 pub const SYS_EPOLL_CREATE1 = syscalls.SYS_EPOLL_CREATE1;

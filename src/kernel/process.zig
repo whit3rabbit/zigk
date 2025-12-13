@@ -85,6 +85,10 @@ pub const Process = struct {
     /// Heap break (current top of the heap)
     heap_break: u64,
 
+    /// Current Working Directory
+    cwd: [uapi.abi.MAX_PATH]u8,
+    cwd_len: usize,
+
     /// Resource limits (DoS protection)
     /// Maximum virtual address space size (default 256 MB)
     rlimit_as: u64 = 256 * 1024 * 1024,
@@ -283,7 +287,12 @@ pub fn createProcess(parent: ?*Process) !*Process {
         .refcount = 1,
         .heap_start = 0,
         .heap_break = 0,
+        .cwd = undefined,
+        .cwd_len = 1,
     };
+
+    // Initialize CWD to "/"
+    proc.cwd[0] = '/';
 
     // Add to parent's children list
     if (parent) |p| {
@@ -311,7 +320,7 @@ pub fn forkProcess(parent: *Process) !*Process {
     const alloc = heap.allocator();
 
     // Duplicate file descriptor table
-    const child_fd_table = try parent.fd_table.dup();
+    const child_fd_table = try parent.fd_table.clone();
     errdefer fd_mod.destroyFdTable(child_fd_table);
 
     // Copy address space (full copy for MVP, CoW would be optimization)
@@ -333,6 +342,8 @@ pub fn forkProcess(parent: *Process) !*Process {
         .refcount = 1,
         .heap_start = parent.heap_start,
         .heap_break = parent.heap_break,
+        .cwd = parent.cwd,
+        .cwd_len = parent.cwd_len,
     };
 
     // Add to parent's children list
