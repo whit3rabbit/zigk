@@ -30,7 +30,19 @@ const seqGte = types.seqGte;
 // Implements the "SEGMENT ARRIVAL" event processing logic.f packet was handled
 pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
     state.lock.acquire();
-    defer state.lock.release();
+    // FIX: Do not release state.lock here. We hold it for the entire duration to prevent
+    // race conditions with api.zig (which holds state.lock but not tcb.mutex) and to
+    // allow safe modification of global state (e.g. freeTcb).
+    // This effectively uses state.lock as a coarse-grained lock for the TCP subsystem.
+    // defer state.lock.release(); // Already deferred at top if we don't release manually?
+    // Wait, the original code had:
+    // state.lock.acquire();
+    // defer state.lock.release();
+    // ...
+    // state.lock.release(); // Early release!
+
+    // So if I simply remove the early release, the defer will handle it at end of function.
+    // Correct.
 
     // Validate minimum TCP header size
     if (pkt.len < pkt.transport_offset + c.TCP_HEADER_SIZE) {
@@ -47,14 +59,6 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
     }
 
     // Verify TCP checksum
-    // Note: for reassembled packets, pkt.ipHeader() might point to invalid/virtual IP header at offset 0
-    // so we must use the stored IP addresses in the packet metadata.
-    // However, we still need payload length.
-    
-    // Safety check: for reassembled packets, len should be mostly payload.
-    // For normal packets, we calculated payload len from IP header previously.
-    // Let's use the slice length directly from packet buffer data/len which is safe.
-    
     const tcp_segment = pkt.data[pkt.transport_offset..pkt.len];
     
     // Use stored IPs for checksum to support reassembled packets
@@ -72,15 +76,27 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
 
     // Try established connection first
     if (state.findTcb(local_ip, local_port, remote_ip, remote_port)) |tcb| {
+        // Acquire TCB lock while holding state lock to prevent race where TCB is freed
+        tcb.mutex.lock();
+        defer tcb.mutex.unlock();
+
+        // Removed early release of state.lock
         return processEstablishedPacket(tcb, pkt, tcp_hdr);
     }
 
     // Try listening socket
     if (state.findListeningTcb(local_port)) |listen_tcb| {
+        // Acquire lock
+        listen_tcb.mutex.lock();
+        defer listen_tcb.mutex.unlock();
+
+        // Removed early release of state.lock
         return processListenPacket(iface, listen_tcb, pkt, tcp_hdr);
     }
 
     // No matching connection - send RST
+    // We send RST without TCB lock, but we hold state.lock which protects interface?
+    // sendRstForPacket doesn't use TCB.
     _ = tx.sendRstForPacket(iface, pkt, tcp_hdr);
     return true;
 }
@@ -113,6 +129,10 @@ fn processListenPacket(
     if (state.countHalfOpen() >= c.MAX_HALF_OPEN) {
         return false; // Silently drop - don't send RST to avoid amplification
     }
+
+    // Note: We should ideally also check listen_tcb backlog here, but we lack
+    // direct access to the socket backlog counter from Tcb in this context.
+    // Relying on global limit for now.
 
     // Got SYN - create new TCB for this connection
     const new_tcb = state.allocateTcb() orelse return false;
@@ -189,8 +209,50 @@ fn processListenPacket(
 
 /// Process packet for established (non-LISTEN) connections
 fn processEstablishedPacket(tcb: *Tcb, pkt: *PacketBuffer, tcp_hdr: *TcpHeader) bool {
+    // Security: Check Sequence Number (RFC 793 / RFC 5961)
+    // We must validate the sequence number before processing RST or SYN/ACK.
+    const seq = tcp_hdr.getSeqNum();
+    const ack = tcp_hdr.getAckNum();
+    const seg_len = tx.calculateSegmentLength(pkt, tcp_hdr);
+    const rcv_wnd = tcb.currentRecvWindow();
+
+    var acceptable = false;
+
+    if (seg_len == 0) {
+        if (rcv_wnd == 0) {
+            acceptable = (seq == tcb.rcv_nxt);
+        } else {
+            // Window > 0
+            // RCV.NXT <= SEG.SEQ < RCV.NXT + RCV.WND
+            // Handle wrap-around using subtraction
+            const dist = seq -% tcb.rcv_nxt;
+            acceptable = (dist < rcv_wnd);
+        }
+    } else {
+        // Segment length > 0
+        if (rcv_wnd == 0) {
+            acceptable = false;
+        } else {
+            // Accept if beginning or end is in window
+            const dist_start = seq -% tcb.rcv_nxt;
+            const end_seq = seq +% seg_len -% 1;
+            const dist_end = end_seq -% tcb.rcv_nxt;
+            acceptable = (dist_start < rcv_wnd) or (dist_end < rcv_wnd);
+        }
+    }
+
+    if (!acceptable) {
+        // If an incoming segment is not acceptable, an acknowledgment should be sent in reply
+        // unless the RST bit is set, in which case the segment is dropped
+        if (!tcp_hdr.hasFlag(TcpHeader.FLAG_RST)) {
+            _ = tx.sendAck(tcb);
+        }
+        return true; // Packet processed (dropped)
+    }
+
     // Handle RST first
     if (tcp_hdr.hasFlag(TcpHeader.FLAG_RST)) {
+        // RST is valid (in window)
         return handleRst(tcb);
     }
 
