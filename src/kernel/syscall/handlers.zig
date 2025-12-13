@@ -1596,9 +1596,48 @@ pub fn sys_brk(addr: u64) SyscallError!usize {
         }
         proc.user_vmm.total_mapped += mapped_len;
     } else if (new_break_aligned < current_break_aligned) {
-        // Shrinking heap - not implemented yet
-        // Would need to unmap pages and free physical memory
-        // TODO: Decrement proc.rss_current when implemented
+        // Shrinking heap
+        var offset: u64 = 0;
+        const size_to_unmap = current_break_aligned - new_break_aligned;
+
+        // Unmap and free pages
+        while (offset < size_to_unmap) : (offset += pmm.PAGE_SIZE) {
+            const vaddr = new_break_aligned + offset;
+            if (vmm.translate(proc.cr3, vaddr)) |paddr| {
+                pmm.freePage(paddr);
+                vmm.unmapPage(proc.cr3, vaddr) catch {};
+                if (proc.rss_current >= pmm.PAGE_SIZE) {
+                    proc.rss_current -= pmm.PAGE_SIZE;
+                } else {
+                    proc.rss_current = 0;
+                }
+            }
+        }
+
+        // Update heap VMA
+        var heap_vma: ?*user_vmm.Vma = null;
+        var cursor = proc.user_vmm.vma_head;
+        while (cursor) |vma| {
+            if (vma.contains(proc.heap_start)) {
+                heap_vma = vma;
+                break;
+            }
+            cursor = vma.next;
+        }
+
+        if (heap_vma) |vma| {
+            // Shrink the VMA end if it was larger than new break
+            if (vma.end > new_break_aligned) {
+                vma.end = new_break_aligned;
+            }
+        }
+
+        // Update total mapped count
+        if (proc.user_vmm.total_mapped >= size_to_unmap) {
+            proc.user_vmm.total_mapped -= @intCast(size_to_unmap);
+        } else {
+            proc.user_vmm.total_mapped = 0;
+        }
     }
 
     // Update break
