@@ -42,7 +42,7 @@ pub fn isValidUserPtr(ptr: usize, len: usize) bool {
     if (end_addr[1] != 0) return false; // Overflow occurred
 
     // Check end is still in userspace
-    if (end_addr[0] > USER_SPACE_END) return false;
+    if (end_addr[0] > USER_SPACE_END + 1) return false;
 
     return true;
 }

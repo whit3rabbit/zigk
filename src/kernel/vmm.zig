@@ -155,6 +155,44 @@ pub fn mapPage(pml4_phys: u64, virt_addr: u64, phys_addr: u64, flags: PageFlags)
     paging.invalidatePage(virt_addr);
 }
 
+/// Update flags for a mapped page (without unmapping)
+///
+/// Changes the permission flags for an existing mapping.
+/// Returns error if page is not mapped.
+pub fn protectPage(pml4_phys: u64, virt_addr: u64, flags: PageFlags) VmmError!void {
+    if (!initialized) {
+        return VmmError.NotInitialized;
+    }
+
+    if (!paging.isPageAligned(virt_addr)) {
+        return VmmError.InvalidAddress;
+    }
+
+    const indices = paging.getIndices(virt_addr);
+    const pml4 = paging.getTablePtr(pml4_phys);
+
+    // Navigate to PT
+    if (!pml4.entries[indices.pml4].isPresent()) return VmmError.NotMapped;
+    const pdpt = paging.getTablePtr(pml4.entries[indices.pml4].getPhysAddr());
+
+    if (!pdpt.entries[indices.pdpt].isPresent()) return VmmError.NotMapped;
+    const pd = paging.getTablePtr(pdpt.entries[indices.pdpt].getPhysAddr());
+
+    if (!pd.entries[indices.pd].isPresent()) return VmmError.NotMapped;
+    const pt = paging.getTablePtr(pd.entries[indices.pd].getPhysAddr());
+
+    if (!pt.entries[indices.pt].isPresent()) return VmmError.NotMapped;
+
+    // Get old physical address
+    const phys_addr = pt.entries[indices.pt].getPhysAddr();
+
+    // Update entry with new flags, preserving physical address
+    pt.entries[indices.pt] = PageTableEntry.pageEntry(phys_addr, flags);
+
+    // Invalidate TLB
+    paging.invalidatePage(virt_addr);
+}
+
 /// Map a contiguous range of pages
 ///
 /// Maps `size` bytes starting from `virt_start` to `phys_start`.

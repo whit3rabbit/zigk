@@ -686,25 +686,28 @@ pub fn sys_writev(fd: usize, bvec_ptr: usize, count: usize) SyscallError!usize {
     for (kvecs) |vec| {
         if (vec.len == 0) continue;
 
-        // Perform write using our locked helper
-        // We reuse sys_write logic but bypass its internal locking
-        // Wait, sys_write does user-copy and allocation. We can't easily reuse do_write_locked directly
-        // without duplicating the allocation/copy logic.
-        //
-        // Refactoring plan:
-        // 1. We should probably NOT reuse sys_write directly if it takes a lock.
-        // 2. We should extract the allocation and user-copy logic of sys_write into a helper 'prepare_write'
-        // 3. OR, since we are already holding the lock here, we can't call sys_write if sys_write also takes the lock (Deadlock!).
-        //
-        // Correct approach: Implement the body of the loop here, replicating necessary logic, OR make a helper.
-        // Given complexity, let's call a helper that does alloc+copy+write_locked.
-        
-        // Helper: prepare_and_write_locked
-        const res = perform_write_locked(fd_obj, vec.base, vec.len) catch |err| {
-            if (total_written > 0) return total_written;
-            return err;
-        };
-        total_written += res;
+        // Perform write using our locked helper, handling chunks if needed
+        var offset: usize = 0;
+        while (offset < vec.len) {
+            // Cap to avoid huge allocations in perform_write_locked
+            const remaining = vec.len - offset;
+            const chunk_len = @min(remaining, 64 * 1024);
+            const current_base = vec.base + offset;
+
+            const res = perform_write_locked(fd_obj, current_base, chunk_len) catch |err| {
+                if (total_written > 0) return total_written;
+                return err;
+            };
+
+            total_written += res;
+            offset += res;
+
+            // If partial write occurred (less than requested for this chunk),
+            // stop and return what we have
+            if (res < chunk_len) {
+                return total_written;
+            }
+        }
     }
 
     return total_written;
@@ -1006,7 +1009,9 @@ pub fn sys_mmap(addr: usize, len: usize, prot: usize, flags: usize, fd: usize, o
     // Enforce per-process memory limit (DoS protection)
     const proc = getCurrentProcess();
     const aligned_len = std.mem.alignForward(usize, len, pmm.PAGE_SIZE);
-    if (proc.rss_current + aligned_len > proc.rlimit_as) {
+
+    const new_rss = @addWithOverflow(proc.rss_current, aligned_len);
+    if (new_rss[1] != 0 or new_rss[0] > proc.rlimit_as) {
         return error.ENOMEM;
     }
 
@@ -1499,9 +1504,12 @@ pub fn sys_brk(addr: u64) SyscallError!usize {
     }
 
     // Enforce per-process memory limit (DoS protection)
-    const new_heap_size = addr - proc.heap_start;
-    if (proc.rss_current + new_heap_size > proc.rlimit_as) {
-        return error.ENOMEM;
+    if (addr > proc.heap_break) {
+        const growth = addr - proc.heap_break;
+        const new_rss = @addWithOverflow(proc.rss_current, growth);
+        if (new_rss[1] != 0 or new_rss[0] > proc.rlimit_as) {
+            return error.ENOMEM;
+        }
     }
 
     // Align to page size for mapping
@@ -1515,6 +1523,11 @@ pub fn sys_brk(addr: u64) SyscallError!usize {
 
     if (new_break_aligned > current_break_aligned) {
         // Growing heap
+        // Check for overlap with existing VMAs
+        if (proc.user_vmm.findOverlappingVma(current_break_aligned, new_break_aligned)) |_| {
+            return error.ENOMEM;
+        }
+
         // The expandHeap method in UserVmm handles mapping pages and updating VMA list.
         const res = proc.user_vmm.expandHeap(current_break_aligned, new_break_aligned);
         if (res < 0) {

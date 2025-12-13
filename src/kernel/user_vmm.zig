@@ -392,12 +392,8 @@ pub const UserVmm = struct {
                 // Update each page in the range
                 var page_addr = update_start;
                 while (page_addr < update_end) : (page_addr += pmm.PAGE_SIZE) {
-                    // Get current physical address
-                    if (vmm.translate(self.pml4_phys, page_addr)) |phys| {
-                        // Remap with new flags
-                        vmm.unmapPage(self.pml4_phys, page_addr) catch {};
-                        vmm.mapPage(self.pml4_phys, page_addr, phys, new_flags) catch {};
-                    }
+                    // Update flags safely without unmapping
+                    vmm.protectPage(self.pml4_phys, page_addr, new_flags) catch {};
                 }
             }
             vma = v.next;
@@ -590,7 +586,7 @@ pub const UserVmm = struct {
     }
 
     /// Find VMA that overlaps with given range
-    fn findOverlappingVma(self: *UserVmm, start: u64, end: u64) ?*Vma {
+    pub fn findOverlappingVma(self: *UserVmm, start: u64, end: u64) ?*Vma {
         var vma = self.vma_head;
         while (vma) |v| {
             if (v.overlaps(start, end)) {
