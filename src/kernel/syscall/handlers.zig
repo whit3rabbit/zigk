@@ -154,11 +154,7 @@ pub fn sys_exit_group(status: usize) isize {
 pub fn sys_wait4(pid_arg: usize, wstatus_ptr: usize, options: usize, rusage_ptr: usize) SyscallError!usize {
     _ = rusage_ptr; // rusage not implemented
 
-    const thread = @import("thread");
-
-    const current_thread = sched.getCurrentThread() orelse {
-        return error.ESRCH;
-    };
+    const current_proc = getCurrentProcess();
 
     // Interpret pid argument
     const target_pid: i32 = @bitCast(@as(u32, @truncate(pid_arg)));
@@ -166,79 +162,78 @@ pub fn sys_wait4(pid_arg: usize, wstatus_ptr: usize, options: usize, rusage_ptr:
 
     // Loop until we find a zombie child or no children remain
     while (true) {
-        var found_zombie: ?*thread.Thread = null;
+        // Disable interrupts to prevent "lost wakeup" race condition
+        // if child exits after we check but before we block.
+        hal.cpu.disableInterrupts();
+
+        var zombie_proc: ?*Process = null;
         var has_children = false;
         var has_matching_child = false;
 
-        // Iterate children list manually to check Process PID
-        var child_node = current_thread.first_child;
-        while (child_node) |child| {
-            // Get next sibling early since we might remove 'child'
-            child_node = child.next_sibling;
+        {
+            // Acquire process tree lock to safely iterate children
+            const held = sched.process_tree_lock.acquire();
+            defer held.release();
 
-            // Get child process PID
-            var child_pid: i32 = 0;
-            if (child.process) |p_ptr| {
-                const proc = @as(*process_mod.Process, @ptrCast(@alignCast(p_ptr)));
-                child_pid = @intCast(proc.pid);
-            } else {
-                // Kernel thread child? Skip or use TID as PID?
-                child_pid = @intCast(child.tid);
-            }
+            var child = current_proc.first_child;
+            while (child) |c| {
+                // Get next sibling early
+                const next_child = c.next_sibling;
 
-            // Check if this child matches target_pid
-            const matches = if (target_pid == -1) true else (child_pid == target_pid);
+                // Check if this child matches target_pid
+                // pid = -1: wait for any child
+                // pid > 0: wait for specific child
+                // pid = 0: wait for process group (not implemented, treat as -1)
+                // pid < -1: wait for process group -pid (not implemented)
+                const matches = if (target_pid == -1) true
+                               else if (target_pid > 0) (c.pid == @as(u32, @intCast(target_pid)))
+                               else true; // MVP fallback
 
-            if (matches) {
-                has_children = true;
-                has_matching_child = true;
+                if (matches) {
+                    has_children = true;
+                    has_matching_child = true;
 
-                if (child.state == .Zombie) {
-                    found_zombie = child;
-                    break;
+                    if (c.state == .Zombie) {
+                        // Found a zombie - remove it from the list immediately
+                        // This effectively "claims" the zombie for this thread
+                        current_proc.removeChild(c);
+                        zombie_proc = c;
+                        break;
+                    }
                 }
-            } else if (target_pid == -1) {
-                // Should be covered by matches=true above, but for clarity
-                has_children = true;
+
+                child = next_child;
             }
         }
 
-        if (found_zombie) |zombie| {
-            // Found a zombie - reap it
+        if (zombie_proc) |zombie| {
+            // Re-enable interrupts before doing work that might fault or take time
+            hal.cpu.enableInterrupts();
 
-            // Get PID before destroying
-            var reaped_pid: usize = 0;
-            if (zombie.process) |p_ptr| {
-                const proc = @as(*process_mod.Process, @ptrCast(@alignCast(p_ptr)));
-                reaped_pid = proc.pid;
-            } else {
-                reaped_pid = @intCast(zombie.tid);
-            }
+            // We found and removed a zombie. The lock is released, so we can fault safely.
+            const reaped_pid = zombie.pid;
+            const exit_status = zombie.exit_status;
 
             // Write exit status if pointer provided
             if (wstatus_ptr != 0) {
-                // Use Process exit status as the source of truth if available
-                var status: i32 = zombie.exit_status;
-                if (zombie.process) |p_ptr| {
-                    const proc = @as(*process_mod.Process, @ptrCast(@alignCast(p_ptr)));
-                    status = proc.exit_status;
-                }
-
-                // Directly write exit_status (already encoded by sys_exit or crash handler)
-                UserPtr.from(wstatus_ptr).writeValue(status) catch {
-                    // Check for error.Fault in the catch block and return error.EFAULT instead of proceeding
+                UserPtr.from(wstatus_ptr).writeValue(exit_status) catch {
+                    // We already removed the zombie from the list.
+                    // If we fault here, we can't easily put it back.
+                    // Strictly speaking we should return EFAULT, but the zombie is lost.
+                    // We'll proceed with destroying it to avoid a leak.
+                    // In a robust kernel, we might try to re-attach or check valid ptr first.
+                    console.warn("sys_wait4: EFAULT writing status for pid={}", .{reaped_pid});
+                    // Clean up and return error
+                    if (zombie.unref()) {
+                        process_mod.destroyProcess(zombie);
+                    }
                     return error.EFAULT;
                 };
             }
 
-            // Remove from parent's child list and destroy
-            thread.removeChild(current_thread, zombie);
-            const proc_opaque = thread.destroyThread(zombie);
-            if (proc_opaque) |ptr| {
-                const proc = @as(*process_mod.Process, @ptrCast(@alignCast(ptr)));
-                if (proc.unref()) {
-                    process_mod.destroyProcess(proc);
-                }
+            // Clean up the process structure
+            if (zombie.unref()) {
+                process_mod.destroyProcess(zombie);
             }
 
             return reaped_pid;
@@ -246,19 +241,23 @@ pub fn sys_wait4(pid_arg: usize, wstatus_ptr: usize, options: usize, rusage_ptr:
 
         // No zombie found
         if (!has_matching_child and target_pid > 0) {
+            hal.cpu.enableInterrupts();
             return error.ECHILD;
         }
-
-        if (!has_children and target_pid == -1) {
+        if (!has_children and target_pid <= 0) {
+            hal.cpu.enableInterrupts();
             return error.ECHILD;
         }
 
         // WNOHANG: don't block, return 0 if no zombies
         if (wnohang) {
+            hal.cpu.enableInterrupts();
             return 0;
         }
 
         // Block and wait for child to exit
+        // When a child exits, it (or its thread) wakes the parent.
+        // sched.block() atomically enables interrupts and halts.
         sched.block();
     }
 }
@@ -267,17 +266,20 @@ pub fn sys_wait4(pid_arg: usize, wstatus_ptr: usize, options: usize, rusage_ptr:
 ///
 /// MVP: Returns thread ID since we don't have processes yet.
 pub fn sys_getpid() SyscallError!usize {
-    if (sched.getCurrentThread()) |t| {
-        return @intCast(t.tid);
-    }
-    // No current thread (shouldn't happen in normal operation)
-    return 1;
+    // Phase 4: Use process PID
+    // Ensure we have a valid process structure (init fallback handled by getter)
+    const proc = getCurrentProcess();
+    return proc.pid;
 }
 
 /// sys_getppid (110) - Get parent process ID
 ///
 /// MVP: Always returns 0 (init process has no parent).
 pub fn sys_getppid() SyscallError!usize {
+    const proc = getCurrentProcess();
+    if (proc.parent) |p| {
+        return p.pid;
+    }
     return 0;
 }
 
@@ -470,14 +472,34 @@ pub fn sys_clock_gettime(clk_id: usize, tp_ptr: usize) SyscallError!usize {
         return error.EFAULT;
     }
 
-    // Get tick count and convert to time
-    // Assuming 100 Hz timer (10ms per tick)
-    const ticks = sched.getTickCount();
-    const ms = ticks * 10;
-    const tp = Timespec{
-        .tv_sec = @intCast(ms / 1000),
-        .tv_nsec = @intCast((ms % 1000) * 1_000_000),
-    };
+    var tp: Timespec = undefined;
+
+    // Try to use TSC-based high resolution timing
+    const freq = hal.timing.getTscFrequency();
+    if (freq > 0) {
+        const tsc = hal.timing.rdtsc();
+        // Convert TSC ticks to nanoseconds
+        // ns = (tsc * 1_000_000_000) / freq
+        // We use 128-bit math implicitly or carefully to avoid overflow
+        // u64 * u64 -> u128 isn't directly supported in all simple expressions
+        // but Zig has mulWide.
+        const tsc_u128 = @as(u128, tsc);
+        const ns_u128 = (tsc_u128 * 1_000_000_000) / freq;
+        const total_ns: u64 = @truncate(ns_u128);
+
+        tp = Timespec{
+            .tv_sec = @intCast(total_ns / 1_000_000_000),
+            .tv_nsec = @intCast(total_ns % 1_000_000_000),
+        };
+    } else {
+        // Fallback to tick count (10ms resolution)
+        const ticks = sched.getTickCount();
+        const ms = ticks * 10;
+        tp = Timespec{
+            .tv_sec = @intCast(ms / 1000),
+            .tv_nsec = @intCast((ms % 1000) * 1_000_000),
+        };
+    }
 
     UserPtr.from(tp_ptr).writeValue(tp) catch {
         return error.EFAULT;
@@ -670,7 +692,6 @@ pub fn sys_writev(fd: usize, bvec_ptr: usize, count: usize) SyscallError!usize {
     const fd_obj = table.get(@intCast(fd)) orelse {
         // Should have been checked by sys_write logically, but here we need the object for locking
         // However, sys_write checks it internally. We need it here to lock.
-        // Let's rely on sys_write checking EBADF, but we need the lock.
         // Actually, we should check invalid FD here before loop.
         return error.EBADF;
     };
