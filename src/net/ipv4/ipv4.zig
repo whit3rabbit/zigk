@@ -23,6 +23,7 @@ const heap = @import("heap");
 const hal = @import("hal");
 const entropy = hal.entropy;
 const reassembly = @import("reassembly.zig");
+const loopback = @import("../loopback.zig");
 
 // Forward declarations for transport protocols
 const icmp = @import("../transport/icmp.zig");
@@ -364,6 +365,24 @@ pub fn buildPacketWithTos(
 /// Send an IP packet
 /// Resolves destination MAC via ARP and transmits
 pub fn sendPacket(iface: *Interface, pkt: *PacketBuffer, dst_ip: u32) bool {
+    // Check for loopback destination (127.x.x.x)
+    // Route through loopback interface instead of physical NIC
+    if (isLoopback(dst_ip)) {
+        if (loopback.getInterface()) |lo| {
+            // Build minimal Ethernet header (loopback transmit expects it)
+            ethernet.buildFrame(lo, pkt, [_]u8{0} ** 6, ethernet.ETHERTYPE_IPV4);
+
+            // Update packet length
+            const ip = pkt.ipHeader();
+            pkt.len = pkt.ip_offset + ip.getTotalLength();
+
+            // Transmit via loopback (injects back to receive path)
+            return lo.transmit(pkt.data[0..pkt.len]);
+        }
+        // Loopback not initialized - drop packet
+        return false;
+    }
+
     // Determine next-hop IP (gateway if not on local subnet)
     const next_hop = iface.getGateway(dst_ip);
 

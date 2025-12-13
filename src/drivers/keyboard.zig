@@ -390,37 +390,28 @@ pub fn init() void {
 /// Handle keyboard IRQ (called from interrupt handler)
 /// Reads scancode from port and populates all buffers
 pub fn handleIrq() void {
-    console.info("keyboard: handleIrq ENTER init={}", .{keyboard_initialized});
-
     if (!keyboard_initialized) {
         // Just read and discard to acknowledge
-        console.info("keyboard: not init, reading port", .{});
         _ = hal.io.inb(KEYBOARD_DATA_PORT);
-        console.info("keyboard: returning", .{});
         return;
     }
 
-    console.info("keyboard: reading status", .{});
     // Check status register before reading data (prevents spurious reads)
     const status = StatusReg.read();
-    console.info("keyboard: status read ok hasData={}", .{status.hasData()});
 
     if (!status.hasData()) {
         // No data ready - spurious interrupt
-        console.info("keyboard: spurious, returning", .{});
         error_stats.spurious_irqs +%= 1;
         return;
     }
 
     // Skip mouse data - let mouse IRQ handler deal with it
     if (status.isMouseData()) {
-        console.info("keyboard: mouse data, returning", .{});
         return;
     }
 
     // Check for transmission errors
     if (status.hasError()) {
-        console.info("keyboard: error, returning", .{});
         if (status.parity_error) error_stats.parity_errors +%= 1;
         if (status.timeout_error) error_stats.timeout_errors +%= 1;
         // Read and discard bad data
@@ -428,15 +419,11 @@ pub fn handleIrq() void {
         return;
     }
 
-    console.info("keyboard: reading scancode", .{});
     // Read scancode from keyboard data port
     const scancode = hal.io.inb(KEYBOARD_DATA_PORT);
-    console.info("keyboard: got scancode {x}", .{scancode});
 
     // Acquire lock to protect buffer access
-    console.info("keyboard: acquiring lock", .{});
     const held = keyboard_lock.acquire();
-    console.info("keyboard: lock acquired", .{});
 
     // Always store raw scancode for games (FR-030a)
     // Track buffer overruns for debugging

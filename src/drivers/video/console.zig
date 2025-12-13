@@ -150,12 +150,21 @@ pub const Console = struct {
         // Ideally trigger a redraw of the cursor, but we don't draw a persistent cursor block yet.
     }
 
+    /// Clear screen safely (Acquires lock)
+    pub fn safeClear(self: *Console) void {
+        const irq_state = hal.cpu.disableInterruptsSaveFlags();
+        defer hal.cpu.restoreInterrupts(irq_state);
+        
+        const held = history_lock.acquire();
+        defer held.release();
+
+        self.clear();
+    }
+
+    /// Clear screen (Unsafe: Caller must hold history_lock)
     pub fn clear(self: *Console) void {
         // Can be called from Parser (Context)
         // Lock is already held by write() usually.
-        // Be careful if called internally vs externally.
-        // If called from parser via write, lock is held.
-        // If clear called directly public?
         
         const mode = self.device.getMode();
         // Use current BG color

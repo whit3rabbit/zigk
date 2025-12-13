@@ -245,9 +245,12 @@ pub fn createKernelThread(
         // even during early boot. This page is part of the HHDM linear map
         // so unmapping it creates a hole that will fault on access.
         vmm.unmapPage(vmm.getKernelPml4(), guard_page_virt) catch |err| {
-            // If unmap fails, log warning but continue - better to have a thread
+            // NotMapped is expected for fresh allocations - guard was never mapped
+            // Other errors are concerning but continue - better to have a thread
             // without guard protection than no thread at all during early boot
-            console.warn("Thread: Failed to unmap guard page {x}: {}", .{ guard_page_virt, err });
+            if (err != error.NotMapped) {
+                console.warn("Thread: Failed to unmap guard page {x}: {}", .{ guard_page_virt, err });
+            }
         };
     }
 

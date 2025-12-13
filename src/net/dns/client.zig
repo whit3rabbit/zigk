@@ -1,4 +1,3 @@
-
 const std = @import("std");
 const dns = @import("dns.zig");
 const socket = @import("../transport/socket.zig");
@@ -16,61 +15,97 @@ pub const DnsError = error{
     Refused,
     NoAnswer,
     TimedOut,
+    NameTooLong, // RFC 1035: domain name exceeds 253 bytes
+    Truncated, // TC flag set, response truncated (needs TCP)
+    IdMismatch, // Transaction ID mismatch (possible spoofing)
+    CnameLoop, // RFC 1034: exceeded max CNAME chain depth (8)
+    BufferTooSmall, // Output buffer too small for name
 };
 
-/// Resolve hostname to IPv4 address
-/// server_ip: DNS server address
+/// Result of a single DNS query - either an IP address or a CNAME target
+const ResolveResult = union(enum) {
+    ip: u32,
+    cname: []const u8,
+};
+
+/// Resolve hostname to IPv4 address with CNAME following.
+/// Follows up to DNS_MAX_CNAME_DEPTH (8) CNAME redirects per RFC 1034.
+/// allocator: Reserved for future use (EDNS0 large responses, DNS caching, TCP fallback)
+/// server_ip: DNS server address in network byte order
 pub fn resolve(allocator: std.mem.Allocator, hostname: []const u8, server_ip: u32) !u32 {
-    _ = allocator; // Buffer on stack for now
-    
+    // Stack-allocated buffers for CNAME chain (no heap allocation)
+    var current_name_buf: [dns.DNS_MAX_NAME_LENGTH]u8 = undefined;
+    var cname_buf: [dns.DNS_MAX_NAME_LENGTH]u8 = undefined;
+    var current_name: []const u8 = hostname;
+
+    var depth: u8 = 0;
+    while (depth < dns.DNS_MAX_CNAME_DEPTH) : (depth += 1) {
+        const result = try resolveOnce(allocator, current_name, server_ip, &cname_buf);
+
+        switch (result) {
+            .ip => |ip| return ip,
+            .cname => |cname_target| {
+                // Copy CNAME target for next iteration
+                if (cname_target.len > current_name_buf.len) return DnsError.NameTooLong;
+                @memcpy(current_name_buf[0..cname_target.len], cname_target);
+                current_name = current_name_buf[0..cname_target.len];
+            },
+        }
+    }
+
+    return DnsError.CnameLoop; // Exceeded max CNAME depth
+}
+
+/// Single DNS query - returns either IP address or CNAME target.
+/// cname_buf is used to store CNAME target if one is found.
+fn resolveOnce(allocator: std.mem.Allocator, hostname: []const u8, server_ip: u32, cname_buf: []u8) !ResolveResult {
+    _ = allocator; // Reserved for future use (EDNS0, caching, TCP fallback)
+
+    // Validate hostname length per RFC 1035 (max 253 bytes)
+    if (hostname.len > dns.DNS_MAX_NAME_LENGTH) return DnsError.NameTooLong;
+
     // Create UDP socket
-    // socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
     const fd_idx = try socket.socket(socket.AF_INET, socket.SOCK_DGRAM, 0);
-    // fd_idx is the index into socket_table.
-    
-    // Ensure cleanup
     errdefer socket.close(fd_idx) catch {};
-    
+
     // Set timeout (2 seconds)
     try socket.setsockopt(fd_idx, socket.SOL_SOCKET, socket.SO_RCVTIMEO, std.mem.asBytes(&socket.TimeVal.fromMillis(2000)), @sizeOf(socket.TimeVal));
 
     // Prepare buffer
     var send_buf: [512]u8 = undefined;
     var packet = dns.DnsPacket.init(&send_buf);
-    
+
     // Generate random Transaction ID using hardware entropy mixed with timestamp
-    // This reduces predictability for cache poisoning protection
     const entropy_val = hal.entropy.getHardwareEntropy();
-    const timestamp_val = @as(u32, @truncate(hal.cpu.getTickCount())); 
+    const timestamp_val = @as(u32, @truncate(hal.cpu.getTickCount()));
     const tx_id = @as(u16, @truncate(entropy_val ^ timestamp_val));
-    
+
     // Write Query
     packet.writeHeader(tx_id, dns.FLAGS_RD); // Recursion Desired
     try packet.writeName(hostname);
     try packet.writeQuestion(dns.TYPE_A, dns.CLASS_IN);
-    
+
     const query_len = packet.pos;
-    
+
     // Send to server
     const dest = socket.SockAddrIn{
         .family = socket.AF_INET,
         .port = socket.htons(53),
-        .addr = server_ip, 
+        .addr = server_ip,
         .zero = [_]u8{0} ** 8,
     };
-    
+
     const sent = try socket.sendto(fd_idx, send_buf[0..query_len], &dest);
     if (sent != query_len) return DnsError.SendError;
-    
+
     // Receive response
     var recv_buf: [512]u8 = undefined;
-    var src_addr: socket.SockAddrIn = undefined;
+    var src_addr: socket.SockAddrIn = std.mem.zeroes(socket.SockAddrIn);
     const received = try socket.recvfrom(fd_idx, &recv_buf, &src_addr);
-    
+
     if (received < 12) return DnsError.FormatError;
 
-    // Validate response came from expected DNS server (RFC 5452 source port randomization)
-    // This prevents DNS cache poisoning attacks where an attacker sends spoofed responses
+    // Validate response came from expected DNS server (RFC 5452)
     if (src_addr.addr != server_ip or src_addr.getPort() != 53) {
         return DnsError.Refused; // Spoofed response - wrong source
     }
@@ -80,56 +115,89 @@ pub fn resolve(allocator: std.mem.Allocator, hostname: []const u8, server_ip: u3
 
     // Parse Response
     const resp = recv_buf[0..received];
-    // const hdr = @as(*const dns.Header, @ptrCast(resp.ptr)); // Unused
-    
-    // Proper parsing
+
     const resp_id = @as(u16, resp[0]) << 8 | resp[1];
-    if (resp_id != tx_id) return DnsError.Refused; // Mismatched ID
-    
+    if (resp_id != tx_id) return DnsError.IdMismatch;
+
     const flags = @as(u16, resp[2]) << 8 | resp[3];
+
+    // Validate this is a response, not a query
+    if ((flags & dns.FLAGS_QR_RESPONSE) == 0) return DnsError.FormatError;
+
+    // Check for truncation (TC flag)
+    if ((flags & dns.FLAGS_TC) != 0) return DnsError.Truncated;
+
+    // Handle RCODE
     const rcode = flags & 0x000F;
-    if (rcode != 0) return DnsError.NameError; // Simplified error handling
-    
+    switch (rcode) {
+        0 => {}, // No error, continue
+        1 => return DnsError.FormatError, // FORMERR
+        2 => return DnsError.ServerFailure, // SERVFAIL
+        3 => return DnsError.NameError, // NXDOMAIN
+        4 => return DnsError.NotImplemented, // NOTIMP
+        5 => return DnsError.Refused, // REFUSED
+        else => return DnsError.FormatError, // Unknown RCODE
+    }
+
     const qd_count = @as(u16, resp[4]) << 8 | resp[5];
     const an_count = @as(u16, resp[6]) << 8 | resp[7];
-    
+
+    // Validate counts to prevent DoS
+    if (qd_count > 50 or an_count > 50) return DnsError.FormatError;
+
     if (an_count == 0) return DnsError.NoAnswer;
-    
+
     // Skip Header
-    var pos: usize = 12;
-    
+    var pos: usize = dns.DNS_HEADER_SIZE;
+
     // Skip Questions
     var i: usize = 0;
     while (i < qd_count) : (i += 1) {
         pos = try skipName(resp, pos);
-        // Skip Type (2) + Class (2)
+        if (pos + 4 > resp.len) return DnsError.FormatError;
         pos += 4;
     }
-    
-    // Parse Answers
+
+    // Parse Answers - look for A record first, then CNAME if no A found
+    var cname_result: ?ResolveResult = null;
+
     i = 0;
     while (i < an_count) : (i += 1) {
         pos = try skipName(resp, pos);
-        
+
         if (pos + 10 > resp.len) return DnsError.FormatError;
-        
-        const rtype = @as(u16, resp[pos]) << 8 | resp[pos+1];
-        const rclass = @as(u16, resp[pos+2]) << 8 | resp[pos+3];
+
+        const rtype = @as(u16, resp[pos]) << 8 | resp[pos + 1];
+        const rclass = @as(u16, resp[pos + 2]) << 8 | resp[pos + 3];
         // ttl (4) at pos+4
-        const rdlen = @as(u16, resp[pos+8]) << 8 | resp[pos+9];
+        const rdlen = @as(u16, resp[pos + 8]) << 8 | resp[pos + 9];
         pos += 10;
-        
+
         if (pos + rdlen > resp.len) return DnsError.FormatError;
-        
+
         if (rtype == dns.TYPE_A and rclass == dns.CLASS_IN and rdlen == 4) {
-            // Found it!
+            // Found A record - return immediately
             const ip = std.mem.readInt(u32, resp[pos..][0..4], .big);
-            return ip; // Host byte order (Big Endian value)
+            return .{ .ip = ip };
         }
-        
+
+        if (rtype == dns.TYPE_CNAME and rclass == dns.CLASS_IN and cname_result == null) {
+            // Found CNAME - extract target name for potential follow-up
+            const name_result = dns.readName(resp, pos, cname_buf) catch |err| switch (err) {
+                error.FormatError => return DnsError.FormatError,
+                error.BufferTooSmall => return DnsError.BufferTooSmall,
+            };
+            cname_result = .{ .cname = name_result.name };
+        }
+
         pos += rdlen;
     }
-    
+
+    // No A record found - return CNAME if we found one
+    if (cname_result) |result| {
+        return result;
+    }
+
     return DnsError.NoAnswer;
 }
 
@@ -139,7 +207,8 @@ pub fn resolve(allocator: std.mem.Allocator, hostname: []const u8, server_ip: u3
 fn skipName(buf: []const u8, start: usize) !usize {
     var pos = start;
     var jumps: u8 = 0;
-    const max_jumps: u8 = 10; // Prevent infinite loops from malicious packets
+    // L4: Use RFC 1035 constant instead of magic number
+    const max_jumps = dns.DNS_MAX_COMPRESSION_JUMPS;
 
     while (true) {
         if (pos >= buf.len) return DnsError.FormatError;

@@ -7,6 +7,8 @@ const std = @import("std");
 const packet = @import("packet.zig");
 const PacketBuffer = packet.PacketBuffer;
 
+pub const MAX_MULTICAST_ADDRESSES: usize = 32;
+
 /// Network interface structure
 pub const Interface = struct {
     /// Interface name for debugging
@@ -36,6 +38,18 @@ pub const Interface = struct {
     /// Link is connected
     link_up: bool,
 
+    /// Whether to accept all multicast frames at L2 (software filter still runs)
+    /// RFC 1112 requires delivery of joined multicast groups; this flag is a
+    /// permissive default until IGMP joins drive the filter.
+    accept_all_multicast: bool,
+
+    /// Multicast MAC subscriptions (software filter)
+    multicast_addrs: [MAX_MULTICAST_ADDRESSES][6]u8,
+    multicast_count: usize,
+
+    /// Optional callback for driver-specific multicast filter updates
+    update_multicast_fn: ?*const fn (*Interface) void,
+
     /// Statistics
     rx_packets: u64,
     tx_packets: u64,
@@ -58,6 +72,10 @@ pub const Interface = struct {
             .transmit_fn = null,
             .is_up = false,
             .link_up = false,
+            .accept_all_multicast = true,
+            .multicast_addrs = [_][6]u8{[_]u8{0} ** 6} ** MAX_MULTICAST_ADDRESSES,
+            .multicast_count = 0,
+            .update_multicast_fn = null,
             .rx_packets = 0,
             .tx_packets = 0,
             .rx_bytes = 0,
@@ -82,6 +100,11 @@ pub const Interface = struct {
     /// Set transmit function
     pub fn setTransmitFn(self: *Self, func: *const fn ([]const u8) bool) void {
         self.transmit_fn = func;
+    }
+
+    /// Set driver hook for multicast filter programming
+    pub fn setMulticastUpdateFn(self: *Self, func: *const fn (*Interface) void) void {
+        self.update_multicast_fn = func;
     }
 
     /// Bring interface up
@@ -129,7 +152,61 @@ pub const Interface = struct {
         const len = std.mem.indexOfScalar(u8, &self.name, 0) orelse self.name.len;
         return self.name[0..len];
     }
+
+    /// Join a multicast MAC address (software filter).
+    /// RFC 1112 maps IPv4 multicast to 01:00:5e:xx:xx:xx; caller supplies the MAC.
+    pub fn joinMulticastMac(self: *Self, mac: [6]u8) bool {
+        if (!isMulticastMac(mac)) return false;
+        if (self.acceptsMulticastMac(mac)) return true; // already present
+        if (self.multicast_count >= MAX_MULTICAST_ADDRESSES) return false;
+        self.multicast_addrs[self.multicast_count] = mac;
+        self.multicast_count += 1;
+        if (self.update_multicast_fn) |cb| cb(self);
+        return true;
+    }
+
+    /// Leave a multicast MAC address (software filter)
+    pub fn leaveMulticastMac(self: *Self, mac: [6]u8) bool {
+        const idx = self.findMulticastIndex(mac) orelse return false;
+        // Compact array
+        const last = self.multicast_count - 1;
+        self.multicast_addrs[idx] = self.multicast_addrs[last];
+        self.multicast_addrs[last] = [_]u8{0} ** 6;
+        self.multicast_count = last;
+        if (self.update_multicast_fn) |cb| cb(self);
+        return true;
+    }
+
+    /// Check if multicast MAC is subscribed
+    pub fn acceptsMulticastMac(self: *const Self, mac: [6]u8) bool {
+        if (!isMulticastMac(mac)) return false;
+        return self.findMulticastIndex(mac) != null;
+    }
+
+    fn findMulticastIndex(self: *const Self, mac: [6]u8) ?usize {
+        var i: usize = 0;
+        while (i < self.multicast_count) : (i += 1) {
+            if (macEqual(self.multicast_addrs[i], mac)) {
+                return i;
+            }
+        }
+        return null;
+    }
+
+    /// Access subscribed multicast MACs
+    pub fn getMulticastMacs(self: *const Self) []const [6]u8 {
+        return self.multicast_addrs[0..self.multicast_count];
+    }
 };
+
+fn isMulticastMac(mac: [6]u8) bool {
+    return (mac[0] & 0x01) != 0;
+}
+
+fn macEqual(a: [6]u8, b: [6]u8) bool {
+    return a[0] == b[0] and a[1] == b[1] and a[2] == b[2] and
+        a[3] == b[3] and a[4] == b[4] and a[5] == b[5];
+}
 
 /// Convert IP address to dotted-decimal string (for logging)
 pub fn ipToString(ip: u32, buf: []u8) []const u8 {

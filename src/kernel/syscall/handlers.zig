@@ -692,14 +692,28 @@ pub fn sys_writev(fd: usize, bvec_ptr: usize, count: usize) SyscallError!usize {
             // Cap to avoid huge allocations in perform_write_locked
             const remaining = vec.len - offset;
             const chunk_len = @min(remaining, 64 * 1024);
-            const current_base = vec.base + offset;
+
+            // Check for pointer arithmetic overflow
+            const base_offset = @addWithOverflow(vec.base, offset);
+            if (base_offset[1] != 0) {
+                // Pointer overflow - invalid iovec
+                if (total_written > 0) return total_written;
+                return error.EFAULT;
+            }
+            const current_base = base_offset[0];
 
             const res = perform_write_locked(fd_obj, current_base, chunk_len) catch |err| {
                 if (total_written > 0) return total_written;
                 return err;
             };
 
-            total_written += res;
+            // Check for accumulation overflow
+            const new_total = @addWithOverflow(total_written, res);
+            if (new_total[1] != 0) {
+                // Overflow - return what we have so far
+                return total_written;
+            }
+            total_written = new_total[0];
             offset += res;
 
             // If partial write occurred (less than requested for this chunk),
@@ -1465,23 +1479,6 @@ fn zeroExecveRegisters(frame: *hal.syscall.SyscallFrame) void {
 /// sys_brk (12) - Change data segment size
 pub fn sys_brk(addr: u64) SyscallError!usize {
     const proc = getCurrentProcess();
-
-    const rollbackNewPages = struct {
-        fn run(p: *Process, start: u64, len: u64) void {
-            var offset: u64 = 0;
-            const page_size: u64 = pmm.PAGE_SIZE;
-            while (offset < len) : (offset += page_size) {
-                const vaddr = start + offset;
-                if (vmm.translate(p.cr3, vaddr)) |paddr| {
-                    pmm.freePage(paddr);
-                    vmm.unmapPage(p.cr3, vaddr) catch {};
-                    if (p.rss_current >= page_size) {
-                        p.rss_current -= page_size;
-                    }
-                }
-            }
-        }
-    }.run;
 
     // If addr is 0, return current break
     if (addr == 0) {

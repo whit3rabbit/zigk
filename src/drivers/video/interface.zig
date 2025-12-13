@@ -12,6 +12,8 @@ pub const VideoMode = struct {
     green_field_position: u8 = 8,
     blue_mask_size: u8 = 8,
     blue_field_position: u8 = 0,
+    alpha_mask_size: u8 = 0,       // Default to 0 (no alpha)
+    alpha_field_position: u8 = 24, // Default position for ARGB/ABGR
 };
 
 pub const Rect = extern struct {

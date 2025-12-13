@@ -1,7 +1,32 @@
-// Synchronization Abstractions for Network Stack
-//
-// Allows the network stack to be used in different environments (kernel, userspace, etc.)
-// by injecting lock implementations.
+const std = @import("std");
+const hal = @import("hal");
+
+/// IRQ-safe spinlock for network stack
+pub const Spinlock = struct {
+    locked: std.atomic.Value(u32) = .{ .raw = 0 },
+
+    pub const Held = struct {
+        lock: *Spinlock,
+        irq_state: u64,
+
+        pub fn release(self: Held) void {
+            self.lock.locked.store(0, .release);
+            hal.cpu.restoreInterrupts(self.irq_state);
+        }
+    };
+
+    pub fn acquire(self: *Spinlock) Held {
+        const irq = hal.cpu.disableInterruptsSaveFlags();
+        while (true) {
+            const prev = self.locked.cmpxchgWeak(0, 1, .acquire, .monotonic);
+            if (prev == null) break;
+            std.atomic.spinLoopHint();
+        }
+        return .{ .lock = self, .irq_state = irq };
+    }
+    
+    // Note: tryAcquire/isLocked omitted for simplicity unless needed
+};
 
 /// Lock interface (Mutex/Spinlock)
 pub const Lock = struct {

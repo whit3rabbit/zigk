@@ -3,6 +3,7 @@
 const types = @import("types.zig");
 const state = @import("state.zig");
 const tcp = @import("../tcp.zig");
+const tcp_state = @import("../tcp/state.zig");
 const uapi = @import("uapi");
 const poll_def = uapi.poll;
 
@@ -11,6 +12,11 @@ const poll_def = uapi.poll;
 pub fn checkPollEvents(fd: usize, events: u16) u16 {
     const sock = state.getSocket(fd) orelse return poll_def.POLLNVAL;
     var revents: u16 = 0;
+
+    // Acquire TCP state lock to safely read TCB state
+    // This prevents races with RX handler modifying TCB concurrently
+    tcp_state.lock.acquire();
+    defer tcp_state.lock.release();
 
     // Check for readable data (POLLIN)
     if ((events & poll_def.POLLIN) != 0) {

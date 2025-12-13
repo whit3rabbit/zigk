@@ -210,6 +210,33 @@ pub fn writeString(fd: i32, str: []const u8) SyscallError!usize {
     return write(fd, str.ptr, str.len);
 }
 
+/// Iovec structure for scatter-gather I/O (writev/readv)
+pub const Iovec = extern struct {
+    base: usize,
+    len: usize,
+
+    /// Create an Iovec from a slice
+    pub fn fromSlice(slice: []const u8) Iovec {
+        return .{
+            .base = @intFromPtr(slice.ptr),
+            .len = slice.len,
+        };
+    }
+};
+
+/// Write data from multiple buffers (scatter-gather write)
+/// Returns total bytes written, or error
+pub fn writev(fd: i32, iov: []const Iovec) SyscallError!usize {
+    const ret = syscall3(
+        syscalls.SYS_WRITEV,
+        @bitCast(@as(isize, fd)),
+        @intFromPtr(iov.ptr),
+        iov.len,
+    );
+    if (isError(ret)) return errorFromReturn(ret);
+    return ret;
+}
+
 // =============================================================================
 // File Operations (sys_open, sys_close)
 // =============================================================================

@@ -81,7 +81,8 @@ pub fn FramebufferDriver(comptime buffered: bool) type {
             const val: u32 =
                 (@as(u32, color.r) >> @intCast(8 - self.mode.red_mask_size) << @intCast(self.mode.red_field_position)) |
                 (@as(u32, color.g) >> @intCast(8 - self.mode.green_mask_size) << @intCast(self.mode.green_field_position)) |
-                (@as(u32, color.b) >> @intCast(8 - self.mode.blue_mask_size) << @intCast(self.mode.blue_field_position));
+                (@as(u32, color.b) >> @intCast(8 - self.mode.blue_mask_size) << @intCast(self.mode.blue_field_position)) |
+                if (self.mode.alpha_mask_size > 0) (@as(u32, 255) >> @intCast(8 - self.mode.alpha_mask_size) << @intCast(self.mode.alpha_field_position)) else 0;
 
             if (buffered) {
                 // Comptime: this branch is eliminated when buffered=false
@@ -107,7 +108,8 @@ pub fn FramebufferDriver(comptime buffered: bool) type {
             const val: u32 =
                 (@as(u32, color.r) >> @intCast(8 - self.mode.red_mask_size) << @intCast(self.mode.red_field_position)) |
                 (@as(u32, color.g) >> @intCast(8 - self.mode.green_mask_size) << @intCast(self.mode.green_field_position)) |
-                (@as(u32, color.b) >> @intCast(8 - self.mode.blue_mask_size) << @intCast(self.mode.blue_field_position));
+                (@as(u32, color.b) >> @intCast(8 - self.mode.blue_mask_size) << @intCast(self.mode.blue_field_position)) |
+                if (self.mode.alpha_mask_size > 0) (@as(u32, 255) >> @intCast(8 - self.mode.alpha_mask_size) << @intCast(self.mode.alpha_field_position)) else 0;
 
             const stride_u32 = self.mode.pitch / 4;
 

@@ -44,11 +44,7 @@ pub fn loadFont(data: []const u8) !types.Font {
         const header_size = 4;
         
         if (data.len < header_size + (256 * @as(usize, char_size))) {
-             // Basic size check assuming 256 glyphs for PSF1 without unicode table
-             // PSF1 is simple, often 256 chars. 512 mode exists.
-             // Just invalid size if data.len < header_size is covered.
-             // Let's rely on slice bounds check later?
-             // But user asked for validation.
+             return Error.InvalidSize;
         }
 
         const glyph_data = data[header_size..];

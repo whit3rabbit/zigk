@@ -113,22 +113,14 @@ pub fn processTimers() void {
     // Release lock before waking threads to prevent deadlock
     // (Woken thread might immediately try to acquire lock)
     state.lock.release();
-    
+
+    // Wake threads outside of lock to avoid deadlock
     var j: usize = 0;
     while (j < wake_count) : (j += 1) {
         if (wake_list[j]) |thread| {
             socket.wakeThread(thread);
         }
     }
-    
-    // Re-acquire lock if caller expects it? 
-    // Wait, caller of processTimers usually expects void return and handles locking?
-    // The original code acquired/released internally.
-    // Line 10: state.lock.acquire();
-    // Line 11: defer state.lock.release();
-    // So we need to re-acquire because the caller relies on `defer release()`.
-    // OR we remove the defer and handle it manually.
-    state.lock.acquire();
 }
 
 /// Handle ICMP error for a connection

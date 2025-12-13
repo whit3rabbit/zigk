@@ -4,6 +4,7 @@ const ethernet = @import("ethernet/root.zig");
 const ipv4 = @import("ipv4/root.zig");
 pub const transport = @import("transport/root.zig");
 const dns = @import("dns/root.zig");
+pub const loopback = @import("loopback.zig");
 
 // Re-export key types from core
 pub const PacketBuffer = core.PacketBuffer;

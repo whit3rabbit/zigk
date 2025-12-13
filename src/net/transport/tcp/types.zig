@@ -1,4 +1,5 @@
 const c = @import("constants.zig");
+const sync = @import("sync");
 
 // TCP header (20 bytes minimum, options may follow). All multi-byte fields are
 // in network byte order. Kept here to preserve the original documentation
@@ -115,6 +116,9 @@ pub const Tcb = struct {
     local_port: u16,
     remote_ip: u32,
     remote_port: u16,
+    
+    // Lock protecting this TCB
+    mutex: sync.Spinlock,
 
     // Connection state
     state: TcpState,
@@ -197,6 +201,7 @@ pub const Tcb = struct {
             .local_port = 0,
             .remote_ip = 0,
             .remote_port = 0,
+            .mutex = .{},
             .state = .Closed,
             .allocated = false,
             .snd_una = 0,
@@ -221,11 +226,11 @@ pub const Tcb = struct {
             .ts_ok = false,
             .ts_recent = 0,
             .ts_val = 0,
-            .send_buf = undefined,
+            .send_buf = [_]u8{0} ** c.BUFFER_SIZE,
             .send_head = 0,
             .send_tail = 0,
             .send_acked = 0,
-            .recv_buf = undefined,
+            .recv_buf = [_]u8{0} ** c.BUFFER_SIZE,
             .recv_head = 0,
             .recv_tail = 0,
             .parent_socket = null,

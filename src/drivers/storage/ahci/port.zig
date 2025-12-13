@@ -19,7 +19,7 @@ const fis = @import("fis.zig");
 const term = @import("std").os.linux; // Not used here directly but good practice to keep std imports clean
 // We need assembly for memory barriers
 fn memoryBarrier() void {
-    asm volatile ("mfence" ::: "memory");
+    asm volatile ("mfence");
 }
 
 const timing = hal.timing;

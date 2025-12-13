@@ -36,6 +36,7 @@ const pci = @import("pci");
 const e1000e = @import("e1000e");
 const usb = @import("usb");
 const acpi = @import("acpi");
+const ahci = @import("ahci");
 
 const serial_driver = @import("serial_driver");
 const video_driver = @import("video_driver");
@@ -320,6 +321,9 @@ export fn _start() noreturn {
 
     // Initialize USB (XHCI controllers)
     initUsb();
+
+    // Initialize storage (AHCI controllers)
+    initStorage();
 
     // Try to initialize VirtIO-GPU (paravirtualized GPU)
     initVirtioGpu();
@@ -719,6 +723,12 @@ fn txWrapper(data: []const u8) bool {
     return false;
 }
 
+fn multicastUpdate(iface: *net.Interface) void {
+    if (e1000e.getDriver()) |driver| {
+        driver.applyMulticastFilter(iface);
+    }
+}
+
 fn rxCallbackAdapter(data: []u8) void {
     // Wrap data in PacketBuffer and pass to network stack
     var pkt = net.PacketBuffer.init(data, data.len);
@@ -764,17 +774,26 @@ fn initNetwork() void {
     const mac = nic_driver.getMacAddress();
     net_interface = net.Interface.init("eth0", mac);
     net_interface.setTransmitFn(txWrapper);
+    net_interface.setMulticastUpdateFn(multicastUpdate);
 
     // 5. Initialize Network Stack
     net.init(&net_interface, heap.allocator(), 100);
+
+    // Program initial multicast filter (defaults to all-multicast until IGMP joins)
+    multicastUpdate(&net_interface);
 
     // 6. Register Callbacks
     nic_driver.setRxCallback(rxCallbackAdapter);
     sched.setTickCallback(net.transport.tcpProcessTimers);
 
     console.info("Network initialized (MAC={x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2})", .{
-        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
     });
+
+    // Initialize loopback interface for local (127.x.x.x) traffic
+    const lo = net.loopback.init();
+    lo.up();
+    console.info("Loopback interface initialized (127.0.0.1)", .{});
 }
 
 // ============================================================================
@@ -796,6 +815,60 @@ fn initUsb() void {
     };
 
     usb.initFromPci(devices, &ecam);
+}
+
+// ============================================================================
+// Storage Initialization (AHCI)
+// ============================================================================
+
+fn initStorage() void {
+    console.print("\n");
+    console.info("Initializing storage subsystem...", .{});
+
+    const devices = pci_devices orelse {
+        console.warn("Storage: PCI not initialized, skipping AHCI", .{});
+        return;
+    };
+
+    const ecam = pci_ecam orelse {
+        console.warn("Storage: PCI ECAM not available, skipping AHCI", .{});
+        return;
+    };
+
+    // Search for AHCI controller (Class 0x01 Mass Storage, Subclass 0x06 SATA)
+    var found_ahci = false;
+    for (devices.devices[0..devices.count]) |*dev| {
+        if (dev.class_code == 0x01 and dev.subclass == 0x06) {
+            console.info("Storage: Found AHCI controller at {x:0>2}:{x:0>2}.{d}", .{
+                dev.bus, dev.device, dev.func,
+            });
+
+            if (ahci.initFromPci(dev, &ecam)) |controller| {
+                // Report detected drives
+                var port_num: u5 = 0;
+                while (port_num < ahci.MAX_PORTS) : (port_num += 1) {
+                    if (controller.getPort(port_num)) |port| {
+                        const dev_type_str = switch (port.device_type) {
+                            .ata => "ATA",
+                            .atapi => "ATAPI",
+                            .semb => "SEMB",
+                            .port_multiplier => "Port Multiplier",
+                            else => "None",
+                        };
+                        console.info("  Port {d}: {s} device", .{ port_num, dev_type_str });
+                    }
+                }
+                found_ahci = true;
+                break; // Only initialize first controller
+            } else |err| {
+                console.warn("Storage: AHCI init failed: {}", .{err});
+            }
+        }
+    }
+
+    if (!found_ahci) {
+        console.info("Storage: No AHCI controllers found", .{});
+    }
 }
 
 // ============================================================================

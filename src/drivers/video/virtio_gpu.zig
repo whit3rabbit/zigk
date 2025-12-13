@@ -149,9 +149,9 @@ pub const VirtioGpuDriver = struct {
     // Command submission lock
     cmd_lock: sync.Spinlock = .{},
 
-    // Virtqueues
-    ctrl_vq: virtio.Virtqueue,
-    cursor_vq: ?virtio.Virtqueue,
+    // Virtqueues (allocated in initDevice after reading device queue_size)
+    ctrl_vq: ?virtio.Virtqueue = null,
+    cursor_vq: ?virtio.Virtqueue = null,
 
     // GPU resources
     resource_id: u32,
@@ -267,11 +267,7 @@ pub const VirtioGpuDriver = struct {
         ecam.enableBusMaster(pci_dev.bus, pci_dev.device, pci_dev.func);
         ecam.enableMemorySpace(pci_dev.bus, pci_dev.device, pci_dev.func);
 
-        // Initialize control virtqueue
-        driver.ctrl_vq = virtio.Virtqueue.init(256) orelse {
-            console.err("VirtIO-GPU: Failed to allocate control virtqueue", .{});
-            return null;
-        };
+        // Note: ctrl_vq is allocated in initDevice() after reading device queue_size
 
         // Allocate command/response buffers
         if (!driver.allocateBuffers()) {
@@ -462,16 +458,26 @@ pub const VirtioGpuDriver = struct {
 
         // Configure virtqueue 0 (controlq)
         cfg.queue_select = 0;
-        const queue_size = cfg.queue_size;
-        if (queue_size == 0) {
+        const device_queue_size = cfg.queue_size;
+        if (device_queue_size == 0) {
             console.err("VirtIO-GPU: Queue size is 0", .{});
             return false;
         }
 
+        // Allocate virtqueue if not already allocated (first init vs recovery)
+        if (self.ctrl_vq == null) {
+            const negotiated_size: u16 = @intCast(@min(device_queue_size, 256));
+            self.ctrl_vq = virtio.Virtqueue.init(negotiated_size) orelse {
+                console.err("VirtIO-GPU: Failed to allocate control virtqueue", .{});
+                return false;
+            };
+            console.debug("VirtIO-GPU: Allocated ctrl_vq with size={d} (device max={d})", .{ negotiated_size, device_queue_size });
+        }
+
         // Set queue addresses
-        cfg.queue_desc = self.ctrl_vq.desc_phys;
-        cfg.queue_avail = self.ctrl_vq.avail_phys;
-        cfg.queue_used = self.ctrl_vq.used_phys;
+        cfg.queue_desc = self.ctrl_vq.?.desc_phys;
+        cfg.queue_avail = self.ctrl_vq.?.avail_phys;
+        cfg.queue_used = self.ctrl_vq.?.used_phys;
 
         // Enable queue
         cfg.queue_enable = 1;
@@ -479,7 +485,7 @@ pub const VirtioGpuDriver = struct {
         // Driver OK
         cfg.device_status |= virtio.VIRTIO_STATUS_DRIVER_OK;
 
-        console.debug("VirtIO-GPU: Device initialized, queue_size={d}", .{queue_size});
+        console.debug("VirtIO-GPU: Device initialized, device_queue_size={d}", .{device_queue_size});
         return true;
     }
 
@@ -493,7 +499,7 @@ pub const VirtioGpuDriver = struct {
     fn recoverAfterTimeout(self: *Self) void {
         // Stop the device so it drops all in-flight descriptors
         self.resetDevice();
-        self.ctrl_vq.reset();
+        if (self.ctrl_vq) |*vq| vq.reset();
         self.device_failed = false;
 
         // Attempt to bring the device back so subsequent commands can proceed
@@ -507,7 +513,7 @@ pub const VirtioGpuDriver = struct {
         const held = self.cmd_lock.acquire();
         defer held.release();
 
-        if (self.device_failed) {
+        if (self.device_failed or self.ctrl_vq == null) {
             return false;
         }
 
@@ -515,19 +521,19 @@ pub const VirtioGpuDriver = struct {
         const out_bufs = [_][]const u8{cmd};
         var in_bufs = [_][]u8{resp};
 
-        _ = self.ctrl_vq.addBuf(&out_bufs, &in_bufs) orelse return false;
+        _ = self.ctrl_vq.?.addBuf(&out_bufs, &in_bufs) orelse return false;
 
         // Notify device
         const notify_addr = self.notify_base + @as(u64, self.common_cfg.?.queue_notify_off) * self.notify_off_multiplier;
-        self.ctrl_vq.kick(notify_addr);
+        self.ctrl_vq.?.kick(notify_addr);
 
         // Poll for completion with wall-clock timeout
         const start_tsc = hal.timing.rdtsc();
         const timeout_us: u64 = 1_000_000; // 1 second
 
         while (true) {
-            if (self.ctrl_vq.hasPending()) {
-                _ = self.ctrl_vq.getUsed();
+            if (self.ctrl_vq.?.hasPending()) {
+                _ = self.ctrl_vq.?.getUsed();
                 return true;
             }
             
@@ -734,6 +740,9 @@ pub const VirtioGpuDriver = struct {
             .pitch = self.pitch,
             .bpp = 32,
             .addr = @intFromPtr(self.fb_virt),
+            // Explicitly set alpha parameters matching B8G8R8X8 (X=unused/alpha)
+            .alpha_mask_size = 0,
+            .alpha_field_position = 24,
         };
     }
 

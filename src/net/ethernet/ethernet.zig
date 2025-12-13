@@ -14,6 +14,7 @@
 // | Frame Check Sequence (4) - Handled by Nic Hardware usually     |
 // +----------------------------------------------------------------+
 
+const std = @import("std");
 const packet = @import("../core/packet.zig");
 const interface = @import("../core/interface.zig");
 const PacketBuffer = packet.PacketBuffer;
@@ -32,11 +33,24 @@ pub const ETHERTYPE_IPV6: u16 = 0x86DD;
 /// Broadcast MAC address
 pub const BROADCAST_MAC: [6]u8 = .{ 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
 
+/// Minimum Ethernet frame length (excluding FCS, which NIC strips)
+/// 14 byte header + 46 byte payload = 60 bytes per IEEE 802.3 / RFC 894
+pub const MIN_FRAME_SIZE_NO_FCS: usize = 60;
+
+// Test helper: captures TX length for padding verification
+var test_tx_len: usize = 0;
+
 /// Process an incoming Ethernet frame
 /// Returns true if frame was handled, false if dropped
 pub fn processFrame(iface: *Interface, pkt: *PacketBuffer) bool {
-    // Validate minimum frame size (14 byte header + some payload)
-    if (pkt.len < packet.ETH_HEADER_SIZE + 1) {
+    // Drop runts (under minimum Ethernet frame size without FCS)
+    if (pkt.len < MIN_FRAME_SIZE_NO_FCS) {
+        return false;
+    }
+
+    // Drop frames that exceed configured MTU (RFC 894: 1500 byte payload)
+    const max_frame_len = packet.ETH_HEADER_SIZE + iface.mtu;
+    if (pkt.len > max_frame_len) {
         return false;
     }
 
@@ -75,6 +89,12 @@ fn isForUs(iface: *const Interface, dst_mac: [6]u8) bool {
     // Accept broadcast
     if (isBroadcast(dst_mac)) {
         return true;
+    }
+
+    // Accept multicast if subscribed (RFC 1112 host requirement)
+    if (isMulticast(dst_mac)) {
+        if (iface.accept_all_multicast) return true;
+        if (iface.acceptsMulticastMac(dst_mac)) return true;
     }
 
     // Accept our unicast MAC
@@ -116,6 +136,23 @@ pub fn sendFrame(iface: *Interface, pkt: *PacketBuffer) bool {
         return false;
     }
 
+    // Enforce MTU (payload) limit at L2 (RFC 894)
+    const max_frame_len = packet.ETH_HEADER_SIZE + iface.mtu;
+    if (pkt.len > max_frame_len) {
+        return false;
+    }
+
+    // Pad short frames to Ethernet minimum, zeroing padding to avoid data leaks
+    if (pkt.len < MIN_FRAME_SIZE_NO_FCS) {
+        const pad_len = MIN_FRAME_SIZE_NO_FCS - pkt.len;
+        if (pkt.len + pad_len > pkt.data.len) {
+            return false;
+        }
+        // Zero padding bytes per RFC 894; prevents leaking stale buffer data
+        std.mem.set(u8, pkt.data[pkt.len..][0..pad_len], 0);
+        pkt.len = MIN_FRAME_SIZE_NO_FCS;
+    }
+
     return iface.transmit(pkt.getData());
 }
 
@@ -140,4 +177,63 @@ pub fn macToString(mac: [6]u8, buf: []u8) []u8 {
     }
 
     return buf[0..17];
+}
+
+test "ethernet multicast filtering" {
+    const testing = std.testing;
+    var iface = Interface.init("eth0", .{ 0x00, 0x11, 0x22, 0x33, 0x44, 0x55 });
+
+    const mc = [6]u8{ 0x01, 0x00, 0x5E, 0x00, 0x00, 0x01 }; // RFC 1112 mapped MAC
+
+    // Default: accept all multicast
+    try testing.expect(isForUs(&iface, mc));
+
+    // Disable all-multicast; drop until explicitly joined
+    iface.accept_all_multicast = false;
+    try testing.expect(!isForUs(&iface, mc));
+
+    // Join multicast MAC and accept again
+    try testing.expect(iface.joinMulticastMac(mc));
+    try testing.expect(isForUs(&iface, mc));
+}
+
+test "ethernet runt and oversize drops" {
+    const testing = std.testing;
+    var buf: [128]u8 = undefined;
+    var iface = Interface.init("eth0", .{ 0, 1, 2, 3, 4, 5 });
+
+    // Runt (<60 bytes) is dropped before parsing header
+    var pkt = PacketBuffer.init(&buf, MIN_FRAME_SIZE_NO_FCS - 1);
+    try testing.expect(!processFrame(&iface, &pkt));
+
+    // Oversize (>MTU + header) dropped before parsing header
+    pkt.len = packet.ETH_HEADER_SIZE + iface.mtu + 1;
+    try testing.expect(!processFrame(&iface, &pkt));
+}
+
+test "ethernet pads short transmit frames" {
+    const testing = std.testing;
+    test_tx_len = 0;
+
+    var buf: [80]u8 = undefined;
+    var iface = Interface.init("eth0", .{ 0, 1, 2, 3, 4, 5 });
+    iface.up();
+    iface.setTransmitFn(struct {
+        fn tx(data: []const u8) bool {
+            test_tx_len = data.len;
+            return true;
+        }
+    }.tx);
+
+    // Build minimal frame shorter than Ethernet minimum
+    var pkt = PacketBuffer.init(&buf, 0);
+    pkt.eth_offset = 0;
+    pkt.len = packet.ETH_HEADER_SIZE + 10;
+    const eth = pkt.ethHeader();
+    eth.dst_mac = .{ 0, 1, 2, 3, 4, 6 };
+    eth.src_mac = iface.mac_addr;
+    eth.setEthertype(ETHERTYPE_IPV4);
+
+    try testing.expect(sendFrame(&iface, &pkt));
+    try testing.expectEqual(@as(usize, MIN_FRAME_SIZE_NO_FCS), test_tx_len);
 }

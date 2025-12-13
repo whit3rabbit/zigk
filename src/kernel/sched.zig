@@ -472,18 +472,10 @@ pub fn exitWithStatus(status: i32) void {
 /// frame: Pointer to the current thread's saved interrupt frame
 /// Returns: Pointer to the frame to restore (same if no switch, different if switched)
 pub fn timerTick(frame: *hal.idt.InterruptFrame) *hal.idt.InterruptFrame {
-    // DEBUG: Entry point - use info level to ensure visibility
-    console.info("timerTick: ENTER frame={x} cs={x} ss={x}", .{
-        @intFromPtr(frame), frame.cs, frame.ss,
-    });
-
     const held = scheduler.lock.acquire();
     defer held.release();
 
     scheduler.tick_count += 1;
-    console.info("timerTick: tick={d} running={} current={}", .{
-        scheduler.tick_count, scheduler.running, scheduler.current != null,
-    });
     wakeSleepingThreads(scheduler.tick_count);
 
     if (scheduler.tick_count % 100 == 0) {

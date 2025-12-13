@@ -189,9 +189,13 @@ pub fn connect(sock_fd: usize, dest_addr: *const types.SockAddrIn) errors.Socket
                  tcb.blocked_thread = sock.blocked_thread; 
                  
                  block_fn(); // Implies enable interrupts + halt
-                 
+
                  sock.blocked_thread = null;
-                 tcb.blocked_thread = null;
+                 // Only clear TCB's blocked_thread if TCB is still valid
+                 // (TCB may have been freed by timer while we were blocked)
+                 if (tcb.allocated and tcb.state != .Closed) {
+                     tcb.blocked_thread = null;
+                 }
             }
         } else {
              // If no scheduler (e.g. early boot), we can't block safely

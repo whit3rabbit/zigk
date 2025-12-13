@@ -316,7 +316,7 @@ pub const Size = struct {
 pub fn buildIdentify(table: *CommandTableBase, buffer_phys: u64) void {
     table.clear();
 
-    var h2d = table.getH2dFis();
+    const h2d = table.getH2dFis();
     h2d.* = fis.FisRegH2D.init(.identify_device);
 
     // PRDT will be set up separately
@@ -327,7 +327,7 @@ pub fn buildIdentify(table: *CommandTableBase, buffer_phys: u64) void {
 pub fn buildReadDmaExt(table: *CommandTableBase, lba: u48, sector_count: u16) void {
     table.clear();
 
-    var h2d = table.getH2dFis();
+    const h2d = table.getH2dFis();
     h2d.* = fis.FisRegH2D.init(.read_dma_ext);
     h2d.setLba(lba);
     h2d.setCount(sector_count);
@@ -337,7 +337,7 @@ pub fn buildReadDmaExt(table: *CommandTableBase, lba: u48, sector_count: u16) vo
 pub fn buildWriteDmaExt(table: *CommandTableBase, lba: u48, sector_count: u16) void {
     table.clear();
 
-    var h2d = table.getH2dFis();
+    const h2d = table.getH2dFis();
     h2d.* = fis.FisRegH2D.init(.write_dma_ext);
     h2d.setLba(lba);
     h2d.setCount(sector_count);
@@ -347,6 +347,6 @@ pub fn buildWriteDmaExt(table: *CommandTableBase, lba: u48, sector_count: u16) v
 pub fn buildFlushCacheExt(table: *CommandTableBase) void {
     table.clear();
 
-    var h2d = table.getH2dFis();
+    const h2d = table.getH2dFis();
     h2d.* = fis.FisRegH2D.init(.flush_cache_ext);
 }

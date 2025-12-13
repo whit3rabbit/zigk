@@ -14,6 +14,7 @@ const hal = @import("hal");
 const keyboard = @import("keyboard");
 const sched = @import("sched");
 const uapi = @import("uapi");
+const ahci = @import("ahci");
 
 const FileDescriptor = fd_mod.FileDescriptor;
 const FileOps = fd_mod.FileOps;
@@ -161,6 +162,7 @@ const devices = [_]DeviceEntry{
     .{ .path = "/dev/stderr", .ops = &console_ops },
     .{ .path = "/dev/null", .ops = &null_ops },
     .{ .path = "/dev/zero", .ops = &zero_ops },
+    .{ .path = "/dev/sda", .ops = &ahci.adapter.block_ops },
 };
 
 /// Look up device operations by path

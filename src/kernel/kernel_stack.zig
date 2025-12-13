@@ -135,9 +135,9 @@ pub fn alloc() StackError!KernelStack {
     // Explicitly unmap the guard page to ensure no stale mappings exist
     // from previous uses of this slot. This enforces the "guard" property.
     vmm.unmapPage(kernel_pml4, guard_virt) catch |err| {
-        // If it's already unmapped (error.PageNotPresent), that's fine.
+        // If it's already unmapped (error.NotMapped), that's fine - expected for fresh slots.
         // Any other error is concerning but likely recoverable/ignorable for a guard page.
-        if (err != error.PageNotPresent) {
+        if (err != error.NotMapped) {
             console.warn("KernelStack: Failed to unmap guard page {x}: {}", .{ guard_virt, err });
         }
     };

@@ -124,6 +124,7 @@ pub fn build(b: *std.Build) void {
     vmm_module.addImport("console", console_module);
     vmm_module.addImport("config", config_module);
     vmm_module.addImport("pmm", pmm_module);
+    vmm_module.addImport("sync", sync_module);
 
     // Create PCI module (PCIe ECAM enumeration)
     const pci_module = b.createModule(.{
@@ -149,6 +150,18 @@ pub fn build(b: *std.Build) void {
     prng_module.addImport("hal", hal_module);
     prng_module.addImport("sync", sync_module);
 
+    // Create Heap module (Kernel Heap Allocator)
+    const heap_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/heap.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    heap_module.addImport("console", console_module);
+    heap_module.addImport("config", config_module);
+    heap_module.addImport("sync", sync_module);
+
+
+
     // Create Network Stack module (full stack: core, ethernet, ipv4, transport)
     const net_module = b.createModule(.{
         .root_source_file = b.path("src/net/root.zig"),
@@ -159,16 +172,10 @@ pub fn build(b: *std.Build) void {
     net_module.addImport("uapi", uapi_module);
     net_module.addImport("prng", prng_module);
     net_module.addImport("console", console_module);
+    net_module.addImport("sync", sync_module);
+    net_module.addImport("heap", heap_module);
 
-    // Create Heap module (Kernel Heap Allocator)
-    const heap_module = b.createModule(.{
-        .root_source_file = b.path("src/kernel/heap.zig"),
-        .target = kernel_target,
-        .optimize = optimize,
-    });
-    heap_module.addImport("console", console_module);
-    heap_module.addImport("config", config_module);
-    heap_module.addImport("sync", sync_module);
+    // heap_module moved up
 
     // Create DMA Allocator module (Physical memory allocator with std.mem.Allocator interface)
     const dma_allocator_module = b.createModule(.{
@@ -242,6 +249,17 @@ pub fn build(b: *std.Build) void {
     stack_guard_module.addImport("console", console_module);
     stack_guard_module.addImport("prng", prng_module);
 
+    // Create FD module (File Descriptor table)
+    const fd_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/fd.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    fd_module.addImport("heap", heap_module);
+    fd_module.addImport("console", console_module);
+    fd_module.addImport("uapi", uapi_module);
+    fd_module.addImport("sync", sync_module);
+
 
     // Create E1000e driver module (Intel 82574L NIC)
     const e1000e_module = b.createModule(.{
@@ -271,6 +289,9 @@ pub fn build(b: *std.Build) void {
     ahci_module.addImport("pmm", pmm_module);
     ahci_module.addImport("console", console_module);
     ahci_module.addImport("hal", hal_module);
+    ahci_module.addImport("fd", fd_module);
+    ahci_module.addImport("uapi", uapi_module);
+    ahci_module.addImport("heap", heap_module);
 
     // Create USB driver module (XHCI/EHCI host controllers)
     const usb_module = b.createModule(.{
@@ -284,16 +305,7 @@ pub fn build(b: *std.Build) void {
     usb_module.addImport("pmm", pmm_module);
     usb_module.addImport("console", console_module);
 
-    // Create FD module (File Descriptor table)
-    const fd_module = b.createModule(.{
-        .root_source_file = b.path("src/kernel/fd.zig"),
-        .target = kernel_target,
-        .optimize = optimize,
-    });
-    fd_module.addImport("heap", heap_module);
-    fd_module.addImport("console", console_module);
-    fd_module.addImport("uapi", uapi_module);
-    fd_module.addImport("sync", sync_module);
+    // fd_module moved up
 
     // Create User VMM module (userspace memory management for mmap/munmap)
     const user_vmm_module = b.createModule(.{
@@ -395,6 +407,7 @@ pub fn build(b: *std.Build) void {
     devfs_module.addImport("keyboard", keyboard_module);
     devfs_module.addImport("sched", sched_module);
     devfs_module.addImport("uapi", uapi_module);
+    devfs_module.addImport("ahci", ahci_module);
 
     // Create Process module (process abstraction for fork/exec/wait)
     const process_module = b.createModule(.{
@@ -678,6 +691,26 @@ pub fn build(b: *std.Build) void {
     const install_test_asm = b.addInstallArtifact(test_asm, .{});
     b.getInstallStep().dependOn(&install_test_asm.step);
 
+    // writev Test (Zig userland test for writev syscall)
+    const test_writev_mod = b.createModule(.{
+        .root_source_file = b.path("tests/userland/test_writev.zig"),
+        .target = b.resolveTargetQuery(.{
+            .cpu_arch = .x86_64,
+            .os_tag = .freestanding,
+            .abi = .none,
+        }),
+        .optimize = optimize,
+    });
+    test_writev_mod.addImport("syscall", syscall_lib);
+
+    const test_writev = b.addExecutable(.{
+        .name = "test_writev",
+        .root_module = test_writev_mod,
+    });
+    test_writev.setLinkerScript(b.path("src/user/linker.ld"));
+    const install_test_writev = b.addInstallArtifact(test_writev, .{});
+    b.getInstallStep().dependOn(&install_test_writev.step);
+
     // Create ISO build step using Limine bootloader
     // Use v5.x binary branch which has prebuilt files
     const iso_cmd = b.addSystemCommand(&.{
@@ -700,6 +733,7 @@ pub fn build(b: *std.Build) void {
         \\cp zig-out/bin/test_clock iso_root/boot/modules/ && \
         \\cp zig-out/bin/test_random iso_root/boot/modules/ && \
         \\cp zig-out/bin/test_asm iso_root/boot/modules/ && \
+        \\cp zig-out/bin/test_writev iso_root/boot/modules/ && \
         \\cp limine.cfg iso_root/boot/ && \
         \\cp "$LIMINE_DIR"/limine-bios.sys iso_root/boot/ && \
         \\cp "$LIMINE_DIR"/limine-bios-cd.bin iso_root/boot/ && \

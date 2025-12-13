@@ -5,6 +5,7 @@ const std = @import("std");
 const types = @import("types.zig");
 const sync = @import("../../sync.zig");
 const interface = @import("../../core/interface.zig");
+const hal = @import("hal");
 
 pub const Interface = interface.Interface;
 
@@ -14,8 +15,6 @@ pub var socket_table: std.ArrayList(?*types.Socket) = undefined;
 pub var socket_allocator: std.mem.Allocator = undefined;
 /// Socket allocation lock
 var lock: sync.Lock = sync.noop_lock;
-/// Next ephemeral port for Auto-binding
-var next_ephemeral_port: u16 = 49152;
 /// Global network interface (set during init)
 var global_iface: ?*Interface = null;
 
@@ -31,7 +30,6 @@ pub fn init(iface: *Interface, allocator: std.mem.Allocator) void {
     global_iface = iface;
     socket_allocator = allocator;
     socket_table = .{};
-    next_ephemeral_port = 49152;
 }
 
 pub fn getInterface() ?*Interface {
@@ -59,34 +57,37 @@ fn findFreeSlot() ?usize {
     return socket_table.items.len;
 }
 
-/// Allocate an ephemeral port. Returns 0 on failure.
+/// Allocate an ephemeral port using RFC 6056 Algorithm 1 (Simple Port Randomization).
+/// Uses hardware entropy for random starting point to prevent port prediction attacks.
 pub fn allocateEphemeralPort() u16 {
-    // Find unused port in ephemeral range (49152-65535)
-    var attempts: u16 = 0;
-    while (attempts < 16384) : (attempts += 1) { // Cover full ephemeral range
-        const port = next_ephemeral_port;
-        
-        // Advance with wrapping logic
-        if (next_ephemeral_port == 65535) {
-            next_ephemeral_port = 49152;
-        } else {
-            next_ephemeral_port += 1;
-        }
+    const EPHEMERAL_START: u16 = 49152;
+    const EPHEMERAL_END: u16 = 65535;
+    const EPHEMERAL_RANGE: u16 = EPHEMERAL_END - EPHEMERAL_START + 1; // 16384
 
+    // RFC 6056 Algorithm 1: Random starting point using hardware entropy
+    const entropy = hal.entropy.getHardwareEntropy();
+    const random_offset: u16 = @truncate(entropy % EPHEMERAL_RANGE);
+    var port = EPHEMERAL_START + random_offset;
+
+    var attempts: u16 = 0;
+    while (attempts < EPHEMERAL_RANGE) : (attempts += 1) {
         // Check if port is in use
         var in_use = false;
         for (socket_table.items) |maybe_socket| {
-             if (maybe_socket) |sock| {
+            if (maybe_socket) |sock| {
                 if (sock.allocated and sock.local_port == port) {
                     in_use = true;
                     break;
                 }
-             }
+            }
         }
 
         if (!in_use) {
             return port;
         }
+
+        // Sequential probe from random start (wrap at range boundary)
+        port = if (port == EPHEMERAL_END) EPHEMERAL_START else port + 1;
     }
 
     return 0; // No free ports
@@ -109,7 +110,7 @@ pub fn reserveSlot() ?usize {
 
 pub fn installSocket(slot: usize, sock: *types.Socket) bool {
     // Note: We don't check MAX_SOCKETS anymore
-    
+
     if (slot < socket_table.items.len) {
         // Reuse slot
         if (socket_table.items[slot] != null) return false;

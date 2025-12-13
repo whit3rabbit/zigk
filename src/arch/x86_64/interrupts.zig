@@ -278,12 +278,7 @@ fn irqHandler(frame: *idt.InterruptFrame) void {
                 const returned_frame = handler(frame);
                 // Signal dispatch_interrupt to use this frame instead
                 if (returned_frame != frame) {
-                    @import("console").debug("irqHandler: ctx switch old={x} new={x}", .{
-                        @intFromPtr(frame), @intFromPtr(returned_frame),
-                    });
                     idt.setNewFrame(returned_frame);
-                } else {
-                    @import("console").debug("irqHandler: NO switch (same frame {x})", .{@intFromPtr(frame)});
                 }
             }
             // If no timer handler, just acknowledge and continue

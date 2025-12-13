@@ -77,8 +77,8 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
     // Try established connection first
     if (state.findTcb(local_ip, local_port, remote_ip, remote_port)) |tcb| {
         // Acquire TCB lock while holding state lock to prevent race where TCB is freed
-        tcb.mutex.lock();
-        defer tcb.mutex.unlock();
+        const held = tcb.mutex.acquire();
+        defer held.release();
 
         // Removed early release of state.lock
         return processEstablishedPacket(tcb, pkt, tcp_hdr);
@@ -87,8 +87,8 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
     // Try listening socket
     if (state.findListeningTcb(local_port)) |listen_tcb| {
         // Acquire lock
-        listen_tcb.mutex.lock();
-        defer listen_tcb.mutex.unlock();
+        const held = listen_tcb.mutex.acquire();
+        defer held.release();
 
         // Removed early release of state.lock
         return processListenPacket(iface, listen_tcb, pkt, tcp_hdr);
@@ -212,7 +212,7 @@ fn processEstablishedPacket(tcb: *Tcb, pkt: *PacketBuffer, tcp_hdr: *TcpHeader) 
     // Security: Check Sequence Number (RFC 793 / RFC 5961)
     // We must validate the sequence number before processing RST or SYN/ACK.
     const seq = tcp_hdr.getSeqNum();
-    const ack = tcp_hdr.getAckNum();
+    // const ack = tcp_hdr.getAckNum(); // Unused here
     const seg_len = tx.calculateSegmentLength(pkt, tcp_hdr);
     const rcv_wnd = tcb.currentRecvWindow();
 

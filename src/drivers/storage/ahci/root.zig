@@ -21,6 +21,7 @@ pub const hba = @import("hba.zig");
 pub const port = @import("port.zig");
 pub const command = @import("command.zig");
 pub const fis = @import("fis.zig");
+pub const adapter = @import("adapter.zig");
 
 // ============================================================================
 // Constants
@@ -436,10 +437,10 @@ pub const AhciController = struct {
         const buffer_pages = pmm.allocZeroedPages(1) orelse {
             return AhciError.AllocationFailed;
         };
-        defer pmm.freePages(buffer_pages.phys, 1);
+        defer pmm.freePages(buffer_pages, 1);
 
         // Check 64-bit capability
-        if (!self.cap.s64a and buffer_pages.phys > 0xFFFFFFFF) {
+        if (!self.cap.s64a and buffer_pages > 0xFFFFFFFF) {
             console.err("AHCI: Port {d} identify buffer > 4GB but controller is 32-bit", .{port_num});
             return AhciError.AllocationFailed;
         }
@@ -449,20 +450,21 @@ pub const AhciController = struct {
         const table: *command.CommandTableBase = @ptrFromInt(p.cmd_tables_virt[0]);
 
         // Build IDENTIFY command
-        command.buildIdentify(table, buffer_pages.phys);
+        command.buildIdentify(table, buffer_pages);
 
         // Set up command header for read (1 sector)
         cmd_list[0].initRead(p.cmd_tables_phys[0], 1);
 
         // Set up PRDT entry
         const prdt: *command.PrdtEntry = @ptrFromInt(p.cmd_tables_virt[0] + @sizeOf(command.CommandTableBase));
-        prdt.* = command.PrdtEntry.init(buffer_pages.phys, 512, true);
+        prdt.* = command.PrdtEntry.init(buffer_pages, 512, true);
 
         // Issue command
         try self.issueCommand(port_num, 0);
 
         // Copy identify data
-        const id_ptr: *fis.IdentifyData = @ptrFromInt(@intFromPtr(buffer_pages.virt));
+        // Copy identify data
+        const id_ptr: *fis.IdentifyData = @ptrCast(hal.paging.physToVirt(buffer_pages));
         p.identify = id_ptr.*;
 
         // Log device info
@@ -480,7 +482,6 @@ pub const AhciController = struct {
     fn issueCommandWithTimeout(self: *Self, port_num: u5, slot: u5, timeout_us: u64) AhciError!void {
         const p = &self.ports[port_num];
         const base = p.base;
-        _ = self;
 
         // Wait for port to be ready (5s per AHCI spec BSY timeout)
         if (!port.waitReady(base, Timeouts.DEVICE_READY_US)) {
