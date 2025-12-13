@@ -1515,128 +1515,31 @@ pub fn sys_brk(addr: u64) SyscallError!usize {
 
     if (new_break_aligned > current_break_aligned) {
         // Growing heap
-        const size_to_map = new_break_aligned - current_break_aligned;
-        const pages_to_map = size_to_map / pmm.PAGE_SIZE;
-
-        // Allocate and map pages
-        // We can use UserVmm or just direct mapping.
-        // Process struct has user_vmm field.
-
-        // TODO: Use proc.user_vmm logic to track VMAs?
-        // For MVP, we just map the pages directly into the page table.
-        // Ideally we should update VMA list too.
-
-        // Let's use vmm directly first for simplicity, but we need physical pages.
-        var i: usize = 0;
-        while (i < pages_to_map) : (i += 1) {
-            const phys_page = pmm.allocPage() orelse {
-                // OOM - should cleanup already mapped pages?
-                // For MVP, just fail. Real implementation needs rollback.
-                return error.ENOMEM;
+        // The expandHeap method in UserVmm handles mapping pages and updating VMA list.
+        const res = proc.user_vmm.expandHeap(current_break_aligned, new_break_aligned);
+        if (res < 0) {
+            const errno_val: i32 = @intCast(-res);
+            return switch (errno_val) {
+                12 => error.ENOMEM,
+                else => error.ENOMEM,
             };
-
-            const vaddr = current_break_aligned + (i * pmm.PAGE_SIZE);
-
-            const flags = vmm.PageFlags{
-                .writable = true,
-                .user = true,
-                .no_execute = true, // Heap should not be executable
-            };
-
-            vmm.mapPage(proc.cr3, vaddr, phys_page, flags) catch {
-                pmm.freePage(phys_page);
-
-                // Rollback: Unmap and free pages successfully mapped in this call
-                var j: usize = 0;
-                while (j < i) : (j += 1) {
-                    const rollback_addr = current_break_aligned + (j * pmm.PAGE_SIZE);
-                    if (vmm.translate(proc.cr3, rollback_addr)) |paddr| {
-                        pmm.freePage(paddr);
-                        vmm.unmapPage(proc.cr3, rollback_addr) catch {};
-                    }
-                }
-                return error.ENOMEM;
-            };
-
-            // Zero the page (security)
-            const ptr: [*]u8 = @ptrCast(hal.paging.physToVirt(phys_page));
-            @memset(ptr[0..pmm.PAGE_SIZE], 0);
-
-            // Track RSS for resource limit enforcement
-            proc.rss_current += pmm.PAGE_SIZE;
         }
 
-        // Track heap VMA so mmap search logic sees the allocated range
-        const mapped_len: usize = @intCast(size_to_map);
-        var heap_vma: ?*user_vmm.Vma = null;
-        var cursor = proc.user_vmm.vma_head;
-        while (cursor) |vma| {
-            if (vma.contains(proc.heap_start)) {
-                heap_vma = vma;
-                break;
-            }
-            cursor = vma.next;
-        }
+        // Update RSS manually since expandHeap relies on caller for accounting
+        const size = new_break_aligned - current_break_aligned;
+        proc.rss_current += size;
 
-        if (heap_vma) |vma| {
-            if (vma.end < new_break_aligned) {
-                vma.end = new_break_aligned;
-            }
-        } else {
-            const new_vma = proc.user_vmm.createVma(
-                current_break_aligned,
-                new_break_aligned,
-                user_vmm.PROT_READ | user_vmm.PROT_WRITE,
-                user_vmm.MAP_PRIVATE | user_vmm.MAP_ANONYMOUS,
-            ) catch {
-                rollbackNewPages(proc, current_break_aligned, size_to_map);
-                return error.ENOMEM;
-            };
-            proc.user_vmm.insertVma(new_vma);
-        }
-        proc.user_vmm.total_mapped += mapped_len;
     } else if (new_break_aligned < current_break_aligned) {
         // Shrinking heap
-        var offset: u64 = 0;
-        const size_to_unmap = current_break_aligned - new_break_aligned;
+        // The shrinkHeap method in UserVmm handles unmapping pages and updating VMA list.
+        proc.user_vmm.shrinkHeap(current_break_aligned, new_break_aligned);
 
-        // Unmap and free pages
-        while (offset < size_to_unmap) : (offset += pmm.PAGE_SIZE) {
-            const vaddr = new_break_aligned + offset;
-            if (vmm.translate(proc.cr3, vaddr)) |paddr| {
-                pmm.freePage(paddr);
-                vmm.unmapPage(proc.cr3, vaddr) catch {};
-                if (proc.rss_current >= pmm.PAGE_SIZE) {
-                    proc.rss_current -= pmm.PAGE_SIZE;
-                } else {
-                    proc.rss_current = 0;
-                }
-            }
-        }
-
-        // Update heap VMA
-        var heap_vma: ?*user_vmm.Vma = null;
-        var cursor = proc.user_vmm.vma_head;
-        while (cursor) |vma| {
-            if (vma.contains(proc.heap_start)) {
-                heap_vma = vma;
-                break;
-            }
-            cursor = vma.next;
-        }
-
-        if (heap_vma) |vma| {
-            // Shrink the VMA end if it was larger than new break
-            if (vma.end > new_break_aligned) {
-                vma.end = new_break_aligned;
-            }
-        }
-
-        // Update total mapped count
-        if (proc.user_vmm.total_mapped >= size_to_unmap) {
-            proc.user_vmm.total_mapped -= @intCast(size_to_unmap);
+        // Update RSS manually
+        const size = current_break_aligned - new_break_aligned;
+        if (proc.rss_current >= size) {
+            proc.rss_current -= size;
         } else {
-            proc.user_vmm.total_mapped = 0;
+            proc.rss_current = 0;
         }
     }
 
