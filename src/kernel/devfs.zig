@@ -15,6 +15,7 @@ const keyboard = @import("keyboard");
 const sched = @import("sched");
 const uapi = @import("uapi");
 const ahci = @import("ahci");
+const audio = @import("audio");
 const vfs = @import("fs").vfs; // Import VFS for Error type
 
 const FileDescriptor = fd_mod.FileDescriptor;
@@ -165,6 +166,7 @@ const devices = [_]DeviceEntry{
     .{ .name = "null", .ops = &null_ops },
     .{ .name = "zero", .ops = &zero_ops },
     .{ .name = "sda", .ops = &ahci.adapter.block_ops },
+    .{ .name = "dsp", .ops = &audio.ac97.dsp_ops },
 };
 
 /// Look up device operations by path

@@ -13,6 +13,7 @@ pub const abi = @import("abi.zig");
 pub const signal = @import("signal.zig");
 pub const stat = @import("stat.zig");
 pub const dirent = @import("dirent.zig");
+pub const sound = @import("sound.zig");
 
 // Re-export commonly used types
 pub const Errno = errno.Errno;

@@ -25,6 +25,9 @@ pub const IntelDeviceId = struct {
     pub const E1000E_82574L: u16 = 0x10D3;
     pub const E1000E_82574L_2: u16 = 0x10F6;
     pub const E1000E_82583V: u16 = 0x150C;
+
+    // Audio Devices
+    pub const AC97_82801AA: u16 = 0x2415; // Intel 82801AA AC'97 Audio Controller
 };
 
 /// VirtIO Device IDs (non-transitional, modern)
@@ -326,6 +329,11 @@ pub const PciDevice = struct {
         return self.class_code == ClassCode.DISPLAY;
     }
 
+    /// Check if device is an AC97 controller
+    pub fn isAc97Controller(self: *const Self) bool {
+        return self.vendor_id == VendorId.INTEL and self.device_id == IntelDeviceId.AC97_82801AA;
+    }
+
     /// Get the first valid MMIO BAR (for NIC drivers)
     pub fn getMmioBar(self: *const Self) ?Bar {
         for (self.bar) |b| {
@@ -428,6 +436,11 @@ pub const DeviceList = struct {
             }
         }
         return null;
+    }
+
+    /// Find first AC97 controller
+    pub fn findAc97Controller(self: *const DeviceList) ?*const PciDevice {
+        return self.findDevice(VendorId.INTEL, IntelDeviceId.AC97_82801AA);
     }
 
     /// Find first USB controller of a specific type by ProgIF
