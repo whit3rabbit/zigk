@@ -722,6 +722,55 @@ pub fn hasAnyChildren(parent: *Thread) bool {
 }
 
 /// Set thread exit status (called during exit)
-pub fn setExitStatus(thread: *Thread, status: i32) void {
-    thread.exit_status = status;
+pub fn setExitStatus(t: *Thread, status: i32) void {
+    t.exit_status = status;
+}
+
+/// Wait for a thread to exit (reach Zombie state)
+///
+/// Blocks the calling thread until the target thread has exited.
+/// Uses polling with yield to avoid busy-waiting.
+///
+/// SAFETY: Caller must ensure:
+/// - Target thread is not the calling thread (would deadlock)
+/// - Target thread will eventually exit (otherwise blocks forever)
+///
+/// After join() returns, the thread is in Zombie state and can be
+/// destroyed with destroyThread().
+pub fn join(t: *Thread) void {
+    const sched = @import("sched");
+
+    // Poll for Zombie state, yielding between checks
+    while (true) {
+        // Atomic load to safely read state from another thread
+        const state = @atomicLoad(ThreadState, &t.state, .acquire);
+        if (state == .Zombie) {
+            break;
+        }
+        // Yield to give the target thread CPU time to finish
+        sched.yield();
+    }
+}
+
+/// Wait for a thread to exit with a timeout (in scheduler ticks)
+///
+/// Returns true if thread exited, false if timeout expired.
+pub fn joinWithTimeout(t: *Thread, timeout_ticks: u64) bool {
+    const sched = @import("sched");
+    const start_tick = sched.getTickCount();
+
+    while (true) {
+        const state = @atomicLoad(ThreadState, &t.state, .acquire);
+        if (state == .Zombie) {
+            return true;
+        }
+
+        // Check timeout
+        const elapsed = sched.getTickCount() - start_tick;
+        if (elapsed >= timeout_ticks) {
+            return false;
+        }
+
+        sched.yield();
+    }
 }

@@ -364,6 +364,33 @@ pub const TX_DESC_COUNT: usize = 512;
 /// Size of each packet buffer
 pub const BUFFER_SIZE: usize = 2048;
 
+// Compile-time validation of configuration constants
+// These ensure driver correctness at compile time rather than runtime
+comptime {
+    // Intel 82574L requires descriptor counts to be multiples of 8
+    // Reference: Datasheet Section 3.2.6 and 3.3.6
+    if (RX_DESC_COUNT % 8 != 0) {
+        @compileError("RX_DESC_COUNT must be a multiple of 8");
+    }
+    if (TX_DESC_COUNT % 8 != 0) {
+        @compileError("TX_DESC_COUNT must be a multiple of 8");
+    }
+
+    // Descriptor indices (rx_cur, tx_cur) are u16, so counts must fit
+    if (RX_DESC_COUNT > 65535) {
+        @compileError("RX_DESC_COUNT exceeds u16 range");
+    }
+    if (TX_DESC_COUNT > 65535) {
+        @compileError("TX_DESC_COUNT exceeds u16 range");
+    }
+
+    // Buffer size must match RCTL.BSIZE setting (0 = 2048 bytes)
+    // and not exceed page size for simple PMM allocation
+    if (BUFFER_SIZE != 2048) {
+        @compileError("BUFFER_SIZE must be 2048 to match RCTL.BSIZE=0");
+    }
+}
+
 // ============================================================================
 // Driver State
 // ============================================================================
@@ -496,7 +523,18 @@ pub const E1000e = struct {
     // ========================================================================
 
     /// Initialize E1000e driver for a PCI device
+    ///
+    /// SAFETY: This function must not be called while the driver is already
+    /// initialized. Call deinit() first if re-initialization is needed.
     pub fn init(pci_dev: *const pci.PciDevice, pci_ecam: *const pci.Ecam) !*Self {
+        // Guard against double-init without deinit
+        // This prevents use-after-free and double-free bugs from concurrent
+        // or repeated init calls.
+        if (@atomicLoad(bool, &driver_initialized, .acquire)) {
+            console.err("E1000e: Driver already initialized - call deinit() first", .{});
+            return error.AlreadyInitialized;
+        }
+
         console.info("E1000e: Initializing {x:0>4}:{x:0>4}", .{
             pci_dev.vendor_id,
             pci_dev.device_id,
@@ -604,6 +642,10 @@ pub const E1000e = struct {
 
         // Enable interrupts (uses MSI-X or legacy based on initMsix result)
         driver.enableInterrupts();
+
+        // Mark driver as initialized BEFORE creating worker thread
+        // to prevent race condition where worker runs before flag is set
+        @atomicStore(bool, &driver_initialized, true, .release);
 
         // Create worker thread
         driver.worker_thread = try thread.createKernelThread(workerEntry, .{
@@ -1088,6 +1130,15 @@ pub const E1000e = struct {
         defer held.release();
 
         // Check if current descriptor is available (DD=1 means completed)
+        //
+        // Per Intel 82574L Datasheet Section 3.3.3:
+        // The DD (Descriptor Done) bit is set by hardware AFTER the packet
+        // has been transmitted and the descriptor buffer is no longer needed.
+        // This is the authoritative signal that the descriptor can be reused.
+        //
+        // Note: We intentionally do NOT read TDH register here. Reading TDH
+        // adds PCI latency and is unnecessary - the DD bit is the definitive
+        // indicator per Intel spec. Linux e1000e driver also trusts DD alone.
         const desc = &self.tx_ring[self.tx_cur];
         if ((desc.status & TxDesc.STATUS_DD) == 0) {
             // Hardware hasn't finished with this descriptor yet
@@ -1098,22 +1149,6 @@ pub const E1000e = struct {
         // Memory barrier: ensure we see hardware's writes to status field
         // before we read or overwrite any descriptor fields
         mmio.readBarrier();
-
-        // Additional safety check: verify against hardware head pointer
-        // This guards against a race where DD is set but hardware is still
-        // reading the descriptor data (possible during rapid retransmission)
-        const tdh = self.readReg(Reg.TDH);
-        if (self.tx_cur == tdh) {
-            // Our position equals hardware head - could be empty or full
-            const tdt = self.readReg(Reg.TDT);
-            if (tdh != tdt) {
-                // TDH != TDT means there's pending work, and hardware head
-                // is at our position - this descriptor is in use
-                self.tx_dropped += 1;
-                return false;
-            }
-            // TDH == TDT means ring is empty, safe to proceed
-        }
 
         // Parse packet for hardware checksum offloading
         // E1000e can insert TCP/UDP checksums if we provide CSS (start) and CSO (offset)
@@ -1373,8 +1408,19 @@ pub const E1000e = struct {
         }
     }
 
-    /// Worker thread entry point
     /// Worker thread entry point (NAPI-style polling)
+    ///
+    /// Implements a receive polling loop with proper interrupt synchronization.
+    /// The key insight from Linux NAPI is: re-enable interrupts BEFORE checking
+    /// for pending work. This closes the race window where packets could arrive
+    /// between the empty check and the block() call.
+    ///
+    /// Interrupt flow:
+    /// 1. IRQ fires, handler masks interrupts and unblocks worker
+    /// 2. Worker processes packets until ring appears empty
+    /// 3. Worker re-enables interrupts (IMS write)
+    /// 4. Worker checks for packets AFTER IMS write
+    /// 5. If empty, worker blocks; any new packet will fire IRQ and unblock
     pub fn workerLoop(self: *Self) void {
         const BATCH_LIMIT = 64;
 
@@ -1386,15 +1432,25 @@ pub const E1000e = struct {
 
             if (processed < BATCH_LIMIT) {
                 // We drained the ring (or close to it).
-                // Re-enable interrupts and block.
+                // Use NAPI-style: re-enable interrupts BEFORE checking for work.
+                // This closes the race window where packets could arrive between
+                // the hasPackets() check and the block() call.
 
                 const flags = hal.cpu.disableInterruptsSaveFlags();
-                // Double check emptiness to avoid race condition where packet arrives
-                // right after processRxLimited returns but before we block.
-                // Also check shutdown to avoid blocking during teardown.
+
+                // Re-enable RX interrupts FIRST (before checking for packets).
+                // This ensures any packets arriving NOW will trigger an interrupt
+                // that will unblock us if we decide to block.
+                self.writeReg(Reg.IMS, INT.RXT0 | INT.RXDMT0);
+
+                // Memory barrier to ensure IMS write completes before checking state.
+                // On x86 this is sfence which orders stores.
+                mmio.writeBarrier();
+
+                // Now check if we should block.
+                // If packets arrived after IMS write, hasPackets() will return true.
+                // If packets arrive after this check, the interrupt will fire and unblock us.
                 if (!self.hasPackets() and !@atomicLoad(bool, &self.shutdown_requested, .acquire)) {
-                    // Re-enable RX interrupts (Timer and Min Threshold)
-                    self.writeReg(Reg.IMS, INT.RXT0 | INT.RXDMT0);
                     sched.block();
                 }
                 hal.cpu.restoreInterrupts(flags);
@@ -1404,7 +1460,7 @@ pub const E1000e = struct {
                 sched.yield();
             }
         }
-        // Clean exit - worker thread terminates
+        // Worker thread is exiting - will be joined by deinit()
     }
 
     /// Check if there are packets waiting
@@ -1611,17 +1667,35 @@ pub const E1000e = struct {
 
     /// Deinitialize driver and release resources
     /// Call before hot-unplug or driver reload
+    ///
+    /// SAFETY: This function waits for the worker thread to exit before
+    /// freeing resources, preventing use-after-free.
     pub fn deinit(self: *Self) void {
         console.info("E1000e: Deinitializing driver", .{});
 
         // Signal worker thread to exit
         @atomicStore(bool, &self.shutdown_requested, true, .release);
 
-        // Wake worker if it's blocked waiting for packets
+        // Wake worker if it's blocked waiting for packets, then wait for exit
         if (self.worker_thread) |wt| {
             sched.unblock(wt);
-            // Note: In a full implementation, we would join the thread here
-            // to ensure it has exited before freeing resources
+
+            // Wait for worker thread to reach Zombie state (exit cleanly).
+            // This prevents use-after-free: we must not free descriptor rings
+            // or buffers while the worker could still be accessing them.
+            // Use timeout to avoid hanging forever if something goes wrong.
+            const timeout_ticks = 1000; // ~10 seconds at 100Hz timer
+            if (!thread.joinWithTimeout(wt, timeout_ticks)) {
+                console.err("E1000e: Worker thread join timed out - forcing cleanup", .{});
+                // Worker didn't exit in time. Continue with cleanup but warn.
+                // This is a last resort to prevent kernel hang.
+            } else {
+                console.info("E1000e: Worker thread joined successfully", .{});
+            }
+
+            // Clean up the worker thread structure
+            _ = thread.destroyThread(wt);
+            self.worker_thread = null;
         }
 
         // Disable interrupts
@@ -1634,35 +1708,9 @@ pub const E1000e = struct {
         // Reset device to known state
         self.writeCtrl(.{ .device_reset = true });
 
-        // Free RX packet buffers
-        for (0..RX_DESC_COUNT) |i| {
-            if (self.rx_buffers_phys[i] != 0) {
-                pmm.freePage(self.rx_buffers_phys[i]);
-                self.rx_buffers_phys[i] = 0;
-            }
-        }
-
-        // Free TX packet buffers
-        for (0..TX_DESC_COUNT) |i| {
-            if (self.tx_buffers_phys[i] != 0) {
-                pmm.freePage(self.tx_buffers_phys[i]);
-                self.tx_buffers_phys[i] = 0;
-            }
-        }
-
-        // Free descriptor rings
-        if (self.rx_ring_phys != 0) {
-            const rx_ring_size = RX_DESC_COUNT * @sizeOf(RxDesc);
-            const rx_ring_pages = (rx_ring_size + pmm.PAGE_SIZE - 1) / pmm.PAGE_SIZE;
-            pmm.freePages(self.rx_ring_phys, rx_ring_pages);
-            self.rx_ring_phys = 0;
-        }
-        if (self.tx_ring_phys != 0) {
-            const tx_ring_size = TX_DESC_COUNT * @sizeOf(TxDesc);
-            const tx_ring_pages = (tx_ring_size + pmm.PAGE_SIZE - 1) / pmm.PAGE_SIZE;
-            pmm.freePages(self.tx_ring_phys, tx_ring_pages);
-            self.tx_ring_phys = 0;
-        }
+        // Free descriptor rings and buffers
+        // Use the shared freeRings() to avoid code duplication
+        self.freeRings();
 
         // Unmap MMIO
         vmm.unmapMmio(self.mmio_base, self.mmio_size);
@@ -1707,10 +1755,14 @@ pub fn irqHandler() void {
 }
 
 /// Static worker entry point
+/// Runs workerLoop then exits cleanly so deinit() can join the thread.
 fn workerEntry() void {
     if (getDriver()) |driver| {
         driver.workerLoop();
     }
+    // Worker thread finished - call scheduler exit to mark thread as Zombie.
+    // This allows deinit() to join (wait for Zombie state) before freeing resources.
+    sched.exit();
 }
 
 /// Initialize E1000e driver for the first found E1000/E1000e NIC
@@ -1722,8 +1774,6 @@ pub fn initFromPci(devices: *const pci.DeviceList, pci_ecam: *const pci.Ecam) !*
     };
 
     const driver = try E1000e.init(nic, pci_ecam);
-    // Use release ordering to ensure all driver initialization is visible
-    // before other threads see driver_initialized = true
-    @atomicStore(bool, &driver_initialized, true, .release);
+    // driver_initialized is now set inside init() before worker thread creation
     return driver;
 }

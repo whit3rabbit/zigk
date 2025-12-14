@@ -366,6 +366,38 @@ pub fn getConfigDescriptor(
     );
 }
 
+/// GET_DESCRIPTOR request for HID report descriptor
+/// This retrieves the report descriptor which describes the format of HID reports
+pub fn getReportDescriptor(
+    ctrl: *Controller,
+    dev: *device.UsbDevice,
+    iface: u8,
+    buffer: []u8,
+) TransferError!usize {
+    if (buffer.len < 1) return error.InvalidParam;
+
+    // HID Report Descriptor request goes to interface
+    const request_type = usb_types.makeRequestType(
+        .device_to_host,
+        .standard,
+        .interface,
+    );
+
+    // wValue: descriptor type (0x22 = Report) in high byte, index (0) in low byte
+    const wValue: u16 = 0x2200; // Report descriptor type
+
+    return controlTransfer(
+        ctrl,
+        dev,
+        @bitCast(request_type),
+        usb_types.Request.GET_DESCRIPTOR,
+        wValue,
+        @as(u16, iface),
+        buffer,
+        CONTROL_TIMEOUT_MS,
+    );
+}
+
 /// SET_CONFIGURATION request
 pub fn setConfiguration(
     ctrl: *Controller,
@@ -537,6 +569,83 @@ pub fn findKeyboardInterface(config_data: []const u8) ?KeyboardInfo {
                         });
 
                         return KeyboardInfo{
+                            .interface_num = current_interface.?,
+                            .endpoint_addr = ep.b_endpoint_address,
+                            .max_packet = ep.w_max_packet_size,
+                            .interval = ep.b_interval,
+                        };
+                    }
+                }
+            },
+            else => {},
+        }
+
+        i += length;
+    }
+
+    return null;
+}
+
+/// Information about a mouse interface found in config descriptor
+pub const MouseInfo = struct {
+    interface_num: u8,
+    endpoint_addr: u8,
+    max_packet: u16,
+    interval: u8,
+};
+
+/// Parse configuration descriptor to find HID mouse interface
+pub fn findMouseInterface(config_data: []const u8) ?MouseInfo {
+    var i: usize = 0;
+
+    // Current interface info
+    var current_interface: ?u8 = null;
+    var is_boot_mouse = false;
+
+    while (i + 2 <= config_data.len) {
+        const length = config_data[i];
+        const desc_type = config_data[i + 1];
+
+        if (length == 0 or i + length > config_data.len) break;
+
+        switch (desc_type) {
+            usb_types.DescriptorType.INTERFACE => {
+                if (length >= 9) {
+                    const iface = @as(*const usb_types.InterfaceDescriptor, @ptrCast(@alignCast(&config_data[i])));
+
+                    current_interface = iface.b_interface_number;
+
+                    // Check for HID Boot Mouse:
+                    // Class = 0x03 (HID)
+                    // SubClass = 0x01 (Boot Interface)
+                    // Protocol = 0x02 (Mouse)
+                    is_boot_mouse = (iface.b_interface_class == 0x03 and
+                        iface.b_interface_sub_class == 0x01 and
+                        iface.b_interface_protocol == 0x02);
+
+                    if (is_boot_mouse) {
+                        console.info("XHCI: Found HID Boot Mouse on interface {}", .{iface.b_interface_number});
+                    }
+                }
+            },
+            usb_types.DescriptorType.ENDPOINT => {
+                if (length >= 7 and is_boot_mouse and current_interface != null) {
+                    const ep = @as(*const usb_types.EndpointDescriptor, @ptrCast(@alignCast(&config_data[i])));
+
+                    // Check for Interrupt IN endpoint
+                    const addr = ep.getAddress();
+                    const attrs = ep.getAttributes();
+                    const is_in = addr.direction == .in;
+                    const is_interrupt = attrs.transfer_type == .interrupt;
+
+                    if (is_in and is_interrupt) {
+                        console.info("XHCI: Found mouse interrupt endpoint 0x{x:0>2}, max_packet={}, interval={}", .{
+                            ep.b_endpoint_address,
+                            ep.w_max_packet_size,
+                            ep.b_interval,
+                        });
+
+                        return MouseInfo{
                             .interface_num = current_interface.?,
                             .endpoint_addr = ep.b_endpoint_address,
                             .max_packet = ep.w_max_packet_size,

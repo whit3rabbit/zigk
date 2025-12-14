@@ -633,6 +633,7 @@ pub fn build(b: *std.Build) void {
     syscall_memory_module.addImport("pmm", pmm_module);
     syscall_memory_module.addImport("user_mem", user_mem_module);
     syscall_memory_module.addImport("user_vmm", user_vmm_module);
+    syscall_memory_module.addImport("console", console_module);
 
     // Create syscall execution module (fork, execve, arch_prctl, fb syscalls)
     const syscall_execution_module = b.createModule(.{

@@ -16,6 +16,7 @@ const console = @import("console");
 const pci = @import("pci");
 const vmm = @import("vmm");
 const pmm = @import("pmm");
+const heap = @import("heap");
 
 pub const hba = @import("hba.zig");
 pub const port = @import("port.zig");
@@ -164,7 +165,8 @@ pub const AhciController = struct {
     const Self = @This();
 
     /// Initialize controller from PCI device
-    pub fn init(pci_dev: *const pci.PciDevice, ecam: *const pci.Ecam) AhciError!Self {
+    /// Note: Allocates resources directly into 'self', avoiding stack copy of large struct
+    pub fn init(self: *Self, pci_dev: *const pci.PciDevice, ecam: *const pci.Ecam) AhciError!void {
         // Verify this is an AHCI controller
         if (pci_dev.class_code != hba.PciClass.CLASS or
             pci_dev.subclass != hba.PciClass.SUBCLASS or
@@ -190,13 +192,11 @@ pub const AhciController = struct {
             return AhciError.MappingFailed;
         };
 
-        var self = Self{
-            .hba_base = hba_virt,
-            .cap = hba.readCap(hba_virt),
-            .ports = undefined,
-            .active_port_count = 0,
-            .pci_dev = pci_dev,
-        };
+        // Initialize fields in-place
+        self.hba_base = hba_virt;
+        self.cap = hba.readCap(hba_virt);
+        self.active_port_count = 0;
+        self.pci_dev = pci_dev;
 
         // Initialize all ports as inactive
         for (0..MAX_PORTS) |i| {
@@ -222,8 +222,6 @@ pub const AhciController = struct {
 
         // Initialize ports
         try self.initPorts();
-
-        return self;
     }
 
     /// Perform BIOS/OS handoff
@@ -748,18 +746,25 @@ pub const AhciController = struct {
 // ============================================================================
 
 /// Global AHCI controller instance
-var controller_instance: ?AhciController = null;
+var controller_instance: ?*AhciController = null;
 
 /// Initialize AHCI from a PCI device
 pub fn initFromPci(pci_dev: *const pci.PciDevice, ecam: *const pci.Ecam) AhciError!*AhciController {
-    controller_instance = try AhciController.init(pci_dev, ecam);
-    return &controller_instance.?;
+    // Allocate controller struct on heap to avoid stack overflow (~20KB)
+    const alloc = heap.allocator();
+    const controller = alloc.create(AhciController) catch return AhciError.AllocationFailed;
+    
+    // Initialize in-place
+    controller.init(pci_dev, ecam) catch |err| {
+        alloc.destroy(controller);
+        return err;
+    };
+    
+    controller_instance = controller;
+    return controller;
 }
 
 /// Get the global controller instance
 pub fn getController() ?*AhciController {
-    if (controller_instance) |*c| {
-        return c;
-    }
-    return null;
+    return controller_instance;
 }

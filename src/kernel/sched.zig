@@ -556,7 +556,13 @@ pub fn timerTick(frame: *hal.idt.InterruptFrame) *hal.idt.InterruptFrame {
         return frame;
     }
 
+    // Log every 100 ticks to show scheduler is alive
+    if (scheduler.tick_count % 100 == 0) {
+        console.debug("Tick {d}", .{scheduler.tick_count});
+    }
+
     const current = getCurrentThread();
+
 
     // Save current thread's context
     if (current) |curr| {

@@ -15,6 +15,8 @@ pub const stat = @import("stat.zig");
 pub const dirent = @import("dirent.zig");
 pub const sound = @import("sound.zig");
 pub const input = @import("input.zig");
+pub const mman = @import("mman.zig");
+
 
 // Re-export commonly used types
 pub const Errno = errno.Errno;

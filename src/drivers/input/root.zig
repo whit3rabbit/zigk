@@ -265,6 +265,15 @@ pub fn setCursorSensitivity(sensitivity: u16) void {
     state.cursor.setSensitivity(sensitivity);
 }
 
+/// Set cursor absolute position from tablet/touchscreen coordinates
+/// Scales from device coordinate space to screen space
+pub fn setCursorAbsolute(abs_x: u32, abs_y: u32, max_x: u32, max_y: u32) void {
+    const held = state.lock.acquire();
+    defer held.release();
+
+    state.cursor.setAbsolute(abs_x, abs_y, max_x, max_y);
+}
+
 /// Get subsystem statistics
 pub fn getStats() struct { events_pushed: u64, events_dropped: u64, queue_len: usize } {
     const held = state.lock.acquire();

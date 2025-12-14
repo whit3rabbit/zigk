@@ -519,10 +519,10 @@ pub const Controller = struct {
                     continue;
                 };
 
-                // If it's a keyboard, start polling
+                // If it's a HID device, start interrupt polling
                 if (maybe_dev) |dev| {
-                    self.startKeyboardPolling(dev) catch |err| {
-                        console.err("XHCI: Failed to start keyboard polling: {}", .{err});
+                    self.startInterruptPolling(dev) catch |err| {
+                        console.err("XHCI: Failed to start HID polling: {}", .{err});
                     };
                 }
             }
@@ -786,13 +786,31 @@ pub const Controller = struct {
             return err;
         };
 
-        // 8. Parse configuration for keyboard interface
-        const kbd_info = transfer.findKeyboardInterface(config_buf[0..config_len]) orelse {
-            console.info("XHCI: Device is not a HID boot keyboard", .{});
-            // Not a keyboard - clean up and return null
+        // 8. Parse configuration for HID interface (keyboard or mouse)
+        var interface_num: u8 = 0;
+        var endpoint_addr: u8 = 0;
+        var max_packet: u16 = 0;
+        var interval: u8 = 0;
+
+        if (transfer.findKeyboardInterface(config_buf[0..config_len])) |info| {
+            console.info("XHCI: Found HID Keyboard", .{});
+            dev.hid_driver.is_keyboard = true;
+            interface_num = info.interface_num;
+            endpoint_addr = info.endpoint_addr;
+            max_packet = info.max_packet;
+            interval = info.interval;
+        } else if (transfer.findMouseInterface(config_buf[0..config_len])) |info| {
+            console.info("XHCI: Found HID Mouse", .{});
+            dev.hid_driver.is_mouse = true;
+            interface_num = info.interface_num;
+            endpoint_addr = info.endpoint_addr;
+            max_packet = info.max_packet;
+            interval = info.interval;
+        } else {
+            console.info("XHCI: Device is not a supported HID device", .{});
             dev.deinit();
             return null;
-        };
+        }
 
         // 9. SET_CONFIGURATION
         const config_value = config_buf[5]; // bConfigurationValue
@@ -804,33 +822,60 @@ pub const Controller = struct {
 
         // 10. Configure interrupt endpoint
         try dev.buildConfigureEndpointContext(
-            kbd_info.endpoint_addr,
-            kbd_info.max_packet,
-            kbd_info.interval,
+            endpoint_addr,
+            max_packet,
+            interval,
         );
         try self.configureEndpoint(dev);
         dev.state = .configured;
 
-        // 11. SET_PROTOCOL(Boot) for 8-byte reports
-        transfer.setProtocol(self, dev, kbd_info.interface_num, 0) catch |err| {
-            console.warn("XHCI: Failed to set boot protocol (may be OK): {}", .{err});
+        // 11. GET_REPORT_DESCRIPTOR to parse full HID capabilities
+        var report_desc_buf: [512]u8 = undefined;
+        const report_desc_len: usize = transfer.getReportDescriptor(self, dev, interface_num, &report_desc_buf) catch |err| blk: {
+            console.warn("XHCI: Failed to get report descriptor: {} - using boot protocol", .{err});
+            break :blk 0;
         };
 
-        // 12. SET_IDLE(0) to get reports only on change
-        transfer.setIdle(self, dev, kbd_info.interface_num, 0, 0) catch |err| {
+        // 12. Parse report descriptor if we got one
+        if (report_desc_len > 0) {
+            dev.hid_driver.parseReportDescriptor(report_desc_buf[0..report_desc_len]) catch |err| {
+                console.warn("XHCI: Failed to parse report descriptor: {}", .{err});
+            };
+
+            // Check if parser detected tablet (overrides initial detection)
+            if (dev.hid_driver.is_tablet) {
+                console.info("XHCI: Device identified as tablet with absolute positioning", .{});
+            }
+        }
+
+        // 13. SET_PROTOCOL - only for boot protocol devices (keyboard/mouse, not tablets)
+        if (!dev.hid_driver.is_tablet) {
+            transfer.setProtocol(self, dev, interface_num, 0) catch |err| {
+                console.warn("XHCI: Failed to set boot protocol (may be OK): {}", .{err});
+            };
+        }
+
+        // 14. SET_IDLE(0) to get reports only on change
+        transfer.setIdle(self, dev, interface_num, 0, 0) catch |err| {
             console.warn("XHCI: Failed to set idle (may be OK): {}", .{err});
         };
 
-        // 13. Register device and start polling
+        // 15. Register device and start polling
         device.registerDevice(dev);
-        console.info("XHCI: USB keyboard enumerated successfully on slot {}", .{slot_id});
+        const device_type: []const u8 = if (dev.hid_driver.is_keyboard)
+            "keyboard"
+        else if (dev.hid_driver.is_tablet)
+            "tablet"
+        else
+            "mouse";
+        console.info("XHCI: USB {s} enumerated successfully on slot {}", .{ device_type, slot_id });
 
         return dev;
     }
 
-    /// Start keyboard polling for a device
-    pub fn startKeyboardPolling(self: *Self, dev: *device.UsbDevice) !void {
-        console.info("XHCI: Starting keyboard polling for slot {}", .{dev.slot_id});
+    /// Start interrupt polling for a HID device (keyboard or mouse)
+    pub fn startInterruptPolling(self: *Self, dev: *device.UsbDevice) !void {
+        console.info("XHCI: Starting HID polling for slot {}", .{dev.slot_id});
         try transfer.queueInterruptTransfer(self, dev);
         dev.state = .polling;
     }

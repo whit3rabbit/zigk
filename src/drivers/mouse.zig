@@ -263,6 +263,38 @@ pub fn injectRawInput(dx: i16, dy: i16, dz: i8, buttons: Buttons) void {
     }
 }
 
+/// Inject absolute position from a tablet/touchscreen device
+/// x, y: screen coordinates (0 to width-1, 0 to height-1)
+/// max_x, max_y: screen dimensions
+pub fn injectAbsoluteInput(x: u32, y: u32, max_x: u32, max_y: u32, buttons: Buttons) void {
+    const held = mouse_lock.acquire();
+    defer held.release();
+
+    // Update cursor position using absolute coordinates
+    input.setCursorAbsolute(x, y, max_x, max_y);
+
+    const buttons_changed = Buttons{
+        .left = buttons.left != mouse_state.prev_buttons.left,
+        .right = buttons.right != mouse_state.prev_buttons.right,
+        .middle = buttons.middle != mouse_state.prev_buttons.middle,
+    };
+
+    mouse_state.prev_buttons = buttons;
+
+    // Create event with zero delta (position is absolute)
+    const event = MouseEvent{
+        .dx = 0,
+        .dy = 0,
+        .dz = 0,
+        .buttons = buttons,
+        .buttons_changed = buttons_changed,
+    };
+
+    if (mouse_state.event_buffer.push(event)) {
+        error_stats.buffer_overruns +%= 1;
+    }
+}
+
 /// Initialize the PS/2 mouse
 pub fn init() void {
     if (@atomicLoad(bool, &mouse_initialized, .acquire)) return;

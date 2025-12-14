@@ -12,6 +12,8 @@ const uapi = @import("uapi");
 const pmm = @import("pmm");
 const user_mem = @import("user_mem");
 const user_vmm = @import("user_vmm");
+const console = @import("console");
+
 
 const SyscallError = base.SyscallError;
 
@@ -26,16 +28,30 @@ const SyscallError = base.SyscallError;
 ///
 /// Args:
 ///   addr: Hint address (0 for kernel choice), exact address if MAP_FIXED
-///   len: Size in bytes
-///   prot: Protection flags (PROT_READ, PROT_WRITE, PROT_EXEC)
-///   flags: Map flags (MAP_ANONYMOUS, MAP_PRIVATE, MAP_FIXED)
-///   fd: File descriptor (ignored for MAP_ANONYMOUS)
-///   offset: File offset (ignored for MAP_ANONYMOUS)
-///
-/// Returns: Mapped address on success, negative errno on error
-pub fn sys_mmap(addr: usize, len: usize, prot: usize, flags: usize, fd: usize, offset: usize) SyscallError!usize {
-    _ = fd; // File mappings not supported
-    _ = offset;
+/// sys_mmap (9) - Map memory
+pub fn sys_mmap(
+    addr: usize,
+    len: usize,
+    prot: usize,
+    flags: usize,
+    fd: usize,
+    offset: usize,
+) SyscallError!usize {
+    console.debug("sys_mmap: addr={x} len={x} prot={x} flags={x} fd={d}", .{ addr, len, prot, flags, fd });
+
+    // Validate length
+    if (len == 0) {
+        return error.EINVAL;
+    }
+
+    // Handle anonymous mapping
+    if ((flags & uapi.mman.MAP_ANONYMOUS) != 0) {
+        // File mappings not supported
+        _ = offset;
+    } else {
+        // File mappings not supported yet
+        return error.EINVAL;
+    }
 
     // Enforce per-process memory limit (DoS protection)
     const proc = base.getCurrentProcess();
@@ -123,32 +139,35 @@ pub fn sys_munmap(addr: usize, len: usize) SyscallError!usize {
 }
 
 /// sys_brk (12) - Change data segment size
-pub fn sys_brk(addr: u64) SyscallError!usize {
+///
+/// Changes the location of the program break, which defines the end of the process's data segment.
+///
+/// Args:
+///   brk: New program break (0 to return current break)
+///
+/// Returns: New program break
+pub fn sys_brk(brk: usize) SyscallError!usize {
     const proc = base.getCurrentProcess();
+    console.debug("sys_brk: current={x} new={x}", .{ proc.heap_break, brk });
 
-    // If addr is 0, return current break
-    if (addr == 0) {
-        return @intCast(proc.heap_break);
+    if (brk == 0) {
+        return proc.heap_break;
     }
 
-    // Checking inputs
-    // We only support growing the heap for now, or keeping it same.
-    // Shrinking is valid but complicates things (need to unmap).
-    // Also need to check if new break is valid (e.g. not overlapping stack or kernel)
-
-    // Check if less than start (invalid)
-    if (addr < proc.heap_start) {
-        return @intCast(proc.heap_break);
+    // Validate new break
+    // Must be >= start_brk and within sane limits
+    if (brk < proc.heap_start) {
+        return error.EINVAL;
     }
 
     // Check upper bound - must not exceed user space
-    if (addr > user_mem.USER_SPACE_END) {
+    if (brk > user_mem.USER_SPACE_END) {
         return @intCast(proc.heap_break);
     }
 
     // Enforce per-process memory limit (DoS protection)
-    if (addr > proc.heap_break) {
-        const growth = addr - proc.heap_break;
+    if (brk > proc.heap_break) {
+        const growth = brk - proc.heap_break;
         const new_rss = @addWithOverflow(proc.rss_current, growth);
         if (new_rss[1] != 0 or new_rss[0] > proc.rlimit_as) {
             return error.ENOMEM;
@@ -157,12 +176,13 @@ pub fn sys_brk(addr: u64) SyscallError!usize {
 
     // Align to page size for mapping
     const current_break_aligned = std.mem.alignForward(usize, proc.heap_break, pmm.PAGE_SIZE);
-    const new_break_aligned = std.mem.alignForward(usize, addr, pmm.PAGE_SIZE);
+    const new_break_aligned = std.mem.alignForward(usize, brk, pmm.PAGE_SIZE);
 
     // Aligned value must also be within bounds (alignment could push it over)
     if (new_break_aligned > user_mem.USER_SPACE_END) {
         return @intCast(proc.heap_break);
     }
+
 
     if (new_break_aligned > current_break_aligned) {
         // Growing heap
@@ -199,6 +219,6 @@ pub fn sys_brk(addr: u64) SyscallError!usize {
     }
 
     // Update break
-    proc.heap_break = addr;
-    return @intCast(addr);
+    proc.heap_break = brk;
+    return @intCast(brk);
 }
