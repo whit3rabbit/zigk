@@ -259,6 +259,28 @@ pub fn initFromLimine(memmap: *const limine.MemoryMapResponse) !void {
 
 
 
+/// Allocate a specific physical page (if free)
+/// Returns true on success, false if already allocated/invalid
+pub fn allocSpecificPage(phys_addr: u64) bool {
+    if (!initialized) return false;
+
+    const held = pmm_lock.acquire();
+    defer held.release();
+
+    if (!paging.isPageAligned(phys_addr)) return false;
+    const page = phys_addr / PAGE_SIZE;
+    if (page >= total_pages) return false;
+
+    if (isBitSet(page)) return false; // Already allocated
+
+    setBit(page);
+    refcounts[page] = 1;
+    free_pages -= 1;
+    allocated_pages += 1;
+
+    return true;
+}
+
 /// Allocate a single physical page
 /// Returns physical address of allocated page, or null if OOM
 pub fn allocPage() ?u64 {

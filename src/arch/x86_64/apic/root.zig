@@ -43,6 +43,9 @@ pub const ApicInitInfo = struct {
     /// Whether dual 8259 PICs are installed (should be disabled)
     pcat_compat: bool,
 
+    /// Local APIC IDs for enabled processors (from MADT)
+    lapic_ids: []const u8,
+
     /// Get the GSI for a legacy ISA IRQ, applying any overrides
     pub fn getGsiForIrq(self: *const ApicInitInfo, irq: u8) u32 {
         if (irq < 16) {

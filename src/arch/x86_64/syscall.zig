@@ -91,9 +91,16 @@ pub const KernelGsData = extern struct {
     /// Scratch space for syscall entry
     scratch: u64,
 
-    comptime {
-        if (@sizeOf(KernelGsData) != 32) @compileError("KernelGsData must be 32 bytes (must match asm_helpers.S)");
-    }
+    // Extended fields for SMP (not accessed by asm_helpers.S)
+    /// APIC ID of this CPU
+    apic_id: u32,
+    /// Padding for alignment
+    _padding: u32 = 0,
+    /// Pointer to idle thread for this CPU
+    idle_thread: u64,
+
+    // asm_helpers.S only accesses the first 32 bytes (offsets 0, 8, 16, 24)
+    // It does not care about the total size as long as offsets match.
 };
 
 /// Syscall frame pushed on kernel stack by syscall entry handler

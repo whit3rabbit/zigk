@@ -35,6 +35,7 @@ const net = @import("net");
 const pci = @import("pci");
 const e1000e = @import("e1000e");
 const usb = @import("usb");
+const audio = @import("audio");
 const acpi = @import("acpi");
 const ahci = @import("ahci");
 const devfs = @import("devfs");
@@ -290,6 +291,10 @@ export fn _start() noreturn {
     // Must be done before keyboard/scheduler to route IRQs correctly
     initApic();
 
+    // Initialize SMP (bring up APs)
+    // Must be done after APIC init
+    hal.smp.init();
+
     // Initialize keyboard driver and register with HAL
     keyboard.init();
     hal.interrupts.setKeyboardHandler(&keyboard.handleIrq);
@@ -329,6 +334,9 @@ export fn _start() noreturn {
 
     // Initialize USB (XHCI controllers)
     initUsb();
+
+    // Initialize Audio (AC97)
+    initAudio();
 
     // Initialize storage (AHCI controllers)
     initStorage();
@@ -829,6 +837,29 @@ fn initUsb() void {
 }
 
 // ============================================================================
+// Audio Initialization
+// ============================================================================
+
+fn initAudio() void {
+    console.print("\n");
+    console.info("Initializing Audio subsystem...", .{});
+
+    const devices = pci_devices orelse {
+        console.warn("Audio: PCI not initialized, skipping Audio", .{});
+        return;
+    };
+
+    if (devices.findAc97Controller()) |dev| {
+        console.info("Audio: Found AC97 Controller at {d}:{d}.{d}", .{ dev.bus, dev.device, dev.func });
+        audio.ac97.initFromPci(dev) catch |err| {
+             console.warn("Audio: Init failed: {}", .{err});
+        };
+    } else {
+        console.info("Audio: No AC97 controller found", .{});
+    }
+}
+
+// ============================================================================
 // VFS Initialization
 // ============================================================================
 
@@ -1085,6 +1116,7 @@ fn initApic() void {
         .io_apics = io_apics[0..madt_info.io_apic_count],
         .overrides = &overrides,
         .pcat_compat = madt_info.pcat_compat,
+        .lapic_ids = madt_info.lapic_ids[0..madt_info.lapic_count],
     };
 
     // Initialize APIC

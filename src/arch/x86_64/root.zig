@@ -20,6 +20,7 @@ pub const mmio = @import("mmio.zig");
 pub const pit = @import("pit.zig");
 pub const timing = @import("timing.zig");
 pub const apic = @import("apic/root.zig");
+pub const smp = @import("smp.zig");
 
 /// Initialize all x86_64 HAL subsystems
 pub fn init() void {

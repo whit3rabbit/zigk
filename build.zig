@@ -384,6 +384,23 @@ pub fn build(b: *std.Build) void {
     video_module.addImport("console", console_module);
     video_module.addImport("heap", heap_module);
 
+    // Create Audio driver module
+    const audio_module = b.createModule(.{
+        .root_source_file = b.path("src/drivers/audio/root.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    audio_module.addImport("hal", hal_module);
+    audio_module.addImport("pci", pci_module);
+    audio_module.addImport("pmm", pmm_module);
+    audio_module.addImport("vmm", vmm_module);
+    audio_module.addImport("console", console_module);
+    audio_module.addImport("uapi", uapi_module);
+    audio_module.addImport("fd", fd_module);
+    audio_module.addImport("sync", sync_module);
+    audio_module.addImport("heap", heap_module);
+    audio_module.addImport("sched", sched_module);
+
     // Create Mouse driver module
     const mouse_module = b.createModule(.{
         .root_source_file = b.path("src/drivers/mouse.zig"),
@@ -408,6 +425,7 @@ pub fn build(b: *std.Build) void {
     devfs_module.addImport("sched", sched_module);
     devfs_module.addImport("uapi", uapi_module);
     devfs_module.addImport("ahci", ahci_module);
+    devfs_module.addImport("audio", audio_module);
 
     // Create Process module (process abstraction for fork/exec/wait)
     const process_module = b.createModule(.{
@@ -598,6 +616,7 @@ pub fn build(b: *std.Build) void {
     kernel.root_module.addImport("serial_driver", serial_module);
     kernel.root_module.addImport("video_driver", video_module);
     kernel.root_module.addImport("mouse", mouse_module);
+    kernel.root_module.addImport("audio", audio_module);
     kernel.root_module.addImport("thread", thread_module);
     kernel.root_module.addImport("sched", sched_module);
     kernel.root_module.addImport("kernel_stack", kernel_stack_module);
@@ -615,6 +634,9 @@ pub fn build(b: *std.Build) void {
 
     // Add assembly helpers for x86_64 (ISR stubs, lgdt, lidt)
     kernel.addAssemblyFile(b.path("src/arch/x86_64/asm_helpers.S"));
+
+    // Add SMP trampoline code
+    kernel.addAssemblyFile(b.path("src/arch/x86_64/smp_trampoline.S"));
 
     // Note: boot32.S is no longer needed - Limine handles 64-bit entry directly
 
@@ -743,6 +765,26 @@ pub fn build(b: *std.Build) void {
     const install_test_writev = b.addInstallArtifact(test_writev, .{});
     b.getInstallStep().dependOn(&install_test_writev.step);
 
+    // Audio Test
+    const audio_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/user/audio_test.zig"),
+        .target = b.resolveTargetQuery(.{
+             .cpu_arch = .x86_64,
+             .os_tag = .freestanding,
+             .abi = .none,
+        }),
+        .optimize = optimize,
+    });
+    audio_test_mod.addImport("syscall", syscall_lib);
+
+    const audio_test = b.addExecutable(.{
+        .name = "audio_test",
+        .root_module = audio_test_mod,
+    });
+    audio_test.setLinkerScript(b.path("src/user/linker.ld"));
+    const install_audio_test = b.addInstallArtifact(audio_test, .{});
+    b.getInstallStep().dependOn(&install_audio_test.step);
+
     // Create ISO build step using Limine bootloader
     // Use v5.x binary branch which has prebuilt files
     const iso_cmd = b.addSystemCommand(&.{
@@ -766,6 +808,7 @@ pub fn build(b: *std.Build) void {
         \\cp zig-out/bin/test_random iso_root/boot/modules/ && \
         \\cp zig-out/bin/test_asm iso_root/boot/modules/ && \
         \\cp zig-out/bin/test_writev iso_root/boot/modules/ && \
+        \\cp zig-out/bin/audio_test iso_root/boot/modules/ && \
         \\cp limine.cfg iso_root/boot/ && \
         \\cp "$LIMINE_DIR"/limine-bios.sys iso_root/boot/ && \
         \\cp "$LIMINE_DIR"/limine-bios-cd.bin iso_root/boot/ && \
@@ -793,6 +836,7 @@ pub fn build(b: *std.Build) void {
         "-cdrom", "zscapek.iso",
         "-device", "qemu-xhci,id=xhci",
         "-device", "virtio-gpu-pci",
+        "-device", "AC97",
         "-serial", "stdio",
         "-no-reboot",
         "-no-shutdown",
