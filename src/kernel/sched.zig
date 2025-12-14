@@ -595,6 +595,12 @@ pub fn timerTick(frame: *hal.idt.InterruptFrame) *hal.idt.InterruptFrame {
         // console.info("timerTick: got thread from queue '{s}'", .{next_thread.?.getName()});
     }
 
+    // CRITICAL FIX: Ensure next_thread is valid. 
+    // If getIdleThread() returned null/0 (due to GS issue), we must catch it here.
+    if (next_thread == null) {
+        console.panic("Sched: Failed to select next thread (Idle thread missing?)", .{});
+    }
+
     const next = next_thread.?;
     // console.info("timerTick: next thread '{s}' state={} kernel_rsp={x}", .{
     //     next.getName(), @intFromEnum(next.state), next.kernel_rsp,
@@ -644,16 +650,6 @@ pub fn timerTick(frame: *hal.idt.InterruptFrame) *hal.idt.InterruptFrame {
 
     next.state = .Running;
     setCurrentThread(next);
-
-    // DEBUG: Verify the interrupt frame before context switch
-    // const frame_ptr: *hal.idt.InterruptFrame = @ptrFromInt(next.kernel_rsp);
-    // console.debug("timerTick: switch to '{s}' tid={d} kernel_rsp={x}", .{
-    //     next.getName(), next.tid, next.kernel_rsp,
-    // });
-    // console.debug("timerTick: frame.cs={x} frame.ss={x} frame.rip={x} rflags={x}", .{
-    //     frame_ptr.cs, frame_ptr.ss, frame_ptr.rip, frame_ptr.rflags,
-    // });
-    // console.debug("timerTick: EXIT returning {x}", .{next.kernel_rsp});
 
     // Return the new thread's saved interrupt frame
     // isr_common will pop registers from this location and iretq

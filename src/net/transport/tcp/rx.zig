@@ -30,19 +30,7 @@ const seqGte = types.seqGte;
 // Implements the "SEGMENT ARRIVAL" event processing logic.f packet was handled
 pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
     state.lock.acquire();
-    // FIX: Do not release state.lock here. We hold it for the entire duration to prevent
-    // race conditions with api.zig (which holds state.lock but not tcb.mutex) and to
-    // allow safe modification of global state (e.g. freeTcb).
-    // This effectively uses state.lock as a coarse-grained lock for the TCP subsystem.
-    // defer state.lock.release(); // Already deferred at top if we don't release manually?
-    // Wait, the original code had:
-    // state.lock.acquire();
-    // defer state.lock.release();
-    // ...
-    // state.lock.release(); // Early release!
-
-    // So if I simply remove the early release, the defer will handle it at end of function.
-    // Correct.
+    defer state.lock.release(); // Hold lock for entire function duration
 
     // Validate minimum TCP header size
     if (pkt.len < pkt.transport_offset + c.TCP_HEADER_SIZE) {
@@ -80,7 +68,6 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
         const held = tcb.mutex.acquire();
         defer held.release();
 
-        // Removed early release of state.lock
         return processEstablishedPacket(tcb, pkt, tcp_hdr);
     }
 
@@ -90,7 +77,6 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
         const held = listen_tcb.mutex.acquire();
         defer held.release();
 
-        // Removed early release of state.lock
         return processListenPacket(iface, listen_tcb, pkt, tcp_hdr);
     }
 

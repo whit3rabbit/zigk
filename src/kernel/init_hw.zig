@@ -30,13 +30,12 @@ fn multicastUpdate(iface: *net.Interface) void {
 }
 
 fn rxCallbackAdapter(data: []u8) void {
+    // Return buffer to packet pool when done (defer runs after processFrame)
+    defer e1000e.packet_pool.release(data);
+
     // Wrap data in PacketBuffer and pass to network stack
     var pkt = net.PacketBuffer.init(data, data.len);
     _ = net.processFrame(&net_interface, &pkt);
-
-    // Free the buffer allocated by the driver
-    // This was allocated in drivers/net/e1000e.zig:processRxLimited via heap.allocator().alloc
-    heap.allocator().free(data);
 }
 
 pub fn initNetwork() void {
