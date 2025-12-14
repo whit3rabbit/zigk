@@ -167,6 +167,7 @@ pub fn init(info: *const ApicInitInfo) void {
     const bsp_id: u8 = @truncate(lapic.getId());
 
     // Timer (IRQ0 -> vector 32)
+    // NOTE: If using LAPIC timer, we might mask this later, but routing it is fine for now
     const timer_gsi = info.getGsiForIrq(0);
     ioapic.routeIsaIrq(0, Vectors.TIMER, bsp_id, timer_gsi, info.getOverridePtr(0));
 
@@ -178,6 +179,29 @@ pub fn init(info: *const ApicInitInfo) void {
 
     interrupt_mode = .Apic;
     console.info("APIC: Initialization complete (APIC mode active)", .{});
+}
+
+/// Initialize the LAPIC timer for scheduling
+/// This should be called after APIC init and TSC calibration
+pub fn initTimer() void {
+    if (interrupt_mode != .Apic) {
+        console.warn("APIC: Cannot init timer, APIC not active", .{});
+        return;
+    }
+
+    console.info("APIC: Calibrating Local APIC timer...", .{});
+
+    // Calibrate LAPIC timer against PIT/TSC
+    lapic.calibrateTimer();
+
+    // Enable periodic timer at 100Hz (same as PIT)
+    // We use the dedicated TIMER_VECTOR (48)
+    lapic.enablePeriodicTimer(100, lapic.TIMER_VECTOR);
+
+    // Mask the legacy PIT IRQ (IRQ0) since we are using LAPIC timer
+    disableIrq(0);
+
+    console.info("APIC: LAPIC timer enabled at 100Hz (Vector {d})", .{lapic.TIMER_VECTOR});
 }
 
 /// Check if APIC mode is active

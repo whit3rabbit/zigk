@@ -95,6 +95,14 @@ pub fn init() void {
     for (32..48) |i| {
         idt.registerHandler(@truncate(i), irqHandler);
     }
+
+    // Register LAPIC Timer handler (vector 48)
+    // We reuse irqHandler logic or direct dispatch?
+    // irqHandler handles EOI logic based on vector.
+    // Vector 48 is not an IRQ (IRQ0-15 map to 32-47).
+    // So we should register a specific handler or use a generic one.
+    // However, for consistency with `timerTick` callback, let's use a specific handler.
+    idt.registerHandler(apic.lapic.TIMER_VECTOR, lapicTimerHandler);
 }
 
 /// Set the console writer for debug output
@@ -255,6 +263,20 @@ fn exceptionHandler(frame: *idt.InterruptFrame) void {
 extern const _asm_copy_user_start: anyopaque;
 extern const _asm_copy_user_end: anyopaque;
 extern const _asm_copy_user_fixup: anyopaque;
+
+/// LAPIC Timer handler
+fn lapicTimerHandler(frame: *idt.InterruptFrame) void {
+    // Delegate to scheduler
+    if (timer_handler) |handler| {
+        const returned_frame = handler(frame);
+        if (returned_frame != frame) {
+            idt.setNewFrame(returned_frame);
+        }
+    }
+
+    // Send EOI
+    apic.lapic.sendEoi();
+}
 
 /// Generic IRQ handler
 fn irqHandler(frame: *idt.InterruptFrame) void {
