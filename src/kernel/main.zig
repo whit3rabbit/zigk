@@ -784,38 +784,57 @@ fn initNetwork() void {
 
     // Save PCI state for other subsystems (USB, VirtIO)
     pci_devices = pci_res.devices;
-    pci_ecam = pci_res.ecam;  // Copy by value to avoid dangling reference
 
-    // 3. Initialize E1000e
-    const nic_driver = e1000e.initFromPci(pci_res.devices, &pci_res.ecam) catch |err| {
-        console.warn("E1000e init failed (no supported NIC?): {}", .{err});
-        return;
-    };
+    // Handle PCI Access Mechanism
+    var nic_driver_opt: ?*e1000e.Driver = null;
 
-    // 4. Setup Interface
-    const mac = nic_driver.getMacAddress();
-    net_interface = net.Interface.init("eth0", mac);
-    net_interface.setTransmitFn(txWrapper);
-    net_interface.setMulticastUpdateFn(multicastUpdate);
+    switch (pci_res.access) {
+        .ecam => |*ecam_ptr| {
+             // Store ECAM for drivers that need it
+             pci_ecam = ecam_ptr.*;
 
-    // 5. Initialize Network Stack
-    net.init(&net_interface, heap.allocator(), 100);
+             // 3. Initialize E1000e (requires ECAM)
+             nic_driver_opt = e1000e.initFromPci(pci_res.devices, ecam_ptr) catch |err| {
+                console.warn("E1000e init failed (no supported NIC?): {}", .{err});
+                null
+             };
+        },
+        .legacy => {
+            console.warn("PCI Legacy mode: Skipping E1000e (requires ECAM)", .{});
+            // pci_ecam remains null, so USB/AHCI will be skipped too
+        }
+    }
 
-    // Program initial multicast filter (defaults to all-multicast until IGMP joins)
-    multicastUpdate(&net_interface);
+    // 4. Setup Network if Driver Available
+    if (nic_driver_opt) |nic_driver| {
+        const mac = nic_driver.getMacAddress();
+        net_interface = net.Interface.init("eth0", mac);
+        net_interface.setTransmitFn(txWrapper);
+        net_interface.setMulticastUpdateFn(multicastUpdate);
 
-    // 6. Register Callbacks
-    nic_driver.setRxCallback(rxCallbackAdapter);
-    sched.setTickCallback(net.transport.tcpProcessTimers);
+        // 5. Initialize Network Stack
+        net.init(&net_interface, heap.allocator(), 100);
 
-    console.info("Network initialized (MAC={x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2})", .{
-        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
-    });
+        // Program initial multicast filter
+        multicastUpdate(&net_interface);
+
+        // 6. Register Callbacks
+        nic_driver.setRxCallback(rxCallbackAdapter);
+        sched.setTickCallback(net.transport.tcpProcessTimers);
+
+        console.info("Network initialized (MAC={x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2})", .{
+            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+        });
+    } else {
+        console.warn("Network stack skipped (no NIC driver)", .{});
+    }
 
     // Initialize loopback interface for local (127.x.x.x) traffic
-    const lo = net.loopback.init();
-    lo.up();
-    console.info("Loopback interface initialized (127.0.0.1)", .{});
+    if (nic_driver_opt != null) {
+        const lo = net.loopback.init();
+        lo.up();
+        console.info("Loopback interface initialized (127.0.0.1)", .{});
+    }
 }
 
 // ============================================================================
