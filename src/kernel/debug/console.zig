@@ -51,7 +51,7 @@ pub fn printUnsafe(str: []const u8) void {
 /// Scroll standard output up/down
 pub fn scroll(lines: usize, up: bool) void {
     if (backend_count == 0) return;
-    
+
     // Only scroll the first backend usually (graphical console)
     // Or iterate all? Typically only one graphical console exists.
     for (backends[0..backend_count]) |b| {
@@ -59,6 +59,22 @@ pub fn scroll(lines: usize, up: bool) void {
             scrollFn(b.context, lines, up);
         }
     }
+}
+
+/// Disable graphical backend when userspace claims exclusive framebuffer access.
+/// Kernel output continues on serial only. Graphical backends are identified by
+/// having a non-null scrollFn (serial backends don't support scrolling).
+pub fn disableGraphicalBackend() void {
+    var new_count: usize = 0;
+    for (backends[0..backend_count]) |b| {
+        // Keep backends without scroll support (serial)
+        // Remove backends with scroll support (graphical)
+        if (b.scrollFn == null) {
+            backends[new_count] = b;
+            new_count += 1;
+        }
+    }
+    backend_count = new_count;
 }
 
 /// Print a formatted string to the debug console

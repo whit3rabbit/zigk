@@ -354,7 +354,9 @@ export fn _start() noreturn {
     initBlockFs();
 
     // Try to initialize VirtIO-GPU (paravirtualized GPU)
-    initVirtioGpu();
+    // Disabled for Doom compatibility: VirtIO driver takes over display but doesn't
+    // update simple framebuffer syscalls, causing Doom to write to invisible memory.
+    // initVirtioGpu();
 
     // Load Init Process (httpd or shell) from modules
     console.info("Main: Calling loadInitProcess()...", .{});

@@ -588,6 +588,11 @@ pub fn sys_map_fb() SyscallError!usize {
         fb_size,
     });
 
+    // Disable graphical console - userspace now owns the framebuffer exclusively.
+    // Kernel output continues on serial only to avoid overwriting userspace graphics.
+    console.disableGraphicalBackend();
+    console.info("Framebuffer: Transferred to userspace (serial-only mode)", .{});
+
     // Return the mapped virtual address
     return @intCast(fb_virt_base);
 }
