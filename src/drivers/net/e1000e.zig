@@ -768,9 +768,8 @@ pub const E1000e = struct {
         @atomicStore(bool, &driver_initialized, true, .release);
 
         // Create worker thread
-        // Cast to expected function type via int to bypass validation
-        const entry_fn = @as(*const fn() void, @ptrFromInt(@intFromPtr(&workerEntry)));
-        driver.worker_thread = try thread.createKernelThread(entry_fn, .{
+        // Pass workerEntry directly (it is now compatible callconv(.c)) and the driver instance as context
+        driver.worker_thread = try thread.createKernelThread(workerEntry, driver, .{
             .name = "net_worker",
             .priority = 10, // High priority
         });
@@ -1907,122 +1906,16 @@ pub fn irqHandler() void {
 
     /// Static worker entry point
     /// Runs workerLoop then exits cleanly so deinit() can join the thread.
-    fn workerEntry() callconv(.c) void {
+    fn workerEntry(ctx: ?*anyopaque) callconv(.c) void {
         console.info("E1000e: Worker thread started", .{});
-        if (getDriver()) |driver| {
+        if (ctx) |ptr| {
+            const driver: *E1000e = @ptrCast(@alignCast(ptr));
             console.info("E1000e: Worker thread entering loop with driver={*}", .{driver});
             
-            // Inline workerLoop logic here to avoid ABI/Calling Convention issues
-            const BATCH_LIMIT = 64;
-
-            while (!@atomicLoad(bool, &driver.shutdown_requested, .acquire)) {
-                // Atomic load prevents torn pointer read if setRxCallback() called concurrently
-                const cb = @atomicLoad(?*const fn ([]u8) void, &driver.rx_callback, .acquire) orelse &defaultRxCallback;
-
-                // Process a batch of packets using packet pool (avoids heap alloc under spinlock)
-                // Manually inlined processRxLimited to bypass ABI crash
-                const processed = blk: {
-                    var count: usize = 0;
-                    var batch_count: usize = 0;
-
-                    while (count < BATCH_LIMIT) {
-                        // Acquire buffer from packet pool OUTSIDE driver spinlock
-                        const pkt_buf = packet_pool.acquire() orelse break;
-
-                        const held = driver.lock.acquire();
-                        const desc = &driver.rx_ring[driver.rx_cur];
-
-                        if ((desc.status & RxDesc.STATUS_DD) == 0) {
-                            held.release();
-                            packet_pool.release(pkt_buf);
-                            break;
-                        }
-
-                        mmio.readBarrier();
-
-                        if (desc.errors != 0) {
-                            driver.logRxErrors(desc.errors);
-                            // Fall through to reset descriptor
-                        } else if ((desc.status & RxDesc.STATUS_EOP) != 0) {
-                            const raw_len: usize = @min(@as(usize, desc.length), BUFFER_SIZE);
-                            if (raw_len < 14) {
-                                driver.rx_dropped += 1;
-                            } else {
-                                const buf = driver.rx_buffers[driver.rx_cur];
-                                @memcpy(pkt_buf[0..raw_len], buf[0..raw_len]);
-                                driver.rx_packets += 1;
-                                driver.rx_bytes += raw_len;
-
-                                // Reset descriptor before releasing lock
-                                desc.status = 0;
-                                desc.errors = 0;
-                                desc.length = 0;
-
-                                driver.rx_cur = @truncate((@as(u32, driver.rx_cur) + 1) % RX_DESC_COUNT);
-                                count += 1;
-                                batch_count += 1;
-
-                                if (batch_count >= 16) {
-                                    driver.updateRdt();
-                                    batch_count = 0;
-                                }
-
-                                held.release();
-
-                                // Callback OUTSIDE spinlock - takes ownership of buffer
-                                cb(pkt_buf[0..raw_len]);
-                                continue;
-                            }
-                        }
-
-                        // Error path: reset descriptor and return buffer to pool
-                        desc.status = 0;
-                        desc.errors = 0;
-                        desc.length = 0;
-
-                        driver.rx_cur = @truncate((@as(u32, driver.rx_cur) + 1) % RX_DESC_COUNT);
-                        count += 1;
-                        batch_count += 1;
-
-                        if (batch_count >= 16) {
-                            driver.updateRdt();
-                            batch_count = 0;
-                        }
-
-                        held.release();
-                        packet_pool.release(pkt_buf);
-                    }
-
-                    if (batch_count > 0) {
-                        const held = driver.lock.acquire();
-                        driver.updateRdt();
-                        held.release();
-                    }
-                    break :blk count;
-                };
-
-                if (processed < BATCH_LIMIT) {
-                    // We drained the ring (or close to it).
-                    const flags = hal.cpu.disableInterruptsSaveFlags();
-
-                    // Re-enable RX interrupts FIRST
-                    driver.writeReg(Reg.IMS, INT.RXT0 | INT.RXDMT0);
-
-                    // Memory barrier
-                    mmio.writeBarrier();
-
-                    // Now check if we should block.
-                    if (!driver.hasPackets() and !@atomicLoad(bool, &driver.shutdown_requested, .acquire)) {
-                        sched.block();
-                    }
-                    hal.cpu.restoreInterrupts(flags);
-                } else {
-                    // We hit the batch limit, there might be more packets.
-                    sched.yield();
-                }
-            }
+            // Now we can safely call the member function because we have the correct self pointer
+            driver.workerLoop();
         } else {
-            console.err("E1000e: Worker thread failed to get driver!", .{});
+            console.err("E1000e: Worker thread failed to get driver context!", .{});
         }
         // Worker thread finished - call scheduler exit to mark thread as Zombie.
         // This allows deinit() to join (wait for Zombie state) before freeing resources.

@@ -198,7 +198,8 @@ fn allocateTid() u32 {
 ///   entry: Function to execute (must not return)
 ///   options: Configuration options (name, stack size, etc.)
 pub fn createKernelThread(
-    entry: *const fn () void,
+    entry: *const fn (?*anyopaque) callconv(.c) void,
+    arg: ?*anyopaque,
     options: ThreadOptions,
 ) ThreadError!*Thread {
     // Check thread limit
@@ -306,7 +307,9 @@ pub fn createKernelThread(
 
     // Set up initial stack frame for context switch
     // The thread will "return" from a fake context switch into entry()
-    thread.kernel_rsp = setupInitialStack(stack_top_virt, @intFromPtr(entry));
+    // Set up initial stack frame for context switch
+    // The thread will "return" from a fake context switch into entry()
+    thread.kernel_rsp = setupInitialStack(stack_top_virt, @intFromPtr(entry), @intFromPtr(arg));
 
     // Update statistics
     total_threads_created += 1;
@@ -462,8 +465,10 @@ pub fn createUserThread(
 /// 1. Pop CS, RIP, RFLAGS, RSP, SS (privilege level change or not).
 /// 2. Jump to `entry_rip` with the specified stack.
 ///
+///   arg: Argument to pass to the thread (passed in RDI)
+///
 /// Returns the adjusted stack pointer (initial RSP).
-fn setupInitialStack(stack_top: u64, entry_rip: u64) u64 {
+fn setupInitialStack(stack_top: u64, entry_rip: u64, arg: u64) u64 {
     var sp = stack_top;
 
     // Build a fake interrupt frame that matches what isr_common expects
@@ -503,7 +508,7 @@ fn setupInitialStack(stack_top: u64, entry_rip: u64) u64 {
     sp -= 8;
     writeStackU64(sp, 0); // RSI
     sp -= 8;
-    writeStackU64(sp, 0); // RDI
+    writeStackU64(sp, arg); // RDI (First element of System V ABI)
     sp -= 8;
     writeStackU64(sp, 0); // R8
     sp -= 8;

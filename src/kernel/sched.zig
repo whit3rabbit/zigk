@@ -175,7 +175,8 @@ fn wakeSleepingThreads(now: u64) void {
 
 /// Idle thread entry point - runs when no other threads are ready
 /// Idle thread entry point - runs when no other threads are ready
-fn idleThreadEntry() void {
+fn idleThreadEntry(ctx: ?*anyopaque) callconv(.c) void {
+    _ = ctx;
     // Just enable interrupts and halt loop.
     // We rely on the timer interrupt to preempt us when work is available.
     hal.cpu.enableInterrupts();
@@ -215,7 +216,7 @@ pub fn init() void {
 
 /// Initialize idle thread for current CPU
 fn initIdleThread() void {
-    const idle = thread.createKernelThread(idleThreadEntry, .{
+    const idle = thread.createKernelThread(idleThreadEntry, null, .{
         .name = "idle",
         .stack_size = 4096, // Idle thread needs minimal stack
     }) catch |err| {

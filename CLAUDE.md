@@ -258,3 +258,10 @@ fn Matrix(comptime rows: usize, comptime cols: usize) type {
 }
 ```
 - .error is a reserved word in Zig
+
+### Threading Best Practices (ABI Safety)
+When creating kernel threads that need access to context (e.g., driver instances), do **not** rely on Zig method calls or global state. The safest pattern is:
+1. Define the entry point as `fn entry(ctx: ?*anyopaque) callconv(.c) void`.
+2. Pass the context pointer (e.g., `self`) during thread creation.
+3. In the entry point, cast `ctx` back to the concrete type: `const self: *Type = @ptrCast(@alignCast(ptr))`.
+4. This ensures ABI compatibility (System V AMD64 passes 1st arg in RDI, which `createKernelThread` sets up) and avoids "NULL self" crashes caused by mismatching Zig vs C calling conventions.
