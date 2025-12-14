@@ -234,3 +234,15 @@ pub inline fn rdtsc() u64 {
     );
     return (@as(u64, high) << 32) | low;
 }
+
+/// Busy-wait delay (microseconds, approximate)
+/// Uses PAUSE instruction for efficient spinning
+pub inline fn stall(us: u32) void {
+    // Simple busy wait - actual timing is approximate
+    // Each iteration is roughly 1us on modern CPUs
+    var i: u32 = 0;
+    while (i < us) : (i += 1) {
+        // PAUSE instruction for efficient spinning
+        asm volatile ("pause");
+    }
+}

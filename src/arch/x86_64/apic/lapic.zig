@@ -394,8 +394,7 @@ pub fn sendIpi(
 ) void {
     if (x2apic_enabled) {
         // x2APIC: single 64-bit ICR write
-        const icr: u64 = (@as(u64, dest_apic_id) << 32) |
-            @as(u64, @bitCast(IcrLow{
+        const icr_low: u32 = @bitCast(IcrLow{
             .vector = vector,
             .delivery_mode = delivery_mode,
             .dest_mode = .physical,
@@ -403,7 +402,8 @@ pub fn sendIpi(
             .level = .assert,
             .trigger_mode = .edge,
             .dest_shorthand = shorthand,
-        }));
+        });
+        const icr: u64 = (@as(u64, dest_apic_id) << 32) | @as(u64, icr_low);
         cpu.writeMsr(X2APIC.ICR, icr);
     } else {
         // xAPIC: write ICR_HIGH first, then ICR_LOW

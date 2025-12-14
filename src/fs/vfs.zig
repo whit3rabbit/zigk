@@ -119,7 +119,7 @@ pub const Vfs = struct {
         var best_match: ?*const MountPoint = null;
         var best_len: usize = 0;
 
-        for (mounts) |*m| {
+        for (&mounts) |*m| {
             if (m.*) |*mount_point| {
                 if (std.mem.startsWith(u8, path, mount_point.path)) {
                     const mp_len = mount_point.path.len;
@@ -191,7 +191,6 @@ fn initrdOpen(ctx: ?*anyopaque, path: []const u8, flags: u32) Error!*fd.FileDesc
         return switch (err) {
             error.FileNotFound => error.NotFound,
             error.OutOfMemory => error.NoMemory,
-            else => error.IOError,
         };
     };
     return res;

@@ -30,7 +30,7 @@ const framebuffer = @import("framebuffer");
 const fs = @import("fs");
 const elf = @import("elf");
 const process_mod = @import("process");
-const handlers = @import("syscall_handlers");
+const syscall_base = @import("syscall_base");
 const net = @import("net");
 const pci = @import("pci");
 const e1000e = @import("e1000e");
@@ -109,6 +109,8 @@ var bsp_gs_data: syscall_arch.KernelGsData = .{
     .user_stack = 0,
     .current_thread = 0,
     .scratch = 0,
+    .apic_id = 0, // BSP is APIC ID 0
+    .idle_thread = 0,
 };
 
 // Global driver instances
@@ -293,7 +295,8 @@ export fn _start() noreturn {
 
     // Initialize SMP (bring up APs)
     // Must be done after APIC init
-    hal.smp.init();
+    // TODO: SMP support is incomplete - assembly trampoline missing required symbols
+    // hal.smp.init();
 
     // Initialize keyboard driver and register with HAL
     keyboard.init();
@@ -439,7 +442,7 @@ fn loadInitProcess() void {
     };
 
     // Step 2: Set as current process so syscall handlers can access FD table
-    handlers.setCurrentProcess(proc);
+    syscall_base.setCurrentProcess(proc);
     console.info("Created process pid={d} with FD table", .{proc.pid});
 
     // Step 3: Get module data as slice for ELF loader

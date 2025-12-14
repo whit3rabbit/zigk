@@ -16,7 +16,7 @@ const Thread = thread.Thread;
 const user_mem = @import("user_mem");
 const fd_mod = @import("fd");
 const heap = @import("heap");
-const syscall_handlers = @import("handlers");
+const base = @import("base.zig");
 
 /// Wake function for blocked threads - called from TCP/socket layer
 fn wakeBlockedThread(opaque_thread: ?*anyopaque) void {
@@ -77,7 +77,7 @@ fn getSocketData(fd: *FileDescriptor) ?*SocketFdData {
 }
 
 fn getSocketContext(fd_num: usize) ?struct { fd: *FileDescriptor, socket_idx: usize } {
-    const table = syscall_handlers.getGlobalFdTable();
+    const table = base.getGlobalFdTable();
     const fd = table.get(@intCast(fd_num)) orelse return null;
     const ctx = getSocketData(fd) orelse return null;
     return .{ .fd = fd, .socket_idx = ctx.socket_idx };
@@ -95,7 +95,7 @@ fn installSocketFd(socket_idx: usize) SyscallError!usize {
     };
     errdefer heap.allocator().destroy(fd);
 
-    const table = syscall_handlers.getGlobalFdTable();
+    const table = base.getGlobalFdTable();
     const fd_num = table.allocFdNum() orelse {
         return error.EMFILE;
     };

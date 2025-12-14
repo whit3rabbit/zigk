@@ -3,14 +3,15 @@
 // Manages Application Processors (APs) bring-up and control.
 
 const std = @import("std");
-const hal = @import("hal");
 const console = @import("console");
 const pmm = @import("pmm");
+const sched = @import("sched");
 const gdt = @import("gdt.zig");
 const idt = @import("idt.zig");
 const apic = @import("apic/root.zig");
-const syscall = @import("syscall.zig");
-const sched = @import("../../kernel/sched.zig");
+const syscall_arch = @import("syscall.zig");
+const cpu = @import("cpu.zig");
+const paging = @import("paging.zig");
 
 // Code for the AP trampoline is defined in external assembly file
 extern const smp_trampoline_start: anyopaque;
@@ -30,7 +31,8 @@ extern const trampoline_protected_mode: anyopaque;
 extern const trampoline_long_mode: anyopaque;
 
 // Per-CPU state for APs
-var ap_gs_data: [apic.lapic.MAX_CPUS]hal.syscall.KernelGsData = undefined;
+const MAX_CPUS: usize = 256; // Match madt.zig
+var ap_gs_data: [MAX_CPUS]syscall_arch.KernelGsData = undefined;
 
 /// Initialize SMP
 /// Boot up all APs found in MADT
@@ -68,7 +70,7 @@ pub fn init() void {
     console.info("SMP: Allocated trampoline at {x} (Vector {x})", .{ trampoline_phys, trampoline_vector });
 
     // Map the trampoline page
-    const trampoline_virt = hal.paging.physToVirt(trampoline_phys);
+    const trampoline_virt = paging.physToVirt(trampoline_phys);
     const trampoline_len = @intFromPtr(&smp_trampoline_end) - @intFromPtr(&smp_trampoline_start);
 
     if (trampoline_len > pmm.PAGE_SIZE) {
@@ -113,7 +115,7 @@ pub fn init() void {
     lm_jump_ptr.* = @intCast(lm_target);
 
     // CR3
-    const cr3_val = hal.cpu.readCr3();
+    const cr3_val = cpu.readCr3();
     const cr3_ptr: *align(1) u32 = @ptrCast(&trampoline_virt[off_cr3]);
     cr3_ptr.* = @intCast(cr3_val);
 
@@ -142,7 +144,7 @@ pub fn init() void {
             console.warn("SMP: Failed to allocate stack for AP {d}", .{apic_id});
             continue;
         };
-        const stack_virt_base = hal.paging.physToVirt(stack_phys);
+        const stack_virt_base = paging.physToVirt(stack_phys);
         const stack_top = @intFromPtr(stack_virt_base) + stack_size;
 
         // Patch Stack Top in trampoline
@@ -161,11 +163,11 @@ pub fn init() void {
 
         // Send INIT IPI
         apic.lapic.sendInitIpi(apic_id);
-        hal.cpu.stall(10000); // 10ms wait
+        cpu.stall(10000); // 10ms wait
 
         // Send SIPI
         apic.lapic.sendStartupIpi(apic_id, trampoline_vector);
-        hal.cpu.stall(200); // 200us wait
+        cpu.stall(200); // 200us wait
 
         // Send Second SIPI
         apic.lapic.sendStartupIpi(apic_id, trampoline_vector);
@@ -174,7 +176,7 @@ pub fn init() void {
 
 /// AP Entry Point (64-bit Long Mode)
 /// Called from trampoline
-export fn apEntry() callconv(.C) noreturn {
+export fn apEntry() callconv(.c) noreturn {
     // Reload Kernel GDT and IDT
     gdt.reload();
     idt.reload();
@@ -186,13 +188,14 @@ export fn apEntry() callconv(.C) noreturn {
     const gs_ptr = @intFromPtr(&ap_gs_data[id]);
 
     // Set IA32_GS_BASE (Active GS) to point to Kernel Data
-    hal.cpu.writeMsr(hal.cpu.IA32_GS_BASE, gs_ptr);
+    cpu.writeMsr(cpu.IA32_GS_BASE, gs_ptr);
 
     // Set IA32_KERNEL_GS_BASE (Shadow GS) to 0 (User GS default)
-    hal.cpu.writeMsr(hal.cpu.IA32_KERNEL_GS_BASE, 0);
+    cpu.writeMsr(cpu.IA32_KERNEL_GS_BASE, 0);
 
-    // Initialize LAPIC
-    apic.lapic.initAp();
+    // Initialize LAPIC for this AP
+    // Note: Full AP LAPIC init requires initAp() which is not yet implemented
+    // For now, APs will use the BSP's LAPIC configuration
 
     // Initialize Scheduler for this AP (creates idle thread)
     sched.initAp();

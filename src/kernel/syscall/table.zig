@@ -11,12 +11,21 @@
 
 const std = @import("std");
 const uapi = @import("uapi");
-const handlers = @import("handlers.zig");
-const net = @import("net.zig");
-const random = @import("random.zig");
 const console = @import("console");
 const hal = @import("hal");
 const signal = @import("signal");
+
+// Handler modules (split from handlers.zig)
+const process = @import("process.zig");
+const signals = @import("signals.zig");
+const scheduling = @import("scheduling.zig");
+const io = @import("io.zig");
+const fd = @import("fd.zig");
+const memory = @import("memory.zig");
+const execution = @import("execution.zig");
+const custom = @import("custom.zig");
+const net = @import("net.zig");
+const random = @import("random.zig");
 
 /// Syscall frame from arch-specific entry
 pub const SyscallFrame = hal.syscall.SyscallFrame;
@@ -40,10 +49,26 @@ pub export fn dispatch_syscall(frame: *SyscallFrame) callconv(.c) void {
                     const name = toSyscallName(decl.name);
                     var mod: ?type = null;
 
+                    // Search handler modules in order of priority
+                    // net.zig has socket syscalls that override stubs in execution.zig
                     if (@hasDecl(net, name)) {
                         mod = net;
-                    } else if (@hasDecl(handlers, name)) {
-                        mod = handlers;
+                    } else if (@hasDecl(process, name)) {
+                        mod = process;
+                    } else if (@hasDecl(signals, name)) {
+                        mod = signals;
+                    } else if (@hasDecl(scheduling, name)) {
+                        mod = scheduling;
+                    } else if (@hasDecl(io, name)) {
+                        mod = io;
+                    } else if (@hasDecl(fd, name)) {
+                        mod = fd;
+                    } else if (@hasDecl(memory, name)) {
+                        mod = memory;
+                    } else if (@hasDecl(execution, name)) {
+                        mod = execution;
+                    } else if (@hasDecl(custom, name)) {
+                        mod = custom;
                     } else if (@hasDecl(random, name)) {
                         mod = random;
                     }

@@ -598,6 +598,7 @@ pub fn timerTick(frame: *hal.idt.InterruptFrame) *hal.idt.InterruptFrame {
     if (current != next) {
         if (config.debug_scheduler) {
             const curr_name = if (current) |c| c.getName() else "none";
+            _ = curr_name; // Used when debug logging is enabled
             // console.debug("Sched: Switch {s} -> {s}", .{ curr_name, next.getName() });
         }
 

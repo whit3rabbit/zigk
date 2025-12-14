@@ -238,6 +238,8 @@ pub fn build(b: *std.Build) void {
 
     // Break circular dependency shim
     sync_module.addImport("sched", sched_module);
+    hal_module.addImport("sched", sched_module);
+    hal_module.addImport("pmm", pmm_module);
 
     // Create Stack Guard module (stack canary support)
     const stack_guard_module = b.createModule(.{
@@ -336,6 +338,7 @@ pub fn build(b: *std.Build) void {
     fs_module.addImport("fd", fd_module);
     fs_module.addImport("heap", heap_module);
     fs_module.addImport("uapi", uapi_module);
+    fs_module.addImport("console", console_module);
 
     // Create Keyboard driver module
     const keyboard_module = b.createModule(.{
@@ -400,6 +403,7 @@ pub fn build(b: *std.Build) void {
     audio_module.addImport("sync", sync_module);
     audio_module.addImport("heap", heap_module);
     audio_module.addImport("sched", sched_module);
+    audio_module.addImport("thread", thread_module);
 
     // Create Mouse driver module
     const mouse_module = b.createModule(.{
@@ -426,6 +430,7 @@ pub fn build(b: *std.Build) void {
     devfs_module.addImport("uapi", uapi_module);
     devfs_module.addImport("ahci", ahci_module);
     devfs_module.addImport("audio", audio_module);
+    devfs_module.addImport("fs", fs_module);
 
     // Create Process module (process abstraction for fork/exec/wait)
     const process_module = b.createModule(.{
@@ -504,31 +509,132 @@ pub fn build(b: *std.Build) void {
     signal_module.addImport("user_mem", user_mem_module);
     signal_module.addImport("console", console_module);
 
-    // Create syscall handlers module
-    const syscall_handlers_module = b.createModule(.{
-        .root_source_file = b.path("src/kernel/syscall/handlers.zig"),
+    // Create syscall base module (shared state for all handlers)
+    const syscall_base_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/syscall/base.zig"),
         .target = kernel_target,
         .optimize = optimize,
     });
-    syscall_handlers_module.addImport("uapi", uapi_module);
-    syscall_handlers_module.addImport("console", console_module);
-    syscall_handlers_module.addImport("hal", hal_module);
-    syscall_handlers_module.addImport("sched", sched_module);
-    syscall_handlers_module.addImport("keyboard", keyboard_module);
-    syscall_handlers_module.addImport("thread", thread_module);
-    syscall_handlers_module.addImport("fd", fd_module);
-    syscall_handlers_module.addImport("devfs", devfs_module);
-    syscall_handlers_module.addImport("user_vmm", user_vmm_module);
-    syscall_handlers_module.addImport("process", process_module);
-    syscall_handlers_module.addImport("vmm", vmm_module);
-    syscall_handlers_module.addImport("pmm", pmm_module);
-    syscall_handlers_module.addImport("heap", heap_module);
-    syscall_handlers_module.addImport("elf", elf_module);
-    syscall_handlers_module.addImport("framebuffer", framebuffer_module);
-    syscall_handlers_module.addImport("fs", fs_module);
-    syscall_handlers_module.addImport("pipe", pipe_module);
-    syscall_handlers_module.addImport("user_mem", user_mem_module);
-    syscall_handlers_module.addImport("signal", signal_module);
+    syscall_base_module.addImport("uapi", uapi_module);
+    syscall_base_module.addImport("console", console_module);
+    syscall_base_module.addImport("sched", sched_module);
+    syscall_base_module.addImport("fd", fd_module);
+    syscall_base_module.addImport("user_vmm", user_vmm_module);
+    syscall_base_module.addImport("process", process_module);
+    syscall_base_module.addImport("user_mem", user_mem_module);
+
+    // Create syscall process module (exit, wait4, getpid, etc.)
+    const syscall_process_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/syscall/process.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    syscall_process_module.addImport("base.zig", syscall_base_module);
+    syscall_process_module.addImport("uapi", uapi_module);
+    syscall_process_module.addImport("console", console_module);
+    syscall_process_module.addImport("hal", hal_module);
+    syscall_process_module.addImport("sched", sched_module);
+    syscall_process_module.addImport("process", process_module);
+
+    // Create syscall signals module (rt_sigprocmask, rt_sigaction, etc.)
+    const syscall_signals_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/syscall/signals.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    syscall_signals_module.addImport("base.zig", syscall_base_module);
+    syscall_signals_module.addImport("uapi", uapi_module);
+    syscall_signals_module.addImport("console", console_module);
+    syscall_signals_module.addImport("hal", hal_module);
+    syscall_signals_module.addImport("sched", sched_module);
+
+    // Create syscall scheduling module (sched_yield, nanosleep, etc.)
+    const syscall_scheduling_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/syscall/scheduling.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    syscall_scheduling_module.addImport("base.zig", syscall_base_module);
+    syscall_scheduling_module.addImport("uapi", uapi_module);
+    syscall_scheduling_module.addImport("hal", hal_module);
+    syscall_scheduling_module.addImport("sched", sched_module);
+
+    // Create syscall io module (read, write, stat, etc.)
+    const syscall_io_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/syscall/io.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    syscall_io_module.addImport("base.zig", syscall_base_module);
+    syscall_io_module.addImport("uapi", uapi_module);
+    syscall_io_module.addImport("console", console_module);
+    syscall_io_module.addImport("fs", fs_module);
+    syscall_io_module.addImport("heap", heap_module);
+    syscall_io_module.addImport("fd", fd_module);
+    syscall_io_module.addImport("user_mem", user_mem_module);
+
+    // Create syscall fd module (open, close, dup, pipe, lseek)
+    const syscall_fd_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/syscall/fd.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    syscall_fd_module.addImport("base.zig", syscall_base_module);
+    syscall_fd_module.addImport("uapi", uapi_module);
+    syscall_fd_module.addImport("console", console_module);
+    syscall_fd_module.addImport("fs", fs_module);
+    syscall_fd_module.addImport("heap", heap_module);
+    syscall_fd_module.addImport("pipe", pipe_module);
+    syscall_fd_module.addImport("fd", fd_module);
+    syscall_fd_module.addImport("user_mem", user_mem_module);
+
+    // Create syscall memory module (mmap, mprotect, munmap, brk)
+    const syscall_memory_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/syscall/memory.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    syscall_memory_module.addImport("base.zig", syscall_base_module);
+    syscall_memory_module.addImport("uapi", uapi_module);
+    syscall_memory_module.addImport("pmm", pmm_module);
+    syscall_memory_module.addImport("user_mem", user_mem_module);
+    syscall_memory_module.addImport("user_vmm", user_vmm_module);
+
+    // Create syscall execution module (fork, execve, arch_prctl, fb syscalls)
+    const syscall_execution_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/syscall/execution.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    syscall_execution_module.addImport("base.zig", syscall_base_module);
+    syscall_execution_module.addImport("uapi", uapi_module);
+    syscall_execution_module.addImport("console", console_module);
+    syscall_execution_module.addImport("hal", hal_module);
+    syscall_execution_module.addImport("sched", sched_module);
+    syscall_execution_module.addImport("process", process_module);
+    syscall_execution_module.addImport("thread", thread_module);
+    syscall_execution_module.addImport("vmm", vmm_module);
+    syscall_execution_module.addImport("pmm", pmm_module);
+    syscall_execution_module.addImport("heap", heap_module);
+    syscall_execution_module.addImport("elf", elf_module);
+    syscall_execution_module.addImport("framebuffer", framebuffer_module);
+    syscall_execution_module.addImport("fs", fs_module);
+    syscall_execution_module.addImport("user_mem", user_mem_module);
+    syscall_execution_module.addImport("user_vmm", user_vmm_module);
+
+    // Create syscall custom module (debug_log, putchar, getchar, etc.)
+    const syscall_custom_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/syscall/custom.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    syscall_custom_module.addImport("base.zig", syscall_base_module);
+    syscall_custom_module.addImport("uapi", uapi_module);
+    syscall_custom_module.addImport("console", console_module);
+    syscall_custom_module.addImport("hal", hal_module);
+    syscall_custom_module.addImport("keyboard", keyboard_module);
+    syscall_custom_module.addImport("heap", heap_module);
+    syscall_custom_module.addImport("sched", sched_module);
 
     // Create syscall random module
     const syscall_random_module = b.createModule(.{
@@ -552,7 +658,7 @@ pub fn build(b: *std.Build) void {
     syscall_net_module.addImport("thread", thread_module);
     syscall_net_module.addImport("hal", hal_module);
     syscall_net_module.addImport("user_mem", user_mem_module);
-    syscall_net_module.addImport("handlers", syscall_handlers_module);
+    syscall_net_module.addImport("base.zig", syscall_base_module);
     syscall_net_module.addImport("heap", heap_module);
     syscall_net_module.addImport("fd", fd_module);
 
@@ -565,10 +671,18 @@ pub fn build(b: *std.Build) void {
     syscall_table_module.addImport("uapi", uapi_module);
     syscall_table_module.addImport("hal", hal_module);
     syscall_table_module.addImport("console", console_module);
-    syscall_table_module.addImport("handlers.zig", syscall_handlers_module);
-    syscall_table_module.addImport("random.zig", syscall_random_module);
-    syscall_table_module.addImport("net.zig", syscall_net_module);
     syscall_table_module.addImport("signal", signal_module);
+    // Handler modules
+    syscall_table_module.addImport("process.zig", syscall_process_module);
+    syscall_table_module.addImport("signals.zig", syscall_signals_module);
+    syscall_table_module.addImport("scheduling.zig", syscall_scheduling_module);
+    syscall_table_module.addImport("io.zig", syscall_io_module);
+    syscall_table_module.addImport("fd.zig", syscall_fd_module);
+    syscall_table_module.addImport("memory.zig", syscall_memory_module);
+    syscall_table_module.addImport("execution.zig", syscall_execution_module);
+    syscall_table_module.addImport("custom.zig", syscall_custom_module);
+    syscall_table_module.addImport("net.zig", syscall_net_module);
+    syscall_table_module.addImport("random.zig", syscall_random_module);
 
     // Create kernel executable
     // NOTE: red_zone must be disabled for kernel code to prevent stack corruption
@@ -628,9 +742,10 @@ pub fn build(b: *std.Build) void {
     kernel.root_module.addImport("fs", fs_module);
     kernel.root_module.addImport("elf", elf_module);
     kernel.root_module.addImport("process", process_module);
-    kernel.root_module.addImport("syscall_handlers", syscall_handlers_module);
+    kernel.root_module.addImport("syscall_base", syscall_base_module);
     kernel.root_module.addImport("signal", signal_module);
     kernel.root_module.addImport("devfs", devfs_module);
+    kernel.root_module.addImport("fd", fd_module);
 
     // Add assembly helpers for x86_64 (ISR stubs, lgdt, lidt)
     kernel.addAssemblyFile(b.path("src/arch/x86_64/asm_helpers.S"));
@@ -701,6 +816,87 @@ pub fn build(b: *std.Build) void {
     // Install httpd as ELF (required for proper ELF loading in kernel)
     const install_httpd = b.addInstallArtifact(httpd, .{});
     b.getInstallStep().dependOn(&install_httpd.step);
+
+    // Build Doom
+    // Create libc module with syscall dependency
+    const doom_libc_module = b.createModule(.{
+        .root_source_file = b.path("src/user/lib/libc.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    doom_libc_module.addImport("syscall.zig", syscall_lib);
+
+    // Create platform hooks module
+    const doom_platform_module = b.createModule(.{
+        .root_source_file = b.path("src/user/doom/doomgeneric_zscapek.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    doom_platform_module.addImport("syscall", syscall_lib);
+
+    // Create sound stubs module
+    const doom_sound_module = b.createModule(.{
+        .root_source_file = b.path("src/user/doom/i_sound_stub.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+
+    const doom_mod = b.createModule(.{
+        .root_source_file = b.path("src/user/doom/main.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+        .code_model = .small,
+    });
+    doom_mod.addImport("syscall", syscall_lib);
+    doom_mod.addImport("libc", doom_libc_module);
+    doom_mod.addImport("doomgeneric_zscapek.zig", doom_platform_module);
+    doom_mod.addImport("i_sound_stub.zig", doom_sound_module);
+
+    const doom = b.addExecutable(.{
+        .name = "doom.elf",
+        .root_module = doom_mod,
+    });
+
+    // Add doomgeneric C source files
+    doom.addCSourceFiles(.{
+        .root = b.path("src/user/doom/doomgeneric"),
+        .files = &.{
+            "am_map.c", "d_event.c", "d_items.c", "d_iwad.c", "d_loop.c",
+            "d_main.c", "d_mode.c", "d_net.c", "doomdef.c", "doomgeneric.c",
+            "doomstat.c", "dstrings.c", "dummy.c", "f_finale.c", "f_wipe.c",
+            "g_game.c", "gusconf.c", "hu_lib.c", "hu_stuff.c", "i_cdmus.c",
+            "i_endoom.c", "i_input.c", "i_joystick.c", "i_scale.c",
+            "i_system.c", "i_timer.c", "i_video.c", "icon.c", // i_sound.c excluded - using Zig stubs
+            "info.c", "m_argv.c", "m_bbox.c", "m_cheat.c", "m_config.c",
+            "m_controls.c", "m_fixed.c", "m_menu.c", "m_misc.c", "m_random.c",
+            "memio.c", "mus2mid.c", "p_ceilng.c",
+            "p_doors.c", "p_enemy.c", "p_floor.c", "p_inter.c", "p_lights.c",
+            "p_map.c", "p_maputl.c", "p_mobj.c", "p_plats.c", "p_pspr.c",
+            "p_saveg.c", "p_setup.c", "p_sight.c", "p_spec.c", "p_switch.c",
+            "p_telept.c", "p_tick.c", "p_user.c", "r_bsp.c", "r_data.c",
+            "r_draw.c", "r_main.c", "r_plane.c", "r_segs.c", "r_sky.c",
+            "r_things.c", "s_sound.c", "sha1.c", "sounds.c", "st_lib.c",
+            "st_stuff.c", "statdump.c", "tables.c", "v_video.c", "w_checksum.c",
+            "w_file_stdc.c", "w_file.c", "w_main.c", "w_wad.c", "wi_stuff.c",
+            "z_zone.c",
+        },
+        .flags = &.{
+            "-DDOOMGENERIC_RESX=640",
+            "-DDOOMGENERIC_RESY=400",
+            "-ffreestanding",
+            "-nostdlib",
+            "-fno-stack-protector",
+            "-fno-builtin",
+        },
+    });
+    doom.addIncludePath(b.path("src/user/doom/include"));
+    doom.addIncludePath(b.path("src/user/doom/doomgeneric"));
+
+    doom.setLinkerScript(b.path("src/user/linker.ld"));
+
+    // Install doom.elf
+    const install_doom = b.addInstallArtifact(doom, .{});
+    b.getInstallStep().dependOn(&install_doom.step);
 
     // Compile C integration tests
     const c_tests = [_][]const u8{
@@ -809,6 +1005,11 @@ pub fn build(b: *std.Build) void {
         \\cp zig-out/bin/test_asm iso_root/boot/modules/ && \
         \\cp zig-out/bin/test_writev iso_root/boot/modules/ && \
         \\cp zig-out/bin/audio_test iso_root/boot/modules/ && \
+        \\cp zig-out/bin/doom.elf iso_root/boot/modules/ && \
+        \\if [ -d initrd_contents ] && [ "$(ls -A initrd_contents 2>/dev/null)" ]; then \
+        \\    echo "Creating initrd.tar..." && \
+        \\    tar --format=ustar -cvf iso_root/boot/initrd.tar -C initrd_contents .; \
+        \\fi && \
         \\cp limine.cfg iso_root/boot/ && \
         \\cp "$LIMINE_DIR"/limine-bios.sys iso_root/boot/ && \
         \\cp "$LIMINE_DIR"/limine-bios-cd.bin iso_root/boot/ && \

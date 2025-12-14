@@ -6,21 +6,23 @@ pub export fn main(argc: i32, argv: [*]const [*:0]const u8) i32 {
     _ = argv;
 
     const message = "Audio Test: Starting...\n";
-    _ = syscall.write(1, message);
+    _ = syscall.write(1, message.ptr, message.len) catch 0;
 
-    run_test() catch |err| {
+    run_test() catch {
         // Write error message
-        _ = syscall.write(2, "Test failed\n");
+        const err_msg = "Test failed\n";
+        _ = syscall.write(2, err_msg.ptr, err_msg.len) catch 0;
         return 1;
     };
 
-    _ = syscall.write(1, "Test complete\n");
+    const done_msg = "Test complete\n";
+    _ = syscall.write(1, done_msg.ptr, done_msg.len) catch 0;
     return 0;
 }
 
 fn run_test() !void {
-    const fd = try syscall.open("/dev/dsp", syscall.O_WRONLY);
-    defer _ = syscall.close(fd);
+    const fd = try syscall.open("/dev/dsp", syscall.O_WRONLY, 0);
+    defer syscall.close(fd) catch {};
 
     // Config
     const SNDCTL_DSP_SPEED: u32 = 0xC0045002;
@@ -32,13 +34,12 @@ fn run_test() !void {
     var stereo: u32 = 1;
     var fmt: u32 = AFMT_S16_LE;
 
-    _ = syscall.ioctl(fd, SNDCTL_DSP_SPEED, @intFromPtr(&speed));
-    _ = syscall.ioctl(fd, SNDCTL_DSP_STEREO, @intFromPtr(&stereo));
-    _ = syscall.ioctl(fd, SNDCTL_DSP_SETFMT, @intFromPtr(&fmt));
+    _ = syscall.ioctl(fd, SNDCTL_DSP_SPEED, @intFromPtr(&speed)) catch 0;
+    _ = syscall.ioctl(fd, SNDCTL_DSP_STEREO, @intFromPtr(&stereo)) catch 0;
+    _ = syscall.ioctl(fd, SNDCTL_DSP_SETFMT, @intFromPtr(&fmt)) catch 0;
 
-    // Generate 1 second of audio
-    const samples_per_sec = 48000;
-    const bytes_per_sample = 4; // 16-bit stereo
+    // Generate audio (48000 samples/sec, 16-bit stereo = 4 bytes per sample)
+    const bytes_per_sample = 4;
 
     const chunk_samples = 1024; // Smaller chunk to fit on stack comfortably
     const chunk_size = chunk_samples * bytes_per_sample; // 4KB
@@ -67,8 +68,8 @@ fn run_test() !void {
             t += dt;
         }
 
-        const written = syscall.write(fd, &buffer);
-        if (written < 0) return error.WriteFailed;
+        const written = syscall.write(fd, &buffer, buffer.len) catch return error.WriteFailed;
+        _ = written;
 
         total_samples += chunk_samples;
     }

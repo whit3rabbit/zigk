@@ -389,6 +389,18 @@ pub fn getKernelStack() u64 {
     return tss_instance.rsp0;
 }
 
+/// Reload GDT and segment registers (for AP boot)
+/// Uses the already-initialized GDT from BSP
+pub fn reload() void {
+    const gdt_ptr = GdtPtr{
+        .limit = @sizeOf(Gdt) - 1,
+        .base = @intFromPtr(&gdt),
+    };
+    loadGdt(&gdt_ptr);
+    reloadSegments();
+    loadTss(TSS_SELECTOR);
+}
+
 // Assembly helper defined in asm_helpers.S
 extern fn _asm_lgdt(ptr: *const GdtPtr) void;
 

@@ -103,8 +103,16 @@ zscapek/
     │   ├── debug/
     │   │   └── console.zig
     │   └── syscall/
-    │       ├── handlers.zig
+    │       ├── base.zig
     │       ├── table.zig
+    │       ├── process.zig
+    │       ├── signals.zig
+    │       ├── scheduling.zig
+    │       ├── io.zig
+    │       ├── fd.zig
+    │       ├── memory.zig
+    │       ├── execution.zig
+    │       ├── custom.zig
     │       ├── net.zig
     │       ├── random.zig
     │       └── user_mem.zig
@@ -259,9 +267,17 @@ zscapek/
 ### `src/kernel/syscall/`
 | File | Description |
 |------|-------------|
-| `handlers.zig` | Maps register values to kernel syscall handlers. |
-| `table.zig` | Function pointers indexed by syscall number. |
-| `net.zig` | `socket`, `bind`, `connect`, `sendto`, `recvfrom`. |
+| `base.zig` | Shared state (current_process, fd_table, user_vmm) and accessors. |
+| `table.zig` | Comptime dispatch table - auto-discovers handlers via reflection. |
+| `process.zig` | `exit`, `wait4`, `getpid`, `getppid`, `getuid`, `getgid`. |
+| `signals.zig` | `rt_sigprocmask`, `rt_sigaction`, `rt_sigreturn`, `set_tid_address`. |
+| `scheduling.zig` | `sched_yield`, `nanosleep`, `select`, `clock_gettime`. |
+| `io.zig` | `read`, `write`, `writev`, `stat`, `fstat`, `ioctl`, `fcntl`, `getcwd`. |
+| `fd.zig` | `open`, `close`, `dup`, `dup2`, `pipe`, `lseek`. |
+| `memory.zig` | `mmap`, `mprotect`, `munmap`, `brk`. |
+| `execution.zig` | `fork`, `execve`, `arch_prctl`, `get_fb_info`, `map_fb`. |
+| `custom.zig` | `debug_log`, `putchar`, `getchar`, `read_scancode`. |
+| `net.zig` | `socket`, `bind`, `listen`, `accept`, `connect`, `sendto`, `recvfrom`. |
 | `random.zig` | `getrandom` (syscall 318). |
 | `user_mem.zig` | Validates and copies user memory safely. |
 

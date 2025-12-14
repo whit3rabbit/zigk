@@ -214,7 +214,7 @@ fn devfsOpen(ctx: ?*anyopaque, path: []const u8, flags: u32) vfs.Error!*fd_mod.F
     if (std.mem.eql(u8, name, "sda")) {
         // Assume port 0 for sda
         // We need to check if port 0 exists
-        if (ahci.root.getController()) |controller| {
+        if (ahci.getController()) |controller| {
              if (controller.getPort(0)) |_| {
                  private_data = @ptrFromInt(0);
              } else {

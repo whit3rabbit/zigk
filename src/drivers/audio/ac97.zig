@@ -14,8 +14,9 @@ const fd = @import("fd");
 const sync = @import("sync");
 const heap = @import("heap");
 const sched = @import("sched");
+const thread = @import("thread");
 
-const io = hal.port;
+const io = hal.io;
 const sound = uapi.sound;
 
 // AC97 Native Audio Mixer (NAM) Registers (IO Space)
@@ -197,8 +198,9 @@ pub const Ac97 = struct {
 
         while (written < data.len) {
             // Find current hardware position
-            const civ = io.inb(self.nabm_base + NABM_PO_CIV);
+            var civ = io.inb(self.nabm_base + NABM_PO_CIV);
             const lvi = io.inb(self.nabm_base + NABM_PO_LVI);
+            _ = lvi; // Used for debugging; hardware uses ring buffer
 
             // Check if we have space.
             // We can write to any buffer that is NOT currently being played.
@@ -311,10 +313,10 @@ fn dspWrite(fd_ctx: *fd.FileDescriptor, buf: []const u8) isize {
     return -1;
 }
 
-fn dspIoctl(fd_ctx: *fd.FileDescriptor, cmd: u32, arg: usize) isize {
+fn dspIoctl(fd_ctx: *fd.FileDescriptor, cmd: u64, arg: u64) isize {
     _ = fd_ctx;
     if (ac97_driver) |drv| {
-        return drv.ioctl(cmd, arg);
+        return drv.ioctl(@truncate(cmd), arg);
     }
     return -1;
 }

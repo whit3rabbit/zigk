@@ -61,13 +61,22 @@ See [BOOT_ARCHITECTURE.md](docs/BOOT_ARCHITECTURE.md) for boot process details.
 
 ## Syscall Handlers
 
-Syscall handlers are located in `src/kernel/syscall/` and follow specific conventions.
+Refer to [SYSCALL.md](docs/SYSCALL.md) for syscall handler details and build system integration.
 
-### Handler Files
-- `handlers.zig` - General syscalls (read, write, open, close, mmap, fork, execve, etc.)
+### Handler Files (`src/kernel/syscall/`)
+- `base.zig` - Shared state (current_process, fd_table, user_vmm) and accessors
+- `process.zig` - Process lifecycle (exit, wait4, getpid, getppid, getuid, getgid)
+- `signals.zig` - Signal handling (rt_sigprocmask, rt_sigaction, rt_sigreturn)
+- `scheduling.zig` - Scheduler (sched_yield, nanosleep, select, clock_gettime)
+- `io.zig` - I/O operations (read, write, writev, stat, fstat, ioctl, fcntl)
+- `fd.zig` - File descriptors (open, close, dup, dup2, pipe, lseek)
+- `memory.zig` - Memory management (mmap, mprotect, munmap, brk)
+- `execution.zig` - Process execution (fork, execve, arch_prctl, fb syscalls)
+- `custom.zig` - Zscapek extensions (debug_log, putchar, getchar, read_scancode)
 - `net.zig` - Network syscalls (socket, bind, listen, accept, connect, etc.)
 - `random.zig` - Random number syscalls (getrandom)
 - `table.zig` - Dispatch table (auto-discovers handlers at comptime)
+- `user_mem.zig` - User pointer validation utilities
 
 ### Naming Convention
 Handler functions MUST be named `sys_<syscall_name>` in lowercase:

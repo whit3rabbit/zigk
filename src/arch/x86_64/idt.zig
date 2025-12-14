@@ -324,3 +324,13 @@ pub fn getIdtBase() u64 {
     );
     return idt_ptr.base;
 }
+
+/// Reload IDT (for AP boot)
+/// Uses the already-initialized IDT from BSP
+pub fn reload() void {
+    const idt_ptr = IdtPtr{
+        .limit = @sizeOf(@TypeOf(idt_table)) - 1,
+        .base = @intFromPtr(&idt_table),
+    };
+    loadIdt(&idt_ptr);
+}

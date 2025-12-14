@@ -1,0 +1,184 @@
+// File Descriptor Syscall Handlers
+//
+// Implements file descriptor management syscalls:
+// - sys_open: Open a file or device
+// - sys_close: Close a file descriptor
+// - sys_dup, sys_dup2: Duplicate file descriptors
+// - sys_pipe: Create a pipe
+// - sys_lseek: Reposition file offset
+
+const std = @import("std");
+const base = @import("base.zig");
+const uapi = @import("uapi");
+const console = @import("console");
+const fs = @import("fs");
+const heap = @import("heap");
+const pipe_mod = @import("pipe");
+const fd_mod = @import("fd");
+const user_mem = @import("user_mem");
+
+const SyscallError = base.SyscallError;
+const UserPtr = base.UserPtr;
+const isValidUserPtr = base.isValidUserPtr;
+
+// =============================================================================
+// File Descriptor Management
+// =============================================================================
+
+/// sys_open (2) - Open a file or device
+///
+/// Opens a file/device and returns a new file descriptor.
+pub fn sys_open(path_ptr: usize, flags: usize, mode: usize) SyscallError!usize {
+    _ = mode; // Mode is ignored for now
+
+    // Allocate path buffer on heap to preserve stack space
+    const path_buf = heap.allocator().alloc(u8, user_mem.MAX_PATH_LEN) catch {
+        return error.ENOMEM;
+    };
+    defer heap.allocator().free(path_buf);
+
+    // Validate and read path string from userspace
+    const path = user_mem.copyStringFromUser(path_buf, path_ptr) catch |err| {
+        if (err == error.NameTooLong) return error.ENAMETOOLONG;
+        return error.EFAULT;
+    };
+
+    if (path.len == 0) {
+        return error.ENOENT;
+    }
+
+    // Use VFS to open file
+    const fd = fs.vfs.Vfs.open(path, @truncate(flags)) catch |err| {
+        return switch (err) {
+            error.NotFound => error.ENOENT,
+            error.AccessDenied => error.EACCES,
+            error.InvalidPath => error.ENOENT, // or EINVAL
+            error.NameTooLong => error.ENAMETOOLONG,
+            error.IOError => error.EIO,
+            error.NoMemory => error.ENOMEM,
+            error.IsDirectory => error.EISDIR, // If we don't support opening dirs yet?
+            else => error.EIO,
+        };
+    };
+
+    const alloc = heap.allocator();
+    errdefer alloc.destroy(fd);
+
+    const table = base.getGlobalFdTable();
+    const fd_num = table.allocFdNum() orelse {
+        alloc.destroy(fd);
+        return error.EMFILE;
+    };
+
+    table.install(fd_num, fd);
+    return fd_num;
+}
+
+/// sys_close (3) - Close a file descriptor
+///
+/// Closes the file descriptor and releases associated resources.
+pub fn sys_close(fd_num: usize) SyscallError!usize {
+    const table = base.getGlobalFdTable();
+    const result = table.close(@intCast(fd_num));
+    if (result < 0) {
+        return error.EBADF;
+    }
+    return 0;
+}
+
+/// sys_dup (32) - Duplicate a file descriptor
+pub fn sys_dup(oldfd: usize) SyscallError!usize {
+    const table = base.getGlobalFdTable();
+    const newfd = table.dup(@intCast(oldfd)) catch |err| {
+        return switch (err) {
+            error.BadFd => error.EBADF,
+            error.MFile => error.EMFILE,
+        };
+    };
+    return newfd;
+}
+
+/// sys_dup2 (33) - Duplicate a file descriptor to a specific slot
+pub fn sys_dup2(oldfd: usize, newfd: usize) SyscallError!usize {
+    const table = base.getGlobalFdTable();
+    const result = table.dup2(@intCast(oldfd), @intCast(newfd)) catch |err| {
+        return switch (err) {
+            error.BadFd => error.EBADF,
+        };
+    };
+    return result;
+}
+
+/// sys_pipe (22) - Create a pipe
+pub fn sys_pipe(pipefd_ptr: usize) SyscallError!usize {
+    if (!isValidUserPtr(pipefd_ptr, 2 * @sizeOf(u32))) {
+        return error.EFAULT;
+    }
+
+    const table = base.getGlobalFdTable();
+    var fds: [2]u32 = undefined;
+    pipe_mod.createPipe(&fds, table) catch |err| {
+        return switch (err) {
+            error.MFile => error.EMFILE,
+            error.OutOfMemory => error.ENOMEM,
+        };
+    };
+
+    const uptr = UserPtr.from(pipefd_ptr);
+    var fds_i32: [2]i32 = undefined;
+    fds_i32[0] = @intCast(fds[0]);
+    fds_i32[1] = @intCast(fds[1]);
+
+    _ = uptr.copyFromKernel(std.mem.sliceAsBytes(&fds_i32)) catch {
+        // Close FDs if copy fails
+        _ = table.close(fds[0]);
+        _ = table.close(fds[1]);
+        return error.EFAULT;
+    };
+
+    return 0;
+}
+
+/// sys_lseek (8) - Reposition read/write file offset
+///
+/// Repositions the file offset of the open file description associated
+/// with the file descriptor fd to the argument offset according to whence.
+///
+/// Args:
+///   fd: File descriptor
+///   offset: Offset value (interpretation depends on whence)
+///   whence: 0=SEEK_SET (absolute), 1=SEEK_CUR (relative to current), 2=SEEK_END (relative to end)
+///
+/// Returns: New offset position on success, negative errno on error
+pub fn sys_lseek(fd_num: usize, offset: i64, whence: u32) SyscallError!usize {
+    const table = base.getGlobalFdTable();
+
+    // Get the file descriptor
+    const file_desc = table.get(@intCast(fd_num)) orelse {
+        return error.EBADF;
+    };
+
+    // Check if the file supports seeking
+    const seek_fn = file_desc.ops.seek orelse {
+        // Device doesn't support seeking (e.g., pipes, sockets, console)
+        return error.ESPIPE;
+    };
+
+    // Validate whence
+    if (whence > 2) {
+        return error.EINVAL;
+    }
+
+    // Call the device-specific seek operation (legacy isize return)
+    const result = seek_fn(file_desc, offset, whence);
+    if (result < 0) {
+        const errno_val: i32 = @intCast(-result);
+        return switch (errno_val) {
+            9 => error.EBADF,
+            22 => error.EINVAL,
+            29 => error.ESPIPE,
+            else => error.EINVAL,
+        };
+    }
+    return @intCast(result);
+}

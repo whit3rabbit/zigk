@@ -37,7 +37,7 @@ pub const ClockId = enum(i32) {
 // =============================================================================
 
 /// Execute syscall with 0 arguments
-inline fn syscall0(number: usize) usize {
+pub inline fn syscall0(number: usize) usize {
     return asm volatile ("syscall"
         : [ret] "={rax}" (-> usize),
         : [number] "{rax}" (number),
@@ -46,7 +46,7 @@ inline fn syscall0(number: usize) usize {
 }
 
 /// Execute syscall with 1 argument
-inline fn syscall1(number: usize, arg1: usize) usize {
+pub inline fn syscall1(number: usize, arg1: usize) usize {
     return asm volatile ("syscall"
         : [ret] "={rax}" (-> usize),
         : [number] "{rax}" (number),
@@ -56,7 +56,7 @@ inline fn syscall1(number: usize, arg1: usize) usize {
 }
 
 /// Execute syscall with 2 arguments
-inline fn syscall2(number: usize, arg1: usize, arg2: usize) usize {
+pub inline fn syscall2(number: usize, arg1: usize, arg2: usize) usize {
     return asm volatile ("syscall"
         : [ret] "={rax}" (-> usize),
         : [number] "{rax}" (number),
@@ -67,7 +67,7 @@ inline fn syscall2(number: usize, arg1: usize, arg2: usize) usize {
 }
 
 /// Execute syscall with 3 arguments
-inline fn syscall3(number: usize, arg1: usize, arg2: usize, arg3: usize) usize {
+pub inline fn syscall3(number: usize, arg1: usize, arg2: usize, arg3: usize) usize {
     return asm volatile ("syscall"
         : [ret] "={rax}" (-> usize),
         : [number] "{rax}" (number),
@@ -80,7 +80,7 @@ inline fn syscall3(number: usize, arg1: usize, arg2: usize, arg3: usize) usize {
 
 /// Execute syscall with 4 arguments
 /// Note: R10 is used instead of RCX because syscall clobbers RCX
-inline fn syscall4(number: usize, arg1: usize, arg2: usize, arg3: usize, arg4: usize) usize {
+pub inline fn syscall4(number: usize, arg1: usize, arg2: usize, arg3: usize, arg4: usize) usize {
     return asm volatile ("syscall"
         : [ret] "={rax}" (-> usize),
         : [number] "{rax}" (number),
@@ -93,7 +93,7 @@ inline fn syscall4(number: usize, arg1: usize, arg2: usize, arg3: usize, arg4: u
 }
 
 /// Execute syscall with 5 arguments
-inline fn syscall5(number: usize, arg1: usize, arg2: usize, arg3: usize, arg4: usize, arg5: usize) usize {
+pub inline fn syscall5(number: usize, arg1: usize, arg2: usize, arg3: usize, arg4: usize, arg5: usize) usize {
     return asm volatile ("syscall"
         : [ret] "={rax}" (-> usize),
         : [number] "{rax}" (number),
@@ -107,7 +107,7 @@ inline fn syscall5(number: usize, arg1: usize, arg2: usize, arg3: usize, arg4: u
 }
 
 /// Execute syscall with 6 arguments
-inline fn syscall6(number: usize, arg1: usize, arg2: usize, arg3: usize, arg4: usize, arg5: usize, arg6: usize) usize {
+pub inline fn syscall6(number: usize, arg1: usize, arg2: usize, arg3: usize, arg4: usize, arg5: usize, arg6: usize) usize {
     return asm volatile ("syscall"
         : [ret] "={rax}" (-> usize),
         : [number] "{rax}" (number),
@@ -180,7 +180,7 @@ fn errorFromReturn(ret: usize) SyscallError {
 }
 
 /// Check if return value indicates error (negative)
-inline fn isError(ret: usize) bool {
+pub inline fn isError(ret: usize) bool {
     const signed: isize = @bitCast(ret);
     return signed < 0 and signed >= -4096;
 }
@@ -273,6 +273,13 @@ pub fn open(path: [*:0]const u8, flags: i32, mode: u32) SyscallError!i32 {
 pub fn close(fd: i32) SyscallError!void {
     const ret = syscall1(syscalls.SYS_CLOSE, @bitCast(@as(isize, fd)));
     if (isError(ret)) return errorFromReturn(ret);
+}
+
+/// Device control
+pub fn ioctl(fd: i32, cmd: u32, arg: usize) SyscallError!i32 {
+    const ret = syscall3(syscalls.SYS_IOCTL, @bitCast(@as(isize, fd)), cmd, arg);
+    if (isError(ret)) return errorFromReturn(ret);
+    return @truncate(@as(isize, @bitCast(ret)));
 }
 
 // =============================================================================

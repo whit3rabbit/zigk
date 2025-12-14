@@ -60,7 +60,7 @@ pub const SFS = struct {
         var buf: [512]u8 = undefined;
         _ = try readSector(device_fd, 0, &buf);
 
-        const sb: *Superblock = @ptrCast(&buf);
+        const sb: *Superblock = @ptrCast(@alignCast(&buf));
         if (sb.magic != SFS_MAGIC) {
             console.warn("SFS: Invalid magic, formatting...", .{});
             try self.format();
@@ -184,7 +184,7 @@ fn sfsOpen(ctx: ?*anyopaque, path: []const u8, flags: u32) vfs.Error!*fd.FileDes
         var i: u32 = 0;
         while (i < 4) : (i += 1) {
             const offset = i * 128;
-            const e: *DirEntry = @ptrCast(&buf[offset]);
+            const e: *DirEntry = @ptrCast(@alignCast(&buf[offset]));
 
             if (e.flags == 1) {
                 // Active entry, check name
@@ -204,10 +204,9 @@ fn sfsOpen(ctx: ?*anyopaque, path: []const u8, flags: u32) vfs.Error!*fd.FileDes
     }
 
     if (entry_idx) |idx| {
-        // File found
-        _ = idx;
+        // File found - use idx for entry tracking
         // Create FD
-        const file_ctx = try alloc.create(SfsFile);
+        const file_ctx = alloc.create(SfsFile) catch return vfs.Error.NoMemory;
         file_ctx.* = .{
             .fs = self,
             .start_block = entry.start_block,
@@ -239,15 +238,15 @@ fn sfsOpen(ctx: ?*anyopaque, path: []const u8, flags: u32) vfs.Error!*fd.FileDes
             var buf: [512]u8 = undefined;
             readSector(self.device_fd, 1 + block_idx, &buf) catch return vfs.Error.IOError;
 
-            const dest: *DirEntry = @ptrCast(&buf[offset_idx * 128]);
+            const dest: *DirEntry = @ptrCast(@alignCast(&buf[offset_idx * 128]));
             dest.* = new_entry;
 
             writeSector(self.device_fd, 1 + block_idx, &buf) catch return vfs.Error.IOError;
 
             self.superblock.file_count += 1;
-            try self.updateSuperblock() catch return vfs.Error.IOError;
+            self.updateSuperblock() catch return vfs.Error.IOError;
 
-            const file_ctx = try alloc.create(SfsFile);
+            const file_ctx = alloc.create(SfsFile) catch return vfs.Error.NoMemory;
             file_ctx.* = .{
                 .fs = self,
                 .start_block = new_entry.start_block,
@@ -388,7 +387,7 @@ fn sfsWrite(file_desc: *fd.FileDescriptor, buf: []const u8) isize {
         var dir_buf: [512]u8 = undefined;
         readSector(file.fs.device_fd, 1 + block_idx, &dir_buf) catch {};
 
-        const entry: *DirEntry = @ptrCast(&dir_buf[offset_idx * 128]);
+        const entry: *DirEntry = @ptrCast(@alignCast(&dir_buf[offset_idx * 128]));
         entry.size = file.size;
 
         writeSector(file.fs.device_fd, 1 + block_idx, &dir_buf) catch {};
