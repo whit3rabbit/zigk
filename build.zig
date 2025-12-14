@@ -595,6 +595,7 @@ pub fn build(b: *std.Build) void {
     kernel.root_module.addImport("elf", elf_module);
     kernel.root_module.addImport("process", process_module);
     kernel.root_module.addImport("syscall_handlers", syscall_handlers_module);
+    kernel.root_module.addImport("devfs", devfs_module);
 
     // Add assembly helpers for x86_64 (ISR stubs, lgdt, lidt)
     kernel.addAssemblyFile(b.path("src/arch/x86_64/asm_helpers.S"));
