@@ -11,6 +11,8 @@
 //   }
 
 pub const ecam = @import("ecam.zig");
+pub const legacy = @import("legacy.zig");
+pub const access = @import("access.zig");
 pub const device = @import("device.zig");
 pub const enumeration = @import("enumeration.zig");
 pub const capabilities = @import("capabilities.zig");
@@ -18,6 +20,8 @@ pub const msi = @import("msi.zig");
 
 // Re-export commonly used types
 pub const Ecam = ecam.Ecam;
+pub const Legacy = legacy.Legacy;
+pub const PciAccess = access.PciAccess;
 pub const PciDevice = device.PciDevice;
 pub const DeviceList = device.DeviceList;
 pub const Bar = device.Bar;

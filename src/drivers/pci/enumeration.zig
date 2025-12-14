@@ -10,28 +10,30 @@ const console = @import("console");
 
 const std = @import("std");
 const ecam = @import("ecam.zig");
+const access = @import("access.zig");
 const device = @import("device.zig");
 const hal = @import("hal");
 
 const Ecam = ecam.Ecam;
+const PciAccess = access.PciAccess;
 const PciDevice = device.PciDevice;
 const DeviceList = device.DeviceList;
 const Bar = device.Bar;
 const ConfigReg = device.ConfigReg;
 
 /// Enumerate all PCI devices and populate a device list
-pub fn enumerate(allocator: std.mem.Allocator, pci: *const Ecam) !*DeviceList {
+pub fn enumerate(allocator: std.mem.Allocator, pci: PciAccess) !*DeviceList {
     const devices = try allocator.create(DeviceList);
     devices.* = DeviceList.init();
 
     console.info("PCI: Enumerating devices on buses {d}-{d}...", .{
-        pci.start_bus,
-        pci.end_bus,
+        pci.startBus(),
+        pci.endBus(),
     });
 
-    console.info("PCI: Scanning bus {d}-{d}", .{pci.start_bus, pci.end_bus});
-    var bus: u16 = pci.start_bus;
-    while (bus <= pci.end_bus) : (bus += 1) {
+    console.info("PCI: Scanning bus {d}-{d}", .{pci.startBus(), pci.endBus()});
+    var bus: u16 = pci.startBus();
+    while (bus <= pci.endBus()) : (bus += 1) {
         // console.debug("PCI: Scanning bus {d}", .{bus});
         enumerateBus(pci, @truncate(bus), devices);
     }
@@ -41,7 +43,7 @@ pub fn enumerate(allocator: std.mem.Allocator, pci: *const Ecam) !*DeviceList {
 }
 
 /// Enumerate all devices on a single bus
-fn enumerateBus(pci: *const Ecam, bus: u8, devices: *DeviceList) void {
+fn enumerateBus(pci: PciAccess, bus: u8, devices: *DeviceList) void {
     var dev: u8 = 0;
     while (dev < 32) : (dev += 1) {
         enumerateDevice(pci, bus, @truncate(dev), devices);
@@ -49,7 +51,7 @@ fn enumerateBus(pci: *const Ecam, bus: u8, devices: *DeviceList) void {
 }
 
 /// Enumerate a device slot (may have multiple functions)
-fn enumerateDevice(pci: *const Ecam, bus: u8, dev: u5, devices: *DeviceList) void {
+fn enumerateDevice(pci: PciAccess, bus: u8, dev: u5, devices: *DeviceList) void {
     // Check if device exists at function 0
     if (!pci.deviceExists(bus, dev, 0)) {
         return;
@@ -72,7 +74,7 @@ fn enumerateDevice(pci: *const Ecam, bus: u8, dev: u5, devices: *DeviceList) voi
 }
 
 /// Check a specific function and add to device list if valid
-fn checkFunction(pci: *const Ecam, bus: u8, dev: u5, func: u3, devices: *DeviceList) void {
+fn checkFunction(pci: PciAccess, bus: u8, dev: u5, func: u3, devices: *DeviceList) void {
     // Read vendor/device ID
     const vendor_id = pci.read16(bus, dev, func, ConfigReg.VENDOR_ID);
     const device_id = pci.read16(bus, dev, func, ConfigReg.DEVICE_ID);
@@ -128,7 +130,7 @@ fn checkFunction(pci: *const Ecam, bus: u8, dev: u5, func: u3, devices: *DeviceL
 }
 
 /// Read all BARs for a device
-fn readBars(pci: *const Ecam, dev: *PciDevice) void {
+fn readBars(pci: PciAccess, dev: *PciDevice) void {
     const orig_cmd = pci.read16(dev.bus, dev.device, dev.func, ConfigReg.COMMAND);
     const disabled_cmd = orig_cmd & ~(device.Command.MEMORY_SPACE | device.Command.IO_SPACE);
     pci.write16(dev.bus, dev.device, dev.func, ConfigReg.COMMAND, disabled_cmd);
@@ -273,7 +275,8 @@ fn logDevice(dev: *const PciDevice) void {
 }
 
 /// Initialize PCI subsystem with ECAM from ACPI
-pub fn initFromAcpi(allocator: std.mem.Allocator, rsdp_address: u64) !struct { ecam: Ecam, devices: *DeviceList } {
+/// Fallback to Legacy PCI if MCFG is not found
+pub fn initFromAcpi(allocator: std.mem.Allocator, rsdp_address: u64) !struct { access: PciAccess, devices: *DeviceList } {
     const acpi = @import("acpi");
 
     // Cast address to RSDP pointer
@@ -281,22 +284,26 @@ pub fn initFromAcpi(allocator: std.mem.Allocator, rsdp_address: u64) !struct { e
     console.info("Debug: rsdp_ptr created, calling findEcamBase", .{});
 
     // Find ECAM base from MCFG table
-    const ecam_info = acpi.mcfg.findEcamBase(rsdp_ptr) orelse {
-        console.err("PCI: MCFG table not found, cannot initialize ECAM", .{});
-        return error.NoMcfg;
-    };
+    var access_mech: PciAccess = undefined;
 
-    console.info("PCI: ECAM base=0x{x}, buses {d}-{d}", .{
-        ecam_info.base_address,
-        ecam_info.start_bus,
-        ecam_info.end_bus,
-    });
+    if (acpi.mcfg.findEcamBase(rsdp_ptr)) |ecam_info| {
+        console.info("PCI: ECAM base=0x{x}, buses {d}-{d}", .{
+            ecam_info.base_address,
+            ecam_info.start_bus,
+            ecam_info.end_bus,
+        });
 
-    // Initialize ECAM accessor
-    const pci = try Ecam.init(ecam_info.base_address, ecam_info.start_bus, ecam_info.end_bus);
+        // Initialize ECAM accessor
+        const ecam_instance = try Ecam.init(ecam_info.base_address, ecam_info.start_bus, ecam_info.end_bus);
+        access_mech = PciAccess{ .ecam = ecam_instance };
+    } else {
+        console.warn("PCI: MCFG table not found, falling back to Legacy PCI (Port I/O)", .{});
+        const legacy_instance = access.Legacy.init();
+        access_mech = PciAccess{ .legacy = legacy_instance };
+    }
 
     // Enumerate devices
-    const devices = try enumerate(allocator, &pci);
+    const devices = try enumerate(allocator, access_mech);
 
-    return .{ .ecam = pci, .devices = devices };
+    return .{ .access = access_mech, .devices = devices };
 }
