@@ -437,9 +437,55 @@ pub const Controller = struct {
         writeReg64(intr0_base, regs.Intr.ERDP, @bitCast(erdp));
     }
 
-    /// Scan ports for connected devices
+    /// Reset a port to enable it and bring the device to the Default state
+    fn resetPort(self: *Self, port: u8) !void {
+        const portsc_off = regs.Op.portsc(port);
+        // Read current state
+        const portsc: regs.PortSc = @bitCast(readReg32(self.op_base, portsc_off));
+
+        // If not connected, nothing to do
+        if (!portsc.ccs) return;
+
+        // Reset sequence: Write 1 to PR (Port Reset)
+        // We must preserve R/W bits and write 1 to Clear R/WC bits (status changes)
+        // to avoid clearing them accidentally.
+        
+        var new_cntl = portsc;
+        new_cntl.pr = true;      // Assert Reset
+        new_cntl.csc = true;     // Clear Connect Status Change
+        new_cntl.pec = true;     // Clear Port Enable/Disable Change
+        new_cntl.wrc = true;     // Clear Warm Port Reset Change
+        new_cntl.occ = true;     // Clear Over-Current Change
+        new_cntl.prc = true;     // Clear Port Reset Change
+
+        writeReg32(self.op_base, portsc_off, @bitCast(new_cntl));
+
+        // Wait for reset to complete
+        // The controller clears PR bit when reset is done
+        var timeout: u32 = 500; // 500ms timeout
+        while (timeout > 0) : (timeout -= 1) {
+            const current = @as(regs.PortSc, @bitCast(readReg32(self.op_base, portsc_off)));
+            
+            // Check if Reset is done (PR == 0) and Port Enabled (PED == 1)
+            if (!current.pr and current.ped) {
+                 console.info("XHCI: Port {d} reset successful (Speed: {d})", .{ port, current.speed });
+                 return;
+            }
+            
+            // Wait approx 1ms
+            var delay: u32 = 10000;
+            while (delay > 0) : (delay -= 1) {
+                hal.cpu.pause();
+            }
+        }
+
+        console.warn("XHCI: Port {d} reset timed out or failed to enable", .{port});
+        return error.ResetFailed;
+    }
+
+    /// Scan ports for connected devices and attempt initialization
     pub fn scanPorts(self: *Self) void {
-        console.info("XHCI: Scanning {} ports...", .{self.max_ports});
+        console.info("XHCI: Scanning {d} ports...", .{self.max_ports});
 
         var port: u8 = 1;
         while (port <= self.max_ports) : (port += 1) {
@@ -455,11 +501,19 @@ pub const Controller = struct {
                     5 => "Super Speed+",
                     else => "Unknown",
                 };
-                console.info("XHCI: Port {} connected, speed={s}, enabled={}", .{
+                console.info("XHCI: Port {d} connected, speed={s}, enabled={}", .{
                     port,
                     speed_name,
                     portsc.ped,
                 });
+
+                // Attempt to reset and enable the port
+                // This transitions the device from "Powered" to "Default" state
+                if (!portsc.ped) {
+                    self.resetPort(port) catch |err| {
+                        console.err("XHCI: Failed to reset port {d}: {}", .{ port, err });
+                    };
+                }
             }
         }
     }

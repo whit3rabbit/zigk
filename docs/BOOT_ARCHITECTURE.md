@@ -35,8 +35,29 @@ The kernel uses the **Higher Half Direct Map (HHDM)** provided by Limine to acce
 
 *   **Virtual Address** = `Physical Address` + `HHDM_OFFSET`
 *   **Physical Address** = `Virtual Address` - `HHDM_OFFSET`
+*   **HHDM_OFFSET** = `0xFFFF_8000_0000_0000` (constant, verified against Limine response)
 
-The `HHDM_OFFSET` is obtained from the Limine HHDM Request at boot.
+The `HHDM_OFFSET` is obtained from the Limine HHDM Request at boot (`src/kernel/main.zig:192-201`).
+
+**HHDM vs Identity Mapping:**
+
+Limine sets up three distinct page mappings before jumping to `_start`:
+1. **Identity mapping** (phys 0x0 -> virt 0x0): Used only during early boot transition
+2. **HHDM** (phys 0x0 -> virt 0xFFFF800000000000): Used by kernel for all physical memory access
+3. **Higher-half kernel** (kernel code at 0xFFFFFFFF80000000): Where kernel ELF is loaded
+
+The kernel discards the identity mapping after entry. All page table access uses HHDM via `paging.physToVirt()` (`src/arch/x86_64/paging.zig:173-189`):
+
+```zig
+pub fn physToVirt(phys: u64) [*]u8 {
+    return @ptrFromInt(phys + hhdm_offset);
+}
+```
+
+**Why HHDM matters:**
+- Enables access to any physical address without explicit mapping
+- Page table manipulation uses HHDM to read/write PML4/PDPT/PD/PT entries
+- Avoids chicken-and-egg problem of needing page tables to access page tables
 
 ## 2. Limine Boot Protocol ABI
 
@@ -177,9 +198,78 @@ Defined in `src/arch/x86_64/paging.zig`.
 *   **G**: Global (TLB preserved on CR3 switch)
 *   **XD**: Execute Disable (NX bit)
 
-## 4. Hardware Interface Technical Notes (Lessons Learned)
+## 4. Input Subsystem Architecture
+
+Zscapek supports two input paths for keyboard and mouse devices.
+
+### Dual-Path Input Architecture
+
+```text
++------------------+                    +------------------+
+|   Legacy Path    |                    |   Modern Path    |
++------------------+                    +------------------+
+        |                                       |
+   8042 PS/2                              PCI Bus
+   Controller                                   |
+   (I/O 0x60/0x64)                        XHCI Controller
+        |                                       |
+   IRQ1 (Keyboard)                        USB HID Device
+   IRQ12 (Mouse)                                |
+        |                                       |
++------------------+                    +------------------+
+| drivers/keyboard |                    | drivers/usb/xhci |
++------------------+                    +------------------+
+        |                                       |
+        +-------------> Input Event Queue <-----+
+                              |
+                        Userland (syscall)
+```
+
+**Legacy Path (PS/2):**
+- Controller: Intel 8042 at ports 0x60 (data) and 0x64 (status/command)
+- Driver: `src/drivers/keyboard.zig`
+- Interrupts: IRQ1 for keyboard, IRQ12 for mouse (via IOAPIC)
+
+**Modern Path (USB):**
+- Controller: XHCI (USB 3.0+) discovered via PCI enumeration
+- Driver: `src/drivers/usb/xhci/root.zig`
+- Interrupts: MSI-X or polling fallback
+
+## 5. Hardware Initialization Quirks
 
 These notes cover specific behaviors and requirements discovered during kernel bring-up.
+
+### PS/2 Keyboard Initialization
+
+The PS/2 controller requires explicit configuration before the keyboard generates scancodes.
+
+**Initialization Sequence** (`src/drivers/keyboard.zig:352-437`):
+1. Disable both PS/2 ports (commands 0xAD, 0xA7)
+2. Flush output buffer (discard stale data)
+3. Disable interrupts temporarily (clear config bits 0 and 1)
+4. Controller self-test (command 0xAA, expect 0x55)
+5. Port test (command 0xAB, expect 0x00)
+6. Enable first port (command 0xAE)
+7. Enable IRQ and translation mode (set config bits 0 and 6)
+8. **Enable keyboard scanning** (send 0xF4 to data port, expect 0xFA acknowledgment)
+9. Flush buffer again
+10. Log final configuration
+
+**Critical Step**: The `0xF4` (Enable Scanning) command at step 8 is required because some hardware does not enable scanning by default after a controller reset. Without this, the keyboard appears dead.
+
+### USB/XHCI Port Reset
+
+USB devices require a port reset to transition from "Powered" state to "Default/Addressed" state.
+
+**Port Reset Sequence** (`src/drivers/usb/xhci/root.zig:440-487`):
+1. Read PORTSC register for the target port
+2. Verify device is connected (CCS bit = 1)
+3. Assert Port Reset (PR bit = 1)
+4. Clear status change bits (CSC, PEC, WRC, OCC, PRC) to avoid false triggers
+5. Wait for reset completion (PR = 0, PED = 1) with 500ms timeout
+6. Read port speed from PORTSC after reset
+
+**Why this matters**: MacBook internal USB hubs and many modern USB devices require explicit port reset before responding to enumeration commands. Without reset, the device stays in "Powered" state and ignores Address Device commands.
 
 ### ACPI Table Alignment
 ACPI tables (RSDP, RSDT, XSDT, MCFG) are provided by firmware and often reside at non-natural alignments (e.g., 4-byte boundaries).
@@ -194,7 +284,7 @@ ACPI tables (RSDP, RSDT, XSDT, MCFG) are provided by firmware and often reside a
     *   **Integer Overflow Risk**: Creating a size mask by inverting a 32-bit read in a 64-bit variable (e.g., `~bar_read`) will set the upper 32-bits to 1, resulting in an incorrect size (e.g., 18 Exabytes). Mask operations must be strictly width-controlled.
     *   **Loop Counters**: Iterating through functions (0-7) with a `u3` counter will cause an integer overflow when incrementing to 8 to exit the loop. Use `u4`.
 
-## 5. Kernel ABI & Calling Convention
+## 6. Kernel ABI & Calling Convention
 
 ### Interrupt Handling
 When an interrupt occurs:
@@ -227,12 +317,47 @@ Zscapek implements a subset of the Linux ABI.
 
 *Note: The `syscall` instruction clobbers RCX and R11. Linux ABI uses R10 for the 4th argument instead of RCX.*
 
-## 6. Security Architecture
+## 7. Security Architecture
 
 ### Stack Smashing Protection
-*   **Canary**: `__stack_chk_guard` (randomized at boot).
-*   **Handler**: `__stack_chk_fail` (panics kernel).
-*   **Location**: Canary placed between local variables and return address.
+
+The kernel uses compiler-inserted stack canaries to detect buffer overflows.
+
+**Symbols** (`src/kernel/stack_guard.zig`):
+*   **Canary**: `__stack_chk_guard` (exported at line 28, randomized at boot)
+*   **Handler**: `__stack_chk_fail` (exported at line 33, halts kernel on corruption)
+*   **Location**: Canary placed between local variables and return address by compiler
+
+**Entropy Seeding** (`src/kernel/main.zig:280-291`):
+
+The canary is seeded via hardware entropy during early boot:
+
+```text
+hal.entropy.init()     -->  Detect RDRAND support via CPUID
+        |
+prng.init()            -->  Seed xoroshiro128+ with two entropy values
+        |
+stack_guard.init()     -->  Generate canary via prng.next(), clear low byte
+        |
+scheduler.init()       -->  First threads created (all protected)
+```
+
+**Hardware Entropy Sources** (`src/arch/x86_64/entropy.zig`):
+1. **RDRAND** (preferred): Intel/AMD hardware RNG via CPUID leaf 1, ECX bit 30
+   - Provides cryptographic-quality randomness from on-chip DRBG
+   - Retried up to 10 times on failure before fallback
+2. **RDTSC** (fallback): Time Stamp Counter when RDRAND unavailable
+   - Multiple samples with XOR mixing and bit rotations
+   - Lower quality, not cryptographically secure
+
+**Canary Format** (`stack_guard.zig:67`):
+
+The low byte is cleared to 0x00 for null-terminator overflow detection:
+```
+[random 7 bytes][0x00]
+```
+
+This causes string-based overflows to include the null terminator in the overwrite, making detection more reliable.
 
 ### Privilege Separation
 *   **Ring 0 (Kernel)**: Full access.
@@ -244,13 +369,76 @@ Zscapek implements a subset of the Linux ABI.
 ### KASLR
 Limine supports KASLR. The kernel is position-independent (PIE) but linked to high memory. The physical load address may vary, but virtual addresses are fixed by the linker script to `0xffffffff80000000`.
 
-## 7. SMP Implementation Notes
+## 8. SMP Implementation Notes
 
-### AP Trampoline
-Application Processors (APs) start in Real Mode (16-bit). The kernel must:
-1.  Copy a trampoline blob to low memory (e.g., `< 1MB`).
-2.  Send SIPI (Startup IPI) to the AP to jump to that physical address.
-3.  The trampoline transitions the AP to Protected Mode (32-bit) and then Long Mode (64-bit).
+### AP Trampoline Protocol
 
-**Critical Requirement - NXE Bit:**
-When enabling Long Mode in the trampoline (`EFER` MSR), the **NXE (No-Execute Enable)** bit (bit 11) MUST be set if the kernel page tables use the NX bit. Failure to set this will cause the AP to #PF (Page Fault) immediately upon enabling paging, as it encounters "reserved bits" (the NX bit) in the page tables that it doesn't think are valid.
+Application Processors (APs) start in Real Mode (16-bit). The BSP (Bootstrap Processor) must orchestrate their bring-up.
+
+**Trampoline Loading** (`src/arch/x86_64/smp.zig:59-103`):
+1. Allocate a page in low memory (0x1000-0xA0000, under 640KB)
+2. Copy trampoline code from kernel image to allocated page
+3. Create identity mapping for trampoline page (virtual = physical)
+4. Patch immediate values in trampoline code
+
+**INIT-SIPI-SIPI Sequence** (`src/arch/x86_64/smp.zig:205-215`):
+```text
+BSP                                         AP
+ |                                           |
+ |------ INIT IPI --------------------------->|  (Reset AP)
+ |           10ms delay                       |
+ |------ SIPI (vector = page >> 12) --------->|  (Wake at trampoline)
+ |           200us delay                      |
+ |------ SIPI (second, per Intel spec) ------>|
+ |                                           |
+ |                      [AP executes trampoline]
+```
+
+**Trampoline Mode Transitions** (`src/arch/x86_64/smp_trampoline.S`):
+
+```text
+Real Mode (16-bit)     Protected Mode (32-bit)     Long Mode (64-bit)
+      |                        |                          |
+  cli, setup DS/ES/SS     Set PE bit in CR0          Set LME+NXE in EFER
+      |                        |                          |
+  lgdt (temp GDT)         Enable PAE in CR4          Set PG bit in CR0
+      |                        |                          |
+  far jump 0x18:pm_entry  Load CR3 (BSP's PML4)      far jump 0x08:lm_entry
+                                                           |
+                                                      Load RSP, jump to kernel
+```
+
+**Trampoline Patching** (`src/arch/x86_64/smp.zig:111-169`):
+
+These values are patched into the trampoline before sending SIPI:
+
+| Patch Point | Size | Value |
+|-------------|------|-------|
+| PM jump target | 4 bytes | Physical addr of 32-bit entry |
+| LM jump target | 4 bytes | Physical addr of 64-bit entry |
+| CR3 | 4 bytes | BSP's page table base (from `cpu.readCr3()`) |
+| RSP | 8 bytes | Per-AP stack top address |
+| AP GDT | 8 bytes | Virtual addr of AP's GDT copy |
+| Entry point | 8 bytes | `&apEntry` function pointer |
+
+**Critical Requirement - NXE Bit** (`smp_trampoline.S:98-108`):
+
+When enabling Long Mode in the trampoline (EFER MSR at 0xC0000080), the **NXE (No-Execute Enable)** bit (bit 11) MUST be set if the kernel page tables use the NX bit:
+
+```assembly
+mov $0xC0000080, %ecx    // IA32_EFER MSR
+rdmsr
+or $(1 << 8), %eax       // LME - Long Mode Enable
+or $(1 << 11), %eax      // NXE - No-Execute Enable
+wrmsr
+```
+
+Failure to set NXE causes the AP to #PF (Page Fault) immediately upon enabling paging, as it interprets the NX bits in page table entries as "reserved bits" that must be zero.
+
+**Embedded GDT** (`smp_trampoline.S:162-182`):
+
+The trampoline contains a temporary 4-entry GDT:
+- 0x00: Null descriptor
+- 0x08: 64-bit code (L=1, D=0)
+- 0x10: Data (shared by all modes)
+- 0x18: 32-bit code (L=0, D=1)

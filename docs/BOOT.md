@@ -160,7 +160,14 @@ If the kernel fails to boot or panics early, consider the following:
 ### 1. Serial Console is Critical
 The framebuffer log may scroll too fast or be initialized too late. Rely on the serial console (COM1/0x3F8) for debugging.
 *   **QEMU**: Use `-serial stdio` to see logs in your terminal.
+*   **Real Hardware**: Connect a serial cable to COM1 or use a USB-to-serial adapter. Set baud rate to 115200.
 *   **Formatting**: Ensure your console writer supports `std.fmt`. If using a custom writer, be wary of format specifiers like `{:0>16x}` causing parser errors; simple `{x}` is safer for basic debugging.
+*   **Minimal QEMU Command**: For serial-only debugging without display:
+    ```bash
+    qemu-system-x86_64 -M q35 -m 128M -cdrom zscapek.iso \
+      -drive if=pflash,format=raw,readonly=on,file=/path/to/edk2-x86_64-code.fd \
+      -serial stdio -display none -accel tcg
+    ```
 
 ### 2. Common Failures
 *   **Silent Reset / Boot Loop**: 
@@ -174,6 +181,12 @@ The framebuffer log may scroll too fast or be initialized too late. Rely on the 
 *   **"Integer Overflow" Panic**:
     *   **Cause**: Zig's safety checks (enabled in Debug/ReleaseSafe) catch overflows that other languages ignore.
     *   **Hint**: Check loop counters (e.g., `u3` cannot hold 8) and bitwise operations on differing integer widths (e.g., `~u32` inside `u64`). Use `+%` for wrapping addition if intentional.
+*   **Keyboard/Mouse Not Working**:
+    *   **Check**: Is the VM/hardware using PS/2 or USB input?
+    *   **PS/2 (QEMU default)**: The kernel sends `0xF4` (Enable Scanning) to the keyboard during initialization (`src/drivers/keyboard.zig:410`). If no response, the 8042 controller may not be present.
+    *   **USB (MacBook/Modern PC)**: Requires XHCI driver with Port Reset logic. The driver must reset ports to transition devices from "Powered" to "Default/Addressed" state.
+    *   **QEMU Fix**: Add `-device qemu-xhci -device usb-kbd -device usb-mouse` to force USB mode.
+    *   **Serial Diagnostics**: Check serial console for "PS/2 keyboard: enable failed" or "XHCI: Port reset" messages.
 
 ### 3. SWAPGS and Syscall Entry Crashes
 
@@ -280,6 +293,32 @@ qemu-system-x86_64 -M q35 -m 256M -smp 4 -cdrom zscapek.iso \
   -drive if=pflash,format=raw,readonly=on,file=/opt/homebrew/share/qemu/edk2-x86_64-code.fd \
   -serial stdio -display none -accel tcg
 ```
+
+### macOS/Apple Silicon Optimized
+
+For better performance on Apple Silicon Macs using Hypervisor.framework:
+
+```bash
+# Using HVF acceleration (faster than TCG)
+qemu-system-x86_64 -M q35 -m 256M -smp 4 -cdrom zscapek.iso \
+  -drive if=pflash,format=raw,readonly=on,file=/opt/homebrew/share/qemu/edk2-x86_64-code.fd \
+  -serial stdio -accel hvf -cpu host
+```
+
+Note: HVF acceleration requires x86_64 emulation layer on ARM. If issues occur, fall back to `-accel tcg`.
+
+### USB Input Testing
+
+To test the XHCI USB driver explicitly (bypassing default PS/2 emulation):
+
+```bash
+qemu-system-x86_64 -M q35 -m 256M -cdrom zscapek.iso \
+  -drive if=pflash,format=raw,readonly=on,file=/opt/homebrew/share/qemu/edk2-x86_64-code.fd \
+  -device qemu-xhci -device usb-kbd -device usb-mouse \
+  -serial stdio -accel tcg
+```
+
+This configures QEMU with an XHCI controller and USB keyboard/mouse devices instead of legacy PS/2.
 
 ## Key Files
 
