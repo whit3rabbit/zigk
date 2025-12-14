@@ -286,6 +286,10 @@ export fn _start() noreturn {
     // Must be done before keyboard/scheduler to route IRQs correctly
     initApic();
 
+    // Initialize SMP (bring up APs)
+    // Must be done after APIC init
+    hal.smp.init();
+
     // Initialize keyboard driver and register with HAL
     keyboard.init();
     hal.interrupts.setKeyboardHandler(&keyboard.handleIrq);
@@ -967,6 +971,7 @@ fn initApic() void {
         .io_apics = io_apics[0..madt_info.io_apic_count],
         .overrides = &overrides,
         .pcat_compat = madt_info.pcat_compat,
+        .lapic_ids = madt_info.lapic_ids[0..madt_info.lapic_count],
     };
 
     // Initialize APIC

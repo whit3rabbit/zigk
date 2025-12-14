@@ -599,6 +599,9 @@ pub fn build(b: *std.Build) void {
     // Add assembly helpers for x86_64 (ISR stubs, lgdt, lidt)
     kernel.addAssemblyFile(b.path("src/arch/x86_64/asm_helpers.S"));
 
+    // Add SMP trampoline code
+    kernel.addAssemblyFile(b.path("src/arch/x86_64/smp_trampoline.S"));
+
     // Note: boot32.S is no longer needed - Limine handles 64-bit entry directly
 
     // Set linker script for kernel memory layout
