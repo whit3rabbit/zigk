@@ -110,9 +110,27 @@ fn checkFunction(pci: *const Ecam, bus: u8, dev: u5, func: u3, devices: *DeviceL
         .bar = [_]Bar{Bar.unused()} ** 6,
         .irq_line = pci.read8(bus, dev, func, ConfigReg.INTERRUPT_LINE),
         .irq_pin = pci.read8(bus, dev, func, ConfigReg.INTERRUPT_PIN),
+        .gsi = 0,
         .subsystem_vendor = subsystem_vendor,
         .subsystem_id = subsystem_id,
     };
+
+    // Calculate GSI (Global System Interrupt) using default rotation
+    // GSI = IOAPIC_BASE (16) + (Pin (0-3) + DeviceID) % 4
+    if (pci_dev.irq_pin >= 1 and pci_dev.irq_pin <= 4) {
+        const pin_idx = pci_dev.irq_pin - 1;
+        // Simple rotation based on device number
+        // This assumes default PCI swizzling for root bus devices
+        const gsi = 16 + ((@as(u32, pin_idx) + pci_dev.device) % 4);
+        pci_dev.gsi = gsi;
+
+        // Update irq_line if it fits (for legacy driver compatibility)
+        if (gsi < 256) {
+             pci_dev.irq_line = @truncate(gsi);
+             // Optional: Write back to PCI config space for consistency
+             // pci.write8(bus, dev, func, ConfigReg.INTERRUPT_LINE, pci_dev.irq_line);
+        }
+    }
 
     // Read BARs (only for type 0 headers - standard devices)
     if ((pci_dev.header_type & 0x7F) == 0) { // Mask multi-function bit
