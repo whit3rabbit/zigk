@@ -41,10 +41,10 @@ var scheduler = Scheduler{};
 
 /// Scheduler internal state structure
 const Scheduler = struct {
-    /// Currently executing thread (null before first schedule)
-    current: ?*Thread = null,
+    // Current thread is now per-CPU, stored in GS data
 
     /// Ready queue using intrusive linked list
+    /// Shared by all CPUs for now (SQMP - Single Queue Multi Processor)
     ready_queue: list.IntrusiveDoublyLinkedList(Thread) = .{},
 
     /// Sorted sleep list head (wake_time ascending)
@@ -58,13 +58,6 @@ const Scheduler = struct {
 
     /// Is the scheduler running? (false until start() is called)
     running: bool = false,
-
-    /// Idle thread - always available as a fallback
-    idle_thread: ?*Thread = null,
-
-    /// Per-CPU kernel GS data pointer (for syscall stack switching)
-    /// Set by main.zig during initialization
-    gs_data: ?*hal.syscall.KernelGsData = null,
 
     /// Callback function to be called on every timer tick
     tick_callback: ?*const fn () void = null,
@@ -195,29 +188,34 @@ fn idleThreadEntry() void {
 /// Set the per-CPU kernel GS data pointer
 /// Called by main.zig during initialization before scheduler starts
 /// This pointer is used to update kernel_stack on context switch for SYSCALL
-pub fn setGsData(gs_data: *hal.syscall.KernelGsData) void {
-    scheduler.gs_data = gs_data;
+/// Deprecated in SMP: GS data is managed per-CPU
+pub fn setGsData(_: *hal.syscall.KernelGsData) void {
+    // scheduler.gs_data = gs_data; // No longer used globally
 }
 
-/// Initialize the scheduler
+/// Initialize the scheduler (BSP)
 /// Must be called after memory management is initialized
 pub fn init() void {
     console.info("Sched: Initializing scheduler...", .{});
 
     // Register timer handler for preemptive scheduling
     hal.interrupts.setTimerHandler(timerTick);
-    console.info("Sched: Timer handler registered", .{});
 
     // Register guard page checker for stack overflow detection
     hal.interrupts.setGuardPageChecker(guardPageCheckerCallback);
-    console.info("Sched: Guard page checker registered", .{});
 
     // Register FPU access handler for lazy FPU switching
     hal.interrupts.setFpuAccessHandler(handleFpuAccess);
-    console.info("Sched: Lazy FPU handler registered", .{});
 
-    // Create the idle thread
-    scheduler.idle_thread = thread.createKernelThread(idleThreadEntry, .{
+    // Create the idle thread for BSP
+    initIdleThread();
+
+    console.info("Sched: Initialized (BSP)", .{});
+}
+
+/// Initialize idle thread for current CPU
+fn initIdleThread() void {
+    const idle = thread.createKernelThread(idleThreadEntry, .{
         .name = "idle",
         .stack_size = 4096, // Idle thread needs minimal stack
     }) catch |err| {
@@ -225,8 +223,26 @@ pub fn init() void {
         hal.cpu.haltForever();
     };
 
-    console.info("Sched: Idle thread created (tid={d})", .{scheduler.idle_thread.?.tid});
+    // Store idle thread in GS data
+    // We access GS via MSR or assumption that it's already set up
+    // In BSP init, main.zig sets up GS before calling sched.init()
+    const gs_base = hal.syscall.getKernelGsBase();
+    const gs_data = @as(*hal.syscall.KernelGsData, @ptrFromInt(gs_base));
+    gs_data.idle_thread = @intFromPtr(idle);
+    gs_data.current_thread = 0; // No current thread yet
+
+    console.info("Sched: Idle thread created for CPU {d} (tid={d})", .{gs_data.apic_id, idle.tid});
 }
+
+/// Initialize Scheduler for AP
+pub fn initAp() void {
+    // Initialize idle thread for this AP
+    initIdleThread();
+
+    // Enable interrupts to allow timer ticks (once we start)
+    // But we are not starting yet.
+}
+
 
 /// Callback wrapper for guard page checker
 /// This wraps checkGuardPage to match the HAL callback signature
@@ -252,10 +268,10 @@ pub fn addThread(t: *Thread) void {
     addToReadyQueue(t);
 }
 
-/// Start the scheduler
+/// Start the scheduler (BSP only really, APs just enter loop)
 /// This function does not return - it becomes the idle thread
 pub fn start() noreturn {
-    console.info("Sched: Starting scheduler...", .{});
+    console.info("Sched: Starting scheduler on CPU {d}...", .{hal.apic.lapic.getId()});
 
     {
         const held = scheduler.lock.acquire();
@@ -266,16 +282,55 @@ pub fn start() noreturn {
     // Enable interrupts to allow timer ticks
     hal.cpu.enableInterrupts();
 
-    // This main thread becomes idle-like behavior until first preemption
+    // This thread becomes idle-like behavior until first preemption
     // The timer interrupt will eventually switch to a ready thread
     while (true) {
         hal.cpu.halt();
     }
 }
 
-/// Get the currently running thread
+/// Start scheduler on AP
+pub fn startAp() noreturn {
+    // Enable interrupts
+    hal.cpu.enableInterrupts();
+    while (true) {
+        hal.cpu.halt();
+    }
+}
+
+/// Get the currently running thread for the current CPU
 pub fn getCurrentThread() ?*Thread {
-    return scheduler.current;
+    // Read from GS:current_thread
+    // We use inline asm to read %gs:16 directly for speed
+    // GS base points to KernelGsData.
+    // 0: kernel_stack
+    // 8: user_stack
+    // 16: current_thread
+
+    const ptr = asm volatile ("movq %%gs:16, %[ret]"
+        : [ret] "=r" (-> u64),
+    );
+
+    if (ptr == 0) return null;
+    return @ptrFromInt(ptr);
+}
+
+/// Set the currently running thread for the current CPU
+fn setCurrentThread(t: ?*Thread) void {
+    const val = if (t) |thread_ptr| @intFromPtr(thread_ptr) else 0;
+    asm volatile ("movq %[val], %%gs:16"
+        :
+        : [val] "r" (val),
+    );
+}
+
+/// Get idle thread for current CPU
+fn getIdleThread() *Thread {
+    // idle_thread is at offset 40 in KernelGsData
+    const ptr = asm volatile ("movq %%gs:40, %[ret]"
+        : [ret] "=r" (-> u64),
+    );
+    return @ptrFromInt(ptr);
 }
 
 /// Get the current tick count
@@ -294,10 +349,12 @@ pub fn getTickCount() u64 {
 /// SAFETY: Calling yield() while holding spinlocks will cause deadlock.
 /// In debug builds, this is detected and panics.
 pub fn yield() void {
+    const current = getCurrentThread();
+
     // Debug check: detect yield while holding locks (deadlock prevention)
     // Debug check: detect yield while holding locks (deadlock prevention)
     // CRITICAL: Always check this, even in release builds, to prevent silent deadlocks.
-    if (scheduler.current) |t| {
+    if (current) |t| {
         if (t.lock_depth > 0) {
             console.err("PANIC: yield() called with {d} lock(s) held by thread '{s}' (tid={d})", .{
                 t.lock_depth,
@@ -327,11 +384,13 @@ pub fn yield() void {
 /// Without enabling interrupts and halting, the timer IRQ cannot fire,
 /// causing a deadlock.
 pub fn block() void {
+    const current = getCurrentThread();
+
     {
         const held = scheduler.lock.acquire();
         defer held.release();
 
-        if (scheduler.current) |curr| {
+        if (current) |curr| {
             removeFromSleepList(curr);
             curr.state = .Blocked;
             curr.wake_time = 0;
@@ -350,7 +409,7 @@ pub fn block() void {
     // preempted, blocked, unblocked, and rescheduled ALREADY.
     // In that case, our state is now Running, and we should NOT halt.
     hal.cpu.disableInterrupts();
-    if (scheduler.current) |curr| {
+    if (current) |curr| {
         if (curr.state == .Running) {
             // We were preempted and woken up already
             hal.cpu.enableInterrupts();
@@ -392,11 +451,13 @@ pub fn sleepForTicks(ticks: u64) void {
         return;
     }
 
+    const current = getCurrentThread();
+
     {
         const held = scheduler.lock.acquire();
         defer held.release();
 
-        if (scheduler.current) |curr| {
+        if (current) |curr| {
             removeFromSleepList(curr);
             curr.state = .Blocked;
             const max_tick: u64 = std.math.maxInt(u64);
@@ -422,14 +483,15 @@ pub fn exit() void {
 /// Thread will be marked as zombie and parent will be woken if waiting
 pub fn exitWithStatus(status: i32) void {
     const held = scheduler.lock.acquire();
+    const current = getCurrentThread();
 
-    if (scheduler.current) |curr| {
+    if (current) |curr| {
         // Set exit status
         thread.setExitStatus(curr, status);
 
         // Mark as zombie
         curr.state = .Zombie;
-        scheduler.current = null;
+        setCurrentThread(null); // Clear current thread
 
         if (config.debug_scheduler) {
             console.info("Sched: Thread '{s}' (tid={d}) exited with status {d}", .{
@@ -472,6 +534,8 @@ pub fn exitWithStatus(status: i32) void {
 /// frame: Pointer to the current thread's saved interrupt frame
 /// Returns: Pointer to the frame to restore (same if no switch, different if switched)
 pub fn timerTick(frame: *hal.idt.InterruptFrame) *hal.idt.InterruptFrame {
+    // Acquire global scheduler lock
+    // In SQMP, this protects the single ready queue.
     const held = scheduler.lock.acquire();
     defer held.release();
 
@@ -479,7 +543,7 @@ pub fn timerTick(frame: *hal.idt.InterruptFrame) *hal.idt.InterruptFrame {
     wakeSleepingThreads(scheduler.tick_count);
 
     if (scheduler.tick_count % 100 == 0) {
-        console.debug("Sched: Tick {d}", .{scheduler.tick_count});
+        // console.debug("Sched: Tick {d}", .{scheduler.tick_count});
     }
 
     // Call registered timer callback (e.g. for TCP timers)
@@ -492,8 +556,10 @@ pub fn timerTick(frame: *hal.idt.InterruptFrame) *hal.idt.InterruptFrame {
         return frame;
     }
 
+    const current = getCurrentThread();
+
     // Save current thread's context
-    if (scheduler.current) |curr| {
+    if (current) |curr| {
         // Save the interrupt frame location
         curr.kernel_rsp = @intFromPtr(frame);
 
@@ -511,28 +577,28 @@ pub fn timerTick(frame: *hal.idt.InterruptFrame) *hal.idt.InterruptFrame {
     }
 
     // Select next thread to run
-    console.info("timerTick: ready_queue count={d}", .{scheduler.ready_queue.count});
+    // console.info("timerTick: ready_queue count={d}", .{scheduler.ready_queue.count});
     var next_thread = removeFromReadyQueue();
 
-    // If no threads ready, use idle thread
+    // If no threads ready, use idle thread for THIS CPU
     if (next_thread == null) {
-        console.info("timerTick: no ready threads, using idle", .{});
-        next_thread = scheduler.idle_thread;
+        // console.info("timerTick: no ready threads, using idle", .{});
+        next_thread = getIdleThread();
         // Idle thread doesn't go in ready queue, just runs directly
     } else {
-        console.info("timerTick: got thread from queue '{s}'", .{next_thread.?.getName()});
+        // console.info("timerTick: got thread from queue '{s}'", .{next_thread.?.getName()});
     }
 
     const next = next_thread.?;
-    console.info("timerTick: next thread '{s}' state={} kernel_rsp={x}", .{
-        next.getName(), @intFromEnum(next.state), next.kernel_rsp,
-    });
+    // console.info("timerTick: next thread '{s}' state={} kernel_rsp={x}", .{
+    //     next.getName(), @intFromEnum(next.state), next.kernel_rsp,
+    // });
 
     // If switching to a different thread, update TSS and potentially CR3
-    if (scheduler.current != next) {
+    if (current != next) {
         if (config.debug_scheduler) {
-            const curr_name = if (scheduler.current) |c| c.getName() else "none";
-            console.debug("Sched: Switch {s} -> {s}", .{ curr_name, next.getName() });
+            const curr_name = if (current) |c| c.getName() else "none";
+            // console.debug("Sched: Switch {s} -> {s}", .{ curr_name, next.getName() });
         }
 
         // Update TSS.rsp0 for the new thread's kernel stack
@@ -540,9 +606,10 @@ pub fn timerTick(frame: *hal.idt.InterruptFrame) *hal.idt.InterruptFrame {
 
         // Update kernel GS data for SYSCALL instruction
         // The syscall entry stub reads %gs:0 to get kernel stack
-        if (scheduler.gs_data) |gs_data| {
-            gs_data.kernel_stack = next.kernel_stack_top;
-        }
+        // Access GS data directly
+        const gs_base = hal.syscall.getKernelGsBase();
+        const gs_data = @as(*hal.syscall.KernelGsData, @ptrFromInt(gs_base));
+        gs_data.kernel_stack = next.kernel_stack_top;
 
         // Switch page tables if different (for userland threads)
         if (next.cr3 != 0) {
@@ -555,9 +622,7 @@ pub fn timerTick(frame: *hal.idt.InterruptFrame) *hal.idt.InterruptFrame {
         // Restore FS base for TLS (set by arch_prctl ARCH_SET_FS)
         // Optimization: Only write MSR if value actually changed
         // We must check against the PREVIOUS thread's FS base (curr), not 0.
-        // This ensures that if we switch from a thread with TLS (fs!=0) to
-        // one without (fs=0), we correctly clear the MSR.
-        const current_fs = if (scheduler.current) |c| c.fs_base else 0;
+        const current_fs = if (current) |c| c.fs_base else 0;
         if (next.fs_base != current_fs) {
             hal.cpu.writeMsr(hal.cpu.IA32_FS_BASE, next.fs_base);
         }
@@ -571,17 +636,17 @@ pub fn timerTick(frame: *hal.idt.InterruptFrame) *hal.idt.InterruptFrame {
     }
 
     next.state = .Running;
-    scheduler.current = next;
+    setCurrentThread(next);
 
     // DEBUG: Verify the interrupt frame before context switch
-    const frame_ptr: *hal.idt.InterruptFrame = @ptrFromInt(next.kernel_rsp);
-    console.debug("timerTick: switch to '{s}' tid={d} kernel_rsp={x}", .{
-        next.getName(), next.tid, next.kernel_rsp,
-    });
-    console.debug("timerTick: frame.cs={x} frame.ss={x} frame.rip={x} rflags={x}", .{
-        frame_ptr.cs, frame_ptr.ss, frame_ptr.rip, frame_ptr.rflags,
-    });
-    console.debug("timerTick: EXIT returning {x}", .{next.kernel_rsp});
+    // const frame_ptr: *hal.idt.InterruptFrame = @ptrFromInt(next.kernel_rsp);
+    // console.debug("timerTick: switch to '{s}' tid={d} kernel_rsp={x}", .{
+    //     next.getName(), next.tid, next.kernel_rsp,
+    // });
+    // console.debug("timerTick: frame.cs={x} frame.ss={x} frame.rip={x} rflags={x}", .{
+    //     frame_ptr.cs, frame_ptr.ss, frame_ptr.rip, frame_ptr.rflags,
+    // });
+    // console.debug("timerTick: EXIT returning {x}", .{next.kernel_rsp});
 
     // Return the new thread's saved interrupt frame
     // isr_common will pop registers from this location and iretq
@@ -605,11 +670,13 @@ pub fn getStats() SchedulerStats {
     const held = scheduler.lock.acquire();
     defer held.release();
 
+    const current = getCurrentThread();
+
     return .{
         .tick_count = scheduler.tick_count,
         .ready_count = scheduler.ready_queue.count,
         .is_running = scheduler.running,
-        .current_tid = if (scheduler.current) |c| c.tid else null,
+        .current_tid = if (current) |c| c.tid else null,
     };
 }
 
@@ -626,8 +693,10 @@ pub const GuardPageInfo = struct {
 /// Returns guard info if it is, null otherwise
 /// This is called from the page fault handler to detect stack overflow
 pub fn checkGuardPage(fault_addr: u64) ?GuardPageInfo {
+    const current = getCurrentThread();
+
     // Check current thread first (most likely case)
-    if (scheduler.current) |curr| {
+    if (current) |curr| {
         if (isInGuardPage(fault_addr, curr)) {
             return GuardPageInfo{
                 .thread_id = curr.tid,
@@ -638,16 +707,16 @@ pub fn checkGuardPage(fault_addr: u64) ?GuardPageInfo {
         }
     }
 
-    // Check idle thread
-    if (scheduler.idle_thread) |idle| {
-        if (isInGuardPage(fault_addr, idle)) {
-            return GuardPageInfo{
-                .thread_id = idle.tid,
-                .thread_name = idle.getName(),
-                .stack_base = idle.kernel_stack_base,
-                .stack_top = idle.kernel_stack_top,
-            };
-        }
+    // Check idle thread (THIS CPU)
+    // Note: checking other CPUs' idle threads would be complex
+    const idle = getIdleThread();
+    if (isInGuardPage(fault_addr, idle)) {
+         return GuardPageInfo{
+            .thread_id = idle.tid,
+            .thread_name = idle.getName(),
+            .stack_base = idle.kernel_stack_base,
+            .stack_top = idle.kernel_stack_top,
+        };
     }
 
     // Check all threads in ready queue
@@ -692,8 +761,10 @@ fn isInGuardPage(addr: u64, t: *const Thread) bool {
 /// Called from the #NM exception handler when a thread tries to use FPU
 /// Returns true if handled successfully, false if no current thread
 pub fn handleFpuAccess() bool {
+    const current = getCurrentThread();
+
     // No lock needed - we're in exception handler context with interrupts disabled
-    if (scheduler.current) |curr| {
+    if (current) |curr| {
         // Clear TS flag to allow FPU access
         fpu.clearTaskSwitched();
 
