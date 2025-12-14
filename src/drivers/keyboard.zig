@@ -44,6 +44,10 @@ const CMD_WRITE_CONFIG: u8 = 0x60;
 const CMD_SELF_TEST: u8 = 0xAA;
 const CMD_TEST_FIRST_PORT: u8 = 0xAB;
 
+// Keyboard Device Commands
+const KBD_CMD_ENABLE: u8 = 0xF4;
+const KBD_ACK: u8 = 0xFA;
+
 // PS/2 Response Codes
 const SELF_TEST_PASSED: u8 = 0x55;
 const PORT_TEST_PASSED: u8 = 0x00;
@@ -402,10 +406,21 @@ pub fn init() void {
     sendCommand(CMD_WRITE_CONFIG);
     sendData(config);
 
-    // 8. Flush any stale data again
+    // 8. Enable Keyboard Scanning
+    sendData(KBD_CMD_ENABLE);
+    const ack = readData();
+    if (ack) |a| {
+        if (a != KBD_ACK) {
+            console.warn("PS/2 keyboard: enable failed, got 0x{X:0>2}", .{a});
+        }
+    } else {
+        console.warn("PS/2 keyboard: enable timeout", .{});
+    }
+
+    // 9. Flush any stale data again
     flushBuffer();
 
-    // 9. Reset keyboard state
+    // 10. Reset keyboard state
     keyboard_state = .{};
     error_stats = .{};
 
