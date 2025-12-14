@@ -28,6 +28,8 @@ pub fn build(b: *std.Build) void {
     const debug_network = b.option(bool, "debug-network", "Enable verbose network logging") orelse false;
     // NEW: Option to pass BIOS/UEFI firmware path
     const qemu_bios = b.option([]const u8, "bios", "Path to BIOS/UEFI firmware (e.g. OVMF.fd) for QEMU");
+    // Display option: "default" (auto), "sdl", "gtk", "cocoa" (macOS), "none" (headless)
+    const qemu_display = b.option([]const u8, "display", "QEMU display backend (default, sdl, gtk, cocoa, none)") orelse "default";
 
     // Create kernel config options module
     const config_options = b.addOptions();
@@ -340,6 +342,7 @@ pub fn build(b: *std.Build) void {
     fs_module.addImport("heap", heap_module);
     fs_module.addImport("uapi", uapi_module);
     fs_module.addImport("console", console_module);
+    fs_module.addImport("ahci", ahci_module);
 
     // Create Keyboard driver module
     const keyboard_module = b.createModule(.{
@@ -428,6 +431,10 @@ pub fn build(b: *std.Build) void {
     mouse_module.addImport("console", console_module);
     mouse_module.addImport("input", input_module);
     mouse_module.addImport("uapi", uapi_module);
+    
+    // Add dependencies to USB module (after keyboard/mouse are defined)
+    usb_module.addImport("keyboard", keyboard_module);
+    usb_module.addImport("mouse", mouse_module);
 
     // Create DevFS module (device filesystem shim)
     const devfs_module = b.createModule(.{
@@ -442,8 +449,22 @@ pub fn build(b: *std.Build) void {
     devfs_module.addImport("sched", sched_module);
     devfs_module.addImport("uapi", uapi_module);
     devfs_module.addImport("ahci", ahci_module);
+    devfs_module.addImport("heap", heap_module);
     devfs_module.addImport("audio", audio_module);
     devfs_module.addImport("fs", fs_module);
+
+    // Create Partitions module
+    const partitions_module = b.createModule(.{
+        .root_source_file = b.path("src/fs/partitions/root.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    partitions_module.addImport("ahci", ahci_module);
+    partitions_module.addImport("devfs", devfs_module);
+    partitions_module.addImport("heap", heap_module);
+    partitions_module.addImport("fd", fd_module);
+    partitions_module.addImport("uapi", uapi_module);
+    partitions_module.addImport("console", console_module);
 
     // Create Process module (process abstraction for fork/exec/wait)
     const process_module = b.createModule(.{
@@ -754,6 +775,7 @@ pub fn build(b: *std.Build) void {
     kernel.root_module.addImport("serial_driver", serial_module);
     kernel.root_module.addImport("video_driver", video_module);
     kernel.root_module.addImport("mouse", mouse_module);
+    kernel.root_module.addImport("partitions", partitions_module);
     kernel.root_module.addImport("input", input_module);
     kernel.root_module.addImport("audio", audio_module);
     kernel.root_module.addImport("thread", thread_module);
@@ -912,6 +934,12 @@ pub fn build(b: *std.Build) void {
             "-nostdlib",
             "-fno-stack-protector",
             "-fno-builtin",
+            "-mno-sse",
+            "-mno-sse2",
+            "-mno-mmx",
+            "-mno-red-zone",
+            "-fno-sanitize=undefined",
+            "-fno-sanitize=alignment",
         },
     });
     doom.addIncludePath(b.path("src/user/doom/include"));
@@ -1061,7 +1089,7 @@ pub fn build(b: *std.Build) void {
         "-m", "512M",
         "-cdrom", "zscapek.iso",
         "-device", "qemu-xhci,id=xhci",
-        "-device", "virtio-gpu-pci",
+        "-vga", "std",
         "-device", "AC97",
         "-serial", "stdio",
         "-smp", "4",
@@ -1069,7 +1097,12 @@ pub fn build(b: *std.Build) void {
         "-no-shutdown",
         "-accel", "tcg",
     });
-    
+
+    // Add display option (default = let QEMU auto-detect)
+    if (!std.mem.eql(u8, qemu_display, "default")) {
+        run_cmd.addArgs(&.{ "-display", qemu_display });
+    }
+
     // NEW: Inject -bios argument if provided
     if (qemu_bios) |bios_path| {
         if (std.mem.endsWith(u8, bios_path, ".fd") or std.mem.endsWith(u8, bios_path, ".FD")) {

@@ -9,8 +9,8 @@
 const std = @import("std");
 const console = @import("console");
 const usb = @import("../root.zig");
-const keyboard = @import("../../keyboard.zig");
-const mouse = @import("../../mouse.zig");
+const keyboard = @import("keyboard");
+const mouse = @import("mouse");
 
 // =============================================================================
 // HID Descriptors
@@ -164,7 +164,7 @@ pub const HidDriver = struct {
             }
 
             const tag = (header >> 4) & 0x0F;
-            const type = (header >> 2) & 0x03;
+            const item_type = (header >> 2) & 0x03;
             const size_code = header & 0x03;
 
             const size: usize = switch (size_code) {
@@ -186,11 +186,11 @@ pub const HidDriver = struct {
             }
 
             // Detect usage
-            if (type == @intFromEnum(ItemType.global)) {
+            if (item_type == @intFromEnum(ItemType.global)) {
                 if (tag == @intFromEnum(GlobalItem.usage_page)) {
                     current_usage_page = @truncate(value);
                 }
-            } else if (type == @intFromEnum(ItemType.local)) {
+            } else if (item_type == @intFromEnum(ItemType.local)) {
                 if (tag == @intFromEnum(LocalItem.usage)) {
                     current_usage = @truncate(value);
 
@@ -207,7 +207,7 @@ pub const HidDriver = struct {
                         }
                     }
                 }
-            } else if (type == @intFromEnum(ItemType.main)) {
+            } else if (item_type == @intFromEnum(ItemType.main)) {
                 if (tag == @intFromEnum(MainItem.collection)) {
                     in_collection = true;
                 } else if (tag == @intFromEnum(MainItem.end_collection)) {
@@ -312,6 +312,7 @@ pub const HidDriver = struct {
     /// Handle Boot Protocol Mouse Report
     /// Format: [Buttons, X, Y, (Optional Wheel)]
     fn handleMouseReport(self: *Self, data: []const u8) void {
+        _ = self;
         if (data.len < 3) return;
 
         const buttons_raw = data[0];

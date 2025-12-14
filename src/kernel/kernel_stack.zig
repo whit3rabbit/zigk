@@ -25,7 +25,7 @@ const paging = hal.paging;
 pub const PAGE_SIZE: usize = pmm.PAGE_SIZE;
 
 /// Number of pages per stack (excluding guard page)
-pub const STACK_PAGES: usize = 4;
+pub const STACK_PAGES: usize = 8;
 
 /// Total size of each stack slot (guard + stack pages)
 pub const STACK_SLOT_PAGES: usize = STACK_PAGES + 1;

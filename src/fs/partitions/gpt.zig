@@ -26,7 +26,7 @@ pub const Guid = extern struct {
     }
 };
 
-pub const GptHeader = packed struct {
+pub const GptHeader = extern struct {
     signature: u64,
     revision: u32,
     header_size: u32,
@@ -52,7 +52,7 @@ pub const GptHeader = packed struct {
     }
 };
 
-pub const GptEntry = packed struct {
+pub const GptEntry = extern struct {
     type_guid: Guid,
     unique_guid: Guid,
     first_lba: u64,

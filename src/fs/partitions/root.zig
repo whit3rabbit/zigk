@@ -67,7 +67,7 @@ fn partitionRead(fd: *FileDescriptor, buf: []u8) isize {
     const end_lba = part.start_lba + ((pos + read_len + 512 - 1) / 512);
     const sector_count_u64 = end_lba - start_lba;
 
-    if (sector_count_u64 > ahci.root.MAX_SECTORS_PER_TRANSFER) {
+    if (sector_count_u64 > ahci.MAX_SECTORS_PER_TRANSFER) {
         return Errno.EINVAL.toReturn();
     }
     const sector_count: u16 = @intCast(sector_count_u64);
@@ -120,7 +120,7 @@ fn partitionWrite(fd: *FileDescriptor, buf: []const u8) isize {
     const end_lba = part.start_lba + ((pos + write_len + 512 - 1) / 512);
     const sector_count_u64 = end_lba - start_lba;
 
-    if (sector_count_u64 > ahci.root.MAX_SECTORS_PER_TRANSFER) {
+    if (sector_count_u64 > ahci.MAX_SECTORS_PER_TRANSFER) {
         return Errno.EINVAL.toReturn();
     }
     const sector_count: u16 = @intCast(sector_count_u64);
@@ -220,7 +220,7 @@ pub fn scanAndRegister(port_num: u5) !void {
         return;
     };
 
-    const mbr_data: *mbr.Mbr = @ptrCast(mbr_sector);
+    const mbr_data: *align(1) mbr.Mbr = @ptrCast(mbr_sector);
 
     if (!mbr_data.isValid()) {
         console.info("Partitions: No valid MBR signature on {s}", .{disk_name});
@@ -237,7 +237,7 @@ pub fn scanAndRegister(port_num: u5) !void {
     // Process MBR partitions
     console.info("Partitions: Found MBR on {s}", .{disk_name});
     var index: u32 = 1;
-    for (mbr_data.partitions) |entry| {
+    for (mbr_data.partitions()) |entry| {
         if (entry.isValid()) {
             try registerPartition(port_num, disk_name, index, entry.lba_start, entry.sector_count);
             index += 1;
@@ -258,7 +258,7 @@ fn scanGpt(port_num: u5, disk_name: []const u8) !void {
         return;
     };
 
-    const header: *gpt.GptHeader = @ptrCast(header_sector);
+    const header: *align(1) gpt.GptHeader = @ptrCast(header_sector);
     if (!header.isValid()) {
         console.warn("Partitions: Invalid GPT signature", .{});
         return;
@@ -290,8 +290,7 @@ fn scanGpt(port_num: u5, disk_name: []const u8) !void {
         const offset = i * header.size_partition_entry;
         if (offset + @sizeOf(gpt.GptEntry) > table_buffer.len) break;
 
-        const entry: *gpt.GptEntry = @ptrCast(table_buffer[offset..].ptr); // pointer cast to avoid alignment issues if we just slice
-        // Note: verify alignment. GptEntry is 128 bytes, buffer is 512 aligned. Should be fine.
+        const entry: *align(1) gpt.GptEntry = @ptrCast(table_buffer[offset..].ptr);
 
         if (entry.isValid()) {
             const size = entry.last_lba - entry.first_lba + 1;

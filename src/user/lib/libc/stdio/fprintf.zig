@@ -340,9 +340,16 @@ pub export fn snprintf(dest: ?[*]u8, size: usize, fmt_str: [*:0]const u8, ...) c
 
             while (fmt_ptr[0] >= '0' and fmt_ptr[0] <= '9') fmt_ptr += 1;
 
+            // Parse precision
+            var precision: usize = 0;
+            var has_precision = false;
             if (fmt_ptr[0] == '.') {
+                has_precision = true;
                 fmt_ptr += 1;
-                while (fmt_ptr[0] >= '0' and fmt_ptr[0] <= '9') fmt_ptr += 1;
+                while (fmt_ptr[0] >= '0' and fmt_ptr[0] <= '9') {
+                    precision = precision * 10 + (fmt_ptr[0] - '0');
+                    fmt_ptr += 1;
+                }
             }
 
             var is_long: bool = false;
@@ -373,8 +380,25 @@ pub export fn snprintf(dest: ?[*]u8, size: usize, fmt_str: [*:0]const u8, ...) c
                         @as(i64, @cVaArg(&args, c_long))
                     else
                         @as(i64, @cVaArg(&args, c_int));
-                    const s = std.fmt.bufPrint(buf[written..], "{d}", .{val}) catch break;
-                    written += s.len;
+                    // Apply precision (minimum digits with leading zeros)
+                    if (has_precision and precision > 0) {
+                        if (val < 0) {
+                            if (written < buf.len) {
+                                buf[written] = '-';
+                                written += 1;
+                            }
+                            const abs_val: u64 = @intCast(-val);
+                            const s = std.fmt.bufPrint(buf[written..], "{d:0>[1]}", .{ abs_val, precision }) catch break;
+                            written += s.len;
+                        } else {
+                            const uval: u64 = @intCast(val);
+                            const s = std.fmt.bufPrint(buf[written..], "{d:0>[1]}", .{ uval, precision }) catch break;
+                            written += s.len;
+                        }
+                    } else {
+                        const s = std.fmt.bufPrint(buf[written..], "{d}", .{val}) catch break;
+                        written += s.len;
+                    }
                 },
                 'u' => {
                     const val: u64 = if (is_long_long)
@@ -383,24 +407,39 @@ pub export fn snprintf(dest: ?[*]u8, size: usize, fmt_str: [*:0]const u8, ...) c
                         @as(u64, @cVaArg(&args, c_ulong))
                     else
                         @as(u64, @cVaArg(&args, c_uint));
-                    const s = std.fmt.bufPrint(buf[written..], "{d}", .{val}) catch break;
-                    written += s.len;
+                    if (has_precision and precision > 0) {
+                        const s = std.fmt.bufPrint(buf[written..], "{d:0>[1]}", .{ val, precision }) catch break;
+                        written += s.len;
+                    } else {
+                        const s = std.fmt.bufPrint(buf[written..], "{d}", .{val}) catch break;
+                        written += s.len;
+                    }
                 },
                 'x' => {
                     const val: u64 = if (is_long)
                         @as(u64, @cVaArg(&args, c_ulong))
                     else
                         @as(u64, @cVaArg(&args, c_uint));
-                    const s = std.fmt.bufPrint(buf[written..], "{x}", .{val}) catch break;
-                    written += s.len;
+                    if (has_precision and precision > 0) {
+                        const s = std.fmt.bufPrint(buf[written..], "{x:0>[1]}", .{ val, precision }) catch break;
+                        written += s.len;
+                    } else {
+                        const s = std.fmt.bufPrint(buf[written..], "{x}", .{val}) catch break;
+                        written += s.len;
+                    }
                 },
                 'X' => {
                     const val: u64 = if (is_long)
                         @as(u64, @cVaArg(&args, c_ulong))
                     else
                         @as(u64, @cVaArg(&args, c_uint));
-                    const s = std.fmt.bufPrint(buf[written..], "{X}", .{val}) catch break;
-                    written += s.len;
+                    if (has_precision and precision > 0) {
+                        const s = std.fmt.bufPrint(buf[written..], "{X:0>[1]}", .{ val, precision }) catch break;
+                        written += s.len;
+                    } else {
+                        const s = std.fmt.bufPrint(buf[written..], "{X}", .{val}) catch break;
+                        written += s.len;
+                    }
                 },
                 'p' => {
                     const val = @cVaArg(&args, usize);

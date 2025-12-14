@@ -27,9 +27,11 @@ pub const PartitionType = enum(u8) {
 
 pub const MbrEntry = packed struct {
     status: u8,
-    chs_first: [3]u8,
+    chs_first_head: u8,
+    chs_first_sect_cyl: u16,
     type: PartitionType,
-    chs_last: [3]u8,
+    chs_last_head: u8,
+    chs_last_sect_cyl: u16,
     lba_start: u32,
     sector_count: u32,
 
@@ -38,19 +40,25 @@ pub const MbrEntry = packed struct {
     }
 };
 
-pub const Mbr = packed struct {
+pub const Mbr = extern struct {
     bootstrap: [446]u8,
-    partitions: [4]MbrEntry,
+    partition_bytes: [64]u8,
     signature: u16,
 
     pub fn isValid(self: Mbr) bool {
         return self.signature == MBR_SIGNATURE;
     }
 
+    pub fn partitions(self: *align(1) const Mbr) []align(1) const MbrEntry {
+        const bytes_ptr: [*]const u8 = @ptrCast(&self.partition_bytes);
+        const bytes = bytes_ptr[0..self.partition_bytes.len];
+        return std.mem.bytesAsSlice(MbrEntry, bytes);
+    }
+
     pub fn isGptProtective(self: Mbr) bool {
         if (!self.isValid()) return false;
         // Check if any partition is type 0xEE
-        for (self.partitions) |p| {
+        for (self.partitions()) |p| {
             if (p.type == .GPTProtection) return true;
         }
         return false;

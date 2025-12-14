@@ -4,6 +4,7 @@
 // The WAD file is expected to be at /doom1.wad in the InitRD.
 
 const syscall = @import("syscall");
+const std = @import("std");
 
 // Import libc to ensure all exports are linked
 // These modules contain exported C-callable functions that doomgeneric needs
@@ -173,3 +174,12 @@ export fn _start() noreturn {
 
 // DG_ScreenBuffer is defined in doomgeneric.c, we just reference it
 extern var DG_ScreenBuffer: [*]u32;
+
+pub fn panic(msg: []const u8, error_return_trace: ?*std.builtin.StackTrace, ret_addr: ?usize) noreturn {
+    _ = error_return_trace;
+    _ = ret_addr;
+    _ = syscall.print("PANIC: ");
+    _ = syscall.print(msg);
+    _ = syscall.print("\n");
+    syscall.exit(1);
+}

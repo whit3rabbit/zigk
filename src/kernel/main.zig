@@ -1017,7 +1017,7 @@ fn initStorage() void {
 
             if (ahci.initFromPci(dev, &ecam)) |controller| {
                 // Report detected drives and scan for partitions
-                const partitions = @import("fs").partitions;
+                const partitions = @import("partitions");
                 var port_num: u5 = 0;
                 while (port_num < ahci.MAX_PORTS) : (port_num += 1) {
                     if (controller.getPort(port_num)) |port| {
