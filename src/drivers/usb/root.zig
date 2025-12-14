@@ -17,6 +17,9 @@ pub const ehci = @import("ehci/root.zig");
 // Common types
 pub const types = @import("types.zig");
 
+// Class Drivers
+pub const hid = @import("class/hid.zig");
+
 // Re-export common types
 pub const SetupPacket = types.SetupPacket;
 pub const RequestType = types.RequestType;
