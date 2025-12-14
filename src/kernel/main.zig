@@ -303,6 +303,9 @@ export fn _start() noreturn {
     // Initialize keyboard driver and register with HAL
     keyboard.init();
     hal.interrupts.setKeyboardHandler(&keyboard.handleIrq);
+    // Explicitly enable keyboard IRQ1 in IOAPIC (ensure unmasked)
+    hal.apic.enableIrq(1);
+    console.info("Keyboard IRQ1 explicitly enabled", .{});
 
     // Initialize input subsystem (must be before mouse driver)
     input.init();

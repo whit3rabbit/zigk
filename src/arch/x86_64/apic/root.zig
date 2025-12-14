@@ -175,6 +175,15 @@ pub fn init(info: *const ApicInitInfo) void {
     const kbd_gsi = info.getGsiForIrq(1);
     ioapic.routeIsaIrq(1, Vectors.KEYBOARD, bsp_id, kbd_gsi, info.getOverridePtr(1));
 
+    // Verify keyboard IRQ1 routing for diagnostics
+    if (ioapic.getGsiConfig(kbd_gsi)) |entry| {
+        console.info("IOAPIC: IRQ1 -> vec={d} mask={} dest={d}", .{
+            entry.vector, entry.mask, entry.destination,
+        });
+    } else {
+        console.warn("IOAPIC: Failed to read IRQ1 config!", .{});
+    }
+
     // Note: Other IRQs can be routed on-demand by drivers
 
     interrupt_mode = .Apic;

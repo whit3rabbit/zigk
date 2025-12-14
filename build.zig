@@ -1089,6 +1089,7 @@ pub fn build(b: *std.Build) void {
         "-m", "512M",
         "-cdrom", "zscapek.iso",
         "-device", "qemu-xhci,id=xhci",
+        "-device", "usb-kbd",
         "-vga", "std",
         "-device", "AC97",
         "-serial", "stdio",

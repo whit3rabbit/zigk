@@ -130,8 +130,6 @@ pub fn sys_write(fd_num: usize, buf_ptr: usize, count: usize) SyscallError!usize
         return error.ENOSYS;
     }
 
-    console.debug("Syscall: write(fd={}, count={})", .{ fd_num, count });
-
     // Cap write size
     const max_write_size = 64 * 1024;
     const write_size = @min(count, max_write_size);

@@ -515,12 +515,6 @@ pub fn sys_get_fb_info(info_ptr: usize) SyscallError!usize {
         return error.EFAULT;
     };
 
-    console.debug("sys_get_fb_info: {d}x{d}x{d}", .{
-        fb_state.width,
-        fb_state.height,
-        fb_state.bpp,
-    });
-
     return 0;
 }
 
@@ -581,12 +575,6 @@ pub fn sys_map_fb() SyscallError!usize {
     };
     proc.user_vmm.insertVma(fb_vma);
     proc.user_vmm.total_mapped += fb_size;
-
-    console.debug("sys_map_fb: Mapped FB at virt={x} (phys={x}, size={d})", .{
-        fb_virt_base,
-        fb_state.phys_addr,
-        fb_size,
-    });
 
     // Disable graphical console - userspace now owns the framebuffer exclusively.
     // Kernel output continues on serial only to avoid overwriting userspace graphics.

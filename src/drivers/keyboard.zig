@@ -260,6 +260,8 @@ var keyboard_state: KeyboardState = .{};
 var keyboard_lock: sync.Spinlock = .{};
 var keyboard_initialized: bool = false;
 var error_stats: ErrorStats = .{};
+/// Public IRQ counter for diagnostics
+pub var irq_count: u32 = 0;
 
 // =============================================================================
 // PS/2 Controller Helpers
@@ -409,11 +411,26 @@ pub fn init() void {
 
     keyboard_initialized = true;
     console.info("PS/2 keyboard: initialized", .{});
+
+    // Verify final PS/2 configuration for diagnostics
+    sendCommand(CMD_READ_CONFIG);
+    const final_config = readData() orelse 0xFF;
+    console.info("PS/2 config: 0x{X:0>2} (IRQ1_EN={}, XLAT={})", .{
+        final_config,
+        (final_config & CONFIG_FIRST_PORT_IRQ) != 0,
+        (final_config & CONFIG_TRANSLATION) != 0,
+    });
 }
 
 /// Handle keyboard IRQ (called from interrupt handler)
 /// Reads scancode from port and populates all buffers
 pub fn handleIrq() void {
+    // Count all IRQs for diagnostics (even before init check)
+    irq_count +%= 1;
+    if (irq_count == 1 or irq_count % 100 == 0) {
+        console.info("KBD IRQ #{d}", .{irq_count});
+    }
+
     if (!keyboard_initialized) {
         // Just read and discard to acknowledge
         _ = hal.io.inb(KEYBOARD_DATA_PORT);
