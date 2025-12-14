@@ -254,6 +254,9 @@ pub const PciDevice = struct {
     /// Interrupt pin (0=none, 1=INTA, 2=INTB, etc.)
     irq_pin: u8,
 
+    /// Global System Interrupt (GSI)
+    gsi: u32,
+
     /// Subsystem vendor ID
     subsystem_vendor: u16,
     /// Subsystem ID
@@ -367,6 +370,7 @@ pub const PciDevice = struct {
             .bar = [_]Bar{Bar.unused()} ** 6,
             .irq_line = 0,
             .irq_pin = 0,
+            .gsi = 0,
             .subsystem_vendor = 0,
             .subsystem_id = 0,
         };
