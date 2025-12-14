@@ -19,6 +19,7 @@ const console = @import("console");
 const cpu = @import("../cpu.zig");
 const mmio = @import("../mmio.zig");
 const paging = @import("../paging.zig");
+const timing = @import("../timing.zig");
 
 // ============================================================================
 // MSR addresses for x2APIC mode (APIC registers mapped to MSRs 0x800-0x8FF)
@@ -236,6 +237,12 @@ var initialized: bool = false;
 /// Spurious interrupt vector (typically 0xFF)
 pub const SPURIOUS_VECTOR: u8 = 0xFF;
 
+/// LAPIC Timer Vector (48 - just after IRQs)
+pub const TIMER_VECTOR: u8 = 0x30;
+
+/// Calibrated timer ticks per millisecond (with div 16)
+var timer_ticks_per_ms: u32 = 0;
+
 // ============================================================================
 // Public API
 // ============================================================================
@@ -374,6 +381,84 @@ pub fn configureTimer(
 pub fn stopTimer() void {
     writeRegister(.timer_init, 0);
     maskLvtEntry(.timer);
+}
+
+/// Calibrate LAPIC timer using the calibrated TSC/PIT
+/// Must be called after timing.calibrate() and before enabling the scheduler
+pub fn calibrateTimer() void {
+    if (!timing.isCalibrated()) {
+        console.warn("LAPIC: Timing not calibrated, skipping LAPIC timer calibration", .{});
+        return;
+    }
+
+    // Configure LVT Timer: Masked, One-Shot
+    const lvt = LvtTimer{
+        .vector = 0,
+        .delivery_status = false,
+        .mask = true,
+        .timer_mode = .one_shot,
+    };
+    writeRegister(.lvt_timer, @bitCast(lvt));
+
+    // Set divider to 16
+    writeRegister(.timer_dcr, 0b0011);
+
+    // Set initial count to max
+    const initial: u32 = 0xFFFFFFFF;
+    writeRegister(.timer_init, initial);
+
+    // Wait 10ms
+    timing.delayMs(10);
+
+    // Read current count
+    const current = readRegister(.timer_cur);
+
+    // Stop timer
+    writeRegister(.timer_init, 0);
+
+    // Calculate ticks elapsed in 10ms
+    if (current > initial) {
+        // Should not happen unless wrapped, but with div 16 and 10ms it shouldn't wrap
+        // (Max 32-bit is ~4 billion. 10ms at 5GHz div 16 is ~3 million)
+        console.warn("LAPIC: Timer wrapped during calibration!", .{});
+        return;
+    }
+    const elapsed = initial - current;
+
+    // Ticks per ms
+    timer_ticks_per_ms = elapsed / 10;
+
+    console.info("LAPIC: Timer calibrated: {d} ticks/ms (div 16)", .{timer_ticks_per_ms});
+}
+
+/// Enable periodic timer interrupt
+/// freq_hz: Desired frequency in Hz
+/// vector: Interrupt vector to use
+pub fn enablePeriodicTimer(freq_hz: u32, vector: u8) void {
+    if (timer_ticks_per_ms == 0) {
+        console.warn("LAPIC: Timer not calibrated, cannot enable periodic mode", .{});
+        return;
+    }
+
+    // Calculate count for desired frequency
+    // ticks/sec = ticks/ms * 1000
+    // count = ticks/sec / freq_hz
+    const count = (timer_ticks_per_ms * 1000) / freq_hz;
+
+    // Set divider 16
+    writeRegister(.timer_dcr, 0b0011);
+
+    // Configure LVT Timer: Unmasked, Periodic, Vector
+    const lvt = LvtTimer{
+        .vector = vector,
+        .delivery_status = false,
+        .mask = false,
+        .timer_mode = .periodic,
+    };
+    writeRegister(.lvt_timer, @bitCast(lvt));
+
+    // Start timer
+    writeRegister(.timer_init, count);
 }
 
 /// Get current timer count
