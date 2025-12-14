@@ -16,33 +16,24 @@ const hal = @import("hal");
 const syscall_arch = hal.syscall;
 const console = @import("console");
 const config = @import("config");
-const pmm = @import("pmm");
-const vmm = @import("vmm");
-const heap = @import("heap");
-const kernel_stack = @import("kernel_stack");
 const keyboard = @import("keyboard");
 const mouse = @import("mouse");
 const input = @import("input");
 const sched = @import("sched");
-const thread = @import("thread");
 const stack_guard = @import("stack_guard");
 const prng = @import("prng");
 const framebuffer = @import("framebuffer");
-const fs = @import("fs");
-const elf = @import("elf");
-const process_mod = @import("process");
-const syscall_base = @import("syscall_base");
-const net = @import("net");
-const pci = @import("pci");
-const e1000e = @import("e1000e");
-const usb = @import("usb");
-const audio = @import("audio");
 const acpi = @import("acpi");
-const ahci = @import("ahci");
-const devfs = @import("devfs");
-
 const serial_driver = @import("serial_driver");
 const video_driver = @import("video_driver");
+
+// New modules
+const boot = @import("boot.zig");
+const panic_lib = @import("panic.zig");
+const init_mem = @import("init_mem.zig");
+const init_proc = @import("init_proc.zig");
+const init_hw = @import("init_hw.zig");
+const init_fs = @import("init_fs.zig");
 
 // Syscall dispatch table - must be imported to compile dispatch_syscall symbol
 // called from asm_helpers.S _syscall_entry
@@ -88,20 +79,6 @@ fn kernelLogFn(
     console.printf(format, args);
     console.print("\n");
 }
-
-// ============================================================================
-// Limine Request Structures
-// These are placed in .limine_requests section for bootloader discovery.
-// Limine scans for magic IDs and patches response pointers at boot time.
-// ============================================================================
-
-pub export var base_revision linksection(".limine_requests") = limine.BaseRevision{ .revision = 1 };
-pub export var hhdm_request linksection(".limine_requests") = limine.HhdmRequest{};
-pub export var memmap_request linksection(".limine_requests") = limine.MemoryMapRequest{};
-pub export var module_request linksection(".limine_requests") = limine.ModuleRequest{};
-pub export var framebuffer_request linksection(".limine_requests") = limine.FramebufferRequest{};
-pub export var kernel_address_request linksection(".limine_requests") = limine.KernelAddressRequest{};
-pub export var rsdp_request linksection(".limine_requests") = limine.RsdpRequest{};
 
 /// Per-CPU kernel data for syscall entry (GS segment)
 /// For SMP, this would be an array indexed by CPU ID
@@ -161,14 +138,6 @@ export fn _start() noreturn {
 
     // Initialize GS base for syscalls - points to per-CPU data
     // kernel_stack will be updated by scheduler on context switch
-    //
-    // SWAPGS dance requires:
-    //   Kernel mode: GS_BASE = &kernel_data, KERNEL_GS_BASE = user_gs (0)
-    //   User mode:   GS_BASE = user_gs (0),  KERNEL_GS_BASE = &kernel_data
-    //
-    // First SWAPGS (isr_common returning to user) swaps these.
-    // So we set GS_BASE here, not KERNEL_GS_BASE.
-    // KERNEL_GS_BASE is already 0 from syscall.init().
     hal.cpu.writeMsr(hal.cpu.IA32_GS_BASE, @intFromPtr(&bsp_gs_data));
 
     // Connect console to interrupt handlers for debug output
@@ -182,43 +151,38 @@ export fn _start() noreturn {
     console.print("\n");
 
     // Verify Limine protocol is supported
-    // Limine sets magic[0] to 0 if it processed our base revision
-    if (!base_revision.is_supported()) {
+    if (!boot.base_revision.is_supported()) {
         console.err("Limine protocol not supported! Check base revision.", .{});
-        halt();
+        panic_lib.halt();
     }
     console.info("Limine protocol verified (revision 3)", .{});
 
     // Get HHDM offset from Limine response
-    // This is critical - paging module needs the correct HHDM offset
-    if (hhdm_request.response) |hhdm| {
+    if (boot.hhdm_request.response) |hhdm| {
         console.info("HHDM offset: {x}", .{hhdm.offset});
         hal.paging.init(hhdm.offset);
     } else {
-        // Fallback to default HHDM (should not happen with Limine)
         console.warn("HHDM response not available, using default offset", .{});
         hal.paging.init(hal.paging.HHDM_OFFSET);
     }
 
     // Log kernel address info if available
-    if (kernel_address_request.response) |ka| {
+    if (boot.kernel_address_request.response) |ka| {
         console.info("Kernel physical base: {x}", .{ka.physical_base});
         console.info("Kernel virtual base: {x}", .{ka.virtual_base});
     }
 
     // Parse and log memory map
-    if (memmap_request.response) |memmap| {
-        logMemoryMap(memmap);
+    if (boot.memmap_request.response) |memmap| {
+        init_mem.logMemoryMap(memmap);
     } else {
         console.err("Memory map not available!", .{});
-        halt();
+        panic_lib.halt();
     }
 
     // Initialize framebuffer from Limine response
-    // Optional - serial-only mode works without framebuffer
-    framebuffer.initFromLimine(&framebuffer_request);
+    framebuffer.initFromLimine(&boot.framebuffer_request);
     
-    // Initialize Graphical Console if framebuffer is available
     // Initialize Graphical Console if framebuffer is available
     if (framebuffer.getState()) |fb_state| {
         // fb_state.phys_addr is physical. Convert to kernel virtual (HHDM).
@@ -256,7 +220,7 @@ export fn _start() noreturn {
     }
 
     // Check for loaded modules (shell, initrd, etc.)
-    if (module_request.response) |mod_response| {
+    if (boot.module_request.response) |mod_response| {
         const mods = mod_response.modules();
         console.info("Loaded modules: {d}", .{mods.len});
         for (mods) |mod| {
@@ -268,34 +232,39 @@ export fn _start() noreturn {
         }
 
         // Initialize InitRD if present
-        initInitRD(mods);
+        init_proc.initInitRD(mods);
     }
 
     // Initialize memory management subsystems
-    initMemoryManagement();
+    init_mem.initMemoryManagement();
 
-    // Initialize VFS and mount filesystems (requires heap)
-    initVfs();
+    // Now that PMM is ready, try to enable Double Buffering for graphical console
+    // Attempt to create a buffered driver using the same video mode
+    if (video_driver.BufferedFramebufferDriver.initWithBackBuffer(fb_driver_direct.mode)) |buffered| {
+        fb_driver_buffered = buffered;
+        fb_is_buffered = true;
+        // Reinitialize console with buffered driver
+        graph_console = video_driver.console.Console.init(fb_driver_buffered.device());
+        console.info("Graphics: Double Buffering enabled", .{});
+    }
+
+    // Initialize VFS and mount filesystems
+    init_fs.initVfs();
 
     // Initialize entropy subsystem (RDRAND/RDTSC detection)
-    // Must be done before PRNG which depends on hardware entropy
     hal.entropy.init();
     console.info("Entropy source: {s}", .{if (hal.entropy.hasRdrand()) "RDRAND" else "RDTSC (fallback)"});
 
-    // Initialize kernel PRNG (seeds from hardware entropy)
-    // Must be done before stack_guard which uses PRNG for canary
+    // Initialize kernel PRNG
     prng.init();
 
-    // Initialize stack guard canary with randomized value
-    // Must be done BEFORE scheduler creates any threads
+    // Initialize stack guard
     stack_guard.init();
 
-    // Initialize APIC (replaces legacy PIC for interrupt handling)
-    // Must be done before keyboard/scheduler to route IRQs correctly
+    // Initialize APIC
     initApic();
 
     // Initialize SMP (bring up APs)
-    // Must be done after APIC init
     console.info("About to call hal.smp.init()", .{});
     hal.smp.init();
     console.info("Returned from hal.smp.init()", .{});
@@ -307,7 +276,7 @@ export fn _start() noreturn {
     hal.apic.enableIrq(1);
     console.info("Keyboard IRQ1 explicitly enabled", .{});
 
-    // Initialize input subsystem (must be before mouse driver)
+    // Initialize input subsystem
     input.init();
     console.info("Input subsystem initialized", .{});
 
@@ -315,12 +284,12 @@ export fn _start() noreturn {
     mouse.init();
     hal.interrupts.setMouseHandler(&mouse.handleIrq);
 
-    hal.interrupts.setCrashHandler(handleCrash);
+    hal.interrupts.setCrashHandler(panic_lib.handleCrash);
 
-    // Initialize scheduler (creates idle thread, registers timer handler)
+    // Initialize scheduler
     sched.init();
 
-    // Initialize signal handling subsystem (registers checker hook)
+    // Initialize signal handling subsystem
     const signal = @import("signal");
     signal.init();
 
@@ -337,852 +306,33 @@ export fn _start() noreturn {
     console.info("  Mouse driver registered", .{});
     console.info("  Scheduler initialized", .{});
     console.info("  PRNG seeded, stack canary randomized", .{});
-
-    console.print("\n");
+    console.info("\n", .{});
     console.info("Kernel initialization complete", .{});
 
-    // Initialize network (PCI + E1000e + Net Stack)
-    initNetwork();
-
-    // Initialize USB (XHCI controllers)
-    initUsb();
-
-    // Initialize Audio (AC97)
-    initAudio();
-
-    // Initialize storage (AHCI controllers)
-    initStorage();
+    // Initialize Hardware Subsystems
+    init_hw.initNetwork();
+    init_hw.initUsb();
+    init_hw.initAudio();
+    init_hw.initStorage();
 
     // Initialize Block Filesystem (SFS)
-    initBlockFs();
+    init_fs.initBlockFs();
 
-    // Try to initialize VirtIO-GPU (paravirtualized GPU)
-    // Disabled for Doom compatibility: VirtIO driver takes over display but doesn't
-    // update simple framebuffer syscalls, causing Doom to write to invisible memory.
-    // initVirtioGpu();
+    // Try to initialize VirtIO-GPU
+    if (init_hw.initVirtioGpu()) |driver| {
+        // Switch console to use VirtIO-GPU
+         graph_console = video_driver.console.Console.init(driver.device());
+         console.info("VirtIO-GPU: Console switched to paravirtualized GPU", .{});
+    }
 
-    // Load Init Process (httpd or shell) from modules
+    // Load Init Process
     console.info("Main: Calling loadInitProcess()...", .{});
-    loadInitProcess();
+    init_proc.loadInitProcess();
     console.info("Main: loadInitProcess() returned.", .{});
 
-    // Start the scheduler - this does not return
-    // The boot thread becomes part of the idle loop
+    // Start the scheduler
     console.info("Starting scheduler...", .{});
     sched.start();
-}
-
-/// Load the init process (httpd or shell) into a new user address space
-/// Creates a proper Process struct with FD table (stdin/stdout/stderr pre-opened)
-/// and uses the ELF loader to parse and load the executable.
-fn loadInitProcess() void {
-    console.info("Searching for init module...", .{});
-
-    const mod_response = module_request.response orelse {
-        console.warn("No modules loaded!", .{});
-        return;
-    };
-
-    const mods = mod_response.modules();
-    var selected_mod: ?*limine.Module = null;
-    var process_name: []const u8 = "init";
-
-    // Helper to safely get string from Limine pointer
-    const get_str = struct {
-        fn call(ptr: [*:0]const u8) []const u8 {
-            if (@intFromPtr(ptr) == 0) return "";
-            return std.mem.span(ptr);
-        }
-    }.call;
-
-    // Priority 0: ASM Test (Sanity Check)
-    for (mods) |mod| {
-        const cmdline = get_str(mod.cmdline);
-        const path = get_str(mod.path);
-        
-        if (std.mem.indexOf(u8, cmdline, "test_asm") != null or std.mem.indexOf(u8, path, "test_asm") != null) {
-            selected_mod = mod;
-            process_name = "test_asm";
-            break;
-        }
-    }
-
-    // Priority 1: HTTPD
-    if (selected_mod == null) {
-        for (mods) |mod| {
-            const cmdline = get_str(mod.cmdline);
-            const path = get_str(mod.path);
-            
-            if (std.mem.indexOf(u8, cmdline, "httpd") != null or std.mem.indexOf(u8, path, "httpd") != null) {
-                selected_mod = mod;
-                process_name = "httpd";
-                break;
-            }
-        }
-    }
-
-    // Priority 2: Shell
-    if (selected_mod == null) {
-        for (mods) |mod| {
-            const cmdline = get_str(mod.cmdline);
-            const path = get_str(mod.path);
-            
-            if (std.mem.indexOf(u8, cmdline, "shell") != null or std.mem.indexOf(u8, path, "shell") != null) {
-                selected_mod = mod;
-                process_name = "shell";
-                break;
-            }
-        }
-    }
-
-    // Priority 3: Doom
-    if (selected_mod == null) {
-        for (mods) |mod| {
-            const cmdline = get_str(mod.cmdline);
-            const path = get_str(mod.path);
-            
-            if (std.mem.indexOf(u8, cmdline, "doom") != null or std.mem.indexOf(u8, path, "doom") != null) {
-                selected_mod = mod;
-                process_name = "doom";
-                break;
-            }
-        }
-    }
-
-    // Fallback: If only one module exists, use it regardless of name
-    if (selected_mod == null and mods.len == 1) {
-        selected_mod = mods[0];
-        console.warn("No matching cmdline found, defaulting to first module", .{});
-    }
-
-    const mod = selected_mod orelse {
-        console.warn("No suitable init module (httpd/shell) found!", .{});
-        return;
-    };
-
-    console.info("Found init module: {s} ({d} bytes)", .{ process_name, mod.size });
-
-    // Debug: List VFS root
-    {
-        // Try to open root to verify filesystem is up
-        if (fs.vfs.Vfs.open("/", 0)) |root| {
-             if (root.ops.close) |close_fn| {
-                 _ = close_fn(root);
-             }
-        } else |err| {
-            console.err("Failed to open root /: {}", .{err});
-        }
-    }
-    
-    // Debug: Check for WAD
-    // Mode 0 = O_RDONLY
-    if (fs.vfs.Vfs.open("/doom1.wad", 0)) |f| {
-        console.info("KERNEL: Successfully opened /doom1.wad", .{});
-        if (f.ops.close) |c| _ = c(f);
-    } else |err| {
-        console.warn("KERNEL: Failed to open /doom1.wad: {}", .{err});
-    }
-
-    // Step 1: Create Process with FD table (stdin/stdout/stderr pre-opened by devfs)
-    const proc = process_mod.createProcess(null) catch |err| {
-        console.err("Failed to create init process: {}", .{err});
-        return;
-    };
-
-    // Step 2: Set as current process so syscall handlers can access FD table
-    syscall_base.setCurrentProcess(proc);
-    console.info("Created process pid={d} with FD table", .{proc.pid});
-
-    console.info("Init: Loading ELF...", .{});
-
-    // Step 3: Get module data as slice for ELF loader
-    const mod_data = @as([*]const u8, @ptrFromInt(mod.address))[0..mod.size];
-
-    // Step 4: Load ELF into process's address space
-    // The ELF loader will parse headers, validate, and map PT_LOAD segments
-    const load_base: u64 = 0x400000; // Default load base for non-PIE executables
-    const load_result = elf.load(mod_data, proc.cr3, load_base) catch |err| {
-        console.err("ELF load failed: {}", .{err});
-        return;
-    };
-    console.info("ELF: Loaded at {x}-{x}, entry={x}", .{
-        load_result.base_addr,
-        load_result.end_addr,
-        load_result.entry_point,
-    });
-
-    // Initialize heap boundaries
-    const heap_start = std.mem.alignForward(u64, load_result.end_addr, pmm.PAGE_SIZE);
-    proc.heap_start = heap_start;
-    proc.heap_break = heap_start;
-    console.info("Init: Heap initialized at {x}", .{heap_start});
-
-    console.info("Init: Setting up user stack...", .{});
-    // Step 5: Allocate and map user stack with arguments
-    // We use the ELF helper to set up the stack according to x86_64 ABI
-    // (argc, argv, envp, auxv)
-    const stack_virt_top: u64 = 0xF0000000;
-    const stack_size: usize = 1024 * 1024; // 1MB stack
-
-    // Parse arguments from module command line
-    var argv_buf: [16][]const u8 = undefined;
-    var argv_count: usize = 0;
-
-    if (@intFromPtr(mod.cmdline) != 0) {
-        const cmd_slice = std.mem.span(mod.cmdline);
-        console.debug("Init: Raw Cmdline: '{s}'", .{cmd_slice});
-        var it = std.mem.tokenizeAny(u8, cmd_slice, " ");
-        while (it.next()) |arg| {
-            if (argv_count >= 16) break;
-            argv_buf[argv_count] = arg;
-            argv_count += 1;
-        }
-    }
-
-    if (argv_count == 0) {
-        argv_buf[0] = process_name;
-        argv_count = 1;
-    }
-
-    // Workaround: If Limine truncates cmdline, manually add arguments for Doom
-    if (argv_count == 1 and std.mem.eql(u8, argv_buf[0], "doom")) {
-        console.warn("Init: Detecting Doom with no args, injecting defaults...", .{});
-        argv_buf[1] = "-iwad";
-        argv_buf[2] = "/doom1.wad";
-        argv_count = 3;
-    }
-    
-    const argv = argv_buf[0..argv_count];
-    const envp = [_][]const u8{};
-
-    for (argv, 0..) |arg, i| {
-        console.debug("Init: Arg {d}: '{s}'", .{i, arg});
-    }
-
-    // Auxiliary Vector (Required for static binaries to find PHDRs)
-    const auxv = [_]elf.AuxEntry{
-        .{ .id = 3, .value = load_result.phdr_addr }, // AT_PHDR
-        .{ .id = 4, .value = 56 }, // AT_PHENT
-        .{ .id = 5, .value = load_result.phnum }, // AT_PHNUM
-        .{ .id = 6, .value = 4096 }, // AT_PAGESZ
-        .{ .id = 9, .value = load_result.entry_point }, // AT_ENTRY
-    };
-
-    console.info("Creating user stack at {x} (size={d})", .{ stack_virt_top, stack_size });
-
-    // setupStack allocates pages, maps them, and pushes args
-    const initial_rsp = elf.setupStack(
-        proc.cr3,
-        stack_virt_top,
-        stack_size,
-        argv,
-        &envp,
-        &auxv,
-    ) catch |err| {
-        console.err("Failed to setup user stack: {}", .{err});
-        return;
-    };
-
-    console.info("User stack created (rsp={x})", .{initial_rsp});
-    console.info("Init: Creating user thread...", .{});
-
-    // Step 6: Create user thread with entry point from ELF header
-    const user_thread = thread.createUserThread(load_result.entry_point, .{
-        .name = process_name,
-        .cr3 = proc.cr3,
-        .user_stack_top = initial_rsp,
-        .process = @ptrCast(proc),
-    }) catch |err| {
-        console.err("Failed to create user thread: {}", .{err});
-        return;
-    };
-
-    // Set up TCB/TLS using ELF header information
-    // Musl static binaries may crash if %fs:0 is not accessible or doesn't point to itself.
-    const tls_base_addr: u64 = 0xB000_0000; // Preferred address for TCB
-    var fs_base: u64 = 0;
-
-    if (load_result.tls_phdr) |phdr| {
-        // Use TLS segment from ELF
-        if (elf.setupTls(proc.cr3, phdr, mod_data, tls_base_addr)) |tp| {
-            fs_base = tp;
-            console.info("Init: Initialized TLS at {x} (size={d})", .{ tp, phdr.p_memsz });
-        } else |err| {
-            console.warn("Init: Failed to setup TLS: {}", .{err});
-        }
-    } else {
-        // Fallback for binaries without PT_TLS (but expecting TCB at fs:0)
-        // Allocate a minimal TCB
-        console.warn("Init: No PT_TLS found, creating minimal TCB", .{});
-        const minimal_phdr = elf.Elf64_Phdr{
-            .p_type = elf.PT_TLS,
-            .p_flags = elf.PF_R | elf.PF_W,
-            .p_offset = 0,
-            .p_vaddr = 0,
-            .p_paddr = 0,
-            .p_filesz = 0,
-            .p_memsz = 0,
-            .p_align = 16, // Default alignment
-        };
-        if (elf.setupTls(proc.cr3, minimal_phdr, mod_data, tls_base_addr)) |tp| {
-            fs_base = tp;
-        } else |err| {
-            console.warn("Init: Failed to setup minimal TCB: {}", .{err});
-        }
-    }
-
-    if (fs_base != 0) {
-        user_thread.fs_base = fs_base;
-    }
-
-    console.info("Init: Adding thread to scheduler...", .{});
-    sched.addThread(user_thread);
-    console.info("Init process started (pid={d}, tid={d})", .{ proc.pid, user_thread.tid });
-}
-
-/// Initialize InitRD filesystem from Limine modules
-/// Searches for a module with "initrd" in its cmdline or path
-fn initInitRD(mods: []const *limine.Module) void {
-    const get_str = struct {
-        fn call(ptr: [*:0]const u8) []const u8 {
-            if (@intFromPtr(ptr) == 0) return "";
-            return std.mem.span(ptr);
-        }
-    }.call;
-
-    for (mods) |mod| {
-        const cmdline = get_str(mod.cmdline);
-        const path = get_str(mod.path);
-
-        // Check if this module is an initrd (by cmdline or path)
-        if (std.mem.indexOf(u8, cmdline, "initrd") != null or std.mem.indexOf(u8, path, "initrd") != null or
-            std.mem.indexOf(u8, cmdline, ".tar") != null or std.mem.indexOf(u8, path, ".tar") != null)
-        {
-            // Get module data as slice
-            const data = @as([*]const u8, @ptrFromInt(mod.address))[0..mod.size];
-
-            // Initialize the global InitRD instance
-            fs.initrd.InitRD.init(data);
-
-            console.info("InitRD: Initialized from module ({d} bytes)", .{mod.size});
-
-            // List files in initrd for debugging
-            var iter = fs.initrd.InitRD.instance.listFiles();
-            var file_count: usize = 0;
-            while (iter.next()) |_| {
-                file_count += 1;
-            }
-            console.info("InitRD: {d} files found", .{file_count});
-            return;
-        }
-    }
-
-    // No initrd found - this is not an error, just informational
-    console.info("InitRD: No initrd module found (filesystem empty)", .{});
-}
-
-/// Initialize PMM, VMM, and Heap using Limine memory map
-fn initMemoryManagement() void {
-    console.print("\n");
-    console.info("Initializing memory management...", .{});
-
-    // PMM initialization from Limine memory map
-    const memmap_response = memmap_request.response orelse {
-        console.err("Cannot initialize PMM: no memory map!", .{});
-        halt();
-    };
-
-    pmm.initFromLimine(memmap_response) catch |err| {
-        console.err("PMM initialization failed: {}", .{err});
-        halt();
-    };
-
-    // Initialize VMM with kernel page tables
-    vmm.init() catch |err| {
-        console.err("VMM initialization failed: {}", .{err});
-        halt();
-    };
-
-    // Initialize kernel stack allocator (for proper guard page protection)
-    // This must be done after VMM is ready since it uses VMM for page mapping
-    kernel_stack.init() catch |err| {
-        console.err("Kernel stack allocator initialization failed: {}", .{err});
-        halt();
-    };
-
-    // Initialize kernel heap
-    // Allocate heap pages from PMM
-    const heap_pages = config.heap_size / pmm.PAGE_SIZE;
-    const heap_phys = pmm.allocZeroedPages(heap_pages) orelse {
-        console.err("Failed to allocate heap pages!", .{});
-        halt();
-    };
-
-    // Convert to virtual address via HHDM for heap init
-    const heap_virt = hal.paging.physToVirt(heap_phys);
-    heap.init(@intFromPtr(heap_virt), config.heap_size);
-
-    console.info("Memory management initialized", .{});
-    
-    // Now that PMM is ready, try to enable Double Buffering for graphical console
-    // Attempt to create a buffered driver using the same video mode
-    if (video_driver.BufferedFramebufferDriver.initWithBackBuffer(fb_driver_direct.mode)) |buffered| {
-        fb_driver_buffered = buffered;
-        fb_is_buffered = true;
-        // Reinitialize console with buffered driver
-        graph_console = video_driver.console.Console.init(fb_driver_buffered.device());
-        console.info("Graphics: Double Buffering enabled", .{});
-    }
-
-
-
-
-
-
-    heap.printStats();
-}
-
-/// Log Limine memory map entries
-fn logMemoryMap(memmap: *const limine.MemoryMapResponse) void {
-    var usable_memory: u64 = 0;
-    var total_memory: u64 = 0;
-
-    const entries = memmap.entries();
-    for (entries) |entry| {
-        total_memory += entry.length;
-
-        const type_str = switch (entry.kind) {
-            .usable => blk: {
-                usable_memory += entry.length;
-                break :blk "Usable";
-            },
-            .reserved => "Reserved",
-            .acpi_reclaimable => "ACPI Reclaimable",
-            .acpi_nvs => "ACPI NVS",
-            .bad_memory => "Bad Memory",
-            .bootloader_reclaimable => "Bootloader Reclaimable",
-            .kernel_and_modules => "Kernel/Modules",
-            .framebuffer => "Framebuffer",
-        };
-
-        if (config.debug_memory) {
-            console.printf("  {x} - {x} ({s})\n", .{
-                entry.base,
-                entry.base + entry.length,
-                type_str,
-            });
-        }
-    }
-
-    console.info("Memory map entries: {d}", .{entries.len});
-    console.info("Total memory: {d} MB", .{total_memory / (1024 * 1024)});
-    console.info("Usable memory: {d} MB", .{usable_memory / (1024 * 1024)});
-}
-
-/// Convert physical address to virtual using HHDM
-pub fn physToVirt(phys: u64) [*]u8 {
-    return hal.paging.physToVirt(phys);
-}
-
-/// Halt the kernel (disables interrupts and loops forever)
-fn halt() noreturn {
-    hal.cpu.haltForever();
-}
-
-// Custom panic handler for freestanding environment
-pub fn panic(msg: []const u8, _: ?*@import("std").builtin.StackTrace, _: ?usize) noreturn {
-    // Disable interrupts to prevent further issues on this core
-    hal.cpu.disableInterrupts();
-
-    console.printUnsafe("\n!!! KERNEL PANIC !!!\n");
-    console.printUnsafe("Message: ");
-    console.printUnsafe(msg);
-    console.printUnsafe("\n");
-
-    halt();
-}
-
-/// Handle user process crashes (exceptions in user mode)
-fn handleCrash(vector: u8, err_code: u64) noreturn {
-    // Map exception vector to POSIX signal
-    const signal: i32 = switch (vector) {
-        0 => 8,  // #DE -> SIGFPE
-        6 => 4,  // #UD -> SIGILL
-        13, 14 => 11, // #GP, #PF -> SIGSEGV
-        else => 11, // Default to SIGSEGV
-    };
-
-    // Always log crashes
-    console.warn("Process crashed! Vector={d} Code={x} Signal={d}", .{ vector, err_code, signal });
-
-    // Terminate the process with signal status
-    // Signal status is stored in bits 0-6 of exit_status
-    process_mod.exit(signal);
-}
-
-// ============================================================================
-// Network Initialization
-// ============================================================================
-
-var net_interface: net.Interface = undefined;
-var pci_devices: ?*const pci.DeviceList = null;
-var pci_ecam: ?pci.Ecam = null;  // Store by value, not pointer (avoid dangling reference)
-
-fn txWrapper(data: []const u8) bool {
-    if (e1000e.getDriver()) |driver| {
-        return driver.transmit(data);
-    }
-    return false;
-}
-
-fn multicastUpdate(iface: *net.Interface) void {
-    if (e1000e.getDriver()) |driver| {
-        driver.applyMulticastFilter(iface);
-    }
-}
-
-fn rxCallbackAdapter(data: []u8) void {
-    // Wrap data in PacketBuffer and pass to network stack
-    var pkt = net.PacketBuffer.init(data, data.len);
-    _ = net.processFrame(&net_interface, &pkt);
-
-    // Free the buffer allocated by the driver
-    // This was allocated in drivers/net/e1000e.zig:processRxLimited via heap.allocator().alloc
-    heap.allocator().free(data);
-}
-
-fn initNetwork() void {
-    console.print("\n");
-    console.info("Initializing network subsystem...", .{});
-
-    // 1. Get RSDP for PCI ECAM
-    if (rsdp_request.response) |resp| {
-        console.info("Debug: RSDP response at 0x{x}", .{resp.address});
-    }
-    const rsdp_response = rsdp_request.response orelse {
-        console.warn("RSDP not found (BIOS boot without ACPI?), network disabled.", .{});
-        return;
-    };
-    const rsdp_addr = rsdp_response.address;
-    console.info("Debug: Calling pci.initFromAcpi with 0x{x}", .{rsdp_addr});
-
-    // 2. Initialize PCI
-    const pci_res = pci.initFromAcpi(heap.allocator(), rsdp_addr) catch |err| {
-        console.err("PCI init failed: {}", .{err});
-        return;
-    };
-
-    // Save PCI state for other subsystems (USB, VirtIO)
-    pci_devices = pci_res.devices;
-
-    // Handle PCI Access Mechanism
-    var nic_driver_opt: ?*e1000e.E1000e = null;
-
-    switch (pci_res.access) {
-        .ecam => |*ecam_ptr| {
-             // Store ECAM for drivers that need it
-             pci_ecam = ecam_ptr.*;
-
-             // 3. Initialize E1000e (requires ECAM)
-             nic_driver_opt = e1000e.initFromPci(pci_res.devices, ecam_ptr) catch |err| blk: {
-                console.warn("E1000e init failed (no supported NIC?): {}", .{err});
-                break :blk null;
-             };
-        },
-        .legacy => {
-            console.warn("PCI Legacy mode: Skipping E1000e (requires ECAM)", .{});
-            // pci_ecam remains null, so USB/AHCI will be skipped too
-        }
-    }
-
-    // 4. Setup Network if Driver Available
-    if (nic_driver_opt) |nic_driver| {
-        const mac = nic_driver.getMacAddress();
-        net_interface = net.Interface.init("eth0", mac);
-        net_interface.setTransmitFn(txWrapper);
-        net_interface.setMulticastUpdateFn(multicastUpdate);
-
-        // 5. Initialize Network Stack
-        net.init(&net_interface, heap.allocator(), 100);
-
-        // Program initial multicast filter
-        multicastUpdate(&net_interface);
-
-        // 6. Register Callbacks
-        nic_driver.setRxCallback(rxCallbackAdapter);
-        sched.setTickCallback(net.transport.tcpProcessTimers);
-
-        console.info("Network initialized (MAC={x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2})", .{
-            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
-        });
-    } else {
-        console.warn("Network stack skipped (no NIC driver)", .{});
-    }
-
-    // Initialize loopback interface for local (127.x.x.x) traffic
-    if (nic_driver_opt != null) {
-        const lo = net.loopback.init();
-        lo.up();
-        console.info("Loopback interface initialized (127.0.0.1)", .{});
-    }
-}
-
-// ============================================================================
-// USB Initialization
-// ============================================================================
-
-fn initUsb() void {
-    console.print("\n");
-    console.info("Initializing USB subsystem...", .{});
-
-    const devices = pci_devices orelse {
-        console.warn("USB: PCI not initialized, skipping USB", .{});
-        return;
-    };
-
-    var ecam = pci_ecam orelse {
-        console.warn("USB: PCI ECAM not available, skipping USB", .{});
-        return;
-    };
-
-    usb.initFromPci(devices, &ecam);
-}
-
-// ============================================================================
-// Audio Initialization
-// ============================================================================
-
-fn initAudio() void {
-    console.print("\n");
-    console.info("Initializing Audio subsystem...", .{});
-
-    const devices = pci_devices orelse {
-        console.warn("Audio: PCI not initialized, skipping Audio", .{});
-        return;
-    };
-
-    if (devices.findAc97Controller()) |dev| {
-        console.info("Audio: Found AC97 Controller at {d}:{d}.{d}", .{ dev.bus, dev.device, dev.func });
-        audio.ac97.initFromPci(dev) catch |err| {
-             console.warn("Audio: Init failed: {}", .{err});
-        };
-    } else {
-        console.info("Audio: No AC97 controller found", .{});
-    }
-}
-
-// ============================================================================
-// VFS Initialization
-// ============================================================================
-
-fn initVfs() void {
-    console.print("\n");
-    console.info("Initializing VFS...", .{});
-
-    fs.vfs.Vfs.init();
-
-    // Mount InitRD at /
-    fs.vfs.Vfs.mount("/", fs.vfs.initrd_fs) catch |err| {
-        console.err("Failed to mount InitRD at /: {}", .{err});
-    };
-
-    // Mount DevFS at /dev
-    fs.vfs.Vfs.mount("/dev", devfs.dev_fs) catch |err| {
-        console.err("Failed to mount DevFS at /dev: {}", .{err});
-    };
-
-    console.info("VFS initialized (mounted / and /dev)", .{});
-}
-
-// ============================================================================
-// Storage Initialization (AHCI)
-// ============================================================================
-
-fn initStorage() void {
-    console.print("\n");
-    console.info("Initializing storage subsystem...", .{});
-
-    const devices = pci_devices orelse {
-        console.warn("Storage: PCI not initialized, skipping AHCI", .{});
-        return;
-    };
-
-    const ecam = pci_ecam orelse {
-        console.warn("Storage: PCI ECAM not available, skipping AHCI", .{});
-        return;
-    };
-
-    // Search for AHCI controller (Class 0x01 Mass Storage, Subclass 0x06 SATA)
-    var found_ahci = false;
-    for (devices.devices[0..devices.count]) |*dev| {
-        if (dev.class_code == 0x01 and dev.subclass == 0x06) {
-            console.info("Storage: Found AHCI controller at {x:0>2}:{x:0>2}.{d}", .{
-                dev.bus, dev.device, dev.func,
-            });
-
-            if (ahci.initFromPci(dev, &ecam)) |controller| {
-                // Report detected drives and scan for partitions
-                const partitions = @import("partitions");
-                var port_num: u5 = 0;
-                while (port_num < ahci.MAX_PORTS) : (port_num += 1) {
-                    if (controller.getPort(port_num)) |port| {
-                        const dev_type_str = switch (port.device_type) {
-                            .ata => "ATA",
-                            .atapi => "ATAPI",
-                            .semb => "SEMB",
-                            .port_multiplier => "Port Multiplier",
-                            else => "None",
-                        };
-                        console.info("  Port {d}: {s} device", .{ port_num, dev_type_str });
-
-                        if (port.device_type == .ata) {
-                            // Scan for partitions
-                            partitions.scanAndRegister(port_num) catch |err| {
-                                console.warn("  Partition scan failed: {}", .{err});
-                            };
-                        }
-                    }
-                }
-                found_ahci = true;
-                break; // Only initialize first controller
-            } else |err| {
-                console.warn("Storage: AHCI init failed: {}", .{err});
-            }
-        }
-    }
-
-    if (!found_ahci) {
-        console.info("Storage: No AHCI controllers found", .{});
-    }
-}
-
-// ============================================================================
-// Block Filesystem Initialization (SFS)
-// ============================================================================
-
-fn initBlockFs() void {
-    console.print("\n");
-    console.info("Initializing Block Filesystem...", .{});
-
-    // Check if /dev/sda exists (created by initStorage via DevFS check)
-    // SFS.init will attempt to open it using VFS
-
-    const sfs_instance = fs.sfs.SFS.init("/dev/sda") catch |err| {
-        console.warn("SFS: Failed to initialize on /dev/sda: {}", .{err});
-        return;
-    };
-
-    // Mount at /mnt
-    fs.vfs.Vfs.mount("/mnt", sfs_instance) catch |err| {
-        console.err("SFS: Failed to mount at /mnt: {}", .{err});
-        return;
-    };
-
-    console.info("SFS: Mounted at /mnt", .{});
-
-    // Run simple filesystem test
-    testBlockFs();
-}
-
-fn testBlockFs() void {
-    console.info("SFS: Running read/write test...", .{});
-
-    const fd_mod = @import("fd");
-
-    // Open/Create file
-    const path = "/mnt/hello.txt";
-    const flags = fd_mod.O_CREAT | fd_mod.O_RDWR;
-
-    const fd = fs.vfs.Vfs.open(path, flags) catch |err| {
-        console.err("SFS Test: Failed to open {s}: {}", .{ path, err });
-        return;
-    };
-    defer {
-        if (fd.ops.close) |close_fn| _ = close_fn(fd);
-        // heap.allocator().destroy(fd); // Vfs.open doesn't use heap? It does. But who owns fd?
-        // sys_close destroys it. We should manually destroy if not using sys_close.
-        // Actually, Vfs.open returns a pointer allocated on heap.
-        // And FileDescriptor.unref calls destroy.
-        // So we should simulate unref/close.
-        const alloc = @import("heap").allocator();
-        alloc.destroy(fd); // fd.close is not enough, need to free struct. But unref does it.
-        // We haven't ref-ed it, createFd sets ref=1.
-        // So calling ops.close is part of it, but we need to free the memory too.
-        // Correct usage:
-        // if (fd.unref()) { if (fd.ops.close) |c| _ = c(fd); alloc.destroy(fd); }
-    }
-
-    // Write data
-    const message = "Hello, Block World!";
-    if (fd.ops.write) |write_fn| {
-        const written = write_fn(fd, message);
-        console.info("SFS Test: Wrote {d} bytes", .{written});
-    }
-
-    // Seek to beginning
-    if (fd.ops.seek) |seek_fn| {
-        _ = seek_fn(fd, 0, 0); // SEEK_SET
-    }
-
-    // Read back
-    var buf: [64]u8 = undefined;
-    if (fd.ops.read) |read_fn| {
-        const read = read_fn(fd, &buf);
-        if (read > 0) {
-            const content = buf[0..@intCast(read)];
-            console.info("SFS Test: Read back: '{s}'", .{content});
-
-            if (std.mem.eql(u8, content, message)) {
-                console.info("SFS Test: PASSED", .{});
-            } else {
-                console.err("SFS Test: FAILED (content mismatch)", .{});
-            }
-        } else {
-            console.err("SFS Test: FAILED (read 0 bytes)", .{});
-        }
-    }
-}
-
-// ============================================================================
-// VirtIO-GPU Initialization
-// ============================================================================
-
-var virtio_gpu_driver: ?*video_driver.VirtioGpuDriver = null;
-
-fn initVirtioGpu() void {
-    console.print("\n");
-    console.info("Checking for VirtIO-GPU...", .{});
-
-    const devices = pci_devices orelse {
-        console.info("VirtIO-GPU: PCI not initialized, skipping", .{});
-        return;
-    };
-
-    var ecam = pci_ecam orelse {
-        console.info("VirtIO-GPU: PCI ECAM not available, skipping", .{});
-        return;
-    };
-
-    // Scan for VirtIO-GPU device
-    for (devices.devices[0..devices.count]) |*dev| {
-        if (dev.isVirtioGpu()) {
-            console.info("VirtIO-GPU: Found device at {d}:{d}.{d}", .{ dev.bus, dev.device, dev.func });
-
-            // Try to initialize the driver
-            if (video_driver.VirtioGpuDriver.init(dev, &ecam)) |driver| {
-                virtio_gpu_driver = driver;
-
-                // Switch console to use VirtIO-GPU
-                graph_console = video_driver.console.Console.init(driver.device());
-                console.info("VirtIO-GPU: Console switched to paravirtualized GPU", .{});
-                return;
-            } else {
-                console.warn("VirtIO-GPU: Driver initialization failed", .{});
-            }
-        }
-    }
-
-    console.info("VirtIO-GPU: No device found, using framebuffer", .{});
 }
 
 /// Initialize APIC subsystem (replaces legacy PIC)
@@ -1190,8 +340,8 @@ fn initApic() void {
     console.print("\n");
     console.info("Initializing APIC subsystem...", .{});
 
-    // Get RSDP from Limine
-    const rsdp_response = rsdp_request.response orelse {
+    // Get RSDP from Limine via boot module
+    const rsdp_response = boot.rsdp_request.response orelse {
         console.warn("RSDP not found, using legacy PIC mode", .{});
         hal.apic.setLegacyPicMode(); // Explicitly set interrupt mode for proper EOI handling
         return;
@@ -1251,3 +401,11 @@ fn initApic() void {
 
     console.info("APIC subsystem initialized", .{});
 }
+
+/// Convert physical address to virtual using HHDM
+pub fn physToVirt(phys: u64) [*]u8 {
+    return hal.paging.physToVirt(phys);
+}
+
+// Forward panic and handleCrash
+pub const panic = panic_lib.panic;

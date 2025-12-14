@@ -154,7 +154,7 @@ pub const NoOpCmdTrb = extern struct {
 
 /// Enable Slot Command TRB - Request a device slot
 pub const EnableSlotCmdTrb = extern struct {
-    _rsvd0: u64 = 0,
+    _rsvd0: u64 align(16) = 0,
     _rsvd1: u32 = 0,
     control: packed struct(u32) {
         cycle: bool,
@@ -177,13 +177,13 @@ pub const EnableSlotCmdTrb = extern struct {
     }
 
     pub fn asTrb(self: *EnableSlotCmdTrb) *Trb {
-        return @ptrCast(self);
+        return @ptrCast(@alignCast(self));
     }
 };
 
 /// Disable Slot Command TRB - Release a device slot
 pub const DisableSlotCmdTrb = extern struct {
-    _rsvd0: u64 = 0,
+    _rsvd0: u64 align(16) = 0,
     _rsvd1: u32 = 0,
     control: packed struct(u32) {
         cycle: bool,
@@ -206,13 +206,13 @@ pub const DisableSlotCmdTrb = extern struct {
     }
 
     pub fn asTrb(self: *DisableSlotCmdTrb) *Trb {
-        return @ptrCast(self);
+        return @ptrCast(@alignCast(self));
     }
 };
 
 /// Address Device Command TRB - Assign USB address to device
 pub const AddressDeviceCmdTrb = extern struct {
-    input_context_ptr: u64, // Physical address of Input Context (16-byte aligned)
+    input_context_ptr: u64 align(16), // Physical address of Input Context (16-byte aligned)
     _rsvd: u32 = 0,
     control: packed struct(u32) {
         cycle: bool,
@@ -238,13 +238,13 @@ pub const AddressDeviceCmdTrb = extern struct {
     }
 
     pub fn asTrb(self: *AddressDeviceCmdTrb) *Trb {
-        return @ptrCast(self);
+        return @ptrCast(@alignCast(self));
     }
 };
 
 /// Configure Endpoint Command TRB - Configure device endpoints
 pub const ConfigureEndpointCmdTrb = extern struct {
-    input_context_ptr: u64, // Physical address of Input Context
+    input_context_ptr: u64 align(16), // Physical address of Input Context
     _rsvd: u32 = 0,
     control: packed struct(u32) {
         cycle: bool,
@@ -270,13 +270,13 @@ pub const ConfigureEndpointCmdTrb = extern struct {
     }
 
     pub fn asTrb(self: *ConfigureEndpointCmdTrb) *Trb {
-        return @ptrCast(self);
+        return @ptrCast(@alignCast(self));
     }
 };
 
 /// Evaluate Context Command TRB - Update endpoint parameters
 pub const EvaluateContextCmdTrb = extern struct {
-    input_context_ptr: u64,
+    input_context_ptr: u64 align(16),
     _rsvd: u32 = 0,
     control: packed struct(u32) {
         cycle: bool,
@@ -300,13 +300,13 @@ pub const EvaluateContextCmdTrb = extern struct {
     }
 
     pub fn asTrb(self: *EvaluateContextCmdTrb) *Trb {
-        return @ptrCast(self);
+        return @ptrCast(@alignCast(self));
     }
 };
 
 /// Reset Endpoint Command TRB - Reset stalled endpoint
 pub const ResetEndpointCmdTrb = extern struct {
-    _rsvd0: u64 = 0,
+    _rsvd0: u64 align(16) = 0,
     _rsvd1: u32 = 0,
     control: packed struct(u32) {
         cycle: bool,
@@ -333,7 +333,7 @@ pub const ResetEndpointCmdTrb = extern struct {
     }
 
     pub fn asTrb(self: *ResetEndpointCmdTrb) *Trb {
-        return @ptrCast(self);
+        return @ptrCast(@alignCast(self));
     }
 };
 
@@ -343,7 +343,7 @@ pub const ResetEndpointCmdTrb = extern struct {
 
 /// Normal Transfer TRB - Bulk/Interrupt data transfer
 pub const NormalTrb = extern struct {
-    data_buffer_ptr: u64, // Physical address of data buffer
+    data_buffer_ptr: u64 align(16), // Physical address of data buffer
     status: packed struct(u32) {
         trb_transfer_length: u17, // Bytes to transfer
         td_size: u5, // Remaining packets in TD
@@ -388,7 +388,7 @@ pub const NormalTrb = extern struct {
     }
 
     pub fn asTrb(self: *NormalTrb) *Trb {
-        return @ptrCast(self);
+        return @ptrCast(@alignCast(self));
     }
 };
 
@@ -402,7 +402,7 @@ pub const TransferFlags = struct {
 
 /// Setup Stage TRB - First TRB of control transfer
 pub const SetupStageTrb = extern struct {
-    setup_data: SetupData, // 8-byte USB Setup Packet
+    setup_data: SetupData align(16), // 8-byte USB Setup Packet
     status: packed struct(u32) {
         trb_transfer_length: u17 = 8, // Always 8 for setup
         _rsvd: u5 = 0,
@@ -449,7 +449,7 @@ pub const SetupStageTrb = extern struct {
     }
 
     pub fn asTrb(self: *SetupStageTrb) *Trb {
-        return @ptrCast(self);
+        return @ptrCast(@alignCast(self));
     }
 };
 
@@ -468,7 +468,7 @@ pub const SetupData = packed struct(u64) {
 
 /// Data Stage TRB - Data phase of control transfer
 pub const DataStageTrb = extern struct {
-    data_buffer_ptr: u64, // Physical address of data buffer
+    data_buffer_ptr: u64 align(16), // Physical address of data buffer
     status: packed struct(u32) {
         trb_transfer_length: u17,
         td_size: u5 = 0,
@@ -513,13 +513,13 @@ pub const DataStageTrb = extern struct {
     }
 
     pub fn asTrb(self: *DataStageTrb) *Trb {
-        return @ptrCast(self);
+        return @ptrCast(@alignCast(self));
     }
 };
 
 /// Status Stage TRB - Final TRB of control transfer
 pub const StatusStageTrb = extern struct {
-    _rsvd0: u64 = 0,
+    _rsvd0: u64 align(16) = 0,
     status: packed struct(u32) {
         _rsvd: u22 = 0,
         interrupter_target: u10 = 0,
@@ -553,13 +553,13 @@ pub const StatusStageTrb = extern struct {
     }
 
     pub fn asTrb(self: *StatusStageTrb) *Trb {
-        return @ptrCast(self);
+        return @ptrCast(@alignCast(self));
     }
 };
 
 /// Link TRB - Wraps ring back to start or chains segments
 pub const LinkTrb = extern struct {
-    ring_segment_ptr: u64, // Physical address of next segment (16-byte aligned)
+    ring_segment_ptr: u64 align(16), // Physical address of next segment (16-byte aligned)
     _rsvd: u32 = 0,
     control: packed struct(u32) {
         cycle: bool,
@@ -589,7 +589,7 @@ pub const LinkTrb = extern struct {
     }
 
     pub fn asTrb(self: *LinkTrb) *Trb {
-        return @ptrCast(self);
+        return @ptrCast(@alignCast(self));
     }
 };
 

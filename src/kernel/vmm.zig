@@ -32,7 +32,7 @@ pub const PAGE_SIZE: usize = paging.PAGE_SIZE;
 // Kernel address space boundaries
 pub const KERNEL_BASE: u64 = 0xFFFF_8000_0000_0000;
 pub const USER_SPACE_END: u64 = 0x0000_7FFF_FFFF_FFFF;
-pub const MMIO_BASE: u64 = 0xFFFF_A000_0000_0000;
+pub const MMIO_BASE: u64 = 0xFFFF_B000_0000_0000; // Must not overlap with kernel stack at 0xFFFF_A000_0000_0000
 
 // VMM State
 var kernel_pml4_phys: u64 = 0;

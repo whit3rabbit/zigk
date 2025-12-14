@@ -133,7 +133,7 @@ pub const ConfigAttributes = packed struct(u8) {
 };
 
 /// Interface Descriptor (9 bytes)
-pub const InterfaceDescriptor = packed struct {
+pub const InterfaceDescriptor = extern struct {
     b_length: u8,
     b_descriptor_type: u8,
     b_interface_number: u8,
@@ -150,16 +150,26 @@ pub const InterfaceDescriptor = packed struct {
 };
 
 /// Endpoint Descriptor (7 bytes)
-pub const EndpointDescriptor = packed struct {
+pub const EndpointDescriptor = extern struct {
     b_length: u8,
     b_descriptor_type: u8,
-    b_endpoint_address: EndpointAddress,
-    bm_attributes: EndpointAttributes,
-    w_max_packet_size: u16,
+    b_endpoint_address: u8,
+    bm_attributes: u8,
+    w_max_packet_size: u16 align(1),
     b_interval: u8,
 
     comptime {
         if (@sizeOf(@This()) != 7) @compileError("EndpointDescriptor must be 7 bytes");
+    }
+
+    /// Get endpoint address as structured type
+    pub fn getAddress(self: EndpointDescriptor) EndpointAddress {
+        return @bitCast(self.b_endpoint_address);
+    }
+
+    /// Get attributes as structured type
+    pub fn getAttributes(self: EndpointDescriptor) EndpointAttributes {
+        return @bitCast(self.bm_attributes);
     }
 };
 

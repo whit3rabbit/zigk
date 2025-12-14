@@ -90,12 +90,7 @@ pub const ProducerRing = struct {
 
         // Copy TRB with correct cycle bit
         var trb_copy = new_trb;
-        const ctrl = @as(*u32, @ptrCast(&trb_copy.control));
-        if (self.pcs) {
-            ctrl.* |= 1; // Set cycle bit
-        } else {
-            ctrl.* &= ~@as(u32, 1); // Clear cycle bit
-        }
+        trb_copy.control.cycle = self.pcs;
 
         // Write to ring
         self.trbs[self.enqueue_idx] = trb_copy;
@@ -128,12 +123,7 @@ pub const ProducerRing = struct {
         const link: *LinkTrb = @ptrCast(&self.trbs[link_idx]);
 
         // Set cycle bit on Link TRB
-        const ctrl = @as(*u32, @ptrCast(&link.control));
-        if (self.pcs) {
-            ctrl.* |= 1;
-        } else {
-            ctrl.* &= ~@as(u32, 1);
-        }
+        link.control.cycle = self.pcs;
 
         // Toggle producer cycle state (Link TRB has TC=1)
         self.pcs = !self.pcs;
@@ -225,9 +215,7 @@ pub const ConsumerRing = struct {
     /// Check if there's a pending event to process
     pub fn hasPending(self: *const Self) bool {
         const current_trb = &self.trbs[self.dequeue_idx];
-        const ctrl = @as(*const u32, @ptrCast(&current_trb.control));
-        const cycle_bit = (ctrl.* & 1) != 0;
-        return cycle_bit == self.ccs;
+        return current_trb.control.cycle == self.ccs;
     }
 
     /// Dequeue the next event TRB

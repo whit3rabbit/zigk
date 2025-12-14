@@ -39,6 +39,12 @@ pub fn sys_read(fd_num: usize, buf_ptr: usize, count: usize) SyscallError!usize 
 
     // Get FD from table
     const table = base.getGlobalFdTable();
+
+    // [Debug] Log reads on stdin (0)
+    if (fd_num == 0) {
+        console.debug("Syscall: read(0, {x}, {})", .{buf_ptr, count});
+    }
+
     const fd = table.get(@intCast(fd_num)) orelse {
         return error.EBADF;
     };

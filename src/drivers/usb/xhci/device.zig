@@ -1,0 +1,360 @@
+// XHCI USB Device Management
+//
+// Manages per-device state for USB devices attached to XHCI ports.
+// Each device has:
+//   - Slot ID assigned by controller
+//   - Device and Input contexts for commands
+//   - Transfer ring for EP0 (control)
+//   - Optional transfer ring for interrupt endpoint (HID keyboards)
+//
+// Reference: xHCI Specification 1.2
+
+const std = @import("std");
+const console = @import("console");
+const hal = @import("hal");
+const pmm = @import("pmm");
+
+const trb = @import("trb.zig");
+const ring = @import("ring.zig");
+const context = @import("context.zig");
+const hid = @import("../class/hid.zig");
+
+// =============================================================================
+// USB Device Structure
+// =============================================================================
+
+/// USB Device - tracks all state for an enumerated device
+pub const UsbDevice = struct {
+    /// Slot ID assigned by Enable Slot command (1-255)
+    slot_id: u8,
+    /// Root hub port number (1-based)
+    port: u8,
+    /// Device speed from PORTSC
+    speed: context.Speed,
+    /// EP0 max packet size (8 for LS, 64 for FS/HS, 512 for SS)
+    max_packet_size: u16,
+
+    // Contexts (DMA-allocated)
+    /// Device Context - output from controller
+    device_context: *context.DeviceContext,
+    device_context_phys: u64,
+    /// Input Context - for commands
+    input_context: *context.InputContext,
+    input_context_phys: u64,
+
+    // Transfer rings
+    /// EP0 Control endpoint transfer ring
+    ep0_ring: ring.TransferRing,
+    /// Interrupt endpoint transfer ring (for HID)
+    interrupt_ring: ?ring.TransferRing,
+    /// DCI for interrupt endpoint
+    interrupt_dci: u5,
+
+    // HID keyboard state
+    /// HID driver instance for parsing reports
+    hid_driver: hid.HidDriver,
+    /// DMA buffer for interrupt reports (8 bytes for boot protocol)
+    report_buffer: [*]u8,
+    report_buffer_phys: u64,
+
+    /// Current device state
+    state: DeviceState,
+
+    const Self = @This();
+
+    /// Device state during enumeration
+    pub const DeviceState = enum {
+        /// Slot enabled, not yet addressed
+        slot_enabled,
+        /// USB address assigned
+        addressed,
+        /// Configuration set, endpoints configured
+        configured,
+        /// Actively polling for HID reports
+        polling,
+        /// Error state - device unusable
+        err,
+    };
+
+    /// Allocate and initialize a new USB device
+    pub fn init(slot_id: u8, port: u8, speed: context.Speed) !*Self {
+        // Allocate device structure from PMM
+        const dev_page = pmm.allocZeroedPages(1) orelse return error.OutOfMemory;
+        const dev_virt = @intFromPtr(hal.paging.physToVirt(dev_page));
+        const device: *Self = @ptrFromInt(dev_virt);
+        errdefer pmm.freePages(dev_page, 1);
+
+        // Allocate Device Context
+        const dc = try context.DeviceContext.alloc();
+        errdefer dc.ctx.free();
+
+        // Allocate Input Context
+        const ic = try context.InputContext.alloc();
+        errdefer ic.ctx.free();
+
+        // Allocate EP0 Transfer Ring
+        var ep0_ring = try ring.TransferRing.init();
+        errdefer ep0_ring.deinit();
+
+        // Allocate report buffer (one page, we only need 8 bytes)
+        const report_page = pmm.allocZeroedPages(1) orelse return error.OutOfMemory;
+        const report_virt = hal.paging.physToVirt(report_page);
+
+        // Determine default max packet size based on speed
+        const default_max_packet: u16 = switch (speed) {
+            .low_speed => 8,
+            .full_speed => 64,
+            .high_speed => 64,
+            .super_speed, .super_speed_plus => 512,
+            else => 8,
+        };
+
+        device.* = Self{
+            .slot_id = slot_id,
+            .port = port,
+            .speed = speed,
+            .max_packet_size = default_max_packet,
+            .device_context = dc.ctx,
+            .device_context_phys = dc.phys,
+            .input_context = ic.ctx,
+            .input_context_phys = ic.phys,
+            .ep0_ring = ep0_ring,
+            .interrupt_ring = null,
+            .interrupt_dci = 0,
+            .hid_driver = .{},
+            .report_buffer = @ptrFromInt(@intFromPtr(report_virt)),
+            .report_buffer_phys = report_page,
+            .state = .slot_enabled,
+        };
+
+        return device;
+    }
+
+    /// Build initial Input Context for Address Device command
+    /// Sets up Slot Context and EP0 Context
+    pub fn buildAddressDeviceContext(self: *Self) void {
+        // Clear input context
+        @memset(@as([*]u8, @ptrCast(self.input_context))[0..@sizeOf(context.InputContext)], 0);
+
+        // Set add flags: Slot (bit 0) + EP0 (bit 1)
+        self.input_context.input_control.setAddFlags(true, 1); // EP0 = endpoint bit 0
+
+        // Initialize Slot Context
+        self.input_context.slot = context.SlotContext.initForDevice(
+            self.speed,
+            self.port,
+            1, // context_entries = 1 (only EP0 for now)
+        );
+
+        // Initialize EP0 Context
+        self.input_context.endpoints[0] = context.EndpointContext.initForEp0(
+            self.max_packet_size,
+            self.ep0_ring.getPhysicalAddress(),
+            self.ep0_ring.getCycleState(),
+        );
+    }
+
+    /// Update Input Context for interrupt endpoint configuration
+    pub fn buildConfigureEndpointContext(
+        self: *Self,
+        ep_addr: u8,
+        max_packet: u16,
+        interval: u8,
+    ) !void {
+        // Allocate interrupt transfer ring if not done
+        if (self.interrupt_ring == null) {
+            self.interrupt_ring = try ring.TransferRing.init();
+        }
+
+        const int_ring = &self.interrupt_ring.?;
+        const dci = context.InputContext.endpointToDci(ep_addr);
+        self.interrupt_dci = dci;
+
+        // Clear and set up input context
+        @memset(@as([*]u8, @ptrCast(self.input_context))[0..@sizeOf(context.InputContext)], 0);
+
+        // Add flags: Slot context + only the new interrupt endpoint
+        // Bit 0 = Slot, Bit N = DCI N (shifted in setAddFlags)
+        // Don't add EP0 again - it's already configured after Address Device
+        const ep_bit: u31 = @as(u31, 1) << @truncate(dci - 1);
+        self.input_context.input_control.setAddFlags(true, ep_bit);
+
+        // Update slot context_entries to include new endpoint
+        self.input_context.slot = self.device_context.slot;
+        self.input_context.slot.dw0.context_entries = dci;
+
+        // Initialize interrupt endpoint context
+        if (self.input_context.getEndpoint(dci)) |ep| {
+            ep.* = context.EndpointContext.initInterruptIn(
+                max_packet,
+                calculateInterval(self.speed, interval),
+                int_ring.getPhysicalAddress(),
+                int_ring.getCycleState(),
+            );
+        }
+    }
+
+    /// Update max packet size after reading device descriptor
+    pub fn updateMaxPacketSize(self: *Self, new_size: u16) void {
+        self.max_packet_size = new_size;
+    }
+
+    /// Build Input Context for Evaluate Context command (max packet update)
+    pub fn buildEvaluateContext(self: *Self) void {
+        @memset(@as([*]u8, @ptrCast(self.input_context))[0..@sizeOf(context.InputContext)], 0);
+
+        // Only update EP0
+        self.input_context.input_control.setAddFlags(false, 1); // Only EP0
+
+        // Update EP0 max packet size
+        self.input_context.endpoints[0] = context.EndpointContext.initForEp0(
+            self.max_packet_size,
+            self.ep0_ring.getPhysicalAddress(),
+            self.ep0_ring.getCycleState(),
+        );
+    }
+
+    /// Free all device resources
+    pub fn deinit(self: *Self) void {
+        self.device_context.free();
+        self.input_context.free();
+        self.ep0_ring.deinit();
+        if (self.interrupt_ring) |*ir| {
+            ir.deinit();
+        }
+        pmm.freePages(self.report_buffer_phys, 1);
+
+        // Free the device structure itself
+        const dev_phys = hal.paging.virtToPhys(@intFromPtr(self));
+        pmm.freePages(dev_phys, 1);
+    }
+};
+
+// =============================================================================
+// Device Array - Track all connected devices
+// =============================================================================
+
+/// Maximum number of devices (limited by slot count, typically 64-255)
+pub const MAX_DEVICES: usize = 64;
+
+/// Global device array indexed by slot_id
+var devices: [MAX_DEVICES]?*UsbDevice = [_]?*UsbDevice{null} ** MAX_DEVICES;
+
+/// Register a device in the global array
+pub fn registerDevice(device: *UsbDevice) void {
+    if (device.slot_id > 0 and device.slot_id < MAX_DEVICES) {
+        devices[device.slot_id] = device;
+    }
+}
+
+/// Unregister a device from the global array
+pub fn unregisterDevice(slot_id: u8) void {
+    if (slot_id > 0 and slot_id < MAX_DEVICES) {
+        devices[slot_id] = null;
+    }
+}
+
+/// Find a device by slot ID
+pub fn findDevice(slot_id: u8) ?*UsbDevice {
+    if (slot_id > 0 and slot_id < MAX_DEVICES) {
+        return devices[slot_id];
+    }
+    return null;
+}
+
+/// Find first device in polling state (for interrupt handling)
+pub fn findPollingDevice() ?*UsbDevice {
+    for (devices) |maybe_dev| {
+        if (maybe_dev) |dev| {
+            if (dev.state == .polling) {
+                return dev;
+            }
+        }
+    }
+    return null;
+}
+
+// =============================================================================
+// Helper Functions
+// =============================================================================
+
+/// Calculate XHCI interval value from USB bInterval
+/// USB bInterval is in frames (FS/LS) or microframes (HS/SS)
+/// XHCI interval is log2 of 125us intervals
+fn calculateInterval(speed: context.Speed, bInterval: u8) u8 {
+    return switch (speed) {
+        // Low/Full speed: bInterval is in 1ms units
+        // Convert to 125us units: multiply by 8
+        .low_speed, .full_speed => blk: {
+            if (bInterval == 0) break :blk 0;
+            // Find log2(bInterval * 8) = log2(bInterval) + 3
+            var val = bInterval;
+            var log: u8 = 3;
+            while (val > 1) : (val >>= 1) {
+                log += 1;
+            }
+            break :blk log;
+        },
+        // High/Super speed: bInterval is already log2+1 of 125us intervals
+        .high_speed, .super_speed, .super_speed_plus => bInterval,
+        else => bInterval,
+    };
+}
+
+// =============================================================================
+// Pending Transfer Tracking
+// =============================================================================
+
+/// Pending transfer info for synchronous control transfers
+pub const PendingTransfer = struct {
+    /// Physical address of first TRB in transfer
+    trb_phys: u64,
+    /// Slot ID for matching
+    slot_id: u8,
+    /// Endpoint DCI for matching
+    ep_dci: u5,
+    /// Completion status
+    completed: bool,
+    /// Completion code from controller
+    completion_code: trb.CompletionCode,
+    /// Bytes transferred (or residual for short packet)
+    bytes_transferred: u24,
+};
+
+/// Global pending transfer for synchronous operations
+/// Only one control transfer at a time per device
+pub var pending_transfer: ?PendingTransfer = null;
+
+/// Start tracking a pending transfer
+pub fn startPendingTransfer(trb_phys: u64, slot_id: u8, ep_dci: u5) void {
+    pending_transfer = PendingTransfer{
+        .trb_phys = trb_phys,
+        .slot_id = slot_id,
+        .ep_dci = ep_dci,
+        .completed = false,
+        .completion_code = .Invalid,
+        .bytes_transferred = 0,
+    };
+}
+
+/// Mark pending transfer as completed
+pub fn completePendingTransfer(code: trb.CompletionCode, residual: u24) void {
+    if (pending_transfer) |*pt| {
+        pt.completed = true;
+        pt.completion_code = code;
+        pt.bytes_transferred = residual;
+    }
+}
+
+/// Check if pending transfer matches event
+pub fn matchesPendingTransfer(slot_id: u8, ep_dci: u5) bool {
+    if (pending_transfer) |pt| {
+        return pt.slot_id == slot_id and pt.ep_dci == ep_dci and !pt.completed;
+    }
+    return false;
+}
+
+/// Clear pending transfer
+pub fn clearPendingTransfer() void {
+    pending_transfer = null;
+}

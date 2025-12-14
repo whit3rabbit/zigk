@@ -20,12 +20,17 @@ const regs = @import("regs.zig");
 const trb = @import("trb.zig");
 const ring = @import("ring.zig");
 const context = @import("context.zig");
+const device = @import("device.zig");
+const transfer = @import("transfer.zig");
+const hid = @import("../class/hid.zig");
 
 // Re-export submodules
 pub const Regs = regs;
 pub const Trb = trb;
 pub const Ring = ring;
 pub const Context = context;
+pub const Device = device;
+pub const Transfer = transfer;
 
 // =============================================================================
 // Controller State
@@ -430,13 +435,6 @@ pub const Controller = struct {
         return error.Timeout;
     }
 
-    /// Update Event Ring Dequeue Pointer
-    fn updateErdp(self: *Self) void {
-        const intr0_base = self.runtime_base + regs.Runtime.interrupter(0);
-        const erdp = regs.Erdp.init(self.event_ring.getDequeuePointer(), 0);
-        writeReg64(intr0_base, regs.Intr.ERDP, @bitCast(erdp));
-    }
-
     /// Reset a port to enable it and bring the device to the Default state
     fn resetPort(self: *Self, port: u8) !void {
         const portsc_off = regs.Op.portsc(port);
@@ -483,7 +481,7 @@ pub const Controller = struct {
         return error.ResetFailed;
     }
 
-    /// Scan ports for connected devices and attempt initialization
+    /// Scan ports for connected devices and attempt enumeration
     pub fn scanPorts(self: *Self) void {
         console.info("XHCI: Scanning {d} ports...", .{self.max_ports});
 
@@ -507,11 +505,24 @@ pub const Controller = struct {
                     portsc.ped,
                 });
 
-                // Attempt to reset and enable the port
-                // This transitions the device from "Powered" to "Default" state
+                // Reset port if not enabled
                 if (!portsc.ped) {
                     self.resetPort(port) catch |err| {
                         console.err("XHCI: Failed to reset port {d}: {}", .{ port, err });
+                        continue;
+                    };
+                }
+
+                // Enumerate the device
+                const maybe_dev = self.enumerateDevice(port) catch |err| {
+                    console.err("XHCI: Failed to enumerate device on port {d}: {}", .{ port, err });
+                    continue;
+                };
+
+                // If it's a keyboard, start polling
+                if (maybe_dev) |dev| {
+                    self.startKeyboardPolling(dev) catch |err| {
+                        console.err("XHCI: Failed to start keyboard polling: {}", .{err});
                     };
                 }
             }
@@ -528,6 +539,307 @@ pub const Controller = struct {
 
         self.running = false;
         console.info("XHCI: Controller stopped", .{});
+    }
+
+    // =========================================================================
+    // USB Device Enumeration Commands
+    // =========================================================================
+
+    /// Send Enable Slot command and return allocated slot ID
+    pub fn enableSlot(self: *Self) !u8 {
+        console.info("XHCI: Sending Enable Slot command...", .{});
+
+        var enable_cmd = trb.EnableSlotCmdTrb.init(self.command_ring.getCycleState());
+        _ = self.command_ring.enqueue(enable_cmd.asTrb().*) orelse {
+            return error.RingFull;
+        };
+
+        self.ringDoorbell(0, 0);
+
+        // Wait for completion
+        var timeout: u32 = 50000;
+        while (timeout > 0) : (timeout -= 1) {
+            if (self.event_ring.hasPending()) {
+                const event = self.event_ring.dequeue() orelse continue;
+                const event_type = ring.getTrbType(event);
+
+                if (event_type == .CommandCompletionEvent) {
+                    const completion = trb.CommandCompletionEventTrb.fromTrb(event);
+                    self.updateErdp();
+
+                    if (completion.status.completion_code == .Success) {
+                        const slot_id = completion.getSlotId();
+                        console.info("XHCI: Enable Slot succeeded, slot_id={}", .{slot_id});
+                        return slot_id;
+                    } else {
+                        console.err("XHCI: Enable Slot failed: {}", .{@intFromEnum(completion.status.completion_code)});
+                        return error.CommandFailed;
+                    }
+                }
+            }
+            hal.cpu.pause();
+        }
+
+        return error.Timeout;
+    }
+
+    /// Send Address Device command
+    pub fn addressDevice(self: *Self, dev: *device.UsbDevice, bsr: bool) !void {
+        console.info("XHCI: Sending Address Device command (slot={}, BSR={})...", .{ dev.slot_id, bsr });
+
+        // Build Address Device command TRB
+        var addr_cmd = trb.AddressDeviceCmdTrb.init(
+            dev.input_context_phys,
+            dev.slot_id,
+            bsr,
+            self.command_ring.getCycleState(),
+        );
+
+        _ = self.command_ring.enqueue(addr_cmd.asTrb().*) orelse {
+            return error.RingFull;
+        };
+
+        // Register device context in DCBAA
+        self.dcbaa.setSlot(dev.slot_id, dev.device_context_phys);
+
+        self.ringDoorbell(0, 0);
+
+        // Wait for completion
+        var timeout: u32 = 100000;
+        while (timeout > 0) : (timeout -= 1) {
+            if (self.event_ring.hasPending()) {
+                const event = self.event_ring.dequeue() orelse continue;
+                const event_type = ring.getTrbType(event);
+
+                if (event_type == .CommandCompletionEvent) {
+                    const completion = trb.CommandCompletionEventTrb.fromTrb(event);
+                    self.updateErdp();
+
+                    if (completion.status.completion_code == .Success) {
+                        console.info("XHCI: Address Device succeeded", .{});
+                        return;
+                    } else {
+                        console.err("XHCI: Address Device failed: {}", .{@intFromEnum(completion.status.completion_code)});
+                        return error.CommandFailed;
+                    }
+                }
+            }
+            hal.cpu.pause();
+        }
+
+        return error.Timeout;
+    }
+
+    /// Send Configure Endpoint command
+    pub fn configureEndpoint(self: *Self, dev: *device.UsbDevice) !void {
+        console.info("XHCI: Sending Configure Endpoint command (slot={})...", .{dev.slot_id});
+
+        var config_cmd = trb.ConfigureEndpointCmdTrb.init(
+            dev.input_context_phys,
+            dev.slot_id,
+            false, // Not deconfiguring
+            self.command_ring.getCycleState(),
+        );
+
+        _ = self.command_ring.enqueue(config_cmd.asTrb().*) orelse {
+            return error.RingFull;
+        };
+
+        self.ringDoorbell(0, 0);
+
+        // Wait for completion
+        var timeout: u32 = 100000;
+        while (timeout > 0) : (timeout -= 1) {
+            if (self.event_ring.hasPending()) {
+                const event = self.event_ring.dequeue() orelse continue;
+                const event_type = ring.getTrbType(event);
+
+                if (event_type == .CommandCompletionEvent) {
+                    const completion = trb.CommandCompletionEventTrb.fromTrb(event);
+                    self.updateErdp();
+
+                    if (completion.status.completion_code == .Success) {
+                        console.info("XHCI: Configure Endpoint succeeded", .{});
+                        return;
+                    } else {
+                        console.err("XHCI: Configure Endpoint failed: {}", .{@intFromEnum(completion.status.completion_code)});
+                        return error.CommandFailed;
+                    }
+                }
+            }
+            hal.cpu.pause();
+        }
+
+        return error.Timeout;
+    }
+
+    /// Send Evaluate Context command (for updating EP0 max packet size)
+    pub fn evaluateContext(self: *Self, dev: *device.UsbDevice) !void {
+        console.info("XHCI: Sending Evaluate Context command (slot={})...", .{dev.slot_id});
+
+        var eval_cmd = trb.EvaluateContextCmdTrb.init(
+            dev.input_context_phys,
+            dev.slot_id,
+            self.command_ring.getCycleState(),
+        );
+
+        _ = self.command_ring.enqueue(eval_cmd.asTrb().*) orelse {
+            return error.RingFull;
+        };
+
+        self.ringDoorbell(0, 0);
+
+        // Wait for completion
+        var timeout: u32 = 50000;
+        while (timeout > 0) : (timeout -= 1) {
+            if (self.event_ring.hasPending()) {
+                const event = self.event_ring.dequeue() orelse continue;
+                const event_type = ring.getTrbType(event);
+
+                if (event_type == .CommandCompletionEvent) {
+                    const completion = trb.CommandCompletionEventTrb.fromTrb(event);
+                    self.updateErdp();
+
+                    if (completion.status.completion_code == .Success) {
+                        console.info("XHCI: Evaluate Context succeeded", .{});
+                        return;
+                    } else {
+                        console.err("XHCI: Evaluate Context failed: {}", .{@intFromEnum(completion.status.completion_code)});
+                        return error.CommandFailed;
+                    }
+                }
+            }
+            hal.cpu.pause();
+        }
+
+        return error.Timeout;
+    }
+
+    // =========================================================================
+    // Device Enumeration State Machine
+    // =========================================================================
+
+    /// Enumerate a USB device on a port
+    /// Returns configured device if successful, null if not a keyboard
+    pub fn enumerateDevice(self: *Self, port: u8) !?*device.UsbDevice {
+        // Get port speed
+        const portsc_off = regs.Op.portsc(port);
+        const portsc: regs.PortSc = @bitCast(readReg32(self.op_base, portsc_off));
+
+        if (!portsc.ccs or !portsc.ped) {
+            console.warn("XHCI: Port {} not connected or enabled", .{port});
+            return null;
+        }
+
+        const speed: context.Speed = @enumFromInt(portsc.speed);
+        console.info("XHCI: Enumerating device on port {} (speed={})", .{ port, @intFromEnum(speed) });
+
+        // 1. Enable Slot
+        const slot_id = try self.enableSlot();
+
+        // 2. Allocate device structure
+        var dev = try device.UsbDevice.init(slot_id, port, speed);
+        errdefer dev.deinit();
+
+        // 3. Build Input Context for Address Device
+        dev.buildAddressDeviceContext();
+
+        // 4. Address Device (BSR=0 sends SET_ADDRESS automatically)
+        try self.addressDevice(dev, false);
+        dev.state = .addressed;
+
+        // 5. GET_DESCRIPTOR(Device, 8 bytes) - get max packet size
+        var desc_buf: [18]u8 = undefined;
+        const bytes_read = transfer.getDeviceDescriptor(self, dev, desc_buf[0..8]) catch |err| {
+            console.err("XHCI: Failed to get device descriptor (short): {}", .{err});
+            return err;
+        };
+
+        if (bytes_read < 8) {
+            console.err("XHCI: Device descriptor too short: {} bytes", .{bytes_read});
+            return error.InvalidDescriptor;
+        }
+
+        // Update max packet size from descriptor
+        const new_max_packet = desc_buf[7];
+        if (new_max_packet != dev.max_packet_size) {
+            console.info("XHCI: Updating max packet size from {} to {}", .{ dev.max_packet_size, new_max_packet });
+            dev.updateMaxPacketSize(new_max_packet);
+            dev.buildEvaluateContext();
+            try self.evaluateContext(dev);
+        }
+
+        // 6. GET_DESCRIPTOR(Device, full 18 bytes)
+        _ = transfer.getDeviceDescriptor(self, dev, &desc_buf) catch |err| {
+            console.err("XHCI: Failed to get full device descriptor: {}", .{err});
+            return err;
+        };
+
+        const vid = @as(u16, desc_buf[8]) | (@as(u16, desc_buf[9]) << 8);
+        const pid = @as(u16, desc_buf[10]) | (@as(u16, desc_buf[11]) << 8);
+        console.info("XHCI: Device VID={x:0>4} PID={x:0>4}", .{ vid, pid });
+
+        // 7. GET_DESCRIPTOR(Configuration)
+        var config_buf: [256]u8 = undefined;
+        const config_len = transfer.getConfigDescriptor(self, dev, 0, &config_buf) catch |err| {
+            console.err("XHCI: Failed to get config descriptor: {}", .{err});
+            return err;
+        };
+
+        // 8. Parse configuration for keyboard interface
+        const kbd_info = transfer.findKeyboardInterface(config_buf[0..config_len]) orelse {
+            console.info("XHCI: Device is not a HID boot keyboard", .{});
+            // Not a keyboard - clean up and return null
+            dev.deinit();
+            return null;
+        };
+
+        // 9. SET_CONFIGURATION
+        const config_value = config_buf[5]; // bConfigurationValue
+        transfer.setConfiguration(self, dev, config_value) catch |err| {
+            console.err("XHCI: Failed to set configuration: {}", .{err});
+            return err;
+        };
+        console.info("XHCI: Configuration {} set", .{config_value});
+
+        // 10. Configure interrupt endpoint
+        try dev.buildConfigureEndpointContext(
+            kbd_info.endpoint_addr,
+            kbd_info.max_packet,
+            kbd_info.interval,
+        );
+        try self.configureEndpoint(dev);
+        dev.state = .configured;
+
+        // 11. SET_PROTOCOL(Boot) for 8-byte reports
+        transfer.setProtocol(self, dev, kbd_info.interface_num, 0) catch |err| {
+            console.warn("XHCI: Failed to set boot protocol (may be OK): {}", .{err});
+        };
+
+        // 12. SET_IDLE(0) to get reports only on change
+        transfer.setIdle(self, dev, kbd_info.interface_num, 0, 0) catch |err| {
+            console.warn("XHCI: Failed to set idle (may be OK): {}", .{err});
+        };
+
+        // 13. Register device and start polling
+        device.registerDevice(dev);
+        console.info("XHCI: USB keyboard enumerated successfully on slot {}", .{slot_id});
+
+        return dev;
+    }
+
+    /// Start keyboard polling for a device
+    pub fn startKeyboardPolling(self: *Self, dev: *device.UsbDevice) !void {
+        console.info("XHCI: Starting keyboard polling for slot {}", .{dev.slot_id});
+        try transfer.queueInterruptTransfer(self, dev);
+        dev.state = .polling;
+    }
+
+    /// Make updateErdp public for transfer.zig
+    pub fn updateErdp(self: *Self) void {
+        const intr0_base = self.runtime_base + regs.Runtime.interrupter(0);
+        const erdp = regs.Erdp.init(self.event_ring.getDequeuePointer(), 0);
+        writeReg64(intr0_base, regs.Intr.ERDP, @bitCast(erdp));
     }
 };
 
@@ -579,9 +891,9 @@ fn processEvent(ctrl: *Controller, event: *const trb.Trb) void {
 
             // Validate command pointer alignment
             if (completion.command_trb_pointer != 0 and completion.command_trb_pointer % 16 != 0) {
-                 console.warn("XHCI: Invalid command TRB pointer alignment {x}", .{completion.command_trb_pointer});
+                console.warn("XHCI: Invalid command TRB pointer alignment {x}", .{completion.command_trb_pointer});
             }
-            
+
             console.debug("XHCI: Command completion, code={}", .{@intFromEnum(completion.status.completion_code)});
         },
         .PortStatusChangeEvent => {
@@ -590,12 +902,40 @@ fn processEvent(ctrl: *Controller, event: *const trb.Trb) void {
             console.info("XHCI: Port {} status changed", .{port_id});
         },
         .TransferEvent => {
-            const transfer = trb.TransferEventTrb.fromTrb(event);
-            console.debug("XHCI: Transfer event, slot={}, ep={}, code={}", .{
-                transfer.control.slot_id,
-                transfer.control.ep_id,
-                @intFromEnum(transfer.status.completion_code),
-            });
+            const transfer_evt = trb.TransferEventTrb.fromTrb(event);
+            const slot_id = transfer_evt.control.slot_id;
+            const ep_id = transfer_evt.control.ep_id;
+            const code = transfer_evt.status.completion_code;
+
+            // Find the device for this slot
+            if (device.findDevice(slot_id)) |dev| {
+                // Check if this is an interrupt endpoint for keyboard
+                if (ep_id == dev.interrupt_dci and dev.state == .polling) {
+                    // Keyboard report received
+                    if (code == .Success or code == .ShortPacket) {
+                        // Parse HID report and inject keystrokes
+                        const report = dev.report_buffer[0..8];
+                        dev.hid_driver.handleInputReport(report);
+                    } else if (code == .StallError) {
+                        console.warn("XHCI: Keyboard endpoint stalled", .{});
+                    }
+
+                    // Re-queue interrupt transfer for continuous polling
+                    transfer.queueInterruptTransfer(ctrl, dev) catch |err| {
+                        console.err("XHCI: Failed to re-queue keyboard transfer: {}", .{err});
+                        dev.state = .err;
+                    };
+                } else {
+                    // Other transfer (control) - handled by waitForCompletion
+                    console.debug("XHCI: Transfer event, slot={}, ep={}, code={}", .{
+                        slot_id,
+                        ep_id,
+                        @intFromEnum(code),
+                    });
+                }
+            } else {
+                console.debug("XHCI: Transfer event for unknown slot {}", .{slot_id});
+            }
         },
         else => {
             console.debug("XHCI: Unhandled event type {}", .{@intFromEnum(event_type)});

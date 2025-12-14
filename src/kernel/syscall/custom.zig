@@ -113,7 +113,9 @@ pub fn sys_getchar() SyscallError!usize {
 
 /// sys_read_scancode (1003) - Read raw keyboard scancode (non-blocking)
 pub fn sys_read_scancode() SyscallError!usize {
+    // console.debug("Syscall: read_scancode", .{});
     if (keyboard.getScancode()) |scancode| {
+        console.debug("Syscall: read_scancode -> 0x{X:0>2}", .{scancode});
         return scancode;
     }
     // No scancode available
