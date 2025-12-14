@@ -17,6 +17,7 @@ const uapi = @import("uapi");
 const ahci = @import("ahci");
 const audio = @import("audio");
 const vfs = @import("fs").vfs; // Import VFS for Error type
+const heap = @import("heap");
 
 const FileDescriptor = fd_mod.FileDescriptor;
 const FileOps = fd_mod.FileOps;
@@ -150,14 +151,16 @@ fn zeroWrite(fd: *FileDescriptor, buf: []const u8) isize {
 // =============================================================================
 
 /// Device entry for path lookup
-const DeviceEntry = struct {
+pub const DeviceEntry = struct {
     name: []const u8,
     ops: *const FileOps,
+    private_data: ?*anyopaque = null,
+    next: ?*DeviceEntry = null,
 };
 
-/// Registered devices
+/// Registered builtin devices
 /// Names are relative to /dev/
-const devices = [_]DeviceEntry{
+const builtin_devices = [_]DeviceEntry{
     .{ .name = "console", .ops = &console_ops },
     .{ .name = "tty", .ops = &console_ops }, // Alias for console
     .{ .name = "stdin", .ops = &console_ops },
@@ -165,27 +168,63 @@ const devices = [_]DeviceEntry{
     .{ .name = "stderr", .ops = &console_ops },
     .{ .name = "null", .ops = &null_ops },
     .{ .name = "zero", .ops = &zero_ops },
-    .{ .name = "sda", .ops = &ahci.adapter.block_ops },
+    // sda is now registered dynamically
     .{ .name = "dsp", .ops = &audio.ac97.dsp_ops },
 };
 
-/// Look up device operations by path
-/// Returns null if path is not a known device
-pub fn lookupDevice(path: []const u8) ?*const FileOps {
-    // Path should be relative to /dev, e.g. "console", "null"
-    // But existing code passes absolute path?
-    // Let's support both for now or check usage.
+/// Dynamic device list head
+var dynamic_devices: ?*DeviceEntry = null;
 
+/// Register a new device
+pub fn registerDevice(name: []const u8, ops: *const FileOps, private_data: ?*anyopaque) !void {
+    const allocator = heap.allocator();
+    const entry = try allocator.create(DeviceEntry);
+
+    // Duplicate name
+    const name_copy = try allocator.dupe(u8, name);
+
+    entry.* = DeviceEntry{
+        .name = name_copy,
+        .ops = ops,
+        .private_data = private_data,
+        .next = dynamic_devices,
+    };
+
+    dynamic_devices = entry;
+}
+
+/// Look up device entry by path
+/// Returns null if path is not a known device
+pub fn lookupDeviceEntry(path: []const u8) ?*const DeviceEntry {
     // Check if path starts with /dev/
     const name = if (std.mem.startsWith(u8, path, "/dev/"))
         path[5..]
     else
         path;
 
-    for (devices) |dev| {
+    // Check builtin devices
+    for (&builtin_devices) |*dev| {
         if (std.mem.eql(u8, name, dev.name)) {
-            return dev.ops;
+            return dev;
         }
+    }
+
+    // Check dynamic devices
+    var current = dynamic_devices;
+    while (current) |dev| {
+        if (std.mem.eql(u8, name, dev.name)) {
+            return dev;
+        }
+        current = dev.next;
+    }
+
+    return null;
+}
+
+/// Look up device operations by path (legacy wrapper)
+pub fn lookupDevice(path: []const u8) ?*const FileOps {
+    if (lookupDeviceEntry(path)) |entry| {
+        return entry.ops;
     }
     return null;
 }
@@ -195,37 +234,11 @@ fn devfsOpen(ctx: ?*anyopaque, path: []const u8, flags: u32) vfs.Error!*fd_mod.F
     _ = ctx;
 
     // Path is relative to /dev mount point.
-    // e.g. "console", "null", "sda" (without leading / if mounted at /dev)
-
-    // Remove leading slash if present (path passed from VFS might have it or not depending on normalization)
-    // VFS currently passes path relative to mount point. If mount is /dev, and we ask for /dev/console, path is /console.
-    // If we ask for /dev, path is /.
-
     const name = if (path.len > 0 and path[0] == '/') path[1..] else path;
 
-    const ops = lookupDevice(name) orelse return vfs.Error.NotFound;
+    const entry = lookupDeviceEntry(name) orelse return vfs.Error.NotFound;
 
-    // For block devices, we need special handling to set private_data (port number)
-    // Currently lookupDevice just returns ops.
-    // We should improve this to support device instances.
-
-    var private_data: ?*anyopaque = null;
-
-    if (std.mem.eql(u8, name, "sda")) {
-        // Assume port 0 for sda
-        // We need to check if port 0 exists
-        if (ahci.getController()) |controller| {
-             if (controller.getPort(0)) |_| {
-                 private_data = @ptrFromInt(0);
-             } else {
-                 return vfs.Error.NotFound;
-             }
-        } else {
-            return vfs.Error.NotFound;
-        }
-    }
-
-    const fd = fd_mod.createFd(ops, flags, private_data) catch return vfs.Error.NoMemory;
+    const fd = fd_mod.createFd(entry.ops, flags, entry.private_data) catch return vfs.Error.NoMemory;
     return fd;
 }
 

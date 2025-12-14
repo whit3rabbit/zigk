@@ -912,7 +912,8 @@ fn initStorage() void {
             });
 
             if (ahci.initFromPci(dev, &ecam)) |controller| {
-                // Report detected drives
+                // Report detected drives and scan for partitions
+                const partitions = @import("fs").partitions;
                 var port_num: u5 = 0;
                 while (port_num < ahci.MAX_PORTS) : (port_num += 1) {
                     if (controller.getPort(port_num)) |port| {
@@ -924,6 +925,13 @@ fn initStorage() void {
                             else => "None",
                         };
                         console.info("  Port {d}: {s} device", .{ port_num, dev_type_str });
+
+                        if (port.device_type == .ata) {
+                            // Scan for partitions
+                            partitions.scanAndRegister(port_num) catch |err| {
+                                console.warn("  Partition scan failed: {}", .{err});
+                            };
+                        }
                     }
                 }
                 found_ahci = true;
