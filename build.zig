@@ -240,6 +240,7 @@ pub fn build(b: *std.Build) void {
     sync_module.addImport("sched", sched_module);
     hal_module.addImport("sched", sched_module);
     hal_module.addImport("pmm", pmm_module);
+    hal_module.addImport("vmm", vmm_module);
 
     // Create Stack Guard module (stack canary support)
     const stack_guard_module = b.createModule(.{
@@ -820,7 +821,7 @@ pub fn build(b: *std.Build) void {
     // Build Doom
     // Create libc module with syscall dependency
     const doom_libc_module = b.createModule(.{
-        .root_source_file = b.path("src/user/lib/libc.zig"),
+        .root_source_file = b.path("src/user/lib/libc/root.zig"),
         .target = kernel_target,
         .optimize = optimize,
     });
@@ -1039,6 +1040,7 @@ pub fn build(b: *std.Build) void {
         "-device", "virtio-gpu-pci",
         "-device", "AC97",
         "-serial", "stdio",
+        "-smp", "4",
         "-no-reboot",
         "-no-shutdown",
         "-accel", "tcg",

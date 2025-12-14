@@ -25,6 +25,7 @@ For detailed byte-level layouts, struct alignments, and hardware interface speci
 6. **Kernel Initialization**:
    - Validates Limine protocol requests (HHDM, Framebuffer, Memory Map)
    - Initializes HAL (GDT/IDT/Serial/PIC)
+   - Initializes SMP (brings up Application Processors)
    - Sets up Memory Management (PMM/VMM/Heap)
    - Initializes scheduler and creates idle thread
    - Scans modules to load the init process (shell or httpd)
@@ -274,8 +275,8 @@ zig build iso
 # Run in QEMU (macOS with Apple Silicon)
 zig build run -Dbios=/opt/homebrew/share/qemu/edk2-x86_64-code.fd
 
-# Or manually with UEFI
-qemu-system-x86_64 -M q35 -m 256M -cdrom zscapek.iso \
+# Or manually with UEFI and SMP (4 cores)
+qemu-system-x86_64 -M q35 -m 256M -smp 4 -cdrom zscapek.iso \
   -drive if=pflash,format=raw,readonly=on,file=/opt/homebrew/share/qemu/edk2-x86_64-code.fd \
   -serial stdio -display none -accel tcg
 ```

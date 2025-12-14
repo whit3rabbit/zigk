@@ -226,7 +226,7 @@ fn initIdleThread() void {
     // Store idle thread in GS data
     // We access GS via MSR or assumption that it's already set up
     // In BSP init, main.zig sets up GS before calling sched.init()
-    const gs_base = hal.syscall.getKernelGsBase();
+    const gs_base = hal.cpu.readMsr(hal.cpu.IA32_GS_BASE);
     const gs_data = @as(*hal.syscall.KernelGsData, @ptrFromInt(gs_base));
     gs_data.idle_thread = @intFromPtr(idle);
     gs_data.current_thread = 0; // No current thread yet
@@ -605,10 +605,10 @@ pub fn timerTick(frame: *hal.idt.InterruptFrame) *hal.idt.InterruptFrame {
         // Update TSS.rsp0 for the new thread's kernel stack
         gdt.setKernelStack(next.kernel_stack_top);
 
-        // Update kernel GS data for SYSCALL instruction
+        // Updata kernel GS data for SYSCALL instruction
         // The syscall entry stub reads %gs:0 to get kernel stack
         // Access GS data directly
-        const gs_base = hal.syscall.getKernelGsBase();
+        const gs_base = hal.cpu.readMsr(hal.cpu.IA32_GS_BASE);
         const gs_data = @as(*hal.syscall.KernelGsData, @ptrFromInt(gs_base));
         gs_data.kernel_stack = next.kernel_stack_top;
 

@@ -389,6 +389,11 @@ pub fn getKernelStack() u64 {
     return tss_instance.rsp0;
 }
 
+/// Get pointer to GDT for AP reload
+pub fn getGdtPtr() *const Gdt {
+    return &gdt;
+}
+
 /// Reload GDT and segment registers (for AP boot)
 /// Uses the already-initialized GDT from BSP
 pub fn reload() void {

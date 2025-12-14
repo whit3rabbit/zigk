@@ -295,8 +295,9 @@ export fn _start() noreturn {
 
     // Initialize SMP (bring up APs)
     // Must be done after APIC init
-    // TODO: SMP support is incomplete - assembly trampoline missing required symbols
-    // hal.smp.init();
+    console.info("About to call hal.smp.init()", .{});
+    hal.smp.init();
+    console.info("Returned from hal.smp.init()", .{});
 
     // Initialize keyboard driver and register with HAL
     keyboard.init();
@@ -351,7 +352,9 @@ export fn _start() noreturn {
     initVirtioGpu();
 
     // Load Init Process (httpd or shell) from modules
+    console.info("Main: Calling loadInitProcess()...", .{});
     loadInitProcess();
+    console.info("Main: loadInitProcess() returned.", .{});
 
     // Start the scheduler - this does not return
     // The boot thread becomes part of the idle loop
@@ -445,6 +448,8 @@ fn loadInitProcess() void {
     syscall_base.setCurrentProcess(proc);
     console.info("Created process pid={d} with FD table", .{proc.pid});
 
+    console.info("Init: Loading ELF...", .{});
+
     // Step 3: Get module data as slice for ELF loader
     const mod_data = @as([*]const u8, @ptrFromInt(mod.address))[0..mod.size];
 
@@ -461,6 +466,7 @@ fn loadInitProcess() void {
         load_result.entry_point,
     });
 
+    console.info("Init: Setting up user stack...", .{});
     // Step 5: Allocate and map user stack with arguments
     // We use the ELF helper to set up the stack according to x86_64 ABI
     // (argc, argv, envp, auxv)
@@ -495,6 +501,7 @@ fn loadInitProcess() void {
     };
 
     console.info("User stack created (rsp={x})", .{initial_rsp});
+    console.info("Init: Creating user thread...", .{});
 
     // Step 6: Create user thread with entry point from ELF header
     const user_thread = thread.createUserThread(load_result.entry_point, .{
@@ -545,6 +552,7 @@ fn loadInitProcess() void {
         user_thread.fs_base = fs_base;
     }
 
+    console.info("Init: Adding thread to scheduler...", .{});
     sched.addThread(user_thread);
     console.info("Init process started (pid={d}, tid={d})", .{ proc.pid, user_thread.tid });
 }
@@ -786,7 +794,7 @@ fn initNetwork() void {
     pci_devices = pci_res.devices;
 
     // Handle PCI Access Mechanism
-    var nic_driver_opt: ?*e1000e.Driver = null;
+    var nic_driver_opt: ?*e1000e.E1000e = null;
 
     switch (pci_res.access) {
         .ecam => |*ecam_ptr| {
@@ -794,9 +802,9 @@ fn initNetwork() void {
              pci_ecam = ecam_ptr.*;
 
              // 3. Initialize E1000e (requires ECAM)
-             nic_driver_opt = e1000e.initFromPci(pci_res.devices, ecam_ptr) catch |err| {
+             nic_driver_opt = e1000e.initFromPci(pci_res.devices, ecam_ptr) catch |err| blk: {
                 console.warn("E1000e init failed (no supported NIC?): {}", .{err});
-                null
+                break :blk null;
              };
         },
         .legacy => {
@@ -1101,13 +1109,20 @@ fn initApic() void {
     const rsdp_ptr: *align(1) const acpi.Rsdp = @ptrFromInt(rsdp_response.address);
 
     // Parse MADT to get APIC topology
-    const madt_info = acpi.parseMadt(rsdp_ptr) orelse {
-        console.warn("MADT not found, using legacy PIC mode", .{});
-        hal.apic.setLegacyPicMode(); // Explicitly set interrupt mode for proper EOI handling
-        return;
+    // MUST be static - ApicInitInfo stores slices that reference this data
+    const madt_info = blk: {
+        const static = struct {
+            var info: acpi.MadtInfo = undefined;
+        };
+        static.info = acpi.parseMadt(rsdp_ptr) orelse {
+            console.warn("MADT not found, using legacy PIC mode", .{});
+            hal.apic.setLegacyPicMode();
+            return;
+        };
+        break :blk &static.info;
     };
 
-    acpi.logMadtInfo(&madt_info);
+    acpi.logMadtInfo(madt_info);
 
     // Convert MADT info to APIC init info
     // We need to convert the ioapic array to the local IoApicInfo type

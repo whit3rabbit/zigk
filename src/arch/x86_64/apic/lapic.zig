@@ -159,7 +159,7 @@ pub const DeliveryMode = enum(u3) {
     _reserved2 = 3,
     nmi = 4,
     init = 5,
-    _reserved3 = 6,
+    startup = 6,
     ext_int = 7,
 };
 
@@ -526,7 +526,7 @@ pub fn sendInitIpi(dest_apic_id: u32) void {
 /// Send SIPI (Startup IPI) to a processor
 /// vector: Page number of startup code (real mode address / 4096)
 pub fn sendStartupIpi(dest_apic_id: u32, vector: u8) void {
-    sendIpi(dest_apic_id, vector, .fixed, .none);
+    sendIpi(dest_apic_id, vector, .startup, .none);
 }
 
 /// Configure LINT0/LINT1 pins

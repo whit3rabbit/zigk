@@ -86,6 +86,12 @@ Offset  Size    Type    Description
 0x38    8       ptr     EDID Pointer
 ```
 
+### GS Base Register
+The first context switch to user mode (via `isr_common` IRETQ) does SWAPGS, which swaps the values. So you must set GS_BASE initially so it ends up in KERNEL_GS_BASE after that first swap.
+
+**Critical Note for SMP/Scheduler:**
+When accessing per-CPU data *inside* the kernel (e.g., during scheduler initialization or timer ticks before returning to user), you must read `IA32_GS_BASE`, not `IA32_KERNEL_GS_BASE`. Even though you intend to access the "kernel" GS, if no SWAPGS has occurred (because we are already in kernel mode), the active base is still in the `IA32_GS_BASE` register. Reading `IA32_KERNEL_GS_BASE` will return 0 (or user base), leading to null pointer panics.
+
 ## 3. Hardware Structures (x86_64)
 
 These structures are defined by the CPU architecture and must effectively use `packed` or `extern` alignment.
@@ -237,3 +243,14 @@ Zscapek implements a subset of the Linux ABI.
 
 ### KASLR
 Limine supports KASLR. The kernel is position-independent (PIE) but linked to high memory. The physical load address may vary, but virtual addresses are fixed by the linker script to `0xffffffff80000000`.
+
+## 7. SMP Implementation Notes
+
+### AP Trampoline
+Application Processors (APs) start in Real Mode (16-bit). The kernel must:
+1.  Copy a trampoline blob to low memory (e.g., `< 1MB`).
+2.  Send SIPI (Startup IPI) to the AP to jump to that physical address.
+3.  The trampoline transitions the AP to Protected Mode (32-bit) and then Long Mode (64-bit).
+
+**Critical Requirement - NXE Bit:**
+When enabling Long Mode in the trampoline (`EFER` MSR), the **NXE (No-Execute Enable)** bit (bit 11) MUST be set if the kernel page tables use the NX bit. Failure to set this will cause the AP to #PF (Page Fault) immediately upon enabling paging, as it encounters "reserved bits" (the NX bit) in the page tables that it doesn't think are valid.

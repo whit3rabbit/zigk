@@ -21,20 +21,13 @@ The DOOM WAD file contains all game data (levels, sprites, sounds). The sharewar
 Download from the DOOM_wads repository:
 
 ```bash
-# Clone the repository
-git clone https://github.com/Akbar30Bill/DOOM_wads.git
-
-# Copy the shareware WAD to initrd_contents
-cp DOOM_wads/DOOM1.WAD initrd_contents/doom1.wad
+wget https://github.com/Akbar30Bill/DOOM_wads/raw/refs/heads/master/doom.wad -O initrd_contents/doom1.wad
 ```
-
-Direct download link:
-https://github.com/Akbar30Bill/DOOM_wads/raw/master/DOOM1.WAD
 
 ### Option 2: Manual Download
 
 1. Visit https://github.com/Akbar30Bill/DOOM_wads
-2. Download `DOOM1.WAD`
+2. Download `DOOM.WAD`
 3. Place it in the `initrd_contents/` directory as `doom1.wad` (lowercase)
 
 ## Building the ISO

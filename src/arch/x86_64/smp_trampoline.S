@@ -30,7 +30,7 @@ smp_trampoline_start:
     // Load GDT
     // We need to patch the GDTR limit and base address here
     // Use CS override to ensure we read from trampoline
-    lgdtl %cs:(trampoline_gdt_ptr - smp_trampoline_start)
+    lgdtl %cs:(smp_trampoline_gdt_ptr - smp_trampoline_start)
 
     // Enable Protected Mode
     mov %cr0, %eax
@@ -99,6 +99,7 @@ smp_trampoline_cr3_imm:
     mov $0xC0000080, %ecx
     rdmsr
     or $(1 << 8), %eax
+    or $(1 << 11), %eax  // Enable NXE (No-Execute)
     wrmsr
 
     // Enable Paging (and Long Mode activation)
@@ -139,6 +140,12 @@ trampoline_long_mode:
 smp_trampoline_rsp_imm:
     .quad 0 // Patched with Stack Top
 
+    // Load AP GDT address into R15 (callee-saved, will be available in apEntry)
+    // `movabs $imm64, %r15` -> 49 BF imm64
+    .byte 0x49, 0xBF
+smp_trampoline_ap_gdt_imm:
+    .quad 0 // Patched with AP GDT virtual address
+
     // Jump to High-Half Kernel Entry Point
     // `movabs $imm64, %rax`; `jmp *%rax`
     .byte 0x48, 0xB8
@@ -147,7 +154,7 @@ smp_trampoline_entry_imm:
     jmp *%rax
 
 .align 4
-trampoline_gdt_ptr:
+smp_trampoline_gdt_ptr:
     .word 0 // Limit (patched)
     .long 0 // Base (patched)
 
@@ -178,6 +185,7 @@ smp_trampoline_gdt_end:
 .global smp_trampoline_cr3_imm
 .global smp_trampoline_rsp_imm
 .global smp_trampoline_entry_imm
+.global smp_trampoline_ap_gdt_imm
 // gdt_ptr is still needed for lgdtl
 .global smp_trampoline_gdt_ptr
 

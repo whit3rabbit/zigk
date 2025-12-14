@@ -235,8 +235,10 @@ pub fn initFromLimine(memmap: *const limine.MemoryMapResponse) !void {
         }
     }.reserve;
 
-    // Reserve first 1MB (legacy)
-    reserveRange(0, 0x100000 / PAGE_SIZE);
+    // Reserve page 0 (IVT/BDA on legacy BIOS, null page on UEFI)
+    // Don't reserve entire first 1MB - SMP trampoline needs low memory
+    // Limine's memory map already tells us what's actually usable
+    reserveRange(0, 1);
 
     // Reserve metadata pages (Bitmap + Refcounts)
     const metadata_pages = paging.pagesToCover(total_metadata);

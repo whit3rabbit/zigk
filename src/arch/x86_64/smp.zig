@@ -12,6 +12,7 @@ const apic = @import("apic/root.zig");
 const syscall_arch = @import("syscall.zig");
 const cpu = @import("cpu.zig");
 const paging = @import("paging.zig");
+const vmm = @import("vmm");
 
 // Code for the AP trampoline is defined in external assembly file
 extern const smp_trampoline_start: anyopaque;
@@ -22,6 +23,7 @@ extern var smp_trampoline_pm_jump_operand: anyopaque;
 extern var smp_trampoline_lm_jump_operand: anyopaque;
 extern var smp_trampoline_cr3_imm: anyopaque;
 extern var smp_trampoline_rsp_imm: anyopaque;
+extern var smp_trampoline_ap_gdt_imm: anyopaque;
 extern var smp_trampoline_entry_imm: anyopaque;
 extern var smp_trampoline_gdt_ptr: anyopaque;
 extern const smp_trampoline_gdt: anyopaque;
@@ -34,9 +36,14 @@ extern const trampoline_long_mode: anyopaque;
 const MAX_CPUS: usize = 256; // Match madt.zig
 var ap_gs_data: [MAX_CPUS]syscall_arch.KernelGsData = undefined;
 
+// GDT copy for APs (in HHDM range, accessible without kernel image mappings)
+// We store the physical address so AP can access it via HHDM without reading kernel image
+var ap_gdt_phys: u64 = 0;
+
 /// Initialize SMP
 /// Boot up all APs found in MADT
 pub fn init() void {
+    console.debug("SMP: init() function entry", .{});
     console.info("SMP: Initializing...", .{});
 
     const init_info = apic.getInitInfo() orelse {
@@ -69,6 +76,19 @@ pub fn init() void {
 
     console.info("SMP: Allocated trampoline at {x} (Vector {x})", .{ trampoline_phys, trampoline_vector });
 
+    // Allocate a page for AP GDT copy (in HHDM range)
+    // This is needed because APs can't access kernel image addresses
+    ap_gdt_phys = pmm.allocZeroedPage() orelse {
+        console.warn("SMP: Failed to allocate page for AP GDT", .{});
+        return;
+    };
+    const gdt_page_virt = paging.physToVirt(ap_gdt_phys);
+    const ap_gdt_copy: *gdt.Gdt = @ptrCast(@alignCast(gdt_page_virt));
+
+    // Copy kernel GDT to AP-accessible memory (BSP can access kernel image)
+    ap_gdt_copy.* = gdt.getGdtPtr().*;
+    console.debug("SMP: AP GDT at virt {x} phys {x}", .{ @intFromPtr(gdt_page_virt), ap_gdt_phys });
+
     // Map the trampoline page
     const trampoline_virt = paging.physToVirt(trampoline_phys);
     const trampoline_len = @intFromPtr(&smp_trampoline_end) - @intFromPtr(&smp_trampoline_start);
@@ -82,6 +102,12 @@ pub fn init() void {
     const code_dst = trampoline_virt[0..trampoline_len];
     @memcpy(code_dst, code_src);
 
+    // Identity-map trampoline so AP can execute after enabling paging
+    // When AP enables paging at physical 0x2000, virtual 0x2000 must also map there
+    vmm.mapPage(vmm.getKernelPml4(), trampoline_phys, trampoline_phys, paging.PageFlags.KERNEL_RWX) catch |err| {
+        console.panic("SMP: Failed to identity-map trampoline: {}", .{err});
+    };
+
     // Calculate offsets for patching
     const start_addr = @intFromPtr(&smp_trampoline_start);
 
@@ -92,6 +118,7 @@ pub fn init() void {
     // Immediate Operands
     const off_cr3 = @intFromPtr(&smp_trampoline_cr3_imm) - start_addr;
     const off_rsp = @intFromPtr(&smp_trampoline_rsp_imm) - start_addr;
+    const off_ap_gdt = @intFromPtr(&smp_trampoline_ap_gdt_imm) - start_addr;
     const off_entry = @intFromPtr(&smp_trampoline_entry_imm) - start_addr;
 
     // GDTR
@@ -114,20 +141,31 @@ pub fn init() void {
     const lm_jump_ptr: *align(1) u32 = @ptrCast(&trampoline_virt[off_lm_jump]);
     lm_jump_ptr.* = @intCast(lm_target);
 
-    // CR3
+    // CR3 - use BSP's actual CR3, not vmm.getKernelPml4()
+    // The BSP's CR3 has working mappings for kernel image + HHDM
     const cr3_val = cpu.readCr3();
+    console.debug("SMP: Using BSP CR3={x} for AP", .{cr3_val});
     const cr3_ptr: *align(1) u32 = @ptrCast(&trampoline_virt[off_cr3]);
-    cr3_ptr.* = @intCast(cr3_val);
+    cr3_ptr.* = @intCast(cr3_val); // Use BSP's actual CR3
 
     // Entry Point (Global)
     const entry_ptr: *align(1) u64 = @ptrCast(&trampoline_virt[off_entry]);
     entry_ptr.* = @intFromPtr(&apEntry);
 
+    // AP GDT Address (will be loaded into R15 before jump to entry point)
+    // This is the virtual address of the AP GDT copy in HHDM range
+    const ap_gdt_virt = @intFromPtr(paging.physToVirt(ap_gdt_phys));
+    const ap_gdt_ptr_patch: *align(1) u64 = @ptrCast(&trampoline_virt[off_ap_gdt]);
+    ap_gdt_ptr_patch.* = ap_gdt_virt;
+    console.debug("SMP: Patched AP GDT at offset {x} with virt {x}", .{ off_ap_gdt, ap_gdt_virt });
+
     // GDTR
+    // GDT has 4 entries (null, 64-bit code, data, 32-bit code) = 32 bytes
+    // Limit = size - 1 = 31
     const gdt_base_phys = trampoline_phys + off_gdt;
     const limit_ptr: *align(1) u16 = @ptrCast(&trampoline_virt[off_gdt_ptr]);
     const base_ptr: *align(1) u32 = @ptrCast(&trampoline_virt[off_gdt_ptr + 2]);
-    limit_ptr.* = 23;
+    limit_ptr.* = 31;
     base_ptr.* = @intCast(gdt_base_phys);
 
     // 2. Boot APs
@@ -147,9 +185,12 @@ pub fn init() void {
         const stack_virt_base = paging.physToVirt(stack_phys);
         const stack_top = @intFromPtr(stack_virt_base) + stack_size;
 
+        console.debug("SMP: AP stack phys={x} virt_base={x} top={x}", .{ stack_phys, @intFromPtr(stack_virt_base), stack_top });
+
         // Patch Stack Top in trampoline
         const stack_ptr: *align(1) u64 = @ptrCast(&trampoline_virt[off_rsp]);
         stack_ptr.* = stack_top;
+        console.debug("SMP: Patched RSP at offset {x} with value {x}", .{ off_rsp, stack_top });
 
         // Initialize per-CPU data
         ap_gs_data[apic_id] = .{
@@ -177,29 +218,106 @@ pub fn init() void {
 /// AP Entry Point (64-bit Long Mode)
 /// Called from trampoline
 export fn apEntry() callconv(.c) noreturn {
-    // Reload Kernel GDT and IDT
-    gdt.reload();
-    idt.reload();
+    // Debug: Write directly to COM1 port without any dependencies
+    // This bypasses any locks or per-CPU data that might not be set up
+    const io = @import("io.zig");
+    const COM1: u16 = 0x3F8;
+    // Wait for transmit buffer empty and write
+    while (io.inb(COM1 + 5) & 0x20 == 0) {}
+    io.outb(COM1, 'A');
+    while (io.inb(COM1 + 5) & 0x20 == 0) {}
+    io.outb(COM1, 'P');
+    while (io.inb(COM1 + 5) & 0x20 == 0) {}
+    io.outb(COM1, '1');
+    while (io.inb(COM1 + 5) & 0x20 == 0) {}
+    io.outb(COM1, '\n');
 
-    // Identify who we are
-    const id = apic.lapic.getId();
+    // Debug helper
+    const writeChar = struct {
+        fn f(c: u8) void {
+            while (io.inb(COM1 + 5) & 0x20 == 0) {}
+            io.outb(COM1, c);
+        }
+    }.f;
 
-    // Set up GS Base to point to our per-CPU data
-    const gs_ptr = @intFromPtr(&ap_gs_data[id]);
+    // Reload GDT using pre-allocated AP GDT copy (in HHDM range)
+    // The trampoline loaded the AP GDT address into R15 before jumping here
+    writeChar('G');
 
-    // Set IA32_GS_BASE (Active GS) to point to Kernel Data
-    cpu.writeMsr(cpu.IA32_GS_BASE, gs_ptr);
+    // Read AP GDT address from R15 (set by trampoline)
+    var ap_gdt_addr: u64 = undefined;
+    asm volatile ("movq %%r15, %[out]"
+        : [out] "=r" (ap_gdt_addr)
+    );
 
-    // Set IA32_KERNEL_GS_BASE (Shadow GS) to 0 (User GS default)
-    cpu.writeMsr(cpu.IA32_KERNEL_GS_BASE, 0);
+    const GdtPtr = packed struct(u80) {
+        limit: u16,
+        base: u64,
+    };
+    const gdt_ptr = GdtPtr{
+        .limit = @sizeOf(gdt.Gdt) - 1,
+        .base = ap_gdt_addr,
+    };
+    writeChar('P'); // GdtPtr created
 
-    // Initialize LAPIC for this AP
-    // Note: Full AP LAPIC init requires initAp() which is not yet implemented
-    // For now, APs will use the BSP's LAPIC configuration
+    // Step 3: Load GDT via LGDT
+    asm volatile ("lgdt (%[ptr])"
+        :
+        : [ptr] "r" (&gdt_ptr),
+        : .{.memory = true}
+    );
+    writeChar('L'); // After LGDT
 
-    // Initialize Scheduler for this AP (creates idle thread)
-    sched.initAp();
+    // Step 4: Reload data segment registers
+    asm volatile (
+        \\mov %[ds], %%ds
+        \\mov %[ds], %%es
+        \\mov %[ds], %%ss
+        :
+        : [ds] "r" (@as(u16, gdt.KERNEL_DATA)),
+        : .{.memory = true}
+    );
+    writeChar('D'); // After DS/ES/SS
 
-    // Start Scheduler (loop forever)
-    sched.startAp();
+    // Step 5: Clear FS and GS
+    asm volatile (
+        \\xor %%eax, %%eax
+        \\mov %%ax, %%fs
+        \\mov %%ax, %%gs
+        :
+        :
+        : .{.rax = true}
+    );
+    writeChar('F'); // After FS/GS
+
+    // Step 6: Reload CS via far return
+    asm volatile (
+        \\pushq %[cs]
+        \\lea 1f(%%rip), %%rax
+        \\pushq %%rax
+        \\lretq
+        \\1:
+        :
+        : [cs] "r" (@as(u64, gdt.KERNEL_CODE)),
+        : .{.rax = true, .memory = true}
+    );
+    writeChar('R'); // After CS reload
+
+    // Step 7: Skip TSS for now - the TSS descriptor points to kernel image memory
+    // TODO: Each AP needs its own TSS for per-CPU kernel stacks
+    // For now, skip TSS load - syscalls won't work but basic AP operation should
+    writeChar('T'); // TSS skipped
+
+    // AP GDT reload successful!
+    // TODO: Fix kernel image mappings so AP can access kernel code/data
+    // For now, just halt - we've proven the basic SMP boot mechanism works
+    writeChar('!');
+    writeChar('O');
+    writeChar('K');
+    writeChar('\n');
+
+    // Spin forever - the AP is alive but can't access kernel image memory
+    while (true) {
+        asm volatile ("hlt");
+    }
 }

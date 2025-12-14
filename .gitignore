@@ -59,3 +59,7 @@ tools/zig_index.json
 tools/zig.tar.xz
 tools/zig/
 tools/zig
+
+# DOOM
+initrd_contents/doom1.wad
+
