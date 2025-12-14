@@ -36,7 +36,7 @@ pub const SYS_CLOSE: usize = 3;
 /// (path, statbuf) -> int
 pub const SYS_STAT: usize = 4;
 
-/// Get file status
+/// Get file status by fd
 /// (fd, statbuf) -> int
 pub const SYS_FSTAT: usize = 5;
 
@@ -44,14 +44,14 @@ pub const SYS_FSTAT: usize = 5;
 /// (path, statbuf) -> int
 pub const SYS_LSTAT: usize = 6;
 
+/// Wait for some event on a set of file descriptors
+/// (ufds, nfds, timeout) -> int
+pub const SYS_POLL: usize = 7;
+
 /// Reposition read/write file offset
 /// (fd, offset, whence) -> off_t
 /// whence: 0=SEEK_SET, 1=SEEK_CUR, 2=SEEK_END
 pub const SYS_LSEEK: usize = 8;
-
-/// Wait for some event on a set of file descriptors
-/// (ufds, nfds, timeout) -> int
-pub const SYS_POLL: usize = 7;
 
 /// Map memory pages
 /// (addr, len, prot, flags, fd, off) -> addr
@@ -69,21 +69,45 @@ pub const SYS_MUNMAP: usize = 11;
 /// (brk) -> addr
 pub const SYS_BRK: usize = 12;
 
+/// Examine and change signal actions
+/// (sig, act, oldact, sigsetsize) -> int
+pub const SYS_RT_SIGACTION: usize = 13;
+
+/// Examine and change blocked signals
+/// (how, set, oldset, sigsetsize) -> int
+pub const SYS_RT_SIGPROCMASK: usize = 14;
+
+/// Return from signal handler
+/// () -> noreturn
+pub const SYS_RT_SIGRETURN: usize = 15;
+
 /// Perform device-specific control operations
 /// (fd, cmd, arg) -> int
 pub const SYS_IOCTL: usize = 16;
+
+/// Read from file at offset
+/// (fd, buf, count, offset) -> ssize_t
+pub const SYS_PREAD64: usize = 17;
+
+/// Write to file at offset
+/// (fd, buf, count, offset) -> ssize_t
+pub const SYS_PWRITE64: usize = 18;
+
+/// Read data into multiple buffers
+/// (fd, iov, iovcnt) -> ssize_t
+pub const SYS_READV: usize = 19;
 
 /// Write data from multiple buffers
 /// (fd, iov, iovcnt) -> ssize_t
 pub const SYS_WRITEV: usize = 20;
 
+/// Check user's permissions for a file
+/// (pathname, mode) -> int
+pub const SYS_ACCESS: usize = 21;
+
 /// Create a pipe
 /// (pipefd) -> int
 pub const SYS_PIPE: usize = 22;
-
-/// Examine and change blocked signals
-/// (how, set, oldset, sigsetsize) -> int
-pub const SYS_RT_SIGPROCMASK: usize = 14;
 
 /// Examine multiple file descriptors
 /// (nfds, readfds, writefds, exceptfds, timeout) -> int
@@ -97,7 +121,7 @@ pub const SYS_SCHED_YIELD: usize = 24;
 /// (oldfd) -> newfd
 pub const SYS_DUP: usize = 32;
 
-/// Duplicate a file descriptor
+/// Duplicate a file descriptor to specific number
 /// (oldfd, newfd) -> int
 pub const SYS_DUP2: usize = 33;
 
@@ -166,6 +190,10 @@ pub const SYS_SETSOCKOPT: usize = 54;
 /// (fd, level, optname, optval, optlen) -> int
 pub const SYS_GETSOCKOPT: usize = 55;
 
+/// Create a child process with specified flags
+/// (flags, stack, parent_tid, child_tid, tls) -> pid_t
+pub const SYS_CLONE: usize = 56;
+
 /// Create a child process
 /// () -> pid_t
 pub const SYS_FORK: usize = 57;
@@ -190,6 +218,22 @@ pub const SYS_UNAME: usize = 63;
 /// (fd, cmd, arg) -> int
 pub const SYS_FCNTL: usize = 72;
 
+/// Synchronize file's in-core state with storage
+/// (fd) -> int
+pub const SYS_FSYNC: usize = 74;
+
+/// Synchronize file data (not metadata)
+/// (fd) -> int
+pub const SYS_FDATASYNC: usize = 75;
+
+/// Truncate a file to specified length
+/// (path, length) -> int
+pub const SYS_TRUNCATE: usize = 76;
+
+/// Truncate file by fd to specified length
+/// (fd, length) -> int
+pub const SYS_FTRUNCATE: usize = 77;
+
 /// Get directory entries
 /// (fd, dirp, count) -> int
 pub const SYS_GETDENTS: usize = 78;
@@ -202,9 +246,73 @@ pub const SYS_GETCWD: usize = 79;
 /// (path) -> int
 pub const SYS_CHDIR: usize = 80;
 
+/// Change working directory by fd
+/// (fd) -> int
+pub const SYS_FCHDIR: usize = 81;
+
+/// Rename a file
+/// (oldpath, newpath) -> int
+pub const SYS_RENAME: usize = 82;
+
 /// Create a directory
 /// (path, mode) -> int
 pub const SYS_MKDIR: usize = 83;
+
+/// Remove a directory
+/// (path) -> int
+pub const SYS_RMDIR: usize = 84;
+
+/// Create a file (legacy, use open with O_CREAT)
+/// (path, mode) -> fd
+pub const SYS_CREAT: usize = 85;
+
+/// Create a hard link
+/// (oldpath, newpath) -> int
+pub const SYS_LINK: usize = 86;
+
+/// Delete a file
+/// (path) -> int
+pub const SYS_UNLINK: usize = 87;
+
+/// Create a symbolic link
+/// (target, linkpath) -> int
+pub const SYS_SYMLINK: usize = 88;
+
+/// Read value of symbolic link
+/// (path, buf, bufsize) -> ssize_t
+pub const SYS_READLINK: usize = 89;
+
+/// Change file mode
+/// (path, mode) -> int
+pub const SYS_CHMOD: usize = 90;
+
+/// Change file mode by fd
+/// (fd, mode) -> int
+pub const SYS_FCHMOD: usize = 91;
+
+/// Change file owner
+/// (path, uid, gid) -> int
+pub const SYS_CHOWN: usize = 92;
+
+/// Change file owner by fd
+/// (fd, uid, gid) -> int
+pub const SYS_FCHOWN: usize = 93;
+
+/// Change symlink owner (don't follow)
+/// (path, uid, gid) -> int
+pub const SYS_LCHOWN: usize = 94;
+
+/// Set file creation mask
+/// (mask) -> mode_t
+pub const SYS_UMASK: usize = 95;
+
+/// Get time of day (legacy)
+/// (tv, tz) -> int
+pub const SYS_GETTIMEOFDAY: usize = 96;
+
+/// Get resource limits
+/// (resource, rlim) -> int
+pub const SYS_GETRLIMIT: usize = 97;
 
 /// Get user ID
 /// () -> uid_t
@@ -214,6 +322,22 @@ pub const SYS_GETUID: usize = 102;
 /// () -> gid_t
 pub const SYS_GETGID: usize = 104;
 
+/// Set user ID
+/// (uid) -> int
+pub const SYS_SETUID: usize = 105;
+
+/// Set group ID
+/// (gid) -> int
+pub const SYS_SETGID: usize = 106;
+
+/// Get effective user ID
+/// () -> uid_t
+pub const SYS_GETEUID: usize = 107;
+
+/// Get effective group ID
+/// () -> gid_t
+pub const SYS_GETEGID: usize = 108;
+
 /// Get parent process ID
 /// () -> pid_t
 pub const SYS_GETPPID: usize = 110;
@@ -221,6 +345,10 @@ pub const SYS_GETPPID: usize = 110;
 /// Set architecture-specific thread state
 /// (code, addr) -> int
 pub const SYS_ARCH_PRCTL: usize = 158;
+
+/// Set resource limits
+/// (resource, rlim) -> int
+pub const SYS_SETRLIMIT: usize = 160;
 
 /// Set host name
 /// (name, len) -> int
@@ -230,9 +358,9 @@ pub const SYS_SETHOSTNAME: usize = 170;
 /// (name, len) -> int
 pub const SYS_SETDOMAINNAME: usize = 171;
 
-/// Get time from a clock
-/// (clk_id, tp) -> int
-pub const SYS_CLOCK_GETTIME: usize = 228;
+/// Fast userspace locking
+/// (uaddr, op, val, timeout, uaddr2, val3) -> int
+pub const SYS_FUTEX: usize = 202;
 
 /// Get directory entries (64-bit)
 /// (fd, dirp, count) -> int
@@ -241,6 +369,14 @@ pub const SYS_GETDENTS64: usize = 217;
 /// Set pointer to thread ID
 /// (tidptr) -> pid_t
 pub const SYS_SET_TID_ADDRESS: usize = 218;
+
+/// Get time from a clock
+/// (clk_id, tp) -> int
+pub const SYS_CLOCK_GETTIME: usize = 228;
+
+/// Get clock resolution
+/// (clk_id, res) -> int
+pub const SYS_CLOCK_GETRES: usize = 229;
 
 /// Exit all threads in process
 /// (code) -> noreturn
@@ -261,6 +397,14 @@ pub const SYS_OPENAT: usize = 257;
 /// Create an epoll instance
 /// (flags) -> int
 pub const SYS_EPOLL_CREATE1: usize = 291;
+
+/// Duplicate FD with flags
+/// (oldfd, newfd, flags) -> int
+pub const SYS_DUP3: usize = 292;
+
+/// Create pipe with flags
+/// (pipefd, flags) -> int
+pub const SYS_PIPE2: usize = 293;
 
 /// Get random bytes
 /// (buf, count, flags) -> ssize_t
@@ -293,3 +437,23 @@ pub const SYS_GETCHAR: usize = 1004;
 /// Write character to console
 /// (c: u8) -> i32
 pub const SYS_PUTCHAR: usize = 1005;
+
+// =============================================================================
+// Input/Mouse Syscalls (1010-1019)
+// =============================================================================
+
+/// Read next input event (non-blocking)
+/// (event_ptr) -> i32 (0 = success, -EAGAIN = no event)
+pub const SYS_READ_INPUT_EVENT: usize = 1010;
+
+/// Get current cursor position
+/// (position_ptr) -> i32 (0 = success)
+pub const SYS_GET_CURSOR_POSITION: usize = 1011;
+
+/// Set cursor bounds (screen dimensions)
+/// (bounds_ptr) -> i32 (0 = success)
+pub const SYS_SET_CURSOR_BOUNDS: usize = 1012;
+
+/// Set input mode (relative/absolute/raw)
+/// (mode) -> i32 (0 = success)
+pub const SYS_SET_INPUT_MODE: usize = 1013;

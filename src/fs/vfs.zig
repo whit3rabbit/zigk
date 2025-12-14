@@ -64,8 +64,9 @@ pub const Vfs = struct {
 
     /// Mount a filesystem at a given path
     pub fn mount(path: []const u8, fs: FileSystem) Error!void {
+        @import("console").info("VFS: Mount '{s}'", .{path});
         if (mount_count >= MAX_MOUNTS) return error.MountPointFull;
-
+        // ... (rest of logic) ...
         // Check if already mounted
         for (mounts) |m| {
             if (m) |mount_point| {
@@ -86,6 +87,7 @@ pub const Vfs = struct {
                     .fs = fs,
                 };
                 mount_count += 1;
+                @import("console").info("VFS: Mounted '{s}' at slot {d}", .{path, i});
                 return;
             }
         }
@@ -112,6 +114,7 @@ pub const Vfs = struct {
     /// Open a file by path
     /// Resolves the mount point and delegates to the filesystem.
     pub fn open(path: []const u8, flags: u32) Error!*fd.FileDescriptor {
+        @import("console").info("VFS: Open '{s}'", .{path});
         if (path.len == 0) return error.InvalidPath;
         if (path[0] != '/') return error.InvalidPath; // Absolute paths only for now
 
@@ -121,6 +124,7 @@ pub const Vfs = struct {
 
         for (&mounts) |*m| {
             if (m.*) |*mount_point| {
+                // @import("console").debug("VFS: Check mount '{s}' vs '{s}'", .{mount_point.path, path});
                 if (std.mem.startsWith(u8, path, mount_point.path)) {
                     const mp_len = mount_point.path.len;
 

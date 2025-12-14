@@ -26,6 +26,7 @@ const execution = @import("execution.zig");
 const custom = @import("custom.zig");
 const net = @import("net.zig");
 const random = @import("random.zig");
+const input_handlers = @import("input.zig");
 
 /// Syscall frame from arch-specific entry
 pub const SyscallFrame = hal.syscall.SyscallFrame;
@@ -71,6 +72,8 @@ pub export fn dispatch_syscall(frame: *SyscallFrame) callconv(.c) void {
                         mod = custom;
                     } else if (@hasDecl(random, name)) {
                         mod = random;
+                    } else if (@hasDecl(input_handlers, name)) {
+                        mod = input_handlers;
                     }
 
                     if (mod) |m| {
@@ -146,6 +149,7 @@ pub export fn dispatch_syscall(frame: *SyscallFrame) callconv(.c) void {
 /// Automatically maps frame pointer and register arguments
 /// Supports both legacy handlers (returning isize) and new error union handlers (returning SyscallError!usize)
 inline fn callHandler(comptime func: anytype, frame: *SyscallFrame, args: [6]usize) isize {
+    @setEvalBranchQuota(20000);
     const FuncType = @TypeOf(func);
     const type_info = @typeInfo(FuncType);
 

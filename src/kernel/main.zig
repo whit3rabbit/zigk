@@ -22,6 +22,7 @@ const heap = @import("heap");
 const kernel_stack = @import("kernel_stack");
 const keyboard = @import("keyboard");
 const mouse = @import("mouse");
+const input = @import("input");
 const sched = @import("sched");
 const thread = @import("thread");
 const stack_guard = @import("stack_guard");
@@ -270,11 +271,11 @@ export fn _start() noreturn {
         initInitRD(mods);
     }
 
-    // Initialize VFS and mount filesystems
-    initVfs();
-
     // Initialize memory management subsystems
     initMemoryManagement();
+
+    // Initialize VFS and mount filesystems (requires heap)
+    initVfs();
 
     // Initialize entropy subsystem (RDRAND/RDTSC detection)
     // Must be done before PRNG which depends on hardware entropy
@@ -302,6 +303,10 @@ export fn _start() noreturn {
     // Initialize keyboard driver and register with HAL
     keyboard.init();
     hal.interrupts.setKeyboardHandler(&keyboard.handleIrq);
+
+    // Initialize input subsystem (must be before mouse driver)
+    input.init();
+    console.info("Input subsystem initialized", .{});
 
     // Initialize mouse driver and register with HAL
     mouse.init();
@@ -425,6 +430,20 @@ fn loadInitProcess() void {
         }
     }
 
+    // Priority 3: Doom
+    if (selected_mod == null) {
+        for (mods) |mod| {
+            const cmdline = get_str(mod.cmdline);
+            const path = get_str(mod.path);
+            
+            if (std.mem.indexOf(u8, cmdline, "doom") != null or std.mem.indexOf(u8, path, "doom") != null) {
+                selected_mod = mod;
+                process_name = "doom";
+                break;
+            }
+        }
+    }
+
     // Fallback: If only one module exists, use it regardless of name
     if (selected_mod == null and mods.len == 1) {
         selected_mod = mods[0];
@@ -437,6 +456,27 @@ fn loadInitProcess() void {
     };
 
     console.info("Found init module: {s} ({d} bytes)", .{ process_name, mod.size });
+
+    // Debug: List VFS root
+    {
+        // Try to open root to verify filesystem is up
+        if (fs.vfs.Vfs.open("/", 0)) |root| {
+             if (root.ops.close) |close_fn| {
+                 _ = close_fn(root);
+             }
+        } else |err| {
+            console.err("Failed to open root /: {}", .{err});
+        }
+    }
+    
+    // Debug: Check for WAD
+    // Mode 0 = O_RDONLY
+    if (fs.vfs.Vfs.open("/doom1.wad", 0)) |f| {
+        console.info("KERNEL: Successfully opened /doom1.wad", .{});
+        if (f.ops.close) |c| _ = c(f);
+    } else |err| {
+        console.warn("KERNEL: Failed to open /doom1.wad: {}", .{err});
+    }
 
     // Step 1: Create Process with FD table (stdin/stdout/stderr pre-opened by devfs)
     const proc = process_mod.createProcess(null) catch |err| {
@@ -466,15 +506,53 @@ fn loadInitProcess() void {
         load_result.entry_point,
     });
 
+    // Initialize heap boundaries
+    const heap_start = std.mem.alignForward(u64, load_result.end_addr, pmm.PAGE_SIZE);
+    proc.heap_start = heap_start;
+    proc.heap_break = heap_start;
+    console.info("Init: Heap initialized at {x}", .{heap_start});
+
     console.info("Init: Setting up user stack...", .{});
     // Step 5: Allocate and map user stack with arguments
     // We use the ELF helper to set up the stack according to x86_64 ABI
     // (argc, argv, envp, auxv)
     const stack_virt_top: u64 = 0xF0000000;
-    const stack_size: usize = 32 * 1024; // 32KB stack
+    const stack_size: usize = 1024 * 1024; // 1MB stack
 
-    const argv = [_][]const u8{process_name};
+    // Parse arguments from module command line
+    var argv_buf: [16][]const u8 = undefined;
+    var argv_count: usize = 0;
+
+    if (@intFromPtr(mod.cmdline) != 0) {
+        const cmd_slice = std.mem.span(mod.cmdline);
+        console.debug("Init: Raw Cmdline: '{s}'", .{cmd_slice});
+        var it = std.mem.tokenizeAny(u8, cmd_slice, " ");
+        while (it.next()) |arg| {
+            if (argv_count >= 16) break;
+            argv_buf[argv_count] = arg;
+            argv_count += 1;
+        }
+    }
+
+    if (argv_count == 0) {
+        argv_buf[0] = process_name;
+        argv_count = 1;
+    }
+
+    // Workaround: If Limine truncates cmdline, manually add arguments for Doom
+    if (argv_count == 1 and std.mem.eql(u8, argv_buf[0], "doom")) {
+        console.warn("Init: Detecting Doom with no args, injecting defaults...", .{});
+        argv_buf[1] = "-iwad";
+        argv_buf[2] = "/doom1.wad";
+        argv_count = 3;
+    }
+    
+    const argv = argv_buf[0..argv_count];
     const envp = [_][]const u8{};
+
+    for (argv, 0..) |arg, i| {
+        console.debug("Init: Arg {d}: '{s}'", .{i, arg});
+    }
 
     // Auxiliary Vector (Required for static binaries to find PHDRs)
     const auxv = [_]elf.AuxEntry{
@@ -492,7 +570,7 @@ fn loadInitProcess() void {
         proc.cr3,
         stack_virt_top,
         stack_size,
-        &argv,
+        argv,
         &envp,
         &auxv,
     ) catch |err| {
@@ -729,9 +807,8 @@ fn handleCrash(vector: u8, err_code: u64) noreturn {
         else => 11, // Default to SIGSEGV
     };
 
-    if (config.debug_scheduler) {
-        console.warn("Process crashed! Vector={d} Code={x} Signal={d}", .{ vector, err_code, signal });
-    }
+    // Always log crashes
+    console.warn("Process crashed! Vector={d} Code={x} Signal={d}", .{ vector, err_code, signal });
 
     // Terminate the process with signal status
     // Signal status is stored in bits 0-6 of exit_status

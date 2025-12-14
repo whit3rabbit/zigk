@@ -275,6 +275,12 @@ pub fn close(fd: i32) SyscallError!void {
     if (isError(ret)) return errorFromReturn(ret);
 }
 
+/// Check user's permissions for a file
+pub fn access(path: [*:0]const u8, mode: i32) SyscallError!void {
+    const ret = syscall2(syscalls.SYS_ACCESS, @intFromPtr(path), @bitCast(@as(isize, mode)));
+    if (isError(ret)) return errorFromReturn(ret);
+}
+
 /// Device control
 pub fn ioctl(fd: i32, cmd: u32, arg: usize) SyscallError!i32 {
     const ret = syscall3(syscalls.SYS_IOCTL, @bitCast(@as(isize, fd)), cmd, arg);

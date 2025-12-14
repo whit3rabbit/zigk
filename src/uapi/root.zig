@@ -14,6 +14,7 @@ pub const signal = @import("signal.zig");
 pub const stat = @import("stat.zig");
 pub const dirent = @import("dirent.zig");
 pub const sound = @import("sound.zig");
+pub const input = @import("input.zig");
 
 // Re-export commonly used types
 pub const Errno = errno.Errno;
@@ -83,6 +84,10 @@ pub const SYS_MAP_FB = syscalls.SYS_MAP_FB;
 pub const SYS_READ_SCANCODE = syscalls.SYS_READ_SCANCODE;
 pub const SYS_GETCHAR = syscalls.SYS_GETCHAR;
 pub const SYS_PUTCHAR = syscalls.SYS_PUTCHAR;
+pub const SYS_READ_INPUT_EVENT = syscalls.SYS_READ_INPUT_EVENT;
+pub const SYS_GET_CURSOR_POSITION = syscalls.SYS_GET_CURSOR_POSITION;
+pub const SYS_SET_CURSOR_BOUNDS = syscalls.SYS_SET_CURSOR_BOUNDS;
+pub const SYS_SET_INPUT_MODE = syscalls.SYS_SET_INPUT_MODE;
 
 // Shutdown flags
 pub const SHUT_RD: i32 = 0;

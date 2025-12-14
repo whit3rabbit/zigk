@@ -591,3 +591,27 @@ pub fn sys_map_fb() SyscallError!usize {
     // Return the mapped virtual address
     return @intCast(fb_virt_base);
 }
+
+// =============================================================================
+// Threading (Stubs)
+// =============================================================================
+
+/// sys_clone (56) - Create a child process/thread
+///
+/// Clone is used for both fork() and thread creation, depending on flags.
+/// MVP: Returns ENOSYS (threading not implemented)
+///
+/// For full implementation, clone needs to:
+/// - Create a new thread/process structure
+/// - Handle CLONE_VM (share address space for threads)
+/// - Handle CLONE_THREAD (create thread, not process)
+/// - Handle CLONE_PARENT_SETTID, CLONE_CHILD_SETTID, etc.
+pub fn sys_clone(flags: usize, stack: usize, parent_tid: usize, child_tid: usize, tls: usize) SyscallError!usize {
+    _ = flags;
+    _ = stack;
+    _ = parent_tid;
+    _ = child_tid;
+    _ = tls;
+    // For now, recommend using fork() instead
+    return error.ENOSYS;
+}

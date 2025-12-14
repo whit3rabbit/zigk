@@ -186,3 +186,126 @@ pub fn sys_getuid() SyscallError!usize {
 pub fn sys_getgid() SyscallError!usize {
     return 0;
 }
+
+/// sys_setuid (105) - Set user ID
+///
+/// MVP: Stub - always succeeds (single-user system)
+pub fn sys_setuid(uid: usize) SyscallError!usize {
+    _ = uid;
+    return 0;
+}
+
+/// sys_setgid (106) - Set group ID
+///
+/// MVP: Stub - always succeeds (single-user system)
+pub fn sys_setgid(gid: usize) SyscallError!usize {
+    _ = gid;
+    return 0;
+}
+
+/// sys_geteuid (107) - Get effective user ID
+///
+/// MVP: Always returns 0 (root).
+pub fn sys_geteuid() SyscallError!usize {
+    return 0;
+}
+
+/// sys_getegid (108) - Get effective group ID
+///
+/// MVP: Always returns 0 (root group).
+pub fn sys_getegid() SyscallError!usize {
+    return 0;
+}
+
+/// sys_umask (95) - Set file creation mask
+///
+/// MVP: Stub - stores mask but not enforced
+var current_umask: u32 = 0o022; // Default umask
+pub fn sys_umask(mask: usize) SyscallError!usize {
+    const old_mask = current_umask;
+    current_umask = @truncate(mask & 0o777);
+    return old_mask;
+}
+
+/// sys_getrlimit (97) - Get resource limits
+///
+/// MVP: Returns unlimited for most resources
+pub fn sys_getrlimit(resource: usize, rlim_ptr: usize) SyscallError!usize {
+    _ = resource;
+    if (rlim_ptr == 0) return error.EFAULT;
+
+    // rlimit struct: { rlim_cur: u64, rlim_max: u64 }
+    const RLIM_INFINITY: u64 = @bitCast(@as(i64, -1));
+    const rlimit = [2]u64{ RLIM_INFINITY, RLIM_INFINITY };
+
+    const uptr = UserPtr.from(rlim_ptr);
+    _ = uptr.copyFromKernel(@as(*const [16]u8, @ptrCast(&rlimit))) catch {
+        return error.EFAULT;
+    };
+    return 0;
+}
+
+/// sys_setrlimit (160) - Set resource limits
+///
+/// MVP: Stub - accepts but ignores
+pub fn sys_setrlimit(resource: usize, rlim_ptr: usize) SyscallError!usize {
+    _ = resource;
+    _ = rlim_ptr;
+    return 0;
+}
+
+/// sys_uname (63) - Get system information
+///
+/// Returns system name, node name, release, version, machine
+pub fn sys_uname(buf_ptr: usize) SyscallError!usize {
+    if (buf_ptr == 0) return error.EFAULT;
+
+    // utsname struct: 5 fields of 65 bytes each = 325 bytes
+    // Linux uses _UTSNAME_LENGTH = 65
+    const UTSNAME_LEN = 65;
+    var utsname: [5 * UTSNAME_LEN]u8 = [_]u8{0} ** (5 * UTSNAME_LEN);
+
+    // sysname
+    const sysname = "Zscapek";
+    @memcpy(utsname[0..sysname.len], sysname);
+
+    // nodename
+    const nodename = "localhost";
+    @memcpy(utsname[UTSNAME_LEN .. UTSNAME_LEN + nodename.len], nodename);
+
+    // release
+    const release = "0.1.0";
+    @memcpy(utsname[2 * UTSNAME_LEN .. 2 * UTSNAME_LEN + release.len], release);
+
+    // version
+    const version = "#1 SMP";
+    @memcpy(utsname[3 * UTSNAME_LEN .. 3 * UTSNAME_LEN + version.len], version);
+
+    // machine
+    const machine = "x86_64";
+    @memcpy(utsname[4 * UTSNAME_LEN .. 4 * UTSNAME_LEN + machine.len], machine);
+
+    const uptr = UserPtr.from(buf_ptr);
+    _ = uptr.copyFromKernel(&utsname) catch {
+        return error.EFAULT;
+    };
+    return 0;
+}
+
+/// sys_sethostname (170) - Set hostname
+///
+/// MVP: Stub - returns EPERM (not permitted)
+pub fn sys_sethostname(name_ptr: usize, len: usize) SyscallError!usize {
+    _ = name_ptr;
+    _ = len;
+    return error.EPERM;
+}
+
+/// sys_setdomainname (171) - Set domain name
+///
+/// MVP: Stub - returns EPERM (not permitted)
+pub fn sys_setdomainname(name_ptr: usize, len: usize) SyscallError!usize {
+    _ = name_ptr;
+    _ = len;
+    return error.EPERM;
+}

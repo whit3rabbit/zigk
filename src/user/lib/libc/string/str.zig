@@ -59,6 +59,8 @@ pub export fn strncmp(s1: ?[*:0]const u8, s2: ?[*:0]const u8, n: usize) c_int {
 }
 
 /// Copy null-terminated string from src to dest
+/// WARNING: UNSAFE - No bounds checking. Buffer overflow risk!
+/// Use strlcpy() instead for safer bounded copying.
 pub export fn strcpy(dest: ?[*:0]u8, src: ?[*:0]const u8) ?[*:0]u8 {
     if (dest == null or src == null) return dest;
 

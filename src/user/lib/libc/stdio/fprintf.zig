@@ -5,6 +5,7 @@
 const std = @import("std");
 const syscall = @import("syscall.zig");
 const file_mod = @import("file.zig");
+const internal = @import("../internal.zig");
 
 const FILE = file_mod.FILE;
 
@@ -117,12 +118,12 @@ pub export fn fprintf(stream: ?*FILE, fmt_str: [*:0]const u8, ...) c_int {
                     if (val) |str| {
                         const len = std.mem.len(str);
                         const copy_len = @min(len, buf.len - written);
-                        @memcpy(buf[written..][0..copy_len], str[0..copy_len]);
+                        internal.safeCopy(buf[written..].ptr, str, copy_len);
                         written += copy_len;
                     } else {
                         const null_str = "(null)";
                         if (written + null_str.len <= buf.len) {
-                            @memcpy(buf[written..][0..null_str.len], null_str);
+                            internal.safeCopy(buf[written..].ptr, null_str.ptr, null_str.len);
                             written += null_str.len;
                         }
                     }
@@ -268,11 +269,11 @@ pub export fn sprintf(dest: ?[*]u8, fmt_str: [*:0]const u8, ...) c_int {
                     if (val) |str| {
                         const len = std.mem.len(str);
                         const copy_len = @min(len, buf.len - written);
-                        @memcpy(buf[written..][0..copy_len], str[0..copy_len]);
+                        internal.safeCopy(buf[written..].ptr, str, copy_len);
                         written += copy_len;
                     } else {
                         const null_str = "(null)";
-                        @memcpy(buf[written..][0..null_str.len], null_str);
+                        internal.safeCopy(buf[written..].ptr, null_str.ptr, null_str.len);
                         written += null_str.len;
                     }
                 },
@@ -309,7 +310,7 @@ pub export fn sprintf(dest: ?[*]u8, fmt_str: [*:0]const u8, ...) c_int {
     }
 
     const d = dest.?;
-    @memcpy(d[0..written], buf[0..written]);
+    internal.safeCopy(d, &buf, written);
     d[written] = 0;
 
     return @intCast(written);
@@ -411,11 +412,11 @@ pub export fn snprintf(dest: ?[*]u8, size: usize, fmt_str: [*:0]const u8, ...) c
                     if (val) |str| {
                         const len = std.mem.len(str);
                         const copy_len = @min(len, buf.len - written);
-                        @memcpy(buf[written..][0..copy_len], str[0..copy_len]);
+                        internal.safeCopy(buf[written..].ptr, str, copy_len);
                         written += copy_len;
                     } else {
                         const null_str = "(null)";
-                        @memcpy(buf[written..][0..null_str.len], null_str);
+                        internal.safeCopy(buf[written..].ptr, null_str.ptr, null_str.len);
                         written += null_str.len;
                     }
                 },
@@ -453,7 +454,7 @@ pub export fn snprintf(dest: ?[*]u8, size: usize, fmt_str: [*:0]const u8, ...) c
 
     const d = dest.?;
     const copy_len = @min(written, size - 1);
-    @memcpy(d[0..copy_len], buf[0..copy_len]);
+    internal.safeCopy(d, &buf, copy_len);
     d[copy_len] = 0;
 
     return @intCast(written);

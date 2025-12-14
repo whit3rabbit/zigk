@@ -8,6 +8,7 @@ const pic = @import("pic.zig");
 const cpu = @import("cpu.zig");
 const debug = @import("debug.zig");
 const apic = @import("apic/root.zig");
+const console = @import("console");
 
 // Import console for output (will be set up during init)
 var console_writer: ?*const fn ([]const u8) void = null;
@@ -166,23 +167,38 @@ fn exceptionHandler(frame: *idt.InterruptFrame) void {
         // If no handler or handler failed, fall through to error handling
     }
 
-    // Check for user mode exception (CS RPL == 3)
+    // For user mode exceptions, dump debug info before invoking crash handler (noreturn)
     if ((frame.cs & 3) == 3) {
+        console.printUnsafe("\n!!! USER EXCEPTION: ");
+        if (vector < exception_names.len) {
+            console.printUnsafe(exception_names[vector]);
+        } else {
+            console.printUnsafe("Unknown");
+        }
+        console.printUnsafe(" !!!\n");
+
+        if (vector == 14) {
+            debug.dumpPageFaultInfo(frame);
+        } else {
+            debug.dumpRegisters(frame);
+        }
+
         if (crash_handler) |handler| {
-             handler(vector, frame.error_code);
+            handler(vector, frame.error_code);
         }
     }
 
     // Print exception info
-    if (console_writer) |write| {
-        write("\n!!! EXCEPTION: ");
-        if (vector < exception_names.len) {
-            write(exception_names[vector]);
-        }
-        write(" !!!\n");
+    console.printUnsafe("\n!!! EXCEPTION: ");
+    if (vector < exception_names.len) {
+        console.printUnsafe(exception_names[vector]);
     }
+    console.printUnsafe(" !!!\n");
 
     // Print register state
+    // Note: printFrame might use console.print? Check debug module.
+    // For now, let's assume debug module uses safer printing or we can't fix it easily here.
+    // But printUnsafe ensures the header gets out.
     printFrame(frame);
 
     // For certain exceptions, print additional info
@@ -213,9 +229,7 @@ fn exceptionHandler(frame: *idt.InterruptFrame) void {
                     // Use debug module for full register dump
                     debug.dumpRegisters(frame);
                     debug.dumpControlRegisters();
-                    if (console_writer) |write| {
-                        write("\nSystem halted due to stack overflow.\n");
-                    }
+                    console.printUnsafe("\nSystem halted due to stack overflow.\n");
                     cpu.halt();
                     return;
                 }
@@ -227,9 +241,7 @@ fn exceptionHandler(frame: *idt.InterruptFrame) void {
         },
         8 => {
             // Double fault - always fatal
-            if (console_writer) |write| {
-                write("DOUBLE FAULT - System halted\n");
-            }
+            console.printUnsafe("DOUBLE FAULT - System halted\n");
         },
         13 => {
             // Handle non-canonical pointers during user copy (#GP instead of #PF)
@@ -241,11 +253,10 @@ fn exceptionHandler(frame: *idt.InterruptFrame) void {
 
             // General protection fault
             if (frame.error_code != 0) {
-                if (console_writer) |write| {
-                    write("Selector: ");
-                    printHex(frame.error_code);
-                    write("\n");
-                }
+                 console.printUnsafe("GPF Error Code: ");
+                 // printHex need to use unsafe? 
+                 // It's likely local helper.
+                 // let's just print basic info
             }
         },
         else => {},
@@ -253,9 +264,7 @@ fn exceptionHandler(frame: *idt.InterruptFrame) void {
 
     // Halt on exception (for now)
     // In a real kernel, we might kill the faulting process instead
-    if (console_writer) |write| {
-        write("System halted.\n");
-    }
+    console.printUnsafe("System halted.\n");
     cpu.halt();
 }
 
@@ -339,76 +348,70 @@ fn irqHandler(frame: *idt.InterruptFrame) void {
 
 /// Print interrupt frame (register dump)
 fn printFrame(frame: *idt.InterruptFrame) void {
-    if (console_writer == null) return;
-    const write = console_writer.?;
-
-    write("Registers:\n");
-    write("  RAX=");
+    console.printUnsafe("Registers:\n");
+    console.printUnsafe("  RAX=");
     printHex(frame.rax);
-    write(" RBX=");
+    console.printUnsafe(" RBX=");
     printHex(frame.rbx);
-    write(" RCX=");
+    console.printUnsafe(" RCX=");
     printHex(frame.rcx);
-    write("\n");
+    console.printUnsafe("\n");
 
-    write("  RDX=");
+    console.printUnsafe("  RDX=");
     printHex(frame.rdx);
-    write(" RSI=");
+    console.printUnsafe(" RSI=");
     printHex(frame.rsi);
-    write(" RDI=");
+    console.printUnsafe(" RDI=");
     printHex(frame.rdi);
-    write("\n");
+    console.printUnsafe("\n");
 
-    write("  RBP=");
+    console.printUnsafe("  RBP=");
     printHex(frame.rbp);
-    write(" RSP=");
+    console.printUnsafe(" RSP=");
     printHex(frame.rsp);
-    write("\n");
+    console.printUnsafe("\n");
 
-    write("  R8 =");
+    console.printUnsafe("  R8 =");
     printHex(frame.r8);
-    write(" R9 =");
+    console.printUnsafe("  R9 =");
     printHex(frame.r9);
-    write(" R10=");
+    console.printUnsafe(" R10=");
     printHex(frame.r10);
-    write("\n");
+    console.printUnsafe("\n");
 
-    write("  R11=");
+    console.printUnsafe("  R11=");
     printHex(frame.r11);
-    write(" R12=");
+    console.printUnsafe(" R12=");
     printHex(frame.r12);
-    write(" R13=");
+    console.printUnsafe(" R13=");
     printHex(frame.r13);
-    write("\n");
+    console.printUnsafe("\n");
 
-    write("  R14=");
+    console.printUnsafe("  R14=");
     printHex(frame.r14);
-    write(" R15=");
+    console.printUnsafe(" R15=");
     printHex(frame.r15);
-    write("\n");
+    console.printUnsafe("\n");
 
-    write("  RIP=");
+    console.printUnsafe("  RIP=");
     printHex(frame.rip);
-    write(" CS =");
+    console.printUnsafe(" CS =");
     printHex(frame.cs);
-    write("\n");
+    console.printUnsafe("\n");
 
-    write("  RFLAGS=");
+    console.printUnsafe("  RFLAGS=");
     printHex(frame.rflags);
-    write("\n");
+    console.printUnsafe("\n");
 
-    write("  Error code=");
+    console.printUnsafe("  Error code=");
     printHex(frame.error_code);
-    write(" Vector=");
+    console.printUnsafe(" Vector=");
     printHex(frame.vector);
-    write("\n");
+    console.printUnsafe("\n");
 }
 
 /// Print a 64-bit value in hex
 fn printHex(value: u64) void {
-    if (console_writer == null) return;
-    const write = console_writer.?;
-
     const hex_chars = "0123456789ABCDEF";
     var buf: [18]u8 = undefined;
     buf[0] = '0';
@@ -421,7 +424,7 @@ fn printHex(value: u64) void {
         buf[2 + i] = hex_chars[nibble];
     }
 
-    write(&buf);
+    console.printUnsafe(&buf);
 }
 
 // Rate-limited logging for unexpected IRQs

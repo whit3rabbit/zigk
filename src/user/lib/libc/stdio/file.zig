@@ -79,22 +79,30 @@ pub export fn fclose(stream: ?*FILE) c_int {
 pub export fn fread(ptr: ?*anyopaque, size: usize, nmemb: usize, stream: ?*FILE) usize {
     if (stream == null or ptr == null) return 0;
     const f = stream.?;
-    const p = ptr.?;
+    var dest_ptr = @as([*]u8, @ptrCast(ptr.?));
 
-    const total_bytes = size * nmemb;
+    var total_bytes = size * nmemb;
+    var total_read: usize = 0;
+
     if (total_bytes == 0) return 0;
 
-    const bytes_read = syscall.read(f.fd, @ptrCast(p), total_bytes) catch {
-        f.has_error = true;
-        return 0;
-    };
+    while (total_bytes > 0) {
+        const bytes_read = syscall.read(f.fd, dest_ptr, total_bytes) catch {
+            f.has_error = true;
+            break;
+        };
 
-    if (bytes_read == 0) {
-        f.eof = true;
-        return 0;
+        if (bytes_read == 0) {
+            f.eof = true;
+            break;
+        }
+
+        total_read += bytes_read;
+        total_bytes -= bytes_read;
+        dest_ptr += bytes_read;
     }
 
-    return bytes_read / size;
+    return total_read / size;
 }
 
 /// Write to file

@@ -684,3 +684,196 @@ pub fn sys_fcntl(fd_num: usize, cmd: usize, arg: usize) SyscallError!usize {
 
     return error.EINVAL;
 }
+
+// =============================================================================
+// Positional I/O
+// =============================================================================
+
+/// sys_pread64 (17) - Read from file at offset
+///
+/// MVP: Stub - returns ENOSYS (not implemented)
+pub fn sys_pread64(fd_num: usize, buf_ptr: usize, count: usize, offset: usize) SyscallError!usize {
+    _ = fd_num;
+    _ = buf_ptr;
+    _ = count;
+    _ = offset;
+    return error.ENOSYS;
+}
+
+/// sys_pwrite64 (18) - Write to file at offset
+///
+/// MVP: Stub - returns ENOSYS (not implemented)
+pub fn sys_pwrite64(fd_num: usize, buf_ptr: usize, count: usize, offset: usize) SyscallError!usize {
+    _ = fd_num;
+    _ = buf_ptr;
+    _ = count;
+    _ = offset;
+    return error.ENOSYS;
+}
+
+/// sys_readv (19) - Read data into multiple buffers
+///
+/// MVP: Stub - returns ENOSYS (not implemented)
+pub fn sys_readv(fd_num: usize, iov_ptr: usize, iovcnt: usize) SyscallError!usize {
+    _ = fd_num;
+    _ = iov_ptr;
+    _ = iovcnt;
+    return error.ENOSYS;
+}
+
+// =============================================================================
+// Filesystem Operations (Stubs)
+// =============================================================================
+
+/// sys_fsync (74) - Synchronize file to storage
+///
+/// MVP: Stub - always succeeds (no persistent storage)
+pub fn sys_fsync(fd_num: usize) SyscallError!usize {
+    _ = fd_num;
+    return 0;
+}
+
+/// sys_fdatasync (75) - Synchronize file data to storage
+///
+/// MVP: Stub - always succeeds (no persistent storage)
+pub fn sys_fdatasync(fd_num: usize) SyscallError!usize {
+    _ = fd_num;
+    return 0;
+}
+
+/// sys_truncate (76) - Truncate file to length
+///
+/// MVP: Stub - returns EROFS (read-only filesystem)
+pub fn sys_truncate(path_ptr: usize, length: usize) SyscallError!usize {
+    _ = path_ptr;
+    _ = length;
+    return error.EROFS;
+}
+
+/// sys_ftruncate (77) - Truncate file by fd to length
+///
+/// MVP: Stub - returns EROFS (read-only filesystem)
+pub fn sys_ftruncate(fd_num: usize, length: usize) SyscallError!usize {
+    _ = fd_num;
+    _ = length;
+    return error.EROFS;
+}
+
+/// sys_getdents (78) - Get directory entries (legacy)
+///
+/// MVP: Returns ENOSYS - use getdents64 instead
+pub fn sys_getdents(fd_num: usize, dirp: usize, count: usize) SyscallError!usize {
+    _ = fd_num;
+    _ = dirp;
+    _ = count;
+    return error.ENOSYS;
+}
+
+/// sys_fchdir (81) - Change working directory by fd
+///
+/// MVP: Stub - returns ENOSYS
+pub fn sys_fchdir(fd_num: usize) SyscallError!usize {
+    _ = fd_num;
+    return error.ENOSYS;
+}
+
+/// sys_rename (82) - Rename a file
+///
+/// MVP: Stub - returns EROFS (read-only filesystem)
+pub fn sys_rename(oldpath_ptr: usize, newpath_ptr: usize) SyscallError!usize {
+    _ = oldpath_ptr;
+    _ = newpath_ptr;
+    return error.EROFS;
+}
+
+/// sys_rmdir (84) - Remove a directory
+///
+/// MVP: Stub - returns EROFS (read-only filesystem)
+pub fn sys_rmdir(path_ptr: usize) SyscallError!usize {
+    _ = path_ptr;
+    return error.EROFS;
+}
+
+/// sys_link (86) - Create a hard link
+///
+/// MVP: Stub - returns EROFS (read-only filesystem)
+pub fn sys_link(oldpath_ptr: usize, newpath_ptr: usize) SyscallError!usize {
+    _ = oldpath_ptr;
+    _ = newpath_ptr;
+    return error.EROFS;
+}
+
+/// sys_unlink (87) - Delete a file
+///
+/// MVP: Stub - returns EROFS (read-only filesystem)
+pub fn sys_unlink(path_ptr: usize) SyscallError!usize {
+    _ = path_ptr;
+    return error.EROFS;
+}
+
+/// sys_symlink (88) - Create a symbolic link
+///
+/// MVP: Stub - returns EROFS (read-only filesystem)
+pub fn sys_symlink(target_ptr: usize, linkpath_ptr: usize) SyscallError!usize {
+    _ = target_ptr;
+    _ = linkpath_ptr;
+    return error.EROFS;
+}
+
+/// sys_readlink (89) - Read value of symbolic link
+///
+/// MVP: Stub - returns EINVAL (no symlinks in initrd)
+pub fn sys_readlink(path_ptr: usize, buf_ptr: usize, bufsize: usize) SyscallError!usize {
+    _ = path_ptr;
+    _ = buf_ptr;
+    _ = bufsize;
+    return error.EINVAL;
+}
+
+/// sys_chmod (90) - Change file mode
+///
+/// MVP: Stub - returns EROFS (read-only filesystem)
+pub fn sys_chmod(path_ptr: usize, mode: usize) SyscallError!usize {
+    _ = path_ptr;
+    _ = mode;
+    return error.EROFS;
+}
+
+/// sys_fchmod (91) - Change file mode by fd
+///
+/// MVP: Stub - returns EROFS (read-only filesystem)
+pub fn sys_fchmod(fd_num: usize, mode: usize) SyscallError!usize {
+    _ = fd_num;
+    _ = mode;
+    return error.EROFS;
+}
+
+/// sys_chown (92) - Change file owner
+///
+/// MVP: Stub - returns EROFS (read-only filesystem)
+pub fn sys_chown(path_ptr: usize, uid: usize, gid: usize) SyscallError!usize {
+    _ = path_ptr;
+    _ = uid;
+    _ = gid;
+    return error.EROFS;
+}
+
+/// sys_fchown (93) - Change file owner by fd
+///
+/// MVP: Stub - returns EROFS (read-only filesystem)
+pub fn sys_fchown(fd_num: usize, uid: usize, gid: usize) SyscallError!usize {
+    _ = fd_num;
+    _ = uid;
+    _ = gid;
+    return error.EROFS;
+}
+
+/// sys_lchown (94) - Change symlink owner
+///
+/// MVP: Stub - returns EROFS (read-only filesystem)
+pub fn sys_lchown(path_ptr: usize, uid: usize, gid: usize) SyscallError!usize {
+    _ = path_ptr;
+    _ = uid;
+    _ = gid;
+    return error.EROFS;
+}

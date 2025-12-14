@@ -2,6 +2,7 @@ const std = @import("std");
 const fd = @import("fd");
 const heap = @import("heap");
 const uapi = @import("uapi");
+const console = @import("console");
 
 /// USTAR TAR Header (512 bytes)
 /// Reference: specs/003.../contracts/initrd-format.md
@@ -88,6 +89,8 @@ pub const InitRD = struct {
         else
             path;
 
+        console.err("InitRD: findFile search='{s}' (orig='{s}')", .{search_name, path});
+
         var offset: usize = 0;
         // Need at least 512 bytes for a header
         while (offset + 512 <= self.data.len) {
@@ -115,7 +118,13 @@ pub const InitRD = struct {
             if (data_end > self.data.len) break;
 
             // Check if this is the file we are looking for
-            if (header.isRegularFile() and std.mem.eql(u8, name, search_name)) {
+            // Normalize header name: remove leading './' if present (common in tar)
+            var header_name = name;
+            if (std.mem.startsWith(u8, header_name, "./")) {
+                header_name = header_name[2..];
+            }
+
+            if (header.isRegularFile() and std.mem.eql(u8, header_name, search_name)) {
                 return InitRDFile{
                     .name = name,
                     .data = self.data[data_start..data_end],
@@ -136,6 +145,9 @@ pub const InitRD = struct {
 
             if (next_offset > self.data.len) break;
             offset = next_offset;
+            
+            // Debug Log
+            console.debug("InitRD Scan: '{s}' (norm: '{s}') vs search '{s}'", .{name, header_name, search_name});
         }
         return null;
     }

@@ -406,6 +406,16 @@ pub fn build(b: *std.Build) void {
     audio_module.addImport("sched", sched_module);
     audio_module.addImport("thread", thread_module);
 
+    // Create Input subsystem module
+    const input_module = b.createModule(.{
+        .root_source_file = b.path("src/drivers/input/root.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    input_module.addImport("sync", sync_module);
+    input_module.addImport("ring_buffer", ring_buffer_module);
+    input_module.addImport("uapi", uapi_module);
+
     // Create Mouse driver module
     const mouse_module = b.createModule(.{
         .root_source_file = b.path("src/drivers/mouse.zig"),
@@ -416,6 +426,8 @@ pub fn build(b: *std.Build) void {
     mouse_module.addImport("sync", sync_module);
     mouse_module.addImport("ring_buffer", ring_buffer_module);
     mouse_module.addImport("console", console_module);
+    mouse_module.addImport("input", input_module);
+    mouse_module.addImport("uapi", uapi_module);
 
     // Create DevFS module (device filesystem shim)
     const devfs_module = b.createModule(.{
@@ -647,6 +659,16 @@ pub fn build(b: *std.Build) void {
     syscall_random_module.addImport("prng", prng_module);
     syscall_random_module.addImport("user_mem", user_mem_module);
 
+    // Create syscall input module (mouse/input syscalls)
+    const syscall_input_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/syscall/input.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    syscall_input_module.addImport("base.zig", syscall_base_module);
+    syscall_input_module.addImport("uapi", uapi_module);
+    syscall_input_module.addImport("input", input_module);
+
     // Create syscall net module (socket syscalls)
     const syscall_net_module = b.createModule(.{
         .root_source_file = b.path("src/kernel/syscall/net.zig"),
@@ -684,6 +706,7 @@ pub fn build(b: *std.Build) void {
     syscall_table_module.addImport("custom.zig", syscall_custom_module);
     syscall_table_module.addImport("net.zig", syscall_net_module);
     syscall_table_module.addImport("random.zig", syscall_random_module);
+    syscall_table_module.addImport("input.zig", syscall_input_module);
 
     // Create kernel executable
     // NOTE: red_zone must be disabled for kernel code to prevent stack corruption
@@ -731,6 +754,7 @@ pub fn build(b: *std.Build) void {
     kernel.root_module.addImport("serial_driver", serial_module);
     kernel.root_module.addImport("video_driver", video_module);
     kernel.root_module.addImport("mouse", mouse_module);
+    kernel.root_module.addImport("input", input_module);
     kernel.root_module.addImport("audio", audio_module);
     kernel.root_module.addImport("thread", thread_module);
     kernel.root_module.addImport("sched", sched_module);
@@ -1034,7 +1058,7 @@ pub fn build(b: *std.Build) void {
     const run_cmd = b.addSystemCommand(&.{
         "qemu-system-x86_64",
         "-M", "q35",
-        "-m", "256M",
+        "-m", "512M",
         "-cdrom", "zscapek.iso",
         "-device", "qemu-xhci,id=xhci",
         "-device", "virtio-gpu-pci",

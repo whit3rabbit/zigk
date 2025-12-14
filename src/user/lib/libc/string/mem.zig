@@ -2,6 +2,8 @@
 //
 // Low-level memory manipulation functions.
 
+const internal = @import("../internal.zig");
+
 /// Copy n bytes from src to dest (non-overlapping)
 pub export fn memcpy(dest: ?*anyopaque, src: ?*const anyopaque, n: usize) ?*anyopaque {
     if (n == 0) return dest;
@@ -9,7 +11,11 @@ pub export fn memcpy(dest: ?*anyopaque, src: ?*const anyopaque, n: usize) ?*anyo
 
     const d = @as([*]u8, @ptrCast(dest.?));
     const s = @as([*]const u8, @ptrCast(src.?));
-    @memcpy(d[0..n], s[0..n]);
+    
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        d[i] = s[i];
+    }
     return dest;
 }
 
@@ -19,7 +25,12 @@ pub export fn memset(s: ?*anyopaque, c: c_int, n: usize) ?*anyopaque {
     if (s == null) return s;
 
     const d = @as([*]u8, @ptrCast(s.?));
-    @memset(d[0..n], @as(u8, @truncate(@as(c_uint, @bitCast(c)))));
+    const val = @as(u8, @truncate(@as(c_uint, @bitCast(c))));
+    
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        d[i] = val;
+    }
     return s;
 }
 
@@ -98,6 +109,7 @@ pub export fn memrchr(s: ?*const anyopaque, c: c_int, n: usize) ?*anyopaque {
 }
 
 /// Copy memory with explicit non-null pointers (Zig-native helper)
+/// Uses safeCopy to avoid @memcpy recursion in freestanding mode
 pub fn copyBytes(dest: [*]u8, src: [*]const u8, n: usize) void {
-    @memcpy(dest[0..n], src[0..n]);
+    internal.safeCopy(dest, src, n);
 }

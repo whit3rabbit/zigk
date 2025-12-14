@@ -25,6 +25,64 @@ const isValidUserPtr = base.isValidUserPtr;
 // File Descriptor Management
 // =============================================================================
 
+/// sys_access (21) - Check user's permissions for a file
+///
+/// Checks if the calling process can access the file pathname.
+/// If pathname is a symbolic link, it is dereferenced.
+///
+/// Mode flags:
+///   F_OK (0) - Check existence
+///   R_OK (4) - Check read permission
+///   W_OK (2) - Check write permission
+///   X_OK (1) - Check execute permission
+///
+/// Returns: 0 on success, negative errno on error
+pub fn sys_access(path_ptr: usize, mode: usize) SyscallError!usize {
+    _ = mode; // We currently only support existence checking (effective F_OK) for all modes
+
+    // Allocate path buffer on heap to preserve stack space
+    const path_buf = heap.allocator().alloc(u8, user_mem.MAX_PATH_LEN) catch {
+        return error.ENOMEM;
+    };
+    defer heap.allocator().free(path_buf);
+
+    // Validate and read path string from userspace
+    const path = user_mem.copyStringFromUser(path_buf, path_ptr) catch |err| {
+        if (err == error.NameTooLong) return error.ENAMETOOLONG;
+        return error.EFAULT;
+    };
+
+    if (path.len == 0) {
+        return error.ENOENT;
+    }
+
+    // Use VFS to try opening the file
+    // Note: This is a heavy way to check existence, but VFS doesn't expose stat/access yet
+    const fd = fs.vfs.Vfs.open(path, 0) catch |err| {
+        return switch (err) {
+            error.NotFound => error.ENOENT,
+            error.AccessDenied => error.EACCES,
+            error.InvalidPath => error.ENOENT,
+            error.NameTooLong => error.ENAMETOOLONG,
+            error.IOError => error.EIO,
+            error.NoMemory => error.ENOMEM,
+            error.IsDirectory => 0, // Directories exist, so access returns success
+            else => error.EIO,
+        };
+    };
+
+    // If we opened it, it exists. Close it immediately.
+    if (fd.ops.close) |close_fn| {
+        _ = close_fn(fd);
+    }
+    // If ops.close is null, we can't close it, which leaks.
+    // However, VFS Files should always have close.
+    // For now, assume usage is safe or leak is minor compared to crash.
+    // Ideally we should enforce close existence or use a safer VFS API.
+
+    return 0;
+}
+
 /// sys_open (2) - Open a file or device
 ///
 /// Opens a file/device and returns a new file descriptor.
@@ -181,4 +239,52 @@ pub fn sys_lseek(fd_num: usize, offset: i64, whence: u32) SyscallError!usize {
         };
     }
     return @intCast(result);
+}
+
+// =============================================================================
+// Additional FD Operations
+// =============================================================================
+
+/// sys_creat (85) - Create a file (legacy)
+///
+/// Equivalent to open() with O_CREAT|O_WRONLY|O_TRUNC
+/// MVP: Stub - returns EROFS (read-only filesystem)
+pub fn sys_creat(path_ptr: usize, mode: usize) SyscallError!usize {
+    _ = path_ptr;
+    _ = mode;
+    return error.EROFS;
+}
+
+/// sys_dup3 (292) - Duplicate FD with flags
+///
+/// Like dup2, but with flags (e.g., O_CLOEXEC)
+pub fn sys_dup3(oldfd: usize, newfd: usize, flags: usize) SyscallError!usize {
+    // For now, ignore flags and delegate to dup2
+    _ = flags;
+    return sys_dup2(oldfd, newfd);
+}
+
+/// sys_pipe2 (293) - Create pipe with flags
+///
+/// Like pipe, but with flags (e.g., O_CLOEXEC, O_NONBLOCK)
+pub fn sys_pipe2(pipefd_ptr: usize, flags: usize) SyscallError!usize {
+    // For now, ignore flags and delegate to pipe
+    _ = flags;
+    return sys_pipe(pipefd_ptr);
+}
+
+/// sys_openat (257) - Open file relative to directory FD
+///
+/// MVP: Stub - only supports AT_FDCWD (-100) which means use current directory
+pub fn sys_openat(dirfd: usize, path_ptr: usize, flags: usize, mode: usize) SyscallError!usize {
+    // AT_FDCWD = -100 (0xffffff9c as usize)
+    const AT_FDCWD: usize = @bitCast(@as(isize, -100));
+
+    if (dirfd == AT_FDCWD) {
+        // Relative to current working directory - delegate to open
+        return sys_open(path_ptr, flags, mode);
+    }
+
+    // Other dirfd values not supported yet
+    return error.ENOSYS;
 }

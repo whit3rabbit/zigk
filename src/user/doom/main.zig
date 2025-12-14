@@ -133,6 +133,11 @@ pub fn main() void {
     // Copy strings into buffer (null-terminated)
     var offset: usize = 0;
 
+    syscall.print("DEBUG: ArgvBuffer at {x}\n"); // .{@intFromPtr(&argv_buffer)});
+    // Note: User print syscall is string-only for now, we need to format manually or add support
+    // For now, let's just print checkpoints.
+
+    syscall.print("DEBUG: Copying arg0...\n");
     @memcpy(argv_buffer[offset .. offset + arg0.len], arg0);
     argv_buffer[offset + arg0.len] = 0;
     argv_storage[0] = @ptrCast(&argv_buffer[offset]);

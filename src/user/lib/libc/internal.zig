@@ -4,6 +4,47 @@
 // These are internal implementation details and should not be
 // exported or used directly by user programs.
 
+// =============================================================================
+// Debug Configuration
+// =============================================================================
+
+/// Debug mode heap checks - compiles out in release
+pub const DEBUG_HEAP = @import("builtin").mode == .Debug;
+
+/// Magic number for valid allocated blocks
+pub const HEAP_MAGIC: u32 = 0xDEADBEEF;
+
+/// Magic number for freed blocks (double-free detection)
+pub const FREED_MAGIC: u32 = 0xFEEDFACE;
+
+// =============================================================================
+// Safe Memory Operations (Recursion-Safe)
+// =============================================================================
+
+/// Inline-safe memory copy - NEVER uses @memcpy to avoid recursion.
+/// In freestanding mode, Zig may lower @memcpy to a call to memcpy,
+/// which causes infinite recursion if memcpy itself uses @memcpy.
+pub inline fn safeCopy(dest: [*]u8, src: [*]const u8, n: usize) void {
+    for (0..n) |i| {
+        dest[i] = src[i];
+    }
+}
+
+/// Inline-safe memory fill - NEVER uses @memset to avoid recursion.
+/// Same rationale as safeCopy.
+pub inline fn safeFill(dest: [*]u8, value: u8, n: usize) void {
+    for (0..n) |i| {
+        dest[i] = value;
+    }
+}
+
+/// Debug-mode bounds check for memory operations
+pub inline fn debugBoundsCheck(len: usize, max: usize) void {
+    if (DEBUG_HEAP and len > max) {
+        @panic("libc: buffer overflow detected");
+    }
+}
+
 /// Convert uppercase ASCII letter to lowercase
 pub fn toLowerInternal(c: u8) u8 {
     return if (c >= 'A' and c <= 'Z') c + 32 else c;

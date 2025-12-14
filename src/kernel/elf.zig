@@ -339,11 +339,12 @@ pub fn load(data: []const u8, pml4_phys: u64, load_base: u64) ElfError!ElfLoadRe
         try loadSegment(data, phdr, pml4_phys, actual_base);
         load_count += 1;
 
-        console.debug("ELF: Loaded segment {x}-{x} (file={}, mem={})", .{
+        console.debug("ELF: Loaded segment {x}-{x} (file={}, mem={}, flags={x})", .{
             vaddr,
             vaddr_end,
             phdr.p_filesz,
             phdr.p_memsz,
+            phdr.p_flags,
         });
     }
 
@@ -377,6 +378,8 @@ pub fn load(data: []const u8, pml4_phys: u64, load_base: u64) ElfError!ElfLoadRe
         console.err("ELF: Entry point {x} is not mapped!", .{entry});
         return ElfError.MappingFailed;
     }
+
+
 
     return ElfLoadResult{
         .entry_point = entry,

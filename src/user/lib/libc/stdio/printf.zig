@@ -5,6 +5,7 @@
 const std = @import("std");
 const syscall = @import("syscall.zig");
 const format = @import("format.zig");
+const internal = @import("../internal.zig");
 
 /// Print formatted output to stdout
 pub export fn printf(fmt_str: [*:0]const u8, ...) c_int {
@@ -112,12 +113,13 @@ pub export fn printf(fmt_str: [*:0]const u8, ...) c_int {
                     if (val) |str| {
                         const len = std.mem.len(str);
                         const copy_len = @min(len, buf.len - written);
-                        @memcpy(buf[written..][0..copy_len], str[0..copy_len]);
+                        // Use safeCopy to avoid @memcpy recursion
+                        internal.safeCopy(buf[written..].ptr, str, copy_len);
                         written += copy_len;
                     } else {
                         const null_str = "(null)";
                         if (written + null_str.len <= buf.len) {
-                            @memcpy(buf[written..][0..null_str.len], null_str);
+                            internal.safeCopy(buf[written..].ptr, null_str.ptr, null_str.len);
                             written += null_str.len;
                         }
                     }

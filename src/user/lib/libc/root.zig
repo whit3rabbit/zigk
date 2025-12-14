@@ -27,6 +27,17 @@ pub const time_mod = @import("time.zig");
 pub const errno_mod = @import("errno.zig");
 pub const internal = @import("internal.zig");
 pub const stubs = @import("stubs.zig");
+pub const unistd = @import("unistd/root.zig");
+
+// =============================================================================
+// unistd
+// =============================================================================
+
+pub const access = unistd.access;
+pub const F_OK = unistd.F_OK;
+pub const R_OK = unistd.R_OK;
+pub const W_OK = unistd.W_OK;
+pub const X_OK = unistd.X_OK;
 
 // =============================================================================
 // errno
@@ -43,6 +54,7 @@ pub const free = memory.free;
 pub const realloc = memory.realloc;
 pub const calloc = memory.calloc;
 pub const aligned_alloc = memory.aligned_alloc;
+pub const aligned_free = memory.aligned_free;
 pub const posix_memalign = memory.posix_memalign;
 
 // =============================================================================
@@ -102,7 +114,8 @@ pub export fn strdup(s: ?[*:0]const u8) ?[*:0]u8 {
     if (new_ptr == null) return null;
 
     const new_str: [*]u8 = @ptrCast(new_ptr.?);
-    @memcpy(new_str[0..len], str[0..len]);
+    // Use safeCopy to avoid @memcpy recursion in freestanding mode
+    internal.safeCopy(new_str, str, len);
     new_str[len] = 0;
 
     return @ptrCast(new_str);

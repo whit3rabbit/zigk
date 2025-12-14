@@ -12,4 +12,5 @@ pub const calloc = allocator.calloc;
 
 // Aligned allocation
 pub const aligned_alloc = allocator.aligned_alloc;
+pub const aligned_free = allocator.aligned_free;
 pub const posix_memalign = allocator.posix_memalign;

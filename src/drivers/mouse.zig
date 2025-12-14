@@ -14,6 +14,8 @@ const hal = @import("hal");
 const sync = @import("sync");
 const ring_buffer = @import("ring_buffer");
 const console = @import("console");
+const input = @import("input");
+const uapi = @import("uapi");
 
 // =============================================================================
 // PS/2 Controller Ports and Commands
@@ -452,9 +454,39 @@ fn processPacket() void {
         .buttons_changed = buttons_changed,
     };
 
-    // Push to buffer
+    // Push to legacy buffer (for backward compat with existing API)
     if (mouse_state.event_buffer.push(event)) {
         error_stats.buffer_overruns +%= 1;
+    }
+
+    // Push to input subsystem if initialized
+    if (input.isInitialized()) {
+        const timestamp: u64 = 0; // TODO: proper timestamp from HAL
+
+        // Push relative movement events
+        if (dx != 0) {
+            input.pushRelative(uapi.input.RelCode.X, @as(i32, dx), timestamp);
+        }
+        if (dy != 0) {
+            input.pushRelative(uapi.input.RelCode.Y, @as(i32, dy), timestamp);
+        }
+        if (dz != 0) {
+            input.pushRelative(uapi.input.RelCode.WHEEL, @as(i32, dz), timestamp);
+        }
+
+        // Push button events on change
+        if (buttons_changed.left) {
+            input.pushButton(uapi.input.BtnCode.LEFT, buttons.left, timestamp);
+        }
+        if (buttons_changed.right) {
+            input.pushButton(uapi.input.BtnCode.RIGHT, buttons.right, timestamp);
+        }
+        if (buttons_changed.middle) {
+            input.pushButton(uapi.input.BtnCode.MIDDLE, buttons.middle, timestamp);
+        }
+
+        // Push sync event to mark end of this packet's events
+        input.pushSync(timestamp);
     }
 
     // Flood detection: track total packets and warn if buffer keeps overflowing

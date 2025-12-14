@@ -12,6 +12,7 @@ const errno_mod = @import("../errno.zig");
 /// Header for memory blocks
 /// Uses double-linked list for efficient coalescing
 const BlockHeader = struct {
+    magic: u32, // Debug: heap corruption detection
     size: usize, // Size of user data (not including header)
     next: ?*BlockHeader,
     prev: ?*BlockHeader, // For coalescing with previous block
@@ -26,6 +27,12 @@ const BlockHeader = struct {
     fn fromUserData(ptr: *anyopaque) *BlockHeader {
         const header_ptr = @as([*]u8, @ptrCast(ptr)) - @sizeOf(BlockHeader);
         return @ptrCast(@alignCast(header_ptr));
+    }
+
+    /// Check if this block has valid magic (debug mode only)
+    fn isValid(self: *const BlockHeader) bool {
+        return self.magic == internal.HEAP_MAGIC or
+            self.magic == internal.FREED_MAGIC;
     }
 };
 
@@ -76,6 +83,7 @@ pub export fn malloc(size: usize) ?*anyopaque {
             const new_block_ptr = @as([*]u8, @ptrCast(block)) + @sizeOf(BlockHeader) + aligned_size;
             const new_block: *BlockHeader = @ptrCast(@alignCast(new_block_ptr));
 
+            new_block.magic = internal.HEAP_MAGIC;
             new_block.size = remaining - @sizeOf(BlockHeader);
             new_block.free = true;
             new_block.next = block.next;
@@ -89,6 +97,7 @@ pub export fn malloc(size: usize) ?*anyopaque {
             block.size = aligned_size;
         }
 
+        block.magic = internal.HEAP_MAGIC;
         block.free = false;
         return block.userData();
     }
@@ -100,6 +109,7 @@ pub export fn malloc(size: usize) ?*anyopaque {
     };
 
     const block: *BlockHeader = @ptrCast(@alignCast(ptr));
+    block.magic = internal.HEAP_MAGIC;
     block.size = aligned_size;
     block.free = false;
     block.prev = null;
@@ -116,10 +126,22 @@ pub export fn malloc(size: usize) ?*anyopaque {
 
 /// Free allocated memory
 /// Implements block coalescing to reduce fragmentation
+/// Debug mode: detects double-free and heap corruption
 pub export fn free(ptr: ?*anyopaque) void {
     if (ptr == null) return;
 
     const block = BlockHeader.fromUserData(ptr.?);
+
+    // DEBUG: Check for heap corruption and double-free
+    if (internal.DEBUG_HEAP) {
+        if (!block.isValid()) {
+            @panic("libc: heap corruption detected in free()");
+        }
+        if (block.magic == internal.FREED_MAGIC) {
+            @panic("libc: double-free detected");
+        }
+        block.magic = internal.FREED_MAGIC;
+    }
 
     // Mark as free
     block.free = true;
@@ -156,6 +178,7 @@ fn coalesceBlocks(block: *BlockHeader) void {
 }
 
 /// Reallocate memory block
+/// Debug mode: validates heap integrity before reallocation
 pub export fn realloc(ptr: ?*anyopaque, size: usize) ?*anyopaque {
     // realloc(NULL, size) is equivalent to malloc(size)
     if (ptr == null) return malloc(size);
@@ -167,6 +190,14 @@ pub export fn realloc(ptr: ?*anyopaque, size: usize) ?*anyopaque {
     }
 
     const block = BlockHeader.fromUserData(ptr.?);
+
+    // DEBUG: Check for heap corruption
+    if (internal.DEBUG_HEAP) {
+        if (!block.isValid()) {
+            @panic("libc: heap corruption detected in realloc()");
+        }
+    }
+
     const aligned_size = internal.alignTo16(size);
 
     // Current block is big enough
@@ -195,11 +226,11 @@ pub export fn realloc(ptr: ?*anyopaque, size: usize) ?*anyopaque {
     const new_ptr = malloc(size);
     if (new_ptr == null) return null;
 
-    // Copy old data
+    // Copy old data using safeCopy to avoid @memcpy recursion
     const copy_size = @min(block.size, size);
     const src = @as([*]const u8, @ptrCast(ptr.?));
     const dst = @as([*]u8, @ptrCast(new_ptr.?));
-    @memcpy(dst[0..copy_size], src[0..copy_size]);
+    internal.safeCopy(dst, src, copy_size);
 
     free(ptr);
     return new_ptr;
@@ -217,14 +248,15 @@ pub export fn calloc(nmemb: usize, size: usize) ?*anyopaque {
 
     const ptr = malloc(total);
     if (ptr) |p| {
-        // Zero the memory
+        // Zero the memory using safeFill to avoid @memset recursion
         const bytes = @as([*]u8, @ptrCast(p));
-        @memset(bytes[0..total], 0);
+        internal.safeFill(bytes, 0, total);
     }
     return ptr;
 }
 
 /// Allocate aligned memory
+/// For alignments > 16, stores offset to allow proper freeing via aligned_free
 pub export fn aligned_alloc(alignment: usize, size: usize) ?*anyopaque {
     // Alignment must be power of 2
     if (alignment == 0 or (alignment & (alignment - 1)) != 0) {
@@ -243,18 +275,37 @@ pub export fn aligned_alloc(alignment: usize, size: usize) ?*anyopaque {
         return malloc(size);
     }
 
-    // For larger alignments, over-allocate and adjust
-    const extra = internal.checkedAdd(size, alignment) orelse {
+    // For larger alignments, over-allocate and store offset for aligned_free
+    // Layout: [raw malloc] ... [offset (usize)] [aligned user data]
+    const extra = internal.checkedAdd(size, alignment + @sizeOf(usize)) orelse {
         errno_mod.errno = errno_mod.ENOMEM;
         return null;
     };
 
-    const ptr = malloc(extra) orelse return null;
-    const addr = @intFromPtr(ptr);
-    const aligned_addr = (addr + alignment - 1) & ~(alignment - 1);
+    const raw_ptr = malloc(extra) orelse return null;
+    const raw_addr = @intFromPtr(raw_ptr);
 
-    // Note: This leaks the unaligned portion - acceptable for simple allocator
+    // Calculate aligned address, leaving room for offset storage
+    const aligned_addr = (raw_addr + @sizeOf(usize) + alignment - 1) & ~(alignment - 1);
+
+    // Store offset just before aligned address
+    const offset_ptr: *usize = @ptrFromInt(aligned_addr - @sizeOf(usize));
+    offset_ptr.* = aligned_addr - raw_addr;
+
     return @ptrFromInt(aligned_addr);
+}
+
+/// Free memory allocated by aligned_alloc with alignment > 16
+/// IMPORTANT: Only use this for pointers from aligned_alloc with alignment > 16
+/// For alignment <= 16, use regular free()
+pub export fn aligned_free(ptr: ?*anyopaque) void {
+    if (ptr == null) return;
+
+    const aligned_addr = @intFromPtr(ptr.?);
+    const offset_ptr: *const usize = @ptrFromInt(aligned_addr - @sizeOf(usize));
+    const original_addr = aligned_addr - offset_ptr.*;
+
+    free(@ptrFromInt(original_addr));
 }
 
 /// POSIX memalign

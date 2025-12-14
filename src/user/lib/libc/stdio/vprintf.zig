@@ -28,11 +28,15 @@ pub export fn vprintf(fmt: [*:0]const u8, ap: va_list) c_int {
 
 /// vfprintf - print to file using va_list
 pub export fn vfprintf(stream: ?*FILE, fmt: [*:0]const u8, ap: va_list) c_int {
-    _ = fmt;
     _ = ap;
     if (stream == null) return -1;
-    // Cannot portably iterate va_list in freestanding Zig
-    return 0;
+    const f = stream.?;
+    const len = std.mem.len(fmt);
+    
+    // Minimal implementation: just print the format string itself
+    // This allows seeing error messages even if args are missing
+    const written = syscall.write(f.fd, fmt, len) catch return -1;
+    return @intCast(written);
 }
 
 /// vsprintf - format to string using va_list

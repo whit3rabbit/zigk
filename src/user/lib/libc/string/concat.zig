@@ -5,6 +5,8 @@
 const std = @import("std");
 
 /// Concatenate src onto end of dest
+/// WARNING: UNSAFE - No bounds checking on destination buffer.
+/// Use strlcat() instead for safer bounded concatenation.
 pub export fn strcat(dest: ?[*:0]u8, src: ?[*:0]const u8) ?[*:0]u8 {
     if (dest == null or src == null) return dest;
 

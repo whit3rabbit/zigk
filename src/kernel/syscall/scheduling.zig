@@ -152,3 +152,124 @@ pub fn sys_clock_gettime(clk_id: usize, tp_ptr: usize) SyscallError!usize {
 
     return 0;
 }
+
+/// sys_clock_getres (229) - Get clock resolution
+///
+/// MVP: Returns 10ms resolution (tick-based timing)
+pub fn sys_clock_getres(clk_id: usize, res_ptr: usize) SyscallError!usize {
+    _ = clk_id;
+
+    if (res_ptr == 0) {
+        return 0; // NULL res is valid per POSIX
+    }
+
+    // Report 10ms resolution (our tick interval)
+    const res = Timespec{
+        .tv_sec = 0,
+        .tv_nsec = 10_000_000, // 10ms in nanoseconds
+    };
+
+    UserPtr.from(res_ptr).writeValue(res) catch {
+        return error.EFAULT;
+    };
+
+    return 0;
+}
+
+/// Timeval structure (for gettimeofday)
+pub const Timeval = extern struct {
+    tv_sec: i64,
+    tv_usec: i64,
+};
+
+/// sys_gettimeofday (96) - Get time of day (legacy)
+///
+/// MVP: Returns tick count converted to timeval
+pub fn sys_gettimeofday(tv_ptr: usize, tz_ptr: usize) SyscallError!usize {
+    _ = tz_ptr; // Timezone not supported
+
+    if (tv_ptr == 0) {
+        return 0; // NULL tv is valid
+    }
+
+    var tv: Timeval = undefined;
+
+    // Try to use TSC-based high resolution timing
+    const freq = hal.timing.getTscFrequency();
+    if (freq > 0) {
+        const tsc = hal.timing.rdtsc();
+        const tsc_u128 = @as(u128, tsc);
+        const us_u128 = (tsc_u128 * 1_000_000) / freq;
+        const total_us: u64 = @truncate(us_u128);
+
+        tv = Timeval{
+            .tv_sec = @intCast(total_us / 1_000_000),
+            .tv_usec = @intCast(total_us % 1_000_000),
+        };
+    } else {
+        // Fallback to tick count
+        const ticks = sched.getTickCount();
+        const ms = ticks * 10;
+        tv = Timeval{
+            .tv_sec = @intCast(ms / 1000),
+            .tv_usec = @intCast((ms % 1000) * 1000),
+        };
+    }
+
+    UserPtr.from(tv_ptr).writeValue(tv) catch {
+        return error.EFAULT;
+    };
+
+    return 0;
+}
+
+// =============================================================================
+// Threading Primitives (Stubs)
+// =============================================================================
+
+/// sys_futex (202) - Fast userspace locking
+///
+/// MVP: Stub - returns ENOSYS (threading not fully implemented)
+pub fn sys_futex(uaddr: usize, op: usize, val: usize, timeout: usize, uaddr2: usize, val3: usize) SyscallError!usize {
+    _ = uaddr;
+    _ = op;
+    _ = val;
+    _ = timeout;
+    _ = uaddr2;
+    _ = val3;
+    return error.ENOSYS;
+}
+
+// =============================================================================
+// epoll (Stubs)
+// =============================================================================
+
+/// sys_epoll_create1 (291) - Create epoll instance
+///
+/// MVP: Stub - returns ENOSYS
+pub fn sys_epoll_create1(flags: usize) SyscallError!usize {
+    _ = flags;
+    return error.ENOSYS;
+}
+
+/// sys_epoll_ctl (233) - Control epoll instance
+///
+/// MVP: Stub - returns ENOSYS
+pub fn sys_epoll_ctl(epfd: usize, op: usize, fd: usize, event: usize) SyscallError!usize {
+    _ = epfd;
+    _ = op;
+    _ = fd;
+    _ = event;
+    return error.ENOSYS;
+}
+
+/// sys_epoll_wait (232) - Wait for epoll events
+///
+/// MVP: Stub - returns ENOSYS
+pub fn sys_epoll_wait(epfd: usize, events: usize, maxevents: usize, timeout: usize) SyscallError!usize {
+    _ = epfd;
+    _ = events;
+    _ = maxevents;
+    _ = timeout;
+    return error.ENOSYS;
+}

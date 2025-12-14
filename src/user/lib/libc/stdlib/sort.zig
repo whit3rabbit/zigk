@@ -4,6 +4,7 @@
 
 const memory = @import("../memory/root.zig");
 const errno_mod = @import("../errno.zig");
+const internal = @import("../internal.zig");
 
 /// Comparison function type
 pub const CompareFn = *const fn (?*const anyopaque, ?*const anyopaque) callconv(.c) c_int;
@@ -58,10 +59,10 @@ fn insertionSortWithBuffer(
             const prev = arr + (j - 1) * size;
 
             if (cmp(@ptrCast(curr), @ptrCast(prev)) < 0) {
-                // Swap elements
-                @memcpy(temp[0..size], curr[0..size]);
-                @memcpy(curr[0..size], prev[0..size]);
-                @memcpy(prev[0..size], temp[0..size]);
+                // Swap elements using safeCopy to avoid @memcpy recursion
+                internal.safeCopy(temp, curr, size);
+                internal.safeCopy(curr, prev, size);
+                internal.safeCopy(prev, temp, size);
                 j -= 1;
             } else {
                 break;
