@@ -318,6 +318,30 @@ fn flushBuffer() void {
 // Public API
 // =============================================================================
 
+/// Inject a scancode from an external source (e.g., USB HID driver)
+pub fn injectScancode(scancode: u8) void {
+    const held = keyboard_lock.acquire();
+
+    // Store raw scancode in buffer (mimic behavior of handleIrq)
+    if (keyboard_state.scancode_buffer.push(scancode)) {
+        error_stats.buffer_overruns +%= 1;
+    }
+
+    processScancode(scancode);
+
+    // Wake up blocked threads if needed
+    if (keyboard_state.blocked_thread) |blocked| {
+        if (!keyboard_state.ascii_buffer.isEmpty()) {
+            keyboard_state.blocked_thread = null;
+            held.release();
+            sched.unblock(blocked);
+            return;
+        }
+    }
+
+    held.release();
+}
+
 /// Initialize the keyboard driver with proper PS/2 controller setup
 pub fn init() void {
     if (keyboard_initialized) {

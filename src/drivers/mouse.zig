@@ -235,6 +235,32 @@ fn sendMouseCommandWithData(cmd: u8, data: u8) bool {
 // Public API
 // =============================================================================
 
+/// Inject a mouse event from an external source (e.g., USB HID driver)
+pub fn injectRawInput(dx: i16, dy: i16, dz: i8, buttons: Buttons) void {
+    const held = mouse_lock.acquire();
+    defer held.release();
+
+    const buttons_changed = Buttons{
+        .left = buttons.left != mouse_state.prev_buttons.left,
+        .right = buttons.right != mouse_state.prev_buttons.right,
+        .middle = buttons.middle != mouse_state.prev_buttons.middle,
+    };
+
+    mouse_state.prev_buttons = buttons;
+
+    const event = MouseEvent{
+        .dx = dx,
+        .dy = dy,
+        .dz = dz,
+        .buttons = buttons,
+        .buttons_changed = buttons_changed,
+    };
+
+    if (mouse_state.event_buffer.push(event)) {
+        error_stats.buffer_overruns +%= 1;
+    }
+}
+
 /// Initialize the PS/2 mouse
 pub fn init() void {
     if (@atomicLoad(bool, &mouse_initialized, .acquire)) return;
