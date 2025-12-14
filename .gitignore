@@ -63,3 +63,4 @@ tools/zig
 # DOOM
 initrd_contents/doom1.wad
 
+limine/
