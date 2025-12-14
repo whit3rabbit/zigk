@@ -122,6 +122,11 @@ pub const Thread = struct {
     sleep_prev: ?*Thread,
     sleep_next: ?*Thread,
 
+    /// Pending wakeup flag for block()/unblock() synchronization
+    /// Set by unblock() if thread hasn't blocked yet; checked/cleared by block()
+    /// SECURITY: Prevents TOCTOU race in block() - see sched.zig security comments
+    pending_wakeup: bool = false,
+
     /// Get thread name as a slice
     pub fn getName(self: *const Thread) []const u8 {
         // Find null terminator

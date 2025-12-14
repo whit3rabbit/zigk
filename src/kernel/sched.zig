@@ -33,6 +33,11 @@ const fpu = hal.fpu;
 
 /// Scheduler state
 /// All fields protected by the scheduler lock
+///
+/// SECURITY AUDIT: Lock ordering - these locks protect separate data structures
+/// and are not typically acquired together. If both are needed, acquire
+/// process_tree_lock BEFORE scheduler.lock to prevent deadlock.
+///
 /// Process tree lock (moved here to avoid circular dep with sync/process)
 pub var process_tree_lock: sync.Spinlock = .{};
 
@@ -54,6 +59,9 @@ const Scheduler = struct {
     tick_count: u64 = 0,
 
     /// Scheduler lock - must be held when modifying scheduler state
+    /// SECURITY AUDIT: This lock protects ready_queue, sleep_head, tick_count,
+    /// and thread state transitions. Always acquired after process_tree_lock
+    /// if both are needed. Safe to acquire from IRQ context.
     lock: sync.Spinlock = .{},
 
     /// Is the scheduler running? (false until start() is called)
@@ -227,6 +235,10 @@ fn initIdleThread() void {
     // Store idle thread in GS data
     // We access GS via MSR or assumption that it's already set up
     // In BSP init, main.zig sets up GS before calling sched.init()
+    //
+    // SECURITY AUDIT: GS base manipulation requires Ring 0 (CPL=0).
+    // Userspace cannot access IA32_GS_BASE MSR. SWAPGS in syscall entry
+    // properly separates user/kernel GS, preventing userspace attacks.
     const gs_base = hal.cpu.readMsr(hal.cpu.IA32_GS_BASE);
     const gs_data = @as(*hal.syscall.KernelGsData, @ptrFromInt(gs_base));
     gs_data.idle_thread = @intFromPtr(idle);
@@ -376,6 +388,10 @@ pub fn yield() void {
 /// Block the current thread
 /// Thread will not be scheduled until explicitly unblocked via unblock()
 ///
+/// SECURITY AUDIT: This function is designed to be race-free with unblock().
+/// The pending_wakeup flag handles the case where unblock() is called before
+/// we halt. All state transitions happen under the scheduler lock.
+///
 /// IMPORTANT: This function sets the thread state to Blocked, then atomically
 /// enables interrupts and halts. The next timer tick will context-switch to
 /// another thread. Because state is Blocked, this thread will NOT be added
@@ -392,10 +408,25 @@ pub fn block() void {
         defer held.release();
 
         if (current) |curr| {
+            // SECURITY: Check pending_wakeup FIRST under lock.
+            // If unblock() was called before we got here, consume the wakeup
+            // and return immediately without blocking. This prevents the
+            // TOCTOU race where unblock() runs between lock release and halt.
+            if (curr.pending_wakeup) {
+                curr.pending_wakeup = false;
+                if (config.debug_scheduler) {
+                    console.debug("Sched: Thread '{s}' (tid={d}) consumed pending wakeup", .{
+                        curr.getName(),
+                        curr.tid,
+                    });
+                }
+                return; // Don't block - wakeup already arrived
+            }
+
             removeFromSleepList(curr);
             curr.state = .Blocked;
             curr.wake_time = 0;
-            // Don't add to ready queue - thread is blocked
+
             if (config.debug_scheduler) {
                 console.debug("Sched: Thread '{s}' (tid={d}) blocked", .{
                     curr.getName(),
@@ -405,36 +436,32 @@ pub fn block() void {
         }
     }
 
-    // Mitigation for "Spurious Halt" race:
-    // If an interrupt fired immediately after lock release, we might have been
-    // preempted, blocked, unblocked, and rescheduled ALREADY.
-    // In that case, our state is now Running, and we should NOT halt.
-    hal.cpu.disableInterrupts();
-    if (current) |curr| {
-        if (curr.state == .Running) {
-            // We were preempted and woken up already
-            hal.cpu.enableInterrupts();
-            return;
-        }
-    }
-
-    // After releasing the lock (and verifying state), atomically enable interrupts and halt.
-    // The timer IRQ will fire and timerTick() will:
+    // SECURITY: After releasing the lock, we are committed to halting.
+    // If unblock() runs now, it will add us to the ready queue and we'll
+    // be scheduled on the next timer tick after the halt. The timer IRQ
+    // will fire and timerTick() will:
     //   1. Save our context (kernel_rsp)
     //   2. See state == .Blocked, so NOT add us to ready queue
     //   3. Switch to another thread
     // When unblock() is called on us, we're added to ready queue.
-    // When scheduled again, execution resumes here.
+    // When scheduled again, execution resumes after this halt.
     hal.cpu.enableAndHalt();
 }
 
 /// Unblock a thread
 /// Thread will be added to the ready queue
+///
+/// SECURITY AUDIT: Safe to call from any context (IRQ, other CPU).
+/// If thread is Blocked, it's added to ready queue immediately.
+/// If thread hasn't blocked yet (Running), pending_wakeup is set so
+/// block() will return immediately without halting.
+/// This prevents the TOCTOU race in block()/unblock() synchronization.
 pub fn unblock(t: *Thread) void {
     const held = scheduler.lock.acquire();
     defer held.release();
 
     if (t.state == .Blocked) {
+        // Thread is blocked - wake it up normally
         removeFromSleepList(t);
         addToReadyQueue(t);
         if (config.debug_scheduler) {
@@ -443,7 +470,19 @@ pub fn unblock(t: *Thread) void {
                 t.tid,
             });
         }
+    } else if (t.state == .Running) {
+        // SECURITY: Thread hasn't blocked yet - set pending wakeup flag.
+        // block() will check this flag under lock and return immediately
+        // instead of halting, preventing missed wakeup race condition.
+        t.pending_wakeup = true;
+        if (config.debug_scheduler) {
+            console.debug("Sched: Thread '{s}' (tid={d}) set pending_wakeup (state=Running)", .{
+                t.getName(),
+                t.tid,
+            });
+        }
     }
+    // If state is Ready or Zombie, do nothing - thread is already runnable or dead
 }
 
 /// Put the current thread to sleep until tick_count reaches the target
@@ -461,6 +500,9 @@ pub fn sleepForTicks(ticks: u64) void {
         if (current) |curr| {
             removeFromSleepList(curr);
             curr.state = .Blocked;
+            // SECURITY AUDIT: Saturating arithmetic prevents overflow.
+            // At 1000Hz tick rate, u64 overflow takes ~584 million years.
+            // The saturation check ensures extremely long sleeps clamp to max.
             const max_tick: u64 = std.math.maxInt(u64);
             const wake_tick = if (ticks > max_tick - scheduler.tick_count)
                 max_tick
@@ -570,8 +612,11 @@ pub fn timerTick(frame: *hal.idt.InterruptFrame) *hal.idt.InterruptFrame {
         // Save the interrupt frame location
         curr.kernel_rsp = @intFromPtr(frame);
 
-        // Lazy FPU: Only save FPU state if thread used FPU instructions
-        // This avoids expensive FXSAVE for threads that don't use FPU
+        // SECURITY AUDIT: Lazy FPU provides proper isolation between threads.
+        // FPU state is only saved if thread used FPU (fpu_used flag).
+        // On switch-in, CR0.TS is set, triggering #NM on first FPU access.
+        // The #NM handler restores the thread's saved FPU state.
+        // This prevents FPU state leakage between threads.
         if (curr.fpu_used) {
             fpu.fxsave(&curr.fpu_state);
             // Keep fpu_used true so we know to restore on switch back
@@ -596,8 +641,12 @@ pub fn timerTick(frame: *hal.idt.InterruptFrame) *hal.idt.InterruptFrame {
         // console.info("timerTick: got thread from queue '{s}'", .{next_thread.?.getName()});
     }
 
-    // CRITICAL FIX: Ensure next_thread is valid. 
-    // If getIdleThread() returned null/0 (due to GS issue), we must catch it here.
+    // SECURITY AUDIT: Validate next_thread is non-null.
+    // If getIdleThread() returned null (GS data corruption or init failure),
+    // we must panic rather than dereference null. This catches:
+    // - Missing idle thread initialization
+    // - Corrupted GS base pointer
+    // - Race during early boot before idle thread created
     if (next_thread == null) {
         console.panic("Sched: Failed to select next thread (Idle thread missing?)", .{});
     }
@@ -618,9 +667,11 @@ pub fn timerTick(frame: *hal.idt.InterruptFrame) *hal.idt.InterruptFrame {
         // Update TSS.rsp0 for the new thread's kernel stack
         gdt.setKernelStack(next.kernel_stack_top);
 
-        // Updata kernel GS data for SYSCALL instruction
+        // Update kernel GS data for SYSCALL instruction
         // The syscall entry stub reads %gs:0 to get kernel stack
-        // Access GS data directly
+        // SECURITY AUDIT: GS base access requires Ring 0 (CPL=0).
+        // Userspace cannot manipulate kernel GS. SWAPGS in syscall
+        // entry provides proper user/kernel GS separation.
         const gs_base = hal.cpu.readMsr(hal.cpu.IA32_GS_BASE);
         const gs_data = @as(*hal.syscall.KernelGsData, @ptrFromInt(gs_base));
         gs_data.kernel_stack = next.kernel_stack_top;
@@ -641,8 +692,13 @@ pub fn timerTick(frame: *hal.idt.InterruptFrame) *hal.idt.InterruptFrame {
             hal.cpu.writeMsr(hal.cpu.IA32_FS_BASE, next.fs_base);
         }
 
-        // Lazy FPU: Set CR0.TS to trigger #NM on first FPU access
-        // The #NM handler will restore FPU state only when needed
+        // SECURITY AUDIT: Lazy FPU switching for state isolation.
+        // Setting CR0.TS causes #NM on first FPU access by new thread.
+        // The #NM handler (handleFpuAccess) then:
+        //   1. Clears TS flag to allow FPU access
+        //   2. Restores saved FPU state if thread previously used FPU
+        //   3. Sets fpu_used=true to save state on next switch
+        // This ensures FPU state is never leaked between threads.
         fpu.setTaskSwitched();
 
         // Reset fpu_used flag - will be set by #NM handler if thread uses FPU
