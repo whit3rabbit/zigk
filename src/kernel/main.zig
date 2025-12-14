@@ -35,6 +35,7 @@ const net = @import("net");
 const pci = @import("pci");
 const e1000e = @import("e1000e");
 const usb = @import("usb");
+const audio = @import("audio");
 const acpi = @import("acpi");
 const ahci = @import("ahci");
 const devfs = @import("devfs");
@@ -332,6 +333,9 @@ export fn _start() noreturn {
 
     // Initialize USB (XHCI controllers)
     initUsb();
+
+    // Initialize Audio (AC97)
+    initAudio();
 
     // Initialize storage (AHCI controllers)
     initStorage();
@@ -829,6 +833,29 @@ fn initUsb() void {
     };
 
     usb.initFromPci(devices, &ecam);
+}
+
+// ============================================================================
+// Audio Initialization
+// ============================================================================
+
+fn initAudio() void {
+    console.print("\n");
+    console.info("Initializing Audio subsystem...", .{});
+
+    const devices = pci_devices orelse {
+        console.warn("Audio: PCI not initialized, skipping Audio", .{});
+        return;
+    };
+
+    if (devices.findAc97Controller()) |dev| {
+        console.info("Audio: Found AC97 Controller at {d}:{d}.{d}", .{ dev.bus, dev.device, dev.func });
+        audio.ac97.initFromPci(dev) catch |err| {
+             console.warn("Audio: Init failed: {}", .{err});
+        };
+    } else {
+        console.info("Audio: No AC97 controller found", .{});
+    }
 }
 
 // ============================================================================

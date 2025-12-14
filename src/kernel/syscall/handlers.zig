@@ -897,12 +897,25 @@ fn perform_write_locked(fd: *FileDescriptor, buf_ptr: usize, count: usize) Sysca
 
 /// sys_ioctl (16) - Control device
 ///
-/// MVP: Returns -ENOTTY (inappropriate ioctl for device)
-/// This is sufficient for musl isatty() checks.
-pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) SyscallError!usize {
-    _ = fd;
-    _ = cmd;
-    _ = arg;
+/// Dispatches ioctl to the device driver.
+pub fn sys_ioctl(fd_num: usize, cmd: usize, arg: usize) SyscallError!usize {
+    const table = getGlobalFdTable();
+    const fd = table.get(@intCast(fd_num)) orelse return error.EBADF;
+
+    if (fd.ops.ioctl) |ioctl_fn| {
+        const res = ioctl_fn(fd, @intCast(cmd), arg);
+        if (res < 0) {
+             const errno_val: i32 = @intCast(-res);
+             return switch (errno_val) {
+                 25 => error.ENOTTY,
+                 22 => error.EINVAL,
+                 14 => error.EFAULT,
+                 else => error.EIO,
+             };
+        }
+        return @intCast(res);
+    }
+
     return error.ENOTTY;
 }
 
