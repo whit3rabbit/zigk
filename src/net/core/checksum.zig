@@ -15,9 +15,10 @@ pub fn icmpChecksum(data: []const u8) u16 {
     return onesComplement(data);
 }
 
-/// Calculate UDP checksum with pseudo-header
-/// src_ip and dst_ip should be in network byte order
-/// udp_segment_with_header must include the UDP header and payload
+/// Calculate UDP checksum with pseudo-header.
+/// UDP only: protocol value (17) is baked in; do not reuse for TCP.
+/// src_ip and dst_ip should be in network byte order.
+/// udp_segment_with_header must include the UDP header and payload.
 pub fn udpChecksum(src_ip: u32, dst_ip: u32, udp_segment_with_header: []const u8) u16 {
     var sum: u32 = 0;
 

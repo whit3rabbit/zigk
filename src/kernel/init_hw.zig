@@ -89,15 +89,16 @@ pub fn initNetwork() void {
         net_interface.setTransmitFn(txWrapper);
         net_interface.setMulticastUpdateFn(multicastUpdate);
 
-        // 5. Initialize Network Stack
-        net.init(&net_interface, heap.allocator(), 100);
+        // Initialize network stack
+        // Pass 1000 ticks/sec (1ms tick)
+        net.init(&net_interface, heap.allocator(), 1000);
 
         // Program initial multicast filter
         multicastUpdate(&net_interface);
 
         // 6. Register Callbacks
         nic_driver.setRxCallback(rxCallbackAdapter);
-        sched.setTickCallback(net.transport.tcpProcessTimers);
+        sched.setTickCallback(net.tick);
 
         console.info("Network initialized (MAC={x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2})", .{
             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
@@ -140,10 +141,15 @@ pub fn initAudio() void {
         return;
     };
 
+    const ecam = pci_ecam orelse {
+        console.warn("Audio: PCI ECAM not available, skipping Audio", .{});
+        return;
+    };
+
     if (devices.findAc97Controller()) |dev| {
         console.info("Audio: Found AC97 Controller at {d}:{d}.{d}", .{ dev.bus, dev.device, dev.func });
-        audio.ac97.initFromPci(dev) catch |err| {
-             console.warn("Audio: Init failed: {}", .{err});
+        audio.ac97.initFromPci(dev, &ecam) catch |err| {
+            console.warn("Audio: Init failed: {}", .{err});
         };
     } else {
         console.info("Audio: No AC97 controller found", .{});

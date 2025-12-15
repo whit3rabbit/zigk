@@ -10,7 +10,8 @@ const poll_def = uapi.poll;
 /// Poll socket for events
 /// Returns mask of ready events (POLLIN, POLLOUT, etc.)
 pub fn checkPollEvents(fd: usize, events: u16) u16 {
-    const sock = state.getSocket(fd) orelse return poll_def.POLLNVAL;
+    const sock = state.acquireSocket(fd) orelse return poll_def.POLLNVAL;
+    defer state.releaseSocket(sock);
     var revents: u16 = 0;
 
     // Acquire TCP state lock to safely read TCB state

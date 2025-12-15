@@ -59,13 +59,21 @@ pub fn parseOptions(pkt: *const PacketBuffer, tcp_hdr: *const TcpHeader, opts: *
                 if (i + c.TCPOLEN_MSS > options_end) return;
                 if (pkt.data[i + 1] != c.TCPOLEN_MSS) {
                     const skip = pkt.data[i + 1];
+                    if (skip < 2) return; // Invalid option length
+                    if (i + skip > options_end) return; // Would exceed bounds
                     i += skip;
                     bytes_consumed += skip;
                     continue;
                 }
                 const mss = (@as(u16, pkt.data[i + 2]) << 8) | pkt.data[i + 3];
                 opts.mss_present = true;
-                opts.mss = if (mss < c.MIN_MSS) c.MIN_MSS else mss;
+                // MSS should be clamped down, not up.
+                // tcb.mss = min(peer_mss, our_mtu - headers)
+                // Here we just record what the peer sent. The Tcb initiation logic should 
+                // perform the min() calculation against local MTU.
+                // Ideally we should enforce a sanity Min MSS to avoid silly small packets,
+                // but RFC 879 says we shouldn't send larger than peer advertises.
+                opts.mss = mss;
                 i += c.TCPOLEN_MSS;
                 bytes_consumed += c.TCPOLEN_MSS;
             },
@@ -75,6 +83,8 @@ pub fn parseOptions(pkt: *const PacketBuffer, tcp_hdr: *const TcpHeader, opts: *
                 if (i + c.TCPOLEN_WINDOW > options_end) return;
                 if (pkt.data[i + 1] != c.TCPOLEN_WINDOW) {
                     const skip = pkt.data[i + 1];
+                    if (skip < 2) return; // Invalid option length
+                    if (i + skip > options_end) return; // Would exceed bounds
                     i += skip;
                     bytes_consumed += skip;
                     continue;
@@ -90,6 +100,8 @@ pub fn parseOptions(pkt: *const PacketBuffer, tcp_hdr: *const TcpHeader, opts: *
                 if (i + c.TCPOLEN_SACK_PERM > options_end) return;
                 if (pkt.data[i + 1] != c.TCPOLEN_SACK_PERM) {
                     const skip = pkt.data[i + 1];
+                    if (skip < 2) return; // Invalid option length
+                    if (i + skip > options_end) return; // Would exceed bounds
                     i += skip;
                     bytes_consumed += skip;
                     continue;
@@ -104,6 +116,8 @@ pub fn parseOptions(pkt: *const PacketBuffer, tcp_hdr: *const TcpHeader, opts: *
                 if (i + c.TCPOLEN_TIMESTAMP > options_end) return;
                 if (pkt.data[i + 1] != c.TCPOLEN_TIMESTAMP) {
                     const skip = pkt.data[i + 1];
+                    if (skip < 2) return; // Invalid option length
+                    if (i + skip > options_end) return; // Would exceed bounds
                     i += skip;
                     bytes_consumed += skip;
                     continue;

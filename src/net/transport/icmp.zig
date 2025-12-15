@@ -60,6 +60,9 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
     const ip = pkt.ipHeader();
     const ip_total_len = ip.getTotalLength();
     const ip_header_len = ip.getHeaderLength();
+
+    // Security: Guard against underflow from malformed packets
+    if (ip_total_len < ip_header_len) return false;
     const icmp_len = ip_total_len - ip_header_len;
 
     // Validate ICMP checksum
@@ -152,7 +155,11 @@ fn handleEchoRequest(iface: *Interface, req_pkt: *PacketBuffer, icmp_len: usize)
 
     // Copy echo data (everything after ICMP header)
     const echo_data_len = icmp_len - packet.ICMP_HEADER_SIZE;
-    if (echo_data_len > 0) {
+    // Security: Validate that we don't read past the end of the packet buffer
+    // The IP header length check only verified packet.ICMP_HEADER_SIZE availability
+    const available_data = req_pkt.len - (req_pkt.transport_offset + packet.ICMP_HEADER_SIZE);
+    
+    if (echo_data_len > 0 and echo_data_len <= available_data) {
         const req_data = req_pkt.data[req_pkt.transport_offset + packet.ICMP_HEADER_SIZE ..][0..echo_data_len];
         const reply_data = reply_buf[eth_len + ip_len + packet.ICMP_HEADER_SIZE ..][0..echo_data_len];
         @memcpy(reply_data, req_data);
@@ -253,10 +260,17 @@ fn handleDestUnreachable(pkt: *PacketBuffer, icmp: *align(1) const IcmpHeader) b
             const local_port = (@as(u16, orig_transport_data[0]) << 8) | orig_transport_data[1];
             const remote_port = (@as(u16, orig_transport_data[2]) << 8) | orig_transport_data[3];
             
+            var seq_num: ?u32 = null;
+            if (transport_offset + 8 <= pkt.len) {
+                 const seq_bytes = pkt.data[transport_offset + 4 ..][0..4];
+                 seq_num = (@as(u32, seq_bytes[0]) << 24) | (@as(u32, seq_bytes[1]) << 16) | (@as(u32, seq_bytes[2]) << 8) | @as(u32, seq_bytes[3]);
+            }
+
             tcp.handleIcmpError(
                 src_ip, local_port,
                 dst_ip, remote_port,
-                icmp.icmp_type, icmp.code
+                icmp.icmp_type, icmp.code,
+                seq_num
             );
         },
         // UDP integration can be added later

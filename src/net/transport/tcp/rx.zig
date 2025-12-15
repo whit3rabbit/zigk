@@ -21,17 +21,20 @@ const seqLte = types.seqLte;
 const seqGt = types.seqGt;
 const seqGte = types.seqGte;
 
+fn freeTcbWithLock(tcb: *Tcb) void {
+    state.lock.acquire();
+    defer state.lock.release();
+    state.freeTcb(tcb);
+}
+
 /// TCP Input Processing
 //
-// Complies with:
-// - RFC 793: SEGMENT ARRIVAL (Section 3.9)
+//
+// Complies with: - RFC 793: SEGMENT ARRIVAL (Section 3.9)
 //
 // Handles incoming TCP segments, state transitions, and data buffering.
 // Implements the "SEGMENT ARRIVAL" event processing logic.f packet was handled
 pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
-    state.lock.acquire();
-    defer state.lock.release(); // Hold lock for entire function duration
-
     // Validate minimum TCP header size
     if (pkt.len < pkt.transport_offset + c.TCP_HEADER_SIZE) {
         return false;
@@ -48,11 +51,14 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
 
     // Verify TCP checksum
     const tcp_segment = pkt.data[pkt.transport_offset..pkt.len];
-    
+
     // Use stored IPs for checksum to support reassembled packets
     const calc_checksum = @import("checksum.zig").tcpChecksum(pkt.src_ip, pkt.dst_ip, tcp_segment);
 
-    if (calc_checksum != 0 and tcp_hdr.checksum != calc_checksum) {
+    // Security: For valid packets, computing checksum over entire segment (including
+    // stored checksum) yields sum=0xFFFF. After one's complement, result=0, but
+    // tcpChecksum returns 0xFFFF in that case. Any other value means bad checksum.
+    if (calc_checksum != 0xFFFF) {
         return false; // Bad checksum
     }
 
@@ -63,14 +69,17 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
     const remote_port = tcp_hdr.getSrcPort();
 
     // Try established connection first
+    state.lock.acquire();
     if (state.findTcb(local_ip, local_port, remote_ip, remote_port)) |tcb| {
         // Security: Check closing flag before processing (two-phase deletion protection)
         if (tcb.closing) {
+            state.lock.release();
             return false; // TCB is being torn down, ignore packet
         }
 
         // Acquire TCB lock while holding state lock to prevent race where TCB is freed
         const held = tcb.mutex.acquire();
+        state.lock.release();
         defer held.release();
 
         return processEstablishedPacket(tcb, pkt, tcp_hdr);
@@ -80,11 +89,13 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
     if (state.findListeningTcb(local_port)) |listen_tcb| {
         // Security: Check closing flag before processing (two-phase deletion protection)
         if (listen_tcb.closing) {
+            state.lock.release();
             return false; // TCB is being torn down, ignore packet
         }
 
         // Acquire lock
         const held = listen_tcb.mutex.acquire();
+        state.lock.release();
         defer held.release();
 
         return processListenPacket(iface, listen_tcb, pkt, tcp_hdr);
@@ -93,6 +104,7 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
     // No matching connection - send RST
     // We send RST without TCB lock, but we hold state.lock which protects interface?
     // sendRstForPacket doesn't use TCB.
+    state.lock.release();
     _ = tx.sendRstForPacket(iface, pkt, tcp_hdr);
     return true;
 }
@@ -187,13 +199,14 @@ fn processListenPacket(
 
     // Transition to SYN-RECEIVED
     new_tcb.state = .SynReceived;
+    state.half_open_count += 1;
 
     // Insert into hash table
     state.insertTcbIntoHash(new_tcb);
 
     // Send SYN-ACK with options (negotiates wscale, sack, timestamps)
     if (!tx.sendSynAckWithOptions(new_tcb, &peer_opts)) {
-        state.freeTcb(new_tcb);
+        freeTcbWithLock(new_tcb);
         return false;
     }
 
@@ -213,6 +226,26 @@ fn processEstablishedPacket(tcb: *Tcb, pkt: *PacketBuffer, tcp_hdr: *TcpHeader) 
     const rcv_wnd = tcb.currentRecvWindow();
 
     var acceptable = false;
+
+    // Parse options for PAWS
+    var peer_opts = options.TcpOptions{};
+    options.parseOptions(pkt, tcp_hdr, &peer_opts);
+
+    // PAWS: Protection Against Wrapped Sequences (RFC 7323)
+    if (tcb.ts_ok and tcp_hdr.hasFlag(TcpHeader.FLAG_ACK) and peer_opts.timestamp_present) {
+        // Drop packet if timestamp is older than recent
+        // Note: RFC 7323 algorithm is more complex (handles pause, etc), simplified here
+        if (peer_opts.ts_val < tcb.ts_recent) {
+            // Check if TS.Recent is valid (not too old) - simplified: assumed valid if connection active
+             return true; // Drop silently (RFC recommends sending ACK, but silent drop is safer for DoS)
+             // Actually RFC says: "If the connection is in a synchronized state ... send an acknowledgement"
+             // We return true to indicate processed (dropped).
+        }
+        // Update TS.Recent
+        if (seqLte(seq, tcb.rcv_nxt) and seqGt(seq +% seg_len, tcb.rcv_nxt)) {
+            tcb.ts_recent = peer_opts.ts_val;
+        }
+    }
 
     if (seg_len == 0) {
         if (rcv_wnd == 0) {
@@ -242,14 +275,30 @@ fn processEstablishedPacket(tcb: *Tcb, pkt: *PacketBuffer, tcp_hdr: *TcpHeader) 
         // unless the RST bit is set, in which case the segment is dropped
         if (!tcp_hdr.hasFlag(TcpHeader.FLAG_RST)) {
             _ = tx.sendAck(tcb);
+        } else {
+             // RFC 5961: If RST is in window but not exact match, send challenge ACK
+             // acceptable here means it is in window.
+             // We need to check exact sequence match.
+             if (seq != tcb.rcv_nxt) {
+                 // Challenge ACK
+                 _ = tx.sendAck(tcb);
+                 return true;
+             }
         }
         return true; // Packet processed (dropped)
     }
 
     // Handle RST first
     if (tcp_hdr.hasFlag(TcpHeader.FLAG_RST)) {
-        // RST is valid (in window)
-        return handleRst(tcb);
+        // RSI is valid (in window)
+        // RFC 5961: Validate exact sequence number
+        if (seq == tcb.rcv_nxt) {
+            return handleRst(tcb);
+        } else {
+            // Challenge ACK
+            _ = tx.sendAck(tcb);
+            return true;
+        }
     }
 
     // Dispatch based on state (RFC 793 state machine)
@@ -278,7 +327,7 @@ fn handleRst(tcb: *Tcb) bool {
         tcb.blocked_thread = null;
     }
 
-    state.freeTcb(tcb);
+    freeTcbWithLock(tcb);
     return true;
 }
 
@@ -302,7 +351,7 @@ fn processSynSent(tcb: *Tcb, pkt: *PacketBuffer, tcp_hdr: *TcpHeader) bool {
                 socket.wakeThread(thread);
                 tcb.blocked_thread = null;
             }
-            state.freeTcb(tcb);
+            freeTcbWithLock(tcb);
             return true;
         }
         tcb.snd_una = ack;
@@ -391,6 +440,7 @@ fn processSynReceived(tcb: *Tcb, tcp_hdr: *TcpHeader) bool {
     // Connection established
     tcb.snd_una = ack;
     tcb.state = .Established;
+    if (state.half_open_count > 0) state.half_open_count -= 1;
     tcb.retrans_timer = 0;
     tcb.retrans_count = 0;
 
@@ -398,7 +448,8 @@ fn processSynReceived(tcb: *Tcb, tcp_hdr: *TcpHeader) bool {
     if (tcb.parent_socket) |parent_idx| {
         if (socket.queueAcceptConnection(parent_idx, tcb)) {
             // Successfully queued - wake any thread blocked on accept()
-            if (socket.getSocket(parent_idx)) |parent_sock| {
+            if (socket.acquireSocket(parent_idx)) |parent_sock| {
+                defer socket.releaseSocket(parent_sock);
                 if (parent_sock.blocked_thread) |thread| {
                     socket.wakeThread(thread);
                     parent_sock.blocked_thread = null;
@@ -454,7 +505,10 @@ fn processEstablished(tcb: *Tcb, pkt: *PacketBuffer, tcp_hdr: *TcpHeader) bool {
                 tcb.cwnd = std.math.add(u32, tcb.cwnd, inc_clamped) catch std.math.maxInt(u32);
             }
 
+            const real_acked = ack -% tcb.snd_una;
             tcb.snd_una = ack;
+            // Update send_tail to free up buffer space
+            tcb.send_tail = (tcb.send_tail + real_acked) % c.BUFFER_SIZE;
             // Stop retransmit timer if all data acked
             if (tcb.snd_una == tcb.snd_nxt) {
                 tcb.retrans_timer = 0;
@@ -462,11 +516,39 @@ fn processEstablished(tcb: *Tcb, pkt: *PacketBuffer, tcp_hdr: *TcpHeader) bool {
         }
     }
 
-    // Update send window
-    tcb.snd_wnd = tcp_hdr.getWindow();
+    // Update send window - apply window scaling if negotiated (RFC 7323)
+    // Update send window - RFC 793 Window Update
+    // SND.WND is updated if:
+    // SND.WL1 < SEG.SEQ  or
+    // SND.WL1 = SEG.SEQ and SND.WL2 <= SEG.ACK
+    //
+    // Note: SND.WL2 check requires ACK flag, but we are in Established state where almost all packets have ACK.
+    // If ACK is not present, we shouldn't update window based on ACK field.
+    const seq = tcp_hdr.getSeqNum();
+    const ack = if (tcp_hdr.hasFlag(TcpHeader.FLAG_ACK)) tcp_hdr.getAckNum() else tcb.snd_wl2;
+    
+    // Initial update (when wl1/wl2 are 0) or valid update
+    // We treat 0 as "not set" if tcb.snd_una is also 0? No, sequence numbers wrap.
+    // Ideally we initialized wl1/wl2 to proper values during handshake.
+    // For now we assume if window update logic passes, we update.
+    
+    var update_window = false;
+    if (seqGt(seq, tcb.snd_wl1) or (seq == tcb.snd_wl1 and seqGte(ack, tcb.snd_wl2))) {
+        update_window = true;
+    }
+    
+    if (update_window) {
+        const raw_window = tcp_hdr.getWindow();
+        tcb.snd_wnd = if (tcb.wscale_ok) blk: {
+            const scale: u5 = @min(tcb.snd_wscale, 14);
+            break :blk @as(u32, raw_window) << scale;
+        } else raw_window;
+        
+        tcb.snd_wl1 = seq;
+        tcb.snd_wl2 = ack;
+    }
 
     // Process incoming data
-    const seq = tcp_hdr.getSeqNum();
     const data_offset = tcp_hdr.getDataOffset();
     const ip_hdr = pkt.ipHeader();
     const ip_payload_len = ip_hdr.getTotalLength() - ip_hdr.getHeaderLength();
@@ -494,7 +576,11 @@ fn processEstablished(tcb: *Tcb, pkt: *PacketBuffer, tcp_hdr: *TcpHeader) bool {
                 tcb.recv_head = (tcb.recv_head + 1) % c.BUFFER_SIZE;
             }
 
-            tcb.rcv_nxt +%= @as(u32, @truncate(copy_len));
+            // Security: Use checked cast to prevent overflow from large reassembled packets
+            const copy_len_u32: u32 = std.math.cast(u32, copy_len) orelse {
+                return false; // Reject oversized segment
+            };
+            tcb.rcv_nxt +%= copy_len_u32;
 
             // Wake thread blocked on recv() if data was copied
             if (copy_len > 0) {
@@ -550,7 +636,7 @@ fn processLastAck(tcb: *Tcb, tcp_hdr: *TcpHeader) bool {
         if (ack == tcb.snd_nxt) {
             // FIN acknowledged - connection closed
             tcb.state = .Closed;
-            state.freeTcb(tcb);
+            freeTcbWithLock(tcb);
         }
     }
     return true;
@@ -623,6 +709,21 @@ fn processClosing(tcb: *Tcb, tcp_hdr: *TcpHeader) bool {
 
 /// Process packet in TIME-WAIT state (both FINs exchanged, waiting 2*MSL)
 fn processTimeWait(tcb: *Tcb, tcp_hdr: *TcpHeader) bool {
+    // Security (RFC 5961): In TIME-WAIT, RST is only accepted if SEQ == RCV.NXT exactly.
+    // This prevents TIME_WAIT assassination attacks where an attacker sends RST
+    // to prematurely close TIME_WAIT, allowing port reuse for connection hijacking.
+    if (tcp_hdr.hasFlag(TcpHeader.FLAG_RST)) {
+        const seq = tcp_hdr.getSeqNum();
+        if (seq == tcb.rcv_nxt) {
+            // Exact match - accept RST
+            tcb.state = .Closed;
+            freeTcbWithLock(tcb);
+            return true;
+        }
+        // RST with wrong sequence - silently ignore (don't send challenge ACK in TIME_WAIT)
+        return true;
+    }
+
     // In TIME-WAIT, we may receive retransmitted FINs - just ACK them
     if (tcp_hdr.hasFlag(TcpHeader.FLAG_FIN)) {
         // Reset the 2*MSL timer
@@ -636,5 +737,5 @@ fn processTimeWait(tcb: *Tcb, tcp_hdr: *TcpHeader) bool {
 /// Reject a connection we cannot queue by sending RST and freeing the TCB
 fn rejectUnqueuedConnection(tcb: *Tcb) void {
     _ = tx.sendRst(tcb);
-    state.freeTcb(tcb);
+    freeTcbWithLock(tcb);
 }

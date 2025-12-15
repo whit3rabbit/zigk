@@ -1,5 +1,6 @@
 // UDP-facing socket helpers (sendto/recvfrom and delivery path).
 
+const std = @import("std");
 const udp = @import("../udp.zig");
 const ipv4 = @import("../../ipv4/ipv4.zig");
 const packet = @import("../../core/packet.zig");
@@ -14,7 +15,8 @@ pub fn sendto(
     data: []const u8,
     dest_addr: *const types.SockAddrIn,
 ) errors.SocketError!usize {
-    const sock = state.getSocket(sock_fd) orelse return errors.SocketError.BadFd;
+    const sock = state.acquireSocket(sock_fd) orelse return errors.SocketError.BadFd;
+    defer state.releaseSocket(sock);
     const iface = state.getInterface() orelse return errors.SocketError.NetworkDown;
 
     // Auto-bind if not bound
@@ -82,16 +84,16 @@ pub fn recvfrom(
     buf: []u8,
     src_addr: ?*types.SockAddrIn,
 ) errors.SocketError!usize {
-    const sock = state.getSocket(sock_fd) orelse return errors.SocketError.BadFd;
+    const sock = state.acquireSocket(sock_fd) orelse return errors.SocketError.BadFd;
+    defer state.releaseSocket(sock);
 
     var src_ip: u32 = 0;
     var src_port: u16 = 0;
 
     // Non-blocking: check queue and return immediately
-    // Disable interrupts to prevent race with ISR enqueuing packets
     if (!sock.blocking) {
-        const saved_flags = hal.cpu.disableInterruptsSaveFlags();
-        defer hal.cpu.restoreInterrupts(saved_flags);
+        state.socketLock().acquire();
+        defer state.socketLock().release();
 
         if (sock.dequeuePacket(buf, &src_ip, &src_port)) |len| {
             if (src_addr) |addr| {
@@ -107,12 +109,18 @@ pub fn recvfrom(
         const get_current = scheduler.currentThreadFn() orelse return errors.SocketError.SystemError;
 
         while (true) {
-            // Try to dequeue data with interrupts enabled
-            if (sock.dequeuePacket(buf, &src_ip, &src_port)) |len| {
-                if (src_addr) |addr| {
-                    addr.* = types.SockAddrIn.init(src_ip, src_port);
+            // Try to dequeue data with lock held
+            {
+                state.socketLock().acquire();
+                // We must release the lock before returning or blocking
+                if (sock.dequeuePacket(buf, &src_ip, &src_port)) |len| {
+                    state.socketLock().release();
+                    if (src_addr) |addr| {
+                        addr.* = types.SockAddrIn.init(src_ip, src_port);
+                    }
+                    return len;
                 }
-                return len;
+                state.socketLock().release();
             }
 
             // No data available - block atomically
@@ -135,19 +143,20 @@ pub fn recvfrom(
     const timeout_ticks: usize = if (sock.rcv_timeout_ms > 0)
         @intCast(sock.rcv_timeout_ms / 10) // ~10ms per tick approximation
     else
-        1000; // Default 10 second timeout when no explicit timeout set
+        std.math.maxInt(usize); // Infinite timeout (0 means block forever)
 
     var ticks: usize = 0;
     while (ticks < timeout_ticks) : (ticks += 1) {
-        // Check for data with interrupts disabled to avoid race
-        const flags = hal.cpu.disableInterruptsSaveFlags();
+        // Check for data with lock held
+        state.socketLock().acquire();
         if (sock.dequeuePacket(buf, &src_ip, &src_port)) |len| {
-            hal.cpu.restoreInterrupts(flags);
+            state.socketLock().release();
             if (src_addr) |addr| {
                 addr.* = types.SockAddrIn.init(src_ip, src_port);
             }
             return len;
         }
+        state.socketLock().release();
         // HLT atomically enables interrupts and halts until next interrupt
         // This is much more power-efficient than busy-spinning with pause
         asm volatile ("sti; hlt");
@@ -195,8 +204,11 @@ pub fn deliverUdpPacket(pkt: *packet.PacketBuffer) bool {
             if (sock.local_port != dst_port) continue;
 
             // Check address binding
-            // Socket must be bound to INADDR_ANY or the specific destination
-            if (sock.local_addr != 0 and sock.local_addr != dst_ip and !pkt.is_multicast) continue;
+            // Check if bound to specific IP (and not broadcast)
+            // RFC Compliance: If socket is bound to a specific IP, it should STILL accept broadcast
+            // packets arriving on that interface, provided it's bound to INADDR_ANY or the specific IP.
+            // The check below was too strict.
+            if (sock.local_addr != 0 and sock.local_addr != dst_ip and !pkt.is_broadcast and !pkt.is_multicast) continue;
 
             // For multicast, also check group membership
             if (pkt.is_multicast) {

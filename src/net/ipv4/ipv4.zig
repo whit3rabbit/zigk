@@ -38,6 +38,8 @@ pub const PROTO_UDP: u8 = 17;
 /// Default TTL for outgoing packets
 pub const DEFAULT_TTL: u8 = 64;
 
+var ipv4_allocator: ?std.mem.Allocator = null;
+
 // ============================================================================
 // IPv4 Options Constants (RFC 791, RFC 7126)
 // ============================================================================
@@ -62,8 +64,9 @@ pub const IP_HEADER_MAX: usize = 60;
 // var ip_id_counter: u16 = 0;
 
 /// Initialize IPv4 subsystem
-pub fn init(allocator: std.mem.Allocator) void {
-    arp.init(allocator);
+pub fn init(allocator: std.mem.Allocator, ticks_per_sec: u32) void {
+    ipv4_allocator = allocator;
+    arp.init(allocator, ticks_per_sec);
     reassembly.init();
 }
 
@@ -181,6 +184,11 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
 
     const header_len = @as(usize, ihl) * 4;
 
+    // Defense in depth: Verify packet buffer contains the full header
+    if (pkt.ip_offset + header_len > pkt.len) {
+        return false;
+    }
+
     // Validate IP options if present (RFC 791, RFC 7126)
     // This also drops dangerous source routing options for security
     if (!validateOptions(pkt, header_len)) {
@@ -205,6 +213,7 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
     // Store destination IP in packet metadata for transport layers
     // Important for reassembled packets where the IP header is virtual/stripped
     pkt.dst_ip = dst_ip;
+    pkt.src_ip = ip.getSrcIp();
 
     // Determine packet type and whether we should accept it
     if (dst_ip == iface.ip_addr) {
@@ -267,28 +276,20 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
     // Set transport layer offset
     
     if (is_reassembled) {
-        // Security fix: Copy reassembled data to local buffer before freeing entry.
-        // This prevents use-after-free if transport handlers hold references.
-        // Kernel stack is 32KB; 8KB buffer provides safety margin for deeply
-        // nested call chains during packet processing while still supporting
-        // most legitimate reassembled packets (typical MTU is 1500).
-        const MAX_REASSEMBLY_COPY: usize = 8192;
-
-        if (payload_slice.len > MAX_REASSEMBLY_COPY) {
-            // Extremely large reassembled packet - drop it (security measure)
+        const allocator = ipv4_allocator orelse heap.allocator();
+        const copy = allocator.alloc(u8, payload_slice.len) catch {
             reassembly.freeEntry(reassembly_id);
             return false;
-        }
+        };
+        errdefer allocator.free(copy);
 
-        // Copy to local buffer before freeing reassembly entry
-        var local_buffer: [MAX_REASSEMBLY_COPY]u8 = undefined;
-        @memcpy(local_buffer[0..payload_slice.len], payload_slice);
+        @memcpy(copy, payload_slice);
 
-        // Now safe to free - data is copied
+        // Now safe to free reassembly entry - data is off the shared buffer
         reassembly.freeEntry(reassembly_id);
 
-        // Create PacketBuffer using local copy
-        var virt_pkt = PacketBuffer.init(local_buffer[0..payload_slice.len], payload_slice.len);
+        // Create PacketBuffer using heap-backed copy to avoid kernel stack pressure
+        var virt_pkt = PacketBuffer.init(copy, payload_slice.len);
 
         // Copy relevant metadata from original packet
         virt_pkt.src_ip = pkt.src_ip;
@@ -301,12 +302,15 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
         virt_pkt.transport_offset = 0;
 
         // Dispatch to transport layer
-        return switch (ip.protocol) {
+        const handled = switch (ip.protocol) {
             PROTO_ICMP => icmp.processPacket(iface, &virt_pkt),
             PROTO_UDP => udp.processPacket(iface, &virt_pkt),
             PROTO_TCP => tcp.processPacket(iface, &virt_pkt),
             else => false,
         };
+
+        allocator.free(copy);
+        return handled;
     }
 
     // Normal non-fragmented path (using original pkt)

@@ -10,7 +10,7 @@
 //
 // Note: R10 is used instead of RCX for arg4 because syscall clobbers RCX
 
-const uapi = @import("uapi");
+pub const uapi = @import("uapi");
 const syscalls = uapi.syscalls;
 const Errno = uapi.errno.Errno;
 
@@ -710,4 +710,40 @@ pub fn connect(fd: i32, addr: *const SockAddrIn) SyscallError!void {
 pub fn shutdown(fd: i32, how: i32) SyscallError!void {
      const ret = syscall2(syscalls.SYS_SHUTDOWN, @bitCast(@as(isize, fd)), @bitCast(@as(isize, how)));
      if (isError(ret)) return errorFromReturn(ret);
+}
+
+// =============================================================================
+// Input/Mouse Syscalls (1010-1019)
+// =============================================================================
+
+/// Read next input event (non-blocking)
+/// Returns EAGAIN if no event available
+pub fn read_input_event(event: *uapi.input.InputEvent) SyscallError!void {
+    const ret = syscall1(syscalls.SYS_READ_INPUT_EVENT, @intFromPtr(event));
+    if (isError(ret)) return errorFromReturn(ret);
+}
+
+/// Get current cursor position
+pub fn get_cursor_position(pos: *uapi.input.CursorPosition) SyscallError!void {
+    const ret = syscall1(syscalls.SYS_GET_CURSOR_POSITION, @intFromPtr(pos));
+    if (isError(ret)) return errorFromReturn(ret);
+}
+
+/// Set cursor bounds (screen dimensions)
+pub fn set_cursor_bounds(width: u32, height: u32) SyscallError!void {
+    // We construct the struct on stack and pass pointer
+    // The syscall implementation in kernel handles copy_from_user
+    const bounds = uapi.input.CursorBounds{
+        .width = width,
+        .height = height,
+    };
+    const ret = syscall1(syscalls.SYS_SET_CURSOR_BOUNDS, @intFromPtr(&bounds));
+    if (isError(ret)) return errorFromReturn(ret);
+}
+
+/// Set input mode
+/// mode: 0=relative, 1=absolute, 2=raw
+pub fn set_input_mode(mode: uapi.input.InputMode) SyscallError!void {
+    const ret = syscall1(syscalls.SYS_SET_INPUT_MODE, @intFromEnum(mode));
+    if (isError(ret)) return errorFromReturn(ret);
 }

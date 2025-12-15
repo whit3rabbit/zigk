@@ -113,6 +113,12 @@ pub const Socket = struct {
     /// Set by syscall layer, woken by packet processing
     blocked_thread: scheduler.ThreadPtr,
 
+    /// Reference count for lifetime management.
+    /// 1 is held by the socket table entry; operations take additional refs.
+    refcount: usize,
+    /// Socket is closing; prevents new references
+    closing: bool,
+
     // =========================================================================
     // Socket Options
     // =========================================================================
@@ -170,6 +176,8 @@ pub const Socket = struct {
             .shutdown_read = false,
             .shutdown_write = false,
             .blocked_thread = null,
+            .refcount = 0,
+            .closing = false,
             // Socket options - defaults
             .rcv_timeout_ms = 0, // Infinite timeout (blocking forever)
             .snd_timeout_ms = 0,

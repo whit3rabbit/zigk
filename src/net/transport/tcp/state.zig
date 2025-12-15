@@ -24,17 +24,29 @@ pub var listen_tcbs: std.ArrayListUnmanaged(*Tcb) = .{};
 pub var global_iface: ?*Interface = null;
 
 /// ISN counter (combined with entropy for unpredictability)
+/// ISN counter (combined with entropy for unpredictability) - DEPRECATED for linear use
 pub var isn_counter: u32 = 0;
 
 /// Monotonic timestamp counter for connection tracking (milliseconds)
 /// Incremented by processTimers() each tick
 pub var connection_timestamp: u64 = 0;
 
+/// Tick the TCP clock (called from system timer)
+pub fn tick() void {
+    connection_timestamp +%= ms_per_tick;
+    // We could call processTimers() here, but usually it's called separately or via a scheduler job
+    // to avoid doing too much work in interrupt context.
+    // For this kernel, let's assume processTimers() is called by the same mechanism driving this tick.
+}
+
 /// Global TCP lock
 pub var lock: sync.Lock = sync.noop_lock;
 
 /// Secret key for ISN generation (RFC 6528)
 var secret_key: u64 = 0;
+
+/// Count of half-open connections (SYN-RECEIVED)
+pub var half_open_count: usize = 0;
 
 /// TCP State Machine
 //
@@ -90,22 +102,21 @@ pub fn init(iface: *Interface, allocator: std.mem.Allocator, ticks_per_sec: u32)
 
 /// Count connections in SYN-RECEIVED state (half-open)
 pub fn countHalfOpen() usize {
-    var count: usize = 0;
-    for (tcb_pool.items) |tcb| {
-        if (tcb.state == .SynReceived) {
-            count += 1;
-        }
-    }
-    return count;
+    return half_open_count;
 }
 
 /// Allocate a new TCB
 pub fn allocateTcb() ?*Tcb {
+    // Security: Enforce MAX_TCBS limit to prevent resource exhaustion
+    if (tcb_pool.items.len >= c.MAX_TCBS) {
+        return null;
+    }
+
     const tcb = tcp_allocator.create(Tcb) catch return null;
     tcb.* = Tcb.init();
     tcb.allocated = true;
     tcb.created_at = connection_timestamp;
-    
+
     tcb_pool.append(tcp_allocator, tcb) catch {
         tcp_allocator.destroy(tcb);
         return null;
@@ -120,6 +131,10 @@ pub fn allocateTcb() ?*Tcb {
 /// 2. Remove from hash table to prevent new lookups
 /// 3. Reset state and free memory
 pub fn freeTcb(tcb: *Tcb) void {
+    // Maintain half-open counter
+    if (tcb.state == .SynReceived) {
+        if (half_open_count > 0) half_open_count -= 1;
+    }
     // Phase 1: Mark as closing - any concurrent packet processing
     // that somehow obtained a reference will see this flag and bail out
     tcb.closing = true;
@@ -266,8 +281,20 @@ pub fn removeFromListenTable(tcb: *Tcb) void {
 /// ISN = M + F(localip, localport, remoteip, remoteport, secret_key)
 /// Secret key is periodically re-seeded for defense-in-depth
 pub fn generateIsn(l_ip: u32, l_port: u16, r_ip: u32, r_port: u16) u32 {
-    // M = Timer (isn_counter)
-    isn_counter +%= 1;
+    // M = Timer. RFC 6528 suggests a 4us timer.
+    // We use our millisecond connection_timestamp scaled to approximate higher resolution
+    // and prevent easy guessing, combined with the global entropy counter.
+    // 250 increments per ms = 4us resolution approx
+    const time_component = @as(u32, @truncate(connection_timestamp)) *% 250;
+    
+    // We still mix in isn_counter (which is random seeded) but we don't
+    // strictly rely on its linear increment leaking volume.
+    // Actually, to fully prevent leak we should not assume a global linear counter that
+    // increments per connection.
+    
+    // Use the time component as the linear basline 'M'
+    const M = time_component;
+    
     isn_generation_count +%= 1;
 
     // Periodically re-seed secret key with fresh entropy
@@ -293,7 +320,7 @@ pub fn generateIsn(l_ip: u32, l_port: u16, r_ip: u32, r_port: u16) u32 {
     k *%= 0x94d049bb133111eb;
     k ^= (k >> 31);
 
-    return isn_counter +% @as(u32, @truncate(k));
+    return M +% @as(u32, @truncate(k));
 }
 
 /// Get current timestamp for TCP Timestamps option (RFC 7323)

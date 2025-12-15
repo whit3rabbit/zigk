@@ -14,7 +14,8 @@ pub const SHUT_RDWR: i32 = 2; // Disable both
 /// Shut down part of a full-duplex connection
 /// how: SHUT_RD (0), SHUT_WR (1), or SHUT_RDWR (2)
 pub fn shutdown(sock_fd: usize, how: i32) errors.SocketError!void {
-    const sock = state.getSocket(sock_fd) orelse return errors.SocketError.BadFd;
+    const sock = state.acquireSocket(sock_fd) orelse return errors.SocketError.BadFd;
+    defer state.releaseSocket(sock);
 
     // Validate 'how' parameter
     if (how != SHUT_RD and how != SHUT_WR and how != SHUT_RDWR) {
@@ -47,7 +48,8 @@ pub fn shutdown(sock_fd: usize, how: i32) errors.SocketError!void {
 /// Get local socket address
 /// Returns local IP and port bound to this socket
 pub fn getsockname(sock_fd: usize, addr: *types.SockAddrIn) errors.SocketError!void {
-    const sock = state.getSocket(sock_fd) orelse return errors.SocketError.BadFd;
+    const sock = state.acquireSocket(sock_fd) orelse return errors.SocketError.BadFd;
+    defer state.releaseSocket(sock);
 
     // Get local address - use interface IP if bound to INADDR_ANY
     var local_ip = sock.local_addr;
@@ -68,7 +70,8 @@ pub fn getsockname(sock_fd: usize, addr: *types.SockAddrIn) errors.SocketError!v
 /// Get peer socket address (for connected sockets)
 /// Returns remote IP and port of connected peer
 pub fn getpeername(sock_fd: usize, addr: *types.SockAddrIn) errors.SocketError!void {
-    const sock = state.getSocket(sock_fd) orelse return errors.SocketError.BadFd;
+    const sock = state.acquireSocket(sock_fd) orelse return errors.SocketError.BadFd;
+    defer state.releaseSocket(sock);
 
     // TCP: get peer address from TCB
     if (sock.sock_type == types.SOCK_STREAM) {

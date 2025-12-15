@@ -128,13 +128,29 @@ fn resolveOnce(allocator: std.mem.Allocator, hostname: []const u8, server_ip: u3
     // Receive response
     var recv_buf: [512]u8 = undefined;
     var src_addr: socket.SockAddrIn = std.mem.zeroes(socket.SockAddrIn);
-    const received = try socket.recvfrom(fd_idx, &recv_buf, &src_addr);
+    var received: usize = 0;
+    while (true) {
+        received = try socket.recvfrom(fd_idx, &recv_buf, &src_addr);
 
-    if (received < 12) return DnsError.FormatError;
+        // Validate response came from expected DNS server (RFC 5452)
+        if (src_addr.addr != server_ip or src_addr.getPort() != 53) {
+            // Ignore spoofed packet, keep waiting until timeout
+            continue;
+        }
 
-    // Validate response came from expected DNS server (RFC 5452)
-    if (src_addr.addr != server_ip or src_addr.getPort() != 53) {
-        return DnsError.Refused; // Spoofed response - wrong source
+        if (received < 12) {
+            // Malformed - ignore and keep waiting
+            continue;
+        }
+
+        const resp = recv_buf[0..received];
+        const resp_id = @as(u16, resp[0]) << 8 | resp[1];
+        if (resp_id != tx_id) {
+            // Keep listening until timeout expires
+            continue;
+        }
+
+        break;
     }
 
     // Close socket (we are done with network)
@@ -142,9 +158,6 @@ fn resolveOnce(allocator: std.mem.Allocator, hostname: []const u8, server_ip: u3
 
     // Parse Response
     const resp = recv_buf[0..received];
-
-    const resp_id = @as(u16, resp[0]) << 8 | resp[1];
-    if (resp_id != tx_id) return DnsError.IdMismatch;
 
     const flags = @as(u16, resp[2]) << 8 | resp[3];
 

@@ -36,13 +36,48 @@ pub fn getInterface() ?*Interface {
     return global_iface;
 }
 
+/// Acquire a socket with a reference count increment.
+/// Returns null if the descriptor is invalid or closing.
+pub fn acquireSocket(sock_fd: usize) ?*types.Socket {
+    const l = socketLock();
+    l.acquire();
+    defer l.release();
+    return acquireSocketLocked(sock_fd);
+}
+
+fn acquireSocketLocked(sock_fd: usize) ?*types.Socket {
+    if (sock_fd >= socket_table.items.len) return null;
+    const sock = socket_table.items[sock_fd] orelse return null;
+    if (!sock.allocated or sock.closing) return null;
+    sock.refcount += 1;
+    return sock;
+}
+
 pub fn getSocket(sock_fd: usize) ?*types.Socket {
+    const l = socketLock();
+    l.acquire();
+    defer l.release();
     if (sock_fd >= socket_table.items.len) return null;
     return socket_table.items[sock_fd];
 }
 
 pub fn getSocketTable() []?*types.Socket {
     return socket_table.items;
+}
+
+pub fn releaseSocket(sock: *types.Socket) void {
+    const l = socketLock();
+    l.acquire();
+    defer l.release();
+    releaseSocketLocked(sock);
+}
+
+pub fn releaseSocketLocked(sock: *types.Socket) void {
+    if (sock.refcount == 0) return;
+    sock.refcount -= 1;
+    if (sock.refcount == 0) {
+        socket_allocator.destroy(sock);
+    }
 }
 
 fn findFreeSlot() ?usize {

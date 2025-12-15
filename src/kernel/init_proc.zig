@@ -37,11 +37,25 @@ pub fn loadInitProcess() void {
     for (mods) |mod| {
         const cmdline = get_str(mod.cmdline);
         const path = get_str(mod.path);
-        
+
         if (std.mem.indexOf(u8, cmdline, "test_asm") != null or std.mem.indexOf(u8, path, "test_asm") != null) {
             selected_mod = mod;
             process_name = "test_asm";
             break;
+        }
+    }
+
+    // Priority 0.5: Audio Test
+    if (selected_mod == null) {
+        for (mods) |mod| {
+            const cmdline = get_str(mod.cmdline);
+            const path = get_str(mod.path);
+
+            if (std.mem.indexOf(u8, cmdline, "audio") != null or std.mem.indexOf(u8, path, "audio") != null) {
+                selected_mod = mod;
+                process_name = "audio_test";
+                break;
+            }
         }
     }
 

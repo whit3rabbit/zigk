@@ -1,6 +1,7 @@
 const c = @import("constants.zig");
 const state = @import("state.zig");
 const tx = @import("tx.zig");
+const types = @import("types.zig");
 
 const socket = @import("../socket.zig");
 
@@ -9,7 +10,9 @@ const socket = @import("../socket.zig");
 pub fn processTimers() void {
     state.lock.acquire();
     // List of threads to wake after releasing the lock (to avoid deadlock)
-    var wake_list: [32]?*anyopaque = undefined;
+    // Security: Size increased to handle pathological cases where many TCBs timeout simultaneously
+    // Must be >= MAX_TCBS to prevent threads being orphaned without waking
+    var wake_list: [c.MAX_TCBS]?*anyopaque = undefined;
     var wake_count: usize = 0;
 
     // Iterate backwards to safely handle swapRemove during iteration.
@@ -124,11 +127,28 @@ pub fn processTimers() void {
 }
 
 /// Handle ICMP error for a connection
-pub fn handleIcmpError(local_ip: u32, local_port: u16, remote_ip: u32, remote_port: u16, icmp_type: u8, icmp_code: u8) void {
+/// Handle ICMP error for a connection
+pub fn handleIcmpError(local_ip: u32, local_port: u16, remote_ip: u32, remote_port: u16, icmp_type: u8, icmp_code: u8, seq_num: ?u32) void {
     state.lock.acquire();
     defer state.lock.release();
 
     const tcb = state.findTcb(local_ip, local_port, remote_ip, remote_port) orelse return;
+
+    // RFC 5927: Validate sequence number if present
+    if (seq_num) |seq| {
+        // Must be in range [SND.UNA, SND.NXT]
+        // Note: SND.NXT might have advanced since the packet was sent, but the
+        // seq number in the error should be what we sent (less than SND.NXT).
+        // It must be >= SND.UNA (unacknowledged).
+        // We use loose check validation to account for window
+        const snd_una = tcb.snd_una;
+        const snd_nxt = tcb.snd_nxt;
+        
+        // seq < snd_una OR seq > snd_nxt
+        if (types.seqLt(seq, snd_una) or types.seqGt(seq, snd_nxt)) {
+            return; // Ignore Invalid ICMP error
+        }
+    }
 
     // Only handle Destination Unreachable for now
     if (icmp_type != 3) return;
@@ -156,15 +176,13 @@ pub fn handleIcmpError(local_ip: u32, local_port: u16, remote_ip: u32, remote_po
         return;
     }
 
-    // Established Phase: Only hard errors reset connection
+    // Established Phase: RFC 5927 / RFC 1122
+    // We MUST NOT abort variables on "hard" errors (Port/Proto Unreach) because they are easily spoofed.
+    // We should rely on TCP's own retransmission limits to time out the connection.
     if ((tcb.state == .Established or tcb.state == .CloseWait) and is_hard_error) {
-        // Abort connection
-        tcb.state = .Closed;
-        if (tcb.blocked_thread) |thread| {
-            socket.wakeThread(thread);
-            tcb.blocked_thread = null;
-        }
-        state.freeTcb(tcb);
+        // Ignore the error.
+        // Optionally, we could log it or maybe trigger a faster retransmit check,
+        // but strictly aborting is the security vulnerability we are fixing.
         return;
     }
 }

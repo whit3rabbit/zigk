@@ -59,6 +59,25 @@ const KEY_F11 = 0x80 + 0x57;
 const KEY_F12 = 0x80 + 0x58;
 const KEY_PAUSE = 0xff;
 
+// Doom event structures (from d_event.h)
+const evtype_t = enum(c_int) {
+    ev_keydown,
+    ev_keyup,
+    ev_mouse,
+    ev_joystick,
+    ev_quit,
+};
+
+const event_t = extern struct {
+    type: evtype_t,
+    data1: c_int,
+    data2: c_int,
+    data3: c_int,
+    data4: c_int,
+};
+
+extern fn D_PostEvent(ev: *const event_t) void;
+
 // Doomgeneric provides this buffer (640x400 ARGB pixels)
 extern var DG_ScreenBuffer: [*]u32;
 
@@ -73,6 +92,9 @@ pub export fn DG_Init() void {
     fb_ptr = syscall.map_framebuffer() catch {
         return;
     };
+
+    // Set cursor bounds
+    syscall.set_cursor_bounds(fb_info.width, fb_info.height) catch {};
 
     fb_initialized = true;
 }
@@ -152,10 +174,39 @@ pub export fn DG_GetTicksMs() u32 {
     return @truncate(ms);
 }
 
+// Mouse state
+var mouse_x_accum: i32 = 0;
+var mouse_y_accum: i32 = 0;
+var mouse_buttons: i32 = 0;
+var mouse_buttons_prev: i32 = 0;
+
 /// Get keyboard input
 /// Returns 1 if a key event is available, 0 otherwise
 pub export fn DG_GetKey(pressed: *c_int, doom_key: *u8) c_int {
-    // First, poll for new scancodes and queue them
+    // Poll for mouse input events
+    pollInputEvents();
+
+    // Check if we need to post a mouse event
+    // We only post if there was movement or button change
+    if (mouse_x_accum != 0 or mouse_y_accum != 0 or mouse_buttons != mouse_buttons_prev) {
+        // Doom expects Y to be inverted (Forward is +Y in game)
+        // Previous i_input.c logic had event.data3 = -y * 8;
+        // We replicate that here.
+        const ev = event_t{
+            .type = .ev_mouse,
+            .data1 = @intCast(mouse_buttons),
+            .data2 = @intCast(mouse_x_accum * 8), // Scale sensitivity
+            .data3 = @intCast(-mouse_y_accum * 8), // Negate Y
+            .data4 = 0,
+        };
+        D_PostEvent(&ev);
+
+        mouse_x_accum = 0;
+        mouse_y_accum = 0;
+        mouse_buttons_prev = mouse_buttons;
+    }
+
+    // Poll for keyboard scancodes
     pollScancodes();
 
     // Then return queued events
@@ -173,6 +224,51 @@ pub export fn DG_GetKey(pressed: *c_int, doom_key: *u8) c_int {
 /// Set window title (no-op for framebuffer)
 pub export fn DG_SetWindowTitle(title: [*:0]const u8) void {
     _ = title;
+}
+
+fn pollInputEvents() void {
+    var event: syscall.uapi.input.InputEvent = undefined;
+    while (true) {
+        syscall.read_input_event(&event) catch |err| {
+            if (err == error.WouldBlock) break;
+            break;
+        };
+        
+        processInputEvent(event);
+    }
+}
+
+fn processInputEvent(event: syscall.uapi.input.InputEvent) void {
+    const uapi = syscall.uapi;
+    const input = uapi.input;
+
+    switch (event.event_type) {
+        input.EventType.EV_REL => {
+            switch (event.code) {
+                input.RelCode.X => mouse_x_accum += event.value,
+                input.RelCode.Y => mouse_y_accum += event.value,
+                else => {},
+            }
+        },
+        input.EventType.EV_KEY => {
+            const pressed: c_int = if (event.value != 0) 1 else 0;
+             switch (event.code) {
+                 input.BtnCode.LEFT => {
+                     if (pressed != 0) mouse_buttons |= 1 else mouse_buttons &= ~@as(i32, 1);
+                 },
+                 input.BtnCode.RIGHT => {
+                     if (pressed != 0) mouse_buttons |= 2 else mouse_buttons &= ~@as(i32, 2);
+                 },
+                 input.BtnCode.MIDDLE => {
+                     if (pressed != 0) mouse_buttons |= 4 else mouse_buttons &= ~@as(i32, 4);
+                 },
+                 else => {
+                     // Ignore keyboard events here (handled by pollScancodes via keyboard driver)
+                 }, 
+            }
+        },
+        else => {},
+    }
 }
 
 // Poll for scancodes and convert to key events

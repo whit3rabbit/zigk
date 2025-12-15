@@ -10,7 +10,8 @@ const errors = @import("errors.zig");
 /// optval: pointer to option value
 /// optlen: length of option value
 pub fn setsockopt(sock_fd: usize, level: i32, optname: i32, optval: [*]const u8, optlen: usize) errors.SocketError!void {
-    const sock = state.getSocket(sock_fd) orelse return errors.SocketError.BadFd;
+    const sock = state.acquireSocket(sock_fd) orelse return errors.SocketError.BadFd;
+    defer state.releaseSocket(sock);
 
     if (level == types.SOL_SOCKET) {
         switch (optname) {
@@ -96,7 +97,8 @@ pub fn setsockopt(sock_fd: usize, level: i32, optname: i32, optval: [*]const u8,
 /// optval: pointer to store option value
 /// optlen: pointer to length (in/out)
 pub fn getsockopt(sock_fd: usize, level: i32, optname: i32, optval: [*]u8, optlen: *usize) errors.SocketError!void {
-    const sock = state.getSocket(sock_fd) orelse return errors.SocketError.BadFd;
+    const sock = state.acquireSocket(sock_fd) orelse return errors.SocketError.BadFd;
+    defer state.releaseSocket(sock);
 
     if (level == types.SOL_SOCKET) {
         switch (optname) {
@@ -143,13 +145,15 @@ pub fn getsockopt(sock_fd: usize, level: i32, optname: i32, optval: [*]u8, optle
 /// Get receive timeout for a socket in milliseconds
 /// Returns 0 for infinite timeout
 pub fn getRecvTimeout(sock_fd: usize) u64 {
-    const sock = state.getSocket(sock_fd) orelse return 0;
+    const sock = state.acquireSocket(sock_fd) orelse return 0;
+    defer state.releaseSocket(sock);
     return sock.rcv_timeout_ms;
 }
 
 /// Get send timeout for a socket in milliseconds
 /// Returns 0 for infinite timeout
 pub fn getSendTimeout(sock_fd: usize) u64 {
-    const sock = state.getSocket(sock_fd) orelse return 0;
+    const sock = state.acquireSocket(sock_fd) orelse return 0;
+    defer state.releaseSocket(sock);
     return sock.snd_timeout_ms;
 }

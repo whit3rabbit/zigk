@@ -36,6 +36,7 @@ pub fn socket(family: i32, sock_type: i32, protocol: i32) errors.SocketError!usi
     new_sock.family = family;
     new_sock.sock_type = sock_type;
     new_sock.protocol = protocol;
+    new_sock.refcount = 1; // Held by socket table entry
 
     if (!state.installSocket(slot, new_sock)) {
         state.socket_allocator.destroy(new_sock);
@@ -80,6 +81,7 @@ pub fn close(sock_fd: usize) errors.SocketError!void {
     const sock = state.getSocket(sock_fd) orelse return errors.SocketError.BadFd;
 
     // 1. Remove from table prevent new lookups (UAF protection)
+    sock.closing = true;
     state.clearSlot(sock_fd);
 
     // Close TCP connection if present
@@ -98,6 +100,6 @@ pub fn close(sock_fd: usize) errors.SocketError!void {
         }
     }
 
-    // Free memory
-    state.socket_allocator.destroy(sock);
+    // Drop table's reference; socket memory will be freed once all users release.
+    state.releaseSocketLocked(sock);
 }

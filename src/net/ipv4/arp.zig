@@ -51,7 +51,7 @@ pub const ArpEntry = struct {
     /// WARNING: Only stores ONE packet per incomplete entry (MVP limitation).
     /// Multiple packets sent to an unresolved IP will cause earlier packets
     /// to be silently dropped. For production use, implement a proper queue.
-    pending_pkts: [QUEUE_SIZE][packet.MAX_PACKET_SIZE]u8,
+    pending_pkts: [QUEUE_SIZE]?[]u8,
     pending_lens: [QUEUE_SIZE]usize,
     queue_head: u8,
     queue_tail: u8,
@@ -83,10 +83,49 @@ pub fn tick() void {
 /// Global ARP lock - IRQ-safe spinlock for concurrent access protection
 var lock: sync.Spinlock = .{};
 
+/// Ticks per second (configured by init)
+var ticks_per_second: u64 = 1000; // Default to 1ms behavior until init called
+
+
 /// Initialize ARP subsystem
-pub fn init(allocator: std.mem.Allocator) void {
+pub fn init(allocator: std.mem.Allocator, ticks_per_sec: u32) void {
     arp_allocator = allocator;
     arp_cache = .{};
+    if (ticks_per_sec > 0) ticks_per_second = ticks_per_sec;
+}
+
+fn findEntry(ip: u32) ?*ArpEntry {
+    for (arp_cache.items) |*entry| {
+        if (entry.state != .free and entry.ip_addr == ip) {
+            return entry;
+        }
+    }
+    return null;
+}
+
+fn resetPending(entry: *ArpEntry) void {
+    entry.pending_pkts = [_]?[]u8{null} ** ArpEntry.QUEUE_SIZE;
+    entry.pending_lens = [_]usize{0} ** ArpEntry.QUEUE_SIZE;
+    entry.queue_head = 0;
+    entry.queue_tail = 0;
+    entry.queue_count = 0;
+}
+
+fn clearPending(entry: *ArpEntry) void {
+    freePending(entry);
+}
+
+fn freePending(entry: *ArpEntry) void {
+    for (&entry.pending_pkts, 0..) |*slot, idx| {
+        if (slot.*) |buf| {
+            arp_allocator.free(buf);
+            slot.* = null;
+        }
+        entry.pending_lens[idx] = 0;
+    }
+    entry.queue_head = 0;
+    entry.queue_tail = 0;
+    entry.queue_count = 0;
 }
 
 /// Process an incoming ARP packet
@@ -101,7 +140,7 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
     }
 
     // Get ARP header
-    const arp: *ArpHeader = @ptrCast(@alignCast(&pkt.data[arp_offset]));
+    const arp: *align(1) ArpHeader = @ptrCast(pkt.data[arp_offset..]);
 
     // Validate hardware type (1 = Ethernet)
     if (@byteSwap(arp.hw_type) != 1) {
@@ -133,9 +172,9 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
             return false;
         }
 
-        // Cache update failure is non-fatal - peer may still be reachable via
-        // explicit ARP request. Silently ignore to avoid log spam in high-traffic scenarios.
-        updateCache(iface, sender_ip, arp.sender_mac, .reachable) catch {};
+        if (findEntry(sender_ip)) |_| {
+            updateCache(iface, sender_ip, arp.sender_mac, .reachable) catch {};
+        }
     }
 
     switch (operation) {
@@ -167,7 +206,7 @@ fn sendReply(iface: *Interface, target_mac: [6]u8, target_ip: u32) void {
     eth.setEthertype(ethernet.ETHERTYPE_ARP);
 
     // Build ARP reply
-    const arp: *ArpHeader = @ptrCast(@alignCast(&buf[packet.ETH_HEADER_SIZE]));
+    const arp: *align(1) ArpHeader = @ptrCast(&buf[packet.ETH_HEADER_SIZE]);
     arp.hw_type = @byteSwap(@as(u16, 1)); // Ethernet
     arp.proto_type = @byteSwap(@as(u16, 0x0800)); // IPv4
     arp.hw_len = 6;
@@ -192,7 +231,7 @@ pub fn sendRequest(iface: *Interface, target_ip: u32) void {
     @memcpy(&eth.src_mac, &iface.mac_addr);
     eth.setEthertype(ethernet.ETHERTYPE_ARP);
 
-    const arp: *ArpHeader = @ptrCast(@alignCast(&buf[packet.ETH_HEADER_SIZE]));
+    const arp: *align(1) ArpHeader = @ptrCast(&buf[packet.ETH_HEADER_SIZE]);
     arp.hw_type = @byteSwap(@as(u16, 1));
     arp.proto_type = @byteSwap(@as(u16, 0x0800));
     arp.hw_len = 6;
@@ -241,16 +280,19 @@ pub fn resolveOrRequest(iface: *Interface, ip: u32, pkt_opaque: ?*const anyopaqu
 
     // Check if we already have an incomplete entry
     for (arp_cache.items) |*entry| {
-        if (entry.ip_addr == ip and entry.state == .incomplete) {
-            if (pkt) |p| {
-                if (p.len <= packet.MAX_PACKET_SIZE and entry.queue_count < ArpEntry.QUEUE_SIZE) {
-                    // Enqueue packet
-                    @memcpy(entry.pending_pkts[entry.queue_tail][0..p.len], p.data[0..p.len]);
-                    entry.pending_lens[entry.queue_tail] = p.len;
-                    entry.queue_tail = (entry.queue_tail + 1) % @as(u8, @intCast(ArpEntry.QUEUE_SIZE));
-                    entry.queue_count += 1;
+            if (entry.ip_addr == ip and entry.state == .incomplete) {
+                if (pkt) |p| {
+                    if (p.len <= packet.MAX_PACKET_SIZE and entry.queue_count < ArpEntry.QUEUE_SIZE) {
+                        const buf = arp_allocator.alloc(u8, p.len) catch null;
+                        if (buf) |slot| {
+                            @memcpy(slot[0..p.len], p.data[0..p.len]);
+                            entry.pending_pkts[entry.queue_tail] = slot;
+                            entry.pending_lens[entry.queue_tail] = p.len;
+                            entry.queue_tail = (entry.queue_tail + 1) % @as(u8, @intCast(ArpEntry.QUEUE_SIZE));
+                            entry.queue_count += 1;
+                        }
+                    }
                 }
-            }
 
             if (entry.retries < ARP_MAX_RETRIES) {
                 entry.retries += 1;
@@ -262,6 +304,7 @@ pub fn resolveOrRequest(iface: *Interface, ip: u32, pkt_opaque: ?*const anyopaqu
 
     // Create incomplete entry
     if (findFreeEntry() catch null) |entry| {
+        clearPending(entry);
         entry.ip_addr = ip;
         entry.state = .incomplete;
         entry.timestamp = current_tick;
@@ -271,13 +314,16 @@ pub fn resolveOrRequest(iface: *Interface, ip: u32, pkt_opaque: ?*const anyopaqu
         entry.queue_count = 0;
 
         if (pkt) |p| {
-             if (p.len <= packet.MAX_PACKET_SIZE) {
-                @memcpy(entry.pending_pkts[entry.queue_tail][0..p.len], p.data[0..p.len]);
+         if (p.len <= packet.MAX_PACKET_SIZE) {
+            if (arp_allocator.alloc(u8, p.len) catch null) |slot| {
+                @memcpy(slot[0..p.len], p.data[0..p.len]);
+                entry.pending_pkts[entry.queue_tail] = slot;
                 entry.pending_lens[entry.queue_tail] = p.len;
                 entry.queue_tail = 1; // (0 + 1) % QUEUE_SIZE
                 entry.queue_count = 1;
             }
         }
+    }
 
         sendRequest(iface, ip);
     }
@@ -312,11 +358,11 @@ fn updateCache(iface: *Interface, ip: u32, mac: [6]u8, state: ArpState) !void {
         if (entry.ip_addr == ip) {
             // Rate limit updates to prevent cache poisoning attacks
             // Allow updates for incomplete entries (awaiting resolution)
-            if (entry.state != .incomplete) {
-                const time_since_update = current_tick -% entry.timestamp;
-                if (time_since_update < ARP_UPDATE_RATE_LIMIT) {
-                    // Too soon since last update - ignore to prevent rapid poisoning
-                    return;
+                    if (entry.state != .incomplete) {
+                        const time_since_update = current_tick -% entry.timestamp;
+                        if (time_since_update < ARP_UPDATE_RATE_LIMIT) {
+                            // Too soon since last update - ignore to prevent rapid poisoning
+                            return;
                 }
             }
 
@@ -325,30 +371,34 @@ fn updateCache(iface: *Interface, ip: u32, mac: [6]u8, state: ArpState) !void {
             entry.timestamp = current_tick;
             entry.retries = 0;
 
-            if (entry.queue_count > 0) {
-                // Flush pending packets
-                var i: u8 = 0;
-                while (i < entry.queue_count) : (i += 1) {
-                    const idx = (entry.queue_head +% i) % @as(u8, @intCast(ArpEntry.QUEUE_SIZE));
-                    const len = entry.pending_lens[idx];
-                    
-                    if (len > 0) {
-                        const eth: *EthernetHeader = @ptrCast(@alignCast(&entry.pending_pkts[idx]));
-                        @memcpy(&eth.dst_mac, &mac);
-                        @memcpy(&eth.src_mac, &iface.mac_addr);
-                        eth.setEthertype(ethernet.ETHERTYPE_IPV4);
-                        
-                        _ = iface.transmit(entry.pending_pkts[idx][0..len]);
+                if (entry.queue_count > 0) {
+                    // Flush pending packets
+                    var i: u8 = 0;
+                    while (i < entry.queue_count) : (i += 1) {
+                        const idx = (entry.queue_head +% i) % @as(u8, @intCast(ArpEntry.QUEUE_SIZE));
+                        const len = entry.pending_lens[idx];
+                        if (entry.pending_pkts[idx]) |buf| {
+                            if (len > 0 and len <= buf.len) {
+                                const eth: *align(1) EthernetHeader = @ptrCast(buf.ptr);
+                                @memcpy(&eth.dst_mac, &mac);
+                                @memcpy(&eth.src_mac, &iface.mac_addr);
+                                eth.setEthertype(ethernet.ETHERTYPE_IPV4);
+
+                                _ = iface.transmit(buf[0..len]);
+                            }
+                            arp_allocator.free(buf);
+                            entry.pending_pkts[idx] = null;
+                            entry.pending_lens[idx] = 0;
+                        }
                     }
+                    // Clear queue
+                    entry.queue_count = 0;
+                    entry.queue_head = 0;
+                    entry.queue_tail = 0;
                 }
-                // Clear queue
-                entry.queue_count = 0;
-                entry.queue_head = 0;
-                entry.queue_tail = 0;
+                return;
             }
-            return;
         }
-    }
 
     // No existing entry - find free slot or append
     const entry = try findFreeEntry();
@@ -370,6 +420,7 @@ fn findFreeEntry() !*ArpEntry {
     // First pass: look for free entry
     for (arp_cache.items) |*entry| {
         if (entry.state == .free) {
+            clearPending(entry);
             return entry;
         }
     }
@@ -386,6 +437,7 @@ fn findFreeEntry() !*ArpEntry {
     }
 
     if (oldest_stale) |entry| {
+        clearPending(entry);
         return entry;
     }
 
@@ -403,6 +455,7 @@ fn findFreeEntry() !*ArpEntry {
         }
 
         if (oldest_reachable) |entry| {
+            clearPending(entry);
             return entry;
         }
 
@@ -418,6 +471,7 @@ fn findFreeEntry() !*ArpEntry {
         }
 
         if (oldest_incomplete) |entry| {
+            clearPending(entry);
             return entry;
         }
 
@@ -428,6 +482,7 @@ fn findFreeEntry() !*ArpEntry {
     // Under capacity: append new entry
     const new_entry = try arp_cache.addOne(arp_allocator);
     new_entry.state = .free;
+    clearPending(new_entry);
     return new_entry;
 }
 
@@ -447,17 +502,22 @@ pub fn ageCache() void {
 
         switch (entry.state) {
             .incomplete => {
-                if (age > 10) {
+                // Timeout after 3 seconds (was hardcoded > 10 ticks which was too fast at 100Hz and definitely at 1000Hz)
+                if (age > 3 * ticks_per_second) {
+                    clearPending(entry);
                     entry.state = .free;
                 }
             },
             .reachable => {
-                if (age > ARP_TIMEOUT) {
+                // Timeout reachable entries
+                if (age > ARP_TIMEOUT * ticks_per_second) {
                     entry.state = .stale;
                 }
             },
             .stale => {
-                if (age > ARP_TIMEOUT * 2) {
+                 // Timeout stale entries (2x standard timeout)
+                if (age > ARP_TIMEOUT * 2 * ticks_per_second) {
+                    clearPending(entry);
                     entry.state = .free;
                 }
             },
@@ -469,6 +529,10 @@ pub fn ageCache() void {
 
 /// Clear the ARP cache
 pub fn clearCache() void {
+    for (arp_cache.items) |*entry| {
+        clearPending(entry);
+        entry.state = .free;
+    }
     arp_cache.clearRetainingCapacity();
 }
 

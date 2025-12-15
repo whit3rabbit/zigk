@@ -37,7 +37,7 @@ pub const ICMP_HEADER_SIZE = core.ICMP_HEADER_SIZE;
 // Called from kernel main after NIC driver is initialized
 pub fn init(iface: *Interface, allocator: std.mem.Allocator, ticks_per_sec: u32) void {
     // Initialize layers with allocator
-    ipv4.ipv4.init(allocator); // Includes ARP init
+    ipv4.ipv4.init(allocator, ticks_per_sec); // Includes ARP init
     
     // Initialize Transport Layer (TCP/Sockets) which now uses dynamic memory
     transport.initSockets(iface, allocator);
@@ -50,8 +50,13 @@ pub fn init(iface: *Interface, allocator: std.mem.Allocator, ticks_per_sec: u32)
     iface.up();
 }
 
-/// Process an incoming Ethernet frame
-/// Entry point for received packets from NIC driver
 pub fn processFrame(iface: *Interface, pkt: *PacketBuffer) bool {
     return ethernet.processFrame(iface, pkt);
+}
+
+/// System timer tick handler
+/// Called from kernel scheduler timer interrupt
+pub fn tick() void {
+    ipv4.arp.tick();
+    transport.tcp.tick();
 }

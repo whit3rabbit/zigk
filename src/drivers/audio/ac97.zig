@@ -91,7 +91,7 @@ pub const Ac97 = struct {
     const Self = @This();
 
     // Init
-    pub fn init(pci_dev: *const pci.PciDevice) !*Self {
+    pub fn init(pci_dev: *const pci.PciDevice, ecam: *const pci.Ecam) !*Self {
         console.info("AC97: Initializing...", .{});
 
         // Get BARs
@@ -104,11 +104,9 @@ pub const Ac97 = struct {
             return error.InvalidDevice;
         }
 
-        // Enable Bus Master and IO Space
-        // We assume pci.initFromAcpi already handled enabling if we use the helper,
-        // but explicit enable is good. Since we don't have the ECAM pointer here easily
-        // (passed to initFromPci usually), we assume it's enabled or we need ECAM.
-        // For now, assume enabled by BIOS or PCI init.
+        // Enable Bus Master (required for DMA) and IO Space via ECAM
+        ecam.enableBusMaster(pci_dev.bus, pci_dev.device, pci_dev.func);
+        ecam.enableMemorySpace(pci_dev.bus, pci_dev.device, pci_dev.func);
 
         // Allocate instance
         const driver = try heap.allocator().create(Self);
@@ -330,6 +328,6 @@ pub const dsp_ops = fd.FileOps{
     .ioctl = dspIoctl,
 };
 
-pub fn initFromPci(pci_dev: *const pci.PciDevice) !void {
-    ac97_driver = try Ac97.init(pci_dev);
+pub fn initFromPci(pci_dev: *const pci.PciDevice, ecam: *const pci.Ecam) !void {
+    ac97_driver = try Ac97.init(pci_dev, ecam);
 }

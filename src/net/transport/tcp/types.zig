@@ -133,6 +133,10 @@ pub const Tcb = struct {
     snd_nxt: u32, // Next sequence number to send
     snd_wnd: u32, // Peer's advertised receive window (scaled)
     iss: u32, // Initial send sequence number
+    
+    // Window update tracking (RFC 793)
+    snd_wl1: u32, // Sequence number of last window update
+    snd_wl2: u32, // Ack number of last window update
 
     // Receive sequence variables
     rcv_nxt: u32, // Next expected sequence number
@@ -213,6 +217,8 @@ pub const Tcb = struct {
             .snd_nxt = 0,
             .snd_wnd = 0,
             .iss = 0,
+            .snd_wl1 = 0,
+            .snd_wl2 = 0,
             .rcv_nxt = 0,
             .rcv_wnd = c.RECV_WINDOW_SIZE,
             .irs = 0,
@@ -258,8 +264,8 @@ pub const Tcb = struct {
     pub fn updateRto(self: *Self, rtt_sample: u32) void {
         if (self.srtt == 0) {
             // First measurement
-            self.srtt = rtt_sample << 3; // Shift by 3 (scaled by 8)
-            self.rttvar = (rtt_sample / 2) << 2; // Shift by 2 (scaled by 4)
+            self.srtt = @as(u32, @truncate(@as(u64, rtt_sample) << 3)); // Shift by 3 (scaled by 8)
+            self.rttvar = @as(u32, @truncate(@as(u64, rtt_sample / 2) << 2)); // Shift by 2 (scaled by 4)
         } else {
             // Update RTTVAR
             // RTTVAR = (1 - beta) * RTTVAR + beta * |SRTT - R'|

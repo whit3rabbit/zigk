@@ -51,6 +51,8 @@ pub const wakeThread = root.wakeThread;
 pub const setLock = root.setLock;
 pub const init = root.init;
 pub const getSocket = root.getSocket;
+pub const acquireSocket = root.acquireSocket;
+pub const releaseSocket = root.releaseSocket;
 pub const findByPort = root.findByPort;
 
 // Lifecycle
