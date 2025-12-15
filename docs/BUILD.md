@@ -1,7 +1,7 @@
 # Build Instructions
 
 ## Prerequisites
-- **Zig Compiler**: Version 0.15.x (Master/Nightly)
+- **Zig Compiler**: Version 0.16.x (Master/Nightly)
 - **QEMU**: For running the kernel (`qemu-system-x86_64`)
 - **Xorriso**: For creating ISO images (part of `grub-common` or `xorriso`)
 - **GRUB Tools**: `grub-mkrescue` (or `x86_64-elf-grub-mkrescue` on macOS)

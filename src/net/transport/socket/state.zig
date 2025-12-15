@@ -217,7 +217,7 @@ pub fn installSocket(slot: usize, sock: *types.Socket) bool {
         socket_table.items[slot] = sock;
         return true;
     } else if (slot == socket_table.items.len) {
-        // Append - Zig 0.15 requires passing allocator
+        // Append - Zig 0.15+ requires passing allocator
         socket_table.append(socket_allocator, sock) catch return false;
         return true;
     }

@@ -22,7 +22,7 @@ pub const mman = @import("mman.zig");
 pub const Errno = errno.Errno;
 
 // Re-export syscall numbers at top level for convenience
-// (Zig 0.15.x removed usingnamespace, so we explicitly re-export)
+// (Zig 0.15+ removed usingnamespace, so we explicitly re-export)
 pub const SYS_READ = syscalls.SYS_READ;
 pub const SYS_WRITE = syscalls.SYS_WRITE;
 pub const SYS_OPEN = syscalls.SYS_OPEN;

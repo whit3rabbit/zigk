@@ -8,7 +8,7 @@
 # For different architectures, set KERNEL_ARCH build arg:
 #   docker build --build-arg KERNEL_ARCH=aarch64 -t zscapek-builder-arm .
 
-ARG ZIG_VERSION=0.15.1
+ARG ZIG_VERSION=0.16.0-dev.1484
 
 
 FROM debian:bookworm-slim AS base

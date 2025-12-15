@@ -1,4 +1,4 @@
-// Minimal Limine Boot Protocol Bindings for Zig 0.15.x
+// Minimal Limine Boot Protocol Bindings for Zig 0.16.x
 //
 // This is a local implementation of essential Limine protocol structures.
 // Created because the upstream limine-zig uses `usingnamespace` which was

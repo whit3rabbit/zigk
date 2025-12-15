@@ -59,7 +59,7 @@ Zscapek includes a native, in-kernel TCP/IP stack.
 See [docs/BUILD.md](docs/BUILD.md) for platform-specific notes and Docker-based builds.
 
 ### Requirements
-- Zig 0.15.x
+- Zig 0.16.x
 - QEMU (for emulation)
 - xorriso (for ISO generation)
 

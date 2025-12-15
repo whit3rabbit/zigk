@@ -12,7 +12,7 @@ zscapek/
 ├── AGENTS.md                # Symlink to CLAUDE.md
 ├── CLAUDE.md                # Assistant guidelines
 ├── README.md                # Project overview
-├── build.zig                # Build graph (Zig 0.15.x)
+├── build.zig                # Build graph (Zig 0.16.x)
 ├── build.zig.zon            # Dependencies
 ├── Dockerfile               # Container build (local toolchain)
 ├── docker-compose.yml       # Compose helper for reproducible builds

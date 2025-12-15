@@ -3,7 +3,7 @@
 // This file delegates to the refactored submodule structure in transport/socket/
 // to maintain API compatibility while using the new split architecture.
 //
-// Note: zig 0.15.x deprecated `pub usingnamespace`, so we explicitly re-export.
+// Note: zig 0.15+ deprecated `pub usingnamespace`, so we explicitly re-export.
 
 const root = @import("socket/root.zig");
 

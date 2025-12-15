@@ -3,7 +3,7 @@
 A Zig-based microkernel for x86_64 using the Limine bootloader protocol.
 
 ## Active Technologies
-- Zig 0.15.x (freestanding x86_64 target)
+- Zig 0.16.x (nightly) - freestanding x86_64 target
 - Limine bootloader (v5.x protocol)
 - QEMU for emulation
 
@@ -144,12 +144,12 @@ pub fn sys_exit(status: usize) isize {
 
 ## Coding Style
 
-- **Version**: Zig 0.15.x
+- **Version**: Zig 0.16.x
 - **Naming**: `snake_case` for functions/vars, `PascalCase` for structs/types
 - **Errors**: Use `try` or explicit handling; avoid `catch unreachable` unless panic intended
 - **Types**: Explicit integer widths (`u64`, `usize`)
 
-### Zig 0.15.x Inline Assembly
+### Zig 0.16.x Inline Assembly
 
 ```zig
 // Clobber syntax
@@ -259,6 +259,12 @@ fn Matrix(comptime rows: usize, comptime cols: usize) type {
 }
 ```
 - .error is a reserved word in Zig
+
+### Async Support
+Zig 0.16 re-introduces `async`/`await`. We intend to use this for the "Reactor" pattern (Phase 2 in `TODO.md`).
+- **Goal**: Replace blocking `sched.block()` with non-blocking `suspend` points.
+- **Pattern**: `frame = async socket.read(...)` -> suspend -> reactor resumes implementation when IRQ fires.
+- **Status**: Available for experimentation in `src/net/` and `src/kernel/syscall/`.
 
 ### Threading Best Practices (ABI Safety)
 When creating kernel threads that need access to context (e.g., driver instances), do **not** rely on Zig method calls or global state. The safest pattern is:

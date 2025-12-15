@@ -527,7 +527,7 @@ pub fn allocator() std.mem.Allocator {
 // std.mem.Allocator vtable implementation
 fn stdAlloc(_: *anyopaque, len: usize, ptr_align: std.mem.Alignment, _: usize) ?[*]u8 {
     // Our heap always aligns to ALIGNMENT (16), which should satisfy most requests
-    // std.mem.Alignment.toByteUnits returns usize (not optional in 0.15.x)
+    // std.mem.Alignment.toByteUnits returns usize (not optional in 0.15+)
     const align_bytes = ptr_align.toByteUnits();
     if (align_bytes > ALIGNMENT) {
         // Log warning when alignment cannot be satisfied

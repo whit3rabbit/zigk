@@ -744,7 +744,7 @@ pub fn build(b: *std.Build) void {
             .pic = false,
             .red_zone = false,
         }),
-        // WORKAROUND: Zig 0.15.x has a regression (#25069) where the self-hosted backend
+        // WORKAROUND: Zig 0.16.x has a regression (#25069) where the self-hosted backend
         // doesn't properly use linker scripts. Force LLVM backend to fix higher-half linking.
         .use_llvm = true,
     });

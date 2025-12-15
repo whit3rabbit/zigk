@@ -319,7 +319,7 @@ test "heap: std.mem.Allocator interface" {
 
     const ally = heap.allocator();
 
-    // Use ArrayListUnmanaged with heap allocator (Zig 0.15.x pattern)
+    // Use ArrayListUnmanaged with heap allocator (Zig 0.15+ pattern)
     var list = std.ArrayListUnmanaged(u32){};
     defer list.deinit(ally);
 
