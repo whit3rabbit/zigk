@@ -15,6 +15,7 @@ const pci = @import("pci");
 const msi = pci.msi;
 const interrupts = hal.interrupts;
 const idt = hal.idt;
+const MmioDevice = hal.mmio_device.MmioDevice;
 
 const regs = @import("regs.zig");
 const trb = @import("trb.zig");
@@ -113,13 +114,14 @@ pub const Controller = struct {
         };
 
         // Read capability registers
-        const caplength = readReg8(bar0_virt, regs.Cap.CAPLENGTH);
-        const hciversion = readReg16(bar0_virt, regs.Cap.HCIVERSION);
-        const hcsparams1: regs.HcsParams1 = @bitCast(readReg32(bar0_virt, regs.Cap.HCSPARAMS1));
-        const hcsparams2: regs.HcsParams2 = @bitCast(readReg32(bar0_virt, regs.Cap.HCSPARAMS2));
-        const hccparams1: regs.HccParams1 = @bitCast(readReg32(bar0_virt, regs.Cap.HCCPARAMS1));
-        const dboff = readReg32(bar0_virt, regs.Cap.DBOFF) & 0xFFFFFFFC;
-        const rtsoff = readReg32(bar0_virt, regs.Cap.RTSOFF) & 0xFFFFFFE0;
+        const cap_dev = MmioDevice(regs.CapReg).init(bar0_virt, 0x1000); // Size approximate for now
+        const caplength = cap_dev.read8(.caplength);
+        const hciversion = cap_dev.read16(.hciversion);
+        const hcsparams1 = cap_dev.readTyped(.hcsparams1, regs.HcsParams1);
+        const hcsparams2 = cap_dev.readTyped(.hcsparams2, regs.HcsParams2);
+        const hccparams1 = cap_dev.readTyped(.hccparams1, regs.HccParams1);
+        const dboff = cap_dev.read(.dboff) & 0xFFFFFFFC;
+        const rtsoff = cap_dev.read(.rtsoff) & 0xFFFFFFE0;
 
         console.info("XHCI: Version {x:0>4}, CAPLENGTH={}, MaxSlots={}, MaxPorts={}", .{
             hciversion,
@@ -195,17 +197,19 @@ pub const Controller = struct {
     /// Reset the host controller
     fn reset(self: *Self) !void {
         console.info("XHCI: Resetting controller...", .{});
+        
+        const op_dev = MmioDevice(regs.OpReg).init(self.op_base, 0x1000);
 
         // Stop controller if running
-        var usbcmd: regs.UsbCmd = @bitCast(readReg32(self.op_base, regs.Op.USBCMD));
+        var usbcmd = op_dev.readTyped(.usbcmd, regs.UsbCmd);
         if (usbcmd.rs) {
             usbcmd.rs = false;
-            writeReg32(self.op_base, regs.Op.USBCMD, @bitCast(usbcmd));
+            op_dev.writeTyped(.usbcmd, usbcmd);
 
             // Wait for HCH (Halted) bit
             var timeout: u32 = 1000;
             while (timeout > 0) : (timeout -= 1) {
-                const usbsts: regs.UsbSts = @bitCast(readReg32(self.op_base, regs.Op.USBSTS));
+                const usbsts = op_dev.readTyped(.usbsts, regs.UsbSts);
                 if (usbsts.hch) break;
                 hal.cpu.pause();
             }
@@ -216,14 +220,14 @@ pub const Controller = struct {
         }
 
         // Assert HCRST
-        usbcmd = @bitCast(readReg32(self.op_base, regs.Op.USBCMD));
+        usbcmd = op_dev.readTyped(.usbcmd, regs.UsbCmd);
         usbcmd.hcrst = true;
-        writeReg32(self.op_base, regs.Op.USBCMD, @bitCast(usbcmd));
+        op_dev.writeTyped(.usbcmd, usbcmd);
 
         // Wait for reset to complete (HCRST clears itself)
         var timeout: u32 = 1000;
         while (timeout > 0) : (timeout -= 1) {
-            usbcmd = @bitCast(readReg32(self.op_base, regs.Op.USBCMD));
+            usbcmd = op_dev.readTyped(.usbcmd, regs.UsbCmd);
             if (!usbcmd.hcrst) break;
             hal.cpu.pause();
         }
@@ -236,7 +240,7 @@ pub const Controller = struct {
         // Wait for CNR (Controller Not Ready) to clear
         timeout = 1000;
         while (timeout > 0) : (timeout -= 1) {
-            const usbsts: regs.UsbSts = @bitCast(readReg32(self.op_base, regs.Op.USBSTS));
+            const usbsts = op_dev.readTyped(.usbsts, regs.UsbSts);
             if (!usbsts.cnr) break;
             hal.cpu.pause();
         }
@@ -251,14 +255,16 @@ pub const Controller = struct {
 
     /// Initialize controller data structures
     fn initDataStructures(self: *Self) !void {
+        const op_dev = MmioDevice(regs.OpReg).init(self.op_base, 0x1000);
+
         // Set MaxSlotsEnabled
-        var config: regs.Config = @bitCast(readReg32(self.op_base, regs.Op.CONFIG));
+        var config = op_dev.readTyped(.config, regs.Config);
         config.max_slots_en = self.max_slots;
-        writeReg32(self.op_base, regs.Op.CONFIG, @bitCast(config));
+        op_dev.writeTyped(.config, config);
 
         // Allocate DCBAA
         self.dcbaa = try context.Dcbaa.alloc(self.max_slots);
-        writeReg64(self.op_base, regs.Op.DCBAAP, self.dcbaa.getPhysicalAddress());
+        op_dev.write64(.dcbaap, self.dcbaa.getPhysicalAddress());
         console.info("XHCI: DCBAA at physical {x:0>16}", .{self.dcbaa.getPhysicalAddress()});
 
         // Allocate scratchpad buffers if needed
@@ -272,24 +278,25 @@ pub const Controller = struct {
             self.command_ring.getPhysicalAddress(),
             self.command_ring.getCycleState(),
         );
-        writeReg64(self.op_base, regs.Op.CRCR, @bitCast(crcr));
+        op_dev.write64(.crcr, @bitCast(crcr));
         console.info("XHCI: Command Ring at physical {x:0>16}", .{self.command_ring.getPhysicalAddress()});
 
         // Allocate Event Ring
         self.event_ring = try ring.ConsumerRing.init();
 
         // Configure Interrupter 0
-        const intr0_base = self.runtime_base + regs.Runtime.interrupter(0);
+        const intr0_base = self.runtime_base + regs.intrSetOffset(0);
+        const intr_dev = MmioDevice(regs.IntrReg).init(intr0_base, 0x20);
 
         // Set ERSTSZ (Event Ring Segment Table Size)
-        writeReg32(intr0_base, regs.Intr.ERSTSZ, self.event_ring.getErstSize());
+        intr_dev.write32(.erstsz, self.event_ring.getErstSize());
 
         // Set ERDP (Event Ring Dequeue Pointer)
         const erdp = regs.Erdp.init(self.event_ring.getDequeuePointer(), 0);
-        writeReg64(intr0_base, regs.Intr.ERDP, @bitCast(erdp));
+        intr_dev.writeTyped(.erdp, erdp);
 
         // Set ERSTBA (Event Ring Segment Table Base Address)
-        writeReg64(intr0_base, regs.Intr.ERSTBA, self.event_ring.getErstBase());
+        intr_dev.write64(.erstba, self.event_ring.getErstBase());
 
         console.info("XHCI: Event Ring at physical {x:0>16}", .{self.event_ring.phys_base});
     }
@@ -377,26 +384,29 @@ pub const Controller = struct {
         }
 
         // Enable interrupter
-        const intr0_base = self.runtime_base + regs.Runtime.interrupter(0);
-        var iman: regs.Iman = @bitCast(readReg32(intr0_base, regs.Intr.IMAN));
+        const intr0_base = self.runtime_base + regs.intrSetOffset(0);
+        const intr_dev = MmioDevice(regs.IntrReg).init(intr0_base, 0x20);
+        var iman = intr_dev.readTyped(.iman, regs.Iman);
         iman.ie = true;
-        writeReg32(intr0_base, regs.Intr.IMAN, @bitCast(iman));
+        intr_dev.writeTyped(.iman, iman);
     }
 
     /// Start the controller
     fn start(self: *Self) !void {
         console.info("XHCI: Starting controller...", .{});
 
+        const op_dev = MmioDevice(regs.OpReg).init(self.op_base, 0x1000);
+
         // Enable interrupts
-        var usbcmd: regs.UsbCmd = @bitCast(readReg32(self.op_base, regs.Op.USBCMD));
+        var usbcmd = op_dev.readTyped(.usbcmd, regs.UsbCmd);
         usbcmd.inte = true;
         usbcmd.rs = true;
-        writeReg32(self.op_base, regs.Op.USBCMD, @bitCast(usbcmd));
+        op_dev.writeTyped(.usbcmd, usbcmd);
 
         // Wait for running
         var timeout: u32 = 100;
         while (timeout > 0) : (timeout -= 1) {
-            const usbsts: regs.UsbSts = @bitCast(readReg32(self.op_base, regs.Op.USBSTS));
+            const usbsts = op_dev.readTyped(.usbsts, regs.UsbSts);
             if (!usbsts.hch) break;
             hal.cpu.pause();
         }
@@ -418,7 +428,8 @@ pub const Controller = struct {
             .db_stream_id = 0,
         };
         const offset = regs.doorbellOffset(slot_id);
-        writeReg32(self.doorbell_base, offset, @bitCast(db));
+        const mmio = hal.mmio;
+        mmio.write32(self.doorbell_base + offset, @bitCast(db));
     }
 
     /// Send a No-Op command to test the command ring
@@ -466,9 +477,11 @@ pub const Controller = struct {
 
     /// Reset a port to enable it and bring the device to the Default state
     fn resetPort(self: *Self, port: u8) !void {
-        const portsc_off = regs.Op.portsc(port);
+        const port_base = self.op_base + regs.portBaseOffset(port);
+        const port_dev = MmioDevice(regs.PortReg).init(port_base, 0x10);
+
         // Read current state
-        const portsc: regs.PortSc = @bitCast(readReg32(self.op_base, portsc_off));
+        const portsc = port_dev.readTyped(.portsc, regs.PortSc);
 
         // If not connected, nothing to do
         if (!portsc.ccs) return;
@@ -484,14 +497,15 @@ pub const Controller = struct {
         new_cntl.wrc = true;     // Clear Warm Port Reset Change
         new_cntl.occ = true;     // Clear Over-Current Change
         new_cntl.prc = true;     // Clear Port Reset Change
+        new_cntl.plc = true;     // Clear Port Link State Change
 
-        writeReg32(self.op_base, portsc_off, @bitCast(new_cntl));
+        port_dev.writeTyped(.portsc, new_cntl);
 
         // Wait for reset to complete
         // The controller clears PR bit when reset is done
         var timeout: u32 = 500; // 500ms timeout
         while (timeout > 0) : (timeout -= 1) {
-            const current = @as(regs.PortSc, @bitCast(readReg32(self.op_base, portsc_off)));
+            const current = port_dev.readTyped(.portsc, regs.PortSc);
             
             // Check if Reset is done (PR == 0) and Port Enabled (PED == 1)
             if (!current.pr and current.ped) {
@@ -516,8 +530,9 @@ pub const Controller = struct {
 
         var port: u8 = 1;
         while (port <= self.max_ports) : (port += 1) {
-            const portsc_off = regs.Op.portsc(port);
-            const portsc: regs.PortSc = @bitCast(readReg32(self.op_base, portsc_off));
+            const port_base = self.op_base + regs.portBaseOffset(port);
+            const port_dev = MmioDevice(regs.PortReg).init(port_base, 0x10);
+            const portsc = port_dev.readTyped(.portsc, regs.PortSc);
 
             if (portsc.ccs) {
                 const speed_name = switch (portsc.speed) {
@@ -562,9 +577,10 @@ pub const Controller = struct {
     pub fn stop(self: *Self) void {
         if (!self.running) return;
 
-        var usbcmd: regs.UsbCmd = @bitCast(readReg32(self.op_base, regs.Op.USBCMD));
+        const op_dev = MmioDevice(regs.OpReg).init(self.op_base, 0x1000);
+        var usbcmd = op_dev.readTyped(.usbcmd, regs.UsbCmd);
         usbcmd.rs = false;
-        writeReg32(self.op_base, regs.Op.USBCMD, @bitCast(usbcmd));
+        op_dev.writeTyped(.usbcmd, usbcmd);
 
         self.running = false;
         console.info("XHCI: Controller stopped", .{});
@@ -752,8 +768,9 @@ pub const Controller = struct {
     /// Returns configured device if successful, null if not a keyboard
     pub fn enumerateDevice(self: *Self, port: u8) !?*device.UsbDevice {
         // Get port speed
-        const portsc_off = regs.Op.portsc(port);
-        const portsc: regs.PortSc = @bitCast(readReg32(self.op_base, portsc_off));
+        const port_base = self.op_base + regs.portBaseOffset(port);
+        const port_dev = MmioDevice(regs.PortReg).init(port_base, 0x10);
+        const portsc = port_dev.readTyped(.portsc, regs.PortSc);
 
         if (!portsc.ccs or !portsc.ped) {
             console.warn("XHCI: Port {} not connected or enabled", .{port});
@@ -911,9 +928,11 @@ pub const Controller = struct {
 
     /// Make updateErdp public for transfer.zig
     pub fn updateErdp(self: *Self) void {
-        const intr0_base = self.runtime_base + regs.Runtime.interrupter(0);
+        const intr0_base = self.runtime_base + regs.intrSetOffset(0);
+        const intr_dev = MmioDevice(regs.IntrReg).init(intr0_base, 0x20);
+
         const erdp = regs.Erdp.init(self.event_ring.getDequeuePointer(), 0);
-        writeReg64(intr0_base, regs.Intr.ERDP, @bitCast(erdp));
+        intr_dev.write64(.erdp, @bitCast(erdp));
     }
 };
 
@@ -941,10 +960,12 @@ fn handleInterrupt(frame: *idt.InterruptFrame) void {
     // Update ERDP and clear interrupt pending
     ctrl.updateErdp();
 
-    const intr0_base = ctrl.runtime_base + regs.Runtime.interrupter(0);
-    var iman: regs.Iman = @bitCast(readReg32(intr0_base, regs.Intr.IMAN));
+    const intr0_base = ctrl.runtime_base + regs.intrSetOffset(0);
+    const intr_dev = MmioDevice(regs.IntrReg).init(intr0_base, 0x20);
+
+    var iman = intr_dev.readTyped(.iman, regs.Iman);
     iman.ip = true; // Write 1 to clear
-    writeReg32(intr0_base, regs.Intr.IMAN, @bitCast(iman));
+    intr_dev.writeTyped(.iman, iman);
 }
 
 /// Process a single event TRB
@@ -1036,35 +1057,7 @@ fn processEvent(ctrl: *Controller, event: *const trb.Trb) void {
 // MMIO Helpers
 // =============================================================================
 
-fn readReg8(base: u64, offset: u64) u8 {
-    const ptr: *volatile u8 = @ptrFromInt(base + offset);
-    return ptr.*;
-}
 
-fn readReg16(base: u64, offset: u64) u16 {
-    const ptr: *volatile u16 = @ptrFromInt(base + offset);
-    return ptr.*;
-}
-
-fn readReg32(base: u64, offset: u64) u32 {
-    const ptr: *volatile u32 = @ptrFromInt(base + offset);
-    return ptr.*;
-}
-
-fn readReg64(base: u64, offset: u64) u64 {
-    const ptr: *volatile u64 = @ptrFromInt(base + offset);
-    return ptr.*;
-}
-
-fn writeReg32(base: u64, offset: u64, value: u32) void {
-    const ptr: *volatile u32 = @ptrFromInt(base + offset);
-    ptr.* = value;
-}
-
-fn writeReg64(base: u64, offset: u64, value: u64) void {
-    const ptr: *volatile u64 = @ptrFromInt(base + offset);
-    ptr.* = value;
-}
 
 // =============================================================================
 // Module Initialization

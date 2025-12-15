@@ -9,21 +9,23 @@
 //
 // Reference: xHCI Specification 1.2
 
+
+
 // =============================================================================
 // Capability Registers (read-only, at BAR0)
 // =============================================================================
 
 /// Capability Register Offsets
-pub const Cap = struct {
-    pub const CAPLENGTH: u64 = 0x00; // Capability Register Length (1 byte)
-    pub const HCIVERSION: u64 = 0x02; // Host Controller Interface Version (2 bytes)
-    pub const HCSPARAMS1: u64 = 0x04; // Structural Parameters 1 (4 bytes)
-    pub const HCSPARAMS2: u64 = 0x08; // Structural Parameters 2 (4 bytes)
-    pub const HCSPARAMS3: u64 = 0x0C; // Structural Parameters 3 (4 bytes)
-    pub const HCCPARAMS1: u64 = 0x10; // Capability Parameters 1 (4 bytes)
-    pub const DBOFF: u64 = 0x14; // Doorbell Offset (4 bytes)
-    pub const RTSOFF: u64 = 0x18; // Runtime Register Space Offset (4 bytes)
-    pub const HCCPARAMS2: u64 = 0x1C; // Capability Parameters 2 (4 bytes)
+pub const CapReg = enum(usize) {
+    caplength = 0x00, // Capability Register Length (1 byte) - Read as u8 or u32/mask
+    hciversion = 0x02, // Host Controller Interface Version (2 bytes)
+    hcsparams1 = 0x04, // Structural Parameters 1 (4 bytes)
+    hcsparams2 = 0x08, // Structural Parameters 2 (4 bytes)
+    hcsparams3 = 0x0C, // Structural Parameters 3 (4 bytes)
+    hccparams1 = 0x10, // Capability Parameters 1 (4 bytes)
+    dboff = 0x14, // Doorbell Offset (4 bytes)
+    rtsoff = 0x18, // Runtime Register Space Offset (4 bytes)
+    hccparams2 = 0x1C, // Capability Parameters 2 (4 bytes)
 };
 
 /// HCSPARAMS1 - Structural Parameters 1
@@ -72,23 +74,22 @@ pub const HccParams1 = packed struct(u32) {
 // =============================================================================
 
 /// Operational Register Offsets (relative to op_base)
-pub const Op = struct {
-    pub const USBCMD: u64 = 0x00; // USB Command (4 bytes)
-    pub const USBSTS: u64 = 0x04; // USB Status (4 bytes)
-    pub const PAGESIZE: u64 = 0x08; // Page Size (4 bytes)
-    pub const DNCTRL: u64 = 0x14; // Device Notification Control (4 bytes)
-    pub const CRCR: u64 = 0x18; // Command Ring Control (8 bytes)
-    pub const DCBAAP: u64 = 0x30; // Device Context Base Address Array Pointer (8 bytes)
-    pub const CONFIG: u64 = 0x38; // Configure (4 bytes)
-    pub const PORTSC_BASE: u64 = 0x400; // Port Status and Control base
-    pub const PORTPMSC_BASE: u64 = 0x404; // Port Power Management base
-    pub const PORTLI_BASE: u64 = 0x408; // Port Link Info base
-    pub const PORTHLPMC_BASE: u64 = 0x40C; // Port Hardware LPM Control base
+pub const OpReg = enum(usize) {
+    usbcmd = 0x00, // USB Command (4 bytes)
+    usbsts = 0x04, // USB Status (4 bytes)
+    pagesize = 0x08, // Page Size (4 bytes)
+    dnctrl = 0x14, // Device Notification Control (4 bytes)
+    crcr = 0x18, // Command Ring Control (8 bytes)
+    dcbaap = 0x30, // Device Context Base Address Array Pointer (8 bytes)
+    config = 0x38, // Configure (4 bytes)
+};
 
-    /// Get PORTSC offset for a specific port (1-based)
-    pub fn portsc(port: u8) u64 {
-        return PORTSC_BASE + (@as(u64, port - 1) * 0x10);
-    }
+/// Port Register Offsets (relative to port base)
+pub const PortReg = enum(usize) {
+    portsc = 0x00, // Port Status and Control
+    portpmsc = 0x04, // Port Power Management
+    portli = 0x08, // Port Link Info
+    porthlpmc = 0x0C, // Port Hardware LPM Control
 };
 
 /// USBCMD - USB Command Register
@@ -224,24 +225,19 @@ pub const PortSc = packed struct(u32) {
 // =============================================================================
 
 /// Runtime Register Offsets (relative to runtime_base)
-pub const Runtime = struct {
-    pub const MFINDEX: u64 = 0x00; // Microframe Index (4 bytes)
-    pub const IR0: u64 = 0x20; // Interrupter Register Set 0
-
-    /// Get interrupter register set offset
-    pub fn interrupter(n: u32) u64 {
-        return IR0 + (@as(u64, n) * 0x20);
-    }
+pub const RuntimeReg = enum(usize) {
+    mfindex = 0x00, // Microframe Index (4 bytes)
+    // IR0 starts at 0x20
 };
 
 /// Interrupter Register Set offsets (relative to interrupter base)
-pub const Intr = struct {
-    pub const IMAN: u64 = 0x00; // Interrupter Management (4 bytes)
-    pub const IMOD: u64 = 0x04; // Interrupter Moderation (4 bytes)
-    pub const ERSTSZ: u64 = 0x08; // Event Ring Segment Table Size (4 bytes)
-    pub const _RSVD: u64 = 0x0C;
-    pub const ERSTBA: u64 = 0x10; // Event Ring Segment Table Base Address (8 bytes)
-    pub const ERDP: u64 = 0x18; // Event Ring Dequeue Pointer (8 bytes)
+pub const IntrReg = enum(usize) {
+    iman = 0x00, // Interrupter Management (4 bytes)
+    imod = 0x04, // Interrupter Moderation (4 bytes)
+    erstsz = 0x08, // Event Ring Segment Table Size (4 bytes)
+    // rsvd 0x0C
+    erstba = 0x10, // Event Ring Segment Table Base Address (8 bytes)
+    erdp = 0x18, // Event Ring Dequeue Pointer (8 bytes)
 };
 
 /// IMAN - Interrupter Management Register
@@ -319,9 +315,18 @@ pub const ExtCapId = struct {
 // Helper Functions
 // =============================================================================
 
-/// Calculate offset for a specific port's PORTSC register
-pub fn portScOffset(port_num: u8) u64 {
-    return Op.PORTSC_BASE + (@as(u64, port_num - 1) * 0x10);
+/// Calculate offset for a specific port base (relative to Op base)
+pub fn portBaseOffset(port_num: u8) u64 {
+    // Port 1 is at offset 0x400
+    // Each port is 0x10 bytes
+    return 0x400 + (@as(u64, port_num - 1) * 0x10);
+}
+
+/// Calculate interrupt register set offset (relative to Runtime base)
+pub fn intrSetOffset(interrupter: u32) u64 {
+    // IR0 is at 0x20
+    // Each interrupter set is 0x20 bytes
+    return 0x20 + (@as(u64, interrupter) * 0x20);
 }
 
 /// Calculate doorbell register offset for a slot

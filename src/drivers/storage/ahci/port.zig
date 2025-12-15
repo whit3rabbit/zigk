@@ -15,7 +15,7 @@ const std = @import("std");
 const hal = @import("hal");
 const hba = @import("hba.zig");
 const fis = @import("fis.zig");
-const MmioDevice = @import("../../arch/x86_64/mmio_device.zig").MmioDevice;
+const MmioDevice = hal.mmio_device.MmioDevice;
 
 const term = @import("std").os.linux; // Not used here directly but good practice to keep std imports clean
 // We need assembly for memory barriers

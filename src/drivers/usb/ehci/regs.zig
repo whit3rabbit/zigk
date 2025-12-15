@@ -3,18 +3,18 @@
 // Reference: Enhanced Host Controller Interface Specification for Universal Serial Bus
 // Revision 1.0
 
-const std = @import("std");
+
 
 // =============================================================================
 // Capability Registers
 // =============================================================================
 
-pub const Cap = struct {
-    pub const CAPLENGTH: u64 = 0x00;
-    pub const HCIVERSION: u64 = 0x02;
-    pub const HCSPARAMS: u64 = 0x04;
-    pub const HCCPARAMS: u64 = 0x08;
-    pub const HCSPPORTROUTE: u64 = 0x0C;
+pub const CapReg = enum(usize) {
+    caplength = 0x00,
+    hciversion = 0x02,
+    hcsparams = 0x04,
+    hccparams = 0x08,
+    hcspportroute = 0x0C,
 };
 
 pub const HcsParams = packed struct(u32) {
@@ -44,19 +44,19 @@ pub const HccParams = packed struct(u32) {
 // Operational Registers
 // =============================================================================
 
-pub const Op = struct {
-    pub const USBCMD: u64 = 0x00;
-    pub const USBSTS: u64 = 0x04;
-    pub const USBINTR: u64 = 0x08;
-    pub const FRINDEX: u64 = 0x0C;
-    pub const CTRLDSSEGMENT: u64 = 0x10;
-    pub const PERIODICLISTBASE: u64 = 0x14;
-    pub const ASYNCLISTADDR: u64 = 0x18;
-    pub const CONFIGFLAG: u64 = 0x40;
+pub const OpReg = enum(usize) {
+    usbcmd = 0x00,
+    usbsts = 0x04,
+    usbintr = 0x08,
+    frindex = 0x0C,
+    ctrldssegment = 0x10,
+    periodiclistbase = 0x14,
+    asynclistaddr = 0x18,
+    configflag = 0x40,
+};
 
-    pub fn portsc(port: u8) u64 {
-        return 0x44 + @as(u64, port - 1) * 4;
-    }
+pub const PortReg = enum(usize) {
+    portsc = 0x00,
 };
 
 pub const UsbCmd = packed struct(u32) {
@@ -178,3 +178,8 @@ pub const Qh = packed struct {
     buffer_pointers: [5]u32,
     extended_buffer: [5]u32,
 };
+
+// Helper
+pub fn portBaseOffset(port_num: u8) u64 {
+    return 0x44 + (@as(u64, port_num - 1) * 4);
+}

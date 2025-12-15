@@ -14,6 +14,7 @@ const vmm = @import("vmm");
 const pci = @import("pci");
 
 const regs = @import("regs.zig");
+const MmioDevice = hal.mmio_device.MmioDevice;
 
 // =============================================================================
 // Controller State
@@ -84,10 +85,11 @@ pub const Controller = struct {
         };
 
         // Read capability registers
-        const caplength = readReg8(bar0_virt, regs.Cap.CAPLENGTH);
-        const hciversion = readReg16(bar0_virt, regs.Cap.HCIVERSION);
-        const hcsparams: regs.HcsParams = @bitCast(readReg32(bar0_virt, regs.Cap.HCSPARAMS));
-        const hccparams: regs.HccParams = @bitCast(readReg32(bar0_virt, regs.Cap.HCCPARAMS));
+        const cap_dev = MmioDevice(regs.CapReg).init(bar0_virt, 0x100);
+        const caplength = cap_dev.read8(.caplength);
+        const hciversion = cap_dev.read16(.hciversion);
+        const hcsparams = cap_dev.readTyped(.hcsparams, regs.HcsParams);
+        const hccparams = cap_dev.readTyped(.hccparams, regs.HccParams);
 
         console.info("EHCI: Version {x:0>4}, CAPLENGTH={}, Ports={}, 64-bit={}", .{
             hciversion,
@@ -143,17 +145,19 @@ pub const Controller = struct {
     /// Reset the host controller
     fn reset(self: *Self) !void {
         console.info("EHCI: Resetting controller...", .{});
+        
+        const op_dev = MmioDevice(regs.OpReg).init(self.op_base, 0x400);
 
         // Stop controller
-        var usbcmd: regs.UsbCmd = @bitCast(readReg32(self.op_base, regs.Op.USBCMD));
+        var usbcmd = op_dev.readTyped(.usbcmd, regs.UsbCmd);
         if (usbcmd.rs) {
             usbcmd.rs = false;
-            writeReg32(self.op_base, regs.Op.USBCMD, @bitCast(usbcmd));
+            op_dev.writeTyped(.usbcmd, usbcmd);
 
             // Wait for HCH (Halted) bit
             var timeout: u32 = 1000;
             while (timeout > 0) : (timeout -= 1) {
-                const usbsts: regs.UsbSts = @bitCast(readReg32(self.op_base, regs.Op.USBSTS));
+                const usbsts = op_dev.readTyped(.usbsts, regs.UsbSts);
                 if (usbsts.hchalted) break;
                 hal.cpu.pause();
             }
@@ -161,14 +165,14 @@ pub const Controller = struct {
         }
 
         // Assert HCRESET
-        usbcmd = @bitCast(readReg32(self.op_base, regs.Op.USBCMD));
+        usbcmd = op_dev.readTyped(.usbcmd, regs.UsbCmd);
         usbcmd.hcreset = true;
-        writeReg32(self.op_base, regs.Op.USBCMD, @bitCast(usbcmd));
+        op_dev.writeTyped(.usbcmd, usbcmd);
 
         // Wait for reset to complete
         var timeout: u32 = 1000;
         while (timeout > 0) : (timeout -= 1) {
-            usbcmd = @bitCast(readReg32(self.op_base, regs.Op.USBCMD));
+            usbcmd = op_dev.readTyped(.usbcmd, regs.UsbCmd);
             if (!usbcmd.hcreset) break;
             hal.cpu.pause();
         }
@@ -188,7 +192,8 @@ pub const Controller = struct {
         // Route all ports to this host controller (clear ConfigFlag)
         // If we want to support Companion Controllers (USB 1.1), we need to handle this carefully.
         // For now, setting ConfigFlag=1 routes all ports to EHCI.
-        writeReg32(self.op_base, regs.Op.CONFIGFLAG, 1);
+        const op_dev = MmioDevice(regs.OpReg).init(self.op_base, 0x400);
+        op_dev.write(.configflag, 1);
         hal.cpu.pause();
 
         console.info("EHCI: Ports routed to EHCI", .{});
@@ -205,17 +210,18 @@ pub const Controller = struct {
 
         var port: u8 = 1;
         while (port <= self.n_ports) : (port += 1) {
-            const portsc_off = regs.Op.portsc(port);
-            var portsc: regs.PortSc = @bitCast(readReg32(self.op_base, portsc_off));
+            const port_base = self.op_base + regs.portBaseOffset(port);
+            const port_dev = MmioDevice(regs.PortReg).init(port_base, 4);
+            var portsc = port_dev.readTyped(.portsc, regs.PortSc);
 
             // If port has power control, ensure it's powered
             if (!portsc.pp) {
                 portsc.pp = true;
-                writeReg32(self.op_base, portsc_off, @bitCast(portsc));
+                port_dev.writeTyped(.portsc, portsc);
                 // Wait for power up
                 var t: u32 = 20000; // ~20ms
                 while (t > 0) : (t -= 1) hal.cpu.pause();
-                portsc = @bitCast(readReg32(self.op_base, portsc_off));
+                portsc = port_dev.readTyped(.portsc, regs.PortSc);
             }
 
             if (portsc.ccs) {
@@ -235,25 +241,7 @@ pub const Controller = struct {
 // MMIO Helpers
 // =============================================================================
 
-fn readReg8(base: u64, offset: u64) u8 {
-    const ptr: *volatile u8 = @ptrFromInt(base + offset);
-    return ptr.*;
-}
 
-fn readReg16(base: u64, offset: u64) u16 {
-    const ptr: *volatile u16 = @ptrFromInt(base + offset);
-    return ptr.*;
-}
-
-fn readReg32(base: u64, offset: u64) u32 {
-    const ptr: *volatile u32 = @ptrFromInt(base + offset);
-    return ptr.*;
-}
-
-fn writeReg32(base: u64, offset: u64, value: u32) void {
-    const ptr: *volatile u32 = @ptrFromInt(base + offset);
-    ptr.* = value;
-}
 
 // =============================================================================
 // Module Initialization
