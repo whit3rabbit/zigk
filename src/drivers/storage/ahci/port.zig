@@ -15,6 +15,7 @@ const std = @import("std");
 const hal = @import("hal");
 const hba = @import("hba.zig");
 const fis = @import("fis.zig");
+const MmioDevice = @import("../../arch/x86_64/mmio_device.zig").MmioDevice;
 
 const term = @import("std").os.linux; // Not used here directly but good practice to keep std imports clean
 // We need assembly for memory barriers
@@ -34,25 +35,27 @@ const POST_RESET_MS: u32 = 150; // Post-reset stability delay
 // Port Register Offsets (relative to port base)
 // ============================================================================
 
-pub const Regs = struct {
-    pub const CLB: usize = 0x00; // Command List Base Address (low)
-    pub const CLBU: usize = 0x04; // Command List Base Address (high)
-    pub const FB: usize = 0x08; // FIS Base Address (low)
-    pub const FBU: usize = 0x0C; // FIS Base Address (high)
-    pub const IS: usize = 0x10; // Interrupt Status
-    pub const IE: usize = 0x14; // Interrupt Enable
-    pub const CMD: usize = 0x18; // Command and Status
-    pub const TFD: usize = 0x20; // Task File Data
-    pub const SIG: usize = 0x24; // Signature
-    pub const SSTS: usize = 0x28; // SATA Status (SCR0)
-    pub const SCTL: usize = 0x2C; // SATA Control (SCR2)
-    pub const SERR: usize = 0x30; // SATA Error (SCR1)
-    pub const SACT: usize = 0x34; // SATA Active
-    pub const CI: usize = 0x38; // Command Issue
-    pub const SNTF: usize = 0x3C; // SNotification
-    pub const FBS: usize = 0x40; // FIS-based Switching Control
-    pub const DEVSLP: usize = 0x44; // Device Sleep
+pub const PortReg = enum(usize) {
+    clb = 0x00, // Command List Base Address (low)
+    clbu = 0x04, // Command List Base Address (high)
+    fb = 0x08, // FIS Base Address (low)
+    fbu = 0x0C, // FIS Base Address (high)
+    is = 0x10, // Interrupt Status
+    ie = 0x14, // Interrupt Enable
+    cmd = 0x18, // Command and Status
+    tfd = 0x20, // Task File Data
+    sig = 0x24, // Signature
+    ssts = 0x28, // SATA Status (SCR0)
+    sctl = 0x2C, // SATA Control (SCR2)
+    serr = 0x30, // SATA Error (SCR1)
+    sact = 0x34, // SATA Active
+    ci = 0x38, // Command Issue
+    sntf = 0x3C, // SNotification
+    fbs = 0x40, // FIS-based Switching Control
+    devslp = 0x44, // Device Sleep
 };
+
+const PortDevice = MmioDevice(PortReg);
 
 // ============================================================================
 // Port Command Register (CMD)
@@ -340,31 +343,7 @@ pub const DeviceSignature = enum(u32) {
 pub fn portBase(hba_base: u64, port_num: u5) u64 {
     return hba_base + hba.Regs.PORT_BASE + (@as(u64, port_num) * hba.Regs.PORT_SIZE);
 }
-
-/// Read a 32-bit port register
-pub fn read32(base: u64, offset: usize) u32 {
-    const ptr: *volatile u32 = @ptrFromInt(base + offset);
-    return ptr.*;
-}
-
-/// Write a 32-bit port register
-pub fn write32(base: u64, offset: usize, value: u32) void {
-    const ptr: *volatile u32 = @ptrFromInt(base + offset);
-    ptr.* = value;
-}
-
-/// Read a 64-bit port register (from two 32-bit registers)
-pub fn read64(base: u64, offset_lo: usize, offset_hi: usize) u64 {
-    const lo = read32(base, offset_lo);
-    const hi = read32(base, offset_hi);
-    return (@as(u64, hi) << 32) | lo;
-}
-
-/// Write a 64-bit port register (to two 32-bit registers)
-pub fn write64(base: u64, offset_lo: usize, offset_hi: usize, value: u64) void {
-    write32(base, offset_lo, @truncate(value));
-    write32(base, offset_hi, @truncate(value >> 32));
-}
+// Note: MmioDevice replaces raw read32/write32. We implement wrappers for compatibility.
 
 // ============================================================================
 // Port Register Accessors
@@ -372,107 +351,134 @@ pub fn write64(base: u64, offset_lo: usize, offset_hi: usize, value: u64) void {
 
 /// Read Command List Base address
 pub fn readClb(base: u64) u64 {
-    return read64(base, Regs.CLB, Regs.CLBU);
+    const dev = PortDevice.init(base, 0x80);
+    const lo = dev.read(.clb);
+    const hi = dev.read(.clbu);
+    return (@as(u64, hi) << 32) | lo;
 }
 
 /// Write Command List Base address
 pub fn writeClb(base: u64, addr: u64) void {
-    write64(base, Regs.CLB, Regs.CLBU, addr);
+    const dev = PortDevice.init(base, 0x80);
+    dev.write(.clb, @truncate(addr));
+    dev.write(.clbu, @truncate(addr >> 32));
 }
 
 /// Read FIS Base address
 pub fn readFb(base: u64) u64 {
-    return read64(base, Regs.FB, Regs.FBU);
+    const dev = PortDevice.init(base, 0x80);
+    const lo = dev.read(.fb);
+    const hi = dev.read(.fbu);
+    return (@as(u64, hi) << 32) | lo;
 }
 
 /// Write FIS Base address
 pub fn writeFb(base: u64, addr: u64) void {
-    write64(base, Regs.FB, Regs.FBU, addr);
+    const dev = PortDevice.init(base, 0x80);
+    dev.write(.fb, @truncate(addr));
+    dev.write(.fbu, @truncate(addr >> 32));
 }
 
 /// Read Port Command register
 pub fn readCmd(base: u64) PortCmd {
-    return @bitCast(read32(base, Regs.CMD));
+    const dev = PortDevice.init(base, 0x80);
+    return dev.readTyped(.cmd, PortCmd);
 }
 
 /// Write Port Command register
 pub fn writeCmd(base: u64, cmd: PortCmd) void {
-    write32(base, Regs.CMD, @bitCast(cmd));
+    const dev = PortDevice.init(base, 0x80);
+    dev.writeTyped(.cmd, cmd);
 }
 
 /// Read Interrupt Status
 pub fn readIs(base: u64) PortInterrupt {
-    return @bitCast(read32(base, Regs.IS));
+    const dev = PortDevice.init(base, 0x80);
+    return dev.readTyped(.is, PortInterrupt);
 }
 
 /// Clear Interrupt Status (write 1 to clear)
 pub fn clearIs(base: u64, mask: PortInterrupt) void {
-    write32(base, Regs.IS, @bitCast(mask));
+    const dev = PortDevice.init(base, 0x80);
+    dev.writeTyped(.is, mask);
 }
 
 /// Read Interrupt Enable
 pub fn readIe(base: u64) PortInterrupt {
-    return @bitCast(read32(base, Regs.IE));
+    const dev = PortDevice.init(base, 0x80);
+    return dev.readTyped(.ie, PortInterrupt);
 }
 
 /// Write Interrupt Enable
 pub fn writeIe(base: u64, ie: PortInterrupt) void {
-    write32(base, Regs.IE, @bitCast(ie));
+    const dev = PortDevice.init(base, 0x80);
+    dev.writeTyped(.ie, ie);
 }
 
 /// Read Task File Data
 pub fn readTfd(base: u64) TaskFileData {
-    return @bitCast(read32(base, Regs.TFD));
+    const dev = PortDevice.init(base, 0x80);
+    return dev.readTyped(.tfd, TaskFileData);
 }
 
 /// Read Device Signature
 pub fn readSig(base: u64) DeviceSignature {
-    return @enumFromInt(read32(base, Regs.SIG));
+    const dev = PortDevice.init(base, 0x80);
+    return @enumFromInt(dev.read(.sig));
 }
 
 /// Read SATA Status
 pub fn readSsts(base: u64) SataStatus {
-    return @bitCast(read32(base, Regs.SSTS));
+    const dev = PortDevice.init(base, 0x80);
+    return dev.readTyped(.ssts, SataStatus);
 }
 
 /// Read SATA Control
 pub fn readSctl(base: u64) SataControl {
-    return @bitCast(read32(base, Regs.SCTL));
+    const dev = PortDevice.init(base, 0x80);
+    return dev.readTyped(.sctl, SataControl);
 }
 
 /// Write SATA Control
 pub fn writeSctl(base: u64, sctl: SataControl) void {
-    write32(base, Regs.SCTL, @bitCast(sctl));
+    const dev = PortDevice.init(base, 0x80);
+    dev.writeTyped(.sctl, sctl);
 }
 
 /// Read SATA Error (write 1 to clear)
 pub fn readSerr(base: u64) u32 {
-    return read32(base, Regs.SERR);
+    const dev = PortDevice.init(base, 0x80);
+    return dev.read(.serr);
 }
 
 /// Clear SATA Error
 pub fn clearSerr(base: u64, mask: u32) void {
-    write32(base, Regs.SERR, mask);
+    const dev = PortDevice.init(base, 0x80);
+    dev.write(.serr, mask);
 }
 
 /// Read SATA Active (NCQ tags)
 pub fn readSact(base: u64) u32 {
-    return read32(base, Regs.SACT);
+    const dev = PortDevice.init(base, 0x80);
+    return dev.read(.sact);
 }
 
 /// Write SATA Active
 pub fn writeSact(base: u64, tags: u32) void {
-    write32(base, Regs.SACT, tags);
+    const dev = PortDevice.init(base, 0x80);
+    dev.write(.sact, tags);
 }
 
 /// Read Command Issue
 pub fn readCi(base: u64) u32 {
-    return read32(base, Regs.CI);
+    const dev = PortDevice.init(base, 0x80);
+    return dev.read(.ci);
 }
 
 /// Write Command Issue (issue commands)
 pub fn writeCi(base: u64, slots: u32) void {
-    write32(base, Regs.CI, slots);
+    const dev = PortDevice.init(base, 0x80);
+    dev.write(.ci, slots);
 }
 
 // ============================================================================

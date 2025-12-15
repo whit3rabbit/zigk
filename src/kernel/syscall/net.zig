@@ -218,18 +218,16 @@ pub fn sys_bind(fd: usize, addr_ptr: usize, addrlen: usize) SyscallError!usize {
         return error.ENOTSOCK;
     };
 
-    // Validate address pointer
-    if (!isValidUserPtr(addr_ptr, @sizeOf(socket.SockAddrIn))) {
-        return error.EFAULT;
-    }
-
     if (addrlen < @sizeOf(socket.SockAddrIn)) {
         return error.EINVAL;
     }
 
-    const addr: *const socket.SockAddrIn = @ptrFromInt(addr_ptr);
+    // Safely copy address from user memory
+    const kaddr = user_mem.copyStructFromUser(socket.SockAddrIn, user_mem.UserPtr.from(addr_ptr)) catch {
+        return error.EFAULT;
+    };
 
-    socket.bind(ctx.socket_idx, addr) catch |err| {
+    socket.bind(ctx.socket_idx, &kaddr) catch |err| {
         return socketErrorToSyscallError(err);
     };
 
@@ -257,23 +255,29 @@ pub fn sys_sendto(
         return error.EFAULT;
     }
 
-    // Validate destination address (small struct, bounds check sufficient)
-    if (!isValidUserPtr(dest_addr_ptr, @sizeOf(socket.SockAddrIn))) {
-        return error.EFAULT;
-    }
-
-    if (addrlen < @sizeOf(socket.SockAddrIn)) {
-        return error.EINVAL;
+    // Copy destination address from user memory if provided
+    var kdest_addr: ?socket.SockAddrIn = null;
+    
+    if (dest_addr_ptr != 0) {
+        if (addrlen < @sizeOf(socket.SockAddrIn)) {
+            return error.EINVAL;
+        }
+        kdest_addr = user_mem.copyStructFromUser(socket.SockAddrIn, user_mem.UserPtr.from(dest_addr_ptr)) catch {
+            return error.EFAULT;
+        };
     }
 
     const buf: [*]const u8 = @ptrFromInt(buf_ptr);
-    const dest_addr: *const socket.SockAddrIn = @ptrFromInt(dest_addr_ptr);
-
-    const sent = socket.sendto(ctx.socket_idx, buf[0..len], dest_addr) catch |err| {
-        return socketErrorToSyscallError(err);
-    };
-
-    return sent;
+    
+    if (kdest_addr) |*addr| {
+        const sent = socket.sendto(ctx.socket_idx, buf[0..len], addr) catch |err| {
+            return socketErrorToSyscallError(err);
+        };
+        return sent;
+    } else {
+        // UDP without destination not supported in MVP (unless connect used?)
+        return error.EDESTADDRREQ; 
+    }
 }
 
 /// sys_recvfrom (45) - Receive message from socket
@@ -299,35 +303,34 @@ pub fn sys_recvfrom(
 
     const buf: [*]u8 = @ptrFromInt(buf_ptr);
 
-    // Source address is optional
-    var src_addr: ?*socket.SockAddrIn = null;
-    if (src_addr_ptr != 0) {
-        if (!isValidUserPtr(src_addr_ptr, @sizeOf(socket.SockAddrIn))) {
-            return error.EFAULT;
-        }
-        src_addr = @ptrFromInt(src_addr_ptr);
-    }
+    // Prepare kernel buffer for source address
+    var ksrc_addr: socket.SockAddrIn = undefined;
+    const src_addr_arg: ?*socket.SockAddrIn = if (src_addr_ptr != 0) &ksrc_addr else null;
 
-    const received = socket.recvfrom(ctx.socket_idx, buf[0..len], src_addr) catch |err| {
+    const received = socket.recvfrom(ctx.socket_idx, buf[0..len], src_addr_arg) catch |err| {
         return socketErrorToSyscallError(err);
     };
 
-    // Update addrlen if provided
-    // Security: Read input addrlen to kernel stack first (prevents double-fetch TOCTOU)
-    // and validate that user buffer is large enough before writing
-    if (addrlen_ptr != 0 and src_addr != null) {
+    // Copy source address back to user if requested and successful
+    if (src_addr_ptr != 0 and addrlen_ptr != 0) {
+        // Update addrlen first check
         const addrlen_uptr = user_mem.UserPtr.from(addrlen_ptr);
-        // Read input addrlen to kernel stack
         const input_len = addrlen_uptr.readValue(u32) catch {
             return error.EFAULT;
         };
-        // Validate user buffer is large enough for the address structure
+        
         if (input_len < @sizeOf(socket.SockAddrIn)) {
             return error.EINVAL;
         }
-        // Write back actual size used
-        addrlen_uptr.writeValue(@as(u32, @sizeOf(socket.SockAddrIn))) catch {
+
+        // Copy address struct
+        user_mem.copyStructToUser(socket.SockAddrIn, user_mem.UserPtr.from(src_addr_ptr), ksrc_addr) catch {
             return error.EFAULT;
+        };
+
+        // Update length
+        addrlen_uptr.writeValue(@as(u32, @sizeOf(socket.SockAddrIn))) catch {
+             return error.EFAULT;
         };
     }
 
@@ -363,14 +366,10 @@ pub fn sys_accept(fd: usize, addr_ptr: usize, addrlen_ptr: usize) SyscallError!u
         return error.ENOTSOCK;
     };
 
-    // Address is optional
-    var peer_addr: ?*socket.SockAddrIn = null;
-    if (addr_ptr != 0) {
-        if (!isValidUserPtr(addr_ptr, @sizeOf(socket.SockAddrIn))) {
-            return error.EFAULT;
-        }
-        peer_addr = @ptrFromInt(addr_ptr);
-    }
+    // Prepare kernel buffer for peer address
+    var kpeer_addr: socket.SockAddrIn = undefined;
+    // recvfrom takes ?*SockAddrIn
+    const peer_addr_arg: ?*socket.SockAddrIn = if (addr_ptr != 0) &kpeer_addr else null;
 
     // Get socket to check blocking mode and set blocked_thread
     const sock = socket.getSocket(ctx.socket_idx) orelse {
@@ -379,23 +378,34 @@ pub fn sys_accept(fd: usize, addr_ptr: usize, addrlen_ptr: usize) SyscallError!u
 
     // Blocking accept loop
     while (true) {
-        const result = socket.accept(ctx.socket_idx, peer_addr);
+        const result = socket.accept(ctx.socket_idx, peer_addr_arg);
 
         if (result) |new_sock_fd| {
-            // Success - update addrlen and return
-            // Security: Read input addrlen to kernel stack first (prevents double-fetch TOCTOU)
-            if (addrlen_ptr != 0 and peer_addr != null) {
-                const addrlen_uptr = user_mem.UserPtr.from(addrlen_ptr);
-                const input_len = addrlen_uptr.readValue(u32) catch {
+            // Success - copy address back if requested
+            if (addr_ptr != 0 and addrlen_ptr != 0) {
+                 const addrlen_uptr = user_mem.UserPtr.from(addrlen_ptr);
+                 const input_len = addrlen_uptr.readValue(u32) catch {
+                    // Cleanup new socket?
+                    _ = socket.close(new_sock_fd) catch {};
                     return error.EFAULT;
-                };
-                if (input_len < @sizeOf(socket.SockAddrIn)) {
-                    return error.EINVAL;
-                }
-                addrlen_uptr.writeValue(@as(u32, @sizeOf(socket.SockAddrIn))) catch {
-                    return error.EFAULT;
-                };
+                 };
+
+                 if (input_len < @sizeOf(socket.SockAddrIn)) {
+                     _ = socket.close(new_sock_fd) catch {};
+                     return error.EINVAL;
+                 }
+
+                 user_mem.copyStructToUser(socket.SockAddrIn, user_mem.UserPtr.from(addr_ptr), kpeer_addr) catch {
+                      _ = socket.close(new_sock_fd) catch {};
+                      return error.EFAULT;
+                 };
+
+                 addrlen_uptr.writeValue(@as(u32, @sizeOf(socket.SockAddrIn))) catch {
+                      _ = socket.close(new_sock_fd) catch {};
+                      return error.EFAULT;
+                 };
             }
+
             const new_fd_num = installSocketFd(new_sock_fd) catch |err| {
                 _ = socket.close(new_sock_fd) catch {};
                 return err;
@@ -415,7 +425,7 @@ pub fn sys_accept(fd: usize, addr_ptr: usize, addrlen_ptr: usize) SyscallError!u
                 // block() sets state to Blocked then enables interrupts and
                 // halts. When we return, interrupts are enabled.
                 sched.block();
-                // Woken up - retry accept
+                // Woke up - retry accept
                 continue;
             }
             // Non-blocking or other error
@@ -435,16 +445,14 @@ pub fn sys_connect(fd: usize, addr_ptr: usize, addrlen: usize) SyscallError!usiz
         return error.ENOTSOCK;
     };
 
-    // Validate address pointer
-    if (!isValidUserPtr(addr_ptr, @sizeOf(socket.SockAddrIn))) {
-        return error.EFAULT;
-    }
-
     if (addrlen < @sizeOf(socket.SockAddrIn)) {
         return error.EINVAL;
     }
 
-    const addr: *const socket.SockAddrIn = @ptrFromInt(addr_ptr);
+    // Safely copy address from user memory
+    const kaddr = user_mem.copyStructFromUser(socket.SockAddrIn, user_mem.UserPtr.from(addr_ptr)) catch {
+        return error.EFAULT;
+    };
 
     // Get socket to check blocking mode
     const sock = socket.getSocket(ctx.socket_idx) orelse {
@@ -452,7 +460,7 @@ pub fn sys_connect(fd: usize, addr_ptr: usize, addrlen: usize) SyscallError!usiz
     };
 
     // Start connection (sends SYN)
-    socket.connect(ctx.socket_idx, addr) catch |err| {
+    socket.connect(ctx.socket_idx, &kaddr) catch |err| {
         return socketErrorToSyscallError(err);
     };
 
