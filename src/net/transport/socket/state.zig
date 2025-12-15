@@ -13,6 +13,10 @@ pub const Interface = interface.Interface;
 /// Stores pointers to sockets. Null entries are free slots.
 pub var socket_table: std.ArrayList(?*types.Socket) = undefined;
 pub var socket_allocator: std.mem.Allocator = undefined;
+/// UDP lookup table (Port -> Socket) for O(1) delivery
+pub var udp_sockets: [65536]?*types.Socket = [_]?*types.Socket{null} ** 65536;
+
+/// Socket allocation lock
 /// Socket allocation lock
 var lock: sync.Lock = sync.noop_lock;
 /// Global network interface (set during init)
@@ -30,6 +34,7 @@ pub fn init(iface: *Interface, allocator: std.mem.Allocator) void {
     global_iface = iface;
     socket_allocator = allocator;
     socket_table = .{};
+    udp_sockets = [_]?*types.Socket{null} ** 65536;
 }
 
 pub fn getInterface() ?*Interface {
@@ -178,6 +183,25 @@ pub fn findByPort(port: u16) ?*types.Socket {
         }
     }
     return null;
+}
+
+/// Find UDP socket by port (O(1) lookup)
+pub fn findUdpSocket(port: u16) ?*types.Socket {
+    return udp_sockets[port];
+}
+
+pub fn registerUdpSocket(sock: *types.Socket) void {
+    if (sock.local_port != 0 and sock.sock_type == types.SOCK_DGRAM) {
+        udp_sockets[sock.local_port] = sock;
+    }
+}
+
+pub fn unregisterUdpSocket(sock: *types.Socket) void {
+    if (sock.local_port != 0 and sock.sock_type == types.SOCK_DGRAM) {
+        if (udp_sockets[sock.local_port] == sock) {
+            udp_sockets[sock.local_port] = null;
+        }
+    }
 }
 
 pub fn reserveSlot() ?usize {

@@ -25,6 +25,7 @@ pub fn sendto(
         if (sock.local_port == 0) {
             return errors.SocketError.AddrNotAvail;
         }
+        state.registerUdpSocket(sock);
     }
 
     const dst_ip = dest_addr.getAddr();
@@ -63,12 +64,16 @@ pub fn sendto(
                 // Check multicast membership
                 if (!s.isMulticastMember(dst_ip)) continue;
                 
-                // Enqueue packet
-                if (s.enqueuePacket(data, iface.ip_addr, sock.local_port)) {
-                    // Wake if blocked
-                    if (s.blocked_thread) |thread| {
-                        scheduler.wakeThread(thread);
-                        s.blocked_thread = null;
+                // Enqueue packet with per-socket lock
+                {
+                    const held = s.lock.acquire();
+                    defer held.release();
+                    if (s.enqueuePacket(data, iface.ip_addr, sock.local_port)) {
+                        // Wake if blocked
+                        if (s.blocked_thread) |thread| {
+                            scheduler.wakeThread(thread);
+                            s.blocked_thread = null;
+                        }
                     }
                 }
             }
@@ -92,8 +97,8 @@ pub fn recvfrom(
 
     // Non-blocking: check queue and return immediately
     if (!sock.blocking) {
-        state.socketLock().acquire();
-        defer state.socketLock().release();
+        const held = sock.lock.acquire();
+        defer held.release();
 
         if (sock.dequeuePacket(buf, &src_ip, &src_port)) |len| {
             if (src_addr) |addr| {
@@ -111,16 +116,16 @@ pub fn recvfrom(
         while (true) {
             // Try to dequeue data with lock held
             {
-                state.socketLock().acquire();
+                const held = sock.lock.acquire();
                 // We must release the lock before returning or blocking
                 if (sock.dequeuePacket(buf, &src_ip, &src_port)) |len| {
-                    state.socketLock().release();
+                    held.release();
                     if (src_addr) |addr| {
                         addr.* = types.SockAddrIn.init(src_ip, src_port);
                     }
                     return len;
                 }
-                state.socketLock().release();
+                held.release();
             }
 
             // No data available - block atomically
@@ -148,15 +153,17 @@ pub fn recvfrom(
     var ticks: usize = 0;
     while (ticks < timeout_ticks) : (ticks += 1) {
         // Check for data with lock held
-        state.socketLock().acquire();
-        if (sock.dequeuePacket(buf, &src_ip, &src_port)) |len| {
-            state.socketLock().release();
-            if (src_addr) |addr| {
-                addr.* = types.SockAddrIn.init(src_ip, src_port);
+        {
+            const held = sock.lock.acquire();
+            if (sock.dequeuePacket(buf, &src_ip, &src_port)) |len| {
+                held.release();
+                if (src_addr) |addr| {
+                    addr.* = types.SockAddrIn.init(src_ip, src_port);
+                }
+                return len;
             }
-            return len;
+            held.release();
         }
-        state.socketLock().release();
         // HLT atomically enables interrupts and halts until next interrupt
         // This is much more power-efficient than busy-spinning with pause
         asm volatile ("sti; hlt");
@@ -218,12 +225,16 @@ pub fn deliverUdpPacket(pkt: *packet.PacketBuffer) bool {
             }
 
             // Deliver to this socket
-            if (sock.enqueuePacket(payload, pkt.src_ip, pkt.src_port)) {
-                delivered = true;
-                // Wake blocked thread if any
-                if (sock.blocked_thread) |thread| {
-                    scheduler.wakeThread(thread);
-                    sock.blocked_thread = null;
+            {
+                const held = sock.lock.acquire();
+                defer held.release();
+                if (sock.enqueuePacket(payload, pkt.src_ip, pkt.src_port)) {
+                    delivered = true;
+                    // Wake blocked thread if any
+                    if (sock.blocked_thread) |thread| {
+                        scheduler.wakeThread(thread);
+                        sock.blocked_thread = null;
+                    }
                 }
             }
         }
@@ -232,18 +243,22 @@ pub fn deliverUdpPacket(pkt: *packet.PacketBuffer) bool {
     }
 
     // Unicast delivery - find single matching socket
-    const sock = state.findByPort(dst_port) orelse {
+    const sock = state.findUdpSocket(dst_port) orelse {
         return false; // No socket listening on this port
     };
 
     // Enqueue packet with source info
-    if (sock.enqueuePacket(payload, pkt.src_ip, pkt.src_port)) {
-        // Wake blocked thread if any
-        if (sock.blocked_thread) |thread| {
-            scheduler.wakeThread(thread);
-            sock.blocked_thread = null;
+    {
+        const held = sock.lock.acquire();
+        defer held.release();
+        if (sock.enqueuePacket(payload, pkt.src_ip, pkt.src_port)) {
+            // Wake blocked thread if any
+            if (sock.blocked_thread) |thread| {
+                scheduler.wakeThread(thread);
+                sock.blocked_thread = null;
+            }
+            return true;
         }
-        return true;
     }
     return false;
 }

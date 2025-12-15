@@ -25,7 +25,15 @@ pub const Spinlock = struct {
         return .{ .lock = self, .irq_state = irq };
     }
     
-    // Note: tryAcquire/isLocked omitted for simplicity unless needed
+    pub fn tryAcquire(self: *Spinlock) ?Held {
+        const irq = hal.cpu.disableInterruptsSaveFlags();
+        const prev = self.locked.cmpxchgStrong(0, 1, .acquire, .monotonic);
+        if (prev == null) {
+            return .{ .lock = self, .irq_state = irq };
+        }
+        hal.cpu.restoreInterrupts(irq);
+        return null;
+    }
 };
 
 /// Lock interface (Mutex/Spinlock)

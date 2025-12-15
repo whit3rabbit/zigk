@@ -48,9 +48,9 @@ fn sendSegment(
     const ip_len = packet.IP_HEADER_SIZE + tcp_len;
     const total_len = packet.ETH_HEADER_SIZE + ip_len;
 
-    // Use heap allocator to avoid stack pressure
-    const buf = state.tcp_allocator.alloc(u8, packet.MAX_PACKET_SIZE) catch return false;
-    defer state.tcp_allocator.free(buf);
+    // Use static buffer pool to avoid heap pressure
+    const buf = state.allocTxBuffer() orelse return false;
+    defer state.freeTxBuffer(buf);
 
     if (total_len > buf.len) return false;
 
@@ -173,9 +173,9 @@ pub fn sendSynWithOptions(tcb: *Tcb) bool {
     const ip_len = packet.IP_HEADER_SIZE + tcp_len;
     const total_len = packet.ETH_HEADER_SIZE + ip_len;
 
-    // Use heap allocator
-    const buf = state.tcp_allocator.alloc(u8, packet.MAX_PACKET_SIZE) catch return false;
-    defer state.tcp_allocator.free(buf);
+    // Use static buffer pool
+    const buf = state.allocTxBuffer() orelse return false;
+    defer state.freeTxBuffer(buf);
 
     if (total_len > buf.len) return false;
 
@@ -259,9 +259,9 @@ pub fn sendSynAckWithOptions(tcb: *Tcb, peer_opts: ?*const options.TcpOptions) b
     const ip_len = packet.IP_HEADER_SIZE + tcp_len;
     const total_len = packet.ETH_HEADER_SIZE + ip_len;
 
-    // Use heap allocator
-    const buf = state.tcp_allocator.alloc(u8, packet.MAX_PACKET_SIZE) catch return false;
-    defer state.tcp_allocator.free(buf);
+    // Use static buffer pool
+    const buf = state.allocTxBuffer() orelse return false;
+    defer state.freeTxBuffer(buf);
 
     if (total_len > buf.len) return false;
 
@@ -358,8 +358,14 @@ pub fn sendRstForPacket(iface: *Interface, pkt: *const PacketBuffer, tcp_hdr: *c
     const next_hop = iface.getGateway(ip_hdr.getSrcIp());
     const dst_mac = arp.resolveOrRequest(iface, next_hop, null) orelse return false;
 
-    var buf: [packet.MAX_PACKET_SIZE]u8 = undefined;
+    // Use static buffer pool to avoid stack pressure and Use-After-Return if ARP queues packet
+    const buf = state.allocTxBuffer() orelse return false;
+    // We only free if we transmit immediately. If Arp queues it, Arp copies it.
+    // See analysis in previous commit about ARP/PacketBuffer ownership.
+    defer state.freeTxBuffer(buf);
+
     const total_len = packet.ETH_HEADER_SIZE + packet.IP_HEADER_SIZE + c.TCP_HEADER_SIZE;
+    // ... logic continues ...
 
     // Ethernet
     const eth: *EthernetHeader = @ptrCast(@alignCast(&buf[0]));

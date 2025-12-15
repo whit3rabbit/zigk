@@ -163,17 +163,22 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
 
     // Learn sender's MAC address (ARP snooping)
     // Only if sender IP is on our subnet
+    // Learn sender's MAC address (ARP snooping)
+    // Only if sender IP is on our subnet
     if (iface.isLocalSubnet(sender_ip)) {
         // Security: Reject ARP entries claiming to be our own IP address.
-        // This prevents ARP spoofing attacks where an attacker claims our IP
-        // to perform a man-in-the-middle attack on traffic destined for us.
         if (sender_ip == iface.ip_addr) {
-            // Silently drop - someone is spoofing our IP
             return false;
         }
 
-        if (findEntry(sender_ip)) |_| {
-            updateCache(iface, sender_ip, arp.sender_mac, .reachable) catch {};
+        // Security: ARP Spoofing Protection.
+        // Only update existing entries if this is an explicit ARP REPLY.
+        // Unsolicited ARP REQUESTs ("Gratuitous ARP") are easily spoofed and
+        // should not overwrite our cache unless we implement stronger validation.
+        if (operation == 2) { 
+             if (findEntry(sender_ip)) |_| {
+                updateCache(iface, sender_ip, arp.sender_mac, .reachable) catch {};
+             }
         }
     }
 
@@ -282,12 +287,26 @@ pub fn resolveOrRequest(iface: *Interface, ip: u32, pkt_opaque: ?*const anyopaqu
     for (arp_cache.items) |*entry| {
             if (entry.ip_addr == ip and entry.state == .incomplete) {
                 if (pkt) |p| {
-                    if (p.len <= packet.MAX_PACKET_SIZE and entry.queue_count < ArpEntry.QUEUE_SIZE) {
+                    if (p.len <= packet.MAX_PACKET_SIZE) {
+                        // Queue full? Use drop-head (drop oldest) to favor new traffic
+                        if (entry.queue_count >= ArpEntry.QUEUE_SIZE) {
+                            // Free the oldest packet
+                            const head_idx = @as(usize, entry.queue_head);
+                            if (entry.pending_pkts[head_idx]) |old_buf| {
+                                arp_allocator.free(old_buf);
+                                entry.pending_pkts[head_idx] = null;
+                            }
+                            entry.queue_head = (entry.queue_head + 1) % @as(u8, @intCast(ArpEntry.QUEUE_SIZE));
+                            entry.queue_count -= 1;
+                        }
+
+                        // Enqueue new packet
                         const buf = arp_allocator.alloc(u8, p.len) catch null;
                         if (buf) |slot| {
                             @memcpy(slot[0..p.len], p.data[0..p.len]);
-                            entry.pending_pkts[entry.queue_tail] = slot;
-                            entry.pending_lens[entry.queue_tail] = p.len;
+                            const tail_idx = @as(usize, entry.queue_tail);
+                            entry.pending_pkts[tail_idx] = slot;
+                            entry.pending_lens[tail_idx] = p.len;
                             entry.queue_tail = (entry.queue_tail + 1) % @as(u8, @intCast(ArpEntry.QUEUE_SIZE));
                             entry.queue_count += 1;
                         }

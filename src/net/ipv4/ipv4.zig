@@ -67,7 +67,7 @@ pub const IP_HEADER_MAX: usize = 60;
 pub fn init(allocator: std.mem.Allocator, ticks_per_sec: u32) void {
     ipv4_allocator = allocator;
     arp.init(allocator, ticks_per_sec);
-    reassembly.init();
+    reassembly.init(allocator);
 }
 
 // ============================================================================

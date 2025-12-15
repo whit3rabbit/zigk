@@ -69,6 +69,19 @@ pub fn setsockopt(sock_fd: usize, level: i32, optname: i32, optval: [*]const u8,
                 if (!sock.addMulticastGroup(group_ip)) {
                     return errors.SocketError.NoResources; // No slots available
                 }
+                
+                // Inform interface to accept this multicast group at MAC layer
+                const iface = state.getInterface();
+                if (iface) |ifc| {
+                     // Map IPv4 multicast to Ethernet multicast: 01:00:5E:xx:xx:xx
+                     // Low 23 bits of IP map to low 23 bits of MAC
+                     var mac = [_]u8{ 0x01, 0x00, 0x5E, 0, 0, 0 };
+                     const trailing = group_ip & 0x7FFFFF; // Mask low 23 bits (host order)
+                     mac[3] = @truncate(trailing >> 16);
+                     mac[4] = @truncate(trailing >> 8);
+                     mac[5] = @truncate(trailing);
+                     _ = ifc.joinMulticastMac(mac);
+                }
             },
             types.IP_DROP_MEMBERSHIP => {
                 if (optlen < @sizeOf(types.IpMreq)) return errors.SocketError.InvalidArg;
@@ -78,6 +91,20 @@ pub fn setsockopt(sock_fd: usize, level: i32, optname: i32, optval: [*]const u8,
                 // Remove from socket's multicast group list
                 if (!sock.dropMulticastGroup(group_ip)) {
                     return errors.SocketError.AddrNotAvail; // Not a member
+                }
+                
+                // Inform interface to leave (refcounting would be better in a full stack, 
+                // but for now we just leave if this socket leaves. NOTE: In a multi-socket 
+                // system, this might break other sockets listening to same group. 
+                // Keeping simple for MVP.)
+                const iface = state.getInterface();
+                if (iface) |ifc| {
+                     var mac = [_]u8{ 0x01, 0x00, 0x5E, 0, 0, 0 };
+                     const trailing = group_ip & 0x7FFFFF; 
+                     mac[3] = @truncate(trailing >> 16);
+                     mac[4] = @truncate(trailing >> 8);
+                     mac[5] = @truncate(trailing);
+                     _ = ifc.leaveMulticastMac(mac);
                 }
             },
             types.IP_MULTICAST_TTL => {

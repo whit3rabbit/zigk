@@ -133,9 +133,11 @@ fn processListenPacket(
     }
 
     // SYN flood protection: limit half-open connections
-    // Drop SYN silently if too many connections in SYN-RECEIVED state
     if (state.countHalfOpen() >= c.MAX_HALF_OPEN) {
-        return false; // Silently drop - don't send RST to avoid amplification
+         // Try to evict oldest half-open TCB to make room (DoS mitigation)
+         if (!state.evictOldestHalfOpenTcb()) {
+             return false; // Could not make room, silently drop
+         }
     }
 
     // Note: We should ideally also check listen_tcb backlog here, but we lack
@@ -235,7 +237,9 @@ fn processEstablishedPacket(tcb: *Tcb, pkt: *PacketBuffer, tcp_hdr: *TcpHeader) 
     if (tcb.ts_ok and tcp_hdr.hasFlag(TcpHeader.FLAG_ACK) and peer_opts.timestamp_present) {
         // Drop packet if timestamp is older than recent
         // Note: RFC 7323 algorithm is more complex (handles pause, etc), simplified here
-        if (peer_opts.ts_val < tcb.ts_recent) {
+        // Security: Use seqLt for timestamp comparison to handle wrap-around (RFC 7323)
+        // TS values are 32-bit and wrap just like sequence numbers.
+        if (seqLt(peer_opts.ts_val, tcb.ts_recent)) {
             // Check if TS.Recent is valid (not too old) - simplified: assumed valid if connection active
              return true; // Drop silently (RFC recommends sending ACK, but silent drop is safer for DoS)
              // Actually RFC says: "If the connection is in a synchronized state ... send an acknowledgement"
@@ -522,19 +526,17 @@ fn processEstablished(tcb: *Tcb, pkt: *PacketBuffer, tcp_hdr: *TcpHeader) bool {
     // SND.WL1 < SEG.SEQ  or
     // SND.WL1 = SEG.SEQ and SND.WL2 <= SEG.ACK
     //
-    // Note: SND.WL2 check requires ACK flag, but we are in Established state where almost all packets have ACK.
-    // If ACK is not present, we shouldn't update window based on ACK field.
+    // Fixed: strictly require ACK flag to be present to update window variables
+    // derived from ACK field (snd_wl2).
     const seq = tcp_hdr.getSeqNum();
-    const ack = if (tcp_hdr.hasFlag(TcpHeader.FLAG_ACK)) tcp_hdr.getAckNum() else tcb.snd_wl2;
-    
-    // Initial update (when wl1/wl2 are 0) or valid update
-    // We treat 0 as "not set" if tcb.snd_una is also 0? No, sequence numbers wrap.
-    // Ideally we initialized wl1/wl2 to proper values during handshake.
-    // For now we assume if window update logic passes, we update.
-    
     var update_window = false;
-    if (seqGt(seq, tcb.snd_wl1) or (seq == tcb.snd_wl1 and seqGte(ack, tcb.snd_wl2))) {
-        update_window = true;
+
+    if (tcp_hdr.hasFlag(TcpHeader.FLAG_ACK)) {
+        const ack = tcp_hdr.getAckNum();
+        if (seqGt(seq, tcb.snd_wl1) or (seq == tcb.snd_wl1 and seqGte(ack, tcb.snd_wl2))) {
+            update_window = true;
+            tcb.snd_wl2 = ack; // Update WL2 inside loop
+        }
     }
     
     if (update_window) {
@@ -545,7 +547,7 @@ fn processEstablished(tcb: *Tcb, pkt: *PacketBuffer, tcp_hdr: *TcpHeader) bool {
         } else raw_window;
         
         tcb.snd_wl1 = seq;
-        tcb.snd_wl2 = ack;
+        // tcb.snd_wl2 updated above
     }
 
     // Process incoming data

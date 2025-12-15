@@ -196,6 +196,9 @@ pub fn connect(sock_fd: usize, dest_addr: *const types.SockAddrIn) errors.Socket
     // Copy socket options to TCB
     tcb.tos = sock.tos;
 
+    // Capture generation for race checking
+    const tcb_gen = tcb.generation;
+
     // Connection started - SYN sent
     
     // Handle blocking if requested
@@ -226,7 +229,9 @@ pub fn connect(sock_fd: usize, dest_addr: *const types.SockAddrIn) errors.Socket
                  // TCB may have been freed by timer while we were blocked.
                  tcp_state.lock.acquire();
                  // Re-verify TCB is still attached to socket and valid
-                 if (sock.tcb == tcb and tcb.allocated and tcb.state != .Closed) {
+                 // Security: Check generation to ensure TCB wasn't freed and re-allocated for a different connection
+                 // while we were sleeping.
+                 if (sock.tcb == tcb and tcb.allocated and tcb.state != .Closed and tcb.generation == tcb_gen) {
                      tcb.blocked_thread = null;
                  }
                  tcp_state.lock.release();

@@ -60,7 +60,7 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
         const udp_data = pkt.data[pkt.transport_offset..][0..udp_len];
         // Use stored IPs from packet metadata to support reassembled packets
         const calc_checksum = checksum.udpChecksum(pkt.src_ip, pkt.dst_ip, udp_data);
-        if (calc_checksum != 0 and udp_hdr.checksum != calc_checksum) {
+        if (udp_hdr.checksum != calc_checksum) {
             // Checksum mismatch
             return false;
         }

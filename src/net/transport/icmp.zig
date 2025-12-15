@@ -12,6 +12,7 @@
 // | Type (1)  | Code(1)| Checksum(2)| Data (depends on Type)  |
 // +-----------+--------+-----------+-------------------------+
 
+const std = @import("std");
 const packet = @import("../core/packet.zig");
 const interface = @import("../core/interface.zig");
 const checksum = @import("../core/checksum.zig");
@@ -101,6 +102,11 @@ fn handleEchoRequest(iface: *Interface, req_pkt: *PacketBuffer, icmp_len: usize)
 
     // Don't reply to broadcast pings (Smurf attack prevention)
     if (ipv4.isBroadcast(req_ip.getDstIp(), iface.netmask)) {
+        return false;
+    }
+    
+    // Security: RFC 1122 - Do not reply if source is Multicast or 0.0.0.0
+    if (ipv4.isMulticast(src_ip) or src_ip == 0) {
         return false;
     }
 
@@ -218,9 +224,20 @@ fn handleDestUnreachable(pkt: *PacketBuffer, icmp: *align(1) const IcmpHeader) b
                 const local_port = (@as(u16, orig_transport[0]) << 8) | orig_transport[1];
                 const remote_port = (@as(u16, orig_transport[2]) << 8) | orig_transport[3];
 
+                // Extract Sequence number if possible (need 8 bytes of transport header)
+                // TCP: src(2), dst(2), seq(4)
+                var seq_num: ?u32 = null;
+                if (transport_offset + 8 <= pkt.len) {
+                    const seq_bytes = pkt.data[transport_offset + 4..][0..4];
+                    seq_num = @byteSwap(std.mem.readInt(u32, seq_bytes, .little));
+                    // Alternatively: (@as(u32, seq_bytes[0]) << 24)...
+                    // Let's use manual construction to be consistent with other code in file
+                    seq_num = (@as(u32, seq_bytes[0]) << 24) | (@as(u32, seq_bytes[1]) << 16) | (@as(u32, seq_bytes[2]) << 8) | @as(u32, seq_bytes[3]);
+                }
+
                 // Validate: original packet was from us (src) to them (dst)
                 // Only update PMTU if we have an active connection matching this 4-tuple
-                if (tcp.validateConnectionExists(original_src, local_port, original_dst, remote_port)) {
+                if (tcp.validateConnectionExists(original_src, local_port, original_dst, remote_port, seq_num)) {
                     ipv4.updatePmtu(original_dst, effective_mtu);
                 }
                 // Silently ignore PMTU updates for non-existent connections

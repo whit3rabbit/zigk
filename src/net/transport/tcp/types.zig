@@ -201,6 +201,10 @@ pub const Tcb = struct {
     rtt_seq: u32,    // Sequence number being timed (0 means not timing)
     rtt_start: u64,  // Timestamp when rtt_seq was sent (ticks)
 
+    // Generation counter for UAF protection (checked by connect())
+    // Incremented on allocation to distinguish reused TCB memory
+    generation: u64,
+
     const Self = @This();
 
     pub fn init() Self {
@@ -256,6 +260,7 @@ pub const Tcb = struct {
             .rttvar = 750 << 2, // Initial deviation estimate (3 sec / 4) -> 750ms
             .rtt_seq = 0,
             .rtt_start = 0,
+            .generation = 0,
         };
     }
 

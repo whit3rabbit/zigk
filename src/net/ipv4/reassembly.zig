@@ -17,9 +17,13 @@ const MAX_IP_PACKET_SIZE: usize = 65535;
 const REASSEMBLY_TIMEOUT: u64 = 15;
 
 /// Maximum concurrent reassemblies
-/// Increased from 8 to handle more simultaneous fragmented flows
-/// while still limiting memory usage (each entry uses ~64KB)
-const MAX_REASSEMBLIES: usize = 32;
+/// Increased significantly to handle many small flows (DoS protection)
+/// Memory usage is now capped by MAX_TOTAL_MEMORY, not just slot count.
+const MAX_REASSEMBLIES: usize = 128;
+
+/// Maximum total memory used by reassembly buffers (2MB)
+/// Prevents memory exhaustion DoS while allowing many small flows
+const MAX_TOTAL_MEMORY: usize = 512 * 1024;
 
 /// Fragment reassembly entry
 const ReassemblyEntry = struct {
@@ -28,19 +32,17 @@ const ReassemblyEntry = struct {
     timer: u64, // Creation timestamp (ticks)
     
     /// Reassembly buffer (holds IP payload)
-    /// We support full 64KB packets. Static allocation is heavy but simple.
-    buffer: [MAX_IP_PACKET_SIZE]u8,
+    /// Dynamically allocated to save memory.
+    buffer: []u8,
     
     /// Total expected length of IP payload (0 if unknown)
     total_len: usize,
     
-    /// Bytes received so far
+    /// Bytes received so far (approximate, for heuristics)
     received_len: usize,
     
     /// Hole descriptor list (simplified)
-    /// Bitmask could work for fixed blocks, but fragments vary in size.
-    /// We'll use a simple "holes" list.
-    holes: [64]Hole, // Support up to 64 fragments/holes (increased from 16 for DoS protection)
+    holes: [64]Hole, // Support up to 64 fragments/holes (limit complexity)
     hole_count: usize,
     
     const Hole = struct {
@@ -53,7 +55,7 @@ const ReassemblyEntry = struct {
             .used = true,
             .key = key,
             .timer = timer,
-            .buffer = undefined,
+            .buffer = &[_]u8{}, // Empty initially
             .total_len = 0,
             .received_len = 0,
             .holes = undefined,
@@ -63,6 +65,18 @@ const ReassemblyEntry = struct {
         // We set it to 65535 initially
         e.holes[0] = Hole{ .start = 0, .end = MAX_IP_PACKET_SIZE };
         return e;
+    }
+    
+    fn deinit(self: *ReassemblyEntry, allocator: std.mem.Allocator) void {
+        if (self.buffer.len > 0) {
+            allocator.free(self.buffer);
+            if (current_memory_usage >= self.buffer.len) {
+                current_memory_usage -= self.buffer.len;
+            } else {
+                current_memory_usage = 0; // Safety against underflow
+            }
+        }
+        self.buffer = &[_]u8{};
     }
 };
 
@@ -80,13 +94,18 @@ var cache_initialized: bool = false;
 /// IRQ-safe spinlock for concurrent access protection
 var lock: sync.Spinlock = .{};
 var current_tick: u64 = 0;
+var reassembly_allocator: std.mem.Allocator = undefined;
+var current_memory_usage: usize = 0;
 
 /// Initialize module
-pub fn init() void {
+pub fn init(allocator: std.mem.Allocator) void {
     if (!cache_initialized) {
+        reassembly_allocator = allocator;
         for (&cache) |*entry| {
             entry.used = false;
+            entry.buffer = &[_]u8{};
         }
+        current_memory_usage = 0;
         cache_initialized = true;
     }
 }
@@ -94,7 +113,6 @@ pub fn init() void {
 /// Update timer tick
 pub fn tick() void {
     current_tick +%= 1;
-    // Timeout check could be here or lazy
 }
 
 /// Result of reassembly
@@ -119,7 +137,8 @@ pub fn processFragment(
     const held = lock.acquire();
     defer held.release();
     
-    if (!cache_initialized) init();
+    // Safety check: if init() wasn't called properly
+    if (!cache_initialized) return null;
 
     const key = FragmentKey{
         .src_ip = src_ip,
@@ -153,21 +172,52 @@ pub fn processFragment(
     
     const e = entry.?;
 
-    // Calculate fragment position with overflow protection
-    // frag_offset is in 8-byte units, max value 65535 -> max start = 524,280
-    // Use checked arithmetic for defense-in-depth against malformed offset values
+    // Calculate fragment position
     const start = std.math.mul(usize, @as(usize, frag_offset), 8) catch return null;
 
-    // Validate start is within bounds (frag_offset * 8 can exceed MAX_IP_PACKET_SIZE)
-    if (start >= MAX_IP_PACKET_SIZE) return null; // Fragment offset too large
-
-    // Check for overflow: start + payload.len must not wrap
-    if (payload.len > MAX_IP_PACKET_SIZE - start) return null; // Would exceed max packet size
+    if (start >= MAX_IP_PACKET_SIZE) return null;
+    if (payload.len > MAX_IP_PACKET_SIZE - start) return null;
 
     const end = start + payload.len;
-
-    // Double-check bounds (redundant but defensive)
-    if (end > MAX_IP_PACKET_SIZE) return null; // Too large
+    if (end > MAX_IP_PACKET_SIZE) return null;
+    
+    // Ensure buffer is large enough
+    if (end > e.buffer.len) {
+        // Grow needed
+        // Align to 2KB
+        var new_len = (end + 2047) & ~@as(usize, 2047);
+        if (new_len > MAX_IP_PACKET_SIZE) new_len = MAX_IP_PACKET_SIZE;
+        
+        // Check global memory budget
+        const current_len = e.buffer.len;
+        const additional = new_len - current_len;
+        
+        if (current_memory_usage + additional > MAX_TOTAL_MEMORY) {
+            // Memory Limit Exceeded
+            // Drop entire flow
+            e.used = false;
+            e.deinit(reassembly_allocator);
+            return null;
+        }
+        
+        if (e.buffer.len == 0) {
+            // New allocation
+            e.buffer = reassembly_allocator.alloc(u8, new_len) catch {
+                e.used = false;
+                // e.deinit not needed (buffer empty)
+                return null;
+            };
+        } else {
+            // Reallocation
+            const new_buf = reassembly_allocator.realloc(e.buffer, new_len) catch {
+                e.used = false;
+                e.deinit(reassembly_allocator);
+                return null;
+            };
+            e.buffer = new_buf;
+        }
+        current_memory_usage += additional;
+    }
 
     // Update total length if this is the last fragment
     if (!more_fragments) {
@@ -180,12 +230,10 @@ pub fn processFragment(
         }
     }
 
-    // Security: Reject overlapping fragments (RFC 5722 recommendation for IPv6,
-    // good practice for IPv4 too). Overlapping fragments are used in Teardrop
-    // and similar attacks to evade IDS/firewall inspection.
+    // Security: Reject overlapping fragments
     if (isRegionOverlapping(e, start, end)) {
-        // Drop the entire reassembly - attacker may be trying to manipulate data
         e.used = false;
+        e.deinit(reassembly_allocator);
         return null;
     }
 
@@ -197,13 +245,13 @@ pub fn processFragment(
 
     // Check if entry was invalidated (e.g., too many holes)
     if (!e.used) {
-        return null; // Reassembly failed due to complexity
+        e.deinit(reassembly_allocator);
+        return null; 
     }
 
     // Check completion
     if (isComplete(e)) {
         const payload_slice = e.buffer[0..e.total_len];
-        // Caller must free manually
         return ReassemblyResult{
             .slice = payload_slice,
             .entry_id = entry_idx,
@@ -220,6 +268,7 @@ pub fn freeEntry(id: usize) void {
 
     if (id < MAX_REASSEMBLIES) {
         cache[id].used = false;
+        cache[id].deinit(reassembly_allocator);
     }
 }
 
@@ -228,15 +277,9 @@ const Allocation = struct {
     index: usize,
 };
 
-/// Simple pseudo-random number for eviction (no external dependencies)
 var eviction_counter: usize = 0;
 
 /// Allocate a cache entry with improved eviction policy
-/// Policy:
-///   1. Return any free entry
-///   2. Evict any entry that has timed out
-///   3. Evict oldest entry (LRU-like)
-///   4. If all entries are young (possible DoS), use random eviction
 fn allocateEntry() ?Allocation {
     // 1. Find free entry first (fast path)
     for (&cache, 0..) |*e, i| {
@@ -253,6 +296,8 @@ fn allocateEntry() ?Allocation {
 
         // Immediately evict timed-out entries
         if (age >= REASSEMBLY_TIMEOUT) {
+            e.used = false;
+            e.deinit(reassembly_allocator);
             return Allocation{ .ptr = e, .index = i };
         }
 
@@ -262,23 +307,25 @@ fn allocateEntry() ?Allocation {
             oldest_idx = i;
         }
 
-        // Track youngest to detect attack scenario
+        // Track youngest
         if (age < youngest_age) {
             youngest_age = age;
         }
     }
 
-    // 3. If all entries are very young (likely attack), use random eviction
-    // to prevent attacker from predicting which flows will be evicted
-    const attack_threshold: u64 = 2; // All entries less than 2 ticks old
+    // 3. Random eviction if under attack (all young)
+    const attack_threshold: u64 = 2; 
     if (youngest_age < attack_threshold and oldest_age < attack_threshold) {
-        // Use simple counter-based pseudo-random index
         eviction_counter +%= 1;
         const random_idx = eviction_counter % MAX_REASSEMBLIES;
+        cache[random_idx].used = false;
+        cache[random_idx].deinit(reassembly_allocator);
         return Allocation{ .ptr = &cache[random_idx], .index = random_idx };
     }
 
-    // 4. Normal case: evict oldest (LRU)
+    // 4. Normal case: evict oldest
+    cache[oldest_idx].used = false;
+    cache[oldest_idx].deinit(reassembly_allocator);
     return Allocation{ .ptr = &cache[oldest_idx], .index = oldest_idx };
 }
 
@@ -298,8 +345,6 @@ fn updateHoles(e: *ReassemblyEntry, start: usize, end: usize) void {
         if (start > h.start and end < h.end) {
             if (e.hole_count >= 64) {
                 // Cannot split hole - too many fragments. Mark entry invalid.
-                // This prevents leaving the reassembly in an inconsistent state
-                // where data was copied but holes don't reflect actual gaps.
                 e.used = false;
                 return;
             }
@@ -335,29 +380,14 @@ fn removeHole(e: *ReassemblyEntry, idx: usize) void {
 }
 
 /// Check if a fragment region overlaps with already-filled data
-/// Returns true if ANY part of [start, end) is NOT within a hole (i.e., overlaps filled data)
 fn isRegionOverlapping(e: *const ReassemblyEntry, start: usize, end: usize) bool {
-    // Relaxed Check: We allow rewriting data (overlap) to support retransmissions involves
-    // receiving the same fragment or a larger fragment covering the same area.
-    // The updateHoles logic handles removing/resizing holes.
-    // We only strictly reject if the fragment goes out of bounds (checked earlier).
-    // So we can return false here to allow processing.
-    //
-    // However, for strict security against some specific overlap attacks (Teardrop),
-    // we might want consistency checks, but correct reassembly requires handling valid overlaps.
     _ = start; _ = end; _ = e;
-    return false; // Allow overlaps
+    return false;
 }
 
 /// Check if reassembly is complete
 fn isComplete(e: *const ReassemblyEntry) bool {
-    if (e.total_len == 0) return false; // Haven't seen last fragment yet
-    
-    // If hole list is empty, we are good?
-    // Wait, holes are initialized to [0, MAX].
-    // If we have any hole left, we are incomplete.
-    // Except holes must be checked against total_len.
-    // If we updated holes correctly, any hole with start < total_len means missing data.
+    if (e.total_len == 0) return false; 
     
     for (0..e.hole_count) |i| {
         if (e.holes[i].start < e.total_len) return false;

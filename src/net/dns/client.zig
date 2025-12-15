@@ -190,17 +190,44 @@ fn resolveOnce(allocator: std.mem.Allocator, hostname: []const u8, server_ip: u3
     // Skip Header
     var pos: usize = dns.DNS_HEADER_SIZE;
 
-    // Skip Questions
+    // Verify Questions (RFC 5452)
+    // The response must contain the same question we asked.
+    var owner_name_buf: [dns.DNS_MAX_NAME_LENGTH]u8 = undefined;
     var i: usize = 0;
     while (i < qd_count) : (i += 1) {
-        pos = try skipName(resp, pos);
+        // Read name from question section
+        const q_result = dns.readName(resp, pos, &owner_name_buf) catch |err| switch (err) {
+            error.FormatError => return DnsError.FormatError,
+            error.BufferTooSmall => return DnsError.BufferTooSmall,
+        };
+        
+        // Security: Verify the question in the response matches what we asked
+        // We only asked one question, so any question in response must match it
+        if (!dnsNameEql(q_result.name, hostname)) {
+             // Possible spoofing attempt or mixed-up response
+             return DnsError.IdMismatch; 
+        }
+        
+        pos = q_result.end_pos;
+
+        // Skip QTYPE (2) and QCLASS (2)
         if (pos + 4 > resp.len) return DnsError.FormatError;
+        
+        // Optionally verify QTYPE/QCLASS too, but name is the most critical
+        const qtype = @as(u16, resp[pos]) << 8 | resp[pos + 1];
+        const qclass = @as(u16, resp[pos + 2]) << 8 | resp[pos + 3];
+        
+        if (qtype != dns.TYPE_A or qclass != dns.CLASS_IN) {
+            // We only ask for A/IN
+             return DnsError.FormatError;
+        }
+
         pos += 4;
     }
 
     // Parse Answers - look for A record first, then CNAME if no A found
     var cname_result: ?ResolveResult = null;
-    var owner_name_buf: [dns.DNS_MAX_NAME_LENGTH]u8 = undefined;
+
 
     i = 0;
     while (i < an_count) : (i += 1) {

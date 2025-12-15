@@ -13,6 +13,42 @@ pub const Tcb = types.Tcb;
 pub var tcb_pool: std.ArrayListUnmanaged(*Tcb) = .{};
 pub var tcp_allocator: std.mem.Allocator = undefined;
 
+/// TX Buffer Pool (32 x 2048 = 64KB)
+/// Avoids heap allocation on transmit path
+const TX_POOL_SIZE = 32;
+const TX_BUF_SIZE = 2048;
+var tx_pool: [TX_POOL_SIZE][TX_BUF_SIZE]u8 = undefined;
+var tx_pool_bitmap: u32 = 0xFFFFFFFF; // 1 = free
+var tx_pool_lock: sync.Spinlock = .{};
+
+pub fn allocTxBuffer() ?[]u8 {
+    const held = tx_pool_lock.acquire();
+    defer held.release();
+
+    if (tx_pool_bitmap == 0) return null;
+
+    const idx = @ctz(tx_pool_bitmap);
+    tx_pool_bitmap &= ~(@as(u32, 1) << @intCast(idx));
+    return &tx_pool[idx];
+}
+
+pub fn freeTxBuffer(buf: []u8) void {
+    const start = @intFromPtr(&tx_pool[0]);
+    const addr = @intFromPtr(buf.ptr);
+    
+    // Validate range
+    if (addr < start or addr >= start + (TX_POOL_SIZE * TX_BUF_SIZE)) {
+        return; 
+    }
+    
+    const offset = addr - start;
+    const idx = offset / TX_BUF_SIZE;
+    
+    const held = tx_pool_lock.acquire();
+    defer held.release();
+    tx_pool_bitmap |= (@as(u32, 1) << @intCast(idx));
+}
+
 /// Connection hash table (for fast lookup)
 /// We still use a fixed size hash table for buckets, but chaining is via TCB linked list (hash_next)
 pub var tcb_hash: [c.TCB_HASH_SIZE]?*Tcb = [_]?*Tcb{null} ** c.TCB_HASH_SIZE;
@@ -42,8 +78,8 @@ pub fn tick() void {
 /// Global TCP lock
 pub var lock: sync.Lock = sync.noop_lock;
 
-/// Secret key for ISN generation (RFC 6528)
-var secret_key: u64 = 0;
+/// Secret key for ISN generation (RFC 6528) - 128-bit for SipHash
+var secret_key: [16]u8 = [_]u8{0} ** 16;
 
 /// Count of half-open connections (SYN-RECEIVED)
 pub var half_open_count: usize = 0;
@@ -57,6 +93,10 @@ pub var half_open_count: usize = 0;
 // Handles state transitions (e.g. CLOSED -> LISTEN -> SYN_RCVD).
 /// Counter for ISN generations since last re-seed
 var isn_generation_count: u32 = 0;
+
+/// Global monotonic generation counter for TCBs
+/// Used to detect TCB reuse when waking from block
+var tcb_generation_counter: u64 = 0;
 
 /// Re-seed secret key every N ISN generations for defense-in-depth
 /// Prevents long-term key exposure from compromising all future ISNs
@@ -96,8 +136,11 @@ pub fn init(iface: *Interface, allocator: std.mem.Allocator, ticks_per_sec: u32)
 
     // Seed ISN counter with hardware entropy
     isn_counter = @truncate(entropy.getHardwareEntropy());
-    // Seed secret key
-    secret_key = entropy.getHardwareEntropy();
+    // Seed secret key (128-bit)
+    const k1 = entropy.getHardwareEntropy();
+    const k2 = entropy.getHardwareEntropy();
+    @memcpy(secret_key[0..8], std.mem.asBytes(&k1));
+    @memcpy(secret_key[8..16], std.mem.asBytes(&k2));
 }
 
 /// Count connections in SYN-RECEIVED state (half-open)
@@ -116,6 +159,10 @@ pub fn allocateTcb() ?*Tcb {
     tcb.* = Tcb.init();
     tcb.allocated = true;
     tcb.created_at = connection_timestamp;
+    
+    // Assign generation
+    tcb_generation_counter +%= 1;
+    tcb.generation = tcb_generation_counter;
 
     tcb_pool.append(tcp_allocator, tcb) catch {
         tcp_allocator.destroy(tcb);
@@ -246,11 +293,27 @@ pub fn findListeningTcb(local_port: u16) ?*Tcb {
 /// Validate that a connection exists for the given 4-tuple.
 /// Used by ICMP handler to validate PMTU updates (RFC 5927).
 /// Returns true if an active TCP connection matches the 4-tuple.
-pub fn validateConnectionExists(local_ip: u32, local_port: u16, remote_ip: u32, remote_port: u16) bool {
+/// Optionally validates if the sequence number from the ICMP payload is valid (in flight).
+pub fn validateConnectionExists(local_ip: u32, local_port: u16, remote_ip: u32, remote_port: u16, seq_num: ?u32) bool {
     lock.acquire();
     defer lock.release();
 
     const tcb = findTcb(local_ip, local_port, remote_ip, remote_port) orelse return false;
+
+    // Check sequence number if provided
+    // RFC 5927: SEQ must be within range [SND.UNA, SND.NXT]
+    if (seq_num) |seq| {
+        // Simple check: SND.UNA <= SEQ <= SND.NXT
+        // Note: use modulo arithmetic (seqGte/seqLte from types.zig not visible here? need to import)
+        // We can do simple wrapping validation manually or move seq functions to util
+        // Assuming we can access tcb members. 
+        // Logic: (seq - snd_una) <= (snd_nxt - snd_una)
+        const dist = seq -% tcb.snd_una;
+        const window = tcb.snd_nxt -% tcb.snd_una;
+        if (dist > window) {
+             return false; // Sequence number not in flight
+        }
+    }
 
     // Only accept PMTU updates for established or nearly-established connections
     // Reject for closed/listen states which wouldn't be sending data
@@ -300,27 +363,28 @@ pub fn generateIsn(l_ip: u32, l_port: u16, r_ip: u32, r_port: u16) u32 {
     // Periodically re-seed secret key with fresh entropy
     // XOR mixing preserves existing entropy while adding new randomness
     if (isn_generation_count >= ISN_RESEED_THRESHOLD) {
-        secret_key ^= entropy.getHardwareEntropy();
+        const k1 = entropy.getHardwareEntropy();
+        const k2 = entropy.getHardwareEntropy();
+        const sk_u64: *[2]u64 = @ptrCast(@alignCast(&secret_key));
+        sk_u64[0] ^= k1;
+        sk_u64[1] ^= k2;
         isn_generation_count = 0;
     }
 
-    // F = Simple hash of 4-tuple + secret
-    var k = secret_key;
-    k +%= l_ip;
-    k *%= 0x9e3779b97f4a7c15;
-    k +%= r_ip;
-    k *%= 0x9e3779b97f4a7c15;
-    k +%= l_port;
-    k *%= 0x9e3779b97f4a7c15;
-    k +%= r_port;
-    k *%= 0x9e3779b97f4a7c15;
-    k ^= (k >> 30);
-    k *%= 0xbf58476d1ce4e5b9;
-    k ^= (k >> 27);
-    k *%= 0x94d049bb133111eb;
-    k ^= (k >> 31);
+    // F = SipHash-2-4(key, 4-tuple)
+    // RFC 6528 recommends a cryptographically secure function.
+    // SipHash is a PRF designed for potential DoS contexts (hash flooding) and is secure enough for ISN.
+    var hasher = std.crypto.auth.siphash.SipHash64(2, 4).init(&secret_key);
+    hasher.update(std.mem.asBytes(&l_ip));
+    hasher.update(std.mem.asBytes(&l_port));
+    hasher.update(std.mem.asBytes(&r_ip));
+    hasher.update(std.mem.asBytes(&r_port));
+    
+    // ISN = M + F.
+    // SipHash64 returns u64, we take lower 32 bits
+    const k: u32 = @truncate(hasher.finalInt());
 
-    return M +% @as(u32, @truncate(k));
+    return M +% k;
 }
 
 /// Get current timestamp for TCP Timestamps option (RFC 7323)
@@ -334,4 +398,37 @@ pub fn nextTimestamp() u32 {
     }
     tcp_timestamp_counter +%= 1;
     return tcp_timestamp_counter;
+}
+
+/// Evict oldest half-open TCB to make space for valid connections (DoS mitigation)
+/// Returns true if an entry was evicted
+pub fn evictOldestHalfOpenTcb() bool {
+    var oldest_tcb: ?*Tcb = null;
+    var oldest_time: u64 = connection_timestamp;
+    
+    // Scan TCB pool for SynReceived state
+    // Note: optimization would be to keep a separate half-open list, 
+    // but max half-open is usually small (e.g. 1024), so linear scan of pool is acceptable for MVP
+    lock.acquire();
+    defer lock.release();
+
+    for (tcb_pool.items) |tcb| {
+        if (tcb.state == .SynReceived) {
+             // We want oldest -> smallest created_at
+             if (tcb.created_at < oldest_time) {
+                 oldest_time = tcb.created_at;
+                 oldest_tcb = tcb;
+             }
+        }
+    }
+    
+    if (oldest_tcb) |tcb| {
+        // Safe eviction: ensure no other thread holds the TCB lock
+        if (tcb.mutex.tryAcquire()) |held| {
+            held.release();
+            freeTcb(tcb); // Assumes state.lock is held (it is)
+            return true;
+        }
+    }
+    return false;
 }

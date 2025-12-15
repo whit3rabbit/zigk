@@ -5,6 +5,7 @@ const packet = @import("../../core/packet.zig");
 const tcp_types = @import("../tcp/types.zig");
 const scheduler = @import("scheduler.zig");
 const uapi = @import("uapi");
+const sync = @import("../../sync.zig");
 
 // Re-export ABI types (canonical definitions with comptime size checks)
 pub const IpMreq = uapi.abi.IpMreq;
@@ -112,6 +113,11 @@ pub const Socket = struct {
     /// Thread blocked waiting on this socket (for accept/recv)
     /// Set by syscall layer, woken by packet processing
     blocked_thread: scheduler.ThreadPtr,
+    
+    /// Per-socket lock for protecting RX queue and state
+    lock: sync.Spinlock,
+
+    /// Reference count for lifetime management.
 
     /// Reference count for lifetime management.
     /// 1 is held by the socket table entry; operations take additional refs.
@@ -176,6 +182,7 @@ pub const Socket = struct {
             .shutdown_read = false,
             .shutdown_write = false,
             .blocked_thread = null,
+            .lock = .{},
             .refcount = 0,
             .closing = false,
             // Socket options - defaults
