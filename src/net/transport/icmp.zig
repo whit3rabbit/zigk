@@ -168,6 +168,7 @@ fn handleEchoRequest(iface: *Interface, req_pkt: *PacketBuffer, icmp_len: usize)
 
 /// Handle ICMP Destination Unreachable messages
 /// Specifically handles Code 4 (Fragmentation Needed) for PMTUD (RFC 1191)
+/// Security: Validates ICMP payload against active connections per RFC 5927
 fn handleDestUnreachable(pkt: *PacketBuffer, icmp: *align(1) const IcmpHeader) bool {
     // ICMP Destination Unreachable format:
     // Bytes 0-1: Type (3) + Code
@@ -192,15 +193,37 @@ fn handleDestUnreachable(pkt: *PacketBuffer, icmp: *align(1) const IcmpHeader) b
             effective_mtu = 1006;
         }
 
-        // Extract original destination IP from the embedded IP header
+        // Extract original packet info from the embedded IP header
         // The original IP header starts 8 bytes after ICMP header start
         const orig_ip_offset = pkt.transport_offset + packet.ICMP_HEADER_SIZE;
         if (orig_ip_offset + packet.IP_HEADER_SIZE <= pkt.len) {
             const orig_ip: *const Ipv4Header = @ptrCast(@alignCast(&pkt.data[orig_ip_offset]));
+            const original_src = orig_ip.getSrcIp();
             const original_dst = orig_ip.getDstIp();
+            const orig_ip_len = orig_ip.getHeaderLength();
 
-            // Update PMTU cache for this destination
-            ipv4.updatePmtu(original_dst, effective_mtu);
+            // Security (RFC 5927): Validate ICMP error relates to packet we sent.
+            // Extract transport ports and verify against active TCP connections.
+            // This prevents cache poisoning via spoofed ICMP messages.
+            const transport_offset = orig_ip_offset + orig_ip_len;
+            if (transport_offset + 4 <= pkt.len and orig_ip.protocol == ipv4.PROTO_TCP) {
+                const orig_transport = pkt.data[transport_offset..][0..4];
+                const local_port = (@as(u16, orig_transport[0]) << 8) | orig_transport[1];
+                const remote_port = (@as(u16, orig_transport[2]) << 8) | orig_transport[3];
+
+                // Validate: original packet was from us (src) to them (dst)
+                // Only update PMTU if we have an active connection matching this 4-tuple
+                if (tcp.validateConnectionExists(original_src, local_port, original_dst, remote_port)) {
+                    ipv4.updatePmtu(original_dst, effective_mtu);
+                }
+                // Silently ignore PMTU updates for non-existent connections
+            } else if (orig_ip.protocol == ipv4.PROTO_UDP) {
+                // For UDP, we cannot easily validate since connections are stateless.
+                // Apply rate limiting from pmtu.zig but accept the update.
+                // A more complete solution would track recent UDP transmissions.
+                ipv4.updatePmtu(original_dst, effective_mtu);
+            }
+            // Ignore PMTU for other protocols (ICMP, etc.)
         }
     }
 

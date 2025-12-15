@@ -123,6 +123,10 @@ pub const Tcb = struct {
     // Connection state
     state: TcpState,
     allocated: bool,
+    /// Security: Two-phase deletion flag. When true, TCB is being torn down
+    /// and should not be used for new packet processing. Prevents use-after-free
+    /// in edge cases where lock ordering might be violated.
+    closing: bool,
 
     // Send sequence variables (RFC 793 section 3.2)
     snd_una: u32, // Oldest unacknowledged sequence number
@@ -204,6 +208,7 @@ pub const Tcb = struct {
             .mutex = .{},
             .state = .Closed,
             .allocated = false,
+            .closing = false,
             .snd_una = 0,
             .snd_nxt = 0,
             .snd_wnd = 0,

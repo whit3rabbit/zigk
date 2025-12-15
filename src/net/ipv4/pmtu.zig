@@ -60,14 +60,12 @@ pub fn lookupPmtu(dst_ip: u32) u16 {
 /// Update PMTU cache with a new (lower) MTU value
 /// Called when we receive ICMP Fragmentation Needed (Type 3 Code 4)
 ///
-/// Security considerations:
-/// - Rate-limited to prevent cache poisoning via spoofed ICMP messages
+/// Security considerations (RFC 5927):
+/// - Rate-limited to prevent rapid cache poisoning
 /// - Only decreases MTU (never increases) per RFC 1191
-///
-/// TODO: Full ICMP validation (RFC 5927) should verify the ICMP error
-/// contains a valid quote of an outgoing packet we actually sent. This
-/// requires passing the ICMP payload to this function and validating it
-/// matches an active TCP connection or recent UDP transmission.
+/// - ICMP handler validates original packet against active TCP connections
+///   before calling this function (see icmp.zig:handleDestUnreachable)
+/// - UDP PMTU updates are allowed with rate limiting (stateless protocol)
 pub fn updatePmtu(dst_ip: u32, new_mtu: u16) void {
     // Clamp MTU to valid range
     const mtu = if (new_mtu < MIN_MTU) MIN_MTU else new_mtu;

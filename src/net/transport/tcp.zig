@@ -11,6 +11,7 @@ pub const TcpState = root.TcpState;
 // Functions
 pub const setLock = root.setLock;
 pub const init = root.init;
+pub const validateConnectionExists = root.validateConnectionExists;
 pub const tcpChecksum = root.tcpChecksum;
 pub const processPacket = root.processPacket;
 pub const listen = root.listen;

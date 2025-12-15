@@ -55,6 +55,8 @@ pub const setLock = state.setLock;
 pub const init = state.init;
 pub const getSocket = state.getSocket;
 pub const findByPort = state.findByPort;
+pub const allocateEphemeralPort = state.allocateEphemeralPort;
+pub const allocateRandomEphemeralPort = state.allocateRandomEphemeralPort;
 
 // Lifecycle
 pub const socket = lifecycle.socket;

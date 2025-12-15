@@ -79,6 +79,21 @@ fn resolveOnce(allocator: std.mem.Allocator, hostname: []const u8, server_ip: u3
     const fd_idx = try socket.socket(socket.AF_INET, socket.SOCK_DGRAM, 0);
     errdefer socket.close(fd_idx) catch {};
 
+    // Security (RFC 5452): Explicitly bind to a random source port.
+    // Uses Algorithm 3 (Random Port Randomization) for maximum entropy.
+    // Combined with 16-bit transaction ID, provides ~32 bits of unpredictability
+    // against DNS cache poisoning attacks.
+    const random_port = socket.allocateRandomEphemeralPort();
+    if (random_port == 0) return DnsError.SocketError;
+
+    const bind_addr = socket.SockAddrIn{
+        .family = socket.AF_INET,
+        .port = socket.htons(random_port),
+        .addr = 0, // INADDR_ANY
+        .zero = [_]u8{0} ** 8,
+    };
+    socket.bind(fd_idx, &bind_addr) catch return DnsError.SocketError;
+
     // Set timeout (2 seconds)
     try socket.setsockopt(fd_idx, socket.SOL_SOCKET, socket.SO_RCVTIMEO, std.mem.asBytes(&socket.TimeVal.fromMillis(2000)), @sizeOf(socket.TimeVal));
 

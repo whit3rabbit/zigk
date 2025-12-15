@@ -64,6 +64,11 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
 
     // Try established connection first
     if (state.findTcb(local_ip, local_port, remote_ip, remote_port)) |tcb| {
+        // Security: Check closing flag before processing (two-phase deletion protection)
+        if (tcb.closing) {
+            return false; // TCB is being torn down, ignore packet
+        }
+
         // Acquire TCB lock while holding state lock to prevent race where TCB is freed
         const held = tcb.mutex.acquire();
         defer held.release();
@@ -73,6 +78,11 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
 
     // Try listening socket
     if (state.findListeningTcb(local_port)) |listen_tcb| {
+        // Security: Check closing flag before processing (two-phase deletion protection)
+        if (listen_tcb.closing) {
+            return false; // TCB is being torn down, ignore packet
+        }
+
         // Acquire lock
         const held = listen_tcb.mutex.acquire();
         defer held.release();

@@ -115,9 +115,19 @@ pub fn allocateTcb() ?*Tcb {
 }
 
 /// Free a TCB
+/// Security: Uses two-phase deletion pattern:
+/// 1. Mark as closing to prevent new packet processing
+/// 2. Remove from hash table to prevent new lookups
+/// 3. Reset state and free memory
 pub fn freeTcb(tcb: *Tcb) void {
-    // Remove from hash table if present
+    // Phase 1: Mark as closing - any concurrent packet processing
+    // that somehow obtained a reference will see this flag and bail out
+    tcb.closing = true;
+
+    // Phase 2: Remove from hash table - prevents new lookups
     removeTcbFromHash(tcb);
+
+    // Phase 3: Reset and free
     tcb.reset();
 
     // Remove from pool
@@ -216,6 +226,23 @@ pub fn findListeningTcb(local_port: u16) ?*Tcb {
          }
     }
     return null;
+}
+
+/// Validate that a connection exists for the given 4-tuple.
+/// Used by ICMP handler to validate PMTU updates (RFC 5927).
+/// Returns true if an active TCP connection matches the 4-tuple.
+pub fn validateConnectionExists(local_ip: u32, local_port: u16, remote_ip: u32, remote_port: u16) bool {
+    lock.acquire();
+    defer lock.release();
+
+    const tcb = findTcb(local_ip, local_port, remote_ip, remote_port) orelse return false;
+
+    // Only accept PMTU updates for established or nearly-established connections
+    // Reject for closed/listen states which wouldn't be sending data
+    return switch (tcb.state) {
+        .Established, .SynSent, .SynReceived, .FinWait1, .FinWait2, .CloseWait, .Closing, .LastAck => true,
+        .Closed, .Listen, .TimeWait => false,
+    };
 }
 
 /// Add TCB to listen table

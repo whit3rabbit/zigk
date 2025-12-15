@@ -38,6 +38,7 @@ pub const TcpState = types.TcpState;
 // State/initialization
 pub const setLock = state.setLock;
 pub const init = state.init;
+pub const validateConnectionExists = state.validateConnectionExists;
 
 // Checksum
 pub const tcpChecksum = checksum.tcpChecksum;

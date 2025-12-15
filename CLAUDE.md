@@ -179,6 +179,7 @@ asm volatile ("out %[data], %[port]"
 ## Key Files
 
 - `docs/FILESYSTEM.md` - Complete project structure
+- `docs/KEYBOARD.md` - Keyboard input (PS/2 and USB)
 - `specs/syscall-table.md` - Authoritative syscall numbers
 - `src/lib/limine.zig` - Limine protocol bindings
 - `src/kernel/main.zig` - Kernel entry point

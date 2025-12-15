@@ -93,6 +93,47 @@ pub fn allocateEphemeralPort() u16 {
     return 0; // No free ports
 }
 
+/// Allocate an ephemeral port using RFC 6056 Algorithm 3 (Random Port Randomization).
+/// Each attempt uses fresh entropy for stronger randomization.
+/// Preferred for DNS queries where each query should have independent source port.
+/// Security: Provides ~16 bits of port entropy combined with DNS transaction ID
+/// for ~32 bits total unpredictability against cache poisoning (RFC 5452).
+pub fn allocateRandomEphemeralPort() u16 {
+    const EPHEMERAL_START: u16 = 49152;
+    const EPHEMERAL_END: u16 = 65535;
+    const EPHEMERAL_RANGE: u16 = EPHEMERAL_END - EPHEMERAL_START + 1; // 16384
+
+    // Try random ports with fresh entropy each time (RFC 6056 Algorithm 3)
+    // This provides maximum unpredictability for DNS security
+    const MAX_RANDOM_ATTEMPTS: u16 = 64; // Limit random probes before fallback
+
+    var attempts: u16 = 0;
+    while (attempts < MAX_RANDOM_ATTEMPTS) : (attempts += 1) {
+        const entropy = hal.entropy.getHardwareEntropy();
+        const random_offset: u16 = @truncate(entropy % EPHEMERAL_RANGE);
+        const port = EPHEMERAL_START + random_offset;
+
+        // Check if port is in use
+        var in_use = false;
+        for (socket_table.items) |maybe_socket| {
+            if (maybe_socket) |sock| {
+                if (sock.allocated and sock.local_port == port) {
+                    in_use = true;
+                    break;
+                }
+            }
+        }
+
+        if (!in_use) {
+            return port;
+        }
+    }
+
+    // Fallback to standard Algorithm 1 if random probing fails
+    // (indicates high port pressure)
+    return allocateEphemeralPort();
+}
+
 pub fn findByPort(port: u16) ?*types.Socket {
     for (socket_table.items) |maybe_socket| {
         if (maybe_socket) |sock| {
