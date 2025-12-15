@@ -62,8 +62,11 @@ pub fn sys_mmap(
         return error.ENOMEM;
     }
 
+    // Validate addr fits target type for VMM (u64-based API)
+    const addr_u64 = std.math.cast(u64, addr) orelse return error.EINVAL;
+
     const uvmm = base.getGlobalUserVmm();
-    const result = uvmm.mmap(@intCast(addr), len, @truncate(prot), @truncate(flags));
+    const result = uvmm.mmap(addr_u64, len, @truncate(prot), @truncate(flags));
 
     // Update RSS on successful mapping
     if (result >= 0) {
@@ -91,8 +94,11 @@ pub fn sys_mmap(
 ///
 /// Returns: 0 on success, negative errno on error
 pub fn sys_mprotect(addr: usize, len: usize, prot: usize) SyscallError!usize {
+    // Validate addr fits target type
+    const addr_u64 = std.math.cast(u64, addr) orelse return error.EINVAL;
+
     const uvmm = base.getGlobalUserVmm();
-    const result = uvmm.mprotect(@intCast(addr), len, @truncate(prot));
+    const result = uvmm.mprotect(addr_u64, len, @truncate(prot));
     if (result < 0) {
         const errno_val: i32 = @intCast(-result);
         return switch (errno_val) {
@@ -115,8 +121,11 @@ pub fn sys_mprotect(addr: usize, len: usize, prot: usize) SyscallError!usize {
 ///
 /// Returns: 0 on success, negative errno on error
 pub fn sys_munmap(addr: usize, len: usize) SyscallError!usize {
+    // Validate addr fits target type
+    const addr_u64 = std.math.cast(u64, addr) orelse return error.EINVAL;
+
     const uvmm = base.getGlobalUserVmm();
-    const result = uvmm.munmap(@intCast(addr), len);
+    const result = uvmm.munmap(addr_u64, len);
 
     // Update RSS on successful unmap (mirrors sys_mmap increment)
     if (result == 0) {

@@ -185,6 +185,17 @@ fn initrdStat(file_desc: *fd.FileDescriptor, stat_buf: *anyopaque) isize {
     const file: *InitRDFile = @ptrCast(@alignCast(file_desc.private_data));
     const stat: *uapi.stat.Stat = @ptrCast(@alignCast(stat_buf));
 
+    // Clamp size to i64 max for very large files
+    const max_i64: usize = @intCast(std.math.maxInt(i64));
+    const file_size: i64 = if (file.data.len > max_i64)
+        std.math.maxInt(i64)
+    else
+        @intCast(file.data.len);
+    const blocks: i64 = if (file.data.len > max_i64)
+        std.math.maxInt(i64) / 512
+    else
+        @intCast((file.data.len + 511) / 512);
+
     stat.* = .{
         .dev = 0,
         .ino = 0,
@@ -193,9 +204,9 @@ fn initrdStat(file_desc: *fd.FileDescriptor, stat_buf: *anyopaque) isize {
         .uid = 0,
         .gid = 0,
         .rdev = 0,
-        .size = @intCast(file.data.len),
+        .size = file_size,
         .blksize = 512,
-        .blocks = @intCast((file.data.len + 511) / 512),
+        .blocks = blocks,
         .atime = 0,
         .atime_nsec = 0,
         .mtime = 0,
@@ -220,7 +231,8 @@ fn initrdRead(file_desc: *fd.FileDescriptor, buf: []u8) isize {
     @memcpy(buf[0..to_read], file.data[file_desc.position..][0..to_read]);
     file_desc.position += to_read;
 
-    return @intCast(to_read);
+    // Safe cast: to_read bounded by buf.len which fits in isize
+    return std.math.cast(isize, to_read) orelse return uapi.errno.Errno.ERANGE.toReturn();
 }
 
 fn initrdWrite(file_desc: *fd.FileDescriptor, buf: []const u8) isize {
@@ -239,8 +251,10 @@ fn initrdClose(file_desc: *fd.FileDescriptor) isize {
 
 fn initrdSeek(file_desc: *fd.FileDescriptor, offset: i64, whence: u32) isize {
     const file: *InitRDFile = @ptrCast(@alignCast(file_desc.private_data));
-    const file_size: i64 = @intCast(file.data.len);
-    const current: i64 = @intCast(file_desc.position);
+
+    // Safe casts for file size and position to i64
+    const file_size = std.math.cast(i64, file.data.len) orelse return uapi.errno.Errno.ERANGE.toReturn();
+    const current = std.math.cast(i64, file_desc.position) orelse return uapi.errno.Errno.ERANGE.toReturn();
 
     const new_pos: i64 = switch (whence) {
         0 => offset,                    // SEEK_SET
@@ -251,11 +265,11 @@ fn initrdSeek(file_desc: *fd.FileDescriptor, offset: i64, whence: u32) isize {
 
     if (new_pos < 0) return uapi.errno.Errno.EINVAL.toReturn();
     // In many filesystems you can seek past end (sparse files), but for InitRD read-only it makes sense to clamp or error?
-    // Standard seeks usually allow seeking past end. But you can't read there. 
+    // Standard seeks usually allow seeking past end. But you can't read there.
     // Let's allow it but read will return 0.
 
-    file_desc.position = @intCast(new_pos);
-    return new_pos;
+    file_desc.position = std.math.cast(usize, new_pos) orelse return uapi.errno.Errno.ERANGE.toReturn();
+    return std.math.cast(isize, new_pos) orelse return uapi.errno.Errno.ERANGE.toReturn();
 }
 
 pub const FileIterator = struct {

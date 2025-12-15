@@ -70,7 +70,8 @@ fn partitionRead(fd: *FileDescriptor, buf: []u8) isize {
     if (sector_count_u64 > ahci.MAX_SECTORS_PER_TRANSFER) {
         return Errno.EINVAL.toReturn();
     }
-    const sector_count: u16 = @intCast(sector_count_u64);
+    // Safe cast: sector_count_u64 <= MAX_SECTORS_PER_TRANSFER which is < u16 max
+    const sector_count: u16 = std.math.cast(u16, sector_count_u64) orelse return Errno.EINVAL.toReturn();
 
     // Fast path: aligned
     if (start_offset == 0 and read_len % 512 == 0) {
@@ -78,7 +79,9 @@ fn partitionRead(fd: *FileDescriptor, buf: []u8) isize {
             return Errno.EIO.toReturn();
         };
         fd.position += read_len;
-        return @intCast(read_len);
+        // Safe cast: read_len bounded by buf.len which fits in isize
+        const result = std.math.cast(isize, read_len) orelse return Errno.ERANGE.toReturn();
+        return result;
     }
 
     // Bounce buffer path
@@ -93,11 +96,13 @@ fn partitionRead(fd: *FileDescriptor, buf: []u8) isize {
         return Errno.EIO.toReturn();
     };
 
-    const copy_start = @as(usize, @intCast(start_offset));
+    // start_offset is pos % 512, always fits in usize
+    const copy_start: usize = start_offset;
     @memcpy(buf[0..read_len], bounce[copy_start .. copy_start + read_len]);
 
     fd.position += read_len;
-    return @intCast(read_len);
+    const result = std.math.cast(isize, read_len) orelse return Errno.ERANGE.toReturn();
+    return result;
 }
 
 fn partitionWrite(fd: *FileDescriptor, buf: []const u8) isize {
@@ -123,14 +128,16 @@ fn partitionWrite(fd: *FileDescriptor, buf: []const u8) isize {
     if (sector_count_u64 > ahci.MAX_SECTORS_PER_TRANSFER) {
         return Errno.EINVAL.toReturn();
     }
-    const sector_count: u16 = @intCast(sector_count_u64);
+    // Safe cast: bounded by MAX_SECTORS_PER_TRANSFER check above
+    const sector_count: u16 = std.math.cast(u16, sector_count_u64) orelse return Errno.EINVAL.toReturn();
 
     if (start_offset == 0 and write_len % 512 == 0) {
         controller.writeSectors(part.port_num, start_lba, sector_count, buf[0..write_len]) catch {
             return Errno.EIO.toReturn();
         };
         fd.position += write_len;
-        return @intCast(write_len);
+        const result = std.math.cast(isize, write_len) orelse return Errno.ERANGE.toReturn();
+        return result;
     }
 
     // RMW
@@ -145,7 +152,8 @@ fn partitionWrite(fd: *FileDescriptor, buf: []const u8) isize {
         return Errno.EIO.toReturn();
     };
 
-    const copy_start = @as(usize, @intCast(start_offset));
+    // start_offset is pos % 512, always fits in usize
+    const copy_start: usize = start_offset;
     @memcpy(bounce[copy_start .. copy_start + write_len], buf[0..write_len]);
 
     controller.writeSectors(part.port_num, start_lba, sector_count, bounce) catch {
@@ -153,7 +161,8 @@ fn partitionWrite(fd: *FileDescriptor, buf: []const u8) isize {
     };
 
     fd.position += write_len;
-    return @intCast(write_len);
+    const result = std.math.cast(isize, write_len) orelse return Errno.ERANGE.toReturn();
+    return result;
 }
 
 fn partitionClose(fd: *FileDescriptor) isize {
@@ -172,10 +181,14 @@ fn partitionSeek(fd: *FileDescriptor, offset: i64, whence: u32) isize {
     const SEEK_CUR: u32 = 1;
     const SEEK_END: u32 = 2;
 
+    // Safe casts for position/size to i64 (validate they fit)
+    const pos_i64 = std.math.cast(i64, fd.position) orelse return Errno.ERANGE.toReturn();
+    const size_i64 = std.math.cast(i64, part_size) orelse return Errno.ERANGE.toReturn();
+
     const new_pos: i64 = switch (whence) {
         SEEK_SET => offset,
-        SEEK_CUR => @as(i64, @intCast(fd.position)) + offset,
-        SEEK_END => @as(i64, @intCast(part_size)) + offset,
+        SEEK_CUR => pos_i64 + offset,
+        SEEK_END => size_i64 + offset,
         else => return Errno.EINVAL.toReturn(),
     };
 
@@ -187,8 +200,8 @@ fn partitionSeek(fd: *FileDescriptor, offset: i64, whence: u32) isize {
     // For block devices, usually fixed size.
     // Let's cap at end or just allow it and let read fail.
 
-    fd.position = @intCast(new_pos);
-    return @intCast(fd.position);
+    fd.position = std.math.cast(usize, new_pos) orelse return Errno.ERANGE.toReturn();
+    return std.math.cast(isize, fd.position) orelse return Errno.ERANGE.toReturn();
 }
 
 // =============================================================================
@@ -279,7 +292,12 @@ fn scanGpt(port_num: u5, disk_name: []const u8) !void {
     const table_buffer = try allocator.alloc(u8, entries_sectors * 512);
     defer allocator.free(table_buffer);
 
-    controller.readSectors(port_num, header.partition_entry_lba, @intCast(entries_sectors), table_buffer) catch {
+    // Safe cast: entries_sectors already bounded to < 128 above
+    const entries_sectors_u16: u16 = std.math.cast(u16, entries_sectors) orelse {
+        console.warn("Partitions: GPT entries_sectors too large", .{});
+        return;
+    };
+    controller.readSectors(port_num, header.partition_entry_lba, entries_sectors_u16, table_buffer) catch {
         console.warn("Partitions: Failed to read GPT entries", .{});
         return;
     };

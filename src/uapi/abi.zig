@@ -9,6 +9,8 @@
 // If any assertion fails, the build will error with a clear message
 // indicating which struct violates the ABI.
 
+const std = @import("std");
+
 // =============================================================================
 // Constants
 // =============================================================================
@@ -88,16 +90,34 @@ pub const TimeVal = extern struct {
     tv_sec: i64,
     tv_usec: i64,
 
+    /// Convert TimeVal to milliseconds with overflow protection.
+    /// Returns 0 for negative values, saturates at maxInt(u64) for overflow.
     pub fn toMillis(self: TimeVal) u64 {
         if (self.tv_sec < 0) return 0;
-        const sec_ms: u64 = @intCast(self.tv_sec * 1000);
-        const usec_ms: u64 = @intCast(@divFloor(self.tv_usec, 1000));
-        return sec_ms + usec_ms;
+
+        // Prevent overflow: max safe sec = maxInt(u64) / 1000
+        const max_safe_sec: i64 = @intCast(std.math.maxInt(u64) / 1000);
+        const safe_sec: u64 = if (self.tv_sec > max_safe_sec)
+            std.math.maxInt(u64)
+        else
+            @as(u64, @intCast(self.tv_sec)) * 1000;
+
+        // Handle negative tv_usec gracefully
+        const usec_ms: u64 = if (self.tv_usec >= 0)
+            @intCast(@divFloor(self.tv_usec, 1000))
+        else
+            0;
+
+        return safe_sec +| usec_ms; // saturating add
     }
 
+    /// Convert milliseconds to TimeVal with bounds checking.
+    /// Clamps tv_sec to maxInt(i64) for very large ms values.
     pub fn fromMillis(ms: u64) TimeVal {
+        const max_sec: u64 = @intCast(std.math.maxInt(i64));
+        const sec = ms / 1000;
         return .{
-            .tv_sec = @intCast(ms / 1000),
+            .tv_sec = if (sec > max_sec) std.math.maxInt(i64) else @intCast(sec),
             .tv_usec = @intCast((ms % 1000) * 1000),
         };
     }

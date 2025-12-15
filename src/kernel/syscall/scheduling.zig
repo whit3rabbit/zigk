@@ -132,16 +132,21 @@ pub fn sys_clock_gettime(clk_id: usize, tp_ptr: usize) SyscallError!usize {
         const ns_u128 = (tsc_u128 * 1_000_000_000) / freq;
         const total_ns: u64 = @truncate(ns_u128);
 
+        // Clamp to i64 max to prevent overflow
+        const max_sec: u64 = @intCast(std.math.maxInt(i64));
+        const sec_val = total_ns / 1_000_000_000;
         tp = Timespec{
-            .tv_sec = @intCast(total_ns / 1_000_000_000),
+            .tv_sec = if (sec_val > max_sec) std.math.maxInt(i64) else @intCast(sec_val),
             .tv_nsec = @intCast(total_ns % 1_000_000_000),
         };
     } else {
         // Fallback to tick count (10ms resolution)
         const ticks = sched.getTickCount();
-        const ms = ticks * 10;
+        const ms = ticks *| 10; // saturating mul to prevent overflow
+        const max_sec_ms: u64 = @intCast(std.math.maxInt(i64));
+        const sec_ms = ms / 1000;
         tp = Timespec{
-            .tv_sec = @intCast(ms / 1000),
+            .tv_sec = if (sec_ms > max_sec_ms) std.math.maxInt(i64) else @intCast(sec_ms),
             .tv_nsec = @intCast((ms % 1000) * 1_000_000),
         };
     }
@@ -202,16 +207,21 @@ pub fn sys_gettimeofday(tv_ptr: usize, tz_ptr: usize) SyscallError!usize {
         const us_u128 = (tsc_u128 * 1_000_000) / freq;
         const total_us: u64 = @truncate(us_u128);
 
+        // Clamp to i64 max to prevent overflow
+        const max_sec_tv: u64 = @intCast(std.math.maxInt(i64));
+        const sec_us = total_us / 1_000_000;
         tv = Timeval{
-            .tv_sec = @intCast(total_us / 1_000_000),
+            .tv_sec = if (sec_us > max_sec_tv) std.math.maxInt(i64) else @intCast(sec_us),
             .tv_usec = @intCast(total_us % 1_000_000),
         };
     } else {
         // Fallback to tick count
         const ticks = sched.getTickCount();
-        const ms = ticks * 10;
+        const ms = ticks *| 10; // saturating mul
+        const max_sec_tv2: u64 = @intCast(std.math.maxInt(i64));
+        const sec_ms2 = ms / 1000;
         tv = Timeval{
-            .tv_sec = @intCast(ms / 1000),
+            .tv_sec = if (sec_ms2 > max_sec_tv2) std.math.maxInt(i64) else @intCast(sec_ms2),
             .tv_usec = @intCast((ms % 1000) * 1000),
         };
     }

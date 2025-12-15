@@ -293,7 +293,9 @@ fn sfsRead(file_desc: *fd.FileDescriptor, buf: []u8) isize {
         const block_offset = rel_pos / 512;
         const byte_offset = rel_pos % 512;
 
-        const phys_block = file.start_block + @as(u32, @intCast(block_offset));
+        // Safe cast: block_offset bounded by file size which is u32
+        const block_offset_u32 = std.math.cast(u32, block_offset) orelse return -5; // EIO
+        const phys_block = file.start_block + block_offset_u32;
 
         var sector_buf: [512]u8 = undefined;
         readSector(file.fs.device_fd, phys_block, &sector_buf) catch return -5; // EIO
@@ -306,7 +308,7 @@ fn sfsRead(file_desc: *fd.FileDescriptor, buf: []u8) isize {
     }
 
     file_desc.position += read_count;
-    return @intCast(read_count);
+    return std.math.cast(isize, read_count) orelse return -75; // EOVERFLOW
 }
 
 fn sfsWrite(file_desc: *fd.FileDescriptor, buf: []const u8) isize {
@@ -346,7 +348,8 @@ fn sfsWrite(file_desc: *fd.FileDescriptor, buf: []const u8) isize {
         }
 
         // Update superblock free pointer
-        file.fs.superblock.next_free_block += @intCast(new_blocks_needed - current_blocks);
+        const blocks_to_add = std.math.cast(u32, new_blocks_needed - current_blocks) orelse return -28; // ENOSPC
+        file.fs.superblock.next_free_block += blocks_to_add;
         file.fs.updateSuperblock() catch return -5;
     }
 
@@ -358,7 +361,9 @@ fn sfsWrite(file_desc: *fd.FileDescriptor, buf: []const u8) isize {
         const block_offset = rel_pos / 512;
         const byte_offset = rel_pos % 512;
 
-        const phys_block = file.start_block + @as(u32, @intCast(block_offset));
+        // Safe cast: block_offset bounded by file size
+        const block_offset_u32 = std.math.cast(u32, block_offset) orelse return -5; // EIO
+        const phys_block = file.start_block + block_offset_u32;
 
         var sector_buf: [512]u8 = undefined;
         // Read-modify-write
@@ -378,7 +383,8 @@ fn sfsWrite(file_desc: *fd.FileDescriptor, buf: []const u8) isize {
 
     file_desc.position += written_count;
     if (file_desc.position > file.size) {
-        file.size = @intCast(file_desc.position);
+        // Safe cast: file.size is u32, position could exceed u32 max
+        file.size = std.math.cast(u32, file_desc.position) orelse return -27; // EFBIG
 
         // Update directory entry size
         const block_idx = file.entry_idx / 4;
@@ -393,7 +399,7 @@ fn sfsWrite(file_desc: *fd.FileDescriptor, buf: []const u8) isize {
         writeSector(file.fs.device_fd, 1 + block_idx, &dir_buf) catch {};
     }
 
-    return @intCast(written_count);
+    return std.math.cast(isize, written_count) orelse return -75; // EOVERFLOW
 }
 
 fn sfsClose(file_desc: *fd.FileDescriptor) isize {
@@ -405,8 +411,9 @@ fn sfsClose(file_desc: *fd.FileDescriptor) isize {
 
 fn sfsSeek(file_desc: *fd.FileDescriptor, offset: i64, whence: u32) isize {
     const file: *SfsFile = @ptrCast(@alignCast(file_desc.private_data));
+    // Safe casts: file.size is u32, position is usize - both fit in i64
     const size: i64 = @intCast(file.size);
-    const current: i64 = @intCast(file_desc.position);
+    const current = std.math.cast(i64, file_desc.position) orelse return -75; // EOVERFLOW
 
     const new_pos: i64 = switch (whence) {
         0 => offset,
@@ -417,8 +424,8 @@ fn sfsSeek(file_desc: *fd.FileDescriptor, offset: i64, whence: u32) isize {
 
     if (new_pos < 0) return -22;
 
-    file_desc.position = @intCast(new_pos);
-    return new_pos;
+    file_desc.position = std.math.cast(usize, new_pos) orelse return -75; // EOVERFLOW
+    return std.math.cast(isize, new_pos) orelse return -75; // EOVERFLOW
 }
 
 fn sfsStat(file_desc: *fd.FileDescriptor, stat_buf: *anyopaque) isize {

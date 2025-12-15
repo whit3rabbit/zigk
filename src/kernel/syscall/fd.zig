@@ -21,6 +21,11 @@ const SyscallError = base.SyscallError;
 const UserPtr = base.UserPtr;
 const isValidUserPtr = base.isValidUserPtr;
 
+/// Safe cast for file descriptor numbers from user space
+fn safeFdCast(fd_num: usize) ?u32 {
+    return std.math.cast(u32, fd_num);
+}
+
 // =============================================================================
 // File Descriptor Management
 // =============================================================================
@@ -137,7 +142,8 @@ pub fn sys_open(path_ptr: usize, flags: usize, mode: usize) SyscallError!usize {
 /// Closes the file descriptor and releases associated resources.
 pub fn sys_close(fd_num: usize) SyscallError!usize {
     const table = base.getGlobalFdTable();
-    const result = table.close(@intCast(fd_num));
+    const fd_u32 = safeFdCast(fd_num) orelse return error.EBADF;
+    const result = table.close(fd_u32);
     if (result < 0) {
         return error.EBADF;
     }
@@ -147,7 +153,8 @@ pub fn sys_close(fd_num: usize) SyscallError!usize {
 /// sys_dup (32) - Duplicate a file descriptor
 pub fn sys_dup(oldfd: usize) SyscallError!usize {
     const table = base.getGlobalFdTable();
-    const newfd = table.dup(@intCast(oldfd)) catch |err| {
+    const oldfd_u32 = safeFdCast(oldfd) orelse return error.EBADF;
+    const newfd = table.dup(oldfd_u32) catch |err| {
         return switch (err) {
             error.BadFd => error.EBADF,
             error.MFile => error.EMFILE,
@@ -159,7 +166,9 @@ pub fn sys_dup(oldfd: usize) SyscallError!usize {
 /// sys_dup2 (33) - Duplicate a file descriptor to a specific slot
 pub fn sys_dup2(oldfd: usize, newfd: usize) SyscallError!usize {
     const table = base.getGlobalFdTable();
-    const result = table.dup2(@intCast(oldfd), @intCast(newfd)) catch |err| {
+    const oldfd_u32 = safeFdCast(oldfd) orelse return error.EBADF;
+    const newfd_u32 = safeFdCast(newfd) orelse return error.EBADF;
+    const result = table.dup2(oldfd_u32, newfd_u32) catch |err| {
         return switch (err) {
             error.BadFd => error.EBADF,
         };
@@ -211,8 +220,9 @@ pub fn sys_pipe(pipefd_ptr: usize) SyscallError!usize {
 pub fn sys_lseek(fd_num: usize, offset: i64, whence: u32) SyscallError!usize {
     const table = base.getGlobalFdTable();
 
-    // Get the file descriptor
-    const file_desc = table.get(@intCast(fd_num)) orelse {
+    // Get the file descriptor with safe cast
+    const fd_u32 = safeFdCast(fd_num) orelse return error.EBADF;
+    const file_desc = table.get(fd_u32) orelse {
         return error.EBADF;
     };
 

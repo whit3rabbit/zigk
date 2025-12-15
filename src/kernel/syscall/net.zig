@@ -4,6 +4,7 @@
 // Uses the kernel's socket layer to provide BSD-style socket API.
 // Integrates with scheduler for blocking I/O operations.
 
+const std = @import("std");
 const uapi = @import("uapi");
 const net = @import("net");
 const socket = net.transport.socket;
@@ -78,7 +79,8 @@ fn getSocketData(fd: *FileDescriptor) ?*SocketFdData {
 
 fn getSocketContext(fd_num: usize) ?struct { fd: *FileDescriptor, socket_idx: usize } {
     const table = base.getGlobalFdTable();
-    const fd = table.get(@intCast(fd_num)) orelse return null;
+    const fd_u32 = std.math.cast(u32, fd_num) orelse return null;
+    const fd = table.get(fd_u32) orelse return null;
     const ctx = getSocketData(fd) orelse return null;
     return .{ .fd = fd, .socket_idx = ctx.socket_idx };
 }
@@ -188,10 +190,15 @@ fn socketClose(fd: *FileDescriptor) isize {
 pub fn sys_socket(domain: usize, sock_type: usize, protocol: usize) SyscallError!usize {
     init();
 
+    // Validate socket parameters fit target types
+    const domain_u16 = std.math.cast(u16, domain) orelse return error.EINVAL;
+    const sock_type_u16 = std.math.cast(u16, sock_type) orelse return error.EINVAL;
+    const protocol_u16 = std.math.cast(u16, protocol) orelse return error.EINVAL;
+
     const sock_idx = socket.socket(
-        @intCast(domain),
-        @intCast(sock_type),
-        @intCast(protocol),
+        domain_u16,
+        sock_type_u16,
+        protocol_u16,
     ) catch |err| {
         return socketErrorToSyscallError(err);
     };
@@ -501,7 +508,11 @@ pub fn sys_setsockopt(fd: usize, level: usize, optname: usize, optval_ptr: usize
 
     const optval: [*]const u8 = @ptrFromInt(optval_ptr);
 
-    socket.setsockopt(ctx.socket_idx, @intCast(level), @intCast(optname), optval, optlen) catch |err| {
+    // Validate socket option parameters
+    const level_i32 = std.math.cast(i32, level) orelse return error.EINVAL;
+    const optname_i32 = std.math.cast(i32, optname) orelse return error.EINVAL;
+
+    socket.setsockopt(ctx.socket_idx, level_i32, optname_i32, optval, optlen) catch |err| {
         return socketErrorToSyscallError(err);
     };
 
@@ -529,7 +540,11 @@ pub fn sys_getsockopt(fd: usize, level: usize, optname: usize, optval_ptr: usize
 
     const optval: [*]u8 = @ptrFromInt(optval_ptr);
 
-    socket.getsockopt(ctx.socket_idx, @intCast(level), @intCast(optname), optval, optlen) catch |err| {
+    // Validate socket option parameters
+    const level_i32 = std.math.cast(i32, level) orelse return error.EINVAL;
+    const optname_i32 = std.math.cast(i32, optname) orelse return error.EINVAL;
+
+    socket.getsockopt(ctx.socket_idx, level_i32, optname_i32, optval, optlen) catch |err| {
         return socketErrorToSyscallError(err);
     };
 
@@ -548,7 +563,11 @@ pub fn sys_shutdown(fd: usize, how: usize) SyscallError!usize {
         return error.ENOTSOCK;
     };
 
-    socket.shutdown(ctx.socket_idx, @intCast(how)) catch |err| {
+    // Validate shutdown mode (0, 1, or 2)
+    const how_i32 = std.math.cast(i32, how) orelse return error.EINVAL;
+    if (how_i32 < 0 or how_i32 > 2) return error.EINVAL;
+
+    socket.shutdown(ctx.socket_idx, how_i32) catch |err| {
         return socketErrorToSyscallError(err);
     };
 
@@ -656,7 +675,9 @@ pub fn sys_poll(ufds: usize, nfds: usize, timeout: isize) SyscallError!usize {
             continue;
         }
 
-        const socket_ctx = getSocketContext(@intCast(pfd.fd)) orelse {
+        // Safe cast: fd is positive after checks above
+        const fd_usize: usize = @intCast(pfd.fd);
+        const socket_ctx = getSocketContext(fd_usize) orelse {
             pfd.revents |= @bitCast(uapi.poll.POLLNVAL);
             continue;
         };
@@ -679,8 +700,10 @@ pub fn sys_poll(ufds: usize, nfds: usize, timeout: isize) SyscallError!usize {
     // Register blocked thread on all sockets
     for (0..nfds) |i| {
         const pfd = &pollfds[i];
+        // fd > 2 ensures positive value, safe to cast
         if (pfd.fd > 2) {
-            if (getSocketContext(@intCast(pfd.fd))) |ctx| {
+            const fd_u: usize = @intCast(pfd.fd);
+            if (getSocketContext(fd_u)) |ctx| {
                 if (socket.getSocket(ctx.socket_idx)) |sock| {
                     if (current_thread) |t| {
                         sock.blocked_thread = t;
@@ -699,8 +722,10 @@ pub fn sys_poll(ufds: usize, nfds: usize, timeout: isize) SyscallError!usize {
     // Woke up - Clear blocked thread registration
     for (0..nfds) |i| {
         const pfd = &pollfds[i];
+        // fd > 2 ensures positive value, safe to cast
         if (pfd.fd > 2) {
-            if (getSocketContext(@intCast(pfd.fd))) |ctx| {
+            const fd_u: usize = @intCast(pfd.fd);
+            if (getSocketContext(fd_u)) |ctx| {
                 if (socket.getSocket(ctx.socket_idx)) |sock| {
                     if (current_thread) |t| {
                         if (sock.blocked_thread == t) {
@@ -734,7 +759,9 @@ pub fn sys_poll(ufds: usize, nfds: usize, timeout: isize) SyscallError!usize {
             continue;
         }
 
-        const socket_ctx = getSocketContext(@intCast(pfd.fd)) orelse {
+        // Safe cast: fd is positive after checks above
+        const fd_usize: usize = @intCast(pfd.fd);
+        const socket_ctx = getSocketContext(fd_usize) orelse {
             pfd.revents |= @bitCast(uapi.poll.POLLNVAL);
             continue;
         };

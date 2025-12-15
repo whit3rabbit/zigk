@@ -24,6 +24,11 @@ const isValidUserAccess = base.isValidUserAccess;
 const AccessMode = base.AccessMode;
 const FileDescriptor = base.FileDescriptor;
 
+/// Safe cast for file descriptor numbers from user space
+fn safeFdCast(fd_num: usize) ?u32 {
+    return std.math.cast(u32, fd_num);
+}
+
 // =============================================================================
 // I/O Operations
 // =============================================================================
@@ -45,7 +50,8 @@ pub fn sys_read(fd_num: usize, buf_ptr: usize, count: usize) SyscallError!usize 
         console.debug("Syscall: read(0, {x}, {})", .{buf_ptr, count});
     }
 
-    const fd = table.get(@intCast(fd_num)) orelse {
+    const fd_u32 = safeFdCast(fd_num) orelse return error.EBADF;
+    const fd = table.get(fd_u32) orelse {
         return error.EBADF;
     };
 
@@ -123,7 +129,8 @@ pub fn sys_write(fd_num: usize, buf_ptr: usize, count: usize) SyscallError!usize
 
     // Get FD from table
     const table = base.getGlobalFdTable();
-    const fd = table.get(@intCast(fd_num)) orelse {
+    const fd_u32 = safeFdCast(fd_num) orelse return error.EBADF;
+    const fd = table.get(fd_u32) orelse {
         return error.EBADF;
     };
 
@@ -214,7 +221,8 @@ pub fn sys_writev(fd: usize, bvec_ptr: usize, count: usize) SyscallError!usize {
     // Acquire FD lock once for the entire vector operation
     // This ensures output from other threads doesn't interleave between vectors
     const table = base.getGlobalFdTable();
-    const fd_obj = table.get(@intCast(fd)) orelse {
+    const fd_u32 = safeFdCast(fd) orelse return error.EBADF;
+    const fd_obj = table.get(fd_u32) orelse {
         // Should have been checked by sys_write logically, but here we need the object for locking
         // However, sys_write checks it internally. We need it here to lock.
         // Actually, we should check invalid FD here before loop.
@@ -374,6 +382,17 @@ pub fn sys_stat(path_ptr: usize, stat_buf: usize) SyscallError!usize {
             return error.EFAULT;
         }
 
+        // Clamp file size to i64 max for very large files
+        const max_i64: usize = @intCast(std.math.maxInt(i64));
+        const file_size: i64 = if (file.data.len > max_i64)
+            std.math.maxInt(i64)
+        else
+            @intCast(file.data.len);
+        const blocks: i64 = if (file.data.len > max_i64)
+            std.math.maxInt(i64) / 512
+        else
+            @intCast((file.data.len + 511) / 512);
+
         const stat = uapi.stat.Stat{
             .dev = 0,
             .ino = 0,
@@ -382,9 +401,9 @@ pub fn sys_stat(path_ptr: usize, stat_buf: usize) SyscallError!usize {
             .uid = 0,
             .gid = 0,
             .rdev = 0,
-            .size = @intCast(file.data.len),
+            .size = file_size,
             .blksize = 512,
-            .blocks = @intCast((file.data.len + 511) / 512),
+            .blocks = blocks,
             .atime = 0,
             .atime_nsec = 0,
             .mtime = 0,
@@ -410,7 +429,8 @@ pub fn sys_lstat(path_ptr: usize, stat_buf: usize) SyscallError!usize {
 /// sys_fstat (5) - Get file status by FD
 pub fn sys_fstat(fd_num: usize, stat_buf: usize) SyscallError!usize {
     const table = base.getGlobalFdTable();
-    const fd = table.get(@intCast(fd_num)) orelse return error.EBADF;
+    const fd_u32 = safeFdCast(fd_num) orelse return error.EBADF;
+    const fd = table.get(fd_u32) orelse return error.EBADF;
 
     if (!isValidUserAccess(stat_buf, @sizeOf(uapi.stat.Stat), AccessMode.Write)) {
         return error.EFAULT;
@@ -494,7 +514,8 @@ pub fn sys_getdents64(fd_num: usize, dirp: usize, count: usize) SyscallError!usi
     // Let's fix `sys_open` to handle "/" by creating a dummy FD for root dir.
 
     const table = base.getGlobalFdTable();
-    const fd = table.get(@intCast(fd_num)) orelse return error.EBADF;
+    const fd_u32 = safeFdCast(fd_num) orelse return error.EBADF;
+    const fd = table.get(fd_u32) orelse return error.EBADF;
 
     // Check if this is our dummy root directory FD
     // We identify it by having null private_data (hack for MVP)
@@ -630,7 +651,8 @@ pub fn sys_mkdir(path_ptr: usize, mode: usize) SyscallError!usize {
 /// sys_fcntl (72) - File control
 pub fn sys_fcntl(fd_num: usize, cmd: usize, arg: usize) SyscallError!usize {
     const table = base.getGlobalFdTable();
-    const fd = table.get(@intCast(fd_num)) orelse return error.EBADF;
+    const fd_u32 = safeFdCast(fd_num) orelse return error.EBADF;
+    const fd = table.get(fd_u32) orelse return error.EBADF;
 
     // F_DUPFD (0)
     if (cmd == 0) {
