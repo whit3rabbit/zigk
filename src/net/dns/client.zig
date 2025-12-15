@@ -56,6 +56,17 @@ pub fn resolve(allocator: std.mem.Allocator, hostname: []const u8, server_ip: u3
     return DnsError.CnameLoop; // Exceeded max CNAME depth
 }
 
+/// Compare two DNS names case-insensitively (DNS is case-insensitive per RFC 1035)
+fn dnsNameEql(a: []const u8, b: []const u8) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |ca, cb| {
+        const la = if (ca >= 'A' and ca <= 'Z') ca + 32 else ca;
+        const lb = if (cb >= 'A' and cb <= 'Z') cb + 32 else cb;
+        if (la != lb) return false;
+    }
+    return true;
+}
+
 /// Single DNS query - returns either IP address or CNAME target.
 /// cname_buf is used to store CNAME target if one is found.
 fn resolveOnce(allocator: std.mem.Allocator, hostname: []const u8, server_ip: u32, cname_buf: []u8) !ResolveResult {
@@ -75,10 +86,11 @@ fn resolveOnce(allocator: std.mem.Allocator, hostname: []const u8, server_ip: u3
     var send_buf: [512]u8 = undefined;
     var packet = dns.DnsPacket.init(&send_buf);
 
-    // Generate random Transaction ID using hardware entropy mixed with timestamp
-    const entropy_val = hal.entropy.getHardwareEntropy();
-    const timestamp_val = @as(u32, @truncate(hal.cpu.getTickCount()));
-    const tx_id = @as(u16, @truncate(entropy_val ^ timestamp_val));
+    // Generate random Transaction ID using hardware entropy directly.
+    // Security: XORing entropy with timestamp can reduce entropy if either
+    // source is predictable. Using hardware entropy directly preserves full
+    // 16 bits of unpredictability for DNS spoofing resistance.
+    const tx_id = @as(u16, @truncate(hal.entropy.getHardwareEntropy()));
 
     // Write Query
     packet.writeHeader(tx_id, dns.FLAGS_RD); // Recursion Desired
@@ -160,10 +172,16 @@ fn resolveOnce(allocator: std.mem.Allocator, hostname: []const u8, server_ip: u3
 
     // Parse Answers - look for A record first, then CNAME if no A found
     var cname_result: ?ResolveResult = null;
+    var owner_name_buf: [dns.DNS_MAX_NAME_LENGTH]u8 = undefined;
 
     i = 0;
     while (i < an_count) : (i += 1) {
-        pos = try skipName(resp, pos);
+        // Read owner name to validate it matches our query (security check)
+        const owner_result = dns.readName(resp, pos, &owner_name_buf) catch |err| switch (err) {
+            error.FormatError => return DnsError.FormatError,
+            error.BufferTooSmall => return DnsError.BufferTooSmall,
+        };
+        pos = owner_result.end_pos;
 
         if (pos + 10 > resp.len) return DnsError.FormatError;
 
@@ -175,14 +193,18 @@ fn resolveOnce(allocator: std.mem.Allocator, hostname: []const u8, server_ip: u3
 
         if (pos + rdlen > resp.len) return DnsError.FormatError;
 
-        if (rtype == dns.TYPE_A and rclass == dns.CLASS_IN and rdlen == 4) {
-            // Found A record - return immediately
+        // Security: Validate owner name matches our queried hostname to prevent
+        // a malicious DNS server from injecting records for unrelated domains.
+        const owner_matches = dnsNameEql(owner_result.name, hostname);
+
+        if (rtype == dns.TYPE_A and rclass == dns.CLASS_IN and rdlen == 4 and owner_matches) {
+            // Found A record for our query - return immediately
             const ip = std.mem.readInt(u32, resp[pos..][0..4], .big);
             return .{ .ip = ip };
         }
 
-        if (rtype == dns.TYPE_CNAME and rclass == dns.CLASS_IN and cname_result == null) {
-            // Found CNAME - extract target name for potential follow-up
+        if (rtype == dns.TYPE_CNAME and rclass == dns.CLASS_IN and cname_result == null and owner_matches) {
+            // Found CNAME for our query - extract target name for potential follow-up
             const name_result = dns.readName(resp, pos, cname_buf) catch |err| switch (err) {
                 error.FormatError => return DnsError.FormatError,
                 error.BufferTooSmall => return DnsError.BufferTooSmall,

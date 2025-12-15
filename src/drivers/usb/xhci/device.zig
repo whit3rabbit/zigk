@@ -234,29 +234,36 @@ pub const UsbDevice = struct {
 // Device Array - Track all connected devices
 // =============================================================================
 
-/// Maximum number of devices (limited by slot count, typically 64-255)
-pub const MAX_DEVICES: usize = 64;
+/// Maximum number of devices
+/// Security: Increased to 256 to match xHCI spec (slot IDs 1-255)
+/// Using 256 allows direct indexing without bounds check failures in ReleaseFast
+pub const MAX_DEVICES: usize = 256;
 
 /// Global device array indexed by slot_id
 var devices: [MAX_DEVICES]?*UsbDevice = [_]?*UsbDevice{null} ** MAX_DEVICES;
 
 /// Register a device in the global array
+/// Security: Validates slot_id bounds to prevent out-of-bounds writes
 pub fn registerDevice(device: *UsbDevice) void {
-    if (device.slot_id > 0 and device.slot_id < MAX_DEVICES) {
+    // slot_id is u8, max value 255, which is < MAX_DEVICES (256)
+    // slot_id 0 is reserved for host controller
+    if (device.slot_id > 0) {
         devices[device.slot_id] = device;
     }
 }
 
 /// Unregister a device from the global array
 pub fn unregisterDevice(slot_id: u8) void {
-    if (slot_id > 0 and slot_id < MAX_DEVICES) {
+    // slot_id is u8, max value 255, which is < MAX_DEVICES (256)
+    if (slot_id > 0) {
         devices[slot_id] = null;
     }
 }
 
 /// Find a device by slot ID
 pub fn findDevice(slot_id: u8) ?*UsbDevice {
-    if (slot_id > 0 and slot_id < MAX_DEVICES) {
+    // slot_id is u8, max value 255, which is < MAX_DEVICES (256)
+    if (slot_id > 0) {
         return devices[slot_id];
     }
     return null;
@@ -313,8 +320,8 @@ pub const PendingTransfer = struct {
     slot_id: u8,
     /// Endpoint DCI for matching
     ep_dci: u5,
-    /// Completion status
-    completed: bool,
+    /// Completion status (atomic for interrupt-safe access)
+    completed: std.atomic.Value(bool),
     /// Completion code from controller
     completion_code: trb.CompletionCode,
     /// Bytes transferred (or residual for short packet)
@@ -323,38 +330,55 @@ pub const PendingTransfer = struct {
 
 /// Global pending transfer for synchronous operations
 /// Only one control transfer at a time per device
-pub var pending_transfer: ?PendingTransfer = null;
+/// Security: Use atomic flag for completed status to prevent race conditions
+/// between interrupt handler and polling code.
+var pending_transfer_storage: PendingTransfer = undefined;
+var pending_transfer_active: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 
 /// Start tracking a pending transfer
+/// Security: Uses atomic operations for thread-safe initialization
 pub fn startPendingTransfer(trb_phys: u64, slot_id: u8, ep_dci: u5) void {
-    pending_transfer = PendingTransfer{
+    // Initialize the storage
+    pending_transfer_storage = PendingTransfer{
         .trb_phys = trb_phys,
         .slot_id = slot_id,
         .ep_dci = ep_dci,
-        .completed = false,
+        .completed = std.atomic.Value(bool).init(false),
         .completion_code = .Invalid,
         .bytes_transferred = 0,
     };
+    // Publish the transfer atomically
+    pending_transfer_active.store(true, .release);
 }
 
 /// Mark pending transfer as completed
+/// Security: Safe to call from interrupt context
 pub fn completePendingTransfer(code: trb.CompletionCode, residual: u24) void {
-    if (pending_transfer) |*pt| {
-        pt.completed = true;
-        pt.completion_code = code;
-        pt.bytes_transferred = residual;
+    if (pending_transfer_active.load(.acquire)) {
+        pending_transfer_storage.completion_code = code;
+        pending_transfer_storage.bytes_transferred = residual;
+        pending_transfer_storage.completed.store(true, .release);
     }
 }
 
 /// Check if pending transfer matches event
 pub fn matchesPendingTransfer(slot_id: u8, ep_dci: u5) bool {
-    if (pending_transfer) |pt| {
-        return pt.slot_id == slot_id and pt.ep_dci == ep_dci and !pt.completed;
+    if (pending_transfer_active.load(.acquire)) {
+        const pt = &pending_transfer_storage;
+        return pt.slot_id == slot_id and pt.ep_dci == ep_dci and !pt.completed.load(.acquire);
     }
     return false;
 }
 
+/// Get pending transfer if active (for polling)
+pub fn getPendingTransfer() ?*PendingTransfer {
+    if (pending_transfer_active.load(.acquire)) {
+        return &pending_transfer_storage;
+    }
+    return null;
+}
+
 /// Clear pending transfer
 pub fn clearPendingTransfer() void {
-    pending_transfer = null;
+    pending_transfer_active.store(false, .release);
 }

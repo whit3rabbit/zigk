@@ -526,26 +526,49 @@ pub fn sys_getsockopt(fd: usize, level: usize, optname: usize, optval_ptr: usize
         return error.ENOTSOCK;
     };
 
-    // Validate optlen pointer
-    if (!isValidUserPtr(optlen_ptr, @sizeOf(usize))) {
+    // Security: Copy optlen to kernel stack first to prevent TOCTOU race
+    // A racing userspace thread could modify optlen between validation and use
+    const optlen_uptr = user_mem.UserPtr.from(optlen_ptr);
+    var koptlen = optlen_uptr.readValue(usize) catch {
+        return error.EFAULT;
+    };
+
+    // Validate option value pointer using kernel-copied length
+    if (koptlen > 0 and !isValidUserPtr(optval_ptr, koptlen)) {
         return error.EFAULT;
     }
 
-    const optlen: *usize = @ptrFromInt(optlen_ptr);
-
-    // Validate option value pointer
-    if (optlen.* > 0 and !isValidUserPtr(optval_ptr, optlen.*)) {
-        return error.EFAULT;
+    // Cap optlen to prevent excessive kernel buffer allocation
+    const max_optlen: usize = 256;
+    if (koptlen > max_optlen) {
+        koptlen = max_optlen;
     }
-
-    const optval: [*]u8 = @ptrFromInt(optval_ptr);
 
     // Validate socket option parameters
     const level_i32 = std.math.cast(i32, level) orelse return error.EINVAL;
     const optname_i32 = std.math.cast(i32, optname) orelse return error.EINVAL;
 
-    socket.getsockopt(ctx.socket_idx, level_i32, optname_i32, optval, optlen) catch |err| {
+    // Allocate kernel buffer for option value
+    var koptval_buf: [256]u8 = undefined;
+    const koptval = koptval_buf[0..koptlen];
+
+    // Call socket layer with kernel buffer
+    var result_len = koptlen;
+    socket.getsockopt(ctx.socket_idx, level_i32, optname_i32, koptval.ptr, &result_len) catch |err| {
         return socketErrorToSyscallError(err);
+    };
+
+    // Copy result back to userspace
+    if (result_len > 0) {
+        const optval_uptr = user_mem.UserPtr.from(optval_ptr);
+        _ = optval_uptr.copyFromKernel(koptval[0..result_len]) catch {
+            return error.EFAULT;
+        };
+    }
+
+    // Write back actual length
+    optlen_uptr.writeValue(result_len) catch {
+        return error.EFAULT;
     };
 
     return 0;
@@ -581,30 +604,39 @@ pub fn sys_getsockname(fd: usize, addr_ptr: usize, addrlen_ptr: usize) SyscallEr
         return error.ENOTSOCK;
     };
 
+    // Security: Copy addrlen to kernel stack first to prevent TOCTOU race
+    const addrlen_uptr = user_mem.UserPtr.from(addrlen_ptr);
+    const kaddrlen = addrlen_uptr.readValue(u32) catch {
+        return error.EFAULT;
+    };
+
+    // Check addrlen is large enough using kernel-copied value
+    if (kaddrlen < @sizeOf(socket.SockAddrIn)) {
+        return error.EINVAL;
+    }
+
     // Validate address pointer
     if (!isValidUserPtr(addr_ptr, @sizeOf(socket.SockAddrIn))) {
         return error.EFAULT;
     }
 
-    // Validate addrlen pointer
-    if (!isValidUserPtr(addrlen_ptr, @sizeOf(u32))) {
-        return error.EFAULT;
-    }
+    // Use kernel buffer for the address
+    var kaddr: socket.SockAddrIn = undefined;
 
-    const addr: *socket.SockAddrIn = @ptrFromInt(addr_ptr);
-    const addrlen: *u32 = @ptrFromInt(addrlen_ptr);
-
-    // Check addrlen is large enough
-    if (addrlen.* < @sizeOf(socket.SockAddrIn)) {
-        return error.EINVAL;
-    }
-
-    socket.getsockname(ctx.socket_idx, addr) catch |err| {
+    socket.getsockname(ctx.socket_idx, &kaddr) catch |err| {
         return socketErrorToSyscallError(err);
     };
 
-    // Update addrlen with actual size
-    addrlen.* = @sizeOf(socket.SockAddrIn);
+    // Copy address to userspace
+    const addr_uptr = user_mem.UserPtr.from(addr_ptr);
+    addr_uptr.writeValue(kaddr) catch {
+        return error.EFAULT;
+    };
+
+    // Write back actual size
+    addrlen_uptr.writeValue(@as(u32, @sizeOf(socket.SockAddrIn))) catch {
+        return error.EFAULT;
+    };
 
     return 0;
 }
@@ -616,52 +648,90 @@ pub fn sys_getpeername(fd: usize, addr_ptr: usize, addrlen_ptr: usize) SyscallEr
         return error.ENOTSOCK;
     };
 
+    // Security: Copy addrlen to kernel stack first to prevent TOCTOU race
+    const addrlen_uptr = user_mem.UserPtr.from(addrlen_ptr);
+    const kaddrlen = addrlen_uptr.readValue(u32) catch {
+        return error.EFAULT;
+    };
+
+    // Check addrlen is large enough using kernel-copied value
+    if (kaddrlen < @sizeOf(socket.SockAddrIn)) {
+        return error.EINVAL;
+    }
+
     // Validate address pointer
     if (!isValidUserPtr(addr_ptr, @sizeOf(socket.SockAddrIn))) {
         return error.EFAULT;
     }
 
-    // Validate addrlen pointer
-    if (!isValidUserPtr(addrlen_ptr, @sizeOf(u32))) {
-        return error.EFAULT;
-    }
+    // Use kernel buffer for the address
+    var kaddr: socket.SockAddrIn = undefined;
 
-    const addr: *socket.SockAddrIn = @ptrFromInt(addr_ptr);
-    const addrlen: *u32 = @ptrFromInt(addrlen_ptr);
-
-    // Check addrlen is large enough
-    if (addrlen.* < @sizeOf(socket.SockAddrIn)) {
-        return error.EINVAL;
-    }
-
-    socket.getpeername(ctx.socket_idx, addr) catch |err| {
+    socket.getpeername(ctx.socket_idx, &kaddr) catch |err| {
         return socketErrorToSyscallError(err);
     };
 
-    // Update addrlen with actual size
-    addrlen.* = @sizeOf(socket.SockAddrIn);
+    // Copy address to userspace
+    const addr_uptr = user_mem.UserPtr.from(addr_ptr);
+    addr_uptr.writeValue(kaddr) catch {
+        return error.EFAULT;
+    };
+
+    // Write back actual size
+    addrlen_uptr.writeValue(@as(u32, @sizeOf(socket.SockAddrIn))) catch {
+        return error.EFAULT;
+    };
 
     return 0;
 }
 
 /// sys_poll (7) - Wait for some event on a file descriptor
 /// (ufds, nfds, timeout) -> int
+///
+/// Security: Copies pollfd array to kernel memory to prevent TOCTOU races.
+/// A malicious userspace thread could modify fd values or unmap memory
+/// while poll is blocked, causing kernel faults or invalid socket access.
 pub fn sys_poll(ufds: usize, nfds: usize, timeout: isize) SyscallError!usize {
-    // Validate pollfd array
+    // Limit nfds to prevent excessive kernel allocations (matches Linux RLIMIT_NOFILE default)
+    const max_nfds: usize = 1024;
+    if (nfds > max_nfds) {
+        return error.EINVAL;
+    }
+
+    if (nfds == 0) {
+        // No fds to poll - if timeout is 0, return immediately; otherwise block
+        if (timeout == 0) return 0;
+        // For non-zero timeout with no fds, just return 0 (matches Linux behavior)
+        return 0;
+    }
+
+    // Validate pollfd array pointer
     const poll_size = @sizeOf(uapi.poll.PollFd);
     const array_size = nfds * poll_size;
     if (!isValidUserPtr(ufds, array_size)) {
         return error.EFAULT;
     }
 
-    const pollfds: [*]uapi.poll.PollFd = @ptrFromInt(ufds);
+    // Security: Copy pollfd array to kernel memory to prevent TOCTOU
+    // This protects against:
+    // 1. Racing userspace modifying fd values between check and use
+    // 2. Userspace unmapping the pollfd array while poll is blocked
+    const kpollfds = heap.allocator().alloc(uapi.poll.PollFd, nfds) catch {
+        return error.ENOMEM;
+    };
+    defer heap.allocator().free(kpollfds);
 
-    // Polling loop
+    // Copy from userspace
+    const ufds_uptr = user_mem.UserPtr.from(ufds);
+    _ = ufds_uptr.copyToKernel(std.mem.sliceAsBytes(kpollfds)) catch {
+        return error.EFAULT;
+    };
+
+    // Polling loop using kernel copy
     var ready_count: usize = 0;
 
     // Check events immediately (non-blocking pass)
-    for (0..nfds) |i| {
-        const pfd = &pollfds[i];
+    for (kpollfds) |*pfd| {
         pfd.revents = 0;
 
         if (pfd.fd < 0) continue;
@@ -690,6 +760,10 @@ pub fn sys_poll(ufds: usize, nfds: usize, timeout: isize) SyscallError!usize {
     }
 
     if (ready_count > 0 or timeout == 0) {
+        // Copy results back to userspace
+        _ = ufds_uptr.copyFromKernel(std.mem.sliceAsBytes(kpollfds)) catch {
+            return error.EFAULT;
+        };
         return ready_count;
     }
 
@@ -697,9 +771,8 @@ pub fn sys_poll(ufds: usize, nfds: usize, timeout: isize) SyscallError!usize {
     // Note: timeout is ms. -1 = infinite.
     const current_thread = getCurrentThread();
 
-    // Register blocked thread on all sockets
-    for (0..nfds) |i| {
-        const pfd = &pollfds[i];
+    // Register blocked thread on all sockets (using kernel copy of fd values)
+    for (kpollfds) |*pfd| {
         // fd > 2 ensures positive value, safe to cast
         if (pfd.fd > 2) {
             const fd_u: usize = @intCast(pfd.fd);
@@ -720,8 +793,7 @@ pub fn sys_poll(ufds: usize, nfds: usize, timeout: isize) SyscallError!usize {
     blockCurrentThread();
 
     // Woke up - Clear blocked thread registration
-    for (0..nfds) |i| {
-        const pfd = &pollfds[i];
+    for (kpollfds) |*pfd| {
         // fd > 2 ensures positive value, safe to cast
         if (pfd.fd > 2) {
             const fd_u: usize = @intCast(pfd.fd);
@@ -742,10 +814,9 @@ pub fn sys_poll(ufds: usize, nfds: usize, timeout: isize) SyscallError!usize {
         }
     }
 
-    // Re-check events
+    // Re-check events using kernel copy
     ready_count = 0;
-    for (0..nfds) |i| {
-        const pfd = &pollfds[i];
+    for (kpollfds) |*pfd| {
         // Ensure consistent reporting
         pfd.revents = 0;
 
@@ -772,6 +843,11 @@ pub fn sys_poll(ufds: usize, nfds: usize, timeout: isize) SyscallError!usize {
             ready_count += 1;
         }
     }
+
+    // Copy results back to userspace
+    _ = ufds_uptr.copyFromKernel(std.mem.sliceAsBytes(kpollfds)) catch {
+        return error.EFAULT;
+    };
 
     return ready_count;
 }

@@ -163,6 +163,8 @@ pub fn main() void {
     // Main game loop
     while (true) {
         doomgeneric_Tick();
+        // Yield to kernel to prevent starvation of input processing threads
+        _ = syscall.sched_yield() catch {};
     }
 }
 

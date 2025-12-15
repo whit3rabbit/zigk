@@ -21,6 +21,9 @@ var keyboard_handler: ?*const fn () void = null;
 // This allows the HAL to call into the mouse driver without importing it
 var mouse_handler: ?*const fn () void = null;
 
+// Serial IRQ handler callback (set by serial driver)
+var serial_handler: ?*const fn () void = null;
+
 // Timer IRQ handler callback (set by scheduler)
 // Returns a new frame pointer for context switching
 // This allows the scheduler to perform preemptive context switches
@@ -123,6 +126,11 @@ pub fn setKeyboardHandler(handler: *const fn () void) void {
 /// This allows the mouse driver to register its IRQ handler
 pub fn setMouseHandler(handler: *const fn () void) void {
     mouse_handler = handler;
+}
+
+/// Set the updated serial handler callback
+pub fn setSerialHandler(handler: *const fn () void) void {
+    serial_handler = handler;
 }
 
 /// Set the crash handler callback
@@ -328,8 +336,21 @@ fn irqHandler(frame: *idt.InterruptFrame) void {
             if (mouse_handler) |handler| {
                 handler();
             } else {
-                // Fallback: read data to acknowledge (prevents mouse lockup)
+                // Fallback: read data to acknowledge
                 _ = @import("io.zig").inb(0x60);
+            }
+        },
+        4 => {
+            // Serial IRQ (COM1)
+            if (serial_handler) |handler| {
+                handler();
+            } else {
+                // Acknowledge by reading IIR/LSR/RBR? 
+                // Mostly UART interrupts are cleared by reading the cause.
+                // If we don't handle it, we might get stuck in a loop if level triggered.
+                // But legacy PIC is edge triggered usually? COM ports are confusing.
+                // Let's just log if unhandled.
+                logUnexpectedIrq(irq);
             }
         },
         else => {

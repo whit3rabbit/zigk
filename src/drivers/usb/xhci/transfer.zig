@@ -518,6 +518,8 @@ pub const KeyboardInfo = struct {
 };
 
 /// Parse configuration descriptor to find HID keyboard interface
+/// Security: Validates all descriptor bounds against actual buffer size,
+/// not just the claimed b_length field from untrusted device data.
 pub fn findKeyboardInterface(config_data: []const u8) ?KeyboardInfo {
     var i: usize = 0;
 
@@ -525,15 +527,25 @@ pub fn findKeyboardInterface(config_data: []const u8) ?KeyboardInfo {
     var current_interface: ?u8 = null;
     var is_boot_keyboard = false;
 
+    const iface_desc_size = @sizeOf(usb_types.InterfaceDescriptor);
+    const ep_desc_size = @sizeOf(usb_types.EndpointDescriptor);
+
     while (i + 2 <= config_data.len) {
         const length = config_data[i];
         const desc_type = config_data[i + 1];
 
-        if (length == 0 or i + length > config_data.len) break;
+        // Validate length field from device data
+        if (length < 2) break; // Minimum descriptor size is 2 bytes
+        if (i + length > config_data.len) break; // Claimed length exceeds buffer
 
         switch (desc_type) {
             usb_types.DescriptorType.INTERFACE => {
-                if (length >= 9) {
+                // Security: Check actual struct size, not just claimed length
+                // A malicious device could claim length=9 near buffer end
+                const required_size = @max(length, iface_desc_size);
+                if (i + required_size > config_data.len) break;
+
+                if (length >= iface_desc_size) {
                     const iface = @as(*const usb_types.InterfaceDescriptor, @ptrCast(@alignCast(&config_data[i])));
 
                     current_interface = iface.b_interface_number;
@@ -552,7 +564,11 @@ pub fn findKeyboardInterface(config_data: []const u8) ?KeyboardInfo {
                 }
             },
             usb_types.DescriptorType.ENDPOINT => {
-                if (length >= 7 and is_boot_keyboard and current_interface != null) {
+                // Security: Check actual struct size, not just claimed length
+                const required_size = @max(length, ep_desc_size);
+                if (i + required_size > config_data.len) break;
+
+                if (length >= ep_desc_size and is_boot_keyboard and current_interface != null) {
                     const ep = @as(*const usb_types.EndpointDescriptor, @ptrCast(@alignCast(&config_data[i])));
 
                     // Check for Interrupt IN endpoint
@@ -595,6 +611,8 @@ pub const MouseInfo = struct {
 };
 
 /// Parse configuration descriptor to find HID mouse interface
+/// Security: Validates all descriptor bounds against actual buffer size,
+/// not just the claimed b_length field from untrusted device data.
 pub fn findMouseInterface(config_data: []const u8) ?MouseInfo {
     var i: usize = 0;
 
@@ -602,15 +620,24 @@ pub fn findMouseInterface(config_data: []const u8) ?MouseInfo {
     var current_interface: ?u8 = null;
     var is_boot_mouse = false;
 
+    const iface_desc_size = @sizeOf(usb_types.InterfaceDescriptor);
+    const ep_desc_size = @sizeOf(usb_types.EndpointDescriptor);
+
     while (i + 2 <= config_data.len) {
         const length = config_data[i];
         const desc_type = config_data[i + 1];
 
-        if (length == 0 or i + length > config_data.len) break;
+        // Validate length field from device data
+        if (length < 2) break; // Minimum descriptor size is 2 bytes
+        if (i + length > config_data.len) break; // Claimed length exceeds buffer
 
         switch (desc_type) {
             usb_types.DescriptorType.INTERFACE => {
-                if (length >= 9) {
+                // Security: Check actual struct size, not just claimed length
+                const required_size = @max(length, iface_desc_size);
+                if (i + required_size > config_data.len) break;
+
+                if (length >= iface_desc_size) {
                     const iface = @as(*const usb_types.InterfaceDescriptor, @ptrCast(@alignCast(&config_data[i])));
 
                     current_interface = iface.b_interface_number;
@@ -629,7 +656,11 @@ pub fn findMouseInterface(config_data: []const u8) ?MouseInfo {
                 }
             },
             usb_types.DescriptorType.ENDPOINT => {
-                if (length >= 7 and is_boot_mouse and current_interface != null) {
+                // Security: Check actual struct size, not just claimed length
+                const required_size = @max(length, ep_desc_size);
+                if (i + required_size > config_data.len) break;
+
+                if (length >= ep_desc_size and is_boot_mouse and current_interface != null) {
                     const ep = @as(*const usb_types.EndpointDescriptor, @ptrCast(@alignCast(&config_data[i])));
 
                     // Check for Interrupt IN endpoint

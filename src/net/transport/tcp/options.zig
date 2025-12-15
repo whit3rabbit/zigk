@@ -31,21 +31,26 @@ pub fn parseOptions(pkt: *const PacketBuffer, tcp_hdr: *const TcpHeader, opts: *
         return; // No options
     }
 
+    // Security: Validate header length against packet bounds before parsing
     const options_start = pkt.transport_offset + c.TCP_HEADER_SIZE;
     const options_end = pkt.transport_offset + header_len;
+    const options_len = header_len - c.TCP_HEADER_SIZE;
 
     if (options_end > pkt.len) {
-        return;
+        return; // Header claims more data than packet contains
     }
 
+    // Track bytes consumed to detect malformed packets
+    var bytes_consumed: usize = 0;
     var i = options_start;
-    while (i < options_end) {
+    while (i < options_end and bytes_consumed < options_len) {
         const kind = pkt.data[i];
 
         switch (kind) {
             c.TCPOPT_EOL => return, // End of options list
             c.TCPOPT_NOP => {
                 i += 1; // Single-byte option
+                bytes_consumed += 1;
                 continue;
             },
             c.TCPOPT_MSS => {
@@ -53,43 +58,54 @@ pub fn parseOptions(pkt: *const PacketBuffer, tcp_hdr: *const TcpHeader, opts: *
                 if (i + 1 >= options_end) return;
                 if (i + c.TCPOLEN_MSS > options_end) return;
                 if (pkt.data[i + 1] != c.TCPOLEN_MSS) {
-                    i += pkt.data[i + 1];
+                    const skip = pkt.data[i + 1];
+                    i += skip;
+                    bytes_consumed += skip;
                     continue;
                 }
                 const mss = (@as(u16, pkt.data[i + 2]) << 8) | pkt.data[i + 3];
                 opts.mss_present = true;
                 opts.mss = if (mss < c.MIN_MSS) c.MIN_MSS else mss;
                 i += c.TCPOLEN_MSS;
+                bytes_consumed += c.TCPOLEN_MSS;
             },
             c.TCPOPT_WINDOW => {
                 // Window Scale option: Kind(1) + Length(1) + ShiftCount(1)
                 if (i + 1 >= options_end) return;
                 if (i + c.TCPOLEN_WINDOW > options_end) return;
                 if (pkt.data[i + 1] != c.TCPOLEN_WINDOW) {
-                    i += pkt.data[i + 1];
+                    const skip = pkt.data[i + 1];
+                    i += skip;
+                    bytes_consumed += skip;
                     continue;
                 }
                 opts.wscale_present = true;
                 opts.wscale = @min(pkt.data[i + 2], c.TCP_MAX_WSCALE);
                 i += c.TCPOLEN_WINDOW;
+                bytes_consumed += c.TCPOLEN_WINDOW;
             },
             c.TCPOPT_SACK_PERM => {
                 // SACK Permitted option: Kind(1) + Length(1), no data
                 if (i + 1 >= options_end) return;
                 if (i + c.TCPOLEN_SACK_PERM > options_end) return;
                 if (pkt.data[i + 1] != c.TCPOLEN_SACK_PERM) {
-                    i += pkt.data[i + 1];
+                    const skip = pkt.data[i + 1];
+                    i += skip;
+                    bytes_consumed += skip;
                     continue;
                 }
                 opts.sack_permitted = true;
                 i += c.TCPOLEN_SACK_PERM;
+                bytes_consumed += c.TCPOLEN_SACK_PERM;
             },
             c.TCPOPT_TIMESTAMP => {
                 // Timestamp option: Kind(1) + Length(1) + TSval(4) + TSecr(4)
                 if (i + 1 >= options_end) return;
                 if (i + c.TCPOLEN_TIMESTAMP > options_end) return;
                 if (pkt.data[i + 1] != c.TCPOLEN_TIMESTAMP) {
-                    i += pkt.data[i + 1];
+                    const skip = pkt.data[i + 1];
+                    i += skip;
+                    bytes_consumed += skip;
                     continue;
                 }
                 opts.timestamp_present = true;
@@ -102,6 +118,7 @@ pub fn parseOptions(pkt: *const PacketBuffer, tcp_hdr: *const TcpHeader, opts: *
                     (@as(u32, pkt.data[i + 8]) << 8) |
                     @as(u32, pkt.data[i + 9]);
                 i += c.TCPOLEN_TIMESTAMP;
+                bytes_consumed += c.TCPOLEN_TIMESTAMP;
             },
             c.TCPOPT_SACK => {
                 // SACK blocks - skip for now (full SACK implementation is complex)
@@ -110,6 +127,7 @@ pub fn parseOptions(pkt: *const PacketBuffer, tcp_hdr: *const TcpHeader, opts: *
                 if (opt_len < 2) return;
                 if (i + opt_len > options_end) return;
                 i += opt_len;
+                bytes_consumed += opt_len;
             },
             else => {
                 // Unknown option - skip using length field
@@ -118,6 +136,7 @@ pub fn parseOptions(pkt: *const PacketBuffer, tcp_hdr: *const TcpHeader, opts: *
                 if (opt_len < 2) return;
                 if (i + opt_len > options_end) return;
                 i += opt_len;
+                bytes_consumed += opt_len;
             },
         }
     }

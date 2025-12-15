@@ -370,9 +370,11 @@ fn processSynReceived(tcb: *Tcb, tcp_hdr: *TcpHeader) bool {
     }
 
     const ack = tcp_hdr.getAckNum();
-    // ACK must acknowledge our SYN
+    // ACK must acknowledge our SYN (RFC 5961: send RST for out-of-window ACK)
     if (ack != tcb.iss +% 1) {
-        // Bad ACK
+        // Security: Send RST for invalid ACK per RFC 5961 to prevent
+        // ISN prediction attacks that use differential response as an oracle.
+        _ = tx.sendRst(tcb);
         return true;
     }
 
@@ -424,7 +426,11 @@ fn processEstablished(tcb: *Tcb, pkt: *PacketBuffer, tcp_hdr: *TcpHeader) bool {
             }
 
             // Congestion Control (RFC 5681)
-            const acked_bytes = ack -% tcb.snd_una;
+            // Security: Clamp acked_bytes to actual unacknowledged data to prevent
+            // an attacker from inflating cwnd via crafted ACK numbers.
+            // Real acked bytes cannot exceed (snd_nxt - old_snd_una).
+            const max_ackable = tcb.snd_nxt -% tcb.snd_una;
+            const acked_bytes = @min(ack -% tcb.snd_una, max_ackable);
             if (tcb.cwnd < tcb.ssthresh) {
                 // Slow Start: use saturating add to prevent overflow
                 tcb.cwnd = std.math.add(u32, tcb.cwnd, @min(acked_bytes, tcb.mss)) catch std.math.maxInt(u32);
@@ -458,6 +464,13 @@ fn processEstablished(tcb: *Tcb, pkt: *PacketBuffer, tcp_hdr: *TcpHeader) bool {
     if (ip_payload_len > data_offset) {
         const data_len = ip_payload_len - data_offset;
         const data_start = pkt.transport_offset + data_offset;
+
+        // Validate calculated offsets against actual packet buffer bounds
+        // Prevents out-of-bounds access from crafted header length fields
+        if (data_start > pkt.len or data_len > pkt.len - data_start) {
+            return false; // Malformed packet - header claims more data than buffer contains
+        }
+
         const data = pkt.data[data_start..][0..data_len];
 
         // Only accept in-order data for MVP

@@ -151,6 +151,9 @@ pub fn readName(buf: []const u8, start: usize, out: []u8) error{ FormatError, Bu
 
             const offset: usize = (@as(u16, len_byte & 0x3F) << 8) | buf[pos + 1];
             if (offset >= buf.len) return error.FormatError;
+            // RFC 1035 compression pointers must point backward to previously seen data.
+            // Forward pointers could allow reading arbitrary buffer locations in crafted responses.
+            if (offset >= pos) return error.FormatError;
             pos = offset;
             continue;
         }

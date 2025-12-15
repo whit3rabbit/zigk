@@ -77,7 +77,8 @@ const FragmentKey = struct {
 /// Global reassembly cache
 var cache: [MAX_REASSEMBLIES]ReassemblyEntry = undefined;
 var cache_initialized: bool = false;
-var lock: sync.Lock = sync.noop_lock;
+/// IRQ-safe spinlock for concurrent access protection
+var lock: sync.Spinlock = .{};
 var current_tick: u64 = 0;
 
 /// Initialize module
@@ -88,11 +89,6 @@ pub fn init() void {
         }
         cache_initialized = true;
     }
-}
-
-/// Set lock
-pub fn setLock(l: sync.Lock) void {
-    lock = l;
 }
 
 /// Update timer tick
@@ -120,8 +116,8 @@ pub fn processFragment(
     more_fragments: bool,
     payload: []const u8
 ) ?ReassemblyResult {
-    lock.acquire();
-    defer lock.release();
+    const held = lock.acquire();
+    defer held.release();
     
     if (!cache_initialized) init();
 
@@ -159,7 +155,8 @@ pub fn processFragment(
 
     // Calculate fragment position with overflow protection
     // frag_offset is in 8-byte units, max value 65535 -> max start = 524,280
-    const start = @as(usize, frag_offset) * 8;
+    // Use checked arithmetic for defense-in-depth against malformed offset values
+    const start = std.math.mul(usize, @as(usize, frag_offset), 8) catch return null;
 
     // Validate start is within bounds (frag_offset * 8 can exceed MAX_IP_PACKET_SIZE)
     if (start >= MAX_IP_PACKET_SIZE) return null; // Fragment offset too large
@@ -181,6 +178,15 @@ pub fn processFragment(
                 e.holes[i].end = e.total_len;
             }
         }
+    }
+
+    // Security: Reject overlapping fragments (RFC 5722 recommendation for IPv6,
+    // good practice for IPv4 too). Overlapping fragments are used in Teardrop
+    // and similar attacks to evade IDS/firewall inspection.
+    if (isRegionOverlapping(e, start, end)) {
+        // Drop the entire reassembly - attacker may be trying to manipulate data
+        e.used = false;
+        return null;
     }
 
     // Copy data to buffer
@@ -209,9 +215,9 @@ pub fn processFragment(
 
 /// Free a reassembly entry after consumption
 pub fn freeEntry(id: usize) void {
-    lock.acquire();
-    defer lock.release();
-    
+    const held = lock.acquire();
+    defer held.release();
+
     if (id < MAX_REASSEMBLIES) {
         cache[id].used = false;
     }
@@ -326,6 +332,25 @@ fn removeHole(e: *ReassemblyEntry, idx: usize) void {
         e.holes[idx] = e.holes[last];
     }
     e.hole_count -= 1;
+}
+
+/// Check if a fragment region overlaps with already-filled data
+/// Returns true if ANY part of [start, end) is NOT within a hole (i.e., overlaps filled data)
+fn isRegionOverlapping(e: *const ReassemblyEntry, start: usize, end: usize) bool {
+    // A fragment is NOT overlapping if it fits entirely within at least one hole.
+    // We need to check if the entire region [start, end) is covered by holes.
+
+    // Simple check: if the region fits completely within a single hole, it's not overlapping
+    for (e.holes[0..e.hole_count]) |hole| {
+        if (start >= hole.start and end <= hole.end) {
+            return false; // Entirely within this hole - no overlap
+        }
+    }
+
+    // More complex case: region might span multiple adjacent holes
+    // For simplicity and security, we require the region to fit in ONE hole.
+    // This is stricter than necessary but safer - any partial overlap is rejected.
+    return true; // Region overlaps with filled data
 }
 
 /// Check if reassembly is complete

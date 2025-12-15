@@ -267,30 +267,46 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
     // Set transport layer offset
     
     if (is_reassembled) {
-        // Ensure we free the reassembly entry when done
-        defer reassembly.freeEntry(reassembly_id);
-        
-        // Create a temporary PacketBuffer on stack for the reassembled data
-        // We rely on the reassembly buffer being valid for this scope
-        var virt_pkt = PacketBuffer.init(payload_slice, payload_slice.len);
-        
+        // Security fix: Copy reassembled data to local buffer before freeing entry.
+        // This prevents use-after-free if transport handlers hold references.
+        // Kernel stack is 32KB; 8KB buffer provides safety margin for deeply
+        // nested call chains during packet processing while still supporting
+        // most legitimate reassembled packets (typical MTU is 1500).
+        const MAX_REASSEMBLY_COPY: usize = 8192;
+
+        if (payload_slice.len > MAX_REASSEMBLY_COPY) {
+            // Extremely large reassembled packet - drop it (security measure)
+            reassembly.freeEntry(reassembly_id);
+            return false;
+        }
+
+        // Copy to local buffer before freeing reassembly entry
+        var local_buffer: [MAX_REASSEMBLY_COPY]u8 = undefined;
+        @memcpy(local_buffer[0..payload_slice.len], payload_slice);
+
+        // Now safe to free - data is copied
+        reassembly.freeEntry(reassembly_id);
+
+        // Create PacketBuffer using local copy
+        var virt_pkt = PacketBuffer.init(local_buffer[0..payload_slice.len], payload_slice.len);
+
         // Copy relevant metadata from original packet
         virt_pkt.src_ip = pkt.src_ip;
         virt_pkt.dst_ip = pkt.dst_ip;
-        virt_pkt.src_port = pkt.src_port; 
+        virt_pkt.src_port = pkt.src_port;
         virt_pkt.ip_protocol = ip.protocol;
-        
+
         virt_pkt.eth_offset = 0;
         virt_pkt.ip_offset = 0;
         virt_pkt.transport_offset = 0;
-        
-        // Dispatch
-         switch (ip.protocol) {
-            PROTO_ICMP => return icmp.processPacket(iface, &virt_pkt),
-            PROTO_UDP => return udp.processPacket(iface, &virt_pkt),
-            PROTO_TCP => return tcp.processPacket(iface, &virt_pkt),
-            else => return false,
-        }
+
+        // Dispatch to transport layer
+        return switch (ip.protocol) {
+            PROTO_ICMP => icmp.processPacket(iface, &virt_pkt),
+            PROTO_UDP => udp.processPacket(iface, &virt_pkt),
+            PROTO_TCP => tcp.processPacket(iface, &virt_pkt),
+            else => false,
+        };
     }
 
     // Normal non-fragmented path (using original pkt)
@@ -535,7 +551,19 @@ pub fn getNextId() u16 {
     return @truncate(entropy.getHardwareEntropy());
 }
 
+/// Validate that a netmask has contiguous 1s followed by 0s
+/// Valid examples: 0xFFFFFF00 (255.255.255.0), 0xFFFFFE00 (255.255.254.0)
+/// Invalid examples: 0xFF00FF00 (255.0.255.0), 0x00000000 (0.0.0.0)
+pub fn isValidNetmask(mask: u32) bool {
+    if (mask == 0) return false;
+    const inverted = ~mask;
+    // For a valid contiguous mask, inverted should be (2^n - 1)
+    // i.e., all 1s in low bits. (inverted & (inverted + 1)) == 0 tests this.
+    return (inverted & (inverted +% 1)) == 0;
+}
+
 /// Check if IP is broadcast (all 1s or directed broadcast)
+/// Note: Assumes netmask is valid (contiguous). Use isValidNetmask to verify.
 pub fn isBroadcast(ip: u32, netmask: u32) bool {
     if (ip == 0xFFFFFFFF) {
         return true;

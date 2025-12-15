@@ -138,6 +138,21 @@ pub const Controller = struct {
         });
 
         // Calculate register base addresses
+        // Security: Validate hardware-provided offsets against BAR0 size
+        // to prevent malicious controllers from causing out-of-bounds MMIO access
+        if (caplength >= bar0.size) {
+            console.err("XHCI: Invalid CAPLENGTH {} exceeds BAR0 size {}", .{ caplength, bar0.size });
+            return error.InvalidHardwareConfig;
+        }
+        if (rtsoff >= bar0.size or rtsoff + 0x20 > bar0.size) {
+            console.err("XHCI: Invalid RTSOFF {x} exceeds BAR0 size {x}", .{ rtsoff, bar0.size });
+            return error.InvalidHardwareConfig;
+        }
+        if (dboff >= bar0.size) {
+            console.err("XHCI: Invalid DBOFF {x} exceeds BAR0 size {x}", .{ dboff, bar0.size });
+            return error.InvalidHardwareConfig;
+        }
+
         const op_base = bar0_virt + caplength;
         const runtime_base = bar0_virt + rtsoff;
         const doorbell_base = bar0_virt + dboff;
@@ -279,9 +294,23 @@ pub const Controller = struct {
         console.info("XHCI: Event Ring at physical {x:0>16}", .{self.event_ring.phys_base});
     }
 
+    /// Maximum scratchpad buffers that fit in one page (4096 bytes / 8 bytes per entry)
+    const MAX_SCRATCHPAD_ENTRIES: u16 = 512;
+
     /// Allocate scratchpad buffers
+    /// Security: Validates scratchpad count to prevent heap overflow
     fn allocScratchpads(self: *Self) !void {
         console.info("XHCI: Allocating {} scratchpad buffers", .{self.scratchpad_count});
+
+        // Security: Validate scratchpad count against array capacity
+        // A malicious controller could report an excessive count
+        if (self.scratchpad_count > MAX_SCRATCHPAD_ENTRIES) {
+            console.err("XHCI: Scratchpad count {} exceeds max {} (single page limit)", .{
+                self.scratchpad_count,
+                MAX_SCRATCHPAD_ENTRIES,
+            });
+            return error.InvalidHardwareConfig;
+        }
 
         // Allocate scratchpad buffer array
         const array_phys = pmm.allocZeroedPages(1) orelse return error.OutOfMemory;
@@ -893,13 +922,15 @@ pub const Controller = struct {
 // =============================================================================
 
 /// Global controller reference for interrupt handler
-var global_controller: ?*Controller = null;
+/// Security: Use atomic operations for thread-safe access between probe() and interrupt handler
+var global_controller: std.atomic.Value(?*Controller) = std.atomic.Value(?*Controller).init(null);
 
 /// MSI-X interrupt handler
 fn handleInterrupt(frame: *idt.InterruptFrame) void {
     _ = frame;
 
-    const ctrl = global_controller orelse return;
+    // Security: Atomic load ensures we see a consistent pointer value
+    const ctrl = global_controller.load(.acquire) orelse return;
 
     // Check for pending events
     while (ctrl.event_ring.hasPending()) {
@@ -951,23 +982,36 @@ fn processEvent(ctrl: *Controller, event: *const trb.Trb) void {
             const slot_id = transfer_evt.control.slot_id;
             const ep_id = transfer_evt.control.ep_id;
             const code = transfer_evt.status.completion_code;
+            const residual = transfer_evt.status.trb_transfer_length;
 
             // Find the device for this slot
             if (device.findDevice(slot_id)) |dev| {
                 // Check if this is an interrupt endpoint for keyboard
                 if (ep_id == dev.interrupt_dci and dev.state == .polling) {
-                    // Keyboard report received
+                    // HID report received
                     if (code == .Success or code == .ShortPacket) {
-                        // Parse HID report and inject keystrokes
-                        const report = dev.report_buffer[0..8];
-                        dev.hid_driver.handleInputReport(report);
+                        // Security: Calculate actual bytes received from residual
+                        // Boot protocol requests 8 bytes, residual = bytes NOT transferred
+                        const requested: usize = 8;
+                        const actual_len = if (residual <= requested) requested - residual else 0;
+
+                        // Security: Validate we received enough data for a valid report
+                        // Boot protocol keyboard reports require at least 8 bytes
+                        // Boot protocol mouse reports require at least 3 bytes
+                        const min_report_len: usize = if (dev.hid_driver.is_keyboard) 8 else 3;
+                        if (actual_len >= min_report_len) {
+                            const report = dev.report_buffer[0..actual_len];
+                            dev.hid_driver.handleInputReport(report);
+                        } else {
+                            console.warn("XHCI: Short HID report ({} bytes), ignoring", .{actual_len});
+                        }
                     } else if (code == .StallError) {
-                        console.warn("XHCI: Keyboard endpoint stalled", .{});
+                        console.warn("XHCI: HID endpoint stalled", .{});
                     }
 
                     // Re-queue interrupt transfer for continuous polling
                     transfer.queueInterruptTransfer(ctrl, dev) catch |err| {
-                        console.err("XHCI: Failed to re-queue keyboard transfer: {}", .{err});
+                        console.err("XHCI: Failed to re-queue HID transfer: {}", .{err});
                         dev.state = .err;
                     };
                 } else {
@@ -1036,7 +1080,8 @@ pub fn probe(devices: *const pci.DeviceList, ecam: *const pci.Ecam) void {
             return;
         };
 
-        global_controller = ctrl;
+        // Security: Atomic store ensures interrupt handler sees consistent pointer
+        global_controller.store(ctrl, .release);
 
         // Test with No-Op command
         ctrl.sendNoOp() catch |err| {
@@ -1052,5 +1097,26 @@ pub fn probe(devices: *const pci.DeviceList, ecam: *const pci.Ecam) void {
 
 /// Get the global controller (if initialized)
 pub fn getController() ?*Controller {
-    return global_controller;
+    return global_controller.load(.acquire);
+}
+
+/// Poll for pending XHCI events (software fallback when MSI-X isn't working)
+/// This should be called periodically to process USB events
+/// Returns number of events processed
+pub fn pollEvents() usize {
+    const ctrl = global_controller.load(.acquire) orelse return 0;
+
+    var event_count: usize = 0;
+    while (ctrl.event_ring.hasPending()) {
+        const event = ctrl.event_ring.dequeue() orelse break;
+        event_count += 1;
+        processEvent(ctrl, event);
+    }
+
+    if (event_count > 0) {
+        // Update ERDP after processing
+        ctrl.updateErdp();
+    }
+
+    return event_count;
 }

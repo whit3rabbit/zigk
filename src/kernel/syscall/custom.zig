@@ -13,6 +13,7 @@ const hal = @import("hal");
 const keyboard = @import("keyboard");
 const heap = @import("heap");
 const sched = @import("sched");
+const usb = @import("usb");
 
 const SyscallError = base.SyscallError;
 const UserPtr = base.UserPtr;
@@ -113,9 +114,11 @@ pub fn sys_getchar() SyscallError!usize {
 
 /// sys_read_scancode (1003) - Read raw keyboard scancode (non-blocking)
 pub fn sys_read_scancode() SyscallError!usize {
-    // console.debug("Syscall: read_scancode", .{});
+    // Poll USB events first (fallback for when MSI-X interrupts aren't firing)
+    // This processes any pending HID reports from USB keyboards
+    _ = usb.xhci.pollEvents();
+
     if (keyboard.getScancode()) |scancode| {
-        console.debug("Syscall: read_scancode -> 0x{X:0>2}", .{scancode});
         return scancode;
     }
     // No scancode available

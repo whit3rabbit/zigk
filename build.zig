@@ -268,7 +268,7 @@ pub fn build(b: *std.Build) void {
 
     // Create E1000e driver module (Intel 82574L NIC)
     const e1000e_module = b.createModule(.{
-        .root_source_file = b.path("src/drivers/net/e1000e.zig"),
+        .root_source_file = b.path("src/drivers/net/e1000e/root.zig"),
         .target = kernel_target,
         .optimize = optimize,
     });
@@ -670,6 +670,7 @@ pub fn build(b: *std.Build) void {
     syscall_custom_module.addImport("keyboard", keyboard_module);
     syscall_custom_module.addImport("heap", heap_module);
     syscall_custom_module.addImport("sched", sched_module);
+    syscall_custom_module.addImport("usb", usb_module);
 
     // Create syscall random module
     const syscall_random_module = b.createModule(.{

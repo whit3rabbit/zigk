@@ -64,6 +64,10 @@ const ARP_TIMEOUT: u64 = 1200;
 /// Max retries for incomplete entries
 const ARP_MAX_RETRIES: u8 = 3;
 
+/// Minimum interval between ARP cache updates for same IP (ticks)
+/// Prevents rapid cache poisoning attacks
+const ARP_UPDATE_RATE_LIMIT: u64 = 100; // ~1 second at 100Hz tick rate
+
 /// Global ARP cache list
 var arp_cache: std.ArrayListUnmanaged(ArpEntry) = .{};
 var arp_allocator: std.mem.Allocator = undefined;
@@ -76,13 +80,8 @@ pub fn tick() void {
     current_tick +%= 1;
 }
 
-/// Global ARP lock
-var lock: sync.Lock = sync.noop_lock;
-
-/// Set the lock implementation
-pub fn setLock(l: sync.Lock) void {
-    lock = l;
-}
+/// Global ARP lock - IRQ-safe spinlock for concurrent access protection
+var lock: sync.Spinlock = .{};
 
 /// Initialize ARP subsystem
 pub fn init(allocator: std.mem.Allocator) void {
@@ -92,8 +91,8 @@ pub fn init(allocator: std.mem.Allocator) void {
 
 /// Process an incoming ARP packet
 pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
-    lock.acquire();
-    defer lock.release();
+    const held = lock.acquire();
+    defer held.release();
 
     // Validate ARP packet size
     const arp_offset = packet.ETH_HEADER_SIZE;
@@ -126,6 +125,14 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
     // Learn sender's MAC address (ARP snooping)
     // Only if sender IP is on our subnet
     if (iface.isLocalSubnet(sender_ip)) {
+        // Security: Reject ARP entries claiming to be our own IP address.
+        // This prevents ARP spoofing attacks where an attacker claims our IP
+        // to perform a man-in-the-middle attack on traffic destined for us.
+        if (sender_ip == iface.ip_addr) {
+            // Silently drop - someone is spoofing our IP
+            return false;
+        }
+
         // Cache update failure is non-fatal - peer may still be reachable via
         // explicit ARP request. Silently ignore to avoid log spam in high-traffic scenarios.
         updateCache(iface, sender_ip, arp.sender_mac, .reachable) catch {};
@@ -203,6 +210,13 @@ pub fn sendRequest(iface: *Interface, target_ip: u32) void {
 
 /// Resolve IP to MAC address
 pub fn resolve(ip: u32) ?[6]u8 {
+    const held = lock.acquire();
+    defer held.release();
+    return resolveUnlocked(ip);
+}
+
+/// Internal resolve without locking (caller must hold lock)
+fn resolveUnlocked(ip: u32) ?[6]u8 {
     for (arp_cache.items) |entry| {
         if (entry.state != .free and entry.ip_addr == ip) {
             if (entry.state == .reachable or entry.state == .stale) {
@@ -217,10 +231,11 @@ pub fn resolve(ip: u32) ?[6]u8 {
 pub fn resolveOrRequest(iface: *Interface, ip: u32, pkt_opaque: ?*const anyopaque) ?[6]u8 {
     const pkt: ?*const PacketBuffer = if (pkt_opaque) |p| @ptrCast(@alignCast(p)) else null;
 
-    lock.acquire();
-    defer lock.release();
+    const held = lock.acquire();
+    defer held.release();
 
-    if (resolve(ip)) |mac| {
+    // Use unlocked version since we already hold the lock
+    if (resolveUnlocked(ip)) |mac| {
         return mac;
     }
 
@@ -270,11 +285,41 @@ pub fn resolveOrRequest(iface: *Interface, ip: u32, pkt_opaque: ?*const anyopaqu
     return null;
 }
 
+/// Broadcast MAC address
+const BROADCAST_MAC: [6]u8 = .{ 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+/// Zero MAC address
+const ZERO_MAC: [6]u8 = .{ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+
 /// Update or add an entry to the ARP cache
 fn updateCache(iface: *Interface, ip: u32, mac: [6]u8, state: ArpState) !void {
+    // Security: Reject invalid MAC addresses to prevent cache poisoning
+    // Broadcast MAC should never be cached for unicast traffic
+    if (std.mem.eql(u8, &mac, &BROADCAST_MAC)) {
+        return;
+    }
+    // Zero MAC is invalid for reachable entries
+    if (std.mem.eql(u8, &mac, &ZERO_MAC)) {
+        return;
+    }
+    // Reject multicast MACs (bit 0 of first octet set) for unicast IP entries
+    // Exception: broadcast is already filtered above
+    if ((mac[0] & 0x01) != 0) {
+        return;
+    }
+
     // Look for existing entry
     for (arp_cache.items) |*entry| {
         if (entry.ip_addr == ip) {
+            // Rate limit updates to prevent cache poisoning attacks
+            // Allow updates for incomplete entries (awaiting resolution)
+            if (entry.state != .incomplete) {
+                const time_since_update = current_tick -% entry.timestamp;
+                if (time_since_update < ARP_UPDATE_RATE_LIMIT) {
+                    // Too soon since last update - ignore to prevent rapid poisoning
+                    return;
+                }
+            }
+
             @memcpy(&entry.mac_addr, &mac);
             entry.state = state;
             entry.timestamp = current_tick;
@@ -388,8 +433,8 @@ fn findFreeEntry() !*ArpEntry {
 
 /// Age ARP cache entries
 pub fn ageCache() void {
-    lock.acquire();
-    defer lock.release();
+    const held = lock.acquire();
+    defer held.release();
     var i: usize = 0;
     while (i < arp_cache.items.len) {
         var entry = &arp_cache.items[i];

@@ -241,8 +241,14 @@ fn signExtend(value: u32, size: usize) i32 {
 }
 
 /// Extract a field value from a report buffer at bit-level precision
+/// Security: Validates bit_offset and bit_size from untrusted device data
+/// to prevent out-of-bounds reads and integer overflows.
 fn extractFieldValue(data: []const u8, field: *const HidField) i32 {
-    const byte_offset = field.bit_offset / 8;
+    // Security: Validate bit_size is reasonable (max 32 bits for u32)
+    if (field.bit_size == 0 or field.bit_size > 32) return 0;
+
+    // Security: Use safe cast for byte offset calculation
+    const byte_offset = std.math.cast(usize, field.bit_offset / 8) orelse return 0;
     const bit_shift: u5 = @truncate(field.bit_offset % 8);
 
     if (byte_offset >= data.len) return 0;
@@ -255,11 +261,17 @@ fn extractFieldValue(data: []const u8, field: *const HidField) i32 {
         0;
     const bytes_needed = 1 + (remaining_bits + 7) / 8;
 
+    // Security: Limit bytes_needed to prevent reading too far
+    const safe_bytes_needed = @min(bytes_needed, 4); // Max 4 bytes for u32
+
     // Read bytes (little-endian)
     var raw: u32 = 0;
     var byte_idx: usize = 0;
-    while (byte_idx < bytes_needed and byte_offset + byte_idx < data.len) : (byte_idx += 1) {
-        raw |= @as(u32, data[byte_offset + byte_idx]) << @intCast(byte_idx * 8);
+    while (byte_idx < safe_bytes_needed) : (byte_idx += 1) {
+        // Security: Check bounds before each access
+        const access_offset = std.math.add(usize, byte_offset, byte_idx) catch break;
+        if (access_offset >= data.len) break;
+        raw |= @as(u32, data[access_offset]) << @intCast(byte_idx * 8);
     }
 
     // Shift and mask to extract the field
@@ -315,6 +327,8 @@ pub const HidDriver = struct {
     const Self = @This();
 
     /// Parse HID report descriptor with full state machine
+    /// Security: Validates all length fields from untrusted device data
+    /// to prevent out-of-bounds reads.
     pub fn parseReportDescriptor(self: *Self, data: []const u8) !void {
         var i: usize = 0;
 
@@ -344,9 +358,14 @@ pub const HidDriver = struct {
 
             // Long item (0xFE prefix)
             if (header == 0xFE) {
+                // Security: Long item format is: 0xFE, bDataSize, bLongItemTag, data[bDataSize]
+                // Need at least 2 more bytes for size and tag
                 if (i + 2 > data.len) break;
                 const len = data[i];
-                i += 1 + 2 + len;
+                // Security: Use checked arithmetic to prevent overflow
+                const skip = std.math.add(usize, 2, len) catch break;
+                if (i + skip > data.len) break;
+                i += skip;
                 continue;
             }
 

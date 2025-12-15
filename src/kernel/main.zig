@@ -120,6 +120,10 @@ fn videoScrollWrapper(ctx: ?*anyopaque, lines: usize, up: bool) void {
     }
 }
 
+
+
+
+
 /// Kernel entry point - called by Limine bootloader
 /// Entry point is specified in linker script as _start
 export fn _start() noreturn {
@@ -280,9 +284,19 @@ export fn _start() noreturn {
     input.init();
     console.info("Input subsystem initialized", .{});
 
+
     // Initialize mouse driver and register with HAL
     mouse.init();
     hal.interrupts.setMouseHandler(&mouse.handleIrq);
+
+    // Register Serial (UART) handler
+    hal.interrupts.setSerialHandler(&serial_driver.Serial.handleIrq);
+    // Register UART input callback
+    // serial_driver.Serial.onByteReceived = &uartInputCallback;
+    
+    // Enable Serial IRQ 4 (legacy COM1)
+    hal.apic.enableIrq(4);
+    console.info("Serial IRQ4 enabled", .{});
 
     hal.interrupts.setCrashHandler(panic_lib.handleCrash);
 
@@ -308,6 +322,8 @@ export fn _start() noreturn {
     console.info("  PRNG seeded, stack canary randomized", .{});
     console.info("\n", .{});
     console.info("Kernel initialization complete", .{});
+
+
 
     // Initialize Hardware Subsystems
     init_hw.initNetwork();
