@@ -350,6 +350,10 @@ fn processSynSent(tcb: *Tcb, pkt: *PacketBuffer, tcp_hdr: *TcpHeader) bool {
             // Bad ACK - send RST
             _ = tx.sendRst(tcb);
             tcb.state = .Closed;
+            // Complete pending async connect with failure
+            if (tcb.parent_socket) |sock_idx| {
+                _ = socket.completePendingConnect(sock_idx, false);
+            }
             // Wake thread blocked on connect() with error
             if (tcb.blocked_thread) |thread| {
                 socket.wakeThread(thread);
@@ -413,6 +417,11 @@ fn processSynSent(tcb: *Tcb, pkt: *PacketBuffer, tcp_hdr: *TcpHeader) bool {
     tcb.retrans_timer = 0;
     tcb.retrans_count = 0;
 
+    // Complete pending async connect with success
+    if (tcb.parent_socket) |sock_idx| {
+        _ = socket.completePendingConnect(sock_idx, true);
+    }
+
     // Wake thread blocked on connect()
     if (tcb.blocked_thread) |thread| {
         socket.wakeThread(thread);
@@ -450,6 +459,13 @@ fn processSynReceived(tcb: *Tcb, tcp_hdr: *TcpHeader) bool {
 
     // Add to parent's accept queue and wake blocked accept thread
     if (tcb.parent_socket) |parent_idx| {
+        // First try to complete any pending async accept request
+        // This avoids queueing if an async consumer is waiting
+        if (socket.completePendingAccept(parent_idx, tcb)) {
+            // Async accept completed - don't add to queue
+            return true;
+        }
+
         if (socket.queueAcceptConnection(parent_idx, tcb)) {
             // Successfully queued - wake any thread blocked on accept()
             if (socket.acquireSocket(parent_idx)) |parent_sock| {
@@ -569,14 +585,26 @@ fn processEstablished(tcb: *Tcb, pkt: *PacketBuffer, tcp_hdr: *TcpHeader) bool {
 
         // Only accept in-order data for MVP
         if (seq == tcb.rcv_nxt) {
-            // Copy to receive buffer
-            const space = c.BUFFER_SIZE - tcb.recvBufferAvailable();
-            const copy_len = @min(data_len, space);
-
-            for (0..copy_len) |i| {
-                tcb.recv_buf[tcb.recv_head] = data[i];
-                tcb.recv_head = (tcb.recv_head + 1) % c.BUFFER_SIZE;
+            // First try to deliver to pending async recv (bypasses TCB buffer)
+            var delivered_async = false;
+            if (tcb.parent_socket) |sock_idx| {
+                if (socket.completePendingRecv(sock_idx, data)) {
+                    // Data delivered directly to async consumer
+                    delivered_async = true;
+                }
             }
+
+            // If no async consumer, buffer in TCB
+            const copy_len = if (delivered_async) data_len else blk: {
+                const space = c.BUFFER_SIZE - tcb.recvBufferAvailable();
+                const len = @min(data_len, space);
+
+                for (0..len) |i| {
+                    tcb.recv_buf[tcb.recv_head] = data[i];
+                    tcb.recv_head = (tcb.recv_head + 1) % c.BUFFER_SIZE;
+                }
+                break :blk len;
+            };
 
             // Security: Use checked cast to prevent overflow from large reassembled packets
             const copy_len_u32: u32 = std.math.cast(u32, copy_len) orelse {
@@ -584,8 +612,8 @@ fn processEstablished(tcb: *Tcb, pkt: *PacketBuffer, tcp_hdr: *TcpHeader) bool {
             };
             tcb.rcv_nxt +%= copy_len_u32;
 
-            // Wake thread blocked on recv() if data was copied
-            if (copy_len > 0) {
+            // Wake thread blocked on recv() if data was copied (and not async)
+            if (copy_len > 0 and !delivered_async) {
                 if (tcb.blocked_thread) |thread| {
                     socket.wakeThread(thread);
                     tcb.blocked_thread = null;

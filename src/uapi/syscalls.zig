@@ -411,6 +411,22 @@ pub const SYS_PIPE2: usize = 293;
 pub const SYS_GETRANDOM: usize = 318;
 
 // =============================================================================
+// io_uring Syscalls (425-427)
+// =============================================================================
+
+/// Create an io_uring instance
+/// (entries, params) -> ring_fd
+pub const SYS_IO_URING_SETUP: usize = 425;
+
+/// Submit operations and/or wait for completions
+/// (ring_fd, to_submit, min_complete, flags, sig) -> submitted_count
+pub const SYS_IO_URING_ENTER: usize = 426;
+
+/// Register resources with io_uring
+/// (ring_fd, opcode, arg, nr_args) -> int
+pub const SYS_IO_URING_REGISTER: usize = 427;
+
+// =============================================================================
 // Zscapek Custom Extensions (1000-1999)
 // =============================================================================
 

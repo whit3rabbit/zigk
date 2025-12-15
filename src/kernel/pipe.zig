@@ -15,6 +15,7 @@ const sync = @import("sync");
 const uapi = @import("uapi");
 const console = @import("console");
 const hal = @import("hal");
+const io = @import("io");
 
 const Errno = uapi.errno.Errno;
 
@@ -37,6 +38,10 @@ const Pipe = struct {
     blocked_readers: ?*sched.Thread,
     blocked_writers: ?*sched.Thread,
 
+    // Async I/O support (Phase 2)
+    pending_read: ?*anyopaque, // *IoRequest for async read
+    pending_write: ?*anyopaque, // *IoRequest for async write
+
     pub fn init() Pipe {
         return Pipe{
             .buffer = undefined,
@@ -48,6 +53,8 @@ const Pipe = struct {
             .lock = .{},
             .blocked_readers = null,
             .blocked_writers = null,
+            .pending_read = null,
+            .pending_write = null,
         };
     }
 };
@@ -165,6 +172,32 @@ fn pipeRead(fd: *fd_mod.FileDescriptor, buf: []u8) isize {
 
             pipe.read_pos = (pipe.read_pos + read_len) % PIPE_BUF_SIZE;
             pipe.data_len -= read_len;
+
+            // Complete pending async write if any (buffer space now available)
+            if (pipe.pending_write) |pending| {
+                const request: *io.IoRequest = @ptrCast(@alignCast(pending));
+
+                const space = PIPE_BUF_SIZE - pipe.data_len;
+                if (space > 0) {
+                    pipe.pending_write = null;
+
+                    const data_ptr: [*]const u8 = @ptrFromInt(request.buf_ptr);
+                    const async_to_write = @min(request.buf_len, space);
+
+                    const async_first = @min(async_to_write, PIPE_BUF_SIZE - pipe.write_pos);
+                    @memcpy(pipe.buffer[pipe.write_pos..][0..async_first], data_ptr[0..async_first]);
+
+                    if (async_first < async_to_write) {
+                        const async_second = async_to_write - async_first;
+                        @memcpy(pipe.buffer[0..async_second], data_ptr[async_first..async_to_write]);
+                    }
+
+                    pipe.write_pos = (pipe.write_pos + async_to_write) % PIPE_BUF_SIZE;
+                    pipe.data_len += async_to_write;
+
+                    _ = request.complete(.{ .success = async_to_write });
+                }
+            }
 
             // Wake up writers
             if (pipe.blocked_writers) |t| {
@@ -318,6 +351,29 @@ fn pipeWrite(fd: *fd_mod.FileDescriptor, buf: []const u8) isize {
             pipe.data_len += to_write;
             written += to_write;
 
+            // Complete pending async read if any
+            if (pipe.pending_read) |pending| {
+                const request: *io.IoRequest = @ptrCast(@alignCast(pending));
+                pipe.pending_read = null;
+
+                // Read data for async consumer
+                const async_read_len = @min(request.buf_len, pipe.data_len);
+                const async_buf_ptr: [*]u8 = @ptrFromInt(request.buf_ptr);
+
+                const async_first = @min(async_read_len, PIPE_BUF_SIZE - pipe.read_pos);
+                @memcpy(async_buf_ptr[0..async_first], pipe.buffer[pipe.read_pos..][0..async_first]);
+
+                if (async_first < async_read_len) {
+                    const async_second = async_read_len - async_first;
+                    @memcpy(async_buf_ptr[async_first..async_read_len], pipe.buffer[0..async_second]);
+                }
+
+                pipe.read_pos = (pipe.read_pos + async_read_len) % PIPE_BUF_SIZE;
+                pipe.data_len -= async_read_len;
+
+                _ = request.complete(.{ .success = async_read_len });
+            }
+
             // Wake up readers
             if (pipe.blocked_readers) |t| {
                 pipe.blocked_readers = null;
@@ -364,6 +420,12 @@ fn pipeClose(fd: *fd_mod.FileDescriptor) isize {
 
     if (handle.end == .Read) {
         pipe.readers -= 1;
+        // Complete pending async write with EPIPE
+        if (pipe.pending_write) |pending| {
+            const request: *io.IoRequest = @ptrCast(@alignCast(pending));
+            pipe.pending_write = null;
+            _ = request.complete(.{ .err = error.EPIPE });
+        }
         // Wake up writers so they see EPIPE
         if (pipe.blocked_writers) |t| {
             pipe.blocked_writers = null;
@@ -371,6 +433,12 @@ fn pipeClose(fd: *fd_mod.FileDescriptor) isize {
         }
     } else {
         pipe.writers -= 1;
+        // Complete pending async read with EOF (0 bytes)
+        if (pipe.pending_read) |pending| {
+            const request: *io.IoRequest = @ptrCast(@alignCast(pending));
+            pipe.pending_read = null;
+            _ = request.complete(.{ .success = 0 }); // EOF
+        }
         // Wake up readers so they see EOF
         if (pipe.blocked_readers) |t| {
             pipe.blocked_readers = null;
@@ -387,4 +455,102 @@ fn pipeClose(fd: *fd_mod.FileDescriptor) isize {
 
     alloc.destroy(handle);
     return 0;
+}
+
+// =============================================================================
+// Async Pipe API (Phase 2)
+// =============================================================================
+
+const IoRequest = io.IoRequest;
+
+/// Async pipe read - queue request for incoming data
+/// Returns true if completed synchronously, false if pending
+pub fn readAsync(fd: *fd_mod.FileDescriptor, request: *IoRequest, buf: []u8) !bool {
+    const handle: *PipeHandle = @ptrCast(@alignCast(fd.private_data));
+    if (handle.end != .Read) return error.EBADF;
+
+    const pipe = handle.pipe;
+    const held = pipe.lock.acquire();
+    defer held.release();
+
+    // If data available, read it
+    if (pipe.data_len > 0) {
+        const read_len = @min(buf.len, pipe.data_len);
+
+        const first_chunk = @min(read_len, PIPE_BUF_SIZE - pipe.read_pos);
+        @memcpy(buf[0..first_chunk], pipe.buffer[pipe.read_pos..][0..first_chunk]);
+
+        if (first_chunk < read_len) {
+            const second_chunk = read_len - first_chunk;
+            @memcpy(buf[first_chunk..read_len], pipe.buffer[0..second_chunk]);
+        }
+
+        pipe.read_pos = (pipe.read_pos + read_len) % PIPE_BUF_SIZE;
+        pipe.data_len -= read_len;
+
+        _ = request.complete(.{ .success = read_len });
+        return true;
+    }
+
+    // No data - check if writers gone (EOF)
+    if (pipe.writers == 0) {
+        _ = request.complete(.{ .success = 0 }); // EOF
+        return true;
+    }
+
+    // Queue async request
+    if (pipe.pending_read != null) {
+        return error.EAGAIN; // Already have pending read
+    }
+
+    pipe.pending_read = request;
+    request.buf_ptr = @intFromPtr(buf.ptr);
+    request.buf_len = buf.len;
+    return false; // Pending
+}
+
+/// Async pipe write - queue request for buffer space
+/// Returns true if completed synchronously, false if pending
+pub fn writeAsync(fd: *fd_mod.FileDescriptor, request: *IoRequest, buf: []const u8) !bool {
+    const handle: *PipeHandle = @ptrCast(@alignCast(fd.private_data));
+    if (handle.end != .Write) return error.EBADF;
+
+    const pipe = handle.pipe;
+    const held = pipe.lock.acquire();
+    defer held.release();
+
+    // Check if readers exist
+    if (pipe.readers == 0) {
+        _ = request.complete(.{ .err = error.EPIPE });
+        return true;
+    }
+
+    const space = PIPE_BUF_SIZE - pipe.data_len;
+    if (space > 0) {
+        const to_write = @min(buf.len, space);
+
+        const first_chunk = @min(to_write, PIPE_BUF_SIZE - pipe.write_pos);
+        @memcpy(pipe.buffer[pipe.write_pos..][0..first_chunk], buf[0..first_chunk]);
+
+        if (first_chunk < to_write) {
+            const second_chunk = to_write - first_chunk;
+            @memcpy(pipe.buffer[0..second_chunk], buf[first_chunk..to_write]);
+        }
+
+        pipe.write_pos = (pipe.write_pos + to_write) % PIPE_BUF_SIZE;
+        pipe.data_len += to_write;
+
+        _ = request.complete(.{ .success = to_write });
+        return true;
+    }
+
+    // Buffer full - queue async request
+    if (pipe.pending_write != null) {
+        return error.EAGAIN; // Already have pending write
+    }
+
+    pipe.pending_write = request;
+    request.buf_ptr = @intFromPtr(buf.ptr);
+    request.buf_len = buf.len;
+    return false; // Pending
 }

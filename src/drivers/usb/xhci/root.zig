@@ -293,7 +293,7 @@ pub const Controller = struct {
 
         // Set ERDP (Event Ring Dequeue Pointer)
         const erdp = regs.Erdp.init(self.event_ring.getDequeuePointer(), 0);
-        intr_dev.writeTyped(.erdp, erdp);
+        intr_dev.writeTyped64(.erdp, erdp);
 
         // Set ERSTBA (Event Ring Segment Table Base Address)
         intr_dev.write64(.erstba, self.event_ring.getErstBase());

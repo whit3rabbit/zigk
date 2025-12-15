@@ -5,6 +5,7 @@ const ipv4 = @import("ipv4/root.zig");
 pub const transport = @import("transport/root.zig");
 const dns = @import("dns/root.zig");
 pub const loopback = @import("loopback.zig");
+const io = @import("io");
 
 // Re-export key types from core
 pub const PacketBuffer = core.PacketBuffer;
@@ -59,4 +60,7 @@ pub fn processFrame(iface: *Interface, pkt: *PacketBuffer) bool {
 pub fn tick() void {
     ipv4.arp.tick();
     transport.tcp.tick();
+
+    // Process async I/O timer expirations (Phase 2)
+    io.timerTick();
 }

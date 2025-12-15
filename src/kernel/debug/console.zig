@@ -78,23 +78,55 @@ pub fn disableGraphicalBackend() void {
 }
 
 /// Print a formatted string to the debug console
-/// Note: In freestanding mode, we implement a minimal formatter
+/// Uses a fixed buffer for formatting - suitable for kernel debug output
 pub fn printf(comptime fmt: []const u8, args: anytype) void {
-    std.fmt.format(writer, fmt, args) catch {};
+    // Use a generous buffer for kernel debug messages
+    var buf: [2048]u8 = undefined;
+    const result = std.fmt.bufPrint(&buf, fmt, args) catch |fmt_err| {
+        // On error, print what we can
+        switch (fmt_err) {
+            error.NoSpaceLeft => {
+                print(buf[0..]);
+                print("[TRUNCATED]");
+                return;
+            },
+        }
+    };
+    print(result);
 }
 
 /// Writer interface for compatibility with std patterns
-const ConsoleRawWriter = struct {
+/// Custom implementation that doesn't depend on std.io (unavailable in freestanding)
+pub const Writer = struct {
     pub const Error = error{};
-    pub fn write(self: ConsoleRawWriter, bytes: []const u8) Error!usize {
-        _ = self;
+
+    pub fn write(_: Writer, bytes: []const u8) Error!usize {
         print(bytes);
         return bytes.len;
+    }
+
+    pub fn writeAll(_: Writer, bytes: []const u8) Error!void {
+        print(bytes);
+    }
+
+    pub fn writeByte(_: Writer, byte: u8) Error!void {
+        print(&[_]u8{byte});
+    }
+
+    pub fn writeByteNTimes(_: Writer, byte: u8, n: usize) Error!void {
+        var i: usize = 0;
+        while (i < n) : (i += 1) {
+            print(&[_]u8{byte});
+        }
+    }
+
+    pub fn printFmt(_: Writer, comptime fmt: []const u8, args: anytype) Error!void {
+        printf(fmt, args);
     }
 };
 
 /// Global writer instance
-pub const writer = std.io.GenericWriter(ConsoleRawWriter, ConsoleRawWriter.Error, ConsoleRawWriter.write){ .context = ConsoleRawWriter{} };
+pub const writer = Writer{};
 
 /// Log levels for structured logging
 pub const LogLevel = enum {

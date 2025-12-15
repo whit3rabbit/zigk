@@ -162,8 +162,6 @@ pub fn build(b: *std.Build) void {
     heap_module.addImport("config", config_module);
     heap_module.addImport("sync", sync_module);
 
-
-
     // Create Network Stack module (full stack: core, ethernet, ipv4, transport)
     const net_module = b.createModule(.{
         .root_source_file = b.path("src/net/root.zig"),
@@ -176,6 +174,7 @@ pub fn build(b: *std.Build) void {
     net_module.addImport("console", console_module);
     net_module.addImport("sync", sync_module);
     net_module.addImport("heap", heap_module);
+    // Note: io module added later after sched_module is defined
 
     // heap_module moved up
 
@@ -243,6 +242,20 @@ pub fn build(b: *std.Build) void {
     hal_module.addImport("sched", sched_module);
     hal_module.addImport("pmm", pmm_module);
     hal_module.addImport("vmm", vmm_module);
+
+    // Create Kernel Async I/O module (reactor, request pool, futures)
+    const kernel_io_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/io/root.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    kernel_io_module.addImport("sync", sync_module);
+    kernel_io_module.addImport("uapi", uapi_module);
+    kernel_io_module.addImport("sched", sched_module);
+    kernel_io_module.addImport("thread", thread_module);
+
+    // Wire io module into net (deferred from earlier due to dependency order)
+    net_module.addImport("io", kernel_io_module);
 
     // Create Stack Guard module (stack canary support)
     const stack_guard_module = b.createModule(.{
@@ -357,6 +370,7 @@ pub fn build(b: *std.Build) void {
     keyboard_module.addImport("uapi", uapi_module);
     keyboard_module.addImport("sched", sched_module);
     keyboard_module.addImport("thread", thread_module);
+    keyboard_module.addImport("io", kernel_io_module);
 
     // Create Serial driver module
     const serial_module = b.createModule(.{
@@ -529,6 +543,7 @@ pub fn build(b: *std.Build) void {
     pipe_module.addImport("uapi", uapi_module);
     pipe_module.addImport("console", console_module);
     pipe_module.addImport("hal", hal_module);
+    pipe_module.addImport("io", kernel_io_module);
 
     // Create Signal module
     const signal_module = b.createModule(.{
@@ -708,6 +723,24 @@ pub fn build(b: *std.Build) void {
     syscall_net_module.addImport("heap", heap_module);
     syscall_net_module.addImport("fd", fd_module);
 
+    // Create syscall io_uring module (async I/O syscalls)
+    const syscall_io_uring_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/syscall/io_uring.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    syscall_io_uring_module.addImport("uapi", uapi_module);
+    syscall_io_uring_module.addImport("io", kernel_io_module);
+    syscall_io_uring_module.addImport("user_mem", user_mem_module);
+    syscall_io_uring_module.addImport("fd", fd_module);
+    syscall_io_uring_module.addImport("sched", sched_module);
+    syscall_io_uring_module.addImport("hal", hal_module);
+    syscall_io_uring_module.addImport("heap", heap_module);
+    syscall_io_uring_module.addImport("base.zig", syscall_base_module);
+    syscall_io_uring_module.addImport("net", net_module);
+    syscall_io_uring_module.addImport("pipe", pipe_module);
+    syscall_io_uring_module.addImport("keyboard", keyboard_module);
+
     // Create syscall dispatch table module
     const syscall_table_module = b.createModule(.{
         .root_source_file = b.path("src/kernel/syscall/table.zig"),
@@ -730,6 +763,7 @@ pub fn build(b: *std.Build) void {
     syscall_table_module.addImport("net.zig", syscall_net_module);
     syscall_table_module.addImport("random.zig", syscall_random_module);
     syscall_table_module.addImport("input.zig", syscall_input_module);
+    syscall_table_module.addImport("io_uring.zig", syscall_io_uring_module);
 
     // Create kernel executable
     // NOTE: red_zone must be disabled for kernel code to prevent stack corruption
@@ -795,6 +829,7 @@ pub fn build(b: *std.Build) void {
     kernel.root_module.addImport("signal", signal_module);
     kernel.root_module.addImport("devfs", devfs_module);
     kernel.root_module.addImport("fd", fd_module);
+    kernel.root_module.addImport("io", kernel_io_module);
 
     // Add assembly helpers for x86_64 (ISR stubs, lgdt, lidt)
     kernel.addAssemblyFile(b.path("src/arch/x86_64/asm_helpers.S"));

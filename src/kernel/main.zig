@@ -26,6 +26,7 @@ const framebuffer = @import("framebuffer");
 const acpi = @import("acpi");
 const serial_driver = @import("serial_driver");
 const video_driver = @import("video_driver");
+const io = @import("io");
 
 // New modules
 const boot = @import("boot.zig");
@@ -302,6 +303,10 @@ export fn _start() noreturn {
 
     // Initialize scheduler
     sched.init();
+
+    // Initialize async I/O reactor (Phase 2)
+    io.initGlobal();
+    console.info("Async I/O reactor initialized", .{});
 
     // Initialize signal handling subsystem
     const signal = @import("signal");

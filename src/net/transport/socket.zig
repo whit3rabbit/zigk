@@ -75,6 +75,16 @@ pub const queueAcceptConnection = root.queueAcceptConnection;
 pub const tcpSend = root.tcpSend;
 pub const tcpRecv = root.tcpRecv;
 
+// TCP async path (Phase 2)
+pub const acceptAsync = root.acceptAsync;
+pub const recvAsync = root.recvAsync;
+pub const sendAsync = root.sendAsync;
+pub const connectAsync = root.connectAsync;
+pub const completePendingAccept = root.completePendingAccept;
+pub const completePendingRecv = root.completePendingRecv;
+pub const completePendingConnect = root.completePendingConnect;
+pub const completePendingSend = root.completePendingSend;
+
 // Options
 pub const setsockopt = root.setsockopt;
 pub const getsockopt = root.getsockopt;

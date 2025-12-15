@@ -113,7 +113,25 @@ pub const Socket = struct {
     /// Thread blocked waiting on this socket (for accept/recv)
     /// Set by syscall layer, woken by packet processing
     blocked_thread: scheduler.ThreadPtr,
-    
+
+    // =========================================================================
+    // Async I/O Pending Requests (Phase 2)
+    // =========================================================================
+    // These are set when an async operation is submitted via io_uring or
+    // the internal KernelIo API. Completed by packet processing or state changes.
+
+    /// Pending accept request (waiting for incoming connection)
+    pending_accept: ?*anyopaque,
+
+    /// Pending recv request (waiting for incoming data)
+    pending_recv: ?*anyopaque,
+
+    /// Pending send request (waiting for buffer space)
+    pending_send: ?*anyopaque,
+
+    /// Pending connect request (waiting for handshake completion)
+    pending_connect: ?*anyopaque,
+
     /// Per-socket lock for protecting RX queue and state
     lock: sync.Spinlock,
 
@@ -182,6 +200,10 @@ pub const Socket = struct {
             .shutdown_read = false,
             .shutdown_write = false,
             .blocked_thread = null,
+            .pending_accept = null,
+            .pending_recv = null,
+            .pending_send = null,
+            .pending_connect = null,
             .lock = .{},
             .refcount = 0,
             .closing = false,

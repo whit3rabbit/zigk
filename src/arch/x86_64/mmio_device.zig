@@ -97,6 +97,10 @@ pub fn MmioDevice(comptime RegisterMap: type) type {
             self.write(reg, @bitCast(value));
         }
 
+        // Aliases for explicit 32-bit access (for code clarity)
+        pub const read32 = read;
+        pub const write32 = write;
+
         // =====================================================================
         // Other Register Sizes
         // =====================================================================
@@ -121,6 +125,29 @@ pub fn MmioDevice(comptime RegisterMap: type) type {
                 }
             }
             mmio.write64(self.base + offset, value);
+        }
+
+        /// Read and cast to a typed packed struct with u64 backing.
+        pub inline fn readTyped64(self: Self, comptime reg: RegisterMap, comptime T: type) T {
+            comptime {
+                const info = @typeInfo(T);
+                if (info != .@"struct" or info.@"struct".backing_integer != u64) {
+                    @compileError("readTyped64 requires packed struct(u64), got " ++ @typeName(T));
+                }
+            }
+            return @bitCast(self.read64(reg));
+        }
+
+        /// Write from a typed packed struct with u64 backing.
+        pub inline fn writeTyped64(self: Self, comptime reg: RegisterMap, value: anytype) void {
+            const T = @TypeOf(value);
+            comptime {
+                const info = @typeInfo(T);
+                if (info != .@"struct" or info.@"struct".backing_integer != u64) {
+                    @compileError("writeTyped64 requires packed struct(u64), got " ++ @typeName(T));
+                }
+            }
+            self.write64(reg, @bitCast(value));
         }
 
         /// Read a 16-bit register by name.

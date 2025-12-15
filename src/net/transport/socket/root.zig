@@ -80,6 +80,16 @@ pub const queueAcceptConnection = tcp_api.queueAcceptConnection;
 pub const tcpSend = tcp_api.tcpSend;
 pub const tcpRecv = tcp_api.tcpRecv;
 
+// TCP async path (Phase 2)
+pub const acceptAsync = tcp_api.acceptAsync;
+pub const recvAsync = tcp_api.recvAsync;
+pub const sendAsync = tcp_api.sendAsync;
+pub const connectAsync = tcp_api.connectAsync;
+pub const completePendingAccept = tcp_api.completePendingAccept;
+pub const completePendingRecv = tcp_api.completePendingRecv;
+pub const completePendingConnect = tcp_api.completePendingConnect;
+pub const completePendingSend = tcp_api.completePendingSend;
+
 // Options
 pub const setsockopt = options.setsockopt;
 pub const getsockopt = options.getsockopt;

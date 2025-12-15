@@ -1,21 +1,10 @@
 # Architecture Pivot: Monolithic to Microkernel
 
-## Current State Assessment
-
-You have built a feature-rich **Monolithic Kernel** with:
-- TCP/IP stack
-- AHCI driver
-- E1000e NIC driver
-- Virtual File System
-- Doom running in userland
-
-**Gap Analysis:** The stated goals (Microkernel, Async I/O, Zero-cost abstractions) diverge from the current implementation.
-
 | Goal | Status |
 |------|--------|
 | Zero-Cost HAL (comptime) | **Done** - MmioDevice wrapper with comptime offsets |
 | Capabilities-Based Microkernel | Not implemented - drivers in kernel space |
-| Asynchronous I/O | Not implemented - blocking syscalls |
+| Asynchronous I/O | **Done** - io_uring syscalls, reactor pattern, timer wheel |
 | Safe Unsafe Code | Well implemented - UserPtr, error handling, copyStructFromUser |
 
 ---
@@ -41,7 +30,7 @@ jmpq *-0x7ff8dd18(,%rax,8)  ; Jump table dispatch
 
 - [x] Add `copyStructFromUser(T, ptr)` generic wrapper
 - [x] Add `copyStructToUser(T, ptr, value)` generic wrapper
-- [ ] Audit existing `copyFromUser` calls for migration
+- [x] Audit existing `copyFromUser` calls for migration
 
 **Implementation:**
 ```zig
@@ -74,6 +63,11 @@ Refactored MMIO and driver definitions to use comptime generation.
   - Replaced `readReg(self, Reg.TCTL)` with `self.regs.read(.tctl)`
   - Updated `root.zig`, `rx.zig`, `tx.zig` to use MmioDevice
 
+- [x] **Refactored USB drivers** (`src/drivers/usb/`)
+  - Updated XHCI and EHCI to use `MmioDevice`
+- [x] **Refactored AHCI driver** (`src/drivers/storage/ahci/`)
+  - Updated port and root controllers to use `MmioDevice`
+
 **New API:**
 ```zig
 const Reg = enum(u64) { ctrl = 0x0000, status = 0x0008, ... };
@@ -87,24 +81,45 @@ const ctrl = self.regs.readTyped(.ctrl, DeviceCtl);
 
 ---
 
-## Phase 2: Async System Calls (The Reactor)
+## Phase 2: Async System Calls (The Reactor) - COMPLETE
 
-Move away from `sched.block()` inside syscalls to io_uring-style async.
+Implemented io_uring-style async I/O with internal KernelIo interface.
 
-### Tasks
+See [docs/ASYNC.md](docs/ASYNC.md) for detailed documentation.
 
-- [ ] **Define ring buffer structures** in `src/uapi/io_ring.zig`
-  - User -> Kernel submission queue
-  - Kernel -> User completion queue
+### Completed Tasks
 
-- [ ] **Implement `sys_submit_io` syscall**
-  - Takes ring index, returns immediately
-  - Add to `src/kernel/syscall/io.zig`
+- [x] **Core Infrastructure** (`src/kernel/io/`)
+  - `types.zig` - IoRequest state machine, Future handle, IoResult union
+  - `pool.zig` - Fixed-size request pool (256 concurrent operations)
+  - `reactor.zig` - Global reactor singleton with timer management
+  - `timer.zig` - Hierarchical 3-level timer wheel (1ms/256ms/65536ms)
 
-- [ ] **Refactor socket read path** (`src/net/transport/socket.zig`)
-  - Return `error.WouldBlock` instead of blocking
-  - Store continuation (request ID) in socket structure
-  - On interrupt (`rx.zig`): push completion event instead of `sched.unblock()`
+- [x] **UAPI Structures** (`src/uapi/io_ring.zig`)
+  - Linux-compatible SQE (64 bytes) and CQE (16 bytes)
+  - IoUringParams for setup syscall
+  - Operation codes: NOP, READ, WRITE, ACCEPT, CONNECT, RECV, SEND, TIMEOUT
+
+- [x] **io_uring Syscalls** (`src/kernel/syscall/io_uring.zig`)
+  - `sys_io_uring_setup` (425) - Create io_uring instance
+  - `sys_io_uring_enter` (426) - Submit SQEs, wait for CQEs
+  - `sys_io_uring_register` (427) - Resource registration (stub)
+
+- [x] **Socket Async API** (`src/net/transport/socket/tcp_api.zig`)
+  - `acceptAsync`, `connectAsync`, `recvAsync`, `sendAsync`
+  - Completion hooks in `tcp/rx.zig` for TCP handshake and data receive
+
+- [x] **Pipe Async Support** (`src/kernel/pipe.zig`)
+  - `readAsync`, `writeAsync` functions
+  - Completion on data transfer
+
+- [x] **Keyboard Async Support** (`src/drivers/keyboard.zig`)
+  - `getCharAsync` function
+  - IRQ handler completes pending requests
+
+- [x] **Integration**
+  - Reactor initialized in `src/kernel/main.zig`
+  - Timer tick registered via `net.tick()` -> `io.timerTick()`
 
 ---
 
@@ -126,6 +141,25 @@ Move one driver to userspace to prove the concept. Start with UART (easiest).
   - Move `src/drivers/serial/uart.zig` logic to `src/user/drivers/uart/main.zig`
   - Kernel `sys_write` to stdout sends IPC to UART driver process
   - UART driver waits for IPC, writes to I/O port, waits for interrupt
+
+---
+
+## Phase 2.5: Async Expansion (Post-Phase 2 Refinements)
+
+Expand async I/O beyond networking to other subsystems.
+
+- [ ] **Generic File I/O**
+  - Update `IORING_OP_READ`/`WRITE` to dispatch based on FD type
+  - Implement `fs.readAsync` and `fs.writeAsync`
+
+- [ ] **Storage Async**
+  - Implement async read/write for AHCI driver
+  - Expose via `fs` layer for true async disk I/O
+
+- [ ] **Mouse Async**
+  - Implement `getEventAsync` in `src/drivers/mouse.zig`
+  - Add `IORING_OP_READ` support for mouse fd
+
 
 ---
 
@@ -154,15 +188,6 @@ Replace Limine with custom Zig UEFI app to fully showcase Zig capabilities.
 
 1. ~~**Immediate:** Syscall dispatch + user_mem generics~~ **DONE**
 2. ~~**Phase 1:** Zero-cost HAL~~ **DONE**
-3. **Phase 2:** Async I/O (major architectural shift, high impact)
+3. ~~**Phase 2:** Async I/O (major architectural shift, high impact)~~ **DONE**
 4. **Phase 3:** Microkernel transition (proves the architecture)
 5. **Phase 4:** UEFI loader (optional, "flex" feature)
-
----
-
-## Future Improvements (from Phase 1)
-
-Other drivers that could benefit from MmioDevice refactoring:
-- XHCI/EHCI USB controllers (currently duplicate readReg/writeReg patterns)
-- AHCI storage controller
-- Any new MMIO-based drivers

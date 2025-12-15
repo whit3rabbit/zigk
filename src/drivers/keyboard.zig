@@ -25,6 +25,7 @@ const console = @import("console");
 const uapi = @import("uapi");
 const sched = @import("sched");
 const thread_mod = @import("thread");
+const io = @import("io");
 const layout_mod = @import("input/layout.zig");
 const us_layout = @import("input/layouts/us.zig");
 const dvorak_layout = @import("input/layouts/dvorak.zig");
@@ -242,6 +243,10 @@ pub const KeyboardState = struct {
 
     /// Thread blocked waiting for keyboard input (for blocking reads)
     blocked_thread: ?*thread_mod.Thread = null,
+
+    /// Pending async read request (Phase 2 async I/O)
+    /// Type-erased to avoid cyclic dependency; cast to *io.IoRequest when used
+    pending_read: ?*anyopaque = null,
 
     comptime {
         // Warn if struct exceeds reasonable size (not a hard error)
@@ -496,6 +501,31 @@ pub fn handleIrq() void {
     // Process scancode for ASCII translation and event generation
     processScancode(scancode);
 
+    // Complete pending async read request if one exists (Phase 2)
+    // Takes priority over blocking thread since async is explicit
+    if (keyboard_state.pending_read) |pending_ptr| {
+        if (!keyboard_state.ascii_buffer.isEmpty()) {
+            const request: *io.IoRequest = @ptrCast(@alignCast(pending_ptr));
+            keyboard_state.pending_read = null;
+
+            // Pop character and copy to user buffer
+            if (keyboard_state.ascii_buffer.pop()) |c| {
+                // If request has a buffer, copy character there
+                if (request.buf_ptr != 0 and request.buf_len > 0) {
+                    const user_buf: [*]u8 = @ptrFromInt(request.buf_ptr);
+                    user_buf[0] = c;
+                    _ = request.complete(.{ .success = 1 });
+                } else {
+                    // No buffer - return character as result value
+                    _ = request.complete(.{ .success = @as(usize, c) });
+                }
+            }
+
+            held.release();
+            return;
+        }
+    }
+
     // Wake any thread blocked waiting for input
     // Only wake if we added a printable character (ascii_buffer not empty)
     if (keyboard_state.blocked_thread) |blocked| {
@@ -744,6 +774,72 @@ pub fn getCharBlockingTimeout(timeout_ticks: ?u64) ?u8 {
 pub fn getCharBlocking() u8 {
     // Infinite timeout - will always return a character
     return getCharBlockingTimeout(null).?;
+}
+
+/// Queue an async read request for keyboard input (Phase 2 async I/O)
+///
+/// If a character is immediately available, completes the request synchronously.
+/// Otherwise, queues the request to be completed when the next keypress arrives.
+///
+/// Returns:
+///   - true if request was queued (will complete later via IRQ)
+///   - false if completed immediately (check request.result)
+///
+/// The request.buf_ptr/buf_len can optionally specify a user buffer.
+/// If provided, the character will be copied there. Otherwise,
+/// the character value is returned in request.result.success.
+pub fn getCharAsync(request: *io.IoRequest) bool {
+    const held = keyboard_lock.acquire();
+
+    // Check if a character is immediately available
+    if (keyboard_state.ascii_buffer.pop()) |c| {
+        // Complete immediately
+        if (request.buf_ptr != 0 and request.buf_len > 0) {
+            const user_buf: [*]u8 = @ptrFromInt(request.buf_ptr);
+            user_buf[0] = c;
+            _ = request.complete(.{ .success = 1 });
+        } else {
+            _ = request.complete(.{ .success = @as(usize, c) });
+        }
+        held.release();
+        return false; // Completed immediately
+    }
+
+    // No character available - queue the request
+    // Transition from idle to pending
+    if (!request.compareAndSwapState(.idle, .pending)) {
+        // Request not in idle state - fail
+        _ = request.complete(.{ .err = error.EINVAL });
+        held.release();
+        return false;
+    }
+
+    // If there's already a pending request, fail this one
+    if (keyboard_state.pending_read != null) {
+        _ = request.complete(.{ .err = error.EBUSY });
+        held.release();
+        return false;
+    }
+
+    keyboard_state.pending_read = request;
+    held.release();
+    return true; // Queued for later completion
+}
+
+/// Cancel a pending async keyboard read request
+/// Returns true if the request was cancelled, false if not found or already complete
+pub fn cancelPendingRead(request: *io.IoRequest) bool {
+    const held = keyboard_lock.acquire();
+    defer held.release();
+
+    if (keyboard_state.pending_read) |pending_ptr| {
+        const pending: *io.IoRequest = @ptrCast(@alignCast(pending_ptr));
+        if (pending == request) {
+            keyboard_state.pending_read = null;
+            return request.cancel();
+        }
+    }
+    return false;
 }
 
 /// Get a KeyEvent from the event buffer (non-blocking)

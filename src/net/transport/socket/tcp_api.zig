@@ -193,6 +193,10 @@ pub fn connect(sock_fd: usize, dest_addr: *const types.SockAddrIn) errors.Socket
 
     sock.tcb = tcb;
 
+    // Store socket index in TCB for async completion lookup
+    // This reuses parent_socket field (also used for server-side accept queue)
+    tcb.parent_socket = sock_fd;
+
     // Copy socket options to TCB
     tcb.tos = sock.tos;
 
@@ -336,4 +340,301 @@ pub fn tcpRecv(sock_fd: usize, buf: []u8) errors.SocketError!usize {
             else => errors.SocketError.NetworkUnreachable,
         };
     };
+}
+
+// =============================================================================
+// Async API (Phase 2)
+// =============================================================================
+// These functions integrate with the KernelIo reactor for async operations.
+// Instead of blocking, they set pending_* fields on the socket and return
+// immediately. The request is completed by IRQ handlers when data arrives.
+//
+// Pattern:
+//   1. Check if operation can complete synchronously (data available)
+//   2. If yes: complete request immediately, return true
+//   3. If no: store request pointer in socket, return false (pending)
+//   4. IRQ handler checks pending_* and completes when data arrives
+
+const io = @import("io");
+const IoRequest = io.IoRequest;
+const IoResult = io.IoResult;
+
+/// Async accept - queue request for incoming connection
+/// Returns true if completed synchronously, false if pending
+pub fn acceptAsync(sock_fd: usize, request: *IoRequest) errors.SocketError!bool {
+    const sock = state.acquireSocket(sock_fd) orelse return errors.SocketError.BadFd;
+    defer state.releaseSocket(sock);
+
+    // Must be SOCK_STREAM and listening
+    if (sock.sock_type != types.SOCK_STREAM) {
+        return errors.SocketError.TypeNotSupported;
+    }
+    if (sock.tcb == null or sock.tcb.?.state != .Listen) {
+        return errors.SocketError.InvalidArg;
+    }
+
+    // Check if connection already available
+    tcp_state.lock.acquire();
+    defer tcp_state.lock.release();
+
+    if (sock.accept_count > 0) {
+        // Connection available - complete synchronously
+        const tcb = sock.accept_queue[sock.accept_tail] orelse {
+            return errors.SocketError.SystemError;
+        };
+        sock.accept_queue[sock.accept_tail] = null;
+        sock.accept_tail = (sock.accept_tail + 1) % types.ACCEPT_QUEUE_SIZE;
+        sock.accept_count -= 1;
+
+        // Allocate new socket for connection
+        const new_sock_fd = @import("lifecycle.zig").socket(types.AF_INET, types.SOCK_STREAM, 0) catch {
+            tcp.close(tcb);
+            _ = request.complete(.{ .err = error.ENOMEM });
+            return true; // Completed (with error)
+        };
+
+        const new_sock = state.getSocket(new_sock_fd) orelse {
+            tcp.close(tcb);
+            _ = request.complete(.{ .err = error.EFAULT });
+            return true;
+        };
+        new_sock.tcb = tcb;
+        new_sock.local_port = tcb.local_port;
+        new_sock.local_addr = tcb.local_ip;
+
+        // Complete with new fd
+        _ = request.complete(.{ .success = new_sock_fd });
+        return true;
+    }
+
+    // No connection available - store pending request
+    if (sock.pending_accept != null) {
+        // Already have a pending accept
+        return errors.SocketError.WouldBlock;
+    }
+
+    sock.pending_accept = request;
+    request.fd = @intCast(sock_fd);
+    return false; // Pending
+}
+
+/// Async recv - queue request for incoming data
+/// Returns true if completed synchronously, false if pending
+pub fn recvAsync(sock_fd: usize, request: *IoRequest, buf: []u8) errors.SocketError!bool {
+    const sock = state.acquireSocket(sock_fd) orelse return errors.SocketError.BadFd;
+    defer state.releaseSocket(sock);
+
+    if (sock.sock_type != types.SOCK_STREAM) {
+        return errors.SocketError.TypeNotSupported;
+    }
+
+    const tcb = sock.tcb orelse return errors.SocketError.NotConnected;
+
+    // Try to receive immediately
+    const result = tcp.recv(tcb, buf) catch |err| {
+        return switch (err) {
+            tcp.TcpError.NotConnected => {
+                _ = request.complete(.{ .err = error.ENOTCONN });
+                return true;
+            },
+            tcp.TcpError.WouldBlock => {
+                // No data available - queue request
+                if (sock.pending_recv != null) {
+                    return errors.SocketError.WouldBlock;
+                }
+                sock.pending_recv = request;
+                request.fd = @intCast(sock_fd);
+                request.buf_ptr = @intFromPtr(buf.ptr);
+                request.buf_len = buf.len;
+                return false; // Pending
+            },
+            else => {
+                _ = request.complete(.{ .err = error.EIO });
+                return true;
+            },
+        };
+    };
+
+    // Data received synchronously
+    _ = request.complete(.{ .success = result });
+    return true;
+}
+
+/// Async send - queue request for outgoing data
+/// Returns true if completed synchronously, false if pending
+pub fn sendAsync(sock_fd: usize, request: *IoRequest, data: []const u8) errors.SocketError!bool {
+    const sock = state.acquireSocket(sock_fd) orelse return errors.SocketError.BadFd;
+    defer state.releaseSocket(sock);
+
+    if (sock.sock_type != types.SOCK_STREAM) {
+        return errors.SocketError.TypeNotSupported;
+    }
+
+    const tcb = sock.tcb orelse return errors.SocketError.NotConnected;
+
+    // Try to send immediately
+    const sent = tcp.send(tcb, data) catch |err| {
+        return switch (err) {
+            tcp.TcpError.NotConnected => {
+                _ = request.complete(.{ .err = error.ENOTCONN });
+                return true;
+            },
+            tcp.TcpError.WouldBlock => {
+                // Buffer full - queue request
+                if (sock.pending_send != null) {
+                    return errors.SocketError.WouldBlock;
+                }
+                sock.pending_send = request;
+                request.fd = @intCast(sock_fd);
+                request.buf_ptr = @intFromPtr(data.ptr);
+                request.buf_len = data.len;
+                return false; // Pending
+            },
+            else => {
+                _ = request.complete(.{ .err = error.EIO });
+                return true;
+            },
+        };
+    };
+
+    // Data sent synchronously
+    _ = request.complete(.{ .success = sent });
+    return true;
+}
+
+/// Async connect - queue request for connection establishment
+/// Returns true if completed synchronously, false if pending
+pub fn connectAsync(sock_fd: usize, request: *IoRequest, dest_addr: *const types.SockAddrIn) errors.SocketError!bool {
+    const sock = state.acquireSocket(sock_fd) orelse return errors.SocketError.BadFd;
+    defer state.releaseSocket(sock);
+
+    // Must be SOCK_STREAM (TCP)
+    if (sock.sock_type != types.SOCK_STREAM) {
+        return errors.SocketError.TypeNotSupported;
+    }
+
+    // Already connected?
+    if (sock.tcb != null) {
+        _ = request.complete(.{ .err = error.EISCONN });
+        return true;
+    }
+
+    const iface = state.getInterface() orelse {
+        _ = request.complete(.{ .err = error.ENETDOWN });
+        return true;
+    };
+
+    // Auto-bind if not bound
+    if (sock.local_port == 0) {
+        sock.local_port = state.allocateEphemeralPort();
+    }
+
+    const local_ip = if (sock.local_addr == 0) iface.ip_addr else sock.local_addr;
+    const remote_ip = dest_addr.getAddr();
+    const remote_port = dest_addr.getPort();
+
+    // Initiate connection
+    const tcb = tcp.connect(local_ip, sock.local_port, remote_ip, remote_port) catch |err| {
+        const syscall_err = switch (err) {
+            tcp.TcpError.NoResources => error.ENOMEM,
+            tcp.TcpError.AlreadyConnected => error.EISCONN,
+            tcp.TcpError.NetworkError => error.ENETUNREACH,
+            else => error.ENETUNREACH,
+        };
+        _ = request.complete(.{ .err = syscall_err });
+        return true;
+    };
+
+    sock.tcb = tcb;
+    tcb.tos = sock.tos;
+
+    // Store socket index in TCB for async completion lookup
+    tcb.parent_socket = sock_fd;
+
+    // Store pending connect request - will be completed when handshake finishes
+    sock.pending_connect = request;
+    request.fd = @intCast(sock_fd);
+
+    return false; // Pending - handshake in progress
+}
+
+/// Complete pending accept request (called from TCP layer when connection arrives)
+/// Returns true if a pending request was completed
+pub fn completePendingAccept(socket_idx: usize, tcb: *tcp.Tcb) bool {
+    const sock = state.acquireSocket(socket_idx) orelse return false;
+    defer state.releaseSocket(sock);
+
+    const pending = sock.pending_accept orelse return false;
+    const request: *IoRequest = @ptrCast(@alignCast(pending));
+    sock.pending_accept = null;
+
+    // Allocate new socket for connection
+    const new_sock_fd = @import("lifecycle.zig").socket(types.AF_INET, types.SOCK_STREAM, 0) catch {
+        tcp.close(tcb);
+        _ = request.complete(.{ .err = error.ENOMEM });
+        return true;
+    };
+
+    const new_sock = state.getSocket(new_sock_fd) orelse {
+        tcp.close(tcb);
+        _ = request.complete(.{ .err = error.EFAULT });
+        return true;
+    };
+    new_sock.tcb = tcb;
+    new_sock.local_port = tcb.local_port;
+    new_sock.local_addr = tcb.local_ip;
+
+    _ = request.complete(.{ .success = new_sock_fd });
+    return true;
+}
+
+/// Complete pending recv request (called from TCP layer when data arrives)
+/// Returns true if a pending request was completed
+pub fn completePendingRecv(socket_idx: usize, data: []const u8) bool {
+    const sock = state.acquireSocket(socket_idx) orelse return false;
+    defer state.releaseSocket(sock);
+
+    const pending = sock.pending_recv orelse return false;
+    const request: *IoRequest = @ptrCast(@alignCast(pending));
+    sock.pending_recv = null;
+
+    // Copy data to request buffer
+    const buf_ptr: [*]u8 = @ptrFromInt(request.buf_ptr);
+    const copy_len = @min(data.len, request.buf_len);
+    @memcpy(buf_ptr[0..copy_len], data[0..copy_len]);
+
+    _ = request.complete(.{ .success = copy_len });
+    return true;
+}
+
+/// Complete pending connect request (called from TCP layer on handshake completion)
+/// Returns true if a pending request was completed
+pub fn completePendingConnect(socket_idx: usize, success: bool) bool {
+    const sock = state.acquireSocket(socket_idx) orelse return false;
+    defer state.releaseSocket(sock);
+
+    const pending = sock.pending_connect orelse return false;
+    const request: *IoRequest = @ptrCast(@alignCast(pending));
+    sock.pending_connect = null;
+
+    if (success) {
+        _ = request.complete(.{ .success = 0 });
+    } else {
+        _ = request.complete(.{ .err = error.ECONNREFUSED });
+    }
+    return true;
+}
+
+/// Complete pending send request (called from TCP layer when buffer space available)
+/// Returns true if a pending request was completed
+pub fn completePendingSend(socket_idx: usize, bytes_sent: usize) bool {
+    const sock = state.acquireSocket(socket_idx) orelse return false;
+    defer state.releaseSocket(sock);
+
+    const pending = sock.pending_send orelse return false;
+    const request: *IoRequest = @ptrCast(@alignCast(pending));
+    sock.pending_send = null;
+
+    _ = request.complete(.{ .success = bytes_sent });
+    return true;
 }
