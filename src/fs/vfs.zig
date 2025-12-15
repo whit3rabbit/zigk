@@ -1,7 +1,12 @@
-// Virtual File System (VFS)
-//
-// Provides a unified interface for filesystem operations.
-// Manages mount points and dispatches operations to specific filesystems.
+//! Virtual File System (VFS)
+//!
+//! Provides a unified interface for filesystem operations.
+//! Manages mount points and dispatches operations to specific filesystems (InitRD, DevFS, SFS).
+//!
+//! Features:
+//! - Mount point registry (`MAX_MOUNTS` entries).
+//! - Path resolution to find the correct filesystem.
+//! - `FileSystem` interface for pluggable FS implementations.
 
 const std = @import("std");
 const fd = @import("fd");
@@ -30,7 +35,7 @@ pub const Error = error{
 };
 
 /// FileSystem Interface
-/// Each concrete filesystem (InitRD, DevFS, FAT32) must implement this.
+/// Each concrete filesystem (InitRD, DevFS, SFS) must implement this.
 pub const FileSystem = struct {
     /// Context pointer for the filesystem instance
     context: ?*anyopaque,
@@ -66,7 +71,6 @@ pub const Vfs = struct {
     pub fn mount(path: []const u8, fs: FileSystem) Error!void {
         @import("console").info("VFS: Mount '{s}'", .{path});
         if (mount_count >= MAX_MOUNTS) return error.MountPointFull;
-        // ... (rest of logic) ...
         // Check if already mounted
         for (mounts) |m| {
             if (m) |mount_point| {

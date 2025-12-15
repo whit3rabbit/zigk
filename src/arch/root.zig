@@ -1,12 +1,12 @@
-// Architecture HAL Root Module
-//
-// Provides architecture-agnostic interface to hardware abstraction layer.
-// This module selects the correct architecture implementation at compile time.
-//
-// Per Constitution Principle VI (Strict Layering):
-// - Only src/arch/ may contain inline assembly or direct hardware access
-// - Kernel code (src/kernel/, src/net/, etc.) MUST use this module
-// - Never import architecture-specific modules directly outside of src/arch/
+//! Hardware Abstraction Layer (HAL) Root
+//!
+//! Provides an architecture-agnostic interface to hardware features.
+//! Selects the appropriate implementation at compile time (currently only x86_64).
+//!
+//! Key Responsibilities:
+//! - Expose hardware features (I/O, CPU control, Interrupts, Paging) via a unified API.
+//! - Enforce strict layering: Kernel code must access hardware *only* through this module.
+//! - Initialization of architecture-specific subsystems.
 
 const builtin = @import("builtin");
 

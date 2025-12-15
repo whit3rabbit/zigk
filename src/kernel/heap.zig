@@ -1,24 +1,24 @@
-// Kernel Heap Allocator
-//
-// Free-list allocator with immediate coalescing for dynamic kernel allocations.
-// Implements the std.mem.Allocator interface for Zig standard library compatibility.
-//
-// Design:
-//   - Free-list with boundary tags (header + footer) for O(1) coalescing
-//   - Immediate coalescing on free() to prevent fragmentation
-//   - First-fit allocation strategy (simple, good cache locality)
-//   - Minimum allocation size: 32 bytes (header + footer + min payload)
-//   - Alignment: 16 bytes (required for SSE and cache lines)
-//   - Thread-safe via Spinlock (protects all global state)
-//
-// Memory Layout:
-//   [BlockHeader][Payload...][BlockFooter] [BlockHeader][Payload...][BlockFooter] ...
-//
-// Constitution Compliance (Principle IX - Heap Hygiene):
-//   - Tracks allocated_bytes for leak detection
-//   - No implicit allocations
-//   - All allocations go through this explicit allocator
-//   - Spinlock protects against interrupt-driven corruption
+//! Kernel Heap Allocator
+//!
+//! Free-list allocator with immediate coalescing for dynamic kernel allocations.
+//! Implements the `std.mem.Allocator` interface for Zig standard library compatibility.
+//!
+//! Design:
+//!   - Free-list with boundary tags (header + footer) for O(1) coalescing
+//!   - Immediate coalescing on `free()` to prevent fragmentation
+//!   - First-fit allocation strategy (simple, good cache locality)
+//!   - Minimum allocation size: 32 bytes (header + footer + min payload)
+//!   - Alignment: 16 bytes (required for SSE and cache lines)
+//!   - Thread-safe via Spinlock (protects all global state)
+//!
+//! Memory Layout:
+//!   `[BlockHeader][Payload...][BlockFooter] [BlockHeader][Payload...][BlockFooter] ...`
+//!
+//! Constitution Compliance (Principle IX - Heap Hygiene):
+//!   - Tracks allocated_bytes for leak detection
+//!   - No implicit allocations
+//!   - All allocations go through this explicit allocator
+//!   - Spinlock protects against interrupt-driven corruption
 
 const std = @import("std");
 

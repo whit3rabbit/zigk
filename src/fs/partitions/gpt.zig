@@ -1,13 +1,20 @@
-// GPT (GUID Partition Table) Parsing
-//
-// GPT uses LBA 1 for the header and subsequent LBAs for partition entries.
-// It supports many more partitions than MBR and uses 64-bit LBAs.
+//! GPT (GUID Partition Table) Parsing
+//!
+//! Provides structures and constants for parsing GPT headers and partition entries.
+//! GPT is the modern replacement for MBR, supporting disks larger than 2TB and
+//! more than 4 primary partitions.
+//!
+//! Layout:
+//! - LBA 0: Protective MBR
+//! - LBA 1: GPT Header
+//! - LBA 2+: Partition Entry Array
 
 const std = @import("std");
 
 pub const SECTOR_SIZE = 512;
 pub const GPT_SIGNATURE = 0x5452415020494645; // "EFI PART" in little-endian
 
+/// Globally Unique Identifier (GUID)
 pub const Guid = extern struct {
     data1: u32,
     data2: u16,
@@ -26,6 +33,7 @@ pub const Guid = extern struct {
     }
 };
 
+/// GPT Header (LBA 1)
 pub const GptHeader = extern struct {
     signature: u64,
     revision: u32,
@@ -52,6 +60,7 @@ pub const GptHeader = extern struct {
     }
 };
 
+/// GPT Partition Entry (128 bytes)
 pub const GptEntry = extern struct {
     type_guid: Guid,
     unique_guid: Guid,

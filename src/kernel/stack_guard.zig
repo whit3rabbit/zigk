@@ -1,19 +1,12 @@
-// Stack Guard Canary Support
-//
-// Provides the __stack_chk_guard symbol and __stack_chk_fail handler
-// for compiler-based stack smashing detection.
-//
-// NOTE: This requires compiler support for stack protection. In freestanding
-// Zig, this may not be automatically enabled. The symbols are provided here
-// in case stack protection is manually enabled via LLVM flags.
-//
-// Stack canary protection works by:
-// 1. Compiler inserts canary value at function entry (below return address)
-// 2. At function exit, compiler checks if canary was corrupted
-// 3. If corrupted, __stack_chk_fail is called instead of returning
-//
-// This catches stack buffer overflows that would otherwise corrupt the
-// return address and lead to arbitrary code execution.
+//! Stack Guard Canary Support
+//!
+//! Provides the `__stack_chk_guard` symbol and `__stack_chk_fail` handler
+//! for compiler-based stack smashing detection.
+//!
+//! Stack canary protection works by:
+//! 1. Compiler inserts a canary value at function entry (below return address).
+//! 2. At function exit, the compiler checks if the canary was corrupted.
+//! 3. If corrupted, `__stack_chk_fail` is called, catching buffer overflows.
 
 const hal = @import("hal");
 const console = @import("console");
@@ -22,12 +15,13 @@ const prng = @import("prng");
 /// Stack canary value
 /// Randomized at boot via PRNG seeded from RDRAND/RDTSC hardware entropy.
 /// Initial value is a compile-time placeholder, replaced by init() before
-/// scheduler starts. The value contains bytes that detect common overflows:
-/// - Low byte = 0x00 (null terminator catches string overflows)
-/// - Contains 0x0a (newline), 0x0d (CR), 0xff for pattern detection
+/// scheduler starts.
+///
+/// Security: The low byte is forced to 0x00 to catch string overflows (strcpy/strcat
+/// will stop at the null byte).
 pub export var __stack_chk_guard: usize = 0x00000aff_0a0d_ff00;
 
-/// Called by compiler-inserted code when stack canary mismatch is detected
+/// Called by compiler-inserted code when stack canary mismatch is detected.
 /// This indicates a stack buffer overflow - a critical security violation.
 /// We immediately halt the system with diagnostic information.
 pub export fn __stack_chk_fail() noreturn {
@@ -53,17 +47,14 @@ pub export fn __stack_chk_fail() noreturn {
     hal.cpu.haltForever();
 }
 
-/// Initialize stack guard with a randomized canary value
-/// Called during early kernel initialization, AFTER prng.init()
-/// Uses PRNG seeded from RDRAND/RDTSC hardware entropy
+/// Initialize stack guard with a randomized canary value.
+/// Called during early kernel initialization, AFTER `prng.init()`.
 pub fn init() void {
     // Generate random canary from kernel PRNG
     var random_value = prng.next();
 
     // Apply canary constraint for string overflow detection:
     // Low byte = 0x00 catches null-terminated string overflows
-    // NOTE: We preserve full entropy in upper bits (previously reduced to ~40 bits
-    // by overwriting with fixed pattern 0x00000aff_0a0d_0000)
     random_value &= ~@as(u64, 0xFF); // Clear low byte only (becomes 0x00)
 
     __stack_chk_guard = random_value;

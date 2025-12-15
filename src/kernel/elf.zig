@@ -1,18 +1,19 @@
-// ELF Loader
-//
-// Parses and loads ELF64 executables into a process address space.
-// Used by sys_execve to replace a process's memory image with a new program.
-//
-// Supports:
-//   - ET_EXEC (fixed address executables)
-//   - ET_DYN (position-independent executables) with fixed base
-//   - PT_LOAD segments with BSS handling
-//   - x86_64 architecture only
-//
-// Limitations (MVP):
-//   - No dynamic linking (static executables only)
-//   - No interpreter support (PT_INTERP ignored)
-//   - Loads from memory buffer (InitRD modules)
+//! ELF Loader
+//!
+//! Parses and loads ELF64 executables into a process address space.
+//! Used by sys_execve to replace a process's memory image with a new program.
+//!
+//! Supports:
+//!   - ET_EXEC (fixed address executables)
+//!   - ET_DYN (position-independent executables) with fixed base
+//!   - PT_LOAD segments with BSS handling
+//!   - PT_TLS segments for Thread Local Storage
+//!   - x86_64 architecture only
+//!
+//! Limitations (MVP):
+//!   - No dynamic linking (static executables only)
+//!   - No interpreter support (PT_INTERP ignored)
+//!   - Loads from memory buffer (InitRD modules)
 
 const std = @import("std");
 const hal = @import("hal");

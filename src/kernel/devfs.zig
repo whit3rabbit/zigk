@@ -1,11 +1,15 @@
-// Device Filesystem Shim
-//
-// Provides virtual device file operations for standard devices:
-//   - /dev/console (stdin/stdout/stderr)
-//   - /dev/null (discard writes, EOF on read)
-//   - /dev/zero (infinite zeros on read)
-//
-// These are registered at boot and used by sys_open for device paths.
+//! Device Filesystem (DevFS)
+//!
+//! Provides virtual device file operations for standard devices and
+//! a registry for dynamic devices.
+//!
+//! - /dev/console (stdin/stdout/stderr): Serial and keyboard I/O
+//! - /dev/null: Discard writes, EOF on read
+//! - /dev/zero: Infinite zeros on read, discard writes
+//! - Dynamic devices: Registered by drivers (e.g., sda, dsp)
+//!
+//! This module implements a VFS interface (`dev_fs`) to allow
+//! mounting at `/dev`.
 
 const std = @import("std");
 const fd_mod = @import("fd");

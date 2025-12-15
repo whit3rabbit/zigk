@@ -1,27 +1,36 @@
-// DMA Allocator
-//
-// Provides a std.mem.Allocator interface backed by PMM for drivers that need
-// physically contiguous, DMA-capable memory with known physical addresses.
-//
-// This abstraction enables:
-//   - Unit testing drivers with a mock allocator
-//   - Consistent memory management interface across drivers
-//   - Easy migration to future memory models
-//
-// Usage:
-//   const dma = @import("dma_allocator");
-//
-//   // Allocate DMA-capable memory
-//   const result = dma.allocDma(4096) orelse return error.OutOfMemory;
-//   defer dma.freeDma(result.slice);
-//
-//   // Use result.slice for virtual access
-//   // Use result.phys for DMA programming
+//! DMA Allocator
+//!
+//! Provides a `std.mem.Allocator` interface backed by the Physical Memory Manager (PMM)
+//! for drivers that require physically contiguous, DMA-capable memory with known
+//! physical addresses.
+//!
+//! Features:
+//! - Tracks virtual-to-physical mappings for its allocations.
+//! - Ensures physical contiguity (required for simple DMA).
+//! - Integrates with `std.mem.Allocator` for ease of use.
+//!
+//! This abstraction enables:
+//! - Unit testing drivers with a mock allocator
+//! - Consistent memory management interface across drivers
+//! - Easy migration to future memory models
+//!
+//! Usage:
+//! ```zig
+//! const dma = @import("dma_allocator");
+//!
+//! // Allocate DMA-capable memory
+//! const result = dma.allocDma(4096) orelse return error.OutOfMemory;
+//! defer dma.freeDma(result.slice);
+//!
+//! // Use result.slice for virtual access
+//! // Use result.phys for DMA programming
+//! ```
 
 const std = @import("std");
 
 const is_freestanding = @import("builtin").os.tag == .freestanding;
 
+// Mock implementations for testing on host
 const pmm = if (is_freestanding) @import("pmm") else struct {
     pub const PAGE_SIZE: usize = 4096;
     pub fn allocZeroedPages(_: usize) ?u64 {
@@ -48,14 +57,16 @@ const console = if (is_freestanding) @import("console") else struct {
     pub fn warn(comptime _: []const u8, _: anytype) void {}
 };
 
-// Allocation tracking entry
+/// Allocation tracking entry
+/// Stores the physical address and page count for a given allocation
 const PhysAlloc = struct {
     phys: u64,
     pages: usize,
 };
 
-// Global allocation tracking
-// Uses heap allocator for the tracking structure itself
+/// Global allocation tracking map
+/// Maps virtual address -> PhysAlloc
+/// Uses heap allocator for the tracking structure itself
 var allocations: ?std.AutoHashMap(usize, PhysAlloc) = null;
 
 fn getTracking() *std.AutoHashMap(usize, PhysAlloc) {
@@ -65,7 +76,7 @@ fn getTracking() *std.AutoHashMap(usize, PhysAlloc) {
     return &allocations.?;
 }
 
-// DMA Allocator struct for instance-based usage
+/// DMA Allocator struct for instance-based usage
 pub const DmaAllocator = struct {
     const Self = @This();
 
@@ -85,7 +96,7 @@ pub const DmaAllocator = struct {
         }
     }
 
-    // Get the physical address for a virtual address allocated through this allocator
+    /// Get the physical address for a virtual address allocated through this allocator
     pub fn getPhysicalAddress(_: *const Self, virt_addr: usize) ?u64 {
         const tracking = getTracking();
         if (tracking.get(virt_addr)) |alloc| {
@@ -94,7 +105,7 @@ pub const DmaAllocator = struct {
         return null;
     }
 
-    // std.mem.Allocator interface
+    /// Get the std.mem.Allocator interface
     pub fn allocator(self: *Self) std.mem.Allocator {
         return .{
             .ptr = self,
@@ -158,7 +169,7 @@ pub const DmaAllocator = struct {
 // Global DMA allocator instance (lazily initialized)
 var global_dma_allocator: ?DmaAllocator = null;
 
-// Get the global DMA allocator
+/// Get the global DMA allocator instance
 pub fn getDmaAllocator() *DmaAllocator {
     if (global_dma_allocator == null) {
         global_dma_allocator = DmaAllocator.init();
@@ -166,13 +177,13 @@ pub fn getDmaAllocator() *DmaAllocator {
     return &global_dma_allocator.?;
 }
 
-// Result type for allocDma
+/// Result type for allocDma, containing both virtual and physical addresses
 pub const DmaAllocation = struct {
     slice: []u8,
     phys: u64,
 };
 
-// Allocate DMA-capable memory and return both virtual slice and physical address
+/// Allocate DMA-capable memory and return both virtual slice and physical address
 pub fn allocDma(size: usize) ?DmaAllocation {
     const dma = getDmaAllocator();
     const alloc = dma.allocator();
@@ -187,13 +198,13 @@ pub fn allocDma(size: usize) ?DmaAllocation {
     return .{ .slice = ptr, .phys = phys };
 }
 
-// Free DMA memory allocated with allocDma
+/// Free DMA memory allocated with allocDma
 pub fn freeDma(slice: []u8) void {
     const dma = getDmaAllocator();
     dma.allocator().free(slice);
 }
 
-// Get physical address for memory allocated through this module
+/// Get physical address for memory allocated through this module
 pub fn getPhysicalAddress(virt_ptr: anytype) ?u64 {
     const virt_addr: usize = switch (@typeInfo(@TypeOf(virt_ptr))) {
         .pointer => @intFromPtr(virt_ptr),

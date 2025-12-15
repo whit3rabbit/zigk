@@ -1,12 +1,12 @@
-// Framebuffer State Management
-//
-// Captures and stores framebuffer information from bootloader.
-// Provides a global accessor for syscall handlers to query framebuffer state.
-//
-// The framebuffer physical address and dimensions are captured at boot time.
-// This allows userspace programs to:
-//   1. Query framebuffer info via sys_get_fb_info (1001)
-//   2. Map framebuffer memory via sys_map_fb (1002)
+//! Framebuffer State Management
+//!
+//! Captures and stores framebuffer information provided by the bootloader (Limine).
+//! Provides a global accessor for syscall handlers to query framebuffer state.
+//!
+//! The framebuffer physical address and dimensions are captured at boot time.
+//! This allows userspace programs to:
+//!   1. Query framebuffer info via `sys_get_fb_info` (1001)
+//!   2. Map framebuffer memory via `sys_map_fb` (1002)
 
 const std = @import("std");
 const limine = @import("limine");

@@ -1,3 +1,12 @@
+//! Filesystem Initialization
+//!
+//! Initializes the Virtual File System (VFS) and mounts core filesystems.
+//!
+//! Mount layout:
+//! - `/`: InitRD (Initial RAM Disk) - read-only, contains init executable
+//! - `/dev`: DevFS (Device Filesystem) - virtual device files
+//! - `/mnt`: SFS (Simple File System) - read/write persistent storage (on /dev/sda)
+
 const std = @import("std");
 const console = @import("console");
 const fs = @import("fs");
@@ -5,10 +14,12 @@ const devfs = @import("devfs");
 const heap = @import("heap");
 const fd_mod = @import("fd");
 
+/// Initialize the Virtual File System and mount core filesystems
 pub fn initVfs() void {
     console.print("\n");
     console.info("Initializing VFS...", .{});
 
+    // Initialize VFS singleton
     fs.vfs.Vfs.init();
 
     // Mount InitRD at /
@@ -24,13 +35,14 @@ pub fn initVfs() void {
     console.info("VFS initialized (mounted / and /dev)", .{});
 }
 
+/// Initialize and mount the block filesystem (SFS)
+/// Requires block drivers to be initialized first
 pub fn initBlockFs() void {
     console.print("\n");
     console.info("Initializing Block Filesystem...", .{});
 
     // Check if /dev/sda exists (created by initStorage via DevFS check)
     // SFS.init will attempt to open it using VFS
-
     const sfs_instance = fs.sfs.SFS.init("/dev/sda") catch |err| {
         console.warn("SFS: Failed to initialize on /dev/sda: {}", .{err});
         return;
@@ -48,6 +60,7 @@ pub fn initBlockFs() void {
     testBlockFs();
 }
 
+/// Simple read/write test for the mounted block filesystem
 fn testBlockFs() void {
     console.info("SFS: Running read/write test...", .{});
 
@@ -60,18 +73,14 @@ fn testBlockFs() void {
         return;
     };
     defer {
-        if (fd.ops.close) |close_fn| _ = close_fn(fd);
-        // heap.allocator().destroy(fd); // Vfs.open doesn't use heap? It does. But who owns fd?
-        // sys_close destroys it. We should manually destroy if not using sys_close.
-        // Actually, Vfs.open returns a pointer allocated on heap.
-        // And FileDescriptor.unref calls destroy.
-        // So we should simulate unref/close.
-        const alloc = heap.allocator();
-        alloc.destroy(fd); // fd.close is not enough, need to free struct. But unref does it.
-        // We haven't ref-ed it, createFd sets ref=1.
-        // So calling ops.close is part of it, but we need to free the memory too.
-        // Correct usage:
-        // if (fd.unref()) { if (fd.ops.close) |c| _ = c(fd); alloc.destroy(fd); }
+        // Simulate correct cleanup:
+        // unref() returns true if refcount reaches 0.
+        // If so, call close op and free memory.
+        if (fd.unref()) {
+            if (fd.ops.close) |close_fn| _ = close_fn(fd);
+            const alloc = heap.allocator();
+            alloc.destroy(fd);
+        }
     }
 
     // Write data

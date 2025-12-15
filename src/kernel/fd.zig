@@ -1,14 +1,17 @@
-// File Descriptor Table
-//
-// Manages per-thread file descriptor tables for I/O operations.
-// Each open file/device/socket is represented by a FileDescriptor
-// with pluggable operations (read/write/close).
-//
-// Design:
-//   - Fixed-size FD table (MAX_FDS entries)
-//   - FDs 0/1/2 pre-populated for stdin/stdout/stderr
-//   - Reference counting for shared FDs (fork)
-//   - Device-agnostic via FileOps vtable
+//! File Descriptor Subsystem
+//!
+//! Manages file descriptors (FDs) which abstract access to files, devices,
+//! sockets, and pipes. This module provides:
+//!
+//! - `FileDescriptor`: A struct representing an open resource, with pluggable
+//!   operations (`FileOps`) for read, write, close, seek, etc.
+//! - `FdTable`: A per-process table mapping integer FD numbers to `FileDescriptor` objects.
+//!   Handles allocation, lookups, and lifecycle management (refcounting).
+//!
+//! Design:
+//! - Fixed-size FD table (`MAX_FDS` entries) per process.
+//! - Shared FDs via reference counting (for `fork` and `dup`).
+//! - Standard I/O (stdin, stdout, stderr) pre-populated at slots 0, 1, 2.
 
 const std = @import("std");
 const heap = @import("heap");
