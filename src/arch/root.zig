@@ -31,6 +31,7 @@ pub const debug = arch.debug;
 pub const entropy = arch.entropy;
 pub const syscall = arch.syscall;
 pub const mmio = arch.mmio;
+pub const mmio_device = arch.mmio_device;
 pub const pit = arch.pit;
 pub const apic = arch.apic;
 pub const timing = arch.timing;

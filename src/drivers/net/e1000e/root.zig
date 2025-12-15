@@ -52,6 +52,7 @@ const heap = @import("heap");
 const net = @import("net");
 
 const mmio = hal.mmio;
+const MmioDevice = hal.mmio_device.MmioDevice;
 
 // Internal module imports
 const regs = @import("regs.zig");
@@ -92,10 +93,8 @@ pub const packet_pool = &pool_mod.packet_pool;
 
 /// E1000e driver instance
 pub const E1000e = struct {
-    /// MMIO base virtual address
-    mmio_base: u64,
-    /// MMIO region size (used for bounds checking)
-    mmio_size: usize,
+    /// MMIO register access (zero-cost wrapper with comptime validation)
+    regs: MmioDevice(Reg),
 
     /// MAC address
     mac_addr: [6]u8,
@@ -167,50 +166,32 @@ pub const E1000e = struct {
     const Self = @This();
 
     // ========================================================================
-    // Register Access
+    // Register Access (via MmioDevice)
     // ========================================================================
-
-    /// Read a 32-bit device register with bounds checking
-    /// Panics if offset is outside mapped MMIO region (indicates driver bug)
-    pub fn readReg(self: *const Self, offset: u64) u32 {
-        if (offset + 4 > self.mmio_size) {
-            @panic("E1000e: MMIO read out of bounds");
-        }
-        return mmio.read32(self.mmio_base + offset);
-    }
-
-    /// Write a 32-bit device register with bounds checking
-    /// Panics if offset is outside mapped MMIO region (indicates driver bug)
-    pub fn writeReg(self: *Self, offset: u64, value: u32) void {
-        if (offset + 4 > self.mmio_size) {
-            @panic("E1000e: MMIO write out of bounds");
-        }
-        mmio.write32(self.mmio_base + offset, value);
-    }
 
     // Typed register accessors for packed structs
     fn readCtrl(self: *const Self) DeviceCtl {
-        return DeviceCtl.fromRaw(self.readReg(Reg.CTRL));
+        return DeviceCtl.fromRaw(self.regs.read(.ctrl));
     }
 
     fn writeCtrl(self: *Self, ctrl_val: DeviceCtl) void {
-        self.writeReg(Reg.CTRL, ctrl_val.toRaw());
+        self.regs.write(.ctrl, ctrl_val.toRaw());
     }
 
     fn readRctl(self: *const Self) ReceiveCtl {
-        return ReceiveCtl.fromRaw(self.readReg(Reg.RCTL));
+        return ReceiveCtl.fromRaw(self.regs.read(.rctl));
     }
 
     fn writeRctl(self: *Self, rctl_val: ReceiveCtl) void {
-        self.writeReg(Reg.RCTL, rctl_val.toRaw());
+        self.regs.write(.rctl, rctl_val.toRaw());
     }
 
     pub fn readTctl(self: *const Self) TransmitCtl {
-        return TransmitCtl.fromRaw(self.readReg(Reg.TCTL));
+        return TransmitCtl.fromRaw(self.regs.read(.tctl));
     }
 
     pub fn writeTctl(self: *Self, tctl_val: TransmitCtl) void {
-        self.writeReg(Reg.TCTL, tctl_val.toRaw());
+        self.regs.write(.tctl, tctl_val.toRaw());
     }
 
     // ========================================================================
@@ -266,8 +247,7 @@ pub const E1000e = struct {
         }
 
         driver.* = Self{
-            .mmio_base = mmio_base,
-            .mmio_size = bar.size,
+            .regs = MmioDevice(Reg).init(mmio_base, bar.size),
             .mac_addr = [_]u8{0} ** 6,
             // Ring pointers set by allocateRings() - undefined until then
             // We check rx_ring_phys != 0 before any access
@@ -368,23 +348,23 @@ pub const E1000e = struct {
         // Reference: 82574L Datasheet Section 13.4.1 - reset completes when RST bit clears
         // 100ms timeout is generous for reset operation
         const reset_mask = (DeviceCtl{ .device_reset = true }).toRaw();
-        if (!mmio.poll32Timed(self.mmio_base + Reg.CTRL, reset_mask, 0, 100_000)) {
+        if (!self.regs.pollTimed(.ctrl, reset_mask, 0, 100_000)) {
             console.warn("E1000e: Reset timeout (RST bit stuck)", .{});
         }
 
         // Disable interrupts during setup
-        self.writeReg(Reg.IMC, 0xFFFFFFFF);
+        self.regs.write(.imc, 0xFFFFFFFF);
 
         // Read ICR to clear pending interrupts
-        _ = self.readReg(Reg.ICR);
+        _ = self.regs.read(.icr);
 
         console.info("E1000e: Reset complete", .{});
     }
 
     /// Read MAC address from RAL/RAH registers
     fn readMacAddress(self: *Self) void {
-        const ral = self.readReg(Reg.RAL0);
-        const rah = self.readReg(Reg.RAH0);
+        const ral = self.regs.read(.ral0);
+        const rah = self.regs.read(.rah0);
 
         self.mac_addr[0] = @truncate(ral);
         self.mac_addr[1] = @truncate(ral >> 8);
@@ -530,18 +510,18 @@ pub const E1000e = struct {
 
         // Program descriptor ring base address (64-bit physical address)
         // Must be 16-byte aligned per Intel spec
-        self.writeReg(Reg.RDBAL, @truncate(self.rx_ring_phys));
-        self.writeReg(Reg.RDBAH, @truncate(self.rx_ring_phys >> 32));
+        self.regs.write(.rdbal, @truncate(self.rx_ring_phys));
+        self.regs.write(.rdbah, @truncate(self.rx_ring_phys >> 32));
 
         // Set descriptor ring length in bytes (must be 128-byte aligned)
         // Hardware uses this to calculate ring wrap
-        self.writeReg(Reg.RDLEN, RX_DESC_COUNT * @sizeOf(RxDesc));
+        self.regs.write(.rdlen, RX_DESC_COUNT * @sizeOf(RxDesc));
 
         // Enable hardware checksum offloading
         // IPOFL: IP checksum offload - hardware verifies IPv4 header checksum
         // TUOFL: TCP/UDP checksum offload - hardware verifies L4 checksum
         // Results are reported in descriptor status/errors fields
-        self.writeReg(Reg.RXCSUM, regs.RXCSUM.IPOFL | regs.RXCSUM.TUOFL);
+        self.regs.write(.rxcsum, regs.RXCSUM.IPOFL | regs.RXCSUM.TUOFL);
 
         // Initialize head and tail pointers
         // HEAD = 0: hardware starts writing at descriptor 0
@@ -550,8 +530,8 @@ pub const E1000e = struct {
         // Note: We could set TAIL = N (wrapped to 0) per strict Intel spec
         // interpretation, but TAIL = N-1 is the common convention that ensures
         // HEAD != TAIL initially (avoiding the ambiguous "empty" state).
-        self.writeReg(Reg.RDH, 0);
-        self.writeReg(Reg.RDT, RX_DESC_COUNT - 1);
+        self.regs.write(.rdh, 0);
+        self.regs.write(.rdt, RX_DESC_COUNT - 1);
 
         // Software read position starts at 0 (same as HEAD)
         self.rx_cur = 0;
@@ -590,17 +570,17 @@ pub const E1000e = struct {
 
         // Program descriptor ring base address (64-bit physical address)
         // Must be 16-byte aligned per Intel spec
-        self.writeReg(Reg.TDBAL, @truncate(self.tx_ring_phys));
-        self.writeReg(Reg.TDBAH, @truncate(self.tx_ring_phys >> 32));
+        self.regs.write(.tdbal, @truncate(self.tx_ring_phys));
+        self.regs.write(.tdbah, @truncate(self.tx_ring_phys >> 32));
 
         // Set descriptor ring length in bytes (must be 128-byte aligned)
-        self.writeReg(Reg.TDLEN, TX_DESC_COUNT * @sizeOf(TxDesc));
+        self.regs.write(.tdlen, TX_DESC_COUNT * @sizeOf(TxDesc));
 
         // Initialize head and tail pointers to 0 (empty ring)
         // Unlike RX where we pre-fill descriptors, TX starts empty.
         // Software will advance TDT as packets are queued for transmission.
-        self.writeReg(Reg.TDH, 0);
-        self.writeReg(Reg.TDT, 0);
+        self.regs.write(.tdh, 0);
+        self.regs.write(.tdt, 0);
 
         // Configure Inter-Packet Gap timing
         // Reference: 82574L Datasheet Section 13.4.34 "Transmit IPG Register"
@@ -613,7 +593,7 @@ pub const E1000e = struct {
         // IPGR2 (bits 29:20) = 10: Part 2 of IPG for non-back-to-back
         //   - Used for collision recovery timing in half-duplex mode
         //   - Not critical for full-duplex gigabit operation
-        self.writeReg(Reg.TIPG, (10 << 0) | (10 << 10) | (10 << 20));
+        self.regs.write(.tipg, (10 << 0) | (10 << 10) | (10 << 20));
 
         // Software write position starts at 0
         self.tx_cur = 0;
@@ -624,7 +604,7 @@ pub const E1000e = struct {
     fn clearMulticastTable(self: *Self) void {
         const MTA_ENTRY_COUNT: usize = 128;
         for (0..MTA_ENTRY_COUNT) |i| {
-            self.writeReg(Reg.MTA_BASE + @as(u64, i) * 4, 0);
+            self.regs.writeRaw(regs.MTA_BASE + @as(u64, i) * 4, 0);
         }
     }
 
@@ -656,10 +636,10 @@ pub const E1000e = struct {
             const reg_index = hash >> 5; // Upper 7 bits select MTA register
             const bit_index: u5 = @intCast(hash & 0x1F); // Lower 5 bits select bit within register
 
-            const mta_reg = Reg.MTA_BASE + @as(u64, reg_index) * 4;
-            var val = self.readReg(mta_reg);
+            const mta_offset = regs.MTA_BASE + @as(u64, reg_index) * 4;
+            var val = self.regs.readRaw(mta_offset);
             val |= @as(u32, 1) << bit_index;
-            self.writeReg(mta_reg, val);
+            self.regs.writeRaw(mta_offset, val);
         }
     }
 
@@ -668,14 +648,14 @@ pub const E1000e = struct {
     fn configureInterruptThrottle(self: *Self) void {
         // RDTR: RX Delay Timer - delay RX interrupt by N microseconds
         // This coalesces multiple packets into fewer interrupts
-        self.writeReg(Reg.RDTR, 256); // ~256us delay before RX interrupt
+        self.regs.write(.rdtr, 256); // ~256us delay before RX interrupt
 
         // RADV: RX Absolute Delay - maximum time to delay RX interrupt
         // Ensures packets are delivered even if threshold not met
-        self.writeReg(Reg.RADV, 512); // Maximum 512us absolute delay
+        self.regs.write(.radv, 512); // Maximum 512us absolute delay
 
         // TADV: TX Absolute Delay - maximum time to delay TX completion interrupt
-        self.writeReg(Reg.TADV, 128); // Maximum 128us for TX
+        self.regs.write(.tadv, 128); // Maximum 128us for TX
     }
 
     /// Initialize MSI-X if available
@@ -738,7 +718,7 @@ pub const E1000e = struct {
         const ivar: u32 = (0 | (1 << 3)) | // RX0 -> vector 0, valid
             ((@as(u32, 1) << 8) | (1 << 11)) | // TX0 -> vector 1, valid
             ((@as(u32, 2) << 16) | (1 << 19)); // Other -> vector 2, valid
-        self.writeReg(Reg.IVAR, ivar);
+        self.regs.write(.ivar, ivar);
 
         // Enable MSI-X vectors
         pci.enableMsixVectors(self.pci_ecam, self.pci_dev, &cap);
@@ -759,10 +739,10 @@ pub const E1000e = struct {
             // Use extended interrupt mask for MSI-X
             // Enable: RX, TX, and Other causes
             // These map to the MSI-X vectors via IVAR
-            self.writeReg(Reg.EIMS, regs.INT.RXT0 | regs.INT.RXDMT0 | regs.INT.LSC | regs.INT.TXDW);
+            self.regs.write(.eims, regs.INT.RXT0 | regs.INT.RXDMT0 | regs.INT.LSC | regs.INT.TXDW);
         } else {
             // Legacy: Enable RX timer, RX descriptor minimum threshold, link status change
-            self.writeReg(Reg.IMS, regs.INT.RXT0 | regs.INT.RXDMT0 | regs.INT.LSC);
+            self.regs.write(.ims, regs.INT.RXT0 | regs.INT.RXDMT0 | regs.INT.LSC);
         }
     }
 
@@ -875,7 +855,7 @@ pub const E1000e = struct {
                 // Re-enable RX interrupts FIRST (before checking for packets).
                 // This ensures any packets arriving NOW will trigger an interrupt
                 // that will unblock us if we decide to block.
-                self.writeReg(Reg.IMS, regs.INT.RXT0 | regs.INT.RXDMT0);
+                self.regs.write(.ims, regs.INT.RXT0 | regs.INT.RXDMT0);
 
                 // Memory barrier to ensure IMS write completes before checking state.
                 // On x86 this is sfence which orders stores.
@@ -903,7 +883,7 @@ pub const E1000e = struct {
 
     /// Handle link status change - decode and log speed/duplex
     fn handleLinkChange(self: *Self) void {
-        const status = self.readReg(Reg.STATUS);
+        const status = self.regs.read(.status);
         const link_up = (status & regs.STATUS.LU) != 0;
 
         if (link_up) {
@@ -923,7 +903,7 @@ pub const E1000e = struct {
 
     /// Get link speed in Mbps (0 if link down)
     pub fn getLinkSpeed(self: *const Self) u16 {
-        const status = self.readReg(Reg.STATUS);
+        const status = self.regs.read(.status);
         if ((status & regs.STATUS.LU) == 0) return 0; // Link down
 
         const speed_bits = (status & regs.STATUS.SPEED_MASK) >> regs.STATUS.SPEED_SHIFT;
@@ -957,7 +937,7 @@ pub const E1000e = struct {
     pub fn handleIrq(self: *Self) void {
         // Read ICR to get interrupt cause and clear pending interrupt.
         // Reading ICR is atomic with clearing on 82574L.
-        const icr = InterruptCause.fromRaw(self.readReg(Reg.ICR));
+        const icr = InterruptCause.fromRaw(self.regs.read(.icr));
 
         if (icr.hasRxInterrupt()) {
             // RX interrupt - transition to polling mode
@@ -968,7 +948,7 @@ pub const E1000e = struct {
             //
             // This is the core of NAPI: interrupt to wake, poll to drain,
             // re-enable when done.
-            self.writeReg(Reg.IMC, regs.INT.RXT0 | regs.INT.RXDMT0);
+            self.regs.write(.imc, regs.INT.RXT0 | regs.INT.RXDMT0);
 
             // Wake the worker thread to process received packets
             if (self.worker_thread) |t| {
@@ -1053,7 +1033,7 @@ pub const E1000e = struct {
         }
 
         // Disable interrupts
-        self.writeReg(Reg.IMC, 0xFFFFFFFF);
+        self.regs.write(.imc, 0xFFFFFFFF);
 
         // Disable RX and TX
         self.writeRctl(.{});
@@ -1067,7 +1047,7 @@ pub const E1000e = struct {
         self.freeRings();
 
         // Unmap MMIO
-        vmm.unmapMmio(self.mmio_base, self.mmio_size);
+        vmm.unmapMmio(self.regs.base, self.regs.size);
 
         // Use release ordering to ensure all cleanup is visible before
         // other threads see driver_initialized = false

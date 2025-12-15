@@ -166,7 +166,7 @@ pub fn updateRdt(driver: *E1000e) void {
     mmio.writeBarrier();
 
     // RDT = rx_cur per Intel spec: "one beyond the last valid descriptor"
-    driver.writeReg(regs.Reg.RDT, driver.rx_cur);
+    driver.regs.write(.rdt, driver.rx_cur);
 }
 
 /// Check if there are packets waiting

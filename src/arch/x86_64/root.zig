@@ -17,6 +17,7 @@ pub const debug = @import("debug.zig");
 pub const entropy = @import("entropy.zig");
 pub const syscall = @import("syscall.zig");
 pub const mmio = @import("mmio.zig");
+pub const mmio_device = @import("mmio_device.zig");
 pub const pit = @import("pit.zig");
 pub const timing = @import("timing.zig");
 pub const apic = @import("apic/root.zig");

@@ -2,68 +2,70 @@
 //
 // Reference: Intel 82574L Gigabit Ethernet Controller Datasheet (316080)
 
-/// E1000e MMIO register offsets
-pub const Reg = struct {
+/// E1000e MMIO register offsets as enum for use with MmioDevice.
+/// Using enum enables compile-time offset validation and typo detection.
+pub const Reg = enum(u64) {
     // Device Control
-    pub const CTRL: u64 = 0x0000; // Device Control
-    pub const STATUS: u64 = 0x0008; // Device Status
-    pub const CTRL_EXT: u64 = 0x0018; // Extended Device Control
+    ctrl = 0x0000, // Device Control
+    status = 0x0008, // Device Status
+    ctrl_ext = 0x0018, // Extended Device Control
 
     // EEPROM
-    pub const EERD: u64 = 0x0014; // EEPROM Read
+    eerd = 0x0014, // EEPROM Read
 
     // Interrupt
-    pub const ICR: u64 = 0x00C0; // Interrupt Cause Read
-    pub const ITR: u64 = 0x00C4; // Interrupt Throttle Rate
-    pub const ICS: u64 = 0x00C8; // Interrupt Cause Set
-    pub const IMS: u64 = 0x00D0; // Interrupt Mask Set
-    pub const IMC: u64 = 0x00D8; // Interrupt Mask Clear
+    icr = 0x00C0, // Interrupt Cause Read
+    itr = 0x00C4, // Interrupt Throttle Rate
+    ics = 0x00C8, // Interrupt Cause Set
+    ims = 0x00D0, // Interrupt Mask Set
+    imc = 0x00D8, // Interrupt Mask Clear
 
     // Receive
-    pub const RCTL: u64 = 0x0100; // Receive Control
-    pub const RDBAL: u64 = 0x2800; // RX Descriptor Base Low
-    pub const RDBAH: u64 = 0x2804; // RX Descriptor Base High
-    pub const RDLEN: u64 = 0x2808; // RX Descriptor Length
-    pub const RDH: u64 = 0x2810; // RX Descriptor Head
-    pub const RDT: u64 = 0x2818; // RX Descriptor Tail
-    pub const RDTR: u64 = 0x2820; // RX Delay Timer
-    pub const RADV: u64 = 0x282C; // RX Interrupt Absolute Delay
+    rctl = 0x0100, // Receive Control
+    rdbal = 0x2800, // RX Descriptor Base Low
+    rdbah = 0x2804, // RX Descriptor Base High
+    rdlen = 0x2808, // RX Descriptor Length
+    rdh = 0x2810, // RX Descriptor Head
+    rdt = 0x2818, // RX Descriptor Tail
+    rdtr = 0x2820, // RX Delay Timer
+    radv = 0x282C, // RX Interrupt Absolute Delay
 
     // Receive Checksum Control
-    pub const RXCSUM: u64 = 0x5000; // Receive Checksum Control
+    rxcsum = 0x5000, // Receive Checksum Control
 
     // Transmit
-    pub const TCTL: u64 = 0x0400; // Transmit Control
-    pub const TIPG: u64 = 0x0410; // TX Inter-Packet Gap
-    pub const TDBAL: u64 = 0x3800; // TX Descriptor Base Low
-    pub const TDBAH: u64 = 0x3804; // TX Descriptor Base High
-    pub const TDLEN: u64 = 0x3808; // TX Descriptor Length
-    pub const TDH: u64 = 0x3810; // TX Descriptor Head
-    pub const TDT: u64 = 0x3818; // TX Descriptor Tail
-    pub const TXDCTL: u64 = 0x3828; // TX Descriptor Control
-    pub const TADV: u64 = 0x382C; // TX Interrupt Absolute Delay
+    tctl = 0x0400, // Transmit Control
+    tipg = 0x0410, // TX Inter-Packet Gap
+    tdbal = 0x3800, // TX Descriptor Base Low
+    tdbah = 0x3804, // TX Descriptor Base High
+    tdlen = 0x3808, // TX Descriptor Length
+    tdh = 0x3810, // TX Descriptor Head
+    tdt = 0x3818, // TX Descriptor Tail
+    txdctl = 0x3828, // TX Descriptor Control
+    tadv = 0x382C, // TX Interrupt Absolute Delay
 
     // Statistics
-    pub const MPC: u64 = 0x4010; // Missed Packets Count (cleared on read)
+    mpc = 0x4010, // Missed Packets Count (cleared on read)
 
     // Receive Address (MAC)
-    pub const RAL0: u64 = 0x5400; // Receive Address Low (MAC bytes 0-3)
-    pub const RAH0: u64 = 0x5404; // Receive Address High (MAC bytes 4-5)
-
-    // Multicast Table Array
-    pub const MTA_BASE: u64 = 0x5200; // Multicast Table Array (128 entries)
+    ral0 = 0x5400, // Receive Address Low (MAC bytes 0-3)
+    rah0 = 0x5404, // Receive Address High (MAC bytes 4-5)
 
     // MSI-X Registers (82574L specific)
-    pub const IVAR: u64 = 0x00E4; // Interrupt Vector Allocation
-    pub const EITR0: u64 = 0x00E8; // Extended Interrupt Throttle Rate 0
-    pub const EITR1: u64 = 0x00EC; // Extended Interrupt Throttle Rate 1
-    pub const EITR2: u64 = 0x00F0; // Extended Interrupt Throttle Rate 2
-    pub const EIAC: u64 = 0x00DC; // Extended Interrupt Auto Clear
-    pub const EIAM: u64 = 0x00E0; // Extended Interrupt Auto Mask
-    pub const EICS: u64 = 0x00E8; // Extended Interrupt Cause Set
-    pub const EIMS: u64 = 0x00D4; // Extended Interrupt Mask Set (read-only set)
-    pub const EIMC: u64 = 0x00D8; // Extended Interrupt Mask Clear (write-only clear)
+    ivar = 0x00E4, // Interrupt Vector Allocation
+    eitr0 = 0x00E8, // Extended Interrupt Throttle Rate 0
+    eitr1 = 0x00EC, // Extended Interrupt Throttle Rate 1
+    eitr2 = 0x00F0, // Extended Interrupt Throttle Rate 2
+    eims = 0x00D4, // Extended Interrupt Mask Set (read-only set)
+    // Note: EIAC/EIAM/EIMC share offsets with legacy interrupt registers
+    // Use legacy IMC (0x00D8) for interrupt mask clear
+
+    // Note: MTA_BASE (0x5200) is an array base, use MTA_BASE constant below
 };
+
+/// Multicast Table Array base (128 entries, 4 bytes each)
+/// Use with MmioDevice.readRaw/writeRaw for indexed access
+pub const MTA_BASE: u64 = 0x5200;
 
 /// Device Status Register bits
 /// Reference: 82574L Datasheet Section 13.4.2

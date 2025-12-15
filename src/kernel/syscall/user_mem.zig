@@ -247,4 +247,43 @@ pub const UserPtr = struct {
     }
 };
 
+// =============================================================================
+// Type-Safe Struct Copy Functions
+// =============================================================================
+
+/// Copy a struct from user space with compile-time type validation.
+/// Enforces that T is a struct type, preventing accidental misuse with
+/// primitives or pointers that could cause size mismatches.
+///
+/// Usage:
+/// ```
+/// const addr = copyStructFromUser(sockaddr_in, UserPtr.from(addr_ptr)) catch return error.EFAULT;
+/// ```
+pub fn copyStructFromUser(comptime T: type, ptr: UserPtr) UserPtrError!T {
+    comptime {
+        const info = @typeInfo(T);
+        if (info != .@"struct") {
+            @compileError("copyStructFromUser requires a struct type, got " ++ @typeName(T));
+        }
+    }
+    return ptr.readValue(T);
+}
+
+/// Copy a struct to user space with compile-time type validation.
+/// Enforces that the value type is a struct.
+///
+/// Usage:
+/// ```
+/// try copyStructToUser(sockaddr_in, UserPtr.from(addr_ptr), addr_value);
+/// ```
+pub fn copyStructToUser(comptime T: type, ptr: UserPtr, value: T) UserPtrError!void {
+    comptime {
+        const info = @typeInfo(T);
+        if (info != .@"struct") {
+            @compileError("copyStructToUser requires a struct type, got " ++ @typeName(T));
+        }
+    }
+    return ptr.writeValue(value);
+}
+
 const std = @import("std");

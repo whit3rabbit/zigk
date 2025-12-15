@@ -13,10 +13,10 @@ You have built a feature-rich **Monolithic Kernel** with:
 
 | Goal | Status |
 |------|--------|
-| Zero-Cost HAL (comptime) | Partial - using packed structs but runtime MMIO |
+| Zero-Cost HAL (comptime) | **Done** - MmioDevice wrapper with comptime offsets |
 | Capabilities-Based Microkernel | Not implemented - drivers in kernel space |
 | Asynchronous I/O | Not implemented - blocking syscalls |
-| Safe Unsafe Code | Well implemented - UserPtr, error handling |
+| Safe Unsafe Code | Well implemented - UserPtr, error handling, copyStructFromUser |
 
 ---
 
@@ -25,60 +25,65 @@ You have built a feature-rich **Monolithic Kernel** with:
 ### 1. Syscall Dispatch Optimization
 **File:** `src/kernel/syscall/table.zig`
 
-Current linear search is O(n). Use comptime to generate O(1) dispatch.
+~~Current linear search is O(n). Use comptime to generate O(1) dispatch.~~
 
-```zig
-// Current (slow):
-inline for (handler_entries) |entry| { if (entry.value == syscall_num) ... }
+**Status: VERIFIED - No changes needed**
 
-// Better (O(1) switch):
-switch (syscall_num) {
-    inline for (handler_entries) |entry| {
-        entry.value => return callHandler(...),
-    }
-    else => return error.ENOSYS,
-}
+Disassembly confirmed LLVM already optimizes the `inline for` to jump tables:
+```asm
+jmpq *-0x7ff8dd18(,%rax,8)  ; Jump table dispatch
 ```
 
-- [ ] Refactor syscall dispatch to use comptime-generated switch
+- [x] ~~Refactor syscall dispatch to use comptime-generated switch~~ (LLVM already optimizes)
 
 ### 2. Generic User Memory Copy
 **File:** `src/kernel/syscall/user_mem.zig`
 
-Add type-safe wrapper to prevent buffer size mismatches at compile time.
+- [x] Add `copyStructFromUser(T, ptr)` generic wrapper
+- [x] Add `copyStructToUser(T, ptr, value)` generic wrapper
+- [ ] Audit existing `copyFromUser` calls for migration
 
+**Implementation:**
 ```zig
-pub fn copyStructFromUser(comptime T: type, ptr: UserPtr) !T {
-    // Validates sizeof(T) automatically
+pub fn copyStructFromUser(comptime T: type, ptr: UserPtr) UserPtrError!T {
+    comptime {
+        if (@typeInfo(T) != .@"struct") {
+            @compileError("copyStructFromUser requires a struct type");
+        }
+    }
+    return ptr.readValue(T);
 }
 ```
 
-- [ ] Add `copyStructFromUser(T, ptr)` generic wrapper
-- [ ] Audit existing `copyFromUser` calls for migration
-
 ---
 
-## Phase 1: Zero-Cost Hardware Interface
+## Phase 1: Zero-Cost Hardware Interface - COMPLETE
 
-Refactor MMIO and driver definitions to use comptime generation.
+Refactored MMIO and driver definitions to use comptime generation.
 
-### Tasks
+### Completed Tasks
 
-- [ ] **Create `MmioStruct` wrapper** in `src/arch/x86_64/mmio.zig`
-  ```zig
-  pub fn MmioDevice(comptime T: type) type {
-      return struct {
-          base: usize,
-          pub inline fn read(self: @This(), comptime field: []const u8) FieldType(T, field) {
-              // Compile-time calculation of offset based on struct layout
-          }
-      };
-  }
-  ```
+- [x] **Created `MmioDevice` wrapper** in `src/arch/x86_64/mmio_device.zig`
+  - Register offsets computed at comptime (zero runtime math)
+  - Bounds checking only in Debug mode (zero-cost in release)
+  - Type-safe `readTyped`/`writeTyped` with packed structs
+  - Register names enforced by enum (typos caught at compile time)
 
-- [ ] **Refactor E1000e driver** (`src/drivers/net/e1000e/`)
-  - Replace `readReg(self, Reg.TCTL)` with `self.regs.read("tctl")`
-  - Proves Zig optimizes away offset math while enforcing types
+- [x] **Refactored E1000e driver** (`src/drivers/net/e1000e/`)
+  - Converted `Reg` struct to `enum(u64)` for comptime validation
+  - Replaced `readReg(self, Reg.TCTL)` with `self.regs.read(.tctl)`
+  - Updated `root.zig`, `rx.zig`, `tx.zig` to use MmioDevice
+
+**New API:**
+```zig
+const Reg = enum(u64) { ctrl = 0x0000, status = 0x0008, ... };
+const DeviceRegs = MmioDevice(Reg);
+
+// Usage:
+const status = self.regs.read(.status);
+self.regs.write(.ctrl, value);
+const ctrl = self.regs.readTyped(.ctrl, DeviceCtl);
+```
 
 ---
 
@@ -147,8 +152,17 @@ Replace Limine with custom Zig UEFI app to fully showcase Zig capabilities.
 
 ## Priority Order
 
-1. **Immediate:** Syscall dispatch + user_mem generics (quick wins, improve existing code)
-2. **Phase 1:** Zero-cost HAL (foundation for type-safe hardware access)
+1. ~~**Immediate:** Syscall dispatch + user_mem generics~~ **DONE**
+2. ~~**Phase 1:** Zero-cost HAL~~ **DONE**
 3. **Phase 2:** Async I/O (major architectural shift, high impact)
 4. **Phase 3:** Microkernel transition (proves the architecture)
 5. **Phase 4:** UEFI loader (optional, "flex" feature)
+
+---
+
+## Future Improvements (from Phase 1)
+
+Other drivers that could benefit from MmioDevice refactoring:
+- XHCI/EHCI USB controllers (currently duplicate readReg/writeReg patterns)
+- AHCI storage controller
+- Any new MMIO-based drivers

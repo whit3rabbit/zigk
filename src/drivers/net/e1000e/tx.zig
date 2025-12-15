@@ -135,7 +135,7 @@ pub fn transmit(driver: *E1000e, data: []const u8) bool {
     // Notify hardware by writing TDT
     // Per Intel spec: TDT points one beyond the last valid descriptor
     // Setting TDT = tx_cur queues the descriptor we just wrote
-    driver.writeReg(regs.Reg.TDT, driver.tx_cur);
+    driver.regs.write(.tdt, driver.tx_cur);
 
     driver.tx_packets += 1;
     driver.tx_bytes += data.len;
@@ -146,8 +146,8 @@ pub fn transmit(driver: *E1000e, data: []const u8) bool {
 /// Check for TX ring stall and reset if stuck
 /// Call periodically from timer tick or worker thread
 pub fn checkTxWatchdog(driver: *E1000e) void {
-    const tdh = driver.readReg(regs.Reg.TDH);
-    const tdt = driver.readReg(regs.Reg.TDT);
+    const tdh = driver.regs.read(.tdh);
+    const tdt = driver.regs.read(.tdt);
 
     // If TDH == TDT, ring is empty - no stall possible
     if (tdh == tdt) {
@@ -178,8 +178,8 @@ pub fn resetTx(driver: *E1000e) void {
     driver.writeTctl(tctl);
 
     // Reset head and tail pointers
-    driver.writeReg(regs.Reg.TDH, 0);
-    driver.writeReg(regs.Reg.TDT, 0);
+    driver.regs.write(.tdh, 0);
+    driver.regs.write(.tdt, 0);
     driver.tx_cur = 0;
 
     // Mark all descriptors as done
