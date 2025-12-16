@@ -1,14 +1,14 @@
-// PS/2 Mouse Driver
-//
-// Handles mouse input via IRQ12, providing movement deltas and button events.
-// Uses a ring buffer to store mouse events for userspace consumption.
-//
-// Features:
-//   - Standard 3-byte PS/2 mouse protocol
-//   - Optional 4-byte protocol with scroll wheel (IntelliMouse)
-//   - Button tracking (left, right, middle)
-//   - Movement delta accumulation
-//   - Thread-safe via Spinlock
+//! PS/2 Mouse Driver
+//!
+//! Handles mouse input via IRQ12 (PS/2 controller port 2).
+//! Parses 3-byte standard packets or 4-byte IntelliMouse packets (with scroll wheel).
+//! Provides movement deltas and button events.
+//!
+//! Features:
+//! - Auto-detection of IntelliMouse extension (scroll wheel).
+//! - Packet synchronization/resync logic.
+//! - Ring buffer for event storage.
+//! - Integration with high-level input subsystem.
 
 const hal = @import("hal");
 const sync = @import("sync");

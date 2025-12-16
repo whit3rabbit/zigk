@@ -1,10 +1,12 @@
-// Signal Handling Logic
-//
-// Implements signal delivery and return mechanisms.
-//
-// Key components:
-// - checkSignals: Called on return to user mode to deliver pending signals.
-// - sys_rt_sigreturn: Restores context after signal handler returns.
+//! Signal Handling Subsystem
+//!
+//! Implements POSIX-style signal delivery and return mechanisms.
+//!
+//! Key components:
+//! - `checkSignals`: Called by the architecture layer (IDT) when returning to user mode.
+//!   Checks for pending signals and modifies the interrupt frame to invoke the signal handler.
+//! - `setupSignalFrame`: Constructs the `ucontext_t` structure on the user stack.
+//! - `sys_rt_sigreturn` (implied): Restores the thread context from the user stack after the handler returns.
 
 const std = @import("std");
 const sched = @import("sched");
@@ -16,8 +18,13 @@ const console = @import("console");
 
 const UserPtr = user_mem.UserPtr;
 
-/// Check for pending signals and set up delivery if needed
-/// Returns the (possibly modified) interrupt frame to restore
+/// Check for pending signals and set up delivery if needed.
+///
+/// This function is the hook called by `src/arch/x86_64/idt.zig`'s `dispatch_interrupt`
+/// when returning to user mode (RPL 3).
+///
+/// Returns the (possibly modified) interrupt frame pointer. If a signal is delivered,
+/// the frame will point to the signal handler with the stack prepared.
 pub fn checkSignals(frame: *hal.idt.InterruptFrame) *hal.idt.InterruptFrame {
     const current_thread = sched.getCurrentThread() orelse return frame;
 
@@ -61,7 +68,11 @@ pub fn checkSignals(frame: *hal.idt.InterruptFrame) *hal.idt.InterruptFrame {
     return setupSignalFrame(frame, signum, action);
 }
 
-/// Set up the user stack for signal delivery
+/// Set up the user stack for signal delivery.
+///
+/// Pushes a `ucontext_t` structure onto the user stack containing the current
+/// register state. Updates the interrupt frame to point RIP to the handler
+/// and RSP to the new stack location.
 fn setupSignalFrame(frame: *hal.idt.InterruptFrame, signum: usize, action: uapi.signal.SigAction) *hal.idt.InterruptFrame {
     // We need to save the current context (registers) to the user stack
     // so sigreturn can restore them later.
@@ -168,6 +179,7 @@ fn setupSignalFrame(frame: *hal.idt.InterruptFrame, signum: usize, action: uapi.
 }
 
 /// Initialize signal subsystem
+/// Registers the `checkSignals` callback with the interrupt dispatcher.
 pub fn init() void {
     // Register the signal checker with the IDT/arch layer
     hal.idt.setSignalChecker(checkSignals);

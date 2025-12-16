@@ -1,7 +1,12 @@
-// MBR (Master Boot Record) Parsing
-//
-// MBR is found at LBA 0. It contains 4 partition entries starting at offset 446 (0x1BE).
-// Signature 0x55AA is at offset 510.
+//! MBR (Master Boot Record) Parsing
+//!
+//! Provides structures for parsing legacy MBR partition tables.
+//! MBR is found at LBA 0 and contains 4 primary partition entries.
+//!
+//! Layout:
+//! - 0x000 - 0x1BD: Bootstrap code (ignored by us).
+//! - 0x1BE - 0x1FD: Partition table (4 entries, 16 bytes each).
+//! - 0x1FE - 0x1FF: Signature (0x55, 0xAA).
 
 const std = @import("std");
 

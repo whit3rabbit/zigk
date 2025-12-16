@@ -1,18 +1,18 @@
-// Thread Management
-//
-// Provides thread creation, destruction, and state management.
-// Each thread has its own kernel stack with a guard page for overflow detection.
-//
-// Design:
-//   - Thread struct contains saved context, stacks, and FPU state
-//   - Kernel stacks allocated with guard page (unmapped page below stack)
-//   - FPU state preserved for userland threads
-//   - Thread IDs are globally unique, never reused during kernel lifetime
-//
-// Stack Layout (per thread):
-//   [Guard Page - unmapped] <- Bottom (low address)
-//   [Kernel Stack]          <- Stack grows down from top
-//   [Stack Top]             <- RSP starts here
+//! Thread Management
+//!
+//! Provides thread creation, destruction, and state management.
+//! Each thread has its own kernel stack with a guard page for overflow detection.
+//!
+//! Design:
+//!   - `Thread` struct contains saved context, stacks, and FPU state.
+//!   - Kernel stacks allocated with guard page (unmapped page below stack).
+//!   - FPU state preserved for userland threads.
+//!   - Thread IDs are globally unique, never reused during kernel lifetime.
+//!
+//! Stack Layout (per thread):
+//!   `[Guard Page - unmapped] <- Bottom (low address)`
+//!   `[Kernel Stack]          <- Stack grows down from top`
+//!   `[Stack Top]             <- RSP starts here`
 
 const std = @import("std");
 const hal = @import("hal");

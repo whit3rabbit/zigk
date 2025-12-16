@@ -1,3 +1,18 @@
+//! Hardware Initialization
+//!
+//! Orchestrates the initialization of hardware subsystems:
+//! - PCI Bus (Enumeration and ECAM setup)
+//! - Network (E1000e NIC, Loopback, TCP/IP stack)
+//! - USB (XHCI/EHCI host controllers)
+//! - Audio (AC97)
+//! - Storage (AHCI SATA)
+//! - VirtIO GPU (if present)
+//!
+//! Dependencies:
+//! - PMM/VMM must be initialized.
+//! - Scheduler must be initialized (for tick callbacks).
+//! - ACPI RSDP must be available (via Limine).
+
 const std = @import("std");
 const console = @import("console");
 const heap = @import("heap");
@@ -38,6 +53,10 @@ fn rxCallbackAdapter(data: []u8) void {
     _ = net.processFrame(&net_interface, &pkt);
 }
 
+/// Initialize the Network subsystem
+/// - Discovers PCI devices via ACPI/ECAM
+/// - Initializes E1000e NIC driver if found
+/// - Sets up TCP/IP stack and Loopback interface
 pub fn initNetwork() void {
     console.print("\n");
     console.info("Initializing network subsystem...", .{});
@@ -122,6 +141,8 @@ pub fn initNetwork() void {
     }
 }
 
+/// Initialize USB subsystem (XHCI/EHCI)
+/// Requires PCI and ECAM to be initialized by `initNetwork` first.
 pub fn initUsb() void {
     console.print("\n");
     console.info("Initializing USB subsystem...", .{});
@@ -139,6 +160,8 @@ pub fn initUsb() void {
     usb.initFromPci(devices, &ecam);
 }
 
+/// Initialize Audio subsystem (AC97)
+/// Requires PCI and ECAM.
 pub fn initAudio() void {
     console.print("\n");
     console.info("Initializing Audio subsystem...", .{});
@@ -163,6 +186,9 @@ pub fn initAudio() void {
     }
 }
 
+/// Initialize Storage subsystem (AHCI SATA)
+/// Scans for AHCI controllers and connected drives.
+/// Registers found partitions with DevFS.
 pub fn initStorage() void {
     console.print("\n");
     console.info("Initializing storage subsystem...", .{});
@@ -221,6 +247,8 @@ pub fn initStorage() void {
     }
 }
 
+/// Initialize VirtIO GPU driver
+/// Returns the driver instance if successful, enabling the console to switch modes.
 pub fn initVirtioGpu() ?*video_driver.VirtioGpuDriver {
     console.print("\n");
     console.info("Checking for VirtIO-GPU...", .{});

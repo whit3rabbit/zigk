@@ -1,3 +1,13 @@
+//! InitRD (Initial RAM Disk) Filesystem
+//!
+//! Provides read-only access to files loaded by the bootloader as modules.
+//! The expected format is a USTAR tar archive.
+//!
+//! Usage:
+//! - Initialized by `init_proc.zig` with module data from Limine.
+//! - Used by `vfs.zig` to mount at `/`.
+//! - Supports `open`, `read`, `seek`, `stat`, `close`.
+
 const std = @import("std");
 const fd = @import("fd");
 const heap = @import("heap");

@@ -1,3 +1,11 @@
+//! Kernel Panic and Crash Handling
+//!
+//! Provides the core `panic` handler used by Zig's safety features and the kernel's
+//! own error handling mechanisms.
+//!
+//! Also handles user-mode exceptions (crashes), mapping hardware exceptions to POSIX signals
+//! and terminating the offending process.
+
 const std = @import("std");
 const hal = @import("hal");
 const console = @import("console");
@@ -8,7 +16,9 @@ pub fn halt() noreturn {
     hal.cpu.haltForever();
 }
 
-// Custom panic handler for freestanding environment
+/// Custom panic handler for freestanding environment
+/// Called by Zig's runtime on safety violations or explicit `@panic` calls.
+/// Prints the message and halts the CPU.
 pub fn panic(msg: []const u8, _: ?*std.builtin.StackTrace, _: ?usize) noreturn {
     // Disable interrupts to prevent further issues on this core
     hal.cpu.disableInterrupts();
@@ -22,6 +32,8 @@ pub fn panic(msg: []const u8, _: ?*std.builtin.StackTrace, _: ?usize) noreturn {
 }
 
 /// Handle user process crashes (exceptions in user mode)
+/// Called by the IDT exception handlers when an exception occurs in Ring 3.
+/// Maps the CPU exception vector to a POSIX signal and terminates the process.
 pub fn handleCrash(vector: u8, err_code: u64) noreturn {
     // Map exception vector to POSIX signal
     const signal: i32 = switch (vector) {

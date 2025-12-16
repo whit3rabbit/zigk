@@ -1,3 +1,11 @@
+//! Memory Initialization
+//!
+//! Orchestrates the initialization of the memory management subsystems:
+//! 1. PMM (Physical Memory Manager) using the Limine memory map.
+//! 2. VMM (Virtual Memory Manager) setting up kernel page tables.
+//! 3. Kernel Stack Allocator (with guard pages).
+//! 4. Kernel Heap (using the standard Zig allocator interface).
+
 const std = @import("std");
 const limine = @import("limine");
 const hal = @import("hal");
@@ -11,6 +19,12 @@ const boot = @import("boot.zig");
 const panic = @import("panic.zig");
 
 /// Initialize PMM, VMM, and Heap using Limine memory map
+///
+/// Steps:
+/// 1. Initialize PMM with memory map from bootloader.
+/// 2. Initialize VMM (kernel page tables).
+/// 3. Initialize Kernel Stack Allocator (allows creating threads with guard pages).
+/// 4. Allocate and initialize the Kernel Heap (free-list allocator).
 pub fn initMemoryManagement() void {
     console.print("\n");
     console.info("Initializing memory management...", .{});
@@ -57,6 +71,7 @@ pub fn initMemoryManagement() void {
 }
 
 /// Log Limine memory map entries
+/// Useful for debugging memory layout and availability.
 pub fn logMemoryMap(memmap: *const limine.MemoryMapResponse) void {
     var usable_memory: u64 = 0;
     var total_memory: u64 = 0;

@@ -1,17 +1,19 @@
-// Kernel Stack Allocator
-//
-// Manages kernel thread stacks with proper guard page protection.
-// Unlike HHDM-based stacks, this module allocates stacks in a dedicated
-// virtual address range with explicitly unmapped guard pages.
-//
-// Security: HHDM linearly maps all physical memory, so a "guard page"
-// calculated from HHDM is still actually mapped. This module solves that
-// by using a separate VA range where guard pages are truly unmapped.
-//
-// Layout per stack slot (5 pages = 20KB):
-//   [Guard Page (unmapped)] [Stack pages (4 pages)] [Stack Top]
-//
-// Stack grows downward, so overflow writes into the guard page trigger #PF.
+//! Kernel Stack Allocator
+//!
+//! Manages kernel thread stacks with proper guard page protection.
+//! Unlike HHDM-based stacks, this module allocates stacks in a dedicated
+//! virtual address range with explicitly unmapped guard pages.
+//!
+//! Security: HHDM linearly maps all physical memory, so a "guard page"
+//! calculated from HHDM is still actually mapped. This module solves that
+//! by using a separate VA range where guard pages are truly unmapped.
+//!
+//! Layout per stack slot (5 pages = 20KB):
+//!   `[Guard Page (unmapped)] [Stack pages (4 pages)] [Stack Top]`
+//!
+//! Stack grows downward, so overflow writes into the guard page trigger #PF.
+//!
+//! This module allocates stacks from a pre-reserved region `STACK_REGION_BASE`.
 
 const std = @import("std");
 const console = @import("console");
@@ -169,6 +171,7 @@ pub fn alloc() StackError!KernelStack {
 }
 
 /// Free a kernel stack
+/// Unmaps pages and returns them to PMM. Marks slot as free.
 pub fn free(stack: KernelStack) void {
     const held = stack_lock.acquire();
     defer held.release();
@@ -196,7 +199,8 @@ pub fn free(stack: KernelStack) void {
     console.debug("KernelStack: Freed slot {d}", .{stack.slot});
 }
 
-/// Check if an address is within a stack's guard page
+/// Check if an address is within a thread's guard page
+/// Used by the page fault handler to detect stack overflows.
 pub fn isGuardPage(addr: u64) bool {
     // Check if address is in our stack region
     if (addr < STACK_REGION_BASE or addr >= STACK_REGION_BASE + STACK_REGION_SIZE) {

@@ -1,11 +1,17 @@
-// Pipe Implementation
-//
-// Implements a unidirectional data channel (pipe).
-// Supports blocking reads and writes.
-//
-// Thread-safety:
-// - Protected by internal spinlock for buffer access.
-// - Supports multiple readers/writers (though POSIX pipe is typically 1:1).
+//! Pipe Implementation
+//!
+//! Implements a unidirectional data channel (pipe) for inter-process communication.
+//! Supports blocking and non-blocking reads and writes.
+//!
+//! Features:
+//! - Circular buffer storage (`PIPE_BUF_SIZE` = 4KB).
+//! - Support for multiple readers/writers (though typically 1:1).
+//! - Blocking I/O with process sleep/wakeup.
+//! - `EPIPE` generation on broken pipes (reader closed).
+//!
+//! Thread-safety:
+//! - Protected by internal spinlock for buffer access.
+//! - Hand-crafted synchronization with scheduler to prevent lost wakeups.
 
 const std = @import("std");
 const heap = @import("heap");

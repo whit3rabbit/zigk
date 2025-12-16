@@ -1,13 +1,21 @@
-// Kernel Synchronization Primitives
-//
-// Provides IRQ-safe spinlocks for protecting critical sections in the kernel.
-// All locking follows the acquire/release pattern with interrupt state preservation.
-//
-// Constitution Compliance (Principle IX - Heap Hygiene):
-//   - Spinlocks protect shared kernel state from interrupt-driven corruption
-//   - Per-subsystem locks enable fine-grained parallelism
-//
-// Spec Reference: Spec 003 FR-LOCK-01 through FR-LOCK-04
+//! Kernel Synchronization Primitives
+//!
+//! Provides IRQ-safe spinlocks for protecting critical sections in the kernel.
+//! All locking follows the acquire/release pattern with interrupt state preservation.
+//!
+//! Constitution Compliance (Principle IX - Heap Hygiene):
+//!   - Spinlocks protect shared kernel state from interrupt-driven corruption.
+//!   - Per-subsystem locks enable fine-grained parallelism.
+//!
+//! Usage:
+//! ```zig
+//! var my_lock = Spinlock{};
+//! {
+//!     const held = my_lock.acquire();
+//!     defer held.release();
+//!     // Critical section
+//! }
+//! ```
 
 const std = @import("std");
 
@@ -40,15 +48,10 @@ else
 
 /// IRQ-safe spinlock for kernel critical sections
 ///
-/// Usage:
-///   const held = lock.acquire();
-///   defer held.release();
-///   // Critical section here
-///
 /// Guarantees:
-///   - Interrupts are disabled during the critical section
-///   - Original interrupt state is restored on release
-///   - Atomic compare-and-swap for lock acquisition
+///   - Interrupts are disabled during the critical section.
+///   - Original interrupt state is restored on release.
+///   - Atomic compare-and-swap for lock acquisition.
 pub const Spinlock = struct {
     /// Lock state: 0 = unlocked, 1 = locked
     /// Using std.atomic.Value for atomic operations

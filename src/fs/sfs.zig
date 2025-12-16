@@ -1,16 +1,19 @@
-// Simple File System (SFS)
-//
-// A minimal read/write filesystem for block devices.
-// Structure:
-//   Block 0: Superblock
-//   Block 1-N: Root Directory (Fixed size)
-//   Block N+1...: Data Blocks (Contiguous allocation)
-//
-// Limitations:
-//   - Flat directory structure (no subdirectories)
-//   - Contiguous file allocation (fragmentation issues, but simple)
-//   - Fixed number of files (determined by root dir size)
-//   - No permissions/ownership storage
+//! Simple File System (SFS)
+//!
+//! A minimal read/write filesystem for block devices (e.g., AHCI SATA drives).
+//!
+//! Structure:
+//! - Block 0: Superblock (Magic, size, file count, next free block).
+//! - Block 1-N: Root Directory (Fixed size, flat list of `DirEntry`s).
+//! - Block N+1...: Data Blocks (Contiguous allocation).
+//!
+//! Limitations:
+//! - Flat directory structure (no subdirectories).
+//! - Contiguous file allocation (prone to fragmentation, simplifies read/write).
+//! - Fixed number of files (determined by root directory size).
+//! - No permissions/ownership storage.
+//!
+//! Intended for basic persistence until a full FS (EXT2/FAT) is implemented.
 
 const std = @import("std");
 const fd = @import("fd");

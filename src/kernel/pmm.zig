@@ -1,18 +1,18 @@
-// Physical Memory Manager (PMM)
-//
-// Manages physical page frames using a bitmap allocator.
-// Parses memory map to identify usable regions.
-// Uses Limine boot protocol for memory map.
-//
-// Design:
-//   - Bitmap-based allocator: 1 bit per 4KB page
-//   - Tracks allocated pages count for leak detection
-//   - Uses HHDM for all physical memory access
-//
-// Memory Layout (after init):
-//   - Kernel and modules: Reserved by bootloader
-//   - Bitmap: Placed in first usable region large enough
-//   - Free pages: All usable regions minus bitmap and reserved areas
+//! Physical Memory Manager (PMM)
+//!
+//! Manages physical page frames using a bitmap allocator.
+//! Parses the memory map provided by Limine to identify usable regions.
+//!
+//! Features:
+//! - Bitmap-based allocator: 1 bit per 4KB page.
+//! - Reference counting: 16 bits per page (supports CoW/shared memory).
+//! - Metadata placement: Dynamically finds a large enough usable region to store its own structures.
+//! - HHDM usage: All physical memory access goes through the Higher Half Direct Map.
+//!
+//! Memory Layout (after init):
+//! - Kernel and modules: Reserved by bootloader
+//! - Bitmap: Placed in first usable region large enough
+//! - Free pages: All usable regions minus bitmap and reserved areas
 
 const std = @import("std");
 const hal = @import("hal");

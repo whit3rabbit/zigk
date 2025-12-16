@@ -1,3 +1,17 @@
+//! Init Process Loading
+//!
+//! Responsible for identifying, loading, and starting the initial userspace process (PID 1).
+//!
+//! Functionality:
+//! - Scans Limine boot modules for suitable init candidates (test_asm, httpd, shell, doom).
+//! - Creates the first process structure and address space.
+//! - Uses the ELF loader to load the executable into memory.
+//! - Sets up the user stack with arguments (argv) and environment (envp).
+//! - Initializes TLS/TCB (Thread Control Block) for the main thread.
+//! - Hands the thread over to the scheduler.
+//!
+//! Also handles the initialization of the Initial RAM Disk (InitRD) if provided.
+
 const std = @import("std");
 const limine = @import("limine");
 const console = @import("console");
@@ -14,8 +28,14 @@ const heap = @import("heap");
 const pci = @import("pci");
 
 /// Load the init process (httpd or shell) into a new user address space
-/// Creates a proper Process struct with FD table (stdin/stdout/stderr pre-opened)
-/// and uses the ELF loader to parse and load the executable.
+///
+/// Steps:
+/// 1. Find the best candidate module (based on name priority).
+/// 2. Create a process struct and set it as current.
+/// 3. Load the ELF executable.
+/// 4. Setup stack and arguments.
+/// 5. Setup TLS.
+/// 6. Create the main thread and add to scheduler.
 pub fn loadInitProcess() void {
     console.info("Searching for init module...", .{});
 
@@ -359,7 +379,8 @@ fn spawnProcess(mod: *limine.Module, process_name: []const u8) void {
 }
 
 /// Initialize InitRD filesystem from Limine modules
-/// Searches for a module with "initrd" in its cmdline or path
+/// Searches for a module with "initrd" in its cmdline or path.
+/// If found, passes the data to the global InitRD instance.
 pub fn initInitRD(mods: []const *limine.Module) void {
     const get_str = struct {
         fn call(ptr: [*:0]const u8) []const u8 {

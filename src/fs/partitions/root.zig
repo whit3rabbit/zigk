@@ -1,7 +1,13 @@
-// Partition Management
-//
-// Handles scanning block devices for partition tables (MBR/GPT)
-// and registering them as devices in DevFS.
+//! Partition Management
+//!
+//! Handles scanning block devices for partition tables (MBR/GPT)
+//! and registering them as distinct devices in DevFS (e.g., `sda1`, `sda2`).
+//!
+//! Features:
+//! - Scans MBR (LBA 0) for legacy partitions.
+//! - Detects GPT Protective MBR and switches to GPT scanning (LBA 1+).
+//! - Registers a `Partition` struct as private data for `partition_ops`.
+//! - Provides block read/write operations offset by the partition start LBA.
 
 const std = @import("std");
 const ahci = @import("ahci");

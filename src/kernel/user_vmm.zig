@@ -1,25 +1,19 @@
-// User Virtual Memory Manager
-//
-// Manages userspace virtual address allocations via mmap/munmap/mprotect.
-// Tracks Virtual Memory Areas (VMAs) per-process for memory region management.
-//
-// Design:
-//   - Simple linked list of VMAs per process
-//   - First-fit address allocation for mmap without hint
-//   - Anonymous mappings only (MAP_ANONYMOUS) for MVP
-//   - Interfaces with VMM for actual page table operations
-//   - Interfaces with PMM for physical page allocation
-//
-// Linux mmap flags supported:
-//   - MAP_ANONYMOUS: Memory not backed by file
-//   - MAP_PRIVATE: Private copy-on-write (MVP: just private)
-//   - MAP_FIXED: Use exact address (no address search)
-//
-// Linux protection flags (PROT_*):
-//   - PROT_READ: Pages can be read
-//   - PROT_WRITE: Pages can be written
-//   - PROT_EXEC: Pages can be executed
-//   - PROT_NONE: Pages cannot be accessed
+//! User Virtual Memory Manager
+//!
+//! Manages userspace virtual address allocations via mmap/munmap/mprotect.
+//! Tracks Virtual Memory Areas (VMAs) per-process for memory region management.
+//!
+//! Design:
+//!   - Simple linked list of VMAs per process.
+//!   - First-fit address allocation for mmap without hint.
+//!   - Interfaces with VMM for actual page table operations.
+//!   - Interfaces with PMM for physical page allocation.
+//!
+//! Linux mmap flags supported:
+//!   - MAP_ANONYMOUS: Memory not backed by file.
+//!   - MAP_PRIVATE: Private copy-on-write (MVP: just private).
+//!   - MAP_FIXED: Use exact address (no address search).
+//!   - MAP_DEVICE: Internal flag for MMIO/device mappings (skips PMM free).
 
 const std = @import("std");
 const hal = @import("hal");

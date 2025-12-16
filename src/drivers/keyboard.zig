@@ -1,22 +1,14 @@
-// PS/2 Keyboard Driver
-//
-// Handles keyboard input via IRQ1, providing both raw scancodes and ASCII characters.
-// Uses dual ring buffers to support both shell input and game scancode reading.
-//
-// Spec Reference: Spec 003 FR-030, FR-030a/b
-//
-// Features:
-//   - Raw scancode buffer (64 entries) for games
-//   - ASCII character buffer (256 entries) for shell
-//   - KeyEvent buffer (64 entries) for rich event handling
-//   - PS/2 Set 1 scancode to ASCII translation (comptime-generated tables)
-//   - Modifier key tracking (Shift, Ctrl, Alt)
-//   - Extended key support (arrows, Insert, Delete, Home, End, Page Up/Down)
-//   - Thread-safe via Spinlock
-//
-// SCANCODE SET ASSUMPTION:
-// This driver assumes Set 1 (XT) scancode mode, which is the default for most
-// PC keyboards when the i8042 controller is in translation mode.
+//! PS/2 Keyboard Driver
+//!
+//! Handles keyboard input via IRQ1 (PS/2 controller port 1).
+//! Provides both raw scancodes (for games) and ASCII characters (for shell).
+//!
+//! Features:
+//! - Dual ring buffers: `scancode_buffer` (raw) and `ascii_buffer` (translated).
+//! - Rich `KeyEvent` type for advanced input handling.
+//! - PS/2 Set 1 scancode support with layout translation (US QWERTY, Dvorak).
+//! - Blocking reads with optional timeout.
+//! - Proper interrupt/thread synchronization to prevent lost wakeups.
 
 const hal = @import("hal");
 const sync = @import("sync");
@@ -990,16 +982,10 @@ test "layout switching" {
 
     // Switch to Dvorak
     setLayout(layouts.dvorak);
-    try std.testing.expectEqual(@as(u8, 'a'), current_layout.unshifted[0x1E]); // Wait, Dvorak 'a' is at same scan code 0x1E? No...
-    // 0x1E 'a' in US is 'a'. In Dvorak 0x1E ('a' position) is 'a'.
-    // Wait, Dvorak layout:
-    // ASDF row: A O E U I D H T N S
-    // US:       A S D F G H J K L ;
-    // Scan code 0x1E is 'A' (leftmost home row char).
-    // In Dvorak, key to right of CapsLock (typically 'A') IS 'A'.
-    // So 0x1E IS 'a' in both.
+    // In Dvorak, scancode 0x1E ('a' position) is still 'a'.
+    try std.testing.expectEqual(@as(u8, 'a'), current_layout.unshifted[0x1E]);
     
-    // Let's test 's' (0x1F). US='s', Dvorak='o'.
+    // Test 's' key (0x1F): US='s', Dvorak='o'
     try std.testing.expectEqual(@as(u8, 'o'), current_layout.unshifted[0x1F]);
     
     // Switch back
