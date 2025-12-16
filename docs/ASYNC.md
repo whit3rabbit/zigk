@@ -369,45 +369,55 @@ src/drivers/
 - SQPOLL mode for kernel-side SQ polling
 - Vectored I/O (READV, WRITEV)
 
-## Design Decisions: Copy-Based vs mmap Ring Model
+## Design Decisions: Shared Memory Ring Model
 
-### Current Implementation: Copy-Based
+### Current Implementation: mmap Shared Rings (Linux-Compatible)
 
-Our io_uring uses explicit syscall-based data transfer:
-- SQEs copied from userspace via `sqes_ptr` parameter
-- CQEs copied to userspace via `cqes_ptr` parameter
-- Extended `io_uring_enter` signature (6 args vs Linux's 4)
+Our io_uring now uses Linux-compatible shared memory rings:
+- Physical pages allocated for SQ ring, CQ ring, and SQE array
+- Userspace maps these via `mmap()` on the io_uring fd
+- Kernel and userspace share the same memory (true zero-copy)
+- Standard mmap offsets: `IORING_OFF_SQ_RING`, `IORING_OFF_CQ_RING`, `IORING_OFF_SQES`
 
-### Linux's Approach: Shared Memory (mmap)
+### Ring Structure
 
-Linux io_uring maps kernel memory directly into userspace:
-- `io_uring_setup` returns offsets for mmap
-- SQ/CQ rings in shared pages (no syscall for submission possible with SQPOLL)
-- True zero-copy between kernel and user
+**SQ Ring (Submission Queue):**
+```
+| head | tail | ring_mask | ring_entries | flags | dropped | array[entries] |
+```
+- Userspace writes to `tail`, kernel reads and updates `head`
+- `array[]` contains indices into the SQE array
 
-### Trade-off Analysis
+**CQ Ring (Completion Queue):**
+```
+| head | tail | ring_mask | ring_entries | overflow | cqes[entries] |
+```
+- Kernel writes to `tail`, userspace reads and updates `head`
+- `cqes[]` contains completion entries directly
 
-| Aspect | Copy-Based (zigk) | mmap (Linux) |
-|--------|-------------------|--------------|
-| Latency | ~100-500ns per op | Near-zero for batched ops |
-| Security | Explicit validation | Requires careful bounds |
-| Complexity | ~50 lines | ~300 lines + VMA tracking |
-| Debugging | Easy - syscall traces | Hard - shared state |
-| Compatibility | Custom interface | liburing works directly |
+**SQE Array:**
+- Separate mmap region containing the actual SQE structures
+- Indexed by values in SQ ring's array
 
-### Why Copy-Based for Now
+### Memory Barriers
 
-1. **Security-first**: User pointers validated on every access
-2. **Simplicity**: No page table manipulation per-ring
-3. **Debugging**: All transfers visible in syscall traces
-4. **Incremental**: Can upgrade to mmap later
+Shared memory requires proper synchronization:
+- `lfence` before reading indices (load barrier)
+- `sfence` after writing entries (store barrier)
+- `mfence` around index updates (full barrier)
 
-### Path to mmap (Future)
+### Legacy Copy Mode (Still Supported)
 
-The VMM already supports shared kernel/user memory via `MAP_DEVICE`:
-1. Allocate contiguous kernel pages for SQ/CQ
-2. Map same physical pages into user address space
-3. Return mmap offsets from `io_uring_setup`
-4. Remove sqes_ptr/cqes_ptr from `io_uring_enter`
+For simple testing, the extended interface is still available:
+- Pass non-zero `sqes_ptr` to copy SQEs from userspace
+- Pass non-zero `cqes_ptr` to copy CQEs to userspace
+- Useful for debugging or when mmap is not desired
 
-Estimated effort: ~200-300 lines in `io_uring.zig` + `user_vmm.zig`.
+### Implementation Details
+
+Key changes in `src/kernel/syscall/io_uring.zig`:
+- `IoUringInstance` stores physical addresses for each ring region
+- `allocInstance()` uses `pmm.allocZeroedPages()` for ring memory
+- `ioUringMmap()` file operation returns physical addresses for mapping
+- `submitFromSharedMemory()` reads SQEs directly from kernel virtual address (via HHDM)
+- Ring headers initialized with proper `ring_mask` and `ring_entries`
