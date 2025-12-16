@@ -52,3 +52,29 @@ pub const MsixAllocation = msi.MsixAllocation;
 // Re-export functions
 pub const enumerate = enumeration.enumerate;
 pub const initFromAcpi = enumeration.initFromAcpi;
+
+// =============================================================================
+// Global PCI State (set during kernel init, read by syscalls)
+// =============================================================================
+
+/// Global PCI device list (set by init_hw.initNetwork)
+pub var global_devices: ?*const DeviceList = null;
+
+/// Global PCI ECAM accessor (set by init_hw.initNetwork)
+pub var global_ecam: ?Ecam = null;
+
+/// Set global PCI state (called by init_hw during boot)
+pub fn setGlobalState(devices: *const DeviceList, ecam_opt: ?Ecam) void {
+    global_devices = devices;
+    global_ecam = ecam_opt;
+}
+
+/// Get global PCI device list
+pub fn getDevices() ?*const DeviceList {
+    return global_devices;
+}
+
+/// Get global PCI ECAM accessor
+pub fn getEcam() ?Ecam {
+    return global_ecam;
+}

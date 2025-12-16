@@ -3,8 +3,8 @@
 | Goal | Status |
 |------|--------|
 | Zero-Cost HAL (comptime) | **Done** - MmioDevice wrapper with comptime offsets |
-| Capabilities-Based Microkernel | Not implemented - drivers in kernel space |
-| Asynchronous I/O | **Done** - io_uring syscalls, reactor pattern, timer wheel |
+| Capabilities-Based Microkernel | **Done** - Userspace VirtIO drivers with MMIO/DMA/PCI capabilities |
+| Asynchronous I/O | **Done** - io_uring with mmap shared rings, reactor pattern, timer wheel |
 | Safe Unsafe Code | Well implemented - UserPtr, error handling, copyStructFromUser |
 
 ---
@@ -123,24 +123,49 @@ See [docs/ASYNC.md](docs/ASYNC.md) for detailed documentation.
 
 ---
 
-## Phase 3: Microkernel Transition (create a new branch in git for this)
+## Phase 3: Microkernel Transition - COMPLETE
 
-Move one driver to userspace to prove the concept. Start with UART (easiest).
+Moved drivers to userspace with capability-based access to hardware.
 
-### Tasks
+### Completed Tasks
 
-- [ ] **Implement IPC syscalls**
-  - `sys_send(target_pid, msg)` in `src/kernel/syscall/ipc.zig`
-  - `sys_recv()` for receiving messages
+- [x] **Implement IPC syscalls** (`src/kernel/syscall/ipc.zig`)
+  - `sys_send(target_pid, msg)` - Send message to process
+  - `sys_recv()` - Receive messages (blocking)
 
-- [ ] **Create Capability objects**
-  - `InterruptCapability` kernel object
-  - `sys_wait_interrupt(irq_cap)` syscall
+- [x] **Create Capability objects** (`src/kernel/capabilities/root.zig`)
+  - `InterruptCapability` - Wait for hardware interrupts
+  - `IoPortCapability` - Access I/O ports
+  - `MmioCapability` - Map physical MMIO regions
+  - `DmaMemoryCapability` - Allocate DMA-capable memory
+  - `PciConfigCapability` - Access PCI configuration space
 
-- [ ] **Create userspace UART driver**
-  - Move `src/drivers/serial/uart.zig` logic to `src/user/drivers/uart/main.zig`
-  - Kernel `sys_write` to stdout sends IPC to UART driver process
-  - UART driver waits for IPC, writes to I/O port, waits for interrupt
+- [x] **Hardware access syscalls**
+  - `sys_wait_interrupt(irq)` (1022) - Block until interrupt fires
+  - `sys_inb/outb` (1023/1024) - Port I/O for legacy devices
+  - `sys_mmap_phys` (1030) - Map MMIO regions into userspace
+  - `sys_alloc_dma` (1031) - Allocate DMA memory with known physical address
+  - `sys_free_dma` (1032) - Free DMA memory
+  - `sys_pci_enumerate` (1033) - List PCI devices
+  - `sys_pci_config_read/write` (1034/1035) - PCI config space access
+
+- [x] **Userspace UART driver** (`src/user/drivers/uart/main.zig`)
+  - Forked architecture: RX handler (interrupt) + TX handler (IPC)
+  - Uses port I/O syscalls for COM1 access
+
+- [x] **Userspace PS/2 driver** (`src/user/drivers/ps2/main.zig`)
+  - Keyboard and mouse input handling
+
+- [x] **Userspace VirtIO-Net driver** (`src/user/drivers/virtio_net/main.zig`)
+  - PCI enumeration to find VirtIO device
+  - MMIO BAR mapping via mmap_phys
+  - DMA allocation for virtqueues
+  - VirtIO device initialization
+  - Forked RX/TX handlers
+
+- [x] **Userspace VirtIO-Blk driver** (`src/user/drivers/virtio_blk/main.zig`)
+  - Block device access via IPC server
+  - Single request queue with polling
 
 ---
 
@@ -189,5 +214,5 @@ Replace Limine with custom Zig UEFI app to fully showcase Zig capabilities.
 1. ~~**Immediate:** Syscall dispatch + user_mem generics~~ **DONE**
 2. ~~**Phase 1:** Zero-cost HAL~~ **DONE**
 3. ~~**Phase 2:** Async I/O (major architectural shift, high impact)~~ **DONE**
-4. **Phase 3:** Microkernel transition (proves the architecture)
+4. ~~**Phase 3:** Microkernel transition (proves the architecture)~~ **DONE**
 5. **Phase 4:** UEFI loader (optional, "flex" feature)

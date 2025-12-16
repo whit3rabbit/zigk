@@ -275,6 +275,7 @@ const sfs_ops = fd.FileOps{
     .seek = sfsSeek,
     .stat = sfsStat,
     .ioctl = null,
+    .mmap = null,
 };
 
 fn sfsRead(file_desc: *fd.FileDescriptor, buf: []u8) isize {

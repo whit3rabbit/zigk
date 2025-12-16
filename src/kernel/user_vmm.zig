@@ -553,7 +553,8 @@ pub const UserVmm = struct {
     // =========================================================================
 
     /// Find a free virtual address range of given size
-    fn findFreeRange(self: *UserVmm, size: usize) ?u64 {
+    /// Public for use by MMIO/DMA syscalls
+    pub fn findFreeRange(self: *UserVmm, size: usize) ?u64 {
         var search_addr: u64 = USER_MMAP_START;
 
         // Walk VMAs looking for a gap

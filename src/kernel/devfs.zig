@@ -35,6 +35,7 @@ pub const console_ops = FileOps{
     .seek = null, // Not seekable
     .stat = null,
     .ioctl = null,
+    .mmap = null,
 };
 
 /// Read from console (keyboard input)
@@ -101,6 +102,7 @@ pub const null_ops = FileOps{
     .seek = null,
     .stat = null,
     .ioctl = null,
+    .mmap = null,
 };
 
 /// Read from /dev/null always returns EOF (0 bytes)
@@ -128,6 +130,7 @@ pub const zero_ops = FileOps{
     .seek = null,
     .stat = null,
     .ioctl = null,
+    .mmap = null,
 };
 
 /// Read from /dev/zero fills buffer with zeros

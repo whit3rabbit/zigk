@@ -24,6 +24,7 @@ const fd_mod = @import("fd");
 const sched = @import("sched");
 const hal = @import("hal");
 const heap = @import("heap");
+const pmm = @import("pmm");
 const base = @import("base.zig");
 const net = @import("net");
 const socket = net.transport.socket;
@@ -41,23 +42,55 @@ const MAX_RINGS_PER_PROCESS: usize = 4;
 const MAX_RING_ENTRIES: u32 = 256;
 const MIN_RING_ENTRIES: u32 = 1;
 
-/// io_uring instance state
+/// SQ ring header layout (at start of sq_ring page)
+const SqRingHeader = extern struct {
+    head: u32,           // Consumer index (kernel reads)
+    tail: u32,           // Producer index (user writes)
+    ring_mask: u32,      // entries - 1
+    ring_entries: u32,   // Number of entries
+    flags: u32,
+    dropped: u32,
+    // Followed by u32[entries] array of SQE indices
+};
+
+/// CQ ring header layout (at start of cq_ring page)
+const CqRingHeader = extern struct {
+    head: u32,           // Consumer index (user reads)
+    tail: u32,           // Producer index (kernel writes)
+    ring_mask: u32,
+    ring_entries: u32,
+    overflow: u32,
+    // Followed by CQE[entries] array
+};
+
+/// io_uring instance state with shared memory rings
 pub const IoUringInstance = struct {
-    /// Submission queue entries (kernel-side copy)
-    sq_entries: []io_ring.IoUringSqe,
+    // =========================================================================
+    // Shared Memory Rings (physical pages mapped via HHDM)
+    // =========================================================================
 
-    /// Completion queue entries (kernel-side buffer)
-    cq_entries: []io_ring.IoUringCqe,
+    /// SQ ring physical address (for mmap)
+    sq_ring_phys: u64,
+    /// SQ ring size in bytes
+    sq_ring_size: usize,
+    /// SQ ring kernel virtual address (via HHDM)
+    sq_ring_virt: u64,
 
-    /// SQ head/tail (shared with userspace via mmap in real Linux, here we copy)
-    sq_head: u32,
-    sq_tail: u32,
+    /// CQ ring physical address
+    cq_ring_phys: u64,
+    /// CQ ring size in bytes
+    cq_ring_size: usize,
+    /// CQ ring kernel virtual address
+    cq_ring_virt: u64,
 
-    /// CQ head/tail
-    cq_head: u32,
-    cq_tail: u32,
+    /// SQE array physical address
+    sqes_phys: u64,
+    /// SQE array size in bytes
+    sqes_size: usize,
+    /// SQE array kernel virtual address
+    sqes_virt: u64,
 
-    /// Ring size
+    /// Ring configuration
     sq_ring_entries: u32,
     cq_ring_entries: u32,
 
@@ -73,12 +106,15 @@ pub const IoUringInstance = struct {
 
     pub fn init() IoUringInstance {
         return .{
-            .sq_entries = &.{},
-            .cq_entries = &.{},
-            .sq_head = 0,
-            .sq_tail = 0,
-            .cq_head = 0,
-            .cq_tail = 0,
+            .sq_ring_phys = 0,
+            .sq_ring_size = 0,
+            .sq_ring_virt = 0,
+            .cq_ring_phys = 0,
+            .cq_ring_size = 0,
+            .cq_ring_virt = 0,
+            .sqes_phys = 0,
+            .sqes_size = 0,
+            .sqes_virt = 0,
             .sq_ring_entries = 0,
             .cq_ring_entries = 0,
             .pending_requests = undefined,
@@ -88,14 +124,45 @@ pub const IoUringInstance = struct {
         };
     }
 
-    /// Get number of SQEs ready to submit
-    pub fn sqReady(self: *const IoUringInstance) u32 {
-        return self.sq_tail -% self.sq_head;
+    /// Get SQ ring header via HHDM
+    fn getSqRing(self: *const IoUringInstance) *volatile SqRingHeader {
+        return @ptrFromInt(self.sq_ring_virt);
     }
 
-    /// Get number of CQEs ready to consume
+    /// Get CQ ring header via HHDM
+    fn getCqRing(self: *const IoUringInstance) *volatile CqRingHeader {
+        return @ptrFromInt(self.cq_ring_virt);
+    }
+
+    /// Get SQE array via HHDM
+    fn getSqes(self: *const IoUringInstance) [*]volatile io_ring.IoUringSqe {
+        return @ptrFromInt(self.sqes_virt);
+    }
+
+    /// Get CQE array (follows CQ ring header)
+    fn getCqes(self: *const IoUringInstance) [*]volatile io_ring.IoUringCqe {
+        const cq_header_size = @sizeOf(CqRingHeader);
+        const cqes_offset = std.mem.alignForward(usize, cq_header_size, 16);
+        return @ptrFromInt(self.cq_ring_virt + cqes_offset);
+    }
+
+    /// Get SQ index array (follows SQ ring header)
+    fn getSqArray(self: *const IoUringInstance) [*]volatile u32 {
+        const sq_header_size = @sizeOf(SqRingHeader);
+        const array_offset = std.mem.alignForward(usize, sq_header_size, 4);
+        return @ptrFromInt(self.sq_ring_virt + array_offset);
+    }
+
+    /// Get number of SQEs ready to submit (reads from shared memory)
+    pub fn sqReady(self: *const IoUringInstance) u32 {
+        const ring = self.getSqRing();
+        return ring.tail -% ring.head;
+    }
+
+    /// Get number of CQEs ready to consume (reads from shared memory)
     pub fn cqReady(self: *const IoUringInstance) u32 {
-        return self.cq_tail -% self.cq_head;
+        const ring = self.getCqRing();
+        return ring.tail -% ring.head;
     }
 
     /// Check if CQ has space for more completions
@@ -103,19 +170,27 @@ pub const IoUringInstance = struct {
         return self.cqReady() < self.cq_ring_entries;
     }
 
-    /// Add a CQE to the completion queue
-    pub fn addCqe(self: *IoUringInstance, user_data: u64, res: i32, flags: u32) bool {
+    /// Add a CQE to the completion queue (writes to shared memory)
+    pub fn addCqe(self: *IoUringInstance, user_data: u64, res: i32, cqe_flags: u32) bool {
         if (!self.cqHasSpace()) {
             return false;
         }
 
-        const idx = self.cq_tail & (self.cq_ring_entries - 1);
-        self.cq_entries[idx] = .{
+        const ring = self.getCqRing();
+        const cqes = self.getCqes();
+        const idx = ring.tail & (self.cq_ring_entries - 1);
+
+        // Write CQE to shared memory
+        cqes[idx] = .{
             .user_data = user_data,
             .res = res,
-            .flags = flags,
+            .flags = cqe_flags,
         };
-        self.cq_tail +%= 1;
+
+        // Memory barrier before updating tail
+        asm volatile ("mfence" ::: "memory");
+
+        ring.tail +%= 1;
         return true;
     }
 
@@ -174,10 +249,11 @@ const io_uring_file_ops = fd_mod.FileOps{
     .seek = null,
     .stat = null,
     .ioctl = null,
+    .mmap = ioUringMmap,
 };
 
-fn ioUringClose(fd: *fd_mod.FileDescriptor) void {
-    const data = getIoUringData(fd) orelse return;
+fn ioUringClose(fd: *fd_mod.FileDescriptor) isize {
+    const data = getIoUringData(fd) orelse return 0;
     freeInstance(data.instance_idx);
 
     // Free the fd data
@@ -185,6 +261,33 @@ fn ioUringClose(fd: *fd_mod.FileDescriptor) void {
         const allocator = heap.getKernelAllocator();
         const data_ptr: *IoUringFdData = @ptrCast(@alignCast(ptr));
         allocator.destroy(data_ptr);
+    }
+    return 0;
+}
+
+/// mmap handler for io_uring - returns physical address of ring region
+/// offset determines which ring to map:
+///   IORING_OFF_SQ_RING (0x0) - SQ ring header and index array
+///   IORING_OFF_CQ_RING (0x8000000) - CQ ring header and CQE array
+///   IORING_OFF_SQES (0x10000000) - SQE array
+fn ioUringMmap(fd: *fd_mod.FileDescriptor, offset: u64, size: *usize) u64 {
+    const data = getIoUringData(fd) orelse return 0;
+    const inst = getInstance(data.instance_idx) orelse return 0;
+
+    switch (offset) {
+        io_ring.IORING_OFF_SQ_RING => {
+            size.* = inst.sq_ring_size;
+            return inst.sq_ring_phys;
+        },
+        io_ring.IORING_OFF_CQ_RING => {
+            size.* = inst.cq_ring_size;
+            return inst.cq_ring_phys;
+        },
+        io_ring.IORING_OFF_SQES => {
+            size.* = inst.sqes_size;
+            return inst.sqes_phys;
+        },
+        else => return 0,
     }
 }
 
@@ -213,6 +316,7 @@ fn initInstances() void {
     instances_initialized = true;
 }
 
+/// Allocate physical pages for io_uring shared memory rings
 fn allocInstance(entries: u32) ?struct { idx: usize, instance: *IoUringInstance } {
     initInstances();
 
@@ -222,19 +326,62 @@ fn allocInstance(entries: u32) ?struct { idx: usize, instance: *IoUringInstance 
             inst.sq_ring_entries = entries;
             inst.cq_ring_entries = entries * 2; // CQ is typically 2x SQ
 
-            // Allocate entry arrays from kernel heap
-            const allocator = heap.getKernelAllocator();
+            // Calculate sizes for each ring region
+            // SQ ring: header + u32[entries] array
+            const sq_header_size = @sizeOf(SqRingHeader);
+            const sq_array_size = entries * @sizeOf(u32);
+            inst.sq_ring_size = std.mem.alignForward(usize, sq_header_size + sq_array_size, pmm.PAGE_SIZE);
 
-            inst.sq_entries = allocator.alloc(io_ring.IoUringSqe, entries) catch return null;
-            inst.cq_entries = allocator.alloc(io_ring.IoUringCqe, entries * 2) catch {
-                allocator.free(inst.sq_entries);
+            // CQ ring: header + CQE[entries*2] array
+            const cq_header_size = @sizeOf(CqRingHeader);
+            const cq_entries_size = (entries * 2) * @sizeOf(io_ring.IoUringCqe);
+            inst.cq_ring_size = std.mem.alignForward(usize, cq_header_size + cq_entries_size, pmm.PAGE_SIZE);
+
+            // SQE array: SQE[entries]
+            inst.sqes_size = std.mem.alignForward(usize, entries * @sizeOf(io_ring.IoUringSqe), pmm.PAGE_SIZE);
+
+            // Allocate physical pages for SQ ring
+            const sq_pages: u32 = @intCast(inst.sq_ring_size / pmm.PAGE_SIZE);
+            inst.sq_ring_phys = pmm.allocZeroedPages(sq_pages) orelse {
                 inst.allocated = false;
                 return null;
             };
+            inst.sq_ring_virt = pmm.physToVirt(inst.sq_ring_phys);
 
-            // Zero initialize
-            @memset(inst.sq_entries, std.mem.zeroes(io_ring.IoUringSqe));
-            @memset(inst.cq_entries, std.mem.zeroes(io_ring.IoUringCqe));
+            // Allocate physical pages for CQ ring
+            const cq_pages: u32 = @intCast(inst.cq_ring_size / pmm.PAGE_SIZE);
+            inst.cq_ring_phys = pmm.allocZeroedPages(cq_pages) orelse {
+                pmm.freePages(inst.sq_ring_phys, sq_pages);
+                inst.allocated = false;
+                return null;
+            };
+            inst.cq_ring_virt = pmm.physToVirt(inst.cq_ring_phys);
+
+            // Allocate physical pages for SQE array
+            const sqe_pages: u32 = @intCast(inst.sqes_size / pmm.PAGE_SIZE);
+            inst.sqes_phys = pmm.allocZeroedPages(sqe_pages) orelse {
+                pmm.freePages(inst.sq_ring_phys, sq_pages);
+                pmm.freePages(inst.cq_ring_phys, cq_pages);
+                inst.allocated = false;
+                return null;
+            };
+            inst.sqes_virt = pmm.physToVirt(inst.sqes_phys);
+
+            // Initialize ring headers
+            const sq_ring = inst.getSqRing();
+            sq_ring.head = 0;
+            sq_ring.tail = 0;
+            sq_ring.ring_mask = entries - 1;
+            sq_ring.ring_entries = entries;
+            sq_ring.flags = 0;
+            sq_ring.dropped = 0;
+
+            const cq_ring = inst.getCqRing();
+            cq_ring.head = 0;
+            cq_ring.tail = 0;
+            cq_ring.ring_mask = (entries * 2) - 1;
+            cq_ring.ring_entries = entries * 2;
+            cq_ring.overflow = 0;
 
             return .{ .idx = idx, .instance = inst };
         }
@@ -248,19 +395,23 @@ fn freeInstance(idx: usize) void {
     var inst = &instances[idx];
     if (!inst.allocated) return;
 
-    const allocator = heap.getKernelAllocator();
-
     // Free any pending requests
     for (0..inst.pending_count) |i| {
         io.pool.free(inst.pending_requests[i]);
     }
 
-    // Free entry arrays
-    if (inst.sq_entries.len > 0) {
-        allocator.free(inst.sq_entries);
+    // Free physical pages
+    if (inst.sq_ring_phys != 0) {
+        const sq_pages: u32 = @intCast(inst.sq_ring_size / pmm.PAGE_SIZE);
+        pmm.freePages(inst.sq_ring_phys, sq_pages);
     }
-    if (inst.cq_entries.len > 0) {
-        allocator.free(inst.cq_entries);
+    if (inst.cq_ring_phys != 0) {
+        const cq_pages: u32 = @intCast(inst.cq_ring_size / pmm.PAGE_SIZE);
+        pmm.freePages(inst.cq_ring_phys, cq_pages);
+    }
+    if (inst.sqes_phys != 0) {
+        const sqe_pages: u32 = @intCast(inst.sqes_size / pmm.PAGE_SIZE);
+        pmm.freePages(inst.sqes_phys, sqe_pages);
     }
 
     inst.* = IoUringInstance.init();
@@ -353,10 +504,7 @@ pub fn sys_io_uring_setup(entries: usize, params_ptr: usize) SyscallError!usize 
     };
 
     // Create file descriptor
-    const fd_table = base.getFdTable() orelse {
-        freeInstance(alloc_result.idx);
-        return error.EBADF;
-    };
+    const fd_table = base.getGlobalFdTable();
 
     const allocator = heap.getKernelAllocator();
     const fd_data = allocator.create(IoUringFdData) catch {
@@ -389,19 +537,23 @@ pub fn sys_io_uring_setup(entries: usize, params_ptr: usize) SyscallError!usize 
 ///
 /// Submit SQEs and/or wait for CQEs.
 ///
-/// Extended interface for copy-based ring model (not true shared memory):
-///   - SQEs are copied FROM userspace sqes_ptr
-///   - CQEs are copied TO userspace cqes_ptr
+/// Two modes of operation:
+///   1. Shared memory mode (Linux compatible): sqes_ptr=0, cqes_ptr=0
+///      - Reads SQEs from mmap'd shared memory
+///      - CQEs are available in mmap'd shared memory after return
+///   2. Copy mode (legacy): sqes_ptr/cqes_ptr provided
+///      - Copies SQEs from userspace pointer
+///      - Copies CQEs to userspace pointer
 ///
 /// Arguments:
 ///   ring_fd: File descriptor from io_uring_setup
 ///   to_submit: Number of SQEs to submit
-///   min_complete: Minimum CQEs to wait for (if GETEVENTS), also max CQEs to copy out
+///   min_complete: Minimum CQEs to wait for (if GETEVENTS)
 ///   flags: IORING_ENTER_* flags
-///   sqes_ptr: Pointer to userspace SQE array (required if to_submit > 0)
-///   cqes_ptr: Pointer to userspace CQE array for output (optional, for GETEVENTS)
+///   sqes_ptr: Pointer to userspace SQE array (0 for shared memory mode)
+///   cqes_ptr: Pointer to userspace CQE array (0 for shared memory mode)
 ///
-/// Returns: Number of SQEs submitted (or CQEs copied if only GETEVENTS)
+/// Returns: Number of SQEs submitted (or CQEs ready if only GETEVENTS in shared mode)
 pub fn sys_io_uring_enter(
     ring_fd: usize,
     to_submit: usize,
@@ -411,31 +563,84 @@ pub fn sys_io_uring_enter(
     cqes_ptr: usize,
 ) SyscallError!usize {
     // Get fd and validate
-    const fd_table = base.getFdTable() orelse return error.EBADF;
+    const fd_table = base.getGlobalFdTable();
     const fd = fd_table.get(ring_fd) orelse return error.EBADF;
     const data = getIoUringData(fd) orelse return error.EBADF;
     const inst = getInstance(data.instance_idx) orelse return error.EBADF;
 
     var submitted: usize = 0;
 
-    // Copy SQEs from userspace and submit
+    // Submit SQEs
     if (to_submit > 0) {
-        submitted = try copySqesAndSubmit(inst, sqes_ptr, to_submit);
+        if (sqes_ptr != 0) {
+            // Legacy copy mode: copy SQEs from userspace
+            submitted = try copySqesAndSubmit(inst, sqes_ptr, to_submit);
+        } else {
+            // Shared memory mode: read SQEs from mmap'd ring
+            submitted = try submitFromSharedMemory(inst, to_submit);
+        }
     }
 
     // Wait for completions if requested
     if (flags & io_ring.IORING_ENTER_GETEVENTS != 0) {
         waitForCompletions(inst, @intCast(min_complete));
 
-        // Copy CQEs to userspace if pointer provided
         if (cqes_ptr != 0 and min_complete > 0) {
+            // Legacy mode: copy CQEs to userspace
             const copied = try copyCompletionsToUser(inst, cqes_ptr, min_complete);
-            // If only getting events (no submit), return CQE count
             if (to_submit == 0) {
                 return copied;
             }
+        } else {
+            // Shared memory mode: CQEs already in shared memory
+            // Return count of ready CQEs
+            if (to_submit == 0) {
+                return inst.cqReady();
+            }
         }
     }
+
+    return submitted;
+}
+
+/// Submit SQEs from shared memory ring
+fn submitFromSharedMemory(inst: *IoUringInstance, to_submit: usize) SyscallError!usize {
+    const sq_ring = inst.getSqRing();
+    const sq_array = inst.getSqArray();
+    const sqes = inst.getSqes();
+
+    // Memory barrier before reading indices
+    asm volatile ("lfence" ::: "memory");
+
+    var submitted: usize = 0;
+    var head = sq_ring.head;
+    const tail = sq_ring.tail;
+
+    while (submitted < to_submit and head != tail) {
+        const idx = head & (inst.sq_ring_entries - 1);
+
+        // SQ array contains indices into SQE array
+        const sqe_idx = sq_array[idx] & (inst.sq_ring_entries - 1);
+        const sqe = &sqes[sqe_idx];
+
+        // Process the SQE (read from shared memory)
+        const result = processSqe(inst, sqe);
+        if (result) |_| {
+            submitted += 1;
+        } else |_| {
+            // On error, generate immediate CQE with EINVAL
+            _ = inst.addCqe(sqe.user_data, -@as(i32, 22), 0);
+            submitted += 1;
+        }
+
+        head +%= 1;
+    }
+
+    // Update SQ head (kernel consumed these entries)
+    sq_ring.head = head;
+
+    // Memory barrier after updating head
+    asm volatile ("sfence" ::: "memory");
 
     return submitted;
 }
@@ -458,7 +663,7 @@ pub fn sys_io_uring_register(
     nr_args: usize,
 ) SyscallError!usize {
     // Get fd and validate
-    const fd_table = base.getFdTable() orelse return error.EBADF;
+    const fd_table = base.getGlobalFdTable();
     const fd = fd_table.get(ring_fd) orelse return error.EBADF;
     _ = getIoUringData(fd) orelse return error.EBADF;
 

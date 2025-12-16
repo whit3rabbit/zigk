@@ -27,6 +27,7 @@ pub const block_ops = FileOps{
     .seek = blockSeek,
     .stat = null,
     .ioctl = null,
+    .mmap = null,
 };
 
 /// Read from block device

@@ -663,6 +663,7 @@ pub fn build(b: *std.Build) void {
     syscall_memory_module.addImport("base.zig", syscall_base_module);
     syscall_memory_module.addImport("uapi", uapi_module);
     syscall_memory_module.addImport("pmm", pmm_module);
+    syscall_memory_module.addImport("vmm", vmm_module);
     syscall_memory_module.addImport("user_mem", user_mem_module);
     syscall_memory_module.addImport("user_vmm", user_vmm_module);
     syscall_memory_module.addImport("console", console_module);
@@ -797,6 +798,32 @@ pub fn build(b: *std.Build) void {
     syscall_port_io_module.addImport("hal", hal_module);
     syscall_port_io_module.addImport("process", process_module);
 
+    // Create syscall mmio module (MMIO/DMA for userspace drivers)
+    const syscall_mmio_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/syscall/mmio.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    syscall_mmio_module.addImport("base.zig", syscall_base_module);
+    syscall_mmio_module.addImport("uapi", uapi_module);
+    syscall_mmio_module.addImport("console", console_module);
+    syscall_mmio_module.addImport("hal", hal_module);
+    syscall_mmio_module.addImport("vmm", vmm_module);
+    syscall_mmio_module.addImport("pmm", pmm_module);
+    syscall_mmio_module.addImport("heap", heap_module);
+    syscall_mmio_module.addImport("user_vmm", user_vmm_module);
+
+    // Create syscall pci module (PCI enumeration and config access)
+    const syscall_pci_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/syscall/pci_syscall.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    syscall_pci_module.addImport("base.zig", syscall_base_module);
+    syscall_pci_module.addImport("uapi", uapi_module);
+    syscall_pci_module.addImport("console", console_module);
+    syscall_pci_module.addImport("pci", pci_module);
+
     // Create syscall dispatch table module
     const syscall_table_module = b.createModule(.{
         .root_source_file = b.path("src/kernel/syscall/table.zig"),
@@ -823,6 +850,8 @@ pub fn build(b: *std.Build) void {
     syscall_table_module.addImport("ipc.zig", syscall_ipc_module);
     syscall_table_module.addImport("interrupt.zig", syscall_interrupt_module);
     syscall_table_module.addImport("port_io.zig", syscall_port_io_module);
+    syscall_table_module.addImport("mmio.zig", syscall_mmio_module);
+    syscall_table_module.addImport("pci_syscall.zig", syscall_pci_module);
 
     // Create kernel executable
     // NOTE: red_zone must be disabled for kernel code to prevent stack corruption
@@ -1039,6 +1068,42 @@ pub fn build(b: *std.Build) void {
     const install_ps2_driver = b.addInstallArtifact(ps2_driver, .{});
     b.getInstallStep().dependOn(&install_ps2_driver.step);
 
+    // Create VirtIO-Net Driver module (userspace VirtIO network driver)
+    const virtio_net_driver_mod = b.createModule(.{
+        .root_source_file = b.path("src/user/drivers/virtio_net/main.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+        .code_model = .small,
+    });
+    virtio_net_driver_mod.addImport("syscall", syscall_lib);
+
+    const virtio_net_driver = b.addExecutable(.{
+        .name = "virtio_net_driver.elf",
+        .root_module = virtio_net_driver_mod,
+    });
+    virtio_net_driver.setLinkerScript(b.path("src/user/linker.ld"));
+
+    const install_virtio_net_driver = b.addInstallArtifact(virtio_net_driver, .{});
+    b.getInstallStep().dependOn(&install_virtio_net_driver.step);
+
+    // Create VirtIO-Blk Driver module (userspace VirtIO block driver)
+    const virtio_blk_driver_mod = b.createModule(.{
+        .root_source_file = b.path("src/user/drivers/virtio_blk/main.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+        .code_model = .small,
+    });
+    virtio_blk_driver_mod.addImport("syscall", syscall_lib);
+
+    const virtio_blk_driver = b.addExecutable(.{
+        .name = "virtio_blk_driver.elf",
+        .root_module = virtio_blk_driver_mod,
+    });
+    virtio_blk_driver.setLinkerScript(b.path("src/user/linker.ld"));
+
+    const install_virtio_blk_driver = b.addInstallArtifact(virtio_blk_driver, .{});
+    b.getInstallStep().dependOn(&install_virtio_blk_driver.step);
+
     // Add doomgeneric C source files
     doom.addCSourceFiles(.{
         .root = b.path("src/user/doom/doomgeneric"),
@@ -1197,6 +1262,8 @@ pub fn build(b: *std.Build) void {
         \\cp zig-out/bin/doom.elf iso_root/boot/modules/ && \
         \\cp zig-out/bin/uart_driver.elf iso_root/boot/modules/ && \
         \\cp zig-out/bin/ps2_driver.elf iso_root/boot/modules/ && \
+        \\cp zig-out/bin/virtio_net_driver.elf iso_root/boot/modules/ && \
+        \\cp zig-out/bin/virtio_blk_driver.elf iso_root/boot/modules/ && \
         \\if [ -d initrd_contents ] && [ "$(ls -A initrd_contents 2>/dev/null)" ]; then \
         \\    echo "Creating initrd.tar..." && \
         \\    tar --format=ustar -cvf iso_root/boot/initrd.tar -C initrd_contents .; \

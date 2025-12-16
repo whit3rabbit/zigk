@@ -173,7 +173,7 @@ int io_uring_setup(unsigned entries, struct io_uring_params *p);
 
 Submit SQEs and/or wait for CQEs.
 
-**Extended interface (copy-based ring model):**
+**Interface (supports both shared memory and legacy copy modes):**
 
 ```c
 int io_uring_enter(unsigned fd, unsigned to_submit,
@@ -184,15 +184,20 @@ int io_uring_enter(unsigned fd, unsigned to_submit,
 **Arguments:**
 - `fd`: io_uring file descriptor
 - `to_submit`: Number of SQEs to submit
-- `min_complete`: Minimum CQEs to wait for (with IORING_ENTER_GETEVENTS), also max CQEs to copy
+- `min_complete`: Minimum CQEs to wait for (with IORING_ENTER_GETEVENTS)
 - `flags`: IORING_ENTER_* flags
-- `sqes_ptr`: Pointer to userspace SQE array (required if to_submit > 0)
-- `cqes_ptr`: Pointer to userspace CQE array for output (optional, for GETEVENTS)
+- `sqes_ptr`: 0 for shared memory mode, or pointer to userspace SQE array for legacy copy mode
+- `cqes_ptr`: 0 for shared memory mode, or pointer to userspace CQE array for legacy copy mode
 
-**Returns:** Number of SQEs submitted (or CQEs copied if only GETEVENTS)
+**Returns:** Number of SQEs submitted (or CQEs ready if shared memory mode with GETEVENTS only)
 
-**Note:** This differs from Linux's shared-memory model. SQEs are copied from userspace
-and CQEs are copied to userspace via the syscall, rather than using memory-mapped rings.
+**Shared Memory Mode (Linux-compatible):**
+When `sqes_ptr` and `cqes_ptr` are 0, the kernel reads SQEs from the mmap'd SQ ring
+and writes CQEs to the mmap'd CQ ring. This is the standard Linux io_uring interface.
+
+**Legacy Copy Mode:**
+When `sqes_ptr` is non-zero, SQEs are copied from userspace. When `cqes_ptr` is non-zero,
+CQEs are copied to userspace. This mode is useful for simple testing.
 
 ### sys_io_uring_register (427)
 
@@ -355,13 +360,10 @@ src/drivers/
 2. **No SQPOLL** - Kernel polling thread not implemented
 3. **No registered buffers** - IORING_REGISTER_BUFFERS not supported
 4. **Fixed pool size** - 256 concurrent requests system-wide
-5. **Copy-based ring model** - SQEs copied from userspace, CQEs copied to userspace (not true shared memory mmap rings)
-6. **Extended syscall interface** - io_uring_enter takes sqes_ptr and cqes_ptr instead of using shared memory
 
 ## Future Enhancements
 
 - Multiple pending requests per socket (queue)
-- Proper shared memory rings with userspace via mmap
 - IORING_REGISTER_BUFFERS support for zero-copy I/O
 - Linked operations (IOSQE_IO_LINK)
 - SQPOLL mode for kernel-side SQ polling

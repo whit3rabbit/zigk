@@ -60,6 +60,12 @@ pub const FileOps = struct {
 
     /// I/O control (optional, for device-specific operations)
     ioctl: ?*const fn (fd: *FileDescriptor, request: u64, arg: u64) isize,
+
+    /// Memory map operation (optional, for mappable files like io_uring)
+    /// Returns physical address of the region to map, or 0 on error.
+    /// offset: mmap offset (e.g., IORING_OFF_SQ_RING)
+    /// size: Pointer to size (in/out - returns actual size)
+    mmap: ?*const fn (fd: *FileDescriptor, offset: u64, size: *usize) u64,
 };
 
 /// File descriptor structure

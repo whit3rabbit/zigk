@@ -77,6 +77,7 @@ const pipe_ops = fd_mod.FileOps{
     .seek = null,
     .stat = null, // TODO: stat
     .ioctl = null,
+    .mmap = null,
 };
 
 /// Create a new pipe

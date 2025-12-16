@@ -493,3 +493,37 @@ pub const SYS_WAIT_INTERRUPT: usize = 1022;
 /// Connect kernel logger to IPC backend
 /// () -> i32
 pub const SYS_REGISTER_IPC_LOGGER: usize = 1025;
+
+// =============================================================================
+// DMA/MMIO Syscalls (1030-1039)
+// =============================================================================
+
+/// Map physical MMIO region into userspace
+/// (phys_addr, size) -> virt_addr
+/// Requires Mmio capability for the physical address range
+pub const SYS_MMAP_PHYS: usize = 1030;
+
+/// Allocate DMA-capable memory with known physical address
+/// (result_ptr, page_count) -> 0 or -errno
+/// Returns DmaAllocResult{virt_addr, phys_addr, size} at result_ptr
+/// Requires DmaMemory capability for the page count
+pub const SYS_ALLOC_DMA: usize = 1031;
+
+/// Free DMA memory previously allocated with SYS_ALLOC_DMA
+/// (virt_addr, size) -> 0 or -errno
+pub const SYS_FREE_DMA: usize = 1032;
+
+/// Enumerate PCI devices
+/// (buf_ptr, max_count) -> actual_count
+/// Copies up to max_count PciDeviceInfo structs to buf_ptr
+pub const SYS_PCI_ENUMERATE: usize = 1033;
+
+/// Read PCI configuration space register
+/// (bus, device, func, offset) -> value (32-bit)
+/// Requires PciConfig capability for the device
+pub const SYS_PCI_CONFIG_READ: usize = 1034;
+
+/// Write PCI configuration space register
+/// (bus, device, func, offset, value) -> 0 or -errno
+/// Requires PciConfig capability for the device
+pub const SYS_PCI_CONFIG_WRITE: usize = 1035;

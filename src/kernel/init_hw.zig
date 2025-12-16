@@ -59,8 +59,15 @@ pub fn initNetwork() void {
         return;
     };
 
-    // Save PCI state for other subsystems (USB, VirtIO)
+    // Save PCI state for other subsystems (USB, VirtIO, syscalls)
     pci_devices = pci_res.devices;
+
+    // Also set in pci module for syscall access
+    const ecam_opt: ?pci.Ecam = switch (pci_res.access) {
+        .ecam => |e| e,
+        .legacy => null,
+    };
+    pci.setGlobalState(pci_res.devices, ecam_opt);
 
     // Handle PCI Access Mechanism
     var nic_driver_opt: ?*e1000e.E1000e = null;

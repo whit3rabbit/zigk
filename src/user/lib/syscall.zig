@@ -747,3 +747,151 @@ pub fn set_input_mode(mode: uapi.input.InputMode) SyscallError!void {
     const ret = syscall1(syscalls.SYS_SET_INPUT_MODE, @intFromEnum(mode));
     if (isError(ret)) return errorFromReturn(ret);
 }
+
+// =============================================================================
+// DMA/MMIO Syscalls (1030-1032)
+// =============================================================================
+
+/// Result from alloc_dma syscall
+pub const DmaAllocResult = extern struct {
+    /// Virtual address in userspace
+    virt_addr: u64,
+    /// Physical address for device programming
+    phys_addr: u64,
+    /// Size in bytes (page-aligned)
+    size: u64,
+};
+
+/// Map a physical MMIO region into userspace
+/// phys_addr must be page-aligned. Requires Mmio capability.
+/// Returns virtual address or error.
+pub fn mmap_phys(phys_addr: u64, size: usize) SyscallError!*anyopaque {
+    const ret = syscall2(syscalls.SYS_MMAP_PHYS, @intCast(phys_addr), size);
+    if (isError(ret)) return errorFromReturn(ret);
+    return @ptrFromInt(ret);
+}
+
+/// Allocate DMA-capable memory with known physical address
+/// page_count: Number of contiguous pages to allocate
+/// Returns DmaAllocResult with virt/phys addresses, or error.
+pub fn alloc_dma(page_count: u32) SyscallError!DmaAllocResult {
+    var result: DmaAllocResult = undefined;
+    const ret = syscall2(syscalls.SYS_ALLOC_DMA, @intFromPtr(&result), page_count);
+    if (isError(ret)) return errorFromReturn(ret);
+    return result;
+}
+
+/// Free DMA memory previously allocated with alloc_dma
+pub fn free_dma(virt_addr: u64, size: usize) SyscallError!void {
+    const ret = syscall2(syscalls.SYS_FREE_DMA, @intCast(virt_addr), size);
+    if (isError(ret)) return errorFromReturn(ret);
+}
+
+// =============================================================================
+// PCI Syscalls (1033-1035)
+// =============================================================================
+
+/// BAR info structure from PCI device
+pub const BarInfo = extern struct {
+    /// Physical base address
+    base: u64,
+    /// Size in bytes
+    size: u64,
+    /// 1 if MMIO, 0 if I/O port
+    is_mmio: u8,
+    /// 1 if 64-bit BAR
+    is_64bit: u8,
+    /// 1 if prefetchable
+    prefetchable: u8,
+    /// Reserved
+    _pad: u8 = 0,
+};
+
+/// PCI device info structure
+pub const PciDeviceInfo = extern struct {
+    /// PCI bus number
+    bus: u8,
+    /// PCI device number (0-31)
+    device: u8,
+    /// PCI function number (0-7)
+    func: u8,
+    /// Reserved for alignment
+    _pad0: u8 = 0,
+
+    /// Vendor ID
+    vendor_id: u16,
+    /// Device ID
+    device_id: u16,
+
+    /// Class code
+    class_code: u8,
+    /// Subclass
+    subclass: u8,
+    /// Programming interface
+    prog_if: u8,
+    /// Revision ID
+    revision: u8,
+
+    /// BAR information (6 BARs)
+    bar: [6]BarInfo,
+
+    /// Interrupt line (IRQ)
+    irq_line: u8,
+    /// Interrupt pin (1=INTA, 2=INTB, etc.)
+    irq_pin: u8,
+    /// Reserved
+    _pad1: [6]u8 = [_]u8{0} ** 6,
+
+    /// Check if this is a VirtIO network device
+    pub fn isVirtioNet(self: *const PciDeviceInfo) bool {
+        // VirtIO Vendor ID
+        if (self.vendor_id != 0x1AF4) return false;
+        // Network device: legacy (0x1000) or modern (0x1041)
+        return self.device_id == 0x1000 or self.device_id == 0x1041;
+    }
+
+    /// Check if this is a VirtIO block device
+    pub fn isVirtioBlk(self: *const PciDeviceInfo) bool {
+        // VirtIO Vendor ID
+        if (self.vendor_id != 0x1AF4) return false;
+        // Block device: legacy (0x1001) or modern (0x1042)
+        return self.device_id == 0x1001 or self.device_id == 0x1042;
+    }
+};
+
+/// Enumerate PCI devices
+/// buf: Array to store device info
+/// Returns number of devices found
+pub fn pci_enumerate(buf: []PciDeviceInfo) SyscallError!usize {
+    const ret = syscall2(syscalls.SYS_PCI_ENUMERATE, @intFromPtr(buf.ptr), buf.len);
+    if (isError(ret)) return errorFromReturn(ret);
+    return ret;
+}
+
+/// Read 32-bit value from PCI configuration space
+/// Requires PciConfig capability for the device.
+pub fn pci_config_read(bus: u8, device: u5, func: u3, offset: u12) SyscallError!u32 {
+    const ret = syscall4(
+        syscalls.SYS_PCI_CONFIG_READ,
+        bus,
+        device,
+        func,
+        offset,
+    );
+    if (isError(ret)) return errorFromReturn(ret);
+    return @truncate(ret);
+}
+
+/// Write 32-bit value to PCI configuration space
+/// Requires PciConfig capability for the device.
+pub fn pci_config_write(bus: u8, device: u5, func: u3, offset: u12, value: u32) SyscallError!void {
+    const ret = syscall5(
+        syscalls.SYS_PCI_CONFIG_WRITE,
+        bus,
+        device,
+        func,
+        offset,
+        value,
+    );
+    if (isError(ret)) return errorFromReturn(ret);
+}

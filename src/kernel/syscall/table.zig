@@ -30,6 +30,8 @@ const input_handlers = @import("input.zig");
 const ipc = @import("ipc.zig");
 const interrupt = @import("interrupt.zig");
 const port_io = @import("port_io.zig");
+const mmio = @import("mmio.zig");
+const pci_syscall = @import("pci_syscall.zig");
 
 /// Syscall frame from arch-specific entry
 pub const SyscallFrame = hal.syscall.SyscallFrame;
@@ -83,6 +85,10 @@ pub export fn dispatch_syscall(frame: *SyscallFrame) callconv(.c) void {
                         mod = interrupt;
                     } else if (@hasDecl(port_io, name)) {
                         mod = port_io;
+                    } else if (@hasDecl(mmio, name)) {
+                        mod = mmio;
+                    } else if (@hasDecl(pci_syscall, name)) {
+                        mod = pci_syscall;
                     }
 
                     if (mod) |m| {

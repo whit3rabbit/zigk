@@ -269,6 +269,52 @@ pub const Process = struct {
         }
         return false;
     }
+
+    /// Check if process has MMIO capability for the given physical address range
+    pub fn hasMmioCapability(self: *Process, phys_addr: u64, size: u64) bool {
+        for (self.capabilities.items) |cap| {
+            switch (cap) {
+                .Mmio => |mmio_cap| {
+                    // Check if requested range is fully within granted range
+                    const req_end = phys_addr +| size; // Saturating add to prevent overflow
+                    const cap_end = mmio_cap.phys_addr +| mmio_cap.size;
+                    if (phys_addr >= mmio_cap.phys_addr and req_end <= cap_end) {
+                        return true;
+                    }
+                },
+                else => {},
+            }
+        }
+        return false;
+    }
+
+    /// Check if process has DMA memory capability for the given page count
+    pub fn hasDmaCapability(self: *Process, page_count: u32) bool {
+        for (self.capabilities.items) |cap| {
+            switch (cap) {
+                .DmaMemory => |dma_cap| {
+                    if (page_count <= dma_cap.max_pages) return true;
+                },
+                else => {},
+            }
+        }
+        return false;
+    }
+
+    /// Check if process has PCI config space capability for the given device
+    pub fn hasPciConfigCapability(self: *Process, bus: u8, device: u5, func: u3) bool {
+        for (self.capabilities.items) |cap| {
+            switch (cap) {
+                .PciConfig => |pci_cap| {
+                    if (pci_cap.bus == bus and pci_cap.device == device and pci_cap.func == func) {
+                        return true;
+                    }
+                },
+                else => {},
+            }
+        }
+        return false;
+    }
 };
 
 // =============================================================================

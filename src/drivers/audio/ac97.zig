@@ -326,6 +326,7 @@ pub const dsp_ops = fd.FileOps{
     .seek = null,
     .stat = null,
     .ioctl = dspIoctl,
+    .mmap = null,
 };
 
 pub fn initFromPci(pci_dev: *const pci.PciDevice, ecam: *const pci.Ecam) !void {

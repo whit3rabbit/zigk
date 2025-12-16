@@ -504,6 +504,17 @@ pub const IORING_UNREGISTER_NAPI: u32 = 28;
 pub const IORING_REGISTER_LAST: u32 = 29;
 
 // =============================================================================
+// mmap Offsets
+// =============================================================================
+
+/// Offset for mmap() to map the SQ ring
+pub const IORING_OFF_SQ_RING: u64 = 0;
+/// Offset for mmap() to map the CQ ring
+pub const IORING_OFF_CQ_RING: u64 = 0x8000000;
+/// Offset for mmap() to map the SQE array
+pub const IORING_OFF_SQES: u64 = 0x10000000;
+
+// =============================================================================
 // Probe Structures
 // =============================================================================
 

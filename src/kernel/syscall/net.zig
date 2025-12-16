@@ -67,6 +67,7 @@ const socket_file_ops = fd_mod.FileOps{
     .seek = null,
     .stat = null,
     .ioctl = null,
+    .mmap = null,
 };
 
 fn getSocketData(fd: *FileDescriptor) ?*SocketFdData {
