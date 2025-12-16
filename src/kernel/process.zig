@@ -24,7 +24,10 @@ const pmm = @import("pmm");
 const hal = @import("hal");
 const sched = @import("sched");
 const uapi = @import("uapi");
-// const sync = @import("sync"); // Removed to avoid cycle
+const ipc_msg = @import("ipc_msg");
+const list = @import("list");
+const capabilities = @import("capabilities");
+// const sync = @import("sync"); // Removed: Cycle
 
 const FdTable = fd_mod.FdTable;
 const UserVmm = user_vmm_mod.UserVmm;
@@ -49,6 +52,47 @@ pub const ProcessState = enum(u8) {
 
 /// Process - owns resources and process hierarchy
 pub const Process = struct {
+    pub const MailboxLock = struct {
+        locked: std.atomic.Value(u32) = .{ .raw = 0 },
+
+        pub const Held = struct {
+            lock: *MailboxLock, // Mutable pointer needed for store
+            irq_state: bool,
+            pub fn release(h: Held) void {
+                 h.lock.locked.store(0, .release);
+                 if (h.irq_state) hal.cpu.enableInterrupts();
+            }
+        };
+
+        pub fn acquire(self: *MailboxLock) Held {
+             const hal_cpu = hal.cpu;
+             const irq_state = hal_cpu.interruptsEnabled();
+             hal_cpu.disableInterrupts();
+             while (true) {
+                 if (self.locked.cmpxchgWeak(0, 1, .acquire, .monotonic) == null) break;
+                 // Spin hint
+                 if (@import("builtin").os.tag == .freestanding) {
+                     asm volatile ("pause"
+                         :
+                         :
+                         : .{ .memory = true }
+                     );
+                 } else {
+                     std.Thread.yield() catch {};
+                 }
+             }
+             return .{ .lock = self, .irq_state = irq_state };
+        }
+    };
+
+    /// Lock for mailbox/IPC state (inlined to avoid cycle)
+    mailbox_lock: MailboxLock = .{},
+
+    /// IPC Message Queue
+    mailbox: list.IntrusiveDoublyLinkedList(ipc_msg.KernelMessage) = .{},
+
+    /// Thread waiting for a message (if any)
+    msg_waiter: ?*sched.Thread = null,
     /// Unique process identifier
     pid: u32,
 
@@ -84,6 +128,10 @@ pub const Process = struct {
     heap_start: u64,
     /// Heap break (current top of the heap)
     heap_break: u64,
+
+    /// Capabilities
+    capabilities: std.ArrayListUnmanaged(capabilities.Capability) = .{},
+    
 
     /// Current Working Directory
     cwd: [uapi.abi.MAX_PATH]u8,
@@ -195,6 +243,32 @@ pub const Process = struct {
 
         console.debug("Process: pid={} exited with status {}", .{ self.pid, status });
     }
+
+    /// Check if process has interrupt capability
+    pub fn hasInterruptCapability(self: *Process, irq: u8) bool {
+        for (self.capabilities.items) |cap| {
+            switch (cap) {
+                .Interrupt => |int_cap| {
+                    if (int_cap.irq == irq) return true;
+                },
+                else => {},
+            }
+        }
+        return false;
+    }
+
+    /// Check if process has IO port capability
+    pub fn hasIoPortCapability(self: *Process, port: u16) bool {
+        for (self.capabilities.items) |cap| {
+            switch (cap) {
+                .IoPort => |io_cap| {
+                    if (port >= io_cap.port and port < io_cap.port + io_cap.len) return true;
+                },
+                else => {},
+            }
+        }
+        return false;
+    }
 };
 
 // =============================================================================
@@ -287,6 +361,7 @@ pub fn createProcess(parent: ?*Process) !*Process {
         .refcount = 1,
         .heap_start = 0,
         .heap_break = 0,
+        .capabilities = .{},
         .cwd = undefined,
         .cwd_len = 1,
     };
@@ -342,6 +417,7 @@ pub fn forkProcess(parent: *Process) !*Process {
         .refcount = 1,
         .heap_start = parent.heap_start,
         .heap_break = parent.heap_break,
+        .capabilities = try parent.capabilities.clone(alloc),
         .cwd = parent.cwd,
         .cwd_len = parent.cwd_len,
     };
@@ -534,6 +610,9 @@ pub fn destroyProcess(proc: *Process) void {
 
     // Free user address space
     proc.user_vmm.deinit();
+
+    // Free capabilities
+    proc.capabilities.deinit(alloc);
 
     // Free process struct
     alloc.destroy(proc);

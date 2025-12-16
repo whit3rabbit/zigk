@@ -140,6 +140,10 @@ export fn _start() noreturn {
         .context = @ptrCast(&uart),
         .writeFn = uartWriteWrapper,
     });
+    
+    // DISABLE Kernel Serial IRQ Handler to allow userspace driver to take it
+    // Phase 3: Transition to userspace capabilities
+    hal.interrupts.setSerialHandler(null);
 
     // Initialize GS base for syscalls - points to per-CPU data
     // kernel_stack will be updated by scheduler on context switch

@@ -9,6 +9,8 @@ const sched = @import("sched");
 const thread = @import("thread");
 const pmm = @import("pmm");
 const boot = @import("boot.zig");
+const capabilities = @import("capabilities");
+const heap = @import("heap");
 
 /// Load the init process (httpd or shell) into a new user address space
 /// Creates a proper Process struct with FD table (stdin/stdout/stderr pre-opened)
@@ -33,15 +35,29 @@ pub fn loadInitProcess() void {
         }
     }.call;
 
-    // Priority 0: ASM Test (Sanity Check)
+    // Priority 0: UART Driver (Phase 3 Test)
     for (mods) |mod| {
         const cmdline = get_str(mod.cmdline);
         const path = get_str(mod.path);
 
-        if (std.mem.indexOf(u8, cmdline, "test_asm") != null or std.mem.indexOf(u8, path, "test_asm") != null) {
+        if (std.mem.indexOf(u8, cmdline, "uart_driver") != null or std.mem.indexOf(u8, path, "uart_driver") != null) {
             selected_mod = mod;
-            process_name = "test_asm";
+            process_name = "uart_driver";
             break;
+        }
+    }
+
+    // Priority 0.1: ASM Test (Sanity Check)
+    if (selected_mod == null) {
+        for (mods) |mod| {
+            const cmdline = get_str(mod.cmdline);
+            const path = get_str(mod.path);
+    
+            if (std.mem.indexOf(u8, cmdline, "test_asm") != null or std.mem.indexOf(u8, path, "test_asm") != null) {
+                selected_mod = mod;
+                process_name = "test_asm";
+                break;
+            }
         }
     }
 
@@ -144,6 +160,31 @@ pub fn loadInitProcess() void {
     // Step 2: Set as current process so syscall handlers can access FD table
     syscall_base.setCurrentProcess(proc);
     console.info("Created process pid={d} with FD table", .{proc.pid});
+
+    // Grant capabilities if this is the UART driver
+    if (std.mem.eql(u8, process_name, "uart_driver")) {
+         const alloc = heap.allocator();
+         // Grant IRQ 4
+         proc.capabilities.append(alloc, .{ .Interrupt = .{ .irq = 4 } }) catch {};
+         // Grant Ports 0x3F8, len 8 (COM1)
+         proc.capabilities.append(alloc, .{ .IoPort = .{ .port = 0x3F8, .len = 8 } }) catch {};
+         console.info("Init: Granted UART capabilities to pid={}", .{proc.pid});
+    }
+
+    // Grant capabilities if this is Doom
+    if (std.mem.eql(u8, process_name, "doom")) {
+         const alloc = heap.allocator();
+         // Grant IRQ 1 (Keyboard)
+         proc.capabilities.append(alloc, .{ .Interrupt = .{ .irq = 1 } }) catch {};
+         // Grant IRQ 12 (Mouse)
+         proc.capabilities.append(alloc, .{ .Interrupt = .{ .irq = 12 } }) catch {};
+         // Grant Ports 0x60, 0x64 (PC/AT Keyboard/Mouse Controller)
+         proc.capabilities.append(alloc, .{ .IoPort = .{ .port = 0x60, .len = 1 } }) catch {};
+         proc.capabilities.append(alloc, .{ .IoPort = .{ .port = 0x64, .len = 1 } }) catch {};
+         // Grant Serial (COM1) for debug output (optional but helpful)
+         proc.capabilities.append(alloc, .{ .IoPort = .{ .port = 0x3F8, .len = 8 } }) catch {};
+         console.info("Init: Granted Doom capabilities to pid={}", .{proc.pid});
+    }
 
     console.info("Init: Loading ELF...", .{});
 

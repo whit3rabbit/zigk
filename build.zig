@@ -480,6 +480,20 @@ pub fn build(b: *std.Build) void {
     partitions_module.addImport("uapi", uapi_module);
     partitions_module.addImport("console", console_module);
 
+    // Create Capabilities module
+    const capabilities_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/capabilities/root.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+
+    // Create atomic module for IPC/Locking (needed by process)
+    const ipc_msg_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/ipc/message.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+
     // Create Process module (process abstraction for fork/exec/wait)
     const process_module = b.createModule(.{
         .root_source_file = b.path("src/kernel/process.zig"),
@@ -496,6 +510,9 @@ pub fn build(b: *std.Build) void {
     process_module.addImport("hal", hal_module);
     process_module.addImport("uapi", uapi_module);
     process_module.addImport("sched", sched_module);
+    process_module.addImport("ipc_msg", ipc_msg_module);
+    process_module.addImport("list", list_module);
+    process_module.addImport("capabilities", capabilities_module);
 
     // Create ELF loader module (for execve)
     const elf_module = b.createModule(.{
@@ -741,6 +758,41 @@ pub fn build(b: *std.Build) void {
     syscall_io_uring_module.addImport("pipe", pipe_module);
     syscall_io_uring_module.addImport("keyboard", keyboard_module);
 
+    // Create syscall ipc module (microkernel IPC)
+    const syscall_ipc_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/syscall/ipc.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    syscall_ipc_module.addImport("uapi", uapi_module);
+    syscall_ipc_module.addImport("user_mem", user_mem_module);
+    syscall_ipc_module.addImport("ipc_msg", ipc_msg_module);
+    syscall_ipc_module.addImport("process", process_module);
+    syscall_ipc_module.addImport("heap", heap_module);
+    syscall_ipc_module.addImport("sched", sched_module);
+
+    // Create syscall interrupt module
+    const syscall_interrupt_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/syscall/interrupt.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    syscall_interrupt_module.addImport("uapi", uapi_module);
+    syscall_interrupt_module.addImport("hal", hal_module);
+    syscall_interrupt_module.addImport("sched", sched_module);
+    syscall_interrupt_module.addImport("capabilities", capabilities_module);
+    syscall_interrupt_module.addImport("process", process_module);
+
+    // Create syscall port_io module
+    const syscall_port_io_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/syscall/port_io.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    syscall_port_io_module.addImport("uapi", uapi_module);
+    syscall_port_io_module.addImport("hal", hal_module);
+    syscall_port_io_module.addImport("process", process_module);
+
     // Create syscall dispatch table module
     const syscall_table_module = b.createModule(.{
         .root_source_file = b.path("src/kernel/syscall/table.zig"),
@@ -764,6 +816,9 @@ pub fn build(b: *std.Build) void {
     syscall_table_module.addImport("random.zig", syscall_random_module);
     syscall_table_module.addImport("input.zig", syscall_input_module);
     syscall_table_module.addImport("io_uring.zig", syscall_io_uring_module);
+    syscall_table_module.addImport("ipc.zig", syscall_ipc_module);
+    syscall_table_module.addImport("interrupt.zig", syscall_interrupt_module);
+    syscall_table_module.addImport("port_io.zig", syscall_port_io_module);
 
     // Create kernel executable
     // NOTE: red_zone must be disabled for kernel code to prevent stack corruption
@@ -830,6 +885,7 @@ pub fn build(b: *std.Build) void {
     kernel.root_module.addImport("devfs", devfs_module);
     kernel.root_module.addImport("fd", fd_module);
     kernel.root_module.addImport("io", kernel_io_module);
+    kernel.root_module.addImport("capabilities", capabilities_module);
 
     // Add assembly helpers for x86_64 (ISR stubs, lgdt, lidt)
     kernel.addAssemblyFile(b.path("src/arch/x86_64/asm_helpers.S"));
@@ -940,6 +996,24 @@ pub fn build(b: *std.Build) void {
         .name = "doom.elf",
         .root_module = doom_mod,
     });
+
+    // Create UART Driver module
+    const uart_driver_mod = b.createModule(.{
+        .root_source_file = b.path("src/user/drivers/uart/main.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+        .code_model = .small,
+    });
+    uart_driver_mod.addImport("syscall", syscall_lib);
+
+    const uart_driver = b.addExecutable(.{
+        .name = "uart_driver.elf",
+        .root_module = uart_driver_mod,
+    });
+    uart_driver.setLinkerScript(b.path("src/user/linker.ld"));
+
+    const install_uart_driver = b.addInstallArtifact(uart_driver, .{});
+    b.getInstallStep().dependOn(&install_uart_driver.step);
 
     // Add doomgeneric C source files
     doom.addCSourceFiles(.{
@@ -1095,7 +1169,9 @@ pub fn build(b: *std.Build) void {
         \\cp zig-out/bin/test_asm iso_root/boot/modules/ && \
         \\cp zig-out/bin/test_writev iso_root/boot/modules/ && \
         \\cp zig-out/bin/audio_test iso_root/boot/modules/ && \
+        \\cp zig-out/bin/audio_test iso_root/boot/modules/ && \
         \\cp zig-out/bin/doom.elf iso_root/boot/modules/ && \
+        \\cp zig-out/bin/uart_driver.elf iso_root/boot/modules/ && \
         \\if [ -d initrd_contents ] && [ "$(ls -A initrd_contents 2>/dev/null)" ]; then \
         \\    echo "Creating initrd.tar..." && \
         \\    tar --format=ustar -cvf iso_root/boot/initrd.tar -C initrd_contents .; \

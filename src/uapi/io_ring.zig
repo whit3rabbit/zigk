@@ -308,8 +308,47 @@ pub const IORING_OP_FILES_UPDATE: u8 = 20;
 pub const IORING_OP_STATX: u8 = 21;
 pub const IORING_OP_READ: u8 = 22;
 pub const IORING_OP_WRITE: u8 = 23;
+pub const IORING_OP_FADVISE: u8 = 24;
+pub const IORING_OP_MADVISE: u8 = 25;
 pub const IORING_OP_SEND: u8 = 26;
 pub const IORING_OP_RECV: u8 = 27;
+pub const IORING_OP_OPENAT2: u8 = 28;
+pub const IORING_OP_EPOLL_CTL: u8 = 29;
+pub const IORING_OP_SPLICE: u8 = 30;
+pub const IORING_OP_PROVIDE_BUFFERS: u8 = 31;
+pub const IORING_OP_REMOVE_BUFFERS: u8 = 32;
+pub const IORING_OP_TEE: u8 = 33;
+pub const IORING_OP_SHUTDOWN: u8 = 34;
+pub const IORING_OP_RENAMEAT: u8 = 35;
+pub const IORING_OP_UNLINKAT: u8 = 36;
+pub const IORING_OP_MKDIRAT: u8 = 37;
+pub const IORING_OP_SYMLINKAT: u8 = 38;
+pub const IORING_OP_LINKAT: u8 = 39;
+pub const IORING_OP_MSG_RING: u8 = 40;
+pub const IORING_OP_FSETXATTR: u8 = 41;
+pub const IORING_OP_SETXATTR: u8 = 42;
+pub const IORING_OP_FGETXATTR: u8 = 43;
+pub const IORING_OP_GETXATTR: u8 = 44;
+pub const IORING_OP_SOCKET: u8 = 45;
+pub const IORING_OP_URING_CMD: u8 = 46;
+pub const IORING_OP_SEND_ZC: u8 = 47;
+pub const IORING_OP_SENDMSG_ZC: u8 = 48;
+pub const IORING_OP_READ_MULTISHOT: u8 = 49;
+pub const IORING_OP_WAITID: u8 = 50;
+pub const IORING_OP_FUTEX_WAIT: u8 = 51;
+pub const IORING_OP_FUTEX_WAKE: u8 = 52;
+pub const IORING_OP_FUTEX_WAITV: u8 = 53;
+pub const IORING_OP_FIXED_FD_INSTALL: u8 = 54;
+pub const IORING_OP_FTRUNCATE: u8 = 55;
+pub const IORING_OP_BIND: u8 = 56;
+pub const IORING_OP_LISTEN: u8 = 57;
+pub const IORING_OP_RECV_ZC: u8 = 58;
+pub const IORING_OP_EPOLL_WAIT: u8 = 59;
+pub const IORING_OP_CLONE: u8 = 60;
+pub const IORING_OP_PIPE: u8 = 61;
+
+/// Maximum opcode value (for bounds checking)
+pub const IORING_OP_LAST: u8 = 62;
 
 // =============================================================================
 // SQE Flags
@@ -375,6 +414,138 @@ pub const IORING_FEAT_SINGLE_MMAP: u32 = 1 << 0;
 pub const IORING_FEAT_NODROP: u32 = 1 << 1;
 /// Support for IOSQE_ASYNC
 pub const IORING_FEAT_SUBMIT_STABLE: u32 = 1 << 2;
+/// Support for RW at current file position
+pub const IORING_FEAT_RW_CUR_POS: u32 = 1 << 3;
+/// Support for personality
+pub const IORING_FEAT_CUR_PERSONALITY: u32 = 1 << 4;
+/// Support for fast poll
+pub const IORING_FEAT_FAST_POLL: u32 = 1 << 5;
+/// Support for 32-bit poll events
+pub const IORING_FEAT_POLL_32BITS: u32 = 1 << 6;
+/// Support for SQPOLL with non-fixed files
+pub const IORING_FEAT_SQPOLL_NONFIXED: u32 = 1 << 7;
+/// Support for extended arguments
+pub const IORING_FEAT_EXT_ARG: u32 = 1 << 8;
+/// Support for native workers
+pub const IORING_FEAT_NATIVE_WORKERS: u32 = 1 << 9;
+/// Support for resource tags
+pub const IORING_FEAT_RSRC_TAGS: u32 = 1 << 10;
+/// Support for CQE skip
+pub const IORING_FEAT_CQE_SKIP: u32 = 1 << 11;
+/// Support for linked files
+pub const IORING_FEAT_LINKED_FILE: u32 = 1 << 12;
+/// Support for registered ring fds
+pub const IORING_FEAT_REG_REG_RING: u32 = 1 << 13;
+
+// =============================================================================
+// Registration Opcodes
+// =============================================================================
+
+/// Register fixed buffers
+pub const IORING_REGISTER_BUFFERS: u32 = 0;
+/// Unregister fixed buffers
+pub const IORING_UNREGISTER_BUFFERS: u32 = 1;
+/// Register fixed files
+pub const IORING_REGISTER_FILES: u32 = 2;
+/// Unregister fixed files
+pub const IORING_UNREGISTER_FILES: u32 = 3;
+/// Register eventfd
+pub const IORING_REGISTER_EVENTFD: u32 = 4;
+/// Unregister eventfd
+pub const IORING_UNREGISTER_EVENTFD: u32 = 5;
+/// Update registered files
+pub const IORING_REGISTER_FILES_UPDATE: u32 = 6;
+/// Register async eventfd
+pub const IORING_REGISTER_EVENTFD_ASYNC: u32 = 7;
+/// Probe capabilities
+pub const IORING_REGISTER_PROBE: u32 = 8;
+/// Register personality
+pub const IORING_REGISTER_PERSONALITY: u32 = 9;
+/// Unregister personality
+pub const IORING_UNREGISTER_PERSONALITY: u32 = 10;
+/// Register restrictions
+pub const IORING_REGISTER_RESTRICTIONS: u32 = 11;
+/// Enable rings
+pub const IORING_REGISTER_ENABLE_RINGS: u32 = 12;
+/// Register files (v2)
+pub const IORING_REGISTER_FILES2: u32 = 13;
+/// Update files (v2)
+pub const IORING_REGISTER_FILES_UPDATE2: u32 = 14;
+/// Register buffers (v2)
+pub const IORING_REGISTER_BUFFERS2: u32 = 15;
+/// Update buffers
+pub const IORING_REGISTER_BUFFERS_UPDATE: u32 = 16;
+/// Register IO worker affinity
+pub const IORING_REGISTER_IOWQ_AFF: u32 = 17;
+/// Unregister IO worker affinity
+pub const IORING_UNREGISTER_IOWQ_AFF: u32 = 18;
+/// Set max IO workers
+pub const IORING_REGISTER_IOWQ_MAX_WORKERS: u32 = 19;
+/// Register ring file descriptors
+pub const IORING_REGISTER_RING_FDS: u32 = 20;
+/// Unregister ring file descriptors
+pub const IORING_UNREGISTER_RING_FDS: u32 = 21;
+/// Register provided buffer ring
+pub const IORING_REGISTER_PBUF_RING: u32 = 22;
+/// Unregister provided buffer ring
+pub const IORING_UNREGISTER_PBUF_RING: u32 = 23;
+/// Synchronous cancel
+pub const IORING_REGISTER_SYNC_CANCEL: u32 = 24;
+/// Register file allocation range
+pub const IORING_REGISTER_FILE_ALLOC_RANGE: u32 = 25;
+/// Get provided buffer status
+pub const IORING_REGISTER_PBUF_STATUS: u32 = 26;
+/// Register NAPI
+pub const IORING_REGISTER_NAPI: u32 = 27;
+/// Unregister NAPI
+pub const IORING_UNREGISTER_NAPI: u32 = 28;
+
+/// Maximum registration opcode
+pub const IORING_REGISTER_LAST: u32 = 29;
+
+// =============================================================================
+// Probe Structures
+// =============================================================================
+
+/// io_uring_probe_op - Per-opcode probe result
+pub const IoUringProbeOp = extern struct {
+    /// Operation code
+    op: u8,
+    /// Reserved
+    resv: u8,
+    /// IORING_PROBE_OP_* flags
+    flags: u16,
+    /// Reserved
+    resv2: u32,
+
+    comptime {
+        if (@sizeOf(IoUringProbeOp) != 8) {
+            @compileError("IoUringProbeOp must be 8 bytes");
+        }
+    }
+};
+
+/// io_uring_probe - Probe capabilities
+pub const IoUringProbe = extern struct {
+    /// Last supported opcode
+    last_op: u8,
+    /// Number of ops following
+    ops_len: u8,
+    /// Reserved
+    resv: u16,
+    /// Reserved
+    resv2: [3]u32,
+    // Followed by ops_len IoUringProbeOp entries
+
+    comptime {
+        if (@sizeOf(IoUringProbe) != 16) {
+            @compileError("IoUringProbe must be 16 bytes");
+        }
+    }
+};
+
+/// Opcode is supported
+pub const IO_URING_OP_SUPPORTED: u16 = 1 << 0;
 
 // =============================================================================
 // Tests

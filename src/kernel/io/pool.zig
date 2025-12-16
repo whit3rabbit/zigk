@@ -64,8 +64,8 @@ pub const IoRequestPool = struct {
     lock: sync.Spinlock,
 
     /// Initialize the pool with all requests on the free list
-    pub fn init() IoRequestPool {
-        var pool: IoRequestPool = .{
+    pub fn init(self: *IoRequestPool) void {
+        self.* = .{
             .requests = undefined,
             .free_list = null,
             .allocated_count = 0,
@@ -77,12 +77,10 @@ pub const IoRequestPool = struct {
         var i: usize = MAX_REQUESTS;
         while (i > 0) {
             i -= 1;
-            pool.requests[i] = IoRequest.init(0, .noop);
-            pool.requests[i].next = pool.free_list;
-            pool.free_list = &pool.requests[i];
+            self.requests[i] = IoRequest.init(0, .noop);
+            self.requests[i].next = self.free_list;
+            self.free_list = &self.requests[i];
         }
-
-        return pool;
     }
 
     /// Allocate a request from the pool
@@ -169,7 +167,8 @@ pub const PoolStats = struct {
 // =============================================================================
 
 test "IoRequestPool basic alloc/free" {
-    var pool = IoRequestPool.init();
+    var pool: IoRequestPool = undefined;
+    pool.init();
 
     // Allocate a request
     const req = pool.alloc(.socket_read) orelse return error.AllocFailed;
@@ -183,7 +182,8 @@ test "IoRequestPool basic alloc/free" {
 }
 
 test "IoRequestPool exhaustion" {
-    var pool = IoRequestPool.init();
+    var pool: IoRequestPool = undefined;
+    pool.init();
 
     // Allocate all requests
     var requests: [MAX_REQUESTS]*IoRequest = undefined;
@@ -204,7 +204,8 @@ test "IoRequestPool exhaustion" {
 }
 
 test "IoRequestPool ID monotonicity" {
-    var pool = IoRequestPool.init();
+    var pool: IoRequestPool = undefined;
+    pool.init();
 
     const req1 = pool.alloc(.noop) orelse return error.AllocFailed;
     const req2 = pool.alloc(.noop) orelse return error.AllocFailed;

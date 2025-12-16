@@ -389,20 +389,26 @@ pub fn sys_io_uring_setup(entries: usize, params_ptr: usize) SyscallError!usize 
 ///
 /// Submit SQEs and/or wait for CQEs.
 ///
+/// Extended interface for copy-based ring model (not true shared memory):
+///   - SQEs are copied FROM userspace sqes_ptr
+///   - CQEs are copied TO userspace cqes_ptr
+///
 /// Arguments:
 ///   ring_fd: File descriptor from io_uring_setup
 ///   to_submit: Number of SQEs to submit
-///   min_complete: Minimum CQEs to wait for (if GETEVENTS)
+///   min_complete: Minimum CQEs to wait for (if GETEVENTS), also max CQEs to copy out
 ///   flags: IORING_ENTER_* flags
-///   sig: Signal mask (unused in this implementation)
+///   sqes_ptr: Pointer to userspace SQE array (required if to_submit > 0)
+///   cqes_ptr: Pointer to userspace CQE array for output (optional, for GETEVENTS)
 ///
-/// Returns: Number of SQEs submitted
+/// Returns: Number of SQEs submitted (or CQEs copied if only GETEVENTS)
 pub fn sys_io_uring_enter(
     ring_fd: usize,
     to_submit: usize,
     min_complete: usize,
     flags: usize,
-    _: usize, // sig - unused
+    sqes_ptr: usize,
+    cqes_ptr: usize,
 ) SyscallError!usize {
     // Get fd and validate
     const fd_table = base.getFdTable() orelse return error.EBADF;
@@ -412,14 +418,23 @@ pub fn sys_io_uring_enter(
 
     var submitted: usize = 0;
 
-    // Submit SQEs
+    // Copy SQEs from userspace and submit
     if (to_submit > 0) {
-        submitted = submitSqes(inst, to_submit) catch |e| return e;
+        submitted = try copySqesAndSubmit(inst, sqes_ptr, to_submit);
     }
 
     // Wait for completions if requested
     if (flags & io_ring.IORING_ENTER_GETEVENTS != 0) {
         waitForCompletions(inst, @intCast(min_complete));
+
+        // Copy CQEs to userspace if pointer provided
+        if (cqes_ptr != 0 and min_complete > 0) {
+            const copied = try copyCompletionsToUser(inst, cqes_ptr, min_complete);
+            // If only getting events (no submit), return CQE count
+            if (to_submit == 0) {
+                return copied;
+            }
+        }
     }
 
     return submitted;
@@ -458,34 +473,92 @@ pub fn sys_io_uring_register(
 }
 
 // =============================================================================
-// SQE Processing
+// SQE/CQE Copy Operations (Copy-Based Ring Model)
 // =============================================================================
 
-fn submitSqes(inst: *IoUringInstance, count: usize) SyscallError!usize {
+/// Copy SQEs from userspace and process them.
+/// This is the key fix for the copy-based ring model - SQEs MUST be copied from
+/// userspace before processing.
+fn copySqesAndSubmit(inst: *IoUringInstance, sqes_ptr: usize, count: usize) SyscallError!usize {
+    if (sqes_ptr == 0) {
+        return error.EFAULT;
+    }
+
+    // Limit to ring size
+    const copy_count = @min(count, inst.sq_ring_entries);
+    const sqe_size = @sizeOf(io_ring.IoUringSqe);
+
+    // Validate entire user buffer
+    if (!user_mem.isValidUserAccess(sqes_ptr, copy_count * sqe_size, .Read)) {
+        return error.EFAULT;
+    }
+
     var submitted: usize = 0;
 
-    for (0..count) |_| {
-        // Check if there are SQEs to process
-        if (inst.sqReady() == 0) break;
+    // Copy and process each SQE
+    for (0..copy_count) |i| {
+        const src_addr = sqes_ptr + i * sqe_size;
+        const user_ptr = user_mem.UserPtr.from(src_addr);
 
-        // Get next SQE
-        const idx = inst.sq_head & (inst.sq_ring_entries - 1);
-        const sqe = &inst.sq_entries[idx];
-        inst.sq_head +%= 1;
+        // Copy SQE from userspace
+        const sqe = user_mem.copyStructFromUser(io_ring.IoUringSqe, user_ptr) catch {
+            return error.EFAULT;
+        };
 
         // Process the SQE
-        const result = processSqe(inst, sqe);
+        const result = processSqe(inst, &sqe);
         if (result) |_| {
             submitted += 1;
         } else |_| {
-            // On error, generate immediate CQE
-            _ = inst.addCqe(sqe.user_data, -@as(i32, 22), 0); // EINVAL
+            // On error, generate immediate CQE with EINVAL
+            _ = inst.addCqe(sqe.user_data, -@as(i32, 22), 0);
             submitted += 1;
         }
     }
 
     return submitted;
 }
+
+/// Copy CQEs to userspace after completions.
+/// This is the key fix - CQEs MUST be copied back to userspace for the user to read them.
+fn copyCompletionsToUser(inst: *IoUringInstance, cqes_ptr: usize, max_cqes: usize) SyscallError!usize {
+    if (cqes_ptr == 0) {
+        return 0;
+    }
+
+    const ready = inst.cqReady();
+    const copy_count = @min(ready, max_cqes);
+    const cqe_size = @sizeOf(io_ring.IoUringCqe);
+
+    if (copy_count == 0) {
+        return 0;
+    }
+
+    // Validate entire user buffer
+    if (!user_mem.isValidUserAccess(cqes_ptr, copy_count * cqe_size, .Write)) {
+        return error.EFAULT;
+    }
+
+    // Copy each CQE to userspace
+    for (0..copy_count) |i| {
+        const idx = inst.cq_head & (inst.cq_ring_entries - 1);
+        const cqe = inst.cq_entries[idx];
+        const dest_addr = cqes_ptr + i * cqe_size;
+        const user_ptr = user_mem.UserPtr.from(dest_addr);
+
+        user_mem.copyStructToUser(io_ring.IoUringCqe, user_ptr, cqe) catch {
+            return error.EFAULT;
+        };
+
+        inst.cq_head +%= 1;
+    }
+
+    return copy_count;
+}
+
+// =============================================================================
+// SQE Processing
+// =============================================================================
 
 fn processSqe(inst: *IoUringInstance, sqe: *const io_ring.IoUringSqe) SyscallError!void {
     switch (sqe.opcode) {
@@ -520,6 +593,18 @@ fn processSqe(inst: *IoUringInstance, sqe: *const io_ring.IoUringSqe) SyscallErr
 
         io_ring.IORING_OP_TIMEOUT => {
             try processTimeoutOp(inst, sqe);
+        },
+
+        io_ring.IORING_OP_OPENAT => {
+            processOpenatOp(inst, sqe);
+        },
+
+        io_ring.IORING_OP_CLOSE => {
+            processCloseOp(inst, sqe);
+        },
+
+        io_ring.IORING_OP_ASYNC_CANCEL => {
+            processAsyncCancelOp(inst, sqe);
         },
 
         else => {
@@ -561,9 +646,28 @@ fn processReadOp(inst: *IoUringInstance, sqe: *const io_ring.IoUringSqe) Syscall
 }
 
 fn processWriteOp(inst: *IoUringInstance, sqe: *const io_ring.IoUringSqe) SyscallError!void {
-    // For now, just complete immediately with length
-    // Full implementation would dispatch to appropriate device
-    _ = inst.addCqe(sqe.user_data, @intCast(sqe.len), 0);
+    // Validate fd
+    if (sqe.fd < 0) {
+        _ = inst.addCqe(sqe.user_data, -@as(i32, 9), 0); // EBADF
+        return;
+    }
+
+    // Validate user buffer
+    if (!user_mem.isValidUserAccess(sqe.addr, sqe.len, .Read)) {
+        _ = inst.addCqe(sqe.user_data, -@as(i32, 14), 0); // EFAULT
+        return;
+    }
+
+    // Dispatch to sys_write implementation
+    const io_syscall = @import("io.zig");
+    const result = io_syscall.sys_write(@intCast(sqe.fd), sqe.addr, sqe.len);
+
+    const res: i32 = if (result) |n|
+        @intCast(@min(n, @as(usize, std.math.maxInt(i32))))
+    else |e|
+        -@as(i32, @intFromEnum(e));
+
+    _ = inst.addCqe(sqe.user_data, res, 0);
 }
 
 fn processAcceptOp(inst: *IoUringInstance, sqe: *const io_ring.IoUringSqe) SyscallError!void {
@@ -794,6 +898,79 @@ fn processTimeoutOp(inst: *IoUringInstance, sqe: *const io_ring.IoUringSqe) Sysc
         io.pool.free(req);
     }
 }
+
+// =============================================================================
+// File Operation Handlers (OPENAT, CLOSE)
+// =============================================================================
+
+fn processOpenatOp(inst: *IoUringInstance, sqe: *const io_ring.IoUringSqe) void {
+    // IORING_OP_OPENAT uses:
+    //   - sqe.fd: dirfd (AT_FDCWD for cwd)
+    //   - sqe.addr: pathname pointer
+    //   - sqe.len: flags (O_RDONLY, O_WRONLY, etc.)
+    //   - sqe.off: mode (low 32 bits)
+    const result = fd_mod.sys_openat(
+        @bitCast(@as(i64, sqe.fd)), // Handle negative dirfd (AT_FDCWD = -100)
+        sqe.addr,
+        sqe.len,
+        @truncate(sqe.off),
+    );
+
+    const res: i32 = if (result) |fd|
+        @intCast(@min(fd, @as(usize, std.math.maxInt(i32))))
+    else |e|
+        -@as(i32, @intFromEnum(e));
+
+    _ = inst.addCqe(sqe.user_data, res, 0);
+}
+
+fn processCloseOp(inst: *IoUringInstance, sqe: *const io_ring.IoUringSqe) void {
+    // IORING_OP_CLOSE uses:
+    //   - sqe.fd: file descriptor to close
+    if (sqe.fd < 0) {
+        _ = inst.addCqe(sqe.user_data, -@as(i32, 9), 0); // EBADF
+        return;
+    }
+
+    const result = fd_mod.sys_close(@intCast(sqe.fd));
+
+    const res: i32 = if (result) |_|
+        0
+    else |e|
+        -@as(i32, @intFromEnum(e));
+
+    _ = inst.addCqe(sqe.user_data, res, 0);
+}
+
+// =============================================================================
+// Async Cancel Handler
+// =============================================================================
+
+fn processAsyncCancelOp(inst: *IoUringInstance, sqe: *const io_ring.IoUringSqe) void {
+    // IORING_OP_ASYNC_CANCEL uses:
+    //   - sqe.addr: user_data of request to cancel
+    const target_user_data = sqe.addr;
+
+    // Search pending requests for matching user_data
+    for (inst.pending_requests[0..inst.pending_count]) |req| {
+        if (req.user_data == target_user_data) {
+            // Attempt to cancel the request
+            if (req.cancel()) {
+                // Successfully cancelled - CQE for cancelled request will be
+                // generated by processPendingRequests()
+                _ = inst.addCqe(sqe.user_data, 0, 0);
+                return;
+            }
+        }
+    }
+
+    // No matching request found or cancel failed
+    _ = inst.addCqe(sqe.user_data, -@as(i32, 2), 0); // ENOENT
+}
+
+// =============================================================================
+// Completion Waiting
+// =============================================================================
 
 fn waitForCompletions(inst: *IoUringInstance, min_complete: u32) void {
     // Process any already-completed requests

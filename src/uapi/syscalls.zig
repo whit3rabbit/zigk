@@ -473,3 +473,19 @@ pub const SYS_SET_CURSOR_BOUNDS: usize = 1012;
 /// Set input mode (relative/absolute/raw)
 /// (mode) -> i32 (0 = success)
 pub const SYS_SET_INPUT_MODE: usize = 1013;
+
+// =============================================================================
+// IPC & Microkernel Syscalls (1020-1029)
+// =============================================================================
+
+/// Send an IPC message to a process (blocking)
+/// (target_pid, msg_ptr, len) -> i32
+pub const SYS_SEND: usize = 1020;
+
+/// Receive an IPC message (blocking)
+/// (msg_ptr, len) -> i32 (returns sender_pid)
+pub const SYS_RECV: usize = 1021;
+
+/// Wait for a hardware interrupt (blocking)
+/// (irq) -> i32
+pub const SYS_WAIT_INTERRUPT: usize = 1022;

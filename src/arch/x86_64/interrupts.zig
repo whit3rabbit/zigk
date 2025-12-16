@@ -51,6 +51,10 @@ var fpu_access_handler: ?*const fn () bool = null;
 // Args: vector, error_code
 var crash_handler: ?*const fn (u8, u64) noreturn = null;
 
+// Generic IRQ handlers (for userspace drivers/IPC)
+// Indexed by IRQ number (0-15)
+var generic_irq_handlers: [16]?*const fn (u8) void = [_]?*const fn (u8) void{null} ** 16;
+
 /// Exception names for debugging
 const exception_names = [_][]const u8{
     "Divide Error (#DE)",
@@ -129,7 +133,7 @@ pub fn setMouseHandler(handler: *const fn () void) void {
 }
 
 /// Set the updated serial handler callback
-pub fn setSerialHandler(handler: *const fn () void) void {
+pub fn setSerialHandler(handler: ?*const fn () void) void {
     serial_handler = handler;
 }
 
@@ -157,6 +161,14 @@ pub fn setGuardPageChecker(checker: *const fn (u64) ?GuardPageInfo) void {
 /// This allows the scheduler to handle #NM exceptions when threads access FPU
 pub fn setFpuAccessHandler(handler: *const fn () bool) void {
     fpu_access_handler = handler;
+}
+
+/// Set a generic handler for an IRQ
+/// This allows higher-level kernel modules to handle IRQs without hardcoding
+pub fn setGenericIrqHandler(irq: u8, handler: *const fn (u8) void) void {
+    if (irq < 16) {
+        generic_irq_handlers[irq] = handler;
+    }
 }
 
 /// Generic exception handler
@@ -344,6 +356,8 @@ fn irqHandler(frame: *idt.InterruptFrame) void {
             // Serial IRQ (COM1)
             if (serial_handler) |handler| {
                 handler();
+            } else if (generic_irq_handlers[irq]) |handler| {
+                handler(irq);
             } else {
                 // Acknowledge by reading IIR/LSR/RBR? 
                 // Mostly UART interrupts are cleared by reading the cause.
@@ -354,8 +368,12 @@ fn irqHandler(frame: *idt.InterruptFrame) void {
             }
         },
         else => {
-            // Unhandled IRQ - log for debugging (rate-limited)
-            logUnexpectedIrq(irq);
+            if (generic_irq_handlers[irq]) |handler| {
+                handler(irq);
+            } else {
+                // Unhandled IRQ - log for debugging (rate-limited)
+                logUnexpectedIrq(irq);
+            }
         },
     }
 

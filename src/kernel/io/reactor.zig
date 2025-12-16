@@ -80,14 +80,12 @@ pub const Reactor = struct {
     stats: ReactorStats,
 
     /// Initialize the reactor
-    pub fn init() Reactor {
-        return .{
-            .pool = IoRequestPool.init(),
-            .lock = .{},
-            .current_tick = 0,
-            .timer_head = null,
-            .stats = .{},
-        };
+    pub fn init(self: *Reactor) void {
+        self.pool.init();
+        self.lock = .{};
+        self.current_tick = 0;
+        self.timer_head = null;
+        self.stats = .{};
     }
 
     /// Allocate a request for an async operation
@@ -222,7 +220,7 @@ pub const ReactorStats = struct {
 /// Initialize the global reactor
 /// Called once from kernel main
 pub fn initGlobal() void {
-    global_reactor = Reactor.init();
+    global_reactor.init();
     reactor_initialized = true;
 }
 
@@ -261,14 +259,16 @@ pub fn timerTick() void {
 // =============================================================================
 
 test "Reactor basic init" {
-    var reactor = Reactor.init();
+    var reactor: Reactor = undefined;
+    reactor.init();
 
     const stats = reactor.getStats();
     try std.testing.expectEqual(@as(u64, 0), stats.requests_allocated);
 }
 
 test "Reactor alloc and free" {
-    var reactor = Reactor.init();
+    var reactor: Reactor = undefined;
+    reactor.init();
 
     const req = reactor.allocRequest(.socket_read) orelse return error.AllocFailed;
     try std.testing.expectEqual(IoOpType.socket_read, req.op);
@@ -281,7 +281,8 @@ test "Reactor alloc and free" {
 }
 
 test "Reactor timer expiry" {
-    var reactor = Reactor.init();
+    var reactor: Reactor = undefined;
+    reactor.init();
 
     const req = reactor.allocRequest(.timer) orelse return error.AllocFailed;
     _ = req.compareAndSwapState(.idle, .pending);

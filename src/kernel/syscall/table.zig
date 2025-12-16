@@ -27,6 +27,9 @@ const custom = @import("custom.zig");
 const net = @import("net.zig");
 const random = @import("random.zig");
 const input_handlers = @import("input.zig");
+const ipc = @import("ipc.zig");
+const interrupt = @import("interrupt.zig");
+const port_io = @import("port_io.zig");
 
 /// Syscall frame from arch-specific entry
 pub const SyscallFrame = hal.syscall.SyscallFrame;
@@ -74,6 +77,12 @@ pub export fn dispatch_syscall(frame: *SyscallFrame) callconv(.c) void {
                         mod = random;
                     } else if (@hasDecl(input_handlers, name)) {
                         mod = input_handlers;
+                    } else if (@hasDecl(ipc, name)) {
+                        mod = ipc;
+                    } else if (@hasDecl(interrupt, name)) {
+                        mod = interrupt;
+                    } else if (@hasDecl(port_io, name)) {
+                        mod = port_io;
                     }
 
                     if (mod) |m| {
