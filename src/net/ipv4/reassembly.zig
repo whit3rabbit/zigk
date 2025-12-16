@@ -381,8 +381,13 @@ fn removeHole(e: *ReassemblyEntry, idx: usize) void {
 
 /// Check if a fragment region overlaps with already-filled data
 fn isRegionOverlapping(e: *const ReassemblyEntry, start: usize, end: usize) bool {
-    _ = start; _ = end; _ = e;
-    return false;
+    for (0..e.hole_count) |i| {
+        const h = e.holes[i];
+        if (start >= h.start and end <= h.end) {
+            return false;
+        }
+    }
+    return true;
 }
 
 /// Check if reassembly is complete
