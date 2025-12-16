@@ -50,7 +50,8 @@ pub const MAX_RTO_MS: u32 = 64000;
 pub const MAX_RETRIES: u8 = 8;
 
 /// Connection hash table size (must be power of 2)
-pub const TCB_HASH_SIZE: usize = 64;
+/// Increased to 1024 to mitigate hash flooding and improve lookup performance
+pub const TCB_HASH_SIZE: usize = 1024;
 
 /// Maximum number of TCBs (connections)
 pub const MAX_TCBS: usize = 256;

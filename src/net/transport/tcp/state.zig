@@ -13,12 +13,13 @@ pub const Tcb = types.Tcb;
 pub var tcb_pool: std.ArrayListUnmanaged(*Tcb) = .{};
 pub var tcp_allocator: std.mem.Allocator = undefined;
 
-/// TX Buffer Pool (32 x 2048 = 64KB)
+/// TX Buffer Pool (64 x 2048 = 128KB)
 /// Avoids heap allocation on transmit path
-const TX_POOL_SIZE = 32;
+/// Shared by TCP and UDP
+const TX_POOL_SIZE = 64;
 const TX_BUF_SIZE = 2048;
 var tx_pool: [TX_POOL_SIZE][TX_BUF_SIZE]u8 = undefined;
-var tx_pool_bitmap: u32 = 0xFFFFFFFF; // 1 = free
+var tx_pool_bitmap: u64 = 0xFFFFFFFFFFFFFFFF; // 1 = free
 var tx_pool_lock: sync.Spinlock = .{};
 
 pub fn allocTxBuffer() ?[]u8 {
@@ -28,7 +29,7 @@ pub fn allocTxBuffer() ?[]u8 {
     if (tx_pool_bitmap == 0) return null;
 
     const idx = @ctz(tx_pool_bitmap);
-    tx_pool_bitmap &= ~(@as(u32, 1) << @intCast(idx));
+    tx_pool_bitmap &= ~(@as(u64, 1) << @intCast(idx));
     return &tx_pool[idx];
 }
 
@@ -46,7 +47,7 @@ pub fn freeTxBuffer(buf: []u8) void {
     
     const held = tx_pool_lock.acquire();
     defer held.release();
-    tx_pool_bitmap |= (@as(u32, 1) << @intCast(idx));
+    tx_pool_bitmap |= (@as(u64, 1) << @intCast(idx));
 }
 
 /// Connection hash table (for fast lookup)
@@ -125,7 +126,6 @@ pub fn init(iface: *Interface, allocator: std.mem.Allocator, ticks_per_sec: u32)
 
     global_iface = iface;
     tcp_allocator = allocator;
-    tcp_allocator = allocator;
     tcb_pool = .{};
     listen_tcbs = .{};
 
@@ -172,6 +172,14 @@ pub fn allocateTcb() ?*Tcb {
     return tcb;
 }
 
+/// Check if a TCB pointer is still valid (exists in the pool)
+pub fn isTcbValid(tcb: *Tcb) bool {
+    for (tcb_pool.items) |item| {
+        if (item == tcb) return true;
+    }
+    return false;
+}
+
 /// Free a TCB
 /// Security: Uses two-phase deletion pattern:
 /// 1. Mark as closing to prevent new packet processing
@@ -189,6 +197,9 @@ pub fn freeTcb(tcb: *Tcb) void {
     // Phase 2: Remove from hash table - prevents new lookups
     removeTcbFromHash(tcb);
 
+    // Safety: Also remove from listen table if present, to prevent dangling pointers
+    removeFromListenTable(tcb);
+
     // Phase 3: Reset and free
     tcb.reset();
 
@@ -204,35 +215,15 @@ pub fn freeTcb(tcb: *Tcb) void {
 }
 
 /// Hash function for connection lookup
-/// Uses Jenkins one-at-a-time hash for better distribution
+/// Uses SipHash-2-4 for protection against hash flooding DoS
 pub fn hashConnection(local_ip: u32, local_port: u16, remote_ip: u32, remote_port: u16) usize {
-    var h: u32 = 0;
+    var hasher = std.crypto.auth.siphash.SipHash64(2, 4).init(&secret_key);
+    hasher.update(std.mem.asBytes(&local_ip));
+    hasher.update(std.mem.asBytes(&local_port));
+    hasher.update(std.mem.asBytes(&remote_ip));
+    hasher.update(std.mem.asBytes(&remote_port));
 
-    // Mix local IP
-    h +%= local_ip;
-    h +%= (h << 10);
-    h ^= (h >> 6);
-
-    // Mix remote IP
-    h +%= remote_ip;
-    h +%= (h << 10);
-    h ^= (h >> 6);
-
-    // Mix ports
-    h +%= @as(u32, local_port);
-    h +%= (h << 10);
-    h ^= (h >> 6);
-
-    h +%= @as(u32, remote_port);
-    h +%= (h << 10);
-    h ^= (h >> 6);
-
-    // Final mixing
-    h +%= (h << 3);
-    h ^= (h >> 11);
-    h +%= (h << 15);
-
-    return @as(usize, h) % c.TCB_HASH_SIZE;
+    return @as(usize, @truncate(hasher.finalInt())) % c.TCB_HASH_SIZE;
 }
 
 /// Insert TCB into hash table
@@ -314,10 +305,6 @@ pub fn validateConnectionExists(local_ip: u32, local_port: u16, remote_ip: u32, 
     // RFC 5927: SEQ must be within range [SND.UNA, SND.NXT]
     if (seq_num) |seq| {
         // Simple check: SND.UNA <= SEQ <= SND.NXT
-        // Note: use modulo arithmetic (seqGte/seqLte from types.zig not visible here? need to import)
-        // We can do simple wrapping validation manually or move seq functions to util
-        // Assuming we can access tcb members. 
-        // Logic: (seq - snd_una) <= (snd_nxt - snd_una)
         const dist = seq -% tcb.snd_una;
         const window = tcb.snd_nxt -% tcb.snd_una;
         if (dist > window) {
@@ -360,11 +347,6 @@ pub fn generateIsn(l_ip: u32, l_port: u16, r_ip: u32, r_port: u16) u32 {
     // 250 increments per ms = 4us resolution approx
     const time_component = @as(u32, @truncate(connection_timestamp)) *% 250;
     
-    // We still mix in isn_counter (which is random seeded) but we don't
-    // strictly rely on its linear increment leaking volume.
-    // Actually, to fully prevent leak we should not assume a global linear counter that
-    // increments per connection.
-    
     // Use the time component as the linear basline 'M'
     const M = time_component;
     
@@ -382,13 +364,16 @@ pub fn generateIsn(l_ip: u32, l_port: u16, r_ip: u32, r_port: u16) u32 {
     }
 
     // F = SipHash-2-4(key, 4-tuple)
-    // RFC 6528 recommends a cryptographically secure function.
-    // SipHash is a PRF designed for potential DoS contexts (hash flooding) and is secure enough for ISN.
+    // Security: Mix in fresh hardware entropy for every connection to prevent
+    // attack against the linear counter component.
+    const fresh_entropy = entropy.getHardwareEntropy();
+
     var hasher = std.crypto.auth.siphash.SipHash64(2, 4).init(&secret_key);
     hasher.update(std.mem.asBytes(&l_ip));
     hasher.update(std.mem.asBytes(&l_port));
     hasher.update(std.mem.asBytes(&r_ip));
     hasher.update(std.mem.asBytes(&r_port));
+    hasher.update(std.mem.asBytes(&fresh_entropy));
     
     // ISN = M + F.
     // SipHash64 returns u64, we take lower 32 bits
