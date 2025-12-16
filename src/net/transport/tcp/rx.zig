@@ -50,7 +50,22 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
     }
 
     // Verify TCP checksum
-    const tcp_segment = pkt.data[pkt.transport_offset..pkt.len];
+    // Note: pkt.len might include Ethernet padding, so we must calculate exact TCP segment length
+    // from IP Total Length to ensure checksum uses correct pseudo-header length and data.
+    const ip_total_len = ip_hdr.getTotalLength();
+    const ip_header_len = ip_hdr.getHeaderLength();
+
+    // Safety check: IP header already validated in ipv4.zig, but ensure we don't underflow
+    if (ip_total_len < ip_header_len) return false;
+
+    const tcp_segment_len = ip_total_len - ip_header_len;
+
+    // Verify segment length is within buffer bounds
+    if (pkt.transport_offset + tcp_segment_len > pkt.len) {
+        return false; // Buffer too small for claimed length
+    }
+
+    const tcp_segment = pkt.data[pkt.transport_offset..][0..tcp_segment_len];
 
     // Use stored IPs for checksum to support reassembled packets
     const calc_checksum = @import("checksum.zig").tcpChecksum(pkt.src_ip, pkt.dst_ip, tcp_segment);
@@ -60,6 +75,12 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
     // tcpChecksum returns 0xFFFF in that case. Any other value means bad checksum.
     if (calc_checksum != 0xFFFF) {
         return false; // Bad checksum
+    }
+
+    // Security: TCP does not support broadcast or multicast (RFC 793)
+    // Drop such packets to prevent broadcast amplification attacks
+    if (pkt.is_broadcast or pkt.is_multicast) {
+        return false;
     }
 
     // Look up connection
@@ -86,7 +107,9 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
     }
 
     // Try listening socket
-    if (state.findListeningTcb(local_port)) |listen_tcb| {
+    // Security: Pass local_ip to ensure we only match listeners bound to this IP (or 0.0.0.0)
+    // Prevents binding bypass where a packet to 192.168.1.1:80 matches a listener on 127.0.0.1:80
+    if (state.findListeningTcb(local_port, local_ip)) |listen_tcb| {
         // Security: Check closing flag before processing (two-phase deletion protection)
         if (listen_tcb.closing) {
             state.lock.release();

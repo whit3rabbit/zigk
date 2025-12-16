@@ -280,14 +280,24 @@ pub fn findTcb(local_ip: u32, local_port: u16, remote_ip: u32, remote_port: u16)
     return null;
 }
 
-/// Find listening TCB by local port
-pub fn findListeningTcb(local_port: u16) ?*Tcb {
+/// Find listening TCB by local port and local IP
+/// local_ip: The destination IP of the incoming packet
+/// Returns a listener bound to local_ip, or to 0.0.0.0 (INADDR_ANY)
+/// Prefers exact IP match over wildcard.
+pub fn findListeningTcb(local_port: u16, local_ip: u32) ?*Tcb {
+    var any_match: ?*Tcb = null;
+
     for (listen_tcbs.items) |tcb| {
          if (tcb.local_port == local_port and tcb.state == .Listen) {
-             return tcb;
+             if (tcb.local_ip == local_ip) {
+                 return tcb; // Exact match found
+             }
+             if (tcb.local_ip == 0) {
+                 any_match = tcb; // Wildcard match candidate
+             }
          }
     }
-    return null;
+    return any_match;
 }
 
 /// Validate that a connection exists for the given 4-tuple.

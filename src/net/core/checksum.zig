@@ -52,6 +52,43 @@ pub fn udpChecksum(src_ip: u32, dst_ip: u32, udp_segment_with_header: []const u8
     return if (result == 0) 0xFFFF else result;
 }
 
+/// Calculate TCP checksum with pseudo-header.
+/// TCP only: protocol value (6) is baked in.
+/// src_ip and dst_ip should be in network byte order.
+/// tcp_segment_with_header must include the TCP header and payload.
+pub fn tcpChecksum(src_ip: u32, dst_ip: u32, tcp_segment_with_header: []const u8) u16 {
+    var sum: u32 = 0;
+
+    // Pseudo-header: src_ip, dst_ip, zero, protocol, tcp_length
+    sum += @as(u32, @truncate(src_ip >> 16));
+    sum += @as(u32, @truncate(src_ip));
+    sum += @as(u32, @truncate(dst_ip >> 16));
+    sum += @as(u32, @truncate(dst_ip));
+    sum += 6; // TCP protocol
+    sum += @as(u32, @truncate(tcp_segment_with_header.len));
+
+    // TCP header + data
+    var i: usize = 0;
+    while (i + 1 < tcp_segment_with_header.len) : (i += 2) {
+        const word = (@as(u32, tcp_segment_with_header[i]) << 8) | @as(u32, tcp_segment_with_header[i + 1]);
+        sum += word;
+    }
+
+    // Handle odd byte
+    if (i < tcp_segment_with_header.len) {
+        sum += @as(u32, tcp_segment_with_header[i]) << 8;
+    }
+
+    // Fold 32-bit sum to 16 bits
+    while (sum > 0xFFFF) {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+
+    // Return ones' complement
+    const result = ~@as(u16, @truncate(sum));
+    return if (result == 0) 0xFFFF else result;
+}
+
 /// Ones' complement checksum (used by IP, ICMP, TCP, UDP)
 fn onesComplement(data: []const u8) u16 {
     var sum: u32 = 0;
