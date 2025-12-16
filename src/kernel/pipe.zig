@@ -38,6 +38,11 @@ const Pipe = struct {
     blocked_readers: ?*sched.Thread,
     blocked_writers: ?*sched.Thread,
 
+    // SMP-safe wakeup flags to prevent lost wakeups.
+    // Set atomically by waker before unblock(), checked by sleeper before block().
+    reader_woken: std.atomic.Value(bool),
+    writer_woken: std.atomic.Value(bool),
+
     // Async I/O support (Phase 2)
     pending_read: ?*anyopaque, // *IoRequest for async read
     pending_write: ?*anyopaque, // *IoRequest for async write
@@ -53,6 +58,8 @@ const Pipe = struct {
             .lock = .{},
             .blocked_readers = null,
             .blocked_writers = null,
+            .reader_woken = std.atomic.Value(bool).init(false),
+            .writer_woken = std.atomic.Value(bool).init(false),
             .pending_read = null,
             .pending_write = null,
         };
@@ -200,9 +207,10 @@ fn pipeRead(fd: *fd_mod.FileDescriptor, buf: []u8) isize {
                 }
             }
 
-            // Wake up writers
+            // Wake up writers - set flag BEFORE unblock to prevent lost wakeup
             if (pipe.blocked_writers) |t| {
                 pipe.blocked_writers = null;
+                pipe.writer_woken.store(true, .release);
                 sched.unblock(t);
             }
 
@@ -224,77 +232,25 @@ fn pipeRead(fd: *fd_mod.FileDescriptor, buf: []u8) isize {
             return Errno.EAGAIN.toReturn();
         }
 
-        // Wait for data
+        // Wait for data - SMP-safe lost wakeup prevention
         pipe.blocked_readers = sched.getCurrentThread();
 
-        // Critical section: Disable interrupts before releasing lock to ensure
-        // we don't miss a wakeup if preempted immediately after release.
-        // sched.block() expects to be called with interrupts enabled?
-        // No, sched.block() handles its own atomicity via scheduler lock,
-        // but the gap between held.release() (pipe lock) and sched.block() (acquires scheduler lock)
-        // is vulnerable if we rely on pipe.blocked_readers.
+        // Clear the woken flag before releasing lock.
+        // Writer will set it atomically before calling unblock().
+        pipe.reader_woken.store(false, .release);
 
-        // If writer comes in here:
-        // 1. We release pipe lock.
-        // 2. Writer acquires pipe lock.
-        // 3. Writer writes data.
-        // 4. Writer sees blocked_readers != null (us).
-        // 5. Writer calls sched.unblock(us).
-        // 6. sched.unblock acquires scheduler lock, sets our state to Ready (if Blocked) or leaves it Running (if not yet Blocked).
-        // 7. We call sched.block().
-        //    - sched.block() acquires scheduler lock.
-        //    - It sets state to Blocked.
-        //    - It halts.
-
-        // If unblock() happens BEFORE block():
-        // - unblock() sees state is Running (we haven't blocked yet). It does nothing (or effectively nothing).
-        // - block() sets state to Blocked. We sleep forever. LOST WAKEUP!
-
-        // Fix: We need to hold scheduler lock or disable interrupts across the gap?
-        // Or check state in block()?
-        // sched.block() implementation checks `if (curr.state == .Running) return;` inside its critical section?
-        // Actually, looking at sched.zig, block() sets state=.Blocked.
-
-        // The pattern should be:
-        // 1. Acquire pipe lock.
-        // 2. Add self to waiter list.
-        // 3. Disable interrupts (prevent preemption).
-        // 4. Release pipe lock.
-        // 5. Call sched.block() (which should handle the rest).
-
-        // However, standard `sched.block()` in this kernel seems to be designed to be called from syscalls.
-        // It acquires scheduler lock.
-
-        // If we disable interrupts, we can't be preempted.
-        // So writer can only run on another core.
-        // If single core (MVP), disabling interrupts is sufficient.
-
-        // For multi-core, spinlock protects data.
-        // The issue is the gap.
-
-        // Correct fix requires integrating with scheduler lock, or a "prepare_to_wait" API.
-        // Given existing sched API, we can't easily hold scheduler lock here.
-
-        // Workaround: Use disableInterrupts() to protect the gap on single core.
-        // For SMP, this is still broken without a proper wait queue primitive.
-        // Assuming single core for now (as per "MVP" notes in other files).
-
-        // Use disableInterrupts() (cli) because disableInterruptsSaveFlags returns u64
-        // which we can't easily pass to restoreInterrupts if we don't save it.
-        // Actually, hal.cpu has disableInterruptsSaveFlags() -> u64
-        // and restoreInterrupts(u64).
-
-        // However, standard `disableInterrupts()` returns void.
-        // I will use explicit `disableInterrupts()` and then assume interrupts were enabled
-        // (standard kernel context) or use explicit enable if needed.
-        // But the reviewer asked to restore.
-        // Let's check if `disableInterrupts` returns something in `hal.cpu`.
-        // Checked: `disableInterrupts()` returns void. `disableInterruptsSaveFlags()` returns u64.
-
+        // Disable interrupts to minimize the gap between lock release and block().
+        // On single core this prevents the race entirely.
+        // On SMP, we use the woken flag as a secondary check.
         const interrupt_state = hal.cpu.disableInterruptsSaveFlags();
         held.release();
 
-        sched.block();
+        // SECURITY: Check if woken flag was set before we block.
+        // This catches the SMP race where unblock() happens between
+        // release() and block(). If woken, skip the block entirely.
+        if (!pipe.reader_woken.load(.acquire)) {
+            sched.block();
+        }
 
         // Restore interrupt state after waking up
         hal.cpu.restoreInterrupts(interrupt_state);
@@ -375,9 +331,10 @@ fn pipeWrite(fd: *fd_mod.FileDescriptor, buf: []const u8) isize {
                 _ = request.complete(.{ .success = async_read_len });
             }
 
-            // Wake up readers
+            // Wake up readers - set flag BEFORE unblock to prevent lost wakeup
             if (pipe.blocked_readers) |t| {
                 pipe.blocked_readers = null;
+                pipe.reader_woken.store(true, .release);
                 sched.unblock(t);
             }
 
@@ -394,14 +351,23 @@ fn pipeWrite(fd: *fd_mod.FileDescriptor, buf: []const u8) isize {
             return Errno.EAGAIN.toReturn();
         }
 
-        // Wait for space
+        // Wait for space - SMP-safe lost wakeup prevention
         pipe.blocked_writers = sched.getCurrentThread();
 
-        // Protect wakeup gap
+        // Clear the woken flag before releasing lock.
+        // Reader will set it atomically before calling unblock().
+        pipe.writer_woken.store(false, .release);
+
+        // Disable interrupts to minimize the gap between lock release and block().
         const interrupt_state = hal.cpu.disableInterruptsSaveFlags();
         held.release();
 
-        sched.block();
+        // SECURITY: Check if woken flag was set before we block.
+        // This catches the SMP race where unblock() happens between
+        // release() and block(). If woken, skip the block entirely.
+        if (!pipe.writer_woken.load(.acquire)) {
+            sched.block();
+        }
 
         // Restore interrupt state
         hal.cpu.restoreInterrupts(interrupt_state);
@@ -427,9 +393,10 @@ fn pipeClose(fd: *fd_mod.FileDescriptor) isize {
             pipe.pending_write = null;
             _ = request.complete(.{ .err = error.EPIPE });
         }
-        // Wake up writers so they see EPIPE
+        // Wake up writers so they see EPIPE - set flag BEFORE unblock
         if (pipe.blocked_writers) |t| {
             pipe.blocked_writers = null;
+            pipe.writer_woken.store(true, .release);
             sched.unblock(t);
         }
     } else {
@@ -440,9 +407,10 @@ fn pipeClose(fd: *fd_mod.FileDescriptor) isize {
             pipe.pending_read = null;
             _ = request.complete(.{ .success = 0 }); // EOF
         }
-        // Wake up readers so they see EOF
+        // Wake up readers so they see EOF - set flag BEFORE unblock
         if (pipe.blocked_readers) |t| {
             pipe.blocked_readers = null;
+            pipe.reader_woken.store(true, .release);
             sched.unblock(t);
         }
     }

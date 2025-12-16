@@ -839,10 +839,14 @@ fn copyCompletionsToUser(inst: *IoUringInstance, cqes_ptr: usize, max_cqes: usiz
         return error.EFAULT;
     }
 
+    // Access CQ via shared memory getters (not non-existent instance fields)
+    const cq_ring = inst.getCqRing();
+    const cqes = inst.getCqes();
+
     // Copy each CQE to userspace
     for (0..copy_count) |i| {
-        const idx = inst.cq_head & (inst.cq_ring_entries - 1);
-        const cqe = inst.cq_entries[idx];
+        const idx = cq_ring.head & (inst.cq_ring_entries - 1);
+        const cqe = cqes[idx];
         const dest_addr = cqes_ptr + i * cqe_size;
         const user_ptr = user_mem.UserPtr.from(dest_addr);
 
@@ -850,7 +854,7 @@ fn copyCompletionsToUser(inst: *IoUringInstance, cqes_ptr: usize, max_cqes: usiz
             return error.EFAULT;
         };
 
-        inst.cq_head +%= 1;
+        cq_ring.head +%= 1;
     }
 
     return copy_count;
@@ -1072,12 +1076,17 @@ fn processRecvOp(inst: *IoUringInstance, sqe: *const io_ring.IoUringSqe) Syscall
     req.buf_len = sqe.len;
     req.user_data = sqe.user_data;
 
-    // Validate buffer
+    // Validate buffer address and length
     if (!user_mem.isValidUserAccess(sqe.addr, sqe.len, .write)) {
         io.pool.free(req);
         return error.EFAULT;
     }
 
+    // SECURITY WARNING (TOCTOU): Creating a kernel slice from validated user
+    // address has a race condition - the page could be unmapped between
+    // validation and actual I/O. Proper fix requires kernel bounce buffers
+    // or page pinning. Current mitigation: validation checks, but async
+    // operations remain vulnerable. TODO: Add kernel bounce buffer support.
     const buf: []u8 = @as([*]u8, @ptrFromInt(sqe.addr))[0..sqe.len];
 
     socket.recvAsync(sock_fd, req, buf) catch |e| {
@@ -1115,12 +1124,17 @@ fn processSendOp(inst: *IoUringInstance, sqe: *const io_ring.IoUringSqe) Syscall
     req.buf_len = sqe.len;
     req.user_data = sqe.user_data;
 
-    // Validate buffer
+    // Validate buffer address and length
     if (!user_mem.isValidUserAccess(sqe.addr, sqe.len, .read)) {
         io.pool.free(req);
         return error.EFAULT;
     }
 
+    // SECURITY WARNING (TOCTOU): Creating a kernel slice from validated user
+    // address has a race condition - the page could be unmapped between
+    // validation and actual I/O. Proper fix requires kernel bounce buffers
+    // or page pinning. Current mitigation: validation checks, but async
+    // operations remain vulnerable. TODO: Add kernel bounce buffer support.
     const data: []const u8 = @as([*]const u8, @ptrFromInt(sqe.addr))[0..sqe.len];
 
     socket.sendAsync(sock_fd, req, data) catch |e| {
@@ -1147,6 +1161,12 @@ fn processSendOp(inst: *IoUringInstance, sqe: *const io_ring.IoUringSqe) Syscall
     }
 }
 
+/// Kernel timespec structure for timeout operations
+const KernelTimespec = extern struct {
+    tv_sec: i64,
+    tv_nsec: i64,
+};
+
 fn processTimeoutOp(inst: *IoUringInstance, sqe: *const io_ring.IoUringSqe) SyscallError!void {
     // IORING_OP_TIMEOUT uses:
     //   - sqe.addr: pointer to struct __kernel_timespec
@@ -1159,16 +1179,25 @@ fn processTimeoutOp(inst: *IoUringInstance, sqe: *const io_ring.IoUringSqe) Sysc
     req.user_data = sqe.user_data;
 
     // Read timeout value from userspace
-    // struct __kernel_timespec { i64 tv_sec; i64 tv_nsec; }
     if (sqe.addr != 0) {
-        if (!user_mem.isValidUserAccess(sqe.addr, 16, .read)) {
+        // SECURITY: Copy timespec to kernel stack to prevent TOCTOU.
+        // Do NOT dereference user memory directly via @ptrFromInt.
+        const user_ptr = user_mem.UserPtr.from(sqe.addr);
+        const ts = user_ptr.readValue(KernelTimespec) catch {
             io.pool.free(req);
             return error.EFAULT;
-        }
+        };
 
-        const ts_ptr: *const extern struct { tv_sec: i64, tv_nsec: i64 } = @ptrFromInt(sqe.addr);
-        const timeout_ns: u64 = @as(u64, @intCast(@max(0, ts_ptr.tv_sec))) * 1_000_000_000 +
-            @as(u64, @intCast(@max(0, ts_ptr.tv_nsec)));
+        // SECURITY: Clamp values to prevent integer overflow in multiplication.
+        // Max timeout of ~1 year prevents overflow when multiplied by 1e9.
+        const MAX_TIMEOUT_SEC: i64 = 86400 * 365; // ~1 year
+        const MAX_NSEC: i64 = 999_999_999;
+
+        const clamped_sec = @min(@max(0, ts.tv_sec), MAX_TIMEOUT_SEC);
+        const clamped_nsec = @min(@max(0, ts.tv_nsec), MAX_NSEC);
+
+        const timeout_ns: u64 = @as(u64, @intCast(clamped_sec)) * 1_000_000_000 +
+            @as(u64, @intCast(clamped_nsec));
 
         // Convert nanoseconds to ticks (1ms per tick)
         const timeout_ticks = io.nsToTicks(timeout_ns);

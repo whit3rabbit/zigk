@@ -26,6 +26,25 @@ const config = @import("config");
 const list = @import("list");
 const kernel_stack = @import("kernel_stack");
 
+/// Thread exit cleanup callback type
+/// Called during exitWithStatus to clean up thread resources
+pub const ThreadExitCallback = *const fn (*Thread) void;
+
+/// Registered exit cleanup callbacks (set by syscall modules)
+var exit_callbacks: [4]?ThreadExitCallback = [_]?ThreadExitCallback{null} ** 4;
+
+/// Register a callback to be called when a thread exits.
+/// Used by syscall modules to clean up thread-specific state.
+pub fn registerExitCallback(cb: ThreadExitCallback) void {
+    for (&exit_callbacks) |*slot| {
+        if (slot.* == null) {
+            slot.* = cb;
+            return;
+        }
+    }
+    // No slots available - should not happen with current usage
+}
+
 pub const Thread = thread.Thread;
 const ThreadState = thread.ThreadState;
 const gdt = hal.gdt;
@@ -529,6 +548,14 @@ pub fn exitWithStatus(status: i32) void {
     const current = getCurrentThread();
 
     if (current) |curr| {
+        // SECURITY: Call registered exit callbacks to clean up thread-specific state.
+        // This includes clearing IRQ waiter registrations to prevent use-after-free.
+        for (exit_callbacks) |cb_opt| {
+            if (cb_opt) |cb| {
+                cb(curr);
+            }
+        }
+
         // Set exit status
         thread.setExitStatus(curr, status);
 

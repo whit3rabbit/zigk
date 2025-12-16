@@ -235,8 +235,15 @@ pub fn sys_bind(fd: usize, addr_ptr: usize, addrlen: usize) SyscallError!usize {
     return 0;
 }
 
+/// Maximum send buffer size to prevent excessive kernel allocation
+const MAX_SENDTO_BUFFER: usize = 65536;
+
 /// sys_sendto (44) - Send message on socket
 /// (fd, buf, len, flags, dest_addr, addrlen) -> ssize_t
+///
+/// SECURITY: Copies user data to kernel buffer to prevent TOCTOU.
+/// A racing userspace thread could modify or unmap the buffer between
+/// validation and use by the socket layer.
 pub fn sys_sendto(
     fd: usize,
     buf_ptr: usize,
@@ -251,6 +258,11 @@ pub fn sys_sendto(
         return error.ENOTSOCK;
     };
 
+    // Limit buffer size to prevent excessive kernel allocation
+    if (len > MAX_SENDTO_BUFFER) {
+        return error.EINVAL;
+    }
+
     // Validate buffer with read permission (kernel reads from user buffer)
     if (!isValidUserAccess(buf_ptr, len, AccessMode.Read)) {
         return error.EFAULT;
@@ -258,7 +270,7 @@ pub fn sys_sendto(
 
     // Copy destination address from user memory if provided
     var kdest_addr: ?socket.SockAddrIn = null;
-    
+
     if (dest_addr_ptr != 0) {
         if (addrlen < @sizeOf(socket.SockAddrIn)) {
             return error.EINVAL;
@@ -268,21 +280,37 @@ pub fn sys_sendto(
         };
     }
 
-    const buf: [*]const u8 = @ptrFromInt(buf_ptr);
-    
+    // SECURITY: Copy user data to kernel buffer to prevent TOCTOU.
+    // Do NOT create a slice from user memory address.
+    const kbuf = heap.allocator().alloc(u8, len) catch {
+        return error.ENOMEM;
+    };
+    defer heap.allocator().free(kbuf);
+
+    const user_ptr = user_mem.UserPtr.from(buf_ptr);
+    _ = user_ptr.copyToKernel(kbuf) catch {
+        return error.EFAULT;
+    };
+
     if (kdest_addr) |*addr| {
-        const sent = socket.sendto(ctx.socket_idx, buf[0..len], addr) catch |err| {
+        const sent = socket.sendto(ctx.socket_idx, kbuf, addr) catch |err| {
             return socketErrorToSyscallError(err);
         };
         return sent;
     } else {
         // UDP without destination not supported in MVP (unless connect used?)
-        return error.EDESTADDRREQ; 
+        return error.EDESTADDRREQ;
     }
 }
 
+/// Maximum receive buffer size to prevent excessive kernel allocation
+const MAX_RECVFROM_BUFFER: usize = 65536;
+
 /// sys_recvfrom (45) - Receive message from socket
 /// (fd, buf, len, flags, src_addr, addrlen_ptr) -> ssize_t
+///
+/// SECURITY: Receives into kernel buffer then copies to user, preventing TOCTOU.
+/// A racing userspace thread could unmap the buffer while socket layer writes to it.
 pub fn sys_recvfrom(
     fd: usize,
     buf_ptr: usize,
@@ -297,20 +325,36 @@ pub fn sys_recvfrom(
         return error.ENOTSOCK;
     };
 
+    // Limit buffer size to prevent excessive kernel allocation
+    const recv_len = @min(len, MAX_RECVFROM_BUFFER);
+
     // Validate buffer with write permission (kernel writes to user buffer)
-    if (!isValidUserAccess(buf_ptr, len, AccessMode.Write)) {
+    if (!isValidUserAccess(buf_ptr, recv_len, AccessMode.Write)) {
         return error.EFAULT;
     }
 
-    const buf: [*]u8 = @ptrFromInt(buf_ptr);
+    // SECURITY: Allocate kernel buffer to receive into, preventing TOCTOU.
+    // Do NOT create a slice from user memory address.
+    const kbuf = heap.allocator().alloc(u8, recv_len) catch {
+        return error.ENOMEM;
+    };
+    defer heap.allocator().free(kbuf);
 
     // Prepare kernel buffer for source address
     var ksrc_addr: socket.SockAddrIn = undefined;
     const src_addr_arg: ?*socket.SockAddrIn = if (src_addr_ptr != 0) &ksrc_addr else null;
 
-    const received = socket.recvfrom(ctx.socket_idx, buf[0..len], src_addr_arg) catch |err| {
+    const received = socket.recvfrom(ctx.socket_idx, kbuf, src_addr_arg) catch |err| {
         return socketErrorToSyscallError(err);
     };
+
+    // Copy received data to userspace
+    if (received > 0) {
+        const user_ptr = user_mem.UserPtr.from(buf_ptr);
+        _ = user_ptr.copyFromKernel(kbuf[0..received]) catch {
+            return error.EFAULT;
+        };
+    }
 
     // Copy source address back to user if requested and successful
     if (src_addr_ptr != 0 and addrlen_ptr != 0) {
@@ -319,7 +363,7 @@ pub fn sys_recvfrom(
         const input_len = addrlen_uptr.readValue(u32) catch {
             return error.EFAULT;
         };
-        
+
         if (input_len < @sizeOf(socket.SockAddrIn)) {
             return error.EINVAL;
         }
@@ -331,7 +375,7 @@ pub fn sys_recvfrom(
 
         // Update length
         addrlen_uptr.writeValue(@as(u32, @sizeOf(socket.SockAddrIn))) catch {
-             return error.EFAULT;
+            return error.EFAULT;
         };
     }
 

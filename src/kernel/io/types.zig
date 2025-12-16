@@ -258,15 +258,29 @@ pub const IoRequest = struct {
     /// Complete this request with a result
     /// Safe to call from IRQ context
     /// Returns true if completion was accepted (state was pending/in_progress)
+    ///
+    /// SECURITY: Uses atomic cmpxchg to prevent race conditions where
+    /// concurrent cancel() and complete() calls could corrupt state.
     pub fn complete(self: *IoRequest, result: IoResult) bool {
-        // Try to transition from pending or in_progress to completed
-        const current = self.state.load(.acquire);
+        // Atomically transition from pending or in_progress to completed.
+        // We must win the race against cancel() or another complete() call.
+        while (true) {
+            const current = self.state.load(.acquire);
 
-        if (current == .pending or current == .in_progress) {
+            // Only pending or in_progress states can transition to completed
+            if (current != .pending and current != .in_progress) {
+                return false; // Already completed or cancelled
+            }
+
+            // Atomically try to claim this request for completion
+            if (self.state.cmpxchgStrong(current, .completed, .acq_rel, .acquire)) |_| {
+                // Lost the race - another thread changed state, retry
+                continue;
+            }
+
+            // Won the race - now safe to write result
+            // State is .completed so no other thread will try to modify
             self.result = result;
-
-            // Use release store to ensure result is visible before state change
-            self.state.store(.completed, .release);
 
             // Wake submitter thread if one is waiting
             if (is_freestanding) {
@@ -277,8 +291,6 @@ pub const IoRequest = struct {
 
             return true;
         }
-
-        return false;
     }
 
     /// Attempt to cancel this request

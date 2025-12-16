@@ -110,14 +110,28 @@ pub const IoRequestPool = struct {
         const held = self.lock.acquire();
         defer held.release();
 
-        // Verify request belongs to this pool (debug check)
-        if (builtin.mode == .Debug) {
-            const base = @intFromPtr(&self.requests[0]);
-            const end = @intFromPtr(&self.requests[MAX_REQUESTS - 1]) + @sizeOf(IoRequest);
-            const ptr = @intFromPtr(req);
-            if (ptr < base or ptr >= end) {
+        // SECURITY: Always verify request belongs to this pool to prevent
+        // double-free and arbitrary-free attacks. This check must run in
+        // all build modes, not just Debug.
+        const base = @intFromPtr(&self.requests[0]);
+        const end = base + MAX_REQUESTS * @sizeOf(IoRequest);
+        const ptr = @intFromPtr(req);
+        if (ptr < base or ptr >= end) {
+            // Invalid pointer - do not corrupt free list
+            // In debug mode, panic for easier debugging
+            if (builtin.mode == .Debug) {
                 @panic("IoRequestPool.free: request not from this pool");
             }
+            // In release mode, silently reject to avoid corruption
+            return;
+        }
+
+        // Verify alignment
+        if ((ptr - base) % @sizeOf(IoRequest) != 0) {
+            if (builtin.mode == .Debug) {
+                @panic("IoRequestPool.free: misaligned request pointer");
+            }
+            return;
         }
 
         // Reset and add to free list

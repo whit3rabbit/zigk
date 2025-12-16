@@ -180,9 +180,12 @@ fn handleKernelMessage(msg_ptr: usize) SyscallError!usize {
     const user_ptr = user_mem.UserPtr.from(msg_ptr);
     var msg: Message = undefined;
     const msg_bytes = std.mem.asBytes(&msg);
-    
+
     _ = user_ptr.copyToKernel(msg_bytes) catch return error.EFAULT;
 
+    // SECURITY: Validate payload_len bounds to prevent logical errors.
+    // payload_len must be within the fixed-size payload array.
+    if (msg.payload_len > ipc_msg.MAX_PAYLOAD_SIZE) return error.EINVAL;
     if (msg.payload_len < @sizeOf(InputHeader)) return error.EINVAL;
 
     const header: *const InputHeader = @ptrCast(@alignCast(&msg.payload));
