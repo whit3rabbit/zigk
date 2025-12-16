@@ -24,9 +24,7 @@ pub fn loadInitProcess() void {
     };
 
     const mods = mod_response.modules();
-    var selected_mod: ?*limine.Module = null;
-    var process_name: []const u8 = "init";
-
+    
     // Helper to safely get string from Limine pointer
     const get_str = struct {
         fn call(ptr: [*:0]const u8) []const u8 {
@@ -35,17 +33,22 @@ pub fn loadInitProcess() void {
         }
     }.call;
 
-    // Priority 0: UART Driver (Phase 3 Test)
+    // 1. Launch Drivers
     for (mods) |mod| {
         const cmdline = get_str(mod.cmdline);
         const path = get_str(mod.path);
-
+        
         if (std.mem.indexOf(u8, cmdline, "uart_driver") != null or std.mem.indexOf(u8, path, "uart_driver") != null) {
-            selected_mod = mod;
-            process_name = "uart_driver";
-            break;
+            spawnProcess(mod, "uart_driver");
+        }
+        if (std.mem.indexOf(u8, cmdline, "ps2_driver") != null or std.mem.indexOf(u8, path, "ps2_driver") != null) {
+            spawnProcess(mod, "ps2_driver");
         }
     }
+
+    // 2. Select Main Init Process
+    var selected_mod: ?*limine.Module = null;
+    var process_name: []const u8 = "init";
 
     // Priority 0.1: ASM Test (Sanity Check)
     if (selected_mod == null) {
@@ -129,27 +132,11 @@ pub fn loadInitProcess() void {
     };
 
     console.info("Found init module: {s} ({d} bytes)", .{ process_name, mod.size });
+    spawnProcess(mod, process_name);
+}
 
-    // Debug: List VFS root
-    {
-        // Try to open root to verify filesystem is up
-        if (fs.vfs.Vfs.open("/", 0)) |root| {
-             if (root.ops.close) |close_fn| {
-                 _ = close_fn(root);
-             }
-        } else |err| {
-            console.err("Failed to open root /: {}", .{err});
-        }
-    }
-    
-    // Debug: Check for WAD
-    // Mode 0 = O_RDONLY
-    if (fs.vfs.Vfs.open("/doom1.wad", 0)) |f| {
-        console.info("KERNEL: Successfully opened /doom1.wad", .{});
-        if (f.ops.close) |c| _ = c(f);
-    } else |err| {
-        console.warn("KERNEL: Failed to open /doom1.wad: {}", .{err});
-    }
+fn spawnProcess(mod: *limine.Module, process_name: []const u8) void {
+    console.info("Spawning process: {s}", .{process_name});
 
     // Step 1: Create Process with FD table (stdin/stdout/stderr pre-opened by devfs)
     const proc = process.createProcess(null) catch |err| {
@@ -169,6 +156,19 @@ pub fn loadInitProcess() void {
          // Grant Ports 0x3F8, len 8 (COM1)
          proc.capabilities.append(alloc, .{ .IoPort = .{ .port = 0x3F8, .len = 8 } }) catch {};
          console.info("Init: Granted UART capabilities to pid={}", .{proc.pid});
+    }
+
+    // Grant capabilities if this is the PS/2 driver
+    if (std.mem.eql(u8, process_name, "ps2_driver")) {
+         const alloc = heap.allocator();
+         // Grant IRQ 1 (Keyboard)
+         proc.capabilities.append(alloc, .{ .Interrupt = .{ .irq = 1 } }) catch {};
+         // Grant IRQ 12 (Mouse)
+         proc.capabilities.append(alloc, .{ .Interrupt = .{ .irq = 12 } }) catch {};
+         // Grant Ports 0x60, 0x64 (Controller)
+         proc.capabilities.append(alloc, .{ .IoPort = .{ .port = 0x60, .len = 1 } }) catch {};
+         proc.capabilities.append(alloc, .{ .IoPort = .{ .port = 0x64, .len = 1 } }) catch {};
+         console.info("Init: Granted PS/2 capabilities to pid={}", .{proc.pid});
     }
 
     // Grant capabilities if this is Doom

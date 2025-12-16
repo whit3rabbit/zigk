@@ -770,6 +770,10 @@ pub fn build(b: *std.Build) void {
     syscall_ipc_module.addImport("process", process_module);
     syscall_ipc_module.addImport("heap", heap_module);
     syscall_ipc_module.addImport("sched", sched_module);
+    syscall_ipc_module.addImport("sched", sched_module);
+    syscall_ipc_module.addImport("console", console_module);
+    syscall_ipc_module.addImport("keyboard", keyboard_module);
+    syscall_ipc_module.addImport("mouse", mouse_module);
 
     // Create syscall interrupt module
     const syscall_interrupt_module = b.createModule(.{
@@ -886,6 +890,7 @@ pub fn build(b: *std.Build) void {
     kernel.root_module.addImport("fd", fd_module);
     kernel.root_module.addImport("io", kernel_io_module);
     kernel.root_module.addImport("capabilities", capabilities_module);
+    kernel.root_module.addImport("syscall_ipc", syscall_ipc_module);
 
     // Add assembly helpers for x86_64 (ISR stubs, lgdt, lidt)
     kernel.addAssemblyFile(b.path("src/arch/x86_64/asm_helpers.S"));
@@ -1014,6 +1019,25 @@ pub fn build(b: *std.Build) void {
 
     const install_uart_driver = b.addInstallArtifact(uart_driver, .{});
     b.getInstallStep().dependOn(&install_uart_driver.step);
+
+    // Create PS/2 driver executable (userspace driver)
+    const ps2_driver_mod = b.createModule(.{
+        .root_source_file = b.path("src/user/drivers/ps2/main.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+        .code_model = .small,
+    });
+    ps2_driver_mod.addImport("syscall", syscall_lib);
+
+    const ps2_driver = b.addExecutable(.{
+        .name = "ps2_driver.elf",
+        .root_module = ps2_driver_mod,
+    });
+    // Use user linker script
+    ps2_driver.setLinkerScript(b.path("src/user/linker.ld"));
+    // Install
+    const install_ps2_driver = b.addInstallArtifact(ps2_driver, .{});
+    b.getInstallStep().dependOn(&install_ps2_driver.step);
 
     // Add doomgeneric C source files
     doom.addCSourceFiles(.{
@@ -1172,6 +1196,7 @@ pub fn build(b: *std.Build) void {
         \\cp zig-out/bin/audio_test iso_root/boot/modules/ && \
         \\cp zig-out/bin/doom.elf iso_root/boot/modules/ && \
         \\cp zig-out/bin/uart_driver.elf iso_root/boot/modules/ && \
+        \\cp zig-out/bin/ps2_driver.elf iso_root/boot/modules/ && \
         \\if [ -d initrd_contents ] && [ "$(ls -A initrd_contents 2>/dev/null)" ]; then \
         \\    echo "Creating initrd.tar..." && \
         \\    tar --format=ustar -cvf iso_root/boot/initrd.tar -C initrd_contents .; \

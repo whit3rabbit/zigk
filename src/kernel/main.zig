@@ -35,6 +35,7 @@ const init_mem = @import("init_mem.zig");
 const init_proc = @import("init_proc.zig");
 const init_hw = @import("init_hw.zig");
 const init_fs = @import("init_fs.zig");
+const syscall_ipc = @import("syscall_ipc"); // For console IPC wiring
 
 // Syscall dispatch table - must be imported to compile dispatch_syscall symbol
 // called from asm_helpers.S _syscall_entry
@@ -279,20 +280,23 @@ export fn _start() noreturn {
     console.info("Returned from hal.smp.init()", .{});
 
     // Initialize keyboard driver and register with HAL
-    keyboard.init();
-    hal.interrupts.setKeyboardHandler(&keyboard.handleIrq);
+    // Initialize keyboard driver and register with HAL
+    // keyboard.init(); // MOVED TO USERSPACE (Phase 5)
+    // hal.interrupts.setKeyboardHandler(&keyboard.handleIrq);
     // Explicitly enable keyboard IRQ1 in IOAPIC (ensure unmasked)
-    hal.apic.enableIrq(1);
+    // hal.apic.enableIrq(1); // Userspace driver will enable this via sys_wait_interrupt
     console.info("Keyboard IRQ1 explicitly enabled", .{});
 
     // Initialize input subsystem
+    // mouse.init();    // MOVED TO USERSPACE (Phase 5)
     input.init();
     console.info("Input subsystem initialized", .{});
 
 
     // Initialize mouse driver and register with HAL
-    mouse.init();
-    hal.interrupts.setMouseHandler(&mouse.handleIrq);
+    // Initialize mouse driver and register with HAL
+    // mouse.init(); // MOVED TO USERSPACE (Phase 5)
+    // hal.interrupts.setMouseHandler(&mouse.handleIrq);
 
     // Register Serial (UART) handler
     hal.interrupts.setSerialHandler(&serial_driver.Serial.handleIrq);
@@ -312,6 +316,9 @@ export fn _start() noreturn {
     io.initGlobal();
     console.info("Async I/O reactor initialized", .{});
 
+    // Wire up console IPC backend function pointer
+    console.sendKernelMessageFn = syscall_ipc.sendKernelMessage;
+    
     // Initialize signal handling subsystem
     const signal = @import("signal");
     signal.init();

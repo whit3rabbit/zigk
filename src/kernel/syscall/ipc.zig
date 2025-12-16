@@ -6,6 +6,8 @@ const process = @import("process");
 const heap = @import("heap");
 const sched = @import("sched");
 const ipc_msg = @import("ipc_msg");
+const keyboard = @import("keyboard");
+const mouse = @import("mouse");
 
 pub const Message = ipc_msg.Message;
 pub const KernelMessage = ipc_msg.KernelMessage;
@@ -14,6 +16,11 @@ pub fn sys_send(target_pid: usize, msg_ptr: usize, len: usize) SyscallError!usiz
     // 1. Validate arguments
     if (len != @sizeOf(Message)) return error.EINVAL;
     
+    // Check if target is Kernel (PID 0)
+    if (target_pid == 0) {
+        return handleKernelMessage(msg_ptr);
+    }
+
     // Find target process
     const target = process.findProcessByPid(@intCast(target_pid)) orelse return error.ESRCH;
     
@@ -100,6 +107,105 @@ pub fn sys_recv(msg_ptr: usize, len: usize) SyscallError!usize {
     };
     
     heap.allocator().destroy(kmsg);
+
+    return 0;
+}
+
+/// Helper for Kernel to send IPC messages (e.g. console logs)
+pub fn sendKernelMessage(target_pid: usize, payload: []const u8) !void {
+    const target = process.findProcessByPid(@intCast(target_pid)) orelse return error.ESRCH;
+
+    var msg: Message = undefined;
+    msg.sender_pid = 0; // 0 = Kernel
+    
+    // Copy payload (truncate if too long)
+    const len = @min(payload.len, ipc_msg.MAX_PAYLOAD_SIZE);
+    msg.payload_len = len;
+    @memcpy(msg.payload[0..len], payload[0..len]);
+    
+    // Allocate kernel message
+    const kmsg = heap.allocator().create(KernelMessage) catch return error.ENOMEM;
+    kmsg.* = KernelMessage{ .msg = msg };
+    
+    // Queue message
+    {
+        const held = target.mailbox_lock.acquire();
+        defer held.release();
+        
+        target.mailbox.append(kmsg);
+        
+        // Wake waiter if any
+        if (target.msg_waiter) |waiter| {
+            sched.unblock(waiter);
+            target.msg_waiter = null;
+        }
+    }
+}
+
+// Helper for console.zig to register logging
+const console = @import("console");
+
+pub fn sys_register_ipc_logger() SyscallError!usize {
+    const thread = sched.getCurrentThread() orelse return error.ESRCH;
+    const proc_opaque = thread.process orelse return error.ESRCH;
+    const process_ptr: *process.Process = @ptrCast(@alignCast(proc_opaque));
+    
+    console.addIpcBackend(process_ptr.pid);
+    return 0;
+}
+
+// Input Event Types (must match userspace)
+const INPUT_TYPE_KEYBOARD = 1;
+const INPUT_TYPE_MOUSE = 2;
+
+const InputHeader = extern struct {
+    type: u32,
+    _pad: u32,
+};
+
+const KeyboardEvent = extern struct {
+    header: InputHeader,
+    scancode: u8,
+};
+
+const MouseEvent = extern struct {
+    header: InputHeader,
+    dx: i16,
+    dy: i16,
+    dz: i8,
+    buttons: u8,
+};
+
+fn handleKernelMessage(msg_ptr: usize) SyscallError!usize {
+    const user_ptr = user_mem.UserPtr.from(msg_ptr);
+    var msg: Message = undefined;
+    const msg_bytes = std.mem.asBytes(&msg);
+    
+    _ = user_ptr.copyToKernel(msg_bytes) catch return error.EFAULT;
+
+    if (msg.payload_len < @sizeOf(InputHeader)) return error.EINVAL;
+
+    const header: *const InputHeader = @ptrCast(@alignCast(&msg.payload));
+
+    switch (header.type) {
+        INPUT_TYPE_KEYBOARD => {
+             if (msg.payload_len < @sizeOf(KeyboardEvent)) return error.EINVAL;
+             const evt: *const KeyboardEvent = @ptrCast(@alignCast(&msg.payload));
+             keyboard.injectScancode(evt.scancode);
+        },
+        INPUT_TYPE_MOUSE => {
+             if (msg.payload_len < @sizeOf(MouseEvent)) return error.EINVAL;
+             const evt: *const MouseEvent = @ptrCast(@alignCast(&msg.payload));
+             // Map u8 buttons to packed struct
+             const buttons = mouse.Buttons{
+                 .left = (evt.buttons & 1) != 0,
+                 .right = (evt.buttons & 2) != 0,
+                 .middle = (evt.buttons & 4) != 0,
+             };
+             mouse.injectRawInput(evt.dx, evt.dy, evt.dz, buttons);
+        },
+        else => return error.EINVAL, // Unknown kernel message type
+    }
 
     return 0;
 }

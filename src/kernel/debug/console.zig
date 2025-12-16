@@ -8,6 +8,9 @@ const std = @import("std");
 const hal = @import("hal");
 const config = @import("config");
 
+/// Function pointer to avoid circular dependency
+pub var sendKernelMessageFn: ?*const fn (pid: usize, payload: []const u8) anyerror!void = null;
+
 /// Console Backend Interface
 pub const Backend = struct {
     context: ?*anyopaque,
@@ -24,6 +27,30 @@ pub fn addBackend(backend: Backend) void {
         backends[backend_count] = backend;
         backend_count += 1;
     }
+}
+
+/// Context for IPC backend
+const IpcBackendCtx = struct {
+    pid: usize,
+};
+var ipc_ctx: IpcBackendCtx = undefined;
+
+/// Wrapper to send logs via IPC
+fn ipcWriteWrapper(ctx: ?*anyopaque, str: []const u8) void {
+    const c: *IpcBackendCtx = @ptrCast(@alignCast(ctx));
+    // Best effort send - ignore errors to avoid infinite loops in logging
+    if (sendKernelMessageFn) |sendFn| {
+        sendFn(c.pid, str) catch {};
+    }
+}
+
+/// Register a process as the logging backend
+pub fn addIpcBackend(pid: usize) void {
+    ipc_ctx = .{ .pid = pid };
+    addBackend(.{
+        .context = &ipc_ctx,
+        .writeFn = ipcWriteWrapper,
+    });
 }
 
 /// Print a string to the debug console

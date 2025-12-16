@@ -173,20 +173,26 @@ int io_uring_setup(unsigned entries, struct io_uring_params *p);
 
 Submit SQEs and/or wait for CQEs.
 
+**Extended interface (copy-based ring model):**
+
 ```c
 int io_uring_enter(unsigned fd, unsigned to_submit,
                    unsigned min_complete, unsigned flags,
-                   sigset_t *sig);
+                   void *sqes_ptr, void *cqes_ptr);
 ```
 
 **Arguments:**
 - `fd`: io_uring file descriptor
 - `to_submit`: Number of SQEs to submit
-- `min_complete`: Minimum CQEs to wait for (with IORING_ENTER_GETEVENTS)
+- `min_complete`: Minimum CQEs to wait for (with IORING_ENTER_GETEVENTS), also max CQEs to copy
 - `flags`: IORING_ENTER_* flags
-- `sig`: Signal mask (unused)
+- `sqes_ptr`: Pointer to userspace SQE array (required if to_submit > 0)
+- `cqes_ptr`: Pointer to userspace CQE array for output (optional, for GETEVENTS)
 
-**Returns:** Number of SQEs submitted
+**Returns:** Number of SQEs submitted (or CQEs copied if only GETEVENTS)
+
+**Note:** This differs from Linux's shared-memory model. SQEs are copied from userspace
+and CQEs are copied to userspace via the syscall, rather than using memory-mapped rings.
 
 ### sys_io_uring_register (427)
 
@@ -197,20 +203,31 @@ int io_uring_register(unsigned fd, unsigned opcode,
                       void *arg, unsigned nr_args);
 ```
 
-**Status:** Stub implementation, returns ENOSYS
+**Supported operations:**
+- `IORING_REGISTER_PROBE` (8): Query supported operations
+
+**Unsupported (returns ENOSYS):**
+- `IORING_REGISTER_BUFFERS` / `IORING_UNREGISTER_BUFFERS`
+- `IORING_REGISTER_FILES` / `IORING_UNREGISTER_FILES`
 
 ## Supported io_uring Operations
 
 | Opcode | Value | Description |
 |--------|-------|-------------|
 | IORING_OP_NOP | 0 | No operation (completes immediately) |
-| IORING_OP_READ | 22 | Read from fd (keyboard) |
-| IORING_OP_WRITE | 23 | Write to fd |
-| IORING_OP_ACCEPT | 13 | Accept TCP connection |
-| IORING_OP_CONNECT | 16 | Connect TCP socket |
-| IORING_OP_RECV | 27 | Receive from socket |
-| IORING_OP_SEND | 26 | Send to socket |
 | IORING_OP_TIMEOUT | 11 | Wait for timeout |
+| IORING_OP_ACCEPT | 13 | Accept TCP connection |
+| IORING_OP_ASYNC_CANCEL | 14 | Cancel pending operation |
+| IORING_OP_CONNECT | 16 | Connect TCP socket |
+| IORING_OP_OPENAT | 18 | Open file relative to directory fd |
+| IORING_OP_CLOSE | 19 | Close file descriptor |
+| IORING_OP_READ | 22 | Read from fd (keyboard, files) |
+| IORING_OP_WRITE | 23 | Write to fd (dispatches to sys_write) |
+| IORING_OP_SEND | 26 | Send to socket |
+| IORING_OP_RECV | 27 | Receive from socket |
+
+All Linux 6.x opcodes (0-61) are defined in `src/uapi/io_ring.zig` for forward compatibility,
+but unsupported opcodes return EINVAL.
 
 ## Usage Examples
 
@@ -338,12 +355,57 @@ src/drivers/
 2. **No SQPOLL** - Kernel polling thread not implemented
 3. **No registered buffers** - IORING_REGISTER_BUFFERS not supported
 4. **Fixed pool size** - 256 concurrent requests system-wide
-5. **Simplified ring model** - SQEs copied to kernel, not true shared memory rings
+5. **Copy-based ring model** - SQEs copied from userspace, CQEs copied to userspace (not true shared memory mmap rings)
+6. **Extended syscall interface** - io_uring_enter takes sqes_ptr and cqes_ptr instead of using shared memory
 
 ## Future Enhancements
 
 - Multiple pending requests per socket (queue)
-- Proper shared memory rings with userspace
-- IORING_REGISTER_BUFFERS support
+- Proper shared memory rings with userspace via mmap
+- IORING_REGISTER_BUFFERS support for zero-copy I/O
 - Linked operations (IOSQE_IO_LINK)
-- Operation cancellation via IORING_OP_ASYNC_CANCEL
+- SQPOLL mode for kernel-side SQ polling
+- Vectored I/O (READV, WRITEV)
+
+## Design Decisions: Copy-Based vs mmap Ring Model
+
+### Current Implementation: Copy-Based
+
+Our io_uring uses explicit syscall-based data transfer:
+- SQEs copied from userspace via `sqes_ptr` parameter
+- CQEs copied to userspace via `cqes_ptr` parameter
+- Extended `io_uring_enter` signature (6 args vs Linux's 4)
+
+### Linux's Approach: Shared Memory (mmap)
+
+Linux io_uring maps kernel memory directly into userspace:
+- `io_uring_setup` returns offsets for mmap
+- SQ/CQ rings in shared pages (no syscall for submission possible with SQPOLL)
+- True zero-copy between kernel and user
+
+### Trade-off Analysis
+
+| Aspect | Copy-Based (zigk) | mmap (Linux) |
+|--------|-------------------|--------------|
+| Latency | ~100-500ns per op | Near-zero for batched ops |
+| Security | Explicit validation | Requires careful bounds |
+| Complexity | ~50 lines | ~300 lines + VMA tracking |
+| Debugging | Easy - syscall traces | Hard - shared state |
+| Compatibility | Custom interface | liburing works directly |
+
+### Why Copy-Based for Now
+
+1. **Security-first**: User pointers validated on every access
+2. **Simplicity**: No page table manipulation per-ring
+3. **Debugging**: All transfers visible in syscall traces
+4. **Incremental**: Can upgrade to mmap later
+
+### Path to mmap (Future)
+
+The VMM already supports shared kernel/user memory via `MAP_DEVICE`:
+1. Allocate contiguous kernel pages for SQ/CQ
+2. Map same physical pages into user address space
+3. Return mmap offsets from `io_uring_setup`
+4. Remove sqes_ptr/cqes_ptr from `io_uring_enter`
+
+Estimated effort: ~200-300 lines in `io_uring.zig` + `user_vmm.zig`.

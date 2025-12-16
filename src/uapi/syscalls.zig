@@ -489,3 +489,7 @@ pub const SYS_RECV: usize = 1021;
 /// Wait for a hardware interrupt (blocking)
 /// (irq) -> i32
 pub const SYS_WAIT_INTERRUPT: usize = 1022;
+
+/// Connect kernel logger to IPC backend
+/// () -> i32
+pub const SYS_REGISTER_IPC_LOGGER: usize = 1025;
