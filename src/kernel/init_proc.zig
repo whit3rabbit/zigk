@@ -11,6 +11,7 @@ const pmm = @import("pmm");
 const boot = @import("boot.zig");
 const capabilities = @import("capabilities");
 const heap = @import("heap");
+const pci = @import("pci");
 
 /// Load the init process (httpd or shell) into a new user address space
 /// Creates a proper Process struct with FD table (stdin/stdout/stderr pre-opened)
@@ -43,6 +44,12 @@ pub fn loadInitProcess() void {
         }
         if (std.mem.indexOf(u8, cmdline, "ps2_driver") != null or std.mem.indexOf(u8, path, "ps2_driver") != null) {
             spawnProcess(mod, "ps2_driver");
+        }
+        if (std.mem.indexOf(u8, cmdline, "virtio_net_driver") != null or std.mem.indexOf(u8, path, "virtio_net_driver") != null) {
+            spawnProcess(mod, "virtio_net_driver");
+        }
+        if (std.mem.indexOf(u8, cmdline, "virtio_blk_driver") != null or std.mem.indexOf(u8, path, "virtio_blk_driver") != null) {
+            spawnProcess(mod, "virtio_blk_driver");
         }
     }
 
@@ -169,6 +176,24 @@ fn spawnProcess(mod: *limine.Module, process_name: []const u8) void {
          proc.capabilities.append(alloc, .{ .IoPort = .{ .port = 0x60, .len = 1 } }) catch {};
          proc.capabilities.append(alloc, .{ .IoPort = .{ .port = 0x64, .len = 1 } }) catch {};
          console.info("Init: Granted PS/2 capabilities to pid={}", .{proc.pid});
+    }
+
+    // Grant capabilities for VirtIO-Net
+    if (std.mem.eql(u8, process_name, "virtio_net_driver")) {
+         if (grantVirtioCapabilities(proc, .Net)) {
+             console.info("Init: Granted VirtIO-Net capabilities to pid={}", .{proc.pid});
+         } else {
+             console.warn("Init: Failed to find VirtIO-Net device for pid={}", .{proc.pid});
+         }
+    }
+
+    // Grant capabilities for VirtIO-Blk
+    if (std.mem.eql(u8, process_name, "virtio_blk_driver")) {
+         if (grantVirtioCapabilities(proc, .Blk)) {
+             console.info("Init: Granted VirtIO-Blk capabilities to pid={}", .{proc.pid});
+         } else {
+             console.warn("Init: Failed to find VirtIO-Blk device for pid={}", .{proc.pid});
+         }
     }
 
     // Grant capabilities if this is Doom
@@ -372,4 +397,63 @@ pub fn initInitRD(mods: []const *limine.Module) void {
 
     // No initrd found - this is not an error, just informational
     console.info("InitRD: No initrd module found (filesystem empty)", .{});
+}
+const VirtioDriverType = enum {
+    Net,
+    Blk,
+};
+
+fn grantVirtioCapabilities(proc: *process.Process, driver_type: VirtioDriverType) bool {
+    const devices = pci.getDevices() orelse return false;
+    const alloc = heap.allocator();
+
+    var i: usize = 0;
+    while (i < devices.count) : (i += 1) {
+        if (devices.get(i)) |dev| {
+            // Check Vendor ID (VirtIO = 0x1AF4)
+            if (dev.vendor_id != 0x1AF4) continue;
+
+            // Check Device ID
+            // Net: 0x1000 (Legacy) or 0x1041 (Modern)
+            // Blk: 0x1001 (Legacy) or 0x1042 (Modern)
+            const is_net = (dev.device_id == 0x1000 or dev.device_id == 0x1041);
+            const is_blk = (dev.device_id == 0x1001 or dev.device_id == 0x1042);
+
+            if ((driver_type == .Net and is_net) or (driver_type == .Blk and is_blk)) {
+                // Grant PciConfig Access
+                proc.capabilities.append(alloc, .{
+                    .PciConfig = .{
+                        .bus = dev.bus,
+                        .device = @intCast(dev.device),
+                        .func = @intCast(dev.func),
+                    }
+                }) catch {};
+
+                // Grant MMIO Access for BARs
+                for (dev.bar) |bar| {
+                    if (bar.is_mmio and bar.base != 0 and bar.size != 0) {
+                        proc.capabilities.append(alloc, .{
+                            .Mmio = .{
+                                .phys_addr = bar.base,
+                                .size = bar.size,
+                            }
+                        }) catch {};
+                    }
+                }
+                
+                // Grant Interrupt Capability
+                proc.capabilities.append(alloc, .{
+                    .Interrupt = .{ .irq = dev.irq_line }
+                }) catch {};
+
+                // Grant DMA Memory Capability (e.g. 512 pages / 2MB)
+                proc.capabilities.append(alloc, .{
+                    .DmaMemory = .{ .max_pages = 512 }
+                }) catch {};
+
+                return true;
+            }
+        }
+    }
+    return false;
 }
