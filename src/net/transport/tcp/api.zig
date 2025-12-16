@@ -14,6 +14,7 @@ pub fn listen(local_ip: u32, local_port: u16, socket_idx: usize) TcpError!*Tcb {
 
     const tcb = state.allocateTcb() orelse return TcpError.NoResources;
 
+    // Initialize TCB (newly allocated, no need for mutex)
     tcb.local_ip = local_ip;
     tcb.local_port = local_port;
     tcb.remote_ip = 0;
@@ -41,6 +42,7 @@ pub fn connect(local_ip: u32, local_port: u16, remote_ip: u32, remote_port: u16)
 
     const tcb = state.allocateTcb() orelse return TcpError.NoResources;
 
+    // Initialize TCB
     tcb.local_ip = local_ip;
     tcb.local_port = local_port;
     tcb.remote_ip = remote_ip;
@@ -55,7 +57,9 @@ pub fn connect(local_ip: u32, local_port: u16, remote_ip: u32, remote_port: u16)
 
     state.insertTcbIntoHash(tcb);
 
-    // Send SYN
+    // Send SYN (requires valid TCB)
+    // We hold state.lock, but sendSyn might access TCB fields.
+    // It's safe since no one else can see TCB yet (except rx looking up hash, but we hold state.lock)
     if (!tx.sendSyn(tcb)) {
         state.freeTcb(tcb);
         return TcpError.NetworkError;
@@ -70,6 +74,12 @@ pub fn connect(local_ip: u32, local_port: u16, remote_ip: u32, remote_port: u16)
 pub fn close(tcb: *Tcb) void {
     state.lock.acquire();
     defer state.lock.release();
+
+    // Acquire TCB mutex to drain any active send/recv operations
+    const held = tcb.mutex.acquire();
+
+    // Mark as closing to prevent new operations from starting
+    tcb.closing = true;
 
     switch (tcb.state) {
         .SynReceived, .Established => {
@@ -98,13 +108,27 @@ pub fn close(tcb: *Tcb) void {
     tcb.parent_socket = null;
     tcb.state = .Closed;
 
+    held.release();
+
     // Removes from hash + timer pool and frees memory
+    // Safe because we hold state.lock and have marked TCB as closing/closed
     state.freeTcb(tcb);
 }
 
 /// Send FIN for shutdown(SHUT_WR) - public wrapper
 /// Called from socket layer for half-close semantics (RFC 793 compliant)
 pub fn sendFinPacket(tcb: *Tcb) void {
+    // We don't need state.lock just to send FIN, only tcb.mutex
+    // But we need to ensure TCB isn't freed.
+    // Ideally caller ensures TCB validity (via socket reference).
+    // Acquiring state.lock is safer given current architecture.
+    state.lock.acquire();
+    const held = tcb.mutex.acquire();
+    state.lock.release();
+    defer held.release();
+
+    if (tcb.closing) return;
+
     switch (tcb.state) {
         .Established, .SynReceived => {
             // Active close: ESTABLISHED/SYN-RECEIVED -> FIN-WAIT-1
@@ -127,7 +151,12 @@ pub fn sendFinPacket(tcb: *Tcb) void {
 /// Send data on a connection
 pub fn send(tcb: *Tcb, data: []const u8) TcpError!usize {
     state.lock.acquire();
-    defer state.lock.release();
+    // Validate TCB state/validity roughly (optional but good)
+    const held = tcb.mutex.acquire();
+    state.lock.release();
+    defer held.release();
+
+    if (tcb.closing) return TcpError.ConnectionReset;
 
     if (tcb.state != .Established and tcb.state != .CloseWait) {
         return TcpError.NotConnected;
@@ -157,7 +186,11 @@ pub fn send(tcb: *Tcb, data: []const u8) TcpError!usize {
 /// Receive data from a connection
 pub fn recv(tcb: *Tcb, buf: []u8) TcpError!usize {
     state.lock.acquire();
-    defer state.lock.release();
+    const held = tcb.mutex.acquire();
+    state.lock.release();
+    defer held.release();
+
+    if (tcb.closing) return TcpError.ConnectionReset;
 
     // Check availability first logic
     const available = tcb.recvBufferAvailable();

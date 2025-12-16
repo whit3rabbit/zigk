@@ -20,6 +20,9 @@ const checksum = @import("../core/checksum.zig");
 const ipv4 = @import("../ipv4/ipv4.zig");
 const ethernet = @import("../ethernet/ethernet.zig");
 const arp = @import("../ipv4/arp.zig");
+// Reuse TCP's buffer pool to avoid stack overflow
+const tcp_state = @import("tcp/state.zig");
+
 const PacketBuffer = packet.PacketBuffer;
 const UdpHeader = packet.UdpHeader;
 const Ipv4Header = packet.Ipv4Header;
@@ -104,7 +107,6 @@ pub fn sendDatagramWithTos(
     }
 
     // Resolve destination MAC
-    // Resolve destination MAC
     const next_hop = iface.getGateway(dst_ip);
     var dst_mac = arp.resolve(next_hop) orelse [_]u8{ 0, 0, 0, 0, 0, 0 };
     const have_mac = (arp.resolve(next_hop) != null);
@@ -115,7 +117,10 @@ pub fn sendDatagramWithTos(
     const udp_len = packet.UDP_HEADER_SIZE + data.len;
     const total_len = eth_len + ip_len + udp_len;
 
-    var buf: [packet.MAX_PACKET_SIZE]u8 = undefined;
+    // Use TCP's TX buffer pool to avoid large stack allocation (stack overflow risk)
+    const buf = tcp_state.allocTxBuffer() orelse return false;
+    defer tcp_state.freeTxBuffer(buf);
+
     if (total_len > buf.len) {
         return false;
     }
@@ -161,7 +166,7 @@ pub fn sendDatagramWithTos(
         return iface.transmit(buf[0..total_len]);
     } else {
         // Create wrapper packet buffer for queueing
-        var pkt = PacketBuffer.init(&buf, total_len);
+        var pkt = PacketBuffer.init(buf[0..total_len], total_len);
         pkt.eth_offset = 0;
         pkt.ip_offset = eth_len;
         pkt.transport_offset = eth_len + ip_len;
@@ -173,7 +178,7 @@ pub fn sendDatagramWithTos(
             return iface.transmit(buf[0..total_len]);
         }
         
-        // Queued successfully
+        // Queued successfully (ARP copies packet)
         return true;
     }
 }
