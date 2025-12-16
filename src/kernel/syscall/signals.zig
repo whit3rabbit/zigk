@@ -165,6 +165,15 @@ pub fn sys_rt_sigreturn(frame: *hal.syscall.SyscallFrame) SyscallError!usize {
     // Restore special registers
     // Note: We don't restore CS, SS, GS, FS blindly as it might be unsafe
     // But we should restore RFLAGS and RIP
+
+    // Validate that the restored RIP is a canonical user address.
+    // If it's non-canonical or in kernel space, sysretq would fault.
+    if (!base.isValidUserPtr(mc.rip, 1)) {
+        console.err("sys_rt_sigreturn: Invalid RIP {x}", .{mc.rip});
+        sched.exitWithStatus(128 + 11); // SIGSEGV
+        unreachable;
+    }
+
     frame.setReturnRip(mc.rip);
     frame.setUserRsp(mc.rsp); // Restore stack pointer
     frame.r11 = mc.rflags; // Sysret restores RFLAGS from R11
