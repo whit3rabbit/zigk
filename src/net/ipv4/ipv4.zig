@@ -207,6 +207,11 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
         return false;
     }
 
+    // Security: Trim packet length to match IP Total Length
+    // This removes Ethernet padding (e.g. 0-bytes at end of frame)
+    // ensuring upper layers don't process garbage data.
+    pkt.len = pkt.ip_offset + total_len;
+
     // Check if packet is for us (unicast, broadcast, or multicast)
     const dst_ip = ip.getDstIp();
     
