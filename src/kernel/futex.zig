@@ -87,10 +87,17 @@ pub fn wait(uaddr: u64, val: u32, timeout_ns: ?u64) !void {
     // Critical section prevents lost wakeup race
     const held = bucket.lock.acquire();
 
-    // 4. Validate value atomically
-    // Note: We assume page is present (verified in sys_futex, no swapping in zscapek)
-    const ptr = @as(*const volatile u32, @ptrFromInt(uaddr));
-    const current_val = ptr.*;
+    // 4. Validate value atomically using the physical address
+    // SECURITY: Read through HHDM-mapped physical address, not raw user virtual address.
+    // Directly dereferencing `uaddr` in kernel context is unsafe because:
+    // (a) The kernel may have different page tables active than the user's CR3.
+    // (b) A malicious user could pass a kernel-space address that happens to be
+    //     readable, leaking kernel memory contents.
+    // By using the translated physical address via HHDM, we ensure we read exactly
+    // the memory the user's page tables map, preventing information disclosure.
+    const phys_with_offset = phys_addr; // translate() returns phys including page offset
+    const kernel_ptr: *const volatile u32 = @ptrCast(@alignCast(hal.paging.physToVirt(phys_with_offset)));
+    const current_val = kernel_ptr.*;
 
     if (current_val != val) {
         held.release();

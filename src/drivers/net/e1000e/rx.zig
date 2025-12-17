@@ -78,7 +78,7 @@ pub fn processRxLimited(driver: *E1000e, callback: *const fn ([]u8) void, limit:
             // Minimum Ethernet frame: 14 bytes (6 dst + 6 src + 2 ethertype)
             // Packets smaller than this are malformed and should be dropped
             if (raw_len < 14) {
-                driver.rx_dropped += 1;
+                driver.rx_dropped +%= 1;
             } else {
                 const buf = driver.rx_buffers[driver.rx_cur];
 
@@ -87,8 +87,8 @@ pub fn processRxLimited(driver: *E1000e, callback: *const fn ([]u8) void, limit:
                 // copy before returning the descriptor to hardware.
                 @memcpy(pkt_buf[0..raw_len], buf[0..raw_len]);
 
-                driver.rx_packets += 1;
-                driver.rx_bytes += raw_len;
+                driver.rx_packets +%= 1;
+                driver.rx_bytes +%= raw_len;
 
                 // Reset descriptor for hardware reuse before releasing lock
                 rx_desc.status = 0;
@@ -191,9 +191,9 @@ pub fn setRxCallback(driver: *E1000e, callback: *const fn ([]u8) void) void {
 /// Log decoded RX errors and update statistics
 pub fn logRxErrors(driver: *E1000e, errors: u8) void {
     // Update statistics
-    driver.rx_errors += 1;
+    driver.rx_errors +%= 1;
     if ((errors & desc.RXERR.CE) != 0) {
-        driver.rx_crc_errors += 1;
+        driver.rx_crc_errors +%= 1;
     }
 
     var buf: [48]u8 = undefined;

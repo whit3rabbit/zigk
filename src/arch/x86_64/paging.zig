@@ -170,10 +170,24 @@ pub fn getHhdmOffset() u64 {
     return HHDM_OFFSET;
 }
 
+const builtin = @import("builtin");
+
 /// Convert physical address to virtual using HHDM
 /// All kernel physical memory access must use this function
+/// SECURITY: In Debug/ReleaseSafe modes, validates that the result doesn't wrap around
 pub fn physToVirt(phys: u64) [*]u8 {
-    return @ptrFromInt(phys + hhdm_offset);
+    const result = phys +% hhdm_offset; // Use wrapping add
+
+    // SECURITY: Check for overflow in debug/safe builds
+    // If result < hhdm_offset after addition, we wrapped around
+    // This would map kernel code to user-controllable addresses
+    if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
+        if (result < hhdm_offset) {
+            @panic("physToVirt: integer overflow - physical address too large");
+        }
+    }
+
+    return @ptrFromInt(result);
 }
 
 /// Convert virtual address to physical using HHDM

@@ -54,12 +54,13 @@ pub const CursorManager = struct {
     pub fn applyDelta(self: *Self, dx: i16, dy: i16) void {
         // Apply sensitivity (fixed-point multiplication)
         // sensitivity 256 = 1.0x, 512 = 2.0x, 128 = 0.5x
-        const scaled_dx = (@as(i32, dx) * @as(i32, self.sensitivity)) + @as(i32, self.frac_x);
-        const scaled_dy = (@as(i32, dy) * @as(i32, self.sensitivity)) + @as(i32, self.frac_y);
+        // Use i64 to prevent overflow: (max_i16 * max_u16) + max_i16 can exceed i32 range
+        const scaled_dx = (@as(i64, dx) * @as(i64, self.sensitivity)) + @as(i64, self.frac_x);
+        const scaled_dy = (@as(i64, dy) * @as(i64, self.sensitivity)) + @as(i64, self.frac_y);
 
         // Extract integer and fractional parts
-        const int_dx = @divTrunc(scaled_dx, 256);
-        const int_dy = @divTrunc(scaled_dy, 256);
+        const int_dx = @as(i32, @truncate(@divTrunc(scaled_dx, 256)));
+        const int_dy = @as(i32, @truncate(@divTrunc(scaled_dy, 256)));
         self.frac_x = @truncate(@rem(scaled_dx, 256));
         self.frac_y = @truncate(@rem(scaled_dy, 256));
 

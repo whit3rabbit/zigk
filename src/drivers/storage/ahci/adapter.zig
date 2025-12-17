@@ -8,14 +8,20 @@
 //   - FileDescriptor.private_data stores the port number as usize
 
 const std = @import("std");
+const math = std.math;
 const root = @import("root.zig");
 const fd_mod = @import("fd");
 const uapi = @import("uapi");
 const heap = @import("heap");
+const io = @import("io");
+const pmm = @import("pmm");
+const hal = @import("hal");
 
 const FileDescriptor = fd_mod.FileDescriptor;
 const FileOps = fd_mod.FileOps;
 const Errno = uapi.errno.Errno;
+const IoRequest = io.IoRequest;
+const IoOpType = io.IoOpType;
 
 const SECTOR_SIZE = root.SECTOR_SIZE; // 512
 
@@ -47,9 +53,18 @@ fn blockRead(fd: *FileDescriptor, buf: []u8) isize {
     const start_lba = pos / SECTOR_SIZE;
     const start_offset = pos % SECTOR_SIZE;
 
-    // Calculate how many sectors we need to read
-    const end_pos = pos + buf.len;
-    const end_lba = (end_pos + SECTOR_SIZE - 1) / SECTOR_SIZE;
+    // Calculate how many sectors we need to read (checked arithmetic to prevent overflow)
+    const end_pos = math.add(u64, pos, buf.len) catch {
+        return Errno.EINVAL.toReturn();
+    };
+    const end_lba = math.add(u64, end_pos, SECTOR_SIZE - 1) catch {
+        return Errno.EINVAL.toReturn();
+    } / SECTOR_SIZE;
+
+    // Underflow check: end_lba must be >= start_lba
+    if (end_lba < start_lba) {
+        return Errno.EINVAL.toReturn();
+    }
     const sector_count_u64 = end_lba - start_lba;
 
     // Limit to max sectors per transfer
@@ -104,8 +119,18 @@ fn blockWrite(fd: *FileDescriptor, buf: []const u8) isize {
     const start_lba = pos / SECTOR_SIZE;
     const start_offset = pos % SECTOR_SIZE;
 
-    const end_pos = pos + buf.len;
-    const end_lba = (end_pos + SECTOR_SIZE - 1) / SECTOR_SIZE;
+    // Checked arithmetic to prevent overflow
+    const end_pos = math.add(u64, pos, buf.len) catch {
+        return Errno.EINVAL.toReturn();
+    };
+    const end_lba = math.add(u64, end_pos, SECTOR_SIZE - 1) catch {
+        return Errno.EINVAL.toReturn();
+    } / SECTOR_SIZE;
+
+    // Underflow check: end_lba must be >= start_lba
+    if (end_lba < start_lba) {
+        return Errno.EINVAL.toReturn();
+    }
     const sector_count_u64 = end_lba - start_lba;
 
     if (sector_count_u64 > root.MAX_SECTORS_PER_TRANSFER) {
@@ -197,4 +222,121 @@ pub fn createBlockFd(port_num: u5, flags: u32) !*FileDescriptor {
     // Store port number in private_data (as usize cast to pointer)
     const private: ?*anyopaque = @ptrFromInt(@as(usize, port_num));
     return fd_mod.createFd(&block_ops, flags, private);
+}
+
+// ============================================================================
+// Async Block I/O API
+// ============================================================================
+
+/// Error type for async block operations
+pub const AsyncBlockError = error{
+    NoController,
+    PortNotFound,
+    InvalidParameter,
+    AllocationFailed,
+    PortNotConnected,
+};
+
+/// Read sectors asynchronously (non-blocking)
+/// Allocates a DMA buffer and submits the request to AHCI.
+/// The IoRequest will be completed by the AHCI IRQ handler.
+/// Caller must free the DMA buffer after the request completes.
+///
+/// Returns the physical address of the allocated buffer.
+pub fn blockReadAsync(
+    port_num: u5,
+    lba: u64,
+    sector_count: u16,
+    request: *IoRequest,
+) AsyncBlockError!u64 {
+    const controller = root.getController() orelse return error.NoController;
+
+    if (sector_count == 0 or sector_count > root.MAX_SECTORS_PER_TRANSFER) {
+        return error.InvalidParameter;
+    }
+
+    // Allocate DMA buffer (physically contiguous pages)
+    const pages_needed = (@as(usize, sector_count) * SECTOR_SIZE + 4095) / 4096;
+    const buf_phys = pmm.allocZeroedPages(pages_needed) orelse {
+        return error.AllocationFailed;
+    };
+
+    // Check 64-bit capability - controller may not support addresses > 4GB
+    if (!controller.cap.s64a and buf_phys > 0xFFFFFFFF) {
+        pmm.freePages(buf_phys, pages_needed);
+        return error.AllocationFailed;
+    }
+
+    // Store buffer info in request for cleanup
+    request.buf_ptr = buf_phys;
+    request.buf_len = @as(usize, sector_count) * SECTOR_SIZE;
+
+    // Submit async read
+    controller.readSectorsAsync(port_num, lba, sector_count, buf_phys, request) catch |err| {
+        pmm.freePages(buf_phys, pages_needed);
+        return switch (err) {
+            root.AhciError.PortNotConnected => error.PortNotConnected,
+            root.AhciError.InvalidParameter => error.InvalidParameter,
+            root.AhciError.AllocationFailed => error.AllocationFailed,
+            else => error.AllocationFailed,
+        };
+    };
+
+    return buf_phys;
+}
+
+/// Write sectors asynchronously (non-blocking)
+/// Data must already be in a DMA-accessible buffer at buf_phys.
+/// The IoRequest will be completed by the AHCI IRQ handler.
+pub fn blockWriteAsync(
+    port_num: u5,
+    lba: u64,
+    sector_count: u16,
+    buf_phys: u64,
+    request: *IoRequest,
+) AsyncBlockError!void {
+    const controller = root.getController() orelse return error.NoController;
+
+    if (sector_count == 0 or sector_count > root.MAX_SECTORS_PER_TRANSFER) {
+        return error.InvalidParameter;
+    }
+
+    // Check 64-bit capability - controller may not support addresses > 4GB
+    if (!controller.cap.s64a and buf_phys > 0xFFFFFFFF) {
+        return error.InvalidParameter;
+    }
+
+    // Store buffer info in request
+    request.buf_ptr = buf_phys;
+    request.buf_len = @as(usize, sector_count) * SECTOR_SIZE;
+
+    // Submit async write
+    controller.writeSectorsAsync(port_num, lba, sector_count, buf_phys, request) catch |err| {
+        return switch (err) {
+            root.AhciError.PortNotConnected => error.PortNotConnected,
+            root.AhciError.InvalidParameter => error.InvalidParameter,
+            root.AhciError.AllocationFailed => error.AllocationFailed,
+            else => error.AllocationFailed,
+        };
+    };
+}
+
+/// Copy data from DMA buffer to user buffer after async read completes
+/// Call this after the IoRequest completes successfully.
+pub fn copyFromDmaBuffer(buf_phys: u64, dest: []u8) void {
+    const src: [*]u8 = @ptrCast(hal.paging.physToVirt(buf_phys));
+    @memcpy(dest, src[0..dest.len]);
+}
+
+/// Copy data from user buffer to DMA buffer before async write
+/// Call this before submitting blockWriteAsync.
+pub fn copyToDmaBuffer(buf_phys: u64, src: []const u8) void {
+    const dest: [*]u8 = @ptrCast(hal.paging.physToVirt(buf_phys));
+    @memcpy(dest[0..src.len], src);
+}
+
+/// Free a DMA buffer after async operation completes
+pub fn freeDmaBuffer(buf_phys: u64, size: usize) void {
+    const pages = (size + 4095) / 4096;
+    pmm.freePages(buf_phys, pages);
 }

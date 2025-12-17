@@ -98,6 +98,12 @@ const exception_names = [_][]const u8{
     "Reserved",
 };
 
+/// Register a raw IDT interrupt handler (helper wrapper)
+/// Used by legacy drivers (AC97) to register directly
+pub fn registerHandler(vector: u8, handler: *const fn (*idt.InterruptFrame) void) void {
+    idt.registerHandler(vector, handler);
+}
+
 /// Initialize interrupt handlers
 /// Must be called after IDT is set up
 pub fn init() void {

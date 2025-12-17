@@ -29,10 +29,11 @@ Syscalls   Syscalls
 | (Future/Reactor) |
 +------------------+
     |
-+---+---+---+---+
-|   |   |   |
-Socket Pipe  Kbd  Timer
-Async  Async Async Wheel
++---+---+---+---+---+
+|   |   |   |   |
+Socket Pipe Kbd Timer Block
+Async  Async Async Wheel  I/O
+                      (AHCI)
 ```
 
 ## Core Components
@@ -153,6 +154,36 @@ Hierarchical 3-level timer wheel for efficient timeout management:
 |-----------|----------|-------------------|
 | Timeout | `reactor.addTimer()` | Timer wheel expiry |
 
+### Block I/O Operations (AHCI)
+
+| Operation | Function | Completion Trigger |
+|-----------|----------|-------------------|
+| Read | `ahci.readSectorsAsync()` | AHCI port IRQ (command slot completes) |
+| Write | `ahci.writeSectorsAsync()` | AHCI port IRQ (command slot completes) |
+
+**Adapter-level API** (`src/drivers/storage/ahci/adapter.zig`):
+
+| Function | Description |
+|----------|-------------|
+| `blockReadAsync()` | Allocate DMA buffer, submit read, return buffer phys addr |
+| `blockWriteAsync()` | Submit write from existing DMA buffer |
+| `copyFromDmaBuffer()` | Copy data from DMA buffer to user buffer |
+| `copyToDmaBuffer()` | Copy data from user buffer to DMA buffer |
+| `freeDmaBuffer()` | Release DMA buffer pages |
+
+**IRQ-Driven Completion:**
+
+The AHCI driver tracks pending requests per command slot (32 slots max per port). When the
+AHCI controller raises an interrupt:
+
+1. `ahciIrqHandler()` is called from the interrupt vector
+2. Reads the global interrupt status register to identify active ports
+3. For each port, calls `handlePortInterrupt()` which:
+   - Reads command issue (CI) register to find completed slots
+   - Looks up pending `IoRequest` for each completed slot
+   - Calls `request.complete()` with success/error result
+   - Wakes the waiting thread via `sched.unblock()`
+
 ## io_uring Syscalls
 
 ### sys_io_uring_setup (425)
@@ -234,6 +265,53 @@ int io_uring_register(unsigned fd, unsigned opcode,
 All Linux 6.x opcodes (0-61) are defined in `src/uapi/io_ring.zig` for forward compatibility,
 but unsupported opcodes return EINVAL.
 
+## Userspace io_uring Wrapper
+
+The userspace syscall library (`src/user/lib/syscall.zig`) provides a high-level `IoUring` wrapper
+that handles ring buffer management and memory barriers:
+
+```zig
+const syscall = @import("syscall");
+
+pub const IoUring = struct {
+    ring_fd: i32,
+    sq_ring: [*]u8,
+    cq_ring: [*]u8,
+    sqes: [*]IoUringSqe,
+    sq_head: *volatile u32,
+    sq_tail: *volatile u32,
+    cq_head: *volatile u32,
+    cq_tail: *volatile u32,
+    sq_array: [*]u32,
+    cqes: [*]IoUringCqe,
+    sq_entries: u32,
+    cq_entries: u32,
+    sq_mask: u32,
+    cq_mask: u32,
+    local_sq_tail: u32,
+
+    pub fn init(entries: u32) SyscallError!IoUring;  // Setup rings, mmap buffers
+    pub fn deinit(self: *IoUring) void;               // Cleanup and close
+    pub fn getSqe(self: *IoUring) ?*IoUringSqe;       // Get next SQE slot
+    pub fn submitSqe(self: *IoUring) void;            // Advance local tail
+    pub fn submit(self: *IoUring, min_complete: u32) SyscallError!u32;  // Enter kernel
+    pub fn peekCqe(self: *IoUring) ?*IoUringCqe;      // Non-blocking CQE check
+    pub fn advanceCq(self: *IoUring) void;            // Consume CQE
+
+    // Prep helpers
+    pub fn prepAccept(sqe: *IoUringSqe, fd: i32, addr: ?*anyopaque,
+                      addrlen: ?*anyopaque, user_data: u64) void;
+    pub fn prepRecv(sqe: *IoUringSqe, fd: i32, buf: []u8, user_data: u64) void;
+    pub fn prepSend(sqe: *IoUringSqe, fd: i32, buf: []const u8, user_data: u64) void;
+    pub fn prepClose(sqe: *IoUringSqe, fd: i32, user_data: u64) void;
+};
+```
+
+**Memory Barriers:**
+
+The wrapper uses `mfence` instructions for proper synchronization between userspace
+and kernel when accessing shared ring buffers.
+
 ## Usage Examples
 
 ### Kernel Internal API
@@ -292,6 +370,101 @@ var future = io.Future{ .request = req };
 _ = future.wait();
 ```
 
+### Async Block I/O (AHCI)
+
+```zig
+const adapter = @import("ahci").adapter;
+const io = @import("io");
+
+// Allocate IoRequest for async operation
+const req = io.allocRequest(.disk_read) orelse return error.ENOMEM;
+defer io.freeRequest(req);
+
+// Submit async read - allocates DMA buffer and returns its physical address
+const buf_phys = try adapter.blockReadAsync(port_num, lba, sector_count, req);
+defer adapter.freeDmaBuffer(buf_phys, sector_count * 512);
+
+// Wait for IRQ-driven completion (thread blocks, no busy-wait)
+var future = io.Future{ .request = req };
+const result = future.wait();
+
+switch (result) {
+    .success => |bytes| {
+        // Copy from DMA buffer to user buffer
+        adapter.copyFromDmaBuffer(buf_phys, user_buffer[0..bytes]);
+    },
+    .err => |e| return e,
+    .cancelled => return error.ECANCELED,
+    .pending => unreachable,
+}
+```
+
+### Userspace io_uring HTTP Server
+
+The httpd example (`src/user/httpd/main.zig`) demonstrates the io_uring wrapper:
+
+```zig
+const syscall = @import("syscall");
+
+// Initialize io_uring
+var ring = syscall.IoUring.init(64) catch |err| {
+    // Fallback to poll() mode
+    return runPollMode(listener);
+};
+defer ring.deinit();
+
+// Submit initial accept
+if (ring.getSqe()) |sqe| {
+    syscall.IoUring.prepAccept(sqe, listener, null, null, encodeUserData(.accept, listener));
+    ring.submitSqe();
+}
+
+// Event loop
+while (true) {
+    // Submit pending SQEs and wait for at least 1 completion
+    // This properly blocks in kernel (no spin-polling)
+    _ = ring.submit(1) catch continue;
+
+    // Process all ready completions
+    while (ring.peekCqe()) |cqe| {
+        handleCompletion(&ring, listener, cqe);
+        ring.advanceCq();
+    }
+}
+
+fn handleCompletion(ring: *syscall.IoUring, listener: i32, cqe: *syscall.IoUringCqe) void {
+    const op = decodeOp(cqe.user_data);
+    const fd = decodeFd(cqe.user_data);
+
+    switch (op) {
+        .accept => {
+            // Resubmit accept, handle new connection
+            submitAccept(ring, listener);
+            if (cqe.res >= 0) {
+                if (allocClient(cqe.res)) |client| {
+                    submitRecv(ring, client);
+                }
+            }
+        },
+        .recv => {
+            // Got request, send response
+            submitSend(ring, fd, http_response);
+        },
+        .send => {
+            // Response sent, close connection
+            submitClose(ring, fd);
+        },
+        .close => {},
+    }
+}
+```
+
+**Operation Encoding:**
+
+The user_data field encodes both operation type and file descriptor:
+- Bits 56-63: Operation type enum (accept, recv, send, close)
+- Bits 0-55: File descriptor
+
 ## Integration Points
 
 ### Initialization
@@ -326,6 +499,32 @@ if (keyboard_state.pending_read) |pending_ptr| {
 }
 ```
 
+### AHCI IRQ Handler Registration
+
+In `src/drivers/storage/ahci/root.zig`:
+```zig
+pub fn registerIrqHandler(controller: *AhciController) void {
+    hal.interrupts.registerHandler(
+        controller.irq_line + 32,  // IRQ offset for PCI devices
+        ahciIrqHandler,
+        @ptrCast(controller),
+    );
+}
+
+pub fn ahciIrqHandler(ctx: ?*anyopaque) void {
+    const controller: *AhciController = @ptrCast(@alignCast(ctx));
+    controller.handleInterrupt();
+}
+```
+
+**AhciPort pending request tracking:**
+```zig
+// Added to AhciPort struct
+pending_requests: [32]?*io.IoRequest,  // Per command slot
+commands_issued: u32,                   // Bitmask of active slots
+pending_lock: sync.Spinlock,            // Thread safety
+```
+
 ## File Structure
 
 ```
@@ -352,6 +551,22 @@ src/kernel/
 
 src/drivers/
     keyboard.zig    - getCharAsync
+
+src/drivers/storage/ahci/
+    root.zig        - AHCI controller with async methods:
+                      readSectorsAsync, writeSectorsAsync,
+                      handleInterrupt, handlePortInterrupt
+    adapter.zig     - Block device adapter with:
+                      blockReadAsync, blockWriteAsync,
+                      copyFromDmaBuffer, copyToDmaBuffer, freeDmaBuffer
+
+src/user/lib/
+    syscall.zig     - Userspace syscall wrappers including:
+                      IoUring struct (init, getSqe, submit, peekCqe)
+                      io_uring_setup, io_uring_enter, io_uring_register
+
+src/user/httpd/
+    main.zig        - HTTP server using io_uring (with poll() fallback)
 ```
 
 ## Limitations
@@ -368,6 +583,8 @@ src/drivers/
 - Linked operations (IOSQE_IO_LINK)
 - SQPOLL mode for kernel-side SQ polling
 - Vectored I/O (READV, WRITEV)
+- NVMe async support (similar pattern to AHCI)
+- Filesystem-level async operations (currently block layer only)
 
 ## Design Decisions: Shared Memory Ring Model
 

@@ -1196,6 +1196,12 @@ pub fn timerTick(frame: *hal.idt.InterruptFrame) *hal.idt.InterruptFrame {
         cb();
     }
 
+    // Update VDSO time
+    if (scheduler.tick_count % 10 == 0) {
+        const vdso = @import("vdso");
+        vdso.update();
+    }
+
     // Don't schedule if scheduler isn't running yet
     if (!scheduler.running) {
         return frame;

@@ -180,9 +180,14 @@ asm volatile ("out %[data], %[port]"
 
 - `docs/FILESYSTEM.md` - Complete project structure
 - `docs/KEYBOARD.md` - Keyboard input (PS/2 and USB)
+- `docs/ASYNC.md` - Async I/O subsystem (io_uring, Reactor, AHCI)
 - `specs/syscall-table.md` - Authoritative syscall numbers
 - `src/lib/limine.zig` - Limine protocol bindings
 - `src/kernel/main.zig` - Kernel entry point
+- `src/kernel/io/` - Async I/O core (types, pool, reactor, timer wheel)
+- `src/kernel/syscall/io_uring.zig` - io_uring kernel implementation
+- `src/user/lib/syscall.zig` - Userspace syscall wrappers (includes IoUring)
+- `src/drivers/storage/ahci/adapter.zig` - Async block I/O adapter
 - `src/arch/x86_64/asm_helpers.S` - Low-level assembly routines
 - `limine.cfg` - Bootloader configuration
 - `src/fs/initrd.zig` - InitRD TAR filesystem parser
@@ -260,11 +265,48 @@ fn Matrix(comptime rows: usize, comptime cols: usize) type {
 ```
 - .error is a reserved word in Zig
 
-### Async Support
-Zig 0.16 re-introduces `async`/`await`. We intend to use this for the "Reactor" pattern (Phase 2 in `TODO.md`).
-- **Goal**: Replace blocking `sched.block()` with non-blocking `suspend` points.
-- **Pattern**: `frame = async socket.read(...)` -> suspend -> reactor resumes implementation when IRQ fires.
-- **Status**: Available for experimentation in `src/net/` and `src/kernel/syscall/`.
+### Async I/O (IMPLEMENTED)
+
+See `docs/ASYNC.md` for full documentation. Key patterns:
+
+**Kernel-side (Reactor pattern):**
+```zig
+const io = @import("io");
+const req = io.allocRequest(.socket_read) orelse return error.ENOMEM;
+defer io.freeRequest(req);
+req.fd = fd;
+var future = io.submit(req);
+const result = future.wait();  // Blocks via sched.block(), not spin
+```
+
+**Userspace (io_uring wrapper in `src/user/lib/syscall.zig`):**
+```zig
+var ring = syscall.IoUring.init(64) catch return runPollFallback();
+defer ring.deinit();
+if (ring.getSqe()) |sqe| {
+    syscall.IoUring.prepAccept(sqe, listener, null, null, user_data);
+    ring.submitSqe();
+}
+_ = ring.submit(1) catch continue;  // Blocks in kernel
+while (ring.peekCqe()) |cqe| { handleCompletion(cqe); ring.advanceCq(); }
+```
+
+**AHCI async block I/O (`src/drivers/storage/ahci/adapter.zig`):**
+```zig
+const buf_phys = try adapter.blockReadAsync(port, lba, sectors, request);
+defer adapter.freeDmaBuffer(buf_phys, sectors * 512);
+var future = io.Future{ .request = request };
+_ = future.wait();  // IRQ-driven completion
+adapter.copyFromDmaBuffer(buf_phys, dest);
+```
+
+**When to use:**
+- New userspace I/O: Use `IoUring` wrapper (poll fallback for compatibility)
+- New kernel async: Use `io.allocRequest()` + `future.wait()`
+- Block device access: Use `adapter.blockReadAsync/blockWriteAsync`
+- Timers: Use `reactor.addTimer(req, ticks)`
+
+**io_uring syscalls:** 425 (setup), 426 (enter), 427 (register)
 
 ### Threading Best Practices (ABI Safety)
 When creating kernel threads that need access to context (e.g., driver instances), do **not** rely on Zig method calls or global state. The safest pattern is:

@@ -23,6 +23,7 @@ pub fn panic(msg: []const u8, _: ?*std.builtin.StackTrace, _: ?usize) noreturn {
     // Disable interrupts to prevent further issues on this core
     hal.cpu.disableInterrupts();
 
+    // Use printUnsafe to avoid locks during panic
     console.printUnsafe("\n!!! KERNEL PANIC !!!\n");
     console.printUnsafe("Message: ");
     console.printUnsafe(msg);
@@ -44,6 +45,11 @@ pub fn handleCrash(vector: u8, err_code: u64) noreturn {
     };
 
     // Always log crashes
+    // Use printUnsafe or be careful with formatted printing if it might alloc/lock
+    // console.warn uses printf which is generally safe but relies on backend.
+    // For crash handlers we prefer simple output.
+    
+    // For MVP we assume console.warn is safe enough for user crashes
     console.warn("Process crashed! Vector={d} Code={x} Signal={d}", .{ vector, err_code, signal });
 
     // Terminate the process with signal status

@@ -129,12 +129,32 @@ fn resolveOnce(allocator: std.mem.Allocator, hostname: []const u8, server_ip: u3
     var recv_buf: [512]u8 = undefined;
     var src_addr: socket.SockAddrIn = std.mem.zeroes(socket.SockAddrIn);
     var received: usize = 0;
+
+    // Security (CVE-mitigating): Use deadline-based timeout instead of per-call timeout.
+    // Problem: The socket's 2-second SO_RCVTIMEO resets on each recvfrom() call.
+    // An attacker flooding spoofed UDP packets would cause the loop to continue
+    // indefinitely (each invalid packet resets the timeout window).
+    // Fix: Track wall-clock deadline and enforce it across all loop iterations.
+    // This bounds total wait time regardless of how many spoofed packets arrive.
+    const DNS_TIMEOUT_US: u64 = 2_000_000; // 2 seconds in microseconds
+    const start_tsc = hal.timing.rdtsc();
+
     while (true) {
-        received = try socket.recvfrom(fd_idx, &recv_buf, &src_addr);
+        // Security: Check deadline BEFORE blocking on recvfrom to prevent
+        // infinite loops from attacker-controlled packet floods.
+        if (hal.timing.hasTimedOut(start_tsc, DNS_TIMEOUT_US)) {
+            return DnsError.TimedOut;
+        }
+
+        received = socket.recvfrom(fd_idx, &recv_buf, &src_addr) catch |err| {
+            // Socket timeout is a normal exit condition
+            if (err == socket.SocketError.TimedOut) return DnsError.TimedOut;
+            return DnsError.RecvError;
+        };
 
         // Validate response came from expected DNS server (RFC 5452)
         if (src_addr.addr != server_ip or src_addr.getPort() != 53) {
-            // Ignore spoofed packet, keep waiting until timeout
+            // Ignore spoofed packet, keep waiting until deadline
             continue;
         }
 
@@ -146,7 +166,7 @@ fn resolveOnce(allocator: std.mem.Allocator, hostname: []const u8, server_ip: u3
         const resp = recv_buf[0..received];
         const resp_id = @as(u16, resp[0]) << 8 | resp[1];
         if (resp_id != tx_id) {
-            // Keep listening until timeout expires
+            // Keep listening until deadline expires
             continue;
         }
 

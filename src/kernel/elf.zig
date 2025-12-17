@@ -255,8 +255,16 @@ pub fn load(data: []const u8, pml4_phys: u64, load_base: u64) ElfError!ElfLoadRe
         return ElfError.NoLoadSegments;
     }
 
-    // Verify program header table is within bounds
-    const phdr_end = ehdr.e_phoff + @as(u64, ehdr.e_phnum) * @sizeOf(Elf64_Phdr);
+    // SECURITY: Verify program header table is within bounds using checked arithmetic.
+    // A malicious ELF could set e_phoff near u64::MAX, causing the addition to wrap
+    // around to a small value. The subsequent bounds check would pass, but the
+    // pointer at line 265 (data.ptr + e_phoff) would be invalid, leading to OOB read.
+    // Using std.math.add catches this overflow and returns an error safely.
+    const phdr_table_size = @as(u64, ehdr.e_phnum) * @sizeOf(Elf64_Phdr);
+    const phdr_end = std.math.add(u64, ehdr.e_phoff, phdr_table_size) catch {
+        console.err("ELF: Program header table offset overflow", .{});
+        return ElfError.BufferTooSmall;
+    };
     if (phdr_end > data.len) {
         return ElfError.BufferTooSmall;
     }
@@ -355,6 +363,21 @@ pub fn load(data: []const u8, pml4_phys: u64, load_base: u64) ElfError!ElfLoadRe
 
     // Calculate entry point
     const entry = actual_base + ehdr.e_entry;
+
+    // SECURITY: Validate entry point falls within loaded executable segments.
+    // A malicious ELF could set e_entry to point at the user stack (which we map)
+    // and then place shellcode in argv/envp strings. The "is mapped" check below
+    // would pass since the stack is mapped, allowing execution of attacker code.
+    // By requiring entry to be within [lowest_addr, highest_addr), we ensure it
+    // points to a PT_LOAD segment we just loaded, not arbitrary mapped memory.
+    if (entry < lowest_addr or entry >= highest_addr) {
+        console.err("ELF: Entry point {x} not within loaded segments [{x}-{x})", .{
+            entry,
+            lowest_addr,
+            highest_addr,
+        });
+        return ElfError.InvalidAddressRange;
+    }
 
     console.info("ELF: Loaded {} segments, entry={x}", .{ load_count, entry });
 
@@ -476,6 +499,17 @@ fn loadSegment(
 
     // Copy file data to memory
     if (phdr.p_filesz > 0) {
+        // SECURITY: Validate p_filesz <= p_memsz before copying.
+        // A malicious ELF could set p_filesz > p_memsz, causing the loader to
+        // copy more data than the allocated region can hold. Since we allocate
+        // pages based on p_memsz (line 429), but copy based on p_filesz, an
+        // attacker could overflow into adjacent memory, corrupting kernel
+        // data structures or achieving code execution.
+        if (phdr.p_filesz > phdr.p_memsz) {
+            console.err("ELF: Invalid segment: p_filesz ({}) > p_memsz ({})", .{ phdr.p_filesz, phdr.p_memsz });
+            return ElfError.InvalidAddressRange;
+        }
+
         // Verify file data is within bounds
         const file_end = phdr.p_offset + phdr.p_filesz;
         if (file_end > data.len) {
@@ -587,6 +621,44 @@ pub fn setupStack(
 ) !u64 {
     const page_size = pmm.PAGE_SIZE;
     const stack_base = stack_top - stack_size;
+
+    // SECURITY: Pre-calculate total stack space required before any writes.
+    // Without this check, we'd begin writing strings and pointers to the stack,
+    // only to discover overflow mid-operation via checkStackBounds(). This leaves
+    // the stack in an inconsistent state. By calculating upfront, we fail fast
+    // with a clean error before any partial writes occur.
+    //
+    // Stack layout (bytes needed):
+    //   - argv strings + null terminators: sum(len+1 for each arg)
+    //   - envp strings + null terminators: sum(len+1 for each env)
+    //   - alignment padding: up to 15 bytes
+    //   - auxv entries: (auxv.len + 1) * 16  (+1 for AT_NULL terminator)
+    //   - envp pointers + NULL: (envc + 1) * 8
+    //   - argv pointers + NULL: (argc + 1) * 8
+    //   - argc: 8 bytes
+    var total_stack_needed: usize = 0;
+    const precheck_argc = @min(argv.len, 64);
+    const precheck_envc = @min(envp.len, 64);
+
+    for (argv[0..precheck_argc]) |arg| {
+        total_stack_needed += arg.len + 1; // string + null terminator
+    }
+    for (envp[0..precheck_envc]) |env| {
+        total_stack_needed += env.len + 1;
+    }
+    total_stack_needed += 15; // worst case alignment padding
+    total_stack_needed += (auxv.len + 1) * 16; // auxv entries + AT_NULL
+    total_stack_needed += (precheck_envc + 1) * 8; // envp pointers + NULL
+    total_stack_needed += (precheck_argc + 1) * 8; // argv pointers + NULL
+    total_stack_needed += 8; // argc value
+
+    if (total_stack_needed > stack_size) {
+        console.err("ELF: Stack setup requires {} bytes but only {} available", .{
+            total_stack_needed,
+            stack_size,
+        });
+        return error.StackOverflow;
+    }
 
     // Allocate and map stack pages
     const page_count = stack_size / page_size;
@@ -726,14 +798,61 @@ pub fn setupTls(
     file_data: []const u8,
     preferred_tp: u64,
 ) !u64 {
+    // SECURITY: Validate p_align before use.
+    // A malicious ELF could set p_align=0, causing underflow in (p_align - 1).
+    // This would result in align_mask = 0xFFFFFFFFFFFFFFFF, corrupting all
+    // subsequent address calculations and potentially mapping memory into
+    // kernel space or causing integer wraparound in allocation sizes.
+    //
+    // Valid alignment must be:
+    // - Non-zero (prevent underflow)
+    // - Power of 2 (required for proper alignment math)
+    // - Reasonable size (prevent DoS via huge alignment padding)
+    const alignment = phdr.p_align;
+    if (alignment == 0) {
+        console.err("ELF: TLS segment has invalid p_align=0", .{});
+        return ElfError.InvalidAddressRange;
+    }
+    // Check power of 2: (n & (n-1)) == 0 for powers of 2
+    if ((alignment & (alignment - 1)) != 0) {
+        console.err("ELF: TLS segment p_align={} is not a power of 2", .{alignment});
+        return ElfError.InvalidAddressRange;
+    }
+    // Sanity check: alignment shouldn't be absurdly large (max 2MB for TLS)
+    const MAX_TLS_ALIGN: u64 = 2 * 1024 * 1024;
+    if (alignment > MAX_TLS_ALIGN) {
+        console.err("ELF: TLS segment p_align={} exceeds maximum {}", .{ alignment, MAX_TLS_ALIGN });
+        return ElfError.InvalidAddressRange;
+    }
+
+    // SECURITY: Apply the same segment size limits to TLS as PT_LOAD segments.
+    // Without this check, a malicious ELF could specify p_memsz = 1GB for TLS,
+    // causing memory exhaustion during page allocation. PT_LOAD segments are
+    // protected by MAX_SEGMENT_SIZE (128MB), but TLS was previously unbounded.
+    if (phdr.p_memsz > MAX_SEGMENT_SIZE) {
+        console.err("ELF: TLS segment too large: {} bytes (max {} MB)", .{
+            phdr.p_memsz,
+            MAX_SEGMENT_SIZE / (1024 * 1024),
+        });
+        return ElfError.SegmentTooLarge;
+    }
+
+    // SECURITY: Validate p_filesz <= p_memsz for TLS segment.
+    // Same vulnerability as PT_LOAD: we allocate based on p_memsz but copy
+    // based on p_filesz. If p_filesz > p_memsz, we'd overflow the allocation.
+    if (phdr.p_filesz > phdr.p_memsz) {
+        console.err("ELF: TLS segment invalid: p_filesz ({}) > p_memsz ({})", .{ phdr.p_filesz, phdr.p_memsz });
+        return ElfError.InvalidAddressRange;
+    }
+
     // TCB pointer (TP) must be aligned to p_align
     // We use the preferred_tp as a starting point and align it up
-    const align_mask = phdr.p_align - 1;
+    const align_mask = alignment - 1;
     const tp = (preferred_tp + align_mask) & ~align_mask;
 
     // TLS data is located at tp - aligned_size
     // According to x86_64 ABI Variant II
-    const tls_size = std.mem.alignForward(u64, phdr.p_memsz, phdr.p_align);
+    const tls_size = std.mem.alignForward(u64, phdr.p_memsz, alignment);
     const tls_start = tp - tls_size;
 
     // We need to map memory covering [tls_start, tp + tcb_size]
@@ -748,6 +867,21 @@ pub fn setupTls(
     const alloc_end = std.mem.alignForward(u64, tp + tcb_size, page_size);
     const total_size = alloc_end - alloc_start;
     const page_count = total_size / page_size;
+
+    // SECURITY: Validate TLS region does not overlap kernel space or user stack.
+    // Unlike PT_LOAD segments (which have these checks in loadSegment), TLS setup
+    // was missing boundary validation. A malicious ELF could craft preferred_tp
+    // or large p_memsz to place TLS pages in kernel space or over the stack.
+    // Pages mapped with .user=true in kernel space = privilege escalation.
+    if (alloc_end >= vmm.KERNEL_BASE or alloc_start >= vmm.KERNEL_BASE) {
+        console.err("ELF: TLS overlaps kernel space: {x}-{x}", .{ alloc_start, alloc_end });
+        return ElfError.InvalidAddressRange;
+    }
+    const stack_base = DEFAULT_STACK_TOP - DEFAULT_STACK_SIZE;
+    if (alloc_start < DEFAULT_STACK_TOP and alloc_end > stack_base) {
+        console.err("ELF: TLS overlaps user stack reservation: {x}-{x}", .{ alloc_start, alloc_end });
+        return ElfError.InvalidAddressRange;
+    }
 
     console.debug("ELF: Setting up TLS at {x} (tp={x}, size={d})", .{ alloc_start, tp, tls_size });
 
@@ -847,6 +981,7 @@ pub fn exec(
     data: []const u8,
     argv: []const []const u8,
     envp: []const []const u8,
+    vdso_base: ?u64,
 ) !ExecResult {
     // Create new address space
     const pml4_phys = vmm.createAddressSpace() catch {
@@ -868,15 +1003,31 @@ pub fn exec(
     const stack_size = DEFAULT_STACK_SIZE;
 
     // Construct basic auxiliary vector
-    const auxv = [_]AuxEntry{
-        .{ .id = 3, .value = load_result.phdr_addr }, // AT_PHDR
-        .{ .id = 4, .value = 56 }, // AT_PHENT (sizeof Elf64_Phdr)
-        .{ .id = 5, .value = load_result.phnum }, // AT_PHNUM
-        .{ .id = 6, .value = 4096 }, // AT_PAGESZ
-        .{ .id = 9, .value = load_result.entry_point }, // AT_ENTRY
-    };
+    var auxv_buf: [8]AuxEntry = undefined;
+    var auxv_count: usize = 0;
+    
+    // AT_PHDR
+    auxv_buf[auxv_count] = .{ .id = 3, .value = load_result.phdr_addr }; auxv_count += 1;
+    // AT_PHENT
+    auxv_buf[auxv_count] = .{ .id = 4, .value = 56 }; auxv_count += 1;
+    // AT_PHNUM
+    auxv_buf[auxv_count] = .{ .id = 5, .value = load_result.phnum }; auxv_count += 1;
+    // AT_PAGESZ
+    auxv_buf[auxv_count] = .{ .id = 6, .value = 4096 }; auxv_count += 1;
+    // AT_ENTRY
+    auxv_buf[auxv_count] = .{ .id = 9, .value = load_result.entry_point }; auxv_count += 1;
+    
+    // AT_SYSINFO_EHDR (value 33 per Linux ABI)
+    // Points to the VDSO ELF header in userspace for fast syscalls
+    const AT_SYSINFO_EHDR: u64 = 33;
+    if (vdso_base) |base| {
+        auxv_buf[auxv_count] = .{ .id = AT_SYSINFO_EHDR, .value = base };
+        auxv_count += 1;
+    }
 
-    const sp = setupStack(pml4_phys, stack_top, stack_size, argv, envp, &auxv) catch |err| {
+    const auxv = auxv_buf[0..auxv_count];
+
+    const sp = setupStack(pml4_phys, stack_top, stack_size, argv, envp, auxv) catch |err| {
         console.err("ELF: Stack setup failed: {}", .{err});
         return error.OutOfMemory;
     };

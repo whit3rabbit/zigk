@@ -250,6 +250,12 @@ export fn _start() noreturn {
     // Initialize memory management subsystems
     init_mem.initMemoryManagement();
 
+    // Initialize VDSO
+    const vdso = @import("vdso");
+    vdso.init() catch |err| {
+        console.warn("Failed to initialize VDSO: {}", .{err});
+    };
+
     // Now that PMM is ready, try to enable Double Buffering for graphical console
     // Attempt to create a buffered driver using the same video mode
     if (video_driver.BufferedFramebufferDriver.initWithBackBuffer(fb_driver_direct.mode)) |buffered| {

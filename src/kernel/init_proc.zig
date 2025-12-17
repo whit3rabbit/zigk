@@ -77,7 +77,21 @@ pub fn loadInitProcess() void {
     var selected_mod: ?*limine.Module = null;
     var process_name: []const u8 = "init";
 
-    // Priority 0: Signals FPU Test
+    // Priority 0: VDSO Test
+    if (selected_mod == null) {
+        for (mods) |mod| {
+            const cmdline = get_str(mod.cmdline);
+            const path = get_str(mod.path);
+    
+            if (std.mem.indexOf(u8, cmdline, "test_vdso") != null or std.mem.indexOf(u8, path, "test_vdso") != null) {
+                selected_mod = mod;
+                process_name = "test_vdso";
+                break;
+            }
+        }
+    }
+
+    // Priority 0.1: Signals FPU Test
     if (selected_mod == null) {
         for (mods) |mod| {
             const cmdline = get_str(mod.cmdline);
@@ -312,12 +326,14 @@ fn spawnProcess(mod: *limine.Module, process_name: []const u8) void {
     }
 
     // Auxiliary Vector (Required for static binaries to find PHDRs)
+    const vdso = @import("vdso");
     const auxv = [_]elf.AuxEntry{
         .{ .id = 3, .value = load_result.phdr_addr }, // AT_PHDR
         .{ .id = 4, .value = 56 }, // AT_PHENT
         .{ .id = 5, .value = load_result.phnum }, // AT_PHNUM
         .{ .id = 6, .value = 4096 }, // AT_PAGESZ
         .{ .id = 9, .value = load_result.entry_point }, // AT_ENTRY
+        .{ .id = 33, .value = vdso.VDSO_BASE_ADDR }, // AT_SYSINFO_EHDR
     };
 
     console.info("Creating user stack at {x} (size={d})", .{ stack_virt_top, stack_size });

@@ -206,7 +206,9 @@ pub const IoUringInstance = struct {
 
     fn finalizeBounceBuffer(req: *io.IoRequest) void {
         if (req.bounce_buf) |buf| {
-            if (req.op == .socket_read and req.user_buf_ptr != 0) {
+            // Copy bounce buffer data back to user for read operations
+            const is_read_op = req.op == .socket_read or req.op == .keyboard_read;
+            if (is_read_op and req.user_buf_ptr != 0) {
                 switch (req.result) {
                     .success => |n| {
                         const copy_len = @min(n, @min(buf.len, req.user_buf_len));
@@ -983,20 +985,26 @@ fn processReadOp(inst: *IoUringInstance, sqe: *const io_ring.IoUringSqe) Syscall
     errdefer io.pool.free(req);
 
     req.fd = sqe.fd;
-    req.buf_ptr = sqe.addr;
-    req.buf_len = sqe.len;
     req.user_data = sqe.user_data;
+
+    // SECURITY: Use bounce buffer to prevent TOCTOU race condition.
+    // User could unmap/remap the buffer between validation and async completion.
+    const buf = try initBounceBuffer(req, sqe.addr, sqe.len, .Write, false);
+    req.buf_ptr = @intFromPtr(buf.ptr);
+    req.buf_len = buf.len;
 
     // For now, assume keyboard read for fd -1 or special fd
     // In full implementation, would dispatch based on fd type
     if (keyboard.getCharAsync(req)) {
         // Queued for later - add to pending
         if (!inst.addPendingRequest(req)) {
+            IoUringInstance.finalizeBounceBuffer(req);
             io.pool.free(req);
             return error.EBUSY;
         }
     } else {
-        // Completed immediately - generate CQE
+        // Completed immediately - finalize bounce buffer and generate CQE
+        IoUringInstance.finalizeBounceBuffer(req);
         const res: i32 = switch (req.result) {
             .success => |n| @intCast(@min(n, @as(usize, std.math.maxInt(i32)))),
             .err => @intCast(req.result.toSyscallReturn()),

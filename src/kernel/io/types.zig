@@ -82,6 +82,9 @@ pub const IoOpType = enum(u8) {
 
     /// Custom - arbitrary async function execution
     custom = 12,
+
+    /// Audio write - async audio buffer submission
+    audio_write = 13,
 };
 
 /// Result of an I/O operation

@@ -300,8 +300,9 @@ export fn dispatch_interrupt(frame: *InterruptFrame) callconv(.c) *InterruptFram
     }
 
     // If we are returning to user mode (CS RPL == 3), check for pending signals
+    // SECURITY: Use atomic getter to prevent torn pointer reads
     if ((ret_frame.cs & 3) == 3) {
-        if (signal_checker) |checker| {
+        if (getSignalChecker()) |checker| {
             ret_frame = checker(ret_frame);
         }
     }
@@ -335,11 +336,25 @@ inline fn getCpuIndex() usize {
 // Signal checker hook (set by scheduler/interrupts module)
 // Called before returning to user mode to check for pending signals
 // Returns potentially modified frame (if signal delivery set up)
+// SECURITY: Uses atomic operations to prevent torn reads during concurrent access
 var signal_checker: ?*const fn (*InterruptFrame) *InterruptFrame = null;
 
 /// Set the signal checker hook
+/// SECURITY: Uses atomic store with release ordering to ensure the function pointer
+/// is fully visible before it can be called from interrupt context
 pub fn setSignalChecker(checker: *const fn (*InterruptFrame) *InterruptFrame) void {
-    signal_checker = checker;
+    const checker_addr: usize = @intFromPtr(checker);
+    const ptr: *usize = @ptrCast(&signal_checker);
+    @atomicStore(usize, ptr, checker_addr, .release);
+}
+
+/// Get the signal checker hook atomically
+/// SECURITY: Uses atomic load with acquire ordering to pair with setSignalChecker
+fn getSignalChecker() ?*const fn (*InterruptFrame) *InterruptFrame {
+    const ptr: *const usize = @ptrCast(&signal_checker);
+    const checker_addr = @atomicLoad(usize, ptr, .acquire);
+    if (checker_addr == 0) return null;
+    return @ptrFromInt(checker_addr);
 }
 
 // Assembly helper defined in asm_helpers.S

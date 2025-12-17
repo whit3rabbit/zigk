@@ -254,17 +254,43 @@ pub const Process = struct {
         _ = self.refcount.fetchAdd(1, .acquire);
     }
 
-    /// Decrement reference count, returns true if process should be freed
+    /// Decrement reference count, returns true if process should be freed.
+    ///
+    /// SECURITY: Uses compare-and-swap to prevent double-free race condition.
+    ///
+    /// The race occurs when two threads concurrently call unref() with refcount=1:
+    /// 1. Thread A: fetchSub returns prev=1, refcount becomes 0
+    /// 2. Thread B: fetchSub returns prev=0, refcount wraps to 0xFFFFFFFF
+    /// 3. Both threads return true and try to free the process -> DOUBLE FREE
+    ///
+    /// Using CAS ensures only one thread can successfully decrement 1->0 and get
+    /// the "should free" indication. Other concurrent unrefs will either:
+    /// - See the new value (0) and panic (correct behavior for bug detection)
+    /// - Retry with the correct value (if refcount > 1)
+    ///
+    /// Note: The high bit (0x80000000) may be set during execve to indicate
+    /// "execve in progress". We mask this out when checking the thread count.
     pub fn unref(self: *Process) bool {
-        const prev = self.refcount.fetchSub(1, .release);
-        if (prev == 0) {
-            console.warn("Process: unref on zero refcount (pid={})", .{self.pid});
-            // Should panic or handle error, but return true to avoid double-free if possible or crash safely?
-            // If it was 0, it wraps to max. This is bad.
-            // Let's assume correct usage for now, but warn.
-            return true;
+        const EXECVE_IN_PROGRESS_BIT: u32 = 0x80000000;
+        const REFCOUNT_MASK: u32 = ~EXECVE_IN_PROGRESS_BIT;
+
+        while (true) {
+            const current = self.refcount.load(.acquire);
+            const thread_count = current & REFCOUNT_MASK;
+
+            if (thread_count == 0) {
+                // This should never happen in correct code - indicates a bug
+                console.panic("Process: unref on zero refcount (pid={})", .{self.pid});
+            }
+
+            const new_value = (current & EXECVE_IN_PROGRESS_BIT) | (thread_count - 1);
+
+            if (self.refcount.cmpxchgWeak(current, new_value, .release, .monotonic) == null) {
+                // CAS succeeded - check if this was the last reference
+                return thread_count == 1;
+            }
+            // CAS failed - another thread modified refcount, retry
         }
-        return prev == 1;
     }
 
     /// Transition to zombie state
@@ -445,6 +471,14 @@ pub fn createProcess(parent: ?*Process) !*Process {
 
     // Initialize CWD to "/"
     proc.cwd[0] = '/';
+
+     // Map VDSO
+    {
+        const vdso = @import("vdso");
+        _ = vdso.map(proc) catch |err| {
+            console.warn("Process: Failed to map VDSO: {}", .{err});
+        };
+    }
 
     // Add to parent's children list
     if (parent) |p| {

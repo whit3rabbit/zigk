@@ -239,6 +239,20 @@ pub fn build(b: *std.Build) void {
     kernel_stack_module.addImport("console", console_module);
     kernel_stack_module.addImport("sync", sync_module);
 
+    // Create VDSO module
+    const vdso_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/vdso.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    // Add dependencies for VDSO module
+    vdso_module.addImport("pmm", pmm_module);
+    vdso_module.addImport("vmm", vmm_module);
+    vdso_module.addImport("hal", hal_module);
+    vdso_module.addImport("console", console_module);
+    // UserVmm not defined yet - will do after definition
+    // Process not defined yet - will do after definition
+
     // Create Thread module (Thread management and creation)
     const thread_module = b.createModule(.{
         .root_source_file = b.path("src/kernel/thread.zig"),
@@ -267,6 +281,7 @@ pub fn build(b: *std.Build) void {
     sched_module.addImport("config", config_module);
     sched_module.addImport("list", list_module);
     sched_module.addImport("kernel_stack", kernel_stack_module);
+    sched_module.addImport("vdso", vdso_module);
 
     // Break circular dependency shim
     sync_module.addImport("sched", sched_module);
@@ -456,6 +471,7 @@ pub fn build(b: *std.Build) void {
     audio_module.addImport("heap", heap_module);
     audio_module.addImport("sched", sched_module);
     audio_module.addImport("thread", thread_module);
+    audio_module.addImport("io", kernel_io_module);
 
     // Create Input subsystem module
     const input_module = b.createModule(.{
@@ -548,6 +564,7 @@ pub fn build(b: *std.Build) void {
     process_module.addImport("ipc_msg", ipc_msg_module);
     process_module.addImport("list", list_module);
     process_module.addImport("capabilities", capabilities_module);
+    process_module.addImport("vdso", vdso_module);
 
     // Create ELF loader module (for execve)
     const elf_module = b.createModule(.{
@@ -585,6 +602,9 @@ pub fn build(b: *std.Build) void {
     // Add user_mem to sched (circular dependency allowed in Zig modules)
     sched_module.addImport("user_mem", user_mem_module);
 
+    // Add user_mem to audio for ioctl validation
+    audio_module.addImport("user_mem", user_mem_module);
+
     // Create Pipe module (IPC)
     const pipe_module = b.createModule(.{
         .root_source_file = b.path("src/kernel/pipe.zig"),
@@ -600,12 +620,17 @@ pub fn build(b: *std.Build) void {
     pipe_module.addImport("hal", hal_module);
     pipe_module.addImport("io", kernel_io_module);
 
+
+
     // Create Signal module
     const signal_module = b.createModule(.{
         .root_source_file = b.path("src/kernel/signal.zig"),
         .target = kernel_target,
         .optimize = optimize,
     });
+    // Add deferred dependencies for VDSO module
+    vdso_module.addImport("user_vmm", user_vmm_module);
+    vdso_module.addImport("process", process_module);
     signal_module.addImport("sched", sched_module);
     signal_module.addImport("thread", thread_module);
     signal_module.addImport("uapi", uapi_module);
@@ -749,6 +774,7 @@ pub fn build(b: *std.Build) void {
     syscall_execution_module.addImport("fs", fs_module);
     syscall_execution_module.addImport("user_mem", user_mem_module);
     syscall_execution_module.addImport("user_vmm", user_vmm_module);
+    syscall_execution_module.addImport("vdso", vdso_module);
 
     // Create syscall custom module (debug_log, putchar, getchar, etc.)
     const syscall_custom_module = b.createModule(.{
@@ -982,6 +1008,7 @@ pub fn build(b: *std.Build) void {
     kernel.root_module.addImport("capabilities", capabilities_module);
     kernel.root_module.addImport("syscall_ipc", syscall_ipc_module);
     kernel.root_module.addImport("futex", futex_module);
+    kernel.root_module.addImport("vdso", vdso_module);
 
     // Add assembly helpers for x86_64 (ISR stubs, lgdt, lidt)
     kernel.addAssemblyFile(b.path("src/arch/x86_64/asm_helpers.S"));
@@ -1230,6 +1257,7 @@ pub fn build(b: *std.Build) void {
         "test_random",
         "test_threads",
         "test_signals_fpu",
+        "test_vdso",
     };
 
     const test_step_build = b.step("build-tests", "Build C integration tests");
@@ -1318,6 +1346,7 @@ pub fn build(b: *std.Build) void {
         \\cp zig-out/bin/test_asm iso_root/boot/modules/ && \
         \\cp zig-out/bin/test_threads iso_root/boot/modules/ && \
         \\cp zig-out/bin/test_signals_fpu iso_root/boot/modules/ && \
+        \\cp zig-out/bin/test_vdso iso_root/boot/modules/ && \
         \\cp zig-out/bin/test_writev iso_root/boot/modules/ && \
         \\cp zig-out/bin/audio_test iso_root/boot/modules/ && \
         \\cp zig-out/bin/audio_test iso_root/boot/modules/ && \

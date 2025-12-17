@@ -306,7 +306,13 @@ _asm_rdtsc:
 #   5. Call syscall dispatcher
 #   6. Restore registers
 #   7. SWAPGS back
-#   8. SYSRET to user
+#   8. Validate RCX is canonical (SECURITY: prevents SYSRET privilege escalation)
+#   9. SYSRET to user (or IRET if RCX non-canonical)
+#
+# SECURITY NOTE: Intel SYSRET with non-canonical RCX causes #GP AFTER switching
+# to user-mode CS but BEFORE switching RSP. This allows a malicious process to
+# trigger a #GP that runs with CPL=3 segments but on the kernel stack.
+# We MUST validate RCX before SYSRET and use slower IRET path if invalid.
 #
 .global _syscall_entry
 .type _syscall_entry, @function
@@ -386,7 +392,48 @@ _syscall_entry:
     # SWAPGS: restore user GS
     swapgs
 
-    # Return to userspace
+    # ==========================================================================
+    # SECURITY: Validate RCX (return RIP) is canonical before SYSRET
+    # ==========================================================================
+    # Intel SYSRET vulnerability: If RCX contains a non-canonical address,
+    # #GP fires AFTER CS is switched to user mode but BEFORE RSP is switched.
+    # This causes the #GP handler to run with user CS but kernel RSP!
+    #
+    # Canonical address check: bits [63:47] must all be 0 or all be 1
+    # We check by sign-extending bit 47 and comparing to the original.
+    mov %rcx, %rax
+    sar $47, %rax           # Sign-extend bit 47 to all upper bits
+    cmp $0, %rax            # All zeros? (user-space canonical: 0x0000_xxxx_xxxx_xxxx)
+    je .Lsysret_safe
+    cmp $-1, %rax           # All ones? (kernel-space canonical: 0xFFFF_xxxx_xxxx_xxxx)
+    je .Lsysret_safe
+
+    # Non-canonical RCX detected - use slow IRET path instead
+    # First, re-SWAPGS since we already swapped above
+    swapgs
+
+    # Build IRET frame on kernel stack
+    # We need to push: SS, RSP, RFLAGS, CS, RIP
+    # Current state: RCX=RIP, R11=RFLAGS, RSP=user_rsp
+    mov %rsp, %rax          # Save user RSP
+    mov %gs:0, %rsp         # Switch back to kernel stack
+
+    # Push IRET frame (reverse order)
+    # GDT layout: 0x00=null, 0x08=kcode, 0x10=kdata, 0x18=udata, 0x20=ucode
+    # USER_DATA = 0x18 | 3 = 0x1B, USER_CODE = 0x20 | 3 = 0x23
+    push $0x1B              # SS (user data selector: GDT index 3, RPL=3)
+    push %rax               # RSP (user stack)
+    push %r11               # RFLAGS
+    push $0x23              # CS (user code selector: GDT index 4, RPL=3)
+    push %rcx               # RIP
+
+    # SWAPGS again before IRET to user mode
+    swapgs
+
+    iretq
+
+.Lsysret_safe:
+    # Return to userspace via fast SYSRET path
     # SYSRETQ: sets CS=STAR[63:48]+16, SS=STAR[63:48]+8, RIP=RCX, RFLAGS=R11
     sysretq
 

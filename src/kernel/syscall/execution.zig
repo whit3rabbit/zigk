@@ -350,13 +350,21 @@ pub fn sys_execve(frame: *hal.syscall.SyscallFrame, path_ptr: usize, argv_ptr: u
 
     // Load and execute ELF
     // This creates a new address space and sets up the stack
-    const result = elf.exec(file.data, argv, envp) catch |err| {
+    const vdso = @import("vdso");
+    const result = elf.exec(file.data, argv, envp, vdso.VDSO_BASE_ADDR) catch |err| {
         console.err("sys_execve: Failed to exec: {}", .{err});
         // Map ELF loader errors to appropriate syscall errors
         return switch (err) {
             error.OutOfMemory => error.ENOMEM,
             error.InvalidExecutable => error.ENOEXEC,
         };
+    };
+
+    // Map VDSO into new address space
+    _ = vdso.mapToPml4(result.pml4_phys) catch |err| blk: {
+        console.warn("sys_execve: Failed to map VDSO: {}", .{err});
+        // Continue anyway - libc will fallback
+        break :blk 0;
     };
 
     console.debug("sys_execve: Loaded ELF entry={x} stack={x} cr3={x}", .{
@@ -374,18 +382,40 @@ pub fn sys_execve(frame: *hal.syscall.SyscallFrame, path_ptr: usize, argv_ptr: u
     const current_thread = sched.getCurrentThread().?;
     const current_proc = base.getCurrentProcess();
 
-    // SECURITY: Check if process has multiple threads.
-    // In a multi-threaded process, other threads may still be executing in the
-    // old address space. Destroying it would cause page faults or memory corruption.
-    // Linux terminates all other threads before execve proceeds; we return EAGAIN
-    // to indicate the caller should handle thread termination first.
-    const thread_count = current_proc.refcount.load(.acquire);
-    if (thread_count > 1) {
-        console.warn("sys_execve: Multi-threaded process (refcount={}) - cannot execve safely", .{thread_count});
-        // The new address space was already created but we need to clean it up
+    // SECURITY: Atomically verify this is a single-threaded process before execve.
+    //
+    // TOCTOU PREVENTION: A simple load-then-check would create a race window where
+    // another thread could call clone() between checking refcount==1 and switching
+    // CR3. That would leave the new thread executing in the old (about to be
+    // destroyed) address space, causing memory corruption or crashes.
+    //
+    // We use cmpxchg to atomically:
+    // 1. Verify refcount is exactly 1 (single-threaded)
+    // 2. Set a sentinel value (0x80000000 | 1) to indicate "execve in progress"
+    //
+    // sys_clone checks for this sentinel and fails with EAGAIN if seen, preventing
+    // new thread creation during the critical section.
+    const EXECVE_IN_PROGRESS_BIT: u32 = 0x80000000;
+    const expected_single_thread: u32 = 1;
+    const execve_sentinel: u32 = EXECVE_IN_PROGRESS_BIT | 1;
+
+    if (current_proc.refcount.cmpxchgStrong(
+        expected_single_thread,
+        execve_sentinel,
+        .acq_rel,
+        .acquire,
+    )) |actual| {
+        // CAS failed - either multi-threaded or another execve in progress
+        console.warn("sys_execve: Cannot execve - refcount={x} (expected 1)", .{actual});
         vmm.destroyAddressSpace(result.pml4_phys);
-        return error.EAGAIN;
+        if (actual & EXECVE_IN_PROGRESS_BIT != 0) {
+            return error.EBUSY; // Another execve in progress
+        }
+        return error.EAGAIN; // Multi-threaded, caller should terminate other threads
     }
+    // CAS succeeded: we now own the execve lock (refcount = 0x80000001)
+    // Must restore to 1 on success or error below
+    errdefer current_proc.refcount.store(1, .release);
 
     // Save old CR3 to destroy after switching
     const old_cr3 = current_proc.cr3;
@@ -410,6 +440,12 @@ pub fn sys_execve(frame: *hal.syscall.SyscallFrame, path_ptr: usize, argv_ptr: u
 
     // Destroy old address space
     vmm.destroyAddressSpace(old_cr3);
+
+    // SECURITY: Restore refcount to 1 now that execve has completed successfully.
+    // The sentinel value (0x80000001) prevented concurrent clone() during the
+    // critical section. Now that we're safely in the new address space, we restore
+    // normal operation.
+    current_proc.refcount.store(1, .release);
 
     // Return 0 - this gets placed in RAX by the dispatcher.
     // On successful execve, this value becomes the argc seen by _start
@@ -685,11 +721,21 @@ pub fn sys_clone(frame: *hal.syscall.SyscallFrame) SyscallError!usize {
             return error.ESRCH;
         }
 
-        // SECURITY: Enforce per-process thread limit atomically to prevent
-        // racing threads from exceeding MAX_THREADS_PER_PROCESS.
+        // SECURITY: Enforce per-process thread limit atomically and detect execve.
+        // - MAX_THREADS_PER_PROCESS prevents fork bomb DoS
+        // - EXECVE_IN_PROGRESS_BIT (0x80000000) prevents creating threads during
+        //   execve's critical section (between refcount check and CR3 switch)
         const MAX_THREADS_PER_PROCESS: u32 = 256;
+        const EXECVE_IN_PROGRESS_BIT: u32 = 0x80000000;
         var refcount = parent_proc.refcount.load(.acquire);
         while (true) {
+            // SECURITY: Check if execve is in progress. Creating a thread now would
+            // result in the new thread running in an address space that's about to
+            // be destroyed, causing memory corruption.
+            if (refcount & EXECVE_IN_PROGRESS_BIT != 0) {
+                console.warn("sys_clone: Process pid={} has execve in progress - blocking clone", .{parent_proc.pid});
+                return error.EAGAIN;
+            }
             if (refcount >= MAX_THREADS_PER_PROCESS) {
                 console.warn("sys_clone: Process pid={} reached thread limit ({})", .{ parent_proc.pid, MAX_THREADS_PER_PROCESS });
                 return error.EAGAIN;

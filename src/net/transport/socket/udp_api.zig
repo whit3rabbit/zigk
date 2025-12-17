@@ -113,7 +113,25 @@ pub fn recvfrom(
     if (scheduler.blockFn()) |block_fn| {
         const get_current = scheduler.currentThreadFn() orelse return errors.SocketError.SystemError;
 
+        // Security: Track deadline for timeout enforcement.
+        // Previously, this path ignored rcv_timeout_ms entirely, causing indefinite
+        // blocking if no data arrived. An attacker who can prevent packets from
+        // reaching the socket (e.g., network partition, or by keeping the sender
+        // busy) could cause permanent thread starvation in the kernel.
+        // Fix: Convert timeout_ms to TSC-based deadline and check it each iteration.
+        const timeout_us: u64 = if (sock.rcv_timeout_ms > 0)
+            @as(u64, sock.rcv_timeout_ms) * 1000 // Convert ms to us
+        else
+            0; // 0 means block forever (no deadline)
+        const start_tsc = hal.timing.rdtsc();
+
         while (true) {
+            // Security: Check timeout BEFORE blocking to bound total wait time.
+            // This prevents indefinite hangs when no packets arrive.
+            if (timeout_us > 0 and hal.timing.hasTimedOut(start_tsc, timeout_us)) {
+                return errors.SocketError.TimedOut;
+            }
+
             // Try to dequeue data with lock held
             {
                 const held = sock.lock.acquire();
@@ -139,7 +157,7 @@ pub fn recvfrom(
             // interrupts and halts (STI; HLT sequence)
             block_fn();
             sock.blocked_thread = null;
-            // Loop back to check for data
+            // Loop back to check for data (and re-check timeout)
         }
     }
 

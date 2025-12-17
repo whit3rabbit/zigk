@@ -10,6 +10,8 @@ pub const SNDCTL_DSP_STEREO: u32 = 0xC0045003;
 pub const SNDCTL_DSP_GETBLKSIZE: u32 = 0xC0045004;
 pub const SNDCTL_DSP_SETFMT: u32 = 0xC0045005;
 pub const SNDCTL_DSP_CHANNELS: u32 = 0xC0045006;
+pub const SNDCTL_DSP_GETOSPACE: u32 = 0x800C500C; // _IOR('P', 12, audio_buf_info)
+pub const SNDCTL_DSP_GETISPACE: u32 = 0x800C500D; // _IOR('P', 13, audio_buf_info)
 // POST: 0x00005008?
 // RESET is _IO('P', 0) -> 0x5000 ? 0x00005000. Yes.
 

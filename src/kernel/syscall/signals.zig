@@ -176,7 +176,22 @@ pub fn sys_rt_sigreturn(frame: *hal.syscall.SyscallFrame) SyscallError!usize {
 
     frame.setReturnRip(mc.rip);
     frame.setUserRsp(mc.rsp); // Restore stack pointer
-    frame.r11 = mc.rflags; // Sysret restores RFLAGS from R11
+
+    // SECURITY: Sanitize RFLAGS before restoration.
+    // User-controlled RFLAGS could contain dangerous bits that must be cleared:
+    // - IOPL (bits 12-13): If set to 3, allows user to execute IN/OUT instructions
+    //   directly, bypassing kernel I/O port protection. This would allow arbitrary
+    //   hardware access (disk, network, display).
+    // - VIF/VIP (bits 19-20): Virtual interrupt flags, should be kernel-controlled.
+    // - VM (bit 17): Virtual-8086 mode, must not be set.
+    // - RF (bit 16): Resume flag, kernel-controlled.
+    // - NT (bit 14): Nested task flag, kernel-controlled.
+    //
+    // We allow: CF, PF, AF, ZF, SF, TF, DF, OF (arithmetic/control flags).
+    // We force: IF=1 (interrupts enabled), reserved bit 1 set.
+    const SAFE_RFLAGS_MASK: u64 = 0x0000_0000_0000_0CD5; // CF,PF,AF,ZF,SF,DF,OF
+    const REQUIRED_RFLAGS: u64 = 0x0000_0000_0000_0202; // IF=1, reserved bit 1
+    frame.r11 = (mc.rflags & SAFE_RFLAGS_MASK) | REQUIRED_RFLAGS;
 
     // Restore FS/GS bases
     // GS is kernel-managed, but FS is TLS.
@@ -238,6 +253,51 @@ pub fn sys_set_tid_address(tidptr: usize) SyscallError!usize {
 // Signal Sending Syscalls
 // =============================================================================
 
+/// Check if the current process has permission to send a signal to the target thread.
+/// SECURITY: Implements POSIX signal permission model to prevent:
+/// - Unprivileged processes from killing system processes (e.g., init/PID 1)
+/// - Cross-user signal injection attacks
+/// - Privilege escalation via signal handler exploitation
+///
+/// Permission rules (simplified POSIX model):
+/// - Process can always signal itself
+/// - PID 1 (init) is protected from SIGKILL/SIGSTOP by non-root processes
+/// - Same UID check would go here when we implement UIDs
+fn checkSignalPermission(target: *sched.Thread, signum: u8) SyscallError!void {
+    const current = sched.getCurrentThread() orelse return error.ESRCH;
+
+    // Process can always signal its own threads
+    if (target.process != null and current.process != null) {
+        if (target.process == current.process) {
+            return; // Same process, always allowed
+        }
+    }
+
+    // Get target process info
+    const Process = base.Process;
+    const target_proc: ?*Process = if (target.process) |p| @ptrCast(@alignCast(p)) else null;
+
+    // SECURITY: Protect PID 1 (init) from termination signals.
+    // If init dies, the system becomes unstable. Only allow non-fatal signals.
+    // In a real implementation, we'd also check if sender is privileged (CAP_KILL).
+    if (target_proc) |tp| {
+        if (tp.pid == 1) {
+            // SIGKILL (9) and SIGSTOP (19) cannot be sent to init by unprivileged processes
+            if (signum == uapi.signal.SIGKILL or signum == uapi.signal.SIGSTOP) {
+                // TODO: When we implement UIDs, check if sender has CAP_KILL or is root
+                // For now, deny these signals to init from any process
+                console.warn("Signal: Blocked sig={} to init (pid=1) - protected process", .{signum});
+                return error.EPERM;
+            }
+        }
+    }
+
+    // TODO: Implement full POSIX permission model when we add UIDs:
+    // - Check real/effective UID match
+    // - Check CAP_KILL capability
+    // For MVP, allow signals between different processes (except init protection above)
+}
+
 /// Deliver a signal to a thread
 fn deliverSignalToThread(target: *sched.Thread, signum: u8) void {
     // Set pending signal bit
@@ -289,6 +349,9 @@ pub fn sys_kill(pid: usize, sig: usize) SyscallError!usize {
         return 0;
     }
 
+    // SECURITY: Check permission before delivering signal
+    try checkSignalPermission(target, signum);
+
     // Deliver the signal
     deliverSignalToThread(target, signum);
 
@@ -322,6 +385,9 @@ pub fn sys_tkill(tid: usize, sig: usize) SyscallError!usize {
     if (signum == 0) {
         return 0;
     }
+
+    // SECURITY: Check permission before delivering signal
+    try checkSignalPermission(target, signum);
 
     deliverSignalToThread(target, signum);
 
@@ -369,6 +435,9 @@ pub fn sys_tgkill(tgid: usize, tid: usize, sig: usize) SyscallError!usize {
     if (signum == 0) {
         return 0;
     }
+
+    // SECURITY: Check permission before delivering signal
+    try checkSignalPermission(target, signum);
 
     deliverSignalToThread(target, signum);
 

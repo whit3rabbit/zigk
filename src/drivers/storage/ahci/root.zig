@@ -341,13 +341,36 @@ pub const AhciController = struct {
             return AhciError.ResetTimeout;
         }
 
+        // Track allocations for cleanup on error
+        var cmd_list_allocated = false;
+        var fis_allocated = false;
+        var tables_allocated: usize = 0;
+
+        // Cleanup on error - free all allocations made so far
+        errdefer {
+            if (cmd_list_allocated) {
+                pmm.freePages(p.cmd_list_phys, 1);
+                p.cmd_list_phys = 0;
+            }
+            if (fis_allocated) {
+                pmm.freePages(p.fis_phys, 1);
+                p.fis_phys = 0;
+            }
+            for (0..tables_allocated) |slot| {
+                if (p.cmd_tables_phys[slot] != 0) {
+                    pmm.freePages(p.cmd_tables_phys[slot], 1);
+                    p.cmd_tables_phys[slot] = 0;
+                }
+            }
+        }
+
         // Allocate command list (1KB aligned)
         const cmd_list_phys = pmm.allocZeroedPages(1) orelse {
             return AhciError.AllocationFailed;
         };
+        cmd_list_allocated = true;
         // Check 64-bit capability
         if (!self.cap.s64a and cmd_list_phys > 0xFFFFFFFF) {
-            pmm.freePages(cmd_list_phys, 1);
             console.err("AHCI: Port {d} cmd list > 4GB but controller is 32-bit", .{port_num});
             return AhciError.AllocationFailed;
         }
@@ -358,8 +381,8 @@ pub const AhciController = struct {
         const fis_phys = pmm.allocZeroedPages(1) orelse {
             return AhciError.AllocationFailed;
         };
+        fis_allocated = true;
         if (!self.cap.s64a and fis_phys > 0xFFFFFFFF) {
-            pmm.freePages(fis_phys, 1);
             console.err("AHCI: Port {d} FIS > 4GB but controller is 32-bit", .{port_num});
             return AhciError.AllocationFailed;
         }
@@ -371,7 +394,9 @@ pub const AhciController = struct {
             const table_phys = pmm.allocZeroedPages(1) orelse {
                 return AhciError.AllocationFailed;
             };
+            tables_allocated = slot + 1;
             if (!self.cap.s64a and table_phys > 0xFFFFFFFF) {
+                // Free this one immediately since errdefer won't see it in array yet
                 pmm.freePages(table_phys, 1);
                 console.err("AHCI: Port {d} table > 4GB but controller is 32-bit", .{port_num});
                 return AhciError.AllocationFailed;
@@ -610,18 +635,32 @@ pub const AhciController = struct {
         // Issue command
         try self.issueCommand(port_num, 0);
 
-        // Copy data to user buffer
+        // Verify hardware-reported transfer size (PRDBC) matches expected
+        // This mitigates TOCTOU attacks from malicious devices
+        const actual_bytes = cmd_list[0].prdbc;
+        const verified_bytes: usize = if (actual_bytes > total_bytes)
+            total_bytes // Cap at expected - don't trust device to report more
+        else
+            @intCast(actual_bytes);
+
+        // Copy verified amount to user buffer
         var dest_offset: usize = 0;
-        bytes_remaining = total_bytes;
-        
+        bytes_remaining = verified_bytes;
+
         for (0..page_count) |i| {
+            if (bytes_remaining == 0) break;
             const chunk_size = if (bytes_remaining > 4096) 4096 else @as(usize, @intCast(bytes_remaining));
             const src: [*]u8 = @ptrCast(hal.paging.physToVirt(pages[i]));
-            
+
             @memcpy(buffer[dest_offset .. dest_offset + chunk_size], src[0..chunk_size]);
-            
+
             dest_offset += chunk_size;
             bytes_remaining -= chunk_size;
+        }
+
+        // Return error if transfer was short
+        if (verified_bytes < total_bytes) {
+            return AhciError.TransferError;
         }
     }
 
@@ -759,12 +798,8 @@ pub const AhciController = struct {
     // Async I/O Methods
     // ========================================================================
 
-    /// Find a free command slot on a port
-    fn findFreeSlot(self: *Self, port_num: u5) ?u5 {
-        const p = &self.ports[port_num];
-        const held = p.pending_lock.acquire();
-        defer held.release();
-
+    /// Find a free command slot on a port (caller must hold pending_lock)
+    fn findFreeSlotLocked(p: *AhciPort) ?u5 {
         // Find first unissued slot
         var slot: u5 = 0;
         while (slot < 32) : (slot += 1) {
@@ -795,8 +830,12 @@ pub const AhciController = struct {
             return AhciError.InvalidParameter;
         }
 
-        // Find free command slot
-        const slot = self.findFreeSlot(port_num) orelse return AhciError.AllocationFailed;
+        // Hold lock from slot allocation through command issue to prevent race
+        const held = p.pending_lock.acquire();
+        defer held.release();
+
+        // Find free command slot under lock
+        const slot = findFreeSlotLocked(p) orelse return AhciError.AllocationFailed;
 
         // Set up request metadata
         request.op_data = .{ .disk = .{
@@ -822,14 +861,9 @@ pub const AhciController = struct {
         const total_bytes: u32 = @as(u32, sector_count) * SECTOR_SIZE;
         prdt.* = command.PrdtEntry.init(buf_phys, total_bytes, true);
 
-        // Register pending request under lock
-        {
-            const held = p.pending_lock.acquire();
-            defer held.release();
-
-            p.pending_requests[slot] = request;
-            p.commands_issued |= @as(u32, 1) << slot;
-        }
+        // Register pending request (still under lock)
+        p.pending_requests[slot] = request;
+        p.commands_issued |= @as(u32, 1) << slot;
 
         // Transition request to in_progress
         _ = request.compareAndSwapState(.pending, .in_progress);
@@ -856,8 +890,12 @@ pub const AhciController = struct {
             return AhciError.InvalidParameter;
         }
 
-        // Find free command slot
-        const slot = self.findFreeSlot(port_num) orelse return AhciError.AllocationFailed;
+        // Hold lock from slot allocation through command issue to prevent race
+        const held = p.pending_lock.acquire();
+        defer held.release();
+
+        // Find free command slot under lock
+        const slot = findFreeSlotLocked(p) orelse return AhciError.AllocationFailed;
 
         // Set up request metadata
         request.op_data = .{ .disk = .{
@@ -883,14 +921,9 @@ pub const AhciController = struct {
         const total_bytes: u32 = @as(u32, sector_count) * SECTOR_SIZE;
         prdt.* = command.PrdtEntry.init(buf_phys, total_bytes, true);
 
-        // Register pending request under lock
-        {
-            const held = p.pending_lock.acquire();
-            defer held.release();
-
-            p.pending_requests[slot] = request;
-            p.commands_issued |= @as(u32, 1) << slot;
-        }
+        // Register pending request (still under lock)
+        p.pending_requests[slot] = request;
+        p.commands_issued |= @as(u32, 1) << slot;
 
         // Transition request to in_progress
         _ = request.compareAndSwapState(.pending, .in_progress);
@@ -921,6 +954,9 @@ pub const AhciController = struct {
 
     /// Handle interrupt for a specific port
     fn handlePortInterrupt(self: *Self, port_num: u5) void {
+        // Explicit bounds check for defense-in-depth (u5 max is 31, MAX_PORTS is 32)
+        if (@as(usize, port_num) >= MAX_PORTS) return;
+
         const p = &self.ports[port_num];
         if (!p.active) return;
 
@@ -936,11 +972,14 @@ pub const AhciController = struct {
 
         if (completed == 0) return;
 
-        // Check for errors
+        // Check for global error conditions
         const tfd = port.readTfd(p.base);
-        const has_error = tfd.hasError() or pis.hasError();
+        const port_has_error = tfd.hasError() or pis.hasError();
 
-        // Complete each finished command's request
+        // Get command list for PRDBC verification
+        const cmd_list: *command.CommandList = @ptrFromInt(p.cmd_list_virt);
+
+        // Complete each finished command's request with per-slot validation
         var slot_mask = completed;
         while (slot_mask != 0) {
             const slot: u5 = @intCast(@ctz(slot_mask));
@@ -959,12 +998,26 @@ pub const AhciController = struct {
 
             // Complete the IoRequest
             if (req) |request| {
-                if (has_error) {
+                // Per-slot validation: check PRDBC (actual bytes transferred)
+                const expected_bytes = @as(usize, request.op_data.disk.sector_count) * SECTOR_SIZE;
+                const actual_bytes = cmd_list[slot].prdbc;
+
+                // Determine if this specific slot had an error:
+                // - Port-level error AND this was the only command = slot errored
+                // - Transfer incomplete (PRDBC < expected) = slot errored
+                // - Otherwise = successful
+                const slot_error = port_has_error or (actual_bytes < expected_bytes);
+
+                if (slot_error) {
                     _ = request.complete(.{ .err = error.EIO });
                 } else {
-                    // Success - return bytes transferred
-                    const bytes = @as(usize, request.op_data.disk.sector_count) * SECTOR_SIZE;
-                    _ = request.complete(.{ .success = bytes });
+                    // Success - return verified bytes transferred
+                    // Cap at expected bytes for safety (don't trust device overreporting)
+                    const verified_bytes: usize = if (actual_bytes > expected_bytes)
+                        expected_bytes
+                    else
+                        @intCast(actual_bytes);
+                    _ = request.complete(.{ .success = verified_bytes });
                 }
             }
         }

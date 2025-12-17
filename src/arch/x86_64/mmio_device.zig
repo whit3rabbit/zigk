@@ -5,9 +5,12 @@
 //
 // Key Features:
 // - Register offsets computed at comptime (no runtime math)
-// - Bounds checking only in Debug mode (zero-cost in release)
+// - Bounds checking in Debug and ReleaseSafe modes (zero-cost in ReleaseFast)
 // - Type-safe accessors via packed struct casting
 // - Register names enforced by enum (typos caught at compile time)
+//
+// SECURITY: Bounds checking is enabled in ReleaseSafe mode to prevent
+// out-of-bounds MMIO access that could corrupt adjacent device registers.
 //
 // Usage:
 // ```
@@ -51,10 +54,13 @@ pub fn MmioDevice(comptime RegisterMap: type) type {
         // 32-bit Register Access (most common for PCIe devices)
         // =====================================================================
 
+        // Helper to determine if bounds checking is enabled
+        const bounds_check_enabled = builtin.mode == .Debug or builtin.mode == .ReleaseSafe;
+
         /// Read a 32-bit register by name. Offset computed at comptime.
         pub inline fn read(self: Self, comptime reg: RegisterMap) u32 {
             const offset = @intFromEnum(reg);
-            if (builtin.mode == .Debug) {
+            if (bounds_check_enabled) {
                 if (offset + 4 > self.size) {
                     @panic("MmioDevice: read32 out of bounds");
                 }
@@ -65,7 +71,7 @@ pub fn MmioDevice(comptime RegisterMap: type) type {
         /// Write a 32-bit register by name.
         pub inline fn write(self: Self, comptime reg: RegisterMap, value: u32) void {
             const offset = @intFromEnum(reg);
-            if (builtin.mode == .Debug) {
+            if (bounds_check_enabled) {
                 if (offset + 4 > self.size) {
                     @panic("MmioDevice: write32 out of bounds");
                 }
@@ -108,7 +114,7 @@ pub fn MmioDevice(comptime RegisterMap: type) type {
         /// Read a 64-bit register by name.
         pub inline fn read64(self: Self, comptime reg: RegisterMap) u64 {
             const offset = @intFromEnum(reg);
-            if (builtin.mode == .Debug) {
+            if (bounds_check_enabled) {
                 if (offset + 8 > self.size) {
                     @panic("MmioDevice: read64 out of bounds");
                 }
@@ -119,7 +125,7 @@ pub fn MmioDevice(comptime RegisterMap: type) type {
         /// Write a 64-bit register by name.
         pub inline fn write64(self: Self, comptime reg: RegisterMap, value: u64) void {
             const offset = @intFromEnum(reg);
-            if (builtin.mode == .Debug) {
+            if (bounds_check_enabled) {
                 if (offset + 8 > self.size) {
                     @panic("MmioDevice: write64 out of bounds");
                 }
@@ -153,7 +159,7 @@ pub fn MmioDevice(comptime RegisterMap: type) type {
         /// Read a 16-bit register by name.
         pub inline fn read16(self: Self, comptime reg: RegisterMap) u16 {
             const offset = @intFromEnum(reg);
-            if (builtin.mode == .Debug) {
+            if (bounds_check_enabled) {
                 if (offset + 2 > self.size) {
                     @panic("MmioDevice: read16 out of bounds");
                 }
@@ -164,7 +170,7 @@ pub fn MmioDevice(comptime RegisterMap: type) type {
         /// Write a 16-bit register by name.
         pub inline fn write16(self: Self, comptime reg: RegisterMap, value: u16) void {
             const offset = @intFromEnum(reg);
-            if (builtin.mode == .Debug) {
+            if (bounds_check_enabled) {
                 if (offset + 2 > self.size) {
                     @panic("MmioDevice: write16 out of bounds");
                 }
@@ -175,7 +181,7 @@ pub fn MmioDevice(comptime RegisterMap: type) type {
         /// Read an 8-bit register by name.
         pub inline fn read8(self: Self, comptime reg: RegisterMap) u8 {
             const offset = @intFromEnum(reg);
-            if (builtin.mode == .Debug) {
+            if (bounds_check_enabled) {
                 if (offset + 1 > self.size) {
                     @panic("MmioDevice: read8 out of bounds");
                 }
@@ -186,7 +192,7 @@ pub fn MmioDevice(comptime RegisterMap: type) type {
         /// Write an 8-bit register by name.
         pub inline fn write8(self: Self, comptime reg: RegisterMap, value: u8) void {
             const offset = @intFromEnum(reg);
-            if (builtin.mode == .Debug) {
+            if (bounds_check_enabled) {
                 if (offset + 1 > self.size) {
                     @panic("MmioDevice: write8 out of bounds");
                 }
@@ -238,7 +244,7 @@ pub fn MmioDevice(comptime RegisterMap: type) type {
         /// Read a 32-bit value at base + runtime offset.
         /// Use sparingly - prefer enum-based access for compile-time safety.
         pub inline fn readRaw(self: Self, offset: u64) u32 {
-            if (builtin.mode == .Debug) {
+            if (bounds_check_enabled) {
                 if (offset + 4 > self.size) {
                     @panic("MmioDevice: readRaw out of bounds");
                 }
@@ -248,7 +254,7 @@ pub fn MmioDevice(comptime RegisterMap: type) type {
 
         /// Write a 32-bit value at base + runtime offset.
         pub inline fn writeRaw(self: Self, offset: u64, value: u32) void {
-            if (builtin.mode == .Debug) {
+            if (bounds_check_enabled) {
                 if (offset + 4 > self.size) {
                     @panic("MmioDevice: writeRaw out of bounds");
                 }

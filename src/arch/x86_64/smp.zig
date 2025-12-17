@@ -385,6 +385,14 @@ export fn apEntry() callconv(.c) noreturn {
     // Step 8: Set up GS base for per-CPU data
     // Get APIC ID to index into per-CPU data
     const apic_id = apic.lapic.getId();
+
+    // SECURITY: Bounds check APIC ID to prevent OOB access
+    // A malicious hypervisor could report invalid APIC IDs
+    if (apic_id >= ap_gs_data.len or apic_id >= gdt.MAX_CPUS) {
+        // Cannot proceed safely - halt this CPU
+        cpu.haltForever();
+    }
+
     const gs_data_ptr = @intFromPtr(&ap_gs_data[apic_id]);
 
     // Set GS_BASE MSR to point to per-CPU data (since we are in kernel mode)
