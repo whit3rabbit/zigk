@@ -91,7 +91,7 @@ pub const Ac97 = struct {
     const Self = @This();
 
     // Init
-    pub fn init(pci_dev: *const pci.PciDevice, ecam: *const pci.Ecam) !*Self {
+    pub fn init(pci_dev: *const pci.PciDevice, pci_access: pci.PciAccess) !*Self {
         console.info("AC97: Initializing...", .{});
 
         // Get BARs
@@ -104,9 +104,9 @@ pub const Ac97 = struct {
             return error.InvalidDevice;
         }
 
-        // Enable Bus Master (required for DMA) and IO Space via ECAM
-        ecam.enableBusMaster(pci_dev.bus, pci_dev.device, pci_dev.func);
-        ecam.enableMemorySpace(pci_dev.bus, pci_dev.device, pci_dev.func);
+        // Enable Bus Master (required for DMA) and IO Space
+        pci_access.enableBusMaster(pci_dev.bus, pci_dev.device, pci_dev.func);
+        pci_access.enableMemorySpace(pci_dev.bus, pci_dev.device, pci_dev.func);
 
         // Allocate instance
         const driver = try heap.allocator().create(Self);
@@ -329,6 +329,6 @@ pub const dsp_ops = fd.FileOps{
     .mmap = null,
 };
 
-pub fn initFromPci(pci_dev: *const pci.PciDevice, ecam: *const pci.Ecam) !void {
-    ac97_driver = try Ac97.init(pci_dev, ecam);
+pub fn initFromPci(pci_dev: *const pci.PciDevice, pci_access: pci.PciAccess) !void {
+    ac97_driver = try Ac97.init(pci_dev, pci_access);
 }

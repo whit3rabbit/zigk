@@ -10,6 +10,10 @@
 // Each IDT entry is 16 bytes in long mode (unlike 8 bytes in protected mode).
 
 const gdt = @import("gdt.zig");
+const apic = @import("apic/root.zig");
+
+// Maximum CPUs for per-CPU data (must match gdt.MAX_CPUS)
+const MAX_CPUS: usize = gdt.MAX_CPUS;
 
 // Number of IDT entries
 pub const IDT_ENTRIES: usize = 256;
@@ -188,6 +192,8 @@ var idt_table: [IDT_ENTRIES]IdtGate = [_]IdtGate{IdtGate.empty()} ** IDT_ENTRIES
 pub const InterruptHandler = *const fn (*InterruptFrame) void;
 
 // Handler table for dispatching interrupts
+// SECURITY: Use atomic operations for handler registration to prevent torn reads
+// during concurrent access from interrupt context and registration context
 var handlers: [IDT_ENTRIES]?InterruptHandler = [_]?InterruptHandler{null} ** IDT_ENTRIES;
 
 // ISR Stubs - defined in asm_helpers.S
@@ -248,13 +254,20 @@ pub fn init() void {
 }
 
 /// Register a handler for a specific interrupt vector
+/// SECURITY: Uses atomic store with release ordering to ensure handler
+/// pointer is fully visible before it can be read by interrupt dispatch
 pub fn registerHandler(vector: u8, handler: InterruptHandler) void {
-    handlers[vector] = handler;
+    // Convert pointer to usize for atomic operations
+    const handler_addr: usize = @intFromPtr(handler);
+    const ptr: *usize = @ptrCast(&handlers[vector]);
+    @atomicStore(usize, ptr, handler_addr, .release);
 }
 
 /// Unregister a handler
+/// SECURITY: Uses atomic store with release ordering
 pub fn unregisterHandler(vector: u8) void {
-    handlers[vector] = null;
+    const ptr: *usize = @ptrCast(&handlers[vector]);
+    @atomicStore(usize, ptr, 0, .release);
 }
 
 /// Register an IRQ handler
@@ -268,14 +281,21 @@ pub fn registerIrqHandler(irq: Irq, handler: InterruptHandler) void {
 export fn dispatch_interrupt(frame: *InterruptFrame) callconv(.c) *InterruptFrame {
     const vector: u8 = @truncate(frame.vector);
 
-    if (handlers[vector]) |handler| {
+    // SECURITY: Use atomic load with acquire ordering to pair with
+    // release ordering in registerHandler - prevents reading stale/torn pointer
+    const ptr: *const usize = @ptrCast(&handlers[vector]);
+    const handler_addr = @atomicLoad(usize, ptr, .acquire);
+    if (handler_addr != 0) {
+        const handler: InterruptHandler = @ptrFromInt(handler_addr);
         handler(frame);
     }
 
     // Check if we need to switch to a different frame (context switch)
+    // Uses per-CPU storage to avoid race conditions in SMP systems
     var ret_frame = frame;
-    if (new_frame) |nf| {
-        new_frame = null;
+    const cpu_id = getCpuIndex();
+    if (per_cpu_new_frame[cpu_id]) |nf| {
+        per_cpu_new_frame[cpu_id] = null;
         ret_frame = nf;
     }
 
@@ -289,13 +309,27 @@ export fn dispatch_interrupt(frame: *InterruptFrame) callconv(.c) *InterruptFram
     return ret_frame;
 }
 
-/// New frame pointer for context switch
+/// Per-CPU new frame pointer for context switch
 /// Set by timer handler to indicate we should switch to a different thread
-var new_frame: ?*InterruptFrame = null;
+/// Using per-CPU storage to avoid race conditions in SMP systems
+/// SECURITY: Fixes race condition where multiple CPUs could corrupt new_frame
+var per_cpu_new_frame: [MAX_CPUS]?*InterruptFrame = [_]?*InterruptFrame{null} ** MAX_CPUS;
 
 /// Set the new frame for context switch (called by scheduler)
+/// Uses current CPU's LAPIC ID to index per-CPU storage
 pub fn setNewFrame(frame: *InterruptFrame) void {
-    new_frame = frame;
+    const cpu_id = getCpuIndex();
+    per_cpu_new_frame[cpu_id] = frame;
+}
+
+/// Get CPU index for per-CPU data access
+/// Returns LAPIC ID clamped to MAX_CPUS-1
+inline fn getCpuIndex() usize {
+    if (apic.isActive()) {
+        const lapic_id = apic.lapic.getId();
+        return if (lapic_id < MAX_CPUS) lapic_id else 0;
+    }
+    return 0; // BSP during early boot
 }
 
 // Signal checker hook (set by scheduler/interrupts module)

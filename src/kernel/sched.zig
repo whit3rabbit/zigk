@@ -26,6 +26,136 @@ const config = @import("config");
 const list = @import("list");
 const kernel_stack = @import("kernel_stack");
 
+/// Maximum number of CPUs supported (from GDT)
+const MAX_CPUS = hal.gdt.MAX_CPUS;
+
+/// Per-CPU scheduler data
+/// Each CPU has its own ready queue for cache locality and reduced contention.
+///
+/// SYNCHRONIZATION: All queue operations are protected by the GLOBAL scheduler.lock,
+/// not per-CPU locks. This simplifies the design and avoids complex lock ordering.
+/// The global lock is already held by all callers (timerTick, addThread, unblock, etc.).
+/// Work stealing is safe because only one CPU can hold scheduler.lock at a time.
+///
+/// LOCK ORDERING (SECURITY CRITICAL - prevents deadlock):
+///   1. process_tree_lock (RwLock) - highest level, protects process hierarchy
+///   2. futex_bucket_lock / wait_queue_lock - protects futex hash buckets / wait queues
+///   3. scheduler.lock (Spinlock) - protects scheduler state, ready queues
+///   4. cpu_sched[i].lock (Spinlock) - protects per-CPU ready queue
+///
+/// IMPORTANT: WaitQueue.wakeUp() acquires scheduler.lock internally.
+/// Callers MUST NOT hold scheduler.lock when calling wakeUp().
+/// Callers SHOULD hold their wait queue's bucket lock when calling wakeUp().
+///
+/// Example correct usage:
+///   bucket_lock.acquire()
+///   wait_queue.wakeUp(1)    // This acquires scheduler.lock internally
+///   bucket_lock.release()
+///
+/// Example INCORRECT (DEADLOCK):
+///   scheduler.lock.acquire()
+///   bucket_lock.acquire()     // Lock order violation!
+///   wait_queue.wakeUp(1)      // Tries to acquire scheduler.lock again
+pub const CpuSchedulerData = struct {
+    /// Ready queue for this CPU (protected by this struct's lock)
+    ready_queue: list.IntrusiveDoublyLinkedList(Thread) = .{},
+
+    /// Lock protecting THIS specific CPU's data (ready_queue)
+    /// LOCK ORDER: process_tree_lock -> bucket_lock -> scheduler.lock -> cpu_sched[i].lock
+    lock: sync.Spinlock = .{},
+
+    /// CPU ID (APIC ID)
+    cpu_id: u32 = 0,
+
+    /// Whether this CPU has been initialized
+    initialized: bool = false,
+};
+
+/// Per-CPU scheduler data array
+var cpu_sched: [MAX_CPUS]CpuSchedulerData = [_]CpuSchedulerData{.{}} ** MAX_CPUS;
+
+/// Number of active CPUs (BSP + booted APs)
+var active_cpu_count: u32 = 1; // Start with BSP
+
+/// Generic Wait Queue for sleep/wakeup
+/// Used by futexes, semaphores, helper threads, etc.
+pub const WaitQueue = struct {
+    head: ?*Thread = null,
+    tail: ?*Thread = null,
+    count: usize = 0,
+
+    /// Add current thread to queue and sleep
+    /// Must be called with a spinlock held (passed via lock_guard)
+    /// The lock is released AFTER thread state is set to Blocking but BEFORE scheduling.
+    /// Returns: 0 on wakeup, EINTR if interrupted
+    // Function moved to sched.waitOn(queue, lock) for better encapsulation
+    
+    /// Thread-safe wakeup of N threads
+    /// Returns: number of threads woken
+    ///
+    /// LOCK ORDERING (SECURITY CRITICAL):
+    ///   - Caller MUST hold the queue's protecting lock (e.g., futex bucket lock)
+    ///   - Caller MUST NOT hold scheduler.lock (this function acquires it internally)
+    ///   - Lock order: bucket_lock -> scheduler.lock (enforced by this function)
+    ///
+    /// This function acquires scheduler.lock internally for each thread woken,
+    /// following the documented lock ordering to prevent deadlocks.
+    pub fn wakeUp(self: *WaitQueue, count: usize) u32 {
+        // SECURITY: This function must be called with the queue's lock held
+        // (usually the futex bucket lock) but WITHOUT scheduler.lock held.
+        // We acquire scheduler.lock for each wakeup to maintain lock order.
+        var woken: u32 = 0;
+        while (woken < count) {
+            if (self.pop()) |t| {
+                // Add to ready queue (requires global scheduler lock)
+                // SECURITY: Acquire scheduler.lock AFTER bucket lock per lock order
+                {
+                    const held = scheduler.lock.acquire();
+                    defer held.release();
+                    addToReadyQueue(t);
+                }
+                woken += 1;
+            } else {
+                break;
+            }
+        }
+        return woken;
+    }
+
+    /// Append thread to queue (internal)
+    fn append(self: *WaitQueue, t: *Thread) void {
+        t.next_sibling = null; // Reusing sibling pointer for queue list? No, unsafe. 
+        // Thread struct needs a `queue_next` pointer.
+        // Let's check Thread struct definition.
+        // Assuming we add `queue_next` to Thread.
+        // For now, let's use `sleep_next` since we aren't in `sleep_head` list when blocked on WaitQueue.
+        
+        t.sleep_next = null;
+        if (self.tail) |tail| {
+            tail.sleep_next = t;
+            self.tail = t;
+        } else {
+            self.head = t;
+            self.tail = t;
+        }
+        self.count += 1;
+    }
+
+    /// Pop thread from head (internal)
+    fn pop(self: *WaitQueue) ?*Thread {
+        if (self.head) |h| {
+            self.head = h.sleep_next;
+            if (self.head == null) {
+                self.tail = null;
+            }
+            h.sleep_next = null; // Clear pointer
+            self.count -= 1;
+            return h;
+        }
+        return null;
+    }
+};
+
 /// Thread exit cleanup callback type
 /// Called during exitWithStatus to clean up thread resources
 pub const ThreadExitCallback = *const fn (*Thread) void;
@@ -35,7 +165,12 @@ var exit_callbacks: [4]?ThreadExitCallback = [_]?ThreadExitCallback{null} ** 4;
 
 /// Register a callback to be called when a thread exits.
 /// Used by syscall modules to clean up thread-specific state.
+/// SECURITY: Protected by scheduler.lock to prevent race when multiple
+/// subsystems register callbacks concurrently during initialization.
 pub fn registerExitCallback(cb: ThreadExitCallback) void {
+    const held = scheduler.lock.acquire();
+    defer held.release();
+
     for (&exit_callbacks) |*slot| {
         if (slot.* == null) {
             slot.* = cb;
@@ -58,20 +193,19 @@ const fpu = hal.fpu;
 /// process_tree_lock BEFORE scheduler.lock to prevent deadlock.
 ///
 /// Process tree lock (moved here to avoid circular dep with sync/process)
-pub var process_tree_lock: sync.Spinlock = .{};
+pub var process_tree_lock: sync.RwLock = .{};
 
 /// Global scheduler instance
 var scheduler = Scheduler{};
 
 /// Scheduler internal state structure
+/// NOTE: ready_queue is now per-CPU (see CpuSchedulerData above)
 const Scheduler = struct {
     // Current thread is now per-CPU, stored in GS data
-
-    /// Ready queue using intrusive linked list
-    /// Shared by all CPUs for now (SQMP - Single Queue Multi Processor)
-    ready_queue: list.IntrusiveDoublyLinkedList(Thread) = .{},
+    // Ready queue is now per-CPU (see cpu_sched array)
 
     /// Sorted sleep list head (wake_time ascending)
+    /// Still global - checked by all CPUs on timer tick
     sleep_head: ?*Thread = null,
 
     /// System tick counter (incremented on each timer IRQ)
@@ -97,38 +231,131 @@ pub fn setTickCallback(callback: *const fn () void) void {
     scheduler.tick_callback = callback;
 }
 
-/// Add a thread to the back of the ready queue
+/// Get current CPU index (clamped to valid range)
+fn getCurrentCpuIndex() usize {
+    const apic_id = hal.apic.lapic.getId();
+    if (apic_id >= MAX_CPUS) return 0;
+    return @intCast(apic_id);
+}
+
+/// Get per-CPU scheduler data for current CPU
+fn getLocalCpuSched() *CpuSchedulerData {
+    return &cpu_sched[getCurrentCpuIndex()];
+}
+
+/// Get per-CPU scheduler data for a specific CPU
+fn getCpuSched(cpu_id: usize) *CpuSchedulerData {
+    if (cpu_id >= MAX_CPUS) return &cpu_sched[0];
+    return &cpu_sched[cpu_id];
+}
+
+/// Add a thread to the back of the ready queue (per-CPU)
+/// Thread is added to:
+/// 1. Its last CPU's queue (for cache locality) if valid
+/// 2. Otherwise, the current CPU's queue
 fn addToReadyQueue(t: *Thread) void {
     t.state = .Ready;
-    scheduler.ready_queue.append(t);
+
+    // Determine target CPU based on affinity and last_cpu
+    var target_cpu: usize = getCurrentCpuIndex();
+
+    // Prefer the CPU this thread last ran on for cache locality
+    if (t.last_cpu < MAX_CPUS and cpu_sched[t.last_cpu].initialized) {
+        // Check affinity allows this CPU
+        if (t.cpu_affinity == 0xFFFFFFFF or (t.cpu_affinity & (@as(u32, 1) << @intCast(t.last_cpu)) != 0)) {
+            target_cpu = t.last_cpu;
+        }
+    }
+
+    // Add to target CPU's queue
+    const cpu_data = &cpu_sched[target_cpu];
+    
+    // Acquire per-CPU lock
+    const held = cpu_data.lock.acquire();
+    defer held.release();
+
+    cpu_data.ready_queue.append(t);
 
     if (config.debug_scheduler) {
-        console.debug("Sched: Added '{s}' (tid={d}) to ready queue (count={d})", .{
+        console.debug("Sched: Added '{s}' (tid={d}) to CPU {d} queue (count={d})", .{
             t.getName(),
             t.tid,
-            scheduler.ready_queue.count,
+            target_cpu,
+            cpu_data.ready_queue.count,
         });
     }
 }
 
-/// Remove and return the thread at the front of the ready queue
+/// Remove and return the thread at the front of the local CPU's ready queue
+/// If local queue is empty, attempts work stealing from other CPUs
 fn removeFromReadyQueue() ?*Thread {
-    const thread_ptr = scheduler.ready_queue.popFirst();
-    if (thread_ptr) |t| {
-        if (config.debug_scheduler) {
-            console.debug("Sched: Removed '{s}' (tid={d}) from ready queue (count={d})", .{
-                t.getName(),
-                t.tid,
-                scheduler.ready_queue.count,
-            });
+    const my_cpu = getCurrentCpuIndex();
+    const my_data = &cpu_sched[my_cpu];
+
+    // First try local queue
+    {
+        const held = my_data.lock.acquire();
+        defer held.release();
+
+        if (my_data.ready_queue.popFirst()) |t| {
+            if (config.debug_scheduler) {
+                console.debug("Sched: Removed '{s}' (tid={d}) from CPU {d} queue (count={d})", .{
+                    t.getName(),
+                    t.tid,
+                    my_cpu,
+                    my_data.ready_queue.count,
+                });
+            }
+            return t;
         }
     }
-    return thread_ptr;
+
+    // Local queue empty - try work stealing from other CPUs
+    return stealFromOtherCpu(my_cpu);
 }
 
-/// Remove a specific thread from the ready queue
-fn removeThreadFromQueue(t: *Thread) void {
-    scheduler.ready_queue.remove(t);
+/// Try to steal a thread from another CPU's queue
+/// Returns null if no work available on any CPU
+fn stealFromOtherCpu(my_cpu: usize) ?*Thread {
+    // SECURITY: Atomically load cpu count to avoid tearing if AP is initializing
+    const cpu_count = @atomicLoad(u32, &active_cpu_count, .acquire);
+
+    // Simple round-robin stealing starting from next CPU
+    var victim = (my_cpu + 1) % cpu_count;
+    var attempts: u32 = 0;
+
+    while (attempts < cpu_count) : (attempts += 1) {
+        if (victim != my_cpu and cpu_sched[victim].initialized) {
+            const victim_data = &cpu_sched[victim];
+
+            // Try to acquire lock - skip if busy to avoid contention/deadlock
+            if (victim_data.lock.tryAcquire()) |held| {
+                defer held.release();
+
+                // Try to steal from back of queue (LIFO for cache locality)
+                if (victim_data.ready_queue.popLast()) |t| {
+                    // Check if thread's affinity allows running on our CPU
+                    if (t.cpu_affinity == 0xFFFFFFFF or (t.cpu_affinity & (@as(u32, 1) << @intCast(my_cpu)) != 0)) {
+                        if (config.debug_scheduler) {
+                            console.debug("Sched: Stole '{s}' (tid={d}) from CPU {d} to CPU {d}", .{
+                                t.getName(),
+                                t.tid,
+                                victim,
+                                my_cpu,
+                            });
+                        }
+                        return t;
+                    } else {
+                        // Put it back - we can't run this thread
+                        victim_data.ready_queue.append(t);
+                    }
+                }
+            }
+        }
+        victim = (victim + 1) % MAX_CPUS;
+    }
+
+    return null;
 }
 
 /// Insert a thread into the sorted sleep list
@@ -169,7 +396,44 @@ fn insertSleepThread(t: *Thread) void {
     }
 }
 
-/// Remove a thread from the sleep list
+/// Wait on a queue until woken up
+///
+/// Arguments:
+///   queue: The wait queue to sleep on
+///   lock_held: The spinlock protecting the condition/queue (already acquired)
+///
+/// The lock is released Atomically with putting the thread to sleep to prevent missed wakeups.
+pub fn waitOn(queue: *WaitQueue, lock_held: sync.Spinlock.Held) void {
+    // 1. Get current thread
+    const current = getCurrentThread() orelse return;
+
+    // 2. Acquire scheduler lock (to modify state)
+    // Lock Order: lock_held (Bucket) -> Scheduler Lock
+    const sched_held = scheduler.lock.acquire();
+
+    // 3. Add to wait queue
+    queue.append(current);
+    current.state = .Blocked;
+    
+    // 4. Release external lock (Bucket) -> we are now protected by scheduler lock and state=Blocked
+    lock_held.release();
+
+    // 5. Release scheduler lock and trigger synchronous switch
+    // Note: Interrupts are enabled by release() if they were enabled before acquire()
+    sched_held.release();
+    schedule_sync();
+    
+    // 6. Returned from sleep
+}
+
+
+
+/// Internal schedule function for synchronous switching
+fn schedule_sync() void {
+    // Trigger scheduler interrupt (vector 32)
+    // This pushes valid interrupt frame, calls timerTick/schedule, switches or returns.
+    asm volatile ("int $32");
+}
 fn removeFromSleepList(t: *Thread) void {
     if (t.sleep_prev) |prev| {
         prev.sleep_next = t.sleep_next;
@@ -221,10 +485,37 @@ pub fn setGsData(_: *hal.syscall.KernelGsData) void {
     // scheduler.gs_data = gs_data; // No longer used globally
 }
 
+/// Handle RESCHEDULE IPI from another CPU
+/// This handler runs when another CPU sends us a reschedule request
+/// (e.g., after unblocking a thread that should run on this CPU).
+///
+/// The IPI serves two purposes:
+/// 1. Wake the CPU if it's halted (idle loop)
+/// 2. Signal that a high-priority thread may be waiting
+///
+/// We don't need to do anything special here - the thread is already
+/// in our ready queue. The next timer tick will schedule it. The IPI
+/// just ensures we wake up if halted rather than waiting for the timer.
+fn handleRescheduleIpi(frame: *hal.idt.InterruptFrame) void {
+    _ = frame;
+    // No action needed - the IPI wakes the CPU from halt state
+    // and the thread is already in our ready queue.
+    // The timer tick will handle the actual context switch.
+    if (config.debug_scheduler) {
+        console.debug("Sched: CPU {d} received RESCHEDULE IPI", .{getCurrentCpuIndex()});
+    }
+}
+
 /// Initialize the scheduler (BSP)
 /// Must be called after memory management is initialized
 pub fn init() void {
     console.info("Sched: Initializing scheduler...", .{});
+
+    // Initialize per-CPU scheduler data for BSP (CPU 0)
+    const cpu_id = getCurrentCpuIndex();
+    cpu_sched[cpu_id].cpu_id = @intCast(cpu_id);
+    cpu_sched[cpu_id].initialized = true;
+    active_cpu_count = 1;
 
     // Register timer handler for preemptive scheduling
     hal.interrupts.setTimerHandler(timerTick);
@@ -235,10 +526,13 @@ pub fn init() void {
     // Register FPU access handler for lazy FPU switching
     hal.interrupts.setFpuAccessHandler(handleFpuAccess);
 
+    // Register RESCHEDULE IPI handler for cross-core wakeups
+    hal.apic.ipi.registerHandler(.reschedule, handleRescheduleIpi);
+
     // Create the idle thread for BSP
     initIdleThread();
 
-    console.info("Sched: Initialized (BSP)", .{});
+    console.info("Sched: Initialized (BSP, CPU {d})", .{cpu_id});
 }
 
 /// Initialize idle thread for current CPU
@@ -268,11 +562,18 @@ fn initIdleThread() void {
 
 /// Initialize Scheduler for AP
 pub fn initAp() void {
+    // Initialize per-CPU scheduler data for this AP
+    const cpu_id = getCurrentCpuIndex();
+    cpu_sched[cpu_id].cpu_id = @intCast(cpu_id);
+    cpu_sched[cpu_id].initialized = true;
+
+    // Atomically increment active CPU count
+    _ = @atomicRmw(u32, &active_cpu_count, .Add, 1, .seq_cst);
+
     // Initialize idle thread for this AP
     initIdleThread();
 
-    // Enable interrupts to allow timer ticks (once we start)
-    // But we are not starting yet.
+    // console.info("Sched: Initialized (AP, CPU {d})", .{cpu_id});
 }
 
 
@@ -467,6 +768,22 @@ pub fn block() void {
     hal.cpu.enableAndHalt();
 }
 
+/// Determine target CPU for a thread based on affinity and last_cpu
+/// Returns the CPU index where the thread should run
+fn getTargetCpu(t: *const Thread) usize {
+    const current_cpu = getCurrentCpuIndex();
+
+    // Prefer the CPU this thread last ran on for cache locality
+    if (t.last_cpu < MAX_CPUS and cpu_sched[t.last_cpu].initialized) {
+        // Check affinity allows this CPU
+        if (t.cpu_affinity == 0xFFFFFFFF or (t.cpu_affinity & (@as(u32, 1) << @intCast(t.last_cpu)) != 0)) {
+            return t.last_cpu;
+        }
+    }
+
+    return current_cpu;
+}
+
 /// Unblock a thread
 /// Thread will be added to the ready queue
 ///
@@ -475,6 +792,9 @@ pub fn block() void {
 /// If thread hasn't blocked yet (Running), pending_wakeup is set so
 /// block() will return immediately without halting.
 /// This prevents the TOCTOU race in block()/unblock() synchronization.
+///
+/// SMP: If the target CPU differs from current CPU, a RESCHEDULE IPI is sent
+/// to ensure the target CPU schedules the woken thread promptly.
 pub fn unblock(t: *Thread) void {
     const held = scheduler.lock.acquire();
     defer held.release();
@@ -482,12 +802,30 @@ pub fn unblock(t: *Thread) void {
     if (t.state == .Blocked) {
         // Thread is blocked - wake it up normally
         removeFromSleepList(t);
+
+        // Determine target CPU before adding to queue
+        const target_cpu = getTargetCpu(t);
+        const current_cpu = getCurrentCpuIndex();
+
         addToReadyQueue(t);
+
         if (config.debug_scheduler) {
-            console.debug("Sched: Thread '{s}' (tid={d}) unblocked", .{
+            console.debug("Sched: Thread '{s}' (tid={d}) unblocked -> CPU {d}", .{
                 t.getName(),
                 t.tid,
+                target_cpu,
             });
+        }
+
+        // Send RESCHEDULE IPI if target is different CPU
+        // This ensures the target CPU picks up the thread promptly
+        if (target_cpu != current_cpu and cpu_sched[target_cpu].initialized) {
+            const target_apic_id = cpu_sched[target_cpu].cpu_id;
+            hal.apic.ipi.sendTo(target_apic_id, .reschedule);
+
+            if (config.debug_scheduler) {
+                console.debug("Sched: Sent RESCHEDULE IPI to CPU {d}", .{target_cpu});
+            }
         }
     } else if (t.state == .Running) {
         // SECURITY: Thread hasn't blocked yet - set pending wakeup flag.
@@ -502,6 +840,25 @@ pub fn unblock(t: *Thread) void {
         }
     }
     // If state is Ready or Zombie, do nothing - thread is already runnable or dead
+}
+
+/// Wake up a thread and assign it to a specific CPU
+/// This updates the thread's affinity to pin it to the target CPU
+pub fn wakeOnCpu(t: *Thread, cpu_id: u32) void {
+    if (cpu_id >= MAX_CPUS) return;
+
+    {
+        // Lock to ensure state consistency while modifying thread
+        const held = scheduler.lock.acquire();
+        defer held.release();
+
+        t.cpu_affinity = @as(u32, 1) << @intCast(cpu_id);
+        t.last_cpu = cpu_id;
+    }
+
+    // Now unblock it - unblock() will use the new affinity/last_cpu
+    // to place it on the correct queue and send IPI if needed
+    unblock(t);
 }
 
 /// Put the current thread to sleep until tick_count reaches the target
@@ -627,9 +984,9 @@ pub fn timerTick(frame: *hal.idt.InterruptFrame) *hal.idt.InterruptFrame {
     }
 
     // Log every 100 ticks to show scheduler is alive
-    if (scheduler.tick_count % 100 == 0) {
-        console.debug("Tick {d}", .{scheduler.tick_count});
-    }
+    // if (scheduler.tick_count % 100 == 0) {
+    //     console.debug("Tick {d}", .{scheduler.tick_count});
+    // }
 
     const current = getCurrentThread();
 
@@ -732,6 +1089,9 @@ pub fn timerTick(frame: *hal.idt.InterruptFrame) *hal.idt.InterruptFrame {
         next.fpu_used = false;
     }
 
+    // Track which CPU this thread is running on (for cache-aware scheduling)
+    next.last_cpu = @intCast(getCurrentCpuIndex());
+
     next.state = .Running;
     setCurrentThread(next);
 
@@ -759,9 +1119,22 @@ pub fn getStats() SchedulerStats {
 
     const current = getCurrentThread();
 
+    // Sum all per-CPU ready queue counts
+    // SECURITY: Atomic load even though we hold scheduler.lock for consistency
+    const cpu_count = @atomicLoad(u32, &active_cpu_count, .acquire);
+    var total_ready: usize = 0;
+    for (cpu_sched[0..cpu_count]) |*cpu_data| {
+        if (cpu_data.initialized) {
+            // Acquire lock to ensure consistent count read
+            const held_cpu = cpu_data.lock.acquire();
+            defer held_cpu.release();
+            total_ready += cpu_data.ready_queue.count;
+        }
+    }
+
     return .{
         .tick_count = scheduler.tick_count,
-        .ready_count = scheduler.ready_queue.count,
+        .ready_count = total_ready,
         .is_running = scheduler.running,
         .current_tid = if (current) |c| c.tid else null,
     };
@@ -806,18 +1179,40 @@ pub fn checkGuardPage(fault_addr: u64) ?GuardPageInfo {
         };
     }
 
-    // Check all threads in ready queue
-    var t = scheduler.ready_queue.head;
-    while (t) |curr_thread| {
-        if (isInGuardPage(fault_addr, curr_thread)) {
-            return GuardPageInfo{
-                .thread_id = curr_thread.tid,
-                .thread_name = curr_thread.getName(),
-                .stack_base = curr_thread.kernel_stack_base,
-                .stack_top = curr_thread.kernel_stack_top,
-            };
+    // Check all threads in per-CPU ready queues
+    // SECURITY: Use tryAcquire to avoid UAF when another CPU modifies queues.
+    // If we can't acquire a lock (contention or held during fault), skip that queue.
+    // This is a diagnostic function - missing a thread is acceptable, UAF is not.
+    //
+    // Note: We use tryAcquire instead of acquire because:
+    // 1. This runs in page fault context - blocking could cause deadlock
+    // 2. The original thread causing the fault might hold a lock we need
+    // 3. Skipping a queue is acceptable for diagnostics; UAF is not
+    //
+    // SECURITY: Atomic load to avoid tearing during AP initialization
+    const cpu_count = @atomicLoad(u32, &active_cpu_count, .acquire);
+    for (cpu_sched[0..cpu_count]) |*cpu_data| {
+        if (!cpu_data.initialized) continue;
+
+        // SECURITY: Try to acquire lock to prevent UAF from concurrent destroyThread
+        // If lock is held, skip this queue - we're in fault context and can't block
+        if (cpu_data.lock.tryAcquire()) |held| {
+            defer held.release();
+
+            var t = cpu_data.ready_queue.head;
+            while (t) |curr_thread| {
+                if (isInGuardPage(fault_addr, curr_thread)) {
+                    return GuardPageInfo{
+                        .thread_id = curr_thread.tid,
+                        .thread_name = curr_thread.getName(),
+                        .stack_base = curr_thread.kernel_stack_base,
+                        .stack_top = curr_thread.kernel_stack_top,
+                    };
+                }
+                t = curr_thread.next;
+            }
         }
-        t = curr_thread.next;
+        // If tryAcquire failed, skip this queue - better than UAF
     }
 
     // Additional check: if fault is in kernel_stack region guard page

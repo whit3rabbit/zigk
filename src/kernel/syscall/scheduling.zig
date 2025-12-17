@@ -240,14 +240,64 @@ pub fn sys_gettimeofday(tv_ptr: usize, tz_ptr: usize) SyscallError!usize {
 /// sys_futex (202) - Fast userspace locking
 ///
 /// MVP: Stub - returns ENOSYS (threading not fully implemented)
+const futex = @import("futex");
+
+/// sys_futex (202) - Fast userspace locking
+///
+/// Implemented Operations:
+/// - FUTEX_WAIT: Wait atomically on a value
+/// - FUTEX_WAKE: Wake up waiting threads
+///
+/// Stubbed Operations:
+/// - FUTEX_REQUEUE, FUTEX_LOCK_PI, etc.
 pub fn sys_futex(uaddr: usize, op: usize, val: usize, timeout: usize, uaddr2: usize, val3: usize) SyscallError!usize {
-    _ = uaddr;
-    _ = op;
-    _ = val;
-    _ = timeout;
     _ = uaddr2;
     _ = val3;
-    return error.ENOSYS;
+
+    // Mask out private/clock flags
+    const cmd = @as(u32, @truncate(op)) & uapi.futex.FUTEX_CMD_MASK;
+
+    // Validate alignment (must be 4-byte aligned)
+    if (uaddr % 4 != 0) {
+        return error.EINVAL;
+    }
+
+    switch (cmd) {
+        uapi.futex.FUTEX_WAIT => {
+            // Wait for value at uaddr to be val
+            // timeout interpretation: pointer to timespec (absolute or relative?)
+            // Linux: relative unless FUTEX_CLOCK_REALTIME is set.
+            // For MVP: ignore timeout (infinite wait)
+            // Ensure timeout pointer handling if implemented later.
+            
+            // Cast val to u32
+            const val_u32 = @as(u32, @truncate(val));
+
+            // Wait (may return error.Again if value changed, or success if woken)
+            futex.wait(uaddr, val_u32, if (timeout != 0) @as(u64, @intCast(timeout)) else null) catch |err| {
+                switch (err) {
+                    error.Again => return error.EAGAIN, // User value changed
+                    error.Fault => return error.EFAULT, // Bad address
+                    error.PermDenied => return error.EPERM,
+                }
+            };
+            return 0;
+        },
+        uapi.futex.FUTEX_WAKE => {
+            // Wake up val threads waiting on uaddr
+            const val_u32 = @as(u32, @truncate(val));
+            const woken = futex.wake(uaddr, val_u32) catch |err| {
+                switch (err) {
+                     error.Fault => return error.EFAULT,
+                     error.PermDenied => return error.EPERM,
+                }
+            };
+            return @as(usize, woken);
+        },
+        else => {
+            return error.ENOSYS;
+        },
+    }
 }
 
 // =============================================================================

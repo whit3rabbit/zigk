@@ -166,7 +166,7 @@ pub const AhciController = struct {
 
     /// Initialize controller from PCI device
     /// Note: Allocates resources directly into 'self', avoiding stack copy of large struct
-    pub fn init(self: *Self, pci_dev: *const pci.PciDevice, ecam: *const pci.Ecam) AhciError!void {
+    pub fn init(self: *Self, pci_dev: *const pci.PciDevice, pci_access: pci.PciAccess) AhciError!void {
         // Verify this is an AHCI controller
         if (pci_dev.class_code != hba.PciClass.CLASS or
             pci_dev.subclass != hba.PciClass.SUBCLASS or
@@ -183,8 +183,8 @@ pub const AhciController = struct {
         }
 
         // Enable bus master and memory space
-        const cmd = ecam.readCommand(pci_dev.bus, pci_dev.device, pci_dev.func);
-        ecam.writeCommand(pci_dev.bus, pci_dev.device, pci_dev.func, cmd | pci.Command.BUS_MASTER | pci.Command.MEMORY_SPACE);
+        const cmd = pci_access.readCommand(pci_dev.bus, pci_dev.device, pci_dev.func);
+        pci_access.writeCommand(pci_dev.bus, pci_dev.device, pci_dev.func, cmd | pci.Command.BUS_MASTER | pci.Command.MEMORY_SPACE);
 
         // Map HBA memory
         const hba_virt = vmm.mapMmio(bar.base, bar.size) catch |err| {
@@ -749,17 +749,17 @@ pub const AhciController = struct {
 var controller_instance: ?*AhciController = null;
 
 /// Initialize AHCI from a PCI device
-pub fn initFromPci(pci_dev: *const pci.PciDevice, ecam: *const pci.Ecam) AhciError!*AhciController {
+pub fn initFromPci(pci_dev: *const pci.PciDevice, pci_access: pci.PciAccess) AhciError!*AhciController {
     // Allocate controller struct on heap to avoid stack overflow (~20KB)
     const alloc = heap.allocator();
     const controller = alloc.create(AhciController) catch return AhciError.AllocationFailed;
-    
+
     // Initialize in-place
-    controller.init(pci_dev, ecam) catch |err| {
+    controller.init(pci_dev, pci_access) catch |err| {
         alloc.destroy(controller);
         return err;
     };
-    
+
     controller_instance = controller;
     return controller;
 }

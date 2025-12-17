@@ -3,6 +3,7 @@
 // Contains exception handlers and IRQ handlers.
 // These are registered with the IDT during initialization.
 
+const std = @import("std");
 const idt = @import("idt.zig");
 const pic = @import("pic.zig");
 const cpu = @import("cpu.zig");
@@ -505,7 +506,9 @@ pub const MSIX_VECTOR_END: u8 = 128;
 pub const MSIX_VECTOR_COUNT: u8 = MSIX_VECTOR_END - MSIX_VECTOR_START;
 
 /// Bitmap tracking allocated MSI-X vectors (64 vectors = 1 u64)
-var msix_allocated: u64 = 0;
+/// SECURITY: Use atomic operations to prevent double-allocation race condition
+/// when multiple drivers initialize concurrently
+var msix_allocated: std.atomic.Value(u64) = std.atomic.Value(u64).init(0);
 
 /// MSI-X handler callbacks indexed by vector offset (0-63 maps to vectors 64-127)
 var msix_handlers: [MSIX_VECTOR_COUNT]?*const fn (*idt.InterruptFrame) void = [_]?*const fn (*idt.InterruptFrame) void{null} ** MSIX_VECTOR_COUNT;
@@ -520,24 +523,39 @@ pub const MsixVectorAllocation = struct {
 
 /// Allocate one or more contiguous MSI-X vectors
 /// Returns null if not enough contiguous vectors are available
+/// SECURITY: Uses atomic CAS to prevent double-allocation race condition
 pub fn allocateMsixVectors(count: u8) ?MsixVectorAllocation {
     if (count == 0 or count > MSIX_VECTOR_COUNT) {
         return null;
     }
 
-    // Find 'count' contiguous free vectors
+    // Find 'count' contiguous free vectors using atomic compare-and-swap
     const mask: u64 = (@as(u64, 1) << @truncate(count)) - 1;
 
     var offset: u6 = 0;
     while (offset <= MSIX_VECTOR_COUNT - count) : (offset += 1) {
         const shifted_mask = mask << offset;
-        if ((msix_allocated & shifted_mask) == 0) {
-            // Found free slot - mark as allocated
-            msix_allocated |= shifted_mask;
-            return MsixVectorAllocation{
-                .first_vector = MSIX_VECTOR_START + offset,
-                .count = count,
-            };
+
+        // Atomically check and set bits using CAS loop
+        while (true) {
+            const current = msix_allocated.load(.acquire);
+            if ((current & shifted_mask) != 0) {
+                // Slot not free, try next offset
+                break;
+            }
+
+            // Try to atomically set the bits
+            const new_value = current | shifted_mask;
+            const prev = msix_allocated.cmpxchgWeak(current, new_value, .acq_rel, .acquire);
+
+            if (prev == null) {
+                // Successfully allocated
+                return MsixVectorAllocation{
+                    .first_vector = MSIX_VECTOR_START + offset,
+                    .count = count,
+                };
+            }
+            // CAS failed due to concurrent modification, retry with new value
         }
     }
 
@@ -551,6 +569,7 @@ pub fn allocateMsixVector() ?u8 {
 }
 
 /// Free previously allocated MSI-X vectors
+/// SECURITY: Uses atomic operations to safely clear allocation bits
 pub fn freeMsixVectors(first_vector: u8, count: u8) void {
     if (first_vector < MSIX_VECTOR_START or first_vector >= MSIX_VECTOR_END) {
         return;
@@ -559,9 +578,10 @@ pub fn freeMsixVectors(first_vector: u8, count: u8) void {
     const offset: u6 = @truncate(first_vector - MSIX_VECTOR_START);
     const actual_count = @min(count, MSIX_VECTOR_END - first_vector);
     const mask: u64 = (@as(u64, 1) << @truncate(actual_count)) - 1;
+    const clear_mask = ~(mask << offset);
 
-    // Clear allocation bits
-    msix_allocated &= ~(mask << offset);
+    // Atomically clear allocation bits using fetchAnd
+    _ = msix_allocated.fetchAnd(clear_mask, .release);
 
     // Clear handlers
     for (offset..offset + actual_count) |i| {
@@ -583,8 +603,9 @@ pub fn registerMsixHandler(vector: u8, handler: *const fn (*idt.InterruptFrame) 
 
     const offset: u6 = @truncate(vector - MSIX_VECTOR_START);
 
-    // Check that vector is allocated
-    if ((msix_allocated & (@as(u64, 1) << offset)) == 0) {
+    // Check that vector is allocated (atomic load for consistency)
+    const allocated = msix_allocated.load(.acquire);
+    if ((allocated & (@as(u64, 1) << offset)) == 0) {
         return false;
     }
 
@@ -625,8 +646,9 @@ fn msixHandler(frame: *idt.InterruptFrame) void {
 
 /// Get the number of free MSI-X vectors
 pub fn getFreeMsixVectorCount() u8 {
+    const allocated = msix_allocated.load(.acquire);
     var count: u8 = 0;
-    var remaining = ~msix_allocated;
+    var remaining = ~allocated;
     while (remaining != 0) : (remaining &= remaining - 1) {
         count += 1;
     }
@@ -640,5 +662,6 @@ pub fn isMsixVectorAllocated(vector: u8) bool {
         return false;
     }
     const offset: u6 = @truncate(vector - MSIX_VECTOR_START);
-    return (msix_allocated & (@as(u64, 1) << offset)) != 0;
+    const allocated = msix_allocated.load(.acquire);
+    return (allocated & (@as(u64, 1) << offset)) != 0;
 }

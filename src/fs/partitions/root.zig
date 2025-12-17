@@ -50,9 +50,10 @@ fn partitionRead(fd: *FileDescriptor, buf: []u8) isize {
     const controller = ahci.getController() orelse return Errno.EIO.toReturn();
 
     // Bounds checking against partition size
+    // Security: Use checked arithmetic to prevent overflow from malicious partition metadata
     const pos = fd.position;
-    const end_pos = pos + buf.len;
-    const part_size_bytes = part.sector_count * 512;
+    const end_pos = std.math.add(usize, pos, buf.len) catch return Errno.ERANGE.toReturn();
+    const part_size_bytes = std.math.mul(u64, part.sector_count, 512) catch return Errno.ERANGE.toReturn();
 
     if (pos >= part_size_bytes) return 0; // EOF
 
@@ -116,13 +117,15 @@ fn partitionWrite(fd: *FileDescriptor, buf: []const u8) isize {
     const part = @as(*Partition, @ptrCast(@alignCast(fd.private_data)));
     const controller = ahci.getController() orelse return Errno.EIO.toReturn();
 
+    // Security: Use checked arithmetic to prevent overflow from malicious partition metadata
     const pos = fd.position;
-    const part_size_bytes = part.sector_count * 512;
+    const part_size_bytes = std.math.mul(u64, part.sector_count, 512) catch return Errno.ERANGE.toReturn();
 
     if (pos >= part_size_bytes) return Errno.ENOSPC.toReturn();
 
     var write_len = buf.len;
-    if (pos + write_len > part_size_bytes) {
+    const end_pos = std.math.add(usize, pos, write_len) catch return Errno.ERANGE.toReturn();
+    if (end_pos > part_size_bytes) {
         write_len = @intCast(part_size_bytes - pos);
     }
 
@@ -182,7 +185,8 @@ fn partitionClose(fd: *FileDescriptor) isize {
 
 fn partitionSeek(fd: *FileDescriptor, offset: i64, whence: u32) isize {
     const part = @as(*Partition, @ptrCast(@alignCast(fd.private_data)));
-    const part_size = part.sector_count * 512;
+    // Security: Use checked arithmetic to prevent overflow from malicious partition metadata
+    const part_size = std.math.mul(u64, part.sector_count, 512) catch return Errno.ERANGE.toReturn();
 
     const SEEK_SET: u32 = 0;
     const SEEK_CUR: u32 = 1;
@@ -287,13 +291,17 @@ fn scanGpt(port_num: u5, disk_name: []const u8) !void {
     // Read Partition Entries
     // They start at partition_entry_lba (usually 2)
     // Size is num_partition_entries * size_partition_entry
-    const entries_size = header.num_partition_entries * header.size_partition_entry;
+    // Security: Use checked arithmetic to prevent integer overflow from malicious GPT headers
+    const entries_size = std.math.mul(u64, header.num_partition_entries, header.size_partition_entry) catch {
+        console.warn("Partitions: GPT table size overflow (entries={}, size={})", .{ header.num_partition_entries, header.size_partition_entry });
+        return;
+    };
     const entries_sectors = (entries_size + 511) / 512;
 
-    // Limit reasonable size to avoid OOM
-    if (entries_sectors > 128) { // 64KB max for table
-         console.warn("Partitions: GPT table too large", .{});
-         return;
+    // Limit reasonable size to avoid OOM (128 sectors = 64KB)
+    if (entries_sectors > 128) {
+        console.warn("Partitions: GPT table too large ({} sectors)", .{entries_sectors});
+        return;
     }
 
     const table_buffer = try allocator.alloc(u8, entries_sectors * 512);
@@ -312,8 +320,10 @@ fn scanGpt(port_num: u5, disk_name: []const u8) !void {
     var index: u32 = 1;
     var i: u32 = 0;
     while (i < header.num_partition_entries) : (i += 1) {
-        const offset = i * header.size_partition_entry;
-        if (offset + @sizeOf(gpt.GptEntry) > table_buffer.len) break;
+        // Security: Use checked arithmetic to prevent offset overflow in ReleaseFast
+        const offset = std.math.mul(u32, i, header.size_partition_entry) catch break;
+        const end_offset = std.math.add(u32, offset, @sizeOf(gpt.GptEntry)) catch break;
+        if (end_offset > table_buffer.len) break;
 
         const entry: *align(1) gpt.GptEntry = @ptrCast(table_buffer[offset..].ptr);
 

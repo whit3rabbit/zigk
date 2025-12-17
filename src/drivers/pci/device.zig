@@ -442,6 +442,16 @@ pub const DeviceList = struct {
         return null;
     }
 
+    /// Find first E1000e (PCIe) NIC (82574L, etc.)
+    pub fn findE1000e(self: *const DeviceList) ?*const PciDevice {
+        for (self.devices[0..self.count]) |*dev| {
+            if (dev.isE1000e()) {
+                return dev;
+            }
+        }
+        return null;
+    }
+
     /// Find first AC97 controller
     pub fn findAc97Controller(self: *const DeviceList) ?*const PciDevice {
         return self.findDevice(VendorId.INTEL, IntelDeviceId.AC97_82801AA);

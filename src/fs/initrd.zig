@@ -94,10 +94,27 @@ pub const InitRD = struct {
     /// Find a file by path in the InitRD
     pub fn findFile(self: *const @This(), path: []const u8) ?InitRDFile {
         // Normalize path: remove leading '/' if present
-        const search_name = if (path.len > 0 and path[0] == '/')
+        var search_name = if (path.len > 0 and path[0] == '/')
             path[1..]
         else
             path;
+
+        // Security: Reject path traversal attempts
+        // Check for ".." anywhere in the path (covers "../", "foo/../bar", "foo/..")
+        if (std.mem.indexOf(u8, search_name, "..")) |_| {
+            console.warn("InitRD: Rejecting path traversal attempt: '{s}'", .{path});
+            return null;
+        }
+
+        // Strip leading "./" sequences (common in tar archives)
+        while (std.mem.startsWith(u8, search_name, "./")) {
+            search_name = search_name[2..];
+        }
+
+        // Reject if path is now empty after normalization
+        if (search_name.len == 0) {
+            return null;
+        }
 
         console.err("InitRD: findFile search='{s}' (orig='{s}')", .{search_name, path});
 

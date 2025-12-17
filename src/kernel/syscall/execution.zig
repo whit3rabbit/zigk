@@ -599,12 +599,98 @@ pub fn sys_map_fb() SyscallError!usize {
 /// - Handle CLONE_VM (share address space for threads)
 /// - Handle CLONE_THREAD (create thread, not process)
 /// - Handle CLONE_PARENT_SETTID, CLONE_CHILD_SETTID, etc.
-pub fn sys_clone(flags: usize, stack: usize, parent_tid: usize, child_tid: usize, tls: usize) SyscallError!usize {
-    _ = flags;
-    _ = stack;
-    _ = parent_tid;
-    _ = child_tid;
-    _ = tls;
-    // For now, recommend using fork() instead
+/// sys_clone (56) - Create a child process/thread
+///
+/// Clone is used for both fork() and thread creation, depending on flags.
+/// Implements CLONE_THREAD for multi-threading support.
+pub fn sys_clone(frame: *hal.syscall.SyscallFrame) SyscallError!usize {
+    // Extract arguments from syscall frame (since this is called from asm entry)
+    // Args: flags, stack, parent_tid, child_tid, tls
+    const flags = frame.rdi;
+    const stack = frame.rsi;
+    // const parent_tid_ptr = frame.rdx;
+    // const child_tid_ptr = frame.r10;
+    const tls = frame.r8;
+
+    // Check for CLONE_THREAD
+    if ((flags & uapi.sched.CLONE_THREAD) != 0) {
+        // Multi-threading: Create a new thread in the SAME process
+        // Must also specify CLONE_VM (threads share address space) and CLONE_SIGHAND
+        if ((flags & uapi.sched.CLONE_VM) == 0 or (flags & uapi.sched.CLONE_SIGHAND) == 0) {
+            return error.EINVAL;
+        }
+
+        const parent_proc = base.getCurrentProcess();
+        const parent_thread = sched.getCurrentThread() orelse return error.ESRCH;
+
+        // Increment reference count for the shared process
+        parent_proc.ref();
+        errdefer _ = parent_proc.unref();
+
+        // Create child thread attached to the SAME process
+        const child_thread = thread.createUserThread(
+            0, // Entry point set below
+            .{
+                .name = parent_thread.getName(),
+                .cr3 = parent_proc.cr3, // Share CR3/Address Space
+                .user_stack_top = if (stack != 0) stack else parent_thread.user_stack_top,
+                .process = @ptrCast(parent_proc),
+            },
+        ) catch {
+            return error.ENOMEM;
+        };
+        errdefer thread.destroyThread(child_thread); // Should unref process too if destroying?
+        // destroyThread doesn't unref process automatically (we handled that in sys_exit usually).
+        // if we error here, we must unref manually? yes, errdefer above covers it.
+        // But destroyThread might not be safe if not scheduled? It just frees memory.
+
+        // Copy parent's kernel stack frame (register state) to child
+        copyThreadState(frame, parent_thread, child_thread);
+
+        // Set child's return value to 0
+        setForkChildReturn(child_thread);
+
+        // If stack was provided, set it in the child's frame
+        // (Note: createUserThread sets initial RSP, but copyThreadState overwrites it
+        // with parent's RSP. We must enforce the new stack if provided)
+        if (stack != 0) {
+            const child_frame: *hal.idt.InterruptFrame = @ptrFromInt(child_thread.kernel_rsp);
+            child_frame.rsp = stack;
+        }
+
+        // Handle TLS setup (CLONE_SETTLS)
+        if ((flags & uapi.sched.CLONE_SETTLS) != 0) {
+             child_thread.fs_base = tls;
+             // Note: We don't write MSR here, child will maintain it on switch
+        }
+
+        // Add child thread to process/thread hierarchy
+        // For CLONE_THREAD, the thread is a sibling of the caller, not a child?
+        // Linux: All threads in a group are peers. Main thread is leader.
+        // Zscapek implementation: We'll treat them as peers in the process,
+        // but our hierarchy is simplistic (parent/child).
+        // Let's attach to the process's thread list if we had one?
+        // Current Process struct doesn't track all threads, just "first_child" process?
+        // Wait, `Process` struct has `first_child` (Process).
+        // `Thread` struct has `parent` (Thread) and `first_child` (Thread).
+        // Threads manage the thread hierarchy.
+        // If we are cloning a thread, who is the parent?
+        // The creating thread is the parent in our simple scheduler model.
+        thread.addChild(parent_thread, child_thread);
+
+        // Add to scheduler
+        sched.addThread(child_thread);
+
+        // Return new TID to caller
+        return child_thread.tid;
+    }
+
+    // Fallback for standard fork-like clone (CLONE_VM not set, etc)
+    // If signals matches SIGCHLD and no other flags..
+    if (flags == uapi.sched.CSIGNAL) {
+        return sys_fork(frame);
+    }
+
+    // Other combinations not yet supported
     return error.ENOSYS;
 }

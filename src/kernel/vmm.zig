@@ -20,6 +20,7 @@ const console = @import("console");
 const config = @import("config");
 const pmm = @import("pmm");
 const sync = @import("sync");
+const tlb = @import("tlb");
 
 const paging = hal.paging;
 const PageTableEntry = paging.PageTableEntry;
@@ -189,8 +190,8 @@ pub fn protectPage(pml4_phys: u64, virt_addr: u64, flags: PageFlags) VmmError!vo
     // Update entry with new flags, preserving physical address
     pt.entries[indices.pt] = PageTableEntry.pageEntry(phys_addr, flags);
 
-    // Invalidate TLB
-    paging.invalidatePage(virt_addr);
+    // TLB shootdown - must invalidate on all CPUs since permissions changed
+    tlb.shootdown(virt_addr);
 }
 
 /// Map a contiguous range of pages
@@ -264,15 +265,11 @@ pub fn unmapPage(pml4_phys: u64, virt_addr: u64) VmmError!void {
     // Clear the entry
     pt.entries[indices.pt] = PageTableEntry.empty();
 
-    // Track if we freed any page table structures (not just the leaf)
-    var tables_freed = false;
-
     // Cleanup empty tables recursively
     if (isTableEmpty(pt)) {
         const pt_phys = pd.entries[indices.pd].getPhysAddr();
         pmm.freePage(pt_phys);
         pd.entries[indices.pd] = PageTableEntry.empty();
-        tables_freed = true;
 
         if (isTableEmpty(pd)) {
             const pd_phys = pdpt.entries[indices.pdpt].getPhysAddr();
@@ -287,15 +284,10 @@ pub fn unmapPage(pml4_phys: u64, virt_addr: u64) VmmError!void {
         }
     }
 
-    // TLB invalidation strategy:
-    // - If only leaf page was unmapped: invlpg is sufficient
-    // - If page table structures were freed: full TLB flush required
-    //   (CPU may cache PDE/PDPTE entries in Paging Structure Caches)
-    if (tables_freed) {
-        paging.flushTlb();
-    } else {
-        paging.invalidatePage(virt_addr);
-    }
+    // TLB shootdown - must invalidate on all CPUs since mapping removed
+    // Note: Even if page table structures were freed (tables_freed=true),
+    // other CPUs may have cached PDE/PDPTE entries, so shootdown is always needed
+    tlb.shootdown(virt_addr);
 
     if (config.debug_memory) {
         console.debug("VMM: Unmapped {x}", .{virt_addr});

@@ -96,15 +96,19 @@ pub fn initNetwork() void {
              // Store ECAM for drivers that need it
              pci_ecam = ecam_ptr.*;
 
-             // 3. Initialize E1000e (requires ECAM)
-             nic_driver_opt = e1000e.initFromPci(pci_res.devices, ecam_ptr) catch |err| blk: {
-                console.warn("E1000e init failed (no supported NIC?): {}", .{err});
+             // 3. Initialize E1000/E1000e NIC driver
+             nic_driver_opt = e1000e.initFromPci(pci_res.devices, pci.PciAccess{ .ecam = ecam_ptr.* }) catch |err| blk: {
+                console.warn("E1000 init failed (no supported NIC?): {}", .{err});
                 break :blk null;
              };
         },
-        .legacy => {
-            console.warn("PCI Legacy mode: Skipping E1000e (requires ECAM)", .{});
-            // pci_ecam remains null, so USB/AHCI will be skipped too
+        .legacy => |legacy| {
+            // 3. Initialize E1000 NIC driver (legacy mode - no MSI-X, uses INTx)
+            nic_driver_opt = e1000e.initFromPci(pci_res.devices, pci.PciAccess{ .legacy = legacy }) catch |err| blk: {
+                console.warn("E1000 init failed (no supported NIC?): {}", .{err});
+                break :blk null;
+            };
+            // pci_ecam remains null, so USB/AHCI will be skipped
         }
     }
 
@@ -152,12 +156,12 @@ pub fn initUsb() void {
         return;
     };
 
-    var ecam = pci_ecam orelse {
+    const ecam = pci_ecam orelse {
         console.warn("USB: PCI ECAM not available, skipping USB", .{});
         return;
     };
 
-    usb.initFromPci(devices, &ecam);
+    usb.initFromPci(devices, pci.PciAccess{ .ecam = ecam });
 }
 
 /// Initialize Audio subsystem (AC97)
@@ -178,7 +182,7 @@ pub fn initAudio() void {
 
     if (devices.findAc97Controller()) |dev| {
         console.info("Audio: Found AC97 Controller at {d}:{d}.{d}", .{ dev.bus, dev.device, dev.func });
-        audio.ac97.initFromPci(dev, &ecam) catch |err| {
+        audio.ac97.initFromPci(dev, pci.PciAccess{ .ecam = ecam }) catch |err| {
             console.warn("Audio: Init failed: {}", .{err});
         };
     } else {
@@ -211,7 +215,7 @@ pub fn initStorage() void {
                 dev.bus, dev.device, dev.func,
             });
 
-            if (ahci.initFromPci(dev, &ecam)) |controller| {
+            if (ahci.initFromPci(dev, pci.PciAccess{ .ecam = ecam })) |controller| {
                 // Report detected drives and scan for partitions
                 const partitions = @import("partitions");
                 for (0..ahci.MAX_PORTS) |i| {
@@ -258,7 +262,7 @@ pub fn initVirtioGpu() ?*video_driver.VirtioGpuDriver {
         return null;
     };
 
-    var ecam = pci_ecam orelse {
+    const ecam = pci_ecam orelse {
         console.info("VirtIO-GPU: PCI ECAM not available, skipping", .{});
         return null;
     };
@@ -269,7 +273,7 @@ pub fn initVirtioGpu() ?*video_driver.VirtioGpuDriver {
             console.info("VirtIO-GPU: Found device at {d}:{d}.{d}", .{ dev.bus, dev.device, dev.func });
 
             // Try to initialize the driver
-            if (video_driver.VirtioGpuDriver.init(dev, &ecam)) |driver| {
+            if (video_driver.VirtioGpuDriver.init(dev, pci.PciAccess{ .ecam = ecam })) |driver| {
                 virtio_gpu_driver = driver;
                 return driver;
             } else {

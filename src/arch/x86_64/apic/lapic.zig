@@ -321,6 +321,49 @@ pub fn init(lapic_phys_addr: u64) void {
     console.info("LAPIC: Initialized, APIC ID = {d}", .{id});
 }
 
+/// Initialize LAPIC for Application Processor (AP)
+/// This is a lightweight init that assumes BSP has already set up global state.
+/// Each AP needs to enable its own LAPIC and set up SVR/TPR.
+pub fn initAp() void {
+    // For x2APIC mode, each AP needs to enable x2APIC in its own MSR
+    if (x2apic_enabled) {
+        enableX2Apic();
+    } else {
+        // xAPIC mode: enable APIC via MSR
+        const apic_base_msr: ApicBaseMsr = @bitCast(cpu.readMsr(IA32_APIC_BASE));
+        var new_msr = apic_base_msr;
+        new_msr.global_enable = true;
+        cpu.writeMsr(IA32_APIC_BASE, @bitCast(new_msr));
+    }
+
+    // Set up spurious interrupt vector and enable APIC
+    const sivr = SivrReg{
+        .vector = SPURIOUS_VECTOR,
+        .apic_enable = true,
+        .focus_checking = false,
+        .eoi_broadcast_suppress = false,
+    };
+    writeRegister(.sivr, @bitCast(sivr));
+
+    // Clear error status register
+    writeRegister(.esr, 0);
+    writeRegister(.esr, 0);
+
+    // Mask all LVT entries initially
+    maskLvtEntry(.timer);
+    maskLvtEntry(.lint0);
+    maskLvtEntry(.lint1);
+    maskLvtEntry(.lvt_error);
+    maskLvtEntry(.perfmon);
+    maskLvtEntry(.thermal);
+
+    // Set Task Priority to 0 (accept all interrupts)
+    writeRegister(.tpr, 0);
+
+    // const id = getId();
+    // console.debug("LAPIC: AP {d} initialized", .{id});
+}
+
 /// Send End-Of-Interrupt signal
 /// Must be called at the end of every interrupt handler
 pub inline fn sendEoi() void {

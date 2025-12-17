@@ -77,13 +77,13 @@ pub fn sys_access(path_ptr: usize, mode: usize) SyscallError!usize {
     };
 
     // If we opened it, it exists. Close it immediately.
+    // First call the close operation to clean up private_data
     if (fd.ops.close) |close_fn| {
         _ = close_fn(fd);
     }
-    // If ops.close is null, we can't close it, which leaks.
-    // However, VFS Files should always have close.
-    // For now, assume usage is safe or leak is minor compared to crash.
-    // Ideally we should enforce close existence or use a safer VFS API.
+    // Always destroy the FileDescriptor to prevent memory leak
+    // (createFd heap-allocates the FileDescriptor)
+    heap.allocator().destroy(fd);
 
     return 0;
 }

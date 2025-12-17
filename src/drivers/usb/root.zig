@@ -31,15 +31,15 @@ pub const InterfaceDescriptor = types.InterfaceDescriptor;
 pub const EndpointDescriptor = types.EndpointDescriptor;
 pub const Speed = types.Speed;
 
-/// Initialize the USB subsystem with PCI devices and ECAM
-pub fn initFromPci(devices: *const pci.DeviceList, ecam: *const pci.Ecam) void {
+/// Initialize the USB subsystem with PCI devices and PCI access
+pub fn initFromPci(devices: *const pci.DeviceList, pci_access: pci.PciAccess) void {
     console.info("USB: Initializing USB subsystem...", .{});
 
     // Probe for XHCI controllers
-    xhci.probe(devices, ecam);
+    xhci.probe(devices, pci_access);
 
     // Probe for EHCI controllers
-    ehci.probe(devices, ecam);
+    ehci.probe(devices, pci_access);
 
     console.info("USB: Initialization complete", .{});
 }

@@ -798,17 +798,19 @@ pub fn getCharAsync(request: *io.IoRequest) bool {
     }
 
     // No character available - queue the request
-    // Transition from idle to pending
-    if (!request.compareAndSwapState(.idle, .pending)) {
-        // Request not in idle state - fail
-        _ = request.complete(.{ .err = error.EINVAL });
+    // Security: Check pending_read BEFORE changing request state to avoid TOCTOU
+    // where state transitions to .pending but request is rejected, leaving
+    // the request in an inconsistent state.
+    if (keyboard_state.pending_read != null) {
+        _ = request.complete(.{ .err = error.EBUSY });
         held.release();
         return false;
     }
 
-    // If there's already a pending request, fail this one
-    if (keyboard_state.pending_read != null) {
-        _ = request.complete(.{ .err = error.EBUSY });
+    // Now safe to transition from idle to pending
+    if (!request.compareAndSwapState(.idle, .pending)) {
+        // Request not in idle state - fail
+        _ = request.complete(.{ .err = error.EINVAL });
         held.release();
         return false;
     }

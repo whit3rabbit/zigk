@@ -21,6 +21,7 @@ const heap = @import("heap");
 const vfs = @import("vfs.zig");
 const uapi = @import("uapi");
 const console = @import("console"); // Assuming console is available via build options or we need to add import
+const sync = @import("sync");
 
 // Magic: "SFS1"
 const SFS_MAGIC: u32 = 0x31534653;
@@ -48,6 +49,8 @@ const DirEntry = extern struct {
 pub const SFS = struct {
     device_fd: *fd.FileDescriptor,
     superblock: Superblock,
+    /// Lock protecting superblock updates (prevents TOCTOU in file growth)
+    alloc_lock: sync.Spinlock = .{},
 
     /// Initialize SFS on a device
     /// Opens the device, checks magic, formats if needed.
@@ -339,19 +342,23 @@ fn sfsWrite(file_desc: *fd.FileDescriptor, buf: []const u8) isize {
     const new_blocks_needed = (new_size_needed + 511) / 512;
 
     if (new_blocks_needed > current_blocks) {
-        // Need to grow
+        // Need to grow - acquire lock to prevent TOCTOU race on superblock
+        const held = file.fs.alloc_lock.acquire();
+        defer held.release();
+
+        // Re-check condition under lock (another thread may have modified)
         if (end_block != file.fs.superblock.next_free_block) {
             // Not at end of disk allocation
             // If file size is 0 (new file), it IS at next_free_block (set in open).
             if (file.size == 0) {
-                 // It is at next_free_block
+                // It is at next_free_block
             } else {
-                 console.warn("SFS: Cannot grow file not at end of allocation", .{});
-                 return -28; // ENOSPC
+                console.warn("SFS: Cannot grow file not at end of allocation", .{});
+                return -28; // ENOSPC
             }
         }
 
-        // Update superblock free pointer
+        // Update superblock free pointer atomically with the check
         const blocks_to_add = std.math.cast(u32, new_blocks_needed - current_blocks) orelse return -28; // ENOSPC
         file.fs.superblock.next_free_block += blocks_to_add;
         file.fs.updateSuperblock() catch return -5;

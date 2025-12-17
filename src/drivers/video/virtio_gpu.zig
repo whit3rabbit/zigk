@@ -213,12 +213,12 @@ pub const VirtioGpuDriver = struct {
     }
 
     /// Initialize VirtIO-GPU from a PCI device
-    pub fn init(pci_dev: *const pci.PciDevice, ecam: *const pci.Ecam) ?*Self {
+    pub fn init(pci_dev: *const pci.PciDevice, pci_access: pci.PciAccess) ?*Self {
         console.info("VirtIO-GPU: Initializing device {x}:{x}", .{ pci_dev.vendor_id, pci_dev.device_id });
         console.debug("VirtIO-GPU: BDF={d}:{d}.{d}", .{ pci_dev.bus, pci_dev.device, pci_dev.func });
 
         // Verify we can read PCI config space (vendor ID at offset 0)
-        const vendor_check = ecam.read16(pci_dev.bus, pci_dev.device, pci_dev.func, 0x00);
+        const vendor_check = pci_access.read16(pci_dev.bus, pci_dev.device, pci_dev.func, 0x00);
         console.debug("VirtIO-GPU: Vendor check={x}", .{vendor_check});
         if (vendor_check != pci_dev.vendor_id) {
             console.err("VirtIO-GPU: PCI config space read mismatch (expected {x}, got {x})", .{ pci_dev.vendor_id, vendor_check });
@@ -258,14 +258,14 @@ pub const VirtioGpuDriver = struct {
         driver.bar_mappings[4] = bar4_virt;
 
         // Find VirtIO capabilities (before enabling bus master)
-        if (!driver.findCapabilities(pci_dev, ecam)) {
+        if (!driver.findCapabilities(pci_dev, pci_access)) {
             console.err("VirtIO-GPU: Failed to find VirtIO capabilities", .{});
             return null;
         }
 
         // Enable bus mastering and memory space (after capabilities are found)
-        ecam.enableBusMaster(pci_dev.bus, pci_dev.device, pci_dev.func);
-        ecam.enableMemorySpace(pci_dev.bus, pci_dev.device, pci_dev.func);
+        pci_access.enableBusMaster(pci_dev.bus, pci_dev.device, pci_dev.func);
+        pci_access.enableMemorySpace(pci_dev.bus, pci_dev.device, pci_dev.func);
 
         // Note: ctrl_vq is allocated in initDevice() after reading device queue_size
 
@@ -298,9 +298,9 @@ pub const VirtioGpuDriver = struct {
         return driver;
     }
 
-    fn findCapabilities(self: *Self, pci_dev: *const pci.PciDevice, ecam: *const pci.Ecam) bool {
+    fn findCapabilities(self: *Self, pci_dev: *const pci.PciDevice, pci_access: pci.PciAccess) bool {
         // Check if device has capabilities (Status register bit 4)
-        const status = ecam.read16(pci_dev.bus, pci_dev.device, pci_dev.func, 0x06);
+        const status = pci_access.read16(pci_dev.bus, pci_dev.device, pci_dev.func, 0x06);
         console.debug("VirtIO-GPU: PCI Status={x}", .{status});
 
         if ((status & 0x10) == 0) {
@@ -310,7 +310,7 @@ pub const VirtioGpuDriver = struct {
 
         // Walk PCI capability list to find VirtIO capabilities
         // Capability pointer is at offset 0x34, only lower 8 bits are valid, and bits 0-1 should be 0
-        const cap_start = ecam.read8(pci_dev.bus, pci_dev.device, pci_dev.func, 0x34) & 0xFC;
+        const cap_start = pci_access.read8(pci_dev.bus, pci_dev.device, pci_dev.func, 0x34) & 0xFC;
         console.debug("VirtIO-GPU: Cap list starts at {x}", .{cap_start});
 
         if (cap_start == 0 or cap_start == 0xFC) {
@@ -322,7 +322,7 @@ pub const VirtioGpuDriver = struct {
         var iteration: u32 = 0;
 
         while (cap_ptr != 0 and cap_ptr != 0xFF and iteration < 32) : (iteration += 1) {
-            const cap_id = ecam.read8(pci_dev.bus, pci_dev.device, pci_dev.func, cap_ptr);
+            const cap_id = pci_access.read8(pci_dev.bus, pci_dev.device, pci_dev.func, cap_ptr);
             console.debug("VirtIO-GPU: Cap at {x} id={x}", .{ cap_ptr, cap_id });
 
             if (cap_id == 0xFF) {
@@ -332,22 +332,22 @@ pub const VirtioGpuDriver = struct {
 
             // VirtIO vendor-specific capability (0x09)
             if (cap_id == 0x09) {
-                const cfg_type = ecam.read8(pci_dev.bus, pci_dev.device, pci_dev.func, cap_ptr + 3);
-                const bar_idx = ecam.read8(pci_dev.bus, pci_dev.device, pci_dev.func, cap_ptr + 4);
-                const offset = ecam.read32(pci_dev.bus, pci_dev.device, pci_dev.func, cap_ptr + 8);
+                const cfg_type = pci_access.read8(pci_dev.bus, pci_dev.device, pci_dev.func, cap_ptr + 3);
+                const bar_idx = pci_access.read8(pci_dev.bus, pci_dev.device, pci_dev.func, cap_ptr + 4);
+                const offset = pci_access.read32(pci_dev.bus, pci_dev.device, pci_dev.func, cap_ptr + 8);
                 console.debug("VirtIO-GPU: VirtIO cap type={d} bar={d} offset={x}", .{ cfg_type, bar_idx, offset });
 
                 // Bounds check for BAR index
                 if (bar_idx >= 6) {
                     console.warn("VirtIO-GPU: Invalid BAR index {d}", .{bar_idx});
-                    cap_ptr = ecam.read8(pci_dev.bus, pci_dev.device, pci_dev.func, cap_ptr + 1);
+                    cap_ptr = pci_access.read8(pci_dev.bus, pci_dev.device, pci_dev.func, cap_ptr + 1);
                     continue;
                 }
 
                 const bar_phys = pci_dev.bar[bar_idx].base;
                 if (bar_phys == 0) {
                     console.warn("VirtIO-GPU: BAR{d} not configured", .{bar_idx});
-                    cap_ptr = ecam.read8(pci_dev.bus, pci_dev.device, pci_dev.func, cap_ptr + 1);
+                    cap_ptr = pci_access.read8(pci_dev.bus, pci_dev.device, pci_dev.func, cap_ptr + 1);
                     continue;
                 }
 
@@ -380,7 +380,7 @@ pub const VirtioGpuDriver = struct {
                 
                 if (bar_virt == 0) {
                      console.warn("VirtIO-GPU: Skipping capability in unmappable BAR{d}", .{bar_idx});
-                     cap_ptr = ecam.read8(pci_dev.bus, pci_dev.device, pci_dev.func, cap_ptr + 1);
+                     cap_ptr = pci_access.read8(pci_dev.bus, pci_dev.device, pci_dev.func, cap_ptr + 1);
                      continue;
                 }
 
@@ -393,7 +393,7 @@ pub const VirtioGpuDriver = struct {
                     virtio.common.VIRTIO_PCI_CAP_NOTIFY_CFG => {
                         self.notify_base = bar_virt + offset;
                         // Read notify_off_multiplier from capability
-                        self.notify_off_multiplier = ecam.read32(pci_dev.bus, pci_dev.device, pci_dev.func, cap_ptr + 16);
+                        self.notify_off_multiplier = pci_access.read32(pci_dev.bus, pci_dev.device, pci_dev.func, cap_ptr + 16);
                         console.debug("VirtIO-GPU: Notify cfg at BAR{d}+{x}, mult={d}", .{ bar_idx, offset, self.notify_off_multiplier });
                     },
                     virtio.common.VIRTIO_PCI_CAP_DEVICE_CFG => {
@@ -404,7 +404,7 @@ pub const VirtioGpuDriver = struct {
             }
 
             // Next capability
-            cap_ptr = ecam.read8(pci_dev.bus, pci_dev.device, pci_dev.func, cap_ptr + 1);
+            cap_ptr = pci_access.read8(pci_dev.bus, pci_dev.device, pci_dev.func, cap_ptr + 1);
         }
 
         return self.common_cfg != null;

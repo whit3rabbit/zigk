@@ -20,6 +20,7 @@ const keyboard = @import("keyboard");
 const mouse = @import("mouse");
 const input = @import("input");
 const sched = @import("sched");
+const tlb = @import("tlb");
 const stack_guard = @import("stack_guard");
 const prng = @import("prng");
 const framebuffer = @import("framebuffer");
@@ -274,6 +275,9 @@ export fn _start() noreturn {
     // Initialize APIC
     initApic();
 
+    // Initialize TLB Shootdown (after IPIs are ready)
+    tlb.init();
+
     // Initialize SMP (bring up APs)
     console.info("About to call hal.smp.init()", .{});
     hal.smp.init();
@@ -360,10 +364,15 @@ export fn _start() noreturn {
     // Load Init Process
     console.info("Main: Calling loadInitProcess()...", .{});
     init_proc.loadInitProcess();
-    console.info("Main: loadInitProcess() returned.", .{});
-
-    // Start the scheduler
-    console.info("Starting scheduler...", .{});
+    // Initialize Futex subsystem (wait queues)
+    {
+        const futex = @import("futex");
+        futex.init();
+    }
+    
+    // -------------------------------------------------------------------------
+    // 9. Process & Scheduler
+    // -------------------------------------------------------------------------console.info("Starting scheduler...", .{});
     sched.start();
 }
 

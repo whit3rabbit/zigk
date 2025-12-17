@@ -24,8 +24,8 @@ const MmioDevice = hal.mmio_device.MmioDevice;
 pub const Controller = struct {
     /// PCI device
     pci_dev: *const pci.PciDevice,
-    /// PCI ECAM (for config space access)
-    pci_ecam: *const pci.Ecam,
+    /// PCI access method (ECAM or legacy I/O)
+    pci_access: pci.PciAccess,
 
     /// BAR0 base virtual address
     bar0_virt: u64,
@@ -47,7 +47,7 @@ pub const Controller = struct {
     const Self = @This();
 
     /// Initialize the EHCI controller
-    pub fn init(pci_dev: *const pci.PciDevice, pci_ecam: *const pci.Ecam) !*Self {
+    pub fn init(pci_dev: *const pci.PciDevice, pci_access: pci.PciAccess) !*Self {
         console.info("EHCI: Initializing controller at PCI {x:0>2}:{x:0>2}.{}", .{
             pci_dev.bus,
             pci_dev.device,
@@ -61,8 +61,8 @@ pub const Controller = struct {
         }
 
         // Enable bus mastering and memory space
-        pci_ecam.enableBusMaster(pci_dev.bus, pci_dev.device, pci_dev.func);
-        pci_ecam.enableMemorySpace(pci_dev.bus, pci_dev.device, pci_dev.func);
+        pci_access.enableBusMaster(pci_dev.bus, pci_dev.device, pci_dev.func);
+        pci_access.enableMemorySpace(pci_dev.bus, pci_dev.device, pci_dev.func);
 
         // Get BAR0 (MMIO base)
         const bar0 = pci_dev.bar[0];
@@ -108,7 +108,7 @@ pub const Controller = struct {
 
         ctrl.* = Self{
             .pci_dev = pci_dev,
-            .pci_ecam = pci_ecam,
+            .pci_access = pci_access,
             .bar0_virt = bar0_virt,
             .bar0_size = bar0.size,
             .cap_base = bar0_virt,
@@ -251,12 +251,12 @@ pub const Controller = struct {
 var global_controller: ?*Controller = null;
 
 /// Probe for EHCI controllers and initialize them
-pub fn probe(devices: *const pci.DeviceList, ecam: *const pci.Ecam) void {
+pub fn probe(devices: *const pci.DeviceList, pci_access: pci.PciAccess) void {
     console.info("EHCI: Probing for controllers...", .{});
 
     // Find EHCI Controller: Class 0x0C (Serial Bus), Subclass 0x03 (USB), ProgIF 0x20 (EHCI)
     if (devices.findEhciController()) |dev| {
-        const ctrl = Controller.init(dev, ecam) catch |err| {
+        const ctrl = Controller.init(dev, pci_access) catch |err| {
             console.err("EHCI: Failed to initialize controller: {}", .{err});
             return;
         };

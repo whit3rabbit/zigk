@@ -41,8 +41,8 @@ pub const Transfer = transfer;
 pub const Controller = struct {
     /// PCI device
     pci_dev: *const pci.PciDevice,
-    /// PCI ECAM (for config space access)
-    pci_ecam: *const pci.Ecam,
+    /// PCI access method (ECAM or Legacy)
+    pci_access: pci.PciAccess,
 
     /// BAR0 base virtual address
     bar0_virt: u64,
@@ -75,7 +75,7 @@ pub const Controller = struct {
     const Self = @This();
 
     /// Initialize the XHCI controller
-    pub fn init(pci_dev: *const pci.PciDevice, pci_ecam: *const pci.Ecam) !*Self {
+    pub fn init(pci_dev: *const pci.PciDevice, pci_access: pci.PciAccess) !*Self {
         console.info("XHCI: Initializing controller at PCI {x:0>2}:{x:0>2}.{}", .{
             pci_dev.bus,
             pci_dev.device,
@@ -89,8 +89,8 @@ pub const Controller = struct {
         }
 
         // Enable bus mastering and memory space
-        pci_ecam.enableBusMaster(pci_dev.bus, pci_dev.device, pci_dev.func);
-        pci_ecam.enableMemorySpace(pci_dev.bus, pci_dev.device, pci_dev.func);
+        pci_access.enableBusMaster(pci_dev.bus, pci_dev.device, pci_dev.func);
+        pci_access.enableMemorySpace(pci_dev.bus, pci_dev.device, pci_dev.func);
 
         // Get BAR0 (MMIO base)
         const bar0 = pci_dev.bar[0];
@@ -166,7 +166,7 @@ pub const Controller = struct {
 
         ctrl.* = Self{
             .pci_dev = pci_dev,
-            .pci_ecam = pci_ecam,
+            .pci_access = pci_access,
             .bar0_virt = bar0_virt,
             .bar0_size = bar0.size,
             .cap_base = bar0_virt,
@@ -337,46 +337,56 @@ pub const Controller = struct {
 
     /// Set up interrupt handling
     fn setupInterrupts(self: *Self) !void {
-        // Try to enable MSI-X
-        if (pci.findMsix(self.pci_ecam, self.pci_dev)) |msix_cap| {
-            console.info("XHCI: Found MSI-X capability, attempting to enable...", .{});
+        // MSI-X requires ECAM access
+        const ecam_ptr: ?*const pci.Ecam = switch (self.pci_access) {
+            .ecam => |*e| e,
+            .legacy => null,
+        };
 
-            // Allocate 1 vector
-            if (interrupts.allocateMsixVector()) |vector| {
-                // Register handler
-                if (interrupts.registerMsixHandler(vector, handleInterrupt)) {
-                    // Enable MSI-X
-                    // Note: We pass 0 for bar_virt to let enableMsix map it
-                    if (pci.enableMsix(self.pci_ecam, self.pci_dev, &msix_cap, 0)) |msix_alloc| {
-                        // Configure vector 0 to point to our allocated vector and BSP
-                        // Use current CPU ID or 0 (BSP)
-                        const dest_id: u8 = @truncate(hal.apic.lapic.getId());
-                        pci.configureMsixEntry(msix_alloc.table_base, 0, vector, dest_id);
+        // Try to enable MSI-X (only with ECAM)
+        if (ecam_ptr) |ecam| {
+            if (pci.findMsix(ecam, self.pci_dev)) |msix_cap| {
+                console.info("XHCI: Found MSI-X capability, attempting to enable...", .{});
 
-                        // Unmask vectors
-                        pci.enableMsixVectors(self.pci_ecam, self.pci_dev, &msix_cap);
+                // Allocate 1 vector
+                if (interrupts.allocateMsixVector()) |vector| {
+                    // Register handler
+                    if (interrupts.registerMsixHandler(vector, handleInterrupt)) {
+                        // Enable MSI-X
+                        // Note: We pass 0 for bar_virt to let enableMsix map it
+                        if (pci.enableMsix(ecam, self.pci_dev, &msix_cap, 0)) |msix_alloc| {
+                            // Configure vector 0 to point to our allocated vector and BSP
+                            // Use current CPU ID or 0 (BSP)
+                            const dest_id: u8 = @truncate(hal.apic.lapic.getId());
+                            pci.configureMsixEntry(msix_alloc.table_base, 0, vector, dest_id);
 
-                        // Disable legacy INTx
-                        pci.msi.disableIntx(self.pci_ecam, self.pci_dev);
+                            // Unmask vectors
+                            pci.enableMsixVectors(ecam, self.pci_dev, &msix_cap);
 
-                        self.msix_vectors = interrupts.MsixVectorAllocation{
-                            .first_vector = vector,
-                            .count = 1,
-                        };
+                            // Disable legacy INTx
+                            pci.msi.disableIntx(ecam, self.pci_dev);
 
-                        console.info("XHCI: MSI-X enabled with vector {}", .{vector});
+                            self.msix_vectors = interrupts.MsixVectorAllocation{
+                                .first_vector = vector,
+                                .count = 1,
+                            };
+
+                            console.info("XHCI: MSI-X enabled with vector {}", .{vector});
+                        } else {
+                            console.err("XHCI: Failed to enable MSI-X capability", .{});
+                            interrupts.unregisterMsixHandler(vector);
+                            interrupts.freeMsixVector(vector);
+                        }
                     } else {
-                        console.err("XHCI: Failed to enable MSI-X capability", .{});
-                        interrupts.unregisterMsixHandler(vector);
+                        console.err("XHCI: Failed to register MSI-X handler", .{});
                         interrupts.freeMsixVector(vector);
                     }
                 } else {
-                    console.err("XHCI: Failed to register MSI-X handler", .{});
-                    interrupts.freeMsixVector(vector);
+                    console.warn("XHCI: Failed to allocate MSI-X vector, falling back to polling", .{});
                 }
-            } else {
-                console.warn("XHCI: Failed to allocate MSI-X vector, falling back to polling", .{});
             }
+        } else {
+            console.info("XHCI: Legacy PCI mode, MSI-X not available", .{});
         }
 
         if (self.msix_vectors == null) {
@@ -1064,11 +1074,11 @@ fn processEvent(ctrl: *Controller, event: *const trb.Trb) void {
 // =============================================================================
 
 /// Probe for XHCI controllers and initialize them
-pub fn probe(devices: *const pci.DeviceList, ecam: *const pci.Ecam) void {
+pub fn probe(devices: *const pci.DeviceList, pci_access: pci.PciAccess) void {
     console.info("XHCI: Probing for controllers...", .{});
 
     if (devices.findXhciController()) |dev| {
-        const ctrl = Controller.init(dev, ecam) catch |err| {
+        const ctrl = Controller.init(dev, pci_access) catch |err| {
             console.err("XHCI: Failed to initialize controller: {}", .{err});
             return;
         };

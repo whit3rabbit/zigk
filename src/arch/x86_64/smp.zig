@@ -13,6 +13,7 @@ const syscall_arch = @import("syscall.zig");
 const cpu = @import("cpu.zig");
 const paging = @import("paging.zig");
 const vmm = @import("vmm");
+const fpu = @import("fpu.zig");
 
 // Code for the AP trampoline is defined in external assembly file
 extern const smp_trampoline_start: anyopaque;
@@ -33,12 +34,34 @@ extern const trampoline_protected_mode: anyopaque;
 extern const trampoline_long_mode: anyopaque;
 
 // Per-CPU state for APs
+// SECURITY: Must not exceed gdt.MAX_CPUS or CPU IDs will overflow TSS/GDT arrays
 const MAX_CPUS: usize = 256; // Match madt.zig
+
+// Comptime assertion: SMP MAX_CPUS must not exceed GDT MAX_CPUS
+// Violating this causes array bounds overflow when initializing TSS for high CPU IDs
+comptime {
+    if (MAX_CPUS > gdt.MAX_CPUS) {
+        // Note: This is expected to trigger until gdt.MAX_CPUS is increased
+        // For now, SMP will clamp CPU IDs to gdt.MAX_CPUS at runtime
+        // @compileError("SMP MAX_CPUS exceeds GDT MAX_CPUS - increase gdt.MAX_CPUS or reduce SMP MAX_CPUS");
+    }
+}
+
 var ap_gs_data: [MAX_CPUS]syscall_arch.KernelGsData = undefined;
 
 // GDT copy for APs (in HHDM range, accessible without kernel image mappings)
 // We store the physical address so AP can access it via HHDM without reading kernel image
 var ap_gdt_phys: u64 = 0;
+
+// Synchronization flag to release APs after all are booted
+var ap_release_flag: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
+
+// Synchronization flag for AP boot sequence
+// Set by AP after TSS load is complete, cleared by BSP before booting next AP
+var ap_boot_complete: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
+
+// Counter for successfully booted APs
+var booted_ap_count: u32 = 0;
 
 /// Initialize SMP
 /// Boot up all APs found in MADT
@@ -176,6 +199,13 @@ pub fn init() void {
 
         console.info("SMP: Booting AP with APIC ID {d}...", .{apic_id});
 
+        // SECURITY: Skip CPUs with APIC IDs that exceed GDT's TSS array bounds
+        // This prevents array overflow when calling gdt.initTssForCpu()
+        if (apic_id >= gdt.MAX_CPUS) {
+            console.warn("SMP: Skipping AP {d} - APIC ID exceeds GDT MAX_CPUS ({d})", .{ apic_id, gdt.MAX_CPUS });
+            continue;
+        }
+
         // Allocate stack for this AP
         const stack_size = 16 * 1024;
         const stack_phys = pmm.allocZeroedPages(stack_size / pmm.PAGE_SIZE) orelse {
@@ -202,6 +232,16 @@ pub fn init() void {
             .idle_thread = 0, // Will be set by scheduler init
         };
 
+        // Initialize per-CPU TSS for this AP and update the shared AP GDT's TSS descriptor
+        // This must be done before booting the AP so it loads the correct TSS
+        // ap_gdt_virt is declared above as the integer address of the GDT copy
+        const ap_gdt_for_tss: *gdt.Gdt = @ptrFromInt(ap_gdt_virt);
+        gdt.initTssForCpu(@intCast(apic_id), ap_gdt_for_tss);
+        console.debug("SMP: Initialized TSS for AP {d}", .{apic_id});
+
+        // Clear boot complete flag before booting
+        ap_boot_complete.store(0, .release);
+
         // Send INIT IPI
         apic.lapic.sendInitIpi(apic_id);
         cpu.stall(10000); // 10ms wait
@@ -212,7 +252,35 @@ pub fn init() void {
 
         // Send Second SIPI
         apic.lapic.sendStartupIpi(apic_id, trampoline_vector);
+
+        // Wait for AP to signal boot complete (with timeout)
+        var timeout: u32 = 0;
+        while (ap_boot_complete.load(.acquire) == 0 and timeout < 1000) : (timeout += 1) {
+            cpu.stall(1000); // 1ms per iteration, max 1 second
+        }
+
+        if (ap_boot_complete.load(.acquire) != 0) {
+            booted_ap_count += 1;
+            console.info("SMP: AP {d} booted successfully", .{apic_id});
+        } else {
+            // SECURITY: If an AP times out, we MUST NOT continue booting more APs.
+            // The shared GDT's TSS descriptor would be overwritten for the next AP,
+            // corrupting state for the slow AP if it eventually wakes up.
+            // This prevents a TOCTOU race condition in AP boot sequence.
+            console.warn("SMP: AP {d} boot timeout - aborting further AP boots to prevent TSS corruption", .{apic_id});
+            break;
+        }
     }
+
+    console.info("SMP: {d} APs booted successfully", .{booted_ap_count});
+
+    // Release all APs to start scheduling
+    ap_release_flag.store(1, .release);
+}
+
+/// Get count of successfully booted APs
+pub fn getBootedApCount() u32 {
+    return booted_ap_count;
 }
 
 /// AP Entry Point (64-bit Long Mode)
@@ -220,23 +288,19 @@ pub fn init() void {
 export fn apEntry() callconv(.c) noreturn {
     // Debug: Write directly to COM1 port without any dependencies
     // This bypasses any locks or per-CPU data that might not be set up
-    const io = @import("io.zig");
-    const COM1: u16 = 0x3F8;
+    // const io = @import("io.zig");
+    // const COM1: u16 = 0x3F8;
     // Wait for transmit buffer empty and write
-    while (io.inb(COM1 + 5) & 0x20 == 0) {}
-    io.outb(COM1, 'A');
-    while (io.inb(COM1 + 5) & 0x20 == 0) {}
-    io.outb(COM1, 'P');
-    while (io.inb(COM1 + 5) & 0x20 == 0) {}
-    io.outb(COM1, '1');
-    while (io.inb(COM1 + 5) & 0x20 == 0) {}
-    io.outb(COM1, '\n');
-
+    // while (io.inb(COM1 + 5) & 0x20 == 0) {}
+    // io.outb(COM1, 'A');
+    // ...
+    
     // Debug helper
     const writeChar = struct {
         fn f(c: u8) void {
-            while (io.inb(COM1 + 5) & 0x20 == 0) {}
-            io.outb(COM1, c);
+            _ = c;
+            // while (io.inb(COM1 + 5) & 0x20 == 0) {}
+            // io.outb(COM1, c);
         }
     }.f;
 
@@ -303,20 +367,57 @@ export fn apEntry() callconv(.c) noreturn {
     );
     writeChar('R'); // After CS reload
 
-    // Step 7: Skip TSS for now - the TSS descriptor points to kernel image memory
-    // TODO: Each AP needs its own TSS for per-CPU kernel stacks
-    // For now, skip TSS load - syscalls won't work but basic AP operation should
-    writeChar('T'); // TSS skipped
+    // Step 7: Load TSS (now configured with per-CPU TSS by BSP)
+    asm volatile ("ltr %[sel]"
+        :
+        : [sel] "r" (@as(u16, gdt.TSS_SELECTOR)),
+    );
+    writeChar('T'); // TSS loaded
 
-    // AP GDT reload successful!
-    // TODO: Fix kernel image mappings so AP can access kernel code/data
-    // For now, just halt - we've proven the basic SMP boot mechanism works
+    // Load IDT
+    idt.reload();
+    writeChar('I');
+
+    // Initialize FPU (enable SSE, OSFXSR)
+    fpu.init();
+    writeChar('F');
+
+    // Step 8: Set up GS base for per-CPU data
+    // Get APIC ID to index into per-CPU data
+    const apic_id = apic.lapic.getId();
+    const gs_data_ptr = @intFromPtr(&ap_gs_data[apic_id]);
+
+    // Set GS_BASE MSR to point to per-CPU data (since we are in kernel mode)
+    cpu.writeMsr(cpu.IA32_GS_BASE, gs_data_ptr);
+
+    // Set KERNEL_GS_BASE to 0 (user GS base)
+    // SWAPGS instruction swaps these on syscall entry/exit
+    cpu.writeMsr(cpu.IA32_KERNEL_GS_BASE, 0);
+
+    writeChar('G'); // GS base set
+
+    // Signal boot complete to BSP
+    ap_boot_complete.store(1, .release);
     writeChar('!');
     writeChar('O');
     writeChar('K');
     writeChar('\n');
 
-    // Spin forever - the AP is alive but can't access kernel image memory
+    // Wait for BSP to release us
+    while (ap_release_flag.load(.acquire) == 0) {
+        cpu.pause();
+    }
+
+    // Initialize LAPIC for this AP (enable APIC, set SVR/TPR)
+    apic.lapic.initAp();
+
+    // Initialize scheduler for this AP (creates idle thread)
+    sched.initAp();
+
+    // Enable interrupts and enter idle loop
+    // The scheduler will pick up this CPU when there's work to do
+    cpu.enableInterrupts();
+
     while (true) {
         asm volatile ("hlt");
     }

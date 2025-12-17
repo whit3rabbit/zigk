@@ -83,6 +83,15 @@ pub fn build(b: *std.Build) void {
     });
     sync_module.addImport("hal", hal_module);
 
+    // Create TLB module (TLB shootdown for SMP)
+    const tlb_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/tlb.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    tlb_module.addImport("hal", hal_module);
+    tlb_module.addImport("sync", sync_module);
+
     // Create console module (debug output)
     const console_module = b.createModule(.{
         .root_source_file = b.path("src/kernel/debug/console.zig"),
@@ -94,6 +103,7 @@ pub fn build(b: *std.Build) void {
 
     // HAL needs console for APIC debug output (circular but Zig handles it)
     hal_module.addImport("console", console_module);
+    hal_module.addImport("sync", sync_module);
 
     // Create ACPI module (RSDP/MCFG parsing for PCIe ECAM)
     const acpi_module = b.createModule(.{
@@ -127,6 +137,7 @@ pub fn build(b: *std.Build) void {
     vmm_module.addImport("config", config_module);
     vmm_module.addImport("pmm", pmm_module);
     vmm_module.addImport("sync", sync_module);
+    vmm_module.addImport("tlb", tlb_module);
 
     // Create PCI module (PCIe ECAM enumeration)
     const pci_module = b.createModule(.{
@@ -151,6 +162,7 @@ pub fn build(b: *std.Build) void {
     });
     prng_module.addImport("hal", hal_module);
     prng_module.addImport("sync", sync_module);
+    prng_module.addImport("console", console_module);
 
     // Create Heap module (Kernel Heap Allocator)
     const heap_module = b.createModule(.{
@@ -356,6 +368,7 @@ pub fn build(b: *std.Build) void {
     fs_module.addImport("uapi", uapi_module);
     fs_module.addImport("console", console_module);
     fs_module.addImport("ahci", ahci_module);
+    fs_module.addImport("sync", sync_module);
 
     // Create Keyboard driver module
     const keyboard_module = b.createModule(.{
@@ -614,6 +627,19 @@ pub fn build(b: *std.Build) void {
     syscall_signals_module.addImport("hal", hal_module);
     syscall_signals_module.addImport("sched", sched_module);
 
+    // Create Futex module
+    const futex_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/futex.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    futex_module.addImport("sched", sched_module);
+    futex_module.addImport("sync", sync_module);
+    futex_module.addImport("heap", heap_module);
+    futex_module.addImport("hal", hal_module);
+    futex_module.addImport("vmm", vmm_module);
+    futex_module.addImport("console", console_module);
+
     // Create syscall scheduling module (sched_yield, nanosleep, etc.)
     const syscall_scheduling_module = b.createModule(.{
         .root_source_file = b.path("src/kernel/syscall/scheduling.zig"),
@@ -624,6 +650,7 @@ pub fn build(b: *std.Build) void {
     syscall_scheduling_module.addImport("uapi", uapi_module);
     syscall_scheduling_module.addImport("hal", hal_module);
     syscall_scheduling_module.addImport("sched", sched_module);
+    syscall_scheduling_module.addImport("futex", futex_module);
 
     // Create syscall io module (read, write, stat, etc.)
     const syscall_io_module = b.createModule(.{
@@ -835,23 +862,23 @@ pub fn build(b: *std.Build) void {
     syscall_table_module.addImport("console", console_module);
     syscall_table_module.addImport("signal", signal_module);
     // Handler modules
-    syscall_table_module.addImport("process.zig", syscall_process_module);
-    syscall_table_module.addImport("signals.zig", syscall_signals_module);
-    syscall_table_module.addImport("scheduling.zig", syscall_scheduling_module);
-    syscall_table_module.addImport("io.zig", syscall_io_module);
-    syscall_table_module.addImport("fd.zig", syscall_fd_module);
-    syscall_table_module.addImport("memory.zig", syscall_memory_module);
-    syscall_table_module.addImport("execution.zig", syscall_execution_module);
-    syscall_table_module.addImport("custom.zig", syscall_custom_module);
-    syscall_table_module.addImport("net.zig", syscall_net_module);
-    syscall_table_module.addImport("random.zig", syscall_random_module);
-    syscall_table_module.addImport("input.zig", syscall_input_module);
-    syscall_table_module.addImport("io_uring.zig", syscall_io_uring_module);
-    syscall_table_module.addImport("ipc.zig", syscall_ipc_module);
-    syscall_table_module.addImport("interrupt.zig", syscall_interrupt_module);
-    syscall_table_module.addImport("port_io.zig", syscall_port_io_module);
-    syscall_table_module.addImport("mmio.zig", syscall_mmio_module);
-    syscall_table_module.addImport("pci_syscall.zig", syscall_pci_module);
+    syscall_table_module.addImport("process", syscall_process_module);
+    syscall_table_module.addImport("signals", syscall_signals_module);
+    syscall_table_module.addImport("scheduling", syscall_scheduling_module);
+    syscall_table_module.addImport("io", syscall_io_module);
+    syscall_table_module.addImport("fd", syscall_fd_module);
+    syscall_table_module.addImport("memory", syscall_memory_module);
+    syscall_table_module.addImport("execution", syscall_execution_module);
+    syscall_table_module.addImport("custom", syscall_custom_module);
+    syscall_table_module.addImport("net", syscall_net_module);
+    syscall_table_module.addImport("random", syscall_random_module);
+    syscall_table_module.addImport("input", syscall_input_module);
+    syscall_table_module.addImport("io_uring", syscall_io_uring_module);
+    syscall_table_module.addImport("ipc", syscall_ipc_module);
+    syscall_table_module.addImport("interrupt", syscall_interrupt_module);
+    syscall_table_module.addImport("port_io", syscall_port_io_module);
+    syscall_table_module.addImport("mmio", syscall_mmio_module);
+    syscall_table_module.addImport("pci_syscall", syscall_pci_module);
 
     // Create kernel executable
     // NOTE: red_zone must be disabled for kernel code to prevent stack corruption
@@ -884,6 +911,7 @@ pub fn build(b: *std.Build) void {
     kernel.root_module.addImport("hal", hal_module);
     kernel.root_module.addImport("acpi", acpi_module);
     kernel.root_module.addImport("pci", pci_module);
+    kernel.root_module.addImport("tlb", tlb_module);
     kernel.root_module.addImport("e1000e", e1000e_module);
     kernel.root_module.addImport("ahci", ahci_module);
     kernel.root_module.addImport("usb", usb_module);
@@ -920,6 +948,7 @@ pub fn build(b: *std.Build) void {
     kernel.root_module.addImport("io", kernel_io_module);
     kernel.root_module.addImport("capabilities", capabilities_module);
     kernel.root_module.addImport("syscall_ipc", syscall_ipc_module);
+    kernel.root_module.addImport("futex", futex_module);
 
     // Add assembly helpers for x86_64 (ISR stubs, lgdt, lidt)
     kernel.addAssemblyFile(b.path("src/arch/x86_64/asm_helpers.S"));

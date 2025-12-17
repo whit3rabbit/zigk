@@ -16,22 +16,23 @@ const hal = @import("hal");
 const signal = @import("signal");
 
 // Handler modules (split from handlers.zig)
-const process = @import("process.zig");
-const signals = @import("signals.zig");
-const scheduling = @import("scheduling.zig");
-const io = @import("io.zig");
-const fd = @import("fd.zig");
-const memory = @import("memory.zig");
-const execution = @import("execution.zig");
-const custom = @import("custom.zig");
-const net = @import("net.zig");
-const random = @import("random.zig");
-const input_handlers = @import("input.zig");
-const ipc = @import("ipc.zig");
-const interrupt = @import("interrupt.zig");
-const port_io = @import("port_io.zig");
-const mmio = @import("mmio.zig");
-const pci_syscall = @import("pci_syscall.zig");
+// Handler modules (split from handlers.zig)
+const process = @import("process");
+const signals = @import("signals");
+const scheduling = @import("scheduling");
+const io = @import("io");
+const fd = @import("fd");
+const memory = @import("memory");
+const execution = @import("execution");
+const custom = @import("custom");
+const net = @import("net");
+const random = @import("random");
+const input_handlers = @import("input");
+const ipc = @import("ipc");
+const interrupt = @import("interrupt");
+const port_io = @import("port_io");
+const mmio = @import("mmio");
+const pci_syscall = @import("pci_syscall");
 
 /// Syscall frame from arch-specific entry
 pub const SyscallFrame = hal.syscall.SyscallFrame;

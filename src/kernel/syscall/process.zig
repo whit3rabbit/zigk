@@ -64,7 +64,8 @@ pub fn sys_wait4(pid_arg: usize, wstatus_ptr: usize, options: usize, rusage_ptr:
 
         {
             // Acquire process tree lock to safely iterate children
-            const held = sched.process_tree_lock.acquire();
+            // Must be Write lock because we might remove a zombie child
+            const held = sched.process_tree_lock.acquireWrite();
             defer held.release();
 
             var child = current_proc.first_child;
@@ -86,7 +87,7 @@ pub fn sys_wait4(pid_arg: usize, wstatus_ptr: usize, options: usize, rusage_ptr:
                     if (c.state == .Zombie) {
                         // Found a zombie - remove it from the list immediately
                         // This effectively "claims" the zombie for this thread
-                        current_proc.removeChild(c);
+                        current_proc.removeChildLocked(c);
                         zombie_proc = c;
                         break;
                     }

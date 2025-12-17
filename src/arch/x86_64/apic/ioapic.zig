@@ -20,6 +20,43 @@ const console = @import("console");
 // Use relative imports within the arch module
 const mmio = @import("../mmio.zig");
 const paging = @import("../paging.zig");
+const cpu = @import("../cpu.zig");
+
+// SECURITY: Simple spinlock to protect IOAPIC indirect register access from concurrent corruption.
+// IOAPIC uses two-step access (write index to IOREGSEL, then read/write IOWIN).
+// Without locking, concurrent access can cause one CPU to overwrite another's index,
+// leading to incorrect register reads/writes and potential interrupt misrouting.
+// Using local implementation since sync module is not available in HAL layer.
+const IoApicLock = struct {
+    locked: std.atomic.Value(u32) = .{ .raw = 0 },
+
+    const Held = struct {
+        lock: *IoApicLock,
+        irq_state: bool,
+
+        pub fn release(self: Held) void {
+            self.lock.locked.store(0, .release);
+            if (self.irq_state) {
+                cpu.enableInterrupts();
+            }
+        }
+    };
+
+    pub fn acquire(self: *IoApicLock) Held {
+        const irq_was_enabled = cpu.interruptsEnabled();
+        cpu.disableInterrupts();
+
+        while (true) {
+            const prev = self.locked.cmpxchgWeak(0, 1, .acquire, .monotonic);
+            if (prev == null) break;
+            asm volatile ("pause" : : : .{ .memory = true });
+        }
+
+        return .{ .lock = self, .irq_state = irq_was_enabled };
+    }
+};
+
+var ioapic_lock: IoApicLock = .{};
 
 // ============================================================================
 // Types for APIC initialization (decoupled from ACPI module)
@@ -340,18 +377,39 @@ pub fn findIoApicForGsi(gsi: u32) ?*const IoApic {
 // Low-level register access
 // ============================================================================
 
+/// Memory barrier (mfence) for ordering MMIO operations
+inline fn memoryBarrier() void {
+    asm volatile ("mfence"
+        :
+        :
+        : .{ .memory = true }
+    );
+}
+
 /// Read an I/O APIC register (indirect access)
+/// SECURITY: Protected by spinlock to prevent concurrent register corruption
 fn readReg(base: u64, index: u8) u32 {
+    const held = ioapic_lock.acquire();
+    defer held.release();
+
     // Write register index to IOREGSEL
     mmio.write32(base + IOREGSEL, index);
+    // Memory barrier ensures index write completes before data read
+    memoryBarrier();
     // Read data from IOWIN
     return mmio.read32(base + IOWIN);
 }
 
 /// Write an I/O APIC register (indirect access)
+/// SECURITY: Protected by spinlock to prevent concurrent register corruption
 fn writeReg(base: u64, index: u8, value: u32) void {
+    const held = ioapic_lock.acquire();
+    defer held.release();
+
     // Write register index to IOREGSEL
     mmio.write32(base + IOREGSEL, index);
+    // Memory barrier ensures index write completes before data write
+    memoryBarrier();
     // Write data to IOWIN
     mmio.write32(base + IOWIN, value);
 }

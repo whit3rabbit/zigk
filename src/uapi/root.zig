@@ -16,6 +16,8 @@ pub const dirent = @import("dirent.zig");
 pub const sound = @import("sound.zig");
 pub const input = @import("input.zig");
 pub const mman = @import("mman.zig");
+pub const sched = @import("sched.zig");
+pub const futex = @import("futex.zig");
 
 
 // Re-export commonly used types

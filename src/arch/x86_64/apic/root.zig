@@ -21,6 +21,7 @@ const pic = @import("../pic.zig");
 
 pub const lapic = @import("lapic.zig");
 pub const ioapic = @import("ioapic.zig");
+pub const ipi = @import("ipi.zig");
 
 // Re-export types from ioapic for convenience
 pub const IoApicInfo = ioapic.IoApicInfo;

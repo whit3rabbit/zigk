@@ -161,7 +161,8 @@ pub const E1000e = struct {
 
     /// PCI device reference (for MSI-X configuration)
     pci_dev: *const pci.PciDevice,
-    pci_ecam: *const pci.Ecam,
+    /// PCI access method (ECAM for PCIe or Legacy I/O ports)
+    pci_access: pci.PciAccess,
 
     const Self = @This();
 
@@ -198,11 +199,12 @@ pub const E1000e = struct {
     // Initialization
     // ========================================================================
 
-    /// Initialize E1000e driver for a PCI device
+    /// Initialize E1000 driver for a PCI device
+    /// Supports both legacy E1000 (82540EM) and PCIe E1000e (82574L)
     ///
     /// SAFETY: This function must not be called while the driver is already
     /// initialized. Call deinit() first if re-initialization is needed.
-    pub fn init(pci_dev: *const pci.PciDevice, pci_ecam: *const pci.Ecam) !*Self {
+    pub fn init(pci_dev: *const pci.PciDevice, pci_access: pci.PciAccess) !*Self {
         // Guard against double-init without deinit
         // This prevents use-after-free and double-free bugs from concurrent
         // or repeated init calls.
@@ -228,8 +230,8 @@ pub const E1000e = struct {
         });
 
         // Enable bus mastering and memory space
-        pci_ecam.enableBusMaster(pci_dev.bus, pci_dev.device, pci_dev.func);
-        pci_ecam.enableMemorySpace(pci_dev.bus, pci_dev.device, pci_dev.func);
+        pci_access.enableBusMaster(pci_dev.bus, pci_dev.device, pci_dev.func);
+        pci_access.enableMemorySpace(pci_dev.bus, pci_dev.device, pci_dev.func);
 
         // Map MMIO region
         const mmio_base = vmm.mapMmio(bar.base, bar.size) catch |err| {
@@ -281,7 +283,7 @@ pub const E1000e = struct {
             .msix_table_base = 0,
             .msix_vectors = [_]u8{0} ** 3,
             .pci_dev = pci_dev,
-            .pci_ecam = pci_ecam,
+            .pci_access = pci_access,
             .shutdown_requested = false,
         };
 
@@ -659,10 +661,20 @@ pub const E1000e = struct {
     }
 
     /// Initialize MSI-X if available
-    /// Falls back to legacy interrupts if MSI-X not supported
+    /// Falls back to legacy interrupts if MSI-X not supported or using legacy PCI access
     fn initMsix(self: *Self) void {
+        // MSI-X requires ECAM (PCIe memory-mapped config space)
+        // Legacy PCI I/O port access doesn't support MSI-X
+        const ecam_ptr: *const pci.Ecam = switch (self.pci_access) {
+            .ecam => |*e| e,
+            .legacy => {
+                console.info("E1000: Using legacy PCI mode, MSI-X not available", .{});
+                return;
+            },
+        };
+
         // Check for MSI-X capability
-        const msix_cap = pci.findMsix(self.pci_ecam, self.pci_dev);
+        const msix_cap = pci.findMsix(ecam_ptr, self.pci_dev);
         if (msix_cap == null) {
             console.info("E1000e: MSI-X not available, using legacy interrupts", .{});
             return;
@@ -680,7 +692,7 @@ pub const E1000e = struct {
         }
 
         // Enable MSI-X
-        const alloc = pci.enableMsix(self.pci_ecam, self.pci_dev, &cap, 0);
+        const alloc = pci.enableMsix(ecam_ptr, self.pci_dev, &cap, 0);
         if (alloc == null) {
             console.warn("E1000e: Failed to enable MSI-X", .{});
             return;
@@ -721,10 +733,10 @@ pub const E1000e = struct {
         self.regs.write(.ivar, ivar);
 
         // Enable MSI-X vectors
-        pci.enableMsixVectors(self.pci_ecam, self.pci_dev, &cap);
+        pci.enableMsixVectors(ecam_ptr, self.pci_dev, &cap);
 
         // Disable legacy INTx
-        pci.msi.disableIntx(self.pci_ecam, self.pci_dev);
+        pci.msi.disableIntx(ecam_ptr, self.pci_dev);
 
         self.msix_enabled = true;
         console.info("E1000e: MSI-X enabled with {d} vectors", .{@as(u8, 3)});
@@ -1107,15 +1119,16 @@ fn workerEntry(ctx: ?*anyopaque) callconv(.c) void {
     sched.exit();
 }
 
-/// Initialize E1000e driver for the first found E1000/E1000e NIC
-pub fn initFromPci(devices: *const pci.DeviceList, pci_ecam: *const pci.Ecam) !*E1000e {
-    // Find E1000/E1000e NIC
+/// Initialize E1000 driver for the first found Intel E1000/E1000e NIC
+/// Supports both legacy E1000 (82540EM, 82545EM) and PCIe E1000e (82574L)
+pub fn initFromPci(devices: *const pci.DeviceList, pci_access: pci.PciAccess) !*E1000e {
+    // Find any E1000 variant (legacy PCI or PCIe)
     const nic = devices.findE1000() orelse {
-        console.err("E1000e: No Intel E1000/E1000e NIC found", .{});
+        console.warn("E1000e: No supported Intel E1000/E1000e NIC found", .{});
         return error.NoDevice;
     };
 
-    const driver = try E1000e.init(nic, pci_ecam);
+    const driver = try E1000e.init(nic, pci_access);
     // driver_initialized is now set inside init() before worker thread creation
     return driver;
 }

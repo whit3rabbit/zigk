@@ -17,23 +17,17 @@ zscapek/
 ├── Dockerfile               # Container build (local toolchain)
 ├── docker-compose.yml       # Compose helper for reproducible builds
 ├── docs/                    # Project documentation
+│   ├── ASYNC.md             # Async I/O and io_uring design
 │   ├── BOOT.md              # Boot process
 │   ├── BOOT_ARCHITECTURE.md # Limine + kernel handoff details
 │   ├── BUILD.md             # Build and run instructions
 │   ├── DOOM.md              # DOOM port documentation
+│   ├── DRIVERS.md           # Driver development guide
 │   ├── FILESYSTEM.md        # This file
 │   ├── GRAPHICS.md          # Framebuffer/console details
 │   ├── KEYBOARD.md          # Keyboard input (PS/2 and USB)
 │   ├── network.md           # Network stack design
 │   └── SYSCALL.md           # Syscall implementation guide
-├── specs/                   # Design documents
-│   ├── 003-microkernel-userland-networking/
-│   ├── 007-linux-compat-layer/
-│   ├── 009-spec-consistency-unification/
-│   ├── archived/            # Superseded specs
-│   ├── shared/              # Shared policies (zig version, gotchas)
-│   ├── DEPENDENCY-ORDER.md  # Link/load ordering constraints
-│   └── syscall-table.md     # Authoritative syscall numbers
 ├── tools/
 │   └── docker-build.sh      # Container build helper
 ├── tests/
@@ -123,8 +117,18 @@ zscapek/
     │   ├── init_hw.zig
     │   ├── init_fs.zig
     │   ├── init_proc.zig
+    │   ├── capabilities/
+    │   │   └── root.zig
     │   ├── debug/
     │   │   └── console.zig
+    │   ├── io/
+    │   │   ├── root.zig
+    │   │   ├── pool.zig
+    │   │   ├── reactor.zig
+    │   │   ├── timer.zig
+    │   │   └── types.zig
+    │   ├── ipc/
+    │   │   └── message.zig
     │   └── syscall/
     │       ├── base.zig
     │       ├── table.zig
@@ -132,6 +136,7 @@ zscapek/
     │       ├── signals.zig
     │       ├── scheduling.zig
     │       ├── io.zig
+    │       ├── io_uring.zig
     │       ├── fd.zig
     │       ├── memory.zig
     │       ├── execution.zig
@@ -139,6 +144,11 @@ zscapek/
     │       ├── net.zig
     │       ├── random.zig
     │       ├── input.zig
+    │       ├── interrupt.zig
+    │       ├── ipc.zig
+    │       ├── mmio.zig
+    │       ├── pci_syscall.zig
+    │       ├── port_io.zig
     │       └── user_mem.zig
     │
     ├── drivers/
@@ -344,6 +354,15 @@ zscapek/
         │       │   └── tokenize.zig
         │       └── unistd/
         │           └── root.zig
+        ├── drivers/
+        │   ├── ps2/
+        │   │   └── main.zig
+        │   ├── uart/
+        │   │   └── main.zig
+        │   ├── virtio_blk/
+        │   │   └── main.zig
+        │   └── virtio_net/
+        │       └── main.zig
         ├── shell/
         │   └── main.zig
         ├── httpd/
@@ -352,6 +371,8 @@ zscapek/
             ├── main.zig
             ├── doomgeneric_zscapek.zig
             ├── i_sound_stub.zig
+            ├── include/
+            │   └── (C headers for DOOM port)
             └── doomgeneric/
                 └── (C source files for DOOM port)
 ```
@@ -387,6 +408,25 @@ zscapek/
 | `init_proc.zig` | Process subsystem initialization. |
 | `debug/console.zig` | Kernel console output. |
 
+### `src/kernel/capabilities/`
+| File | Description |
+|------|-------------|
+| `root.zig` | Capability-based access control for user-space driver permissions. |
+
+### `src/kernel/io/`
+| File | Description |
+|------|-------------|
+| `root.zig` | Async I/O subsystem entry point. |
+| `pool.zig` | I/O request pool management. |
+| `reactor.zig` | Event reactor for async completion handling. |
+| `timer.zig` | Timer-based I/O operations. |
+| `types.zig` | Shared I/O types and structures. |
+
+### `src/kernel/ipc/`
+| File | Description |
+|------|-------------|
+| `message.zig` | Message-passing IPC for microkernel communication. |
+
 ### `src/kernel/syscall/`
 | File | Description |
 |------|-------------|
@@ -396,6 +436,7 @@ zscapek/
 | `signals.zig` | `rt_sigprocmask`, `rt_sigaction`, `rt_sigreturn`, `set_tid_address`. |
 | `scheduling.zig` | `sched_yield`, `nanosleep`, `select`, `clock_gettime`. |
 | `io.zig` | `read`, `write`, `writev`, `stat`, `fstat`, `ioctl`, `fcntl`, `getcwd`. |
+| `io_uring.zig` | io_uring async I/O syscalls (`io_uring_setup`, `io_uring_enter`). |
 | `fd.zig` | `open`, `close`, `dup`, `dup2`, `pipe`, `lseek`. |
 | `memory.zig` | `mmap`, `mprotect`, `munmap`, `brk`. |
 | `execution.zig` | `fork`, `execve`, `arch_prctl`, `get_fb_info`, `map_fb`. |
@@ -403,6 +444,11 @@ zscapek/
 | `net.zig` | `socket`, `bind`, `listen`, `accept`, `connect`, `sendto`, `recvfrom`. |
 | `random.zig` | `getrandom` (syscall 318). |
 | `input.zig` | Input device syscalls (keyboard, mouse). |
+| `interrupt.zig` | User-space interrupt handling for drivers. |
+| `ipc.zig` | IPC message passing syscalls. |
+| `mmio.zig` | Memory-mapped I/O access for user-space drivers. |
+| `pci_syscall.zig` | PCI device access for user-space drivers. |
+| `port_io.zig` | Port I/O access for user-space drivers. |
 | `user_mem.zig` | Validates and copies user memory safely. |
 
 ### `src/arch/x86_64/`
@@ -590,6 +636,14 @@ A device-independent TCP/IP stack implementing Ethernet, IPv4/ARP, DNS, and sock
 | `httpd/main.zig` | HTTP server application. |
 | `doom/` | DOOM game port (doomgeneric). |
 
+### `src/user/drivers/` (User-space Drivers)
+| Directory | Description |
+|-----------|-------------|
+| `ps2/main.zig` | PS/2 keyboard and mouse user-space driver. |
+| `uart/main.zig` | UART serial port user-space driver. |
+| `virtio_blk/main.zig` | VirtIO block device user-space driver. |
+| `virtio_net/main.zig` | VirtIO network device user-space driver. |
+
 ### `src/user/lib/libc/` (Minimal libc)
 | Submodule | Description |
 |-----------|-------------|
@@ -610,3 +664,5 @@ A device-independent TCP/IP stack implementing Ethernet, IPv4/ARP, DNS, and sock
 3. **Unified UAPI**: `src/uapi` is shared between kernel and userland for ABI compatibility.
 4. **Limine Boot**: Primary bootloader is Limine v5.x.
 5. **Modular Initialization**: Boot sequence split into `init_mem.zig`, `init_hw.zig`, `init_fs.zig`, `init_proc.zig`.
+6. **User-space Drivers**: Microkernel architecture with user-space drivers (`src/user/drivers/`) using capability-based access control.
+7. **Async I/O**: io_uring-style async I/O subsystem (`src/kernel/io/`) for high-performance driver communication.

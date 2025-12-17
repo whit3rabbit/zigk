@@ -23,6 +23,10 @@ var prng_lock: sync.Spinlock = .{};
 // Initialization flag
 var initialized: bool = false;
 
+// SECURITY: Flag indicating predictable fallback seed was used
+// Callers should check isUsingFallbackSeed() and log a warning
+var using_fallback_seed: bool = false;
+
 /// Initialize the PRNG with hardware entropy
 /// MUST be called before scheduler starts to ensure stack canary
 /// is randomized before any threads are created (FR-RAND-08)
@@ -30,16 +34,27 @@ pub fn init() void {
     const held = prng_lock.acquire();
     defer held.release();
 
+    // Ensure entropy subsystem is initialized (needed for RDRAND detection)
+    if (!hal.entropy.isInitialized()) {
+        hal.entropy.init();
+    }
+
     // Seed both state words with different hardware entropy values
     state[0] = hal.entropy.getHardwareEntropy();
     state[1] = hal.entropy.getHardwareEntropy();
 
     // Ensure non-zero state (required by xoroshiro128+)
     // If both are zero (extremely unlikely), use fallback constants
+    // SECURITY WARNING: Fallback constants are predictable and weaken security!
+    // This should only happen if RDRAND/RDTSC both fail, which indicates
+    // a serious hardware issue or VM misconfiguration.
     if (state[0] == 0 and state[1] == 0) {
-        // Fallback seed from splitmix64 output
+        // Fallback seed from splitmix64 output - PREDICTABLE!
         state[0] = 0x853c49e6748fea9b;
         state[1] = 0xda3e39cb94b95bdb;
+        using_fallback_seed = true;
+        // Warning: Stack canaries and ASLR may be compromised!
+        // Check isUsingFallbackSeed() to detect this condition.
     }
 
     initialized = true;
@@ -99,6 +114,13 @@ pub fn fill(buf: []u8) void {
 /// Check if PRNG has been initialized
 pub fn isInitialized() bool {
     return initialized;
+}
+
+/// SECURITY: Check if predictable fallback seed is in use
+/// If true, stack canaries and ASLR may be compromised!
+/// Callers (e.g., kernel main) should log a warning when this returns true.
+pub fn isUsingFallbackSeed() bool {
+    return using_fallback_seed;
 }
 
 /// Generate random value in range [0, max)

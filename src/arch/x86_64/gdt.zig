@@ -336,32 +336,28 @@ const GdtPtr = packed struct(u80) {
     base: u64,
 };
 
+// Maximum number of CPUs supported
+// Keep small to avoid large .bss section (256 * 4096 = 1MB per-CPU stacks)
+pub const MAX_CPUS: usize = 16;
+
 // Static GDT and TSS instances
+// BSP uses index 0, APs use their APIC ID as index
 var gdt: Gdt = .{};
-var tss_instance: Tss = .{};
+var tss_instances: [MAX_CPUS]Tss = [_]Tss{.{}} ** MAX_CPUS;
 
-// Stacks for IST entries
-var double_fault_stack: [4096]u8 align(16) = undefined;
+// Double fault stacks - one per CPU for IST1
+// SECURITY: Zero-initialized to prevent information disclosure if double fault
+// occurs before stack is used. Using undefined would leak stale memory contents.
+var double_fault_stacks: [MAX_CPUS][4096]u8 align(16) = [_][4096]u8{[_]u8{0} ** 4096} ** MAX_CPUS;
 
-/// Initialize GDT and TSS
+// Legacy aliases for BSP (CPU 0)
+fn getBspTss() *Tss {
+    return &tss_instances[0];
+}
+
+/// Initialize GDT and TSS for BSP (CPU 0)
 pub fn init() void {
-    // Set up TSS
-    // RSP0 will be set later when we have a proper kernel stack
-    tss_instance.rsp0 = 0;
-
-    // Set up IST1 for double fault handler (uses separate stack)
-    // Stack grows downward, so point to end of array
-    const df_stack_top = @intFromPtr(&double_fault_stack) + double_fault_stack.len;
-    tss_instance.ist1 = df_stack_top;
-
-    // Create TSS descriptor
-    const tss_base = @intFromPtr(&tss_instance);
-    const tss_desc = TssDescriptor.fromBase(tss_base, @sizeOf(Tss) - 1);
-
-    // Split TSS descriptor into two 64-bit parts
-    const tss_bytes: u128 = @bitCast(tss_desc);
-    gdt.tss_low = @truncate(tss_bytes);
-    gdt.tss_high = @truncate(tss_bytes >> 64);
+    initTssForCpu(0, &gdt);
 
     // Load GDT
     const gdt_ptr = GdtPtr{
@@ -378,15 +374,73 @@ pub fn init() void {
     loadTss(TSS_SELECTOR);
 }
 
-/// Set the kernel stack pointer (RSP0) in TSS
-/// Called when switching to a thread to set up the kernel stack for syscalls
-pub fn setKernelStack(stack_top: u64) void {
-    tss_instance.rsp0 = stack_top;
+/// Initialize TSS for a specific CPU and update GDT's TSS descriptor
+/// This function sets up per-CPU TSS with:
+///   - RSP0 = 0 (will be set by scheduler when switching threads)
+///   - IST1 = per-CPU double fault stack
+/// The GDT's TSS descriptor is updated to point to this CPU's TSS.
+///
+/// For BSP: called with cpu_id=0, gdt_ptr=&gdt
+/// For APs: called with cpu_id=apic_id, gdt_ptr=AP's GDT copy
+pub fn initTssForCpu(cpu_id: u32, gdt_ptr: *Gdt) void {
+    if (cpu_id >= MAX_CPUS) {
+        // CPU ID out of range - should not happen in practice
+        return;
+    }
+
+    const tss = &tss_instances[cpu_id];
+
+    // RSP0 will be set later when scheduler assigns a thread
+    tss.rsp0 = 0;
+
+    // Set up IST1 for double fault handler (uses separate per-CPU stack)
+    // Stack grows downward, so point to end of array
+    const df_stack_top = @intFromPtr(&double_fault_stacks[cpu_id]) + double_fault_stacks[cpu_id].len;
+    tss.ist1 = df_stack_top;
+
+    // Create TSS descriptor pointing to this CPU's TSS
+    const tss_base = @intFromPtr(tss);
+    const tss_desc = TssDescriptor.fromBase(tss_base, @sizeOf(Tss) - 1);
+
+    // Split TSS descriptor into two 64-bit parts and update GDT
+    const tss_bytes: u128 = @bitCast(tss_desc);
+    gdt_ptr.tss_low = @truncate(tss_bytes);
+    gdt_ptr.tss_high = @truncate(tss_bytes >> 64);
 }
 
-/// Get current kernel stack pointer from TSS
+/// Get TSS for a specific CPU
+pub fn getTssForCpu(cpu_id: u32) *Tss {
+    if (cpu_id >= MAX_CPUS) {
+        return &tss_instances[0]; // Fallback to BSP
+    }
+    return &tss_instances[cpu_id];
+}
+
+/// Set the kernel stack pointer (RSP0) in TSS for BSP (CPU 0)
+/// Called when switching to a thread to set up the kernel stack for syscalls
+/// Note: For SMP, use setKernelStackForCpu() with the current CPU's APIC ID
+pub fn setKernelStack(stack_top: u64) void {
+    tss_instances[0].rsp0 = stack_top;
+}
+
+/// Set the kernel stack pointer (RSP0) in TSS for a specific CPU
+pub fn setKernelStackForCpu(cpu_id: u32, stack_top: u64) void {
+    if (cpu_id < MAX_CPUS) {
+        tss_instances[cpu_id].rsp0 = stack_top;
+    }
+}
+
+/// Get current kernel stack pointer from TSS for BSP (CPU 0)
 pub fn getKernelStack() u64 {
-    return tss_instance.rsp0;
+    return tss_instances[0].rsp0;
+}
+
+/// Get kernel stack pointer from TSS for a specific CPU
+pub fn getKernelStackForCpu(cpu_id: u32) u64 {
+    if (cpu_id < MAX_CPUS) {
+        return tss_instances[cpu_id].rsp0;
+    }
+    return 0;
 }
 
 /// Get pointer to GDT for AP reload

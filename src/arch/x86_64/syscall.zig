@@ -81,6 +81,20 @@ pub fn getKernelGsBase() u64 {
 /// Per-CPU kernel data structure accessed via GS segment
 /// This structure is pointed to by KERNEL_GS_BASE and accessed after SWAPGS
 /// Layout must match asm_helpers.S:_syscall_entry GS offsets
+///
+/// SECURITY NOTE - Stack Pivot Risk:
+/// The kernel_stack field is loaded via `mov %gs:0, %rsp` during syscall entry.
+/// If an attacker corrupts this field (e.g., via kernel heap overflow or UAF),
+/// they can redirect RSP to an attacker-controlled address, enabling ROP attacks.
+///
+/// Mitigations:
+/// 1. KernelGsData structures should be allocated from a protected memory region
+/// 2. SMEP/SMAP prevent execution of user pages in kernel mode
+/// 3. Stack canaries detect buffer overflow attempts
+/// 4. Consider adding integrity checks on kernel_stack value before use
+///
+/// Defense-in-depth: The scheduler should validate kernel_stack addresses when
+/// updating this field during context switches.
 pub const KernelGsData = extern struct {
     /// Kernel stack pointer (top of stack) for this CPU
     kernel_stack: u64,

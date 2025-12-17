@@ -127,6 +127,14 @@ pub const Thread = struct {
     /// SECURITY: Prevents TOCTOU race in block() - see sched.zig security comments
     pending_wakeup: bool = false,
 
+    /// CPU affinity mask (0xFFFFFFFF = any CPU, otherwise bitmask of allowed CPUs)
+    /// Used for cache locality and NUMA awareness
+    cpu_affinity: u32 = 0xFFFFFFFF,
+
+    /// Last CPU this thread ran on (for cache-aware scheduling)
+    /// Set during context switch, used to prefer same CPU on next schedule
+    last_cpu: u32 = 0,
+
     /// Get thread name as a slice
     pub fn getName(self: *const Thread) []const u8 {
         // Find null terminator
@@ -186,11 +194,10 @@ var total_threads_created: u32 = 0;
 var active_thread_count: u32 = 0;
 
 /// Allocate a new unique thread ID
+/// SECURITY: Uses atomic increment to prevent duplicate TIDs when multiple
+/// CPUs create threads concurrently (e.g., concurrent fork() syscalls).
 fn allocateTid() u32 {
-    // Simple increment - no lock needed as we're only called from scheduler lock context
-    const tid = next_tid;
-    next_tid += 1;
-    return tid;
+    return @atomicRmw(u32, &next_tid, .Add, 1, .seq_cst);
 }
 
 /// Create a new kernel thread

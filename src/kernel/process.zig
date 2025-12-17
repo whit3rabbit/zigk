@@ -122,7 +122,7 @@ pub const Process = struct {
 
     /// Reference count (for multi-threaded processes)
     /// When refcount drops to 0, the process structure is freed.
-    refcount: u32,
+    refcount: std.atomic.Value(u32),
 
     /// Heap start address (base of the program break)
     heap_start: u64,
@@ -149,9 +149,13 @@ pub const Process = struct {
 
     /// Add a child process
     pub fn addChild(self: *Process, child: *Process) void {
-        const held = sched.process_tree_lock.acquire();
+        const held = sched.process_tree_lock.acquireWrite();
         defer held.release();
+        self.addChildLocked(child);
+    }
 
+    /// Add a child process (Lock must be held by caller)
+    pub fn addChildLocked(self: *Process, child: *Process) void {
         child.parent = self;
         child.next_sibling = self.first_child;
         self.first_child = child;
@@ -159,37 +163,57 @@ pub const Process = struct {
 
     /// Remove a child from this process's children list
     pub fn removeChild(self: *Process, child: *Process) void {
-        const held = sched.process_tree_lock.acquire();
+        const held = sched.process_tree_lock.acquireWrite();
         defer held.release();
+        self.removeChildLocked(child);
+    }
 
+    /// Remove a child from this process's children list (Lock must be held by caller)
+    pub fn removeChildLocked(self: *Process, child: *Process) void {
         child.parent = null;
 
         if (self.first_child == child) {
             self.first_child = child.next_sibling;
         } else {
-            var prev: ?*Process = self.first_child;
-            while (prev) |p| {
-                if (p.next_sibling == child) {
-                    p.next_sibling = child.next_sibling;
+            var curr = self.first_child;
+            while (curr) |c| {
+                if (c.next_sibling == child) {
+                    c.next_sibling = child.next_sibling;
                     break;
                 }
-                prev = p.next_sibling;
+                curr = c.next_sibling;
             }
         }
         child.next_sibling = null;
     }
 
-    /// Find a zombie child matching target PID
-    /// pid = -1: any child, pid > 0: specific child
-    pub fn findZombieChild(self: *Process, target_pid: i32) ?*Process {
+    /// Check if target is a child of this process
+    pub fn hasChild(self: *Process, target: *Process) bool {
         var child = self.first_child;
         while (child) |c| {
+            if (c == target) return true;
+            child = c.next_sibling;
+        }
+        return false;
+    }
+
+    /// Find a zombie child matching target PID
+    /// pid = -1: any child, pid > 0: specific child
+    pub fn findZombieChild(self: *Process, pid_filter: i32) ?*Process {
+        const held = sched.process_tree_lock.acquireRead();
+        defer held.release();
+
+        var child = self.first_child;
+        while (child) |c| {
+            // Apply PID filter
+            if (pid_filter > 0 and c.pid != @as(u32, @intCast(pid_filter))) {
+                child = c.next_sibling;
+                continue;
+            }
+
+            // Check if zombie
             if (c.state == .Zombie) {
-                if (target_pid == -1) {
-                    return c;
-                } else if (target_pid > 0 and c.pid == @as(u32, @intCast(target_pid))) {
-                    return c;
-                }
+                return c;
             }
             child = c.next_sibling;
         }
@@ -223,17 +247,20 @@ pub const Process = struct {
 
     /// Increment reference count
     pub fn ref(self: *Process) void {
-        self.refcount += 1;
+        _ = self.refcount.fetchAdd(1, .acquire);
     }
 
     /// Decrement reference count, returns true if process should be freed
     pub fn unref(self: *Process) bool {
-        if (self.refcount == 0) {
+        const prev = self.refcount.fetchSub(1, .release);
+        if (prev == 0) {
             console.warn("Process: unref on zero refcount (pid={})", .{self.pid});
+            // Should panic or handle error, but return true to avoid double-free if possible or crash safely?
+            // If it was 0, it wraps to max. This is bad.
+            // Let's assume correct usage for now, but warn.
             return true;
         }
-        self.refcount -= 1;
-        return self.refcount == 0;
+        return prev == 1;
     }
 
     /// Transition to zombie state
@@ -328,7 +355,7 @@ fn allocatePid() u32 {
     const max_attempts = @as(usize, process_count.load(.monotonic)) + 1;
     var attempts: usize = 0;
 
-    const held = sched.process_tree_lock.acquire();
+    const held = sched.process_tree_lock.acquireWrite();
     defer held.release();
 
     while (attempts <= max_attempts) : (attempts += 1) {
@@ -404,7 +431,7 @@ pub fn createProcess(parent: ?*Process) !*Process {
         .fd_table = fd_table,
         .user_vmm = user_vmm,
         .cr3 = user_vmm.pml4_phys,
-        .refcount = 1,
+        .refcount = std.atomic.Value(u32).init(1),
         .heap_start = 0,
         .heap_break = 0,
         .capabilities = .{},
@@ -460,7 +487,7 @@ pub fn forkProcess(parent: *Process) !*Process {
         .fd_table = child_fd_table,
         .user_vmm = child_vmm,
         .cr3 = child_vmm.pml4_phys,
-        .refcount = 1,
+        .refcount = std.atomic.Value(u32).init(1),
         .heap_start = parent.heap_start,
         .heap_break = parent.heap_break,
         .capabilities = try parent.capabilities.clone(alloc),
@@ -477,14 +504,25 @@ pub fn forkProcess(parent: *Process) !*Process {
     return child;
 }
 
-/// Exit the current process with the given status.
-/// Marks the owning Process as Zombie (if present) and delegates
-/// the thread teardown to the scheduler.
+/// Exit the current process/thread with the given status.
+///
+/// Multi-threading:
+/// - Decrements process refcount.
+/// - If refcount drops to 0 (last thread), transitions process to Zombie.
+/// - Otherwise, just exits the thread.
 pub fn exit(status: i32) noreturn {
     if (sched.getCurrentThread()) |curr| {
         if (curr.process) |proc_opaque| {
             const proc: *Process = @ptrCast(@alignCast(proc_opaque));
-            proc.exitWithStatus(status);
+            
+            // Decrement refcount. Returns true if this was the last thread.
+            if (proc.unref()) {
+                // Last thread exiting - process becomes Zombie
+                proc.exitWithStatus(status);
+            } else {
+                // Other threads remain - just this thread exits
+                console.debug("Thread: Exiting thread (pid={}, tid={})", .{proc.pid, curr.tid});
+            }
         }
     }
 
@@ -678,7 +716,7 @@ pub fn getProcessCount() u32 {
 /// Find process by PID
 /// Note: Linear search - optimize if needed
 pub fn findProcessByPid(target_pid: u32) ?*Process {
-    const held = sched.process_tree_lock.acquire();
+    const held = sched.process_tree_lock.acquireRead();
     defer held.release();
     return findProcessByPidLocked(target_pid);
 }

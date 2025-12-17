@@ -146,14 +146,30 @@ pub const Virtqueue = struct {
     }
 
     /// Free a chain of descriptors starting at head
+    /// Security: Validates device-provided indices to prevent OOB access and infinite loops
     fn freeDescChain(self: *Self, head: u16) void {
+        // Validate head index before starting
+        if (head >= self.size) {
+            // Invalid descriptor index from device - log and abort
+            return;
+        }
+
         var idx = head;
-        while (true) {
+        var count: u16 = 0;
+
+        // Limit iterations to queue size to prevent infinite loops from circular chains
+        while (count < self.size) : (count += 1) {
             const flags = self.desc[idx].flags;
             const next = self.desc[idx].next;
             self.freeDesc(idx);
 
             if (flags & VIRTQ_DESC_F_NEXT == 0) break;
+
+            // Validate next index before following chain
+            if (next >= self.size) {
+                // Invalid next index from device - stop chain traversal
+                break;
+            }
             idx = next;
         }
     }
@@ -220,6 +236,7 @@ pub const Virtqueue = struct {
 
     /// Check for and return the next used buffer
     /// Returns (head_idx, bytes_written) or null if no new entries
+    /// Security: Validates device-provided elem.id before use
     pub fn getUsed(self: *Self) ?struct { head: u16, len: u32 } {
         // Memory barrier to ensure we see device writes
         hal.mmio.memoryBarrier();
@@ -232,10 +249,20 @@ pub const Virtqueue = struct {
         const elem = self.used.ring[used_idx];
         self.last_used_idx +%= 1;
 
-        // Free the descriptor chain
-        self.freeDescChain(@intCast(elem.id));
+        // Validate device-provided descriptor ID before use
+        // elem.id is u32 from device; must be < queue size (which is u16)
+        if (elem.id >= self.size) {
+            // Invalid descriptor ID from device - skip this entry
+            // Do not free descriptors as we don't know which chain it refers to
+            return null;
+        }
 
-        return .{ .head = @intCast(elem.id), .len = elem.len };
+        const head_id: u16 = @intCast(elem.id);
+
+        // Free the descriptor chain
+        self.freeDescChain(head_id);
+
+        return .{ .head = head_id, .len = elem.len };
     }
 
     /// Notify device that new buffers are available
