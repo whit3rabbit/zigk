@@ -49,7 +49,7 @@ Current status: Scheduler decentralized, Per-CPU queues, TLB shootdown, and fine
     - Basic wait/wake operations work
     - Timeout support with proper sleep list integration
     - Remaining: FUTEX_REQUEUE, robust futexes, priority inheritance
-- [ ] **Signals**: Finish signal delivery logic. `checkSignals` exists but `sys_rt_sigreturn` context restoration needs validation against `sys_clone`.
+- [x] **Signals**: Finish signal delivery logic. `checkSignals` exists but `sys_rt_sigreturn` context restoration needs validation against `sys_clone`.
 - [ ] **VDSO**: Map a page into userspace for fast time/getcpu calls without syscall overhead.
 
 ### Phase 5.5: Memory mapping
