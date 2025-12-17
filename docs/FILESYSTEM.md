@@ -395,6 +395,7 @@ zscapek/
 | `process.zig` | Process lifecycle and address space wiring. |
 | `sched.zig` | Scheduler core. |
 | `sync.zig` | Spinlocks and synchronization helpers. |
+| `futex.zig` | Fast Userspace Mutex locking primitives. |
 | `signal.zig` | Signal delivery and handling infrastructure. |
 | `pipe.zig` | Pipe implementation for IPC. |
 | `panic.zig` | Kernel panic handling. |

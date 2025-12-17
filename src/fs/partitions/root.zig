@@ -43,6 +43,7 @@ pub const partition_ops = FileOps{
     .stat = null,
     .ioctl = null,
     .mmap = null,
+    .poll = null,
 };
 
 fn partitionRead(fd: *FileDescriptor, buf: []u8) isize {

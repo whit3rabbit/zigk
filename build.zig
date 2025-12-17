@@ -4,9 +4,21 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     // Freestanding x86_64 target for kernel
-    // code_model=kernel disables Red Zone; we keep SSE enabled to avoid
-    // soft_float issues, but kernel code must save/restore FPU state in interrupts
+    // Kernel target (No SSE/MMX/AVX) to prevent FPU register clobbering
     const kernel_target = b.resolveTargetQuery(.{
+        .cpu_arch = .x86_64,
+        .os_tag = .freestanding,
+        .abi = .none,
+        .cpu_features_sub = std.Target.x86.featureSet(&.{
+            .mmx, .sse, .sse2, .avx, .avx2,
+        }),
+        .cpu_features_add = std.Target.x86.featureSet(&.{
+            .soft_float,
+        }),
+    });
+
+    // User target (SSE enabled) for userspace applications
+    const user_target = b.resolveTargetQuery(.{
         .cpu_arch = .x86_64,
         .os_tag = .freestanding,
         .abi = .none,
@@ -58,6 +70,13 @@ pub fn build(b: *std.Build) void {
     const uapi_module = b.createModule(.{
         .root_source_file = b.path("src/uapi/root.zig"),
         .target = kernel_target,
+        .optimize = optimize,
+    });
+
+    // Create User UAPI module (for user apps with SSE)
+    const user_uapi_module = b.createModule(.{
+        .root_source_file = b.path("src/uapi/root.zig"),
+        .target = user_target,
         .optimize = optimize,
     });
 
@@ -322,6 +341,8 @@ pub fn build(b: *std.Build) void {
     ahci_module.addImport("fd", fd_module);
     ahci_module.addImport("uapi", uapi_module);
     ahci_module.addImport("heap", heap_module);
+    ahci_module.addImport("io", kernel_io_module);
+    ahci_module.addImport("sync", sync_module);
 
     // Create USB driver module (XHCI/EHCI host controllers)
     const usb_module = b.createModule(.{
@@ -479,6 +500,7 @@ pub fn build(b: *std.Build) void {
     devfs_module.addImport("heap", heap_module);
     devfs_module.addImport("audio", audio_module);
     devfs_module.addImport("fs", fs_module);
+    devfs_module.addImport("sync", sync_module);
 
     // Create Partitions module
     const partitions_module = b.createModule(.{
@@ -560,6 +582,9 @@ pub fn build(b: *std.Build) void {
     user_mem_module.addImport("vmm", vmm_module);
     user_mem_module.addImport("sched", sched_module);
 
+    // Add user_mem to sched (circular dependency allowed in Zig modules)
+    sched_module.addImport("user_mem", user_mem_module);
+
     // Create Pipe module (IPC)
     const pipe_module = b.createModule(.{
         .root_source_file = b.path("src/kernel/pipe.zig"),
@@ -640,6 +665,11 @@ pub fn build(b: *std.Build) void {
     futex_module.addImport("vmm", vmm_module);
     futex_module.addImport("console", console_module);
 
+    // Break circular dependency: sched needs futex for timeout handling in wakeSleepingThreads
+    sched_module.addImport("futex", futex_module);
+    // sched needs base.zig for CLONE_CHILD_CLEARTID handling
+    sched_module.addImport("base.zig", syscall_base_module);
+
     // Create syscall scheduling module (sched_yield, nanosleep, etc.)
     const syscall_scheduling_module = b.createModule(.{
         .root_source_file = b.path("src/kernel/syscall/scheduling.zig"),
@@ -651,6 +681,9 @@ pub fn build(b: *std.Build) void {
     syscall_scheduling_module.addImport("hal", hal_module);
     syscall_scheduling_module.addImport("sched", sched_module);
     syscall_scheduling_module.addImport("futex", futex_module);
+    syscall_scheduling_module.addImport("heap", heap_module);
+    syscall_scheduling_module.addImport("fd", fd_module);
+    syscall_scheduling_module.addImport("sync", sync_module);
 
     // Create syscall io module (read, write, stat, etc.)
     const syscall_io_module = b.createModule(.{
@@ -983,13 +1016,21 @@ pub fn build(b: *std.Build) void {
     // Need to add uapi dependency to syscall lib
     syscall_lib.addImport("uapi", uapi_module);
 
+    // Create syscall library for USER applications (SSE enabled)
+    const user_syscall_lib = b.createModule(.{
+        .root_source_file = b.path("src/user/lib/syscall.zig"),
+        .target = user_target,
+        .optimize = optimize, 
+    });
+    user_syscall_lib.addImport("uapi", user_uapi_module);
+
     const shell_mod = b.createModule(.{
         .root_source_file = b.path("src/user/shell/main.zig"),
-        .target = kernel_target,
+        .target = user_target,
         .optimize = optimize,
         .code_model = .small, // User code doesn't need kernel code model
     });
-    shell_mod.addImport("syscall", syscall_lib);
+    shell_mod.addImport("syscall", user_syscall_lib);
 
     const shell = b.addExecutable(.{
         .name = "shell.elf",
@@ -1004,11 +1045,11 @@ pub fn build(b: *std.Build) void {
 
     const httpd_mod = b.createModule(.{
         .root_source_file = b.path("src/user/httpd/main.zig"),
-        .target = kernel_target,
+        .target = user_target,
         .optimize = optimize,
         .code_model = .small,
     });
-    httpd_mod.addImport("syscall", syscall_lib);
+    httpd_mod.addImport("syscall", user_syscall_lib);
 
     const httpd = b.addExecutable(.{
         .name = "httpd.elf",
@@ -1024,33 +1065,33 @@ pub fn build(b: *std.Build) void {
     // Create libc module with syscall dependency
     const doom_libc_module = b.createModule(.{
         .root_source_file = b.path("src/user/lib/libc/root.zig"),
-        .target = kernel_target,
+        .target = user_target,
         .optimize = optimize,
     });
-    doom_libc_module.addImport("syscall.zig", syscall_lib);
+    doom_libc_module.addImport("syscall.zig", user_syscall_lib);
 
     // Create platform hooks module
     const doom_platform_module = b.createModule(.{
         .root_source_file = b.path("src/user/doom/doomgeneric_zscapek.zig"),
-        .target = kernel_target,
+        .target = user_target,
         .optimize = optimize,
     });
-    doom_platform_module.addImport("syscall", syscall_lib);
+    doom_platform_module.addImport("syscall", user_syscall_lib);
 
     // Create sound stubs module
     const doom_sound_module = b.createModule(.{
         .root_source_file = b.path("src/user/doom/i_sound_stub.zig"),
-        .target = kernel_target,
+        .target = user_target,
         .optimize = optimize,
     });
 
     const doom_mod = b.createModule(.{
         .root_source_file = b.path("src/user/doom/main.zig"),
-        .target = kernel_target,
+        .target = user_target,
         .optimize = optimize,
         .code_model = .small,
     });
-    doom_mod.addImport("syscall", syscall_lib);
+    doom_mod.addImport("syscall", user_syscall_lib);
     doom_mod.addImport("libc", doom_libc_module);
     doom_mod.addImport("doomgeneric_zscapek.zig", doom_platform_module);
     doom_mod.addImport("i_sound_stub.zig", doom_sound_module);
@@ -1063,11 +1104,11 @@ pub fn build(b: *std.Build) void {
     // Create UART Driver module
     const uart_driver_mod = b.createModule(.{
         .root_source_file = b.path("src/user/drivers/uart/main.zig"),
-        .target = kernel_target,
+        .target = user_target,
         .optimize = optimize,
         .code_model = .small,
     });
-    uart_driver_mod.addImport("syscall", syscall_lib);
+    uart_driver_mod.addImport("syscall", user_syscall_lib);
 
     const uart_driver = b.addExecutable(.{
         .name = "uart_driver.elf",
@@ -1081,11 +1122,11 @@ pub fn build(b: *std.Build) void {
     // Create PS/2 driver executable (userspace driver)
     const ps2_driver_mod = b.createModule(.{
         .root_source_file = b.path("src/user/drivers/ps2/main.zig"),
-        .target = kernel_target,
+        .target = user_target,
         .optimize = optimize,
         .code_model = .small,
     });
-    ps2_driver_mod.addImport("syscall", syscall_lib);
+    ps2_driver_mod.addImport("syscall", user_syscall_lib);
 
     const ps2_driver = b.addExecutable(.{
         .name = "ps2_driver.elf",
@@ -1100,11 +1141,11 @@ pub fn build(b: *std.Build) void {
     // Create VirtIO-Net Driver module (userspace VirtIO network driver)
     const virtio_net_driver_mod = b.createModule(.{
         .root_source_file = b.path("src/user/drivers/virtio_net/main.zig"),
-        .target = kernel_target,
+        .target = user_target,
         .optimize = optimize,
         .code_model = .small,
     });
-    virtio_net_driver_mod.addImport("syscall", syscall_lib);
+    virtio_net_driver_mod.addImport("syscall", user_syscall_lib);
 
     const virtio_net_driver = b.addExecutable(.{
         .name = "virtio_net_driver.elf",
@@ -1118,11 +1159,11 @@ pub fn build(b: *std.Build) void {
     // Create VirtIO-Blk Driver module (userspace VirtIO block driver)
     const virtio_blk_driver_mod = b.createModule(.{
         .root_source_file = b.path("src/user/drivers/virtio_blk/main.zig"),
-        .target = kernel_target,
+        .target = user_target,
         .optimize = optimize,
         .code_model = .small,
     });
-    virtio_blk_driver_mod.addImport("syscall", syscall_lib);
+    virtio_blk_driver_mod.addImport("syscall", user_syscall_lib);
 
     const virtio_blk_driver = b.addExecutable(.{
         .name = "virtio_blk_driver.elf",
@@ -1187,6 +1228,8 @@ pub fn build(b: *std.Build) void {
         "test_wait4",
         "test_clock",
         "test_random",
+        "test_threads",
+        "test_signals_fpu",
     };
 
     const test_step_build = b.step("build-tests", "Build C integration tests");
@@ -1211,11 +1254,7 @@ pub fn build(b: *std.Build) void {
         .name = "test_asm",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/user/test_asm.zig"),
-            .target = b.resolveTargetQuery(.{
-                .cpu_arch = .x86_64,
-                .os_tag = .freestanding,
-                .abi = .none,
-            }),
+            .target = user_target,
             .optimize = optimize,
         }),
     });
@@ -1226,14 +1265,10 @@ pub fn build(b: *std.Build) void {
     // writev Test (Zig userland test for writev syscall)
     const test_writev_mod = b.createModule(.{
         .root_source_file = b.path("tests/userland/test_writev.zig"),
-        .target = b.resolveTargetQuery(.{
-            .cpu_arch = .x86_64,
-            .os_tag = .freestanding,
-            .abi = .none,
-        }),
+        .target = user_target,
         .optimize = optimize,
     });
-    test_writev_mod.addImport("syscall", syscall_lib);
+    test_writev_mod.addImport("syscall", user_syscall_lib);
 
     const test_writev = b.addExecutable(.{
         .name = "test_writev",
@@ -1246,14 +1281,10 @@ pub fn build(b: *std.Build) void {
     // Audio Test
     const audio_test_mod = b.createModule(.{
         .root_source_file = b.path("src/user/audio_test.zig"),
-        .target = b.resolveTargetQuery(.{
-             .cpu_arch = .x86_64,
-             .os_tag = .freestanding,
-             .abi = .none,
-        }),
+        .target = user_target,
         .optimize = optimize,
     });
-    audio_test_mod.addImport("syscall", syscall_lib);
+    audio_test_mod.addImport("syscall", user_syscall_lib);
 
     const audio_test = b.addExecutable(.{
         .name = "audio_test",
@@ -1285,6 +1316,8 @@ pub fn build(b: *std.Build) void {
         \\cp zig-out/bin/test_clock iso_root/boot/modules/ && \
         \\cp zig-out/bin/test_random iso_root/boot/modules/ && \
         \\cp zig-out/bin/test_asm iso_root/boot/modules/ && \
+        \\cp zig-out/bin/test_threads iso_root/boot/modules/ && \
+        \\cp zig-out/bin/test_signals_fpu iso_root/boot/modules/ && \
         \\cp zig-out/bin/test_writev iso_root/boot/modules/ && \
         \\cp zig-out/bin/audio_test iso_root/boot/modules/ && \
         \\cp zig-out/bin/audio_test iso_root/boot/modules/ && \

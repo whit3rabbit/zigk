@@ -22,6 +22,7 @@ const ahci = @import("ahci");
 const audio = @import("audio");
 const vfs = @import("fs").vfs; // Import VFS for Error type
 const heap = @import("heap");
+const sync = @import("sync");
 
 const FileDescriptor = fd_mod.FileDescriptor;
 const FileOps = fd_mod.FileOps;
@@ -40,6 +41,7 @@ pub const console_ops = FileOps{
     .stat = null,
     .ioctl = null,
     .mmap = null,
+    .poll = null,
 };
 
 /// Read from console (keyboard input)
@@ -107,6 +109,7 @@ pub const null_ops = FileOps{
     .stat = null,
     .ioctl = null,
     .mmap = null,
+    .poll = null,
 };
 
 /// Read from /dev/null always returns EOF (0 bytes)
@@ -135,6 +138,7 @@ pub const zero_ops = FileOps{
     .stat = null,
     .ioctl = null,
     .mmap = null,
+    .poll = null,
 };
 
 /// Read from /dev/zero fills buffer with zeros
@@ -182,13 +186,25 @@ const builtin_devices = [_]DeviceEntry{
 /// Dynamic device list head
 var dynamic_devices: ?*DeviceEntry = null;
 
+/// Lock protecting dynamic_devices linked list
+/// Required for thread-safe device registration and lookup
+var registry_lock: sync.Spinlock = .{};
+
 /// Register a new device
+/// Thread-safe: protected by registry_lock
 pub fn registerDevice(name: []const u8, ops: *const FileOps, private_data: ?*anyopaque) !void {
     const allocator = heap.allocator();
-    const entry = try allocator.create(DeviceEntry);
 
-    // Duplicate name
+    // Allocate outside lock to minimize critical section
+    const entry = try allocator.create(DeviceEntry);
+    errdefer allocator.destroy(entry);
+
     const name_copy = try allocator.dupe(u8, name);
+    errdefer allocator.free(name_copy);
+
+    // Critical section: link into list
+    const held = registry_lock.acquire();
+    defer held.release();
 
     entry.* = DeviceEntry{
         .name = name_copy,
@@ -202,6 +218,7 @@ pub fn registerDevice(name: []const u8, ops: *const FileOps, private_data: ?*any
 
 /// Look up device entry by path
 /// Returns null if path is not a known device
+/// Thread-safe: dynamic device list access protected by registry_lock
 pub fn lookupDeviceEntry(path: []const u8) ?*const DeviceEntry {
     // Check if path starts with /dev/
     const name = if (std.mem.startsWith(u8, path, "/dev/"))
@@ -209,14 +226,17 @@ pub fn lookupDeviceEntry(path: []const u8) ?*const DeviceEntry {
     else
         path;
 
-    // Check builtin devices
+    // Check builtin devices first (immutable, no lock needed)
     for (&builtin_devices) |*dev| {
         if (std.mem.eql(u8, name, dev.name)) {
             return dev;
         }
     }
 
-    // Check dynamic devices
+    // Check dynamic devices (requires lock)
+    const held = registry_lock.acquire();
+    defer held.release();
+
     var current = dynamic_devices;
     while (current) |dev| {
         if (std.mem.eql(u8, name, dev.name)) {

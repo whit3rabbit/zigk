@@ -39,6 +39,16 @@ pub const ThreadState = enum(u8) {
     Zombie,
 };
 
+/// Futex wakeup reason - distinguishes timeout from normal wakeup
+pub const FutexWakeupReason = enum(u8) {
+    /// Not waiting on a futex
+    none,
+    /// Woken by FUTEX_WAKE
+    woken,
+    /// Woken by timeout expiry
+    timeout,
+};
+
 /// Thread structure
 ///
 /// Represents an execution context in the kernel.
@@ -134,6 +144,23 @@ pub const Thread = struct {
     /// Last CPU this thread ran on (for cache-aware scheduling)
     /// Set during context switch, used to prefer same CPU on next schedule
     last_cpu: u32 = 0,
+
+    /// Address in userspace to clear (zero) and wake (futex) when thread exits.
+    /// Used by pthread_join() implementations (CLONE_CHILD_CLEARTID).
+    clear_child_tid: u64 = 0,
+
+    // Futex timeout support
+
+    /// Reason for most recent futex wakeup (timeout vs normal wake)
+    futex_wakeup_reason: FutexWakeupReason = .none,
+
+    /// Opaque pointer to FutexBucket when waiting with timeout
+    /// Used by wakeSleepingThreads to find and remove from wait queue on timeout
+    futex_bucket: ?*anyopaque = null,
+
+    /// Wait queue linkage (separate from sleep_next/prev to allow simultaneous membership)
+    wait_queue_next: ?*Thread = null,
+    wait_queue_prev: ?*Thread = null,
 
     /// Get thread name as a slice
     pub fn getName(self: *const Thread) []const u8 {
@@ -298,6 +325,7 @@ pub fn createKernelThread(
         .fpu_state = fpu.FpuState.init(),
         .fpu_used = false, // Lazy FPU: will be set true on first FPU access
         .fs_base = 0, // TLS base, set via arch_prctl
+        .clear_child_tid = 0,
         .name = [_]u8{0} ** 32,
         .next = null,
         .prev = null,
@@ -434,6 +462,7 @@ pub fn createUserThread(
         .fpu_state = fpu.FpuState.init(),
         .fpu_used = false,
         .fs_base = 0, // TLS base, set via arch_prctl
+        .clear_child_tid = 0,
         .name = [_]u8{0} ** 32,
         .next = null,
         .prev = null,

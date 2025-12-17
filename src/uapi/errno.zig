@@ -142,6 +142,12 @@ pub const Errno = enum(i32) {
     /// Socket operation on non-socket
     ENOTSOCK = 88,
 
+    /// Destination address required
+    EDESTADDRREQ = 89,
+
+    /// Message too long
+    EMSGSIZE = 90,
+
     /// Protocol not supported
     EPROTONOSUPPORT = 93,
 
@@ -245,6 +251,8 @@ pub const ELOOP = Errno.ELOOP;
 pub const ENOMSG = Errno.ENOMSG;
 pub const EIDRM = Errno.EIDRM;
 pub const ENOTSOCK = Errno.ENOTSOCK;
+pub const EDESTADDRREQ_ALIAS = Errno.EDESTADDRREQ;
+pub const EMSGSIZE = Errno.EMSGSIZE;
 pub const EPROTONOSUPPORT = Errno.EPROTONOSUPPORT;
 pub const ESOCKTNOSUPPORT = Errno.ESOCKTNOSUPPORT;
 pub const EAFNOSUPPORT = Errno.EAFNOSUPPORT;
@@ -332,6 +340,7 @@ pub const SyscallError = error{
     EISCONN,
     ENOTCONN,
     EDESTADDRREQ,
+    EMSGSIZE,
 };
 
 /// Convert SyscallError to negative isize return value for syscall ABI
@@ -396,6 +405,7 @@ pub fn errorToReturn(err: SyscallError) isize {
         error.EALREADY => 114,
         error.EINPROGRESS => 115,
         error.EDESTADDRREQ => 89,
+        error.EMSGSIZE => 90,
     };
     return -@as(isize, errno_val);
 }

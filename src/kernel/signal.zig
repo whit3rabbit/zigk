@@ -86,11 +86,39 @@ fn setupSignalFrame(frame: *hal.idt.InterruptFrame, signum: usize, action: uapi.
     sp = (sp - 128) & ~@as(u64, 15);
 
     // Calculate size of ucontext/sigframe
-    // For MVP, we'll use a simplified frame:
+    // Layout:
     // [return address (trampoline)]
     // [ucontext]
+    // [fpu_state (512 bytes)]
+    
+    // Reserve space for FPU state (512 bytes) + alignment
+    // We do this first (higher address) so ucontext can point to it
+    // 512 bytes is standard size for FXSAVE area
+    var fpstate_addr: usize = 0;
+    
+    // Check if we need to save FPU state
+    const current_thread = sched.getCurrentThread().?;
+    // always save FPU state to stack (it might be in regs or memory)
+    if (current_thread.fpu_used) {
+        // State is in registers, save to memory first
+        hal.fpu.fxsave(&current_thread.fpu_state);
+    }
+
+    // Now current_thread.fpu_state is up to date. Copy to stack.
+    sp -= 512; // Standard FXSAVE size
+    sp &= ~@as(u64, 15); // Align to 16 bytes
+    fpstate_addr = sp;
+
+    // Copy FPU state to user stack
+    UserPtr.from(fpstate_addr).writeValue(current_thread.fpu_state) catch {
+            console.err("Signal: Failed to write FPU state to stack", .{});
+            sched.exitWithStatus(128 + 11);
+            return frame;
+    };
+
     const ucontext_size = @sizeOf(uapi.signal.UContext);
     sp -= ucontext_size;
+    sp &= ~@as(u64, 15); // Force alignment to 16 bytes
 
     // Save context to user stack
     // We need to construct UContext
@@ -130,7 +158,7 @@ fn setupSignalFrame(frame: *hal.idt.InterruptFrame, signum: usize, action: uapi.
             .trapno = frame.vector,
             .oldmask = 0, // TODO: Save current signal mask
             .cr2 = 0, // TODO: Save CR2 for page faults
-            .fpstate = 0, // TODO: Save FPU state
+            .fpstate = fpstate_addr, // Pointer to saved FPU state (or 0)
             .reserved = [_]u64{0} ** 8,
         },
         .sigmask = sched.getCurrentThread().?.sigmask,

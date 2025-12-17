@@ -37,6 +37,7 @@ pub const types = @import("types.zig");
 pub const pool = @import("pool.zig");
 pub const reactor = @import("reactor.zig");
 pub const timer = @import("timer.zig");
+pub const kernel_io = @import("kernel_io.zig");
 
 // Re-export commonly used types
 pub const IoRequest = types.IoRequest;
@@ -44,6 +45,11 @@ pub const IoResult = types.IoResult;
 pub const IoOpType = types.IoOpType;
 pub const IoRequestState = types.IoRequestState;
 pub const Future = types.Future;
+
+// Re-export KernelIo types
+pub const KernelIo = kernel_io.KernelIo;
+pub const KernelIoError = kernel_io.KernelIoError;
+pub const AsyncHandle = kernel_io.AsyncHandle;
 
 pub const IoRequestPool = pool.IoRequestPool;
 pub const MAX_REQUESTS = pool.MAX_REQUESTS;

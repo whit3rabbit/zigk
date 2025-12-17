@@ -28,6 +28,7 @@ pub const block_ops = FileOps{
     .stat = null,
     .ioctl = null,
     .mmap = null,
+    .poll = null,
 };
 
 /// Read from block device

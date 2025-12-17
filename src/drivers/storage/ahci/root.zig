@@ -17,6 +17,8 @@ const pci = @import("pci");
 const vmm = @import("vmm");
 const pmm = @import("pmm");
 const heap = @import("heap");
+const io = @import("io");
+const sync = @import("sync");
 
 pub const hba = @import("hba.zig");
 pub const port = @import("port.zig");
@@ -107,6 +109,16 @@ pub const AhciPort = struct {
     /// Device identify data (if available)
     identify: ?fis.IdentifyData,
 
+    /// Pending async requests per command slot (32 slots max)
+    /// Set before issuing command, cleared by IRQ handler
+    pending_requests: [32]?*io.IoRequest,
+
+    /// Bitmask of commands currently issued (for IRQ handler)
+    commands_issued: u32,
+
+    /// Lock protecting pending_requests and commands_issued
+    pending_lock: sync.Spinlock,
+
     /// Initialize port as inactive
     pub fn initInactive(num: u5) AhciPort {
         return AhciPort{
@@ -121,6 +133,9 @@ pub const AhciPort = struct {
             .cmd_tables_phys = [_]u64{0} ** 32,
             .cmd_tables_virt = [_]u64{0} ** 32,
             .identify = null,
+            .pending_requests = [_]?*io.IoRequest{null} ** 32,
+            .commands_issued = 0,
+            .pending_lock = .{},
         };
     }
 
@@ -739,6 +754,221 @@ pub const AhciController = struct {
         }
         return null;
     }
+
+    // ========================================================================
+    // Async I/O Methods
+    // ========================================================================
+
+    /// Find a free command slot on a port
+    fn findFreeSlot(self: *Self, port_num: u5) ?u5 {
+        const p = &self.ports[port_num];
+        const held = p.pending_lock.acquire();
+        defer held.release();
+
+        // Find first unissued slot
+        var slot: u5 = 0;
+        while (slot < 32) : (slot += 1) {
+            if ((p.commands_issued & (@as(u32, 1) << slot)) == 0) {
+                return slot;
+            }
+        }
+        return null;
+    }
+
+    /// Read sectors asynchronously (non-blocking)
+    /// Caller provides an IoRequest from the reactor pool.
+    /// The request will be completed by the IRQ handler.
+    pub fn readSectorsAsync(
+        self: *Self,
+        port_num: u5,
+        lba: u64,
+        sector_count: u16,
+        buf_phys: u64,
+        request: *io.IoRequest,
+    ) AhciError!void {
+        const p = &self.ports[port_num];
+        if (!p.active) {
+            return AhciError.PortNotConnected;
+        }
+
+        if (sector_count == 0 or sector_count > MAX_SECTORS_PER_TRANSFER) {
+            return AhciError.InvalidParameter;
+        }
+
+        // Find free command slot
+        const slot = self.findFreeSlot(port_num) orelse return AhciError.AllocationFailed;
+
+        // Set up request metadata
+        request.op_data = .{ .disk = .{
+            .lba = lba,
+            .sector_count = sector_count,
+            .port = port_num,
+            .slot = slot,
+            ._reserved = .{ 0, 0, 0, 0 },
+        } };
+
+        // Set up command table
+        const cmd_list: *command.CommandList = @ptrFromInt(p.cmd_list_virt);
+        const table: *command.CommandTableBase = @ptrFromInt(p.cmd_tables_virt[slot]);
+
+        // Build READ DMA EXT command
+        command.buildReadDmaExt(table, @intCast(lba), sector_count);
+
+        // Set up command header
+        cmd_list[slot].initRead(p.cmd_tables_phys[slot], 1);
+
+        // Set up PRDT entry (single contiguous buffer)
+        const prdt: *command.PrdtEntry = @ptrFromInt(p.cmd_tables_virt[slot] + @sizeOf(command.CommandTableBase));
+        const total_bytes: u32 = @as(u32, sector_count) * SECTOR_SIZE;
+        prdt.* = command.PrdtEntry.init(buf_phys, total_bytes, true);
+
+        // Register pending request under lock
+        {
+            const held = p.pending_lock.acquire();
+            defer held.release();
+
+            p.pending_requests[slot] = request;
+            p.commands_issued |= @as(u32, 1) << slot;
+        }
+
+        // Transition request to in_progress
+        _ = request.compareAndSwapState(.pending, .in_progress);
+
+        // Issue the command (non-blocking - IRQ will complete it)
+        port.writeCi(p.base, @as(u32, 1) << slot);
+    }
+
+    /// Write sectors asynchronously (non-blocking)
+    pub fn writeSectorsAsync(
+        self: *Self,
+        port_num: u5,
+        lba: u64,
+        sector_count: u16,
+        buf_phys: u64,
+        request: *io.IoRequest,
+    ) AhciError!void {
+        const p = &self.ports[port_num];
+        if (!p.active) {
+            return AhciError.PortNotConnected;
+        }
+
+        if (sector_count == 0 or sector_count > MAX_SECTORS_PER_TRANSFER) {
+            return AhciError.InvalidParameter;
+        }
+
+        // Find free command slot
+        const slot = self.findFreeSlot(port_num) orelse return AhciError.AllocationFailed;
+
+        // Set up request metadata
+        request.op_data = .{ .disk = .{
+            .lba = lba,
+            .sector_count = sector_count,
+            .port = port_num,
+            .slot = slot,
+            ._reserved = .{ 0, 0, 0, 0 },
+        } };
+
+        // Set up command table
+        const cmd_list: *command.CommandList = @ptrFromInt(p.cmd_list_virt);
+        const table: *command.CommandTableBase = @ptrFromInt(p.cmd_tables_virt[slot]);
+
+        // Build WRITE DMA EXT command
+        command.buildWriteDmaExt(table, @intCast(lba), sector_count);
+
+        // Set up command header
+        cmd_list[slot].initWrite(p.cmd_tables_phys[slot], 1);
+
+        // Set up PRDT entry
+        const prdt: *command.PrdtEntry = @ptrFromInt(p.cmd_tables_virt[slot] + @sizeOf(command.CommandTableBase));
+        const total_bytes: u32 = @as(u32, sector_count) * SECTOR_SIZE;
+        prdt.* = command.PrdtEntry.init(buf_phys, total_bytes, true);
+
+        // Register pending request under lock
+        {
+            const held = p.pending_lock.acquire();
+            defer held.release();
+
+            p.pending_requests[slot] = request;
+            p.commands_issued |= @as(u32, 1) << slot;
+        }
+
+        // Transition request to in_progress
+        _ = request.compareAndSwapState(.pending, .in_progress);
+
+        // Issue the command
+        port.writeCi(p.base, @as(u32, 1) << slot);
+    }
+
+    /// Handle AHCI interrupt - called from IRQ handler
+    /// Checks all ports for completed commands and completes IoRequests
+    pub fn handleInterrupt(self: *Self) void {
+        // Read and clear global interrupt status
+        const is = hba.readInterruptStatus(self.hba_base);
+        if (is == 0) return;
+
+        // Clear the bits we're handling
+        hba.clearInterruptStatus(self.hba_base, is);
+
+        // Process each port that has an interrupt pending
+        var port_mask = is;
+        while (port_mask != 0) {
+            const port_num: u5 = @intCast(@ctz(port_mask));
+            port_mask &= ~(@as(u32, 1) << port_num);
+
+            self.handlePortInterrupt(port_num);
+        }
+    }
+
+    /// Handle interrupt for a specific port
+    fn handlePortInterrupt(self: *Self, port_num: u5) void {
+        const p = &self.ports[port_num];
+        if (!p.active) return;
+
+        // Read and clear port interrupt status
+        const pis = port.readIs(p.base);
+        port.clearIs(p.base, pis);
+
+        // Check which commands completed
+        const ci = port.readCi(p.base);
+
+        // Commands that were issued but are no longer in CI have completed
+        const completed = p.commands_issued & ~ci;
+
+        if (completed == 0) return;
+
+        // Check for errors
+        const tfd = port.readTfd(p.base);
+        const has_error = tfd.hasError() or pis.hasError();
+
+        // Complete each finished command's request
+        var slot_mask = completed;
+        while (slot_mask != 0) {
+            const slot: u5 = @intCast(@ctz(slot_mask));
+            slot_mask &= ~(@as(u32, 1) << slot);
+
+            // Get and clear pending request under lock
+            var req: ?*io.IoRequest = null;
+            {
+                const held = p.pending_lock.acquire();
+                defer held.release();
+
+                req = p.pending_requests[slot];
+                p.pending_requests[slot] = null;
+                p.commands_issued &= ~(@as(u32, 1) << slot);
+            }
+
+            // Complete the IoRequest
+            if (req) |request| {
+                if (has_error) {
+                    _ = request.complete(.{ .err = error.EIO });
+                } else {
+                    // Success - return bytes transferred
+                    const bytes = @as(usize, request.op_data.disk.sector_count) * SECTOR_SIZE;
+                    _ = request.complete(.{ .success = bytes });
+                }
+            }
+        }
+    }
 };
 
 // ============================================================================
@@ -767,4 +997,41 @@ pub fn initFromPci(pci_dev: *const pci.PciDevice, pci_access: pci.PciAccess) Ahc
 /// Get the global controller instance
 pub fn getController() ?*AhciController {
     return controller_instance;
+}
+
+// ============================================================================
+// IRQ Handler
+// ============================================================================
+
+/// AHCI IRQ handler - called from interrupt dispatcher
+pub fn ahciIrqHandler(ctx: ?*anyopaque) void {
+    if (ctx) |ptr| {
+        const controller: *AhciController = @ptrCast(@alignCast(ptr));
+        controller.handleInterrupt();
+    } else if (controller_instance) |controller| {
+        controller.handleInterrupt();
+    }
+}
+
+/// Register AHCI IRQ handler with the interrupt system
+/// Call this after initFromPci to enable interrupt-driven I/O
+pub fn registerIrqHandler(controller: *AhciController) void {
+    const irq = controller.pci_dev.irq_line;
+    if (irq == 0 or irq == 255) {
+        console.warn("AHCI: No valid IRQ line configured", .{});
+        return;
+    }
+
+    // IRQ line + PIC offset (typically 32 for hardware IRQs)
+    const vector = @as(u8, @intCast(irq)) + 32;
+
+    // Register with interrupt system
+    hal.interrupts.registerHandler(vector, ahciIrqHandler, @ptrCast(controller));
+
+    // Enable global HBA interrupts
+    var ghc = hba.readGhc(controller.hba_base);
+    ghc.ie = true;
+    hba.writeGhc(controller.hba_base, ghc);
+
+    console.info("AHCI: IRQ handler registered on vector {d}", .{vector});
 }

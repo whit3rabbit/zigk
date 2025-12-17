@@ -77,6 +77,20 @@ pub fn loadInitProcess() void {
     var selected_mod: ?*limine.Module = null;
     var process_name: []const u8 = "init";
 
+    // Priority 0: Signals FPU Test
+    if (selected_mod == null) {
+        for (mods) |mod| {
+            const cmdline = get_str(mod.cmdline);
+            const path = get_str(mod.path);
+    
+            if (std.mem.indexOf(u8, cmdline, "test_signals_fpu") != null or std.mem.indexOf(u8, path, "test_signals_fpu") != null) {
+                selected_mod = mod;
+                process_name = "test_signals_fpu";
+                break;
+            }
+        }
+    }
+
     // Priority 0.1: ASM Test (Sanity Check)
     if (selected_mod == null) {
         for (mods) |mod| {

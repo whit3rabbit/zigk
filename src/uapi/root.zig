@@ -18,6 +18,8 @@ pub const input = @import("input.zig");
 pub const mman = @import("mman.zig");
 pub const sched = @import("sched.zig");
 pub const futex = @import("futex.zig");
+pub const epoll = @import("epoll.zig");
+pub const io_ring = @import("io_ring.zig");
 
 
 // Re-export commonly used types

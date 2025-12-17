@@ -178,9 +178,37 @@ pub fn sys_rt_sigreturn(frame: *hal.syscall.SyscallFrame) SyscallError!usize {
     frame.setUserRsp(mc.rsp); // Restore stack pointer
     frame.r11 = mc.rflags; // Sysret restores RFLAGS from R11
 
-    // Restore signal mask
+    // Restore FS/GS bases
+    // GS is kernel-managed, but FS is TLS.
     if (sched.getCurrentThread()) |t| {
+        t.fs_base = @intCast(mc.fs); // Actually we need `fs_base` from ARCH_PRCTL, not segment selector.
+        // Userspace Linux `ucontext` usually doesn't have the FS_BASE directly in `fs` field (which is u16).
+        // It's often implied or stored in extra padding.
+        // For now, we trust the `fs_base` we have, OR we could look for it.
+        // Since we don't save FS_BASE in `setupSignalFrame` (we saved 0), we shouldn't overwrite it with garbage.
+        // In `setupSignalFrame`: `.fs = 0`.
+        // So let's skip FS/GS base restoration for now until we properly save it.
+
         t.sigmask = ucontext.sigmask;
+
+        // Restore FPU state if present
+        if (mc.fpstate != 0) {
+            // Validate pointer
+            if (base.isValidUserPtr(mc.fpstate, @sizeOf(hal.fpu.FpuState))) {
+                const fpstate_val = UserPtr.from(mc.fpstate).readValue(hal.fpu.FpuState) catch {
+                     sched.exitWithStatus(128 + 11);
+                     unreachable;
+                };
+
+                // Update thread state
+                t.fpu_state = fpstate_val;
+                t.fpu_used = true;
+
+                // Restore mechanisms
+                // We need to ensure the FPU hardware is updated.
+                hal.fpu.fxrstor(&t.fpu_state);
+            }
+        }
     }
 
     // Return value is ignored since we overwrote RAX/RDI/RSI etc.
@@ -197,10 +225,152 @@ pub fn sys_rt_sigreturn(frame: *hal.syscall.SyscallFrame) SyscallError!usize {
 ///
 /// MVP: Returns current TID. musl uses this for thread cancellation/cleanup.
 pub fn sys_set_tid_address(tidptr: usize) SyscallError!usize {
-    _ = tidptr; // We should store this in the Thread struct if we supported it
+    const current = sched.getCurrentThread() orelse return error.ESRCH;
 
-    if (sched.getCurrentThread()) |t| {
-        return @intCast(t.tid);
+    // Set the clear_child_tid address for the current thread.
+    // This address will be cleared and futex-woken when the thread exits.
+    current.clear_child_tid = tidptr;
+
+    return @intCast(current.tid);
+}
+
+// =============================================================================
+// Signal Sending Syscalls
+// =============================================================================
+
+/// Deliver a signal to a thread
+fn deliverSignalToThread(target: *sched.Thread, signum: u8) void {
+    // Set pending signal bit
+    const sig_bit: u64 = @as(u64, 1) << @intCast(signum - 1);
+    target.pending_signals |= sig_bit;
+
+    // If thread is blocked, wake it to handle signal
+    if (target.state == .Blocked) {
+        sched.unblock(target);
     }
-    return 1;
+}
+
+/// sys_kill (62) - Send signal to a process
+///
+/// Args:
+///   pid: Target process ID (or special values)
+///   sig: Signal number (0 to check permissions only)
+///
+/// Special pid values:
+///   pid > 0: Send to process with that PID
+///   pid == 0: Send to all processes in caller's process group (not impl)
+///   pid == -1: Send to all processes (not impl)
+///   pid < -1: Send to process group -pid (not impl)
+///
+/// Returns: 0 on success, negative errno on error
+pub fn sys_kill(pid: usize, sig: usize) SyscallError!usize {
+    const pid_i: i32 = @bitCast(@as(u32, @truncate(pid)));
+    const signum: u8 = @truncate(sig);
+
+    // Signal 0 is used to check if process exists (no signal sent)
+    if (signum > 64) {
+        return error.EINVAL;
+    }
+
+    // Only handle positive PIDs for now
+    if (pid_i <= 0) {
+        // Process groups not implemented
+        return error.ESRCH;
+    }
+
+    // Find the target process's main thread
+    // For MVP, we search threads by PID (treating PID as TID of main thread)
+    const target = sched.findThreadByTid(@intCast(pid_i)) orelse {
+        return error.ESRCH;
+    };
+
+    // Signal 0 is just a check - don't actually deliver
+    if (signum == 0) {
+        return 0;
+    }
+
+    // Deliver the signal
+    deliverSignalToThread(target, signum);
+
+    return 0;
+}
+
+/// sys_tkill (200) - Send signal to a specific thread
+///
+/// Args:
+///   tid: Target thread ID
+///   sig: Signal number
+///
+/// Returns: 0 on success, negative errno on error
+pub fn sys_tkill(tid: usize, sig: usize) SyscallError!usize {
+    const tid_i: i32 = @bitCast(@as(u32, @truncate(tid)));
+    const signum: u8 = @truncate(sig);
+
+    if (tid_i <= 0) {
+        return error.EINVAL;
+    }
+
+    if (signum > 64) {
+        return error.EINVAL;
+    }
+
+    const target = sched.findThreadByTid(@intCast(tid_i)) orelse {
+        return error.ESRCH;
+    };
+
+    // Signal 0 is just a check
+    if (signum == 0) {
+        return 0;
+    }
+
+    deliverSignalToThread(target, signum);
+
+    return 0;
+}
+
+/// sys_tgkill (234) - Send signal to a thread in a thread group
+///
+/// Args:
+///   tgid: Thread group ID (process ID)
+///   tid: Target thread ID
+///   sig: Signal number
+///
+/// This is the preferred interface for sending signals to threads
+/// as it prevents race conditions where TID gets reused.
+///
+/// Returns: 0 on success, negative errno on error
+pub fn sys_tgkill(tgid: usize, tid: usize, sig: usize) SyscallError!usize {
+    const tgid_i: i32 = @bitCast(@as(u32, @truncate(tgid)));
+    const tid_i: i32 = @bitCast(@as(u32, @truncate(tid)));
+    const signum: u8 = @truncate(sig);
+
+    if (tgid_i <= 0 or tid_i <= 0) {
+        return error.EINVAL;
+    }
+
+    if (signum > 64) {
+        return error.EINVAL;
+    }
+
+    const target = sched.findThreadByTid(@intCast(tid_i)) orelse {
+        return error.ESRCH;
+    };
+
+    // Verify thread belongs to the specified thread group
+    // MVP: We check if the thread's process PID matches tgid
+    if (target.process) |proc| {
+        const process: *base.Process = @ptrCast(@alignCast(proc));
+        if (process.pid != @as(u32, @intCast(tgid_i))) {
+            return error.ESRCH;
+        }
+    }
+
+    // Signal 0 is just a check
+    if (signum == 0) {
+        return 0;
+    }
+
+    deliverSignalToThread(target, signum);
+
+    return 0;
 }

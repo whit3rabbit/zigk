@@ -23,10 +23,17 @@ const vmm = @import("vmm");
 const BUCKET_COUNT = 256; // Power of 2 for fast modulus
 
 /// Hash bucket for futex queues
-const FutexBucket = struct {
+/// Public so wakeSleepingThreads can access when handling timeout
+pub const FutexBucket = struct {
     lock: sync.Spinlock = .{},
     queue: sched.WaitQueue = .{},
 };
+
+/// Convert an opaque futex_bucket pointer back to FutexBucket
+/// Used by scheduler when handling futex timeout expiry
+pub fn getBucketFromOpaque(ptr: *anyopaque) *FutexBucket {
+    return @ptrCast(@alignCast(ptr));
+}
 
 /// Global futex hash table
 var futex_table: [BUCKET_COUNT]FutexBucket = undefined;
@@ -60,118 +67,63 @@ fn hash(phys_addr: u64) usize {
 /// 3. Sleep on hash bucket queue corresponding to phys_addr
 ///
 /// Returns:
-///   0 on success (woken up)
-///   EAGAIN if *uaddr != val
-///   EINTR if interrupted
-///   ETIMEDOUT (not impl yet)
+///   success: Thread was woken by FUTEX_WAKE
+///   error.Again: *uaddr != val (EWOULDBLOCK/EAGAIN)
+///   error.TimedOut: Timeout expired before wakeup
+///   error.Fault: Invalid user address
+///   error.PermDenied: No current thread
 pub fn wait(uaddr: u64, val: u32, timeout_ns: ?u64) !void {
-    _ = timeout_ns; // TODO: Implement timeout
-    
-    // We assume init() called by main
-    
     const current = sched.getCurrentThread() orelse return error.PermDenied;
-    
+
     // 1. Translate to physical address
-    // We need the physical address to uniquely identify the lock, especially for shared memory.
-    // Use current process's CR3.
+    // Physical address uniquely identifies the futex, enabling shared memory futexes
     const phys_addr = vmm.translate(current.cr3, uaddr) orelse return error.Fault;
-    
+
     // 2. Compute bucket
     const bucket_idx = hash(phys_addr);
     const bucket = &futex_table[bucket_idx];
-    
+
     // 3. Acquire bucket lock
-    // Critical section starts here to avoid "lost wakeup" race
+    // Critical section prevents lost wakeup race
     const held = bucket.lock.acquire();
-    defer held.release();
-    
-    // 4. Validate value (Atomic Load from user memory)
-    // We must read userspace memory carefully.
-    // If translation fails here or valid check constraint...
-    // Note: We are holding a spinlock, so we shouldn't fault if paged out?
-    // Accessing userspace memory while holding a kernel spinlock is dangerous (page fault = deadlock/panic).
-    //
-    // CORRECT APPROACH:
-    // Pin page? Or just read.
-    // However, if we take a page fault inside a spinlock, the kernel panics in simple OSes.
-    // Zscapek handles kernel page faults?
-    //
-    // For MVP/safety: We should verify access *before* lock?
-    // But the value might change.
-    // Linux does: disable page faults, try read. If fault, drop lock, fault in, retry.
-    //
-    // Hack for now:
-    // Assume page is present (we verified verifyUserPtr).
-    // In `sys_futex`, access validation happens.
-    // But verify != pinned.
-    //
-    // Current VMM doesn't swap. So present user pages are resident.
-    // Checking translation implies it's present.
-    //
-    // So reading `*ptr` should satisfy.
-    // Use a direct physical access pointer to avoid CR3 mapping issues?
-    // No, we are in correct CR3 context.
-    //
-    // Atomic check:
+
+    // 4. Validate value atomically
+    // Note: We assume page is present (verified in sys_futex, no swapping in zscapek)
     const ptr = @as(*const volatile u32, @ptrFromInt(uaddr));
-    const current_val = ptr.*; // This is a user read.
-    
+    const current_val = ptr.*;
+
     if (current_val != val) {
-        return error.Again; // EWOULDBLOCK/EAGAIN
+        held.release();
+        return error.Again;
     }
-    
-    // 5. Sleep
-    // Add to wait queue with a predicate/key?
-    // Our WaitQueue is generic.
-    // We need to store `phys_addr` in the thread or wait node so `wake` wakes the right threads.
-    //
-    // sched.WaitQueue wakes *all* or *one*?
-    // `wait_queue.block(thread)` adds to listing.
-    // `wake` wakes from head.
-    //
-    // Problem: Bucket contains threads for MULTIPLE futexes (hash collisions).
-    // We need to filter by phys_addr when waking.
-    // But `sched.WaitQueue` doesn't support filtered wakeups easily unless we modify it.
-    //
-    // Alternative:
-    // When waking, we walk the list, find matches, and wake them.
-    // `sched` exposes `WaitQueue` internals? No, opaque usually.
-    //
-    // Let's check `sched.WaitQueue` implementation.
-    // If it's a simple list, we might need to enhance it or implement our own queue here.
-    //
-    // For MVP:
-    // Wake up *everyone* in the bucket.
-    // Spurious wakeups are legal in futexes!
-    // If we wake a thread for a different futex (hash collision), it wakes up,
-    // returns 0 (or checks again in userspace loop).
-    // Userspace `futex_wait` is always in a loop checking the value.
-    // So spurious wakeups are fine structurally.
-    // Performance might suffer on collisions, but acceptable for MVP.
-    
-    // Set thread state to sleeping
-    // Release lock happens via scheduler switch or manual?
-    // `sched.block` usually switches.
-    // We are holding `bucket.lock`. We cannot sleep while holding a spinlock!
-    //
-    // Pattern:
-    // set_current_state(SLEEPING)
-    // add_to_queue
-    // release_lock
-    // schedule()
-    //
-    // Zscapek `sched` likely has `sleepOn(queue, lock)` to handle atomic sleep?
-    // Or we manually handle it.
-    
-    // Let's defer to sched implementation check.
-    // Assuming `sched.cwait(queue, &bucket.lock)` pattern exists or similar.
-    // Or `sched.block(thread)` just marks it.
-    // We need to verify `sched.zig` API.
-    
-    // Temporary Assumption: `sched.waitOn(queue, held_lock)`
-    sched.waitOn(&bucket.queue, held);
-    
-    // Back from sleep
+
+    // 5. Sleep with optional timeout
+    // Convert timeout from nanoseconds to ticks (1ms per tick)
+    var timeout_ticks: u64 = 0;
+    if (timeout_ns) |ns| {
+        // Round up to ensure we wait at least the requested time
+        timeout_ticks = (ns + 999_999) / 1_000_000;
+        if (timeout_ticks == 0) timeout_ticks = 1; // Minimum 1 tick
+    }
+
+    // waitOnWithTimeout handles:
+    // - Adding to wait queue
+    // - Adding to sleep list (if timeout > 0)
+    // - Setting futex_bucket for timeout handling
+    // - Releasing bucket lock atomically with sleep
+    sched.waitOnWithTimeout(
+        &bucket.queue,
+        held,
+        timeout_ticks,
+        if (timeout_ticks > 0) @ptrCast(bucket) else null,
+    );
+
+    // 6. Check wakeup reason
+    if (current.futex_wakeup_reason == .timeout) {
+        return error.TimedOut;
+    }
+
+    // Normal wakeup (by FUTEX_WAKE) or spurious wakeup
     return;
 }
 
@@ -179,28 +131,39 @@ pub fn wait(uaddr: u64, val: u32, timeout_ns: ?u64) !void {
 ///
 /// 1. Translate user address to physical address
 /// 2. Compute bucket
-/// 3. Wake `count` threads from bucket
+/// 3. Wake up to `count` threads from bucket, canceling any pending timeouts
+///
+/// Returns: Number of threads woken
 pub fn wake(uaddr: u64, count: u32) !u32 {
     const current = sched.getCurrentThread() orelse return error.PermDenied;
-    
-    // 1. Translate
+
+    // 1. Translate to physical address
     const phys_addr = vmm.translate(current.cr3, uaddr) orelse return error.Fault;
-    
-    // 2. Bucket
+
+    // 2. Compute bucket
     const bucket_idx = hash(phys_addr);
     const bucket = &futex_table[bucket_idx];
-    
-    // 3. Lock
+
+    // 3. Acquire bucket lock
     const held = bucket.lock.acquire();
     defer held.release();
-    
-    // 4. Wake
-    // As noted, we might wake wrong threads (hash collision).
-    // Userspace must handle spurious wakeups.
-    // Better implementation would filter by `phys_addr`.
-    // For now, we wake `count` threads from the bucket regardless of address.
-    // This is technically correct (spurious wakeup).
-    
-    // `queue.wakeUp(count)`?
-    return bucket.queue.wakeUp(count);
+
+    // 4. Wake threads, properly canceling any pending timeouts
+    // Note: Hash collisions may cause spurious wakeups - this is acceptable
+    // as futex semantics require userspace to re-check the condition in a loop
+    var woken: u32 = 0;
+    while (woken < count) {
+        if (bucket.queue.pop()) |t| {
+            // cancelTimeoutAndWake handles:
+            // - Removing from sleep list if timeout was set
+            // - Setting futex_wakeup_reason to .woken
+            // - Adding to ready queue
+            sched.cancelTimeoutAndWake(t);
+            woken += 1;
+        } else {
+            break;
+        }
+    }
+
+    return woken;
 }

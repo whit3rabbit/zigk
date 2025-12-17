@@ -164,6 +164,47 @@ pub const PollFd = extern struct {
     }
 };
 
+/// struct iovec - Reference: Linux <sys/uio.h>
+/// Must be 16 bytes: iov_base(ptr/usize) + iov_len(usize)
+/// Used for scatter/gather I/O in readv, writev, sendmsg, recvmsg
+pub const IoVec = extern struct {
+    iov_base: usize, // void* in C, represented as usize for user pointer
+    iov_len: usize,
+
+    comptime {
+        if (@sizeOf(@This()) != 16) {
+            @compileError("IoVec must be 16 bytes");
+        }
+        if (@alignOf(@This()) != 8) {
+            @compileError("IoVec must have 8-byte alignment");
+        }
+    }
+};
+
+/// struct msghdr - Reference: Linux <sys/socket.h>
+/// Must be 56 bytes on x86_64
+/// Used for sendmsg/recvmsg scatter/gather socket I/O
+pub const MsgHdr = extern struct {
+    msg_name: usize, // void* - optional address
+    msg_namelen: u32, // socklen_t
+    _pad0: u32 = 0, // padding for alignment
+    msg_iov: usize, // struct iovec*
+    msg_iovlen: usize, // size_t - number of iovecs
+    msg_control: usize, // void* - ancillary data
+    msg_controllen: usize, // size_t
+    msg_flags: i32,
+    _pad1: u32 = 0, // padding for alignment
+
+    comptime {
+        if (@sizeOf(@This()) != 56) {
+            @compileError("MsgHdr must be 56 bytes");
+        }
+        if (@alignOf(@This()) != 8) {
+            @compileError("MsgHdr must have 8-byte alignment");
+        }
+    }
+};
+
 // =============================================================================
 // Zscapek-specific ABI Layouts
 // =============================================================================
@@ -205,6 +246,8 @@ pub fn verifyAbi() void {
         _ = TimeVal{};
         _ = IpMreq{};
         _ = PollFd{};
+        _ = IoVec{};
+        _ = MsgHdr{};
         _ = FramebufferInfo{};
     }
 }

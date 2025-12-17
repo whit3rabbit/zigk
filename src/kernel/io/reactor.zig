@@ -18,12 +18,14 @@ const std = @import("std");
 const builtin = @import("builtin");
 const types = @import("types.zig");
 const pool_mod = @import("pool.zig");
+const timer_mod = @import("timer.zig");
 
 const IoRequest = types.IoRequest;
 const IoResult = types.IoResult;
 const IoOpType = types.IoOpType;
 const Future = types.Future;
 const IoRequestPool = pool_mod.IoRequestPool;
+const TimerWheel = timer_mod.TimerWheel;
 
 // Conditional imports for freestanding
 const is_freestanding = builtin.os.tag == .freestanding;
@@ -70,11 +72,8 @@ pub const Reactor = struct {
     /// Lock protecting reactor state
     lock: sync.Spinlock,
 
-    /// Current tick count (from scheduler)
-    current_tick: u64,
-
-    /// Pending timer operations (sorted by expiry)
-    timer_head: ?*IoRequest,
+    /// Hierarchical timer wheel for efficient timeout management
+    timer_wheel: TimerWheel,
 
     /// Statistics
     stats: ReactorStats,
@@ -83,8 +82,7 @@ pub const Reactor = struct {
     pub fn init(self: *Reactor) void {
         self.pool.init();
         self.lock = .{};
-        self.current_tick = 0;
-        self.timer_head = null;
+        self.timer_wheel = TimerWheel.init();
         self.stats = .{};
     }
 
@@ -115,81 +113,36 @@ pub const Reactor = struct {
         return Future{ .request = req };
     }
 
-    /// Add a timer operation to the timer queue
+    /// Add a timer operation to the timer queue (O(1) with TimerWheel)
     pub fn addTimer(self: *Reactor, req: *IoRequest, timeout_ticks: u64) void {
-        const held = self.lock.acquire();
-        defer held.release();
-
-        const expiry = self.current_tick + timeout_ticks;
-        req.op_data.timer.timeout_ns = expiry; // Reuse as expiry tick
-
-        // Insert sorted by expiry time
-        var prev: ?*IoRequest = null;
-        var curr = self.timer_head;
-
-        while (curr) |c| {
-            if (c.op_data.timer.timeout_ns > expiry) {
-                break;
-            }
-            prev = c;
-            curr = c.next;
-        }
-
-        req.next = curr;
-        if (prev) |p| {
-            p.next = req;
-        } else {
-            self.timer_head = req;
-        }
+        self.timer_wheel.add(req, timeout_ticks);
     }
 
     /// Cancel a pending timer
     pub fn cancelTimer(self: *Reactor, req: *IoRequest) bool {
-        const held = self.lock.acquire();
-        defer held.release();
-
-        // Remove from timer list
-        var prev: ?*IoRequest = null;
-        var curr = self.timer_head;
-
-        while (curr) |c| {
-            if (c == req) {
-                if (prev) |p| {
-                    p.next = c.next;
-                } else {
-                    self.timer_head = c.next;
-                }
-                return req.cancel();
-            }
-            prev = c;
-            curr = c.next;
+        if (self.timer_wheel.cancel(req)) {
+            return req.cancel();
         }
-
         return false;
     }
 
     /// Timer tick - called from scheduler timer interrupt
     /// Must be IRQ-safe (no blocking)
     pub fn tick(self: *Reactor) void {
-        // Try to acquire lock - skip tick if contended
-        const held = self.lock.tryAcquire() orelse return;
-        defer held.release();
+        // Process expired timers using the hierarchical wheel
+        const expired = self.timer_wheel.tick();
 
-        self.current_tick += 1;
-
-        // Process expired timers
-        while (self.timer_head) |req| {
-            if (req.op_data.timer.timeout_ns > self.current_tick) {
-                break; // No more expired timers
-            }
-
-            // Remove from list
-            self.timer_head = req.next;
+        // Complete all expired timers
+        var curr = expired;
+        while (curr) |req| {
+            const next = req.next;
             req.next = null;
 
             // Complete the timer
             _ = req.complete(.{ .success = 0 });
             self.stats.timers_expired += 1;
+
+            curr = next;
         }
     }
 

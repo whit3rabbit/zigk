@@ -68,6 +68,7 @@ const socket_file_ops = fd_mod.FileOps{
     .stat = null,
     .ioctl = null,
     .mmap = null,
+    .poll = null,
 };
 
 fn getSocketData(fd: *FileDescriptor) ?*SocketFdData {
@@ -554,18 +555,30 @@ pub fn sys_setsockopt(fd: usize, level: usize, optname: usize, optval_ptr: usize
         return error.ENOTSOCK;
     };
 
-    // Validate option value pointer
-    if (optlen > 0 and !isValidUserPtr(optval_ptr, optlen)) {
-        return error.EFAULT;
+    // Copy option value to kernel buffer to avoid TOCTOU on async access.
+    const max_optlen: usize = 256;
+    if (optlen > max_optlen) {
+        return error.EINVAL;
     }
 
-    const optval: [*]const u8 = @ptrFromInt(optval_ptr);
+    var optval_buf: [256]u8 = undefined;
+    const optval_slice: []const u8 = if (optlen == 0) &[_]u8{} else optval_buf[0..optlen];
+
+    if (optlen > 0) {
+        if (!isValidUserAccess(optval_ptr, optlen, AccessMode.Read)) {
+            return error.EFAULT;
+        }
+        const optval_uptr = user_mem.UserPtr.from(optval_ptr);
+        _ = optval_uptr.copyToKernel(optval_buf[0..optlen]) catch {
+            return error.EFAULT;
+        };
+    }
 
     // Validate socket option parameters
     const level_i32 = std.math.cast(i32, level) orelse return error.EINVAL;
     const optname_i32 = std.math.cast(i32, optname) orelse return error.EINVAL;
 
-    socket.setsockopt(ctx.socket_idx, level_i32, optname_i32, optval, optlen) catch |err| {
+    socket.setsockopt(ctx.socket_idx, level_i32, optname_i32, optval_slice.ptr, optval_slice.len) catch |err| {
         return socketErrorToSyscallError(err);
     };
 
@@ -903,4 +916,261 @@ pub fn sys_poll(ufds: usize, nfds: usize, timeout: isize) SyscallError!usize {
     };
 
     return ready_count;
+}
+
+// ============================================================================
+// Scatter/Gather I/O Syscalls (sendmsg/recvmsg)
+// ============================================================================
+
+const IoVec = uapi.abi.IoVec;
+const MsgHdr = uapi.abi.MsgHdr;
+
+/// Maximum number of iovecs to prevent excessive kernel allocations
+const MAX_IOV_COUNT: usize = 1024;
+
+/// Maximum total message size for sendmsg/recvmsg
+const MAX_MSG_SIZE: usize = 65536;
+
+/// sys_sendmsg (46) - Send a message on a socket with scatter/gather I/O
+/// (fd, msg_ptr, flags) -> ssize_t
+///
+/// Gathers data from multiple user buffers (iovecs) and sends as single message.
+/// SECURITY: All user data is copied to kernel buffers to prevent TOCTOU.
+pub fn sys_sendmsg(fd: usize, msg_ptr: usize, flags: usize) SyscallError!usize {
+    _ = flags; // Flags ignored for MVP (MSG_DONTWAIT, MSG_NOSIGNAL, etc.)
+
+    const ctx = getSocketContext(fd) orelse {
+        return error.ENOTSOCK;
+    };
+
+    // Read msghdr from userspace
+    const msg = user_mem.copyStructFromUser(MsgHdr, user_mem.UserPtr.from(msg_ptr)) catch {
+        return error.EFAULT;
+    };
+
+    // Validate iovec count
+    if (msg.msg_iovlen == 0) {
+        return 0; // Nothing to send
+    }
+    if (msg.msg_iovlen > MAX_IOV_COUNT) {
+        return error.EMSGSIZE;
+    }
+
+    // Validate iovec array pointer
+    const iov_size = msg.msg_iovlen * @sizeOf(IoVec);
+    if (!isValidUserAccess(msg.msg_iov, iov_size, AccessMode.Read)) {
+        return error.EFAULT;
+    }
+
+    // Copy iovec array to kernel
+    const iovecs = heap.allocator().alloc(IoVec, msg.msg_iovlen) catch {
+        return error.ENOMEM;
+    };
+    defer heap.allocator().free(iovecs);
+
+    const iov_uptr = user_mem.UserPtr.from(msg.msg_iov);
+    _ = iov_uptr.copyToKernel(std.mem.sliceAsBytes(iovecs)) catch {
+        return error.EFAULT;
+    };
+
+    // Calculate total message size and validate
+    var total_len: usize = 0;
+    for (iovecs) |iov| {
+        // Check for overflow
+        if (total_len > MAX_MSG_SIZE - iov.iov_len) {
+            return error.EMSGSIZE;
+        }
+        total_len += iov.iov_len;
+    }
+
+    if (total_len == 0) {
+        return 0;
+    }
+
+    // Allocate kernel buffer and gather data from iovecs
+    const kbuf = heap.allocator().alloc(u8, total_len) catch {
+        return error.ENOMEM;
+    };
+    defer heap.allocator().free(kbuf);
+
+    var offset: usize = 0;
+    for (iovecs) |iov| {
+        if (iov.iov_len == 0) continue;
+
+        if (!isValidUserAccess(iov.iov_base, iov.iov_len, AccessMode.Read)) {
+            return error.EFAULT;
+        }
+
+        const iov_uptr_base = user_mem.UserPtr.from(iov.iov_base);
+        _ = iov_uptr_base.copyToKernel(kbuf[offset .. offset + iov.iov_len]) catch {
+            return error.EFAULT;
+        };
+        offset += iov.iov_len;
+    }
+
+    // Handle optional destination address
+    var kdest_addr: ?socket.SockAddrIn = null;
+    if (msg.msg_name != 0 and msg.msg_namelen >= @sizeOf(socket.SockAddrIn)) {
+        kdest_addr = user_mem.copyStructFromUser(socket.SockAddrIn, user_mem.UserPtr.from(msg.msg_name)) catch {
+            return error.EFAULT;
+        };
+    }
+
+    // Send the message
+    if (kdest_addr) |*addr| {
+        // UDP-style send with destination address
+        const sent = socket.sendto(ctx.socket_idx, kbuf, addr) catch |err| {
+            return socketErrorToSyscallError(err);
+        };
+        return sent;
+    } else {
+        // TCP-style send (connected socket)
+        const sock = socket.getSocket(ctx.socket_idx) orelse {
+            return error.EBADF;
+        };
+
+        if (sock.sock_type == socket.SOCK_STREAM) {
+            const sent = socket.tcpSend(ctx.socket_idx, kbuf) catch |err| {
+                return socketErrorToSyscallError(err);
+            };
+            return sent;
+        } else {
+            // UDP without destination requires prior connect()
+            return error.EDESTADDRREQ;
+        }
+    }
+}
+
+/// sys_recvmsg (47) - Receive a message from a socket with scatter/gather I/O
+/// (fd, msg_ptr, flags) -> ssize_t
+///
+/// Receives data and scatters it into multiple user buffers (iovecs).
+/// SECURITY: Data is received into kernel buffer then copied to user to prevent TOCTOU.
+pub fn sys_recvmsg(fd: usize, msg_ptr: usize, flags: usize) SyscallError!usize {
+    _ = flags; // Flags ignored for MVP (MSG_PEEK, MSG_WAITALL, etc.)
+
+    const ctx = getSocketContext(fd) orelse {
+        return error.ENOTSOCK;
+    };
+
+    // Read msghdr from userspace
+    var msg = user_mem.copyStructFromUser(MsgHdr, user_mem.UserPtr.from(msg_ptr)) catch {
+        return error.EFAULT;
+    };
+
+    // Validate iovec count
+    if (msg.msg_iovlen == 0) {
+        return 0; // Nothing to receive into
+    }
+    if (msg.msg_iovlen > MAX_IOV_COUNT) {
+        return error.EMSGSIZE;
+    }
+
+    // Validate iovec array pointer
+    const iov_size = msg.msg_iovlen * @sizeOf(IoVec);
+    if (!isValidUserAccess(msg.msg_iov, iov_size, AccessMode.Read)) {
+        return error.EFAULT;
+    }
+
+    // Copy iovec array to kernel
+    const iovecs = heap.allocator().alloc(IoVec, msg.msg_iovlen) catch {
+        return error.ENOMEM;
+    };
+    defer heap.allocator().free(iovecs);
+
+    const iov_uptr = user_mem.UserPtr.from(msg.msg_iov);
+    _ = iov_uptr.copyToKernel(std.mem.sliceAsBytes(iovecs)) catch {
+        return error.EFAULT;
+    };
+
+    // Calculate total buffer size and validate write access
+    var total_len: usize = 0;
+    for (iovecs) |iov| {
+        if (total_len > MAX_MSG_SIZE - iov.iov_len) {
+            return error.EMSGSIZE;
+        }
+        total_len += iov.iov_len;
+
+        // Validate each iovec buffer for write access
+        if (iov.iov_len > 0 and !isValidUserAccess(iov.iov_base, iov.iov_len, AccessMode.Write)) {
+            return error.EFAULT;
+        }
+    }
+
+    if (total_len == 0) {
+        return 0;
+    }
+
+    // Allocate kernel receive buffer
+    const recv_len = @min(total_len, MAX_MSG_SIZE);
+    const kbuf = heap.allocator().alloc(u8, recv_len) catch {
+        return error.ENOMEM;
+    };
+    defer heap.allocator().free(kbuf);
+
+    // Prepare for source address if requested
+    var ksrc_addr: socket.SockAddrIn = undefined;
+    const src_addr_arg: ?*socket.SockAddrIn = if (msg.msg_name != 0) &ksrc_addr else null;
+
+    // Receive data
+    const sock = socket.getSocket(ctx.socket_idx) orelse {
+        return error.EBADF;
+    };
+
+    var received: usize = 0;
+    if (sock.sock_type == socket.SOCK_STREAM) {
+        received = socket.tcpRecv(ctx.socket_idx, kbuf) catch |err| {
+            return socketErrorToSyscallError(err);
+        };
+    } else {
+        received = socket.recvfrom(ctx.socket_idx, kbuf, src_addr_arg) catch |err| {
+            return socketErrorToSyscallError(err);
+        };
+    }
+
+    // Scatter received data into user iovecs
+    var bytes_remaining = received;
+    var iov_idx: usize = 0;
+    var buf_offset: usize = 0;
+
+    while (bytes_remaining > 0 and iov_idx < iovecs.len) {
+        const iov = iovecs[iov_idx];
+        if (iov.iov_len == 0) {
+            iov_idx += 1;
+            continue;
+        }
+
+        const copy_len = @min(bytes_remaining, iov.iov_len);
+        const iov_uptr_base = user_mem.UserPtr.from(iov.iov_base);
+        _ = iov_uptr_base.copyFromKernel(kbuf[buf_offset .. buf_offset + copy_len]) catch {
+            return error.EFAULT;
+        };
+
+        buf_offset += copy_len;
+        bytes_remaining -= copy_len;
+        iov_idx += 1;
+    }
+
+    // Copy source address back to user if requested
+    if (msg.msg_name != 0 and msg.msg_namelen >= @sizeOf(socket.SockAddrIn) and src_addr_arg != null) {
+        user_mem.copyStructToUser(socket.SockAddrIn, user_mem.UserPtr.from(msg.msg_name), ksrc_addr) catch {
+            return error.EFAULT;
+        };
+
+        // Update msg_namelen in userspace
+        msg.msg_namelen = @sizeOf(socket.SockAddrIn);
+    } else {
+        msg.msg_namelen = 0;
+    }
+
+    // Clear msg_controllen (ancillary data not implemented)
+    msg.msg_controllen = 0;
+    msg.msg_flags = 0;
+
+    // Write updated msghdr back to userspace
+    user_mem.copyStructToUser(MsgHdr, user_mem.UserPtr.from(msg_ptr), msg) catch {
+        return error.EFAULT;
+    };
+
+    return received;
 }

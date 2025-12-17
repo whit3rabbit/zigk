@@ -73,6 +73,15 @@ pub const IoOpType = enum(u8) {
 
     /// Poll - wait for any of multiple fds
     poll = 9,
+
+    /// Disk read - AHCI async block read
+    disk_read = 10,
+
+    /// Disk write - AHCI async block write
+    disk_write = 11,
+
+    /// Custom - arbitrary async function execution
+    custom = 12,
 };
 
 /// Result of an I/O operation
@@ -174,6 +183,14 @@ pub const IoRequest = struct {
     /// User buffer length
     buf_len: usize,
 
+    /// Kernel bounce buffer for async user I/O (io_uring).
+    /// When set, buf_ptr/buf_len refer to kernel memory.
+    bounce_buf: ?[]u8,
+
+    /// Original user buffer for copy-back on completion.
+    user_buf_ptr: usize,
+    user_buf_len: usize,
+
     /// Operation-specific data
     op_data: OpData,
 
@@ -186,6 +203,10 @@ pub const IoRequest = struct {
 
     /// io_uring user_data field (returned in CQE)
     user_data: u64,
+
+    /// io_uring instance this request belongs to (for CQE posting)
+    /// Null for non-io_uring requests
+    io_ring: ?*anyopaque,
 
     /// Completion result (valid when state == .completed or .cancelled)
     result: IoResult,
@@ -219,6 +240,28 @@ pub const IoRequest = struct {
             _pad: u32 = 0,
         },
 
+        /// For disk_read/disk_write: AHCI block I/O parameters
+        disk: extern struct {
+            /// Starting LBA (48-bit addressable)
+            lba: u64,
+            /// Sector count (max 65535)
+            sector_count: u16,
+            /// AHCI port number (0-31)
+            port: u8,
+            /// Command slot used (0-31)
+            slot: u8,
+            /// Reserved for alignment
+            _reserved: [4]u8 = .{ 0, 0, 0, 0 },
+        },
+
+        /// For custom: arbitrary function execution
+        custom: extern struct {
+            /// Function pointer (cast to appropriate type)
+            func_ptr: usize,
+            /// Argument pointer (cast to appropriate type)
+            args_ptr: usize,
+        },
+
         /// Raw bytes for custom data
         raw: [16]u8,
     };
@@ -231,10 +274,14 @@ pub const IoRequest = struct {
             .fd = -1,
             .buf_ptr = 0,
             .buf_len = 0,
+            .bounce_buf = null,
+            .user_buf_ptr = 0,
+            .user_buf_len = 0,
             .op_data = .{ .raw = [_]u8{0} ** 16 },
             .submitter = null,
             .next = null,
             .user_data = 0,
+            .io_ring = null,
             .result = .pending,
             .state = std.atomic.Value(IoRequestState).init(.idle),
         };

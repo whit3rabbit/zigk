@@ -27,6 +27,7 @@ For detailed byte-level layouts, struct alignments, and hardware interface speci
    - Initializes HAL (GDT/IDT/Serial/PIC)
    - Initializes SMP (brings up Application Processors)
    - Sets up Memory Management (PMM/VMM/Heap)
+   - Registers demand paging handler for lazy memory allocation
    - Initializes scheduler and creates idle thread
    - Scans modules to load the init process (shell or httpd)
    - Starts the scheduler
@@ -49,6 +50,41 @@ For detailed byte-level layouts, struct alignments, and hardware interface speci
 | HHDM Base | `0xFFFF800000000000` | Direct map of physical memory |
 | Kernel Stacks | `0xFFFFA00000000000` | Per-thread kernel stacks |
 | User Stack | `0xF0000000` (top) | Default user stack location |
+| User mmap region | `0x10000000000` - `0x7FFFFFFFFFFF` | Demand-paged anonymous mappings |
+
+## Demand Paging
+
+Zscapek implements lazy (demand) paging for anonymous memory mappings. When userspace calls `mmap()`, the kernel reserves virtual address space by creating a VMA (Virtual Memory Area) but does not allocate physical pages. Physical pages are allocated on-demand when the memory is first accessed.
+
+### How It Works
+
+1. **mmap()**: Creates a VMA entry tracking the address range, protection flags, and mapping type. No physical pages allocated.
+
+2. **First Access**: When userspace reads/writes the mapped region, a page fault occurs (not-present page).
+
+3. **Page Fault Handler**: The kernel's demand paging handler:
+   - Looks up the faulting address in the process's VMA list
+   - Verifies access permissions (write to read-only = SIGSEGV)
+   - Allocates a zeroed physical page from PMM
+   - Maps the page into the process's address space
+   - Returns to userspace to retry the instruction
+
+4. **VMA Types**:
+   - `Anonymous`: Zero-filled on demand (standard mmap behavior)
+   - `Device`: Eagerly mapped for MMIO/DMA (never demand-paged)
+   - `File`: Reserved for future file-backed mappings
+
+### Benefits
+
+- **Memory efficiency**: Only allocate pages that are actually used
+- **Faster mmap()**: Returns immediately without allocation overhead
+- **Overcommit support**: Map more virtual memory than physical RAM available
+
+### Key Files
+
+- `src/kernel/user_vmm.zig` - VMA management and `handlePageFault()`
+- `src/arch/x86_64/interrupts.zig` - Page fault dispatch to demand paging handler
+- `src/kernel/main.zig` - Handler registration via `setPageFaultHandler()`
 
 ## Limine Configuration
 

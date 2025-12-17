@@ -97,11 +97,13 @@ pub fn sys_mmap_phys(phys_addr_arg: usize, size_arg: usize) SyscallError!usize {
     };
 
     // Create VMA with MAP_DEVICE flag (prevents freeing physical pages on munmap)
-    const vma = proc.user_vmm.createVma(
+    // and VmaType.Device (prevents demand paging - already eagerly mapped)
+    const vma = proc.user_vmm.createVmaWithType(
         virt_addr,
         virt_addr + aligned_size,
         user_vmm.PROT_READ | user_vmm.PROT_WRITE,
         user_vmm.MAP_SHARED | user_vmm.MAP_DEVICE,
+        .Device,
     ) catch {
         // Rollback: unmap the pages
         var offset: u64 = 0;
@@ -199,11 +201,13 @@ pub fn sys_alloc_dma(result_ptr_arg: usize, page_count_arg: usize) SyscallError!
 
     // Create VMA to track this mapping
     // Note: NOT using MAP_DEVICE because we need to free pages on munmap
-    const vma = proc.user_vmm.createVma(
+    // Using VmaType.Device to prevent demand paging (already eagerly mapped)
+    const vma = proc.user_vmm.createVmaWithType(
         virt_addr,
         virt_addr + size,
         user_vmm.PROT_READ | user_vmm.PROT_WRITE,
         user_vmm.MAP_SHARED | user_vmm.MAP_ANONYMOUS,
+        .Device,
     ) catch {
         // Rollback
         var offset: usize = 0;

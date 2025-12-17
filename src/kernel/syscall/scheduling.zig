@@ -11,6 +11,9 @@ const base = @import("base.zig");
 const uapi = @import("uapi");
 const hal = @import("hal");
 const sched = @import("sched");
+const heap = @import("heap");
+const fd_mod = @import("fd");
+const sync = @import("sync");
 
 const SyscallError = base.SyscallError;
 const UserPtr = base.UserPtr;
@@ -250,7 +253,7 @@ const futex = @import("futex");
 ///
 /// Stubbed Operations:
 /// - FUTEX_REQUEUE, FUTEX_LOCK_PI, etc.
-pub fn sys_futex(uaddr: usize, op: usize, val: usize, timeout: usize, uaddr2: usize, val3: usize) SyscallError!usize {
+pub fn sys_futex(uaddr: usize, op: usize, val: usize, timeout_ptr: usize, uaddr2: usize, val3: usize) SyscallError!usize {
     _ = uaddr2;
     _ = val3;
 
@@ -264,32 +267,40 @@ pub fn sys_futex(uaddr: usize, op: usize, val: usize, timeout: usize, uaddr2: us
 
     switch (cmd) {
         uapi.futex.FUTEX_WAIT => {
-            // Wait for value at uaddr to be val
-            // timeout interpretation: pointer to timespec (absolute or relative?)
-            // Linux: relative unless FUTEX_CLOCK_REALTIME is set.
-            // For MVP: ignore timeout (infinite wait)
-            // Ensure timeout pointer handling if implemented later.
-            
-            // Cast val to u32
+            // Parse timeout if provided (pointer to struct timespec)
+            // Linux: relative timeout unless FUTEX_CLOCK_REALTIME is set
+            var timeout_ns: ?u64 = null;
+            if (timeout_ptr != 0) {
+                const ts = UserPtr.from(timeout_ptr).readValue(Timespec) catch {
+                    return error.EFAULT;
+                };
+                // Validate timespec values
+                if (ts.tv_sec < 0 or ts.tv_nsec < 0 or ts.tv_nsec >= 1_000_000_000) {
+                    return error.EINVAL;
+                }
+                // Convert to nanoseconds (saturating to prevent overflow)
+                const sec_ns: u64 = @as(u64, @intCast(ts.tv_sec)) *| 1_000_000_000;
+                timeout_ns = sec_ns +| @as(u64, @intCast(ts.tv_nsec));
+            }
+
             const val_u32 = @as(u32, @truncate(val));
 
-            // Wait (may return error.Again if value changed, or success if woken)
-            futex.wait(uaddr, val_u32, if (timeout != 0) @as(u64, @intCast(timeout)) else null) catch |err| {
+            futex.wait(uaddr, val_u32, timeout_ns) catch |err| {
                 switch (err) {
-                    error.Again => return error.EAGAIN, // User value changed
-                    error.Fault => return error.EFAULT, // Bad address
+                    error.Again => return error.EAGAIN,
+                    error.TimedOut => return error.ETIMEDOUT,
+                    error.Fault => return error.EFAULT,
                     error.PermDenied => return error.EPERM,
                 }
             };
             return 0;
         },
         uapi.futex.FUTEX_WAKE => {
-            // Wake up val threads waiting on uaddr
             const val_u32 = @as(u32, @truncate(val));
             const woken = futex.wake(uaddr, val_u32) catch |err| {
                 switch (err) {
-                     error.Fault => return error.EFAULT,
-                     error.PermDenied => return error.EPERM,
+                    error.Fault => return error.EFAULT,
+                    error.PermDenied => return error.EPERM,
                 }
             };
             return @as(usize, woken);
@@ -301,35 +312,278 @@ pub fn sys_futex(uaddr: usize, op: usize, val: usize, timeout: usize, uaddr2: us
 }
 
 // =============================================================================
-// epoll (Stubs)
+// epoll Implementation
 // =============================================================================
+
+/// Maximum number of fds per epoll instance
+const EPOLL_MAX_FDS: usize = 64;
+
+/// Entry in epoll watch list
+const EpollEntry = struct {
+    fd: i32,
+    events: u32,
+    data: u64,
+    active: bool,
+};
+
+/// Epoll instance data stored in FD private_data
+const EpollInstance = struct {
+    entries: [EPOLL_MAX_FDS]EpollEntry,
+    count: usize,
+    lock: sync.Spinlock,
+
+    fn init() EpollInstance {
+        return .{
+            .entries = [_]EpollEntry{.{ .fd = -1, .events = 0, .data = 0, .active = false }} ** EPOLL_MAX_FDS,
+            .count = 0,
+            .lock = .{},
+        };
+    }
+
+    fn findEntry(self: *EpollInstance, fd: i32) ?*EpollEntry {
+        for (&self.entries) |*e| {
+            if (e.active and e.fd == fd) return e;
+        }
+        return null;
+    }
+
+    fn findFreeSlot(self: *EpollInstance) ?*EpollEntry {
+        for (&self.entries) |*e| {
+            if (!e.active) return e;
+        }
+        return null;
+    }
+};
+
+/// File operations for epoll fds
+const epoll_file_ops = fd_mod.FileOps{
+    .read = null,
+    .write = null,
+    .close = epollClose,
+    .seek = null,
+    .stat = null,
+    .ioctl = null,
+    .mmap = null,
+    .poll = null,
+};
+
+fn epollClose(fd: *fd_mod.FileDescriptor) isize {
+    if (fd.private_data) |ptr| {
+        const instance: *EpollInstance = @ptrCast(@alignCast(ptr));
+        heap.allocator().destroy(instance);
+    }
+    return 0;
+}
+
+/// Get epoll instance from fd number
+fn getEpollInstance(epfd: usize) ?*EpollInstance {
+    const table = base.getGlobalFdTable();
+    const fd_u32 = std.math.cast(u32, epfd) orelse return null;
+    const fd = table.get(fd_u32) orelse return null;
+
+    // Verify this is an epoll fd by checking ops
+    if (fd.ops.close != epollClose) return null;
+
+    if (fd.private_data) |ptr| {
+        return @ptrCast(@alignCast(ptr));
+    }
+    return null;
+}
 
 /// sys_epoll_create1 (291) - Create epoll instance
 ///
-/// MVP: Stub - returns ENOSYS
+/// Creates a new epoll instance and returns a file descriptor.
+/// Flags: EPOLL_CLOEXEC (0x80000) - set close-on-exec
 pub fn sys_epoll_create1(flags: usize) SyscallError!usize {
-    _ = flags;
-    return error.ENOSYS;
+    _ = flags; // EPOLL_CLOEXEC handled at FD level if needed
+
+    // Allocate epoll instance
+    const instance = heap.allocator().create(EpollInstance) catch {
+        return error.ENOMEM;
+    };
+    errdefer heap.allocator().destroy(instance);
+
+    instance.* = EpollInstance.init();
+
+    // Allocate FD
+    const fd = heap.allocator().create(fd_mod.FileDescriptor) catch {
+        return error.ENOMEM;
+    };
+    errdefer heap.allocator().destroy(fd);
+
+    fd.* = fd_mod.FileDescriptor{
+        .ops = &epoll_file_ops,
+        .flags = fd_mod.O_RDWR,
+        .private_data = instance,
+        .position = 0,
+        .refcount = .{ .raw = 1 },
+        .lock = .{},
+    };
+
+    // Install in FD table
+    const table = base.getGlobalFdTable();
+    const fd_num = table.allocFdNum() orelse {
+        heap.allocator().destroy(fd);
+        return error.EMFILE;
+    };
+
+    table.install(fd_num, fd);
+
+    return fd_num;
 }
 
 /// sys_epoll_ctl (233) - Control epoll instance
 ///
-/// MVP: Stub - returns ENOSYS
-pub fn sys_epoll_ctl(epfd: usize, op: usize, fd: usize, event: usize) SyscallError!usize {
-    _ = epfd;
-    _ = op;
-    _ = fd;
-    _ = event;
-    return error.ENOSYS;
+/// Add, modify, or remove entries in the interest list.
+/// op: EPOLL_CTL_ADD (1), EPOLL_CTL_DEL (2), EPOLL_CTL_MOD (3)
+pub fn sys_epoll_ctl(epfd: usize, op: usize, fd: usize, event_ptr: usize) SyscallError!usize {
+    const instance = getEpollInstance(epfd) orelse return error.EBADF;
+
+    const fd_i32: i32 = std.math.cast(i32, fd) orelse return error.EBADF;
+
+    const held = instance.lock.acquire();
+    defer held.release();
+
+    switch (op) {
+        uapi.epoll.EPOLL_CTL_ADD => {
+            // Check if already exists
+            if (instance.findEntry(fd_i32) != null) {
+                return error.EEXIST;
+            }
+
+            // Find free slot
+            const slot = instance.findFreeSlot() orelse {
+                return error.ENOSPC; // Too many fds
+            };
+
+            // Read event from user
+            if (event_ptr == 0) return error.EFAULT;
+            const ev = UserPtr.from(event_ptr).readValue(uapi.epoll.EpollEvent) catch {
+                return error.EFAULT;
+            };
+
+            slot.* = .{
+                .fd = fd_i32,
+                .events = ev.events,
+                .data = ev.getData(),
+                .active = true,
+            };
+            instance.count += 1;
+        },
+        uapi.epoll.EPOLL_CTL_DEL => {
+            const entry = instance.findEntry(fd_i32) orelse {
+                return error.ENOENT;
+            };
+            entry.active = false;
+            entry.fd = -1;
+            instance.count -|= 1;
+        },
+        uapi.epoll.EPOLL_CTL_MOD => {
+            const entry = instance.findEntry(fd_i32) orelse {
+                return error.ENOENT;
+            };
+
+            // Read event from user
+            if (event_ptr == 0) return error.EFAULT;
+            const ev = UserPtr.from(event_ptr).readValue(uapi.epoll.EpollEvent) catch {
+                return error.EFAULT;
+            };
+
+            entry.events = ev.events;
+            entry.data = ev.getData();
+        },
+        else => return error.EINVAL,
+    }
+
+    return 0;
 }
 
 /// sys_epoll_wait (232) - Wait for epoll events
 ///
-/// MVP: Stub - returns ENOSYS
-pub fn sys_epoll_wait(epfd: usize, events: usize, maxevents: usize, timeout: usize) SyscallError!usize {
-    _ = epfd;
-    _ = events;
-    _ = maxevents;
-    _ = timeout;
-    return error.ENOSYS;
+/// Wait for events on the epoll instance.
+/// Returns number of ready fds, or 0 on timeout.
+pub fn sys_epoll_wait(epfd: usize, events_ptr: usize, maxevents: usize, timeout: usize) SyscallError!usize {
+    if (maxevents == 0 or maxevents > 1024) {
+        return error.EINVAL;
+    }
+
+    const instance = getEpollInstance(epfd) orelse return error.EBADF;
+
+    // Validate output buffer
+    const ev_size = @sizeOf(uapi.epoll.EpollEvent);
+    if (!base.isValidUserPtr(events_ptr, maxevents * ev_size)) {
+        return error.EFAULT;
+    }
+
+    // Allocate kernel buffer for results
+    const result_buf = heap.allocator().alloc(uapi.epoll.EpollEvent, maxevents) catch {
+        return error.ENOMEM;
+    };
+    defer heap.allocator().free(result_buf);
+
+    // Check events (simplified - does one pass)
+    var ready_count: usize = 0;
+    const timeout_i: isize = @bitCast(timeout);
+
+    // Take a snapshot of entries under lock
+    var entries_copy: [EPOLL_MAX_FDS]EpollEntry = undefined;
+    {
+        const held = instance.lock.acquire();
+        entries_copy = instance.entries;
+        held.release();
+    }
+
+    // Check each watched fd
+    for (&entries_copy) |*entry| {
+        if (!entry.active) continue;
+        if (ready_count >= maxevents) break;
+
+        // Check if fd has events
+        // MVP: Only check stdin (0), stdout (1), stderr (2) for basic events
+        var revents: u32 = 0;
+
+        if (entry.fd >= 0 and entry.fd <= 2) {
+            // stdout/stderr are always writable
+            if (entry.fd > 0 and (entry.events & uapi.epoll.EPOLLOUT) != 0) {
+                revents |= uapi.epoll.EPOLLOUT;
+            }
+            // stdin - check if data available (MVP: assume not unless keyboard has data)
+            if (entry.fd == 0 and (entry.events & uapi.epoll.EPOLLIN) != 0) {
+                // Would need keyboard buffer check here
+            }
+        } else {
+            // For other fds, check via FD table
+            const table = base.getGlobalFdTable();
+            const fd_u32 = std.math.cast(u32, @as(usize, @intCast(entry.fd))) orelse continue;
+            if (table.get(fd_u32)) |fd_obj| {
+                // Check if fd has poll operation
+                if (fd_obj.ops.poll) |poll_fn| {
+                    const poll_events = poll_fn(fd_obj, @truncate(entry.events));
+                    revents = @intCast(poll_events);
+                }
+            } else {
+                // FD no longer valid
+                revents = uapi.epoll.EPOLLNVAL;
+            }
+        }
+
+        if (revents != 0) {
+            result_buf[ready_count] = uapi.epoll.EpollEvent.init(revents, entry.data);
+            ready_count += 1;
+        }
+    }
+
+    // If events found or timeout is 0, return immediately
+    if (ready_count > 0 or timeout_i == 0) {
+        // Copy results to userspace
+        const out_slice = result_buf[0..ready_count];
+        _ = UserPtr.from(events_ptr).copyFromKernel(std.mem.sliceAsBytes(out_slice)) catch {
+            return error.EFAULT;
+        };
+        return ready_count;
+    }
+
+    // If timeout is -1 (infinite) or positive, we would block here
+    // MVP: Just return 0 (timeout) since blocking requires more infrastructure
+    return 0;
 }

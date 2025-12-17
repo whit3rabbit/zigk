@@ -52,6 +52,12 @@ var fpu_access_handler: ?*const fn () bool = null;
 // Args: vector, error_code
 var crash_handler: ?*const fn (u8, u64) noreturn = null;
 
+// User page fault handler callback (set by kernel for demand paging)
+// Called for user-mode page faults before treating as a crash
+// Args: fault_address (CR2), error_code
+// Returns: true if handled (page allocated), false if should crash
+var page_fault_handler: ?*const fn (u64, u64) bool = null;
+
 // Generic IRQ handlers (for userspace drivers/IPC)
 // Indexed by IRQ number (0-15)
 var generic_irq_handlers: [16]?*const fn (u8) void = [_]?*const fn (u8) void{null} ** 16;
@@ -164,6 +170,13 @@ pub fn setFpuAccessHandler(handler: *const fn () bool) void {
     fpu_access_handler = handler;
 }
 
+/// Set the page fault handler callback for demand paging
+/// This allows the kernel to handle user-mode page faults by allocating pages on demand
+/// The callback should return true if the fault was handled, false if it's a real crash
+pub fn setPageFaultHandler(handler: *const fn (u64, u64) bool) void {
+    page_fault_handler = handler;
+}
+
 /// Set a generic handler for an IRQ
 /// This allows higher-level kernel modules to handle IRQs without hardcoding
 pub fn setGenericIrqHandler(irq: u8, handler: *const fn (u8) void) void {
@@ -186,6 +199,19 @@ fn exceptionHandler(frame: *idt.InterruptFrame) void {
             }
         }
         // If no handler or handler failed, fall through to error handling
+    }
+
+    // Handle user mode page faults for demand paging
+    // This must happen BEFORE the crash handler since demand paging is normal operation
+    if (vector == 14 and (frame.cs & 3) == 3) {
+        const cr2 = cpu.readCr2();
+        if (page_fault_handler) |handler| {
+            if (handler(cr2, frame.error_code)) {
+                // Demand paging successfully allocated the page
+                return;
+            }
+        }
+        // Handler returned false or not set - fall through to error handling
     }
 
     // For user mode exceptions, dump debug info before invoking crash handler (noreturn)

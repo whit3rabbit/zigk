@@ -16,6 +16,8 @@ const process_mod = @import("process");
 const SyscallError = base.SyscallError;
 const Process = base.Process;
 const UserPtr = base.UserPtr;
+const isValidUserAccess = base.isValidUserAccess;
+const AccessMode = base.AccessMode;
 
 // =============================================================================
 // Process Control
@@ -220,27 +222,43 @@ pub fn sys_getegid() SyscallError!usize {
 
 /// sys_umask (95) - Set file creation mask
 ///
-/// MVP: Stub - stores mask but not enforced
-var current_umask: u32 = 0o022; // Default umask
+/// MVP: Stored per-process but not enforced yet
 pub fn sys_umask(mask: usize) SyscallError!usize {
-    const old_mask = current_umask;
-    current_umask = @truncate(mask & 0o777);
+    const proc = base.getCurrentProcess();
+    const old_mask = proc.umask;
+    proc.umask = @truncate(mask & 0o777);
     return old_mask;
 }
+
+/// Linux rlimit structure (matches Linux x86_64 ABI)
+const Rlimit = extern struct {
+    rlim_cur: u64, // Soft limit
+    rlim_max: u64, // Hard limit
+
+    comptime {
+        // Validate struct matches Linux ABI (16 bytes, no padding)
+        const std = @import("std");
+        std.debug.assert(@sizeOf(Rlimit) == 16);
+        std.debug.assert(@alignOf(Rlimit) == 8);
+    }
+};
+
+/// Unlimited resource limit value (Linux RLIM_INFINITY)
+const RLIM_INFINITY: u64 = @bitCast(@as(i64, -1));
 
 /// sys_getrlimit (97) - Get resource limits
 ///
 /// MVP: Returns unlimited for most resources
 pub fn sys_getrlimit(resource: usize, rlim_ptr: usize) SyscallError!usize {
-    _ = resource;
+    _ = resource; // TODO: Handle different resource types
     if (rlim_ptr == 0) return error.EFAULT;
 
-    // rlimit struct: { rlim_cur: u64, rlim_max: u64 }
-    const RLIM_INFINITY: u64 = @bitCast(@as(i64, -1));
-    const rlimit = [2]u64{ RLIM_INFINITY, RLIM_INFINITY };
+    const rlimit = Rlimit{
+        .rlim_cur = RLIM_INFINITY,
+        .rlim_max = RLIM_INFINITY,
+    };
 
-    const uptr = UserPtr.from(rlim_ptr);
-    _ = uptr.copyFromKernel(@as(*const [16]u8, @ptrCast(&rlimit))) catch {
+    UserPtr.from(rlim_ptr).writeValue(rlimit) catch {
         return error.EFAULT;
     };
     return 0;
@@ -264,6 +282,10 @@ pub fn sys_uname(buf_ptr: usize) SyscallError!usize {
     // utsname struct: 5 fields of 65 bytes each = 325 bytes
     // Linux uses _UTSNAME_LENGTH = 65
     const UTSNAME_LEN = 65;
+    const utsname_len = 5 * UTSNAME_LEN;
+    if (!isValidUserAccess(buf_ptr, utsname_len, AccessMode.Write)) {
+        return error.EFAULT;
+    }
     var utsname: [5 * UTSNAME_LEN]u8 = [_]u8{0} ** (5 * UTSNAME_LEN);
 
     // sysname

@@ -210,6 +210,10 @@ pub const SYS_EXIT: usize = 60;
 /// (pid, wstatus, options, rusage) -> pid_t
 pub const SYS_WAIT4: usize = 61;
 
+/// Send signal to a process
+/// (pid, sig) -> int
+pub const SYS_KILL: usize = 62;
+
 /// Get system information
 /// (name) -> int
 pub const SYS_UNAME: usize = 63;
@@ -390,9 +394,17 @@ pub const SYS_EPOLL_WAIT: usize = 232;
 /// (epfd, op, fd, event) -> int
 pub const SYS_EPOLL_CTL: usize = 233;
 
+/// Send signal to a specific thread
+/// (tid, sig) -> int
+pub const SYS_TKILL: usize = 200;
+
 /// Open file relative to a directory FD
 /// (dfd, filename, flags, mode) -> int
 pub const SYS_OPENAT: usize = 257;
+
+/// Send signal to a thread in a thread group
+/// (tgid, tid, sig) -> int
+pub const SYS_TGKILL: usize = 234;
 
 /// Create an epoll instance
 /// (flags) -> int

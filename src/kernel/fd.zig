@@ -24,6 +24,16 @@ const Errno = uapi.errno.Errno;
 /// Maximum number of file descriptors per thread/process
 pub const MAX_FDS: usize = 256;
 
+// Comptime validation of constants
+comptime {
+    // MAX_FDS must fit in u32 (fd_num is cast from usize to u32 in syscall handlers)
+    std.debug.assert(MAX_FDS <= std.math.maxInt(u32));
+    // MAX_FDS should be reasonable (not too large for stack arrays)
+    std.debug.assert(MAX_FDS <= 1024);
+    // MAX_FDS must be > 2 for stdin/stdout/stderr
+    std.debug.assert(MAX_FDS >= 3);
+}
+
 /// File descriptor flags (Linux O_* flags we care about)
 pub const O_RDONLY: u32 = 0x0000;
 pub const O_WRONLY: u32 = 0x0001;
@@ -69,6 +79,10 @@ pub const FileOps = struct {
     /// offset: mmap offset (e.g., IORING_OFF_SQ_RING)
     /// size: Pointer to size (in/out - returns actual size)
     mmap: ?*const fn (fd: *FileDescriptor, offset: u64, size: *usize) u64,
+
+    /// Poll for events (optional, for epoll support)
+    /// Returns bitmask of ready events (EPOLLIN, EPOLLOUT, etc.)
+    poll: ?*const fn (fd: *FileDescriptor, requested_events: u32) u32,
 };
 
 /// File descriptor structure
@@ -83,8 +97,8 @@ pub const FileDescriptor = struct {
     /// Open flags (O_RDONLY, O_WRONLY, O_RDWR, etc.)
     flags: u32,
 
-    /// Reference count for shared FDs
-    refcount: u32,
+    /// Reference count for shared FDs (atomic for thread-safety)
+    refcount: std.atomic.Value(u32),
 
     /// Current file position (for seekable files)
     position: u64,
@@ -92,19 +106,30 @@ pub const FileDescriptor = struct {
     /// Lock for atomic operations (e.g. writev)
     lock: sync.Spinlock,
 
-    /// Increment reference count
+    /// Increment reference count (atomic, thread-safe)
     pub fn ref(self: *FileDescriptor) void {
-        self.refcount += 1;
+        _ = self.refcount.fetchAdd(1, .monotonic);
     }
 
     /// Decrement reference count, returns true if FD should be freed
+    /// Uses release ordering to ensure all prior writes are visible before
+    /// the FD is potentially freed by another thread seeing refcount == 0
     pub fn unref(self: *FileDescriptor) bool {
-        if (self.refcount == 0) {
+        const old = self.refcount.fetchSub(1, .release);
+        if (old == 0) {
+            // Underflow - this is a bug, but handle defensively
             console.warn("FD: unref on zero refcount", .{});
+            // Restore to 0 to prevent wraparound
+            self.refcount.store(0, .monotonic);
             return true;
         }
-        self.refcount -= 1;
-        return self.refcount == 0;
+        if (old == 1) {
+            // Was 1, now 0 - we're the last reference
+            // On x86_64, the release ordering in fetchSub combined with
+            // the strong memory model provides sufficient synchronization
+            return true;
+        }
+        return false;
     }
 
     /// Check if file is readable
@@ -280,7 +305,7 @@ pub fn createFd(ops: *const FileOps, flags: u32, private_data: ?*anyopaque) !*Fi
         .ops = ops,
         .private_data = private_data,
         .flags = flags,
-        .refcount = 1,
+        .refcount = .{ .raw = 1 },
         .position = 0,
         .lock = .{},
     };

@@ -12,6 +12,8 @@ const mouse = @import("mouse");
 pub const Message = ipc_msg.Message;
 pub const KernelMessage = ipc_msg.KernelMessage;
 
+const MAX_MAILBOX_MESSAGES: usize = 128;
+
 pub fn sys_send(target_pid: usize, msg_ptr: usize, len: usize) SyscallError!usize {
     // 1. Validate arguments
     if (len != @sizeOf(Message)) return error.EINVAL;
@@ -46,14 +48,20 @@ pub fn sys_send(target_pid: usize, msg_ptr: usize, len: usize) SyscallError!usiz
     
     // Allocate kernel message
     const kmsg = heap.allocator().create(KernelMessage) catch return error.ENOMEM;
+    errdefer heap.allocator().destroy(kmsg);
     kmsg.* = KernelMessage{ .msg = msg };
     
     // Queue message
     {
         const held = target.mailbox_lock.acquire();
         defer held.release();
+
+        if (target.mailbox_len >= MAX_MAILBOX_MESSAGES) {
+            return error.EAGAIN;
+        }
         
         target.mailbox.append(kmsg);
+        target.mailbox_len += 1;
         
         // Wake waiter if any
         if (target.msg_waiter) |waiter| {
@@ -84,6 +92,9 @@ pub fn sys_recv(msg_ptr: usize, len: usize) SyscallError!usize {
             // Check queue
             if (proc.mailbox.popFirst()) |msg| {
                 kmsg = msg;
+                if (proc.mailbox_len > 0) {
+                    proc.mailbox_len -= 1;
+                }
                 held.release();
                 break;
             }
@@ -125,14 +136,20 @@ pub fn sendKernelMessage(target_pid: usize, payload: []const u8) !void {
     
     // Allocate kernel message
     const kmsg = heap.allocator().create(KernelMessage) catch return error.ENOMEM;
+    errdefer heap.allocator().destroy(kmsg);
     kmsg.* = KernelMessage{ .msg = msg };
     
     // Queue message
     {
         const held = target.mailbox_lock.acquire();
         defer held.release();
+
+        if (target.mailbox_len >= MAX_MAILBOX_MESSAGES) {
+            return error.EAGAIN;
+        }
         
         target.mailbox.append(kmsg);
+        target.mailbox_len += 1;
         
         // Wake waiter if any
         if (target.msg_waiter) |waiter| {

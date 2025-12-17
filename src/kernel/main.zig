@@ -28,6 +28,7 @@ const acpi = @import("acpi");
 const serial_driver = @import("serial_driver");
 const video_driver = @import("video_driver");
 const io = @import("io");
+const syscall_base = @import("syscall_base");
 
 // New modules
 const boot = @import("boot.zig");
@@ -316,6 +317,12 @@ export fn _start() noreturn {
     // Initialize scheduler
     sched.init();
 
+    // Register demand paging handler for user page faults
+    // This enables lazy allocation - mmap reserves address space without allocating
+    // physical pages until they are actually accessed
+    hal.interrupts.setPageFaultHandler(pageFaultHandler);
+    console.info("Demand paging enabled", .{});
+
     // Initialize async I/O reactor (Phase 2)
     io.initGlobal();
     console.info("Async I/O reactor initialized", .{});
@@ -441,6 +448,27 @@ fn initApic() void {
     hal.apic.init(&apic_init_info);
 
     console.info("APIC subsystem initialized", .{});
+}
+
+/// Page fault handler for demand paging
+/// Called by HAL when a user-mode page fault occurs
+/// Returns true if the fault was handled (page allocated), false if it's a real crash
+fn pageFaultHandler(addr: u64, err_code: u64) bool {
+    // Get current process - must exist for user-mode page faults
+    const proc = syscall_base.getCurrentProcessOrNull() orelse {
+        console.warn("PageFault: No current process for addr {x}", .{addr});
+        return false;
+    };
+
+    // Delegate to the process's UserVmm for demand paging
+    const handled = proc.user_vmm.handlePageFault(addr, err_code);
+
+    if (handled) {
+        // Update RSS accounting (we allocated 1 page = 4096 bytes)
+        proc.rss_current +|= 4096;
+    }
+
+    return handled;
 }
 
 /// Convert physical address to virtual using HHDM

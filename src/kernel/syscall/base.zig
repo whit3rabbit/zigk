@@ -51,6 +51,13 @@ pub fn getCurrentProcess() *Process {
     return current_process.?;
 }
 
+/// Get the current process if one is set, without creating init
+/// Useful for contexts where we need to check if a process exists
+/// without side effects (e.g., page fault handling before scheduler runs)
+pub fn getCurrentProcessOrNull() ?*Process {
+    return current_process;
+}
+
 /// Set the current process (for context switching)
 pub fn setCurrentProcess(proc: *Process) void {
     current_process = proc;

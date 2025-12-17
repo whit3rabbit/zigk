@@ -207,6 +207,7 @@ const initrd_ops = fd.FileOps{
     .stat = initrdStat,
     .ioctl = null,
     .mmap = null,
+    .poll = null,
 };
 
 fn initrdStat(file_desc: *fd.FileDescriptor, stat_buf: *anyopaque) isize {

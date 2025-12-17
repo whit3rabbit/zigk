@@ -100,6 +100,17 @@ pub fn sys_fork(frame: *hal.syscall.SyscallFrame) SyscallError!usize {
         return error.ESRCH;
     };
 
+    // SECURITY: Save parent's FPU state before fork to ensure proper isolation.
+    // Due to lazy FPU switching, the parent's FPU registers may not have been
+    // saved to the thread struct yet. If we fork and the child runs first on the
+    // same CPU, there's a window where FPU state could leak. Explicitly saving
+    // here ensures the parent's sensitive FPU data (e.g., from crypto operations)
+    // is captured in the thread struct before the child is created.
+    // Note: The child gets fresh FPU state from createUserThread (fpu_used=false).
+    if (parent_thread.fpu_used) {
+        hal.fpu.fxsave(&parent_thread.fpu_state);
+    }
+
     // Create child thread
     // The child thread needs to be set up to return 0 from this syscall
     const child_thread = thread.createUserThread(
@@ -249,7 +260,10 @@ pub fn sys_execve(frame: *hal.syscall.SyscallFrame, path_ptr: usize, argv_ptr: u
         var i: usize = 0;
         while (argc < 64) : (i += 1) {
             const ptr_addr = argv_ptr + i * @sizeOf(usize);
-            const arg_ptr = UserPtr.from(ptr_addr).readValue(usize) catch break;
+            // Read pointer from argv array - fault is a real error, not silent termination
+            const arg_ptr = UserPtr.from(ptr_addr).readValue(usize) catch {
+                return error.EFAULT; // Pointer read failed
+            };
 
             if (arg_ptr == 0) break; // Null terminator of argv array
 
@@ -292,7 +306,10 @@ pub fn sys_execve(frame: *hal.syscall.SyscallFrame, path_ptr: usize, argv_ptr: u
         var i: usize = 0;
         while (envc < 64) : (i += 1) {
             const ptr_addr = envp_ptr + i * @sizeOf(usize);
-            const env_ptr = UserPtr.from(ptr_addr).readValue(usize) catch break;
+            // Read pointer from envp array - fault is a real error, not silent termination
+            const env_ptr = UserPtr.from(ptr_addr).readValue(usize) catch {
+                return error.EFAULT; // Pointer read failed
+            };
 
             if (env_ptr == 0) break;
 
@@ -335,7 +352,11 @@ pub fn sys_execve(frame: *hal.syscall.SyscallFrame, path_ptr: usize, argv_ptr: u
     // This creates a new address space and sets up the stack
     const result = elf.exec(file.data, argv, envp) catch |err| {
         console.err("sys_execve: Failed to exec: {}", .{err});
-        return error.ENOEXEC;
+        // Map ELF loader errors to appropriate syscall errors
+        return switch (err) {
+            error.OutOfMemory => error.ENOMEM,
+            error.InvalidExecutable => error.ENOEXEC,
+        };
     };
 
     console.debug("sys_execve: Loaded ELF entry={x} stack={x} cr3={x}", .{
@@ -353,8 +374,20 @@ pub fn sys_execve(frame: *hal.syscall.SyscallFrame, path_ptr: usize, argv_ptr: u
     const current_thread = sched.getCurrentThread().?;
     const current_proc = base.getCurrentProcess();
 
-    // Save old CR3 to destroy later
-    // Save old CR3 to destroy later
+    // SECURITY: Check if process has multiple threads.
+    // In a multi-threaded process, other threads may still be executing in the
+    // old address space. Destroying it would cause page faults or memory corruption.
+    // Linux terminates all other threads before execve proceeds; we return EAGAIN
+    // to indicate the caller should handle thread termination first.
+    const thread_count = current_proc.refcount.load(.acquire);
+    if (thread_count > 1) {
+        console.warn("sys_execve: Multi-threaded process (refcount={}) - cannot execve safely", .{thread_count});
+        // The new address space was already created but we need to clean it up
+        vmm.destroyAddressSpace(result.pml4_phys);
+        return error.EAGAIN;
+    }
+
+    // Save old CR3 to destroy after switching
     const old_cr3 = current_proc.cr3;
 
     // Update process/thread state
@@ -436,6 +469,16 @@ pub fn sys_arch_prctl(code: usize, addr: usize) SyscallError!usize {
 
     switch (code) {
         ARCH_SET_FS => {
+            // SECURITY: Validate FS base is within userspace bounds.
+            // A kernel address could be exploited with speculative execution
+            // vulnerabilities or if kernel code erroneously uses FS-relative accesses.
+            // Also reject non-canonical addresses that would cause #GP on access.
+            if (addr != 0) {
+                // Check address is in canonical lower half (userspace)
+                if (addr >= user_mem.USER_SPACE_END or addr < user_mem.USER_SPACE_START) {
+                    return error.EINVAL;
+                }
+            }
             // Store FS base in thread struct for context switch restoration
             curr.fs_base = addr;
             // Write to IA32_FS_BASE MSR for immediate effect
@@ -527,15 +570,27 @@ pub fn sys_get_fb_info(info_ptr: usize) SyscallError!usize {
 /// Returns:
 ///   Virtual address on success (positive)
 ///   -ENODEV if no framebuffer available
+///   -EPERM if process lacks framebuffer/MMIO capability
 ///   -ENOMEM if mapping failed
+///
+/// Security: Requires MMIO capability for the framebuffer physical address range.
+/// This prevents unprivileged processes from gaining direct hardware access.
 pub fn sys_map_fb() SyscallError!usize {
     // Get framebuffer state from module
     const fb_state = framebuffer.getState() orelse {
         return error.ENODEV;
     };
 
-    // Get current process for page table
+    // Get current process for page table and capability check
     const proc = base.getCurrentProcess();
+
+    // SECURITY: Verify process has MMIO capability for framebuffer region.
+    // Without this check, any unprivileged process could map display hardware
+    // enabling UI spoofing, DoS, or information disclosure attacks.
+    if (!proc.hasMmioCapability(fb_state.phys_addr, fb_state.size)) {
+        console.warn("sys_map_fb: Process pid={} lacks framebuffer capability", .{proc.pid});
+        return error.EPERM;
+    }
 
     // Fixed virtual address for framebuffer in user space
     // Using high address to avoid conflicts with heap/stack
@@ -623,8 +678,27 @@ pub fn sys_clone(frame: *hal.syscall.SyscallFrame) SyscallError!usize {
         const parent_proc = base.getCurrentProcess();
         const parent_thread = sched.getCurrentThread() orelse return error.ESRCH;
 
-        // Increment reference count for the shared process
-        parent_proc.ref();
+        // SECURITY: Validate process is still alive before incrementing refcount.
+        // Another thread might be exiting this process concurrently. If process is
+        // already in Zombie or Dead state, ref() could lead to use-after-free.
+        if (parent_proc.state != .Running) {
+            return error.ESRCH;
+        }
+
+        // SECURITY: Enforce per-process thread limit atomically to prevent
+        // racing threads from exceeding MAX_THREADS_PER_PROCESS.
+        const MAX_THREADS_PER_PROCESS: u32 = 256;
+        var refcount = parent_proc.refcount.load(.acquire);
+        while (true) {
+            if (refcount >= MAX_THREADS_PER_PROCESS) {
+                console.warn("sys_clone: Process pid={} reached thread limit ({})", .{ parent_proc.pid, MAX_THREADS_PER_PROCESS });
+                return error.EAGAIN;
+            }
+            if (parent_proc.refcount.cmpxchgWeak(refcount, refcount + 1, .acq_rel, .acquire) == null) {
+                break;
+            }
+            refcount = parent_proc.refcount.load(.acquire);
+        }
         errdefer _ = parent_proc.unref();
 
         // Create child thread attached to the SAME process
@@ -639,10 +713,52 @@ pub fn sys_clone(frame: *hal.syscall.SyscallFrame) SyscallError!usize {
         ) catch {
             return error.ENOMEM;
         };
-        errdefer thread.destroyThread(child_thread); // Should unref process too if destroying?
-        // destroyThread doesn't unref process automatically (we handled that in sys_exit usually).
-        // if we error here, we must unref manually? yes, errdefer above covers it.
-        // But destroyThread might not be safe if not scheduled? It just frees memory.
+        errdefer _ = thread.destroyThread(child_thread); 
+
+        // Handle CLONE_PARENT_SETTID (store child TID in parent memory)
+        // Usually passed in RDX (parent_tid_ptr)
+        if ((flags & uapi.sched.CLONE_PARENT_SETTID) != 0) {
+             const parent_tid_ptr = frame.rdx;
+             if (isValidUserPtr(parent_tid_ptr, @sizeOf(i32))) {
+                  UserPtr.from(parent_tid_ptr).writeValue(@as(i32, @intCast(child_thread.tid))) catch {
+                      // Linux ignores fault here usually or returns EFAULT. 
+                      // For robustness, we'll return EFAULT.
+                      return error.EFAULT;
+                  };
+             } else {
+                 return error.EFAULT;
+             }
+        }
+
+        // Handle CLONE_CHILD_CLEARTID (store child TID in child memory and clear on exit)
+        // Usually passed in R10 (child_tid_ptr)
+        if ((flags & uapi.sched.CLONE_CHILD_CLEARTID) != 0) {
+             const child_tid_ptr = frame.r10;
+             if (isValidUserPtr(child_tid_ptr, @sizeOf(i32))) {
+                  // Store TID in child memory (same address space as parent/current)
+                  UserPtr.from(child_tid_ptr).writeValue(@as(i32, @intCast(child_thread.tid))) catch {
+                      return error.EFAULT;
+                  };
+                  // Remember address to clear on exit
+                  child_thread.clear_child_tid = child_tid_ptr;
+             } else {
+                 return error.EFAULT;
+             }
+        }
+
+        // Handle CLONE_CHILD_SETTID (store child TID in child memory)
+        // Usually passed in R10 (child_tid_ptr)
+        // Note: SETTID and CLEARTID both use the same pointer register (R10)
+        if ((flags & uapi.sched.CLONE_CHILD_SETTID) != 0) {
+             const child_tid_ptr = frame.r10;
+             if (isValidUserPtr(child_tid_ptr, @sizeOf(i32))) {
+                  UserPtr.from(child_tid_ptr).writeValue(@as(i32, @intCast(child_thread.tid))) catch {
+                      return error.EFAULT;
+                  };
+             } else {
+                 return error.EFAULT;
+             }
+        }
 
         // Copy parent's kernel stack frame (register state) to child
         copyThreadState(frame, parent_thread, child_thread);
@@ -665,17 +781,6 @@ pub fn sys_clone(frame: *hal.syscall.SyscallFrame) SyscallError!usize {
         }
 
         // Add child thread to process/thread hierarchy
-        // For CLONE_THREAD, the thread is a sibling of the caller, not a child?
-        // Linux: All threads in a group are peers. Main thread is leader.
-        // Zscapek implementation: We'll treat them as peers in the process,
-        // but our hierarchy is simplistic (parent/child).
-        // Let's attach to the process's thread list if we had one?
-        // Current Process struct doesn't track all threads, just "first_child" process?
-        // Wait, `Process` struct has `first_child` (Process).
-        // `Thread` struct has `parent` (Thread) and `first_child` (Thread).
-        // Threads manage the thread hierarchy.
-        // If we are cloning a thread, who is the parent?
-        // The creating thread is the parent in our simple scheduler model.
         thread.addChild(parent_thread, child_thread);
 
         // Add to scheduler

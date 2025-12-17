@@ -22,6 +22,8 @@ const io = @import("io");
 const user_mem = @import("user_mem");
 const fd_mod = @import("fd");
 const sched = @import("sched");
+const thread_mod = @import("thread");
+const Thread = thread_mod.Thread;
 const hal = @import("hal");
 const heap = @import("heap");
 const pmm = @import("pmm");
@@ -98,6 +100,12 @@ pub const IoUringInstance = struct {
     pending_requests: [MAX_RING_ENTRIES]*io.IoRequest,
     pending_count: u32,
 
+    /// Thread waiting for completions (for sched.block() wakeup)
+    waiting_thread: ?*Thread,
+
+    /// Minimum completions needed to wake waiting thread
+    min_complete: u32,
+
     /// Setup flags
     flags: u32,
 
@@ -119,6 +127,8 @@ pub const IoUringInstance = struct {
             .cq_ring_entries = 0,
             .pending_requests = undefined,
             .pending_count = 0,
+            .waiting_thread = null,
+            .min_complete = 0,
             .flags = 0,
             .allocated = false,
         };
@@ -194,6 +204,28 @@ pub const IoUringInstance = struct {
         return true;
     }
 
+    fn finalizeBounceBuffer(req: *io.IoRequest) void {
+        if (req.bounce_buf) |buf| {
+            if (req.op == .socket_read and req.user_buf_ptr != 0) {
+                switch (req.result) {
+                    .success => |n| {
+                        const copy_len = @min(n, @min(buf.len, req.user_buf_len));
+                        if (copy_len > 0) {
+                            const uptr = user_mem.UserPtr.from(req.user_buf_ptr);
+                            _ = uptr.copyFromKernel(buf[0..copy_len]) catch {
+                                req.result = .{ .err = error.EFAULT };
+                            };
+                        }
+                    },
+                    else => {},
+                }
+            }
+
+            heap.allocator().free(buf);
+            req.bounce_buf = null;
+        }
+    }
+
     /// Process pending requests and generate CQEs for completed ones
     pub fn processPendingRequests(self: *IoUringInstance) u32 {
         var completed: u32 = 0;
@@ -204,10 +236,12 @@ pub const IoUringInstance = struct {
             const state = req.getState();
 
             if (state == .completed or state == .cancelled) {
+                finalizeBounceBuffer(req);
+
                 // Generate CQE
                 const res: i32 = switch (req.result) {
                     .success => |n| @intCast(@min(n, @as(usize, std.math.maxInt(i32)))),
-                    .err => |e| @intCast(req.result.toSyscallReturn()),
+                    .err => @intCast(req.result.toSyscallReturn()),
                     .cancelled => -@as(i32, 125), // ECANCELED
                     .pending => 0,
                 };
@@ -230,7 +264,31 @@ pub const IoUringInstance = struct {
             }
         }
 
+        // Wake waiting thread if we have enough completions
+        if (completed > 0) {
+            if (self.waiting_thread) |thread| {
+                if (self.cqReady() >= self.min_complete) {
+                    sched.unblock(thread);
+                }
+            }
+        }
+
         return completed;
+    }
+
+    /// Add a request to the pending list with proper io_ring association
+    /// Returns false if pending list is full
+    pub fn addPendingRequest(self: *IoUringInstance, req: *io.IoRequest) bool {
+        if (self.pending_count >= MAX_RING_ENTRIES) {
+            return false;
+        }
+
+        // Associate request with this io_uring instance for CQE posting
+        req.io_ring = @ptrCast(self);
+
+        self.pending_requests[self.pending_count] = req;
+        self.pending_count += 1;
+        return true;
     }
 };
 
@@ -250,6 +308,7 @@ const io_uring_file_ops = fd_mod.FileOps{
     .stat = null,
     .ioctl = null,
     .mmap = ioUringMmap,
+    .poll = null,
 };
 
 fn ioUringClose(fd: *fd_mod.FileDescriptor) isize {
@@ -397,6 +456,7 @@ fn freeInstance(idx: usize) void {
 
     // Free any pending requests
     for (0..inst.pending_count) |i| {
+        IoUringInstance.finalizeBounceBuffer(inst.pending_requests[i]);
         io.pool.free(inst.pending_requests[i]);
     }
 
@@ -931,12 +991,10 @@ fn processReadOp(inst: *IoUringInstance, sqe: *const io_ring.IoUringSqe) Syscall
     // In full implementation, would dispatch based on fd type
     if (keyboard.getCharAsync(req)) {
         // Queued for later - add to pending
-        if (inst.pending_count >= MAX_RING_ENTRIES) {
+        if (!inst.addPendingRequest(req)) {
             io.pool.free(req);
             return error.EBUSY;
         }
-        inst.pending_requests[inst.pending_count] = req;
-        inst.pending_count += 1;
     } else {
         // Completed immediately - generate CQE
         const res: i32 = switch (req.result) {
@@ -1007,12 +1065,10 @@ fn processAcceptOp(inst: *IoUringInstance, sqe: *const io_ring.IoUringSqe) Sysca
         io.pool.free(req);
     } else {
         // Queued for later
-        if (inst.pending_count >= MAX_RING_ENTRIES) {
+        if (!inst.addPendingRequest(req)) {
             io.pool.free(req);
             return error.EBUSY;
         }
-        inst.pending_requests[inst.pending_count] = req;
-        inst.pending_count += 1;
     }
 }
 
@@ -1056,13 +1112,46 @@ fn processConnectOp(inst: *IoUringInstance, sqe: *const io_ring.IoUringSqe) Sysc
         _ = inst.addCqe(sqe.user_data, res, 0);
         io.pool.free(req);
     } else {
-        if (inst.pending_count >= MAX_RING_ENTRIES) {
+        if (!inst.addPendingRequest(req)) {
+            IoUringInstance.finalizeBounceBuffer(req);
             io.pool.free(req);
             return error.EBUSY;
         }
-        inst.pending_requests[inst.pending_count] = req;
-        inst.pending_count += 1;
     }
+}
+
+fn initBounceBuffer(
+    req: *io.IoRequest,
+    user_ptr: usize,
+    len: usize,
+    mode: user_mem.AccessMode,
+    copy_from_user: bool,
+) SyscallError![]u8 {
+    if (len == 0) {
+        req.bounce_buf = null;
+        req.user_buf_ptr = user_ptr;
+        req.user_buf_len = 0;
+        return &[_]u8{};
+    }
+
+    if (!user_mem.isValidUserAccess(user_ptr, len, mode)) {
+        return error.EFAULT;
+    }
+
+    const kbuf = heap.allocator().alloc(u8, len) catch return error.ENOMEM;
+    errdefer heap.allocator().free(kbuf);
+
+    if (copy_from_user) {
+        const uptr = user_mem.UserPtr.from(user_ptr);
+        _ = uptr.copyToKernel(kbuf) catch {
+            return error.EFAULT;
+        };
+    }
+
+    req.bounce_buf = kbuf;
+    req.user_buf_ptr = user_ptr;
+    req.user_buf_len = len;
+    return kbuf;
 }
 
 fn processRecvOp(inst: *IoUringInstance, sqe: *const io_ring.IoUringSqe) SyscallError!void {
@@ -1072,30 +1161,24 @@ fn processRecvOp(inst: *IoUringInstance, sqe: *const io_ring.IoUringSqe) Syscall
     errdefer io.pool.free(req);
 
     req.fd = sqe.fd;
-    req.buf_ptr = sqe.addr;
-    req.buf_len = sqe.len;
     req.user_data = sqe.user_data;
 
-    // Validate buffer address and length
-    if (!user_mem.isValidUserAccess(sqe.addr, sqe.len, .write)) {
-        io.pool.free(req);
-        return error.EFAULT;
-    }
-
-    // SECURITY WARNING (TOCTOU): Creating a kernel slice from validated user
-    // address has a race condition - the page could be unmapped between
-    // validation and actual I/O. Proper fix requires kernel bounce buffers
-    // or page pinning. Current mitigation: validation checks, but async
-    // operations remain vulnerable. TODO: Add kernel bounce buffer support.
-    const buf: []u8 = @as([*]u8, @ptrFromInt(sqe.addr))[0..sqe.len];
+    const buf = try initBounceBuffer(req, sqe.addr, sqe.len, .Write, false);
+    req.buf_ptr = @intFromPtr(buf.ptr);
+    req.buf_len = buf.len;
 
     socket.recvAsync(sock_fd, req, buf) catch |e| {
+        if (req.bounce_buf) |bounce| {
+            heap.allocator().free(bounce);
+            req.bounce_buf = null;
+        }
         io.pool.free(req);
         return socketErrorToSyscallError(e);
     };
 
     const state = req.getState();
     if (state == .completed) {
+        IoUringInstance.finalizeBounceBuffer(req);
         const res: i32 = switch (req.result) {
             .success => |n| @intCast(@min(n, @as(usize, std.math.maxInt(i32)))),
             .err => @intCast(req.result.toSyscallReturn()),
@@ -1104,12 +1187,11 @@ fn processRecvOp(inst: *IoUringInstance, sqe: *const io_ring.IoUringSqe) Syscall
         _ = inst.addCqe(sqe.user_data, res, 0);
         io.pool.free(req);
     } else {
-        if (inst.pending_count >= MAX_RING_ENTRIES) {
+        if (!inst.addPendingRequest(req)) {
+            IoUringInstance.finalizeBounceBuffer(req);
             io.pool.free(req);
             return error.EBUSY;
         }
-        inst.pending_requests[inst.pending_count] = req;
-        inst.pending_count += 1;
     }
 }
 
@@ -1120,30 +1202,25 @@ fn processSendOp(inst: *IoUringInstance, sqe: *const io_ring.IoUringSqe) Syscall
     errdefer io.pool.free(req);
 
     req.fd = sqe.fd;
-    req.buf_ptr = sqe.addr;
-    req.buf_len = sqe.len;
     req.user_data = sqe.user_data;
 
-    // Validate buffer address and length
-    if (!user_mem.isValidUserAccess(sqe.addr, sqe.len, .read)) {
-        io.pool.free(req);
-        return error.EFAULT;
-    }
-
-    // SECURITY WARNING (TOCTOU): Creating a kernel slice from validated user
-    // address has a race condition - the page could be unmapped between
-    // validation and actual I/O. Proper fix requires kernel bounce buffers
-    // or page pinning. Current mitigation: validation checks, but async
-    // operations remain vulnerable. TODO: Add kernel bounce buffer support.
-    const data: []const u8 = @as([*]const u8, @ptrFromInt(sqe.addr))[0..sqe.len];
+    const buf = try initBounceBuffer(req, sqe.addr, sqe.len, .Read, true);
+    const data: []const u8 = buf;
+    req.buf_ptr = @intFromPtr(data.ptr);
+    req.buf_len = data.len;
 
     socket.sendAsync(sock_fd, req, data) catch |e| {
+        if (req.bounce_buf) |bounce| {
+            heap.allocator().free(bounce);
+            req.bounce_buf = null;
+        }
         io.pool.free(req);
         return socketErrorToSyscallError(e);
     };
 
     const state = req.getState();
     if (state == .completed) {
+        IoUringInstance.finalizeBounceBuffer(req);
         const res: i32 = switch (req.result) {
             .success => |n| @intCast(@min(n, @as(usize, std.math.maxInt(i32)))),
             .err => @intCast(req.result.toSyscallReturn()),
@@ -1152,12 +1229,10 @@ fn processSendOp(inst: *IoUringInstance, sqe: *const io_ring.IoUringSqe) Syscall
         _ = inst.addCqe(sqe.user_data, res, 0);
         io.pool.free(req);
     } else {
-        if (inst.pending_count >= MAX_RING_ENTRIES) {
+        if (!inst.addPendingRequest(req)) {
             io.pool.free(req);
             return error.EBUSY;
         }
-        inst.pending_requests[inst.pending_count] = req;
-        inst.pending_count += 1;
     }
 }
 
@@ -1213,13 +1288,11 @@ fn processTimeoutOp(inst: *IoUringInstance, sqe: *const io_ring.IoUringSqe) Sysc
         reactor.addTimer(req, timeout_ticks);
 
         // Add to pending list for CQE generation
-        if (inst.pending_count >= MAX_RING_ENTRIES) {
+        if (!inst.addPendingRequest(req)) {
             _ = reactor.cancelTimer(req);
             io.pool.free(req);
             return error.EBUSY;
         }
-        inst.pending_requests[inst.pending_count] = req;
-        inst.pending_count += 1;
     } else {
         // No timeout specified - complete immediately
         _ = req.complete(.{ .success = 0 });
@@ -1305,25 +1378,47 @@ fn waitForCompletions(inst: *IoUringInstance, min_complete: u32) void {
     // Process any already-completed requests
     _ = inst.processPendingRequests();
 
-    // If we have enough completions, return
+    // If we have enough completions, return immediately
     if (inst.cqReady() >= min_complete) {
         return;
     }
 
-    // Need to wait for more completions
-    // For now, just spin-poll (in full implementation would use proper blocking)
-    var spins: u32 = 0;
-    const max_spins: u32 = 10000;
-
-    while (inst.cqReady() < min_complete and spins < max_spins) {
-        _ = inst.processPendingRequests();
-        spins += 1;
-
-        // Yield to allow IRQ handlers to run
-        if (spins % 100 == 0) {
+    // Need to wait for more completions using proper blocking
+    // Get current thread for wakeup registration
+    const current_thread = sched.getCurrentThread() orelse {
+        // No current thread context - fall back to limited spinning
+        var spins: u32 = 0;
+        while (inst.cqReady() < min_complete and spins < 1000) : (spins += 1) {
+            _ = inst.processPendingRequests();
             hal.cpu.pause();
         }
+        return;
+    };
+
+    // Register ourselves for wakeup when completions arrive
+    inst.waiting_thread = current_thread;
+    inst.min_complete = min_complete;
+
+    // Block until we have enough completions
+    // The completion path (processPendingRequests or IRQ handler) will wake us
+    while (inst.cqReady() < min_complete) {
+        // Double-check before blocking (race condition avoidance)
+        _ = inst.processPendingRequests();
+        if (inst.cqReady() >= min_complete) {
+            break;
+        }
+
+        // Block the thread - scheduler will context switch
+        // We will be woken by sched.unblock() when completions arrive
+        sched.block();
+
+        // After wakeup, process any newly completed requests
+        _ = inst.processPendingRequests();
     }
+
+    // Clear the waiting state
+    inst.waiting_thread = null;
+    inst.min_complete = 0;
 }
 
 // =============================================================================

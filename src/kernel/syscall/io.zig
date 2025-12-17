@@ -16,6 +16,7 @@ const fs = @import("fs");
 const heap = @import("heap");
 const fd_mod = @import("fd");
 const user_mem = @import("user_mem");
+const error_helpers = @import("error_helpers.zig");
 
 const SyscallError = base.SyscallError;
 const UserPtr = base.UserPtr;
@@ -87,21 +88,10 @@ pub fn sys_read(fd_num: usize, buf_ptr: usize, count: usize) SyscallError!usize 
 
     // Read into kernel buffer (legacy isize return from device ops)
     const bytes_read = read_fn(fd, kbuf);
-    if (bytes_read < 0) {
-        // Device ops return negative errno - convert to SyscallError
-        // For now, map common errors; device layer will migrate separately
-        const errno_val: i32 = @intCast(-bytes_read);
-        return switch (errno_val) {
-            5 => error.EIO,
-            11 => error.EAGAIN,
-            14 => error.EFAULT,
-            else => error.EIO,
-        };
-    }
+    const valid_read = try error_helpers.mapDeviceError(bytes_read);
 
     // Copy to user memory
     const uptr = UserPtr.from(buf_ptr);
-    const valid_read = @as(usize, @intCast(bytes_read));
 
     // Only copy what was actually read
     const copy_res = uptr.copyFromKernel(kbuf[0..valid_read]);
@@ -166,20 +156,10 @@ pub fn sys_write(fd_num: usize, buf_ptr: usize, count: usize) SyscallError!usize
     defer held.release();
 
     const bytes_written = do_write_locked(fd, kbuf);
-    
+
     console.debug("sys_write: result={d}", .{bytes_written});
 
-    if (bytes_written < 0) {
-        const errno_val: i32 = @intCast(-bytes_written);
-        return switch (errno_val) {
-            5 => error.EIO,
-            11 => error.EAGAIN,
-            14 => error.EFAULT,
-            32 => error.EPIPE,
-            else => error.EIO,
-        };
-    }
-    return @intCast(bytes_written);
+    return error_helpers.mapDeviceError(bytes_written);
 }
 
 /// Helper for locked write operations
@@ -202,6 +182,8 @@ pub fn sys_writev(fd: usize, bvec_ptr: usize, count: usize) SyscallError!usize {
         len: usize,
     };
 
+    const MAX_WRITEV_BYTES: usize = 16 * 1024 * 1024;
+
     if (count == 0) return 0;
     if (count > 1024) return error.EINVAL;
 
@@ -217,6 +199,7 @@ pub fn sys_writev(fd: usize, bvec_ptr: usize, count: usize) SyscallError!usize {
     }
 
     var total_written: usize = 0;
+    var total_len: usize = 0;
 
     // Acquire FD lock once for the entire vector operation
     // This ensures output from other threads doesn't interleave between vectors
@@ -236,6 +219,15 @@ pub fn sys_writev(fd: usize, bvec_ptr: usize, count: usize) SyscallError!usize {
 
     const held = fd_obj.lock.acquire();
     defer held.release();
+
+    for (kvecs) |vec| {
+        if (vec.len == 0) continue;
+        const new_total = @addWithOverflow(total_len, vec.len);
+        if (new_total[1] != 0 or new_total[0] > MAX_WRITEV_BYTES) {
+            return error.EINVAL;
+        }
+        total_len = new_total[0];
+    }
 
     for (kvecs) |vec| {
         if (vec.len == 0) continue;
@@ -531,9 +523,14 @@ pub fn sys_getdents64(fd_num: usize, dirp: usize, count: usize) SyscallError!usi
 
     // InitRD Iterator needs a pointer to InitRD.
     const initrd = &fs.initrd.InitRD.instance;
+    const start_offset = std.math.cast(usize, fd.position) orelse return error.EINVAL;
+    if (start_offset > initrd.data.len) {
+        return 0;
+    }
+
     var iterator = fs.initrd.FileIterator{
         .initrd = initrd,
-        .offset = @intCast(fd.position),
+        .offset = start_offset,
     };
 
     var bytes_written: usize = 0;

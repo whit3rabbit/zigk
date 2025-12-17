@@ -10,9 +10,19 @@
 //
 // Note: R10 is used instead of RCX for arg4 because syscall clobbers RCX
 
+const std = @import("std");
 pub const uapi = @import("uapi");
 const syscalls = uapi.syscalls;
 const Errno = uapi.errno.Errno;
+
+/// Memory barrier for x86_64 userspace
+inline fn memoryBarrier() void {
+    asm volatile ("mfence"
+        :
+        :
+        : .{ .memory = true }
+    );
+}
 
 /// Timespec structure for nanosleep and clock_gettime
 pub const Timespec = extern struct {
@@ -895,3 +905,287 @@ pub fn pci_config_write(bus: u8, device: u5, func: u3, offset: u12, value: u32) 
     );
     if (isError(ret)) return errorFromReturn(ret);
 }
+
+// =============================================================================
+// io_uring Async I/O (425-427)
+// =============================================================================
+
+/// io_uring types from uapi
+pub const io_ring = uapi.io_ring;
+pub const IoUringSqe = io_ring.IoUringSqe;
+pub const IoUringCqe = io_ring.IoUringCqe;
+pub const IoUringParams = io_ring.IoUringParams;
+pub const IORING_ENTER_GETEVENTS = io_ring.IORING_ENTER_GETEVENTS;
+pub const IORING_OP_NOP = io_ring.IORING_OP_NOP;
+pub const IORING_OP_READ = io_ring.IORING_OP_READ;
+pub const IORING_OP_WRITE = io_ring.IORING_OP_WRITE;
+pub const IORING_OP_ACCEPT = io_ring.IORING_OP_ACCEPT;
+pub const IORING_OP_RECV = io_ring.IORING_OP_RECV;
+pub const IORING_OP_SEND = io_ring.IORING_OP_SEND;
+pub const IORING_OP_CLOSE = io_ring.IORING_OP_CLOSE;
+pub const IORING_OFF_SQ_RING = io_ring.IORING_OFF_SQ_RING;
+pub const IORING_OFF_CQ_RING = io_ring.IORING_OFF_CQ_RING;
+pub const IORING_OFF_SQES = io_ring.IORING_OFF_SQES;
+
+/// Setup an io_uring instance
+/// entries: Number of SQ entries (must be power of 2)
+/// params: In/out parameters for the ring
+/// Returns ring file descriptor or error
+pub fn io_uring_setup(entries: u32, params: *IoUringParams) SyscallError!i32 {
+    const ret = syscall2(
+        syscalls.SYS_IO_URING_SETUP,
+        entries,
+        @intFromPtr(params),
+    );
+    if (isError(ret)) return errorFromReturn(ret);
+    return @truncate(@as(isize, @bitCast(ret)));
+}
+
+/// Submit SQEs and optionally wait for completions
+/// ring_fd: File descriptor from io_uring_setup
+/// to_submit: Number of SQEs to submit
+/// min_complete: Minimum completions to wait for (0 for no wait)
+/// flags: IORING_ENTER_* flags
+/// Returns number of SQEs submitted or error
+pub fn io_uring_enter(ring_fd: i32, to_submit: u32, min_complete: u32, flags: u32) SyscallError!u32 {
+    const ret = syscall4(
+        syscalls.SYS_IO_URING_ENTER,
+        @bitCast(@as(isize, ring_fd)),
+        to_submit,
+        min_complete,
+        flags,
+    );
+    if (isError(ret)) return errorFromReturn(ret);
+    return @truncate(ret);
+}
+
+/// Register resources with an io_uring instance
+/// ring_fd: File descriptor from io_uring_setup
+/// opcode: IORING_REGISTER_* operation
+/// arg: Operation-specific argument
+/// nr_args: Number of arguments
+pub fn io_uring_register(ring_fd: i32, opcode: u32, arg: usize, nr_args: u32) SyscallError!i32 {
+    const ret = syscall4(
+        syscalls.SYS_IO_URING_REGISTER,
+        @bitCast(@as(isize, ring_fd)),
+        opcode,
+        arg,
+        nr_args,
+    );
+    if (isError(ret)) return errorFromReturn(ret);
+    return @truncate(@as(isize, @bitCast(ret)));
+}
+
+/// Memory protection flags
+pub const PROT_NONE: i32 = 0;
+pub const PROT_READ: i32 = 1;
+pub const PROT_WRITE: i32 = 2;
+pub const PROT_EXEC: i32 = 4;
+
+/// Memory mapping flags
+pub const MAP_SHARED: i32 = 1;
+pub const MAP_PRIVATE: i32 = 2;
+pub const MAP_FIXED: i32 = 0x10;
+pub const MAP_ANONYMOUS: i32 = 0x20;
+pub const MAP_POPULATE: i32 = 0x8000;
+
+/// Map memory region (for io_uring ring buffers)
+pub fn mmap(addr: ?*anyopaque, length: usize, prot: i32, flags: i32, fd: i32, offset: u64) SyscallError![*]u8 {
+    const ret = syscall6(
+        syscalls.SYS_MMAP,
+        @intFromPtr(addr),
+        length,
+        @bitCast(@as(isize, prot)),
+        @bitCast(@as(isize, flags)),
+        @bitCast(@as(isize, fd)),
+        offset,
+    );
+    if (isError(ret)) return errorFromReturn(ret);
+    return @ptrFromInt(ret);
+}
+
+/// Unmap memory region
+pub fn munmap(addr: [*]u8, length: usize) SyscallError!void {
+    const ret = syscall2(
+        syscalls.SYS_MUNMAP,
+        @intFromPtr(addr),
+        length,
+    );
+    if (isError(ret)) return errorFromReturn(ret);
+}
+
+/// High-level io_uring ring wrapper for userspace
+pub const IoUring = struct {
+    ring_fd: i32,
+    sq_ring: [*]u8,
+    cq_ring: [*]u8,
+    sqes: [*]IoUringSqe,
+    sq_head: *volatile u32,
+    sq_tail: *volatile u32,
+    sq_mask: u32,
+    sq_array: [*]u32,
+    cq_head: *volatile u32,
+    cq_tail: *volatile u32,
+    cq_mask: u32,
+    cqes: [*]IoUringCqe,
+    sq_ring_size: usize,
+    cq_ring_size: usize,
+    sqes_size: usize,
+
+    /// Initialize io_uring with given number of entries
+    pub fn init(entries: u32) SyscallError!IoUring {
+        var params: IoUringParams = std.mem.zeroes(IoUringParams);
+
+        const ring_fd = try io_uring_setup(entries, &params);
+
+        // Calculate sizes
+        const sq_ring_size = params.sq_off.array + params.sq_entries * @sizeOf(u32);
+        const cq_ring_size = params.cq_off.cqes + params.cq_entries * @sizeOf(IoUringCqe);
+        const sqes_size = params.sq_entries * @sizeOf(IoUringSqe);
+
+        // Map SQ ring
+        const sq_ring = try mmap(
+            null,
+            sq_ring_size,
+            PROT_READ | PROT_WRITE,
+            MAP_SHARED | MAP_POPULATE,
+            ring_fd,
+            IORING_OFF_SQ_RING,
+        );
+
+        // Map CQ ring
+        const cq_ring = try mmap(
+            null,
+            cq_ring_size,
+            PROT_READ | PROT_WRITE,
+            MAP_SHARED | MAP_POPULATE,
+            ring_fd,
+            IORING_OFF_CQ_RING,
+        );
+
+        // Map SQEs
+        const sqes_ptr = try mmap(
+            null,
+            sqes_size,
+            PROT_READ | PROT_WRITE,
+            MAP_SHARED | MAP_POPULATE,
+            ring_fd,
+            IORING_OFF_SQES,
+        );
+
+        return IoUring{
+            .ring_fd = ring_fd,
+            .sq_ring = sq_ring,
+            .cq_ring = cq_ring,
+            .sqes = @ptrCast(@alignCast(sqes_ptr)),
+            .sq_head = @ptrCast(@alignCast(sq_ring + params.sq_off.head)),
+            .sq_tail = @ptrCast(@alignCast(sq_ring + params.sq_off.tail)),
+            .sq_mask = params.sq_entries - 1,
+            .sq_array = @ptrCast(@alignCast(sq_ring + params.sq_off.array)),
+            .cq_head = @ptrCast(@alignCast(cq_ring + params.cq_off.head)),
+            .cq_tail = @ptrCast(@alignCast(cq_ring + params.cq_off.tail)),
+            .cq_mask = params.cq_entries - 1,
+            .cqes = @ptrCast(@alignCast(cq_ring + params.cq_off.cqes)),
+            .sq_ring_size = sq_ring_size,
+            .cq_ring_size = cq_ring_size,
+            .sqes_size = sqes_size,
+        };
+    }
+
+    /// Clean up io_uring resources
+    pub fn deinit(self: *IoUring) void {
+        munmap(self.sq_ring, self.sq_ring_size) catch {};
+        munmap(self.cq_ring, self.cq_ring_size) catch {};
+        munmap(@ptrCast(self.sqes), self.sqes_size) catch {};
+        close(self.ring_fd) catch {};
+    }
+
+    /// Get next SQE slot (returns null if queue full)
+    pub fn getSqe(self: *IoUring) ?*IoUringSqe {
+        const tail = self.sq_tail.*;
+        const head = self.sq_head.*;
+
+        if (tail - head >= self.sq_mask + 1) {
+            return null; // Queue full
+        }
+
+        const index = tail & self.sq_mask;
+        self.sq_array[index] = index;
+        return &self.sqes[index];
+    }
+
+    /// Submit SQE (advances tail)
+    pub fn submitSqe(self: *IoUring) void {
+        memoryBarrier();
+        self.sq_tail.* += 1;
+        memoryBarrier();
+    }
+
+    /// Submit all pending SQEs and optionally wait
+    pub fn submit(self: *IoUring, min_complete: u32) SyscallError!u32 {
+        const to_submit = self.sq_tail.* - self.sq_head.*;
+        if (to_submit == 0 and min_complete == 0) return 0;
+
+        const flags: u32 = if (min_complete > 0) IORING_ENTER_GETEVENTS else 0;
+        return io_uring_enter(self.ring_fd, to_submit, min_complete, flags);
+    }
+
+    /// Check if there are completions ready
+    pub fn cqReady(self: *IoUring) u32 {
+        return self.cq_tail.* - self.cq_head.*;
+    }
+
+    /// Get next CQE (returns null if none ready)
+    pub fn peekCqe(self: *IoUring) ?*IoUringCqe {
+        if (self.cq_head.* == self.cq_tail.*) {
+            return null;
+        }
+        const index = self.cq_head.* & self.cq_mask;
+        return &self.cqes[index];
+    }
+
+    /// Advance CQ head (consume a CQE)
+    pub fn advanceCq(self: *IoUring) void {
+        memoryBarrier();
+        self.cq_head.* += 1;
+        memoryBarrier();
+    }
+
+    /// Prepare accept SQE
+    pub fn prepAccept(sqe: *IoUringSqe, fd: i32, addr: ?*SockAddrIn, addrlen: ?*u32, user_data: u64) void {
+        sqe.* = std.mem.zeroes(IoUringSqe);
+        sqe.opcode = IORING_OP_ACCEPT;
+        sqe.fd = fd;
+        sqe.addr = if (addr) |a| @intFromPtr(a) else 0;
+        sqe.off = if (addrlen) |l| @intFromPtr(l) else 0;
+        sqe.user_data = user_data;
+    }
+
+    /// Prepare recv SQE
+    pub fn prepRecv(sqe: *IoUringSqe, fd: i32, buf: []u8, user_data: u64) void {
+        sqe.* = std.mem.zeroes(IoUringSqe);
+        sqe.opcode = IORING_OP_RECV;
+        sqe.fd = fd;
+        sqe.addr = @intFromPtr(buf.ptr);
+        sqe.len = @truncate(buf.len);
+        sqe.user_data = user_data;
+    }
+
+    /// Prepare send SQE
+    pub fn prepSend(sqe: *IoUringSqe, fd: i32, buf: []const u8, user_data: u64) void {
+        sqe.* = std.mem.zeroes(IoUringSqe);
+        sqe.opcode = IORING_OP_SEND;
+        sqe.fd = fd;
+        sqe.addr = @intFromPtr(buf.ptr);
+        sqe.len = @truncate(buf.len);
+        sqe.user_data = user_data;
+    }
+
+    /// Prepare close SQE
+    pub fn prepClose(sqe: *IoUringSqe, fd: i32, user_data: u64) void {
+        sqe.* = std.mem.zeroes(IoUringSqe);
+        sqe.opcode = IORING_OP_CLOSE;
+        sqe.fd = fd;
+        sqe.user_data = user_data;
+    }
+};

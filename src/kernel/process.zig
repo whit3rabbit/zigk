@@ -90,6 +90,8 @@ pub const Process = struct {
 
     /// IPC Message Queue
     mailbox: list.IntrusiveDoublyLinkedList(ipc_msg.KernelMessage) = .{},
+    /// Number of queued IPC messages (bounded for DoS protection)
+    mailbox_len: usize = 0,
 
     /// Thread waiting for a message (if any)
     msg_waiter: ?*sched.Thread = null,
@@ -137,6 +139,8 @@ pub const Process = struct {
     cwd: [uapi.abi.MAX_PATH]u8,
     cwd_len: usize,
 
+    /// Per-process file creation mask
+    umask: u32 = 0o022,
     /// Resource limits (DoS protection)
     /// Maximum virtual address space size (default 256 MB)
     rlimit_as: u64 = 256 * 1024 * 1024,
@@ -493,6 +497,7 @@ pub fn forkProcess(parent: *Process) !*Process {
         .capabilities = try parent.capabilities.clone(alloc),
         .cwd = parent.cwd,
         .cwd_len = parent.cwd_len,
+        .umask = parent.umask,
     };
 
     // Add to parent's children list

@@ -29,6 +29,13 @@ const kernel_stack = @import("kernel_stack");
 /// Maximum number of CPUs supported (from GDT)
 const MAX_CPUS = hal.gdt.MAX_CPUS;
 
+/// Maximum number of threads tracked for TID lookup
+const MAX_TRACKED_THREADS: usize = 256;
+
+/// Global thread tracking array for TID lookup
+/// Protected by scheduler.lock
+var all_threads: [MAX_TRACKED_THREADS]?*Thread = [_]?*Thread{null} ** MAX_TRACKED_THREADS;
+
 /// Per-CPU scheduler data
 /// Each CPU has its own ready queue for cache locality and reduced contention.
 ///
@@ -123,36 +130,64 @@ pub const WaitQueue = struct {
     }
 
     /// Append thread to queue (internal)
+    /// Uses wait_queue_next/prev for doubly-linked list (separate from sleep list)
     fn append(self: *WaitQueue, t: *Thread) void {
-        t.next_sibling = null; // Reusing sibling pointer for queue list? No, unsafe. 
-        // Thread struct needs a `queue_next` pointer.
-        // Let's check Thread struct definition.
-        // Assuming we add `queue_next` to Thread.
-        // For now, let's use `sleep_next` since we aren't in `sleep_head` list when blocked on WaitQueue.
-        
-        t.sleep_next = null;
+        t.wait_queue_next = null;
+        t.wait_queue_prev = self.tail;
         if (self.tail) |tail| {
-            tail.sleep_next = t;
-            self.tail = t;
+            tail.wait_queue_next = t;
         } else {
             self.head = t;
-            self.tail = t;
         }
+        self.tail = t;
         self.count += 1;
     }
 
-    /// Pop thread from head (internal)
-    fn pop(self: *WaitQueue) ?*Thread {
+    /// Pop thread from head
+    /// Public so futex.wake() can directly pop threads
+    pub fn pop(self: *WaitQueue) ?*Thread {
         if (self.head) |h| {
-            self.head = h.sleep_next;
-            if (self.head == null) {
+            self.head = h.wait_queue_next;
+            if (self.head) |new_head| {
+                new_head.wait_queue_prev = null;
+            } else {
                 self.tail = null;
             }
-            h.sleep_next = null; // Clear pointer
+            h.wait_queue_next = null;
+            h.wait_queue_prev = null;
             self.count -= 1;
             return h;
         }
         return null;
+    }
+
+    /// Remove a specific thread from the queue (for timeout cancellation)
+    /// Returns true if thread was found and removed, false otherwise
+    pub fn removeThread(self: *WaitQueue, target: *Thread) bool {
+        // Verify thread is actually in this queue by checking if it's the head
+        // or has a prev pointer set
+        if (target.wait_queue_prev == null and self.head != target) {
+            return false; // Not in queue
+        }
+
+        // Unlink from prev
+        if (target.wait_queue_prev) |prev| {
+            prev.wait_queue_next = target.wait_queue_next;
+        } else {
+            self.head = target.wait_queue_next;
+        }
+
+        // Unlink from next
+        if (target.wait_queue_next) |next| {
+            next.wait_queue_prev = target.wait_queue_prev;
+        } else {
+            self.tail = target.wait_queue_prev;
+        }
+
+        target.wait_queue_next = null;
+        target.wait_queue_prev = null;
+        self.count -= 1;
+        return true;
     }
 };
 
@@ -247,6 +282,31 @@ fn getLocalCpuSched() *CpuSchedulerData {
 fn getCpuSched(cpu_id: usize) *CpuSchedulerData {
     if (cpu_id >= MAX_CPUS) return &cpu_sched[0];
     return &cpu_sched[cpu_id];
+}
+
+/// Cancel a thread's futex timeout and add to ready queue
+/// Used by futex.wake() to properly handle threads with pending timeouts
+/// Caller MUST hold the futex bucket lock
+pub fn cancelTimeoutAndWake(t: *Thread) void {
+    const held = scheduler.lock.acquire();
+    defer held.release();
+
+    // Check if thread is still blocked (might have been woken by timeout)
+    if (t.state != .Blocked) {
+        // Thread was already woken (by timeout), don't add again
+        return;
+    }
+
+    // Cancel pending timeout if set
+    if (t.wake_time != 0) {
+        removeFromSleepList(t);
+    }
+
+    // Clear futex state
+    t.futex_bucket = null;
+    t.futex_wakeup_reason = .woken;
+
+    addToReadyQueue(t);
 }
 
 /// Add a thread to the back of the ready queue (per-CPU)
@@ -422,11 +482,53 @@ pub fn waitOn(queue: *WaitQueue, lock_held: sync.Spinlock.Held) void {
     // Note: Interrupts are enabled by release() if they were enabled before acquire()
     sched_held.release();
     schedule_sync();
-    
+
     // 6. Returned from sleep
 }
 
+/// Wait on a queue with timeout support
+/// Like waitOn, but also adds thread to sleep list for timeout handling.
+///
+/// Arguments:
+///   queue: Wait queue to sleep on
+///   lock_held: The spinlock protecting the condition/queue (already acquired)
+///   timeout_ticks: Number of ticks to wait before timeout (0 = no timeout)
+///   futex_bucket_ptr: Opaque pointer to futex bucket for timeout handling
+pub fn waitOnWithTimeout(
+    queue: *WaitQueue,
+    lock_held: sync.Spinlock.Held,
+    timeout_ticks: u64,
+    futex_bucket_ptr: ?*anyopaque,
+) void {
+    const current = getCurrentThread() orelse return;
 
+    const sched_held = scheduler.lock.acquire();
+
+    // Add to wait queue
+    queue.append(current);
+    current.state = .Blocked;
+
+    // Setup timeout if specified
+    if (timeout_ticks > 0) {
+        // Use saturating add to prevent overflow
+        current.wake_time = scheduler.tick_count +| timeout_ticks;
+        current.futex_bucket = futex_bucket_ptr;
+        current.futex_wakeup_reason = .none;
+        insertSleepThread(current);
+    } else {
+        current.wake_time = 0;
+        current.futex_bucket = null;
+        current.futex_wakeup_reason = .none;
+    }
+
+    // Release external lock (bucket lock)
+    lock_held.release();
+
+    sched_held.release();
+    schedule_sync();
+
+    // Returned from sleep
+}
 
 /// Internal schedule function for synchronous switching
 fn schedule_sync() void {
@@ -434,7 +536,10 @@ fn schedule_sync() void {
     // This pushes valid interrupt frame, calls timerTick/schedule, switches or returns.
     asm volatile ("int $32");
 }
-fn removeFromSleepList(t: *Thread) void {
+/// Remove a thread from the sleep list
+/// Public so futex.wake() can cancel pending timeouts
+/// MUST be called with scheduler.lock held
+pub fn removeFromSleepList(t: *Thread) void {
     if (t.sleep_prev) |prev| {
         prev.sleep_next = t.sleep_next;
     } else if (scheduler.sleep_head == t) {
@@ -454,10 +559,57 @@ fn removeFromSleepList(t: *Thread) void {
 ///
 /// Checks the head of the sorted sleep list against the current tick count.
 /// If wake_time <= now, the thread is removed from the list and added to the ready queue.
+///
+/// For futex waiters (futex_bucket != null), also removes from the wait queue
+/// and sets wakeup reason to .timeout
+///
+/// SECURITY: For futex waiters, we must acquire the bucket lock to safely remove
+/// the thread from the wait queue before adding to ready queue. If we cannot
+/// acquire the lock (another CPU holds it), we MUST NOT add the thread to the
+/// ready queue - this would leave it in both queues, causing list corruption
+/// when the thread later calls futex.wait() on a different address.
 fn wakeSleepingThreads(now: u64) void {
+    const futex = @import("futex");
+
     while (scheduler.sleep_head) |t| {
         if (t.wake_time > now) break;
         removeFromSleepList(t);
+
+        // Check if this is a futex waiter with timeout
+        if (t.futex_bucket) |bucket_ptr| {
+            const bucket = futex.getBucketFromOpaque(bucket_ptr);
+
+            // Try to acquire bucket lock to remove from wait queue.
+            // LOCK ORDER: We hold scheduler.lock but need bucket.lock.
+            // Normal order is bucket.lock -> scheduler.lock (see WaitQueue.wakeUp).
+            // Using tryAcquire to avoid deadlock from lock order inversion.
+            if (bucket.lock.tryAcquire()) |held| {
+                defer held.release();
+                // Successfully acquired lock - safe to remove from wait queue
+                _ = bucket.queue.removeThread(t);
+                t.futex_wakeup_reason = .timeout;
+                t.futex_bucket = null;
+                // Fall through to add to ready queue below
+            } else {
+                // SECURITY FIX: Cannot acquire bucket lock - another CPU holds it.
+                // We MUST NOT add thread to ready queue while it's still in the
+                // wait queue. If we did, the thread would be in both queues:
+                //   1. Thread gets scheduled from ready queue, returns from futex.wait()
+                //   2. Thread calls futex.wait() on different address
+                //   3. New futex.wait() overwrites wait_queue_next/prev pointers
+                //   4. Original bucket's WaitQueue is now corrupted
+                //
+                // Solution: Re-insert into sleep list with a short retry delay.
+                // On the next tick, we'll try again to acquire the bucket lock.
+                // If futex.wake() runs first, it will remove from wait queue and
+                // call cancelTimeoutAndWake() which will remove from sleep list
+                // and add to ready queue with .woken reason (correct behavior).
+                t.wake_time = now + 1;
+                insertSleepThread(t);
+                continue; // Skip addToReadyQueue - thread is still in wait queue
+            }
+        }
+
         if (t.state == .Blocked) {
             addToReadyQueue(t);
         }
@@ -593,12 +745,49 @@ fn guardPageCheckerCallback(fault_addr: u64) ?hal.interrupts.GuardPageInfo {
 }
 
 /// Add a thread to the scheduler
-/// Thread will be added to the ready queue
+/// Thread will be added to the ready queue and registered for TID lookup
 pub fn addThread(t: *Thread) void {
     const held = scheduler.lock.acquire();
     defer held.release();
 
+    // Register thread in global tracking array for TID lookup
+    for (&all_threads) |*slot| {
+        if (slot.* == null) {
+            slot.* = t;
+            break;
+        }
+    }
+
     addToReadyQueue(t);
+}
+
+/// Find a thread by its TID
+/// Returns null if not found or if thread has exited
+pub fn findThreadByTid(tid: u32) ?*Thread {
+    const held = scheduler.lock.acquire();
+    defer held.release();
+
+    for (all_threads) |maybe_t| {
+        if (maybe_t) |t| {
+            if (t.tid == tid) {
+                return t;
+            }
+        }
+    }
+    return null;
+}
+
+/// Unregister a thread from TID lookup (called when thread is destroyed)
+pub fn unregisterThread(t: *Thread) void {
+    const held = scheduler.lock.acquire();
+    defer held.release();
+
+    for (&all_threads) |*slot| {
+        if (slot.* == t) {
+            slot.* = null;
+            break;
+        }
+    }
 }
 
 /// Start the scheduler (BSP only really, APs just enter loop)
@@ -915,6 +1104,35 @@ pub fn exitWithStatus(status: i32) void {
 
         // Set exit status
         thread.setExitStatus(curr, status);
+
+        // Handle CLONE_CHILD_CLEARTID
+        // If clear_child_tid is set, write 0 to that address and wake up waiters.
+        // This is used by pthread_join to detect thread exit.
+        if (curr.clear_child_tid != 0) {
+            // Need base/UserPtr for safe access
+            const base = @import("base.zig");
+            // SECURITY: Use isValidUserAccess with .Write mode for full validation.
+            // The page might have been unmapped by the process between clone() and exit().
+            // Using only bounds checking (isValidUserPtr) would cause a page fault
+            // in kernel context if the page is no longer mapped.
+            if (base.isValidUserAccess(curr.clear_child_tid, @sizeOf(i32), .Write)) {
+                // Write 0 to the address
+                base.UserPtr.from(curr.clear_child_tid).writeValue(@as(i32, 0)) catch |err| {
+                    console.warn("Sched: Failed to clear TID at {x}: {}", .{ curr.clear_child_tid, err });
+                };
+
+                // Wake up any waiters (futex)
+                const futex = @import("futex");
+                // Wake 1 waiter (usually the joining thread)
+                _ = futex.wake(curr.clear_child_tid, 1) catch {};
+            } else {
+                // Page no longer mapped - silently skip. This is not an error,
+                // just means the process unmapped the memory before thread exit.
+                if (config.debug_scheduler) {
+                    console.debug("Sched: clear_child_tid {x} no longer writable", .{curr.clear_child_tid});
+                }
+            }
+        }
 
         // Mark as zombie
         curr.state = .Zombie;

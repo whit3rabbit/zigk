@@ -59,6 +59,16 @@ const USER_MMAP_END: u64 = 0x0000_7FFF_FFFF_FFFF; // 128 TB
 // Virtual Memory Area (VMA)
 // =============================================================================
 
+/// Type of VMA mapping - determines page fault handling behavior
+pub const VmaType = enum {
+    /// Anonymous memory (zero-filled on demand)
+    Anonymous,
+    /// File-backed mapping (not yet implemented)
+    File,
+    /// Device/MMIO mapping (eagerly mapped, not demand-paged)
+    Device,
+};
+
 /// Virtual Memory Area - tracks a contiguous region of virtual memory
 pub const Vma = struct {
     /// Start virtual address (page-aligned)
@@ -69,6 +79,8 @@ pub const Vma = struct {
     prot: u32,
     /// Map flags (MAP_PRIVATE, MAP_ANONYMOUS, etc.)
     flags: u32,
+    /// Type of mapping (determines page fault handling)
+    vma_type: VmaType,
 
     /// Linked list pointers
     next: ?*Vma,
@@ -235,26 +247,13 @@ pub const UserVmm = struct {
             };
         }
 
-        // Allocate physical pages
-        const phys_pages = pmm.allocZeroedPages(page_count) orelse {
-            return Errno.ENOMEM.toReturn();
-        };
+        // LAZY PAGING: Do NOT allocate physical pages here.
+        // Physical pages will be allocated on-demand when page faults occur.
+        // This is more memory-efficient as pages are only allocated when accessed.
+        _ = page_count; // Unused now that allocation is lazy
 
-        // Create page flags from protection
-        const page_flags = protToPageFlags(prot);
-
-        // Map pages into address space
-        vmm.mapRange(self.pml4_phys, map_addr, phys_pages, aligned_len, page_flags) catch {
-            // Mapping failed, free physical pages
-            pmm.freePages(phys_pages, page_count);
-            return Errno.ENOMEM.toReturn();
-        };
-
-        // Create VMA to track this mapping
+        // Create VMA to track this mapping (no physical pages yet)
         const vma = self.createVma(map_addr, map_addr + aligned_len, prot, flags) catch {
-            // VMA creation failed, unmap and free
-            self.unmapRange(map_addr, aligned_len);
-            pmm.freePages(phys_pages, page_count);
             return Errno.ENOMEM.toReturn();
         };
 
@@ -262,7 +261,7 @@ pub const UserVmm = struct {
         self.insertVma(vma);
         self.total_mapped += aligned_len;
 
-        console.debug("UserVmm: mmap {x}-{x} prot={x} flags={x}", .{
+        console.debug("UserVmm: lazy mmap {x}-{x} prot={x} flags={x}", .{
             map_addr,
             map_addr + aligned_len,
             prot,
@@ -543,6 +542,81 @@ pub const UserVmm = struct {
     }
 
     // =========================================================================
+    // Page Fault Handling (Demand Paging)
+    // =========================================================================
+
+    /// Handle a user page fault for demand paging
+    /// addr: Faulting virtual address (from CR2)
+    /// err_code: x86 page fault error code:
+    ///   bit 0 (P): 0 = not-present, 1 = protection violation
+    ///   bit 1 (W): 0 = read access, 1 = write access
+    ///   bit 2 (U): 0 = supervisor, 1 = user mode
+    /// Returns: true if fault was handled (page allocated), false if segfault
+    pub fn handlePageFault(self: *UserVmm, addr: u64, err_code: u64) bool {
+        // 1. Find VMA covering the fault address
+        var vma_iter = self.vma_head;
+        var target_vma: ?*Vma = null;
+        while (vma_iter) |v| {
+            if (v.contains(addr)) {
+                target_vma = v;
+                break;
+            }
+            vma_iter = v.next;
+        }
+
+        const vma = target_vma orelse {
+            // Address not in any VMA - genuine segfault
+            console.warn("PageFault: addr {x} not in any VMA (SIGSEGV)", .{addr});
+            return false;
+        };
+
+        // 2. Check if this is a Device mapping (should never fault - already mapped)
+        if (vma.vma_type == .Device) {
+            console.warn("PageFault: addr {x} in Device VMA (should be pre-mapped)", .{addr});
+            return false;
+        }
+
+        // 3. Check permissions
+        const is_write = (err_code & 2) != 0;
+        const is_user = (err_code & 4) != 0;
+
+        // Only handle user-mode faults
+        if (!is_user) {
+            console.warn("PageFault: kernel-mode fault at {x}", .{addr});
+            return false;
+        }
+
+        // Write to read-only page is a protection violation
+        if (is_write and (vma.prot & PROT_WRITE) == 0) {
+            console.warn("PageFault: write to read-only VMA at {x}", .{addr});
+            return false;
+        }
+
+        // 4. Allocate physical page (zeroed for anonymous mappings)
+        const phys = pmm.allocPage() orelse {
+            console.err("PageFault: OOM allocating page for {x}", .{addr});
+            return false;
+        };
+
+        // Zero the page for security (prevent info leaks)
+        const ptr: [*]u8 = @ptrCast(hal.paging.physToVirt(phys));
+        @memset(ptr[0..pmm.PAGE_SIZE], 0);
+
+        // 5. Map the page with VMA's protection flags
+        const page_base = addr & ~@as(u64, pmm.PAGE_SIZE - 1);
+        const page_flags = vma.toPageFlags();
+
+        vmm.mapPage(self.pml4_phys, page_base, phys, page_flags) catch {
+            console.err("PageFault: failed to map page at {x}", .{page_base});
+            pmm.freePage(phys);
+            return false;
+        };
+
+        console.debug("PageFault: demand-allocated page at {x} -> phys {x}", .{ page_base, phys });
+        return true;
+    }
+
+    // =========================================================================
     // Internal helpers
     // =========================================================================
 
@@ -595,6 +669,11 @@ pub const UserVmm = struct {
     /// Create a new VMA struct
     /// Public for use by process fork
     pub fn createVma(self: *UserVmm, start: u64, end: u64, prot: u32, flags: u32) !*Vma {
+        return self.createVmaWithType(start, end, prot, flags, .Anonymous);
+    }
+
+    /// Create a new VMA struct with explicit type
+    pub fn createVmaWithType(self: *UserVmm, start: u64, end: u64, prot: u32, flags: u32, vma_type: VmaType) !*Vma {
         _ = self;
         const alloc = heap.allocator();
         const vma = try alloc.create(Vma);
@@ -603,6 +682,7 @@ pub const UserVmm = struct {
             .end = end,
             .prot = prot,
             .flags = flags,
+            .vma_type = vma_type,
             .next = null,
             .prev = null,
         };

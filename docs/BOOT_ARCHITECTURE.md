@@ -198,7 +198,103 @@ Defined in `src/arch/x86_64/paging.zig`.
 *   **G**: Global (TLB preserved on CR3 switch)
 *   **XD**: Execute Disable (NX bit)
 
-## 4. Input Subsystem Architecture
+## 4. Demand Paging Architecture
+
+Zscapek implements lazy (demand) paging for anonymous memory allocations. Physical pages are not allocated until first access.
+
+### Virtual Memory Area (VMA) Structure
+
+VMAs track user virtual address ranges. Defined in `src/kernel/user_vmm.zig`.
+
+```text
+Offset  Size    Type        Description
+0x00    8       u64         start - Region start address (page-aligned)
+0x08    8       u64         end - Region end address (exclusive)
+0x10    4       u32         prot - Protection flags (PROT_READ|WRITE|EXEC)
+0x14    4       u32         flags - Mapping flags (MAP_PRIVATE|SHARED|ANONYMOUS)
+0x18    1       VmaType     vma_type - Allocation strategy
+0x19    7       padding     Alignment padding
+0x20    8       ?*Vma       next - Next VMA in sorted list
+0x28    8       ?*Vma       prev - Previous VMA in sorted list
+```
+
+### VmaType Enum
+
+Determines whether pages are allocated eagerly or on-demand:
+
+| Type | Value | Allocation | Use Case |
+|------|-------|------------|----------|
+| Anonymous | 0 | Demand (lazy) | Standard mmap, heap, stack |
+| File | 1 | Demand | File-backed mappings (future) |
+| Device | 2 | Eager | MMIO regions, DMA buffers |
+
+**Device mappings bypass demand paging** because hardware expects physical pages to exist at specific addresses before any access occurs.
+
+### Page Fault Handler Flow
+
+When a page fault occurs in user mode (CPL=3), the handler in `src/arch/x86_64/interrupts.zig` dispatches to the demand paging logic:
+
+```text
+1. CPU triggers #PF (vector 14)
+   |
+2. Check if user mode (CS & 3 == 3)
+   |
+3. Read CR2 (faulting address)
+   |
+4. Call registered page_fault_handler(cr2, error_code)
+   |
+5. Handler looks up VMA containing address
+   |
+   +-- Not found: Return false (SIGSEGV)
+   |
+   +-- Found: Check access permissions
+       |
+       +-- Write to read-only: Return false (SIGSEGV)
+       |
+       +-- Valid: Allocate zeroed page from PMM
+           |
+           Map page at fault address with VMA protection
+           |
+           Update process RSS accounting
+           |
+           Return true (retry instruction)
+```
+
+### x86_64 Page Fault Error Code
+
+The error code pushed by the CPU indicates the fault type:
+
+```text
+Bit    Name    Meaning when set
+0      P       Page was present (protection violation vs not-present)
+1      W       Write access caused the fault
+2      U       Fault occurred in user mode (CPL=3)
+3      RSVD    Reserved bit set in page table entry
+4      I/D     Instruction fetch caused the fault (NX violation)
+```
+
+**Demand paging handles**: Bit 0 = 0 (not-present), Bit 2 = 1 (user mode)
+
+**Not handled (SIGSEGV)**: Bit 0 = 1 with Bit 1 = 1 and VMA lacks PROT_WRITE
+
+### Key Implementation Files
+
+| File | Purpose |
+|------|---------|
+| `src/kernel/user_vmm.zig` | VMA management, `handlePageFault()` |
+| `src/arch/x86_64/interrupts.zig` | Handler dispatch, `setPageFaultHandler()` |
+| `src/kernel/main.zig` | Handler registration |
+| `src/kernel/syscall/base.zig` | `getCurrentProcessOrNull()` for safe process lookup |
+
+### Lock Ordering (Page Faults)
+
+Page faults can occur while other locks are held. The handler must avoid deadlock:
+
+1. No locks held when calling `pmm.allocZeroedPage()`
+2. VMA list is per-process (no global VMA lock)
+3. Page table modifications use per-process PML4 (no global VMM lock needed)
+
+## 5. Input Subsystem Architecture
 
 Zscapek supports two input paths for keyboard and mouse devices.
 
@@ -235,7 +331,7 @@ Zscapek supports two input paths for keyboard and mouse devices.
 - Driver: `src/drivers/usb/xhci/root.zig`
 - Interrupts: MSI-X or polling fallback
 
-## 5. Hardware Initialization Quirks
+## 6. Hardware Initialization Quirks
 
 These notes cover specific behaviors and requirements discovered during kernel bring-up.
 
@@ -284,7 +380,7 @@ ACPI tables (RSDP, RSDT, XSDT, MCFG) are provided by firmware and often reside a
     *   **Integer Overflow Risk**: Creating a size mask by inverting a 32-bit read in a 64-bit variable (e.g., `~bar_read`) will set the upper 32-bits to 1, resulting in an incorrect size (e.g., 18 Exabytes). Mask operations must be strictly width-controlled.
     *   **Loop Counters**: Iterating through functions (0-7) with a `u3` counter will cause an integer overflow when incrementing to 8 to exit the loop. Use `u4`.
 
-## 6. Kernel ABI & Calling Convention
+## 7. Kernel ABI & Calling Convention
 
 ### Interrupt Handling
 When an interrupt occurs:
@@ -317,7 +413,7 @@ Zscapek implements a subset of the Linux ABI.
 
 *Note: The `syscall` instruction clobbers RCX and R11. Linux ABI uses R10 for the 4th argument instead of RCX.*
 
-## 7. Security Architecture
+## 8. Security Architecture
 
 ### Stack Smashing Protection
 
@@ -369,7 +465,7 @@ This causes string-based overflows to include the null terminator in the overwri
 ### KASLR
 Limine supports KASLR. The kernel is position-independent (PIE) but linked to high memory. The physical load address may vary, but virtual addresses are fixed by the linker script to `0xffffffff80000000`.
 
-## 8. SMP Implementation Notes
+## 9. SMP Implementation Notes
 
 ### AP Trampoline Protocol
 
