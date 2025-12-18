@@ -2,6 +2,7 @@
 //
 // Low-level memory manipulation functions.
 
+const builtin = @import("builtin");
 const internal = @import("../internal.zig");
 
 /// Copy n bytes from src to dest (non-overlapping)
@@ -11,11 +12,8 @@ pub export fn memcpy(dest: ?*anyopaque, src: ?*const anyopaque, n: usize) ?*anyo
 
     const d = @as([*]u8, @ptrCast(dest.?));
     const s = @as([*]const u8, @ptrCast(src.?));
-    
-    var i: usize = 0;
-    while (i < n) : (i += 1) {
-        d[i] = s[i];
-    }
+
+    internal.safeCopy(d, s, n);
     return dest;
 }
 
@@ -26,11 +24,8 @@ pub export fn memset(s: ?*anyopaque, c: c_int, n: usize) ?*anyopaque {
 
     const d = @as([*]u8, @ptrCast(s.?));
     const val = @as(u8, @truncate(@as(c_uint, @bitCast(c))));
-    
-    var i: usize = 0;
-    while (i < n) : (i += 1) {
-        d[i] = val;
-    }
+
+    internal.safeFill(d, val, n);
     return s;
 }
 
@@ -42,14 +37,44 @@ pub export fn memmove(dest: ?*anyopaque, src: ?*const anyopaque, n: usize) ?*any
     const d = @as([*]u8, @ptrCast(dest.?));
     const s = @as([*]const u8, @ptrCast(src.?));
 
-    if (@intFromPtr(d) < @intFromPtr(s)) {
-        // Forward copy
-        var i: usize = 0;
-        while (i < n) : (i += 1) d[i] = s[i];
-    } else {
-        // Backward copy
+    const d_ptr = @intFromPtr(d);
+    const s_ptr = @intFromPtr(s);
+    const s_end = s_ptr + n;
+    const d_end = d_ptr + n;
+
+    if (d_ptr == s_ptr or d_ptr >= s_end or s_ptr >= d_end) {
+        internal.safeCopy(d, s, n);
+        return dest;
+    }
+
+    if (d_ptr < s_ptr) {
+        internal.safeCopy(d, s, n);
+        return dest;
+    }
+
+    if (builtin.cpu.arch == .x86_64 and n >= @sizeOf(usize)) {
+        const word_size = @sizeOf(usize);
         var i: usize = n;
-        while (i > 0) : (i -= 1) d[i - 1] = s[i - 1];
+        while (i > 0 and (i % word_size) != 0) {
+            i -= 1;
+            d[i] = s[i];
+        }
+
+        const word_count = i / word_size;
+        const d_words = @as([*]align(1) usize, @ptrCast(d));
+        const s_words = @as([*]align(1) const usize, @ptrCast(s));
+        var w: usize = word_count;
+        while (w > 0) {
+            w -= 1;
+            d_words[w] = s_words[w];
+        }
+        return dest;
+    }
+
+    var i: usize = n;
+    while (i > 0) {
+        i -= 1;
+        d[i] = s[i];
     }
     return dest;
 }

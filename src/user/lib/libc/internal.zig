@@ -8,8 +8,10 @@
 // Debug Configuration
 // =============================================================================
 
+const builtin = @import("builtin");
+
 /// Debug mode heap checks - compiles out in release
-pub const DEBUG_HEAP = @import("builtin").mode == .Debug;
+pub const DEBUG_HEAP = builtin.mode == .Debug;
 
 /// Magic number for valid allocated blocks
 pub const HEAP_MAGIC: u32 = 0xDEADBEEF;
@@ -25,6 +27,25 @@ pub const FREED_MAGIC: u32 = 0xFEEDFACE;
 /// In freestanding mode, Zig may lower @memcpy to a call to memcpy,
 /// which causes infinite recursion if memcpy itself uses @memcpy.
 pub inline fn safeCopy(dest: [*]u8, src: [*]const u8, n: usize) void {
+    if (n == 0) return;
+    if (builtin.cpu.arch == .x86_64 and n >= @sizeOf(usize)) {
+        const word_size = @sizeOf(usize);
+        const word_count = n / word_size;
+        const d_words = @as([*]align(1) usize, @ptrCast(dest));
+        const s_words = @as([*]align(1) const usize, @ptrCast(src));
+
+        var i: usize = 0;
+        while (i < word_count) : (i += 1) {
+            d_words[i] = s_words[i];
+        }
+
+        var j: usize = word_count * word_size;
+        while (j < n) : (j += 1) {
+            dest[j] = src[j];
+        }
+        return;
+    }
+
     for (0..n) |i| {
         dest[i] = src[i];
     }
@@ -33,6 +54,26 @@ pub inline fn safeCopy(dest: [*]u8, src: [*]const u8, n: usize) void {
 /// Inline-safe memory fill - NEVER uses @memset to avoid recursion.
 /// Same rationale as safeCopy.
 pub inline fn safeFill(dest: [*]u8, value: u8, n: usize) void {
+    if (n == 0) return;
+    if (builtin.cpu.arch == .x86_64 and n >= @sizeOf(usize)) {
+        const word_size = @sizeOf(usize);
+        const word_count = n / word_size;
+        const repeat = ~@as(usize, 0) / 0xFF;
+        const word_value = repeat * @as(usize, value);
+        const d_words = @as([*]align(1) usize, @ptrCast(dest));
+
+        var i: usize = 0;
+        while (i < word_count) : (i += 1) {
+            d_words[i] = word_value;
+        }
+
+        var j: usize = word_count * word_size;
+        while (j < n) : (j += 1) {
+            dest[j] = value;
+        }
+        return;
+    }
+
     for (0..n) |i| {
         dest[i] = value;
     }

@@ -197,6 +197,16 @@ pub fn build(b: *std.Build) void {
     aslr_module.addImport("pmm", pmm_module);
     aslr_module.addImport("console", console_module);
 
+    // Create Slab module (Kernel Slab Allocator)
+    const slab_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/slab.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    slab_module.addImport("console", console_module);
+    slab_module.addImport("config", config_module);
+    slab_module.addImport("sync", sync_module);
+
     // Create Heap module (Kernel Heap Allocator)
     const heap_module = b.createModule(.{
         .root_source_file = b.path("src/kernel/heap.zig"),
@@ -207,6 +217,7 @@ pub fn build(b: *std.Build) void {
     heap_module.addImport("config", config_module);
     heap_module.addImport("sync", sync_module);
     heap_module.addImport("hal", hal_module); // For TSC-based canary randomization
+    heap_module.addImport("slab", slab_module);
 
     // Create Network Stack module (full stack: core, ethernet, ipv4, transport)
     const net_module = b.createModule(.{
@@ -1505,6 +1516,8 @@ pub fn build(b: *std.Build) void {
         "-no-reboot",
         "-no-shutdown",
         "-accel", "tcg",
+        "-drive", "if=none,id=stick,format=raw,file=usb_disk.img",
+        "-device", "usb-storage,drive=stick",
     });
 
     // Add display option (default = let QEMU auto-detect)
@@ -1557,6 +1570,15 @@ pub fn build(b: *std.Build) void {
     heap_test_module.addImport("config", test_config_module);
 
     test_module.addImport("heap", heap_test_module);
+    const slab_test_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/slab.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+    slab_test_module.addImport("config", test_config_module);
+
+    heap_test_module.addImport("slab", slab_test_module);
+    test_module.addImport("slab", slab_test_module);
 
     const unit_tests = b.addTest(.{
         .root_module = test_module,

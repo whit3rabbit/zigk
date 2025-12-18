@@ -45,7 +45,7 @@ const console = if (is_freestanding) @import("console") else struct {
 };
 
 const config = @import("config");
-const slab = @import("slab.zig");
+const slab = @import("slab");
 
 // HAL import for TSC-based canary initialization (freestanding only)
 const hal = if (is_freestanding) @import("hal") else struct {

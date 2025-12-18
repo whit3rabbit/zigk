@@ -14,6 +14,7 @@ const tcp_types_test = @import("tcp_types_test.zig");
 const vmm_test = @import("vmm_test.zig");
 const msi_allocator_test = @import("msi_allocator_test.zig");
 const ipv4_reassembly = @import("ipv4_reassembly.zig");
+const slab_bench = @import("slab_bench.zig");
 
 test "placeholder test" {
     // Placeholder test to verify test infrastructure works
@@ -27,4 +28,5 @@ comptime {
     _ = vmm_test;
     _ = msi_allocator_test;
     _ = ipv4_reassembly;
+    _ = slab_bench;
 }

@@ -17,7 +17,9 @@ const pmm = @import("pmm");
 const trb = @import("trb.zig");
 const ring = @import("ring.zig");
 const context = @import("context.zig");
+const context = @import("context.zig");
 const hid = @import("../class/hid.zig");
+const hub = @import("../class/hub.zig");
 
 // =============================================================================
 // USB Device Structure
@@ -57,6 +59,9 @@ pub const UsbDevice = struct {
     /// DMA buffer for interrupt reports (8 bytes for boot protocol)
     report_buffer: [*]u8,
     report_buffer_phys: u64,
+
+    /// Hub driver state (if is_hub is true)
+    hub_driver: hub.HubDriver,
 
     /// Helper tag to identify device class if needed
     is_hub: bool = false,
@@ -126,6 +131,7 @@ pub const UsbDevice = struct {
             .endpoints = [_]?ring.TransferRing{null} ** 32,
             .interrupt_dci = 0,
             .hid_driver = .{},
+            .hub_driver = undefined,
             .report_buffer = @ptrFromInt(@intFromPtr(report_virt)),
             .report_buffer_phys = report_page,
             .state = .slot_enabled,

@@ -73,6 +73,10 @@ pub const MscDriver = struct {
     // Command Tag Tracker
     current_tag: u32 = 1,
 
+    // Device Capacity
+    sector_count: u32 = 0,
+    sector_size: u32 = 0,
+
     const Self = @This();
 
     pub fn init(ctrl: *usb.Controller, dev: *device.UsbDevice, ep_in: u8, ep_out: u8) Self {
@@ -107,15 +111,19 @@ pub const MscDriver = struct {
             cmd,
         );
         
-        const cbw_bytes = std.mem.asBytes(&cbw);
+        const cbw_bytes = std.mem.asBytes(&cbw)[0..31];
         // Note: CBW is always 31 bytes
+        console.debug("MSC: Sending CBW (tag={})", .{tag});
         _ = try usb.Transfer.queueBulkTransfer(self.ctrl, self.dev, self.bulk_out_ep, cbw_bytes);
+        console.debug("MSC: CBW sent", .{});
         
         // 2. Data Stage
         if (data) |buf| {
             if (buf.len > 0) {
                 const ep = if (dir_in) self.bulk_in_ep else self.bulk_out_ep;
+                console.debug("MSC: Transferring data len={}", .{buf.len});
                 const transferred = try usb.Transfer.queueBulkTransfer(self.ctrl, self.dev, ep, buf);
+                console.debug("MSC: Data transferred={}", .{transferred});
                 
                 if (transferred < buf.len) {
                     console.warn("MSC: Short data transfer: {} < {}", .{transferred, buf.len});
@@ -125,10 +133,13 @@ pub const MscDriver = struct {
 
         // 3. Receive CSW
         var csw: CommandStatusWrapper = undefined;
-        const csw_bytes = std.mem.asBytes(&csw);
+        // Explicitly slice to 13 bytes to match wire format (remove padding)
+        const csw_bytes = std.mem.asBytes(&csw)[0..13];
+        console.debug("MSC: Receiving CSW...", .{});
         const csw_len = try usb.Transfer.queueBulkTransfer(self.ctrl, self.dev, self.bulk_in_ep, csw_bytes);
+        console.debug("MSC: CSW received len={}", .{csw_len});
 
-        if (csw_len != @sizeOf(CommandStatusWrapper)) {
+        if (csw_len != 13) {
             console.err("MSC: Invalid CSW length {}", .{csw_len});
             return error.ProtocolError;
         }
@@ -192,5 +203,80 @@ pub const MscDriver = struct {
         };
         try self.sendScsiCommand(0, &cmd, null, false);
         console.info("MSC: Unit is Ready", .{});
+    }
+
+    /// Read Capacity (10)
+    /// Updates internal sector_count and sector_size
+    pub fn readCapacity(self: *Self) !void {
+        console.info("MSC: Reading Capacity...", .{});
+
+        var buffer: [8]u8 = undefined;
+        const cmd = [_]u8{
+            0x25, // READ CAPACITY (10)
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+        };
+
+        try self.sendScsiCommand(0, &cmd, &buffer, true);
+
+        // Parse Big Endian response
+        // Use double slicing to get *[4]u8 from capture
+        self.sector_count = std.mem.readInt(u32, buffer[0..4][0..4], .big) + 1; // Returns highest LBA, so count is +1
+        self.sector_size = std.mem.readInt(u32, buffer[4..8][0..4], .big);
+
+        console.info("MSC: Capacity: {} blocks, {} bytes/block", .{ self.sector_count, self.sector_size });
+        console.info("MSC: Total Size: {} MB", .{ (self.sector_count / 1024) * self.sector_size / 1024 });
+    }
+
+    /// Read (10)
+    pub fn read(self: *Self, lba: u32, count: u16, buffer: []u8) !void {
+        if (self.sector_size == 0) return error.DeviceNotReady;
+        if (buffer.len < count * self.sector_size) return error.BufferTooSmall;
+
+        const cmd = [_]u8{
+            0x28, // READ (10)
+            0x00, // Flags
+            @truncate(lba >> 24),
+            @truncate(lba >> 16),
+            @truncate(lba >> 8),
+            @truncate(lba),
+            0x00, // Group Number
+            @truncate(count >> 8),
+            @truncate(count), // Transfer Length
+            0x00, // Control
+        };
+
+        try self.sendScsiCommand(0, &cmd, buffer, true);
+    }
+
+    /// Write (10)
+    pub fn write(self: *Self, lba: u32, count: u16, buffer: []const u8) !void {
+        if (self.sector_size == 0) return error.DeviceNotReady;
+        if (buffer.len < count * self.sector_size) return error.BufferTooSmall;
+
+        const cmd = [_]u8{
+            0x2A, // WRITE (10)
+            0x00, // Flags
+            @truncate(lba >> 24),
+            @truncate(lba >> 16),
+            @truncate(lba >> 8),
+            @truncate(lba),
+            0x00, // Group Number
+            @truncate(count >> 8),
+            @truncate(count), // Transfer Length
+            0x00, // Control
+        };
+
+        // Cast const buffer to mutable for sendScsiCommand signature (it won't modify it for OUT transfers)
+        // Ideally sendScsiCommand should take const buffer for data
+        const mutable_buf = @constCast(buffer);
+        try self.sendScsiCommand(0, &cmd, mutable_buf, false);
     }
 };

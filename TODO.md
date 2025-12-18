@@ -27,7 +27,7 @@ This document contains actionable sub-tasks with research findings from comprehe
 - [x] **Create Slab Structure:** SlabHeader with bitmap tracking
 - [x] **Implement Slab Cache:** SlabCache with partial/full lists per size class
 - [x] **Refactor `heap.zig`:** Routes small requests to slab, large to free-list
-- [ ] **Benchmark:** Compare allocation time with micro-benchmark (10,000 small objects)
+- [x] **Benchmark:** Compare allocation time with micro-benchmark (10,000 small objects)
 
 ---
 

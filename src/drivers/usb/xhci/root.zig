@@ -22,9 +22,11 @@ const trb = @import("trb.zig");
 const ring = @import("ring.zig");
 const context = @import("context.zig");
 const device = @import("device.zig");
+const descriptor = @import("descriptor.zig");
 const transfer = @import("transfer.zig");
 const hid = @import("../class/hid.zig");
 const msc = @import("../class/msc.zig");
+const hub = @import("../class/hub.zig");
 
 // Re-export submodules
 pub const Regs = regs;
@@ -576,9 +578,11 @@ pub const Controller = struct {
 
                 // If it's a HID device, start interrupt polling
                 if (maybe_dev) |dev| {
-                    self.startInterruptPolling(dev) catch |err| {
-                        console.err("XHCI: Failed to start HID polling: {}", .{err});
-                    };
+                    if (dev.hid_driver.is_keyboard or dev.hid_driver.is_mouse) {
+                        self.startInterruptPolling(dev) catch |err| {
+                            console.err("XHCI: Failed to start HID polling: {}", .{err});
+                        };
+                    }
                 }
             }
         }
@@ -865,6 +869,7 @@ pub const Controller = struct {
             interval = info.interval;
         } else if (transfer.findMscInterface(config_buf[0..config_len])) |info| {
             console.info("XHCI: Found Mass Storage Device", .{});
+            console.info("XHCI: MSC Endpoints in=0x{x} out=0x{x} max={}", .{info.bulk_in_ep, info.bulk_out_ep, info.max_packet});
             
             // 9. SET_CONFIGURATION
             const config_val = config_buf[5]; 
@@ -890,11 +895,63 @@ pub const Controller = struct {
             msc_drv.inquiry() catch |err| {
                 console.warn("MSC: Inquiry failed: {}", .{err});
             };
+
+            // Run Capacity Check
+            msc_drv.readCapacity() catch |err| {
+                console.warn("MSC: Read Capacity failed: {}", .{err});
+            };
             
             // Register device
             device.registerDevice(dev);
             console.info("XHCI: USB MSC device enumerated on slot {}", .{slot_id});
             return dev;
+
+        } else if (transfer.findHubInterface(config_buf[0..config_len])) |interface| {
+             console.info("XHCI: Found USB Hub Interface {d}", .{interface.bInterfaceNumber});
+             
+             // Initialize Hub Driver
+             dev.is_hub = true;
+             
+             // Find Interrupt IN endpoint
+             var int_in: u8 = 0;
+             var max_packet_size: u16 = 8; // Default max packet size for interrupt endpoint
+             
+             for (interface.endpoints) |ep_desc| {
+                 if (ep_desc.bLength == 0) continue;
+                 const is_in = (ep_desc.bEndpointAddress & 0x80) != 0;
+                 const ep_type = ep_desc.bmAttributes & 0x03;
+                 
+                 if (is_in and ep_type == 0x03) { // Interrupt IN
+                     int_in = ep_desc.bEndpointAddress;
+                     max_packet_size = ep_desc.wMaxPacketSize;
+                     break;
+                 }
+             }
+             
+             // Send Configuration Command (first time for this device, unless already done once for control)
+             // Endpoints must be added to Input Context first.
+             // For hub, we need to add the Interrupt IN endpoint.
+             
+             if (int_in != 0) {
+                 // Initialize Endpoint
+                 console.debug("XHCI: Hub Int IN Endpoint 0x{x} max={d}", .{int_in, max_packet_size});
+                 try dev.initBulkEndpoint(int_in); // Reusing bulk helper, works for allocating ring
+                 try dev.buildConfigureEndpointContext(int_in, .interrupt_in, max_packet_size, 12); // Interval 12 (~32ms)
+             } else {
+                 console.warn("XHCI: Hub has no Interrupt IN endpoint", .{});
+             }
+             
+             // Send Configuration Command
+             try self.configureEndpoint(dev); // Use self.configureEndpoint
+             
+             // Initialize Driver
+             dev.hub_driver = hub.HubDriver.init(self, dev, int_in);
+             try dev.hub_driver.configure();
+             
+             console.info("XHCI: USB Hub device enumerated on slot {d}", .{slot_id});
+             
+             device.registerDevice(dev);
+             return dev; // Hub returns dev
 
         } else {
             console.info("XHCI: Device is not a supported device class", .{});

@@ -34,6 +34,7 @@ zscapek/
 │   ├── unit/                # Kernel unit tests
 │   │   ├── main.zig         # Test runner
 │   │   ├── heap_fuzz.zig    # Allocator fuzzing
+│   │   ├── slab_bench.zig   # Slab allocator micro-benchmark
 │   │   ├── msi_allocator_test.zig # MSI allocator tests
 │   │   ├── vmm_test.zig     # VMM unit coverage
 │   │   └── tcp_types_test.zig # TCP type packing/endianness tests
