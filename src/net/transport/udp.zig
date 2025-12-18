@@ -22,6 +22,8 @@ const ethernet = @import("../ethernet/ethernet.zig");
 const arp = @import("../ipv4/arp.zig");
 // Reuse TCP's buffer pool to avoid stack overflow
 const tcp_state = @import("tcp/state.zig");
+// ICMP module for PMTU validation tracking
+const icmp = @import("icmp.zig");
 
 const PacketBuffer = packet.PacketBuffer;
 const UdpHeader = packet.UdpHeader;
@@ -57,8 +59,25 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
         return false;
     }
 
-    // Verify UDP checksum (if non-zero)
-    if (udp_hdr.checksum != 0) {
+    // Verify UDP checksum
+    // RFC 768: Checksum 0 means "no checksum computed" and is valid for IPv4.
+    // SECURITY: For security-sensitive protocols (DNS port 53), we require
+    // non-zero checksums to prevent cache poisoning attacks where an attacker
+    // injects spoofed responses without computing valid checksums.
+    const dst_port = udp_hdr.getDstPort();
+    const src_port = udp_hdr.getSrcPort();
+
+    // Security-sensitive ports that require UDP checksum validation
+    const DNS_PORT: u16 = 53;
+    const is_security_sensitive = (dst_port == DNS_PORT or src_port == DNS_PORT);
+
+    if (udp_hdr.checksum == 0) {
+        if (is_security_sensitive) {
+            // Reject zero-checksum packets for DNS - potential cache poisoning
+            return false;
+        }
+        // Allow zero checksum for other UDP traffic per RFC 768
+    } else {
         // Use safe slice access from packet buffer
         const udp_data = pkt.data[pkt.transport_offset..][0..udp_len];
         // Use stored IPs from packet metadata to support reassembled packets
@@ -163,6 +182,8 @@ pub fn sendDatagramWithTos(
 
     // Transmit or Queue
     if (have_mac) {
+        // Record transmission for ICMP PMTU validation
+        icmp.recordUdpTransmit(dst_ip);
         return iface.transmit(buf[0..total_len]);
     } else {
         // Create wrapper packet buffer for queueing
@@ -175,10 +196,14 @@ pub fn sendDatagramWithTos(
         if (arp.resolveOrRequest(iface, next_hop, &pkt)) |mac| {
             // Resolved immediately (race condition or just appeared)
             @memcpy(&eth.dst_mac, &mac);
+            // Record transmission for ICMP PMTU validation
+            icmp.recordUdpTransmit(dst_ip);
             return iface.transmit(buf[0..total_len]);
         }
-        
-        // Queued successfully (ARP copies packet)
+
+        // Queued successfully (ARP copies packet) - record for PMTU validation
+        // Packet will be sent once ARP resolves
+        icmp.recordUdpTransmit(dst_ip);
         return true;
     }
 }

@@ -24,6 +24,7 @@ const context = @import("context.zig");
 const device = @import("device.zig");
 const transfer = @import("transfer.zig");
 const hid = @import("../class/hid.zig");
+const msc = @import("../class/msc.zig");
 
 // Re-export submodules
 pub const Regs = regs;
@@ -358,7 +359,7 @@ pub const Controller = struct {
                             // Configure vector 0 to point to our allocated vector and BSP
                             // Use current CPU ID or 0 (BSP)
                             const dest_id: u8 = @truncate(hal.apic.lapic.getId());
-                            pci.configureMsixEntry(msix_alloc.table_base, 0, vector, dest_id);
+                            _ = pci.configureMsixEntry(msix_alloc.table_base, msix_alloc.vector_count, 0, vector, dest_id);
 
                             // Unmask vectors
                             pci.enableMsixVectors(ecam, self.pci_dev, &msix_cap);
@@ -862,8 +863,41 @@ pub const Controller = struct {
             endpoint_addr = info.endpoint_addr;
             max_packet = info.max_packet;
             interval = info.interval;
+        } else if (transfer.findMscInterface(config_buf[0..config_len])) |info| {
+            console.info("XHCI: Found Mass Storage Device", .{});
+            
+            // 9. SET_CONFIGURATION
+            const config_val = config_buf[5]; 
+            transfer.setConfiguration(self, dev, config_val) catch |err| {
+                console.err("XHCI: Failed to set configuration: {}", .{err});
+                return err;
+            };
+
+            // Configure Bulk IN
+            try dev.initBulkEndpoint(info.bulk_in_ep);
+            try dev.buildConfigureEndpointContext(info.bulk_in_ep, .bulk_in, info.max_packet, 0);
+            try self.configureEndpoint(dev);
+
+             // Configure Bulk OUT
+            try dev.initBulkEndpoint(info.bulk_out_ep);
+            try dev.buildConfigureEndpointContext(info.bulk_out_ep, .bulk_out, info.max_packet, 0);
+            try self.configureEndpoint(dev);
+
+            dev.state = .configured;
+
+            // Run MSC Verification
+            var msc_drv = msc.MscDriver.init(self, dev, info.bulk_in_ep, info.bulk_out_ep);
+            msc_drv.inquiry() catch |err| {
+                console.warn("MSC: Inquiry failed: {}", .{err});
+            };
+            
+            // Register device
+            device.registerDevice(dev);
+            console.info("XHCI: USB MSC device enumerated on slot {}", .{slot_id});
+            return dev;
+
         } else {
-            console.info("XHCI: Device is not a supported HID device", .{});
+            console.info("XHCI: Device is not a supported device class", .{});
             dev.deinit();
             return null;
         }
@@ -879,6 +913,7 @@ pub const Controller = struct {
         // 10. Configure interrupt endpoint
         try dev.buildConfigureEndpointContext(
             endpoint_addr,
+            .interrupt_in,
             max_packet,
             interval,
         );

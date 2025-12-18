@@ -45,6 +45,7 @@ const LCR_DLAB: u8 = 0x80; // Divisor Latch Access Bit
 var current_port: u16 = COM1;
 var initialized: bool = false;
 var lock = std.atomic.Value(bool).init(false);
+var panic_reinit_done = std.atomic.Value(bool).init(false);
 
 const std = @import("std");
 
@@ -180,6 +181,21 @@ pub fn writeString(str: []const u8) void {
 /// Write a string to the serial port without acquiring the lock
 /// UNSAFE: Use only in panic/crash situations where deadlock is possible
 pub fn writeStringUnsafe(str: []const u8) void {
+    for (str) |byte| {
+        if (byte == '\n') {
+            writeByteUnlocked('\r');
+        }
+        writeByteUnlocked(byte);
+    }
+}
+
+/// Write a string during panic/crash handling.
+/// Reinitializes the UART once and bypasses locks to avoid deadlocks.
+pub fn writeStringPanic(str: []const u8) void {
+    if (!panic_reinit_done.swap(true, .acq_rel)) {
+        init(current_port, 115200);
+    }
+
     for (str) |byte| {
         if (byte == '\n') {
             writeByteUnlocked('\r');

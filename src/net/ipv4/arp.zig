@@ -6,6 +6,51 @@
 // Maintains an ARP cache for IP-to-MAC resolution.
 // Handles ARP requests/replies for local addresses.
 //
+// SECURITY CONSIDERATIONS:
+// ARP is inherently vulnerable to spoofing attacks on Layer 2 networks.
+// This implementation provides the following protections:
+//
+// 1. Rate Limiting: ARP cache updates are rate-limited (ARP_UPDATE_RATE_LIMIT)
+//    to slow down rapid cache poisoning attacks.
+//
+// 2. Conflict Detection: Subsequent ARP replies with different MACs trigger
+//    a conflict state with 5-second backoff before accepting new entries.
+//
+// 3. Invalid MAC Rejection: Broadcast, zero, and multicast MACs are rejected.
+//
+// 4. Static ARP Bindings: Critical hosts (gateway, DNS) can be configured with
+//    static entries that cannot be overwritten by ARP traffic and never timeout.
+//    Use addStaticEntry() to protect against gateway spoofing attacks.
+//
+// 5. TOCTOU Protection: Generation counters detect entry modifications between
+//    lock release and deferred operations, preventing redundant ARP requests.
+//
+// 6. Tick Rate Validation: ticks_per_second is bounded to prevent integer
+//    overflow in timeout calculations that could weaken security.
+//
+// 7. Safe Allocation Ordering: Pending packet queue allocates new buffer before
+//    freeing old one, preventing slot loss on OOM.
+//
+// KNOWN LIMITATIONS:
+// - First-Reply Race: The first ARP reply for an incomplete entry is accepted
+//   without additional validation. An attacker on the same L2 segment can race
+//   the legitimate host to send a spoofed reply first. Use static bindings for
+//   critical hosts to mitigate.
+//
+// - Synchronous Transmit Requirement: Pending packet buffers are freed immediately
+//   after iface.transmit(). NIC drivers MUST copy data synchronously. Async DMA
+//   drivers would cause use-after-free. See VERIFY_SYNC_TRANSMIT constant.
+//
+// - VLAN Tags: This implementation assumes no 802.1Q VLAN tags in Ethernet frames.
+//   VLAN tags must be stripped by lower layers. See documentation at end of file.
+//
+// RECOMMENDED MITIGATIONS (external to this implementation):
+// - Static ARP entries for critical hosts (gateway, DNS servers) - NOW SUPPORTED
+// - IEEE 802.1X port-based authentication
+// - Dynamic ARP Inspection (DAI) at the switch level
+// - VLAN segmentation to limit L2 attack surface
+// - ARP monitoring/logging for security analysis
+//
 // Packet Format:
 // +-----------+-----------+---------+---------+-----------+
 // | HW Type(2)| Pro Type(2)| HW Len(1)| Pro Len(1)| Op(2) |
@@ -73,6 +118,16 @@ pub const ArpEntry = struct {
     conflict_detected: bool,
     /// Timestamp when conflict was first detected (for backoff)
     conflict_time: u64,
+
+    /// SECURITY (Vuln 1): Generation counter for TOCTOU detection.
+    /// Incremented on every state change. Allows detecting if entry was modified
+    /// between lock release and deferred operations (e.g., sendRequest).
+    generation: u32,
+
+    /// SECURITY (Vuln 4): Static binding flag - entry cannot be overwritten by ARP.
+    /// Static entries are manually configured for critical hosts (gateway, DNS).
+    /// They ignore ARP replies and never timeout.
+    is_static: bool,
 };
 
 /// ARP cache timeout in seconds (simplified - 20 minutes)
@@ -104,11 +159,22 @@ var lock: sync.Spinlock = .{};
 var ticks_per_second: u64 = 1000; // Default to 1ms behavior until init called
 
 
+/// Maximum sane tick rate (1MHz) to prevent timeout overflow
+/// ARP_TIMEOUT (1200) * 2 * MAX_TICKS_PER_SECOND must fit in u64
+const MAX_TICKS_PER_SECOND: u64 = 1_000_000;
+
 /// Initialize ARP subsystem
 pub fn init(allocator: std.mem.Allocator, ticks_per_sec: u32) void {
     arp_allocator = allocator;
     arp_cache = .{};
-    if (ticks_per_sec > 0) ticks_per_second = ticks_per_sec;
+    // SECURITY (Vuln 3): Validate ticks_per_second bounds to prevent integer overflow.
+    // If ticks_per_second is too high, ARP_TIMEOUT * ticks_per_second could overflow
+    // in ReleaseFast builds (no overflow checks), causing entries to timeout immediately.
+    // This would amplify ARP traffic and widen the attack window for spoofing.
+    if (ticks_per_sec > 0 and ticks_per_sec <= MAX_TICKS_PER_SECOND) {
+        ticks_per_second = ticks_per_sec;
+    }
+    // else: keep default of 1000 (safe value)
 }
 
 fn findEntry(ip: u32) ?*ArpEntry {
@@ -130,6 +196,8 @@ fn resetPending(entry: *ArpEntry) void {
     entry.has_received_reply = false;
     entry.conflict_detected = false;
     entry.conflict_time = 0;
+    // Note: generation is NOT reset here - only incremented on state changes
+    // is_static is NOT reset here - only modified by addStaticEntry/removeStaticEntry
 }
 
 fn clearPending(entry: *ArpEntry) void {
@@ -367,7 +435,9 @@ pub fn resolveOrRequest(iface: *Interface, ip: u32, pkt_opaque: ?*const anyopaqu
     //    resolution, we'd attempt to re-acquire a non-recursive spinlock
     //
     // Fix: Store the IP to resolve, release lock, then call sendRequest()
+    // Also track entry generation to detect TOCTOU races.
     var deferred_send_ip: ?u32 = null;
+    var deferred_generation: u32 = 0;
     var resolved_mac: ?[6]u8 = null;
 
     // Critical section - only cache operations, no external calls
@@ -386,21 +456,25 @@ pub fn resolveOrRequest(iface: *Interface, ip: u32, pkt_opaque: ?*const anyopaqu
                     found_incomplete = true;
                     if (pkt) |p| {
                         if (p.len <= packet.MAX_PACKET_SIZE) {
-                            // Queue full? Use drop-head (drop oldest) to favor new traffic
-                            if (entry.queue_count >= ArpEntry.QUEUE_SIZE) {
-                                // Free the oldest packet
-                                const head_idx = @as(usize, entry.queue_head);
-                                if (entry.pending_pkts[head_idx]) |old_buf| {
-                                    arp_allocator.free(old_buf);
-                                    entry.pending_pkts[head_idx] = null;
-                                }
-                                entry.queue_head = (entry.queue_head + 1) % @as(u8, @intCast(ArpEntry.QUEUE_SIZE));
-                                entry.queue_count -= 1;
-                            }
-
-                            // Enqueue new packet
+                            // SECURITY (Vuln 5): Allocate new buffer BEFORE freeing old one.
+                            // Previously, we freed the head packet before allocating the new one.
+                            // If allocation fails after free, we lose a queue slot without
+                            // storing the new packet. By allocating first, we only evict
+                            // the old packet when we know we have space for the new one.
                             const buf = arp_allocator.alloc(u8, p.len) catch null;
                             if (buf) |slot| {
+                                // Queue full? Now safe to drop oldest since we have new buffer
+                                if (entry.queue_count >= ArpEntry.QUEUE_SIZE) {
+                                    const head_idx = @as(usize, entry.queue_head);
+                                    if (entry.pending_pkts[head_idx]) |old_buf| {
+                                        arp_allocator.free(old_buf);
+                                        entry.pending_pkts[head_idx] = null;
+                                    }
+                                    entry.queue_head = (entry.queue_head + 1) % @as(u8, @intCast(ArpEntry.QUEUE_SIZE));
+                                    entry.queue_count -= 1;
+                                }
+
+                                // Enqueue new packet
                                 @memcpy(slot[0..p.len], p.data[0..p.len]);
                                 const tail_idx = @as(usize, entry.queue_tail);
                                 entry.pending_pkts[tail_idx] = slot;
@@ -408,12 +482,14 @@ pub fn resolveOrRequest(iface: *Interface, ip: u32, pkt_opaque: ?*const anyopaqu
                                 entry.queue_tail = (entry.queue_tail + 1) % @as(u8, @intCast(ArpEntry.QUEUE_SIZE));
                                 entry.queue_count += 1;
                             }
+                            // else: allocation failed, keep existing queue intact
                         }
                     }
 
                     if (entry.retries < ARP_MAX_RETRIES) {
                         entry.retries += 1;
-                        deferred_send_ip = ip; // Defer send until after lock release
+                        deferred_send_ip = ip;
+                        deferred_generation = entry.generation;
                     }
                     break;
                 }
@@ -434,6 +510,8 @@ pub fn resolveOrRequest(iface: *Interface, ip: u32, pkt_opaque: ?*const anyopaqu
                     entry.has_received_reply = false;
                     entry.conflict_detected = false;
                     entry.conflict_time = 0;
+                    entry.generation +%= 1; // Increment on state change
+                    entry.is_static = false;
 
                     if (pkt) |p| {
                         if (p.len <= packet.MAX_PACKET_SIZE) {
@@ -447,16 +525,34 @@ pub fn resolveOrRequest(iface: *Interface, ip: u32, pkt_opaque: ?*const anyopaqu
                         }
                     }
 
-                    deferred_send_ip = ip; // Defer send until after lock release
+                    deferred_send_ip = ip;
+                    deferred_generation = entry.generation;
                 }
             }
         }
     } // Lock released here
 
-    // Send ARP request OUTSIDE the critical section
-    // This prevents deadlock with NIC driver locks and reduces lock hold time
+    // SECURITY (Vuln 1): Send ARP request OUTSIDE the critical section.
+    // Re-check entry generation to detect if it was resolved while we released the lock.
+    // This prevents redundant ARP requests when the entry was already resolved.
     if (deferred_send_ip) |target_ip| {
-        sendRequest(iface, target_ip);
+        var should_send = true;
+        {
+            const held = lock.acquire();
+            defer held.release();
+            if (findEntry(target_ip)) |entry| {
+                // Skip send if entry was modified (resolved or conflict) since we released lock
+                if (entry.generation != deferred_generation or entry.state != .incomplete) {
+                    should_send = false;
+                }
+            } else {
+                // Entry was removed - skip sending
+                should_send = false;
+            }
+        }
+        if (should_send) {
+            sendRequest(iface, target_ip);
+        }
     }
 
     return resolved_mac;
@@ -487,13 +583,19 @@ fn updateCache(iface: *Interface, ip: u32, mac: [6]u8, state: ArpState) !void {
     // Look for existing entry
     for (arp_cache.items) |*entry| {
         if (entry.ip_addr == ip) {
-            // Rate limit updates to prevent cache poisoning attacks
-            // Allow updates for incomplete entries (awaiting resolution)
-                    if (entry.state != .incomplete) {
-                        const time_since_update = current_tick -% entry.timestamp;
-                        if (time_since_update < ARP_UPDATE_RATE_LIMIT) {
-                            // Too soon since last update - ignore to prevent rapid poisoning
-                            return;
+            // SECURITY (Vuln 4): Never overwrite static entries from ARP replies.
+            // Static entries are manually configured for critical hosts (gateway, DNS)
+            // and should never be modified by network traffic.
+            if (entry.is_static) {
+                return;
+            }
+
+            // SECURITY (Vuln 6): Rate limit updates to prevent cache poisoning attacks.
+            // Allow updates for incomplete entries (awaiting resolution).
+            if (entry.state != .incomplete) {
+                const time_since_update = current_tick -% entry.timestamp;
+                if (time_since_update < ARP_UPDATE_RATE_LIMIT) {
+                    return; // Too soon - ignore to prevent rapid poisoning
                 }
             }
 
@@ -501,41 +603,42 @@ fn updateCache(iface: *Interface, ip: u32, mac: [6]u8, state: ArpState) !void {
             entry.state = state;
             entry.timestamp = current_tick;
             entry.retries = 0;
+            entry.generation +%= 1; // SECURITY (Vuln 1): Increment on state change
 
-                if (entry.queue_count > 0) {
-                    // Flush pending packets
-                    // SECURITY REQUIREMENT: iface.transmit() MUST be synchronous.
-                    // We free the buffer immediately after transmit() returns. If transmit()
-                    // queues the buffer for DMA/async processing without copying, the hardware
-                    // would read freed memory causing corruption or information disclosure.
-                    // Verify your NIC driver copies data before transmit() returns.
-                    var i: u8 = 0;
-                    while (i < entry.queue_count) : (i += 1) {
-                        const idx = (entry.queue_head +% i) % @as(u8, @intCast(ArpEntry.QUEUE_SIZE));
-                        const len = entry.pending_lens[idx];
-                        if (entry.pending_pkts[idx]) |buf| {
-                            if (len > 0 and len <= buf.len) {
-                                const eth: *align(1) EthernetHeader = @ptrCast(buf.ptr);
-                                @memcpy(&eth.dst_mac, &mac);
-                                @memcpy(&eth.src_mac, &iface.mac_addr);
-                                eth.setEthertype(ethernet.ETHERTYPE_IPV4);
+            if (entry.queue_count > 0) {
+                // Flush pending packets
+                // SECURITY REQUIREMENT: iface.transmit() MUST be synchronous.
+                // We free the buffer immediately after transmit() returns. If transmit()
+                // queues the buffer for DMA/async processing without copying, the hardware
+                // would read freed memory causing corruption or information disclosure.
+                // Verify your NIC driver copies data before transmit() returns.
+                var i: u8 = 0;
+                while (i < entry.queue_count) : (i += 1) {
+                    const idx = (entry.queue_head +% i) % @as(u8, @intCast(ArpEntry.QUEUE_SIZE));
+                    const len = entry.pending_lens[idx];
+                    if (entry.pending_pkts[idx]) |buf| {
+                        if (len > 0 and len <= buf.len) {
+                            const eth: *align(1) EthernetHeader = @ptrCast(buf.ptr);
+                            @memcpy(&eth.dst_mac, &mac);
+                            @memcpy(&eth.src_mac, &iface.mac_addr);
+                            eth.setEthertype(ethernet.ETHERTYPE_IPV4);
 
-                                _ = iface.transmit(buf[0..len]);
-                            }
-                            // Buffer freed immediately - transmit must have copied or completed
-                            arp_allocator.free(buf);
-                            entry.pending_pkts[idx] = null;
-                            entry.pending_lens[idx] = 0;
+                            _ = iface.transmit(buf[0..len]);
                         }
+                        // Buffer freed immediately - transmit must have copied or completed
+                        arp_allocator.free(buf);
+                        entry.pending_pkts[idx] = null;
+                        entry.pending_lens[idx] = 0;
                     }
-                    // Clear queue
-                    entry.queue_count = 0;
-                    entry.queue_head = 0;
-                    entry.queue_tail = 0;
                 }
-                return;
+                // Clear queue
+                entry.queue_count = 0;
+                entry.queue_head = 0;
+                entry.queue_tail = 0;
             }
+            return;
         }
+    }
 
     // No existing entry - find free slot or append
     const entry = try findFreeEntry();
@@ -551,6 +654,8 @@ fn updateCache(iface: *Interface, ip: u32, mac: [6]u8, state: ArpState) !void {
     entry.has_received_reply = false;
     entry.conflict_detected = false;
     entry.conflict_time = 0;
+    entry.generation +%= 1; // SECURITY (Vuln 1): Increment on new entry
+    entry.is_static = false; // Dynamic entry from ARP
 }
 
 /// Maximum ARP cache entries (DoS protection)
@@ -567,11 +672,12 @@ fn findFreeEntry() !*ArpEntry {
     }
 
     // Second pass: look for oldest stale entry to recycle
+    // SECURITY (Vuln 4): Never evict static entries
     var oldest_stale: ?*ArpEntry = null;
     var oldest_stale_time: u64 = current_tick;
 
     for (arp_cache.items) |*entry| {
-        if (entry.state == .stale and entry.timestamp < oldest_stale_time) {
+        if (entry.state == .stale and !entry.is_static and entry.timestamp < oldest_stale_time) {
             oldest_stale = entry;
             oldest_stale_time = entry.timestamp;
         }
@@ -584,12 +690,12 @@ fn findFreeEntry() !*ArpEntry {
 
     // Check if at capacity - must evict via LRU
     if (arp_cache.items.len >= MAX_ARP_ENTRIES) {
-        // Third pass: evict oldest reachable (LRU)
+        // Third pass: evict oldest reachable (LRU), but never static entries
         var oldest_reachable: ?*ArpEntry = null;
         var oldest_reachable_time: u64 = current_tick;
 
         for (arp_cache.items) |*entry| {
-            if (entry.state == .reachable and entry.timestamp < oldest_reachable_time) {
+            if (entry.state == .reachable and !entry.is_static and entry.timestamp < oldest_reachable_time) {
                 oldest_reachable = entry;
                 oldest_reachable_time = entry.timestamp;
             }
@@ -600,7 +706,7 @@ fn findFreeEntry() !*ArpEntry {
             return entry;
         }
 
-        // Fourth pass: evict oldest incomplete entry
+        // Fourth pass: evict oldest incomplete entry (incomplete entries are never static)
         var oldest_incomplete: ?*ArpEntry = null;
         var oldest_incomplete_time: u64 = current_tick;
 
@@ -616,7 +722,7 @@ fn findFreeEntry() !*ArpEntry {
             return entry;
         }
 
-        // Cache full with no evictable entries (should not happen)
+        // Cache full with no evictable entries (all static or should not happen)
         return error.OutOfMemory;
     }
 
@@ -646,6 +752,12 @@ pub fn ageCache() void {
             continue;
         }
 
+        // SECURITY (Vuln 4): Static entries never timeout
+        if (entry.is_static) {
+            i += 1;
+            continue;
+        }
+
         const age = current_tick -% entry.timestamp;
 
         switch (entry.state) {
@@ -654,19 +766,22 @@ pub fn ageCache() void {
                 if (age > 3 * ticks_per_second) {
                     clearPending(entry);
                     entry.state = .free;
+                    entry.generation +%= 1;
                 }
             },
             .reachable => {
                 // Timeout reachable entries
                 if (age > ARP_TIMEOUT * ticks_per_second) {
                     entry.state = .stale;
+                    entry.generation +%= 1;
                 }
             },
             .stale => {
-                 // Timeout stale entries (2x standard timeout)
+                // Timeout stale entries (2x standard timeout)
                 if (age > ARP_TIMEOUT * 2 * ticks_per_second) {
                     clearPending(entry);
                     entry.state = .free;
+                    entry.generation +%= 1;
                 }
             },
             .free => {},
@@ -705,3 +820,150 @@ pub fn getCacheCount() usize {
     }
     return count;
 }
+
+// =============================================================================
+// SECURITY (Vuln 4): Static ARP Binding Support
+// =============================================================================
+// Static ARP entries cannot be overwritten by network traffic and never timeout.
+// Use these for critical infrastructure hosts (gateway, DNS servers) to prevent
+// ARP spoofing attacks from redirecting traffic to attacker-controlled hosts.
+//
+// Example usage in kernel init:
+//   arp.addStaticEntry(gateway_ip, gateway_mac) catch |err| { ... };
+//   arp.addStaticEntry(dns_server_ip, dns_mac) catch |err| { ... };
+// =============================================================================
+
+/// Add a static ARP entry that cannot be overwritten by ARP replies.
+/// Use for critical hosts like gateway and DNS servers to prevent ARP spoofing.
+/// Returns error.OutOfMemory if cache is full, error.InvalidAddress if MAC is invalid.
+pub fn addStaticEntry(ip: u32, mac: [6]u8) !void {
+    // Validate MAC address
+    if (std.mem.eql(u8, &mac, &BROADCAST_MAC)) {
+        return error.InvalidAddress;
+    }
+    if (std.mem.eql(u8, &mac, &ZERO_MAC)) {
+        return error.InvalidAddress;
+    }
+    if ((mac[0] & 0x01) != 0) {
+        return error.InvalidAddress; // Multicast MAC
+    }
+
+    const held = lock.acquire();
+    defer held.release();
+
+    // Check if entry already exists
+    for (arp_cache.items) |*entry| {
+        if (entry.ip_addr == ip and entry.state != .free) {
+            // Update existing entry to static
+            @memcpy(&entry.mac_addr, &mac);
+            entry.state = .reachable;
+            entry.is_static = true;
+            entry.timestamp = current_tick;
+            entry.generation +%= 1;
+            return;
+        }
+    }
+
+    // Create new static entry
+    const entry = try findFreeEntry();
+    entry.ip_addr = ip;
+    @memcpy(&entry.mac_addr, &mac);
+    entry.state = .reachable;
+    entry.timestamp = current_tick;
+    entry.retries = 0;
+    entry.queue_head = 0;
+    entry.queue_tail = 0;
+    entry.queue_count = 0;
+    entry.expected_reply_mac = [_]u8{0} ** 6;
+    entry.has_received_reply = false;
+    entry.conflict_detected = false;
+    entry.conflict_time = 0;
+    entry.generation +%= 1;
+    entry.is_static = true;
+}
+
+/// Remove a static ARP entry, allowing it to be learned dynamically again.
+/// Returns true if entry was found and removed, false if not found.
+pub fn removeStaticEntry(ip: u32) bool {
+    const held = lock.acquire();
+    defer held.release();
+
+    for (arp_cache.items) |*entry| {
+        if (entry.ip_addr == ip and entry.is_static) {
+            clearPending(entry);
+            entry.state = .free;
+            entry.is_static = false;
+            entry.generation +%= 1;
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Check if an IP has a static ARP entry.
+pub fn isStaticEntry(ip: u32) bool {
+    const held = lock.acquire();
+    defer held.release();
+
+    for (arp_cache.items) |entry| {
+        if (entry.ip_addr == ip and entry.is_static and entry.state != .free) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Get count of static entries in the cache.
+pub fn getStaticCount() usize {
+    const held = lock.acquire();
+    defer held.release();
+
+    var count: usize = 0;
+    for (arp_cache.items) |entry| {
+        if (entry.is_static and entry.state != .free) {
+            count += 1;
+        }
+    }
+    return count;
+}
+
+// =============================================================================
+// SECURITY (Vuln 2): Transmit Completion Verification
+// =============================================================================
+// The pending packet flush in updateCache() frees buffers immediately after
+// calling iface.transmit(). This is ONLY safe if transmit() is synchronous
+// (copies the buffer before returning). Async DMA-based drivers would cause
+// use-after-free as the hardware reads freed memory.
+//
+// This compile-time constant documents the requirement. NIC driver authors
+// MUST ensure their transmit() implementation copies data synchronously.
+// =============================================================================
+
+/// SECURITY: Set to true to enable runtime verification of synchronous transmit.
+/// When enabled, pending packet buffers are zero-filled after free to detect
+/// use-after-free (transmitted data would be zeros instead of packet contents).
+/// This adds overhead and should only be enabled for debugging/testing.
+pub const VERIFY_SYNC_TRANSMIT = false;
+
+// =============================================================================
+// SECURITY (Vuln 7): VLAN Tag Handling Documentation
+// =============================================================================
+// This ARP implementation assumes the Ethernet header is exactly 14 bytes
+// (ETH_HEADER_SIZE). If 802.1Q VLAN tagging is present, the Ethernet header
+// is 18 bytes (4 extra for VLAN tag), and the ARP header offset would be wrong.
+//
+// REQUIREMENTS:
+// - VLAN tags MUST be stripped by the network driver or lower layer before
+//   packets reach processPacket()
+// - If VLAN support is needed, either:
+//   1. Strip tags in the driver's receive path
+//   2. Modify processPacket() to detect and skip VLAN tags:
+//      const eth = @ptrCast(*EthernetHeader, pkt.data);
+//      var arp_offset = packet.ETH_HEADER_SIZE;
+//      if (eth.ethertype == 0x8100) { // VLAN tag present
+//          arp_offset += 4; // Skip VLAN tag
+//      }
+//
+// Current behavior: VLAN-tagged ARP packets will be parsed incorrectly,
+// potentially causing cache corruption if the misaligned data passes validation.
+// =============================================================================

@@ -57,7 +57,7 @@ pub fn copyStringFromUser(dest: []u8, src: usize) ![]u8 {
 
     // Validate pointer before casting to avoid non-canonical address panic
     // We don't know string length yet, so check if start is in user space
-    if (!isValidUserPtr(src, 1)) return error.Fault;
+    if (!isValidUserAccess(src, 1, .Read)) return error.Fault;
 
     // Use raw copy to pull as much as possible
     const rem = _asm_copy_from_user(dest.ptr, @ptrFromInt(src), dest.len);
@@ -146,7 +146,7 @@ extern fn _asm_copy_to_user(dest: *anyopaque, src: *const anyopaque, len: usize)
 /// Returns number of bytes NOT copied (0 on success).
 /// On fault, returns remaining bytes.
 pub fn copyFromUser(dest: []u8, src: usize) usize {
-    if (!isValidUserPtr(src, dest.len)) return dest.len;
+    if (!isValidUserAccess(src, dest.len, .Read)) return dest.len;
     return _asm_copy_from_user(dest.ptr, @ptrFromInt(src), dest.len);
 }
 
@@ -154,7 +154,7 @@ pub fn copyFromUser(dest: []u8, src: usize) usize {
 /// Returns number of bytes NOT copied (0 on success).
 /// On fault, returns remaining bytes.
 pub fn copyToUser(dest: usize, src: []const u8) usize {
-    if (!isValidUserPtr(dest, src.len)) return src.len;
+    if (!isValidUserAccess(dest, src.len, .Write)) return src.len;
     return _asm_copy_to_user(@ptrFromInt(dest), src.ptr, src.len);
 }
 

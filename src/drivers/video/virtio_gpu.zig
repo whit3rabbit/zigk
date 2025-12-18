@@ -15,6 +15,7 @@ const hal = @import("hal");
 const console = @import("console");
 const sync = @import("sync");
 const heap = @import("heap");
+const interrupts = hal.interrupts;
 
 // GPU Command Types
 const VIRTIO_GPU_CMD_GET_DISPLAY_INFO: u32 = 0x0100;
@@ -181,6 +182,10 @@ pub const VirtioGpuDriver = struct {
     // bar_mappings[i] stores virt address of BAR i, or 0 if not mapped
     bar_mappings: [6]u64 = .{ 0, 0, 0, 0, 0, 0 },
 
+    // MSI-X interrupt support
+    msix_vector: ?u8 = null,
+    cmd_complete: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
     const Self = @This();
 
     /// GraphicsDevice vtable
@@ -280,6 +285,9 @@ pub const VirtioGpuDriver = struct {
             console.err("VirtIO-GPU: Device initialization failed", .{});
             return null;
         }
+
+        // Set up MSI-X interrupts (optional, will fall back to polling)
+        driver.setupInterrupts(pci_dev, pci_access);
 
         // Get display info
         if (!driver.getDisplayInfo()) {
@@ -489,6 +497,66 @@ pub const VirtioGpuDriver = struct {
         return true;
     }
 
+    /// Set up MSI-X interrupt handling for command completion
+    fn setupInterrupts(self: *Self, pci_dev: *const pci.PciDevice, pci_access: pci.PciAccess) void {
+        const cfg = self.common_cfg orelse return;
+
+        // MSI-X requires ECAM access
+        const ecam_ptr: ?*const pci.Ecam = switch (pci_access) {
+            .ecam => |*e| e,
+            .legacy => null,
+        };
+
+        if (ecam_ptr) |ecam| {
+            if (pci.findMsix(ecam, pci_dev)) |msix_cap| {
+                console.info("VirtIO-GPU: Found MSI-X capability, attempting to enable...", .{});
+
+                // Allocate 1 vector for control queue
+                if (interrupts.allocateMsixVector()) |vector| {
+                    // Register handler
+                    if (interrupts.registerMsixHandler(vector, handleInterrupt)) {
+                        // Enable MSI-X
+                        if (pci.enableMsix(ecam, pci_dev, &msix_cap, 0)) |msix_alloc| {
+                            // Configure vector 0 to point to our allocated vector
+                            const dest_id: u8 = @truncate(hal.apic.lapic.getId());
+                            _ = pci.configureMsixEntry(msix_alloc.table_base, msix_alloc.vector_count, 0, vector, dest_id);
+
+                            // Unmask vectors
+                            pci.enableMsixVectors(ecam, pci_dev, &msix_cap);
+
+                            // Disable legacy INTx
+                            pci.msi.disableIntx(ecam, pci_dev);
+
+                            // Configure VirtIO to use MSI-X for control queue
+                            cfg.queue_select = 0;
+                            cfg.queue_msix_vector = 0; // Use MSI-X table entry 0
+                            hal.mmio.memoryBarrier();
+
+                            // Verify device accepted the vector
+                            if (cfg.queue_msix_vector == 0) {
+                                self.msix_vector = vector;
+                                console.info("VirtIO-GPU: MSI-X enabled with vector {d}", .{vector});
+                                return;
+                            } else {
+                                console.warn("VirtIO-GPU: Device rejected MSI-X vector", .{});
+                            }
+                        } else {
+                            console.err("VirtIO-GPU: Failed to enable MSI-X capability", .{});
+                        }
+                        interrupts.unregisterMsixHandler(vector);
+                    } else {
+                        console.err("VirtIO-GPU: Failed to register MSI-X handler", .{});
+                    }
+                    interrupts.freeMsixVector(vector);
+                } else {
+                    console.warn("VirtIO-GPU: Failed to allocate MSI-X vector", .{});
+                }
+            }
+        }
+
+        console.info("VirtIO-GPU: Using polling mode for command completion", .{});
+    }
+
     fn resetDevice(self: *Self) void {
         if (self.common_cfg) |cfg| {
             cfg.device_status = 0;
@@ -523,25 +591,49 @@ pub const VirtioGpuDriver = struct {
 
         _ = self.ctrl_vq.?.addBuf(&out_bufs, &in_bufs) orelse return false;
 
+        // Clear completion flag before sending (for MSI-X mode)
+        if (self.msix_vector != null) {
+            self.cmd_complete.store(false, .release);
+        }
+
         // Notify device
         const notify_addr = self.notify_base + @as(u64, self.common_cfg.?.queue_notify_off) * self.notify_off_multiplier;
         self.ctrl_vq.?.kick(notify_addr);
 
-        // Poll for completion with wall-clock timeout
         const start_tsc = hal.timing.rdtsc();
         const timeout_us: u64 = 1_000_000; // 1 second
 
-        while (true) {
-            if (self.ctrl_vq.?.hasPending()) {
-                _ = self.ctrl_vq.?.getUsed();
-                return true;
+        if (self.msix_vector != null) {
+            // MSI-X mode: wait for interrupt-driven completion
+            while (true) {
+                if (self.cmd_complete.load(.acquire)) {
+                    // Interrupt fired, process the used descriptor
+                    if (self.ctrl_vq.?.hasPending()) {
+                        _ = self.ctrl_vq.?.getUsed();
+                    }
+                    return true;
+                }
+
+                if (hal.timing.hasTimedOut(start_tsc, timeout_us)) {
+                    break;
+                }
+
+                hal.cpu.pause();
             }
-            
-            if (hal.timing.hasTimedOut(start_tsc, timeout_us)) {
-                break;
+        } else {
+            // Polling mode: check virtqueue directly
+            while (true) {
+                if (self.ctrl_vq.?.hasPending()) {
+                    _ = self.ctrl_vq.?.getUsed();
+                    return true;
+                }
+
+                if (hal.timing.hasTimedOut(start_tsc, timeout_us)) {
+                    break;
+                }
+
+                hal.cpu.pause();
             }
-            
-            hal.cpu.pause();
         }
 
         console.err("VirtIO-GPU: Command timeout", .{});
@@ -902,4 +994,18 @@ var driver_initialized: bool = false;
 pub fn getDriver() ?*VirtioGpuDriver {
     if (driver_initialized) return &driver_instance;
     return null;
+}
+
+/// MSI-X interrupt handler for VirtIO-GPU command completion
+fn handleInterrupt(_: *hal.idt.InterruptFrame) void {
+    if (!driver_initialized) {
+        hal.apic.lapic.sendEoi();
+        return;
+    }
+
+    // Signal command completion
+    driver_instance.cmd_complete.store(true, .release);
+
+    // Send EOI to LAPIC
+    hal.apic.lapic.sendEoi();
 }

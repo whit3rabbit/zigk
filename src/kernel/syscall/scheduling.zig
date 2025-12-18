@@ -511,7 +511,7 @@ pub fn sys_epoll_wait(epfd: usize, events_ptr: usize, maxevents: usize, timeout:
 
     // Validate output buffer
     const ev_size = @sizeOf(uapi.epoll.EpollEvent);
-    if (!base.isValidUserPtr(events_ptr, maxevents * ev_size)) {
+    if (!base.isValidUserAccess(events_ptr, maxevents * ev_size, base.AccessMode.Write)) {
         return error.EFAULT;
     }
 

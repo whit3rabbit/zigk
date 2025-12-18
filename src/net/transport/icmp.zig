@@ -29,6 +29,71 @@ const Interface = interface.Interface;
 // but we need to call them. circular imports are allowed in Zig if done right.
 const tcp = @import("tcp.zig");
 const udp = @import("udp.zig");
+const sync = @import("../sync.zig");
+
+/// SECURITY: Recent UDP transmit cache for PMTU validation (RFC 5927 defense).
+/// Tracks destination IPs we've recently sent UDP packets to, preventing spoofed
+/// ICMP "Fragmentation Needed" messages from poisoning our PMTU cache for arbitrary
+/// destinations.
+const UDP_TRANSMIT_CACHE_SIZE: usize = 64;
+const UDP_TRANSMIT_CACHE_TTL_MS: u64 = 30000; // 30 seconds
+
+/// Entry in the UDP transmit cache
+const UdpTransmitEntry = struct {
+    dst_ip: u32,
+    timestamp_ms: u64,
+    valid: bool,
+};
+
+/// Ring buffer cache of recent UDP transmissions
+var udp_transmit_cache: [UDP_TRANSMIT_CACHE_SIZE]UdpTransmitEntry = [_]UdpTransmitEntry{.{
+    .dst_ip = 0,
+    .timestamp_ms = 0,
+    .valid = false,
+}} ** UDP_TRANSMIT_CACHE_SIZE;
+var udp_transmit_cache_index: usize = 0;
+var udp_transmit_cache_lock: sync.Spinlock = .{};
+
+/// Monotonic timestamp for cache entries (milliseconds)
+/// Updated externally via tick()
+var current_time_ms: u64 = 0;
+
+/// Increment the time counter (call from timer, e.g., 1ms tick)
+pub fn tick() void {
+    current_time_ms +%= 1;
+}
+
+/// Record a UDP transmission for PMTU validation.
+/// Called from UDP transmit path.
+pub fn recordUdpTransmit(dst_ip: u32) void {
+    const held = udp_transmit_cache_lock.acquire();
+    defer held.release();
+
+    // Insert at current index (ring buffer)
+    udp_transmit_cache[udp_transmit_cache_index] = .{
+        .dst_ip = dst_ip,
+        .timestamp_ms = current_time_ms,
+        .valid = true,
+    };
+    udp_transmit_cache_index = (udp_transmit_cache_index + 1) % UDP_TRANSMIT_CACHE_SIZE;
+}
+
+/// Check if we recently sent UDP to this destination.
+/// Returns true if a valid entry exists within TTL.
+fn validateUdpTransmit(dst_ip: u32) bool {
+    const held = udp_transmit_cache_lock.acquire();
+    defer held.release();
+
+    for (&udp_transmit_cache) |*entry| {
+        if (entry.valid and entry.dst_ip == dst_ip) {
+            const age = current_time_ms -% entry.timestamp_ms;
+            if (age <= UDP_TRANSMIT_CACHE_TTL_MS) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
 
 /// ICMP message types
 pub const TYPE_ECHO_REPLY: u8 = 0;
@@ -242,10 +307,13 @@ fn handleDestUnreachable(pkt: *PacketBuffer, icmp: *align(1) const IcmpHeader) b
                 }
                 // Silently ignore PMTU updates for non-existent connections
             } else if (orig_ip.protocol == ipv4.PROTO_UDP) {
-                // For UDP, we cannot easily validate since connections are stateless.
-                // Apply rate limiting from pmtu.zig but accept the update.
-                // A more complete solution would track recent UDP transmissions.
-                ipv4.updatePmtu(original_dst, effective_mtu);
+                // SECURITY: Validate we recently sent UDP to this destination.
+                // Without this check, an attacker could send spoofed ICMP PMTU
+                // messages to degrade performance or cause fragmentation DoS.
+                if (validateUdpTransmit(original_dst)) {
+                    ipv4.updatePmtu(original_dst, effective_mtu);
+                }
+                // Silently ignore PMTU updates for destinations we haven't sent to
             }
             // Ignore PMTU for other protocols (ICMP, etc.)
         }

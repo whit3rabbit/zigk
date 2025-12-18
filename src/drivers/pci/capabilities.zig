@@ -108,6 +108,10 @@ pub fn hasCapabilities(pci_ecam: *const Ecam, dev: *const PciDevice) bool {
 
 /// Find a capability by ID in the device's capability list
 /// Returns the config space offset of the capability, or null if not found
+///
+/// SECURITY: Tracks visited offsets to detect circular or duplicate capability
+/// lists from malicious devices, preventing infinite loops and ensuring we
+/// return the first occurrence of a capability.
 pub fn findCapability(
     pci_ecam: *const Ecam,
     dev: *const PciDevice,
@@ -124,9 +128,23 @@ pub fn findCapability(
     // Capability pointers must be DWORD aligned (bottom 2 bits should be 0)
     offset &= 0xFC;
 
+    // SECURITY: Track visited offsets using a bitmap.
+    // Config space is 256 bytes, DWORD-aligned offsets means 64 possible positions (0-252 step 4).
+    // A u64 bitmap covers all 64 possible DWORD-aligned offsets.
+    var visited: u64 = 0;
+
     // Traverse the linked list (max 48 iterations to prevent infinite loops)
     var iterations: u8 = 0;
     while (offset != 0 and iterations < 48) : (iterations += 1) {
+        // SECURITY: Check if we've already visited this offset (cycle detection)
+        const offset_idx: u6 = @intCast(offset >> 2);
+        const offset_bit: u64 = @as(u64, 1) << offset_idx;
+        if ((visited & offset_bit) != 0) {
+            // Already visited - malicious device created a cycle
+            break;
+        }
+        visited |= offset_bit;
+
         const id = pci_ecam.read8(dev.bus, dev.device, dev.func, offset);
         if (id == @intFromEnum(cap_id)) {
             return offset;
@@ -141,6 +159,8 @@ pub fn findCapability(
 }
 
 /// Find all capabilities and return count
+///
+/// SECURITY: Uses visited-offset tracking to prevent cycles from malicious devices.
 pub fn enumerateCapabilities(
     pci_ecam: *const Ecam,
     dev: *const PciDevice,
@@ -154,8 +174,19 @@ pub fn enumerateCapabilities(
     var offset = pci_ecam.read8(dev.bus, dev.device, dev.func, ConfigReg.CAPABILITIES);
     offset &= 0xFC;
 
+    // SECURITY: Track visited offsets using a bitmap (same as findCapability)
+    var visited: u64 = 0;
+
     var iterations: u8 = 0;
     while (offset != 0 and iterations < 48 and count < out_caps.len) : (iterations += 1) {
+        // SECURITY: Check for cycles
+        const offset_idx: u6 = @intCast(offset >> 2);
+        const offset_bit: u64 = @as(u64, 1) << offset_idx;
+        if ((visited & offset_bit) != 0) {
+            break;
+        }
+        visited |= offset_bit;
+
         const id = pci_ecam.read8(dev.bus, dev.device, dev.func, offset);
         out_caps[count] = .{
             .id = @enumFromInt(id),

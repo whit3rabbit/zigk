@@ -61,7 +61,7 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
     }
 
     const tcp_segment = pkt.data[pkt.transport_offset..][0..tcp_segment_len];
-    const calc_checksum = @import("checksum.zig").tcpChecksum(pkt.src_ip, pkt.dst_ip, tcp_segment);
+    const calc_checksum = @import("../../core/checksum.zig").tcpChecksum(pkt.src_ip, pkt.dst_ip, tcp_segment);
 
     if (calc_checksum != 0xFFFF) {
         return false; // Bad checksum

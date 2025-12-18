@@ -208,6 +208,34 @@ pub const EndpointContext = extern struct {
         return ctx;
     }
 
+    /// Generic initialization
+    pub fn initGeneric(
+        ep_type: EndpointType,
+        max_packet_size: u16,
+        interval: u8,
+        tr_phys: u64,
+        dcs: bool,
+    ) Self {
+        var ctx = empty();
+        ctx.dw0.interval = interval;
+        ctx.dw1.cerr = 3;
+        ctx.dw1.ep_type = ep_type;
+        ctx.dw1.max_packet_size = max_packet_size;
+        ctx.tr_dequeue_ptr.dcs = dcs;
+        ctx.tr_dequeue_ptr.ptr = @truncate(tr_phys >> 4);
+        
+        // Set average TRB length based on type
+        switch (ep_type) {
+            .control_bidirectional => ctx.dw4.average_trb_length = 8,
+            .interrupt_in, .interrupt_out => ctx.dw4.average_trb_length = max_packet_size,
+            .bulk_in, .bulk_out => ctx.dw4.average_trb_length = 1024,
+            .isoch_in, .isoch_out => ctx.dw4.average_trb_length = max_packet_size, // simplified
+            else => ctx.dw4.average_trb_length = 8,
+        }
+        
+        return ctx;
+    }
+
     /// Set TR dequeue pointer
     pub fn setTrDequeue(self: *Self, phys: u64, dcs: bool) void {
         self.tr_dequeue_ptr.dcs = dcs;

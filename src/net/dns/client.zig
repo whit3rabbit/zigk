@@ -154,7 +154,20 @@ fn resolveOnce(allocator: std.mem.Allocator, hostname: []const u8, server_ip: u3
     const DNS_TIMEOUT_US: u64 = 2_000_000; // 2 seconds in microseconds
     const start_tsc = platform.timing.rdtsc();
 
+    // Security: Secondary safeguard against packet flood DoS.
+    // If TSC calibration is incorrect (common in VMs), the deadline check may
+    // not trigger correctly. This absolute packet limit ensures the loop
+    // terminates regardless of timing accuracy.
+    const DNS_MAX_PACKETS_PER_QUERY: u32 = 1000;
+    var packet_count: u32 = 0;
+
     while (true) {
+        // Security: Enforce packet count limit before processing
+        packet_count += 1;
+        if (packet_count > DNS_MAX_PACKETS_PER_QUERY) {
+            return DnsError.TimedOut;
+        }
+
         // Security: Check deadline BEFORE blocking on recvfrom to prevent
         // infinite loops from attacker-controlled packet floods.
         if (platform.timing.hasTimedOut(start_tsc, DNS_TIMEOUT_US)) {

@@ -4,6 +4,16 @@
 // Handles multi-function devices and populates device structures with
 // BAR information for driver use.
 //
+// SMP SAFETY INVARIANT:
+//   PCI enumeration MUST complete before any device drivers are started.
+//   During BAR sizing, we temporarily write 0xFFFFFFFF to BAR registers which
+//   puts devices in an invalid state. While we disable local CPU interrupts,
+//   other CPUs could still run ISRs that access devices being probed if
+//   drivers were already started. The kernel init sequence enforces this:
+//   1. Boot CPU runs PCI enumeration (single-threaded)
+//   2. Only after enumeration completes are drivers initialized
+//   3. Only after drivers are ready are secondary CPUs brought up
+//
 // Reference: PCI Local Bus Specification 3.0, Section 6.1
 
 const console = @import("console");
@@ -148,6 +158,8 @@ fn checkFunction(pci: PciAccess, bus: u8, dev: u5, func: u3, devices: *DeviceLis
 }
 
 /// Read all BARs for a device
+/// SAFETY: See module-level SMP SAFETY INVARIANT comment. This function must only
+/// be called during early boot before any device drivers are started.
 fn readBars(pci: PciAccess, dev: *PciDevice) void {
     const orig_cmd = pci.read16(dev.bus, dev.device, dev.func, ConfigReg.COMMAND);
     const disabled_cmd = orig_cmd & ~(device.Command.MEMORY_SPACE | device.Command.IO_SPACE);
@@ -156,10 +168,13 @@ fn readBars(pci: PciAccess, dev: *PciDevice) void {
     // Restore original command register after sizing to avoid changing device state.
     defer pci.write16(dev.bus, dev.device, dev.func, ConfigReg.COMMAND, orig_cmd);
 
-    // CRITICAL: Disable interrupts during BAR sizing.
+    // CRITICAL: Disable local CPU interrupts during BAR sizing.
     // Writing 0xFFFFFFFF to the BAR register temporarily unmaps the device or puts it in an invalid state.
     // If an interrupt (e.g. from the same device or another device sharing the bus) fires in between,
     // the ISR might try to access the device and crash or read garbage.
+    // NOTE: This only disables interrupts on the local CPU. On SMP systems, other CPUs could still
+    // run ISRs. The module-level SMP SAFETY INVARIANT ensures this is safe by requiring enumeration
+    // to complete before any drivers (and thus ISRs) are registered.
     hal.cpu.disableInterrupts();
     defer hal.cpu.enableInterrupts();
 

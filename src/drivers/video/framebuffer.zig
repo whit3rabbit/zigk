@@ -32,6 +32,16 @@ pub fn FramebufferDriver(comptime buffered: bool) type {
             .present = present,
         };
 
+        fn calcIndex(stride_u32: u64, x: u64, y: u64) ?u64 {
+            const row = std.math.mul(u64, y, stride_u32) catch return null;
+            return std.math.add(u64, row, x) catch return null;
+        }
+
+        fn calcOffsetBytes(pitch: u64, x_bytes: u64, y: u64) ?u64 {
+            const row = std.math.mul(u64, y, pitch) catch return null;
+            return std.math.add(u64, row, x_bytes) catch return null;
+        }
+
         /// Initialize a buffered driver with back buffer from PMM.
         /// Only available when buffered=true.
         pub fn initWithBackBuffer(mode: interface.VideoMode) ?Self {
@@ -86,11 +96,14 @@ pub fn FramebufferDriver(comptime buffered: bool) type {
 
             if (buffered) {
                 // Comptime: this branch is eliminated when buffered=false
-                const index = (@as(u64, y) * (@as(u64, self.mode.pitch) / 4)) + @as(u64, x);
+                const stride_u32 = @as(u64, self.mode.pitch) / 4;
+                const index = calcIndex(stride_u32, @as(u64, x), @as(u64, y)) orelse return;
                 self.back_buffer[index] = val;
             } else {
                 // Direct VRAM write
-                const offset = (@as(u64, y) * @as(u64, self.mode.pitch)) + (@as(u64, x) * 4);
+                const pitch = @as(u64, self.mode.pitch);
+                const x_bytes = std.math.mul(u64, x, 4) catch return;
+                const offset = calcOffsetBytes(pitch, x_bytes, @as(u64, y)) orelse return;
                 const ptr: [*]u32 = @ptrFromInt(self.mode.addr + offset);
                 ptr[0] = val;
             }
@@ -112,14 +125,17 @@ pub fn FramebufferDriver(comptime buffered: bool) type {
                 if (self.mode.alpha_mask_size > 0) (@as(u32, 255) >> @intCast(8 - self.mode.alpha_mask_size) << @intCast(self.mode.alpha_field_position)) else 0;
 
             const stride_u32 = self.mode.pitch / 4;
+            const stride_u64: u64 = @as(u64, stride_u32);
+            const pitch = @as(u64, self.mode.pitch);
+            const x_bytes = std.math.mul(u64, @as(u64, x), 4) catch return;
 
             var row: u32 = 0;
             while (row < clip_h) : (row += 1) {
                 if (buffered) {
-                    const row_start = (@as(u64, y + row) * stride_u32) + @as(u64, x);
+                    const row_start = calcIndex(stride_u64, @as(u64, x), @as(u64, y + row)) orelse return;
                     @memset(self.back_buffer[row_start .. row_start + clip_w], val);
                 } else {
-                    const row_offset = (@as(u64, y + row) * self.mode.pitch) + (@as(u64, x) * 4);
+                    const row_offset = calcOffsetBytes(pitch, x_bytes, @as(u64, y + row)) orelse return;
                     const row_ptr: [*]u32 = @ptrFromInt(self.mode.addr + row_offset);
                     @memset(row_ptr[0..clip_w], val);
                 }
@@ -138,6 +154,9 @@ pub fn FramebufferDriver(comptime buffered: bool) type {
             if (buf.len < @as(usize, w) * h) return;
 
             const stride_u32 = self.mode.pitch / 4;
+            const stride_u64: u64 = @as(u64, stride_u32);
+            const pitch = @as(u64, self.mode.pitch);
+            const x_bytes = std.math.mul(u64, @as(u64, x), 4) catch return;
 
             var row: u32 = 0;
             while (row < clip_h) : (row += 1) {
@@ -145,10 +164,10 @@ pub fn FramebufferDriver(comptime buffered: bool) type {
                 const src_ptr = buf.ptr + buf_offset;
 
                 if (buffered) {
-                    const fb_offset = (@as(u64, y + row) * stride_u32) + @as(u64, x);
+                    const fb_offset = calcIndex(stride_u64, @as(u64, x), @as(u64, y + row)) orelse return;
                     @memcpy(self.back_buffer[fb_offset .. fb_offset + clip_w], src_ptr[0..clip_w]);
                 } else {
-                    const fb_offset = (@as(u64, y + row) * self.mode.pitch) + (@as(u64, x) * 4);
+                    const fb_offset = calcOffsetBytes(pitch, x_bytes, @as(u64, y + row)) orelse return;
                     const fb_ptr: [*]u32 = @ptrFromInt(self.mode.addr + fb_offset);
                     @memcpy(fb_ptr[0..clip_w], src_ptr[0..clip_w]);
                 }
@@ -170,6 +189,10 @@ pub fn FramebufferDriver(comptime buffered: bool) type {
             if (final_w == 0 or final_h == 0) return;
 
             const stride_u32 = self.mode.pitch / 4;
+            const stride_u64: u64 = @as(u64, stride_u32);
+            const pitch = @as(u64, self.mode.pitch);
+            const src_x_bytes = std.math.mul(u64, @as(u64, src_x), 4) catch return;
+            const dst_x_bytes = std.math.mul(u64, @as(u64, dst_x), 4) catch return;
 
             // Determine copy direction to handle overlapping regions
             const copy_backwards = src_y < dst_y;
@@ -179,8 +202,8 @@ pub fn FramebufferDriver(comptime buffered: bool) type {
                     var i: u32 = 0;
                     while (i < final_h) : (i += 1) {
                         const row = final_h - 1 - i;
-                        const src_offset = (@as(u64, src_y + row) * stride_u32) + @as(u64, src_x);
-                        const dst_offset = (@as(u64, dst_y + row) * stride_u32) + @as(u64, dst_x);
+                        const src_offset = calcIndex(stride_u64, @as(u64, src_x), @as(u64, src_y + row)) orelse return;
+                        const dst_offset = calcIndex(stride_u64, @as(u64, dst_x), @as(u64, dst_y + row)) orelse return;
                         // Using explicit forward/backward copy for safety, although separate rows are generally safe
                         // unless src_y == dst_y (which shouldn't happen in this branch unless logic is weird)
                         // But horizontal overlap within a row is possible if src_y == dst_y and src_x != dst_x.
@@ -194,8 +217,8 @@ pub fn FramebufferDriver(comptime buffered: bool) type {
                 } else {
                     var row: u32 = 0;
                     while (row < final_h) : (row += 1) {
-                        const src_offset = (@as(u64, src_y + row) * stride_u32) + @as(u64, src_x);
-                        const dst_offset = (@as(u64, dst_y + row) * stride_u32) + @as(u64, dst_x);
+                        const src_offset = calcIndex(stride_u64, @as(u64, src_x), @as(u64, src_y + row)) orelse return;
+                        const dst_offset = calcIndex(stride_u64, @as(u64, dst_x), @as(u64, dst_y + row)) orelse return;
                         if (src_y == dst_y) {
                              std.mem.copyForwards(u32, self.back_buffer[dst_offset .. dst_offset + final_w], self.back_buffer[src_offset .. src_offset + final_w]);
                         } else {
@@ -209,8 +232,8 @@ pub fn FramebufferDriver(comptime buffered: bool) type {
                     var i: u32 = 0;
                     while (i < final_h) : (i += 1) {
                         const row = final_h - 1 - i;
-                        const src_offset = (@as(u64, src_y + row) * self.mode.pitch) + (@as(u64, src_x) * 4);
-                        const dst_offset = (@as(u64, dst_y + row) * self.mode.pitch) + (@as(u64, dst_x) * 4);
+                        const src_offset = calcOffsetBytes(pitch, src_x_bytes, @as(u64, src_y + row)) orelse return;
+                        const dst_offset = calcOffsetBytes(pitch, dst_x_bytes, @as(u64, dst_y + row)) orelse return;
 
                         const src_ptr: [*]u32 = @ptrFromInt(self.mode.addr + src_offset);
                         const dst_ptr: [*]u32 = @ptrFromInt(self.mode.addr + dst_offset);
@@ -220,8 +243,8 @@ pub fn FramebufferDriver(comptime buffered: bool) type {
                 } else {
                     var row: u32 = 0;
                     while (row < final_h) : (row += 1) {
-                        const src_offset = (@as(u64, src_y + row) * self.mode.pitch) + (@as(u64, src_x) * 4);
-                        const dst_offset = (@as(u64, dst_y + row) * self.mode.pitch) + (@as(u64, dst_x) * 4);
+                        const src_offset = calcOffsetBytes(pitch, src_x_bytes, @as(u64, src_y + row)) orelse return;
+                        const dst_offset = calcOffsetBytes(pitch, dst_x_bytes, @as(u64, dst_y + row)) orelse return;
 
                         const src_ptr: [*]u32 = @ptrFromInt(self.mode.addr + src_offset);
                         const dst_ptr: [*]u32 = @ptrFromInt(self.mode.addr + dst_offset);
@@ -237,6 +260,7 @@ pub fn FramebufferDriver(comptime buffered: bool) type {
             if (buffered) {
                 const vram: [*]u32 = @ptrFromInt(self.mode.addr);
                 const stride_u32 = self.mode.pitch / 4;
+                const stride_u64: u64 = @as(u64, stride_u32);
                 
                 if (dirty_rect) |rect| {
                     // Optimized update for dirty region
@@ -251,12 +275,12 @@ pub fn FramebufferDriver(comptime buffered: bool) type {
                     
                     var row: u32 = 0;
                     while (row < h) : (row += 1) {
-                        const offset = (@as(u64, y + row) * stride_u32) + x;
+                        const offset = calcIndex(stride_u64, @as(u64, x), @as(u64, y + row)) orelse return;
                         @memcpy(vram[offset .. offset + w], self.back_buffer[offset .. offset + w]);
                     }
                 } else {
                     // Full update
-                    const len = @as(u64, stride_u32) * @as(u64, self.mode.height);
+                    const len = std.math.mul(u64, stride_u64, self.mode.height) catch return;
                     @memcpy(vram[0..len], self.back_buffer[0..len]);
                 }
             }

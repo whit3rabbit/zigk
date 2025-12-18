@@ -6,6 +6,7 @@
 //
 // Reference: PCI Express Base Specification 4.0, Section 7.2.2
 
+const std = @import("std");
 const hal = @import("hal");
 const vmm = @import("vmm");
 const console = @import("console");
@@ -29,10 +30,25 @@ pub const Ecam = struct {
     /// ecam_phys: Physical base address from MCFG table
     /// start_bus: First bus number covered
     /// end_bus: Last bus number covered
+    ///
+    /// SECURITY: Uses overflow-safe arithmetic for size calculation since
+    /// bus range values come from ACPI MCFG table (untrusted firmware data).
     pub fn init(ecam_phys: u64, start_bus: u8, end_bus: u8) !Self {
+        // Validate bus range to prevent integer underflow
+        if (end_bus < start_bus) {
+            console.err("PCI ECAM: Invalid bus range {d}-{d} (end < start)", .{ start_bus, end_bus });
+            return error.MappingFailed;
+        }
+
         // Calculate size: (end_bus - start_bus + 1) buses * 32 devices * 8 functions * 4KB
-        const bus_count: usize = @as(usize, end_bus - start_bus) + 1;
-        const size = bus_count * 32 * 8 * 4096;
+        // SECURITY: Use overflow-safe multiplication since values come from ACPI (firmware).
+        // Max theoretical size: 256 buses * 32 * 8 * 4096 = 256MB, fits in u64.
+        const bus_count: u64 = @as(u64, end_bus - start_bus) + 1;
+        const bytes_per_bus: u64 = 32 * 8 * 4096; // 1MB per bus (constant, no overflow)
+        const size = std.math.mul(u64, bus_count, bytes_per_bus) catch {
+            console.err("PCI ECAM: Size calculation overflow (bus_count={d})", .{bus_count});
+            return error.MappingFailed;
+        };
 
         console.info("PCI ECAM: Mapping phys=0x{x}, buses {d}-{d}, size={d}MB", .{
             ecam_phys,

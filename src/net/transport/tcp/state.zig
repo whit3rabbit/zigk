@@ -37,18 +37,27 @@ pub fn allocTxBuffer() ?[]u8 {
 pub fn freeTxBuffer(buf: []u8) void {
     const start = @intFromPtr(&tx_pool[0]);
     const addr = @intFromPtr(buf.ptr);
-    
+
     // Validate range
     if (addr < start or addr >= start + (TX_POOL_SIZE * TX_BUF_SIZE)) {
-        return; 
+        return;
     }
-    
+
     const offset = addr - start;
     const idx = offset / TX_BUF_SIZE;
-    
+
     const held = tx_pool_lock.acquire();
     defer held.release();
-    tx_pool_bitmap |= (@as(u64, 1) << @intCast(idx));
+
+    // SECURITY: Check for double-free before setting the bit.
+    // If bit is already 1 (free), this is a double-free attempt which could
+    // cause two concurrent operations to share the same buffer if toggled.
+    // Silently ignore to prevent exploitation - caller has a logic bug.
+    const mask = @as(u64, 1) << @intCast(idx);
+    if (tx_pool_bitmap & mask != 0) {
+        return; // Already free - double-free detected
+    }
+    tx_pool_bitmap |= mask;
 }
 
 /// Connection hash table (for fast lookup)

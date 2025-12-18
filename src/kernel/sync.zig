@@ -67,10 +67,13 @@ pub const Spinlock = struct {
         /// This MUST be called exactly once per acquire()
         pub fn release(self: Held) void {
             // Decrement lock depth before releasing
+            // Only track after scheduler is running (GS base is set)
             if (is_freestanding) {
-                if (sched.getCurrentThread()) |t| {
-                    if (t.lock_depth > 0) {
-                        t.lock_depth -= 1;
+                if (sched.isRunning()) {
+                    if (sched.getCurrentThread()) |t| {
+                        if (t.lock_depth > 0) {
+                            t.lock_depth -= 1;
+                        }
                     }
                 }
             }
@@ -122,9 +125,12 @@ pub const Spinlock = struct {
         // No additional fence needed
 
         // Track lock depth for yield safety check
+        // Only track after scheduler is running (GS base is set)
         if (is_freestanding) {
-            if (sched.getCurrentThread()) |t| {
-                t.lock_depth += 1;
+            if (sched.isRunning()) {
+                if (sched.getCurrentThread()) |t| {
+                    t.lock_depth += 1;
+                }
             }
         }
 
@@ -150,9 +156,12 @@ pub const Spinlock = struct {
         if (prev == null) {
             // cmpxchgStrong with .acquire ordering already provides acquire semantics
             // Track lock depth for yield safety check
+            // Only track after scheduler is running (GS base is set)
             if (is_freestanding) {
-                if (sched.getCurrentThread()) |t| {
-                    t.lock_depth += 1;
+                if (sched.isRunning()) {
+                    if (sched.getCurrentThread()) |t| {
+                        t.lock_depth += 1;
+                    }
                 }
             }
             return .{

@@ -19,7 +19,8 @@ const user_mem = @import("user_mem");
 
 const SyscallError = base.SyscallError;
 const UserPtr = base.UserPtr;
-const isValidUserPtr = base.isValidUserPtr;
+const isValidUserAccess = base.isValidUserAccess;
+const AccessMode = base.AccessMode;
 
 /// Safe cast for file descriptor numbers from user space
 fn safeFdCast(fd_num: usize) ?u32 {
@@ -178,7 +179,7 @@ pub fn sys_dup2(oldfd: usize, newfd: usize) SyscallError!usize {
 
 /// sys_pipe (22) - Create a pipe
 pub fn sys_pipe(pipefd_ptr: usize) SyscallError!usize {
-    if (!isValidUserPtr(pipefd_ptr, 2 * @sizeOf(u32))) {
+    if (!isValidUserAccess(pipefd_ptr, 2 * @sizeOf(u32), AccessMode.Write)) {
         return error.EFAULT;
     }
 

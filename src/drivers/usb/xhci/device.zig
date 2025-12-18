@@ -43,19 +43,24 @@ pub const UsbDevice = struct {
     input_context_phys: u64,
 
     // Transfer rings
-    /// EP0 Control endpoint transfer ring
-    ep0_ring: ring.TransferRing,
-    /// Interrupt endpoint transfer ring (for HID)
-    interrupt_ring: ?ring.TransferRing,
-    /// DCI for interrupt endpoint
+    /// Transfer rings indexed by DCI (Device Context Index)
+    /// DCI 1 = Control EP0
+    /// DCI 2..31 = Other Endpoints
+    endpoints: [32]?ring.TransferRing,
+
+    /// Primary Interrupt DCI (for HID polling)
     interrupt_dci: u5,
 
-    // HID keyboard state
-    /// HID driver instance for parsing reports
+    // Class driver state
+    /// HID driver instance for parsing reports (if HID)
     hid_driver: hid.HidDriver,
     /// DMA buffer for interrupt reports (8 bytes for boot protocol)
     report_buffer: [*]u8,
     report_buffer_phys: u64,
+
+    /// Helper tag to identify device class if needed
+    is_hub: bool = false,
+
 
     /// Current device state
     state: DeviceState,
@@ -109,7 +114,7 @@ pub const UsbDevice = struct {
             else => 8,
         };
 
-        device.* = Self{
+        var new_dev = Self{
             .slot_id = slot_id,
             .port = port,
             .speed = speed,
@@ -118,8 +123,7 @@ pub const UsbDevice = struct {
             .device_context_phys = dc.phys,
             .input_context = ic.ctx,
             .input_context_phys = ic.phys,
-            .ep0_ring = ep0_ring,
-            .interrupt_ring = null,
+            .endpoints = [_]?ring.TransferRing{null} ** 32,
             .interrupt_dci = 0,
             .hid_driver = .{},
             .report_buffer = @ptrFromInt(@intFromPtr(report_virt)),
@@ -127,7 +131,13 @@ pub const UsbDevice = struct {
             .state = .slot_enabled,
         };
 
+        // Initialize EP0 ring at DCI 1
+        new_dev.endpoints[1] = ep0_ring;
+
+        device.* = new_dev;
+
         return device;
+
     }
 
     /// Build initial Input Context for Address Device command
@@ -147,50 +157,83 @@ pub const UsbDevice = struct {
         );
 
         // Initialize EP0 Context
+        const ep0_ring = &self.endpoints[1].?;
         self.input_context.endpoints[0] = context.EndpointContext.initForEp0(
             self.max_packet_size,
-            self.ep0_ring.getPhysicalAddress(),
-            self.ep0_ring.getCycleState(),
+            ep0_ring.getPhysicalAddress(),
+            ep0_ring.getCycleState(),
         );
+
     }
 
-    /// Update Input Context for interrupt endpoint configuration
+    /// Initialize a Bulk Endpoint
+    pub fn initBulkEndpoint(self: *Self, ep_addr: u8) !void {
+        const dci = context.InputContext.endpointToDci(ep_addr);
+        
+        // Allocate transfer ring if not present
+        if (self.endpoints[dci] == null) {
+            self.endpoints[dci] = try ring.TransferRing.init();
+        }
+
+        // We don't update InputContext here immediately;
+        // The pattern is initEndpoint -> buildConfigureEndpointContext -> Configure Endpoint Command
+    }
+
+    /// Update Input Context to configure a specific endpoint
     pub fn buildConfigureEndpointContext(
         self: *Self,
         ep_addr: u8,
+        ep_type: context.EndpointType,
         max_packet: u16,
         interval: u8,
     ) !void {
-        // Allocate interrupt transfer ring if not done
-        if (self.interrupt_ring == null) {
-            self.interrupt_ring = try ring.TransferRing.init();
+        const dci = context.InputContext.endpointToDci(ep_addr);
+        
+        // Allocate ring if it doesn't exist (it should, from initXXEndpoint)
+        if (self.endpoints[dci] == null) {
+            self.endpoints[dci] = try ring.TransferRing.init();
         }
 
-        const int_ring = &self.interrupt_ring.?;
-        const dci = context.InputContext.endpointToDci(ep_addr);
-        self.interrupt_dci = dci;
+        const ep_ring = &self.endpoints[dci].?;
 
         // Clear and set up input context
         @memset(@as([*]u8, @ptrCast(self.input_context))[0..@sizeOf(context.InputContext)], 0);
 
-        // Add flags: Slot context + only the new interrupt endpoint
-        // Bit 0 = Slot, Bit N = DCI N (shifted in setAddFlags)
-        // Don't add EP0 again - it's already configured after Address Device
-        const ep_bit: u31 = @as(u31, 1) << @truncate(dci - 1);
-        self.input_context.input_control.setAddFlags(true, ep_bit);
+        // Set Add Flags
+        // Bit 0 = Slot, Bit N = DCI N (handled by setAddFlags shifting left by 1)
+        const endpoint_flag: u31 = @as(u31, 1) << @truncate(dci - 1);
+        self.input_context.input_control.setAddFlags(true, endpoint_flag); // Slot + Endpoint
 
-        // Update slot context_entries to include new endpoint
+        // Update Slot Context
+        // We need to ensure context_entries covers this DCI
         self.input_context.slot = self.device_context.slot;
-        self.input_context.slot.dw0.context_entries = dci;
+        if (dci > self.input_context.slot.dw0.context_entries) {
+            self.input_context.slot.dw0.context_entries = dci;
+        }
 
-        // Initialize interrupt endpoint context
+        // Initialize Endpoint Context
+        // Index in endpoints array is dci - 1
         if (self.input_context.getEndpoint(dci)) |ep| {
-            ep.* = context.EndpointContext.initInterruptIn(
-                max_packet,
-                calculateInterval(self.speed, interval),
-                int_ring.getPhysicalAddress(),
-                int_ring.getCycleState(),
-            );
+             switch (ep_type) {
+                .control_bidirectional => {}, // Should use buildAddressDeviceContext or specialized init
+                .isoch_in, .isoch_out, 
+                .bulk_in, .bulk_out, 
+                .interrupt_in, .interrupt_out => {
+                    ep.* = context.EndpointContext.initGeneric(
+                        ep_type,
+                        max_packet,
+                        calculateInterval(self.speed, interval),
+                        ep_ring.getPhysicalAddress(),
+                        ep_ring.getCycleState(),
+                    );
+                    
+                    // Track interrupt endpoint for HID polling
+                    if (ep_type == .interrupt_in) {
+                        self.interrupt_dci = dci;
+                    }
+                },
+                else => {},
+             }
         }
     }
 
@@ -207,20 +250,23 @@ pub const UsbDevice = struct {
         self.input_context.input_control.setAddFlags(false, 1); // Only EP0
 
         // Update EP0 max packet size
+        const ep0_ring = &self.endpoints[1].?;
         self.input_context.endpoints[0] = context.EndpointContext.initForEp0(
             self.max_packet_size,
-            self.ep0_ring.getPhysicalAddress(),
-            self.ep0_ring.getCycleState(),
+            ep0_ring.getPhysicalAddress(),
+            ep0_ring.getCycleState(),
         );
+
     }
 
     /// Free all device resources
     pub fn deinit(self: *Self) void {
         self.device_context.free();
         self.input_context.free();
-        self.ep0_ring.deinit();
-        if (self.interrupt_ring) |*ir| {
-            ir.deinit();
+        for (&self.endpoints) |*ep_opt| {
+            if (ep_opt.*) |*rng| {
+                rng.deinit();
+            }
         }
         pmm.freePages(self.report_buffer_phys, 1);
 

@@ -20,6 +20,7 @@ const user_vmm = @import("user_vmm");
 const SyscallError = base.SyscallError;
 const UserPtr = base.UserPtr;
 const Process = base.Process;
+const AccessMode = base.AccessMode;
 
 /// Result structure returned by sys_alloc_dma
 /// Must match userspace definition
@@ -150,7 +151,7 @@ pub fn sys_alloc_dma(result_ptr_arg: usize, page_count_arg: usize) SyscallError!
     }
 
     // Validate user pointer
-    if (!base.isValidUserPtr(@intCast(result_ptr), @sizeOf(DmaAllocResult))) {
+    if (!base.isValidUserAccess(@intCast(result_ptr), @sizeOf(DmaAllocResult), AccessMode.Write)) {
         return error.EFAULT;
     }
     const uptr = UserPtr.from(result_ptr);
@@ -220,6 +221,10 @@ pub fn sys_alloc_dma(result_ptr_arg: usize, page_count_arg: usize) SyscallError!
     proc.user_vmm.insertVma(vma);
     proc.user_vmm.total_mapped += size;
 
+    // SECURITY: Track cumulative DMA allocations to enforce capability limits.
+    // This must happen AFTER successful allocation to maintain consistency.
+    proc.dma_allocated_pages += page_count;
+
     // Build result
     const result = DmaAllocResult{
         .virt_addr = virt_addr,
@@ -250,6 +255,9 @@ pub fn sys_alloc_dma(result_ptr_arg: usize, page_count_arg: usize) SyscallError!
 /// Frees DMA memory previously allocated with sys_alloc_dma.
 /// The virtual address and size must match exactly.
 ///
+/// SECURITY: Zeros the buffer before freeing to prevent information leakage
+/// if the memory is reallocated to another process.
+///
 /// Arguments:
 ///   arg0: Virtual address returned by sys_alloc_dma
 ///   arg1: Size in bytes (must match original allocation)
@@ -267,12 +275,26 @@ pub fn sys_free_dma(virt_addr_arg: usize, size_arg: usize) SyscallError!usize {
 
     const proc = base.getCurrentProcess();
 
+    // SECURITY: Zero the DMA buffer before freeing to prevent information leakage.
+    // DMA buffers often contain sensitive data (network packets, disk blocks).
+    // This ensures no residual data leaks if memory is reallocated to another process.
+    // Note: We zero via the virtual address since it's still mapped at this point.
+    const buffer_ptr: [*]volatile u8 = @ptrFromInt(virt_addr);
+    for (0..size) |i| {
+        buffer_ptr[i] = 0;
+    }
+
     // Use munmap to free the region
     // This will unmap pages and free physical memory via VMA cleanup
     const result = proc.user_vmm.munmap(virt_addr, size);
     if (result < 0) {
         return error.EINVAL;
     }
+
+    // SECURITY: Decrement cumulative DMA allocation counter.
+    // Use saturating subtraction to prevent underflow in case of accounting errors.
+    const page_count: u32 = @intCast((size + pmm.PAGE_SIZE - 1) / pmm.PAGE_SIZE);
+    proc.dma_allocated_pages -|= page_count;
 
     console.debug("sys_free_dma: Freed virt={x} size={}", .{ virt_addr, size });
 

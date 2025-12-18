@@ -168,7 +168,7 @@ pub fn sys_rt_sigreturn(frame: *hal.syscall.SyscallFrame) SyscallError!usize {
 
     // Validate that the restored RIP is a canonical user address.
     // If it's non-canonical or in kernel space, sysretq would fault.
-    if (!base.isValidUserPtr(mc.rip, 1)) {
+    if (!base.isValidUserAccess(mc.rip, 1, base.AccessMode.Execute)) {
         console.err("sys_rt_sigreturn: Invalid RIP {x}", .{mc.rip});
         sched.exitWithStatus(128 + 11); // SIGSEGV
         unreachable;
@@ -209,7 +209,7 @@ pub fn sys_rt_sigreturn(frame: *hal.syscall.SyscallFrame) SyscallError!usize {
         // Restore FPU state if present
         if (mc.fpstate != 0) {
             // Validate pointer
-            if (base.isValidUserPtr(mc.fpstate, @sizeOf(hal.fpu.FpuState))) {
+            if (base.isValidUserAccess(mc.fpstate, @sizeOf(hal.fpu.FpuState), base.AccessMode.Read)) {
                 const fpstate_val = UserPtr.from(mc.fpstate).readValue(hal.fpu.FpuState) catch {
                      sched.exitWithStatus(128 + 11);
                      unreachable;

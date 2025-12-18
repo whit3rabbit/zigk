@@ -118,7 +118,7 @@ fn doControlTransfer(
     buffer: ?[]u8,
     timeout_ms: u32,
 ) TransferError!usize {
-    const ep0_ring = &dev.ep0_ring;
+    const ep0_ring = &(dev.endpoints[1] orelse return error.InvalidState);
 
     // Determine transfer type (direction of data stage)
     const is_in = (request_type & 0x80) != 0;
@@ -489,7 +489,9 @@ pub fn queueInterruptTransfer(
     ctrl: *Controller,
     dev: *device.UsbDevice,
 ) TransferError!void {
-    var int_ring = &(dev.interrupt_ring orelse return error.InvalidState);
+    const int_dci = dev.interrupt_dci;
+    if (int_dci == 0) return error.InvalidState;
+    var int_ring = &(dev.endpoints[int_dci] orelse return error.InvalidState);
 
     // Build Normal TRB for interrupt transfer
     var normal = trb.NormalTrb.init(
@@ -503,6 +505,62 @@ pub fn queueInterruptTransfer(
 
     // Ring doorbell for interrupt endpoint
     ctrl.ringDoorbell(dev.slot_id, dev.interrupt_dci);
+}
+
+// =============================================================================
+// Bulk Transfer
+// =============================================================================
+
+/// Queue a bulk transfer
+/// This is asynchronous - caller must poll completion or use events
+/// Currently synchronous waiting is not implemented here due to one-off nature,
+/// but will return the TRB physical address for tracking.
+/// Real implementation should integrate with IoRequest/Reactor.
+/// For now, we will wait synchronously like control transfers for basic testing.
+pub fn queueBulkTransfer(
+    ctrl: *Controller,
+    dev: *device.UsbDevice,
+    ep_addr: u8,
+    buffer: []u8,
+) TransferError!usize {
+    const dci = context.InputContext.endpointToDci(ep_addr);
+    
+    // Validate state
+    if (dci == 0 or dci >= 32) return error.InvalidParam;
+    
+    var ring_ptr = &(dev.endpoints[dci] orelse return error.InvalidState);
+
+    // Get physical address of buffer
+    const buf_phys = hal.paging.virtToPhys(@intFromPtr(buffer.ptr));
+
+    // Build Normal TRB
+    var normal = trb.NormalTrb.init(
+        buf_phys,
+        @truncate(buffer.len),
+        .{ .ioc = true, .isp = true }, // IOC + ISP (Interrupt on Short Packet)
+        ring_ptr.getCycleState(),
+    );
+
+    const trb_phys = ring_ptr.enqueueSingle(normal.asTrb().*) orelse return error.RingFull;
+
+    // Start tracking for completion
+    device.startPendingTransfer(trb_phys, dev.slot_id, dci);
+    defer device.clearPendingTransfer();
+
+    // Ring doorbell
+    ctrl.ringDoorbell(dev.slot_id, dci);
+
+    // Wait for completion (reuse control logic for now)
+    // TODO: Move to IoRequest
+    const result = waitForCompletion(ctrl, dev.slot_id, dci, 1000) catch |err| {
+        return err;
+    };
+
+    const requested = buffer.len;
+    const residual = result.residual;
+    const transferred = if (residual <= requested) requested - residual else 0;
+
+    return transferred;
 }
 
 // =============================================================================
@@ -691,5 +749,92 @@ pub fn findMouseInterface(config_data: []const u8) ?MouseInfo {
         i += length;
     }
 
+    return null;
+}
+
+/// Information about an MSC interface found in config descriptor
+pub const MscInfo = struct {
+    interface_num: u8,
+    bulk_in_ep: u8,
+    bulk_out_ep: u8,
+    max_packet: u16,
+};
+
+/// Parse configuration descriptor to find Mass Storage interface
+pub fn findMscInterface(config_data: []const u8) ?MscInfo {
+    var i: usize = 0;
+
+    var current_interface: ?u8 = null;
+    var is_msc = false;
+    var bulk_in: ?u8 = null;
+    var bulk_out: ?u8 = null;
+    var max_packet_size: u16 = 0;
+
+    const iface_desc_size = @sizeOf(usb_types.InterfaceDescriptor);
+    const ep_desc_size = @sizeOf(usb_types.EndpointDescriptor);
+
+    while (i + 2 <= config_data.len) {
+        const length = config_data[i];
+        const desc_type = config_data[i + 1];
+
+        if (length < 2) break;
+        if (i + length > config_data.len) break;
+
+        switch (desc_type) {
+            usb_types.DescriptorType.INTERFACE => {
+               const required_size = @max(length, iface_desc_size);
+                if (i + required_size > config_data.len) break;
+
+                 if (length >= iface_desc_size) {
+                    const iface = @as(*const usb_types.InterfaceDescriptor, @ptrCast(@alignCast(&config_data[i])));
+                    current_interface = iface.b_interface_number;
+                    
+                    // Reset endpoint finding for new interface
+                    bulk_in = null;
+                    bulk_out = null;
+
+                    // Class 0x08 (MSC), Subclass 0x06 (SCSI), Protocol 0x50 (BOT)
+                    is_msc = (iface.b_interface_class == 0x08 and
+                             iface.b_interface_sub_class == 0x06 and
+                             iface.b_interface_protocol == 0x50);
+                    
+                    if (is_msc) {
+                        console.info("XHCI: Found MSC Interface {}", .{iface.b_interface_number});
+                    }
+                 }
+            },
+            usb_types.DescriptorType.ENDPOINT => {
+                const required_size = @max(length, ep_desc_size);
+                if (i + required_size > config_data.len) break;
+
+                if (length >= ep_desc_size and is_msc and current_interface != null) {
+                    const ep = @as(*const usb_types.EndpointDescriptor, @ptrCast(@alignCast(&config_data[i])));
+                    const addr = ep.getAddress();
+                    const attrs = ep.getAttributes();
+
+                    if (attrs.transfer_type == .bulk) {
+                        if (addr.direction == .in) {
+                            bulk_in = ep.b_endpoint_address;
+                             max_packet_size = ep.w_max_packet_size;
+                        } else {
+                            bulk_out = ep.b_endpoint_address;
+                        }
+                    }
+
+                    // If we have both, we are good
+                    if (bulk_in != null and bulk_out != null) {
+                        return MscInfo{
+                            .interface_num = current_interface.?,
+                            .bulk_in_ep = bulk_in.?,
+                            .bulk_out_ep = bulk_out.?,
+                            .max_packet = max_packet_size,
+                        };
+                    }
+                }
+            },
+            else => {},
+        }
+        i += length;
+    }
     return null;
 }

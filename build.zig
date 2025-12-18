@@ -1,7 +1,9 @@
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
-    const optimize = b.standardOptimizeOption(.{});
+    const optimize = b.standardOptimizeOption(.{
+        .preferred_optimize_mode = .ReleaseSafe,
+    });
 
     // Freestanding x86_64 target for kernel
     // Kernel target (No SSE/MMX/AVX) to prevent FPU register clobbering
@@ -119,6 +121,7 @@ pub fn build(b: *std.Build) void {
     });
     console_module.addImport("hal", hal_module);
     console_module.addImport("config", config_module);
+    console_module.addImport("sync", sync_module);
 
     // HAL needs console for APIC debug output (circular but Zig handles it)
     hal_module.addImport("console", console_module);
@@ -168,6 +171,7 @@ pub fn build(b: *std.Build) void {
     pci_module.addImport("vmm", vmm_module);
     pci_module.addImport("console", console_module);
     pci_module.addImport("acpi", acpi_module);
+    pci_module.addImport("sync", sync_module);
 
 
 

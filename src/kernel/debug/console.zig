@@ -7,6 +7,7 @@
 const std = @import("std");
 const hal = @import("hal");
 const config = @import("config");
+const sync = @import("sync");
 
 /// Function pointer to avoid circular dependency
 pub var sendKernelMessageFn: ?*const fn (pid: usize, payload: []const u8) anyerror!void = null;
@@ -20,6 +21,9 @@ pub const Backend = struct {
 
 var backends: [4]Backend = undefined;
 var backend_count: usize = 0;
+
+var log_buffer: [4096]u8 = undefined;
+var log_lock: sync.Spinlock = .{};
 
 /// Add a new output backend
 pub fn addBackend(backend: Backend) void {
@@ -72,7 +76,7 @@ pub fn printUnsafe(str: []const u8) void {
     // Try to use backends if available, but skip locks if possible?
     // Our backends (uart, console) are currently lock-free or simple.
     // However, for unsafe panic, maybe just dump to HAL serial for valid output.
-    hal.serial.writeStringUnsafe(str); 
+    hal.serial.writeStringPanic(str);
 }
 
 /// Scroll standard output up/down
@@ -107,13 +111,16 @@ pub fn disableGraphicalBackend() void {
 /// Print a formatted string to the debug console
 /// Uses a fixed buffer for formatting - suitable for kernel debug output
 pub fn printf(comptime fmt: []const u8, args: anytype) void {
-    // Use a generous buffer for kernel debug messages
-    var buf: [2048]u8 = undefined;
-    const result = std.fmt.bufPrint(&buf, fmt, args) catch |fmt_err| {
+    const held = log_lock.acquire();
+    defer held.release();
+
+    // Use a shared buffer to avoid stack pressure on interrupt paths.
+    @memset(&log_buffer, 0);
+    const result = std.fmt.bufPrint(&log_buffer, fmt, args) catch |fmt_err| {
         // On error, print what we can
         switch (fmt_err) {
             error.NoSpaceLeft => {
-                print(buf[0..]);
+                print(log_buffer[0..]);
                 print("[TRUNCATED]");
                 return;
             },

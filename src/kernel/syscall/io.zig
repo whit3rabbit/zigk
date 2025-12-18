@@ -20,7 +20,6 @@ const error_helpers = @import("error_helpers.zig");
 
 const SyscallError = base.SyscallError;
 const UserPtr = base.UserPtr;
-const isValidUserPtr = base.isValidUserPtr;
 const isValidUserAccess = base.isValidUserAccess;
 const AccessMode = base.AccessMode;
 const FileDescriptor = base.FileDescriptor;
@@ -113,10 +112,6 @@ pub fn sys_write(fd_num: usize, buf_ptr: usize, count: usize) SyscallError!usize
         return 0;
     }
 
-    if (!isValidUserPtr(buf_ptr, count)) {
-        return error.EFAULT;
-    }
-
     // Get FD from table
     const table = base.getGlobalFdTable();
     const fd_u32 = safeFdCast(fd_num) orelse return error.EBADF;
@@ -138,6 +133,10 @@ pub fn sys_write(fd_num: usize, buf_ptr: usize, count: usize) SyscallError!usize
     // Cap write size
     const max_write_size = 64 * 1024;
     const write_size = @min(count, max_write_size);
+
+    if (!isValidUserAccess(buf_ptr, write_size, AccessMode.Read)) {
+        return error.EFAULT;
+    }
 
     const kbuf = heap.allocator().alloc(u8, write_size) catch {
         return error.ENOMEM;
@@ -278,13 +277,13 @@ pub fn sys_writev(fd: usize, bvec_ptr: usize, count: usize) SyscallError!usize {
 fn perform_write_locked(fd: *FileDescriptor, buf_ptr: usize, count: usize) SyscallError!usize {
     if (count == 0) return 0;
 
-    if (!isValidUserPtr(buf_ptr, count)) {
-        return error.EFAULT;
-    }
-
     // Cap write size
     const max_write_size = 64 * 1024;
     const write_size = @min(count, max_write_size);
+
+    if (!isValidUserAccess(buf_ptr, write_size, AccessMode.Read)) {
+        return error.EFAULT;
+    }
 
     const kbuf = heap.allocator().alloc(u8, write_size) catch {
         return error.ENOMEM;

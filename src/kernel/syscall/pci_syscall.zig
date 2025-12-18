@@ -105,7 +105,11 @@ fn deviceToInfo(dev: *const pci.PciDevice) PciDeviceInfo {
 /// sys_pci_enumerate (1033) - List PCI devices
 ///
 /// Copies information about discovered PCI devices to userspace.
-/// No capability required (read-only enumeration).
+/// No capability required for basic enumeration (vendor/device IDs, class codes).
+///
+/// SECURITY: Physical BAR addresses are ONLY exposed to processes with
+/// appropriate capabilities (PciConfig or Mmio). Unprivileged callers
+/// receive zeroed BAR base addresses to prevent ASLR/KASLR bypass attacks.
 ///
 /// Arguments:
 ///   arg0: Pointer to array of PciDeviceInfo structs
@@ -133,14 +137,45 @@ pub fn sys_pci_enumerate(buf_ptr_arg: usize, max_count_arg: usize) SyscallError!
 
     // Validate user buffer
     const entry_size = @sizeOf(PciDeviceInfo);
-    if (!base.isValidUserPtr(@intCast(buf_ptr), count * entry_size)) {
+    if (!base.isValidUserAccess(@intCast(buf_ptr), count * entry_size, base.AccessMode.Write)) {
         return error.EFAULT;
     }
+
+    // Get current process for capability checking
+    const proc = base.getCurrentProcess();
 
     // Copy device info to userspace
     for (0..count) |i| {
         if (devices.get(i)) |dev| {
-            const info = deviceToInfo(dev);
+            var info = deviceToInfo(dev);
+
+            // SECURITY: Redact physical BAR addresses unless the process has
+            // capability to access this device's config space or MMIO.
+            // This prevents unprivileged processes from learning physical
+            // memory layout (defeats ASLR/KASLR bypass attacks).
+            const has_pci_cap = proc.hasPciConfigCapability(dev.bus, dev.device, dev.func);
+
+            if (!has_pci_cap) {
+                // Check if process has MMIO capability for any of the BARs
+                var has_any_mmio_cap = false;
+                for (&info.bar) |*bar_info| {
+                    if (bar_info.base != 0 and bar_info.size != 0) {
+                        if (proc.hasMmioCapability(bar_info.base, bar_info.size)) {
+                            has_any_mmio_cap = true;
+                            break;
+                        }
+                    }
+                }
+
+                // No capability - redact all physical addresses
+                if (!has_any_mmio_cap) {
+                    for (&info.bar) |*bar_info| {
+                        bar_info.base = 0; // Redact physical address
+                        // Keep size/type info - these are useful and not sensitive
+                    }
+                }
+            }
+
             const offset = i * entry_size;
             const dest_ptr = UserPtr.from(buf_ptr + offset);
             _ = dest_ptr.copyFromKernel(std.mem.asBytes(&info)) catch {

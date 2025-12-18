@@ -197,17 +197,27 @@ pub fn loadInitProcess() void {
     spawnProcess(mod, process_name);
 }
 
+/// SECURITY: Match driver name with strict boundary checks.
+/// Prevents capability spoofing via substring injection (e.g., "my_uart_driver_malware").
+/// Only matches:
+/// - Exact cmdline match: cmdline == "uart_driver"
+/// - Exact path component: path ends with "/uart_driver" or "/uart_driver.elf"
 fn matchesDriverName(cmdline: []const u8, path: []const u8, name: []const u8) bool {
     // Exact cmdline match
     if (std.mem.eql(u8, cmdline, name)) return true;
-    // Check for path suffix (e.g. /uart_driver)
-    if (std.mem.endsWith(u8, path, name)) return true;
-    
-    // Check for .elf suffix
-    var buf: [64]u8 = undefined;
-    const elf_name = std.fmt.bufPrint(&buf, "{s}.elf", .{name}) catch return false;
-    if (std.mem.endsWith(u8, path, elf_name)) return true;
-    
+
+    // Check for exact path component match (must be preceded by '/')
+    // This prevents "my_uart_driver" from matching "uart_driver"
+    var buf: [65]u8 = undefined;
+
+    // Match "/name" at end of path
+    const slash_name = std.fmt.bufPrint(&buf, "/{s}", .{name}) catch return false;
+    if (std.mem.endsWith(u8, path, slash_name)) return true;
+
+    // Match "/name.elf" at end of path
+    const slash_name_elf = std.fmt.bufPrint(&buf, "/{s}.elf", .{name}) catch return false;
+    if (std.mem.endsWith(u8, path, slash_name_elf)) return true;
+
     return false;
 }
 

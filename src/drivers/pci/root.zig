@@ -10,6 +10,8 @@
 //       // Initialize NIC driver with nic device
 //   }
 
+const sync = @import("sync");
+
 pub const ecam = @import("ecam.zig");
 pub const legacy = @import("legacy.zig");
 pub const access = @import("access.zig");
@@ -57,24 +59,63 @@ pub const initFromAcpi = enumeration.initFromAcpi;
 // Global PCI State (set during kernel init, read by syscalls)
 // =============================================================================
 
+/// RwLock protecting global PCI state for SMP-safe access.
+/// Writers (setGlobalState) acquire exclusive lock.
+/// Readers (getDevices, getEcam) acquire shared lock.
+var pci_state_lock: sync.RwLock = .{};
+
 /// Global PCI device list (set by init_hw.initNetwork)
-pub var global_devices: ?*const DeviceList = null;
+var global_devices: ?*const DeviceList = null;
 
 /// Global PCI ECAM accessor (set by init_hw.initNetwork)
-pub var global_ecam: ?Ecam = null;
+var global_ecam: ?Ecam = null;
+
+/// Tracks whether global state has been initialized.
+/// SECURITY: Prevents setGlobalState from being called multiple times,
+/// which would invalidate pointers returned by getDevices/getEcam.
+var global_state_initialized: bool = false;
 
 /// Set global PCI state (called by init_hw during boot)
+/// Acquires exclusive write lock to prevent TOCTOU races on SMP systems.
+///
+/// SECURITY INVARIANT: This function MUST only be called once during boot.
+/// Calling it again would invalidate pointers previously returned by
+/// getDevices()/getEcam(), creating use-after-free or stale-data bugs.
+/// Hot-plug support would require a redesign (RCU pattern or copy-on-read).
 pub fn setGlobalState(devices: *const DeviceList, ecam_opt: ?Ecam) void {
+    const held = pci_state_lock.acquireWrite();
+    defer held.release();
+
+    // SECURITY: Prevent double-initialization which would invalidate
+    // previously returned pointers. This is a hard invariant.
+    if (global_state_initialized) {
+        @import("console").err("PCI: SECURITY - setGlobalState called twice!", .{});
+        return;
+    }
+
     global_devices = devices;
     global_ecam = ecam_opt;
+    global_state_initialized = true;
 }
 
 /// Get global PCI device list
+/// Acquires shared read lock for SMP-safe access.
+///
+/// SAFETY: The returned pointer remains valid for the lifetime of the kernel
+/// because setGlobalState is only called once during boot.
 pub fn getDevices() ?*const DeviceList {
+    const held = pci_state_lock.acquireRead();
+    defer held.release();
     return global_devices;
 }
 
 /// Get global PCI ECAM accessor
+/// Acquires shared read lock for SMP-safe access.
+///
+/// SAFETY: Returns by value (copy), so the caller owns the copy and
+/// there are no lifetime concerns even if global state were to change.
 pub fn getEcam() ?Ecam {
+    const held = pci_state_lock.acquireRead();
+    defer held.release();
     return global_ecam;
 }

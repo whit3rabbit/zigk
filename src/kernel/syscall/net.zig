@@ -50,7 +50,6 @@ pub fn init() void {
 }
 
 // Use consolidated user pointer validation with permission checking
-const isValidUserPtr = user_mem.isValidUserPtr;
 const isValidUserAccess = user_mem.isValidUserAccess;
 const AccessMode = user_mem.AccessMode;
 
@@ -600,7 +599,7 @@ pub fn sys_getsockopt(fd: usize, level: usize, optname: usize, optval_ptr: usize
     };
 
     // Validate option value pointer using kernel-copied length
-    if (koptlen > 0 and !isValidUserPtr(optval_ptr, koptlen)) {
+    if (koptlen > 0 and !isValidUserAccess(optval_ptr, koptlen, AccessMode.Write)) {
         return error.EFAULT;
     }
 
@@ -682,7 +681,7 @@ pub fn sys_getsockname(fd: usize, addr_ptr: usize, addrlen_ptr: usize) SyscallEr
     }
 
     // Validate address pointer
-    if (!isValidUserPtr(addr_ptr, @sizeOf(socket.SockAddrIn))) {
+    if (!isValidUserAccess(addr_ptr, @sizeOf(socket.SockAddrIn), AccessMode.Write)) {
         return error.EFAULT;
     }
 
@@ -726,7 +725,7 @@ pub fn sys_getpeername(fd: usize, addr_ptr: usize, addrlen_ptr: usize) SyscallEr
     }
 
     // Validate address pointer
-    if (!isValidUserPtr(addr_ptr, @sizeOf(socket.SockAddrIn))) {
+    if (!isValidUserAccess(addr_ptr, @sizeOf(socket.SockAddrIn), AccessMode.Write)) {
         return error.EFAULT;
     }
 
@@ -774,7 +773,9 @@ pub fn sys_poll(ufds: usize, nfds: usize, timeout: isize) SyscallError!usize {
     // Validate pollfd array pointer
     const poll_size = @sizeOf(uapi.poll.PollFd);
     const array_size = nfds * poll_size;
-    if (!isValidUserPtr(ufds, array_size)) {
+    if (!isValidUserAccess(ufds, array_size, AccessMode.Read) or
+        !isValidUserAccess(ufds, array_size, AccessMode.Write))
+    {
         return error.EFAULT;
     }
 

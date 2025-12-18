@@ -9,6 +9,12 @@ const platform = @import("../../platform.zig");
 
 pub const Interface = interface.Interface;
 
+/// Maximum number of sockets allowed system-wide.
+/// Prevents resource exhaustion from malicious or buggy processes
+/// repeatedly calling socket() without closing.
+/// Value chosen to balance resource availability with DoS protection.
+pub const MAX_SOCKETS: usize = 4096;
+
 /// Global socket table (dynamic array)
 /// Stores pointers to sockets. Null entries are free slots.
 pub var socket_table: std.ArrayList(?*types.Socket) = undefined;
@@ -205,11 +211,17 @@ pub fn unregisterUdpSocket(sock: *types.Socket) void {
 }
 
 pub fn reserveSlot() ?usize {
-    return findFreeSlot();
+    const slot = findFreeSlot() orelse return null;
+    // SECURITY: Enforce MAX_SOCKETS limit to prevent resource exhaustion.
+    // A malicious process could repeatedly call socket() to exhaust kernel heap.
+    if (slot >= MAX_SOCKETS) {
+        return null;
+    }
+    return slot;
 }
 
 pub fn installSocket(slot: usize, sock: *types.Socket) bool {
-    // Note: We don't check MAX_SOCKETS anymore
+    // MAX_SOCKETS is enforced in reserveSlot() - no need to check here
 
     if (slot < socket_table.items.len) {
         // Reuse slot

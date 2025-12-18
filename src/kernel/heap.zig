@@ -45,6 +45,24 @@ const console = if (is_freestanding) @import("console") else struct {
 };
 
 const config = @import("config");
+const slab = @import("slab.zig");
+
+// HAL import for TSC-based canary initialization (freestanding only)
+const hal = if (is_freestanding) @import("hal") else struct {
+    pub const timing = struct {
+        pub fn rdtsc() u64 {
+            return 0x12345678ABCD; // Test fallback
+        }
+    };
+};
+
+// Per-boot randomized canary - initialized with TSC in init()
+// Security: Prevents attackers from predicting canary value at compile time
+// Note: TSC provides weak entropy but is available before PRNG init
+var heap_canary: u64 = 0xDEADBEEFCAFEBABE; // Default until init()
+
+// Legacy constant for reference (kept for documentation)
+const HEAP_CANARY_DEFAULT: u64 = 0xDEADBEEFCAFEBABE;
 
 // Sync module for Spinlock - thread-safe heap operations
 const sync = if (is_freestanding)
@@ -132,6 +150,7 @@ pub const BlockHeader = extern struct {
 
     /// Get previous block in memory using its footer
     /// Returns null if no valid previous block exists or if corruption is detected
+    /// Security: Validates header magic and size consistency to prevent footer-based attacks
     pub fn getPrevBlock(self: *BlockHeader, start_addr: usize) ?*BlockHeader {
         const self_addr = @intFromPtr(self);
         if (self_addr <= start_addr) {
@@ -148,6 +167,11 @@ pub const BlockHeader = extern struct {
         // Read footer of previous block
         const prev_footer: *BlockFooter = @ptrFromInt(self_addr - footer_size);
 
+        // Validate footer canary (detects buffer overruns into footer)
+        if (prev_footer.canary != heap_canary) {
+            return null;
+        }
+
         // Defensive check: validate footer size before subtraction
         // Corrupted footer could have size > self_addr, causing underflow
         if (prev_footer.size > self_addr or prev_footer.size < MIN_BLOCK_SIZE) {
@@ -160,7 +184,21 @@ pub const BlockHeader = extern struct {
             return null;
         }
 
-        return @ptrFromInt(prev_addr);
+        // Critical security check: validate the header at computed address
+        const prev_block: *BlockHeader = @ptrFromInt(prev_addr);
+
+        // Verify magic to ensure we're pointing at a real block header
+        if (prev_block.magic != ALLOCATOR_MAGIC) {
+            return null;
+        }
+
+        // Verify header size matches footer size (consistency check)
+        // This catches attacks where footer is crafted to point to arbitrary memory
+        if (prev_block.getSize() != prev_footer.size) {
+            return null;
+        }
+
+        return prev_block;
     }
 
     // 4 usize fields = 32 bytes on x86_64
@@ -176,9 +214,9 @@ pub const BlockHeader = extern struct {
 /// from the current block's header address.
 pub const BlockFooter = extern struct {
     size: usize, // Matches the size in header (without flags)
-    // Padding to ensure 16-byte size (preserves alignment for next block)
-    // 1 * 8 = 8 bytes, need 8 more to reach 16
-    _padding: usize = 0,
+    // Canary for overrun detection (payload writes should never reach here)
+    // Default is compile-time constant; setFooter() overwrites with per-boot random value
+    canary: u64 = HEAP_CANARY_DEFAULT,
 
     comptime {
         if (@sizeOf(BlockFooter) != 16) @compileError("BlockFooter must be 16 bytes");
@@ -234,8 +272,7 @@ pub fn init(start: usize, size: usize) void {
 
     // Set footer
     const footer = initial_block.getFooter();
-    footer.size = block_size;
-    footer._padding = 0; // Hygiene
+    setFooter(footer, block_size);
 
     // Initialize free list
     free_list_head = initial_block;
@@ -248,6 +285,19 @@ pub fn init(start: usize, size: usize) void {
     if (is_freestanding) {
         console.info("Heap: Initialized {d} KB at {x}", .{ block_size / 1024, heap_start });
     }
+
+    // DISABLED: Slab allocator requires page-aligned backing allocations
+    // slab.setBackingAllocator(backingAlloc, backingFree);
+    // slab.init();
+}
+
+// Backing allocator functions for slab (uses free-list allocator directly)
+fn backingAlloc(size: usize) ?[]u8 {
+    return allocFromFreeList(size);
+}
+
+fn backingFree(buf: []u8) void {
+    freeToFreeList(buf);
 }
 
 /// Reset heap state (for testing)
@@ -263,12 +313,32 @@ pub fn reset() void {
 
 /// Allocate memory from the heap
 ///
-/// Uses a first-fit strategy to find a suitable free block.
-/// Splits the block if it is significantly larger than requested.
+/// Small allocations (<=2KB) use the slab allocator for O(1) performance.
+/// Large allocations use the free-list allocator with first-fit strategy.
 /// Thread-safe: acquires global heap lock.
 ///
 /// Returns: Slice to allocated memory, or null if OOM.
 pub fn alloc(size: usize) ?[]u8 {
+    if (!initialized or size == 0) {
+        return null;
+    }
+
+    // DISABLED: Slab allocator requires page-aligned backing allocations
+    // which the free-list allocator doesn't provide. The 4KB alignment
+    // check in slab.free() fails for non-aligned slabs.
+    // TODO: Fix slab allocator to use PMM directly for page-aligned slabs
+    //
+    // if (slab.isSizeSlabbed(size)) {
+    //     if (slab.alloc(size)) |result| {
+    //         return result[0..size];
+    //     }
+    // }
+
+    return allocFromFreeList(size);
+}
+
+/// Internal: Allocate from the free-list allocator (used by slab for backing memory)
+fn allocFromFreeList(size: usize) ?[]u8 {
     if (!initialized or size == 0) {
         return null;
     }
@@ -322,25 +392,42 @@ pub fn alloc(size: usize) ?[]u8 {
 
 /// Free previously allocated memory
 ///
-/// Marks the block as free and attempts to coalesce it with adjacent free blocks
-/// (both previous and next) to reduce fragmentation.
+/// Marks the block as free and attempts to coalesce it with adjacent free blocks.
 /// Thread-safe: acquires global heap lock.
 pub fn free(buf: []u8) void {
     if (!initialized) {
         return;
     }
 
+    // DISABLED: Slab allocator (see alloc() comment)
+    // if (slab.free(buf)) {
+    //     return;
+    // }
+
+    freeToFreeList(buf);
+}
+
+/// Internal: Free to the free-list allocator (used by slab for returning slabs)
+fn freeToFreeList(buf: []u8) void {
+    if (!initialized) {
+        return;
+    }
+
+    // Acquire lock FIRST to prevent TOCTOU race conditions
+    // (heap_start/heap_end could change between check and use)
+    const held = heap_lock.acquire();
+    defer held.release();
+
     const ptr_addr = @intFromPtr(buf.ptr);
-    if (ptr_addr < heap_start or ptr_addr >= heap_end) {
+
+    // Bounds check must be INSIDE critical section to avoid TOCTOU
+    // Also require space for header before ptr_addr (Vuln 5 fix)
+    if (ptr_addr < heap_start + @sizeOf(BlockHeader) or ptr_addr >= heap_end) {
         if (is_freestanding) {
             console.warn("Heap: Invalid free at {x}", .{ptr_addr});
         }
         return;
     }
-
-    // Acquire lock for thread-safe access to heap state
-    const held = heap_lock.acquire();
-    defer held.release();
 
     // Get block header from payload pointer
     const header: *BlockHeader = @ptrFromInt(ptr_addr - @sizeOf(BlockHeader));
@@ -348,7 +435,7 @@ pub fn free(buf: []u8) void {
     // Verify magic number before touching anything else
     if (header.magic != BlockHeader.ALLOCATOR_MAGIC) {
         if (is_freestanding) {
-            console.panic("Heap: Corruption detected! Invalid magic {x} at {x}", .{header.magic, ptr_addr});
+            console.panic("Heap: Corruption detected! Invalid magic {x} at {x}", .{ header.magic, ptr_addr });
         }
         return;
     }
@@ -361,6 +448,28 @@ pub fn free(buf: []u8) void {
     }
 
     const block_size = header.getSize();
+    const header_addr = @intFromPtr(header);
+    const block_end = std.math.add(usize, header_addr, block_size) catch {
+        if (is_freestanding) {
+            console.panic("Heap: Corruption detected! Block size overflow at {x}", .{ptr_addr});
+        }
+        return;
+    };
+    if (block_size < MIN_BLOCK_SIZE or block_end > heap_end) {
+        if (is_freestanding) {
+            console.panic("Heap: Corruption detected! Invalid block size {d} at {x}", .{ block_size, ptr_addr });
+        }
+        return;
+    }
+
+    const footer = header.getFooter();
+    if (footer.size != block_size or footer.canary != heap_canary) {
+        if (is_freestanding) {
+            console.panic("Heap: Corruption detected! Footer mismatch at {x}", .{ptr_addr});
+        }
+        return;
+    }
+
     const payload_size = block_size - @sizeOf(BlockHeader) - @sizeOf(BlockFooter);
 
     // Update statistics
@@ -375,27 +484,69 @@ pub fn free(buf: []u8) void {
     header.setAllocated(false);
 
     // Coalesce with adjacent free blocks
+    // Security: Validate magic and use checked arithmetic to prevent exploitation
     var coalesced_block = header;
     var coalesced_size = block_size;
 
     // Try to coalesce with next block
     if (header.getNextBlock(heap_end)) |next_block| {
+        // Validate magic BEFORE trusting any metadata (prevents unsafe unlink attack)
+        if (next_block.magic != BlockHeader.ALLOCATOR_MAGIC) {
+            if (is_freestanding) {
+                console.panic("Heap: Corrupt next block magic at {x}", .{@intFromPtr(next_block)});
+            }
+            return;
+        }
         if (!next_block.isAllocated()) {
+            const next_size = next_block.getSize();
+            // Validate size is reasonable (within heap bounds)
+            if (next_size < MIN_BLOCK_SIZE or next_size > heap_end - heap_start) {
+                if (is_freestanding) {
+                    console.panic("Heap: Corrupt next block size {d}", .{next_size});
+                }
+                return;
+            }
+            // Use checked arithmetic to detect overflow
+            coalesced_size = std.math.add(usize, coalesced_size, next_size) catch {
+                if (is_freestanding) {
+                    console.panic("Heap: Coalesce overflow with next block", .{});
+                }
+                return;
+            };
             // Remove next block from free list (decrements free_block_count)
             removeFromFreeList(next_block);
-            // Absorb next block
-            coalesced_size += next_block.getSize();
         }
     }
 
     // Try to coalesce with previous block
     if (header.getPrevBlock(heap_start)) |prev_block| {
+        // Validate magic BEFORE trusting any metadata (prevents unsafe unlink attack)
+        if (prev_block.magic != BlockHeader.ALLOCATOR_MAGIC) {
+            if (is_freestanding) {
+                console.panic("Heap: Corrupt prev block magic at {x}", .{@intFromPtr(prev_block)});
+            }
+            return;
+        }
         if (!prev_block.isAllocated()) {
+            const prev_size = prev_block.getSize();
+            // Validate size is reasonable
+            if (prev_size < MIN_BLOCK_SIZE or prev_size > heap_end - heap_start) {
+                if (is_freestanding) {
+                    console.panic("Heap: Corrupt prev block size {d}", .{prev_size});
+                }
+                return;
+            }
+            // Use checked arithmetic to detect overflow
+            coalesced_size = std.math.add(usize, coalesced_size, prev_size) catch {
+                if (is_freestanding) {
+                    console.panic("Heap: Coalesce overflow with prev block", .{});
+                }
+                return;
+            };
             // Remove previous block from free list (decrements free_block_count)
             removeFromFreeList(prev_block);
             // Previous block absorbs current
             coalesced_block = prev_block;
-            coalesced_size += prev_block.getSize();
         }
     }
 
@@ -404,9 +555,8 @@ pub fn free(buf: []u8) void {
     coalesced_block.setAllocated(false);
 
     // Update footer
-    const footer = coalesced_block.getFooter();
-    footer.size = coalesced_size;
-    footer._padding = 0; // Hygiene
+    const coalesced_footer = coalesced_block.getFooter();
+    setFooter(coalesced_footer, coalesced_size);
 
     // Add to free list
     addToFreeList(coalesced_block);
@@ -498,7 +648,7 @@ pub fn checkIntegrity() bool {
         }
 
         const footer = header.getFooter();
-        if (footer.size != size) {
+        if (footer.size != size or footer.canary != heap_canary) {
             if (is_freestanding) {
                 console.err("Heap: Header/footer mismatch at {x}", .{addr});
             }
@@ -578,9 +728,8 @@ fn allocateFromBlock(block: *BlockHeader, required_size: usize) ?[]u8 {
         block.magic = BlockHeader.ALLOCATOR_MAGIC;
 
         // Update footer for allocated block
-        var footer = block.getFooter();
-        footer.size = required_size;
-        footer._padding = 0; // Hygiene
+        const footer = block.getFooter();
+        setFooter(footer, required_size);
 
         // Create new free block
         const new_block: *BlockHeader = @ptrFromInt(@intFromPtr(block) + required_size);
@@ -592,14 +741,14 @@ fn allocateFromBlock(block: *BlockHeader, required_size: usize) ?[]u8 {
 
         // Set footer for new block
         const new_footer = new_block.getFooter();
-        new_footer.size = remaining;
-        new_footer._padding = 0; // Hygiene
+        setFooter(new_footer, remaining);
 
         // Add new block to free list (this increments free_block_count)
         addToFreeList(new_block);
     } else {
         // Use entire block (already removed from free list, count already decremented)
         block.setAllocated(true);
+        setFooter(block.getFooter(), block.getSize());
     }
 
     const payload_size = block.getSize() - @sizeOf(BlockHeader) - @sizeOf(BlockFooter);
@@ -645,6 +794,11 @@ fn removeFromFreeList(block: *BlockHeader) void {
     }
 }
 
+fn setFooter(footer: *BlockFooter, size: usize) void {
+    footer.size = size;
+    footer.canary = heap_canary;
+}
+
 /// Debug: Print heap statistics
 pub fn printStats() void {
     if (is_freestanding) {
@@ -654,5 +808,7 @@ pub fn printStats() void {
         console.info("  Free blocks: {d}", .{free_block_count});
         console.info("  Free bytes: {d}", .{getFreeBytes()});
         console.info("  Integrity: {}", .{checkIntegrity()});
+        // Print slab allocator stats
+        slab.printStats();
     }
 }

@@ -156,6 +156,7 @@ pub const E1000e = struct {
     /// MSI-X state
     msix_enabled: bool,
     msix_table_base: u64,
+    msix_table_size: u16,
     /// MSI-X vectors: [0]=RX, [1]=TX, [2]=Other
     msix_vectors: [3]u8,
 
@@ -281,6 +282,7 @@ pub const E1000e = struct {
             .rx_callback = null,
             .msix_enabled = false,
             .msix_table_base = 0,
+            .msix_table_size = 0,
             .msix_vectors = [_]u8{0} ** 3,
             .pci_dev = pci_dev,
             .pci_access = pci_access,
@@ -699,6 +701,7 @@ pub const E1000e = struct {
         }
 
         self.msix_table_base = alloc.?.table_base;
+        self.msix_table_size = alloc.?.vector_count;
 
         // Get APIC ID for interrupt delivery (use BSP for now)
         const dest_apic_id: u8 = 0;
@@ -710,10 +713,10 @@ pub const E1000e = struct {
         self.msix_vectors[1] = base_vector + 1; // TX
         self.msix_vectors[2] = base_vector + 2; // Other
 
-        // Configure MSI-X table entries
-        pci.configureMsixEntry(self.msix_table_base, 0, self.msix_vectors[0], dest_apic_id);
-        pci.configureMsixEntry(self.msix_table_base, 1, self.msix_vectors[1], dest_apic_id);
-        pci.configureMsixEntry(self.msix_table_base, 2, self.msix_vectors[2], dest_apic_id);
+        // Configure MSI-X table entries (with bounds check)
+        _ = pci.configureMsixEntry(self.msix_table_base, self.msix_table_size, 0, self.msix_vectors[0], dest_apic_id);
+        _ = pci.configureMsixEntry(self.msix_table_base, self.msix_table_size, 1, self.msix_vectors[1], dest_apic_id);
+        _ = pci.configureMsixEntry(self.msix_table_base, self.msix_table_size, 2, self.msix_vectors[2], dest_apic_id);
 
         // Configure IVAR register to route interrupts to MSI-X vectors
         // 82574L IVAR format (per Intel datasheet):

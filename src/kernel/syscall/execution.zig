@@ -27,7 +27,8 @@ const aslr = @import("aslr");
 
 const SyscallError = base.SyscallError;
 const UserPtr = base.UserPtr;
-const isValidUserPtr = base.isValidUserPtr;
+const isValidUserAccess = base.isValidUserAccess;
+const AccessMode = base.AccessMode;
 const Process = base.Process;
 
 // =============================================================================
@@ -389,6 +390,17 @@ pub fn sys_execve(frame: *hal.syscall.SyscallFrame, path_ptr: usize, argv_ptr: u
     current_proc_for_aslr.vdso_base = vdso_base;
     current_proc_for_aslr.aslr_offsets = aslr_offsets;
 
+    // SECURITY: Clear inherited capabilities on execve.
+    // Capabilities must NOT be laundered to arbitrary programs via fork+execve.
+    // This prevents a compromised driver from granting its hardware access
+    // to an untrusted program by forking and exec'ing it.
+    current_proc_for_aslr.capabilities.clearRetainingCapacity();
+
+    // SECURITY: Reset DMA allocation counter on execve.
+    // New program starts with zero DMA allocations regardless of what
+    // the previous program had allocated.
+    current_proc_for_aslr.dma_allocated_pages = 0;
+
     console.debug("sys_execve: Loaded ELF entry={x} stack={x} cr3={x}", .{
         result.entry_point,
         result.stack_pointer,
@@ -397,7 +409,7 @@ pub fn sys_execve(frame: *hal.syscall.SyscallFrame, path_ptr: usize, argv_ptr: u
 
     // Vulnerability Fix: Ensure entry_point is canonical low-half address
     // sysretq throws #GP if RCX (return RIP) is non-canonical.
-    if (!user_mem.isValidUserPtr(result.entry_point, 1)) {
+    if (!isValidUserAccess(result.entry_point, 1, AccessMode.Execute)) {
         return error.EFAULT;
     }
 
@@ -547,7 +559,7 @@ pub fn sys_arch_prctl(code: usize, addr: usize) SyscallError!usize {
         },
         ARCH_GET_FS => {
             // Validate user pointer
-            if (!isValidUserPtr(addr, @sizeOf(u64))) {
+            if (!isValidUserAccess(addr, @sizeOf(u64), AccessMode.Write)) {
                 return error.EFAULT;
             }
             // Write current FS base to user pointer using safe copy
@@ -794,7 +806,7 @@ pub fn sys_clone(frame: *hal.syscall.SyscallFrame) SyscallError!usize {
         // Usually passed in RDX (parent_tid_ptr)
         if ((flags & uapi.sched.CLONE_PARENT_SETTID) != 0) {
              const parent_tid_ptr = frame.rdx;
-             if (isValidUserPtr(parent_tid_ptr, @sizeOf(i32))) {
+             if (isValidUserAccess(parent_tid_ptr, @sizeOf(i32), AccessMode.Write)) {
                   UserPtr.from(parent_tid_ptr).writeValue(@as(i32, @intCast(child_thread.tid))) catch {
                       // Linux ignores fault here usually or returns EFAULT. 
                       // For robustness, we'll return EFAULT.
@@ -809,7 +821,7 @@ pub fn sys_clone(frame: *hal.syscall.SyscallFrame) SyscallError!usize {
         // Usually passed in R10 (child_tid_ptr)
         if ((flags & uapi.sched.CLONE_CHILD_CLEARTID) != 0) {
              const child_tid_ptr = frame.r10;
-             if (isValidUserPtr(child_tid_ptr, @sizeOf(i32))) {
+             if (isValidUserAccess(child_tid_ptr, @sizeOf(i32), AccessMode.Write)) {
                   // Store TID in child memory (same address space as parent/current)
                   UserPtr.from(child_tid_ptr).writeValue(@as(i32, @intCast(child_thread.tid))) catch {
                       return error.EFAULT;
@@ -826,7 +838,7 @@ pub fn sys_clone(frame: *hal.syscall.SyscallFrame) SyscallError!usize {
         // Note: SETTID and CLEARTID both use the same pointer register (R10)
         if ((flags & uapi.sched.CLONE_CHILD_SETTID) != 0) {
              const child_tid_ptr = frame.r10;
-             if (isValidUserPtr(child_tid_ptr, @sizeOf(i32))) {
+             if (isValidUserAccess(child_tid_ptr, @sizeOf(i32), AccessMode.Write)) {
                   UserPtr.from(child_tid_ptr).writeValue(@as(i32, @intCast(child_thread.tid))) catch {
                       return error.EFAULT;
                   };

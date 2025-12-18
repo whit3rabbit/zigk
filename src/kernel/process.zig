@@ -137,6 +137,11 @@ pub const Process = struct {
 
     /// Capabilities
     capabilities: std.ArrayListUnmanaged(capabilities.Capability) = .{},
+
+    /// SECURITY: Cumulative DMA pages allocated by this process.
+    /// Used to enforce DMA capability limits across multiple allocations.
+    /// A process with max_pages=256 cannot exceed 256 total pages at any time.
+    dma_allocated_pages: u32 = 0,
     
 
     /// Current Working Directory
@@ -344,11 +349,15 @@ pub const Process = struct {
     }
 
     /// Check if process has IO port capability
+    /// SECURITY: Uses saturating addition to prevent integer overflow.
+    /// Without this, port=0xFFF0 + len=0x20 would wrap to 0x10, potentially
+    /// granting unintended access to low ports (e.g., DMA controller).
     pub fn hasIoPortCapability(self: *Process, port: u16) bool {
         for (self.capabilities.items) |cap| {
             switch (cap) {
                 .IoPort => |io_cap| {
-                    if (port >= io_cap.port and port < io_cap.port + io_cap.len) return true;
+                    const cap_end = io_cap.port +| io_cap.len; // Saturating add
+                    if (port >= io_cap.port and port < cap_end) return true;
                 },
                 else => {},
             }
@@ -374,12 +383,21 @@ pub const Process = struct {
         return false;
     }
 
-    /// Check if process has DMA memory capability for the given page count
+    /// Check if process has DMA memory capability for the given page count.
+    /// SECURITY: Checks if the new allocation would exceed cumulative limits.
+    /// Returns true only if (current_allocated + page_count) <= max_pages.
     pub fn hasDmaCapability(self: *Process, page_count: u32) bool {
+        // Calculate new total with overflow check
+        const new_total = @addWithOverflow(self.dma_allocated_pages, page_count);
+        if (new_total[1] != 0) {
+            // Overflow - definitely exceeds any reasonable limit
+            return false;
+        }
+
         for (self.capabilities.items) |cap| {
             switch (cap) {
                 .DmaMemory => |dma_cap| {
-                    if (page_count <= dma_cap.max_pages) return true;
+                    if (new_total[0] <= dma_cap.max_pages) return true;
                 },
                 else => {},
             }
@@ -575,6 +593,10 @@ pub fn forkProcess(parent: *Process) !*Process {
         .heap_start = parent.heap_start,
         .heap_break = parent.heap_break,
         .capabilities = try parent.capabilities.clone(alloc),
+        // SECURITY: Child inherits parent's DMA allocation count since it shares
+        // the same capability limits. The total across parent+child must not exceed
+        // the granted max_pages.
+        .dma_allocated_pages = parent.dma_allocated_pages,
         .cwd = parent.cwd,
         .cwd_len = parent.cwd_len,
         .vdso_base = parent.vdso_base,

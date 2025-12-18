@@ -564,9 +564,10 @@ pub fn allocateMsixVectors(count: u8) ?MsixVectorAllocation {
     // Find 'count' contiguous free vectors using atomic compare-and-swap
     const mask: u64 = (@as(u64, 1) << @truncate(count)) - 1;
 
-    var offset: u6 = 0;
+    // Use u8 for offset to match MSIX_VECTOR_COUNT type and avoid boundary issues
+    var offset: u8 = 0;
     while (offset <= MSIX_VECTOR_COUNT - count) : (offset += 1) {
-        const shifted_mask = mask << offset;
+        const shifted_mask = mask << @as(u6, @truncate(offset));
 
         // Atomically check and set bits using CAS loop
         while (true) {

@@ -42,9 +42,8 @@ pub const timing = struct {
         if (@hasDecl(root, "hal")) {
             return root.hal.timing.rdtsc();
         } else {
-            // Userspace: use dummy or rdtsc if allowed
-            // Ideally we use clock_gettime via syscall, but for simple timing loops:
-            return 0; // TODO
+            // Userspace: use clock_gettime(CLOCK_MONOTONIC) via syscall
+            return userspaceGetMonotonicNs();
         }
     }
 
@@ -52,10 +51,43 @@ pub const timing = struct {
         if (@hasDecl(root, "hal")) {
             return root.hal.timing.hasTimedOut(start, timeout_us);
         } else {
-            // Userspace timeout check
-            // For now always return false or handle properly
-            return false;
+            // Userspace: compare monotonic timestamps in nanoseconds
+            const now = userspaceGetMonotonicNs();
+            const elapsed_ns = now -| start; // saturating subtract
+            const timeout_ns = timeout_us * 1000;
+            return elapsed_ns >= timeout_ns;
         }
+    }
+
+    /// Timespec for clock_gettime
+    const Timespec = extern struct {
+        tv_sec: i64,
+        tv_nsec: i64,
+    };
+
+    /// Get monotonic time in nanoseconds via syscall
+    fn userspaceGetMonotonicNs() u64 {
+        const SYS_CLOCK_GETTIME: usize = 228;
+        const CLOCK_MONOTONIC: usize = 1;
+        var ts: Timespec = undefined;
+        var ret: isize = undefined;
+
+        asm volatile ("syscall"
+            : [ret] "={rax}" (ret)
+            : [number] "{rax}" (SYS_CLOCK_GETTIME),
+              [arg1] "{rdi}" (CLOCK_MONOTONIC),
+              [arg2] "{rsi}" (@intFromPtr(&ts)),
+            : .{ .rcx = true, .r11 = true, .memory = true }
+        );
+
+        if (ret < 0) {
+            // Syscall failed - return 0 and let caller handle
+            return 0;
+        }
+
+        const sec_ns: u64 = @intCast(ts.tv_sec);
+        const nsec: u64 = @intCast(ts.tv_nsec);
+        return sec_ns *% 1_000_000_000 +% nsec;
     }
 };
 

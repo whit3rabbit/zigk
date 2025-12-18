@@ -2,11 +2,10 @@ const c = @import("constants.zig");
 const types = @import("types.zig");
 const state = @import("state.zig");
 const options = @import("options.zig");
-const checksum = @import("checksum.zig");
 
 const packet = @import("../../core/packet.zig");
 const interface = @import("../../core/interface.zig");
-const checksum_mod = @import("../../core/checksum.zig");
+const checksum = @import("../../core/checksum.zig");
 const ipv4 = @import("../../ipv4/ipv4.zig");
 const ethernet = @import("../../ethernet/ethernet.zig");
 const arp = @import("../../ipv4/arp.zig");
@@ -72,7 +71,7 @@ fn sendSegment(
     ip.checksum = 0;
     ip.setSrcIp(tcb.local_ip);
     ip.setDstIp(tcb.remote_ip);
-    ip.checksum = checksum_mod.ipChecksum(buf[packet.ETH_HEADER_SIZE..][0..packet.IP_HEADER_SIZE]);
+    ip.checksum = checksum.ipChecksum(buf[packet.ETH_HEADER_SIZE..][0..packet.IP_HEADER_SIZE]);
 
     // Build TCP header
     const tcp_offset = packet.ETH_HEADER_SIZE + packet.IP_HEADER_SIZE;
@@ -197,7 +196,7 @@ pub fn sendSynWithOptions(tcb: *Tcb) bool {
     ip.checksum = 0;
     ip.setSrcIp(tcb.local_ip);
     ip.setDstIp(tcb.remote_ip);
-    ip.checksum = checksum_mod.ipChecksum(buf[packet.ETH_HEADER_SIZE..][0..packet.IP_HEADER_SIZE]);
+    ip.checksum = checksum.ipChecksum(buf[packet.ETH_HEADER_SIZE..][0..packet.IP_HEADER_SIZE]);
 
     // Build TCP header
     const tcp_offset = packet.ETH_HEADER_SIZE + packet.IP_HEADER_SIZE;
@@ -283,7 +282,7 @@ pub fn sendSynAckWithOptions(tcb: *Tcb, peer_opts: ?*const options.TcpOptions) b
     ip.checksum = 0;
     ip.setSrcIp(tcb.local_ip);
     ip.setDstIp(tcb.remote_ip);
-    ip.checksum = checksum_mod.ipChecksum(buf[packet.ETH_HEADER_SIZE..][0..packet.IP_HEADER_SIZE]);
+    ip.checksum = checksum.ipChecksum(buf[packet.ETH_HEADER_SIZE..][0..packet.IP_HEADER_SIZE]);
 
     // Build TCP header
     const tcp_offset = packet.ETH_HEADER_SIZE + packet.IP_HEADER_SIZE;
@@ -385,7 +384,7 @@ pub fn sendRstForPacket(iface: *Interface, pkt: *const PacketBuffer, tcp_hdr: *c
     ip.checksum = 0;
     ip.setSrcIp(ip_hdr.getDstIp());
     ip.setDstIp(ip_hdr.getSrcIp());
-    ip.checksum = checksum_mod.ipChecksum(buf[packet.ETH_HEADER_SIZE..][0..packet.IP_HEADER_SIZE]);
+    ip.checksum = checksum.ipChecksum(buf[packet.ETH_HEADER_SIZE..][0..packet.IP_HEADER_SIZE]);
 
     // TCP RST
     const tcp_offset = packet.ETH_HEADER_SIZE + packet.IP_HEADER_SIZE;

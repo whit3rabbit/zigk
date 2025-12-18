@@ -231,6 +231,9 @@ pub const MsixAllocation = struct {
 /// Enable MSI-X for a device
 /// bar_virt should be the virtual address of the BAR containing the MSI-X table
 /// (pass 0 to let this function attempt to map it)
+///
+/// SECURITY: Validates that table_size does not exceed BAR bounds to prevent
+/// malicious devices from causing out-of-bounds memory writes.
 pub fn enableMsix(
     pci_ecam: *const Ecam,
     dev: *const PciDevice,
@@ -238,6 +241,7 @@ pub fn enableMsix(
     bar_virt: u64,
 ) ?MsixAllocation {
     var table_base = bar_virt;
+    var bar_size: u64 = 0;
 
     // If caller didn't provide BAR mapping, we need to get BAR address
     if (table_base == 0) {
@@ -249,11 +253,30 @@ pub fn enableMsix(
             return null;
         }
 
+        bar_size = bar_info.size;
+
         // Map the BAR region
         table_base = vmm.mapMmio(bar_info.base, bar_info.size) catch |err| {
             console.err("MSI-X: Failed to map BAR{d}: {}", .{ bar_index, err });
             return null;
         };
+    } else {
+        // Caller provided BAR mapping - get size from device
+        const bar_index = msix_cap.table_bir;
+        bar_size = dev.bar[bar_index].size;
+    }
+
+    // SECURITY: Validate table_size against BAR bounds to prevent OOB writes
+    // from malicious devices reporting inflated table_size values.
+    // Each MSI-X table entry is 16 bytes.
+    const table_end_offset = msix_cap.table_offset + (@as(u64, msix_cap.table_size) * 16);
+    if (table_end_offset > bar_size) {
+        console.err("MSI-X: SECURITY - table extends beyond BAR (offset={x} + size={d}*16 > bar_size={x})", .{
+            msix_cap.table_offset,
+            msix_cap.table_size,
+            bar_size,
+        });
+        return null;
     }
 
     // Calculate table address
@@ -270,7 +293,7 @@ pub fn enableMsix(
     msg_ctrl.enable = true;
     pci_ecam.write16(dev.bus, dev.device, dev.func, base + MsixRegs.MSG_CTRL, @bitCast(msg_ctrl));
 
-    // Mask all individual vectors in the table
+    // Mask all individual vectors in the table (bounds already validated above)
     for (0..msix_cap.table_size) |i| {
         const entry_addr = table_addr + (i * 16) + 12; // vector_ctrl offset
         const ptr: *volatile u32 = @ptrFromInt(entry_addr);
@@ -289,12 +312,20 @@ pub fn enableMsix(
 }
 
 /// Configure a single MSI-X table entry
+/// Returns false if index is out of bounds
 pub fn configureMsixEntry(
     table_base: u64,
+    table_size: u16,
     index: u16,
     vector: u8,
     dest_apic_id: u8,
-) void {
+) bool {
+    // Bounds check to prevent out-of-bounds memory write
+    if (index >= table_size) {
+        console.err("MSI-X: Entry index {d} out of bounds (table_size={d})", .{ index, table_size });
+        return false;
+    }
+
     const entry_addr = table_base + (@as(u64, index) * 16);
 
     const addr = buildMsiAddressSimple(dest_apic_id);
@@ -310,20 +341,31 @@ pub fn configureMsixEntry(
     addr_hi_ptr.* = @truncate(addr >> 32);
     data_ptr.* = data;
     ctrl_ptr.* = 0; // Unmask this vector
+    return true;
 }
 
 /// Mask a single MSI-X vector
-pub fn maskMsixVector(table_base: u64, index: u16) void {
+/// Returns false if index is out of bounds
+pub fn maskMsixVector(table_base: u64, table_size: u16, index: u16) bool {
+    if (index >= table_size) {
+        return false;
+    }
     const ctrl_addr = table_base + (@as(u64, index) * 16) + 12;
     const ctrl_ptr: *volatile u32 = @ptrFromInt(ctrl_addr);
     ctrl_ptr.* = 1;
+    return true;
 }
 
 /// Unmask a single MSI-X vector
-pub fn unmaskMsixVector(table_base: u64, index: u16) void {
+/// Returns false if index is out of bounds
+pub fn unmaskMsixVector(table_base: u64, table_size: u16, index: u16) bool {
+    if (index >= table_size) {
+        return false;
+    }
     const ctrl_addr = table_base + (@as(u64, index) * 16) + 12;
     const ctrl_ptr: *volatile u32 = @ptrFromInt(ctrl_addr);
     ctrl_ptr.* = 0;
+    return true;
 }
 
 /// Clear the function mask bit to enable all unmasked vectors
