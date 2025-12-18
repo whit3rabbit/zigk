@@ -173,14 +173,20 @@ pub export fn fprintf(stream: ?*FILE, fmt_str: [*:0]const u8, ...) c_int {
     return @intCast(bytes_written);
 }
 
-/// Format into string buffer (no size limit - unsafe!)
+/// Format into string buffer (UNSAFE - use snprintf instead!)
+/// WARNING: This function cannot know the destination buffer size.
+/// It uses a conservative 1024-byte limit, but callers should migrate
+/// to snprintf() with an explicit size parameter.
 pub export fn sprintf(dest: ?[*]u8, fmt_str: [*:0]const u8, ...) c_int {
     if (dest == null) return -1;
 
     var args = @cVaStart();
     defer @cVaEnd(&args);
 
-    var buf: [8192]u8 = undefined;
+    // SECURITY: Limit internal buffer to 1024 bytes as a safety measure.
+    // This reduces damage from legacy code but is still inherently unsafe.
+    // New code should ALWAYS use snprintf() with explicit size.
+    var buf: [1024]u8 = undefined;
     var written: usize = 0;
     var fmt_ptr = fmt_str;
 

@@ -20,6 +20,8 @@ pub const sched = @import("sched.zig");
 pub const futex = @import("futex.zig");
 pub const epoll = @import("epoll.zig");
 pub const io_ring = @import("io_ring.zig");
+pub const net_ipc = @import("net_ipc.zig");
+pub const ipc_msg = @import("ipc_msg.zig");
 
 
 // Re-export commonly used types

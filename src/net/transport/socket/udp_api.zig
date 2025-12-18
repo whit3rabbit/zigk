@@ -8,7 +8,7 @@ const types = @import("types.zig");
 const state = @import("state.zig");
 const errors = @import("errors.zig");
 const scheduler = @import("scheduler.zig");
-const hal = @import("hal");
+const platform = @import("../../platform.zig");
 
 pub fn sendto(
     sock_fd: usize,
@@ -123,12 +123,12 @@ pub fn recvfrom(
             @as(u64, sock.rcv_timeout_ms) * 1000 // Convert ms to us
         else
             0; // 0 means block forever (no deadline)
-        const start_tsc = hal.timing.rdtsc();
+        const start_tsc = platform.timing.rdtsc();
 
         while (true) {
             // Security: Check timeout BEFORE blocking to bound total wait time.
             // This prevents indefinite hangs when no packets arrive.
-            if (timeout_us > 0 and hal.timing.hasTimedOut(start_tsc, timeout_us)) {
+            if (timeout_us > 0 and platform.timing.hasTimedOut(start_tsc, timeout_us)) {
                 return errors.SocketError.TimedOut;
             }
 
@@ -151,7 +151,7 @@ pub fn recvfrom(
             // blocked_thread and entering Blocked state. If a packet
             // arrives after this point, the interrupt handler will see
             // blocked_thread set and wake us after block_fn() halts.
-            _ = hal.cpu.disableInterrupts();
+            _ = platform.cpu.disableInterrupts();
             sock.blocked_thread = get_current();
             // block_fn() sets state=Blocked then atomically enables
             // interrupts and halts (STI; HLT sequence)

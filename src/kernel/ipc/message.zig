@@ -1,22 +1,13 @@
 const std = @import("std");
+const uapi = @import("uapi");
 
-/// Fixed-size message for IPC
-/// 64 bytes payload + metadata
-pub const MAX_PAYLOAD_SIZE = 64;
-
-pub const Message = extern struct {
-    sender_pid: u64,
-    payload_len: u64,
-    payload: [MAX_PAYLOAD_SIZE]u8,
-};
-
-/// IPC Operation type (for potential future expansion)
-pub const IpcOp = enum(u64) {
-    SEND = 0,
-    RECV = 1,
-};
+// Re-export shared types from uapi for kernel use
+pub const MAX_PAYLOAD_SIZE = uapi.ipc_msg.MAX_PAYLOAD_SIZE;
+pub const Message = uapi.ipc_msg.Message;
+pub const IpcOp = uapi.ipc_msg.IpcOp;
 
 /// Kernel-side message node for linked lists
+/// This is kernel-only and not exposed to userspace
 pub const KernelMessage = struct {
     msg: Message,
     next: ?*KernelMessage = null,

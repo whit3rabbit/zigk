@@ -1189,3 +1189,42 @@ pub const IoUring = struct {
         sqe.user_data = user_data;
     }
 };
+
+// =============================================================================
+// IPC Syscalls (1020-1021)
+// =============================================================================
+
+/// IPC Message type re-exported for convenience
+pub const IpcMessage = uapi.ipc_msg.Message;
+
+/// Send an IPC message to a process (blocking)
+/// Returns 0 on success, or error
+pub fn send(target_pid: u32, msg: *const IpcMessage) SyscallError!void {
+    const ret = syscall3(syscalls.SYS_SEND, target_pid, @intFromPtr(msg), @sizeOf(IpcMessage));
+    if (isError(ret)) return errorFromReturn(ret);
+}
+
+/// Receive an IPC message (blocking)
+/// Returns sender_pid on success, or error
+pub fn recv(msg: *IpcMessage) SyscallError!u32 {
+    const ret = syscall2(syscalls.SYS_RECV, @intFromPtr(msg), @sizeOf(IpcMessage));
+    if (isError(ret)) return errorFromReturn(ret);
+    return @truncate(ret);
+}
+
+// =============================================================================
+// Service Registry Syscalls (1026-1027)
+// =============================================================================
+
+/// Register current process as a named service
+pub fn register_service(name: []const u8) SyscallError!void {
+    const ret = syscall2(syscalls.SYS_REGISTER_SERVICE, @intFromPtr(name.ptr), name.len);
+    if (isError(ret)) return errorFromReturn(ret);
+}
+
+/// Lookup a service PID by name
+pub fn lookup_service(name: []const u8) SyscallError!u32 {
+    const ret = syscall2(syscalls.SYS_LOOKUP_SERVICE, @intFromPtr(name.ptr), name.len);
+    if (isError(ret)) return errorFromReturn(ret);
+    return @truncate(ret);
+}

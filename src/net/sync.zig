@@ -1,5 +1,5 @@
 const std = @import("std");
-const hal = @import("hal");
+const platform = @import("platform.zig");
 
 /// IRQ-safe spinlock for network stack
 pub const Spinlock = struct {
@@ -11,12 +11,12 @@ pub const Spinlock = struct {
 
         pub fn release(self: Held) void {
             self.lock.locked.store(0, .release);
-            hal.cpu.restoreInterrupts(self.irq_state);
+            platform.cpu.restoreInterrupts(self.irq_state);
         }
     };
 
     pub fn acquire(self: *Spinlock) Held {
-        const irq = hal.cpu.disableInterruptsSaveFlags();
+        const irq = platform.cpu.disableInterruptsSaveFlags();
         while (true) {
             const prev = self.locked.cmpxchgWeak(0, 1, .acquire, .monotonic);
             if (prev == null) break;
@@ -26,12 +26,12 @@ pub const Spinlock = struct {
     }
     
     pub fn tryAcquire(self: *Spinlock) ?Held {
-        const irq = hal.cpu.disableInterruptsSaveFlags();
+        const irq = platform.cpu.disableInterruptsSaveFlags();
         const prev = self.locked.cmpxchgStrong(0, 1, .acquire, .monotonic);
         if (prev == null) {
             return .{ .lock = self, .irq_state = irq };
         }
-        hal.cpu.restoreInterrupts(irq);
+        platform.cpu.restoreInterrupts(irq);
         return null;
     }
 };

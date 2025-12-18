@@ -5,12 +5,22 @@
 const std = @import("std");
 const search = @import("search.zig");
 
-/// Static state for strtok (not thread-safe)
+/// Static state for strtok (NOT THREAD-SAFE)
+/// WARNING: This global variable causes race conditions in multithreaded code.
+/// Use strtok_r() instead for thread-safe tokenization.
+/// TODO: Use threadlocal storage when kernel TLS support is available.
 var strtok_state: ?[*:0]u8 = null;
 
-/// Split string into tokens (not thread-safe)
+/// Split string into tokens
+/// WARNING: NOT THREAD-SAFE - uses global state that can be corrupted
+/// by concurrent calls from multiple threads. Use strtok_r() instead.
+///
 /// First call: s = string to tokenize
 /// Subsequent calls: s = null to continue tokenizing
+///
+/// Thread-safe alternative:
+///   var saveptr: ?[*:0]u8 = null;
+///   var tok = strtok_r(str, delim, &saveptr);
 pub export fn strtok(s: ?[*:0]u8, delim: ?[*:0]const u8) ?[*:0]u8 {
     return strtok_r(s, delim, &strtok_state);
 }

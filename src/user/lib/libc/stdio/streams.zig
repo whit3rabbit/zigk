@@ -147,22 +147,17 @@ pub export fn fgets(s: ?[*]u8, size: c_int, stream: ?*FILE) ?[*]u8 {
     return s;
 }
 
-/// Read line from stdin (deprecated, unsafe)
+/// Read line from stdin (REMOVED - inherently unsafe)
+/// This function was deprecated in C11 and removed in C17 due to
+/// buffer overflow vulnerabilities. Always returns null.
+/// Use fgets() instead with an explicit buffer size.
 pub export fn gets(s: ?[*]u8) ?[*]u8 {
-    if (s == null) return null;
-    // Note: gets() is inherently unsafe - no bounds checking
-    // Using a large limit as compromise
-    const result = fgets(s, 4096, stdin);
-    if (result == null) return null;
-
-    // Remove trailing newline
-    const buf = s.?;
-    var i: usize = 0;
-    while (buf[i] != 0) : (i += 1) {}
-    if (i > 0 and buf[i - 1] == '\n') {
-        buf[i - 1] = 0;
-    }
-    return s;
+    // SECURITY: gets() cannot be made safe - there is no way to know the
+    // destination buffer size. This stub prevents linking errors while
+    // refusing to perform the unsafe operation.
+    _ = s;
+    errno_mod.errno = errno_mod.ENOSYS;
+    return null;
 }
 
 // =============================================================================

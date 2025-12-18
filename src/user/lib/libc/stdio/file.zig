@@ -4,6 +4,7 @@
 
 const syscall = @import("syscall.zig");
 const memory = @import("../memory/root.zig");
+const internal = @import("../internal.zig");
 
 /// Opaque FILE structure
 pub const FILE = extern struct {
@@ -81,7 +82,9 @@ pub export fn fread(ptr: ?*anyopaque, size: usize, nmemb: usize, stream: ?*FILE)
     const f = stream.?;
     var dest_ptr = @as([*]u8, @ptrCast(ptr.?));
 
-    var total_bytes = size * nmemb;
+    // SECURITY: Check for multiplication overflow to prevent reading
+    // an unintended small amount due to integer wrap-around.
+    var total_bytes = internal.checkedMultiply(size, nmemb) orelse return 0;
     var total_read: usize = 0;
 
     if (total_bytes == 0) return 0;
@@ -111,7 +114,8 @@ pub export fn fwrite(ptr: ?*const anyopaque, size: usize, nmemb: usize, stream: 
     const f = stream.?;
     const p = ptr.?;
 
-    const total_bytes = size * nmemb;
+    // SECURITY: Check for multiplication overflow
+    const total_bytes = internal.checkedMultiply(size, nmemb) orelse return 0;
     if (total_bytes == 0) return 0;
 
     const bytes_written = syscall.write(f.fd, @ptrCast(p), total_bytes) catch {

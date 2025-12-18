@@ -2,7 +2,21 @@ const std = @import("std");
 const dns = @import("dns.zig");
 const socket = @import("../transport/socket.zig");
 const ipv4 = @import("../ipv4/ipv4.zig");
-const hal = @import("hal");
+// const std = @import("std");
+const core = @import("../core/root.zig");
+const transport = @import("../transport/root.zig");
+const platform = @import("../platform.zig");
+const alloc = @import("std").heap.page_allocator; // Fallback allocator if needed
+// const platform = @import("../platform.zig"); // REMOVED
+
+// ...
+
+// In sendQuery or similar:
+// const entropy = platform.entropy.getHardwareEntropy();
+// ...
+// const start_tsc = platform.timing.rdtsc();
+// ...
+// if (platform.timing.hasTimedOut(start_tsc, DNS_TIMEOUT_US)) {
 
 pub const DnsError = error{
     SocketError,
@@ -105,7 +119,7 @@ fn resolveOnce(allocator: std.mem.Allocator, hostname: []const u8, server_ip: u3
     // Security: Simple truncation of 64-bit to 16-bit could theoretically lose
     // entropy if the RNG has bias in certain bit positions. XOR-folding all
     // 64 bits ensures full entropy contribution to the 16-bit result.
-    const entropy = hal.entropy.getHardwareEntropy();
+    const entropy = platform.entropy.getHardwareEntropy();
     const tx_id = @as(u16, @truncate(entropy ^ (entropy >> 16) ^ (entropy >> 32) ^ (entropy >> 48)));
 
     // Write Query
@@ -138,12 +152,12 @@ fn resolveOnce(allocator: std.mem.Allocator, hostname: []const u8, server_ip: u3
     // Fix: Track wall-clock deadline and enforce it across all loop iterations.
     // This bounds total wait time regardless of how many spoofed packets arrive.
     const DNS_TIMEOUT_US: u64 = 2_000_000; // 2 seconds in microseconds
-    const start_tsc = hal.timing.rdtsc();
+    const start_tsc = platform.timing.rdtsc();
 
     while (true) {
         // Security: Check deadline BEFORE blocking on recvfrom to prevent
         // infinite loops from attacker-controlled packet floods.
-        if (hal.timing.hasTimedOut(start_tsc, DNS_TIMEOUT_US)) {
+        if (platform.timing.hasTimedOut(start_tsc, DNS_TIMEOUT_US)) {
             return DnsError.TimedOut;
         }
 

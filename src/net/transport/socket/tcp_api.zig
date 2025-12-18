@@ -6,7 +6,7 @@ const state = @import("state.zig");
 const tcp_state = @import("../tcp/state.zig");
 const errors = @import("errors.zig");
 const scheduler = @import("scheduler.zig");
-const hal = @import("hal");
+const platform = @import("../../platform.zig");
 
 /// Mark socket as listening for connections (TCP only)
 pub fn listen(sock_fd: usize, backlog_arg: usize) errors.SocketError!void {
@@ -66,7 +66,7 @@ pub fn accept(sock_fd: usize, peer_addr: ?*types.SockAddrIn) errors.SocketError!
         }
 
         // Disable interrupts to close race window between check and block
-        hal.cpu.disableInterrupts();
+        platform.cpu.disableInterrupts();
         tcp_state.lock.acquire();
 
         // Check accept queue
@@ -74,7 +74,7 @@ pub fn accept(sock_fd: usize, peer_addr: ?*types.SockAddrIn) errors.SocketError!
             // Dequeue connection under TCP lock
             const tcb = sock.accept_queue[sock.accept_tail] orelse {
                 tcp_state.lock.release();
-                 hal.cpu.enableInterrupts(); // Safe to enable here
+                 platform.cpu.enableInterrupts(); // Safe to enable here
                 state.releaseSocket(sock);
                 return errors.SocketError.WouldBlock;
             };
@@ -83,7 +83,7 @@ pub fn accept(sock_fd: usize, peer_addr: ?*types.SockAddrIn) errors.SocketError!
             sock.accept_count -= 1;
             
             tcp_state.lock.release();
-            hal.cpu.enableInterrupts(); // Safe to enable here
+            platform.cpu.enableInterrupts(); // Safe to enable here
             
             // Drop socket lock now that we have the TCB
             state.releaseSocket(sock);
@@ -95,7 +95,7 @@ pub fn accept(sock_fd: usize, peer_addr: ?*types.SockAddrIn) errors.SocketError!
         // No connections available
         if (!sock.blocking) {
             tcp_state.lock.release();
-            hal.cpu.enableInterrupts();
+            platform.cpu.enableInterrupts();
             state.releaseSocket(sock);
             return errors.SocketError.WouldBlock;
         }
@@ -104,7 +104,7 @@ pub fn accept(sock_fd: usize, peer_addr: ?*types.SockAddrIn) errors.SocketError!
         if (scheduler.blockFn()) |block_fn| {
             const get_current = scheduler.currentThreadFn() orelse {
                 tcp_state.lock.release();
-                hal.cpu.enableInterrupts();
+                platform.cpu.enableInterrupts();
                 state.releaseSocket(sock);
                 return errors.SocketError.SystemError;
             };
@@ -126,7 +126,7 @@ pub fn accept(sock_fd: usize, peer_addr: ?*types.SockAddrIn) errors.SocketError!
             continue;
         } else {
             tcp_state.lock.release();
-            hal.cpu.enableInterrupts();
+            platform.cpu.enableInterrupts();
             state.releaseSocket(sock);
             return errors.SocketError.WouldBlock;
         }
@@ -213,11 +213,11 @@ pub fn connect(sock_fd: usize, dest_addr: *const types.SockAddrIn) errors.Socket
             // Loop until state changes from SynSent (or error occurs)
             while (tcb.state == .SynSent) {
                  // Disable interrupts to close race window
-                 _ = hal.cpu.disableInterrupts();
+                 _ = platform.cpu.disableInterrupts();
                  
                  // Check state again after locking
                  if (tcb.state != .SynSent) {
-                     hal.cpu.enableInterrupts();
+                     platform.cpu.enableInterrupts();
                      break;
                  }
                  

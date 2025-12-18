@@ -20,8 +20,8 @@ const Ipv4Header = packet.Ipv4Header;
 const EthernetHeader = packet.EthernetHeader;
 const Interface = interface.Interface;
 const heap = @import("heap");
-const hal = @import("hal");
-const entropy = hal.entropy;
+const platform = @import("../platform.zig");
+const entropy = platform.entropy;
 const reassembly = @import("reassembly.zig");
 const loopback = @import("../loopback.zig");
 
@@ -418,7 +418,9 @@ pub fn sendPacket(iface: *Interface, pkt: *PacketBuffer, dst_ip: u32) bool {
     if (isLoopback(dst_ip)) {
         if (loopback.getInterface()) |lo| {
             // Build minimal Ethernet header (loopback transmit expects it)
-            ethernet.buildFrame(lo, pkt, [_]u8{0} ** 6, ethernet.ETHERTYPE_IPV4);
+            if (!ethernet.buildFrame(lo, pkt, [_]u8{0} ** 6, ethernet.ETHERTYPE_IPV4)) {
+                return false;
+            }
 
             // Update packet length
             const ip = pkt.ipHeader();
@@ -459,7 +461,9 @@ pub fn sendPacket(iface: *Interface, pkt: *PacketBuffer, dst_ip: u32) bool {
     }
 
     // Build Ethernet header
-    ethernet.buildFrame(iface, pkt, dst_mac, ethernet.ETHERTYPE_IPV4);
+    if (!ethernet.buildFrame(iface, pkt, dst_mac, ethernet.ETHERTYPE_IPV4)) {
+        return false;
+    }
 
     // Update packet length
     const ip = pkt.ipHeader();
@@ -506,10 +510,12 @@ fn sendFragmentedPacket(iface: *Interface, pkt: *PacketBuffer, dst_mac: [6]u8) b
         
         // Build fragment packet
         var frag_pkt = PacketBuffer.init(frag_buf, 0);
-        
+
         // 1. Build Ethernet Header (recycle buildFrame)
-        ethernet.buildFrame(iface, &frag_pkt, dst_mac, ethernet.ETHERTYPE_IPV4);
-        
+        if (!ethernet.buildFrame(iface, &frag_pkt, dst_mac, ethernet.ETHERTYPE_IPV4)) {
+            return false;
+        }
+
         // 2. Build IP Header
         const frag_ip_offset = packet.ETH_HEADER_SIZE;
         frag_pkt.ip_offset = frag_ip_offset;

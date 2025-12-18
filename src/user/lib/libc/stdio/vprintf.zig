@@ -437,9 +437,15 @@ pub export fn vsnprintf(dest: ?[*]u8, size: usize, fmt: [*:0]const u8, ap: va_li
     return @intCast(len);
 }
 
-/// vsprintf - format to string (unsafe, assumes large buffer)
+/// vsprintf - format to string (UNSAFE - use vsnprintf instead)
+/// WARNING: This function cannot know the destination buffer size.
+/// It uses a conservative 1024-byte limit, but callers should migrate
+/// to vsnprintf() with an explicit size parameter.
 pub export fn vsprintf(dest: ?[*]u8, fmt: [*:0]const u8, ap: va_list) c_int {
-    return vsnprintf(dest, 65536, fmt, ap);
+    // SECURITY: Limit to 1024 bytes as a safety measure.
+    // This is still unsafe but reduces the damage from legacy code.
+    // New code should ALWAYS use vsnprintf() with explicit size.
+    return vsnprintf(dest, 1024, fmt, ap);
 }
 
 /// vasprintf - allocate and format string (stub - needs allocator)

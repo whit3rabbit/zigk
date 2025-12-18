@@ -75,6 +75,9 @@ pub fn loadInitProcess() void {
         if (matchesDriverName(cmdline, path, "virtio_blk_driver")) {
             spawnProcess(mod, "virtio_blk_driver");
         }
+        if (matchesDriverName(cmdline, path, "netstack")) {
+            spawnProcess(mod, "netstack");
+        }
     }
 
     // 2. Select Main Init Process
@@ -253,6 +256,8 @@ fn spawnProcess(mod: *limine.Module, process_name: []const u8) void {
          // Grant Ports 0x60, 0x64 (Controller)
          appendCapabilityOrWarn(proc, alloc, .{ .IoPort = .{ .port = 0x60, .len = 1 } }, process_name);
          appendCapabilityOrWarn(proc, alloc, .{ .IoPort = .{ .port = 0x64, .len = 1 } }, process_name);
+         // Grant input injection capability (send keyboard/mouse events to kernel)
+         appendCapabilityOrWarn(proc, alloc, .{ .InputInjection = {} }, process_name);
          console.info("Init: Granted PS/2 capabilities to pid={}", .{proc.pid});
     }
 

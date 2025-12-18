@@ -556,6 +556,7 @@ pub fn build(b: *std.Build) void {
         .target = kernel_target,
         .optimize = optimize,
     });
+    ipc_msg_module.addImport("uapi", uapi_module);
 
     // Create Process module (process abstraction for fork/exec/wait)
     const process_module = b.createModule(.{
@@ -797,7 +798,91 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     syscall_custom_module.addImport("base.zig", syscall_base_module);
-    syscall_custom_module.addImport("uapi", uapi_module);
+
+    // Create syscall library for USER applications (SSE enabled)
+    // Moved up for dependency resolution
+    const user_syscall_lib = b.createModule(.{
+        .root_source_file = b.path("src/user/lib/syscall.zig"),
+        .target = user_target,
+        .optimize = optimize, 
+    });
+    user_syscall_lib.addImport("uapi", user_uapi_module);
+    // Create User Sync module (stub)
+    const user_sync_module = b.createModule(.{
+        .root_source_file = b.path("src/user/lib/sync_stub.zig"),
+        .target = user_target,
+        .optimize = optimize,
+    });
+    
+    // Create User Console module (stub)
+    const user_console_module = b.createModule(.{
+        .root_source_file = b.path("src/user/lib/console_stub.zig"),
+        .target = user_target,
+        .optimize = optimize,
+    });
+    user_console_module.addImport("uapi", user_uapi_module);
+
+    // Create User Network Stack module (for userspace netstack)
+    const user_net_module = b.createModule(.{
+        .root_source_file = b.path("src/net/root.zig"),
+        .target = user_target,
+        .optimize = optimize,
+    });
+    // Do NOT import hal for user_net_module
+    user_net_module.addImport("uapi", user_uapi_module);
+    user_net_module.addImport("console", user_console_module);
+    user_net_module.addImport("sync", user_sync_module);
+    user_net_module.addImport("prng", prng_module); // See note below, ideally unused or stubbed
+    user_net_module.addImport("io", b.createModule(.{
+        .root_source_file = b.path("src/user/netstack/io_stub.zig"),
+        .target = user_target,
+        .optimize = optimize,
+    }));
+    
+    // Create Netstack Process (Userspace Networking)
+    const netstack_mod = b.createModule(.{
+        .root_source_file = b.path("src/user/netstack/main.zig"),
+        .target = user_target,
+        .optimize = optimize,
+    });
+    netstack_mod.addImport("syscall", user_syscall_lib);
+    netstack_mod.addImport("net", user_net_module); 
+    netstack_mod.addImport("uapi", user_uapi_module);
+    // Note: src/user/lib/syscall.zig needs uapi.
+    // I should add uapi to the syscall module as well?
+    // The syscall module created above needs imports?
+    // Yes. It's better if I define netstack loop later or just duplicate logic.
+    // Or I can move user_syscall_lib definition up?
+    // Replacing a large chunk to move it up is risky.
+    // I will just define netstack_mod imports manually.
+    
+    // Actually, I can fix the build error first.
+    // netstack_mod.addImport("syscall", ...);
+    // But that syscall module needs imports.
+    // Let's use b.createModule for syscall and add uapi import.
+    const netstack_syscall_mod = b.createModule(.{
+        .root_source_file = b.path("src/user/lib/syscall.zig"),
+        .target = user_target,
+        .optimize = optimize,
+    });
+    netstack_syscall_mod.addImport("uapi", user_uapi_module);
+    
+    netstack_mod.addImport("syscall", netstack_syscall_mod);
+    netstack_mod.addImport("net", user_net_module); 
+    netstack_mod.addImport("uapi", user_uapi_module);
+
+    const netstack_exe = b.addExecutable(.{
+        .name = "netstack",
+        .root_module = netstack_mod,
+    });
+    netstack_exe.setLinkerScript(b.path("src/user/linker.ld"));
+
+    const netstack_cmd = b.addInstallArtifact(netstack_exe, .{});
+    b.getInstallStep().dependOn(&netstack_cmd.step);
+    
+    // Add explicit step for building netstack
+    const netstack_step = b.step("netstack", "Build userspace netstack");
+    netstack_step.dependOn(&netstack_cmd.step);
     syscall_custom_module.addImport("console", console_module);
     syscall_custom_module.addImport("hal", hal_module);
     syscall_custom_module.addImport("keyboard", keyboard_module);
@@ -859,6 +944,17 @@ pub fn build(b: *std.Build) void {
     syscall_io_uring_module.addImport("pipe", pipe_module);
     syscall_io_uring_module.addImport("keyboard", keyboard_module);
 
+    // Create IPC Service Registry module
+    const ipc_service_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/ipc/service.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    ipc_service_module.addImport("heap", heap_module);
+    ipc_service_module.addImport("sync", sync_module);
+    ipc_service_module.addImport("process", process_module);
+    ipc_service_module.addImport("console", console_module);
+
     // Create syscall ipc module (microkernel IPC)
     const syscall_ipc_module = b.createModule(.{
         .root_source_file = b.path("src/kernel/syscall/ipc.zig"),
@@ -875,6 +971,7 @@ pub fn build(b: *std.Build) void {
     syscall_ipc_module.addImport("console", console_module);
     syscall_ipc_module.addImport("keyboard", keyboard_module);
     syscall_ipc_module.addImport("mouse", mouse_module);
+    syscall_ipc_module.addImport("ipc_service", ipc_service_module);
 
     // Create syscall interrupt module
     const syscall_interrupt_module = b.createModule(.{
@@ -1058,13 +1155,7 @@ pub fn build(b: *std.Build) void {
     // Need to add uapi dependency to syscall lib
     syscall_lib.addImport("uapi", uapi_module);
 
-    // Create syscall library for USER applications (SSE enabled)
-    const user_syscall_lib = b.createModule(.{
-        .root_source_file = b.path("src/user/lib/syscall.zig"),
-        .target = user_target,
-        .optimize = optimize, 
-    });
-    user_syscall_lib.addImport("uapi", user_uapi_module);
+
 
     const shell_mod = b.createModule(.{
         .root_source_file = b.path("src/user/shell/main.zig"),
@@ -1359,6 +1450,7 @@ pub fn build(b: *std.Build) void {
         \\cp zig-out/bin/test_clock iso_root/boot/modules/ && \
         \\cp zig-out/bin/test_random iso_root/boot/modules/ && \
         \\cp zig-out/bin/test_asm iso_root/boot/modules/ && \
+        \\cp zig-out/bin/netstack iso_root/boot/modules/ && \
         \\cp zig-out/bin/test_threads iso_root/boot/modules/ && \
         \\cp zig-out/bin/test_signals_fpu iso_root/boot/modules/ && \
         \\cp zig-out/bin/test_vdso iso_root/boot/modules/ && \

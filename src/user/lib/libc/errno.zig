@@ -1,9 +1,19 @@
 // Global errno for libc compatibility
 //
 // This provides the global errno variable required by C programs.
-// Note: Not thread-local for MVP kernel - acceptable for single-threaded use.
+//
+// SECURITY WARNING: This errno is NOT thread-local.
+// In multithreaded programs, errno values can be corrupted by concurrent
+// calls from other threads, potentially causing security-sensitive code
+// to misinterpret error conditions.
+//
+// TODO: When kernel TLS support is available, change to:
+//   pub threadlocal var errno: c_int = 0;
 
 /// Global errno variable - set by libc functions on error
+/// WARNING: NOT THREAD-SAFE - use with caution in multithreaded code.
+/// Check errno immediately after a failing call before any other
+/// operations that might modify it.
 pub export var errno: c_int = 0;
 
 // Common error codes (matching Linux values)

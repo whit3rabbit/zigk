@@ -3,8 +3,10 @@
 // Functions for parsing numbers from strings.
 
 const internal = @import("../internal.zig");
+const errno_mod = @import("../errno.zig");
 
-/// Convert string to integer
+/// Convert string to integer with overflow protection
+/// On overflow, returns INT_MAX or INT_MIN and sets errno to ERANGE
 pub export fn atoi(str: ?[*:0]const u8) c_int {
     if (str == null) return 0;
     var s = str.?;
@@ -23,17 +25,43 @@ pub export fn atoi(str: ?[*:0]const u8) c_int {
         s += 1;
     }
 
-    // Parse digits
+    // Parse digits with overflow checking
+    const INT_MAX: c_int = 2147483647;
+    const INT_MIN: c_int = -2147483648;
     var result: c_int = 0;
+    var overflowed = false;
+
     while (s[0] >= '0' and s[0] <= '9') {
-        result = result * 10 + @as(c_int, s[0] - '0');
+        const digit: c_int = @as(c_int, s[0] - '0');
+
+        // Check multiplication overflow
+        const mul_result = @mulWithOverflow(result, 10);
+        if (mul_result[1] != 0) {
+            overflowed = true;
+            break;
+        }
+
+        // Check addition overflow
+        const add_result = @addWithOverflow(mul_result[0], digit);
+        if (add_result[1] != 0) {
+            overflowed = true;
+            break;
+        }
+
+        result = add_result[0];
         s += 1;
+    }
+
+    if (overflowed) {
+        errno_mod.errno = errno_mod.ERANGE;
+        return if (negative) INT_MIN else INT_MAX;
     }
 
     return if (negative) -result else result;
 }
 
-/// Convert string to long integer
+/// Convert string to long integer with overflow protection
+/// On overflow, returns LONG_MAX or LONG_MIN and sets errno to ERANGE
 pub export fn atol(str: ?[*:0]const u8) c_long {
     if (str == null) return 0;
     var s = str.?;
@@ -50,16 +78,41 @@ pub export fn atol(str: ?[*:0]const u8) c_long {
         s += 1;
     }
 
+    // Parse digits with overflow checking
+    const LONG_MAX: c_long = 9223372036854775807;
+    const LONG_MIN: c_long = -9223372036854775808;
     var result: c_long = 0;
+    var overflowed = false;
+
     while (s[0] >= '0' and s[0] <= '9') {
-        result = result * 10 + @as(c_long, s[0] - '0');
+        const digit: c_long = @as(c_long, s[0] - '0');
+
+        const mul_result = @mulWithOverflow(result, 10);
+        if (mul_result[1] != 0) {
+            overflowed = true;
+            break;
+        }
+
+        const add_result = @addWithOverflow(mul_result[0], digit);
+        if (add_result[1] != 0) {
+            overflowed = true;
+            break;
+        }
+
+        result = add_result[0];
         s += 1;
+    }
+
+    if (overflowed) {
+        errno_mod.errno = errno_mod.ERANGE;
+        return if (negative) LONG_MIN else LONG_MAX;
     }
 
     return if (negative) -result else result;
 }
 
-/// Convert string to long long integer
+/// Convert string to long long integer with overflow protection
+/// On overflow, returns LLONG_MAX or LLONG_MIN and sets errno to ERANGE
 pub export fn atoll(str: ?[*:0]const u8) c_longlong {
     if (str == null) return 0;
     var s = str.?;
@@ -76,10 +129,34 @@ pub export fn atoll(str: ?[*:0]const u8) c_longlong {
         s += 1;
     }
 
+    // Parse digits with overflow checking
+    const LLONG_MAX: c_longlong = 9223372036854775807;
+    const LLONG_MIN: c_longlong = -9223372036854775808;
     var result: c_longlong = 0;
+    var overflowed = false;
+
     while (s[0] >= '0' and s[0] <= '9') {
-        result = result * 10 + @as(c_longlong, s[0] - '0');
+        const digit: c_longlong = @as(c_longlong, s[0] - '0');
+
+        const mul_result = @mulWithOverflow(result, 10);
+        if (mul_result[1] != 0) {
+            overflowed = true;
+            break;
+        }
+
+        const add_result = @addWithOverflow(mul_result[0], digit);
+        if (add_result[1] != 0) {
+            overflowed = true;
+            break;
+        }
+
+        result = add_result[0];
         s += 1;
+    }
+
+    if (overflowed) {
+        errno_mod.errno = errno_mod.ERANGE;
+        return if (negative) LLONG_MIN else LLONG_MAX;
     }
 
     return if (negative) -result else result;

@@ -55,13 +55,10 @@ const SYS_SEND: usize = 1020;
 const SYS_RECV: usize = 1021;
 
 // IPC message structure for network packets
-const MAX_PACKET_SIZE: usize = 1514;
-
-const NetMessage = extern struct {
-    sender_pid: u64,
-    packet_len: u64,
-    packet: [MAX_PACKET_SIZE]u8,
-};
+// IPC message structure for network packets
+const uapi = syscall.uapi;
+const net_ipc = uapi.net_ipc;
+const MAX_PACKET_SIZE = net_ipc.MAX_PACKET_SIZE;
 
 // Virtqueue descriptor
 const VirtqDesc = extern struct {
@@ -145,6 +142,9 @@ const DriverState = struct {
 
     // IRQ for interrupt handling
     irq: u8,
+    
+    // Netstack PID
+    netstack_pid: u32,
 };
 
 var driver_state: DriverState = undefined;
@@ -152,6 +152,29 @@ var driver_initialized: bool = false;
 
 pub fn main() void {
     syscall.print("VirtIO-Net Driver Starting...\n");
+    
+    // Register as service
+    syscall.register_service("virtio_net") catch |err| {
+         printError("Failed to register virtio_net service", err);
+         return;
+    };
+    syscall.print("Registered 'virtio_net' service\n");
+
+    // Lookup netstack
+    // Retry loop in case netstack is starting up
+    var netstack_pid: u32 = 0;
+    while (true) {
+        netstack_pid = syscall.lookup_service("netstack") catch 0;
+        if (netstack_pid != 0) break;
+        syscall.print("Waiting for netstack...\n");
+         _ = syscall.nanosleep(&.{ .tv_sec = 1, .tv_nsec = 0 }, null) catch {};
+    }
+    
+    driver_state.netstack_pid = netstack_pid;
+    syscall.print("Found netstack at PID ");
+    printDec(netstack_pid);
+    syscall.print("\n");
+
 
     // Step 1: Find VirtIO-Net device
     var pci_devices: [32]PciDeviceInfo = undefined;
@@ -477,22 +500,27 @@ fn rxLoop() noreturn {
 fn txLoop() noreturn {
     syscall.print("[TX] TX loop started\n");
 
-    var msg: NetMessage = undefined;
+    // IPC message buffer - must match kernel's Message struct exactly (2064 bytes)
+    var msg: syscall.IpcMessage = undefined;
 
     while (true) {
         // Wait for packet to send via IPC
-        const sender = syscall.syscall2(SYS_RECV, @intFromPtr(&msg), @sizeOf(NetMessage));
+        _ = syscall.recv(&msg) catch continue;
 
-        if (sender < 0) {
+        // PacketHeader is at the start of msg.payload
+        const header: *const net_ipc.PacketHeader = @ptrCast(@alignCast(&msg.payload));
+
+        if (header.type != .TX_PACKET) continue;
+
+        if (header.len > MAX_PACKET_SIZE) {
             continue;
         }
 
-        if (msg.packet_len > MAX_PACKET_SIZE) {
-            continue;
-        }
+        // Packet data follows PacketHeader within payload
+        const data_ptr = msg.payload[@sizeOf(net_ipc.PacketHeader)..];
 
         // Send packet
-        sendPacket(msg.packet[0..msg.packet_len]);
+        sendPacket(data_ptr[0..header.len]);
 
         // Process TX completions
         processTxCompletions();
@@ -577,9 +605,28 @@ fn processRxCompletions() void {
 
         // Skip VirtIO net header (12 bytes typically)
         if (len > 12) {
-            // Here we would send packet to network stack via IPC
-            // For now, just print stats
-            _ = packet;
+            // Send packet to network stack via IPC
+            const data_len = len - 12;
+            if (data_len <= MAX_PACKET_SIZE) {
+                // Construct proper IPC Message
+                var msg: syscall.IpcMessage = undefined;
+                msg.sender_pid = 0; // Filled by kernel
+                msg.payload_len = @sizeOf(net_ipc.PacketHeader) + data_len;
+
+                // Write PacketHeader at start of payload
+                const header: *net_ipc.PacketHeader = @ptrCast(@alignCast(&msg.payload));
+                header.type = .RX_PACKET;
+                header.len = @intCast(data_len);
+                header._pad = 0;
+
+                // Copy packet data from DMA buffer to payload after header
+                const data_dest = msg.payload[@sizeOf(net_ipc.PacketHeader)..];
+                const payload_src = packet[12..len];
+                @memcpy(data_dest[0..data_len], payload_src);
+
+                // Send to netstack
+                _ = syscall.send(driver_state.netstack_pid, &msg) catch {};
+            }
         }
 
         driver_state.rx_last_used_idx +%= 1;

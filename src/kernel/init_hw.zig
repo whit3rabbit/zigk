@@ -114,35 +114,44 @@ pub fn initNetwork() void {
 
     // 4. Setup Network if Driver Available
     if (nic_driver_opt) |nic_driver| {
-        const mac = nic_driver.getMacAddress();
-        net_interface = net.Interface.init("eth0", mac);
-        net_interface.setTransmitFn(txWrapper);
-        net_interface.setMulticastUpdateFn(multicastUpdate);
+        // [NETSTACK MIGRATION]
+        // Disable in-kernel network stack initialization.
+        // We still initialize the driver hardware if needed, bu we don't bind it to the kernel stack
+        // OR we skip driver initialization if the userspace driver is taking over.
+        
+        // For now, let's just log and skip.
+        console.warn("[NETSTACK] Kernel network stack disabled for userspace migration.", .{});
+        _ = nic_driver; // Unused
+        
+        // const mac = nic_driver.getMacAddress();
+        // net_interface = net.Interface.init("eth0", mac);
+        // net_interface.setTransmitFn(txWrapper);
+        // net_interface.setMulticastUpdateFn(multicastUpdate);
 
-        // Initialize network stack
-        // Pass 1000 ticks/sec (1ms tick)
-        net.init(&net_interface, heap.allocator(), 1000);
+        // // Initialize network stack
+        // // Pass 1000 ticks/sec (1ms tick)
+        // net.init(&net_interface, heap.allocator(), 1000);
 
-        // Program initial multicast filter
-        multicastUpdate(&net_interface);
+        // // Program initial multicast filter
+        // multicastUpdate(&net_interface);
 
-        // 6. Register Callbacks
-        nic_driver.setRxCallback(rxCallbackAdapter);
-        sched.setTickCallback(net.tick);
+        // // 6. Register Callbacks
+        // nic_driver.setRxCallback(rxCallbackAdapter);
+        // sched.setTickCallback(net.tick);
 
-        console.info("Network initialized (MAC={x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2})", .{
-            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
-        });
+        // console.info("Network initialized (MAC={x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2})", .{
+        //     mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+        // });
     } else {
         console.warn("Network stack skipped (no NIC driver)", .{});
     }
 
     // Initialize loopback interface for local (127.x.x.x) traffic
-    if (nic_driver_opt != null) {
-        const lo = net.loopback.init();
-        lo.up();
-        console.info("Loopback interface initialized (127.0.0.1)", .{});
-    }
+    // if (nic_driver_opt != null) {
+    //     const lo = net.loopback.init();
+    //     lo.up();
+    //     console.info("Loopback interface initialized (127.0.0.1)", .{});
+    // }
 }
 
 /// Initialize USB subsystem (XHCI/EHCI)

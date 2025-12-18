@@ -5,7 +5,7 @@ const std = @import("std");
 const types = @import("types.zig");
 const sync = @import("../../sync.zig");
 const interface = @import("../../core/interface.zig");
-const hal = @import("hal");
+const platform = @import("../../platform.zig");
 
 pub const Interface = interface.Interface;
 
@@ -105,7 +105,7 @@ pub fn allocateEphemeralPort() u16 {
     const EPHEMERAL_RANGE: u16 = EPHEMERAL_END - EPHEMERAL_START + 1; // 16384
 
     // RFC 6056 Algorithm 1: Random starting point using hardware entropy
-    const entropy = hal.entropy.getHardwareEntropy();
+    const entropy = platform.entropy.getHardwareEntropy();
     const random_offset: u16 = @truncate(entropy % EPHEMERAL_RANGE);
     var port = EPHEMERAL_START + random_offset;
 
@@ -149,7 +149,7 @@ pub fn allocateRandomEphemeralPort() u16 {
 
     var attempts: u16 = 0;
     while (attempts < MAX_RANDOM_ATTEMPTS) : (attempts += 1) {
-        const entropy = hal.entropy.getHardwareEntropy();
+        const entropy = platform.entropy.getHardwareEntropy();
         const random_offset: u16 = @truncate(entropy % EPHEMERAL_RANGE);
         const port = EPHEMERAL_START + random_offset;
 

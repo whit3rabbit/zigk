@@ -3,8 +3,9 @@ const c = @import("constants.zig");
 const types = @import("types.zig");
 pub const Interface = @import("../../core/interface.zig").Interface;
 const sync = @import("../../sync.zig");
-const hal = @import("hal");
-const entropy = hal.entropy;
+// const hal = @import("hal"); // Removed dependency
+// const entropy = @import("../entropy.zig"); // Removed incorrect import (using platform.entropy)
+const platform = @import("../../platform.zig");
 
 pub const TcpState = types.TcpState;
 pub const Tcb = types.Tcb;
@@ -135,10 +136,10 @@ pub fn init(iface: *Interface, allocator: std.mem.Allocator, ticks_per_sec: u32)
     }
 
     // Seed ISN counter with hardware entropy
-    isn_counter = @truncate(entropy.getHardwareEntropy());
+    isn_counter = @truncate(platform.entropy.getHardwareEntropy());
     // Seed secret key (128-bit)
-    const k1 = entropy.getHardwareEntropy();
-    const k2 = entropy.getHardwareEntropy();
+    const k1 = platform.entropy.getHardwareEntropy();
+    const k2 = platform.entropy.getHardwareEntropy();
     @memcpy(secret_key[0..8], std.mem.asBytes(&k1));
     @memcpy(secret_key[8..16], std.mem.asBytes(&k2));
 }
@@ -355,8 +356,8 @@ pub fn generateIsn(l_ip: u32, l_port: u16, r_ip: u32, r_port: u16) u32 {
     // Periodically re-seed secret key with fresh entropy
     // XOR mixing preserves existing entropy while adding new randomness
     if (isn_generation_count >= ISN_RESEED_THRESHOLD) {
-        const k1 = entropy.getHardwareEntropy();
-        const k2 = entropy.getHardwareEntropy();
+        const k1 = platform.entropy.getHardwareEntropy();
+        const k2 = platform.entropy.getHardwareEntropy();
         const sk_u64: *[2]u64 = @ptrCast(@alignCast(&secret_key));
         sk_u64[0] ^= k1;
         sk_u64[1] ^= k2;
@@ -366,7 +367,7 @@ pub fn generateIsn(l_ip: u32, l_port: u16, r_ip: u32, r_port: u16) u32 {
     // F = SipHash-2-4(key, 4-tuple)
     // Security: Mix in fresh hardware entropy for every connection to prevent
     // attack against the linear counter component.
-    const fresh_entropy = entropy.getHardwareEntropy();
+    const fresh_entropy = platform.entropy.getHardwareEntropy();
 
     var hasher = std.crypto.auth.siphash.SipHash64(2, 4).init(&secret_key);
     hasher.update(std.mem.asBytes(&l_ip));
@@ -389,7 +390,7 @@ pub fn nextTimestamp() u32 {
     // Increment counter each call - provides monotonicity required by RFC 7323
     // Seed with entropy on first call for unpredictability
     if (tcp_timestamp_counter == 0) {
-        tcp_timestamp_counter = @truncate(entropy.getHardwareEntropy());
+        tcp_timestamp_counter = @truncate(platform.entropy.getHardwareEntropy());
     }
     tcp_timestamp_counter +%= 1;
     return tcp_timestamp_counter;

@@ -120,7 +120,13 @@ pub fn macEqual(a: [6]u8, b: [6]u8) bool {
 
 /// Build an Ethernet frame header
 /// Prepends Ethernet header to packet and sets fields
-pub fn buildFrame(iface: *const Interface, pkt: *PacketBuffer, dst_mac: [6]u8, ethertype: u16) void {
+/// Returns false if buffer is too small to hold the header at eth_offset
+pub fn buildFrame(iface: *const Interface, pkt: *PacketBuffer, dst_mac: [6]u8, ethertype: u16) bool {
+    // Bounds check: ensure buffer can hold 14-byte Ethernet header at specified offset
+    if (pkt.eth_offset + packet.ETH_HEADER_SIZE > pkt.data.len) {
+        return false;
+    }
+
     const eth = pkt.ethHeader();
 
     @memcpy(&eth.dst_mac, &dst_mac);
@@ -128,6 +134,7 @@ pub fn buildFrame(iface: *const Interface, pkt: *PacketBuffer, dst_mac: [6]u8, e
     eth.setEthertype(ethertype);
 
     pkt.ethertype = ethertype;
+    return true;
 }
 
 /// Send a raw Ethernet frame

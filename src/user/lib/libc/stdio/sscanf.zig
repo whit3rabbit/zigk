@@ -54,11 +54,17 @@ pub export fn sscanf(str: ?[*:0]const u8, fmt: ?[*:0]const u8, ...) c_int {
 
         // Parse width
         var width: usize = 0;
+        var has_width = false;
         while (f[0] >= '0' and f[0] <= '9') {
+            has_width = true;
             width = width * 10 + @as(usize, f[0] - '0');
             f += 1;
         }
-        if (width == 0) width = ~@as(usize, 0); // No limit
+        // SECURITY: Default to 4095 chars max for %s instead of unlimited.
+        // This prevents buffer overflow when no width is specified.
+        // Per POSIX, %s without width is unsafe but common in legacy code.
+        // Note: has_width tracks if user specified a width; width=0 means unlimited for %c.
+        if (!has_width) width = 4095;
 
         // Length modifier
         var is_long = false;
@@ -216,7 +222,8 @@ pub export fn sscanf(str: ?[*:0]const u8, fmt: ?[*:0]const u8, ...) c_int {
             },
             'c' => {
                 // %c does NOT skip whitespace
-                const count = if (width == ~@as(usize, 0)) 1 else width;
+                // Default to 1 character when no width specified
+                const count = if (!has_width) 1 else width;
 
                 if (!suppress) {
                     const ptr = @cVaArg(&args, ?[*]u8);

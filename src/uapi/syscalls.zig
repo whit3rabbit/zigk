@@ -506,6 +506,14 @@ pub const SYS_WAIT_INTERRUPT: usize = 1022;
 /// () -> i32
 pub const SYS_REGISTER_IPC_LOGGER: usize = 1025;
 
+/// Register the current process as a named service
+/// (name_ptr, name_len) -> 0 or -errno
+pub const SYS_REGISTER_SERVICE: usize = 1026;
+
+/// Lookup a service PID by name
+/// (name_ptr, name_len) -> pid or -errno
+pub const SYS_LOOKUP_SERVICE: usize = 1027;
+
 // =============================================================================
 // DMA/MMIO Syscalls (1030-1039)
 // =============================================================================

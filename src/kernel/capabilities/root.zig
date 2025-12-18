@@ -31,6 +31,7 @@ pub const CapabilityType = enum {
     Mmio,
     DmaMemory,
     PciConfig,
+    InputInjection,
 };
 
 pub const Capability = union(CapabilityType) {
@@ -39,4 +40,6 @@ pub const Capability = union(CapabilityType) {
     Mmio: MmioCapability,
     DmaMemory: DmaCapability,
     PciConfig: PciConfigCapability,
+    /// Allows injecting keyboard/mouse input via IPC to kernel (PID 0)
+    InputInjection: void,
 };

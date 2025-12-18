@@ -8,6 +8,7 @@ const sched = @import("sched");
 const ipc_msg = @import("ipc_msg");
 const keyboard = @import("keyboard");
 const mouse = @import("mouse");
+const service = @import("ipc_service");
 
 pub const Message = ipc_msg.Message;
 pub const KernelMessage = ipc_msg.KernelMessage;
@@ -17,9 +18,18 @@ const MAX_MAILBOX_MESSAGES: usize = 128;
 pub fn sys_send(target_pid: usize, msg_ptr: usize, len: usize) SyscallError!usize {
     // 1. Validate arguments
     if (len != @sizeOf(Message)) return error.EINVAL;
-    
+
     // Check if target is Kernel (PID 0)
     if (target_pid == 0) {
+        // SECURITY: Require InputInjection capability to send messages to kernel
+        // This prevents unprivileged processes from injecting keyboard/mouse input
+        const thread = sched.getCurrentThread() orelse return error.ESRCH;
+        const proc_opaque = thread.process orelse return error.ESRCH;
+        const proc: *process.Process = @ptrCast(@alignCast(proc_opaque));
+
+        if (!proc.hasInputInjectionCapability()) {
+            return error.EPERM;
+        }
         return handleKernelMessage(msg_ptr);
     }
 
@@ -117,9 +127,10 @@ pub fn sys_recv(msg_ptr: usize, len: usize) SyscallError!usize {
          return error.EFAULT;
     };
     
+    const sender = kmsg.msg.sender_pid;
     heap.allocator().destroy(kmsg);
 
-    return 0;
+    return sender;
 }
 
 /// Helper for Kernel to send IPC messages (e.g. console logs)
@@ -169,6 +180,40 @@ pub fn sys_register_ipc_logger() SyscallError!usize {
     
     console.addIpcBackend(process_ptr.pid);
     return 0;
+}
+
+pub fn sys_register_service(name_ptr: usize, name_len: usize) SyscallError!usize {
+    const thread = sched.getCurrentThread() orelse return error.ESRCH;
+    const proc_opaque = thread.process orelse return error.ESRCH;
+    const process_ptr: *process.Process = @ptrCast(@alignCast(proc_opaque));
+
+    if (name_len > service.MAX_SERVICE_NAME) return error.EINVAL;
+
+    var name_buf: [service.MAX_SERVICE_NAME]u8 = undefined;
+    const user_ptr = user_mem.UserPtr.from(name_ptr);
+    
+    _ = user_ptr.copyToKernel(name_buf[0..name_len]) catch return error.EFAULT;
+
+    if (service.register(name_buf[0..name_len], process_ptr.pid) catch return error.ENOMEM) {
+        return 0;
+    } else {
+        return error.EEXIST; // Name taken
+    }
+}
+
+pub fn sys_lookup_service(name_ptr: usize, name_len: usize) SyscallError!usize {
+    if (name_len > service.MAX_SERVICE_NAME) return error.EINVAL;
+
+    var name_buf: [service.MAX_SERVICE_NAME]u8 = undefined;
+    const user_ptr = user_mem.UserPtr.from(name_ptr);
+    
+    _ = user_ptr.copyToKernel(name_buf[0..name_len]) catch return error.EFAULT;
+
+    if (service.lookup(name_buf[0..name_len])) |pid| {
+        return pid;
+    } else {
+        return error.ENOENT;
+    }
 }
 
 // Input Event Types (must match userspace)

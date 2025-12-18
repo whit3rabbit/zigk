@@ -421,11 +421,12 @@ _syscall_entry:
     #
     # Canonical address check: bits [63:47] must all be 0 or all be 1
     # We check by sign-extending bit 47 and comparing to the original.
-    mov %rcx, %rax
-    sar $47, %rax           # Sign-extend bit 47 to all upper bits
-    cmp $0, %rax            # All zeros? (user-space canonical: 0x0000_xxxx_xxxx_xxxx)
+    # NOTE: Use R10 as scratch register to preserve RAX (return value)!
+    mov %rcx, %r10
+    sar $47, %r10           # Sign-extend bit 47 to all upper bits
+    cmp $0, %r10            # All zeros? (user-space canonical: 0x0000_xxxx_xxxx_xxxx)
     je .Lsysret_safe
-    cmp $-1, %rax           # All ones? (kernel-space canonical: 0xFFFF_xxxx_xxxx_xxxx)
+    cmp $-1, %r10           # All ones? (kernel-space canonical: 0xFFFF_xxxx_xxxx_xxxx)
     je .Lsysret_safe
 
     # Non-canonical RCX detected - use slow IRET path instead

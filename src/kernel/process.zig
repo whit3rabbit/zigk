@@ -401,6 +401,17 @@ pub const Process = struct {
         }
         return false;
     }
+
+    /// Check if process has input injection capability (keyboard/mouse IPC to kernel)
+    pub fn hasInputInjectionCapability(self: *Process) bool {
+        for (self.capabilities.items) |cap| {
+            switch (cap) {
+                .InputInjection => return true,
+                else => {},
+            }
+        }
+        return false;
+    }
 };
 
 // =============================================================================
