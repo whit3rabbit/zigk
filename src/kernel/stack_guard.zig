@@ -49,15 +49,63 @@ pub export fn __stack_chk_fail() noreturn {
 
 /// Initialize stack guard with a randomized canary value.
 /// Called during early kernel initialization, AFTER `prng.init()`.
+///
+/// Security Note: At early boot, entropy may be limited (especially without
+/// hardware RNG). Call reseed() after more entropy sources are available
+/// (e.g., after device initialization, network card MAC addresses, etc.).
 pub fn init() void {
     // Generate random canary from kernel PRNG
     var random_value = prng.next();
 
     // Apply canary constraint for string overflow detection:
     // Low byte = 0x00 catches null-terminated string overflows
+    // Security: This reduces entropy by 8 bits but catches common string bugs
     random_value &= ~@as(u64, 0xFF); // Clear low byte only (becomes 0x00)
 
     __stack_chk_guard = random_value;
 
-    console.info("Stack guard: Canary randomized (value: {x})", .{__stack_chk_guard});
+    // Security: Check if we're using weak entropy and warn
+    if (prng.isUsingFallbackSeed()) {
+        console.warn("Stack guard: Using weak entropy - canary may be predictable!", .{});
+    } else {
+        console.info("Stack guard: Canary randomized (entropy: good)", .{});
+    }
+}
+
+/// Re-seed the stack canary with fresh entropy.
+/// Security: Call this after more entropy is available to mitigate
+/// boot-time entropy starvation. The canary is replaced atomically.
+///
+/// IMPORTANT: This should be called BEFORE any threads are created,
+/// or the old canary must be propagated to existing stack frames.
+/// In practice, call this after APIC/timer initialization but before
+/// the scheduler starts.
+pub fn reseed() void {
+    // Check if we can get better entropy now
+    const quality = hal.entropy.getEstimatedQuality();
+
+    if (quality == .high) {
+        // Re-seed PRNG first to incorporate new entropy
+        hal.entropy.reseedCsprng();
+        prng.mixEntropy(hal.entropy.getHardwareEntropy());
+
+        // Generate new canary
+        var random_value = prng.next();
+        random_value &= ~@as(u64, 0xFF); // Maintain null-byte constraint
+
+        __stack_chk_guard = random_value;
+
+        console.info("Stack guard: Canary re-seeded with high-quality entropy", .{});
+    } else if (quality == .medium and prng.isUsingFallbackSeed()) {
+        // Some improvement is better than none
+        prng.mixEntropy(hal.entropy.getHardwareEntropy());
+
+        var random_value = prng.next();
+        random_value &= ~@as(u64, 0xFF);
+
+        __stack_chk_guard = random_value;
+
+        console.info("Stack guard: Canary re-seeded (entropy: medium)", .{});
+    }
+    // If quality is still low, don't re-seed - we'd just add predictable data
 }

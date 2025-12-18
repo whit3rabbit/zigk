@@ -101,11 +101,12 @@ fn resolveOnce(allocator: std.mem.Allocator, hostname: []const u8, server_ip: u3
     var send_buf: [512]u8 = undefined;
     var packet = dns.DnsPacket.init(&send_buf);
 
-    // Generate random Transaction ID using hardware entropy directly.
-    // Security: XORing entropy with timestamp can reduce entropy if either
-    // source is predictable. Using hardware entropy directly preserves full
-    // 16 bits of unpredictability for DNS spoofing resistance.
-    const tx_id = @as(u16, @truncate(hal.entropy.getHardwareEntropy()));
+    // Generate random Transaction ID using hardware entropy with bit mixing.
+    // Security: Simple truncation of 64-bit to 16-bit could theoretically lose
+    // entropy if the RNG has bias in certain bit positions. XOR-folding all
+    // 64 bits ensures full entropy contribution to the 16-bit result.
+    const entropy = hal.entropy.getHardwareEntropy();
+    const tx_id = @as(u16, @truncate(entropy ^ (entropy >> 16) ^ (entropy >> 32) ^ (entropy >> 48)));
 
     // Write Query
     packet.writeHeader(tx_id, dns.FLAGS_RD); // Recursion Desired

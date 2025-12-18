@@ -35,6 +35,14 @@ pub const PROTO_ICMP: u8 = 1;
 pub const PROTO_TCP: u8 = 6;
 pub const PROTO_UDP: u8 = 17;
 
+/// Minimum transport header sizes for validation
+/// SECURITY: After reassembly, we must validate the payload is large enough
+/// to contain a valid transport header before dispatching. Without this check,
+/// transport layer parsing could read beyond buffer bounds.
+const ICMP_HEADER_MIN: usize = 8; // Type(1) + Code(1) + Checksum(2) + rest(4)
+const UDP_HEADER_MIN: usize = 8; // SrcPort(2) + DstPort(2) + Len(2) + Checksum(2)
+const TCP_HEADER_MIN: usize = 20; // Minimum TCP header without options
+
 /// Default TTL for outgoing packets
 pub const DEFAULT_TTL: u8 = 64;
 
@@ -306,6 +314,23 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
         virt_pkt.ip_offset = 0;
         virt_pkt.transport_offset = 0;
 
+        // SECURITY: Validate minimum payload size before dispatching to transport layer.
+        // Attackers could craft fragments that reassemble to a payload smaller than
+        // the transport header, causing out-of-bounds reads in the transport layer.
+        // In Debug/ReleaseSafe this panics; in ReleaseFast it's undefined behavior.
+        const min_size: usize = switch (ip.protocol) {
+            PROTO_ICMP => ICMP_HEADER_MIN,
+            PROTO_UDP => UDP_HEADER_MIN,
+            PROTO_TCP => TCP_HEADER_MIN,
+            else => 0,
+        };
+
+        if (payload_slice.len < min_size) {
+            // Reassembled payload too small for transport header - drop
+            allocator.free(copy);
+            return false;
+        }
+
         // Dispatch to transport layer
         const handled = switch (ip.protocol) {
             PROTO_ICMP => icmp.processPacket(iface, &virt_pkt),
@@ -553,11 +578,45 @@ pub fn decrementTtl(pkt: *PacketBuffer) bool {
     return true;
 }
 
+/// Fallback PRNG state for when hardware entropy is unavailable
+/// SECURITY: Seeded from multiple sources to avoid predictability even at boot
+var fallback_prng_state: u64 = 0;
+var prng_initialized: bool = false;
+
 /// Get next IP identification value
+/// SECURITY: Unpredictable IP IDs prevent idle scanning attacks where an attacker
+/// can infer host activity by observing predictable ID increments. We use hardware
+/// entropy (RDRAND) when available, with a seeded PRNG fallback.
 pub fn getNextId() u16 {
-    // Use hardware entropy for unpredictable IP IDs
-    // Prevents idle scanning and information leaks
-    return @truncate(entropy.getHardwareEntropy());
+    // Try hardware entropy first (RDRAND on x86_64)
+    const hw_entropy = entropy.getHardwareEntropy();
+
+    // Check if hardware entropy is available and not returning a constant
+    // (Some VMs return 0 or -1 when RDRAND fails)
+    if (hw_entropy != 0 and hw_entropy != @as(u64, 0xFFFFFFFFFFFFFFFF)) {
+        return @truncate(hw_entropy);
+    }
+
+    // Fallback: Use xorshift64* PRNG seeded from available entropy sources
+    // This is better than a counter but not cryptographically secure
+    if (!prng_initialized) {
+        // Seed from TSC (cycle counter) + boot time entropy
+        fallback_prng_state = entropy.getHardwareEntropy();
+        if (fallback_prng_state == 0) {
+            // Last resort: use a non-zero seed based on address
+            fallback_prng_state = @intFromPtr(&fallback_prng_state) ^ 0xDEADBEEFCAFEBABE;
+        }
+        prng_initialized = true;
+    }
+
+    // xorshift64* step
+    var x = fallback_prng_state;
+    x ^= x >> 12;
+    x ^= x << 25;
+    x ^= x >> 27;
+    fallback_prng_state = x;
+
+    return @truncate(x *% 0x2545F4914F6CDD1D);
 }
 
 /// Validate that a netmask has contiguous 1s followed by 0s

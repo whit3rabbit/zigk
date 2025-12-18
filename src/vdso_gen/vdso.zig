@@ -98,21 +98,20 @@ fn do_clock_gettime(clk_id: std.os.linux.CLOCK, tp: *Timespec) i32 {
 fn __kernel_gettimeofday(tv: ?*Timeval, tz: ?*anyopaque) callconv(.c) i32 {
     _ = tz;
     if (tv) |out_tv| {
-        // Bypass VVAR for debugging
-        out_tv.tv_sec = 1234;
-        out_tv.tv_usec = 5678;
+        var ts: Timespec = undefined;
+        const ret = do_clock_gettime(.REALTIME, &ts);
+        if (ret != 0) return ret;
+        out_tv.tv_sec = ts.tv_sec;
+        out_tv.tv_usec = @divTrunc(ts.tv_nsec, 1000);
         return 0;
     }
     return 0;
 }
 
 fn __kernel_clock_gettime(clk_id: i32, tp: ?*Timespec) callconv(.c) i32 {
-    _ = clk_id;
     if (tp) |out_tp| {
-        // Bypass VVAR for debugging
-        out_tp.tv_sec = 1234;
-        out_tp.tv_nsec = 5678;
-        return 0;
+        const clock: std.os.linux.CLOCK = @enumFromInt(@as(u32, @bitCast(clk_id)));
+        return do_clock_gettime(clock, out_tp);
     }
     return -1;
 }

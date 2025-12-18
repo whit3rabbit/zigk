@@ -269,18 +269,23 @@ export fn _start() noreturn {
     // Initialize VFS and mount filesystems
     init_fs.initVfs();
 
-    // Initialize entropy subsystem (RDRAND/RDTSC detection)
+    // Initialize entropy subsystem (RDRAND/RDSEED/RDTSC detection)
+    // Security: This is early boot - entropy may be limited without hardware RNG
     hal.entropy.init();
-    console.info("Entropy source: {s}", .{if (hal.entropy.hasRdrand()) "RDRAND" else "RDTSC (fallback)"});
 
-    // Initialize kernel PRNG
+    // Initialize kernel PRNG (may use weak entropy at this point)
     prng.init();
 
-    // Initialize stack guard
+    // Initialize stack guard (initial canary - may be weak)
     stack_guard.init();
 
     // Initialize APIC
     initApic();
+
+    // Security: Re-seed stack canary now that APIC timer is running
+    // The APIC initialization adds timing entropy from calibration loops.
+    // This mitigates boot-time entropy starvation on systems without RDRAND.
+    stack_guard.reseed();
 
     // Initialize TLB Shootdown (after IPIs are ready)
     tlb.init();

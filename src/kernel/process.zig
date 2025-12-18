@@ -553,7 +553,7 @@ pub fn exit(status: i32) noreturn {
     if (sched.getCurrentThread()) |curr| {
         if (curr.process) |proc_opaque| {
             const proc: *Process = @ptrCast(@alignCast(proc_opaque));
-            
+
             // Decrement refcount. Returns true if this was the last thread.
             if (proc.unref()) {
                 // Last thread exiting - process becomes Zombie
@@ -740,7 +740,11 @@ pub fn destroyProcess(proc: *Process) void {
     // Free process struct
     alloc.destroy(proc);
 
-    _ = process_count.fetchSub(1, .monotonic);
+    // Guard against underflow (can occur if init exits as the only process)
+    const current = process_count.load(.monotonic);
+    if (current > 0) {
+        _ = process_count.fetchSub(1, .monotonic);
+    }
 }
 
 // =============================================================================

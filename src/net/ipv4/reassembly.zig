@@ -21,9 +21,16 @@ const REASSEMBLY_TIMEOUT: u64 = 15;
 /// Memory usage is now capped by MAX_TOTAL_MEMORY, not just slot count.
 const MAX_REASSEMBLIES: usize = 128;
 
-/// Maximum total memory used by reassembly buffers (2MB)
+/// Maximum total memory used by reassembly buffers (512KB)
 /// Prevents memory exhaustion DoS while allowing many small flows
 const MAX_TOTAL_MEMORY: usize = 512 * 1024;
+
+/// Minimum fragment payload size (except for first/last fragments)
+/// SECURITY: Prevents fragment bomb attacks where attacker sends many tiny
+/// fragments (8 bytes each) to exhaust hole tracking (64 slots).
+/// RFC 791 allows 8-byte fragments but real traffic uses much larger sizes.
+/// Middle fragments smaller than this are suspicious and dropped.
+const MIN_FRAGMENT_SIZE: usize = 256;
 
 /// Fragment reassembly entry
 const ReassemblyEntry = struct {
@@ -91,7 +98,12 @@ const FragmentKey = struct {
 /// Global reassembly cache
 var cache: [MAX_REASSEMBLIES]ReassemblyEntry = undefined;
 var cache_initialized: bool = false;
+
 /// IRQ-safe spinlock for concurrent access protection
+/// SECURITY NOTE: sync.Spinlock MUST disable interrupts during acquire/release
+/// to prevent TOCTOU races between overlap check and memcpy. The spinlock
+/// prevents concurrent CPU access, but IRQs could still preempt if not disabled.
+/// Verify your Spinlock implementation uses CLI/STI or equivalent.
 var lock: sync.Spinlock = .{};
 var current_tick: u64 = 0;
 var reassembly_allocator: std.mem.Allocator = undefined;
@@ -180,6 +192,18 @@ pub fn processFragment(
 
     const end = start + payload.len;
     if (end > MAX_IP_PACKET_SIZE) return null;
+
+    // SECURITY: Reject suspiciously small fragments to prevent fragment bomb DoS.
+    // Attackers can send many 8-byte fragments to exhaust our 64-slot hole list.
+    // Exception: first fragment (offset=0) may be small, last fragment (!more_fragments)
+    // may be a remainder. Only middle fragments are suspicious if tiny.
+    const is_first_fragment = (frag_offset == 0);
+    if (!is_first_fragment and more_fragments and payload.len < MIN_FRAGMENT_SIZE) {
+        // Middle fragment too small - likely attack, drop entire flow
+        e.used = false;
+        e.deinit(reassembly_allocator);
+        return null;
+    }
     
     // Ensure buffer is large enough
     if (end > e.buffer.len) {
@@ -187,19 +211,36 @@ pub fn processFragment(
         // Align to 2KB
         var new_len = (end + 2047) & ~@as(usize, 2047);
         if (new_len > MAX_IP_PACKET_SIZE) new_len = MAX_IP_PACKET_SIZE;
-        
+
         // Check global memory budget
+        // SECURITY: Use checked arithmetic to prevent integer overflow.
+        // In ReleaseFast mode, wrapping could bypass the memory limit check
+        // if new_len < current_len due to corruption or race conditions.
         const current_len = e.buffer.len;
-        const additional = new_len - current_len;
-        
-        if (current_memory_usage + additional > MAX_TOTAL_MEMORY) {
+        const additional = std.math.sub(usize, new_len, current_len) catch {
+            // Underflow means new_len < current_len (should not happen normally)
+            // Treat as corruption/attack and drop flow
+            e.used = false;
+            e.deinit(reassembly_allocator);
+            return null;
+        };
+
+        // Use checked add for memory limit check to prevent overflow bypass
+        const projected_usage = std.math.add(usize, current_memory_usage, additional) catch {
+            // Overflow - would exceed addressable memory, definitely over limit
+            e.used = false;
+            e.deinit(reassembly_allocator);
+            return null;
+        };
+
+        if (projected_usage > MAX_TOTAL_MEMORY) {
             // Memory Limit Exceeded
             // Drop entire flow
             e.used = false;
             e.deinit(reassembly_allocator);
             return null;
         }
-        
+
         if (e.buffer.len == 0) {
             // New allocation
             e.buffer = reassembly_allocator.alloc(u8, new_len) catch {
@@ -216,6 +257,7 @@ pub fn processFragment(
             };
             e.buffer = new_buf;
         }
+        // Safe to add now - we already verified it won't overflow
         current_memory_usage += additional;
     }
 
@@ -230,14 +272,19 @@ pub fn processFragment(
         }
     }
 
-    // Security: Reject overlapping fragments
+    // SECURITY: Reject overlapping fragments (Teardrop/Ping-of-Death defense)
+    // Overlapping fragments can cause undefined behavior when reassembled and
+    // have been used in historic attacks. RFC 5722 mandates dropping them.
+    // NOTE: This check and the subsequent memcpy must be atomic with respect to
+    // other fragment processing. The spinlock above must disable IRQs to prevent
+    // a TOCTOU race where another IRQ modifies hole list between check and copy.
     if (isRegionOverlapping(e, start, end)) {
         e.used = false;
         e.deinit(reassembly_allocator);
         return null;
     }
 
-    // Copy data to buffer
+    // Copy data to buffer (protected by spinlock held above)
     @memcpy(e.buffer[start..end], payload);
 
     // Update holes

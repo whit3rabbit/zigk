@@ -40,21 +40,36 @@ pub fn init() void {
     }
 
     // Seed both state words with different hardware entropy values
-    state[0] = hal.entropy.getHardwareEntropy();
-    state[1] = hal.entropy.getHardwareEntropy();
+    // Security: Use getHardwareEntropyWithQuality() to get entropy quality info
+    const entropy1 = hal.entropy.getHardwareEntropyWithQuality();
+    const entropy2 = hal.entropy.getHardwareEntropyWithQuality();
+    state[0] = entropy1.value;
+    state[1] = entropy2.value;
 
-    // Ensure non-zero state (required by xoroshiro128+)
-    // If both are zero (extremely unlikely), use fallback constants
-    // SECURITY WARNING: Fallback constants are predictable and weaken security!
-    // This should only happen if RDRAND/RDTSC both fail, which indicates
-    // a serious hardware issue or VM misconfiguration.
-    if (state[0] == 0 and state[1] == 0) {
-        // Fallback seed from splitmix64 output - PREDICTABLE!
-        state[0] = 0x853c49e6748fea9b;
-        state[1] = 0xda3e39cb94b95bdb;
+    // Security: Track if we're using weak entropy
+    // xoroshiro128+ is already not cryptographically secure, but weak seeds
+    // make it trivially predictable
+    if (entropy1.quality == .low or entropy2.quality == .low) {
         using_fallback_seed = true;
-        // Warning: Stack canaries and ASLR may be compromised!
-        // Check isUsingFallbackSeed() to detect this condition.
+    }
+
+    // Security fix: Check EACH state word independently, not just both
+    // xoroshiro128+ degenerates with ANY zero state word (short period,
+    // predictable output). Previously only checked if BOTH were zero.
+    // Fallback values are chosen from splitmix64 output - still predictable
+    // but at least ensures the PRNG doesn't degenerate.
+    const fallback_0: u64 = 0x853c49e6748fea9b;
+    const fallback_1: u64 = 0xda3e39cb94b95bdb;
+
+    if (state[0] == 0) {
+        // Security: Zero state[0] would cause PRNG degeneration
+        state[0] = fallback_0;
+        using_fallback_seed = true;
+    }
+    if (state[1] == 0) {
+        // Security: Zero state[1] would cause PRNG degeneration
+        state[1] = fallback_1;
+        using_fallback_seed = true;
     }
 
     initialized = true;

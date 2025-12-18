@@ -287,6 +287,26 @@ _asm_rdtsc:
     or %rdx, %rax
     ret
 
+# u64 _asm_rdseed64(u8* success)
+# Security: RDSEED provides higher-quality entropy than RDRAND.
+# RDRAND uses a DRBG (Deterministic Random Bit Generator) reseeded from
+# hardware noise, while RDSEED provides entropy directly from the hardware
+# noise source. RDSEED is preferred for seeding CSPRNGs because it provides
+# "full entropy" per NIST SP 800-90B requirements.
+# Returns seed value in RAX, sets *success = 1 on success, 0 on failure.
+# RDSEED may fail more often than RDRAND as it drains the entropy pool.
+.global _asm_rdseed64
+.type _asm_rdseed64, @function
+_asm_rdseed64:
+    rdseed %rax
+    jnc .rdseed_fail
+    movb $1, (%rdi)        # *success = 1
+    ret
+.rdseed_fail:
+    movb $0, (%rdi)        # *success = 0
+    xor %rax, %rax         # return 0
+    ret
+
 # =============================================================================
 # SYSCALL Entry Point
 # =============================================================================

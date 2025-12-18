@@ -49,13 +49,14 @@ pub fn init() void {
 }
 
 /// Compute hash for a physical address
+/// Uses wrapping multiplication (*%) since MurmurHash mixing intentionally overflows
 fn hash(phys_addr: u64) usize {
-    // Simple mixing
+    // Simple mixing (MurmurHash finalizer)
     var h = phys_addr;
     h ^= h >> 33;
-    h *= 0xff51afd7ed558ccd;
+    h *%= 0xff51afd7ed558ccd;
     h ^= h >> 33;
-    h *= 0xc4ceb9fe1a85ec53;
+    h *%= 0xc4ceb9fe1a85ec53;
     h ^= h >> 33;
     return h % BUCKET_COUNT;
 }

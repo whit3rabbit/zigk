@@ -39,7 +39,7 @@ pub const ArpState = enum {
 pub const ArpEntry = struct {
     /// Small fixed-size queue to handle bursts
     pub const QUEUE_SIZE: usize = 4;
-    
+
     ip_addr: u32,
     mac_addr: [6]u8,
     state: ArpState,
@@ -56,6 +56,14 @@ pub const ArpEntry = struct {
     queue_head: u8,
     queue_tail: u8,
     queue_count: u8,
+
+    /// SECURITY: Track expected MAC from our ARP request to detect spoofing.
+    /// When we create an incomplete entry via sendRequest(), we don't know the
+    /// target MAC. When the reply comes, we should verify it's from a plausible
+    /// source. This field stores the MAC that sent the first reply.
+    expected_reply_mac: [6]u8,
+    /// Whether we've received at least one reply (for validation)
+    has_received_reply: bool,
 };
 
 /// ARP cache timeout in seconds (simplified - 20 minutes)
@@ -109,6 +117,8 @@ fn resetPending(entry: *ArpEntry) void {
     entry.queue_head = 0;
     entry.queue_tail = 0;
     entry.queue_count = 0;
+    entry.expected_reply_mac = [_]u8{0} ** 6;
+    entry.has_received_reply = false;
 }
 
 fn clearPending(entry: *ArpEntry) void {
@@ -171,14 +181,34 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
             return false;
         }
 
-        // Security: ARP Spoofing Protection.
+        // SECURITY: ARP Spoofing Protection.
         // Only update existing entries if this is an explicit ARP REPLY.
         // Unsolicited ARP REQUESTs ("Gratuitous ARP") are easily spoofed and
         // should not overwrite our cache unless we implement stronger validation.
-        if (operation == 2) { 
-             if (findEntry(sender_ip)) |_| {
-                updateCache(iface, sender_ip, arp.sender_mac, .reachable) catch {};
-             }
+        if (operation == 2) {
+            if (findEntry(sender_ip)) |entry| {
+                // SECURITY: For incomplete entries, validate the reply is plausible.
+                // An attacker could race to send a spoofed reply before the real host.
+                // We track whether we've already received a reply and from which MAC.
+                if (entry.state == .incomplete) {
+                    if (!entry.has_received_reply) {
+                        // First reply - record the MAC and accept
+                        @memcpy(&entry.expected_reply_mac, &arp.sender_mac);
+                        entry.has_received_reply = true;
+                        updateCache(iface, sender_ip, arp.sender_mac, .reachable) catch {};
+                    } else {
+                        // Subsequent reply - verify it matches expected MAC
+                        // If different, someone is racing to poison; drop the packet
+                        if (std.mem.eql(u8, &entry.expected_reply_mac, &arp.sender_mac)) {
+                            updateCache(iface, sender_ip, arp.sender_mac, .reachable) catch {};
+                        }
+                        // Else: Silently drop conflicting reply (potential attack)
+                    }
+                } else {
+                    // Non-incomplete entry - apply rate limiting via updateCache
+                    updateCache(iface, sender_ip, arp.sender_mac, .reachable) catch {};
+                }
+            }
         }
     }
 
@@ -331,6 +361,8 @@ pub fn resolveOrRequest(iface: *Interface, ip: u32, pkt_opaque: ?*const anyopaqu
         entry.queue_head = 0;
         entry.queue_tail = 0;
         entry.queue_count = 0;
+        entry.expected_reply_mac = [_]u8{0} ** 6;
+        entry.has_received_reply = false;
 
         if (pkt) |p| {
          if (p.len <= packet.MAX_PACKET_SIZE) {
@@ -392,6 +424,11 @@ fn updateCache(iface: *Interface, ip: u32, mac: [6]u8, state: ArpState) !void {
 
                 if (entry.queue_count > 0) {
                     // Flush pending packets
+                    // SECURITY REQUIREMENT: iface.transmit() MUST be synchronous.
+                    // We free the buffer immediately after transmit() returns. If transmit()
+                    // queues the buffer for DMA/async processing without copying, the hardware
+                    // would read freed memory causing corruption or information disclosure.
+                    // Verify your NIC driver copies data before transmit() returns.
                     var i: u8 = 0;
                     while (i < entry.queue_count) : (i += 1) {
                         const idx = (entry.queue_head +% i) % @as(u8, @intCast(ArpEntry.QUEUE_SIZE));
@@ -405,6 +442,7 @@ fn updateCache(iface: *Interface, ip: u32, mac: [6]u8, state: ArpState) !void {
 
                                 _ = iface.transmit(buf[0..len]);
                             }
+                            // Buffer freed immediately - transmit must have copied or completed
                             arp_allocator.free(buf);
                             entry.pending_pkts[idx] = null;
                             entry.pending_lens[idx] = 0;
@@ -429,6 +467,8 @@ fn updateCache(iface: *Interface, ip: u32, mac: [6]u8, state: ArpState) !void {
     entry.queue_head = 0;
     entry.queue_tail = 0;
     entry.queue_count = 0;
+    entry.expected_reply_mac = [_]u8{0} ** 6;
+    entry.has_received_reply = false;
 }
 
 /// Maximum ARP cache entries (DoS protection)

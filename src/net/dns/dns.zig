@@ -131,6 +131,7 @@ pub fn readName(buf: []const u8, start: usize, out: []u8) error{ FormatError, Bu
     var out_pos: usize = 0;
     var jumps: u8 = 0;
     var end_pos: ?usize = null; // Position after name in original buffer
+    var total_name_len: usize = 0; // RFC 1035: track total name length (max 253)
 
     while (true) {
         if (pos >= buf.len) return error.FormatError;
@@ -141,8 +142,12 @@ pub fn readName(buf: []const u8, start: usize, out: []u8) error{ FormatError, Bu
             break;
         }
 
+        // RFC 1035 section 4.1.4: Two high-order bits determine label type
+        // 00 = label (length in remaining 6 bits)
+        // 11 = compression pointer
+        // 01, 10 = reserved for future use - reject these
         if ((len_byte & 0xC0) == 0xC0) {
-            // Compression pointer
+            // Compression pointer (11xxxxxx)
             jumps += 1;
             if (jumps > DNS_MAX_COMPRESSION_JUMPS) return error.FormatError;
             if (pos + 1 >= buf.len) return error.FormatError;
@@ -158,9 +163,20 @@ pub fn readName(buf: []const u8, start: usize, out: []u8) error{ FormatError, Bu
             continue;
         }
 
-        // Regular label
+        // Security: Reject reserved label types (01xxxxxx and 10xxxxxx)
+        // These could be interpreted as label lengths 64-191, causing OOB reads
+        if ((len_byte & 0xC0) != 0) {
+            return error.FormatError;
+        }
+
+        // Regular label (00xxxxxx) - length is 0-63
         const label_len: usize = len_byte;
         if (pos + 1 + label_len > buf.len) return error.FormatError;
+
+        // RFC 1035: Enforce total name length limit (253 bytes)
+        // Each label contributes: label_len + 1 (for dot or null terminator)
+        total_name_len += label_len + 1;
+        if (total_name_len > DNS_MAX_NAME_LENGTH) return error.FormatError;
 
         // Add dot separator (except for first label)
         if (out_pos > 0) {
