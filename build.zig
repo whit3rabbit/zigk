@@ -206,6 +206,7 @@ pub fn build(b: *std.Build) void {
     heap_module.addImport("console", console_module);
     heap_module.addImport("config", config_module);
     heap_module.addImport("sync", sync_module);
+    heap_module.addImport("hal", hal_module); // For TSC-based canary randomization
 
     // Create Network Stack module (full stack: core, ethernet, ipv4, transport)
     const net_module = b.createModule(.{

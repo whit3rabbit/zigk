@@ -249,6 +249,17 @@ pub fn init(start: usize, size: usize) void {
         return;
     }
 
+    // Initialize per-boot random canary using TSC
+    // Security: Prevents compile-time prediction of canary value
+    // Note: TSC is weak entropy but available immediately (before PRNG init)
+    // The canary is mixed with the default constant to ensure non-zero value
+    const tsc = hal.timing.rdtsc();
+    heap_canary = HEAP_CANARY_DEFAULT ^ tsc ^ (tsc >> 17) ^ (tsc << 31);
+    // Ensure canary is never zero (would make corruption detection trivial)
+    if (heap_canary == 0) {
+        heap_canary = HEAP_CANARY_DEFAULT;
+    }
+
     // Align start up and size down
     heap_start = std.mem.alignForward(usize, start, ALIGNMENT);
     const adjusted_size = size - (heap_start - start);
