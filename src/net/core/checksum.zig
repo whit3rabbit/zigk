@@ -19,6 +19,17 @@ pub fn icmpChecksum(data: []const u8) u16 {
 /// UDP only: protocol value (17) is baked in; do not reuse for TCP.
 /// src_ip and dst_ip should be in network byte order.
 /// udp_segment_with_header must include the UDP header and payload.
+///
+/// SECURITY: This function assumes the slice length is validated by the caller.
+/// If an attacker provides a crafted IP packet claiming a total_length larger than
+/// the actual buffer, the slice passed here may be shorter than claimed, producing
+/// a checksum that validates truncated data. Conversely, slices > 65535 bytes
+/// (impossible in valid IP) will have their length truncated to u16, potentially
+/// causing checksum miscalculation.
+///
+/// Risk: Medium - checksum bypass or validation of corrupted data.
+/// Mitigation: IP layer must validate total_length against actual buffer size
+/// before calling transport checksum functions.
 pub fn udpChecksum(src_ip: u32, dst_ip: u32, udp_segment_with_header: []const u8) u16 {
     var sum: u32 = 0;
 
@@ -28,6 +39,7 @@ pub fn udpChecksum(src_ip: u32, dst_ip: u32, udp_segment_with_header: []const u8
     sum += @as(u32, @truncate(dst_ip >> 16));
     sum += @as(u32, @truncate(dst_ip));
     sum += 17; // UDP protocol
+    // SECURITY: Length truncated to u16 - callers must ensure len <= 65535
     sum += @as(u32, @truncate(udp_segment_with_header.len));
 
     // UDP header + data
@@ -56,6 +68,9 @@ pub fn udpChecksum(src_ip: u32, dst_ip: u32, udp_segment_with_header: []const u8
 /// TCP only: protocol value (6) is baked in.
 /// src_ip and dst_ip should be in network byte order.
 /// tcp_segment_with_header must include the TCP header and payload.
+///
+/// SECURITY: Same considerations as udpChecksum - see that function's documentation.
+/// Callers must validate segment length against IP total_length before calling.
 pub fn tcpChecksum(src_ip: u32, dst_ip: u32, tcp_segment_with_header: []const u8) u16 {
     var sum: u32 = 0;
 
@@ -65,6 +80,7 @@ pub fn tcpChecksum(src_ip: u32, dst_ip: u32, tcp_segment_with_header: []const u8
     sum += @as(u32, @truncate(dst_ip >> 16));
     sum += @as(u32, @truncate(dst_ip));
     sum += 6; // TCP protocol
+    // SECURITY: Length truncated to u16 - callers must ensure len <= 65535
     sum += @as(u32, @truncate(tcp_segment_with_header.len));
 
     // TCP header + data

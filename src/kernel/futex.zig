@@ -76,19 +76,27 @@ fn hash(phys_addr: u64) usize {
 pub fn wait(uaddr: u64, val: u32, timeout_ns: ?u64) !void {
     const current = sched.getCurrentThread() orelse return error.PermDenied;
 
-    // 1. Translate to physical address
+    // 1. Validate user address has user-accessible permission
+    // SECURITY: Prevents kernel memory disclosure via oracle attack.
+    // An attacker could pass kernel addresses (e.g., 0xFFFF_8000_...) which are
+    // present in CR3 (kernel mappings shared via PML4 entries 256-511) but lack
+    // user_accessible bit. Without this check, the kernel would read the value
+    // and return EAGAIN or block, allowing binary search to leak kernel memory.
+    if (!vmm.isUserPageMapped(current.cr3, uaddr)) return error.Fault;
+
+    // 2. Translate to physical address
     // Physical address uniquely identifies the futex, enabling shared memory futexes
     const phys_addr = vmm.translate(current.cr3, uaddr) orelse return error.Fault;
 
-    // 2. Compute bucket
+    // 3. Compute bucket
     const bucket_idx = hash(phys_addr);
     const bucket = &futex_table[bucket_idx];
 
-    // 3. Acquire bucket lock
+    // 4. Acquire bucket lock
     // Critical section prevents lost wakeup race
     const held = bucket.lock.acquire();
 
-    // 4. Validate value atomically using the physical address
+    // 5. Validate value atomically using the physical address
     // SECURITY: Read through HHDM-mapped physical address, not raw user virtual address.
     // Directly dereferencing `uaddr` in kernel context is unsafe because:
     // (a) The kernel may have different page tables active than the user's CR3.
@@ -105,7 +113,7 @@ pub fn wait(uaddr: u64, val: u32, timeout_ns: ?u64) !void {
         return error.Again;
     }
 
-    // 5. Sleep with optional timeout
+    // 6. Sleep with optional timeout
     // Convert timeout from nanoseconds to ticks (1ms per tick)
     var timeout_ticks: u64 = 0;
     if (timeout_ns) |ns| {
@@ -126,7 +134,7 @@ pub fn wait(uaddr: u64, val: u32, timeout_ns: ?u64) !void {
         if (timeout_ticks > 0) @ptrCast(bucket) else null,
     );
 
-    // 6. Check wakeup reason
+    // 7. Check wakeup reason
     if (current.futex_wakeup_reason == .timeout) {
         return error.TimedOut;
     }
@@ -137,26 +145,32 @@ pub fn wait(uaddr: u64, val: u32, timeout_ns: ?u64) !void {
 
 /// Futex Wake
 ///
-/// 1. Translate user address to physical address
-/// 2. Compute bucket
-/// 3. Wake up to `count` threads from bucket, canceling any pending timeouts
+/// 1. Validate user address permissions
+/// 2. Translate user address to physical address
+/// 3. Compute bucket
+/// 4. Wake up to `count` threads from bucket, canceling any pending timeouts
 ///
 /// Returns: Number of threads woken
 pub fn wake(uaddr: u64, count: u32) !u32 {
     const current = sched.getCurrentThread() orelse return error.PermDenied;
 
-    // 1. Translate to physical address
+    // 1. Validate user address has user-accessible permission
+    // SECURITY: While wake() doesn't directly leak memory contents, allowing
+    // kernel addresses enables KASLR probing via hash bucket correlation.
+    if (!vmm.isUserPageMapped(current.cr3, uaddr)) return error.Fault;
+
+    // 2. Translate to physical address
     const phys_addr = vmm.translate(current.cr3, uaddr) orelse return error.Fault;
 
-    // 2. Compute bucket
+    // 3. Compute bucket
     const bucket_idx = hash(phys_addr);
     const bucket = &futex_table[bucket_idx];
 
-    // 3. Acquire bucket lock
+    // 4. Acquire bucket lock
     const held = bucket.lock.acquire();
     defer held.release();
 
-    // 4. Wake threads, properly canceling any pending timeouts
+    // 5. Wake threads, properly canceling any pending timeouts
     // Note: Hash collisions may cause spurious wakeups - this is acceptable
     // as futex semantics require userspace to re-check the condition in a loop
     var woken: u32 = 0;

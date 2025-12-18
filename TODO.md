@@ -50,7 +50,7 @@ Current status: Scheduler decentralized, Per-CPU queues, TLB shootdown, and fine
     - Timeout support with proper sleep list integration
     - Remaining: FUTEX_REQUEUE, robust futexes, priority inheritance
 - [x] **Signals**: Finish signal delivery logic. `checkSignals` exists but `sys_rt_sigreturn` context restoration needs validation against `sys_clone`.
-- [ ] **VDSO**: Map a page into userspace for fast time/getcpu calls without syscall overhead.
+- [x] **VDSO**: Map a page into userspace for fast time/getcpu calls without syscall overhead.
 
 ### Phase 5.5: Memory mapping
 
@@ -272,7 +272,14 @@ Current status: Networking stack is in-kernel (hybrid) or userspace (VirtIO). St
 
 ### Phase 7: Security & Robustness
 - [ ] **IOMMU (VT-d)**: Implement DMAR parsing and page tables to restrict userspace drivers to their own DMA buffers.
-- [ ] **ASLR**: Randomize heap, stack, and mmap base addresses.
+- [x] **ASLR**: Randomize heap, stack, mmap base, and PIE addresses.
+    - Stack top: 11 bits entropy (8MB range)
+    - PIE base: 16 bits entropy (4GB range, 64KB granularity)
+    - mmap base: 20 bits entropy (4TB range)
+    - Heap gap: 8 bits entropy (1MB range after ELF end)
+    - VDSO: 12 bits entropy (implemented separately in vdso.zig)
+    - Per-process offsets stored in `Process.aslr_offsets`
+    - Fork inherits parent layout, execve generates new layout
 - [ ] **User/Group Permissions**: Implement actual checks in VFS (currently stubs return 0 or EACCES statically).
 
 ### Phase 8: Bootloader (Optional "Flex")

@@ -6,6 +6,7 @@
 // Maintains a cache of Path MTUs to avoid IP fragmentation.
 
 const std = @import("std");
+const sync = @import("../sync.zig");
 
 /// Default MTU for Ethernet
 pub const DEFAULT_MTU: u16 = 1500;
@@ -20,16 +21,23 @@ const PMTU_CACHE_SIZE: usize = 16;
 /// After this many "accesses" we should refresh the entry
 const PMTU_ENTRY_AGE_LIMIT: u32 = 1000;
 
-/// Minimum interval between PMTU updates for same destination (access counter units)
-/// Prevents rapid cache poisoning via spoofed ICMP messages
-const PMTU_UPDATE_RATE_LIMIT: u32 = 50;
+/// SECURITY (Vuln 2): Minimum interval between PMTU updates in TICKS (not ops).
+/// Previously used operation counter which attacker could accelerate by flooding
+/// with ICMP messages. Now uses monotonic tick counter that advances only with
+/// real time (timer interrupts), making rate limiting robust against flooding.
+/// 100 ticks = ~1 second at typical 100Hz tick rate.
+const PMTU_UPDATE_RATE_LIMIT_TICKS: u64 = 100;
 
 /// Path MTU cache entry
 const PmtuEntry = struct {
     destination_ip: u32, // 0 = empty slot
     mtu: u16, // Discovered MTU
-    age: u32, // Access counter for LRU-ish aging
-    last_update: u32, // When this entry was last modified (for rate limiting)
+    age: u32, // Access counter for LRU-ish aging (can still use op counter - not security critical)
+    /// SECURITY (Vuln 2): Changed from operation counter to tick timestamp.
+    /// Now stores the monotonic tick count when entry was last modified.
+    /// This makes rate limiting time-based rather than operation-based,
+    /// preventing attackers from accelerating wraparound via flooding.
+    last_update_tick: u64,
 };
 
 /// PMTU cache (simple array with LRU-ish replacement)
@@ -37,15 +45,37 @@ var pmtu_cache: [PMTU_CACHE_SIZE]PmtuEntry = [_]PmtuEntry{.{
     .destination_ip = 0,
     .mtu = DEFAULT_MTU,
     .age = 0,
-    .last_update = 0,
+    .last_update_tick = 0,
 }} ** PMTU_CACHE_SIZE;
 
-/// Global age counter for cache entries
+/// Global age counter for cache entries (LRU ordering - not security critical)
 var pmtu_age_counter: u32 = 0;
+
+/// SECURITY (Vuln 2): Monotonic tick counter for time-based rate limiting.
+/// Updated by tick() which should be called from timer interrupt.
+/// Using u64 ensures wraparound takes ~5 billion years at 100Hz, not hours.
+var current_tick: u64 = 0;
+
+/// Update the tick counter (call from timer interrupt)
+/// This provides the time base for rate limiting that cannot be
+/// accelerated by attacker-controlled traffic.
+pub fn tick() void {
+    current_tick +%= 1;
+}
+
+/// SECURITY: IRQ-safe spinlock for concurrent access protection.
+/// Previously the PMTU cache had no synchronization, allowing race conditions
+/// on SMP systems where concurrent lookupPmtu/updatePmtu calls could read
+/// torn values or corrupt cache entries.
+var pmtu_lock: sync.Spinlock = .{};
 
 /// Look up PMTU for a destination IP
 /// Returns DEFAULT_MTU if no entry exists
+/// Thread-safe: protected by spinlock
 pub fn lookupPmtu(dst_ip: u32) u16 {
+    const held = pmtu_lock.acquire();
+    defer held.release();
+
     for (&pmtu_cache) |*entry| {
         if (entry.destination_ip == dst_ip) {
             // Update age on access
@@ -66,7 +96,11 @@ pub fn lookupPmtu(dst_ip: u32) u16 {
 /// - ICMP handler validates original packet against active TCP connections
 ///   before calling this function (see icmp.zig:handleDestUnreachable)
 /// - UDP PMTU updates are allowed with rate limiting (stateless protocol)
+/// Thread-safe: protected by spinlock
 pub fn updatePmtu(dst_ip: u32, new_mtu: u16) void {
+    const held = pmtu_lock.acquire();
+    defer held.release();
+
     // Clamp MTU to valid range
     const mtu = if (new_mtu < MIN_MTU) MIN_MTU else new_mtu;
 
@@ -75,20 +109,22 @@ pub fn updatePmtu(dst_ip: u32, new_mtu: u16) void {
     // First, check if entry already exists
     for (&pmtu_cache) |*entry| {
         if (entry.destination_ip == dst_ip) {
-            // Rate limit: ignore updates that come too quickly
-            // This prevents rapid cache poisoning via spoofed ICMP messages
-            const time_since_update = pmtu_age_counter -% entry.last_update;
-            if (time_since_update < PMTU_UPDATE_RATE_LIMIT) {
-                return; // Too soon since last update
+            // SECURITY (Vuln 2): Use tick-based rate limiting instead of op counter.
+            // The op counter could be accelerated by attacker flooding with ICMP messages.
+            // Using current_tick (monotonic, timer-driven) makes rate limiting time-based.
+            // Wraparound: u64 ticks at 100Hz wraps after ~5 billion years, not hours.
+            const ticks_since_update = current_tick -% entry.last_update_tick;
+            if (ticks_since_update < PMTU_UPDATE_RATE_LIMIT_TICKS) {
+                return; // Too soon since last update - rate limit triggered
             }
 
             // Only update if new MTU is smaller (PMTUD reduces, never increases)
             // To increase, we'd need explicit "probe" support (RFC 4821)
             if (mtu < entry.mtu) {
                 entry.mtu = mtu;
-                entry.last_update = pmtu_age_counter;
+                entry.last_update_tick = current_tick;
             }
-            entry.age = pmtu_age_counter;
+            entry.age = pmtu_age_counter; // LRU ordering still uses op counter (not security critical)
             return;
         }
     }
@@ -115,7 +151,7 @@ pub fn updatePmtu(dst_ip: u32, new_mtu: u16) void {
         .destination_ip = dst_ip,
         .mtu = mtu,
         .age = pmtu_age_counter,
-        .last_update = pmtu_age_counter,
+        .last_update_tick = current_tick, // Use tick-based timestamp
     };
 }
 

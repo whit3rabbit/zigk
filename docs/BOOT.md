@@ -28,6 +28,7 @@ For detailed byte-level layouts, struct alignments, and hardware interface speci
    - Initializes SMP (brings up Application Processors)
    - Sets up Memory Management (PMM/VMM/Heap)
    - Registers demand paging handler for lazy memory allocation
+   - Initializes VDSO (Virtual Dynamic Shared Object)
    - Initializes scheduler and creates idle thread
    - Scans modules to load the init process (shell or httpd)
    - Starts the scheduler
@@ -49,8 +50,10 @@ For detailed byte-level layouts, struct alignments, and hardware interface speci
 | Kernel Base | `0xFFFFFFFF80000000` | Kernel code and data |
 | HHDM Base | `0xFFFF800000000000` | Direct map of physical memory |
 | Kernel Stacks | `0xFFFFA00000000000` | Per-thread kernel stacks |
-| User Stack | `0xF0000000` (top) | Default user stack location |
-| User mmap region | `0x10000000000` - `0x7FFFFFFFFFFF` | Demand-paged anonymous mappings |
+| User Stack | `0x7FFF_FFFF_F000` (base) | User stack location (ASLR randomized) |
+| VDSO / VVAR | `0x7FFF_E000_0000` (base) | Shared kernel-user pages (ASLR randomized) |
+| PIE Base | `0x5555_5000_0000` (base) | Position-independent executable load address (ASLR randomized) |
+| User mmap region | `0x1000_0000_0000` (base) | Demand-paged anonymous mappings (ASLR randomized) |
 
 ## Demand Paging
 
@@ -85,6 +88,37 @@ Zscapek implements lazy (demand) paging for anonymous memory mappings. When user
 - `src/kernel/user_vmm.zig` - VMA management and `handlePageFault()`
 - `src/arch/x86_64/interrupts.zig` - Page fault dispatch to demand paging handler
 - `src/kernel/main.zig` - Handler registration via `setPageFaultHandler()`
+
+## Address Space Layout Randomization (ASLR)
+
+Zscapek implements full ASLR to randomize critical memory regions per-process, mitigating exploitation techniques that rely on predictable addresses (ROP, ret2libc, etc.).
+
+### Randomized Regions
+
+| Component | Base Address | Entropy | Range |
+|-----------|--------------|---------|-------|
+| Stack top | `0x7FFF_FFFF_F000` | 11 bits | 8MB (2048 pages) |
+| PIE base | `0x5555_5000_0000` | 16 bits | 4GB (64KB granularity) |
+| mmap base | `0x1000_0000_0000` | 20 bits | 4TB |
+| Heap gap | After ELF end | 8 bits | 1MB (256 pages) |
+| VDSO | `0x7FFF_E000_0000` | 12 bits | 16MB |
+
+### Behavior
+
+- **Process creation**: New ASLR offsets generated via `aslr.generateOffsets()`
+- **Fork**: Child inherits parent's ASLR layout (same address space)
+- **Execve**: New ASLR offsets generated (replaces address space)
+
+### Entropy Source
+
+ASLR uses the kernel PRNG (xoroshiro128+) seeded from hardware entropy (RDRAND/RDSEED) at boot. The `prng.range()` function uses rejection sampling to avoid modulo bias.
+
+### Key Files
+
+- `src/kernel/aslr.zig` - ASLR offset generation and configuration
+- `src/kernel/process.zig` - Per-process `aslr_offsets` field
+- `src/kernel/elf.zig` - Accepts randomized stack_top and pie_base
+- `src/kernel/user_vmm.zig` - Randomized mmap_base per address space
 
 ## Limine Configuration
 
@@ -175,6 +209,7 @@ Static ELF binaries (especially those using musl or glibc) require auxiliary vec
 | AT_PHNUM (5)  | count | Number of program headers |
 | AT_PAGESZ (6) | 4096  | System page size |
 | AT_ENTRY (9)  | addr  | Original entry point |
+| AT_SYSINFO_EHDR (33) | addr | Address of VDSO header (for fast syscalls) |
 
 Without these, C runtime initialization may fail silently or crash.
 

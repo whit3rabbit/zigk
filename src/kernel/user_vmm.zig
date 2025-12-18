@@ -140,8 +140,17 @@ pub const UserVmm = struct {
     /// Total mapped bytes
     total_mapped: usize,
 
-    /// Initialize a new UserVmm with a fresh address space
+    /// Randomized mmap base address (ASLR)
+    /// First-fit allocation starts searching from here
+    mmap_base: u64,
+
+    /// Initialize a new UserVmm with a fresh address space (default mmap base)
     pub fn init() !*UserVmm {
+        return initWithMmapBase(USER_MMAP_START);
+    }
+
+    /// Initialize a new UserVmm with a randomized mmap base (ASLR)
+    pub fn initWithMmapBase(mmap_base: u64) !*UserVmm {
         const alloc = heap.allocator();
 
         // Create new page table
@@ -155,6 +164,7 @@ pub const UserVmm = struct {
             .vma_head = null,
             .vma_count = 0,
             .total_mapped = 0,
+            .mmap_base = mmap_base,
         };
 
         return self;
@@ -170,6 +180,7 @@ pub const UserVmm = struct {
             .vma_head = null,
             .vma_count = 0,
             .total_mapped = 0,
+            .mmap_base = USER_MMAP_START, // Default for compatibility
         };
 
         return self;
@@ -623,7 +634,8 @@ pub const UserVmm = struct {
     /// Find a free virtual address range of given size
     /// Public for use by MMIO/DMA syscalls
     pub fn findFreeRange(self: *UserVmm, size: usize) ?u64 {
-        var search_addr: u64 = USER_MMAP_START;
+        // Start from randomized mmap base (ASLR)
+        var search_addr: u64 = self.mmap_base;
 
         // Walk VMAs looking for a gap
         var vma = self.vma_head;

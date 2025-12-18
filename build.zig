@@ -183,6 +183,16 @@ pub fn build(b: *std.Build) void {
     prng_module.addImport("sync", sync_module);
     prng_module.addImport("console", console_module);
 
+    // Create ASLR module (Address Space Layout Randomization)
+    const aslr_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/aslr.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    aslr_module.addImport("prng", prng_module);
+    aslr_module.addImport("pmm", pmm_module);
+    aslr_module.addImport("console", console_module);
+
     // Create Heap module (Kernel Heap Allocator)
     const heap_module = b.createModule(.{
         .root_source_file = b.path("src/kernel/heap.zig"),
@@ -250,6 +260,7 @@ pub fn build(b: *std.Build) void {
     vdso_module.addImport("vmm", vmm_module);
     vdso_module.addImport("hal", hal_module);
     vdso_module.addImport("console", console_module);
+    vdso_module.addImport("prng", prng_module);
     // UserVmm not defined yet - will do after definition
     // Process not defined yet - will do after definition
 
@@ -565,6 +576,7 @@ pub fn build(b: *std.Build) void {
     process_module.addImport("list", list_module);
     process_module.addImport("capabilities", capabilities_module);
     process_module.addImport("vdso", vdso_module);
+    process_module.addImport("aslr", aslr_module);
 
     // Create ELF loader module (for execve)
     const elf_module = b.createModule(.{
@@ -775,6 +787,7 @@ pub fn build(b: *std.Build) void {
     syscall_execution_module.addImport("user_mem", user_mem_module);
     syscall_execution_module.addImport("user_vmm", user_vmm_module);
     syscall_execution_module.addImport("vdso", vdso_module);
+    syscall_execution_module.addImport("aslr", aslr_module);
 
     // Create syscall custom module (debug_log, putchar, getchar, etc.)
     const syscall_custom_module = b.createModule(.{
@@ -994,6 +1007,7 @@ pub fn build(b: *std.Build) void {
     kernel.root_module.addImport("kernel_stack", kernel_stack_module);
     kernel.root_module.addImport("stack_guard", stack_guard_module);
     kernel.root_module.addImport("prng", prng_module);
+    kernel.root_module.addImport("aslr", aslr_module);
     kernel.root_module.addImport("syscall_random", syscall_random_module);
     kernel.root_module.addImport("syscall_table", syscall_table_module);
     kernel.root_module.addImport("framebuffer", framebuffer_module);

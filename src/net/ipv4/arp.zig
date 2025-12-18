@@ -64,6 +64,15 @@ pub const ArpEntry = struct {
     expected_reply_mac: [6]u8,
     /// Whether we've received at least one reply (for validation)
     has_received_reply: bool,
+    /// SECURITY (Vuln 4): Conflict detection for ARP race attacks.
+    /// Set true when we receive replies with different MACs for the same IP
+    /// within a short time window. This indicates either:
+    /// 1. Legitimate IP address conflict on the network
+    /// 2. Active ARP spoofing/MITM attack in progress
+    /// When set, the entry is invalidated and must be re-resolved after a delay.
+    conflict_detected: bool,
+    /// Timestamp when conflict was first detected (for backoff)
+    conflict_time: u64,
 };
 
 /// ARP cache timeout in seconds (simplified - 20 minutes)
@@ -119,6 +128,8 @@ fn resetPending(entry: *ArpEntry) void {
     entry.queue_count = 0;
     entry.expected_reply_mac = [_]u8{0} ** 6;
     entry.has_received_reply = false;
+    entry.conflict_detected = false;
+    entry.conflict_time = 0;
 }
 
 fn clearPending(entry: *ArpEntry) void {
@@ -191,18 +202,58 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
                 // An attacker could race to send a spoofed reply before the real host.
                 // We track whether we've already received a reply and from which MAC.
                 if (entry.state == .incomplete) {
+                    // SECURITY (Vuln 4): Check for conflict backoff period
+                    // If we recently detected a conflict, ignore all replies for a while
+                    // to prevent the attacker from winning the race repeatedly
+                    if (entry.conflict_detected) {
+                        const conflict_age = current_tick -% entry.conflict_time;
+                        // Backoff for 5 seconds before accepting new replies
+                        // This gives time for admin investigation and reduces attack surface
+                        if (conflict_age < 5 * ticks_per_second) {
+                            return false; // Still in conflict backoff period
+                        }
+                        // Backoff expired - reset conflict state and try fresh
+                        entry.conflict_detected = false;
+                        entry.has_received_reply = false;
+                        entry.expected_reply_mac = [_]u8{0} ** 6;
+                    }
+
                     if (!entry.has_received_reply) {
-                        // First reply - record the MAC and accept
+                        // SECURITY (Vuln 4 - First Reply Race): First reply is accepted without
+                        // additional validation. An attacker on the same L2 segment can race
+                        // the legitimate host to send a spoofed ARP reply first, winning MITM
+                        // position. The conflict_detected mechanism only triggers for SUBSEQUENT
+                        // conflicting replies, not the initial race winner.
+                        //
+                        // Risk: Medium - enables ARP spoofing/MITM on local network.
+                        // Mitigation options (not implemented):
+                        // - Require multiple consistent replies before promoting to reachable
+                        // - Static ARP bindings for critical hosts (gateway, DNS)
+                        // - 802.1X/Dynamic ARP Inspection at switch level
+                        // - Gratuitous ARP announcement to detect conflicts proactively
                         @memcpy(&entry.expected_reply_mac, &arp.sender_mac);
                         entry.has_received_reply = true;
                         updateCache(iface, sender_ip, arp.sender_mac, .reachable) catch {};
                     } else {
                         // Subsequent reply - verify it matches expected MAC
-                        // If different, someone is racing to poison; drop the packet
                         if (std.mem.eql(u8, &entry.expected_reply_mac, &arp.sender_mac)) {
                             updateCache(iface, sender_ip, arp.sender_mac, .reachable) catch {};
+                        } else {
+                            // SECURITY (Vuln 4): Conflicting MAC detected!
+                            // This indicates either:
+                            // 1. Active ARP spoofing attack (attacker racing legitimate host)
+                            // 2. IP address conflict on network (misconfiguration)
+                            // 3. Legitimate failover/load balancing (rare for ARP)
+                            //
+                            // Response: Mark entry as conflicted, clear it, and enter backoff.
+                            // The next resolution attempt after backoff will start fresh.
+                            // TODO: Add kernel logging/alerting for this security event
+                            entry.conflict_detected = true;
+                            entry.conflict_time = current_tick;
+                            entry.state = .incomplete;
+                            entry.has_received_reply = false;
+                            // Don't update cache - reject both MACs until backoff expires
                         }
-                        // Else: Silently drop conflicting reply (potential attack)
                     }
                 } else {
                     // Non-incomplete entry - apply rate limiting via updateCache
@@ -305,81 +356,110 @@ fn resolveUnlocked(ip: u32) ?[6]u8 {
 pub fn resolveOrRequest(iface: *Interface, ip: u32, pkt_opaque: ?*const anyopaque) ?[6]u8 {
     const pkt: ?*const PacketBuffer = if (pkt_opaque) |p| @ptrCast(@alignCast(p)) else null;
 
-    const held = lock.acquire();
-    defer held.release();
+    // SECURITY (Vuln 1): Defer sendRequest() outside the critical section.
+    // Previously, sendRequest() was called while holding the ARP spinlock.
+    // This creates potential issues:
+    // 1. Deadlock: If NIC driver's transmit() has its own locks, lock ordering
+    //    violations could cause deadlock on SMP systems
+    // 2. Priority inversion: Long transmit() calls block other CPUs spinning
+    //    on the ARP lock, starving high-priority packet processing
+    // 3. Reentrancy: If transmit() triggers a callback/IRQ that needs ARP
+    //    resolution, we'd attempt to re-acquire a non-recursive spinlock
+    //
+    // Fix: Store the IP to resolve, release lock, then call sendRequest()
+    var deferred_send_ip: ?u32 = null;
+    var resolved_mac: ?[6]u8 = null;
 
-    // Use unlocked version since we already hold the lock
-    if (resolveUnlocked(ip)) |mac| {
-        return mac;
-    }
+    // Critical section - only cache operations, no external calls
+    {
+        const held = lock.acquire();
+        defer held.release();
 
-    // Check if we already have an incomplete entry
-    for (arp_cache.items) |*entry| {
-            if (entry.ip_addr == ip and entry.state == .incomplete) {
-                if (pkt) |p| {
-                    if (p.len <= packet.MAX_PACKET_SIZE) {
-                        // Queue full? Use drop-head (drop oldest) to favor new traffic
-                        if (entry.queue_count >= ArpEntry.QUEUE_SIZE) {
-                            // Free the oldest packet
-                            const head_idx = @as(usize, entry.queue_head);
-                            if (entry.pending_pkts[head_idx]) |old_buf| {
-                                arp_allocator.free(old_buf);
-                                entry.pending_pkts[head_idx] = null;
+        // Use unlocked version since we already hold the lock
+        if (resolveUnlocked(ip)) |mac| {
+            resolved_mac = mac;
+        } else {
+            // Check if we already have an incomplete entry
+            var found_incomplete = false;
+            for (arp_cache.items) |*entry| {
+                if (entry.ip_addr == ip and entry.state == .incomplete) {
+                    found_incomplete = true;
+                    if (pkt) |p| {
+                        if (p.len <= packet.MAX_PACKET_SIZE) {
+                            // Queue full? Use drop-head (drop oldest) to favor new traffic
+                            if (entry.queue_count >= ArpEntry.QUEUE_SIZE) {
+                                // Free the oldest packet
+                                const head_idx = @as(usize, entry.queue_head);
+                                if (entry.pending_pkts[head_idx]) |old_buf| {
+                                    arp_allocator.free(old_buf);
+                                    entry.pending_pkts[head_idx] = null;
+                                }
+                                entry.queue_head = (entry.queue_head + 1) % @as(u8, @intCast(ArpEntry.QUEUE_SIZE));
+                                entry.queue_count -= 1;
                             }
-                            entry.queue_head = (entry.queue_head + 1) % @as(u8, @intCast(ArpEntry.QUEUE_SIZE));
-                            entry.queue_count -= 1;
-                        }
 
-                        // Enqueue new packet
-                        const buf = arp_allocator.alloc(u8, p.len) catch null;
-                        if (buf) |slot| {
-                            @memcpy(slot[0..p.len], p.data[0..p.len]);
-                            const tail_idx = @as(usize, entry.queue_tail);
-                            entry.pending_pkts[tail_idx] = slot;
-                            entry.pending_lens[tail_idx] = p.len;
-                            entry.queue_tail = (entry.queue_tail + 1) % @as(u8, @intCast(ArpEntry.QUEUE_SIZE));
-                            entry.queue_count += 1;
+                            // Enqueue new packet
+                            const buf = arp_allocator.alloc(u8, p.len) catch null;
+                            if (buf) |slot| {
+                                @memcpy(slot[0..p.len], p.data[0..p.len]);
+                                const tail_idx = @as(usize, entry.queue_tail);
+                                entry.pending_pkts[tail_idx] = slot;
+                                entry.pending_lens[tail_idx] = p.len;
+                                entry.queue_tail = (entry.queue_tail + 1) % @as(u8, @intCast(ArpEntry.QUEUE_SIZE));
+                                entry.queue_count += 1;
+                            }
                         }
                     }
+
+                    if (entry.retries < ARP_MAX_RETRIES) {
+                        entry.retries += 1;
+                        deferred_send_ip = ip; // Defer send until after lock release
+                    }
+                    break;
                 }
-
-            if (entry.retries < ARP_MAX_RETRIES) {
-                entry.retries += 1;
-                sendRequest(iface, ip);
             }
-            return null;
-        }
-    }
 
-    // Create incomplete entry
-    if (findFreeEntry() catch null) |entry| {
-        clearPending(entry);
-        entry.ip_addr = ip;
-        entry.state = .incomplete;
-        entry.timestamp = current_tick;
-        entry.retries = 1;
-        entry.queue_head = 0;
-        entry.queue_tail = 0;
-        entry.queue_count = 0;
-        entry.expected_reply_mac = [_]u8{0} ** 6;
-        entry.has_received_reply = false;
+            // Create incomplete entry if not found
+            if (!found_incomplete) {
+                if (findFreeEntry() catch null) |entry| {
+                    clearPending(entry);
+                    entry.ip_addr = ip;
+                    entry.state = .incomplete;
+                    entry.timestamp = current_tick;
+                    entry.retries = 1;
+                    entry.queue_head = 0;
+                    entry.queue_tail = 0;
+                    entry.queue_count = 0;
+                    entry.expected_reply_mac = [_]u8{0} ** 6;
+                    entry.has_received_reply = false;
+                    entry.conflict_detected = false;
+                    entry.conflict_time = 0;
 
-        if (pkt) |p| {
-         if (p.len <= packet.MAX_PACKET_SIZE) {
-            if (arp_allocator.alloc(u8, p.len) catch null) |slot| {
-                @memcpy(slot[0..p.len], p.data[0..p.len]);
-                entry.pending_pkts[entry.queue_tail] = slot;
-                entry.pending_lens[entry.queue_tail] = p.len;
-                entry.queue_tail = 1; // (0 + 1) % QUEUE_SIZE
-                entry.queue_count = 1;
+                    if (pkt) |p| {
+                        if (p.len <= packet.MAX_PACKET_SIZE) {
+                            if (arp_allocator.alloc(u8, p.len) catch null) |slot| {
+                                @memcpy(slot[0..p.len], p.data[0..p.len]);
+                                entry.pending_pkts[entry.queue_tail] = slot;
+                                entry.pending_lens[entry.queue_tail] = p.len;
+                                entry.queue_tail = 1; // (0 + 1) % QUEUE_SIZE
+                                entry.queue_count = 1;
+                            }
+                        }
+                    }
+
+                    deferred_send_ip = ip; // Defer send until after lock release
+                }
             }
         }
+    } // Lock released here
+
+    // Send ARP request OUTSIDE the critical section
+    // This prevents deadlock with NIC driver locks and reduces lock hold time
+    if (deferred_send_ip) |target_ip| {
+        sendRequest(iface, target_ip);
     }
 
-        sendRequest(iface, ip);
-    }
-
-    return null;
+    return resolved_mac;
 }
 
 /// Broadcast MAC address
@@ -469,6 +549,8 @@ fn updateCache(iface: *Interface, ip: u32, mac: [6]u8, state: ArpState) !void {
     entry.queue_count = 0;
     entry.expected_reply_mac = [_]u8{0} ** 6;
     entry.has_received_reply = false;
+    entry.conflict_detected = false;
+    entry.conflict_time = 0;
 }
 
 /// Maximum ARP cache entries (DoS protection)
@@ -540,6 +622,13 @@ fn findFreeEntry() !*ArpEntry {
 
     // Under capacity: append new entry
     const new_entry = try arp_cache.addOne(arp_allocator);
+
+    // SECURITY: Zero-initialize before calling clearPending().
+    // addOne() returns memory with undefined contents. If those bytes happen
+    // to look like valid pointers in pending_pkts[], freePending() would call
+    // allocator.free() on garbage addresses, causing heap corruption or crash.
+    // Zero-initializing ensures pending_pkts[] contains null before clearPending.
+    new_entry.* = std.mem.zeroes(ArpEntry);
     new_entry.state = .free;
     clearPending(new_entry);
     return new_entry;
@@ -587,7 +676,14 @@ pub fn ageCache() void {
 }
 
 /// Clear the ARP cache
+/// SECURITY: Now acquires lock before clearing.
+/// Previously this function iterated without holding the lock, allowing
+/// concurrent packet reception to modify pending_pkts while clearPending()
+/// was iterating, causing double-free or use-after-free of packet buffers.
 pub fn clearCache() void {
+    const held = lock.acquire();
+    defer held.release();
+
     for (arp_cache.items) |*entry| {
         clearPending(entry);
         entry.state = .free;
@@ -596,7 +692,11 @@ pub fn clearCache() void {
 }
 
 /// Get cache entry count
+/// SECURITY: Acquires lock to prevent race with cache modifications on SMP
 pub fn getCacheCount() usize {
+    const held = lock.acquire();
+    defer held.release();
+
     var count: usize = 0;
     for (arp_cache.items) |entry| {
         if (entry.state != .free) {

@@ -259,13 +259,15 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
 
     var payload_slice: []u8 = &[_]u8{};
     var is_reassembled = false;
-    var reassembly_id: usize = 0;
+    // SECURITY: Store the ReassemblyResult which owns the buffer.
+    // Previously we stored a slice that could become dangling after lock release.
+    var reassembly_result: ?reassembly.ReassemblyResult = null;
 
     if (mf_bit != 0 or frag_offset != 0) {
         // Fragmented packet - attempt reassembly
         const payload_len = total_len - header_len;
         const current_payload = pkt.data[pkt.ip_offset + header_len..][0..payload_len];
-        
+
         if (reassembly.processFragment(
             ip.getSrcIp(),
             ip.getDstIp(),
@@ -275,8 +277,11 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
             mf_bit != 0,
             current_payload
         )) |res| {
-            payload_slice = res.slice;
-            reassembly_id = res.entry_id;
+            // SECURITY: res.owned_buffer is now an OWNED copy, not a reference
+            // to the cache entry. The cache entry was already freed inside
+            // processFragment while holding the lock. No UAF possible.
+            reassembly_result = res;
+            payload_slice = res.payload();
             is_reassembled = true;
         } else {
             return true; // Consumed (stored or incomplete), stop processing
@@ -289,20 +294,15 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
     // Set transport layer offset
     
     if (is_reassembled) {
-        const allocator = ipv4_allocator orelse heap.allocator();
-        const copy = allocator.alloc(u8, payload_slice.len) catch {
-            reassembly.freeEntry(reassembly_id);
-            return false;
-        };
-        errdefer allocator.free(copy);
+        // SECURITY: reassembly_result now contains an OWNED buffer.
+        // The data was copied inside processFragment() while holding the lock,
+        // eliminating the UAF window that existed before.
+        var result = reassembly_result.?;
+        defer result.deinit(); // Free the owned buffer when we're done
 
-        @memcpy(copy, payload_slice);
-
-        // Now safe to free reassembly entry - data is off the shared buffer
-        reassembly.freeEntry(reassembly_id);
-
-        // Create PacketBuffer using heap-backed copy to avoid kernel stack pressure
-        var virt_pkt = PacketBuffer.init(copy, payload_slice.len);
+        // Create PacketBuffer using the owned buffer directly
+        // No extra allocation needed - reassembly already allocated for us
+        var virt_pkt = PacketBuffer.init(result.owned_buffer, result.payload_len);
 
         // Copy relevant metadata from original packet
         virt_pkt.src_ip = pkt.src_ip;
@@ -325,22 +325,20 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
             else => 0,
         };
 
-        if (payload_slice.len < min_size) {
+        if (result.payload_len < min_size) {
             // Reassembled payload too small for transport header - drop
-            allocator.free(copy);
+            // defer will call result.deinit() to free memory
             return false;
         }
 
         // Dispatch to transport layer
-        const handled = switch (ip.protocol) {
+        return switch (ip.protocol) {
             PROTO_ICMP => icmp.processPacket(iface, &virt_pkt),
             PROTO_UDP => udp.processPacket(iface, &virt_pkt),
             PROTO_TCP => tcp.processPacket(iface, &virt_pkt),
             else => false,
         };
-
-        allocator.free(copy);
-        return handled;
+        // defer handles cleanup - result.deinit() called automatically
     }
 
     // Normal non-fragmented path (using original pkt)

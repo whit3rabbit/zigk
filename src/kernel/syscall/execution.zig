@@ -23,6 +23,7 @@ const framebuffer = @import("framebuffer");
 const fs = @import("fs");
 const user_mem = @import("user_mem");
 const user_vmm = @import("user_vmm");
+const aslr = @import("aslr");
 
 const SyscallError = base.SyscallError;
 const UserPtr = base.UserPtr;
@@ -351,7 +352,22 @@ pub fn sys_execve(frame: *hal.syscall.SyscallFrame, path_ptr: usize, argv_ptr: u
     // Load and execute ELF
     // This creates a new address space and sets up the stack
     const vdso = @import("vdso");
-    const result = elf.exec(file.data, argv, envp, vdso.VDSO_BASE_ADDR) catch |err| {
+
+    // Generate new ASLR offsets for the new address space
+    // execve replaces the entire address space, so we need fresh randomization
+    const aslr_offsets = aslr.generateOffsets();
+
+    // Generate new randomized VDSO base for the new program
+    const vdso_base = vdso.generateBase();
+
+    const result = elf.exec(
+        file.data,
+        argv,
+        envp,
+        vdso_base,
+        aslr_offsets.stack_top,          // ASLR stack top
+        aslr.getPieBase(&aslr_offsets),  // ASLR PIE base
+    ) catch |err| {
         console.err("sys_execve: Failed to exec: {}", .{err});
         // Map ELF loader errors to appropriate syscall errors
         return switch (err) {
@@ -361,11 +377,17 @@ pub fn sys_execve(frame: *hal.syscall.SyscallFrame, path_ptr: usize, argv_ptr: u
     };
 
     // Map VDSO into new address space
-    _ = vdso.mapToPml4(result.pml4_phys) catch |err| blk: {
+    _ = vdso.mapToPml4(result.pml4_phys, vdso_base) catch |err| blk: {
         console.warn("sys_execve: Failed to map VDSO: {}", .{err});
         // Continue anyway - libc will fallback
-        break :blk 0;
+        break :blk;
     };
+    
+    // Store the new VDSO base and ASLR offsets in the process struct
+    // These are needed for fork() to inherit the address layout
+    const current_proc_for_aslr = base.getCurrentProcess();
+    current_proc_for_aslr.vdso_base = vdso_base;
+    current_proc_for_aslr.aslr_offsets = aslr_offsets;
 
     console.debug("sys_execve: Loaded ELF entry={x} stack={x} cr3={x}", .{
         result.entry_point,
@@ -422,8 +444,10 @@ pub fn sys_execve(frame: *hal.syscall.SyscallFrame, path_ptr: usize, argv_ptr: u
 
     // Update process/thread state
     current_proc.cr3 = result.pml4_phys;
-    current_proc.heap_start = result.heap_start;
-    current_proc.heap_break = result.heap_start;
+    // Apply ASLR heap gap to heap start
+    const heap_with_gap = aslr.getHeapStart(result.heap_start, &aslr_offsets);
+    current_proc.heap_start = heap_with_gap;
+    current_proc.heap_break = heap_with_gap;
     current_thread.cr3 = result.pml4_phys;
 
     // Switch to new address space immediately

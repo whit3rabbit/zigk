@@ -74,14 +74,35 @@ const ReassemblyEntry = struct {
         return e;
     }
     
+    /// Free the entry's buffer and update memory tracking.
+    /// SECURITY: MUST be called while holding the reassembly lock.
+    /// This function modifies current_memory_usage which is shared state.
+    /// The lock provides synchronization to prevent race conditions on SMP.
     fn deinit(self: *ReassemblyEntry, allocator: std.mem.Allocator) void {
         if (self.buffer.len > 0) {
+            const buf_len = self.buffer.len;
             allocator.free(self.buffer);
-            if (current_memory_usage >= self.buffer.len) {
-                current_memory_usage -= self.buffer.len;
-            } else {
-                current_memory_usage = 0; // Safety against underflow
+
+            // SECURITY (Vuln 5): Detect and log memory accounting underflow.
+            // Use saturating subtraction to prevent wraparound to huge values
+            // which would bypass MAX_TOTAL_MEMORY and allow memory exhaustion.
+            //
+            // IMPORTANT: If underflow occurs, it indicates a bug elsewhere
+            // (double-free, deinit called without allocation, etc.). In debug
+            // builds we assert to catch this during development. In release
+            // builds we saturate to 0 and continue (fail-safe), but the
+            // accounting is now incorrect and future allocations may exceed
+            // the budget. Consider adding telemetry/logging here if available.
+            if (std.debug.runtime_safety) {
+                // Debug build: assert to catch accounting bugs during development
+                std.debug.assert(current_memory_usage >= buf_len);
             }
+            current_memory_usage = std.math.sub(usize, current_memory_usage, buf_len) catch blk: {
+                // Underflow detected - accounting is corrupted
+                // In production: saturate to 0 (fail-safe, but budget is broken)
+                // TODO: Add kernel log/telemetry for this anomaly if logging available
+                break :blk 0;
+            };
         }
         self.buffer = &[_]u8{};
     }
@@ -128,15 +149,38 @@ pub fn tick() void {
 }
 
 /// Result of reassembly
+/// SECURITY: Contains an OWNED copy of the reassembled payload.
+/// The caller is responsible for freeing `owned_buffer` via the reassembly allocator.
+/// This design prevents use-after-free: the slice no longer references the cache entry's
+/// internal buffer which could be evicted by another thread/IRQ after lock release.
 pub const ReassemblyResult = struct {
-    slice: []u8,
-    entry_id: usize,
+    /// Owned buffer - caller must free with reassembly allocator
+    owned_buffer: []u8,
+    /// Actual payload length (may be less than owned_buffer.len due to alignment)
+    payload_len: usize,
+
+    /// Get the payload slice
+    pub fn payload(self: *const ReassemblyResult) []u8 {
+        return self.owned_buffer[0..self.payload_len];
+    }
+
+    /// Free the owned buffer - call this when done with the payload
+    pub fn deinit(self: *ReassemblyResult) void {
+        if (self.owned_buffer.len > 0) {
+            reassembly_allocator.free(self.owned_buffer);
+            self.owned_buffer = &[_]u8{};
+            self.payload_len = 0;
+        }
+    }
 };
 
 /// Process a fragment of an IPv4 packet
 /// Returns:
-///   - ReassemblyResult if complete (caller MUST call freeEntry)
+///   - ReassemblyResult if complete (contains OWNED copy - caller must call result.deinit())
 ///   - null if incomplete or dropped
+/// SECURITY: The returned buffer is an owned copy allocated while holding the lock.
+/// This prevents use-after-free races where another thread evicts the cache entry
+/// between lock release and the caller's memcpy.
 pub fn processFragment(
     src_ip: u32,
     dst_ip: u32,
@@ -298,10 +342,38 @@ pub fn processFragment(
 
     // Check completion
     if (isComplete(e)) {
-        const payload_slice = e.buffer[0..e.total_len];
+        // SECURITY (CVE-like: UAF in fragment reassembly)
+        // Allocate and copy the payload WHILE HOLDING THE LOCK.
+        // Previously, we returned a slice into e.buffer and released the lock,
+        // creating a window where another thread/IRQ could evict this entry
+        // before the caller copied the data, leading to use-after-free.
+        const owned_buf = reassembly_allocator.alloc(u8, e.total_len) catch {
+            // Allocation failed - free entry and return null
+            e.used = false;
+            e.deinit(reassembly_allocator);
+            return null;
+        };
+
+        @memcpy(owned_buf, e.buffer[0..e.total_len]);
+
+        // SECURITY (Vuln 3): Capture total_len BEFORE calling deinit().
+        // Previously, e.total_len was read after e.deinit() was called.
+        // While currently safe (deinit only frees buffer, not struct fields),
+        // this pattern is fragile and violates use-after-free principles:
+        // 1. Future changes to deinit() might zero fields for defense-in-depth
+        // 2. Between e.used=false and return, another CPU could theoretically
+        //    reuse this slot (unlikely with spinlock, but defensive coding)
+        // 3. Static analyzers flag reads of object members after "destructor"
+        const final_payload_len = e.total_len;
+
+        // Free the cache entry NOW while we still hold the lock
+        // The caller owns owned_buf and is responsible for freeing it
+        e.used = false;
+        e.deinit(reassembly_allocator);
+
         return ReassemblyResult{
-            .slice = payload_slice,
-            .entry_id = entry_idx,
+            .owned_buffer = owned_buf,
+            .payload_len = final_payload_len,
         };
     }
 
@@ -309,14 +381,14 @@ pub fn processFragment(
 }
 
 /// Free a reassembly entry after consumption
+/// DEPRECATED: Entry cleanup is now handled internally by processFragment().
+/// The ReassemblyResult now contains an owned copy and the cache entry is freed
+/// before processFragment() returns. Callers should use result.deinit() instead.
+/// This function is retained for backwards compatibility but does nothing useful.
 pub fn freeEntry(id: usize) void {
-    const held = lock.acquire();
-    defer held.release();
-
-    if (id < MAX_REASSEMBLIES) {
-        cache[id].used = false;
-        cache[id].deinit(reassembly_allocator);
-    }
+    _ = id;
+    // No-op: entries are now freed inside processFragment() while holding the lock.
+    // This eliminates the UAF window that existed when the caller had to free.
 }
 
 const Allocation = struct {

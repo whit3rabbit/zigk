@@ -982,6 +982,8 @@ pub fn exec(
     argv: []const []const u8,
     envp: []const []const u8,
     vdso_base: ?u64,
+    stack_top_opt: ?u64,
+    pie_base_opt: ?u64,
 ) !ExecResult {
     // Create new address space
     const pml4_phys = vmm.createAddressSpace() catch {
@@ -989,8 +991,8 @@ pub fn exec(
     };
     errdefer vmm.destroyAddressSpace(pml4_phys);
 
-    // Default load base for PIE executables
-    const pie_base: u64 = 0x400000;
+    // Use provided PIE base or default (for ASLR)
+    const pie_base: u64 = pie_base_opt orelse 0x400000;
 
     // Load the ELF
     const load_result = load(data, pml4_phys, pie_base) catch |err| {
@@ -998,8 +1000,8 @@ pub fn exec(
         return error.InvalidExecutable;
     };
 
-    // Set up stack
-    const stack_top = DEFAULT_STACK_TOP;
+    // Use provided stack top or default (for ASLR)
+    const stack_top = stack_top_opt orelse DEFAULT_STACK_TOP;
     const stack_size = DEFAULT_STACK_SIZE;
 
     // Construct basic auxiliary vector

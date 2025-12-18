@@ -26,6 +26,7 @@ const boot = @import("boot.zig");
 const capabilities = @import("capabilities");
 const heap = @import("heap");
 const pci = @import("pci");
+const aslr = @import("aslr");
 
 /// Load the init process (httpd or shell) into a new user address space
 ///
@@ -55,10 +56,13 @@ pub fn loadInitProcess() void {
     }.call;
 
     // 1. Launch Drivers
+    // NOTE: Substring matching is used here for flexibility, but exact path matching
+    // or cryptographic signature verification would provide stronger guarantees that
+    // only intended driver binaries receive hardware capabilities.
     for (mods) |mod| {
         const cmdline = get_str(mod.cmdline);
         const path = get_str(mod.path);
-        
+
         if (std.mem.indexOf(u8, cmdline, "uart_driver") != null or std.mem.indexOf(u8, path, "uart_driver") != null) {
             spawnProcess(mod, "uart_driver");
         }
@@ -204,6 +208,8 @@ fn spawnProcess(mod: *limine.Module, process_name: []const u8) void {
     console.info("Created process pid={d} with FD table", .{proc.pid});
 
     // Grant capabilities if this is the UART driver
+    // TODO: Consider logging or failing process spawn if capability allocation fails,
+    // as silent failures may cause drivers to start without required hardware access.
     if (std.mem.eql(u8, process_name, "uart_driver")) {
          const alloc = heap.allocator();
          // Grant IRQ 4
@@ -262,35 +268,42 @@ fn spawnProcess(mod: *limine.Module, process_name: []const u8) void {
     console.info("Init: Loading ELF...", .{});
 
     // Step 3: Get module data as slice for ELF loader
+    // NOTE: This assumes Limine provides valid module metadata. Consider validating
+    // that mod.address != 0 and that mod.address + mod.size does not overflow
+    // before creating the slice, to guard against corrupted bootloader data.
     const mod_data = @as([*]const u8, @ptrFromInt(mod.address))[0..mod.size];
 
     // Step 4: Load ELF into process's address space
     // The ELF loader will parse headers, validate, and map PT_LOAD segments
-    const load_base: u64 = 0x400000; // Default load base for non-PIE executables
+    // Use ASLR-randomized PIE base from process offsets
+    const load_base: u64 = aslr.getPieBase(&proc.aslr_offsets);
     const load_result = elf.load(mod_data, proc.cr3, load_base) catch |err| {
         console.err("ELF load failed: {}", .{err});
         return;
     };
-    console.info("ELF: Loaded at {x}-{x}, entry={x}", .{
+    console.info("ELF: Loaded at {x}-{x}, entry={x} (ASLR)", .{
         load_result.base_addr,
         load_result.end_addr,
         load_result.entry_point,
     });
 
-    // Initialize heap boundaries
-    const heap_start = std.mem.alignForward(u64, load_result.end_addr, pmm.PAGE_SIZE);
+    // Initialize heap boundaries with ASLR heap gap
+    const heap_start = aslr.getHeapStart(load_result.end_addr, &proc.aslr_offsets);
     proc.heap_start = heap_start;
     proc.heap_break = heap_start;
-    console.info("Init: Heap initialized at {x}", .{heap_start});
+    console.info("Init: Heap initialized at {x} (ASLR gap={})", .{ heap_start, proc.aslr_offsets.heap_gap });
 
     console.info("Init: Setting up user stack...", .{});
     // Step 5: Allocate and map user stack with arguments
     // We use the ELF helper to set up the stack according to x86_64 ABI
     // (argc, argv, envp, auxv)
-    const stack_virt_top: u64 = 0xF0000000;
+    // Use ASLR-randomized stack top from process offsets
+    const stack_virt_top: u64 = proc.aslr_offsets.stack_top;
     const stack_size: usize = 1024 * 1024; // 1MB stack
 
     // Parse arguments from module command line
+    // NOTE: Fixed buffer of 16 arguments; excess tokens are silently dropped.
+    // Consider dynamic allocation or logging if truncation occurs.
     var argv_buf: [16][]const u8 = undefined;
     var argv_count: usize = 0;
 
@@ -326,17 +339,19 @@ fn spawnProcess(mod: *limine.Module, process_name: []const u8) void {
     }
 
     // Auxiliary Vector (Required for static binaries to find PHDRs)
-    const vdso = @import("vdso");
     const auxv = [_]elf.AuxEntry{
         .{ .id = 3, .value = load_result.phdr_addr }, // AT_PHDR
         .{ .id = 4, .value = 56 }, // AT_PHENT
         .{ .id = 5, .value = load_result.phnum }, // AT_PHNUM
         .{ .id = 6, .value = 4096 }, // AT_PAGESZ
         .{ .id = 9, .value = load_result.entry_point }, // AT_ENTRY
-        .{ .id = 33, .value = vdso.VDSO_BASE_ADDR }, // AT_SYSINFO_EHDR
+        .{ .id = 33, .value = proc.vdso_base }, // AT_SYSINFO_EHDR
     };
 
-    console.info("Creating user stack at {x} (size={d})", .{ stack_virt_top, stack_size });
+    console.info("Creating user stack at {x} (size={d}, ASLR)", .{ stack_virt_top, stack_size });
+
+    // Log ASLR configuration for this process
+    aslr.logOffsets(&proc.aslr_offsets, proc.pid);
 
     // setupStack allocates pages, maps them, and pushes args
     const initial_rsp = elf.setupStack(
@@ -367,6 +382,8 @@ fn spawnProcess(mod: *limine.Module, process_name: []const u8) void {
 
     // Set up TCB/TLS using ELF header information
     // Musl static binaries may crash if %fs:0 is not accessible or doesn't point to itself.
+    // TODO: Consider randomizing this address via aslr.getTlsBase() to prevent
+    // attackers from having a known memory location to target.
     const tls_base_addr: u64 = 0xB000_0000; // Preferred address for TCB
     var fs_base: u64 = 0;
 
@@ -498,6 +515,9 @@ fn grantVirtioCapabilities(proc: *process.Process, driver_type: VirtioDriverType
                 }) catch {};
 
                 // Grant DMA Memory Capability (e.g. 512 pages / 2MB)
+                // NOTE: This grants a uniform 2MB DMA limit to all VirtIO drivers.
+                // Consider calculating minimum required pages based on device type
+                // and virtqueue sizes to follow the principle of least privilege.
                 proc.capabilities.append(alloc, .{
                     .DmaMemory = .{ .max_pages = 512 }
                 }) catch {};

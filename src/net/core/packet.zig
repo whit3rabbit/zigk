@@ -76,23 +76,34 @@ pub const PacketBuffer = struct {
         };
     }
 
-    /// Get Ethernet header pointer
+    // SECURITY: The following header accessor methods (ethHeader, ipHeader, udpHeader,
+    // icmpHeader) perform direct pointer casts WITHOUT bounds checking. In ReleaseFast
+    // builds where runtime safety is disabled, malformed packets with invalid offsets
+    // can cause out-of-bounds memory access.
+    //
+    // These methods assume callers have already validated packet structure. For untrusted
+    // network input, prefer the bounds-checked module-level functions: getEthHeader(),
+    // getIpv4Header(), getUdpHeader(), getIcmpHeader() which return null on invalid access.
+    //
+    // Risk: High in ReleaseFast mode with malformed packets.
+    // Mitigation: Use safe accessors or validate offsets before calling these methods.
+
+    /// Get Ethernet header pointer (unchecked - see SECURITY note above)
     pub fn ethHeader(self: *const Self) *align(1) EthernetHeader {
-        // Safe access via slice bounds checking
         return @ptrCast(&self.data[self.eth_offset]);
     }
 
-    /// Get IPv4 header pointer
+    /// Get IPv4 header pointer (unchecked - see SECURITY note above)
     pub fn ipHeader(self: *const Self) *align(1) Ipv4Header {
         return @ptrCast(&self.data[self.ip_offset]);
     }
 
-    /// Get UDP header pointer
+    /// Get UDP header pointer (unchecked - see SECURITY note above)
     pub fn udpHeader(self: *const Self) *align(1) UdpHeader {
         return @ptrCast(&self.data[self.transport_offset]);
     }
 
-    /// Get ICMP header pointer
+    /// Get ICMP header pointer (unchecked - see SECURITY note above)
     pub fn icmpHeader(self: *const Self) *align(1) IcmpHeader {
         return @ptrCast(&self.data[self.transport_offset]);
     }

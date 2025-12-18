@@ -21,6 +21,9 @@ var vdso_page: ?[*]u8 = null;
 var vvar_phys: u64 = 0;
 var vdso_phys: u64 = 0;
 
+// Atomic guard for SMP-safe initialization (prevents double-init race)
+var init_done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
+
 const pmm = @import("pmm");
 const vmm = @import("vmm");
 const hal = @import("hal");
@@ -28,7 +31,10 @@ const console = @import("console");
 const user_vmm = @import("user_vmm");
 
 pub fn init() !void {
-    if (vvar_page != null) return;
+    // Atomic CAS ensures only one CPU wins the init race on SMP
+    if (init_done.cmpxchgStrong(false, true, .acquire, .monotonic) != null) {
+        return; // Another CPU already initialized
+    }
 
     // Allocate Vvar page
     const vvar_p = pmm.allocZeroedPage() orelse return error.OutOfMemory;
@@ -63,19 +69,18 @@ pub fn init() !void {
 pub fn update() void {
     const v = vvar_page orelse return;
 
-    // Seqlock write
-    _ = @atomicRmw(u32, &v.sequence, .Add, 1, .monotonic);
-    std.atomic.spinLoopHint(); // Barrier
+    // Seqlock write-begin: increment to odd
+    // seq_cst provides full barrier - prevents reordering of data writes before this
+    _ = @atomicRmw(u32, &v.sequence, .Add, 1, .seq_cst);
 
-    // Update time
-    // For MVP, just updating last_tsc.
-    // Ideally we sync with wall clock.
-    const freq = v.tsc_frequency_hz;
+    // Update time - use atomic stores to prevent torn reads by userspace
+    const freq = @atomicLoad(u64, &v.tsc_frequency_hz, .monotonic);
     if (freq > 0) {
-        v.last_tsc = hal.timing.rdtsc();
+        @atomicStore(u64, &v.last_tsc, hal.timing.rdtsc(), .monotonic);
     }
 
-    std.atomic.spinLoopHint(); // Barrier
+    // Seqlock write-end: increment to even
+    // release ensures all prior data writes are visible before sequence update
     _ = @atomicRmw(u32, &v.sequence, .Add, 1, .release);
 }
 
@@ -83,45 +88,48 @@ pub fn update() void {
 pub fn updateTime(sec: u64, nsec: u64) void {
     const v = vvar_page orelse return;
 
-    // Sequence begin
-    _ = @atomicRmw(u32, &v.sequence, .Add, 1, .monotonic);
-    std.atomic.spinLoopHint(); 
-    
-    v.base_sec = sec;
-    v.base_nsec = nsec;
-    v.last_tsc = hal.timing.rdtsc();
-    // Refresh freq just in case
-    v.tsc_frequency_hz = hal.timing.getTscFrequency();
-    
-    std.atomic.spinLoopHint();
-    // Sequence end
+    // Seqlock write-begin: increment to odd
+    // seq_cst provides full barrier - prevents reordering of data writes before this
+    _ = @atomicRmw(u32, &v.sequence, .Add, 1, .seq_cst);
+
+    // All data writes use atomic stores to prevent torn reads
+    @atomicStore(u64, &v.base_sec, sec, .monotonic);
+    @atomicStore(u64, &v.base_nsec, nsec, .monotonic);
+    @atomicStore(u64, &v.last_tsc, hal.timing.rdtsc(), .monotonic);
+    @atomicStore(u64, &v.tsc_frequency_hz, hal.timing.getTscFrequency(), .monotonic);
+
+    // Seqlock write-end: increment to even
+    // release ensures all prior data writes are visible before sequence update
     _ = @atomicRmw(u32, &v.sequence, .Add, 1, .release);
 }
 
 // VDSO placement
 //
-// SECURITY TODO: Implement ASLR for VDSO/VVAR addresses.
-//
-// Currently the VDSO and VVAR pages are mapped at fixed addresses, making them
-// predictable targets for exploitation:
-// - Information disclosure: Attacker knows exactly where timing data is located
-// - ROP gadget hunting: Fixed VDSO code location simplifies Return-Oriented
-//   Programming attacks by providing reliable gadget addresses
-// - ASLR bypass: Known VDSO address can be used to calculate other addresses
-//   via relative offsets if any info leak exists
-//
-// Recommended fix:
-// 1. Add a per-process random offset (e.g., 12-16 bits of entropy)
-// 2. Calculate VDSO base as: BASE - (random_offset * PAGE_SIZE)
-// 3. Store the actual VDSO address in the process struct for AT_SYSINFO_EHDR
-// 4. Ensure VVAR immediately precedes VDSO at (vdso_base - PAGE_SIZE)
+// WE use ASLR for VDSO/VVAR addresses to mitigate ROP and info leaks.
+// Base range: 0x7FFF_E000_0000 (high memory)
+// Window: 1MB (256 pages)
 //
 // Linux randomizes VDSO within a ~1MB range for 8 bits of entropy.
-pub const VDSO_BASE_ADDR: u64 = 0x7FFF_E000_0000;
-const VVAR_BASE_ADDR: u64 = VDSO_BASE_ADDR - 4096;
+const VDSO_HIGH_BASE: u64 = 0x7FFF_E000_0000;
 
-pub fn mapToPml4(pml4: u64) !u64 {
-    if (vvar_phys == 0) return 0; // Not initialized
+/// Generate a random base address for the VDSO
+/// Uses the kernel PRNG to select a random page offset within the ASLR window.
+/// Returns a page-aligned virtual address.
+pub fn generateBase() u64 {
+    const prng = @import("prng");
+    // 256 possible locations (1MB range / 4KB page)
+    const random_offset = prng.range(256);
+    return VDSO_HIGH_BASE - (random_offset * page_size);
+}
+
+// Public constant removed - address is now per-process
+// pub const VDSO_BASE_ADDR: u64 = ...;
+
+pub fn mapToPml4(pml4: u64, vdso_base: u64) !void {
+    if (vvar_phys == 0) return; // Not initialized
+
+    // VVAR is always immediately preceding VDSO
+    const vvar_base = vdso_base - 4096;
 
     // Helper to map a page if not already mapped
     const map_fn = struct {
@@ -137,18 +145,29 @@ pub fn mapToPml4(pml4: u64) !u64 {
     }.map;
 
     // Map VVAR (Read-only for user)
-    try map_fn(pml4, VVAR_BASE_ADDR, vvar_phys, false, false);
+    try map_fn(pml4, vvar_base, vvar_phys, false, false);
     
     // Map VDSO pages (Read/Exec)
     // We map 2 pages (8KB) to cover potential spillover
-    try map_fn(pml4, VDSO_BASE_ADDR, vdso_phys, false, true);
-    try map_fn(pml4, VDSO_BASE_ADDR + 4096, vdso_phys + 4096, false, true);
-
-    return VDSO_BASE_ADDR;
+    try map_fn(pml4, vdso_base, vdso_phys, false, true);
+    try map_fn(pml4, vdso_base + 4096, vdso_phys + 4096, false, true);
 }
 
+/// Map VDSO into a process address space
+/// Generates a random base address, stores it in the process struct, and maps the pages.
+/// Returns the chosen VDSO base address.
 pub fn map(proc_opaque: *anyopaque) !u64 {
     const Process = @import("process").Process;
     const proc: *Process = @ptrCast(@alignCast(proc_opaque));
-    return mapToPml4(proc.cr3);
+    
+    // Generate random base
+    const base = generateBase();
+    
+    // Store in process struct for AT_SYSINFO_EHDR
+    proc.vdso_base = base;
+
+    // Map using the generated base
+    try mapToPml4(proc.cr3, base);
+
+    return base;
 }

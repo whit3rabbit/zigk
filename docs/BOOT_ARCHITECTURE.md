@@ -22,6 +22,15 @@ Zscapek uses the standard Higher Half Kernel model.
 0xFFFF_A000_0000_0000  ─── Kernel Stacks Region
                         │  Explicitly allocated stacks with guard pages
                         │
+0x0000_7FFF_E000_0000  ─── VDSO / VVAR Base (ASLR randomized)
+                        │  Shared kernel-user pages (Timekeeping)
+                        │
+0x0000_7FFF_FFFF_F000  ─── User Stack Top Base (ASLR randomized)
+                        │
+0x0000_5555_5000_0000  ─── PIE Load Base (ASLR randomized)
+                        │
+0x0000_1000_0000_0000  ─── User mmap Base (ASLR randomized)
+                        │
 0x0000_7FFF_FFFF_FFFF  ─── User Space Top (Canonical)
                         │
                         │  User Stacks / Heap / Code
@@ -294,7 +303,48 @@ Page faults can occur while other locks are held. The handler must avoid deadloc
 2. VMA list is per-process (no global VMA lock)
 3. Page table modifications use per-process PML4 (no global VMM lock needed)
 
-## 5. Input Subsystem Architecture
+## 5. VDSO & VVAR Architecture
+
+To reduce syscall overhead for high-frequency operations (like `gettimeofday`), Zscapek implements a Virtual Dynamic Shared Object (VDSO).
+
+### Memory Layout
+
+The kernel maps two pages into every user address space. Base addresses are randomized per-process via ASLR:
+
+| Component | Base Address | Permissions | Content |
+|-----------|--------------|-------------|---------|
+| **VDSO** | `0x7FFF_E000_0000` + offset | Read/Exec | Shared library code (`.so` compatible) |
+| **VVAR** | VDSO - PAGE_SIZE | Read-Only | Data page with timekeeping variables |
+
+VDSO uses 12 bits of entropy (16MB range). The VVAR page always immediately precedes the VDSO page.
+
+### VVAR Usage
+
+The VVAR page contains valid timestamps managed by the kernel. Userspace reads this locklessly using a sequence counter (seqlock).
+
+```zig
+pub const Vvar = extern struct {
+    sequence: u32,          // Seqlock version
+    _pad1: u32,
+    base_sec: u64,          // Realtime seconds
+    base_nsec: u64,         // Realtime nanoseconds
+    tsc_frequency_hz: u64,  // TSC frequency
+    last_tsc: u64,          // TSC value at last update
+    coarse_sec: u64,
+    coarse_nsec: u64,
+};
+```
+
+### VDSO Functions
+
+The VDSO blob exports standard Linux-compatible symbols:
+
+*   `__kernel_gettimeofday`
+*   `__kernel_clock_gettime`
+
+These functions read the VVAR page directly. If the hardware clock source (TSC) is unstable or the seqlock logic fails, they fallback to a standard syscall.
+
+## 6. Input Subsystem Architecture
 
 Zscapek supports two input paths for keyboard and mouse devices.
 
@@ -464,6 +514,81 @@ This causes string-based overflows to include the null terminator in the overwri
 
 ### KASLR
 Limine supports KASLR. The kernel is position-independent (PIE) but linked to high memory. The physical load address may vary, but virtual addresses are fixed by the linker script to `0xffffffff80000000`.
+
+### User-Space ASLR
+
+Zscapek implements full user-space ASLR to randomize critical memory regions per-process.
+
+**AslrOffsets Structure** (`src/kernel/aslr.zig`):
+
+```text
+Offset  Size    Type    Field           Description
+0x00    2       u16     stack_offset    Stack offset in pages (subtracted from base)
+0x02    2       u16     pie_offset      PIE base offset in 64KB units
+0x04    4       u32     mmap_offset     mmap base offset in pages
+0x08    1       u8      heap_gap        Heap gap offset in pages
+0x09    7       padding
+0x10    8       u64     stack_top       Computed stack top address
+0x18    8       u64     mmap_start      Computed mmap start address
+```
+
+**Entropy Configuration**:
+
+| Component | Base Address | Entropy Bits | Granularity | Max Offset |
+|-----------|--------------|--------------|-------------|------------|
+| Stack top | `0x7FFF_FFFF_F000` | 11 | 4KB (page) | 8MB down |
+| PIE base | `0x5555_5000_0000` | 16 | 64KB | 4GB up |
+| mmap base | `0x1000_0000_0000` | 20 | 4KB (page) | 4TB up |
+| Heap gap | After ELF end | 8 | 4KB (page) | 1MB up |
+| VDSO | `0x7FFF_E000_0000` | 12 | 4KB (page) | 16MB down |
+
+**Address Computation**:
+
+```text
+stack_top  = STACK_TOP_BASE  - (stack_offset * PAGE_SIZE)
+pie_base   = PIE_BASE        + (pie_offset * 64KB)
+mmap_start = MMAP_BASE       + (mmap_offset * PAGE_SIZE)
+heap_start = align(elf_end)  + (heap_gap * PAGE_SIZE)
+```
+
+**Lifecycle**:
+
+| Event | Action |
+|-------|--------|
+| `createProcess()` | Generate new offsets via `aslr.generateOffsets()` |
+| `forkProcess()` | Copy parent's `aslr_offsets` (same address layout) |
+| `sys_execve()` | Generate new offsets (new address space) |
+
+**Entropy Source** (`src/lib/prng.zig`):
+
+ASLR uses `prng.range(max)` which implements rejection sampling:
+
+```text
+1. Generate 64-bit random via xoroshiro128+
+2. If (random % max) would have modulo bias, retry
+3. Return unbiased value in [0, max)
+```
+
+The PRNG is seeded at boot from hardware entropy (RDRAND preferred, RDTSC fallback).
+
+**Debug Output**:
+
+When a process is created, ASLR logs its configuration:
+```
+ASLR[pid=1]: stack_top=7fffff8bf000 pie_base=5555c3470000 mmap=10002a590000 heap_gap=49
+```
+
+**Key Files**:
+
+| File | Purpose |
+|------|---------|
+| `src/kernel/aslr.zig` | Config constants, offset generation, address helpers |
+| `src/kernel/process.zig` | `aslr_offsets` field in Process struct |
+| `src/kernel/elf.zig` | Accepts `stack_top_opt` and `pie_base_opt` parameters |
+| `src/kernel/user_vmm.zig` | `mmap_base` field, `initWithMmapBase()` |
+| `src/kernel/syscall/execution.zig` | Generates new offsets on execve |
+| `src/kernel/init_proc.zig` | Uses ASLR for initial process |
+| `src/kernel/vdso.zig` | Independent VDSO randomization |
 
 ## 9. SMP Implementation Notes
 

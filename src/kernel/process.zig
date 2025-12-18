@@ -27,6 +27,7 @@ const uapi = @import("uapi");
 const ipc_msg = @import("ipc_msg");
 const list = @import("list");
 const capabilities = @import("capabilities");
+const aslr = @import("aslr");
 // const sync = @import("sync"); // Removed: Cycle
 
 const FdTable = fd_mod.FdTable;
@@ -92,6 +93,8 @@ pub const Process = struct {
     mailbox: list.IntrusiveDoublyLinkedList(ipc_msg.KernelMessage) = .{},
     /// Number of queued IPC messages (bounded for DoS protection)
     mailbox_len: usize = 0,
+    /// Maximum messages per mailbox to prevent memory exhaustion
+    pub const MAX_MAILBOX_LEN: usize = 1024,
 
     /// Thread waiting for a message (if any)
     msg_waiter: ?*sched.Thread = null,
@@ -138,6 +141,12 @@ pub const Process = struct {
     /// Current Working Directory
     cwd: [uapi.abi.MAX_PATH]u8,
     cwd_len: usize,
+
+    /// VDSO Base Address (ASLR)
+    vdso_base: u64 = 0,
+
+    /// ASLR offsets for stack, PIE, mmap, heap (per-process)
+    aslr_offsets: aslr.AslrOffsets = .{},
 
     /// Per-process file creation mask
     umask: u32 = 0o022,
@@ -225,12 +234,23 @@ pub const Process = struct {
     }
 
     /// Check if process has any children
+    /// Acquires process_tree_lock to ensure consistent view of child list
     pub fn hasAnyChildren(self: *Process) bool {
+        const held = sched.process_tree_lock.acquireRead();
+        defer held.release();
         return self.first_child != null;
     }
 
     /// Check if process has any non-zombie children matching PID
+    /// Acquires process_tree_lock to ensure consistent view during iteration
     pub fn hasLivingChildren(self: *Process, target_pid: i32) bool {
+        const held = sched.process_tree_lock.acquireRead();
+        defer held.release();
+        return self.hasLivingChildrenLocked(target_pid);
+    }
+
+    /// Check if process has any non-zombie children matching PID (lock must be held)
+    fn hasLivingChildrenLocked(self: *Process, target_pid: i32) bool {
         var child = self.first_child;
         while (child) |c| {
             if (c.state != .Zombie) {
@@ -438,6 +458,9 @@ pub fn getInitProcess() !*Process {
 pub fn createProcess(parent: ?*Process) !*Process {
     const alloc = heap.allocator();
 
+    // Generate ASLR offsets for this process
+    const aslr_offsets = aslr.generateOffsets();
+
     // Create file descriptor table
     const fd_table = try fd_mod.createFdTable();
     errdefer fd_mod.destroyFdTable(fd_table);
@@ -445,8 +468,8 @@ pub fn createProcess(parent: ?*Process) !*Process {
     // Pre-populate stdin/stdout/stderr
     try devfs.createStdFds(fd_table);
 
-    // Create user address space
-    const user_vmm = try UserVmm.init();
+    // Create user address space with randomized mmap base
+    const user_vmm = try UserVmm.initWithMmapBase(aslr_offsets.mmap_start);
     errdefer user_vmm.deinit();
 
     // Allocate process struct
@@ -467,6 +490,7 @@ pub fn createProcess(parent: ?*Process) !*Process {
         .capabilities = .{},
         .cwd = undefined,
         .cwd_len = 1,
+        .aslr_offsets = aslr_offsets,
     };
 
     // Initialize CWD to "/"
@@ -475,9 +499,11 @@ pub fn createProcess(parent: ?*Process) !*Process {
      // Map VDSO
     {
         const vdso = @import("vdso");
-        _ = vdso.map(proc) catch |err| {
+        const base = vdso.map(proc) catch |err| blk: {
             console.warn("Process: Failed to map VDSO: {}", .{err});
+            break :blk 0;
         };
+        proc.vdso_base = base;
     }
 
     // Add to parent's children list
@@ -531,7 +557,10 @@ pub fn forkProcess(parent: *Process) !*Process {
         .capabilities = try parent.capabilities.clone(alloc),
         .cwd = parent.cwd,
         .cwd_len = parent.cwd_len,
+        .vdso_base = parent.vdso_base,
         .umask = parent.umask,
+        // Fork inherits parent's ASLR layout (same address space)
+        .aslr_offsets = parent.aslr_offsets,
     };
 
     // Add to parent's children list
@@ -571,8 +600,8 @@ pub fn exit(status: i32) noreturn {
 
 /// Copy a UserVmm (for fork) - creates new address space with copied pages
 fn copyUserVmm(src: *UserVmm) !*UserVmm {
-    // Create new address space
-    const dst = try UserVmm.init();
+    // Create new address space with same mmap base (fork inherits ASLR layout)
+    const dst = try UserVmm.initWithMmapBase(src.mmap_base);
     errdefer dst.deinit();
 
     const cleanupMappedRange = struct {
