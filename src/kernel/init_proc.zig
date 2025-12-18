@@ -63,16 +63,16 @@ pub fn loadInitProcess() void {
         const cmdline = get_str(mod.cmdline);
         const path = get_str(mod.path);
 
-        if (std.mem.indexOf(u8, cmdline, "uart_driver") != null or std.mem.indexOf(u8, path, "uart_driver") != null) {
+        if (matchesDriverName(cmdline, path, "uart_driver")) {
             spawnProcess(mod, "uart_driver");
         }
-        if (std.mem.indexOf(u8, cmdline, "ps2_driver") != null or std.mem.indexOf(u8, path, "ps2_driver") != null) {
+        if (matchesDriverName(cmdline, path, "ps2_driver")) {
             spawnProcess(mod, "ps2_driver");
         }
-        if (std.mem.indexOf(u8, cmdline, "virtio_net_driver") != null or std.mem.indexOf(u8, path, "virtio_net_driver") != null) {
+        if (matchesDriverName(cmdline, path, "virtio_net_driver")) {
             spawnProcess(mod, "virtio_net_driver");
         }
-        if (std.mem.indexOf(u8, cmdline, "virtio_blk_driver") != null or std.mem.indexOf(u8, path, "virtio_blk_driver") != null) {
+        if (matchesDriverName(cmdline, path, "virtio_blk_driver")) {
             spawnProcess(mod, "virtio_blk_driver");
         }
     }
@@ -194,6 +194,32 @@ pub fn loadInitProcess() void {
     spawnProcess(mod, process_name);
 }
 
+fn matchesDriverName(cmdline: []const u8, path: []const u8, name: []const u8) bool {
+    // Exact cmdline match
+    if (std.mem.eql(u8, cmdline, name)) return true;
+    // Check for path suffix (e.g. /uart_driver)
+    if (std.mem.endsWith(u8, path, name)) return true;
+    
+    // Check for .elf suffix
+    var buf: [64]u8 = undefined;
+    const elf_name = std.fmt.bufPrint(&buf, "{s}.elf", .{name}) catch return false;
+    if (std.mem.endsWith(u8, path, elf_name)) return true;
+    
+    return false;
+}
+
+fn appendCapabilityOrWarn(
+    proc: *process.Process,
+    alloc: std.mem.Allocator,
+    cap: capabilities.Capability,
+    proc_name: []const u8,
+) void {
+    proc.capabilities.append(alloc, cap) catch |err| {
+        console.warn("Failed to grant capability to {s}: {} (driver may lack hardware access)",
+                     .{proc_name, err});
+    };
+}
+
 fn spawnProcess(mod: *limine.Module, process_name: []const u8) void {
     console.info("Spawning process: {s}", .{process_name});
 
@@ -208,14 +234,12 @@ fn spawnProcess(mod: *limine.Module, process_name: []const u8) void {
     console.info("Created process pid={d} with FD table", .{proc.pid});
 
     // Grant capabilities if this is the UART driver
-    // TODO: Consider logging or failing process spawn if capability allocation fails,
-    // as silent failures may cause drivers to start without required hardware access.
     if (std.mem.eql(u8, process_name, "uart_driver")) {
          const alloc = heap.allocator();
          // Grant IRQ 4
-         proc.capabilities.append(alloc, .{ .Interrupt = .{ .irq = 4 } }) catch {};
+         appendCapabilityOrWarn(proc, alloc, .{ .Interrupt = .{ .irq = 4 } }, process_name);
          // Grant Ports 0x3F8, len 8 (COM1)
-         proc.capabilities.append(alloc, .{ .IoPort = .{ .port = 0x3F8, .len = 8 } }) catch {};
+         appendCapabilityOrWarn(proc, alloc, .{ .IoPort = .{ .port = 0x3F8, .len = 8 } }, process_name);
          console.info("Init: Granted UART capabilities to pid={}", .{proc.pid});
     }
 
@@ -223,12 +247,12 @@ fn spawnProcess(mod: *limine.Module, process_name: []const u8) void {
     if (std.mem.eql(u8, process_name, "ps2_driver")) {
          const alloc = heap.allocator();
          // Grant IRQ 1 (Keyboard)
-         proc.capabilities.append(alloc, .{ .Interrupt = .{ .irq = 1 } }) catch {};
+         appendCapabilityOrWarn(proc, alloc, .{ .Interrupt = .{ .irq = 1 } }, process_name);
          // Grant IRQ 12 (Mouse)
-         proc.capabilities.append(alloc, .{ .Interrupt = .{ .irq = 12 } }) catch {};
+         appendCapabilityOrWarn(proc, alloc, .{ .Interrupt = .{ .irq = 12 } }, process_name);
          // Grant Ports 0x60, 0x64 (Controller)
-         proc.capabilities.append(alloc, .{ .IoPort = .{ .port = 0x60, .len = 1 } }) catch {};
-         proc.capabilities.append(alloc, .{ .IoPort = .{ .port = 0x64, .len = 1 } }) catch {};
+         appendCapabilityOrWarn(proc, alloc, .{ .IoPort = .{ .port = 0x60, .len = 1 } }, process_name);
+         appendCapabilityOrWarn(proc, alloc, .{ .IoPort = .{ .port = 0x64, .len = 1 } }, process_name);
          console.info("Init: Granted PS/2 capabilities to pid={}", .{proc.pid});
     }
 
@@ -254,23 +278,37 @@ fn spawnProcess(mod: *limine.Module, process_name: []const u8) void {
     if (std.mem.eql(u8, process_name, "doom")) {
          const alloc = heap.allocator();
          // Grant IRQ 1 (Keyboard)
-         proc.capabilities.append(alloc, .{ .Interrupt = .{ .irq = 1 } }) catch {};
+         appendCapabilityOrWarn(proc, alloc, .{ .Interrupt = .{ .irq = 1 } }, process_name);
          // Grant IRQ 12 (Mouse)
-         proc.capabilities.append(alloc, .{ .Interrupt = .{ .irq = 12 } }) catch {};
+         appendCapabilityOrWarn(proc, alloc, .{ .Interrupt = .{ .irq = 12 } }, process_name);
          // Grant Ports 0x60, 0x64 (PC/AT Keyboard/Mouse Controller)
-         proc.capabilities.append(alloc, .{ .IoPort = .{ .port = 0x60, .len = 1 } }) catch {};
-         proc.capabilities.append(alloc, .{ .IoPort = .{ .port = 0x64, .len = 1 } }) catch {};
+         appendCapabilityOrWarn(proc, alloc, .{ .IoPort = .{ .port = 0x60, .len = 1 } }, process_name);
+         appendCapabilityOrWarn(proc, alloc, .{ .IoPort = .{ .port = 0x64, .len = 1 } }, process_name);
          // Grant Serial (COM1) for debug output (optional but helpful)
-         proc.capabilities.append(alloc, .{ .IoPort = .{ .port = 0x3F8, .len = 8 } }) catch {};
+         appendCapabilityOrWarn(proc, alloc, .{ .IoPort = .{ .port = 0x3F8, .len = 8 } }, process_name);
          console.info("Init: Granted Doom capabilities to pid={}", .{proc.pid});
     }
 
     console.info("Init: Loading ELF...", .{});
 
     // Step 3: Get module data as slice for ELF loader
-    // NOTE: This assumes Limine provides valid module metadata. Consider validating
-    // that mod.address != 0 and that mod.address + mod.size does not overflow
-    // before creating the slice, to guard against corrupted bootloader data.
+    // Validation: Ensure valid address and no overflow
+    if (mod.address == 0) {
+        console.err("Invalid module address (null) for {s}", .{process_name});
+        return;
+    }
+    if (mod.size == 0) {
+        console.err("Invalid module size (zero) for {s}", .{process_name});
+        return;
+    }
+    // Check for address overflow
+    const end_addr = @addWithOverflow(mod.address, mod.size);
+    if (end_addr[1] != 0) {
+        console.err("Module address overflow for {s}: addr=0x{x} size={}",
+                    .{process_name, mod.address, mod.size});
+        return;
+    }
+
     const mod_data = @as([*]const u8, @ptrFromInt(mod.address))[0..mod.size];
 
     // Step 4: Load ELF into process's address space
@@ -312,7 +350,11 @@ fn spawnProcess(mod: *limine.Module, process_name: []const u8) void {
         console.debug("Init: Raw Cmdline: '{s}'", .{cmd_slice});
         var it = std.mem.tokenizeAny(u8, cmd_slice, " ");
         while (it.next()) |arg| {
-            if (argv_count >= 16) break;
+            if (argv_count >= 16) {
+                console.warn("Init: Argument buffer full, truncating remaining args for {s}",
+                             .{process_name});
+                break;
+            }
             argv_buf[argv_count] = arg;
             argv_count += 1;
         }
@@ -488,38 +530,40 @@ fn grantVirtioCapabilities(proc: *process.Process, driver_type: VirtioDriverType
 
             if ((driver_type == .Net and is_net) or (driver_type == .Blk and is_blk)) {
                 // Grant PciConfig Access
-                proc.capabilities.append(alloc, .{
+                appendCapabilityOrWarn(proc, alloc, .{
                     .PciConfig = .{
                         .bus = dev.bus,
                         .device = @intCast(dev.device),
                         .func = @intCast(dev.func),
                     }
-                }) catch {};
+                }, "virtio");
 
                 // Grant MMIO Access for BARs
                 for (dev.bar) |bar| {
                     if (bar.is_mmio and bar.base != 0 and bar.size != 0) {
-                        proc.capabilities.append(alloc, .{
+                        appendCapabilityOrWarn(proc, alloc, .{
                             .Mmio = .{
                                 .phys_addr = bar.base,
                                 .size = bar.size,
                             }
-                        }) catch {};
+                        }, "virtio");
                     }
                 }
                 
                 // Grant Interrupt Capability
-                proc.capabilities.append(alloc, .{
+                appendCapabilityOrWarn(proc, alloc, .{
                     .Interrupt = .{ .irq = dev.irq_line }
-                }) catch {};
+                }, "virtio");
 
-                // Grant DMA Memory Capability (e.g. 512 pages / 2MB)
-                // NOTE: This grants a uniform 2MB DMA limit to all VirtIO drivers.
-                // Consider calculating minimum required pages based on device type
-                // and virtqueue sizes to follow the principle of least privilege.
-                proc.capabilities.append(alloc, .{
-                    .DmaMemory = .{ .max_pages = 512 }
-                }) catch {};
+                // Grant DMA Memory Capability
+                // Net: 1MB (rx/tx pages), Blk: 512KB
+                const dma_pages: u32 = switch (driver_type) {
+                    .Net => 256,
+                    .Blk => 128,
+                };
+                appendCapabilityOrWarn(proc, alloc, .{
+                    .DmaMemory = .{ .max_pages = dma_pages }
+                }, "virtio");
 
                 return true;
             }
