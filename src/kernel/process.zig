@@ -86,6 +86,9 @@ pub const Process = struct {
         }
     };
 
+    /// Maximum messages per mailbox to prevent memory exhaustion
+    pub const MAX_MAILBOX_LEN: usize = 1024;
+
     /// Lock for mailbox/IPC state (inlined to avoid cycle)
     mailbox_lock: MailboxLock = .{},
 
@@ -93,8 +96,6 @@ pub const Process = struct {
     mailbox: list.IntrusiveDoublyLinkedList(ipc_msg.KernelMessage) = .{},
     /// Number of queued IPC messages (bounded for DoS protection)
     mailbox_len: usize = 0,
-    /// Maximum messages per mailbox to prevent memory exhaustion
-    pub const MAX_MAILBOX_LEN: usize = 1024,
 
     /// Thread waiting for a message (if any)
     msg_waiter: ?*sched.Thread = null,
@@ -320,6 +321,14 @@ pub const Process = struct {
 
         console.debug("Process: pid={} exited with status {}", .{ self.pid, status });
     }
+
+    // =========================================================================
+    // Capability Checks
+    // =========================================================================
+    // Note: These functions iterate capabilities without synchronization.
+    // This is safe because capabilities are immutable after process creation
+    // (set only in init_proc.zig). If dynamic capability grants are added,
+    // a reader-writer lock must protect these functions and the grant path.
 
     /// Check if process has interrupt capability
     pub fn hasInterruptCapability(self: *Process, irq: u8) bool {
@@ -719,7 +728,11 @@ pub fn destroyProcess(proc: *Process) void {
 
     // Reparent children to init (PID 1) per POSIX semantics
     // This prevents zombie leaks when parent exits before children
+    // Hold lock for entire reparenting operation to prevent concurrent child list modification
     if (proc.first_child != null) {
+        const held = sched.process_tree_lock.acquireWrite();
+        defer held.release();
+
         const init_opt: ?*Process = getInitProcess() catch null;
 
         // Only reparent if init exists and we're not destroying init itself
@@ -729,7 +742,7 @@ pub fn destroyProcess(proc: *Process) void {
                 while (child) |c| {
                     const next = c.next_sibling;
                     c.next_sibling = null;
-                    init.addChild(c);
+                    init.addChildLocked(c);
                     child = next;
                 }
                 proc.first_child = null;
@@ -769,10 +782,13 @@ pub fn destroyProcess(proc: *Process) void {
     // Free process struct
     alloc.destroy(proc);
 
-    // Guard against underflow (can occur if init exits as the only process)
-    const current = process_count.load(.monotonic);
-    if (current > 0) {
-        _ = process_count.fetchSub(1, .monotonic);
+    // Decrement process count atomically, preventing underflow via CAS
+    while (true) {
+        const current = process_count.load(.acquire);
+        if (current == 0) break;
+        if (process_count.cmpxchgWeak(current, current - 1, .release, .monotonic) == null) {
+            break;
+        }
     }
 }
 
@@ -782,7 +798,7 @@ pub fn destroyProcess(proc: *Process) void {
 
 /// Get current process count
 pub fn getProcessCount() u32 {
-    return process_count.load(.Monotonic);
+    return process_count.load(.monotonic);
 }
 
 /// Find process by PID

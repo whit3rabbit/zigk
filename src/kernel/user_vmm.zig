@@ -16,6 +16,8 @@
 //!   - MAP_DEVICE: Internal flag for MMIO/device mappings (skips PMM free).
 
 const std = @import("std");
+const builtin = @import("builtin");
+const sync = @import("sync");
 const hal = @import("hal");
 const vmm = @import("vmm");
 const pmm = @import("pmm");
@@ -91,6 +93,7 @@ pub const Vma = struct {
     pub fn size(self: *const Vma) usize {
         // Defensive: validate invariant to prevent underflow
         if (self.end < self.start) {
+            if (builtin.mode == .Debug) @panic("VMA corruption: end < start");
             return 0;
         }
         return @intCast(self.end - self.start);
@@ -144,6 +147,11 @@ pub const UserVmm = struct {
     /// First-fit allocation starts searching from here
     mmap_base: u64,
 
+    /// Read-Writer lock protecting VMA list and operations
+    /// Required for thread-safety (CLONE_VM) and to prevent races between
+    /// mprotect and page faults.
+    lock: sync.RwLock = .{},
+
     /// Initialize a new UserVmm with a fresh address space (default mmap base)
     pub fn init() !*UserVmm {
         return initWithMmapBase(USER_MMAP_START);
@@ -151,6 +159,11 @@ pub const UserVmm = struct {
 
     /// Initialize a new UserVmm with a randomized mmap base (ASLR)
     pub fn initWithMmapBase(mmap_base: u64) !*UserVmm {
+        // Validation: mmap_base must be within user range
+        if (mmap_base < USER_MMAP_START or mmap_base >= USER_MMAP_END) {
+            return error.InvalidAddress;
+        }
+
         const alloc = heap.allocator();
 
         // Create new page table
@@ -217,6 +230,10 @@ pub const UserVmm = struct {
     /// flags: Map flags (MAP_ANONYMOUS | MAP_PRIVATE required)
     /// Returns: Start address of mapping, or negative errno
     pub fn mmap(self: *UserVmm, addr: u64, len: usize, prot: u32, flags: u32) isize {
+        // Acquire write lock as we are modifying the VMA list
+        const held = self.lock.acquireWrite();
+        defer held.release();
+
         // Validate flags - only anonymous private mappings supported
         if ((flags & MAP_ANONYMOUS) == 0) {
             return Errno.ENOSYS.toReturn(); // File mappings not supported
@@ -287,6 +304,10 @@ pub const UserVmm = struct {
     /// len: Size in bytes (will be rounded up)
     /// Returns: 0 on success, negative errno on error
     pub fn munmap(self: *UserVmm, addr: u64, len: usize) isize {
+        // Acquire write lock as we are modifying the VMA list
+        const held = self.lock.acquireWrite();
+        defer held.release();
+
         if (!paging.isPageAligned(addr)) {
             return Errno.EINVAL.toReturn();
         }
@@ -362,6 +383,11 @@ pub const UserVmm = struct {
     /// prot: New protection flags
     /// Returns: 0 on success, negative errno on error
     pub fn mprotect(self: *UserVmm, addr: u64, len: usize, prot: u32) isize {
+        // Acquire write lock to prevent race with page fault handler
+        // Page fault needs consistent view of VMA protection flags
+        const held = self.lock.acquireWrite();
+        defer held.release();
+
         if (!paging.isPageAligned(addr)) {
             return Errno.EINVAL.toReturn();
         }
@@ -417,6 +443,10 @@ pub const UserVmm = struct {
     /// Returns: 0 on success, negative errno on error
     /// Note: Caller must update process RSS accounting
     pub fn expandHeap(self: *UserVmm, old_brk: u64, new_brk: u64) isize {
+        // Acquire write lock for VMA manipulation
+        const held = self.lock.acquireWrite();
+        defer held.release();
+
         if (new_brk <= old_brk) return 0;
 
         const size = new_brk - old_brk;
@@ -515,6 +545,10 @@ pub const UserVmm = struct {
     /// Returns: 0 on success
     /// Note: Caller must update process RSS accounting
     pub fn shrinkHeap(self: *UserVmm, old_brk: u64, new_brk: u64) void {
+        // Acquire write lock for VMA manipulation
+        const held = self.lock.acquireWrite();
+        defer held.release();
+
         if (new_brk >= old_brk) return;
 
         const size = old_brk - new_brk;
@@ -564,6 +598,17 @@ pub const UserVmm = struct {
     ///   bit 2 (U): 0 = supervisor, 1 = user mode
     /// Returns: true if fault was handled (page allocated), false if segfault
     pub fn handlePageFault(self: *UserVmm, addr: u64, err_code: u64) bool {
+        // Check for kernel space access (security hard-stop)
+        if (addr >= vmm.KERNEL_BASE) {
+            console.err("PageFault: SECURITY VIOLATION: User fault in kernel space {x}", .{addr});
+            return false;
+        }
+
+        // Acquire read lock - we need stable VMA list and permissions
+        // This blocks if mprotect is updating permissions
+        const held = self.lock.acquireRead();
+        defer held.release();
+
         // 1. Find VMA covering the fault address
         var vma_iter = self.vma_head;
         var target_vma: ?*Vma = null;

@@ -396,6 +396,7 @@ pub fn build(b: *std.Build) void {
     user_vmm_module.addImport("heap", heap_module);
     user_vmm_module.addImport("console", console_module);
     user_vmm_module.addImport("uapi", uapi_module);
+    user_vmm_module.addImport("sync", sync_module);
 
     // Create Ring Buffer module (generic circular buffer)
     const ring_buffer_module = b.createModule(.{

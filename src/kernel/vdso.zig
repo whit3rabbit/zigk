@@ -107,9 +107,10 @@ pub fn updateTime(sec: u64, nsec: u64) void {
 //
 // WE use ASLR for VDSO/VVAR addresses to mitigate ROP and info leaks.
 // Base range: 0x7FFF_E000_0000 (high memory)
-// Window: 1MB (256 pages)
+// Window: 256MB (65536 pages)
 //
 // Linux randomizes VDSO within a ~1MB range for 8 bits of entropy.
+// We provide 16 bits (65536 locations) for increased security.
 const VDSO_HIGH_BASE: u64 = 0x7FFF_E000_0000;
 
 /// Generate a random base address for the VDSO
@@ -117,8 +118,8 @@ const VDSO_HIGH_BASE: u64 = 0x7FFF_E000_0000;
 /// Returns a page-aligned virtual address.
 pub fn generateBase() u64 {
     const prng = @import("prng");
-    // 256 possible locations (1MB range / 4KB page)
-    const random_offset = prng.range(256);
+    // 65536 possible locations (256MB range / 4KB page)
+    const random_offset = prng.range(65536);
     return VDSO_HIGH_BASE - (random_offset * page_size);
 }
 

@@ -27,7 +27,9 @@ pub const Config = struct {
 
     /// Stack: 11 bits of entropy (2048 pages = 8MB range)
     /// Linux uses 11 bits with variable granularity
-    pub const STACK_ENTROPY_BITS: u5 = 11;
+    /// Stack: 22 bits of entropy (8GB range implied if we weren't limited by usage)
+    /// Linux uses 22 bits. We use 22 bits to match.
+    pub const STACK_ENTROPY_BITS: u5 = 22;
     pub const STACK_MAX_OFFSET: u64 = (1 << STACK_ENTROPY_BITS) - 1;
 
     /// PIE: 16 bits of entropy in 64KB units (4GB range)
@@ -41,10 +43,14 @@ pub const Config = struct {
     pub const MMAP_ENTROPY_BITS: u5 = 20;
     pub const MMAP_MAX_OFFSET: u64 = (1 << MMAP_ENTROPY_BITS) - 1;
 
-    /// Heap gap: 8 bits of entropy (256 pages = 1MB range)
-    /// Provides defense against heap spraying attacks
-    pub const HEAP_ENTROPY_BITS: u5 = 8;
+    /// Heap gap: 16 bits of entropy
+    /// Provides stronger defense against heap spraying attacks
+    pub const HEAP_ENTROPY_BITS: u5 = 16;
     pub const HEAP_MAX_OFFSET: u64 = (1 << HEAP_ENTROPY_BITS) - 1;
+
+    /// TLS: 16 bits of entropy (256MB range with 4KB granularity)
+    pub const TLS_ENTROPY_BITS: u5 = 16;
+    pub const TLS_MAX_OFFSET: u64 = (1 << TLS_ENTROPY_BITS) - 1;
 
     // Base addresses (before randomization)
 
@@ -59,6 +65,10 @@ pub const Config = struct {
     /// mmap region starts here (16TB mark)
     /// Randomization adds offset to this base
     pub const MMAP_BASE: u64 = 0x0000_1000_0000_0000;
+
+    /// TLS base (Thread Local Storage)
+    /// Randomization adds offset to this base
+    pub const TLS_BASE: u64 = 0xB000_0000;
 };
 
 /// Per-process ASLR offsets
@@ -74,11 +84,16 @@ pub const AslrOffsets = struct {
     mmap_offset: u32 = 0,
 
     /// Heap gap offset in pages (added after ELF end)
-    heap_gap: u8 = 0,
+    /// Changed to u16 for 16 bits entropy
+    heap_gap: u16 = 0,
+
+    /// TLS offset in pages (added to TLS_BASE)
+    tls_offset: u16 = 0,
 
     // Cached computed addresses (populated by generateOffsets)
     stack_top: u64 = Config.STACK_TOP_BASE,
     mmap_start: u64 = Config.MMAP_BASE,
+    tls_base: u64 = Config.TLS_BASE,
 };
 
 /// Generate ASLR offsets for a new process
@@ -86,12 +101,20 @@ pub const AslrOffsets = struct {
 pub fn generateOffsets() AslrOffsets {
     var offsets = AslrOffsets{};
 
+    // Fail-secure: Check if weak entropy is being used
+    if (prng.isUsingFallbackSeed()) {
+        console.err("CRITICAL: ASLR using predictable fallback seed! System security compromised.", .{});
+        // We do not abort here to prevent bricking on low-quality emulators,
+        // but this log should alert any security audit.
+    }
+
     // Generate random values using kernel PRNG
     // prng.range() uses rejection sampling to avoid modulo bias
     offsets.stack_offset = @truncate(prng.range(Config.STACK_MAX_OFFSET + 1));
     offsets.pie_offset = @truncate(prng.range(Config.PIE_MAX_OFFSET + 1));
     offsets.mmap_offset = @truncate(prng.range(Config.MMAP_MAX_OFFSET + 1));
     offsets.heap_gap = @truncate(prng.range(Config.HEAP_MAX_OFFSET + 1));
+    offsets.tls_offset = @truncate(prng.range(Config.TLS_MAX_OFFSET + 1));
 
     // Compute cached addresses
     computeAddresses(&offsets);
@@ -106,6 +129,9 @@ fn computeAddresses(offsets: *AslrOffsets) void {
 
     // mmap: Add offset to base (grows upward)
     offsets.mmap_start = Config.MMAP_BASE + (@as(u64, offsets.mmap_offset) * PAGE_SIZE);
+
+    // TLS: Add offset to base
+    offsets.tls_base = Config.TLS_BASE + (@as(u64, offsets.tls_offset) * PAGE_SIZE);
 }
 
 /// Get PIE load base for a process
@@ -123,12 +149,16 @@ pub fn getHeapStart(elf_end: u64, offsets: *const AslrOffsets) u64 {
 
 /// Log ASLR configuration for debugging
 pub fn logOffsets(offsets: *const AslrOffsets, pid: u32) void {
-    console.debug("ASLR[pid={}]: stack_top={x} pie_base={x} mmap={x} heap_gap={}", .{
+    const builtin = @import("builtin");
+    if (builtin.mode != .Debug) return;
+
+    console.debug("ASLR[pid={}]: stack_top={x} pie_base={x} mmap={x} heap_gap={} tls_base={x}", .{
         pid,
         offsets.stack_top,
         getPieBase(offsets),
         offsets.mmap_start,
         offsets.heap_gap,
+        offsets.tls_base,
     });
 }
 

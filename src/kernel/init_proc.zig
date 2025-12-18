@@ -382,9 +382,8 @@ fn spawnProcess(mod: *limine.Module, process_name: []const u8) void {
 
     // Set up TCB/TLS using ELF header information
     // Musl static binaries may crash if %fs:0 is not accessible or doesn't point to itself.
-    // TODO: Consider randomizing this address via aslr.getTlsBase() to prevent
-    // attackers from having a known memory location to target.
-    const tls_base_addr: u64 = 0xB000_0000; // Preferred address for TCB
+    // Use randomized TLS base address from ASLR offsets.
+    const tls_base_addr = proc.aslr_offsets.tls_base;
     var fs_base: u64 = 0;
 
     if (load_result.tls_phdr) |phdr| {

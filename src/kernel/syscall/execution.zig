@@ -738,14 +738,12 @@ pub fn sys_clone(frame: *hal.syscall.SyscallFrame) SyscallError!usize {
         const parent_proc = base.getCurrentProcess();
         const parent_thread = sched.getCurrentThread() orelse return error.ESRCH;
 
-        // SECURITY: Validate process is still alive before incrementing refcount.
-        // Another thread might be exiting this process concurrently. If process is
-        // already in Zombie or Dead state, ref() could lead to use-after-free.
+        // Fast path: reject if process already exiting (re-checked after refcount increment)
         if (parent_proc.state != .Running) {
             return error.ESRCH;
         }
 
-        // SECURITY: Enforce per-process thread limit atomically and detect execve.
+        // Enforce per-process thread limit atomically and detect execve.
         // - MAX_THREADS_PER_PROCESS prevents fork bomb DoS
         // - EXECVE_IN_PROGRESS_BIT (0x80000000) prevents creating threads during
         //   execve's critical section (between refcount check and CR3 switch)
@@ -753,7 +751,7 @@ pub fn sys_clone(frame: *hal.syscall.SyscallFrame) SyscallError!usize {
         const EXECVE_IN_PROGRESS_BIT: u32 = 0x80000000;
         var refcount = parent_proc.refcount.load(.acquire);
         while (true) {
-            // SECURITY: Check if execve is in progress. Creating a thread now would
+            // Check if execve is in progress. Creating a thread now would
             // result in the new thread running in an address space that's about to
             // be destroyed, causing memory corruption.
             if (refcount & EXECVE_IN_PROGRESS_BIT != 0) {
@@ -770,6 +768,13 @@ pub fn sys_clone(frame: *hal.syscall.SyscallFrame) SyscallError!usize {
             refcount = parent_proc.refcount.load(.acquire);
         }
         errdefer _ = parent_proc.unref();
+
+        // Recheck state after refcount increment to close the window where another
+        // thread could exit between our initial check and refcount increment.
+        // If process transitioned to Zombie/Dead, we must not proceed.
+        if (parent_proc.state != .Running) {
+            return error.ESRCH; // errdefer handles unref
+        }
 
         // Create child thread attached to the SAME process
         const child_thread = thread.createUserThread(
