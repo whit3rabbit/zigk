@@ -2,19 +2,19 @@
 //
 // This provides the global errno variable required by C programs.
 //
-// SECURITY WARNING: This errno is NOT thread-local.
-// In multithreaded programs, errno values can be corrupted by concurrent
-// calls from other threads, potentially causing security-sensitive code
-// to misinterpret error conditions.
-//
-// TODO: When kernel TLS support is available, change to:
-//   pub threadlocal var errno: c_int = 0;
-
 /// Global errno variable - set by libc functions on error
-/// WARNING: NOT THREAD-SAFE - use with caution in multithreaded code.
-/// Check errno immediately after a failing call before any other
-/// operations that might modify it.
-pub export var errno: c_int = 0;
+///
+/// This variable is thread-local, meaning each thread has its own separate instance.
+/// It is set by system calls and library functions when an error occurs.
+///
+/// To access the raw error code from the last syscall:
+/// `const err = std.os.errno(rc);`
+pub threadlocal var errno: c_int = 0;
+
+/// Get address of errno (for C ABI)
+pub export fn __errno_location() *c_int {
+    return &errno;
+}
 
 // Common error codes (matching Linux values)
 // These are the most commonly used in libc functions
@@ -57,6 +57,27 @@ pub const ENOSPC: c_int = 28;
 
 /// Math result not representable
 pub const ERANGE: c_int = 34;
+
+/// No such process
+pub const ESRCH: c_int = 3;
+
+/// No such device or address
+pub const ENXIO: c_int = 6;
+
+/// Argument list too long
+pub const E2BIG: c_int = 7;
+
+/// Exec format error
+pub const ENOEXEC: c_int = 8;
+
+/// No child processes
+pub const ECHILD: c_int = 10;
+
+/// Device or resource busy
+pub const EBUSY: c_int = 16;
+
+/// File exists
+pub const EEXIST: c_int = 17;
 
 /// Function not implemented
 pub const ENOSYS: c_int = 38;

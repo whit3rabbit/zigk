@@ -43,7 +43,8 @@ pub const X_OK = unistd.X_OK;
 // errno
 // =============================================================================
 
-pub const errno = &errno_mod.errno;
+// pub const errno = &errno_mod.errno; // Cannot take address of threadlocal at comptime
+pub const __errno_location = errno_mod.__errno_location;
 
 // =============================================================================
 // Memory Management

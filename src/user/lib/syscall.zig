@@ -315,6 +315,50 @@ pub fn exit_group(status: i32) noreturn {
     unreachable;
 }
 
+pub const ARCH_SET_FS: usize = 0x1002;
+pub const ARCH_GET_FS: usize = 0x1003;
+
+pub fn arch_prctl(code: usize, addr: usize) SyscallError!void {
+    const ret = syscall2(syscalls.SYS_ARCH_PRCTL, code, addr);
+    if (isError(ret)) return errorFromReturn(ret);
+}
+
+// Signal handling
+pub const SigAction = uapi.signal.SigAction;
+pub const SigSet = uapi.signal.SigSet;
+
+pub fn kill(pid: i32, sig: i32) SyscallError!void {
+    const ret = syscall2(syscalls.SYS_KILL, @bitCast(@as(isize, pid)), @bitCast(@as(isize, sig)));
+    if (isError(ret)) return errorFromReturn(ret);
+}
+
+pub fn sigaction(sig: i32, act: ?*const SigAction, oldact: ?*SigAction) SyscallError!void {
+    const ret = syscall4(syscalls.SYS_RT_SIGACTION,
+        @bitCast(@as(isize, sig)),
+        if (act) |a| @intFromPtr(a) else 0,
+        if (oldact) |a| @intFromPtr(a) else 0,
+        @sizeOf(SigSet)
+    );
+    if (isError(ret)) return errorFromReturn(ret);
+}
+
+pub fn sigprocmask(how: i32, set: ?*const SigSet, oldset: ?*SigSet) SyscallError!void {
+    const ret = syscall4(syscalls.SYS_RT_SIGPROCMASK,
+        @bitCast(@as(isize, how)),
+        if (set) |s| @intFromPtr(s) else 0,
+        if (oldset) |s| @intFromPtr(s) else 0,
+        @sizeOf(SigSet)
+    );
+    if (isError(ret)) return errorFromReturn(ret);
+}
+
+// sigreturn is weird because it doesn't return, but we shouldn't really call it from C manually usually.
+// It's used by the kernel trampoline. But if we need it:
+pub fn sigreturn() noreturn {
+    _ = syscall0(syscalls.SYS_RT_SIGRETURN);
+    unreachable;
+}
+
 /// Get process ID
 pub fn getpid() i32 {
     const ret = syscall0(syscalls.SYS_GETPID);
@@ -904,6 +948,25 @@ pub fn pci_config_write(bus: u8, device: u5, func: u3, offset: u12, value: u32) 
         value,
     );
     if (isError(ret)) return errorFromReturn(ret);
+}
+
+// =============================================================================
+// Port I/O Syscalls (1036-1037)
+// =============================================================================
+
+/// Write byte to I/O port
+/// Requires IoPort capability for the port range.
+pub fn outb(port: u16, value: u8) SyscallError!void {
+    const ret = syscall2(syscalls.SYS_OUTB, port, value);
+    if (isError(ret)) return errorFromReturn(ret);
+}
+
+/// Read byte from I/O port
+/// Requires IoPort capability for the port range.
+pub fn inb(port: u16) SyscallError!u8 {
+    const ret = syscall1(syscalls.SYS_INB, port);
+    if (isError(ret)) return errorFromReturn(ret);
+    return @truncate(ret);
 }
 
 // =============================================================================

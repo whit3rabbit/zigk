@@ -561,6 +561,20 @@ pub const SYS_PCI_CONFIG_READ: usize = 1034;
 pub const SYS_PCI_CONFIG_WRITE: usize = 1035;
 
 // =============================================================================
+// Port I/O Syscalls (1036-1037)
+// =============================================================================
+
+/// Write byte to I/O port
+/// (port, value) -> 0 or -errno
+/// Requires IoPort capability for the port range
+pub const SYS_OUTB: usize = 1036;
+
+/// Read byte from I/O port
+/// (port) -> value
+/// Requires IoPort capability for the port range
+pub const SYS_INB: usize = 1037;
+
+// =============================================================================
 // Ring Buffer IPC Syscalls (1040-1049)
 // =============================================================================
 

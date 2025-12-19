@@ -63,11 +63,14 @@ pub export fn nanosleep(req: ?*const timespec, rem: ?*timespec) c_int {
         .tv_nsec = r.tv_nsec,
     };
 
-    syscall.nanosleep(&ts, null) catch {
+    var rmt: syscall.Timespec = undefined;
+    const rmt_ptr = if (rem != null) &rmt else null;
+
+    syscall.nanosleep(&ts, rmt_ptr) catch {
         // If interrupted, store remaining time
         if (rem) |remaining| {
-            remaining.tv_sec = ts.tv_sec;
-            remaining.tv_nsec = ts.tv_nsec;
+            remaining.tv_sec = rmt.tv_sec;
+            remaining.tv_nsec = rmt.tv_nsec;
         }
         return -1;
     };

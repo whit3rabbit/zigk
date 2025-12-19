@@ -113,3 +113,33 @@ pub fn hexDigitValue(c: u8) ?u8 {
     if (c >= 'a' and c <= 'f') return c - 'a' + 10;
     return null;
 }
+
+const errno = @import("errno.zig");
+
+/// Set thread-local errno from Zig error
+pub fn setErrno(err: anyerror) void {
+    const code = switch (err) {
+        error.PermissionDenied => errno.EPERM,
+        error.NoSuchFileOrDirectory => errno.ENOENT,
+        error.NoSuchProcess => errno.ESRCH, // 3
+        error.Interrupted => errno.EINTR,
+        error.IoError => errno.EIO,
+        error.NoSuchDevice => errno.ENXIO, // 6
+        error.ArgumentListTooLong => errno.E2BIG, // 7
+        error.ExecFormatError => errno.ENOEXEC, // 8
+        error.BadFileDescriptor => errno.EBADF,
+        error.NoChildProcesses => errno.ECHILD, // 10
+        error.WouldBlock => errno.EAGAIN,
+        error.OutOfMemory => errno.ENOMEM,
+        error.AccessDenied => errno.EACCES,
+        error.BadAddress => errno.EFAULT,
+        error.DeviceBusy => errno.EBUSY, // 16
+        error.FileExists => errno.EEXIST,
+        error.InvalidArgument => errno.EINVAL,
+        error.TooManyOpenFiles => errno.EMFILE,
+        error.NotImplemented => errno.ENOSYS,
+        error.NoSpaceLeft => errno.ENOSPC,
+        else => errno.EIO,
+    };
+    errno.errno = code;
+}

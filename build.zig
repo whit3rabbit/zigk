@@ -1051,6 +1051,7 @@ pub fn build(b: *std.Build) void {
     });
     syscall_port_io_module.addImport("uapi", uapi_module);
     syscall_port_io_module.addImport("hal", hal_module);
+    syscall_port_io_module.addImport("sched", sched_module);
     syscall_port_io_module.addImport("process", process_module);
 
     // Create syscall mmio module (MMIO/DMA for userspace drivers)
@@ -1492,6 +1493,42 @@ pub fn build(b: *std.Build) void {
         test_step_build.dependOn(&test_exe.step);
     }
 
+    // Create libc test runner module (Zig wrapper for C test)
+    const test_libc_runner_mod = b.createModule(.{
+        .root_source_file = b.path("tests/userland/test_libc_runner.zig"),
+        .target = user_target,
+        .optimize = optimize,
+    });
+    test_libc_runner_mod.addImport("libc", user_libc_module);
+
+    const test_libc_exe = b.addExecutable(.{
+        .name = "test_libc_fixes.elf",
+        .root_module = test_libc_runner_mod,
+    });
+    test_libc_exe.addCSourceFile(.{
+        .file = b.path("tests/userland/test_libc_fixes.c"),
+        .flags = &.{
+            "-ffreestanding",
+            "-nostdlib",
+            "-mno-red-zone",
+            "-fno-stack-protector",
+            "-fno-builtin", // Use our libc functions, not compiler builtins
+        },
+    });
+    test_libc_exe.addIncludePath(b.path("src/user/doom/include"));
+    test_libc_exe.setLinkerScript(b.path("src/user/linker.ld"));
+    test_libc_exe.addAssemblyFile(b.path("src/arch/x86_64/memcpy.S"));
+
+    const install_test_libc = b.addInstallArtifact(test_libc_exe, .{});
+    b.getInstallStep().dependOn(&install_test_libc.step);
+
+    // Copy to ISO modules
+    const copy_test_libc = b.addSystemCommand(&.{
+        "cp", "zig-out/bin/test_libc_fixes.elf", "iso_root/boot/modules/"
+    });
+    copy_test_libc.step.dependOn(&install_test_libc.step);
+    b.getInstallStep().dependOn(&copy_test_libc.step);
+
     // Ensure tests are built before ISO is created
     b.getInstallStep().dependOn(test_step_build);
 
@@ -1546,6 +1583,40 @@ pub fn build(b: *std.Build) void {
     const install_audio_test = b.addInstallArtifact(audio_test, .{});
     b.getInstallStep().dependOn(&install_audio_test.step);
 
+    // Libc Fix Verification Test (Native C with Custom Libc)
+    // Wrapper and C source definition below
+    
+    // Create a wrapper to link against libc and crt0
+    // Create a dummy entry file if needed, or better:
+    // Actually, create module with just the C file?
+    // b.createModule doesn't take C files easily as root.
+    // Use a small Zig wrapper "src/user/test_libc_fix_entry.zig" that imports libc and exports nothing, relying on C main.
+    
+    // Waiting for file creation in next step, assuming path "src/user/test_libc_fix_wrapper.zig"
+    // Let's create the wrapper content inline if possible or use write_to_file next.
+    // For now I define the build step, pointing to a wrapper I will create.
+    const test_libc_fix_mod = b.createModule(.{
+        .root_source_file = b.path("src/user/test_libc_fix_wrapper.zig"),
+        .target = user_target,
+        .optimize = optimize,
+    });
+    test_libc_fix_mod.addImport("libc", user_libc_module);
+    test_libc_fix_mod.addImport("syscall", user_syscall_lib);
+    
+    const test_libc_fix_exe = b.addExecutable(.{
+        .name = "test_libc_fix",
+        .root_module = test_libc_fix_mod,
+    });
+    test_libc_fix_exe.addCSourceFile(.{
+        .file = b.path("tests/userland/test_libc_fix.c"),
+        .flags = &.{ "-nostdlib", "-ffreestanding", "-I", "src/user/doom/include" },
+    });
+    test_libc_fix_exe.setLinkerScript(b.path("src/user/linker.ld"));
+    test_libc_fix_exe.addAssemblyFile(b.path("src/arch/x86_64/memcpy.S"));
+    test_libc_fix_exe.addAssemblyFile(b.path("src/user/crt0.S"));
+    const install_test_libc_fix = b.addInstallArtifact(test_libc_fix_exe, .{});
+    b.getInstallStep().dependOn(&install_test_libc_fix.step);
+
     // Create ISO build step using Limine bootloader
     // Use v5.x binary branch which has prebuilt files
     const iso_cmd = b.addSystemCommand(&.{
@@ -1574,7 +1645,7 @@ pub fn build(b: *std.Build) void {
         \\cp zig-out/bin/test_vdso iso_root/boot/modules/ && \
         \\cp zig-out/bin/test_writev iso_root/boot/modules/ && \
         \\cp zig-out/bin/audio_test iso_root/boot/modules/ && \
-        \\cp zig-out/bin/audio_test iso_root/boot/modules/ && \
+        \\cp zig-out/bin/test_libc_fix iso_root/boot/modules/ && \
         \\cp zig-out/bin/doom.elf iso_root/boot/modules/ && \
         \\cp zig-out/bin/uart_driver.elf iso_root/boot/modules/ && \
         \\cp zig-out/bin/ps2_driver.elf iso_root/boot/modules/ && \

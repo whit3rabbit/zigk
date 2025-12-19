@@ -208,6 +208,8 @@ fn processListenPacket(
     tcb.tos = listen_tcb.tos;
     tcb.state = .SynReceived;
     state.half_open_count += 1;
+    // Insert into half-open list for O(1) SYN flood eviction
+    state.halfOpenListInsert(tcb);
 
     // Insert into hash table (state.lock is held)
     state.insertTcbIntoHash(tcb);
@@ -404,6 +406,8 @@ fn processSynReceived(tcb: *Tcb, tcp_hdr: *TcpHeader) RxAction {
     }
 
     tcb.snd_una = ack;
+    // Remove from half-open list before transitioning state
+    state.halfOpenListRemove(tcb);
     tcb.state = .Established;
     if (state.half_open_count > 0) state.half_open_count -= 1;
     tcb.retrans_timer = 0;

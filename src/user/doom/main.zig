@@ -90,7 +90,7 @@ comptime {
     _ = &libc.stdin;
     _ = &libc.stdout;
     _ = &libc.stderr;
-    _ = &libc.errno;
+    _ = &libc.__errno_location;
     _ = &libc.system;
     _ = &libc.mkdir;
     _ = &libc.atof;

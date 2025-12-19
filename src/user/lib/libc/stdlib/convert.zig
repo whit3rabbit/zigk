@@ -162,8 +162,12 @@ pub export fn atoll(str: ?[*:0]const u8) c_longlong {
     return if (negative) -result else result;
 }
 
-/// Convert string to long with base detection
+/// Convert string to long with base detection and overflow protection
+/// On overflow, returns LONG_MAX or LONG_MIN and sets errno to ERANGE
 pub export fn strtol(str: ?[*:0]const u8, endptr: ?*?[*:0]u8, base_arg: c_int) c_long {
+    const LONG_MAX: c_long = 9223372036854775807;
+    const LONG_MIN: c_long = -9223372036854775808;
+
     if (str == null) {
         if (endptr) |ep| ep.* = null;
         return 0;
@@ -201,8 +205,10 @@ pub export fn strtol(str: ?[*:0]const u8, endptr: ?*?[*:0]u8, base_arg: c_int) c
         s += 2;
     }
 
-    // Parse digits
+    // Parse digits with overflow checking
     var result: c_long = 0;
+    var overflowed = false;
+
     while (true) {
         var digit: c_int = -1;
         if (s[0] >= '0' and s[0] <= '9') {
@@ -214,7 +220,24 @@ pub export fn strtol(str: ?[*:0]const u8, endptr: ?*?[*:0]u8, base_arg: c_int) c
         }
 
         if (digit < 0 or digit >= base) break;
-        result = result * base + digit;
+
+        // Check multiplication overflow
+        const mul_result = @mulWithOverflow(result, @as(c_long, base));
+        if (mul_result[1] != 0) {
+            overflowed = true;
+            s += 1;
+            continue;
+        }
+
+        // Check addition overflow
+        const add_result = @addWithOverflow(mul_result[0], @as(c_long, digit));
+        if (add_result[1] != 0) {
+            overflowed = true;
+            s += 1;
+            continue;
+        }
+
+        result = add_result[0];
         s += 1;
     }
 
@@ -222,11 +245,19 @@ pub export fn strtol(str: ?[*:0]const u8, endptr: ?*?[*:0]u8, base_arg: c_int) c
         ep.* = @ptrCast(@constCast(s));
     }
 
+    if (overflowed) {
+        errno_mod.errno = errno_mod.ERANGE;
+        return if (negative) LONG_MIN else LONG_MAX;
+    }
+
     return if (negative) -result else result;
 }
 
-/// Convert string to unsigned long with base detection
+/// Convert string to unsigned long with base detection and overflow protection
+/// On overflow, returns ULONG_MAX and sets errno to ERANGE
 pub export fn strtoul(str: ?[*:0]const u8, endptr: ?*?[*:0]u8, base_arg: c_int) c_ulong {
+    const ULONG_MAX: c_ulong = 18446744073709551615;
+
     if (str == null) {
         if (endptr) |ep| ep.* = null;
         return 0;
@@ -255,7 +286,10 @@ pub export fn strtoul(str: ?[*:0]const u8, endptr: ?*?[*:0]u8, base_arg: c_int) 
         s += 2;
     }
 
+    // Parse digits with overflow checking
     var result: c_ulong = 0;
+    var overflowed = false;
+
     while (true) {
         var digit: c_int = -1;
         if (s[0] >= '0' and s[0] <= '9') {
@@ -267,12 +301,34 @@ pub export fn strtoul(str: ?[*:0]const u8, endptr: ?*?[*:0]u8, base_arg: c_int) 
         }
 
         if (digit < 0 or digit >= base) break;
-        result = result * @as(c_ulong, @intCast(base)) + @as(c_ulong, @intCast(digit));
+
+        // Check multiplication overflow
+        const mul_result = @mulWithOverflow(result, @as(c_ulong, @intCast(base)));
+        if (mul_result[1] != 0) {
+            overflowed = true;
+            s += 1;
+            continue;
+        }
+
+        // Check addition overflow
+        const add_result = @addWithOverflow(mul_result[0], @as(c_ulong, @intCast(digit)));
+        if (add_result[1] != 0) {
+            overflowed = true;
+            s += 1;
+            continue;
+        }
+
+        result = add_result[0];
         s += 1;
     }
 
     if (endptr) |ep| {
         ep.* = @ptrCast(@constCast(s));
+    }
+
+    if (overflowed) {
+        errno_mod.errno = errno_mod.ERANGE;
+        return ULONG_MAX;
     }
 
     return result;

@@ -84,7 +84,9 @@ pub fn loadInitProcess() void {
     var selected_mod: ?*limine.Module = null;
     var process_name: []const u8 = "init";
 
-    // Priority 0: VDSO Test
+
+
+    // Priority 0.1: VDSO Test
     if (selected_mod == null) {
         for (mods) |mod| {
             const cmdline = get_str(mod.cmdline);

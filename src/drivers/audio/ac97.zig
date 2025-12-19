@@ -147,8 +147,21 @@ pub const Ac97 = struct {
         };
 
         // Allocate BDL
+        // SECURITY FIX (Vuln 3): AC97 DMA controller only supports 32-bit physical
+        // addresses. On systems with >4GB RAM, allocations above 4GB would be
+        // truncated, causing DMA to access wrong memory (potential kernel memory
+        // corruption or information disclosure). We validate all DMA buffer
+        // addresses fit within 32 bits.
         const bdl_phys = pmm.allocZeroedPage() orelse return error.OutOfMemory;
         errdefer pmm.freePage(bdl_phys);
+
+        // Validate BDL address is within 32-bit range for AC97 DMA
+        if (bdl_phys > 0xFFFFFFFF) {
+            console.err("AC97: BDL address 0x{x} exceeds 32-bit DMA limit", .{bdl_phys});
+            pmm.freePage(bdl_phys);
+            return error.DmaAddressOutOfRange;
+        }
+
         driver.bdl_phys = bdl_phys;
         driver.bdl = @ptrCast(@alignCast(hal.paging.physToVirt(bdl_phys)));
 
@@ -162,11 +175,19 @@ pub const Ac97 = struct {
 
         for (0..BDL_ENTRY_COUNT) |i| {
             const buf_phys = pmm.allocZeroedPage() orelse return error.OutOfMemory;
+
+            // SECURITY FIX (Vuln 3): Validate buffer address is within 32-bit range
+            if (buf_phys > 0xFFFFFFFF) {
+                console.err("AC97: Buffer {} address 0x{x} exceeds 32-bit DMA limit", .{ i, buf_phys });
+                pmm.freePage(buf_phys);
+                return error.DmaAddressOutOfRange;
+            }
+
             driver.buffers_phys[i] = buf_phys;
             driver.buffers[i] = hal.paging.physToVirt(buf_phys);
             allocated_buffers += 1;
 
-            // Setup BDL Entry
+            // Setup BDL Entry - safe to truncate after validation above
             driver.bdl[i] = BdlEntry{
                 .ptr = @truncate(buf_phys),
                 .ioc = true, // Interrupt when this buffer is done
@@ -301,6 +322,12 @@ pub const Ac97 = struct {
 
     // DevFS Operations
 
+    /// Write audio data to playback buffers.
+    ///
+    /// SECURITY FIX (Vuln 1): Acquires spinlock to prevent race condition with
+    /// handleInterrupt() which also modifies current_buffer, bdl, and buffers.
+    /// Without this lock, concurrent IRQ and process context access can corrupt
+    /// buffer indices and cause DMA to access wrong memory regions.
     pub fn write(self: *Self, data: []const u8) isize {
         // We need to copy data to buffers and update LVI.
         // If all buffers are full, wait.
@@ -311,36 +338,47 @@ pub const Ac97 = struct {
         var written: usize = 0;
 
         while (written < data.len) {
+            // Acquire lock for shared state access
+            const held = self.lock.acquire();
+
+            // SECURITY FIX (Vuln 4): Validate current_buffer before array access.
+            // Memory corruption elsewhere could set this out of bounds.
+            if (self.current_buffer >= BDL_ENTRY_COUNT) {
+                held.release();
+                return -5; // EIO - internal state corrupted
+            }
+
             // Find current hardware position
-            var civ = port_io.inb(self.nabm_base + NABM_PO_CIV);
+            const civ = port_io.inb(self.nabm_base + NABM_PO_CIV);
             const lvi = port_io.inb(self.nabm_base + NABM_PO_LVI);
             _ = lvi; // Used for debugging
 
             if (self.current_buffer == civ) {
                 // Check if hardware is actually running
-                var sr = port_io.inw(self.nabm_base + NABM_PO_SR);
-                while ((sr & SR_DCH) == 0 and self.current_buffer == civ) {
+                const sr = port_io.inw(self.nabm_base + NABM_PO_SR);
+                if ((sr & SR_DCH) == 0) {
                     // DMA is running and pointing to our buffer. We are full.
-                    // Poll until hardware advances or stops.
+                    // Release lock before yielding to avoid deadlock.
+                    held.release();
                     sched.yield();
-                    civ = port_io.inb(self.nabm_base + NABM_PO_CIV);
-                    sr = port_io.inw(self.nabm_base + NABM_PO_SR);
+                    continue; // Re-acquire lock and re-check
                 }
             }
 
             // Fill the current buffer with as much compatible data as possible
             // Destination: full 4KB buffer
             // Source: remaining user data
-            
+
             const dst_slice = self.buffers[self.current_buffer][0..BUFFER_SIZE];
             const src_slice = data[written..];
-            
+
             const res = self.processAudio(dst_slice, src_slice);
-            
+
             // If we consumed nothing but had input, we might be stuck (frame alignment issue?)
             if (res.consumed == 0 and src_slice.len > 0) {
-                 // Should not happen if inputs are aligned. 
+                 // Should not happen if inputs are aligned.
                  // If unaligned data at end, we just drop/ignore or break.
+                 held.release();
                  break;
             }
 
@@ -361,7 +399,7 @@ pub const Ac97 = struct {
             const next_buffer = (self.current_buffer + 1) % BDL_ENTRY_COUNT;
             self.current_buffer = next_buffer;
 
-            // Update LVI 
+            // Update LVI
             port_io.outb(self.nabm_base + NABM_PO_LVI, @truncate(self.current_buffer));
 
             // Ensure DMA is running
@@ -369,6 +407,8 @@ pub const Ac97 = struct {
             if ((cr & CR_RPBM) == 0) {
                 port_io.outb(self.nabm_base + NABM_PO_CR, CR_RPBM);
             }
+
+            held.release();
         }
 
         return @intCast(written);
@@ -558,6 +598,12 @@ pub const Ac97 = struct {
         const frame_size: usize = 4; // stereo 16-bit = 4 bytes
         const buf_idx = self.current_buffer;
 
+        // SECURITY FIX (Vuln 4): Validate buffer index before array access
+        if (buf_idx >= BDL_ENTRY_COUNT) {
+            _ = request.complete(.{ .err = error.EIO });
+            return;
+        }
+
         // Copy data to DMA buffer with format conversion
         const buf = self.buffers[buf_idx];
 
@@ -580,7 +626,10 @@ pub const Ac97 = struct {
         self.bdl[buf_idx].len = @truncate(samples);
 
         // Track this request for IRQ completion
-        self.pending_requests[buf_idx] = request;
+        // SECURITY FIX (Vuln 5): Use atomic store for consistency with atomic
+        // reads in handleInterrupt(). This ensures memory ordering is correct
+        // across the producer (submitBuffer) and consumer (handleInterrupt).
+        @atomicStore(?*kernel_io.IoRequest, &self.pending_requests[buf_idx], request, .release);
         _ = request.compareAndSwapState(.pending, .in_progress);
         
         // NOTE: We only consumed src_consumed bytes.
@@ -665,25 +714,42 @@ pub const Ac97 = struct {
             // Complete any requests for buffers that have been consumed
             // Buffers from the last completed index up to (but not including) CIV
             // have finished playing.
-            for (self.pending_requests, 0..) |maybe_req, i| {
+            //
+            // SECURITY FIX (Vuln 5): Use atomic exchange to claim request slots.
+            // This provides defense-in-depth against potential SMP race conditions
+            // where multiple CPUs could attempt to complete the same request.
+            // Even though we hold the spinlock, atomics ensure correctness if:
+            // - The spinlock implementation has bugs
+            // - Future code paths bypass the lock
+            // - Memory ordering issues on certain architectures
+            for (&self.pending_requests, 0..) |*slot, i| {
+                // Atomically claim the slot by exchanging with null
+                const maybe_req = @atomicRmw(?*kernel_io.IoRequest, slot, .Xchg, null, .acq_rel);
                 if (maybe_req) |request| {
                     // This buffer slot had a pending request
                     // Check if hardware has moved past it
                     // Simple heuristic: if i != civ and request was in_progress
                     if (i != civ and request.getState() == .in_progress) {
-                        self.pending_requests[i] = null;
                         // Retrieve the bytes-consumed we stored earlier
                         const written = switch (request.result) {
                             .success => |val| val,
                             else => 0,
                         };
                         _ = request.complete(.{ .success = written });
+                    } else {
+                        // Not ready for completion yet, put it back
+                        @atomicStore(?*kernel_io.IoRequest, slot, request, .release);
                     }
                 }
             }
 
             // Submit queued requests if space available
             while (self.dequeueRequest()) |queued| {
+                // SECURITY FIX (Vuln 7): Defensive assertion to verify dequeueRequest()
+                // properly cleared the next pointer. If this is non-null, we have queue
+                // corruption that could cause cycles or lost requests.
+                std.debug.assert(queued.next == null);
+
                 const new_civ = port_io.inb(self.nabm_base + NABM_PO_CIV);
                 if (self.current_buffer == new_civ) {
                     // Still full, put it back at HEAD (not tail) so it's processed first.

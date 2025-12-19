@@ -2,24 +2,6 @@
 //
 // Userland entry point providing SysV ABI compliant stack setup.
 // This is the first code executed when a userland process starts.
-//
-// Stack layout at _start (set up by kernel):
-//   RSP+0:    argc (u64)
-//   RSP+8:    argv[0] (pointer to first arg string)
-//   RSP+16:   argv[1]
-//   ...
-//   RSP+8*(argc+1): NULL (argv terminator)
-//   RSP+8*(argc+2): envp[0] (optional, environment)
-//
-// Responsibilities:
-//   1. Clear RBP (frame pointer) to mark stack base
-//   2. Extract argc from RSP
-//   3. Calculate argv pointer from RSP+8
-//   4. Align RSP to 16 bytes (SysV ABI requirement)
-//   5. Call main(argc, argv)
-//   6. Pass main's return value to sys_exit
-//
-// Reference: System V AMD64 ABI specification
 
 // Note: syscall module is imported via build system as "syscall"
 // However, crt0 only uses inline assembly for the syscall instruction
@@ -28,42 +10,50 @@
 // External main function provided by the user program
 extern fn main(argc: i32, argv: [*]const [*:0]const u8) i32;
 
-/// _start - Userland entry point
-///
-/// This function is marked naked because we need full control over
-/// the stack and registers. No prologue/epilogue is generated.
-///
-/// The assembly performs:
-///   1. xor rbp, rbp    - Clear frame pointer (marks stack base for debuggers)
-///   2. mov rdi, [rsp]  - Load argc into first argument register
-///   3. lea rsi, [rsp+8]- Load argv pointer into second argument register
-///   4. and rsp, -16    - Align stack to 16 bytes (SysV ABI)
-///   5. call main       - Call the user's main function
-///   6. mov rdi, rax    - Move return value to first syscall arg
-///   7. mov rax, 60     - sys_exit syscall number
-///   8. syscall         - Exit process with main's return value
-export fn _start() callconv(.naked) noreturn {
-    asm volatile (
-        // Clear frame pointer to mark stack base
-        \\xor %%rbp, %%rbp
-        // Load argc from stack (set up by kernel)
-        \\mov (%%rsp), %%rdi
-        // Calculate argv pointer (RSP + 8)
-        \\lea 8(%%rsp), %%rsi
-        // Align stack to 16 bytes (SysV ABI requirement)
-        // Stack may be misaligned after kernel sets it up
-        \\and $-16, %%rsp
-        // Call main(argc, argv)
-        // Return value will be in RAX
-        \\call main
-        // Pass main's return value to sys_exit
-        \\mov %%rax, %%rdi
-        // sys_exit syscall number
-        \\mov $60, %%rax
-        // Terminate process
+// Global assembly entry point
+comptime {
+    asm (
+        \\.global _start
+        \\_start:
+        // Clear frame pointer
+        \\xor %rbp, %rbp
+        
+        // Save argc and argv to callee-saved regs (preserved across syscall)
+        \\movq (%rsp), %r12      // argc
+        \\leaq 8(%rsp), %r13     // argv
+        
+        // Align stack
+        \\andq $-16, %rsp
+
+        // Initialize TLS: main_thread_tcb[0] = &main_thread_tcb
+        \\leaq main_thread_tcb(%rip), %rax
+        \\movq %rax, main_thread_tcb(%rip)
+
+        // sys_arch_prctl(ARCH_SET_FS, &main_thread_tcb)
+        \\movq $158, %rax         // SYS_ARCH_PRCTL
+        \\movq $0x1002, %rdi      // ARCH_SET_FS
+        \\leaq main_thread_tcb(%rip), %rsi // addr
         \\syscall
-        // Never reached, but required for noreturn
+
+        // Restore args for main
+        \\movq %r12, %rdi        // argc
+        \\movq %r13, %rsi        // argv
+        
+        // Call main
+        \\call main
+        
+        // Exit(rax)
+        \\movq %rax, %rdi
+        \\movq $60, %rax
+        \\syscall
         \\ud2
+
+        // Define TCB in data section
+        \\.data
+        \\.align 8
+        \\.global main_thread_tcb
+        \\main_thread_tcb: .quad 0
+        \\.text
     );
 }
 

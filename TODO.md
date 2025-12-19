@@ -4,20 +4,6 @@ This document contains actionable sub-tasks with research findings from comprehe
 
 ---
 
- | Category             | Count | Examples                                                         |            |----------------------|-------|------------------------------------------------------------------|
-  | TODO Comments        | 28    | Signal handling, heap slab allocator, USB drivers, audio formats |
-  | Stub Implementations | 45+   | Syscalls returning ENOSYS, hardcoded UID/GID returns             |
-  | Incomplete Features  | 20+   | io_uring ops, file-backed mmap, sigaltstack                      |
-
-  Key areas with stubs/TODOs:
-  - Signals: Default actions, sigaltstack, mask saving (5 TODOs)
-  - Filesystem: pread64, pwrite64, readv, openat, file modifications (15+ stubs)
-  - Process Management: UID/GID model, capabilities, resource limits (10+ stubs)
-  - USB Drivers: EHCI handoff, hub disconnect handling (6 TODOs)
-  - Audio: Sample rates, mono playback, format conversion (3 TODOs)
-  - Networking: Some stubs in execution.zig (though net.zig has real implementations)
-  - Libc: printf width padding, thread-local errno, signal stubs
-
 ## Phase 6: Performance & Core Optimization (Priority)
 
 **Goal:** Eliminate O(N) bottlenecks in memory allocation and scheduling.

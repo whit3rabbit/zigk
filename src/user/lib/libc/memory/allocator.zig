@@ -2,8 +2,9 @@
 //
 // Provides malloc, free, realloc, calloc with security improvements:
 // - Integer overflow protection in size calculations
-// - Block coalescing to reduce fragmentation
-// - Double-linked list for efficient coalescing
+// - Address-ordered block list for safe coalescing
+// - Physical adjacency checks before merging
+// - Double-linked list for efficiency
 
 const syscall = @import("syscall.zig");
 const internal = @import("../internal.zig");
@@ -34,9 +35,15 @@ const BlockHeader = struct {
         return self.magic == internal.HEAP_MAGIC or
             self.magic == internal.FREED_MAGIC;
     }
+
+    /// Check if other block is physically adjacent after this one
+    fn isAdjacent(self: *const BlockHeader, other: *const BlockHeader) bool {
+        const self_end = @as(usize, @intFromPtr(self)) + @sizeOf(BlockHeader) + self.size;
+        return self_end == @intFromPtr(other);
+    }
 };
 
-/// Head of the allocation list
+/// Head of the allocation list (Lowest Address)
 var head: ?*BlockHeader = null;
 
 /// Minimum block size (avoids tiny fragments)
@@ -56,12 +63,19 @@ pub export fn malloc(size: usize) ?*anyopaque {
         return null;
     };
 
-    // First-fit search through free list
+    // First-fit search through free list (address ordered)
     var current = head;
     var best_fit: ?*BlockHeader = null;
     var best_fit_size: usize = ~@as(usize, 0);
 
+    // Traverse to find best fit AND find tail if needed
+    var tail: ?*BlockHeader = null;
+
     while (current) |block| {
+        if (internal.DEBUG_HEAP and !block.isValid()) {
+            @panic("libc: heap corruption detected in malloc scan");
+        }
+
         if (block.free and block.size >= aligned_size) {
             // Use best-fit to reduce fragmentation
             if (block.size < best_fit_size) {
@@ -72,14 +86,18 @@ pub export fn malloc(size: usize) ?*anyopaque {
                 if (block.size == aligned_size) break;
             }
         }
+        
+        tail = block; // Track tail for appending if needed
         current = block.next;
     }
 
     if (best_fit) |block| {
         // Try to split block if it's large enough
         const remaining = block.size - aligned_size;
-        if (remaining >= MIN_BLOCK_SIZE + @sizeOf(BlockHeader)) {
+        // Need space for header + min data
+        if (remaining >= @sizeOf(BlockHeader) + MIN_BLOCK_SIZE) {
             // Split the block
+            // New block goes AFTER current block
             const new_block_ptr = @as([*]u8, @ptrCast(block)) + @sizeOf(BlockHeader) + aligned_size;
             const new_block: *BlockHeader = @ptrCast(@alignCast(new_block_ptr));
 
@@ -103,6 +121,7 @@ pub export fn malloc(size: usize) ?*anyopaque {
     }
 
     // No suitable free block found, allocate new one
+    // New block will be at highest address, so append to tail
     const ptr = syscall.sbrk(@intCast(total_size)) catch {
         errno_mod.errno = errno_mod.ENOMEM;
         return null;
@@ -112,14 +131,14 @@ pub export fn malloc(size: usize) ?*anyopaque {
     block.magic = internal.HEAP_MAGIC;
     block.size = aligned_size;
     block.free = false;
-    block.prev = null;
+    block.next = null;
+    block.prev = tail;
 
-    // Prepend to list
-    block.next = head;
-    if (head) |h| {
-        h.prev = block;
+    if (tail) |t| {
+        t.next = block;
+    } else {
+        head = block;
     }
-    head = block;
 
     return block.userData();
 }
@@ -151,28 +170,38 @@ pub export fn free(ptr: ?*anyopaque) void {
 }
 
 /// Coalesce block with adjacent free blocks
+/// Requires strict adjacency check since list order != physical order
+/// (Though with our new malloc, list order SHOULD == physical order,
+/// but safe checks are critical)
 fn coalesceBlocks(block: *BlockHeader) void {
     // Try to coalesce with next block
     if (block.next) |next| {
-        if (next.free) {
+        // Must be free AND physically adjacent
+        if (next.free and block.isAdjacent(next)) {
             // Merge next block into current
+            // block extends to cover next
             block.size += @sizeOf(BlockHeader) + next.size;
             block.next = next.next;
             if (next.next) |nn| {
                 nn.prev = block;
             }
+            // Invalidate merged block magic
+            if (internal.DEBUG_HEAP) next.magic = 0;
         }
     }
 
     // Try to coalesce with previous block
     if (block.prev) |prev| {
-        if (prev.free) {
+        // Must be free AND physically adjacent
+        if (prev.free and prev.isAdjacent(block)) {
             // Merge current block into previous
             prev.size += @sizeOf(BlockHeader) + block.size;
             prev.next = block.next;
             if (block.next) |bn| {
                 bn.prev = prev;
             }
+            // Invalidate merged block magic
+            if (internal.DEBUG_HEAP) block.magic = 0;
         }
     }
 }
@@ -202,13 +231,14 @@ pub export fn realloc(ptr: ?*anyopaque, size: usize) ?*anyopaque {
 
     // Current block is big enough
     if (block.size >= aligned_size) {
-        // Could split here if significantly oversized, but keep simple for now
+        // TODO: Split if significantly oversized?
+        // For now, simple standard behavior
         return ptr;
     }
 
-    // Try to expand into next block if it's free
+    // Try to expand into next block if it's free and adjacent
     if (block.next) |next| {
-        if (next.free) {
+        if (next.free and block.isAdjacent(next)) {
             const combined = block.size + @sizeOf(BlockHeader) + next.size;
             if (combined >= aligned_size) {
                 // Absorb next block
@@ -217,6 +247,10 @@ pub export fn realloc(ptr: ?*anyopaque, size: usize) ?*anyopaque {
                 if (next.next) |nn| {
                     nn.prev = block;
                 }
+                if (internal.DEBUG_HEAP) next.magic = 0;
+                
+                // If we absorbed too much, we could split again here?
+                // Leaving as simple expansion for now.
                 return ptr;
             }
         }
@@ -302,9 +336,32 @@ pub export fn aligned_free(ptr: ?*anyopaque) void {
     if (ptr == null) return;
 
     const aligned_addr = @intFromPtr(ptr.?);
-    const offset_ptr: *const usize = @ptrFromInt(aligned_addr - @sizeOf(usize));
-    const original_addr = aligned_addr - offset_ptr.*;
 
+    // Validate that we can read the offset (address must be > sizeof(usize))
+    if (aligned_addr < @sizeOf(usize)) {
+        if (internal.DEBUG_HEAP) {
+            @panic("libc: aligned_free called with invalid address");
+        }
+        return;
+    }
+
+    const offset_ptr: *const usize = @ptrFromInt(aligned_addr - @sizeOf(usize));
+    const offset = offset_ptr.*;
+
+    // SECURITY: Validate offset is reasonable
+    // - Must be at least sizeof(usize) (room for offset storage)
+    // - Must not exceed aligned_addr (would underflow)
+    // - Must not exceed a reasonable maximum (e.g., 4KB alignment max)
+    const MAX_REASONABLE_OFFSET: usize = 4096 + @sizeOf(usize);
+
+    if (offset < @sizeOf(usize) or offset > aligned_addr or offset > MAX_REASONABLE_OFFSET) {
+        if (internal.DEBUG_HEAP) {
+            @panic("libc: heap corruption detected in aligned_free - invalid offset");
+        }
+        return;
+    }
+
+    const original_addr = aligned_addr - offset;
     free(@ptrFromInt(original_addr));
 }
 

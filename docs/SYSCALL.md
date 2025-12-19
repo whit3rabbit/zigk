@@ -70,6 +70,7 @@ pub export fn dispatch_syscall(frame: *SyscallFrame) callconv(.c) void
 Runtime dispatch is an unrolled loop that LLVM optimizes to a jump table.
 
 Networking syscalls live exclusively in `net.zig` (see `docs/FILESYSTEM.md`).
+`net.zig` matches all network syscall numbers defined in `src/uapi/syscalls.zig`.
 Do not add socket stubs to other modules. If a syscall has no handler in any
 module, dispatch returns `error.ENOSYS`.
 
@@ -155,7 +156,7 @@ src/kernel/syscall/
     memory.zig     - Memory management (mmap, mprotect, munmap, brk)
     execution.zig  - Process execution (fork, execve, arch_prctl)
     custom.zig     - Zscapek extensions (debug_log, putchar, getchar, read_scancode)
-    net.zig        - Networking (socket, bind, listen, accept, connect, send, recv)
+    net.zig        - Networking (socket, bind, listen, accept, connect, send, recv, poll)
     random.zig     - Random numbers (getrandom)
     input.zig      - Input devices (mouse, keyboard events)
     ipc.zig        - Inter-process communication
@@ -187,7 +188,7 @@ src/kernel/syscall/
 | 4 | stat | (path, statbuf) -> int | io.zig |
 | 5 | fstat | (fd, statbuf) -> int | io.zig |
 | 6 | lstat | (path, statbuf) -> int | io.zig |
-| 7 | poll | (ufds, nfds, timeout) -> int | - |
+| 7 | poll | (ufds, nfds, timeout) -> int | net.zig |
 | 8 | lseek | (fd, offset, whence) -> off_t | fd.zig |
 | 9 | mmap | (addr, len, prot, flags, fd, off) -> addr | memory.zig |
 | 10 | mprotect | (addr, len, prot) -> int | memory.zig |
@@ -308,6 +309,8 @@ src/kernel/syscall/
 | 1033 | pci_enumerate | (buf, max) -> int | pci_syscall.zig |
 | 1034 | pci_config_read | (b,d,f,off) -> val | pci_syscall.zig |
 | 1035 | pci_config_write | (b,d,f,off,val) -> int | pci_syscall.zig |
+| 1036 | outb | (port, value) -> int | port_io.zig |
+| 1037 | inb | (port) -> value | port_io.zig |
 | 1026 | register_service | (name, len) -> int | ipc.zig |
 | 1027 | lookup_service | (name, len) -> pid | ipc.zig |
 

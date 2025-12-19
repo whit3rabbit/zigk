@@ -95,6 +95,48 @@ var secret_key: [16]u8 = [_]u8{0} ** 16;
 /// Count of half-open connections (SYN-RECEIVED)
 pub var half_open_count: usize = 0;
 
+/// Head of half-open TCB list (oldest first for O(1) eviction)
+/// Doubly-linked intrusive list for O(1) insert/remove
+var half_open_head: ?*Tcb = null;
+var half_open_tail: ?*Tcb = null;
+
+/// Insert TCB into half-open list (at tail - newest)
+/// Call this when TCB transitions to SYN-RECEIVED state
+pub fn halfOpenListInsert(tcb: *Tcb) void {
+    tcb.half_open_next = null;
+    tcb.half_open_prev = half_open_tail;
+
+    if (half_open_tail) |tail| {
+        tail.half_open_next = tcb;
+    } else {
+        half_open_head = tcb;
+    }
+    half_open_tail = tcb;
+}
+
+/// Remove TCB from half-open list
+/// Call this when TCB transitions out of SYN-RECEIVED state
+pub fn halfOpenListRemove(tcb: *Tcb) void {
+    // Update prev's next pointer
+    if (tcb.half_open_prev) |prev| {
+        prev.half_open_next = tcb.half_open_next;
+    } else {
+        // tcb was head
+        half_open_head = tcb.half_open_next;
+    }
+
+    // Update next's prev pointer
+    if (tcb.half_open_next) |next| {
+        next.half_open_prev = tcb.half_open_prev;
+    } else {
+        // tcb was tail
+        half_open_tail = tcb.half_open_prev;
+    }
+
+    tcb.half_open_next = null;
+    tcb.half_open_prev = null;
+}
+
 /// TCP State Machine
 //
 // Complies with:
@@ -196,8 +238,9 @@ pub fn isTcbValid(tcb: *Tcb) bool {
 /// 2. Remove from hash table to prevent new lookups
 /// 3. Reset state and free memory
 pub fn freeTcb(tcb: *Tcb) void {
-    // Maintain half-open counter
+    // Maintain half-open counter and remove from half-open list
     if (tcb.state == .SynReceived) {
+        halfOpenListRemove(tcb);
         if (half_open_count > 0) half_open_count -= 1;
     }
     // Phase 1: Mark as closing - any concurrent packet processing
@@ -407,33 +450,27 @@ pub fn nextTimestamp() u32 {
 
 /// Evict oldest half-open TCB to make space for valid connections (DoS mitigation)
 /// Returns true if an entry was evicted
+/// Uses O(1) intrusive list - oldest is always at head
 pub fn evictOldestHalfOpenTcb() bool {
-    var oldest_tcb: ?*Tcb = null;
-    var oldest_time: u64 = connection_timestamp;
-    
-    // Scan TCB pool for SynReceived state
-    // Note: optimization would be to keep a separate half-open list, 
-    // but max half-open is usually small (e.g. 1024), so linear scan of pool is acceptable for MVP
     lock.acquire();
     defer lock.release();
 
-    for (tcb_pool.items) |tcb| {
-        if (tcb.state == .SynReceived) {
-             // We want oldest -> smallest created_at
-             if (tcb.created_at < oldest_time) {
-                 oldest_time = tcb.created_at;
-                 oldest_tcb = tcb;
-             }
-        }
+    // O(1) - oldest is at head of list
+    const oldest_tcb = half_open_head orelse return false;
+
+    // Verify it's actually in SYN-RECEIVED state (sanity check)
+    if (oldest_tcb.state != .SynReceived) {
+        // Inconsistent state - remove from list but don't free
+        halfOpenListRemove(oldest_tcb);
+        return false;
     }
-    
-    if (oldest_tcb) |tcb| {
-        // Safe eviction: ensure no other thread holds the TCB lock
-        if (tcb.mutex.tryAcquire()) |held| {
-            held.release();
-            freeTcb(tcb); // Assumes state.lock is held (it is)
-            return true;
-        }
+
+    // Safe eviction: ensure no other thread holds the TCB lock
+    if (oldest_tcb.mutex.tryAcquire()) |held| {
+        held.release();
+        freeTcb(oldest_tcb); // freeTcb handles halfOpenListRemove
+        return true;
     }
+
     return false;
 }

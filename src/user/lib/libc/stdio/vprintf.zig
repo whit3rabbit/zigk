@@ -105,17 +105,14 @@ const FORMAT_BUF_SIZE = 4096;
 /// Format a value as decimal (signed)
 fn formatDecimal(buf: []u8, val: i64) []const u8 {
     var temp: [24]u8 = undefined;
-    var n: u64 = undefined;
     var negative = false;
+    // Fix: Use unsigned magnitude to handle INT64_MIN
+    var n: u64 = @abs(val);
+    var i: usize = temp.len;
 
     if (val < 0) {
         negative = true;
-        n = @intCast(-val);
-    } else {
-        n = @intCast(val);
     }
-
-    var i: usize = temp.len;
     if (n == 0) {
         i -= 1;
         temp[i] = '0';
@@ -195,9 +192,13 @@ fn formatToBuffer(dest: [*]u8, limit: usize, fmt: [*:0]const u8, ap: va_list) us
     var d_idx: usize = 0;
     var f_idx: usize = 0;
 
-    while (fmt[f_idx] != 0 and d_idx < limit - 1) {
+    // Max index we can write to (leaving room for null)
+    const write_limit = if (limit > 0) limit - 1 else 0;
+    const can_write = limit > 0;
+
+    while (fmt[f_idx] != 0) {
         if (fmt[f_idx] != '%') {
-            dest[d_idx] = fmt[f_idx];
+            if (can_write and d_idx < write_limit) dest[d_idx] = fmt[f_idx];
             d_idx += 1;
             f_idx += 1;
             continue;
@@ -384,12 +385,9 @@ fn formatToBuffer(dest: [*]u8, limit: usize, fmt: [*:0]const u8, ap: va_list) us
                 }
             },
             'n' => {
-                // %n - store number of characters written so far
-                const ptr = vaArg(ap);
-                if (ptr != 0) {
-                    const n_ptr: *i32 = @ptrFromInt(ptr);
-                    n_ptr.* = @intCast(d_idx);
-                }
+                // SECURITY: %n is disabled - allows arbitrary memory write
+                // Consume the argument but do nothing with it
+                _ = vaArg(ap);
             },
             else => {
                 // Unknown specifier, print it literally

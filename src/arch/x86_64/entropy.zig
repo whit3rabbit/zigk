@@ -670,3 +670,68 @@ pub fn reseedCsprng() void {
 pub fn isCsprngSeeded() bool {
     return csprng_seeded and (rdseed_available or rdrand_available);
 }
+
+/// Try to fill buffer with hardware entropy (RDRAND/RDSEED only)
+/// Returns true if hardware entropy was available, false if not.
+/// SECURITY: Unlike fillWithHardwareEntropy(), this does NOT fall back to CSPRNG or TSC.
+/// Use this for security-critical operations where weak entropy is unacceptable.
+pub fn tryFillWithHardwareEntropy(buf: []u8) bool {
+    const held = state_lock.acquire();
+    defer held.release();
+
+    // Require hardware entropy - no fallbacks
+    if (!rdseed_available and !rdrand_available) {
+        return false;
+    }
+
+    var offset: usize = 0;
+
+    while (offset < buf.len) {
+        var entropy: u64 = 0;
+        var success: u8 = 0;
+        var got_hardware = false;
+
+        // Try RDSEED first (true entropy)
+        if (rdseed_available) {
+            var attempts: u32 = 0;
+            while (attempts < 20) : (attempts += 1) {
+                entropy = _asm_rdseed64(&success);
+                if (success != 0) {
+                    got_hardware = true;
+                    break;
+                }
+                cpu.pause();
+            }
+        }
+
+        // Try RDRAND (DRBG-based)
+        if (!got_hardware and rdrand_available) {
+            var attempts: u32 = 0;
+            while (attempts < 10) : (attempts += 1) {
+                entropy = _asm_rdrand64(&success);
+                if (success != 0) {
+                    got_hardware = true;
+                    break;
+                }
+            }
+        }
+
+        // SECURITY: If hardware failed, abort entirely - no weak fallback
+        if (!got_hardware) {
+            rdrand_failure_count += 1;
+            return false;
+        }
+
+        // Copy bytes to buffer
+        const bytes = @as(*const [8]u8, @ptrCast(&entropy));
+        const remaining = buf.len - offset;
+        const to_copy = @min(remaining, 8);
+
+        for (0..to_copy) |i| {
+            buf[offset + i] = bytes[i];
+        }
+        offset += to_copy;
+    }
+
+    return true;
+}

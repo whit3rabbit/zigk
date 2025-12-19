@@ -21,13 +21,19 @@ pub const SIG_IGN: sighandler_t = @ptrFromInt(1);
 /// SIG_ERR - error return
 pub const SIG_ERR: sighandler_t = @ptrFromInt(@as(usize, @bitCast(@as(isize, -1))));
 
-/// Set signal handler (stub - no real signal support yet)
+/// Set signal handler
 /// Returns previous handler or SIG_ERR on error
 pub export fn signal(sig: c_int, handler: sighandler_t) sighandler_t {
-    _ = sig;
-    _ = handler;
-    // No signal support in kernel yet - return SIG_DFL
-    return SIG_DFL;
+    var act: syscall.SigAction = undefined;
+    act.handler = @intFromPtr(handler);
+    act.flags = syscall.uapi.signal.SA_RESTART | syscall.uapi.signal.SA_RESETHAND;
+    act.mask = 0;
+    act.restorer = 0;
+    
+    var old_act: syscall.SigAction = undefined;
+    syscall.sigaction(sig, &act, &old_act) catch return SIG_ERR;
+    
+    return @ptrFromInt(old_act.handler);
 }
 
 // =============================================================================
@@ -42,7 +48,7 @@ pub const jmp_buf = [64]u8;
 /// Returns 0 on direct call, non-zero when returning from longjmp
 pub export fn setjmp(env: ?*jmp_buf) c_int {
     // Cannot properly implement without assembly to save registers
-    // Just return 0 indicating direct call
+    // The current stub is invalid for real usage but allows linking.
     _ = env;
     return 0;
 }
@@ -50,8 +56,6 @@ pub export fn setjmp(env: ?*jmp_buf) c_int {
 /// Restore calling environment saved by setjmp
 /// Never returns - transfers control to setjmp location
 pub export fn longjmp(env: ?*jmp_buf, val: c_int) noreturn {
-    // Cannot properly implement without assembly
-    // Fall back to abort
     _ = env;
     _ = val;
     syscall.exit(134); // SIGABRT exit code
@@ -93,36 +97,78 @@ pub export fn setlocale(category: c_int, locale: ?[*:0]const u8) ?[*:0]const u8 
 // Misc stubs
 // =============================================================================
 
-/// Raise a signal in current process (stub)
+/// Raise a signal in current process
 pub export fn raise(sig: c_int) c_int {
-    _ = sig;
-    // No signal support yet
-    return -1;
+    const pid = syscall.getpid();
+    syscall.kill(pid, sig) catch return -1;
+    return 0;
 }
 
-/// Block all signals (stub)
+/// Block all signals
 pub export fn sigfillset(set: ?*anyopaque) c_int {
-    _ = set;
+    if (set) |s| {
+        const ptr = @as(*syscall.SigSet, @ptrCast(@alignCast(s)));
+        ptr.* = ~@as(syscall.SigSet, 0);
+    }
     return 0;
 }
 
-/// Clear signal set (stub)
+/// Clear signal set
 pub export fn sigemptyset(set: ?*anyopaque) c_int {
-    _ = set;
+    if (set) |s| {
+        const ptr = @as(*syscall.SigSet, @ptrCast(@alignCast(s)));
+        ptr.* = 0;
+    }
     return 0;
 }
 
-/// Add signal to set (stub)
+/// Add signal to set
 pub export fn sigaddset(set: ?*anyopaque, signum: c_int) c_int {
-    _ = set;
-    _ = signum;
+    if (set) |s| {
+        const ptr = @as(*syscall.SigSet, @ptrCast(@alignCast(s)));
+        syscall.uapi.signal.sigaddset(ptr, @intCast(signum));
+    }
     return 0;
 }
 
-/// Block signals (stub)
-pub export fn sigprocmask(how: c_int, set: ?*const anyopaque, oldset: ?*anyopaque) c_int {
-    _ = how;
-    _ = set;
-    _ = oldset;
+/// Remove signal from set
+pub export fn sigdelset(set: ?*anyopaque, signum: c_int) c_int {
+    if (set) |s| {
+         const ptr = @as(*syscall.SigSet, @ptrCast(@alignCast(s)));
+         syscall.uapi.signal.sigdelset(ptr, @intCast(signum));
+    }
     return 0;
+}
+
+/// Check if signal is in set
+pub export fn sigismember(set: ?*const anyopaque, signum: c_int) c_int {
+    if (set) |s| {
+        const ptr = @as(*const syscall.SigSet, @ptrCast(@alignCast(s)));
+        if (syscall.uapi.signal.sigismember(ptr.*, @intCast(signum))) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/// Change signal mask
+pub export fn sigprocmask(how: c_int, set: ?*const anyopaque, oldset: ?*anyopaque) c_int {
+    const set_ptr = if (set) |s| @as(*const syscall.SigSet, @ptrCast(@alignCast(s))) else null;
+    const oldset_ptr = if (oldset) |s| @as(*syscall.SigSet, @ptrCast(@alignCast(s))) else null;
+    
+    syscall.sigprocmask(how, set_ptr, oldset_ptr) catch return -1;
+    return 0;
+}
+
+/// Assert fail handler
+pub export fn __assert_fail(expr: ?[*:0]const u8, file: ?[*:0]const u8, line: c_uint, func: ?[*:0]const u8) noreturn {
+    _ = expr;
+    _ = file;
+    _ = line;
+    _ = func;
+    // Print error to stderr (fd 2)
+    // We can't use detailed printf here to avoid loops if printf fails
+    const msg = "Assertion failed!\n";
+    _ = syscall.write(2, msg, msg.len) catch {};
+    syscall.exit(134);
 }

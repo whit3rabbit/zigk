@@ -128,6 +128,9 @@ pub const ArpEntry = struct {
     /// Static entries are manually configured for critical hosts (gateway, DNS).
     /// They ignore ARP replies and never timeout.
     is_static: bool,
+
+    /// Hash chain pointer for O(1) lookup by IP address
+    hash_next: ?*ArpEntry,
 };
 
 /// ARP cache timeout in seconds (simplified - 20 minutes)
@@ -177,11 +180,16 @@ pub fn init(allocator: std.mem.Allocator, ticks_per_sec: u32) void {
     // else: keep default of 1000 (safe value)
 }
 
+/// Find entry by IP using O(1) hash table lookup
 fn findEntry(ip: u32) ?*ArpEntry {
-    for (arp_cache.items) |*entry| {
+    const idx = hashIp(ip);
+    var curr = arp_hash_table[idx];
+
+    while (curr) |entry| {
         if (entry.state != .free and entry.ip_addr == ip) {
             return entry;
         }
+        curr = entry.hash_next;
     }
     return null;
 }
@@ -409,13 +417,19 @@ pub fn resolve(ip: u32) ?[6]u8 {
 }
 
 /// Internal resolve without locking (caller must hold lock)
+/// Uses O(1) hash table lookup
 fn resolveUnlocked(ip: u32) ?[6]u8 {
-    for (arp_cache.items) |entry| {
+    const idx = hashIp(ip);
+    var curr = arp_hash_table[idx];
+
+    while (curr) |entry| {
         if (entry.state != .free and entry.ip_addr == ip) {
             if (entry.state == .reachable or entry.state == .stale) {
                 return entry.mac_addr;
             }
+            return null; // Found but not reachable/stale
         }
+        curr = entry.hash_next;
     }
     return null;
 }
@@ -512,6 +526,9 @@ pub fn resolveOrRequest(iface: *Interface, ip: u32, pkt_opaque: ?*const anyopaqu
                     entry.conflict_time = 0;
                     entry.generation +%= 1; // Increment on state change
                     entry.is_static = false;
+                    entry.hash_next = null;
+                    // Insert into hash table for O(1) future lookups
+                    hashTableInsert(entry);
 
                     if (pkt) |p| {
                         if (p.len <= packet.MAX_PACKET_SIZE) {
@@ -656,14 +673,64 @@ fn updateCache(iface: *Interface, ip: u32, mac: [6]u8, state: ArpState) !void {
     entry.conflict_time = 0;
     entry.generation +%= 1; // SECURITY (Vuln 1): Increment on new entry
     entry.is_static = false; // Dynamic entry from ARP
+    entry.hash_next = null;
+    // Insert into hash table for O(1) future lookups
+    hashTableInsert(entry);
 }
 
 /// Maximum ARP cache entries (DoS protection)
 const MAX_ARP_ENTRIES: usize = 256;
 
+/// Hash table size (power of 2 for fast modulus)
+/// 512 buckets for 256 max entries = ~0.5 load factor
+const ARP_HASH_SIZE: usize = 512;
+
+/// ARP hash table for O(1) lookup by IP address
+/// Each bucket points to an ArpEntry (entries store their index for removal)
+var arp_hash_table: [ARP_HASH_SIZE]?*ArpEntry = [_]?*ArpEntry{null} ** ARP_HASH_SIZE;
+
+/// Hash function for IP address (simple but effective for IPs)
+/// Uses multiplicative hashing with golden ratio constant
+fn hashIp(ip: u32) usize {
+    // Knuth's multiplicative hash
+    const golden_ratio: u32 = 0x9E3779B9;
+    const hash = ip *% golden_ratio;
+    // Use upper bits (better distribution)
+    return @as(usize, hash >> (32 - 9)) & (ARP_HASH_SIZE - 1);
+}
+
+/// Insert entry into hash table
+fn hashTableInsert(entry: *ArpEntry) void {
+    const idx = hashIp(entry.ip_addr);
+    entry.hash_next = arp_hash_table[idx];
+    arp_hash_table[idx] = entry;
+}
+
+/// Remove entry from hash table
+fn hashTableRemove(entry: *ArpEntry) void {
+    const idx = hashIp(entry.ip_addr);
+    var prev: ?*ArpEntry = null;
+    var curr = arp_hash_table[idx];
+
+    while (curr) |c| {
+        if (c == entry) {
+            if (prev) |p| {
+                p.hash_next = c.hash_next;
+            } else {
+                arp_hash_table[idx] = c.hash_next;
+            }
+            entry.hash_next = null;
+            return;
+        }
+        prev = c;
+        curr = c.hash_next;
+    }
+}
+
 /// Get a slot for a new entry (reusing free/stale or LRU eviction)
+/// Caller is responsible for inserting the returned entry into hash table
 fn findFreeEntry() !*ArpEntry {
-    // First pass: look for free entry
+    // First pass: look for free entry (already removed from hash table)
     for (arp_cache.items) |*entry| {
         if (entry.state == .free) {
             clearPending(entry);
@@ -684,6 +751,7 @@ fn findFreeEntry() !*ArpEntry {
     }
 
     if (oldest_stale) |entry| {
+        hashTableRemove(entry); // Remove old entry from hash table
         clearPending(entry);
         return entry;
     }
@@ -702,6 +770,7 @@ fn findFreeEntry() !*ArpEntry {
         }
 
         if (oldest_reachable) |entry| {
+            hashTableRemove(entry); // Remove old entry from hash table
             clearPending(entry);
             return entry;
         }
@@ -718,6 +787,7 @@ fn findFreeEntry() !*ArpEntry {
         }
 
         if (oldest_incomplete) |entry| {
+            hashTableRemove(entry); // Remove old entry from hash table
             clearPending(entry);
             return entry;
         }
@@ -736,6 +806,7 @@ fn findFreeEntry() !*ArpEntry {
     // Zero-initializing ensures pending_pkts[] contains null before clearPending.
     new_entry.* = std.mem.zeroes(ArpEntry);
     new_entry.state = .free;
+    new_entry.hash_next = null;
     clearPending(new_entry);
     return new_entry;
 }
@@ -764,6 +835,7 @@ pub fn ageCache() void {
             .incomplete => {
                 // Timeout after 3 seconds (was hardcoded > 10 ticks which was too fast at 100Hz and definitely at 1000Hz)
                 if (age > 3 * ticks_per_second) {
+                    hashTableRemove(entry); // Remove from hash table before freeing
                     clearPending(entry);
                     entry.state = .free;
                     entry.generation +%= 1;
@@ -779,6 +851,7 @@ pub fn ageCache() void {
             .stale => {
                 // Timeout stale entries (2x standard timeout)
                 if (age > ARP_TIMEOUT * 2 * ticks_per_second) {
+                    hashTableRemove(entry); // Remove from hash table before freeing
                     clearPending(entry);
                     entry.state = .free;
                     entry.generation +%= 1;
@@ -804,6 +877,11 @@ pub fn clearCache() void {
         entry.state = .free;
     }
     arp_cache.clearRetainingCapacity();
+
+    // Clear hash table
+    for (&arp_hash_table) |*bucket| {
+        bucket.* = null;
+    }
 }
 
 /// Get cache entry count
@@ -880,6 +958,9 @@ pub fn addStaticEntry(ip: u32, mac: [6]u8) !void {
     entry.conflict_time = 0;
     entry.generation +%= 1;
     entry.is_static = true;
+    entry.hash_next = null;
+    // Insert into hash table for O(1) future lookups
+    hashTableInsert(entry);
 }
 
 /// Remove a static ARP entry, allowing it to be learned dynamically again.
@@ -890,6 +971,7 @@ pub fn removeStaticEntry(ip: u32) bool {
 
     for (arp_cache.items) |*entry| {
         if (entry.ip_addr == ip and entry.is_static) {
+            hashTableRemove(entry); // Remove from hash table before freeing
             clearPending(entry);
             entry.state = .free;
             entry.is_static = false;
@@ -901,14 +983,13 @@ pub fn removeStaticEntry(ip: u32) bool {
 }
 
 /// Check if an IP has a static ARP entry.
+/// Uses O(1) hash table lookup.
 pub fn isStaticEntry(ip: u32) bool {
     const held = lock.acquire();
     defer held.release();
 
-    for (arp_cache.items) |entry| {
-        if (entry.ip_addr == ip and entry.is_static and entry.state != .free) {
-            return true;
-        }
+    if (findEntry(ip)) |entry| {
+        return entry.is_static;
     }
     return false;
 }

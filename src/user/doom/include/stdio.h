@@ -2,8 +2,8 @@
 #ifndef _STDIO_H
 #define _STDIO_H
 
-#include <stddef.h>
 #include <stdarg.h>
+#include <stddef.h>
 
 #define EOF (-1)
 #define SEEK_SET 0
@@ -19,6 +19,7 @@ extern FILE *stdout;
 extern FILE *stderr;
 
 FILE *fopen(const char *path, const char *mode);
+FILE *freopen(const char *path, const char *mode, FILE *stream);
 int fclose(FILE *stream);
 size_t fread(void *ptr, size_t size, size_t nmemb, FILE *stream);
 size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream);
@@ -53,6 +54,6 @@ int vsnprintf(char *str, size_t size, const char *format, va_list ap);
 int sscanf(const char *str, const char *format, ...);
 
 int remove(const char *path);
-int rename(const char *old, const char *new);
+int rename(const char *old, const char *newpath);
 
 #endif // _STDIO_H

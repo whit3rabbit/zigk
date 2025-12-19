@@ -138,6 +138,54 @@ pub fn isUsingFallbackSeed() bool {
     return using_fallback_seed;
 }
 
+/// SECURITY: Get the security degradation level
+/// Returns a severity level for security-sensitive code to check
+pub const SecurityLevel = enum {
+    /// Hardware entropy available - full security
+    secure,
+    /// CSPRNG seeded but no RDRAND - acceptable for most uses
+    degraded,
+    /// Using predictable fallback - CRITICAL security risk
+    critical,
+};
+
+pub fn getSecurityLevel() SecurityLevel {
+    if (!using_fallback_seed and hal.entropy.hasRdrand()) {
+        return .secure;
+    } else if (!using_fallback_seed) {
+        return .degraded;
+    } else {
+        return .critical;
+    }
+}
+
+/// SECURITY: Log appropriate warnings based on entropy quality
+/// Call this after PRNG initialization to inform about security posture
+pub fn logSecurityStatus() void {
+    const console = @import("console");
+
+    switch (getSecurityLevel()) {
+        .secure => {
+            console.info("PRNG: Initialized with hardware entropy (secure)", .{});
+        },
+        .degraded => {
+            console.warn("PRNG: No RDRAND - using CSPRNG fallback", .{});
+            console.warn("  Security is acceptable but not optimal", .{});
+        },
+        .critical => {
+            console.err("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!", .{});
+            console.err("!!! CRITICAL SECURITY WARNING: WEAK ENTROPY !!!", .{});
+            console.err("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!", .{});
+            console.err("PRNG seeded with PREDICTABLE fallback values!", .{});
+            console.err("  - Stack canaries may be guessable", .{});
+            console.err("  - ASLR entropy is severely reduced", .{});
+            console.err("  - TCP/DNS randomization is compromised", .{});
+            console.err("This system lacks RDRAND/RDSEED hardware support.", .{});
+            console.err("Consider adding hardware RNG or using a different CPU.", .{});
+        },
+    }
+}
+
 /// Generate random value in range [0, max)
 /// Thread-safe
 pub fn range(max: u64) u64 {
@@ -157,6 +205,14 @@ pub fn range(max: u64) u64 {
 /// This bypasses the PRNG and goes straight to hardware
 pub fn fillFromHardwareEntropy(buf: []u8) void {
     hal.entropy.fillWithHardwareEntropy(buf);
+}
+
+/// Try to fill buffer with hardware entropy only (RDRAND/RDSEED)
+/// Returns true if hardware entropy was used, false if not available.
+/// SECURITY: Unlike fillFromHardwareEntropy(), this does NOT fall back
+/// to CSPRNG or weak sources. Use for GRND_RANDOM semantics.
+pub fn tryFillFromHardwareEntropy(buf: []u8) bool {
+    return hal.entropy.tryFillWithHardwareEntropy(buf);
 }
 
 /// Mix additional entropy into PRNG state

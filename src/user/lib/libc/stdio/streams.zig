@@ -15,9 +15,9 @@ const EOF = file.EOF;
 // =============================================================================
 
 /// Static FILE structures for stdin, stdout, stderr
-var stdin_file: FILE = .{ .fd = 0, .has_error = false, .eof = false, .unget_char = -1 };
-var stdout_file: FILE = .{ .fd = 1, .has_error = false, .eof = false, .unget_char = -1 };
-var stderr_file: FILE = .{ .fd = 2, .has_error = false, .eof = false, .unget_char = -1 };
+var stdin_file: FILE = .{ .fd = 0, .has_error = false, .eof = false, .unget_char = -1, .is_static = true };
+var stdout_file: FILE = .{ .fd = 1, .has_error = false, .eof = false, .unget_char = -1, .is_static = true };
+var stderr_file: FILE = .{ .fd = 2, .has_error = false, .eof = false, .unget_char = -1, .is_static = true };
 
 pub export var stdin: ?*FILE = &stdin_file;
 pub export var stdout: ?*FILE = &stdout_file;

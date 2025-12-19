@@ -188,6 +188,11 @@ pub const Tcb = struct {
     // Hash chain (for TCB lookup)
     hash_next: ?*Tcb,
 
+    // Half-open list (for O(1) SYN flood eviction)
+    // Intrusive doubly-linked list of TCBs in SYN-RECEIVED state
+    half_open_next: ?*Tcb,
+    half_open_prev: ?*Tcb,
+
     // Connection tracking - timestamp when TCB was created (for state timeouts)
     created_at: u64,
 
@@ -251,6 +256,8 @@ pub const Tcb = struct {
             .parent_socket = null,
             .blocked_thread = null,
             .hash_next = null,
+            .half_open_next = null,
+            .half_open_prev = null,
             .created_at = 0, // Set when allocated
             // Congestion Control default: 2 MSS (conservative start)
             .cwnd = c.DEFAULT_MSS * 2,

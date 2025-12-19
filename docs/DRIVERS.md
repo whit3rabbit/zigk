@@ -10,7 +10,7 @@ Kernel drivers are located in `src/drivers`. They are used for:
 
 ### MmioDevice Pattern
 Modern kernel drivers use the `MmioDevice(RegType)` wrapper for zero-cost, type-safe MMIO access.
-- **Location**: `src/hal/mmio_device.zig`
+- **Location**: `src/arch/x86_64/mmio_device.zig` (exported via `hal.mmio_device`)
 - **Usage**:
   ```zig
   const regs = MmioDevice(Regs).init(base_addr, size);
@@ -58,7 +58,7 @@ To handle asynchronous events without threading complexity:
 #### VirtIO-Net (`src/user/drivers/virtio_net`)
 - **Type**: Userspace Network Driver
 - **IPC**: Uses **Ring IPC** for RX/TX data path.
-- **Status**: Functional MPSC (Multi-Producer Single-Consumer) design.
+- **Status**: Functional SPSC rings per direction; MPSC is supported via per-producer rings.
 
 #### VirtIO-Blk (`src/user/drivers/virtio_blk`)
 - **Type**: Userspace Storage Driver

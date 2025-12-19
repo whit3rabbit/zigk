@@ -48,14 +48,32 @@ pub export fn __stack_chk_fail() noreturn {
 }
 
 /// Initialize stack guard with a randomized canary value.
-/// Called during early kernel initialization, AFTER `prng.init()`.
+/// Called during early kernel initialization.
 ///
-/// Security Note: At early boot, entropy may be limited (especially without
-/// hardware RNG). Call reseed() after more entropy sources are available
-/// (e.g., after device initialization, network card MAC addresses, etc.).
+/// Security: Uses hardware entropy (RDRAND) directly for canary generation.
+/// This bypasses the software PRNG to ensure stack canaries cannot be predicted
+/// even if an attacker recovers the PRNG state.
 pub fn init() void {
-    // Generate random canary from kernel PRNG
-    var random_value = prng.next();
+    // SECURITY FIX: Use hardware entropy directly instead of software PRNG
+    // The PRNG (xoroshiro128+) has only 128 bits of state and is reversible,
+    // making canaries predictable if PRNG output is observed.
+    var entropy_buf: [8]u8 = undefined;
+    const got_hardware_entropy = hal.entropy.tryFillWithHardwareEntropy(&entropy_buf);
+
+    var random_value: u64 = undefined;
+    if (got_hardware_entropy) {
+        random_value = @bitCast(entropy_buf);
+        console.info("Stack guard: Canary seeded from hardware entropy (RDRAND)", .{});
+    } else {
+        // Fallback: use PRNG if hardware entropy unavailable
+        // This is weaker but still better than a static value
+        random_value = prng.next();
+        console.warn("Stack guard: RDRAND unavailable - using PRNG (weaker security)", .{});
+
+        if (prng.isUsingFallbackSeed()) {
+            console.err("Stack guard: CRITICAL - using predictable fallback seed!", .{});
+        }
+    }
 
     // Apply canary constraint for string overflow detection:
     // Low byte = 0x00 catches null-terminated string overflows
@@ -63,13 +81,6 @@ pub fn init() void {
     random_value &= ~@as(u64, 0xFF); // Clear low byte only (becomes 0x00)
 
     __stack_chk_guard = random_value;
-
-    // Security: Check if we're using weak entropy and warn
-    if (prng.isUsingFallbackSeed()) {
-        console.warn("Stack guard: Using weak entropy - canary may be predictable!", .{});
-    } else {
-        console.info("Stack guard: Canary randomized (entropy: good)", .{});
-    }
 }
 
 /// Re-seed the stack canary with fresh entropy.

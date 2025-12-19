@@ -125,12 +125,12 @@ pub fn parseFormatSpec(fmt: [*:0]const u8) FormatSpec {
 /// Format an integer into buffer
 /// Returns slice of formatted characters
 pub fn formatInt(buf: []u8, value: i64, spec: FormatSpec) []u8 {
-    var num = value;
     var is_negative = false;
+    // Use absCast to handle INT64_MIN correctly without overflow
+    var num: u64 = @abs(value);
 
-    if (num < 0) {
+    if (value < 0) {
         is_negative = true;
-        num = -num;
     }
 
     // Format digits in reverse
@@ -142,7 +142,7 @@ pub fn formatInt(buf: []u8, value: i64, spec: FormatSpec) []u8 {
         len = 1;
     } else {
         while (num > 0) : (len += 1) {
-            tmp[len] = @truncate('0' + @as(u8, @truncate(@as(u64, @bitCast(num)) % 10)));
+            tmp[len] = @truncate('0' + @as(u8, @truncate(num % 10)));
             num = @divTrunc(num, 10);
         }
     }

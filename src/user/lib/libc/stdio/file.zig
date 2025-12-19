@@ -13,6 +13,8 @@ pub const FILE = extern struct {
     eof: bool,
     // Buffer for ungetc (simplified - single char)
     unget_char: i16, // -1 if no unget char, otherwise the char
+    // Flag for static streams (stdin/stdout/stderr)
+    is_static: bool,
 };
 
 /// Seek origins
@@ -50,7 +52,10 @@ pub export fn fopen(filename: [*:0]const u8, mode: [*:0]const u8) ?*FILE {
         return null;
     }
 
-    const fd = syscall.open(filename, flags, access_mode) catch return null;
+    const fd = syscall.open(filename, flags, access_mode) catch |err| {
+        internal.setErrno(err);
+        return null;
+    };
 
     const f_ptr = memory.malloc(@sizeOf(FILE));
     if (f_ptr == null) {
@@ -63,6 +68,7 @@ pub export fn fopen(filename: [*:0]const u8, mode: [*:0]const u8) ?*FILE {
     f.has_error = false;
     f.eof = false;
     f.unget_char = -1;
+    f.is_static = false;
 
     return f;
 }
@@ -71,8 +77,16 @@ pub export fn fopen(filename: [*:0]const u8, mode: [*:0]const u8) ?*FILE {
 pub export fn fclose(stream: ?*FILE) c_int {
     if (stream == null) return EOF;
     const f = stream.?;
+    
+    // Always flush before closing (though our flush is no-op, good practice)
+    _ = fflush(f);
+    
     _ = syscall.close(f.fd) catch return EOF;
-    memory.free(stream);
+    
+    // Only free if allocated on heap
+    if (!f.is_static) {
+        memory.free(stream);
+    }
     return 0;
 }
 
@@ -187,16 +201,18 @@ pub export fn fsetpos(stream: ?*FILE, pos: ?*const fpos_t) c_int {
 pub export fn freopen(filename: ?[*:0]const u8, mode: [*:0]const u8, stream: ?*FILE) ?*FILE {
     if (stream == null) return null;
 
-    // Close old file
-    const f = stream.?;
-    _ = syscall.close(f.fd) catch {};
-
+    // Validate filename (if provided) and mode BEFORE closing the old stream
     if (filename == null) {
-        // Change mode of existing stream (not supported)
+        // Change mode of existing stream (not supported in this implementation)
+        return null;
+    }
+    
+    // Simple validation of mode string
+    if (mode[0] != 'r' and mode[0] != 'w' and mode[0] != 'a') {
         return null;
     }
 
-    // Open new file
+    // Determine flags first
     var flags: i32 = 0;
     const access_mode: u32 = 0o666;
 
@@ -212,11 +228,23 @@ pub export fn freopen(filename: ?[*:0]const u8, mode: [*:0]const u8, stream: ?*F
             syscall.O_RDWR | syscall.O_CREAT | syscall.O_APPEND
         else
             syscall.O_WRONLY | syscall.O_CREAT | syscall.O_APPEND;
-    } else {
-        return null;
     }
 
-    const fd = syscall.open(filename.?, flags, access_mode) catch return null;
+    // Now safe to close old stream
+    const f = stream.?;
+    
+     // Flush before closing
+    _ = fflush(f);
+    
+    _ = syscall.close(f.fd) catch {};
+
+    // Open new file
+    const fd = syscall.open(filename.?, flags, access_mode) catch {
+        // If open fails, the stream is closed and we return null.
+        // We cannot restore the old stream.
+        return null;
+    };
+    
     f.fd = fd;
     f.has_error = false;
     f.eof = false;

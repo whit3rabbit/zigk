@@ -54,6 +54,14 @@ const hal = if (is_freestanding) @import("hal") else struct {
             return 0x12345678ABCD; // Test fallback
         }
     };
+    pub const entropy = struct {
+        pub fn isInitialized() bool {
+            return false; // No hardware entropy in test mode
+        }
+        pub fn tryFillWithHardwareEntropy(_: []u8) bool {
+            return false; // No hardware entropy in test mode
+        }
+    };
 };
 
 const mem = if (is_freestanding) hal.mem else struct {
@@ -261,15 +269,37 @@ pub fn init(start: usize, size: usize) void {
         return;
     }
 
-    // Initialize per-boot random canary using TSC
-    // Security: Prevents compile-time prediction of canary value
-    // Note: TSC is weak entropy but available immediately (before PRNG init)
-    // The canary is mixed with the default constant to ensure non-zero value
+    // SECURITY FIX: Initialize per-boot random canary using hardware entropy + TSC
+    // Previously only used TSC which has limited entropy (~20-30 bits).
+    // Now we try RDRAND first, then mix with TSC for additional entropy.
     const tsc = hal.timing.rdtsc();
-    heap_canary = HEAP_CANARY_DEFAULT ^ tsc ^ (tsc >> 17) ^ (tsc << 31);
+
+    // Try to get hardware entropy (RDRAND) if available
+    var hw_entropy: u64 = 0;
+    if (is_freestanding and hal.entropy.isInitialized()) {
+        // Use hardware entropy if available
+        var entropy_buf: [8]u8 = undefined;
+        if (hal.entropy.tryFillWithHardwareEntropy(&entropy_buf)) {
+            hw_entropy = @bitCast(entropy_buf);
+        }
+    }
+
+    // Mix all entropy sources: hardware entropy + TSC + constant
+    // This ensures at least TSC-level entropy even without RDRAND
+    heap_canary = HEAP_CANARY_DEFAULT ^ hw_entropy ^ tsc ^ (tsc >> 17) ^ (tsc << 31);
+
     // Ensure canary is never zero (would make corruption detection trivial)
     if (heap_canary == 0) {
         heap_canary = HEAP_CANARY_DEFAULT;
+    }
+
+    // Log security status
+    if (is_freestanding) {
+        if (hw_entropy != 0) {
+            console.info("Heap: Canary seeded with hardware entropy + TSC", .{});
+        } else {
+            console.warn("Heap: Canary seeded with TSC only (weaker)", .{});
+        }
     }
 
     // Align start up and size down

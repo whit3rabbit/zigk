@@ -1,13 +1,19 @@
 // Random number generation (stdlib.h)
 //
 // Simple LCG-based random number generator.
+// SECURITY: rand_seed is threadlocal to prevent data races in multi-threaded
+// userspace programs. Each thread gets independent PRNG state.
 
-/// Random number generator state
-var rand_seed: c_uint = 1;
+/// Random number generator state (per-thread to avoid data races)
+threadlocal var rand_seed: c_uint = 1;
 
 /// Generate random number in range [0, RAND_MAX]
+/// SECURITY WARNING: This is NOT cryptographically secure. Uses a simple
+/// Linear Congruential Generator (LCG) that is trivially predictable.
+/// DO NOT use for: session tokens, passwords, cryptographic keys, nonces.
+/// Use getRandomBytes() for security-sensitive applications.
 pub export fn rand() c_int {
-    // LCG parameters from glibc
+    // LCG parameters from glibc - fast but predictable
     rand_seed = rand_seed *% 1103515245 +% 12345;
     return @bitCast(@as(c_uint, (rand_seed >> 16) & 0x7fff));
 }
@@ -20,19 +26,29 @@ pub export fn srand(seed: c_uint) void {
 /// Maximum value returned by rand()
 pub const RAND_MAX: c_int = 0x7fff;
 
-/// Generate random bytes (uses kernel getrandom if available)
+/// Generate cryptographically secure random bytes via kernel getrandom
+/// SECURITY: Returns false if kernel getrandom fails - never falls back to weak PRNG
+/// Callers MUST check the return value and handle failure appropriately
 pub fn getRandomBytes(buf: [*]u8, len: usize) bool {
     const syscall = @import("syscall.zig");
 
-    // Try kernel getrandom syscall
-    _ = syscall.getrandom(buf, len, 0) catch {
-        // Fall back to rand() if syscall not available
-        var i: usize = 0;
-        while (i < len) : (i += 1) {
-            buf[i] = @truncate(@as(c_uint, @bitCast(rand())));
+    var offset: usize = 0;
+
+    // Use kernel getrandom syscall for cryptographic randomness
+    while (offset < len) {
+        const read = syscall.getrandom(buf + offset, len - offset, 0) catch {
+            // SECURITY: Do NOT fall back to weak PRNG - that would silently
+            // downgrade security guarantees. Caller must handle failure.
+            return false;
+        };
+        
+        if (read == 0) {
+             // Should not happen for getrandom unless blocked/interrupted indefinitely
+             return false; 
         }
-        return true;
-    };
+        
+        offset += read;
+    }
     return true;
 }
 
