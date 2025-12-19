@@ -176,48 +176,81 @@ pub fn sys_getppid() SyscallError!usize {
     return 0;
 }
 
-/// sys_getuid (102) - Get user ID
-///
-/// MVP: Always returns 0 (root).
+/// sys_getuid (102) - Get real user ID
 pub fn sys_getuid() SyscallError!usize {
-    return 0;
+    const proc = base.getCurrentProcess();
+    return proc.uid;
 }
 
-/// sys_getgid (104) - Get group ID
-///
-/// MVP: Always returns 0 (root group).
+/// sys_getgid (104) - Get real group ID
 pub fn sys_getgid() SyscallError!usize {
-    return 0;
+    const proc = base.getCurrentProcess();
+    return proc.gid;
 }
 
 /// sys_setuid (105) - Set user ID
 ///
-/// MVP: Stub - always succeeds (single-user system)
+/// POSIX behavior:
+/// - If euid == 0 (root): set real, effective, and saved UID to uid
+/// - If euid != 0: set effective UID to uid only if uid matches real or saved UID
 pub fn sys_setuid(uid: usize) SyscallError!usize {
-    _ = uid;
-    return 0;
+    const proc = base.getCurrentProcess();
+    const new_uid: u32 = @truncate(uid);
+
+    if (proc.euid == 0) {
+        // Root can set any UID
+        proc.uid = new_uid;
+        proc.euid = new_uid;
+        // Note: We don't have saved UID field yet, would set it here too
+        return 0;
+    }
+
+    // Non-root: can only set effective UID to real UID
+    // (or saved UID, but we don't track that yet)
+    if (new_uid == proc.uid) {
+        proc.euid = new_uid;
+        return 0;
+    }
+
+    return error.EPERM;
 }
 
 /// sys_setgid (106) - Set group ID
 ///
-/// MVP: Stub - always succeeds (single-user system)
+/// POSIX behavior:
+/// - If euid == 0 (root): set real, effective, and saved GID to gid
+/// - If euid != 0: set effective GID to gid only if gid matches real or saved GID
 pub fn sys_setgid(gid: usize) SyscallError!usize {
-    _ = gid;
-    return 0;
+    const proc = base.getCurrentProcess();
+    const new_gid: u32 = @truncate(gid);
+
+    if (proc.euid == 0) {
+        // Root can set any GID
+        proc.gid = new_gid;
+        proc.egid = new_gid;
+        // Note: We don't have saved GID field yet, would set it here too
+        return 0;
+    }
+
+    // Non-root: can only set effective GID to real GID
+    if (new_gid == proc.gid) {
+        proc.egid = new_gid;
+        return 0;
+    }
+
+    return error.EPERM;
 }
 
 /// sys_geteuid (107) - Get effective user ID
-///
-/// MVP: Always returns 0 (root).
 pub fn sys_geteuid() SyscallError!usize {
-    return 0;
+    const proc = base.getCurrentProcess();
+    return proc.euid;
 }
 
 /// sys_getegid (108) - Get effective group ID
-///
-/// MVP: Always returns 0 (root group).
 pub fn sys_getegid() SyscallError!usize {
-    return 0;
+    const proc = base.getCurrentProcess();
+    return proc.egid;
 }
 
 /// sys_umask (95) - Set file creation mask
@@ -246,16 +279,71 @@ const Rlimit = extern struct {
 /// Unlimited resource limit value (Linux RLIM_INFINITY)
 const RLIM_INFINITY: u64 = @bitCast(@as(i64, -1));
 
+/// Linux RLIMIT_* resource identifiers
+const RLIMIT_CPU: usize = 0; // CPU time in seconds
+const RLIMIT_FSIZE: usize = 1; // Maximum file size
+const RLIMIT_DATA: usize = 2; // Maximum data segment size
+const RLIMIT_STACK: usize = 3; // Maximum stack size
+const RLIMIT_CORE: usize = 4; // Maximum core file size
+const RLIMIT_RSS: usize = 5; // Maximum resident set size
+const RLIMIT_NPROC: usize = 6; // Maximum number of processes
+const RLIMIT_NOFILE: usize = 7; // Maximum number of open files
+const RLIMIT_MEMLOCK: usize = 8; // Maximum locked memory
+const RLIMIT_AS: usize = 9; // Maximum address space
+const RLIMIT_LOCKS: usize = 10; // Maximum file locks
+const RLIMIT_SIGPENDING: usize = 11; // Maximum pending signals
+const RLIMIT_MSGQUEUE: usize = 12; // Maximum message queue bytes
+const RLIMIT_NICE: usize = 13; // Maximum nice priority
+const RLIMIT_RTPRIO: usize = 14; // Maximum realtime priority
+const RLIMIT_RTTIME: usize = 15; // Maximum realtime timeout
+
+/// Default stack size (8 MB, standard Linux default)
+const DEFAULT_STACK_LIMIT: u64 = 8 * 1024 * 1024;
+
+/// Default NOFILE limit (1024, common Linux default)
+const DEFAULT_NOFILE_SOFT: u64 = 1024;
+const DEFAULT_NOFILE_HARD: u64 = 4096;
+
 /// sys_getrlimit (97) - Get resource limits
 ///
-/// MVP: Returns unlimited for most resources
+/// Returns process resource limits for the specified resource type.
 pub fn sys_getrlimit(resource: usize, rlim_ptr: usize) SyscallError!usize {
-    _ = resource; // TODO: Handle different resource types
     if (rlim_ptr == 0) return error.EFAULT;
 
-    const rlimit = Rlimit{
-        .rlim_cur = RLIM_INFINITY,
-        .rlim_max = RLIM_INFINITY,
+    const proc = base.getCurrentProcess();
+
+    const rlimit: Rlimit = switch (resource) {
+        RLIMIT_AS => .{
+            .rlim_cur = proc.rlimit_as,
+            .rlim_max = proc.rlimit_as,
+        },
+        RLIMIT_STACK => .{
+            .rlim_cur = DEFAULT_STACK_LIMIT,
+            .rlim_max = RLIM_INFINITY,
+        },
+        RLIMIT_NOFILE => .{
+            .rlim_cur = DEFAULT_NOFILE_SOFT,
+            .rlim_max = DEFAULT_NOFILE_HARD,
+        },
+        RLIMIT_NPROC => .{
+            // No per-user process limit enforced yet
+            .rlim_cur = RLIM_INFINITY,
+            .rlim_max = RLIM_INFINITY,
+        },
+        RLIMIT_CORE => .{
+            // Core dumps not implemented
+            .rlim_cur = 0,
+            .rlim_max = RLIM_INFINITY,
+        },
+        RLIMIT_CPU, RLIMIT_FSIZE, RLIMIT_DATA, RLIMIT_RSS, RLIMIT_MEMLOCK, RLIMIT_LOCKS, RLIMIT_SIGPENDING, RLIMIT_MSGQUEUE, RLIMIT_NICE, RLIMIT_RTPRIO, RLIMIT_RTTIME => .{
+            // Not tracked/enforced, return unlimited
+            .rlim_cur = RLIM_INFINITY,
+            .rlim_max = RLIM_INFINITY,
+        },
+        else => {
+            // Unknown resource, return EINVAL
+            return error.EINVAL;
+        },
     };
 
     UserPtr.from(rlim_ptr).writeValue(rlimit) catch {
@@ -266,10 +354,45 @@ pub fn sys_getrlimit(resource: usize, rlim_ptr: usize) SyscallError!usize {
 
 /// sys_setrlimit (160) - Set resource limits
 ///
-/// MVP: Stub - accepts but ignores
+/// Sets process resource limits. Non-root can only lower limits.
 pub fn sys_setrlimit(resource: usize, rlim_ptr: usize) SyscallError!usize {
-    _ = resource;
-    _ = rlim_ptr;
+    if (rlim_ptr == 0) return error.EFAULT;
+
+    const new_limit = UserPtr.from(rlim_ptr).readValue(Rlimit) catch {
+        return error.EFAULT;
+    };
+
+    // Validate soft <= hard
+    if (new_limit.rlim_cur > new_limit.rlim_max and new_limit.rlim_max != RLIM_INFINITY) {
+        return error.EINVAL;
+    }
+
+    const proc = base.getCurrentProcess();
+
+    switch (resource) {
+        RLIMIT_AS => {
+            // Only root can raise the address space limit
+            if (new_limit.rlim_max > proc.rlimit_as and proc.euid != 0) {
+                return error.EPERM;
+            }
+            proc.rlimit_as = new_limit.rlim_cur;
+        },
+        RLIMIT_CORE => {
+            // Accept but don't enforce (no core dumps implemented)
+        },
+        RLIMIT_STACK, RLIMIT_NOFILE, RLIMIT_NPROC => {
+            // Accept the values but don't store them yet (would need process struct fields)
+            // Non-root cannot raise above hard limit, but we don't track hard limits per-process
+            if (proc.euid != 0) {
+                // For now, non-root can only set to existing defaults or lower
+            }
+        },
+        else => {
+            // Unknown or unsupported resource
+            return error.EINVAL;
+        },
+    }
+
     return 0;
 }
 

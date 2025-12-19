@@ -122,6 +122,79 @@ pub fn sys_rt_sigaction(signum: usize, act_ptr: usize, oldact_ptr: usize, sigset
     return 0;
 }
 
+/// sys_sigaltstack (131) - Set/get signal stack context
+///
+/// Args:
+///   ss_ptr: Pointer to new stack_t (or NULL to query only)
+///   old_ss_ptr: Pointer to store previous stack_t (or NULL)
+///
+/// Returns: 0 on success, negative errno on error
+pub fn sys_sigaltstack(ss_ptr: usize, old_ss_ptr: usize) SyscallError!usize {
+    const current_thread = sched.getCurrentThread() orelse return error.ESRCH;
+    const signal = uapi.signal;
+
+    // Check if we're currently executing on the alternate stack
+    // If so, we cannot change it
+    const current_rsp = asm volatile ("mov %%rsp, %[ret]"
+        : [ret] "=r" (-> u64)
+    );
+    const on_altstack = isOnAlternateStack(current_thread, current_rsp);
+
+    // Return old stack info if requested
+    if (old_ss_ptr != 0) {
+        var old_ss = current_thread.alternate_stack;
+        // Set SS_ONSTACK flag if currently on alternate stack
+        if (on_altstack) {
+            old_ss.flags |= signal.SS_ONSTACK;
+        }
+        UserPtr.from(old_ss_ptr).writeValue(old_ss) catch {
+            return error.EFAULT;
+        };
+    }
+
+    // Set new stack if provided
+    if (ss_ptr != 0) {
+        // Cannot change stack while on it
+        if (on_altstack) {
+            return error.EPERM;
+        }
+
+        const new_ss = UserPtr.from(ss_ptr).readValue(signal.StackT) catch {
+            return error.EFAULT;
+        };
+
+        // Validate the new stack
+        if ((new_ss.flags & signal.SS_DISABLE) == 0) {
+            // Enabling alternate stack - validate size
+            // Linux requires at least MINSIGSTKSZ (2048 bytes typically)
+            const MINSIGSTKSZ: usize = 2048;
+            if (new_ss.size < MINSIGSTKSZ) {
+                return error.ENOMEM;
+            }
+            // Validate stack pointer is a valid user address
+            if (!base.isValidUserAccess(new_ss.sp, new_ss.size, base.AccessMode.Write)) {
+                return error.EFAULT;
+            }
+        }
+
+        // Store new alternate stack configuration
+        current_thread.alternate_stack = new_ss;
+    }
+
+    return 0;
+}
+
+/// Check if the given stack pointer is within the alternate signal stack
+fn isOnAlternateStack(thread: *sched.Thread, rsp: u64) bool {
+    const alt = thread.alternate_stack;
+    // If alternate stack is disabled, we're not on it
+    if ((alt.flags & uapi.signal.SS_DISABLE) != 0) {
+        return false;
+    }
+    // Check if rsp is within [sp, sp + size)
+    return rsp >= alt.sp and rsp < alt.sp + alt.size;
+}
+
 /// sys_rt_sigreturn (15) - Return from signal handler and restore context
 ///
 /// This syscall is called by the signal trampoline. It restores the user context
@@ -262,7 +335,11 @@ pub fn sys_set_tid_address(tidptr: usize) SyscallError!usize {
 /// Permission rules (simplified POSIX model):
 /// - Process can always signal itself
 /// - PID 1 (init) is protected from SIGKILL/SIGSTOP by non-root processes
-/// - Same UID check would go here when we implement UIDs
+/// POSIX signal permission check
+/// A process can send a signal to another process if:
+/// 1. The sender's real or effective UID matches the target's real or saved UID
+/// 2. The sender is root (UID 0)
+/// 3. The sender has CAP_KILL capability (TODO: not fully implemented yet)
 fn checkSignalPermission(target: *sched.Thread, signum: u8) SyscallError!void {
     const current = sched.getCurrentThread() orelse return error.ESRCH;
 
@@ -273,33 +350,77 @@ fn checkSignalPermission(target: *sched.Thread, signum: u8) SyscallError!void {
         }
     }
 
-    // Get target process info
+    // Get process info
     const Process = base.Process;
+    const current_proc: ?*Process = if (current.process) |p| @ptrCast(@alignCast(p)) else null;
     const target_proc: ?*Process = if (target.process) |p| @ptrCast(@alignCast(p)) else null;
 
     // SECURITY: Protect PID 1 (init) from termination signals.
-    // If init dies, the system becomes unstable. Only allow non-fatal signals.
-    // In a real implementation, we'd also check if sender is privileged (CAP_KILL).
+    // If init dies, the system becomes unstable. Only root can send SIGKILL/SIGSTOP to init.
     if (target_proc) |tp| {
         if (tp.pid == 1) {
-            // SIGKILL (9) and SIGSTOP (19) cannot be sent to init by unprivileged processes
             if (signum == uapi.signal.SIGKILL or signum == uapi.signal.SIGSTOP) {
-                // TODO: When we implement UIDs, check if sender has CAP_KILL or is root
-                // For now, deny these signals to init from any process
-                console.warn("Signal: Blocked sig={} to init (pid=1) - protected process", .{signum});
-                return error.EPERM;
+                // Only root can send SIGKILL/SIGSTOP to init
+                if (current_proc) |cp| {
+                    if (cp.euid != 0) {
+                        console.warn("Signal: Non-root process blocked from sending sig={} to init (pid=1)", .{signum});
+                        return error.EPERM;
+                    }
+                } else {
+                    return error.EPERM;
+                }
             }
         }
     }
 
-    // TODO: Implement full POSIX permission model when we add UIDs:
-    // - Check real/effective UID match
-    // - Check CAP_KILL capability
-    // For MVP, allow signals between different processes (except init protection above)
+    // Permission checks for signals between different processes
+    if (current_proc) |cp| {
+        if (target_proc) |tp| {
+            // Root (euid 0) can always send signals
+            if (cp.euid == 0) {
+                return; // Privileged sender, allowed
+            }
+
+            // POSIX permission model:
+            // The sender's real UID or effective UID must match
+            // the target's real UID or saved UID.
+            // (For MVP, we check real UID and effective UID since we don't have saved UID yet)
+            const sender_uid = cp.uid;
+            const sender_euid = cp.euid;
+            const target_uid = tp.uid;
+            const target_euid = tp.euid; // Use euid as proxy for saved UID for now
+
+            if (sender_uid == target_uid or sender_uid == target_euid or
+                sender_euid == target_uid or sender_euid == target_euid)
+            {
+                return; // UID match, allowed
+            }
+
+            // No permission match found
+            console.debug("Signal: Permission denied: sender uid={}/euid={} -> target uid={}/euid={}", .{ sender_uid, sender_euid, target_uid, target_euid });
+            return error.EPERM;
+        }
+    }
+
+    // If we can't determine processes, allow for kernel threads
 }
 
 /// Deliver a signal to a thread
 fn deliverSignalToThread(target: *sched.Thread, signum: u8) void {
+    const signal = @import("uapi").signal;
+
+    // Special handling for SIGCONT: resume stopped threads
+    if (signum == signal.SIGCONT) {
+        if (target.stopped) {
+            target.stopped = false;
+            // Unblock if thread is blocked due to being stopped
+            if (target.state == .Blocked) {
+                sched.unblock(target);
+            }
+        }
+        // SIGCONT is still delivered (pending_signals set below) so handler can run if set
+    }
+
     // Set pending signal bit
     const sig_bit: u64 = @as(u64, 1) << @intCast(signum - 1);
     target.pending_signals |= sig_bit;

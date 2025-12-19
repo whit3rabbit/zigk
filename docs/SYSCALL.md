@@ -69,6 +69,10 @@ pub export fn dispatch_syscall(frame: *SyscallFrame) callconv(.c) void
 
 Runtime dispatch is an unrolled loop that LLVM optimizes to a jump table.
 
+Networking syscalls live exclusively in `net.zig` (see `docs/FILESYSTEM.md`).
+Do not add socket stubs to other modules. If a syscall has no handler in any
+module, dispatch returns `error.ENOSYS`.
+
 ### Handler Signature
 
 **Preferred (error union):**

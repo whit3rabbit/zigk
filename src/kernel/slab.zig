@@ -22,6 +22,10 @@ const std = @import("std");
 
 const is_freestanding = @import("builtin").os.tag == .freestanding;
 
+// PMM and HAL for direct page allocation (freestanding only)
+const pmm = if (is_freestanding) @import("pmm") else @compileError("PMM not available outside freestanding");
+const hal = if (is_freestanding) @import("hal") else @compileError("HAL not available outside freestanding");
+
 const console = if (is_freestanding) @import("console") else struct {
     pub fn info(comptime fmt: []const u8, args: anytype) void {
         _ = fmt;
@@ -384,20 +388,43 @@ pub const SlabCache = struct {
         self.addToFullList(slab);
     }
 
-    /// Allocate a new slab from the backing heap
+    /// Allocate a new slab directly from PMM (page-aligned)
     fn allocateSlab(self: *Self) ?*SlabHeader {
-        const alloc_fn = backing_alloc orelse return null;
-        const mem = alloc_fn(SLAB_SIZE) orelse return null;
-        const slab: *SlabHeader = @ptrCast(@alignCast(mem.ptr));
+        if (!is_freestanding) {
+            // For testing, fall back to backing allocator
+            const alloc_fn = backing_alloc orelse return null;
+            const mem = alloc_fn(SLAB_SIZE) orelse return null;
+            const slab: *SlabHeader = @ptrCast(@alignCast(mem.ptr));
+            slab.init(self, @truncate(self.object_size));
+            return slab;
+        }
+
+        // Allocate one physical page (4KB, page-aligned by definition)
+        const phys_addr = pmm.allocZeroedPage() orelse return null;
+
+        // Convert to virtual address via HHDM
+        const virt_ptr = hal.paging.physToVirt(phys_addr);
+        const slab: *SlabHeader = @ptrCast(@alignCast(virt_ptr));
         slab.init(self, @truncate(self.object_size));
         return slab;
     }
 
-    /// Return a slab to the backing heap
+    /// Return a slab to PMM
     fn deallocateSlab(_: *Self, slab: *SlabHeader) void {
-        const free_fn = backing_free orelse return;
-        const ptr: [*]u8 = @ptrCast(slab);
-        free_fn(ptr[0..SLAB_SIZE]);
+        if (!is_freestanding) {
+            // For testing, fall back to backing allocator
+            const free_fn = backing_free orelse return;
+            const ptr: [*]u8 = @ptrCast(slab);
+            free_fn(ptr[0..SLAB_SIZE]);
+            return;
+        }
+
+        // Convert virtual address back to physical via HHDM
+        const virt_addr = @intFromPtr(slab);
+        const phys_addr = hal.paging.virtToPhys(virt_addr);
+
+        // Free the page back to PMM
+        pmm.freePage(phys_addr);
     }
 };
 

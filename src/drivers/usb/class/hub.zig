@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const console = @import("console");
+const io = @import("io");
 const usb = @import("../xhci/root.zig"); // Access to generic USB types/transfer
 const device = @import("../xhci/device.zig");
 const usb_types = @import("../types.zig");
@@ -164,8 +165,13 @@ pub const HubDriver = struct {
         }
 
         // 3. Wait for power to stabilize
-        // TODO: Implement proper sleep. For now, we assume the boot delay covers it or rely on busy wait if available.
-        // hal.timer.sleep(self.power_on_delay_ms); 
+        if (self.power_on_delay_ms > 0) {
+            const delay_ns: u64 = @as(u64, self.power_on_delay_ms) * 1_000_000;
+            io.kernel_io.sleep(delay_ns) catch |err| {
+                console.warn("HUB: Sleep failed during power delay: {}", .{err});
+                self.busyWaitMs(self.power_on_delay_ms);
+            };
+        }
         console.info("HUB: Ports powered, waiting for devices...", .{});
 
         // 4. Start Status Change Interrupt Polling
@@ -188,6 +194,40 @@ pub const HubDriver = struct {
         if (transferred < 7) { // Min Hub Desc length
              return error.ShortTransfer;
         }
+    }
+
+    /// Get Hub Status
+    fn getHubStatus(self: *Self) !HubStatus {
+        var status: HubStatus = undefined;
+        const buffer = std.mem.asBytes(&status);
+
+        const transferred = try usb.Transfer.controlTransfer(
+            self.ctrl,
+            self.dev,
+            @bitCast(@as(u8, 0xA0)), // Dir=IN, Type=Class, Recip=Device
+            @intFromEnum(Request.GET_STATUS),
+            0, // wValue
+            0, // wIndex
+            buffer,
+            usb.Transfer.CONTROL_TIMEOUT_MS,
+        );
+
+        if (transferred != 4) return error.ShortTransfer;
+        return status;
+    }
+
+    /// Clear Hub Feature
+    fn clearHubFeature(self: *Self, feature: HubFeature) !void {
+        _ = try usb.Transfer.controlTransfer(
+            self.ctrl,
+            self.dev,
+            @bitCast(@as(u8, 0x20)), // Dir=OUT, Type=Class, Recip=Device
+            @intFromEnum(Request.CLEAR_FEATURE),
+            @intFromEnum(feature),
+            0, // wIndex
+            null,
+            usb.Transfer.CONTROL_TIMEOUT_MS,
+        );
     }
 
     /// Set Port Feature
@@ -239,7 +279,7 @@ pub const HubDriver = struct {
         // Bit 0: Hub Status Change
         if ((report[0] & 1) != 0) {
             console.info("HUB: Hub Status Change detected", .{});
-            // TODO: Handle Hub Status Change (Over-current, etc.)
+            self.handleHubStatusChange();
         }
 
         // Port Status Changes (Bits 1..N)
@@ -272,7 +312,7 @@ pub const HubDriver = struct {
                 try self.handleConnect(port);
             } else {
                 console.info("HUB: Port {d} Device Disconnected", .{port});
-                // TODO: Handle Disconnect (find child device and unregister)
+                self.handleDisconnect(port);
             }
         }
         
@@ -351,5 +391,48 @@ pub const HubDriver = struct {
                };
            }
        }
+    }
+
+    fn handleDisconnect(self: *Self, port: u8) void {
+        if (device.findChildDevice(self.dev, port)) |child| {
+            const slot_id = child.slot_id;
+            device.unregisterDevice(slot_id);
+            child.deinit();
+            console.info("HUB: Port {d} device removed (slot {d})", .{ port, slot_id });
+        } else {
+            console.warn("HUB: Port {d} disconnect without tracked device", .{port});
+        }
+    }
+
+    fn handleHubStatusChange(self: *Self) void {
+        const status = self.getHubStatus() catch |err| {
+            console.warn("HUB: Failed to read hub status: {}", .{err});
+            return;
+        };
+
+        if ((status.wHubChange & 1) != 0) {
+            console.warn("HUB: Local power change", .{});
+            self.clearHubFeature(.C_HUB_LOCAL_POWER) catch |err| {
+                console.warn("HUB: Failed to clear local power change: {}", .{err});
+            };
+        }
+
+        if ((status.wHubChange & 2) != 0) {
+            console.warn("HUB: Over-current change", .{});
+            self.clearHubFeature(.C_HUB_OVER_CURRENT) catch |err| {
+                console.warn("HUB: Failed to clear over-current change: {}", .{err});
+            };
+        }
+    }
+
+    fn busyWaitMs(self: *Self, ms: u32) void {
+        _ = self;
+        var remaining: u32 = ms;
+        while (remaining > 0) : (remaining -= 1) {
+            var delay: u32 = 10000;
+            while (delay > 0) : (delay -= 1) {
+                std.atomic.spinLoopHint();
+            }
+        }
     }
 };

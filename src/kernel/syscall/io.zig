@@ -31,6 +31,18 @@ fn safeFdCast(fd_num: usize) ?u32 {
     return std.math.cast(u32, fd_num);
 }
 
+fn mapSeekResult(result: isize) SyscallError!void {
+    if (result >= 0) return;
+
+    const errno_val: i32 = @intCast(-result);
+    return switch (errno_val) {
+        9 => error.EBADF,
+        22 => error.EINVAL,
+        29 => error.ESPIPE,
+        else => error.EINVAL,
+    };
+}
+
 // =============================================================================
 // I/O Operations
 // =============================================================================
@@ -167,6 +179,12 @@ fn do_write_locked(fd: *FileDescriptor, kbuf: []const u8) isize {
     return write_fn(fd, kbuf);
 }
 
+/// Helper for locked read operations
+fn do_read_locked(fd: *FileDescriptor, kbuf: []u8) isize {
+    const read_fn = fd.ops.read orelse return -5; // EIO
+    return read_fn(fd, kbuf);
+}
+
 /// sys_writev (20) - Write data from multiple buffers
 ///
 /// Args:
@@ -294,6 +312,32 @@ fn perform_write_locked(fd: *FileDescriptor, buf_ptr: usize, count: usize) Sysca
 
     const bytes_written = do_write_locked(fd, kbuf);
     return error_helpers.mapWriteError(bytes_written);
+}
+
+/// Helper: Allocates buffer, reads from device, and copies to user.
+/// Caller must hold fd.lock.
+fn perform_read_locked(fd: *FileDescriptor, buf_ptr: usize, count: usize) SyscallError!usize {
+    if (count == 0) return 0;
+
+    const max_read_size = 64 * 1024;
+    const read_size = @min(count, max_read_size);
+
+    if (!isValidUserAccess(buf_ptr, read_size, AccessMode.Write)) {
+        return error.EFAULT;
+    }
+
+    const kbuf = heap.allocator().alloc(u8, read_size) catch {
+        return error.ENOMEM;
+    };
+    defer heap.allocator().free(kbuf);
+
+    const bytes_read = do_read_locked(fd, kbuf);
+    const valid_read = try error_helpers.mapReadError(bytes_read);
+
+    const uptr = UserPtr.from(buf_ptr);
+    _ = uptr.copyFromKernel(kbuf[0..valid_read]) catch return error.EFAULT;
+
+    return valid_read;
 }
 
 /// sys_ioctl (16) - Control device
@@ -738,34 +782,223 @@ pub fn sys_fcntl(fd_num: usize, cmd: usize, arg: usize) SyscallError!usize {
 
 /// sys_pread64 (17) - Read from file at offset
 ///
-/// MVP: Stub - returns ENOSYS (not implemented)
+/// Reads from file at specified offset without modifying file position.
+/// Atomic with respect to other pread/pwrite operations.
 pub fn sys_pread64(fd_num: usize, buf_ptr: usize, count: usize, offset: usize) SyscallError!usize {
-    _ = fd_num;
-    _ = buf_ptr;
-    _ = count;
-    _ = offset;
-    return error.ENOSYS;
+    if (count == 0) {
+        return 0;
+    }
+
+    const table = base.getGlobalFdTable();
+    const fd_u32 = safeFdCast(fd_num) orelse return error.EBADF;
+    const fd = table.get(fd_u32) orelse return error.EBADF;
+
+    if (!fd.isReadable()) {
+        return error.EBADF;
+    }
+
+    if (fd.ops.read == null) {
+        return error.ENOSYS;
+    }
+
+    const seek_fn = fd.ops.seek orelse return error.ESPIPE;
+
+    const offset_i64 = std.math.cast(i64, offset) orelse return error.EFBIG;
+    const original_pos = std.math.cast(i64, fd.position) orelse return error.EFBIG;
+
+    const held = fd.lock.acquire();
+    defer held.release();
+
+    try mapSeekResult(seek_fn(fd, offset_i64, 0));
+
+    var total_read: usize = 0;
+    while (total_read < count) {
+        const remaining = count - total_read;
+        const chunk_len = @min(remaining, 64 * 1024);
+
+        const base_offset = @addWithOverflow(buf_ptr, total_read);
+        if (base_offset[1] != 0) {
+            _ = seek_fn(fd, original_pos, 0);
+            if (total_read > 0) return total_read;
+            return error.EFAULT;
+        }
+
+        const res = perform_read_locked(fd, base_offset[0], chunk_len) catch |err| {
+            _ = seek_fn(fd, original_pos, 0);
+            if (total_read > 0) return total_read;
+            return err;
+        };
+
+        const new_total = @addWithOverflow(total_read, res);
+        if (new_total[1] != 0) {
+            _ = seek_fn(fd, original_pos, 0);
+            return total_read;
+        }
+        total_read = new_total[0];
+
+        if (res == 0 or res < chunk_len) {
+            break;
+        }
+    }
+
+    if (seek_fn(fd, original_pos, 0) < 0 and total_read == 0) {
+        return error.EIO;
+    }
+
+    return total_read;
 }
 
 /// sys_pwrite64 (18) - Write to file at offset
 ///
-/// MVP: Stub - returns ENOSYS (not implemented)
+/// Writes to file at specified offset without modifying file position.
+/// Atomic with respect to other pread/pwrite operations.
 pub fn sys_pwrite64(fd_num: usize, buf_ptr: usize, count: usize, offset: usize) SyscallError!usize {
-    _ = fd_num;
-    _ = buf_ptr;
-    _ = count;
-    _ = offset;
-    return error.ENOSYS;
+    if (count == 0) {
+        return 0;
+    }
+
+    const table = base.getGlobalFdTable();
+    const fd_u32 = safeFdCast(fd_num) orelse return error.EBADF;
+    const fd = table.get(fd_u32) orelse return error.EBADF;
+
+    if (!fd.isWritable()) {
+        return error.EBADF;
+    }
+
+    if (fd.ops.write == null) {
+        return error.ENOSYS;
+    }
+
+    const seek_fn = fd.ops.seek orelse return error.ESPIPE;
+
+    const offset_i64 = std.math.cast(i64, offset) orelse return error.EFBIG;
+    const original_pos = std.math.cast(i64, fd.position) orelse return error.EFBIG;
+
+    const held = fd.lock.acquire();
+    defer held.release();
+
+    try mapSeekResult(seek_fn(fd, offset_i64, 0));
+
+    var total_written: usize = 0;
+    while (total_written < count) {
+        const remaining = count - total_written;
+        const chunk_len = @min(remaining, 64 * 1024);
+
+        const base_offset = @addWithOverflow(buf_ptr, total_written);
+        if (base_offset[1] != 0) {
+            _ = seek_fn(fd, original_pos, 0);
+            if (total_written > 0) return total_written;
+            return error.EFAULT;
+        }
+
+        const res = perform_write_locked(fd, base_offset[0], chunk_len) catch |err| {
+            _ = seek_fn(fd, original_pos, 0);
+            if (total_written > 0) return total_written;
+            return err;
+        };
+
+        const new_total = @addWithOverflow(total_written, res);
+        if (new_total[1] != 0) {
+            _ = seek_fn(fd, original_pos, 0);
+            return total_written;
+        }
+        total_written = new_total[0];
+
+        if (res < chunk_len) {
+            break;
+        }
+    }
+
+    if (seek_fn(fd, original_pos, 0) < 0 and total_written == 0) {
+        return error.EIO;
+    }
+
+    return total_written;
 }
 
 /// sys_readv (19) - Read data into multiple buffers
 ///
-/// MVP: Stub - returns ENOSYS (not implemented)
+/// Scatter read: reads data into multiple buffers (iovec array).
+/// Commonly used by libc for efficient buffered I/O.
 pub fn sys_readv(fd_num: usize, iov_ptr: usize, iovcnt: usize) SyscallError!usize {
-    _ = fd_num;
-    _ = iov_ptr;
-    _ = iovcnt;
-    return error.ENOSYS;
+    const Iovec = extern struct {
+        base: usize,
+        len: usize,
+    };
+
+    const MAX_READV_BYTES: usize = 16 * 1024 * 1024;
+
+    if (iovcnt == 0) return 0;
+    if (iovcnt > 1024) return error.EINVAL;
+
+    const kvecs = heap.allocator().alloc(Iovec, iovcnt) catch {
+        return error.ENOMEM;
+    };
+    defer heap.allocator().free(kvecs);
+
+    const uptr = UserPtr.from(iov_ptr);
+    _ = uptr.copyToKernel(std.mem.sliceAsBytes(kvecs)) catch return error.EFAULT;
+
+    const table = base.getGlobalFdTable();
+    const fd_u32 = safeFdCast(fd_num) orelse return error.EBADF;
+    const fd_obj = table.get(fd_u32) orelse return error.EBADF;
+
+    if (!fd_obj.isReadable()) {
+        return error.EBADF;
+    }
+    if (fd_obj.ops.read == null) {
+        return error.ENOSYS;
+    }
+
+    var total_len: usize = 0;
+    for (kvecs) |vec| {
+        if (vec.len == 0) continue;
+        const new_total = @addWithOverflow(total_len, vec.len);
+        if (new_total[1] != 0 or new_total[0] > MAX_READV_BYTES) {
+            return error.EINVAL;
+        }
+        total_len = new_total[0];
+    }
+
+    const held = fd_obj.lock.acquire();
+    defer held.release();
+
+    var total_read: usize = 0;
+
+    for (kvecs) |vec| {
+        if (vec.len == 0) continue;
+
+        var offset: usize = 0;
+        while (offset < vec.len) {
+            const remaining = vec.len - offset;
+            const chunk_len = @min(remaining, 64 * 1024);
+
+            const base_offset = @addWithOverflow(vec.base, offset);
+            if (base_offset[1] != 0) {
+                if (total_read > 0) return total_read;
+                return error.EFAULT;
+            }
+            const current_base = base_offset[0];
+
+            const res = perform_read_locked(fd_obj, current_base, chunk_len) catch |err| {
+                if (total_read > 0) return total_read;
+                return err;
+            };
+
+            const new_total = @addWithOverflow(total_read, res);
+            if (new_total[1] != 0) {
+                return total_read;
+            }
+            total_read = new_total[0];
+            offset += res;
+
+            if (res == 0 or res < chunk_len) {
+                return total_read;
+            }
+        }
+    }
+
+    return total_read;
 }
 
 // =============================================================================
@@ -790,20 +1023,81 @@ pub fn sys_fdatasync(fd_num: usize) SyscallError!usize {
 
 /// sys_truncate (76) - Truncate file to length
 ///
-/// MVP: Stub - returns EROFS (read-only filesystem)
+/// Truncation is currently only supported for SFS-backed files.
 pub fn sys_truncate(path_ptr: usize, length: usize) SyscallError!usize {
-    _ = path_ptr;
-    _ = length;
-    return error.EROFS;
+    const path_buf = heap.allocator().alloc(u8, user_mem.MAX_PATH_LEN) catch {
+        return error.ENOMEM;
+    };
+    defer heap.allocator().free(path_buf);
+
+    const path = user_mem.copyStringFromUser(path_buf, path_ptr) catch |err| {
+        if (err == error.NameTooLong) return error.ENAMETOOLONG;
+        return error.EFAULT;
+    };
+
+    if (path.len == 0) return error.ENOENT;
+
+    const fd = fs.vfs.Vfs.open(path, fd_mod.O_WRONLY) catch |err| {
+        return switch (err) {
+            error.NotFound => error.ENOENT,
+            error.AccessDenied => error.EACCES,
+            error.InvalidPath => error.ENOENT,
+            error.NameTooLong => error.ENAMETOOLONG,
+            error.IOError => error.EIO,
+            error.NoMemory => error.ENOMEM,
+            error.IsDirectory => error.EISDIR,
+            else => error.EIO,
+        };
+    };
+    defer {
+        if (fd.ops.close) |close_fn| {
+            _ = close_fn(fd);
+        }
+        heap.allocator().destroy(fd);
+    }
+
+    if (!fd.isWritable()) {
+        return error.EBADF;
+    }
+    if (fd.ops.seek == null) {
+        return error.ESPIPE;
+    }
+
+    fs.sfs.truncateFd(fd, length) catch |err| {
+        return switch (err) {
+            error.NotSfs => error.EROFS,
+            error.TooLarge => error.EFBIG,
+            error.IOError => error.EIO,
+        };
+    };
+
+    return 0;
 }
 
 /// sys_ftruncate (77) - Truncate file by fd to length
 ///
-/// MVP: Stub - returns EROFS (read-only filesystem)
+/// Truncation is currently only supported for SFS-backed files.
 pub fn sys_ftruncate(fd_num: usize, length: usize) SyscallError!usize {
-    _ = fd_num;
-    _ = length;
-    return error.EROFS;
+    const table = base.getGlobalFdTable();
+    const fd_u32 = safeFdCast(fd_num) orelse return error.EBADF;
+    const fd = table.get(fd_u32) orelse return error.EBADF;
+
+    if (!fd.isWritable()) {
+        return error.EBADF;
+    }
+    if (fd.ops.seek == null) {
+        return error.ESPIPE;
+    }
+
+    fs.sfs.truncateFd(fd, length) catch |err| {
+        return switch (err) {
+            error.NotSfs => error.EROFS,
+            error.TooLarge => error.EFBIG,
+            error.IOError => error.EIO,
+        };
+    };
+
+    return 0;
 }
 
 /// sys_getdents (78) - Get directory entries (legacy)
@@ -818,10 +1112,35 @@ pub fn sys_getdents(fd_num: usize, dirp: usize, count: usize) SyscallError!usize
 
 /// sys_fchdir (81) - Change working directory by fd
 ///
-/// MVP: Stub - returns ENOSYS
 pub fn sys_fchdir(fd_num: usize) SyscallError!usize {
-    _ = fd_num;
-    return error.ENOSYS;
+    const table = base.getGlobalFdTable();
+    const fd_u32 = safeFdCast(fd_num) orelse return error.EBADF;
+    const fd = table.get(fd_u32) orelse return error.EBADF;
+
+    if (fd.ops != &fd_mod.dir_ops) {
+        return error.ENOTDIR;
+    }
+
+    const initrd_tag_ptr: ?*anyopaque = @ptrCast(@constCast(&fd_mod.initrd_dir_tag));
+    const devfs_tag_ptr: ?*anyopaque = @ptrCast(@constCast(&fd_mod.devfs_dir_tag));
+    const proc = base.getCurrentProcess();
+
+    if (fd.private_data == devfs_tag_ptr) {
+        proc.cwd[0] = '/';
+        proc.cwd[1] = 'd';
+        proc.cwd[2] = 'e';
+        proc.cwd[3] = 'v';
+        proc.cwd_len = 4;
+        return 0;
+    }
+
+    if (fd.private_data == null or fd.private_data == initrd_tag_ptr) {
+        proc.cwd[0] = '/';
+        proc.cwd_len = 1;
+        return 0;
+    }
+
+    return error.ENOTDIR;
 }
 
 /// sys_rename (82) - Rename a file

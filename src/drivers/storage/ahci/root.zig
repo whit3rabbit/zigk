@@ -858,7 +858,7 @@ pub const AhciController = struct {
 
         // Set up PRDT entry (single contiguous buffer)
         const prdt: *command.PrdtEntry = @ptrFromInt(p.cmd_tables_virt[slot] + @sizeOf(command.CommandTableBase));
-        const total_bytes: u32 = @as(u32, sector_count) * SECTOR_SIZE;
+        const total_bytes: u32 = @as(u32, sector_count) * @as(u32, @truncate(SECTOR_SIZE));
         prdt.* = command.PrdtEntry.init(buf_phys, total_bytes, true);
 
         // Register pending request (still under lock)
@@ -918,7 +918,7 @@ pub const AhciController = struct {
 
         // Set up PRDT entry
         const prdt: *command.PrdtEntry = @ptrFromInt(p.cmd_tables_virt[slot] + @sizeOf(command.CommandTableBase));
-        const total_bytes: u32 = @as(u32, sector_count) * SECTOR_SIZE;
+        const total_bytes: u32 = @as(u32, sector_count) * @as(u32, @truncate(SECTOR_SIZE));
         prdt.* = command.PrdtEntry.init(buf_phys, total_bytes, true);
 
         // Register pending request (still under lock)

@@ -15,6 +15,7 @@ const heap = @import("heap");
 const fd_mod = @import("fd");
 const sync = @import("sync");
 const futex = @import("futex");
+const user_mem = @import("user_mem");
 
 const SyscallError = base.SyscallError;
 const UserPtr = base.UserPtr;
@@ -101,14 +102,146 @@ pub fn sys_nanosleep(req_ptr: usize, rem_ptr: usize) SyscallError!usize {
 ///   exceptfds: FD set to watch for exceptions
 ///   timeout: Maximum wait time
 ///
-/// MVP: Returns -ENOSYS (not implemented)
+/// Implements basic non-blocking poll of FD sets.
+/// Blocking with timeout is supported via scheduler.
 pub fn sys_select(nfds: usize, readfds: usize, writefds: usize, exceptfds: usize, timeout: usize) SyscallError!usize {
-    _ = nfds;
-    _ = readfds;
-    _ = writefds;
-    _ = exceptfds;
-    _ = timeout;
-    return error.ENOSYS;
+    // fd_set is 128 bytes (1024 bits) on Linux x86_64
+    const FD_SET_SIZE = 128;
+    const FD_SET_BITS = FD_SET_SIZE * 8;
+
+    // Cap nfds to max supported
+    const max_fd = @min(nfds, fd_mod.MAX_FDS);
+    if (max_fd > FD_SET_BITS) return error.EINVAL;
+
+    // Get current FD table
+    const fd_table = base.getGlobalFdTable();
+
+    // Local buffers for fd_sets
+    var read_set: [FD_SET_SIZE]u8 = [_]u8{0} ** FD_SET_SIZE;
+    var write_set: [FD_SET_SIZE]u8 = [_]u8{0} ** FD_SET_SIZE;
+    var except_set: [FD_SET_SIZE]u8 = [_]u8{0} ** FD_SET_SIZE;
+
+    // Copy sets from userspace
+    if (readfds != 0) {
+        if (user_mem.copyFromUser(&read_set, readfds) != FD_SET_SIZE) {
+            return error.EFAULT;
+        }
+    }
+    if (writefds != 0) {
+        if (user_mem.copyFromUser(&write_set, writefds) != FD_SET_SIZE) {
+            return error.EFAULT;
+        }
+    }
+    if (exceptfds != 0) {
+        if (user_mem.copyFromUser(&except_set, exceptfds) != FD_SET_SIZE) {
+            return error.EFAULT;
+        }
+    }
+
+    // Output sets (what's ready)
+    var read_out: [FD_SET_SIZE]u8 = [_]u8{0} ** FD_SET_SIZE;
+    var write_out: [FD_SET_SIZE]u8 = [_]u8{0} ** FD_SET_SIZE;
+    var except_out: [FD_SET_SIZE]u8 = [_]u8{0} ** FD_SET_SIZE;
+
+    // Parse timeout (struct timeval)
+    var timeout_us: ?u64 = null;
+    if (timeout != 0) {
+        var tv: extern struct { tv_sec: i64, tv_usec: i64 } = undefined;
+        const tv_bytes = std.mem.asBytes(&tv);
+        if (user_mem.copyFromUser(tv_bytes, timeout) != tv_bytes.len) {
+            return error.EFAULT;
+        }
+        // Convert to microseconds
+        const sec_us = @as(u64, @intCast(@max(0, tv.tv_sec))) * 1_000_000;
+        const usec = @as(u64, @intCast(@max(0, tv.tv_usec)));
+        timeout_us = sec_us + usec;
+    }
+
+    var ready_count: usize = 0;
+    const start_tsc = hal.timing.rdtsc();
+
+    // Poll loop - check FDs until ready or timeout
+    while (true) {
+        ready_count = 0;
+        @memset(&read_out, 0);
+        @memset(&write_out, 0);
+        @memset(&except_out, 0);
+
+        // Check each FD in range
+        var fd_num: usize = 0;
+        while (fd_num < max_fd) : (fd_num += 1) {
+            const byte_idx = fd_num / 8;
+            const bit_idx: u3 = @truncate(fd_num % 8);
+            const mask: u8 = @as(u8, 1) << bit_idx;
+
+            const want_read = (read_set[byte_idx] & mask) != 0;
+            const want_write = (write_set[byte_idx] & mask) != 0;
+            const want_except = (except_set[byte_idx] & mask) != 0;
+
+            if (!want_read and !want_write and !want_except) continue;
+
+            // Get the FD
+            const fd_ptr = fd_table.get(@truncate(fd_num)) orelse continue;
+
+            // Build poll request
+            var poll_events: u32 = 0;
+            if (want_read) poll_events |= uapi.epoll.EPOLLIN;
+            if (want_write) poll_events |= uapi.epoll.EPOLLOUT;
+            if (want_except) poll_events |= uapi.epoll.EPOLLERR | uapi.epoll.EPOLLPRI;
+
+            // Call poll if available
+            var revents: u32 = 0;
+            if (fd_ptr.ops.poll) |poll_fn| {
+                revents = poll_fn(fd_ptr, poll_events);
+            } else {
+                // No poll - assume always ready for the modes the FD supports
+                if (want_read and fd_ptr.isReadable()) revents |= uapi.epoll.EPOLLIN;
+                if (want_write and fd_ptr.isWritable()) revents |= uapi.epoll.EPOLLOUT;
+            }
+
+            // Set output bits
+            if ((revents & uapi.epoll.EPOLLIN) != 0 and want_read) {
+                read_out[byte_idx] |= mask;
+                ready_count += 1;
+            }
+            if ((revents & uapi.epoll.EPOLLOUT) != 0 and want_write) {
+                write_out[byte_idx] |= mask;
+                ready_count += 1;
+            }
+            if ((revents & (uapi.epoll.EPOLLERR | uapi.epoll.EPOLLPRI)) != 0 and want_except) {
+                except_out[byte_idx] |= mask;
+                ready_count += 1;
+            }
+        }
+
+        // If any FDs ready, return
+        if (ready_count > 0) break;
+
+        // Check timeout
+        if (timeout_us) |us| {
+            if (hal.timing.hasTimedOut(start_tsc, us)) break; // Timeout expired
+        } else if (timeout != 0) {
+            // timeout was provided but was zero - immediate return
+            break;
+        }
+
+        // No FDs ready and not timed out - yield and retry
+        if (timeout == 0) break; // No timeout means poll once
+        sched.yield();
+    }
+
+    // Copy output sets back to userspace
+    if (readfds != 0) {
+        _ = user_mem.copyToUser(readfds, &read_out);
+    }
+    if (writefds != 0) {
+        _ = user_mem.copyToUser(writefds, &write_out);
+    }
+    if (exceptfds != 0) {
+        _ = user_mem.copyToUser(exceptfds, &except_out);
+    }
+
+    return ready_count;
 }
 
 /// sys_clock_gettime (228) - Get time from a clock

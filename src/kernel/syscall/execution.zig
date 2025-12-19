@@ -5,7 +5,6 @@
 // - sys_execve: Execute program
 // - sys_arch_prctl: Architecture-specific thread state (TLS)
 // - sys_get_fb_info, sys_map_fb: Framebuffer access
-// - Network stubs (socket, sendto, recvfrom)
 
 const std = @import("std");
 const base = @import("base.zig");
@@ -30,44 +29,6 @@ const UserPtr = base.UserPtr;
 const isValidUserAccess = base.isValidUserAccess;
 const AccessMode = base.AccessMode;
 const Process = base.Process;
-
-// =============================================================================
-// Network Stubs
-// =============================================================================
-
-/// sys_socket (41) - Create a socket
-/// MVP: Returns -ENOSYS (networking not implemented)
-pub fn sys_socket(domain: usize, sock_type: usize, protocol: usize) SyscallError!usize {
-    _ = domain;
-    _ = sock_type;
-    _ = protocol;
-    // Networking will be implemented in Phase 7
-    return error.ENOSYS;
-}
-
-/// sys_sendto (44) - Send a message on a socket
-/// MVP: Returns -ENOSYS (networking not implemented)
-pub fn sys_sendto(fd: usize, buf_ptr: usize, len: usize, flags: usize, addr_ptr: usize, addrlen: usize) SyscallError!usize {
-    _ = fd;
-    _ = buf_ptr;
-    _ = len;
-    _ = flags;
-    _ = addr_ptr;
-    _ = addrlen;
-    return error.ENOSYS;
-}
-
-/// sys_recvfrom (45) - Receive a message from a socket
-/// MVP: Returns -ENOSYS (networking not implemented)
-pub fn sys_recvfrom(fd: usize, buf_ptr: usize, len: usize, flags: usize, addr_ptr: usize, addrlen_ptr: usize) SyscallError!usize {
-    _ = fd;
-    _ = buf_ptr;
-    _ = len;
-    _ = flags;
-    _ = addr_ptr;
-    _ = addrlen_ptr;
-    return error.ENOSYS;
-}
 
 // =============================================================================
 // Process Execution

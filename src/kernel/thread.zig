@@ -112,6 +112,10 @@ pub const Thread = struct {
     /// Signal actions table (index 0 is unused, 1-64 correspond to signals)
     signal_actions: [64]uapi.signal.SigAction,
 
+    /// Alternate signal stack (set via sigaltstack syscall)
+    /// Used when SA_ONSTACK flag is set in signal action
+    alternate_stack: uapi.signal.StackT = .{ .sp = 0, .flags = 2, .size = 0 }, // SS_DISABLE=2
+
     /// Doubly-linked list pointers for ready queue
     next: ?*Thread,
     prev: ?*Thread,
@@ -136,6 +140,10 @@ pub const Thread = struct {
     /// Set by unblock() if thread hasn't blocked yet; checked/cleared by block()
     /// SECURITY: Prevents TOCTOU race in block() - see sched.zig security comments
     pending_wakeup: bool = false,
+
+    /// Stopped by signal (SIGSTOP/SIGTSTP/SIGTTIN/SIGTTOU)
+    /// Distinguished from normal blocking so SIGCONT can resume only signal-stopped threads
+    stopped: bool = false,
 
     /// CPU affinity mask (0xFFFFFFFF = any CPU, otherwise bitmask of allowed CPUs)
     /// Used for cache locality and NUMA awareness

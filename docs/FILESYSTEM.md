@@ -492,7 +492,7 @@ zscapek/
 | `memory.zig` | `mmap`, `mprotect`, `munmap`, `brk`. |
 | `execution.zig` | `fork`, `execve`, `arch_prctl`, `get_fb_info`, `map_fb`. |
 | `custom.zig` | Zscapek extensions (`debug_log`, `putchar`, `getchar`, `read_scancode`). |
-| `net.zig` | `socket`, `bind`, `listen`, `accept`, `connect`, `sendto`, `recvfrom`. |
+| `net.zig` | Networking syscalls only (`socket`, `bind`, `listen`, `accept`, `connect`, `sendto`, `recvfrom`). |
 | `random.zig` | `getrandom` (syscall 318). |
 | `input.zig` | Input device syscalls (keyboard, mouse). |
 | `interrupt.zig` | User-space interrupt handling for drivers. |

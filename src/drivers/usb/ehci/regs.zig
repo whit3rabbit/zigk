@@ -175,8 +175,18 @@ pub const Qh = packed struct {
     next_qtd: u32,
     alt_next_qtd: u32,
     token: u32,
-    buffer_pointers: [5]u32,
-    extended_buffer: [5]u32,
+    // Buffer pointers (packed structs cannot have arrays)
+    buffer_pointer_0: u32,
+    buffer_pointer_1: u32,
+    buffer_pointer_2: u32,
+    buffer_pointer_3: u32,
+    buffer_pointer_4: u32,
+    // Extended buffer pointers (64-bit addressing)
+    extended_buffer_0: u32,
+    extended_buffer_1: u32,
+    extended_buffer_2: u32,
+    extended_buffer_3: u32,
+    extended_buffer_4: u32,
 };
 
 // Helper

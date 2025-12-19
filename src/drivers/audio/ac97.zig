@@ -31,6 +31,10 @@ const NAM_PCM_FRONT_DAC_RATE: u16 = 0x2C;
 const NAM_PCM_SURR_DAC_RATE: u16 = 0x2E;
 const NAM_PCM_LFE_DAC_RATE: u16 = 0x30;
 
+// AC97 Extended Audio ID/Ctrl Bits
+const EAI_VRA: u16 = 1 << 0;
+const EAC_VRA: u16 = 1 << 0;
+
 // AC97 Native Audio Bus Master (NABM) Registers (IO Space)
 const NABM_PO_BDBAR: u16 = 0x10; // PCM Out Buffer Descriptor Base Address
 const NABM_PO_CIV: u16 = 0x14;   // Current Index Value
@@ -86,6 +90,7 @@ pub const Ac97 = struct {
     sample_rate: u32,
     channels: u32,
     format: u32, // AFMT_*
+    vra_supported: bool,
 
     lock: sync.Spinlock,
     wait_queue: ?*thread.Thread, // Single waiter for now (simple blocking)
@@ -132,6 +137,7 @@ pub const Ac97 = struct {
             .sample_rate = 48000,
             .channels = 2,
             .format = sound.AFMT_S16_LE,
+            .vra_supported = false,
             .lock = sync.Spinlock{},
             .wait_queue = null,
             .pending_requests = [_]?*kernel_io.IoRequest{null} ** BDL_ENTRY_COUNT,
@@ -200,10 +206,97 @@ pub const Ac97 = struct {
         port_io.outw(self.nam_base + NAM_MASTER_VOL, 0x0202);
         port_io.outw(self.nam_base + NAM_PCM_OUT_VOL, 0x0202);
 
-        // Set sample rate (try 48kHz)
-        // Check if VRA is supported (Extended Audio ID)
-        // For simplicity, we assume 48kHz fixed for now unless requested.
+        // Detect and Enable VRA (Variable Rate Audio)
+        const ext_id = port_io.inw(self.nam_base + NAM_EXT_AUDIO_ID);
+        if ((ext_id & EAI_VRA) != 0) {
+            // VRA supported, enable it
+            const ext_ctrl = port_io.inw(self.nam_base + NAM_EXT_AUDIO_CTRL);
+            port_io.outw(self.nam_base + NAM_EXT_AUDIO_CTRL, ext_ctrl | EAC_VRA);
+            self.vra_supported = true;
+            console.info("AC97: VRA enabled", .{});
+        }
+
+        // Set sample rate (try 48kHz default)
         port_io.outw(self.nam_base + NAM_PCM_FRONT_DAC_RATE, 48000);
+        // Verify what we got
+        const actual = port_io.inw(self.nam_base + NAM_PCM_FRONT_DAC_RATE);
+        self.sample_rate = actual;
+    }
+
+
+    /// Process audio data from user format to hardware format (S16_LE Stereo).
+    /// Returns number of bytes consumed from src and written to dst.
+    fn processAudio(self: *Self, dst: []u8, src: []const u8) struct { consumed: usize, written: usize } {
+        var s_off: usize = 0;
+        var d_off: usize = 0;
+        
+        // Limits
+        const s_max = src.len;
+        const d_max = dst.len;
+
+        // Optimization: 1:1 Copy (Stereo S16LE -> Stereo S16LE)
+        if (self.channels == 2 and self.format == sound.AFMT_S16_LE) {
+            const copy_len = @min(s_max, d_max);
+            // Must align to frame size (4 bytes)
+            const aligned_len = copy_len & ~@as(usize, 3);
+            @memcpy(dst[0..aligned_len], src[0..aligned_len]);
+            return .{ .consumed = aligned_len, .written = aligned_len };
+        }
+
+        while (s_off < s_max and d_off < d_max) {
+            // Determine input frame size
+            const bytes_per_sample: usize = if (self.format == sound.AFMT_U8) 1 else 2;
+            const input_frame_size = bytes_per_sample * self.channels;
+
+            // Check if we have a full frame in src
+            if (s_off + input_frame_size > s_max) break;
+            // Check if we have space for stereo S16 frame (4 bytes) in dst
+            if (d_off + 4 > d_max) break;
+            
+            // Read L/R samples, normalized to i16
+            var left: i16 = 0;
+            var right: i16 = 0;
+            
+            if (self.format == sound.AFMT_U8) {
+                 // U8 is unsigned 0..255, bias 128. 
+                 // Conversion to i16: (u8 - 128) * 256
+                 const l_val: i16 = @as(i16, src[s_off]) - 128;
+                 left = l_val * 256;
+                 
+                 if (self.channels == 2) {
+                     const r_val: i16 = @as(i16, src[s_off+1]) - 128;
+                     right = r_val * 256;
+                 } else {
+                     right = left;
+                 }
+            } else {
+                 // S16_LE
+                 const l_low = src[s_off];
+                 const l_high = src[s_off+1];
+                 left = @as(i16, @bitCast(@as(u16, l_low) | (@as(u16, l_high) << 8)));
+                 
+                 if (self.channels == 2) {
+                     const r_low = src[s_off+2];
+                     const r_high = src[s_off+3];
+                     right = @as(i16, @bitCast(@as(u16, r_low) | (@as(u16, r_high) << 8)));
+                 } else {
+                     right = left;
+                 }
+            }
+            
+            // Write to DST (S16_LE Stereo)
+            const u_l = @as(u16, @bitCast(left));
+            dst[d_off] = @truncate(u_l);
+            dst[d_off+1] = @truncate(u_l >> 8);
+            
+            const u_r = @as(u16, @bitCast(right));
+            dst[d_off+2] = @truncate(u_r);
+            dst[d_off+3] = @truncate(u_r >> 8);
+            
+            s_off += input_frame_size;
+            d_off += 4;
+        }
+        return .{ .consumed = s_off, .written = d_off };
     }
 
     // DevFS Operations
@@ -212,8 +305,8 @@ pub const Ac97 = struct {
         // We need to copy data to buffers and update LVI.
         // If all buffers are full, wait.
 
-        // Calculate bytes per sample frame (stereo 16-bit = 4 bytes)
-        const frame_size: usize = 4;
+        // Hardware is always Stereo 16-bit = 4 bytes/frame
+        const hw_frame_size: usize = 4;
 
         var written: usize = 0;
 
@@ -221,33 +314,7 @@ pub const Ac97 = struct {
             // Find current hardware position
             var civ = port_io.inb(self.nabm_base + NABM_PO_CIV);
             const lvi = port_io.inb(self.nabm_base + NABM_PO_LVI);
-            _ = lvi; // Used for debugging; hardware uses ring buffer
-
-            // Check if we have space.
-            // We can write to any buffer that is NOT currently being played.
-            // civ is the buffer currently being played.
-            // We want to write to self.current_buffer.
-            // If self.current_buffer == civ, we might be overwriting what is playing (bad).
-            // But we treat it as a ring.
-
-            // Strategy: Fill buffers ahead of CIV.
-            // If self.current_buffer == civ, we are too fast (caught up to hardware read pointer from behind).
-            // Or hardware is stopped.
-
-            // Wait, hardware stops at LVI.
-            // If we are at LVI, we should advance LVI.
-
-            // Let's simplified logic:
-            // current_buffer is where we want to write next.
-            // We can write if current_buffer != civ.
-            // Wait, if LVI is far ahead, civ moves towards it.
-
-            // Actually, correct check is:
-            // available = (civ + BDL_ENTRY_COUNT - current_buffer) % BDL_ENTRY_COUNT? No.
-
-            // Let's use:
-            // Software Write Ptr: current_buffer
-            // Hardware Read Ptr: civ
+            _ = lvi; // Used for debugging
 
             if (self.current_buffer == civ) {
                 // Check if hardware is actually running
@@ -259,34 +326,47 @@ pub const Ac97 = struct {
                     civ = port_io.inb(self.nabm_base + NABM_PO_CIV);
                     sr = port_io.inw(self.nabm_base + NABM_PO_SR);
                 }
-                // If halted (SR_DCH) or civ moved, we can write.
             }
 
-            const chunk_size = @min(BUFFER_SIZE, data.len - written);
-
-            // Copy data
-            const buf = self.buffers[self.current_buffer];
-            @memcpy(buf[0..chunk_size], data[written..][0..chunk_size]);
+            // Fill the current buffer with as much compatible data as possible
+            // Destination: full 4KB buffer
+            // Source: remaining user data
+            
+            const dst_slice = self.buffers[self.current_buffer][0..BUFFER_SIZE];
+            const src_slice = data[written..];
+            
+            const res = self.processAudio(dst_slice, src_slice);
+            
+            // If we consumed nothing but had input, we might be stuck (frame alignment issue?)
+            if (res.consumed == 0 and src_slice.len > 0) {
+                 // Should not happen if inputs are aligned. 
+                 // If unaligned data at end, we just drop/ignore or break.
+                 break;
+            }
 
             // Update BDL entry
-            // Length is in samples.
-            const samples = chunk_size / frame_size;
+            // Length is in samples (stereo sample = 1 frame? No, AC97 BDL len is samples per channel or total samples?)
+            // "Number of samples to be played"
+            // AC97 spec: "The number of samples to be fetched... For 16-bit stereo, this is the number of sample pairs."
+            // NOTE: QEMU/RealHW usually treats this as "number of samples per channel"?
+            // Or total samples?
+            // "If the stream is stereo, 16-bit, then each sample is 4 bytes. If B.L. = 20, then 20 sample pairs (80 bytes) are fetched."
+            // So: Length = bytes / 4.
+            const samples = res.written / hw_frame_size;
             self.bdl[self.current_buffer].len = @truncate(samples);
 
-            written += chunk_size;
+            written += res.consumed;
 
             // Advance software pointer
             const next_buffer = (self.current_buffer + 1) % BDL_ENTRY_COUNT;
             self.current_buffer = next_buffer;
 
-            // Update LVI to point to the buffer we just filled (or keep it ahead)
-            // If we just filled buffer N, we set LVI to N.
+            // Update LVI 
             port_io.outb(self.nabm_base + NABM_PO_LVI, @truncate(self.current_buffer));
 
             // Ensure DMA is running
             const cr = port_io.inb(self.nabm_base + NABM_PO_CR);
             if ((cr & CR_RPBM) == 0) {
-                // Start (Run, no interrupts for polling mode)
                 port_io.outb(self.nabm_base + NABM_PO_CR, CR_RPBM);
             }
         }
@@ -301,25 +381,72 @@ pub const Ac97 = struct {
 
         switch (cmd) {
             sound.SNDCTL_DSP_SPEED => {
-                // Read requested rate from user, return actual rate
+                // Read requested rate from user
                 const requested = user_ptr.readValue(u32) catch return -14; // EFAULT
-                _ = requested; // TODO: Support variable sample rates via VRA
-                const actual_rate: u32 = self.sample_rate;
-                user_ptr.writeValue(actual_rate) catch return -14;
+                
+                if (self.vra_supported) {
+                    // Clamp to AC97 safe range (usually 8000-48000)
+                    var rate = requested;
+                    if (rate < 8000) rate = 8000;
+                    if (rate > 48000) rate = 48000;
+                    
+                    port_io.outw(self.nam_base + NAM_PCM_FRONT_DAC_RATE, @truncate(rate));
+                    // Read back what the hardware actually accepted
+                    rate = port_io.inw(self.nam_base + NAM_PCM_FRONT_DAC_RATE);
+                    self.sample_rate = rate;
+                }
+                
+                user_ptr.writeValue(self.sample_rate) catch return -14;
                 return 0;
             },
             sound.SNDCTL_DSP_STEREO => {
                 // Read mono/stereo request, return actual channel config
                 const requested = user_ptr.readValue(u32) catch return -14;
-                _ = requested; // TODO: Support mono playback
-                const stereo: u32 = if (self.channels == 2) 1 else 0;
-                user_ptr.writeValue(stereo) catch return -14;
+                
+                // Allow 1 (Mono) or 2 (Stereo). Treat 0 as Stereo query?
+                // DOOM passes 0 for mono? No, 0 usually means false (mono), 1 true (stereo) in some APIs.
+                // Linux ioctl: argument is "0=mono, 1=stereo" ?
+                // OSS Spec: "Argument is 0 (mono) or 1 (stereo). The driver returns the actual mode."
+                // Wait, some docs say argument is *channels* (1 or 2).
+                // Let's assume argument is 0/1 boolean for stereo-ness for SNDCTL_DSP_STEREO.
+                // For SNDCTL_DSP_CHANNELS, argument is number of channels.
+                
+                // Let's support both interpretations.
+                // If val > 1, treat as channel count?
+                // Standard says SNDCTL_DSP_STEREO takes 0 or 1.
+                
+                var new_channels: u32 = 2;
+                if (requested == 0) {
+                    new_channels = 1;
+                } else {
+                    new_channels = 2;
+                }
+                self.channels = new_channels;
+                
+                // Return 1 if stereo (channels==2), 0 if mono
+                const result: u32 = if (self.channels == 2) 1 else 0;
+                user_ptr.writeValue(result) catch return -14;
                 return 0;
+            },
+            sound.SNDCTL_DSP_CHANNELS => {
+                 const requested = user_ptr.readValue(u32) catch return -14;
+                 if (requested == 1) self.channels = 1;
+                 if (requested == 2) self.channels = 2;
+                 user_ptr.writeValue(self.channels) catch return -14;
+                 return 0;
             },
             sound.SNDCTL_DSP_SETFMT => {
                 // Read requested format, return actual format
                 const requested = user_ptr.readValue(u32) catch return -14;
-                _ = requested; // TODO: Support format conversion
+                
+                // Check if we support it
+                if (requested == sound.AFMT_U8) {
+                    self.format = sound.AFMT_U8;
+                } else if (requested == sound.AFMT_S16_LE) {
+                    self.format = sound.AFMT_S16_LE;
+                }
+                // default keep existing if unsupported
+                
                 user_ptr.writeValue(self.format) catch return -14;
                 return 0;
             },
@@ -431,32 +558,46 @@ pub const Ac97 = struct {
         const frame_size: usize = 4; // stereo 16-bit = 4 bytes
         const buf_idx = self.current_buffer;
 
-        // Copy data to DMA buffer (max BUFFER_SIZE per submission)
-        const chunk_size = @min(BUFFER_SIZE, request.buf_len);
+        // Copy data to DMA buffer with format conversion
         const buf = self.buffers[buf_idx];
+
+        var src_consumed: usize = 0;
+        var dst_written: usize = 0;
 
         if (request.bounce_buf) |bounce| {
             // SAFE: Data is in kernel-allocated bounce buffer that was validated
-            // when the IoRequest was created. The io_uring layer copies user data
-            // into this bounce buffer after validation.
-            @memcpy(buf[0..chunk_size], bounce[0..chunk_size]);
+            const res = self.processAudio(buf[0..BUFFER_SIZE], bounce[0..request.buf_len]);
+            src_consumed = res.consumed;
+            dst_written = res.written;
         } else {
             // SECURITY FIX: Reject requests without bounce buffers.
-            // Raw buf_ptr could point to arbitrary kernel memory. We cannot
-            // safely validate all possible kernel addresses, so we require
-            // the caller to use bounce buffers for async audio writes.
-            // This prevents information disclosure via DMA buffer contents.
             _ = request.complete(.{ .err = error.EFAULT });
             return;
         }
 
         // Update BDL entry
-        const samples = chunk_size / frame_size;
+        const samples = dst_written / frame_size;
         self.bdl[buf_idx].len = @truncate(samples);
 
         // Track this request for IRQ completion
         self.pending_requests[buf_idx] = request;
         _ = request.compareAndSwapState(.pending, .in_progress);
+        
+        // NOTE: We only consumed src_consumed bytes.
+        // If Request was larger, we rely on the caller to handle short writes?
+        // But IoRequest infrastructure doesn't easily support "partial completion then continue".
+        // We act like a short write system call: we completed X bytes.
+        // We store the partial amount in the request result?
+        // Actually, we complete it LATER in IRQ.
+        // But we need to say HOW MUCH was written.
+        // We can squirrel that away in the request or just assume we'll report src_consumed.
+        // However, standard IoRequest completion just says "success".
+        // The `result` field is u64. We can store bytes there.
+        // When IRQ fires, we do: `request.complete(.{ .success = THE_BYTES })`.
+        // But IRQ handler doesn't know src_consumed unless we store it.
+        // A hack: Store src_consumed in `request.result` NOW (while in progress),
+        // and read it back in IRQ.
+        request.result = .{ .success = src_consumed }; 
 
         // Advance software pointer
         self.current_buffer = (self.current_buffer + 1) % BDL_ENTRY_COUNT;
@@ -531,7 +672,12 @@ pub const Ac97 = struct {
                     // Simple heuristic: if i != civ and request was in_progress
                     if (i != civ and request.getState() == .in_progress) {
                         self.pending_requests[i] = null;
-                        _ = request.complete(.{ .success = request.buf_len });
+                        // Retrieve the bytes-consumed we stored earlier
+                        const written = switch (request.result) {
+                            .success => |val| val,
+                            else => 0,
+                        };
+                        _ = request.complete(.{ .success = written });
                     }
                 }
             }

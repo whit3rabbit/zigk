@@ -27,6 +27,65 @@ fn safeFdCast(fd_num: usize) ?u32 {
     return std.math.cast(u32, fd_num);
 }
 
+fn joinPaths(base_path: []const u8, rel: []const u8, out_buf: []u8) ?[]const u8 {
+    if (base_path.len == 0 or rel.len == 0) return null;
+
+    var out_idx: usize = 0;
+    if (base_path.len == 1 and base_path[0] == '/') {
+        if (out_buf.len < 1 + rel.len) return null;
+        out_buf[0] = '/';
+        out_idx = 1;
+    } else {
+        const needs_sep = base_path[base_path.len - 1] != '/';
+        const needed = base_path.len + (if (needs_sep) @as(usize, 1) else 0) + rel.len;
+        if (out_buf.len < needed) return null;
+        @memcpy(out_buf[0..base_path.len], base_path);
+        out_idx = base_path.len;
+        if (needs_sep) {
+            out_buf[out_idx] = '/';
+            out_idx += 1;
+        }
+    }
+
+    @memcpy(out_buf[out_idx .. out_idx + rel.len], rel);
+    out_idx += rel.len;
+
+    return out_buf[0..out_idx];
+}
+
+fn openPath(path: []const u8, flags: usize, mode: usize) SyscallError!usize {
+    _ = mode; // Mode is ignored for now
+
+    if (path.len == 0) {
+        return error.ENOENT;
+    }
+
+    const fd = fs.vfs.Vfs.open(path, @truncate(flags)) catch |err| {
+        return switch (err) {
+            error.NotFound => error.ENOENT,
+            error.AccessDenied => error.EACCES,
+            error.InvalidPath => error.ENOENT,
+            error.NameTooLong => error.ENAMETOOLONG,
+            error.IOError => error.EIO,
+            error.NoMemory => error.ENOMEM,
+            error.IsDirectory => error.EISDIR,
+            else => error.EIO,
+        };
+    };
+
+    const alloc = heap.allocator();
+    errdefer alloc.destroy(fd);
+
+    const table = base.getGlobalFdTable();
+    const fd_num = table.allocFdNum() orelse {
+        alloc.destroy(fd);
+        return error.EMFILE;
+    };
+
+    table.install(fd_num, fd);
+    return fd_num;
+}
+
 // =============================================================================
 // File Descriptor Management
 // =============================================================================
@@ -97,8 +156,6 @@ pub fn sys_access(path_ptr: usize, mode: usize) SyscallError!usize {
 ///
 /// Opens a file/device and returns a new file descriptor.
 pub fn sys_open(path_ptr: usize, flags: usize, mode: usize) SyscallError!usize {
-    _ = mode; // Mode is ignored for now
-
     // Allocate path buffer on heap to preserve stack space
     const path_buf = heap.allocator().alloc(u8, user_mem.MAX_PATH_LEN) catch {
         return error.ENOMEM;
@@ -115,31 +172,7 @@ pub fn sys_open(path_ptr: usize, flags: usize, mode: usize) SyscallError!usize {
         return error.ENOENT;
     }
 
-    // Use VFS to open file
-    const fd = fs.vfs.Vfs.open(path, @truncate(flags)) catch |err| {
-        return switch (err) {
-            error.NotFound => error.ENOENT,
-            error.AccessDenied => error.EACCES,
-            error.InvalidPath => error.ENOENT, // or EINVAL
-            error.NameTooLong => error.ENAMETOOLONG,
-            error.IOError => error.EIO,
-            error.NoMemory => error.ENOMEM,
-            error.IsDirectory => error.EISDIR, // If we don't support opening dirs yet?
-            else => error.EIO,
-        };
-    };
-
-    const alloc = heap.allocator();
-    errdefer alloc.destroy(fd);
-
-    const table = base.getGlobalFdTable();
-    const fd_num = table.allocFdNum() orelse {
-        alloc.destroy(fd);
-        return error.EMFILE;
-    };
-
-    table.install(fd_num, fd);
-    return fd_num;
+    return openPath(path, flags, mode);
 }
 
 /// sys_close (3) - Close a file descriptor
@@ -265,9 +298,7 @@ pub fn sys_lseek(fd_num: usize, offset: i64, whence: u32) SyscallError!usize {
 /// Equivalent to open() with O_CREAT|O_WRONLY|O_TRUNC
 /// MVP: Stub - returns EROFS (read-only filesystem)
 pub fn sys_creat(path_ptr: usize, mode: usize) SyscallError!usize {
-    _ = path_ptr;
-    _ = mode;
-    return error.EROFS;
+    return sys_open(path_ptr, fd_mod.O_CREAT | fd_mod.O_WRONLY | fd_mod.O_TRUNC, mode);
 }
 
 /// sys_dup3 (292) - Duplicate FD with flags
@@ -292,14 +323,56 @@ pub fn sys_pipe2(pipefd_ptr: usize, flags: usize) SyscallError!usize {
 ///
 /// MVP: Stub - only supports AT_FDCWD (-100) which means use current directory
 pub fn sys_openat(dirfd: usize, path_ptr: usize, flags: usize, mode: usize) SyscallError!usize {
-    // AT_FDCWD = -100 (0xffffff9c as usize)
     const AT_FDCWD: usize = @bitCast(@as(isize, -100));
 
-    if (dirfd == AT_FDCWD) {
-        // Relative to current working directory - delegate to open
-        return sys_open(path_ptr, flags, mode);
+    const path_buf = heap.allocator().alloc(u8, user_mem.MAX_PATH_LEN) catch {
+        return error.ENOMEM;
+    };
+    defer heap.allocator().free(path_buf);
+
+    const path = user_mem.copyStringFromUser(path_buf, path_ptr) catch |err| {
+        if (err == error.NameTooLong) return error.ENAMETOOLONG;
+        return error.EFAULT;
+    };
+
+    if (path.len == 0) {
+        return error.ENOENT;
     }
 
-    // Other dirfd values not supported yet
-    return error.ENOSYS;
+    if (path[0] == '/') {
+        return openPath(path, flags, mode);
+    }
+
+    const resolved_buf = heap.allocator().alloc(u8, user_mem.MAX_PATH_LEN) catch {
+        return error.ENOMEM;
+    };
+    defer heap.allocator().free(resolved_buf);
+
+    const proc = base.getCurrentProcess();
+    const initrd_tag_ptr: ?*anyopaque = @ptrCast(@constCast(&fd_mod.initrd_dir_tag));
+    const devfs_tag_ptr: ?*anyopaque = @ptrCast(@constCast(&fd_mod.devfs_dir_tag));
+
+    var base_path: []const u8 = undefined;
+    if (dirfd == AT_FDCWD) {
+        base_path = proc.cwd[0..proc.cwd_len];
+    } else {
+        const table = base.getGlobalFdTable();
+        const fd_u32 = safeFdCast(dirfd) orelse return error.EBADF;
+        const fd = table.get(fd_u32) orelse return error.EBADF;
+
+        if (fd.ops != &fd_mod.dir_ops) {
+            return error.ENOTDIR;
+        }
+
+        if (fd.private_data == devfs_tag_ptr) {
+            base_path = "/dev";
+        } else if (fd.private_data == null or fd.private_data == initrd_tag_ptr) {
+            base_path = "/";
+        } else {
+            return error.ENOTDIR;
+        }
+    }
+
+    const resolved = joinPaths(base_path, path, resolved_buf) orelse return error.ENAMETOOLONG;
+    return openPath(resolved, flags, mode);
 }

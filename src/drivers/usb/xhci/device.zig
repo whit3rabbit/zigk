@@ -56,9 +56,13 @@ pub const UsbDevice = struct {
     // Class driver state
     /// HID driver instance for parsing reports (if HID)
     hid_driver: hid.HidDriver,
-    /// DMA buffer for interrupt reports (8 bytes for boot protocol)
-    report_buffer: [*]u8,
+    /// DMA buffer for interrupt reports
+    /// Security: Use bounded slice to prevent buffer overruns from malicious devices.
+    /// Size 64 accommodates max interrupt packet (HS max_packet).
+    report_buffer: []u8,
     report_buffer_phys: u64,
+    /// Allocated size of report_buffer for validation
+    report_buffer_len: usize,
 
     /// Hub driver state (if is_hub is true)
     hub_driver: hub.HubDriver,
@@ -113,9 +117,11 @@ pub const UsbDevice = struct {
         var ep0_ring = try ring.TransferRing.init();
         errdefer ep0_ring.deinit();
 
-        // Allocate report buffer (one page, we only need 8 bytes)
+        // Allocate report buffer (one page for DMA alignment)
+        // Security: Explicit size limit (64 bytes) for max interrupt packet
         const report_page = pmm.allocZeroedPages(1) orelse return error.OutOfMemory;
-        const report_virt = hal.paging.physToVirt(report_page);
+        const report_virt: [*]u8 = @ptrCast(hal.paging.physToVirt(report_page));
+        const report_buffer_size: usize = 64; // Max HS interrupt packet size
 
         // Determine default max packet size based on speed
         const default_max_packet: u16 = switch (speed) {
@@ -139,8 +145,9 @@ pub const UsbDevice = struct {
             .interrupt_dci = 0,
             .hid_driver = .{},
             .hub_driver = undefined,
-            .report_buffer = @ptrFromInt(@intFromPtr(report_virt)),
+            .report_buffer = report_virt[0..report_buffer_size],
             .report_buffer_phys = report_page,
+            .report_buffer_len = report_buffer_size,
             .state = .slot_enabled,
             .parent = parent,
             .parent_port = parent_port,
@@ -311,11 +318,20 @@ pub const MAX_DEVICES: usize = 256;
 var devices: [MAX_DEVICES]?*UsbDevice = [_]?*UsbDevice{null} ** MAX_DEVICES;
 
 /// Register a device in the global array
-/// Security: Validates slot_id bounds to prevent out-of-bounds writes
+/// Security: Validates slot_id bounds and frees existing device to prevent
+/// resource exhaustion from malicious hub enumeration cycling.
 pub fn registerDevice(device: *UsbDevice) void {
     // slot_id is u8, max value 255, which is < MAX_DEVICES (256)
     // slot_id 0 is reserved for host controller
     if (device.slot_id > 0) {
+        // Security: Free existing device resources to prevent memory exhaustion
+        if (devices[device.slot_id]) |old_dev| {
+            // Avoid double-free if re-registering same device
+            if (old_dev != device) {
+                console.warn("XHCI: Replacing existing device at slot {}", .{device.slot_id});
+                old_dev.deinit();
+            }
+        }
         devices[device.slot_id] = device;
     }
 }
@@ -333,6 +349,18 @@ pub fn findDevice(slot_id: u8) ?*UsbDevice {
     // slot_id is u8, max value 255, which is < MAX_DEVICES (256)
     if (slot_id > 0) {
         return devices[slot_id];
+    }
+    return null;
+}
+
+/// Find a child device by parent and port
+pub fn findChildDevice(parent: *UsbDevice, port: u8) ?*UsbDevice {
+    for (devices) |maybe_dev| {
+        if (maybe_dev) |dev| {
+            if (dev.parent == parent and dev.parent_port == port) {
+                return dev;
+            }
+        }
     }
     return null;
 }
@@ -453,13 +481,22 @@ pub fn matchesPendingTransfer(slot_id: u8, ep_dci: u5) bool {
 }
 
 /// Get pending transfer if active (for polling)
-/// Note: Caller must not hold the lock when calling this
-pub fn getPendingTransfer() ?*PendingTransfer {
+/// Security: Returns a copy by value to avoid race condition where caller
+/// accesses struct fields after lock is released while interrupt handler modifies them.
+pub fn getPendingTransfer() ?PendingTransfer {
     const held = pending_transfer_lock.acquire();
     defer held.release();
 
     if (pending_transfer_active.load(.acquire)) {
-        return &pending_transfer_storage;
+        // Return copy by value - caller gets consistent snapshot
+        return PendingTransfer{
+            .trb_phys = pending_transfer_storage.trb_phys,
+            .slot_id = pending_transfer_storage.slot_id,
+            .ep_dci = pending_transfer_storage.ep_dci,
+            .completed = std.atomic.Value(bool).init(pending_transfer_storage.completed.load(.acquire)),
+            .completion_code = pending_transfer_storage.completion_code,
+            .bytes_transferred = pending_transfer_storage.bytes_transferred,
+        };
     }
     return null;
 }

@@ -38,11 +38,16 @@ pub const Controller = struct {
 
     /// Controller capabilities
     n_ports: u4,
+    n_cc: u4,
     has_debug_port: bool,
     is_64_bit: bool,
 
     /// Controller state
     running: bool,
+
+    /// Schedule structures (physical addresses)
+    periodic_list_phys: u64,
+    async_qh_phys: u64,
 
     const Self = @This();
 
@@ -114,9 +119,12 @@ pub const Controller = struct {
             .cap_base = bar0_virt,
             .op_base = op_base,
             .n_ports = hcsparams.n_ports,
+            .n_cc = hcsparams.n_cc,
             .has_debug_port = (hcsparams.dbg_port_num != 0),
             .is_64_bit = hccparams.addr_64_bit,
             .running = false,
+            .periodic_list_phys = 0,
+            .async_qh_phys = 0,
         };
 
         // Take ownership from BIOS if needed (OS Handoff)
@@ -133,13 +141,58 @@ pub const Controller = struct {
     }
 
     /// Perform BIOS Handoff (OS ownership)
-    fn biosHandoff(_: *Self, eecp: u8) !void {
+    fn biosHandoff(self: *Self, eecp: u8) !void {
         if (eecp == 0) return;
 
         console.info("EHCI: Checking for BIOS ownership at offset {x}", .{eecp});
 
-        // TODO: Implement full EHCI Extended Capability traversal and handoff
-        // For now we assume we can just reset if not claimed or if simple handoff
+        const pci_dev = self.pci_dev;
+        var cap_ptr: u8 = eecp;
+        var hops: u8 = 0;
+
+        while (cap_ptr != 0 and hops < 32) : (hops += 1) {
+            const cap_offset: u12 = @intCast(cap_ptr);
+            const cap = self.pci_access.read32(pci_dev.bus, pci_dev.device, pci_dev.func, cap_offset);
+            const cap_id: u8 = @truncate(cap & 0xFF);
+            const next: u8 = @truncate((cap >> 8) & 0xFF);
+
+            if (cap_id == 0x01) {
+                console.info("EHCI: USB Legacy Support capability found at {x}", .{cap_ptr});
+
+                const bios_owned_mask: u32 = 1 << 16;
+                const os_owned_mask: u32 = 1 << 24;
+
+                var legsup = self.pci_access.read32(pci_dev.bus, pci_dev.device, pci_dev.func, cap_offset);
+                if ((legsup & bios_owned_mask) != 0) {
+                    legsup |= os_owned_mask;
+                    self.pci_access.write32(pci_dev.bus, pci_dev.device, pci_dev.func, cap_offset, legsup);
+
+                    var timeout: u32 = 10000;
+                    while (timeout > 0) : (timeout -= 1) {
+                        const cur = self.pci_access.read32(pci_dev.bus, pci_dev.device, pci_dev.func, cap_offset);
+                        if ((cur & bios_owned_mask) == 0) break;
+                        hal.cpu.pause();
+                    }
+
+                    if (timeout == 0) {
+                        console.warn("EHCI: BIOS ownership handoff timed out", .{});
+                    }
+                }
+
+                const ctl_offset: u12 = @intCast(@as(u16, cap_ptr) + 0x04);
+                const smi_mask: u32 = 0x0000FFFF;
+                var legctl = self.pci_access.read32(pci_dev.bus, pci_dev.device, pci_dev.func, ctl_offset);
+                if ((legctl & smi_mask) != 0) {
+                    legctl &= ~smi_mask;
+                    self.pci_access.write32(pci_dev.bus, pci_dev.device, pci_dev.func, ctl_offset, legctl);
+                }
+                return;
+            }
+
+            cap_ptr = next;
+        }
+
+        console.info("EHCI: No USB Legacy Support capability found", .{});
     }
 
     /// Reset the host controller
@@ -187,12 +240,38 @@ pub const Controller = struct {
 
     /// Start the controller
     fn start(self: *Self) !void {
-        // TODO: Setup Periodic/Async lists before starting
+        try self.setupSchedules();
 
         // Route all ports to this host controller (clear ConfigFlag)
         // If we want to support Companion Controllers (USB 1.1), we need to handle this carefully.
         // For now, setting ConfigFlag=1 routes all ports to EHCI.
         const op_dev = MmioDevice(regs.OpReg).init(self.op_base, 0x400);
+        if (self.is_64_bit) {
+            op_dev.write(.ctrldssegment, @truncate(self.periodic_list_phys >> 32));
+        } else {
+            op_dev.write(.ctrldssegment, 0);
+        }
+        op_dev.write(.periodiclistbase, @truncate(self.periodic_list_phys));
+        op_dev.write(.asynclistaddr, @truncate(self.async_qh_phys));
+
+        var usbcmd = op_dev.readTyped(.usbcmd, regs.UsbCmd);
+        usbcmd.fls = 0; // Default frame list size keeps controller expectations simple.
+        usbcmd.pse = false;
+        usbcmd.ase = true;
+        usbcmd.rs = true;
+        op_dev.writeTyped(.usbcmd, usbcmd);
+
+        var timeout: u32 = 1000;
+        while (timeout > 0) : (timeout -= 1) {
+            const usbsts = op_dev.readTyped(.usbsts, regs.UsbSts);
+            if (!usbsts.hchalted) break;
+            hal.cpu.pause();
+        }
+
+        if (timeout == 0) {
+            console.warn("EHCI: Timeout waiting for controller to run", .{});
+        }
+
         op_dev.write(.configflag, 1);
         hal.cpu.pause();
 
@@ -231,9 +310,92 @@ pub const Controller = struct {
                     portsc.line_status,
                 });
 
-                // TODO: Reset port to determine speed and enable it
+                if (portsc.owner) {
+                    console.info("EHCI: Port {} owned by companion controller", .{port});
+                    continue;
+                }
+
+                portsc.csc = false;
+                portsc.pedc = false;
+                portsc.occ = false;
+                portsc.reset = true;
+                port_dev.writeTyped(.portsc, portsc);
+
+                var t: u32 = 50000;
+                while (t > 0) : (t -= 1) hal.cpu.pause();
+
+                portsc = port_dev.readTyped(.portsc, regs.PortSc);
+                portsc.csc = false;
+                portsc.pedc = false;
+                portsc.occ = false;
+                portsc.reset = false;
+                port_dev.writeTyped(.portsc, portsc);
+
+                var reset_timeout: u32 = 1000;
+                while (reset_timeout > 0) : (reset_timeout -= 1) {
+                    portsc = port_dev.readTyped(.portsc, regs.PortSc);
+                    if (!portsc.reset) break;
+                    hal.cpu.pause();
+                }
+
+                if (!portsc.ped) {
+                    console.warn("EHCI: Port {} did not enable after reset", .{port});
+                }
+
+                const speed_label: []const u8 = switch (portsc.line_status) {
+                    0 => "high-speed",
+                    1 => "low-speed",
+                    2 => "full-speed",
+                    else => "unknown",
+                };
+
+                if ((portsc.line_status == 1 or portsc.line_status == 2) and self.n_cc != 0) {
+                    portsc.owner = true;
+                    portsc.csc = false;
+                    portsc.pedc = false;
+                    portsc.occ = false;
+                    portsc.reset = false;
+                    port_dev.writeTyped(.portsc, portsc);
+                    console.info("EHCI: Port {} {s} handed off to companion", .{ port, speed_label });
+                } else {
+                    console.info("EHCI: Port {} {s} active", .{ port, speed_label });
+                }
             }
         }
+    }
+
+    fn setupSchedules(self: *Self) !void {
+        if (self.periodic_list_phys != 0 and self.async_qh_phys != 0) return;
+
+        const list_phys = pmm.allocZeroedPages(1) orelse return error.OutOfMemory;
+        const list_virt = @intFromPtr(hal.paging.physToVirt(list_phys));
+        const frame_list: [*]u32 = @ptrFromInt(list_virt);
+
+        var i: usize = 0;
+        while (i < 1024) : (i += 1) {
+            frame_list[i] = 1; // Keep the periodic list empty until transfers are queued.
+        }
+
+        const qh_phys = pmm.allocZeroedPages(1) orelse return error.OutOfMemory;
+        const qh_virt = @intFromPtr(hal.paging.physToVirt(qh_phys));
+        const qh: *regs.Qh = @ptrFromInt(qh_virt);
+
+        const link = regs.LinkPointer{
+            .terminate = false,
+            .type = 1,
+            .address = @truncate(qh_phys >> 5),
+        };
+
+        qh.horizontal_link = @bitCast(link);
+        qh.endpoint_chars = 1 << 15; // Anchor reclamation with a stable async head.
+        qh.endpoint_caps = 0;
+        qh.current_qtd = 0;
+        qh.next_qtd = 1;
+        qh.alt_next_qtd = 1;
+        qh.token = 0x00000040; // No active qTDs yet.
+
+        self.periodic_list_phys = list_phys;
+        self.async_qh_phys = qh_phys;
     }
 };
 

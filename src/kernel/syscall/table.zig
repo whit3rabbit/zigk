@@ -58,7 +58,7 @@ pub export fn dispatch_syscall(frame: *SyscallFrame) callconv(.c) void {
                 var mod: ?type = null;
 
                 // Search handler modules in order of priority
-                // net.zig has socket syscalls that override stubs in execution.zig
+                // net.zig owns socket syscalls
                 if (@hasDecl(net, name)) {
                     mod = net;
                 } else if (@hasDecl(process, name)) {
@@ -129,7 +129,9 @@ pub export fn dispatch_syscall(frame: *SyscallFrame) callconv(.c) void {
     // Set return value in frame
     frame.setReturnSigned(result);
 
-    // TODO: Consider signal delivery on syscall exit once SyscallFrame compatibility is handled.
+    // Check for pending signals and deliver if necessary
+    // This modifies the frame to jump to signal handler instead of returning normally
+    signal.checkSignalsOnSyscallExit(frame);
 }
 
 /// Helper to call a handler with correct arguments

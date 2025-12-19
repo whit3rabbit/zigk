@@ -153,6 +153,10 @@ pub const MContext = extern struct {
     ss: u64, // Added at end to match Linux logic often putting ss/rsp at end of gregset
 };
 
+// Sigaltstack flags
+pub const SS_ONSTACK: i32 = 1; // Currently executing on alternate stack
+pub const SS_DISABLE: i32 = 2; // Alternate stack is disabled
+
 /// Stack information
 pub const StackT = extern struct {
     sp: usize,

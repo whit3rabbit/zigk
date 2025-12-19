@@ -346,6 +346,10 @@ pub const SYS_GETEGID: usize = 108;
 /// () -> pid_t
 pub const SYS_GETPPID: usize = 110;
 
+/// Set/get signal stack context
+/// (ss, old_ss) -> int
+pub const SYS_SIGALTSTACK: usize = 131;
+
 /// Set architecture-specific thread state
 /// (code, addr) -> int
 pub const SYS_ARCH_PRCTL: usize = 158;

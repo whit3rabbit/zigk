@@ -346,16 +346,13 @@ pub fn alloc(size: usize) ?[]u8 {
         return null;
     }
 
-    // DISABLED: Slab allocator requires page-aligned backing allocations
-    // which the free-list allocator doesn't provide. The 4KB alignment
-    // check in slab.free() fails for non-aligned slabs.
-    // TODO: Fix slab allocator to use PMM directly for page-aligned slabs
-    //
-    // if (slab.isSizeSlabbed(size)) {
-    //     if (slab.alloc(size)) |result| {
-    //         return result[0..size];
-    //     }
-    // }
+    // Use slab allocator for small allocations (16-2048 bytes)
+    // Slab allocator uses PMM directly for page-aligned slabs
+    if (slab.isSizeSlabbed(size)) {
+        if (slab.alloc(size)) |result| {
+            return result[0..size];
+        }
+    }
 
     return allocFromFreeList(size);
 }

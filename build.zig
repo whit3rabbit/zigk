@@ -201,6 +201,8 @@ pub fn build(b: *std.Build) void {
     slab_module.addImport("console", console_module);
     slab_module.addImport("config", config_module);
     slab_module.addImport("sync", sync_module);
+    slab_module.addImport("pmm", pmm_module);
+    slab_module.addImport("hal", hal_module);
 
     // Create Heap module (Kernel Heap Allocator)
     const heap_module = b.createModule(.{
@@ -392,6 +394,7 @@ pub fn build(b: *std.Build) void {
     usb_module.addImport("pmm", pmm_module);
     usb_module.addImport("console", console_module);
     usb_module.addImport("sync", sync_module);
+    usb_module.addImport("io", kernel_io_module);
 
     // fd_module moved up
 
@@ -428,6 +431,8 @@ pub fn build(b: *std.Build) void {
     fs_module.addImport("console", console_module);
     fs_module.addImport("ahci", ahci_module);
     fs_module.addImport("sync", sync_module);
+    fs_module.addImport("io", kernel_io_module);
+    fs_module.addImport("pmm", pmm_module);
 
     // Create Keyboard driver module
     const keyboard_module = b.createModule(.{
@@ -733,6 +738,7 @@ pub fn build(b: *std.Build) void {
     syscall_scheduling_module.addImport("heap", heap_module);
     syscall_scheduling_module.addImport("fd", fd_module);
     syscall_scheduling_module.addImport("sync", sync_module);
+    syscall_scheduling_module.addImport("user_mem", user_mem_module);
 
     // Create syscall io module (read, write, stat, etc.)
     const syscall_io_module = b.createModule(.{

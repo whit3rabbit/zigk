@@ -23,6 +23,11 @@ const uapi = @import("uapi");
 const console = @import("console"); // Assuming console is available via build options or we need to add import
 const sync = @import("sync");
 
+// Async I/O imports
+const ahci = @import("ahci");
+const io = @import("io");
+const pmm = @import("pmm");
+
 // Magic: "SFS2" (version 2 with bitmap allocation)
 const SFS_MAGIC: u32 = 0x32534653;
 const SFS_VERSION: u32 = 2;
@@ -58,11 +63,78 @@ const DirEntry = extern struct {
     _pad: [128 - 44]u8, // Pad to 128 bytes
 };
 
+/// Sync I/O error type for sector operations
+const SectorError = error{IOError};
+
+/// Read a single sector using async AHCI I/O (sync-over-async pattern)
+/// Extracts port_num from device_fd.private_data and uses IRQ-driven completion
+fn readSector(device_fd: *fd.FileDescriptor, lba: u32, buf: *[512]u8) SectorError!void {
+    // Extract port number from device FD (same pattern as adapter.zig:50)
+    const port_num: u5 = @intCast(@intFromPtr(device_fd.private_data) & 0x1F);
+
+    const req = io.allocRequest(.disk_read) orelse return error.IOError;
+    defer io.freeRequest(req);
+
+    const buf_phys = ahci.adapter.blockReadAsync(port_num, lba, 1, req) catch return error.IOError;
+    defer ahci.adapter.freeDmaBuffer(buf_phys, 512);
+
+    var future = io.Future{ .request = req };
+    const result = future.wait();
+
+    switch (result) {
+        .success => |bytes| {
+            if (bytes < 512) return error.IOError;
+            // SECURITY: Vuln 8 - Memory barrier ensures DMA writes are visible
+            // before we copy from the buffer. Prevents data corruption from
+            // out-of-order memory access or CPU cache inconsistency.
+            asm volatile ("mfence" ::: .{ .memory = true });
+            ahci.adapter.copyFromDmaBuffer(buf_phys, buf);
+        },
+        .err => return error.IOError,
+        .cancelled => return error.IOError,
+        .pending => unreachable,
+    }
+}
+
+/// Write a single sector using async AHCI I/O (sync-over-async pattern)
+/// Extracts port_num from device_fd.private_data and uses IRQ-driven completion
+fn writeSector(device_fd: *fd.FileDescriptor, lba: u32, buf: []const u8) SectorError!void {
+    if (buf.len < 512) return error.IOError;
+
+    // Extract port number from device FD
+    const port_num: u5 = @intCast(@intFromPtr(device_fd.private_data) & 0x1F);
+
+    const req = io.allocRequest(.disk_write) orelse return error.IOError;
+    defer io.freeRequest(req);
+
+    // Allocate DMA buffer (1 page minimum for PMM)
+    const buf_phys = pmm.allocZeroedPages(1) orelse return error.IOError;
+    defer pmm.freePages(buf_phys, 1);
+
+    // Copy data to DMA buffer
+    ahci.adapter.copyToDmaBuffer(buf_phys, buf[0..512]);
+
+    // Submit async write
+    ahci.adapter.blockWriteAsync(port_num, lba, 1, buf_phys, req) catch return error.IOError;
+
+    var future = io.Future{ .request = req };
+    const result = future.wait();
+
+    switch (result) {
+        .success => {},
+        .err => return error.IOError,
+        .cancelled => return error.IOError,
+        .pending => unreachable,
+    }
+}
+
 pub const SFS = struct {
     device_fd: *fd.FileDescriptor,
     superblock: Superblock,
     /// Lock protecting superblock updates (prevents TOCTOU in file growth)
     alloc_lock: sync.Spinlock = .{},
+    /// AHCI port number for direct async I/O access
+    port_num: u5,
 
     /// Initialize SFS on a device
     /// Opens the device, checks magic, formats if needed.
@@ -73,28 +145,37 @@ pub const SFS = struct {
         const alloc = heap.allocator();
         const self = try alloc.create(SFS);
         self.device_fd = device_fd;
+        // Extract AHCI port number for direct async I/O access
+        self.port_num = @intCast(@intFromPtr(device_fd.private_data) & 0x1F);
 
-        // Read superblock
+        // Read superblock using async I/O
         var buf: [512]u8 = undefined;
-        _ = try readSector(device_fd, 0, &buf);
+        try readSector(device_fd, 0, &buf);
 
         const sb: *Superblock = @ptrCast(@alignCast(&buf));
         if (sb.magic != SFS_MAGIC or sb.version != SFS_VERSION) {
             console.warn("SFS: Invalid magic or old version, formatting...", .{});
             try self.format();
         } else {
-            self.superblock = sb.*;
-            console.info("SFS: Mounted. Files: {}, Free Blocks: {}", .{
-                self.superblock.file_count,
-                self.superblock.free_blocks,
-            });
+            // SECURITY: Validate superblock fields from untrusted disk source
+            // Prevent malicious disk from causing out-of-bounds access or DoS
+            if (!validateSuperblock(sb)) {
+                console.err("SFS: Corrupted superblock detected, formatting...", .{});
+                try self.format();
+            } else {
+                self.superblock = sb.*;
+                console.info("SFS: Mounted. Files: {}, Free Blocks: {}", .{
+                    self.superblock.file_count,
+                    self.superblock.free_blocks,
+                });
+            }
         }
 
         return vfs.FileSystem{
             .context = self,
             .open = sfsOpen,
             .unmount = sfsUnmount,
-            .unlink = null, // TODO: implement sfsUnlink
+            .unlink = sfsUnlink,
         };
     }
 
@@ -216,16 +297,26 @@ pub const SFS = struct {
         writeSector(self.device_fd, self.superblock.bitmap_start + bitmap_block_idx, &buf) catch return error.IOError;
 
         // Update superblock
-        self.superblock.free_blocks += 1;
+        // SECURITY: Use saturating add to prevent overflow from malicious disk data
+        self.superblock.free_blocks = std.math.add(u32, self.superblock.free_blocks, 1) catch std.math.maxInt(u32);
         self.updateSuperblock() catch return error.IOError;
     }
 
     /// Free multiple contiguous blocks
+    /// SECURITY: Uses checked arithmetic to prevent integer overflow attacks
     pub fn freeBlocks(self: *SFS, start_block: u32, count: u32) void {
+        // Limit iteration count to prevent DoS from malicious disk data
+        const safe_count = @min(count, self.superblock.total_blocks);
+
         var i: u32 = 0;
-        while (i < count) : (i += 1) {
-            self.freeBlock(start_block + i) catch |err| {
-                console.warn("SFS: Failed to free block {}: {}", .{ start_block + i, err });
+        while (i < safe_count) : (i += 1) {
+            // SECURITY: Use checked arithmetic to detect overflow
+            const block = std.math.add(u32, start_block, i) catch {
+                console.warn("SFS: freeBlocks overflow at start_block={}, i={}", .{ start_block, i });
+                return;
+            };
+            self.freeBlock(block) catch |err| {
+                console.warn("SFS: Failed to free block {}: {}", .{ block, err });
             };
         }
     }
@@ -237,40 +328,235 @@ pub const SFS = struct {
     };
 };
 
-// Helper wrappers
-fn readSector(device: *fd.FileDescriptor, lba: u32, buf: []u8) !void {
-    // Seek to sector
-    const offset: i64 = @as(i64, lba) * 512;
-    if (device.ops.seek) |seek_fn| {
-        _ = seek_fn(device, offset, 0); // SEEK_SET
-    } else {
-        return error.IOError;
+// =============================================================================
+// Security: Input Validation
+// =============================================================================
+
+/// Validate filename to prevent path traversal and injection attacks
+/// Returns false if filename contains dangerous characters
+fn isValidFilename(name: []const u8) bool {
+    if (name.len == 0) return false;
+
+    // Reject path traversal attempts
+    if (std.mem.indexOf(u8, name, "..")) |_| return false;
+
+    // Reject path separators (shouldn't be in flat filename)
+    if (std.mem.indexOf(u8, name, "/")) |_| return false;
+    if (std.mem.indexOf(u8, name, "\\")) |_| return false;
+
+    // SECURITY: Reject control characters (0x00-0x1F, 0x7F)
+    // These can cause null-byte injection and display issues
+    for (name) |c| {
+        if (c < 0x20 or c == 0x7F) return false;
     }
 
-    // Read
-    if (device.ops.read) |read_fn| {
-        const res = read_fn(device, buf);
-        if (res != buf.len) return error.IOError;
-    } else {
-        return error.IOError;
+    return true;
+}
+
+/// Validate superblock fields to prevent malicious disk attacks
+/// Returns false if any field is out of expected bounds
+fn validateSuperblock(sb: *const Superblock) bool {
+    // Basic sanity checks
+    if (sb.block_size != SECTOR_SIZE) {
+        console.warn("SFS: Invalid block_size {}", .{sb.block_size});
+        return false;
+    }
+
+    // Total blocks should be reasonable (max 2GB with 512B sectors = 4M blocks)
+    const max_blocks: u32 = 4 * 1024 * 1024;
+    if (sb.total_blocks == 0 or sb.total_blocks > max_blocks) {
+        console.warn("SFS: Invalid total_blocks {}", .{sb.total_blocks});
+        return false;
+    }
+
+    // Bitmap must start at block 1 (after superblock)
+    if (sb.bitmap_start != 1) {
+        console.warn("SFS: Invalid bitmap_start {}", .{sb.bitmap_start});
+        return false;
+    }
+
+    // Bitmap blocks should be reasonable (max 256 blocks = 1M tracked blocks)
+    if (sb.bitmap_blocks == 0 or sb.bitmap_blocks > 256) {
+        console.warn("SFS: Invalid bitmap_blocks {}", .{sb.bitmap_blocks});
+        return false;
+    }
+
+    // Root dir must come after bitmap
+    const expected_root_start = sb.bitmap_start + sb.bitmap_blocks;
+    if (sb.root_dir_start != expected_root_start) {
+        console.warn("SFS: Invalid root_dir_start {}, expected {}", .{ sb.root_dir_start, expected_root_start });
+        return false;
+    }
+
+    // Data start must come after root directory
+    const expected_data_start = sb.root_dir_start + ROOT_DIR_BLOCKS;
+    if (sb.data_start != expected_data_start) {
+        console.warn("SFS: Invalid data_start {}, expected {}", .{ sb.data_start, expected_data_start });
+        return false;
+    }
+
+    // Data start must be within total blocks
+    if (sb.data_start >= sb.total_blocks) {
+        console.warn("SFS: data_start {} >= total_blocks {}", .{ sb.data_start, sb.total_blocks });
+        return false;
+    }
+
+    // Free blocks cannot exceed available data blocks
+    const max_data_blocks = sb.total_blocks - sb.data_start;
+    if (sb.free_blocks > max_data_blocks) {
+        console.warn("SFS: free_blocks {} > max_data_blocks {}", .{ sb.free_blocks, max_data_blocks });
+        return false;
+    }
+
+    // File count should be reasonable
+    if (sb.file_count > MAX_FILES) {
+        console.warn("SFS: file_count {} > MAX_FILES {}", .{ sb.file_count, MAX_FILES });
+        return false;
+    }
+
+    // next_free_block must be within bounds
+    if (sb.next_free_block > sb.total_blocks) {
+        console.warn("SFS: next_free_block {} > total_blocks {}", .{ sb.next_free_block, sb.total_blocks });
+        return false;
+    }
+
+    return true;
+}
+
+// =============================================================================
+// Async I/O Helper Functions
+// =============================================================================
+
+/// Read a single sector using async AHCI I/O
+/// Allocates DMA buffer, submits read, waits for completion, copies to dest
+fn readSectorAsync(self: *SFS, lba: u32, buf: []u8) !void {
+    const req = io.allocRequest(.disk_read) orelse return error.IOError;
+    defer io.freeRequest(req);
+
+    const buf_phys = ahci.adapter.blockReadAsync(self.port_num, lba, 1, req) catch return error.IOError;
+    defer ahci.adapter.freeDmaBuffer(buf_phys, 512);
+
+    var future = io.Future{ .request = req };
+    const result = future.wait();
+
+    switch (result) {
+        .success => |bytes| {
+            if (bytes < 512) return error.IOError;
+            // SECURITY: Memory barrier ensures DMA writes are visible
+            asm volatile ("mfence" ::: .{ .memory = true });
+            ahci.adapter.copyFromDmaBuffer(buf_phys, buf[0..512]);
+        },
+        .err => return error.IOError,
+        .cancelled => return error.IOError,
+        .pending => unreachable,
     }
 }
 
-fn writeSector(device: *fd.FileDescriptor, lba: u32, buf: []const u8) !void {
-    const offset: i64 = @as(i64, lba) * 512;
-    if (device.ops.seek) |seek_fn| {
-        _ = seek_fn(device, offset, 0);
-    } else {
-        return error.IOError;
-    }
+/// Write a single sector using async AHCI I/O
+/// Allocates DMA buffer, copies data, submits write, waits for completion
+fn writeSectorAsync(self: *SFS, lba: u32, buf: []const u8) !void {
+    const req = io.allocRequest(.disk_write) orelse return error.IOError;
+    defer io.freeRequest(req);
 
-    if (device.ops.write) |write_fn| {
-        const res = write_fn(device, buf);
-        if (res != buf.len) return error.IOError;
-    } else {
-        return error.IOError;
+    // Allocate DMA buffer (1 page minimum for PMM)
+    const buf_phys = pmm.allocZeroedPages(1) orelse return error.IOError;
+    defer pmm.freePages(buf_phys, 1);
+
+    // Copy data to DMA buffer
+    ahci.adapter.copyToDmaBuffer(buf_phys, buf[0..512]);
+
+    // Submit async write
+    ahci.adapter.blockWriteAsync(self.port_num, lba, 1, buf_phys, req) catch return error.IOError;
+
+    var future = io.Future{ .request = req };
+    const result = future.wait();
+
+    switch (result) {
+        .success => {},
+        .err => return error.IOError,
+        .cancelled => return error.IOError,
+        .pending => unreachable,
     }
 }
+
+/// Read multiple sectors using async AHCI I/O (batched)
+/// More efficient than multiple single-sector reads
+fn readSectorsAsync(self: *SFS, lba: u32, sector_count: u16, buf: []u8) !void {
+    if (sector_count == 0) return;
+    const total_bytes = @as(usize, sector_count) * 512;
+    if (buf.len < total_bytes) return error.IOError;
+
+    const req = io.allocRequest(.disk_read) orelse return error.IOError;
+    defer io.freeRequest(req);
+
+    const buf_phys = ahci.adapter.blockReadAsync(self.port_num, lba, sector_count, req) catch return error.IOError;
+    defer ahci.adapter.freeDmaBuffer(buf_phys, total_bytes);
+
+    var future = io.Future{ .request = req };
+    const result = future.wait();
+
+    switch (result) {
+        .success => |bytes| {
+            if (bytes < total_bytes) return error.IOError;
+            // SECURITY: Memory barrier ensures DMA writes are visible
+            asm volatile ("mfence" ::: .{ .memory = true });
+            ahci.adapter.copyFromDmaBuffer(buf_phys, buf[0..total_bytes]);
+        },
+        .err => return error.IOError,
+        .cancelled => return error.IOError,
+        .pending => unreachable,
+    }
+}
+
+/// Write multiple sectors using async AHCI I/O (batched)
+fn writeSectorsAsync(self: *SFS, lba: u32, sector_count: u16, buf: []const u8) !void {
+    if (sector_count == 0) return;
+    const total_bytes = @as(usize, sector_count) * 512;
+    if (buf.len < total_bytes) return error.IOError;
+
+    const req = io.allocRequest(.disk_write) orelse return error.IOError;
+    defer io.freeRequest(req);
+
+    // Allocate DMA buffer
+    const pages_needed = (total_bytes + 4095) / 4096;
+    const buf_phys = pmm.allocZeroedPages(pages_needed) orelse return error.IOError;
+    defer pmm.freePages(buf_phys, pages_needed);
+
+    // Copy data to DMA buffer
+    ahci.adapter.copyToDmaBuffer(buf_phys, buf[0..total_bytes]);
+
+    // Submit async write
+    ahci.adapter.blockWriteAsync(self.port_num, lba, sector_count, buf_phys, req) catch return error.IOError;
+
+    var future = io.Future{ .request = req };
+    const result = future.wait();
+
+    switch (result) {
+        .success => {},
+        .err => return error.IOError,
+        .cancelled => return error.IOError,
+        .pending => unreachable,
+    }
+}
+
+/// Read entire root directory in one async operation (batched)
+/// Returns buffer containing all directory blocks
+fn readDirectoryAsync(self: *SFS, buf: []u8) !void {
+    const total_bytes = ROOT_DIR_BLOCKS * 512;
+    if (buf.len < total_bytes) return error.IOError;
+
+    try readSectorsAsync(self, self.superblock.root_dir_start, ROOT_DIR_BLOCKS, buf[0..total_bytes]);
+}
+
+/// Write entire root directory in one async operation (batched)
+fn writeDirectoryAsync(self: *SFS, buf: []const u8) !void {
+    const total_bytes = ROOT_DIR_BLOCKS * 512;
+    if (buf.len < total_bytes) return error.IOError;
+
+    try writeSectorsAsync(self, self.superblock.root_dir_start, ROOT_DIR_BLOCKS, buf[0..total_bytes]);
+}
+
+// Legacy sync wrappers removed - all I/O now uses async helpers above
 
 // VFS Operations
 
@@ -294,8 +580,8 @@ fn sfsOpen(ctx: ?*anyopaque, path: []const u8, flags: u32) vfs.Error!*fd.FileDes
     // Normalize path (remove leading /)
     const name = if (path.len > 0 and path[0] == '/') path[1..] else path;
 
-    // Security: Reject path traversal attempts
-    if (std.mem.indexOf(u8, name, "..")) |_| {
+    // SECURITY: Vuln 6 - Comprehensive path validation
+    if (!isValidFilename(name)) {
         return vfs.Error.AccessDenied;
     }
 
@@ -306,49 +592,64 @@ fn sfsOpen(ctx: ?*anyopaque, path: []const u8, flags: u32) vfs.Error!*fd.FileDes
 
     if (name.len >= 32) return vfs.Error.NameTooLong;
 
-    // Search for file in root directory
+    // Search for file in root directory using batched read
     var entry_idx: ?u32 = null;
     var free_idx: ?u32 = null;
     var entry: DirEntry = undefined;
 
-    // Read directory blocks
-    var block: u32 = 0;
-    while (block < ROOT_DIR_BLOCKS) : (block += 1) {
-        var buf: [512]u8 = undefined;
-        readSector(self.device_fd, self.superblock.root_dir_start + block, &buf) catch return vfs.Error.IOError;
+    // Read all directory blocks at once (more efficient than one at a time)
+    var dir_buf: [ROOT_DIR_BLOCKS * 512]u8 = undefined;
+    readDirectoryAsync(self, &dir_buf) catch return vfs.Error.IOError;
 
-        // Iterate entries in block (4 entries per 512 byte block, 128 bytes each)
-        var i: u32 = 0;
-        while (i < 4) : (i += 1) {
-            const offset = i * 128;
-            const e: *DirEntry = @ptrCast(@alignCast(&buf[offset]));
+    // Scan all entries from in-memory buffer
+    const total_entries = ROOT_DIR_BLOCKS * 4; // 4 entries per block
+    var idx: u32 = 0;
+    while (idx < total_entries) : (idx += 1) {
+        const offset = idx * 128;
+        const e: *DirEntry = @ptrCast(@alignCast(&dir_buf[offset]));
 
-            if (e.flags == 1) {
-                // Active entry, check name
-                const e_name = std.mem.sliceTo(&e.name, 0);
-                if (std.mem.eql(u8, e_name, name)) {
-                    entry_idx = block * 4 + i;
-                    entry = e.*;
-                    break;
-                }
-            } else {
-                if (free_idx == null) {
-                    free_idx = block * 4 + i;
-                }
+        if (e.flags == 1) {
+            // Active entry, check name
+            const e_name = std.mem.sliceTo(&e.name, 0);
+            if (std.mem.eql(u8, e_name, name)) {
+                entry_idx = idx;
+                entry = e.*;
+                break;
+            }
+        } else {
+            if (free_idx == null) {
+                free_idx = idx;
             }
         }
-        if (entry_idx != null) break;
     }
 
-    if (entry_idx) |idx| {
-        // File found - use idx for entry tracking
+    if (entry_idx) |found_idx| {
+        // File found - use found_idx for entry tracking
+
+        // SECURITY: Validate entry fields from untrusted disk source
+        // Vuln 3: Ensure start_block is within data region
+        if (entry.start_block < self.superblock.data_start or
+            entry.start_block >= self.superblock.total_blocks)
+        {
+            console.warn("SFS: Corrupted entry '{s}' with invalid start_block {}", .{ name, entry.start_block });
+            return vfs.Error.IOError;
+        }
+
+        // SECURITY: Vuln 5 - Validate size doesn't exceed possible allocation
+        const max_possible_blocks = self.superblock.total_blocks - entry.start_block;
+        const max_possible_size = max_possible_blocks * 512;
+        if (entry.size > max_possible_size) {
+            console.warn("SFS: Corrupted entry '{s}' with size {} > max {}", .{ name, entry.size, max_possible_size });
+            return vfs.Error.IOError;
+        }
+
         // Create FD
         const file_ctx = alloc.create(SfsFile) catch return vfs.Error.NoMemory;
         file_ctx.* = .{
             .fs = self,
             .start_block = entry.start_block,
             .size = entry.size,
-            .entry_idx = idx,
+            .entry_idx = found_idx,
         };
 
         return fd.createFd(&sfs_ops, flags, file_ctx) catch return vfs.Error.NoMemory;
@@ -356,7 +657,7 @@ fn sfsOpen(ctx: ?*anyopaque, path: []const u8, flags: u32) vfs.Error!*fd.FileDes
         // Not found. Create if O_CREAT?
         if ((flags & fd.O_CREAT) != 0) {
             if (self.superblock.file_count >= MAX_FILES) return vfs.Error.NoMemory; // Disk full (inodes)
-            const idx = free_idx orelse return vfs.Error.NoMemory;
+            const new_idx = free_idx orelse return vfs.Error.NoMemory;
 
             // Allocate first block for new file using bitmap
             const start_block = self.allocateBlock() catch return vfs.Error.NoMemory;
@@ -370,17 +671,17 @@ fn sfsOpen(ctx: ?*anyopaque, path: []const u8, flags: u32) vfs.Error!*fd.FileDes
             };
             @memcpy(new_entry.name[0..name.len], name);
 
-            // Write entry to disk
-            const block_idx = idx / 4;
-            const offset_idx = idx % 4;
+            // Write entry to disk - reuse dir_buf we already read
+            const block_idx = new_idx / 4;
+            const offset_in_dir = new_idx * 128;
 
-            var buf: [512]u8 = undefined;
-            readSector(self.device_fd, self.superblock.root_dir_start + block_idx, &buf) catch return vfs.Error.IOError;
-
-            const dest: *DirEntry = @ptrCast(@alignCast(&buf[offset_idx * 128]));
+            // Update entry in our existing directory buffer
+            const dest: *DirEntry = @ptrCast(@alignCast(&dir_buf[offset_in_dir]));
             dest.* = new_entry;
 
-            writeSector(self.device_fd, self.superblock.root_dir_start + block_idx, &buf) catch return vfs.Error.IOError;
+            // Write only the affected block back
+            const block_start = block_idx * 512;
+            writeSectorAsync(self, self.superblock.root_dir_start + block_idx, dir_buf[block_start..][0..512]) catch return vfs.Error.IOError;
 
             self.superblock.file_count += 1;
             self.updateSuperblock() catch return vfs.Error.IOError;
@@ -390,7 +691,7 @@ fn sfsOpen(ctx: ?*anyopaque, path: []const u8, flags: u32) vfs.Error!*fd.FileDes
                 .fs = self,
                 .start_block = new_entry.start_block,
                 .size = 0,
-                .entry_idx = idx,
+                .entry_idx = new_idx,
             };
 
             return fd.createFd(&sfs_ops, flags, file_ctx) catch return vfs.Error.NoMemory;
@@ -406,6 +707,71 @@ const SfsFile = struct {
     size: u32,
     entry_idx: u32,
 };
+
+pub const TruncateError = error{
+    NotSfs,
+    TooLarge,
+    IOError,
+};
+
+pub fn truncateFd(file_desc: *fd.FileDescriptor, length: usize) TruncateError!void {
+    if (file_desc.ops != &sfs_ops) {
+        return error.NotSfs;
+    }
+
+    const file: *SfsFile = @ptrCast(@alignCast(file_desc.private_data));
+    if (length > std.math.maxInt(u32)) {
+        return error.TooLarge;
+    }
+
+    if (length > file.size) {
+        return error.TooLarge;
+    }
+
+    // SECURITY: Vuln 4 - Acquire lock at start to prevent TOCTOU race with sfsWrite
+    // The entire truncate operation must be atomic with respect to file size changes
+    const held = file.fs.alloc_lock.acquire();
+    defer held.release();
+
+    // Re-check size under lock to prevent race
+    if (length > file.size) {
+        return error.TooLarge;
+    }
+
+    const new_size: u32 = @intCast(length);
+    const current_blocks: u32 = if (file.size == 0) 1 else (file.size + 511) / 512;
+    const requested_blocks: u32 = if (new_size == 0) 1 else (new_size + 511) / 512;
+
+    if (requested_blocks < current_blocks) {
+        const free_start = file.start_block + requested_blocks;
+        const free_count = current_blocks - requested_blocks;
+        if (free_count > 0) {
+            file.fs.freeBlocks(free_start, free_count);
+        }
+
+        const end_block = file.start_block + current_blocks;
+        if (end_block == file.fs.superblock.next_free_block) {
+            file.fs.superblock.next_free_block = file.start_block + requested_blocks;
+            file.fs.updateSuperblock() catch return error.IOError;
+        }
+    }
+
+    file.size = new_size;
+    if (file_desc.position > new_size) {
+        file_desc.position = new_size;
+    }
+
+    const block_idx = file.entry_idx / 4;
+    const offset_idx = file.entry_idx % 4;
+
+    var dir_buf: [512]u8 = undefined;
+    readSector(file.fs.device_fd, file.fs.superblock.root_dir_start + block_idx, &dir_buf) catch return error.IOError;
+
+    const entry: *DirEntry = @ptrCast(@alignCast(&dir_buf[offset_idx * 128]));
+    entry.size = file.size;
+
+    writeSector(file.fs.device_fd, file.fs.superblock.root_dir_start + block_idx, &dir_buf) catch return error.IOError;
+}
 
 const sfs_ops = fd.FileOps{
     .read = sfsRead,
@@ -426,20 +792,48 @@ fn sfsRead(file_desc: *fd.FileDescriptor, buf: []u8) isize {
     const remaining = file.size - file_desc.position;
     const to_read = @min(buf.len, remaining);
 
+    // Calculate sector range needed
+    const start_byte = file_desc.position;
+    const end_byte = start_byte + to_read;
+    const first_sector = start_byte / 512;
+    const last_sector = (end_byte + 511) / 512; // Round up
+    const sector_count = last_sector - first_sector;
+
+    // Safe cast: sector offsets bounded by file size which is u32
+    const first_sector_u32 = std.math.cast(u32, first_sector) orelse return -5;
+    const sector_count_u16 = std.math.cast(u16, @min(sector_count, 256)) orelse return -5;
+
+    // Optimization: For multi-sector reads, use batched async I/O
+    if (sector_count > 1 and sector_count <= 256) {
+        // Allocate temporary buffer for all sectors
+        const total_bytes = @as(usize, sector_count_u16) * 512;
+        var sector_buf: [256 * 512]u8 = undefined; // Max 256 sectors (128KB)
+
+        const phys_block = file.start_block + first_sector_u32;
+        readSectorsAsync(file.fs, phys_block, sector_count_u16, sector_buf[0..total_bytes]) catch return -5;
+
+        // Copy relevant portion to output buffer
+        const byte_offset = start_byte % 512;
+        @memcpy(buf[0..to_read], sector_buf[byte_offset..][0..to_read]);
+
+        file_desc.position += to_read;
+        return std.math.cast(isize, to_read) orelse return -75;
+    }
+
+    // Fallback: Single-sector read or reads > 256 sectors
     var read_count: usize = 0;
     var current_pos = file_desc.position;
 
     while (read_count < to_read) {
-        const rel_pos = current_pos; // Relative to file start
+        const rel_pos = current_pos;
         const block_offset = rel_pos / 512;
         const byte_offset = rel_pos % 512;
 
-        // Safe cast: block_offset bounded by file size which is u32
-        const block_offset_u32 = std.math.cast(u32, block_offset) orelse return -5; // EIO
+        const block_offset_u32 = std.math.cast(u32, block_offset) orelse return -5;
         const phys_block = file.start_block + block_offset_u32;
 
         var sector_buf: [512]u8 = undefined;
-        readSector(file.fs.device_fd, phys_block, &sector_buf) catch return -5; // EIO
+        readSector(file.fs.device_fd, phys_block, &sector_buf) catch return -5;
 
         const chunk = @min(to_read - read_count, 512 - byte_offset);
         @memcpy(buf[read_count..][0..chunk], sector_buf[byte_offset..][0..chunk]);
@@ -449,7 +843,7 @@ fn sfsRead(file_desc: *fd.FileDescriptor, buf: []u8) isize {
     }
 
     file_desc.position += read_count;
-    return std.math.cast(isize, read_count) orelse return -75; // EOVERFLOW
+    return std.math.cast(isize, read_count) orelse return -75;
 }
 
 fn sfsWrite(file_desc: *fd.FileDescriptor, buf: []const u8) isize {
@@ -507,19 +901,39 @@ fn sfsWrite(file_desc: *fd.FileDescriptor, buf: []const u8) isize {
     var written_count: usize = 0;
     var current_pos = file_desc.position;
 
+    // Optimization: Batch write for sector-aligned multi-sector writes
+    const start_byte_offset = current_pos % 512;
+
+    // Check if we can do a batch write (aligned start, multiple full sectors)
+    if (start_byte_offset == 0 and buf.len >= 1024) {
+        // Calculate full sectors we can batch write
+        const full_sectors = buf.len / 512;
+        if (full_sectors >= 2 and full_sectors <= 256) {
+            const block_offset_u32 = std.math.cast(u32, current_pos / 512) orelse return -5;
+            const phys_block = file.start_block + block_offset_u32;
+            const sector_count_u16: u16 = @intCast(full_sectors);
+            const batch_bytes = full_sectors * 512;
+
+            // Write all full sectors at once
+            writeSectorsAsync(file.fs, phys_block, sector_count_u16, buf[0..batch_bytes]) catch return -5;
+
+            written_count = batch_bytes;
+            current_pos += batch_bytes;
+        }
+    }
+
+    // Handle remaining bytes (partial sectors or single-sector fallback)
     while (written_count < buf.len) {
         const rel_pos = current_pos;
         const block_offset = rel_pos / 512;
         const byte_offset = rel_pos % 512;
 
-        // Safe cast: block_offset bounded by file size
-        const block_offset_u32 = std.math.cast(u32, block_offset) orelse return -5; // EIO
+        const block_offset_u32 = std.math.cast(u32, block_offset) orelse return -5;
         const phys_block = file.start_block + block_offset_u32;
 
         var sector_buf: [512]u8 = undefined;
-        // Read-modify-write
+        // Read-modify-write for partial sectors
         readSector(file.fs.device_fd, phys_block, &sector_buf) catch {
-            // If reading failed (maybe uninitialized block), zero it
             @memset(&sector_buf, 0);
         };
 
@@ -613,51 +1027,52 @@ fn sfsUnlink(ctx: ?*anyopaque, path: []const u8) vfs.Error!void {
     // Normalize path (remove leading /)
     const name = if (path.len > 0 and path[0] == '/') path[1..] else path;
 
-    // Security: Reject path traversal attempts
-    if (std.mem.indexOf(u8, name, "..")) |_| {
+    // SECURITY: Vuln 6 - Comprehensive path validation
+    if (!isValidFilename(name)) {
         return vfs.Error.AccessDenied;
     }
 
     if (name.len == 0 or name.len >= 32) return vfs.Error.NotFound;
 
-    // Find file in directory
-    var block: u32 = 0;
-    while (block < ROOT_DIR_BLOCKS) : (block += 1) {
-        var buf: [512]u8 = undefined;
-        readSector(self.device_fd, self.superblock.root_dir_start + block, &buf) catch return vfs.Error.IOError;
+    // Read all directory blocks at once (batched async I/O)
+    var dir_buf: [ROOT_DIR_BLOCKS * 512]u8 = undefined;
+    readDirectoryAsync(self, &dir_buf) catch return vfs.Error.IOError;
 
-        var i: u32 = 0;
-        while (i < 4) : (i += 1) {
-            const offset = i * 128;
-            const e: *DirEntry = @ptrCast(@alignCast(&buf[offset]));
+    // Scan all entries from in-memory buffer
+    const total_entries = ROOT_DIR_BLOCKS * 4;
+    var idx: u32 = 0;
+    while (idx < total_entries) : (idx += 1) {
+        const offset = idx * 128;
+        const e: *DirEntry = @ptrCast(@alignCast(&dir_buf[offset]));
 
-            if (e.flags == 1) {
-                const e_name = std.mem.sliceTo(&e.name, 0);
-                if (std.mem.eql(u8, e_name, name)) {
-                    // Found the file - free its blocks
-                    const blocks_used = (e.size + 511) / 512;
-                    if (blocks_used > 0) {
-                        self.freeBlocks(e.start_block, blocks_used);
-                    }
-
-                    // Clear directory entry
-                    e.flags = 0;
-                    e.name = [_]u8{0} ** 32;
-                    e.start_block = 0;
-                    e.size = 0;
-
-                    // Write back directory block
-                    writeSector(self.device_fd, self.superblock.root_dir_start + block, &buf) catch return vfs.Error.IOError;
-
-                    // Update file count
-                    if (self.superblock.file_count > 0) {
-                        self.superblock.file_count -= 1;
-                    }
-                    self.updateSuperblock() catch return vfs.Error.IOError;
-
-                    console.info("SFS: Unlinked '{s}'", .{name});
-                    return;
+        if (e.flags == 1) {
+            const e_name = std.mem.sliceTo(&e.name, 0);
+            if (std.mem.eql(u8, e_name, name)) {
+                // Found the file - free its blocks
+                const blocks_used = (e.size + 511) / 512;
+                if (blocks_used > 0) {
+                    self.freeBlocks(e.start_block, blocks_used);
                 }
+
+                // Clear directory entry in buffer
+                e.flags = 0;
+                e.name = [_]u8{0} ** 32;
+                e.start_block = 0;
+                e.size = 0;
+
+                // Write back only the affected directory block
+                const block_idx = idx / 4;
+                const block_start = block_idx * 512;
+                writeSectorAsync(self, self.superblock.root_dir_start + block_idx, dir_buf[block_start..][0..512]) catch return vfs.Error.IOError;
+
+                // Update file count
+                if (self.superblock.file_count > 0) {
+                    self.superblock.file_count -= 1;
+                }
+                self.updateSuperblock() catch return vfs.Error.IOError;
+
+                console.info("SFS: Unlinked '{s}'", .{name});
+                return;
             }
         }
     }
