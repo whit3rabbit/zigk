@@ -139,6 +139,16 @@ pub const HubDriver = struct {
             return error.InvalidDescriptor;
         }
 
+        // Security: Validate port count from device-controlled descriptor
+        // USB 2.0 hubs support up to 127 ports (7-bit addressing)
+        // USB 3.0 hubs support up to 15 ports per tier
+        // Reject 0 or excessive values to prevent iteration attacks
+        const max_hub_ports: u8 = 127; // USB 2.0 spec maximum
+        if (desc.bNbrPorts == 0 or desc.bNbrPorts > max_hub_ports) {
+            console.err("HUB: Invalid port count {d} (must be 1-{d})", .{ desc.bNbrPorts, max_hub_ports });
+            return error.InvalidDescriptor;
+        }
+
         self.num_ports = desc.bNbrPorts;
         self.power_on_delay_ms = @as(u32, desc.bPwrOn2PwrGood) * 2;
 

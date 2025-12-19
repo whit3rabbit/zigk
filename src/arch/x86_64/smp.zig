@@ -14,6 +14,7 @@ const cpu = @import("cpu.zig");
 const paging = @import("paging.zig");
 const vmm = @import("vmm");
 const fpu = @import("fpu.zig");
+const mem = @import("mem.zig");
 
 // Code for the AP trampoline is defined in external assembly file
 extern const smp_trampoline_start: anyopaque;
@@ -123,7 +124,7 @@ pub fn init() void {
     // Copy trampoline code
     const code_src = @as([*]const u8, @ptrCast(&smp_trampoline_start))[0..trampoline_len];
     const code_dst = trampoline_virt[0..trampoline_len];
-    @memcpy(code_dst, code_src);
+    mem.copy(code_dst.ptr, code_src.ptr, code_dst.len);
 
     // Identity-map trampoline so AP can execute after enabling paging
     // When AP enables paging at physical 0x2000, virtual 0x2000 must also map there

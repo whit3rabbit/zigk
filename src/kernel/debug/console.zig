@@ -115,7 +115,7 @@ pub fn printf(comptime fmt: []const u8, args: anytype) void {
     defer held.release();
 
     // Use a shared buffer to avoid stack pressure on interrupt paths.
-    @memset(&log_buffer, 0);
+    hal.mem.fill(log_buffer[0..].ptr, 0, log_buffer.len);
     const result = std.fmt.bufPrint(&log_buffer, fmt, args) catch |fmt_err| {
         // On error, print what we can
         switch (fmt_err) {

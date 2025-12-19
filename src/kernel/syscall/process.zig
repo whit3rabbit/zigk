@@ -290,23 +290,23 @@ pub fn sys_uname(buf_ptr: usize) SyscallError!usize {
 
     // sysname
     const sysname = "Zscapek";
-    @memcpy(utsname[0..sysname.len], sysname);
+    hal.mem.copy(utsname[0..sysname.len].ptr, sysname.ptr, sysname.len);
 
     // nodename
     const nodename = "localhost";
-    @memcpy(utsname[UTSNAME_LEN .. UTSNAME_LEN + nodename.len], nodename);
+    hal.mem.copy(utsname[UTSNAME_LEN .. UTSNAME_LEN + nodename.len].ptr, nodename.ptr, nodename.len);
 
     // release
     const release = "0.1.0";
-    @memcpy(utsname[2 * UTSNAME_LEN .. 2 * UTSNAME_LEN + release.len], release);
+    hal.mem.copy(utsname[2 * UTSNAME_LEN .. 2 * UTSNAME_LEN + release.len].ptr, release.ptr, release.len);
 
     // version
     const version = "#1 SMP";
-    @memcpy(utsname[3 * UTSNAME_LEN .. 3 * UTSNAME_LEN + version.len], version);
+    hal.mem.copy(utsname[3 * UTSNAME_LEN .. 3 * UTSNAME_LEN + version.len].ptr, version.ptr, version.len);
 
     // machine
     const machine = "x86_64";
-    @memcpy(utsname[4 * UTSNAME_LEN .. 4 * UTSNAME_LEN + machine.len], machine);
+    hal.mem.copy(utsname[4 * UTSNAME_LEN .. 4 * UTSNAME_LEN + machine.len].ptr, machine.ptr, machine.len);
 
     const uptr = UserPtr.from(buf_ptr);
     _ = uptr.copyFromKernel(&utsname) catch {

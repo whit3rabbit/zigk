@@ -178,11 +178,11 @@ fn pipeRead(fd: *fd_mod.FileDescriptor, buf: []u8) isize {
 
             // Handle wrap-around
             const first_chunk = @min(read_len, PIPE_BUF_SIZE - pipe.read_pos);
-            @memcpy(buf[0..first_chunk], pipe.buffer[pipe.read_pos..][0..first_chunk]);
+            hal.mem.copy(buf[0..first_chunk].ptr, pipe.buffer[pipe.read_pos..][0..first_chunk].ptr, first_chunk);
 
             if (first_chunk < read_len) {
                 const second_chunk = read_len - first_chunk;
-                @memcpy(buf[first_chunk..read_len], pipe.buffer[0..second_chunk]);
+                hal.mem.copy(buf[first_chunk..read_len].ptr, pipe.buffer[0..second_chunk].ptr, second_chunk);
             }
 
             pipe.read_pos = (pipe.read_pos + read_len) % PIPE_BUF_SIZE;
@@ -200,11 +200,11 @@ fn pipeRead(fd: *fd_mod.FileDescriptor, buf: []u8) isize {
                     const async_to_write = @min(request.buf_len, space);
 
                     const async_first = @min(async_to_write, PIPE_BUF_SIZE - pipe.write_pos);
-                    @memcpy(pipe.buffer[pipe.write_pos..][0..async_first], data_ptr[0..async_first]);
+                    hal.mem.copy(pipe.buffer[pipe.write_pos..][0..async_first].ptr, data_ptr[0..async_first].ptr, async_first);
 
                     if (async_first < async_to_write) {
                         const async_second = async_to_write - async_first;
-                        @memcpy(pipe.buffer[0..async_second], data_ptr[async_first..async_to_write]);
+                        hal.mem.copy(pipe.buffer[0..async_second].ptr, data_ptr[async_first..async_to_write].ptr, async_second);
                     }
 
                     pipe.write_pos = (pipe.write_pos + async_to_write) % PIPE_BUF_SIZE;
@@ -304,11 +304,11 @@ fn pipeWrite(fd: *fd_mod.FileDescriptor, buf: []const u8) isize {
 
             // Handle wrap-around
             const first_chunk = @min(to_write, PIPE_BUF_SIZE - pipe.write_pos);
-            @memcpy(pipe.buffer[pipe.write_pos..][0..first_chunk], buf[written..][0..first_chunk]);
+            hal.mem.copy(pipe.buffer[pipe.write_pos..][0..first_chunk].ptr, buf[written..][0..first_chunk].ptr, first_chunk);
 
             if (first_chunk < to_write) {
                 const second_chunk = to_write - first_chunk;
-                @memcpy(pipe.buffer[0..second_chunk], buf[written + first_chunk..][0..second_chunk]);
+                hal.mem.copy(pipe.buffer[0..second_chunk].ptr, buf[written + first_chunk..][0..second_chunk].ptr, second_chunk);
             }
 
             pipe.write_pos = (pipe.write_pos + to_write) % PIPE_BUF_SIZE;
@@ -325,11 +325,11 @@ fn pipeWrite(fd: *fd_mod.FileDescriptor, buf: []const u8) isize {
                 const async_buf_ptr: [*]u8 = @ptrFromInt(request.buf_ptr);
 
                 const async_first = @min(async_read_len, PIPE_BUF_SIZE - pipe.read_pos);
-                @memcpy(async_buf_ptr[0..async_first], pipe.buffer[pipe.read_pos..][0..async_first]);
+                hal.mem.copy(async_buf_ptr[0..async_first].ptr, pipe.buffer[pipe.read_pos..][0..async_first].ptr, async_first);
 
                 if (async_first < async_read_len) {
                     const async_second = async_read_len - async_first;
-                    @memcpy(async_buf_ptr[async_first..async_read_len], pipe.buffer[0..async_second]);
+                    hal.mem.copy(async_buf_ptr[async_first..async_read_len].ptr, pipe.buffer[0..async_second].ptr, async_second);
                 }
 
                 pipe.read_pos = (pipe.read_pos + async_read_len) % PIPE_BUF_SIZE;
@@ -454,11 +454,11 @@ pub fn readAsync(fd: *fd_mod.FileDescriptor, request: *IoRequest, buf: []u8) !bo
         const read_len = @min(buf.len, pipe.data_len);
 
         const first_chunk = @min(read_len, PIPE_BUF_SIZE - pipe.read_pos);
-        @memcpy(buf[0..first_chunk], pipe.buffer[pipe.read_pos..][0..first_chunk]);
+        hal.mem.copy(buf[0..first_chunk].ptr, pipe.buffer[pipe.read_pos..][0..first_chunk].ptr, first_chunk);
 
         if (first_chunk < read_len) {
             const second_chunk = read_len - first_chunk;
-            @memcpy(buf[first_chunk..read_len], pipe.buffer[0..second_chunk]);
+            hal.mem.copy(buf[first_chunk..read_len].ptr, pipe.buffer[0..second_chunk].ptr, second_chunk);
         }
 
         pipe.read_pos = (pipe.read_pos + read_len) % PIPE_BUF_SIZE;
@@ -506,11 +506,11 @@ pub fn writeAsync(fd: *fd_mod.FileDescriptor, request: *IoRequest, buf: []const 
         const to_write = @min(buf.len, space);
 
         const first_chunk = @min(to_write, PIPE_BUF_SIZE - pipe.write_pos);
-        @memcpy(pipe.buffer[pipe.write_pos..][0..first_chunk], buf[0..first_chunk]);
+        hal.mem.copy(pipe.buffer[pipe.write_pos..][0..first_chunk].ptr, buf[0..first_chunk].ptr, first_chunk);
 
         if (first_chunk < to_write) {
             const second_chunk = to_write - first_chunk;
-            @memcpy(pipe.buffer[0..second_chunk], buf[first_chunk..to_write]);
+            hal.mem.copy(pipe.buffer[0..second_chunk].ptr, buf[first_chunk..to_write].ptr, second_chunk);
         }
 
         pipe.write_pos = (pipe.write_pos + to_write) % PIPE_BUF_SIZE;

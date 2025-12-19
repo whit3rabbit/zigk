@@ -476,7 +476,7 @@ pub const UserVmm = struct {
 
             // Zero the page (security)
             const ptr: [*]u8 = @ptrCast(hal.paging.physToVirt(phys_page));
-            @memset(ptr[0..pmm.PAGE_SIZE], 0);
+            hal.mem.fill(ptr, 0, pmm.PAGE_SIZE);
 
             // Map the page
             const vaddr = old_brk + (i * pmm.PAGE_SIZE);
@@ -656,7 +656,7 @@ pub const UserVmm = struct {
 
         // Zero the page for security (prevent info leaks)
         const ptr: [*]u8 = @ptrCast(hal.paging.physToVirt(phys));
-        @memset(ptr[0..pmm.PAGE_SIZE], 0);
+        hal.mem.fill(ptr, 0, pmm.PAGE_SIZE);
 
         // 5. Map the page with VMA's protection flags
         const page_base = addr & ~@as(u64, pmm.PAGE_SIZE - 1);

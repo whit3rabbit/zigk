@@ -385,9 +385,14 @@ pub const InputContext = extern struct {
     /// EP0 = DCI 1
     /// EP N OUT = DCI 2N
     /// EP N IN = DCI 2N+1
-    pub fn endpointToDci(ep_addr: u8) u5 {
+    /// Security: Validates endpoint number to prevent integer overflow.
+    /// USB spec allows ep_num 0-15 only. Returns null for invalid addresses.
+    pub fn endpointToDci(ep_addr: u8) ?u5 {
         const ep_num = ep_addr & 0x0F;
         const is_in = (ep_addr & 0x80) != 0;
+        // Security: USB spec limits endpoint numbers to 0-15
+        // ep_num * 2 + 1 must fit in u5 (max 31), so ep_num <= 15
+        if (ep_num > 15) return null;
         if (ep_num == 0) return 1; // EP0 is bidirectional
         return @truncate(ep_num * 2 + (if (is_in) @as(u5, 1) else @as(u5, 0)));
     }

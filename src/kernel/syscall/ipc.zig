@@ -9,6 +9,7 @@ const ipc_msg = @import("ipc_msg");
 const keyboard = @import("keyboard");
 const mouse = @import("mouse");
 const service = @import("ipc_service");
+const hal = @import("hal");
 
 pub const Message = ipc_msg.Message;
 pub const KernelMessage = ipc_msg.KernelMessage;
@@ -143,7 +144,7 @@ pub fn sendKernelMessage(target_pid: usize, payload: []const u8) !void {
     // Copy payload (truncate if too long)
     const len = @min(payload.len, ipc_msg.MAX_PAYLOAD_SIZE);
     msg.payload_len = len;
-    @memcpy(msg.payload[0..len], payload[0..len]);
+    hal.mem.copy(msg.payload[0..len].ptr, payload[0..len].ptr, len);
     
     // Allocate kernel message
     const kmsg = heap.allocator().create(KernelMessage) catch return error.ENOMEM;

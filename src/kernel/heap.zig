@@ -56,6 +56,18 @@ const hal = if (is_freestanding) @import("hal") else struct {
     };
 };
 
+const mem = if (is_freestanding) hal.mem else struct {
+    pub fn copy(dest: [*]u8, src: [*]const u8, n: usize) void {
+        if (n == 0) return;
+        @memcpy(dest[0..n], src[0..n]);
+    }
+
+    pub fn fill(dest: [*]u8, value: u8, n: usize) void {
+        if (n == 0) return;
+        @memset(dest[0..n], value);
+    }
+};
+
 // Per-boot randomized canary - initialized with TSC in init()
 // Security: Prevents attackers from predicting canary value at compile time
 // Note: TSC provides weak entropy but is available before PRNG init
@@ -595,7 +607,7 @@ pub fn realloc(buf: []u8, old_size: usize, new_size: usize) ?[]u8 {
     // Copy data
     const src = buf[0..copy_size];
     const dst = new_ptr[0..copy_size];
-    @memcpy(dst, src);
+    mem.copy(dst.ptr, src.ptr, copy_size);
 
     free(buf);
     return new_ptr;
@@ -604,7 +616,7 @@ pub fn realloc(buf: []u8, old_size: usize, new_size: usize) ?[]u8 {
 /// Allocate zeroed memory
 pub fn allocZeroed(size: usize) ?[]u8 {
     const slice = alloc(size) orelse return null;
-    @memset(slice[0..size], 0);
+    mem.fill(slice.ptr, 0, size);
     return slice;
 }
 

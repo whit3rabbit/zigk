@@ -146,7 +146,7 @@ fn zeroRead(fd: *FileDescriptor, buf: []u8) isize {
     _ = fd;
 
     // Fill buffer with zeros
-    @memset(buf, 0);
+    hal.mem.fill(buf.ptr, 0, buf.len);
 
     return @intCast(buf.len);
 }

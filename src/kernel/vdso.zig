@@ -53,7 +53,7 @@ pub fn init() !void {
 
     // Copy blob
     const copy_len = @min(vdso_blob.vdso_image.len, vdso_page_count * page_size);
-    @memcpy(vdso_page.?[0..copy_len], vdso_blob.vdso_image[0..copy_len]);
+    hal.mem.copy(vdso_page.?[0..copy_len].ptr, vdso_blob.vdso_image[0..copy_len].ptr, copy_len);
 
     console.info("VDSO: Initialized (phys={x}, size={})", .{vdso_phys, copy_len});
     

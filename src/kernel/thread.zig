@@ -173,7 +173,7 @@ pub const Thread = struct {
     /// Set thread name
     pub fn setName(self: *Thread, new_name: []const u8) void {
         const copy_len = @min(new_name.len, self.name.len - 1);
-        @memcpy(self.name[0..copy_len], new_name[0..copy_len]);
+        hal.mem.copy(self.name[0..copy_len].ptr, new_name[0..copy_len].ptr, copy_len);
         self.name[copy_len] = 0; // Null terminate
     }
 };

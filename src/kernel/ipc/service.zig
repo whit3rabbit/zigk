@@ -2,6 +2,7 @@ const std = @import("std");
 const heap = @import("heap");
 const sync = @import("sync");
 const process = @import("process");
+const hal = @import("hal");
 
 // Maximum length of a service name
 pub const MAX_SERVICE_NAME = 32;
@@ -38,7 +39,7 @@ pub fn register(name: []const u8, pid: u32) !bool {
     // Allocate new service node
     const node = try heap.allocator().create(Service);
     node.len = name.len;
-    @memcpy(node.name[0..name.len], name);
+    hal.mem.copy(node.name[0..name.len].ptr, name.ptr, name.len);
     node.pid = pid;
 
     // Prepend to list

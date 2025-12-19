@@ -492,7 +492,7 @@ fn loadSegment(
 
         // Zero the page first (important for BSS)
         const page_ptr: [*]u8 = paging.physToVirt(phys_page);
-        @memset(page_ptr[0..page_size], 0);
+        hal.mem.fill(page_ptr, 0, page_size);
 
         current_vaddr += page_size;
     }
@@ -565,7 +565,7 @@ fn copyToUserspace(pml4_phys: u64, vaddr: u64, data: []const u8) ElfError!void {
             const dest = dest_ptr[0..bytes_in_page];
 
             // Copy data
-            @memcpy(dest, data[offset..][0..bytes_in_page]);
+            hal.mem.copy(dest.ptr, data[offset..][0..bytes_in_page].ptr, bytes_in_page);
         } else {
             // CRITICAL: Translation failed for a page we should have just mapped
             console.err("ELF: copyToUserspace failed - vaddr={x} not mapped (pml4={x})", .{ current_vaddr, pml4_phys });
@@ -683,7 +683,7 @@ pub fn setupStack(
 
         // Zero the stack page
         const page_ptr: [*]u8 = paging.physToVirt(phys_page);
-        @memset(page_ptr[0..page_size], 0);
+        hal.mem.fill(page_ptr, 0, page_size);
 
         current_vaddr += page_size;
     }
@@ -904,7 +904,7 @@ pub fn setupTls(
 
         // Zero the page (handles tbss and TCB init)
         const page_ptr: [*]u8 = paging.physToVirt(phys_page);
-        @memset(page_ptr[0..page_size], 0);
+        hal.mem.fill(page_ptr, 0, page_size);
 
         current_vaddr += page_size;
     }

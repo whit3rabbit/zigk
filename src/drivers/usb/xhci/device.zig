@@ -13,6 +13,7 @@ const std = @import("std");
 const console = @import("console");
 const hal = @import("hal");
 const pmm = @import("pmm");
+const sync = @import("sync");
 
 const trb = @import("trb.zig");
 const ring = @import("ring.zig");
@@ -187,8 +188,9 @@ pub const UsbDevice = struct {
 
     /// Initialize a Bulk Endpoint
     pub fn initBulkEndpoint(self: *Self, ep_addr: u8) !void {
-        const dci = context.InputContext.endpointToDci(ep_addr);
-        
+        // Security: Validate endpoint address before calculating DCI
+        const dci = context.InputContext.endpointToDci(ep_addr) orelse return error.InvalidParam;
+
         // Allocate transfer ring if not present
         if (self.endpoints[dci] == null) {
             self.endpoints[dci] = try ring.TransferRing.init();
@@ -206,8 +208,9 @@ pub const UsbDevice = struct {
         max_packet: u16,
         interval: u8,
     ) !void {
-        const dci = context.InputContext.endpointToDci(ep_addr);
-        
+        // Security: Validate endpoint address before calculating DCI
+        const dci = context.InputContext.endpointToDci(ep_addr) orelse return error.InvalidParam;
+
         // Allocate ring if it doesn't exist (it should, from initXXEndpoint)
         if (self.endpoints[dci] == null) {
             self.endpoints[dci] = try ring.TransferRing.init();
@@ -395,14 +398,21 @@ pub const PendingTransfer = struct {
 
 /// Global pending transfer for synchronous operations
 /// Only one control transfer at a time per device
-/// Security: Use atomic flag for completed status to prevent race conditions
-/// between interrupt handler and polling code.
+/// Security: Use spinlock to prevent TOCTOU race conditions between
+/// interrupt handler and polling code. The race window was between
+/// writing to storage and setting active=true, where an interrupt
+/// could check active (false) and miss a valid pending transfer.
 var pending_transfer_storage: PendingTransfer = undefined;
 var pending_transfer_active: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
+var pending_transfer_lock: sync.Spinlock = .{};
 
 /// Start tracking a pending transfer
-/// Security: Uses atomic operations for thread-safe initialization
+/// Security: Uses spinlock to atomically initialize storage and set active flag,
+/// preventing TOCTOU race where interrupt fires between write and flag set.
 pub fn startPendingTransfer(trb_phys: u64, slot_id: u8, ep_dci: u5) void {
+    const held = pending_transfer_lock.acquire();
+    defer held.release();
+
     // Initialize the storage
     pending_transfer_storage = PendingTransfer{
         .trb_phys = trb_phys,
@@ -412,13 +422,16 @@ pub fn startPendingTransfer(trb_phys: u64, slot_id: u8, ep_dci: u5) void {
         .completion_code = .Invalid,
         .bytes_transferred = 0,
     };
-    // Publish the transfer atomically
+    // Publish the transfer atomically (within lock)
     pending_transfer_active.store(true, .release);
 }
 
 /// Mark pending transfer as completed
-/// Security: Safe to call from interrupt context
+/// Security: Safe to call from interrupt context (uses IRQ-safe spinlock)
 pub fn completePendingTransfer(code: trb.CompletionCode, residual: u24) void {
+    const held = pending_transfer_lock.acquire();
+    defer held.release();
+
     if (pending_transfer_active.load(.acquire)) {
         pending_transfer_storage.completion_code = code;
         pending_transfer_storage.bytes_transferred = residual;
@@ -427,7 +440,11 @@ pub fn completePendingTransfer(code: trb.CompletionCode, residual: u24) void {
 }
 
 /// Check if pending transfer matches event
+/// Security: Protected by spinlock to ensure consistent read
 pub fn matchesPendingTransfer(slot_id: u8, ep_dci: u5) bool {
+    const held = pending_transfer_lock.acquire();
+    defer held.release();
+
     if (pending_transfer_active.load(.acquire)) {
         const pt = &pending_transfer_storage;
         return pt.slot_id == slot_id and pt.ep_dci == ep_dci and !pt.completed.load(.acquire);
@@ -436,7 +453,11 @@ pub fn matchesPendingTransfer(slot_id: u8, ep_dci: u5) bool {
 }
 
 /// Get pending transfer if active (for polling)
+/// Note: Caller must not hold the lock when calling this
 pub fn getPendingTransfer() ?*PendingTransfer {
+    const held = pending_transfer_lock.acquire();
+    defer held.release();
+
     if (pending_transfer_active.load(.acquire)) {
         return &pending_transfer_storage;
     }
@@ -445,5 +466,8 @@ pub fn getPendingTransfer() ?*PendingTransfer {
 
 /// Clear pending transfer
 pub fn clearPendingTransfer() void {
+    const held = pending_transfer_lock.acquire();
+    defer held.release();
+
     pending_transfer_active.store(false, .release);
 }

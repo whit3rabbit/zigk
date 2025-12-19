@@ -7,6 +7,7 @@
 pub const io = @import("io.zig");
 pub const cpu = @import("cpu.zig");
 pub const serial = @import("serial.zig");
+pub const mem = @import("mem.zig");
 pub const paging = @import("paging.zig");
 pub const gdt = @import("gdt.zig");
 pub const idt = @import("idt.zig");

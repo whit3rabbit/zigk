@@ -21,6 +21,7 @@ pub const arch = switch (builtin.cpu.arch) {
 pub const io = arch.io;
 pub const cpu = arch.cpu;
 pub const serial = arch.serial;
+pub const mem = arch.mem;
 pub const paging = arch.paging;
 pub const gdt = arch.gdt;
 pub const idt = arch.idt;

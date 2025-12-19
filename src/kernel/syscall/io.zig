@@ -17,6 +17,7 @@ const heap = @import("heap");
 const fd_mod = @import("fd");
 const user_mem = @import("user_mem");
 const error_helpers = @import("error_helpers.zig");
+const hal = @import("hal");
 
 const SyscallError = base.SyscallError;
 const UserPtr = base.UserPtr;
@@ -436,7 +437,8 @@ pub fn sys_fstat(fd_num: usize, stat_buf: usize) SyscallError!usize {
 
         var kstat: uapi.stat.Stat = undefined;
         // Zero initialize
-        @memset(std.mem.asBytes(&kstat), 0);
+        const kstat_bytes = std.mem.asBytes(&kstat);
+        hal.mem.fill(kstat_bytes.ptr, 0, kstat_bytes.len);
 
         const res = stat_fn(fd, &kstat);
         if (res < 0) {

@@ -10,6 +10,9 @@
 
 const builtin = @import("builtin");
 
+extern fn zscapek_memcpy(dest: [*]u8, src: [*]const u8, n: usize) callconv(.c) [*]u8;
+extern fn zscapek_memset(dest: [*]u8, value: u8, n: usize) callconv(.c) [*]u8;
+
 /// Debug mode heap checks - compiles out in release
 pub const DEBUG_HEAP = builtin.mode == .Debug;
 
@@ -29,20 +32,7 @@ pub const FREED_MAGIC: u32 = 0xFEEDFACE;
 pub inline fn safeCopy(dest: [*]u8, src: [*]const u8, n: usize) void {
     if (n == 0) return;
     if (builtin.cpu.arch == .x86_64 and n >= @sizeOf(usize)) {
-        const word_size = @sizeOf(usize);
-        const word_count = n / word_size;
-        const d_words = @as([*]align(1) usize, @ptrCast(dest));
-        const s_words = @as([*]align(1) const usize, @ptrCast(src));
-
-        var i: usize = 0;
-        while (i < word_count) : (i += 1) {
-            d_words[i] = s_words[i];
-        }
-
-        var j: usize = word_count * word_size;
-        while (j < n) : (j += 1) {
-            dest[j] = src[j];
-        }
+        _ = zscapek_memcpy(dest, src, n);
         return;
     }
 
@@ -56,21 +46,7 @@ pub inline fn safeCopy(dest: [*]u8, src: [*]const u8, n: usize) void {
 pub inline fn safeFill(dest: [*]u8, value: u8, n: usize) void {
     if (n == 0) return;
     if (builtin.cpu.arch == .x86_64 and n >= @sizeOf(usize)) {
-        const word_size = @sizeOf(usize);
-        const word_count = n / word_size;
-        const repeat = ~@as(usize, 0) / 0xFF;
-        const word_value = repeat * @as(usize, value);
-        const d_words = @as([*]align(1) usize, @ptrCast(dest));
-
-        var i: usize = 0;
-        while (i < word_count) : (i += 1) {
-            d_words[i] = word_value;
-        }
-
-        var j: usize = word_count * word_size;
-        while (j < n) : (j += 1) {
-            dest[j] = value;
-        }
+        _ = zscapek_memset(dest, value, n);
         return;
     }
 

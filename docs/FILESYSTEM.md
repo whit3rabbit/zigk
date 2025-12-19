@@ -6,16 +6,22 @@ This structure mirrors the Linux kernel organization while keeping Zig modules a
 
 ```text
 zscapek/
+├── .claude/
+│   ├── commands/            # Codex CLI command definitions
+│   └── hooks/               # Local automation hooks
 ├── .github/
 │   └── workflows/
 │       └── build-iso.yml     # GitHub Actions workflow to build release ISO
+├── .zig-cache/             # Zig build cache (generated)
 ├── AGENTS.md                # Symlink to CLAUDE.md
 ├── CLAUDE.md                # Assistant guidelines
 ├── README.md                # Project overview
 ├── build.zig                # Build graph (Zig 0.16.x)
+├── build.zig.snippet        # Build snippet for local experiments
 ├── build.zig.zon            # Dependencies
 ├── Dockerfile               # Container build (local toolchain)
 ├── docker-compose.yml       # Compose helper for reproducible builds
+├── kernel_build.sh          # Local build helper
 ├── docs/                    # Project documentation
 │   ├── ASYNC.md             # Async I/O and io_uring design
 │   ├── BOOT.md              # Boot process
@@ -34,6 +40,7 @@ zscapek/
 │   ├── unit/                # Kernel unit tests
 │   │   ├── main.zig         # Test runner
 │   │   ├── heap_fuzz.zig    # Allocator fuzzing
+│   │   ├── ipv4_reassembly.zig # IPv4 fragment reassembly tests
 │   │   ├── slab_bench.zig   # Slab allocator micro-benchmark
 │   │   ├── msi_allocator_test.zig # MSI allocator tests
 │   │   ├── vmm_test.zig     # VMM unit coverage
@@ -42,7 +49,10 @@ zscapek/
 │   │   ├── test_clock.c
 │   │   ├── test_devnull.c
 │   │   ├── test_random.c
+│   │   ├── test_signals_fpu.c
 │   │   ├── test_stdio.c
+│   │   ├── test_threads.c
+│   │   ├── test_vdso.c
 │   │   ├── test_wait4.c
 │   │   ├── test_writev.zig
 │   │   └── soak_test.zig    # Long-running syscall soak test
@@ -54,6 +64,10 @@ zscapek/
 ├── iso_root/                # ISO staging (Limine config + modules)
 ├── limine/                  # Limine bootloader binaries and headers
 ├── limine.cfg               # Bootloader configuration
+├── options.o                # VDSO build artifact (generated)
+├── root.o                   # VDSO build artifact (generated)
+├── test_vdso.asm            # VDSO assembly test
+├── usb_disk.img             # Sample disk image
 ├── zig-out/                 # Build outputs
 ├── zscapek.iso              # Generated ISO image
 └── src/
@@ -62,6 +76,9 @@ zscapek/
     │   ├── x86_64/
     │   │   ├── root.zig
     │   │   ├── asm_helpers.S
+    │   │   ├── mem.zig
+    │   │   ├── memcpy.S
+    │   │   ├── smp_trampoline.S
     │   │   ├── boot/
     │   │   │   └── linker.ld
     │   │   ├── cpu.zig
@@ -74,6 +91,7 @@ zscapek/
     │   │   ├── interrupts.zig
     │   │   ├── io.zig
     │   │   ├── mmio.zig
+    │   │   ├── mmio_device.zig
     │   │   ├── paging.zig
     │   │   ├── pic.zig
     │   │   ├── pit.zig
@@ -88,6 +106,7 @@ zscapek/
     │   │   └── apic/
     │   │       ├── root.zig
     │   │       ├── ioapic.zig
+    │   │       ├── ipi.zig
     │   │       └── lapic.zig
     │   └── aarch64/          # Placeholder for future ARM64 HAL
     │       ├── boot/
@@ -103,10 +122,12 @@ zscapek/
     │   ├── kernel_stack.zig
     │   ├── stack_guard.zig
     │   ├── dma_allocator.zig
+    │   ├── aslr.zig
     │   ├── thread.zig
     │   ├── process.zig
     │   ├── sched.zig
     │   ├── sync.zig
+    │   ├── futex.zig
     │   ├── signal.zig
     │   ├── pipe.zig
     │   ├── panic.zig
@@ -118,18 +139,24 @@ zscapek/
     │   ├── init_hw.zig
     │   ├── init_fs.zig
     │   ├── init_proc.zig
+    │   ├── slab.zig
+    │   ├── tlb.zig
+    │   ├── vdso.zig
+    │   ├── vdso_blob.zig
     │   ├── capabilities/
     │   │   └── root.zig
     │   ├── debug/
     │   │   └── console.zig
     │   ├── io/
     │   │   ├── root.zig
+    │   │   ├── kernel_io.zig
     │   │   ├── pool.zig
     │   │   ├── reactor.zig
     │   │   ├── timer.zig
     │   │   └── types.zig
     │   ├── ipc/
-    │   │   └── message.zig
+    │   │   ├── message.zig
+    │   │   └── service.zig
     │   └── syscall/
     │       ├── base.zig
     │       ├── table.zig
@@ -139,6 +166,7 @@ zscapek/
     │       ├── io.zig
     │       ├── io_uring.zig
     │       ├── fd.zig
+    │       ├── error_helpers.zig
     │       ├── memory.zig
     │       ├── execution.zig
     │       ├── custom.zig
@@ -199,7 +227,9 @@ zscapek/
     │   │   ├── root.zig
     │   │   ├── types.zig
     │   │   ├── class/
-    │   │   │   └── hid.zig
+    │   │   │   ├── hid.zig
+    │   │   │   ├── hub.zig
+    │   │   │   └── msc.zig
     │   │   ├── ehci/
     │   │   │   ├── root.zig
     │   │   │   └── regs.zig
@@ -244,6 +274,8 @@ zscapek/
     │
     ├── net/
     │   ├── root.zig
+    │   ├── entropy.zig
+    │   ├── platform.zig
     │   ├── sync.zig
     │   ├── loopback.zig
     │   ├── core/
@@ -300,13 +332,24 @@ zscapek/
     │   ├── syscalls.zig
     │   ├── abi.zig
     │   ├── errno.zig
+    │   ├── epoll.zig
+    │   ├── futex.zig
+    │   ├── io_ring.zig
+    │   ├── ipc_msg.zig
+    │   ├── net_ipc.zig
     │   ├── poll.zig
+    │   ├── sched.zig
     │   ├── dirent.zig
     │   ├── input.zig
     │   ├── mman.zig
     │   ├── signal.zig
     │   ├── sound.zig
     │   └── stat.zig
+    │
+    ├── mm/                   # Placeholder for memory subsystem work
+    ├── vdso_gen/
+    │   ├── build.sh
+    │   └── vdso.zig
     │
     └── user/
         ├── root.zig
@@ -317,6 +360,8 @@ zscapek/
         ├── lib/
         │   ├── syscall.zig
         │   ├── syscall_exports.zig
+        │   ├── console_stub.zig
+        │   ├── sync_stub.zig
         │   └── libc/
         │       ├── root.zig
         │       ├── ctype.zig
@@ -366,6 +411,9 @@ zscapek/
         │       └── main.zig
         ├── shell/
         │   └── main.zig
+        ├── netstack/
+        │   ├── io_stub.zig
+        │   └── main.zig
         ├── httpd/
         │   └── main.zig
         └── doom/
@@ -392,6 +440,7 @@ zscapek/
 | `kernel_stack.zig` | Guarded kernel stack allocator in a dedicated VA range (unmapped guard pages). |
 | `stack_guard.zig` | Guard page protections shared across stacks. |
 | `dma_allocator.zig` | DMA-safe allocator for page-aligned, device-visible buffers. |
+| `aslr.zig` | Kernel ASLR and address randomization helpers. |
 | `thread.zig` | Thread creation and context management. |
 | `process.zig` | Process lifecycle and address space wiring. |
 | `sched.zig` | Scheduler core. |
@@ -408,6 +457,10 @@ zscapek/
 | `init_hw.zig` | Hardware initialization (drivers, interrupts). |
 | `init_fs.zig` | Filesystem initialization. |
 | `init_proc.zig` | Process subsystem initialization. |
+| `slab.zig` | Slab allocator implementation. |
+| `tlb.zig` | TLB shootdown and page invalidation helpers. |
+| `vdso.zig` | VDSO mapping and setup. |
+| `vdso_blob.zig` | Embedded VDSO payload blob. |
 | `debug/console.zig` | Kernel console output. |
 
 ### `src/kernel/capabilities/`
@@ -419,6 +472,7 @@ zscapek/
 | File | Description |
 |------|-------------|
 | `root.zig` | Async I/O subsystem entry point. |
+| `kernel_io.zig` | Kernel-side async I/O helpers. |
 | `pool.zig` | I/O request pool management. |
 | `reactor.zig` | Event reactor for async completion handling. |
 | `timer.zig` | Timer-based I/O operations. |
@@ -428,11 +482,13 @@ zscapek/
 | File | Description |
 |------|-------------|
 | `message.zig` | Message-passing IPC for microkernel communication. |
+| `service.zig` | IPC service registry and routing. |
 
 ### `src/kernel/syscall/`
 | File | Description |
 |------|-------------|
 | `base.zig` | Shared state (current_process, fd_table, user_vmm) and accessors. |
+| `error_helpers.zig` | Shared syscall error conversion helpers. |
 | `table.zig` | Comptime dispatch table - auto-discovers handlers via reflection. |
 | `process.zig` | `exit`, `wait4`, `getpid`, `getppid`, `getuid`, `getgid`. |
 | `signals.zig` | `rt_sigprocmask`, `rt_sigaction`, `rt_sigreturn`, `set_tid_address`. |
@@ -458,6 +514,9 @@ zscapek/
 |------|-------------|
 | `root.zig` | x86_64 HAL exports. |
 | `cpu.zig` | CPU feature detection and control. |
+| `mem.zig` | Architecture memory helpers for optimized copy/fill. |
+| `memcpy.S` | Optimized memcpy/memset helpers for freestanding builds. |
+| `smp_trampoline.S` | AP bring-up trampoline. |
 | `serial.zig` | Serial port output. |
 | `debug.zig` | Debug utilities. |
 | `entropy.zig` | Hardware entropy (RDRAND/RDSEED). |
@@ -467,6 +526,7 @@ zscapek/
 | `interrupts.zig` | Interrupt handlers. |
 | `io.zig` | Port I/O. |
 | `mmio.zig` | Memory-mapped I/O. |
+| `mmio_device.zig` | MMIO device helpers. |
 | `paging.zig` | Page table management. |
 | `pic.zig` | Legacy 8259 PIC. |
 | `pit.zig` | Programmable Interval Timer. |
@@ -480,6 +540,7 @@ zscapek/
 | `apic/root.zig` | APIC subsystem exports. |
 | `apic/lapic.zig` | Local APIC driver. |
 | `apic/ioapic.zig` | I/O APIC driver. |
+| `apic/ipi.zig` | Inter-processor interrupt helpers. |
 
 ### `src/net/` (Network Stack)
 A device-independent TCP/IP stack implementing Ethernet, IPv4/ARP, DNS, and socket-based UDP/TCP/ICMP.
@@ -492,6 +553,8 @@ A device-independent TCP/IP stack implementing Ethernet, IPv4/ARP, DNS, and sock
 | `dns` | DNS client and resolver. |
 | `transport` | UDP datagrams, TCP streams, ICMP echo, and socket plumbing. |
 | `loopback.zig` | Loopback interface (127.0.0.1). |
+| `entropy.zig` | Network stack entropy sources. |
+| `platform.zig` | Platform glue for timers and memory. |
 
 ### `src/fs/` (Filesystem)
 | File | Description |
@@ -584,6 +647,8 @@ A device-independent TCP/IP stack implementing Ethernet, IPv4/ARP, DNS, and sock
 | `root.zig` | USB stack scaffold. |
 | `types.zig` | Shared USB descriptor/types. |
 | `class/hid.zig` | USB HID class driver (keyboard/mouse). |
+| `class/hub.zig` | USB hub class driver. |
+| `class/msc.zig` | USB mass storage class driver. |
 | `ehci/root.zig` | EHCI (USB 2.0) host controller driver. |
 | `ehci/regs.zig` | EHCI register definitions. |
 | `xhci/root.zig` | XHCI (USB 3.x) host controller driver. |
@@ -615,13 +680,28 @@ A device-independent TCP/IP stack implementing Ethernet, IPv4/ARP, DNS, and sock
 | `syscalls.zig` | Syscall numbers (Linux ABI). |
 | `abi.zig` | ABI layouts shared with userland. |
 | `errno.zig` | Linux-compatible error codes. |
+| `epoll.zig` | Epoll definitions. |
+| `futex.zig` | Futex constants and types. |
+| `io_ring.zig` | io_uring ABI structs. |
+| `ipc_msg.zig` | IPC message structs for user-space drivers. |
+| `net_ipc.zig` | Network IPC message definitions. |
 | `poll.zig` | Poll event definitions. |
+| `sched.zig` | Scheduling constants and structs. |
 | `dirent.zig` | Directory entry structures. |
 | `input.zig` | Input event structures. |
 | `mman.zig` | Memory mapping flags and constants. |
 | `signal.zig` | Signal definitions and structures. |
 | `sound.zig` | Audio IOCTL definitions. |
 | `stat.zig` | File stat structures. |
+
+### `src/mm/`
+Reserved for future memory subsystem work; currently empty.
+
+### `src/vdso_gen/`
+| File | Description |
+|------|-------------|
+| `build.sh` | VDSO build helper script. |
+| `vdso.zig` | VDSO definitions and build inputs. |
 
 ### `src/user/` (Userland Runtime)
 | File | Description |
@@ -633,8 +713,12 @@ A device-independent TCP/IP stack implementing Ethernet, IPv4/ARP, DNS, and sock
 | `test_asm.zig` | Minimal assembly sanity test program. |
 | `lib/syscall.zig` | Syscall wrappers. |
 | `lib/syscall_exports.zig` | Exported syscall symbols for libc. |
+| `lib/console_stub.zig` | Console syscall shims for userland. |
+| `lib/sync_stub.zig` | Synchronization syscall shims for userland. |
 | `lib/libc/` | Minimal libc implementation for C program support. |
 | `shell/main.zig` | Shell application. |
+| `netstack/main.zig` | User-space network stack harness. |
+| `netstack/io_stub.zig` | Netstack I/O syscall shims. |
 | `httpd/main.zig` | HTTP server application. |
 | `doom/` | DOOM game port (doomgeneric). |
 

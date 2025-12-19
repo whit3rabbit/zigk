@@ -398,6 +398,7 @@ pub fn build(b: *std.Build) void {
     usb_module.addImport("vmm", vmm_module);
     usb_module.addImport("pmm", pmm_module);
     usb_module.addImport("console", console_module);
+    usb_module.addImport("sync", sync_module);
 
     // fd_module moved up
 
@@ -754,6 +755,7 @@ pub fn build(b: *std.Build) void {
     syscall_io_module.addImport("heap", heap_module);
     syscall_io_module.addImport("fd", fd_module);
     syscall_io_module.addImport("user_mem", user_mem_module);
+    syscall_io_module.addImport("hal", hal_module);
 
     // Create syscall fd module (open, close, dup, pipe, lseek)
     const syscall_fd_module = b.createModule(.{
@@ -821,9 +823,16 @@ pub fn build(b: *std.Build) void {
     const user_syscall_lib = b.createModule(.{
         .root_source_file = b.path("src/user/lib/syscall.zig"),
         .target = user_target,
-        .optimize = optimize, 
+        .optimize = optimize,
     });
     user_syscall_lib.addImport("uapi", user_uapi_module);
+
+    const user_libc_module = b.createModule(.{
+        .root_source_file = b.path("src/user/lib/libc/root.zig"),
+        .target = user_target,
+        .optimize = optimize,
+    });
+    user_libc_module.addImport("syscall.zig", user_syscall_lib);
     // Create User Sync module (stub)
     const user_sync_module = b.createModule(.{
         .root_source_file = b.path("src/user/lib/sync_stub.zig"),
@@ -887,12 +896,14 @@ pub fn build(b: *std.Build) void {
     netstack_mod.addImport("syscall", netstack_syscall_mod);
     netstack_mod.addImport("net", user_net_module); 
     netstack_mod.addImport("uapi", user_uapi_module);
+    netstack_mod.addImport("libc", user_libc_module);
 
     const netstack_exe = b.addExecutable(.{
         .name = "netstack",
         .root_module = netstack_mod,
     });
     netstack_exe.setLinkerScript(b.path("src/user/linker.ld"));
+    netstack_exe.addAssemblyFile(b.path("src/arch/x86_64/memcpy.S"));
 
     const netstack_cmd = b.addInstallArtifact(netstack_exe, .{});
     b.getInstallStep().dependOn(&netstack_cmd.step);
@@ -971,6 +982,7 @@ pub fn build(b: *std.Build) void {
     ipc_service_module.addImport("sync", sync_module);
     ipc_service_module.addImport("process", process_module);
     ipc_service_module.addImport("console", console_module);
+    ipc_service_module.addImport("hal", hal_module);
 
     // Create syscall ipc module (microkernel IPC)
     const syscall_ipc_module = b.createModule(.{
@@ -986,6 +998,7 @@ pub fn build(b: *std.Build) void {
     syscall_ipc_module.addImport("sched", sched_module);
     syscall_ipc_module.addImport("sched", sched_module);
     syscall_ipc_module.addImport("console", console_module);
+    syscall_ipc_module.addImport("hal", hal_module);
     syscall_ipc_module.addImport("keyboard", keyboard_module);
     syscall_ipc_module.addImport("mouse", mouse_module);
     syscall_ipc_module.addImport("ipc_service", ipc_service_module);
@@ -1141,6 +1154,7 @@ pub fn build(b: *std.Build) void {
 
     // Add assembly helpers for x86_64 (ISR stubs, lgdt, lidt)
     kernel.addAssemblyFile(b.path("src/arch/x86_64/asm_helpers.S"));
+    kernel.addAssemblyFile(b.path("src/arch/x86_64/memcpy.S"));
 
     // Add SMP trampoline code
     kernel.addAssemblyFile(b.path("src/arch/x86_64/smp_trampoline.S"));
@@ -1181,12 +1195,14 @@ pub fn build(b: *std.Build) void {
         .code_model = .small, // User code doesn't need kernel code model
     });
     shell_mod.addImport("syscall", user_syscall_lib);
+    shell_mod.addImport("libc", user_libc_module);
 
     const shell = b.addExecutable(.{
         .name = "shell.elf",
         .root_module = shell_mod,
     });
     shell.setLinkerScript(b.path("src/user/linker.ld"));
+    shell.addAssemblyFile(b.path("src/arch/x86_64/memcpy.S"));
     // shell.entry = .disabled; // let Zig find _start
 
     // Install shell as ELF (required for proper ELF loading in kernel)
@@ -1200,26 +1216,20 @@ pub fn build(b: *std.Build) void {
         .code_model = .small,
     });
     httpd_mod.addImport("syscall", user_syscall_lib);
+    httpd_mod.addImport("libc", user_libc_module);
 
     const httpd = b.addExecutable(.{
         .name = "httpd.elf",
         .root_module = httpd_mod,
     });
     httpd.setLinkerScript(b.path("src/user/linker.ld"));
+    httpd.addAssemblyFile(b.path("src/arch/x86_64/memcpy.S"));
 
     // Install httpd as ELF (required for proper ELF loading in kernel)
     const install_httpd = b.addInstallArtifact(httpd, .{});
     b.getInstallStep().dependOn(&install_httpd.step);
 
     // Build Doom
-    // Create libc module with syscall dependency
-    const doom_libc_module = b.createModule(.{
-        .root_source_file = b.path("src/user/lib/libc/root.zig"),
-        .target = user_target,
-        .optimize = optimize,
-    });
-    doom_libc_module.addImport("syscall.zig", user_syscall_lib);
-
     // Create platform hooks module
     const doom_platform_module = b.createModule(.{
         .root_source_file = b.path("src/user/doom/doomgeneric_zscapek.zig"),
@@ -1242,7 +1252,7 @@ pub fn build(b: *std.Build) void {
         .code_model = .small,
     });
     doom_mod.addImport("syscall", user_syscall_lib);
-    doom_mod.addImport("libc", doom_libc_module);
+    doom_mod.addImport("libc", user_libc_module);
     doom_mod.addImport("doomgeneric_zscapek.zig", doom_platform_module);
     doom_mod.addImport("i_sound_stub.zig", doom_sound_module);
 
@@ -1250,6 +1260,7 @@ pub fn build(b: *std.Build) void {
         .name = "doom.elf",
         .root_module = doom_mod,
     });
+    doom.addAssemblyFile(b.path("src/arch/x86_64/memcpy.S"));
 
     // Create UART Driver module
     const uart_driver_mod = b.createModule(.{
@@ -1259,11 +1270,13 @@ pub fn build(b: *std.Build) void {
         .code_model = .small,
     });
     uart_driver_mod.addImport("syscall", user_syscall_lib);
+    uart_driver_mod.addImport("libc", user_libc_module);
 
     const uart_driver = b.addExecutable(.{
         .name = "uart_driver.elf",
         .root_module = uart_driver_mod,
     });
+    uart_driver.addAssemblyFile(b.path("src/arch/x86_64/memcpy.S"));
     uart_driver.setLinkerScript(b.path("src/user/linker.ld"));
 
     const install_uart_driver = b.addInstallArtifact(uart_driver, .{});
@@ -1277,11 +1290,13 @@ pub fn build(b: *std.Build) void {
         .code_model = .small,
     });
     ps2_driver_mod.addImport("syscall", user_syscall_lib);
+    ps2_driver_mod.addImport("libc", user_libc_module);
 
     const ps2_driver = b.addExecutable(.{
         .name = "ps2_driver.elf",
         .root_module = ps2_driver_mod,
     });
+    ps2_driver.addAssemblyFile(b.path("src/arch/x86_64/memcpy.S"));
     // Use user linker script
     ps2_driver.setLinkerScript(b.path("src/user/linker.ld"));
     // Install
@@ -1296,11 +1311,13 @@ pub fn build(b: *std.Build) void {
         .code_model = .small,
     });
     virtio_net_driver_mod.addImport("syscall", user_syscall_lib);
+    virtio_net_driver_mod.addImport("libc", user_libc_module);
 
     const virtio_net_driver = b.addExecutable(.{
         .name = "virtio_net_driver.elf",
         .root_module = virtio_net_driver_mod,
     });
+    virtio_net_driver.addAssemblyFile(b.path("src/arch/x86_64/memcpy.S"));
     virtio_net_driver.setLinkerScript(b.path("src/user/linker.ld"));
 
     const install_virtio_net_driver = b.addInstallArtifact(virtio_net_driver, .{});
@@ -1314,11 +1331,13 @@ pub fn build(b: *std.Build) void {
         .code_model = .small,
     });
     virtio_blk_driver_mod.addImport("syscall", user_syscall_lib);
+    virtio_blk_driver_mod.addImport("libc", user_libc_module);
 
     const virtio_blk_driver = b.addExecutable(.{
         .name = "virtio_blk_driver.elf",
         .root_module = virtio_blk_driver_mod,
     });
+    virtio_blk_driver.addAssemblyFile(b.path("src/arch/x86_64/memcpy.S"));
     virtio_blk_driver.setLinkerScript(b.path("src/user/linker.ld"));
 
     const install_virtio_blk_driver = b.addInstallArtifact(virtio_blk_driver, .{});
@@ -1410,6 +1429,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     test_asm.setLinkerScript(b.path("src/user/linker.ld"));
+    test_asm.addAssemblyFile(b.path("src/arch/x86_64/memcpy.S"));
     const install_test_asm = b.addInstallArtifact(test_asm, .{});
     b.getInstallStep().dependOn(&install_test_asm.step);
 
@@ -1420,12 +1440,14 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     test_writev_mod.addImport("syscall", user_syscall_lib);
+    test_writev_mod.addImport("libc", user_libc_module);
 
     const test_writev = b.addExecutable(.{
         .name = "test_writev",
         .root_module = test_writev_mod,
     });
     test_writev.setLinkerScript(b.path("src/user/linker.ld"));
+    test_writev.addAssemblyFile(b.path("src/arch/x86_64/memcpy.S"));
     const install_test_writev = b.addInstallArtifact(test_writev, .{});
     b.getInstallStep().dependOn(&install_test_writev.step);
 
@@ -1436,12 +1458,14 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     audio_test_mod.addImport("syscall", user_syscall_lib);
+    audio_test_mod.addImport("libc", user_libc_module);
 
     const audio_test = b.addExecutable(.{
         .name = "audio_test",
         .root_module = audio_test_mod,
     });
     audio_test.setLinkerScript(b.path("src/user/linker.ld"));
+    audio_test.addAssemblyFile(b.path("src/arch/x86_64/memcpy.S"));
     const install_audio_test = b.addInstallArtifact(audio_test, .{});
     b.getInstallStep().dependOn(&install_audio_test.step);
 
@@ -1522,15 +1546,15 @@ pub fn build(b: *std.Build) void {
 
     if (qemu_usb_hub) {
         run_cmd.addArgs(&.{
-            // Attach USB Hub to XHCI port 2 (port 1 used by usb-kbd)
-            "-device", "usb-hub,bus=xhci.0,port=2,id=hub0",
-            // Attach USB Storage to Hub Port 1
-            "-device", "usb-storage,drive=usbdisk,bus=xhci.0,port=2.1",
+            // Attach USB Hub to XHCI and let QEMU pick the port
+            "-device", "usb-hub,bus=xhci.0,id=hub0",
+            // Attach USB Storage to hub port 1 (auto-assigned)
+            "-device", "usb-storage,drive=usbdisk,bus=hub0.0",
         });
     } else {
         run_cmd.addArgs(&.{
-            // Attach USB Storage to XHCI root hub (no external hub required)
-            "-device", "usb-storage,drive=usbdisk,bus=xhci.0,port=1",
+            // Attach USB Storage to XHCI root hub (auto-assigned port)
+            "-device", "usb-storage,drive=usbdisk",
         });
     }
 

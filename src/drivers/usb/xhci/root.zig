@@ -845,7 +845,26 @@ pub const Controller = struct {
         }
 
         // Update max packet size from descriptor
+        // Security: Validate max packet size against USB specification limits
+        // USB spec defines valid EP0 max packet sizes per speed:
+        // - Low Speed: 8 only
+        // - Full Speed: 8, 16, 32, or 64
+        // - High Speed: 64 only
+        // - Super Speed / SS+: 512 only (encoded as 9 in descriptor for 2^9)
         const new_max_packet = desc_buf[7];
+        const valid_max_packet = switch (dev.speed) {
+            .low_speed => new_max_packet == 8,
+            .full_speed => new_max_packet == 8 or new_max_packet == 16 or new_max_packet == 32 or new_max_packet == 64,
+            .high_speed => new_max_packet == 64,
+            .super_speed, .super_speed_plus => new_max_packet == 9, // 2^9 = 512
+            else => new_max_packet >= 8 and new_max_packet <= 64, // Fallback for unknown speeds
+        };
+
+        if (!valid_max_packet) {
+            console.err("XHCI: Invalid max packet size {} for speed {}", .{ new_max_packet, @intFromEnum(dev.speed) });
+            return error.InvalidDescriptor;
+        }
+
         if (new_max_packet != dev.max_packet_size) {
             console.info("XHCI: Updating max packet size from {} to {}", .{ dev.max_packet_size, new_max_packet });
             dev.updateMaxPacketSize(new_max_packet);
@@ -1112,6 +1131,16 @@ fn processEvent(ctrl: *Controller, event: *const trb.Trb) void {
             const code = transfer_evt.status.completion_code;
             const residual = transfer_evt.status.trb_transfer_length;
 
+            // Security: slot_id comes from hardware event TRB and could be invalid
+            // if the controller is compromised or malfunctioning.
+            // Validate against controller's max_slots before lookup.
+            // The devices array is sized to 256 (MAX_DEVICES) to prevent OOB
+            // from any u8 value, but we add explicit validation for defense-in-depth.
+            if (slot_id == 0 or slot_id > ctrl.max_slots) {
+                console.warn("XHCI: Invalid slot_id {} in transfer event (max={})", .{ slot_id, ctrl.max_slots });
+                return;
+            }
+
             // Find the device for this slot
             if (device.findDevice(slot_id)) |dev| {
                 // Check if this is an interrupt endpoint for keyboard
@@ -1124,12 +1153,21 @@ fn processEvent(ctrl: *Controller, event: *const trb.Trb) void {
                         const actual_len = if (residual <= requested) requested - residual else 0;
 
                         if (dev.is_hub) {
-                             dev.hub_driver.handleInterrupt(dev.report_buffer[0..actual_len]);
+                            // Security: Hub status change bitmap is ceil((num_ports+1)/8) bytes max
+                            // Cap to reasonable maximum (16 bytes = 127 ports + hub status bit)
+                            const max_hub_report: usize = 16;
+                            const safe_len = @min(actual_len, max_hub_report);
+                            dev.hub_driver.handleInterrupt(dev.report_buffer[0..safe_len]);
                         } else {
-                            // Security: Validate we received enough data for a valid report
+                            // Security: Validate report length and cap to expected maximum
+                            // Boot protocol: keyboard = 8 bytes exactly, mouse = 3-6 bytes
                             const min_report_len: usize = if (dev.hid_driver.is_keyboard) 8 else 3;
+                            const max_report_len: usize = if (dev.hid_driver.is_keyboard) 8 else 6;
                             if (actual_len >= min_report_len) {
-                                const report = dev.report_buffer[0..actual_len];
+                                // Cap to expected maximum to prevent HID driver from parsing
+                                // unexpected data beyond the protocol-defined report size
+                                const safe_len = @min(actual_len, max_report_len);
+                                const report = dev.report_buffer[0..safe_len];
                                 dev.hid_driver.handleInputReport(report);
                             } else {
                                 console.warn("XHCI: Short HID report ({} bytes), ignoring", .{actual_len});

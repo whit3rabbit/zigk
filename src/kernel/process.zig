@@ -719,11 +719,11 @@ fn copyUserVmm(src: *UserVmm) !*UserVmm {
                 // Copy page data using HHDM mapping
                 const src_ptr: [*]const u8 = hal.paging.physToVirt(src_phys);
                 const dst_ptr: [*]u8 = hal.paging.physToVirt(dst_phys);
-                @memcpy(dst_ptr[0..pmm.PAGE_SIZE], src_ptr[0..pmm.PAGE_SIZE]);
+                hal.mem.copy(dst_ptr, src_ptr, pmm.PAGE_SIZE);
             } else {
                 // Source page not mapped - zero the destination
                 const dst_ptr: [*]u8 = hal.paging.physToVirt(dst_phys);
-                @memset(dst_ptr[0..pmm.PAGE_SIZE], 0);
+                hal.mem.fill(dst_ptr, 0, pmm.PAGE_SIZE);
             }
         }
 

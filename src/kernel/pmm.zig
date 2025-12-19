@@ -191,11 +191,13 @@ pub fn initFromLimine(memmap: *const limine.MemoryMapResponse) !void {
     console.info("PMM: Metadata at phys {x}", .{ metadata_phys });
 
     // Initialize bitmap: mark all pages as used (1 = used, 0 = free)
-    @memset(bitmap, 0xFF);
+    hal.mem.fill(bitmap.ptr, 0xFF, bitmap.len);
     
     // Initialize refcounts: default to 1 (reserved/used)
     // We will clear refcounts for free pages shortly
-    @memset(refcounts, 1);
+    for (refcounts) |*entry| {
+        entry.* = 1;
+    }
 
     // Third pass: mark usable regions as free
     for (entries) |entry| {
@@ -462,7 +464,7 @@ pub fn getTotalPages() usize {
 /// Zero out a physical page (via HHDM)
 pub fn zeroPage(phys_addr: u64) void {
     const virt = paging.physToVirt(phys_addr);
-    @memset(virt[0..PAGE_SIZE], 0);
+    hal.mem.fill(virt, 0, PAGE_SIZE);
 }
 
 /// Allocate a zeroed physical page

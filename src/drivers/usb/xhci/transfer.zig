@@ -523,9 +523,10 @@ pub fn queueBulkTransfer(
     ep_addr: u8,
     buffer: []u8,
 ) TransferError!usize {
-    const dci = context.InputContext.endpointToDci(ep_addr);
-    
-    // Validate state
+    // Security: Validate endpoint address before calculating DCI
+    const dci = context.InputContext.endpointToDci(ep_addr) orelse return error.InvalidParam;
+
+    // Validate state (DCI 0 is invalid, DCI 1 is EP0 control)
     if (dci == 0 or dci >= 32) return error.InvalidParam;
     
     var ring_ptr = &(dev.endpoints[dci] orelse return error.InvalidState);
@@ -849,12 +850,14 @@ pub const HubInfo = struct {
 };
 
 /// Parse configuration descriptor to find Generic Hub interface
+/// Security: Validates all descriptor bounds against actual buffer size,
+/// not just the claimed b_length field from untrusted device data.
 pub fn findHubInterface(config_data: []const u8) ?HubInfo {
     var i: usize = 0;
 
     var current_interface: ?u8 = null;
     var is_hub = false;
-    
+
     // Default to EP 0 if strangely not found, but we really want the INT IN EP
     var int_in: ?u8 = null;
     var max_packet_size: u16 = 0;
@@ -866,39 +869,49 @@ pub fn findHubInterface(config_data: []const u8) ?HubInfo {
         const length = config_data[i];
         const desc_type = config_data[i + 1];
 
-        if (length < 2) break;
-        if (i + length > config_data.len) break;
+        // Validate length field from device data
+        if (length < 2) break; // Minimum descriptor size is 2 bytes
+        if (i + length > config_data.len) break; // Claimed length exceeds buffer
 
         switch (desc_type) {
             usb_types.DescriptorType.INTERFACE => {
+                // Security: Check actual struct size, not just claimed length
+                // A malicious device could claim length=9 near buffer end
+                const required_size = @max(length, iface_desc_size);
+                if (i + required_size > config_data.len) break;
+
                 if (length >= iface_desc_size) {
                     const iface = @as(*const usb_types.InterfaceDescriptor, @ptrCast(@alignCast(&config_data[i])));
                     current_interface = iface.b_interface_number;
 
                     // Class 0x09 (Hub)
                     is_hub = (iface.b_interface_class == 0x09);
-                    
+
                     // Reset endpoint search
                     int_in = null;
                 }
             },
             usb_types.DescriptorType.ENDPOINT => {
+                // Security: Check actual struct size for endpoint descriptor
+                const required_size = @max(length, ep_desc_size);
+                if (i + required_size > config_data.len) break;
+
                 if (is_hub and current_interface != null) {
                     if (length >= ep_desc_size) {
                         const ep = @as(*const usb_types.EndpointDescriptor, @ptrCast(@alignCast(&config_data[i])));
                         const addr = ep.getAddress();
                         const attrs = ep.getAttributes();
-                        
+
                         // Interrupt IN endpoint
                         if (attrs.transfer_type == .interrupt and addr.direction == .in) {
-                             int_in = ep.b_endpoint_address;
-                             max_packet_size = ep.w_max_packet_size;
-                             
-                             return HubInfo{
-                                 .interface_num = current_interface.?,
-                                 .int_in_ep = int_in.?,
-                                 .max_packet = max_packet_size,
-                             };
+                            int_in = ep.b_endpoint_address;
+                            max_packet_size = ep.w_max_packet_size;
+
+                            return HubInfo{
+                                .interface_num = current_interface.?,
+                                .int_in_ep = int_in.?,
+                                .max_packet = max_packet_size,
+                            };
                         }
                     }
                 }
@@ -909,5 +922,4 @@ pub fn findHubInterface(config_data: []const u8) ?HubInfo {
     }
 
     return null;
-
 }
