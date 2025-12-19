@@ -294,7 +294,7 @@ pub fn build(b: *std.Build) void {
 
     // Create Scheduler module (Thread scheduling)
     const sched_module = b.createModule(.{
-        .root_source_file = b.path("src/kernel/sched.zig"),
+        .root_source_file = b.path("src/kernel/sched/root.zig"),
         .target = kernel_target,
         .optimize = optimize,
     });
