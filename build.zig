@@ -577,7 +577,7 @@ pub fn build(b: *std.Build) void {
 
     // Create Process module (process abstraction for fork/exec/wait)
     const process_module = b.createModule(.{
-        .root_source_file = b.path("src/kernel/process.zig"),
+        .root_source_file = b.path("src/kernel/process/root.zig"),
         .target = kernel_target,
         .optimize = optimize,
     });
