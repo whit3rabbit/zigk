@@ -17,7 +17,6 @@ const pmm = @import("pmm");
 const trb = @import("trb.zig");
 const ring = @import("ring.zig");
 const context = @import("context.zig");
-const context = @import("context.zig");
 const hid = @import("../class/hid.zig");
 const hub = @import("../class/hub.zig");
 
@@ -63,6 +62,13 @@ pub const UsbDevice = struct {
     /// Hub driver state (if is_hub is true)
     hub_driver: hub.HubDriver,
 
+    /// Parent device (if connected via hub)
+    parent: ?*UsbDevice = null,
+    /// Port number on parent device (1-based)
+    parent_port: u8 = 0,
+    /// Route string for XHCI addressing
+    route_string: u20 = 0,
+
     /// Helper tag to identify device class if needed
     is_hub: bool = false,
 
@@ -87,7 +93,7 @@ pub const UsbDevice = struct {
     };
 
     /// Allocate and initialize a new USB device
-    pub fn init(slot_id: u8, port: u8, speed: context.Speed) !*Self {
+    pub fn init(slot_id: u8, port: u8, speed: context.Speed, parent: ?*UsbDevice, parent_port: u8, route_string: u20) !*Self {
         // Allocate device structure from PMM
         const dev_page = pmm.allocZeroedPages(1) orelse return error.OutOfMemory;
         const dev_virt = @intFromPtr(hal.paging.physToVirt(dev_page));
@@ -135,6 +141,9 @@ pub const UsbDevice = struct {
             .report_buffer = @ptrFromInt(@intFromPtr(report_virt)),
             .report_buffer_phys = report_page,
             .state = .slot_enabled,
+            .parent = parent,
+            .parent_port = parent_port,
+            .route_string = route_string,
         };
 
         // Initialize EP0 ring at DCI 1
@@ -156,10 +165,14 @@ pub const UsbDevice = struct {
         self.input_context.input_control.setAddFlags(true, 1); // EP0 = endpoint bit 0
 
         // Initialize Slot Context
+
         self.input_context.slot = context.SlotContext.initForDevice(
             self.speed,
             self.port,
-            1, // context_entries = 1 (only EP0 for now)
+            self.route_string,
+            if (self.parent) |p| p.slot_id else 0,
+            self.parent_port,
+            1, // context_entries
         );
 
         // Initialize EP0 Context

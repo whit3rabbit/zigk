@@ -23,11 +23,13 @@
 //
 // Reference: Intel 64 Architecture Manual Vol 3A, Section 10.11
 
+const std = @import("std");
 const ecam = @import("ecam.zig");
 const device = @import("device.zig");
 const capabilities = @import("capabilities.zig");
 const vmm = @import("vmm");
 const console = @import("console");
+const hal = @import("hal");
 
 const Ecam = ecam.Ecam;
 const PciDevice = device.PciDevice;
@@ -35,6 +37,11 @@ const MsiCapability = capabilities.MsiCapability;
 const MsixCapability = capabilities.MsixCapability;
 const MsiMessageControl = capabilities.MsiMessageControl;
 const MsixMessageControl = capabilities.MsixMessageControl;
+
+fn msixTableWriteFence() void {
+    // Ensure MSI-X table updates are visible before vectors are unmasked.
+    hal.mmio.writeBarrier();
+}
 
 // ============================================================================
 // x86_64 MSI Address/Data Building
@@ -299,6 +306,7 @@ pub fn enableMsix(
         const ptr: *volatile u32 = @ptrFromInt(entry_addr);
         ptr.* = 1; // Set mask bit
     }
+    msixTableWriteFence();
 
     console.info("MSI-X: Enabled for {x}:{x}.{x} table_entries={d} table_addr=0x{x}", .{
         dev.bus, dev.device, dev.func, msix_cap.table_size, table_addr,
@@ -340,7 +348,9 @@ pub fn configureMsixEntry(
     addr_lo_ptr.* = @truncate(addr);
     addr_hi_ptr.* = @truncate(addr >> 32);
     data_ptr.* = data;
+    msixTableWriteFence();
     ctrl_ptr.* = 0; // Unmask this vector
+    msixTableWriteFence();
     return true;
 }
 
@@ -353,6 +363,7 @@ pub fn maskMsixVector(table_base: u64, table_size: u16, index: u16) bool {
     const ctrl_addr = table_base + (@as(u64, index) * 16) + 12;
     const ctrl_ptr: *volatile u32 = @ptrFromInt(ctrl_addr);
     ctrl_ptr.* = 1;
+    msixTableWriteFence();
     return true;
 }
 
@@ -365,6 +376,7 @@ pub fn unmaskMsixVector(table_base: u64, table_size: u16, index: u16) bool {
     const ctrl_addr = table_base + (@as(u64, index) * 16) + 12;
     const ctrl_ptr: *volatile u32 = @ptrFromInt(ctrl_addr);
     ctrl_ptr.* = 0;
+    msixTableWriteFence();
     return true;
 }
 

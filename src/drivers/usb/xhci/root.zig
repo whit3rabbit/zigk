@@ -22,7 +22,6 @@ const trb = @import("trb.zig");
 const ring = @import("ring.zig");
 const context = @import("context.zig");
 const device = @import("device.zig");
-const descriptor = @import("descriptor.zig");
 const transfer = @import("transfer.zig");
 const hid = @import("../class/hid.zig");
 const msc = @import("../class/msc.zig");
@@ -571,16 +570,17 @@ pub const Controller = struct {
                 }
 
                 // Enumerate the device
-                const maybe_dev = self.enumerateDevice(port) catch |err| {
+                // For root hub ports: parent=null, port_num=port, route=0, root_port=port, speed=null (auto-detect)
+                const maybe_dev = self.enumerateDevice(null, port, 0, port, null) catch |err| {
                     console.err("XHCI: Failed to enumerate device on port {d}: {}", .{ port, err });
                     continue;
                 };
 
-                // If it's a HID device, start interrupt polling
+                // If it's a HID device or Hub, start interrupt polling
                 if (maybe_dev) |dev| {
-                    if (dev.hid_driver.is_keyboard or dev.hid_driver.is_mouse) {
+                    if (dev.hid_driver.is_keyboard or dev.hid_driver.is_mouse or dev.is_hub) {
                         self.startInterruptPolling(dev) catch |err| {
-                            console.err("XHCI: Failed to start HID polling: {}", .{err});
+                            console.err("XHCI: Failed to start interrupt polling: {}", .{err});
                         };
                     }
                 }
@@ -779,27 +779,50 @@ pub const Controller = struct {
     // Device Enumeration State Machine
     // =========================================================================
 
-    /// Enumerate a USB device on a port
-    /// Returns configured device if successful, null if not a keyboard
-    pub fn enumerateDevice(self: *Self, port: u8) !?*device.UsbDevice {
-        // Get port speed
-        const port_base = self.op_base + regs.portBaseOffset(port);
-        const port_dev = MmioDevice(regs.PortReg).init(port_base, 0x10);
-        const portsc = port_dev.readTyped(.portsc, regs.PortSc);
+    /// Enumerate a USB device on a port (Root or Hub)
+    /// Returns configured device if successful
+    pub fn enumerateDevice(
+        self: *Self, 
+        parent: ?*device.UsbDevice, 
+        port_num: u8, 
+        route_string: u20, 
+        root_port_num: u8,
+        speed_override: ?context.Speed
+    ) !?*device.UsbDevice {
+        
+        var speed: context.Speed = .invalid;
 
-        if (!portsc.ccs or !portsc.ped) {
-            console.warn("XHCI: Port {} not connected or enabled", .{port});
-            return null;
+        if (parent == null) {
+            // Root Hub Port logic
+            const port_base = self.op_base + regs.portBaseOffset(port_num);
+            const port_dev = MmioDevice(regs.PortReg).init(port_base, 0x10);
+            const portsc = port_dev.readTyped(.portsc, regs.PortSc);
+
+            if (!portsc.ccs or !portsc.ped) {
+                console.warn("XHCI: Port {} not connected or enabled", .{port_num});
+                return null;
+            }
+            speed = @enumFromInt(portsc.speed);
+        } else {
+            // Hub Port logic - speed passed from Hub Driver
+            if (speed_override) |s| {
+                speed = s;
+            } else {
+                return error.InvalidSpeed;
+            }
         }
-
-        const speed: context.Speed = @enumFromInt(portsc.speed);
-        console.info("XHCI: Enumerating device on port {} (speed={})", .{ port, @intFromEnum(speed) });
+        
+        console.info("XHCI: Enumerating device on port {} (speed={}, parent={s})", .{ 
+            port_num, 
+            @intFromEnum(speed),
+            if (parent != null) "Hub" else "Root" 
+        });
 
         // 1. Enable Slot
         const slot_id = try self.enableSlot();
 
         // 2. Allocate device structure
-        var dev = try device.UsbDevice.init(slot_id, port, speed);
+        const dev = try device.UsbDevice.init(slot_id, root_port_num, speed, parent, port_num, route_string);
         errdefer dev.deinit();
 
         // 3. Build Input Context for Address Device
@@ -906,40 +929,22 @@ pub const Controller = struct {
             console.info("XHCI: USB MSC device enumerated on slot {}", .{slot_id});
             return dev;
 
-        } else if (transfer.findHubInterface(config_buf[0..config_len])) |interface| {
-             console.info("XHCI: Found USB Hub Interface {d}", .{interface.bInterfaceNumber});
+        } else if (transfer.findHubInterface(config_buf[0..config_len])) |hub_info| {
+             console.info("XHCI: Found USB Hub Interface {d}", .{hub_info.interface_num});
              
              // Initialize Hub Driver
              dev.is_hub = true;
              
-             // Find Interrupt IN endpoint
-             var int_in: u8 = 0;
-             var max_packet_size: u16 = 8; // Default max packet size for interrupt endpoint
-             
-             for (interface.endpoints) |ep_desc| {
-                 if (ep_desc.bLength == 0) continue;
-                 const is_in = (ep_desc.bEndpointAddress & 0x80) != 0;
-                 const ep_type = ep_desc.bmAttributes & 0x03;
-                 
-                 if (is_in and ep_type == 0x03) { // Interrupt IN
-                     int_in = ep_desc.bEndpointAddress;
-                     max_packet_size = ep_desc.wMaxPacketSize;
-                     break;
-                 }
-             }
+             const int_in = hub_info.int_in_ep;
+             const max_packet_size = hub_info.max_packet;
              
              // Send Configuration Command (first time for this device, unless already done once for control)
              // Endpoints must be added to Input Context first.
-             // For hub, we need to add the Interrupt IN endpoint.
              
-             if (int_in != 0) {
-                 // Initialize Endpoint
-                 console.debug("XHCI: Hub Int IN Endpoint 0x{x} max={d}", .{int_in, max_packet_size});
-                 try dev.initBulkEndpoint(int_in); // Reusing bulk helper, works for allocating ring
-                 try dev.buildConfigureEndpointContext(int_in, .interrupt_in, max_packet_size, 12); // Interval 12 (~32ms)
-             } else {
-                 console.warn("XHCI: Hub has no Interrupt IN endpoint", .{});
-             }
+             // Initialize Endpoint
+             console.debug("XHCI: Hub Int IN Endpoint 0x{x} max={d}", .{int_in, max_packet_size});
+             try dev.initBulkEndpoint(int_in); // Reusing bulk helper, works for allocating ring
+             try dev.buildConfigureEndpointContext(int_in, .interrupt_in, max_packet_size, 12); // Interval 12 (~32ms)
              
              // Send Configuration Command
              try self.configureEndpoint(dev); // Use self.configureEndpoint
@@ -1118,15 +1123,17 @@ fn processEvent(ctrl: *Controller, event: *const trb.Trb) void {
                         const requested: usize = 8;
                         const actual_len = if (residual <= requested) requested - residual else 0;
 
-                        // Security: Validate we received enough data for a valid report
-                        // Boot protocol keyboard reports require at least 8 bytes
-                        // Boot protocol mouse reports require at least 3 bytes
-                        const min_report_len: usize = if (dev.hid_driver.is_keyboard) 8 else 3;
-                        if (actual_len >= min_report_len) {
-                            const report = dev.report_buffer[0..actual_len];
-                            dev.hid_driver.handleInputReport(report);
+                        if (dev.is_hub) {
+                             dev.hub_driver.handleInterrupt(dev.report_buffer[0..actual_len]);
                         } else {
-                            console.warn("XHCI: Short HID report ({} bytes), ignoring", .{actual_len});
+                            // Security: Validate we received enough data for a valid report
+                            const min_report_len: usize = if (dev.hid_driver.is_keyboard) 8 else 3;
+                            if (actual_len >= min_report_len) {
+                                const report = dev.report_buffer[0..actual_len];
+                                dev.hid_driver.handleInputReport(report);
+                            } else {
+                                console.warn("XHCI: Short HID report ({} bytes), ignoring", .{actual_len});
+                            }
                         }
                     } else if (code == .StallError) {
                         console.warn("XHCI: HID endpoint stalled", .{});

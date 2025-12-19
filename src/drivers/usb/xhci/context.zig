@@ -69,12 +69,40 @@ pub const SlotContext = extern struct {
     pub fn initForDevice(
         speed: Speed,
         root_port: u8,
+        route_string: u20,
+        parent_hub_slot_id: u8,
+        parent_port_num: u8,
         context_entries: u5,
     ) Self {
         var ctx = empty();
         ctx.dw0.speed = speed;
+        ctx.dw0.route_string = route_string;
         ctx.dw0.context_entries = context_entries;
+        
         ctx.dw1.root_hub_port_number = root_port;
+        // For non-hub devices, num_ports is 0. 
+        // Logic for setting hub: true and num_ports should be done post-init or via another method if needed,
+        // but typically initForDevice sets the basic connectivity.
+        
+        // Populate parent info (needed for splits)
+        // Note: For root hub ports, parent_hub_slot_id is 0.
+        // For hubs, we might need to set TT info in DW2 if we are LS/FS behind HS hub.
+        // That logic is complex and usually done by the caller calculating these values.
+        // For now, let's trust the caller to update DW2 manually if needed or add arguments.
+        
+        // Actually, let's keep it simple for now and rely on caller to set more if needed,
+        // but route_string is essential for hubs.
+        
+        // Wait, parent_hub_slot_id is not a direct field in SlotContext for standard operations EXCEPT for TT (DW2).
+        // The xHCI uses Route String to find the path.
+        // DW2 has tt_hub_slot_id and tt_port_number.
+        
+        _ = parent_port_num;
+        if (parent_hub_slot_id != 0) {
+            // This is likely for TT configuration (LS/FS behind HS Hub)
+            // But we'll leave DW2 zero for now unless explicitly needed.
+        }
+        
         return ctx;
     }
 

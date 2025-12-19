@@ -230,7 +230,7 @@ This document contains actionable sub-tasks with research findings from comprehe
 - `src/drivers/video/virtio_gpu.zig` - MISSING interrupt support
 
 **Sub-Tasks:**
-- [ ] **Audit `drivers/pci/msi.zig`:** Add memory barrier after table writes
+- [x] **Audit `drivers/pci/msi.zig`:** Add memory barrier after table writes
 - [x] **Fix VirtIO-GPU IRQ:** Implemented MSI-X support following XHCI pattern (src/drivers/video/virtio_gpu.zig)
 - [ ] **Vector Reclamation:** Already implemented via `freeMsixVectors()`, test coverage needed
 - [x] **Fix u6/u8 boundary:** Changed offset to u8 in allocation loop (src/arch/x86_64/interrupts.zig)

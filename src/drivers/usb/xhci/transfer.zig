@@ -807,28 +807,29 @@ pub fn findMscInterface(config_data: []const u8) ?MscInfo {
                 const required_size = @max(length, ep_desc_size);
                 if (i + required_size > config_data.len) break;
 
-                if (length >= ep_desc_size and is_msc and current_interface != null) {
-                    const ep = @as(*const usb_types.EndpointDescriptor, @ptrCast(@alignCast(&config_data[i])));
-                    const addr = ep.getAddress();
-                    const attrs = ep.getAttributes();
-
-                    if (attrs.transfer_type == .bulk) {
-                        if (addr.direction == .in) {
-                            bulk_in = ep.b_endpoint_address;
-                             max_packet_size = ep.w_max_packet_size;
-                        } else {
-                            bulk_out = ep.b_endpoint_address;
+                if (is_msc and current_interface != null) {
+                    if (length >= ep_desc_size) {
+                        const ep = @as(*const usb_types.EndpointDescriptor, @ptrCast(@alignCast(&config_data[i])));
+                        const addr = ep.getAddress();
+                        const attrs = ep.getAttributes();
+                        
+                        if (attrs.transfer_type == .bulk) {
+                            if (addr.direction == .in) {
+                                bulk_in = ep.b_endpoint_address;
+                                max_packet_size = ep.w_max_packet_size;
+                            } else {
+                                bulk_out = ep.b_endpoint_address;
+                            }
                         }
-                    }
-
-                    // If we have both, we are good
-                    if (bulk_in != null and bulk_out != null) {
-                        return MscInfo{
-                            .interface_num = current_interface.?,
-                            .bulk_in_ep = bulk_in.?,
-                            .bulk_out_ep = bulk_out.?,
-                            .max_packet = max_packet_size,
-                        };
+                        
+                        if (bulk_in != null and bulk_out != null) {
+                             return MscInfo{
+                                 .interface_num = current_interface.?,
+                                 .bulk_in_ep = bulk_in.?,
+                                 .bulk_out_ep = bulk_out.?,
+                                 .max_packet = max_packet_size,
+                             };
+                        }
                     }
                 }
             },
@@ -836,5 +837,77 @@ pub fn findMscInterface(config_data: []const u8) ?MscInfo {
         }
         i += length;
     }
+
     return null;
+}
+
+/// Information about a Hub interface found in config descriptor
+pub const HubInfo = struct {
+    interface_num: u8,
+    int_in_ep: u8,
+    max_packet: u16,
+};
+
+/// Parse configuration descriptor to find Generic Hub interface
+pub fn findHubInterface(config_data: []const u8) ?HubInfo {
+    var i: usize = 0;
+
+    var current_interface: ?u8 = null;
+    var is_hub = false;
+    
+    // Default to EP 0 if strangely not found, but we really want the INT IN EP
+    var int_in: ?u8 = null;
+    var max_packet_size: u16 = 0;
+
+    const iface_desc_size = @sizeOf(usb_types.InterfaceDescriptor);
+    const ep_desc_size = @sizeOf(usb_types.EndpointDescriptor);
+
+    while (i + 2 <= config_data.len) {
+        const length = config_data[i];
+        const desc_type = config_data[i + 1];
+
+        if (length < 2) break;
+        if (i + length > config_data.len) break;
+
+        switch (desc_type) {
+            usb_types.DescriptorType.INTERFACE => {
+                if (length >= iface_desc_size) {
+                    const iface = @as(*const usb_types.InterfaceDescriptor, @ptrCast(@alignCast(&config_data[i])));
+                    current_interface = iface.b_interface_number;
+
+                    // Class 0x09 (Hub)
+                    is_hub = (iface.b_interface_class == 0x09);
+                    
+                    // Reset endpoint search
+                    int_in = null;
+                }
+            },
+            usb_types.DescriptorType.ENDPOINT => {
+                if (is_hub and current_interface != null) {
+                    if (length >= ep_desc_size) {
+                        const ep = @as(*const usb_types.EndpointDescriptor, @ptrCast(@alignCast(&config_data[i])));
+                        const addr = ep.getAddress();
+                        const attrs = ep.getAttributes();
+                        
+                        // Interrupt IN endpoint
+                        if (attrs.transfer_type == .interrupt and addr.direction == .in) {
+                             int_in = ep.b_endpoint_address;
+                             max_packet_size = ep.w_max_packet_size;
+                             
+                             return HubInfo{
+                                 .interface_num = current_interface.?,
+                                 .int_in_ep = int_in.?,
+                                 .max_packet = max_packet_size,
+                             };
+                        }
+                    }
+                }
+            },
+            else => {},
+        }
+        i += length;
+    }
+
+    return null;
+
 }

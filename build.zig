@@ -44,6 +44,7 @@ pub fn build(b: *std.Build) void {
     const qemu_bios = b.option([]const u8, "bios", "Path to BIOS/UEFI firmware (e.g. OVMF.fd) for QEMU");
     // Display option: "default" (auto), "sdl", "gtk", "cocoa" (macOS), "none" (headless)
     const qemu_display = b.option([]const u8, "display", "QEMU display backend (default, sdl, gtk, cocoa, none)") orelse "default";
+    const qemu_usb_hub = b.option(bool, "usb-hub", "Attach usb-hub to XHCI and connect storage to it") orelse false;
 
     // Create kernel config options module
     const config_options = b.addOptions();
@@ -1516,9 +1517,22 @@ pub fn build(b: *std.Build) void {
         "-no-reboot",
         "-no-shutdown",
         "-accel", "tcg",
-        "-drive", "if=none,id=stick,format=raw,file=usb_disk.img",
-        "-device", "usb-storage,drive=stick",
+        "-drive", "if=none,id=usbdisk,format=raw,file=usb_disk.img", // USB Mass Storage
     });
+
+    if (qemu_usb_hub) {
+        run_cmd.addArgs(&.{
+            // Attach USB Hub to XHCI port 2 (port 1 used by usb-kbd)
+            "-device", "usb-hub,bus=xhci.0,port=2,id=hub0",
+            // Attach USB Storage to Hub Port 1
+            "-device", "usb-storage,drive=usbdisk,bus=xhci.0,port=2.1",
+        });
+    } else {
+        run_cmd.addArgs(&.{
+            // Attach USB Storage to XHCI root hub (no external hub required)
+            "-device", "usb-storage,drive=usbdisk,bus=xhci.0,port=1",
+        });
+    }
 
     // Add display option (default = let QEMU auto-detect)
     if (!std.mem.eql(u8, qemu_display, "default")) {
