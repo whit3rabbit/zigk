@@ -62,6 +62,10 @@ pub fn sys_access(path_ptr: usize, mode: usize) SyscallError!usize {
         return error.ENOENT;
     }
 
+    if (std.mem.eql(u8, path, "/") or std.mem.eql(u8, path, "/.")) {
+        return 0;
+    }
+
     // Use VFS to try opening the file
     // Note: This is a heavy way to check existence, but VFS doesn't expose stat/access yet
     const fd = fs.vfs.Vfs.open(path, 0) catch |err| {

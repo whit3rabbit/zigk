@@ -186,6 +186,21 @@ fn socketClose(fd: *FileDescriptor) isize {
     return 0;
 }
 
+fn hasPendingSignal() bool {
+    const current = sched.getCurrentThread() orelse return false;
+    const pending = current.pending_signals & ~current.sigmask;
+    return pending != 0;
+}
+
+fn pollTimeoutToTicks(timeout_ms: isize) ?u64 {
+    if (timeout_ms < 0) return null;
+    if (timeout_ms == 0) return 0;
+
+    const tick_ms: u64 = 10;
+    const timeout_u64 = std.math.cast(u64, timeout_ms) orelse return null;
+    return std.math.divCeil(u64, timeout_u64, tick_ms) catch unreachable;
+}
+
 /// sys_socket (41) - Create a socket
 /// (domain, type, protocol) -> fd
 pub fn sys_socket(domain: usize, sock_type: usize, protocol: usize) SyscallError!usize {
@@ -428,27 +443,27 @@ pub fn sys_accept(fd: usize, addr_ptr: usize, addrlen_ptr: usize) SyscallError!u
         if (result) |new_sock_fd| {
             // Success - copy address back if requested
             if (addr_ptr != 0 and addrlen_ptr != 0) {
-                 const addrlen_uptr = user_mem.UserPtr.from(addrlen_ptr);
-                 const input_len = addrlen_uptr.readValue(u32) catch {
+                const addrlen_uptr = user_mem.UserPtr.from(addrlen_ptr);
+                const input_len = addrlen_uptr.readValue(u32) catch {
                     // Cleanup new socket?
                     _ = socket.close(new_sock_fd) catch {};
                     return error.EFAULT;
-                 };
+                };
 
-                 if (input_len < @sizeOf(socket.SockAddrIn)) {
-                     _ = socket.close(new_sock_fd) catch {};
-                     return error.EINVAL;
-                 }
+                if (input_len < @sizeOf(socket.SockAddrIn)) {
+                    _ = socket.close(new_sock_fd) catch {};
+                    return error.EINVAL;
+                }
 
-                 user_mem.copyStructToUser(socket.SockAddrIn, user_mem.UserPtr.from(addr_ptr), kpeer_addr) catch {
-                      _ = socket.close(new_sock_fd) catch {};
-                      return error.EFAULT;
-                 };
+                user_mem.copyStructToUser(socket.SockAddrIn, user_mem.UserPtr.from(addr_ptr), kpeer_addr) catch {
+                    _ = socket.close(new_sock_fd) catch {};
+                    return error.EFAULT;
+                };
 
-                 addrlen_uptr.writeValue(@as(u32, @sizeOf(socket.SockAddrIn))) catch {
-                      _ = socket.close(new_sock_fd) catch {};
-                      return error.EFAULT;
-                 };
+                addrlen_uptr.writeValue(@as(u32, @sizeOf(socket.SockAddrIn))) catch {
+                    _ = socket.close(new_sock_fd) catch {};
+                    return error.EFAULT;
+                };
             }
 
             const new_fd_num = installSocketFd(new_sock_fd) catch |err| {
@@ -757,6 +772,10 @@ pub fn sys_getpeername(fd: usize, addr_ptr: usize, addrlen_ptr: usize) SyscallEr
 /// A malicious userspace thread could modify fd values or unmap memory
 /// while poll is blocked, causing kernel faults or invalid socket access.
 pub fn sys_poll(ufds: usize, nfds: usize, timeout: isize) SyscallError!usize {
+    if (hasPendingSignal()) {
+        return error.EINTR;
+    }
+
     // Limit nfds to prevent excessive kernel allocations (matches Linux RLIMIT_NOFILE default)
     const max_nfds: usize = 1024;
     if (nfds > max_nfds) {
@@ -766,7 +785,20 @@ pub fn sys_poll(ufds: usize, nfds: usize, timeout: isize) SyscallError!usize {
     if (nfds == 0) {
         // No fds to poll - if timeout is 0, return immediately; otherwise block
         if (timeout == 0) return 0;
-        // For non-zero timeout with no fds, just return 0 (matches Linux behavior)
+        if (pollTimeoutToTicks(timeout)) |ticks| {
+            if (ticks > 0) {
+                sched.sleepForTicks(ticks);
+            }
+            if (hasPendingSignal()) {
+                return error.EINTR;
+            }
+            return 0;
+        }
+
+        blockCurrentThread();
+        if (hasPendingSignal()) {
+            return error.EINTR;
+        }
         return 0;
     }
 
@@ -857,7 +889,13 @@ pub fn sys_poll(ufds: usize, nfds: usize, timeout: isize) SyscallError!usize {
     }
 
     // Block
-    blockCurrentThread();
+    if (pollTimeoutToTicks(timeout)) |ticks| {
+        if (ticks > 0) {
+            sched.sleepForTicks(ticks);
+        }
+    } else {
+        blockCurrentThread();
+    }
 
     // Woke up - Clear blocked thread registration
     for (kpollfds) |*pfd| {
@@ -909,6 +947,10 @@ pub fn sys_poll(ufds: usize, nfds: usize, timeout: isize) SyscallError!usize {
         if (pfd.revents != 0) {
             ready_count += 1;
         }
+    }
+
+    if (ready_count == 0 and hasPendingSignal()) {
+        return error.EINTR;
     }
 
     // Copy results back to userspace

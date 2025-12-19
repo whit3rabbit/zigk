@@ -85,6 +85,31 @@ pub const FileOps = struct {
     poll: ?*const fn (fd: *FileDescriptor, requested_events: u32) u32,
 };
 
+/// Directory-only operations marker for synthetic directory FDs.
+/// Used to distinguish directory handles from regular files/devices.
+pub const dir_ops = FileOps{
+    .read = null,
+    .write = null,
+    .close = null,
+    .seek = null,
+    .stat = null,
+    .ioctl = null,
+    .mmap = null,
+    .poll = null,
+};
+
+pub const DirTag = enum {
+    initrd_root,
+    devfs_root,
+};
+
+pub var initrd_dir_tag: DirTag = .initrd_root;
+pub var devfs_dir_tag: DirTag = .devfs_root;
+
+/// Hook for VFS to decrement open file count when FD is closed
+/// Set by VFS.init to avoid circular dependency between fd.zig and vfs.zig
+pub var vfs_close_hook: ?*const fn (u8) void = null;
+
 /// File descriptor structure
 /// Represents an open file, device, socket, or pipe
 pub const FileDescriptor = struct {
@@ -105,6 +130,10 @@ pub const FileDescriptor = struct {
 
     /// Lock for atomic operations (e.g. writev)
     lock: sync.Spinlock,
+
+    /// VFS mount index for open file tracking (null if not from VFS)
+    /// Used to decrement open_files count when FD is closed
+    vfs_mount_idx: ?u8 = null,
 
     /// Increment reference count (atomic, thread-safe)
     pub fn ref(self: *FileDescriptor) void {
@@ -225,6 +254,15 @@ pub const FdTable = struct {
             if (fd.ops.close) |close_fn| {
                 _ = close_fn(fd);
             }
+
+            // Notify VFS to decrement open file count for this mount
+            // This prevents use-after-free on unmount
+            if (fd.vfs_mount_idx) |idx| {
+                if (vfs_close_hook) |hook| {
+                    hook(idx);
+                }
+            }
+
             // Free the FileDescriptor
             const alloc = heap.allocator();
             alloc.destroy(fd);
@@ -308,6 +346,7 @@ pub fn createFd(ops: *const FileOps, flags: u32, private_data: ?*anyopaque) !*Fi
         .refcount = .{ .raw = 1 },
         .position = 0,
         .lock = .{},
+        .vfs_mount_idx = null,
     };
     return fd;
 }

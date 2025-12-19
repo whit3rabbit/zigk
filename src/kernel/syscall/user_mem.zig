@@ -133,8 +133,6 @@ pub fn isValidUserAccess(ptr: usize, len: usize, mode: AccessMode) bool {
     }
 }
 
-
-
 // =============================================================================
 // Safe Copy Primitives (Assembly)
 // =============================================================================

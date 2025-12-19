@@ -2,7 +2,7 @@ const std = @import("std");
 const uapi = @import("uapi");
 const hal = @import("hal");
 const sched = @import("sched");
-const capabilities = @import("capabilities");
+const process = @import("process");
 
 const SyscallError = uapi.errno.SyscallError;
 
@@ -56,7 +56,6 @@ pub fn sys_wait_interrupt(irq: usize) SyscallError!usize {
     if (irq >= 16) return error.EINVAL;
     const irq_u8: u8 = @intCast(irq);
 
-    const process = @import("process");
     const current = sched.getCurrentThread() orelse return error.EPERM;
     const proc_opaque = current.process orelse return error.EPERM;
     const proc: *process.Process = @ptrCast(@alignCast(proc_opaque));

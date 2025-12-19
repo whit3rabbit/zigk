@@ -373,13 +373,16 @@ Zscapek supports two input paths for keyboard and mouse devices.
 
 **Legacy Path (PS/2):**
 - Controller: Intel 8042 at ports 0x60 (data) and 0x64 (status/command)
-- Driver: `src/drivers/keyboard.zig`
+- Driver: `src/drivers/keyboard.zig` (Kernel) OR `src/user/drivers/ps2` (Userspace - Phase 5)
 - Interrupts: IRQ1 for keyboard, IRQ12 for mouse (via IOAPIC)
 
 **Modern Path (USB):**
 - Controller: XHCI (USB 3.0+) discovered via PCI enumeration
 - Driver: `src/drivers/usb/xhci/root.zig`
 - Interrupts: MSI-X or polling fallback
+
+> [!NOTE]
+> As of Phase 5, input drivers are moving to userspace. The kernel spawns `ps2_driver` or `virtio_input` processes and grants them I/O capabilities. The kernel-side legacy drivers are disabled when corresponding userspace drivers are detected.
 
 ## 6. Hardware Initialization Quirks
 
@@ -485,6 +488,10 @@ prng.init()            -->  Seed xoroshiro128+ with two entropy values
         |
 stack_guard.init()     -->  Generate canary via prng.next(), clear low byte
         |
+initApic()             -->  APIC calibration adds timing jitter to entropy pool
+        |
+stack_guard.reseed()   -->  Reseed canary with stronger entropy before spawning threads
+        |
 scheduler.init()       -->  First threads created (all protected)
 ```
 
@@ -540,7 +547,7 @@ Offset  Size    Type    Field           Description
 | PIE base | `0x5555_5000_0000` | 16 | 64KB | 4GB up |
 | mmap base | `0x1000_0000_0000` | 20 | 4KB (page) | 4TB up |
 | Heap gap | After ELF end | 8 | 4KB (page) | 1MB up |
-| VDSO | `0x7FFF_E000_0000` | 12 | 4KB (page) | 16MB down |
+| VDSO | `0x7FFF_E000_0000` | 16 | 4KB (page) | 256MB down |
 
 **Address Computation**:
 

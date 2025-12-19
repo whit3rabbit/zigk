@@ -12,8 +12,10 @@
 
 const std = @import("std");
 const syscall = @import("syscall");
+const ring = @import("ring");
 
 const SyscallError = syscall.uapi.errno.SyscallError;
+const Ring = ring.Ring;
 const PciDeviceInfo = syscall.PciDeviceInfo;
 const DmaAllocResult = syscall.DmaAllocResult;
 
@@ -142,13 +144,18 @@ const DriverState = struct {
 
     // IRQ for interrupt handling
     irq: u8,
-    
+
     // Netstack PID
     netstack_pid: u32,
+
+    // Ring buffer IPC (zero-copy)
+    rx_ring: ?Ring, // RX ring: driver produces, netstack consumes
+    tx_ring: ?Ring, // TX ring: netstack produces, driver consumes
 };
 
 var driver_state: DriverState = undefined;
 var driver_initialized: bool = false;
+var use_ring_ipc: bool = false; // Set to true if ring IPC is available
 
 pub fn main() void {
     syscall.print("VirtIO-Net Driver Starting...\n");
@@ -175,6 +182,20 @@ pub fn main() void {
     printDec(netstack_pid);
     syscall.print("\n");
 
+    // Initialize ring buffer IPC for zero-copy packet transfer
+    driver_state.rx_ring = null;
+    driver_state.tx_ring = null;
+
+    // Create RX ring: driver (producer) -> netstack (consumer)
+    if (Ring.create(256, "netstack")) |rx_ring| {
+        driver_state.rx_ring = rx_ring;
+        use_ring_ipc = true;
+        syscall.print("Ring IPC: RX ring created (ring_id=");
+        printDec(rx_ring.ring_id);
+        syscall.print(")\n");
+    } else |_| {
+        syscall.print("Ring IPC: Failed to create RX ring, using legacy IPC\n");
+    }
 
     // Step 1: Find VirtIO-Net device
     var pci_devices: [32]PciDeviceInfo = undefined;
@@ -500,30 +521,41 @@ fn rxLoop() noreturn {
 fn txLoop() noreturn {
     syscall.print("[TX] TX loop started\n");
 
-    // IPC message buffer - must match kernel's Message struct exactly (2064 bytes)
+    // IPC message buffer for legacy path
     var msg: syscall.IpcMessage = undefined;
 
     while (true) {
-        // Wait for packet to send via IPC
-        _ = syscall.recv(&msg) catch continue;
+        // Try zero-copy ring IPC first (TX ring: netstack produces, driver consumes)
+        if (driver_state.tx_ring) |*tx_ring| {
+            // Wait for entries in ring
+            _ = tx_ring.wait(1, 100_000_000) catch {}; // 100ms timeout
 
-        // PacketHeader is at the start of msg.payload
-        const header: *const net_ipc.PacketHeader = @ptrCast(@alignCast(&msg.payload));
+            // Process all available entries
+            while (tx_ring.peek()) |entry| {
+                if (entry.len > 0 and entry.len <= 1536) {
+                    // Zero-copy: read directly from ring buffer
+                    const data = @as([*]const u8, @volatileCast(&entry.data));
+                    sendPacket(data[0..entry.len]);
+                }
+                tx_ring.advance();
+            }
 
-        if (header.type != .TX_PACKET) continue;
+            // Process TX completions
+            processTxCompletions();
+        } else {
+            // Fallback: Legacy IPC path
+            _ = syscall.recv(&msg) catch continue;
 
-        if (header.len > MAX_PACKET_SIZE) {
-            continue;
+            const header: *const net_ipc.PacketHeader = @ptrCast(@alignCast(&msg.payload));
+
+            if (header.type != .TX_PACKET) continue;
+            if (header.len > MAX_PACKET_SIZE) continue;
+
+            const data_ptr = msg.payload[@sizeOf(net_ipc.PacketHeader)..];
+            sendPacket(data_ptr[0..header.len]);
+
+            processTxCompletions();
         }
-
-        // Packet data follows PacketHeader within payload
-        const data_ptr = msg.payload[@sizeOf(net_ipc.PacketHeader)..];
-
-        // Send packet
-        sendPacket(data_ptr[0..header.len]);
-
-        // Process TX completions
-        processTxCompletions();
     }
 }
 
@@ -605,26 +637,36 @@ fn processRxCompletions() void {
 
         // Skip VirtIO net header (12 bytes typically)
         if (len > 12) {
-            // Send packet to network stack via IPC
             const data_len = len - 12;
-            if (data_len <= MAX_PACKET_SIZE) {
-                // Construct proper IPC Message
+            const payload_src = packet[12..len];
+
+            // Try zero-copy ring IPC first
+            if (use_ring_ipc) {
+                if (driver_state.rx_ring) |*rx_ring| {
+                    if (rx_ring.reserve()) |entry| {
+                        // Zero-copy: write directly to ring buffer
+                        @memcpy(entry.data[0..data_len], payload_src);
+                        entry.len = @intCast(data_len);
+                        entry.flags = 0;
+                        rx_ring.commit();
+                        _ = rx_ring.notify() catch {};
+                    }
+                    // Ring full - packet dropped (acceptable for best-effort)
+                }
+            } else if (data_len <= MAX_PACKET_SIZE) {
+                // Fallback: Legacy IPC path
                 var msg: syscall.IpcMessage = undefined;
-                msg.sender_pid = 0; // Filled by kernel
+                msg.sender_pid = 0;
                 msg.payload_len = @sizeOf(net_ipc.PacketHeader) + data_len;
 
-                // Write PacketHeader at start of payload
                 const header: *net_ipc.PacketHeader = @ptrCast(@alignCast(&msg.payload));
                 header.type = .RX_PACKET;
                 header.len = @intCast(data_len);
                 header._pad = 0;
 
-                // Copy packet data from DMA buffer to payload after header
                 const data_dest = msg.payload[@sizeOf(net_ipc.PacketHeader)..];
-                const payload_src = packet[12..len];
                 @memcpy(data_dest[0..data_len], payload_src);
 
-                // Send to netstack
                 _ = syscall.send(driver_state.netstack_pid, &msg) catch {};
             }
         }

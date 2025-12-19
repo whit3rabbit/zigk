@@ -1,53 +1,73 @@
-# Userspace Driver Architecture
+# Driver Architecture
 
-Zscapek is transitioning towards a microkernel architecture where device drivers run in userspace. This improves stability (drivers can't crash the kernel) and security (drivers have limited privileges).
+Zscapek uses a hybrid architecture where critical drivers run in the kernel for performance and boot capability, while other drivers run in userspace for stability and security.
 
-## Core Concepts
+## Kernel Drivers
 
-### 1. Capability-Based Security
-Drivers are not implicitly trusted. They must be explicitly granted capabilities to access hardware resources.
-- **Interrupt Capabilities**: Allow a process to wait for specific IRQs (e.g., `SYS_WAIT_INTERRUPT(4)` for UART).
-- **I/O Port Capabilities**: Allow access to specific x86 I/O ports (e.g., `0x3F8` for COM1).
-- **Granting**: Capabilities are currently granted by the `init_proc` during system startup.
+Kernel drivers are located in `src/drivers`. They are used for:
+- Boot-critical devices (AHCI, XHCI, Console)
+- Performance-critical low-level hardware interaction using `MmioDevice`
 
-### 2. Inter-Process Communication (IPC)
-Drivers communicate with the kernel and other processes via message passing.
-- **`SYS_SEND(pid, msg)`**: Send a fixed-size message to a target process.
-- **`SYS_RECV(msg)`**: Block until a message is received.
-- **Kernel Messages**: The kernel can send messages to drivers (e.g., console logs).
+### MmioDevice Pattern
+Modern kernel drivers use the `MmioDevice(RegType)` wrapper for zero-cost, type-safe MMIO access.
+- **Location**: `src/hal/mmio_device.zig`
+- **Usage**:
+  ```zig
+  const regs = MmioDevice(Regs).init(base_addr, size);
+  // Typed read/write
+  const val = regs.read(.CTRL);
+  regs.write(.CTRL, val | 1);
+  ```
 
-### 3. Split-Process Architecture
-To handle asynchronous events (interrupts) and synchronous requests (IPC) without complex threading, drivers often use a **Split-Process Model**:
-- **Input Process (Child)**: Loops on `SYS_WAIT_INTERRUPT`. Handles hardware events and sends notifications.
-- **Output Process (Parent)**: Loops on `SYS_RECV`. Handles requests from clients (or kernel) and writes to hardware.
-- **Shared State**: The processes are created via `fork()`, sharing capabilities and file descriptors.
+### Drivers using MmioDevice
+- **XHCI** (`src/drivers/usb/xhci`)
+- **EHCI** (`src/drivers/usb/ehci`)
+- **AHCI** (`src/drivers/storage/ahci`)
+- **E1000e** (`src/drivers/net/e1000e`)
 
-## Reference Implementation: UART Driver
+---
 
-The `uart_driver` (`src/user/drivers/uart/main.zig`) demonstrates this pattern:
+## Userspace Drivers
 
-### Architecture
-1. **Initialization**: The driver initializes the UART hardware (baud rate, FIFO) using `SYS_OUTB`.
-2. **Fork**: The process forks into an Input Handler and an Output Handler.
-3. **Output Handler (Parent)**:
-   - Registers as the kernel logger via `SYS_REGISTER_IPC_LOGGER`.
-   - Receives log messages from the kernel via IPC.
-   - Writes characters to the UART TX port.
-4. **Input Handler (Child)**:
-   - Waits for IRQ 4 using `SYS_WAIT_INTERRUPT`.
-   - Reads characters from UART RX port.
-   - Echoes characters back (currently direct echo, future: send to shell).
+Userspace drivers are located in `src/user/drivers`. They interact with the kernel via capabilities and IPC.
 
-## Future Work
+### Core Concepts
 
-### 1. Networking (VirtIO-Net)
-- **Goal**: Move the current kernel-level VirtIO-Net driver to userspace.
-- **Needs**: DMA capability (mapping physical memory), VirtIO queue management in userspace.
+#### 1. Capability-Based Security
+Drivers must be explicitly granted capabilities by `init_proc`:
+- **Interrupts**: `SYS_WAIT_INTERRUPT(irq)`
+- **I/O Ports**: `SYS_OUTB`/`SYS_INB` (restricted)
+- **MMIO**: `SYS_MMAP_PHYS` (requires `PciCapability`)
+- **DMA**: `SYS_ALLOC_DMA` (requires `DmaCapability`)
 
-### 2. Storage (VirtIO-Blk)
-- **Goal**: Implement a userspace disk driver.
-- **Needs**: Similar DMA requirements as networking.
+#### 2. Ring IPC (Zero-Copy)
+High-performance drivers (like Network) use Shared Memory Rings to communicate with the system.
+- **Mechanism**: Single-Producer/Single-Consumer rings mapped in both driver and client (e.g., Netstack) address spaces.
+- **Syscalls**: `ring_create`, `ring_attach`, `ring_notify`, `ring_wait`
+- **Pattern**:
+    - **TX Ring**: Client produces packets -> Driver consumes (transmits)
+    - **RX Ring**: Driver produces packets (receives) -> Client consumes
 
-### 3. Input (PS/2)
-- **Goal**: Migrate keyboard/mouse logic from kernel `input` module to a userspace driver.
-- **Status**: Doom currently uses direct syscalls for input. A dedicated driver would broadcast input events to the active window/session.
+#### 3. Split-Process Architecture
+To handle asynchronous events without threading complexity:
+- **Input Process**: Loops on `SYS_WAIT_INTERRUPT` or `ring_wait`.
+- **Output Process**: Loops on `SYS_RECV` (Legacy IPC) or `ring_wait` (Command Ring).
+
+### Driver Implementations
+
+#### VirtIO-Net (`src/user/drivers/virtio_net`)
+- **Type**: Userspace Network Driver
+- **IPC**: Uses **Ring IPC** for RX/TX data path.
+- **Status**: Functional MPSC (Multi-Producer Single-Consumer) design.
+
+#### VirtIO-Blk (`src/user/drivers/virtio_blk`)
+- **Type**: Userspace Storage Driver
+- **Status**: In development.
+
+#### PS/2 Input (`src/user/drivers/ps2`)
+- **Type**: Userspace Input Driver
+- **Status**: Handles Keyboard/Mouse interrupt 1/12, broadcasts events.
+
+#### UART (`src/user/drivers/uart`)
+- **Type**: Userspace Serial Driver
+- **Status**: Simple split-process echo server.

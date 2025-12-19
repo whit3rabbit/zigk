@@ -366,8 +366,8 @@ pub fn sys_execve(frame: *hal.syscall.SyscallFrame, path_ptr: usize, argv_ptr: u
         argv,
         envp,
         vdso_base,
-        aslr_offsets.stack_top,          // ASLR stack top
-        aslr.getPieBase(&aslr_offsets),  // ASLR PIE base
+        aslr_offsets.stack_top, // ASLR stack top
+        aslr.getPieBase(&aslr_offsets), // ASLR PIE base
     ) catch |err| {
         console.err("sys_execve: Failed to exec: {}", .{err});
         // Map ELF loader errors to appropriate syscall errors
@@ -383,7 +383,7 @@ pub fn sys_execve(frame: *hal.syscall.SyscallFrame, path_ptr: usize, argv_ptr: u
         // Continue anyway - libc will fallback
         break :blk;
     };
-    
+
     // Store the new VDSO base and ASLR offsets in the process struct
     // These are needed for fork() to inherit the address layout
     const current_proc_for_aslr = base.getCurrentProcess();
@@ -713,19 +713,9 @@ pub fn sys_map_fb() SyscallError!usize {
 }
 
 // =============================================================================
-// Threading (Stubs)
+// Threading
 // =============================================================================
 
-/// sys_clone (56) - Create a child process/thread
-///
-/// Clone is used for both fork() and thread creation, depending on flags.
-/// MVP: Returns ENOSYS (threading not implemented)
-///
-/// For full implementation, clone needs to:
-/// - Create a new thread/process structure
-/// - Handle CLONE_VM (share address space for threads)
-/// - Handle CLONE_THREAD (create thread, not process)
-/// - Handle CLONE_PARENT_SETTID, CLONE_CHILD_SETTID, etc.
 /// sys_clone (56) - Create a child process/thread
 ///
 /// Clone is used for both fork() and thread creation, depending on flags.
@@ -800,51 +790,51 @@ pub fn sys_clone(frame: *hal.syscall.SyscallFrame) SyscallError!usize {
         ) catch {
             return error.ENOMEM;
         };
-        errdefer _ = thread.destroyThread(child_thread); 
+        errdefer _ = thread.destroyThread(child_thread);
 
         // Handle CLONE_PARENT_SETTID (store child TID in parent memory)
         // Usually passed in RDX (parent_tid_ptr)
         if ((flags & uapi.sched.CLONE_PARENT_SETTID) != 0) {
-             const parent_tid_ptr = frame.rdx;
-             if (isValidUserAccess(parent_tid_ptr, @sizeOf(i32), AccessMode.Write)) {
-                  UserPtr.from(parent_tid_ptr).writeValue(@as(i32, @intCast(child_thread.tid))) catch {
-                      // Linux ignores fault here usually or returns EFAULT. 
-                      // For robustness, we'll return EFAULT.
-                      return error.EFAULT;
-                  };
-             } else {
-                 return error.EFAULT;
-             }
+            const parent_tid_ptr = frame.rdx;
+            if (isValidUserAccess(parent_tid_ptr, @sizeOf(i32), AccessMode.Write)) {
+                UserPtr.from(parent_tid_ptr).writeValue(@as(i32, @intCast(child_thread.tid))) catch {
+                    // Linux ignores fault here usually or returns EFAULT.
+                    // For robustness, we'll return EFAULT.
+                    return error.EFAULT;
+                };
+            } else {
+                return error.EFAULT;
+            }
         }
 
         // Handle CLONE_CHILD_CLEARTID (store child TID in child memory and clear on exit)
         // Usually passed in R10 (child_tid_ptr)
         if ((flags & uapi.sched.CLONE_CHILD_CLEARTID) != 0) {
-             const child_tid_ptr = frame.r10;
-             if (isValidUserAccess(child_tid_ptr, @sizeOf(i32), AccessMode.Write)) {
-                  // Store TID in child memory (same address space as parent/current)
-                  UserPtr.from(child_tid_ptr).writeValue(@as(i32, @intCast(child_thread.tid))) catch {
-                      return error.EFAULT;
-                  };
-                  // Remember address to clear on exit
-                  child_thread.clear_child_tid = child_tid_ptr;
-             } else {
-                 return error.EFAULT;
-             }
+            const child_tid_ptr = frame.r10;
+            if (isValidUserAccess(child_tid_ptr, @sizeOf(i32), AccessMode.Write)) {
+                // Store TID in child memory (same address space as parent/current)
+                UserPtr.from(child_tid_ptr).writeValue(@as(i32, @intCast(child_thread.tid))) catch {
+                    return error.EFAULT;
+                };
+                // Remember address to clear on exit
+                child_thread.clear_child_tid = child_tid_ptr;
+            } else {
+                return error.EFAULT;
+            }
         }
 
         // Handle CLONE_CHILD_SETTID (store child TID in child memory)
         // Usually passed in R10 (child_tid_ptr)
         // Note: SETTID and CLEARTID both use the same pointer register (R10)
         if ((flags & uapi.sched.CLONE_CHILD_SETTID) != 0) {
-             const child_tid_ptr = frame.r10;
-             if (isValidUserAccess(child_tid_ptr, @sizeOf(i32), AccessMode.Write)) {
-                  UserPtr.from(child_tid_ptr).writeValue(@as(i32, @intCast(child_thread.tid))) catch {
-                      return error.EFAULT;
-                  };
-             } else {
-                 return error.EFAULT;
-             }
+            const child_tid_ptr = frame.r10;
+            if (isValidUserAccess(child_tid_ptr, @sizeOf(i32), AccessMode.Write)) {
+                UserPtr.from(child_tid_ptr).writeValue(@as(i32, @intCast(child_thread.tid))) catch {
+                    return error.EFAULT;
+                };
+            } else {
+                return error.EFAULT;
+            }
         }
 
         // Copy parent's kernel stack frame (register state) to child
@@ -863,8 +853,8 @@ pub fn sys_clone(frame: *hal.syscall.SyscallFrame) SyscallError!usize {
 
         // Handle TLS setup (CLONE_SETTLS)
         if ((flags & uapi.sched.CLONE_SETTLS) != 0) {
-             child_thread.fs_base = tls;
-             // Note: We don't write MSR here, child will maintain it on switch
+            child_thread.fs_base = tls;
+            // Note: We don't write MSR here, child will maintain it on switch
         }
 
         // Add child thread to process/thread hierarchy

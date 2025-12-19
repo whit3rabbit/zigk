@@ -18,6 +18,7 @@ const fd_mod = @import("fd");
 const user_mem = @import("user_mem");
 const error_helpers = @import("error_helpers.zig");
 const hal = @import("hal");
+const devfs = @import("devfs");
 
 const SyscallError = base.SyscallError;
 const UserPtr = base.UserPtr;
@@ -48,7 +49,7 @@ pub fn sys_read(fd_num: usize, buf_ptr: usize, count: usize) SyscallError!usize 
 
     // [Debug] Log reads on stdin (0)
     if (fd_num == 0) {
-        console.debug("Syscall: read(0, {x}, {})", .{buf_ptr, count});
+        console.debug("Syscall: read(0, {x}, {})", .{ buf_ptr, count });
     }
 
     const fd_u32 = safeFdCast(fd_num) orelse return error.EBADF;
@@ -146,9 +147,7 @@ pub fn sys_write(fd_num: usize, buf_ptr: usize, count: usize) SyscallError!usize
 
     // Copy from user to kernel
     const uptr = UserPtr.from(buf_ptr);
-    if (uptr.copyToKernel(kbuf) catch null == null) {
-        return error.EFAULT;
-    }
+    _ = uptr.copyToKernel(kbuf) catch return error.EFAULT;
 
     // Write from kernel buffer (legacy isize return from device ops)
     // Acquire lock for atomicity
@@ -194,9 +193,7 @@ pub fn sys_writev(fd: usize, bvec_ptr: usize, count: usize) SyscallError!usize {
     defer heap.allocator().free(kvecs);
 
     const uptr = UserPtr.from(bvec_ptr);
-    if (uptr.copyToKernel(std.mem.sliceAsBytes(kvecs)) catch null == null) {
-        return error.EFAULT;
-    }
+    _ = uptr.copyToKernel(std.mem.sliceAsBytes(kvecs)) catch return error.EFAULT;
 
     var total_written: usize = 0;
     var total_len: usize = 0;
@@ -293,22 +290,10 @@ fn perform_write_locked(fd: *FileDescriptor, buf_ptr: usize, count: usize) Sysca
 
     // Copy from user to kernel
     const uptr = UserPtr.from(buf_ptr);
-    if (uptr.copyToKernel(kbuf) catch null == null) {
-        return error.EFAULT;
-    }
+    _ = uptr.copyToKernel(kbuf) catch return error.EFAULT;
 
     const bytes_written = do_write_locked(fd, kbuf);
-    if (bytes_written < 0) {
-        const errno_val: i32 = @intCast(-bytes_written);
-        return switch (errno_val) {
-            5 => error.EIO,
-            11 => error.EAGAIN,
-            14 => error.EFAULT,
-            32 => error.EPIPE,
-            else => error.EIO,
-        };
-    }
-    return @intCast(bytes_written);
+    return error_helpers.mapWriteError(bytes_written);
 }
 
 /// sys_ioctl (16) - Control device
@@ -486,6 +471,9 @@ pub fn sys_fstat(fd_num: usize, stat_buf: usize) SyscallError!usize {
 
 /// sys_getdents64 (217) - Get directory entries
 pub fn sys_getdents64(fd_num: usize, dirp: usize, count: usize) SyscallError!usize {
+    const DT_CHR: u8 = 2;
+    const DT_REG: u8 = 8;
+
     // Validate buffer
     if (!isValidUserAccess(dirp, count, AccessMode.Write)) {
         return error.EFAULT;
@@ -510,78 +498,108 @@ pub fn sys_getdents64(fd_num: usize, dirp: usize, count: usize) SyscallError!usi
     const fd_u32 = safeFdCast(fd_num) orelse return error.EBADF;
     const fd = table.get(fd_u32) orelse return error.EBADF;
 
-    // Check if this is our dummy root directory FD
-    // We identify it by having null private_data (hack for MVP)
-    // Real implementation should have explicit type checking.
-    if (fd.private_data != null) {
+    if (fd.ops != &fd_mod.dir_ops) {
         return error.ENOTDIR;
     }
 
-    // Use InitRD iterator
-    // We need to store iteration state (offset) in the FD.
-    // But our dummy FD has null private_data.
-    // We can use fd.position as the offset into the tar file.
+    const initrd_tag_ptr: ?*anyopaque = @ptrCast(@constCast(&fd_mod.initrd_dir_tag));
+    const devfs_tag_ptr: ?*anyopaque = @ptrCast(@constCast(&fd_mod.devfs_dir_tag));
 
-    // InitRD Iterator needs a pointer to InitRD.
-    const initrd = &fs.initrd.InitRD.instance;
-    const start_offset = std.math.cast(usize, fd.position) orelse return error.EINVAL;
-    if (start_offset > initrd.data.len) {
+    // Use InitRD iterator
+    if (fd.private_data == null or fd.private_data == initrd_tag_ptr) {
+        // We need to store iteration state (offset) in the FD.
+        // We can use fd.position as the offset into the tar file.
+
+        const initrd = &fs.initrd.InitRD.instance;
+        const start_offset = std.math.cast(usize, fd.position) orelse return error.EINVAL;
+        if (start_offset > initrd.data.len) {
+            return 0;
+        }
+
+        var iterator = fs.initrd.FileIterator{
+            .initrd = initrd,
+            .offset = start_offset,
+        };
+
+        var bytes_written: usize = 0;
+        const buf_uptr = UserPtr.from(dirp);
+
+        while (iterator.next()) |file| {
+            const name_len = file.name.len;
+            const reclen = @sizeOf(uapi.dirent.Dirent64) + name_len + 1;
+            const aligned_reclen = std.mem.alignForward(usize, reclen, 8);
+
+            if (bytes_written + aligned_reclen > count) {
+                break;
+            }
+
+            var ent: uapi.dirent.Dirent64 = .{
+                .d_ino = 1,
+                .d_off = @intCast(iterator.offset),
+                .d_reclen = @intCast(aligned_reclen),
+                .d_type = DT_REG,
+                .d_name = undefined,
+            };
+
+            const ent_bytes = std.mem.asBytes(&ent);
+            _ = buf_uptr.offset(bytes_written).copyFromKernel(ent_bytes) catch return error.EFAULT;
+
+            const name_offset = bytes_written + @offsetOf(uapi.dirent.Dirent64, "d_name");
+            _ = buf_uptr.offset(name_offset).copyFromKernel(file.name) catch return error.EFAULT;
+            _ = buf_uptr.offset(name_offset + name_len).writeValue(@as(u8, 0)) catch return error.EFAULT;
+
+            bytes_written += aligned_reclen;
+            fd.position = iterator.offset;
+        }
+
+        return bytes_written;
+    }
+
+    if (fd.private_data != devfs_tag_ptr) {
+        return error.ENOTDIR;
+    }
+
+    const device_names = devfs.snapshotDeviceNames(heap.allocator()) catch {
+        return error.ENOMEM;
+    };
+    defer heap.allocator().free(device_names);
+
+    const start_index = std.math.cast(usize, fd.position) orelse return error.EINVAL;
+    if (start_index >= device_names.len) {
         return 0;
     }
 
-    var iterator = fs.initrd.FileIterator{
-        .initrd = initrd,
-        .offset = start_offset,
-    };
-
     var bytes_written: usize = 0;
     const buf_uptr = UserPtr.from(dirp);
+    var idx: usize = start_index;
 
-    while (iterator.next()) |file| {
-        // Construct linux_dirent64
-        // struct linux_dirent64 {
-        //    ino64_t        d_ino;    /* 64-bit inode number */
-        //    off64_t        d_off;    /* 64-bit offset to next structure */
-        //    unsigned short d_reclen; /* Size of this dirent */
-        //    unsigned char  d_type;   /* File type */
-        //    char           d_name[]; /* Filename (null-terminated) */
-        // };
-
-        // Calculate size: header + name + null
-        const name_len = file.name.len;
+    while (idx < device_names.len) : (idx += 1) {
+        const name = device_names[idx];
+        const name_len = name.len;
         const reclen = @sizeOf(uapi.dirent.Dirent64) + name_len + 1;
-        const aligned_reclen = std.mem.alignForward(usize, reclen, 8); // Align to 8 bytes
+        const aligned_reclen = std.mem.alignForward(usize, reclen, 8);
 
         if (bytes_written + aligned_reclen > count) {
-            // No more space
             break;
         }
 
-        // We need to construct this manually byte-by-byte or use a struct
         var ent: uapi.dirent.Dirent64 = .{
-            .d_ino = 1, // Dummy inode
-            .d_off = @intCast(iterator.offset), // Offset of NEXT entry
+            .d_ino = 1,
+            .d_off = @intCast(idx + 1),
             .d_reclen = @intCast(aligned_reclen),
-            .d_type = 8, // DT_REG (regular file)
+            .d_type = DT_CHR,
             .d_name = undefined,
         };
 
-        // Write fixed part
         const ent_bytes = std.mem.asBytes(&ent);
-
         _ = buf_uptr.offset(bytes_written).copyFromKernel(ent_bytes) catch return error.EFAULT;
 
-        // Write name
         const name_offset = bytes_written + @offsetOf(uapi.dirent.Dirent64, "d_name");
-        _ = buf_uptr.offset(name_offset).copyFromKernel(file.name) catch return error.EFAULT;
-
-        // Write null terminator and padding
+        _ = buf_uptr.offset(name_offset).copyFromKernel(name) catch return error.EFAULT;
         _ = buf_uptr.offset(name_offset + name_len).writeValue(@as(u8, 0)) catch return error.EFAULT;
 
         bytes_written += aligned_reclen;
-
-        // Update FD position to next offset
-        fd.position = iterator.offset;
+        fd.position = idx + 1;
     }
 
     return bytes_written;
@@ -832,13 +850,7 @@ pub fn sys_link(oldpath_ptr: usize, newpath_ptr: usize) SyscallError!usize {
     return error.EROFS;
 }
 
-/// sys_unlink (87) - Delete a file
-///
-/// MVP: Stub - returns EROFS (read-only filesystem)
-pub fn sys_unlink(path_ptr: usize) SyscallError!usize {
-    _ = path_ptr;
-    return error.EROFS;
-}
+// sys_unlink is implemented in fs_handlers.zig
 
 /// sys_symlink (88) - Create a symbolic link
 ///

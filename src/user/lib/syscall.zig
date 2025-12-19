@@ -160,7 +160,7 @@ pub const SyscallError = error{
 };
 
 /// Convert raw syscall return value to error union
-fn errorFromReturn(ret: usize) SyscallError {
+pub fn errorFromReturn(ret: usize) SyscallError {
     const err: isize = @bitCast(ret);
     if (err >= 0) return error.Unexpected;
 

@@ -33,7 +33,9 @@ build.zig
     |       |-- syscall_interrupt_module  -> interrupt.zig
     |       |-- syscall_port_io_module    -> port_io.zig
     |       |-- syscall_mmio_module       -> mmio.zig
-    |       `-- syscall_pci_module        -> pci_syscall.zig
+    |       |-- syscall_pci_module        -> pci_syscall.zig
+    |       |-- syscall_ring_module       -> ring.zig
+    |       `-- syscall_fs_handlers_module -> fs_handlers.zig
     |
     +-- syscall_table_module (src/kernel/syscall/table.zig)
             |-- Imports all handler modules
@@ -157,6 +159,8 @@ src/kernel/syscall/
     port_io.zig    - Raw port I/O access
     mmio.zig       - MMIO mapping
     pci_syscall.zig- PCI configuration and enumeration
+    ring.zig       - Ring buffer IPC (create, attach, wait, notify)
+    fs_handlers.zig- Filesystem operations (mount, umount)
 ```
 
 ## Syscall Quick Reference
@@ -235,7 +239,7 @@ src/kernel/syscall/
 | 84 | rmdir | (path) -> int | io.zig |
 | 85 | creat | (path, mode) -> fd | - |
 | 86 | link | (old, new) -> int | io.zig |
-| 87 | unlink | (path) -> int | io.zig |
+| 87 | unlink | (path) -> int | fs_handlers.zig |
 | 88 | symlink | (target, link) -> int | io.zig |
 | 89 | readlink | (path, buf, size) -> ssize_t | io.zig |
 | 90 | chmod | (path, mode) -> int | io.zig |
@@ -255,6 +259,8 @@ src/kernel/syscall/
 | 110 | getppid | () -> pid_t | process.zig |
 | 158 | arch_prctl | (code, addr) -> int | execution.zig |
 | 160 | setrlimit | (res, rlim) -> int | - |
+| 165 | mount | (src, tgt, type, flags, data) -> int | fs_handlers.zig |
+| 166 | umount2 | (target, flags) -> int | fs_handlers.zig |
 | 170 | sethostname | (name, len) -> int | - |
 | 171 | setdomainname | (name, len) -> int | - |
 | 202 | futex | (uaddr, op, val, timeout, uaddr2, val3) -> int | - |
@@ -298,6 +304,19 @@ src/kernel/syscall/
 | 1033 | pci_enumerate | (buf, max) -> int | pci_syscall.zig |
 | 1034 | pci_config_read | (b,d,f,off) -> val | pci_syscall.zig |
 | 1035 | pci_config_write | (b,d,f,off,val) -> int | pci_syscall.zig |
+| 1026 | register_service | (name, len) -> int | ipc.zig |
+| 1027 | lookup_service | (name, len) -> pid | ipc.zig |
+
+### Ring Buffer IPC Syscalls (1040-1049)
+
+| # | Name | Signature | Handler |
+|---|------|-----------|---------|
+| 1040 | ring_create | (sz, cnt, pid, name, len) -> id | ring.zig |
+| 1041 | ring_attach | (id, res_ptr) -> int | ring.zig |
+| 1042 | ring_detach | (id) -> int | ring.zig |
+| 1043 | ring_wait | (id, min, time) -> cnt | ring.zig |
+| 1044 | ring_notify | (id) -> int | ring.zig |
+| 1045 | ring_wait_any | (ids, cnt, min, time) -> id | ring.zig |
 
 ### Implementation Status Legend
 

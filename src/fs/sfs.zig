@@ -23,19 +23,31 @@ const uapi = @import("uapi");
 const console = @import("console"); // Assuming console is available via build options or we need to add import
 const sync = @import("sync");
 
-// Magic: "SFS1"
-const SFS_MAGIC: u32 = 0x31534653;
+// Magic: "SFS2" (version 2 with bitmap allocation)
+const SFS_MAGIC: u32 = 0x32534653;
+const SFS_VERSION: u32 = 2;
 const SECTOR_SIZE: u32 = 512;
 const MAX_FILES: u32 = 64;
 const ROOT_DIR_BLOCKS: u32 = (MAX_FILES * @sizeOf(DirEntry) + SECTOR_SIZE - 1) / SECTOR_SIZE;
-const DATA_START_BLOCK: u32 = 1 + ROOT_DIR_BLOCKS;
+
+// Bitmap configuration: Each bitmap block tracks 512*8 = 4096 blocks
+const BITS_PER_BLOCK: u32 = SECTOR_SIZE * 8;
+const BITMAP_BLOCKS: u32 = 4; // Supports up to 16384 blocks (8MB with 512B sectors)
+const DATA_START_BLOCK: u32 = 1 + BITMAP_BLOCKS + ROOT_DIR_BLOCKS;
 
 const Superblock = extern struct {
     magic: u32,
+    version: u32,
     block_size: u32,
+    total_blocks: u32,
     file_count: u32,
-    next_free_block: u32,
-    _pad: [512 - 16]u8,
+    free_blocks: u32,
+    bitmap_start: u32,
+    bitmap_blocks: u32,
+    root_dir_start: u32,
+    data_start: u32,
+    next_free_block: u32, // Next block for sequential allocation
+    _pad: [512 - 44]u8,
 };
 
 const DirEntry = extern struct {
@@ -67,14 +79,14 @@ pub const SFS = struct {
         _ = try readSector(device_fd, 0, &buf);
 
         const sb: *Superblock = @ptrCast(@alignCast(&buf));
-        if (sb.magic != SFS_MAGIC) {
-            console.warn("SFS: Invalid magic, formatting...", .{});
+        if (sb.magic != SFS_MAGIC or sb.version != SFS_VERSION) {
+            console.warn("SFS: Invalid magic or old version, formatting...", .{});
             try self.format();
         } else {
             self.superblock = sb.*;
-            console.info("SFS: Mounted. Files: {}, Free Block: {}", .{
+            console.info("SFS: Mounted. Files: {}, Free Blocks: {}", .{
                 self.superblock.file_count,
-                self.superblock.next_free_block,
+                self.superblock.free_blocks,
             });
         }
 
@@ -82,15 +94,26 @@ pub const SFS = struct {
             .context = self,
             .open = sfsOpen,
             .unmount = sfsUnmount,
+            .unlink = null, // TODO: implement sfsUnlink
         };
     }
 
     fn format(self: *SFS) !void {
-        // Initialize superblock
+        // Calculate total blocks (assume 16MB disk)
+        const total_blocks: u32 = 32768; // 16MB / 512B per sector
+
+        // Initialize superblock with bitmap layout
         self.superblock = Superblock{
             .magic = SFS_MAGIC,
+            .version = SFS_VERSION,
             .block_size = SECTOR_SIZE,
+            .total_blocks = total_blocks,
             .file_count = 0,
+            .free_blocks = total_blocks - DATA_START_BLOCK,
+            .bitmap_start = 1,
+            .bitmap_blocks = BITMAP_BLOCKS,
+            .root_dir_start = 1 + BITMAP_BLOCKS,
+            .data_start = DATA_START_BLOCK,
             .next_free_block = DATA_START_BLOCK,
             ._pad = undefined,
         };
@@ -98,17 +121,120 @@ pub const SFS = struct {
         // Write superblock
         try writeSector(self.device_fd, 0, std.mem.asBytes(&self.superblock));
 
-        // Clear root directory blocks
+        // Clear bitmap blocks (all zeros = all free)
         const zero_buf = [_]u8{0} ** 512;
         var i: u32 = 0;
-        while (i < ROOT_DIR_BLOCKS) : (i += 1) {
+        while (i < BITMAP_BLOCKS) : (i += 1) {
             try writeSector(self.device_fd, 1 + i, &zero_buf);
+        }
+
+        // Clear root directory blocks
+        i = 0;
+        while (i < ROOT_DIR_BLOCKS) : (i += 1) {
+            try writeSector(self.device_fd, self.superblock.root_dir_start + i, &zero_buf);
         }
     }
 
     fn updateSuperblock(self: *SFS) !void {
         try writeSector(self.device_fd, 0, std.mem.asBytes(&self.superblock));
     }
+
+    /// Allocate a free block from the bitmap
+    /// Returns block number or error if disk is full
+    pub fn allocateBlock(self: *SFS) !u32 {
+        const held = self.alloc_lock.acquire();
+        defer held.release();
+
+        // Scan bitmap blocks for a free bit
+        var bitmap_block: u32 = 0;
+        while (bitmap_block < self.superblock.bitmap_blocks) : (bitmap_block += 1) {
+            var buf: [512]u8 = undefined;
+            readSector(self.device_fd, self.superblock.bitmap_start + bitmap_block, &buf) catch return error.IOError;
+
+            // Scan bytes in this bitmap block
+            for (&buf, 0..) |*byte_ptr, byte_idx| {
+                const byte = byte_ptr.*;
+                if (byte != 0xFF) {
+                    // Found a byte with at least one free bit
+                    var bit: u3 = 0;
+                    while (bit < 8) : (bit += 1) {
+                        if ((byte & (@as(u8, 1) << bit)) == 0) {
+                            // Found free bit - mark as allocated
+                            buf[byte_idx] |= (@as(u8, 1) << bit);
+                            writeSector(self.device_fd, self.superblock.bitmap_start + bitmap_block, &buf) catch return error.IOError;
+
+                            // Calculate absolute block number with overflow checking
+                            const bitmap_offset = std.math.mul(u32, bitmap_block, BITS_PER_BLOCK) catch return error.IOError;
+                            const byte_offset = std.math.mul(u32, @as(u32, @intCast(byte_idx)), 8) catch return error.IOError;
+                            const bit_offset = std.math.add(u32, byte_offset, bit) catch return error.IOError;
+                            const total_offset = std.math.add(u32, bitmap_offset, bit_offset) catch return error.IOError;
+                            const block_num = std.math.add(u32, self.superblock.data_start, total_offset) catch return error.IOError;
+
+                            // Update superblock free count
+                            if (self.superblock.free_blocks > 0) {
+                                self.superblock.free_blocks -= 1;
+                            }
+                            self.updateSuperblock() catch return error.IOError;
+
+                            return block_num;
+                        }
+                    }
+                }
+            }
+        }
+
+        return error.ENOSPC; // No free blocks
+    }
+
+    /// Free a block back to the bitmap
+    pub fn freeBlock(self: *SFS, block_num: u32) !void {
+        if (block_num < self.superblock.data_start) return error.InvalidBlock;
+
+        const held = self.alloc_lock.acquire();
+        defer held.release();
+
+        // Calculate bitmap position
+        const relative_block = block_num - self.superblock.data_start;
+        const bitmap_block_idx = relative_block / BITS_PER_BLOCK;
+        const byte_idx = (relative_block % BITS_PER_BLOCK) / 8;
+        const bit_idx: u3 = @intCast(relative_block % 8);
+
+        if (bitmap_block_idx >= self.superblock.bitmap_blocks) return error.InvalidBlock;
+
+        // Read bitmap block
+        var buf: [512]u8 = undefined;
+        readSector(self.device_fd, self.superblock.bitmap_start + bitmap_block_idx, &buf) catch return error.IOError;
+
+        // Check if already free (double-free detection)
+        if ((buf[byte_idx] & (@as(u8, 1) << bit_idx)) == 0) {
+            console.warn("SFS: Double-free detected for block {}", .{block_num});
+            return;
+        }
+
+        // Clear bit
+        buf[byte_idx] &= ~(@as(u8, 1) << bit_idx);
+        writeSector(self.device_fd, self.superblock.bitmap_start + bitmap_block_idx, &buf) catch return error.IOError;
+
+        // Update superblock
+        self.superblock.free_blocks += 1;
+        self.updateSuperblock() catch return error.IOError;
+    }
+
+    /// Free multiple contiguous blocks
+    pub fn freeBlocks(self: *SFS, start_block: u32, count: u32) void {
+        var i: u32 = 0;
+        while (i < count) : (i += 1) {
+            self.freeBlock(start_block + i) catch |err| {
+                console.warn("SFS: Failed to free block {}: {}", .{ start_block + i, err });
+            };
+        }
+    }
+
+    const SfsError = error{
+        IOError,
+        InvalidBlock,
+        ENOSPC,
+    };
 };
 
 // Helper wrappers
@@ -168,6 +294,11 @@ fn sfsOpen(ctx: ?*anyopaque, path: []const u8, flags: u32) vfs.Error!*fd.FileDes
     // Normalize path (remove leading /)
     const name = if (path.len > 0 and path[0] == '/') path[1..] else path;
 
+    // Security: Reject path traversal attempts
+    if (std.mem.indexOf(u8, name, "..")) |_| {
+        return vfs.Error.AccessDenied;
+    }
+
     if (name.len == 0 or std.mem.eql(u8, name, ".")) {
         // Root directory - not supported as file yet
         return vfs.Error.IsDirectory;
@@ -184,7 +315,7 @@ fn sfsOpen(ctx: ?*anyopaque, path: []const u8, flags: u32) vfs.Error!*fd.FileDes
     var block: u32 = 0;
     while (block < ROOT_DIR_BLOCKS) : (block += 1) {
         var buf: [512]u8 = undefined;
-        readSector(self.device_fd, 1 + block, &buf) catch return vfs.Error.IOError;
+        readSector(self.device_fd, self.superblock.root_dir_start + block, &buf) catch return vfs.Error.IOError;
 
         // Iterate entries in block (4 entries per 512 byte block, 128 bytes each)
         var i: u32 = 0;
@@ -227,10 +358,12 @@ fn sfsOpen(ctx: ?*anyopaque, path: []const u8, flags: u32) vfs.Error!*fd.FileDes
             if (self.superblock.file_count >= MAX_FILES) return vfs.Error.NoMemory; // Disk full (inodes)
             const idx = free_idx orelse return vfs.Error.NoMemory;
 
-            // Allocate entry
+            // Allocate first block for new file using bitmap
+            const start_block = self.allocateBlock() catch return vfs.Error.NoMemory;
+
             var new_entry = DirEntry{
                 .name = [_]u8{0} ** 32,
-                .start_block = self.superblock.next_free_block, // Optimistic allocation
+                .start_block = start_block,
                 .size = 0,
                 .flags = 1,
                 ._pad = undefined,
@@ -242,12 +375,12 @@ fn sfsOpen(ctx: ?*anyopaque, path: []const u8, flags: u32) vfs.Error!*fd.FileDes
             const offset_idx = idx % 4;
 
             var buf: [512]u8 = undefined;
-            readSector(self.device_fd, 1 + block_idx, &buf) catch return vfs.Error.IOError;
+            readSector(self.device_fd, self.superblock.root_dir_start + block_idx, &buf) catch return vfs.Error.IOError;
 
             const dest: *DirEntry = @ptrCast(@alignCast(&buf[offset_idx * 128]));
             dest.* = new_entry;
 
-            writeSector(self.device_fd, 1 + block_idx, &buf) catch return vfs.Error.IOError;
+            writeSector(self.device_fd, self.superblock.root_dir_start + block_idx, &buf) catch return vfs.Error.IOError;
 
             self.superblock.file_count += 1;
             self.updateSuperblock() catch return vfs.Error.IOError;
@@ -335,34 +468,40 @@ fn sfsWrite(file_desc: *fd.FileDescriptor, buf: []const u8) isize {
     // Let's implement: Can only grow if (start_block + current_blocks) == next_free_block.
     // Otherwise, EnOSPC (No space/fragmentation).
 
-    // Calculate current blocks used
-    const current_blocks = (file.size + 511) / 512;
-    const end_block = file.start_block + current_blocks;
+    // Calculate current blocks used (preliminary check before lock)
+    const prelim_current_blocks = (file.size + 511) / 512;
 
     const new_size_needed = file_desc.position + buf.len;
     const new_blocks_needed = (new_size_needed + 511) / 512;
 
-    if (new_blocks_needed > current_blocks) {
+    if (new_blocks_needed > prelim_current_blocks) {
         // Need to grow - acquire lock to prevent TOCTOU race on superblock
         const held = file.fs.alloc_lock.acquire();
         defer held.release();
 
-        // Re-check condition under lock (another thread may have modified)
-        if (end_block != file.fs.superblock.next_free_block) {
-            // Not at end of disk allocation
-            // If file size is 0 (new file), it IS at next_free_block (set in open).
-            if (file.size == 0) {
-                // It is at next_free_block
-            } else {
-                console.warn("SFS: Cannot grow file not at end of allocation", .{});
-                return -28; // ENOSPC
-            }
-        }
+        // SECURITY: Recalculate under lock to prevent TOCTOU race
+        // Another thread may have modified file.size between our check and lock acquisition
+        const current_blocks = (file.size + 511) / 512;
+        const end_block = file.start_block + current_blocks;
 
-        // Update superblock free pointer atomically with the check
-        const blocks_to_add = std.math.cast(u32, new_blocks_needed - current_blocks) orelse return -28; // ENOSPC
-        file.fs.superblock.next_free_block += blocks_to_add;
-        file.fs.updateSuperblock() catch return -5;
+        // Re-check if we still need to grow after recalculation
+        if (new_blocks_needed > current_blocks) {
+            // Still need to grow - check if we can
+            if (end_block != file.fs.superblock.next_free_block) {
+                // Not at end of disk allocation
+                // If file size is 0 (new file), it IS at next_free_block (set in open).
+                if (file.size != 0) {
+                    console.warn("SFS: Cannot grow file not at end of allocation", .{});
+                    return -28; // ENOSPC
+                }
+            }
+
+            // Update superblock free pointer atomically with the check
+            const blocks_to_add = std.math.cast(u32, new_blocks_needed - current_blocks) orelse return -28; // ENOSPC
+            file.fs.superblock.next_free_block += blocks_to_add;
+            file.fs.updateSuperblock() catch return -5;
+        }
+        // else: Another thread already grew the file, no action needed
     }
 
     var written_count: usize = 0;
@@ -403,12 +542,12 @@ fn sfsWrite(file_desc: *fd.FileDescriptor, buf: []const u8) isize {
         const offset_idx = file.entry_idx % 4;
 
         var dir_buf: [512]u8 = undefined;
-        readSector(file.fs.device_fd, 1 + block_idx, &dir_buf) catch {};
+        readSector(file.fs.device_fd, file.fs.superblock.root_dir_start + block_idx, &dir_buf) catch {};
 
         const entry: *DirEntry = @ptrCast(@alignCast(&dir_buf[offset_idx * 128]));
         entry.size = file.size;
 
-        writeSector(file.fs.device_fd, 1 + block_idx, &dir_buf) catch {};
+        writeSector(file.fs.device_fd, file.fs.superblock.root_dir_start + block_idx, &dir_buf) catch {};
     }
 
     return std.math.cast(isize, written_count) orelse return -75; // EOVERFLOW
@@ -465,4 +604,63 @@ fn sfsStat(file_desc: *fd.FileDescriptor, stat_buf: *anyopaque) isize {
         .__unused = [_]i64{0} ** 3,
     };
     return 0;
+}
+
+/// Unlink (delete) a file from SFS
+fn sfsUnlink(ctx: ?*anyopaque, path: []const u8) vfs.Error!void {
+    const self: *SFS = @ptrCast(@alignCast(ctx));
+
+    // Normalize path (remove leading /)
+    const name = if (path.len > 0 and path[0] == '/') path[1..] else path;
+
+    // Security: Reject path traversal attempts
+    if (std.mem.indexOf(u8, name, "..")) |_| {
+        return vfs.Error.AccessDenied;
+    }
+
+    if (name.len == 0 or name.len >= 32) return vfs.Error.NotFound;
+
+    // Find file in directory
+    var block: u32 = 0;
+    while (block < ROOT_DIR_BLOCKS) : (block += 1) {
+        var buf: [512]u8 = undefined;
+        readSector(self.device_fd, self.superblock.root_dir_start + block, &buf) catch return vfs.Error.IOError;
+
+        var i: u32 = 0;
+        while (i < 4) : (i += 1) {
+            const offset = i * 128;
+            const e: *DirEntry = @ptrCast(@alignCast(&buf[offset]));
+
+            if (e.flags == 1) {
+                const e_name = std.mem.sliceTo(&e.name, 0);
+                if (std.mem.eql(u8, e_name, name)) {
+                    // Found the file - free its blocks
+                    const blocks_used = (e.size + 511) / 512;
+                    if (blocks_used > 0) {
+                        self.freeBlocks(e.start_block, blocks_used);
+                    }
+
+                    // Clear directory entry
+                    e.flags = 0;
+                    e.name = [_]u8{0} ** 32;
+                    e.start_block = 0;
+                    e.size = 0;
+
+                    // Write back directory block
+                    writeSector(self.device_fd, self.superblock.root_dir_start + block, &buf) catch return vfs.Error.IOError;
+
+                    // Update file count
+                    if (self.superblock.file_count > 0) {
+                        self.superblock.file_count -= 1;
+                    }
+                    self.updateSuperblock() catch return vfs.Error.IOError;
+
+                    console.info("SFS: Unlinked '{s}'", .{name});
+                    return;
+                }
+            }
+        }
+    }
+
+    return vfs.Error.NotFound;
 }

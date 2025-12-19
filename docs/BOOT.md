@@ -22,16 +22,21 @@ For detailed byte-level layouts, struct alignments, and hardware interface speci
    - Framebuffer (if available)
    - Memory map
 5. **Limine** jumps directly to the kernel entry point `_start` defined in `src/kernel/main.zig`.
-6. **Kernel Initialization**:
+6. **Kernel Initialization** (`src/kernel/main.zig`):
    - Validates Limine protocol requests (HHDM, Framebuffer, Memory Map)
    - Initializes HAL (GDT/IDT/Serial/PIC)
-   - Initializes SMP (brings up Application Processors)
-   - Sets up Memory Management (PMM/VMM/Heap)
-   - Registers demand paging handler for lazy memory allocation
+   - Initializes Memory Management (PMM/VMM via `init_mem.zig`)
    - Initializes VDSO (Virtual Dynamic Shared Object)
-   - Initializes scheduler and creates idle thread
-   - Scans modules to load the init process (shell or httpd)
-   - Starts the scheduler
+   - Initializes File Systems (VFS)
+   - Initializes Security (Entropy, PRNG, Stack Guard)
+   - Initializes APIC (replaces legacy PIC) & Re-seeds Stack Guard
+   - Initializes SMP (brings up Application Processors)
+   - Initializes Async I/O Reactor
+   - Initializes Signal Handling
+   - Initializes Hardware (PCI, Network*, USB, Audio, Storage, VirtIO-GPU) via `init_hw.zig`
+     * *Note: Kernel network stack is currently disabled for userspace migration.*
+   - Loads Init Process (scans modules for drivers and init candidate)
+   - Starts Scheduler and Futex subsystem
 
 ## Memory Layout
 
@@ -101,7 +106,7 @@ Zscapek implements full ASLR to randomize critical memory regions per-process, m
 | PIE base | `0x5555_5000_0000` | 16 bits | 4GB (64KB granularity) |
 | mmap base | `0x1000_0000_0000` | 20 bits | 4TB |
 | Heap gap | After ELF end | 8 bits | 1MB (256 pages) |
-| VDSO | `0x7FFF_E000_0000` | 12 bits | 16MB |
+| VDSO | `0x7FFF_E000_0000` | 16 bits | 256MB (65536 pages) |
 
 ### Behavior
 
@@ -144,7 +149,7 @@ The kernel declares Limine requests in `src/kernel/main.zig`:
 - **HHDM Request** - Higher Half Direct Map offset
 - **Memory Map Request** - Physical memory regions
 - **Framebuffer Request** - Display buffer
-- **Module Request** - Loaded modules (shell, httpd, initrd)
+- **Module Request** - Loaded modules (init process, drivers, initrd)
 - **Kernel Address Request** - Kernel physical/virtual base
 
 ## ELF Loading and Userland Binaries
@@ -254,7 +259,8 @@ The framebuffer log may scroll too fast or be initialized too late. Rely on the 
     *   **Hint**: Check loop counters (e.g., `u3` cannot hold 8) and bitwise operations on differing integer widths (e.g., `~u32` inside `u64`). Use `+%` for wrapping addition if intentional.
 *   **Keyboard/Mouse Not Working**:
     *   **Check**: Is the VM/hardware using PS/2 or USB input?
-    *   **PS/2 (QEMU default)**: The kernel sends `0xF4` (Enable Scanning) to the keyboard during initialization (`src/drivers/keyboard.zig:410`). If no response, the 8042 controller may not be present.
+    *   **PS/2 (QEMU default)**: The kernel sends `0xF4` (Enable Scanning) to the keyboard during initialization.
+    *   **Note**: Keyboard and Mouse drivers are being moved to userspace (Phase 5). The kernel now spawns `ps2_driver` or `uart_driver` if found in boot modules.
     *   **USB (MacBook/Modern PC)**: Requires XHCI driver with Port Reset logic. The driver must reset ports to transition devices from "Powered" to "Default/Addressed" state.
     *   **QEMU Fix**: Add `-device qemu-xhci -device usb-kbd -device usb-mouse` to force USB mode.
     *   **Serial Diagnostics**: Check serial console for "PS/2 keyboard: enable failed" or "XHCI: Port reset" messages.

@@ -263,10 +263,66 @@ fn devfsOpen(ctx: ?*anyopaque, path: []const u8, flags: u32) vfs.Error!*fd_mod.F
     // Path is relative to /dev mount point.
     const name = if (path.len > 0 and path[0] == '/') path[1..] else path;
 
+    if (name.len == 0 or std.mem.eql(u8, name, ".")) {
+        const access_mode = flags & fd_mod.O_ACCMODE;
+        if (access_mode != fd_mod.O_RDONLY) {
+            return vfs.Error.IsDirectory;
+        }
+
+        const tag_ptr: ?*anyopaque = @ptrCast(@constCast(&fd_mod.devfs_dir_tag));
+        return fd_mod.createFd(&fd_mod.dir_ops, fd_mod.O_RDONLY, tag_ptr) catch return vfs.Error.NoMemory;
+    }
+
     const entry = lookupDeviceEntry(name) orelse return vfs.Error.NotFound;
 
     const fd = fd_mod.createFd(entry.ops, flags, entry.private_data) catch return vfs.Error.NoMemory;
     return fd;
+}
+
+/// Snapshot device names for directory listing.
+/// Returns slices pointing to persistent device name storage.
+pub fn snapshotDeviceNames(alloc: std.mem.Allocator) ![]const []const u8 {
+    var dynamic_count: usize = 0;
+    {
+        const held = registry_lock.acquire();
+        defer held.release();
+
+        var current = dynamic_devices;
+        while (current) |dev| {
+            dynamic_count += 1;
+            current = dev.next;
+        }
+    }
+
+    const total = builtin_devices.len + dynamic_count;
+    const names = try alloc.alloc([]const u8, total);
+
+    for (builtin_devices, 0..) |dev, i| {
+        names[i] = dev.name;
+    }
+
+    {
+        const held = registry_lock.acquire();
+        defer held.release();
+
+        var idx: usize = builtin_devices.len;
+        var current = dynamic_devices;
+        while (current) |dev| {
+            if (idx >= names.len) break;
+            names[idx] = dev.name;
+            idx += 1;
+            current = dev.next;
+        }
+    }
+
+    return names;
+}
+
+fn devfsUnlink(ctx: ?*anyopaque, path: []const u8) vfs.Error!void {
+    _ = ctx;
+    _ = path;
+    // DevFS devices cannot be unlinked
+    return error.AccessDenied;
 }
 
 /// DevFS filesystem interface
@@ -274,6 +330,7 @@ pub const dev_fs = vfs.FileSystem{
     .context = null,
     .open = devfsOpen,
     .unmount = null,
+    .unlink = devfsUnlink,
 };
 
 /// Create pre-opened FDs for stdin/stdout/stderr (FDs 0/1/2)

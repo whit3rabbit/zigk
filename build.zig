@@ -67,8 +67,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-
-
     // Create UAPI module (syscall numbers, errno codes)
     const uapi_module = b.createModule(.{
         .root_source_file = b.path("src/uapi/root.zig"),
@@ -173,10 +171,6 @@ pub fn build(b: *std.Build) void {
     pci_module.addImport("console", console_module);
     pci_module.addImport("acpi", acpi_module);
     pci_module.addImport("sync", sync_module);
-
-
-
-
 
     // Create PRNG module (Kernel entropy/random)
     const prng_module = b.createModule(.{
@@ -352,7 +346,6 @@ pub fn build(b: *std.Build) void {
     fd_module.addImport("uapi", uapi_module);
     fd_module.addImport("sync", sync_module);
 
-
     // Create E1000e driver module (Intel 82574L NIC)
     const e1000e_module = b.createModule(.{
         .root_source_file = b.path("src/drivers/net/e1000e/root.zig"),
@@ -525,7 +518,7 @@ pub fn build(b: *std.Build) void {
     mouse_module.addImport("console", console_module);
     mouse_module.addImport("input", input_module);
     mouse_module.addImport("uapi", uapi_module);
-    
+
     // Add dependencies to USB module (after keyboard/mouse are defined)
     usb_module.addImport("keyboard", keyboard_module);
     usb_module.addImport("mouse", mouse_module);
@@ -567,6 +560,7 @@ pub fn build(b: *std.Build) void {
         .target = kernel_target,
         .optimize = optimize,
     });
+    capabilities_module.addImport("console", console_module);
 
     // Create atomic module for IPC/Locking (needed by process)
     const ipc_msg_module = b.createModule(.{
@@ -651,8 +645,6 @@ pub fn build(b: *std.Build) void {
     pipe_module.addImport("console", console_module);
     pipe_module.addImport("hal", hal_module);
     pipe_module.addImport("io", kernel_io_module);
-
-
 
     // Create Signal module
     const signal_module = b.createModule(.{
@@ -756,6 +748,7 @@ pub fn build(b: *std.Build) void {
     syscall_io_module.addImport("fd", fd_module);
     syscall_io_module.addImport("user_mem", user_mem_module);
     syscall_io_module.addImport("hal", hal_module);
+    syscall_io_module.addImport("devfs", devfs_module);
 
     // Create syscall fd module (open, close, dup, pipe, lseek)
     const syscall_fd_module = b.createModule(.{
@@ -827,6 +820,14 @@ pub fn build(b: *std.Build) void {
     });
     user_syscall_lib.addImport("uapi", user_uapi_module);
 
+    // Create ring buffer IPC library for USER applications
+    const user_ring_lib = b.createModule(.{
+        .root_source_file = b.path("src/user/lib/ring.zig"),
+        .target = user_target,
+        .optimize = optimize,
+    });
+    user_ring_lib.addImport("syscall", user_syscall_lib);
+
     const user_libc_module = b.createModule(.{
         .root_source_file = b.path("src/user/lib/libc/root.zig"),
         .target = user_target,
@@ -839,7 +840,7 @@ pub fn build(b: *std.Build) void {
         .target = user_target,
         .optimize = optimize,
     });
-    
+
     // Create User Console module (stub)
     const user_console_module = b.createModule(.{
         .root_source_file = b.path("src/user/lib/console_stub.zig"),
@@ -864,16 +865,14 @@ pub fn build(b: *std.Build) void {
         .target = user_target,
         .optimize = optimize,
     }));
-    
+
     // Create Netstack Process (Userspace Networking)
     const netstack_mod = b.createModule(.{
         .root_source_file = b.path("src/user/netstack/main.zig"),
         .target = user_target,
         .optimize = optimize,
     });
-    netstack_mod.addImport("syscall", user_syscall_lib);
-    netstack_mod.addImport("net", user_net_module); 
-    netstack_mod.addImport("uapi", user_uapi_module);
+    // Note: syscall import added after netstack_syscall_mod is created below
     // Note: src/user/lib/syscall.zig needs uapi.
     // I should add uapi to the syscall module as well?
     // The syscall module created above needs imports?
@@ -881,7 +880,7 @@ pub fn build(b: *std.Build) void {
     // Or I can move user_syscall_lib definition up?
     // Replacing a large chunk to move it up is risky.
     // I will just define netstack_mod imports manually.
-    
+
     // Actually, I can fix the build error first.
     // netstack_mod.addImport("syscall", ...);
     // But that syscall module needs imports.
@@ -892,11 +891,20 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     netstack_syscall_mod.addImport("uapi", user_uapi_module);
-    
+
+    // Create netstack-specific ring module to avoid module conflicts
+    const netstack_ring_mod = b.createModule(.{
+        .root_source_file = b.path("src/user/lib/ring.zig"),
+        .target = user_target,
+        .optimize = optimize,
+    });
+    netstack_ring_mod.addImport("syscall", netstack_syscall_mod);
+
     netstack_mod.addImport("syscall", netstack_syscall_mod);
-    netstack_mod.addImport("net", user_net_module); 
+    netstack_mod.addImport("net", user_net_module);
     netstack_mod.addImport("uapi", user_uapi_module);
     netstack_mod.addImport("libc", user_libc_module);
+    netstack_mod.addImport("ring", netstack_ring_mod);
 
     const netstack_exe = b.addExecutable(.{
         .name = "netstack",
@@ -907,7 +915,7 @@ pub fn build(b: *std.Build) void {
 
     const netstack_cmd = b.addInstallArtifact(netstack_exe, .{});
     b.getInstallStep().dependOn(&netstack_cmd.step);
-    
+
     // Add explicit step for building netstack
     const netstack_step = b.step("netstack", "Build userspace netstack");
     netstack_step.dependOn(&netstack_cmd.step);
@@ -927,6 +935,20 @@ pub fn build(b: *std.Build) void {
     syscall_random_module.addImport("uapi", uapi_module);
     syscall_random_module.addImport("prng", prng_module);
     syscall_random_module.addImport("user_mem", user_mem_module);
+
+    // Create syscall fs_handlers module (mount/umount/unlink)
+    const syscall_fs_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/syscall/fs_handlers.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    syscall_fs_module.addImport("base.zig", syscall_base_module);
+    syscall_fs_module.addImport("uapi", uapi_module);
+    syscall_fs_module.addImport("console", console_module);
+    syscall_fs_module.addImport("fs", fs_module);
+    syscall_fs_module.addImport("heap", heap_module);
+    syscall_fs_module.addImport("user_mem", user_mem_module);
+    syscall_fs_module.addImport("capabilities", capabilities_module);
 
     // Create syscall input module (mouse/input syscalls)
     const syscall_input_module = b.createModule(.{
@@ -1051,6 +1073,54 @@ pub fn build(b: *std.Build) void {
     syscall_pci_module.addImport("console", console_module);
     syscall_pci_module.addImport("pci", pci_module);
 
+    // Create ring buffer manager module (kernel/ring.zig)
+    const ring_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/ring.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    ring_module.addImport("uapi", uapi_module);
+    ring_module.addImport("sync", sync_module);
+    ring_module.addImport("pmm", pmm_module);
+    ring_module.addImport("vmm", vmm_module);
+    ring_module.addImport("hal", hal_module);
+    ring_module.addImport("futex", futex_module);
+    ring_module.addImport("sched", sched_module);
+    ring_module.addImport("console", console_module);
+    ring_module.addImport("ipc_service", ipc_service_module);
+
+    // Create syscall ring module (ring buffer IPC syscalls)
+    const syscall_ring_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/syscall/ring.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    syscall_ring_module.addImport("uapi", uapi_module);
+    syscall_ring_module.addImport("user_mem", user_mem_module);
+    syscall_ring_module.addImport("process", process_module);
+    syscall_ring_module.addImport("sched", sched_module);
+    syscall_ring_module.addImport("ring", ring_module);
+    syscall_ring_module.addImport("ipc_service", ipc_service_module);
+    syscall_ring_module.addImport("pmm", pmm_module);
+    syscall_ring_module.addImport("vmm", vmm_module);
+    syscall_ring_module.addImport("hal", hal_module);
+    syscall_ring_module.addImport("user_vmm", user_vmm_module);
+
+    // Create syscall fs_handlers module (mount, umount, unlink)
+    const syscall_fs_handlers_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/syscall/fs_handlers.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    syscall_fs_handlers_module.addImport("base.zig", syscall_base_module);
+    syscall_fs_handlers_module.addImport("uapi", uapi_module);
+    syscall_fs_handlers_module.addImport("console", console_module);
+    syscall_fs_handlers_module.addImport("fs", fs_module);
+    syscall_fs_handlers_module.addImport("heap", heap_module);
+    syscall_fs_handlers_module.addImport("user_mem", user_mem_module);
+    syscall_fs_handlers_module.addImport("capabilities", capabilities_module);
+    syscall_fs_handlers_module.addImport("process", process_module);
+
     // Create syscall dispatch table module
     const syscall_table_module = b.createModule(.{
         .root_source_file = b.path("src/kernel/syscall/table.zig"),
@@ -1079,6 +1149,8 @@ pub fn build(b: *std.Build) void {
     syscall_table_module.addImport("port_io", syscall_port_io_module);
     syscall_table_module.addImport("mmio", syscall_mmio_module);
     syscall_table_module.addImport("pci_syscall", syscall_pci_module);
+    syscall_table_module.addImport("ring", syscall_ring_module);
+    syscall_table_module.addImport("fs_handlers", syscall_fs_handlers_module);
 
     // Create kernel executable
     // NOTE: red_zone must be disabled for kernel code to prevent stack corruption
@@ -1103,7 +1175,6 @@ pub fn build(b: *std.Build) void {
 
     // Smaller page alignment to reduce ELF file size gaps
     kernel.link_z_max_page_size = 4096;
-
 
     // Add module imports to kernel
 
@@ -1171,7 +1242,7 @@ pub fn build(b: *std.Build) void {
     const kernel_bin = b.addObjCopy(kernel.getEmittedBin(), .{
         .format = .bin,
     });
-    
+
     // Install the binary
     const install_bin = b.addInstallFile(kernel_bin.getOutput(), "bin/kernel.bin");
     b.getInstallStep().dependOn(&install_bin.step);
@@ -1181,12 +1252,10 @@ pub fn build(b: *std.Build) void {
     const syscall_lib = b.createModule(.{
         .root_source_file = b.path("src/user/lib/syscall.zig"),
         .target = kernel_target,
-        .optimize = optimize, 
+        .optimize = optimize,
     });
     // Need to add uapi dependency to syscall lib
     syscall_lib.addImport("uapi", uapi_module);
-
-
 
     const shell_mod = b.createModule(.{
         .root_source_file = b.path("src/user/shell/main.zig"),
@@ -1312,6 +1381,7 @@ pub fn build(b: *std.Build) void {
     });
     virtio_net_driver_mod.addImport("syscall", user_syscall_lib);
     virtio_net_driver_mod.addImport("libc", user_libc_module);
+    virtio_net_driver_mod.addImport("ring", user_ring_lib);
 
     const virtio_net_driver = b.addExecutable(.{
         .name = "virtio_net_driver.elf",
@@ -1347,24 +1417,26 @@ pub fn build(b: *std.Build) void {
     doom.addCSourceFiles(.{
         .root = b.path("src/user/doom/doomgeneric"),
         .files = &.{
-            "am_map.c", "d_event.c", "d_items.c", "d_iwad.c", "d_loop.c",
-            "d_main.c", "d_mode.c", "d_net.c", "doomdef.c", "doomgeneric.c",
-            "doomstat.c", "dstrings.c", "dummy.c", "f_finale.c", "f_wipe.c",
-            "g_game.c", "gusconf.c", "hu_lib.c", "hu_stuff.c", "i_cdmus.c",
-            "i_endoom.c", "i_input.c", "i_joystick.c", "i_scale.c",
-            "i_system.c", "i_timer.c", "i_video.c", "icon.c", // i_sound.c excluded - using Zig stubs
-            "info.c", "m_argv.c", "m_bbox.c", "m_cheat.c", "m_config.c",
-            "m_controls.c", "m_fixed.c", "m_menu.c", "m_misc.c", "m_random.c",
-            "memio.c", "mus2mid.c", "p_ceilng.c",
-            "p_doors.c", "p_enemy.c", "p_floor.c", "p_inter.c", "p_lights.c",
-            "p_map.c", "p_maputl.c", "p_mobj.c", "p_plats.c", "p_pspr.c",
-            "p_saveg.c", "p_setup.c", "p_sight.c", "p_spec.c", "p_switch.c",
-            "p_telept.c", "p_tick.c", "p_user.c", "r_bsp.c", "r_data.c",
-            "r_draw.c", "r_main.c", "r_plane.c", "r_segs.c", "r_sky.c",
-            "r_things.c", "s_sound.c", "sha1.c", "sounds.c", "st_lib.c",
-            "st_stuff.c", "statdump.c", "tables.c", "v_video.c", "w_checksum.c",
-            "w_file_stdc.c", "w_file.c", "w_main.c", "w_wad.c", "wi_stuff.c",
-            "z_zone.c",
+            "am_map.c",   "d_event.c",  "d_items.c",    "d_iwad.c",   "d_loop.c",
+            "d_main.c",   "d_mode.c",   "d_net.c",      "doomdef.c",  "doomgeneric.c",
+            "doomstat.c", "dstrings.c", "dummy.c",      "f_finale.c", "f_wipe.c",
+            "g_game.c",   "gusconf.c",  "hu_lib.c",     "hu_stuff.c", "i_cdmus.c",
+            "i_endoom.c", "i_input.c",  "i_joystick.c", "i_scale.c",
+            "i_system.c",    "i_timer.c",    "i_video.c",  "icon.c", // i_sound.c excluded - using Zig stubs
+            "info.c",        "m_argv.c",     "m_bbox.c",   "m_cheat.c",
+            "m_config.c",    "m_controls.c", "m_fixed.c",  "m_menu.c",
+            "m_misc.c",      "m_random.c",   "memio.c",    "mus2mid.c",
+            "p_ceilng.c",    "p_doors.c",    "p_enemy.c",  "p_floor.c",
+            "p_inter.c",     "p_lights.c",   "p_map.c",    "p_maputl.c",
+            "p_mobj.c",      "p_plats.c",    "p_pspr.c",   "p_saveg.c",
+            "p_setup.c",     "p_sight.c",    "p_spec.c",   "p_switch.c",
+            "p_telept.c",    "p_tick.c",     "p_user.c",   "r_bsp.c",
+            "r_data.c",      "r_draw.c",     "r_main.c",   "r_plane.c",
+            "r_segs.c",      "r_sky.c",      "r_things.c", "s_sound.c",
+            "sha1.c",        "sounds.c",     "st_lib.c",   "st_stuff.c",
+            "statdump.c",    "tables.c",     "v_video.c",  "w_checksum.c",
+            "w_file_stdc.c", "w_file.c",     "w_main.c",   "w_wad.c",
+            "wi_stuff.c",    "z_zone.c",
         },
         .flags = &.{
             "-DDOOMGENERIC_RESX=640",
@@ -1406,15 +1478,14 @@ pub fn build(b: *std.Build) void {
 
     inline for (c_tests) |test_name| {
         const test_exe = b.addSystemCommand(&.{
-            "zig", "cc",
-            "-target", "x86_64-linux-musl",
-            "-static",
-            "-o", "zig-out/bin/" ++ test_name,
-            "tests/userland/" ++ test_name ++ ".c",
+            "zig",                       "cc",
+            "-target",                   "x86_64-linux-musl",
+            "-static",                   "-o",
+            "zig-out/bin/" ++ test_name, "tests/userland/" ++ test_name ++ ".c",
         });
         test_step_build.dependOn(&test_exe.step);
     }
-    
+
     // Ensure tests are built before ISO is created
     b.getInstallStep().dependOn(test_step_build);
 
@@ -1529,18 +1600,28 @@ pub fn build(b: *std.Build) void {
     // Create run step for QEMU
     const run_cmd = b.addSystemCommand(&.{
         "qemu-system-x86_64",
-        "-M", "q35",
-        "-m", "512M",
-        "-cdrom", "zscapek.iso",
-        "-device", "qemu-xhci,id=xhci",
-        "-device", "usb-kbd",
-        "-vga", "std",
-        "-device", "AC97",
-        "-serial", "stdio",
-        "-smp", "4",
+        "-M",
+        "q35",
+        "-m",
+        "512M",
+        "-cdrom",
+        "zscapek.iso",
+        "-device",
+        "qemu-xhci,id=xhci",
+        "-device",
+        "usb-kbd",
+        "-vga",
+        "std",
+        "-device",
+        "AC97",
+        "-serial",
+        "stdio",
+        "-smp",
+        "4",
         "-no-reboot",
         "-no-shutdown",
-        "-accel", "tcg",
+        "-accel",
+        "tcg",
         "-drive", "if=none,id=usbdisk,format=raw,file=usb_disk.img", // USB Mass Storage
     });
 
@@ -1566,17 +1647,15 @@ pub fn build(b: *std.Build) void {
     // NEW: Inject -bios argument if provided
     if (qemu_bios) |bios_path| {
         if (std.mem.endsWith(u8, bios_path, ".fd") or std.mem.endsWith(u8, bios_path, ".FD")) {
-            run_cmd.addArgs(&.{"-drive", b.fmt("if=pflash,format=raw,readonly=on,file={s}", .{bios_path})});
+            run_cmd.addArgs(&.{ "-drive", b.fmt("if=pflash,format=raw,readonly=on,file={s}", .{bios_path}) });
         } else {
-            run_cmd.addArgs(&.{"-bios", bios_path});
+            run_cmd.addArgs(&.{ "-bios", bios_path });
         }
     }
     run_cmd.step.dependOn(&iso_cmd.step);
 
     const run_step = b.step("run", "Build and run the kernel in QEMU");
     run_step.dependOn(&run_cmd.step);
-
-
 
     // Host-side unit tests
     const test_module = b.createModule(.{

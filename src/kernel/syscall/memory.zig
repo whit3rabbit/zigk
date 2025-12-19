@@ -14,8 +14,6 @@ const vmm = @import("vmm");
 const user_mem = @import("user_mem");
 const user_vmm = @import("user_vmm");
 const console = @import("console");
-
-
 const SyscallError = base.SyscallError;
 
 // =============================================================================
@@ -258,7 +256,6 @@ pub fn sys_brk(brk: usize) SyscallError!usize {
     if (new_break_aligned > user_mem.USER_SPACE_END) {
         return @intCast(proc.heap_break);
     }
-
 
     if (new_break_aligned > current_break_aligned) {
         // Growing heap

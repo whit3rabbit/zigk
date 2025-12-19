@@ -6,8 +6,73 @@ pub const SIG_BLOCK: usize = 0;
 pub const SIG_UNBLOCK: usize = 1;
 pub const SIG_SETMASK: usize = 2;
 
+// Standard signal numbers (Linux x86_64)
+pub const SIGHUP: usize = 1;
+pub const SIGINT: usize = 2;
+pub const SIGQUIT: usize = 3;
+pub const SIGILL: usize = 4;
+pub const SIGTRAP: usize = 5;
+pub const SIGABRT: usize = 6;
+pub const SIGIOT: usize = 6; // Alias for SIGABRT
+pub const SIGBUS: usize = 7;
+pub const SIGFPE: usize = 8;
 pub const SIGKILL: usize = 9;
+pub const SIGUSR1: usize = 10;
+pub const SIGSEGV: usize = 11;
+pub const SIGUSR2: usize = 12;
+pub const SIGPIPE: usize = 13;
+pub const SIGALRM: usize = 14;
+pub const SIGTERM: usize = 15;
+pub const SIGSTKFLT: usize = 16;
+pub const SIGCHLD: usize = 17;
+pub const SIGCONT: usize = 18;
 pub const SIGSTOP: usize = 19;
+pub const SIGTSTP: usize = 20;
+pub const SIGTTIN: usize = 21;
+pub const SIGTTOU: usize = 22;
+pub const SIGURG: usize = 23;
+pub const SIGXCPU: usize = 24;
+pub const SIGXFSZ: usize = 25;
+pub const SIGVTALRM: usize = 26;
+pub const SIGPROF: usize = 27;
+pub const SIGWINCH: usize = 28;
+pub const SIGIO: usize = 29;
+pub const SIGPOLL: usize = 29; // Alias for SIGIO
+pub const SIGPWR: usize = 30;
+pub const SIGSYS: usize = 31;
+
+/// Maximum signal number
+pub const NSIG: usize = 64;
+
+/// Default signal action types
+pub const SigDefaultAction = enum {
+    /// Terminate the process
+    Terminate,
+    /// Terminate with core dump
+    Core,
+    /// Ignore the signal
+    Ignore,
+    /// Stop the process
+    Stop,
+    /// Continue if stopped
+    Continue,
+};
+
+/// Get the default action for a signal
+pub fn getDefaultAction(signum: usize) SigDefaultAction {
+    return switch (signum) {
+        // Ignore
+        SIGCHLD, SIGURG, SIGWINCH => .Ignore,
+        // Stop
+        SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU => .Stop,
+        // Continue
+        SIGCONT => .Continue,
+        // Core dump
+        SIGQUIT, SIGILL, SIGTRAP, SIGABRT, SIGBUS, SIGFPE, SIGSEGV, SIGXCPU, SIGXFSZ, SIGSYS => .Core,
+        // Terminate (default for all others)
+        else => .Terminate,
+    };
+}
 
 /// Signal set (64 bits)
 /// Compatible with Linux sigset_t for x86_64 which is 1024 bits (128 bytes),

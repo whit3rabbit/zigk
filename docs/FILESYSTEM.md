@@ -4,7 +4,6 @@ This structure mirrors the Linux kernel organization while keeping Zig modules a
 
 ## Current Implementation Status
 
-```text
 zscapek/
 ├── .claude/
 │   ├── commands/            # Codex CLI command definitions
@@ -12,7 +11,7 @@ zscapek/
 ├── .github/
 │   └── workflows/
 │       └── build-iso.yml     # GitHub Actions workflow to build release ISO
-├── .zig-cache/             # Zig build cache (generated)
+├── .gitignore
 ├── AGENTS.md                # Symlink to CLAUDE.md
 ├── CLAUDE.md                # Assistant guidelines
 ├── README.md                # Project overview
@@ -60,16 +59,8 @@ zscapek/
 │   └── scripts/
 │       └── fuzz_packets.py  # Network fuzzer harness
 ├── initrd_contents/         # InitRD source files
-├── initrd.tar               # Generated USTAR initrd
-├── iso_root/                # ISO staging (Limine config + modules)
 ├── limine/                  # Limine bootloader binaries and headers
 ├── limine.cfg               # Bootloader configuration
-├── options.o                # VDSO build artifact (generated)
-├── root.o                   # VDSO build artifact (generated)
-├── test_vdso.asm            # VDSO assembly test
-├── usb_disk.img             # Sample disk image
-├── zig-out/                 # Build outputs
-├── zscapek.iso              # Generated ISO image
 └── src/
     ├── arch/                # HAL - ONLY place for inline assembly
     │   ├── root.zig         # Architecture-neutral HAL interface
@@ -259,6 +250,8 @@ zscapek/
     ├── fs/
     │   ├── root.zig
     │   ├── initrd.zig
+    │   ├── initrd/
+    │   │   └── (initrd implementation)
     │   ├── vfs.zig
     │   ├── sfs.zig
     │   └── partitions/
@@ -397,7 +390,7 @@ zscapek/
         │       │   ├── mem.zig
         │       │   ├── search.zig
         │       │   ├── str.zig
-        │       │   └── tokenize.zig
+        │       │   ├── tokenize.zig
         │       └── unistd/
         │           └── root.zig
         ├── drivers/

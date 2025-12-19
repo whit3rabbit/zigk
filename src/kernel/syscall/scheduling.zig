@@ -14,6 +14,7 @@ const sched = @import("sched");
 const heap = @import("heap");
 const fd_mod = @import("fd");
 const sync = @import("sync");
+const futex = @import("futex");
 
 const SyscallError = base.SyscallError;
 const UserPtr = base.UserPtr;
@@ -239,11 +240,6 @@ pub fn sys_gettimeofday(tv_ptr: usize, tz_ptr: usize) SyscallError!usize {
 // =============================================================================
 // Threading Primitives (Stubs)
 // =============================================================================
-
-/// sys_futex (202) - Fast userspace locking
-///
-/// MVP: Stub - returns ENOSYS (threading not fully implemented)
-const futex = @import("futex");
 
 /// sys_futex (202) - Fast userspace locking
 ///

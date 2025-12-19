@@ -354,6 +354,14 @@ pub const SYS_ARCH_PRCTL: usize = 158;
 /// (resource, rlim) -> int
 pub const SYS_SETRLIMIT: usize = 160;
 
+/// Mount a filesystem
+/// (source, target, fstype, flags, data) -> int
+pub const SYS_MOUNT: usize = 165;
+
+/// Unmount a filesystem
+/// (target, flags) -> int
+pub const SYS_UMOUNT2: usize = 166;
+
 /// Set host name
 /// (name, len) -> int
 pub const SYS_SETHOSTNAME: usize = 170;
@@ -547,3 +555,37 @@ pub const SYS_PCI_CONFIG_READ: usize = 1034;
 /// (bus, device, func, offset, value) -> 0 or -errno
 /// Requires PciConfig capability for the device
 pub const SYS_PCI_CONFIG_WRITE: usize = 1035;
+
+// =============================================================================
+// Ring Buffer IPC Syscalls (1040-1049)
+// =============================================================================
+
+/// Create a new ring buffer for zero-copy IPC
+/// (entry_size, entry_count, consumer_pid, service_name_ptr, service_name_len) -> ring_id or -errno
+/// Producer creates ring, specifies consumer by PID or service name
+pub const SYS_RING_CREATE: usize = 1040;
+
+/// Attach to an existing ring as consumer
+/// (ring_id, result_ptr) -> 0 or -errno
+/// Writes RingAttachResult to result_ptr with virt_addr
+pub const SYS_RING_ATTACH: usize = 1041;
+
+/// Detach from a ring (producer or consumer)
+/// (ring_id) -> 0 or -errno
+/// Cleans up mappings and marks ring for destruction if both detached
+pub const SYS_RING_DETACH: usize = 1042;
+
+/// Wait for entries to become available (consumer)
+/// (ring_id, min_entries, timeout_ns) -> available_count or -errno
+/// Blocks via futex if ring is empty, wakes when producer commits
+pub const SYS_RING_WAIT: usize = 1043;
+
+/// Notify consumer that entries are available (producer)
+/// (ring_id) -> 0 or -errno
+/// Wakes consumer via futex if blocked
+pub const SYS_RING_NOTIFY: usize = 1044;
+
+/// Wait for entries on any of multiple rings (MPSC consumer)
+/// (ring_ids_ptr, ring_count, min_entries, timeout_ns) -> ring_id with entries or -errno
+/// Polls all rings, sleeps if all empty, returns first ring with data
+pub const SYS_RING_WAIT_ANY: usize = 1045;

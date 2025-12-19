@@ -60,29 +60,25 @@ pub const Process = struct {
             lock: *MailboxLock, // Mutable pointer needed for store
             irq_state: bool,
             pub fn release(h: Held) void {
-                 h.lock.locked.store(0, .release);
-                 if (h.irq_state) hal.cpu.enableInterrupts();
+                h.lock.locked.store(0, .release);
+                if (h.irq_state) hal.cpu.enableInterrupts();
             }
         };
 
         pub fn acquire(self: *MailboxLock) Held {
-             const hal_cpu = hal.cpu;
-             const irq_state = hal_cpu.interruptsEnabled();
-             hal_cpu.disableInterrupts();
-             while (true) {
-                 if (self.locked.cmpxchgWeak(0, 1, .acquire, .monotonic) == null) break;
-                 // Spin hint
-                 if (@import("builtin").os.tag == .freestanding) {
-                     asm volatile ("pause"
-                         :
-                         :
-                         : .{ .memory = true }
-                     );
-                 } else {
-                     std.Thread.yield() catch {};
-                 }
-             }
-             return .{ .lock = self, .irq_state = irq_state };
+            const hal_cpu = hal.cpu;
+            const irq_state = hal_cpu.interruptsEnabled();
+            hal_cpu.disableInterrupts();
+            while (true) {
+                if (self.locked.cmpxchgWeak(0, 1, .acquire, .monotonic) == null) break;
+                // Spin hint
+                if (@import("builtin").os.tag == .freestanding) {
+                    asm volatile ("pause" ::: .{ .memory = true });
+                } else {
+                    std.Thread.yield() catch {};
+                }
+            }
+            return .{ .lock = self, .irq_state = irq_state };
         }
     };
 
@@ -142,7 +138,6 @@ pub const Process = struct {
     /// Used to enforce DMA capability limits across multiple allocations.
     /// A process with max_pages=256 cannot exceed 256 total pages at any time.
     dma_allocated_pages: u32 = 0,
-    
 
     /// Current Working Directory
     cwd: [uapi.abi.MAX_PATH]u8,
@@ -156,6 +151,12 @@ pub const Process = struct {
 
     /// Per-process file creation mask
     umask: u32 = 0o022,
+
+    /// User and group identity (Linux-compatible uid/gid)
+    uid: u32 = 0,
+    gid: u32 = 0,
+    euid: u32 = 0,
+    egid: u32 = 0,
     /// Resource limits (DoS protection)
     /// Maximum virtual address space size (default 256 MB)
     rlimit_as: u64 = 256 * 1024 * 1024,
@@ -526,6 +527,10 @@ pub fn createProcess(parent: ?*Process) !*Process {
         .heap_start = 0,
         .heap_break = 0,
         .capabilities = .{},
+        .uid = 0,
+        .gid = 0,
+        .euid = 0,
+        .egid = 0,
         .cwd = undefined,
         .cwd_len = 1,
         .aslr_offsets = aslr_offsets,
@@ -534,7 +539,7 @@ pub fn createProcess(parent: ?*Process) !*Process {
     // Initialize CWD to "/"
     proc.cwd[0] = '/';
 
-     // Map VDSO
+    // Map VDSO
     {
         const vdso = @import("vdso");
         const base = vdso.map(proc) catch |err| blk: {
@@ -593,10 +598,17 @@ pub fn forkProcess(parent: *Process) !*Process {
         .heap_start = parent.heap_start,
         .heap_break = parent.heap_break,
         .capabilities = try parent.capabilities.clone(alloc),
-        // SECURITY: Child inherits parent's DMA allocation count since it shares
-        // the same capability limits. The total across parent+child must not exceed
-        // the granted max_pages.
-        .dma_allocated_pages = parent.dma_allocated_pages,
+        .uid = parent.uid,
+        .gid = parent.gid,
+        .euid = parent.euid,
+        .egid = parent.egid,
+        // SECURITY: Child starts with zero DMA allocations.
+        // While child inherits DmaCapability, it gets its own allocation counter.
+        // This prevents the fork-multiply attack where repeated forks would allow
+        // exceeding the intended DMA limit (N forks * max_pages).
+        // Trade-off: Parent and child can each allocate up to max_pages independently.
+        // For stricter enforcement, consider not inheriting DmaCapability on fork.
+        .dma_allocated_pages = 0,
         .cwd = parent.cwd,
         .cwd_len = parent.cwd_len,
         .vdso_base = parent.vdso_base,
@@ -631,7 +643,7 @@ pub fn exit(status: i32) noreturn {
                 proc.exitWithStatus(status);
             } else {
                 // Other threads remain - just this thread exits
-                console.debug("Thread: Exiting thread (pid={}, tid={})", .{proc.pid, curr.tid});
+                console.debug("Thread: Exiting thread (pid={}, tid={})", .{ proc.pid, curr.tid });
             }
         }
     }

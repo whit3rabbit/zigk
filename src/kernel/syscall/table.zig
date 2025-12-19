@@ -16,7 +16,6 @@ const hal = @import("hal");
 const signal = @import("signal");
 
 // Handler modules (split from handlers.zig)
-// Handler modules (split from handlers.zig)
 const process = @import("process");
 const signals = @import("signals");
 const scheduling = @import("scheduling");
@@ -33,6 +32,8 @@ const interrupt = @import("interrupt");
 const port_io = @import("port_io");
 const mmio = @import("mmio");
 const pci_syscall = @import("pci_syscall");
+const ring = @import("ring");
+const fs_handlers = @import("fs_handlers");
 
 /// Syscall frame from arch-specific entry
 pub const SyscallFrame = hal.syscall.SyscallFrame;
@@ -47,58 +48,62 @@ pub export fn dispatch_syscall(frame: *SyscallFrame) callconv(.c) void {
         const SyscallEntry = struct { value: usize, module: type, name: []const u8 };
         var entries: []const SyscallEntry = &.{};
         const decls = @typeInfo(uapi.syscalls).@"struct".decls;
-        
+
         for (decls) |decl| {
             const val = @field(uapi.syscalls, decl.name);
-            
+
             // Check if it's a usize constant (syscall number)
-                if (@TypeOf(val) == usize) {
-                    const name = toSyscallName(decl.name);
-                    var mod: ?type = null;
+            if (@TypeOf(val) == usize) {
+                const name = toSyscallName(decl.name);
+                var mod: ?type = null;
 
-                    // Search handler modules in order of priority
-                    // net.zig has socket syscalls that override stubs in execution.zig
-                    if (@hasDecl(net, name)) {
-                        mod = net;
-                    } else if (@hasDecl(process, name)) {
-                        mod = process;
-                    } else if (@hasDecl(signals, name)) {
-                        mod = signals;
-                    } else if (@hasDecl(scheduling, name)) {
-                        mod = scheduling;
-                    } else if (@hasDecl(io, name)) {
-                        mod = io;
-                    } else if (@hasDecl(fd, name)) {
-                        mod = fd;
-                    } else if (@hasDecl(memory, name)) {
-                        mod = memory;
-                    } else if (@hasDecl(execution, name)) {
-                        mod = execution;
-                    } else if (@hasDecl(custom, name)) {
-                        mod = custom;
-                    } else if (@hasDecl(random, name)) {
-                        mod = random;
-                    } else if (@hasDecl(input_handlers, name)) {
-                        mod = input_handlers;
-                    } else if (@hasDecl(ipc, name)) {
-                        mod = ipc;
-                    } else if (@hasDecl(interrupt, name)) {
-                        mod = interrupt;
-                    } else if (@hasDecl(port_io, name)) {
-                        mod = port_io;
-                    } else if (@hasDecl(mmio, name)) {
-                        mod = mmio;
-                    } else if (@hasDecl(pci_syscall, name)) {
-                        mod = pci_syscall;
-                    }
-
-                    if (mod) |m| {
-                        entries = entries ++ @as([]const SyscallEntry, &.{ .{ .value = val, .module = m, .name = name } });
-                    }
-                    // Note: Syscalls without handlers will return ENOSYS at runtime.
-                    // This allows incremental syscall implementation during development.
+                // Search handler modules in order of priority
+                // net.zig has socket syscalls that override stubs in execution.zig
+                if (@hasDecl(net, name)) {
+                    mod = net;
+                } else if (@hasDecl(process, name)) {
+                    mod = process;
+                } else if (@hasDecl(signals, name)) {
+                    mod = signals;
+                } else if (@hasDecl(scheduling, name)) {
+                    mod = scheduling;
+                } else if (@hasDecl(io, name)) {
+                    mod = io;
+                } else if (@hasDecl(fd, name)) {
+                    mod = fd;
+                } else if (@hasDecl(fs_handlers, name)) {
+                    mod = fs_handlers;
+                } else if (@hasDecl(memory, name)) {
+                    mod = memory;
+                } else if (@hasDecl(execution, name)) {
+                    mod = execution;
+                } else if (@hasDecl(custom, name)) {
+                    mod = custom;
+                } else if (@hasDecl(random, name)) {
+                    mod = random;
+                } else if (@hasDecl(input_handlers, name)) {
+                    mod = input_handlers;
+                } else if (@hasDecl(ipc, name)) {
+                    mod = ipc;
+                } else if (@hasDecl(interrupt, name)) {
+                    mod = interrupt;
+                } else if (@hasDecl(port_io, name)) {
+                    mod = port_io;
+                } else if (@hasDecl(mmio, name)) {
+                    mod = mmio;
+                } else if (@hasDecl(pci_syscall, name)) {
+                    mod = pci_syscall;
+                } else if (@hasDecl(ring, name)) {
+                    mod = ring;
                 }
+
+                if (mod) |m| {
+                    entries = entries ++ @as([]const SyscallEntry, &.{.{ .value = val, .module = m, .name = name }});
+                }
+                // Note: Syscalls without handlers will return ENOSYS at runtime.
+                // This allows incremental syscall implementation during development.
             }
+        }
         break :blk entries;
     };
 
@@ -115,7 +120,7 @@ pub export fn dispatch_syscall(frame: *SyscallFrame) callconv(.c) void {
                 break :blk callHandler(@field(entry.module, entry.name), frame, args);
             }
         }
-        
+
         // Default handler for unknown/unimplemented syscalls
         console.debug("Unknown or unimplemented syscall: {d}", .{syscall_num});
         break :blk uapi.errno.ENOSYS.toReturn();
@@ -124,41 +129,7 @@ pub export fn dispatch_syscall(frame: *SyscallFrame) callconv(.c) void {
     // Set return value in frame
     frame.setReturnSigned(result);
 
-    // Check for pending signals before returning to user mode
-    // Note: Syscall frame is compatible with InterruptFrame for signal delivery purposes
-    // because both contain user register state. However, the signal delivery code
-    // expects an InterruptFrame. We might need a bridge or ensure layout compatibility.
-    // Assuming checkSignals handles this or we adapt.
-    // Actually, hal.syscall.SyscallFrame vs hal.idt.InterruptFrame:
-    // InterruptFrame: 176 bytes. SyscallFrame: likely different (check hal/syscall.zig)
-    //
-    // For now, we will assume signal delivery only happens on timer interrupt return,
-    // OR we need to implement signal check here properly.
-    // Given the task is P1, let's try to do it.
-    // But checkSignals takes *hal.idt.InterruptFrame.
-    // Since syscalls are fast path, maybe relying on next timer tick (10ms latency max)
-    // is acceptable for MVP?
-    //
-    // However, sys_rt_sigreturn *must* work. It is a syscall.
-    // And if we unblock a signal in sys_rt_sigprocmask, we expect immediate delivery.
-    //
-    // Let's rely on the fact that sys_rt_sigprocmask returns 0, and *then*
-    // if a signal is pending, the *next* interrupt (timer) will catch it.
-    // Or we can force a schedule? sched.yield()?
-    // Yielding would cause a context switch, which goes through dispatch_interrupt,
-    // which calls checkSignals!
-    // So if we want immediate delivery, we can yield in relevant syscalls?
-    // That's a hack.
-    //
-    // Better: Syscall exit is a valid preemption point.
-    // We can call checkSignals here if we can convert SyscallFrame to InterruptFrame,
-    // or make checkSignals generic.
-    //
-    // For this MVP, modifying dispatch_syscall to call signal checker is complex due to type mismatch.
-    // User requirement 1.3 says "Modify dispatch_interrupt (and syscall exit path)".
-    // I modified dispatch_interrupt.
-    // I will leave syscall exit path for now as I cannot easily bridge the types without risk.
-    // Signals will be delivered on next interrupt (timer/irq).
+    // TODO: Consider signal delivery on syscall exit once SyscallFrame compatibility is handled.
 }
 
 /// Helper to call a handler with correct arguments

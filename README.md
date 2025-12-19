@@ -33,7 +33,8 @@ Zscapek includes a native, in-kernel TCP/IP stack.
 - **Protocols:** Ethernet, ARP, IPv4, ICMP, UDP, and TCP.
 - **TCP Support:** Implements RFC 793 state machine, sliding windows, retransmission timers, and congestion control.
 - **Socket API:** BSD-style interface supporting `socket`, `bind`, `connect`, `accept`, `listen`, `send`, and `recv`.
-- **Driver:** Intel E1000e (PCIe Gigabit Ethernet) driver with NAPI-style interrupt handling.
+- **Drivers:** Intel E1000e (PCIe Gigabit Ethernet) and VirtIO-Net (paravirtualized) with NAPI-style interrupt handling.
+- **Zero-Copy IPC:** Ring buffer based inter-process communication between VirtIO-Net driver and netstack using decomposed SPSC pattern for MPSC semantics. 128-byte cache line alignment prevents false sharing.
 
 ### Hardware Support
 - **Bus:** PCI enumeration with BAR mapping and MSI/MSI-X interrupt support.
@@ -84,7 +85,7 @@ This configuration forwards local port 8080 to the guest port 80. Once the syste
 - **SMP:** Symmetric Multiprocessing support.
 - **VFS:** Abstract Virtual File System to unify InitRD and AHCI storage.
 - **Dynamic Linking:** Support for shared object (`.so`) loading.
-- **VirtIO Net:** Paravirtualized network driver implementation.
+- ~~**VirtIO Net:** Paravirtualized network driver implementation.~~ (Done)
 
 ## License
 

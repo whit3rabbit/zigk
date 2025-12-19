@@ -4,6 +4,20 @@ This document contains actionable sub-tasks with research findings from comprehe
 
 ---
 
+ | Category             | Count | Examples                                                         |            |----------------------|-------|------------------------------------------------------------------|
+  | TODO Comments        | 28    | Signal handling, heap slab allocator, USB drivers, audio formats |
+  | Stub Implementations | 45+   | Syscalls returning ENOSYS, hardcoded UID/GID returns             |
+  | Incomplete Features  | 20+   | io_uring ops, file-backed mmap, sigaltstack                      |
+
+  Key areas with stubs/TODOs:
+  - Signals: Default actions, sigaltstack, mask saving (5 TODOs)
+  - Filesystem: pread64, pwrite64, readv, openat, file modifications (15+ stubs)
+  - Process Management: UID/GID model, capabilities, resource limits (10+ stubs)
+  - USB Drivers: EHCI handoff, hub disconnect handling (6 TODOs)
+  - Audio: Sample rates, mono playback, format conversion (3 TODOs)
+  - Networking: Some stubs in execution.zig (though net.zig has real implementations)
+  - Libc: printf width padding, thread-local errno, signal stubs
+
 ## Phase 6: Performance & Core Optimization (Priority)
 
 **Goal:** Eliminate O(N) bottlenecks in memory allocation and scheduling.
@@ -60,9 +74,9 @@ This document contains actionable sub-tasks with research findings from comprehe
 
 ---
 
-### 3. Optimized Memcpy/Memset
+### 3. Optimized Memcpy/Memset [COMPLETED]
 
-**Current State:** Byte-by-byte loops in libc and kernel. ~8x speedup possible.
+**Current State:** IMPLEMENTED globally via `rep movsq` (assembly).
 
 **Key Findings:**
 - `src/user/lib/libc/string/mem.zig`: memcpy/memset/memmove all use byte loops
@@ -91,32 +105,54 @@ This document contains actionable sub-tasks with research findings from comprehe
 
 **Goal:** Remove copy overhead and enable async storage operations.
 
-### 4. Zero-Copy Ring IPC (Netstack)
+### 4. Zero-Copy Ring IPC (Netstack) [COMPLETED]
 
-**Current State:** 4-5 packet copies per RX/TX path. io_uring infrastructure exists but disconnected.
+**Status:** IMPLEMENTED using RingMPSC pattern
 
-**Key Findings:**
-- IPC Message: 2064 bytes (sender_pid, payload_len, payload[2048])
-- Current flow: User -> sys_send (copy) -> mailbox (heap alloc) -> sys_recv (copy) -> User
-- Socket RX queue: Fixed 8-entry queue with embedded 2KB buffers (2 copies per packet)
-- TCP ring buffers use byte-by-byte copy (8KB send/recv buffers)
-- io_uring already implemented: syscalls 425/426/427, supports socket/pipe/disk ops
-- PacketBuffer exists with layer-based offset tracking (could enable zero-copy)
+**Source:** https://github.com/boonzy00/ringmpsc
+
+**Architecture:** Decomposed SPSC for MPSC semantics
+- Each producer (VirtIO-Net driver) gets dedicated ring
+- Consumer (netstack) polls all attached rings round-robin
+- No producer-producer contention (lock-free writes)
+- 128-byte cache line padding prevents false sharing
+
+**Implementation Details:**
+- Ring capacity: 256 entries (~400KB per ring)
+- Entry size: 1552 bytes (MTU + metadata)
+- Syscalls 1040-1045: ring_create, ring_attach, ring_detach, ring_wait, ring_notify, ring_wait_any
 
 **Key Files:**
-- `src/kernel/syscall/ipc.zig:39-48,125-128` - IPC copy points
-- `src/uapi/ipc_msg.zig` - Message structure (2064 bytes)
-- `src/net/transport/socket/types.zig:266-315` - RxQueueEntry with embedded buffers
-- `src/net/transport/tcp/api.zig:175-178,201-204` - Byte-by-byte TCP buffer copies
-- `src/kernel/syscall/io_uring.zig` - Existing io_uring implementation
+- `src/uapi/ring.zig` - Ring buffer user API structures (RingHeader, PacketEntry)
+- `src/uapi/syscalls.zig` - Ring syscall numbers (SYS_RING_CREATE=1040, etc.)
+- `src/kernel/ring.zig` - Ring buffer manager with PMM allocation
+- `src/kernel/syscall/ring.zig` - Syscall handlers for ring operations
+- `src/user/lib/ring.zig` - Userspace ring library with Ring/RingSet wrappers
+- `src/user/drivers/virtio_net/main.zig` - VirtIO-Net using ring for RX/TX
+- `src/user/netstack/main.zig` - Netstack with MPSC ring polling
 
 **Sub-Tasks:**
-- [ ] **Define Ring Structure:** Create shared memory ring layout (SQ/CQ) for network packets
-- [ ] **Implement `sys_ipc_setup`:** New syscall for shared memory region between processes
-- [ ] **Driver Update (VirtIO-Net):** Write RX descriptors directly to shared ring
-- [ ] **Netstack Update:** Poll shared ring instead of blocking on `sys_recv`
+- [x] **Create uAPI types:** RingHeader (384 bytes, 3 cache lines), PacketEntry (1552 bytes)
+- [x] **Add syscall numbers:** SYS_RING_CREATE (1040) through SYS_RING_WAIT_ANY (1045)
+- [x] **Implement ring manager:** Ring allocation, PMM page mapping, futex integration
+- [x] **Implement syscall handlers:** sys_ring_create, attach, detach, wait, notify, wait_any
+- [x] **Add multi-ring wait:** sys_ring_wait_any() for MPSC consumer polling
+- [x] **Create userspace library:** Ring wrapper with reserve/commit, peek/advance API
+- [x] **Migrate VirtIO-Net RX:** Replace IPC send with ring.reserve/commit/notify
+- [x] **Migrate VirtIO-Net TX:** Attach to netstack TX ring, use @memcpy from ring
+- [x] **Migrate netstack:** MPSC polling loop with RingSet, fallback to legacy IPC
 
-**Effort:** High (~800 lines, touches multiple subsystems)
+**Performance Improvement:**
+- Reduced from 4-5 copies per packet to 1 copy (direct DMA to ring buffer)
+- Eliminated per-packet heap allocation in kernel IPC path
+- Lock-free ring operations with memory barriers (lfence/sfence)
+
+**Backward Compatibility:**
+- Existing sys_send/sys_recv IPC unchanged
+- Ring is opt-in: drivers detect ring capability
+- Fallback to legacy IPC if ring setup fails
+
+**Effort:** High (~900 lines across 9 files)
 
 ---
 
@@ -213,7 +249,7 @@ This document contains actionable sub-tasks with research findings from comprehe
 
 ### 8. MSI-X Refinement
 
-**Current State:** MSI-X works for XHCI. VirtIO-GPU has NO interrupt support (polling only).
+**Current State:** MSI-X works for XHCI and VirtIO-GPU.
 
 **Key Findings:**
 - `src/drivers/pci/msi.zig` correctly implements MSI-X table configuration
@@ -524,7 +560,7 @@ Keep Limine for now while developing Phase 6 and 7 of your kernel. Start the `sr
 | 4 | VFS Mount + Permissions | Medium | Medium (userland) | |
 | 5 | Scheduler Lock Breaking | High | High (SMP scaling) | DONE |
 | 6 | Async Filesystem | High | Medium (I/O perf) | |
-| 7 | Zero-Copy IPC | High | High (network perf) | |
+| 7 | Zero-Copy IPC | High | High (network perf) | DONE |
 | 8 | User/Group Permissions | Medium | Low (security) | |
 | 9 | IOMMU | Very High | High (security) | |
 | 10 | Custom UEFI | Very High | Low (optional) | |
@@ -535,7 +571,9 @@ Keep Limine for now while developing Phase 6 and 7 of your kernel. Start the `sr
 3. ~~MSI-X u6/u8 boundary fix~~ - Changed offset to u8
 4. ~~Slab allocator~~ - O(1) allocation for objects <= 2KB
 5. ~~Scheduler lock breaking~~ - timerTick lock hold reduced 97%, sleep_lock added, atomic tick_count
+6. ~~Zero-Copy Ring IPC~~ - RingMPSC pattern with decomposed SPSC rings, VirtIO-Net and netstack migrated
 
 **Next Priority:**
 - VFS Mount + Permissions (Medium effort, Medium impact)
+- Async Filesystem (High effort, Medium impact)
 - Optimized Memcpy/Memset - remaining userland integration (Low effort, High impact)

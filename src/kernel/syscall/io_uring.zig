@@ -46,10 +46,10 @@ const MIN_RING_ENTRIES: u32 = 1;
 
 /// SQ ring header layout (at start of sq_ring page)
 const SqRingHeader = extern struct {
-    head: u32,           // Consumer index (kernel reads)
-    tail: u32,           // Producer index (user writes)
-    ring_mask: u32,      // entries - 1
-    ring_entries: u32,   // Number of entries
+    head: u32, // Consumer index (kernel reads)
+    tail: u32, // Producer index (user writes)
+    ring_mask: u32, // entries - 1
+    ring_entries: u32, // Number of entries
     flags: u32,
     dropped: u32,
     // Followed by u32[entries] array of SQE indices
@@ -57,8 +57,8 @@ const SqRingHeader = extern struct {
 
 /// CQ ring header layout (at start of cq_ring page)
 const CqRingHeader = extern struct {
-    head: u32,           // Consumer index (user reads)
-    tail: u32,           // Producer index (kernel writes)
+    head: u32, // Consumer index (user reads)
+    tail: u32, // Producer index (kernel writes)
     ring_mask: u32,
     ring_entries: u32,
     overflow: u32,
@@ -198,7 +198,7 @@ pub const IoUringInstance = struct {
         };
 
         // Memory barrier before updating tail
-        asm volatile ("mfence" ::: "memory");
+        asm volatile ("mfence" ::: .{ .memory = true });
 
         ring.tail +%= 1;
         return true;
@@ -672,7 +672,7 @@ fn submitFromSharedMemory(inst: *IoUringInstance, to_submit: usize) SyscallError
     const sqes = inst.getSqes();
 
     // Memory barrier before reading indices
-    asm volatile ("lfence" ::: "memory");
+    asm volatile ("lfence" ::: .{ .memory = true });
 
     var submitted: usize = 0;
     var head = sq_ring.head;
@@ -702,7 +702,7 @@ fn submitFromSharedMemory(inst: *IoUringInstance, to_submit: usize) SyscallError
     sq_ring.head = head;
 
     // Memory barrier after updating head
-    asm volatile ("sfence" ::: "memory");
+    asm volatile ("sfence" ::: .{ .memory = true });
 
     return submitted;
 }

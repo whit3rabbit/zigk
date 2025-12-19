@@ -211,8 +211,8 @@ pub fn sys_rt_sigreturn(frame: *hal.syscall.SyscallFrame) SyscallError!usize {
             // Validate pointer
             if (base.isValidUserAccess(mc.fpstate, @sizeOf(hal.fpu.FpuState), base.AccessMode.Read)) {
                 const fpstate_val = UserPtr.from(mc.fpstate).readValue(hal.fpu.FpuState) catch {
-                     sched.exitWithStatus(128 + 11);
-                     unreachable;
+                    sched.exitWithStatus(128 + 11);
+                    unreachable;
                 };
 
                 // Update thread state
