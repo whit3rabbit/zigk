@@ -16,6 +16,9 @@ const heap = @import("heap");
 const uapi = @import("uapi");
 const initrd = @import("initrd.zig");
 const sync = @import("sync");
+const meta = @import("meta.zig");
+
+pub const FileMeta = meta.FileMeta;
 
 // Maximum number of mount points
 const MAX_MOUNTS = 8;
@@ -51,6 +54,10 @@ pub const FileSystem = struct {
 
     /// Unlink (delete) a file (optional - null for read-only filesystems)
     unlink: ?*const fn (ctx: ?*anyopaque, path: []const u8) Error!void,
+
+    /// Get file metadata without opening (optional - for permission checking)
+    /// Returns null if file does not exist
+    stat_path: ?*const fn (ctx: ?*anyopaque, path: []const u8) ?FileMeta,
 };
 
 /// Mount Point Structure
@@ -216,6 +223,60 @@ pub const Vfs = struct {
         return error.NotFound;
     }
 
+    /// Get file metadata without opening the file
+    /// Used for permission checking before open operations
+    /// Returns null if file does not exist or filesystem doesn't support stat_path
+    pub fn statPath(path: []const u8) ?FileMeta {
+        if (path.len == 0) return null;
+        if (path[0] != '/') return null; // Absolute paths only
+
+        const held = lock.acquire();
+        defer held.release();
+
+        // Find the longest matching mount point (same logic as open)
+        var best_idx: ?usize = null;
+        var best_len: usize = 0;
+
+        for (0..MAX_MOUNTS) |i| {
+            if (mounts[i]) |mount_point| {
+                if (std.mem.startsWith(u8, path, mount_point.path)) {
+                    const mp_len = mount_point.path.len;
+                    var match = false;
+                    if (path.len == mp_len) {
+                        match = true;
+                    } else if (path.len > mp_len) {
+                        if (mp_len == 1 and mount_point.path[0] == '/') {
+                            match = true;
+                        } else if (path[mp_len] == '/') {
+                            match = true;
+                        }
+                    }
+                    if (match and mp_len > best_len) {
+                        best_idx = i;
+                        best_len = mp_len;
+                    }
+                }
+            }
+        }
+
+        if (best_idx) |idx| {
+            const mp = &mounts[idx].?;
+
+            // Check if filesystem supports stat_path
+            const stat_fn = mp.fs.stat_path orelse return null;
+
+            // Strip mount point prefix
+            var rel_path = path[best_len..];
+            if (rel_path.len == 0) {
+                rel_path = "/";
+            }
+
+            return stat_fn(mp.fs.context, rel_path);
+        }
+
+        return null;
+    }
+
     /// Decrement open file count for a mount point by index
     /// Called by fd.zig when a file descriptor is closed
     fn decrementOpenFilesByIndex(idx: u8) void {
@@ -360,9 +421,49 @@ fn initrdUnlink(ctx: ?*anyopaque, path: []const u8) Error!void {
     return error.AccessDenied;
 }
 
+fn initrdStatPath(ctx: ?*anyopaque, path: []const u8) ?FileMeta {
+    _ = ctx;
+
+    // Handle root directory
+    if (std.mem.eql(u8, path, "/") or std.mem.eql(u8, path, "/.")) {
+        return FileMeta{
+            .mode = meta.S_IFDIR | 0o755, // Directory with rwxr-xr-x
+            .uid = 0,
+            .gid = 0,
+            .exists = true,
+            .readonly = true,
+        };
+    }
+
+    // Look up file in InitRD
+    const file = initrd.InitRD.instance.findFile(path) orelse return null;
+
+    // Parse permissions from TAR header
+    const header = file.header;
+    const mode = header.getMode();
+    const uid = header.getUid();
+    const gid = header.getGid();
+
+    // Determine file type from TAR typeflag
+    const file_type: u32 = switch (header.typeflag) {
+        '5' => meta.S_IFDIR, // Directory
+        '2' => meta.S_IFLNK, // Symlink
+        else => meta.S_IFREG, // Regular file (typeflag '0' or '\0')
+    };
+
+    return FileMeta{
+        .mode = file_type | (mode & 0o7777),
+        .uid = uid,
+        .gid = gid,
+        .exists = true,
+        .readonly = true, // InitRD is always read-only
+    };
+}
+
 pub const initrd_fs = FileSystem{
     .context = null,
     .open = initrdOpen,
     .unmount = null,
     .unlink = initrdUnlink,
+    .stat_path = initrdStatPath,
 };

@@ -19,6 +19,7 @@ const std = @import("std");
 const fd = @import("fd");
 const heap = @import("heap");
 const vfs = @import("vfs.zig");
+const meta = @import("meta.zig");
 const uapi = @import("uapi");
 const console = @import("console"); // Assuming console is available via build options or we need to add import
 const sync = @import("sync");
@@ -176,6 +177,7 @@ pub const SFS = struct {
             .open = sfsOpen,
             .unmount = sfsUnmount,
             .unlink = sfsUnlink,
+            .stat_path = sfsStatPath,
         };
     }
 
@@ -1078,4 +1080,58 @@ fn sfsUnlink(ctx: ?*anyopaque, path: []const u8) vfs.Error!void {
     }
 
     return vfs.Error.NotFound;
+}
+
+fn sfsStatPath(ctx: ?*anyopaque, path: []const u8) ?vfs.FileMeta {
+    const self: *SFS = @ptrCast(@alignCast(ctx));
+
+    // Handle root directory
+    if (path.len == 0 or std.mem.eql(u8, path, "/") or std.mem.eql(u8, path, ".")) {
+        return vfs.FileMeta{
+            .mode = meta.S_IFDIR | 0o755, // Directory with rwxr-xr-x
+            .uid = 0,
+            .gid = 0,
+            .exists = true,
+            .readonly = false,
+        };
+    }
+
+    // Normalize path (remove leading /)
+    const name = if (path.len > 0 and path[0] == '/') path[1..] else path;
+
+    // Validate filename
+    if (!isValidFilename(name)) {
+        return null;
+    }
+
+    if (name.len == 0 or name.len >= 32) return null;
+
+    // Read all directory blocks at once (batched async I/O)
+    var dir_buf: [ROOT_DIR_BLOCKS * 512]u8 = undefined;
+    readDirectoryAsync(self, &dir_buf) catch return null;
+
+    // Scan all entries from in-memory buffer
+    const total_entries = ROOT_DIR_BLOCKS * 4;
+    var idx: u32 = 0;
+    while (idx < total_entries) : (idx += 1) {
+        const offset = idx * 128;
+        const e: *const DirEntry = @ptrCast(@alignCast(&dir_buf[offset]));
+
+        if (e.flags == 1) {
+            const e_name = std.mem.sliceTo(&e.name, 0);
+            if (std.mem.eql(u8, e_name, name)) {
+                // Found the file
+                // SFS doesn't store permissions, return hardcoded values
+                return vfs.FileMeta{
+                    .mode = meta.S_IFREG | 0o644, // Regular file with rw-r--r--
+                    .uid = 0,
+                    .gid = 0,
+                    .exists = true,
+                    .readonly = false,
+                };
+            }
+        }
+    }
+
+    return null;
 }

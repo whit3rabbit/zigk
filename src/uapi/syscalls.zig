@@ -346,6 +346,22 @@ pub const SYS_GETEGID: usize = 108;
 /// () -> pid_t
 pub const SYS_GETPPID: usize = 110;
 
+/// Set real, effective, and saved user IDs
+/// (ruid, euid, suid) -> int
+pub const SYS_SETRESUID: usize = 117;
+
+/// Get real, effective, and saved user IDs
+/// (ruid, euid, suid) -> int
+pub const SYS_GETRESUID: usize = 118;
+
+/// Set real, effective, and saved group IDs
+/// (rgid, egid, sgid) -> int
+pub const SYS_SETRESGID: usize = 119;
+
+/// Get real, effective, and saved group IDs
+/// (rgid, egid, sgid) -> int
+pub const SYS_GETRESGID: usize = 120;
+
 /// Set/get signal stack context
 /// (ss, old_ss) -> int
 pub const SYS_SIGALTSTACK: usize = 131;

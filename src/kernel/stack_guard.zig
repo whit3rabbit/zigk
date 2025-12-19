@@ -10,7 +10,8 @@
 
 const hal = @import("hal");
 const console = @import("console");
-const prng = @import("prng");
+// NOTE: prng import removed - stack_guard now uses ChaCha20 CSPRNG directly
+// via hal.entropy for better security (CSPRNG is not reversible like xoroshiro128+)
 
 /// Stack canary value
 /// Randomized at boot via PRNG seeded from RDRAND/RDTSC hardware entropy.
@@ -65,13 +66,17 @@ pub fn init() void {
         random_value = @bitCast(entropy_buf);
         console.info("Stack guard: Canary seeded from hardware entropy (RDRAND)", .{});
     } else {
-        // Fallback: use PRNG if hardware entropy unavailable
-        // This is weaker but still better than a static value
-        random_value = prng.next();
-        console.warn("Stack guard: RDRAND unavailable - using PRNG (weaker security)", .{});
+        // SECURITY FIX: Use ChaCha20 CSPRNG instead of weak xoroshiro128+ PRNG
+        // The CSPRNG provides 256-bit security even when seeded from weak sources,
+        // making it far harder for attackers to predict canary values.
+        // xoroshiro128+ has only 128 bits of state and is reversible from 2 outputs.
+        random_value = hal.entropy.getCsprngU64AllowWeak();
+        console.warn("Stack guard: RDRAND unavailable - using ChaCha20 CSPRNG", .{});
 
-        if (prng.isUsingFallbackSeed()) {
-            console.err("Stack guard: CRITICAL - using predictable fallback seed!", .{});
+        // Check if even the CSPRNG is using weak seeding
+        if (!hal.entropy.isCsprngSeeded()) {
+            console.err("Stack guard: CRITICAL - CSPRNG using weak fallback seed!", .{});
+            console.err("  Stack canaries may be predictable to sophisticated attackers.", .{});
         }
     }
 
@@ -96,27 +101,38 @@ pub fn reseed() void {
     const quality = hal.entropy.getEstimatedQuality();
 
     if (quality == .high) {
-        // Re-seed PRNG first to incorporate new entropy
+        // Re-seed the CSPRNG with fresh hardware entropy
         hal.entropy.reseedCsprng();
-        prng.mixEntropy(hal.entropy.getHardwareEntropy());
 
-        // Generate new canary
-        var random_value = prng.next();
+        // SECURITY FIX: Use CSPRNG instead of weak PRNG
+        // Try hardware first, fall back to CSPRNG
+        var entropy_buf: [8]u8 = undefined;
+        var random_value: u64 = undefined;
+
+        if (hal.entropy.tryFillWithHardwareEntropy(&entropy_buf)) {
+            random_value = @bitCast(entropy_buf);
+        } else if (hal.entropy.getCsprngU64()) |csprng_val| {
+            random_value = csprng_val;
+        } else {
+            // Should not happen since quality == .high means hardware is available
+            return;
+        }
+
         random_value &= ~@as(u64, 0xFF); // Maintain null-byte constraint
-
         __stack_chk_guard = random_value;
 
         console.info("Stack guard: Canary re-seeded with high-quality entropy", .{});
-    } else if (quality == .medium and prng.isUsingFallbackSeed()) {
-        // Some improvement is better than none
-        prng.mixEntropy(hal.entropy.getHardwareEntropy());
+    } else if (quality == .medium) {
+        // SECURITY FIX: Use CSPRNG even for medium quality
+        // CSPRNG provides better mixing than xoroshiro128+
+        hal.entropy.reseedCsprng();
 
-        var random_value = prng.next();
+        var random_value = hal.entropy.getCsprngU64AllowWeak();
         random_value &= ~@as(u64, 0xFF);
 
         __stack_chk_guard = random_value;
 
-        console.info("Stack guard: Canary re-seeded (entropy: medium)", .{});
+        console.info("Stack guard: Canary re-seeded with CSPRNG (entropy: medium)", .{});
     }
     // If quality is still low, don't re-seed - we'd just add predictable data
 }

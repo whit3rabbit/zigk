@@ -71,6 +71,38 @@ pub const FileCapability = struct {
     }
 };
 
+/// Capability for changing user ID (like Linux CAP_SETUID)
+/// Allows a process to:
+/// - Make arbitrary changes to process UIDs (setuid, setreuid, setresuid)
+/// - Forge UID when passing socket credentials
+/// - Set saved set-user-ID when executing setuid programs
+pub const SetUidCapability = struct {
+    /// Target UID to allow changing to (or 0xFFFFFFFF for any UID)
+    target_uid: u32,
+
+    pub const ANY_UID: u32 = 0xFFFFFFFF;
+
+    pub fn allows(self: SetUidCapability, target: u32) bool {
+        return self.target_uid == ANY_UID or self.target_uid == target;
+    }
+};
+
+/// Capability for changing group ID (like Linux CAP_SETGID)
+/// Allows a process to:
+/// - Make arbitrary changes to process GIDs (setgid, setregid, setresgid)
+/// - Forge GID when passing socket credentials
+/// - Set supplementary GIDs with setgroups
+pub const SetGidCapability = struct {
+    /// Target GID to allow changing to (or 0xFFFFFFFF for any GID)
+    target_gid: u32,
+
+    pub const ANY_GID: u32 = 0xFFFFFFFF;
+
+    pub fn allows(self: SetGidCapability, target: u32) bool {
+        return self.target_gid == ANY_GID or self.target_gid == target;
+    }
+};
+
 /// Capability for mounting/unmounting filesystems
 pub const MountCapability = struct {
     /// Target mount point path (exact match required, wildcards NOT allowed for security)
@@ -116,6 +148,8 @@ pub const CapabilityType = enum {
     InputInjection,
     Mount,
     File,
+    SetUid,
+    SetGid,
 };
 
 pub const Capability = union(CapabilityType) {
@@ -130,4 +164,8 @@ pub const Capability = union(CapabilityType) {
     Mount: MountCapability,
     /// Allows file write operations (create, delete, modify)
     File: FileCapability,
+    /// Allows changing user ID (like Linux CAP_SETUID)
+    SetUid: SetUidCapability,
+    /// Allows changing group ID (like Linux CAP_SETGID)
+    SetGid: SetGidCapability,
 };

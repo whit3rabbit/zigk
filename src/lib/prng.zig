@@ -13,6 +13,7 @@
 
 const hal = @import("hal");
 const sync = @import("sync");
+const atomic = @import("std").atomic;
 
 // PRNG state (128 bits for xoroshiro128+)
 var state: [2]u64 = .{ 0, 0 };
@@ -20,8 +21,10 @@ var state: [2]u64 = .{ 0, 0 };
 // Spinlock for thread-safe access
 var prng_lock: sync.Spinlock = .{};
 
-// Initialization flag
-var initialized: bool = false;
+// Initialization flag - atomic to prevent TOCTOU race condition
+// SECURITY: Using acquire/release ordering ensures state writes are visible
+// before initialized is observed as true by other cores
+var initialized: atomic.Value(bool) = atomic.Value(bool).init(false);
 
 // SECURITY: Flag indicating predictable fallback seed was used
 // Callers should check isUsingFallbackSeed() and log a warning
@@ -56,23 +59,45 @@ pub fn init() void {
     // Security fix: Check EACH state word independently, not just both
     // xoroshiro128+ degenerates with ANY zero state word (short period,
     // predictable output). Previously only checked if BOTH were zero.
-    // Fallback values are chosen from splitmix64 output - still predictable
-    // but at least ensures the PRNG doesn't degenerate.
-    const fallback_0: u64 = 0x853c49e6748fea9b;
-    const fallback_1: u64 = 0xda3e39cb94b95bdb;
+    //
+    // SECURITY IMPROVEMENT: Instead of pure hardcoded constants, mix in
+    // runtime-specific data to reduce predictability. The base constants
+    // are still from splitmix64 but we XOR with runtime entropy.
+    //
+    // This is still NOT cryptographically secure - if an attacker can
+    // estimate TSC and stack layout, they can predict the fallback.
+    // But it's better than pure constants visible in the binary.
+    const base_fallback_0: u64 = 0x853c49e6748fea9b;
+    const base_fallback_1: u64 = 0xda3e39cb94b95bdb;
+
+    // Mix in runtime data to make fallbacks less predictable
+    // TSC provides timing entropy, stack address provides layout entropy
+    var stack_addr: usize = undefined;
+    const tsc = hal.cpu.rdtsc();
+    const addr_entropy: u64 = @intFromPtr(&stack_addr);
+
+    // Finalization mix (from MurmurHash3) to spread bits
+    const mixed_0 = finalizeMix(base_fallback_0 ^ tsc);
+    const mixed_1 = finalizeMix(base_fallback_1 ^ addr_entropy ^ rotl(tsc, 17));
 
     if (state[0] == 0) {
         // Security: Zero state[0] would cause PRNG degeneration
-        state[0] = fallback_0;
+        state[0] = mixed_0;
         using_fallback_seed = true;
     }
     if (state[1] == 0) {
         // Security: Zero state[1] would cause PRNG degeneration
-        state[1] = fallback_1;
+        state[1] = mixed_1;
         using_fallback_seed = true;
     }
 
-    initialized = true;
+    // Final safety: ensure neither is still zero after mixing
+    if (state[0] == 0) state[0] = base_fallback_0;
+    if (state[1] == 0) state[1] = base_fallback_1;
+
+    // SECURITY: Release ordering ensures all state writes are visible
+    // to other cores before they observe initialized == true
+    initialized.store(true, .release);
 }
 
 /// Generate 64 bits of pseudo-random data
@@ -105,6 +130,18 @@ inline fn rotl(x: u64, comptime k: comptime_int) u64 {
     return (x << shift_left) | (x >> shift_right);
 }
 
+/// MurmurHash3 finalization mix - spreads bits for better avalanche
+/// Used to mix runtime entropy into fallback values
+inline fn finalizeMix(h: u64) u64 {
+    var x = h;
+    x ^= x >> 33;
+    x *%= 0xff51afd7ed558ccd;
+    x ^= x >> 33;
+    x *%= 0xc4ceb9fe1a85ec53;
+    x ^= x >> 33;
+    return x;
+}
+
 /// Fill buffer with random bytes
 /// Thread-safe, suitable for sys_getrandom implementation
 pub fn fill(buf: []u8) void {
@@ -127,8 +164,10 @@ pub fn fill(buf: []u8) void {
 }
 
 /// Check if PRNG has been initialized
+/// SECURITY: Uses acquire ordering to synchronize with release in init()
+/// This ensures state writes are visible when this returns true
 pub fn isInitialized() bool {
-    return initialized;
+    return initialized.load(.acquire);
 }
 
 /// SECURITY: Check if predictable fallback seed is in use

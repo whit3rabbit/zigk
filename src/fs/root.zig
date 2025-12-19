@@ -12,3 +12,4 @@ pub const initrd = @import("initrd.zig");
 pub const vfs = @import("vfs.zig");
 pub const sfs = @import("sfs.zig");
 pub const partitions = @import("partitions");
+pub const meta = @import("meta.zig");

@@ -97,6 +97,8 @@ pub fn sys_getrandom(buf_ptr: usize, buflen: usize, flags: u32) SyscallError!usi
     // FR-RAND-02: Fill buffer with random data
     const STACK_BUF_SIZE: usize = 256;
     var stack_buf: [STACK_BUF_SIZE]u8 = undefined;
+    // SECURITY: Zero buffer on exit to prevent entropy leakage via stack
+    defer @memset(&stack_buf, 0);
 
     const uptr = user_mem.UserPtr.from(buf_ptr);
     var remaining = buflen;
@@ -125,13 +127,18 @@ pub fn sys_getrandom(buf_ptr: usize, buflen: usize, flags: u32) SyscallError!usi
             prng.fillFromHardwareEntropy(stack_buf[0..chunk_size]);
         } else {
             // Default: Use hardware entropy with CSPRNG fallback
-            // But check security level first
-            if (!isEntropyPoolReady() and !allow_weak) {
+            // SECURITY FIX: Must check entropy quality before proceeding
+            // Per NIST SP 800-90B, cryptographic randomness requires verified entropy
+            if (!isEntropyPoolReady()) {
+                // Return partial data if we got some, otherwise EAGAIN
+                // This prevents silent downgrade to weak entropy
                 if (offset > 0) {
                     return offset;
                 }
-                // Block would happen here in a full implementation
-                // For now, return what CSPRNG provides (it's at least medium quality)
+                // SECURITY: Do NOT silently provide weak entropy
+                // Applications expect cryptographic quality from getrandom()
+                // Return EAGAIN so they can retry or handle appropriately
+                return error.EAGAIN;
             }
             prng.fillFromHardwareEntropy(stack_buf[0..chunk_size]);
         }

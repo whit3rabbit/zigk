@@ -55,6 +55,10 @@ pub const MsixAllocation = msi.MsixAllocation;
 pub const enumerate = enumeration.enumerate;
 pub const initFromAcpi = enumeration.initFromAcpi;
 
+// Re-export SMP safety functions (see enumeration.zig for invariant documentation)
+pub const isEnumerationComplete = enumeration.isEnumerationComplete;
+pub const assertEnumerationComplete = enumeration.assertEnumerationComplete;
+
 // =============================================================================
 // Global PCI State (set during kernel init, read by syscalls)
 // =============================================================================

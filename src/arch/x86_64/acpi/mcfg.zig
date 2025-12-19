@@ -80,7 +80,14 @@ pub const McfgEntry = packed struct {
 
     /// Calculate size of ECAM region for this entry
     /// Each bus has 32 devices * 8 functions * 4KB = 256KB per bus
+    ///
+    /// SECURITY: Validates end_bus >= start_bus to prevent integer underflow.
+    /// ACPI MCFG data comes from firmware (untrusted) and may be malformed.
     pub fn getRegionSize(self: *align(1) const Self) usize {
+        // SECURITY: Prevent integer underflow from malformed MCFG entries
+        if (self.end_bus < self.start_bus) {
+            return 0;
+        }
         const bus_count: usize = @as(usize, self.end_bus - self.start_bus) + 1;
         // 32 devices * 8 functions * 4096 bytes = 1MB per bus
         return bus_count * 32 * 8 * 4096;

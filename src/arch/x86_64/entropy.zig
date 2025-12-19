@@ -38,6 +38,7 @@ const cpu = @import("cpu.zig");
 const timing = @import("timing.zig");
 const console = @import("console");
 const sync = @import("sync");
+const atomic = @import("std").atomic;
 
 // External assembly helpers (from asm_helpers.S)
 extern fn _asm_rdrand64(success: *u8) u64;
@@ -72,7 +73,8 @@ pub const EntropySource = enum {
 // Module state
 var rdrand_available: bool = false;
 var rdseed_available: bool = false;
-var initialized: bool = false;
+// SECURITY: Atomic to prevent TOCTOU race between init() and isInitialized()
+var initialized: atomic.Value(bool) = atomic.Value(bool).init(false);
 var csprng_seeded: bool = false;
 var state_lock: sync.Spinlock = .{};
 
@@ -174,7 +176,9 @@ pub fn init() void {
     // Initialize CSPRNG with best available entropy
     seedCsprngLocked();
 
-    initialized = true;
+    // SECURITY: Release ordering ensures all state writes are visible
+    // before other cores observe initialized == true
+    initialized.store(true, .release);
 
     // Security: Log entropy source availability for diagnostics
     // This helps identify systems running with weak entropy
@@ -531,8 +535,9 @@ fn getWeakFallbackLocked() u64 {
 }
 
 /// Check if entropy subsystem has been initialized
+/// SECURITY: Uses acquire ordering to synchronize with release in init()
 pub fn isInitialized() bool {
-    return initialized;
+    return initialized.load(.acquire);
 }
 
 /// Get current entropy quality estimate
@@ -734,4 +739,112 @@ pub fn tryFillWithHardwareEntropy(buf: []u8) bool {
     }
 
     return true;
+}
+
+// =============================================================================
+// CSPRNG Public API for Security-Critical Code
+// =============================================================================
+// Use these functions instead of prng.next() for:
+// - Cryptographic key generation
+// - Session tokens and nonces
+// - ASLR offsets
+// - Any value that must be unpredictable
+//
+// The ChaCha20 CSPRNG (RFC 8439) provides 256-bit security when properly seeded.
+// =============================================================================
+
+/// Get 64 bits from the ChaCha20 CSPRNG
+/// SECURITY: Returns null if CSPRNG is not seeded with high-quality entropy.
+/// This prevents silent downgrade to weak randomness.
+/// For security-critical applications, always check the return value.
+pub fn getCsprngU64() ?u64 {
+    const held = state_lock.acquire();
+    defer held.release();
+
+    // SECURITY: Refuse to provide output if not properly seeded
+    if (!csprng_seeded or (!rdseed_available and !rdrand_available)) {
+        return null;
+    }
+
+    return getCsprngU64Locked();
+}
+
+/// Get 64 bits from ChaCha20 CSPRNG, allowing fallback seeding
+/// SECURITY WARNING: This may return values from a weakly-seeded CSPRNG
+/// if hardware entropy is unavailable. Use getCsprngU64() for strict mode.
+/// Suitable for: stack canaries, ASLR (where some randomness is better than none)
+pub fn getCsprngU64AllowWeak() u64 {
+    const held = state_lock.acquire();
+    defer held.release();
+
+    if (!csprng_seeded) {
+        // Initialize with whatever entropy is available
+        seedCsprngLocked();
+    }
+
+    return getCsprngU64Locked();
+}
+
+/// Fill buffer with ChaCha20 CSPRNG output
+/// SECURITY: Returns false if CSPRNG is not seeded with high-quality entropy.
+/// Buffer contents are undefined on failure.
+pub fn fillWithCsprng(buf: []u8) bool {
+    const held = state_lock.acquire();
+    defer held.release();
+
+    // SECURITY: Refuse if not properly seeded
+    if (!csprng_seeded or (!rdseed_available and !rdrand_available)) {
+        return false;
+    }
+
+    var offset: usize = 0;
+    while (offset < buf.len) {
+        // Generate a block if needed
+        if (chacha_output_index >= 64) {
+            chacha_state.block(&csprng_buffer);
+            chacha_output_index = 0;
+        }
+
+        const available = 64 - chacha_output_index;
+        const to_copy = @min(buf.len - offset, available);
+
+        for (0..to_copy) |i| {
+            buf[offset + i] = csprng_buffer[chacha_output_index + i];
+        }
+
+        chacha_output_index += to_copy;
+        offset += to_copy;
+    }
+
+    return true;
+}
+
+/// Fill buffer with ChaCha20 CSPRNG, allowing weak seeding
+/// SECURITY WARNING: Use fillWithCsprng() for security-critical operations.
+/// This function will use weak entropy sources if hardware RNG unavailable.
+pub fn fillWithCsprngAllowWeak(buf: []u8) void {
+    const held = state_lock.acquire();
+    defer held.release();
+
+    if (!csprng_seeded) {
+        seedCsprngLocked();
+    }
+
+    var offset: usize = 0;
+    while (offset < buf.len) {
+        if (chacha_output_index >= 64) {
+            chacha_state.block(&csprng_buffer);
+            chacha_output_index = 0;
+        }
+
+        const available = 64 - chacha_output_index;
+        const to_copy = @min(buf.len - offset, available);
+
+        for (0..to_copy) |i| {
+            buf[offset + i] = csprng_buffer[chacha_output_index + i];
+        }
+
+        chacha_output_index += to_copy;
+        offset += to_copy;
+    }
 }

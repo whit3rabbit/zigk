@@ -253,6 +253,15 @@ pub fn enableMsix(
     // If caller didn't provide BAR mapping, we need to get BAR address
     if (table_base == 0) {
         const bar_index = msix_cap.table_bir;
+
+        // SECURITY: Validate table_bir is within valid BAR range (0-5).
+        // table_bir is a u3 (0-7) but dev.bar is [6]Bar. A malicious device
+        // could report table_bir=6 or 7, causing out-of-bounds array access.
+        if (bar_index > 5) {
+            console.err("MSI-X: SECURITY - Invalid BAR index {d} in capability (max 5)", .{bar_index});
+            return null;
+        }
+
         const bar_info = dev.bar[bar_index];
 
         if (!bar_info.isValid() or !bar_info.is_mmio) {
@@ -270,6 +279,14 @@ pub fn enableMsix(
     } else {
         // Caller provided BAR mapping - get size from device
         const bar_index = msix_cap.table_bir;
+
+        // SECURITY: Validate table_bir even when caller provides BAR mapping.
+        // Same OOB risk as above.
+        if (bar_index > 5) {
+            console.err("MSI-X: SECURITY - Invalid BAR index {d} in capability (max 5)", .{bar_index});
+            return null;
+        }
+
         bar_size = dev.bar[bar_index].size;
     }
 

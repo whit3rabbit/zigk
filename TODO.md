@@ -261,32 +261,38 @@ This document contains actionable sub-tasks with research findings from comprehe
 
 ---
 
-### 9. User/Group Permissions
+### 9. User/Group Permissions [PARTIAL]
 
-**Current State:** Always root (uid=0). No permission enforcement anywhere.
+**Current State:** VFS permission enforcement implemented. Privilege dropping via setresuid/setresgid implemented. CAP_SETUID/CAP_SETGID capabilities added.
 
 **Key Findings:**
-- Process struct has capabilities array but NO uid/gid/euid/egid fields
-- sys_getuid/getgid always return 0 (stubs)
-- sys_setuid/seteuid always succeed (no-op)
-- VFS.open ignores file mode entirely
-- InitRD stat returns hardcoded 0o100755 (never checked)
-- SFS has no permission storage in DirEntry struct
+- Process struct has uid/gid/euid/egid/suid/sgid/umask fields
+- sys_getuid/getgid/seteuid/setgid/setresuid/setresgid implemented
+- VFS.open now checks permissions via statPath and perms module
+- InitRD parses TAR header permissions (mode/uid/gid)
+- SFS still has no per-file permission storage (hardcoded 0o644)
+- SetUidCapability/SetGidCapability allow non-root UID/GID changes
 
 **Key Files:**
-- `src/kernel/process.zig` - Process struct (needs uid/gid/euid/egid)
-- `src/kernel/syscall/process.zig:160-210` - Credential syscalls (stubs)
-- `src/kernel/syscall/fd.zig:94-138` - sys_open (mode ignored)
-- `src/fs/vfs.zig` - VFS.open (no permission check)
-- `src/fs/sfs.zig:41-47` - DirEntry (no permissions)
+- `src/kernel/process.zig` - Process struct with credentials, hasSetUidCapability, hasSetGidCapability
+- `src/kernel/capabilities/root.zig` - SetUidCapability, SetGidCapability
+- `src/kernel/perms.zig` - Permission checking module
+- `src/fs/meta.zig` - FileMeta struct and permission constants
+- `src/fs/vfs.zig` - VFS.statPath method for permission lookup
+- `src/kernel/syscall/fd.zig` - sys_open/sys_access with permission checks
+- `src/kernel/syscall/process.zig` - setresuid/setresgid/getresuid/getresgid
 
 **Sub-Tasks:**
-- [ ] **Process Credentials:** Add uid, gid, euid, egid to Process struct
-- [ ] **Implement Login:** Binary or syscall to drop privileges
-- [ ] **VFS Enforcement:** Check inode.mode against process credentials in open
-- [ ] **Update `sys_setuid`:** Check capabilities before changing ID
+- [x] **Process Credentials:** uid, gid, euid, egid, suid, sgid exist in Process struct
+- [x] **VFS Enforcement:** statPath + perms.checkAccess in sys_open
+- [x] **InitRD Permissions:** TarHeader.getMode/getUid/getGid implemented
+- [x] **Capability Override:** hasFileCapability for write/create/delete
+- [x] **Update sys_setuid:** Checks CAP_SETUID capability before changing ID
+- [x] **Update sys_setgid:** Checks CAP_SETGID capability before changing ID
+- [x] **Privilege Dropping:** sys_setresuid/sys_setresgid (117-120) for permanent privilege drop
+- [ ] **SFS Permission Storage:** Add mode/uid/gid to DirEntry (disk format change)
 
-**Effort:** Medium (~500 lines across multiple files)
+**Effort:** Remaining: Medium (~200 lines for SFS disk format change)
 
 ---
 
@@ -547,7 +553,7 @@ Keep Limine for now while developing Phase 6 and 7 of your kernel. Start the `sr
 | 5 | Scheduler Lock Breaking | High | High (SMP scaling) | DONE |
 | 6 | Async Filesystem | High | Medium (I/O perf) | |
 | 7 | Zero-Copy IPC | High | High (network perf) | DONE |
-| 8 | User/Group Permissions | Medium | Low (security) | |
+| 8 | User/Group Permissions | Medium | Low (security) | PARTIAL (setresuid/CAP_SETUID done) |
 | 9 | IOMMU | Very High | High (security) | |
 | 10 | Custom UEFI | Very High | Low (optional) | |
 
@@ -558,6 +564,8 @@ Keep Limine for now while developing Phase 6 and 7 of your kernel. Start the `sr
 4. ~~Slab allocator~~ - O(1) allocation for objects <= 2KB
 5. ~~Scheduler lock breaking~~ - timerTick lock hold reduced 97%, sleep_lock added, atomic tick_count
 6. ~~Zero-Copy Ring IPC~~ - RingMPSC pattern with decomposed SPSC rings, VirtIO-Net and netstack migrated
+7. ~~VFS Permission Enforcement~~ - statPath, perms module, sys_open/sys_access checks
+8. ~~User/Group Privileges~~ - setresuid/setresgid (117-120), CAP_SETUID/CAP_SETGID capabilities, saved UID/GID
 
 **Next Priority:**
 - VFS Mount + Permissions (Medium effort, Medium impact)

@@ -21,6 +21,7 @@ const uapi = @import("uapi");
 const ahci = @import("ahci");
 const audio = @import("audio");
 const vfs = @import("fs").vfs; // Import VFS for Error type
+const meta = @import("fs").meta;
 const heap = @import("heap");
 const sync = @import("sync");
 
@@ -325,12 +326,72 @@ fn devfsUnlink(ctx: ?*anyopaque, path: []const u8) vfs.Error!void {
     return error.AccessDenied;
 }
 
+fn devfsStatPath(ctx: ?*anyopaque, path: []const u8) ?vfs.FileMeta {
+    _ = ctx;
+
+    // Handle root directory (/dev)
+    if (path.len == 0 or std.mem.eql(u8, path, "/") or std.mem.eql(u8, path, ".")) {
+        return vfs.FileMeta{
+            .mode = meta.S_IFDIR | 0o755, // Directory with rwxr-xr-x
+            .uid = 0,
+            .gid = 0,
+            .exists = true,
+            .readonly = false,
+        };
+    }
+
+    // Normalize path (remove leading /)
+    const name = if (path.len > 0 and path[0] == '/') path[1..] else path;
+
+    // Check static devices
+    const static_devices = [_][]const u8{
+        "null", "zero", "console", "tty", "random", "urandom", "fb0",
+    };
+    for (static_devices) |dev| {
+        if (std.mem.eql(u8, name, dev)) {
+            return vfs.FileMeta{
+                .mode = meta.S_IFCHR | 0o666, // Character device with rw-rw-rw-
+                .uid = 0,
+                .gid = 0,
+                .exists = true,
+                .readonly = false,
+            };
+        }
+    }
+
+    // Check block devices (sda, sdb, etc.)
+    if (name.len >= 3 and std.mem.startsWith(u8, name, "sd")) {
+        return vfs.FileMeta{
+            .mode = meta.S_IFBLK | 0o660, // Block device with rw-rw----
+            .uid = 0,
+            .gid = 0,
+            .exists = true,
+            .readonly = false,
+        };
+    }
+
+    // Check dynamic devices registry
+    // (For now, check if path matches a known pattern)
+    if (std.mem.eql(u8, name, "dsp")) {
+        return vfs.FileMeta{
+            .mode = meta.S_IFCHR | 0o666,
+            .uid = 0,
+            .gid = 0,
+            .exists = true,
+            .readonly = false,
+        };
+    }
+
+    return null;
+}
+
 /// DevFS filesystem interface
 pub const dev_fs = vfs.FileSystem{
     .context = null,
     .open = devfsOpen,
     .unmount = null,
     .unlink = devfsUnlink,
+    .stat_path = devfsStatPath,
 };
 
 /// Create pre-opened FDs for stdin/stdout/stderr (FDs 0/1/2)

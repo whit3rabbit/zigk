@@ -157,6 +157,9 @@ pub const Process = struct {
     gid: u32 = 0,
     euid: u32 = 0,
     egid: u32 = 0,
+    /// Saved set-user-ID and set-group-ID (for setresuid/setresgid)
+    suid: u32 = 0,
+    sgid: u32 = 0,
     /// Resource limits (DoS protection)
     /// Maximum virtual address space size (default 256 MB)
     rlimit_as: u64 = 256 * 1024 * 1024,
@@ -426,6 +429,45 @@ pub const Process = struct {
         for (self.capabilities.items) |cap| {
             switch (cap) {
                 .InputInjection => return true,
+                else => {},
+            }
+        }
+        return false;
+    }
+
+    /// Check if process has file capability for the given path and operation
+    pub fn hasFileCapability(self: *Process, path: []const u8, op: u8) bool {
+        for (self.capabilities.items) |cap| {
+            switch (cap) {
+                .File => |file_cap| {
+                    if (file_cap.allows(path, op)) return true;
+                },
+                else => {},
+            }
+        }
+        return false;
+    }
+
+    /// Check if process has SetUid capability for the given target UID
+    pub fn hasSetUidCapability(self: *Process, target_uid: u32) bool {
+        for (self.capabilities.items) |cap| {
+            switch (cap) {
+                .SetUid => |setuid_cap| {
+                    if (setuid_cap.allows(target_uid)) return true;
+                },
+                else => {},
+            }
+        }
+        return false;
+    }
+
+    /// Check if process has SetGid capability for the given target GID
+    pub fn hasSetGidCapability(self: *Process, target_gid: u32) bool {
+        for (self.capabilities.items) |cap| {
+            switch (cap) {
+                .SetGid => |setgid_cap| {
+                    if (setgid_cap.allows(target_gid)) return true;
+                },
                 else => {},
             }
         }

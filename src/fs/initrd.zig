@@ -71,12 +71,59 @@ pub const TarHeader = extern struct {
     pub fn isRegularFile(self: *const @This()) bool {
         return self.typeflag == '0' or self.typeflag == 0;
     }
+
+    /// Parse octal mode field and return file permissions
+    pub fn getMode(self: *const @This()) u32 {
+        var mode: u32 = 0;
+        for (self.mode) |c| {
+            if (c == ' ' or c == 0) break;
+            if (c < '0' or c > '7') break;
+            const mul_result = @mulWithOverflow(mode, 8);
+            if (mul_result[1] != 0) return 0;
+            const add_result = @addWithOverflow(mul_result[0], c - '0');
+            if (add_result[1] != 0) return 0;
+            mode = add_result[0];
+        }
+        return mode;
+    }
+
+    /// Parse octal uid field and return owner user ID
+    pub fn getUid(self: *const @This()) u32 {
+        var uid: u32 = 0;
+        for (self.uid) |c| {
+            if (c == ' ' or c == 0) break;
+            if (c < '0' or c > '7') break;
+            const mul_result = @mulWithOverflow(uid, 8);
+            if (mul_result[1] != 0) return 0;
+            const add_result = @addWithOverflow(mul_result[0], c - '0');
+            if (add_result[1] != 0) return 0;
+            uid = add_result[0];
+        }
+        return uid;
+    }
+
+    /// Parse octal gid field and return owner group ID
+    pub fn getGid(self: *const @This()) u32 {
+        var gid: u32 = 0;
+        for (self.gid) |c| {
+            if (c == ' ' or c == 0) break;
+            if (c < '0' or c > '7') break;
+            const mul_result = @mulWithOverflow(gid, 8);
+            if (mul_result[1] != 0) return 0;
+            const add_result = @addWithOverflow(mul_result[0], c - '0');
+            if (add_result[1] != 0) return 0;
+            gid = add_result[0];
+        }
+        return gid;
+    }
 };
 
 /// Represents a file found in the InitRD
 pub const InitRDFile = struct {
     name: []const u8,
     data: []const u8,
+    /// Pointer to the TAR header for permission/metadata access
+    header: *const TarHeader,
 };
 
 /// InitRD Filesystem Handler
@@ -155,6 +202,7 @@ pub const InitRD = struct {
                 return InitRDFile{
                     .name = name,
                     .data = self.data[data_start..data_end],
+                    .header = header,
                 };
             }
 
@@ -344,6 +392,7 @@ pub const FileIterator = struct {
                 return InitRDFile{
                     .name = name,
                     .data = self.initrd.data[data_start..data_end],
+                    .header = header,
                 };
             }
         }

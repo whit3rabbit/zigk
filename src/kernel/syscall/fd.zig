@@ -16,6 +16,7 @@ const heap = @import("heap");
 const pipe_mod = @import("pipe");
 const fd_mod = @import("fd");
 const user_mem = @import("user_mem");
+const perms = @import("perms");
 
 const SyscallError = base.SyscallError;
 const UserPtr = base.UserPtr;
@@ -54,13 +55,53 @@ fn joinPaths(base_path: []const u8, rel: []const u8, out_buf: []u8) ?[]const u8 
 }
 
 fn openPath(path: []const u8, flags: usize, mode: usize) SyscallError!usize {
-    _ = mode; // Mode is ignored for now
-
     if (path.len == 0) {
         return error.ENOENT;
     }
 
-    const fd = fs.vfs.Vfs.open(path, @truncate(flags)) catch |err| {
+    const proc = base.getCurrentProcess();
+    const flags_u32: u32 = @truncate(flags);
+
+    // Get file metadata for permission check
+    if (fs.vfs.Vfs.statPath(path)) |file_meta| {
+        // File exists - check permissions based on open flags
+        const access_mode = flags_u32 & fd_mod.O_ACCMODE;
+
+        if (access_mode == fd_mod.O_RDWR) {
+            // O_RDWR requires both read and write
+            if (!perms.checkReadWriteAccess(proc, file_meta, path)) {
+                return error.EACCES;
+            }
+        } else {
+            const required = perms.flagsToAccess(flags_u32);
+            if (!perms.checkAccess(proc, file_meta, required, path)) {
+                return error.EACCES;
+            }
+        }
+
+        // Check for write on read-only filesystem
+        if (file_meta.readonly and perms.flagsRequireWrite(flags_u32)) {
+            return error.EROFS;
+        }
+    } else {
+        // File does not exist
+        if ((flags_u32 & fd_mod.O_CREAT) == 0) {
+            return error.ENOENT;
+        }
+
+        // O_CREAT: Check if process can create files
+        if (!perms.checkCreatePermission(proc, path)) {
+            return error.EACCES;
+        }
+    }
+
+    // Apply umask to mode for file creation (used by filesystem if O_CREAT)
+    _ = if ((flags_u32 & fd_mod.O_CREAT) != 0)
+        perms.applyUmask(@truncate(mode), proc.umask)
+    else
+        @as(u32, 0);
+
+    const fd = fs.vfs.Vfs.open(path, flags_u32) catch |err| {
         return switch (err) {
             error.NotFound => error.ENOENT,
             error.AccessDenied => error.EACCES,
@@ -103,7 +144,10 @@ fn openPath(path: []const u8, flags: usize, mode: usize) SyscallError!usize {
 ///
 /// Returns: 0 on success, negative errno on error
 pub fn sys_access(path_ptr: usize, mode: usize) SyscallError!usize {
-    _ = mode; // We currently only support existence checking (effective F_OK) for all modes
+    const F_OK: usize = 0;
+    const R_OK: usize = 4;
+    const W_OK: usize = 2;
+    const X_OK: usize = 1;
 
     // Allocate path buffer on heap to preserve stack space
     const path_buf = heap.allocator().alloc(u8, user_mem.MAX_PATH_LEN) catch {
@@ -121,33 +165,38 @@ pub fn sys_access(path_ptr: usize, mode: usize) SyscallError!usize {
         return error.ENOENT;
     }
 
-    if (std.mem.eql(u8, path, "/") or std.mem.eql(u8, path, "/.")) {
+    // Get file metadata using VFS statPath
+    const file_meta = fs.vfs.Vfs.statPath(path) orelse {
+        return error.ENOENT;
+    };
+
+    // F_OK: just check existence (already done above)
+    if (mode == F_OK) {
         return 0;
     }
 
-    // Use VFS to try opening the file
-    // Note: This is a heavy way to check existence, but VFS doesn't expose stat/access yet
-    const fd = fs.vfs.Vfs.open(path, 0) catch |err| {
-        return switch (err) {
-            error.NotFound => error.ENOENT,
-            error.AccessDenied => error.EACCES,
-            error.InvalidPath => error.ENOENT,
-            error.NameTooLong => error.ENAMETOOLONG,
-            error.IOError => error.EIO,
-            error.NoMemory => error.ENOMEM,
-            error.IsDirectory => 0, // Directories exist, so access returns success
-            else => error.EIO,
-        };
-    };
+    const proc = base.getCurrentProcess();
 
-    // If we opened it, it exists. Close it immediately.
-    // First call the close operation to clean up private_data
-    if (fd.ops.close) |close_fn| {
-        _ = close_fn(fd);
+    // Check requested permissions
+    if ((mode & R_OK) != 0) {
+        if (!perms.checkAccess(proc, file_meta, .Read, path)) {
+            return error.EACCES;
+        }
     }
-    // Always destroy the FileDescriptor to prevent memory leak
-    // (createFd heap-allocates the FileDescriptor)
-    heap.allocator().destroy(fd);
+    if ((mode & W_OK) != 0) {
+        if (!perms.checkAccess(proc, file_meta, .Write, path)) {
+            return error.EACCES;
+        }
+        // Also check for read-only filesystem
+        if (file_meta.readonly) {
+            return error.EROFS;
+        }
+    }
+    if ((mode & X_OK) != 0) {
+        if (!perms.checkAccess(proc, file_meta, .Execute, path)) {
+            return error.EACCES;
+        }
+    }
 
     return 0;
 }

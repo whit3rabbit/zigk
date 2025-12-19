@@ -34,6 +34,7 @@ pub const PAGE_SIZE: usize = paging.PAGE_SIZE;
 pub const KERNEL_BASE: u64 = 0xFFFF_8000_0000_0000;
 pub const USER_SPACE_END: u64 = 0x0000_7FFF_FFFF_FFFF;
 pub const MMIO_BASE: u64 = 0xFFFF_B000_0000_0000; // Must not overlap with kernel stack at 0xFFFF_A000_0000_0000
+pub const MMIO_END: u64 = 0xFFFF_C000_0000_0000; // 1TB MMIO region limit
 
 // VMM State
 var kernel_pml4_phys: u64 = 0;
@@ -558,13 +559,27 @@ pub fn mapMmioExplicit(phys_addr: u64, size: usize) VmmError!u64 {
     const held = mmio_lock.acquire();
     const virt_base = mmio_current;
 
-    // Check for overflow or collision with other regions (basic check)
+    // SECURITY: Check for overflow and ensure we stay within MMIO region bounds.
+    // Without this check, large BAR allocations (from malicious firmware or
+    // many devices) could cause mmio_current to grow into kernel heap or other
+    // critical memory regions, leading to memory corruption.
     if (std.math.maxInt(u64) - virt_base < aligned_size) {
         held.release();
         return VmmError.OutOfMemory;
     }
 
-    mmio_current += aligned_size;
+    const new_mmio_current = virt_base + aligned_size;
+    if (new_mmio_current > MMIO_END) {
+        console.err("VMM: MMIO region exhausted (requested={d}KB, current=0x{x}, limit=0x{x})", .{
+            aligned_size / 1024,
+            virt_base,
+            MMIO_END,
+        });
+        held.release();
+        return VmmError.OutOfMemory;
+    }
+
+    mmio_current = new_mmio_current;
     held.release();
 
     // Map each page with cache-disabled flag

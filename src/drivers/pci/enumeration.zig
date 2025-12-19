@@ -14,6 +14,11 @@
 //   2. Only after enumeration completes are drivers initialized
 //   3. Only after drivers are ready are secondary CPUs brought up
 //
+// SECURITY: This invariant is now enforced via enumeration_complete flag.
+// Drivers MUST call assertEnumerationComplete() before registering ISRs
+// or performing device I/O. Future hot-plug support must acquire a global
+// PCI enumeration lock to maintain this invariant.
+//
 // Reference: PCI Local Bus Specification 3.0, Section 6.1
 
 const console = @import("console");
@@ -30,6 +35,30 @@ const PciDevice = device.PciDevice;
 const DeviceList = device.DeviceList;
 const Bar = device.Bar;
 const ConfigReg = device.ConfigReg;
+
+// SMP Safety: Track whether enumeration has completed.
+// This flag is set to true after enumerate() completes and is never reset.
+// Drivers must check this before registering ISRs to prevent race conditions.
+var enumeration_complete: bool = false;
+
+/// Check if PCI enumeration has completed.
+/// Drivers should call this before registering interrupt handlers.
+pub fn isEnumerationComplete() bool {
+    return enumeration_complete;
+}
+
+/// Assert that PCI enumeration has completed.
+/// Call this from driver initialization code before registering ISRs.
+/// Panics if enumeration has not completed, indicating a kernel init order bug.
+///
+/// SECURITY: This enforces the SMP safety invariant documented at module level.
+/// If this assertion fires, it means a driver is being initialized too early,
+/// which could lead to race conditions during BAR sizing.
+pub fn assertEnumerationComplete() void {
+    if (!enumeration_complete) {
+        @panic("PCI: Driver init before enumeration complete - kernel init order bug");
+    }
+}
 
 /// Enumerate all PCI devices and populate a device list
 pub fn enumerate(allocator: std.mem.Allocator, pci: PciAccess) !*DeviceList {
@@ -49,6 +78,12 @@ pub fn enumerate(allocator: std.mem.Allocator, pci: PciAccess) !*DeviceList {
     }
 
     console.info("PCI: Found {d} devices", .{devices.count});
+
+    // SECURITY: Mark enumeration as complete. After this point, drivers may
+    // safely register ISRs and perform device I/O without risk of BAR sizing
+    // race conditions. This flag is never reset (no hot-plug support yet).
+    enumeration_complete = true;
+
     return devices;
 }
 

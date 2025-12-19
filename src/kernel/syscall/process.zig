@@ -191,23 +191,22 @@ pub fn sys_getgid() SyscallError!usize {
 /// sys_setuid (105) - Set user ID
 ///
 /// POSIX behavior:
-/// - If euid == 0 (root): set real, effective, and saved UID to uid
-/// - If euid != 0: set effective UID to uid only if uid matches real or saved UID
+/// - If euid == 0 (root) or has CAP_SETUID: set real, effective, and saved UID
+/// - If euid != 0: set effective UID only if uid matches real or saved UID
 pub fn sys_setuid(uid: usize) SyscallError!usize {
     const proc = base.getCurrentProcess();
     const new_uid: u32 = @truncate(uid);
 
-    if (proc.euid == 0) {
-        // Root can set any UID
+    // Root or CAP_SETUID holder can set any UID
+    if (proc.euid == 0 or proc.hasSetUidCapability(new_uid)) {
         proc.uid = new_uid;
         proc.euid = new_uid;
-        // Note: We don't have saved UID field yet, would set it here too
+        proc.suid = new_uid;
         return 0;
     }
 
-    // Non-root: can only set effective UID to real UID
-    // (or saved UID, but we don't track that yet)
-    if (new_uid == proc.uid) {
+    // Non-root: can only set effective UID to real or saved UID
+    if (new_uid == proc.uid or new_uid == proc.suid) {
         proc.euid = new_uid;
         return 0;
     }
@@ -218,22 +217,22 @@ pub fn sys_setuid(uid: usize) SyscallError!usize {
 /// sys_setgid (106) - Set group ID
 ///
 /// POSIX behavior:
-/// - If euid == 0 (root): set real, effective, and saved GID to gid
-/// - If euid != 0: set effective GID to gid only if gid matches real or saved GID
+/// - If euid == 0 (root) or has CAP_SETGID: set real, effective, and saved GID
+/// - If euid != 0: set effective GID only if gid matches real or saved GID
 pub fn sys_setgid(gid: usize) SyscallError!usize {
     const proc = base.getCurrentProcess();
     const new_gid: u32 = @truncate(gid);
 
-    if (proc.euid == 0) {
-        // Root can set any GID
+    // Root or CAP_SETGID holder can set any GID
+    if (proc.euid == 0 or proc.hasSetGidCapability(new_gid)) {
         proc.gid = new_gid;
         proc.egid = new_gid;
-        // Note: We don't have saved GID field yet, would set it here too
+        proc.sgid = new_gid;
         return 0;
     }
 
-    // Non-root: can only set effective GID to real GID
-    if (new_gid == proc.gid) {
+    // Non-root: can only set effective GID to real or saved GID
+    if (new_gid == proc.gid or new_gid == proc.sgid) {
         proc.egid = new_gid;
         return 0;
     }
@@ -251,6 +250,149 @@ pub fn sys_geteuid() SyscallError!usize {
 pub fn sys_getegid() SyscallError!usize {
     const proc = base.getCurrentProcess();
     return proc.egid;
+}
+
+/// Value indicating "leave unchanged" for setresuid/setresgid
+const UNCHANGED: u32 = 0xFFFFFFFF;
+
+/// Check if a non-privileged process can set UID to the given value
+fn canSetUid(proc: *base.Process, new_uid: u32) bool {
+    return new_uid == proc.uid or new_uid == proc.euid or new_uid == proc.suid;
+}
+
+/// Check if a non-privileged process can set GID to the given value
+fn canSetGid(proc: *base.Process, new_gid: u32) bool {
+    return new_gid == proc.gid or new_gid == proc.egid or new_gid == proc.sgid;
+}
+
+/// sys_setresuid (117) - Set real, effective, and saved user IDs
+///
+/// Allows fine-grained control over all three user IDs. This is the proper
+/// way to permanently drop privileges (set all three to the same non-zero value).
+///
+/// Args:
+///   ruid: New real UID, or -1 to leave unchanged
+///   euid: New effective UID, or -1 to leave unchanged
+///   suid: New saved UID, or -1 to leave unchanged
+///
+/// Security:
+/// - Root or CAP_SETUID can set any values
+/// - Non-privileged users can only set values that match current real, effective, or saved UID
+/// - Permanently drops privileges if all three are set to a non-zero value
+pub fn sys_setresuid(ruid: usize, euid: usize, suid_arg: usize) SyscallError!usize {
+    const proc = base.getCurrentProcess();
+
+    const new_ruid: u32 = @truncate(ruid);
+    const new_euid: u32 = @truncate(euid);
+    const new_suid: u32 = @truncate(suid_arg);
+
+    const is_privileged = proc.euid == 0;
+
+    // Check permissions for each ID that will be changed
+    if (new_ruid != UNCHANGED) {
+        if (!is_privileged and !proc.hasSetUidCapability(new_ruid) and !canSetUid(proc, new_ruid)) {
+            return error.EPERM;
+        }
+    }
+    if (new_euid != UNCHANGED) {
+        if (!is_privileged and !proc.hasSetUidCapability(new_euid) and !canSetUid(proc, new_euid)) {
+            return error.EPERM;
+        }
+    }
+    if (new_suid != UNCHANGED) {
+        if (!is_privileged and !proc.hasSetUidCapability(new_suid) and !canSetUid(proc, new_suid)) {
+            return error.EPERM;
+        }
+    }
+
+    // All checks passed, apply changes
+    if (new_ruid != UNCHANGED) proc.uid = new_ruid;
+    if (new_euid != UNCHANGED) proc.euid = new_euid;
+    if (new_suid != UNCHANGED) proc.suid = new_suid;
+
+    return 0;
+}
+
+/// sys_getresuid (118) - Get real, effective, and saved user IDs
+///
+/// Writes the current real, effective, and saved UIDs to userspace pointers.
+/// Any pointer may be NULL to skip that value.
+pub fn sys_getresuid(ruid_ptr: usize, euid_ptr: usize, suid_ptr: usize) SyscallError!usize {
+    const proc = base.getCurrentProcess();
+
+    if (ruid_ptr != 0) {
+        const ptr = UserPtr.from(ruid_ptr);
+        _ = ptr.copyFromKernel(@as(*const [4]u8, @ptrCast(&proc.uid))) catch return error.EFAULT;
+    }
+    if (euid_ptr != 0) {
+        const ptr = UserPtr.from(euid_ptr);
+        _ = ptr.copyFromKernel(@as(*const [4]u8, @ptrCast(&proc.euid))) catch return error.EFAULT;
+    }
+    if (suid_ptr != 0) {
+        const ptr = UserPtr.from(suid_ptr);
+        _ = ptr.copyFromKernel(@as(*const [4]u8, @ptrCast(&proc.suid))) catch return error.EFAULT;
+    }
+
+    return 0;
+}
+
+/// sys_setresgid (119) - Set real, effective, and saved group IDs
+///
+/// Same semantics as setresuid but for group IDs.
+pub fn sys_setresgid(rgid: usize, egid: usize, sgid_arg: usize) SyscallError!usize {
+    const proc = base.getCurrentProcess();
+
+    const new_rgid: u32 = @truncate(rgid);
+    const new_egid: u32 = @truncate(egid);
+    const new_sgid: u32 = @truncate(sgid_arg);
+
+    const is_privileged = proc.euid == 0;
+
+    // Check permissions for each ID that will be changed
+    if (new_rgid != UNCHANGED) {
+        if (!is_privileged and !proc.hasSetGidCapability(new_rgid) and !canSetGid(proc, new_rgid)) {
+            return error.EPERM;
+        }
+    }
+    if (new_egid != UNCHANGED) {
+        if (!is_privileged and !proc.hasSetGidCapability(new_egid) and !canSetGid(proc, new_egid)) {
+            return error.EPERM;
+        }
+    }
+    if (new_sgid != UNCHANGED) {
+        if (!is_privileged and !proc.hasSetGidCapability(new_sgid) and !canSetGid(proc, new_sgid)) {
+            return error.EPERM;
+        }
+    }
+
+    // All checks passed, apply changes
+    if (new_rgid != UNCHANGED) proc.gid = new_rgid;
+    if (new_egid != UNCHANGED) proc.egid = new_egid;
+    if (new_sgid != UNCHANGED) proc.sgid = new_sgid;
+
+    return 0;
+}
+
+/// sys_getresgid (120) - Get real, effective, and saved group IDs
+///
+/// Writes the current real, effective, and saved GIDs to userspace pointers.
+pub fn sys_getresgid(rgid_ptr: usize, egid_ptr: usize, sgid_ptr: usize) SyscallError!usize {
+    const proc = base.getCurrentProcess();
+
+    if (rgid_ptr != 0) {
+        const ptr = UserPtr.from(rgid_ptr);
+        _ = ptr.copyFromKernel(@as(*const [4]u8, @ptrCast(&proc.gid))) catch return error.EFAULT;
+    }
+    if (egid_ptr != 0) {
+        const ptr = UserPtr.from(egid_ptr);
+        _ = ptr.copyFromKernel(@as(*const [4]u8, @ptrCast(&proc.egid))) catch return error.EFAULT;
+    }
+    if (sgid_ptr != 0) {
+        const ptr = UserPtr.from(sgid_ptr);
+        _ = ptr.copyFromKernel(@as(*const [4]u8, @ptrCast(&proc.sgid))) catch return error.EFAULT;
+    }
+
+    return 0;
 }
 
 /// sys_umask (95) - Set file creation mask

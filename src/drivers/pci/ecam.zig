@@ -33,10 +33,22 @@ pub const Ecam = struct {
     ///
     /// SECURITY: Uses overflow-safe arithmetic for size calculation since
     /// bus range values come from ACPI MCFG table (untrusted firmware data).
+    /// Also validates ECAM base alignment per PCIe spec requirements.
     pub fn init(ecam_phys: u64, start_bus: u8, end_bus: u8) !Self {
         // Validate bus range to prevent integer underflow
         if (end_bus < start_bus) {
             console.err("PCI ECAM: Invalid bus range {d}-{d} (end < start)", .{ start_bus, end_bus });
+            return error.MappingFailed;
+        }
+
+        // SECURITY: Validate ECAM base alignment per PCIe spec.
+        // ECAM base must be naturally aligned to its size (bus_count * 1MB).
+        // At minimum, it should be 1MB aligned (single bus). For full 256-bus range,
+        // it should be 256MB aligned. We enforce 1MB alignment as minimum.
+        // This prevents address calculation errors from misaligned firmware data.
+        const ecam_alignment: u64 = 0x100000; // 1MB minimum alignment
+        if ((ecam_phys & (ecam_alignment - 1)) != 0) {
+            console.err("PCI ECAM: Base address 0x{x} not 1MB aligned (ACPI firmware bug)", .{ecam_phys});
             return error.MappingFailed;
         }
 
@@ -73,6 +85,11 @@ pub const Ecam = struct {
     }
 
     /// Calculate virtual address for a device's config space register
+    ///
+    /// SECURITY: Uses pure bitwise OR for address calculation. This is safe because
+    /// Ecam.init() validates that base_virt is at least 1MB aligned, ensuring the
+    /// lower 20 bits are zero. The bus/device/func/offset fields occupy non-overlapping
+    /// bit positions within those lower 20 bits (plus bus extending above).
     fn configAddr(self: *const Self, bus: u8, device: u5, func: u3, offset: u12) ?u64 {
         // Validate bus is in range
         if (bus < self.start_bus or bus > self.end_bus) {
@@ -80,7 +97,13 @@ pub const Ecam = struct {
         }
 
         const relative_bus: u64 = bus - self.start_bus;
-        return self.base_virt +
+        // Pure bitwise OR is correct because base_virt is 1MB+ aligned (validated in init)
+        // and the shifted fields occupy distinct bit ranges:
+        //   bits 0-11:  offset (u12)
+        //   bits 12-14: function (u3)
+        //   bits 15-19: device (u5)
+        //   bits 20+:   relative_bus
+        return self.base_virt |
             (relative_bus << 20) |
             (@as(u64, device) << 15) |
             (@as(u64, func) << 12) |

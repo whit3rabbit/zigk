@@ -667,6 +667,17 @@ pub fn build(b: *std.Build) void {
     signal_module.addImport("user_mem", user_mem_module);
     signal_module.addImport("console", console_module);
 
+    // Create perms module (VFS permission checking)
+    const perms_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/perms.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    perms_module.addImport("process", process_module);
+    perms_module.addImport("fs", fs_module);
+    perms_module.addImport("capabilities", capabilities_module);
+    perms_module.addImport("fd", fd_module);
+
     // Create syscall base module (shared state for all handlers)
     const syscall_base_module = b.createModule(.{
         .root_source_file = b.path("src/kernel/syscall/base.zig"),
@@ -770,6 +781,7 @@ pub fn build(b: *std.Build) void {
     syscall_fd_module.addImport("pipe", pipe_module);
     syscall_fd_module.addImport("fd", fd_module);
     syscall_fd_module.addImport("user_mem", user_mem_module);
+    syscall_fd_module.addImport("perms", perms_module);
 
     // Create syscall memory module (mmap, mprotect, munmap, brk)
     const syscall_memory_module = b.createModule(.{
