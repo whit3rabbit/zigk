@@ -27,6 +27,7 @@ const capabilities = @import("capabilities");
 const heap = @import("heap");
 const pci = @import("pci");
 const aslr = @import("aslr");
+const devfs = @import("devfs");
 
 /// Load the init process (httpd or shell) into a new user address space
 ///
@@ -242,6 +243,11 @@ fn spawnProcess(mod: *limine.Module, process_name: []const u8) void {
     const proc = process.createProcess(null) catch |err| {
         console.err("Failed to create init process: {}", .{err});
         return;
+    };
+
+    // Pre-populate stdin/stdout/stderr (moved from lifecycle.zig)
+    devfs.createStdFds(proc.fd_table) catch |err| {
+        console.warn("Failed to create std FDs for {s}: {}", .{process_name, err});
     };
 
     // Step 2: Set as current process so syscall handlers can access FD table

@@ -5,8 +5,9 @@
 
 const std = @import("std");
 const process_mod = @import("process");
-const vfs = @import("fs").vfs;
-const meta = @import("fs").meta;
+const vfs = @import("fs_meta"); // Use shared metadata
+const meta = @import("fs_meta");
+
 const capabilities = @import("capabilities");
 const fd_mod = @import("fd");
 
@@ -27,7 +28,8 @@ pub const AccessRequest = enum(u8) {
 /// Returns: true if access allowed, false if denied
 pub fn checkAccess(
     proc: *process_mod.Process,
-    file_meta: vfs.FileMeta,
+    file_meta: meta.FileMeta,
+
     request: AccessRequest,
     path: []const u8,
 ) bool {
@@ -65,7 +67,8 @@ pub fn checkAccess(
 /// Check both read and write access (for O_RDWR)
 pub fn checkReadWriteAccess(
     proc: *process_mod.Process,
-    file_meta: vfs.FileMeta,
+    file_meta: meta.FileMeta,
+
     path: []const u8,
 ) bool {
     return checkAccess(proc, file_meta, .Read, path) and

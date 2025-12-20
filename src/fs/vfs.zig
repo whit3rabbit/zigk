@@ -16,7 +16,8 @@ const heap = @import("heap");
 const uapi = @import("uapi");
 const initrd = @import("initrd.zig");
 const sync = @import("sync");
-const meta = @import("meta.zig");
+const meta = @import("fs_meta");
+
 
 pub const FileMeta = meta.FileMeta;
 
@@ -58,6 +59,12 @@ pub const FileSystem = struct {
     /// Get file metadata without opening (optional - for permission checking)
     /// Returns null if file does not exist
     stat_path: ?*const fn (ctx: ?*anyopaque, path: []const u8) ?FileMeta,
+
+    /// Change file mode (permissions) - optional, null for read-only filesystems
+    chmod: ?*const fn (ctx: ?*anyopaque, path: []const u8, mode: u32) Error!void = null,
+
+    /// Change file owner/group - optional, null for read-only filesystems
+    chown: ?*const fn (ctx: ?*anyopaque, path: []const u8, uid: ?u32, gid: ?u32) Error!void = null,
 };
 
 /// Mount Point Structure
@@ -379,6 +386,104 @@ pub const Vfs = struct {
             }
 
             return unlink_fn(mp.fs.context, rel_path);
+        }
+
+        return error.NotFound;
+    }
+
+    /// Change file mode (permissions)
+    /// Resolves the mount point and delegates to the filesystem.
+    pub fn chmod(path: []const u8, mode: u32) Error!void {
+        if (path.len == 0) return error.InvalidPath;
+        if (path[0] != '/') return error.InvalidPath;
+
+        const held = lock.acquire();
+        defer held.release();
+
+        // Find the longest matching mount point
+        var best_match: ?*const MountPoint = null;
+        var best_len: usize = 0;
+
+        for (&mounts) |*m| {
+            if (m.*) |*mount_point| {
+                if (std.mem.startsWith(u8, path, mount_point.path)) {
+                    const mp_len = mount_point.path.len;
+                    var match = false;
+                    if (path.len == mp_len) {
+                        match = true;
+                    } else if (path.len > mp_len) {
+                        if (mp_len == 1 and mount_point.path[0] == '/') {
+                            match = true;
+                        } else if (path[mp_len] == '/') {
+                            match = true;
+                        }
+                    }
+                    if (match and mp_len > best_len) {
+                        best_match = mount_point;
+                        best_len = mp_len;
+                    }
+                }
+            }
+        }
+
+        if (best_match) |mp| {
+            const chmod_fn = mp.fs.chmod orelse return error.NotSupported;
+
+            var rel_path = path[best_len..];
+            if (rel_path.len == 0) {
+                rel_path = "/";
+            }
+
+            return chmod_fn(mp.fs.context, rel_path, mode);
+        }
+
+        return error.NotFound;
+    }
+
+    /// Change file owner and group
+    /// Resolves the mount point and delegates to the filesystem.
+    pub fn chown(path: []const u8, uid: ?u32, gid: ?u32) Error!void {
+        if (path.len == 0) return error.InvalidPath;
+        if (path[0] != '/') return error.InvalidPath;
+
+        const held = lock.acquire();
+        defer held.release();
+
+        // Find the longest matching mount point
+        var best_match: ?*const MountPoint = null;
+        var best_len: usize = 0;
+
+        for (&mounts) |*m| {
+            if (m.*) |*mount_point| {
+                if (std.mem.startsWith(u8, path, mount_point.path)) {
+                    const mp_len = mount_point.path.len;
+                    var match = false;
+                    if (path.len == mp_len) {
+                        match = true;
+                    } else if (path.len > mp_len) {
+                        if (mp_len == 1 and mount_point.path[0] == '/') {
+                            match = true;
+                        } else if (path[mp_len] == '/') {
+                            match = true;
+                        }
+                    }
+                    if (match and mp_len > best_len) {
+                        best_match = mount_point;
+                        best_len = mp_len;
+                    }
+                }
+            }
+        }
+
+        if (best_match) |mp| {
+            const chown_fn = mp.fs.chown orelse return error.NotSupported;
+
+            var rel_path = path[best_len..];
+            if (rel_path.len == 0) {
+                rel_path = "/";
+            }
+
+            return chown_fn(mp.fs.context, rel_path, uid, gid);
         }
 
         return error.NotFound;

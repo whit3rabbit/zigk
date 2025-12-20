@@ -430,9 +430,12 @@ pub fn build(b: *std.Build) void {
     fs_module.addImport("uapi", uapi_module);
     fs_module.addImport("console", console_module);
     fs_module.addImport("ahci", ahci_module);
+
     fs_module.addImport("sync", sync_module);
+
     fs_module.addImport("io", kernel_io_module);
     fs_module.addImport("pmm", pmm_module);
+
 
     // Create Keyboard driver module
     const keyboard_module = b.createModule(.{
@@ -584,8 +587,9 @@ pub fn build(b: *std.Build) void {
     process_module.addImport("heap", heap_module);
     process_module.addImport("console", console_module);
     process_module.addImport("fd", fd_module);
-    process_module.addImport("devfs", devfs_module);
+    // Removed devfs dependency to break cycle
     process_module.addImport("user_vmm", user_vmm_module);
+
     process_module.addImport("vmm", vmm_module);
     process_module.addImport("pmm", pmm_module);
     process_module.addImport("hal", hal_module);
@@ -596,6 +600,11 @@ pub fn build(b: *std.Build) void {
     process_module.addImport("capabilities", capabilities_module);
     process_module.addImport("vdso", vdso_module);
     process_module.addImport("aslr", aslr_module);
+
+    // Defer fs->process import due to definition order
+    fs_module.addImport("process", process_module);
+
+
 
     // Create ELF loader module (for execve)
     const elf_module = b.createModule(.{
@@ -667,16 +676,27 @@ pub fn build(b: *std.Build) void {
     signal_module.addImport("user_mem", user_mem_module);
     signal_module.addImport("console", console_module);
 
-    // Create perms module (VFS permission checking)
+    // Create generic FS metadata module (structs only, no deps)
+    const fs_meta_module = b.createModule(.{
+        .root_source_file = b.path("src/fs/meta.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+
+    // Create permissions logic module
     const perms_module = b.createModule(.{
         .root_source_file = b.path("src/kernel/perms.zig"),
         .target = kernel_target,
         .optimize = optimize,
     });
     perms_module.addImport("process", process_module);
-    perms_module.addImport("fs", fs_module);
+    perms_module.addImport("fs_meta", fs_meta_module); // Use standalone meta module
     perms_module.addImport("capabilities", capabilities_module);
     perms_module.addImport("fd", fd_module);
+
+    // Add imports to fs module (safe here as fs_meta and perms are defined)
+    fs_module.addImport("fs_meta", fs_meta_module);
+    fs_module.addImport("perms", perms_module);
 
     // Create syscall base module (shared state for all handlers)
     const syscall_base_module = b.createModule(.{
@@ -753,7 +773,7 @@ pub fn build(b: *std.Build) void {
 
     // Create syscall io module (read, write, stat, etc.)
     const syscall_io_module = b.createModule(.{
-        .root_source_file = b.path("src/kernel/syscall/io.zig"),
+        .root_source_file = b.path("src/kernel/syscall/io/root.zig"),
         .target = kernel_target,
         .optimize = optimize,
     });
@@ -996,12 +1016,13 @@ pub fn build(b: *std.Build) void {
 
     // Create syscall io_uring module (async I/O syscalls)
     const syscall_io_uring_module = b.createModule(.{
-        .root_source_file = b.path("src/kernel/syscall/io_uring.zig"),
+        .root_source_file = b.path("src/kernel/syscall/io_uring/root.zig"),
         .target = kernel_target,
         .optimize = optimize,
     });
     syscall_io_uring_module.addImport("uapi", uapi_module);
     syscall_io_uring_module.addImport("io", kernel_io_module);
+    syscall_io_uring_module.addImport("syscall_io", syscall_io_module);
     syscall_io_uring_module.addImport("user_mem", user_mem_module);
     syscall_io_uring_module.addImport("fd", fd_module);
     syscall_io_uring_module.addImport("sched", sched_module);
@@ -1139,6 +1160,7 @@ pub fn build(b: *std.Build) void {
     syscall_fs_handlers_module.addImport("user_mem", user_mem_module);
     syscall_fs_handlers_module.addImport("capabilities", capabilities_module);
     syscall_fs_handlers_module.addImport("process", process_module);
+    syscall_fs_handlers_module.addImport("devfs", devfs_module);
 
     // Create syscall dispatch table module
     const syscall_table_module = b.createModule(.{

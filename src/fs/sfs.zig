@@ -19,9 +19,10 @@ const std = @import("std");
 const fd = @import("fd");
 const heap = @import("heap");
 const vfs = @import("vfs.zig");
-const meta = @import("meta.zig");
+const meta = @import("fs_meta");
+
 const uapi = @import("uapi");
-const console = @import("console"); // Assuming console is available via build options or we need to add import
+const console = @import("console");
 const sync = @import("sync");
 
 // Async I/O imports
@@ -29,9 +30,12 @@ const ahci = @import("ahci");
 const io = @import("io");
 const pmm = @import("pmm");
 
-// Magic: "SFS2" (version 2 with bitmap allocation)
-const SFS_MAGIC: u32 = 0x32534653;
-const SFS_VERSION: u32 = 2;
+// Magic: "SFS3" (version 3 with permissions)
+const SFS_MAGIC: u32 = 0x33534653;
+const SFS_VERSION: u32 = 3;
+// Previous version for read-only compatibility
+const SFS_VERSION_2: u32 = 2;
+const SFS_MAGIC_V2: u32 = 0x32534653;
 const SECTOR_SIZE: u32 = 512;
 const MAX_FILES: u32 = 64;
 const ROOT_DIR_BLOCKS: u32 = (MAX_FILES * @sizeOf(DirEntry) + SECTOR_SIZE - 1) / SECTOR_SIZE;
@@ -61,7 +65,26 @@ const DirEntry = extern struct {
     start_block: u32,
     size: u32,
     flags: u32, // 1 = Active
-    _pad: [128 - 44]u8, // Pad to 128 bytes
+    mode: u32, // File type and permissions (e.g., 0o100644)
+    uid: u32, // Owner user ID
+    gid: u32, // Owner group ID
+    mtime: u32, // Modification time (Unix timestamp)
+    _pad: [128 - 60]u8, // Pad to 128 bytes
+
+    /// Check if this is a regular file
+    pub fn isRegularFile(self: *const @This()) bool {
+        return (self.mode & 0o170000) == 0o100000;
+    }
+
+    /// Check if this is a directory
+    pub fn isDirectory(self: *const @This()) bool {
+        return (self.mode & 0o170000) == 0o040000;
+    }
+
+    /// Get permission bits only (lower 9 bits)
+    pub fn getPermissions(self: *const @This()) u32 {
+        return self.mode & 0o777;
+    }
 };
 
 /// Sync I/O error type for sector operations
@@ -645,6 +668,9 @@ fn sfsOpen(ctx: ?*anyopaque, path: []const u8, flags: u32) vfs.Error!*fd.FileDes
             return vfs.Error.IOError;
         }
 
+        // NOTE: Permission checking is done at the syscall layer (sys_open/sys_openat)
+        // before calling VFS.open. This avoids circular dependency between fs and perms.
+
         // Create FD
         const file_ctx = alloc.create(SfsFile) catch return vfs.Error.NoMemory;
         file_ctx.* = .{
@@ -664,11 +690,20 @@ fn sfsOpen(ctx: ?*anyopaque, path: []const u8, flags: u32) vfs.Error!*fd.FileDes
             // Allocate first block for new file using bitmap
             const start_block = self.allocateBlock() catch return vfs.Error.NoMemory;
 
+            // Default permissions: regular file with rw-r--r-- (0o644)
+            // The syscall layer can adjust ownership via chown after creation
+            // if the calling process has different uid/gid
+            const default_mode: u32 = meta.S_IFREG | 0o644;
+
             var new_entry = DirEntry{
                 .name = [_]u8{0} ** 32,
                 .start_block = start_block,
                 .size = 0,
                 .flags = 1,
+                .mode = default_mode,
+                .uid = 0, // Default to root, syscall layer adjusts via chown
+                .gid = 0,
+                .mtime = 0, // TODO: Get current timestamp when RTC is available
                 ._pad = undefined,
             };
             @memcpy(new_entry.name[0..name.len], name);
@@ -1120,12 +1155,11 @@ fn sfsStatPath(ctx: ?*anyopaque, path: []const u8) ?vfs.FileMeta {
         if (e.flags == 1) {
             const e_name = std.mem.sliceTo(&e.name, 0);
             if (std.mem.eql(u8, e_name, name)) {
-                // Found the file
-                // SFS doesn't store permissions, return hardcoded values
+                // Found the file - return actual permissions from DirEntry
                 return vfs.FileMeta{
-                    .mode = meta.S_IFREG | 0o644, // Regular file with rw-r--r--
-                    .uid = 0,
-                    .gid = 0,
+                    .mode = e.mode,
+                    .uid = e.uid,
+                    .gid = e.gid,
                     .exists = true,
                     .readonly = false,
                 };
@@ -1134,4 +1168,94 @@ fn sfsStatPath(ctx: ?*anyopaque, path: []const u8) ?vfs.FileMeta {
     }
 
     return null;
+}
+
+/// Change file mode (permissions)
+fn sfsChmod(ctx: ?*anyopaque, path: []const u8, mode: u32) vfs.Error!void {
+    const self: *SFS = @ptrCast(@alignCast(ctx));
+
+    // Normalize path (remove leading /)
+    const name = if (path.len > 0 and path[0] == '/') path[1..] else path;
+
+    if (!isValidFilename(name)) {
+        return vfs.Error.AccessDenied;
+    }
+    if (name.len == 0 or name.len >= 32) return vfs.Error.NotFound;
+
+    // Read all directory blocks
+    var dir_buf: [ROOT_DIR_BLOCKS * 512]u8 = undefined;
+    readDirectoryAsync(self, &dir_buf) catch return vfs.Error.IOError;
+
+    // Find the entry
+    const total_entries = ROOT_DIR_BLOCKS * 4;
+    var idx: u32 = 0;
+    while (idx < total_entries) : (idx += 1) {
+        const offset = idx * 128;
+        const e: *DirEntry = @ptrCast(@alignCast(&dir_buf[offset]));
+
+        if (e.flags == 1) {
+            const e_name = std.mem.sliceTo(&e.name, 0);
+            if (std.mem.eql(u8, e_name, name)) {
+                // Found - update mode (keep file type, change permission bits)
+                const file_type = e.mode & 0o170000;
+                e.mode = file_type | (mode & 0o7777);
+
+                // Write back the directory block
+                const block_idx = idx / 4;
+                const block_start = block_idx * 512;
+                writeSectorAsync(self, self.superblock.root_dir_start + block_idx, dir_buf[block_start..][0..512]) catch return vfs.Error.IOError;
+
+                return;
+            }
+        }
+    }
+
+    return vfs.Error.NotFound;
+}
+
+/// Change file owner and group
+fn sfsChown(ctx: ?*anyopaque, path: []const u8, uid: ?u32, gid: ?u32) vfs.Error!void {
+    const self: *SFS = @ptrCast(@alignCast(ctx));
+
+    // Normalize path (remove leading /)
+    const name = if (path.len > 0 and path[0] == '/') path[1..] else path;
+
+    if (!isValidFilename(name)) {
+        return vfs.Error.AccessDenied;
+    }
+    if (name.len == 0 or name.len >= 32) return vfs.Error.NotFound;
+
+    // Read all directory blocks
+    var dir_buf: [ROOT_DIR_BLOCKS * 512]u8 = undefined;
+    readDirectoryAsync(self, &dir_buf) catch return vfs.Error.IOError;
+
+    // Find the entry
+    const total_entries = ROOT_DIR_BLOCKS * 4;
+    var idx: u32 = 0;
+    while (idx < total_entries) : (idx += 1) {
+        const offset = idx * 128;
+        const e: *DirEntry = @ptrCast(@alignCast(&dir_buf[offset]));
+
+        if (e.flags == 1) {
+            const e_name = std.mem.sliceTo(&e.name, 0);
+            if (std.mem.eql(u8, e_name, name)) {
+                // Found - update uid/gid if specified
+                if (uid) |new_uid| {
+                    e.uid = new_uid;
+                }
+                if (gid) |new_gid| {
+                    e.gid = new_gid;
+                }
+
+                // Write back the directory block
+                const block_idx = idx / 4;
+                const block_start = block_idx * 512;
+                writeSectorAsync(self, self.superblock.root_dir_start + block_idx, dir_buf[block_start..][0..512]) catch return vfs.Error.IOError;
+
+                return;
+            }
+        }
+    }
+
+    return vfs.Error.NotFound;
 }

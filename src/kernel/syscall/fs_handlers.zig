@@ -13,6 +13,7 @@ const fs = @import("fs");
 const heap = @import("heap");
 const user_mem = @import("user_mem");
 const caps = @import("capabilities");
+const devfs = @import("devfs");
 
 const SyscallError = base.SyscallError;
 
@@ -127,6 +128,7 @@ pub fn sys_mount(
             error.NotFound => error.ENOENT,
             error.NoMemory => error.ENOMEM,
             error.IOError => error.EIO,
+            error.NotSupported => error.ENODEV, // Filesystem type not implemented
             else => error.EINVAL,
         };
     };
@@ -167,9 +169,8 @@ pub fn sys_umount2(target_ptr: usize, flags: usize) SyscallError!usize {
         return error.EPERM;
     }
 
-    // TODO: Check for open file handles on mount point
-    // This requires iterating all FD tables and checking paths
-    // For MVP, skip this check
+    // Note: VFS.unmount() already checks for open file handles
+    // and returns error.Busy if files are still open
 
     fs.vfs.Vfs.unmount(target) catch |err| {
         return switch (err) {
@@ -259,10 +260,275 @@ fn hasFileCapability(proc: *@import("process").Process, path: []const u8, op: u8
 }
 
 /// Helper: Get filesystem implementation by type
+/// Supports: sfs (block device), devfs (virtual), initrd (read-only tar)
 fn getFilesystem(source: []const u8, fstype: []const u8) !fs.vfs.FileSystem {
     if (std.mem.eql(u8, fstype, "sfs")) {
+        // SFS requires a block device path (e.g., /dev/sda)
         return fs.sfs.SFS.init(source);
+    } else if (std.mem.eql(u8, fstype, "devfs")) {
+        // DevFS is a singleton virtual filesystem
+
+        return devfs.dev_fs;
+    } else if (std.mem.eql(u8, fstype, "initrd")) {
+        // InitRD is a singleton (already loaded at boot)
+
+        return fs.vfs.initrd_fs;
+    } else if (std.mem.eql(u8, fstype, "tmpfs")) {
+        // tmpfs not yet implemented
+        return error.NotSupported;
     }
-    // Add other filesystem types as needed
     return error.NotFound;
+}
+
+// =============================================================================
+// File Status Syscalls (stat, fstat, access)
+// =============================================================================
+
+/// sys_stat (4) - Get file status by path
+///
+/// Args:
+///   path_ptr: Path to file
+///   statbuf_ptr: Pointer to userspace Stat structure
+pub fn sys_stat(path_ptr: usize, statbuf_ptr: usize) SyscallError!usize {
+    const alloc = heap.allocator();
+    const path_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(path_buf);
+    const canon_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(canon_buf);
+
+    const raw_path = user_mem.copyStringFromUser(path_buf, path_ptr) catch return error.EFAULT;
+    if (raw_path.len == 0) return error.ENOENT;
+
+    // Canonicalize path
+    const path = canonicalizePath(raw_path, canon_buf) orelse return error.ENOENT;
+
+    // Validate userspace buffer
+    if (!user_mem.isValidUserPtr(statbuf_ptr, @sizeOf(uapi.stat.Stat))) {
+        return error.EFAULT;
+    }
+
+    // Get file metadata via VFS
+    const file_meta = fs.vfs.Vfs.statPath(path) orelse return error.ENOENT;
+
+    // Fill Stat structure
+    const stat_ptr: *uapi.stat.Stat = @ptrFromInt(statbuf_ptr);
+    stat_ptr.* = .{
+        .dev = 0,
+        .ino = 0,
+        .nlink = 1,
+        .mode = file_meta.mode,
+        .uid = file_meta.uid,
+        .gid = file_meta.gid,
+        .__pad0 = 0,
+        .rdev = 0,
+        .size = 0, // TODO: Get actual size from VFS
+        .blksize = 512,
+        .blocks = 0,
+        .atime = 0,
+        .atime_nsec = 0,
+        .mtime = 0,
+        .mtime_nsec = 0,
+        .ctime = 0,
+        .ctime_nsec = 0,
+        .__unused = [_]i64{0} ** 3,
+    };
+
+    return 0;
+}
+
+/// sys_fstat (5) - Get file status by file descriptor
+///
+/// Args:
+///   fd_num: File descriptor number
+///   statbuf_ptr: Pointer to userspace Stat structure
+pub fn sys_fstat(fd_num: usize, statbuf_ptr: usize) SyscallError!usize {
+    const fd_mod = @import("fd");
+
+    // Validate userspace buffer
+    if (!user_mem.isValidUserPtr(statbuf_ptr, @sizeOf(uapi.stat.Stat))) {
+        return error.EFAULT;
+    }
+
+    // Get file descriptor
+    const fd_table = base.getGlobalFdTable();
+    const file_desc = fd_table.get(@intCast(fd_num)) orelse return error.EBADF;
+
+    // Call the FD's stat operation if available
+    const stat_ptr: *uapi.stat.Stat = @ptrFromInt(statbuf_ptr);
+
+    if (file_desc.ops.stat) |stat_fn| {
+        const result = stat_fn(file_desc, stat_ptr);
+        if (result < 0) {
+            // Convert negative errno to SyscallError
+            return error.EIO;
+        }
+        return 0;
+    }
+
+    // No stat operation - return basic info
+    stat_ptr.* = .{
+        .dev = 0,
+        .ino = 0,
+        .nlink = 1,
+        .mode = 0o100644, // Regular file
+        .uid = 0,
+        .gid = 0,
+        .__pad0 = 0,
+        .rdev = 0,
+        .size = 0,
+        .blksize = 512,
+        .blocks = 0,
+        .atime = 0,
+        .atime_nsec = 0,
+        .mtime = 0,
+        .mtime_nsec = 0,
+        .ctime = 0,
+        .ctime_nsec = 0,
+        .__unused = [_]i64{0} ** 3,
+    };
+
+    _ = fd_mod;
+    return 0;
+}
+
+/// sys_access (21) - Check file access permissions
+///
+/// Args:
+///   path_ptr: Path to file
+///   mode: Access mode to check (R_OK=4, W_OK=2, X_OK=1, F_OK=0)
+pub fn sys_access(path_ptr: usize, mode: usize) SyscallError!usize {
+    const perms = @import("perms");
+
+    const alloc = heap.allocator();
+    const path_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(path_buf);
+    const canon_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(canon_buf);
+
+    const raw_path = user_mem.copyStringFromUser(path_buf, path_ptr) catch return error.EFAULT;
+    if (raw_path.len == 0) return error.ENOENT;
+
+    // Canonicalize path
+    const path = canonicalizePath(raw_path, canon_buf) orelse return error.ENOENT;
+
+    // Get file metadata
+    const file_meta = fs.vfs.Vfs.statPath(path) orelse return error.ENOENT;
+
+    // F_OK (0) just checks existence
+    if (mode == 0) return 0;
+
+    // Check requested permissions
+    const proc = base.getCurrentProcess();
+
+    // Check read permission
+    if ((mode & 4) != 0) {
+        if (!perms.checkAccess(proc, file_meta, .Read, path)) {
+            return error.EACCES;
+        }
+    }
+
+    // Check write permission
+    if ((mode & 2) != 0) {
+        if (!perms.checkAccess(proc, file_meta, .Write, path)) {
+            return error.EACCES;
+        }
+    }
+
+    // Check execute permission
+    if ((mode & 1) != 0) {
+        if (!perms.checkAccess(proc, file_meta, .Execute, path)) {
+            return error.EACCES;
+        }
+    }
+
+    return 0;
+}
+
+// =============================================================================
+// File Permission Modification Syscalls (chmod, chown)
+// =============================================================================
+
+/// sys_chmod (90) - Change file mode
+///
+/// Args:
+///   path_ptr: Path to file
+///   mode: New file mode (permissions only, lower 12 bits)
+pub fn sys_chmod(path_ptr: usize, mode_arg: usize) SyscallError!usize {
+    const alloc = heap.allocator();
+    const path_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(path_buf);
+    const canon_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(canon_buf);
+
+    const raw_path = user_mem.copyStringFromUser(path_buf, path_ptr) catch return error.EFAULT;
+    if (raw_path.len == 0) return error.ENOENT;
+
+    // Canonicalize path
+    const path = canonicalizePath(raw_path, canon_buf) orelse return error.ENOENT;
+
+    // Get current file metadata to check ownership
+    const file_meta = fs.vfs.Vfs.statPath(path) orelse return error.ENOENT;
+
+    // Only owner or root can chmod
+    const proc = base.getCurrentProcess();
+    if (proc.euid != 0 and proc.euid != file_meta.uid) {
+        return error.EPERM;
+    }
+
+    // Only use permission bits (lower 12 bits including setuid/setgid/sticky)
+    const new_mode: u32 = @truncate(mode_arg & 0o7777);
+
+    // Perform chmod via VFS
+    fs.vfs.Vfs.chmod(path, new_mode) catch |err| {
+        return switch (err) {
+            error.NotFound => error.ENOENT,
+            error.NotSupported => error.EROFS,
+            error.IOError => error.EIO,
+            else => error.EIO,
+        };
+    };
+
+    return 0;
+}
+
+/// sys_chown (92) - Change file owner and group
+///
+/// Args:
+///   path_ptr: Path to file
+///   owner: New owner UID (-1 to keep current)
+///   group: New group GID (-1 to keep current)
+pub fn sys_chown(path_ptr: usize, owner: usize, group: usize) SyscallError!usize {
+    const alloc = heap.allocator();
+    const path_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(path_buf);
+    const canon_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(canon_buf);
+
+    const raw_path = user_mem.copyStringFromUser(path_buf, path_ptr) catch return error.EFAULT;
+    if (raw_path.len == 0) return error.ENOENT;
+
+    // Canonicalize path
+    const path = canonicalizePath(raw_path, canon_buf) orelse return error.ENOENT;
+
+    // Only root can chown
+    const proc = base.getCurrentProcess();
+    if (proc.euid != 0) {
+        return error.EPERM;
+    }
+
+    // Convert -1 (0xFFFFFFFF) to null for "keep current"
+    const new_uid: ?u32 = if (owner == 0xFFFFFFFF) null else @truncate(owner);
+    const new_gid: ?u32 = if (group == 0xFFFFFFFF) null else @truncate(group);
+
+    // Perform chown via VFS
+    fs.vfs.Vfs.chown(path, new_uid, new_gid) catch |err| {
+        return switch (err) {
+            error.NotFound => error.ENOENT,
+            error.NotSupported => error.EROFS,
+            error.IOError => error.EIO,
+            else => error.EIO,
+        };
+    };
+
+    return 0;
 }

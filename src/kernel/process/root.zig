@@ -5,6 +5,7 @@ const types = @import("types.zig");
 const lifecycle = @import("lifecycle.zig");
 const manager = @import("manager.zig");
 const ipc_msg = @import("ipc_msg");
+const sched = @import("sched"); // Added for getCurrentProcess
 
 // Export public API
 
@@ -38,3 +39,12 @@ pub const hasInputInjectionCapability = Process.hasInputInjectionCapability;
 pub const hasFileCapability = Process.hasFileCapability;
 pub const hasSetUidCapability = Process.hasSetUidCapability;
 pub const hasSetGidCapability = Process.hasSetGidCapability;
+
+// Helper to get current process (shim for Scheduler)
+pub fn getCurrentProcess() *Process {
+    const thread = sched.getCurrentThread() orelse @panic("getCurrentProcess: No current thread");
+    if (thread.process) |p| {
+        return @ptrCast(@alignCast(p));
+    }
+    @panic("getCurrentProcess: Thread has no process");
+}

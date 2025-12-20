@@ -2,7 +2,7 @@ const std = @import("std");
 const heap = @import("heap");
 const console = @import("console");
 const fd_mod = @import("fd");
-const devfs = @import("devfs");
+
 const user_vmm_mod = @import("user_vmm");
 const vmm = @import("vmm");
 const pmm = @import("pmm");
@@ -35,7 +35,8 @@ pub fn createProcess(parent: ?*Process) !*Process {
     errdefer fd_mod.destroyFdTable(fd_table);
 
     // Pre-populate stdin/stdout/stderr
-    try devfs.createStdFds(fd_table);
+    // Std FDs are now created by the caller (init_proc.zig) or copied via fork
+
 
     // Create user address space with randomized mmap base
     const user_vmm = try UserVmm.initWithMmapBase(aslr_offsets.mmap_start);
