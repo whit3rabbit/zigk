@@ -1,0 +1,209 @@
+const std = @import("std");
+const primitive = @import("primitive.zig");
+const uapi = primitive.uapi;
+const syscalls = uapi.syscalls;
+
+pub const SyscallError = primitive.SyscallError;
+
+// =============================================================================
+// Random (sys_getrandom)
+// =============================================================================
+
+/// Flags for getrandom
+pub const GRND_NONBLOCK: u32 = 1;
+pub const GRND_RANDOM: u32 = 2;
+
+/// Get random bytes from kernel
+pub fn getrandom(buf: [*]u8, count: usize, flags: u32) SyscallError!usize {
+    const ret = primitive.syscall3(syscalls.SYS_GETRANDOM, @intFromPtr(buf), count, flags);
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return ret;
+}
+
+// =============================================================================
+// Hardware Info & Graphics (1000+)
+// =============================================================================
+
+/// Framebuffer info structure
+pub const FramebufferInfo = extern struct {
+    width: u32,
+    height: u32,
+    pitch: u32,
+    bpp: u32,
+    red_shift: u8,
+    red_mask_size: u8,
+    green_shift: u8,
+    green_mask_size: u8,
+    blue_shift: u8,
+    blue_mask_size: u8,
+    _reserved: [2]u8 = .{ 0, 0 },
+};
+
+/// Get framebuffer info
+pub fn get_framebuffer_info(info: *FramebufferInfo) SyscallError!void {
+    const ret = primitive.syscall1(syscalls.SYS_GET_FB_INFO, @intFromPtr(info));
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Map framebuffer into process address space
+pub fn map_framebuffer() SyscallError![*]u8 {
+    const ret = primitive.syscall0(syscalls.SYS_MAP_FB);
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return @ptrFromInt(ret);
+}
+
+// =============================================================================
+// Input/Mouse Syscalls (1010-1019)
+// =============================================================================
+
+/// Read raw keyboard scancode (non-blocking)
+pub fn read_scancode() SyscallError!u8 {
+    const ret = primitive.syscall0(syscalls.SYS_READ_SCANCODE);
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return @truncate(ret);
+}
+
+/// Read ASCII character from input buffer (blocking)
+pub fn getchar() SyscallError!u8 {
+    const ret = primitive.syscall0(syscalls.SYS_GETCHAR);
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return @truncate(ret);
+}
+
+/// Write character to console
+pub fn putchar(c: u8) SyscallError!void {
+    const ret = primitive.syscall1(syscalls.SYS_PUTCHAR, c);
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Read next input event (non-blocking)
+pub fn read_input_event(event: *uapi.input.InputEvent) SyscallError!void {
+    const ret = primitive.syscall1(syscalls.SYS_READ_INPUT_EVENT, @intFromPtr(event));
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Get current cursor position
+pub fn get_cursor_position(pos: *uapi.input.CursorPosition) SyscallError!void {
+    const ret = primitive.syscall1(syscalls.SYS_GET_CURSOR_POSITION, @intFromPtr(pos));
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Set cursor bounds (screen dimensions)
+pub fn set_cursor_bounds(width: u32, height: u32) SyscallError!void {
+    const bounds = uapi.input.CursorBounds{
+        .width = width,
+        .height = height,
+    };
+    const ret = primitive.syscall1(syscalls.SYS_SET_CURSOR_BOUNDS, @intFromPtr(&bounds));
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Set input mode
+pub fn set_input_mode(mode: uapi.input.InputMode) SyscallError!void {
+    const ret = primitive.syscall1(syscalls.SYS_SET_INPUT_MODE, @intFromEnum(mode));
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+// =============================================================================
+// DMA/MMIO Syscalls (1030-1032)
+// =============================================================================
+
+/// Result from alloc_dma syscall
+pub const DmaAllocResult = extern struct {
+    virt_addr: u64,
+    phys_addr: u64,
+    size: u64,
+};
+
+/// Map a physical MMIO region into userspace
+pub fn mmap_phys(phys_addr: u64, size: usize) SyscallError!*anyopaque {
+    const ret = primitive.syscall2(syscalls.SYS_MMAP_PHYS, @intCast(phys_addr), size);
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return @ptrFromInt(ret);
+}
+
+/// Allocate DMA-capable memory
+pub fn alloc_dma(page_count: u32) SyscallError!DmaAllocResult {
+    var result: DmaAllocResult = std.mem.zeroes(DmaAllocResult);
+    const ret = primitive.syscall2(syscalls.SYS_ALLOC_DMA, @intFromPtr(&result), page_count);
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return result;
+}
+
+/// Free DMA memory
+pub fn free_dma(virt_addr: u64, size: usize) SyscallError!void {
+    const ret = primitive.syscall2(syscalls.SYS_FREE_DMA, @intCast(virt_addr), size);
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+// =============================================================================
+// PCI Syscalls (1033-1035)
+// =============================================================================
+
+pub const BarInfo = extern struct {
+    base: u64,
+    size: u64,
+    is_mmio: u8,
+    is_64bit: u8,
+    prefetchable: u8,
+    _pad: u8 = 0,
+};
+
+pub const PciDeviceInfo = extern struct {
+    bus: u8,
+    device: u8,
+    func: u8,
+    _pad0: u8 = 0,
+    vendor_id: u16,
+    device_id: u16,
+    class_code: u8,
+    subclass: u8,
+    prog_if: u8,
+    revision: u8,
+    bar: [6]BarInfo,
+    irq_line: u8,
+    irq_pin: u8,
+    _pad1: [6]u8 = [_]u8{0} ** 6,
+
+    pub fn isVirtioNet(self: *const PciDeviceInfo) bool {
+        if (self.vendor_id != 0x1AF4) return false;
+        return self.device_id == 0x1000 or self.device_id == 0x1041;
+    }
+
+    pub fn isVirtioBlk(self: *const PciDeviceInfo) bool {
+        if (self.vendor_id != 0x1AF4) return false;
+        return self.device_id == 0x1001 or self.device_id == 0x1042;
+    }
+};
+
+pub fn pci_enumerate(buf: []PciDeviceInfo) SyscallError!usize {
+    const ret = primitive.syscall2(syscalls.SYS_PCI_ENUMERATE, @intFromPtr(buf.ptr), buf.len);
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return ret;
+}
+
+pub fn pci_config_read(bus: u8, device: u5, func: u3, offset: u12) SyscallError!u32 {
+    const ret = primitive.syscall4(syscalls.SYS_PCI_CONFIG_READ, bus, device, func, offset);
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return @truncate(ret);
+}
+
+pub fn pci_config_write(bus: u8, device: u5, func: u3, offset: u12, value: u32) SyscallError!void {
+    const ret = primitive.syscall5(syscalls.SYS_PCI_CONFIG_WRITE, bus, device, func, offset, value);
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+// =============================================================================
+// Port I/O Syscalls (1036-1037)
+// =============================================================================
+
+pub fn outb(port: u16, value: u8) SyscallError!void {
+    const ret = primitive.syscall2(syscalls.SYS_OUTB, port, value);
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+pub fn inb(port: u16) SyscallError!u8 {
+    const ret = primitive.syscall1(syscalls.SYS_INB, port);
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return @truncate(ret);
+}

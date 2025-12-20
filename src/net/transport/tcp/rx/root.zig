@@ -61,28 +61,35 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
     const remote_ip = ip_hdr.getSrcIp();
     const remote_port = tcp_hdr.getSrcPort();
 
-    state.lock.acquire();
+    // SECURITY FIX: Use Held pattern for proper IRQ state management.
+    // The state.lock is now an IrqLock that properly saves/restores interrupt state.
+    var state_held = state.lock.acquire();
 
     // Try established connection first
     if (state.findTcb(local_ip, local_port, remote_ip, remote_port)) |tcb| {
         if (tcb.closing) {
-            state.lock.release();
+            state_held.release();
             return false;
         }
 
-        const held = tcb.mutex.acquire();
+        // SECURITY FIX: Acquire tcb.mutex while holding state.lock, then release state.lock.
+        // The generation check after re-acquiring state.lock validates TCB wasn't freed.
+        // We mark closing=true atomically before any free operation in freeTcb().
+        const tcb_held = tcb.mutex.acquire();
         const expected_generation = tcb.generation;
-        state.lock.release();
+        state_held.release();
 
         const action = processEstablishedPacket(tcb, pkt, tcp_hdr);
-        held.release();
+        tcb_held.release();
 
         if (action == .FreeTcb) {
-            state.lock.acquire();
+            state_held = state.lock.acquire();
+            // SECURITY: Double-check validity after re-acquiring lock.
+            // Generation check ensures TCB wasn't freed and reallocated.
             if (state.isTcbValid(tcb) and tcb.generation == expected_generation) {
                 state.freeTcb(tcb);
             }
-            state.lock.release();
+            state_held.release();
         }
 
         return true;
@@ -91,18 +98,18 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
     // Try listening socket
     if (state.findListeningTcb(local_port, local_ip)) |listen_tcb| {
         if (listen_tcb.closing) {
-            state.lock.release();
+            state_held.release();
             return false;
         }
 
-        const held = listen_tcb.mutex.acquire();
-        state.lock.release();
-        defer held.release();
+        const listen_held = listen_tcb.mutex.acquire();
+        state_held.release();
+        defer listen_held.release();
 
         return listen.processListenPacket(iface, listen_tcb, pkt, tcp_hdr);
     }
 
-    state.lock.release();
+    state_held.release();
     _ = tx.sendRstForPacket(iface, pkt, tcp_hdr);
     return true;
 }

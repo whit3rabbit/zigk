@@ -3,7 +3,7 @@
 // Provides C ABI exports for doomgeneric platform code.
 // These functions wrap the Zig syscall interface for use from C.
 
-const syscall = @import("syscall.zig");
+const syscall = @import("syscall");
 
 // Re-export types for C
 pub const FramebufferInfo = syscall.FramebufferInfo;

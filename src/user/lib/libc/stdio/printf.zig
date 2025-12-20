@@ -3,7 +3,7 @@
 // Formatted output to stdout.
 
 const std = @import("std");
-const syscall = @import("syscall.zig");
+const syscall = @import("syscall");
 const format = @import("format.zig");
 const internal = @import("../internal.zig");
 

@@ -25,9 +25,8 @@ pub fn socket(family: i32, sock_type: i32, protocol: i32) errors.SocketError!usi
     // TODO: Handle SOCK_NONBLOCK/CLOEXEC if we support them in the future
     // For now, we accept them but ignore them to allow initialization.
 
-    const lock = state.socketLock();
-    lock.acquire();
-    defer lock.release();
+    const held = state.lock.acquire();
+    defer held.release();
 
     const slot = state.reserveSlot() orelse return errors.SocketError.NoSocketsAvailable;
     const new_sock = state.socket_allocator.create(types.Socket) catch return errors.SocketError.NoSocketsAvailable;
@@ -36,7 +35,7 @@ pub fn socket(family: i32, sock_type: i32, protocol: i32) errors.SocketError!usi
     new_sock.family = family;
     new_sock.sock_type = sock_type;
     new_sock.protocol = protocol;
-    new_sock.refcount = 1; // Held by socket table entry
+    // refcount is initialized to 1 by Socket.init()
 
     if (!state.installSocket(slot, new_sock)) {
         state.socket_allocator.destroy(new_sock);
@@ -48,11 +47,10 @@ pub fn socket(family: i32, sock_type: i32, protocol: i32) errors.SocketError!usi
 
 /// Bind socket to local address/port
 pub fn bind(sock_fd: usize, addr: *const types.SockAddrIn) errors.SocketError!void {
-     const lock = state.socketLock();
-     lock.acquire();
-     defer lock.release();
+    const held = state.lock.acquire();
+    defer held.release();
 
-    const sock = state.getSocket(sock_fd) orelse return errors.SocketError.BadFd;
+    const sock = state.getSocketLocked(sock_fd) orelse return errors.SocketError.BadFd;
 
     const port = addr.getPort();
     const ip = addr.getAddr();
@@ -79,14 +77,14 @@ pub fn bind(sock_fd: usize, addr: *const types.SockAddrIn) errors.SocketError!vo
 
 /// Close a socket
 pub fn close(sock_fd: usize) errors.SocketError!void {
-     const lock = state.socketLock();
-     lock.acquire();
-     defer lock.release();
+    const held = state.lock.acquire();
+    defer held.release();
 
-    const sock = state.getSocket(sock_fd) orelse return errors.SocketError.BadFd;
+    const sock = state.getSocketLocked(sock_fd) orelse return errors.SocketError.BadFd;
 
     // 1. Remove from table prevent new lookups (UAF protection)
-    sock.closing = true;
+    // SECURITY: Use atomic store for closing flag
+    sock.closing.store(true, .release);
     state.clearSlot(sock_fd);
     state.unregisterUdpSocket(sock);
 

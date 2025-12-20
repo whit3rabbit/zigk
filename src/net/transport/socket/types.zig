@@ -1,6 +1,7 @@
 // Socket types, constants, and helpers.
 // Split out so UDP/TCP helpers can share a single definition surface.
 
+const std = @import("std");
 const packet = @import("../../core/packet.zig");
 const tcp_types = @import("../tcp/types.zig");
 const scheduler = @import("scheduler.zig");
@@ -136,12 +137,13 @@ pub const Socket = struct {
     lock: sync.Spinlock,
 
     /// Reference count for lifetime management.
-
-    /// Reference count for lifetime management.
+    /// SECURITY: Uses atomic operations to prevent TOCTOU races.
     /// 1 is held by the socket table entry; operations take additional refs.
-    refcount: usize,
-    /// Socket is closing; prevents new references
-    closing: bool,
+    refcount: sync.AtomicRefcount,
+
+    /// Socket is closing; prevents new references.
+    /// SECURITY: Once set, tryRetain() will fail atomically.
+    closing: std.atomic.Value(bool),
 
     // =========================================================================
     // Socket Options
@@ -205,8 +207,8 @@ pub const Socket = struct {
             .pending_send = null,
             .pending_connect = null,
             .lock = .{},
-            .refcount = 0,
-            .closing = false,
+            .refcount = .{ .count = .{ .raw = 1 } }, // Start with 1 ref for table entry
+            .closing = .{ .raw = false },
             // Socket options - defaults
             .rcv_timeout_ms = 0, // Infinite timeout (blocking forever)
             .snd_timeout_ms = 0,

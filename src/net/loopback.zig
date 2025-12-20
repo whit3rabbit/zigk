@@ -7,6 +7,7 @@
 // - Implements standard Interface abstraction (no special casing in IP layer)
 // - Transmit callback re-injects packet to IPv4 processPacket
 // - No actual hardware, just memory copy
+// - Packet processing is SYNCHRONOUS - protocol handlers must copy data before returning
 //
 // Note: The loopback interface is separate from the physical NIC interface.
 // Traffic to 127.x.x.x should be routed through this interface.
@@ -21,8 +22,9 @@ const heap = @import("heap");
 /// Loopback interface instance
 var loopback_interface: Interface = undefined;
 
-/// Whether loopback has been initialized
-var initialized: bool = false;
+/// Atomic initialization flag for thread-safe access
+/// Uses acquire/release semantics to ensure all interface fields are visible
+var initialized: std.atomic.Value(bool) = .{ .raw = false };
 
 /// Initialize the loopback interface
 /// Returns pointer to the interface for registration
@@ -47,17 +49,23 @@ pub fn init() *Interface {
     // Loopback doesn't need multicast MAC filtering
     loopback_interface.accept_all_multicast = false;
 
-    initialized = true;
+    // Release semantics: ensure all interface fields are visible before marking initialized
+    initialized.store(true, .release);
     return &loopback_interface;
 }
 
 /// Get the loopback interface (if initialized)
+/// Uses acquire semantics to synchronize with init()'s release store
 pub fn getInterface() ?*Interface {
-    return if (initialized) &loopback_interface else null;
+    return if (initialized.load(.acquire)) &loopback_interface else null;
 }
 
 /// Loopback transmit function
 /// Instead of sending to hardware, inject directly into receive path
+///
+/// OWNERSHIP: This function allocates packet_data and pkt, passes them to processPacket
+/// for SYNCHRONOUS processing, then frees both. Protocol handlers MUST copy any data
+/// they need before returning - they cannot retain references to the PacketBuffer.
 fn loopbackTransmit(data: []const u8) bool {
     // Skip Ethernet header (14 bytes) to get IP packet
     // Loopback doesn't really need Ethernet, but sendPacket adds it
@@ -69,26 +77,34 @@ fn loopbackTransmit(data: []const u8) bool {
 
     const ip_data = data[eth_header_size..];
 
+    // Validate minimum IPv4 header length to prevent OOB reads in protocol handlers
+    if (ip_data.len < packet.IP_HEADER_SIZE) {
+        return false;
+    }
+
     // Allocate buffer for packet data
     const allocator = heap.allocator();
     const packet_data = allocator.alloc(u8, ip_data.len) catch return false;
-    defer allocator.free(packet_data);
+    // Note: No defer - we explicitly manage lifetime after synchronous processPacket
     @memcpy(packet_data, ip_data);
 
     // Allocate new PacketBuffer
-    var pkt = allocator.create(PacketBuffer) catch return false;
-    // No error return after this point until destroy(pkt)
+    var pkt = allocator.create(PacketBuffer) catch {
+        allocator.free(packet_data);
+        return false;
+    };
 
     // Initialize PacketBuffer
     pkt.* = PacketBuffer.init(packet_data, ip_data.len);
     pkt.eth_offset = 0; // No Ethernet header
     pkt.ip_offset = 0;  // IP starts at 0
 
-    // Process as incoming IP packet
+    // Process as incoming IP packet (SYNCHRONOUS - handlers must copy data)
     const result = ipv4.processPacket(&loopback_interface, pkt);
 
-    // Clean up
+    // Clean up - safe because processPacket is synchronous and handlers copy data
     allocator.destroy(pkt);
+    allocator.free(packet_data);
 
     return result;
 }

@@ -1,5 +1,5 @@
 const std = @import("std");
-const syscall = @import("syscall.zig");
+const syscall = @import("syscall");
 const errno = @import("../errno.zig");
 
 // Access mode flags

@@ -1,0 +1,167 @@
+const primitive = @import("primitive.zig");
+const io = @import("io.zig");
+const process = @import("process.zig");
+const signal = @import("signal.zig");
+const net = @import("net.zig");
+const time = @import("time.zig");
+const resource = @import("resource.zig");
+const io_uring = @import("io_uring.zig");
+
+// Re-export core primitives
+pub const uapi = primitive.uapi;
+pub const SyscallError = primitive.SyscallError;
+pub const memoryBarrier = primitive.memoryBarrier;
+pub const syscall0 = primitive.syscall0;
+pub const syscall1 = primitive.syscall1;
+pub const syscall2 = primitive.syscall2;
+pub const syscall3 = primitive.syscall3;
+pub const syscall4 = primitive.syscall4;
+pub const syscall5 = primitive.syscall5;
+pub const syscall6 = primitive.syscall6;
+pub const isError = primitive.isError;
+pub const errorFromReturn = primitive.errorFromReturn;
+
+// Re-export I/O
+pub const read = io.read;
+pub const write = io.write;
+pub const writeString = io.writeString;
+pub const Iovec = io.Iovec;
+pub const writev = io.writev;
+pub const lseek = io.lseek;
+pub const open = io.open;
+pub const close = io.close;
+pub const access = io.access;
+pub const ioctl = io.ioctl;
+pub const poll = io.poll;
+pub const PollFd = io.PollFd;
+pub const POLLIN = io.POLLIN;
+pub const POLLOUT = io.POLLOUT;
+pub const POLLERR = io.POLLERR;
+pub const POLLHUP = io.POLLHUP;
+pub const POLLNVAL = io.POLLNVAL;
+pub const O_RDONLY = io.O_RDONLY;
+pub const O_WRONLY = io.O_WRONLY;
+pub const O_RDWR = io.O_RDWR;
+pub const O_CREAT = io.O_CREAT;
+pub const O_EXCL = io.O_EXCL;
+pub const O_TRUNC = io.O_TRUNC;
+pub const O_APPEND = io.O_APPEND;
+pub const SEEK_SET = io.SEEK_SET;
+pub const SEEK_CUR = io.SEEK_CUR;
+pub const SEEK_END = io.SEEK_END;
+pub const STDIN_FILENO = io.STDIN_FILENO;
+pub const STDOUT_FILENO = io.STDOUT_FILENO;
+pub const STDERR_FILENO = io.STDERR_FILENO;
+pub const print_safe = io.print_safe;
+pub const print = io.print;
+pub const eprint_safe = io.eprint_safe;
+pub const eprint = io.eprint;
+pub const debug_log = io.debug_log;
+pub const debug_print = io.debug_print;
+pub const PROT_NONE = io.PROT_NONE;
+pub const PROT_READ = io.PROT_READ;
+pub const PROT_WRITE = io.PROT_WRITE;
+pub const PROT_EXEC = io.PROT_EXEC;
+pub const MAP_SHARED = io.MAP_SHARED;
+pub const MAP_PRIVATE = io.MAP_PRIVATE;
+pub const MAP_FIXED = io.MAP_FIXED;
+pub const MAP_ANONYMOUS = io.MAP_ANONYMOUS;
+pub const MAP_POPULATE = io.MAP_POPULATE;
+pub const mmap = io.mmap;
+pub const munmap = io.munmap;
+
+// Re-export Process
+pub const sched_yield = process.sched_yield;
+pub const exit = process.exit;
+pub const exit_group = process.exit_group;
+pub const arch_prctl = process.arch_prctl;
+pub const ARCH_SET_FS = process.ARCH_SET_FS;
+pub const ARCH_GET_FS = process.ARCH_GET_FS;
+pub const getpid = process.getpid;
+pub const getppid = process.getppid;
+pub const getuid = process.getuid;
+pub const getgid = process.getgid;
+pub const brk = process.brk;
+pub const sbrk = process.sbrk;
+pub const IpcMessage = process.IpcMessage;
+pub const send = process.send;
+pub const recv = process.recv;
+pub const register_service = process.register_service;
+pub const lookup_service = process.lookup_service;
+
+// Re-export Signal
+pub const kill = signal.kill;
+pub const sigaction = signal.sigaction;
+pub const sigprocmask = signal.sigprocmask;
+pub const sigreturn = signal.sigreturn;
+pub const SigAction = signal.SigAction;
+pub const SigSet = signal.SigSet;
+
+// Re-export Net
+pub const SockAddrIn = net.SockAddrIn;
+pub const AF_INET = net.AF_INET;
+pub const SOCK_STREAM = net.SOCK_STREAM;
+pub const SOCK_DGRAM = net.SOCK_DGRAM;
+pub const socket = net.socket;
+pub const bind = net.bind;
+pub const sendto = net.sendto;
+pub const recvfrom = net.recvfrom;
+pub const listen = net.listen;
+pub const accept = net.accept;
+pub const connect = net.connect;
+pub const shutdown = net.shutdown;
+pub const parseIp = net.parseIp;
+
+// Re-export Time
+pub const Timespec = time.Timespec;
+pub const ClockId = time.ClockId;
+pub const nanosleep = time.nanosleep;
+pub const sleep_ms = time.sleep_ms;
+pub const clock_gettime = time.clock_gettime;
+pub const gettime_ms = time.gettime_ms;
+
+// Re-export Resources
+pub const GRND_NONBLOCK = resource.GRND_NONBLOCK;
+pub const GRND_RANDOM = resource.GRND_RANDOM;
+pub const getrandom = resource.getrandom;
+pub const FramebufferInfo = resource.FramebufferInfo;
+pub const get_framebuffer_info = resource.get_framebuffer_info;
+pub const map_framebuffer = resource.map_framebuffer;
+pub const read_scancode = resource.read_scancode;
+pub const getchar = resource.getchar;
+pub const putchar = resource.putchar;
+pub const read_input_event = resource.read_input_event;
+pub const get_cursor_position = resource.get_cursor_position;
+pub const set_cursor_bounds = resource.set_cursor_bounds;
+pub const set_input_mode = resource.set_input_mode;
+pub const DmaAllocResult = resource.DmaAllocResult;
+pub const mmap_phys = resource.mmap_phys;
+pub const alloc_dma = resource.alloc_dma;
+pub const free_dma = resource.free_dma;
+pub const BarInfo = resource.BarInfo;
+pub const PciDeviceInfo = resource.PciDeviceInfo;
+pub const pci_enumerate = resource.pci_enumerate;
+pub const pci_config_read = resource.pci_config_read;
+pub const pci_config_write = resource.pci_config_write;
+pub const outb = resource.outb;
+pub const inb = resource.inb;
+
+// Re-export io_uring
+pub const IoUringSqe = io_uring.IoUringSqe;
+pub const IoUringCqe = io_uring.IoUringCqe;
+pub const IoUringParams = io_uring.IoUringParams;
+pub const IORING_ENTER_GETEVENTS = io_uring.IORING_ENTER_GETEVENTS;
+pub const IORING_OP_NOP = io_uring.IORING_OP_NOP;
+pub const IORING_OP_READ = io_uring.IORING_OP_READ;
+pub const IORING_OP_WRITE = io_uring.IORING_OP_WRITE;
+pub const IORING_OP_ACCEPT = io_uring.IORING_OP_ACCEPT;
+pub const IORING_OP_RECV = io_uring.IORING_OP_RECV;
+pub const IORING_OP_SEND = io_uring.IORING_OP_SEND;
+pub const IORING_OP_CLOSE = io_uring.IORING_OP_CLOSE;
+pub const IORING_OFF_SQ_RING = io_uring.IORING_OFF_SQ_RING;
+pub const IORING_OFF_CQ_RING = io_uring.IORING_OFF_CQ_RING;
+pub const IORING_OFF_SQES = io_uring.IORING_OFF_SQES;
+pub const io_uring_setup = io_uring.io_uring_setup;
+pub const io_uring_enter = io_uring.io_uring_enter;
+pub const io_uring_register = io_uring.io_uring_register;
+pub const IoUring = io_uring.IoUring;

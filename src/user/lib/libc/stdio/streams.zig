@@ -3,7 +3,7 @@
 // Character and line I/O functions, plus standard streams.
 
 const std = @import("std");
-const syscall = @import("syscall.zig");
+const syscall = @import("syscall");
 const file = @import("file.zig");
 const errno_mod = @import("../errno.zig");
 

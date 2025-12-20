@@ -2,7 +2,7 @@
 //
 // FILE structure and basic file I/O functions.
 
-const syscall = @import("syscall.zig");
+const syscall = @import("syscall");
 const memory = @import("../memory/root.zig");
 const internal = @import("../internal.zig");
 

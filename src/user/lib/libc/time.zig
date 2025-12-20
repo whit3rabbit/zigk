@@ -2,7 +2,7 @@
 //
 // Provides POSIX time functions for getting the current time.
 
-const syscall = @import("syscall.zig");
+const syscall = @import("syscall");
 
 /// Time type - seconds since Unix epoch
 pub const time_t = i64;

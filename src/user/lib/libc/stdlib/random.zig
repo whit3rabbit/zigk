@@ -30,7 +30,7 @@ pub const RAND_MAX: c_int = 0x7fff;
 /// SECURITY: Returns false if kernel getrandom fails - never falls back to weak PRNG
 /// Callers MUST check the return value and handle failure appropriately
 pub fn getRandomBytes(buf: [*]u8, len: usize) bool {
-    const syscall = @import("syscall.zig");
+    const syscall = @import("syscall");
 
     var offset: usize = 0;
 

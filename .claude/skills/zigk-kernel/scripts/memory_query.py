@@ -15,6 +15,7 @@ Usage:
     python memory_query.py fault         # Page fault error codes
     python memory_query.py limine        # Limine boot mappings
     python memory_query.py addr          # Key addresses quick ref
+    python memory_query.py vector        # Interrupt vector map
 """
 
 import sys
@@ -382,6 +383,96 @@ pub const MemoryType = enum(u64) {
     kernel_and_modules = 6,
     framebuffer = 7,
 };
+```
+""",
+
+    "vector": """
+## Interrupt Vector Map
+
+### CPU Exceptions (0-31)
+| Vector | Name | Type | Error Code |
+|--------|------|------|------------|
+| 0 | #DE | Divide Error | No |
+| 1 | #DB | Debug | No |
+| 2 | NMI | Non-Maskable Interrupt | No |
+| 3 | #BP | Breakpoint | No |
+| 4 | #OF | Overflow | No |
+| 5 | #BR | Bound Range Exceeded | No |
+| 6 | #UD | Invalid Opcode | No |
+| 7 | #NM | Device Not Available | No |
+| 8 | #DF | Double Fault | Yes (0) |
+| 9 | - | Coprocessor Segment Overrun | No |
+| 10 | #TS | Invalid TSS | Yes |
+| 11 | #NP | Segment Not Present | Yes |
+| 12 | #SS | Stack-Segment Fault | Yes |
+| 13 | #GP | General Protection Fault | Yes |
+| 14 | #PF | Page Fault | Yes |
+| 15 | - | Reserved | - |
+| 16 | #MF | x87 FPU Error | No |
+| 17 | #AC | Alignment Check | Yes (0) |
+| 18 | #MC | Machine Check | No |
+| 19 | #XM | SIMD Floating-Point | No |
+| 20 | #VE | Virtualization Exception | No |
+| 21 | #CP | Control Protection | Yes |
+| 22-31 | - | Reserved | - |
+
+### IRQ Mapping (PIC/IOAPIC)
+| Vector | IRQ | Device | ISA |
+|--------|-----|--------|-----|
+| 32 | 0 | PIT Timer | Yes |
+| 33 | 1 | PS/2 Keyboard | Yes |
+| 34 | 2 | Cascade (unused) | Yes |
+| 35 | 3 | COM2 | Yes |
+| 36 | 4 | COM1 | Yes |
+| 37 | 5 | LPT2 / Sound | Yes |
+| 38 | 6 | Floppy | Yes |
+| 39 | 7 | LPT1 / Spurious | Yes |
+| 40 | 8 | RTC | Yes |
+| 41 | 9 | ACPI | Yes |
+| 42 | 10 | Available | Yes |
+| 43 | 11 | Available | Yes |
+| 44 | 12 | PS/2 Mouse | Yes |
+| 45 | 13 | Coprocessor | Yes |
+| 46 | 14 | Primary IDE | Yes |
+| 47 | 15 | Secondary IDE | Yes |
+
+### Special Vectors
+| Vector | Purpose |
+|--------|---------|
+| 128 (0x80) | Legacy Syscall (int 0x80) |
+| 239 | APIC Timer |
+| 240-254 | MSI-X Vectors (dynamic) |
+| 255 | Spurious Interrupt |
+
+### Zscapek Specifics
+```zig
+// Vector 128: Syscall entry (via int 0x80 or syscall instruction)
+pub const SYSCALL_VECTOR: u8 = 0x80;
+
+// APIC Timer for scheduler tick
+pub const APIC_TIMER_VECTOR: u8 = 0xEF;  // 239
+
+// Spurious interrupts (must not be masked)
+pub const SPURIOUS_VECTOR: u8 = 0xFF;    // 255
+```
+
+### IRQ to Vector Calculation
+```zig
+// PIC remapped to 32-47
+const vector = irq + 32;
+
+// For MSI-X, vectors are dynamically allocated:
+const msi_vector = hal.interrupts.allocateMsixVector();
+```
+
+### Exception Handler Signature
+```zig
+fn exceptionHandler(frame: *InterruptFrame, error_code: u64) void {
+    const vector = frame.interrupt_number;
+    const rip = frame.rip;
+    const cr2 = hal.cpu.readCr2();  // Page fault address
+    // ...
+}
 ```
 """,
 }

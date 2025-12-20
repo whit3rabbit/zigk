@@ -57,6 +57,35 @@ pub const Process = struct {
     /// Maximum messages per mailbox to prevent memory exhaustion
     pub const MAX_MAILBOX_LEN: usize = 1024;
 
+    /// CWD lock type (lightweight spinlock)
+    pub const CwdLock = struct {
+        locked: std.atomic.Value(u32) = .{ .raw = 0 },
+
+        pub const Held = struct {
+            lock: *CwdLock,
+            irq_state: bool,
+            pub fn release(h: Held) void {
+                h.lock.locked.store(0, .release);
+                if (h.irq_state) hal.cpu.enableInterrupts();
+            }
+        };
+
+        pub fn acquire(self: *CwdLock) Held {
+            const hal_cpu = hal.cpu;
+            const irq_state = hal_cpu.interruptsEnabled();
+            hal_cpu.disableInterrupts();
+            while (true) {
+                if (self.locked.cmpxchgWeak(0, 1, .acquire, .monotonic) == null) break;
+                if (@import("builtin").os.tag == .freestanding) {
+                    asm volatile ("pause" ::: .{ .memory = true });
+                } else {
+                    std.Thread.yield() catch {};
+                }
+            }
+            return .{ .lock = self, .irq_state = irq_state };
+        }
+    };
+
     /// Lock for mailbox/IPC state
     mailbox_lock: MailboxLock = .{},
 
@@ -115,6 +144,10 @@ pub const Process = struct {
     /// Current Working Directory
     cwd: [uapi.abi.MAX_PATH]u8,
     cwd_len: usize,
+    /// SECURITY: Lock for CWD access to prevent races between chdir and openat
+    cwd_lock: CwdLock = .{},
+
+
 
     /// VDSO Base Address (ASLR)
     vdso_base: u64 = 0,

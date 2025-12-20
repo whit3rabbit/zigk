@@ -3,7 +3,7 @@
 // These functions require kernel features not yet available or
 // have no meaningful implementation in a freestanding kernel.
 
-const syscall = @import("syscall.zig");
+const syscall = @import("syscall");
 
 // =============================================================================
 // Signal handling stubs

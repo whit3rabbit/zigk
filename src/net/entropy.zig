@@ -1,19 +1,30 @@
 const std = @import("std");
 const root = @import("root");
 
+const EINTR: usize = 4; // Interrupted system call
+
 pub fn getEntropy() u64 {
     if (@hasDecl(root, "hal")) {
         // Kernel mode
         return root.hal.entropy.getHardwareEntropy();
     } else {
         // Userspace: use getrandom syscall (SYS_GETRANDOM = 318)
-        var buf: [8]u8 = undefined;
-        const ret = userspaceGetrandom(&buf, 8, 0);
-        if (ret == 8) {
-            return std.mem.readInt(u64, &buf, .little);
+        // Zero-init to prevent reading uninitialized memory on error paths
+        var buf: [8]u8 = .{0} ** 8;
+        var total: usize = 0;
+
+        while (total < 8) {
+            const ret = userspaceGetrandom(buf[total..].ptr, 8 - total, 0);
+            if (ret < 0) {
+                const errno: usize = @intCast(-ret);
+                if (errno == EINTR) {
+                    continue; // Retry on signal interruption
+                }
+                @panic("getrandom syscall failed - cannot provide secure entropy");
+            }
+            total += @intCast(ret);
         }
-        // Syscall failed - this is a security-critical failure
-        @panic("getrandom syscall failed - cannot provide secure entropy");
+        return std.mem.readInt(u64, &buf, .little);
     }
 }
 

@@ -102,7 +102,11 @@ fn populateAccept(sqe: *syscall.IoUringSqe, ctx: ?*anyopaque) void {
 }
 
 // Submit to kernel (blocks until min_complete done)
-_ = ring.submit(1) catch continue;
+_ = ring.submit(1) catch |err| {
+    // Handle submit error (e.g., EAGAIN, EINTR)
+    console.printf("submit failed: {}\\n", .{err});
+    return err;
+};
 ```
 
 ### Process Completions

@@ -2,318 +2,178 @@
 
 A Zig-based microkernel for x86_64 using the Limine bootloader protocol.
 
-## Active Technologies
-- Zig 0.16.x (nightly) - freestanding x86_64 target
-- Limine bootloader (v5.x protocol)
-- QEMU for emulation
+## Environment & Build
+- **Zig Version**: 0.16.x (Nightly)
+- **Target**: `x86_64-freestanding`
+- **Bootloader**: Limine v5.x
+- **Host**: macOS (Apple Silicon) -> Requires QEMU TCG
 
-## Project Structure
-
-See [FILESYSTEM.md](docs/FILESYSTEM.md) for complete directory layout. Key directories:
-
-- `src/arch/` - HAL (x86_64, aarch64) - ONLY place for inline assembly
-- `src/kernel/` - Core kernel (scheduler, heap, syscalls, ELF loader)
-- `src/net/` - TCP/IP stack, sockets, DNS
-- `src/fs/` - Filesystem (initrd)
-- `src/drivers/` - Device drivers (PCI, E1000e NIC)
-- `src/user/` - Userland programs (shell, httpd)
-- `specs/` - Feature specifications
-
-When creating new files or folders, update this document.
-
-## Commands
-
+### Commands
 ```bash
 zig build              # Build kernel + userland
 zig build iso          # Create bootable ISO
-zig build run          # Build ISO and run in QEMU
+zig build run          # Run via QEMU (auto-detects macOS flags)
 zig build test         # Run unit tests
-
-Mode,Command,Safety Checks,Optimizations,Best For
-Debug,zig build -Doptimize=Debug,On,Off,Development
-ReleaseSafe,zig build -Doptimize=ReleaseSafe,On,On,Production (Secure)
-ReleaseFast,zig build -Doptimize=ReleaseFast,Off,On,Raw Speed (Gaming/Sim)
-ReleaseSmall,zig build -Doptimize=ReleaseSmall,Off,Size,Embedded
 ```
 
-For macOS with Apple Silicon:
-```bash
-zig build run -Dbios=/opt/homebrew/share/qemu/edk2-x86_64-code.fd
-```
+**QEMU on macOS (Apple Silicon):**
+Use `-Dqemu-args="-accel tcg,thread=multi -cpu max"` to prevent stability issues.
+To prevent hangs on CI/Testing, ensure test runner implements timeouts (e.g., 30s).
 
-## Architecture Rules
+## Security Standards (Strict)
 
-See [BOOT_ARCHITECTURE.md](docs/BOOT_ARCHITECTURE.md) for boot process details.
+### 1. Memory Access (`UserPtr`)
+**NEVER** dereference user pointers directly. Use `UserPtr` to ensure bounds checks, page mapping verification, and SMAP compliance.
 
-### HAL Barrier (Strict Layering)
-- **FORBIDDEN**: `asm volatile`, direct port I/O, or CPU register access outside `src/arch/`
-- **REQUIRED**: Kernel code must use the `hal` module interface
-- Assembly helpers go in `src/arch/x86_64/asm_helpers.S`
-
-### Memory Hygiene
-- All dynamic memory uses the kernel heap allocator
-- Heap provides 16-byte aligned allocations (required for SSE/FPU state)
-- Zero-copy patterns for networking until userspace boundary
-
-### Linux Compatibility
-- Syscall numbers follow Linux x86_64 ABI (see `specs/syscall-table.md`)
-- Error codes use standard Linux errno values
-
-## Syscall Handlers
-
-Refer to [SYSCALL.md](docs/SYSCALL.md) for syscall handler details and build system integration.
-
-### Handler Files (`src/kernel/syscall/`)
-- `base.zig` - Shared state (current_process, fd_table, user_vmm) and accessors
-- `process.zig` - Process lifecycle (exit, wait4, getpid, getppid, getuid, getgid)
-- `signals.zig` - Signal handling (rt_sigprocmask, rt_sigaction, rt_sigreturn)
-- `scheduling.zig` - Scheduler (sched_yield, nanosleep, select, clock_gettime)
-- `io.zig` - I/O operations (read, write, writev, stat, fstat, ioctl, fcntl)
-- `fd.zig` - File descriptors (open, close, dup, dup2, pipe, lseek)
-- `memory.zig` - Memory management (mmap, mprotect, munmap, brk)
-- `execution.zig` - Process execution (fork, execve, arch_prctl, fb syscalls)
-- `custom.zig` - Zscapek extensions (debug_log, putchar, getchar, read_scancode)
-- `net.zig` - Network syscalls (socket, bind, listen, accept, connect, etc.)
-- `random.zig` - Random number syscalls (getrandom)
-- `table.zig` - Dispatch table (auto-discovers handlers at comptime)
-- `user_mem.zig` - User pointer validation utilities
-
-### Naming Convention
-Handler functions MUST be named `sys_<syscall_name>` in lowercase:
 ```zig
-pub fn sys_read(...) SyscallError!usize { ... }
-pub fn sys_getrandom(...) SyscallError!usize { ... }
-pub fn sys_socket(...) SyscallError!usize { ... }
-```
-
-The dispatch table (`table.zig`) uses comptime reflection to match `SYS_READ` from `uapi/syscalls.zig` to `sys_read` in handler modules.
-
-### Error Handling Pattern
-
-**Required**: Use Zig error unions with `SyscallError`:
-```zig
-const SyscallError = uapi.errno.SyscallError;
-
-pub fn sys_read(fd: usize, buf_ptr: usize, count: usize) SyscallError!usize {
-    if (!isValidUserPtr(buf_ptr, count)) {
-        return error.EFAULT;
-    }
-    // ... implementation ...
-    return bytes_read;
+// ✅ CORRECT: Type-safe copy
+pub fn sys_read(fd: usize, buf_ptr: usize, len: usize) SyscallError!usize {
+    if (!user_mem.isValidUserAccess(buf_ptr, len, .Write)) return error.EFAULT;
+    const uptr = user_mem.UserPtr.from(buf_ptr);
+    // ... copy logic ...
 }
 ```
 
-**Forbidden** (legacy pattern, do not use in new code):
+### 2. Concurrency & State Management (TOCTOU Prevention)
+*   **Refresh State Under Lock**: Never rely on cached metadata (size, permissions, active flags) acquired *before* a lock. Always re-read or verify the state from the source (disk/inode) immediately **after** acquiring the lock.
+*   **Bounds Checks Inside Lock**: If accessing a shared array using an index validated outside the lock, **re-validate** the index against `.len` *inside* the lock. Arrays may have shrunk or reallocated.
+*   **Post-Open Verification**: For filesystem operations, verify permissions/file status *after* obtaining the file descriptor to catch symlink swaps or race conditions.
+*   **Lock Ordering**:
+    1. `process_tree_lock`
+    2. `SFS.alloc_lock` (Filesystem Allocation)
+    3. `FileDescriptor.lock`
+    4. `Scheduler/Runqueue Lock`
+    5. `tcp_state.lock` (Global TCP state - `src/net/transport/tcp/state.zig`)
+    6. `socket/state.lock` (Socket table - `src/net/transport/socket/state.zig`)
+    7. Per-socket `sock.lock` / Per-TCB `tcb.mutex`
+
+### 3. I/O Robustness & Information Leaks
+*   **DMA Hygiene**: Zero-initialize (`@memset(buf, 0)`) destination buffers **before** initiating DMA or hardware reads. This prevents kernel stack leaks if the device writes less data than expected or fails silently.
+*   **Partial I/O & EINTR**: System calls and internal I/O (like `getrandom` or `read`) must assume **partial returns** or interruptions. Always wrap in a loop handling `EINTR` (retry) and updating offsets until the full request is satisfied or a hard error occurs.
+*   **Secure Initialization**: Prefer `var buf = [_]u8{0} ** N;` over `undefined` for security-sensitive buffers (keys, RNG, network packets). `undefined` in `ReleaseFast` leaks stack data.
+*   **Fail Secure**: If a security-critical dependency (like entropy source) fails, **panic** or return a fatal error. Do not fall back to insecure defaults silently.
+
+### 4. Integer Safety
+*   **Checked Arithmetic**: Use `std.math.add`, `sub`, `mul` (or `@addWithOverflow`) for **all** calculations involving:
+    *   File offsets/positions.
+    *   Buffer lengths derived from user input.
+    *   Sector counts.
+    *   Allocation sizes.
+*   **Panic on Overflow**: In kernel space, unexpected overflow is a security violation. Fail the syscall (return error) rather than wrapping.
+
+### 5. Capabilities over Root
+Do not check `uid == 0` for hardware access. Use the Capability system (`src/capabilities/`).
+
 ```zig
-pub fn sys_read(...) isize {
-    if (!isValidUserPtr(buf_ptr, count)) {
-        return Errno.EFAULT.toReturn();  // Don't do this
-    }
-    return @intCast(bytes_read);
+// ✅ CORRECT
+if (!proc.hasMmioCapability(phys_addr, size)) return error.EPERM;
+```
+
+## Async I/O & IPC Architecture
+
+### 1. Kernel Async (`src/kernel/io/`)
+Use the Reactor pattern for kernel-side async operations.
+*   **Allocate**: `io.allocRequest(.disk_read)`
+*   **Submit**: `io.submit(req)`
+*   **Wait**: `future.wait()` (Blocks thread via scheduler, does not spin)
+
+### 2. Userspace I/O (`io_uring`)
+General file/net operations use Linux-compatible `io_uring`.
+*   **Syscalls**: `sys_io_uring_setup`, `_enter`, `_register`.
+*   **Pattern**: Submission Queue (SQ) -> Kernel Reactor -> Completion Queue (CQ).
+
+### 3. Zero-Copy Driver IPC (`sys_ring_*`)
+High-throughput drivers (VirtIO, Netstack) use shared memory rings, **not** io_uring.
+*   **Create**: `sys_ring_create` (Producer)
+*   **Attach**: `sys_ring_attach` (Consumer)
+*   **Notify**: `sys_ring_notify` / `sys_ring_wait` (Futex-based signaling)
+
+## Syscall Implementation
+
+*   **Location**: `src/kernel/syscall/`
+*   **Return Type**: Must be `SyscallError!usize`.
+*   **Dispatch**: Auto-registered in `table.zig`.
+
+```zig
+pub fn sys_example(arg1: usize) SyscallError!usize {
+    // Return standard Zig errors; dispatcher converts to -errno
+    if (arg1 == 0) return error.EINVAL; 
+    return 0;
 }
 ```
 
-### Error Conversion
-
-The dispatch layer (`callHandler` in `table.zig`) automatically converts error unions to negative errno values at the syscall boundary. Handlers should never manually convert errors.
-
-For subsystem errors (e.g., socket layer), create a conversion helper:
-```zig
-fn socketErrorToSyscallError(err: socket.SocketError) SyscallError {
-    return switch (err) {
-        socket.SocketError.AddrInUse => error.EADDRINUSE,
-        socket.SocketError.WouldBlock => error.EAGAIN,
-        // ... complete mapping
-    };
-}
-```
-
-### Exception: Non-returning Handlers
-Handlers that never return (e.g., `sys_exit`, `sys_exit_group`) may use `isize` since there is no success value:
-```zig
-pub fn sys_exit(status: usize) isize {
-    process.exit(@truncate(status));
-    unreachable;
-}
-```
-
-### Adding New Syscalls
-1. Add syscall number to `src/uapi/syscalls.zig` as `SYS_NAME`
-2. Create handler as `pub fn sys_name(...) SyscallError!usize` in appropriate file
-3. Dispatch table auto-discovers it at comptime (no manual registration needed)
+## Hardware Abstraction Layer (HAL)
+*   **Directory**: `src/arch/`
+*   **Rule**: Inline assembly (`asm volatile`) is **FORBIDDEN** outside of `src/arch/`.
+*   **Usage**: Kernel code calls `hal.cpu.disableInterrupts()`, never `cli`.
 
 ## Coding Style
+*   **Allocators**: Explicitly use `heap.allocator()` or `dma_allocator`. No global allocator fallback.
+*   **Error Handling**: Use `errdefer` to ensure complex multi-step operations (like file creation) fully roll back resources (free blocks, remove entries) on failure.
+*   **Slices**: Prefer `[]u8` over `[*]u8`.
+*   **Naming**: `sys_snake_case` for syscalls, `camelCase` for internal functions.
 
-- **Version**: Zig 0.16.x
-- **Naming**: `snake_case` for functions/vars, `PascalCase` for structs/types
-- **Errors**: Use `try` or explicit handling; avoid `catch unreachable` unless panic intended
-- **Types**: Explicit integer widths (`u64`, `usize`)
+## InitRD
+*   **Format**: USTAR Tarball.
+*   **Mount**: Loaded by `init_proc.zig` from Limine modules, mounted at `/`.
+*   **Security**: Read-only. Paths must be canonicalized to prevent `../../` traversal.
 
-### Zig 0.16.x Inline Assembly
+## File Descriptors
+*   **Location**: `src/kernel/fd.zig`
+*   **Purpose**: Manage file descriptors (FDs) which abstract access to files, devices, sockets, and pipes.
+*   **Design**: Fixed-size FD table (`MAX_FDS` entries) per process. Shared FDs via reference counting (for `fork` and `dup`). Standard I/O (stdin, stdout, stderr) pre-populated at slots 0, 1, 2.
+
+## Drivers
+
+### 1. Driver Registration & Lifecycle
+*   **Location**: Drivers live in `src/drivers/<subsystem>/<driver_name>/`.
+*   **Entry Point**: Drivers must expose a public `init` function taking `*const pci.PciDevice` and `pci.PciAccess`.
+*   **Hook**: New drivers are initialized in `src/kernel/init_hw.zig` inside the `init<Subsystem>` functions (e.g., `initNetwork`, `initStorage`).
+*   **State**: Driver instances are typically allocated on the heap, but global singleton pointers (e.g., `g_controller`) are often kept in the driver's `root.zig` for ISR access.
+
+### 2. Register Access Pattern (`MmioDevice`)
+Do not use raw pointer casting for register access. Use the `hal.mmio_device.MmioDevice` wrapper for type safety.
 
 ```zig
-// Clobber syntax
-asm volatile ("cli"
-    :
-    :
-    : .{ .memory = true }
-);
+// 1. Define offsets enum
+pub const Reg = enum(usize) { ctrl = 0x00, status = 0x08 };
 
-// Register constraints
-asm volatile ("out %[data], %[port]"
-    :
-    : [port] "{dx}" (port),
-      [data] "{al}" (data),
-);
+// 2. Init wrapper
+const MmioDevice = hal.mmio_device.MmioDevice;
+var regs = MmioDevice(Reg).init(base_addr, size);
+
+// 3. Use typed access (with packed structs)
+const ctrl = regs.readTyped(.ctrl, ControlReg);
+regs.writeTyped(.ctrl, .{ .enable = true });
 ```
 
-- **lgdt/lidt**: Use separate `.S` assembly file (Zig cannot express indirect memory operands)
-- **Naked functions**: Can ONLY contain inline assembly, no Zig code
+### 3. DMA Memory Allocation
+Drivers must **never** use `heap.allocator()` for DMA buffers.
+*   **Allocation**: Use `pmm.allocZeroedPages(count)` to get physical addresses.
+*   **Virtual Access**: Use `hal.paging.physToVirt(phys)` to get the kernel HHDM virtual address for software access.
+*   **Hardware Access**: Pass the *physical* address to the device registers/descriptors.
+*   **64-bit BARs**: If a BAR is > 4GB, use `vmm.mapMmioExplicit` instead of HHDM logic.
 
-## Testing & Debugging
+### 4. Interrupt Handling (MSI-X Preference)
+Drivers should prefer MSI-X over Legacy INTx.
+1.  Check capability: `pci.findMsix(ecam, dev)`.
+2.  Allocate vector: `hal.interrupts.allocateMsixVector()`.
+3.  Register handler: `hal.interrupts.registerMsixHandler(vector, handler)`.
+4.  Enable on device: `pci.enableMsix(...)`.
+5.  **ISR Rule**: Interrupt handlers must be fast. For complex processing (like network packets), use a worker thread pattern (`thread.createKernelThread`) and wake it from the ISR using `sched.unblock`.
 
-- **Emulation**: QEMU with `-accel tcg` (required on Apple Silicon)
-- **Serial output**: `-serial stdio` captures kernel logs
-- **Debug builds**: `zig build -Doptimize=Debug`
+### 5. Hardware Structures
+*   Use `extern struct` for descriptors that require specific memory layouts.
+*   Use `packed struct(u32)` for registers where bit manipulation is required.
+*   **Alignment**: Ensure structs have `align(16)` or similar if the hardware requires specific alignment (like xHCI TRBs).
+*   **Volatile**: Descriptors shared with hardware must be accessed via `*volatile` pointers.
 
-## Key Files
+### 6. Async I/O Integration
+Drivers implementing `read/write` ops must support the kernel `IoRequest` pattern:
+*   **Sync**: Return `isize` directly (legacy) or block using `io.Future`.
+*   **Async**: If `req.compareAndSwapState(.pending, .in_progress)` succeeds, queue the request in a driver-local list.
+*   **Completion**: The ISR or Worker thread calls `req.complete(...)` when hardware finishes.
 
-- `docs/FILESYSTEM.md` - Complete project structure
-- `docs/KEYBOARD.md` - Keyboard input (PS/2 and USB)
-- `docs/ASYNC.md` - Async I/O subsystem (io_uring, Reactor, AHCI)
-- `specs/syscall-table.md` - Authoritative syscall numbers
-- `src/lib/limine.zig` - Limine protocol bindings
-- `src/kernel/main.zig` - Kernel entry point
-- `src/kernel/io/` - Async I/O core (types, pool, reactor, timer wheel)
-- `src/kernel/syscall/io_uring.zig` - io_uring kernel implementation
-- `src/user/lib/syscall.zig` - Userspace syscall wrappers (includes IoUring)
-- `src/drivers/storage/ahci/adapter.zig` - Async block I/O adapter
-- `src/arch/x86_64/asm_helpers.S` - Low-level assembly routines
-- `limine.cfg` - Bootloader configuration
-- `src/fs/initrd.zig` - InitRD TAR filesystem parser
-
-## InitRD Setup
-
-The kernel loads an optional InitRD (Initial RAM Disk) in USTAR TAR format. Files in the initrd are accessible via `sys_open` syscalls.
-
-### Creating InitRD
-
-```bash
-# Create contents directory
-mkdir -p initrd_contents/etc
-echo "config data" > initrd_contents/etc/config
-
-# Create USTAR TAR (required format)
-tar --format=ustar -cvf initrd.tar -C initrd_contents .
-
-# Copy to ISO root
-cp initrd.tar iso_root/boot/initrd.tar
-```
-
-### Limine Configuration
-
-Add to `limine.cfg` after the kernel module:
-
-```
-MODULE_PATH=boot:///boot/initrd.tar
-MODULE_CMDLINE=initrd
-```
-
-### Detection Logic
-
-The kernel (`src/kernel/main.zig:initInitRD`) scans Limine modules for:
-- Cmdline containing "initrd" or ".tar"
-- Path containing "initrd" or ".tar"
-
-When found, it initializes `fs.initrd.InitRD.instance` with the module data.
-
-## Agent Instructions
-
-- Use zig-programming skill when writing Zig code
-- Use subagents for research or context7 for documentation
-- No emojis or em dashes
-- Comments explain "why", not "what"
-
-## Zig Best Practices for Speed and Slice Safety
-
-| Rule | Rationale (Security) |
-| :--- | :--- |
-| **1. Use Safe Build Modes by Default** | Compile your code with **`Debug`** (default) or **`ReleaseSafe`** (optimized, but with checks). These modes automatically enable **array bounds checking** and **integer overflow checking**, which are the main defense against buffer overruns when working with slices. |
-| **2. Leverage Slices (`[]T`) and Const Slices (`[]const T`)** | Slices explicitly carry their length, which the compiler uses for the bounds checks mentioned above. Avoid using raw "many-item pointers" (`[*]T`) unless you are very certain you know the length and are manually managing safety.  |
-| **3. Use `[]const T` for Read-Only Data** | Pass slices as `[]const T` whenever a function doesn't need to modify the data. This provides a compile-time guarantee that data cannot be accidentally changed, improving code safety and clarity. |
-| **4. Avoid Dangling Slices/Pointers** | **Never** return a slice or pointer to memory allocated on a function's stack (a local variable that goes out of scope). This leads to **use-after-free** bugs. For memory that must persist beyond the current scope, use an **allocator** to manage heap memory, or ensure the slice points to a memory region with an explicitly managed lifetime. |
-| **5. Be Explicit with Lifetime Management (Allocators)** | When allocating slices on the heap (e.g., using `std.mem.Allocator.alloc`), use `defer` to ensure the memory is freed. The `GeneralPurposeAllocator` (`std.heap.GeneralPurposeAllocator`) in debug builds is excellent for runtime detection of memory leaks, use-after-free, and double-free errors. |
-| **6. Only Disable Safety for Bottlenecks** | For extreme performance gains, you can selectively disable runtime safety checks using `@setRuntimeSafety(false)` or compile with **`ReleaseFast`**. However, this should be **isolated** to small, heavily-tested functions, as it sacrifices the core security feature (bounds checking) that slices provide. |
-| **7. Minimize Heap Allocations** | Heap allocations are slow. Prefer stack-allocated arrays and slices of those arrays, or use specialized allocators like **Arena Allocators** (`std.heap.ArenaAllocator`) to reduce allocation/deallocation overhead for temporary data. Slices themselves are cheap views, not allocations. |
-| **8. Optimize Slicing Operations** | The Zig compiler is smart. Repeated slicing operations (e.g., slicing a slice) are often optimized into a single, efficient operation at compile time, leading to a zero-cost abstraction. Trust the built-in slicing (`array[start..end]`) before resorting to manual pointer manipulation. |
-| **9. Prefer Contiguous Memory Access** | Use slices to process large, contiguous blocks of memory (arrays) with simple loops (`for (slice) |item|`). This maximizes **data locality** and allows the compiler and hardware to make better use of **CPU caches** and potentially use **SIMD** instructions for vectorized operations. |
-
-* **Handle All Errors (Avoid Panics):** Use Zig's `error` unions and the `try`/`catch` keywords. This prevents unexpected control flow interruptions and promotes explicit error handling, making resource management (like freeing slice memory) more reliable, especially with `defer` and `errdefer`.
-* **Avoid Unsafe C-style Idioms:** Zig's standard library and slices replace many C idioms like null-terminated strings (Zig uses `[:0]const u8` when needed for C interop, but `[]const u8` for pure Zig strings) and raw pointer arithmetic. Use the Zig-native slices and functions for better safety.
-* **No undefined:** Avoid var x: i32 = undefined; unless you have a strict performance reason and initialize it immediately after.
-* **No try in defer:** Do not put code that can fail inside a defer block (it swallows errors).
-* **Checked Arithmetic:** Zig checks integer overflow by default. Use wrapping operators (e.g., +% for wrapping add) only if you explicitly want that behavior.
-* **comptime:** Static Verification
-This is Zig's "killer feature" for both speed and security. You can run arbitrary Zig code during compilation.
-Best Practice: Use comptime checks to enforce invariants that C would check at runtime (or assert).
-Speed Benefit: Pre-calculate complex lookup tables or math at compile time so the runtime cost is zero.
-```
-fn Matrix(comptime rows: usize, comptime cols: usize) type {
-    if (rows != cols) @compileError("Matrix must be square!");
-    return [rows][cols]f32;
-}
-```
-- .error is a reserved word in Zig
-
-### Async I/O (IMPLEMENTED)
-
-See `docs/ASYNC.md` for full documentation. Key patterns:
-
-**Kernel-side (Reactor pattern):**
-```zig
-const io = @import("io");
-const req = io.allocRequest(.socket_read) orelse return error.ENOMEM;
-defer io.freeRequest(req);
-req.fd = fd;
-var future = io.submit(req);
-const result = future.wait();  // Blocks via sched.block(), not spin
-```
-
-**Userspace (io_uring wrapper in `src/user/lib/syscall.zig`):**
-```zig
-var ring = syscall.IoUring.init(64) catch return runPollFallback();
-defer ring.deinit();
-// Use atomic pattern to avoid TOCTOU race between get/submit
-_ = ring.getSqeAtomicFn(&populateAccept, @ptrFromInt(@as(usize, @intCast(listener))));
-_ = ring.submit(1) catch continue;  // Blocks in kernel
-while (ring.peekCqe()) |cqe| { handleCompletion(cqe); ring.advanceCq(); }
-
-fn populateAccept(sqe: *syscall.IoUringSqe, ctx: ?*anyopaque) void {
-    const fd: i32 = @intCast(@intFromPtr(ctx));
-    syscall.IoUring.prepAccept(sqe, fd, null, null, user_data);
-}
-```
-
-**AHCI async block I/O (`src/drivers/storage/ahci/adapter.zig`):**
-```zig
-const buf_phys = try adapter.blockReadAsync(port, lba, sectors, request);
-defer adapter.freeDmaBuffer(buf_phys, sectors * 512);
-var future = io.Future{ .request = request };
-_ = future.wait();  // IRQ-driven completion
-adapter.copyFromDmaBuffer(buf_phys, dest);
-```
-
-**When to use:**
-- New userspace I/O: Use `IoUring` wrapper (poll fallback for compatibility)
-- New kernel async: Use `io.allocRequest()` + `future.wait()`
-- Block device access: Use `adapter.blockReadAsync/blockWriteAsync`
-- Timers: Use `reactor.addTimer(req, ticks)`
-
-**io_uring syscalls:** 425 (setup), 426 (enter), 427 (register)
-
-### Threading Best Practices (ABI Safety)
-When creating kernel threads that need access to context (e.g., driver instances), do **not** rely on Zig method calls or global state. The safest pattern is:
-1. Define the entry point as `fn entry(ctx: ?*anyopaque) callconv(.c) void`.
-2. Pass the context pointer (e.g., `self`) during thread creation.
-3. In the entry point, cast `ctx` back to the concrete type: `const self: *Type = @ptrCast(@alignCast(ptr))`.
-4. This ensures ABI compatibility (System V AMD64 passes 1st arg in RDI, which `createKernelThread` sets up) and avoids "NULL self" crashes caused by mismatching Zig vs C calling conventions.
+### 7. Module Imports
+*   Avoid relative imports like `@import("../../hal.zig")`.
+*   Use the package names defined in `build.zig`: `@import("hal")`, `@import("pci")`, `@import("pmm")`.

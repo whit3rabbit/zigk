@@ -43,6 +43,8 @@ pub const O_CREAT: u32 = 0x0040;
 pub const O_TRUNC: u32 = 0x0200;
 pub const O_APPEND: u32 = 0x0400;
 pub const O_NONBLOCK: u32 = 0x0800;
+/// SECURITY: Close-on-exec flag - FDs with this flag are closed during execve
+pub const O_CLOEXEC: u32 = 0x80000; // 0o2000000 in Linux
 
 /// File operations vtable
 /// Devices/files implement these to provide I/O functionality
@@ -135,6 +137,10 @@ pub const FileDescriptor = struct {
     /// Used to decrement open_files count when FD is closed
     vfs_mount_idx: ?u8 = null,
 
+    /// SECURITY: Close-on-exec flag
+    /// When true, this FD is automatically closed during execve
+    cloexec: bool = false,
+
     /// Increment reference count (atomic, thread-safe)
     pub fn ref(self: *FileDescriptor) void {
         _ = self.refcount.fetchAdd(1, .monotonic);
@@ -183,17 +189,31 @@ pub const FdTable = struct {
     /// Number of open FDs
     count: usize,
 
+    /// SECURITY: Spinlock for thread-safe FD table operations.
+    /// Prevents race conditions between concurrent syscalls accessing
+    /// the same FD table (e.g., close racing with read on same FD).
+    lock: sync.Spinlock,
+
     /// Initialize an empty FD table
     pub fn init() FdTable {
         return FdTable{
             .fds = [_]?*FileDescriptor{null} ** MAX_FDS,
             .count = 0,
+            .lock = .{},
         };
     }
 
     /// Allocate a new FD number (lowest available)
     /// Returns FD number or null if table is full
+    /// SECURITY: Caller must hold table lock OR use allocFdNumLocked internally
     pub fn allocFdNum(self: *FdTable) ?u32 {
+        const held = self.lock.acquire();
+        defer held.release();
+        return self.allocFdNumLocked();
+    }
+
+    /// Internal: allocate FD number without acquiring lock (caller holds lock)
+    fn allocFdNumLocked(self: *FdTable) ?u32 {
         for (self.fds, 0..) |fd, i| {
             if (fd == null) {
                 return @intCast(i);
@@ -205,6 +225,8 @@ pub const FdTable = struct {
     /// Allocate a specific FD number
     /// Returns true if successful, false if already in use
     pub fn allocSpecificFd(self: *FdTable, fd_num: u32) bool {
+        const held = self.lock.acquire();
+        defer held.release();
         if (fd_num >= MAX_FDS) return false;
         if (self.fds[fd_num] != null) return false;
         return true;
@@ -213,6 +235,13 @@ pub const FdTable = struct {
     /// Install an FD at a specific slot
     /// Caller must have already allocated the slot
     pub fn install(self: *FdTable, fd_num: u32, fd: *FileDescriptor) void {
+        const held = self.lock.acquire();
+        defer held.release();
+        self.installLocked(fd_num, fd);
+    }
+
+    /// Internal: install FD without acquiring lock (caller holds lock)
+    fn installLocked(self: *FdTable, fd_num: u32, fd: *FileDescriptor) void {
         if (fd_num >= MAX_FDS) {
             console.err("FD: install with invalid fd_num {d}", .{fd_num});
             return;
@@ -225,13 +254,31 @@ pub const FdTable = struct {
     }
 
     /// Get FD by number
-    pub fn get(self: *const FdTable, fd_num: u32) ?*FileDescriptor {
+    /// SECURITY: Returns FD pointer with table lock held momentarily.
+    /// Caller should use the returned FD immediately; the FD may be
+    /// closed by another thread after this returns.
+    pub fn get(self: *FdTable, fd_num: u32) ?*FileDescriptor {
+        const held = self.lock.acquire();
+        defer held.release();
+        if (fd_num >= MAX_FDS) return null;
+        return self.fds[fd_num];
+    }
+
+    /// Get FD by number without locking (caller holds lock)
+    fn getLocked(self: *const FdTable, fd_num: u32) ?*FileDescriptor {
         if (fd_num >= MAX_FDS) return null;
         return self.fds[fd_num];
     }
 
     /// Remove FD from table (does not free or close)
     pub fn remove(self: *FdTable, fd_num: u32) ?*FileDescriptor {
+        const held = self.lock.acquire();
+        defer held.release();
+        return self.removeLocked(fd_num);
+    }
+
+    /// Internal: remove FD without acquiring lock (caller holds lock)
+    fn removeLocked(self: *FdTable, fd_num: u32) ?*FileDescriptor {
         if (fd_num >= MAX_FDS) return null;
         const fd = self.fds[fd_num];
         if (fd != null) {
@@ -243,14 +290,18 @@ pub const FdTable = struct {
 
     /// Close an FD by number
     /// Decrements refcount and calls close op if refcount reaches 0
+    /// SECURITY: Acquires table lock to remove FD atomically, then releases
+    /// before calling close_fn to avoid holding lock during I/O.
     pub fn close(self: *FdTable, fd_num: u32) isize {
+        // Remove FD from table atomically (uses lock internally)
         const fd = self.remove(fd_num) orelse {
             return Errno.EBADF.toReturn();
         };
 
-        // Decrement refcount
+        // Decrement refcount (outside lock - atomic operation)
         if (fd.unref()) {
             // Refcount reached 0, call close op if present
+            // Note: close_fn called without table lock to avoid deadlock
             if (fd.ops.close) |close_fn| {
                 _ = close_fn(fd);
             }
@@ -273,7 +324,11 @@ pub const FdTable = struct {
 
     /// Duplicate the FD table (for fork)
     /// Creates a new table with same FDs, incremented refcounts
-    pub fn clone(self: *const FdTable) !*FdTable {
+    /// SECURITY: Holds source table lock during clone to get consistent snapshot
+    pub fn clone(self: *FdTable) !*FdTable {
+        const held = self.lock.acquire();
+        defer held.release();
+
         const alloc = heap.allocator();
         const new_table = try alloc.create(FdTable);
         new_table.* = FdTable.init();
@@ -291,29 +346,58 @@ pub const FdTable = struct {
     }
 
     /// Duplicate a single FD to the lowest available slot
+    /// SECURITY: Uses single lock acquisition for atomic dup operation
     pub fn dup(self: *FdTable, old_fd: u32) !u32 {
-        const fd = self.get(old_fd) orelse return error.BadFd;
-        const new_fd = self.allocFdNum() orelse return error.MFile;
+        const held = self.lock.acquire();
+        defer held.release();
+
+        const fd = self.getLocked(old_fd) orelse return error.BadFd;
+        const new_fd = self.allocFdNumLocked() orelse return error.MFile;
         fd.ref();
-        self.install(new_fd, fd);
+        self.installLocked(new_fd, fd);
         return new_fd;
     }
 
     /// Duplicate a single FD to a specific slot
+    /// SECURITY: Atomic operation - holds lock throughout to prevent races
     pub fn dup2(self: *FdTable, old_fd: u32, new_fd: u32) !u32 {
+        if (new_fd >= MAX_FDS) return error.BadFd;
+
+        var held = self.lock.acquire();
+        defer held.release();
+
         if (old_fd == new_fd) {
             // Check if old_fd is valid
-            if (self.get(old_fd) == null) return error.BadFd;
+            if (self.getLocked(old_fd) == null) return error.BadFd;
             return new_fd;
         }
 
-        const fd = self.get(old_fd) orelse return error.BadFd;
+        const fd = self.getLocked(old_fd) orelse return error.BadFd;
 
-        if (new_fd >= MAX_FDS) return error.BadFd;
-
-        // Close new_fd if open
-        if (self.fds[new_fd] != null) {
-            _ = self.close(new_fd);
+        // Close new_fd if open (inline to avoid recursive lock)
+        if (self.fds[new_fd]) |existing_fd| {
+            self.fds[new_fd] = null;
+            self.count -= 1;
+            // Release lock before close_fn to avoid deadlock
+            held.release();
+            if (existing_fd.unref()) {
+                if (existing_fd.ops.close) |close_fn| {
+                    _ = close_fn(existing_fd);
+                }
+                if (existing_fd.vfs_mount_idx) |idx| {
+                    if (vfs_close_hook) |hook| {
+                        hook(idx);
+                    }
+                }
+                heap.allocator().destroy(existing_fd);
+            }
+            held = self.lock.acquire();
+            // Re-check fd is still valid after reacquiring lock
+            const recheck_fd = self.getLocked(old_fd) orelse return error.BadFd;
+            if (recheck_fd != fd) {
+                // old_fd was changed while lock was released
+                return error.BadFd;
+            }
         }
 
         // Install new FD
@@ -325,6 +409,7 @@ pub const FdTable = struct {
     }
 
     /// Close all FDs in the table
+    /// Called during process exit - no concurrent access expected
     pub fn closeAll(self: *FdTable) void {
         var i: u32 = 0;
         while (i < MAX_FDS) : (i += 1) {
@@ -332,6 +417,30 @@ pub const FdTable = struct {
                 _ = self.close(i);
             }
         }
+    }
+
+    /// SECURITY: Close all FDs with cloexec flag set
+    /// Called during execve to implement close-on-exec semantics.
+    /// This prevents file descriptor leakage to exec'd programs.
+    pub fn closeCloexec(self: *FdTable) void {
+        var i: u32 = 0;
+        while (i < MAX_FDS) : (i += 1) {
+            if (self.fds[i]) |fd| {
+                if (fd.cloexec) {
+                    _ = self.close(i);
+                }
+            }
+        }
+    }
+
+    /// Atomically allocate and install an FD
+    /// SECURITY: Single lock acquisition for alloc+install to prevent races
+    pub fn allocAndInstall(self: *FdTable, fd: *FileDescriptor) ?u32 {
+        const held = self.lock.acquire();
+        defer held.release();
+        const fd_num = self.allocFdNumLocked() orelse return null;
+        self.installLocked(fd_num, fd);
+        return fd_num;
     }
 };
 
@@ -347,6 +456,8 @@ pub fn createFd(ops: *const FileOps, flags: u32, private_data: ?*anyopaque) !*Fi
         .position = 0,
         .lock = .{},
         .vfs_mount_idx = null,
+        // SECURITY: Set cloexec flag based on O_CLOEXEC in open flags
+        .cloexec = (flags & O_CLOEXEC) != 0,
     };
     return fd;
 }

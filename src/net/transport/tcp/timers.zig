@@ -8,7 +8,7 @@ const socket = @import("../socket.zig");
 /// Check and process timers (called from timer tick, assumed ~1ms per call)
 /// Handles retransmission and state-based connection timeouts
 pub fn processTimers() void {
-    state.lock.acquire();
+    var state_held = state.lock.acquire();
     // List of threads to wake after releasing the lock (to avoid deadlock)
     // Security: Size increased to handle pathological cases where many TCBs timeout simultaneously
     // Must be >= MAX_TCBS to prevent threads being orphaned without waking
@@ -112,10 +112,10 @@ pub fn processTimers() void {
             }
         }
     }
-    
+
     // Release lock before waking threads to prevent deadlock
     // (Woken thread might immediately try to acquire lock)
-    state.lock.release();
+    state_held.release();
 
     // Wake threads outside of lock to avoid deadlock
     var j: usize = 0;
@@ -129,8 +129,8 @@ pub fn processTimers() void {
 /// Handle ICMP error for a connection
 /// Handle ICMP error for a connection
 pub fn handleIcmpError(local_ip: u32, local_port: u16, remote_ip: u32, remote_port: u16, icmp_type: u8, icmp_code: u8, seq_num: ?u32) void {
-    state.lock.acquire();
-    defer state.lock.release();
+    const held = state.lock.acquire();
+    defer held.release();
 
     const tcb = state.findTcb(local_ip, local_port, remote_ip, remote_port) orelse return;
 
@@ -143,7 +143,7 @@ pub fn handleIcmpError(local_ip: u32, local_port: u16, remote_ip: u32, remote_po
         // We use loose check validation to account for window
         const snd_una = tcb.snd_una;
         const snd_nxt = tcb.snd_nxt;
-        
+
         // seq < snd_una OR seq > snd_nxt
         if (types.seqLt(seq, snd_una) or types.seqGt(seq, snd_nxt)) {
             return; // Ignore Invalid ICMP error

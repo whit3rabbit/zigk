@@ -2,7 +2,7 @@
 //
 // Functions for process termination and execution.
 
-const syscall = @import("syscall.zig");
+const syscall = @import("syscall");
 
 /// Exit status codes
 pub const EXIT_SUCCESS: c_int = 0;

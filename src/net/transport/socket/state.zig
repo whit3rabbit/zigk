@@ -22,21 +22,19 @@ pub var socket_allocator: std.mem.Allocator = undefined;
 /// UDP lookup table (Port -> Socket) for O(1) delivery
 pub var udp_sockets: [65536]?*types.Socket = [_]?*types.Socket{null} ** 65536;
 
-/// Socket allocation lock
-/// Socket allocation lock
-var lock: sync.Lock = sync.noop_lock;
+/// Socket allocation lock - MUST be initialized before use
+/// SECURITY: Uses IrqLock to ensure proper interrupt state management
+pub var lock: sync.IrqLock = .{};
+
 /// Global network interface (set during init)
 var global_iface: ?*Interface = null;
 
-pub fn setLock(l: sync.Lock) void {
-    lock = l;
-}
-
-pub fn socketLock() *sync.Lock {
-    return &lock;
-}
-
+/// Initialize socket subsystem.
+/// SECURITY: This MUST be called before any socket operations.
 pub fn init(iface: *Interface, allocator: std.mem.Allocator) void {
+    // SECURITY: Initialize lock before first use
+    lock.init();
+
     global_iface = iface;
     socket_allocator = allocator;
     socket_table = .{};
@@ -49,25 +47,40 @@ pub fn getInterface() ?*Interface {
 
 /// Acquire a socket with a reference count increment.
 /// Returns null if the descriptor is invalid or closing.
+/// SECURITY: Uses atomic tryRetain to prevent TOCTOU races.
 pub fn acquireSocket(sock_fd: usize) ?*types.Socket {
-    const l = socketLock();
-    l.acquire();
-    defer l.release();
+    const held = lock.acquire();
+    defer held.release();
     return acquireSocketLocked(sock_fd);
 }
 
+/// Internal: acquire socket while already holding lock.
+/// SECURITY: Uses atomic tryRetain to atomically check closing and increment refcount.
 fn acquireSocketLocked(sock_fd: usize) ?*types.Socket {
     if (sock_fd >= socket_table.items.len) return null;
     const sock = socket_table.items[sock_fd] orelse return null;
-    if (!sock.allocated or sock.closing) return null;
-    sock.refcount += 1;
+    if (!sock.allocated) return null;
+
+    // SECURITY FIX: Atomically check closing and increment refcount.
+    // This prevents TOCTOU race where another thread could set closing=true
+    // between our check and refcount increment.
+    if (sock.closing.load(.acquire)) return null;
+    if (!sock.refcount.tryRetain()) return null;
+
     return sock;
 }
 
+/// Get socket without incrementing refcount (for internal lookups).
+/// Caller must ensure socket lifetime through other means.
 pub fn getSocket(sock_fd: usize) ?*types.Socket {
-    const l = socketLock();
-    l.acquire();
-    defer l.release();
+    const held = lock.acquire();
+    defer held.release();
+    if (sock_fd >= socket_table.items.len) return null;
+    return socket_table.items[sock_fd];
+}
+
+/// Get socket without incrementing refcount - caller MUST hold lock.
+pub fn getSocketLocked(sock_fd: usize) ?*types.Socket {
     if (sock_fd >= socket_table.items.len) return null;
     return socket_table.items[sock_fd];
 }
@@ -76,17 +89,19 @@ pub fn getSocketTable() []?*types.Socket {
     return socket_table.items;
 }
 
+/// Release a socket reference.
+/// SECURITY: Uses atomic release to ensure memory ordering.
 pub fn releaseSocket(sock: *types.Socket) void {
-    const l = socketLock();
-    l.acquire();
-    defer l.release();
+    const held = lock.acquire();
+    defer held.release();
     releaseSocketLocked(sock);
 }
 
+/// Internal: release socket while already holding lock.
+/// SECURITY: Atomic refcount decrement prevents double-free races.
 pub fn releaseSocketLocked(sock: *types.Socket) void {
-    if (sock.refcount == 0) return;
-    sock.refcount -= 1;
-    if (sock.refcount == 0) {
+    if (sock.refcount.release()) {
+        // Last reference - safe to destroy
         socket_allocator.destroy(sock);
     }
 }

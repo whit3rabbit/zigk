@@ -4,7 +4,7 @@
 // The va_list structure tracks both register-saved and stack-passed arguments.
 
 const std = @import("std");
-const syscall = @import("syscall.zig");
+const syscall = @import("syscall");
 const file_mod = @import("file.zig");
 
 const FILE = file_mod.FILE;

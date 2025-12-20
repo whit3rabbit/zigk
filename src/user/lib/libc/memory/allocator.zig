@@ -6,7 +6,7 @@
 // - Physical adjacency checks before merging
 // - Double-linked list for efficiency
 
-const syscall = @import("syscall.zig");
+const syscall = @import("syscall");
 const internal = @import("../internal.zig");
 const errno_mod = @import("../errno.zig");
 

@@ -44,8 +44,8 @@ pub fn sendto(
         // Multicast Loopback
         // If sending to a multicast group, deliver a copy to local sockets that are members
         if (ipv4.isMulticast(dst_ip)) {
-            state.socketLock().acquire();
-            defer state.socketLock().release();
+            const sock_held = state.lock.acquire();
+            defer sock_held.release();
             
             // Iterate all sockets to find matching subscribers
             for (state.getSocketTable()) |maybe_s| {
@@ -195,8 +195,8 @@ pub fn recvfrom(
 pub fn deliverUdpPacket(pkt: *packet.PacketBuffer) bool {
     // Acquire global socket lock to prevent UAF (Use-After-Free)
     // if a socket is closed (freed) while we are iterating.
-    state.socketLock().acquire();
-    defer state.socketLock().release();
+    const held = state.lock.acquire();
+    defer held.release();
 
     const udp_hdr = pkt.udpHeader();
     const dst_port = udp_hdr.getDstPort();
@@ -244,8 +244,8 @@ pub fn deliverUdpPacket(pkt: *packet.PacketBuffer) bool {
 
             // Deliver to this socket
             {
-                const held = sock.lock.acquire();
-                defer held.release();
+                const inner_sock_held = sock.lock.acquire();
+                defer inner_sock_held.release();
                 if (sock.enqueuePacket(payload, pkt.src_ip, pkt.src_port)) {
                     delivered = true;
                     // Wake blocked thread if any
@@ -267,8 +267,8 @@ pub fn deliverUdpPacket(pkt: *packet.PacketBuffer) bool {
 
     // Enqueue packet with source info
     {
-        const held = sock.lock.acquire();
-        defer held.release();
+        const unicast_sock_held = sock.lock.acquire();
+        defer unicast_sock_held.release();
         if (sock.enqueuePacket(payload, pkt.src_ip, pkt.src_port)) {
             // Wake blocked thread if any
             if (sock.blocked_thread) |thread| {

@@ -20,6 +20,8 @@ Run these scripts to get targeted information without loading full docs:
 | `scripts/security_query.py` | Security | `python scripts/security_query.py spinlock` |
 | `scripts/memory_query.py` | Memory layout | `python scripts/memory_query.py pte` |
 | `scripts/libc_query.py` | Userspace/libc | `python scripts/libc_query.py errno` |
+| `scripts/build_query.py` | Build system | `python scripts/build_query.py modules` |
+| `scripts/debug_query.py` | Debugging | `python scripts/debug_query.py panic` |
 
 ## Quick Reference (Always Available)
 
@@ -95,6 +97,7 @@ python scripts/memory_query.py gdt       # GDT entry format (8 bytes)
 python scripts/memory_query.py idt       # IDT entry format (16 bytes)
 python scripts/memory_query.py fault     # Page fault error codes
 python scripts/memory_query.py limine    # Boot mappings
+python scripts/memory_query.py vector    # Interrupt vector map
 ```
 
 ### Libc/User Lookup
@@ -106,6 +109,32 @@ python scripts/libc_query.py net       # Network socket wrappers
 python scripts/libc_query.py structure # User folder layout
 ```
 
+### Build System Lookup
+```bash
+python scripts/build_query.py modules    # Module dependency graph
+python scripts/build_query.py targets    # Build targets (x86_64-freestanding)
+python scripts/build_query.py options    # Build options (-D flags)
+python scripts/build_query.py artifacts  # Output paths (kernel.elf, ISO)
+python scripts/build_query.py qemu       # QEMU run options
+python scripts/build_query.py commands   # Common build commands
+```
+
+### Debug/Troubleshooting Lookup
+```bash
+python scripts/debug_query.py panic      # Panic handler and stack traces
+python scripts/debug_query.py log        # Kernel logging (console.printf)
+python scripts/debug_query.py qemu       # QEMU debugging tips
+python scripts/debug_query.py gdb        # GDB debugging setup
+python scripts/debug_query.py crash      # Common crash causes and fixes
+python scripts/debug_query.py serial     # Serial output debugging
+```
+
+### Driver Template Generation
+```bash
+python scripts/driver_query.py template mmio  # MMIO kernel driver boilerplate
+python scripts/driver_query.py template ring  # Ring IPC userspace driver
+```
+
 ## Workflow: Adding a Feature
 
 ### New Syscall
@@ -115,15 +144,15 @@ python scripts/libc_query.py structure # User folder layout
 4. Add handler to appropriate file in `src/kernel/syscall/`
 
 ### New Driver (Kernel)
-1. Query pattern: `python scripts/driver_query.py mmio`
+1. Generate template: `python scripts/driver_query.py template mmio`
 2. Query PCI: `python scripts/driver_query.py pci`
 3. Create in `src/drivers/`
-4. Use MmioDevice for register access
+4. Customize template with device-specific registers
 
 ### New Driver (Userspace)
-1. Query caps: `python scripts/driver_query.py capabilities`
-2. Query split: `python scripts/driver_query.py split`
-3. Query ring: `python scripts/driver_query.py ring`
+1. Generate template: `python scripts/driver_query.py template ring`
+2. Query caps: `python scripts/driver_query.py capabilities`
+3. Query split: `python scripts/driver_query.py split`
 4. Create in `src/user/drivers/`
 
 ### Network Feature

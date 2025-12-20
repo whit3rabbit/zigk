@@ -36,11 +36,11 @@ pub fn processListenPacket(
     // SECURITY: Acquire state.lock BEFORE checking half-open count to prevent
     // race where multiple threads bypass the limit check simultaneously.
     // This ensures atomic check-and-allocate for SYN flood mitigation.
-    state.lock.acquire();
+    var state_held = state.lock.acquire();
 
     if (state.countHalfOpen() >= c.MAX_HALF_OPEN) {
         if (!state.evictOldestHalfOpenTcbUnlocked()) {
-            state.lock.release();
+            state_held.release();
             return false;
         }
     }
@@ -48,7 +48,7 @@ pub fn processListenPacket(
     // Allocate TCB (state.lock already held)
     const new_tcb = state.allocateTcb();
     if (new_tcb == null) {
-        state.lock.release();
+        state_held.release();
         return false;
     }
     const tcb = new_tcb.?; // Unwrap
@@ -105,13 +105,13 @@ pub fn processListenPacket(
     state.insertTcbIntoHash(tcb);
 
     // Release state lock now that TCB is consistent and in hash
-    state.lock.release();
+    state_held.release();
 
     if (!tx.sendSynAckWithOptions(tcb, &peer_opts)) {
         // Failed to send. Need to free TCB.
-        state.lock.acquire();
+        const state_held_retry = state.lock.acquire();
         state.freeTcb(tcb);
-        state.lock.release();
+        state_held_retry.release();
         return false;
     }
 

@@ -67,22 +67,22 @@ pub fn accept(sock_fd: usize, peer_addr: ?*types.SockAddrIn) errors.SocketError!
 
         // Disable interrupts to close race window between check and block
         platform.cpu.disableInterrupts();
-        tcp_state.lock.acquire();
+        var tcp_held = tcp_state.lock.acquire();
 
         // Check accept queue
         if (sock.accept_count > 0) {
             // Dequeue connection under TCP lock
             const tcb = sock.accept_queue[sock.accept_tail] orelse {
-                tcp_state.lock.release();
-                 platform.cpu.enableInterrupts(); // Safe to enable here
+                tcp_held.release();
+                platform.cpu.enableInterrupts(); // Safe to enable here
                 state.releaseSocket(sock);
                 return errors.SocketError.WouldBlock;
             };
             sock.accept_queue[sock.accept_tail] = null;
             sock.accept_tail = (sock.accept_tail + 1) % types.ACCEPT_QUEUE_SIZE;
             sock.accept_count -= 1;
-            
-            tcp_state.lock.release();
+
+            tcp_held.release();
             platform.cpu.enableInterrupts(); // Safe to enable here
             
             // Drop socket lock now that we have the TCB
@@ -94,7 +94,7 @@ pub fn accept(sock_fd: usize, peer_addr: ?*types.SockAddrIn) errors.SocketError!
 
         // No connections available
         if (!sock.blocking) {
-            tcp_state.lock.release();
+            tcp_held.release();
             platform.cpu.enableInterrupts();
             state.releaseSocket(sock);
             return errors.SocketError.WouldBlock;
@@ -103,15 +103,15 @@ pub fn accept(sock_fd: usize, peer_addr: ?*types.SockAddrIn) errors.SocketError!
         // Blocking: Prepare to sleep
         if (scheduler.blockFn()) |block_fn| {
             const get_current = scheduler.currentThreadFn() orelse {
-                tcp_state.lock.release();
+                tcp_held.release();
                 platform.cpu.enableInterrupts();
                 state.releaseSocket(sock);
                 return errors.SocketError.SystemError;
             };
 
             sock.blocked_thread = get_current();
-            
-            tcp_state.lock.release(); // TCP lock released, IRQs disabled
+
+            tcp_held.release(); // TCP lock released, IRQs disabled
             
             // CRITICAL: Release socket lock before blocking!
             // calling queueAcceptConnection requires this lock.
@@ -125,7 +125,7 @@ pub fn accept(sock_fd: usize, peer_addr: ?*types.SockAddrIn) errors.SocketError!
             // Woke up - loop around to re-acquire locks and check queue
             continue;
         } else {
-            tcp_state.lock.release();
+            tcp_held.release();
             platform.cpu.enableInterrupts();
             state.releaseSocket(sock);
             return errors.SocketError.WouldBlock;
@@ -231,14 +231,16 @@ pub fn connect(sock_fd: usize, dest_addr: *const types.SockAddrIn) errors.Socket
                  sock.blocked_thread = null;
                  // Security: Acquire lock before accessing TCB to prevent use-after-free.
                  // TCB may have been freed by timer while we were blocked.
-                 tcp_state.lock.acquire();
-                 // Re-verify TCB is still attached to socket and valid
-                 // Security: Check generation to ensure TCB wasn't freed and re-allocated for a different connection
-                 // while we were sleeping.
-                 if (sock.tcb == tcb and tcb.allocated and tcb.state != .Closed and tcb.generation == tcb_gen) {
-                     tcb.blocked_thread = null;
+                 {
+                     const connect_held = tcp_state.lock.acquire();
+                     // Re-verify TCB is still attached to socket and valid
+                     // Security: Check generation to ensure TCB wasn't freed and re-allocated for a different connection
+                     // while we were sleeping.
+                     if (sock.tcb == tcb and tcb.allocated and tcb.state != .Closed and tcb.generation == tcb_gen) {
+                         tcb.blocked_thread = null;
+                     }
+                     connect_held.release();
                  }
-                 tcp_state.lock.release();
             }
         } else {
              // If no scheduler (e.g. early boot), we can't block safely
@@ -247,10 +249,12 @@ pub fn connect(sock_fd: usize, dest_addr: *const types.SockAddrIn) errors.Socket
     }
 
     // Check final state - must re-fetch TCB under lock to prevent use-after-free
-    tcp_state.lock.acquire();
-    const final_tcb = sock.tcb;
-    const final_state = if (final_tcb) |t| t.state else .Closed;
-    tcp_state.lock.release();
+    const final_state = blk: {
+        const final_held = tcp_state.lock.acquire();
+        defer final_held.release();
+        const final_tcb = sock.tcb;
+        break :blk if (final_tcb) |t| t.state else .Closed;
+    };
 
     switch (final_state) {
         .Established => return,
@@ -374,8 +378,8 @@ pub fn acceptAsync(sock_fd: usize, request: *IoRequest) errors.SocketError!bool 
     }
 
     // Check if connection already available
-    tcp_state.lock.acquire();
-    defer tcp_state.lock.release();
+    const async_held = tcp_state.lock.acquire();
+    defer async_held.release();
 
     if (sock.accept_count > 0) {
         // Connection available - complete synchronously

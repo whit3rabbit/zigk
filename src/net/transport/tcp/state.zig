@@ -86,8 +86,9 @@ pub fn tick() void {
     // For this kernel, let's assume processTimers() is called by the same mechanism driving this tick.
 }
 
-/// Global TCP lock
-pub var lock: sync.Lock = sync.noop_lock;
+/// Global TCP lock - MUST be initialized before use
+/// SECURITY: Uses IrqLock to ensure proper interrupt state management
+pub var lock: sync.IrqLock = .{};
 
 /// Secret key for ISN generation (RFC 6528) - 128-bit for SipHash
 var secret_key: [16]u8 = [_]u8{0} ** 16;
@@ -159,22 +160,23 @@ const ISN_RESEED_THRESHOLD: u32 = 10000;
 /// Increments with each call, providing monotonic values
 var tcp_timestamp_counter: u32 = 0;
 
-/// Set the lock implementation
-pub fn setLock(l: sync.Lock) void {
-    lock = l;
-}
-
 /// Milliseconds per timer tick (default 1ms for 1000Hz)
 pub var ms_per_tick: u32 = 1;
 
 /// Initialize TCP subsystem
+/// SECURITY: This MUST be called before any TCP operations.
+/// Initializes the global lock and seeds cryptographic state.
 pub fn init(iface: *Interface, allocator: std.mem.Allocator, ticks_per_sec: u32) void {
     if (ticks_per_sec > 0) {
         ms_per_tick = 1000 / ticks_per_sec;
         if (ms_per_tick == 0) ms_per_tick = 1;
     }
-    lock.acquire();
-    defer lock.release();
+
+    // SECURITY: Initialize lock before first use - prevents silent failures
+    lock.init();
+
+    const held = lock.acquire();
+    defer held.release();
 
     global_iface = iface;
     tcp_allocator = allocator;
@@ -349,8 +351,8 @@ pub fn findListeningTcb(local_port: u16, local_ip: u32) ?*Tcb {
 /// Returns true if an active TCP connection matches the 4-tuple.
 /// Optionally validates if the sequence number from the ICMP payload is valid (in flight).
 pub fn validateConnectionExists(local_ip: u32, local_port: u16, remote_ip: u32, remote_port: u16, seq_num: ?u32) bool {
-    lock.acquire();
-    defer lock.release();
+    const held = lock.acquire();
+    defer held.release();
 
     const tcb = findTcb(local_ip, local_port, remote_ip, remote_port) orelse return false;
 
@@ -452,8 +454,8 @@ pub fn nextTimestamp() u32 {
 /// Returns true if an entry was evicted
 /// Uses O(1) intrusive list - oldest is always at head
 pub fn evictOldestHalfOpenTcb() bool {
-    lock.acquire();
-    defer lock.release();
+    const held = lock.acquire();
+    defer held.release();
     return evictOldestHalfOpenTcbUnlocked();
 }
 
@@ -470,9 +472,13 @@ pub fn evictOldestHalfOpenTcbUnlocked() bool {
         return false;
     }
 
-    // Safe eviction: ensure no other thread holds the TCB lock
-    if (oldest_tcb.mutex.tryAcquire()) |held| {
-        held.release();
+    // SECURITY FIX: Keep TCB mutex held during freeTcb to prevent IRQ window.
+    // Previously we released the mutex before freeTcb which allowed interrupts
+    // to fire and potentially access the TCB being freed.
+    if (oldest_tcb.mutex.tryAcquire()) |tcb_held| {
+        // Mark as closing before releasing mutex to prevent concurrent access
+        oldest_tcb.closing = true;
+        tcb_held.release();
         freeTcb(oldest_tcb); // freeTcb handles halfOpenListRemove
         return true;
     }

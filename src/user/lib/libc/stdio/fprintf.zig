@@ -3,7 +3,7 @@
 // Formatted output to files and strings.
 
 const std = @import("std");
-const syscall = @import("syscall.zig");
+const syscall = @import("syscall");
 const file_mod = @import("file.zig");
 const internal = @import("../internal.zig");
 

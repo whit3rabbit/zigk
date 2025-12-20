@@ -154,7 +154,23 @@ pub fn sys_getdents64(fd_num: usize, dirp: usize, count: usize) SyscallError!usi
 /// sys_getcwd (79) - Get current working directory
 pub fn sys_getcwd(buf_ptr: usize, size: usize) SyscallError!usize {
     const proc = base.getCurrentProcess();
-    const cwd_len = proc.cwd_len;
+
+    // SECURITY: Acquire cwd_lock to get consistent snapshot of cwd
+    // and copy to a local buffer before releasing the lock
+    var cwd_copy: [uapi.abi.MAX_PATH]u8 = undefined;
+    var cwd_len: usize = undefined;
+    {
+        const held = proc.cwd_lock.acquire();
+        cwd_len = proc.cwd_len;
+        if (cwd_len > 0 and cwd_len <= uapi.abi.MAX_PATH) {
+            @memcpy(cwd_copy[0..cwd_len], proc.cwd[0..cwd_len]);
+        }
+        held.release();
+    }
+
+    if (cwd_len == 0 or cwd_len > uapi.abi.MAX_PATH) {
+        return error.ENOENT;
+    }
 
     if (size < cwd_len + 1) {
         return error.ERANGE;
@@ -166,8 +182,8 @@ pub fn sys_getcwd(buf_ptr: usize, size: usize) SyscallError!usize {
 
     const uptr = UserPtr.from(buf_ptr);
 
-    // Copy path
-    _ = uptr.copyFromKernel(proc.cwd[0..cwd_len]) catch return error.EFAULT;
+    // Copy path from local buffer (not from proc.cwd which could change)
+    _ = uptr.copyFromKernel(cwd_copy[0..cwd_len]) catch return error.EFAULT;
 
     // Null terminate
     uptr.offset(cwd_len).writeValue(@as(u8, 0)) catch return error.EFAULT;
@@ -195,8 +211,12 @@ pub fn sys_chdir(path_ptr: usize) SyscallError!usize {
 
     if (std.mem.eql(u8, path, "/") or std.mem.eql(u8, path, "/.")) {
         const proc = base.getCurrentProcess();
+        // SECURITY: Acquire cwd_lock when modifying cwd to prevent
+        // races with concurrent openat reading the cwd
+        const held = proc.cwd_lock.acquire();
         proc.cwd[0] = '/';
         proc.cwd_len = 1;
+        held.release();
         return 0;
     }
 

@@ -110,110 +110,83 @@ zscapek/
     │       └── mm/
     │
     ├── kernel/
-    │   ├── main.zig
-    │   ├── boot.zig
-    │   ├── heap.zig
-    │   ├── pmm.zig
-    │   ├── vmm.zig
-    │   ├── user_vmm.zig
-    │   ├── kernel_stack.zig
-    │   ├── stack_guard.zig
-    │   ├── dma_allocator.zig
-    │   ├── aslr.zig
-    │   ├── ring.zig
-    │   ├── perms.zig
-    │   ├── thread.zig
-    │   ├── sched/
+    │   ├── core/         # Boot, Main, Sync, Init, ELF, Debug
     │   │   ├── root.zig
-    │   │   ├── scheduler.zig
+    │   │   ├── main.zig
+    │   │   ├── boot.zig
+    │   │   ├── init_hw.zig
+    │   │   ├── init_mem.zig
+    │   │   ├── init_fs.zig
+    │   │   ├── init_proc.zig
+    │   │   ├── panic.zig
+    │   │   ├── sync.zig
+    │   │   ├── stack_guard.zig
+    │   │   ├── debug/
+    │   │   │   └── console.zig
+    │   │   └── elf/
+    │   │       ├── root.zig
+    │   │       ├── loader.zig
+    │   │       ├── types.zig
+    │   │       └── validation.zig
+    │   ├── mm/           # PMM, VMM, Heap, slab, IOMMU, ASLR
+    │   │   ├── root.zig
+    │   │   ├── pmm.zig
+    │   │   ├── vmm.zig
+    │   │   ├── user_vmm.zig
+    │   │   ├── heap.zig
+    │   │   ├── slab.zig
+    │   │   ├── dma_allocator.zig
+    │   │   ├── aslr.zig
+    │   │   ├── tlb.zig
+    │   │   ├── kernel_stack.zig
+    │   │   └── iommu/
+    │   │       ├── root.zig
+    │   │       └── domain.zig
+    │   ├── proc/         # Sched, Process, Thread, Signal, Futex, IPC
+    │   │   ├── root.zig
     │   │   ├── thread.zig
-    │   │   ├── cpu.zig
-    │   │   └── queue.zig
-    │   ├── process/
+    │   │   ├── signal.zig
+    │   │   ├── futex.zig
+    │   │   ├── perms.zig
+    │   │   ├── ring.zig
+    │   │   ├── sched/
+    │   │   │   ├── root.zig
+    │   │   │   ├── scheduler.zig
+    │   │   │   └── cpu.zig
+    │   │   ├── process/
+    │   │   │   ├── root.zig
+    │   │   │   ├── lifecycle.zig
+    │   │   │   └── manager.zig
+    │   │   ├── capabilities/
+    │   │   │   └── root.zig
+    │   │   └── ipc/
+    │   │       ├── message.zig
+    │   │       └── service.zig
+    │   ├── sys/          # Syscall handlers, VDSO, Framebuffer
     │   │   ├── root.zig
-    │   │   ├── types.zig
-    │   │   ├── manager.zig
-    │   │   └── lifecycle.zig
-    │   ├── sync.zig
-    │   ├── futex.zig
-    │   ├── signal.zig
-    │   ├── pipe.zig
-    │   ├── panic.zig
-    │   ├── fd.zig
-    │   ├── devfs.zig
-    │   ├── elf/
+    │   │   ├── vdso.zig
+    │   │   ├── vdso_blob.zig
+    │   │   ├── framebuffer.zig
+    │   │   └── syscall/
+    │   │       ├── table.zig
+    │   │       ├── base.zig
+    │   │       ├── process.zig
+    │   │       ├── signals.zig
+    │   │       ├── scheduling.zig
+    │   │       ├── io/
+    │   │       ├── fd.zig
+    │   │       └── memory.zig
+    │   ├── fs/           # Filesystem glue (DevFS, Pipe, FD)
     │   │   ├── root.zig
-    │   │   ├── loader.zig
-    │   │   ├── setup.zig
-    │   │   ├── types.zig
-    │   │   ├── utils.zig
-    │   │   └── validation.zig
-    │   ├── framebuffer.zig
-    │   ├── init_mem.zig
-    │   ├── init_hw.zig
-    │   ├── init_fs.zig
-    │   ├── init_proc.zig
-    │   ├── slab.zig
-    │   ├── tlb.zig
-    │   ├── vdso.zig
-    │   ├── vdso_blob.zig
-    │   ├── capabilities/
-    │   │   └── root.zig
-    │   ├── debug/
-    │   │   └── console.zig
-    │   ├── io/
-    │   │   ├── root.zig
-    │   │   ├── kernel_io.zig
-    │   │   ├── pool.zig
-    │   │   ├── reactor.zig
-    │   │   ├── timer.zig
-    │   │   └── types.zig
-    │   ├── ipc/
-    │   │   ├── message.zig
-    │   │   └── service.zig
-    │   └── syscall/
-    │       ├── base.zig
-    │       ├── table.zig
-    │       ├── process.zig
-    │       ├── signals.zig
-    │       ├── scheduling.zig
-    │       ├── io/
-    │       │   ├── root.zig
-    │       │   ├── read_write.zig
-    │       │   ├── fcntl.zig
-    │       │   ├── stat.zig
-    │       │   ├── dir.zig
-    │       │   ├── utils.zig
-    │       │   └── error_helpers.zig
-    │       ├── io_uring/
-    │       │   ├── root.zig
-    │       │   ├── types.zig
-    │       │   ├── ring.zig
-    │       │   ├── submission.zig
-    │       │   ├── completion.zig
-    │       │   ├── request.zig
-    │       │   ├── instance.zig
-    │       │   ├── ops.zig
-    │       │   ├── setup.zig
-    │       │   ├── enter.zig
-    │       │   ├── register.zig
-    │       │   └── fd.zig
-    │       ├── fd.zig
-    │       ├── error_helpers.zig
-    │       ├── memory.zig
-    │       ├── execution.zig
-    │       ├── custom.zig
-    │       ├── net.zig
-    │       ├── random.zig
-    │       ├── input.zig
-    │       ├── interrupt.zig
-    │       ├── ipc.zig
-    │       ├── mmio.zig
-    │       ├── pci_syscall.zig
-    │       ├── port_io.zig
-    │       ├── ring.zig
-    │       ├── fs_handlers.zig
-    │       └── user_mem.zig
+    │   │   ├── devfs.zig
+    │   │   ├── fd.zig
+    │   │   └── pipe.zig
+    │   └── io/           # Async I/O (Reactor, Pool)
+    │       ├── root.zig
+    │       ├── kernel_io.zig
+    │       ├── pool.zig
+    │       ├── reactor.zig
+    │       └── timer.zig
     │
     ├── drivers/
     │   ├── keyboard.zig
@@ -488,38 +461,62 @@ These files and directories are produced by local builds or tooling and are not 
 
 ## Module Reference
 
-### `src/kernel/`
+### `src/kernel/core/`
 | File | Description |
 |------|-------------|
-| `main.zig` | Kernel entry; wires Limine handoff into memory, driver, and scheduler bring-up. |
+| `main.zig` | Kernel entry; wires Limine handoff into subsystems. |
 | `boot.zig` | Boot-time initialization sequencing. |
-| `heap.zig` | Kernel heap allocator. |
-| `pmm.zig` | Physical memory manager. |
-| `vmm.zig` | Page table manager (map/unmap helpers). |
-| `user_vmm.zig` | User address space creation and cloning. |
-| `kernel_stack.zig` | Guarded kernel stack allocator in a dedicated VA range (unmapped guard pages). |
-| `stack_guard.zig` | Guard page protections shared across stacks. |
-| `dma_allocator.zig` | DMA-safe allocator for page-aligned, device-visible buffers. |
-| `aslr.zig` | Kernel ASLR and address randomization helpers. |
-| `ring.zig` | Zero-copy ring buffer manager for IPC. |
-| `perms.zig` | POSIX-style permission checks with capability overrides. |
-| `thread.zig` | Thread creation and context management. |
-| `sync.zig` | Spinlocks and synchronization helpers. |
-| `futex.zig` | Fast Userspace Mutex locking primitives. |
-| `signal.zig` | Signal delivery and handling infrastructure. |
-| `pipe.zig` | Pipe implementation for IPC. |
-| `panic.zig` | Kernel panic handling. |
-| `fd.zig` | File descriptor table logic. |
-| `devfs.zig` | Device filesystem. |
-| `framebuffer.zig` | Limine framebuffer setup. |
-| `init_mem.zig` | Memory subsystem initialization. |
 | `init_hw.zig` | Hardware initialization (drivers, interrupts). |
+| `init_mem.zig` | Memory subsystem initialization. |
 | `init_fs.zig` | Filesystem initialization. |
 | `init_proc.zig` | Process subsystem initialization. |
+| `panic.zig` | Kernel panic handling. |
+| `sync.zig` | Spinlocks and synchronization helpers. |
+| `stack_guard.zig` | Guard page protections shared across stacks. |
+| `debug/` | Kernel console and debug helpers. |
+| `elf/` | ELF loader and validation. |
+
+### `src/kernel/mm/`
+| File | Description |
+|------|-------------|
+| `pmm.zig` | Physical memory manager. |
+| `vmm.zig` | Page table manager. |
+| `user_vmm.zig` | User address space management. |
+| `heap.zig` | Kernel heap allocator. |
 | `slab.zig` | Slab allocator implementation. |
-| `tlb.zig` | TLB shootdown and page invalidation helpers. |
+| `dma_allocator.zig` | DMA-safe allocator. |
+| `aslr.zig` | Address randomization helpers. |
+| `tlb.zig` | TLB shootdown helpers. |
+| `kernel_stack.zig` | Guarded kernel stack allocator. |
+| `iommu/` | IOMMU domain management. |
+
+### `src/kernel/proc/`
+| File | Description |
+|------|-------------|
+| `thread.zig` | Thread context management. |
+| `signal.zig` | Signal delivery infrastructure. |
+| `futex.zig` | Fast Userspace Mutex. |
+| `perms.zig` | POSIX permission checks. |
+| `ring.zig` | Zero-copy ring buffer manager. |
+| `sched/` | CPU scheduler core. |
+| `process/` | Process lifecycle and manager. |
+| `capabilities/` | Capability-based access control. |
+| `ipc/` | Message passing and services. |
+
+### `src/kernel/sys/`
+| File | Description |
+|------|-------------|
 | `vdso.zig` | VDSO mapping and setup. |
-| `vdso_blob.zig` | Embedded VDSO payload blob. |
+| `vdso_blob.zig` | Embedded VDSO payload. |
+| `framebuffer.zig` | Limine framebuffer setup. |
+| `syscall/` | Syscall table and handlers. |
+
+### `src/kernel/fs/`
+| File | Description |
+|------|-------------|
+| `devfs.zig` | Device filesystem. |
+| ` pipe.zig` | Pipe implementation for IPC. |
+| `fd.zig` | File descriptor table logic. |
 
 ### `src/kernel/core/`
 | File | Description |

@@ -15,6 +15,11 @@ pub const FileMeta = struct {
     exists: bool = true,
     /// True if filesystem is read-only
     readonly: bool = false,
+    /// SECURITY: Device ID for TOCTOU detection
+    /// Comparing dev+ino before/after open detects symlink swaps
+    dev: u64 = 0,
+    /// SECURITY: Inode number for TOCTOU detection
+    ino: u64 = 0,
 };
 
 // File type masks

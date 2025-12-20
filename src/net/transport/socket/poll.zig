@@ -10,14 +10,15 @@ const poll_def = uapi.poll;
 /// Poll socket for events
 /// Returns mask of ready events (POLLIN, POLLOUT, etc.)
 pub fn checkPollEvents(fd: usize, events: u16) u16 {
+    // Acquire TCP state lock FIRST to match RX handler lock ordering.
+    // RX path holds tcp_state.lock then accesses sockets, so we must
+    // acquire in the same order to prevent deadlock.
+    const tcp_held = tcp_state.lock.acquire();
+    defer tcp_held.release();
+
     const sock = state.acquireSocket(fd) orelse return poll_def.POLLNVAL;
     defer state.releaseSocket(sock);
     var revents: u16 = 0;
-
-    // Acquire TCP state lock to safely read TCB state
-    // This prevents races with RX handler modifying TCB concurrently
-    tcp_state.lock.acquire();
-    defer tcp_state.lock.release();
 
     // Check for readable data (POLLIN)
     if ((events & poll_def.POLLIN) != 0) {

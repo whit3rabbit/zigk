@@ -415,6 +415,10 @@ pub fn sys_execve(frame: *hal.syscall.SyscallFrame, path_ptr: usize, argv_ptr: u
     // Save old CR3 to destroy after switching
     const old_cr3 = current_proc.cr3;
 
+    // SECURITY: Close FDs with O_CLOEXEC flag set before entering new program.
+    // This prevents file descriptor leakage to exec'd programs.
+    current_proc.fd_table.closeCloexec();
+
     // Update process/thread state
     current_proc.cr3 = result.pml4_phys;
     // Apply ASLR heap gap to heap start
