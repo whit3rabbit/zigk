@@ -759,6 +759,7 @@ pub fn build(b: *std.Build) void {
     futex_module.addImport("hal", hal_module);
     futex_module.addImport("vmm", vmm_module);
     futex_module.addImport("console", console_module);
+    futex_module.addImport("pmm", pmm_module); // For page pinning to prevent UAF
 
     // Break circular dependency: sched needs futex for timeout handling in wakeSleepingThreads
     sched_module.addImport("futex", futex_module);

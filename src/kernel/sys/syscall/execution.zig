@@ -216,7 +216,12 @@ pub fn sys_execve(frame: *hal.syscall.SyscallFrame, path_ptr: usize, argv_ptr: u
     defer alloc.free(arg_data_buf);
 
     var arg_data_idx: usize = 0;
-    var argv_storage: [64][]const u8 = undefined;
+    // Stack hardening: heap-allocate argv/envp pointer arrays to reduce stack pressure
+    // in deep call chains. Each array is 64 * 16 = 1024 bytes.
+    const argv_storage = alloc.alloc([]const u8, 64) catch {
+        return error.ENOMEM;
+    };
+    defer alloc.free(argv_storage);
     var argc: usize = 0;
 
     if (argv_ptr != 0) {
@@ -262,7 +267,10 @@ pub fn sys_execve(frame: *hal.syscall.SyscallFrame, path_ptr: usize, argv_ptr: u
     const argv = argv_storage[0..argc];
 
     // Parse envp (collect up to 64 environment variables)
-    var envp_storage: [64][]const u8 = undefined;
+    const envp_storage = alloc.alloc([]const u8, 64) catch {
+        return error.ENOMEM;
+    };
+    defer alloc.free(envp_storage);
     var envc: usize = 0;
 
     if (envp_ptr != 0) {

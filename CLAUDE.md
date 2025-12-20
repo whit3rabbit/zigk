@@ -46,6 +46,9 @@ pub fn sys_read(fd: usize, buf_ptr: usize, len: usize) SyscallError!usize {
     5. `tcp_state.lock` (Global TCP state - `src/net/transport/tcp/state.zig`)
     6. `socket/state.lock` (Socket table - `src/net/transport/socket/state.zig`)
     7. Per-socket `sock.lock` / Per-TCB `tcb.mutex`
+    8. `UserVmm.lock` (read mode for address translation, write mode for munmap - must NOT be held during sleep)
+    9. `FutexBucket.lock` (per-bucket spinlock for futex wait queues)
+    10. `pmm.lock` (internal PMM spinlock, not held across calls)
 
 ### 3. I/O Robustness & Information Leaks
 *   **DMA Hygiene**: Zero-initialize (`@memset(buf, 0)`) destination buffers **before** initiating DMA or hardware reads. This prevents kernel stack leaks if the device writes less data than expected or fails silently.

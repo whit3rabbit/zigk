@@ -316,6 +316,7 @@ pub const MAX_DEVICES: usize = 256;
 
 /// Global device array indexed by slot_id
 var devices: [MAX_DEVICES]?*UsbDevice = [_]?*UsbDevice{null} ** MAX_DEVICES;
+var devices_lock: sync.RwLock = .{};
 
 /// Register a device in the global array
 /// Security: Validates slot_id bounds and frees existing device to prevent
@@ -324,6 +325,8 @@ pub fn registerDevice(device: *UsbDevice) void {
     // slot_id is u8, max value 255, which is < MAX_DEVICES (256)
     // slot_id 0 is reserved for host controller
     if (device.slot_id > 0) {
+        const held = devices_lock.acquireWrite();
+        defer held.release();
         // Security: Free existing device resources to prevent memory exhaustion
         if (devices[device.slot_id]) |old_dev| {
             // Avoid double-free if re-registering same device
@@ -340,6 +343,8 @@ pub fn registerDevice(device: *UsbDevice) void {
 pub fn unregisterDevice(slot_id: u8) void {
     // slot_id is u8, max value 255, which is < MAX_DEVICES (256)
     if (slot_id > 0) {
+        const held = devices_lock.acquireWrite();
+        defer held.release();
         devices[slot_id] = null;
     }
 }
@@ -348,6 +353,8 @@ pub fn unregisterDevice(slot_id: u8) void {
 pub fn findDevice(slot_id: u8) ?*UsbDevice {
     // slot_id is u8, max value 255, which is < MAX_DEVICES (256)
     if (slot_id > 0) {
+        const held = devices_lock.acquireRead();
+        defer held.release();
         return devices[slot_id];
     }
     return null;
@@ -355,6 +362,8 @@ pub fn findDevice(slot_id: u8) ?*UsbDevice {
 
 /// Find a child device by parent and port
 pub fn findChildDevice(parent: *UsbDevice, port: u8) ?*UsbDevice {
+    const held = devices_lock.acquireRead();
+    defer held.release();
     for (devices) |maybe_dev| {
         if (maybe_dev) |dev| {
             if (dev.parent == parent and dev.parent_port == port) {
@@ -367,6 +376,8 @@ pub fn findChildDevice(parent: *UsbDevice, port: u8) ?*UsbDevice {
 
 /// Find first device in polling state (for interrupt handling)
 pub fn findPollingDevice() ?*UsbDevice {
+    const held = devices_lock.acquireRead();
+    defer held.release();
     for (devices) |maybe_dev| {
         if (maybe_dev) |dev| {
             if (dev.state == .polling) {

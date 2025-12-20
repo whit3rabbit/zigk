@@ -15,6 +15,8 @@ pub const SyscallError = uapi.errno.SyscallError;
 pub const LINUX_EIO: i32 = 5;
 pub const LINUX_EAGAIN: i32 = 11;
 pub const LINUX_EFAULT: i32 = 14;
+pub const LINUX_EINVAL: i32 = 22;
+pub const LINUX_ENOTTY: i32 = 25;
 pub const LINUX_EPIPE: i32 = 32;
 
 /// Maps device layer negative errno returns to SyscallError.
@@ -36,6 +38,8 @@ pub inline fn mapDeviceError(ret: isize) SyscallError!usize {
         LINUX_EIO => error.EIO,
         LINUX_EAGAIN => error.EAGAIN,
         LINUX_EFAULT => error.EFAULT,
+        LINUX_EINVAL => error.EINVAL,
+        LINUX_ENOTTY => error.ENOTTY,
         LINUX_EPIPE => error.EPIPE,
         else => error.EIO, // Default to I/O error for unknown
     };
@@ -58,6 +62,8 @@ comptime {
     std.debug.assert(LINUX_EIO == 5);
     std.debug.assert(LINUX_EAGAIN == 11);
     std.debug.assert(LINUX_EFAULT == 14);
+    std.debug.assert(LINUX_EINVAL == 22);
+    std.debug.assert(LINUX_ENOTTY == 25);
     std.debug.assert(LINUX_EPIPE == 32);
 }
 
@@ -85,4 +91,14 @@ test "mapDeviceError negative EAGAIN" {
 test "mapDeviceError negative EPIPE" {
     const result = mapDeviceError(-32);
     try std.testing.expectError(error.EPIPE, result);
+}
+
+test "mapDeviceError negative EINVAL" {
+    const result = mapDeviceError(-22);
+    try std.testing.expectError(error.EINVAL, result);
+}
+
+test "mapDeviceError negative ENOTTY" {
+    const result = mapDeviceError(-25);
+    try std.testing.expectError(error.ENOTTY, result);
 }

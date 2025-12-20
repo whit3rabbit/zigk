@@ -8,6 +8,12 @@
 //! - Global Hash Table: Fixed-size table with per-bucket locks.
 //! - Atomic Validation: wait() verifies *addr == val atomically before sleeping.
 //!
+//! Security - TOCTOU Prevention:
+//! Physical pages are pinned via PMM refcounting during futex operations. This prevents
+//! a race condition where a concurrent munmap() could free the physical page while we
+//! hold a reference to it, leading to use-after-free. The defer ensures cleanup on all
+//! exit paths (normal return, error, timeout).
+//!
 //! Note:
 //! - Timeouts are not fully implemented yet (infinite wait).
 //! - Only basic FUTEX_WAIT and FUTEX_WAKE implemented for MVP.
@@ -19,6 +25,7 @@ const sync = @import("sync");
 const heap = @import("heap");
 const hal = @import("hal");
 const vmm = @import("vmm");
+const pmm = @import("pmm");
 
 const BUCKET_COUNT = 256; // Power of 2 for fast modulus
 
@@ -88,15 +95,22 @@ pub fn wait(uaddr: u64, val: u32, timeout_ns: ?u64) !void {
     // Physical address uniquely identifies the futex, enabling shared memory futexes
     const phys_addr = vmm.translate(current.cr3, uaddr) orelse return error.Fault;
 
-    // 3. Compute bucket
+    // 3. Pin the page to prevent use-after-free
+    // SECURITY: A concurrent munmap() could free the physical page while we sleep.
+    // By incrementing the refcount, we ensure the page remains valid until we're done.
+    // This prevents TOCTOU race between translate() and the actual memory access.
+    pmm.refPage(phys_addr);
+    defer pmm.freePage(phys_addr);
+
+    // 4. Compute bucket
     const bucket_idx = hash(phys_addr);
     const bucket = &futex_table[bucket_idx];
 
-    // 4. Acquire bucket lock
+    // 5. Acquire bucket lock
     // Critical section prevents lost wakeup race
     const held = bucket.lock.acquire();
 
-    // 5. Validate value atomically using the physical address
+    // 6. Validate value atomically using the physical address
     // SECURITY: Read through HHDM-mapped physical address, not raw user virtual address.
     // Directly dereferencing `uaddr` in kernel context is unsafe because:
     // (a) The kernel may have different page tables active than the user's CR3.
@@ -113,7 +127,7 @@ pub fn wait(uaddr: u64, val: u32, timeout_ns: ?u64) !void {
         return error.Again;
     }
 
-    // 6. Sleep with optional timeout
+    // 7. Sleep with optional timeout
     // Convert timeout from nanoseconds to ticks (1ms per tick)
     var timeout_ticks: u64 = 0;
     if (timeout_ns) |ns| {
@@ -134,7 +148,7 @@ pub fn wait(uaddr: u64, val: u32, timeout_ns: ?u64) !void {
         if (timeout_ticks > 0) @ptrCast(bucket) else null,
     );
 
-    // 7. Check wakeup reason
+    // 8. Check wakeup reason
     if (current.futex_wakeup_reason == .timeout) {
         return error.TimedOut;
     }
@@ -147,8 +161,9 @@ pub fn wait(uaddr: u64, val: u32, timeout_ns: ?u64) !void {
 ///
 /// 1. Validate user address permissions
 /// 2. Translate user address to physical address
-/// 3. Compute bucket
-/// 4. Wake up to `count` threads from bucket, canceling any pending timeouts
+/// 3. Pin page (consistency with wait, prevents future TOCTOU if value validation added)
+/// 4. Compute bucket
+/// 5. Wake up to `count` threads from bucket, canceling any pending timeouts
 ///
 /// Returns: Number of threads woken
 pub fn wake(uaddr: u64, count: u32) !u32 {
@@ -162,15 +177,22 @@ pub fn wake(uaddr: u64, count: u32) !u32 {
     // 2. Translate to physical address
     const phys_addr = vmm.translate(current.cr3, uaddr) orelse return error.Fault;
 
-    // 3. Compute bucket
+    // 3. Pin the page for consistency with wait()
+    // While wake() currently doesn't read the futex value, pinning ensures:
+    // - Consistent behavior if value validation is added later
+    // - The physical address remains valid during the entire operation
+    pmm.refPage(phys_addr);
+    defer pmm.freePage(phys_addr);
+
+    // 4. Compute bucket
     const bucket_idx = hash(phys_addr);
     const bucket = &futex_table[bucket_idx];
 
-    // 4. Acquire bucket lock
+    // 5. Acquire bucket lock
     const held = bucket.lock.acquire();
     defer held.release();
 
-    // 5. Wake threads, properly canceling any pending timeouts
+    // 6. Wake threads, properly canceling any pending timeouts
     // Note: Hash collisions may cause spurious wakeups - this is acceptable
     // as futex semantics require userspace to re-check the condition in a loop
     var woken: u32 = 0;

@@ -2,6 +2,7 @@ const std = @import("std");
 const base = @import("base.zig");
 const fd_mod = @import("fd");
 const utils = @import("utils.zig");
+const error_helpers = @import("error_helpers.zig");
 
 const SyscallError = base.SyscallError;
 const safeFdCast = utils.safeFdCast;
@@ -79,8 +80,15 @@ pub fn sys_fcntl(fd_num: usize, cmd: usize, arg: usize) SyscallError!usize {
 /// MVP: Returns -ENOTTY (inappropriate ioctl for device)
 /// This is sufficient for musl isatty() checks.
 pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) SyscallError!usize {
-    _ = fd;
-    _ = cmd;
-    _ = arg;
-    return error.ENOTTY;
+    const table = base.getGlobalFdTable();
+    const fd_u32 = safeFdCast(fd) orelse return error.EBADF;
+    const fd_entry = table.get(fd_u32) orelse return error.EBADF;
+
+    const ioctl_fn = fd_entry.ops.ioctl orelse return error.ENOTTY;
+
+    const held = fd_entry.lock.acquire();
+    defer held.release();
+
+    const result = ioctl_fn(fd_entry, @intCast(cmd), @intCast(arg));
+    return error_helpers.mapDeviceError(result);
 }
