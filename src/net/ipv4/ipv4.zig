@@ -13,7 +13,7 @@ const packet = @import("../core/packet.zig");
 const interface = @import("../core/interface.zig");
 const checksum = @import("../core/checksum.zig");
 const ethernet = @import("../ethernet/ethernet.zig");
-const arp = @import("arp.zig");
+const arp = @import("arp/root.zig");
 const pmtu = @import("pmtu.zig");
 const PacketBuffer = packet.PacketBuffer;
 const Ipv4Header = packet.Ipv4Header;
@@ -153,13 +153,26 @@ pub fn validateOptions(pkt: *const PacketBuffer, header_len: usize) bool {
             return false; // Option extends beyond header
         }
 
-        // Security check: drop dangerous source routing options (RFC 7126)
-        // LSRR and SSRR allow attackers to bypass firewalls
-        const option_num = option_type & 0x1F;
-        if (option_num == 3 or option_num == 9) {
-            // LSRR (131 = 0x83) has num=3, SSRR (137 = 0x89) has num=9
-            // Drop packets with source routing for security
-            return false;
+        // SECURITY: Drop dangerous IP options per RFC 7126 recommendations.
+        // These options are rarely used legitimately and enable various attacks:
+        // - Source routing (LSRR/SSRR): Bypass firewalls, MITM attacks
+        // - Record Route: Network reconnaissance, path discovery
+        // - Timestamp: Network reconnaissance, timing attacks
+        switch (option_type) {
+            IPOPT_LSRR, IPOPT_SSRR => {
+                // Source routing allows attackers to specify packet path,
+                // bypassing firewalls and enabling MITM attacks
+                return false;
+            },
+            IPOPT_RR => {
+                // Record Route reveals network topology to attackers
+                return false;
+            },
+            IPOPT_TS => {
+                // Timestamp option enables timing-based attacks and reconnaissance
+                return false;
+            },
+            else => {},
         }
 
         // Skip to next option
@@ -172,12 +185,10 @@ pub fn validateOptions(pkt: *const PacketBuffer, header_len: usize) bool {
 
 /// Process an incoming IPv4 packet
 pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
-    // Validate minimum IP header size
-    if (pkt.len < pkt.ip_offset + packet.IP_HEADER_SIZE) {
-        return false;
-    }
-
-    const ip = pkt.ipHeader();
+    // SECURITY: Use bounds-checked accessor for untrusted incoming packets.
+    // This provides defense-in-depth: even if pkt.ip_offset is corrupted,
+    // getIpv4HeaderMut returns null rather than accessing invalid memory.
+    const ip = packet.getIpv4HeaderMut(pkt.data, pkt.ip_offset) orelse return false;
 
     // Validate IP version (must be 4)
     if (ip.getVersion() != 4) {
@@ -212,6 +223,17 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
     // Validate total length
     const total_len = ip.getTotalLength();
     if (total_len < header_len or pkt.ip_offset + total_len > pkt.len) {
+        return false;
+    }
+
+    // SECURITY: Validate payload length is non-zero for fragmented packets.
+    // A crafted packet with total_len == header_len has zero payload, which
+    // could cause issues in reassembly or transport layer dispatch.
+    // For non-fragmented packets, zero payload is technically valid but unusual.
+    const payload_len = total_len - header_len;
+    if (payload_len == 0) {
+        // Zero-length payload - drop as likely malformed
+        // Valid IP packets should have at least 1 byte of payload
         return false;
     }
 
@@ -265,7 +287,7 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
 
     if (mf_bit != 0 or frag_offset != 0) {
         // Fragmented packet - attempt reassembly
-        const payload_len = total_len - header_len;
+        // payload_len already validated non-zero above
         const current_payload = pkt.data[pkt.ip_offset + header_len..][0..payload_len];
 
         if (reassembly.processFragment(
@@ -287,8 +309,8 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
             return true; // Consumed (stored or incomplete), stop processing
         }
     } else {
-        // Not fragmented
-        payload_slice = pkt.data[pkt.ip_offset + header_len..][0..(total_len - header_len)];
+        // Not fragmented - payload_len already validated non-zero above
+        payload_slice = pkt.data[pkt.ip_offset + header_len..][0..payload_len];
     }
 
     // Set transport layer offset
@@ -331,14 +353,19 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
             return false;
         }
 
-        // Dispatch to transport layer
+        // SECURITY REQUIREMENT: Transport layer MUST process synchronously.
+        // The virt_pkt.data points to result.owned_buffer which is freed by
+        // defer result.deinit() when this scope exits. Transport handlers:
+        // 1. MUST NOT store pointers to the packet data for later use
+        // 2. MUST copy any data they need to retain
+        // 3. MUST complete all processing before returning
+        // Violating these rules causes use-after-free when defer runs.
         return switch (ip.protocol) {
             PROTO_ICMP => icmp.processPacket(iface, &virt_pkt),
             PROTO_UDP => udp.processPacket(iface, &virt_pkt),
             PROTO_TCP => tcp.processPacket(iface, &virt_pkt),
             else => false,
         };
-        // defer handles cleanup - result.deinit() called automatically
     }
 
     // Normal non-fragmented path (using original pkt)
@@ -423,6 +450,7 @@ pub fn sendPacket(iface: *Interface, pkt: *PacketBuffer, dst_ip: u32) bool {
             }
 
             // Update packet length
+            // SAFETY: ip_offset was set by buildPacket above, packet is trusted
             const ip = pkt.ipHeader();
             pkt.len = pkt.ip_offset + ip.getTotalLength();
 
@@ -466,6 +494,7 @@ pub fn sendPacket(iface: *Interface, pkt: *PacketBuffer, dst_ip: u32) bool {
     }
 
     // Update packet length
+    // SAFETY: ip_offset was set by buildPacket, packet is trusted outgoing
     const ip = pkt.ipHeader();
     pkt.len = pkt.ip_offset + ip.getTotalLength();
 
@@ -480,17 +509,30 @@ pub fn sendPacket(iface: *Interface, pkt: *PacketBuffer, dst_ip: u32) bool {
     return ethernet.sendFrame(iface, pkt);
 }
 
+/// Maximum IP payload size (65535 - 20 = 65515 bytes)
+/// Fragment offset field is 13 bits, representing 8-byte units (max offset = 8191 * 8 = 65528)
+const MAX_IP_PAYLOAD: usize = 65515;
+
 /// Send a packet fragmented into multiple IP datagrams
 fn sendFragmentedPacket(iface: *Interface, pkt: *PacketBuffer, dst_mac: [6]u8) bool {
     // Original IP header
+    // SAFETY: Called only from sendPacket with trusted outgoing packets
     const orig_ip = pkt.ipHeader();
 
     const ip_header_len = orig_ip.getHeaderLength();
-    
+
     // Total payload to fragment (everything after IP header)
     // This includes Transport Header + Data
     const payload_start = pkt.ip_offset + ip_header_len;
     const payload = pkt.data[payload_start..pkt.len];
+
+    // SECURITY: Validate payload size to prevent fragment offset overflow.
+    // Fragment offset is 13 bits representing 8-byte units (max = 8191 * 8 = 65528).
+    // If payload exceeds this, later fragments would have truncated offsets,
+    // causing incorrect reassembly or memory corruption on receiver.
+    if (payload.len > MAX_IP_PAYLOAD) {
+        return false;
+    }
     
     // Max payload per fragment (MTU - IP Header), aligned to 8 bytes
     const mtu_payload = (iface.mtu - ip_header_len) & ~@as(u16, 7);
@@ -564,7 +606,9 @@ fn sendFragmentedPacket(iface: *Interface, pkt: *PacketBuffer, dst_mac: [6]u8) b
 
 /// Decrement TTL and update checksum (for routing, if we ever support it)
 pub fn decrementTtl(pkt: *PacketBuffer) bool {
-    const ip = pkt.ipHeader();
+    // SECURITY: Use bounds-checked accessor - this is a public function
+    // that may receive packets from various sources.
+    const ip = packet.getIpv4HeaderMut(pkt.data, pkt.ip_offset) orelse return false;
 
     if (ip.ttl <= 1) {
         return false; // TTL expired
@@ -583,14 +627,17 @@ pub fn decrementTtl(pkt: *PacketBuffer) bool {
 }
 
 /// Fallback PRNG state for when hardware entropy is unavailable
-/// SECURITY: Seeded from multiple sources to avoid predictability even at boot
-var fallback_prng_state: u64 = 0;
-var prng_initialized: bool = false;
+/// SECURITY: Uses atomic operations for thread-safety on SMP systems.
+/// Without atomics, concurrent CPU access could cause torn reads/writes,
+/// producing predictable or duplicate IP IDs enabling fragment injection attacks.
+var fallback_prng_state: std.atomic.Value(u64) = std.atomic.Value(u64).init(0);
+var prng_initialized: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 
 /// Get next IP identification value
 /// SECURITY: Unpredictable IP IDs prevent idle scanning attacks where an attacker
 /// can infer host activity by observing predictable ID increments. We use hardware
 /// entropy (RDRAND) when available, with a seeded PRNG fallback.
+/// Thread-safe: Uses atomic operations to prevent race conditions on SMP.
 pub fn getNextId() u16 {
     // Try hardware entropy first (RDRAND on x86_64)
     const hw_entropy = entropy.getHardwareEntropy();
@@ -603,24 +650,52 @@ pub fn getNextId() u16 {
 
     // Fallback: Use xorshift64* PRNG seeded from available entropy sources
     // This is better than a counter but not cryptographically secure
-    if (!prng_initialized) {
-        // Seed from TSC (cycle counter) + boot time entropy
-        fallback_prng_state = entropy.getHardwareEntropy();
-        if (fallback_prng_state == 0) {
-            // Last resort: use a non-zero seed based on address
-            fallback_prng_state = @intFromPtr(&fallback_prng_state) ^ 0xDEADBEEFCAFEBABE;
+    // SECURITY: Use compare-exchange for initialization to prevent double-init race
+    if (!prng_initialized.load(.acquire)) {
+        // SECURITY: Mix multiple entropy sources to reduce predictability:
+        // 1. TSC/timer value - adds timing jitter
+        // 2. Address of static variable - varies with ASLR
+        // 3. Constant to ensure non-zero seed
+        const tsc = platform.timing.rdtsc();
+        const addr_entropy = @intFromPtr(&fallback_prng_state);
+
+        // Mix sources using multiplication and XOR for distribution
+        var seed: u64 = tsc;
+        seed ^= addr_entropy *% 0x9E3779B97F4A7C15; // Golden ratio
+        seed ^= 0xDEADBEEFCAFEBABE;
+
+        // Ensure non-zero state
+        if (seed == 0) {
+            seed = 0x853C49E6748FEA9B; // Arbitrary non-zero constant
         }
-        prng_initialized = true;
+
+        // Atomically initialize - if another CPU beat us, that's fine
+        _ = fallback_prng_state.cmpxchgStrong(0, seed, .acq_rel, .acquire);
+        prng_initialized.store(true, .release);
     }
 
-    // xorshift64* step
-    var x = fallback_prng_state;
-    x ^= x >> 12;
-    x ^= x << 25;
-    x ^= x >> 27;
-    fallback_prng_state = x;
+    // SECURITY: Atomically update PRNG state using compare-exchange loop.
+    // This prevents torn reads/writes and ensures each CPU gets unique IDs.
+    const jitter = platform.timing.rdtsc();
 
-    return @truncate(x *% 0x2545F4914F6CDD1D);
+    while (true) {
+        const old_state = fallback_prng_state.load(.acquire);
+
+        // Mix in jitter and apply xorshift64* step
+        var x = old_state ^ jitter;
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+
+        // Try to update state atomically
+        if (fallback_prng_state.cmpxchgWeak(old_state, x, .acq_rel, .acquire)) |_| {
+            // CAS failed - another CPU modified state, retry with new value
+            continue;
+        } else {
+            // Success - return the result
+            return @truncate(x *% 0x2545F4914F6CDD1D);
+        }
+    }
 }
 
 /// Validate that a netmask has contiguous 1s followed by 0s

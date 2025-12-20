@@ -9,10 +9,11 @@ const regs = @import("regs.zig");
 const desc = @import("desc.zig");
 const ctl = @import("ctl.zig");
 const config = @import("config.zig");
-const root = @import("root.zig");
+const types = @import("types.zig");
+const init = @import("init.zig");
 
 const mmio = hal.mmio;
-const E1000e = root.E1000e;
+const E1000e = types.E1000e;
 
 /// TX watchdog threshold - number of consecutive stall checks before reset
 pub const TX_WATCHDOG_THRESHOLD: u16 = 100;

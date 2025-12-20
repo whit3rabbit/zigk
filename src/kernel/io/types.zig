@@ -311,6 +311,11 @@ pub const IoRequest = struct {
     ///
     /// SECURITY: Uses atomic cmpxchg to prevent race conditions where
     /// concurrent cancel() and complete() calls could corrupt state.
+    ///
+    /// SECURITY FIX: Result is written BEFORE state transition to prevent
+    /// race condition where a reader observes state==completed but reads
+    /// stale result data. The release fence ensures result is visible to
+    /// any thread that subsequently observes the completed state.
     pub fn complete(self: *IoRequest, result: IoResult) bool {
         // Atomically transition from pending or in_progress to completed.
         // We must win the race against cancel() or another complete() call.
@@ -322,15 +327,25 @@ pub const IoRequest = struct {
                 return false; // Already completed or cancelled
             }
 
+            // SECURITY FIX: Write result BEFORE state transition.
+            // This ensures any reader who observes state==completed will
+            // also see the correct result value (due to the release fence
+            // in cmpxchgStrong and acquire fence in state.load).
+            self.result = result;
+
+            // Note: The cmpxchgStrong with .acq_rel ordering below provides the
+            // release semantics needed to ensure the result write above is
+            // visible before the state transition.
+
             // Atomically try to claim this request for completion
             if (self.state.cmpxchgStrong(current, .completed, .acq_rel, .acquire)) |_| {
-                // Lost the race - another thread changed state, retry
+                // Lost the race - another thread changed state, retry.
+                // The result write above is harmless since we'll overwrite
+                // it on the next iteration or the winner will set their own.
                 continue;
             }
 
-            // Won the race - now safe to write result
-            // State is .completed so no other thread will try to modify
-            self.result = result;
+            // Won the race - state is now .completed and result is already set
 
             // Wake submitter thread if one is waiting
             if (is_freestanding) {

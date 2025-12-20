@@ -8,10 +8,33 @@ Parses actual source files for always up-to-date information.
 Usage:
     python syscall_query.py read              # Find syscall by name
     python syscall_query.py 41                # Find syscall by number
-    python syscall_query.py --category net    # List category (net, io, mem, proc, fs, ipc, ring)
+    python syscall_query.py --category net    # List category
     python syscall_query.py --handler io.zig  # List syscalls in handler file
     python syscall_query.py --all             # List all syscalls
     python syscall_query.py --zscapek         # List Zscapek extensions (1000+)
+    python syscall_query.py --security        # List security-critical syscalls
+
+Categories:
+    io       - Core I/O (read, write, ioctl, fcntl)
+    fd       - File descriptors (open, close, dup, pipe)
+    mem      - Memory (mmap, mprotect, mremap, madvise, mlock)
+    proc     - Process (fork, clone, exec, wait, getpid)
+    sig      - Signals (rt_sigaction, kill, tgkill)
+    net      - Networking (socket, bind, listen, connect)
+    sched    - Scheduling (sched_yield, nanosleep, clock_gettime)
+    fs       - Filesystem (stat, chmod, mount, sync)
+    fsat     - File *at() operations (openat, mkdirat, unlinkat)
+    timer    - Timers (timer_create, timerfd, clock_nanosleep)
+    event    - Events (epoll, inotify, eventfd, signalfd)
+    advio    - Advanced I/O (sendfile, splice, fallocate)
+    security - Security (ptrace, prctl, seccomp, capget/capset)
+    container- Container/namespace (unshare, setns)
+    uring    - io_uring async I/O
+    ipc      - Zscapek IPC
+    ring     - Zscapek ring buffer IPC
+    mmio     - Zscapek MMIO/DMA/PCI
+    input    - Zscapek input
+    fb       - Zscapek framebuffer
 """
 
 import sys
@@ -32,21 +55,50 @@ SYSCALLS_FILE = PROJECT_ROOT / "src" / "uapi" / "syscalls.zig"
 SYSCALL_DIR = PROJECT_ROOT / "src" / "kernel" / "syscall"
 
 # Categories for grouping
+# Updated with all Linux ABI syscalls added in security audit
 CATEGORIES = {
-    "io": [0, 1, 4, 5, 6, 16, 17, 18, 19, 20, 72, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 86, 88, 89, 90, 91, 92, 93, 94],
-    "fd": [2, 3, 8, 22, 32, 33, 85, 257, 292, 293],  # Added creat, openat, dup3, pipe2
-    "mem": [9, 10, 11, 12],
-    "proc": [39, 56, 57, 59, 60, 61, 62, 102, 104, 105, 106, 107, 108, 110, 117, 118, 119, 120, 231],  # Added setuid/setgid/seteuid/setegid/setresuid/getresuid/setresgid/getresgid
-    "sig": [13, 14, 15, 131, 200, 218, 234],
-    "net": [7, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 54, 55],
-    "sched": [23, 24, 35, 228, 229],
-    "fs": [21, 87, 95, 96, 97, 160, 165, 166, 217],  # Removed 85 (creat) and 257 (openat) - moved to fd
-    "ipc": [1020, 1021, 1022, 1025, 1026, 1027],
-    "ring": [1040, 1041, 1042, 1043, 1044, 1045],
-    "mmio": [1030, 1031, 1032, 1033, 1034, 1035, 1036, 1037],
-    "input": [1003, 1004, 1005, 1010, 1011, 1012, 1013],
-    "fb": [1000, 1001, 1002],
+    # Core I/O operations
+    "io": [0, 1, 6, 16, 17, 18, 19, 20, 72, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 86, 88, 89, 93, 94],
+    # File descriptors: open, close, dup, pipe, creat
+    "fd": [2, 3, 8, 22, 32, 33, 85, 257, 292, 293],
+    # Memory management: mmap, mprotect, mremap, madvise, mlock
+    "mem": [9, 10, 11, 12, 25, 26, 27, 28, 149, 150, 151, 152],
+    # Process management: fork, clone, exec, exit, wait, getpid, getrusage
+    "proc": [39, 56, 57, 58, 59, 60, 61, 62, 98, 102, 104, 105, 106, 107, 108, 110, 117, 118, 119, 120, 186, 231, 302, 435],
+    # Signals: rt_sig*, sigaltstack, kill, tgkill
+    "sig": [13, 14, 15, 127, 128, 129, 130, 131, 200, 218, 234],
+    # Networking: socket, bind, listen, connect, accept, send, recv
+    "net": [7, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55],
+    # Scheduling and time: sched_yield, nanosleep, clock_gettime
+    "sched": [23, 24, 35, 228, 229, 230],
+    # Filesystem: stat, access, chmod, mount, getdents
+    "fs": [4, 5, 21, 87, 90, 91, 92, 95, 96, 97, 160, 162, 165, 166, 217, 306],
+    # File *at() operations: mkdirat, unlinkat, renameat, fstatat, etc.
+    "fsat": [257, 258, 259, 260, 262, 263, 264, 265, 266, 267, 268, 269, 316],
+    # Timers: timer_create, timerfd_create, clock_nanosleep
+    "timer": [222, 223, 224, 225, 226, 230, 283, 286, 287],
+    # Events: epoll, inotify, eventfd, signalfd
+    "event": [232, 233, 253, 254, 255, 281, 282, 284, 289, 290, 291, 294],
+    # Advanced I/O: sendfile, splice, fallocate, copy_file_range
+    "advio": [40, 275, 276, 277, 278, 285, 295, 296, 326],
+    # Security: ptrace, prctl, seccomp, capget/capset
+    "security": [101, 125, 126, 157, 317],
+    # Container/namespace: unshare, setns
+    "container": [272, 308],
+    # Misc: sync, memfd_create, getrandom
+    "misc": [162, 306, 318, 319],
+    # io_uring async I/O
     "uring": [425, 426, 427],
+    # Zscapek IPC
+    "ipc": [1020, 1021, 1022, 1025, 1026, 1027],
+    # Zscapek ring buffer IPC
+    "ring": [1040, 1041, 1042, 1043, 1044, 1045],
+    # Zscapek MMIO/DMA/PCI
+    "mmio": [1030, 1031, 1032, 1033, 1034, 1035, 1036, 1037, 1046, 1047],
+    # Zscapek input
+    "input": [1003, 1004, 1005, 1010, 1011, 1012, 1013],
+    # Zscapek framebuffer
+    "fb": [1000, 1001, 1002],
 }
 
 def parse_syscalls():
@@ -134,6 +186,14 @@ def main():
         print("Zscapek Extensions (1000+):")
         for num in sorted(syscalls.keys()):
             if num >= 1000:
+                print(format_syscall(num, syscalls[num]))
+        return
+
+    # --security: shorthand for --category security
+    if arg == "--security":
+        print("Security-Critical Syscalls:")
+        for num in CATEGORIES["security"]:
+            if num in syscalls:
                 print(format_syscall(num, syscalls[num]))
         return
 

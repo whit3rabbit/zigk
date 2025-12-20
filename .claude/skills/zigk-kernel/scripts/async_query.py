@@ -2,7 +2,7 @@
 """
 Async I/O Query Tool for zigk kernel.
 
-Query async patterns: reactor, io_uring, ring buffers, timers.
+Query async patterns: reactor, io_uring, ring buffers, timers, filesystems.
 
 Usage:
     python async_query.py reactor        # Kernel reactor pattern
@@ -11,6 +11,7 @@ Usage:
     python async_query.py timer          # Timer wheel
     python async_query.py future         # Future/promise pattern
     python async_query.py ahci           # AHCI async block I/O
+    python async_query.py sfs            # SFS batched bitmap I/O
 """
 
 import sys
@@ -374,6 +375,105 @@ _ = future.wait();  // Blocks until IRQ
 
 adapter.copyFromDmaBuffer(buf_phys, dest_buf);
 ```
+""",
+
+    "sfs": """
+## SFS Batched Bitmap Async I/O
+
+Location: src/fs/sfs.zig
+
+### Problem
+Bitmap operations (allocateBlock, freeBlock) previously read sectors one at a time,
+causing multiple blocking I/O calls per allocation.
+
+### Solution: Batched Bitmap Loading
+Read all bitmap blocks in a single async I/O operation, scan in-memory.
+
+### loadBitmapBatch Pattern
+```zig
+fn loadBitmapBatch(self: *SFS) ![]u8 {
+    const alloc = heap.allocator();
+    const bitmap_size = self.superblock.bitmap_blocks * SECTOR_SIZE;
+    const bitmap_buf = alloc.alloc(u8, bitmap_size) catch return error.ENOMEM;
+    errdefer alloc.free(bitmap_buf);
+
+    // Allocate I/O request for batched read
+    const req = io.allocRequest(.disk_read) orelse {
+        alloc.free(bitmap_buf);
+        return error.IOError;
+    };
+    defer io.freeRequest(req);
+
+    // Read ALL bitmap blocks at once (1 async I/O instead of N)
+    const sector_count: u16 = @intCast(self.superblock.bitmap_blocks);
+    const buf_phys = ahci.adapter.blockReadAsync(
+        self.port_num,
+        self.superblock.bitmap_start,
+        sector_count,
+        req,
+    ) catch {
+        alloc.free(bitmap_buf);
+        return error.IOError;
+    };
+    defer ahci.adapter.freeDmaBuffer(buf_phys, bitmap_size);
+
+    // Wait for completion
+    var future = io.Future{ .request = req };
+    const result = future.wait();
+
+    switch (result) {
+        .success => |bytes| {
+            if (bytes < bitmap_size) {
+                alloc.free(bitmap_buf);
+                return error.IOError;
+            }
+            asm volatile ("mfence" ::: .{ .memory = true });
+            ahci.adapter.copyFromDmaBuffer(buf_phys, bitmap_buf);
+        },
+        .err, .cancelled => {
+            alloc.free(bitmap_buf);
+            return error.IOError;
+        },
+        .pending => unreachable,
+    }
+
+    return bitmap_buf;
+}
+```
+
+### allocateBlock Optimization
+```zig
+pub fn allocateBlock(self: *SFS) !u32 {
+    const held = self.alloc_lock.acquire();
+    defer held.release();
+
+    // Load all bitmap blocks in one batched read
+    const bitmap_buf = self.loadBitmapBatch() catch return error.IOError;
+    defer heap.allocator().free(bitmap_buf);
+
+    // Scan in-memory bitmap for free bit (no I/O during scan)
+    for (bitmap_buf, 0..) |byte, global_byte_idx| {
+        if (byte != 0xFF) {
+            // Found free bit, mark as allocated
+            bitmap_buf[global_byte_idx] |= (@as(u8, 1) << bit);
+
+            // Write back only the modified block
+            const bitmap_block_idx: u32 = @intCast(global_byte_idx / SECTOR_SIZE);
+            const block_start = bitmap_block_idx * SECTOR_SIZE;
+            const block_slice = bitmap_buf[block_start..][0..SECTOR_SIZE];
+            writeSectorAsync(self, self.superblock.bitmap_start + bitmap_block_idx, block_slice);
+
+            return block_num;
+        }
+    }
+    return error.ENOSPC;
+}
+```
+
+### Performance
+- Before: 4-10 blocking I/O per allocation (one per bitmap block scanned)
+- After: 2 async I/O per allocation (batch read all + write one modified)
+- Estimated 3-5x reduction in blocking time
 """,
 }
 

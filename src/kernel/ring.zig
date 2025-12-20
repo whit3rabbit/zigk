@@ -13,6 +13,17 @@
 //!   - Ring header (384 bytes): indices + metadata
 //!   - Data entries follow at offset 384
 //!   - Physical pages mapped via HHDM (kernel) and mmap (userspace)
+//!
+//! SECURITY NOTES:
+//!   - Ring header indices are in shared memory, so both producer and consumer
+//!     can modify them. This is an intentional design choice for SPSC rings.
+//!   - The kernel MUST validate that available entries never exceeds entry_count
+//!     to prevent a malicious producer from causing consumer out-of-bounds reads.
+//!   - The ring_mask (entry_count - 1) ensures index wrapping is always safe
+//!     as long as we cap available entries at entry_count.
+//!   - Trust model: Producer and consumer must cooperate for correctness.
+//!     A malicious producer can send garbage data but cannot cause consumer
+//!     memory corruption due to bounds checking in availableEntries().
 
 const std = @import("std");
 const uapi = @import("uapi");
@@ -93,16 +104,29 @@ pub const RingDescriptor = struct {
     }
 
     /// Get number of available entries
+    ///
+    /// SECURITY: Caps the result at entry_count to prevent a malicious producer
+    /// from setting prod_idx to cause consumer out-of-bounds reads. The wrapping
+    /// subtraction handles index wraparound correctly, and the min() ensures
+    /// we never return more entries than the ring can hold.
     pub fn availableEntries(self: *const RingDescriptor) u32 {
         const header = self.getHeader();
-        return @intCast(header.prod_idx -% header.cons_idx);
+        // Wrapping subtraction handles index wraparound (u64 indices, power-of-2 ring)
+        const raw_available: u64 = header.prod_idx -% header.cons_idx;
+        // SECURITY: Cap at entry_count to prevent OOB if producer lies about prod_idx
+        return @intCast(@min(raw_available, self.entry_count));
     }
 
     /// Get number of free slots (for producer)
+    ///
+    /// SECURITY: Uses saturating subtraction to prevent underflow if a malicious
+    /// consumer sets cons_idx ahead of prod_idx.
     pub fn freeSlots(self: *const RingDescriptor) u32 {
         const header = self.getHeader();
-        const used = header.prod_idx -% header.cons_idx;
-        return self.entry_count - @as(u32, @intCast(used));
+        const used: u64 = header.prod_idx -% header.cons_idx;
+        // SECURITY: Cap used at entry_count, then use saturating subtraction
+        const capped_used: u32 = @intCast(@min(used, self.entry_count));
+        return self.entry_count -| capped_used;
     }
 };
 

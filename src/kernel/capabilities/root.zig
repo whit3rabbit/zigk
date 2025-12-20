@@ -16,6 +16,42 @@ pub const DmaCapability = struct {
     max_pages: u32,
 };
 
+/// Capability for IOMMU-protected DMA operations
+/// Allows a process to allocate DMA buffers that are IOMMU-isolated
+/// to a specific PCI device, preventing the device from accessing
+/// memory outside its allocated regions.
+pub const IommuDmaCapability = struct {
+    /// PCI bus number
+    bus: u8,
+    /// PCI device number (0-31)
+    device: u5,
+    /// PCI function number (0-7)
+    func: u3,
+    /// Maximum total DMA allocation size in bytes
+    max_size: u64,
+    /// IOMMU domain ID assigned by kernel (0 = not yet assigned)
+    domain_id: u16,
+    /// If true, IOMMU protection is mandatory - syscall fails if IOVA
+    /// allocation fails rather than falling back to raw physical addresses.
+    /// SECURITY: Prevents DMA attacks when device isolation is required.
+    iommu_required: bool = false,
+
+    /// Create raw BDF encoding
+    pub fn toBdf(self: IommuDmaCapability) u16 {
+        return (@as(u16, self.bus) << 8) | (@as(u16, self.device) << 3) | @as(u16, self.func);
+    }
+};
+
+/// Capability for PCI configuration space access.
+///
+/// SECURITY: By default, writes to security-sensitive registers are blocked:
+/// - Command register (0x04): Controls bus mastering, memory/IO enable
+/// - BAR registers (0x10-0x24): Control device memory mappings
+/// - Expansion ROM (0x30): Could load malicious firmware
+/// - Capability pointers that control MSI/MSI-X (interrupt redirection)
+///
+/// To allow writes to these registers, the capability must have `allow_unsafe=true`,
+/// which should only be granted to highly trusted kernel-mode drivers.
 pub const PciConfigCapability = struct {
     /// PCI bus number
     bus: u8,
@@ -23,6 +59,42 @@ pub const PciConfigCapability = struct {
     device: u5,
     /// PCI function number (0-7)
     func: u3,
+    /// If true, allows writes to ALL registers including dangerous ones.
+    /// If false (default), blocks writes to: Command, BARs, ROM, MSI control.
+    /// SECURITY: Only set to true for kernel-mode drivers that need full control.
+    allow_unsafe: bool = false,
+
+    /// PCI register offsets that are restricted by default
+    pub const RESTRICTED_OFFSETS = struct {
+        pub const COMMAND: u12 = 0x04; // Bus master, memory/IO enable
+        pub const BAR0: u12 = 0x10;
+        pub const BAR1: u12 = 0x14;
+        pub const BAR2: u12 = 0x18;
+        pub const BAR3: u12 = 0x1C;
+        pub const BAR4: u12 = 0x20;
+        pub const BAR5: u12 = 0x24;
+        pub const EXPANSION_ROM: u12 = 0x30;
+        // MSI capability register offsets are capability-relative, checked separately
+    };
+
+    /// Check if writing to the given offset is allowed
+    pub fn allowsWrite(self: PciConfigCapability, offset: u12) bool {
+        if (self.allow_unsafe) return true;
+
+        // Block writes to security-sensitive registers
+        return switch (offset) {
+            RESTRICTED_OFFSETS.COMMAND,
+            RESTRICTED_OFFSETS.BAR0,
+            RESTRICTED_OFFSETS.BAR1,
+            RESTRICTED_OFFSETS.BAR2,
+            RESTRICTED_OFFSETS.BAR3,
+            RESTRICTED_OFFSETS.BAR4,
+            RESTRICTED_OFFSETS.BAR5,
+            RESTRICTED_OFFSETS.EXPANSION_ROM,
+            => false,
+            else => true,
+        };
+    }
 };
 
 /// Capability for file write operations (create, delete, modify)
@@ -144,6 +216,7 @@ pub const CapabilityType = enum {
     IoPort,
     Mmio,
     DmaMemory,
+    IommuDma,
     PciConfig,
     InputInjection,
     Mount,
@@ -157,6 +230,8 @@ pub const Capability = union(CapabilityType) {
     IoPort: struct { port: u16, len: u16 },
     Mmio: MmioCapability,
     DmaMemory: DmaCapability,
+    /// IOMMU-protected DMA for a specific PCI device
+    IommuDma: IommuDmaCapability,
     PciConfig: PciConfigCapability,
     /// Allows injecting keyboard/mouse input via IPC to kernel (PID 0)
     InputInjection: void,

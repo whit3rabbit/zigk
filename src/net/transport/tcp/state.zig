@@ -454,7 +454,12 @@ pub fn nextTimestamp() u32 {
 pub fn evictOldestHalfOpenTcb() bool {
     lock.acquire();
     defer lock.release();
+    return evictOldestHalfOpenTcbUnlocked();
+}
 
+/// Unlocked version of evictOldestHalfOpenTcb - caller MUST hold state.lock
+/// SECURITY: Used by processListenPacket to atomically check limit and evict
+pub fn evictOldestHalfOpenTcbUnlocked() bool {
     // O(1) - oldest is at head of list
     const oldest_tcb = half_open_head orelse return false;
 

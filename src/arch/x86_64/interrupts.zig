@@ -14,6 +14,9 @@ const console = @import("console");
 // Import console for output (will be set up during init)
 var console_writer: ?*const fn ([]const u8) void = null;
 
+/// Re-export InterruptFrame for drivers
+pub const InterruptFrame = idt.InterruptFrame;
+
 // Keyboard IRQ handler callback (set by keyboard driver)
 // This allows the HAL to call into the keyboard driver without importing it
 var keyboard_handler: ?*const fn () void = null;

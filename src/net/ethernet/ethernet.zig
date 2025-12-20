@@ -23,7 +23,7 @@ const Interface = interface.Interface;
 
 // Import protocol handlers (will be implemented)
 const ipv4 = @import("../ipv4/ipv4.zig");
-const arp = @import("../ipv4/arp.zig");
+const arp = @import("../ipv4/arp/root.zig");
 
 /// Ethertype values in host byte order
 pub const ETHERTYPE_IPV4: u16 = 0x0800;

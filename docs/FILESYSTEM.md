@@ -8,6 +8,7 @@ zscapek/
 ├── .claude/
 │   ├── commands/            # Codex CLI command definitions
 │   └── hooks/               # Local automation hooks
+├── .dockerignore            # Docker ignore rules
 ├── .github/
 │   └── workflows/
 │       └── build-iso.yml     # GitHub Actions workflow to build release ISO
@@ -15,6 +16,8 @@ zscapek/
 ├── AGENTS.md                # Symlink to CLAUDE.md
 ├── CLAUDE.md                # Assistant guidelines
 ├── README.md                # Project overview
+├── REFACTORED.md            # Refactor notes
+├── TODO.md                  # Project task list
 ├── build.zig                # Build graph (Zig 0.16.x)
 ├── build.zig.snippet        # Build snippet for local experiments
 ├── build.zig.zon            # Dependencies
@@ -47,6 +50,9 @@ zscapek/
 │   ├── userland/            # Syscall/user ABI validation (C/Zig)
 │   │   ├── test_clock.c
 │   │   ├── test_devnull.c
+│   │   ├── test_libc_fix.c
+│   │   ├── test_libc_fixes.c
+│   │   ├── test_libc_runner.zig
 │   │   ├── test_random.c
 │   │   ├── test_signals_fpu.c
 │   │   ├── test_stdio.c
@@ -114,9 +120,20 @@ zscapek/
     │   ├── stack_guard.zig
     │   ├── dma_allocator.zig
     │   ├── aslr.zig
+    │   ├── ring.zig
+    │   ├── perms.zig
     │   ├── thread.zig
-    │   ├── process.zig
-    │   ├── sched.zig
+    │   ├── sched/
+    │   │   ├── root.zig
+    │   │   ├── scheduler.zig
+    │   │   ├── thread.zig
+    │   │   ├── cpu.zig
+    │   │   └── queue.zig
+    │   ├── process/
+    │   │   ├── root.zig
+    │   │   ├── types.zig
+    │   │   ├── manager.zig
+    │   │   └── lifecycle.zig
     │   ├── sync.zig
     │   ├── futex.zig
     │   ├── signal.zig
@@ -124,7 +141,13 @@ zscapek/
     │   ├── panic.zig
     │   ├── fd.zig
     │   ├── devfs.zig
-    │   ├── elf.zig
+    │   ├── elf/
+    │   │   ├── root.zig
+    │   │   ├── loader.zig
+    │   │   ├── setup.zig
+    │   │   ├── types.zig
+    │   │   ├── utils.zig
+    │   │   └── validation.zig
     │   ├── framebuffer.zig
     │   ├── init_mem.zig
     │   ├── init_hw.zig
@@ -154,8 +177,27 @@ zscapek/
     │       ├── process.zig
     │       ├── signals.zig
     │       ├── scheduling.zig
-    │       ├── io.zig
-    │       ├── io_uring.zig
+    │       ├── io/
+    │       │   ├── root.zig
+    │       │   ├── read_write.zig
+    │       │   ├── fcntl.zig
+    │       │   ├── stat.zig
+    │       │   ├── dir.zig
+    │       │   ├── utils.zig
+    │       │   └── error_helpers.zig
+    │       ├── io_uring/
+    │       │   ├── root.zig
+    │       │   ├── types.zig
+    │       │   ├── ring.zig
+    │       │   ├── submission.zig
+    │       │   ├── completion.zig
+    │       │   ├── request.zig
+    │       │   ├── instance.zig
+    │       │   ├── ops.zig
+    │       │   ├── setup.zig
+    │       │   ├── enter.zig
+    │       │   ├── register.zig
+    │       │   └── fd.zig
     │       ├── fd.zig
     │       ├── error_helpers.zig
     │       ├── memory.zig
@@ -169,6 +211,8 @@ zscapek/
     │       ├── mmio.zig
     │       ├── pci_syscall.zig
     │       ├── port_io.zig
+    │       ├── ring.zig
+    │       ├── fs_handlers.zig
     │       └── user_mem.zig
     │
     ├── drivers/
@@ -191,10 +235,13 @@ zscapek/
     │   │       ├── config.zig
     │   │       ├── ctl.zig
     │   │       ├── desc.zig
+    │   │       ├── init.zig
     │   │       ├── pool.zig
     │   │       ├── regs.zig
     │   │       ├── rx.zig
-    │   │       └── tx.zig
+    │   │       ├── tx.zig
+    │   │       ├── types.zig
+    │   │       └── worker.zig
     │   ├── pci/
     │   │   ├── root.zig
     │   │   ├── access.zig
@@ -252,6 +299,7 @@ zscapek/
     │   ├── initrd.zig
     │   ├── initrd/
     │   │   └── (initrd implementation)
+    │   ├── meta.zig
     │   ├── vfs.zig
     │   ├── sfs.zig
     │   └── partitions/
@@ -331,6 +379,7 @@ zscapek/
     │   ├── ipc_msg.zig
     │   ├── net_ipc.zig
     │   ├── poll.zig
+    │   ├── ring.zig
     │   ├── sched.zig
     │   ├── dirent.zig
     │   ├── input.zig
@@ -347,10 +396,13 @@ zscapek/
     └── user/
         ├── root.zig
         ├── crt0.zig
+        ├── crt0.S
         ├── linker.ld
         ├── audio_test.zig
         ├── test_asm.zig
+        ├── test_libc_fix_wrapper.zig
         ├── lib/
+        │   ├── ring.zig
         │   ├── syscall.zig
         │   ├── syscall_exports.zig
         │   ├── console_stub.zig
@@ -419,6 +471,21 @@ zscapek/
                 └── (C source files for DOOM port)
 ```
 
+## Generated Artifacts
+
+These files and directories are produced by local builds or tooling and are not source-controlled.
+
+- `.zig-cache/` - Zig build cache
+- `initrd.tar` - InitRD archive
+- `iso_root/` - ISO staging directory
+- `options.o` - Local build artifact
+- `root.o` - Local build artifact
+- `test_libc_fixes.o` - Local build artifact
+- `test_vdso.asm` - Local build artifact
+- `usb_disk.img` - QEMU disk image
+- `zig-out/` - Zig build output
+- `zscapek.iso` - Bootable ISO
+
 ## Module Reference
 
 ### `src/kernel/`
@@ -434,9 +501,9 @@ zscapek/
 | `stack_guard.zig` | Guard page protections shared across stacks. |
 | `dma_allocator.zig` | DMA-safe allocator for page-aligned, device-visible buffers. |
 | `aslr.zig` | Kernel ASLR and address randomization helpers. |
+| `ring.zig` | Zero-copy ring buffer manager for IPC. |
+| `perms.zig` | POSIX-style permission checks with capability overrides. |
 | `thread.zig` | Thread creation and context management. |
-| `process.zig` | Process lifecycle and address space wiring. |
-| `sched.zig` | Scheduler core. |
 | `sync.zig` | Spinlocks and synchronization helpers. |
 | `futex.zig` | Fast Userspace Mutex locking primitives. |
 | `signal.zig` | Signal delivery and handling infrastructure. |
@@ -444,7 +511,6 @@ zscapek/
 | `panic.zig` | Kernel panic handling. |
 | `fd.zig` | File descriptor table logic. |
 | `devfs.zig` | Device filesystem. |
-| `elf.zig` | ELF loader. |
 | `framebuffer.zig` | Limine framebuffer setup. |
 | `init_mem.zig` | Memory subsystem initialization. |
 | `init_hw.zig` | Hardware initialization (drivers, interrupts). |
@@ -454,7 +520,63 @@ zscapek/
 | `tlb.zig` | TLB shootdown and page invalidation helpers. |
 | `vdso.zig` | VDSO mapping and setup. |
 | `vdso_blob.zig` | Embedded VDSO payload blob. |
-| `debug/console.zig` | Kernel console output. |
+
+### `src/kernel/core/`
+| File | Description |
+|------|-------------|
+| `root.zig` | Shim exports for kernel core entry and boot lifecycle modules. |
+
+### `src/kernel/mm/`
+| File | Description |
+|------|-------------|
+| `root.zig` | Shim exports for memory management modules. |
+
+### `src/kernel/proc/`
+| File | Description |
+|------|-------------|
+| `root.zig` | Shim exports for process, thread, scheduling, and IPC modules. |
+
+### `src/kernel/fs/`
+| File | Description |
+|------|-------------|
+| `root.zig` | Shim exports for kernel filesystem glue (devfs, pipe, fd). |
+
+### `src/kernel/sys/`
+| File | Description |
+|------|-------------|
+| `root.zig` | Shim exports for syscall, vdso, and user ABI glue. |
+
+### `src/kernel/elf/`
+| File | Description |
+|------|-------------|
+| `root.zig` | ELF loader entry point. |
+| `loader.zig` | ELF load and map implementation. |
+| `setup.zig` | Process image setup helpers. |
+| `types.zig` | ELF type definitions and constants. |
+| `utils.zig` | ELF parsing helpers. |
+| `validation.zig` | ELF header and segment validation. |
+
+### `src/kernel/process/`
+| File | Description |
+|------|-------------|
+| `root.zig` | Process subsystem entry points. |
+| `types.zig` | Process and credential types. |
+| `manager.zig` | Process table and lifecycle coordination. |
+| `lifecycle.zig` | Process creation, exec, and exit flows. |
+
+### `src/kernel/sched/`
+| File | Description |
+|------|-------------|
+| `root.zig` | Scheduler module entry point. |
+| `scheduler.zig` | Scheduler core logic. |
+| `thread.zig` | Scheduler thread bookkeeping. |
+| `cpu.zig` | Per-CPU scheduler state. |
+| `queue.zig` | Run queue implementation. |
+
+### `src/kernel/debug/`
+| File | Description |
+|------|-------------|
+| `console.zig` | Kernel console output. |
 
 ### `src/kernel/capabilities/`
 | File | Description |
@@ -486,8 +608,8 @@ zscapek/
 | `process.zig` | `exit`, `wait4`, `getpid`, `getppid`, `getuid`, `getgid`. |
 | `signals.zig` | `rt_sigprocmask`, `rt_sigaction`, `rt_sigreturn`, `set_tid_address`. |
 | `scheduling.zig` | `sched_yield`, `nanosleep`, `select`, `clock_gettime`. |
-| `io.zig` | `read`, `write`, `writev`, `stat`, `fstat`, `ioctl`, `fcntl`, `getcwd`. |
-| `io_uring.zig` | io_uring async I/O syscalls (`io_uring_setup`, `io_uring_enter`). |
+| `io/` | Core I/O syscalls (`read`, `write`, `stat`, `fcntl`, directory ops). |
+| `io_uring/` | io_uring async I/O syscalls and ring management. |
 | `fd.zig` | `open`, `close`, `dup`, `dup2`, `pipe`, `lseek`. |
 | `memory.zig` | `mmap`, `mprotect`, `munmap`, `brk`. |
 | `execution.zig` | `fork`, `execve`, `arch_prctl`, `get_fb_info`, `map_fb`. |
@@ -500,7 +622,36 @@ zscapek/
 | `mmio.zig` | Memory-mapped I/O access for user-space drivers. |
 | `pci_syscall.zig` | PCI device access for user-space drivers. |
 | `port_io.zig` | Port I/O access for user-space drivers. |
+| `ring.zig` | Ring buffer IPC syscalls. |
+| `fs_handlers.zig` | Filesystem syscall helpers. |
 | `user_mem.zig` | Validates and copies user memory safely. |
+
+### `src/kernel/syscall/io/`
+| File | Description |
+|------|-------------|
+| `root.zig` | I/O syscall entry points and wiring. |
+| `read_write.zig` | `read`, `write`, `writev` handlers. |
+| `fcntl.zig` | `fcntl` handling and flags. |
+| `stat.zig` | `stat` and `fstat` handlers. |
+| `dir.zig` | Directory-related syscalls. |
+| `utils.zig` | I/O helpers for common path handling. |
+| `error_helpers.zig` | I/O-specific error conversions. |
+
+### `src/kernel/syscall/io_uring/`
+| File | Description |
+|------|-------------|
+| `root.zig` | io_uring subsystem entry point. |
+| `types.zig` | io_uring type definitions. |
+| `ring.zig` | Ring setup and shared state. |
+| `submission.zig` | Submission queue handling. |
+| `completion.zig` | Completion queue handling. |
+| `request.zig` | Request allocation and lifecycle. |
+| `instance.zig` | Per-instance state and tracking. |
+| `ops.zig` | Supported io_uring operations. |
+| `setup.zig` | `io_uring_setup` handler. |
+| `enter.zig` | `io_uring_enter` handler. |
+| `register.zig` | `io_uring_register` handler. |
+| `fd.zig` | File descriptor helpers for io_uring. |
 
 ### `src/arch/x86_64/`
 | File | Description |
@@ -554,6 +705,7 @@ A device-independent TCP/IP stack implementing Ethernet, IPv4/ARP, DNS, and sock
 |------|-------------|
 | `root.zig` | Filesystem registry and init hooks. |
 | `initrd.zig` | TAR-format initial ramdisk for loading files at boot. |
+| `meta.zig` | File metadata for permission checks. |
 | `vfs.zig` | Virtual filesystem layer. |
 | `sfs.zig` | Simple filesystem implementation. |
 | `partitions/root.zig` | Partition table detection. |
@@ -602,10 +754,13 @@ A device-independent TCP/IP stack implementing Ethernet, IPv4/ARP, DNS, and sock
 | `config.zig` | Device configuration constants. |
 | `ctl.zig` | Control register operations. |
 | `desc.zig` | Descriptor ring structures. |
+| `init.zig` | Device initialization and lifecycle. |
 | `pool.zig` | Buffer pool management. |
 | `regs.zig` | Register definitions. |
 | `rx.zig` | Receive path handling. |
 | `tx.zig` | Transmit path handling. |
+| `types.zig` | Shared device types and constants. |
+| `worker.zig` | Background worker for IRQ and TX watchdog handling. |
 
 ### `src/drivers/audio/`
 | File | Description |
@@ -679,6 +834,7 @@ A device-independent TCP/IP stack implementing Ethernet, IPv4/ARP, DNS, and sock
 | `ipc_msg.zig` | IPC message structs for user-space drivers. |
 | `net_ipc.zig` | Network IPC message definitions. |
 | `poll.zig` | Poll event definitions. |
+| `ring.zig` | Ring buffer IPC ABI structs. |
 | `sched.zig` | Scheduling constants and structs. |
 | `dirent.zig` | Directory entry structures. |
 | `input.zig` | Input event structures. |
@@ -701,9 +857,12 @@ Reserved for future memory subsystem work; currently empty.
 |------|-------------|
 | `root.zig` | User module exports. |
 | `crt0.zig` | Userland entry point (`_start`). |
+| `crt0.S` | Low-level startup assembly. |
 | `linker.ld` | Userland linker script. |
 | `audio_test.zig` | Audio playback test application. |
 | `test_asm.zig` | Minimal assembly sanity test program. |
+| `test_libc_fix_wrapper.zig` | libc regression test wrapper. |
+| `lib/ring.zig` | Userspace ring buffer IPC helpers. |
 | `lib/syscall.zig` | Syscall wrappers. |
 | `lib/syscall_exports.zig` | Exported syscall symbols for libc. |
 | `lib/console_stub.zig` | Console syscall shims for userland. |

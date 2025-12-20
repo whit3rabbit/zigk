@@ -252,6 +252,17 @@ pub fn sys_pci_config_read(
 /// Writes a 32-bit value to PCI configuration space.
 /// Requires PciConfig capability for the device.
 ///
+/// SECURITY: By default, writes to security-sensitive registers are blocked:
+/// - Command register (0x04): Controls bus mastering, memory/IO enable
+/// - BAR registers (0x10-0x24): Control device memory mappings
+/// - Expansion ROM (0x30): Could load malicious firmware
+///
+/// To write these registers, the capability must have allow_unsafe=true.
+/// This prevents userspace drivers from:
+/// 1. Re-enabling bus mastering on a device the kernel disabled
+/// 2. Remapping device memory to overlap kernel regions
+/// 3. Redirecting MSI interrupts to hijack kernel control flow
+///
 /// Arguments:
 ///   arg0: Bus number
 ///   arg1: Device number (0-31)
@@ -261,7 +272,7 @@ pub fn sys_pci_config_read(
 ///
 /// Returns:
 ///   0 on success
-///   -EPERM if process lacks PciConfig capability
+///   -EPERM if process lacks PciConfig capability or writing restricted register
 ///   -EINVAL if offset not aligned
 ///   -ENODEV if PCI not initialized
 pub fn sys_pci_config_write(
@@ -285,14 +296,28 @@ pub fn sys_pci_config_write(
     // Get current process
     const proc = base.getCurrentProcess();
 
-    // Check PciConfig capability
-    if (!proc.hasPciConfigCapability(bus, device, func)) {
+    // Get PciConfig capability (need full capability to check allow_unsafe)
+    const pci_cap = proc.getPciConfigCapability(bus, device, func) orelse {
         console.warn("sys_pci_config_write: Process {} lacks PciConfig capability for {}:{}.{}", .{
             proc.pid,
             bus,
             device,
             func,
         });
+        return error.EPERM;
+    };
+
+    // SECURITY: Check if writing to this register is allowed
+    // Restricted registers (Command, BARs, ROM) require allow_unsafe=true
+    if (!pci_cap.allowsWrite(offset)) {
+        console.warn("sys_pci_config_write: Process {} denied write to restricted register 0x{x} on {}:{}.{}", .{
+            proc.pid,
+            offset,
+            bus,
+            device,
+            func,
+        });
+        console.warn("  Hint: Set allow_unsafe=true in PciConfigCapability for kernel drivers", .{});
         return error.EPERM;
     }
 

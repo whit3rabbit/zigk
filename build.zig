@@ -570,6 +570,16 @@ pub fn build(b: *std.Build) void {
     });
     capabilities_module.addImport("console", console_module);
 
+    // Create kernel IOMMU module (domain management)
+    const kernel_iommu_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/iommu/root.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    kernel_iommu_module.addImport("console", console_module);
+    kernel_iommu_module.addImport("pmm", pmm_module);
+    kernel_iommu_module.addImport("hal", hal_module);
+
     // Create atomic module for IPC/Locking (needed by process)
     const ipc_msg_module = b.createModule(.{
         .root_source_file = b.path("src/kernel/ipc/message.zig"),
@@ -1101,6 +1111,7 @@ pub fn build(b: *std.Build) void {
     syscall_mmio_module.addImport("pmm", pmm_module);
     syscall_mmio_module.addImport("heap", heap_module);
     syscall_mmio_module.addImport("user_vmm", user_vmm_module);
+    syscall_mmio_module.addImport("kernel_iommu", kernel_iommu_module);
 
     // Create syscall pci module (PCI enumeration and config access)
     const syscall_pci_module = b.createModule(.{
@@ -1263,6 +1274,7 @@ pub fn build(b: *std.Build) void {
     kernel.root_module.addImport("syscall_ipc", syscall_ipc_module);
     kernel.root_module.addImport("futex", futex_module);
     kernel.root_module.addImport("vdso", vdso_module);
+    kernel.root_module.addImport("kernel_iommu", kernel_iommu_module);
 
     // Add assembly helpers for x86_64 (ISR stubs, lgdt, lidt)
     kernel.addAssemblyFile(b.path("src/arch/x86_64/asm_helpers.S"));

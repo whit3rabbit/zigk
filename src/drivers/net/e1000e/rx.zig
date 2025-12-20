@@ -9,10 +9,10 @@ const regs = @import("regs.zig");
 const desc = @import("desc.zig");
 const config = @import("config.zig");
 const pool = @import("pool.zig");
-const root = @import("root.zig");
+const types = @import("types.zig");
 
 const mmio = hal.mmio;
-const E1000e = root.E1000e;
+const E1000e = types.E1000e;
 
 /// Batch size for RDT updates (same as Linux E1000_RX_BUFFER_WRITE)
 /// Updating RDT every N descriptors reduces register write overhead while

@@ -32,6 +32,14 @@ const MAX_TOTAL_MEMORY: usize = 512 * 1024;
 /// Middle fragments smaller than this are suspicious and dropped.
 const MIN_FRAGMENT_SIZE: usize = 256;
 
+/// Minimum first fragment size - must contain complete transport header
+/// SECURITY: Prevents tiny-first-fragment attacks where attacker sends a first
+/// fragment with partial transport header (e.g., 8 bytes of TCP header) to
+/// bypass firewall header inspection. After reassembly, the full header is
+/// reconstructed but filtering was already bypassed on fragment 1.
+/// 20 bytes = minimum TCP header (most restrictive transport protocol we handle)
+const MIN_FIRST_FRAGMENT_SIZE: usize = 20;
+
 /// Fragment reassembly entry
 const ReassemblyEntry = struct {
     used: bool,
@@ -153,6 +161,14 @@ pub fn tick() void {
 /// The caller is responsible for freeing `owned_buffer` via the reassembly allocator.
 /// This design prevents use-after-free: the slice no longer references the cache entry's
 /// internal buffer which could be evicted by another thread/IRQ after lock release.
+///
+/// SYNCHRONOUS PROCESSING REQUIREMENT:
+/// Callers typically use this with `defer result.deinit()` for automatic cleanup.
+/// Any code that accesses result.payload() MUST complete synchronously before the
+/// defer runs. This means:
+/// - Transport layer handlers MUST NOT store pointers to the payload
+/// - Any retained data MUST be copied to caller-owned memory
+/// - All processing MUST complete before the owning scope exits
 pub const ReassemblyResult = struct {
     /// Owned buffer - caller must free with reassembly allocator
     owned_buffer: []u8,
@@ -237,12 +253,24 @@ pub fn processFragment(
     const end = start + payload.len;
     if (end > MAX_IP_PACKET_SIZE) return null;
 
-    // SECURITY: Reject suspiciously small fragments to prevent fragment bomb DoS.
-    // Attackers can send many 8-byte fragments to exhaust our 64-slot hole list.
-    // Exception: first fragment (offset=0) may be small, last fragment (!more_fragments)
-    // may be a remainder. Only middle fragments are suspicious if tiny.
+    // SECURITY: Reject suspiciously small fragments to prevent fragment-based attacks.
     const is_first_fragment = (frag_offset == 0);
-    if (!is_first_fragment and more_fragments and payload.len < MIN_FRAGMENT_SIZE) {
+    const is_last_fragment = !more_fragments;
+
+    // SECURITY: First fragment must contain at least the transport header.
+    // Prevents tiny-first-fragment attacks where attacker sends partial TCP/UDP
+    // header in fragment 1 to bypass firewall port/flag inspection.
+    if (is_first_fragment and payload.len < MIN_FIRST_FRAGMENT_SIZE) {
+        // First fragment too small to contain transport header - likely attack
+        e.used = false;
+        e.deinit(reassembly_allocator);
+        return null;
+    }
+
+    // SECURITY: Middle fragments must be reasonably sized to prevent hole exhaustion.
+    // Attackers can send many 8-byte fragments to exhaust our 64-slot hole list.
+    // First and last fragments are exempt (first has header, last is remainder).
+    if (!is_first_fragment and !is_last_fragment and payload.len < MIN_FRAGMENT_SIZE) {
         // Middle fragment too small - likely attack, drop entire flow
         e.used = false;
         e.deinit(reassembly_allocator);
@@ -464,7 +492,11 @@ fn updateHoles(e: *ReassemblyEntry, start: usize, end: usize) void {
         if (start > h.start and end < h.end) {
             if (e.hole_count >= 64) {
                 // Cannot split hole - too many fragments. Mark entry invalid.
+                // SECURITY: Call deinit immediately to free buffer memory.
+                // Previously, buffer persisted until caller checked e.used,
+                // allowing brief memory accumulation under rapid attack.
                 e.used = false;
+                e.deinit(reassembly_allocator);
                 return;
             }
             const new_hole = ReassemblyEntry.Hole{ .start = end, .end = h.end };

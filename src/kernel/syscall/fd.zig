@@ -62,6 +62,12 @@ fn openPath(path: []const u8, flags: usize, mode: usize) SyscallError!usize {
     const proc = base.getCurrentProcess();
     const flags_u32: u32 = @truncate(flags);
 
+    // SECURITY NOTE: TOCTOU race condition exists here.
+    // The permission check (statPath) and actual open are not atomic.
+    // An attacker could swap a symlink target between these calls.
+    // TODO: Fix by adding openWithCredentials() to VFS that checks
+    // permissions atomically while holding the VFS lock.
+    //
     // Get file metadata for permission check
     if (fs.vfs.Vfs.statPath(path)) |file_meta| {
         // File exists - check permissions based on open flags

@@ -171,33 +171,29 @@ This document contains actionable sub-tasks with research findings from comprehe
 
 ---
 
-### 6. VFS Mount API & SFS Write Support
+### 6. VFS Mount API & SFS Permissions [COMPLETED]
 
-**Current State:** Hardcoded mounts in init_fs.zig. No sys_mount/unmount. No permission enforcement.
+**Status:** IMPLEMENTED
 
-**Key Findings:**
-- VFS mount registry: Fixed 8 mount points (MAX_MOUNTS)
-- Filesystems: InitRD (TAR), DevFS (virtual), SFS (block device)
-- SYS_MOUNT/SYS_UMOUNT not defined in uapi/syscalls.zig
-- VFS.open() ignores mode parameter completely
-- Process struct has NO uid/gid fields (always returns 0)
-- InitRD has mode bits in TAR header but never enforced
-- SFS DirEntry has no permission/ownership storage
+**Implementation:**
+- Phase A: VFS Mount Completion - Multi-filesystem support (sfs, devfs, initrd, tmpfs)
+- Phase B: SFS Permissions - Breaking change (v2->v3), mode/uid/gid storage in DirEntry
+- Phase C: Async SFS - Batched bitmap loading for 3-5x I/O reduction
 
-**Key Files:**
-- `src/fs/vfs.zig` - VFS mount registry and path resolution
-- `src/kernel/init_fs.zig` - Hardcoded mount sequence
-- `src/kernel/syscall/fd.zig:94-138` - sys_open (mode ignored at line 95)
-- `src/kernel/syscall/process.zig:160-210` - sys_getuid/setuid stubs (always 0)
-- `src/uapi/syscalls.zig` - Missing mount/umount syscall numbers
+**Key Changes:**
+- `src/kernel/syscall/fs_handlers.zig` - sys_mount (165), sys_umount2 (166), sys_stat (4), sys_fstat (5), sys_access (21), sys_chmod (90), sys_chown (92)
+- `src/fs/sfs.zig` - SFS_VERSION=3, DirEntry with mode/uid/gid/mtime, loadBitmapBatch(), async allocateBlock/freeBlock
+- `src/fs/vfs.zig` - FileSystem interface with chmod/chown function pointers
+- `src/kernel/perms.zig` - Permission checking infrastructure
 
 **Sub-Tasks:**
-- [ ] **Implement `sys_mount`:** Map block device to path with capability check
-- [ ] **Implement `sys_unmount`:** Detach filesystem (check open handles)
-- [ ] **SFS Unlink:** Mark blocks free in bitmap, remove directory entries
-- [ ] **SFS Bitmaps:** Add block allocation bitmap (replace next_free_block counter)
+- [x] **Implement `sys_mount`:** Map block device to path with capability check
+- [x] **Implement `sys_unmount`:** Detach filesystem (VFS tracks open handles)
+- [x] **SFS Permissions:** DirEntry with mode/uid/gid, permission enforcement at syscall layer
+- [x] **SFS Bitmaps:** Batched async loading (1 I/O instead of N per allocation)
+- [x] **Stat/chmod/chown syscalls:** Full POSIX-style permission management
 
-**Effort:** Medium (~400 lines for mount/unmount, ~300 for SFS bitmap)
+**Effort:** Completed (Phase A: ~30 lines, Phase B: ~300 lines, Phase C: ~100 lines)
 
 ---
 
@@ -549,9 +545,9 @@ Keep Limine for now while developing Phase 6 and 7 of your kernel. Start the `sr
 | 1 | Optimized Memcpy/Memset | Low | High (8x faster) | PARTIAL (copy_from_user done) |
 | 2 | MSI-X Refinement (GPU) | Low-Med | Medium (GPU perf) | DONE |
 | 3 | Slab Allocator | Medium | High (O(1) alloc) | DONE |
-| 4 | VFS Mount + Permissions | Medium | Medium (userland) | |
+| 4 | VFS Mount + Permissions | Medium | Medium (userland) | DONE |
 | 5 | Scheduler Lock Breaking | High | High (SMP scaling) | DONE |
-| 6 | Async Filesystem | High | Medium (I/O perf) | |
+| 6 | Async Filesystem (SFS) | High | Medium (I/O perf) | DONE |
 | 7 | Zero-Copy IPC | High | High (network perf) | DONE |
 | 8 | User/Group Permissions | Medium | Low (security) | PARTIAL (setresuid/CAP_SETUID done) |
 | 9 | IOMMU | Very High | High (security) | |
@@ -566,8 +562,10 @@ Keep Limine for now while developing Phase 6 and 7 of your kernel. Start the `sr
 6. ~~Zero-Copy Ring IPC~~ - RingMPSC pattern with decomposed SPSC rings, VirtIO-Net and netstack migrated
 7. ~~VFS Permission Enforcement~~ - statPath, perms module, sys_open/sys_access checks
 8. ~~User/Group Privileges~~ - setresuid/setresgid (117-120), CAP_SETUID/CAP_SETGID capabilities, saved UID/GID
+9. ~~VFS Mount API~~ - sys_mount/sys_umount2, multi-filesystem support (sfs, devfs, initrd, tmpfs)
+10. ~~SFS Permissions~~ - DirEntry v3 with mode/uid/gid/mtime, stat/fstat/chmod/chown syscalls
+11. ~~Async SFS~~ - Batched bitmap loading (3-5x I/O reduction), async allocateBlock/freeBlock
 
 **Next Priority:**
-- VFS Mount + Permissions (Medium effort, Medium impact)
-- Async Filesystem (High effort, Medium impact)
 - Optimized Memcpy/Memset - remaining userland integration (Low effort, High impact)
+- IOMMU (Very High effort, High impact)

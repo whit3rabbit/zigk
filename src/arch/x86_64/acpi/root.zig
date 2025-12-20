@@ -10,6 +10,7 @@
 pub const rsdp = @import("rsdp.zig");
 pub const mcfg = @import("mcfg.zig");
 pub const madt = @import("madt.zig");
+pub const dmar = @import("dmar.zig");
 
 // Re-export commonly used types
 pub const Rsdp = rsdp.Rsdp;
@@ -20,6 +21,9 @@ pub const McfgEntry = mcfg.McfgEntry;
 pub const EcamInfo = mcfg.EcamInfo;
 pub const MadtInfo = madt.MadtInfo;
 pub const IoApicInfo = madt.IoApicInfo;
+pub const DmarInfo = dmar.DmarInfo;
+pub const DrhdInfo = dmar.DrhdInfo;
+pub const BDF = dmar.BDF;
 
 // Re-export commonly used functions
 pub const findTable = rsdp.findTable;
@@ -28,3 +32,5 @@ pub const logRsdpInfo = rsdp.logRsdpInfo;
 pub const logMcfgInfo = mcfg.logMcfgInfo;
 pub const parseMadt = madt.parse;
 pub const logMadtInfo = madt.logMadtInfo;
+pub const parseDmar = dmar.parse;
+pub const logDmarInfo = dmar.logDmarInfo;

@@ -37,6 +37,7 @@ pub const pit = arch.pit;
 pub const apic = arch.apic;
 pub const timing = arch.timing;
 pub const smp = arch.smp;
+pub const iommu = arch.iommu;
 
 /// Initialize the Hardware Abstraction Layer
 /// Must be called early in kernel boot before using any HAL functions

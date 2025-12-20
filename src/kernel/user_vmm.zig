@@ -785,7 +785,9 @@ pub const UserVmm = struct {
     }
 
     /// Remove VMA from list
-    fn removeVma(self: *UserVmm, vma: *Vma) void {
+    /// Public to allow rollback in syscall handlers when operations fail
+    /// after VMA insertion (e.g., copyFromKernel failure in DMA allocation).
+    pub fn removeVma(self: *UserVmm, vma: *Vma) void {
         self.vma_count -= 1;
 
         if (vma.prev) |p| {

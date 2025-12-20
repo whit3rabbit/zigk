@@ -11,6 +11,19 @@
 //   Entry: RAX=number, RDI=arg1, RSI=arg2, RDX=arg3, R10=arg4, R8=arg5, R9=arg6
 //   Return: RAX=result (if >= 0) or -errno (if < 0)
 //   Clobbers: RCX, R11 (as per SYSCALL instruction)
+//
+// SECURITY NOTES:
+//   - All syscall handlers MUST validate user pointers before dereferencing.
+//   - Use isValidUserAccess() or UserPtr wrapper for pointer validation.
+//   - Custom syscalls (1000+) require capability checks for hardware access.
+//   - Syscalls returning file descriptors must check fd table limits.
+//   - Syscalls modifying process state (uid/gid) require CAP_SETUID/CAP_SETGID.
+//
+// SECURITY CATEGORIES:
+//   CRITICAL (prctl, seccomp, capget/capset): Enable sandboxing, must be robust.
+//   HIGH (ptrace, mmap, mprotect): Can bypass security if misimplemented.
+//   MEDIUM (file ops, socket ops): Standard input validation required.
+//   LOW (getpid, uname): Read-only, minimal attack surface.
 
 // =============================================================================
 // Linux x86_64 ABI Syscalls (numerical order)
@@ -117,6 +130,24 @@ pub const SYS_SELECT: usize = 23;
 /// () -> int
 pub const SYS_SCHED_YIELD: usize = 24;
 
+/// Remap/resize a virtual memory area
+/// (old_addr, old_size, new_size, flags, new_addr) -> addr
+/// SECURITY: HIGH - can move mappings, validate all addresses
+pub const SYS_MREMAP: usize = 25;
+
+/// Synchronize file with memory map
+/// (addr, len, flags) -> int
+pub const SYS_MSYNC: usize = 26;
+
+/// Determine whether pages are resident in memory
+/// (addr, len, vec) -> int
+pub const SYS_MINCORE: usize = 27;
+
+/// Give advice about memory usage patterns
+/// (addr, len, advice) -> int
+/// SECURITY: HIGH - MADV_DONTNEED can cause data loss if misused
+pub const SYS_MADVISE: usize = 28;
+
 /// Duplicate a file descriptor
 /// (oldfd) -> newfd
 pub const SYS_DUP: usize = 32;
@@ -132,6 +163,11 @@ pub const SYS_NANOSLEEP: usize = 35;
 /// Get process ID
 /// () -> pid_t
 pub const SYS_GETPID: usize = 39;
+
+/// Transfer data between file descriptors (zero-copy)
+/// (out_fd, in_fd, offset, count) -> ssize_t
+/// SECURITY: HIGH - can copy between arbitrary fds, validate permissions
+pub const SYS_SENDFILE: usize = 40;
 
 /// Create a socket
 /// (domain, type, protocol) -> fd
@@ -182,6 +218,10 @@ pub const SYS_GETSOCKNAME: usize = 51;
 /// (fd, addr, addrlen) -> int
 pub const SYS_GETPEERNAME: usize = 52;
 
+/// Create connected socket pair
+/// (domain, type, protocol, sv) -> int
+pub const SYS_SOCKETPAIR: usize = 53;
+
 /// Set socket options
 /// (fd, level, optname, optval, optlen) -> int
 pub const SYS_SETSOCKOPT: usize = 54;
@@ -197,6 +237,11 @@ pub const SYS_CLONE: usize = 56;
 /// Create a child process
 /// () -> pid_t
 pub const SYS_FORK: usize = 57;
+
+/// Create child process sharing VM until exec/exit
+/// () -> pid_t
+/// SECURITY: HIGH - child shares parent's memory, use with care
+pub const SYS_VFORK: usize = 58;
 
 /// Execute a program
 /// (path, argv, envp) -> int
@@ -318,6 +363,15 @@ pub const SYS_GETTIMEOFDAY: usize = 96;
 /// (resource, rlim) -> int
 pub const SYS_GETRLIMIT: usize = 97;
 
+/// Get resource usage statistics
+/// (who, rusage) -> int
+pub const SYS_GETRUSAGE: usize = 98;
+
+/// Process tracing and debugging
+/// (request, pid, addr, data) -> long
+/// SECURITY: CRITICAL - can read/write arbitrary process memory
+pub const SYS_PTRACE: usize = 101;
+
 /// Get user ID
 /// () -> uid_t
 pub const SYS_GETUID: usize = 102;
@@ -362,9 +416,56 @@ pub const SYS_SETRESGID: usize = 119;
 /// (rgid, egid, sgid) -> int
 pub const SYS_GETRESGID: usize = 120;
 
+/// Get thread capabilities
+/// (header, data) -> int
+/// SECURITY: CRITICAL - part of capability-based security model
+pub const SYS_CAPGET: usize = 125;
+
+/// Set thread capabilities
+/// (header, data) -> int
+/// SECURITY: CRITICAL - can elevate privileges if misimplemented
+pub const SYS_CAPSET: usize = 126;
+
+/// Examine pending signals
+/// (set, sigsetsize) -> int
+pub const SYS_RT_SIGPENDING: usize = 127;
+
+/// Synchronously wait for queued signals
+/// (set, info, timeout, sigsetsize) -> int
+pub const SYS_RT_SIGTIMEDWAIT: usize = 128;
+
+/// Queue a signal with info to a process
+/// (tgid, sig, info) -> int
+pub const SYS_RT_SIGQUEUEINFO: usize = 129;
+
+/// Wait for a signal, replacing signal mask
+/// (mask, sigsetsize) -> int
+pub const SYS_RT_SIGSUSPEND: usize = 130;
+
 /// Set/get signal stack context
 /// (ss, old_ss) -> int
 pub const SYS_SIGALTSTACK: usize = 131;
+
+/// Lock memory pages to prevent swapping
+/// (addr, len) -> int
+pub const SYS_MLOCK: usize = 149;
+
+/// Unlock memory pages
+/// (addr, len) -> int
+pub const SYS_MUNLOCK: usize = 150;
+
+/// Lock all memory pages
+/// (flags) -> int
+pub const SYS_MLOCKALL: usize = 151;
+
+/// Unlock all memory pages
+/// () -> int
+pub const SYS_MUNLOCKALL: usize = 152;
+
+/// Process control operations
+/// (option, arg2, arg3, arg4, arg5) -> int
+/// SECURITY: CRITICAL - controls capabilities, seccomp, memory protection
+pub const SYS_PRCTL: usize = 157;
 
 /// Set architecture-specific thread state
 /// (code, addr) -> int
@@ -373,6 +474,10 @@ pub const SYS_ARCH_PRCTL: usize = 158;
 /// Set resource limits
 /// (resource, rlim) -> int
 pub const SYS_SETRLIMIT: usize = 160;
+
+/// Commit buffer cache to disk
+/// () -> void
+pub const SYS_SYNC: usize = 162;
 
 /// Mount a filesystem
 /// (source, target, fstype, flags, data) -> int
@@ -422,13 +527,156 @@ pub const SYS_EPOLL_WAIT: usize = 232;
 /// (epfd, op, fd, event) -> int
 pub const SYS_EPOLL_CTL: usize = 233;
 
+/// Get thread ID
+/// () -> pid_t
+pub const SYS_GETTID: usize = 186;
+
 /// Send signal to a specific thread
 /// (tid, sig) -> int
 pub const SYS_TKILL: usize = 200;
 
+/// Create a POSIX per-process timer
+/// (clockid, sevp, timerid) -> int
+pub const SYS_TIMER_CREATE: usize = 222;
+
+/// Arm/disarm a POSIX per-process timer
+/// (timerid, flags, new_value, old_value) -> int
+pub const SYS_TIMER_SETTIME: usize = 223;
+
+/// Get POSIX per-process timer state
+/// (timerid, curr_value) -> int
+pub const SYS_TIMER_GETTIME: usize = 224;
+
+/// Get overrun count for a POSIX timer
+/// (timerid) -> int
+pub const SYS_TIMER_GETOVERRUN: usize = 225;
+
+/// Delete a POSIX per-process timer
+/// (timerid) -> int
+pub const SYS_TIMER_DELETE: usize = 226;
+
+/// High-resolution sleep with clock selection
+/// (clockid, flags, request, remain) -> int
+pub const SYS_CLOCK_NANOSLEEP: usize = 230;
+
+/// Initialize an inotify instance
+/// () -> fd
+pub const SYS_INOTIFY_INIT: usize = 253;
+
+/// Add watch to inotify instance
+/// (fd, pathname, mask) -> int (watch descriptor)
+pub const SYS_INOTIFY_ADD_WATCH: usize = 254;
+
+/// Remove watch from inotify instance
+/// (fd, wd) -> int
+pub const SYS_INOTIFY_RM_WATCH: usize = 255;
+
 /// Open file relative to a directory FD
 /// (dfd, filename, flags, mode) -> int
 pub const SYS_OPENAT: usize = 257;
+
+/// Create directory relative to directory FD
+/// (dfd, pathname, mode) -> int
+pub const SYS_MKDIRAT: usize = 258;
+
+/// Create special/device file relative to directory FD
+/// (dfd, pathname, mode, dev) -> int
+pub const SYS_MKNODAT: usize = 259;
+
+/// Change ownership relative to directory FD
+/// (dfd, pathname, uid, gid, flags) -> int
+pub const SYS_FCHOWNAT: usize = 260;
+
+/// Get file status relative to directory FD
+/// (dfd, pathname, statbuf, flags) -> int
+/// SECURITY: Replaces stat/lstat, prevents TOCTOU
+pub const SYS_NEWFSTATAT: usize = 262;
+
+/// Delete file/directory relative to directory FD
+/// (dfd, pathname, flags) -> int
+pub const SYS_UNLINKAT: usize = 263;
+
+/// Rename file relative to directory FDs
+/// (olddfd, oldpath, newdfd, newpath) -> int
+pub const SYS_RENAMEAT: usize = 264;
+
+/// Create hard link relative to directory FDs
+/// (olddfd, oldpath, newdfd, newpath, flags) -> int
+pub const SYS_LINKAT: usize = 265;
+
+/// Create symlink relative to directory FD
+/// (target, newdfd, linkpath) -> int
+pub const SYS_SYMLINKAT: usize = 266;
+
+/// Read symlink relative to directory FD
+/// (dfd, pathname, buf, bufsize) -> ssize_t
+pub const SYS_READLINKAT: usize = 267;
+
+/// Change permissions relative to directory FD
+/// (dfd, pathname, mode, flags) -> int
+pub const SYS_FCHMODAT: usize = 268;
+
+/// Check access relative to directory FD
+/// (dfd, pathname, mode, flags) -> int
+/// SECURITY: Replaces access, prevents TOCTOU
+pub const SYS_FACCESSAT: usize = 269;
+
+/// Disassociate parts of execution context
+/// (flags) -> int
+/// SECURITY: HIGH - enables namespace isolation for containers
+pub const SYS_UNSHARE: usize = 272;
+
+/// Splice data between file descriptors
+/// (fd_in, off_in, fd_out, off_out, len, flags) -> ssize_t
+pub const SYS_SPLICE: usize = 275;
+
+/// Duplicate pipe content
+/// (fd_in, fd_out, len, flags) -> ssize_t
+pub const SYS_TEE: usize = 276;
+
+/// Sync file segment with disk
+/// (fd, offset, nbytes, flags) -> int
+pub const SYS_SYNC_FILE_RANGE: usize = 277;
+
+/// Splice user pages into pipe
+/// (iov, nr_segs, flags) -> ssize_t
+pub const SYS_VMSPLICE: usize = 278;
+
+/// Wait for I/O events with signal mask
+/// (epfd, events, maxevents, timeout, sigmask, sigsetsize) -> int
+pub const SYS_EPOLL_PWAIT: usize = 281;
+
+/// Create file descriptor for signal handling
+/// (fd, mask, flags) -> fd
+pub const SYS_SIGNALFD: usize = 282;
+
+/// Create timer as file descriptor
+/// (clockid, flags) -> fd
+pub const SYS_TIMERFD_CREATE: usize = 283;
+
+/// Create event notification file descriptor
+/// (initval, flags) -> fd
+pub const SYS_EVENTFD: usize = 284;
+
+/// Pre-allocate file space
+/// (fd, mode, offset, len) -> int
+pub const SYS_FALLOCATE: usize = 285;
+
+/// Arm/disarm timerfd
+/// (fd, flags, new_value, old_value) -> int
+pub const SYS_TIMERFD_SETTIME: usize = 286;
+
+/// Get timerfd state
+/// (fd, curr_value) -> int
+pub const SYS_TIMERFD_GETTIME: usize = 287;
+
+/// signalfd with flags
+/// (fd, mask, sizemask, flags) -> fd
+pub const SYS_SIGNALFD4: usize = 289;
+
+/// eventfd with flags
+/// (initval, flags) -> fd
+pub const SYS_EVENTFD2: usize = 290;
 
 /// Send signal to a thread in a thread group
 /// (tgid, tid, sig) -> int
@@ -446,9 +694,51 @@ pub const SYS_DUP3: usize = 292;
 /// (pipefd, flags) -> int
 pub const SYS_PIPE2: usize = 293;
 
+/// Initialize inotify instance with flags
+/// (flags) -> fd
+pub const SYS_INOTIFY_INIT1: usize = 294;
+
+/// Read data at offset into multiple buffers
+/// (fd, iov, iovcnt, offset) -> ssize_t
+pub const SYS_PREADV: usize = 295;
+
+/// Write data from multiple buffers at offset
+/// (fd, iov, iovcnt, offset) -> ssize_t
+pub const SYS_PWRITEV: usize = 296;
+
+/// Get/set resource limits for any process
+/// (pid, resource, new_limit, old_limit) -> int
+pub const SYS_PRLIMIT64: usize = 302;
+
+/// Sync single filesystem to disk
+/// (fd) -> int
+pub const SYS_SYNCFS: usize = 306;
+
+/// Reassociate thread with a namespace
+/// (fd, nstype) -> int
+/// SECURITY: HIGH - can enter other processes' namespaces
+pub const SYS_SETNS: usize = 308;
+
+/// Rename file with flags (atomic exchange, noreplace)
+/// (olddfd, oldpath, newdfd, newpath, flags) -> int
+pub const SYS_RENAMEAT2: usize = 316;
+
+/// Secure computing mode (syscall filtering)
+/// (op, flags, args) -> int
+/// SECURITY: CRITICAL - primary sandboxing mechanism
+pub const SYS_SECCOMP: usize = 317;
+
 /// Get random bytes
 /// (buf, count, flags) -> ssize_t
 pub const SYS_GETRANDOM: usize = 318;
+
+/// Create anonymous file for memory sharing
+/// (name, flags) -> fd
+pub const SYS_MEMFD_CREATE: usize = 319;
+
+/// Copy data between file descriptors (server-side)
+/// (fd_in, off_in, fd_out, off_out, len, flags) -> ssize_t
+pub const SYS_COPY_FILE_RANGE: usize = 326;
 
 // =============================================================================
 // io_uring Syscalls (425-427)
@@ -465,6 +755,15 @@ pub const SYS_IO_URING_ENTER: usize = 426;
 /// Register resources with io_uring
 /// (ring_fd, opcode, arg, nr_args) -> int
 pub const SYS_IO_URING_REGISTER: usize = 427;
+
+// =============================================================================
+// Modern Process Creation (435)
+// =============================================================================
+
+/// Create child process with extensible arguments
+/// (cl_args, size) -> pid_t
+/// Modern replacement for clone() with extensible struct
+pub const SYS_CLONE3: usize = 435;
 
 // =============================================================================
 // Zscapek Custom Extensions (1000-1999)
@@ -623,3 +922,19 @@ pub const SYS_RING_NOTIFY: usize = 1044;
 /// (ring_ids_ptr, ring_count, min_entries, timeout_ns) -> ring_id with entries or -errno
 /// Polls all rings, sleeps if all empty, returns first ring with data
 pub const SYS_RING_WAIT_ANY: usize = 1045;
+
+// =============================================================================
+// IOMMU-protected DMA syscalls (1046-1047)
+// =============================================================================
+
+/// Allocate IOMMU-protected DMA memory for a specific device
+/// (result_ptr, page_count, device_bdf) -> 0 or -errno
+/// Returns IommuDmaResult{virt_addr, dma_addr, size, is_iova} at result_ptr
+/// dma_addr is IOVA if IOMMU available, physical address if fallback
+/// Requires IommuDmaCapability for the specified device BDF
+pub const SYS_ALLOC_IOMMU_DMA: usize = 1046;
+
+/// Free IOMMU-protected DMA memory
+/// (virt_addr, size, device_bdf, dma_addr) -> 0 or -errno
+/// Releases IOVA mapping if IOMMU was used
+pub const SYS_FREE_IOMMU_DMA: usize = 1047;

@@ -21,8 +21,8 @@ pub const AccessRequest = enum(u8) {
 /// Check if process can access file with requested permissions
 ///
 /// Order of checks:
-/// 1. Root (euid == 0) bypasses all checks
-/// 2. POSIX mode bits checked against euid/egid
+/// 1. Root (euid == 0) bypasses most checks (execute requires at least one x bit)
+/// 2. POSIX mode bits checked against euid/egid/supplementary groups
 /// 3. FileCapability checked as fallback grant
 ///
 /// Returns: true if access allowed, false if denied
@@ -33,21 +33,30 @@ pub fn checkAccess(
     request: AccessRequest,
     path: []const u8,
 ) bool {
-    // Root bypass - euid 0 can access anything
-    if (proc.euid == 0) return true;
+    // Root bypass - euid 0 can access anything EXCEPT:
+    // For execute permission, at least one execute bit must be set (POSIX requirement)
+    if (proc.euid == 0) {
+        if (request == .Execute) {
+            // Root can only execute if at least one x bit is set
+            const any_exec = (file_meta.mode & 0o111) != 0;
+            return any_exec;
+        }
+        return true;
+    }
 
     // Extract permission bits (lower 9 bits)
     const mode = file_meta.mode & 0o777;
 
     // Determine which permission set applies based on uid/gid
-    var applicable_bits: u32 = undefined;
+    // Initialize to 0 for safety (will be overwritten in all branches)
+    var applicable_bits: u32 = 0;
 
     if (proc.euid == file_meta.uid) {
         // Owner permissions (bits 6-8)
         applicable_bits = (mode >> 6) & 7;
-    } else if (proc.egid == file_meta.gid) {
+    } else if (proc.isGroupMember(file_meta.gid)) {
         // Group permissions (bits 3-5)
-        // Note: This is simplified - Linux also checks supplementary groups
+        // Checks egid AND supplementary groups per POSIX
         applicable_bits = (mode >> 3) & 7;
     } else {
         // Other permissions (bits 0-2)

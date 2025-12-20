@@ -6,9 +6,12 @@
 const std = @import("std");
 const console = @import("console");
 const io = @import("io");
-const usb = @import("../xhci/root.zig"); // Access to generic USB types/transfer
+
+// Use specific imports to avoid cycle with root.zig
+const types = @import("../xhci/types.zig");
 const device = @import("../xhci/device.zig");
-const usb_types = @import("../types.zig");
+const context = @import("../xhci/context.zig");
+const transfer = @import("../xhci/transfer/control.zig"); 
 
 // =============================================================================
 // Constants and Types
@@ -34,7 +37,6 @@ pub const Request = enum(u8) {
 };
 
 // Hub Class Feature Selectors (Table 11-17)
-// Hub Class Feature Selectors (Table 11-17)
 pub const HubFeature = enum(u16) {
     C_HUB_LOCAL_POWER = 0,
     C_HUB_OVER_CURRENT = 1,
@@ -58,7 +60,6 @@ pub const PortFeature = enum(u16) {
 };
 
 /// Hub Descriptor (Table 11-13)
-/// Note: Variable length due to DeviceRemovable and PortPwrCtrlMask
 pub const HubDescriptor = extern struct {
     bDescLength: u8,
     bDescriptorType: u8, // 0x29
@@ -67,8 +68,6 @@ pub const HubDescriptor = extern struct {
     bPwrOn2PwrGood: u8, // Time in 2ms intervals
     bHubContrCurrent: u8,
     // Variable length fields follow, handled manually
-    // DeviceRemovable: [bNbrPorts/8 + 1]u8
-    // PortPwrCtrlMask: [bNbrPorts/8 + 1]u8
 
     pub const TYPE = 0x29;
 };
@@ -105,9 +104,19 @@ pub const PortStatus = extern struct {
 // Driver State
 // =============================================================================
 
+/// Function pointer type for enumerating devices (breaks dependency cycle)
+pub const EnumerateDeviceFn = *const fn (
+    ctrl: *types.Controller,
+    parent: ?*device.UsbDevice,
+    port_num: u8,
+    route_string: u20,
+    root_port_num: u8,
+    speed_override: ?context.Speed
+) anyerror!?*device.UsbDevice;
+
 pub const HubDriver = struct {
     dev: *device.UsbDevice,
-    ctrl: *usb.Controller,
+    ctrl: *types.Controller,
 
     // Hub Properties
     num_ports: u8 = 0,
@@ -116,13 +125,17 @@ pub const HubDriver = struct {
     // Endpoints
     int_in_ep: u8 = 0, // Endpoint address
 
+    // Callback
+    enumerate_fn: EnumerateDeviceFn,
+
     const Self = @This();
 
-    pub fn init(ctrl: *usb.Controller, dev: *device.UsbDevice, ep_in: u8) Self {
+    pub fn init(ctrl: *types.Controller, dev: *device.UsbDevice, ep_in: u8, enumerate_fn: EnumerateDeviceFn) Self {
         return Self{
             .dev = dev,
             .ctrl = ctrl,
             .int_in_ep = ep_in,
+            .enumerate_fn = enumerate_fn,
         };
     }
 
@@ -131,7 +144,7 @@ pub const HubDriver = struct {
         console.info("HUB: Configuring Hub...", .{});
 
         // 1. Get Hub Descriptor
-        var desc_buf: [32]u8 align(@alignOf(HubDescriptor)) = undefined; // Max size for standard hub desc
+        var desc_buf: [32]u8 align(@alignOf(HubDescriptor)) = undefined; 
         try self.getHubDescriptor(&desc_buf);
         
         const desc: *const HubDescriptor = @ptrCast(&desc_buf);
@@ -140,11 +153,7 @@ pub const HubDriver = struct {
             return error.InvalidDescriptor;
         }
 
-        // Security: Validate port count from device-controlled descriptor
-        // USB 2.0 hubs support up to 127 ports (7-bit addressing)
-        // USB 3.0 hubs support up to 15 ports per tier
-        // Reject 0 or excessive values to prevent iteration attacks
-        const max_hub_ports: u8 = 127; // USB 2.0 spec maximum
+        const max_hub_ports: u8 = 127; 
         if (desc.bNbrPorts == 0 or desc.bNbrPorts > max_hub_ports) {
             console.err("HUB: Invalid port count {d} (must be 1-{d})", .{ desc.bNbrPorts, max_hub_ports });
             return error.InvalidDescriptor;
@@ -158,7 +167,7 @@ pub const HubDriver = struct {
         // 2. Power On All Ports
         var i: u8 = 1;
         while (i <= self.num_ports) : (i += 1) {
-            console.debug("HUB: Powering Port {d}", .{i});
+            // console.debug("HUB: Powering Port {d}", .{i});
             self.setPortFeature(i, .PORT_POWER) catch |err| {
                  console.warn("HUB: Failed to power port {d}: {}", .{i, err});
             };
@@ -167,8 +176,8 @@ pub const HubDriver = struct {
         // 3. Wait for power to stabilize
         if (self.power_on_delay_ms > 0) {
             const delay_ns: u64 = @as(u64, self.power_on_delay_ms) * 1_000_000;
-            io.kernel_io.sleep(delay_ns) catch |err| {
-                console.warn("HUB: Sleep failed during power delay: {}", .{err});
+            io.kernel_io.sleep(delay_ns) catch {
+                console.warn("HUB: Failed to sleep for power-on delay, busy-waiting instead.", .{});
                 self.busyWaitMs(self.power_on_delay_ms);
             };
         }
@@ -180,7 +189,7 @@ pub const HubDriver = struct {
 
     /// Send Get Hub Descriptor Request
     fn getHubDescriptor(self: *Self, buffer: []u8) !void {
-        const transferred = try usb.Transfer.controlTransfer(
+        const transferred = try transfer.controlTransfer(
             self.ctrl,
             self.dev,
             @bitCast(@as(u8, 0xA0)), // Dir=IN, Type=Class, Recip=Device
@@ -188,10 +197,10 @@ pub const HubDriver = struct {
             @as(u16, HubDescriptor.TYPE) << 8, // wValue (Descriptor Type)
             0, // wIndex
             buffer,
-            usb.Transfer.CONTROL_TIMEOUT_MS,
+            transfer.CONTROL_TIMEOUT_MS,
         );
         
-        if (transferred < 7) { // Min Hub Desc length
+        if (transferred < 7) { 
              return error.ShortTransfer;
         }
     }
@@ -201,15 +210,15 @@ pub const HubDriver = struct {
         var status: HubStatus = undefined;
         const buffer = std.mem.asBytes(&status);
 
-        const transferred = try usb.Transfer.controlTransfer(
+        const transferred = try transfer.controlTransfer(
             self.ctrl,
             self.dev,
-            @bitCast(@as(u8, 0xA0)), // Dir=IN, Type=Class, Recip=Device
+            @bitCast(@as(u8, 0xA0)), 
             @intFromEnum(Request.GET_STATUS),
-            0, // wValue
-            0, // wIndex
+            0, 
+            0, 
             buffer,
-            usb.Transfer.CONTROL_TIMEOUT_MS,
+            transfer.CONTROL_TIMEOUT_MS,
         );
 
         if (transferred != 4) return error.ShortTransfer;
@@ -218,29 +227,29 @@ pub const HubDriver = struct {
 
     /// Clear Hub Feature
     fn clearHubFeature(self: *Self, feature: HubFeature) !void {
-        _ = try usb.Transfer.controlTransfer(
+        _ = try transfer.controlTransfer(
             self.ctrl,
             self.dev,
             @bitCast(@as(u8, 0x20)), // Dir=OUT, Type=Class, Recip=Device
             @intFromEnum(Request.CLEAR_FEATURE),
             @intFromEnum(feature),
-            0, // wIndex
+            0, 
             null,
-            usb.Transfer.CONTROL_TIMEOUT_MS,
+            transfer.CONTROL_TIMEOUT_MS,
         );
     }
 
     /// Set Port Feature
     fn setPortFeature(self: *Self, port: u8, feature: PortFeature) !void {
-        _ = try usb.Transfer.controlTransfer(
+        _ = try transfer.controlTransfer(
             self.ctrl,
             self.dev,
             @bitCast(@as(u8, 0x23)), // Dir=OUT, Type=Class, Recip=Other (Port)
-            @intFromEnum(Request.SET_FEATURE), // bRequest
-            @intFromEnum(feature), // wValue
-            @as(u16, port), // wIndex
+            @intFromEnum(Request.SET_FEATURE), 
+            @intFromEnum(feature), 
+            @as(u16, port), 
             null,
-            usb.Transfer.CONTROL_TIMEOUT_MS,
+            transfer.CONTROL_TIMEOUT_MS,
         );
     }
     
@@ -249,15 +258,15 @@ pub const HubDriver = struct {
         var status: PortStatus = undefined;
         const buffer = std.mem.asBytes(&status);
         
-        const transferred = try usb.Transfer.controlTransfer(
+        const transferred = try transfer.controlTransfer(
             self.ctrl,
             self.dev,
             @bitCast(@as(u8, 0xA3)), // Dir=IN, Type=Class, Recip=Other (Port)
             @intFromEnum(Request.GET_STATUS),
-            0, // wValue
-            @as(u16, port), // wIndex
+            0, 
+            @as(u16, port), 
             buffer,
-            usb.Transfer.CONTROL_TIMEOUT_MS,
+            transfer.CONTROL_TIMEOUT_MS,
         );
         
         if (transferred != 4) return error.ShortTransfer;
@@ -267,8 +276,31 @@ pub const HubDriver = struct {
 
     /// Start polling for status changes
     pub fn checkStatus(self: *Self) !void {
-        // Start interrupt polling via XHCI controller
-        try self.ctrl.startInterruptPolling(self.dev);
+        // Start interrupt polling via XHCI controller (using device manager through callback?)
+        // Wait, startInterruptPolling is in device_manager.zig.
+        // But HubDriver doesn't know about device_manager.zig.
+        // It knows about self.ctrl and self.dev.
+        // The original code called self.ctrl.startInterruptPolling(self.dev).
+        // Since Controller has no methods, this fails.
+        // I need pass a callback for polling too? Or assume enumerate_fn is enough?
+        // Wait, checkStatus -> startInterruptPolling.
+        // startInterruptPolling -> queueInterruptTransfer.
+        // queueInterruptTransfer is in transfer/interrupt.zig.
+        // hub.zig can import transfer/interrupt.zig?
+        // No, startInterruptPolling also sets device state to .polling.
+        // I should probably move startInterruptPolling to `transfer/interrupt.zig` or keep in `device_manager`.
+        
+        // Strategy:
+        // Import `transfer/interrupt.zig` here and use it directly?
+        // `const interrupt_transfer = @import("../xhci/transfer/interrupt.zig");`
+        // `interrupt_transfer.queueInterruptTransfer(self.ctrl, self.dev);`
+        // `self.dev.state = .polling;`
+        // This duplicates logic from `device_manager.startInterruptPolling`.
+        // But acceptable.
+        
+        const interrupt_transfer = @import("../xhci/transfer/interrupt.zig");
+        try interrupt_transfer.queueInterruptTransfer(self.ctrl, self.dev);
+        self.dev.state = .polling;
     }
 
     /// Handle Interrupt IN report (Status Change Bitmap)
@@ -304,7 +336,6 @@ pub const HubDriver = struct {
         
         // Handle Connect Status Change
         if ((status.wPortChange & PortStatus.C_CONNECTION) != 0) {
-            // Clear change bit first
             try self.setPortFeature(port, .C_PORT_CONNECTION);
             
             if ((status.wPortStatus & PortStatus.CONNECTION) != 0) {
@@ -316,26 +347,16 @@ pub const HubDriver = struct {
             }
         }
         
-        // Handle Port Reset Change (Completion)
         if ((status.wPortChange & PortStatus.C_RESET) != 0) {
             try self.setPortFeature(port, .C_PORT_RESET);
             console.info("HUB: Port {d} Reset Complete", .{port});
-            // Enumeration continues in handleConnect after reset
         }
     }
 
     /// Handle Device Connection
     fn handleConnect(self: *Self, port: u8) !void {
-        // 1. Debounce (wait 100ms) - Simplified for now
-        // 2. Reset Port
         console.info("HUB: Resetting Port {d}...", .{port});
         try self.setPortFeature(port, .PORT_RESET);
-        
-        // Wait for reset to complete (hardware should set C_PORT_RESET)
-        // For now, we poll or rely on interrupt again? 
-        // Standard flow: Reset sets PORT_RESET, clears when done, sets C_PORT_RESET.
-        // We can wait here synchronously or wait for next interrupt.
-        // Synchronous is easier for initial implementation.
         
         var timeout: u32 = 100;
         while (timeout > 0) : (timeout -= 1) {
@@ -343,25 +364,21 @@ pub const HubDriver = struct {
             if ((status.wPortChange & PortStatus.C_RESET) != 0) {
                 break;
             }
-            // Basic delay
              var delay: u32 = 10000;
             while (delay > 0) : (delay -= 1) {
                 std.atomic.spinLoopHint();
             }
         }
         
-        // Clear C_PORT_RESET
         try self.setPortFeature(port, .C_PORT_RESET);
         
-        // Check if enabled
         const status = try self.getPortStatus(port);
         if ((status.wPortStatus & PortStatus.ENABLE) == 0) {
             console.err("HUB: Port {d} failed to enable after reset", .{port});
             return error.ResetFailed;
         }
 
-        // Determine speed
-        var speed: usb.Context.Speed = .full_speed; // Default
+        var speed: context.Speed = .full_speed; 
         if ((status.wPortStatus & PortStatus.LOW_SPEED) != 0) {
             speed = .low_speed;
         } else if ((status.wPortStatus & PortStatus.HIGH_SPEED) != 0) {
@@ -370,25 +387,24 @@ pub const HubDriver = struct {
 
         console.info("HUB: Port {d} Enabled, Speed={}, Enumerating...", .{port, @intFromEnum(speed)});
 
-        // Calculate Route String for new device
         var route_string: u20 = 0;
         if (self.dev.parent != null) {
-             // Assume Tier 1 Hub for now -> Route = port.
              route_string = port;
         } else {
-             // Hub is on Root Hub. Route String = port number of THIS port on the hub.
              route_string = port;
         }
 
-        // Call recursive enumeration
-       const maybe_child = try self.ctrl.enumerateDevice(self.dev, port, route_string, self.dev.port, speed);
+        // Call recursive enumeration via callback
+       const maybe_child = try self.enumerate_fn(self.ctrl, self.dev, port, route_string, self.dev.port, speed);
        
-       // Start polling if child needs it
        if (maybe_child) |child| {
+           // Start polling for child devices that need it
+           const interrupt_tr = @import("../xhci/transfer/interrupt.zig");
            if (child.is_hub or child.hid_driver.is_keyboard or child.hid_driver.is_mouse) {
-               self.ctrl.startInterruptPolling(child) catch |err| {
+               interrupt_tr.queueInterruptTransfer(self.ctrl, child) catch |err| {
                    console.err("HUB: Failed to start child polling: {}", .{err});
                };
+               child.state = .polling;
            }
        }
     }
@@ -411,17 +427,11 @@ pub const HubDriver = struct {
         };
 
         if ((status.wHubChange & 1) != 0) {
-            console.warn("HUB: Local power change", .{});
-            self.clearHubFeature(.C_HUB_LOCAL_POWER) catch |err| {
-                console.warn("HUB: Failed to clear local power change: {}", .{err});
-            };
+            self.clearHubFeature(.C_HUB_LOCAL_POWER) catch {};
         }
 
         if ((status.wHubChange & 2) != 0) {
-            console.warn("HUB: Over-current change", .{});
-            self.clearHubFeature(.C_HUB_OVER_CURRENT) catch |err| {
-                console.warn("HUB: Failed to clear over-current change: {}", .{err});
-            };
+            self.clearHubFeature(.C_HUB_OVER_CURRENT) catch {};
         }
     }
 

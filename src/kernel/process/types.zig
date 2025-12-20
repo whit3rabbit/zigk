@@ -109,6 +109,9 @@ pub const Process = struct {
     /// SECURITY: Cumulative DMA pages allocated by this process.
     dma_allocated_pages: u32 = 0,
 
+    /// SECURITY: Cumulative IOMMU DMA bytes allocated by this process.
+    iommu_allocated_bytes: u64 = 0,
+
     /// Current Working Directory
     cwd: [uapi.abi.MAX_PATH]u8,
     cwd_len: usize,
@@ -130,6 +133,12 @@ pub const Process = struct {
     /// Saved set-user-ID and set-group-ID (for setresuid/setresgid)
     suid: u32 = 0,
     sgid: u32 = 0,
+
+    /// Supplementary group IDs (POSIX supplementary groups)
+    /// NGROUPS_MAX is typically 32 on Linux; we use 16 for simplicity
+    supplementary_groups: [16]u32 = [_]u32{0} ** 16,
+    supplementary_groups_count: u8 = 0,
+
     /// Resource limits (DoS protection)
     /// Maximum virtual address space size (default 256 MB)
     rlimit_as: u64 = 256 * 1024 * 1024,
@@ -345,19 +354,54 @@ pub const Process = struct {
         return false;
     }
 
-    /// Check if process has PCI config space capability
-    pub fn hasPciConfigCapability(self: *Process, bus: u8, device: u5, func: u3) bool {
+    /// Get the maximum DMA pages allowed by capability.
+    /// Returns 0 if no DmaMemory capability exists.
+    /// Used for atomic reservation pattern to prevent TOCTOU races.
+    pub fn getDmaCapabilityLimit(self: *Process) u32 {
         for (self.capabilities.items) |cap| {
             switch (cap) {
-                .PciConfig => |pci_cap| {
-                    if (pci_cap.bus == bus and pci_cap.device == device and pci_cap.func == func) {
-                        return true;
+                .DmaMemory => |dma_cap| return dma_cap.max_pages,
+                else => {},
+            }
+        }
+        return 0;
+    }
+
+    /// Get IOMMU DMA capability for a specific device
+    /// Returns the capability if found, null otherwise
+    pub fn getIommuDmaCapability(self: *Process, bus: u8, device: u5, func: u3) ?capabilities.IommuDmaCapability {
+        for (self.capabilities.items) |cap| {
+            switch (cap) {
+                .IommuDma => |iommu_cap| {
+                    if (iommu_cap.bus == bus and iommu_cap.device == device and iommu_cap.func == func) {
+                        return iommu_cap;
                     }
                 },
                 else => {},
             }
         }
-        return false;
+        return null;
+    }
+
+    /// Check if process has PCI config space capability
+    pub fn hasPciConfigCapability(self: *Process, bus: u8, device: u5, func: u3) bool {
+        return self.getPciConfigCapability(bus, device, func) != null;
+    }
+
+    /// Get PCI config space capability for a device (returns null if not found)
+    /// SECURITY: Use this to check allow_unsafe flag before writing restricted registers
+    pub fn getPciConfigCapability(self: *Process, bus: u8, device: u5, func: u3) ?capabilities.PciConfigCapability {
+        for (self.capabilities.items) |cap| {
+            switch (cap) {
+                .PciConfig => |pci_cap| {
+                    if (pci_cap.bus == bus and pci_cap.device == device and pci_cap.func == func) {
+                        return pci_cap;
+                    }
+                },
+                else => {},
+            }
+        }
+        return null;
     }
 
     /// Check if process has input injection capability
@@ -407,6 +451,20 @@ pub const Process = struct {
                 else => {},
             }
         }
+        return false;
+    }
+
+    /// Check if process is member of a group (egid or supplementary)
+    /// Used for POSIX permission checking
+    pub fn isGroupMember(self: *const Process, gid: u32) bool {
+        // Check primary effective group
+        if (self.egid == gid) return true;
+
+        // Check supplementary groups
+        for (self.supplementary_groups[0..self.supplementary_groups_count]) |sg| {
+            if (sg == gid) return true;
+        }
+
         return false;
     }
 };

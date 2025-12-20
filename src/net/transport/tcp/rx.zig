@@ -87,6 +87,9 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
 
         // Acquire TCB lock while holding state lock
         const held = tcb.mutex.acquire();
+        // SECURITY: Capture generation before releasing state lock to detect
+        // if TCB is freed and reallocated by another thread (TOCTOU mitigation)
+        const expected_generation = tcb.generation;
         state.lock.release();
 
         // Process packet with TCB lock held (state lock released)
@@ -96,9 +99,10 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
         // Handle deferred cleanup
         if (action == .FreeTcb) {
             state.lock.acquire();
-            // Verify TCB is still valid before freeing (prevent double-free)
-            // Another thread (e.g. close()) might have beaten us to it
-            if (state.isTcbValid(tcb)) {
+            // SECURITY: Verify both pointer validity AND generation match.
+            // Generation check prevents freeing a reallocated TCB that now
+            // belongs to a different connection.
+            if (state.isTcbValid(tcb) and tcb.generation == expected_generation) {
                 state.freeTcb(tcb);
             }
             state.lock.release();
@@ -147,14 +151,19 @@ fn processListenPacket(
         return true;
     }
 
+    // SECURITY: Acquire state.lock BEFORE checking half-open count to prevent
+    // race where multiple threads bypass the limit check simultaneously.
+    // This ensures atomic check-and-allocate for SYN flood mitigation.
+    state.lock.acquire();
+
     if (state.countHalfOpen() >= c.MAX_HALF_OPEN) {
-         if (!state.evictOldestHalfOpenTcb()) {
-             return false;
-         }
+        if (!state.evictOldestHalfOpenTcbUnlocked()) {
+            state.lock.release();
+            return false;
+        }
     }
 
-    // Allocate TCB - MUST acquire state.lock as allocateTcb touches global pool
-    state.lock.acquire();
+    // Allocate TCB (state.lock already held)
     const new_tcb = state.allocateTcb();
     if (new_tcb == null) {
         state.lock.release();
@@ -464,6 +473,10 @@ fn processEstablished(tcb: *Tcb, pkt: *PacketBuffer, tcp_hdr: *TcpHeader) RxActi
 
             const real_acked = ack -% tcb.snd_una;
             tcb.snd_una = ack;
+            // LOCKING: send_tail update requires TCB mutex (held by caller).
+            // Application-side send operations (tcpSend) must also hold TCB mutex
+            // when reading send_head/send_tail to calculate available space.
+            // This ensures consistent view of circular buffer state.
             tcb.send_tail = (tcb.send_tail + real_acked) % c.BUFFER_SIZE;
             if (tcb.snd_una == tcb.snd_nxt) {
                 tcb.retrans_timer = 0;
@@ -497,10 +510,20 @@ fn processEstablished(tcb: *Tcb, pkt: *PacketBuffer, tcp_hdr: *TcpHeader) RxActi
     const ip_payload_len = ip_hdr.getTotalLength() - ip_hdr.getHeaderLength();
 
     if (ip_payload_len > data_offset) {
-        const data_len = ip_payload_len - data_offset;
         const data_start = pkt.transport_offset + data_offset;
 
-        if (data_start > pkt.len or data_len > pkt.len - data_start) {
+        // SECURITY: Validate bounds before calculating data_len to prevent
+        // slice operations on malformed packets from panicking in ReleaseSafe
+        if (data_start >= pkt.len) {
+            return .Continue;
+        }
+
+        const max_available = pkt.len - data_start;
+        const claimed_len = ip_payload_len - data_offset;
+        // Clamp to actual available data - malformed packets may claim more
+        const data_len = @min(claimed_len, max_available);
+
+        if (data_len == 0) {
             return .Continue;
         }
 
@@ -515,7 +538,10 @@ fn processEstablished(tcb: *Tcb, pkt: *PacketBuffer, tcp_hdr: *TcpHeader) RxActi
             }
 
             const copy_len = if (delivered_async) data_len else blk: {
-                const space = c.BUFFER_SIZE - tcb.recvBufferAvailable();
+                // SECURITY: Validate recvBufferAvailable() before subtraction to prevent
+                // integer underflow if indices are corrupted (e.g., via race condition)
+                const available = tcb.recvBufferAvailable();
+                const space = if (available >= c.BUFFER_SIZE) 0 else c.BUFFER_SIZE - available;
                 const len = @min(data_len, space);
 
                 for (0..len) |i| {
@@ -633,12 +659,12 @@ fn processClosing(tcb: *Tcb, tcp_hdr: *TcpHeader) RxAction {
 }
 
 fn processTimeWait(tcb: *Tcb, tcp_hdr: *TcpHeader) RxAction {
+    // SECURITY: Ignore RST in TIME_WAIT per RFC 6528 to prevent TIME_WAIT
+    // assassination attacks. An attacker who knows a connection was recently
+    // closed could send a spoofed RST to prematurely terminate TIME_WAIT,
+    // allowing 4-tuple reuse and potential data corruption from late duplicates.
+    // The 2MSL timeout will naturally clean up this TCB.
     if (tcp_hdr.hasFlag(TcpHeader.FLAG_RST)) {
-        const seq = tcp_hdr.getSeqNum();
-        if (seq == tcb.rcv_nxt) {
-            tcb.state = .Closed;
-            return .FreeTcb;
-        }
         return .Continue;
     }
 

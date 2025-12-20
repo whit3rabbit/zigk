@@ -8,7 +8,7 @@ const interface = @import("../../core/interface.zig");
 const checksum = @import("../../core/checksum.zig");
 const ipv4 = @import("../../ipv4/ipv4.zig");
 const ethernet = @import("../../ethernet/ethernet.zig");
-const arp = @import("../../ipv4/arp.zig");
+const arp = @import("../../ipv4/arp/root.zig");
 
 const PacketBuffer = packet.PacketBuffer;
 const Ipv4Header = packet.Ipv4Header;
@@ -36,15 +36,21 @@ fn sendSegment(
 ) bool {
     const iface = state.global_iface orelse return false;
 
-    // Resolve destination MAC
+    // Resolve destination MAC (single atomic lookup to avoid TOCTOU race)
     const next_hop = iface.getGateway(tcb.remote_ip);
-    var dst_mac = arp.resolve(next_hop) orelse [_]u8{ 0, 0, 0, 0, 0, 0 };
-    const have_mac = (arp.resolve(next_hop) != null);
+    const resolved_mac = arp.resolve(next_hop);
+    const have_mac = resolved_mac != null;
+    var dst_mac = resolved_mac orelse [_]u8{ 0, 0, 0, 0, 0, 0 };
 
-    // Calculate sizes
-    const tcp_data_len = if (data) |d| d.len else 0;
+    // Calculate sizes with validation
+    const tcp_data_len: usize = if (data) |d| blk: {
+        if (d.len > c.MAX_TCP_PAYLOAD) return false; // Reject oversized payload
+        break :blk d.len;
+    } else 0;
     const tcp_len = c.TCP_HEADER_SIZE + tcp_data_len;
     const ip_len = packet.IP_HEADER_SIZE + tcp_len;
+    // IP total length must fit in u16 (max 65535)
+    if (ip_len > 65535) return false;
     const total_len = packet.ETH_HEADER_SIZE + ip_len;
 
     // Use static buffer pool to avoid heap pressure
@@ -63,7 +69,7 @@ fn sendSegment(
     const ip: *Ipv4Header = @ptrCast(@alignCast(&buf[packet.ETH_HEADER_SIZE]));
     ip.version_ihl = 0x45;
     ip.tos = tcb.tos; // Use socket's ToS/DSCP value
-    ip.setTotalLength(@truncate(ip_len));
+    ip.setTotalLength(@intCast(ip_len)); // Safe: validated ip_len <= 65535 above
     ip.identification = @byteSwap(ipv4.getNextId());
     ip.flags_fragment = @byteSwap(@as(u16, 0x4000)); // Don't Fragment
     ip.ttl = ipv4.DEFAULT_TTL;
@@ -156,10 +162,11 @@ pub fn sendSynAck(tcb: *Tcb) bool {
 pub fn sendSynWithOptions(tcb: *Tcb) bool {
     const iface = state.global_iface orelse return false;
 
-    // Resolve destination MAC
+    // Resolve destination MAC (single atomic lookup to avoid TOCTOU race)
     const next_hop = iface.getGateway(tcb.remote_ip);
-    var dst_mac = arp.resolve(next_hop) orelse [_]u8{ 0, 0, 0, 0, 0, 0 };
-    const have_mac = (arp.resolve(next_hop) != null);
+    const resolved_mac = arp.resolve(next_hop);
+    const have_mac = resolved_mac != null;
+    var dst_mac = resolved_mac orelse [_]u8{ 0, 0, 0, 0, 0, 0 };
 
     // Build TCP options
     // stack alloc is small enough? TCP_MAX_OPTIONS_SIZE is 40 bytes. OK.
@@ -170,6 +177,8 @@ pub fn sendSynWithOptions(tcb: *Tcb) bool {
     const tcp_header_len = c.TCP_HEADER_SIZE + options_len;
     const tcp_len = tcp_header_len;
     const ip_len = packet.IP_HEADER_SIZE + tcp_len;
+    // IP total length must fit in u16 (max 65535)
+    if (ip_len > 65535) return false;
     const total_len = packet.ETH_HEADER_SIZE + ip_len;
 
     // Use static buffer pool
@@ -188,7 +197,7 @@ pub fn sendSynWithOptions(tcb: *Tcb) bool {
     const ip: *Ipv4Header = @ptrCast(@alignCast(&buf[packet.ETH_HEADER_SIZE]));
     ip.version_ihl = 0x45;
     ip.tos = tcb.tos;
-    ip.setTotalLength(@truncate(ip_len));
+    ip.setTotalLength(@intCast(ip_len)); // Safe: validated ip_len <= 65535 above
     ip.identification = @byteSwap(ipv4.getNextId());
     ip.flags_fragment = @byteSwap(@as(u16, 0x4000));
     ip.ttl = ipv4.DEFAULT_TTL;
@@ -243,10 +252,11 @@ pub fn sendSynWithOptions(tcb: *Tcb) bool {
 pub fn sendSynAckWithOptions(tcb: *Tcb, peer_opts: ?*const options.TcpOptions) bool {
     const iface = state.global_iface orelse return false;
 
-    // Resolve destination MAC
+    // Resolve destination MAC (single atomic lookup to avoid TOCTOU race)
     const next_hop = iface.getGateway(tcb.remote_ip);
-    var dst_mac = arp.resolve(next_hop) orelse [_]u8{ 0, 0, 0, 0, 0, 0 };
-    const have_mac = (arp.resolve(next_hop) != null);
+    const resolved_mac = arp.resolve(next_hop);
+    const have_mac = resolved_mac != null;
+    var dst_mac = resolved_mac orelse [_]u8{ 0, 0, 0, 0, 0, 0 };
 
     // Build TCP options (negotiate based on peer's options)
     var options_buf: [c.TCP_MAX_OPTIONS_SIZE]u8 = undefined;
@@ -256,6 +266,8 @@ pub fn sendSynAckWithOptions(tcb: *Tcb, peer_opts: ?*const options.TcpOptions) b
     const tcp_header_len = c.TCP_HEADER_SIZE + options_len;
     const tcp_len = tcp_header_len;
     const ip_len = packet.IP_HEADER_SIZE + tcp_len;
+    // IP total length must fit in u16 (max 65535)
+    if (ip_len > 65535) return false;
     const total_len = packet.ETH_HEADER_SIZE + ip_len;
 
     // Use static buffer pool
@@ -274,7 +286,7 @@ pub fn sendSynAckWithOptions(tcb: *Tcb, peer_opts: ?*const options.TcpOptions) b
     const ip: *Ipv4Header = @ptrCast(@alignCast(&buf[packet.ETH_HEADER_SIZE]));
     ip.version_ihl = 0x45;
     ip.tos = tcb.tos;
-    ip.setTotalLength(@truncate(ip_len));
+    ip.setTotalLength(@intCast(ip_len)); // Safe: validated ip_len <= 65535 above
     ip.identification = @byteSwap(ipv4.getNextId());
     ip.flags_fragment = @byteSwap(@as(u16, 0x4000));
     ip.ttl = ipv4.DEFAULT_TTL;
@@ -376,7 +388,7 @@ pub fn sendRstForPacket(iface: *Interface, pkt: *const PacketBuffer, tcp_hdr: *c
     const ip: *Ipv4Header = @ptrCast(@alignCast(&buf[packet.ETH_HEADER_SIZE]));
     ip.version_ihl = 0x45;
     ip.tos = 0;
-    ip.setTotalLength(@truncate(packet.IP_HEADER_SIZE + c.TCP_HEADER_SIZE));
+    ip.setTotalLength(@intCast(packet.IP_HEADER_SIZE + c.TCP_HEADER_SIZE)); // Constant, always fits u16
     ip.identification = @byteSwap(ipv4.getNextId());
     ip.flags_fragment = @byteSwap(@as(u16, 0x4000));
     ip.ttl = ipv4.DEFAULT_TTL;
@@ -419,7 +431,10 @@ pub fn sendRstForPacket(iface: *Interface, pkt: *const PacketBuffer, tcp_hdr: *c
 pub fn calculateSegmentLength(pkt: *const PacketBuffer, tcp_hdr: *const TcpHeader) u32 {
     const data_offset = tcp_hdr.getDataOffset();
     const ip_hdr = pkt.ipHeader();
-    const ip_payload_len = ip_hdr.getTotalLength() - ip_hdr.getHeaderLength();
+    // Use saturating subtraction to prevent underflow from malformed packets (DoS mitigation)
+    const total_len = ip_hdr.getTotalLength();
+    const hdr_len = ip_hdr.getHeaderLength();
+    const ip_payload_len = if (total_len >= hdr_len) total_len - hdr_len else 0;
 
     var len: u32 = 0;
     if (ip_payload_len > data_offset) {

@@ -18,7 +18,7 @@ const sync = @import("sync");
 const trb = @import("trb.zig");
 const ring = @import("ring.zig");
 const context = @import("context.zig");
-const hid = @import("../class/hid.zig");
+const hid = @import("../class/hid/root.zig");
 const hub = @import("../class/hub.zig");
 
 // =============================================================================

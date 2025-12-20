@@ -25,22 +25,117 @@ const audio = @import("audio");
 const ahci = @import("ahci");
 const boot = @import("boot.zig");
 const video_driver = @import("video_driver");
+const hal = @import("hal");
+const kernel_iommu = @import("kernel_iommu");
 
 pub var net_interface: net.Interface = undefined;
 pub var pci_devices: ?*const pci.DeviceList = null;
 pub var pci_ecam: ?pci.Ecam = null;
 pub var virtio_gpu_driver: ?*video_driver.VirtioGpuDriver = null;
 
+/// Whether IOMMU is available and enabled
+pub var iommu_enabled: bool = false;
+
+/// Initialize IOMMU (VT-d) subsystem
+/// Must be called BEFORE device initialization to ensure DMA isolation from the start.
+/// If IOMMU is not available, devices will fall back to using physical addresses.
+pub fn initIommu() void {
+    console.print("\n");
+    console.info("Initializing IOMMU subsystem...", .{});
+
+    // 1. Get RSDP from boot protocol
+    const rsdp_response = boot.rsdp_request.response orelse {
+        console.warn("IOMMU: RSDP not found, IOMMU disabled", .{});
+        return;
+    };
+    const rsdp_addr = rsdp_response.address;
+    const rsdp_ptr: *align(1) const hal.acpi.Rsdp = @ptrFromInt(rsdp_addr);
+
+    // 2. Parse DMAR table
+    const dmar_info = hal.acpi.parseDmar(rsdp_ptr) orelse {
+        console.info("IOMMU: No DMAR table found (IOMMU not present)", .{});
+        return;
+    };
+
+    hal.acpi.logDmarInfo(dmar_info);
+
+    if (dmar_info.drhd_count == 0) {
+        console.warn("IOMMU: No DMA remapping hardware units found", .{});
+        return;
+    }
+
+    console.info("IOMMU: Found {d} DRHD unit(s)", .{dmar_info.drhd_count});
+
+    // 3. Initialize each VT-d hardware unit
+    var units_initialized: u8 = 0;
+    for (dmar_info.drhd_units[0..dmar_info.drhd_count]) |*drhd| {
+        const unit = hal.iommu.vtd.VtdUnit.init(drhd) catch |err| {
+            console.err("IOMMU: Failed to init unit at 0x{x}: {}", .{ drhd.reg_base, err });
+            continue;
+        };
+
+        unit.logInfo();
+        hal.iommu.vtd.registerUnit(unit);
+        units_initialized += 1;
+    }
+
+    if (units_initialized == 0) {
+        console.err("IOMMU: No VT-d units successfully initialized", .{});
+        return;
+    }
+
+    // 4. Initialize kernel IOMMU domain subsystem
+    kernel_iommu.init();
+
+    // 5. Initialize hardware tables (root table, context tables)
+    if (!kernel_iommu.initHardware()) {
+        console.err("IOMMU: Failed to initialize hardware tables", .{});
+        return;
+    }
+
+    // 6. Program root table and enable translation for each unit
+    const root_table_phys = kernel_iommu.domain_manager.getRootTablePhys() orelse {
+        console.err("IOMMU: No root table available", .{});
+        return;
+    };
+
+    var i: u8 = 0;
+    while (i < hal.iommu.vtd.getUnitCount()) : (i += 1) {
+        if (hal.iommu.vtd.getUnit(i)) |unit| {
+            // Set root table address
+            unit.setRootTable(root_table_phys);
+
+            // Invalidate context cache (fresh start)
+            unit.invalidateContextGlobal();
+
+            // Invalidate IOTLB
+            unit.invalidateIotlbGlobal();
+
+            // Enable translation
+            unit.enableTranslation();
+
+            // Enable fault interrupts for debugging
+            unit.enableFaultInterrupt();
+        }
+    }
+
+    // 7. Initialize fault handler
+    hal.iommu.fault.init();
+
+    iommu_enabled = true;
+    console.info("IOMMU: Enabled with {d} unit(s), DMA isolation active", .{units_initialized});
+}
+
 fn txWrapper(data: []const u8) bool {
     if (e1000e.getDriver()) |driver| {
-        return driver.transmit(data);
+        return e1000e.transmit(driver, data);
     }
     return false;
 }
 
 fn multicastUpdate(iface: *net.Interface) void {
     if (e1000e.getDriver()) |driver| {
-        driver.applyMulticastFilter(iface);
+        e1000e.applyMulticastFilter(driver, iface);
     }
 }
 

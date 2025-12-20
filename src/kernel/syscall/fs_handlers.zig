@@ -226,10 +226,11 @@ pub fn sys_unlink(path_ptr: usize) SyscallError!usize {
 }
 
 /// Helper: Check if process has mount capability for the given path and operation
-/// Root (UID 0) always has mount permission for system administration
+/// Root (EUID 0) always has mount permission for system administration
 fn hasMountCapability(proc: *@import("process").Process, path: []const u8, op: u8) bool {
     // Root always has mount permission (needed for system setup)
-    if (proc.uid == 0) return true;
+    // SECURITY: Use euid (effective UID) per POSIX semantics, not real uid
+    if (proc.euid == 0) return true;
 
     for (proc.capabilities.items) |cap| {
         switch (cap) {
@@ -243,10 +244,11 @@ fn hasMountCapability(proc: *@import("process").Process, path: []const u8, op: u
 }
 
 /// Helper: Check if process has file capability for the given path and operation
-/// Root (UID 0) always has permission for system administration
+/// Root (EUID 0) always has permission for system administration
 fn hasFileCapability(proc: *@import("process").Process, path: []const u8, op: u8) bool {
     // Root always has permission
-    if (proc.uid == 0) return true;
+    // SECURITY: Use euid (effective UID) per POSIX semantics, not real uid
+    if (proc.euid == 0) return true;
 
     for (proc.capabilities.items) |cap| {
         switch (cap) {
