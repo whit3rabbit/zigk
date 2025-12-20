@@ -480,6 +480,13 @@ pub fn exitWithStatus(status: i32) void {
                         parent.getName(), parent.tid,
                     });
                 }
+            } else if (parent.state == .Running and parent.wait4_waiting.load(.acquire)) {
+                parent.pending_wakeup = true;
+                if (config.debug_scheduler) {
+                    console.debug("Sched: Deferred wake for parent '{s}' (tid={d})", .{
+                        parent.getName(), parent.tid,
+                    });
+                }
             }
         }
     }

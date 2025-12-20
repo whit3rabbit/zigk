@@ -141,6 +141,9 @@ pub const Thread = struct {
     /// SECURITY: Prevents TOCTOU race in block() - see sched.zig security comments
     pending_wakeup: bool = false,
 
+    /// Wait4 coordination flag to avoid lost wakeups on child exit
+    wait4_waiting: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
     /// Stopped by signal (SIGSTOP/SIGTSTP/SIGTTIN/SIGTTOU)
     /// Distinguished from normal blocking so SIGCONT can resume only signal-stopped threads
     stopped: bool = false,

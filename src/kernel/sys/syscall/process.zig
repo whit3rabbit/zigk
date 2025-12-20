@@ -53,6 +53,7 @@ pub fn sys_wait4(pid_arg: usize, wstatus_ptr: usize, options: usize, rusage_ptr:
     // Interpret pid argument
     const target_pid: i32 = @bitCast(@as(u32, @truncate(pid_arg)));
     const wnohang = (options & 1) != 0; // WNOHANG flag
+    const current_thread = sched.getCurrentThread() orelse return error.ESRCH;
 
     // Loop until we find a zombie child or no children remain
     while (true) {
@@ -151,7 +152,9 @@ pub fn sys_wait4(pid_arg: usize, wstatus_ptr: usize, options: usize, rusage_ptr:
         // Block and wait for child to exit
         // When a child exits, it (or its thread) wakes the parent.
         // sched.block() atomically enables interrupts and halts.
+        current_thread.wait4_waiting.store(true, .release);
         sched.block();
+        current_thread.wait4_waiting.store(false, .release);
     }
 }
 

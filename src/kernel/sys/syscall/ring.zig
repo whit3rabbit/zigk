@@ -370,6 +370,11 @@ fn mapRingToProcess(ring: *ring_mod.RingDescriptor, proc: *process_mod.Process) 
         .writable = true,
         .user = true,
         .no_execute = true,
+        // SECURITY: Use Write-Through caching for shared ring buffer.
+        // This ensures that writes are immediately visible to other cores
+        // without requiring manual cache flushing userspace.
+        .write_through = true,
+        .cache_disable = false,
     };
 
     // Map each page

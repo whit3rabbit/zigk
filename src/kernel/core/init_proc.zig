@@ -28,6 +28,7 @@ const heap = @import("heap");
 const pci = @import("pci");
 const aslr = @import("aslr");
 const devfs = @import("devfs");
+const kernel_iommu = @import("kernel_iommu");
 
 /// Load the init process (httpd or shell) into a new user address space
 ///
@@ -587,6 +588,27 @@ fn grantVirtioCapabilities(proc: *process.Process, driver_type: VirtioDriverType
                 appendCapabilityOrWarn(proc, alloc, .{
                     .DmaMemory = .{ .max_pages = dma_pages }
                 }, "virtio");
+
+                if (kernel_iommu.isAvailable()) {
+                    const max_size = std.math.mul(
+                        u64,
+                        @as(u64, dma_pages),
+                        @as(u64, pmm.PAGE_SIZE),
+                    ) catch {
+                        console.err("virtio: IOMMU max_size overflow for dma_pages={d}", .{dma_pages});
+                        return false;
+                    };
+                    appendCapabilityOrWarn(proc, alloc, .{
+                        .IommuDma = .{
+                            .bus = dev.bus,
+                            .device = @intCast(dev.device),
+                            .func = @intCast(dev.func),
+                            .max_size = max_size,
+                            .domain_id = 0,
+                            .iommu_required = true,
+                        }
+                    }, "virtio");
+                }
 
                 return true;
             }

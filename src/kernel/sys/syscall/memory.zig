@@ -292,6 +292,9 @@ pub fn sys_brk(brk: usize) SyscallError!usize {
     }
 
     // Update break
-    proc.heap_break = brk;
-    return @intCast(brk);
+    // SECURITY: Always maintain page alignment for the internal heap break.
+    // This prevents inconsistencies between the mapped memory region and
+    // the program break value, ensuring subsequent allocations behave predictably.
+    proc.heap_break = new_break_aligned;
+    return @intCast(new_break_aligned);
 }

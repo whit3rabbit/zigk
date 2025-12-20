@@ -301,7 +301,10 @@ fn loadSegment(
         }
 
         // Verify file data is within bounds
-        const file_end = phdr.p_offset + phdr.p_filesz;
+        const file_end = std.math.add(u64, phdr.p_offset, phdr.p_filesz) catch {
+            console.err("ELF: p_offset + p_filesz overflow", .{});
+            return ElfError.InvalidAddressRange;
+        };
         if (file_end > data.len) {
             return ElfError.BufferTooSmall;
         }

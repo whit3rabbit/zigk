@@ -442,6 +442,15 @@ pub fn sys_execve(frame: *hal.syscall.SyscallFrame, path_ptr: usize, argv_ptr: u
     // Destroy old address space
     vmm.destroyAddressSpace(old_cr3);
 
+    // SECURITY: Reset signal handlers to default behavior.
+    // Executed programs must not inherit signal handlers from the previous process,
+    // as the handler addresses are no longer valid in the new address space.
+    current_thread.signal_actions = [_]uapi.signal.SigAction{std.mem.zeroes(uapi.signal.SigAction)} ** 64;
+
+    // SECURITY: Clear alternate signal stack.
+    // The alternate stack pointer is no longer valid.
+    current_thread.alternate_stack = .{ .sp = 0, .flags = 2, .size = 0 }; // SS_DISABLE
+
     // SECURITY: Restore refcount to 1 now that execve has completed successfully.
     // The sentinel value (0x80000001) prevented concurrent clone() during the
     // critical section. Now that we're safely in the new address space, we restore
