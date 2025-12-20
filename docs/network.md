@@ -12,7 +12,7 @@ This document describes the network stack implementation in Zscapek.
 +------------------------------------------------------------------+
                               |
                          Syscall Layer
-                    (src/kernel/syscall/net.zig)
+                     (src/kernel/sys/syscall/net.zig)
                    (centralized networking syscalls)
                (matches network syscalls in src/uapi/syscalls.zig)
                               |

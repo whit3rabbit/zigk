@@ -110,7 +110,7 @@ qemu-system-x86_64 -M q35 -m 512M -cdrom zscapek.iso \
 On some platforms (notably macOS with TCG), XHCI MSI-X interrupts may not fire reliably. The kernel implements a software polling fallback:
 
 ```zig
-// In sys_read_scancode (src/kernel/syscall/custom.zig)
+// In sys_read_scancode (src/kernel/sys/syscall/custom.zig)
 pub fn sys_read_scancode() SyscallError!usize {
     // Poll USB events first (fallback for when MSI-X interrupts aren't firing)
     _ = usb.xhci.pollEvents();

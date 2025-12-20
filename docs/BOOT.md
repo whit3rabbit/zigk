@@ -21,19 +21,19 @@ For detailed byte-level layouts, struct alignments, and hardware interface speci
    - Higher Half Direct Map (HHDM) for physical memory access
    - Framebuffer (if available)
    - Memory map
-5. **Limine** jumps directly to the kernel entry point `_start` defined in `src/kernel/main.zig`.
-6. **Kernel Initialization** (`src/kernel/main.zig`):
+5. **Limine** jumps directly to the kernel entry point `_start` defined in `src/kernel/core/main.zig`.
+6. **Kernel Initialization** (`src/kernel/core/main.zig`):
    - Validates Limine protocol requests (HHDM, Framebuffer, Memory Map)
    - Initializes HAL (GDT/IDT/Serial/PIC)
-   - Initializes Memory Management (PMM/VMM via `init_mem.zig`)
+   - Initializes Memory Management (PMM/VMM via `core/init_mem.zig`)
    - Initializes VDSO (Virtual Dynamic Shared Object)
    - Initializes File Systems (VFS)
-   - Initializes Security (Entropy, PRNG, Stack Guard)
+   - Initializes Security (Entropy, PRNG, Stack Guard via `core/stack_guard.zig`)
    - Initializes APIC (replaces legacy PIC) & Re-seeds Stack Guard
    - Initializes SMP (brings up Application Processors)
    - Initializes Async I/O Reactor
    - Initializes Signal Handling
-   - Initializes Hardware (PCI, Network*, USB, Audio, Storage, VirtIO-GPU) via `init_hw.zig`
+   - Initializes Hardware (PCI, Network*, USB, Audio, Storage, VirtIO-GPU) via `core/init_hw.zig`
      * *Note: Kernel network stack is currently disabled for userspace migration.*
    - Loads Init Process (scans modules for drivers and init candidate)
    - Starts Scheduler and Futex subsystem
@@ -90,9 +90,9 @@ Zscapek implements lazy (demand) paging for anonymous memory mappings. When user
 
 ### Key Files
 
-- `src/kernel/user_vmm.zig` - VMA management and `handlePageFault()`
+- `src/kernel/mm/user_vmm.zig` - VMA management and `handlePageFault()`
 - `src/arch/x86_64/interrupts.zig` - Page fault dispatch to demand paging handler
-- `src/kernel/main.zig` - Handler registration via `setPageFaultHandler()`
+- `src/kernel/core/main.zig` - Handler registration via `setPageFaultHandler()`
 
 ## Address Space Layout Randomization (ASLR)
 
@@ -120,10 +120,10 @@ ASLR uses the kernel PRNG (xoroshiro128+) seeded from hardware entropy (RDRAND/R
 
 ### Key Files
 
-- `src/kernel/aslr.zig` - ASLR offset generation and configuration
-- `src/kernel/process.zig` - Per-process `aslr_offsets` field
-- `src/kernel/elf.zig` - Accepts randomized stack_top and pie_base
-- `src/kernel/user_vmm.zig` - Randomized mmap_base per address space
+- `src/kernel/mm/aslr.zig` - ASLR offset generation and configuration
+- `src/kernel/proc/process/types.zig` - Per-process `aslr_offsets` field
+- `src/kernel/core/elf/root.zig` - Accepts randomized stack_top and pie_base
+- `src/kernel/mm/user_vmm.zig` - Randomized mmap_base per address space
 
 ## Limine Configuration
 
@@ -143,7 +143,7 @@ MODULE_CMDLINE=shell
 
 ## Limine Requests
 
-The kernel declares Limine requests in `src/kernel/main.zig`:
+The kernel declares Limine requests in `src/kernel/core/main.zig`:
 
 - **Base Revision** - Protocol version check
 - **HHDM Request** - Higher Half Direct Map offset
@@ -195,7 +195,7 @@ If a userland binary crashes immediately on first instruction:
 
 ### ELF Loader Error Handling
 
-The ELF loader (`src/kernel/elf.zig`) must handle translation failures explicitly. Silent failures in `copyToUserspace` can leave mapped pages zeroed, causing immediate crashes when userspace executes.
+The ELF loader (`src/kernel/core/elf/root.zig`) must handle translation failures explicitly. Silent failures in `copyToUserspace` can leave mapped pages zeroed, causing immediate crashes when userspace executes.
 
 Pattern for safe segment loading:
 ```zig
@@ -367,7 +367,7 @@ zig build run -Dbios=/opt/homebrew/share/qemu/edk2-x86_64-code.fd
 
 # Or manually with UEFI and SMP (4 cores)
 qemu-system-x86_64 -M q35 -m 256M -smp 4 -cdrom zscapek.iso \
-  -drive if=pflash,format=raw,readonly=on,file=/opt/homebrew/share/qemu/edk2-x86_64-code.fd \
+  -drive if=pflash,format=raw,readonly=on,file=/path/to/edk2-x86_64-code.fd \
   -serial stdio -display none -accel tcg
 ```
 
@@ -401,5 +401,5 @@ This configures QEMU with an XHCI controller and USB keyboard/mouse devices inst
 
 - `limine.cfg` - Bootloader configuration
 - `src/lib/limine.zig` - Limine protocol bindings
-- `src/kernel/main.zig` - Kernel entry point
+- `src/kernel/core/main.zig` - Kernel entry point
 - `src/arch/x86_64/boot/linker.ld` - Kernel linker script

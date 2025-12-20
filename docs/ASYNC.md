@@ -187,7 +187,7 @@ AHCI controller raises an interrupt:
 ## io_uring Syscalls
 
 ### sys_io_uring_setup (425)
-
+### In sys_io_uring_setup (src/kernel/sys/syscall/io_uring.zig)
 Create an io_uring instance.
 
 ```c
@@ -541,14 +541,14 @@ src/uapi/
     io_ring.zig     - Linux-compatible SQE/CQE structures
     syscalls.zig    - Syscall numbers (425-427)
 
-src/kernel/syscall/
+src/kernel/sys/syscall/
     io_uring.zig    - io_uring syscall implementations
 
 src/net/transport/socket/
     tcp_api.zig     - acceptAsync, recvAsync, etc.
     types.zig       - Socket struct with pending_* fields
 
-src/kernel/
+src/kernel/fs/
     pipe.zig        - readAsync, writeAsync
 
 src/drivers/
@@ -634,7 +634,7 @@ For simple testing, the extended interface is still available:
 
 ### Implementation Details
 
-Key changes in `src/kernel/syscall/io_uring.zig`:
+Key changes in `src/kernel/sys/syscall/io_uring.zig`:
 - `IoUringInstance` stores physical addresses for each ring region
 - `allocInstance()` uses `pmm.allocZeroedPages()` for ring memory
 - `ioUringMmap()` file operation returns physical addresses for mapping

@@ -13,31 +13,31 @@ build.zig
     |       |-- syscalls.zig    <- Single source of truth for syscall numbers
     |       `-- errno.zig       <- SyscallError type and errno conversion
     |
-    +-- syscall_base_module (src/kernel/syscall/base.zig)
+    +-- syscall_base_module (src/kernel/sys/syscall/base.zig)
     |       |-- Shared state: current_process, global_fd_table, global_user_vmm
     |       `-- Accessor functions for all handler modules
     |
     +-- Handler Modules (each imports base.zig + domain-specific deps)
-    |       |-- syscall_process_module    -> process.zig
-    |       |-- syscall_signals_module    -> signals.zig
-    |       |-- syscall_scheduling_module -> scheduling.zig
-    |       |-- syscall_io_module         -> io.zig
-    |       |-- syscall_fd_module         -> fd.zig
-    |       |-- syscall_memory_module     -> memory.zig
-    |       |-- syscall_execution_module  -> execution.zig
-    |       |-- syscall_custom_module     -> custom.zig
-    |       |-- syscall_net_module        -> net.zig
-    |       |-- syscall_random_module     -> random.zig
-    |       |-- syscall_input_module      -> input.zig
-    |       |-- syscall_ipc_module        -> ipc.zig
-    |       |-- syscall_interrupt_module  -> interrupt.zig
-    |       |-- syscall_port_io_module    -> port_io.zig
-    |       |-- syscall_mmio_module       -> mmio.zig
-    |       |-- syscall_pci_module        -> pci_syscall.zig
-    |       |-- syscall_ring_module       -> ring.zig
-    |       `-- syscall_fs_handlers_module -> fs_handlers.zig
+    |       |-- syscall_process_module    -> sys/syscall/process.zig
+    |       |-- syscall_signals_module    -> sys/syscall/signals.zig
+    |       |-- syscall_scheduling_module -> sys/syscall/scheduling.zig
+    |       |-- syscall_io_module         -> sys/syscall/io/root.zig
+    |       |-- syscall_fd_module         -> sys/syscall/fd.zig
+    |       |-- syscall_memory_module     -> sys/syscall/memory.zig
+    |       |-- syscall_execution_module  -> sys/syscall/execution.zig
+    |       |-- syscall_custom_module     -> sys/syscall/custom.zig
+    |       |-- syscall_net_module        -> sys/syscall/net.zig
+    |       |-- syscall_random_module     -> sys/syscall/random.zig
+    |       |-- syscall_input_module      -> sys/syscall/input.zig
+    |       |-- syscall_ipc_module        -> sys/syscall/ipc.zig
+    |       |-- syscall_interrupt_module  -> sys/syscall/interrupt.zig
+    |       |-- syscall_port_io_module    -> sys/syscall/port_io.zig
+    |       |-- syscall_mmio_module       -> sys/syscall/mmio.zig
+    |       |-- syscall_pci_module        -> sys/syscall/pci_syscall.zig
+    |       |-- syscall_ring_module       -> sys/syscall/ring.zig
+    |       `-- syscall_fs_handlers_module -> sys/syscall/fs_handlers.zig
     |
-    +-- syscall_table_module (src/kernel/syscall/table.zig)
+    +-- syscall_table_module (src/kernel/sys/syscall/table.zig)
             |-- Imports all handler modules
             `-- Comptime dispatch via reflection on uapi.syscalls
 ```
@@ -143,7 +143,7 @@ The `callHandler` function auto-converts error unions to negative errno at the b
 ## File Organization
 
 ```
-src/kernel/syscall/
+src/kernel/sys/syscall/
     base.zig       - Shared state (current_process, fd_table, user_vmm)
     table.zig      - Dispatch table (comptime reflection)
     user_mem.zig   - User pointer validation utilities
@@ -151,7 +151,7 @@ src/kernel/syscall/
     process.zig    - Process lifecycle (exit, wait4, getpid, getppid, getuid, getgid)
     signals.zig    - Signal handling (rt_sigprocmask, rt_sigaction, rt_sigreturn)
     scheduling.zig - Scheduler (sched_yield, nanosleep, select, clock_gettime)
-    io.zig         - I/O operations (read, write, writev, stat, fstat, ioctl, fcntl)
+    io/            - I/O operations (read, write, writev, stat, fstat, ioctl, fcntl)
     fd.zig         - File descriptors (open, close, dup, dup2, pipe, lseek)
     memory.zig     - Memory management (mmap, mprotect, munmap, brk)
     execution.zig  - Process execution (fork, execve, arch_prctl)

@@ -49,7 +49,7 @@ pub const GraphicsDevice = struct {
     -   Scrolling (via software buffer shift and redraw).
     -   Basic control characters (`\n`, `\r`, `\t`, `\b`).
 
-### 4. Kernel Integration (`src/kernel/debug/console.zig`)
+### 4. Kernel Integration (`src/kernel/core/debug/console.zig`)
 -   The kernel's `console.print` function is a multiplexer.
 -   It maintains a list of registered `Backend`s.
 -   When `print` is called, the string is sent to **all** registered backends.

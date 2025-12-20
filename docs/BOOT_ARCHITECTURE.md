@@ -46,7 +46,7 @@ The kernel uses the **Higher Half Direct Map (HHDM)** provided by Limine to acce
 *   **Physical Address** = `Virtual Address` - `HHDM_OFFSET`
 *   **HHDM_OFFSET** = `0xFFFF_8000_0000_0000` (constant, verified against Limine response)
 
-The `HHDM_OFFSET` is obtained from the Limine HHDM Request at boot (`src/kernel/main.zig:192-201`).
+The `HHDM_OFFSET` is obtained from the Limine HHDM Request at boot (`src/kernel/core/main.zig:192-201`).
 
 **HHDM vs Identity Mapping:**
 
@@ -213,7 +213,7 @@ Zscapek implements lazy (demand) paging for anonymous memory allocations. Physic
 
 ### Virtual Memory Area (VMA) Structure
 
-VMAs track user virtual address ranges. Defined in `src/kernel/user_vmm.zig`.
+VMAs track user virtual address ranges. Defined in `src/kernel/mm/user_vmm.zig`.
 
 ```text
 Offset  Size    Type        Description
@@ -290,10 +290,10 @@ Bit    Name    Meaning when set
 
 | File | Purpose |
 |------|---------|
-| `src/kernel/user_vmm.zig` | VMA management, `handlePageFault()` |
+| `src/kernel/mm/user_vmm.zig` | VMA management, `handlePageFault()` |
 | `src/arch/x86_64/interrupts.zig` | Handler dispatch, `setPageFaultHandler()` |
-| `src/kernel/main.zig` | Handler registration |
-| `src/kernel/syscall/base.zig` | `getCurrentProcessOrNull()` for safe process lookup |
+| `src/kernel/core/main.zig` | Handler registration |
+| `src/kernel/sys/syscall/base.zig` | `getCurrentProcessOrNull()` for safe process lookup |
 
 ### Lock Ordering (Page Faults)
 
@@ -526,7 +526,7 @@ Limine supports KASLR. The kernel is position-independent (PIE) but linked to hi
 
 Zscapek implements full user-space ASLR to randomize critical memory regions per-process.
 
-**AslrOffsets Structure** (`src/kernel/aslr.zig`):
+**AslrOffsets Structure** (`src/kernel/mm/aslr.zig`):
 
 ```text
 Offset  Size    Type    Field           Description
@@ -589,13 +589,13 @@ ASLR[pid=1]: stack_top=7fffff8bf000 pie_base=5555c3470000 mmap=10002a590000 heap
 
 | File | Purpose |
 |------|---------|
-| `src/kernel/aslr.zig` | Config constants, offset generation, address helpers |
-| `src/kernel/process.zig` | `aslr_offsets` field in Process struct |
-| `src/kernel/elf.zig` | Accepts `stack_top_opt` and `pie_base_opt` parameters |
-| `src/kernel/user_vmm.zig` | `mmap_base` field, `initWithMmapBase()` |
-| `src/kernel/syscall/execution.zig` | Generates new offsets on execve |
-| `src/kernel/init_proc.zig` | Uses ASLR for initial process |
-| `src/kernel/vdso.zig` | Independent VDSO randomization |
+| `src/kernel/mm/aslr.zig` | Config constants, offset generation, address helpers |
+| `src/kernel/proc/process/root.zig` | `Process` struct (indirectly through types) |
+| `src/kernel/core/elf/root.zig` | Accepts `stack_top_opt` and `pie_base_opt` parameters |
+| `src/kernel/mm/user_vmm.zig` | `mmap_base` field, `initWithMmapBase()` |
+| `src/kernel/sys/syscall/execution.zig` | Generates new offsets on execve |
+| `src/kernel/core/init_proc.zig` | Uses ASLR for initial process |
+| `src/kernel/sys/vdso.zig` | Independent VDSO randomization |
 
 ## 9. SMP Implementation Notes
 
