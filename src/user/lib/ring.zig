@@ -183,8 +183,22 @@ pub const Ring = struct {
     ///
     /// Returns: Ring on success, error on failure
     pub fn attach(ring_id: u32) SyscallError!Ring {
-        var result: ring_uapi.RingAttachResult = undefined;
+        var result: ring_uapi.RingAttachResult = std.mem.zeroes(ring_uapi.RingAttachResult);
         try ringAttach(ring_id, &result);
+
+        // Validate kernel-returned values to prevent integer underflow on ring_mask
+        // and null pointer dereference on virt_addr. Defense-in-depth against
+        // compromised or buggy kernel responses.
+        if (result.entry_count == 0) {
+            return error.InvalidArgument;
+        }
+        if (result.virt_addr == 0) {
+            return error.BadAddress;
+        }
+        // entry_count must be power of 2 for mask arithmetic to work correctly
+        if (result.entry_count & (result.entry_count - 1) != 0) {
+            return error.InvalidArgument;
+        }
 
         const header: *volatile RingHeader = @ptrFromInt(result.virt_addr);
         const entries: [*]volatile PacketEntry = @ptrFromInt(result.virt_addr + RingHeader.DATA_OFFSET);
@@ -229,10 +243,14 @@ pub const Ring = struct {
 
         // Advance consumer index
         self.local_cons_idx += 1;
-        // Release fence before store to ensure reads are complete
+        // Release fence BEFORE store ensures all reads from the entry are
+        // complete before we publish cons_idx to the producer. This prevents
+        // the producer from seeing the advanced index and overwriting data
+        // we haven't finished reading yet.
         releaseFence();
         self.header.cons_idx = self.local_cons_idx;
-        releaseFence();
+        // Note: No trailing fence needed on x86_64 (strong memory model).
+        // The store above is already visible to other CPUs in program order.
     }
 
     /// Wait for entries to become available (consumer only)

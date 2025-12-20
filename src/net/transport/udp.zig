@@ -17,9 +17,9 @@
 const packet = @import("../core/packet.zig");
 const interface = @import("../core/interface.zig");
 const checksum = @import("../core/checksum.zig");
-const ipv4 = @import("../ipv4/ipv4.zig");
+const ipv4 = @import("../ipv4/root.zig").ipv4;
 const ethernet = @import("../ethernet/ethernet.zig");
-const arp = @import("../ipv4/arp/root.zig");
+const arp = @import("../ipv4/root.zig").arp;
 // Reuse TCP's buffer pool to avoid stack overflow
 const tcp_state = @import("tcp/state.zig");
 // ICMP module for PMTU validation tracking

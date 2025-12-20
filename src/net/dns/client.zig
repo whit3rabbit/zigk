@@ -1,7 +1,7 @@
 const std = @import("std");
 const dns = @import("dns.zig");
 const socket = @import("../transport/socket.zig");
-const ipv4 = @import("../ipv4/ipv4.zig");
+const ipv4 = @import("../ipv4/root.zig").ipv4;
 // const std = @import("std");
 const core = @import("../core/root.zig");
 const transport = @import("../transport/root.zig");

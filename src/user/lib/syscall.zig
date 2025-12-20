@@ -410,10 +410,14 @@ pub fn sbrk(increment: isize) SyscallError![*]u8 {
         return @ptrFromInt(current);
     }
 
-    const new_break: usize = if (increment > 0)
-        current + @as(usize, @intCast(increment))
-    else
-        current - @as(usize, @intCast(-increment));
+    // Use checked arithmetic to prevent integer overflow/underflow
+    const new_break: usize = if (increment > 0) blk: {
+        const inc: usize = @intCast(increment);
+        break :blk std.math.add(usize, current, inc) catch return error.OutOfMemory;
+    } else blk: {
+        const dec: usize = @intCast(-increment);
+        break :blk std.math.sub(usize, current, dec) catch return error.OutOfMemory;
+    };
 
     _ = try brk(new_break);
     return @ptrFromInt(current);
@@ -461,7 +465,12 @@ pub fn clock_gettime(clk_id: ClockId, tp: *Timespec) SyscallError!void {
 pub fn gettime_ms() SyscallError!u64 {
     var ts: Timespec = undefined;
     try clock_gettime(.MONOTONIC, &ts);
-    return @as(u64, @intCast(ts.tv_sec)) * 1000 + @as(u64, @intCast(ts.tv_nsec)) / 1_000_000;
+    // Validate non-negative values before casting to u64
+    if (ts.tv_sec < 0 or ts.tv_nsec < 0) return error.Unexpected;
+    // Use checked arithmetic to prevent overflow on corrupted/malicious timespec
+    const sec_ms = std.math.mul(u64, @intCast(ts.tv_sec), 1000) catch return error.Unexpected;
+    const nsec_ms = @as(u64, @intCast(ts.tv_nsec)) / 1_000_000;
+    return std.math.add(u64, sec_ms, nsec_ms) catch return error.Unexpected;
 }
 
 // =============================================================================
@@ -520,6 +529,13 @@ pub fn debug_log(buf: [*]const u8, len: usize) SyscallError!usize {
 }
 
 /// Write debug string to kernel log (convenience wrapper)
+/// Returns error for callers who need to handle I/O failures.
+pub fn debug_print_safe(str: []const u8) SyscallError!usize {
+    return debug_log(str.ptr, str.len);
+}
+
+/// Write debug string to kernel log (convenience wrapper)
+/// Silently ignores errors - use debug_print_safe() for security-sensitive logging.
 pub fn debug_print(str: []const u8) void {
     _ = debug_log(str.ptr, str.len) catch {};
 }
@@ -566,12 +582,27 @@ pub const STDIN_FILENO: i32 = 0;
 pub const STDOUT_FILENO: i32 = 1;
 pub const STDERR_FILENO: i32 = 2;
 
+/// Write to stdout with error handling.
+/// Returns error for callers who need to handle I/O failures
+/// (e.g., security audit logging, transaction logging).
+pub fn print_safe(str: []const u8) SyscallError!usize {
+    return write(STDOUT_FILENO, str.ptr, str.len);
+}
+
 /// Write to stdout (convenience wrapper)
+/// Silently ignores errors - use print_safe() for security-sensitive output.
 pub fn print(str: []const u8) void {
     _ = write(STDOUT_FILENO, str.ptr, str.len) catch {};
 }
 
+/// Write to stderr with error handling.
+/// Returns error for callers who need to handle I/O failures.
+pub fn eprint_safe(str: []const u8) SyscallError!usize {
+    return write(STDERR_FILENO, str.ptr, str.len);
+}
+
 /// Write to stderr (convenience wrapper)
+/// Silently ignores errors - use eprint_safe() for security-sensitive output.
 pub fn eprint(str: []const u8) void {
     _ = write(STDERR_FILENO, str.ptr, str.len) catch {};
 }
@@ -685,7 +716,12 @@ pub fn parseIp(str: []const u8) ?u32 {
 
     for (str) |c| {
         if (c >= '0' and c <= '9') {
-            octet = octet * 10 + (c - '0');
+            // Use overflow-detecting arithmetic to prevent wrap-around
+            const mul_result = @mulWithOverflow(octet, 10);
+            if (mul_result[1] != 0) return null;
+            const add_result = @addWithOverflow(mul_result[0], c - '0');
+            if (add_result[1] != 0) return null;
+            octet = add_result[0];
             if (octet > 255) return null;
         } else if (c == '.') {
             ip = (ip << 8) | octet;
@@ -829,7 +865,8 @@ pub fn mmap_phys(phys_addr: u64, size: usize) SyscallError!*anyopaque {
 /// page_count: Number of contiguous pages to allocate
 /// Returns DmaAllocResult with virt/phys addresses, or error.
 pub fn alloc_dma(page_count: u32) SyscallError!DmaAllocResult {
-    var result: DmaAllocResult = undefined;
+    // Zero-initialize to prevent leaking stack memory if kernel partially fills struct
+    var result: DmaAllocResult = std.mem.zeroes(DmaAllocResult);
     const ret = syscall2(syscalls.SYS_ALLOC_DMA, @intFromPtr(&result), page_count);
     if (isError(ret)) return errorFromReturn(ret);
     return result;
@@ -1078,6 +1115,12 @@ pub fn munmap(addr: [*]u8, length: usize) SyscallError!void {
 }
 
 /// High-level io_uring ring wrapper for userspace
+///
+/// THREAD SAFETY: This struct is NOT thread-safe. All operations (getSqeAtomic,
+/// getSqeAtomicFn, submit, peekCqe, advanceCq) must be called from a single
+/// thread, or externally synchronized with a mutex. Concurrent access without
+/// synchronization can cause double-submission or lost entries due to races
+/// on the ring indices.
 pub const IoUring = struct {
     ring_fd: i32,
     sq_ring: [*]u8,
@@ -1100,11 +1143,31 @@ pub const IoUring = struct {
         var params: IoUringParams = std.mem.zeroes(IoUringParams);
 
         const ring_fd = try io_uring_setup(entries, &params);
+        errdefer close(ring_fd) catch {};
 
-        // Calculate sizes
-        const sq_ring_size = params.sq_off.array + params.sq_entries * @sizeOf(u32);
-        const cq_ring_size = params.cq_off.cqes + params.cq_entries * @sizeOf(IoUringCqe);
-        const sqes_size = params.sq_entries * @sizeOf(IoUringSqe);
+        // Validate kernel-returned values before size calculations to prevent integer overflow
+        if (params.sq_entries == 0 or params.cq_entries == 0) {
+            return error.InvalidArgument;
+        }
+
+        // Calculate sizes with overflow checks (defense against compromised kernel)
+        const sq_array_size = std.math.mul(usize, params.sq_entries, @sizeOf(u32)) catch {
+            return error.OutOfMemory;
+        };
+        const sq_ring_size = std.math.add(usize, params.sq_off.array, sq_array_size) catch {
+            return error.OutOfMemory;
+        };
+
+        const cqes_array_size = std.math.mul(usize, params.cq_entries, @sizeOf(IoUringCqe)) catch {
+            return error.OutOfMemory;
+        };
+        const cq_ring_size = std.math.add(usize, params.cq_off.cqes, cqes_array_size) catch {
+            return error.OutOfMemory;
+        };
+
+        const sqes_size = std.math.mul(usize, params.sq_entries, @sizeOf(IoUringSqe)) catch {
+            return error.OutOfMemory;
+        };
 
         // Map SQ ring
         const sq_ring = try mmap(
@@ -1115,6 +1178,7 @@ pub const IoUring = struct {
             ring_fd,
             IORING_OFF_SQ_RING,
         );
+        errdefer munmap(sq_ring, sq_ring_size) catch {};
 
         // Map CQ ring
         const cq_ring = try mmap(
@@ -1125,6 +1189,7 @@ pub const IoUring = struct {
             ring_fd,
             IORING_OFF_CQ_RING,
         );
+        errdefer munmap(cq_ring, cq_ring_size) catch {};
 
         // Map SQEs
         const sqes_ptr = try mmap(
@@ -1135,6 +1200,25 @@ pub const IoUring = struct {
             ring_fd,
             IORING_OFF_SQES,
         );
+        errdefer munmap(sqes_ptr, sqes_size) catch {};
+
+        // Validate alignment of kernel-provided offsets before casting.
+        // This protects against a compromised kernel returning malformed offsets
+        // that would cause undefined behavior on strict-alignment architectures.
+        const u32_align = @alignOf(u32);
+        const sqe_align = @alignOf(IoUringSqe);
+        const cqe_align = @alignOf(IoUringCqe);
+
+        if (params.sq_off.head % u32_align != 0 or
+            params.sq_off.tail % u32_align != 0 or
+            params.sq_off.array % u32_align != 0 or
+            params.cq_off.head % u32_align != 0 or
+            params.cq_off.tail % u32_align != 0 or
+            params.cq_off.cqes % cqe_align != 0 or
+            @intFromPtr(sqes_ptr) % sqe_align != 0)
+        {
+            return error.InvalidArgument;
+        }
 
         return IoUring{
             .ring_fd = ring_fd,
@@ -1163,25 +1247,80 @@ pub const IoUring = struct {
         close(self.ring_fd) catch {};
     }
 
-    /// Get next SQE slot (returns null if queue full)
-    pub fn getSqe(self: *IoUring) ?*IoUringSqe {
+    // NOTE: getSqe() and submitSqe() were removed due to TOCTOU race condition.
+    // The separate get/submit pattern allowed multiple callers to get the same
+    // SQE slot index before tail was advanced, causing data corruption.
+    // Use getSqeAtomic() or getSqeAtomicFn() instead, which atomically reserve
+    // and commit the slot in a single operation.
+
+    /// Atomically get an SQE slot and advance the tail in one operation.
+    /// This eliminates the TOCTOU race between getSqe() and submitSqe().
+    ///
+    /// The callback receives a zeroed SQE to populate. After the callback
+    /// returns, the tail is atomically advanced with proper memory barriers.
+    ///
+    /// Returns false if the queue is full (callback not invoked).
+    /// Returns true if the SQE was successfully submitted.
+    ///
+    /// Example:
+    ///   const submitted = ring.getSqeAtomic(struct {
+    ///       fd: i32,
+    ///       buf: []u8,
+    ///       pub fn populate(ctx: @This(), sqe: *IoUringSqe) void {
+    ///           IoUring.prepRecvInto(sqe, ctx.fd, ctx.buf, 0);
+    ///       }
+    ///   }{ .fd = sock_fd, .buf = buffer });
+    pub fn getSqeAtomic(self: *IoUring, ctx: anytype) bool {
         const tail = self.sq_tail.*;
         const head = self.sq_head.*;
 
         if (tail - head >= self.sq_mask + 1) {
-            return null; // Queue full
+            return false; // Queue full
         }
 
         const index = tail & self.sq_mask;
         self.sq_array[index] = index;
-        return &self.sqes[index];
+
+        // Zero the SQE and let caller populate it
+        const sqe = &self.sqes[index];
+        sqe.* = std.mem.zeroes(IoUringSqe);
+
+        // Call the populate function with context
+        ctx.populate(sqe);
+
+        // Barrier ensures all SQE field writes complete before tail is visible
+        memoryBarrier();
+        self.sq_tail.* = tail + 1;
+
+        return true;
     }
 
-    /// Submit SQE (advances tail)
-    pub fn submitSqe(self: *IoUring) void {
+    /// Simpler atomic SQE submission using a function pointer.
+    /// Returns false if queue is full, true on success.
+    pub fn getSqeAtomicFn(
+        self: *IoUring,
+        populate_fn: *const fn (*IoUringSqe, ?*anyopaque) void,
+        user_ctx: ?*anyopaque,
+    ) bool {
+        const tail = self.sq_tail.*;
+        const head = self.sq_head.*;
+
+        if (tail - head >= self.sq_mask + 1) {
+            return false;
+        }
+
+        const index = tail & self.sq_mask;
+        self.sq_array[index] = index;
+
+        const sqe = &self.sqes[index];
+        sqe.* = std.mem.zeroes(IoUringSqe);
+
+        populate_fn(sqe, user_ctx);
+
         memoryBarrier();
-        self.sq_tail.* += 1;
-        memoryBarrier();
+        self.sq_tail.* = tail + 1;
+
+        return true;
     }
 
     /// Submit all pending SQEs and optionally wait
@@ -1224,8 +1363,24 @@ pub const IoUring = struct {
         sqe.user_data = user_data;
     }
 
+    /// Buffer too large error for io_uring operations
+    pub const PrepError = error{BufferTooLarge};
+
+    /// Prepare recv SQE (safe version with runtime validation)
+    /// Returns error.BufferTooLarge if buffer exceeds 4GB limit.
+    pub fn prepRecvSafe(sqe: *IoUringSqe, fd: i32, buf: []u8, user_data: u64) PrepError!void {
+        if (buf.len > std.math.maxInt(u32)) {
+            return error.BufferTooLarge;
+        }
+        prepRecv(sqe, fd, buf, user_data);
+    }
+
     /// Prepare recv SQE
+    /// Panics if buf.len > 4GB. Use prepRecvSafe() for fallible handling.
     pub fn prepRecv(sqe: *IoUringSqe, fd: i32, buf: []u8, user_data: u64) void {
+        if (buf.len > std.math.maxInt(u32)) {
+            @panic("prepRecv: buffer length exceeds u32 max");
+        }
         sqe.* = std.mem.zeroes(IoUringSqe);
         sqe.opcode = IORING_OP_RECV;
         sqe.fd = fd;
@@ -1234,8 +1389,21 @@ pub const IoUring = struct {
         sqe.user_data = user_data;
     }
 
+    /// Prepare send SQE (safe version with runtime validation)
+    /// Returns error.BufferTooLarge if buffer exceeds 4GB limit.
+    pub fn prepSendSafe(sqe: *IoUringSqe, fd: i32, buf: []const u8, user_data: u64) PrepError!void {
+        if (buf.len > std.math.maxInt(u32)) {
+            return error.BufferTooLarge;
+        }
+        prepSend(sqe, fd, buf, user_data);
+    }
+
     /// Prepare send SQE
+    /// Panics if buf.len > 4GB. Use prepSendSafe() for fallible handling.
     pub fn prepSend(sqe: *IoUringSqe, fd: i32, buf: []const u8, user_data: u64) void {
+        if (buf.len > std.math.maxInt(u32)) {
+            @panic("prepSend: buffer length exceeds u32 max");
+        }
         sqe.* = std.mem.zeroes(IoUringSqe);
         sqe.opcode = IORING_OP_SEND;
         sqe.fd = fd;

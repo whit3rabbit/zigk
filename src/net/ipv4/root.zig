@@ -2,7 +2,7 @@
 //
 // Re-exports IPv4 and ARP protocol types and functions.
 
-pub const ipv4 = @import("ipv4.zig");
+pub const ipv4 = @import("ipv4/root.zig");
 pub const arp = @import("arp/root.zig");
 
 // Re-export commonly used IPv4 items

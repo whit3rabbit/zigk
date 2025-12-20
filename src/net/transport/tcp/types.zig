@@ -393,3 +393,8 @@ pub fn seqGte(a: u32, b: u32) bool {
 pub fn seqBetween(seq: u32, low: u32, high: u32) bool {
     return seqGte(seq, low) and seqLt(seq, high);
 }
+
+pub const RxAction = enum {
+    Continue,
+    FreeTcb,
+};

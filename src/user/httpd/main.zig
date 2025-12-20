@@ -134,31 +134,43 @@ fn main() !void {
 }
 
 fn submitAccept(ring: *syscall.IoUring, listener: i32) void {
-    if (ring.getSqe()) |sqe| {
-        syscall.IoUring.prepAccept(sqe, listener, null, null, encodeUserData(.accept, listener));
-        ring.submitSqe();
-    }
+    _ = ring.getSqeAtomicFn(&populateAccept, @ptrFromInt(@as(usize, @intCast(listener))));
+}
+
+fn populateAccept(sqe: *syscall.IoUringSqe, ctx: ?*anyopaque) void {
+    const listener: i32 = @intCast(@intFromPtr(ctx));
+    syscall.IoUring.prepAccept(sqe, listener, null, null, encodeUserData(.accept, listener));
 }
 
 fn submitRecv(ring: *syscall.IoUring, client: *ClientState) void {
-    if (ring.getSqe()) |sqe| {
-        syscall.IoUring.prepRecv(sqe, client.fd, &client.buf, encodeUserData(.recv, client.fd));
-        ring.submitSqe();
-    }
+    _ = ring.getSqeAtomicFn(&populateRecv, client);
+}
+
+fn populateRecv(sqe: *syscall.IoUringSqe, ctx: ?*anyopaque) void {
+    const client: *ClientState = @ptrCast(@alignCast(ctx));
+    syscall.IoUring.prepRecv(sqe, client.fd, &client.buf, encodeUserData(.recv, client.fd));
 }
 
 fn submitSend(ring: *syscall.IoUring, fd: i32, data: []const u8) void {
-    if (ring.getSqe()) |sqe| {
-        syscall.IoUring.prepSend(sqe, fd, data, encodeUserData(.send, fd));
-        ring.submitSqe();
-    }
+    // Pack fd and data pointer into a stack struct for the callback
+    const SendCtx = struct { fd: i32, data: []const u8 };
+    var send_ctx = SendCtx{ .fd = fd, .data = data };
+    _ = ring.getSqeAtomicFn(&populateSend, @ptrCast(&send_ctx));
+}
+
+fn populateSend(sqe: *syscall.IoUringSqe, ctx: ?*anyopaque) void {
+    const SendCtx = struct { fd: i32, data: []const u8 };
+    const send_ctx: *SendCtx = @ptrCast(@alignCast(ctx));
+    syscall.IoUring.prepSend(sqe, send_ctx.fd, send_ctx.data, encodeUserData(.send, send_ctx.fd));
 }
 
 fn submitClose(ring: *syscall.IoUring, fd: i32) void {
-    if (ring.getSqe()) |sqe| {
-        syscall.IoUring.prepClose(sqe, fd, encodeUserData(.close, fd));
-        ring.submitSqe();
-    }
+    _ = ring.getSqeAtomicFn(&populateClose, @ptrFromInt(@as(usize, @intCast(fd))));
+}
+
+fn populateClose(sqe: *syscall.IoUringSqe, ctx: ?*anyopaque) void {
+    const fd: i32 = @intCast(@intFromPtr(ctx));
+    syscall.IoUring.prepClose(sqe, fd, encodeUserData(.close, fd));
 }
 
 fn handleCompletion(ring: *syscall.IoUring, listener: i32, cqe: *syscall.IoUringCqe) void {

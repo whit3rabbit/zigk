@@ -22,7 +22,7 @@ const EthernetHeader = packet.EthernetHeader;
 const Interface = interface.Interface;
 
 // Import protocol handlers (will be implemented)
-const ipv4 = @import("../ipv4/ipv4.zig");
+const ipv4 = @import("../ipv4/root.zig").ipv4;
 const arp = @import("../ipv4/arp/root.zig");
 
 /// Ethertype values in host byte order

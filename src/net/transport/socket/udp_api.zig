@@ -2,7 +2,7 @@
 
 const std = @import("std");
 const udp = @import("../udp.zig");
-const ipv4 = @import("../../ipv4/ipv4.zig");
+const ipv4 = @import("../../ipv4/root.zig").ipv4;
 const packet = @import("../../core/packet.zig");
 const types = @import("types.zig");
 const state = @import("state.zig");

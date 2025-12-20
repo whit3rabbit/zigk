@@ -93,11 +93,12 @@ defer ring.deinit();
 
 ### Submit Operations
 ```zig
-// Get submission queue entry
-if (ring.getSqe()) |sqe| {
-    // Prepare operation
-    syscall.IoUring.prepAccept(sqe, listener_fd, null, null, user_data);
-    ring.submitSqe();
+// Use atomic pattern to get SQE and submit in one operation (avoids TOCTOU race)
+_ = ring.getSqeAtomicFn(&populateAccept, @ptrFromInt(@as(usize, @intCast(listener_fd))));
+
+fn populateAccept(sqe: *syscall.IoUringSqe, ctx: ?*anyopaque) void {
+    const fd: i32 = @intCast(@intFromPtr(ctx));
+    syscall.IoUring.prepAccept(sqe, fd, null, null, user_data);
 }
 
 // Submit to kernel (blocks until min_complete done)

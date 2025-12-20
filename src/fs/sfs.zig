@@ -11,9 +11,32 @@
 //! - Flat directory structure (no subdirectories).
 //! - Contiguous file allocation (prone to fragmentation, simplifies read/write).
 //! - Fixed number of files (determined by root directory size).
-//! - No permissions/ownership storage.
 //!
 //! Intended for basic persistence until a full FS (EXT2/FAT) is implemented.
+//!
+//! ## Lock Ordering (SECURITY: deadlock prevention)
+//!
+//! To prevent deadlocks, locks MUST be acquired in this order:
+//!   1. SFS.alloc_lock (filesystem-wide allocation lock)
+//!   2. FileDescriptor.lock (per-file descriptor lock)
+//!
+//! Current lock usage by operation:
+//!   - sfsOpen: alloc_lock only (for open_counts)
+//!   - sfsClose: alloc_lock only (for open_counts, pending_delete)
+//!   - sfsRead: FD lock only (position/size access)
+//!   - sfsWrite: FD lock, then alloc_lock if growing (nested, same thread)
+//!   - sfsUnlink: alloc_lock only (for open_counts, pending_delete)
+//!   - truncateFd: alloc_lock only (for size/block updates)
+//!   - allocateBlock/freeBlock: alloc_lock only
+//!
+//! ## TOCTOU Considerations (SECURITY: race condition awareness)
+//!
+//! Permission checks occur at the syscall layer (sys_open/sys_openat) before
+//! VFS.open is called. There is a potential TOCTOU window between permission
+//! check and actual open. Mitigations:
+//!   - pending_delete check catches concurrent unlink race
+//!   - Permission changes during this window are accepted as low risk
+//!   - Full mitigation would require VFS-level locking across stat+open
 
 const std = @import("std");
 const fd = @import("fd");
@@ -108,7 +131,7 @@ fn readSector(device_fd: *fd.FileDescriptor, lba: u32, buf: *[512]u8) SectorErro
     switch (result) {
         .success => |bytes| {
             if (bytes < 512) return error.IOError;
-            // SECURITY: Vuln 8 - Memory barrier ensures DMA writes are visible
+            // SECURITY: Memory barrier ensures DMA writes are visible
             // before we copy from the buffer. Prevents data corruption from
             // out-of-order memory access or CPU cache inconsistency.
             asm volatile ("mfence" ::: .{ .memory = true });
@@ -152,20 +175,35 @@ fn writeSector(device_fd: *fd.FileDescriptor, lba: u32, buf: []const u8) SectorE
     }
 }
 
+/// SECURITY: stores block allocation info at unlink time
+/// Prevents block leaks if file is modified between unlink and close
+const DeferredDeleteInfo = struct {
+    start_block: u32,
+    block_count: u32,
+};
+
 pub const SFS = struct {
     device_fd: *fd.FileDescriptor,
     superblock: Superblock,
     /// Lock protecting superblock updates (prevents TOCTOU in file growth)
+    /// LOCK ORDERING: alloc_lock must be acquired BEFORE any FD locks
     alloc_lock: sync.Spinlock = .{},
     /// AHCI port number for direct async I/O access
     port_num: u5,
 
-    // SECURITY: Vuln 5 fix - track open file descriptors per entry
+    // SECURITY: track mount state to prevent use-after-free on unmount
+    /// True while filesystem is mounted and safe to use
+    mounted: bool = true,
+
+    // SECURITY: track open file descriptors per entry
     // Prevents use-after-free when file is unlinked while still open
     /// Count of open file descriptors per directory entry
     open_counts: [MAX_FILES]u32 = [_]u32{0} ** MAX_FILES,
     /// Tracks entries that were unlinked while open (deferred deletion)
     pending_delete: [MAX_FILES]bool = [_]bool{false} ** MAX_FILES,
+    /// SECURITY: stores block info at unlink time (not close time)
+    /// This ensures we free the correct blocks even if file was modified after unlink
+    deferred_info: [MAX_FILES]DeferredDeleteInfo = [_]DeferredDeleteInfo{.{ .start_block = 0, .block_count = 0 }} ** MAX_FILES,
 
     /// Initialize SFS on a device
     /// Opens the device, checks magic, formats if needed.
@@ -228,7 +266,8 @@ pub const SFS = struct {
             .root_dir_start = 1 + BITMAP_BLOCKS,
             .data_start = DATA_START_BLOCK,
             .next_free_block = DATA_START_BLOCK,
-            ._pad = undefined,
+            // SECURITY: zero padding to prevent kernel stack leak to disk
+            ._pad = [_]u8{0} ** (512 - 44),
         };
 
         // Write superblock
@@ -342,10 +381,20 @@ pub const SFS = struct {
                         const total_offset = std.math.add(u32, bitmap_offset, bit_offset) catch return error.IOError;
                         const block_num = std.math.add(u32, self.superblock.data_start, total_offset) catch return error.IOError;
 
-                        // Update superblock free count
-                        if (self.superblock.free_blocks > 0) {
-                            self.superblock.free_blocks -= 1;
+                        // SECURITY: validate block_num is within disk bounds
+                        // Malicious disk could have bitmap_blocks > what total_blocks allows
+                        if (block_num >= self.superblock.total_blocks) {
+                            console.warn("SFS: Allocated block {} exceeds total_blocks {}", .{ block_num, self.superblock.total_blocks });
+                            return error.ENOSPC;
                         }
+
+                        // SECURITY: use checked subtraction for free_blocks
+                        // Detects inconsistency between bitmap and superblock accounting
+                        // A malformed disk could have free_blocks=0 but free bits in bitmap
+                        self.superblock.free_blocks = std.math.sub(u32, self.superblock.free_blocks, 1) catch blk: {
+                            console.warn("SFS: free_blocks underflow detected (bitmap/superblock mismatch)", .{});
+                            break :blk 0;
+                        };
                         self.updateSuperblock() catch return error.IOError;
 
                         return block_num;
@@ -468,9 +517,12 @@ fn validateSuperblock(sb: *const Superblock) bool {
         return false;
     }
 
-    // Bitmap blocks should be reasonable (max 256 blocks = 1M tracked blocks)
-    if (sb.bitmap_blocks == 0 or sb.bitmap_blocks > 256) {
-        console.warn("SFS: Invalid bitmap_blocks {}", .{sb.bitmap_blocks});
+    // SECURITY: limit bitmap_blocks to 16 (8KB max allocation)
+    // Each bitmap block tracks 4096 blocks, so 16 blocks = 65536 trackable blocks (32MB disk)
+    // This prevents heap exhaustion from malicious disk with large bitmap_blocks
+    const MAX_BITMAP_BLOCKS: u32 = 16;
+    if (sb.bitmap_blocks == 0 or sb.bitmap_blocks > MAX_BITMAP_BLOCKS) {
+        console.warn("SFS: Invalid bitmap_blocks {} (max={})", .{ sb.bitmap_blocks, MAX_BITMAP_BLOCKS });
         return false;
     }
 
@@ -656,9 +708,28 @@ fn writeDirectoryAsync(self: *SFS, buf: []const u8) !void {
 fn sfsUnmount(ctx: ?*anyopaque) void {
     if (ctx) |ptr| {
         const self: *SFS = @ptrCast(@alignCast(ptr));
-        // Close device FD?
-        // Since VFS opened it, maybe VFS should close it?
-        // But we opened it in init().
+
+        // SECURITY: atomically mark as unmounted and check for open files
+        // This prevents use-after-free if operations are in progress
+        {
+            const held = self.alloc_lock.acquire();
+            defer held.release();
+
+            // Mark as unmounted - all new operations will fail
+            self.mounted = false;
+
+            // Check if any files are still open
+            for (self.open_counts) |count| {
+                if (count > 0) {
+                    // Files still open - log warning but proceed with unmount
+                    // The mounted=false flag will cause in-flight operations to fail safely
+                    console.warn("SFS: Unmounting with open files - operations may fail", .{});
+                    break;
+                }
+            }
+        }
+
+        // Close device FD
         if (self.device_fd.ops.close) |close_fn| {
             _ = close_fn(self.device_fd);
         }
@@ -668,12 +739,16 @@ fn sfsUnmount(ctx: ?*anyopaque) void {
 
 fn sfsOpen(ctx: ?*anyopaque, path: []const u8, flags: u32) vfs.Error!*fd.FileDescriptor {
     const self: *SFS = @ptrCast(@alignCast(ctx));
+
+    // SECURITY: check mount state before any operation
+    if (!self.mounted) return vfs.Error.IOError;
+
     const alloc = heap.allocator();
 
     // Normalize path (remove leading /)
     const name = if (path.len > 0 and path[0] == '/') path[1..] else path;
 
-    // SECURITY: Vuln 6 - Comprehensive path validation
+    // SECURITY: Comprehensive path validation
     if (!isValidFilename(name)) {
         return vfs.Error.AccessDenied;
     }
@@ -704,6 +779,8 @@ fn sfsOpen(ctx: ?*anyopaque, path: []const u8, flags: u32) vfs.Error!*fd.FileDes
         if (e.flags == 1) {
             // Active entry, check name
             const e_name = std.mem.sliceTo(&e.name, 0);
+            // SECURITY: skip entries with corrupted names (no null terminator)
+            if (e_name.len >= 32) continue;
             if (std.mem.eql(u8, e_name, name)) {
                 entry_idx = idx;
                 entry = e.*;
@@ -720,7 +797,7 @@ fn sfsOpen(ctx: ?*anyopaque, path: []const u8, flags: u32) vfs.Error!*fd.FileDes
         // File found - use found_idx for entry tracking
 
         // SECURITY: Validate entry fields from untrusted disk source
-        // Vuln 3: Ensure start_block is within data region
+        // Ensure start_block is within data region
         if (entry.start_block < self.superblock.data_start or
             entry.start_block >= self.superblock.total_blocks)
         {
@@ -728,7 +805,7 @@ fn sfsOpen(ctx: ?*anyopaque, path: []const u8, flags: u32) vfs.Error!*fd.FileDes
             return vfs.Error.IOError;
         }
 
-        // SECURITY: Vuln 5 - Validate size doesn't exceed possible allocation
+        // SECURITY: Validate size doesn't exceed possible allocation
         const max_possible_blocks = self.superblock.total_blocks - entry.start_block;
         const max_possible_size = max_possible_blocks * 512;
         if (entry.size > max_possible_size) {
@@ -739,7 +816,7 @@ fn sfsOpen(ctx: ?*anyopaque, path: []const u8, flags: u32) vfs.Error!*fd.FileDes
         // NOTE: Permission checking is done at the syscall layer (sys_open/sys_openat)
         // before calling VFS.open. This avoids circular dependency between fs and perms.
         //
-        // SECURITY: Vuln 6 consideration - TOCTOU between stat_path and open
+        // SECURITY: TOCTOU between stat_path and open
         // There is a potential race where permissions could change between when
         // the syscall layer checks permissions (via stat_path) and when we open.
         // Full mitigation would require passing expected permissions here and
@@ -748,25 +825,37 @@ fn sfsOpen(ctx: ?*anyopaque, path: []const u8, flags: u32) vfs.Error!*fd.FileDes
         // concurrent unlink case. For permission changes, the risk is acceptable
         // as the window is small and the syscall layer re-validates on each operation.
 
-        // SECURITY: Vuln 5 fix - check if file was unlinked while we were looking it up
-        if (self.pending_delete[found_idx]) {
-            return vfs.Error.NotFound;
-        }
-
-        // Create FD
+        // Create FD context first (allocation can be done outside lock)
         const file_ctx = alloc.create(SfsFile) catch return vfs.Error.NoMemory;
         file_ctx.* = .{
             .fs = self,
             .start_block = entry.start_block,
             .size = entry.size,
             .entry_idx = found_idx,
+            // SECURITY: store actual permissions for sfsStat
+            .mode = entry.mode,
+            .uid = entry.uid,
+            .gid = entry.gid,
         };
 
-        // SECURITY: Vuln 5 fix - increment open count under lock
+        // SECURITY: atomically check pending_delete AND increment open_counts
+        // This prevents race condition where another thread completes deferred deletion
+        // between our check and increment, leading to use-after-free of freed blocks.
         {
             const lock_held = self.alloc_lock.acquire();
             defer lock_held.release();
-            self.open_counts[found_idx] += 1;
+
+            // Check pending_delete UNDER lock to prevent TOCTOU race
+            if (self.pending_delete[found_idx]) {
+                alloc.destroy(file_ctx);
+                return vfs.Error.NotFound;
+            }
+            // SECURITY: use checked addition to prevent overflow
+            // Overflow would break deferred deletion and cause use-after-free
+            self.open_counts[found_idx] = std.math.add(u32, self.open_counts[found_idx], 1) catch {
+                alloc.destroy(file_ctx);
+                return vfs.Error.NoMemory; // Too many open files
+            };
         }
 
         return fd.createFd(&sfs_ops, flags, file_ctx) catch {
@@ -782,15 +871,63 @@ fn sfsOpen(ctx: ?*anyopaque, path: []const u8, flags: u32) vfs.Error!*fd.FileDes
     } else {
         // Not found. Create if O_CREAT?
         if ((flags & fd.O_CREAT) != 0) {
-            if (self.superblock.file_count >= MAX_FILES) return vfs.Error.NoMemory; // Disk full (inodes)
-            const new_idx = free_idx orelse return vfs.Error.NoMemory;
+            // SECURITY: reserve slot under lock to prevent:
+            // 1. Two threads finding same free_idx (directory entry aliasing)
+            // 2. file_count race condition on increment
+            //
+            // Strategy: We cannot hold lock during allocateBlock (it has own lock).
+            // Instead: (1) reserve slot under lock, (2) allocate block, (3) write entry under lock.
 
-            // Allocate first block for new file using bitmap
-            const start_block = self.allocateBlock() catch return vfs.Error.NoMemory;
+            var new_idx: u32 = undefined;
+
+            // Phase 1: Reserve directory slot under lock
+            {
+                const lock_held = self.alloc_lock.acquire();
+                defer lock_held.release();
+
+                if (self.superblock.file_count >= MAX_FILES) return vfs.Error.NoMemory;
+
+                // Re-scan for free slot under lock (another thread may have taken free_idx)
+                var reserved_idx: ?u32 = null;
+                for (0..MAX_FILES) |slot_i| {
+                    const slot_idx: u32 = @intCast(slot_i);
+                    const blk_idx = slot_idx / 4;
+                    const off_idx = slot_idx % 4;
+                    const e: *const DirEntry = @ptrCast(@alignCast(&dir_buf[blk_idx * 512 + off_idx * 128]));
+                    if (e.flags == 0) {
+                        reserved_idx = slot_idx;
+                        break;
+                    }
+                }
+
+                new_idx = reserved_idx orelse return vfs.Error.NoMemory;
+
+                // Mark slot as reserved by setting flags=1 in memory
+                // This prevents other threads from claiming this slot
+                const blk_idx = new_idx / 4;
+                const off_idx = new_idx % 4;
+                const slot: *DirEntry = @ptrCast(@alignCast(&dir_buf[blk_idx * 512 + off_idx * 128]));
+                slot.flags = 1; // Reserve in our local buffer
+
+                // Increment file_count under lock
+                self.superblock.file_count += 1;
+            }
+
+            // Phase 2: Allocate block (has its own internal locking)
+            const start_block = self.allocateBlock() catch {
+                // Rollback: decrement file_count
+                const lock_held = self.alloc_lock.acquire();
+                defer lock_held.release();
+                if (self.superblock.file_count > 0) {
+                    self.superblock.file_count -= 1;
+                }
+                return vfs.Error.NoMemory;
+            };
+
+            // SECURITY: free block if any subsequent operation fails
+            errdefer self.freeBlock(start_block) catch {};
 
             // Default permissions: regular file with rw-r--r-- (0o644)
-            // The syscall layer can adjust ownership via chown after creation
-            // if the calling process has different uid/gid
             const default_mode: u32 = meta.S_IFREG | 0o644;
 
             var new_entry = DirEntry{
@@ -802,39 +939,56 @@ fn sfsOpen(ctx: ?*anyopaque, path: []const u8, flags: u32) vfs.Error!*fd.FileDes
                 .uid = 0, // Default to root, syscall layer adjusts via chown
                 .gid = 0,
                 .mtime = 0, // TODO: Get current timestamp when RTC is available
-                ._pad = undefined,
+                // SECURITY: zero padding to prevent kernel stack leak to disk
+                ._pad = [_]u8{0} ** (128 - 60),
             };
             @memcpy(new_entry.name[0..name.len], name);
 
-            // Write entry to disk - reuse dir_buf we already read
-            const block_idx = new_idx / 4;
-            const offset_in_dir = new_idx * 128;
+            // Phase 3: Write entry to disk under lock
+            {
+                const lock_held = self.alloc_lock.acquire();
+                defer lock_held.release();
 
-            // Update entry in our existing directory buffer
-            const dest: *DirEntry = @ptrCast(@alignCast(&dir_buf[offset_in_dir]));
-            dest.* = new_entry;
+                const block_idx = new_idx / 4;
+                const offset_in_dir = new_idx * 128;
 
-            // Write only the affected block back
-            const block_start = block_idx * 512;
-            writeSectorAsync(self, self.superblock.root_dir_start + block_idx, dir_buf[block_start..][0..512]) catch return vfs.Error.IOError;
+                // Update entry in our directory buffer
+                const dest: *DirEntry = @ptrCast(@alignCast(&dir_buf[offset_in_dir]));
+                dest.* = new_entry;
 
-            self.superblock.file_count += 1;
-            self.updateSuperblock() catch return vfs.Error.IOError;
+                // Write only the affected block back
+                const block_start = block_idx * 512;
+                writeSectorAsync(self, self.superblock.root_dir_start + block_idx, dir_buf[block_start..][0..512]) catch return vfs.Error.IOError;
 
-            const file_ctx = alloc.create(SfsFile) catch return vfs.Error.NoMemory;
+                // Update superblock with new file_count
+                self.updateSuperblock() catch return vfs.Error.IOError;
+
+                // Increment open count for new file
+                self.open_counts[new_idx] = std.math.add(u32, self.open_counts[new_idx], 1) catch {
+                    return vfs.Error.NoMemory; // Too many open files
+                };
+            }
+
+            const file_ctx = alloc.create(SfsFile) catch {
+                // Decrement count on allocation failure
+                const lock_held = self.alloc_lock.acquire();
+                defer lock_held.release();
+                if (self.open_counts[new_idx] > 0) {
+                    self.open_counts[new_idx] -= 1;
+                }
+                return vfs.Error.NoMemory;
+            };
+
             file_ctx.* = .{
                 .fs = self,
                 .start_block = new_entry.start_block,
                 .size = 0,
                 .entry_idx = new_idx,
+                // SECURITY: store actual permissions for sfsStat
+                .mode = new_entry.mode,
+                .uid = new_entry.uid,
+                .gid = new_entry.gid,
             };
-
-            // SECURITY: Vuln 5 fix - increment open count for new file
-            {
-                const lock_held = self.alloc_lock.acquire();
-                defer lock_held.release();
-                self.open_counts[new_idx] += 1;
-            }
 
             return fd.createFd(&sfs_ops, flags, file_ctx) catch {
                 // Decrement count on FD creation failure
@@ -857,6 +1011,62 @@ const SfsFile = struct {
     start_block: u32,
     size: u32,
     entry_idx: u32,
+    // SECURITY: store actual permissions for sfsStat
+    mode: u32,
+    uid: u32,
+    gid: u32,
+
+    /// SECURITY: refresh size from directory entry to detect concurrent truncation
+    /// Prevents stale cache from allowing reads of blocks that have been freed and reallocated.
+    /// Must be called under file_desc.lock to prevent races with position updates.
+    /// Returns current size from disk, or null on I/O error or torn read detection.
+    fn refreshSizeFromDisk(self: *SfsFile) ?u32 {
+        // Validate entry_idx before access
+        if (self.entry_idx >= MAX_FILES) {
+            return null;
+        }
+
+        const block_idx = self.entry_idx / 4;
+        const offset_idx = self.entry_idx % 4;
+
+        var dir_buf: [512]u8 = undefined;
+
+        // SECURITY: memory fence before read to ensure we see consistent state
+        asm volatile ("mfence" ::: .{ .memory = true });
+
+        readSector(self.fs.device_fd, self.fs.superblock.root_dir_start + block_idx, &dir_buf) catch {
+            return null;
+        };
+
+        const entry: *const DirEntry = @ptrCast(@alignCast(&dir_buf[offset_idx * 128]));
+
+        // Verify entry is still active (not deleted)
+        if (entry.flags != 1) {
+            return null;
+        }
+
+        // SECURITY: validate fields for consistency to detect torn reads
+        // 1. start_block must match our cached value (truncate doesn't change start_block)
+        if (entry.start_block != self.start_block) {
+            // Torn read or file was deleted and slot reused
+            return null;
+        }
+
+        // 2. size must be reasonable (not exceed max possible file size)
+        // Max file size = total_blocks * 512 bytes
+        const max_size = @as(u64, self.fs.superblock.total_blocks) * 512;
+        if (entry.size > max_size) {
+            return null;
+        }
+
+        // 3. name must be null-terminated within bounds (sanity check)
+        const name_slice = std.mem.sliceTo(&entry.name, 0);
+        if (name_slice.len >= 32) {
+            return null;
+        }
+
+        return entry.size;
+    }
 };
 
 pub const TruncateError = error{
@@ -871,6 +1081,13 @@ pub fn truncateFd(file_desc: *fd.FileDescriptor, length: usize) TruncateError!vo
     }
 
     const file: *SfsFile = @ptrCast(@alignCast(file_desc.private_data));
+
+    // SECURITY: validate entry_idx to prevent OOB directory access
+    // Corrupted SfsFile could cause arbitrary disk read/write
+    if (file.entry_idx >= MAX_FILES) {
+        return error.IOError;
+    }
+
     if (length > std.math.maxInt(u32)) {
         return error.TooLarge;
     }
@@ -879,7 +1096,7 @@ pub fn truncateFd(file_desc: *fd.FileDescriptor, length: usize) TruncateError!vo
         return error.TooLarge;
     }
 
-    // SECURITY: Vuln 4 - Acquire lock at start to prevent TOCTOU race with sfsWrite
+    // SECURITY: Acquire lock at start to prevent TOCTOU race with sfsWrite
     // The entire truncate operation must be atomic with respect to file size changes
     const held = file.fs.alloc_lock.acquire();
     defer held.release();
@@ -939,11 +1156,27 @@ const sfs_ops = fd.FileOps{
 const MAX_BATCH_SECTORS: u16 = 32;
 
 fn sfsRead(file_desc: *fd.FileDescriptor, buf: []u8) isize {
-    // SECURITY: Vuln 1-2 fix - acquire FD lock to prevent data races on position/size
+    // SECURITY: acquire FD lock to prevent data races on position/size
     const held = file_desc.lock.acquire();
     defer held.release();
 
     const file: *SfsFile = @ptrCast(@alignCast(file_desc.private_data));
+
+    // SECURITY: refresh size from disk to detect concurrent truncation
+    // Another FD may have truncated the file, freeing blocks we would otherwise read.
+    // This prevents information disclosure from reading reallocated blocks.
+    const current_size = file.refreshSizeFromDisk() orelse {
+        // Entry was deleted or I/O error - treat as EOF
+        return 0;
+    };
+    // Update cached size if it was reduced (truncated)
+    if (current_size < file.size) {
+        file.size = current_size;
+        // Also adjust position if it's now past EOF
+        if (file_desc.position > current_size) {
+            file_desc.position = current_size;
+        }
+    }
 
     if (file_desc.position >= file.size) return 0;
 
@@ -951,16 +1184,22 @@ fn sfsRead(file_desc: *fd.FileDescriptor, buf: []u8) isize {
     const to_read = @min(buf.len, remaining);
 
     // Calculate sector range needed
+    // SECURITY: use checked arithmetic to prevent integer overflow
     const start_byte = file_desc.position;
-    const end_byte = start_byte + to_read;
+    const end_byte = std.math.add(usize, start_byte, to_read) catch {
+        return 0; // Overflow - treat as EOF
+    };
     const first_sector = start_byte / 512;
-    const last_sector = (end_byte + 511) / 512; // Round up
+    // SECURITY: checked add for rounding up
+    const last_sector = (std.math.add(usize, end_byte, 511) catch {
+        return 0; // Overflow - treat as EOF
+    }) / 512;
     const sector_count = last_sector - first_sector;
 
     // Safe cast: sector offsets bounded by file size which is u32
     const first_sector_u32 = std.math.cast(u32, first_sector) orelse return -5;
 
-    // SECURITY: Vuln 3 fix - validate computed block is within file allocation and fs bounds
+    // SECURITY: validate computed block is within file allocation and fs bounds
     const file_blocks: u32 = if (file.size == 0) 1 else (file.size + 511) / 512;
     if (first_sector_u32 >= file_blocks) {
         return 0; // EOF - position is beyond allocated blocks
@@ -972,7 +1211,7 @@ fn sfsRead(file_desc: *fd.FileDescriptor, buf: []u8) isize {
         return -5; // EIO
     }
 
-    // SECURITY: Vuln 7 fix - limit batch size to 16KB to avoid kernel stack overflow
+    // SECURITY: limit batch size to 16KB to avoid kernel stack overflow
     const sector_count_u16 = std.math.cast(u16, @min(sector_count, MAX_BATCH_SECTORS)) orelse return -5;
 
     // Optimization: For multi-sector reads, use batched async I/O
@@ -981,7 +1220,7 @@ fn sfsRead(file_desc: *fd.FileDescriptor, buf: []u8) isize {
         const total_bytes = @as(usize, sector_count_u16) * 512;
         var sector_buf: [MAX_BATCH_SECTORS * 512]u8 = undefined;
 
-        // SECURITY: Vuln 3 fix - verify end block is also within bounds
+        // SECURITY: verify end block is also within bounds
         const end_block = phys_block_start + sector_count_u16 - 1;
         if (end_block >= file.fs.superblock.total_blocks) {
             console.warn("SFS: Read end block {} exceeds total_blocks {}", .{ end_block, file.fs.superblock.total_blocks });
@@ -1009,7 +1248,7 @@ fn sfsRead(file_desc: *fd.FileDescriptor, buf: []u8) isize {
 
         const block_offset_u32 = std.math.cast(u32, block_offset) orelse return -5;
 
-        // SECURITY: Vuln 3 fix - validate each block access
+        // SECURITY: validate each block access
         if (block_offset_u32 >= file_blocks) {
             break; // EOF reached
         }
@@ -1035,7 +1274,7 @@ fn sfsRead(file_desc: *fd.FileDescriptor, buf: []u8) isize {
 }
 
 fn sfsWrite(file_desc: *fd.FileDescriptor, buf: []const u8) isize {
-    // SECURITY: Vuln 1-2 fix - acquire FD lock to prevent data races on position/size
+    // SECURITY: acquire FD lock to prevent data races on position/size
     const held = file_desc.lock.acquire();
     defer held.release();
 
@@ -1057,7 +1296,7 @@ fn sfsWrite(file_desc: *fd.FileDescriptor, buf: []const u8) isize {
     // Calculate current blocks used (preliminary check before lock)
     const prelim_current_blocks: u32 = if (file.size == 0) 1 else (file.size + 511) / 512;
 
-    // SECURITY: Vuln 4 fix - use checked arithmetic to prevent integer overflow
+    // SECURITY: use checked arithmetic to prevent integer overflow
     const new_size_needed = std.math.add(u64, file_desc.position, buf.len) catch {
         return -27; // EFBIG - file too large
     };
@@ -1094,8 +1333,17 @@ fn sfsWrite(file_desc: *fd.FileDescriptor, buf: []const u8) isize {
                 return -28; // ENOSPC - not enough free blocks
             }
 
+            // SECURITY: use checked arithmetic to prevent integer overflow
+            // A malicious superblock with next_free_block near u32::MAX could wrap around
+            const new_next_free = std.math.add(u32, file.fs.superblock.next_free_block, blocks_to_add) catch {
+                return -28; // ENOSPC - overflow would occur
+            };
+            if (new_next_free > file.fs.superblock.total_blocks) {
+                return -28; // ENOSPC - would exceed disk bounds
+            }
+
             // Update superblock free pointer atomically with the check
-            file.fs.superblock.next_free_block += blocks_to_add;
+            file.fs.superblock.next_free_block = new_next_free;
             file.fs.updateSuperblock() catch return -5;
         }
         // else: Another thread already grew the file, no action needed
@@ -1108,7 +1356,7 @@ fn sfsWrite(file_desc: *fd.FileDescriptor, buf: []const u8) isize {
     const start_byte_offset = current_pos % 512;
 
     // Check if we can do a batch write (aligned start, multiple full sectors)
-    // SECURITY: Vuln 7 fix - limit batch size to MAX_BATCH_SECTORS (16KB)
+    // SECURITY: limit batch size to MAX_BATCH_SECTORS (16KB)
     if (start_byte_offset == 0 and buf.len >= 1024) {
         // Calculate full sectors we can batch write
         const full_sectors = @min(buf.len / 512, MAX_BATCH_SECTORS);
@@ -1116,7 +1364,7 @@ fn sfsWrite(file_desc: *fd.FileDescriptor, buf: []const u8) isize {
             const block_offset_u32 = std.math.cast(u32, current_pos / 512) orelse return -5;
             const phys_block = file.start_block + block_offset_u32;
 
-            // SECURITY: Vuln 3 fix - validate block bounds before write
+            // SECURITY: validate block bounds before write
             if (phys_block >= file.fs.superblock.total_blocks) {
                 console.warn("SFS: Write block {} exceeds total_blocks {}", .{ phys_block, file.fs.superblock.total_blocks });
                 return -5; // EIO
@@ -1148,7 +1396,7 @@ fn sfsWrite(file_desc: *fd.FileDescriptor, buf: []const u8) isize {
         const block_offset_u32 = std.math.cast(u32, block_offset) orelse return -5;
         const phys_block = file.start_block + block_offset_u32;
 
-        // SECURITY: Vuln 3 fix - validate block bounds before write
+        // SECURITY: validate block bounds before write
         if (phys_block >= file.fs.superblock.total_blocks) {
             console.warn("SFS: Write block {} exceeds total_blocks {}", .{ phys_block, file.fs.superblock.total_blocks });
             return -5; // EIO
@@ -1175,16 +1423,37 @@ fn sfsWrite(file_desc: *fd.FileDescriptor, buf: []const u8) isize {
         file.size = std.math.cast(u32, file_desc.position) orelse return -27; // EFBIG
 
         // Update directory entry size
+        // SECURITY: we hold file_desc.lock here and access device_fd
+        // This is safe because:
+        // 1. device_fd uses async I/O (AHCI adapter) which has its own request locking
+        // 2. We don't acquire device_fd.lock, only call its read/write ops
+        // 3. The AHCI adapter uses per-port locking, not FD-level locking
+        // If device I/O ever adds FD-level locking, this must be revisited.
+        // SECURITY: validate entry_idx and handle I/O errors properly
+        // Prevents directory corruption from uninitialized buffer write
+        if (file.entry_idx >= MAX_FILES) {
+            // Corrupted entry_idx - don't attempt directory update
+            return std.math.cast(isize, written_count) orelse return -75;
+        }
+
         const block_idx = file.entry_idx / 4;
         const offset_idx = file.entry_idx % 4;
 
         var dir_buf: [512]u8 = undefined;
-        readSector(file.fs.device_fd, file.fs.superblock.root_dir_start + block_idx, &dir_buf) catch {};
+        // SECURITY: if read fails, skip directory update rather than
+        // writing garbage. The in-memory size is still correct; just disk metadata
+        // may be stale until next successful write.
+        readSector(file.fs.device_fd, file.fs.superblock.root_dir_start + block_idx, &dir_buf) catch {
+            console.warn("SFS: Failed to read directory for size update, skipping", .{});
+            return std.math.cast(isize, written_count) orelse return -75;
+        };
 
         const entry: *DirEntry = @ptrCast(@alignCast(&dir_buf[offset_idx * 128]));
         entry.size = file.size;
 
-        writeSector(file.fs.device_fd, file.fs.superblock.root_dir_start + block_idx, &dir_buf) catch {};
+        writeSector(file.fs.device_fd, file.fs.superblock.root_dir_start + block_idx, &dir_buf) catch {
+            console.warn("SFS: Failed to write directory size update", .{});
+        };
     }
 
     return std.math.cast(isize, written_count) orelse return -75; // EOVERFLOW
@@ -1194,14 +1463,22 @@ fn sfsClose(file_desc: *fd.FileDescriptor) isize {
     const alloc = heap.allocator();
     const file: *SfsFile = @ptrCast(@alignCast(file_desc.private_data));
 
-    // SECURITY: Vuln 5 fix - decrement open count and handle deferred deletion
+    // SECURITY: decrement open count and handle deferred deletion
     const entry_idx = file.entry_idx;
-    const start_block = file.start_block;
-    const file_size = file.size;
     const fs = file.fs;
+
+    // SECURITY: validate entry_idx bounds before array access
+    // Prevents out-of-bounds access from memory corruption
+    if (entry_idx >= MAX_FILES) {
+        console.err("SFS: Invalid entry_idx {} in close (max={})", .{ entry_idx, MAX_FILES });
+        alloc.destroy(file);
+        return -5; // EIO
+    }
 
     // Decrement open count under lock
     var should_delete = false;
+    var deferred_start_block: u32 = 0;
+    var deferred_block_count: u32 = 0;
     {
         const lock_held = fs.alloc_lock.acquire();
         defer lock_held.release();
@@ -1214,14 +1491,20 @@ fn sfsClose(file_desc: *fd.FileDescriptor) isize {
         if (fs.open_counts[entry_idx] == 0 and fs.pending_delete[entry_idx]) {
             should_delete = true;
             fs.pending_delete[entry_idx] = false;
+            // SECURITY: use block info captured at unlink time
+            // This prevents block leaks/corruption if file was modified after unlink
+            deferred_start_block = fs.deferred_info[entry_idx].start_block;
+            deferred_block_count = fs.deferred_info[entry_idx].block_count;
+            // Clear the deferred info
+            fs.deferred_info[entry_idx] = .{ .start_block = 0, .block_count = 0 };
         }
     }
 
     // If file was unlinked while open and this is the last reference, free blocks now
     if (should_delete) {
-        const blocks_used = if (file_size == 0) 1 else (file_size + 511) / 512;
-        fs.freeBlocks(start_block, blocks_used);
-        console.info("SFS: Deferred deletion completed for entry {}", .{entry_idx});
+        // SECURITY: use stored block info, not current SfsFile data
+        fs.freeBlocks(deferred_start_block, deferred_block_count);
+        console.info("SFS: Deferred deletion completed for entry {} (freed {} blocks at {})", .{ entry_idx, deferred_block_count, deferred_start_block });
     }
 
     alloc.destroy(file);
@@ -1243,6 +1526,12 @@ fn sfsSeek(file_desc: *fd.FileDescriptor, offset: i64, whence: u32) isize {
 
     if (new_pos < 0) return -22;
 
+    // SECURITY: limit seek position to u32::MAX (SFS file size limit)
+    // Prevents writes at extreme positions that could corrupt block accounting
+    // SFS uses u32 for file sizes, so positions beyond u32::MAX are invalid
+    const max_pos: i64 = std.math.maxInt(u32);
+    if (new_pos > max_pos) return -27; // EFBIG - file too large
+
     file_desc.position = std.math.cast(usize, new_pos) orelse return -75; // EOVERFLOW
     return std.math.cast(isize, new_pos) orelse return -75; // EOVERFLOW
 }
@@ -1251,13 +1540,14 @@ fn sfsStat(file_desc: *fd.FileDescriptor, stat_buf: *anyopaque) isize {
     const file: *SfsFile = @ptrCast(@alignCast(file_desc.private_data));
     const stat: *uapi.stat.Stat = @ptrCast(@alignCast(stat_buf));
 
+    // SECURITY: return actual permissions captured at open time
     stat.* = .{
         .dev = 0,
         .ino = file.entry_idx,
         .nlink = 1,
-        .mode = 0o100644,
-        .uid = 0,
-        .gid = 0,
+        .mode = file.mode, // Actual mode from DirEntry
+        .uid = file.uid, // Actual owner
+        .gid = file.gid, // Actual group
         .rdev = 0,
         .size = @intCast(file.size),
         .blksize = 512,
@@ -1278,10 +1568,13 @@ fn sfsStat(file_desc: *fd.FileDescriptor, stat_buf: *anyopaque) isize {
 fn sfsUnlink(ctx: ?*anyopaque, path: []const u8) vfs.Error!void {
     const self: *SFS = @ptrCast(@alignCast(ctx));
 
+    // SECURITY: check mount state before any operation
+    if (!self.mounted) return vfs.Error.IOError;
+
     // Normalize path (remove leading /)
     const name = if (path.len > 0 and path[0] == '/') path[1..] else path;
 
-    // SECURITY: Vuln 6 - Comprehensive path validation
+    // SECURITY: Comprehensive path validation
     if (!isValidFilename(name)) {
         return vfs.Error.AccessDenied;
     }
@@ -1301,9 +1594,13 @@ fn sfsUnlink(ctx: ?*anyopaque, path: []const u8) vfs.Error!void {
 
         if (e.flags == 1) {
             const e_name = std.mem.sliceTo(&e.name, 0);
+            // SECURITY: skip entries with corrupted names (no null terminator)
+            if (e_name.len >= 32) continue;
             if (std.mem.eql(u8, e_name, name)) {
-                // SECURITY: Vuln 5 fix - check if file is still open
+                // SECURITY: check if file is still open
                 var is_open = false;
+                // SECURITY: capture block info now, before any modifications
+                const blocks_used: u32 = if (e.size == 0) 1 else (e.size + 511) / 512;
                 {
                     const lock_held = self.alloc_lock.acquire();
                     defer lock_held.release();
@@ -1312,13 +1609,18 @@ fn sfsUnlink(ctx: ?*anyopaque, path: []const u8) vfs.Error!void {
                         // File is still open - defer deletion
                         is_open = true;
                         self.pending_delete[idx] = true;
-                        console.info("SFS: Deferring deletion of '{s}' (open_count={})", .{ name, self.open_counts[idx] });
+                        // SECURITY: store block info at unlink time
+                        // This ensures correct blocks are freed even if file is modified after unlink
+                        self.deferred_info[idx] = .{
+                            .start_block = e.start_block,
+                            .block_count = blocks_used,
+                        };
+                        console.info("SFS: Deferring deletion of '{s}' (open_count={}, blocks={})", .{ name, self.open_counts[idx], blocks_used });
                     }
                 }
 
                 if (!is_open) {
                     // File is not open - free blocks immediately
-                    const blocks_used = if (e.size == 0) 1 else (e.size + 511) / 512;
                     self.freeBlocks(e.start_block, blocks_used);
                 }
 
@@ -1337,9 +1639,12 @@ fn sfsUnlink(ctx: ?*anyopaque, path: []const u8) vfs.Error!void {
                 const block_start = block_idx * 512;
                 writeSectorAsync(self, self.superblock.root_dir_start + block_idx, dir_buf[block_start..][0..512]) catch return vfs.Error.IOError;
 
-                // Update file count
-                if (self.superblock.file_count > 0) {
-                    self.superblock.file_count -= 1;
+                // SECURITY: update file count under lock to prevent race
+                // Concurrent sfsOpen with O_CREAT could cause lost updates otherwise
+                {
+                    const lock_held = self.alloc_lock.acquire();
+                    defer lock_held.release();
+                    self.superblock.file_count = std.math.sub(u32, self.superblock.file_count, 1) catch 0;
                 }
                 self.updateSuperblock() catch return vfs.Error.IOError;
 
@@ -1354,6 +1659,9 @@ fn sfsUnlink(ctx: ?*anyopaque, path: []const u8) vfs.Error!void {
 
 fn sfsStatPath(ctx: ?*anyopaque, path: []const u8) ?vfs.FileMeta {
     const self: *SFS = @ptrCast(@alignCast(ctx));
+
+    // SECURITY: check mount state before any operation
+    if (!self.mounted) return null;
 
     // Handle root directory
     if (path.len == 0 or std.mem.eql(u8, path, "/") or std.mem.eql(u8, path, ".")) {
@@ -1389,6 +1697,8 @@ fn sfsStatPath(ctx: ?*anyopaque, path: []const u8) ?vfs.FileMeta {
 
         if (e.flags == 1) {
             const e_name = std.mem.sliceTo(&e.name, 0);
+            // SECURITY: skip entries with corrupted names (no null terminator)
+            if (e_name.len >= 32) continue;
             if (std.mem.eql(u8, e_name, name)) {
                 // Found the file - return actual permissions from DirEntry
                 return vfs.FileMeta{
@@ -1409,6 +1719,9 @@ fn sfsStatPath(ctx: ?*anyopaque, path: []const u8) ?vfs.FileMeta {
 fn sfsChmod(ctx: ?*anyopaque, path: []const u8, mode: u32) vfs.Error!void {
     const self: *SFS = @ptrCast(@alignCast(ctx));
 
+    // SECURITY: check mount state before any operation
+    if (!self.mounted) return vfs.Error.IOError;
+
     // Normalize path (remove leading /)
     const name = if (path.len > 0 and path[0] == '/') path[1..] else path;
 
@@ -1416,6 +1729,11 @@ fn sfsChmod(ctx: ?*anyopaque, path: []const u8, mode: u32) vfs.Error!void {
         return vfs.Error.AccessDenied;
     }
     if (name.len == 0 or name.len >= 32) return vfs.Error.NotFound;
+
+    // SECURITY: acquire lock for entire read-modify-write cycle
+    // Prevents TOCTOU race where another thread could unlink/modify the entry
+    const held = self.alloc_lock.acquire();
+    defer held.release();
 
     // Read all directory blocks
     var dir_buf: [ROOT_DIR_BLOCKS * 512]u8 = undefined;
@@ -1430,6 +1748,8 @@ fn sfsChmod(ctx: ?*anyopaque, path: []const u8, mode: u32) vfs.Error!void {
 
         if (e.flags == 1) {
             const e_name = std.mem.sliceTo(&e.name, 0);
+            // SECURITY: skip entries with corrupted names (no null terminator)
+            if (e_name.len >= 32) continue;
             if (std.mem.eql(u8, e_name, name)) {
                 // Found - update mode (keep file type, change permission bits)
                 const file_type = e.mode & 0o170000;
@@ -1452,6 +1772,9 @@ fn sfsChmod(ctx: ?*anyopaque, path: []const u8, mode: u32) vfs.Error!void {
 fn sfsChown(ctx: ?*anyopaque, path: []const u8, uid: ?u32, gid: ?u32) vfs.Error!void {
     const self: *SFS = @ptrCast(@alignCast(ctx));
 
+    // SECURITY: check mount state before any operation
+    if (!self.mounted) return vfs.Error.IOError;
+
     // Normalize path (remove leading /)
     const name = if (path.len > 0 and path[0] == '/') path[1..] else path;
 
@@ -1459,6 +1782,11 @@ fn sfsChown(ctx: ?*anyopaque, path: []const u8, uid: ?u32, gid: ?u32) vfs.Error!
         return vfs.Error.AccessDenied;
     }
     if (name.len == 0 or name.len >= 32) return vfs.Error.NotFound;
+
+    // SECURITY: acquire lock for entire read-modify-write cycle
+    // Prevents TOCTOU race where another thread could unlink/modify the entry
+    const held = self.alloc_lock.acquire();
+    defer held.release();
 
     // Read all directory blocks
     var dir_buf: [ROOT_DIR_BLOCKS * 512]u8 = undefined;
@@ -1473,6 +1801,8 @@ fn sfsChown(ctx: ?*anyopaque, path: []const u8, uid: ?u32, gid: ?u32) vfs.Error!
 
         if (e.flags == 1) {
             const e_name = std.mem.sliceTo(&e.name, 0);
+            // SECURITY: skip entries with corrupted names (no null terminator)
+            if (e_name.len >= 32) continue;
             if (std.mem.eql(u8, e_name, name)) {
                 // Found - update uid/gid if specified
                 if (uid) |new_uid| {

@@ -6,7 +6,7 @@
 //
 // This module is the single source of truth for ABI compatibility.
 
-pub const syscalls = @import("syscalls.zig");
+pub const syscalls = @import("syscalls/root.zig");
 pub const errno = @import("errno.zig");
 pub const poll = @import("poll.zig");
 pub const abi = @import("abi.zig");

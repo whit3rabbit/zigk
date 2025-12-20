@@ -100,38 +100,40 @@ The goal is to improve maintainability, verifyability, and logical separation of
 - [x] Move Monitoring/Aging to `src/net/ipv4/arp/monitor.zig`
 - [x] Create `src/net/ipv4/arp/root.zig`
 
-#### [REFACTOR] src/net/ipv4/ipv4.zig
-- [ ] Create `src/net/ipv4/` directory (if not exists as package)
-- [ ] Move Option validation to `src/net/ipv4/validation.zig`
-- [ ] Move Packet processing dispatch to `src/net/ipv4/process.zig`
-- [ ] Ensure `src/net/ipv4/reassembly.zig` is used effectively (already exists)
-- [ ] Create `src/net/ipv4/root.zig`
+#### [REFACTOR] src/net/ipv4/ipv4.zig [DONE]
+- [x] Create `src/net/ipv4/ipv4/` directory
+- [x] Move Constants and Types to `src/net/ipv4/ipv4/types.zig`
+- [x] Move IP Utils to `src/net/ipv4/ipv4/utils.zig`
+- [x] Move ID generation to `src/net/ipv4/ipv4/id.zig`
+- [x] Move Option validation to `src/net/ipv4/ipv4/validation.zig`
+- [x] Move Packet building/sending to `src/net/ipv4/ipv4/transmit.zig`
+- [x] Move Packet processing to `src/net/ipv4/ipv4/process.zig`
+- [x] Create `src/net/ipv4/ipv4/root.zig`
 
-#### [REFACTOR] src/net/transport/tcp/ (rx.zig, tx.zig)
-- [ ] Split `rx.zig` into:
-    - [ ] `src/net/transport/tcp/rx/listen.zig` (processListenPacket)
-    - [ ] `src/net/transport/tcp/rx/established.zig` (processEstablishedPacket)
-    - [ ] `src/net/transport/tcp/rx/syn.zig` (processSynSent, processSynReceived)
-    - [ ] `src/net/transport/tcp/rx/root.zig` (processPacket entry)
-- [ ] Split `tx.zig` into:
-    - [ ] `src/net/transport/tcp/tx/segment.zig` (sendSegment)
-    - [ ] `src/net/transport/tcp/tx/control.zig` (sendSyn, sendSynAck, sendRst)
+#### [REFACTOR] src/net/transport/tcp/ (rx.zig, tx.zig) [DONE]
+- [x] Split `rx.zig` into:
+    - [x] `src/net/transport/tcp/rx/listen.zig` (processListenPacket)
+    - [x] `src/net/transport/tcp/rx/established.zig` (processEstablishedPacket)
+    - [x] `src/net/transport/tcp/rx/syn.zig` (processSynSent, processSynReceived)
+    - [x] `src/net/transport/tcp/rx/root.zig` (processPacket entry)
+- [x] Split `tx.zig` into:
+    - [x] `src/net/transport/tcp/tx/segment.zig` (sendSegment)
+    - [x] `src/net/transport/tcp/tx/control.zig` (sendSyn, sendSynAck, sendRst)
 
 ### UAPI
-#### [REFACTOR] src/uapi/syscalls.zig
-- [ ] Create `src/uapi/syscalls/` directory
-- [ ] Move standard syscall numbers to `src/uapi/syscalls/linux.zig`
-- [ ] Move custom/extension numbers to `src/uapi/syscalls/zscapek.zig`
-- [ ] Move helper tables/maps (if any) to `src/uapi/syscalls/tables.zig`
-- [ ] Create `src/uapi/syscalls/root.zig`
+#### [REFACTOR] src/uapi/syscalls.zig [DONE]
+- [x] Create `src/uapi/syscalls/` directory
+- [x] Move standard syscall numbers to `src/uapi/syscalls/linux.zig`
+- [x] Move custom/extension numbers to `src/uapi/syscalls/zscapek.zig`
+- [x] Create `src/uapi/syscalls/root.zig`
 
 ### Architecture (x86_64)
-#### [REFACTOR] src/arch/x86_64/interrupts.zig
-- [ ] Create `src/arch/x86_64/interrupts/` directory
-- [ ] Move Exception Handler dispatch logic to `src/arch/x86_64/interrupts/handlers.zig`
-- [ ] Move IRQ handling logic to `src/arch/x86_64/interrupts/irq.zig`
-- [ ] Move Initialization and registration to `src/arch/x86_64/interrupts/init.zig`
-- [ ] Create `src/arch/x86_64/interrupts/root.zig`
+#### [REFACTOR] src/arch/x86_64/interrupts.zig [DONE]
+- [x] Create `src/arch/x86_64/interrupts/` directory
+- [x] Move Exception Handler dispatch logic to `src/arch/x86_64/interrupts/handlers.zig`
+- [x] Move IRQ handling logic to `src/arch/x86_64/interrupts/irq.zig`
+- [x] Move Initialization and registration to `src/arch/x86_64/interrupts/init.zig`
+- [x] Create `src/arch/x86_64/interrupts/root.zig`
 
 ### Filesystem
 #### [REFACTOR] src/fs/sfs.zig

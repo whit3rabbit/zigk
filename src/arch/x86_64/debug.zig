@@ -10,7 +10,7 @@
 const cpu = @import("cpu.zig");
 const idt = @import("idt.zig");
 
-// Console writer callback - set by interrupts.zig
+// Console writer callback - set by interrupts package (init.zig)
 var console_writer: ?*const fn ([]const u8) void = null;
 
 /// Set the console writer for debug output

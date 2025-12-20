@@ -42,9 +42,22 @@ export fn zsc_nanosleep(sec: c_long, nsec: c_long) void {
     syscall.nanosleep(&req, null) catch {};
 }
 
+// Derive maximum valid ClockId value at comptime from enum definition.
+// This prevents stale validation if new clock types are added.
+const max_clock_id: c_int = comptime blk: {
+    const fields = @typeInfo(syscall.ClockId).@"enum".fields;
+    var max: c_int = 0;
+    for (fields) |field| {
+        if (field.value > max) max = @intCast(field.value);
+    }
+    break :blk max;
+};
+
 /// Get time from clock
 /// Returns 0 on success, negative errno on failure
 export fn zsc_clock_gettime(clk_id: c_int, tp: *Timespec) c_long {
+    // Validate clock ID is within valid range before enum conversion
+    if (clk_id < 0 or clk_id > max_clock_id) return -22; // EINVAL
     const clock_id: syscall.ClockId = @enumFromInt(clk_id);
     syscall.clock_gettime(clock_id, tp) catch |err| {
         return -@as(c_long, @intCast(errnoFromError(err)));

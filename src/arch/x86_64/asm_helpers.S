@@ -529,24 +529,57 @@ _asm_copy_user_end:
 
 # Fixup handler for page faults during copy
 # The #PF handler redirects here.
-# Calculate remaining bytes based on current positions.
+# SECURITY FIX (Vuln 6): Correctly calculate remaining bytes based on fault phase
 # RSI points to next byte to read, original src was RSI - (copied bytes)
 # RCX contains remaining count for current rep instruction
 .global _asm_copy_user_fixup
+.global _asm_copy_user_fixup_movsq_end
 _asm_copy_user_fixup:
     # RCX has remaining count from the faulting rep instruction
     # R8 has original total length
-    # Calculate: remaining = RCX * 8 (if in movsq) + (RDX & 7) if not done remainder
-    # Simplified: since we're in fault path, return conservative estimate
-    # The copied amount is (original_len - remaining_in_movsq * 8 - remaining_in_movsb)
-    # For safety, use RCX which is the remaining count of current instruction
-    # If fault was in movsq, RCX is remaining quadwords, multiply by 8
-    # If fault was in movsb, RCX is remaining bytes
-    # We use R8 (original len) and compute how much is left
+    # RDX has original length (still preserved)
+    #
+    # We need to determine if fault was in movsq or movsb phase.
+    # The caller (exception handler) saved RIP before redirecting here.
+    # We can compare against known instruction boundaries.
+    #
+    # However, since RIP was already modified to point here, we need to
+    # use the original remaining byte count logic:
+    # - If we're in movsq phase: remaining = RCX * 8 + (original & 7)
+    # - If we're in movsb phase: remaining = RCX
+    #
+    # We use RSI/RDI to determine phase: if (RSI - original_src) % 8 != 0,
+    # we were in movsb. But we don't have original_src preserved.
+    #
+    # Safe approach: Use R8 (original len) and compute based on what was copied.
+    # copied = original_len - ((RSI - original_src) or (RDI - original_dst))
+    # But we don't have original pointers.
+    #
+    # Best fix: Check if RCX would make sense as quadwords or bytes.
+    # If RCX * 8 > R8 (original len), we must be in movsb phase.
+    # Otherwise, assume movsq phase and compute: RCX * 8 + (RDX & 7)
+
+    # Save original RCX before we modify it
+    mov %rcx, %r9
+
     mov %rcx, %rax
-    # If we faulted during movsq, remaining is at least RCX*8 + (original & 7)
-    # Conservative: return RCX (may undercount if in movsq phase)
+    shl $3, %rax              # RAX = RCX * 8 (assume movsq phase)
+
+    cmp %r8, %rax             # If RCX*8 > original_len, we're in movsb
+    ja .Lfixup_was_movsb
+
+    # Was in movsq phase: remaining = RCX*8 + (original & 7)
+    mov %rdx, %rcx
+    and $7, %rcx              # RCX = original len % 8 (remainder bytes)
+    add %rcx, %rax            # RAX = RCX*8 + remainder
     ret
+
+.Lfixup_was_movsb:
+    # Was in movsb phase: remaining = original RCX (saved in R9)
+    mov %r9, %rax             # Return the saved RCX directly
+    ret
+
+_asm_copy_user_fixup_movsq_end:
 
 # usize _asm_copy_to_user(void* dest, const void* src, usize len)
 # Same as copy_from_user but writes to user memory (dest)

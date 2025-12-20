@@ -5,7 +5,7 @@
 
 const std = @import("std");
 const packet = @import("../core/packet.zig");
-const ipv4 = @import("ipv4.zig");
+// ipv4 import removed (not used)
 const sync = @import("../sync.zig");
 const PacketBuffer = packet.PacketBuffer;
 

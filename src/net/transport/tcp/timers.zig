@@ -1,6 +1,6 @@
 const c = @import("constants.zig");
 const state = @import("state.zig");
-const tx = @import("tx.zig");
+const tx = @import("tx/root.zig");
 const types = @import("types.zig");
 
 const socket = @import("../socket.zig");

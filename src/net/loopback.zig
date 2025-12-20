@@ -15,7 +15,7 @@ const std = @import("std");
 const Interface = @import("core/interface.zig").Interface;
 const packet = @import("core/packet.zig");
 const PacketBuffer = packet.PacketBuffer;
-const ipv4 = @import("ipv4/ipv4.zig");
+const ipv4 = @import("ipv4/root.zig").ipv4;
 const heap = @import("heap");
 
 /// Loopback interface instance

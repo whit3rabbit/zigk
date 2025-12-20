@@ -292,8 +292,8 @@ pub const IoUring = struct {
 
     pub fn init(entries: u32) SyscallError!IoUring;  // Setup rings, mmap buffers
     pub fn deinit(self: *IoUring) void;               // Cleanup and close
-    pub fn getSqe(self: *IoUring) ?*IoUringSqe;       // Get next SQE slot
-    pub fn submitSqe(self: *IoUring) void;            // Advance local tail
+    pub fn getSqeAtomicFn(self: *IoUring, populate: fn(*IoUringSqe, ?*anyopaque) void, ctx: ?*anyopaque) bool;  // Atomic get+submit
+    pub fn getSqeAtomic(self: *IoUring, ctx: anytype) bool;  // Atomic with .populate() method
     pub fn submit(self: *IoUring, min_complete: u32) SyscallError!u32;  // Enter kernel
     pub fn peekCqe(self: *IoUring) ?*IoUringCqe;      // Non-blocking CQE check
     pub fn advanceCq(self: *IoUring) void;            // Consume CQE
@@ -413,11 +413,8 @@ var ring = syscall.IoUring.init(64) catch |err| {
 };
 defer ring.deinit();
 
-// Submit initial accept
-if (ring.getSqe()) |sqe| {
-    syscall.IoUring.prepAccept(sqe, listener, null, null, encodeUserData(.accept, listener));
-    ring.submitSqe();
-}
+// Submit initial accept using atomic pattern (avoids TOCTOU race)
+_ = ring.getSqeAtomicFn(&populateAccept, @ptrFromInt(@as(usize, @intCast(listener))));
 
 // Event loop
 while (true) {
@@ -430,6 +427,11 @@ while (true) {
         handleCompletion(&ring, listener, cqe);
         ring.advanceCq();
     }
+}
+
+fn populateAccept(sqe: *syscall.IoUringSqe, ctx: ?*anyopaque) void {
+    const fd: i32 = @intCast(@intFromPtr(ctx));
+    syscall.IoUring.prepAccept(sqe, fd, null, null, encodeUserData(.accept, fd));
 }
 
 fn handleCompletion(ring: *syscall.IoUring, listener: i32, cqe: *syscall.IoUringCqe) void {
@@ -562,7 +564,7 @@ src/drivers/storage/ahci/
 
 src/user/lib/
     syscall.zig     - Userspace syscall wrappers including:
-                      IoUring struct (init, getSqe, submit, peekCqe)
+                      IoUring struct (init, getSqeAtomicFn, submit, peekCqe)
                       io_uring_setup, io_uring_enter, io_uring_register
 
 src/user/httpd/

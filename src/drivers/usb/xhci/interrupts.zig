@@ -158,11 +158,11 @@ pub fn setupInterrupts(ctrl: *Controller) !void {
                     } else {
                         console.err("XHCI: Failed to enable MSI-X capability", .{});
                         interrupts.unregisterMsixHandler(vector);
-                        interrupts.freeMsixVector(vector);
+                        _ = interrupts.freeMsixVector(vector);
                     }
                 } else {
                     console.err("XHCI: Failed to register MSI-X handler", .{});
-                    interrupts.freeMsixVector(vector);
+                    _ = interrupts.freeMsixVector(vector);
                 }
             } else {
                 console.warn("XHCI: Failed to allocate MSI-X vector, falling back to polling", .{});

@@ -63,6 +63,10 @@ const VIRTIO_GPU_F_CONTEXT_INIT: u32 = 4;
 
 const MAX_SCANOUTS: usize = 16;
 
+// Security: Maximum display dimensions to prevent integer overflow and DoS
+const MAX_DISPLAY_WIDTH: u32 = 8192; // 8K resolution
+const MAX_DISPLAY_HEIGHT: u32 = 8192;
+
 /// GPU control header (common to all commands)
 const VirtioGpuCtrlHdr = extern struct {
     type_: u32,
@@ -185,6 +189,8 @@ pub const VirtioGpuDriver = struct {
     // MSI-X interrupt support
     msix_vector: ?u8 = null,
     cmd_complete: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    // Security: Generation counter to invalidate stale interrupts during recovery
+    cmd_generation: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
 
     const Self = @This();
 
@@ -392,6 +398,19 @@ pub const VirtioGpuDriver = struct {
                      continue;
                 }
 
+                // Security: Validate offset + structure size fits within BAR
+                const bar_size = pci_dev.bar[bar_idx].size;
+                const struct_size: u64 = switch (cfg_type) {
+                    virtio.common.VIRTIO_PCI_CAP_COMMON_CFG => @sizeOf(virtio.VirtioPciCommonCfg),
+                    virtio.common.VIRTIO_PCI_CAP_NOTIFY_CFG => 4, // Minimum notify size
+                    else => 0,
+                };
+                if (struct_size > 0 and (offset > bar_size or struct_size > bar_size - offset)) {
+                    console.warn("VirtIO-GPU: Capability offset {x} + size {x} exceeds BAR{d} size {x}", .{ offset, struct_size, bar_idx, bar_size });
+                    cap_ptr = pci_access.read8(pci_dev.bus, pci_dev.device, pci_dev.func, cap_ptr + 1);
+                    continue;
+                }
+
                 switch (cfg_type) {
                     virtio.common.VIRTIO_PCI_CAP_COMMON_CFG => {
                         // Map common config using pre-mapped BAR address
@@ -547,7 +566,7 @@ pub const VirtioGpuDriver = struct {
                     } else {
                         console.err("VirtIO-GPU: Failed to register MSI-X handler", .{});
                     }
-                    interrupts.freeMsixVector(vector);
+                    _ = interrupts.freeMsixVector(vector);
                 } else {
                     console.warn("VirtIO-GPU: Failed to allocate MSI-X vector", .{});
                 }
@@ -565,6 +584,9 @@ pub const VirtioGpuDriver = struct {
     }
 
     fn recoverAfterTimeout(self: *Self) void {
+        // Security: Increment generation to invalidate any in-flight interrupts
+        _ = self.cmd_generation.fetchAdd(1, .acq_rel);
+
         // Stop the device so it drops all in-flight descriptors
         self.resetDevice();
         if (self.ctrl_vq) |*vq| vq.reset();
@@ -592,7 +614,10 @@ pub const VirtioGpuDriver = struct {
         _ = self.ctrl_vq.?.addBuf(&out_bufs, &in_bufs) orelse return false;
 
         // Clear completion flag before sending (for MSI-X mode)
+        // Security: Capture generation before sending to detect stale interrupts
+        var expected_gen: u32 = 0;
         if (self.msix_vector != null) {
+            expected_gen = self.cmd_generation.load(.acquire);
             self.cmd_complete.store(false, .release);
         }
 
@@ -606,7 +631,10 @@ pub const VirtioGpuDriver = struct {
         if (self.msix_vector != null) {
             // MSI-X mode: wait for interrupt-driven completion
             while (true) {
-                if (self.cmd_complete.load(.acquire)) {
+                // Security: Check generation matches to reject stale interrupts
+                if (self.cmd_complete.load(.acquire) and
+                    self.cmd_generation.load(.acquire) == expected_gen)
+                {
                     // Interrupt fired, process the used descriptor
                     if (self.ctrl_vq.?.hasPending()) {
                         _ = self.ctrl_vq.?.getUsed();
@@ -655,6 +683,9 @@ pub const VirtioGpuDriver = struct {
         const cmd_bytes = @as([*]const u8, @ptrCast(cmd))[0..@sizeOf(VirtioGpuCtrlHdr)];
         const resp_bytes = self.resp_buf_virt[0..@sizeOf(VirtioGpuRespDisplayInfo)];
 
+        // Security: Zero response buffer to ensure no stale/uninitialized data is interpreted
+        @memset(resp_bytes, 0);
+
         if (!self.sendCommand(cmd_bytes, resp_bytes)) {
             return false;
         }
@@ -667,13 +698,18 @@ pub const VirtioGpuDriver = struct {
         }
 
         // Find first enabled scanout
+        // Security: Validate device-provided dimensions against reasonable maximums
         for (resp.pmodes, 0..) |pmode, i| {
-            if (pmode.enabled != 0 and pmode.r.width > 0 and pmode.r.height > 0) {
+            if (pmode.enabled != 0 and pmode.r.width > 0 and pmode.r.height > 0 and
+                pmode.r.width <= MAX_DISPLAY_WIDTH and pmode.r.height <= MAX_DISPLAY_HEIGHT)
+            {
                 self.width = pmode.r.width;
                 self.height = pmode.r.height;
                 self.pitch = self.width * 4;
                 console.info("VirtIO-GPU: Scanout {d}: {d}x{d}", .{ i, self.width, self.height });
                 return true;
+            } else if (pmode.enabled != 0 and (pmode.r.width > MAX_DISPLAY_WIDTH or pmode.r.height > MAX_DISPLAY_HEIGHT)) {
+                console.warn("VirtIO-GPU: Scanout {d} dimensions {d}x{d} exceed maximum, skipping", .{ i, pmode.r.width, pmode.r.height });
             }
         }
 
@@ -686,29 +722,55 @@ pub const VirtioGpuDriver = struct {
     }
 
     fn createFramebufferResource(self: *Self) bool {
-        // Allocate framebuffer memory using scattered pages to avoid fragmentation
-        const fb_size = @as(usize, self.pitch) * self.height;
+        // Security: Use checked arithmetic to prevent integer overflow
+        const fb_size = std.math.mul(usize, @as(usize, self.pitch), self.height) catch {
+            console.err("VirtIO-GPU: Framebuffer size overflow (pitch={d}, height={d})", .{ self.pitch, self.height });
+            return false;
+        };
         const pages_needed = (fb_size + 4095) / 4096;
         const allocator = heap.allocator();
 
-        // Use a fixed virtual region for the framebuffer (256GB offset from kernel base)
+        // Security: Fixed virtual region for framebuffer (256GB offset from kernel base)
+        // This address is reserved for VirtIO-GPU and must not overlap with other kernel mappings.
+        // The VMM allocator does not manage this region - it is driver-owned.
         const FB_VIRT_BASE = vmm.KERNEL_BASE + 0x4000000000;
         self.fb_virt = @ptrFromInt(FB_VIRT_BASE);
         // We don't have a single physical address anymore, but keep first one for reference
-        self.fb_phys = 0; 
+        self.fb_phys = 0;
 
-        // Prepare SG list
+        // Prepare SG list and track allocated pages for cleanup on error
         var entries = std.ArrayListUnmanaged(VirtioGpuMemEntry){};
         defer entries.deinit(allocator);
 
+        // Security: Track allocated physical pages for proper cleanup on failure
+        var allocated_pages = std.ArrayListUnmanaged(u64){};
+        defer allocated_pages.deinit(allocator);
+
         const kernel_pml4 = vmm.getKernelPml4();
+
+        // Security: Cleanup helper to free all allocated pages and unmap on error
+        const cleanup = struct {
+            fn run(pages: *std.ArrayListUnmanaged(u64), pml4: anytype, base_virt: u64) void {
+                for (pages.items, 0..) |phys, idx| {
+                    // Unmap page (best effort, ignore errors during cleanup)
+                    vmm.unmapPage(pml4, base_virt + idx * 4096) catch {};
+                    pmm.freePage(phys);
+                }
+            }
+        };
 
         var i: usize = 0;
         while (i < pages_needed) : (i += 1) {
             const phys = pmm.allocZeroedPage() orelse {
                 console.err("VirtIO-GPU: Failed to allocate framebuffer page {}", .{i});
-                // Cleanup: iterate backwards unmapping/freeing?
-                // For this critical failure, we leak for now or need complex rollback.
+                cleanup.run(&allocated_pages, kernel_pml4, FB_VIRT_BASE);
+                return false;
+            };
+
+            // Track for cleanup before any operations that can fail
+            allocated_pages.append(allocator, phys) catch {
+                pmm.freePage(phys);
+                cleanup.run(&allocated_pages, kernel_pml4, FB_VIRT_BASE);
                 return false;
             };
 
@@ -716,14 +778,11 @@ pub const VirtioGpuDriver = struct {
 
             // Map to contiguous virtual space
             const virt_addr = FB_VIRT_BASE + i * 4096;
-            // Map as writable, present, no-execute (NX implied if not set?)
-            // VMM default flags usually include NX for data.
-            // Using default kernel flags (writable | present/global).
             const flags = vmm.PageFlags{ .writable = true, .global = true };
-            
+
             vmm.mapPage(kernel_pml4, virt_addr, phys, flags) catch |err| {
                 console.err("VirtIO-GPU: Failed to map framebuffer page: {}", .{err});
-                pmm.freePage(phys);
+                cleanup.run(&allocated_pages, kernel_pml4, FB_VIRT_BASE);
                 return false;
             };
 
@@ -733,6 +792,7 @@ pub const VirtioGpuDriver = struct {
                 ._padding = 0,
             }) catch {
                 console.err("VirtIO-GPU: Failed to append SG entry", .{});
+                cleanup.run(&allocated_pages, kernel_pml4, FB_VIRT_BASE);
                 return false;
             };
         }
@@ -880,6 +940,13 @@ pub const VirtioGpuDriver = struct {
         const clip_w = if (x + w > self.width) self.width - x else w;
         const clip_h = if (y + h > self.height) self.height - y else h;
         if (clip_w == 0 or clip_h == 0) return;
+
+        // Security: Validate buffer has enough data to prevent out-of-bounds read
+        const required_len = std.math.mul(usize, w, h) catch return;
+        if (buf.len < required_len) {
+            console.warn("VirtIO-GPU: drawBuffer buffer too small ({d} < {d})", .{ buf.len, required_len });
+            return;
+        }
 
         const stride_u32 = self.pitch / 4;
 

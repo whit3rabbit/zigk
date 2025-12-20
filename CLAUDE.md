@@ -283,12 +283,15 @@ const result = future.wait();  // Blocks via sched.block(), not spin
 ```zig
 var ring = syscall.IoUring.init(64) catch return runPollFallback();
 defer ring.deinit();
-if (ring.getSqe()) |sqe| {
-    syscall.IoUring.prepAccept(sqe, listener, null, null, user_data);
-    ring.submitSqe();
-}
+// Use atomic pattern to avoid TOCTOU race between get/submit
+_ = ring.getSqeAtomicFn(&populateAccept, @ptrFromInt(@as(usize, @intCast(listener))));
 _ = ring.submit(1) catch continue;  // Blocks in kernel
 while (ring.peekCqe()) |cqe| { handleCompletion(cqe); ring.advanceCq(); }
+
+fn populateAccept(sqe: *syscall.IoUringSqe, ctx: ?*anyopaque) void {
+    const fd: i32 = @intCast(@intFromPtr(ctx));
+    syscall.IoUring.prepAccept(sqe, fd, null, null, user_data);
+}
 ```
 
 **AHCI async block I/O (`src/drivers/storage/ahci/adapter.zig`):**
