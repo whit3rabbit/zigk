@@ -599,7 +599,7 @@ pub fn build(b: *std.Build) void {
 
     // Create ELF loader module (for execve)
     const elf_module = b.createModule(.{
-        .root_source_file = b.path("src/kernel/elf.zig"),
+        .root_source_file = b.path("src/kernel/elf/root.zig"),
         .target = kernel_target,
         .optimize = optimize,
     });
