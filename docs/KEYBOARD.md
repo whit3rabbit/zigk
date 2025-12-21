@@ -53,7 +53,7 @@ The PS/2 keyboard uses IRQ1 and the Intel 8042 controller at ports 0x60/0x64.
 4. Userland retrieves via `sys_read_scancode`
 
 **Relevant Files:**
-- `src/drivers/keyboard.zig` - PS/2 keyboard driver
+- `src/drivers/input/keyboard.zig` - PS/2 keyboard driver
 - `src/arch/x86_64/interrupts.zig` - IRQ1 handler dispatch
 
 ### USB Keyboard (Modern Path)
@@ -71,7 +71,7 @@ USB keyboards use the XHCI controller with HID Boot Protocol.
 **Relevant Files:**
 - `src/drivers/usb/xhci/root.zig` - XHCI controller driver
 - `src/drivers/usb/class/hid.zig` - HID class driver
-- `src/drivers/keyboard.zig` - Scancode injection
+- `src/drivers/input/keyboard.zig` - Scancode injection
 
 ## QEMU Configuration
 
@@ -200,7 +200,7 @@ If no IRQs after initialization, ensure:
 
 ## Debug Output
 
-Enable verbose keyboard debugging by uncommenting in `src/drivers/keyboard.zig`:
+Enable verbose keyboard debugging by uncommenting in `src/drivers/input/keyboard.zig`:
 
 ```zig
 // In handleIrq():

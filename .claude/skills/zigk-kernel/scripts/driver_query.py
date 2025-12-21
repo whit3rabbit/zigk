@@ -190,7 +190,7 @@ Location: src/drivers/
 | EHCI | src/drivers/usb/ehci/ | USB 2.0 host |
 | AHCI | src/drivers/storage/ahci/ | SATA storage |
 | E1000e | src/drivers/net/e1000e/ | Intel Gigabit |
-| Keyboard | src/drivers/keyboard.zig | PS/2 keyboard |
+| Keyboard | src/drivers/input/keyboard.zig | PS/2 keyboard |
 | Console | src/drivers/console/ | Framebuffer |
 | AC97 | src/drivers/audio/ac97.zig | Audio |
 | VirtIO | src/drivers/virtio/ | VirtIO base |

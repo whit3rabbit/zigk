@@ -189,13 +189,13 @@ zscapek/
     │       └── timer.zig
     │
     ├── drivers/
-    │   ├── keyboard.zig
-    │   ├── mouse.zig
     │   ├── audio/
     │   │   ├── root.zig
     │   │   └── ac97.zig
     │   ├── input/
     │   │   ├── root.zig
+    │   │   ├── keyboard.zig
+    │   │   ├── mouse.zig
     │   │   ├── cursor.zig
     │   │   ├── keyboard_layout.zig
     │   │   ├── layout.zig
@@ -361,19 +361,15 @@ zscapek/
     │   ├── sound.zig
     │   └── stat.zig
     │
-    ├── mm/                   # Placeholder for memory subsystem work
-    ├── vdso_gen/
-    │   ├── build.sh
-    │   └── vdso.zig
-    │
     └── user/
         ├── root.zig
         ├── crt0.zig
         ├── crt0.S
         ├── linker.ld
-        ├── audio_test.zig
-        ├── test_asm.zig
-        ├── test_libc_fix_wrapper.zig
+        ├── tests/
+        │   ├── audio_test.zig
+        │   ├── test_asm.zig
+        │   └── test_libc_fix_wrapper.zig
         ├── lib/
         │   ├── ring.zig
         │   ├── syscall.zig
@@ -769,17 +765,13 @@ A device-independent TCP/IP stack implementing Ethernet, IPv4/ARP, DNS, and sock
 | File | Description |
 |------|-------------|
 | `root.zig` | Input subsystem entry. |
+| `keyboard.zig` | PS/2 keyboard driver entry. |
+| `mouse.zig` | PS/2 mouse driver entry. |
 | `cursor.zig` | Mouse cursor rendering. |
 | `keyboard_layout.zig` | Keymap tables. |
 | `layout.zig` | Layout selection and lookup. |
 | `layouts/dvorak.zig` | Dvorak keyboard layout. |
 | `layouts/us.zig` | US QWERTY keyboard layout. |
-
-### `src/drivers/` (top-level device entries)
-| File | Description |
-|------|-------------|
-| `keyboard.zig` | PS/2 keyboard driver entry. |
-| `mouse.zig` | PS/2 mouse driver entry. |
 
 ### `src/drivers/serial/`
 | File | Description |
@@ -840,10 +832,7 @@ A device-independent TCP/IP stack implementing Ethernet, IPv4/ARP, DNS, and sock
 | `sound.zig` | Audio IOCTL definitions. |
 | `stat.zig` | File stat structures. |
 
-### `src/mm/`
-Reserved for future memory subsystem work; currently empty.
-
-### `src/vdso_gen/`
+### `tools/vdso_gen/`
 | File | Description |
 |------|-------------|
 | `build.sh` | VDSO build helper script. |

@@ -466,7 +466,7 @@ pub fn build(b: *std.Build) void {
 
     // Create Keyboard driver module
     const keyboard_module = b.createModule(.{
-        .root_source_file = b.path("src/drivers/keyboard.zig"),
+        .root_source_file = b.path("src/drivers/input/keyboard.zig"),
         .target = kernel_target,
         .optimize = optimize,
     });
@@ -543,7 +543,7 @@ pub fn build(b: *std.Build) void {
 
     // Create Mouse driver module
     const mouse_module = b.createModule(.{
-        .root_source_file = b.path("src/drivers/mouse.zig"),
+        .root_source_file = b.path("src/drivers/input/mouse.zig"),
         .target = kernel_target,
         .optimize = optimize,
     });
@@ -668,7 +668,7 @@ pub fn build(b: *std.Build) void {
 
     // Create user memory validation module (shared by all syscall modules)
     const user_mem_module = b.createModule(.{
-        .root_source_file = b.path("src/kernel/sys/syscall/user_mem.zig"),
+        .root_source_file = b.path("src/kernel/sys/syscall/core/user_mem.zig"),
         .target = kernel_target,
         .optimize = optimize,
     });
@@ -737,7 +737,7 @@ pub fn build(b: *std.Build) void {
 
     // Create syscall base module (shared state for all handlers)
     const syscall_base_module = b.createModule(.{
-        .root_source_file = b.path("src/kernel/sys/syscall/base.zig"),
+        .root_source_file = b.path("src/kernel/sys/syscall/core/base.zig"),
         .target = kernel_target,
         .optimize = optimize,
     });
@@ -751,7 +751,7 @@ pub fn build(b: *std.Build) void {
 
     // Create syscall process module (exit, wait4, getpid, etc.)
     const syscall_process_module = b.createModule(.{
-        .root_source_file = b.path("src/kernel/sys/syscall/process.zig"),
+        .root_source_file = b.path("src/kernel/sys/syscall/process/process.zig"),
         .target = kernel_target,
         .optimize = optimize,
     });
@@ -764,7 +764,7 @@ pub fn build(b: *std.Build) void {
 
     // Create syscall signals module (rt_sigprocmask, rt_sigaction, etc.)
     const syscall_signals_module = b.createModule(.{
-        .root_source_file = b.path("src/kernel/sys/syscall/signals.zig"),
+        .root_source_file = b.path("src/kernel/sys/syscall/process/signals.zig"),
         .target = kernel_target,
         .optimize = optimize,
     });
@@ -795,7 +795,7 @@ pub fn build(b: *std.Build) void {
 
     // Create syscall scheduling module (sched_yield, nanosleep, etc.)
     const syscall_scheduling_module = b.createModule(.{
-        .root_source_file = b.path("src/kernel/sys/syscall/scheduling.zig"),
+        .root_source_file = b.path("src/kernel/sys/syscall/process/scheduling.zig"),
         .target = kernel_target,
         .optimize = optimize,
     });
@@ -827,7 +827,7 @@ pub fn build(b: *std.Build) void {
 
     // Create syscall fd module (open, close, dup, pipe, lseek)
     const syscall_fd_module = b.createModule(.{
-        .root_source_file = b.path("src/kernel/sys/syscall/fd.zig"),
+        .root_source_file = b.path("src/kernel/sys/syscall/fs/fd.zig"),
         .target = kernel_target,
         .optimize = optimize,
     });
@@ -843,7 +843,7 @@ pub fn build(b: *std.Build) void {
 
     // Create syscall memory module (mmap, mprotect, munmap, brk)
     const syscall_memory_module = b.createModule(.{
-        .root_source_file = b.path("src/kernel/sys/syscall/memory.zig"),
+        .root_source_file = b.path("src/kernel/sys/syscall/memory/memory.zig"),
         .target = kernel_target,
         .optimize = optimize,
     });
@@ -857,7 +857,7 @@ pub fn build(b: *std.Build) void {
 
     // Create syscall execution module (fork, execve, arch_prctl, fb syscalls)
     const syscall_execution_module = b.createModule(.{
-        .root_source_file = b.path("src/kernel/sys/syscall/execution.zig"),
+        .root_source_file = b.path("src/kernel/sys/syscall/core/execution.zig"),
         .target = kernel_target,
         .optimize = optimize,
     });
@@ -881,7 +881,7 @@ pub fn build(b: *std.Build) void {
 
     // Create syscall custom module (debug_log, putchar, getchar, etc.)
     const syscall_custom_module = b.createModule(.{
-        .root_source_file = b.path("src/kernel/sys/syscall/custom.zig"),
+        .root_source_file = b.path("src/kernel/sys/syscall/misc/custom.zig"),
         .target = kernel_target,
         .optimize = optimize,
     });
@@ -1004,7 +1004,7 @@ pub fn build(b: *std.Build) void {
 
     // Create syscall random module
     const syscall_random_module = b.createModule(.{
-        .root_source_file = b.path("src/kernel/sys/syscall/random.zig"),
+        .root_source_file = b.path("src/kernel/sys/syscall/misc/random.zig"),
         .target = kernel_target,
         .optimize = optimize,
     });
@@ -1014,7 +1014,7 @@ pub fn build(b: *std.Build) void {
 
     // Create syscall fs_handlers module (mount/umount/unlink)
     const syscall_fs_module = b.createModule(.{
-        .root_source_file = b.path("src/kernel/sys/syscall/fs_handlers.zig"),
+        .root_source_file = b.path("src/kernel/sys/syscall/fs/fs_handlers.zig"),
         .target = kernel_target,
         .optimize = optimize,
     });
@@ -1028,7 +1028,7 @@ pub fn build(b: *std.Build) void {
 
     // Create syscall input module (mouse/input syscalls)
     const syscall_input_module = b.createModule(.{
-        .root_source_file = b.path("src/kernel/sys/syscall/input.zig"),
+        .root_source_file = b.path("src/kernel/sys/syscall/hw/input.zig"),
         .target = kernel_target,
         .optimize = optimize,
     });
@@ -1038,7 +1038,7 @@ pub fn build(b: *std.Build) void {
 
     // Create syscall net module (socket syscalls)
     const syscall_net_module = b.createModule(.{
-        .root_source_file = b.path("src/kernel/sys/syscall/net.zig"),
+        .root_source_file = b.path("src/kernel/sys/syscall/net/net.zig"),
         .target = kernel_target,
         .optimize = optimize,
     });
@@ -1085,7 +1085,7 @@ pub fn build(b: *std.Build) void {
 
     // Create syscall ipc module (microkernel IPC)
     const syscall_ipc_module = b.createModule(.{
-        .root_source_file = b.path("src/kernel/sys/syscall/ipc.zig"),
+        .root_source_file = b.path("src/kernel/sys/syscall/misc/ipc.zig"),
         .target = kernel_target,
         .optimize = optimize,
     });
@@ -1104,7 +1104,7 @@ pub fn build(b: *std.Build) void {
 
     // Create syscall interrupt module
     const syscall_interrupt_module = b.createModule(.{
-        .root_source_file = b.path("src/kernel/sys/syscall/interrupt.zig"),
+        .root_source_file = b.path("src/kernel/sys/syscall/hw/interrupt.zig"),
         .target = kernel_target,
         .optimize = optimize,
     });
@@ -1116,7 +1116,7 @@ pub fn build(b: *std.Build) void {
 
     // Create syscall port_io module
     const syscall_port_io_module = b.createModule(.{
-        .root_source_file = b.path("src/kernel/sys/syscall/port_io.zig"),
+        .root_source_file = b.path("src/kernel/sys/syscall/hw/port_io.zig"),
         .target = kernel_target,
         .optimize = optimize,
     });
@@ -1127,7 +1127,7 @@ pub fn build(b: *std.Build) void {
 
     // Create syscall mmio module (MMIO/DMA for userspace drivers)
     const syscall_mmio_module = b.createModule(.{
-        .root_source_file = b.path("src/kernel/sys/syscall/mmio.zig"),
+        .root_source_file = b.path("src/kernel/sys/syscall/memory/mmio.zig"),
         .target = kernel_target,
         .optimize = optimize,
     });
@@ -1143,7 +1143,7 @@ pub fn build(b: *std.Build) void {
 
     // Create syscall pci module (PCI enumeration and config access)
     const syscall_pci_module = b.createModule(.{
-        .root_source_file = b.path("src/kernel/sys/syscall/pci_syscall.zig"),
+        .root_source_file = b.path("src/kernel/sys/syscall/net/pci_syscall.zig"),
         .target = kernel_target,
         .optimize = optimize,
     });
@@ -1170,7 +1170,7 @@ pub fn build(b: *std.Build) void {
 
     // Create syscall ring module (ring buffer IPC syscalls)
     const syscall_ring_module = b.createModule(.{
-        .root_source_file = b.path("src/kernel/sys/syscall/ring.zig"),
+        .root_source_file = b.path("src/kernel/sys/syscall/hw/ring.zig"),
         .target = kernel_target,
         .optimize = optimize,
     });
@@ -1187,7 +1187,7 @@ pub fn build(b: *std.Build) void {
 
     // Create syscall fs_handlers module (mount, umount, unlink)
     const syscall_fs_handlers_module = b.createModule(.{
-        .root_source_file = b.path("src/kernel/sys/syscall/fs_handlers.zig"),
+        .root_source_file = b.path("src/kernel/sys/syscall/fs/fs_handlers.zig"),
         .target = kernel_target,
         .optimize = optimize,
     });
@@ -1203,7 +1203,7 @@ pub fn build(b: *std.Build) void {
 
     // Create syscall dispatch table module
     const syscall_table_module = b.createModule(.{
-        .root_source_file = b.path("src/kernel/sys/syscall/table.zig"),
+        .root_source_file = b.path("src/kernel/sys/syscall/core/table.zig"),
         .target = kernel_target,
         .optimize = optimize,
     });
@@ -1611,7 +1611,7 @@ pub fn build(b: *std.Build) void {
     const test_asm = b.addExecutable(.{
         .name = "test_asm",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/user/test_asm.zig"),
+            .root_source_file = b.path("src/user/tests/test_asm.zig"),
             .target = user_target,
             .optimize = optimize,
         }),
@@ -1641,7 +1641,7 @@ pub fn build(b: *std.Build) void {
 
     // Audio Test
     const audio_test_mod = b.createModule(.{
-        .root_source_file = b.path("src/user/audio_test.zig"),
+        .root_source_file = b.path("src/user/tests/audio_test.zig"),
         .target = user_target,
         .optimize = optimize,
     });
@@ -1666,11 +1666,11 @@ pub fn build(b: *std.Build) void {
     // b.createModule doesn't take C files easily as root.
     // Use a small Zig wrapper "src/user/test_libc_fix_entry.zig" that imports libc and exports nothing, relying on C main.
     
-    // Waiting for file creation in next step, assuming path "src/user/test_libc_fix_wrapper.zig"
+    // Waiting for file creation in next step, assuming path "src/user/tests/test_libc_fix_wrapper.zig"
     // Let's create the wrapper content inline if possible or use write_to_file next.
     // For now I define the build step, pointing to a wrapper I will create.
     const test_libc_fix_mod = b.createModule(.{
-        .root_source_file = b.path("src/user/test_libc_fix_wrapper.zig"),
+        .root_source_file = b.path("src/user/tests/test_libc_fix_wrapper.zig"),
         .target = user_target,
         .optimize = optimize,
     });

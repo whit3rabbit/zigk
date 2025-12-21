@@ -13,14 +13,10 @@ zig-out/
 *.img
 
 # ISO staging directory (created by zig build iso)
-iso_root/boot/kernel.elf
-iso_root/boot/kernel.bin
-iso_root/boot/modules/
-iso_root/boot/limine.cfg
-iso_root/boot/limine-bios.sys
-iso_root/boot/limine-bios-cd.bin
-iso_root/boot/limine-uefi-cd.bin
-iso_root/EFI/
+iso_root/
+
+# Build logs
+*.log
 
 # Editor and IDE files
 .vscode/

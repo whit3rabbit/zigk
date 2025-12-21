@@ -485,7 +485,7 @@ Zscapek supports two input paths for keyboard and mouse devices.
 
 **Legacy Path (PS/2):**
 - Controller: Intel 8042 at ports 0x60 (data) and 0x64 (status/command)
-- Driver: `src/drivers/keyboard.zig` (Kernel) OR `src/user/drivers/ps2` (Userspace - Phase 5)
+- Driver: `src/drivers/input/keyboard.zig` (Kernel) OR `src/user/drivers/ps2` (Userspace - Phase 5)
 - Interrupts: IRQ1 for keyboard, IRQ12 for mouse (via IOAPIC)
 
 **Modern Path (USB):**
@@ -504,7 +504,7 @@ These notes cover specific behaviors and requirements discovered during kernel b
 
 The PS/2 controller requires explicit configuration before the keyboard generates scancodes.
 
-**Initialization Sequence** (`src/drivers/keyboard.zig:352-437`):
+**Initialization Sequence** (`src/drivers/input/keyboard.zig:352-437`):
 1. Disable both PS/2 ports (commands 0xAD, 0xA7)
 2. Flush output buffer (discard stale data)
 3. Disable interrupts temporarily (clear config bits 0 and 1)

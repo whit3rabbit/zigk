@@ -490,7 +490,7 @@ pub fn tick() void {
 
 ### IRQ Completion
 
-Example from `src/drivers/keyboard.zig`:
+Example from `src/drivers/input/keyboard.zig`:
 ```zig
 // In handleIrq():
 if (keyboard_state.pending_read) |pending_ptr| {
