@@ -1816,10 +1816,13 @@ pub fn build(b: *std.Build) void {
     // ============================================================
     const run_uefi_cmd = b.addSystemCommand(&.{
         "qemu-system-x86_64",
+        "-machine", "q35",
+        "-m", "256M",
         "-net", "none",
         "-serial", "stdio",
-        // Helper to map a directory as a FAT drive (simplest way to test UEFI app)
-        "-drive", b.fmt("format=raw,file=fat:rw:{s}/efi_root", .{b.install_path}),
+        // Use virtio-blk with bootindex for proper UEFI auto-boot
+        "-drive", b.fmt("if=none,format=raw,id=esp,file=fat:rw:{s}/efi_root", .{b.install_path}),
+        "-device", "virtio-blk-pci,drive=esp,bootindex=1",
     });
     
     // Add BIOS if provided, otherwise assume user has it or QEMU defaults
@@ -1840,8 +1843,12 @@ pub fn build(b: *std.Build) void {
     // Ensure the executable is copied to the correct path structure
     // We need EFI/BOOT/BOOTX64.EFI for automatic boot
     const install_uefi = b.addInstallFile(bootloader.getEmittedBin(), "efi_root/EFI/BOOT/BOOTX64.EFI");
+    const install_kernel_uefi = b.addInstallFile(kernel.getEmittedBin(), "efi_root/kernel.elf");
+    const install_startup_nsh = b.addInstallFile(b.path("src/boot/uefi/startup.nsh"), "efi_root/startup.nsh");
     
     run_uefi_cmd.step.dependOn(&install_uefi.step);
+    run_uefi_cmd.step.dependOn(&install_kernel_uefi.step);
+    run_uefi_cmd.step.dependOn(&install_startup_nsh.step);
 
     const run_uefi_step = b.step("run-uefi", "Run the UEFI bootloader in QEMU");
     run_uefi_step.dependOn(&run_uefi_cmd.step);

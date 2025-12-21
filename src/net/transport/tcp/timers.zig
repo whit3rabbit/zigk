@@ -23,6 +23,9 @@ pub fn processTimers() void {
         i -= 1;
         const tcb = state.tcb_pool.items[i];
         if (!tcb.allocated) continue;
+        var tcb_held = tcb.mutex.tryAcquire() orelse continue;
+        var tcb_released = false;
+        defer if (!tcb_released) tcb_held.release();
 
         // Orphan TCB detection: TCBs without a parent socket (except Listen state)
         // These can occur if a socket is closed while the TCP state machine is
@@ -32,6 +35,7 @@ pub fn processTimers() void {
             const age = state.connection_timestamp -% tcb.created_at;
             if (age > orphan_timeout) {
                 tcb.state = .Closed;
+                tcb.closing = true;
                 if (tcb.blocked_thread) |thread| {
                     if (wake_count < wake_list.len) {
                         wake_list[wake_count] = thread;
@@ -39,6 +43,8 @@ pub fn processTimers() void {
                     }
                     tcb.blocked_thread = null;
                 }
+                tcb_held.release();
+                tcb_released = true;
                 state.freeTcb(tcb);
                 continue;
             }
@@ -51,6 +57,7 @@ pub fn processTimers() void {
             if (age > state_timeout) {
                 // Connection timed out in this state - clean up
                 tcb.state = .Closed;
+                tcb.closing = true;
                 // Wake thread blocked on this connection
                 if (tcb.blocked_thread) |thread| {
                     if (wake_count < wake_list.len) {
@@ -59,6 +66,8 @@ pub fn processTimers() void {
                     }
                     tcb.blocked_thread = null;
                 }
+                tcb_held.release();
+                tcb_released = true;
                 state.freeTcb(tcb);
                 continue;
             }
@@ -77,6 +86,7 @@ pub fn processTimers() void {
             if (tcb.retrans_count >= c.MAX_RETRIES) {
                 // Too many retries - reset connection
                 tcb.state = .Closed;
+                tcb.closing = true;
                 // Wake thread blocked on this connection (connect/recv timeout)
                 if (tcb.blocked_thread) |thread| {
                     if (wake_count < wake_list.len) {
@@ -85,6 +95,8 @@ pub fn processTimers() void {
                     }
                     tcb.blocked_thread = null;
                 }
+                tcb_held.release();
+                tcb_released = true;
                 state.freeTcb(tcb);
                 continue;
             }
