@@ -597,6 +597,9 @@ pub const UserVmm = struct {
     ///   bit 1 (W): 0 = read access, 1 = write access
     ///   bit 2 (U): 0 = supervisor, 1 = user mode
     /// Returns: true if fault was handled (page allocated), false if segfault
+    ///
+    /// THREAD SAFETY: Uses write lock to prevent races with munmap/mprotect.
+    /// Multiple page faults on the same address are handled atomically.
     pub fn handlePageFault(self: *UserVmm, addr: u64, err_code: u64) bool {
         // Check for kernel space access (security hard-stop)
         if (addr >= vmm.KERNEL_BASE) {
@@ -604,9 +607,11 @@ pub const UserVmm = struct {
             return false;
         }
 
-        // Acquire read lock - we need stable VMA list and permissions
-        // This blocks if mprotect is updating permissions
-        const held = self.lock.acquireRead();
+        // Acquire WRITE lock to prevent races:
+        // 1. Prevents munmap from freeing VMA while we use it
+        // 2. Prevents mprotect from changing permissions mid-operation
+        // 3. Serializes multiple faults on same page (prevents double-alloc)
+        const held = self.lock.acquireWrite();
         defer held.release();
 
         // 1. Find VMA covering the fault address
@@ -648,7 +653,15 @@ pub const UserVmm = struct {
             return false;
         }
 
-        // 4. Allocate physical page (zeroed for anonymous mappings)
+        // 4. Check if page is already mapped (another thread handled it, or spurious fault)
+        const page_base = addr & ~@as(u64, pmm.PAGE_SIZE - 1);
+        if (vmm.translate(self.pml4_phys, page_base) != null) {
+            // Page is already mapped - success (race with another fault handler)
+            console.debug("PageFault: page at {x} already mapped (race)", .{page_base});
+            return true;
+        }
+
+        // 5. Allocate physical page (zeroed for anonymous mappings)
         const phys = pmm.allocPage() orelse {
             console.err("PageFault: OOM allocating page for {x}", .{addr});
             return false;
@@ -658,12 +671,16 @@ pub const UserVmm = struct {
         const ptr: [*]u8 = @ptrCast(hal.paging.physToVirt(phys));
         hal.mem.fill(ptr, 0, pmm.PAGE_SIZE);
 
-        // 5. Map the page with VMA's protection flags
-        const page_base = addr & ~@as(u64, pmm.PAGE_SIZE - 1);
+        // 6. Map the page with VMA's protection flags
         const page_flags = vma.toPageFlags();
 
-        vmm.mapPage(self.pml4_phys, page_base, phys, page_flags) catch {
-            console.err("PageFault: failed to map page at {x}", .{page_base});
+        vmm.mapPage(self.pml4_phys, page_base, phys, page_flags) catch |err| {
+            // If AlreadyMapped, another thread just mapped it - success
+            if (err == vmm.VmmError.AlreadyMapped) {
+                pmm.freePage(phys);
+                return true;
+            }
+            console.err("PageFault: failed to map page at {x}: {}", .{ page_base, err });
             pmm.freePage(phys);
             return false;
         };

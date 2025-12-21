@@ -69,6 +69,21 @@ const PhysAlloc = struct {
 /// Uses heap allocator for the tracking structure itself
 var allocations: ?std.AutoHashMap(usize, PhysAlloc) = null;
 
+/// Lock protecting the allocations hashmap
+/// Required for thread-safety when multiple drivers allocate DMA buffers concurrently
+var dma_lock: sync.Spinlock = .{};
+
+const sync = if (is_freestanding) @import("sync") else struct {
+    pub const Spinlock = struct {
+        pub const Held = struct {
+            pub fn release(_: Held) void {}
+        };
+        pub fn acquire(_: *Spinlock) Held {
+            return .{};
+        }
+    };
+};
+
 fn getTracking() *std.AutoHashMap(usize, PhysAlloc) {
     if (allocations == null) {
         allocations = std.AutoHashMap(usize, PhysAlloc).init(heap.allocator());
@@ -85,6 +100,9 @@ pub const DmaAllocator = struct {
     }
 
     pub fn deinit(_: *Self) void {
+        const held = dma_lock.acquire();
+        defer held.release();
+
         // Free all tracked allocations
         if (allocations) |*allocs| {
             var iter = allocs.iterator();
@@ -98,6 +116,9 @@ pub const DmaAllocator = struct {
 
     /// Get the physical address for a virtual address allocated through this allocator
     pub fn getPhysicalAddress(_: *const Self, virt_addr: usize) ?u64 {
+        const held = dma_lock.acquire();
+        defer held.release();
+
         const tracking = getTracking();
         if (tracking.get(virt_addr)) |alloc| {
             return alloc.phys;
@@ -129,7 +150,7 @@ pub const DmaAllocator = struct {
             return null;
         }
 
-        // Allocate physical pages
+        // Allocate physical pages (outside lock - PMM has its own locking)
         const phys = pmm.allocZeroedPages(pages) orelse return null;
 
         // Convert to virtual address
@@ -137,11 +158,22 @@ pub const DmaAllocator = struct {
         const virt_addr = @intFromPtr(virt_ptr);
 
         // Track allocation for physical address lookup and freeing
-        const tracking = getTracking();
-        tracking.put(virt_addr, .{ .phys = phys, .pages = pages }) catch {
+        // Use block scope for lock to allow cleanup outside lock on failure
+        const success = blk: {
+            const held = dma_lock.acquire();
+            defer held.release();
+
+            const tracking = getTracking();
+            tracking.put(virt_addr, .{ .phys = phys, .pages = pages }) catch {
+                break :blk false;
+            };
+            break :blk true;
+        };
+
+        if (!success) {
             pmm.freePages(phys, pages);
             return null;
-        };
+        }
 
         return virt_ptr;
     }
@@ -158,9 +190,17 @@ pub const DmaAllocator = struct {
 
     fn free(_: *anyopaque, buf: []u8, _: std.mem.Alignment, _: usize) void {
         const virt_addr = @intFromPtr(buf.ptr);
-        const tracking = getTracking();
 
-        if (tracking.fetchRemove(virt_addr)) |kv| {
+        // Lookup and remove under lock, then free pages outside lock
+        const maybe_alloc = blk: {
+            const held = dma_lock.acquire();
+            defer held.release();
+
+            const tracking = getTracking();
+            break :blk tracking.fetchRemove(virt_addr);
+        };
+
+        if (maybe_alloc) |kv| {
             pmm.freePages(kv.value.phys, kv.value.pages);
         }
     }

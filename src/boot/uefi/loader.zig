@@ -2,7 +2,7 @@ const std = @import("std");
 const uefi = std.os.uefi;
 const elf = std.elf;
 
-pub const LoaderError = error {
+pub const LoaderError = error{
     LocateProtocolFailed,
     OpenVolumeFailed,
     KernelNotFound,
@@ -11,6 +11,9 @@ pub const LoaderError = error {
     InvalidElf,
     AllocateFailed,
     SegmentsBufferTooSmall,
+    SymbolNotFound,
+    InitrdNotFound,
+    InitrdTooLarge,
 };
 
 pub const LoadedSegment = struct {
@@ -18,99 +21,353 @@ pub const LoadedSegment = struct {
     physical_address: u64,
     page_count: usize,
     size: u64,
+    writable: bool,
+    executable: bool,
 };
 
-pub fn loadKernel(bs: *uefi.tables.BootServices, segments_buffer: []LoadedSegment) LoaderError!usize {
+pub const LoadResult = struct {
+    entry_point: u64,
+    segment_count: usize,
+};
+
+pub fn loadKernel(bs: *uefi.tables.BootServices, segments_buffer: []LoadedSegment) LoaderError!LoadResult {
     // Locate Protocol
-    // Wrapper signature: locateProtocol(protocol: *Guid, registration: ?*anyopaque) Error!?*anyopaque
-    const fs_opaque = bs.locateProtocol(uefi.protocol.SimpleFileSystem, null) catch {
+    const fs = bs.locateProtocol(uefi.protocol.SimpleFileSystem, null) catch {
         return LoaderError.LocateProtocolFailed;
-    };
-    const fs_ptr = fs_opaque orelse return LoaderError.LocateProtocolFailed;
-    const fs = @as(*uefi.protocol.SimpleFileSystem, @ptrCast(@alignCast(fs_ptr)));
-    
-    var root: *uefi.protocol.File = undefined;
-    if (fs.openVolume()) |r| {
-        root = r;
-    } else |_| {
+    } orelse return LoaderError.LocateProtocolFailed;
+
+    var root = fs.openVolume() catch {
         return LoaderError.OpenVolumeFailed;
-    }
+    };
     defer _ = root.close() catch {};
-    
-    const kernel_path = [11:0]u16{ 'k', 'e', 'r', 'n', 'e', 'l', '.', 'e', 'l', 'f', 0 };
-    var kernel_file = root.open(&kernel_path, @enumFromInt(1), @bitCast(@as(u64, 0))) catch {
+
+    const kernel_path = [_:0]u16{ 'k', 'e', 'r', 'n', 'e', 'l', '.', 'e', 'l', 'f' };
+    var kernel_file = root.open(&kernel_path, .read, .{}) catch {
         return LoaderError.KernelNotFound;
     };
     defer _ = kernel_file.close() catch {};
-    
+
     // Read ELF Header
-    var ehdr: elf.Elf64_Ehdr = undefined;
-    var len: usize = @sizeOf(elf.Elf64_Ehdr);
-    _ = kernel_file.read(std.mem.asBytes(&ehdr)) catch return LoaderError.ReadFailed;
-    
+    var ehdr: elf.Elf64_Ehdr = std.mem.zeroes(elf.Elf64_Ehdr);
+    const ehdr_bytes_read = kernel_file.read(std.mem.asBytes(&ehdr)) catch return LoaderError.ReadFailed;
+
+    // Validate full header was read
+    if (ehdr_bytes_read != @sizeOf(elf.Elf64_Ehdr)) return LoaderError.InvalidElf;
+
     // Validate Magic
     if (!std.mem.eql(u8, ehdr.e_ident[0..4], "\x7fELF")) return LoaderError.InvalidElf;
-    if (ehdr.e_phoff == 0) return LoaderError.InvalidElf;
 
-    // Read Program Headers
-    _ = kernel_file.setPosition(ehdr.e_phoff) catch return LoaderError.SeekFailed;
-    
+    // Validate ELF class (must be 64-bit)
+    if (ehdr.e_ident[elf.EI_CLASS] != elf.ELFCLASS64) return LoaderError.InvalidElf;
+
+    // Validate endianness (must be little-endian)
+    if (ehdr.e_ident[elf.EI_DATA] != elf.ELFDATA2LSB) return LoaderError.InvalidElf;
+
+    // Validate machine type (must be x86_64)
+    if (ehdr.e_machine != elf.EM.X86_64) return LoaderError.InvalidElf;
+
+    // Validate program header offset and entry size
+    if (ehdr.e_phoff == 0) return LoaderError.InvalidElf;
+    if (ehdr.e_phentsize < @sizeOf(elf.Elf64_Phdr)) return LoaderError.InvalidElf;
+
+    // Sanity check: reject unreasonable program header count (DoS prevention)
+    const MAX_PHNUM: u16 = 256;
+    if (ehdr.e_phnum > MAX_PHNUM) return LoaderError.InvalidElf;
+
     var segment_count: usize = 0;
-    
+
     var i: usize = 0;
     while (i < ehdr.e_phnum) : (i += 1) {
-        var phdr: elf.Elf64_Phdr = undefined;
-        len = @sizeOf(elf.Elf64_Phdr);
-        
-        // Ensure we are at the right offset
-        const offset = ehdr.e_phoff + (i * ehdr.e_phentsize);
-        _ = kernel_file.setPosition(offset) catch return LoaderError.SeekFailed;
-        
-        _ = kernel_file.read(std.mem.asBytes(&phdr)) catch return LoaderError.ReadFailed;
-        
+        var phdr: elf.Elf64_Phdr = std.mem.zeroes(elf.Elf64_Phdr);
+
+        // Calculate offset with overflow protection
+        const phdr_offset = std.math.mul(u64, i, ehdr.e_phentsize) catch return LoaderError.InvalidElf;
+        const offset = std.math.add(u64, ehdr.e_phoff, phdr_offset) catch return LoaderError.InvalidElf;
+
+        kernel_file.setPosition(offset) catch return LoaderError.SeekFailed;
+
+        const phdr_bytes_read = kernel_file.read(std.mem.asBytes(&phdr)) catch return LoaderError.ReadFailed;
+        if (phdr_bytes_read != @sizeOf(elf.Elf64_Phdr)) return LoaderError.InvalidElf;
+
         if (phdr.p_type == elf.PT_LOAD) {
             if (segment_count >= segments_buffer.len) return LoaderError.SegmentsBufferTooSmall;
-            
-            // Calculate pages
+
+            // Validate virtual address is in expected kernel range (higher half)
+            const KERNEL_VADDR_MIN: u64 = 0xFFFF_8000_0000_0000;
+            if (phdr.p_vaddr < KERNEL_VADDR_MIN) return LoaderError.InvalidElf;
+
+            // Check for overlapping segments with previously loaded ones
+            const seg_end = std.math.add(u64, phdr.p_vaddr, phdr.p_memsz) catch return LoaderError.InvalidElf;
+            for (segments_buffer[0..segment_count]) |prev| {
+                const prev_end = std.math.add(u64, prev.virtual_address, prev.size) catch return LoaderError.InvalidElf;
+                // Overlap if: new_start < prev_end AND prev_start < new_end
+                if (phdr.p_vaddr < prev_end and prev.virtual_address < seg_end) {
+                    return LoaderError.InvalidElf;
+                }
+            }
+
+            // Calculate pages needed with overflow protection
             const mem_size = phdr.p_memsz;
-            const page_count = (mem_size + 4096 - 1) / 4096;
-            
-            // Allocate Physical Memory
+            const aligned_size = std.math.add(u64, mem_size, 4095) catch return LoaderError.InvalidElf;
+            const page_count = aligned_size / 4096;
+
+            // Sanity check: reject unreasonable kernel sizes (> 1GB)
+            const MAX_KERNEL_PAGES: u64 = (1024 * 1024 * 1024) / 4096;
+            if (page_count == 0 or page_count > MAX_KERNEL_PAGES) return LoaderError.InvalidElf;
+
+            // Allocate physical memory
             const pages_slice = bs.allocatePages(
                 .any,
                 .loader_data,
                 page_count,
             ) catch return LoaderError.AllocateFailed;
-            
+
             const phys_addr = @intFromPtr(pages_slice.ptr);
-            
-            // Zero out memory (BSS)
-            // pages_slice is []align(4096) [4096]u8.
-            // Convert to byte slice.
-            var dest_slice = std.mem.sliceAsBytes(pages_slice);
+
+            // Zero out memory (for BSS)
+            const dest_slice = std.mem.sliceAsBytes(pages_slice);
             @memset(dest_slice, 0);
-            
+
             // Load file data
             if (phdr.p_filesz > 0) {
-                 _ = kernel_file.setPosition(phdr.p_offset) catch return LoaderError.SeekFailed;
-                 
-                 // Read into slice
-                 // dest_slice is []u8.
-                 if (phdr.p_filesz > dest_slice.len) return LoaderError.ReadFailed; // Should not happen if logic correct
-                 
-                 const exact_dest = dest_slice[0..phdr.p_filesz];
-                 _ = kernel_file.read(exact_dest) catch return LoaderError.ReadFailed;
+                kernel_file.setPosition(phdr.p_offset) catch return LoaderError.SeekFailed;
+
+                if (phdr.p_filesz > dest_slice.len) return LoaderError.ReadFailed;
+
+                const exact_dest = dest_slice[0..@intCast(phdr.p_filesz)];
+                const bytes_read = kernel_file.read(exact_dest) catch return LoaderError.ReadFailed;
+                if (bytes_read != phdr.p_filesz) return LoaderError.ReadFailed;
             }
-            
+
+            // Parse segment flags
+            const writable = (phdr.p_flags & elf.PF_W) != 0;
+            const executable = (phdr.p_flags & elf.PF_X) != 0;
+
             segments_buffer[segment_count] = .{
                 .virtual_address = phdr.p_vaddr,
                 .physical_address = phys_addr,
                 .page_count = page_count,
                 .size = mem_size,
+                .writable = writable,
+                .executable = executable,
             };
             segment_count += 1;
         }
     }
-    
-    return segment_count;
+
+    // Try to find _uefi_start symbol for UEFI boot
+    // If not found, fall back to e_entry (_start)
+    const uefi_entry = findSymbol(kernel_file, &ehdr, bs, "_uefi_start") catch ehdr.e_entry;
+
+    // Validate entry point is within a loaded executable segment
+    var entry_valid = false;
+    for (segments_buffer[0..segment_count]) |seg| {
+        const seg_end = std.math.add(u64, seg.virtual_address, seg.size) catch continue;
+        if (uefi_entry >= seg.virtual_address and uefi_entry < seg_end and seg.executable) {
+            entry_valid = true;
+            break;
+        }
+    }
+    if (!entry_valid) return LoaderError.InvalidElf;
+
+    return .{
+        .entry_point = uefi_entry,
+        .segment_count = segment_count,
+    };
+}
+
+/// Search for a symbol by name in the ELF symbol table
+fn findSymbol(
+    file: *uefi.protocol.File,
+    ehdr: *const elf.Elf64_Ehdr,
+    bs: *uefi.tables.BootServices,
+    name: []const u8,
+) LoaderError!u64 {
+    if (ehdr.e_shoff == 0 or ehdr.e_shnum == 0) return LoaderError.SymbolNotFound;
+
+    // Validate section header entry size
+    if (ehdr.e_shentsize < @sizeOf(elf.Elf64_Shdr)) return LoaderError.InvalidElf;
+
+    // Sanity check: reject unreasonable section header count (DoS prevention)
+    const MAX_SHNUM: u16 = 256;
+    if (ehdr.e_shnum > MAX_SHNUM) return LoaderError.InvalidElf;
+
+    // Read section headers to find .symtab and .strtab
+    var symtab_shdr: ?elf.Elf64_Shdr = null;
+    var strtab_shdr: ?elf.Elf64_Shdr = null;
+
+    var i: usize = 0;
+    while (i < ehdr.e_shnum) : (i += 1) {
+        var shdr: elf.Elf64_Shdr = std.mem.zeroes(elf.Elf64_Shdr);
+
+        // Calculate offset with overflow protection
+        const shdr_offset = std.math.mul(u64, i, ehdr.e_shentsize) catch return LoaderError.InvalidElf;
+        const offset = std.math.add(u64, ehdr.e_shoff, shdr_offset) catch return LoaderError.InvalidElf;
+
+        file.setPosition(offset) catch return LoaderError.SeekFailed;
+        const bytes_read = file.read(std.mem.asBytes(&shdr)) catch return LoaderError.ReadFailed;
+        if (bytes_read != @sizeOf(elf.Elf64_Shdr)) return LoaderError.InvalidElf;
+
+        if (shdr.sh_type == elf.SHT_SYMTAB) {
+            symtab_shdr = shdr;
+        } else if (shdr.sh_type == elf.SHT_STRTAB and symtab_shdr != null) {
+            // Get the string table linked from symtab
+            if (symtab_shdr.?.sh_link == i) {
+                strtab_shdr = shdr;
+            }
+        }
+    }
+
+    // Also check if we need to find strtab by link index
+    if (symtab_shdr != null and strtab_shdr == null) {
+        var shdr: elf.Elf64_Shdr = std.mem.zeroes(elf.Elf64_Shdr);
+        const link_idx = symtab_shdr.?.sh_link;
+
+        // Validate link index is within bounds
+        if (link_idx >= ehdr.e_shnum) return LoaderError.InvalidElf;
+
+        // Calculate offset with overflow protection
+        const shdr_offset = std.math.mul(u64, link_idx, ehdr.e_shentsize) catch return LoaderError.InvalidElf;
+        const offset = std.math.add(u64, ehdr.e_shoff, shdr_offset) catch return LoaderError.InvalidElf;
+
+        file.setPosition(offset) catch return LoaderError.SeekFailed;
+        const bytes_read = file.read(std.mem.asBytes(&shdr)) catch return LoaderError.ReadFailed;
+        if (bytes_read != @sizeOf(elf.Elf64_Shdr)) return LoaderError.InvalidElf;
+
+        // Validate the linked section is actually a string table
+        if (shdr.sh_type != elf.SHT_STRTAB) return LoaderError.InvalidElf;
+        strtab_shdr = shdr;
+    }
+
+    const symtab = symtab_shdr orelse return LoaderError.SymbolNotFound;
+    const strtab = strtab_shdr orelse return LoaderError.SymbolNotFound;
+
+    // Validate symbol table size is reasonable (< 64MB)
+    const MAX_SYMTAB_SIZE: u64 = 64 * 1024 * 1024;
+    if (symtab.sh_size == 0 or symtab.sh_size > MAX_SYMTAB_SIZE) return LoaderError.InvalidElf;
+
+    // Validate string table size is reasonable (< 64MB)
+    const MAX_STRTAB_SIZE: u64 = 64 * 1024 * 1024;
+    if (strtab.sh_size == 0 or strtab.sh_size > MAX_STRTAB_SIZE) return LoaderError.InvalidElf;
+
+    // Allocate buffer for string table with overflow protection
+    const strtab_aligned = std.math.add(u64, strtab.sh_size, 4095) catch return LoaderError.InvalidElf;
+    const strtab_pages = strtab_aligned / 4096;
+    const strtab_buf = bs.allocatePages(.any, .loader_data, strtab_pages) catch {
+        return LoaderError.AllocateFailed;
+    };
+    defer _ = bs.freePages(strtab_buf) catch {};
+
+    const strtab_slice = @as([*]u8, @ptrCast(strtab_buf.ptr))[0..@intCast(strtab.sh_size)];
+    file.setPosition(strtab.sh_offset) catch return LoaderError.SeekFailed;
+    const strtab_bytes_read = file.read(strtab_slice) catch return LoaderError.ReadFailed;
+    if (strtab_bytes_read != strtab.sh_size) return LoaderError.InvalidElf;
+
+    // Search symbols
+    const sym_count = symtab.sh_size / @sizeOf(elf.Elf64_Sym);
+    var sym_idx: usize = 0;
+    while (sym_idx < sym_count) : (sym_idx += 1) {
+        var sym: elf.Elf64_Sym = std.mem.zeroes(elf.Elf64_Sym);
+
+        // Calculate offset with overflow protection
+        const sym_entry_offset = std.math.mul(u64, sym_idx, @sizeOf(elf.Elf64_Sym)) catch return LoaderError.InvalidElf;
+        const sym_offset = std.math.add(u64, symtab.sh_offset, sym_entry_offset) catch return LoaderError.InvalidElf;
+
+        file.setPosition(sym_offset) catch return LoaderError.SeekFailed;
+        const sym_bytes_read = file.read(std.mem.asBytes(&sym)) catch return LoaderError.ReadFailed;
+        if (sym_bytes_read != @sizeOf(elf.Elf64_Sym)) return LoaderError.InvalidElf;
+
+        if (sym.st_name == 0) continue;
+        if (sym.st_name >= strtab.sh_size) continue;
+
+        // Get symbol name from strtab
+        const sym_name_start = strtab_slice[@intCast(sym.st_name)..];
+        const sym_name_end = std.mem.indexOfScalar(u8, sym_name_start, 0) orelse sym_name_start.len;
+        const sym_name = sym_name_start[0..sym_name_end];
+
+        if (std.mem.eql(u8, sym_name, name)) {
+            return sym.st_value;
+        }
+    }
+
+    return LoaderError.SymbolNotFound;
+}
+
+/// Result of loading the initrd
+pub const InitrdResult = struct {
+    address: u64,
+    size: u64,
+};
+
+/// Load initrd.tar from the EFI filesystem into memory
+/// Returns physical address and size of the loaded initrd
+pub fn loadInitrd(bs: *uefi.tables.BootServices) LoaderError!InitrdResult {
+    // Maximum initrd size: 256MB
+    const MAX_INITRD_SIZE: u64 = 256 * 1024 * 1024;
+
+    // Locate filesystem protocol
+    const fs = bs.locateProtocol(uefi.protocol.SimpleFileSystem, null) catch {
+        return LoaderError.LocateProtocolFailed;
+    } orelse return LoaderError.LocateProtocolFailed;
+
+    var root = fs.openVolume() catch {
+        return LoaderError.OpenVolumeFailed;
+    };
+    defer _ = root.close() catch {};
+
+    // Try to open initrd.tar
+    const initrd_path = [_:0]u16{ 'i', 'n', 'i', 't', 'r', 'd', '.', 't', 'a', 'r' };
+    var initrd_file = root.open(&initrd_path, .read, .{}) catch {
+        return LoaderError.InitrdNotFound;
+    };
+    defer _ = initrd_file.close() catch {};
+
+    // Get file size by seeking to end
+    // First, get current position (should be 0)
+    const start_pos = initrd_file.getPosition() catch return LoaderError.SeekFailed;
+    _ = start_pos;
+
+    // Seek to end to get file size
+    initrd_file.setPosition(0xFFFFFFFFFFFFFFFF) catch return LoaderError.SeekFailed;
+    const file_size = initrd_file.getPosition() catch return LoaderError.SeekFailed;
+
+    // Seek back to start
+    initrd_file.setPosition(0) catch return LoaderError.SeekFailed;
+
+    if (file_size == 0) {
+        return LoaderError.ReadFailed;
+    }
+
+    if (file_size > MAX_INITRD_SIZE) {
+        return LoaderError.InitrdTooLarge;
+    }
+
+    // Calculate pages needed
+    const aligned_size = std.math.add(u64, file_size, 4095) catch return LoaderError.InvalidElf;
+    const page_count = aligned_size / 4096;
+
+    // Allocate memory for initrd
+    const pages_slice = bs.allocatePages(
+        .any,
+        .loader_data,
+        page_count,
+    ) catch return LoaderError.AllocateFailed;
+
+    const phys_addr = @intFromPtr(pages_slice.ptr);
+
+    // Zero the buffer first (security)
+    const dest_slice = std.mem.sliceAsBytes(pages_slice);
+    @memset(dest_slice, 0);
+
+    // Read the file
+    const exact_dest = dest_slice[0..@intCast(file_size)];
+    const bytes_read = initrd_file.read(exact_dest) catch return LoaderError.ReadFailed;
+    if (bytes_read != file_size) {
+        return LoaderError.ReadFailed;
+    }
+
+    return .{
+        .address = phys_addr,
+        .size = file_size,
+    };
 }

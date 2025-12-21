@@ -11,7 +11,7 @@
 //! Dependencies:
 //! - PMM/VMM must be initialized.
 //! - Scheduler must be initialized (for tick callbacks).
-//! - ACPI RSDP must be available (via Limine).
+//! - ACPI RSDP must be set via setRsdpAddress().
 
 const std = @import("std");
 const console = @import("console");
@@ -23,7 +23,6 @@ const e1000e = @import("e1000e");
 const usb = @import("usb");
 const audio = @import("audio");
 const ahci = @import("ahci");
-const boot = @import("boot.zig");
 const video_driver = @import("video_driver");
 const hal = @import("hal");
 const kernel_iommu = @import("kernel_iommu");
@@ -36,6 +35,15 @@ pub var virtio_gpu_driver: ?*video_driver.VirtioGpuDriver = null;
 /// Whether IOMMU is available and enabled
 pub var iommu_enabled: bool = false;
 
+/// RSDP address from boot info (set by main.zig during kernel init)
+var rsdp_address: u64 = 0;
+
+/// Set the RSDP address from BootInfo
+/// Must be called before initIommu() or initNetwork()
+pub fn setRsdpAddress(addr: u64) void {
+    rsdp_address = addr;
+}
+
 /// Initialize IOMMU (VT-d) subsystem
 /// Must be called BEFORE device initialization to ensure DMA isolation from the start.
 /// If IOMMU is not available, devices will fall back to using physical addresses.
@@ -44,12 +52,11 @@ pub fn initIommu() void {
     console.info("Initializing IOMMU subsystem...", .{});
 
     // 1. Get RSDP from boot protocol
-    const rsdp_response = boot.rsdp_request.response orelse {
+    if (rsdp_address == 0) {
         console.warn("IOMMU: RSDP not found, IOMMU disabled", .{});
         return;
-    };
-    const rsdp_addr = rsdp_response.address;
-    const rsdp_ptr: *align(1) const hal.acpi.Rsdp = @ptrFromInt(rsdp_addr);
+    }
+    const rsdp_ptr: *align(1) const hal.acpi.Rsdp = @ptrFromInt(rsdp_address);
 
     // 2. Parse DMAR table
     const dmar_info = hal.acpi.parseDmar(rsdp_ptr) orelse {
@@ -157,18 +164,15 @@ pub fn initNetwork() void {
     console.info("Initializing network subsystem...", .{});
 
     // 1. Get RSDP for PCI ECAM
-    if (boot.rsdp_request.response) |resp| {
-        console.info("Debug: RSDP response at 0x{x}", .{resp.address});
-    }
-    const rsdp_response = boot.rsdp_request.response orelse {
-        console.warn("RSDP not found (BIOS boot without ACPI?), network disabled.", .{});
+    if (rsdp_address == 0) {
+        console.warn("RSDP not found, network disabled.", .{});
         return;
-    };
-    const rsdp_addr = rsdp_response.address;
-    console.info("Debug: Calling pci.initFromAcpi with 0x{x}", .{rsdp_addr});
+    }
+    console.info("Debug: RSDP at 0x{x}", .{rsdp_address});
+    console.info("Debug: Calling pci.initFromAcpi with 0x{x}", .{rsdp_address});
 
     // 2. Initialize PCI
-    const pci_res = pci.initFromAcpi(heap.allocator(), rsdp_addr) catch |err| {
+    const pci_res = pci.initFromAcpi(heap.allocator(), rsdp_address) catch |err| {
         console.err("PCI init failed: {}", .{err});
         return;
     };
@@ -213,40 +217,13 @@ pub fn initNetwork() void {
         // Disable in-kernel network stack initialization.
         // We still initialize the driver hardware if needed, bu we don't bind it to the kernel stack
         // OR we skip driver initialization if the userspace driver is taking over.
-        
+
         // For now, let's just log and skip.
         console.warn("[NETSTACK] Kernel network stack disabled for userspace migration.", .{});
         _ = nic_driver; // Unused
-        
-        // const mac = nic_driver.getMacAddress();
-        // net_interface = net.Interface.init("eth0", mac);
-        // net_interface.setTransmitFn(txWrapper);
-        // net_interface.setMulticastUpdateFn(multicastUpdate);
-
-        // // Initialize network stack
-        // // Pass 1000 ticks/sec (1ms tick)
-        // net.init(&net_interface, heap.allocator(), 1000);
-
-        // // Program initial multicast filter
-        // multicastUpdate(&net_interface);
-
-        // // 6. Register Callbacks
-        // nic_driver.setRxCallback(rxCallbackAdapter);
-        // sched.setTickCallback(net.tick);
-
-        // console.info("Network initialized (MAC={x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2})", .{
-        //     mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
-        // });
     } else {
         console.warn("Network stack skipped (no NIC driver)", .{});
     }
-
-    // Initialize loopback interface for local (127.x.x.x) traffic
-    // if (nic_driver_opt != null) {
-    //     const lo = net.loopback.init();
-    //     lo.up();
-    //     console.info("Loopback interface initialized (127.0.0.1)", .{});
-    // }
 }
 
 /// Initialize USB subsystem (XHCI/EHCI)

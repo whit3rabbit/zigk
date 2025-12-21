@@ -123,7 +123,8 @@ pub fn macEqual(a: [6]u8, b: [6]u8) bool {
 /// Returns false if buffer is too small to hold the header at eth_offset
 pub fn buildFrame(iface: *const Interface, pkt: *PacketBuffer, dst_mac: [6]u8, ethertype: u16) bool {
     // Bounds check: ensure buffer can hold 14-byte Ethernet header at specified offset
-    if (pkt.eth_offset + packet.ETH_HEADER_SIZE > pkt.data.len) {
+    const end = std.math.add(usize, pkt.eth_offset, packet.ETH_HEADER_SIZE) catch return false;
+    if (end > pkt.data.len) {
         return false;
     }
 

@@ -89,4 +89,4 @@ zig build test
 ## Troubleshooting
 **ISO creation fails**:
 - Ensure `xorriso` is installed: `brew install xorriso` (macOS) or `apt install xorriso` (Linux).
-- Check that the `limine/` directory contains the bootloader binaries.
+- Verify the UEFI bootloader builds successfully (`zig-out/bin/BOOTX64.EFI`).

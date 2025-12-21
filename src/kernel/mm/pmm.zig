@@ -18,7 +18,6 @@ const std = @import("std");
 const hal = @import("hal");
 const console = @import("console");
 const config = @import("config");
-const limine = @import("limine");
 const BootInfo = @import("boot_info");
 const sync = @import("sync");
 
@@ -49,12 +48,41 @@ var memory_end: u64 = 0;
 // Track if PMM is initialized
 var initialized: bool = false;
 
-// Helper to get refcount safely
+/// Get refcount for a page (ADVISORY ONLY - unlocked read)
+///
+/// WARNING: This function reads without holding pmm_lock. The returned value
+/// may be stale by the time the caller acts on it. DO NOT use for security
+/// decisions like CoW - use getRefcountLocked() instead.
+///
+/// Safe uses: debugging, statistics, heuristics where stale data is acceptable.
 pub fn getRefcount(phys_addr: u64) u16 {
     if (phys_addr >= memory_end) return 0;
     const page = phys_addr / PAGE_SIZE;
     if (page >= refcounts.len) return 0;
     return refcounts[page];
+}
+
+/// Get refcount for a page with lock held (for security-critical decisions)
+///
+/// Use this when the refcount determines security behavior (e.g., CoW decisions).
+/// Returns the refcount value that will remain valid while you hold the lock.
+///
+/// Example: CoW check
+///   const held = pmm.acquireLock();
+///   defer held.release();
+///   if (pmm.getRefcountLocked(page) > 1) { ... copy ... }
+pub fn getRefcountLocked(phys_addr: u64) u16 {
+    // Caller must already hold pmm_lock
+    if (phys_addr >= memory_end) return 0;
+    const page = phys_addr / PAGE_SIZE;
+    if (page >= refcounts.len) return 0;
+    return refcounts[page];
+}
+
+/// Acquire the PMM lock for multi-step atomic operations
+/// Use with getRefcountLocked() for CoW and other security-critical checks
+pub fn acquireLock() sync.Spinlock.Held {
+    return pmm_lock.acquire();
 }
 
 /// Increment reference count for a page
@@ -235,53 +263,6 @@ pub fn init(memmap: []const BootInfo.MemoryDescriptor) !void {
     });
 }
 
-/// Initialize PMM from Limine memory map (shim)
-pub fn initFromLimine(memmap: *const limine.MemoryMapResponse) !void {
-    // We need to convert Limine entries to BootInfo entries temporarily
-    // Ideally we allocate this conversion array on stack, but it might be large?
-    // Limine usually has < 128 entries.
-    // However, PMM isn't up yet, so no heap.
-    // Stack is small. 
-    // BUT we can use a temporary global or static buffer?
-    // Or just iterate and map manually for now to save complexity of allocation?
-    // No, `init` takes a slice.
-    
-    // Let's use a static buffer in BSS.
-    
-    const entries = memmap.entries();
-    var descriptors: [128]BootInfo.MemoryDescriptor = undefined;
-    var count: usize = 0;
-    
-
-    
-    for (entries) |entry| {
-        if (count >= 128) break;
-        
-        var type_: BootInfo.MemoryType = .Reserved;
-        // Map Limine types to BootInfo types
-        switch (entry.kind) {
-            .usable => type_ = .Conventional,
-            .reserved => type_ = .Reserved,
-            .acpi_reclaimable => type_ = .ACPIReclaim,
-            .acpi_nvs => type_ = .ACPINvs,
-            .bad_memory => type_ = .Unusable,
-            .bootloader_reclaimable => type_ = .BootServicesData, // close enough?
-            .kernel_and_modules => type_ = .KernelCode, // generic
-            .framebuffer => type_ = .Framebuffer,
-        }
-        
-        descriptors[count] = .{
-            .type = type_,
-            .phys_start = entry.base,
-            .virt_start = 0, // unused by PMM
-            .num_pages = entry.length / PAGE_SIZE,
-            .attribute = 0,
-        };
-        count += 1;
-    }
-    
-    try init(descriptors[0..count]);
-}
 
 
 

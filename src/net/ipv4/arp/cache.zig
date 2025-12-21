@@ -237,21 +237,49 @@ pub fn findFreeEntry() !*ArpEntry {
     return new_entry;
 }
 
+/// Struct to hold packets for deferred transmission (outside lock)
+pub const PendingPackets = struct {
+    pkts: [ArpEntry.QUEUE_SIZE]?[]u8 = [_]?[]u8{null} ** ArpEntry.QUEUE_SIZE,
+    lens: [ArpEntry.QUEUE_SIZE]usize = [_]usize{0} ** ArpEntry.QUEUE_SIZE,
+    count: u8 = 0,
+
+    /// Transmit all pending packets and free buffers
+    pub fn transmitAndFree(self: *PendingPackets, iface: *Interface) void {
+        var i: u8 = 0;
+        while (i < self.count) : (i += 1) {
+            const len = self.lens[i];
+            if (self.pkts[i]) |buf| {
+                if (len > 0 and len <= buf.len) {
+                    // MAC and Type headers are set in updateCache before
+                    // packets are moved to PendingPackets
+                    _ = iface.transmit(buf[0..len]);
+                }
+                if (monitor.VERIFY_SYNC_TRANSMIT) {
+                    @memset(buf, 0xDE);
+                }
+                arp_allocator.free(buf);
+            }
+        }
+    }
+};
+
 /// Update or add an entry to the ARP cache
-pub fn updateCache(iface: *Interface, ip: u32, mac: [6]u8, state: ArpState) !void {
-    if (std.mem.eql(u8, &mac, &BROADCAST_MAC)) return;
-    if (std.mem.eql(u8, &mac, &ZERO_MAC)) return;
-    if ((mac[0] & 0x01) != 0) return;
+/// Returns PendingPackets that MUST be transmitted by caller AFTER releasing lock
+pub fn updateCache(iface: *Interface, ip: u32, mac: [6]u8, state: ArpState) !PendingPackets {
+    var pending = PendingPackets{};
+    if (std.mem.eql(u8, &mac, &BROADCAST_MAC)) return pending;
+    if (std.mem.eql(u8, &mac, &ZERO_MAC)) return pending;
+    if ((mac[0] & 0x01) != 0) return pending;
 
     if (findEntry(ip)) |entry| {
         if (entry.is_static) {
             monitor.logSecurityEvent(.static_entry_protected, ip, entry.mac_addr, mac);
-            return;
+            return pending;
         }
 
         if (entry.state != .incomplete) {
             const time_since_update = monitor.current_tick -% entry.timestamp;
-            if (time_since_update < ARP_UPDATE_RATE_LIMIT) return;
+            if (time_since_update < ARP_UPDATE_RATE_LIMIT) return pending;
         }
 
         const was_incomplete = entry.state == .incomplete;
@@ -278,13 +306,15 @@ pub fn updateCache(iface: *Interface, ip: u32, mac: [6]u8, state: ArpState) !voi
                         @memcpy(&eth.dst_mac, &mac);
                         @memcpy(&eth.src_mac, &iface.mac_addr);
                         eth.setEthertype(ethernet.ETHERTYPE_IPV4);
-
-                        _ = iface.transmit(buf[0..len]);
+                        
+                        // Move to pending struct
+                        pending.pkts[pending.count] = buf;
+                        pending.lens[pending.count] = len;
+                        pending.count += 1;
+                    } else {
+                         // Should not happen, but free if so
+                         arp_allocator.free(buf);
                     }
-                    if (monitor.VERIFY_SYNC_TRANSMIT) {
-                        @memset(buf, 0xDE);
-                    }
-                    arp_allocator.free(buf);
                     entry.pending_pkts[idx] = null;
                     entry.pending_lens[idx] = 0;
                 }
@@ -293,7 +323,7 @@ pub fn updateCache(iface: *Interface, ip: u32, mac: [6]u8, state: ArpState) !voi
             entry.queue_head = 0;
             entry.queue_tail = 0;
         }
-        return;
+        return pending;
     }
 
     const entry = try findFreeEntry();
@@ -313,6 +343,8 @@ pub fn updateCache(iface: *Interface, ip: u32, mac: [6]u8, state: ArpState) !voi
     entry.is_static = false;
     entry.hash_next = null;
     hashTableInsert(entry);
+    
+    return pending;
 }
 
 /// Initialize ARP subsystem

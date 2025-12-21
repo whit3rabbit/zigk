@@ -93,15 +93,16 @@ pub fn processSynSent(tcb: *Tcb, pkt: *PacketBuffer, tcp_hdr: *TcpHeader) RxActi
 }
 
 /// Process packet in SYN-RECEIVED state
-pub fn processSynReceived(tcb: *Tcb, tcp_hdr: *TcpHeader) RxAction {
+/// Caller must hold state.lock and tcb.mutex.
+pub fn processSynReceivedLocked(tcb: *Tcb, tcp_hdr: *TcpHeader) bool {
     if (!tcp_hdr.hasFlag(TcpHeader.FLAG_ACK)) {
-        return .Continue;
+        return false;
     }
 
     const ack = tcp_hdr.getAckNum();
     if (ack != tcb.iss +% 1) {
         _ = tx.sendRst(tcb);
-        return .Continue;
+        return false;
     }
 
     tcb.snd_una = ack;
@@ -111,32 +112,5 @@ pub fn processSynReceived(tcb: *Tcb, tcp_hdr: *TcpHeader) RxAction {
     if (state.half_open_count > 0) state.half_open_count -= 1;
     tcb.retrans_timer = 0;
     tcb.retrans_count = 0;
-
-    if (tcb.parent_socket) |parent_idx| {
-        if (socket.completePendingAccept(parent_idx, tcb)) {
-            return .Continue;
-        }
-
-        if (socket.queueAcceptConnection(parent_idx, tcb)) {
-            if (socket.acquireSocket(parent_idx)) |parent_sock| {
-                defer socket.releaseSocket(parent_sock);
-                if (parent_sock.blocked_thread) |thread| {
-                    socket.wakeThread(thread);
-                    parent_sock.blocked_thread = null;
-                }
-            }
-        } else {
-            rejectUnqueuedConnection(tcb);
-            return .FreeTcb;
-        }
-    } else {
-        rejectUnqueuedConnection(tcb);
-        return .FreeTcb;
-    }
-
-    return .Continue;
-}
-
-fn rejectUnqueuedConnection(tcb: *Tcb) void {
-    _ = tx.sendRst(tcb);
+    return true;
 }

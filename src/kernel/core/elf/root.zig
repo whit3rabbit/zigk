@@ -25,6 +25,7 @@ pub const MAX_TOTAL_MEMORY = types.MAX_TOTAL_MEMORY;
 pub const MAX_LOAD_SEGMENTS = types.MAX_LOAD_SEGMENTS;
 pub const DEFAULT_STACK_SIZE = types.DEFAULT_STACK_SIZE;
 pub const DEFAULT_STACK_TOP = types.DEFAULT_STACK_TOP;
+pub const StackBounds = types.StackBounds;
 
 pub const Elf64_Ehdr = types.Elf64_Ehdr;
 pub const Elf64_Phdr = types.Elf64_Phdr;
@@ -69,15 +70,21 @@ pub fn exec(
     // Use provided PIE base or default (for ASLR)
     const pie_base: u64 = pie_base_opt orelse 0x400000;
 
-    // Load the ELF
-    const load_result = loader.load(data, pml4_phys, pie_base) catch |err| {
-        console.err("ELF: Load failed: {}", .{err});
-        return error.InvalidExecutable;
-    };
-
     // Use provided stack top or default (for ASLR)
     const stack_top = stack_top_opt orelse types.DEFAULT_STACK_TOP;
     const stack_size = types.DEFAULT_STACK_SIZE;
+
+    // SECURITY: Construct actual stack bounds for ELF loading validation
+    const stack_bounds = types.StackBounds{
+        .stack_top = stack_top,
+        .stack_size = stack_size,
+    };
+
+    // Load the ELF
+    const load_result = loader.load(data, pml4_phys, pie_base, stack_bounds) catch |err| {
+        console.err("ELF: Load failed: {}", .{err});
+        return error.InvalidExecutable;
+    };
 
     // Construct basic auxiliary vector
     var auxv_buf: [8]types.AuxEntry = undefined;

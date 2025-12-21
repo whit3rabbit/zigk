@@ -42,6 +42,13 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/boot/uefi/main.zig"),
             .target = uefi_target,
             .optimize = optimize,
+            .imports = &.{
+                .{ .name = "boot_info", .module = b.createModule(.{
+                    .root_source_file = b.path("src/boot/common/boot_info.zig"),
+                    .target = uefi_target,
+                    .optimize = optimize,
+                }) },
+            },
         }),
     });
     b.installArtifact(bootloader);
@@ -98,13 +105,6 @@ pub fn build(b: *std.Build) void {
     const user_uapi_module = b.createModule(.{
         .root_source_file = b.path("src/uapi/root.zig"),
         .target = user_target,
-        .optimize = optimize,
-    });
-
-    // Create Limine module (boot protocol parsing)
-    const limine_module = b.createModule(.{
-        .root_source_file = b.path("src/lib/limine.zig"),
-        .target = kernel_target,
         .optimize = optimize,
     });
 
@@ -171,7 +171,6 @@ pub fn build(b: *std.Build) void {
     pmm_module.addImport("hal", hal_module);
     pmm_module.addImport("console", console_module);
     pmm_module.addImport("config", config_module);
-    pmm_module.addImport("limine", limine_module);
     pmm_module.addImport("sync", sync_module);
     pmm_module.addImport("boot_info", boot_info_module);
 
@@ -663,7 +662,6 @@ pub fn build(b: *std.Build) void {
         .target = kernel_target,
         .optimize = optimize,
     });
-    framebuffer_module.addImport("limine", limine_module);
     framebuffer_module.addImport("console", console_module);
     framebuffer_module.addImport("hal", hal_module);
     framebuffer_module.addImport("boot_info", boot_info_module);
@@ -1260,7 +1258,6 @@ pub fn build(b: *std.Build) void {
 
     // Add module imports to kernel
 
-    kernel.root_module.addImport("limine", limine_module);
     kernel.root_module.addImport("boot_info", boot_info_module);
     kernel.root_module.addImport("hal", hal_module);
     kernel.root_module.addImport("acpi", acpi_module);
@@ -1694,101 +1691,59 @@ pub fn build(b: *std.Build) void {
     const install_test_libc_fix = b.addInstallArtifact(test_libc_fix_exe, .{});
     b.getInstallStep().dependOn(&install_test_libc_fix.step);
 
-    // Create ISO build step using Limine bootloader
-    // Use v5.x binary branch which has prebuilt files
+    // Create UEFI-only ISO build step
+    // Uses custom UEFI bootloader (no Limine dependency)
     const iso_cmd = b.addSystemCommand(&.{
         "sh", "-c",
         \\set -e && \
-        \\LIMINE_DIR="limine" && \
-        \\if [ ! -f "$LIMINE_DIR/limine-bios-cd.bin" ]; then \
-        \\    rm -rf "$LIMINE_DIR" && \
-        \\    echo "Downloading Limine binary branch..." && \
-        \\    git clone --depth 1 --branch v5.x-branch-binary https://github.com/limine-bootloader/limine.git "$LIMINE_DIR" && \
-        \\    make -C "$LIMINE_DIR"; \
-        \\fi && \
-        \\mkdir -p iso_root/boot/modules iso_root/EFI/BOOT && \
-        \\cp zig-out/bin/kernel.elf iso_root/boot/ && \
-        \\cp zig-out/bin/shell.elf iso_root/boot/modules/ && \
-        \\cp zig-out/bin/httpd.elf iso_root/boot/modules/ && \
-        \\cp zig-out/bin/test_stdio iso_root/boot/modules/ && \
-        \\cp zig-out/bin/test_devnull iso_root/boot/modules/ && \
-        \\cp zig-out/bin/test_wait4 iso_root/boot/modules/ && \
-        \\cp zig-out/bin/test_clock iso_root/boot/modules/ && \
-        \\cp zig-out/bin/test_random iso_root/boot/modules/ && \
-        \\cp zig-out/bin/test_asm iso_root/boot/modules/ && \
-        \\cp zig-out/bin/netstack iso_root/boot/modules/ && \
-        \\cp zig-out/bin/test_threads iso_root/boot/modules/ && \
-        \\cp zig-out/bin/test_signals_fpu iso_root/boot/modules/ && \
-        \\cp zig-out/bin/test_vdso iso_root/boot/modules/ && \
-        \\cp zig-out/bin/test_writev iso_root/boot/modules/ && \
-        \\cp zig-out/bin/audio_test iso_root/boot/modules/ && \
-        \\cp zig-out/bin/test_libc_fix iso_root/boot/modules/ && \
-        \\cp zig-out/bin/doom.elf iso_root/boot/modules/ && \
-        \\cp zig-out/bin/uart_driver.elf iso_root/boot/modules/ && \
-        \\cp zig-out/bin/ps2_driver.elf iso_root/boot/modules/ && \
-        \\cp zig-out/bin/virtio_net_driver.elf iso_root/boot/modules/ && \
-        \\cp zig-out/bin/virtio_blk_driver.elf iso_root/boot/modules/ && \
+        \\rm -rf iso_root && \
+        \\mkdir -p iso_root/EFI/BOOT && \
+        \\cp zig-out/bin/BOOTX64.EFI iso_root/EFI/BOOT/ && \
+        \\cp zig-out/bin/kernel.elf iso_root/ && \
         \\if [ -d initrd_contents ] && [ "$(ls -A initrd_contents 2>/dev/null)" ]; then \
         \\    echo "Creating initrd.tar..." && \
-        \\    tar --format=ustar -cvf iso_root/boot/initrd.tar -C initrd_contents .; \
+        \\    tar --format=ustar -cvf iso_root/initrd.tar -C initrd_contents .; \
         \\fi && \
-        \\cp limine.cfg iso_root/boot/ && \
-        \\cp "$LIMINE_DIR"/limine-bios.sys iso_root/boot/ && \
-        \\cp "$LIMINE_DIR"/limine-bios-cd.bin iso_root/boot/ && \
-        \\cp "$LIMINE_DIR"/limine-uefi-cd.bin iso_root/boot/ && \
-        \\cp "$LIMINE_DIR"/BOOTX64.EFI iso_root/EFI/BOOT/ && \
-        \\cp "$LIMINE_DIR"/BOOTIA32.EFI iso_root/EFI/BOOT/ 2>/dev/null || true && \
-        \\xorriso -as mkisofs -b boot/limine-bios-cd.bin \
-        \\    -no-emul-boot -boot-load-size 4 -boot-info-table \
-        \\    --efi-boot boot/limine-uefi-cd.bin \
-        \\    -efi-boot-part --efi-boot-image --protective-msdos-label \
-        \\    iso_root -o zscapek.iso && \
-        \\"$LIMINE_DIR"/limine bios-install zscapek.iso && \
-        \\echo "ISO created: zscapek.iso"
+        \\xorriso -as mkisofs \
+        \\    -r -V "ZIGK" \
+        \\    -efi-boot-part --efi-boot-image \
+        \\    -append_partition 2 0xef iso_root \
+        \\    iso_root -o zigk.iso && \
+        \\echo "UEFI ISO created: zigk.iso"
     });
     iso_cmd.step.dependOn(b.getInstallStep());
 
-    const iso_step = b.step("iso", "Build bootable ISO image");
+    const iso_step = b.step("iso", "Build bootable UEFI ISO image");
     iso_step.dependOn(&iso_cmd.step);
 
-    // Create run step for QEMU
+    // Create run step for QEMU (UEFI boot via FAT directory)
     const run_cmd = b.addSystemCommand(&.{
         "qemu-system-x86_64",
-        "-M",
-        "q35",
-        "-m",
-        "512M",
-        "-cdrom",
-        "zscapek.iso",
-        "-device",
-        "qemu-xhci,id=xhci",
-        "-device",
-        "usb-kbd",
-        "-vga",
-        "std",
-        "-device",
-        "AC97",
-        "-serial",
-        "stdio",
-        "-smp",
-        "4",
+        "-machine", "q35",
+        "-m", "512M",
+        "-device", "qemu-xhci,id=xhci",
+        "-device", "usb-kbd",
+        "-vga", "std",
+        "-device", "AC97",
+        "-serial", "stdio",
+        "-smp", "4",
         "-no-reboot",
         "-no-shutdown",
-        "-accel",
-        "tcg",
-        "-drive", "if=none,id=usbdisk,format=raw,file=usb_disk.img", // USB Mass Storage
+        "-accel", "tcg",
+        // UEFI boot via FAT directory
+        "-drive", b.fmt("if=none,format=raw,id=esp,file=fat:rw:{s}/efi_root", .{b.install_path}),
+        "-device", "virtio-blk-pci,drive=esp,bootindex=1",
+        // USB Mass Storage (optional)
+        "-drive", "if=none,id=usbdisk,format=raw,file=usb_disk.img",
     });
 
     if (qemu_usb_hub) {
         run_cmd.addArgs(&.{
-            // Attach USB Hub to XHCI and let QEMU pick the port
             "-device", "usb-hub,bus=xhci.0,id=hub0",
-            // Attach USB Storage to hub port 1 (auto-assigned)
             "-device", "usb-storage,drive=usbdisk,bus=hub0.0",
         });
     } else {
         run_cmd.addArgs(&.{
-            // Attach USB Storage to XHCI root hub (auto-assigned port)
             "-device", "usb-storage,drive=usbdisk",
         });
     }
@@ -1798,7 +1753,7 @@ pub fn build(b: *std.Build) void {
         run_cmd.addArgs(&.{ "-display", qemu_display });
     }
 
-    // NEW: Inject -bios argument if provided
+    // UEFI firmware (required for UEFI boot)
     if (qemu_bios) |bios_path| {
         if (std.mem.endsWith(u8, bios_path, ".fd") or std.mem.endsWith(u8, bios_path, ".FD")) {
             run_cmd.addArgs(&.{ "-drive", b.fmt("if=pflash,format=raw,readonly=on,file={s}", .{bios_path}) });
@@ -1806,52 +1761,18 @@ pub fn build(b: *std.Build) void {
             run_cmd.addArgs(&.{ "-bios", bios_path });
         }
     }
-    run_cmd.step.dependOn(&iso_cmd.step);
 
-    const run_step = b.step("run", "Build and run the kernel in QEMU");
-    run_step.dependOn(&run_cmd.step);
-
-    // ============================================================
-    // Run UEFI Step
-    // ============================================================
-    const run_uefi_cmd = b.addSystemCommand(&.{
-        "qemu-system-x86_64",
-        "-machine", "q35",
-        "-m", "256M",
-        "-net", "none",
-        "-serial", "stdio",
-        // Use virtio-blk with bootindex for proper UEFI auto-boot
-        "-drive", b.fmt("if=none,format=raw,id=esp,file=fat:rw:{s}/efi_root", .{b.install_path}),
-        "-device", "virtio-blk-pci,drive=esp,bootindex=1",
-    });
-    
-    // Add BIOS if provided, otherwise assume user has it or QEMU defaults
-    if (qemu_bios) |bios_path| {
-         if (std.mem.endsWith(u8, bios_path, ".fd") or std.mem.endsWith(u8, bios_path, ".FD")) {
-            run_uefi_cmd.addArgs(&.{ "-drive", b.fmt("if=pflash,format=raw,readonly=on,file={s}", .{bios_path}) });
-        } else {
-            run_uefi_cmd.addArgs(&.{ "-bios", bios_path });
-        }
-    } else {
-        // Try to utilize system OVMF if available (common location on macOS/brew)
-        // Or just let QEMU fail and tell user to provide -Dbios
-        // Actually, let's provide a helpful error if not provided? 
-        // Or just let it run, QEMU internal bios might not support UEFI.
-        // We'll trust the user to provide -Dbios=/path/to/OVMF.fd
-    }
-
-    // Ensure the executable is copied to the correct path structure
-    // We need EFI/BOOT/BOOTX64.EFI for automatic boot
+    // Install UEFI bootloader and kernel to efi_root directory
     const install_uefi = b.addInstallFile(bootloader.getEmittedBin(), "efi_root/EFI/BOOT/BOOTX64.EFI");
     const install_kernel_uefi = b.addInstallFile(kernel.getEmittedBin(), "efi_root/kernel.elf");
     const install_startup_nsh = b.addInstallFile(b.path("src/boot/uefi/startup.nsh"), "efi_root/startup.nsh");
-    
-    run_uefi_cmd.step.dependOn(&install_uefi.step);
-    run_uefi_cmd.step.dependOn(&install_kernel_uefi.step);
-    run_uefi_cmd.step.dependOn(&install_startup_nsh.step);
 
-    const run_uefi_step = b.step("run-uefi", "Run the UEFI bootloader in QEMU");
-    run_uefi_step.dependOn(&run_uefi_cmd.step);
+    run_cmd.step.dependOn(&install_uefi.step);
+    run_cmd.step.dependOn(&install_kernel_uefi.step);
+    run_cmd.step.dependOn(&install_startup_nsh.step);
+
+    const run_step = b.step("run", "Build and run the kernel in QEMU (UEFI)");
+    run_step.dependOn(&run_cmd.step);
 
     // Host-side unit tests
     const test_module = b.createModule(.{

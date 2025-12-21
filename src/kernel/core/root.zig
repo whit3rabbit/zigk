@@ -1,4 +1,3 @@
-pub const boot = @import("boot.zig");
 pub const init_hw = @import("init_hw.zig");
 pub const init_mem = @import("init_mem.zig");
 pub const init_fs = @import("init_fs.zig");

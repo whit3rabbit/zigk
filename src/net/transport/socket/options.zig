@@ -13,6 +13,9 @@ pub fn setsockopt(sock_fd: usize, level: i32, optname: i32, optval: [*]const u8,
     const sock = state.acquireSocket(sock_fd) orelse return errors.SocketError.BadFd;
     defer state.releaseSocket(sock);
 
+    const held = sock.lock.acquire();
+    defer held.release();
+
     if (level == types.SOL_SOCKET) {
         switch (optname) {
             types.SO_RCVTIMEO => {
@@ -126,6 +129,9 @@ pub fn setsockopt(sock_fd: usize, level: i32, optname: i32, optval: [*]const u8,
 pub fn getsockopt(sock_fd: usize, level: i32, optname: i32, optval: [*]u8, optlen: *usize) errors.SocketError!void {
     const sock = state.acquireSocket(sock_fd) orelse return errors.SocketError.BadFd;
     defer state.releaseSocket(sock);
+
+    const held = sock.lock.acquire();
+    defer held.release();
 
     if (level == types.SOL_SOCKET) {
         switch (optname) {

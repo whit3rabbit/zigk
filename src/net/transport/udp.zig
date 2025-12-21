@@ -127,8 +127,9 @@ pub fn sendDatagramWithTos(
 
     // Resolve destination MAC
     const next_hop = iface.getGateway(dst_ip);
-    var dst_mac = arp.resolve(next_hop) orelse [_]u8{ 0, 0, 0, 0, 0, 0 };
-    const have_mac = (arp.resolve(next_hop) != null);
+    const resolved_mac = arp.resolve(next_hop);
+    var dst_mac = resolved_mac orelse [_]u8{ 0, 0, 0, 0, 0, 0 };
+    const have_mac = resolved_mac != null;
 
     // Calculate sizes
     const eth_len = packet.ETH_HEADER_SIZE;

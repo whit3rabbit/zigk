@@ -325,7 +325,11 @@ pub fn sys_execve(frame: *hal.syscall.SyscallFrame, path_ptr: usize, argv_ptr: u
 
     // Generate new ASLR offsets for the new address space
     // execve replaces the entire address space, so we need fresh randomization
-    const aslr_offsets = aslr.generateOffsets();
+    // SECURITY: This will fail if entropy is weak (per CLAUDE.md "Fail Secure" policy)
+    const aslr_offsets = aslr.generateOffsets() catch |err| {
+        console.err("sys_execve: Failed to generate ASLR offsets: {}", .{err});
+        return error.ENOMEM; // Security failure - cannot proceed without ASLR
+    };
 
     // Generate new randomized VDSO base for the new program
     const vdso_base = vdso.generateBase();

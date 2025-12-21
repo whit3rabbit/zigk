@@ -181,6 +181,15 @@ pub fn free(stack: KernelStack) void {
         return;
     }
 
+    // SECURITY: Check if slot is actually allocated to prevent double-free
+    // Without this check, freeing an already-freed slot would:
+    // 1. Double-free physical pages (PMM corruption)
+    // 2. Potentially free pages now owned by another thread
+    if (!getBitmapBit(stack.slot)) {
+        console.warn("KernelStack: Double-free detected for slot {d}", .{stack.slot});
+        return;
+    }
+
     // Unmap stack pages from kernel address space
     const kernel_pml4 = vmm.getKernelPml4();
     var i: usize = 0;

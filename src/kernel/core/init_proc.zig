@@ -3,17 +3,16 @@
 //! Responsible for identifying, loading, and starting the initial userspace process (PID 1).
 //!
 //! Functionality:
-//! - Scans Limine boot modules for suitable init candidates (test_asm, httpd, shell, doom).
+//! - Initializes the InitRD filesystem from BootInfo.initrd_addr/size
+//! - Scans InitRD for suitable init candidates (test_asm, httpd, shell, doom).
 //! - Creates the first process structure and address space.
 //! - Uses the ELF loader to load the executable into memory.
 //! - Sets up the user stack with arguments (argv) and environment (envp).
 //! - Initializes TLS/TCB (Thread Control Block) for the main thread.
 //! - Hands the thread over to the scheduler.
-//!
-//! Also handles the initialization of the Initial RAM Disk (InitRD) if provided.
 
 const std = @import("std");
-const limine = @import("limine");
+const builtin = @import("builtin");
 const console = @import("console");
 const process = @import("process");
 const elf = @import("elf");
@@ -22,207 +21,202 @@ const fs = @import("fs");
 const sched = @import("sched");
 const thread = @import("thread");
 const pmm = @import("pmm");
-const boot = @import("boot.zig");
 const capabilities = @import("capabilities");
 const heap = @import("heap");
 const pci = @import("pci");
 const aslr = @import("aslr");
 const devfs = @import("devfs");
 const kernel_iommu = @import("kernel_iommu");
+const hal = @import("hal");
+const BootInfo = @import("boot_info");
 
-/// Load the init process (httpd or shell) into a new user address space
-///
-/// Steps:
-/// 1. Find the best candidate module (based on name priority).
-/// 2. Create a process struct and set it as current.
-/// 3. Load the ELF executable.
-/// 4. Setup stack and arguments.
-/// 5. Setup TLS.
-/// 6. Create the main thread and add to scheduler.
-pub fn loadInitProcess() void {
-    console.info("Searching for init module...", .{});
+/// Module data structure (replaces Limine module)
+const ModuleData = struct {
+    name: []const u8,
+    data: []const u8,
+};
 
-    const mod_response = boot.module_request.response orelse {
-        console.warn("No modules loaded!", .{});
+/// Maximum reasonable InitRD size (256 MB)
+/// Prevents DoS via malicious bootloader setting enormous size
+const MAX_INITRD_SIZE: u64 = 256 * 1024 * 1024;
+
+/// Initialize InitRD filesystem from BootInfo
+/// This should be called early in kernel boot, before loadInitProcess()
+pub fn initInitRDFromBootInfo(boot_info: *const BootInfo.BootInfo) void {
+    if (boot_info.initrd_addr == 0 or boot_info.initrd_size == 0) {
+        console.info("InitRD: No initrd provided (addr=0 or size=0)", .{});
+        return;
+    }
+
+    // SECURITY: Validate initrd_size is reasonable
+    if (boot_info.initrd_size > MAX_INITRD_SIZE) {
+        console.err("InitRD: Size {} exceeds maximum {} bytes - rejecting", .{
+            boot_info.initrd_size,
+            MAX_INITRD_SIZE,
+        });
+        return;
+    }
+
+    // SECURITY: Check for address overflow (initrd_addr + initrd_size)
+    const initrd_end = std.math.add(u64, boot_info.initrd_addr, boot_info.initrd_size) catch {
+        console.err("InitRD: Address overflow (addr={x} + size={x})", .{
+            boot_info.initrd_addr,
+            boot_info.initrd_size,
+        });
         return;
     };
 
-    const mods = mod_response.modules();
-    
-    // Helper to safely get string from Limine pointer
-    const get_str = struct {
-        fn call(ptr: [*:0]const u8) []const u8 {
-            if (@intFromPtr(ptr) == 0) return "";
-            return std.mem.span(ptr);
-        }
-    }.call;
-
-    // 1. Launch Drivers
-    // NOTE: Substring matching is used here for flexibility, but exact path matching
-    // or cryptographic signature verification would provide stronger guarantees that
-    // only intended driver binaries receive hardware capabilities.
-    for (mods) |mod| {
-        const cmdline = get_str(mod.cmdline);
-        const path = get_str(mod.path);
-
-        if (matchesDriverName(cmdline, path, "uart_driver")) {
-            spawnProcess(mod, "uart_driver");
-        }
-        if (matchesDriverName(cmdline, path, "ps2_driver")) {
-            spawnProcess(mod, "ps2_driver");
-        }
-        if (matchesDriverName(cmdline, path, "virtio_net_driver")) {
-            spawnProcess(mod, "virtio_net_driver");
-        }
-        if (matchesDriverName(cmdline, path, "virtio_blk_driver")) {
-            spawnProcess(mod, "virtio_blk_driver");
-        }
-        if (matchesDriverName(cmdline, path, "netstack")) {
-            spawnProcess(mod, "netstack");
-        }
-    }
-
-    // 2. Select Main Init Process
-    var selected_mod: ?*limine.Module = null;
-    var process_name: []const u8 = "init";
-
-
-
-    // Priority 0.1: VDSO Test
-    if (selected_mod == null) {
-        for (mods) |mod| {
-            const cmdline = get_str(mod.cmdline);
-            const path = get_str(mod.path);
-    
-            if (std.mem.indexOf(u8, cmdline, "test_vdso") != null or std.mem.indexOf(u8, path, "test_vdso") != null) {
-                selected_mod = mod;
-                process_name = "test_vdso";
-                break;
-            }
-        }
-    }
-
-    // Priority 0.1: Signals FPU Test
-    if (selected_mod == null) {
-        for (mods) |mod| {
-            const cmdline = get_str(mod.cmdline);
-            const path = get_str(mod.path);
-    
-            if (std.mem.indexOf(u8, cmdline, "test_signals_fpu") != null or std.mem.indexOf(u8, path, "test_signals_fpu") != null) {
-                selected_mod = mod;
-                process_name = "test_signals_fpu";
-                break;
-            }
-        }
-    }
-
-    // Priority 0.1: ASM Test (Sanity Check)
-    if (selected_mod == null) {
-        for (mods) |mod| {
-            const cmdline = get_str(mod.cmdline);
-            const path = get_str(mod.path);
-    
-            if (std.mem.indexOf(u8, cmdline, "test_asm") != null or std.mem.indexOf(u8, path, "test_asm") != null) {
-                selected_mod = mod;
-                process_name = "test_asm";
-                break;
-            }
-        }
-    }
-
-    // Priority 0.5: Audio Test
-    if (selected_mod == null) {
-        for (mods) |mod| {
-            const cmdline = get_str(mod.cmdline);
-            const path = get_str(mod.path);
-
-            if (std.mem.indexOf(u8, cmdline, "audio") != null or std.mem.indexOf(u8, path, "audio") != null) {
-                selected_mod = mod;
-                process_name = "audio_test";
-                break;
-            }
-        }
-    }
-
-    // Priority 1: HTTPD
-    if (selected_mod == null) {
-        for (mods) |mod| {
-            const cmdline = get_str(mod.cmdline);
-            const path = get_str(mod.path);
-            
-            if (std.mem.indexOf(u8, cmdline, "httpd") != null or std.mem.indexOf(u8, path, "httpd") != null) {
-                selected_mod = mod;
-                process_name = "httpd";
-                break;
-            }
-        }
-    }
-
-    // Priority 2: Shell
-    if (selected_mod == null) {
-        for (mods) |mod| {
-            const cmdline = get_str(mod.cmdline);
-            const path = get_str(mod.path);
-            
-            if (std.mem.indexOf(u8, cmdline, "shell") != null or std.mem.indexOf(u8, path, "shell") != null) {
-                selected_mod = mod;
-                process_name = "shell";
-                break;
-            }
-        }
-    }
-
-    // Priority 3: Doom
-    if (selected_mod == null) {
-        for (mods) |mod| {
-            const cmdline = get_str(mod.cmdline);
-            const path = get_str(mod.path);
-            
-            if (std.mem.indexOf(u8, cmdline, "doom") != null or std.mem.indexOf(u8, path, "doom") != null) {
-                selected_mod = mod;
-                process_name = "doom";
-                break;
-            }
-        }
-    }
-
-    // Fallback: If only one module exists, use it regardless of name
-    if (selected_mod == null and mods.len == 1) {
-        selected_mod = mods[0];
-        console.warn("No matching cmdline found, defaulting to first module", .{});
-    }
-
-    const mod = selected_mod orelse {
-        console.warn("No suitable init module (httpd/shell) found!", .{});
+    // SECURITY: Validate physical range is within usable memory
+    // Check against memory map to ensure initrd is in conventional/loader memory
+    if (!isPhysicalRangeUsable(boot_info, boot_info.initrd_addr, initrd_end)) {
+        console.err("InitRD: Physical range {x}-{x} not in usable memory", .{
+            boot_info.initrd_addr,
+            initrd_end,
+        });
         return;
-    };
+    }
 
-    console.info("Found init module: {s} ({d} bytes)", .{ process_name, mod.size });
-    spawnProcess(mod, process_name);
+    // Convert physical address to virtual using HHDM
+    const virt_ptr = hal.paging.physToVirt(boot_info.initrd_addr);
+    const data = virt_ptr[0..boot_info.initrd_size];
+
+    // Initialize the global InitRD instance
+    fs.initrd.InitRD.init(data);
+
+    console.info("InitRD: Initialized from BootInfo ({d} bytes)", .{boot_info.initrd_size});
+
+    // List files in initrd for debugging
+    var iter = fs.initrd.InitRD.instance.listFiles();
+    var file_count: usize = 0;
+    while (iter.next()) |file| {
+        console.debug("  - {s} ({d} bytes)", .{ file.name, file.data.len });
+        file_count += 1;
+    }
+    console.info("InitRD: {d} files found", .{file_count});
 }
 
-/// SECURITY: Match driver name with strict boundary checks.
-/// Prevents capability spoofing via substring injection (e.g., "my_uart_driver_malware").
-/// Only matches:
-/// - Exact cmdline match: cmdline == "uart_driver"
-/// - Exact path component: path ends with "/uart_driver" or "/uart_driver.elf"
-fn matchesDriverName(cmdline: []const u8, path: []const u8, name: []const u8) bool {
-    // Exact cmdline match
-    if (std.mem.eql(u8, cmdline, name)) return true;
+/// Check if a physical memory range is within usable memory regions
+/// Returns true if the range [start, end) is fully contained in a usable memory region
+fn isPhysicalRangeUsable(boot_info: *const BootInfo.BootInfo, start: u64, end: u64) bool {
+    const descriptors = boot_info.memory_map[0..boot_info.memory_map_count];
 
-    // Check for exact path component match (must be preceded by '/')
-    // This prevents "my_uart_driver" from matching "uart_driver"
-    var buf: [65]u8 = undefined;
+    for (descriptors) |desc| {
+        // Only consider memory types that are safe for InitRD
+        const is_usable = switch (desc.type) {
+            .Conventional, .LoaderCode, .LoaderData, .BootServicesCode, .BootServicesData => true,
+            else => false,
+        };
 
-    // Match "/name" at end of path
-    const slash_name = std.fmt.bufPrint(&buf, "/{s}", .{name}) catch return false;
-    if (std.mem.endsWith(u8, path, slash_name)) return true;
+        if (!is_usable) continue;
 
-    // Match "/name.elf" at end of path
-    const slash_name_elf = std.fmt.bufPrint(&buf, "/{s}.elf", .{name}) catch return false;
-    if (std.mem.endsWith(u8, path, slash_name_elf)) return true;
+        const region_start = desc.phys_start;
+        const region_end = desc.phys_start + (desc.num_pages * pmm.PAGE_SIZE);
+
+        // Check if our range is fully contained in this region
+        if (start >= region_start and end <= region_end) {
+            return true;
+        }
+    }
 
     return false;
+}
+
+/// Load the init process from InitRD
+///
+/// Steps:
+/// 1. Find drivers and spawn them
+/// 2. Find the best candidate init process (based on name priority).
+/// 3. Create a process struct and set it as current.
+/// 4. Load the ELF executable.
+/// 5. Setup stack and arguments.
+/// 6. Setup TLS.
+/// 7. Create the main thread and add to scheduler.
+pub fn loadInitProcess() void {
+    console.info("Searching for init in InitRD...", .{});
+
+    // Check if InitRD is initialized
+    if (fs.initrd.InitRD.instance.data.len == 0) {
+        console.warn("No InitRD loaded - no userspace processes will be spawned", .{});
+        return;
+    }
+
+    // 1. Launch Drivers (scan InitRD for driver executables)
+    const driver_names = [_][]const u8{
+        "uart_driver",
+        "ps2_driver",
+        "virtio_net_driver",
+        "virtio_blk_driver",
+        "netstack",
+    };
+
+    for (driver_names) |driver_name| {
+        if (findModuleInInitRD(driver_name)) |mod| {
+            spawnProcessFromData(mod, driver_name);
+        }
+    }
+
+    // 2. Select Main Init Process (priority order)
+    const init_candidates = [_][]const u8{
+        "test_vdso",
+        "test_signals_fpu",
+        "test_asm",
+        "audio",
+        "httpd",
+        "shell",
+        "doom",
+        "init",
+    };
+
+    for (init_candidates) |name| {
+        if (findModuleInInitRD(name)) |mod| {
+            console.info("Found init module: {s} ({d} bytes)", .{ name, mod.data.len });
+            spawnProcessFromData(mod, name);
+            return;
+        }
+    }
+
+    // Fallback: Try to find any executable
+    var iter = fs.initrd.InitRD.instance.listFiles();
+    while (iter.next()) |file| {
+        // Skip non-ELF files
+        if (file.data.len >= 4 and std.mem.eql(u8, file.data[0..4], "\x7fELF")) {
+            console.warn("No matching init found, defaulting to first ELF: {s}", .{file.name});
+            spawnProcessFromData(.{ .name = file.name, .data = file.data }, file.name);
+            return;
+        }
+    }
+
+    console.warn("No suitable init process found in InitRD!", .{});
+}
+
+/// Find a module in the InitRD by name
+/// Searches for exact matches and common variations (.elf suffix, bin/ prefix)
+fn findModuleInInitRD(name: []const u8) ?ModuleData {
+    // Try exact name match
+    if (fs.initrd.InitRD.instance.findFile(name)) |file| {
+        return .{ .name = file.name, .data = file.data };
+    }
+
+    // Try with .elf suffix
+    var buf: [128]u8 = undefined;
+    const name_elf = std.fmt.bufPrint(&buf, "{s}.elf", .{name}) catch return null;
+    if (fs.initrd.InitRD.instance.findFile(name_elf)) |file| {
+        return .{ .name = file.name, .data = file.data };
+    }
+
+    // Try with bin/ prefix
+    const bin_name = std.fmt.bufPrint(&buf, "bin/{s}", .{name}) catch return null;
+    if (fs.initrd.InitRD.instance.findFile(bin_name)) |file| {
+        return .{ .name = file.name, .data = file.data };
+    }
+
+    // Try with bin/ prefix and .elf suffix
+    const bin_name_elf = std.fmt.bufPrint(&buf, "bin/{s}.elf", .{name}) catch return null;
+    if (fs.initrd.InitRD.instance.findFile(bin_name_elf)) |file| {
+        return .{ .name = file.name, .data = file.data };
+    }
+
+    return null;
 }
 
 fn appendCapabilityOrWarn(
@@ -237,7 +231,7 @@ fn appendCapabilityOrWarn(
     };
 }
 
-fn spawnProcess(mod: *limine.Module, process_name: []const u8) void {
+fn spawnProcessFromData(mod: ModuleData, process_name: []const u8) void {
     console.info("Spawning process: {s}", .{process_name});
 
     // Step 1: Create Process with FD table (stdin/stdout/stderr pre-opened by devfs)
@@ -246,7 +240,7 @@ fn spawnProcess(mod: *limine.Module, process_name: []const u8) void {
         return;
     };
 
-    // Pre-populate stdin/stdout/stderr (moved from lifecycle.zig)
+    // Pre-populate stdin/stdout/stderr
     devfs.createStdFds(proc.fd_table) catch |err| {
         console.warn("Failed to create std FDs for {s}: {}", .{process_name, err});
     };
@@ -255,148 +249,70 @@ fn spawnProcess(mod: *limine.Module, process_name: []const u8) void {
     syscall_base.setCurrentProcess(proc);
     console.info("Created process pid={d} with FD table", .{proc.pid});
 
-    // Grant capabilities if this is the UART driver
-    if (std.mem.eql(u8, process_name, "uart_driver")) {
-         const alloc = heap.allocator();
-         // Grant IRQ 4
-         appendCapabilityOrWarn(proc, alloc, .{ .Interrupt = .{ .irq = 4 } }, process_name);
-         // Grant Ports 0x3F8, len 8 (COM1)
-         appendCapabilityOrWarn(proc, alloc, .{ .IoPort = .{ .port = 0x3F8, .len = 8 } }, process_name);
-         console.info("Init: Granted UART capabilities to pid={}", .{proc.pid});
-    }
-
-    // Grant capabilities if this is the PS/2 driver
-    if (std.mem.eql(u8, process_name, "ps2_driver")) {
-         const alloc = heap.allocator();
-         // Grant IRQ 1 (Keyboard)
-         appendCapabilityOrWarn(proc, alloc, .{ .Interrupt = .{ .irq = 1 } }, process_name);
-         // Grant IRQ 12 (Mouse)
-         appendCapabilityOrWarn(proc, alloc, .{ .Interrupt = .{ .irq = 12 } }, process_name);
-         // Grant Ports 0x60, 0x64 (Controller)
-         appendCapabilityOrWarn(proc, alloc, .{ .IoPort = .{ .port = 0x60, .len = 1 } }, process_name);
-         appendCapabilityOrWarn(proc, alloc, .{ .IoPort = .{ .port = 0x64, .len = 1 } }, process_name);
-         // Grant input injection capability (send keyboard/mouse events to kernel)
-         appendCapabilityOrWarn(proc, alloc, .{ .InputInjection = {} }, process_name);
-         console.info("Init: Granted PS/2 capabilities to pid={}", .{proc.pid});
-    }
-
-    // Grant capabilities for VirtIO-Net
-    if (std.mem.eql(u8, process_name, "virtio_net_driver")) {
-         if (grantVirtioCapabilities(proc, .Net)) {
-             console.info("Init: Granted VirtIO-Net capabilities to pid={}", .{proc.pid});
-         } else {
-             console.warn("Init: Failed to find VirtIO-Net device for pid={}", .{proc.pid});
-         }
-    }
-
-    // Grant capabilities for VirtIO-Blk
-    if (std.mem.eql(u8, process_name, "virtio_blk_driver")) {
-         if (grantVirtioCapabilities(proc, .Blk)) {
-             console.info("Init: Granted VirtIO-Blk capabilities to pid={}", .{proc.pid});
-         } else {
-             console.warn("Init: Failed to find VirtIO-Blk device for pid={}", .{proc.pid});
-         }
-    }
-
-    // Grant capabilities if this is Doom
-    if (std.mem.eql(u8, process_name, "doom")) {
-         const alloc = heap.allocator();
-         // Grant IRQ 1 (Keyboard)
-         appendCapabilityOrWarn(proc, alloc, .{ .Interrupt = .{ .irq = 1 } }, process_name);
-         // Grant IRQ 12 (Mouse)
-         appendCapabilityOrWarn(proc, alloc, .{ .Interrupt = .{ .irq = 12 } }, process_name);
-         // Grant Ports 0x60, 0x64 (PC/AT Keyboard/Mouse Controller)
-         appendCapabilityOrWarn(proc, alloc, .{ .IoPort = .{ .port = 0x60, .len = 1 } }, process_name);
-         appendCapabilityOrWarn(proc, alloc, .{ .IoPort = .{ .port = 0x64, .len = 1 } }, process_name);
-         // Grant Serial (COM1) for debug output (optional but helpful)
-         appendCapabilityOrWarn(proc, alloc, .{ .IoPort = .{ .port = 0x3F8, .len = 8 } }, process_name);
-         console.info("Init: Granted Doom capabilities to pid={}", .{proc.pid});
-    }
+    // Grant capabilities based on process name
+    grantProcessCapabilities(proc, process_name);
 
     console.info("Init: Loading ELF...", .{});
 
-    // Step 3: Get module data as slice for ELF loader
-    // Validation: Ensure valid address and no overflow
-    if (mod.address == 0) {
-        console.err("Invalid module address (null) for {s}", .{process_name});
-        return;
-    }
-    if (mod.size == 0) {
+    // Step 3: Validate module data
+    if (mod.data.len == 0) {
         console.err("Invalid module size (zero) for {s}", .{process_name});
         return;
     }
-    // Check for address overflow
-    const end_addr = @addWithOverflow(mod.address, mod.size);
-    if (end_addr[1] != 0) {
-        console.err("Module address overflow for {s}: addr=0x{x} size={}",
-                    .{process_name, mod.address, mod.size});
-        return;
-    }
-
-    const mod_data = @as([*]const u8, @ptrFromInt(mod.address))[0..mod.size];
 
     // Step 4: Load ELF into process's address space
-    // The ELF loader will parse headers, validate, and map PT_LOAD segments
-    // Use ASLR-randomized PIE base from process offsets
     const load_base: u64 = aslr.getPieBase(&proc.aslr_offsets);
-    const load_result = elf.load(mod_data, proc.cr3, load_base) catch |err| {
+
+    // SECURITY: Use actual ASLR stack bounds for ELF segment overlap validation
+    const stack_size: usize = 1024 * 1024; // 1MB stack
+    const stack_bounds = elf.StackBounds{
+        .stack_top = proc.aslr_offsets.stack_top,
+        .stack_size = stack_size,
+    };
+
+    const load_result = elf.load(mod.data, proc.cr3, load_base, stack_bounds) catch |err| {
         console.err("ELF load failed: {}", .{err});
         return;
     };
-    console.info("ELF: Loaded at {x}-{x}, entry={x} (ASLR)", .{
-        load_result.base_addr,
-        load_result.end_addr,
-        load_result.entry_point,
-    });
+    // SECURITY: Only log addresses in debug builds to prevent ASLR info leak
+    if (builtin.mode == .Debug) {
+        console.info("ELF: Loaded at {x}-{x}, entry={x} (ASLR)", .{
+            load_result.base_addr,
+            load_result.end_addr,
+            load_result.entry_point,
+        });
+    } else {
+        console.info("ELF: Loaded successfully", .{});
+    }
 
     // Initialize heap boundaries with ASLR heap gap
     const heap_start = aslr.getHeapStart(load_result.end_addr, &proc.aslr_offsets);
     proc.heap_start = heap_start;
     proc.heap_break = heap_start;
-    console.info("Init: Heap initialized at {x} (ASLR gap={})", .{ heap_start, proc.aslr_offsets.heap_gap });
+    // SECURITY: Only log heap address in debug builds
+    if (builtin.mode == .Debug) {
+        console.info("Init: Heap initialized at {x} (ASLR gap={})", .{ heap_start, proc.aslr_offsets.heap_gap });
+    }
 
     console.info("Init: Setting up user stack...", .{});
+
     // Step 5: Allocate and map user stack with arguments
-    // We use the ELF helper to set up the stack according to x86_64 ABI
-    // (argc, argv, envp, auxv)
-    // Use ASLR-randomized stack top from process offsets
     const stack_virt_top: u64 = proc.aslr_offsets.stack_top;
-    const stack_size: usize = 1024 * 1024; // 1MB stack
+    // stack_size defined above for ELF loading
 
-    // Parse arguments from module command line
-    // NOTE: Fixed buffer of 16 arguments; excess tokens are silently dropped.
-    // Consider dynamic allocation or logging if truncation occurs.
+    // Parse arguments (just use process name for now)
     var argv_buf: [16][]const u8 = undefined;
-    var argv_count: usize = 0;
+    argv_buf[0] = process_name;
+    var argv_count: usize = 1;
 
-    if (@intFromPtr(mod.cmdline) != 0) {
-        const cmd_slice = std.mem.span(mod.cmdline);
-        console.debug("Init: Raw Cmdline: '{s}'", .{cmd_slice});
-        var it = std.mem.tokenizeAny(u8, cmd_slice, " ");
-        while (it.next()) |arg| {
-            if (argv_count >= 16) {
-                console.warn("Init: Argument buffer full, truncating remaining args for {s}",
-                             .{process_name});
-                break;
-            }
-            argv_buf[argv_count] = arg;
-            argv_count += 1;
-        }
-    }
-
-    if (argv_count == 0) {
-        argv_buf[0] = process_name;
-        argv_count = 1;
-    }
-
-    // Workaround: If Limine truncates cmdline, manually add arguments for Doom
-    if (argv_count == 1 and std.mem.eql(u8, argv_buf[0], "doom")) {
-        console.warn("Init: Detecting Doom with no args, injecting defaults...", .{});
+    // Workaround: If this is Doom, inject default arguments
+    if (std.mem.eql(u8, process_name, "doom")) {
+        console.warn("Init: Detecting Doom, injecting defaults...", .{});
         argv_buf[1] = "-iwad";
         argv_buf[2] = "/doom1.wad";
         argv_count = 3;
     }
-    
+
     const argv = argv_buf[0..argv_count];
     const envp = [_][]const u8{};
 
@@ -414,9 +330,12 @@ fn spawnProcess(mod: *limine.Module, process_name: []const u8) void {
         .{ .id = 33, .value = proc.vdso_base }, // AT_SYSINFO_EHDR
     };
 
-    console.info("Creating user stack at {x} (size={d}, ASLR)", .{ stack_virt_top, stack_size });
+    // SECURITY: Only log stack address in debug builds
+    if (builtin.mode == .Debug) {
+        console.info("Creating user stack at {x} (size={d}, ASLR)", .{ stack_virt_top, stack_size });
+    }
 
-    // Log ASLR configuration for this process
+    // Log ASLR configuration for this process (already guarded in aslr.zig)
     aslr.logOffsets(&proc.aslr_offsets, proc.pid);
 
     // setupStack allocates pages, maps them, and pushes args
@@ -432,7 +351,10 @@ fn spawnProcess(mod: *limine.Module, process_name: []const u8) void {
         return;
     };
 
-    console.info("User stack created (rsp={x})", .{initial_rsp});
+    // SECURITY: Only log rsp in debug builds
+    if (builtin.mode == .Debug) {
+        console.info("User stack created (rsp={x})", .{initial_rsp});
+    }
     console.info("Init: Creating user thread...", .{});
 
     // Step 6: Create user thread with entry point from ELF header
@@ -447,22 +369,23 @@ fn spawnProcess(mod: *limine.Module, process_name: []const u8) void {
     };
 
     // Set up TCB/TLS using ELF header information
-    // Musl static binaries may crash if %fs:0 is not accessible or doesn't point to itself.
-    // Use randomized TLS base address from ASLR offsets.
     const tls_base_addr = proc.aslr_offsets.tls_base;
     var fs_base: u64 = 0;
 
     if (load_result.tls_phdr) |phdr| {
         // Use TLS segment from ELF
-        if (elf.setupTls(proc.cr3, phdr, mod_data, tls_base_addr)) |tp| {
+        // SECURITY: Pass actual ASLR stack bounds for TLS overlap validation
+        if (elf.setupTls(proc.cr3, phdr, mod.data, tls_base_addr, stack_bounds)) |tp| {
             fs_base = tp;
-            console.info("Init: Initialized TLS at {x} (size={d})", .{ tp, phdr.p_memsz });
+            // SECURITY: Only log TLS address in debug builds
+            if (builtin.mode == .Debug) {
+                console.info("Init: Initialized TLS at {x} (size={d})", .{ tp, phdr.p_memsz });
+            }
         } else |err| {
             console.warn("Init: Failed to setup TLS: {}", .{err});
         }
     } else {
         // Fallback for binaries without PT_TLS (but expecting TCB at fs:0)
-        // Allocate a minimal TCB
         console.warn("Init: No PT_TLS found, creating minimal TCB", .{});
         const minimal_phdr = elf.Elf64_Phdr{
             .p_type = elf.PT_TLS,
@@ -472,9 +395,10 @@ fn spawnProcess(mod: *limine.Module, process_name: []const u8) void {
             .p_paddr = 0,
             .p_filesz = 0,
             .p_memsz = 0,
-            .p_align = 16, // Default alignment
+            .p_align = 16,
         };
-        if (elf.setupTls(proc.cr3, minimal_phdr, mod_data, tls_base_addr)) |tp| {
+        // SECURITY: Pass actual ASLR stack bounds for TLS overlap validation
+        if (elf.setupTls(proc.cr3, minimal_phdr, mod.data, tls_base_addr, stack_bounds)) |tp| {
             fs_base = tp;
         } else |err| {
             console.warn("Init: Failed to setup minimal TCB: {}", .{err});
@@ -490,47 +414,83 @@ fn spawnProcess(mod: *limine.Module, process_name: []const u8) void {
     console.info("Init process started (pid={d}, tid={d})", .{ proc.pid, user_thread.tid });
 }
 
-/// Initialize InitRD filesystem from Limine modules
-/// Searches for a module with "initrd" in its cmdline or path.
-/// If found, passes the data to the global InitRD instance.
-pub fn initInitRD(mods: []const *limine.Module) void {
-    const get_str = struct {
-        fn call(ptr: [*:0]const u8) []const u8 {
-            if (@intFromPtr(ptr) == 0) return "";
-            return std.mem.span(ptr);
-        }
-    }.call;
+/// Grant capabilities based on process name
+///
+/// SECURITY WARNING: This function grants hardware capabilities based solely on
+/// the process name, which is derived from the filename in InitRD. This is a
+/// PRIVILEGE ESCALATION RISK:
+///
+/// - Any binary named "doom", "virtio_net_driver", etc. will receive powerful
+///   hardware access capabilities (IRQs, I/O ports, MMIO, DMA, PCI config)
+/// - A compromised InitRD or bootloader can plant malicious binaries with
+///   privileged names to gain full hardware access
+///
+/// RECOMMENDED MITIGATIONS:
+/// 1. Cryptographically sign InitRD contents and verify signatures before granting caps
+/// 2. Use a separate capability manifest file that is also signed
+/// 3. Implement a TPM-based measured boot to detect InitRD tampering
+/// 4. Move to a capability token system where processes request caps at runtime
+///
+/// FIXME(security-high): Replace name-based capability granting with signed capability manifests
+/// Tracked as: Privilege escalation via malicious InitRD binaries
+fn grantProcessCapabilities(proc: *process.Process, process_name: []const u8) void {
+    // Track whether we've logged the security warning (static var persists across calls)
+    const S = struct {
+        var warned: bool = false;
+    };
+    if (!S.warned) {
+        console.warn("SECURITY: Capabilities granted by process name only. See grantProcessCapabilities() for risks.", .{});
+        S.warned = true;
+    }
 
-    for (mods) |mod| {
-        const cmdline = get_str(mod.cmdline);
-        const path = get_str(mod.path);
+    const alloc = heap.allocator();
 
-        // Check if this module is an initrd (by cmdline or path)
-        if (std.mem.indexOf(u8, cmdline, "initrd") != null or std.mem.indexOf(u8, path, "initrd") != null or
-            std.mem.indexOf(u8, cmdline, ".tar") != null or std.mem.indexOf(u8, path, ".tar") != null)
-        {
-            // Get module data as slice
-            const data = @as([*]const u8, @ptrFromInt(mod.address))[0..mod.size];
+    // UART driver capabilities
+    if (std.mem.eql(u8, process_name, "uart_driver")) {
+        appendCapabilityOrWarn(proc, alloc, .{ .Interrupt = .{ .irq = 4 } }, process_name);
+        appendCapabilityOrWarn(proc, alloc, .{ .IoPort = .{ .port = 0x3F8, .len = 8 } }, process_name);
+        console.info("Init: Granted UART capabilities to pid={}", .{proc.pid});
+    }
 
-            // Initialize the global InitRD instance
-            fs.initrd.InitRD.init(data);
+    // PS/2 driver capabilities
+    if (std.mem.eql(u8, process_name, "ps2_driver")) {
+        appendCapabilityOrWarn(proc, alloc, .{ .Interrupt = .{ .irq = 1 } }, process_name);
+        appendCapabilityOrWarn(proc, alloc, .{ .Interrupt = .{ .irq = 12 } }, process_name);
+        appendCapabilityOrWarn(proc, alloc, .{ .IoPort = .{ .port = 0x60, .len = 1 } }, process_name);
+        appendCapabilityOrWarn(proc, alloc, .{ .IoPort = .{ .port = 0x64, .len = 1 } }, process_name);
+        appendCapabilityOrWarn(proc, alloc, .{ .InputInjection = {} }, process_name);
+        console.info("Init: Granted PS/2 capabilities to pid={}", .{proc.pid});
+    }
 
-            console.info("InitRD: Initialized from module ({d} bytes)", .{mod.size});
-
-            // List files in initrd for debugging
-            var iter = fs.initrd.InitRD.instance.listFiles();
-            var file_count: usize = 0;
-            while (iter.next()) |_| {
-                file_count += 1;
-            }
-            console.info("InitRD: {d} files found", .{file_count});
-            return;
+    // VirtIO-Net capabilities
+    if (std.mem.eql(u8, process_name, "virtio_net_driver")) {
+        if (grantVirtioCapabilities(proc, .Net)) {
+            console.info("Init: Granted VirtIO-Net capabilities to pid={}", .{proc.pid});
+        } else {
+            console.warn("Init: Failed to find VirtIO-Net device for pid={}", .{proc.pid});
         }
     }
 
-    // No initrd found - this is not an error, just informational
-    console.info("InitRD: No initrd module found (filesystem empty)", .{});
+    // VirtIO-Blk capabilities
+    if (std.mem.eql(u8, process_name, "virtio_blk_driver")) {
+        if (grantVirtioCapabilities(proc, .Blk)) {
+            console.info("Init: Granted VirtIO-Blk capabilities to pid={}", .{proc.pid});
+        } else {
+            console.warn("Init: Failed to find VirtIO-Blk device for pid={}", .{proc.pid});
+        }
+    }
+
+    // Doom capabilities
+    if (std.mem.eql(u8, process_name, "doom")) {
+        appendCapabilityOrWarn(proc, alloc, .{ .Interrupt = .{ .irq = 1 } }, process_name);
+        appendCapabilityOrWarn(proc, alloc, .{ .Interrupt = .{ .irq = 12 } }, process_name);
+        appendCapabilityOrWarn(proc, alloc, .{ .IoPort = .{ .port = 0x60, .len = 1 } }, process_name);
+        appendCapabilityOrWarn(proc, alloc, .{ .IoPort = .{ .port = 0x64, .len = 1 } }, process_name);
+        appendCapabilityOrWarn(proc, alloc, .{ .IoPort = .{ .port = 0x3F8, .len = 8 } }, process_name);
+        console.info("Init: Granted Doom capabilities to pid={}", .{proc.pid});
+    }
 }
+
 const VirtioDriverType = enum {
     Net,
     Blk,
@@ -547,8 +507,6 @@ fn grantVirtioCapabilities(proc: *process.Process, driver_type: VirtioDriverType
             if (dev.vendor_id != 0x1AF4) continue;
 
             // Check Device ID
-            // Net: 0x1000 (Legacy) or 0x1041 (Modern)
-            // Blk: 0x1001 (Legacy) or 0x1042 (Modern)
             const is_net = (dev.device_id == 0x1000 or dev.device_id == 0x1041);
             const is_blk = (dev.device_id == 0x1001 or dev.device_id == 0x1042);
 
@@ -573,14 +531,13 @@ fn grantVirtioCapabilities(proc: *process.Process, driver_type: VirtioDriverType
                         }, "virtio");
                     }
                 }
-                
+
                 // Grant Interrupt Capability
                 appendCapabilityOrWarn(proc, alloc, .{
                     .Interrupt = .{ .irq = dev.irq_line }
                 }, "virtio");
 
                 // Grant DMA Memory Capability
-                // Net: 1MB (rx/tx pages), Blk: 512KB
                 const dma_pages: u32 = switch (driver_type) {
                     .Net => 256,
                     .Blk => 128,

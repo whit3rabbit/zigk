@@ -37,6 +37,7 @@ pub const pit = arch.pit;
 pub const apic = arch.apic;
 pub const timing = arch.timing;
 pub const smp = arch.smp;
+pub const userspace = arch.userspace;
 pub const iommu = arch.iommu;
 
 /// Initialize the Hardware Abstraction Layer

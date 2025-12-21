@@ -80,15 +80,17 @@ pub fn init() VmmError!void {
 
     console.info("VMM: Kernel PML4 at phys {x}", .{kernel_pml4_phys});
 
-    // Copy higher-half entries from current page tables (set up by Bootloader)
+    // Copy page table entries from current page tables (set up by Bootloader)
     // This preserves HHDM and kernel mappings
     const current_pml4_phys = paging.getCurrentPageTable();
     const current_pml4 = paging.getTablePtr(current_pml4_phys);
     const new_pml4 = paging.getTablePtr(kernel_pml4_phys);
 
-    // Copy entries 256-511 (kernel space, higher half)
-    // These are shared across all address spaces
-    var i: usize = 256;
+    // Copy ALL entries (0-511) to preserve any bootloader mappings.
+    // This is necessary for UEFI boot which uses an identity-mapped stack.
+    // For Limine boot, entries 0-255 are typically empty anyway.
+    // User-space processes will get their own separate PML4 with only entries 256-511 shared.
+    var i: usize = 0;
     while (i < 512) : (i += 1) {
         new_pml4.entries[i] = current_pml4.entries[i];
     }
@@ -652,6 +654,39 @@ pub fn unmapAndFreePage(pml4_phys: u64, virt_addr: u64) VmmError!void {
 
     try unmapPage(pml4_phys, virt_addr);
     pmm.freePage(paging.pageAlignDown(phys));
+}
+
+/// Securely unmap and free a page containing sensitive data
+///
+/// SECURITY: This function zeros page content BEFORE clearing the PTE to
+/// prevent information disclosure via TLB race. The sequence is:
+///   1. Zero page content via HHDM (kernel always has access)
+///   2. Clear PTE entry
+///   3. TLB shootdown to all CPUs
+///   4. Return physical page to PMM
+///
+/// Use this for pages containing: keys, passwords, decrypted data, etc.
+/// For non-sensitive data, use regular unmapAndFreePage().
+pub fn unmapAndFreePageSecure(pml4_phys: u64, virt_addr: u64) VmmError!void {
+    const phys = translate(pml4_phys, virt_addr) orelse {
+        return VmmError.NotMapped;
+    };
+
+    const aligned_phys = paging.pageAlignDown(phys);
+
+    // Step 1: Zero page via HHDM before unmapping
+    // This is safe because kernel HHDM mapping remains even after user PTE is cleared
+    const hhdm_ptr = paging.physToVirt(aligned_phys);
+    @memset(hhdm_ptr[0..PAGE_SIZE], 0);
+
+    // Memory barrier to ensure zero is visible before PTE clear
+    std.atomic.fence(.seq_cst);
+
+    // Step 2-3: Clear PTE and shootdown (unmapPage handles this)
+    try unmapPage(pml4_phys, virt_addr);
+
+    // Step 4: Now safe to return page to PMM
+    pmm.freePage(aligned_phys);
 }
 
 // Helper: Get or create a page table at the next level

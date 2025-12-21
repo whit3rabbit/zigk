@@ -1,22 +1,23 @@
 # zscapek Development Guidelines
 
-A Zig-based microkernel for x86_64 using the Limine bootloader protocol.
+A Zig-based microkernel for x86_64 with a custom UEFI bootloader.
 
 ## Environment & Build
 - **Zig Version**: 0.16.x (Nightly)
 - **Target**: `x86_64-freestanding`
-- **Bootloader**: Limine v5.x
+- **Bootloader**: Custom UEFI (src/boot/uefi/)
 - **Host**: macOS (Apple Silicon) -> Requires QEMU TCG
 
 ### Commands
 ```bash
-zig build              # Build kernel + userland
-zig build iso          # Create bootable ISO
-zig build run          # Run via QEMU (auto-detects macOS flags)
+zig build              # Build kernel + userland + UEFI bootloader
+zig build iso          # Create bootable UEFI ISO
+zig build run          # Run via QEMU with UEFI
 zig build test         # Run unit tests
 ```
 
 **QEMU on macOS (Apple Silicon):**
+Use `-Dbios=/path/to/OVMF.fd` to specify UEFI firmware.
 Use `-Dqemu-args="-accel tcg,thread=multi -cpu max"` to prevent stability issues.
 To prevent hangs on CI/Testing, ensure test runner implements timeouts (e.g., 30s).
 
@@ -118,7 +119,7 @@ pub fn sys_example(arg1: usize) SyscallError!usize {
 
 ## InitRD
 *   **Format**: USTAR Tarball.
-*   **Mount**: Loaded by `init_proc.zig` from Limine modules, mounted at `/`.
+*   **Mount**: Loaded by UEFI bootloader, passed to kernel via BootInfo, mounted at `/` by `init_proc.zig`.
 *   **Security**: Read-only. Paths must be canonicalized to prevent `../../` traversal.
 
 ## File Descriptors

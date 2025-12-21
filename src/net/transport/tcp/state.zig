@@ -158,7 +158,7 @@ const ISN_RESEED_THRESHOLD: u32 = 10000;
 
 /// Timestamp counter for TCP timestamps (RFC 7323)
 /// Increments with each call, providing monotonic values
-var tcp_timestamp_counter: u32 = 0;
+var tcp_timestamp_counter: std.atomic.Value(u32) = .{ .raw = 0 };
 
 /// Milliseconds per timer tick (default 1ms for 1000Hz)
 pub var ms_per_tick: u32 = 1;
@@ -443,11 +443,12 @@ pub fn generateIsn(l_ip: u32, l_port: u16, r_ip: u32, r_port: u16) u32 {
 pub fn nextTimestamp() u32 {
     // Increment counter each call - provides monotonicity required by RFC 7323
     // Seed with entropy on first call for unpredictability
-    if (tcp_timestamp_counter == 0) {
-        tcp_timestamp_counter = @truncate(platform.entropy.getHardwareEntropy());
+    if (tcp_timestamp_counter.load(.acquire) == 0) {
+        const seed: u32 = @truncate(platform.entropy.getHardwareEntropy());
+        _ = tcp_timestamp_counter.cmpxchgStrong(0, seed, .acq_rel, .acquire);
     }
-    tcp_timestamp_counter +%= 1;
-    return tcp_timestamp_counter;
+    const prev = tcp_timestamp_counter.fetchAdd(1, .acq_rel);
+    return prev +% 1;
 }
 
 /// Evict oldest half-open TCB to make space for valid connections (DoS mitigation)

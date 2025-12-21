@@ -1,13 +1,12 @@
 //! Memory Initialization
 //!
 //! Orchestrates the initialization of the memory management subsystems:
-//! 1. PMM (Physical Memory Manager) using the Limine memory map.
+//! 1. PMM (Physical Memory Manager) using the BootInfo memory map.
 //! 2. VMM (Virtual Memory Manager) setting up kernel page tables.
 //! 3. Kernel Stack Allocator (with guard pages).
 //! 4. Kernel Heap (using the standard Zig allocator interface).
 
 const std = @import("std");
-const limine = @import("limine");
 const hal = @import("hal");
 const console = @import("console");
 const config = @import("config");
@@ -15,8 +14,8 @@ const pmm = @import("pmm");
 const vmm = @import("vmm");
 const heap = @import("heap");
 const kernel_stack = @import("kernel_stack");
-const boot = @import("boot.zig");
 const panic = @import("panic.zig");
+const BootInfo = @import("boot_info");
 
 /// Initialize PMM, VMM, and Heap using generic BootInfo
 ///
@@ -67,34 +66,36 @@ pub fn initMemoryManagement(boot_info: *const @import("boot_info").BootInfo) voi
     heap.printStats();
 }
 
-/// Log Limine memory map entries
+/// Log memory map entries from BootInfo
 /// Useful for debugging memory layout and availability.
-pub fn logMemoryMap(memmap: *const limine.MemoryMapResponse) void {
+pub fn logMemoryMap(boot_info: *const BootInfo.BootInfo) void {
     var usable_memory: u64 = 0;
     var total_memory: u64 = 0;
 
-    const entries = memmap.entries();
+    const entries = boot_info.memory_map[0..boot_info.memory_map_count];
     for (entries) |entry| {
-        total_memory += entry.length;
+        const length = entry.num_pages * pmm.PAGE_SIZE;
+        total_memory += length;
 
-        const type_str = switch (entry.kind) {
-            .usable => blk: {
-                usable_memory += entry.length;
+        const type_str = switch (entry.type) {
+            .Conventional => blk: {
+                usable_memory += length;
                 break :blk "Usable";
             },
-            .reserved => "Reserved",
-            .acpi_reclaimable => "ACPI Reclaimable",
-            .acpi_nvs => "ACPI NVS",
-            .bad_memory => "Bad Memory",
-            .bootloader_reclaimable => "Bootloader Reclaimable",
-            .kernel_and_modules => "Kernel/Modules",
-            .framebuffer => "Framebuffer",
+            .Reserved => "Reserved",
+            .ACPIReclaim => "ACPI Reclaimable",
+            .ACPINvs => "ACPI NVS",
+            .Unusable => "Unusable",
+            .BootServicesCode, .BootServicesData => "Bootloader Reclaimable",
+            .KernelCode, .KernelData => "Kernel/Modules",
+            .Framebuffer => "Framebuffer",
+            else => "Other",
         };
 
         if (config.debug_memory) {
             console.printf("  {x} - {x} ({s})\n", .{
-                entry.base,
-                entry.base + entry.length,
+                entry.phys_start,
+                entry.phys_start + length,
                 type_str,
             });
         }

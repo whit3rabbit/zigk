@@ -68,7 +68,11 @@ pub fn physToVirt(phys: u64) [*]u8 {
 - Page table manipulation uses HHDM to read/write PML4/PDPT/PD/PT entries
 - Avoids chicken-and-egg problem of needing page tables to access page tables
 
-## 2. Limine Boot Protocol ABI
+## 2. Boot Protocol ABIs
+
+Zscapek supports two boot protocols: Limine and custom UEFI.
+
+### 2.1 Limine Boot Protocol ABI
 
 Limine uses a Request/Response mechanism. All pointers are 64-bit and 8-byte aligned.
 
@@ -121,6 +125,114 @@ The first context switch to user mode (via `isr_common` IRETQ) does SWAPGS, whic
 
 **Critical Note for SMP/Scheduler:**
 When accessing per-CPU data *inside* the kernel (e.g., during scheduler initialization or timer ticks before returning to user), you must read `IA32_GS_BASE`, not `IA32_KERNEL_GS_BASE`. Even though you intend to access the "kernel" GS, if no SWAPGS has occurred (because we are already in kernel mode), the active base is still in the `IA32_GS_BASE` register. Reading `IA32_KERNEL_GS_BASE` will return 0 (or user base), leading to null pointer panics.
+
+### 2.2 UEFI Boot Protocol
+
+The custom UEFI bootloader uses a simpler direct handoff model with the BootInfo structure.
+
+#### BootInfo Structure Layout
+
+Defined in `src/boot/common/boot_info.zig`. This is an `extern struct` for ABI stability.
+
+```text
+Offset  Size    Type                    Field               Description
+0x00    8       [*]MemoryDescriptor     memory_map          Pointer to memory map array
+0x08    8       usize                   memory_map_count    Number of memory entries
+0x10    8       usize                   descriptor_size     Size of each descriptor
+0x18    8       ?*FramebufferInfo       framebuffer         Optional framebuffer info
+0x20    8       u64                     rsdp                ACPI RSDP physical address
+0x28    8       u64                     initrd_addr         InitRD address (0 for UEFI)
+0x30    8       u64                     initrd_size         InitRD size (0 for UEFI)
+0x38    8       ?[*:0]const u8          cmdline             Command line (null for UEFI)
+0x40    8       u64                     hhdm_offset         HHDM base (0xFFFF800000000000)
+0x48    8       u64                     kernel_phys_base    Kernel physical load address
+0x50    8       u64                     kernel_virt_base    Kernel virtual base address
+```
+
+#### MemoryDescriptor Layout
+
+```text
+Offset  Size    Type            Field           Description
+0x00    4       MemoryType      type            Memory region type (enum)
+0x04    4       padding
+0x08    8       u64             phys_start      Physical start address
+0x10    8       u64             virt_start      Virtual start (usually 0)
+0x18    8       u64             num_pages       Number of 4KB pages
+0x20    8       u64             attribute       Memory attributes
+```
+
+#### FramebufferInfo Layout
+
+```text
+Offset  Size    Type    Field               Description
+0x00    8       u64     address             Framebuffer physical address
+0x08    8       u64     width               Width in pixels
+0x10    8       u64     height              Height in pixels
+0x18    8       u64     pitch               Bytes per row
+0x20    2       u16     bpp                 Bits per pixel
+0x22    1       u8      red_mask_size       Red channel bit width
+0x23    1       u8      red_mask_shift      Red channel bit position
+0x24    1       u8      green_mask_size     Green channel bit width
+0x25    1       u8      green_mask_shift    Green channel bit position
+0x26    1       u8      blue_mask_size      Blue channel bit width
+0x27    1       u8      blue_mask_shift     Blue channel bit position
+```
+
+#### UEFI to Kernel Calling Convention
+
+**Critical ABI Mismatch:**
+
+| Component | ABI | First Argument Register |
+|-----------|-----|-------------------------|
+| UEFI Bootloader | Microsoft x64 | RCX |
+| Kernel | System V AMD64 | RDI |
+
+The UEFI bootloader must explicitly set RDI before jumping to the kernel:
+
+```zig
+// Bootloader (x86_64-uefi target)
+asm volatile (
+    \\mov %[bi], %%rdi
+    \\jmp *%[entry]
+    :
+    : [bi] "r" (@intFromPtr(&boot_info)),
+      [entry] "r" (kernel_entry_addr),
+);
+```
+
+The kernel entry point uses System V ABI:
+
+```zig
+// Kernel (x86_64-freestanding target)
+export fn _uefi_start(boot_info: *BootInfo.BootInfo) callconv(.c) noreturn {
+    // boot_info arrives in RDI per System V AMD64 ABI
+}
+```
+
+#### UEFI Page Table Layout
+
+The UEFI bootloader creates PML4 page tables with three regions:
+
+```text
+PML4 Index  Virtual Range                           Mapping
+---------   -------------                           -------
+0           0x0000_0000_0000_0000 - 0x0000_007F_FFFF_FFFF   Identity (0-4GB)
+256         0xFFFF_8000_0000_0000 - 0xFFFF_80xx_xxxx_xxxx   HHDM (all physical)
+511         0xFFFF_FFFF_8000_0000 - 0xFFFF_FFFF_FFFF_FFFF   Kernel segments
+```
+
+**Page Table Flags Used:**
+
+| Mapping | Present | Writable | Global | Huge (2MB) |
+|---------|---------|----------|--------|------------|
+| Identity | Yes | Yes | Yes | Where aligned |
+| HHDM | Yes | Yes | Yes | Where aligned |
+| Kernel .text | Yes | No | Yes | No |
+| Kernel .data/.bss | Yes | Yes | Yes | No |
+
+**Identity Mapping Preservation:**
+
+When VMM initializes, it must copy ALL 512 PML4 entries (not just 256-511) because the UEFI bootloader's stack resides in the identity-mapped region. Failure to preserve entries 0-255 causes a Double Fault when the stack becomes inaccessible.
 
 ## 3. Hardware Structures (x86_64)
 

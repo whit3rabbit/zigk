@@ -209,11 +209,20 @@ pub fn setupStack(
     return sp;
 }
 
+const StackBounds = types.StackBounds;
+
 /// Set up TLS/TCB for a new thread
 ///
 /// Allocates memory for the TLS block (tdata + tbss) and TCB.
 /// Copies the initial TLS image from the ELF file.
 /// Sets up the self-pointer in the TCB.
+///
+/// Args:
+///   pml4_phys: Page table physical address
+///   phdr: PT_TLS program header
+///   file_data: Raw ELF file data
+///   preferred_tp: Preferred thread pointer address
+///   stack_bounds: Actual stack bounds (ASLR) for overlap validation
 ///
 /// Returns: The FS base address (pointer to TCB)
 pub fn setupTls(
@@ -221,7 +230,9 @@ pub fn setupTls(
     phdr: Elf64_Phdr,
     file_data: []const u8,
     preferred_tp: u64,
+    stack_bounds: ?StackBounds,
 ) !u64 {
+    const bounds = stack_bounds orelse StackBounds.default;
     // SECURITY: Validate p_align before use.
     // A malicious ELF could set p_align=0, causing underflow in (p_align - 1).
     // This would result in align_mask = 0xFFFFFFFFFFFFFFFF, corrupting all
@@ -277,6 +288,16 @@ pub fn setupTls(
     // TLS data is located at tp - aligned_size
     // According to x86_64 ABI Variant II
     const tls_size = std.mem.alignForward(u64, phdr.p_memsz, alignment);
+
+    // SECURITY: Check for underflow before subtraction.
+    // A malicious ELF with large p_memsz (up to MAX_SEGMENT_SIZE = 128MB) could cause
+    // tp - tls_size to wrap around if preferred_tp is low. This would result in
+    // tls_start being a very high address (near 0xFFFFFFFF_XXXXXXXX), potentially
+    // landing in kernel space or overlapping with other mapped regions.
+    if (tp < tls_size) {
+        console.err("ELF: TLS size ({x}) exceeds thread pointer ({x})", .{ tls_size, tp });
+        return ElfError.InvalidAddressRange;
+    }
     const tls_start = tp - tls_size;
 
     // We need to map memory covering [tls_start, tp + tcb_size]
@@ -301,9 +322,15 @@ pub fn setupTls(
         console.err("ELF: TLS overlaps kernel space: {x}-{x}", .{ alloc_start, alloc_end });
         return ElfError.InvalidAddressRange;
     }
-    const stack_base = types.DEFAULT_STACK_TOP - types.DEFAULT_STACK_SIZE;
-    if (alloc_start < types.DEFAULT_STACK_TOP and alloc_end > stack_base) {
-        console.err("ELF: TLS overlaps user stack reservation: {x}-{x}", .{ alloc_start, alloc_end });
+    // SECURITY: Check against actual ASLR stack bounds, not hardcoded defaults
+    const stack_base_addr = bounds.base();
+    if (alloc_start < bounds.stack_top and alloc_end > stack_base_addr) {
+        console.err("ELF: TLS overlaps user stack reservation: {x}-{x} (stack={x}-{x})", .{
+            alloc_start,
+            alloc_end,
+            stack_base_addr,
+            bounds.stack_top,
+        });
         return ElfError.InvalidAddressRange;
     }
 
@@ -316,15 +343,47 @@ pub fn setupTls(
         .no_execute = true, // TLS/TCB should not be executable
     };
 
+    // SECURITY: Track mapped pages for proper cleanup on failure.
+    // The previous code only freed the current page on mapping failure,
+    // leaking all previously allocated pages in the loop. This could be
+    // exploited for memory exhaustion (DoS) by repeatedly triggering
+    // TLS setup failures.
+    const MAX_TLS_PAGES = 64; // 256KB max TLS (64 * 4KB pages)
+    if (page_count > MAX_TLS_PAGES) {
+        console.err("ELF: TLS requires too many pages: {} (max {})", .{ page_count, MAX_TLS_PAGES });
+        return ElfError.SegmentTooLarge;
+    }
+    var mapped_pages: [MAX_TLS_PAGES]u64 = undefined;
+    var pages_mapped: usize = 0;
+
+    // Helper to clean up on failure
+    const cleanup = struct {
+        fn run(pml4: u64, start: u64, psize: u64, pages: []const u64) void {
+            for (pages, 0..) |phys, idx| {
+                const virt = start + idx * psize;
+                vmm.unmapPage(pml4, virt) catch {};
+                pmm.freePage(phys);
+            }
+        }
+    };
+
     var current_vaddr = alloc_start;
     var i: usize = 0;
     while (i < page_count) : (i += 1) {
-        const phys_page = pmm.allocPage() orelse return ElfError.OutOfMemory;
+        const phys_page = pmm.allocPage() orelse {
+            cleanup.run(pml4_phys, alloc_start, page_size, mapped_pages[0..pages_mapped]);
+            return ElfError.OutOfMemory;
+        };
 
         vmm.mapPage(pml4_phys, current_vaddr, phys_page, page_flags) catch {
             pmm.freePage(phys_page);
+            cleanup.run(pml4_phys, alloc_start, page_size, mapped_pages[0..pages_mapped]);
             return ElfError.MappingFailed;
         };
+
+        // Track this page for cleanup
+        mapped_pages[pages_mapped] = phys_page;
+        pages_mapped += 1;
 
         // Zero the page (handles tbss and TCB init)
         const page_ptr: [*]u8 = hal.paging.physToVirt(phys_page);
@@ -335,7 +394,15 @@ pub fn setupTls(
 
     // Copy TLS template data (tdata)
     if (phdr.p_filesz > 0) {
-        if (phdr.p_offset + phdr.p_filesz > file_data.len) {
+        // SECURITY: Use checked arithmetic for bounds validation.
+        // A malicious ELF with p_offset = 0xFFFFFFFF_FFFFF000 and p_filesz = 0x1000
+        // would cause p_offset + p_filesz to wrap to 0x0, bypassing the bounds check.
+        // The subsequent slice operation would then access out-of-bounds memory.
+        const file_end = std.math.add(u64, phdr.p_offset, phdr.p_filesz) catch {
+            console.err("ELF: TLS p_offset + p_filesz overflow", .{});
+            return ElfError.BufferTooSmall;
+        };
+        if (file_end > file_data.len) {
             console.err("ELF: TLS segment out of file bounds", .{});
             return ElfError.BufferTooSmall;
         }

@@ -77,6 +77,19 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
         // We mark closing=true atomically before any free operation in freeTcb().
         const tcb_held = tcb.mutex.acquire();
         const expected_generation = tcb.generation;
+
+        if (tcb.state == .SynReceived) {
+            const is_established = syn.processSynReceivedLocked(tcb, tcp_hdr);
+            tcb_held.release();
+            state_held.release();
+
+            if (!is_established) {
+                return true;
+            }
+
+            return handleSynReceivedEstablished(tcb);
+        }
+
         state_held.release();
 
         const action = processEstablishedPacket(tcb, pkt, tcp_hdr);
@@ -175,7 +188,7 @@ fn processEstablishedPacket(tcb: *Tcb, pkt: *PacketBuffer, tcp_hdr: *TcpHeader) 
 
     switch (tcb.state) {
         .SynSent => return syn.processSynSent(tcb, pkt, tcp_hdr),
-        .SynReceived => return syn.processSynReceived(tcb, tcp_hdr),
+        .SynReceived => return .Continue, // handled in processPacket with state.lock held
         .Established => return established.processEstablished(tcb, pkt, tcp_hdr),
         .FinWait1 => return established.processFinWait1(tcb, tcp_hdr),
         .FinWait2 => return established.processFinWait2(tcb, tcp_hdr),
@@ -197,4 +210,29 @@ fn handleRst(tcb: *Tcb) RxAction {
     }
 
     return .FreeTcb;
+}
+
+fn handleSynReceivedEstablished(tcb: *Tcb) bool {
+    if (tcb.parent_socket) |parent_idx| {
+        if (socket.completePendingAccept(parent_idx, tcb)) {
+            return true;
+        }
+
+        if (socket.queueAcceptConnection(parent_idx, tcb)) {
+            if (socket.acquireSocket(parent_idx)) |parent_sock| {
+                defer socket.releaseSocket(parent_sock);
+                if (parent_sock.blocked_thread) |thread| {
+                    socket.wakeThread(thread);
+                    parent_sock.blocked_thread = null;
+                }
+            }
+            return true;
+        }
+    }
+
+    _ = tx.sendRst(tcb);
+    const held = state.lock.acquire();
+    state.freeTcb(tcb);
+    held.release();
+    return true;
 }

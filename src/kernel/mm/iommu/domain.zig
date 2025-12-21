@@ -65,8 +65,8 @@ pub const DeviceBdf = struct {
 /// Simple bump allocator for IOVA space
 /// Thread-safe with atomic next pointer
 pub const IovaAllocator = struct {
-    /// Next available IOVA address
-    next: u64,
+    /// Next available IOVA address (atomic for thread-safety)
+    next: std.atomic.Value(u64),
 
     /// End of IOVA space
     limit: u64,
@@ -76,26 +76,47 @@ pub const IovaAllocator = struct {
     /// Create a new IOVA allocator
     pub fn init() Self {
         return .{
-            .next = IOVA_BASE,
+            .next = std.atomic.Value(u64).init(IOVA_BASE),
             .limit = IOVA_LIMIT,
         };
     }
 
     /// Allocate a contiguous IOVA range
     /// Returns the starting IOVA address, or null if out of space
+    /// Thread-safe: uses atomic compare-and-swap loop
     pub fn allocate(self: *Self, size: u64) ?u64 {
-        // Align size to page boundary
-        const aligned_size = (size + PAGE_SIZE - 1) & ~@as(u64, PAGE_SIZE - 1);
-
-        // Check if we have enough space
-        if (self.next + aligned_size > self.limit) {
-            console.warn("IOMMU: IOVA space exhausted", .{});
+        // Align size to page boundary (checked arithmetic)
+        const aligned_size = std.math.add(u64, size, PAGE_SIZE - 1) catch {
+            console.warn("IOMMU: IOVA size overflow during alignment", .{});
             return null;
-        }
+        };
+        const aligned_size_masked = aligned_size & ~@as(u64, PAGE_SIZE - 1);
 
-        const iova = self.next;
-        self.next += aligned_size;
-        return iova;
+        // Atomic allocation loop
+        while (true) {
+            const current = self.next.load(.acquire);
+
+            // Check for overflow: current + aligned_size_masked must not wrap
+            const new_next = std.math.add(u64, current, aligned_size_masked) catch {
+                console.warn("IOMMU: IOVA allocation overflow", .{});
+                return null;
+            };
+
+            // Check if we have enough space
+            if (new_next > self.limit) {
+                console.warn("IOMMU: IOVA space exhausted", .{});
+                return null;
+            }
+
+            // Attempt atomic update
+            if (self.next.cmpxchgWeak(current, new_next, .acq_rel, .acquire)) |_| {
+                // CAS failed, another thread updated - retry
+                continue;
+            } else {
+                // CAS succeeded, return the old value as our allocation
+                return current;
+            }
+        }
     }
 
     /// Free an IOVA range (currently a no-op for bump allocator)
@@ -110,7 +131,9 @@ pub const IovaAllocator = struct {
 
     /// Get remaining IOVA space
     pub fn remaining(self: *const Self) u64 {
-        return self.limit - self.next;
+        const current = self.next.load(.acquire);
+        if (current >= self.limit) return 0;
+        return self.limit - current;
     }
 };
 

@@ -7,6 +7,7 @@
 //   - Fixed-size buffers from driver's pre-allocated pool
 //   - Layer offsets track header positions for easy access
 //   - Reference counting for shared packet handling
+const std = @import("std");
 
 /// Maximum packet size (MTU + headers)
 pub const MAX_PACKET_SIZE: usize = 2048;
@@ -134,18 +135,23 @@ pub const PacketBuffer = struct {
         if (self.eth_offset < size) {
             return false; // No room
         }
+        const new_len = std.math.add(usize, self.len, size) catch return false;
+        if (new_len > self.data.len) {
+            return false;
+        }
         self.eth_offset -= size;
-        self.len += size;
+        self.len = new_len;
         return true;
     }
 
     /// Copy data into packet at current position
     pub fn appendData(self: *Self, src: []const u8) bool {
-        if (self.len + src.len > self.data.len) {
+        const new_len = std.math.add(usize, self.len, src.len) catch return false;
+        if (new_len > self.data.len) {
             return false;
         }
         @memcpy(self.data[self.len..][0..src.len], src);
-        self.len += src.len;
+        self.len = new_len;
         return true;
     }
 };
@@ -354,52 +360,60 @@ pub const ArpHeader = extern struct {
 /// Get Ethernet header from buffer with bounds checking.
 /// Returns null if buffer is too small to contain an Ethernet header.
 pub fn getEthHeader(buf: []const u8, offset: usize) ?*align(1) const EthernetHeader {
-    if (offset + ETH_HEADER_SIZE > buf.len) return null;
+    const end = std.math.add(usize, offset, ETH_HEADER_SIZE) catch return null;
+    if (end > buf.len) return null;
     return @ptrCast(&buf[offset]);
 }
 
 /// Get mutable Ethernet header from buffer with bounds checking.
 pub fn getEthHeaderMut(buf: []u8, offset: usize) ?*align(1) EthernetHeader {
-    if (offset + ETH_HEADER_SIZE > buf.len) return null;
+    const end = std.math.add(usize, offset, ETH_HEADER_SIZE) catch return null;
+    if (end > buf.len) return null;
     return @ptrCast(&buf[offset]);
 }
 
 /// Get IPv4 header from buffer with bounds checking.
 /// Returns null if buffer is too small to contain an IPv4 header.
 pub fn getIpv4Header(buf: []const u8, offset: usize) ?*align(1) const Ipv4Header {
-    if (offset + IP_HEADER_SIZE > buf.len) return null;
+    const end = std.math.add(usize, offset, IP_HEADER_SIZE) catch return null;
+    if (end > buf.len) return null;
     return @ptrCast(&buf[offset]);
 }
 
 /// Get mutable IPv4 header from buffer with bounds checking.
 pub fn getIpv4HeaderMut(buf: []u8, offset: usize) ?*align(1) Ipv4Header {
-    if (offset + IP_HEADER_SIZE > buf.len) return null;
+    const end = std.math.add(usize, offset, IP_HEADER_SIZE) catch return null;
+    if (end > buf.len) return null;
     return @ptrCast(&buf[offset]);
 }
 
 /// Get UDP header from buffer with bounds checking.
 /// Returns null if buffer is too small to contain a UDP header.
 pub fn getUdpHeader(buf: []const u8, offset: usize) ?*align(1) const UdpHeader {
-    if (offset + UDP_HEADER_SIZE > buf.len) return null;
+    const end = std.math.add(usize, offset, UDP_HEADER_SIZE) catch return null;
+    if (end > buf.len) return null;
     return @ptrCast(&buf[offset]);
 }
 
 /// Get mutable UDP header from buffer with bounds checking.
 pub fn getUdpHeaderMut(buf: []u8, offset: usize) ?*align(1) UdpHeader {
-    if (offset + UDP_HEADER_SIZE > buf.len) return null;
+    const end = std.math.add(usize, offset, UDP_HEADER_SIZE) catch return null;
+    if (end > buf.len) return null;
     return @ptrCast(&buf[offset]);
 }
 
 /// Get ICMP header from buffer with bounds checking.
 /// Returns null if buffer is too small to contain an ICMP header.
 pub fn getIcmpHeader(buf: []const u8, offset: usize) ?*align(1) const IcmpHeader {
-    if (offset + ICMP_HEADER_SIZE > buf.len) return null;
+    const end = std.math.add(usize, offset, ICMP_HEADER_SIZE) catch return null;
+    if (end > buf.len) return null;
     return @ptrCast(&buf[offset]);
 }
 
 /// Get mutable ICMP header from buffer with bounds checking.
 pub fn getIcmpHeaderMut(buf: []u8, offset: usize) ?*align(1) IcmpHeader {
-    if (offset + ICMP_HEADER_SIZE > buf.len) return null;
+    const end = std.math.add(usize, offset, ICMP_HEADER_SIZE) catch return null;
+    if (end > buf.len) return null;
     return @ptrCast(&buf[offset]);
 }
 
@@ -407,14 +421,16 @@ pub fn getIcmpHeaderMut(buf: []u8, offset: usize) ?*align(1) IcmpHeader {
 /// Returns null if buffer is too small to contain an ARP header.
 pub fn getArpHeader(buf: []const u8, offset: usize) ?*align(1) const ArpHeader {
     const arp_size = @sizeOf(ArpHeader);
-    if (offset + arp_size > buf.len) return null;
+    const end = std.math.add(usize, offset, arp_size) catch return null;
+    if (end > buf.len) return null;
     return @ptrCast(&buf[offset]);
 }
 
 /// Get mutable ARP header from buffer with bounds checking.
 pub fn getArpHeaderMut(buf: []u8, offset: usize) ?*align(1) ArpHeader {
     const arp_size = @sizeOf(ArpHeader);
-    if (offset + arp_size > buf.len) return null;
+    const end = std.math.add(usize, offset, arp_size) catch return null;
+    if (end > buf.len) return null;
     return @ptrCast(&buf[offset]);
 }
 

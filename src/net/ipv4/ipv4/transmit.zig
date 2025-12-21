@@ -45,7 +45,9 @@ pub fn buildPacketWithTos(
 
     ip_hdr.version_ihl = 0x45;
     ip_hdr.tos = tos;
-    ip_hdr.setTotalLength(@truncate(packet.IP_HEADER_SIZE + payload_len));
+    const total_len = std.math.add(usize, packet.IP_HEADER_SIZE, payload_len) catch return false;
+    if (total_len > std.math.maxInt(u16)) return false;
+    ip_hdr.setTotalLength(@intCast(total_len));
     ip_hdr.identification = @byteSwap(id.getNextId());
     ip_hdr.flags_fragment = @byteSwap(@as(u16, 0x4000));
     ip_hdr.ttl = types.DEFAULT_TTL;
@@ -98,9 +100,10 @@ pub fn sendPacket(iface: *Interface, pkt: *PacketBuffer, dst_ip: u32) bool {
     }
 
     const ip_hdr = pkt.ipHeader();
-    pkt.len = pkt.ip_offset + ip_hdr.getTotalLength();
+    const ip_total_len = ip_hdr.getTotalLength();
+    pkt.len = pkt.ip_offset + ip_total_len;
 
-    if (pkt.len > iface.mtu) {
+    if (ip_total_len > iface.mtu) {
         return sendFragmentedPacket(iface, pkt, dst_mac);
     }
 
@@ -112,15 +115,20 @@ fn sendFragmentedPacket(iface: *Interface, pkt: *PacketBuffer, dst_mac: [6]u8) b
     const orig_ip = pkt.ipHeader();
     const ip_header_len = orig_ip.getHeaderLength();
 
+    if (@as(usize, iface.mtu) <= ip_header_len) return false;
+
     const payload_start = pkt.ip_offset + ip_header_len;
     const payload = pkt.data[payload_start..pkt.len];
 
     if (payload.len > MAX_IP_PAYLOAD) return false;
     
-    const mtu_payload = (iface.mtu - ip_header_len) & ~@as(u16, 7);
+    const mtu_payload = (@as(usize, iface.mtu) - ip_header_len) & ~@as(usize, 7);
 
     const alloc = heap.allocator();
     const frag_buf = alloc.alloc(u8, packet.MAX_PACKET_SIZE) catch return false;
+    // NOTE: We assume iface.transmit is synchronous and copies the data (like e1000e driver).
+    // If a driver holds this pointer asynchronously, this free will cause use-after-free!
+    // TODO: If we support async zero-copy drivers, we need value-semantics or refcounting here.
     defer alloc.free(frag_buf);
     
     var offset: usize = 0;
@@ -140,8 +148,9 @@ fn sendFragmentedPacket(iface: *Interface, pkt: *PacketBuffer, dst_mac: [6]u8) b
         const frag_ip: *Ipv4Header = @ptrCast(@alignCast(&frag_buf[frag_ip_offset]));
         frag_ip.* = orig_ip.*;
         
-        const total_len = ip_header_len + chunk_len;
-        frag_ip.setTotalLength(@truncate(total_len));
+        const total_len = std.math.add(usize, ip_header_len, chunk_len) catch return false;
+        if (total_len > std.math.maxInt(u16)) return false;
+        frag_ip.setTotalLength(@intCast(total_len));
         
         const frag_off_val = (offset / 8);
         var flags = frag_off_val & 0x1FFF;

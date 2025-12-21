@@ -30,37 +30,60 @@ pub const UserPtr = user_mem.UserPtr;
 // =============================================================================
 // Current Process Tracking
 // =============================================================================
-// For Phase 4, we track the current process. Falls back to init process
-// when no explicit current process is set.
+// SECURITY: Uses per-CPU thread state via GS segment for SMP safety.
+// The scheduler maintains current_thread in per-CPU data, and each thread
+// has a reference to its parent process. This avoids race conditions where
+// multiple CPUs could access/modify a shared global.
+//
+// Fallback to init_process is only used during early boot before scheduler starts.
 
-var current_process: ?*Process = null;
+/// Init process reference for pre-scheduler boot phase
+var init_process_cache: ?*Process = null;
 
-/// Get the current process (init if none set)
+/// Get the current process via the scheduler's per-CPU thread state
+/// Falls back to init process during early boot (before scheduler starts)
 pub fn getCurrentProcess() *Process {
-    if (current_process) |proc| {
+    // SECURITY: Use per-CPU thread state from GS segment (SMP-safe)
+    if (sched.getCurrentThread()) |thread| {
+        if (thread.process) |proc_ptr| {
+            return @ptrCast(@alignCast(proc_ptr));
+        }
+    }
+
+    // Fallback for early boot before scheduler starts
+    if (init_process_cache) |proc| {
         return proc;
     }
 
-    // First access - get or create init process
-    current_process = process_mod.getInitProcess() catch {
+    // First access during boot - get or create init process
+    init_process_cache = process_mod.getInitProcess() catch {
         console.err("Process: Failed to create init process", .{});
         @panic("Cannot create init process");
     };
 
-    console.info("Process: Using init process (pid={})", .{current_process.?.pid});
-    return current_process.?;
+    console.info("Process: Using init process (pid={})", .{init_process_cache.?.pid});
+    return init_process_cache.?;
 }
 
-/// Get the current process if one is set, without creating init
+/// Get the current process if one exists, without creating init
 /// Useful for contexts where we need to check if a process exists
 /// without side effects (e.g., page fault handling before scheduler runs)
 pub fn getCurrentProcessOrNull() ?*Process {
-    return current_process;
+    // SECURITY: Use per-CPU thread state from GS segment (SMP-safe)
+    if (sched.getCurrentThread()) |thread| {
+        if (thread.process) |proc_ptr| {
+            return @ptrCast(@alignCast(proc_ptr));
+        }
+    }
+    // Return cached init process if available (pre-scheduler)
+    return init_process_cache;
 }
 
-/// Set the current process (for context switching)
+/// Set the init process during early boot (before scheduler starts)
+/// After scheduler starts, current process is derived from current thread
 pub fn setCurrentProcess(proc: *Process) void {
-    current_process = proc;
+    // This is only used during init_proc setup before scheduler runs
+    init_process_cache = proc;
 }
 
 // =============================================================================
@@ -74,8 +97,8 @@ var fd_table_initialized: bool = false;
 
 /// Get the FD table for the current process
 pub fn getGlobalFdTable() *FdTable {
-    // Use current process's FD table if available
-    if (current_process) |proc| {
+    // Use current process's FD table via SMP-safe accessor
+    if (getCurrentProcessOrNull()) |proc| {
         return proc.fd_table;
     }
 
@@ -99,8 +122,8 @@ var global_user_vmm: ?*UserVmm = null;
 
 /// Get the UserVmm for the current process
 pub fn getGlobalUserVmm() *UserVmm {
-    // Use current process's UserVmm if available
-    if (current_process) |proc| {
+    // Use current process's UserVmm via SMP-safe accessor
+    if (getCurrentProcessOrNull()) |proc| {
         return proc.user_vmm;
     }
 

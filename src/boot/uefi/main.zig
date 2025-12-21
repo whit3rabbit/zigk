@@ -1,66 +1,346 @@
+// Zscapek UEFI Bootloader
+// Phase 3: Full boot implementation
+//
+// Boot sequence:
+// 1. Initialize serial for debug output
+// 2. Load kernel ELF and parse segments
+// 3. Get memory map from UEFI
+// 4. Initialize GOP for framebuffer
+// 5. Find RSDP (ACPI)
+// 6. Build page tables (Identity + HHDM + Kernel)
+// 7. Call ExitBootServices
+// 8. Switch to new page tables
+// 9. Jump to kernel entry point
+
 const std = @import("std");
-const loader = @import("loader.zig");
 const uefi = std.os.uefi;
+const BootInfo = @import("boot_info");
+const loader = @import("loader.zig");
+const memory = @import("memory.zig");
+const graphics = @import("graphics.zig");
+const paging = @import("paging.zig");
+
+// Constants
+const HHDM_OFFSET: u64 = 0xFFFF_8000_0000_0000;
+const MAX_SEGMENTS: usize = 32;
+const MAX_MEMMAP_ENTRIES: usize = 256;
+const MEMMAP_BUFFER_SIZE: usize = MAX_MEMMAP_ENTRIES * @sizeOf(uefi.tables.MemoryDescriptor);
+
+// Static buffers (zero-initialized for security - prevents information leaks)
+var kernel_segments: [MAX_SEGMENTS]loader.LoadedSegment = std.mem.zeroes([MAX_SEGMENTS]loader.LoadedSegment);
+var memmap_buffer: [MEMMAP_BUFFER_SIZE]u8 align(@alignOf(uefi.tables.MemoryDescriptor)) = std.mem.zeroes([MEMMAP_BUFFER_SIZE]u8);
+var boot_memmap: [MAX_MEMMAP_ENTRIES]BootInfo.MemoryDescriptor = std.mem.zeroes([MAX_MEMMAP_ENTRIES]BootInfo.MemoryDescriptor);
+var framebuffer_info: BootInfo.FramebufferInfo = std.mem.zeroes(BootInfo.FramebufferInfo);
+var boot_info: BootInfo.BootInfo = std.mem.zeroes(BootInfo.BootInfo);
 
 pub fn main() void {
     const system_table = uefi.system_table;
-    
-    serialPrint("Phase 2: UEFI Bootloader Started\r\n");
-    
+
+    serialPrint("=== Zscapek UEFI Bootloader ===\r\n");
+
+    // Clear screen and print banner
     if (system_table.con_out) |con_out| {
         _ = con_out.clearScreen() catch {};
 
-        const msg = "Hello from Zscapek Custom UEFI Bootloader!\r\n";
+        const msg = "Zscapek UEFI Bootloader - Phase 3\r\n";
         for (msg) |c| {
             var buf = [2:0]u16{ c, 0 };
             _ = con_out.outputString(&buf) catch {};
         }
-
-        const sub_msg = "Phase 2: Bootloader Skeleton Active.\r\n";
-        for (sub_msg) |c| {
-            var buf = [2:0]u16{ c, 0 };
-            _ = con_out.outputString(&buf) catch {};
-        }
     }
 
-    if (system_table.boot_services) |bs| {
-        serialPrint("Attempting to load kernel...\r\n");
-        var segments: [16]loader.LoadedSegment = undefined;
-        if (loader.loadKernel(bs, &segments)) |_| {
-            serialPrint("Kernel segments loaded!\r\n");
-            // Print count? Can't easy with serialPrint simple string
-            // Just assume success
-        } else |_| {
-            serialPrint("Failed to load kernel: Error\r\n");
+    const bs = system_table.boot_services orelse {
+        serialPrint("ERROR: Boot services not available\r\n");
+        stallForever();
+    };
+
+    // Step 1: Load kernel ELF
+    serialPrint("Loading kernel.elf...\r\n");
+    const load_result = loader.loadKernel(bs, &kernel_segments) catch |err| {
+        serialPrint("ERROR: Failed to load kernel: ");
+        serialPrintError(err);
+        stallForever();
+    };
+    serialPrint("Kernel loaded: entry=");
+    serialPrintHex(load_result.entry_point);
+    serialPrint(" segments=");
+    serialPrintNum(load_result.segment_count);
+    serialPrint("\r\n");
+
+    // Step 1b: Load initrd.tar
+    serialPrint("Loading initrd.tar...\r\n");
+    var initrd_addr: u64 = 0;
+    var initrd_size: u64 = 0;
+    if (loader.loadInitrd(bs)) |initrd| {
+        initrd_addr = initrd.address;
+        initrd_size = initrd.size;
+        serialPrint("Initrd loaded: addr=");
+        serialPrintHex(initrd_addr);
+        serialPrint(" size=");
+        serialPrintNum(initrd_size);
+        serialPrint(" bytes\r\n");
+    } else |err| {
+        serialPrint("WARNING: Initrd not loaded: ");
+        serialPrintError(err);
+        // Continue without initrd - kernel will have no userspace processes
+    }
+
+    // Step 2: Get memory map
+    serialPrint("Getting memory map...\r\n");
+    var uefi_memmap = memory.getMemoryMap(bs, &memmap_buffer) catch {
+        serialPrint("ERROR: Failed to get memory map\r\n");
+        stallForever();
+    };
+    serialPrint("Memory map: ");
+    serialPrintNum(uefi_memmap.entry_count);
+    serialPrint(" entries, total usable: ");
+    serialPrintNum(uefi_memmap.totalUsableMemory() / (1024 * 1024));
+    serialPrint(" MB\r\n");
+
+    const max_phys = memory.findMaxPhysicalAddress(&uefi_memmap);
+    serialPrint("Max physical address: ");
+    serialPrintHex(max_phys);
+    serialPrint("\r\n");
+
+    // Step 3: Initialize graphics
+    serialPrint("Initializing GOP...\r\n");
+    if (graphics.initGraphics(bs)) |fb| {
+        framebuffer_info = fb;
+        serialPrint("Framebuffer: ");
+        serialPrintNum(fb.width);
+        serialPrint("x");
+        serialPrintNum(fb.height);
+        serialPrint(" @ ");
+        serialPrintHex(fb.address);
+        serialPrint("\r\n");
+    } else |_| {
+        serialPrint("WARNING: GOP not available, continuing without framebuffer\r\n");
+        framebuffer_info = std.mem.zeroes(BootInfo.FramebufferInfo);
+    }
+
+    // Step 4: Find RSDP
+    serialPrint("Searching for RSDP...\r\n");
+    const rsdp_addr = findRsdp(system_table);
+    if (rsdp_addr != 0) {
+        serialPrint("RSDP found at: ");
+        serialPrintHex(rsdp_addr);
+        serialPrint("\r\n");
+    } else {
+        serialPrint("WARNING: RSDP not found\r\n");
+    }
+
+    // Step 5: Build page tables
+    serialPrint("Building page tables...\r\n");
+    var paging_segments: [MAX_SEGMENTS]paging.KernelSegment = undefined;
+    for (kernel_segments[0..load_result.segment_count], 0..) |seg, i| {
+        paging_segments[i] = .{
+            .virt_addr = seg.virtual_address,
+            .phys_addr = seg.physical_address,
+            .size = seg.size,
+            .writable = seg.writable,
+            .executable = seg.executable, // Security: propagate for W^X enforcement
+        };
+    }
+
+    const pml4_phys = paging.createKernelPageTables(
+        bs,
+        max_phys,
+        paging_segments[0..load_result.segment_count],
+    ) catch {
+        serialPrint("ERROR: Failed to create page tables\r\n");
+        stallForever();
+    };
+    serialPrint("PML4 created at: ");
+    serialPrintHex(pml4_phys);
+    serialPrint("\r\n");
+
+    // Step 6: Prepare BootInfo structure
+    // Convert memory map to BootInfo format
+    const memmap_count = memory.convertToBootInfo(&uefi_memmap, &boot_memmap);
+
+    // Find kernel physical/virtual base from first segment
+    var kernel_phys_base: u64 = 0;
+    var kernel_virt_base: u64 = 0;
+    if (load_result.segment_count > 0) {
+        kernel_phys_base = kernel_segments[0].physical_address;
+        kernel_virt_base = kernel_segments[0].virtual_address;
+    }
+
+    boot_info = .{
+        .memory_map = &boot_memmap,
+        .memory_map_count = memmap_count,
+        .descriptor_size = @sizeOf(BootInfo.MemoryDescriptor),
+        .framebuffer = &framebuffer_info,
+        .rsdp = rsdp_addr,
+        .initrd_addr = initrd_addr,
+        .initrd_size = initrd_size,
+        .cmdline = null,
+        .hhdm_offset = HHDM_OFFSET,
+        .kernel_phys_base = kernel_phys_base,
+        .kernel_virt_base = kernel_virt_base,
+    };
+
+    serialPrint("BootInfo prepared\r\n");
+
+    // Step 7: Exit boot services
+    serialPrint("Calling ExitBootServices...\r\n");
+
+    // Must get fresh memory map right before ExitBootServices
+    var exit_memmap = memory.getMemoryMap(bs, &memmap_buffer) catch {
+        serialPrint("ERROR: Failed to get final memory map\r\n");
+        stallForever();
+    };
+
+    // Exit boot services - after this, no more UEFI calls!
+    const image_handle = uefi.handle;
+    const exit_status = bs._exitBootServices(image_handle, exit_memmap.map_key);
+
+    if (exit_status != .success) {
+        // Memory map might have changed, try once more
+        exit_memmap = memory.getMemoryMap(bs, &memmap_buffer) catch {
+            stallForever();
+        };
+        const retry_status = bs._exitBootServices(image_handle, exit_memmap.map_key);
+        if (retry_status != .success) {
+            // Can't print anymore after this point in real impl
             stallForever();
         }
     }
-    
-    serialPrint("Exiting EfiMain\r\n");
-    
-    // Stall before exit
-    if (system_table.boot_services) |bs| {
-        _ = bs.stall(5 * 1000 * 1000) catch {};
+
+    // === NO MORE UEFI CALLS AFTER THIS POINT ===
+
+    // Step 8: Load new page tables
+    paging.loadPageTables(pml4_phys);
+
+    // Step 9: Jump to kernel
+    // IMPORTANT: UEFI uses Microsoft x64 ABI (RCX = first arg)
+    // but kernel uses System V AMD64 ABI (RDI = first arg).
+    // We must manually set RDI and jump to avoid calling convention mismatch.
+    const boot_info_ptr = @intFromPtr(&boot_info);
+    const entry_addr = load_result.entry_point;
+
+    // Put boot_info pointer in RDI (System V first arg) and jump to kernel
+    asm volatile (
+        \\mov %[bi], %%rdi
+        \\jmp *%[entry]
+        :
+        : [bi] "r" (boot_info_ptr),
+          [entry] "r" (entry_addr),
+    );
+
+    // Should never reach here
+    unreachable;
+}
+
+fn findRsdp(system_table: *uefi.tables.SystemTable) u64 {
+    // ACPI 2.0 GUID
+    const acpi20_guid = uefi.Guid{
+        .time_low = 0x8868e871,
+        .time_mid = 0xe4f1,
+        .time_high_and_version = 0x11d3,
+        .clock_seq_high_and_reserved = 0xbc,
+        .clock_seq_low = 0x22,
+        .node = [_]u8{ 0x00, 0x80, 0xc7, 0x3c, 0x88, 0x81 },
+    };
+
+    // ACPI 1.0 GUID
+    const acpi10_guid = uefi.Guid{
+        .time_low = 0xeb9d2d30,
+        .time_mid = 0x2d88,
+        .time_high_and_version = 0x11d3,
+        .clock_seq_high_and_reserved = 0x9a,
+        .clock_seq_low = 0x16,
+        .node = [_]u8{ 0x00, 0x90, 0x27, 0x3f, 0xc1, 0x4d },
+    };
+
+    // Sanity check: reject unreasonable table entry counts (protects against corrupted firmware)
+    const MAX_CONFIG_ENTRIES: usize = 1024;
+    if (system_table.number_of_table_entries > MAX_CONFIG_ENTRIES) return 0;
+    if (system_table.number_of_table_entries == 0) return 0;
+
+    const config_entries = system_table.configuration_table[0..system_table.number_of_table_entries];
+
+    // First try ACPI 2.0
+    for (config_entries) |entry| {
+        if (std.mem.eql(u8, std.mem.asBytes(&entry.vendor_guid), std.mem.asBytes(&acpi20_guid))) {
+            return @intFromPtr(entry.vendor_table);
+        }
     }
+
+    // Fall back to ACPI 1.0
+    for (config_entries) |entry| {
+        if (std.mem.eql(u8, std.mem.asBytes(&entry.vendor_guid), std.mem.asBytes(&acpi10_guid))) {
+            return @intFromPtr(entry.vendor_table);
+        }
+    }
+
+    return 0;
 }
 
 fn stallForever() noreturn {
     while (true) {
-        asm volatile("hlt");
+        asm volatile ("hlt");
     }
 }
 
+// Serial output helpers
 fn serialWrite(data: u8) void {
     asm volatile ("outb %%al, %%dx" : : [val] "{al}" (data), [port] "{dx}" (@as(u16, 0x3F8)));
 }
 
 fn serialPrint(msg: []const u8) void {
     for (msg) |c| {
-        // Removed LSR check to avoid potential hang in QEMU if UART is not perfectly emulated or ready
         serialWrite(c);
     }
 }
 
-fn serialRead(port: u16) u8 {
-    return asm volatile ("inb %%dx, %%al" : [ret] "={al}" (-> u8) : [port] "{dx}" (port));
+fn serialPrintHex(value: u64) void {
+    const hex = "0123456789ABCDEF";
+    serialPrint("0x");
+    var started = false;
+    var i: u6 = 60;
+    while (true) : (i -= 4) {
+        const nibble: u4 = @truncate(value >> i);
+        if (nibble != 0 or started or i == 0) {
+            serialWrite(hex[nibble]);
+            started = true;
+        }
+        if (i == 0) break;
+    }
+}
+
+fn serialPrintNum(value: u64) void {
+    if (value == 0) {
+        serialWrite('0');
+        return;
+    }
+    var buf: [20]u8 = undefined;
+    var i: usize = 0;
+    var v = value;
+    while (v > 0) : (v /= 10) {
+        buf[i] = @truncate((v % 10) + '0');
+        i += 1;
+    }
+    while (i > 0) {
+        i -= 1;
+        serialWrite(buf[i]);
+    }
+}
+
+fn serialPrintError(err: loader.LoaderError) void {
+    const msg = switch (err) {
+        error.LocateProtocolFailed => "LocateProtocolFailed",
+        error.OpenVolumeFailed => "OpenVolumeFailed",
+        error.KernelNotFound => "KernelNotFound",
+        error.ReadFailed => "ReadFailed",
+        error.SeekFailed => "SeekFailed",
+        error.InvalidElf => "InvalidElf",
+        error.AllocateFailed => "AllocateFailed",
+        error.SegmentsBufferTooSmall => "SegmentsBufferTooSmall",
+        error.SymbolNotFound => "SymbolNotFound",
+        error.InitrdNotFound => "InitrdNotFound",
+        error.InitrdTooLarge => "InitrdTooLarge",
+    };
+    serialPrint(msg);
+    serialPrint("\r\n");
 }

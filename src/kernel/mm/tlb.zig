@@ -17,6 +17,16 @@
 //! 2. Invalidates local TLB entries
 //! 3. Atomically decrements pending counter
 //!
+//! SECURITY WARNING: Race Window
+//! There is an inherent race between PTE modification and shootdown completion:
+//!   - CPU0 clears PTE for page P
+//!   - CPU0 initiates shootdown IPI
+//!   - BEFORE CPU1 processes IPI, it may still access page P via stale TLB
+//!   - If page P is freed and reallocated, CPU1 may read new data
+//!
+//! For security-sensitive unmaps (keys, credentials, etc.), use
+//! vmm.unmapAndFreePageSecure() which zeros the page BEFORE clearing the PTE.
+//!
 //! Usage:
 //! ```zig
 //! // Single page shootdown

@@ -1,5 +1,7 @@
 const std = @import("std");
 const root = @import("root");
+const builtin = @import("builtin");
+const userspace = if (builtin.cpu.arch == .x86_64) @import("../arch/x86_64/userspace.zig") else struct {};
 
 const EINTR: usize = 4; // Interrupted system call
 
@@ -32,14 +34,9 @@ pub fn getEntropy() u64 {
 /// SYS_GETRANDOM = 318 on x86_64 Linux ABI
 fn userspaceGetrandom(buf: [*]u8, count: usize, flags: u32) isize {
     const SYS_GETRANDOM: usize = 318;
-    var ret: isize = undefined;
-    asm volatile ("syscall"
-        : [ret] "={rax}" (ret)
-        : [number] "{rax}" (SYS_GETRANDOM),
-          [arg1] "{rdi}" (@intFromPtr(buf)),
-          [arg2] "{rsi}" (count),
-          [arg3] "{rdx}" (flags),
-        : .{ .rcx = true, .r11 = true, .memory = true }
-    );
-    return ret;
+    if (builtin.cpu.arch == .x86_64) {
+        const ret_val = userspace.syscall3(SYS_GETRANDOM, @intFromPtr(buf), count, flags);
+        return @as(isize, @bitCast(ret_val));
+    }
+    return -1;
 }

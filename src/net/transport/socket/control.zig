@@ -17,6 +17,9 @@ pub fn shutdown(sock_fd: usize, how: i32) errors.SocketError!void {
     const sock = state.acquireSocket(sock_fd) orelse return errors.SocketError.BadFd;
     defer state.releaseSocket(sock);
 
+    const held = sock.lock.acquire();
+    defer held.release();
+
     // Validate 'how' parameter
     if (how != SHUT_RD and how != SHUT_WR and how != SHUT_RDWR) {
         return errors.SocketError.InvalidArg;
@@ -51,6 +54,9 @@ pub fn getsockname(sock_fd: usize, addr: *types.SockAddrIn) errors.SocketError!v
     const sock = state.acquireSocket(sock_fd) orelse return errors.SocketError.BadFd;
     defer state.releaseSocket(sock);
 
+    const held = sock.lock.acquire();
+    defer held.release();
+
     // Get local address - use interface IP if bound to INADDR_ANY
     var local_ip = sock.local_addr;
     if (local_ip == 0) {
@@ -72,6 +78,9 @@ pub fn getsockname(sock_fd: usize, addr: *types.SockAddrIn) errors.SocketError!v
 pub fn getpeername(sock_fd: usize, addr: *types.SockAddrIn) errors.SocketError!void {
     const sock = state.acquireSocket(sock_fd) orelse return errors.SocketError.BadFd;
     defer state.releaseSocket(sock);
+
+    const held = sock.lock.acquire();
+    defer held.release();
 
     // TCP: get peer address from TCB
     if (sock.sock_type == types.SOCK_STREAM) {

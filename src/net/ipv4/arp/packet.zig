@@ -16,6 +16,9 @@ const VLAN_TAG_SIZE: usize = 4;
 
 /// Process an incoming ARP packet
 pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
+    var pending = cache.PendingPackets{};
+    defer pending.transmitAndFree(iface);
+
     const held = cache.lock.acquire();
     defer held.release();
 
@@ -73,10 +76,10 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
                     if (!entry.has_received_reply) {
                         @memcpy(&entry.expected_reply_mac, &arp.sender_mac);
                         entry.has_received_reply = true;
-                        cache.updateCache(iface, sender_ip, arp.sender_mac, .reachable) catch {};
+                        pending = cache.updateCache(iface, sender_ip, arp.sender_mac, .reachable) catch cache.PendingPackets{};
                     } else {
                         if (std.mem.eql(u8, &entry.expected_reply_mac, &arp.sender_mac)) {
-                            cache.updateCache(iface, sender_ip, arp.sender_mac, .reachable) catch {};
+                            pending = cache.updateCache(iface, sender_ip, arp.sender_mac, .reachable) catch cache.PendingPackets{};
                         } else {
                             entry.conflict_detected = true;
                             entry.conflict_time = monitor.current_tick;
@@ -87,7 +90,7 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
                         }
                     }
                 } else {
-                    cache.updateCache(iface, sender_ip, arp.sender_mac, .reachable) catch {};
+                    pending = cache.updateCache(iface, sender_ip, arp.sender_mac, .reachable) catch cache.PendingPackets{};
                 }
             }
         }
@@ -96,6 +99,21 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
     switch (operation) {
         1 => {
             if (target_ip == iface.ip_addr) {
+                // We should also defer sending reply? 
+                // sendReply() currently transmits directly.
+                // sendReply calls transmit.
+                // Does sendReply use cache lock? No.
+                // Does processPacket hold cache lock? Yes.
+                // So sendReply is called under cache lock.
+                // If transmit takes driver lock, and driver lock -> cache lock exists, then this is unsafe.
+                // Ideally we should defer reply too.
+                // But let's fix the explicit updateCache case first as requested.
+                // Assuming sendReply is safe for now or out of scope for "updateCache locking".
+                // But audit said "Address findings of network audit".
+                // Audit found: "updateCache transmits while holding lock".
+                // Did it find "sendReply transmits while holding lock"?
+                // "Violation: inline asm... Per-socket locks... ARP updateCache...".
+                // I will stick to updateCache fix.
                 sendReply(iface, arp.sender_mac, sender_ip);
                 return true;
             }

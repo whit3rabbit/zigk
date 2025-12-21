@@ -93,19 +93,25 @@ pub fn getSizeClassIndex(size: usize) ?usize {
     return null; // Size too large for slab allocator
 }
 
+/// Magic value for slab header validation
+/// Used to detect fake slab injection attacks
+const SLAB_MAGIC: u32 = 0xDEAD51AB; // "DEADSLAB"
+
 /// Slab header stored at the beginning of each slab
 /// Uses a bitmap to track free/allocated slots
 pub const SlabHeader = struct {
+    /// Magic canary for validation (prevents fake slab injection)
+    magic: u32 = SLAB_MAGIC,
+    /// Number of allocated objects in this slab
+    allocated_count: u16,
+    /// Total number of objects that fit in this slab
+    total_objects: u16,
     /// Pointer to the cache this slab belongs to
     cache: *SlabCache,
     /// Next slab in the list (partial/full/empty)
     next: ?*SlabHeader,
     /// Previous slab in the list
     prev: ?*SlabHeader,
-    /// Number of allocated objects in this slab
-    allocated_count: u16,
-    /// Total number of objects that fit in this slab
-    total_objects: u16,
     /// Object size for this slab
     object_size: u16,
     /// Padding to align to 8 bytes
@@ -133,6 +139,7 @@ pub const SlabHeader = struct {
 
     /// Initialize a new slab for a given object size
     pub fn init(self: *Self, cache: *SlabCache, object_size: u16) void {
+        self.magic = SLAB_MAGIC;
         self.cache = cache;
         self.next = null;
         self.prev = null;
@@ -473,6 +480,20 @@ pub fn free(ptr: []u8) bool {
     const slab_addr = ptr_addr & ~@as(usize, SLAB_SIZE - 1);
     const slab: *SlabHeader = @ptrFromInt(slab_addr);
 
+    // SECURITY: First validate magic canary to detect fake slab injection
+    // An attacker who controls memory at a page boundary could craft a fake
+    // SlabHeader. The magic check prevents this attack.
+    if (slab.magic != SLAB_MAGIC) {
+        if (is_freestanding) {
+            console.warn("Slab: Invalid magic at {x} (expected {x}, got {x})", .{
+                slab_addr,
+                SLAB_MAGIC,
+                slab.magic,
+            });
+        }
+        return false; // Not a valid slab - possible attack or corruption
+    }
+
     // Validate this looks like a slab header by checking cache pointer
     // The cache pointer should point into our slab_caches array
     const caches_start = @intFromPtr(&slab_caches[0]);
@@ -480,7 +501,18 @@ pub fn free(ptr: []u8) bool {
     const cache_addr = @intFromPtr(slab.cache);
 
     if (cache_addr < caches_start or cache_addr >= caches_end) {
+        if (is_freestanding) {
+            console.warn("Slab: Invalid cache pointer at {x}", .{slab_addr});
+        }
         return false; // Not a slab allocation
+    }
+
+    // Additional validation: object_size should match cache's object_size
+    if (slab.object_size != slab.cache.object_size) {
+        if (is_freestanding) {
+            console.warn("Slab: Object size mismatch at {x}", .{slab_addr});
+        }
+        return false; // Corrupted or fake slab
     }
 
     slab.cache.free(slab, ptr.ptr);

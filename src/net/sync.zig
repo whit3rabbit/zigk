@@ -108,7 +108,21 @@ pub const AtomicRefcount = struct {
     /// Increment reference count. Returns previous value.
     /// SECURITY: Uses acquire ordering to ensure visibility of object state.
     pub fn retain(self: *AtomicRefcount) u32 {
-        return self.count.fetchAdd(1, .acquire);
+        while (true) {
+            const current = self.count.load(.acquire);
+            if (current == std.math.maxInt(u32)) {
+                @panic("AtomicRefcount overflow");
+            }
+            const result = self.count.cmpxchgWeak(
+                current,
+                current + 1,
+                .acquire,
+                .monotonic,
+            );
+            if (result == null) {
+                return current;
+            }
+        }
     }
 
     /// Decrement reference count. Returns true if this was the last reference.
@@ -137,6 +151,9 @@ pub const AtomicRefcount = struct {
     pub fn tryRetain(self: *AtomicRefcount) bool {
         var current = self.count.load(.acquire);
         while (current > 0) {
+            if (current == std.math.maxInt(u32)) {
+                @panic("AtomicRefcount overflow");
+            }
             const result = self.count.cmpxchgWeak(
                 current,
                 current + 1,

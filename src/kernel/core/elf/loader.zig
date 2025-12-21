@@ -18,18 +18,34 @@ const validateHeader = validation.validateHeader;
 const copyToUserspace = utils.copyToUserspace;
 const cleanupMappedSegment = utils.cleanupMappedSegment;
 
+const StackBounds = types.StackBounds;
+
 /// Load an ELF executable into an address space
 ///
 /// Args:
 ///   data: Raw ELF file data (e.g., from InitRD module)
 ///   pml4_phys: Physical address of target page table (PML4)
 ///   load_base: Base address for PIE executables (0 for ET_EXEC)
+///   stack_bounds: Actual stack bounds (ASLR). If null, uses default bounds.
+///
+/// SECURITY: Always pass actual ASLR stack bounds to prevent segment overlap attacks
+/// where a malicious ELF places segments at the randomized stack location.
 ///
 /// Returns: ElfLoadResult with entry point and address range
-pub fn load(data: []const u8, pml4_phys: u64, load_base: u64) ElfError!ElfLoadResult {
+pub fn load(data: []const u8, pml4_phys: u64, load_base: u64, stack_bounds: ?StackBounds) ElfError!ElfLoadResult {
+    const bounds = stack_bounds orelse StackBounds.default;
     // Verify we have enough data for the header
     if (data.len < @sizeOf(Elf64_Ehdr)) {
         return ElfError.BufferTooSmall;
+    }
+
+    // SECURITY: Validate alignment before pointer cast.
+    // @alignCast panics in ReleaseSafe if alignment is wrong. While the data
+    // buffer is typically page-aligned from InitRD, we validate explicitly to
+    // convert a panic into a controlled error for defense in depth.
+    if (@intFromPtr(data.ptr) % @alignOf(Elf64_Ehdr) != 0) {
+        console.err("ELF: Input buffer is not aligned for ELF header (required {} bytes)", .{@alignOf(Elf64_Ehdr)});
+        return ElfError.InvalidHeaderSize;
     }
 
     // Parse and validate ELF header
@@ -59,6 +75,18 @@ pub fn load(data: []const u8, pml4_phys: u64, load_base: u64) ElfError!ElfLoadRe
         return ElfError.BufferTooSmall;
     }
 
+    // SECURITY: Validate program header table alignment before pointer cast.
+    // e_phoff is attacker-controlled. A misaligned value causes @alignCast to
+    // panic in ReleaseSafe (DoS) or undefined behavior in ReleaseFast.
+    // Elf64_Phdr requires 8-byte alignment.
+    if (ehdr.e_phoff % @alignOf(Elf64_Phdr) != 0) {
+        console.err("ELF: Program header table offset {x} is not aligned (required {} bytes)", .{
+            ehdr.e_phoff,
+            @alignOf(Elf64_Phdr),
+        });
+        return ElfError.InvalidPhdrSize;
+    }
+
     // Get program header table
     const phdr_ptr: [*]const Elf64_Phdr = @ptrCast(@alignCast(data.ptr + ehdr.e_phoff));
     const phdrs = phdr_ptr[0..ehdr.e_phnum];
@@ -70,6 +98,13 @@ pub fn load(data: []const u8, pml4_phys: u64, load_base: u64) ElfError!ElfLoadRe
     var total_memory: u64 = 0;
     var phdr_vaddr: u64 = 0;
     var tls_phdr: ?Elf64_Phdr = null;
+
+    // SECURITY: Track loaded segment ranges to detect overlaps.
+    // A malicious ELF can define multiple PT_LOAD segments at the same p_vaddr,
+    // causing the second segment to overwrite the first. This could allow an
+    // attacker to place shellcode in a W+X segment that overwrites legitimate code.
+    const SegmentRange = struct { start: u64, end: u64 };
+    var loaded_ranges: [types.MAX_LOAD_SEGMENTS]SegmentRange = undefined;
 
     // First pass: Find PT_PHDR and PT_TLS
     for (phdrs) |*phdr| {
@@ -130,12 +165,30 @@ pub fn load(data: []const u8, pml4_phys: u64, load_base: u64) ElfError!ElfLoadRe
         }
         const vaddr_end = vaddr + phdr.p_memsz;
 
+        // SECURITY: Check for overlap with previously loaded segments.
+        // Prevents a malicious ELF from using segment overlap to inject code.
+        for (loaded_ranges[0..load_count]) |range| {
+            // Overlap exists if: seg_start < range.end AND seg_end > range.start
+            if (vaddr < range.end and vaddr_end > range.start) {
+                console.err("ELF: Segment {x}-{x} overlaps with previously loaded segment {x}-{x}", .{
+                    vaddr,
+                    vaddr_end,
+                    range.start,
+                    range.end,
+                });
+                return ElfError.InvalidAddressRange;
+            }
+        }
+
         // Update address range
         if (vaddr < lowest_addr) lowest_addr = vaddr;
         if (vaddr_end > highest_addr) highest_addr = vaddr_end;
 
         // Load this segment
-        try loadSegment(data, phdr, pml4_phys, actual_base);
+        try loadSegment(data, phdr, pml4_phys, actual_base, bounds);
+
+        // Record this segment's range for future overlap checks
+        loaded_ranges[load_count] = .{ .start = vaddr, .end = vaddr_end };
         load_count += 1;
 
         console.debug("ELF: Loaded segment {x}-{x} (file={}, mem={}, flags={x})", .{
@@ -212,6 +265,7 @@ fn loadSegment(
     phdr: *const Elf64_Phdr,
     pml4_phys: u64,
     base: u64,
+    bounds: StackBounds,
 ) ElfError!void {
     const vaddr = base + phdr.p_vaddr;
     const seg_end = vaddr + phdr.p_memsz;
@@ -226,10 +280,16 @@ fn loadSegment(
         return ElfError.InvalidAddressRange;
     }
 
-    const stack_base = types.DEFAULT_STACK_TOP - types.DEFAULT_STACK_SIZE;
-    const stack_top = types.DEFAULT_STACK_TOP;
-    if (vaddr < stack_top and seg_end > stack_base) {
-        console.err("ELF: Segment overlaps user stack reservation: {x}-{x}", .{ vaddr, seg_end });
+    // SECURITY: Check against actual ASLR stack bounds, not hardcoded defaults
+    const stack_base_addr = bounds.base();
+    const stack_top_addr = bounds.stack_top;
+    if (vaddr < stack_top_addr and seg_end > stack_base_addr) {
+        console.err("ELF: Segment overlaps user stack reservation: {x}-{x} (stack={x}-{x})", .{
+            vaddr,
+            seg_end,
+            stack_base_addr,
+            stack_top_addr,
+        });
         return ElfError.InvalidAddressRange;
     }
 
@@ -242,11 +302,21 @@ fn loadSegment(
     const total_size = std.mem.alignForward(u64, phdr.p_memsz + vaddr_offset, page_size);
     const page_count = total_size / page_size;
 
+    // SECURITY: Warn on W+X segments (violates W^X principle).
+    // Segments that are both writable and executable defeat exploit mitigations
+    // like DEP/NX. While some legitimate use cases exist (JIT compilers), this
+    // is a significant security risk. Log a warning but allow for compatibility.
+    const is_writable = (phdr.p_flags & types.PF_W) != 0;
+    const is_executable = (phdr.p_flags & types.PF_X) != 0;
+    if (is_writable and is_executable) {
+        console.warn("ELF: Segment at {x} has W+X permissions (security risk)", .{vaddr});
+    }
+
     // Convert flags to page flags
     const page_flags = PageFlags{
-        .writable = (phdr.p_flags & types.PF_W) != 0,
+        .writable = is_writable,
         .user = true,
-        .no_execute = (phdr.p_flags & types.PF_X) == 0,
+        .no_execute = !is_executable,
     };
 
     // Allocate and map pages

@@ -2,28 +2,64 @@
 
 ## Overview
 
-Zscapek uses the **Limine Bootloader** (v5.x protocol) for booting. The kernel is compiled as a standard 64-bit ELF executable and loaded into the higher half of virtual memory.
+Zscapek uses a custom UEFI bootloader written in Zig. The kernel is compiled as a standard 64-bit ELF executable and loaded into the higher half of virtual memory.
 
-**Developer Reference**: 
+**Developer Reference**:
 
 For detailed byte-level layouts, struct alignments, and hardware interface specifications, see **[BOOT_ARCHITECTURE.md](BOOT_ARCHITECTURE.md)**.
 
 ## Boot Flow
 
-1. **BIOS/UEFI** hands control to Limine.
-2. **Limine** reads `limine.cfg` and locates the kernel and modules.
-3. **Limine** loads:
-   - `kernel.elf` - The OS kernel
-   - `shell.elf` - Userland shell module
-   - (Optional) `initrd.tar` - Filesystem module
-4. **Limine** sets up:
-   - 64-bit Long Mode with paging enabled
-   - Higher Half Direct Map (HHDM) for physical memory access
-   - Framebuffer (if available)
-   - Memory map
-5. **Limine** jumps directly to the kernel entry point `_start` defined in `src/kernel/core/main.zig`.
-6. **Kernel Initialization** (`src/kernel/core/main.zig`):
-   - Validates Limine protocol requests (HHDM, Framebuffer, Memory Map)
+1. **UEFI Firmware** loads `EFI/BOOT/BOOTX64.EFI` from the EFI System Partition.
+2. **UEFI Bootloader** (`src/boot/uefi/main.zig`):
+   - Loads `kernel.elf` from the filesystem
+   - Loads `initrd.tar` (initial ramdisk) if present
+   - Parses ELF headers and loads PT_LOAD segments into memory
+   - Searches symbol table for `_uefi_start` entry point
+   - Initializes GOP (Graphics Output Protocol) for framebuffer
+   - Gets UEFI memory map and converts to BootInfo format
+   - Locates RSDP (ACPI Root System Description Pointer)
+   - Creates PML4 page tables:
+     - Identity map: 0-4GB (for boot transition)
+     - HHDM: 0xFFFF800000000000 maps all physical memory
+     - Kernel: High-half kernel segments
+   - Calls `ExitBootServices()` to take control from UEFI
+   - Loads new page tables (switches CR3)
+   - Jumps to `_uefi_start` with BootInfo pointer
+
+3. **Kernel Entry** (`_uefi_start` in `src/kernel/core/main.zig`):
+   - Receives BootInfo structure with memory map, framebuffer, RSDP, and initrd
+   - Initializes HAL, memory management, and all subsystems
+
+### UEFI Bootloader Files
+
+| File | Purpose |
+|------|---------|
+| `src/boot/uefi/main.zig` | Main entry, boot sequence orchestration |
+| `src/boot/uefi/loader.zig` | ELF parsing, segment loading, symbol lookup, initrd loading |
+| `src/boot/uefi/memory.zig` | UEFI memory map handling |
+| `src/boot/uefi/graphics.zig` | GOP initialization |
+| `src/boot/uefi/paging.zig` | PML4 page table creation |
+| `src/boot/common/boot_info.zig` | Shared BootInfo structure |
+
+### Running
+
+```bash
+# Build and run with UEFI
+zig build run -Dbios=/opt/homebrew/share/qemu/edk2-x86_64-code.fd
+
+# Or manually with QEMU
+qemu-system-x86_64 -M q35 -m 256M \
+  -drive if=none,format=raw,id=esp,file=fat:rw:zig-out/efi_root \
+  -device virtio-blk-pci,drive=esp,bootindex=1 \
+  -drive if=pflash,format=raw,readonly=on,file=/path/to/edk2-x86_64-code.fd \
+  -serial stdio -accel tcg
+```
+
+## Kernel Initialization
+
+4. **Kernel Initialization** (`src/kernel/core/main.zig`):
+   - Validates BootInfo structure (HHDM, Framebuffer, Memory Map)
    - Initializes HAL (GDT/IDT/Serial/PIC)
    - Initializes Memory Management (PMM/VMM via `core/init_mem.zig`)
    - Initializes VDSO (Virtual Dynamic Shared Object)
@@ -124,33 +160,6 @@ ASLR uses the kernel PRNG (xoroshiro128+) seeded from hardware entropy (RDRAND/R
 - `src/kernel/proc/process/types.zig` - Per-process `aslr_offsets` field
 - `src/kernel/core/elf/root.zig` - Accepts randomized stack_top and pie_base
 - `src/kernel/mm/user_vmm.zig` - Randomized mmap_base per address space
-
-## Limine Configuration
-
-The bootloader is configured via `limine.cfg`:
-
-```ini
-TIMEOUT=5
-SERIAL=yes
-VERBOSE=yes
-
-:Zscapek Microkernel
-PROTOCOL=limine
-KERNEL_PATH=boot:///boot/kernel.elf
-MODULE_PATH=boot:///boot/modules/shell.elf
-MODULE_CMDLINE=shell
-```
-
-## Limine Requests
-
-The kernel declares Limine requests in `src/kernel/core/main.zig`:
-
-- **Base Revision** - Protocol version check
-- **HHDM Request** - Higher Half Direct Map offset
-- **Memory Map Request** - Physical memory regions
-- **Framebuffer Request** - Display buffer
-- **Module Request** - Loaded modules (init process, drivers, initrd)
-- **Kernel Address Request** - Kernel physical/virtual base
 
 ## ELF Loading and Userland Binaries
 
@@ -253,7 +262,7 @@ The framebuffer log may scroll too fast or be initialized too late. Rely on the 
     *   **Cause 1**: Unaligned memory access, often when reading packed ACPI structs.
     *   **Fix**: Ensure all pointers to packed structs (like `*Rsdp` or `*McfgBase`) are cast with `align(1)`, e.g., `@as(*align(1) const T, ptr)`.
     *   **Cause 2**: CS register pointing to wrong GDT entry (e.g., TSS selector 0x28 instead of KERNEL_CODE 0x08).
-    *   **Fix**: The GDT initialization must reload CS via far return after loading the new GDT. Limine bootloader uses a different GDT layout where kernel code may be at a different index than Zscapek's GDT. See "GDT Initialization and CS Reload" section below.
+    *   **Fix**: The GDT initialization must reload CS via far return after loading the new GDT. The UEFI bootloader uses a different GDT layout where kernel code may be at a different index than Zscapek's GDT. See "GDT Initialization and CS Reload" section below.
 *   **"Integer Overflow" Panic**:
     *   **Cause**: Zig's safety checks (enabled in Debug/ReleaseSafe) catch overflows that other languages ignore.
     *   **Hint**: Check loop counters (e.g., `u3` cannot hold 8) and bitwise operations on differing integer widths (e.g., `~u32` inside `u64`). Use `+%` for wrapping addition if intentional.
@@ -308,11 +317,11 @@ The first context switch to user mode (via `isr_common` IRETQ) does SWAPGS, whic
 
 ### 4. GDT Initialization and CS Reload
 
-When the kernel loads its own GDT, it must also reload the CS register. The Limine bootloader uses its own GDT with a different layout than Zscapek's GDT.
+When the kernel loads its own GDT, it must also reload the CS register. The UEFI firmware uses its own GDT with a different layout than Zscapek's GDT.
 
 **The Problem:**
 
-| GDT Index | Limine GDT | Zscapek GDT |
+| GDT Index | UEFI GDT | Zscapek GDT |
 |-----------|------------|----------|
 | 0 | Null | Null |
 | 1 (0x08) | Kernel Code | Kernel Code |
@@ -399,7 +408,57 @@ This configures QEMU with an XHCI controller and USB keyboard/mouse devices inst
 
 ## Key Files
 
-- `limine.cfg` - Bootloader configuration
-- `src/lib/limine.zig` - Limine protocol bindings
-- `src/kernel/core/main.zig` - Kernel entry point
+### UEFI Bootloader
+- `src/boot/uefi/main.zig` - UEFI bootloader entry point
+- `src/boot/uefi/loader.zig` - ELF loader with symbol table search, initrd loading
+- `src/boot/uefi/memory.zig` - UEFI memory map processing
+- `src/boot/uefi/graphics.zig` - GOP framebuffer initialization
+- `src/boot/uefi/paging.zig` - Page table construction
+- `src/boot/common/boot_info.zig` - Shared BootInfo structure
+
+### Kernel
+- `src/kernel/core/main.zig` - Kernel entry point (`_uefi_start`)
 - `src/arch/x86_64/boot/linker.ld` - Kernel linker script
+
+## UEFI Boot Troubleshooting
+
+### Calling Convention Mismatch
+
+**Symptom**: Kernel receives garbage values in BootInfo fields despite bootloader setting correct values.
+
+**Cause**: UEFI executables use the **Microsoft x64 ABI** (first argument in RCX), while the kernel uses **System V AMD64 ABI** (first argument in RDI).
+
+**Solution**: The UEFI bootloader uses inline assembly to explicitly set RDI before jumping to the kernel:
+
+```zig
+// Put boot_info pointer in RDI (System V first arg) and jump to kernel
+asm volatile (
+    \\mov %[bi], %%rdi
+    \\jmp *%[entry]
+    :
+    : [bi] "r" (boot_info_ptr),
+      [entry] "r" (entry_addr),
+);
+```
+
+### Identity Mapping Required for Stack
+
+**Symptom**: Double Fault immediately after VMM initialization.
+
+**Cause**: UEFI bootloader uses a stack in low memory (identity-mapped region). When VMM creates new page tables, it must preserve the identity mapping or the stack becomes inaccessible.
+
+**Solution**: VMM copies all 512 PML4 entries (not just 256-511) to preserve identity mapping for UEFI boot.
+
+### Symbol Table Lookup
+
+**Symptom**: Kernel crashes immediately on entry.
+
+**Cause**: UEFI bootloader defaults to ELF entry point (`_start`) if `_uefi_start` symbol is not found.
+
+**Solution**: The loader searches the ELF symbol table for `_uefi_start`. If not found, it falls back to `e_entry` which is `_start`. Ensure the kernel exports `_uefi_start`:
+
+```zig
+export fn _uefi_start(boot_info: *BootInfo.BootInfo) callconv(.c) noreturn {
+    // UEFI-specific initialization
+}
+```

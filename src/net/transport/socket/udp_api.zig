@@ -120,7 +120,7 @@ pub fn recvfrom(
         // busy) could cause permanent thread starvation in the kernel.
         // Fix: Convert timeout_ms to TSC-based deadline and check it each iteration.
         const timeout_us: u64 = if (sock.rcv_timeout_ms > 0)
-            @as(u64, sock.rcv_timeout_ms) * 1000 // Convert ms to us
+            std.math.mul(u64, sock.rcv_timeout_ms, 1000) catch std.math.maxInt(u64)
         else
             0; // 0 means block forever (no deadline)
         const start_tsc = platform.timing.rdtsc();
@@ -184,7 +184,8 @@ pub fn recvfrom(
         }
         // HLT atomically enables interrupts and halts until next interrupt
         // This is much more power-efficient than busy-spinning with pause
-        asm volatile ("sti; hlt");
+        platform.cpu.enableInterrupts();
+        platform.cpu.halt();
     }
 
     return errors.SocketError.TimedOut;

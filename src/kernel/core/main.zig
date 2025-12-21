@@ -1,9 +1,9 @@
 // Zscapek Kernel Entry Point
 //
 // This is the main entry point for the Zscapek microkernel.
-// It is called by Limine bootloader in 64-bit long mode with paging enabled.
+// It is called by the UEFI bootloader in 64-bit long mode with paging enabled.
 //
-// Limine Entry Conditions:
+// Entry Conditions:
 //   - 64-bit long mode
 //   - Paging enabled with identity + HHDM + higher-half mapping
 //   - GDT with flat code/data segments
@@ -11,7 +11,7 @@
 //   - Interrupts disabled (we set up our own IDT)
 
 const std = @import("std");
-const limine = @import("limine");
+const builtin = @import("builtin");
 const hal = @import("hal");
 const syscall_arch = hal.syscall;
 const console = @import("console");
@@ -31,16 +31,18 @@ const io = @import("io");
 const syscall_base = @import("syscall_base");
 
 // New modules
-const boot = @import("boot.zig");
 const panic_lib = @import("panic.zig");
 const init_mem = @import("init_mem.zig");
 const init_proc = @import("init_proc.zig");
 const init_hw = @import("init_hw.zig");
 const init_fs = @import("init_fs.zig");
-const syscall_ipc = @import("syscall_ipc"); // For console IPC wiring
+const syscall_ipc = @import("syscall_ipc");
 
 // Boot Interface
 const BootInfo = @import("boot_info");
+
+// Global boot info pointer (set during kernel entry)
+var boot_info_ptr: ?*BootInfo.BootInfo = null;
 
 // Syscall dispatch table - must be imported to compile dispatch_syscall symbol
 // called from asm_helpers.S _syscall_entry
@@ -55,14 +57,13 @@ comptime {
     _ = &syscall_table.dispatch_syscall;
 }
 
-// Disable error return traces globally to safe memory/stack space
+// Disable error return traces globally to save memory/stack space
 pub const os_has_error_return_trace = false;
 
 // =============================================================================
 // std.log Integration
 // =============================================================================
-// Redirect std.log.* calls to kernel console. This allows third-party Zig
-// libraries to log correctly and provides a standard logging interface.
+// Redirect std.log.* calls to kernel console.
 
 pub const std_options: std.Options = .{
     .logFn = kernelLogFn,
@@ -99,6 +100,11 @@ var bsp_gs_data: syscall_arch.KernelGsData = .{
 };
 
 // Global driver instances
+// SECURITY NOTE: These are intentionally `undefined` until properly initialized.
+// Framebuffer drivers contain non-nullable pointers that cannot be zero-initialized.
+// The init paths (Serial.init(), DirectFramebufferDriver.initDirect(), etc.) fully
+// initialize these before any use. If init fails, the kernel panics - partial init
+// with leaked data is not possible in practice.
 var uart: serial_driver.Serial = undefined;
 var fb_driver_direct: video_driver.DirectFramebufferDriver = undefined;
 var fb_driver_buffered: video_driver.BufferedFramebufferDriver = undefined;
@@ -127,35 +133,68 @@ fn videoScrollWrapper(ctx: ?*anyopaque, lines: usize, up: bool) void {
     }
 }
 
+// SECURITY: Maximum memory map entries (must match bootloader)
+const MAX_MEMMAP_ENTRIES: usize = 256;
+// Kernel space starts at 0xFFFF800000000000 (canonical higher half)
+const KERNEL_SPACE_START: u64 = 0xFFFF800000000000;
 
+/// Validate BootInfo fields before use (defense-in-depth)
+/// This runs before serial is available, so we halt on failure
+fn validateBootInfo(boot_info: *const BootInfo.BootInfo) void {
+    // SECURITY: HHDM offset must be in kernel space
+    // A malicious/buggy bootloader could set this to userspace, allowing
+    // physToVirt() to return user-controllable addresses
+    if (boot_info.hhdm_offset < KERNEL_SPACE_START) {
+        // Cannot use console here - halt forever
+        hal.cpu.halt();
+    }
 
+    // SECURITY: Memory map count must be within bounds
+    // Out-of-bounds access could read arbitrary memory
+    if (boot_info.memory_map_count > MAX_MEMMAP_ENTRIES) {
+        hal.cpu.halt();
+    }
 
+    // SECURITY: Memory map pointer must be valid (not null)
+    if (@intFromPtr(boot_info.memory_map) == 0) {
+        hal.cpu.halt();
+    }
 
-/// Kernel entry point - called by Limine bootloader
-/// Entry point is specified in linker script as _start
-export fn _start() noreturn {
+    // SECURITY: Kernel addresses should be in higher half if set
+    if (boot_info.kernel_virt_base != 0 and boot_info.kernel_virt_base < KERNEL_SPACE_START) {
+        hal.cpu.halt();
+    }
+}
+
+/// Kernel entry point - called by UEFI bootloader with BootInfo
+export fn _start(boot_info: *BootInfo.BootInfo) callconv(.c) noreturn {
+    // SECURITY: Validate boot info before using any fields
+    // This must be first - a malicious bootloader could provide invalid data
+    validateBootInfo(boot_info);
+
+    // Store the boot info globally
+    boot_info_ptr = boot_info;
+
     // Initialize HAL (serial port, GDT, PIC, IDT, interrupts)
     // This must be first - serial is needed for any debug output
-    hal.init(0);
+    hal.init(boot_info.hhdm_offset);
 
     // Initialize Serial Driver (UART)
     uart = serial_driver.Serial.init();
-    
+
     // Register UART as console backend
     console.addBackend(.{
         .context = @ptrCast(&uart),
         .writeFn = uartWriteWrapper,
     });
-    
+
     // DISABLE Kernel Serial IRQ Handler to allow userspace driver to take it
-    // Phase 3: Transition to userspace capabilities
     hal.interrupts.setSerialHandler(null);
 
-    // Initialize GS base for syscalls - points to per-CPU data
-    // kernel_stack will be updated by scheduler on context switch
+    // Initialize GS base for syscalls
     hal.cpu.writeMsr(hal.cpu.IA32_GS_BASE, @intFromPtr(&bsp_gs_data));
 
-    // Connect console to interrupt handlers for debug output
+    // Connect console to interrupt handlers
     hal.interrupts.setConsoleWriter(&console.print);
 
     // Print boot banner
@@ -165,179 +204,37 @@ export fn _start() noreturn {
     console.print("========================================\n");
     console.print("\n");
 
-    // Verify Limine protocol is supported
-    if (!boot.base_revision.is_supported()) {
-        console.err("Limine protocol not supported! Check base revision.", .{});
-        panic_lib.halt();
-    }
-    console.info("Limine protocol verified (revision 3)", .{});
+    // Initialize paging with HHDM offset from BootInfo
+    hal.paging.init(boot_info.hhdm_offset);
 
-    // Get HHDM offset from Limine response
-    if (boot.hhdm_request.response) |hhdm| {
-        console.info("HHDM offset: {x}", .{hhdm.offset});
-        hal.paging.init(hhdm.offset);
-    } else {
-        console.warn("HHDM response not available, using default offset", .{});
-    }
-
-    // Log kernel address info if available
-    if (boot.kernel_address_request.response) |ka| {
-        console.info("Kernel physical base: {x}", .{ka.physical_base});
-        console.info("Kernel virtual base: {x}", .{ka.virtual_base});
-    }
-
-    // --- Boot Interface Abstraction Layer ---
-    // Convert Limine requests to generic BootInfo
-    // This allows switching to a custom loader later without changing kernel logic
-    
-    // 1. Memory Map Conversion
-    const memmap_response = boot.memmap_request.response orelse {
-        // Serial is not yet initialized? Actually hal.serial.init() is called by hal.init() which we haven't called yet?
-        // Wait, hal.init is called AFTER checking requests in original code?
-        // Original code:
-        // if (boot.hhdm_request.response == null) halt();
-        // hal.init();
-        
-        // We should keep the checks.
-        asm volatile ("cli; hlt"); 
-        unreachable;
-    };
-    
-    const hhdm_response = boot.hhdm_request.response orelse {
-        asm volatile ("cli; hlt");
-        unreachable;
-    };
-    
-
-    
-    // Static buffer for memory map to avoid stack overflow
-    // We are single-threaded here (BSP), so this is safe.
-    const MAX_MEMMAP_ENTRIES = 128;
-    // Use a struct to hold the buffer in function scope static memory? 
-    // Zig doesn't have function-static. We can use a global or just risk the stack?
-    // 128 * 40 bytes ~= 5KB. 
-    // Limine stack is usually 64KB. This is safe.
-    var mem_descriptors: [MAX_MEMMAP_ENTRIES]BootInfo.MemoryDescriptor = undefined;
-    var mem_count: usize = 0;
-    
-    {
-        const entries = memmap_response.entries();
-        for (entries) |entry| {
-            if (mem_count >= MAX_MEMMAP_ENTRIES) break;
-            
-            var type_: BootInfo.MemoryType = .Reserved;
-            switch (entry.kind) {
-                .usable => type_ = .Conventional,
-                .reserved => type_ = .Reserved,
-                .acpi_reclaimable => type_ = .ACPIReclaim,
-                .acpi_nvs => type_ = .ACPINvs,
-                .bad_memory => type_ = .Unusable,
-                .bootloader_reclaimable => type_ = .BootServicesData,
-                .kernel_and_modules => type_ = .KernelCode,
-                .framebuffer => type_ = .Framebuffer,
-            }
-            
-            mem_descriptors[mem_count] = .{
-                .type = type_,
-                .phys_start = entry.base,
-                .virt_start = 0,
-                .num_pages = entry.length / 4096, // PAGE_SIZE
-                .attribute = 0,
-            };
-            mem_count += 1;
+    // SECURITY: Only log kernel addresses in debug mode to prevent KASLR bypass
+    if (builtin.mode == .Debug) {
+        console.info("HHDM offset: {x}", .{boot_info.hhdm_offset});
+        if (boot_info.kernel_phys_base != 0) {
+            console.info("Kernel physical base: {x}", .{boot_info.kernel_phys_base});
+            console.info("Kernel virtual base: {x}", .{boot_info.kernel_virt_base});
         }
     }
-    
-    // 2. Framebuffer Info
-    var fb_info: ?BootInfo.FramebufferInfo = null;
-    var fb_info_storage: BootInfo.FramebufferInfo = undefined;
-    
-    if (boot.framebuffer_request.response) |resp| {
-        if (resp.framebuffer_count > 0) {
-            const fb = resp.framebuffers()[0];
-            fb_info_storage = .{
-                .address = fb.address,
-                .width = fb.width,
-                .height = fb.height,
-                .pitch = fb.pitch,
-                .bpp = fb.bpp,
-                .red_mask_size = fb.red_mask_size,
-                .red_mask_shift = fb.red_mask_shift,
-                .green_mask_size = fb.green_mask_size,
-                .green_mask_shift = fb.green_mask_shift,
-                .blue_mask_size = fb.blue_mask_size,
-                .blue_mask_shift = fb.blue_mask_shift,
-            };
-            fb_info = fb_info_storage; // struct copy
-        }
-    }
-    
-    // 3. RSDP
-    const rsdp_addr = if (boot.rsdp_request.response) |resp| resp.address else 0;
-
-    // 4. Construct BootInfo
-    var k_phys: u64 = 0;
-    var k_virt: u64 = 0;
-    if (boot.kernel_address_request.response) |ka| {
-        k_phys = ka.physical_base;
-        k_virt = ka.virtual_base;
-    }
-
-    const boot_info = BootInfo.BootInfo{
-        .memory_map = &mem_descriptors,
-        .memory_map_count = mem_count,
-        .descriptor_size = @sizeOf(BootInfo.MemoryDescriptor),
-        .framebuffer = if (fb_info) |*info| info else null,
-        .rsdp = rsdp_addr,
-        .initrd_addr = 0, // TODO
-        .initrd_size = 0,
-        .cmdline = null, // TODO
-        .hhdm_offset = hhdm_response.offset,
-        .kernel_phys_base = k_phys,
-        .kernel_virt_base = k_virt,
-    };
-
-    // --- Kernel Initialization ---
-
-    // 1. Initialize HAL (Hardware Abstraction Layer)
-    // Needs HHDM offset for default paging functions
-    // hal.init(boot_info.hhdm_offset); // Already initialized
 
     console.info("Kernel Exception Handling initialized", .{});
 
-    // 2. Initialize Memory Management (PMM, VMM, Heap)
-    // Refactored to use BootInfo
-    init_mem.initMemoryManagement(&boot_info);
+    // Initialize Memory Management (PMM, VMM, Heap)
+    init_mem.initMemoryManagement(boot_info);
 
-    // 3. Initialize Framebuffer (if available)
+    // Initialize Framebuffer
     if (boot_info.framebuffer) |fb| {
         framebuffer.initFromInfo(fb, boot_info.hhdm_offset);
     } else {
         console.warn("No framebuffer (BootInfo), serial only", .{});
     }
 
-    // Check for loaded modules (shell, initrd, etc.)
-    if (boot.module_request.response) |mod_response| {
-        const mods = mod_response.modules();
-        console.info("Loaded modules: {d}", .{mods.len});
-        for (mods) |mod| {
-            console.info("  Module: {s} @ {x} ({d} bytes)", .{
-                std.mem.span(mod.cmdline),
-                mod.address,
-                mod.size,
-            });
-        }
-        init_proc.initInitRD(mods);
-    }
+    // Initialize InitRD from BootInfo
+    init_proc.initInitRDFromBootInfo(boot_info);
 
-
-    // Now that PMM is ready, try to enable Double Buffering for graphical console
-    // Attempt to create a buffered driver using the same video mode
+    // Initialize video console if framebuffer available
     if (framebuffer.getState()) |fb_state| {
-        // fb_state.phys_addr is physical. Convert to kernel virtual (HHDM).
         const virt_addr = @intFromPtr(hal.paging.physToVirt(fb_state.phys_addr));
-        
-        // Initialize Framebuffer Driver (direct mode initially, before PMM is ready)
+
         const video_mode = video_driver.interface.VideoMode{
             .width = fb_state.width,
             .height = fb_state.height,
@@ -352,88 +249,52 @@ export fn _start() noreturn {
             .blue_field_position = fb_state.blue_shift,
         };
         fb_driver_direct = video_driver.DirectFramebufferDriver.initDirect(video_mode);
-
-        // Initialize Graphical Console (will switch to buffered driver after PMM init)
         graph_console = video_driver.console.Console.init(fb_driver_direct.device());
-        
-        // Register Graphical Console as backend
+
         console.addBackend(.{
             .context = @ptrCast(&graph_console),
             .writeFn = videoWriteWrapper,
             .scrollFn = videoScrollWrapper,
         });
-        
+
         console.info("Graphics: Initialized {d}x{d}x{d} framebuffer", .{
             fb_state.width, fb_state.height, fb_state.bpp
         });
     }
 
-
-
-    // Now that PMM is ready, try to enable Double Buffering for graphical console
-    // Attempt to create a buffered driver using the same video mode
+    // Try double buffering
     if (video_driver.BufferedFramebufferDriver.initWithBackBuffer(fb_driver_direct.mode)) |buffered| {
         fb_driver_buffered = buffered;
         fb_is_buffered = true;
-        // Reinitialize console with buffered driver
         graph_console = video_driver.console.Console.init(fb_driver_buffered.device());
         console.info("Graphics: Double Buffering enabled", .{});
     }
 
-    // Initialize VFS and mount filesystems
+    // Initialize VFS
     init_fs.initVfs();
 
-    // Initialize entropy subsystem (RDRAND/RDSEED/RDTSC detection)
-    // Security: This is early boot - entropy may be limited without hardware RNG
+    // Initialize entropy subsystem
     hal.entropy.init();
-
-    // Initialize kernel PRNG (may use weak entropy at this point)
     prng.init();
-
-    // Initialize stack guard (initial canary - may be weak)
     stack_guard.init();
 
     // Initialize APIC
-    initApic();
-
-    // Security: Re-seed stack canary now that APIC timer is running
-    // The APIC initialization adds timing entropy from calibration loops.
-    // This mitigates boot-time entropy starvation on systems without RDRAND.
+    initApic(boot_info);
     stack_guard.reseed();
 
-    // Initialize TLB Shootdown (after IPIs are ready)
+    // Initialize TLB Shootdown
     tlb.init();
 
-    // Initialize SMP (bring up APs)
+    // Initialize SMP
     console.info("About to call hal.smp.init()", .{});
     hal.smp.init();
     console.info("Returned from hal.smp.init()", .{});
 
-    // Initialize keyboard driver and register with HAL
-    // Initialize keyboard driver and register with HAL
-    // keyboard.init(); // MOVED TO USERSPACE (Phase 5)
-    // hal.interrupts.setKeyboardHandler(&keyboard.handleIrq);
-    // Explicitly enable keyboard IRQ1 in IOAPIC (ensure unmasked)
-    // hal.apic.enableIrq(1); // Userspace driver will enable this via sys_wait_interrupt
     console.info("Keyboard IRQ1 explicitly enabled", .{});
-
-    // Initialize input subsystem
-    // mouse.init();    // MOVED TO USERSPACE (Phase 5)
     input.init();
     console.info("Input subsystem initialized", .{});
 
-
-    // Initialize mouse driver and register with HAL
-    // Initialize mouse driver and register with HAL
-    // mouse.init(); // MOVED TO USERSPACE (Phase 5)
-    // hal.interrupts.setMouseHandler(&mouse.handleIrq);
-
-    // Register Serial (UART) handler
     hal.interrupts.setSerialHandler(&serial_driver.Serial.handleIrq);
-    // Register UART input callback
-    // serial_driver.Serial.onByteReceived = &uartInputCallback;
-    
-    // Enable Serial IRQ 4 (legacy COM1)
     hal.apic.enableIrq(4);
     console.info("Serial IRQ4 enabled", .{});
 
@@ -441,88 +302,75 @@ export fn _start() noreturn {
 
     // Initialize scheduler
     sched.init();
-
-    // Register demand paging handler for user page faults
-    // This enables lazy allocation - mmap reserves address space without allocating
-    // physical pages until they are actually accessed
     hal.interrupts.setPageFaultHandler(pageFaultHandler);
     console.info("Demand paging enabled", .{});
 
-    // Initialize async I/O reactor (Phase 2)
     io.initGlobal();
     console.info("Async I/O reactor initialized", .{});
 
-    // Wire up console IPC backend function pointer
     console.sendKernelMessageFn = syscall_ipc.sendKernelMessage;
-    
-    // Initialize signal handling subsystem
+
     const signal = @import("signal");
     signal.init();
 
-    // Register GS data with scheduler for syscall stack switching
     sched.setGsData(&bsp_gs_data);
 
-    // Log interrupt infrastructure status
     console.print("\n");
     console.info("Interrupt infrastructure initialized:", .{});
     console.info("  GDT loaded with TSS", .{});
     console.info("  PIC remapped to vectors 32-47", .{});
     console.info("  IDT installed with 48 handlers", .{});
-    console.info("  Keyboard driver registered", .{});
-    console.info("  Mouse driver registered", .{});
     console.info("  Scheduler initialized", .{});
     console.info("  PRNG seeded, stack canary randomized", .{});
     console.info("\n", .{});
     console.info("Kernel initialization complete", .{});
 
+    // Set RSDP address for hardware subsystems
+    init_hw.setRsdpAddress(boot_info.rsdp);
 
-
-    // Initialize Hardware Subsystems
+    // Initialize Hardware
     init_hw.initNetwork();
     init_hw.initUsb();
     init_hw.initAudio();
     init_hw.initStorage();
 
-    // Initialize Block Filesystem (SFS)
     init_fs.initBlockFs();
 
-    // Try to initialize VirtIO-GPU
     if (init_hw.initVirtioGpu()) |driver| {
-        // Switch console to use VirtIO-GPU
-         graph_console = video_driver.console.Console.init(driver.device());
-         console.info("VirtIO-GPU: Console switched to paravirtualized GPU", .{});
+        graph_console = video_driver.console.Console.init(driver.device());
+        console.info("VirtIO-GPU: Console switched to paravirtualized GPU", .{});
     }
 
-    // Load Init Process
+    // Load Init Process from InitRD
     console.info("Main: Calling loadInitProcess()...", .{});
     init_proc.loadInitProcess();
-    // Initialize Futex subsystem (wait queues)
+
+    // Initialize Futex subsystem
     {
         const futex = @import("futex");
         futex.init();
     }
-    
-    // -------------------------------------------------------------------------
-    // 9. Process & Scheduler
-    // -------------------------------------------------------------------------console.info("Starting scheduler...", .{});
+
+    console.info("Starting scheduler...", .{});
     sched.start();
 }
 
 // Initialize APIC subsystem (replaces legacy PIC)
-fn initApic() void {
+fn initApic(boot_info: *const BootInfo.BootInfo) void {
     console.print("\n");
     console.info("Initializing APIC subsystem...", .{});
 
-    // Get RSDP from Limine via boot module
-    const rsdp_response = boot.rsdp_request.response orelse {
+    // Get RSDP address from BootInfo
+    const rsdp_addr = boot_info.rsdp;
+
+    if (rsdp_addr == 0) {
         console.warn("RSDP not found, using legacy PIC mode", .{});
-        hal.apic.setLegacyPicMode(); // Explicitly set interrupt mode for proper EOI handling
+        hal.apic.setLegacyPicMode();
         return;
-    };
-    const rsdp_ptr: *align(1) const acpi.Rsdp = @ptrFromInt(rsdp_response.address);
+    }
+    const rsdp_ptr: *align(1) const acpi.Rsdp = @ptrFromInt(rsdp_addr);
 
     // Parse MADT to get APIC topology
-    // MUST be static - ApicInitInfo stores slices that reference this data
     const madt_info = blk: {
         const static = struct {
             var info: acpi.MadtInfo = undefined;
@@ -538,7 +386,6 @@ fn initApic() void {
     acpi.logMadtInfo(madt_info);
 
     // Convert MADT info to APIC init info
-    // We need to convert the ioapic array to the local IoApicInfo type
     var io_apics: [hal.apic.ioapic.MAX_IOAPICS]hal.apic.IoApicInfo = undefined;
     for (madt_info.io_apics[0..madt_info.io_apic_count], 0..) |ioapic, i| {
         io_apics[i] = .{
@@ -576,20 +423,15 @@ fn initApic() void {
 }
 
 /// Page fault handler for demand paging
-/// Called by HAL when a user-mode page fault occurs
-/// Returns true if the fault was handled (page allocated), false if it's a real crash
 fn pageFaultHandler(addr: u64, err_code: u64) bool {
-    // Get current process - must exist for user-mode page faults
     const proc = syscall_base.getCurrentProcessOrNull() orelse {
         console.warn("PageFault: No current process for addr {x}", .{addr});
         return false;
     };
 
-    // Delegate to the process's UserVmm for demand paging
     const handled = proc.user_vmm.handlePageFault(addr, err_code);
 
     if (handled) {
-        // Update RSS accounting (we allocated 1 page = 4096 bytes)
         proc.rss_current +|= 4096;
     }
 

@@ -77,33 +77,46 @@ pub fn bind(sock_fd: usize, addr: *const types.SockAddrIn) errors.SocketError!vo
 
 /// Close a socket
 pub fn close(sock_fd: usize) errors.SocketError!void {
-    const held = state.lock.acquire();
-    defer held.release();
+    var tcb_list: [types.ACCEPT_QUEUE_SIZE + 1]*tcp.Tcb = undefined;
+    var tcb_count: usize = 0;
 
-    const sock = state.getSocketLocked(sock_fd) orelse return errors.SocketError.BadFd;
+    {
+        const held = state.lock.acquire();
+        defer held.release();
 
-    // 1. Remove from table prevent new lookups (UAF protection)
-    // SECURITY: Use atomic store for closing flag
-    sock.closing.store(true, .release);
-    state.clearSlot(sock_fd);
-    state.unregisterUdpSocket(sock);
+        const sock = state.getSocketLocked(sock_fd) orelse return errors.SocketError.BadFd;
 
-    // Close TCP connection if present
-    if (sock.tcb) |tcb| {
-        tcp.close(tcb);
-        sock.tcb = null;
-    }
+        // 1. Remove from table prevent new lookups (UAF protection)
+        // SECURITY: Use atomic store for closing flag
+        sock.closing.store(true, .release);
+        state.clearSlot(sock_fd);
+        state.unregisterUdpSocket(sock);
 
-    // Free any pending accept queue entries in user-space logic if needed,
-    // but TCB destruction should handle TCBs.
-    // The Socket struct accept_queue holds pointers to TCBs.
-    for (&sock.accept_queue) |*entry| {
-        if (entry.*) |tcb| {
-            tcp.close(tcb);
-            entry.* = null;
+        if (sock.tcb) |tcb| {
+            tcb_list[tcb_count] = tcb;
+            tcb_count += 1;
+            sock.tcb = null;
         }
+
+        // Free any pending accept queue entries in user-space logic if needed,
+        // but TCB destruction should handle TCBs.
+        // The Socket struct accept_queue holds pointers to TCBs.
+        for (&sock.accept_queue) |*entry| {
+            if (entry.*) |tcb| {
+                if (tcb_count < tcb_list.len) {
+                    tcb_list[tcb_count] = tcb;
+                    tcb_count += 1;
+                }
+                entry.* = null;
+            }
+        }
+
+        // Drop table's reference; socket memory will be freed once all users release.
+        state.releaseSocketLocked(sock);
     }
 
-    // Drop table's reference; socket memory will be freed once all users release.
-    state.releaseSocketLocked(sock);
+    var i: usize = 0;
+    while (i < tcb_count) : (i += 1) {
+        tcp.close(tcb_list[i]);
+    }
 }

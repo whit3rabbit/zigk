@@ -107,6 +107,25 @@ pub const DEFAULT_STACK_SIZE: usize = 2 * 1024 * 1024;
 /// Default stack top address (below kernel space)
 pub const DEFAULT_STACK_TOP: u64 = 0x7FFF_FFFF_F000;
 
+/// Stack bounds for ELF loading validation
+/// SECURITY: Use actual ASLR bounds instead of defaults to prevent
+/// segment overlap attacks where malicious ELF segments target the
+/// randomized stack location.
+pub const StackBounds = struct {
+    stack_top: u64,
+    stack_size: usize,
+
+    pub fn base(self: StackBounds) u64 {
+        return self.stack_top - self.stack_size;
+    }
+
+    /// Default bounds (used when ASLR offsets not available)
+    pub const default = StackBounds{
+        .stack_top = DEFAULT_STACK_TOP,
+        .stack_size = DEFAULT_STACK_SIZE,
+    };
+};
+
 // =============================================================================
 // ELF Loader Errors
 // =============================================================================

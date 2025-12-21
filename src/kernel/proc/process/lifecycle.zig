@@ -24,11 +24,17 @@ const UserVmm = user_vmm_mod.UserVmm;
 ///
 /// Allocates a new PID, file descriptor table (with stdio), and address space.
 /// If `parent` is provided, the new process is added as a child.
+///
+/// Returns error.WeakEntropy if ASLR cannot generate secure offsets (no hardware RNG).
 pub fn createProcess(parent: ?*Process) !*Process {
     const alloc = heap.allocator();
 
     // Generate ASLR offsets for this process
-    const aslr_offsets = aslr.generateOffsets();
+    // SECURITY: This will fail if entropy is weak (per CLAUDE.md "Fail Secure" policy)
+    const aslr_offsets = aslr.generateOffsets() catch |err| {
+        console.err("Process: Failed to generate ASLR offsets: {}", .{err});
+        return error.OutOfMemory; // Map to a standard error for callers
+    };
 
     // Create file descriptor table
     const fd_table = try fd_mod.createFdTable();

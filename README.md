@@ -1,7 +1,7 @@
 # Zscapek
 [![ISO Release Build](https://github.com/whit3rabbit/zigk/actions/workflows/build-iso.yml/badge.svg?event=release)](https://github.com/whit3rabbit/zigk/actions/workflows/build-iso.yml)
 
-Zscapek is a 64-bit modular monolithic operating system kernel written in Zig. It targets the x86_64 architecture and utilizes the Limine bootloader.
+Zscapek is a 64-bit modular monolithic operating system kernel written in Zig. It targets the x86_64 architecture and includes a custom UEFI bootloader.
 
 While the project uses a clean module structure to separate concerns, it operates as a monolithic kernel. Device drivers, the network stack, and file system logic run in kernel space (Ring 0) to maximize performance and simplify hardware access.
 

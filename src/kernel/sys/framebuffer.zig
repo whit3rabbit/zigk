@@ -1,6 +1,6 @@
 //! Framebuffer State Management
 //!
-//! Captures and stores framebuffer information provided by the bootloader (Limine).
+//! Captures and stores framebuffer information provided by the bootloader.
 //! Provides a global accessor for syscall handlers to query framebuffer state.
 //!
 //! The framebuffer physical address and dimensions are captured at boot time.
@@ -9,7 +9,6 @@
 //!   2. Map framebuffer memory via `sys_map_fb` (1002)
 
 const std = @import("std");
-const limine = @import("limine");
 const console = @import("console");
 const BootInfo = @import("boot_info");
 
@@ -122,38 +121,6 @@ pub fn initFromInfo(info: *const BootInfo.FramebufferInfo, hhdm_offset: u64) voi
     });
 }
 
-/// Initialize framebuffer state from Limine framebuffer request
-/// Called once during kernel initialization (after PMM, before scheduler)
-pub fn initFromLimine(fb_request: *const limine.FramebufferRequest) void {
-    const fb_response = fb_request.response orelse {
-        console.warn("Framebuffer: No response (serial-only mode)", .{});
-        return;
-    };
-
-    if (fb_response.framebuffer_count == 0) {
-        console.warn("Framebuffer: No framebuffers available (serial-only mode)", .{});
-        return;
-    }
-
-    // Use the first framebuffer
-    const fb = fb_response.framebuffers()[0];
-    
-    const info = BootInfo.FramebufferInfo{
-        .address = fb.address,
-        .width = fb.width,
-        .height = fb.height,
-        .pitch = fb.pitch,
-        .bpp = fb.bpp,
-        .red_mask_size = fb.red_mask_size,
-        .red_mask_shift = fb.red_mask_shift,
-        .green_mask_size = fb.green_mask_size,
-        .green_mask_shift = fb.green_mask_shift,
-        .blue_mask_size = fb.blue_mask_size,
-        .blue_mask_shift = fb.blue_mask_shift,
-    };
-    
-    initFromInfo(&info, hal.paging.HHDM_OFFSET);
-}
 
 /// Get framebuffer state
 /// Returns null if no framebuffer is available (serial-only mode)

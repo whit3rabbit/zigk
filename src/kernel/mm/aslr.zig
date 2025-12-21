@@ -96,16 +96,26 @@ pub const AslrOffsets = struct {
     tls_base: u64 = Config.TLS_BASE,
 };
 
+/// Error type for ASLR generation
+pub const AslrError = error{
+    WeakEntropy,
+};
+
 /// Generate ASLR offsets for a new process
 /// Called during createProcess() and execve()
-pub fn generateOffsets() AslrOffsets {
+///
+/// Returns error.WeakEntropy if the PRNG is using fallback seed (per CLAUDE.md
+/// "Fail Secure" policy: security-critical dependencies must not silently degrade).
+pub fn generateOffsets() AslrError!AslrOffsets {
     var offsets = AslrOffsets{};
 
-    // Fail-secure: Check if weak entropy is being used
+    // SECURITY: Fail-secure per CLAUDE.md policy.
+    // If entropy source is weak, refuse to generate ASLR offsets.
+    // This prevents spawning processes with predictable memory layouts.
     if (prng.isUsingFallbackSeed()) {
-        console.err("CRITICAL: ASLR using predictable fallback seed! System security compromised.", .{});
-        // We do not abort here to prevent bricking on low-quality emulators,
-        // but this log should alert any security audit.
+        console.err("CRITICAL: ASLR refusing to generate offsets - PRNG using predictable fallback seed!", .{});
+        console.err("CRITICAL: Ensure hardware RNG (RDRAND/RDSEED) is available or provide boot entropy.", .{});
+        return error.WeakEntropy;
     }
 
     // Generate random values using kernel PRNG
