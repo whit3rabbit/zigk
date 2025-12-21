@@ -10,9 +10,27 @@ const RingSet = ring.RingSet;
 // Configure std options for freestanding
 // Configure std options for freestanding
 pub const std_options: std.Options = .{
+    .logFn = log,
     .page_size_min = 4096,
     .page_size_max = 4096,
 };
+
+pub fn log(
+    comptime message_level: std.log.Level,
+    comptime scope: @TypeOf(.enum_literal),
+    comptime format: []const u8,
+    args: anytype,
+) void {
+    _ = message_level;
+    _ = scope;
+    var buf: [1024]u8 = undefined;
+    if (std.fmt.bufPrint(&buf, format, args)) |written| {
+        syscall.print(written);
+        syscall.print("\n");
+    } else |_| {
+        syscall.print("Log truncated\n");
+    }
+}
 
 // 1MB static heap buffer
 var heap_buffer: [1024 * 1024]u8 = undefined;
@@ -40,7 +58,7 @@ pub fn main() !void {
         net.parseIp("10.0.2.2").?,
     );
 
-    net.init(&iface, allocator, 100); // 100 ticks per sec (10ms)
+    net.init(&iface, allocator, 100, net.defaultClock()); // 100 ticks per sec (10ms)
 
     syscall.print("Netstack Initialized: 10.0.2.15/24\n");
 

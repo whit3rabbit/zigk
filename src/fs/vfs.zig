@@ -18,7 +18,6 @@ const initrd = @import("initrd.zig");
 const sync = @import("sync");
 const meta = @import("fs_meta");
 
-
 pub const FileMeta = meta.FileMeta;
 
 // Maximum number of mount points
@@ -39,6 +38,8 @@ pub const Error = error{
     Busy,
     IOError,
     NoMemory,
+    AlreadyExists,
+    NotEmpty,
 };
 
 /// FileSystem Interface
@@ -65,6 +66,30 @@ pub const FileSystem = struct {
 
     /// Change file owner/group - optional, null for read-only filesystems
     chown: ?*const fn (ctx: ?*anyopaque, path: []const u8, uid: ?u32, gid: ?u32) Error!void = null,
+
+    /// Get filesystem statistics - optional
+    statfs: ?*const fn (ctx: ?*anyopaque) Error!uapi.stat.Statfs = null,
+
+    /// Rename a file or directory - optional
+    rename: ?*const fn (ctx: ?*anyopaque, old_path: []const u8, new_path: []const u8) Error!void = null,
+
+    /// Truncate (resize) a file - optional
+    truncate: ?*const fn (ctx: ?*anyopaque, path: []const u8, length: u64) Error!void = null,
+
+    /// Create a directory - optional
+    mkdir: ?*const fn (ctx: ?*anyopaque, path: []const u8, mode: u32) Error!void = null,
+
+    /// Remove a directory - optional
+    rmdir: ?*const fn (ctx: ?*anyopaque, path: []const u8) Error!void = null,
+
+    /// Create a hard link - optional
+    link: ?*const fn (ctx: ?*anyopaque, old_path: []const u8, new_path: []const u8) Error!void = null,
+
+    /// Create a symbolic link - optional
+    symlink: ?*const fn (ctx: ?*anyopaque, target: []const u8, linkpath: []const u8) Error!void = null,
+
+    /// Read the target of a symbolic link - optional
+    readlink: ?*const fn (ctx: ?*anyopaque, path: []const u8, buf: []u8) Error!usize = null,
 };
 
 /// Mount Point Structure
@@ -488,6 +513,326 @@ pub const Vfs = struct {
 
         return error.NotFound;
     }
+
+    /// Rename a file or directory
+    pub fn rename(old_path: []const u8, new_path: []const u8) Error!void {
+        if (old_path.len == 0 or new_path.len == 0) return error.InvalidPath;
+        if (old_path[0] != '/' or new_path[0] != '/') return error.InvalidPath;
+
+        const held = lock.acquire();
+        defer held.release();
+
+        // 1. Find mount point for old_path
+        var old_idx: ?usize = null;
+        var old_best_len: usize = 0;
+        for (0..MAX_MOUNTS) |i| {
+            if (mounts[i]) |mp| {
+                if (std.mem.startsWith(u8, old_path, mp.path)) {
+                    if (mp.path.len > old_best_len) {
+                        old_idx = i;
+                        old_best_len = mp.path.len;
+                    }
+                }
+            }
+        }
+
+        // 2. Find mount point for new_path
+        var new_idx: ?usize = null;
+        var new_best_len: usize = 0;
+        for (0..MAX_MOUNTS) |i| {
+            if (mounts[i]) |mp| {
+                if (std.mem.startsWith(u8, new_path, mp.path)) {
+                    if (mp.path.len > new_best_len) {
+                        new_idx = i;
+                        new_best_len = mp.path.len;
+                    }
+                }
+            }
+        }
+
+        if (old_idx == null or new_idx == null) return error.NotFound;
+        if (old_idx != new_idx) return error.NotSupported; // Cannot rename across filesystems
+
+        const mp = &mounts[old_idx.?].?;
+        const rename_fn = mp.fs.rename orelse return error.NotSupported;
+
+        var rel_old = old_path[old_best_len..];
+        if (rel_old.len == 0) rel_old = "/";
+        var rel_new = new_path[new_best_len..];
+        if (rel_new.len == 0) rel_new = "/";
+
+        return rename_fn(mp.fs.context, rel_old, rel_new);
+    }
+
+    /// Truncate a file to a given length
+    pub fn truncate(path: []const u8, length: u64) Error!void {
+        if (path.len == 0 or path[0] != '/') return error.InvalidPath;
+
+        const held = lock.acquire();
+        defer held.release();
+
+        var best_idx: ?usize = null;
+        var best_len: usize = 0;
+        for (0..MAX_MOUNTS) |i| {
+            if (mounts[i]) |mp| {
+                if (std.mem.startsWith(u8, path, mp.path)) {
+                    if (mp.path.len > best_len) {
+                        best_idx = i;
+                        best_len = mp.path.len;
+                    }
+                }
+            }
+        }
+
+        if (best_idx) |idx| {
+            const mp = &mounts[idx].?;
+            const truncate_fn = mp.fs.truncate orelse return error.NotSupported;
+
+            var rel_path = path[best_len..];
+            if (rel_path.len == 0) rel_path = "/";
+
+            return truncate_fn(mp.fs.context, rel_path, length);
+        }
+
+        return error.NotFound;
+    }
+
+    /// Create a directory
+    pub fn mkdir(path: []const u8, mode: u32) Error!void {
+        if (path.len == 0 or path[0] != '/') return error.InvalidPath;
+
+        const held = lock.acquire();
+        defer held.release();
+
+        var best_idx: ?usize = null;
+        var best_len: usize = 0;
+        for (0..MAX_MOUNTS) |i| {
+            if (mounts[i]) |mp| {
+                if (std.mem.startsWith(u8, path, mp.path)) {
+                    if (mp.path.len > best_len) {
+                        best_idx = i;
+                        best_len = mp.path.len;
+                    }
+                }
+            }
+        }
+
+        if (best_idx) |idx| {
+            const mp = &mounts[idx].?;
+            const mkdir_fn = mp.fs.mkdir orelse return error.NotSupported;
+
+            var rel_path = path[best_len..];
+            if (rel_path.len == 0) rel_path = "/";
+
+            return mkdir_fn(mp.fs.context, rel_path, mode);
+        }
+
+        return error.NotFound;
+    }
+
+    /// Remove a directory
+    pub fn rmdir(path: []const u8) Error!void {
+        if (path.len == 0 or path[0] != '/') return error.InvalidPath;
+
+        const held = lock.acquire();
+        defer held.release();
+
+        var best_idx: ?usize = null;
+        var best_len: usize = 0;
+        for (0..MAX_MOUNTS) |i| {
+            if (mounts[i]) |mp| {
+                if (std.mem.startsWith(u8, path, mp.path)) {
+                    if (mp.path.len > best_len) {
+                        best_idx = i;
+                        best_len = mp.path.len;
+                    }
+                }
+            }
+        }
+
+        if (best_idx) |idx| {
+            const mp = &mounts[idx].?;
+            const rmdir_fn = mp.fs.rmdir orelse return error.NotSupported;
+
+            var rel_path = path[best_len..];
+            if (rel_path.len == 0) rel_path = "/";
+
+            return rmdir_fn(mp.fs.context, rel_path);
+        }
+
+        return error.NotFound;
+    }
+
+    /// Create a hard link
+    pub fn link(old_path: []const u8, new_path: []const u8) Error!void {
+        if (old_path.len == 0 or new_path.len == 0) return error.InvalidPath;
+        if (old_path[0] != '/' or new_path[0] != '/') return error.InvalidPath;
+
+        const held = lock.acquire();
+        defer held.release();
+
+        var old_idx: ?usize = null;
+        var old_best_len: usize = 0;
+        for (0..MAX_MOUNTS) |i| {
+            if (mounts[i]) |mp| {
+                if (std.mem.startsWith(u8, old_path, mp.path)) {
+                    if (mp.path.len > old_best_len) {
+                        old_idx = i;
+                        old_best_len = mp.path.len;
+                    }
+                }
+            }
+        }
+
+        var new_idx: ?usize = null;
+        var new_best_len: usize = 0;
+        for (0..MAX_MOUNTS) |i| {
+            if (mounts[i]) |mp| {
+                if (std.mem.startsWith(u8, new_path, mp.path)) {
+                    if (mp.path.len > new_best_len) {
+                        new_idx = i;
+                        new_best_len = mp.path.len;
+                    }
+                }
+            }
+        }
+
+        if (old_idx == null or new_idx == null) return error.NotFound;
+        if (old_idx != new_idx) return error.NotSupported; // Cannot link across filesystems
+
+        const mp = &mounts[old_idx.?].?;
+        const link_fn = mp.fs.link orelse return error.NotSupported;
+
+        var rel_old = old_path[old_best_len..];
+        if (rel_old.len == 0) rel_old = "/";
+        var rel_new = new_path[new_best_len..];
+        if (rel_new.len == 0) rel_new = "/";
+
+        return link_fn(mp.fs.context, rel_old, rel_new);
+    }
+
+    /// Create a symbolic link
+    pub fn symlink(target: []const u8, linkpath: []const u8) Error!void {
+        if (linkpath.len == 0 or linkpath[0] != '/') return error.InvalidPath;
+
+        const held = lock.acquire();
+        defer held.release();
+
+        var best_idx: ?usize = null;
+        var best_len: usize = 0;
+        for (0..MAX_MOUNTS) |i| {
+            if (mounts[i]) |mp| {
+                if (std.mem.startsWith(u8, linkpath, mp.path)) {
+                    if (mp.path.len > best_len) {
+                        best_idx = i;
+                        best_len = mp.path.len;
+                    }
+                }
+            }
+        }
+
+        if (best_idx) |idx| {
+            const mp = &mounts[idx].?;
+            const symlink_fn = mp.fs.symlink orelse return error.NotSupported;
+
+            var rel_path = linkpath[best_len..];
+            if (rel_path.len == 0) rel_path = "/";
+
+            return symlink_fn(mp.fs.context, target, rel_path);
+        }
+
+        return error.NotFound;
+    }
+
+    /// Read the target of a symbolic link
+    pub fn readlink(path: []const u8, buf: []u8) Error!usize {
+        if (path.len == 0 or path[0] != '/') return error.InvalidPath;
+
+        const held = lock.acquire();
+        defer held.release();
+
+        var best_idx: ?usize = null;
+        var best_len: usize = 0;
+        for (0..MAX_MOUNTS) |i| {
+            if (mounts[i]) |mp| {
+                if (std.mem.startsWith(u8, path, mp.path)) {
+                    if (mp.path.len > best_len) {
+                        best_idx = i;
+                        best_len = mp.path.len;
+                    }
+                }
+            }
+        }
+
+        if (best_idx) |idx| {
+            const mp = &mounts[idx].?;
+            const readlink_fn = mp.fs.readlink orelse return error.NotSupported;
+
+            var rel_path = path[best_len..];
+            if (rel_path.len == 0) rel_path = "/";
+
+            return readlink_fn(mp.fs.context, rel_path, buf);
+        }
+
+        return error.NotFound;
+    }
+
+    /// Get filesystem statistics for a path
+    pub fn statfs(path: []const u8) Error!uapi.stat.Statfs {
+        if (path.len == 0) return error.InvalidPath;
+        if (path[0] != '/') return error.InvalidPath;
+
+        const held = lock.acquire();
+        defer held.release();
+
+        // Find the longest matching mount point
+        var best_idx: ?usize = null;
+        var best_len: usize = 0;
+
+        for (0..MAX_MOUNTS) |i| {
+            if (mounts[i]) |mount_point| {
+                if (std.mem.startsWith(u8, path, mount_point.path)) {
+                    const mp_len = mount_point.path.len;
+                    var match = false;
+                    if (path.len == mp_len) {
+                        match = true;
+                    } else if (path.len > mp_len) {
+                        if (mp_len == 1 and mount_point.path[0] == '/') {
+                            match = true;
+                        } else if (path[mp_len] == '/') {
+                            match = true;
+                        }
+                    }
+
+                    if (match and mp_len > best_len) {
+                        best_idx = i;
+                        best_len = mp_len;
+                    }
+                }
+            }
+        }
+
+        if (best_idx) |idx| {
+            const mp = &mounts[idx].?;
+            const statfs_fn = mp.fs.statfs orelse return error.NotSupported;
+            return statfs_fn(mp.fs.context);
+        }
+
+        return error.NotFound;
+    }
+
+    /// Get filesystem statistics for a mount point index (internal)
+    pub fn statfsByIndex(idx: u8) Error!uapi.stat.Statfs {
+        const held = lock.acquire();
+        defer held.release();
+
+        if (idx >= MAX_MOUNTS) return error.NotFound;
+        if (mounts[idx]) |mp| {
+            const statfs_fn = mp.fs.statfs orelse return error.NotSupported;
+            return statfs_fn(mp.fs.context);
+        }
+        return error.NotFound;
+    }
 };
 
 // =============================================================================
@@ -562,6 +907,27 @@ fn initrdStatPath(ctx: ?*anyopaque, path: []const u8) ?FileMeta {
         .gid = gid,
         .exists = true,
         .readonly = true, // InitRD is always read-only
+        .size = @intCast(file.data.len),
+    };
+}
+
+fn initrdStatfs(ctx: ?*anyopaque) Error!uapi.stat.Statfs {
+    _ = ctx;
+    // InitRD is a RAMdisk based on the loaded modules.
+    // For now, return basic info.
+    return uapi.stat.Statfs{
+        .f_type = 0x01234567, // Generic RAMFS type
+        .f_bsize = 512,
+        .f_blocks = @intCast(initrd.InitRD.instance.data.len / 512),
+        .f_bfree = 0,
+        .f_bavail = 0,
+        .f_files = 0,
+        .f_ffree = 0,
+        .f_fsid = .{ .val = .{ 0, 0 } },
+        .f_namelen = 255,
+        .f_frsize = 512,
+        .f_flags = 1, // ST_RDONLY
+        .f_spare = [_]i64{0} ** 4,
     };
 }
 
@@ -571,4 +937,5 @@ pub const initrd_fs = FileSystem{
     .unmount = null,
     .unlink = initrdUnlink,
     .stat_path = initrdStatPath,
+    .statfs = initrdStatfs,
 };

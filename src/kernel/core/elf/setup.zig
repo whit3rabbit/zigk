@@ -318,7 +318,8 @@ pub fn setupTls(
     // was missing boundary validation. A malicious ELF could craft preferred_tp
     // or large p_memsz to place TLS pages in kernel space or over the stack.
     // Pages mapped with .user=true in kernel space = privilege escalation.
-    if (alloc_end >= vmm.KERNEL_BASE or alloc_start >= vmm.KERNEL_BASE) {
+    const kernel_base = vmm.getKernelBase();
+    if (alloc_end >= kernel_base or alloc_start >= kernel_base) {
         console.err("ELF: TLS overlaps kernel space: {x}-{x}", .{ alloc_start, alloc_end });
         return ElfError.InvalidAddressRange;
     }

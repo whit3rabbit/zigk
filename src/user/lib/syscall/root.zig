@@ -127,6 +127,7 @@ pub const getrandom = resource.getrandom;
 pub const FramebufferInfo = resource.FramebufferInfo;
 pub const get_framebuffer_info = resource.get_framebuffer_info;
 pub const map_framebuffer = resource.map_framebuffer;
+pub const flush_framebuffer = resource.flush_framebuffer;
 pub const read_scancode = resource.read_scancode;
 pub const getchar = resource.getchar;
 pub const putchar = resource.putchar;

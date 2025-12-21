@@ -73,6 +73,25 @@ Do not check `uid == 0` for hardware access. Use the Capability system (`src/cap
 if (!proc.hasMmioCapability(phys_addr, size)) return error.EPERM;
 ```
 
+### 6. Network Stack Security (Zero-Trust)
+Treat all incoming packets as malicious.
+
+*   **Packet Parsing**: NEVER rely on length fields inside the packet headers (IP Total Len, TCP Data Offset) without verifying them against the actual buffer slice length first.
+    *   Use `packed struct` for headers to avoid compiler padding leaks or misalignments.
+    *   Use `@bitCast` only after size verification.
+    ```zig
+    // ✅ CORRECT
+    if (buffer.len < @sizeOf(IpHeader)) return error.PacketTooShort;
+    const ip_hdr: *const IpHeader = @ptrCast(buffer.ptr);
+    if (ip_hdr.total_len > buffer.len) return error.PacketTruncated;
+    ```
+*   **Sequence Number Randomization**: TCP Initial Sequence Numbers (ISNs) MUST be generated using a CSPRNG (ChaCha20), never a simple counter or time-based value, to prevent connection hijacking.
+*   **Padding Hygiene**: When constructing packets to send, strictly zero-initialize any padding bytes in headers. Uninitialized padding leaks kernel stack memory to the network.
+*   **State Exhaustion (DoS)**:
+    *   Limit the number of "embryonic" (SYN_RCVD) connections per listener.
+    *   Use a fixed-size memory pool for packet buffers (`mbufs`). Do not allocate heap memory per incoming packet; drop packets if the pool is empty.
+*   **Checksum Arithmetic**: Use `u32` accumulators for 16-bit checksum calculations to safely catch overflows before folding bits.
+
 ## Async I/O & IPC Architecture
 
 ### 1. Kernel Async (`src/kernel/io/`)
@@ -94,9 +113,9 @@ High-throughput drivers (VirtIO, Netstack) use shared memory rings, **not** io_u
 
 ## Syscall Implementation
 
-*   **Location**: `src/kernel/syscall/`
+*   **Location**: `src/kernel/sys/syscall/` (organized into subdirectories: core/, fs/, memory/, process/, net/, hw/, io/, io_uring/, misc/)
 *   **Return Type**: Must be `SyscallError!usize`.
-*   **Dispatch**: Auto-registered in `table.zig`.
+*   **Dispatch**: Auto-registered in `core/table.zig`.
 
 ```zig
 pub fn sys_example(arg1: usize) SyscallError!usize {

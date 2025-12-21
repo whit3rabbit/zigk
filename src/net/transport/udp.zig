@@ -37,15 +37,13 @@ pub const MAX_UDP_PAYLOAD: usize = 1500 - packet.IP_HEADER_SIZE - packet.UDP_HEA
 /// Process an incoming UDP packet
 /// Returns true if packet was handled
 pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
-    _ = iface;
-
     // Validate minimum UDP header size
     if (pkt.len < pkt.transport_offset + packet.UDP_HEADER_SIZE) {
         return false;
     }
 
-    const udp_hdr = pkt.udpHeader();
-    const ip = pkt.ipHeader();
+    const udp_hdr = packet.getUdpHeader(pkt.data, pkt.transport_offset) orelse return false;
+    const ip = packet.getIpv4Header(pkt.data, pkt.ip_offset) orelse return false;
 
     // Get UDP length
     const udp_len = udp_hdr.getLength();
@@ -96,7 +94,12 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
 
     // Deliver to socket layer
     const socket = @import("socket.zig");
-    return socket.deliverUdpPacket(pkt);
+    const delivered = socket.deliverUdpPacket(pkt);
+    if (!delivered and !pkt.is_broadcast and !pkt.is_multicast) {
+        _ = icmp.sendDestUnreachable(iface, pkt, icmp.CODE_PORT_UNREACHABLE);
+        return true;
+    }
+    return delivered;
 }
 
 /// Send a UDP datagram
@@ -211,7 +214,7 @@ pub fn sendDatagramWithTos(
 
 /// Calculate payload length from UDP header
 pub fn getPayloadLength(pkt: *const PacketBuffer) usize {
-    const udp_hdr = pkt.udpHeader();
+    const udp_hdr = packet.getUdpHeader(pkt.data, pkt.transport_offset) orelse return 0;
     const udp_len = udp_hdr.getLength();
     if (udp_len <= packet.UDP_HEADER_SIZE) {
         return 0;

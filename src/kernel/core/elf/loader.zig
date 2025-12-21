@@ -275,7 +275,7 @@ fn loadSegment(
         return ElfError.InvalidAddressRange;
     }
 
-    if (seg_end >= vmm.KERNEL_BASE) {
+    if (seg_end >= vmm.getKernelBase()) {
         console.err("ELF: Segment overlaps kernel space: {x}-{x}", .{ vaddr, seg_end });
         return ElfError.InvalidAddressRange;
     }

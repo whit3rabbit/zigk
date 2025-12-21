@@ -288,15 +288,19 @@ zscapek/
     │
     ├── net/
     │   ├── root.zig
+    │   ├── constants.zig
+    │   ├── clock.zig
     │   ├── entropy.zig
     │   ├── platform.zig
     │   ├── sync.zig
-    │   ├── loopback.zig
+    │   ├── drivers/
+    │   │   └── loopback.zig
     │   ├── core/
     │   │   ├── root.zig
     │   │   ├── interface.zig
     │   │   ├── packet.zig
-    │   │   └── checksum.zig
+    │   │   ├── checksum.zig
+    │   │   └── pool.zig
     │   ├── ethernet/
     │   │   ├── root.zig
     │   │   └── ethernet.zig
@@ -592,34 +596,53 @@ These files and directories are produced by local builds or tooling and are not 
 | `message.zig` | Message-passing IPC for microkernel communication. |
 | `service.zig` | IPC service registry and routing. |
 
-### `src/kernel/syscall/`
+### `src/kernel/sys/syscall/`
+
+Syscall handlers organized by category:
+
+### `src/kernel/sys/syscall/core/`
 | File | Description |
 |------|-------------|
 | `base.zig` | Shared state (current_process, fd_table, user_vmm) and accessors. |
-| `error_helpers.zig` | Shared syscall error conversion helpers. |
 | `table.zig` | Comptime dispatch table - auto-discovers handlers via reflection. |
+| `user_mem.zig` | Validates and copies user memory safely. |
+| `execution.zig` | `fork`, `execve`, `arch_prctl`, `get_fb_info`, `map_fb`. |
+| `error_helpers.zig` | Shared syscall error conversion helpers. |
+
+### `src/kernel/sys/syscall/process/`
+| File | Description |
+|------|-------------|
 | `process.zig` | `exit`, `wait4`, `getpid`, `getppid`, `getuid`, `getgid`. |
 | `signals.zig` | `rt_sigprocmask`, `rt_sigaction`, `rt_sigreturn`, `set_tid_address`. |
 | `scheduling.zig` | `sched_yield`, `nanosleep`, `select`, `clock_gettime`. |
-| `io/` | Core I/O syscalls (`read`, `write`, `stat`, `fcntl`, directory ops). |
-| `io_uring/` | io_uring async I/O syscalls and ring management. |
+
+### `src/kernel/sys/syscall/fs/`
+| File | Description |
+|------|-------------|
 | `fd.zig` | `open`, `close`, `dup`, `dup2`, `pipe`, `lseek`. |
+| `fs_handlers.zig` | Filesystem syscall helpers (mount, umount). |
+
+### `src/kernel/sys/syscall/memory/`
+| File | Description |
+|------|-------------|
 | `memory.zig` | `mmap`, `mprotect`, `munmap`, `brk`. |
-| `execution.zig` | `fork`, `execve`, `arch_prctl`, `get_fb_info`, `map_fb`. |
-| `custom.zig` | Zscapek extensions (`debug_log`, `putchar`, `getchar`, `read_scancode`). |
-| `net.zig` | Networking syscalls only (`socket`, `bind`, `listen`, `accept`, `connect`, `sendto`, `recvfrom`). |
-| `random.zig` | `getrandom` (syscall 318). |
+| `mmio.zig` | Memory-mapped I/O access for user-space drivers. |
+
+### `src/kernel/sys/syscall/net/`
+| File | Description |
+|------|-------------|
+| `net.zig` | Networking syscalls (`socket`, `bind`, `listen`, `accept`, `connect`, `sendto`, `recvfrom`). |
+| `pci_syscall.zig` | PCI device access for user-space drivers. |
+
+### `src/kernel/sys/syscall/hw/`
+| File | Description |
+|------|-------------|
 | `input.zig` | Input device syscalls (keyboard, mouse). |
 | `interrupt.zig` | User-space interrupt handling for drivers. |
-| `ipc.zig` | IPC message passing syscalls. |
-| `mmio.zig` | Memory-mapped I/O access for user-space drivers. |
-| `pci_syscall.zig` | PCI device access for user-space drivers. |
 | `port_io.zig` | Port I/O access for user-space drivers. |
 | `ring.zig` | Ring buffer IPC syscalls. |
-| `fs_handlers.zig` | Filesystem syscall helpers. |
-| `user_mem.zig` | Validates and copies user memory safely. |
 
-### `src/kernel/syscall/io/`
+### `src/kernel/sys/syscall/io/`
 | File | Description |
 |------|-------------|
 | `root.zig` | I/O syscall entry points and wiring. |
@@ -630,7 +653,7 @@ These files and directories are produced by local builds or tooling and are not 
 | `utils.zig` | I/O helpers for common path handling. |
 | `error_helpers.zig` | I/O-specific error conversions. |
 
-### `src/kernel/syscall/io_uring/`
+### `src/kernel/sys/syscall/io_uring/`
 | File | Description |
 |------|-------------|
 | `root.zig` | io_uring subsystem entry point. |
@@ -645,6 +668,13 @@ These files and directories are produced by local builds or tooling and are not 
 | `enter.zig` | `io_uring_enter` handler. |
 | `register.zig` | `io_uring_register` handler. |
 | `fd.zig` | File descriptor helpers for io_uring. |
+
+### `src/kernel/sys/syscall/misc/`
+| File | Description |
+|------|-------------|
+| `custom.zig` | Zscapek extensions (`debug_log`, `putchar`, `getchar`, `read_scancode`). |
+| `random.zig` | `getrandom` (syscall 318). |
+| `ipc.zig` | IPC message passing syscalls. |
 
 ### `src/arch/x86_64/`
 | File | Description |
@@ -689,7 +719,9 @@ A device-independent TCP/IP stack implementing Ethernet, IPv4/ARP, DNS, and sock
 | `ipv4` | IPv4 validation, ARP resolution, PMTU discovery, and fragment reassembly. |
 | `dns` | DNS client and resolver. |
 | `transport` | UDP datagrams, TCP streams, ICMP echo, and socket plumbing. |
-| `loopback.zig` | Loopback interface (127.0.0.1). |
+| `drivers/loopback.zig` | Loopback interface (127.0.0.1). |
+| `constants.zig` | Shared protocol constants (header sizes, options, ethertypes). |
+| `clock.zig` | Network clock abstraction for timing and timeouts. |
 | `entropy.zig` | Network stack entropy sources. |
 | `platform.zig` | Platform glue for timers and memory. |
 

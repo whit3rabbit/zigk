@@ -15,12 +15,20 @@ pub const Interface = interface.Interface;
 /// Value chosen to balance resource availability with DoS protection.
 pub const MAX_SOCKETS: usize = 4096;
 
+/// Ephemeral port range (RFC 6335)
+const EPHEMERAL_START: u16 = 49152;
+const EPHEMERAL_END: u16 = 65535;
+const EPHEMERAL_RANGE_U16: u16 = EPHEMERAL_END - EPHEMERAL_START + 1; // 16384
+const EPHEMERAL_RANGE: usize = @as(usize, EPHEMERAL_RANGE_U16);
+
 /// Global socket table (dynamic array)
 /// Stores pointers to sockets. Null entries are free slots.
 pub var socket_table: std.ArrayList(?*types.Socket) = undefined;
 pub var socket_allocator: std.mem.Allocator = undefined;
 /// UDP lookup table (Port -> Socket) for O(1) delivery
 pub var udp_sockets: [65536]?*types.Socket = [_]?*types.Socket{null} ** 65536;
+/// Ephemeral port usage counts (O(1) allocation)
+var ephemeral_port_counts: [EPHEMERAL_RANGE]u16 = [_]u16{0} ** EPHEMERAL_RANGE;
 
 /// Socket allocation lock - MUST be initialized before use
 /// SECURITY: Uses IrqLock to ensure proper interrupt state management
@@ -39,6 +47,7 @@ pub fn init(iface: *Interface, allocator: std.mem.Allocator) void {
     socket_allocator = allocator;
     socket_table = .{};
     udp_sockets = [_]?*types.Socket{null} ** 65536;
+    ephemeral_port_counts = [_]u16{0} ** EPHEMERAL_RANGE;
 }
 
 pub fn getInterface() ?*Interface {
@@ -121,37 +130,9 @@ fn findFreeSlot() ?usize {
 /// Allocate an ephemeral port using RFC 6056 Algorithm 1 (Simple Port Randomization).
 /// Uses hardware entropy for random starting point to prevent port prediction attacks.
 pub fn allocateEphemeralPort() u16 {
-    const EPHEMERAL_START: u16 = 49152;
-    const EPHEMERAL_END: u16 = 65535;
-    const EPHEMERAL_RANGE: u16 = EPHEMERAL_END - EPHEMERAL_START + 1; // 16384
-
-    // RFC 6056 Algorithm 1: Random starting point using hardware entropy
-    const entropy = platform.entropy.getHardwareEntropy();
-    const random_offset: u16 = @truncate(entropy % EPHEMERAL_RANGE);
-    var port = EPHEMERAL_START + random_offset;
-
-    var attempts: u16 = 0;
-    while (attempts < EPHEMERAL_RANGE) : (attempts += 1) {
-        // Check if port is in use
-        var in_use = false;
-        for (socket_table.items) |maybe_socket| {
-            if (maybe_socket) |sock| {
-                if (sock.allocated and sock.local_port == port) {
-                    in_use = true;
-                    break;
-                }
-            }
-        }
-
-        if (!in_use) {
-            return port;
-        }
-
-        // Sequential probe from random start (wrap at range boundary)
-        port = if (port == EPHEMERAL_END) EPHEMERAL_START else port + 1;
-    }
-
-    return 0; // No free ports
+    const held = lock.acquire();
+    defer held.release();
+    return allocateEphemeralPortLocked();
 }
 
 /// Allocate an ephemeral port using RFC 6056 Algorithm 3 (Random Port Randomization).
@@ -160,9 +141,8 @@ pub fn allocateEphemeralPort() u16 {
 /// Security: Provides ~16 bits of port entropy combined with DNS transaction ID
 /// for ~32 bits total unpredictability against cache poisoning (RFC 5452).
 pub fn allocateRandomEphemeralPort() u16 {
-    const EPHEMERAL_START: u16 = 49152;
-    const EPHEMERAL_END: u16 = 65535;
-    const EPHEMERAL_RANGE: u16 = EPHEMERAL_END - EPHEMERAL_START + 1; // 16384
+    const held = lock.acquire();
+    defer held.release();
 
     // Try random ports with fresh entropy each time (RFC 6056 Algorithm 3)
     // This provides maximum unpredictability for DNS security
@@ -171,28 +151,107 @@ pub fn allocateRandomEphemeralPort() u16 {
     var attempts: u16 = 0;
     while (attempts < MAX_RANDOM_ATTEMPTS) : (attempts += 1) {
         const entropy = platform.entropy.getHardwareEntropy();
-        const random_offset: u16 = @truncate(entropy % EPHEMERAL_RANGE);
+        const random_offset: u16 = @truncate(entropy % EPHEMERAL_RANGE_U16);
         const port = EPHEMERAL_START + random_offset;
 
-        // Check if port is in use
-        var in_use = false;
-        for (socket_table.items) |maybe_socket| {
-            if (maybe_socket) |sock| {
-                if (sock.allocated and sock.local_port == port) {
-                    in_use = true;
-                    break;
-                }
-            }
-        }
-
-        if (!in_use) {
+        if (isEphemeralPortFreeLocked(port)) {
             return port;
         }
     }
 
     // Fallback to standard Algorithm 1 if random probing fails
     // (indicates high port pressure)
-    return allocateEphemeralPort();
+    return findEphemeralPortLocked();
+}
+
+/// Allocate an ephemeral port while holding state.lock.
+pub fn allocateEphemeralPortLocked() u16 {
+    // RFC 6056 Algorithm 1: Random starting point using hardware entropy
+    const entropy = platform.entropy.getHardwareEntropy();
+    const random_offset: u16 = @truncate(entropy % EPHEMERAL_RANGE_U16);
+    var offset = random_offset;
+
+    var attempts: u16 = 0;
+    while (attempts < EPHEMERAL_RANGE_U16) : (attempts += 1) {
+        const port = EPHEMERAL_START + offset;
+        if (tryReserveEphemeralPortLocked(port)) {
+            return port;
+        }
+        // Sequential probe from random start (wrap at range boundary)
+        offset = if (offset + 1 == EPHEMERAL_RANGE_U16) 0 else offset + 1;
+    }
+
+    return 0; // No free ports
+}
+
+pub fn retainPort(port: u16) void {
+    const held = lock.acquire();
+    defer held.release();
+    retainPortLocked(port);
+}
+
+pub fn releasePort(port: u16) void {
+    const held = lock.acquire();
+    defer held.release();
+    releasePortLocked(port);
+}
+
+pub fn retainPortLocked(port: u16) void {
+    if (ephemeralIndex(port)) |idx| {
+        if (ephemeral_port_counts[idx] != std.math.maxInt(u16)) {
+            ephemeral_port_counts[idx] += 1;
+        }
+    }
+}
+
+pub fn releasePortLocked(port: u16) void {
+    if (ephemeralIndex(port)) |idx| {
+        if (ephemeral_port_counts[idx] > 0) {
+            ephemeral_port_counts[idx] -= 1;
+        } else {
+            std.log.warn("ephemeral port underflow: port={}", .{port});
+        }
+    }
+}
+
+fn tryReserveEphemeralPortLocked(port: u16) bool {
+    if (ephemeralIndex(port)) |idx| {
+        if (ephemeral_port_counts[idx] == 0) {
+            ephemeral_port_counts[idx] = 1;
+            return true;
+        }
+    }
+    return false;
+}
+
+fn isEphemeralPortFreeLocked(port: u16) bool {
+    if (ephemeralIndex(port)) |idx| {
+        return ephemeral_port_counts[idx] == 0;
+    }
+    return false;
+}
+
+fn findEphemeralPortLocked() u16 {
+    // RFC 6056 Algorithm 1 without reservation (caller will bind later).
+    const entropy = platform.entropy.getHardwareEntropy();
+    const random_offset: u16 = @truncate(entropy % EPHEMERAL_RANGE_U16);
+    var offset = random_offset;
+
+    var attempts: u16 = 0;
+    while (attempts < EPHEMERAL_RANGE_U16) : (attempts += 1) {
+        const port = EPHEMERAL_START + offset;
+        if (isEphemeralPortFreeLocked(port)) {
+            return port;
+        }
+        offset = if (offset + 1 == EPHEMERAL_RANGE_U16) 0 else offset + 1;
+    }
+
+    return 0;
+}
+
+fn ephemeralIndex(port: u16) ?usize {
+    if (port < EPHEMERAL_START or port > EPHEMERAL_END) return null;
+    return @as(usize, port - EPHEMERAL_START);
 }
 
 pub fn findByPort(port: u16) ?*types.Socket {

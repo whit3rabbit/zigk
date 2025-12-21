@@ -338,7 +338,7 @@ def find_handler(syscall_name):
     if not root:
         return None
 
-    syscall_dir = root / "src" / "kernel" / "syscall"
+    syscall_dir = root / "src" / "kernel" / "sys" / "syscall"
     if not syscall_dir.exists():
         return None
 

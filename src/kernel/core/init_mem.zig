@@ -16,6 +16,7 @@ const heap = @import("heap");
 const kernel_stack = @import("kernel_stack");
 const panic = @import("panic.zig");
 const BootInfo = @import("boot_info");
+const layout = @import("layout");
 
 /// Initialize PMM, VMM, and Heap using generic BootInfo
 ///
@@ -50,16 +51,29 @@ pub fn initMemoryManagement(boot_info: *const @import("boot_info").BootInfo) voi
     };
 
     // Initialize kernel heap
-    // Allocate heap pages from PMM
-    const heap_pages = config.heap_size / pmm.PAGE_SIZE;
+    // Allocate heap pages from PMM (with extra pages for KASLR offset)
+    const heap_offset = layout.getHeapOffset();
+    const extra_pages = (heap_offset + pmm.PAGE_SIZE - 1) / pmm.PAGE_SIZE;
+    const total_heap_size = config.heap_size + heap_offset;
+    const heap_pages = total_heap_size / pmm.PAGE_SIZE;
     const heap_phys = pmm.allocZeroedPages(heap_pages) orelse {
         console.err("Failed to allocate heap pages!", .{});
         panic.halt();
     };
 
     // Convert to virtual address via HHDM for heap init
+    // Add KASLR offset to randomize heap base
     const heap_virt = hal.paging.physToVirt(heap_phys);
-    heap.init(@intFromPtr(heap_virt), config.heap_size);
+    const randomized_heap_start = @intFromPtr(heap_virt) + heap_offset;
+    const usable_heap_size = config.heap_size;
+
+    heap.init(randomized_heap_start, usable_heap_size);
+
+    // Log heap offset in debug mode
+    const builtin = @import("builtin");
+    if (builtin.mode == .Debug and heap_offset > 0) {
+        console.info("Heap KASLR offset: 0x{x} ({d} extra pages)", .{ heap_offset, extra_pages });
+    }
 
     console.info("Memory management initialized", .{});
 

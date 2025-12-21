@@ -22,6 +22,7 @@ pub const SOCK_DGRAM = types.SOCK_DGRAM;
 pub const SOL_SOCKET = types.SOL_SOCKET;
 pub const IPPROTO_IP = types.IPPROTO_IP;
 pub const IPPROTO_TCP = types.IPPROTO_TCP;
+pub const TCP_NODELAY = types.TCP_NODELAY;
 pub const SO_REUSEADDR = types.SO_REUSEADDR;
 pub const SO_BROADCAST = types.SO_BROADCAST;
 pub const SO_RCVTIMEO = types.SO_RCVTIMEO;

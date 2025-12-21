@@ -21,6 +21,7 @@ const config = @import("config");
 const pmm = @import("pmm");
 const sync = @import("sync");
 const tlb = @import("tlb");
+const layout = @import("layout");
 
 const paging = hal.paging;
 const PageTableEntry = paging.PageTableEntry;
@@ -31,17 +32,33 @@ pub const PageFlags = paging.PageFlags;
 pub const PAGE_SIZE: usize = paging.PAGE_SIZE;
 
 // Kernel address space boundaries
-pub const KERNEL_BASE: u64 = 0xFFFF_8000_0000_0000;
+// KERNEL_BASE and MMIO_BASE are now runtime values from layout module (KASLR)
 pub const USER_SPACE_END: u64 = 0x0000_7FFF_FFFF_FFFF;
-pub const MMIO_BASE: u64 = 0xFFFF_B000_0000_0000; // Must not overlap with kernel stack at 0xFFFF_A000_0000_0000
-pub const MMIO_END: u64 = 0xFFFF_C000_0000_0000; // 1TB MMIO region limit
+pub const KERNEL_BASE: u64 = 0xFFFF_8000_0000_0000;
+const MMIO_REGION_SIZE: u64 = 0x1000_0000_0000; // 1TB MMIO region
+
+/// Get the kernel base address (HHDM base, runtime value from layout)
+pub fn getKernelBase() u64 {
+    return layout.getHhdmBase();
+}
+
+/// Get the MMIO region base (runtime value from layout with KASLR offset)
+pub fn getMmioBase() u64 {
+    return layout.getMmioRegionBase();
+}
+
+/// Get the MMIO region end (calculated from base + size)
+pub fn getMmioEnd() u64 {
+    return layout.getMmioRegionBase() + MMIO_REGION_SIZE;
+}
+pub const MMIO_END = 0xFFFF_C000_0000_0000; // Legacy fallback constant
 
 // VMM State
 var kernel_pml4_phys: u64 = 0;
 var initialized: bool = false;
 
 // MMIO Allocator State
-var mmio_current: u64 = MMIO_BASE;
+var mmio_current: u64 = 0; // Initialized in init()
 var mmio_lock: sync.Spinlock = .{};
 
 /// Errors that can occur during VMM operations
@@ -71,6 +88,9 @@ pub fn init() VmmError!void {
     }
 
     console.info("VMM: Initializing...", .{});
+
+    // Initialize MMIO allocator with KASLR-randomized base
+    mmio_current = layout.getMmioRegionBase();
 
     // Allocate PML4 for kernel address space
     kernel_pml4_phys = pmm.allocZeroedPage() orelse {
@@ -571,11 +591,12 @@ pub fn mapMmioExplicit(phys_addr: u64, size: usize) VmmError!u64 {
     }
 
     const new_mmio_current = virt_base + aligned_size;
-    if (new_mmio_current > MMIO_END) {
+    const mmio_end = getMmioEnd();
+    if (new_mmio_current > mmio_end) {
         console.err("VMM: MMIO region exhausted (requested={d}KB, current=0x{x}, limit=0x{x})", .{
             aligned_size / 1024,
             virt_base,
-            MMIO_END,
+            mmio_end,
         });
         held.release();
         return VmmError.OutOfMemory;

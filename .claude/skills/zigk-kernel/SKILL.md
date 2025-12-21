@@ -22,6 +22,8 @@ Run these scripts to get targeted information without loading full docs:
 | `scripts/libc_query.py` | Userspace/libc | `python scripts/libc_query.py errno` |
 | `scripts/build_query.py` | Build system | `python scripts/build_query.py modules` |
 | `scripts/debug_query.py` | Debugging | `python scripts/debug_query.py panic` |
+| `scripts/uefi_query.py` | UEFI bootloader | `python scripts/uefi_query.py event` |
+| `scripts/network_query.py` | Network stack | `python scripts/network_query.py tcp` |
 
 ## Quick Reference (Always Available)
 
@@ -129,6 +131,41 @@ python scripts/debug_query.py crash      # Common crash causes and fixes
 python scripts/debug_query.py serial     # Serial output debugging
 ```
 
+### UEFI Bootloader Lookup
+```bash
+python scripts/uefi_query.py system      # System table structure
+python scripts/uefi_query.py boot        # Boot services overview
+python scripts/uefi_query.py event       # Event/Timer APIs
+python scripts/uefi_query.py text        # SimpleTextInput/Output protocols
+python scripts/uefi_query.py gop         # Graphics Output Protocol
+python scripts/uefi_query.py memmap      # Memory map and types
+python scripts/uefi_query.py file        # File protocol and loading
+python scripts/uefi_query.py exit        # ExitBootServices pattern
+python scripts/uefi_query.py paging      # Page table setup in UEFI
+python scripts/uefi_query.py errors      # Common errors and fixes
+```
+
+### Network Stack Lookup
+```bash
+python scripts/network_query.py tcp           # TCP protocol overview
+python scripts/network_query.py tcp_states    # TCP state machine and timeouts
+python scripts/network_query.py socket        # Socket API and syscalls
+python scripts/network_query.py socket_options # setsockopt/getsockopt options
+python scripts/network_query.py udp           # UDP protocol
+python scripts/network_query.py arp           # ARP cache and resolution
+python scripts/network_query.py dns           # DNS resolver with anti-spoofing
+python scripts/network_query.py icmp          # ICMP handling and PMTU
+python scripts/network_query.py reassembly    # IP fragment reassembly (DoS protected)
+python scripts/network_query.py security      # All network security features
+python scripts/network_query.py constants     # Protocol constants and limits
+python scripts/network_query.py blocking      # Blocking I/O scheduler integration
+python scripts/network_query.py async         # Async socket API pattern
+python scripts/network_query.py template protocol    # New protocol handler template
+python scripts/network_query.py template socket_op   # Socket operation template
+python scripts/network_query.py template packet_parse # Safe packet parsing template
+python scripts/network_query.py template state_machine # Protocol state machine
+```
+
 ### Driver Template Generation
 ```bash
 python scripts/driver_query.py template mmio  # MMIO kernel driver boilerplate
@@ -141,7 +178,7 @@ python scripts/driver_query.py template ring  # Ring IPC userspace driver
 1. Query existing: `python scripts/syscall_query.py --category <relevant>`
 2. Query pattern: `python scripts/rules_query.py handler`
 3. Add to `src/uapi/syscalls.zig`
-4. Add handler to appropriate file in `src/kernel/syscall/`
+4. Add handler to appropriate subdirectory in `src/kernel/sys/syscall/` (core/, fs/, memory/, process/, net/, hw/, io/, io_uring/, misc/)
 
 ### New Driver (Kernel)
 1. Generate template: `python scripts/driver_query.py template mmio`
@@ -156,19 +193,23 @@ python scripts/driver_query.py template ring  # Ring IPC userspace driver
 4. Create in `src/user/drivers/`
 
 ### Network Feature
-1. Query syscalls: `python scripts/syscall_query.py --category net`
-2. Query async: `python scripts/async_query.py reactor`
-3. Query ring: `python scripts/async_query.py ring`
+1. Query protocol: `python scripts/network_query.py tcp` or `udp`
+2. Query constants: `python scripts/network_query.py constants`
+3. Query security: `python scripts/network_query.py security`
+4. Generate template: `python scripts/network_query.py template protocol`
+5. Query syscalls: `python scripts/syscall_query.py --category net`
 
 ## File Locations
 
 | Component | Location |
 |-----------|----------|
 | Syscall numbers | src/uapi/syscalls.zig |
-| Syscall handlers | src/kernel/syscall/*.zig |
+| Syscall handlers | src/kernel/sys/syscall/{core,fs,memory,process,net,hw,io,io_uring,misc}/*.zig |
 | HAL | src/arch/x86_64/ (via hal import) |
 | Kernel drivers | src/drivers/ |
 | User drivers | src/user/drivers/ |
 | Libc | src/user/lib/libc/ |
 | Async I/O | src/kernel/io/ |
+| Network stack | src/net/ |
+| UEFI bootloader | src/boot/uefi/ |
 

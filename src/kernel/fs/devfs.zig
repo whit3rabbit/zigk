@@ -33,7 +33,6 @@ const Errno = uapi.errno.Errno;
 // Console Device (/dev/console, stdin/stdout/stderr)
 // =============================================================================
 
-/// Console device operations
 pub const console_ops = FileOps{
     .read = consoleRead,
     .write = consoleWrite,
@@ -43,6 +42,7 @@ pub const console_ops = FileOps{
     .ioctl = null,
     .mmap = null,
     .poll = null,
+    .truncate = null,
 };
 
 /// Read from console (keyboard input)
@@ -111,6 +111,7 @@ pub const null_ops = FileOps{
     .ioctl = null,
     .mmap = null,
     .poll = null,
+    .truncate = null,
 };
 
 /// Read from /dev/null always returns EOF (0 bytes)
@@ -140,6 +141,7 @@ pub const zero_ops = FileOps{
     .ioctl = null,
     .mmap = null,
     .poll = null,
+    .truncate = null,
 };
 
 /// Read from /dev/zero fills buffer with zeros

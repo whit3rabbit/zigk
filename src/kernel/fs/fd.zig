@@ -85,6 +85,9 @@ pub const FileOps = struct {
     /// Poll for events (optional, for epoll support)
     /// Returns bitmask of ready events (EPOLLIN, EPOLLOUT, etc.)
     poll: ?*const fn (fd: *FileDescriptor, requested_events: u32) u32,
+
+    /// Truncate file to specified length (optional)
+    truncate: ?*const fn (fd: *FileDescriptor, length: u64) error{ AccessDenied, IOError }!void,
 };
 
 /// Directory-only operations marker for synthetic directory FDs.
@@ -98,6 +101,7 @@ pub const dir_ops = FileOps{
     .ioctl = null,
     .mmap = null,
     .poll = null,
+    .truncate = null,
 };
 
 pub const DirTag = enum {

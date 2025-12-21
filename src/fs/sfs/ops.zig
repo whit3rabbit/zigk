@@ -902,4 +902,11 @@ pub const sfs_ops = fd.FileOps{
     .ioctl = null,
     .mmap = null,
     .poll = null,
+    .truncate = sfsTruncate,
 };
+
+fn sfsTruncate(file_desc: *fd.FileDescriptor, length: u64) error{ AccessDenied, IOError }!void {
+    truncateFd(file_desc, @intCast(length)) catch {
+        return error.IOError;
+    };
+}

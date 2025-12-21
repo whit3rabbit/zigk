@@ -541,6 +541,9 @@ pub fn sys_setrlimit(resource: usize, rlim_ptr: usize) SyscallError!usize {
     return 0;
 }
 
+const config = @import("config");
+
+// ...
 /// sys_uname (63) - Get system information
 ///
 /// Returns system name, node name, release, version, machine
@@ -557,7 +560,7 @@ pub fn sys_uname(buf_ptr: usize) SyscallError!usize {
     var utsname: [5 * UTSNAME_LEN]u8 = [_]u8{0} ** (5 * UTSNAME_LEN);
 
     // sysname
-    const sysname = "Zscapek";
+    const sysname = config.name;
     hal.mem.copy(utsname[0..sysname.len].ptr, sysname.ptr, sysname.len);
 
     // nodename
@@ -565,7 +568,7 @@ pub fn sys_uname(buf_ptr: usize) SyscallError!usize {
     hal.mem.copy(utsname[UTSNAME_LEN .. UTSNAME_LEN + nodename.len].ptr, nodename.ptr, nodename.len);
 
     // release
-    const release = "0.1.0";
+    const release = config.version;
     hal.mem.copy(utsname[2 * UTSNAME_LEN .. 2 * UTSNAME_LEN + release.len].ptr, release.ptr, release.len);
 
     // version
@@ -581,6 +584,78 @@ pub fn sys_uname(buf_ptr: usize) SyscallError!usize {
         return error.EFAULT;
     };
     return 0;
+}
+
+// =============================================================================
+// Process Groups and Sessions
+// =============================================================================
+
+/// sys_getpgid (121) - Get process group ID
+pub fn sys_getpgid(pid: usize) SyscallError!usize {
+    const target_pid: u32 = @truncate(pid);
+    const proc = if (target_pid == 0)
+        base.getCurrentProcess()
+    else
+        process_mod.findProcessByPid(target_pid) orelse return error.ESRCH;
+
+    return proc.pgid;
+}
+
+/// sys_setpgid (109) - Set process group ID
+pub fn sys_setpgid(pid: usize, pgid_arg: usize) SyscallError!usize {
+    const target_pid: u32 = @truncate(pid);
+    const new_pgid: u32 = @truncate(pgid_arg);
+
+    const current = base.getCurrentProcess();
+    const target = if (target_pid == 0)
+        current
+    else
+        process_mod.findProcessByPid(target_pid) orelse return error.ESRCH;
+
+    // Security: Only allow setting pgid for current process or its children
+    if (target != current and target.parent != current) {
+        return error.ESRCH;
+    }
+
+    // POSIX: New pgid must be 0 (current pid) or an existing pgid in the same session
+    // For MVP, we allow setting it to any value or target's own pid
+    const pgid = if (new_pgid == 0) target.pid else new_pgid;
+
+    // Cannot change pgid if process has already called execve? (Simplified for now)
+    // Cannot change pgid if target is session leader
+    if (target.sid == target.pid) {
+        return error.EPERM;
+    }
+
+    target.pgid = pgid;
+    return 0;
+}
+
+/// sys_setsid (112) - Create new session
+pub fn sys_setsid() SyscallError!usize {
+    const proc = base.getCurrentProcess();
+
+    // If already a process group leader, return EPERM
+    if (proc.pgid == proc.pid) {
+        return error.EPERM;
+    }
+
+    // Create new session: sid = pid, pgid = pid
+    proc.sid = proc.pid;
+    proc.pgid = proc.pid;
+
+    return proc.sid;
+}
+
+/// sys_getsid (124) - Get session ID
+pub fn sys_getsid(pid: usize) SyscallError!usize {
+    const target_pid: u32 = @truncate(pid);
+    const proc = if (target_pid == 0)
+        base.getCurrentProcess()
+    else
+        process_mod.findProcessByPid(target_pid) orelse return error.ESRCH;
+
+    return proc.sid;
 }
 
 /// sys_sethostname (170) - Set hostname

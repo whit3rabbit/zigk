@@ -52,6 +52,8 @@ pub fn createProcess(parent: ?*Process) !*Process {
     const proc = try alloc.create(Process);
     proc.* = Process{
         .pid = manager.allocatePid(),
+        .pgid = 0, // Set below
+        .sid = 0,  // Set below
         .parent = null,
         .first_child = null,
         .next_sibling = null,
@@ -72,6 +74,10 @@ pub fn createProcess(parent: ?*Process) !*Process {
         .cwd_len = 1,
         .aslr_offsets = aslr_offsets,
     };
+
+    // Initialize pgid/sid
+    proc.pgid = proc.pid;
+    proc.sid = proc.pid;
 
     // Initialize CWD to "/"
     proc.cwd[0] = '/';
@@ -122,7 +128,10 @@ pub fn forkProcess(parent: *Process) !*Process {
     // Allocate child process struct
     const child = try alloc.create(Process);
     child.* = Process{
+        .refcount = std.atomic.Value(u32).init(1),
         .pid = manager.allocatePid(),
+        .pgid = parent.pgid,
+        .sid = parent.sid,
         .parent = null, // Set by addChild
         .first_child = null,
         .next_sibling = null,
@@ -131,7 +140,6 @@ pub fn forkProcess(parent: *Process) !*Process {
         .fd_table = child_fd_table,
         .user_vmm = child_vmm,
         .cr3 = child_vmm.pml4_phys,
-        .refcount = std.atomic.Value(u32).init(1),
         .heap_start = parent.heap_start,
         .heap_break = parent.heap_break,
         .capabilities = try parent.capabilities.clone(alloc),

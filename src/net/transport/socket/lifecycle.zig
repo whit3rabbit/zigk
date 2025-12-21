@@ -66,7 +66,12 @@ pub fn bind(sock_fd: usize, addr: *const types.SockAddrIn) errors.SocketError!vo
         }
     }
 
-    sock.local_port = if (port == 0) state.allocateEphemeralPort() else port;
+    if (port == 0) {
+        sock.local_port = state.allocateEphemeralPortLocked();
+    } else {
+        sock.local_port = port;
+        state.retainPortLocked(sock.local_port);
+    }
     sock.local_addr = ip;
 
     // Register in lookup table if UDP
@@ -89,6 +94,7 @@ pub fn close(sock_fd: usize) errors.SocketError!void {
         // 1. Remove from table prevent new lookups (UAF protection)
         // SECURITY: Use atomic store for closing flag
         sock.closing.store(true, .release);
+        state.releasePortLocked(sock.local_port);
         state.clearSlot(sock_fd);
         state.unregisterUdpSocket(sock);
 

@@ -44,5 +44,5 @@ var ipv4_allocator: ?std.mem.Allocator = null;
 pub fn init(allocator: std.mem.Allocator, ticks_per_sec: u32) void {
     ipv4_allocator = allocator;
     arp.init(allocator, ticks_per_sec);
-    reassembly.init(allocator);
+    reassembly.init();
 }

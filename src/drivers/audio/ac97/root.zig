@@ -55,6 +55,7 @@ pub const dsp_ops = fd.FileOps{
     .ioctl = dspIoctl,
     .mmap = null,
     .poll = null,
+    .truncate = null,
 };
 
 pub fn initFromPci(pci_dev: *const pci.PciDevice, pci_access: pci.PciAccess) !void {

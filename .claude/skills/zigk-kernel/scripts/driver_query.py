@@ -52,7 +52,7 @@ Drivers using MmioDevice:
     "ring": """
 ## Ring IPC Pattern (Zero-Copy)
 
-Syscalls: 1040-1045 in src/kernel/syscall/ring.zig
+Syscalls: 1040-1045 in src/kernel/sys/syscall/io/ring.zig
 
 ### Producer (Client)
 ```zig

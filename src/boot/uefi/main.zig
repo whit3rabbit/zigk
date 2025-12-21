@@ -19,9 +19,18 @@ const loader = @import("loader.zig");
 const memory = @import("memory.zig");
 const graphics = @import("graphics.zig");
 const paging = @import("paging.zig");
+const menu = @import("menu.zig");
+const entropy = @import("entropy.zig");
 
 // Constants
 const HHDM_OFFSET: u64 = 0xFFFF_8000_0000_0000;
+
+// KASLR configuration
+// Entropy bits determine randomization range; alignment ensures proper memory access
+const KASLR_STACK_ENTROPY_BITS: u5 = 12; // 4096 units * 4KB = 16MB range
+const KASLR_MMIO_ENTROPY_BITS: u5 = 12; // 4096 units * 4KB = 16MB range
+const KASLR_HEAP_ENTROPY_BITS: u5 = 8; // 256 units * 4KB = 1MB range
+const KASLR_PAGE_SIZE: u64 = 4096;
 const MAX_SEGMENTS: usize = 32;
 const MAX_MEMMAP_ENTRIES: usize = 256;
 const MEMMAP_BUFFER_SIZE: usize = MAX_MEMMAP_ENTRIES * @sizeOf(uefi.tables.MemoryDescriptor);
@@ -32,6 +41,8 @@ var memmap_buffer: [MEMMAP_BUFFER_SIZE]u8 align(@alignOf(uefi.tables.MemoryDescr
 var boot_memmap: [MAX_MEMMAP_ENTRIES]BootInfo.MemoryDescriptor = std.mem.zeroes([MAX_MEMMAP_ENTRIES]BootInfo.MemoryDescriptor);
 var framebuffer_info: BootInfo.FramebufferInfo = std.mem.zeroes(BootInfo.FramebufferInfo);
 var boot_info: BootInfo.BootInfo = std.mem.zeroes(BootInfo.BootInfo);
+var cmdline_buffer: [64:0]u8 = std.mem.zeroes([64:0]u8);
+var kaslr_entropy: [32]u8 = std.mem.zeroes([32]u8); // Entropy for KASLR offsets
 
 pub fn main() void {
     const system_table = uefi.system_table;
@@ -53,6 +64,38 @@ pub fn main() void {
         serialPrint("ERROR: Boot services not available\r\n");
         stallForever();
     };
+
+    // Step 0a: Acquire entropy for KASLR (must be done before ExitBootServices)
+    serialPrint("Acquiring KASLR entropy...\r\n");
+    const entropy_result = entropy.getBootEntropy(bs, &kaslr_entropy);
+    if (entropy_result.quality == .hardware) {
+        serialPrint("KASLR: Using hardware RNG\r\n");
+    } else if (entropy_result.quality == .weak) {
+        serialPrint("WARNING: KASLR using weak TSC entropy\r\n");
+    } else {
+        serialPrint("WARNING: No entropy for KASLR\r\n");
+    }
+
+    // Step 0b: Show boot menu and get selection
+    serialPrint("Showing boot menu...\r\n");
+    const selection = menu.showMenu(bs, system_table.con_in, system_table.con_out) catch |err| blk: {
+        serialPrint("WARNING: Menu failed (");
+        serialPrintMenuError(err);
+        serialPrint("), defaulting to shell\r\n");
+        break :blk .shell;
+    };
+
+    // Set cmdline from selection
+    const cmdline_str = selection.toCmdline();
+    @memcpy(cmdline_buffer[0..cmdline_str.len], cmdline_str);
+    serialPrint("Boot selection: ");
+    serialPrint(cmdline_str);
+    serialPrint("\r\n");
+
+    // Clear screen before loading kernel
+    if (system_table.con_out) |con_out| {
+        _ = con_out.clearScreen() catch {};
+    }
 
     // Step 1: Load kernel ELF
     serialPrint("Loading kernel.elf...\r\n");
@@ -166,6 +209,20 @@ pub fn main() void {
         kernel_virt_base = kernel_segments[0].virtual_address;
     }
 
+    // Calculate KASLR offsets from entropy
+    // Each offset uses different bytes from the entropy buffer
+    const stack_offset = entropy.calculateOffset(kaslr_entropy[0..2], KASLR_STACK_ENTROPY_BITS, KASLR_PAGE_SIZE);
+    const mmio_offset = entropy.calculateOffset(kaslr_entropy[2..4], KASLR_MMIO_ENTROPY_BITS, KASLR_PAGE_SIZE);
+    const heap_offset = entropy.calculateOffset(kaslr_entropy[4..6], KASLR_HEAP_ENTROPY_BITS, KASLR_PAGE_SIZE);
+
+    serialPrint("KASLR offsets: stack=");
+    serialPrintHex(stack_offset);
+    serialPrint(" mmio=");
+    serialPrintHex(mmio_offset);
+    serialPrint(" heap=");
+    serialPrintHex(heap_offset);
+    serialPrint("\r\n");
+
     boot_info = .{
         .memory_map = &boot_memmap,
         .memory_map_count = memmap_count,
@@ -174,10 +231,13 @@ pub fn main() void {
         .rsdp = rsdp_addr,
         .initrd_addr = initrd_addr,
         .initrd_size = initrd_size,
-        .cmdline = null,
+        .cmdline = if (cmdline_buffer[0] != 0) @ptrCast(&cmdline_buffer) else null,
         .hhdm_offset = HHDM_OFFSET,
         .kernel_phys_base = kernel_phys_base,
         .kernel_virt_base = kernel_virt_base,
+        .stack_region_offset = stack_offset,
+        .mmio_region_offset = mmio_offset,
+        .heap_offset = heap_offset,
     };
 
     serialPrint("BootInfo prepared\r\n");
@@ -343,4 +403,13 @@ fn serialPrintError(err: loader.LoaderError) void {
     };
     serialPrint(msg);
     serialPrint("\r\n");
+}
+
+fn serialPrintMenuError(err: menu.MenuError) void {
+    const msg = switch (err) {
+        error.NoConsoleInput => "NoConsoleInput",
+        error.NoConsoleOutput => "NoConsoleOutput",
+        error.NoBootServices => "NoBootServices",
+    };
+    serialPrint(msg);
 }

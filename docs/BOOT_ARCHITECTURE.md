@@ -405,7 +405,7 @@ Bit    Name    Meaning when set
 | `src/kernel/mm/user_vmm.zig` | VMA management, `handlePageFault()` |
 | `src/arch/x86_64/interrupts.zig` | Handler dispatch, `setPageFaultHandler()` |
 | `src/kernel/core/main.zig` | Handler registration |
-| `src/kernel/sys/syscall/base.zig` | `getCurrentProcessOrNull()` for safe process lookup |
+| `src/kernel/sys/syscall/core/base.zig` | `getCurrentProcessOrNull()` for safe process lookup |
 
 ### Lock Ordering (Page Faults)
 
@@ -705,7 +705,7 @@ ASLR[pid=1]: stack_top=7fffff8bf000 pie_base=5555c3470000 mmap=10002a590000 heap
 | `src/kernel/proc/process/root.zig` | `Process` struct (indirectly through types) |
 | `src/kernel/core/elf/root.zig` | Accepts `stack_top_opt` and `pie_base_opt` parameters |
 | `src/kernel/mm/user_vmm.zig` | `mmap_base` field, `initWithMmapBase()` |
-| `src/kernel/sys/syscall/execution.zig` | Generates new offsets on execve |
+| `src/kernel/sys/syscall/core/execution.zig` | Generates new offsets on execve |
 | `src/kernel/core/init_proc.zig` | Uses ASLR for initial process |
 | `src/kernel/sys/vdso.zig` | Independent VDSO randomization |
 

@@ -494,6 +494,7 @@ const epoll_file_ops = fd_mod.FileOps{
     .ioctl = null,
     .mmap = null,
     .poll = null,
+    .truncate = null,
 };
 
 fn epollClose(fd: *fd_mod.FileDescriptor) isize {

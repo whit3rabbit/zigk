@@ -39,6 +39,9 @@ pub const SOL_SOCKET: i32 = 1;
 pub const IPPROTO_IP: i32 = 0;
 pub const IPPROTO_TCP: i32 = 6;
 
+/// IPPROTO_TCP options
+pub const TCP_NODELAY: i32 = 1;
+
 /// SOL_SOCKET options
 pub const SO_REUSEADDR: i32 = 2;
 pub const SO_BROADCAST: i32 = 6;
@@ -163,6 +166,8 @@ pub const Socket = struct {
 
     /// Allow address reuse (SO_REUSEADDR)
     so_reuseaddr: bool,
+    /// Disable Nagle's algorithm (TCP_NODELAY)
+    tcp_nodelay: bool,
 
     /// Multicast group memberships (IP addresses in host byte order)
     /// 0 = unused slot
@@ -215,6 +220,7 @@ pub const Socket = struct {
             .tos = 0, // Normal service
             .so_broadcast = false,
             .so_reuseaddr = false,
+            .tcp_nodelay = false,
             // Multicast
             .multicast_groups = [_]u32{0} ** MAX_MULTICAST_GROUPS,
             .multicast_count = 0,

@@ -6,7 +6,6 @@ const state = @import("state.zig");
 const tcp_state = @import("../tcp/state.zig");
 const errors = @import("errors.zig");
 const scheduler = @import("scheduler.zig");
-const platform = @import("../../platform.zig");
 
 /// Mark socket as listening for connections (TCP only)
 pub fn listen(sock_fd: usize, backlog_arg: usize) errors.SocketError!void {
@@ -36,6 +35,7 @@ pub fn listen(sock_fd: usize, backlog_arg: usize) errors.SocketError!void {
 
     // Copy socket options to listening TCB (for inheritance to child connections)
     listen_tcb.tos = sock.tos;
+    listen_tcb.nodelay = sock.tcp_nodelay;
 }
 
 /// Accept an incoming connection (TCP only)
@@ -43,10 +43,6 @@ pub fn listen(sock_fd: usize, backlog_arg: usize) errors.SocketError!void {
 pub fn accept(sock_fd: usize, peer_addr: ?*types.SockAddrIn) errors.SocketError!usize {
     // Socket acquisition is now handled inside the loop to support re-acquisition
     // after blocking.
-
-
-
-
     var accepted_tcb: ?*tcp.Tcb = null;
 
     // Loop until we get a connection or error
@@ -65,70 +61,60 @@ pub fn accept(sock_fd: usize, peer_addr: ?*types.SockAddrIn) errors.SocketError!
             return errors.SocketError.InvalidArg;
         }
 
-        // Disable interrupts to close race window between check and block
-        platform.cpu.disableInterrupts();
-        var tcp_held = tcp_state.lock.acquire();
+        // Check accept queue under socket lock
+        {
+            const held = sock.lock.acquire();
+            if (sock.accept_count > 0) {
+                const tcb = sock.accept_queue[sock.accept_tail] orelse {
+                    held.release();
+                    state.releaseSocket(sock);
+                    return errors.SocketError.WouldBlock;
+                };
+                sock.accept_queue[sock.accept_tail] = null;
+                sock.accept_tail = (sock.accept_tail + 1) % types.ACCEPT_QUEUE_SIZE;
+                sock.accept_count -= 1;
 
-        // Check accept queue
-        if (sock.accept_count > 0) {
-            // Dequeue connection under TCP lock
-            const tcb = sock.accept_queue[sock.accept_tail] orelse {
-                tcp_held.release();
-                platform.cpu.enableInterrupts(); // Safe to enable here
+                held.release();
+                state.releaseSocket(sock);
+                accepted_tcb = tcb;
+                break; // Found one!
+            }
+
+            // No connections available
+            if (!sock.blocking) {
+                held.release();
                 state.releaseSocket(sock);
                 return errors.SocketError.WouldBlock;
-            };
-            sock.accept_queue[sock.accept_tail] = null;
-            sock.accept_tail = (sock.accept_tail + 1) % types.ACCEPT_QUEUE_SIZE;
-            sock.accept_count -= 1;
+            }
 
-            tcp_held.release();
-            platform.cpu.enableInterrupts(); // Safe to enable here
-            
-            // Drop socket lock now that we have the TCB
-            state.releaseSocket(sock);
-            
-            accepted_tcb = tcb;
-            break; // Found one!
-        }
+            // Blocking: Prepare to sleep
+            if (scheduler.blockFn()) |block_fn| {
+                const get_current = scheduler.currentThreadFn() orelse {
+                    held.release();
+                    state.releaseSocket(sock);
+                    return errors.SocketError.SystemError;
+                };
 
-        // No connections available
-        if (!sock.blocking) {
-            tcp_held.release();
-            platform.cpu.enableInterrupts();
-            state.releaseSocket(sock);
-            return errors.SocketError.WouldBlock;
-        }
+                sock.blocked_thread = get_current();
+                held.release();
 
-        // Blocking: Prepare to sleep
-        if (scheduler.blockFn()) |block_fn| {
-            const get_current = scheduler.currentThreadFn() orelse {
-                tcp_held.release();
-                platform.cpu.enableInterrupts();
+                // CRITICAL: Release socket ref before blocking!
+                // calling queueAcceptConnection requires this lock.
+                // If we hold it while sleeping, we deadock.
                 state.releaseSocket(sock);
-                return errors.SocketError.SystemError;
-            };
 
-            sock.blocked_thread = get_current();
+                // block_fn() sets state=Blocked then atomically enables
+                // interrupts and halts (STI; HLT sequence)
+                block_fn();
 
-            tcp_held.release(); // TCP lock released, IRQs disabled
-            
-            // CRITICAL: Release socket lock before blocking!
-            // calling queueAcceptConnection requires this lock.
-            // If we hold it while sleeping, we deadock.
-            state.releaseSocket(sock); 
-
-            // block_fn() sets state=Blocked then atomically enables
-            // interrupts and halts (STI; HLT sequence)
-            block_fn();
-            
-            // Woke up - loop around to re-acquire locks and check queue
-            continue;
-        } else {
-            tcp_held.release();
-            platform.cpu.enableInterrupts();
-            state.releaseSocket(sock);
-            return errors.SocketError.WouldBlock;
+                sock.blocked_thread = null;
+                // Woke up - loop around to re-acquire locks and check queue
+                continue;
+            } else {
+                held.release();
+                state.releaseSocket(sock);
+                return errors.SocketError.WouldBlock;
+            }
         }
     }
     const tcb = accepted_tcb.?;
@@ -146,6 +132,9 @@ pub fn accept(sock_fd: usize, peer_addr: ?*types.SockAddrIn) errors.SocketError!
     new_sock.tcb = tcb;
     new_sock.local_port = tcb.local_port;
     new_sock.local_addr = tcb.local_ip;
+    new_sock.tcp_nodelay = tcb.nodelay;
+    state.retainPort(new_sock.local_port);
+    new_sock.tcp_nodelay = tcb.nodelay;
 
     // Fill peer address if requested
     if (peer_addr) |addr| {
@@ -192,6 +181,7 @@ pub fn connect(sock_fd: usize, dest_addr: *const types.SockAddrIn) errors.Socket
     };
 
     sock.tcb = tcb;
+    tcb.nodelay = sock.tcp_nodelay;
 
     // Store socket index in TCB for async completion lookup
     // This reuses parent_socket field (also used for server-side accept queue)
@@ -209,38 +199,31 @@ pub fn connect(sock_fd: usize, dest_addr: *const types.SockAddrIn) errors.Socket
     if (sock.blocking) {
         if (scheduler.blockFn()) |block_fn| {
             const get_current = scheduler.currentThreadFn() orelse return errors.SocketError.SystemError;
-            
-            // Loop until state changes from SynSent (or error occurs)
-            while (tcb.state == .SynSent) {
-                 // Disable interrupts to close race window
-                 _ = platform.cpu.disableInterrupts();
-                 
-                 // Check state again after locking
-                 if (tcb.state != .SynSent) {
-                     platform.cpu.enableInterrupts();
-                     break;
-                 }
-                 
-                 sock.blocked_thread = get_current();
-                 // Important: tcb.blocked_thread must also be set for TCP layer to wake us
-                 // when the handshake completes (SYN-SENT processing in rx.zig wakes this)
-                 tcb.blocked_thread = sock.blocked_thread; 
-                 
-                 block_fn(); // Implies enable interrupts + halt
 
-                 sock.blocked_thread = null;
-                 // Security: Acquire lock before accessing TCB to prevent use-after-free.
-                 // TCB may have been freed by timer while we were blocked.
-                 {
-                     const connect_held = tcp_state.lock.acquire();
-                     // Re-verify TCB is still attached to socket and valid
-                     // Security: Check generation to ensure TCB wasn't freed and re-allocated for a different connection
-                     // while we were sleeping.
-                     if (sock.tcb == tcb and tcb.allocated and tcb.state != .Closed and tcb.generation == tcb_gen) {
-                         tcb.blocked_thread = null;
-                     }
-                     connect_held.release();
-                 }
+            // Loop until state changes from SynSent (or error occurs)
+            while (true) {
+                const connect_held = tcp_state.lock.acquire();
+                const still_valid = tcp_state.isTcbValid(tcb) and sock.tcb == tcb and tcb.generation == tcb_gen;
+                if (!still_valid) {
+                    connect_held.release();
+                    return errors.SocketError.ConnectionRefused;
+                }
+
+                if (tcb.state != .SynSent) {
+                    tcb.blocked_thread = null;
+                    connect_held.release();
+                    break;
+                }
+
+                sock.blocked_thread = get_current();
+                // Important: tcb.blocked_thread must also be set for TCP layer to wake us
+                // when the handshake completes (SYN-SENT processing in rx.zig wakes this)
+                tcb.blocked_thread = sock.blocked_thread;
+                connect_held.release();
+
+                block_fn(); // Implies enable interrupts + halt
+
+                sock.blocked_thread = null;
             }
         } else {
              // If no scheduler (e.g. early boot), we can't block safely
@@ -253,7 +236,9 @@ pub fn connect(sock_fd: usize, dest_addr: *const types.SockAddrIn) errors.Socket
         const final_held = tcp_state.lock.acquire();
         defer final_held.release();
         const final_tcb = sock.tcb;
-        break :blk if (final_tcb) |t| t.state else .Closed;
+        if (final_tcb == null) break :blk .Closed;
+        if (!tcp_state.isTcbValid(final_tcb.?)) break :blk .Closed;
+        break :blk final_tcb.?.state;
     };
 
     switch (final_state) {
@@ -292,6 +277,8 @@ pub fn checkConnectStatus(sock_fd: usize) errors.SocketError!void {
 pub fn queueAcceptConnection(socket_idx: usize, tcb: *tcp.Tcb) bool {
     const sock = state.acquireSocket(socket_idx) orelse return false;
     defer state.releaseSocket(sock);
+    const held = sock.lock.acquire();
+    defer held.release();
     if (sock.accept_count >= sock.backlog) return false;
 
     sock.accept_queue[sock.accept_head] = tcb;
@@ -300,6 +287,7 @@ pub fn queueAcceptConnection(socket_idx: usize, tcb: *tcp.Tcb) bool {
 
     // Wake any waiting thread
     scheduler.wakeThread(sock.blocked_thread);
+    sock.blocked_thread = null;
 
     return true;
 }
@@ -377,49 +365,55 @@ pub fn acceptAsync(sock_fd: usize, request: *IoRequest) errors.SocketError!bool 
         return errors.SocketError.InvalidArg;
     }
 
-    // Check if connection already available
-    const async_held = tcp_state.lock.acquire();
-    defer async_held.release();
+    var dequeued_tcb: ?*tcp.Tcb = null;
+    {
+        const held = sock.lock.acquire();
+        defer held.release();
 
-    if (sock.accept_count > 0) {
-        // Connection available - complete synchronously
-        const tcb = sock.accept_queue[sock.accept_tail] orelse {
-            return errors.SocketError.SystemError;
-        };
-        sock.accept_queue[sock.accept_tail] = null;
-        sock.accept_tail = (sock.accept_tail + 1) % types.ACCEPT_QUEUE_SIZE;
-        sock.accept_count -= 1;
+        if (sock.accept_count > 0) {
+            // Connection available - dequeue while holding the socket lock
+            const tcb = sock.accept_queue[sock.accept_tail] orelse {
+                return errors.SocketError.SystemError;
+            };
+            sock.accept_queue[sock.accept_tail] = null;
+            sock.accept_tail = (sock.accept_tail + 1) % types.ACCEPT_QUEUE_SIZE;
+            sock.accept_count -= 1;
+            dequeued_tcb = tcb;
+        } else {
+            // No connection available - store pending request
+            if (sock.pending_accept != null) {
+                // Already have a pending accept
+                return errors.SocketError.WouldBlock;
+            }
+            sock.pending_accept = request;
+            request.fd = @intCast(sock_fd);
+            return false; // Pending
+        }
+    }
 
-        // Allocate new socket for connection
-        const new_sock_fd = @import("lifecycle.zig").socket(types.AF_INET, types.SOCK_STREAM, 0) catch {
-            tcp.close(tcb);
-            _ = request.complete(.{ .err = error.ENOMEM });
-            return true; // Completed (with error)
-        };
+    const tcb = dequeued_tcb.?;
 
-        const new_sock = state.getSocket(new_sock_fd) orelse {
-            tcp.close(tcb);
-            _ = request.complete(.{ .err = error.EFAULT });
-            return true;
-        };
-        new_sock.tcb = tcb;
-        new_sock.local_port = tcb.local_port;
-        new_sock.local_addr = tcb.local_ip;
+    // Allocate new socket for connection
+    const new_sock_fd = @import("lifecycle.zig").socket(types.AF_INET, types.SOCK_STREAM, 0) catch {
+        tcp.close(tcb);
+        _ = request.complete(.{ .err = error.ENOMEM });
+        return true; // Completed (with error)
+    };
 
-        // Complete with new fd
-        _ = request.complete(.{ .success = new_sock_fd });
+    const new_sock = state.getSocket(new_sock_fd) orelse {
+        tcp.close(tcb);
+        _ = request.complete(.{ .err = error.EFAULT });
         return true;
-    }
+    };
+    new_sock.tcb = tcb;
+    new_sock.local_port = tcb.local_port;
+    new_sock.local_addr = tcb.local_ip;
+    state.retainPort(new_sock.local_port);
+    new_sock.tcp_nodelay = tcb.nodelay;
 
-    // No connection available - store pending request
-    if (sock.pending_accept != null) {
-        // Already have a pending accept
-        return errors.SocketError.WouldBlock;
-    }
-
-    sock.pending_accept = request;
-    request.fd = @intCast(sock_fd);
-    return false; // Pending
+    // Complete with new fd
+    _ = request.complete(.{ .success = new_sock_fd });
+    return true;
 }
 
 /// Async recv - queue request for incoming data
@@ -568,9 +562,13 @@ pub fn completePendingAccept(socket_idx: usize, tcb: *tcp.Tcb) bool {
     const sock = state.acquireSocket(socket_idx) orelse return false;
     defer state.releaseSocket(sock);
 
-    const pending = sock.pending_accept orelse return false;
-    const request: *IoRequest = @ptrCast(@alignCast(pending));
-    sock.pending_accept = null;
+    const request: *IoRequest = blk: {
+        const held = sock.lock.acquire();
+        defer held.release();
+        const pending = sock.pending_accept orelse return false;
+        sock.pending_accept = null;
+        break :blk @ptrCast(@alignCast(pending));
+    };
 
     // Allocate new socket for connection
     const new_sock_fd = @import("lifecycle.zig").socket(types.AF_INET, types.SOCK_STREAM, 0) catch {

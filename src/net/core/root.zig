@@ -5,6 +5,7 @@
 pub const packet = @import("packet.zig");
 pub const interface = @import("interface.zig");
 pub const checksum = @import("checksum.zig");
+pub const pool = @import("pool.zig");
 
 // Re-export commonly used types
 pub const PacketBuffer = packet.PacketBuffer;

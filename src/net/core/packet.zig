@@ -8,20 +8,21 @@
 //   - Layer offsets track header positions for easy access
 //   - Reference counting for shared packet handling
 const std = @import("std");
+const constants = @import("../constants.zig");
 
 /// Maximum packet size (MTU + headers)
-pub const MAX_PACKET_SIZE: usize = 2048;
+pub const MAX_PACKET_SIZE: usize = constants.MAX_PACKET_SIZE;
 
 /// Ethernet header size
-pub const ETH_HEADER_SIZE: usize = 14;
+pub const ETH_HEADER_SIZE: usize = constants.ETH_HEADER_SIZE;
 /// IPv4 header size (minimum, without options)
-pub const IP_HEADER_SIZE: usize = 20;
+pub const IP_HEADER_SIZE: usize = constants.IP_HEADER_SIZE;
 /// TCP header size (minimum, without options)
-pub const TCP_HEADER_SIZE: usize = 20;
+pub const TCP_HEADER_SIZE: usize = constants.TCP_HEADER_SIZE;
 /// UDP header size
-pub const UDP_HEADER_SIZE: usize = 8;
+pub const UDP_HEADER_SIZE: usize = constants.UDP_HEADER_SIZE;
 /// ICMP header size
-pub const ICMP_HEADER_SIZE: usize = 8;
+pub const ICMP_HEADER_SIZE: usize = constants.ICMP_HEADER_SIZE;
 
 /// Packet buffer for zero-copy networking
 pub const PacketBuffer = struct {
@@ -77,8 +78,8 @@ pub const PacketBuffer = struct {
         };
     }
 
-    // SECURITY: The following header accessor methods (ethHeader, ipHeader, udpHeader,
-    // icmpHeader) perform direct pointer casts WITHOUT bounds checking. In ReleaseFast
+    // SECURITY: The following header accessor methods (ethHeaderUnsafe, ipHeaderUnsafe,
+    // udpHeaderUnsafe, icmpHeaderUnsafe) perform direct pointer casts WITHOUT bounds checking. In ReleaseFast
     // builds where runtime safety is disabled, malformed packets with invalid offsets
     // can cause out-of-bounds memory access.
     //
@@ -90,22 +91,38 @@ pub const PacketBuffer = struct {
     // Mitigation: Use safe accessors or validate offsets before calling these methods.
 
     /// Get Ethernet header pointer (unchecked - see SECURITY note above)
-    pub fn ethHeader(self: *const Self) *align(1) EthernetHeader {
+    pub fn ethHeaderUnsafe(self: *const Self) *align(1) EthernetHeader {
+        @setRuntimeSafety(true);
+        const end = std.math.add(usize, self.eth_offset, ETH_HEADER_SIZE) catch @panic("ethHeader overflow");
+        const limit = if (self.len == 0) self.data.len else self.len;
+        if (end > limit) @panic("ethHeader out of bounds");
         return @ptrCast(&self.data[self.eth_offset]);
     }
 
     /// Get IPv4 header pointer (unchecked - see SECURITY note above)
-    pub fn ipHeader(self: *const Self) *align(1) Ipv4Header {
+    pub fn ipHeaderUnsafe(self: *const Self) *align(1) Ipv4Header {
+        @setRuntimeSafety(true);
+        const end = std.math.add(usize, self.ip_offset, IP_HEADER_SIZE) catch @panic("ipHeader overflow");
+        const limit = if (self.len == 0) self.data.len else self.len;
+        if (end > limit) @panic("ipHeader out of bounds");
         return @ptrCast(&self.data[self.ip_offset]);
     }
 
     /// Get UDP header pointer (unchecked - see SECURITY note above)
-    pub fn udpHeader(self: *const Self) *align(1) UdpHeader {
+    pub fn udpHeaderUnsafe(self: *const Self) *align(1) UdpHeader {
+        @setRuntimeSafety(true);
+        const end = std.math.add(usize, self.transport_offset, UDP_HEADER_SIZE) catch @panic("udpHeader overflow");
+        const limit = if (self.len == 0) self.data.len else self.len;
+        if (end > limit) @panic("udpHeader out of bounds");
         return @ptrCast(&self.data[self.transport_offset]);
     }
 
     /// Get ICMP header pointer (unchecked - see SECURITY note above)
-    pub fn icmpHeader(self: *const Self) *align(1) IcmpHeader {
+    pub fn icmpHeaderUnsafe(self: *const Self) *align(1) IcmpHeader {
+        @setRuntimeSafety(true);
+        const end = std.math.add(usize, self.transport_offset, ICMP_HEADER_SIZE) catch @panic("icmpHeader overflow");
+        const limit = if (self.len == 0) self.data.len else self.len;
+        if (end > limit) @panic("icmpHeader out of bounds");
         return @ptrCast(&self.data[self.transport_offset]);
     }
 
@@ -167,8 +184,8 @@ pub const EthernetHeader = extern struct {
     src_mac: [6]u8,
     ethertype: u16, // Network byte order, unaligned access safe
 
-    pub const ETHERTYPE_IPV4: u16 = 0x0008; // 0x0800 in network order
-    pub const ETHERTYPE_ARP: u16 = 0x0608;  // 0x0806 in network order
+    pub const ETHERTYPE_IPV4: u16 = constants.ETHERTYPE_IPV4; // 0x0800 in network order
+    pub const ETHERTYPE_ARP: u16 = constants.ETHERTYPE_ARP;  // 0x0806 in network order
 
     /// Get ethertype in host byte order
     pub fn getEthertype(self: *align(1) const EthernetHeader) u16 {
@@ -198,9 +215,9 @@ pub const Ipv4Header = extern struct {
     src_ip: u32,        // Network byte order
     dst_ip: u32,        // Network byte order
 
-    pub const PROTO_ICMP: u8 = 1;
-    pub const PROTO_TCP: u8 = 6;
-    pub const PROTO_UDP: u8 = 17;
+    pub const PROTO_ICMP: u8 = constants.PROTO_ICMP;
+    pub const PROTO_TCP: u8 = constants.PROTO_TCP;
+    pub const PROTO_UDP: u8 = constants.PROTO_UDP;
 
     /// Get IP version
     pub fn getVersion(self: *align(1) const Ipv4Header) u4 {

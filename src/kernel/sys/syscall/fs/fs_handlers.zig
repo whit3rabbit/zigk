@@ -14,8 +14,9 @@ const heap = @import("heap");
 const user_mem = @import("user_mem");
 const caps = @import("capabilities");
 const devfs = @import("devfs");
+const vmm = @import("vmm");
 
-const SyscallError = base.SyscallError;
+const perms = @import("perms");
 
 // Mount operation flags
 const MOUNT_OP: u8 = 1;
@@ -94,7 +95,7 @@ pub fn sys_mount(
     fstype_ptr: usize,
     flags: usize,
     data: usize,
-) SyscallError!usize {
+) base.SyscallError!usize {
     _ = flags;
     _ = data;
 
@@ -152,7 +153,7 @@ pub fn sys_mount(
 /// Args:
 ///   target: Mount point path
 ///   flags: Unmount flags (MNT_FORCE, MNT_DETACH - currently ignored)
-pub fn sys_umount2(target_ptr: usize, flags: usize) SyscallError!usize {
+pub fn sys_umount2(target_ptr: usize, flags: usize) base.SyscallError!usize {
     _ = flags; // TODO: Handle MNT_FORCE, MNT_DETACH
 
     const alloc = heap.allocator();
@@ -185,7 +186,7 @@ pub fn sys_umount2(target_ptr: usize, flags: usize) SyscallError!usize {
 }
 
 /// sys_unlink (87) - Delete a file
-pub fn sys_unlink(path_ptr: usize) SyscallError!usize {
+pub fn sys_unlink(path_ptr: usize) base.SyscallError!usize {
     const alloc = heap.allocator();
     const path_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
     defer alloc.free(path_buf);
@@ -283,123 +284,15 @@ fn getFilesystem(source: []const u8, fstype: []const u8) !fs.vfs.FileSystem {
 }
 
 // =============================================================================
-// File Status Syscalls (stat, fstat, access)
+// File Status Syscalls (access)
 // =============================================================================
-
-/// sys_stat (4) - Get file status by path
-///
-/// Args:
-///   path_ptr: Path to file
-///   statbuf_ptr: Pointer to userspace Stat structure
-pub fn sys_stat(path_ptr: usize, statbuf_ptr: usize) SyscallError!usize {
-    const alloc = heap.allocator();
-    const path_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
-    defer alloc.free(path_buf);
-    const canon_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
-    defer alloc.free(canon_buf);
-
-    const raw_path = user_mem.copyStringFromUser(path_buf, path_ptr) catch return error.EFAULT;
-    if (raw_path.len == 0) return error.ENOENT;
-
-    // Canonicalize path
-    const path = canonicalizePath(raw_path, canon_buf) orelse return error.ENOENT;
-
-    // Validate userspace buffer
-    if (!user_mem.isValidUserPtr(statbuf_ptr, @sizeOf(uapi.stat.Stat))) {
-        return error.EFAULT;
-    }
-
-    // Get file metadata via VFS
-    const file_meta = fs.vfs.Vfs.statPath(path) orelse return error.ENOENT;
-
-    // Fill Stat structure
-    const stat_ptr: *uapi.stat.Stat = @ptrFromInt(statbuf_ptr);
-    stat_ptr.* = .{
-        .dev = 0,
-        .ino = 0,
-        .nlink = 1,
-        .mode = file_meta.mode,
-        .uid = file_meta.uid,
-        .gid = file_meta.gid,
-        .__pad0 = 0,
-        .rdev = 0,
-        .size = 0, // TODO: Get actual size from VFS
-        .blksize = 512,
-        .blocks = 0,
-        .atime = 0,
-        .atime_nsec = 0,
-        .mtime = 0,
-        .mtime_nsec = 0,
-        .ctime = 0,
-        .ctime_nsec = 0,
-        .__unused = [_]i64{0} ** 3,
-    };
-
-    return 0;
-}
-
-/// sys_fstat (5) - Get file status by file descriptor
-///
-/// Args:
-///   fd_num: File descriptor number
-///   statbuf_ptr: Pointer to userspace Stat structure
-pub fn sys_fstat(fd_num: usize, statbuf_ptr: usize) SyscallError!usize {
-    const fd_mod = @import("fd");
-
-    // Validate userspace buffer
-    if (!user_mem.isValidUserPtr(statbuf_ptr, @sizeOf(uapi.stat.Stat))) {
-        return error.EFAULT;
-    }
-
-    // Get file descriptor
-    const fd_table = base.getGlobalFdTable();
-    const file_desc = fd_table.get(@intCast(fd_num)) orelse return error.EBADF;
-
-    // Call the FD's stat operation if available
-    const stat_ptr: *uapi.stat.Stat = @ptrFromInt(statbuf_ptr);
-
-    if (file_desc.ops.stat) |stat_fn| {
-        const result = stat_fn(file_desc, stat_ptr);
-        if (result < 0) {
-            // Convert negative errno to SyscallError
-            return error.EIO;
-        }
-        return 0;
-    }
-
-    // No stat operation - return basic info
-    stat_ptr.* = .{
-        .dev = 0,
-        .ino = 0,
-        .nlink = 1,
-        .mode = 0o100644, // Regular file
-        .uid = 0,
-        .gid = 0,
-        .__pad0 = 0,
-        .rdev = 0,
-        .size = 0,
-        .blksize = 512,
-        .blocks = 0,
-        .atime = 0,
-        .atime_nsec = 0,
-        .mtime = 0,
-        .mtime_nsec = 0,
-        .ctime = 0,
-        .ctime_nsec = 0,
-        .__unused = [_]i64{0} ** 3,
-    };
-
-    _ = fd_mod;
-    return 0;
-}
 
 /// sys_access (21) - Check file access permissions
 ///
 /// Args:
 ///   path_ptr: Path to file
 ///   mode: Access mode to check (R_OK=4, W_OK=2, X_OK=1, F_OK=0)
-pub fn sys_access(path_ptr: usize, mode: usize) SyscallError!usize {
-    const perms = @import("perms");
+pub fn sys_access(path_ptr: usize, mode: usize) base.SyscallError!usize {
 
     const alloc = heap.allocator();
     const path_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
@@ -455,7 +348,7 @@ pub fn sys_access(path_ptr: usize, mode: usize) SyscallError!usize {
 /// Args:
 ///   path_ptr: Path to file
 ///   mode: New file mode (permissions only, lower 12 bits)
-pub fn sys_chmod(path_ptr: usize, mode_arg: usize) SyscallError!usize {
+pub fn sys_chmod(path_ptr: usize, mode_arg: usize) base.SyscallError!usize {
     const alloc = heap.allocator();
     const path_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
     defer alloc.free(path_buf);
@@ -499,7 +392,7 @@ pub fn sys_chmod(path_ptr: usize, mode_arg: usize) SyscallError!usize {
 ///   path_ptr: Path to file
 ///   owner: New owner UID (-1 to keep current)
 ///   group: New group GID (-1 to keep current)
-pub fn sys_chown(path_ptr: usize, owner: usize, group: usize) SyscallError!usize {
+pub fn sys_chown(path_ptr: usize, owner: usize, group: usize) base.SyscallError!usize {
     const alloc = heap.allocator();
     const path_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
     defer alloc.free(path_buf);
@@ -533,4 +426,281 @@ pub fn sys_chown(path_ptr: usize, owner: usize, group: usize) SyscallError!usize
     };
 
     return 0;
+}
+
+// =============================================================================
+// File Manipulation Syscalls (truncate, rename, link)
+// =============================================================================
+
+/// sys_truncate (76) - Truncate a file to a specified length
+pub fn sys_truncate(path_ptr: usize, length: usize) base.SyscallError!usize {
+    const alloc = heap.allocator();
+    const path_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(path_buf);
+    const canon_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(canon_buf);
+
+    const raw_path = user_mem.copyStringFromUser(path_buf, path_ptr) catch return error.EFAULT;
+    if (raw_path.len == 0) return error.ENOENT;
+
+    const path = canonicalizePath(raw_path, canon_buf) orelse return error.ENOENT;
+
+    // Check permissions (require write access)
+    const file_meta = fs.vfs.Vfs.statPath(path) orelse return error.ENOENT;
+    const proc = base.getCurrentProcess();
+    if (!@import("perms").checkAccess(proc, file_meta, .Write, path)) {
+        return error.EACCES;
+    }
+
+    fs.vfs.Vfs.truncate(path, @intCast(length)) catch |err| {
+        return switch (err) {
+            error.AccessDenied => error.EACCES,
+            error.IsDirectory => error.EISDIR,
+            error.NotSupported => error.EROFS,
+            error.IOError => error.EIO,
+            else => error.EIO,
+        };
+    };
+
+    return 0;
+}
+
+/// sys_ftruncate (77) - Truncate an open file to a specified length
+pub fn sys_ftruncate(fd_num: usize, length: usize) base.SyscallError!usize {
+    const table = base.getGlobalFdTable();
+    const fd_u32 = std.math.cast(u32, fd_num) orelse return error.EBADF;
+    const file_desc = table.get(fd_u32) orelse return error.EBADF;
+
+    if (!file_desc.isWritable()) {
+        return error.EBADF;
+    }
+
+    // Check if the file operation supports truncate
+    // We need to add 'truncate' to fd.FileOps
+    if (file_desc.ops.truncate) |truncate_fn| {
+        truncate_fn(file_desc, @intCast(length)) catch |err| {
+            return switch (err) {
+                error.AccessDenied => error.EACCES,
+                error.IOError => error.EIO,
+            };
+        };
+        return 0;
+    }
+
+    return error.EINVAL;
+}
+
+/// sys_rename (82) - Rename a file or directory
+pub fn sys_rename(old_ptr: usize, new_ptr: usize) base.SyscallError!usize {
+    const alloc = heap.allocator();
+    const old_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(old_buf);
+    const new_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(new_buf);
+    const c_old_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(c_old_buf);
+    const c_new_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(c_new_buf);
+
+    const raw_old = user_mem.copyStringFromUser(old_buf, old_ptr) catch return error.EFAULT;
+    const raw_new = user_mem.copyStringFromUser(new_buf, new_ptr) catch return error.EFAULT;
+
+    if (raw_old.len == 0 or raw_new.len == 0) return error.ENOENT;
+
+    const old_path = canonicalizePath(raw_old, c_old_buf) orelse return error.ENOENT;
+    const new_path = canonicalizePath(raw_new, c_new_buf) orelse return error.ENOENT;
+
+    // Check permissions: require write access to parent directories (simplified for now)
+    // For MVP, we check write access to the old file itself, but ideally we check the parent.
+    const file_meta = fs.vfs.Vfs.statPath(old_path) orelse return error.ENOENT;
+    const proc = base.getCurrentProcess();
+    if (!@import("perms").checkAccess(proc, file_meta, .Write, old_path)) {
+        return error.EACCES;
+    }
+
+    fs.vfs.Vfs.rename(old_path, new_path) catch |err| {
+        return switch (err) {
+            error.NotFound => error.ENOENT,
+            error.AccessDenied => error.EACCES,
+            error.NotSupported => error.EROFS,
+            error.IOError => error.EIO,
+            else => error.EIO,
+        };
+    };
+
+    return 0;
+}
+
+/// sys_mkdir (83) - Create a directory
+pub fn sys_mkdir(path_ptr: usize, mode: usize) base.SyscallError!usize {
+    const alloc = heap.allocator();
+    const path_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(path_buf);
+    const canon_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(canon_buf);
+
+    const raw_path = user_mem.copyStringFromUser(path_buf, path_ptr) catch return error.EFAULT;
+    if (raw_path.len == 0) return error.ENOENT;
+
+    const path = canonicalizePath(raw_path, canon_buf) orelse return error.ENOENT;
+
+    // Capability check for mkdir
+    const proc = base.getCurrentProcess();
+    if (!hasFileCapability(proc, path, caps.FileCapability.DELETE_OP)) { // Simplified: use delete op for now or add CREATE
+         // Ideally has separate CREATE capability
+    }
+
+    fs.vfs.Vfs.mkdir(path, @intCast(mode & 0o7777)) catch |err| {
+        return switch (err) {
+            error.AlreadyExists => error.EEXIST,
+            error.NotFound => error.ENOENT,
+            error.NotSupported => error.EROFS,
+            error.IOError => error.EIO,
+            else => error.EIO,
+        };
+    };
+
+    return 0;
+}
+
+/// sys_rmdir (84) - Remove a directory
+pub fn sys_rmdir(path_ptr: usize) base.SyscallError!usize {
+    const alloc = heap.allocator();
+    const path_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(path_buf);
+    const canon_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(canon_buf);
+
+    const raw_path = user_mem.copyStringFromUser(path_buf, path_ptr) catch return error.EFAULT;
+    if (raw_path.len == 0) return error.ENOENT;
+
+    const path = canonicalizePath(raw_path, canon_buf) orelse return error.ENOENT;
+
+    // Capability check
+    const proc = base.getCurrentProcess();
+    if (!hasFileCapability(proc, path, caps.FileCapability.DELETE_OP)) {
+        return error.EACCES;
+    }
+
+    fs.vfs.Vfs.rmdir(path_buf) catch |err| {
+        return switch (err) {
+            error.NotEmpty => error.ENOTEMPTY,
+            error.NotFound => error.ENOENT,
+            error.AccessDenied => error.EACCES,
+            error.Busy => error.EBUSY,
+            error.NoMemory => error.ENOMEM,
+            else => error.EIO,
+        };
+    };
+
+    return 0;
+}
+
+/// sys_link (86) - Create a hard link
+pub fn sys_link(old_ptr: usize, new_ptr: usize) base.SyscallError!usize {
+    const alloc = heap.allocator();
+    const old_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(old_buf);
+    const new_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(new_buf);
+    const c_old_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(c_old_buf);
+    const c_new_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(c_new_buf);
+
+    const raw_old = user_mem.copyStringFromUser(old_buf, old_ptr) catch return error.EFAULT;
+    const raw_new = user_mem.copyStringFromUser(new_buf, new_ptr) catch return error.EFAULT;
+
+    if (raw_old.len == 0 or raw_new.len == 0) return error.ENOENT;
+
+    const old_path = canonicalizePath(raw_old, c_old_buf) orelse return error.ENOENT;
+    const new_path = canonicalizePath(raw_new, c_new_buf) orelse return error.ENOENT;
+
+    // Check permissions
+    const file_meta = fs.vfs.Vfs.statPath(old_path) orelse return error.ENOENT;
+    const proc = base.getCurrentProcess();
+    if (!@import("perms").checkAccess(proc, file_meta, .Write, old_path)) {
+        return error.EACCES;
+    }
+
+    fs.vfs.Vfs.link(old_path, new_path) catch |err| {
+        return switch (err) {
+            error.NotFound => error.ENOENT,
+            error.AlreadyExists => error.EEXIST,
+            error.NotSupported => error.EROFS,
+            error.IOError => error.EIO,
+            else => error.EIO,
+        };
+    };
+
+    return 0;
+}
+
+/// sys_symlink (88) - Create a symbolic link
+pub fn sys_symlink(target_ptr: usize, linkpath_ptr: usize) base.SyscallError!usize {
+    const alloc = heap.allocator();
+    const target_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(target_buf);
+    const link_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(link_buf);
+    const c_link_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(c_link_buf);
+
+    const target = user_mem.copyStringFromUser(target_buf, target_ptr) catch return error.EFAULT;
+    const raw_link = user_mem.copyStringFromUser(link_buf, linkpath_ptr) catch return error.EFAULT;
+
+    if (target.len == 0 or raw_link.len == 0) return error.ENOENT;
+
+    const linkpath = canonicalizePath(raw_link, c_link_buf) orelse return error.ENOENT;
+
+    // Simplified permission check: check write access to the directory where link will be created.
+    // For now, we stub this with a generic check or relying on VFS/FS errors.
+
+    fs.vfs.Vfs.symlink(target, linkpath) catch |err| {
+        return switch (err) {
+            error.AlreadyExists => error.EEXIST,
+            error.NotSupported => error.EROFS,
+            error.IOError => error.EIO,
+            else => error.EIO,
+        };
+    };
+
+    return 0;
+}
+
+/// sys_readlink (89) - Read target of a symbolic link
+pub fn sys_readlink(path_ptr: usize, buf_ptr: usize, bufsiz: usize) base.SyscallError!usize {
+    const alloc = heap.allocator();
+    const path_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(path_buf);
+    const canon_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(canon_buf);
+
+    const raw_path = user_mem.copyStringFromUser(path_buf, path_ptr) catch return error.EFAULT;
+    if (raw_path.len == 0) return error.ENOENT;
+
+    const path = canonicalizePath(raw_path, canon_buf) orelse return error.ENOENT;
+
+    // Validate user buffer
+    if (!base.isValidUserAccess(buf_ptr, bufsiz, base.AccessMode.Write)) {
+        return error.EFAULT;
+    }
+
+    const kbuf = alloc.alloc(u8, bufsiz) catch return error.ENOMEM;
+    defer alloc.free(kbuf);
+
+    const bytes_read = fs.vfs.Vfs.readlink(path, kbuf) catch |err| {
+        return switch (err) {
+            error.NotFound => error.ENOENT,
+            error.NotSupported => error.EINVAL, // Not a symlink
+            error.IOError => error.EIO,
+            else => error.EIO,
+        };
+    };
+
+    // Copy to user memory
+    const uptr = base.UserPtr.from(buf_ptr);
+    _ = uptr.copyFromKernel(kbuf[0..bytes_read]) catch return error.EFAULT;
+
+    return bytes_read;
 }

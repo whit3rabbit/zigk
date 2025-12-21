@@ -92,6 +92,7 @@ const pipe_ops = fd_mod.FileOps{
     .ioctl = null,
     .mmap = null,
     .poll = null,
+    .truncate = null,
 };
 
 /// Create a new pipe

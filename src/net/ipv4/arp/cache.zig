@@ -326,24 +326,8 @@ pub fn updateCache(iface: *Interface, ip: u32, mac: [6]u8, state: ArpState) !Pen
         return pending;
     }
 
-    const entry = try findFreeEntry();
-    entry.ip_addr = ip;
-    @memcpy(&entry.mac_addr, &mac);
-    entry.state = state;
-    entry.timestamp = monitor.current_tick;
-    entry.retries = 0;
-    entry.queue_head = 0;
-    entry.queue_tail = 0;
-    entry.queue_count = 0;
-    entry.expected_reply_mac = [_]u8{0} ** 6;
-    entry.has_received_reply = false;
-    entry.conflict_detected = false;
-    entry.conflict_time = 0;
-    entry.generation +%= 1;
-    entry.is_static = false;
-    entry.hash_next = null;
-    hashTableInsert(entry);
-    
+    // Security: Do not create new entries for unsolicited packets.
+    // Only update entries that are already tracked (e.g., pending request).
     return pending;
 }
 

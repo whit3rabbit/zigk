@@ -37,6 +37,7 @@ const init_proc = @import("init_proc.zig");
 const init_hw = @import("init_hw.zig");
 const init_fs = @import("init_fs.zig");
 const syscall_ipc = @import("syscall_ipc");
+const layout = @import("layout");
 
 // Boot Interface
 const BootInfo = @import("boot_info");
@@ -206,6 +207,10 @@ export fn _start(boot_info: *BootInfo.BootInfo) callconv(.c) noreturn {
 
     // Initialize paging with HHDM offset from BootInfo
     hal.paging.init(boot_info.hhdm_offset);
+
+    // Initialize memory layout with KASLR offsets from BootInfo
+    // Must be called after paging.init() but before VMM/stack/heap init
+    layout.init(boot_info);
 
     // SECURITY: Only log kernel addresses in debug mode to prevent KASLR bypass
     if (builtin.mode == .Debug) {

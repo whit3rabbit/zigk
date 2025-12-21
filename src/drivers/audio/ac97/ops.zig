@@ -14,7 +14,9 @@ pub fn write(self: *types.Ac97, data: []const u8) isize {
     var written: usize = 0;
 
     while (written < data.len) {
+        const flags = hal.cpu.disableInterruptsSaveFlags();
         const held = self.lock.acquire();
+        defer hal.cpu.restoreInterrupts(flags);
 
         if (self.current_buffer >= types.BDL_ENTRY_COUNT) {
             held.release();
@@ -47,10 +49,10 @@ pub fn write(self: *types.Ac97, data: []const u8) isize {
 
         written += res.consumed;
 
+        port_io.outb(self.nabm_base + regs.NABM_PO_LVI, @truncate(self.current_buffer));
+
         const next_buffer = (self.current_buffer + 1) % types.BDL_ENTRY_COUNT;
         self.current_buffer = next_buffer;
-
-        port_io.outb(self.nabm_base + regs.NABM_PO_LVI, @truncate(self.current_buffer));
 
         const cr = port_io.inb(self.nabm_base + regs.NABM_PO_CR);
         if ((cr & regs.CR_RPBM) == 0) {
@@ -64,8 +66,12 @@ pub fn write(self: *types.Ac97, data: []const u8) isize {
 }
 
 pub fn writeAsync(self: *types.Ac97, request: *kernel_io.IoRequest) void {
+    const flags = hal.cpu.disableInterruptsSaveFlags();
     const held = self.lock.acquire();
-    defer held.release();
+    defer {
+        held.release();
+        hal.cpu.restoreInterrupts(flags);
+    }
 
     const civ = port_io.inb(self.nabm_base + regs.NABM_PO_CIV);
 
@@ -117,9 +123,11 @@ pub fn submitBuffer(self: *types.Ac97, request: *kernel_io.IoRequest) void {
     const bytes_le = std.mem.toBytes(@as(u64, src_consumed));
     @memcpy(request.op_data.raw[0..8], &bytes_le); 
 
-    self.current_buffer = (self.current_buffer + 1) % types.BDL_ENTRY_COUNT;
-
+    // Update LVI to point to the buffer we just filled
     port_io.outb(self.nabm_base + regs.NABM_PO_LVI, @truncate(self.current_buffer));
+
+    // Advance write pointer
+    self.current_buffer = (self.current_buffer + 1) % types.BDL_ENTRY_COUNT;
 
     const cr = port_io.inb(self.nabm_base + regs.NABM_PO_CR);
     if ((cr & regs.CR_RPBM) == 0) {

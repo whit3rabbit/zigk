@@ -239,8 +239,12 @@ fn sendMouseCommandWithData(cmd: u8, data: u8) bool {
 
 /// Inject a mouse event from an external source (e.g., USB HID driver)
 pub fn injectRawInput(dx: i16, dy: i16, dz: i8, buttons: Buttons) void {
+    const flags = hal.cpu.disableInterruptsSaveFlags();
     const held = mouse_lock.acquire();
-    defer held.release();
+    defer {
+        held.release();
+        hal.cpu.restoreInterrupts(flags);
+    }
 
     const buttons_changed = Buttons{
         .left = buttons.left != mouse_state.prev_buttons.left,
@@ -267,8 +271,12 @@ pub fn injectRawInput(dx: i16, dy: i16, dz: i8, buttons: Buttons) void {
 /// x, y: screen coordinates (0 to width-1, 0 to height-1)
 /// max_x, max_y: screen dimensions
 pub fn injectAbsoluteInput(x: u32, y: u32, max_x: u32, max_y: u32, buttons: Buttons) void {
+    const flags = hal.cpu.disableInterruptsSaveFlags();
     const held = mouse_lock.acquire();
-    defer held.release();
+    defer {
+        held.release();
+        hal.cpu.restoreInterrupts(flags);
+    }
 
     // Update cursor position using absolute coordinates
     input.setCursorAbsolute(x, y, max_x, max_y);
@@ -537,32 +545,48 @@ fn processPacket() void {
 
 /// Get a mouse event (non-blocking)
 pub fn getEvent() ?MouseEvent {
+    const flags = hal.cpu.disableInterruptsSaveFlags();
     const held = mouse_lock.acquire();
-    defer held.release();
+    defer {
+        held.release();
+        hal.cpu.restoreInterrupts(flags);
+    }
 
     return mouse_state.event_buffer.pop();
 }
 
 /// Check if there are events available
 pub fn hasEvent() bool {
+    const flags = hal.cpu.disableInterruptsSaveFlags();
     const held = mouse_lock.acquire();
-    defer held.release();
+    defer {
+        held.release();
+        hal.cpu.restoreInterrupts(flags);
+    }
 
     return !mouse_state.event_buffer.isEmpty();
 }
 
 /// Get current button state
 pub fn getButtons() Buttons {
+    const flags = hal.cpu.disableInterruptsSaveFlags();
     const held = mouse_lock.acquire();
-    defer held.release();
+    defer {
+        held.release();
+        hal.cpu.restoreInterrupts(flags);
+    }
 
     return mouse_state.prev_buttons;
 }
 
 /// Check if mouse has scroll wheel (thread-safe)
 pub fn hasScrollWheel() bool {
+    const flags = hal.cpu.disableInterruptsSaveFlags();
     const held = mouse_lock.acquire();
-    defer held.release();
+    defer {
+        held.release();
+        hal.cpu.restoreInterrupts(flags);
+    }
     return mouse_state.has_scroll_wheel;
 }
 

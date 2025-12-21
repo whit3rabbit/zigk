@@ -223,9 +223,3 @@ pub fn sys_chdir(path_ptr: usize) SyscallError!usize {
     return error.ENOENT;
 }
 
-/// sys_mkdir (83) - Create directory
-pub fn sys_mkdir(path_ptr: usize, mode: usize) SyscallError!usize {
-    _ = path_ptr;
-    _ = mode;
-    return error.EROFS; // Read-only filesystem
-}

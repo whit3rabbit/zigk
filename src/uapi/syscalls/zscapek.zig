@@ -8,6 +8,8 @@ pub const SYS_DEBUG_LOG: usize = 1000;
 pub const SYS_GET_FB_INFO: usize = 1001;
 /// Map framebuffer into process address space
 pub const SYS_MAP_FB: usize = 1002;
+/// Flush framebuffer to display (trigger present)
+pub const SYS_FB_FLUSH: usize = 1006;
 /// Read raw keyboard scancode (non-blocking)
 pub const SYS_READ_SCANCODE: usize = 1003;
 /// Read ASCII character from input buffer (blocking)

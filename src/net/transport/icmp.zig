@@ -19,6 +19,8 @@ const checksum = @import("../core/checksum.zig");
 const ipv4 = @import("../ipv4/root.zig").ipv4;
 const ethernet = @import("../ethernet/ethernet.zig");
 const arp = @import("../ipv4/root.zig").arp;
+// Reuse TCP's buffer pool to avoid large stack allocations
+const tcp_state = @import("tcp/state.zig");
 const PacketBuffer = packet.PacketBuffer;
 const IcmpHeader = packet.IcmpHeader;
 const Ipv4Header = packet.Ipv4Header;
@@ -120,10 +122,10 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
         return false;
     }
 
-    const icmp = pkt.icmpHeader();
+    const icmp = packet.getIcmpHeader(pkt.data, pkt.transport_offset) orelse return false;
 
     // Get ICMP message length from IP header
-    const ip = pkt.ipHeader();
+    const ip = packet.getIpv4Header(pkt.data, pkt.ip_offset) orelse return false;
     const ip_total_len = ip.getTotalLength();
     const ip_header_len = ip.getHeaderLength();
 
@@ -159,8 +161,8 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
 /// Handle an ICMP Echo Request (ping)
 /// Sends back an Echo Reply with the same data
 fn handleEchoRequest(iface: *Interface, req_pkt: *PacketBuffer, icmp_len: usize) bool {
-    const req_ip = req_pkt.ipHeader();
-    const req_icmp = req_pkt.icmpHeader();
+    const req_ip = packet.getIpv4Header(req_pkt.data, req_pkt.ip_offset) orelse return false;
+    const req_icmp = packet.getIcmpHeader(req_pkt.data, req_pkt.transport_offset) orelse return false;
 
     // Get source IP to reply to
     const src_ip = req_ip.getSrcIp();
@@ -188,8 +190,9 @@ fn handleEchoRequest(iface: *Interface, req_pkt: *PacketBuffer, icmp_len: usize)
     const ip_len = packet.IP_HEADER_SIZE;
     const total_len = eth_len + ip_len + icmp_len;
 
-    // Use static buffer for reply (avoid allocation)
-    var reply_buf: [packet.MAX_PACKET_SIZE]u8 = undefined;
+    // Use TX buffer pool to avoid large stack allocations
+    const reply_buf = tcp_state.allocTxBuffer() orelse return false;
+    defer tcp_state.freeTxBuffer(reply_buf);
     if (total_len > reply_buf.len) {
         return false;
     }
@@ -409,7 +412,9 @@ pub fn sendEchoRequest(
     const icmp_len = packet.ICMP_HEADER_SIZE + data.len;
     const total_len = eth_len + ip_len + icmp_len;
 
-    var buf: [packet.MAX_PACKET_SIZE]u8 = undefined;
+    // Use TX buffer pool to avoid large stack allocations
+    const buf = tcp_state.allocTxBuffer() orelse return false;
+    defer tcp_state.freeTxBuffer(buf);
     if (total_len > buf.len) {
         return false;
     }
@@ -460,14 +465,14 @@ pub fn sendDestUnreachable(
     original_pkt: *const PacketBuffer,
     code: u8,
 ) bool {
-    const orig_ip = original_pkt.ipHeader();
+    const orig_ip = packet.getIpv4Header(original_pkt.data, original_pkt.ip_offset) orelse return false;
     const src_ip = orig_ip.getSrcIp();
 
     // Don't send ICMP errors for:
     // - ICMP errors (to prevent loops)
     // - Broadcast/multicast destinations
     if (orig_ip.protocol == ipv4.PROTO_ICMP) {
-        const orig_icmp = original_pkt.icmpHeader();
+        const orig_icmp = packet.getIcmpHeader(original_pkt.data, original_pkt.transport_offset) orelse return false;
         if (orig_icmp.icmp_type != TYPE_ECHO_REQUEST and
             orig_icmp.icmp_type != TYPE_ECHO_REPLY)
         {
@@ -490,7 +495,9 @@ pub fn sendDestUnreachable(
     const icmp_len = packet.ICMP_HEADER_SIZE + orig_data_len;
     const total_len = eth_len + ip_len + icmp_len;
 
-    var buf: [packet.MAX_PACKET_SIZE]u8 = undefined;
+    // Use TX buffer pool to avoid large stack allocations
+    const buf = tcp_state.allocTxBuffer() orelse return false;
+    defer tcp_state.freeTxBuffer(buf);
     if (total_len > buf.len) {
         return false;
     }

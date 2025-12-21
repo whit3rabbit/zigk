@@ -1,5 +1,6 @@
 const std = @import("std");
 const platform = @import("../../platform.zig");
+const clock = @import("../../clock.zig");
 const entropy = platform.entropy;
 
 /// Fallback PRNG state for when hardware entropy is unavailable
@@ -15,7 +16,7 @@ pub fn getNextId() u16 {
     }
 
     if (!prng_initialized.load(.acquire)) {
-        const tsc = platform.timing.rdtsc();
+        const tsc = clock.rdtsc();
         const addr_entropy = @intFromPtr(&fallback_prng_state);
 
         var seed: u64 = tsc;
@@ -30,7 +31,7 @@ pub fn getNextId() u16 {
         prng_initialized.store(true, .release);
     }
 
-    const jitter = platform.timing.rdtsc();
+    const jitter = clock.rdtsc();
 
     while (true) {
         const old_state = fallback_prng_state.load(.acquire);

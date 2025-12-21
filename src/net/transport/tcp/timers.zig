@@ -73,6 +73,12 @@ pub fn processTimers() void {
             }
         }
 
+        if (tcb.ack_pending and state.connection_timestamp >= tcb.ack_due) {
+            _ = tx.sendAck(tcb);
+            tcb.ack_pending = false;
+            tcb.ack_due = 0;
+        }
+
         // Process retransmission timer
         if (tcb.retrans_timer == 0) continue;
 
@@ -115,9 +121,13 @@ pub fn processTimers() void {
                 .SynSent => _ = tx.sendSyn(tcb),
                 .SynReceived => _ = tx.sendSynAck(tcb),
                 .Established, .CloseWait => {
-                    // Retransmit oldest unacked segment (Go-Back-N style simplified)
-                    tcb.snd_nxt = tcb.snd_una;
-                    _ = tx.transmitPendingData(tcb);
+                    if (tcb.sack_ok and tcb.sack_block_count > 0) {
+                        _ = tx.retransmitLoss(tcb);
+                    } else {
+                        // Retransmit oldest unacked segment (Go-Back-N style simplified)
+                        tcb.snd_nxt = tcb.snd_una;
+                        _ = tx.transmitPendingData(tcb);
+                    }
                 },
                 .LastAck => _ = tx.sendFin(tcb),
                 else => {},

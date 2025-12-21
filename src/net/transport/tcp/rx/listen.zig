@@ -54,7 +54,10 @@ pub fn processListenPacket(
     const tcb = new_tcb.?; // Unwrap
     // We hold state.lock currently. We can initialize TCB safely.
 
-    const ip_hdr = pkt.ipHeader();
+    const ip_hdr = packet.getIpv4Header(pkt.data, pkt.ip_offset) orelse {
+        state_held.release();
+        return false;
+    };
     tcb.local_ip = ip_hdr.getDstIp();
     tcb.local_port = tcp_hdr.getDstPort();
     tcb.remote_ip = ip_hdr.getSrcIp();
@@ -96,6 +99,7 @@ pub fn processListenPacket(
 
     tcb.parent_socket = listen_tcb.parent_socket;
     tcb.tos = listen_tcb.tos;
+    tcb.nodelay = listen_tcb.nodelay;
     tcb.state = .SynReceived;
     state.half_open_count += 1;
     // Insert into half-open list for O(1) SYN flood eviction

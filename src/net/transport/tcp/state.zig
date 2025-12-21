@@ -3,6 +3,7 @@ const c = @import("constants.zig");
 const types = @import("types.zig");
 pub const Interface = @import("../../core/interface.zig").Interface;
 const sync = @import("../../sync.zig");
+const net_pool = @import("../../core/pool.zig");
 // const hal = @import("hal"); // Removed dependency
 // const entropy = @import("../entropy.zig"); // Removed incorrect import (using platform.entropy)
 const platform = @import("../../platform.zig");
@@ -17,47 +18,12 @@ pub var tcp_allocator: std.mem.Allocator = undefined;
 /// TX Buffer Pool (64 x 2048 = 128KB)
 /// Avoids heap allocation on transmit path
 /// Shared by TCP and UDP
-const TX_POOL_SIZE = 64;
-const TX_BUF_SIZE = 2048;
-var tx_pool: [TX_POOL_SIZE][TX_BUF_SIZE]u8 = undefined;
-var tx_pool_bitmap: u64 = 0xFFFFFFFFFFFFFFFF; // 1 = free
-var tx_pool_lock: sync.Spinlock = .{};
-
 pub fn allocTxBuffer() ?[]u8 {
-    const held = tx_pool_lock.acquire();
-    defer held.release();
-
-    if (tx_pool_bitmap == 0) return null;
-
-    const idx = @ctz(tx_pool_bitmap);
-    tx_pool_bitmap &= ~(@as(u64, 1) << @intCast(idx));
-    return &tx_pool[idx];
+    return net_pool.allocTxBuffer();
 }
 
 pub fn freeTxBuffer(buf: []u8) void {
-    const start = @intFromPtr(&tx_pool[0]);
-    const addr = @intFromPtr(buf.ptr);
-
-    // Validate range
-    if (addr < start or addr >= start + (TX_POOL_SIZE * TX_BUF_SIZE)) {
-        return;
-    }
-
-    const offset = addr - start;
-    const idx = offset / TX_BUF_SIZE;
-
-    const held = tx_pool_lock.acquire();
-    defer held.release();
-
-    // SECURITY: Check for double-free before setting the bit.
-    // If bit is already 1 (free), this is a double-free attempt which could
-    // cause two concurrent operations to share the same buffer if toggled.
-    // Silently ignore to prevent exploitation - caller has a logic bug.
-    const mask = @as(u64, 1) << @intCast(idx);
-    if (tx_pool_bitmap & mask != 0) {
-        return; // Already free - double-free detected
-    }
-    tx_pool_bitmap |= mask;
+    net_pool.freeTxBuffer(buf);
 }
 
 /// Connection hash table (for fast lookup)
@@ -88,10 +54,13 @@ pub fn tick() void {
 
 /// Global TCP lock - MUST be initialized before use
 /// SECURITY: Uses IrqLock to ensure proper interrupt state management
+/// LOCK ORDER: Always take state.lock before any per-TCB mutex to avoid AB-BA deadlocks.
 pub var lock: sync.IrqLock = .{};
 
-/// Secret key for ISN generation (RFC 6528) - 128-bit for SipHash
-var secret_key: [16]u8 = [_]u8{0} ** 16;
+/// Secret key for TCP hash buckets (SipHash-2-4) - stable across connections
+var hash_key: [16]u8 = [_]u8{0} ** 16;
+/// Secret key for ISN generation (RFC 6528) - can be re-seeded
+var isn_key: [16]u8 = [_]u8{0} ** 16;
 
 /// Count of half-open connections (SYN-RECEIVED)
 pub var half_open_count: usize = 0;
@@ -190,11 +159,16 @@ pub fn init(iface: *Interface, allocator: std.mem.Allocator, ticks_per_sec: u32)
 
     // Seed ISN counter with hardware entropy
     isn_counter = @truncate(platform.entropy.getHardwareEntropy());
-    // Seed secret key (128-bit)
+    // Seed hash key (128-bit) - must remain stable for hash table lookups
     const k1 = platform.entropy.getHardwareEntropy();
     const k2 = platform.entropy.getHardwareEntropy();
-    @memcpy(secret_key[0..8], std.mem.asBytes(&k1));
-    @memcpy(secret_key[8..16], std.mem.asBytes(&k2));
+    @memcpy(hash_key[0..8], std.mem.asBytes(&k1));
+    @memcpy(hash_key[8..16], std.mem.asBytes(&k2));
+    // Seed ISN key (128-bit) - can be re-seeded without rehashing tables
+    const k3 = platform.entropy.getHardwareEntropy();
+    const k4 = platform.entropy.getHardwareEntropy();
+    @memcpy(isn_key[0..8], std.mem.asBytes(&k3));
+    @memcpy(isn_key[8..16], std.mem.asBytes(&k4));
 }
 
 /// Count connections in SYN-RECEIVED state (half-open)
@@ -272,7 +246,7 @@ pub fn freeTcb(tcb: *Tcb) void {
 /// Hash function for connection lookup
 /// Uses SipHash-2-4 for protection against hash flooding DoS
 pub fn hashConnection(local_ip: u32, local_port: u16, remote_ip: u32, remote_port: u16) usize {
-    var hasher = std.crypto.auth.siphash.SipHash64(2, 4).init(&secret_key);
+    var hasher = std.crypto.auth.siphash.SipHash64(2, 4).init(&hash_key);
     hasher.update(std.mem.asBytes(&local_ip));
     hasher.update(std.mem.asBytes(&local_port));
     hasher.update(std.mem.asBytes(&remote_ip));
@@ -312,6 +286,7 @@ pub fn removeTcbFromHash(tcb: *Tcb) void {
 
 /// Find TCB by connection 4-tuple
 pub fn findTcb(local_ip: u32, local_port: u16, remote_ip: u32, remote_port: u16) ?*Tcb {
+    // Caller must hold state.lock for the duration of any lookup-then-modify sequence.
     const idx = hashConnection(local_ip, local_port, remote_ip, remote_port);
     var curr = tcb_hash[idx];
 
@@ -412,7 +387,7 @@ pub fn generateIsn(l_ip: u32, l_port: u16, r_ip: u32, r_port: u16) u32 {
     if (isn_generation_count >= ISN_RESEED_THRESHOLD) {
         const k1 = platform.entropy.getHardwareEntropy();
         const k2 = platform.entropy.getHardwareEntropy();
-        const sk_u64: *[2]u64 = @ptrCast(@alignCast(&secret_key));
+        const sk_u64: *[2]u64 = @ptrCast(@alignCast(&isn_key));
         sk_u64[0] ^= k1;
         sk_u64[1] ^= k2;
         isn_generation_count = 0;
@@ -423,7 +398,7 @@ pub fn generateIsn(l_ip: u32, l_port: u16, r_ip: u32, r_port: u16) u32 {
     // attack against the linear counter component.
     const fresh_entropy = platform.entropy.getHardwareEntropy();
 
-    var hasher = std.crypto.auth.siphash.SipHash64(2, 4).init(&secret_key);
+    var hasher = std.crypto.auth.siphash.SipHash64(2, 4).init(&isn_key);
     hasher.update(std.mem.asBytes(&l_ip));
     hasher.update(std.mem.asBytes(&l_port));
     hasher.update(std.mem.asBytes(&r_ip));

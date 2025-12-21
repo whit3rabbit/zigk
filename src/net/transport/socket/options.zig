@@ -116,6 +116,18 @@ pub fn setsockopt(sock_fd: usize, level: i32, optname: i32, optval: [*]const u8,
             },
             else => return errors.SocketError.InvalidArg,
         }
+    } else if (level == types.IPPROTO_TCP) {
+        switch (optname) {
+            types.TCP_NODELAY => {
+                if (optlen < 4) return errors.SocketError.InvalidArg;
+                const val: *const i32 = @ptrCast(@alignCast(optval));
+                sock.tcp_nodelay = (val.* != 0);
+                if (sock.tcb) |tcb| {
+                    tcb.nodelay = sock.tcp_nodelay;
+                }
+            },
+            else => return errors.SocketError.InvalidArg,
+        }
     } else {
         return errors.SocketError.InvalidArg;
     }
@@ -167,6 +179,16 @@ pub fn getsockopt(sock_fd: usize, level: i32, optname: i32, optval: [*]u8, optle
                 if (optlen.* < 1) return errors.SocketError.InvalidArg;
                 optval[0] = sock.tos;
                 optlen.* = 1;
+            },
+            else => return errors.SocketError.InvalidArg,
+        }
+    } else if (level == types.IPPROTO_TCP) {
+        switch (optname) {
+            types.TCP_NODELAY => {
+                if (optlen.* < 4) return errors.SocketError.InvalidArg;
+                const val: *i32 = @ptrCast(@alignCast(optval));
+                val.* = if (sock.tcp_nodelay) 1 else 0;
+                optlen.* = 4;
             },
             else => return errors.SocketError.InvalidArg,
         }

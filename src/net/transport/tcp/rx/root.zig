@@ -25,7 +25,7 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
     }
 
     const tcp_hdr: *TcpHeader = @ptrCast(@alignCast(&pkt.data[pkt.transport_offset]));
-    const ip_hdr = pkt.ipHeader();
+    const ip_hdr = packet.getIpv4Header(pkt.data, pkt.ip_offset) orelse return false;
 
     // Validate TCP data offset
     const data_offset = tcp_hdr.getDataOffset();

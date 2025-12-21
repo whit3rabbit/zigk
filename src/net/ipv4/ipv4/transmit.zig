@@ -5,7 +5,7 @@ const checksum = @import("../../core/checksum.zig");
 const ethernet = @import("../../ethernet/ethernet.zig");
 const arp = @import("../arp/root.zig");
 const pmtu = @import("../pmtu.zig");
-const loopback = @import("../../loopback.zig");
+const loopback = @import("../../drivers/loopback.zig");
 const heap = @import("heap");
 const types = @import("types.zig");
 const utils = @import("utils.zig");
@@ -70,7 +70,7 @@ pub fn sendPacket(iface: *Interface, pkt: *PacketBuffer, dst_ip: u32) bool {
             if (!ethernet.buildFrame(lo, pkt, [_]u8{0} ** 6, ethernet.ETHERTYPE_IPV4)) {
                 return false;
             }
-            const ip_hdr = pkt.ipHeader();
+            const ip_hdr = pkt.ipHeaderUnsafe();
             pkt.len = pkt.ip_offset + ip_hdr.getTotalLength();
             return lo.transmit(pkt.data[0..pkt.len]);
         }
@@ -99,7 +99,7 @@ pub fn sendPacket(iface: *Interface, pkt: *PacketBuffer, dst_ip: u32) bool {
         return false;
     }
 
-    const ip_hdr = pkt.ipHeader();
+    const ip_hdr = pkt.ipHeaderUnsafe();
     const ip_total_len = ip_hdr.getTotalLength();
     pkt.len = pkt.ip_offset + ip_total_len;
 
@@ -112,7 +112,7 @@ pub fn sendPacket(iface: *Interface, pkt: *PacketBuffer, dst_ip: u32) bool {
 
 /// Send a packet fragmented into multiple IP datagrams
 fn sendFragmentedPacket(iface: *Interface, pkt: *PacketBuffer, dst_mac: [6]u8) bool {
-    const orig_ip = pkt.ipHeader();
+    const orig_ip = pkt.ipHeaderUnsafe();
     const ip_header_len = orig_ip.getHeaderLength();
 
     if (@as(usize, iface.mtu) <= ip_header_len) return false;

@@ -23,6 +23,9 @@ const fs = @import("fs");
 const user_mem = @import("user_mem");
 const user_vmm = @import("user_vmm");
 const aslr = @import("aslr");
+// Access virtio_gpu through the video_driver module
+const video_driver = @import("video_driver");
+const virtio_gpu = video_driver.virtio_gpu;
 
 const SyscallError = base.SyscallError;
 const UserPtr = base.UserPtr;
@@ -696,6 +699,29 @@ pub fn sys_map_fb() SyscallError!usize {
 
     // Return the mapped virtual address
     return @intCast(fb_virt_base);
+}
+
+/// sys_fb_flush (1006) - Flush framebuffer to display
+///
+/// Triggers a display update (present) for the framebuffer.
+/// Required for devices that use a shadow framebuffer (e.g., VirtIO-GPU).
+pub fn sys_fb_flush() SyscallError!usize {
+    // Check if framebuffer exists using generic state
+    if (!framebuffer.isAvailable()) {
+        return error.ENODEV;
+    }
+
+    // Try to get VirtIO-GPU driver instance
+    if (virtio_gpu.getDriver()) |drv| {
+        // Trigger generic present (updates full screen if no rect provided)
+        const dev = drv.device();
+        dev.vtable.present(dev.ptr, null);
+        return 0;
+    }
+
+    // If not VirtIO-GPU (e.g. UEFI framebuffer), flush is a no-op (memory mapped directly)
+    // but we return success so userland logic is consistent.
+    return 0;
 }
 
 // =============================================================================

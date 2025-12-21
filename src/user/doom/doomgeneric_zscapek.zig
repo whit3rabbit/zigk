@@ -152,6 +152,9 @@ pub export fn DG_DrawFrame() void {
             }
         }
     }
+
+    // Flush to screen (required for VirtIO-GPU)
+    syscall.flush_framebuffer() catch {};
 }
 
 /// Sleep for specified milliseconds

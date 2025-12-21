@@ -323,6 +323,7 @@ fn flushBuffer() void {
 
 /// Inject a scancode from an external source (e.g., USB HID driver)
 pub fn injectScancode(scancode: u8) void {
+    const flags = hal.cpu.disableInterruptsSaveFlags();
     const held = keyboard_lock.acquire();
 
     // Store raw scancode in buffer (mimic behavior of handleIrq)
@@ -337,12 +338,14 @@ pub fn injectScancode(scancode: u8) void {
         if (!keyboard_state.ascii_buffer.isEmpty()) {
             keyboard_state.blocked_thread = null;
             held.release();
+            hal.cpu.restoreInterrupts(flags);
             sched.unblock(blocked);
             return;
         }
     }
 
     held.release();
+    hal.cpu.restoreInterrupts(flags);
 }
 
 /// Initialize the keyboard driver with proper PS/2 controller setup
@@ -702,8 +705,12 @@ fn processExtendedKey(key_code: u8, is_release: bool) void {
 /// Returns null if buffer is empty
 /// Syscall: SYS_GETCHAR (1004) - but blocking version would loop on this
 pub fn getChar() ?u8 {
+    const flags = hal.cpu.disableInterruptsSaveFlags();
     const held = keyboard_lock.acquire();
-    defer held.release();
+    defer {
+        held.release();
+        hal.cpu.restoreInterrupts(flags);
+    }
 
     return keyboard_state.ascii_buffer.pop();
 }
@@ -781,6 +788,7 @@ pub fn getCharBlocking() u8 {
 /// If provided, the character will be copied there. Otherwise,
 /// the character value is returned in request.result.success.
 pub fn getCharAsync(request: *io.IoRequest) bool {
+    const flags = hal.cpu.disableInterruptsSaveFlags();
     const held = keyboard_lock.acquire();
 
     // Check if a character is immediately available
@@ -794,6 +802,7 @@ pub fn getCharAsync(request: *io.IoRequest) bool {
             _ = request.complete(.{ .success = @as(usize, c) });
         }
         held.release();
+        hal.cpu.restoreInterrupts(flags);
         return false; // Completed immediately
     }
 
@@ -812,11 +821,15 @@ pub fn getCharAsync(request: *io.IoRequest) bool {
         // Request not in idle state - fail
         _ = request.complete(.{ .err = error.EINVAL });
         held.release();
+        hal.cpu.restoreInterrupts(flags);
         return false;
     }
 
     keyboard_state.pending_read = request;
+    // Request is now owned by IRQ handler
+    
     held.release();
+    hal.cpu.restoreInterrupts(flags);
     return true; // Queued for later completion
 }
 

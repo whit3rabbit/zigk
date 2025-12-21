@@ -236,22 +236,10 @@ pub const VirtioGpuDriver = struct {
             return null;
         }
 
-        // Modern VirtIO devices use BAR4 for capabilities (64-bit BAR)
-        // BAR4 is at index 4 in the bar array
-        const bar4 = pci_dev.bar[4];
-        if (!bar4.isValid() or !bar4.is_mmio) {
-            console.err("VirtIO-GPU: BAR4 not valid or not MMIO", .{});
-            return null;
-        }
-        console.debug("VirtIO-GPU: BAR4 at phys={x} size={x}", .{ bar4.base, bar4.size });
+        // Detect capabilities
+        // Note: We do not hardcode BAR mapping. findCapabilities() will lazy-map
+        // the correct BARs based on the Capability structure.
 
-        // Map BAR4 MMIO region with explicit page mappings
-        // Required for 64-bit BAR addresses outside HHDM-covered RAM
-        const bar4_virt = vmm.mapMmioExplicit(bar4.base, bar4.size) catch |err| {
-            console.err("VirtIO-GPU: Failed to map BAR4: {}", .{err});
-            return null;
-        };
-        console.debug("VirtIO-GPU: BAR4 mapped to virt={x}", .{bar4_virt});
 
         // Allocate driver instance
         const driver = &driver_instance;
@@ -265,8 +253,8 @@ pub const VirtioGpuDriver = struct {
         driver.device_failed = false;
         
         // Initialize BAR mappings
-        // We know BAR4 is already mapped, so cache it
-        driver.bar_mappings[4] = bar4_virt;
+        driver.bar_mappings = [_]u64{0} ** 6;
+
 
         // Find VirtIO capabilities (before enabling bus master)
         if (!driver.findCapabilities(pci_dev, pci_access)) {
@@ -733,7 +721,7 @@ pub const VirtioGpuDriver = struct {
         // Security: Fixed virtual region for framebuffer (256GB offset from kernel base)
         // This address is reserved for VirtIO-GPU and must not overlap with other kernel mappings.
         // The VMM allocator does not manage this region - it is driver-owned.
-        const FB_VIRT_BASE = vmm.KERNEL_BASE + 0x4000000000;
+        const FB_VIRT_BASE = vmm.getKernelBase() + 0x4000000000;
         self.fb_virt = @ptrFromInt(FB_VIRT_BASE);
         // We don't have a single physical address anymore, but keep first one for reference
         self.fb_phys = 0;

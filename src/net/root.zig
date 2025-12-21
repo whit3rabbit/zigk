@@ -4,7 +4,8 @@ const ethernet = @import("ethernet/root.zig");
 const ipv4 = @import("ipv4/root.zig");
 pub const transport = @import("transport/root.zig");
 const dns = @import("dns/root.zig");
-pub const loopback = @import("loopback.zig");
+pub const loopback = @import("drivers/loopback.zig");
+const net_clock = @import("clock.zig");
 const io = @import("io");
 
 // Re-export key types from core
@@ -32,12 +33,18 @@ pub const IP_HEADER_SIZE = core.IP_HEADER_SIZE;
 pub const UDP_HEADER_SIZE = core.UDP_HEADER_SIZE;
 pub const ICMP_HEADER_SIZE = core.ICMP_HEADER_SIZE;
 
+// Re-export clock abstraction
+pub const Clock = net_clock.Clock;
+pub const defaultClock = net_clock.defaultClock;
+
 // Network stack initialization
 // Called from kernel main after NIC driver is initialized
 // Network stack initialization
 // Called from kernel main after NIC driver is initialized
-pub fn init(iface: *Interface, allocator: std.mem.Allocator, ticks_per_sec: u32) void {
+pub fn init(iface: *Interface, allocator: std.mem.Allocator, ticks_per_sec: u32, clk: Clock) void {
+    net_clock.init(clk);
     // Initialize layers with allocator
+    core.pool.init(allocator, core.pool.DEFAULT_MAX_MEMORY);
     ipv4.ipv4.init(allocator, ticks_per_sec); // Includes ARP init
     
     // Initialize Transport Layer (TCP/Sockets) which now uses dynamic memory

@@ -52,6 +52,12 @@ pub fn map_framebuffer() SyscallError![*]u8 {
     return @ptrFromInt(ret);
 }
 
+/// Flush framebuffer to display
+pub fn flush_framebuffer() SyscallError!void {
+    const ret = primitive.syscall0(syscalls.SYS_FB_FLUSH);
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
 // =============================================================================
 // Input/Mouse Syscalls (1010-1019)
 // =============================================================================

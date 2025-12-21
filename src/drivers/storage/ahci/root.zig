@@ -119,6 +119,10 @@ pub const AhciPort = struct {
     /// Lock protecting pending_requests and commands_issued
     pending_lock: sync.Spinlock,
 
+    /// Accumulated Interrupt Status (for sync commands)
+    /// Updated by ISR, cleared/read by sync code
+    last_is: std.atomic.Value(u32),
+
     /// Initialize port as inactive
     pub fn initInactive(num: u5) AhciPort {
         return AhciPort{
@@ -136,6 +140,7 @@ pub const AhciPort = struct {
             .pending_requests = [_]?*io.IoRequest{null} ** 32,
             .commands_issued = 0,
             .pending_lock = .{},
+            .last_is = std.atomic.Value(u32).init(0),
         };
     }
 
@@ -526,6 +531,9 @@ pub const AhciController = struct {
             return AhciError.CommandTimeout;
         }
 
+        // Clear previous error status
+        p.last_is.store(0, .release);
+
         // Issue the command
         port.writeCi(base, @as(u32, 1) << slot);
 
@@ -540,9 +548,17 @@ pub const AhciController = struct {
             }
 
             // Check for errors
-            const is = port.readIs(base);
-            if (is.hasError()) {
-                port.clearIs(base, is);
+            // Use last_is to catch errors even if ISR ran and cleared the register
+            const is_reg = port.readIs(base);
+            const is_val = @as(u32, @bitCast(is_reg));
+            const last_is_val = p.last_is.load(.acquire);
+            const combined_is = is_val | last_is_val;
+            
+            // Re-constitute PortInterrupt from integer
+            const is_combined: port.PortInterrupt = @bitCast(combined_is);
+
+            if (is_combined.hasError()) {
+                port.clearIs(base, is_reg);
                 return AhciError.DeviceError;
             }
 
@@ -831,8 +847,12 @@ pub const AhciController = struct {
         }
 
         // Hold lock from slot allocation through command issue to prevent race
+        const flags = hal.cpu.disableInterruptsSaveFlags();
         const held = p.pending_lock.acquire();
-        defer held.release();
+        defer {
+            held.release();
+            hal.cpu.restoreInterrupts(flags);
+        }
 
         // Find free command slot under lock
         const slot = findFreeSlotLocked(p) orelse return AhciError.AllocationFailed;
@@ -891,8 +911,12 @@ pub const AhciController = struct {
         }
 
         // Hold lock from slot allocation through command issue to prevent race
+        const flags = hal.cpu.disableInterruptsSaveFlags();
         const held = p.pending_lock.acquire();
-        defer held.release();
+        defer {
+            held.release();
+            hal.cpu.restoreInterrupts(flags);
+        }
 
         // Find free command slot under lock
         const slot = findFreeSlotLocked(p) orelse return AhciError.AllocationFailed;
@@ -961,8 +985,12 @@ pub const AhciController = struct {
         if (!p.active) return;
 
         // Read and clear port interrupt status
+        // Read and clear port interrupt status
         const pis = port.readIs(p.base);
         port.clearIs(p.base, pis);
+
+        // Accumulate status for sync commands
+        _ = p.last_is.fetchOr(@as(u32, @bitCast(pis)), .acq_rel);
 
         // Check which commands completed
         const ci = port.readCi(p.base);

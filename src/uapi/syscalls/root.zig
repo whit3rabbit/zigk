@@ -189,6 +189,7 @@ pub const SYS_CLONE3 = linux.SYS_CLONE3;
 pub const SYS_DEBUG_LOG = zscapek.SYS_DEBUG_LOG;
 pub const SYS_GET_FB_INFO = zscapek.SYS_GET_FB_INFO;
 pub const SYS_MAP_FB = zscapek.SYS_MAP_FB;
+pub const SYS_FB_FLUSH = zscapek.SYS_FB_FLUSH;
 pub const SYS_READ_SCANCODE = zscapek.SYS_READ_SCANCODE;
 pub const SYS_GETCHAR = zscapek.SYS_GETCHAR;
 pub const SYS_PUTCHAR = zscapek.SYS_PUTCHAR;

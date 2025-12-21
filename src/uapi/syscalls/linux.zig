@@ -192,6 +192,10 @@ pub const SYS_GETRESUID: usize = 118;
 pub const SYS_SETRESGID: usize = 119;
 /// Get real, effective, and saved group IDs
 pub const SYS_GETRESGID: usize = 120;
+/// Get filesystem statistics
+pub const SYS_STATFS: usize = 137;
+/// Get filesystem statistics by fd
+pub const SYS_FSTATFS: usize = 138;
 /// Get thread capabilities
 pub const SYS_CAPGET: usize = 125;
 /// Set thread capabilities

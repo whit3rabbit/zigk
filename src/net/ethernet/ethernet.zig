@@ -17,6 +17,7 @@
 const std = @import("std");
 const packet = @import("../core/packet.zig");
 const interface = @import("../core/interface.zig");
+const constants = @import("../constants.zig");
 const PacketBuffer = packet.PacketBuffer;
 const EthernetHeader = packet.EthernetHeader;
 const Interface = interface.Interface;
@@ -26,9 +27,9 @@ const ipv4 = @import("../ipv4/root.zig").ipv4;
 const arp = @import("../ipv4/arp/root.zig");
 
 /// Ethertype values in host byte order
-pub const ETHERTYPE_IPV4: u16 = 0x0800;
-pub const ETHERTYPE_ARP: u16 = 0x0806;
-pub const ETHERTYPE_IPV6: u16 = 0x86DD;
+pub const ETHERTYPE_IPV4: u16 = constants.ETHERTYPE_IPV4;
+pub const ETHERTYPE_ARP: u16 = constants.ETHERTYPE_ARP;
+pub const ETHERTYPE_IPV6: u16 = constants.ETHERTYPE_IPV6;
 
 /// Broadcast MAC address
 pub const BROADCAST_MAC: [6]u8 = .{ 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
@@ -54,7 +55,7 @@ pub fn processFrame(iface: *Interface, pkt: *PacketBuffer) bool {
         return false;
     }
 
-    const eth = pkt.ethHeader();
+    const eth = packet.getEthHeader(pkt.data, pkt.eth_offset) orelse return false;
 
     // Check if frame is for us (unicast to our MAC or broadcast)
     if (!isForUs(iface, eth.dst_mac)) {
@@ -128,7 +129,7 @@ pub fn buildFrame(iface: *const Interface, pkt: *PacketBuffer, dst_mac: [6]u8, e
         return false;
     }
 
-    const eth = pkt.ethHeader();
+    const eth = pkt.ethHeaderUnsafe();
 
     @memcpy(&eth.dst_mac, &dst_mac);
     @memcpy(&eth.src_mac, &iface.mac_addr);
@@ -237,7 +238,7 @@ test "ethernet pads short transmit frames" {
     var pkt = PacketBuffer.init(&buf, 0);
     pkt.eth_offset = 0;
     pkt.len = packet.ETH_HEADER_SIZE + 10;
-    const eth = pkt.ethHeader();
+    const eth = pkt.ethHeaderUnsafe();
     eth.dst_mac = .{ 0, 1, 2, 3, 4, 6 };
     eth.src_mac = iface.mac_addr;
     eth.setEthertype(ETHERTYPE_IPV4);

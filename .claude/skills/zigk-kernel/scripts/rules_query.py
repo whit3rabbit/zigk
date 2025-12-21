@@ -81,10 +81,16 @@ pub fn sys_read(...) isize {           // Don't use isize
 
 **Exception:** Non-returning handlers (sys_exit) may use isize.
 
-**Handler file locations:** src/kernel/syscall/
-- process.zig, signals.zig, scheduling.zig, io.zig, fd.zig
-- memory.zig, execution.zig, custom.zig, net.zig, random.zig
-- input.zig, ipc.zig, interrupt.zig, mmio.zig, ring.zig
+**Handler file locations:** src/kernel/sys/syscall/
+- core/: base.zig, table.zig, execution.zig, error_helpers.zig, user_mem.zig
+- fs/: fd.zig, fs_handlers.zig
+- memory/: memory.zig
+- process/: process.zig, signals.zig, scheduling.zig
+- net/: net.zig, pci_syscall.zig
+- hw/: interrupt.zig, mmio.zig, port_io.zig
+- io/: input.zig, ipc.zig, ring.zig
+- io_uring/: io_uring.zig
+- misc/: random.zig, custom.zig
 """,
 
     "memory": """

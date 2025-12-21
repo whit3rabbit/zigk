@@ -20,6 +20,8 @@ pub const FileMeta = struct {
     dev: u64 = 0,
     /// SECURITY: Inode number for TOCTOU detection
     ino: u64 = 0,
+    /// Size in bytes (optional)
+    size: u64 = 0,
 };
 
 // File type masks

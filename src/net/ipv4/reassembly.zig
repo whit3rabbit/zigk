@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const packet = @import("../core/packet.zig");
+const net_pool = @import("../core/pool.zig");
 // ipv4 import removed (not used)
 const sync = @import("../sync.zig");
 const PacketBuffer = packet.PacketBuffer;
@@ -18,12 +19,10 @@ const REASSEMBLY_TIMEOUT: u64 = 15;
 
 /// Maximum concurrent reassemblies
 /// Increased significantly to handle many small flows (DoS protection)
-/// Memory usage is now capped by MAX_TOTAL_MEMORY, not just slot count.
+/// Memory usage is capped by the shared packet pool budget.
 const MAX_REASSEMBLIES: usize = 128;
 
-/// Maximum total memory used by reassembly buffers (512KB)
-/// Prevents memory exhaustion DoS while allowing many small flows
-const MAX_TOTAL_MEMORY: usize = 512 * 1024;
+/// Memory usage is capped by the shared packet pool budget.
 
 /// Minimum fragment payload size (except for first/last fragments)
 /// SECURITY: Prevents fragment bomb attacks where attacker sends many tiny
@@ -82,35 +81,11 @@ const ReassemblyEntry = struct {
         return e;
     }
     
-    /// Free the entry's buffer and update memory tracking.
+    /// Free the entry's buffer.
     /// SECURITY: MUST be called while holding the reassembly lock.
-    /// This function modifies current_memory_usage which is shared state.
-    /// The lock provides synchronization to prevent race conditions on SMP.
-    fn deinit(self: *ReassemblyEntry, allocator: std.mem.Allocator) void {
+    fn deinit(self: *ReassemblyEntry) void {
         if (self.buffer.len > 0) {
-            const buf_len = self.buffer.len;
-            allocator.free(self.buffer);
-
-            // SECURITY (Vuln 5): Detect and log memory accounting underflow.
-            // Use saturating subtraction to prevent wraparound to huge values
-            // which would bypass MAX_TOTAL_MEMORY and allow memory exhaustion.
-            //
-            // IMPORTANT: If underflow occurs, it indicates a bug elsewhere
-            // (double-free, deinit called without allocation, etc.). In debug
-            // builds we assert to catch this during development. In release
-            // builds we saturate to 0 and continue (fail-safe), but the
-            // accounting is now incorrect and future allocations may exceed
-            // the budget. Consider adding telemetry/logging here if available.
-            if (std.debug.runtime_safety) {
-                // Debug build: assert to catch accounting bugs during development
-                std.debug.assert(current_memory_usage >= buf_len);
-            }
-            current_memory_usage = std.math.sub(usize, current_memory_usage, buf_len) catch blk: {
-                // Underflow detected - accounting is corrupted
-                // In production: saturate to 0 (fail-safe, but budget is broken)
-                // TODO: Add kernel log/telemetry for this anomaly if logging available
-                break :blk 0;
-            };
+            net_pool.freeReassemblyBuffer(self.buffer);
         }
         self.buffer = &[_]u8{};
     }
@@ -135,18 +110,14 @@ var cache_initialized: bool = false;
 /// Verify your Spinlock implementation uses CLI/STI or equivalent.
 var lock: sync.Spinlock = .{};
 var current_tick: u64 = 0;
-var reassembly_allocator: std.mem.Allocator = undefined;
-var current_memory_usage: usize = 0;
 
 /// Initialize module
-pub fn init(allocator: std.mem.Allocator) void {
+pub fn init() void {
     if (!cache_initialized) {
-        reassembly_allocator = allocator;
         for (&cache) |*entry| {
             entry.used = false;
             entry.buffer = &[_]u8{};
         }
-        current_memory_usage = 0;
         cache_initialized = true;
     }
 }
@@ -183,7 +154,7 @@ pub const ReassemblyResult = struct {
     /// Free the owned buffer - call this when done with the payload
     pub fn deinit(self: *ReassemblyResult) void {
         if (self.owned_buffer.len > 0) {
-            reassembly_allocator.free(self.owned_buffer);
+            net_pool.freeReassemblyBuffer(self.owned_buffer);
             self.owned_buffer = &[_]u8{};
             self.payload_len = 0;
         }
@@ -263,7 +234,7 @@ pub fn processFragment(
     if (is_first_fragment and payload.len < MIN_FIRST_FRAGMENT_SIZE) {
         // First fragment too small to contain transport header - likely attack
         e.used = false;
-        e.deinit(reassembly_allocator);
+        e.deinit();
         return null;
     }
 
@@ -273,7 +244,7 @@ pub fn processFragment(
     if (!is_first_fragment and !is_last_fragment and payload.len < MIN_FRAGMENT_SIZE) {
         // Middle fragment too small - likely attack, drop entire flow
         e.used = false;
-        e.deinit(reassembly_allocator);
+        e.deinit();
         return null;
     }
     
@@ -284,53 +255,22 @@ pub fn processFragment(
         var new_len = (end + 2047) & ~@as(usize, 2047);
         if (new_len > MAX_IP_PACKET_SIZE) new_len = MAX_IP_PACKET_SIZE;
 
-        // Check global memory budget
-        // SECURITY: Use checked arithmetic to prevent integer overflow.
-        // In ReleaseFast mode, wrapping could bypass the memory limit check
-        // if new_len < current_len due to corruption or race conditions.
-        const current_len = e.buffer.len;
-        const additional = std.math.sub(usize, new_len, current_len) catch {
-            // Underflow means new_len < current_len (should not happen normally)
-            // Treat as corruption/attack and drop flow
-            e.used = false;
-            e.deinit(reassembly_allocator);
-            return null;
-        };
-
-        // Use checked add for memory limit check to prevent overflow bypass
-        const projected_usage = std.math.add(usize, current_memory_usage, additional) catch {
-            // Overflow - would exceed addressable memory, definitely over limit
-            e.used = false;
-            e.deinit(reassembly_allocator);
-            return null;
-        };
-
-        if (projected_usage > MAX_TOTAL_MEMORY) {
-            // Memory Limit Exceeded
-            // Drop entire flow
-            e.used = false;
-            e.deinit(reassembly_allocator);
-            return null;
-        }
-
         if (e.buffer.len == 0) {
             // New allocation
-            e.buffer = reassembly_allocator.alloc(u8, new_len) catch {
+            e.buffer = net_pool.allocReassemblyBuffer(new_len) orelse {
                 e.used = false;
                 // e.deinit not needed (buffer empty)
                 return null;
             };
         } else {
             // Reallocation
-            const new_buf = reassembly_allocator.realloc(e.buffer, new_len) catch {
+            const new_buf = net_pool.reallocReassemblyBuffer(e.buffer, new_len) orelse {
                 e.used = false;
-                e.deinit(reassembly_allocator);
+                e.deinit();
                 return null;
             };
             e.buffer = new_buf;
         }
-        // Safe to add now - we already verified it won't overflow
-        current_memory_usage += additional;
     }
 
     // Update total length if this is the last fragment
@@ -352,7 +292,7 @@ pub fn processFragment(
     // a TOCTOU race where another IRQ modifies hole list between check and copy.
     if (isRegionOverlapping(e, start, end)) {
         e.used = false;
-        e.deinit(reassembly_allocator);
+        e.deinit();
         return null;
     }
 
@@ -364,7 +304,7 @@ pub fn processFragment(
 
     // Check if entry was invalidated (e.g., too many holes)
     if (!e.used) {
-        e.deinit(reassembly_allocator);
+        e.deinit();
         return null; 
     }
 
@@ -375,10 +315,10 @@ pub fn processFragment(
         // Previously, we returned a slice into e.buffer and released the lock,
         // creating a window where another thread/IRQ could evict this entry
         // before the caller copied the data, leading to use-after-free.
-        const owned_buf = reassembly_allocator.alloc(u8, e.total_len) catch {
+        const owned_buf = net_pool.allocReassemblyBuffer(e.total_len) orelse {
             // Allocation failed - free entry and return null
             e.used = false;
-            e.deinit(reassembly_allocator);
+            e.deinit();
             return null;
         };
 
@@ -397,7 +337,7 @@ pub fn processFragment(
         // Free the cache entry NOW while we still hold the lock
         // The caller owns owned_buf and is responsible for freeing it
         e.used = false;
-        e.deinit(reassembly_allocator);
+        e.deinit();
 
         return ReassemblyResult{
             .owned_buffer = owned_buf,
@@ -444,7 +384,7 @@ fn allocateEntry() ?Allocation {
         // Immediately evict timed-out entries
         if (age >= REASSEMBLY_TIMEOUT) {
             e.used = false;
-            e.deinit(reassembly_allocator);
+            e.deinit();
             return Allocation{ .ptr = e, .index = i };
         }
 
@@ -466,13 +406,13 @@ fn allocateEntry() ?Allocation {
         eviction_counter +%= 1;
         const random_idx = eviction_counter % MAX_REASSEMBLIES;
         cache[random_idx].used = false;
-        cache[random_idx].deinit(reassembly_allocator);
+        cache[random_idx].deinit();
         return Allocation{ .ptr = &cache[random_idx], .index = random_idx };
     }
 
     // 4. Normal case: evict oldest
     cache[oldest_idx].used = false;
-    cache[oldest_idx].deinit(reassembly_allocator);
+    cache[oldest_idx].deinit();
     return Allocation{ .ptr = &cache[oldest_idx], .index = oldest_idx };
 }
 
@@ -496,7 +436,7 @@ fn updateHoles(e: *ReassemblyEntry, start: usize, end: usize) void {
                 // Previously, buffer persisted until caller checked e.used,
                 // allowing brief memory accumulation under rapid attack.
                 e.used = false;
-                e.deinit(reassembly_allocator);
+                e.deinit();
                 return;
             }
             const new_hole = ReassemblyEntry.Hole{ .start = end, .end = h.end };

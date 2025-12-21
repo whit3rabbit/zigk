@@ -18,3 +18,22 @@ pub const Stat = extern struct {
     ctime_nsec: i64,
     __unused: [3]i64,
 };
+
+pub const Fsid = extern struct {
+    val: [2]i32,
+};
+
+pub const Statfs = extern struct {
+    f_type: i64,
+    f_bsize: i64,
+    f_blocks: i64,
+    f_bfree: i64,
+    f_bavail: i64,
+    f_files: i64,
+    f_ffree: i64,
+    f_fsid: Fsid,
+    f_namelen: i64,
+    f_frsize: i64,
+    f_flags: i64,
+    f_spare: [4]i64,
+};

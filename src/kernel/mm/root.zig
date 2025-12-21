@@ -8,3 +8,4 @@ pub const aslr = @import("aslr.zig");
 pub const tlb = @import("tlb.zig");
 pub const kernel_stack = @import("kernel_stack.zig");
 pub const iommu = @import("iommu/root.zig");
+pub const layout = @import("layout.zig");

@@ -9,6 +9,7 @@ const state = @import("state.zig");
 const errors = @import("errors.zig");
 const scheduler = @import("scheduler.zig");
 const platform = @import("../../platform.zig");
+const clock = @import("../../clock.zig");
 
 pub fn sendto(
     sock_fd: usize,
@@ -123,21 +124,26 @@ pub fn recvfrom(
             std.math.mul(u64, sock.rcv_timeout_ms, 1000) catch std.math.maxInt(u64)
         else
             0; // 0 means block forever (no deadline)
-        const start_tsc = platform.timing.rdtsc();
+        const start_tsc = clock.rdtsc();
 
         while (true) {
             // Security: Check timeout BEFORE blocking to bound total wait time.
             // This prevents indefinite hangs when no packets arrive.
-            if (timeout_us > 0 and platform.timing.hasTimedOut(start_tsc, timeout_us)) {
+            if (timeout_us > 0 and clock.hasTimedOut(start_tsc, timeout_us)) {
                 return errors.SocketError.TimedOut;
             }
 
-            // Try to dequeue data with lock held
+            // No data available - block atomically.
+            // Disable interrupts before registering blocked_thread, then re-check
+            // under the socket lock to prevent a lost wakeup.
+            const irq_state = platform.cpu.disableInterruptsSaveFlags();
             {
                 const held = sock.lock.acquire();
-                // We must release the lock before returning or blocking
+                sock.blocked_thread = get_current();
                 if (sock.dequeuePacket(buf, &src_ip, &src_port)) |len| {
+                    sock.blocked_thread = null;
                     held.release();
+                    platform.cpu.restoreInterrupts(irq_state);
                     if (src_addr) |addr| {
                         addr.* = types.SockAddrIn.init(src_ip, src_port);
                     }
@@ -146,17 +152,11 @@ pub fn recvfrom(
                 held.release();
             }
 
-            // No data available - block atomically
-            // Disable interrupts to close race window between setting
-            // blocked_thread and entering Blocked state. If a packet
-            // arrives after this point, the interrupt handler will see
-            // blocked_thread set and wake us after block_fn() halts.
-            _ = platform.cpu.disableInterrupts();
-            sock.blocked_thread = get_current();
             // block_fn() sets state=Blocked then atomically enables
             // interrupts and halts (STI; HLT sequence)
             block_fn();
             sock.blocked_thread = null;
+            platform.cpu.restoreInterrupts(irq_state);
             // Loop back to check for data (and re-check timeout)
         }
     }
@@ -199,9 +199,9 @@ pub fn deliverUdpPacket(pkt: *packet.PacketBuffer) bool {
     const held = state.lock.acquire();
     defer held.release();
 
-    const udp_hdr = pkt.udpHeader();
+    const udp_hdr = packet.getUdpHeader(pkt.data, pkt.transport_offset) orelse return false;
     const dst_port = udp_hdr.getDstPort();
-    const ip_hdr = pkt.ipHeader();
+    const ip_hdr = packet.getIpv4Header(pkt.data, pkt.ip_offset) orelse return false;
     const dst_ip = ip_hdr.getDstIp();
 
     // Extract payload once

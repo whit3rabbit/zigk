@@ -98,6 +98,10 @@ pub const Process = struct {
     msg_waiter: ?*sched.Thread = null,
     /// Unique process identifier
     pid: u32,
+    /// Process Group ID
+    pgid: u32,
+    /// Session ID
+    sid: u32,
 
     /// Parent process (null for init)
     parent: ?*Process,

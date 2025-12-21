@@ -140,7 +140,7 @@ Use poll() fallback for now.
     "ring": """
 ## Ring Buffer IPC (Zero-Copy)
 
-Location: src/kernel/syscall/ring.zig
+Location: src/kernel/sys/syscall/io/ring.zig
 
 ### Syscalls
 | # | Name | Purpose |

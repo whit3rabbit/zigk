@@ -19,6 +19,11 @@ const Ring = ring.Ring;
 const PciDeviceInfo = syscall.PciDeviceInfo;
 const DmaAllocResult = syscall.DmaAllocResult;
 
+// Helper to read PCI config with proper type conversion
+fn pciConfigRead(dev: *const PciDeviceInfo, offset: u12) u32 {
+    return syscall.pci_config_read(dev.bus, @truncate(dev.device), @truncate(dev.func), offset) catch 0;
+}
+
 // VirtIO device status bits
 const VIRTIO_STATUS_ACKNOWLEDGE: u8 = 1;
 const VIRTIO_STATUS_DRIVER: u8 = 2;
@@ -276,44 +281,95 @@ pub fn main() void {
 }
 
 fn mapMmioRegions(dev: *const PciDeviceInfo) bool {
-    // For modern VirtIO-PCI, we need to find capabilities
-    // For now, assume BAR0 is the main MMIO region (legacy mode)
-    // Modern VirtIO uses PCI capabilities to locate regions
-
-    const bar0 = dev.bar[0];
-    if (bar0.base == 0 or bar0.size == 0) {
-        syscall.print("BAR0 not configured\n");
+    // Check if device has capabilities
+    const status = pciConfigRead(dev, 0x06);
+    if ((status & 0x10) == 0) {
+        syscall.print("Device does not support capabilities\n");
         return false;
     }
 
-    if (bar0.is_mmio == 0) {
-        syscall.print("BAR0 is not MMIO (I/O port mode not supported)\n");
-        return false;
+    var connection_bar_mappings = [_]usize{0} ** 6;
+    
+    // Capability pointer is at 0x34
+    // Read 32-bits at 0x34, cap ptr is lowest byte
+    const cap_ptr_val = pciConfigRead(dev, 0x34);
+    var cap_ptr = @as(u8, @truncate(cap_ptr_val));
+    cap_ptr &= 0xFC; // align to 4 bytes
+
+    var common_found = false;
+    var notify_found = false;
+    var device_found = false;
+
+    while (cap_ptr != 0 and cap_ptr < 0xFF) {
+        // Read capability header (type, next, len)
+        const cap_header = pciConfigRead(dev, cap_ptr);
+        const cap_id = @as(u8, @truncate(cap_header));
+        const next_cap = @as(u8, @truncate(cap_header >> 8));
+        
+        if (cap_id == 0x09) { // VirtIO Vendor Specific
+            const cfg_type = @as(u8, @truncate(cap_header >> 24));
+            
+            // Read next dword at cap_ptr + 4: (bar, pad, pad, pad)
+            const bar_word = pciConfigRead(dev, cap_ptr + 4);
+            const bar_idx = @as(u8, @truncate(bar_word));
+            
+            // Read offset at cap_ptr + 8
+            const offset = pciConfigRead(dev, cap_ptr + 8);
+            // Read length at cap_ptr + 12
+            _ = pciConfigRead(dev, cap_ptr + 12);
+
+            if (bar_idx >= 6) {
+                cap_ptr = next_cap;
+                continue;
+            }
+
+            // Map BAR if not already mapped
+            var bar_base_virt = connection_bar_mappings[bar_idx];
+            if (bar_base_virt == 0) {
+                const bar = dev.bar[bar_idx];
+                if (bar.base != 0 and bar.size > 0) {
+                    bar_base_virt = syscall.mmap_phys(bar.base, @intCast(bar.size)) catch 0;
+                    connection_bar_mappings[bar_idx] = bar_base_virt;
+                }
+            }
+
+            if (bar_base_virt != 0) {
+                const virt_addr = bar_base_virt + offset;
+
+                switch (cfg_type) {
+                    VIRTIO_PCI_CAP_COMMON_CFG => {
+                        driver_state.common_cfg = @ptrFromInt(virt_addr);
+                        common_found = true;
+                    },
+                    VIRTIO_PCI_CAP_NOTIFY_CFG => {
+                        driver_state.notify_base = virt_addr;
+                        const multiplier = pciConfigRead(dev, cap_ptr + 16);
+                        driver_state.notify_off_multiplier = @intCast(multiplier);
+                        notify_found = true;
+                    },
+                    VIRTIO_PCI_CAP_DEVICE_CFG => {
+                        driver_state.device_cfg = @ptrFromInt(virt_addr);
+                        device_found = true;
+                    },
+                    else => {},
+                }
+            }
+        }
+
+        // Next capability
+        cap_ptr = next_cap;
     }
 
-    syscall.print("Mapping BAR0: ");
-    printHex64(bar0.base);
-    syscall.print(" size ");
-    printHex64(bar0.size);
-    syscall.print("\n");
-
-    // Map the MMIO region
-    const mmio_base = syscall.mmap_phys(bar0.base, @intCast(bar0.size)) catch |err| {
-        printError("mmap_phys failed", err);
+    if (!common_found or !notify_found or !device_found) {
+        syscall.print("Missing required VirtIO capabilities\n");
         return false;
-    };
-
-    // For modern VirtIO PCI, the common config is at the start
-    // This is a simplification - real driver would parse capabilities
-    driver_state.common_cfg = @ptrCast(@alignCast(mmio_base));
-    driver_state.notify_base = @intFromPtr(mmio_base) + @sizeOf(VirtioPciCommonCfg);
-    driver_state.notify_off_multiplier = 2; // Typical value
-
-    // Device config follows common config (simplified)
-    const device_cfg_offset = @sizeOf(VirtioPciCommonCfg) + 0x100;
-    driver_state.device_cfg = @ptrFromInt(@intFromPtr(mmio_base) + device_cfg_offset);
+    }
 
     return true;
+}
+
+fn pciConfigRead(dev: *const PciDeviceInfo, offset: u12) u32 {
+    return syscall.pci_config_read(dev.bus, @truncate(dev.device), @truncate(dev.func), offset) catch 0;
 }
 
 fn allocateQueueMemory() bool {

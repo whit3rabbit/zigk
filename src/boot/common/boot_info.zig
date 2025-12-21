@@ -65,4 +65,10 @@ pub const BootInfo = extern struct {
     hhdm_offset: u64, // Usually 0xFFFF800000000000
     kernel_phys_base: u64,
     kernel_virt_base: u64,
+
+    // KASLR offsets (set by bootloader from entropy)
+    // These add randomization to kernel memory region bases
+    stack_region_offset: u64, // Random offset for kernel stack region
+    mmio_region_offset: u64, // Random offset for MMIO mapping region
+    heap_offset: u64, // Random offset for kernel heap
 };

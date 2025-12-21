@@ -30,6 +30,9 @@ const kernel_iommu = @import("kernel_iommu");
 const hal = @import("hal");
 const BootInfo = @import("boot_info");
 
+/// Stored boot_info pointer for cmdline parsing
+var stored_boot_info: ?*const BootInfo.BootInfo = null;
+
 /// Module data structure (replaces Limine module)
 const ModuleData = struct {
     name: []const u8,
@@ -43,6 +46,9 @@ const MAX_INITRD_SIZE: u64 = 256 * 1024 * 1024;
 /// Initialize InitRD filesystem from BootInfo
 /// This should be called early in kernel boot, before loadInitProcess()
 pub fn initInitRDFromBootInfo(boot_info: *const BootInfo.BootInfo) void {
+    // Store boot_info for later cmdline parsing
+    stored_boot_info = boot_info;
+
     if (boot_info.initrd_addr == 0 or boot_info.initrd_size == 0) {
         console.info("InitRD: No initrd provided (addr=0 or size=0)", .{});
         return;
@@ -121,6 +127,29 @@ fn isPhysicalRangeUsable(boot_info: *const BootInfo.BootInfo, start: u64, end: u
     return false;
 }
 
+/// Parse cmdline for "init=" parameter
+/// Returns the init name if found, null otherwise
+fn parseInitFromCmdline() ?[]const u8 {
+    const boot_info = stored_boot_info orelse return null;
+    const cmdline = boot_info.cmdline orelse return null;
+
+    // Find length (null-terminated)
+    var len: usize = 0;
+    while (cmdline[len] != 0 and len < 256) : (len += 1) {}
+    const cmd_slice = cmdline[0..len];
+
+    // Look for "init=" parameter
+    if (std.mem.indexOf(u8, cmd_slice, "init=")) |idx| {
+        const start = idx + 5; // len("init=")
+        var end = start;
+        while (end < len and cmd_slice[end] != ' ' and cmd_slice[end] != 0) : (end += 1) {}
+        if (end > start) {
+            return cmd_slice[start..end];
+        }
+    }
+    return null;
+}
+
 /// Load the init process from InitRD
 ///
 /// Steps:
@@ -155,7 +184,18 @@ pub fn loadInitProcess() void {
         }
     }
 
-    // 2. Select Main Init Process (priority order)
+    // 2. Check cmdline for explicit init selection (from boot menu)
+    if (parseInitFromCmdline()) |init_name| {
+        console.info("Cmdline specifies init={s}", .{init_name});
+        if (findModuleInInitRD(init_name)) |mod| {
+            console.info("Loading init from cmdline: {s} ({d} bytes)", .{ init_name, mod.data.len });
+            spawnProcessFromData(mod, init_name);
+            return;
+        }
+        console.warn("Cmdline init={s} not found in InitRD, falling back to priority", .{init_name});
+    }
+
+    // 3. Select Main Init Process (priority order)
     const init_candidates = [_][]const u8{
         "test_vdso",
         "test_signals_fpu",

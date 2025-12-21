@@ -13,13 +13,14 @@
 //!
 //! Stack grows downward, so overflow writes into the guard page trigger #PF.
 //!
-//! This module allocates stacks from a pre-reserved region `STACK_REGION_BASE`.
+//! This module allocates stacks from a pre-reserved region (stack_region_base).
 
 const std = @import("std");
 const console = @import("console");
 const pmm = @import("pmm");
 const vmm = @import("vmm");
 const hal = @import("hal");
+const layout = @import("layout");
 
 const paging = hal.paging;
 
@@ -36,13 +37,20 @@ pub const STACK_SLOT_SIZE: usize = STACK_SLOT_PAGES * PAGE_SIZE;
 /// Maximum number of kernel stacks
 pub const MAX_STACKS: usize = 256;
 
-/// Virtual address base for kernel stacks
-/// This is in kernel space but separate from HHDM (0xFFFF_8000...)
-/// Using 0xFFFF_A000_0000_0000 for stack region
-pub const STACK_REGION_BASE: u64 = 0xFFFF_A000_0000_0000;
+/// Default stack region base (before KASLR randomization)
+/// Used only for compile-time checks; runtime uses layout.getStackRegionBase()
+const DEFAULT_STACK_REGION_BASE: u64 = 0xFFFF_A000_0000_0000;
+
+/// Virtual address base for kernel stacks (runtime, set from layout with KASLR offset)
+var stack_region_base: u64 = DEFAULT_STACK_REGION_BASE;
 
 /// Total size of stack region
 pub const STACK_REGION_SIZE: u64 = MAX_STACKS * STACK_SLOT_SIZE;
+
+/// Get the current stack region base (with KASLR offset)
+pub fn getStackRegionBase() u64 {
+    return stack_region_base;
+}
 
 // Bitmap to track allocated stack slots
 // Each bit represents one stack slot (1 = allocated, 0 = free)
@@ -80,21 +88,25 @@ pub const StackError = error{
 };
 
 /// Initialize the kernel stack allocator
-/// Must be called after VMM is initialized
+/// Must be called after layout.init() and VMM is initialized
 pub fn init() StackError!void {
     if (initialized) return;
 
     const held = stack_lock.acquire();
     defer held.release();
 
+    // Initialize stack region base from layout (with KASLR offset)
+    stack_region_base = layout.getStackRegionBase();
+
     // Verify the stack region doesn't overlap with HHDM
-    // HHDM is at 0xFFFF_8000_0000_0000, our region at 0xFFFF_A000_0000_0000
-    if (STACK_REGION_BASE < paging.HHDM_OFFSET + (4 * 1024 * 1024 * 1024)) {
-        console.err("KernelStack: Stack region overlaps HHDM!", .{});
+    // Runtime check uses actual HHDM offset for KASLR support
+    const hhdm_end = paging.getHhdmOffset() + (128 * 1024 * 1024 * 1024); // HHDM + 128GB
+    if (stack_region_base < hhdm_end) {
+        console.err("KernelStack: Stack region {x} overlaps HHDM end {x}!", .{ stack_region_base, hhdm_end });
         return StackError.MappingFailed;
     }
 
-    console.info("KernelStack: Initialized at {x}, max {d} stacks", .{ STACK_REGION_BASE, MAX_STACKS });
+    console.info("KernelStack: Initialized at {x}, max {d} stacks", .{ stack_region_base, MAX_STACKS });
     initialized = true;
 }
 
@@ -110,7 +122,7 @@ pub fn alloc() StackError!KernelStack {
     const slot = findFreeSlot() orelse return StackError.OutOfSlots;
 
     // Calculate virtual addresses for this slot
-    const slot_base = STACK_REGION_BASE + slot * STACK_SLOT_SIZE;
+    const slot_base = stack_region_base + slot * STACK_SLOT_SIZE;
     const guard_virt = slot_base;
     const stack_base = slot_base + PAGE_SIZE; // Skip guard page
     const stack_top = slot_base + STACK_SLOT_SIZE;
@@ -212,12 +224,12 @@ pub fn free(stack: KernelStack) void {
 /// Used by the page fault handler to detect stack overflows.
 pub fn isGuardPage(addr: u64) bool {
     // Check if address is in our stack region
-    if (addr < STACK_REGION_BASE or addr >= STACK_REGION_BASE + STACK_REGION_SIZE) {
+    if (addr < stack_region_base or addr >= stack_region_base + STACK_REGION_SIZE) {
         return false;
     }
 
     // Calculate which slot this address is in
-    const offset = addr - STACK_REGION_BASE;
+    const offset = addr - stack_region_base;
     const slot_offset = offset % STACK_SLOT_SIZE;
 
     // Guard page is the first page of each slot
@@ -228,12 +240,12 @@ pub fn isGuardPage(addr: u64) bool {
 pub fn getStackInfoForGuardFault(addr: u64) ?struct { slot: usize, stack_base: u64, stack_top: u64 } {
     if (!isGuardPage(addr)) return null;
 
-    const offset = addr - STACK_REGION_BASE;
+    const offset = addr - stack_region_base;
     const slot = offset / STACK_SLOT_SIZE;
 
     if (slot >= MAX_STACKS) return null;
 
-    const slot_base = STACK_REGION_BASE + slot * STACK_SLOT_SIZE;
+    const slot_base = stack_region_base + slot * STACK_SLOT_SIZE;
     return .{
         .slot = slot,
         .stack_base = slot_base + PAGE_SIZE,

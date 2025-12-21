@@ -109,6 +109,17 @@ pub const TcpState = enum(u8) {
     TimeWait = 10,
 };
 
+pub const SackBlock = struct {
+    start: u32,
+    end: u32,
+};
+
+pub const OooBlock = struct {
+    start: u32,
+    len: u16,
+    data: [c.MAX_TCP_PAYLOAD]u8,
+};
+
 /// TCP Control Block - per-connection state
 pub const Tcb = struct {
     // Connection identity (4-tuple)
@@ -161,6 +172,12 @@ pub const Tcb = struct {
 
     // SACK support (RFC 2018)
     sack_ok: bool, // True if both sides negotiated SACK
+    sack_blocks: [4]SackBlock,
+    sack_block_count: u8,
+    rcv_sack_blocks: [4]SackBlock,
+    rcv_sack_block_count: u8,
+    ooo_blocks: [4]OooBlock,
+    ooo_count: u8,
 
     // Timestamps (RFC 7323)
     ts_ok: bool, // True if both sides negotiated timestamps
@@ -206,6 +223,19 @@ pub const Tcb = struct {
     rtt_seq: u32,    // Sequence number being timed (0 means not timing)
     rtt_start: u64,  // Timestamp when rtt_seq was sent (ticks)
 
+    // Fast retransmit/recovery (RFC 6582)
+    last_ack: u32,
+    dup_ack_count: u8,
+    fast_recovery: bool,
+    recover: u32,
+
+    // Delayed ACK (RFC 1122)
+    ack_pending: bool,
+    ack_due: u64,
+
+    // Nagle (RFC 896)
+    nodelay: bool,
+
     // Generation counter for UAF protection (checked by connect())
     // Incremented on allocation to distinguish reused TCB memory
     generation: u64,
@@ -242,6 +272,12 @@ pub const Tcb = struct {
             .wscale_ok = false,
             // SACK
             .sack_ok = false,
+            .sack_blocks = [_]SackBlock{.{ .start = 0, .end = 0 }} ** 4,
+            .sack_block_count = 0,
+            .rcv_sack_blocks = [_]SackBlock{.{ .start = 0, .end = 0 }} ** 4,
+            .rcv_sack_block_count = 0,
+            .ooo_blocks = [_]OooBlock{.{ .start = 0, .len = 0, .data = [_]u8{0} ** c.MAX_TCP_PAYLOAD }} ** 4,
+            .ooo_count = 0,
             // Timestamps
             .ts_ok = false,
             .ts_recent = 0,
@@ -267,6 +303,13 @@ pub const Tcb = struct {
             .rttvar = 750 << 2, // Initial deviation estimate (3 sec / 4) -> 750ms
             .rtt_seq = 0,
             .rtt_start = 0,
+            .last_ack = 0,
+            .dup_ack_count = 0,
+            .fast_recovery = false,
+            .recover = 0,
+            .ack_pending = false,
+            .ack_due = 0,
+            .nodelay = false,
             .generation = 0,
         };
     }

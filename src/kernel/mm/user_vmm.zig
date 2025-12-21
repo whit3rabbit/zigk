@@ -602,7 +602,7 @@ pub const UserVmm = struct {
     /// Multiple page faults on the same address are handled atomically.
     pub fn handlePageFault(self: *UserVmm, addr: u64, err_code: u64) bool {
         // Check for kernel space access (security hard-stop)
-        if (addr >= vmm.KERNEL_BASE) {
+        if (addr >= vmm.getKernelBase()) {
             console.err("PageFault: SECURITY VIOLATION: User fault in kernel space {x}", .{addr});
             return false;
         }

@@ -13,150 +13,159 @@ const isValidUserAccess = base.isValidUserAccess;
 const AccessMode = base.AccessMode;
 const safeFdCast = utils.safeFdCast;
 
-/// sys_stat (4) - Get file status
-pub fn sys_stat(path_ptr: usize, stat_buf: usize) SyscallError!usize {
-    // Allocate path buffer
-    const path_buf = heap.allocator().alloc(u8, user_mem.MAX_PATH_LEN) catch {
-        return error.ENOMEM;
-    };
-    defer heap.allocator().free(path_buf);
+/// Canonicalize a path by removing redundant components
+/// - Removes redundant slashes (// -> /)
+/// - Removes . components (/a/./b -> /a/b)
+/// - REJECTS paths containing .. (returns null)
+/// - Returns slice into provided buffer
+fn canonicalizePath(path: []const u8, out_buf: []u8) ?[]const u8 {
+    if (path.len == 0) return null;
+    if (path[0] != '/') return null; // Require absolute path
 
-    const path = user_mem.copyStringFromUser(path_buf, path_ptr) catch |err| {
-        if (err == error.NameTooLong) return error.ENAMETOOLONG;
-        return error.EFAULT;
-    };
+    var out_idx: usize = 0;
+    var i: usize = 0;
 
-    if (path.len == 0) return error.ENOENT;
-
-    // Handle root directory explicitly
-    if (std.mem.eql(u8, path, "/") or std.mem.eql(u8, path, "/.")) {
-        if (!isValidUserAccess(stat_buf, @sizeOf(uapi.stat.Stat), AccessMode.Write)) {
-            return error.EFAULT;
+    while (i < path.len) {
+        // Skip redundant slashes
+        if (path[i] == '/') {
+            // Add single slash if not already present
+            if (out_idx == 0 or out_buf[out_idx - 1] != '/') {
+                if (out_idx >= out_buf.len) return null;
+                out_buf[out_idx] = '/';
+                out_idx += 1;
+            }
+            i += 1;
+            continue;
         }
 
-        const stat = uapi.stat.Stat{
-            .dev = 0,
-            .ino = 1, // Root inode
-            .nlink = 2,
-            .mode = 0o0040755, // S_IFDIR | 0755
-            .uid = 0,
-            .gid = 0,
-            .rdev = 0,
-            .size = 4096,
-            .blksize = 512,
-            .blocks = 8,
-            .atime = 0,
-            .atime_nsec = 0,
-            .mtime = 0,
-            .mtime_nsec = 0,
-            .ctime = 0,
-            .ctime_nsec = 0,
-            .__pad0 = 0,
-            .__unused = [_]i64{0} ** 3,
-        };
-
-        UserPtr.from(stat_buf).writeValue(stat) catch return error.EFAULT;
-        return 0;
-    }
-
-    // Check InitRD
-    if (fs.initrd.InitRD.instance.findFile(path)) |file| {
-        if (!isValidUserAccess(stat_buf, @sizeOf(uapi.stat.Stat), AccessMode.Write)) {
-            return error.EFAULT;
+        // Check for . or .. component
+        const remaining = path[i..];
+        if (std.mem.startsWith(u8, remaining, "..")) {
+            // Check if it's ".." followed by / or end of string
+            if (remaining.len == 2 or remaining[2] == '/') {
+                // Security: REJECT path traversal
+                return null;
+            }
+        } else if (std.mem.startsWith(u8, remaining, ".")) {
+            // Check if it's "." followed by / or end of string
+            if (remaining.len == 1 or remaining[1] == '/') {
+                // Skip single . component
+                i += 1;
+                continue;
+            }
         }
 
-        // Clamp file size to i64 max for very large files
-        const max_i64: usize = @intCast(std.math.maxInt(i64));
-        const file_size: i64 = if (file.data.len > max_i64)
-            std.math.maxInt(i64)
-        else
-            @intCast(file.data.len);
-        const blocks: i64 = if (file.data.len > max_i64)
-            std.math.maxInt(i64) / 512
-        else
-            @intCast((file.data.len + 511) / 512);
-
-        const stat = uapi.stat.Stat{
-            .dev = 0,
-            .ino = 0,
-            .nlink = 1,
-            .mode = 0o100755, // Regular file, rwxr-xr-x
-            .uid = 0,
-            .gid = 0,
-            .rdev = 0,
-            .size = file_size,
-            .blksize = 512,
-            .blocks = blocks,
-            .atime = 0,
-            .atime_nsec = 0,
-            .mtime = 0,
-            .mtime_nsec = 0,
-            .ctime = 0,
-            .ctime_nsec = 0,
-            .__pad0 = 0,
-            .__unused = [_]i64{0} ** 3,
-        };
-
-        UserPtr.from(stat_buf).writeValue(stat) catch return error.EFAULT;
-        return 0;
+        // Copy regular path component
+        while (i < path.len and path[i] != '/') {
+            if (out_idx >= out_buf.len) return null;
+            out_buf[out_idx] = path[i];
+            out_idx += 1;
+            i += 1;
+        }
     }
 
-    return error.ENOENT;
+    // Remove trailing slash (except for root)
+    if (out_idx > 1 and out_buf[out_idx - 1] == '/') {
+        out_idx -= 1;
+    }
+
+    return out_buf[0..out_idx];
 }
 
-/// sys_lstat (6) - Get file status (no follow)
+/// sys_stat (4) - Get file status by path
+pub fn sys_stat(path_ptr: usize, stat_buf_ptr: usize) SyscallError!usize {
+    const alloc = heap.allocator();
+    const path_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(path_buf);
+    const canon_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(canon_buf);
+
+    const raw_path = user_mem.copyStringFromUser(path_buf, path_ptr) catch return error.EFAULT;
+    if (raw_path.len == 0) return error.ENOENT;
+
+    // Canonicalize path
+    const path = canonicalizePath(raw_path, canon_buf) orelse return error.ENOENT;
+
+    // Validate userspace buffer
+    if (!isValidUserAccess(stat_buf_ptr, @sizeOf(uapi.stat.Stat), AccessMode.Write)) {
+        return error.EFAULT;
+    }
+
+    // Get file metadata via VFS
+    const file_meta = fs.vfs.Vfs.statPath(path) orelse return error.ENOENT;
+
+    // Fill Stat structure
+    const stat_ptr: *uapi.stat.Stat = @ptrFromInt(stat_buf_ptr);
+    stat_ptr.* = .{
+        .dev = file_meta.dev,
+        .ino = file_meta.ino,
+        .nlink = 1,
+        .mode = file_meta.mode,
+        .uid = file_meta.uid,
+        .gid = file_meta.gid,
+        .__pad0 = 0,
+        .rdev = 0,
+        .size = @intCast(file_meta.size),
+        .blksize = 512,
+        .blocks = @intCast((file_meta.size + 511) / 512),
+        .atime = 0,
+        .atime_nsec = 0,
+        .mtime = 0,
+        .mtime_nsec = 0,
+        .ctime = 0,
+        .ctime_nsec = 0,
+        .__unused = [_]i64{0} ** 3,
+    };
+
+    return 0;
+}
+
+/// sys_lstat (6) - Get file status (do not follow symlinks)
 pub fn sys_lstat(path_ptr: usize, stat_buf: usize) SyscallError!usize {
+    // Current VFS implementation doesn't support symlinks fully,
+    // so sys_lstat is equivalent to sys_stat for now.
     return sys_stat(path_ptr, stat_buf);
 }
 
-/// sys_fstat (5) - Get file status by FD
-pub fn sys_fstat(fd_num: usize, stat_buf: usize) SyscallError!usize {
-    const table = base.getGlobalFdTable();
-    const fd_u32 = safeFdCast(fd_num) orelse return error.EBADF;
-    const fd = table.get(fd_u32) orelse return error.EBADF;
-
-    if (!isValidUserAccess(stat_buf, @sizeOf(uapi.stat.Stat), AccessMode.Write)) {
+/// sys_fstat (5) - Get file status by file descriptor
+pub fn sys_fstat(fd_num: usize, stat_buf_ptr: usize) SyscallError!usize {
+    // Validate userspace buffer
+    if (!isValidUserAccess(stat_buf_ptr, @sizeOf(uapi.stat.Stat), AccessMode.Write)) {
         return error.EFAULT;
     }
 
-    // Use device specific stat if available
-    if (fd.ops.stat) |stat_fn| {
-        // We need to pass the kernel address of the struct, but stat_fn takes *anyopaque.
-        // Wait, fd.ops.stat signature (in original io.zig) seemed to imply *Stat
-        // "const res = stat_fn(fd, &kstat);"
-        // So assuming device stat ops take *Stat.
+    // Get file descriptor
+    const fd_table = base.getGlobalFdTable();
+    const fd_u32 = safeFdCast(fd_num) orelse return error.EBADF;
+    const file_desc = fd_table.get(fd_u32) orelse return error.EBADF;
 
+    const stat_ptr: *uapi.stat.Stat = @ptrFromInt(stat_buf_ptr);
+
+    // Call the FD's stat operation if available
+    if (file_desc.ops.stat) |stat_fn| {
         var kstat: uapi.stat.Stat = undefined;
         // Zero initialize
-        const kstat_bytes = std.mem.asBytes(&kstat);
-        hal.mem.fill(kstat_bytes.ptr, 0, kstat_bytes.len);
+        @memset(std.mem.asBytes(&kstat), 0);
 
-        const res = stat_fn(fd, &kstat);
-        if (res < 0) {
-            const errno_val: i32 = @intCast(-res);
-            _ = errno_val;
-            // Map errors? EIO?
-            // Just return EIO for now if unknown
+        const result = stat_fn(file_desc, &kstat);
+        if (result < 0) {
             return error.EIO;
         }
-
-        // Copy to user
-        UserPtr.from(stat_buf).writeValue(kstat) catch return error.EFAULT;
+        stat_ptr.* = kstat;
         return 0;
     }
 
-    // Fallback generic stat
-    // Check if it's our dummy root directory FD (private_data == null)
-    const is_dir = fd.private_data == null;
-    const mode: u32 = if (is_dir) 0o0040755 else 0o0020600; // Directory or Char Device
-
-    const stat = uapi.stat.Stat{
+    // No stat operation - return basic info
+    // Heuristic: if it has vfs_mount_idx, it came from VFS
+    const is_dir = file_desc.ops.read == null and file_desc.ops.write == null;
+    stat_ptr.* = .{
         .dev = 0,
         .ino = @intCast(fd_num),
         .nlink = if (is_dir) 2 else 1,
-        .mode = mode,
+        .mode = if (is_dir) 0o0040755 else 0o100644,
         .uid = 0,
         .gid = 0,
+        .__pad0 = 0,
         .rdev = 0,
         .size = 0,
         .blksize = 512,
@@ -167,10 +176,66 @@ pub fn sys_fstat(fd_num: usize, stat_buf: usize) SyscallError!usize {
         .mtime_nsec = 0,
         .ctime = 0,
         .ctime_nsec = 0,
-        .__pad0 = 0,
         .__unused = [_]i64{0} ** 3,
     };
 
-    UserPtr.from(stat_buf).writeValue(stat) catch return error.EFAULT;
     return 0;
+}
+
+/// sys_statfs (137) - Get filesystem statistics
+pub fn sys_statfs(path_ptr: usize, buf_ptr: usize) SyscallError!usize {
+    const alloc = heap.allocator();
+    const path_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(path_buf);
+    const canon_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(canon_buf);
+
+    const raw_path = user_mem.copyStringFromUser(path_buf, path_ptr) catch return error.EFAULT;
+    if (raw_path.len == 0) return error.ENOENT;
+
+    // Canonicalize path
+    const path = canonicalizePath(raw_path, canon_buf) orelse return error.ENOENT;
+
+    // Validate userspace buffer
+    if (!isValidUserAccess(buf_ptr, @sizeOf(uapi.stat.Statfs), AccessMode.Write)) {
+        return error.EFAULT;
+    }
+
+    const result = fs.vfs.Vfs.statfs(path) catch |err| {
+        return switch (err) {
+            error.NotFound => error.ENOENT,
+            error.NotSupported => error.ENOSYS,
+            else => error.EIO,
+        };
+    };
+
+    UserPtr.from(buf_ptr).writeValue(result) catch return error.EFAULT;
+    return 0;
+}
+
+/// sys_fstatfs (138) - Get filesystem statistics by FD
+pub fn sys_fstatfs(fd_num: usize, buf_ptr: usize) SyscallError!usize {
+    // Get file descriptor
+    const fd_table = base.getGlobalFdTable();
+    const fd_u32 = safeFdCast(fd_num) orelse return error.EBADF;
+    const file_desc = fd_table.get(fd_u32) orelse return error.EBADF;
+
+    // Validate userspace buffer
+    if (!isValidUserAccess(buf_ptr, @sizeOf(uapi.stat.Statfs), AccessMode.Write)) {
+        return error.EFAULT;
+    }
+
+    if (file_desc.vfs_mount_idx) |idx| {
+        const result = fs.vfs.Vfs.statfsByIndex(idx) catch |err| {
+            return switch (err) {
+                error.NotFound => error.ENOENT,
+                error.NotSupported => error.ENOSYS,
+                else => error.EIO,
+            };
+        };
+        UserPtr.from(buf_ptr).writeValue(result) catch return error.EFAULT;
+        return 0;
+    }
+
+    return error.ENOSYS;
 }

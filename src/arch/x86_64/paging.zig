@@ -149,25 +149,37 @@ pub const PageTable = struct {
 };
 
 // HHDM (Higher Half Direct Map) offset
-// Limine sets up the HHDM mapping at this address.
-// This maps physical memory starting at 0x0 to virtual address 0xFFFF800000000000.
-pub const HHDM_OFFSET: u64 = 0xFFFF800000000000;
+// The bootloader sets up HHDM mapping in kernel space.
+// This maps physical memory starting at 0x0 to a virtual address in higher half.
+// Default value used before init() is called.
+pub const HHDM_OFFSET_DEFAULT: u64 = 0xFFFF800000000000;
 
-// Keep variable for backwards compatibility (set to compile-time constant)
-var hhdm_offset: u64 = HHDM_OFFSET;
+// Minimum valid HHDM offset (must be in kernel space)
+const HHDM_MIN_OFFSET: u64 = 0xFFFF800000000000;
 
-/// Initialize paging module
-/// The HHDM is set up by Limine at a fixed address,
-/// so this function verifies the offset but uses the constant.
+// Runtime HHDM offset - set by bootloader via init()
+var hhdm_offset: u64 = HHDM_OFFSET_DEFAULT;
+var hhdm_initialized: bool = false;
+
+/// Initialize paging module with bootloader-provided HHDM offset.
+/// This enables KASLR support by accepting dynamic HHDM bases.
 pub fn init(offset: u64) void {
-    // Verify the offset matches our expected HHDM
-    _ = offset;
-    hhdm_offset = HHDM_OFFSET;
+    // Validate offset is in kernel space (higher half)
+    if (offset < HHDM_MIN_OFFSET) {
+        @panic("HHDM offset not in kernel space");
+    }
+    hhdm_offset = offset;
+    hhdm_initialized = true;
 }
 
-/// Get the current HHDM offset
+/// Get the current HHDM offset (runtime value from bootloader)
 pub fn getHhdmOffset() u64 {
-    return HHDM_OFFSET;
+    return hhdm_offset;
+}
+
+/// Check if HHDM has been initialized with bootloader value
+pub fn isInitialized() bool {
+    return hhdm_initialized;
 }
 
 const builtin = @import("builtin");

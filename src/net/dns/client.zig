@@ -6,6 +6,7 @@ const ipv4 = @import("../ipv4/root.zig").ipv4;
 const core = @import("../core/root.zig");
 const transport = @import("../transport/root.zig");
 const platform = @import("../platform.zig");
+const clock = @import("../clock.zig");
 const alloc = @import("std").heap.page_allocator; // Fallback allocator if needed
 // const platform = @import("../platform.zig"); // REMOVED
 
@@ -152,7 +153,7 @@ fn resolveOnce(allocator: std.mem.Allocator, hostname: []const u8, server_ip: u3
     // Fix: Track wall-clock deadline and enforce it across all loop iterations.
     // This bounds total wait time regardless of how many spoofed packets arrive.
     const DNS_TIMEOUT_US: u64 = 2_000_000; // 2 seconds in microseconds
-    const start_tsc = platform.timing.rdtsc();
+    const start_tsc = clock.rdtsc();
 
     // Security: Secondary safeguard against packet flood DoS.
     // If TSC calibration is incorrect (common in VMs), the deadline check may
@@ -170,7 +171,7 @@ fn resolveOnce(allocator: std.mem.Allocator, hostname: []const u8, server_ip: u3
 
         // Security: Check deadline BEFORE blocking on recvfrom to prevent
         // infinite loops from attacker-controlled packet floods.
-        if (platform.timing.hasTimedOut(start_tsc, DNS_TIMEOUT_US)) {
+        if (clock.hasTimedOut(start_tsc, DNS_TIMEOUT_US)) {
             return DnsError.TimedOut;
         }
 

@@ -9,11 +9,13 @@ const ipv4 = @import("../../../ipv4/root.zig").ipv4;
 const PacketBuffer = packet.PacketBuffer;
 const TcpHeader = types.TcpHeader;
 const Tcb = types.Tcb;
+const seqLt = types.seqLt;
+const seqBetween = types.seqBetween;
 
 /// Calculate segment length (data + SYN/FIN each count as 1)
 pub fn calculateSegmentLength(pkt: *const PacketBuffer, tcp_hdr: *const TcpHeader) u32 {
     const data_offset = tcp_hdr.getDataOffset();
-    const ip_hdr = pkt.ipHeader();
+    const ip_hdr = pkt.ipHeaderUnsafe();
     const total_len = ip_hdr.getTotalLength();
     const hdr_len = ip_hdr.getHeaderLength();
     const ip_payload_len = if (total_len >= hdr_len) total_len - hdr_len else 0;
@@ -74,6 +76,11 @@ pub fn transmitPendingData(tcb: *Tcb) bool {
     const max_send = @min(available, @as(u32, effective_mss));
     const send_len = @min(buffered, max_send);
 
+    // Nagle's algorithm (RFC 896): coalesce small writes when data is in flight.
+    if (!tcb.nodelay and flight_size > 0 and send_len < effective_mss) {
+        return true;
+    }
+
     if (send_len == 0) return true;
 
     var data_buf: [c.MAX_TCP_PAYLOAD]u8 = undefined;
@@ -96,4 +103,74 @@ pub fn transmitPendingData(tcb: *Tcb) bool {
     }
 
     return false;
+}
+
+pub fn retransmitLoss(tcb: *Tcb) bool {
+    const seq = selectRetransmitSeq(tcb);
+    return retransmitFromSeq(tcb, seq);
+}
+
+pub fn retransmitFromSeq(tcb: *Tcb, seq: u32) bool {
+    const buffered = bufferedBytes(tcb);
+    if (buffered == 0) return false;
+
+    const offset: usize = @as(usize, seq -% tcb.snd_una);
+    if (offset >= buffered) return false;
+
+    const pmtu_mss = ipv4.getEffectiveMss(tcb.remote_ip);
+    const effective_mss = @min(tcb.mss, pmtu_mss);
+    const remaining = buffered - offset;
+    const send_len = @min(remaining, @as(usize, effective_mss));
+    if (send_len == 0) return false;
+
+    var data_buf: [c.MAX_TCP_PAYLOAD]u8 = undefined;
+    for (0..send_len) |i| {
+        const idx = (tcb.send_tail + @as(usize, offset) + i) % c.BUFFER_SIZE;
+        data_buf[i] = tcb.send_buf[idx];
+    }
+
+    if (segment.sendSegment(tcb, TcpHeader.FLAG_ACK, seq, tcb.rcv_nxt, data_buf[0..send_len])) {
+        if (tcb.retrans_timer == 0) {
+            tcb.retrans_timer = 1;
+        }
+        return true;
+    }
+    return false;
+}
+
+pub fn selectRetransmitSeq(tcb: *Tcb) u32 {
+    if (!tcb.sack_ok or tcb.sack_block_count == 0) {
+        return tcb.snd_una;
+    }
+
+    const pmtu_mss = ipv4.getEffectiveMss(tcb.remote_ip);
+    const effective_mss = @min(tcb.mss, pmtu_mss);
+    var seq = tcb.snd_una;
+
+    while (seqLt(seq, tcb.snd_nxt)) {
+        if (!seqCoveredBySack(tcb, seq)) {
+            return seq;
+        }
+        seq +%= @as(u32, effective_mss);
+    }
+
+    return tcb.snd_una;
+}
+
+fn seqCoveredBySack(tcb: *const Tcb, seq: u32) bool {
+    var i: usize = 0;
+    while (i < tcb.sack_block_count) : (i += 1) {
+        const block = tcb.sack_blocks[i];
+        if (seqBetween(seq, block.start, block.end)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn bufferedBytes(tcb: *const Tcb) usize {
+    if (tcb.send_head >= tcb.send_tail) {
+        return tcb.send_head - tcb.send_tail;
+    }
+    return c.BUFFER_SIZE - tcb.send_tail + tcb.send_head;
 }

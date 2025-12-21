@@ -13,31 +13,31 @@ build.zig
     |       |-- syscalls.zig    <- Single source of truth for syscall numbers
     |       `-- errno.zig       <- SyscallError type and errno conversion
     |
-    +-- syscall_base_module (src/kernel/sys/syscall/base.zig)
+    +-- syscall_base_module (src/kernel/sys/syscall/core/base.zig)
     |       |-- Shared state: current_process, global_fd_table, global_user_vmm
     |       `-- Accessor functions for all handler modules
     |
     +-- Handler Modules (each imports base.zig + domain-specific deps)
-    |       |-- syscall_process_module    -> sys/syscall/process.zig
-    |       |-- syscall_signals_module    -> sys/syscall/signals.zig
-    |       |-- syscall_scheduling_module -> sys/syscall/scheduling.zig
+    |       |-- syscall_process_module    -> sys/syscall/process/process.zig
+    |       |-- syscall_signals_module    -> sys/syscall/process/signals.zig
+    |       |-- syscall_scheduling_module -> sys/syscall/process/scheduling.zig
     |       |-- syscall_io_module         -> sys/syscall/io/root.zig
-    |       |-- syscall_fd_module         -> sys/syscall/fd.zig
-    |       |-- syscall_memory_module     -> sys/syscall/memory.zig
-    |       |-- syscall_execution_module  -> sys/syscall/execution.zig
-    |       |-- syscall_custom_module     -> sys/syscall/custom.zig
-    |       |-- syscall_net_module        -> sys/syscall/net.zig
-    |       |-- syscall_random_module     -> sys/syscall/random.zig
-    |       |-- syscall_input_module      -> sys/syscall/input.zig
-    |       |-- syscall_ipc_module        -> sys/syscall/ipc.zig
-    |       |-- syscall_interrupt_module  -> sys/syscall/interrupt.zig
-    |       |-- syscall_port_io_module    -> sys/syscall/port_io.zig
-    |       |-- syscall_mmio_module       -> sys/syscall/mmio.zig
-    |       |-- syscall_pci_module        -> sys/syscall/pci_syscall.zig
-    |       |-- syscall_ring_module       -> sys/syscall/ring.zig
-    |       `-- syscall_fs_handlers_module -> sys/syscall/fs_handlers.zig
+    |       |-- syscall_fd_module         -> sys/syscall/fs/fd.zig
+    |       |-- syscall_memory_module     -> sys/syscall/memory/memory.zig
+    |       |-- syscall_execution_module  -> sys/syscall/core/execution.zig
+    |       |-- syscall_custom_module     -> sys/syscall/misc/custom.zig
+    |       |-- syscall_net_module        -> sys/syscall/net/net.zig
+    |       |-- syscall_random_module     -> sys/syscall/misc/random.zig
+    |       |-- syscall_input_module      -> sys/syscall/hw/input.zig
+    |       |-- syscall_ipc_module        -> sys/syscall/misc/ipc.zig
+    |       |-- syscall_interrupt_module  -> sys/syscall/hw/interrupt.zig
+    |       |-- syscall_port_io_module    -> sys/syscall/hw/port_io.zig
+    |       |-- syscall_mmio_module       -> sys/syscall/memory/mmio.zig
+    |       |-- syscall_pci_module        -> sys/syscall/net/pci_syscall.zig
+    |       |-- syscall_ring_module       -> sys/syscall/hw/ring.zig
+    |       `-- syscall_fs_handlers_module -> sys/syscall/fs/fs_handlers.zig
     |
-    +-- syscall_table_module (src/kernel/sys/syscall/table.zig)
+    +-- syscall_table_module (src/kernel/sys/syscall/core/table.zig)
             |-- Imports all handler modules
             `-- Comptime dispatch via reflection on uapi.syscalls
 ```
@@ -144,28 +144,46 @@ The `callHandler` function auto-converts error unions to negative errno at the b
 
 ```
 src/kernel/sys/syscall/
-    base.zig       - Shared state (current_process, fd_table, user_vmm)
-    table.zig      - Dispatch table (comptime reflection)
-    user_mem.zig   - User pointer validation utilities
+    core/           - Core infrastructure
+        base.zig       - Shared state (current_process, fd_table, user_vmm)
+        table.zig      - Dispatch table (comptime reflection)
+        user_mem.zig   - User pointer validation utilities
+        execution.zig  - Process execution (fork, execve, arch_prctl)
+        error_helpers.zig - Error handling utilities
 
-    process.zig    - Process lifecycle (exit, wait4, getpid, getppid, getuid, getgid)
-    signals.zig    - Signal handling (rt_sigprocmask, rt_sigaction, rt_sigreturn)
-    scheduling.zig - Scheduler (sched_yield, nanosleep, select, clock_gettime)
-    io/            - I/O operations (read, write, writev, stat, fstat, ioctl, fcntl)
-    fd.zig         - File descriptors (open, close, dup, dup2, pipe, lseek)
-    memory.zig     - Memory management (mmap, mprotect, munmap, brk)
-    execution.zig  - Process execution (fork, execve, arch_prctl)
-    custom.zig     - Zscapek extensions (debug_log, putchar, getchar, read_scancode)
-    net.zig        - Networking (socket, bind, listen, accept, connect, send, recv, poll)
-    random.zig     - Random numbers (getrandom)
-    input.zig      - Input devices (mouse, keyboard events)
-    ipc.zig        - Inter-process communication
-    interrupt.zig  - Userspace interrupt waiting
-    port_io.zig    - Raw port I/O access
-    mmio.zig       - MMIO mapping
-    pci_syscall.zig- PCI configuration and enumeration
-    ring.zig       - Ring buffer IPC (create, attach, wait, notify)
-    fs_handlers.zig- Filesystem operations (mount, umount)
+    process/        - Process management
+        process.zig    - Process lifecycle (exit, wait4, getpid, getppid, getuid, getgid)
+        signals.zig    - Signal handling (rt_sigprocmask, rt_sigaction, rt_sigreturn)
+        scheduling.zig - Scheduler (sched_yield, nanosleep, select, clock_gettime)
+
+    fs/             - Filesystem syscalls
+        fd.zig         - File descriptors (open, close, dup, dup2, pipe, lseek)
+        fs_handlers.zig- Filesystem operations (mount, umount)
+
+    memory/         - Memory management
+        memory.zig     - Memory ops (mmap, mprotect, munmap, brk)
+        mmio.zig       - MMIO mapping for userspace drivers
+
+    net/            - Networking
+        net.zig        - Sockets (socket, bind, listen, accept, connect, send, recv, poll)
+        pci_syscall.zig- PCI configuration and enumeration
+
+    hw/             - Hardware I/O
+        input.zig      - Input devices (mouse, keyboard events)
+        interrupt.zig  - Userspace interrupt waiting
+        port_io.zig    - Raw port I/O access
+        ring.zig       - Ring buffer IPC (create, attach, wait, notify)
+
+    io/             - Async I/O
+        root.zig       - I/O operations (read, write, writev, stat, fstat, ioctl, fcntl)
+
+    io_uring/       - io_uring subsystem
+        root.zig       - io_uring setup, enter, register
+
+    misc/           - Miscellaneous
+        custom.zig     - Zscapek extensions (debug_log, putchar, getchar, read_scancode)
+        random.zig     - Random numbers (getrandom)
+        ipc.zig        - Inter-process communication
 ```
 
 ## Syscall Quick Reference

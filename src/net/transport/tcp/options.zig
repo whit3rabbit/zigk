@@ -2,6 +2,7 @@ const c = @import("constants.zig");
 const state = @import("state.zig");
 const Tcb = @import("types.zig").Tcb;
 const TcpHeader = @import("types.zig").TcpHeader;
+const SackBlock = @import("types.zig").SackBlock;
 const PacketBuffer = @import("../../core/packet.zig").PacketBuffer;
 
 /// Parsed TCP options structure
@@ -11,6 +12,8 @@ pub const TcpOptions = struct {
     wscale_present: bool = false,
     wscale: u8 = 0,
     sack_permitted: bool = false,
+    sack_block_count: u8 = 0,
+    sack_blocks: [4]SackBlock = [_]SackBlock{.{ .start = 0, .end = 0 }} ** 4,
     timestamp_present: bool = false,
     ts_val: u32 = 0,
     ts_ecr: u32 = 0,
@@ -135,11 +138,32 @@ pub fn parseOptions(pkt: *const PacketBuffer, tcp_hdr: *const TcpHeader, opts: *
                 bytes_consumed += c.TCPOLEN_TIMESTAMP;
             },
             c.TCPOPT_SACK => {
-                // SACK blocks - skip for now (full SACK implementation is complex)
+                // SACK blocks: Kind(1) + Length(1) + N*8 bytes
                 if (i + 1 >= options_end) return;
                 const opt_len = pkt.data[i + 1];
                 if (opt_len < 2) return;
                 if (i + opt_len > options_end) return;
+                const sack_bytes = opt_len - 2;
+                if (sack_bytes % 8 != 0) return;
+
+                const block_count = @min(@as(usize, sack_bytes / 8), opts.sack_blocks.len);
+                opts.sack_block_count = @intCast(block_count);
+
+                var block_idx: usize = 0;
+                var offset = i + 2;
+                while (block_idx < block_count) : (block_idx += 1) {
+                    const start = (@as(u32, pkt.data[offset]) << 24) |
+                        (@as(u32, pkt.data[offset + 1]) << 16) |
+                        (@as(u32, pkt.data[offset + 2]) << 8) |
+                        @as(u32, pkt.data[offset + 3]);
+                    const end = (@as(u32, pkt.data[offset + 4]) << 24) |
+                        (@as(u32, pkt.data[offset + 5]) << 16) |
+                        (@as(u32, pkt.data[offset + 6]) << 8) |
+                        @as(u32, pkt.data[offset + 7]);
+                    opts.sack_blocks[block_idx] = .{ .start = start, .end = end };
+                    offset += 8;
+                }
+
                 i += opt_len;
                 bytes_consumed += opt_len;
             },
@@ -225,6 +249,43 @@ pub fn buildSynOptions(buf: []u8, tcb: *Tcb, is_syn_ack: bool, peer_opts: ?*cons
             tcb.ts_ok = true;
             tcb.ts_recent = peer_opts.?.ts_val;
         }
+    }
+
+    // Pad to 4-byte boundary with NOPs
+    while (offset % 4 != 0) {
+        buf[offset] = c.TCPOPT_NOP;
+        offset += 1;
+    }
+
+    return offset;
+}
+
+/// Build SACK options for ACK segments (RFC 2018).
+/// Returns the number of bytes written (padded to 4-byte boundary).
+pub fn buildSackOptions(buf: []u8, tcb: *const Tcb) usize {
+    if (!tcb.sack_ok or tcb.rcv_sack_block_count == 0) return 0;
+
+    var offset: usize = 0;
+    const block_count: usize = @min(@as(usize, tcb.rcv_sack_block_count), 4);
+    const sack_len: usize = 2 + (block_count * 8);
+    if (sack_len > buf.len) return 0;
+
+    buf[offset] = c.TCPOPT_SACK;
+    buf[offset + 1] = @intCast(sack_len);
+    offset += 2;
+
+    var i: usize = 0;
+    while (i < block_count) : (i += 1) {
+        const block = tcb.rcv_sack_blocks[i];
+        buf[offset] = @intCast((block.start >> 24) & 0xFF);
+        buf[offset + 1] = @intCast((block.start >> 16) & 0xFF);
+        buf[offset + 2] = @intCast((block.start >> 8) & 0xFF);
+        buf[offset + 3] = @intCast(block.start & 0xFF);
+        buf[offset + 4] = @intCast((block.end >> 24) & 0xFF);
+        buf[offset + 5] = @intCast((block.end >> 16) & 0xFF);
+        buf[offset + 6] = @intCast((block.end >> 8) & 0xFF);
+        buf[offset + 7] = @intCast(block.end & 0xFF);
+        offset += 8;
     }
 
     // Pad to 4-byte boundary with NOPs
