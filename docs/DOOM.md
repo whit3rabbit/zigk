@@ -91,7 +91,7 @@ This entry loads:
 
 The DOOM port uses:
 - **Graphics**: Kernel framebuffer via `sys_get_framebuffer_info` and `sys_map_framebuffer`
-- **Input**: PS/2 keyboard scancodes via `sys_read_scancode`
+- **Input**: PS/2 keyboard scancodes via `sys_read_scancode`, mouse via `sys_read_input_event`
 - **Timing**: `sys_clock_gettime` and `sys_nanosleep`
 - **File I/O**: InitRD filesystem via standard `fopen`/`fread`
 
@@ -112,9 +112,13 @@ DOOM runs at 640x400 and is centered on the framebuffer if the display is larger
 ## Known Limitations
 
 - **No Sound**: Audio is stubbed out (silent gameplay)
-- **No Mouse**: Only keyboard input is supported
 - **No Save Games**: Filesystem writes are not implemented
 - **Shareware Only**: Full DOOM requires purchasing the commercial WAD
+
+## Input Support
+
+- **Keyboard**: Full PS/2 keyboard support via scancodes
+- **Mouse**: Relative motion and 3-button support via input events (8x sensitivity scaling)
 
 ## Troubleshooting
 

@@ -1438,6 +1438,8 @@ pub fn build(b: *std.Build) void {
         .target = user_target,
         .optimize = optimize,
     });
+    doom_sound_module.addImport("syscall", user_syscall_lib);
+    doom_sound_module.addImport("uapi", user_uapi_module);
 
     const doom_mod = b.createModule(.{
         .root_source_file = b.path("src/user/doom/main.zig"),
@@ -1455,6 +1457,7 @@ pub fn build(b: *std.Build) void {
         .root_module = doom_mod,
     });
     doom.addAssemblyFile(b.path("src/arch/x86_64/memcpy.S"));
+    doom.addAssemblyFile(b.path("src/user/lib/libc/setjmp.S"));
 
     // NOTE: uart_driver and ps2_driver removed - source files not yet implemented
     // TODO: Add userspace UART driver (src/user/drivers/uart/main.zig)
@@ -1605,6 +1608,7 @@ pub fn build(b: *std.Build) void {
     test_libc_exe.addIncludePath(b.path("src/user/doom/include"));
     test_libc_exe.setLinkerScript(b.path("src/user/linker.ld"));
     test_libc_exe.addAssemblyFile(b.path("src/arch/x86_64/memcpy.S"));
+    test_libc_exe.addAssemblyFile(b.path("src/user/lib/libc/setjmp.S"));
 
     const install_test_libc = b.addInstallArtifact(test_libc_exe, .{});
     b.getInstallStep().dependOn(&install_test_libc.step);
@@ -1693,6 +1697,7 @@ pub fn build(b: *std.Build) void {
     test_libc_fix_exe.setLinkerScript(b.path("src/user/linker.ld"));
     test_libc_fix_exe.addAssemblyFile(b.path("src/arch/x86_64/memcpy.S"));
     test_libc_fix_exe.addAssemblyFile(b.path("src/user/crt0.S"));
+    test_libc_fix_exe.addAssemblyFile(b.path("src/user/lib/libc/setjmp.S"));
     const install_test_libc_fix = b.addInstallArtifact(test_libc_fix_exe, .{});
     b.getInstallStep().dependOn(&install_test_libc_fix.step);
 
@@ -1711,20 +1716,19 @@ pub fn build(b: *std.Build) void {
         \\    tar --format=ustar -cvf iso_root/initrd.tar -C initrd_contents .; \
         \\fi && \
         \\echo "Creating EFI boot image..." && \
-        \\dd if=/dev/zero of=efi.img bs=1M count=4 2>/dev/null && \
+        \\dd if=/dev/zero of=efi.img bs=1M count=16 2>/dev/null && \
         \\mformat -i efi.img -F :: && \
         \\mmd -i efi.img ::/EFI && \
         \\mmd -i efi.img ::/EFI/BOOT && \
         \\mcopy -i efi.img zig-out/bin/bootx64.efi ::/EFI/BOOT/BOOTX64.EFI && \
-        \\echo 'FS0:\\EFI\\BOOT\\BOOTX64.EFI' > startup.nsh && \
-        \\mcopy -i efi.img startup.nsh :: && \
-        \\cp startup.nsh iso_root/ && \
-        \\rm -f startup.nsh && \
+        \\mcopy -i efi.img zig-out/bin/kernel.elf :: && \
         \\cp efi.img iso_root/ && \
         \\xorriso -as mkisofs \
         \\    -r -V "ZIGK" \
+        \\    -eltorito-alt-boot \
         \\    -e efi.img \
         \\    -no-emul-boot \
+        \\    -isohybrid-gpt-basdat \
         \\    iso_root -o zigk.iso && \
         \\rm -f efi.img && \
         \\echo "UEFI ISO created: zigk.iso"
@@ -1756,9 +1760,11 @@ pub fn build(b: *std.Build) void {
     if (run_iso) {
         run_cmd.addArgs(&.{ "-drive", "file=zigk.iso,media=cdrom,if=ide", "-boot", "d" });
     } else {
+        // Use a real FAT disk image for UEFI boot (fat:rw: doesn't work with UEFI)
+        // The disk.img is created by the pre-build step
         run_cmd.addArgs(&.{
-            "-drive", b.fmt("if=none,format=raw,id=esp,file=fat:rw:{s}/efi_root", .{b.install_path}),
-            "-device", "virtio-blk-pci,drive=esp,bootindex=1",
+            "-drive", "if=none,format=raw,id=esp,file=disk.img",
+            "-device", "ide-hd,drive=esp,bus=ide.0,bootindex=1",
         });
     }
 
@@ -1798,12 +1804,43 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_kernel_uefi.step);
     b.getInstallStep().dependOn(&install_startup_nsh.step);
 
+    // Create esp_part.img (Raw FAT filesystem)
+    const create_esp_cmd = b.addSystemCommand(&.{
+        "sh", "-c",
+        \\set -e && \
+        \\dd if=/dev/zero of=esp_part.img bs=1M count=32 2>/dev/null && \
+        \\mformat -i esp_part.img -H 2048 :: && \
+        \\mmd -i esp_part.img ::/EFI && \
+        \\mmd -i esp_part.img ::/EFI/BOOT && \
+        \\mcopy -i esp_part.img zig-out/bin/bootx64.efi ::/EFI/BOOT/BOOTX64.EFI && \
+        \\mcopy -i esp_part.img zig-out/bin/kernel.elf :: && \
+        \\mcopy -i esp_part.img src/boot/uefi/startup.nsh ::
+    });
+    create_esp_cmd.step.dependOn(&install_uefi.step);
+    create_esp_cmd.step.dependOn(&install_kernel_uefi.step);
+
+    // Build disk_image tool
+    const disk_image_tool = b.addExecutable(.{
+        .name = "disk_image",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/disk_image.zig"),
+            .target = b.graph.host,
+            .optimize = optimize,
+        }),
+    });
+    const install_disk_image_tool = b.addInstallArtifact(disk_image_tool, .{});
+
+    // Run disk_image tool to create disk.img
+    const create_disk_img = b.addRunArtifact(disk_image_tool);
+    create_disk_img.addFileArg(b.path("esp_part.img")); // Input FAT FS
+    create_disk_img.addArg("disk.img");      // Output GPT disk path
+    create_disk_img.step.dependOn(&create_esp_cmd.step);
+    create_disk_img.step.dependOn(&install_disk_image_tool.step);
+
     if (run_iso) {
         run_cmd.step.dependOn(&iso_cmd.step);
     } else {
-        run_cmd.step.dependOn(&install_uefi.step);
-        run_cmd.step.dependOn(&install_kernel_uefi.step);
-        run_cmd.step.dependOn(&install_startup_nsh.step);
+        run_cmd.step.dependOn(&create_disk_img.step);
     }
 
     const run_step = b.step("run", "Build and run the kernel in QEMU (UEFI)");

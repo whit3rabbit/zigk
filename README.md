@@ -72,7 +72,7 @@ zig build -Doptimize=ReleaseSafe
 ```
 
 ### Running in QEMU
-To run the system with networking and VirtIO-GPU enabled:
+To run the system with networking and VirtIO-GPU enabled (boots from the ISO by default):
 
 ```bash
 zig build run
@@ -80,14 +80,17 @@ zig build run
 
 This configuration forwards local port 8080 to the guest port 80. Once the system boots and the `httpd` process starts, the web server is accessible at `http://localhost:8080`.
 
-### Running with Custom UEFI Bootloader (Experimental)
-To run the skeletal UEFI bootloader (Phase 2):
+On macOS, the run step auto-detects Homebrew OVMF firmware if present. To override:
 
 ```bash
-zig build run-uefi -Dbios=/path/to/OVMF.fd
+zig build run -Dbios=/path/to/OVMF_CODE.fd -Dvars=/path/to/OVMF_VARS.fd
 ```
 
-Note: You must provide a valid UEFI firmware image (e.g. `OVMF.fd`). A known working copy can be found in the repository root as `OVMF_CODE.fd`.
+To boot directly from the `efi_root` directory instead of the ISO:
+
+```bash
+zig build run -Drun-iso=false
+```
 
 ## Roadmap
 

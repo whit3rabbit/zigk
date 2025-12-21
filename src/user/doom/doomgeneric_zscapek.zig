@@ -230,7 +230,12 @@ pub export fn DG_SetWindowTitle(title: [*:0]const u8) void {
 }
 
 fn pollInputEvents() void {
-    var event: syscall.uapi.input.InputEvent = undefined;
+    var event: syscall.uapi.input.InputEvent = .{
+        .timestamp_ns = 0,
+        .event_type = .EV_SYN,
+        .code = 0,
+        .value = 0,
+    };
     while (true) {
         syscall.read_input_event(&event) catch |err| {
             if (err == error.WouldBlock) break;

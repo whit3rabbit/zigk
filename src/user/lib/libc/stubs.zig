@@ -37,40 +37,39 @@ pub export fn signal(sig: c_int, handler: sighandler_t) sighandler_t {
 }
 
 // =============================================================================
-// setjmp/longjmp stubs
+// setjmp/longjmp for x86_64 (implemented in setjmp.S)
 // =============================================================================
 
 /// Jump buffer type - architecture dependent
 /// For x86_64: stores RBX, RBP, R12-R15, RSP, RIP (8 registers * 8 bytes = 64 bytes)
+/// Layout:
+///   [0]:  RBX
+///   [8]:  RBP
+///   [16]: R12
+///   [24]: R13
+///   [32]: R14
+///   [40]: R15
+///   [48]: RSP (value after setjmp returns)
+///   [56]: RIP (return address)
 pub const jmp_buf = [64]u8;
 
 /// Save calling environment for later longjmp
 /// Returns 0 on direct call, non-zero when returning from longjmp
-pub export fn setjmp(env: ?*jmp_buf) c_int {
-    // Cannot properly implement without assembly to save registers
-    // The current stub is invalid for real usage but allows linking.
-    _ = env;
-    return 0;
-}
+/// Implemented in setjmp.S
+pub extern fn setjmp(env: ?*jmp_buf) callconv(.c) c_int;
 
 /// Restore calling environment saved by setjmp
 /// Never returns - transfers control to setjmp location
-pub export fn longjmp(env: ?*jmp_buf, val: c_int) noreturn {
-    _ = env;
-    _ = val;
-    syscall.exit(134); // SIGABRT exit code
-}
+/// Implemented in setjmp.S
+pub extern fn longjmp(env: ?*jmp_buf, val: c_int) callconv(.c) noreturn;
 
 /// POSIX version of setjmp that saves signal mask
-pub export fn sigsetjmp(env: ?*jmp_buf, savemask: c_int) c_int {
-    _ = savemask;
-    return setjmp(env);
-}
+/// Implemented in setjmp.S (signal mask not actually saved)
+pub extern fn sigsetjmp(env: ?*jmp_buf, savemask: c_int) callconv(.c) c_int;
 
 /// POSIX version of longjmp for sigsetjmp
-pub export fn siglongjmp(env: ?*jmp_buf, val: c_int) noreturn {
-    longjmp(env, val);
-}
+/// Implemented in setjmp.S
+pub extern fn siglongjmp(env: ?*jmp_buf, val: c_int) callconv(.c) noreturn;
 
 // =============================================================================
 // Locale stubs
