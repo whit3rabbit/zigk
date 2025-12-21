@@ -18,24 +18,21 @@ const kernel_stack = @import("kernel_stack");
 const boot = @import("boot.zig");
 const panic = @import("panic.zig");
 
-/// Initialize PMM, VMM, and Heap using Limine memory map
+/// Initialize PMM, VMM, and Heap using generic BootInfo
 ///
 /// Steps:
 /// 1. Initialize PMM with memory map from bootloader.
 /// 2. Initialize VMM (kernel page tables).
 /// 3. Initialize Kernel Stack Allocator (allows creating threads with guard pages).
 /// 4. Allocate and initialize the Kernel Heap (free-list allocator).
-pub fn initMemoryManagement() void {
+pub fn initMemoryManagement(boot_info: *const @import("boot_info").BootInfo) void {
     console.print("\n");
     console.info("Initializing memory management...", .{});
 
-    // PMM initialization from Limine memory map
-    const memmap_response = boot.memmap_request.response orelse {
-        console.err("Cannot initialize PMM: no memory map!", .{});
-        panic.halt();
-    };
-
-    pmm.initFromLimine(memmap_response) catch |err| {
+    // PMM initialization from BootInfo
+    const descriptors = boot_info.memory_map[0..boot_info.memory_map_count];
+    
+    pmm.init(descriptors) catch |err| {
         console.err("PMM initialization failed: {}", .{err});
         panic.halt();
     };

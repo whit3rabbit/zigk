@@ -80,6 +80,15 @@ zig build run
 
 This configuration forwards local port 8080 to the guest port 80. Once the system boots and the `httpd` process starts, the web server is accessible at `http://localhost:8080`.
 
+### Running with Custom UEFI Bootloader (Experimental)
+To run the skeletal UEFI bootloader (Phase 2):
+
+```bash
+zig build run-uefi -Dbios=/path/to/OVMF.fd
+```
+
+Note: You must provide a valid UEFI firmware image (e.g. `OVMF.fd`). A known working copy can be found in the repository root as `OVMF_CODE.fd`.
+
 ## Roadmap
 
 - **SMP:** Symmetric Multiprocessing support.

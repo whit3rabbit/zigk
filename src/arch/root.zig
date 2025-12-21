@@ -41,6 +41,6 @@ pub const iommu = arch.iommu;
 
 /// Initialize the Hardware Abstraction Layer
 /// Must be called early in kernel boot before using any HAL functions
-pub fn init() void {
-    arch.init();
+pub fn init(hhdm_offset: u64) void {
+    arch.init(hhdm_offset);
 }

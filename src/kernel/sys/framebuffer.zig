@@ -11,6 +11,8 @@
 const std = @import("std");
 const limine = @import("limine");
 const console = @import("console");
+const BootInfo = @import("boot_info");
+
 const hal = @import("hal");
 
 /// Framebuffer state captured at boot
@@ -62,6 +64,64 @@ var state: FramebufferState = .{
     .available = false,
 };
 
+/// Initialize framebuffer state from generic BootInfo
+pub fn initFromInfo(info: *const BootInfo.FramebufferInfo, hhdm_offset: u64) void {
+    // Capture basic framebuffer info
+    // BootInfo addresses are physical? No, usually physical for Framebuffer in UEFI.
+    // However, if we are mapping it, we need to know.
+    // The BootInfo struct says "address".
+    
+    // In UEFI, the framebuffer address from GOP is physical.
+    // In Limine, it maps it to HHDM.
+    // Let's assume the BootInfo carries the address provided by the loader.
+    // If it's Limine shim, we'll pass the HHDM address.
+    // If it's UEFI, we likely want to map it ourselves or it's identity mapped?
+    // Actually, our kernel runs in higher half. We need to access it.
+    // If it's not mapped in HHDM yet, we might have trouble if we don't map it.
+    // But PMM controls mappings.
+    
+    // STARTING ASSUMPTION: The address in BootInfo is ACCESSIBLE (e.g. HHDM mapped).
+    
+    // Allow converting virtual HHDM address back to physical if needed for storage
+    if (info.address >= hhdm_offset) {
+        state.phys_addr = info.address - hhdm_offset;
+    } else {
+        state.phys_addr = info.address;
+    }
+
+    state.width = @intCast(info.width);
+    state.height = @intCast(info.height);
+    state.pitch = @intCast(info.pitch);
+    state.bpp = @truncate(info.bpp);
+
+    // Calculate size with overflow check (pitch * height)
+    const pitch_usize: usize = @intCast(info.pitch);
+    const height_usize: usize = @intCast(info.height);
+    state.size = std.math.mul(usize, pitch_usize, height_usize) catch {
+        console.err("Framebuffer: Size overflow pitch={d} height={d}", .{ info.pitch, info.height });
+        return; // Leave state.available = false
+    };
+
+    // Extract RGB color info
+    state.red_shift = info.red_mask_shift;
+    state.red_mask_size = info.red_mask_size;
+    state.green_shift = info.green_mask_shift;
+    state.green_mask_size = info.green_mask_size;
+    state.blue_shift = info.blue_mask_shift;
+    state.blue_mask_size = info.blue_mask_size;
+
+    state.available = true;
+
+    console.info("Framebuffer: {d}x{d}x{d} @ {x} (pitch={d}, size={d})", .{
+        state.width,
+        state.height,
+        state.bpp,
+        state.phys_addr,
+        state.pitch,
+        state.size,
+    });
+}
+
 /// Initialize framebuffer state from Limine framebuffer request
 /// Called once during kernel initialization (after PMM, before scheduler)
 pub fn initFromLimine(fb_request: *const limine.FramebufferRequest) void {
@@ -77,55 +137,22 @@ pub fn initFromLimine(fb_request: *const limine.FramebufferRequest) void {
 
     // Use the first framebuffer
     const fb = fb_response.framebuffers()[0];
-
-    // Capture basic framebuffer info
-    // Limine protocol maps framebuffer in HHDM, so address is virtual.
-    // Convert to physical address for sys_map_fb.
-    if (fb.address >= hal.paging.HHDM_OFFSET) {
-        state.phys_addr = fb.address - hal.paging.HHDM_OFFSET;
-    } else {
-        state.phys_addr = fb.address;
-    }
-    state.width = @intCast(fb.width);
-    state.height = @intCast(fb.height);
-    state.pitch = @intCast(fb.pitch);
-    state.bpp = @truncate(fb.bpp);
-
-    // Calculate size with overflow check (pitch * height)
-    const pitch_usize: usize = @intCast(fb.pitch);
-    const height_usize: usize = @intCast(fb.height);
-    state.size = std.math.mul(usize, pitch_usize, height_usize) catch {
-        console.err("Framebuffer: Size overflow pitch={d} height={d}", .{ fb.pitch, fb.height });
-        return; // Leave state.available = false
+    
+    const info = BootInfo.FramebufferInfo{
+        .address = fb.address,
+        .width = fb.width,
+        .height = fb.height,
+        .pitch = fb.pitch,
+        .bpp = fb.bpp,
+        .red_mask_size = fb.red_mask_size,
+        .red_mask_shift = fb.red_mask_shift,
+        .green_mask_size = fb.green_mask_size,
+        .green_mask_shift = fb.green_mask_shift,
+        .blue_mask_size = fb.blue_mask_size,
+        .blue_mask_shift = fb.blue_mask_shift,
     };
-
-    // Extract RGB color info from Limine framebuffer structure
-    state.red_shift = fb.red_mask_shift;
-    state.red_mask_size = fb.red_mask_size;
-    state.green_shift = fb.green_mask_shift;
-    state.green_mask_size = fb.green_mask_size;
-    state.blue_shift = fb.blue_mask_shift;
-    state.blue_mask_size = fb.blue_mask_size;
-
-    state.available = true;
-
-    console.info("Framebuffer: {d}x{d}x{d} @ {x} (pitch={d}, size={d})", .{
-        state.width,
-        state.height,
-        state.bpp,
-        state.phys_addr,
-        state.pitch,
-        state.size,
-    });
-
-    console.debug("Framebuffer: RGB shift/size: R({d}/{d}) G({d}/{d}) B({d}/{d})", .{
-        state.red_shift,
-        state.red_mask_size,
-        state.green_shift,
-        state.green_mask_size,
-        state.blue_shift,
-        state.blue_mask_size,
-    });
+    
+    initFromInfo(&info, hal.paging.HHDM_OFFSET);
 }
 
 /// Get framebuffer state

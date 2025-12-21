@@ -39,6 +39,9 @@ const init_hw = @import("init_hw.zig");
 const init_fs = @import("init_fs.zig");
 const syscall_ipc = @import("syscall_ipc"); // For console IPC wiring
 
+// Boot Interface
+const BootInfo = @import("boot_info");
+
 // Syscall dispatch table - must be imported to compile dispatch_syscall symbol
 // called from asm_helpers.S _syscall_entry
 const syscall_table = @import("syscall_table");
@@ -133,7 +136,7 @@ fn videoScrollWrapper(ctx: ?*anyopaque, lines: usize, up: bool) void {
 export fn _start() noreturn {
     // Initialize HAL (serial port, GDT, PIC, IDT, interrupts)
     // This must be first - serial is needed for any debug output
-    hal.init();
+    hal.init(0);
 
     // Initialize Serial Driver (UART)
     uart = serial_driver.Serial.init();
@@ -175,7 +178,6 @@ export fn _start() noreturn {
         hal.paging.init(hhdm.offset);
     } else {
         console.warn("HHDM response not available, using default offset", .{});
-        hal.paging.init(hal.paging.HHDM_OFFSET);
     }
 
     // Log kernel address info if available
@@ -184,18 +186,153 @@ export fn _start() noreturn {
         console.info("Kernel virtual base: {x}", .{ka.virtual_base});
     }
 
-    // Parse and log memory map
-    if (boot.memmap_request.response) |memmap| {
-        init_mem.logMemoryMap(memmap);
-    } else {
-        console.err("Memory map not available!", .{});
-        panic_lib.halt();
+    // --- Boot Interface Abstraction Layer ---
+    // Convert Limine requests to generic BootInfo
+    // This allows switching to a custom loader later without changing kernel logic
+    
+    // 1. Memory Map Conversion
+    const memmap_response = boot.memmap_request.response orelse {
+        // Serial is not yet initialized? Actually hal.serial.init() is called by hal.init() which we haven't called yet?
+        // Wait, hal.init is called AFTER checking requests in original code?
+        // Original code:
+        // if (boot.hhdm_request.response == null) halt();
+        // hal.init();
+        
+        // We should keep the checks.
+        asm volatile ("cli; hlt"); 
+        unreachable;
+    };
+    
+    const hhdm_response = boot.hhdm_request.response orelse {
+        asm volatile ("cli; hlt");
+        unreachable;
+    };
+    
+
+    
+    // Static buffer for memory map to avoid stack overflow
+    // We are single-threaded here (BSP), so this is safe.
+    const MAX_MEMMAP_ENTRIES = 128;
+    // Use a struct to hold the buffer in function scope static memory? 
+    // Zig doesn't have function-static. We can use a global or just risk the stack?
+    // 128 * 40 bytes ~= 5KB. 
+    // Limine stack is usually 64KB. This is safe.
+    var mem_descriptors: [MAX_MEMMAP_ENTRIES]BootInfo.MemoryDescriptor = undefined;
+    var mem_count: usize = 0;
+    
+    {
+        const entries = memmap_response.entries();
+        for (entries) |entry| {
+            if (mem_count >= MAX_MEMMAP_ENTRIES) break;
+            
+            var type_: BootInfo.MemoryType = .Reserved;
+            switch (entry.kind) {
+                .usable => type_ = .Conventional,
+                .reserved => type_ = .Reserved,
+                .acpi_reclaimable => type_ = .ACPIReclaim,
+                .acpi_nvs => type_ = .ACPINvs,
+                .bad_memory => type_ = .Unusable,
+                .bootloader_reclaimable => type_ = .BootServicesData,
+                .kernel_and_modules => type_ = .KernelCode,
+                .framebuffer => type_ = .Framebuffer,
+            }
+            
+            mem_descriptors[mem_count] = .{
+                .type = type_,
+                .phys_start = entry.base,
+                .virt_start = 0,
+                .num_pages = entry.length / 4096, // PAGE_SIZE
+                .attribute = 0,
+            };
+            mem_count += 1;
+        }
+    }
+    
+    // 2. Framebuffer Info
+    var fb_info: ?BootInfo.FramebufferInfo = null;
+    var fb_info_storage: BootInfo.FramebufferInfo = undefined;
+    
+    if (boot.framebuffer_request.response) |resp| {
+        if (resp.framebuffer_count > 0) {
+            const fb = resp.framebuffers()[0];
+            fb_info_storage = .{
+                .address = fb.address,
+                .width = fb.width,
+                .height = fb.height,
+                .pitch = fb.pitch,
+                .bpp = fb.bpp,
+                .red_mask_size = fb.red_mask_size,
+                .red_mask_shift = fb.red_mask_shift,
+                .green_mask_size = fb.green_mask_size,
+                .green_mask_shift = fb.green_mask_shift,
+                .blue_mask_size = fb.blue_mask_size,
+                .blue_mask_shift = fb.blue_mask_shift,
+            };
+            fb_info = fb_info_storage; // struct copy
+        }
+    }
+    
+    // 3. RSDP
+    const rsdp_addr = if (boot.rsdp_request.response) |resp| resp.address else 0;
+
+    // 4. Construct BootInfo
+    var k_phys: u64 = 0;
+    var k_virt: u64 = 0;
+    if (boot.kernel_address_request.response) |ka| {
+        k_phys = ka.physical_base;
+        k_virt = ka.virtual_base;
     }
 
-    // Initialize framebuffer from Limine response
-    framebuffer.initFromLimine(&boot.framebuffer_request);
-    
-    // Initialize Graphical Console if framebuffer is available
+    const boot_info = BootInfo.BootInfo{
+        .memory_map = &mem_descriptors,
+        .memory_map_count = mem_count,
+        .descriptor_size = @sizeOf(BootInfo.MemoryDescriptor),
+        .framebuffer = if (fb_info) |*info| info else null,
+        .rsdp = rsdp_addr,
+        .initrd_addr = 0, // TODO
+        .initrd_size = 0,
+        .cmdline = null, // TODO
+        .hhdm_offset = hhdm_response.offset,
+        .kernel_phys_base = k_phys,
+        .kernel_virt_base = k_virt,
+    };
+
+    // --- Kernel Initialization ---
+
+    // 1. Initialize HAL (Hardware Abstraction Layer)
+    // Needs HHDM offset for default paging functions
+    // hal.init(boot_info.hhdm_offset); // Already initialized
+
+    console.info("Kernel Exception Handling initialized", .{});
+
+    // 2. Initialize Memory Management (PMM, VMM, Heap)
+    // Refactored to use BootInfo
+    init_mem.initMemoryManagement(&boot_info);
+
+    // 3. Initialize Framebuffer (if available)
+    if (boot_info.framebuffer) |fb| {
+        framebuffer.initFromInfo(fb, boot_info.hhdm_offset);
+    } else {
+        console.warn("No framebuffer (BootInfo), serial only", .{});
+    }
+
+    // Check for loaded modules (shell, initrd, etc.)
+    if (boot.module_request.response) |mod_response| {
+        const mods = mod_response.modules();
+        console.info("Loaded modules: {d}", .{mods.len});
+        for (mods) |mod| {
+            console.info("  Module: {s} @ {x} ({d} bytes)", .{
+                std.mem.span(mod.cmdline),
+                mod.address,
+                mod.size,
+            });
+        }
+        init_proc.initInitRD(mods);
+    }
+
+
+    // Now that PMM is ready, try to enable Double Buffering for graphical console
+    // Attempt to create a buffered driver using the same video mode
     if (framebuffer.getState()) |fb_state| {
         // fb_state.phys_addr is physical. Convert to kernel virtual (HHDM).
         const virt_addr = @intFromPtr(hal.paging.physToVirt(fb_state.phys_addr));
@@ -231,30 +368,7 @@ export fn _start() noreturn {
         });
     }
 
-    // Check for loaded modules (shell, initrd, etc.)
-    if (boot.module_request.response) |mod_response| {
-        const mods = mod_response.modules();
-        console.info("Loaded modules: {d}", .{mods.len});
-        for (mods) |mod| {
-            console.info("  Module: {s} @ {x} ({d} bytes)", .{
-                std.mem.span(mod.cmdline),
-                mod.address,
-                mod.size,
-            });
-        }
 
-        // Initialize InitRD if present
-        init_proc.initInitRD(mods);
-    }
-
-    // Initialize memory management subsystems
-    init_mem.initMemoryManagement();
-
-    // Initialize VDSO
-    const vdso = @import("vdso");
-    vdso.init() catch |err| {
-        console.warn("Failed to initialize VDSO: {}", .{err});
-    };
 
     // Now that PMM is ready, try to enable Double Buffering for graphical console
     // Attempt to create a buffered driver using the same video mode
@@ -394,7 +508,7 @@ export fn _start() noreturn {
     sched.start();
 }
 
-/// Initialize APIC subsystem (replaces legacy PIC)
+// Initialize APIC subsystem (replaces legacy PIC)
 fn initApic() void {
     console.print("\n");
     console.info("Initializing APIC subsystem...", .{});

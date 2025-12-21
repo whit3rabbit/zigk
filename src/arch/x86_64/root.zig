@@ -26,7 +26,7 @@ pub const smp = @import("smp.zig");
 pub const iommu = @import("iommu/root.zig");
 
 /// Initialize all x86_64 HAL subsystems
-pub fn init() void {
+pub fn init(_: u64) void {
     // Initialize serial port for debug output first
     serial.initDefault();
 

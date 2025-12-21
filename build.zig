@@ -26,8 +26,28 @@ pub fn build(b: *std.Build) void {
         .abi = .none,
     });
 
+    // UEFI target (x86_64-uefi-msvc)
+    const uefi_target = b.resolveTargetQuery(.{
+        .cpu_arch = .x86_64,
+        .os_tag = .uefi,
+        .abi = .msvc,
+    });
+
     // ============================================================
-    // Build-time Configuration Options
+    // UEFI Bootloader
+    // ============================================================
+    const bootloader = b.addExecutable(.{
+        .name = "bootx64",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/boot/uefi/main.zig"),
+            .target = uefi_target,
+            .optimize = optimize,
+        }),
+    });
+    b.installArtifact(bootloader);
+
+    // ============================================================
+    // Build Steps & Runnersfiguration Options
     // ============================================================
     const version = b.option([]const u8, "version", "Kernel version string") orelse "0.1.0";
     const kernel_name = b.option([]const u8, "name", "Kernel name") orelse "Zscapek";
@@ -84,6 +104,13 @@ pub fn build(b: *std.Build) void {
     // Create Limine module (boot protocol parsing)
     const limine_module = b.createModule(.{
         .root_source_file = b.path("src/lib/limine.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+
+    // Create Boot Info module (Shared Contract)
+    const boot_info_module = b.createModule(.{
+        .root_source_file = b.path("src/boot/common/boot_info.zig"),
         .target = kernel_target,
         .optimize = optimize,
     });
@@ -146,6 +173,7 @@ pub fn build(b: *std.Build) void {
     pmm_module.addImport("config", config_module);
     pmm_module.addImport("limine", limine_module);
     pmm_module.addImport("sync", sync_module);
+    pmm_module.addImport("boot_info", boot_info_module);
 
     // Create VMM module (Virtual Memory Manager)
     const vmm_module = b.createModule(.{
@@ -638,6 +666,7 @@ pub fn build(b: *std.Build) void {
     framebuffer_module.addImport("limine", limine_module);
     framebuffer_module.addImport("console", console_module);
     framebuffer_module.addImport("hal", hal_module);
+    framebuffer_module.addImport("boot_info", boot_info_module);
 
     // Create user memory validation module (shared by all syscall modules)
     const user_mem_module = b.createModule(.{
@@ -1232,6 +1261,7 @@ pub fn build(b: *std.Build) void {
     // Add module imports to kernel
 
     kernel.root_module.addImport("limine", limine_module);
+    kernel.root_module.addImport("boot_info", boot_info_module);
     kernel.root_module.addImport("hal", hal_module);
     kernel.root_module.addImport("acpi", acpi_module);
     kernel.root_module.addImport("pci", pci_module);
@@ -1780,6 +1810,41 @@ pub fn build(b: *std.Build) void {
 
     const run_step = b.step("run", "Build and run the kernel in QEMU");
     run_step.dependOn(&run_cmd.step);
+
+    // ============================================================
+    // Run UEFI Step
+    // ============================================================
+    const run_uefi_cmd = b.addSystemCommand(&.{
+        "qemu-system-x86_64",
+        "-net", "none",
+        "-serial", "stdio",
+        // Helper to map a directory as a FAT drive (simplest way to test UEFI app)
+        "-drive", b.fmt("format=raw,file=fat:rw:{s}/efi_root", .{b.install_path}),
+    });
+    
+    // Add BIOS if provided, otherwise assume user has it or QEMU defaults
+    if (qemu_bios) |bios_path| {
+         if (std.mem.endsWith(u8, bios_path, ".fd") or std.mem.endsWith(u8, bios_path, ".FD")) {
+            run_uefi_cmd.addArgs(&.{ "-drive", b.fmt("if=pflash,format=raw,readonly=on,file={s}", .{bios_path}) });
+        } else {
+            run_uefi_cmd.addArgs(&.{ "-bios", bios_path });
+        }
+    } else {
+        // Try to utilize system OVMF if available (common location on macOS/brew)
+        // Or just let QEMU fail and tell user to provide -Dbios
+        // Actually, let's provide a helpful error if not provided? 
+        // Or just let it run, QEMU internal bios might not support UEFI.
+        // We'll trust the user to provide -Dbios=/path/to/OVMF.fd
+    }
+
+    // Ensure the executable is copied to the correct path structure
+    // We need EFI/BOOT/BOOTX64.EFI for automatic boot
+    const install_uefi = b.addInstallFile(bootloader.getEmittedBin(), "efi_root/EFI/BOOT/BOOTX64.EFI");
+    
+    run_uefi_cmd.step.dependOn(&install_uefi.step);
+
+    const run_uefi_step = b.step("run-uefi", "Run the UEFI bootloader in QEMU");
+    run_uefi_step.dependOn(&run_uefi_cmd.step);
 
     // Host-side unit tests
     const test_module = b.createModule(.{
