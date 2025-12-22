@@ -306,14 +306,14 @@ pub fn block() void {
         defer held.release();
 
         if (current) |curr| {
-            if (curr.pending_wakeup) {
-                curr.pending_wakeup = false;
+            if (curr.pending_wakeup.load(.acquire)) {
+                curr.pending_wakeup.store(false, .release);
                 if (config.debug_scheduler) {
                     console.debug("Sched: Thread '{s}' (tid={d}) consumed pending wakeup", .{
                         curr.getName(), curr.tid,
                     });
                 }
-                return; 
+                return;
             }
 
             {
@@ -363,7 +363,7 @@ pub fn unblock(t: *Thread) void {
             hal.apic.ipi.sendTo(target_apic_id, .reschedule);
         }
     } else if (t.state == .Running) {
-        t.pending_wakeup = true;
+        t.pending_wakeup.store(true, .release);
         if (config.debug_scheduler) {
             console.debug("Sched: Thread '{s}' (tid={d}) set pending_wakeup", .{
                 t.getName(), t.tid,
@@ -533,7 +533,7 @@ pub fn exitWithStatus(status: i32) void {
                     });
                 }
             } else if (parent.state == .Running and parent.wait4_waiting.load(.acquire)) {
-                parent.pending_wakeup = true;
+                parent.pending_wakeup.store(true, .release);
                 if (config.debug_scheduler) {
                     console.debug("Sched: Deferred wake for parent '{s}' (tid={d})", .{
                         parent.getName(), parent.tid,

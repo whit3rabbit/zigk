@@ -2,6 +2,7 @@ const std = @import("std");
 const heap = @import("heap");
 const console = @import("console");
 const fd_mod = @import("fd");
+const framebuffer = @import("framebuffer");
 
 const user_vmm_mod = @import("user_vmm");
 const vmm = @import("vmm");
@@ -312,6 +313,10 @@ pub fn destroyProcess(proc: *Process) void {
 
     console.debug("Process: Destroying pid={}", .{proc.pid});
     proc.state = .Dead;
+
+    // Release framebuffer ownership if this process owned it.
+    // This prevents resource leaks when a display server crashes or exits.
+    framebuffer.releaseOwnership(proc.pid);
 
     // Reparent children to init (PID 1) per POSIX semantics
     if (proc.first_child != null) {

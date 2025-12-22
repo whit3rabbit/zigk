@@ -67,11 +67,12 @@ pub fn getgid() u32 {
 /// Change data segment size (heap)
 /// brk(0) returns current break address
 /// brk(addr) sets new break and returns new break (or error)
+/// Note: Kernel returns page-aligned break value, so we check ret >= addr
 pub fn brk(addr: usize) SyscallError!usize {
     const ret = primitive.syscall1(syscalls.SYS_BRK, addr);
-    // brk returns the new break address, or the current one if it failed
-    // We need to check if it actually changed
-    if (addr != 0 and ret != addr) {
+    // brk returns the new break address (page-aligned by kernel)
+    // If the request failed, kernel returns the current break (< requested)
+    if (addr != 0 and ret < addr) {
         // Request to change break failed
         return error.OutOfMemory;
     }

@@ -21,7 +21,7 @@ pub var timer_handler: ?*const fn (*idt.InterruptFrame) *idt.InterruptFrame = nu
 
 /// Guard page fault info struct
 pub const GuardPageInfo = struct {
-    thread_id: u32,
+    thread_id: u64, // u64 to match Thread.tid (prevents TID reuse attacks)
     thread_name: []const u8,
     stack_base: u64,
     stack_top: u64,

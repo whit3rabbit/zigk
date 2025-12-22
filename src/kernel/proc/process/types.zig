@@ -375,6 +375,20 @@ pub const Process = struct {
         return false;
     }
 
+    /// Check if process has display server capability
+    /// Display server capability grants framebuffer access and input routing
+    pub fn hasDisplayServerCapability(self: *Process) bool {
+        for (self.capabilities.items) |cap| {
+            switch (cap) {
+                .DisplayServer => |ds_cap| {
+                    if (ds_cap.owns_framebuffer) return true;
+                },
+                else => {},
+            }
+        }
+        return false;
+    }
+
     /// Check if process has DMA memory capability
     pub fn hasDmaCapability(self: *Process, page_count: u32) bool {
         const new_total = @addWithOverflow(self.dma_allocated_pages, page_count);

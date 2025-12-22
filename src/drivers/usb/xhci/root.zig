@@ -47,15 +47,30 @@ var g_controller: ?*Controller = null;
 
 /// Probe for XHCI controllers in the PCI device list
 pub fn probe(devices: *const pci.DeviceList, pci_access: pci.PciAccess) void {
-    console.info("XHCI: Probing for controllers...", .{});
+    console.info("XHCI: Probing for controllers (count={})...", .{devices.count});
 
     if (g_controller != null) {
         console.warn("XHCI: Controller already initialized", .{});
         return;
     }
 
+    // Debug: List first 5 devices to see what we have
+    const max_debug = @min(devices.count, 5);
+    for (devices.devices[0..max_debug], 0..) |*dev, i| {
+        console.info("XHCI: Dev[{}]: {x}:{x}.{d} class={x:0>2}/{x:0>2}/{x:0>2}", .{
+            i, dev.bus, dev.device, dev.func, dev.class_code, dev.subclass, dev.prog_if,
+        });
+    }
+
     // Iterate through devices
     for (devices.devices[0..devices.count]) |*dev| {
+        // Debug: Log all USB controllers (class 0x0C, subclass 0x03)
+        if (dev.class_code == 0x0C and dev.subclass == 0x03) {
+            console.debug("XHCI: USB controller at {x:0>2}:{x:0>2}.{d} prog_if=0x{x:0>2}", .{
+                dev.bus, dev.device, dev.func, dev.prog_if,
+            });
+        }
+
         // Class 0x0C (Serial Bus), Subclass 0x03 (USB), ProgIF 0x30 (XHCI)
         if (dev.class_code == 0x0C and dev.subclass == 0x03 and dev.prog_if == 0x30) {
             console.info("XHCI: Found controller at {x:0>2}:{x:0>2}.{d}", .{
@@ -71,7 +86,7 @@ pub fn probe(devices: *const pci.DeviceList, pci_access: pci.PciAccess) void {
             // Set global controller helper for interrupts
             // (Note: controller.init calls interrupts.setupInterrupts which sets interrupts.g_controller.
             //  We maintain root g_controller for getController access).
-            
+
             // Only initialize the first one for now
             return;
         }

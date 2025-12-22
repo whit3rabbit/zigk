@@ -55,7 +55,8 @@ pub const FutexWakeupReason = enum(u8) {
 /// All fields are protected by the scheduler lock when accessed from other threads.
 pub const Thread = struct {
     /// Unique thread identifier (never reused)
-    tid: u32,
+    /// u64 to prevent TID reuse attacks - would take centuries to wrap at 1B threads/sec
+    tid: u64,
 
     /// Current execution state
     state: ThreadState,
@@ -138,8 +139,9 @@ pub const Thread = struct {
 
     /// Pending wakeup flag for block()/unblock() synchronization
     /// Set by unblock() if thread hasn't blocked yet; checked/cleared by block()
-    /// SECURITY: Prevents TOCTOU race in block() - see sched.zig security comments
-    pending_wakeup: bool = false,
+    /// SECURITY: Atomic to prevent torn reads in race between block()/unblock()
+    /// Prevents TOCTOU race in block() - see sched.zig security comments
+    pending_wakeup: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
     /// Wait4 coordination flag to avoid lost wakeups on child exit
     wait4_waiting: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
@@ -225,17 +227,19 @@ pub const ThreadOptions = struct {
 };
 
 // Thread ID counter - atomically incremented for each new thread
-var next_tid: u32 = 0;
+// SECURITY: Uses u64 to prevent TID reuse attacks - would take centuries to wrap
+var next_tid: std.atomic.Value(u64) = std.atomic.Value(u64).init(0);
 
-// Thread creation statistics
-var total_threads_created: u32 = 0;
-var active_thread_count: u32 = 0;
+// Thread creation statistics - atomic to prevent races during concurrent thread creation
+var total_threads_created: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
+var active_thread_count: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
 
 /// Allocate a new unique thread ID
 /// SECURITY: Uses atomic increment to prevent duplicate TIDs when multiple
 /// CPUs create threads concurrently (e.g., concurrent fork() syscalls).
-fn allocateTid() u32 {
-    return @atomicRmw(u32, &next_tid, .Add, 1, .seq_cst);
+/// Returns u64 to prevent TID reuse attacks (u32 would wrap after 4B threads).
+fn allocateTid() u64 {
+    return next_tid.fetchAdd(1, .seq_cst);
 }
 
 /// Create a new kernel thread
@@ -252,8 +256,8 @@ pub fn createKernelThread(
     arg: ?*anyopaque,
     options: ThreadOptions,
 ) ThreadError!*Thread {
-    // Check thread limit
-    if (active_thread_count >= config.max_threads) {
+    // Check thread limit (atomic load for safe concurrent access)
+    if (active_thread_count.load(.acquire) >= config.max_threads) {
         console.warn("Thread: Max thread limit ({d}) reached", .{config.max_threads});
         return ThreadError.TooManyThreads;
     }
@@ -287,7 +291,8 @@ pub fn createKernelThread(
         const stack_pages = stack_size / pmm.PAGE_SIZE;
         total_pages = stack_pages + 1;
 
-        const stack_phys = pmm.allocPages(stack_pages) orelse {
+        // SECURITY: Use allocZeroedPages to prevent information leaks from stale memory
+        const stack_phys = pmm.allocZeroedPages(stack_pages) orelse {
             console.err("Thread: Failed to allocate {d} stack pages", .{stack_pages});
             return ThreadError.OutOfMemory;
         };
@@ -362,9 +367,9 @@ pub fn createKernelThread(
     // The thread will "return" from a fake context switch into entry()
     thread.kernel_rsp = setupInitialStack(stack_top_virt, @intFromPtr(entry), @intFromPtr(arg));
 
-    // Update statistics
-    total_threads_created += 1;
-    active_thread_count += 1;
+    // Update statistics (atomic for concurrent thread creation)
+    _ = total_threads_created.fetchAdd(1, .release);
+    _ = active_thread_count.fetchAdd(1, .release);
 
     if (config.debug_scheduler) {
         console.info("Thread: Created '{s}' (tid={d}, stack={x}-{x})", .{
@@ -390,8 +395,8 @@ pub fn createUserThread(
     entry: u64,
     options: ThreadOptions,
 ) ThreadError!*Thread {
-     // Check thread limit
-    if (active_thread_count >= config.max_threads) {
+     // Check thread limit (atomic load for safe concurrent access)
+    if (active_thread_count.load(.acquire) >= config.max_threads) {
         console.warn("Thread: Max thread limit ({d}) reached", .{config.max_threads});
         return ThreadError.TooManyThreads;
     }
@@ -431,8 +436,8 @@ pub fn createUserThread(
         const stack_pages = aligned_stack_size / pmm.PAGE_SIZE;
         total_pages = stack_pages + 1; // +1 for guard page
 
-        // Allocate physical pages for kernel stack
-        const stack_phys = pmm.allocPages(stack_pages) orelse {
+        // SECURITY: Allocate zeroed pages to prevent information leaks from stale memory
+        const stack_phys = pmm.allocZeroedPages(stack_pages) orelse {
             console.err("Thread: Failed to allocate {d} stack pages", .{stack_pages});
             return ThreadError.OutOfMemory;
         };
@@ -495,9 +500,9 @@ pub fn createUserThread(
     // Set up initial stack frame for context switch (iretq to user mode)
     thread.kernel_rsp = setupUserStack(stack_top_virt, entry, options.user_stack_top);
 
-    // Update statistics
-    total_threads_created += 1;
-    active_thread_count += 1;
+    // Update statistics (atomic for concurrent thread creation)
+    _ = total_threads_created.fetchAdd(1, .release);
+    _ = active_thread_count.fetchAdd(1, .release);
 
     if (config.debug_scheduler) {
         console.info("Thread: Created user '{s}' (tid={d}, cr3={x})", .{
@@ -688,26 +693,34 @@ pub fn destroyThread(thread: *Thread) ?*anyopaque {
     const alloc = heap.allocator();
     alloc.destroy(thread);
 
-    active_thread_count -= 1;
-    
+    _ = active_thread_count.fetchSub(1, .release);
+
     return proc;
 }
 
 /// Get the current count of active threads
 pub fn getActiveThreadCount() u32 {
-    return active_thread_count;
+    return active_thread_count.load(.acquire);
 }
 
 /// Get total threads ever created
 pub fn getTotalThreadsCreated() u32 {
-    return total_threads_created;
+    return total_threads_created.load(.acquire);
 }
 
 // =============================================================================
 // Process Hierarchy Management (for wait4/fork)
 // =============================================================================
+//
+// SECURITY: These functions modify thread parent/child linked lists.
+// Callers MUST hold sched.process_tree_lock (write mode) to prevent TOCTOU races
+// where concurrent wait4() iteration + exit() removal causes use-after-free.
+//
+// Lock must be acquired by caller before calling these functions.
+// Example: const held = sched.process_tree_lock.acquireWrite();
 
 /// Add a child thread to a parent's child list
+/// REQUIRES: Caller MUST hold sched.process_tree_lock (write mode)
 pub fn addChild(parent: *Thread, child: *Thread) void {
     child.parent = parent;
     child.next_sibling = parent.first_child;
@@ -715,6 +728,7 @@ pub fn addChild(parent: *Thread, child: *Thread) void {
 }
 
 /// Remove a child thread from its parent's child list
+/// REQUIRES: Caller MUST hold sched.process_tree_lock (write mode)
 pub fn removeChild(parent: *Thread, child: *Thread) void {
     // Clear parent reference
     child.parent = null;
@@ -740,6 +754,7 @@ pub fn removeChild(parent: *Thread, child: *Thread) void {
 
 /// Find a zombie child matching the target PID
 /// pid = -1: any child, pid > 0: specific child
+/// REQUIRES: Caller should hold process_tree_lock for thread-safe iteration
 pub fn findZombieChild(parent: *Thread, target_pid: i32) ?*Thread {
     var child = parent.first_child;
     while (child) |c| {
@@ -747,7 +762,7 @@ pub fn findZombieChild(parent: *Thread, target_pid: i32) ?*Thread {
             if (target_pid == -1) {
                 // Any zombie child
                 return c;
-            } else if (target_pid > 0 and c.tid == @as(u32, @intCast(target_pid))) {
+            } else if (target_pid > 0 and c.tid == @as(u64, @intCast(target_pid))) {
                 // Specific child
                 return c;
             }
@@ -758,13 +773,14 @@ pub fn findZombieChild(parent: *Thread, target_pid: i32) ?*Thread {
 }
 
 /// Check if parent has any living (non-zombie) children
+/// REQUIRES: Caller should hold process_tree_lock for thread-safe iteration
 pub fn hasLivingChildren(parent: *Thread, target_pid: i32) bool {
     var child = parent.first_child;
     while (child) |c| {
         if (c.state != .Zombie) {
             if (target_pid == -1) {
                 return true;
-            } else if (target_pid > 0 and c.tid == @as(u32, @intCast(target_pid))) {
+            } else if (target_pid > 0 and c.tid == @as(u64, @intCast(target_pid))) {
                 return true;
             }
         }

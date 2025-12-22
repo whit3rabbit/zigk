@@ -66,7 +66,9 @@ pub fn addThread(t: *Thread) void {
 
 /// Find a thread by its TID
 /// Returns null if not found or if thread has exited
-pub fn findThreadByTid(tid: u32) ?*Thread {
+/// WARNING: The returned pointer may become invalid after the lock is released.
+/// Caller must ensure thread lifetime or hold appropriate locks during use.
+pub fn findThreadByTid(tid: u64) ?*Thread {
     const held = sched_mod.scheduler.lock.acquire();
     defer held.release();
 

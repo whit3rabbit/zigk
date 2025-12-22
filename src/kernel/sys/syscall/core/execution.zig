@@ -101,7 +101,12 @@ pub fn sys_fork(frame: *hal.syscall.SyscallFrame) SyscallError!usize {
     setForkChildReturn(child_thread);
 
     // Set up parent-child relationship in thread hierarchy
-    thread.addChild(parent_thread, child_thread);
+    // SECURITY: Acquire process_tree_lock to prevent TOCTOU with wait4()
+    {
+        const held = sched.process_tree_lock.acquireWrite();
+        defer held.release();
+        thread.addChild(parent_thread, child_thread);
+    }
 
     // Add child thread to scheduler
     sched.addThread(child_thread);
@@ -631,11 +636,12 @@ pub fn sys_get_fb_info(info_ptr: usize) SyscallError!usize {
 /// Returns:
 ///   Virtual address on success (positive)
 ///   -ENODEV if no framebuffer available
-///   -EPERM if process lacks framebuffer/MMIO capability
+///   -EPERM if process lacks display server or MMIO capability
+///   -EBUSY if framebuffer is already owned by another process
 ///   -ENOMEM if mapping failed
 ///
-/// Security: Requires MMIO capability for the framebuffer physical address range.
-/// This prevents unprivileged processes from gaining direct hardware access.
+/// Security: Requires DisplayServer capability (preferred) or legacy MMIO capability.
+/// Only one process can own the framebuffer at a time (exclusive access).
 pub fn sys_map_fb() SyscallError!usize {
     // Get framebuffer state from module
     const fb_state = framebuffer.getState() orelse {
@@ -645,13 +651,26 @@ pub fn sys_map_fb() SyscallError!usize {
     // Get current process for page table and capability check
     const proc = base.getCurrentProcess();
 
-    // SECURITY: Verify process has MMIO capability for framebuffer region.
-    // Without this check, any unprivileged process could map display hardware
-    // enabling UI spoofing, DoS, or information disclosure attacks.
-    if (!proc.hasMmioCapability(fb_state.phys_addr, fb_state.size)) {
-        console.warn("sys_map_fb: Process pid={} lacks framebuffer capability", .{proc.pid});
+    // SECURITY: Check for DisplayServer capability (preferred) or legacy MMIO capability.
+    // DisplayServer is the semantic capability for display server access.
+    // MMIO is kept for backwards compatibility with existing setups.
+    const has_display_cap = proc.hasDisplayServerCapability();
+    const has_mmio_cap = proc.hasMmioCapability(fb_state.phys_addr, fb_state.size);
+
+    if (!has_display_cap and !has_mmio_cap) {
+        console.warn("sys_map_fb: Process pid={} lacks display capability", .{proc.pid});
         return error.EPERM;
     }
+
+    // SECURITY: Claim exclusive framebuffer ownership.
+    // Only one process can map the framebuffer at a time to prevent race conditions
+    // and display corruption. This enforces the display server model.
+    if (!framebuffer.claimOwnership(proc.pid)) {
+        console.warn("sys_map_fb: Framebuffer already owned by pid={}", .{framebuffer.getOwnerPid()});
+        return error.EBUSY;
+    }
+    // Release ownership if we fail to complete the mapping
+    errdefer framebuffer.releaseOwnership(proc.pid);
 
     // Fixed virtual address for framebuffer in user space
     // Using high address to avoid conflicts with heap/stack
@@ -870,7 +889,12 @@ pub fn sys_clone(frame: *hal.syscall.SyscallFrame) SyscallError!usize {
         }
 
         // Add child thread to process/thread hierarchy
-        thread.addChild(parent_thread, child_thread);
+        // SECURITY: Acquire process_tree_lock to prevent TOCTOU with wait4()
+        {
+            const held = sched.process_tree_lock.acquireWrite();
+            defer held.release();
+            thread.addChild(parent_thread, child_thread);
+        }
 
         // Add to scheduler
         sched.addThread(child_thread);

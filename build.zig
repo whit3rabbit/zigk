@@ -758,6 +758,9 @@ pub fn build(b: *std.Build) void {
     framebuffer_module.addImport("hal", hal_module);
     framebuffer_module.addImport("boot_info", boot_info_module);
 
+    // Add framebuffer to process_module (deferred due to definition order)
+    process_module.addImport("framebuffer", framebuffer_module);
+
     // Create user memory validation module (shared by all syscall modules)
     const user_mem_module = b.createModule(.{
         .root_source_file = b.path("src/kernel/sys/syscall/core/user_mem.zig"),

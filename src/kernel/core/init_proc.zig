@@ -522,23 +522,57 @@ fn grantProcessCapabilities(proc: *process.Process, process_name: []const u8) vo
         }
     }
 
-    // Doom capabilities
+    // Display server capabilities (new generic approach)
+    // Any process named "display_server" gets framebuffer + input routing
+    if (std.mem.eql(u8, process_name, "display_server")) {
+        grantDisplayServerCapabilities(proc, alloc, process_name);
+    }
+
+    // Doom capabilities (for testing - uses display server caps)
+    // In production, doom would be a client of display_server via IPC
     if (std.mem.eql(u8, process_name, "doom")) {
-        appendCapabilityOrWarn(proc, alloc, .{ .Interrupt = .{ .irq = 1 } }, process_name);
-        appendCapabilityOrWarn(proc, alloc, .{ .Interrupt = .{ .irq = 12 } }, process_name);
-        appendCapabilityOrWarn(proc, alloc, .{ .IoPort = .{ .port = 0x60, .len = 1 } }, process_name);
-        appendCapabilityOrWarn(proc, alloc, .{ .IoPort = .{ .port = 0x64, .len = 1 } }, process_name);
+        grantDisplayServerCapabilities(proc, alloc, process_name);
+        // Additional UART capability for debug output
         appendCapabilityOrWarn(proc, alloc, .{ .IoPort = .{ .port = 0x3F8, .len = 8 } }, process_name);
-        // Framebuffer MMIO capability for display access
-        if (framebuffer.getState()) |fb_state| {
-            appendCapabilityOrWarn(proc, alloc, .{ .Mmio = .{
-                .phys_addr = fb_state.phys_addr,
-                .size = fb_state.size,
-            } }, process_name);
-            console.info("Init: Granted Doom framebuffer at 0x{x} size=0x{x}", .{ fb_state.phys_addr, fb_state.size });
-        }
         console.info("Init: Granted Doom capabilities to pid={}", .{proc.pid});
     }
+}
+
+/// Grant display server capabilities to a process.
+/// This includes framebuffer access, input routing (PS/2), and input injection.
+///
+/// Architecture: Follows Wayland-like model where the display server owns
+/// the framebuffer and receives all input events. GUI applications communicate
+/// with the display server via IPC rather than accessing hardware directly.
+fn grantDisplayServerCapabilities(proc: *process.Process, alloc: std.mem.Allocator, process_name: []const u8) void {
+    // DisplayServer semantic capability - grants framebuffer access rights
+    appendCapabilityOrWarn(proc, alloc, .{ .DisplayServer = .{
+        .receives_input = true,
+        .owns_framebuffer = true,
+    } }, process_name);
+
+    // PS/2 keyboard IRQ
+    appendCapabilityOrWarn(proc, alloc, .{ .Interrupt = .{ .irq = 1 } }, process_name);
+    // PS/2 mouse IRQ
+    appendCapabilityOrWarn(proc, alloc, .{ .Interrupt = .{ .irq = 12 } }, process_name);
+    // PS/2 controller data port
+    appendCapabilityOrWarn(proc, alloc, .{ .IoPort = .{ .port = 0x60, .len = 1 } }, process_name);
+    // PS/2 controller command/status port
+    appendCapabilityOrWarn(proc, alloc, .{ .IoPort = .{ .port = 0x64, .len = 1 } }, process_name);
+    // Input injection for IPC-based input routing from other processes
+    appendCapabilityOrWarn(proc, alloc, .{ .InputInjection = {} }, process_name);
+
+    // Legacy MMIO capability for framebuffer (backwards compatibility)
+    // New code should check DisplayServer capability instead
+    if (framebuffer.getState()) |fb_state| {
+        appendCapabilityOrWarn(proc, alloc, .{ .Mmio = .{
+            .phys_addr = fb_state.phys_addr,
+            .size = fb_state.size,
+        } }, process_name);
+        console.info("Init: Granted display server framebuffer at 0x{x} size=0x{x}", .{ fb_state.phys_addr, fb_state.size });
+    }
+
+    console.info("Init: Granted display server capabilities to pid={}", .{proc.pid});
 }
 
 const VirtioDriverType = enum {

@@ -175,6 +175,25 @@ pub const SetGidCapability = struct {
     }
 };
 
+/// Capability for display server access (framebuffer + input routing)
+///
+/// This capability grants a process the right to:
+/// - Map the framebuffer into its address space via sys_map_fb()
+/// - Receive routed input events from the kernel input subsystem
+/// - Act as the compositor/display server for the system
+///
+/// Only one process should hold this capability active at a time.
+/// The kernel enforces exclusive framebuffer ownership via claimOwnership().
+///
+/// Architecture: Follows Wayland-like model where the display server owns
+/// the framebuffer and GUI applications communicate via IPC.
+pub const DisplayServerCapability = struct {
+    /// If true, input events (keyboard/mouse) are routed to this process
+    receives_input: bool = true,
+    /// If true, allows exclusive framebuffer mapping
+    owns_framebuffer: bool = true,
+};
+
 /// Capability for mounting/unmounting filesystems
 pub const MountCapability = struct {
     /// Target mount point path (exact match required, wildcards NOT allowed for security)
@@ -223,6 +242,7 @@ pub const CapabilityType = enum {
     File,
     SetUid,
     SetGid,
+    DisplayServer,
 };
 
 pub const Capability = union(CapabilityType) {
@@ -243,4 +263,6 @@ pub const Capability = union(CapabilityType) {
     SetUid: SetUidCapability,
     /// Allows changing group ID (like Linux CAP_SETGID)
     SetGid: SetGidCapability,
+    /// Allows display server access (framebuffer + input routing)
+    DisplayServer: DisplayServerCapability,
 };

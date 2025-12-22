@@ -11,7 +11,6 @@
 const std = @import("std");
 const console = @import("console");
 const BootInfo = @import("boot_info");
-
 const hal = @import("hal");
 
 /// Framebuffer state captured at boot
@@ -149,4 +148,55 @@ pub fn getSize() usize {
 /// Check if framebuffer is available
 pub fn isAvailable() bool {
     return state.available;
+}
+
+// =============================================================================
+// Framebuffer Ownership Tracking
+// =============================================================================
+//
+// Ensures exclusive framebuffer access. Only one process can map the
+// framebuffer at a time. This prevents race conditions and display corruption
+// when multiple processes attempt to write to the framebuffer.
+//
+// The display server model: a single compositor/display server process owns
+// the framebuffer, and GUI applications communicate via IPC.
+
+/// PID of process that currently owns the framebuffer (0 = kernel/no owner)
+var owner_pid: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
+
+/// Attempt to claim exclusive framebuffer ownership.
+/// Returns true if ownership was granted, false if already owned by another process.
+/// A process can call this multiple times (idempotent for same PID).
+pub fn claimOwnership(pid: u32) bool {
+    // Atomically try to claim ownership (0 -> pid)
+    if (owner_pid.cmpxchgStrong(0, pid, .acquire, .monotonic) == null) {
+        console.info("Framebuffer: Ownership claimed by pid={}", .{pid});
+        return true;
+    }
+    // Check if already owned by this pid
+    if (owner_pid.load(.acquire) == pid) {
+        return true;
+    }
+    console.warn("Framebuffer: Ownership denied to pid={} (owned by pid={})", .{ pid, owner_pid.load(.acquire) });
+    return false;
+}
+
+/// Release framebuffer ownership.
+/// Only releases if the given PID is the current owner.
+/// Called on process exit to prevent resource leaks.
+pub fn releaseOwnership(pid: u32) void {
+    // Atomically release if we're the owner (pid -> 0)
+    if (owner_pid.cmpxchgStrong(pid, 0, .release, .monotonic) == null) {
+        console.info("Framebuffer: Ownership released by pid={}", .{pid});
+    }
+}
+
+/// Get current owner PID (0 = no owner)
+pub fn getOwnerPid() u32 {
+    return owner_pid.load(.acquire);
+}
+
+/// Check if framebuffer is currently owned by any process
+pub fn isOwned() bool {
+    return getOwnerPid() != 0;
 }

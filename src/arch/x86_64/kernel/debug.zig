@@ -189,7 +189,7 @@ pub fn isGuardPageFault(fault_addr: u64, stack_base: u64, page_size: usize) bool
 /// Print stack overflow diagnostic message
 /// Called when a page fault is detected in a guard page region
 pub fn printStackOverflowDiagnostic(
-    thread_id: ?u32,
+    thread_id: ?u64, // u64 to match Thread.tid
     thread_name: ?[]const u8,
     fault_addr: u64,
     stack_base: u64,
@@ -303,8 +303,8 @@ fn printHex8(value: u8) void {
     write(&buf);
 }
 
-/// Print a decimal number
-fn printDecimal(value: u32) void {
+/// Print a decimal number (u64 for TID support)
+fn printDecimal(value: u64) void {
     const write = console_writer orelse return;
 
     if (value == 0) {
@@ -312,16 +312,16 @@ fn printDecimal(value: u32) void {
         return;
     }
 
-    var buf: [10]u8 = undefined;
+    var buf: [20]u8 = undefined; // 20 digits max for u64
     var i: usize = 0;
     var v = value;
 
     while (v > 0) : (i += 1) {
-        buf[9 - i] = '0' + @as(u8, @truncate(v % 10));
+        buf[19 - i] = '0' + @as(u8, @truncate(v % 10));
         v /= 10;
     }
 
-    write(buf[10 - i ..]);
+    write(buf[20 - i ..]);
 }
 
 /// Print decoded RFLAGS bits
