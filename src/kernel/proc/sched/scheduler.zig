@@ -200,7 +200,6 @@ pub fn initAp() void {
 
 /// Start the scheduler (BSP)
 pub fn start() noreturn {
-
     console.info("Sched: Starting scheduler on CPU {d}...", .{hal.apic.lapic.getId()});
 
     {
@@ -209,19 +208,72 @@ pub fn start() noreturn {
         held.release();
     }
 
-    hal.cpu.enableInterrupts();
+    // Get idle thread pointer directly from GS:40 inline to minimize stack usage
+    // This avoids potential stack overflow on the boot stack
+    const idle_ptr: u64 = asm volatile ("movq %%gs:40, %[ret]"
+        : [ret] "=r" (-> u64),
+    );
+    const idle: *Thread = @ptrFromInt(idle_ptr);
 
-    while (true) {
-        hal.cpu.halt();
-    }
+    // Set the idle thread as current
+    thread_logic.setCurrentThread(idle);
+    idle.state = .Running;
+
+    // Update GDT/TSS with idle thread's kernel stack for syscalls
+    hal.gdt.setKernelStack(idle.kernel_stack_top);
+    const gs_base = hal.cpu.readMsr(hal.cpu.IA32_GS_BASE);
+    const gs_data = @as(*hal.syscall.KernelGsData, @ptrFromInt(gs_base));
+    gs_data.kernel_stack = idle.kernel_stack_top;
+    gs_data.current_thread = @intFromPtr(idle);
+
+    // Switch to idle thread's stack and enable interrupts
+    const idle_stack = idle.kernel_stack_top;
+
+    asm volatile (
+        \\mov %[stack], %%rsp
+        \\mov %%rsp, %%rbp
+        \\sti
+        \\1: hlt
+        \\jmp 1b
+        :
+        : [stack] "r" (idle_stack),
+        : .{ .rsp = true, .rbp = true, .memory = true }
+    );
+
+    unreachable;
 }
 
 /// Start scheduler on AP
 pub fn startAp() noreturn {
-    hal.cpu.enableInterrupts();
-    while (true) {
-        hal.cpu.halt();
-    }
+    // Get idle thread pointer directly from GS:40 inline
+    const idle_ptr: u64 = asm volatile ("movq %%gs:40, %[ret]"
+        : [ret] "=r" (-> u64),
+    );
+    const idle: *Thread = @ptrFromInt(idle_ptr);
+
+    thread_logic.setCurrentThread(idle);
+    idle.state = .Running;
+
+    hal.gdt.setKernelStack(idle.kernel_stack_top);
+    const gs_base = hal.cpu.readMsr(hal.cpu.IA32_GS_BASE);
+    const gs_data = @as(*hal.syscall.KernelGsData, @ptrFromInt(gs_base));
+    gs_data.kernel_stack = idle.kernel_stack_top;
+    gs_data.current_thread = @intFromPtr(idle);
+
+    const idle_stack = idle.kernel_stack_top;
+
+    asm volatile (
+        \\mov %[stack], %%rsp
+        \\mov %%rsp, %%rbp
+        \\sti
+        \\1: hlt
+        \\jmp 1b
+        :
+        : [stack] "r" (idle_stack),
+        : .{ .rsp = true, .rbp = true, .memory = true }
+    );
+
+    unreachable;
 }
 
 /// Get the current tick count (lock-free)

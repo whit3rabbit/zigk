@@ -29,6 +29,7 @@ const devfs = @import("devfs");
 const kernel_iommu = @import("kernel_iommu");
 const hal = @import("hal");
 const BootInfo = @import("boot_info");
+const framebuffer = @import("framebuffer");
 
 /// Stored boot_info pointer for cmdline parsing
 var stored_boot_info: ?*const BootInfo.BootInfo = null;
@@ -170,12 +171,13 @@ pub fn loadInitProcess() void {
     }
 
     // 1. Launch Drivers (scan InitRD for driver executables)
+    // NOTE: netstack temporarily disabled - crashes during net.init()
     const driver_names = [_][]const u8{
         "uart_driver",
         "ps2_driver",
         "virtio_net_driver",
         "virtio_blk_driver",
-        "netstack",
+        // "netstack",
     };
 
     for (driver_names) |driver_name| {
@@ -527,6 +529,14 @@ fn grantProcessCapabilities(proc: *process.Process, process_name: []const u8) vo
         appendCapabilityOrWarn(proc, alloc, .{ .IoPort = .{ .port = 0x60, .len = 1 } }, process_name);
         appendCapabilityOrWarn(proc, alloc, .{ .IoPort = .{ .port = 0x64, .len = 1 } }, process_name);
         appendCapabilityOrWarn(proc, alloc, .{ .IoPort = .{ .port = 0x3F8, .len = 8 } }, process_name);
+        // Framebuffer MMIO capability for display access
+        if (framebuffer.getState()) |fb_state| {
+            appendCapabilityOrWarn(proc, alloc, .{ .Mmio = .{
+                .phys_addr = fb_state.phys_addr,
+                .size = fb_state.size,
+            } }, process_name);
+            console.info("Init: Granted Doom framebuffer at 0x{x} size=0x{x}", .{ fb_state.phys_addr, fb_state.size });
+        }
         console.info("Init: Granted Doom capabilities to pid={}", .{proc.pid});
     }
 }
