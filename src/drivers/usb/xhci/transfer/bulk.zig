@@ -54,13 +54,15 @@ pub fn queueBulkTransfer(
     ctrl.ringDoorbell(dev.slot_id, dci);
 
     // Wait for completion (reuse control logic for now)
-    const result = common.waitForCompletion(ctrl, dev, dci, 1000) catch |err| {
+    // waitForCompletion returns u24 residual (bytes NOT transferred)
+    const residual = common.waitForCompletion(ctrl, dev, dci, 1000) catch |err| {
         return err;
     };
 
     const requested = buffer.len;
-    const residual = result.residual;
-    const transferred = if (residual <= requested) requested - residual else 0;
+    // Security: Explicit type conversion for safe subtraction
+    const residual_usize: usize = @intCast(residual);
+    const transferred = if (residual_usize <= requested) requested - residual_usize else 0;
 
     return transferred;
 }

@@ -164,9 +164,11 @@ fn probeE1000Legacy(ecam: pci.Ecam) ?*e1000e.E1000e {
     // E1000 device IDs: 0x100E (82540EM/QEMU), 0x100F (82545EM), 0x10D3 (82574L)
     const e1000_ids = [_]u16{ 0x100E, 0x100F, 0x10D3, 0x10F6, 0x150C };
 
-    var dev_num: u5 = 0;
+    // Use u8 to avoid overflow when loop counter reaches 32
+    var dev_num: u8 = 0;
     while (dev_num < 32) : (dev_num += 1) {
-        const vendor_id = legacy.read16(0, dev_num, 0, 0x00);
+        const device: u5 = @truncate(dev_num);
+        const vendor_id = legacy.read16(0, device, 0, 0x00);
         if (vendor_id != 0x8086) continue; // Must be Intel
 
         const device_id = legacy.read16(0, dev_num, 0, 0x02);
@@ -373,7 +375,8 @@ pub fn initAudio() void {
     console.info("Audio: Trying legacy PCI probe...", .{});
     const legacy = pci.Legacy.init();
 
-    var dev_num: u5 = 0;
+    // Use u8 to avoid overflow when loop counter reaches 32
+    var dev_num: u8 = 0;
     while (dev_num < 32) : (dev_num += 1) {
         const vendor_id = legacy.read16(0, dev_num, 0, 0x00);
         if (vendor_id == 0xFFFF) continue;

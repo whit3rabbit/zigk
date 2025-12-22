@@ -177,7 +177,9 @@ fn doControlTransfer(
     // Calculate bytes transferred
     // For IN transfers, residual tells us how many bytes were NOT transferred
     const requested = if (buffer) |b| b.len else 0;
-    const transferred = if (residual <= requested) requested - residual else 0;
+    // Security: Explicit type conversion for safe subtraction
+    const residual_usize: usize = @intCast(residual);
+    const transferred = if (residual_usize <= requested) requested - residual_usize else 0;
 
     // For IN transfers, copy data from DMA buffer back to user buffer
     if (has_data and is_in and dma_buf != null and buffer != null) {

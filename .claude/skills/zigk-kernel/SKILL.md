@@ -198,8 +198,10 @@ python scripts/driver_query.py template ring  # Ring IPC userspace driver
 ### New Driver (Kernel)
 1. Generate template: `python scripts/driver_query.py template mmio`
 2. Query PCI: `python scripts/driver_query.py pci`
-3. Create in `src/drivers/`
-4. Customize template with device-specific registers
+3. Query interrupt pattern: `python scripts/driver_query.py msix` (PCI) or `irq` (ISA)
+4. Create in `src/drivers/`
+5. Customize template with device-specific registers
+6. For ISA IRQs: Call `routeIrq()` BEFORE `enableIrq()` (see `irq` pattern)
 
 ### New Driver (Userspace)
 1. Generate template: `python scripts/driver_query.py template ring`
@@ -214,6 +216,13 @@ python scripts/driver_query.py template ring  # Ring IPC userspace driver
 4. Generate template: `python scripts/network_query.py template protocol`
 5. Query syscalls: `python scripts/syscall_query.py --category net`
 
+### Debug Input Device (Keyboard/Mouse)
+1. Query input flow: `python scripts/driver_query.py input`
+2. Verify IRQ routing: `python scripts/driver_query.py irq`
+3. Check: Is IRQ routed? (boot log: "routed to vector N")
+4. Check: Does handler push to unified input subsystem?
+5. Keyboard uses `sys_read_scancode()`, Mouse uses `sys_read_input_event()`
+
 ## File Locations
 
 | Component | Location |
@@ -221,7 +230,10 @@ python scripts/driver_query.py template ring  # Ring IPC userspace driver
 | Syscall numbers | src/uapi/syscalls/root.zig |
 | Syscall handlers | src/kernel/sys/syscall/{core,fs,memory,process,net,hw,io,io_uring,misc}/*.zig |
 | HAL | src/arch/x86_64/ (via hal import) |
+| APIC/IRQ routing | src/arch/x86_64/kernel/apic/root.zig |
 | Kernel drivers | src/drivers/ |
+| Input drivers | src/drivers/input/{keyboard,mouse,input}.zig |
+| USB HID driver | src/drivers/usb/class/hid/ |
 | User drivers | src/user/drivers/ |
 | Libc | src/user/lib/libc/ |
 | Async I/O | src/kernel/io/ |

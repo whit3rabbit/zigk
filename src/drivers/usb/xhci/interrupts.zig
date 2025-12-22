@@ -84,10 +84,10 @@ pub fn processEvents(ctrl: *Controller) usize {
                             // IMPORTANT: trb_transfer_length is RESIDUAL (bytes NOT transferred)
                             // Actual transferred = request_length - residual
                             // Interrupt transfers request 8 bytes (see transfer/interrupt.zig)
-                            const request_len: u32 = 8;
-                            const actual_transferred = if (len <= request_len) request_len - len else 0;
+                            const request_len: u24 = 8; // Use same type as len (u24)
+                            const actual_transferred: u24 = if (len <= request_len) request_len - len else 0;
                             // Security: Ensure actual_transferred doesn't exceed buffer
-                            const data_len = @min(actual_transferred, @as(u32, @intCast(dev.report_buffer.len)));
+                            const data_len: usize = @min(@as(usize, actual_transferred), dev.report_buffer.len);
                             device_manager.handleInterrupt(ctrl, dev, dev.report_buffer[0..data_len]);
                         } else {
                             console.warn("XHCI: Interrupt transfer failed: {}", .{@intFromEnum(code)});
