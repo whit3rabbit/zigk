@@ -11,6 +11,7 @@ const hal = @import("../../root.zig");
 const console = @import("console");
 const regs = @import("regs.zig");
 const acpi = @import("acpi");
+const mmio = @import("../mmio.zig");
 
 const paging = hal.paging;
 const Offset = regs.Offset;
@@ -98,26 +99,22 @@ pub const VtdUnit = struct {
 
     /// Read a 32-bit register
     pub fn readReg32(self: *const Self, offset: u32) u32 {
-        const ptr: *volatile u32 = @ptrCast(@alignCast(self.reg_base + offset));
-        return ptr.*;
+        return mmio.read32(@intFromPtr(self.reg_base) + offset);
     }
 
     /// Write a 32-bit register
     pub fn writeReg32(self: *Self, offset: u32, value: u32) void {
-        const ptr: *volatile u32 = @ptrCast(@alignCast(self.reg_base + offset));
-        ptr.* = value;
+        mmio.write32(@intFromPtr(self.reg_base) + offset, value);
     }
 
     /// Read a 64-bit register
     pub fn readReg64(self: *const Self, offset: u32) u64 {
-        const ptr: *volatile u64 = @ptrCast(@alignCast(self.reg_base + offset));
-        return ptr.*;
+        return mmio.read64(@intFromPtr(self.reg_base) + offset);
     }
 
     /// Write a 64-bit register
     pub fn writeReg64(self: *Self, offset: u32, value: u64) void {
-        const ptr: *volatile u64 = @ptrCast(@alignCast(self.reg_base + offset));
-        ptr.* = value;
+        mmio.write64(@intFromPtr(self.reg_base) + offset, value);
     }
 
     /// Read capability register

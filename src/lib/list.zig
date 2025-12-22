@@ -1,3 +1,5 @@
+const std = @import("std");
+
 /// Intrusive Doubly Linked List
 ///
 /// Wraps a type T that has `next: ?*T` and `prev: ?*T` fields.
@@ -45,7 +47,25 @@ pub fn IntrusiveDoublyLinkedList(comptime T: type) type {
         }
 
         /// Remove a specific node from the list
+        /// SECURITY: Debug assertions verify the node is actually in this list
+        /// to catch double-remove bugs that could cause count underflow
         pub fn remove(self: *Self, node: *T) void {
+            // Debug assertions: verify node appears to be in *some* list
+            // If node has no prev, it should be the head of this list
+            // If node has no next, it should be the tail of this list
+            if (std.debug.runtime_safety) {
+                // Node with null prev should be the head
+                if (node.prev == null) {
+                    std.debug.assert(self.head == node);
+                }
+                // Node with null next should be the tail
+                if (node.next == null) {
+                    std.debug.assert(self.tail == node);
+                }
+                // Count should be positive (prevent underflow)
+                std.debug.assert(self.count > 0);
+            }
+
             if (node.prev) |prev| {
                 prev.next = node.next;
             } else {

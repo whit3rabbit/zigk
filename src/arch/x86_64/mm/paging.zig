@@ -190,13 +190,12 @@ const builtin = @import("builtin");
 pub fn physToVirt(phys: u64) [*]u8 {
     const result = phys +% hhdm_offset; // Use wrapping add
 
-    // SECURITY: Check for overflow in debug/safe builds
-    // If result < hhdm_offset after addition, we wrapped around
-    // This would map kernel code to user-controllable addresses
-    if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
-        if (result < hhdm_offset) {
-            @panic("physToVirt: integer overflow - physical address too large");
-        }
+    // SECURITY: Ensure physical address doesn't wrap into user virtual space.
+    // This check is always enabled to prevent privilege escalation regardless
+    // of build mode. If result < hhdm_offset, the caller passed a physical
+    // address that would land in the lower-half or wrap around.
+    if (result < hhdm_offset) {
+        @panic("physToVirt: integer overflow - physical address too large");
     }
 
     return @ptrFromInt(result);
@@ -205,6 +204,10 @@ pub fn physToVirt(phys: u64) [*]u8 {
 /// Convert virtual address to physical using HHDM
 /// Only valid for addresses in the HHDM range
 pub fn virtToPhys(virt: u64) u64 {
+    // SECURITY: Ensure virtual address is within HHDM range
+    if (virt < hhdm_offset) {
+        @panic("virtToPhys: address not in HHDM range");
+    }
     return virt - hhdm_offset;
 }
 

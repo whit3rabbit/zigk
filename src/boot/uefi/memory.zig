@@ -9,6 +9,7 @@ pub const MemoryError = error{
     GetMemoryMapFailed,
     BufferTooSmall,
     InvalidDescriptor,
+    UnsupportedDescriptorVersion,
 };
 
 /// UEFI Memory Map state
@@ -59,8 +60,10 @@ pub const MemoryMapIterator = struct {
         // Use checked arithmetic to prevent overflow from malformed descriptor_size
         const offset = std.math.mul(usize, self.index, self.descriptor_size) catch return null;
 
-        // Bounds check against actual buffer size
-        if (offset >= self.buffer_size) return null;
+        // Bounds check: verify the ENTIRE descriptor fits within buffer, not just the start
+        // This prevents out-of-bounds reads when accessing fields within the descriptor
+        const end_offset = std.math.add(usize, offset, @sizeOf(uefi.tables.MemoryDescriptor)) catch return null;
+        if (end_offset > self.buffer_size) return null;
 
         const ptr = self.buffer + offset;
         self.index += 1;
@@ -124,12 +127,23 @@ pub fn getMemoryMap(
     );
 
     if (status != .success) {
+        // Distinguish buffer too small from other errors for better diagnostics
+        // map_size will contain required size on buffer_too_small
+        if (status == .buffer_too_small) {
+            return MemoryError.BufferTooSmall;
+        }
         return MemoryError.GetMemoryMapFailed;
     }
 
     // Validate descriptor size to prevent division by zero and detect malformed firmware data
     if (desc_size == 0 or desc_size < @sizeOf(uefi.tables.MemoryDescriptor)) {
         return MemoryError.InvalidDescriptor;
+    }
+
+    // Validate descriptor version - UEFI spec defines version 1 as the only valid version
+    // Unknown versions may have incompatible field layouts
+    if (desc_version != 1) {
+        return MemoryError.UnsupportedDescriptorVersion;
     }
 
     // Ensure map_size is a valid multiple of desc_size
@@ -153,6 +167,16 @@ pub fn convertToBootInfo(
     uefi_map: *const MemoryMap,
     output: []BootInfo.MemoryDescriptor,
 ) usize {
+    // Compile-time assertion: ensure attribute types have matching sizes
+    // Prevents silent truncation or misinterpretation if types diverge
+    comptime {
+        const uefi_attr_size = @sizeOf(uefi.tables.MemoryDescriptorAttribute);
+        const boot_attr_size = @sizeOf(@TypeOf(@as(BootInfo.MemoryDescriptor, undefined).attribute));
+        if (uefi_attr_size != boot_attr_size) {
+            @compileError("UEFI and BootInfo memory attribute sizes mismatch");
+        }
+    }
+
     var iter = uefi_map.iterator();
     var count: usize = 0;
 

@@ -35,6 +35,8 @@ pub fn RingBuffer(comptime T: type, comptime capacity: usize) type {
         const MASK: usize = capacity - 1;
 
         /// Storage array
+        /// NOTE: Uses undefined initialization for performance with complex types.
+        /// SECURITY: pop() zeros slots after reading, and clear() zeros the buffer.
         buffer: [capacity]T = undefined,
 
         /// Index of next element to read (oldest element)
@@ -68,12 +70,17 @@ pub fn RingBuffer(comptime T: type, comptime capacity: usize) type {
 
         /// Pop the oldest element from the buffer
         /// Returns null if buffer is empty
+        /// SECURITY: Zeros the slot after reading to prevent stale data leaks
         pub fn pop(self: *Self) ?T {
             if (self.count == 0) {
                 return null;
             }
 
             const value = self.buffer[self.head];
+            // SECURITY: Zero the slot to prevent information leaks
+            // Use byte-level zeroing to avoid issues with non-zero default types
+            const slot_bytes: *[@sizeOf(T)]u8 = @ptrCast(&self.buffer[self.head]);
+            @memset(slot_bytes, 0);
             self.head = (self.head + 1) & MASK;
             self.count -= 1;
 
@@ -109,7 +116,12 @@ pub fn RingBuffer(comptime T: type, comptime capacity: usize) type {
         }
 
         /// Clear all elements
+        /// SECURITY: Also zeros buffer contents to prevent stale data leaks
         pub fn clear(self: *Self) void {
+            // Zero buffer contents to prevent information leaks
+            // Use byte-level zeroing to avoid issues with non-zero default types
+            const buf_bytes: *[capacity * @sizeOf(T)]u8 = @ptrCast(&self.buffer);
+            @memset(buf_bytes, 0);
             self.head = 0;
             self.tail = 0;
             self.count = 0;

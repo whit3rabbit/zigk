@@ -246,8 +246,19 @@ pub fn createKernelPageTables(
         .no_execute = true, // Security: .rodata should not be executable
     };
 
+    // Identity map flags: must be executable since bootloader runs from here
+    // This is temporary and will be unmapped after kernel takes over
+    const identity_flags = PageFlags{
+        .present = true,
+        .writable = true,
+        .global = true,
+        .no_execute = false, // Must be executable for bootloader code
+    };
+
     // 1. Identity map all physical memory (UEFI stack can live above 4GB on EDK2/QEMU)
-    try ctx.mapRange(0, 0, max_phys_addr, rw_flags);
+    // Must be executable because bootloader continues running from identity-mapped
+    // addresses after CR3 switch until kernel entry
+    try ctx.mapRange(0, 0, max_phys_addr, identity_flags);
 
     // 2. HHDM: Map all physical memory at HHDM_BASE
     try ctx.mapRange(HHDM_BASE, 0, max_phys_addr, rw_flags);

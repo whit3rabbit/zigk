@@ -84,12 +84,18 @@ fn doControlTransfer(
         .out;
 
     // Build Setup Stage TRB
+    // Security: Use checked conversion to prevent silent truncation of large buffers
+    const w_length: u16 = if (buffer) |b|
+        std.math.cast(u16, b.len) orelse return error.InvalidParam
+    else
+        0;
+
     const setup_data = trb.SetupData{
         .bm_request_type = request_type,
         .b_request = request,
         .w_value = value,
         .w_index = index,
-        .w_length = if (buffer) |b| @truncate(b.len) else 0,
+        .w_length = w_length,
     };
 
     var setup_trb = trb.SetupStageTrb.init(
@@ -109,9 +115,12 @@ fn doControlTransfer(
         // Note: buffer must be in kernel memory (not user space)
         const buf_phys = hal.paging.virtToPhys(@intFromPtr(buf.ptr));
 
+        // Security: Use checked conversion - TRB length field is 17 bits (max 131071)
+        const trb_len: u17 = std.math.cast(u17, buf.len) orelse return error.InvalidParam;
+
         var data_trb = trb.DataStageTrb.init(
             buf_phys,
-            @truncate(buf.len),
+            trb_len,
             is_in,
             false, // IOC on data stage
             false, // No chain

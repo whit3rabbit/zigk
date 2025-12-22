@@ -129,6 +129,10 @@ pub fn loadKernel(bs: *uefi.tables.BootServices, segments_buffer: []LoadedSegmen
             @memset(dest_slice, 0);
 
             // Load file data
+            // Security: Reject malformed ELF where file size exceeds memory size
+            // p_filesz should never exceed p_memsz (BSS is p_memsz - p_filesz)
+            if (phdr.p_filesz > phdr.p_memsz) return LoaderError.InvalidElf;
+
             if (phdr.p_filesz > 0) {
                 kernel_file.setPosition(phdr.p_offset) catch return LoaderError.SeekFailed;
 

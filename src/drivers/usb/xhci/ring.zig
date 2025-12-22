@@ -96,11 +96,7 @@ pub const ProducerRing = struct {
         self.trbs[self.enqueue_idx] = trb_copy;
 
         // Memory barrier to ensure TRB is visible before doorbell
-        asm volatile ("mfence"
-            :
-            :
-            : .{ .memory = true }
-        );
+        hal.mmio.memoryBarrier();
 
         // Calculate physical address of this TRB
         const trb_phys = self.phys_base + @as(u64, self.enqueue_idx) * @sizeOf(Trb);

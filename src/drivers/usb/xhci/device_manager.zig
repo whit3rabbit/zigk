@@ -260,7 +260,8 @@ pub fn enumerateDevice(
     dev.state = .addressed;
 
     // 5. GET_DESCRIPTOR(Device, 8 bytes) - get max packet size
-    var desc_buf: [18]u8 = undefined;
+    // Security: Zero-initialize DMA buffer to prevent kernel memory leaks on short transfers
+    var desc_buf: [18]u8 = [_]u8{0} ** 18;
     const bytes_read = control_transfer.getDeviceDescriptor(ctrl, dev, desc_buf[0..8]) catch |err| {
         console.err("XHCI: Failed to get device descriptor (short): {}", .{err});
         return err;
@@ -305,7 +306,8 @@ pub fn enumerateDevice(
     console.info("XHCI: Device VID={x:0>4} PID={x:0>4}", .{ vid, pid });
 
     // 7. GET_DESCRIPTOR(Configuration)
-    var config_buf: [256]u8 = undefined;
+    // Security: Zero-initialize DMA buffer to prevent kernel memory leaks on short transfers
+    var config_buf: [256]u8 = [_]u8{0} ** 256;
     const config_len = control_transfer.getConfigDescriptor(ctrl, dev, 0, &config_buf) catch |err| {
         console.err("XHCI: Failed to get config descriptor: {}", .{err});
         return err;
@@ -392,7 +394,8 @@ pub fn enumerateDevice(
     dev.state = .configured;
 
     // 11. GET_REPORT_DESCRIPTOR to parse full HID capabilities
-    var report_desc_buf: [512]u8 = undefined;
+    // Security: Zero-initialize DMA buffer to prevent kernel memory leaks on short transfers
+    var report_desc_buf: [512]u8 = [_]u8{0} ** 512;
     const report_desc_len: usize = control_transfer.getReportDescriptor(ctrl, dev, interface_num, &report_desc_buf) catch |err| blk: {
         console.warn("XHCI: Failed to get report descriptor: {} - using boot protocol", .{err});
         break :blk 0;

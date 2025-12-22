@@ -167,18 +167,36 @@ fn validateBootInfo(boot_info: *const BootInfo.BootInfo) void {
     }
 }
 
+// Early serial write - before HAL init
+fn earlySerialWrite(c: u8) void {
+    asm volatile ("outb %%al, %%dx" : : [val] "{al}" (c), [port] "{dx}" (@as(u16, 0x3F8)));
+}
+
+fn earlySerialPrint(msg: []const u8) void {
+    for (msg) |c| {
+        earlySerialWrite(c);
+    }
+}
+
 /// Kernel entry point - called by UEFI bootloader with BootInfo
 export fn _start(boot_info: *BootInfo.BootInfo) callconv(.c) noreturn {
+    // CRITICAL: First thing - prove we got here
+    earlySerialPrint("KERNEL: Entry point reached!\r\n");
+
     // SECURITY: Validate boot info before using any fields
     // This must be first - a malicious bootloader could provide invalid data
+    earlySerialPrint("KERNEL: Validating BootInfo...\r\n");
     validateBootInfo(boot_info);
+    earlySerialPrint("KERNEL: BootInfo valid\r\n");
 
     // Store the boot info globally
     boot_info_ptr = boot_info;
 
     // Initialize HAL (serial port, GDT, PIC, IDT, interrupts)
     // This must be first - serial is needed for any debug output
+    earlySerialPrint("KERNEL: Calling hal.init()...\r\n");
     hal.init(boot_info.hhdm_offset);
+    earlySerialPrint("KERNEL: HAL initialized\r\n");
 
     // Initialize Serial Driver (UART)
     uart = serial_driver.Serial.init(serial_driver.COM1);

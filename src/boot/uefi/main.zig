@@ -198,8 +198,8 @@ pub fn main() void {
     serialPrint("\r\n");
 
     // Step 6: Prepare BootInfo structure
-    // Convert memory map to BootInfo format
-    const memmap_count = memory.convertToBootInfo(&uefi_memmap, &boot_memmap);
+    // NOTE: Memory map conversion is deferred until after ExitBootServices
+    // to avoid TOCTOU - allocations between now and exit would make the map stale
 
     // Find kernel physical/virtual base from first segment
     var kernel_phys_base: u64 = 0;
@@ -225,7 +225,7 @@ pub fn main() void {
 
     boot_info = .{
         .memory_map = &boot_memmap,
-        .memory_map_count = memmap_count,
+        .memory_map_count = 0, // Set after ExitBootServices with final memory map
         .descriptor_size = @sizeOf(BootInfo.MemoryDescriptor),
         .framebuffer = &framebuffer_info,
         .rsdp = rsdp_addr,
@@ -268,9 +268,22 @@ pub fn main() void {
     }
 
     // === NO MORE UEFI CALLS AFTER THIS POINT ===
+    // From here we use direct serial I/O only
+
+    serialPrint("BOOT: ExitBootServices OK\r\n");
+
+    // Convert FINAL memory map to BootInfo format (TOCTOU fix: use exit_memmap, not stale uefi_memmap)
+    // This is safe to call after ExitBootServices - it only copies data, no UEFI calls
+    const memmap_count = memory.convertToBootInfo(&exit_memmap, &boot_memmap);
+    boot_info.memory_map_count = memmap_count;
+    serialPrint("BOOT: Final memory map: ");
+    serialPrintNum(memmap_count);
+    serialPrint(" entries\r\n");
 
     // Step 8: Load new page tables
+    serialPrint("BOOT: Loading page tables...\r\n");
     paging.loadPageTables(pml4_phys);
+    serialPrint("BOOT: CR3 loaded\r\n");
 
     // Step 9: Jump to kernel
     // IMPORTANT: UEFI uses Microsoft x64 ABI (RCX = first arg)
@@ -278,6 +291,12 @@ pub fn main() void {
     // We must manually set RDI and jump to avoid calling convention mismatch.
     const boot_info_ptr = @intFromPtr(&boot_info);
     const entry_addr = load_result.entry_point;
+
+    serialPrint("BOOT: Jumping to kernel entry=0x");
+    serialPrintHex(entry_addr);
+    serialPrint(" boot_info=0x");
+    serialPrintHex(boot_info_ptr);
+    serialPrint("\r\n");
 
     // Put boot_info pointer in RDI (System V first arg) and jump to kernel
     asm volatile (

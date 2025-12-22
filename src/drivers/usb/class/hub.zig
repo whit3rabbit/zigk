@@ -144,7 +144,8 @@ pub const HubDriver = struct {
         console.info("HUB: Configuring Hub...", .{});
 
         // 1. Get Hub Descriptor
-        var desc_buf: [32]u8 align(@alignOf(HubDescriptor)) = undefined; 
+        // Security: Zero-initialize DMA buffer to prevent kernel memory leaks on short transfers
+        var desc_buf: [32]u8 align(@alignOf(HubDescriptor)) = [_]u8{0} ** 32;
         try self.getHubDescriptor(&desc_buf);
         
         const desc: *const HubDescriptor = @ptrCast(&desc_buf);
@@ -207,7 +208,8 @@ pub const HubDriver = struct {
 
     /// Get Hub Status
     fn getHubStatus(self: *Self) !HubStatus {
-        var status: HubStatus = undefined;
+        // Security: Zero-initialize to prevent kernel memory leaks on short transfers
+        var status: HubStatus = std.mem.zeroes(HubStatus);
         const buffer = std.mem.asBytes(&status);
 
         const transferred = try transfer.controlTransfer(
@@ -255,7 +257,8 @@ pub const HubDriver = struct {
     
     /// Get Port Status
     pub fn getPortStatus(self: *Self, port: u8) !PortStatus {
-        var status: PortStatus = undefined;
+        // Security: Zero-initialize to prevent kernel memory leaks on short transfers
+        var status: PortStatus = std.mem.zeroes(PortStatus);
         const buffer = std.mem.asBytes(&status);
         
         const transferred = try transfer.controlTransfer(

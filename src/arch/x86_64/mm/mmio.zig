@@ -21,6 +21,7 @@
 // - Debug builds include alignment and address validation assertions.
 
 const builtin = @import("builtin");
+const std = @import("std");
 
 // Minimum valid MMIO address - addresses below this are likely errors.
 // On x86_64, the first 1MB is real-mode legacy area, and low addresses
@@ -34,15 +35,15 @@ const FALLBACK_MAX_ITERATIONS: usize = 10_000_000;
 /// Validate address in debug builds. Catches null pointers and suspiciously
 /// low addresses that are unlikely to be valid MMIO regions.
 inline fn debugValidateAddr(addr: u64, alignment: u64) void {
-    if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
-        // Check for null or very low addresses (likely bugs)
-        if (addr < MIN_MMIO_ADDR) {
-            @panic("MMIO: invalid address (null or too low)");
-        }
-        // Check alignment
-        if (addr % alignment != 0) {
-            @panic("MMIO: unaligned address");
-        }
+    // Check alignment only in debug/safe builds - use std.debug.assert
+    // which is comptime-removed in release builds
+    std.debug.assert(addr % alignment == 0);
+
+    // SECURITY: Always check for null or suspiciously low addresses.
+    // This catches null pointer dereferences and misconfigurations early
+    // even in release builds.
+    if (addr < MIN_MMIO_ADDR) {
+        @panic("MMIO: invalid address (null or too low)");
     }
 }
 
@@ -174,6 +175,30 @@ pub inline fn clearBits32(addr: u64, bits: u32) void {
 /// Caller must hold appropriate locks when concurrent access is possible.
 pub inline fn modifyBits32(addr: u64, mask: u32, value: u32) void {
     write32(addr, (read32(addr) & ~mask) | (value & mask));
+}
+
+/// Set bits in a 32-bit MMIO register atomically using LOCK prefix.
+/// Use this when concurrent access is possible and holding a lock is too expensive.
+pub inline fn setBits32Atomic(addr: u64, bits: u32) void {
+    debugValidateAddr(addr, 4);
+    asm volatile ("lock orl %[bits], (%[ptr])"
+        :
+        : [bits] "er" (bits),
+          [ptr] "r" (addr),
+        : .{ .memory = true }
+    );
+}
+
+/// Clear bits in a 32-bit MMIO register atomically using LOCK prefix.
+/// Use this when concurrent access is possible and holding a lock is too expensive.
+pub inline fn clearBits32Atomic(addr: u64, bits: u32) void {
+    debugValidateAddr(addr, 4);
+    asm volatile ("lock andl %[bits], (%[ptr])"
+        :
+        : [bits] "er" (~bits),
+          [ptr] "r" (addr),
+        : .{ .memory = true }
+    );
 }
 
 /// Poll a 32-bit register until condition is met or iteration limit reached.

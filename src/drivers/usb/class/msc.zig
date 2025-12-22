@@ -132,7 +132,8 @@ pub const MscDriver = struct {
         }
 
         // 3. Receive CSW
-        var csw: CommandStatusWrapper = undefined;
+        // Security: Zero-initialize to prevent kernel memory leaks on short transfers
+        var csw: CommandStatusWrapper = std.mem.zeroes(CommandStatusWrapper);
         // Explicitly slice to 13 bytes to match wire format (remove padding)
         const csw_bytes = std.mem.asBytes(&csw)[0..13];
         console.debug("MSC: Receiving CSW...", .{});
@@ -164,7 +165,8 @@ pub const MscDriver = struct {
     pub fn inquiry(self: *Self) !void {
         console.info("MSC: Sending SCSI Inquiry...", .{});
 
-        var buffer: [36]u8 = undefined; // Standard Inquiry data length
+        // Security: Zero-initialize DMA buffer to prevent kernel memory leaks
+        var buffer: [36]u8 = [_]u8{0} ** 36;
         const cmd = [_]u8{
             0x12, // INQUIRY
             0x00, // Flags
@@ -210,7 +212,8 @@ pub const MscDriver = struct {
     pub fn readCapacity(self: *Self) !void {
         console.info("MSC: Reading Capacity...", .{});
 
-        var buffer: [8]u8 = undefined;
+        // Security: Zero-initialize DMA buffer to prevent kernel memory leaks
+        var buffer: [8]u8 = [_]u8{0} ** 8;
         const cmd = [_]u8{
             0x25, // READ CAPACITY (10)
             0x00,

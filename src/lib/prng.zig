@@ -28,7 +28,13 @@ var initialized: atomic.Value(bool) = atomic.Value(bool).init(false);
 
 // SECURITY: Flag indicating predictable fallback seed was used
 // Callers should check isUsingFallbackSeed() and log a warning
-var using_fallback_seed: bool = false;
+// SECURITY FIX: Made atomic to prevent data race between init() and readers
+var using_fallback_seed: atomic.Value(bool) = atomic.Value(bool).init(false);
+
+// Build option for fail-secure behavior: panic if no hardware entropy
+// To enable: change to true or configure via build.zig options module
+// When true, the kernel will panic if hardware entropy is unavailable
+pub const require_hardware_entropy: bool = false;
 
 /// Initialize the PRNG with hardware entropy
 /// MUST be called before scheduler starts to ensure stack canary
@@ -52,8 +58,10 @@ pub fn init() void {
     // Security: Track if we're using weak entropy
     // xoroshiro128+ is already not cryptographically secure, but weak seeds
     // make it trivially predictable
+    // Track locally first, then store atomically at the end
+    var weak_entropy_detected = false;
     if (entropy1.quality == .low or entropy2.quality == .low) {
-        using_fallback_seed = true;
+        weak_entropy_detected = true;
     }
 
     // Security fix: Check EACH state word independently, not just both
@@ -83,17 +91,27 @@ pub fn init() void {
     if (state[0] == 0) {
         // Security: Zero state[0] would cause PRNG degeneration
         state[0] = mixed_0;
-        using_fallback_seed = true;
+        weak_entropy_detected = true;
     }
     if (state[1] == 0) {
         // Security: Zero state[1] would cause PRNG degeneration
         state[1] = mixed_1;
-        using_fallback_seed = true;
+        weak_entropy_detected = true;
     }
 
     // Final safety: ensure neither is still zero after mixing
     if (state[0] == 0) state[0] = base_fallback_0;
     if (state[1] == 0) state[1] = base_fallback_1;
+
+    // SECURITY: Fail-secure option - panic if weak entropy and build requires hardware entropy
+    if (weak_entropy_detected and require_hardware_entropy) {
+        @panic("FATAL: No hardware entropy available. System is insecure. " ++
+            "Disable require_hardware_entropy build option to allow weak fallback.");
+    }
+
+    // SECURITY FIX: Store using_fallback_seed atomically with release ordering
+    // This ensures the flag is visible to other cores before initialized is set
+    using_fallback_seed.store(weak_entropy_detected, .release);
 
     // SECURITY: Release ordering ensures all state writes are visible
     // to other cores before they observe initialized == true
@@ -173,8 +191,9 @@ pub fn isInitialized() bool {
 /// SECURITY: Check if predictable fallback seed is in use
 /// If true, stack canaries and ASLR may be compromised!
 /// Callers (e.g., kernel main) should log a warning when this returns true.
+/// SECURITY FIX: Uses acquire ordering to synchronize with release in init()
 pub fn isUsingFallbackSeed() bool {
-    return using_fallback_seed;
+    return using_fallback_seed.load(.acquire);
 }
 
 /// SECURITY: Get the security degradation level
@@ -189,9 +208,11 @@ pub const SecurityLevel = enum {
 };
 
 pub fn getSecurityLevel() SecurityLevel {
-    if (!using_fallback_seed and hal.entropy.hasRdrand()) {
+    // SECURITY FIX: Load atomically with acquire ordering
+    const is_fallback = using_fallback_seed.load(.acquire);
+    if (!is_fallback and hal.entropy.hasRdrand()) {
         return .secure;
-    } else if (!using_fallback_seed) {
+    } else if (!is_fallback) {
         return .degraded;
     } else {
         return .critical;

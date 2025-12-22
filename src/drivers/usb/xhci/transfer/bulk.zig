@@ -33,10 +33,13 @@ pub fn queueBulkTransfer(
     // Get physical address of buffer
     const buf_phys = hal.paging.virtToPhys(@intFromPtr(buffer.ptr));
 
+    // Security: Use checked conversion - TRB length field is 17 bits (max 131071)
+    const trb_len: u17 = std.math.cast(u17, buffer.len) orelse return error.InvalidParam;
+
     // Build Normal TRB
     var normal = trb.NormalTrb.init(
         buf_phys,
-        @truncate(buffer.len),
+        trb_len,
         .{ .ioc = true, .isp = true }, // IOC + ISP (Interrupt on Short Packet)
         ring_ptr.getCycleState(),
     );
