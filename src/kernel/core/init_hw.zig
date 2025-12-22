@@ -171,7 +171,7 @@ fn probeE1000Legacy(ecam: pci.Ecam) ?*e1000e.E1000e {
         const vendor_id = legacy.read16(0, device, 0, 0x00);
         if (vendor_id != 0x8086) continue; // Must be Intel
 
-        const device_id = legacy.read16(0, dev_num, 0, 0x02);
+        const device_id = legacy.read16(0, device, 0, 0x02);
 
         // Check if it's an E1000 variant
         var is_e1000 = false;
@@ -183,11 +183,11 @@ fn probeE1000Legacy(ecam: pci.Ecam) ?*e1000e.E1000e {
         }
         if (!is_e1000) continue;
 
-        console.info("E1000e: Found via legacy probe at 00:{x:0>2}.0 (did={x:0>4})", .{ dev_num, device_id });
+        console.info("E1000e: Found via legacy probe at 00:{x:0>2}.0 (did={x:0>4})", .{ device, device_id });
 
         // Read BAR0 (MMIO, possibly 64-bit)
-        const bar0_raw = legacy.read32(0, dev_num, 0, 0x10);
-        const bar1_raw = legacy.read32(0, dev_num, 0, 0x14);
+        const bar0_raw = legacy.read32(0, device, 0, 0x10);
+        const bar1_raw = legacy.read32(0, device, 0, 0x14);
 
         // E1000 uses MMIO BAR (bit 0 = 0), check if 64-bit (bits 2:1 = 10)
         const is_mmio = (bar0_raw & 0x1) == 0;
@@ -206,7 +206,7 @@ fn probeE1000Legacy(ecam: pci.Ecam) ?*e1000e.E1000e {
         // Build PciDevice struct
         var fixed_dev = pci.PciDevice{
             .bus = 0,
-            .device = dev_num,
+            .device = device,
             .func = 0,
             .vendor_id = vendor_id,
             .device_id = device_id,
@@ -216,11 +216,11 @@ fn probeE1000Legacy(ecam: pci.Ecam) ?*e1000e.E1000e {
             .class_code = 0x02, // Network
             .header_type = 0,
             .bar = undefined,
-            .irq_line = legacy.read8(0, dev_num, 0, 0x3C),
-            .irq_pin = legacy.read8(0, dev_num, 0, 0x3D),
+            .irq_line = legacy.read8(0, device, 0, 0x3C),
+            .irq_pin = legacy.read8(0, device, 0, 0x3D),
             .gsi = 0,
-            .subsystem_vendor = legacy.read16(0, dev_num, 0, 0x2C),
-            .subsystem_id = legacy.read16(0, dev_num, 0, 0x2E),
+            .subsystem_vendor = legacy.read16(0, device, 0, 0x2C),
+            .subsystem_id = legacy.read16(0, device, 0, 0x2E),
         };
 
         // Initialize BAR array
@@ -378,18 +378,19 @@ pub fn initAudio() void {
     // Use u8 to avoid overflow when loop counter reaches 32
     var dev_num: u8 = 0;
     while (dev_num < 32) : (dev_num += 1) {
-        const vendor_id = legacy.read16(0, dev_num, 0, 0x00);
+        const device: u5 = @truncate(dev_num);
+        const vendor_id = legacy.read16(0, device, 0, 0x00);
         if (vendor_id == 0xFFFF) continue;
 
-        const device_id = legacy.read16(0, dev_num, 0, 0x02);
+        const device_id = legacy.read16(0, device, 0, 0x02);
 
         // Intel AC97: VID=0x8086 DID=0x2415
         if (vendor_id == 0x8086 and device_id == 0x2415) {
-            console.info("Audio: Found AC97 via legacy probe at 00:{x:0>2}.0", .{dev_num});
+            console.info("Audio: Found AC97 via legacy probe at 00:{x:0>2}.0", .{device});
 
             // Read BARs and build PciDevice struct
-            const bar0_raw = legacy.read32(0, dev_num, 0, 0x10);
-            const bar1_raw = legacy.read32(0, dev_num, 0, 0x14);
+            const bar0_raw = legacy.read32(0, device, 0, 0x10);
+            const bar1_raw = legacy.read32(0, device, 0, 0x14);
 
             // AC97 uses I/O BARs (bit 0 = 1)
             const bar0_io = (bar0_raw & 0x1) == 1;
@@ -397,7 +398,7 @@ pub fn initAudio() void {
 
             var fixed_dev = pci.PciDevice{
                 .bus = 0,
-                .device = dev_num,
+                .device = device,
                 .func = 0,
                 .vendor_id = vendor_id,
                 .device_id = device_id,
@@ -407,11 +408,11 @@ pub fn initAudio() void {
                 .class_code = 0x04, // Multimedia
                 .header_type = 0,
                 .bar = undefined,
-                .irq_line = legacy.read8(0, dev_num, 0, 0x3C),
-                .irq_pin = legacy.read8(0, dev_num, 0, 0x3D),
+                .irq_line = legacy.read8(0, device, 0, 0x3C),
+                .irq_pin = legacy.read8(0, device, 0, 0x3D),
                 .gsi = 0,
-                .subsystem_vendor = legacy.read16(0, dev_num, 0, 0x2C),
-                .subsystem_id = legacy.read16(0, dev_num, 0, 0x2E),
+                .subsystem_vendor = legacy.read16(0, device, 0, 0x2C),
+                .subsystem_id = legacy.read16(0, device, 0, 0x2E),
             };
 
             // Initialize BAR array

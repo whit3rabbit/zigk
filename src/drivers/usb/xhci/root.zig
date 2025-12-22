@@ -66,26 +66,28 @@ pub fn probe(devices: *const pci.DeviceList, pci_access: pci.PciAccess) void {
 
     // Scan bus 0 for USB controllers (class 0x0C subclass 0x03)
     var found_xhci = false;
-    var dev_num: u5 = 0;
+    // Use u8 to avoid overflow when loop counter reaches 32
+    var dev_num: u8 = 0;
     while (dev_num < 32) : (dev_num += 1) {
-        const vendor_id = legacy.read16(0, dev_num, 0, 0x00);
+        const device: u5 = @truncate(dev_num);
+        const vendor_id = legacy.read16(0, device, 0, 0x00);
         if (vendor_id == 0xFFFF) continue; // No device
 
-        const class_dword = legacy.read32(0, dev_num, 0, 0x08);
+        const class_dword = legacy.read32(0, device, 0, 0x08);
         const class_code: u8 = @truncate(class_dword >> 24);
         const subclass: u8 = @truncate(class_dword >> 16);
         const prog_if: u8 = @truncate(class_dword >> 8);
-        const device_id = legacy.read16(0, dev_num, 0, 0x02);
+        const device_id = legacy.read16(0, device, 0, 0x02);
 
         console.debug("XHCI: Legacy probe 00:{x:0>2}.0: vid={x:0>4} did={x:0>4} class={x:0>2}/{x:0>2}/{x:0>2}", .{
-            dev_num, vendor_id, device_id, class_code, subclass, prog_if,
+            device, vendor_id, device_id, class_code, subclass, prog_if,
         });
 
         // XHCI: Class 0x0C (Serial Bus), Subclass 0x03 (USB), ProgIF 0x30 (XHCI)
         if (class_code == 0x0C and subclass == 0x03 and prog_if == 0x30) {
             // Read BAR0/BAR1 via legacy (since ECAM values are corrupted)
-            const bar0_raw = legacy.read32(0, dev_num, 0, 0x10);
-            const bar1_raw = legacy.read32(0, dev_num, 0, 0x14);
+            const bar0_raw = legacy.read32(0, device, 0, 0x10);
+            const bar1_raw = legacy.read32(0, device, 0, 0x14);
 
             // Decode BAR0: bits 2:1 indicate type (00=32bit, 10=64bit)
             const is_64bit = ((bar0_raw >> 1) & 0x3) == 2;
@@ -95,13 +97,13 @@ pub fn probe(devices: *const pci.DeviceList, pci_access: pci.PciAccess) void {
                 @as(u64, bar0_raw & 0xFFFFFFF0);
 
             console.info("XHCI: Found via legacy probe at 00:{x:0>2}.0 (vid={x:0>4} did={x:0>4}) BAR={x:0>16}", .{
-                dev_num, vendor_id, device_id, bar_base,
+                device, vendor_id, device_id, bar_base,
             });
 
             // Build a corrected PciDevice struct using legacy reads
             var fixed_dev = pci.PciDevice{
                 .bus = 0,
-                .device = dev_num,
+                .device = device,
                 .func = 0,
                 .vendor_id = vendor_id,
                 .device_id = device_id,
@@ -111,11 +113,11 @@ pub fn probe(devices: *const pci.DeviceList, pci_access: pci.PciAccess) void {
                 .class_code = class_code,
                 .header_type = 0,
                 .bar = undefined,
-                .irq_line = legacy.read8(0, dev_num, 0, 0x3C),
-                .irq_pin = legacy.read8(0, dev_num, 0, 0x3D),
+                .irq_line = legacy.read8(0, device, 0, 0x3C),
+                .irq_pin = legacy.read8(0, device, 0, 0x3D),
                 .gsi = 0,
-                .subsystem_vendor = legacy.read16(0, dev_num, 0, 0x2C),
-                .subsystem_id = legacy.read16(0, dev_num, 0, 0x2E),
+                .subsystem_vendor = legacy.read16(0, device, 0, 0x2C),
+                .subsystem_id = legacy.read16(0, device, 0, 0x2E),
             };
 
             // Initialize BAR array
