@@ -18,7 +18,8 @@ const Interface = interface.Interface;
 /// Maximum IP payload size
 const MAX_IP_PAYLOAD: usize = 65515;
 
-/// Assumes Ethernet header is already in place
+/// Build an IPv4 packet header.
+/// Assumes Ethernet header is already in place.
 pub fn buildPacket(
     iface: *const Interface,
     pkt: *PacketBuffer,
@@ -29,7 +30,17 @@ pub fn buildPacket(
     return buildPacketWithTos(iface, pkt, dst_ip, protocol, payload_len, 0);
 }
 
-/// Build an IPv4 packet header with explicit ToS value
+/// Build an IPv4 packet header with explicit ToS (Type of Service) value.
+///
+/// Sets up:
+/// - Version (4) and IHL (5)
+/// - Total Length
+/// - Identification (from global counter)
+/// - Flags (sets DF=0, MF=0)
+/// - TTL (default 64)
+/// - Protocol
+/// - Checksum (calculated over header)
+/// - Source and Destination IP
 pub fn buildPacketWithTos(
     iface: *const Interface,
     pkt: *PacketBuffer,
@@ -63,8 +74,16 @@ pub fn buildPacketWithTos(
     return true;
 }
 
-/// Send an IP packet
+/// Send an IP packet.
+///
+/// Handles:
+/// 1. Loopback routing if destination is 127.x.x.x.
+/// 2. Next-hop resolution (Gateway vs Direct).
+/// 3. ARP resolution for MAC address.
+/// 4. Fragmentation if packet exceeds Interface MTU.
+/// 5. Ethernet frame construction and transmission.
 pub fn sendPacket(iface: *Interface, pkt: *PacketBuffer, dst_ip: u32) bool {
+    // 1. Check for Loopback
     if (utils.isLoopback(dst_ip)) {
         if (loopback.getInterface()) |lo| {
             if (!ethernet.buildFrame(lo, pkt, [_]u8{0} ** 6, ethernet.ETHERTYPE_IPV4)) {
@@ -77,12 +96,15 @@ pub fn sendPacket(iface: *Interface, pkt: *PacketBuffer, dst_ip: u32) bool {
         return false;
     }
 
+    // 2. Determine Next Hop
     const next_hop = iface.getGateway(dst_ip);
     var dst_mac: [6]u8 = undefined;
 
+    // 3. Resolve MAC Address
     if (utils.isBroadcast(dst_ip, iface.netmask) or dst_ip == 0xFFFFFFFF) {
         dst_mac = ethernet.BROADCAST_MAC;
     } else if (utils.isMulticast(dst_ip)) {
+        // Map Multicast IP to Ethernet Multicast MAC (01:00:5E:xx:xx:xx)
         dst_mac[0] = 0x01;
         dst_mac[1] = 0x00;
         dst_mac[2] = 0x5E;
@@ -90,7 +112,9 @@ pub fn sendPacket(iface: *Interface, pkt: *PacketBuffer, dst_ip: u32) bool {
         dst_mac[4] = @truncate((dst_ip >> 8) & 0xFF);
         dst_mac[5] = @truncate(dst_ip & 0xFF);
     } else {
+        // Unicast: Resolve via ARP
         dst_mac = arp.resolveOrRequest(iface, next_hop, pkt) orelse {
+            // ARP request sent, packet queued or dropped
             return true;
         };
     }
@@ -103,14 +127,23 @@ pub fn sendPacket(iface: *Interface, pkt: *PacketBuffer, dst_ip: u32) bool {
     const ip_total_len = ip_hdr.getTotalLength();
     pkt.len = pkt.ip_offset + ip_total_len;
 
+    // 4. Check MTU and Fragment if needed
     if (ip_total_len > iface.mtu) {
         return sendFragmentedPacket(iface, pkt, dst_mac);
     }
 
+    // 5. Transmit
     return ethernet.sendFrame(iface, pkt);
 }
 
-/// Send a packet fragmented into multiple IP datagrams
+/// Send a packet fragmented into multiple IP datagrams.
+///
+/// Splits the payload into chunks that fit within the interface MTU.
+/// Each fragment copies the original IP header but updates:
+/// - Total Length: Size of this fragment (header + chunk).
+/// - Flags: Sets MF (More Fragments) bit for all but the last fragment.
+/// - Fragment Offset: Offset of this chunk in 8-byte units.
+/// - Checksum: Recalculated for the new header.
 fn sendFragmentedPacket(iface: *Interface, pkt: *PacketBuffer, dst_mac: [6]u8) bool {
     const orig_ip = pkt.ipHeaderUnsafe();
     const ip_header_len = orig_ip.getHeaderLength();
@@ -122,9 +155,11 @@ fn sendFragmentedPacket(iface: *Interface, pkt: *PacketBuffer, dst_mac: [6]u8) b
 
     if (payload.len > MAX_IP_PAYLOAD) return false;
     
+    // MTU payload must be multiple of 8 bytes for fragmentation
     const mtu_payload = (@as(usize, iface.mtu) - ip_header_len) & ~@as(usize, 7);
 
     const alloc = heap.allocator();
+    // Allocate temporary buffer for fragments
     const frag_buf = alloc.alloc(u8, packet.MAX_PACKET_SIZE) catch return false;
     // NOTE: We assume iface.transmit is synchronous and copies the data (like e1000e driver).
     // If a driver holds this pointer asynchronously, this free will cause use-after-free!
@@ -145,22 +180,28 @@ fn sendFragmentedPacket(iface: *Interface, pkt: *PacketBuffer, dst_mac: [6]u8) b
         frag_pkt.ip_offset = frag_ip_offset;
         frag_pkt.transport_offset = frag_ip_offset + ip_header_len;
         
+        // Copy original IP header
         const frag_ip: *Ipv4Header = @ptrCast(@alignCast(&frag_buf[frag_ip_offset]));
         frag_ip.* = orig_ip.*;
         
+        // Update Total Length for this fragment
         const total_len = std.math.add(usize, ip_header_len, chunk_len) catch return false;
         if (total_len > std.math.maxInt(u16)) return false;
         frag_ip.setTotalLength(@intCast(total_len));
         
+        // Update Fragment Offset and Flags
+        // Offset is in 8-byte blocks
         const frag_off_val = (offset / 8);
         var flags = frag_off_val & 0x1FFF;
-        if (!last_frag) flags |= 0x2000;
+        if (!last_frag) flags |= 0x2000; // Set More Fragments (MF) bit
         frag_ip.flags_fragment = @byteSwap(@as(u16, @truncate(flags)));
         
+        // Recalculate Checksum
         frag_ip.checksum = 0;
         const header_bytes = frag_buf[frag_ip_offset..][0..ip_header_len];
         frag_ip.checksum = checksum.ipChecksum(header_bytes);
         
+        // Copy Payload Chunk
         const payload_dest = frag_ip_offset + ip_header_len;
         @memcpy(frag_buf[payload_dest..][0..chunk_len], payload[offset..][0..chunk_len]);
         

@@ -20,32 +20,47 @@ const PacketBuffer = packet.PacketBuffer;
 const Ipv4Header = packet.Ipv4Header;
 const Interface = interface.Interface;
 
-/// Process an incoming IPv4 packet
+/// Process an incoming IPv4 packet.
+///
+/// Performs the following steps:
+/// 1. Validation: Version (4), IHL (>=5), Lengths (header and total), Checksum.
+/// 2. Options Validation: Checks for supported/malformed IP options.
+/// 3. Destination Check: Unicast (to us), Broadcast, or Multicast.
+/// 4. Reassembly: Handles fragmented packets using `reassembly` module.
+/// 5. Dispatch: Routes payload to appropriate transport protocol (ICMP, UDP, TCP).
 pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
     const ip = packet.getIpv4HeaderMut(pkt.data, pkt.ip_offset) orelse return false;
 
+    // 1. Verify Version (Must be 4)
     if (ip.getVersion() != 4) return false;
 
+    // 2. Verify IHL (Internet Header Length) >= 5 words (20 bytes)
     const ihl = ip.version_ihl & 0x0F;
     if (ihl < 5) return false;
 
     const header_len = @as(usize, ihl) * 4;
 
+    // Ensure we have enough data for the header
     if (pkt.ip_offset + header_len > pkt.len) return false;
 
+    // 3. Validate Options (if present)
     if (!validation.validateOptions(pkt, header_len)) return false;
 
+    // 4. Verify Header Checksum
     const header_bytes = pkt.data[pkt.ip_offset..][0..header_len];
     if (!checksum.verifyIpChecksum(header_bytes)) return false;
 
+    // 5. Verify Total Length vs Received Length
     const total_len = ip.getTotalLength();
     if (total_len < header_len or pkt.ip_offset + total_len > pkt.len) return false;
 
     const payload_len = total_len - header_len;
     if (payload_len == 0) return false;
 
+    // Truncate packet buffer to actual IP length (ignore Ethernet padding)
     pkt.len = pkt.ip_offset + total_len;
 
+    // 6. Address Checks (Unicast/Broadcast/Multicast)
     const dst_ip = ip.getDstIp();
     pkt.dst_ip = dst_ip;
     pkt.src_ip = ip.getSrcIp();
@@ -63,9 +78,11 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
         pkt.is_broadcast = false;
         pkt.is_multicast = true;
     } else {
+        // Not for us
         return false;
     }
 
+    // 7. Handle Fragmentation
     const flags_frag = @byteSwap(ip.flags_fragment);
     const mf_bit = (flags_frag >> 13) & 0x1;
     const frag_offset = flags_frag & 0x1FFF;
@@ -75,6 +92,7 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
     var reassembly_result: ?reassembly.ReassemblyResult = null;
 
     if (mf_bit != 0 or frag_offset != 0) {
+        // Fragmented Packet
         const current_payload = pkt.data[pkt.ip_offset + header_len..][0..payload_len];
 
         if (reassembly.processFragment(
@@ -86,20 +104,25 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
             mf_bit != 0,
             current_payload
         )) |res| {
+            // Reassembly Complete
             reassembly_result = res;
             payload_slice = res.payload();
             is_reassembled = true;
         } else {
+            // Fragment buffered, waiting for more
             return true;
         }
     } else {
+        // Unfragmented Packet
         payload_slice = pkt.data[pkt.ip_offset + header_len..][0..payload_len];
     }
 
+    // 8. Process Payload (Reassembled or Direct)
     if (is_reassembled) {
         var result = reassembly_result.?;
         defer result.deinit();
 
+        // Create virtual packet from reassembled buffer
         var virt_pkt = PacketBuffer.init(result.owned_buffer, result.payload_len);
 
         virt_pkt.src_ip = pkt.src_ip;
@@ -109,7 +132,7 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
 
         virt_pkt.eth_offset = 0;
         virt_pkt.ip_offset = 0;
-        virt_pkt.transport_offset = 0;
+        virt_pkt.transport_offset = 0; // Starts at 0 in reassembled buffer
 
         const min_size: usize = switch (ip.protocol) {
             types.PROTO_ICMP => types.ICMP_HEADER_MIN,
@@ -128,6 +151,7 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
         };
     }
 
+    // Standard Processing (No Reassembly)
     pkt.transport_offset = pkt.ip_offset + header_len;
     pkt.ip_protocol = ip.protocol;
     
@@ -139,7 +163,9 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
     }
 }
 
-/// Decrement TTL and update checksum
+/// Decrement TTL (Time To Live) and update header checksum.
+/// Used when routing packets.
+/// Returns false if TTL drops to 0.
 pub fn decrementTtl(pkt: *PacketBuffer) bool {
     const ip = packet.getIpv4HeaderMut(pkt.data, pkt.ip_offset) orelse return false;
 
@@ -148,6 +174,8 @@ pub fn decrementTtl(pkt: *PacketBuffer) bool {
     const old_ttl = ip.ttl;
     ip.ttl -= 1;
 
+    // RFC 1624: Incremental Internet Checksum Update
+    // HC' = ~(~HC + ~m + m')
     const old_value = (@as(u16, old_ttl) << 8) | ip.protocol;
     const new_value = (@as(u16, ip.ttl) << 8) | ip.protocol;
     ip.checksum = checksum.updateChecksum(ip.checksum, old_value, new_value);

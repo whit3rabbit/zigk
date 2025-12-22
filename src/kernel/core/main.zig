@@ -1,14 +1,16 @@
-// Zscapek Kernel Entry Point
-//
-// This is the main entry point for the Zscapek microkernel.
-// It is called by the UEFI bootloader in 64-bit long mode with paging enabled.
-//
-// Entry Conditions:
-//   - 64-bit long mode
-//   - Paging enabled with identity + HHDM + higher-half mapping
-//   - GDT with flat code/data segments
-//   - Stack already set up
-//   - Interrupts disabled (we set up our own IDT)
+//! Kernel Entry Point
+//!
+//! This module contains the main entry point (`_start`) for the Zscapek microkernel.
+//! It is responsible for initializing the hardware, memory management, scheduler,
+//! and other core subsystems before launching the initial process.
+//!
+//! # Entry Conditions
+//! The kernel expects to be booted by a UEFI bootloader (e.g., Limine) in 64-bit long mode
+//! with the following state:
+//! - Paging enabled with identity + HHDM + higher-half mapping.
+//! - GDT with flat code/data segments.
+//! - Stack already set up.
+//! - Interrupts disabled.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -42,7 +44,7 @@ const layout = @import("layout");
 // Boot Interface
 const BootInfo = @import("boot_info");
 
-// Global boot info pointer (set during kernel entry)
+/// Global boot info pointer (set during kernel entry)
 var boot_info_ptr: ?*BootInfo.BootInfo = null;
 
 // Syscall dispatch table - must be imported to compile dispatch_syscall symbol
@@ -71,6 +73,8 @@ pub const std_options: std.Options = .{
     .log_level = .debug,
 };
 
+/// Custom log function for `std.log` integration.
+/// Redirects log messages to the kernel console with appropriate prefixes.
 fn kernelLogFn(
     comptime level: std.log.Level,
     comptime scope: @TypeOf(.EnumLiteral),
@@ -112,19 +116,19 @@ var fb_driver_buffered: video_driver.BufferedFramebufferDriver = undefined;
 var fb_is_buffered: bool = false;
 var graph_console: video_driver.console.Console = undefined;
 
-// Wrapper for UART backend
+/// Wrapper for writing to the UART backend.
 fn uartWriteWrapper(ctx: ?*anyopaque, str: []const u8) void {
     const s: *serial_driver.Serial = @ptrCast(@alignCast(ctx));
     s.write(str);
 }
 
-// Wrapper for Video backend
+/// Wrapper for writing to the Video Console backend.
 fn videoWriteWrapper(ctx: ?*anyopaque, str: []const u8) void {
     const c: *video_driver.console.Console = @ptrCast(@alignCast(ctx));
     c.write(str);
 }
 
-// Wrapper for Scrolling
+/// Wrapper for scrolling the Video Console backend.
 fn videoScrollWrapper(ctx: ?*anyopaque, lines: usize, up: bool) void {
     const c: *video_driver.console.Console = @ptrCast(@alignCast(ctx));
     if (up) {
@@ -140,7 +144,13 @@ const MAX_MEMMAP_ENTRIES: usize = 256;
 const KERNEL_SPACE_START: u64 = 0xFFFF800000000000;
 
 /// Validate BootInfo fields before use (defense-in-depth)
-/// This runs before serial is available, so we halt on failure
+/// This runs before serial is available, so we halt on failure.
+///
+/// Checks:
+/// - HHDM offset is in kernel space.
+/// - Memory map count is within bounds.
+/// - Memory map pointer is valid.
+/// - Kernel virtual base is in higher half.
 fn validateBootInfo(boot_info: *const BootInfo.BootInfo) void {
     // SECURITY: HHDM offset must be in kernel space
     // A malicious/buggy bootloader could set this to userspace, allowing
@@ -167,18 +177,22 @@ fn validateBootInfo(boot_info: *const BootInfo.BootInfo) void {
     }
 }
 
-// Early serial write - before HAL init
+/// Early serial write byte - before HAL init.
+/// Directly accesses I/O port 0x3F8 (COM1).
 fn earlySerialWrite(c: u8) void {
     asm volatile ("outb %%al, %%dx" : : [val] "{al}" (c), [port] "{dx}" (@as(u16, 0x3F8)));
 }
 
+/// Early serial print string - before HAL init.
 fn earlySerialPrint(msg: []const u8) void {
     for (msg) |c| {
         earlySerialWrite(c);
     }
 }
 
-/// Kernel entry point - called by UEFI bootloader with BootInfo
+/// Kernel entry point - called by UEFI bootloader with BootInfo.
+/// This is the C-calling-convention entry point that receives control
+/// from the bootloader stub.
 export fn _start(boot_info: *BootInfo.BootInfo) callconv(.c) noreturn {
     // CRITICAL: First thing - prove we got here
     earlySerialPrint("KERNEL: Entry point reached!\r\n");
@@ -388,7 +402,8 @@ export fn _start(boot_info: *BootInfo.BootInfo) callconv(.c) noreturn {
     sched.start();
 }
 
-// Initialize APIC subsystem (replaces legacy PIC)
+/// Initialize APIC subsystem (replaces legacy PIC).
+/// Parses MADT ACPI table to configure Local APIC and I/O APICs.
 fn initApic(boot_info: *const BootInfo.BootInfo) void {
     console.print("\n");
     console.info("Initializing APIC subsystem...", .{});
@@ -455,7 +470,9 @@ fn initApic(boot_info: *const BootInfo.BootInfo) void {
     console.info("APIC subsystem initialized", .{});
 }
 
-/// Page fault handler for demand paging
+/// Page fault handler for demand paging.
+/// Returns true if the fault was handled (e.g., loaded a page), false otherwise.
+/// Updates process RSS statistics on success.
 fn pageFaultHandler(addr: u64, err_code: u64) bool {
     const proc = syscall_base.getCurrentProcessOrNull() orelse {
         console.warn("PageFault: No current process for addr {x}", .{addr});
@@ -471,7 +488,8 @@ fn pageFaultHandler(addr: u64, err_code: u64) bool {
     return handled;
 }
 
-/// Convert physical address to virtual using HHDM
+/// Convert physical address to virtual using HHDM.
+/// This is a convenience wrapper around `hal.paging.physToVirt`.
 pub fn physToVirt(phys: u64) [*]u8 {
     return hal.paging.physToVirt(phys);
 }
