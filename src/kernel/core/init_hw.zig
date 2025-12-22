@@ -107,30 +107,46 @@ pub fn initIommu() void {
     };
 
     var i: u8 = 0;
+    var units_enabled: u8 = 0;
     while (i < hal.iommu.vtd.getUnitCount()) : (i += 1) {
         if (hal.iommu.vtd.getUnit(i)) |unit| {
             // Set root table address
             unit.setRootTable(root_table_phys);
 
             // Invalidate context cache (fresh start)
-            unit.invalidateContextGlobal();
+            unit.invalidateContextGlobal() catch |err| {
+                console.err("IOMMU: Unit {d} context invalidation failed: {}", .{ i, err });
+                continue;
+            };
 
             // Invalidate IOTLB
-            unit.invalidateIotlbGlobal();
+            unit.invalidateIotlbGlobal() catch |err| {
+                console.err("IOMMU: Unit {d} IOTLB invalidation failed: {}", .{ i, err });
+                continue;
+            };
 
             // Enable translation
-            unit.enableTranslation();
+            unit.enableTranslation() catch |err| {
+                console.err("IOMMU: Unit {d} translation enable failed: {}", .{ i, err });
+                continue;
+            };
 
             // Enable fault interrupts for debugging
             unit.enableFaultInterrupt();
+            units_enabled += 1;
         }
+    }
+
+    if (units_enabled == 0) {
+        console.err("IOMMU: No units successfully enabled", .{});
+        return;
     }
 
     // 7. Initialize fault handler
     hal.iommu.fault.init();
 
     iommu_enabled = true;
-    console.info("IOMMU: Enabled with {d} unit(s), DMA isolation active", .{units_initialized});
+    console.info("IOMMU: Enabled with {d} unit(s), DMA isolation active", .{units_enabled});
 }
 
 fn txWrapper(data: []const u8) bool {

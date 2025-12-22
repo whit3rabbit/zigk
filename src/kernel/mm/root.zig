@@ -4,6 +4,7 @@ pub const user_vmm = @import("user_vmm.zig");
 pub const heap = @import("heap.zig");
 pub const slab = @import("slab.zig");
 pub const dma_allocator = @import("dma_allocator.zig");
+pub const dma = @import("dma.zig");
 pub const aslr = @import("aslr.zig");
 pub const tlb = @import("tlb.zig");
 pub const kernel_stack = @import("kernel_stack.zig");

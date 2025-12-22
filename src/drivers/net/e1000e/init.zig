@@ -10,6 +10,8 @@ const thread = @import("thread");
 const sched = @import("sched");
 const net = @import("net");
 const sync = @import("sync");
+const dma = @import("dma");
+const iommu = @import("iommu");
 
 const MmioDevice = hal.mmio_device.MmioDevice;
 const types = @import("types.zig");
@@ -87,6 +89,11 @@ pub fn init(pci_dev: *const pci.PciDevice, pci_access: pci.PciAccess) !*E1000e {
         .rx_buffers_phys = [_]u64{0} ** types.RX_DESC_COUNT,
         .tx_buffers = undefined,
         .tx_buffers_phys = [_]u64{0} ** types.TX_DESC_COUNT,
+        .rx_ring_dma = undefined,
+        .tx_ring_dma = undefined,
+        .rx_buf_dma = undefined,
+        .tx_buf_dma = undefined,
+        .using_iommu_dma = false,
         .rx_cur = 0,
         .tx_cur = 0,
         .irq_line = pci_dev.irq_line,
@@ -192,63 +199,78 @@ fn readMacAddress(driver: *E1000e) void {
 }
 
 fn allocateRings(driver: *E1000e) !void {
+    // Get device BDF for IOMMU domain
+    const bdf = iommu.DeviceBdf{
+        .bus = driver.pci_dev.bus,
+        .device = driver.pci_dev.device,
+        .func = driver.pci_dev.func,
+    };
+
     const rx_ring_size = types.RX_DESC_COUNT * @sizeOf(RxDesc);
-    const rx_ring_pages = (rx_ring_size + pmm.PAGE_SIZE - 1) / pmm.PAGE_SIZE;
-
-    const rx_ring_phys = pmm.allocZeroedPages(rx_ring_pages) orelse {
-        return error.OutOfMemory;
-    };
-    errdefer pmm.freePages(rx_ring_phys, rx_ring_pages);
-
-    driver.rx_ring_phys = rx_ring_phys;
-    driver.rx_ring = @ptrCast(@volatileCast(@as([*]RxDesc, @ptrCast(@alignCast(hal.paging.physToVirt(rx_ring_phys))))));
-
     const tx_ring_size = types.TX_DESC_COUNT * @sizeOf(TxDesc);
-    const tx_ring_pages = (tx_ring_size + pmm.PAGE_SIZE - 1) / pmm.PAGE_SIZE;
 
-    const tx_ring_phys = pmm.allocZeroedPages(tx_ring_pages) orelse {
+    // Allocate RX ring with IOMMU-aware DMA
+    driver.rx_ring_dma = dma.allocBuffer(bdf, rx_ring_size, true) catch |err| {
+        console.err("E1000e: Failed to allocate RX ring: {}", .{err});
         return error.OutOfMemory;
     };
-    errdefer pmm.freePages(tx_ring_phys, tx_ring_pages);
+    errdefer dma.freeBuffer(&driver.rx_ring_dma);
 
-    driver.tx_ring_phys = tx_ring_phys;
-    driver.tx_ring = @ptrCast(@volatileCast(@as([*]TxDesc, @ptrCast(@alignCast(hal.paging.physToVirt(tx_ring_phys))))));
+    driver.rx_ring_phys = driver.rx_ring_dma.device_addr;
+    driver.rx_ring = @ptrCast(@volatileCast(driver.rx_ring_dma.getTypedPtr([types.RX_DESC_COUNT]RxDesc)));
 
+    // Allocate TX ring with IOMMU-aware DMA
+    driver.tx_ring_dma = dma.allocBuffer(bdf, tx_ring_size, true) catch |err| {
+        console.err("E1000e: Failed to allocate TX ring: {}", .{err});
+        return error.OutOfMemory;
+    };
+    errdefer dma.freeBuffer(&driver.tx_ring_dma);
+
+    driver.tx_ring_phys = driver.tx_ring_dma.device_addr;
+    driver.tx_ring = @ptrCast(@volatileCast(driver.tx_ring_dma.getTypedPtr([types.TX_DESC_COUNT]TxDesc)));
+
+    // Allocate RX buffers
     var rx_buffers_allocated: usize = 0;
     errdefer {
         for (0..rx_buffers_allocated) |i| {
-            pmm.freePage(driver.rx_buffers_phys[i]);
+            dma.freeBuffer(&driver.rx_buf_dma[i]);
         }
     }
 
     for (0..types.RX_DESC_COUNT) |i| {
-        const buf_phys = pmm.allocZeroedPage() orelse {
+        driver.rx_buf_dma[i] = dma.allocBuffer(bdf, pmm.PAGE_SIZE, true) catch |err| {
+            console.err("E1000e: Failed to allocate RX buffer {d}: {}", .{ i, err });
             return error.OutOfMemory;
         };
-        driver.rx_buffers_phys[i] = buf_phys;
-        driver.rx_buffers[i] = hal.paging.physToVirt(buf_phys);
+        driver.rx_buffers_phys[i] = driver.rx_buf_dma[i].device_addr;
+        driver.rx_buffers[i] = driver.rx_buf_dma[i].getVirt();
         rx_buffers_allocated += 1;
     }
 
+    // Allocate TX buffers
     var tx_buffers_allocated: usize = 0;
     errdefer {
         for (0..tx_buffers_allocated) |i| {
-            pmm.freePage(driver.tx_buffers_phys[i]);
+            dma.freeBuffer(&driver.tx_buf_dma[i]);
         }
     }
 
     for (0..types.TX_DESC_COUNT) |i| {
-        const buf_phys = pmm.allocZeroedPage() orelse {
+        driver.tx_buf_dma[i] = dma.allocBuffer(bdf, pmm.PAGE_SIZE, true) catch |err| {
+            console.err("E1000e: Failed to allocate TX buffer {d}: {}", .{ i, err });
             return error.OutOfMemory;
         };
-        driver.tx_buffers_phys[i] = buf_phys;
-        driver.tx_buffers[i] = hal.paging.physToVirt(buf_phys);
+        driver.tx_buffers_phys[i] = driver.tx_buf_dma[i].device_addr;
+        driver.tx_buffers[i] = driver.tx_buf_dma[i].getVirt();
         tx_buffers_allocated += 1;
     }
 
-    console.info("E1000e: Allocated {d} RX and {d} TX descriptors", .{
+    driver.using_iommu_dma = dma.isIommuAvailable();
+
+    console.info("E1000e: Allocated {d} RX and {d} TX descriptors (IOMMU: {})", .{
         types.RX_DESC_COUNT,
         types.TX_DESC_COUNT,
+        driver.using_iommu_dma,
     });
 }
 

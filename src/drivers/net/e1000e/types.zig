@@ -6,6 +6,7 @@ const pci = @import("pci");
 const sync = @import("sync");
 const thread = @import("thread");
 const net = @import("net");
+const dma = @import("dma");
 
 const MmioDevice = hal.mmio_device.MmioDevice;
 const regs = @import("regs.zig");
@@ -42,6 +43,15 @@ pub const E1000e = struct {
     /// TX packet buffers (one per descriptor)
     tx_buffers: [TX_DESC_COUNT][*]u8,
     tx_buffers_phys: [TX_DESC_COUNT]u64,
+
+    /// DMA buffer tracking for IOMMU integration
+    /// These store both physical and device addresses for proper cleanup
+    rx_ring_dma: dma.DmaBuffer,
+    tx_ring_dma: dma.DmaBuffer,
+    rx_buf_dma: [RX_DESC_COUNT]dma.DmaBuffer,
+    tx_buf_dma: [TX_DESC_COUNT]dma.DmaBuffer,
+    /// Whether IOMMU-aware DMA is being used
+    using_iommu_dma: bool,
 
     /// Current RX descriptor index
     rx_cur: u16,

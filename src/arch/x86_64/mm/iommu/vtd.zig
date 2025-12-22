@@ -16,6 +16,29 @@ const mmio = @import("../mmio.zig");
 const paging = hal.paging;
 const Offset = regs.Offset;
 
+/// VT-d operation errors
+pub const VtdError = error{
+    /// Hardware did not respond within timeout
+    Timeout,
+    /// Invalid configuration (NULL address, unaligned, out of range)
+    InvalidConfiguration,
+    /// Hardware does not support required features
+    UnsupportedHardware,
+};
+
+/// Timeout values for VT-d operations (iteration counts)
+/// Hardware typically responds within 1ms; these provide 10ms safety margin
+pub const Timeouts = struct {
+    /// Translation enable/disable (~10ms)
+    pub const TRANSLATION: u32 = 1_000_000;
+    /// Write buffer flush (~1ms)
+    pub const WRITE_BUFFER: u32 = 100_000;
+    /// Context cache invalidation (~10ms)
+    pub const CONTEXT_INV: u32 = 1_000_000;
+    /// IOTLB invalidation (~10ms)
+    pub const IOTLB_INV: u32 = 1_000_000;
+};
+
 /// VT-d Hardware Unit
 /// Represents a single IOMMU hardware unit discovered via ACPI DMAR
 pub const VtdUnit = struct {
@@ -59,6 +82,26 @@ pub const VtdUnit = struct {
 
     /// Initialize a VT-d unit from DRHD information
     pub fn init(drhd: *const acpi.DrhdInfo) !Self {
+        // Validate MMIO address before mapping
+        if (drhd.reg_base == 0) {
+            console.err("VT-d: NULL register base address in DRHD", .{});
+            return VtdError.InvalidConfiguration;
+        }
+
+        // IOMMU registers must be page-aligned (4KB)
+        if ((drhd.reg_base & 0xFFF) != 0) {
+            console.err("VT-d: Unaligned register base 0x{x}", .{drhd.reg_base});
+            return VtdError.InvalidConfiguration;
+        }
+
+        // Sanity check: reject addresses that are unreasonably high
+        // IOMMU MMIO is typically in the 0xFEDx_xxxx range or similar
+        const MAX_REASONABLE_PHYS: u64 = 0x1000_0000_0000; // 16TB limit
+        if (drhd.reg_base >= MAX_REASONABLE_PHYS) {
+            console.err("VT-d: Register base 0x{x} exceeds reasonable range", .{drhd.reg_base});
+            return VtdError.InvalidConfiguration;
+        }
+
         // Map the IOMMU registers via HHDM
         const reg_virt = paging.physToVirt(drhd.reg_base);
         const reg_ptr: [*]volatile u8 = @ptrFromInt(reg_virt);
@@ -91,7 +134,7 @@ pub const VtdUnit = struct {
         // Validate minimum requirements
         if (!unit.cap.supports48BitGaw() and !unit.cap.supports39BitGaw()) {
             console.err("VT-d: Unit at 0x{x} does not support 39/48-bit guest address width", .{drhd.reg_base});
-            return error.UnsupportedHardware;
+            return VtdError.UnsupportedHardware;
         }
 
         return unit;
@@ -163,11 +206,12 @@ pub const VtdUnit = struct {
     }
 
     /// Enable DMA remapping (translation)
-    pub fn enableTranslation(self: *Self) void {
+    /// Returns error.Timeout if hardware does not respond
+    pub fn enableTranslation(self: *Self) VtdError!void {
         if (self.translation_enabled) return;
 
         // Flush write buffer if required
-        self.flushWriteBuffer();
+        try self.flushWriteBuffer();
 
         // Issue Translation Enable command
         var gcmd = regs.GlobalCmdReg{};
@@ -182,23 +226,31 @@ pub const VtdUnit = struct {
     }
 
     /// Disable DMA remapping
-    pub fn disableTranslation(self: *Self) void {
+    /// Returns error.Timeout if hardware does not respond
+    pub fn disableTranslation(self: *Self) VtdError!void {
         if (!self.translation_enabled) return;
 
         // Clear Translation Enable bit
         self.writeReg32(Offset.GCMD, 0);
 
-        // Wait for TES to clear
-        while (true) {
+        // Wait for TES to clear with timeout
+        var i: u32 = 0;
+        while (i < Timeouts.TRANSLATION) : (i += 1) {
             const gsts = self.readGlobalStatus();
-            if (!gsts.tes) break;
+            if (!gsts.tes) {
+                self.translation_enabled = false;
+                return;
+            }
+            asm volatile ("pause");
         }
 
-        self.translation_enabled = false;
+        console.err("VT-d: Timeout waiting for translation disable", .{});
+        return VtdError.Timeout;
     }
 
     /// Flush write buffer if required by hardware
-    pub fn flushWriteBuffer(self: *Self) void {
+    /// Returns error.Timeout if hardware does not respond
+    pub fn flushWriteBuffer(self: *Self) VtdError!void {
         if (!self.cap.rwbf) return; // Not required
 
         // Issue Write Buffer Flush command
@@ -206,44 +258,62 @@ pub const VtdUnit = struct {
         gcmd.wbf = true;
         self.writeReg32(Offset.GCMD, @bitCast(gcmd));
 
-        // Wait for WBF to clear (indicates completion)
-        while (true) {
+        // Wait for WBFS to clear with timeout
+        var i: u32 = 0;
+        while (i < Timeouts.WRITE_BUFFER) : (i += 1) {
             const gsts = self.readGlobalStatus();
-            if (!gsts.wbfs) break;
+            if (!gsts.wbfs) return;
+            asm volatile ("pause");
         }
+
+        console.err("VT-d: Timeout waiting for write buffer flush", .{});
+        return VtdError.Timeout;
     }
 
     /// Invalidate context cache globally
-    pub fn invalidateContextGlobal(self: *Self) void {
+    /// Returns error.Timeout if hardware does not respond
+    pub fn invalidateContextGlobal(self: *Self) VtdError!void {
         var ccmd = regs.ContextCmdReg{};
         ccmd.cirg = @intFromEnum(regs.ContextCmdReg.Granularity.global);
         ccmd.icc = true;
         self.writeReg64(Offset.CCMD, @bitCast(ccmd));
 
-        // Wait for ICC to clear
-        while (true) {
+        // Wait for ICC to clear with timeout
+        var i: u32 = 0;
+        while (i < Timeouts.CONTEXT_INV) : (i += 1) {
             const val: regs.ContextCmdReg = @bitCast(self.readReg64(Offset.CCMD));
-            if (!val.icc) break;
+            if (!val.icc) return;
+            asm volatile ("pause");
         }
+
+        console.err("VT-d: Timeout waiting for global context invalidation", .{});
+        return VtdError.Timeout;
     }
 
     /// Invalidate context cache for a specific domain
-    pub fn invalidateContextDomain(self: *Self, domain_id: u16) void {
+    /// Returns error.Timeout if hardware does not respond
+    pub fn invalidateContextDomain(self: *Self, domain_id: u16) VtdError!void {
         var ccmd = regs.ContextCmdReg{};
         ccmd.did = domain_id;
         ccmd.cirg = @intFromEnum(regs.ContextCmdReg.Granularity.domain);
         ccmd.icc = true;
         self.writeReg64(Offset.CCMD, @bitCast(ccmd));
 
-        // Wait for ICC to clear
-        while (true) {
+        // Wait for ICC to clear with timeout
+        var i: u32 = 0;
+        while (i < Timeouts.CONTEXT_INV) : (i += 1) {
             const val: regs.ContextCmdReg = @bitCast(self.readReg64(Offset.CCMD));
-            if (!val.icc) break;
+            if (!val.icc) return;
+            asm volatile ("pause");
         }
+
+        console.err("VT-d: Timeout waiting for domain {d} context invalidation", .{domain_id});
+        return VtdError.Timeout;
     }
 
     /// Invalidate IOTLB globally
-    pub fn invalidateIotlbGlobal(self: *Self) void {
+    /// Returns error.Timeout if hardware does not respond
+    pub fn invalidateIotlbGlobal(self: *Self) VtdError!void {
         const iotlb_offset = if (self.iotlb_offset != 0) self.iotlb_offset else Offset.IOTLB_BASE;
 
         var iotlb = regs.IotlbInvReg{};
@@ -256,15 +326,21 @@ pub const VtdUnit = struct {
 
         self.writeReg64(iotlb_offset, @bitCast(iotlb));
 
-        // Wait for IVT to clear
-        while (true) {
+        // Wait for IVT to clear with timeout
+        var i: u32 = 0;
+        while (i < Timeouts.IOTLB_INV) : (i += 1) {
             const val: regs.IotlbInvReg = @bitCast(self.readReg64(iotlb_offset));
-            if (!val.ivt) break;
+            if (!val.ivt) return;
+            asm volatile ("pause");
         }
+
+        console.err("VT-d: Timeout waiting for global IOTLB invalidation", .{});
+        return VtdError.Timeout;
     }
 
     /// Invalidate IOTLB for a specific domain
-    pub fn invalidateIotlbDomain(self: *Self, domain_id: u16) void {
+    /// Returns error.Timeout if hardware does not respond
+    pub fn invalidateIotlbDomain(self: *Self, domain_id: u16) VtdError!void {
         const iotlb_offset = if (self.iotlb_offset != 0) self.iotlb_offset else Offset.IOTLB_BASE;
 
         var iotlb = regs.IotlbInvReg{};
@@ -277,11 +353,16 @@ pub const VtdUnit = struct {
 
         self.writeReg64(iotlb_offset, @bitCast(iotlb));
 
-        // Wait for IVT to clear
-        while (true) {
+        // Wait for IVT to clear with timeout
+        var i: u32 = 0;
+        while (i < Timeouts.IOTLB_INV) : (i += 1) {
             const val: regs.IotlbInvReg = @bitCast(self.readReg64(iotlb_offset));
-            if (!val.ivt) break;
+            if (!val.ivt) return;
+            asm volatile ("pause");
         }
+
+        console.err("VT-d: Timeout waiting for domain {d} IOTLB invalidation", .{domain_id});
+        return VtdError.Timeout;
     }
 
     /// Process pending fault records
@@ -389,31 +470,44 @@ pub const VtdUnit = struct {
 
 /// Global array of initialized VT-d units
 var units: [8]?VtdUnit = [_]?VtdUnit{null} ** 8;
-var unit_count: u8 = 0;
+/// Atomic unit count for thread-safe access
+var unit_count: std.atomic.Value(u8) = std.atomic.Value(u8).init(0);
 
-/// Register an initialized unit
+/// Register an initialized unit (thread-safe)
+/// Note: Registration typically happens during single-threaded boot,
+/// but atomics ensure correctness if called concurrently.
 pub fn registerUnit(unit: VtdUnit) void {
-    if (unit_count < units.len) {
-        units[unit_count] = unit;
-        unit_count += 1;
+    // Use atomic fetch-add to get a unique slot
+    const slot = unit_count.fetchAdd(1, .acq_rel);
+    if (slot < units.len) {
+        units[slot] = unit;
+    } else {
+        // Rollback if we exceeded capacity
+        _ = unit_count.fetchSub(1, .acq_rel);
+        console.warn("VT-d: Maximum units ({d}) exceeded, ignoring unit at 0x{x}", .{
+            units.len,
+            unit.reg_base_phys,
+        });
     }
 }
 
-/// Get number of registered units
+/// Get number of registered units (atomic read)
 pub fn getUnitCount() u8 {
-    return unit_count;
+    return unit_count.load(.acquire);
 }
 
 /// Get a unit by index
 pub fn getUnit(index: u8) ?*VtdUnit {
-    if (index >= unit_count) return null;
+    if (index >= unit_count.load(.acquire)) return null;
     return if (units[index]) |*u| u else null;
 }
 
 /// Find the unit responsible for a PCI device
 pub fn findUnitForDevice(segment: u16, bus: u8, device: u5, func: u3) ?*VtdUnit {
+    const count = unit_count.load(.acquire);
+
     // First check units with explicit device scope
-    for (0..unit_count) |i| {
+    for (0..count) |i| {
         if (units[i]) |*unit| {
             if (unit.segment == segment and !unit.include_all) {
                 // Check if device is in this unit's scope
@@ -427,7 +521,7 @@ pub fn findUnitForDevice(segment: u16, bus: u8, device: u5, func: u3) ?*VtdUnit 
     }
 
     // Fall back to INCLUDE_PCI_ALL unit
-    for (0..unit_count) |i| {
+    for (0..count) |i| {
         if (units[i]) |*unit| {
             if (unit.segment == segment and unit.include_all) {
                 return unit;
