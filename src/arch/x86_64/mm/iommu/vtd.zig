@@ -7,7 +7,7 @@
 // Reference: Intel VT-d Specification 3.0+, Section 10 (Programming Interface)
 
 const std = @import("std");
-const hal = @import("hal");
+const hal = @import("../../root.zig");
 const console = @import("console");
 const regs = @import("regs.zig");
 const acpi = @import("acpi");

@@ -80,17 +80,26 @@ zig build run
 
 This configuration forwards local port 8080 to the guest port 80. Once the system boots and the `httpd` process starts, the web server is accessible at `http://localhost:8080`.
 
-On macOS, the run step auto-detects Homebrew OVMF firmware if present. To override:
+On macOS, the run step auto-detects Homebrew OVMF firmware if present (`brew install qemu`). On Linux, it auto-detects OVMF from common distro paths (e.g. `ovmf`/`edk2-ovmf` packages).
+
+Linux packages:
+- Debian/Ubuntu: `sudo apt install qemu-system-x86 ovmf`
+- Fedora: `sudo dnf install qemu-system-x86 edk2-ovmf`
+- Arch: `sudo pacman -S qemu-system-x86 edk2-ovmf`
+
+To override:
 
 ```bash
 zig build run -Dbios=/path/to/OVMF_CODE.fd -Dvars=/path/to/OVMF_VARS.fd
 ```
 
-To boot directly from the `efi_root` directory instead of the ISO:
+To boot directly from the generated GPT disk image (`disk.img`) instead of the ISO:
 
 ```bash
 zig build run -Drun-iso=false
 ```
+
+Note: This requires `tools/disk_image.zig` (automatically built) to generate a valid GPT partition table for the FAT filesystem.
 
 ## Roadmap
 

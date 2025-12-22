@@ -40,22 +40,22 @@ Zscapek uses the standard Higher Half Kernel model.
 
 ### Physical to Virtual Translation
 
-The kernel uses the **Higher Half Direct Map (HHDM)** provided by Limine to access physical memory.
+The kernel uses the **Higher Half Direct Map (HHDM)** to access physical memory.
 
 *   **Virtual Address** = `Physical Address` + `HHDM_OFFSET`
 *   **Physical Address** = `Virtual Address` - `HHDM_OFFSET`
-*   **HHDM_OFFSET** = `0xFFFF_8000_0000_0000` (constant, verified against Limine response)
+*   **HHDM_OFFSET** = `0xFFFF_8000_0000_0000` (constant, passed via BootInfo)
 
-The `HHDM_OFFSET` is obtained from the Limine HHDM Request at boot (`src/kernel/core/main.zig:192-201`).
+The `HHDM_OFFSET` is passed from the UEFI bootloader via the BootInfo structure.
 
 **HHDM vs Identity Mapping:**
 
-Limine sets up three distinct page mappings before jumping to `_start`:
-1. **Identity mapping** (phys 0x0 -> virt 0x0): Used only during early boot transition
+The UEFI bootloader sets up three distinct page mappings before jumping to the kernel:
+1. **Identity mapping** (phys 0x0 -> virt 0x0): Used only during boot transition
 2. **HHDM** (phys 0x0 -> virt 0xFFFF800000000000): Used by kernel for all physical memory access
 3. **Higher-half kernel** (kernel code at 0xFFFFFFFF80000000): Where kernel ELF is loaded
 
-The kernel discards the identity mapping after entry. All page table access uses HHDM via `paging.physToVirt()` (`src/arch/x86_64/paging.zig:173-189`):
+The kernel preserves the identity mapping for stack access during early init. All page table access uses HHDM via `paging.physToVirt()` (`src/arch/x86_64/mm/paging.zig`):
 
 ```zig
 pub fn physToVirt(phys: u64) [*]u8 {
@@ -68,57 +68,9 @@ pub fn physToVirt(phys: u64) [*]u8 {
 - Page table manipulation uses HHDM to read/write PML4/PDPT/PD/PT entries
 - Avoids chicken-and-egg problem of needing page tables to access page tables
 
-## 2. Boot Protocol ABIs
+## 2. Boot Protocol ABI
 
-Zscapek supports two boot protocols: Limine and custom UEFI.
-
-### 2.1 Limine Boot Protocol ABI
-
-Limine uses a Request/Response mechanism. All pointers are 64-bit and 8-byte aligned.
-
-### Generic Request Structure
-All Limine requests share this 24-byte (3x u64) header structure.
-
-```text
-Offset  Size    Type    Description
-0x00    8       u64[4]  Magic ID (Unique 4-u64 signature)
-0x20    8       u64     Revision (0)
-0x28    8       ptr     Response Pointer (Written by Limine)
-```
-
-**Note on Magic IDs**: Defined in `src/lib/limine.zig`. They identify the request type to the bootloader.
-
-### Framebuffer Response Layout
-The response pointer points to this structure in bootloader-reclaimable memory.
-
-```text
-Offset  Size    Type    Description
-0x00    8       u64     Revision
-0x08    8       u64     Framebuffer Count
-0x10    8       ptr     Pointer to array of Framebuffer structs
-```
-
-### Framebuffer Struct
-The actual video mode definition.
-
-```text
-Offset  Size    Type    Description
-0x00    8       ptr     Address (Physical video memory)
-0x08    8       u64     Width (pixels)
-0x10    8       u64     Height (pixels)
-0x18    8       u64     Pitch (Bytes per row)
-0x20    2       u16     BPP (Bits per pixel)
-0x22    1       u8      Memory Model
-0x23    1       u8      Red Mask Size
-0x24    1       u8      Red Mask Shift
-0x25    1       u8      Green Mask Size
-0x26    1       u8      Green Mask Shift
-0x27    1       u8      Blue Mask Size
-0x28    1       u8      Blue Mask Shift
-0x29    7       u8[7]   Unused (Padding)
-0x30    8       u64     EDID Size
-0x38    8       ptr     EDID Pointer
-```
+Zscapek uses a custom UEFI bootloader (`src/boot/uefi/`) that directly loads the kernel ELF and hands off via the BootInfo structure.
 
 ### GS Base Register
 The first context switch to user mode (via `isr_common` IRETQ) does SWAPGS, which swaps the values. So you must set GS_BASE initially so it ends up in KERNEL_GS_BASE after that first swap.
@@ -126,9 +78,9 @@ The first context switch to user mode (via `isr_common` IRETQ) does SWAPGS, whic
 **Critical Note for SMP/Scheduler:**
 When accessing per-CPU data *inside* the kernel (e.g., during scheduler initialization or timer ticks before returning to user), you must read `IA32_GS_BASE`, not `IA32_KERNEL_GS_BASE`. Even though you intend to access the "kernel" GS, if no SWAPGS has occurred (because we are already in kernel mode), the active base is still in the `IA32_GS_BASE` register. Reading `IA32_KERNEL_GS_BASE` will return 0 (or user base), leading to null pointer panics.
 
-### 2.2 UEFI Boot Protocol
+### UEFI Bootloader
 
-The custom UEFI bootloader uses a simpler direct handoff model with the BootInfo structure.
+The custom UEFI bootloader uses a direct handoff model with the BootInfo structure.
 
 #### BootInfo Structure Layout
 
@@ -632,7 +584,7 @@ This causes string-based overflows to include the null terminator in the overwri
     *   `SMAP/SMEP` (future): Prevent kernel from executing/accessing user pages accidentally.
 
 ### KASLR
-Limine supports KASLR. The kernel is position-independent (PIE) but linked to high memory. The physical load address may vary, but virtual addresses are fixed by the linker script to `0xffffffff80000000`.
+The UEFI bootloader acquires hardware entropy (RDRAND/RDSEED) for KASLR. The kernel is linked to high memory with virtual addresses fixed by the linker script to `0xffffffff80000000`. Physical load addresses may vary.
 
 ### User-Space ASLR
 

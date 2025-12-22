@@ -8,7 +8,8 @@ Usage:
     python build_query.py modules        # Module dependency graph
     python build_query.py targets        # x86_64-freestanding targets
     python build_query.py options        # Build options (-D flags)
-    python build_query.py artifacts      # Output paths (kernel.elf, ISO)
+    python build_query.py artifacts      # Output paths (kernel.elf, ISO, disk.img)
+    python build_query.py disk_image     # GPT disk image tool (tools/disk_image.zig)
     python build_query.py qemu           # QEMU run options
     python build_query.py commands       # Common build commands
 """
@@ -24,7 +25,7 @@ Location: build.zig (createModule + addImport)
 ### Core Modules
 ```
 config     <- Build options (version, heap_size, etc.)
-uapi       <- Syscall numbers, errno codes (src/uapi/root.zig)
+uapi       <- Syscall numbers (src/uapi/syscalls/root.zig), errno codes
 limine     <- Boot protocol parsing (src/lib/limine.zig)
 hal        <- Hardware Abstraction Layer (src/arch/root.zig)
 sync       <- Spinlock, synchronization (src/kernel/sync.zig)
@@ -56,6 +57,7 @@ keyboard   <- PS/2 (depends: hal, ring_buffer, io)
 virtio     <- VirtIO base (depends: pmm, hal)
 video      <- Framebuffer/VirtIO-GPU (depends: virtio, pci)
 audio      <- AC97 (depends: pci, pmm, vmm)
+hid        <- USB HID class (depends: usb)
 ```
 
 ### Network Stack
@@ -168,35 +170,86 @@ if (config.debug_enabled) {
 ```
 zig-out/bin/
 ├── kernel.elf          # Main kernel binary
+├── bootx64.efi         # UEFI bootloader
+├── disk_image          # GPT disk image generator tool
 ├── shell.elf           # Shell program
 ├── httpd.elf           # HTTP server
 ├── doom.elf            # Doom port
-├── netstack             # Network stack test
-├── test_stdio           # Test programs
+├── netstack            # Network stack test
+├── test_stdio          # Test programs
 ├── ...
-├── uart_driver.elf      # Userspace drivers
+├── uart_driver.elf     # Userspace drivers
 ├── ps2_driver.elf
 ├── virtio_net_driver.elf
 └── virtio_blk_driver.elf
 
-zscapek.iso              # Bootable ISO image
+zigk.iso                 # Bootable ISO (El Torito)
+disk.img                 # GPT disk image (recommended)
+esp_part.img             # EFI System Partition (FAT16)
 iso_root/                # ISO staging directory
-├── boot/
-│   ├── kernel.elf
-│   ├── limine.cfg
-│   ├── initrd.tar       # Initial ramdisk (USTAR)
-│   └── modules/         # User programs
+├── kernel.elf
+├── initrd.tar           # Initial ramdisk (USTAR)
+├── efi.img              # Embedded ESP for ISO
 └── EFI/BOOT/
     └── BOOTX64.EFI      # UEFI bootloader
 ```
+
+### Boot Images
+- **disk.img (GPT)**: Recommended. Created by tools/disk_image.zig
+- **zigk.iso (El Torito)**: May not work with all UEFI firmware
 
 ### InitRD Format
 - USTAR tarball created from initrd_contents/
 - Mounted at / by init_proc
 - Read-only filesystem
+""",
 
-### ISO Creation
-Uses xorriso to create El Torito bootable ISO with Limine.
+    "disk_image": """
+## GPT Disk Image Tool
+
+Location: `tools/disk_image.zig`
+Output: `disk.img`
+
+### Purpose
+Generates a GPT-partitioned disk image with an EFI System Partition for UEFI boot.
+More reliable than ISO El Torito boot across UEFI firmware implementations.
+
+### Usage
+```bash
+# Automatic (via build system)
+zig build run -Drun-iso=false
+
+# Manual
+./zig-out/bin/disk_image esp_part.img disk.img
+```
+
+### Disk Layout
+```
+Sector 0:    Protective MBR
+             - Partition 0: Type 0xEE (GPT protective)
+             - Signature: 0x55AA at bytes 510-511
+
+Sector 1:    GPT Header
+             - Signature: "EFI PART"
+             - Partition entries at LBA 2
+
+Sector 2+:   GPT Partition Entries (128 entries)
+
+LBA 2048+:   EFI System Partition (FAT16)
+             - /EFI/BOOT/BOOTX64.EFI
+             - /kernel.elf
+             - /startup.nsh
+```
+
+### Common Issues
+**MBR signature missing (offset 510-511 != 0x55AA)**:
+- Cause: extern struct alignment padding
+- Fix: Use packed struct or byte array for MBR layout
+- Verify: `xxd -s 510 -l 2 disk.img` should show `55aa`
+
+**UEFI drops to shell**:
+- Check: `file disk.img` should NOT show just "data"
+- Fix: `rm -rf .zig-cache && zig build run -Drun-iso=false`
 """,
 
     "qemu": """

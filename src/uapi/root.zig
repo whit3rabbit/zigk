@@ -7,22 +7,22 @@
 // This module is the single source of truth for ABI compatibility.
 
 pub const syscalls = @import("syscalls/root.zig");
-pub const errno = @import("errno.zig");
-pub const poll = @import("poll.zig");
-pub const abi = @import("abi.zig");
-pub const signal = @import("signal.zig");
-pub const stat = @import("stat.zig");
-pub const dirent = @import("dirent.zig");
-pub const sound = @import("sound.zig");
-pub const input = @import("input.zig");
-pub const mman = @import("mman.zig");
-pub const sched = @import("sched.zig");
-pub const futex = @import("futex.zig");
-pub const epoll = @import("epoll.zig");
-pub const io_ring = @import("io_ring.zig");
-pub const net_ipc = @import("net_ipc.zig");
-pub const ipc_msg = @import("ipc_msg.zig");
-pub const ring = @import("ring.zig");
+pub const errno = @import("base/errno.zig");
+pub const poll = @import("io/poll.zig");
+pub const abi = @import("base/abi.zig");
+pub const signal = @import("process/signal.zig");
+pub const stat = @import("fs/stat.zig");
+pub const dirent = @import("fs/dirent.zig");
+pub const sound = @import("dev/sound.zig");
+pub const input = @import("dev/input.zig");
+pub const mman = @import("base/mman.zig");
+pub const sched = @import("process/sched.zig");
+pub const futex = @import("ipc/futex.zig");
+pub const epoll = @import("io/epoll.zig");
+pub const io_ring = @import("io/io_ring.zig");
+pub const net_ipc = @import("ipc/net_ipc.zig");
+pub const ipc_msg = @import("ipc/ipc_msg.zig");
+pub const ring = @import("ipc/ring.zig");
 
 
 // Re-export commonly used types

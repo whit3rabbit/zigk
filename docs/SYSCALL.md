@@ -10,7 +10,10 @@ Quick reference for the Zscapek syscall subsystem. Covers build system integrati
 build.zig
     |
     +-- uapi_module (src/uapi/root.zig)
-    |       |-- syscalls.zig    <- Single source of truth for syscall numbers
+    |       |-- syscalls/       <- Syscall number definitions
+    |       |   |-- root.zig    <- Re-exports all numbers (linux + zscapek)
+    |       |   |-- linux.zig   <- Standard Linux syscall numbers
+    |       |   `-- zscapek.zig <- Custom Zscapek extensions
     |       `-- errno.zig       <- SyscallError type and errno conversion
     |
     +-- syscall_base_module (src/kernel/sys/syscall/core/base.zig)
@@ -44,7 +47,7 @@ build.zig
 
 ### How build.zig Wires Syscalls
 
-1. **UAPI Module** - Defines syscall numbers as `pub const SYS_NAME: usize = N`
+1. **UAPI Module** - Defines syscall numbers in `src/uapi/syscalls/root.zig` by re-exporting from `linux.zig` and `zscapek.zig`.
 2. **Base Module** - Provides shared state accessed by all handlers
 3. **Handler Modules** - Each handler file is a separate Zig module with explicit imports
 4. **Table Module** - Uses comptime reflection to auto-discover handlers
@@ -70,7 +73,7 @@ pub export fn dispatch_syscall(frame: *SyscallFrame) callconv(.c) void
 Runtime dispatch is an unrolled loop that LLVM optimizes to a jump table.
 
 Networking syscalls live exclusively in `net.zig` (see `docs/FILESYSTEM.md`).
-`net.zig` matches all network syscall numbers defined in `src/uapi/syscalls.zig`.
+`net.zig` matches all network syscall numbers defined in `src/uapi/syscalls/root.zig`.
 Do not add socket stubs to other modules. If a syscall has no handler in any
 module, dispatch returns `error.ENOSYS`.
 
@@ -125,8 +128,7 @@ The `callHandler` function auto-converts error unions to negative errno at the b
 
 ## Adding New Syscalls
 
-1. Add to `src/uapi/syscalls.zig`:
-   ```zig
+   // In src/uapi/syscalls/zscapek.zig (for custom) or linux.zig
    pub const SYS_MYSYSCALL: usize = 999;
    ```
 
@@ -342,6 +344,13 @@ src/kernel/sys/syscall/
 | 1043 | ring_wait | (id, min, time) -> cnt | ring.zig |
 | 1044 | ring_notify | (id) -> int | ring.zig |
 | 1045 | ring_wait_any | (ids, cnt, min, time) -> id | ring.zig |
+
+### IOMMU DMA Syscalls (1050+)
+
+| # | Name | Signature | Handler |
+|---|------|-----------|---------|
+| 1050 | alloc_iommu_dma | (domain_id, size, flags) -> addr | iommu/root.zig |
+| 1051 | free_iommu_dma | (domain_id, addr, size) -> int | iommu/root.zig |
 
 ### Implementation Status Legend
 

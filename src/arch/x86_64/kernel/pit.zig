@@ -3,7 +3,7 @@
 // The PIT is used to generate periodic interrupts (IRQ0) for the scheduler.
 // Base frequency is 1.193182 MHz.
 
-const io = @import("io.zig");
+const io = @import("../lib/io.zig");
 const pic = @import("pic.zig");
 
 // PIT Ports

@@ -4,27 +4,27 @@
 // Kernel code should import this via the architecture-agnostic src/arch/root.zig
 // to maintain portability.
 
-pub const io = @import("io.zig");
-pub const cpu = @import("cpu.zig");
-pub const serial = @import("serial.zig");
-pub const mem = @import("mem.zig");
-pub const paging = @import("paging.zig");
-pub const gdt = @import("gdt.zig");
-pub const idt = @import("idt.zig");
-pub const pic = @import("pic.zig");
-pub const interrupts = @import("interrupts/root.zig");
-pub const fpu = @import("fpu.zig");
-pub const debug = @import("debug.zig");
-pub const entropy = @import("entropy.zig");
-pub const syscall = @import("syscall.zig");
-pub const mmio = @import("mmio.zig");
-pub const mmio_device = @import("mmio_device.zig");
-pub const pit = @import("pit.zig");
-pub const timing = @import("timing.zig");
-pub const apic = @import("apic/root.zig");
-pub const smp = @import("smp.zig");
-pub const userspace = @import("userspace.zig");
-pub const iommu = @import("iommu/root.zig");
+pub const io = @import("lib/io.zig");
+pub const cpu = @import("kernel/cpu.zig");
+pub const serial = @import("serial");
+pub const mem = @import("mm/mem.zig");
+pub const paging = @import("mm/paging.zig");
+pub const gdt = @import("kernel/gdt.zig");
+pub const idt = @import("kernel/idt.zig");
+pub const pic = @import("kernel/pic.zig");
+pub const interrupts = @import("kernel/interrupts/root.zig");
+pub const fpu = @import("kernel/fpu.zig");
+pub const debug = @import("kernel/debug.zig");
+pub const entropy = @import("kernel/entropy.zig");
+pub const syscall = @import("kernel/syscall.zig");
+pub const mmio = @import("mm/mmio.zig");
+pub const mmio_device = @import("mm/mmio_device.zig");
+pub const pit = @import("kernel/pit.zig");
+pub const timing = @import("kernel/timing.zig");
+pub const apic = @import("kernel/apic/root.zig");
+pub const smp = @import("kernel/smp.zig");
+pub const userspace = @import("kernel/userspace.zig");
+pub const iommu = @import("mm/iommu/root.zig");
 
 /// Initialize all x86_64 HAL subsystems
 pub fn init(_: u64) void {

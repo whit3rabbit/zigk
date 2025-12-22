@@ -11,10 +11,10 @@ const idt = @import("idt.zig");
 const apic = @import("apic/root.zig");
 const syscall_arch = @import("syscall.zig");
 const cpu = @import("cpu.zig");
-const paging = @import("paging.zig");
+const paging = @import("../mm/paging.zig");
 const vmm = @import("vmm");
 const fpu = @import("fpu.zig");
-const mem = @import("mem.zig");
+const mem = @import("../mm/mem.zig");
 
 // Code for the AP trampoline is defined in external assembly file
 extern const smp_trampoline_start: anyopaque;

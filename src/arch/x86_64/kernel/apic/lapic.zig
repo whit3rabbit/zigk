@@ -17,8 +17,8 @@ const console = @import("console");
 
 // Use relative imports within the arch module
 const cpu = @import("../cpu.zig");
-const mmio = @import("../mmio.zig");
-const paging = @import("../paging.zig");
+const mmio = @import("../../mm/mmio.zig");
+const paging = @import("../../mm/paging.zig");
 const timing = @import("../timing.zig");
 
 // ============================================================================

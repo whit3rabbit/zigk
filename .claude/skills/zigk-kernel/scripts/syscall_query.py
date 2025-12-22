@@ -301,7 +301,7 @@ def parse_syscalls_from_source():
     syscalls = {}
 
     # Check both possible locations
-    for subpath in ["src/uapi/syscalls/linux.zig", "src/uapi/syscalls/zscapek.zig", "src/uapi/syscalls.zig"]:
+    for subpath in ["src/uapi/syscalls/linux.zig", "src/uapi/syscalls/zscapek.zig", "src/uapi/syscalls/root.zig", "src/uapi/syscalls.zig"]:
         zig_file = root / subpath
         if not zig_file.exists():
             continue
@@ -309,7 +309,7 @@ def parse_syscalls_from_source():
         content = zig_file.read_text()
         # Match: pub const SYS_NAME: usize = N; or pub const SYS_NAME = N;
         # Fixed regex: type annotation is now optional
-        pattern = r'pub const (SYS_\w+)(?::\s*usize)?\s*=\s*(\d+);'
+        pattern = r'pub const (SYS_\w+)(?::\s*usize)?\s*=\s*(?:[a-zA-Z0-9_.]+\.)?(\d+);'
 
         for match in re.finditer(pattern, content):
             name = match.group(1)

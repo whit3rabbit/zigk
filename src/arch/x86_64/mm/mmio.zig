@@ -207,7 +207,7 @@ pub fn pollAny32(addr: u64, mask: u32, max_iterations: usize) bool {
     return false;
 }
 
-const timing = @import("timing.zig");
+const timing = @import("../kernel/timing.zig");
 
 /// Poll a 32-bit register with real timeout in microseconds.
 /// Uses calibrated TSC for accurate wall-clock timing.

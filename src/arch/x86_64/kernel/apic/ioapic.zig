@@ -16,11 +16,14 @@
 
 const std = @import("std");
 const console = @import("console");
+const io = @import("../../lib/io.zig");
+const pic = @import("../pic.zig");
 
 // Use relative imports within the arch module
-const mmio = @import("../mmio.zig");
-const paging = @import("../paging.zig");
+const mmio = @import("../../mm/mmio.zig");
+const paging = @import("../../mm/paging.zig");
 const cpu = @import("../cpu.zig");
+const timing = @import("../timing.zig");
 
 // SECURITY: Simple spinlock to protect IOAPIC indirect register access from concurrent corruption.
 // IOAPIC uses two-step access (write index to IOREGSEL, then read/write IOWIN).

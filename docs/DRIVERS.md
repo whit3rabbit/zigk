@@ -62,7 +62,7 @@ To handle asynchronous events without threading complexity:
 
 #### VirtIO-Blk (`src/user/drivers/virtio_blk`)
 - **Type**: Userspace Storage Driver
-- **Status**: In development.
+- **Status**: Functional. Supports read/write requests, DMA, and MMIO via capabilities.
 
 #### PS/2 Input (`src/user/drivers/ps2`)
 - **Type**: Userspace Input Driver

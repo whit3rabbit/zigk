@@ -24,7 +24,8 @@ pub const BootSelection = enum(u8) {
     test_threads = 9,
     test_wait4 = 10,
     audio_test = 11,
-    soak_test = 12,
+    sound_test = 12,
+    soak_test = 13,
 
     /// Convert selection to cmdline string for kernel
     pub fn toCmdline(self: BootSelection) []const u8 {
@@ -41,6 +42,7 @@ pub const BootSelection = enum(u8) {
             .test_threads => "init=test_threads",
             .test_wait4 => "init=test_wait4",
             .audio_test => "init=audio_test",
+            .sound_test => "init=sound_test",
             .soak_test => "init=soak_test",
         };
     }
@@ -60,6 +62,7 @@ pub const BootSelection = enum(u8) {
             .test_threads => "test_threads",
             .test_wait4 => "test_wait4",
             .audio_test => "audio_test",
+            .sound_test => "sound_test",
             .soak_test => "soak_test",
         };
     }
@@ -92,6 +95,7 @@ const test_items = [_]BootSelection{
     .test_threads,
     .test_wait4,
     .audio_test,
+    .sound_test,
     .soak_test,
 };
 

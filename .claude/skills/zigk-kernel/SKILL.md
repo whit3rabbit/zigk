@@ -116,7 +116,8 @@ python scripts/libc_query.py structure # User folder layout
 python scripts/build_query.py modules    # Module dependency graph
 python scripts/build_query.py targets    # Build targets (x86_64-freestanding)
 python scripts/build_query.py options    # Build options (-D flags)
-python scripts/build_query.py artifacts  # Output paths (kernel.elf, ISO)
+python scripts/build_query.py artifacts  # Output paths (kernel.elf, ISO, disk.img)
+python scripts/build_query.py disk_image # GPT disk image tool (tools/disk_image.zig)
 python scripts/build_query.py qemu       # QEMU run options
 python scripts/build_query.py commands   # Common build commands
 ```
@@ -203,7 +204,7 @@ python scripts/driver_query.py template ring  # Ring IPC userspace driver
 
 | Component | Location |
 |-----------|----------|
-| Syscall numbers | src/uapi/syscalls.zig |
+| Syscall numbers | src/uapi/syscalls/root.zig |
 | Syscall handlers | src/kernel/sys/syscall/{core,fs,memory,process,net,hw,io,io_uring,misc}/*.zig |
 | HAL | src/arch/x86_64/ (via hal import) |
 | Kernel drivers | src/drivers/ |
@@ -212,4 +213,5 @@ python scripts/driver_query.py template ring  # Ring IPC userspace driver
 | Async I/O | src/kernel/io/ |
 | Network stack | src/net/ |
 | UEFI bootloader | src/boot/uefi/ |
+| Build tools | tools/ (disk_image.zig, docker-build.sh) |
 

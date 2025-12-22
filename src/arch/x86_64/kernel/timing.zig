@@ -5,7 +5,7 @@
 //
 // Must call calibrate() before using delayUs/delayMs/hasTimedOut.
 
-const io = @import("io.zig");
+const io = @import("../lib/io.zig");
 const cpu = @import("cpu.zig");
 const console = @import("console");
 

@@ -26,22 +26,27 @@ const GptPartitionEntry = extern struct {
     name: [72]u8, // UTF-16LE
 };
 
-const MbrPartitionEntry = extern struct {
-    status: u8,
-    chs_first: [3]u8,
-    type: u8,
-    chs_last: [3]u8,
-    lba_first: u32,
-    sectors: u32,
-};
+// MBR is 512 bytes total:
+// 0-445: Bootstrap + disk ID + reserved
+// 446-509: 4 partition entries (16 bytes each)
+// 510-511: Signature (0x55, 0xAA)
+const MBR_SIZE = 512;
+const MBR_PARTITION_OFFSET = 446;
+const MBR_SIGNATURE_OFFSET = 510;
+const MBR_PARTITION_ENTRY_SIZE = 16;
 
-const Mbr = extern struct {
-    bootstrap: [440]u8,
-    unique_disk_id: u32,
-    reserved: u16,
-    partitions: [4]MbrPartitionEntry,
-    signature: [2]u8,
-};
+fn writeMbrPartitionEntry(buf: []u8, status: u8, type_code: u8, lba_first: u32, sectors: u32) void {
+    buf[0] = status;
+    buf[1] = 0x00; // CHS first (head)
+    buf[2] = 0x02; // CHS first (sector/cyl)
+    buf[3] = 0x00; // CHS first (cyl)
+    buf[4] = type_code;
+    buf[5] = 0xFF; // CHS last (head)
+    buf[6] = 0xFF; // CHS last (sector/cyl)
+    buf[7] = 0xFF; // CHS last (cyl)
+    std.mem.writeInt(u32, buf[8..12], lba_first, .little);
+    std.mem.writeInt(u32, buf[12..16], sectors, .little);
+}
 
 // EFI System Partition GUID: C12A7328-F81F-11D2-BA4B-00A0C93EC93B
 const EFI_SYSTEM_PARTITION_GUID = "\x28\x73\x2a\xc1\x1f\xf8\xd2\x11\xba\x4b\x00\xa0\xc9\x3e\xc9\x3b";
@@ -82,18 +87,13 @@ pub fn main() !void {
     const output_file = try std.fs.cwd().createFile(output_path, .{});
     defer output_file.close();
 
-    // 1. Protective MBR
-    // LBA 0
-    var mbr: Mbr = std.mem.zeroes(Mbr);
-    mbr.partitions[0] = .{
-        .status = 0x00,
-        .chs_first = .{ 0x00, 0x02, 0x00 },
-        .type = 0xEE, // GPT Protective
-        .chs_last = .{ 0xFF, 0xFF, 0xFF },
-        .lba_first = 1,
-        .sectors = 0xFFFFFFFF, // Or size of disk - 1
-    };
-    mbr.signature = .{ 0x55, 0xAA };
+    // 1. Protective MBR (LBA 0)
+    var mbr: [MBR_SIZE]u8 = [_]u8{0} ** MBR_SIZE;
+    // Write protective MBR partition entry (type 0xEE for GPT)
+    writeMbrPartitionEntry(mbr[MBR_PARTITION_OFFSET..][0..MBR_PARTITION_ENTRY_SIZE], 0x00, 0xEE, 1, 0xFFFFFFFF);
+    // Write MBR signature
+    mbr[MBR_SIGNATURE_OFFSET] = 0x55;
+    mbr[MBR_SIGNATURE_OFFSET + 1] = 0xAA;
 
     // 2. Calculate Layout
     const sector_size = 512;
@@ -120,16 +120,13 @@ pub fn main() !void {
     // Total disk size
     const total_sectors = backup_header_lba + 1;
     
-    // Update MBR size
-    if (total_sectors > 0xFFFFFFFF) {
-         mbr.partitions[0].sectors = 0xFFFFFFFF;
-    } else {
-         mbr.partitions[0].sectors = @as(u32, @intCast(total_sectors)) - 1;
-    }
-    
+    // Update MBR partition size (sectors field is at offset 12 within the partition entry)
+    const mbr_sectors: u32 = if (total_sectors > 0xFFFFFFFF) 0xFFFFFFFF else @as(u32, @intCast(total_sectors)) - 1;
+    std.mem.writeInt(u32, mbr[MBR_PARTITION_OFFSET + 12 ..][0..4], mbr_sectors, .little);
+
     // Write MBR (LBA 0)
     try output_file.seekTo(0);
-    try output_file.writeAll(std.mem.asBytes(&mbr));
+    try output_file.writeAll(&mbr);
     
     // 3. Prepare Partition Entries
     var entries = try allocator.alloc(GptPartitionEntry, num_partition_entries);

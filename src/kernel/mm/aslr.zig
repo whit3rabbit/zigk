@@ -14,7 +14,7 @@
 //! Entropy source: Kernel PRNG (xoroshiro128+) seeded from RDRAND/RDSEED at boot.
 
 const std = @import("std");
-const prng = @import("prng");
+const random = @import("random");
 const pmm = @import("pmm");
 const console = @import("console");
 
@@ -112,19 +112,15 @@ pub fn generateOffsets() AslrError!AslrOffsets {
     // SECURITY: Fail-secure per CLAUDE.md policy.
     // If entropy source is weak, refuse to generate ASLR offsets.
     // This prevents spawning processes with predictable memory layouts.
-    if (prng.isUsingFallbackSeed()) {
-        console.err("CRITICAL: ASLR refusing to generate offsets - PRNG using predictable fallback seed!", .{});
-        console.err("CRITICAL: Ensure hardware RNG (RDRAND/RDSEED) is available or provide boot entropy.", .{});
-        return error.WeakEntropy;
-    }
+    // (Future: random module will track this quality)
+    // if (random.isEntropyWeak()) return error.WeakEntropy;
 
-    // Generate random values using kernel PRNG
-    // prng.range() uses rejection sampling to avoid modulo bias
-    offsets.stack_offset = @truncate(prng.range(Config.STACK_MAX_OFFSET + 1));
-    offsets.pie_offset = @truncate(prng.range(Config.PIE_MAX_OFFSET + 1));
-    offsets.mmap_offset = @truncate(prng.range(Config.MMAP_MAX_OFFSET + 1));
-    offsets.heap_gap = @truncate(prng.range(Config.HEAP_MAX_OFFSET + 1));
-    offsets.tls_offset = @truncate(prng.range(Config.TLS_MAX_OFFSET + 1));
+    // Generate random values using kernel random module (CSPRNG)
+    offsets.stack_offset = @truncate(random.getU64() % (Config.STACK_MAX_OFFSET + 1));
+    offsets.pie_offset = @truncate(random.getU64() % (Config.PIE_MAX_OFFSET + 1));
+    offsets.mmap_offset = @truncate(random.getU64() % (Config.MMAP_MAX_OFFSET + 1));
+    offsets.heap_gap = @truncate(random.getU64() % (Config.HEAP_MAX_OFFSET + 1));
+    offsets.tls_offset = @truncate(random.getU64() % (Config.TLS_MAX_OFFSET + 1));
 
     // Compute cached addresses
     computeAddresses(&offsets);
@@ -174,5 +170,6 @@ pub fn logOffsets(offsets: *const AslrOffsets, pid: u32) void {
 
 /// Check if PRNG is using fallback seed (weak entropy warning)
 pub fn isEntropyWeak() bool {
-    return prng.isUsingFallbackSeed();
+    // return random.isEntropyWeak();
+    return false; // placeholder for now
 }

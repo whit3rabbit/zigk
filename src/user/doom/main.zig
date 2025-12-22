@@ -10,7 +10,7 @@ const std = @import("std");
 // These modules contain exported C-callable functions that doomgeneric needs
 pub const libc = @import("libc");
 pub const platform = @import("doomgeneric_zscapek.zig");
-pub const sound = @import("i_sound_stub.zig");
+pub const sound = @import("i_sound.zig");
 
 // Force linker to keep libc exports by referencing them
 comptime {

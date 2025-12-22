@@ -3,7 +3,7 @@ const state = @import("state.zig");
 const idt = @import("../idt.zig");
 const pic = @import("../pic.zig");
 const apic = @import("../apic/root.zig");
-const io = @import("../io.zig");
+const io = @import("../../lib/io.zig");
 
 /// Generic IRQ handler
 pub fn irqHandler(frame: *idt.InterruptFrame) void {

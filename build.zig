@@ -10,24 +10,47 @@ fn fileExists(path: []const u8) bool {
     return true;
 }
 
-fn detectHomebrewOvmf(host_os: std.Target.Os.Tag) OvmfPaths {
-    if (host_os != .macos) return .{ .code = null, .vars = null };
-
+fn detectHostOvmf(host_os: std.Target.Os.Tag) OvmfPaths {
     var code: ?[]const u8 = null;
     var vars: ?[]const u8 = null;
 
-    if (fileExists("/opt/homebrew/share/qemu/edk2-x86_64-code.fd")) {
-        code = "/opt/homebrew/share/qemu/edk2-x86_64-code.fd";
-    }
-    if (fileExists("/opt/homebrew/share/qemu/edk2-x86_64-vars.fd")) {
-        vars = "/opt/homebrew/share/qemu/edk2-x86_64-vars.fd";
+    if (host_os == .macos) {
+        if (fileExists("/opt/homebrew/share/qemu/edk2-x86_64-code.fd")) {
+            code = "/opt/homebrew/share/qemu/edk2-x86_64-code.fd";
+        }
+        if (fileExists("/opt/homebrew/share/qemu/edk2-x86_64-vars.fd")) {
+            vars = "/opt/homebrew/share/qemu/edk2-x86_64-vars.fd";
+        }
+
+        if (code == null and fileExists("/usr/local/share/qemu/edk2-x86_64-code.fd")) {
+            code = "/usr/local/share/qemu/edk2-x86_64-code.fd";
+        }
+        if (vars == null and fileExists("/usr/local/share/qemu/edk2-x86_64-vars.fd")) {
+            vars = "/usr/local/share/qemu/edk2-x86_64-vars.fd";
+        }
+
+        return .{ .code = code, .vars = vars };
     }
 
-    if (code == null and fileExists("/usr/local/share/qemu/edk2-x86_64-code.fd")) {
-        code = "/usr/local/share/qemu/edk2-x86_64-code.fd";
-    }
-    if (vars == null and fileExists("/usr/local/share/qemu/edk2-x86_64-vars.fd")) {
-        vars = "/usr/local/share/qemu/edk2-x86_64-vars.fd";
+    if (host_os == .linux) {
+        const pair_paths = [_]struct { code: []const u8, vars: []const u8 }{
+            .{ .code = "/usr/share/OVMF/OVMF_CODE.fd", .vars = "/usr/share/OVMF/OVMF_VARS.fd" },
+            .{ .code = "/usr/share/OVMF/OVMF_CODE.secboot.fd", .vars = "/usr/share/OVMF/OVMF_VARS.secboot.fd" },
+            .{ .code = "/usr/share/edk2/ovmf/OVMF_CODE.fd", .vars = "/usr/share/edk2/ovmf/OVMF_VARS.fd" },
+            .{ .code = "/usr/share/edk2/ovmf/OVMF_CODE.secboot.fd", .vars = "/usr/share/edk2/ovmf/OVMF_VARS.secboot.fd" },
+            .{ .code = "/usr/share/qemu/edk2-x86_64-code.fd", .vars = "/usr/share/qemu/edk2-x86_64-vars.fd" },
+        };
+
+        for (pair_paths) |pair| {
+            if (fileExists(pair.code) and fileExists(pair.vars)) {
+                return .{ .code = pair.code, .vars = pair.vars };
+            }
+        }
+
+        for (pair_paths) |pair| {
+            if (code == null and fileExists(pair.code)) code = pair.code;
+            if (vars == null and fileExists(pair.vars)) vars = pair.vars;
+        }
     }
 
     return .{ .code = code, .vars = vars };
@@ -103,14 +126,15 @@ pub fn build(b: *std.Build) void {
     // NEW: Option to pass BIOS/UEFI firmware path
     const qemu_bios_opt = b.option([]const u8, "bios", "Path to BIOS/UEFI firmware (e.g. OVMF.fd) for QEMU");
     const qemu_vars_opt = b.option([]const u8, "vars", "Path to UEFI vars (e.g. OVMF_VARS.fd) for QEMU");
-    const run_iso = b.option(bool, "run-iso", "Boot QEMU from ISO instead of FAT directory") orelse true;
+    const run_iso = b.option(bool, "run-iso", "Boot QEMU from ISO instead of FAT directory") orelse false;
     const host_os = b.graph.host.result.os.tag;
-    const homebrew_ovmf = detectHomebrewOvmf(host_os);
+    const homebrew_ovmf = detectHostOvmf(host_os);
     const qemu_bios = qemu_bios_opt orelse homebrew_ovmf.code;
     const qemu_vars = if (qemu_bios_opt == null) (qemu_vars_opt orelse homebrew_ovmf.vars) else qemu_vars_opt;
     // Display option: "default" (auto), "sdl", "gtk", "cocoa" (macOS), "none" (headless)
     const qemu_display = b.option([]const u8, "display", "QEMU display backend (default, sdl, gtk, cocoa, none)") orelse "default";
     const qemu_usb_hub = b.option(bool, "usb-hub", "Attach usb-hub to XHCI and connect storage to it") orelse false;
+    const qemu_audio = b.option([]const u8, "audio", "QEMU audio backend (none, coreaudio, pa, file)") orelse "none";
 
     // Create kernel config options module
     const config_options = b.addOptions();
@@ -161,6 +185,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+
     // Create Sync module (Spinlock and synchronization primitives)
     const sync_module = b.createModule(.{
         .root_source_file = b.path("src/kernel/core/sync.zig"),
@@ -168,6 +193,15 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     sync_module.addImport("hal", hal_module);
+
+    // Create Serial module (16550 UART)
+    const serial_module = b.createModule(.{
+        .root_source_file = b.path("src/drivers/serial/uart_16550.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    serial_module.addImport("hal", hal_module);
+    serial_module.addImport("sync", sync_module);
 
     // Create TLB module (TLB shootdown for SMP)
     const tlb_module = b.createModule(.{
@@ -191,10 +225,11 @@ pub fn build(b: *std.Build) void {
     // HAL needs console for APIC debug output (circular but Zig handles it)
     hal_module.addImport("console", console_module);
     hal_module.addImport("sync", sync_module);
+    hal_module.addImport("serial", serial_module);
 
     // Create ACPI module (RSDP/MCFG parsing for PCIe ECAM)
     const acpi_module = b.createModule(.{
-        .root_source_file = b.path("src/arch/x86_64/acpi/root.zig"),
+        .root_source_file = b.path("src/kernel/acpi/root.zig"),
         .target = kernel_target,
         .optimize = optimize,
     });
@@ -259,6 +294,16 @@ pub fn build(b: *std.Build) void {
     prng_module.addImport("hal", hal_module);
     prng_module.addImport("sync", sync_module);
     prng_module.addImport("console", console_module);
+    
+    // Create Random module (Generic CSPRNG)
+    const random_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/core/random.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    random_module.addImport("hal", hal_module);
+    random_module.addImport("sync", sync_module);
+    random_module.addImport("console", console_module);
 
     // Create ASLR module (Address Space Layout Randomization)
     const aslr_module = b.createModule(.{
@@ -267,6 +312,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     aslr_module.addImport("prng", prng_module);
+    aslr_module.addImport("random", random_module);
     aslr_module.addImport("pmm", pmm_module);
     aslr_module.addImport("console", console_module);
 
@@ -303,6 +349,7 @@ pub fn build(b: *std.Build) void {
     net_module.addImport("hal", hal_module);
     net_module.addImport("uapi", uapi_module);
     net_module.addImport("prng", prng_module);
+    net_module.addImport("random", random_module);
     net_module.addImport("console", console_module);
     net_module.addImport("sync", sync_module);
     net_module.addImport("heap", heap_module);
@@ -415,6 +462,7 @@ pub fn build(b: *std.Build) void {
     stack_guard_module.addImport("hal", hal_module);
     stack_guard_module.addImport("console", console_module);
     stack_guard_module.addImport("prng", prng_module);
+    stack_guard_module.addImport("random", random_module);
 
     // Create FD module (File Descriptor table)
     const fd_module = b.createModule(.{
@@ -531,14 +579,6 @@ pub fn build(b: *std.Build) void {
     keyboard_module.addImport("thread", thread_module);
     keyboard_module.addImport("io", kernel_io_module);
 
-    // Create Serial driver module
-    const serial_module = b.createModule(.{
-        .root_source_file = b.path("src/drivers/serial/uart.zig"),
-        .target = kernel_target,
-        .optimize = optimize,
-    });
-    serial_module.addImport("hal", hal_module);
-    serial_module.addImport("sync", sync_module);
 
     // Create VirtIO common module
     const virtio_module = b.createModule(.{
@@ -1041,7 +1081,7 @@ pub fn build(b: *std.Build) void {
         .root_module = netstack_mod,
     });
     netstack_exe.setLinkerScript(b.path("src/user/linker.ld"));
-    netstack_exe.addAssemblyFile(b.path("src/arch/x86_64/memcpy.S"));
+    netstack_exe.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
 
     const netstack_cmd = b.addInstallArtifact(netstack_exe, .{});
     b.getInstallStep().dependOn(&netstack_cmd.step);
@@ -1349,11 +1389,11 @@ pub fn build(b: *std.Build) void {
     kernel.root_module.addImport("kernel_iommu", kernel_iommu_module);
 
     // Add assembly helpers for x86_64 (ISR stubs, lgdt, lidt)
-    kernel.addAssemblyFile(b.path("src/arch/x86_64/asm_helpers.S"));
-    kernel.addAssemblyFile(b.path("src/arch/x86_64/memcpy.S"));
+    kernel.addAssemblyFile(b.path("src/arch/x86_64/lib/asm_helpers.S"));
+    kernel.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
 
     // Add SMP trampoline code
-    kernel.addAssemblyFile(b.path("src/arch/x86_64/smp_trampoline.S"));
+    kernel.addAssemblyFile(b.path("src/arch/x86_64/boot/smp_trampoline.S"));
 
     // Note: boot32.S is no longer needed - Limine handles 64-bit entry directly
 
@@ -1396,7 +1436,7 @@ pub fn build(b: *std.Build) void {
         .root_module = shell_mod,
     });
     shell.setLinkerScript(b.path("src/user/linker.ld"));
-    shell.addAssemblyFile(b.path("src/arch/x86_64/memcpy.S"));
+    shell.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
     // shell.entry = .disabled; // let Zig find _start
 
     // Install shell as ELF (required for proper ELF loading in kernel)
@@ -1417,7 +1457,7 @@ pub fn build(b: *std.Build) void {
         .root_module = httpd_mod,
     });
     httpd.setLinkerScript(b.path("src/user/linker.ld"));
-    httpd.addAssemblyFile(b.path("src/arch/x86_64/memcpy.S"));
+    httpd.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
 
     // Install httpd as ELF (required for proper ELF loading in kernel)
     const install_httpd = b.addInstallArtifact(httpd, .{});
@@ -1432,9 +1472,9 @@ pub fn build(b: *std.Build) void {
     });
     doom_platform_module.addImport("syscall", user_syscall_lib);
 
-    // Create sound stubs module
+    // Create sound module
     const doom_sound_module = b.createModule(.{
-        .root_source_file = b.path("src/user/doom/i_sound_stub.zig"),
+        .root_source_file = b.path("src/user/doom/i_sound.zig"),
         .target = user_target,
         .optimize = optimize,
     });
@@ -1450,13 +1490,13 @@ pub fn build(b: *std.Build) void {
     doom_mod.addImport("syscall", user_syscall_lib);
     doom_mod.addImport("libc", user_libc_module);
     doom_mod.addImport("doomgeneric_zscapek.zig", doom_platform_module);
-    doom_mod.addImport("i_sound_stub.zig", doom_sound_module);
+    doom_mod.addImport("i_sound.zig", doom_sound_module);
 
     const doom = b.addExecutable(.{
         .name = "doom.elf",
         .root_module = doom_mod,
     });
-    doom.addAssemblyFile(b.path("src/arch/x86_64/memcpy.S"));
+    doom.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
     doom.addAssemblyFile(b.path("src/user/lib/libc/setjmp.S"));
 
     // NOTE: uart_driver and ps2_driver removed - source files not yet implemented
@@ -1483,7 +1523,7 @@ pub fn build(b: *std.Build) void {
     //     .name = "virtio_net_driver.elf",
     //     .root_module = virtio_net_driver_mod,
     // });
-    // virtio_net_driver.addAssemblyFile(b.path("src/arch/x86_64/memcpy.S"));
+    // virtio_net_driver.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
     // virtio_net_driver.setLinkerScript(b.path("src/user/linker.ld"));
     // const install_virtio_net_driver = b.addInstallArtifact(virtio_net_driver, .{});
     // b.getInstallStep().dependOn(&install_virtio_net_driver.step);
@@ -1502,7 +1542,7 @@ pub fn build(b: *std.Build) void {
     //     .name = "virtio_blk_driver.elf",
     //     .root_module = virtio_blk_driver_mod,
     // });
-    // virtio_blk_driver.addAssemblyFile(b.path("src/arch/x86_64/memcpy.S"));
+    // virtio_blk_driver.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
     // virtio_blk_driver.setLinkerScript(b.path("src/user/linker.ld"));
     // const install_virtio_blk_driver = b.addInstallArtifact(virtio_blk_driver, .{});
     // b.getInstallStep().dependOn(&install_virtio_blk_driver.step);
@@ -1607,7 +1647,7 @@ pub fn build(b: *std.Build) void {
     });
     test_libc_exe.addIncludePath(b.path("src/user/doom/include"));
     test_libc_exe.setLinkerScript(b.path("src/user/linker.ld"));
-    test_libc_exe.addAssemblyFile(b.path("src/arch/x86_64/memcpy.S"));
+    test_libc_exe.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
     test_libc_exe.addAssemblyFile(b.path("src/user/lib/libc/setjmp.S"));
 
     const install_test_libc = b.addInstallArtifact(test_libc_exe, .{});
@@ -1626,7 +1666,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     test_asm.setLinkerScript(b.path("src/user/linker.ld"));
-    test_asm.addAssemblyFile(b.path("src/arch/x86_64/memcpy.S"));
+    test_asm.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
     const install_test_asm = b.addInstallArtifact(test_asm, .{});
     b.getInstallStep().dependOn(&install_test_asm.step);
 
@@ -1644,7 +1684,7 @@ pub fn build(b: *std.Build) void {
         .root_module = test_writev_mod,
     });
     test_writev.setLinkerScript(b.path("src/user/linker.ld"));
-    test_writev.addAssemblyFile(b.path("src/arch/x86_64/memcpy.S"));
+    test_writev.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
     const install_test_writev = b.addInstallArtifact(test_writev, .{});
     b.getInstallStep().dependOn(&install_test_writev.step);
 
@@ -1662,9 +1702,28 @@ pub fn build(b: *std.Build) void {
         .root_module = audio_test_mod,
     });
     audio_test.setLinkerScript(b.path("src/user/linker.ld"));
-    audio_test.addAssemblyFile(b.path("src/arch/x86_64/memcpy.S"));
+    audio_test.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
     const install_audio_test = b.addInstallArtifact(audio_test, .{});
     b.getInstallStep().dependOn(&install_audio_test.step);
+
+    // Sound Test
+    const sound_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/user/tests/sound_test.zig"),
+        .target = user_target,
+        .optimize = optimize,
+    });
+    sound_test_mod.addImport("syscall", user_syscall_lib);
+    sound_test_mod.addImport("libc", user_libc_module);
+    sound_test_mod.addImport("uapi", user_uapi_module);
+
+    const sound_test = b.addExecutable(.{
+        .name = "sound_test",
+        .root_module = sound_test_mod,
+    });
+    sound_test.setLinkerScript(b.path("src/user/linker.ld"));
+    sound_test.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
+    const install_sound_test = b.addInstallArtifact(sound_test, .{});
+    b.getInstallStep().dependOn(&install_sound_test.step);
 
     // Libc Fix Verification Test (Native C with Custom Libc)
     // Wrapper and C source definition below
@@ -1695,7 +1754,7 @@ pub fn build(b: *std.Build) void {
         .flags = &.{ "-nostdlib", "-ffreestanding", "-I", "src/user/doom/include" },
     });
     test_libc_fix_exe.setLinkerScript(b.path("src/user/linker.ld"));
-    test_libc_fix_exe.addAssemblyFile(b.path("src/arch/x86_64/memcpy.S"));
+    test_libc_fix_exe.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
     test_libc_fix_exe.addAssemblyFile(b.path("src/user/crt0.S"));
     test_libc_fix_exe.addAssemblyFile(b.path("src/user/lib/libc/setjmp.S"));
     const install_test_libc_fix = b.addInstallArtifact(test_libc_fix_exe, .{});
@@ -1711,21 +1770,41 @@ pub fn build(b: *std.Build) void {
         \\mkdir -p iso_root/EFI/BOOT && \
         \\cp zig-out/bin/bootx64.efi iso_root/EFI/BOOT/BOOTX64.EFI && \
         \\cp zig-out/bin/kernel.elf iso_root/ && \
+        \\mkdir -p .zig-cache && \
+        \\tmp_initrd=".zig-cache/esp_initrd.tar" && \
+        \\rm -rf .zig-cache/initrd_root && \
+        \\mkdir -p .zig-cache/initrd_root && \
         \\if [ -d initrd_contents ] && [ "$(ls -A initrd_contents 2>/dev/null)" ]; then \
+        \\    cp -R initrd_contents/. .zig-cache/initrd_root/; \
+        \\fi && \
+        \\if [ -d zig-out/bin ] && [ "$(ls -A zig-out/bin 2>/dev/null)" ]; then \
+        \\    for f in zig-out/bin/*; do \
+        \\        base="$(basename "$f")"; \
+        \\        case "$base" in \
+        \\            bootx64.efi|bootx64.pdb|kernel.elf|kernel.bin|disk_image) continue ;; \
+        \\        esac; \
+        \\        cp "$f" .zig-cache/initrd_root/; \
+        \\    done; \
+        \\fi && \
+        \\if [ "$(ls -A .zig-cache/initrd_root 2>/dev/null)" ]; then \
         \\    echo "Creating initrd.tar..." && \
-        \\    tar --format=ustar -cvf iso_root/initrd.tar -C initrd_contents .; \
+        \\    tar --format=ustar -cvf "$tmp_initrd" -C .zig-cache/initrd_root .; \
         \\fi && \
         \\echo "Creating EFI boot image..." && \
-        \\dd if=/dev/zero of=efi.img bs=1M count=16 2>/dev/null && \
+        \\dd if=/dev/zero of=efi.img bs=1M count=128 2>/dev/null && \
         \\mformat -i efi.img -F :: && \
         \\mmd -i efi.img ::/EFI && \
         \\mmd -i efi.img ::/EFI/BOOT && \
         \\mcopy -i efi.img zig-out/bin/bootx64.efi ::/EFI/BOOT/BOOTX64.EFI && \
         \\mcopy -i efi.img zig-out/bin/kernel.elf :: && \
+        \\if [ -f "$tmp_initrd" ]; then \
+        \\    mcopy -i efi.img "$tmp_initrd" ::/initrd.tar; \
+        \\fi && \
+        \\rm -f "$tmp_initrd" && \
+        \\rm -rf .zig-cache/initrd_root && \
         \\cp efi.img iso_root/ && \
         \\xorriso -as mkisofs \
         \\    -r -V "ZIGK" \
-        \\    -eltorito-alt-boot \
         \\    -e efi.img \
         \\    -no-emul-boot \
         \\    -isohybrid-gpt-basdat \
@@ -1747,7 +1826,11 @@ pub fn build(b: *std.Build) void {
         "-device", "qemu-xhci,id=xhci",
         "-device", "usb-kbd",
         "-vga", "std",
-        "-device", "AC97",
+        "-audiodev",
+    });
+    run_cmd.addArg(b.fmt("{s},id=audio0", .{qemu_audio}));
+    run_cmd.addArgs(&.{
+        "-device", "AC97,audiodev=audio0",
         "-serial", "stdio",
         "-smp", "4",
         "-no-reboot",
@@ -1758,7 +1841,12 @@ pub fn build(b: *std.Build) void {
     });
 
     if (run_iso) {
-        run_cmd.addArgs(&.{ "-drive", "file=zigk.iso,media=cdrom,if=ide", "-boot", "d" });
+        // Boot hybrid ISO as hard disk - bypasses EDK2 El Torito bug
+        // The -isohybrid-gpt-basdat xorriso option creates a GPT on the ISO
+        run_cmd.addArgs(&.{
+            "-drive", "file=zigk.iso,format=raw,if=none,id=bootdisk",
+            "-device", "ide-hd,drive=bootdisk,bus=ide.0,bootindex=1",
+        });
     } else {
         // Use a real FAT disk image for UEFI boot (fat:rw: doesn't work with UEFI)
         // The disk.img is created by the pre-build step
@@ -1808,13 +1896,38 @@ pub fn build(b: *std.Build) void {
     const create_esp_cmd = b.addSystemCommand(&.{
         "sh", "-c",
         \\set -e && \
-        \\dd if=/dev/zero of=esp_part.img bs=1M count=32 2>/dev/null && \
+        \\dd if=/dev/zero of=esp_part.img bs=1M count=128 2>/dev/null && \
         \\mformat -i esp_part.img -H 2048 :: && \
         \\mmd -i esp_part.img ::/EFI && \
         \\mmd -i esp_part.img ::/EFI/BOOT && \
         \\mcopy -i esp_part.img zig-out/bin/bootx64.efi ::/EFI/BOOT/BOOTX64.EFI && \
         \\mcopy -i esp_part.img zig-out/bin/kernel.elf :: && \
-        \\mcopy -i esp_part.img src/boot/uefi/startup.nsh ::
+        \\mcopy -i esp_part.img src/boot/uefi/startup.nsh :: && \
+        \\mkdir -p .zig-cache && \
+        \\tmp_initrd=".zig-cache/esp_initrd.tar" && \
+        \\rm -rf .zig-cache/initrd_root && \
+        \\mkdir -p .zig-cache/initrd_root && \
+        \\if [ -d initrd_contents ] && [ "$(ls -A initrd_contents 2>/dev/null)" ]; then \
+        \\    cp -R initrd_contents/. .zig-cache/initrd_root/; \
+        \\fi && \
+        \\if [ -d zig-out/bin ] && [ "$(ls -A zig-out/bin 2>/dev/null)" ]; then \
+        \\    for f in zig-out/bin/*; do \
+        \\        base="$(basename "$f")"; \
+        \\        case "$base" in \
+        \\            bootx64.efi|bootx64.pdb|kernel.elf|kernel.bin|disk_image) continue ;; \
+        \\        esac; \
+        \\        cp "$f" .zig-cache/initrd_root/; \
+        \\    done; \
+        \\fi && \
+        \\if [ "$(ls -A .zig-cache/initrd_root 2>/dev/null)" ]; then \
+        \\    echo "Creating initrd.tar..." && \
+        \\    tar --format=ustar -cvf "$tmp_initrd" -C .zig-cache/initrd_root .; \
+        \\fi && \
+        \\if [ -f "$tmp_initrd" ]; then \
+        \\    mcopy -i esp_part.img "$tmp_initrd" ::/initrd.tar; \
+        \\fi && \
+        \\rm -f "$tmp_initrd" && \
+        \\rm -rf .zig-cache/initrd_root
     });
     create_esp_cmd.step.dependOn(&install_uefi.step);
     create_esp_cmd.step.dependOn(&install_kernel_uefi.step);

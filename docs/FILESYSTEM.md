@@ -37,6 +37,7 @@ zscapek/
 │   ├── network.md           # Network stack design
 │   └── SYSCALL.md           # Syscall implementation guide
 ├── tools/
+│   ├── disk_image.zig       # GPT disk image creation tool
 │   └── docker-build.sh      # Container build helper
 ├── tests/
 │   ├── unit/                # Kernel unit tests
@@ -238,7 +239,12 @@ zscapek/
     │   │   ├── root.zig
     │   │   ├── types.zig
     │   │   ├── class/
-    │   │   │   ├── hid.zig
+    │   │   │   ├── hid/
+    │   │   │   │   ├── root.zig
+    │   │   │   │   ├── descriptor.zig
+    │   │   │   │   ├── driver.zig
+    │   │   │   │   ├── input.zig
+    │   │   │   │   └── types.zig
     │   │   │   ├── hub.zig
     │   │   │   └── msc.zig
     │   │   ├── ehci/
@@ -313,7 +319,7 @@ zscapek/
     │   ├── dns/
     │   │   ├── root.zig
     │   │   ├── dns.zig
-    │   │   └── client.zig
+    │   │   ├── client.zig
     │   └── transport/
     │       ├── root.zig
     │       ├── udp.zig
@@ -347,23 +353,32 @@ zscapek/
     │
     ├── uapi/
     │   ├── root.zig
-    │   ├── syscalls.zig
-    │   ├── abi.zig
-    │   ├── errno.zig
-    │   ├── epoll.zig
-    │   ├── futex.zig
-    │   ├── io_ring.zig
-    │   ├── ipc_msg.zig
-    │   ├── net_ipc.zig
-    │   ├── poll.zig
-    │   ├── ring.zig
-    │   ├── sched.zig
-    │   ├── dirent.zig
-    │   ├── input.zig
-    │   ├── mman.zig
-    │   ├── signal.zig
-    │   ├── sound.zig
-    │   └── stat.zig
+    │   ├── base/
+    │   │   ├── abi.zig
+    │   │   ├── errno.zig
+    │   │   └── mman.zig
+    │   ├── fs/
+    │   │   ├── dirent.zig
+    │   │   └── stat.zig
+    │   ├── io/
+    │   │   ├── epoll.zig
+    │   │   ├── io_ring.zig
+    │   │   └── poll.zig
+    │   ├── ipc/
+    │   │   ├── futex.zig
+    │   │   ├── ipc_msg.zig
+    │   │   ├── net_ipc.zig
+    │   │   └── ring.zig
+    │   ├── process/
+    │   │   ├── sched.zig
+    │   │   └── signal.zig
+    │   ├── dev/
+    │   │   ├── input.zig
+    │   │   └── sound.zig
+    │   └── syscalls/
+    │       ├── root.zig
+    │       ├── linux.zig
+    │       └── zscapek.zig
     │
     └── user/
         ├── root.zig
@@ -437,7 +452,7 @@ zscapek/
         └── doom/
             ├── main.zig
             ├── doomgeneric_zscapek.zig
-            ├── i_sound_stub.zig
+            ├── i_sound.zig
             ├── include/
             │   └── (C headers for DOOM port)
             └── doomgeneric/
@@ -446,18 +461,16 @@ zscapek/
 
 ## Generated Artifacts
 
-These files and directories are produced by local builds or tooling and are not source-controlled.
+These files and directories are produced by builds or tooling and are not source-controlled.
 
 - `.zig-cache/` - Zig build cache
 - `initrd.tar` - InitRD archive
 - `iso_root/` - ISO staging directory
-- `options.o` - Local build artifact
-- `root.o` - Local build artifact
-- `test_libc_fixes.o` - Local build artifact
-- `test_vdso.asm` - Local build artifact
-- `usb_disk.img` - QEMU disk image
+- `disk.img` - GPT-partitioned disk image (primary boot target)
+- `esp_part.img` - Raw FAT filesystem image (ESP partition)
+- `usb_disk.img` - QEMU USB disk image
 - `zig-out/` - Zig build output
-- `zscapek.iso` - Bootable ISO
+- `zigk.iso` - Bootable ISO (El Torito EFI boot)
 
 ## Module Reference
 
@@ -843,26 +856,18 @@ A device-independent TCP/IP stack implementing Ethernet, IPv4/ARP, DNS, and sock
 | `ring_buffer.zig` | Generic, thread-safe compile-time ring buffer. |
 
 ### `src/uapi/` (Shared Kernel/User ABI)
-| File | Description |
-|------|-------------|
-| `root.zig` | UAPI module root. |
-| `syscalls.zig` | Syscall numbers (Linux ABI). |
-| `abi.zig` | ABI layouts shared with userland. |
-| `errno.zig` | Linux-compatible error codes. |
-| `epoll.zig` | Epoll definitions. |
-| `futex.zig` | Futex constants and types. |
-| `io_ring.zig` | io_uring ABI structs. |
-| `ipc_msg.zig` | IPC message structs for user-space drivers. |
-| `net_ipc.zig` | Network IPC message definitions. |
-| `poll.zig` | Poll event definitions. |
-| `ring.zig` | Ring buffer IPC ABI structs. |
-| `sched.zig` | Scheduling constants and structs. |
-| `dirent.zig` | Directory entry structures. |
-| `input.zig` | Input event structures. |
-| `mman.zig` | Memory mapping flags and constants. |
-| `signal.zig` | Signal definitions and structures. |
-| `sound.zig` | Audio IOCTL definitions. |
-| `stat.zig` | File stat structures. |
+
+The User API is organized into functional subdirectories:
+
+| Submodule | Description |
+|-----------|-------------|
+| `base/` | ABI assertions, errno values, and memory management constants. |
+| `fs/` | Filesystem-related structures (stat, dirent). |
+| `io/` | I/O event polling and io_uring definitions. |
+| `ipc/` | Shared memory rings, futex, and IPC message types. |
+| `process/` | Scheduling and signal definitions. |
+| `dev/` | Device-specific ABI definitions (input, sound). |
+| `syscalls/` | Syscall number definitions for x86_64 and Zscapek specific calls. |
 
 ### `tools/vdso_gen/`
 | File | Description |

@@ -36,7 +36,7 @@ const SoundModule = extern struct {
     start_sound: *const fn (*SfxInfo, c_int, c_int, c_int) callconv(.c) c_int,
     stop_sound: *const fn (c_int) callconv(.c) void,
     sound_is_playing: *const fn (c_int) callconv(.c) CBool,
-    cache_sounds: *const fn (*SfxInfo, c_int) callconv(.c) void,
+    cache_sounds: *const fn (?[*]SfxInfo, c_int) callconv(.c) void,
 };
 
 const MusicModule = extern struct {
@@ -59,7 +59,7 @@ const MusicModule = extern struct {
 // Doom Config Variables (bound by I_BindSoundVariables)
 // -----------------------------------------------------------------------------
 
-pub export var snd_samplerate: c_int = 44100;
+pub export var snd_samplerate: c_int = 48000;
 pub export var snd_cachesize: c_int = 64 * 1024 * 1024;
 pub export var snd_maxslicetime_ms: c_int = 28;
 pub export var snd_musicdevice: c_int = SNDDEVICE_SB;
@@ -182,7 +182,7 @@ fn reallocateChannels() void {
     if (count == channels_len and channels_ptr != null) return;
 
     if (channels_ptr) |ptr| {
-        freeBuffer(@ptrCast(?*anyopaque, ptr));
+        freeBuffer(@ptrCast(ptr));
     }
 
     const total_size = std.math.mul(usize, count, @sizeOf(ChannelState)) catch {
@@ -206,8 +206,8 @@ fn reallocateChannels() void {
 fn reallocateMixBuffers(frames_needed: usize) void {
     if (frames_needed == 0 or frames_needed == mix_frames) return;
 
-    if (mix_accum_ptr) |ptr| freeBuffer(@ptrCast(?*anyopaque, ptr));
-    if (mix_output_ptr) |ptr| freeBuffer(@ptrCast(?*anyopaque, ptr));
+    if (mix_accum_ptr) |ptr| freeBuffer(@ptrCast(ptr));
+    if (mix_output_ptr) |ptr| freeBuffer(@ptrCast(ptr));
     mix_accum_ptr = null;
     mix_output_ptr = null;
     mix_frames = 0;
@@ -234,7 +234,7 @@ fn clampFrames(frames: usize) usize {
 }
 
 fn desiredFrames() usize {
-    var rate: usize = 44100;
+    var rate: usize = 48000;
     if (snd_samplerate > 0) rate = @intCast(snd_samplerate);
 
     var ms: usize = 28;
@@ -287,8 +287,8 @@ fn stopChannel(idx: usize) void {
     ch.sep = 128;
 }
 
-fn buildSfxLumpName(sfx: *SfxInfo, prefix: bool) [9]u8 {
-    var name_buf: [9]u8 = [_]u8{0} ** 9;
+fn buildSfxLumpName(sfx: *SfxInfo, prefix: bool) [8:0]u8 {
+    var name_buf: [8:0]u8 = [_:0]u8{0} ** 8;
     var pos: usize = 0;
     if (prefix) {
         name_buf[0] = 'D';
@@ -354,7 +354,7 @@ fn evictCacheIfNeeded() void {
         cache_bytes -= victim.data_len;
         victim.sfx.driver_data = null;
         W_ReleaseLumpNum(victim.lumpnum);
-        freeBuffer(@ptrCast(?*anyopaque, victim));
+        freeBuffer(@ptrCast(victim));
     }
 }
 
@@ -367,7 +367,7 @@ fn cacheSfx(sfx: *SfxInfo) ?*SfxCache {
 
     if (sfx.lumpnum < 0) {
         const name = buildSfxLumpName(sfx, use_sfx_prefix);
-        sfx.lumpnum = W_GetNumForName(&name);
+        sfx.lumpnum = W_GetNumForName(@ptrCast(&name));
     }
 
     const lump_len = W_LumpLength(@intCast(sfx.lumpnum));
@@ -377,8 +377,8 @@ fn cacheSfx(sfx: *SfxInfo) ?*SfxCache {
     const lump_bytes: [*]const u8 = @ptrCast(lump_ptr);
     const lump_slice = lump_bytes[0..@intCast(lump_len)];
 
-    const rate = std.mem.readIntLittle(u16, lump_slice[0..2]);
-    const sample_count_hdr = std.mem.readIntLittle(u16, lump_slice[2..4]);
+    const rate = std.mem.readInt(u16, lump_slice[0..2], .little);
+    const sample_count_hdr = std.mem.readInt(u16, lump_slice[2..4], .little);
     const data_len_raw = @as(usize, @intCast(lump_len - 8));
     const sample_count = @min(@as(usize, sample_count_hdr), data_len_raw);
     if (sample_count == 0 or rate == 0) return null;
@@ -414,8 +414,8 @@ fn mixChannel(idx: usize, ch: *ChannelState, accum: []i32, frames: usize, out_ra
 
     const vol: i32 = ch.volume;
     const sep: i32 = ch.sep;
-    const left_scale = (vol * (254 - sep)) / 254;
-    const right_scale = (vol * sep) / 254;
+    const left_scale = @divTrunc(vol * (254 - sep), 254);
+    const right_scale = @divTrunc(vol * sep, 254);
 
     var frame_idx: usize = 0;
     while (frame_idx < frames) : (frame_idx += 1) {
@@ -433,8 +433,8 @@ fn mixChannel(idx: usize, ch: *ChannelState, accum: []i32, frames: usize, out_ra
         const s1 = (@as(i32, s1_u8) - 128) * 256;
         const interp = s0 + (((s1 - s0) * frac) >> SampleFpShift);
 
-        const left = (interp * left_scale) / 127;
-        const right = (interp * right_scale) / 127;
+        const left = @divTrunc(interp * left_scale, 127);
+        const right = @divTrunc(interp * right_scale, 127);
 
         const out_idx = frame_idx * 2;
         accum[out_idx] += left;
@@ -471,7 +471,7 @@ fn mixAndWrite() void {
 
     @memset(accum, 0);
 
-    const rate = if (snd_samplerate > 0) @as(u32, @intCast(snd_samplerate)) else 44100;
+    const rate = if (snd_samplerate > 0) @as(u32, @intCast(snd_samplerate)) else 48000;
     for (channelsSlice(), 0..) |*ch, idx| {
         mixChannel(idx, ch, accum, frames, rate);
     }
@@ -509,7 +509,7 @@ pub export fn I_InitSound(use_prefix: CBool) callconv(.c) void {
         return;
     };
 
-    var rate: u32 = if (snd_samplerate > 0) @intCast(snd_samplerate) else 44100;
+    var rate: u32 = if (snd_samplerate > 0) @intCast(snd_samplerate) else 48000;
     var channels: u32 = 2;
     var fmt: u32 = sound_uapi.AFMT_S16_LE;
 
@@ -531,13 +531,13 @@ pub export fn I_ShutdownSound() callconv(.c) void {
     sound_enabled = false;
 
     if (channels_ptr) |ptr| {
-        freeBuffer(@ptrCast(?*anyopaque, ptr));
+        freeBuffer(@ptrCast(ptr));
         channels_ptr = null;
         channels_len = 0;
     }
 
-    if (mix_accum_ptr) |ptr| freeBuffer(@ptrCast(?*anyopaque, ptr));
-    if (mix_output_ptr) |ptr| freeBuffer(@ptrCast(?*anyopaque, ptr));
+    if (mix_accum_ptr) |ptr| freeBuffer(@ptrCast(ptr));
+    if (mix_output_ptr) |ptr| freeBuffer(@ptrCast(ptr));
     mix_accum_ptr = null;
     mix_output_ptr = null;
     mix_frames = 0;
@@ -546,7 +546,7 @@ pub export fn I_ShutdownSound() callconv(.c) void {
         detachCache(cache);
         cache.sfx.driver_data = null;
         W_ReleaseLumpNum(cache.lumpnum);
-        freeBuffer(@ptrCast(?*anyopaque, cache));
+        freeBuffer(@ptrCast(cache));
     }
     cache_tail = null;
     cache_bytes = 0;
@@ -558,7 +558,7 @@ pub export fn I_GetSfxLumpNum(sfx: *SfxInfo) callconv(.c) c_int {
     const target = resolveSfx(sfx);
     if (target.lumpnum >= 0) return target.lumpnum;
     const name = buildSfxLumpName(target, use_sfx_prefix);
-    target.lumpnum = W_GetNumForName(&name);
+    target.lumpnum = W_GetNumForName(@ptrCast(&name));
     return target.lumpnum;
 }
 
@@ -582,7 +582,7 @@ pub export fn I_StartSound(sfx: *SfxInfo, channel: c_int, vol: c_int, sep: c_int
     ch.volume = @intCast(@max(0, @min(127, vol)));
     ch.sep = @intCast(@max(0, @min(254, sep)));
 
-    const out_rate: u32 = if (snd_samplerate > 0) @intCast(snd_samplerate) else 44100;
+    const out_rate: u32 = if (snd_samplerate > 0) @intCast(snd_samplerate) else 48000;
     if (out_rate == 0) return -1;
     const step = (@as(u32, cache.sample_rate) << SampleFpShift) / out_rate;
     ch.step_fp = if (step == 0) 1 else step;
@@ -616,14 +616,15 @@ pub export fn I_UpdateSoundParams(handle: c_int, vol: c_int, sep: c_int) callcon
     ch.sep = @intCast(@max(0, @min(254, sep)));
 }
 
-pub export fn I_PrecacheSounds(sounds: ?*SfxInfo, count: c_int) callconv(.c) void {
+pub export fn I_PrecacheSounds(sounds: ?[*]SfxInfo, count: c_int) callconv(.c) void {
     if (!sound_enabled) return;
     if (sounds == null or count <= 0) return;
 
+    const sounds_ptr = sounds.?;
     const total: usize = @intCast(count);
     var i: usize = 0;
     while (i < total) : (i += 1) {
-        const sfx = &sounds.?[i];
+        const sfx = &sounds_ptr[i];
         const target = resolveSfx(sfx);
         _ = cacheSfx(target);
     }
@@ -654,16 +655,16 @@ pub export fn I_MusicIsPlaying() callconv(.c) CBool {
 }
 
 pub export fn I_BindSoundVariables() callconv(.c) void {
-    M_BindVariable("snd_musicdevice", &snd_musicdevice);
-    M_BindVariable("snd_sfxdevice", &snd_sfxdevice);
-    M_BindVariable("snd_sbport", &snd_sbport);
-    M_BindVariable("snd_sbirq", &snd_sbirq);
-    M_BindVariable("snd_sbdma", &snd_sbdma);
-    M_BindVariable("snd_mport", &snd_mport);
-    M_BindVariable("snd_maxslicetime_ms", &snd_maxslicetime_ms);
-    M_BindVariable("snd_musiccmd", &snd_musiccmd);
-    M_BindVariable("snd_samplerate", &snd_samplerate);
-    M_BindVariable("snd_cachesize", &snd_cachesize);
+    M_BindVariable("snd_musicdevice", @ptrCast(&snd_musicdevice));
+    M_BindVariable("snd_sfxdevice", @ptrCast(&snd_sfxdevice));
+    M_BindVariable("snd_sbport", @ptrCast(&snd_sbport));
+    M_BindVariable("snd_sbirq", @ptrCast(&snd_sbirq));
+    M_BindVariable("snd_sbdma", @ptrCast(&snd_sbdma));
+    M_BindVariable("snd_mport", @ptrCast(&snd_mport));
+    M_BindVariable("snd_maxslicetime_ms", @ptrCast(&snd_maxslicetime_ms));
+    M_BindVariable("snd_musiccmd", @ptrCast(&snd_musiccmd));
+    M_BindVariable("snd_samplerate", @ptrCast(&snd_samplerate));
+    M_BindVariable("snd_cachesize", @ptrCast(&snd_cachesize));
 }
 
 // -----------------------------------------------------------------------------
@@ -703,7 +704,7 @@ fn soundModuleIsPlaying(handle: c_int) callconv(.c) CBool {
     return I_SoundIsPlaying(handle);
 }
 
-fn soundModuleCache(sounds: *SfxInfo, count: c_int) callconv(.c) void {
+fn soundModuleCache(sounds: ?[*]SfxInfo, count: c_int) callconv(.c) void {
     I_PrecacheSounds(sounds, count);
 }
 

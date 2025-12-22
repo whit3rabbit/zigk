@@ -50,16 +50,31 @@ Example:
 zig build -Dheap-size=4194304 -Ddebug=false
 ```
 
-### 2. Create Bootable ISO
-To build the OS image (`zigk.iso`):
+### 2. Create Bootable Images
+Two boot methods are available: ISO and GPT disk image.
+
+#### ISO Image (El Torito)
 ```bash
 zig build iso
 ```
 Artifact: `zigk.iso`
 
-**Note**: This step performs the following:
-1.  Compiles `kernel.elf` and `BOOTX64.EFI`.
-2.  Creates a UEFI-bootable ISO with an embedded EFI System Partition.
+This creates a UEFI-bootable ISO with an embedded EFI System Partition using El Torito boot.
+
+**Note**: Some UEFI firmware implementations may not correctly detect El Torito EFI boot entries. If `zig build run` drops into the UEFI shell instead of booting, use the GPT disk image method below.
+
+#### GPT Disk Image (Recommended)
+```bash
+zig build run -Drun-iso=false
+```
+Artifact: `disk.img`
+
+This creates a GPT-partitioned disk image with an EFI System Partition. This method is more reliable across different UEFI firmware implementations.
+
+**Note**: The `tools/disk_image.zig` tool generates the GPT disk from `esp_part.img` (a FAT filesystem). The disk includes:
+- Protective MBR (sector 0)
+- GPT header and partition table
+- EFI System Partition with `EFI/BOOT/BOOTX64.EFI` and `kernel.elf`
 
 ### 3. Run in QEMU
 To build and immediately run the ISO in QEMU:
@@ -80,8 +95,8 @@ zig build run -Dbios=/opt/homebrew/share/qemu/edk2-x86_64-code.fd -Dvars=/opt/ho
 zig build run -Dbios=/usr/local/share/qemu/edk2-x86_64-code.fd -Dvars=/usr/local/share/qemu/edk2-x86_64-vars.fd
 ```
 
-#### FAT Directory Boot (Legacy)
-To boot directly from the `efi_root` directory instead of the ISO:
+#### Disk Image Boot
+To boot from the generated GPT disk image (`disk.img`) instead of the ISO:
 ```bash
 zig build run -Drun-iso=false
 ```
@@ -89,7 +104,7 @@ zig build run -Drun-iso=false
 #### Common Run Flags
 | Flag | Default | Description |
 |------|---------|-------------|
-| `-Drun-iso=[bool]` | true | Boot from `zigk.iso` (UEFI El Torito). Set false to boot from `efi_root` FAT directory. |
+| `-Drun-iso=[bool]` | true | Boot from `zigk.iso` (UEFI El Torito). Set false to boot from `disk.img` (GPT Disk Image). |
 | `-Dbios=[string]` | auto | Path to UEFI firmware code image (OVMF). On macOS, auto-detects Homebrew `edk2-x86_64-code.fd`. |
 | `-Dvars=[string]` | auto | Path to UEFI vars image. On macOS, auto-detects Homebrew `edk2-x86_64-vars.fd`. |
 | `-Ddisplay=[string]` | default | QEMU display backend: `default`, `sdl`, `gtk`, `cocoa`, `none`. |
@@ -100,7 +115,7 @@ Examples:
 # Headless serial-only output
 zig build run -Ddisplay=none
 
-# Boot from FAT directory instead of ISO
+# Boot from disk header (disk.img) instead of ISO
 zig build run -Drun-iso=false
 
 # Attach USB hub (useful for some USB storage setups)
@@ -111,9 +126,10 @@ zig build run -Dbios=/path/to/OVMF_CODE.fd -Dvars=/path/to/OVMF_VARS.fd
 ```
 
 #### Troubleshooting QEMU Boot
-- **BdsDxe: failed to load Boot0 / Not Found**: OVMF likely cannot see the ISO. Use full OVMF code+vars images and ISO boot: `zig build run -Drun-iso=true -Dbios=... -Dvars=...`.
+- **BdsDxe: failed to load Boot0 / Not Found**: El Torito EFI boot not recognized. Use GPT disk image instead: `zig build run -Drun-iso=false`.
 - **No bootable device**: Ensure OVMF firmware paths are valid. On macOS, verify Homebrew has `edk2-x86_64-code.fd` and `edk2-x86_64-vars.fd`.
-- **UEFI shell opens instead of booting**: Confirm `BOOTX64.EFI` is present in the ISO (`zigk.iso`) and in the FAT directory (`zig-out/efi_root/EFI/BOOT/BOOTX64.EFI`), then rebuild with `zig build iso`.
+- **UEFI shell opens instead of booting**: The ISO El Torito boot may not be recognized by some UEFI firmware. Switch to GPT disk: `zig build run -Drun-iso=false`. Alternatively, ensure `BOOTX64.EFI` is present and rebuild with `zig build iso`.
+- **disk.img has invalid MBR**: If `file disk.img` shows "data" instead of GPT, rebuild the disk_image tool: `rm -rf .zig-cache && zig build run -Drun-iso=false`. The tool requires packed struct handling for correct MBR layout.
 
 ### 4. Running Tests
 To run the kernel unit tests:

@@ -246,9 +246,8 @@ pub fn createKernelPageTables(
         .no_execute = true, // Security: .rodata should not be executable
     };
 
-    // 1. Identity map first 4GB (for boot transition)
-    const identity_size: u64 = 4 * 1024 * 1024 * 1024; // 4GB
-    try ctx.mapRange(0, 0, @min(identity_size, max_phys_addr), rw_flags);
+    // 1. Identity map all physical memory (UEFI stack can live above 4GB on EDK2/QEMU)
+    try ctx.mapRange(0, 0, max_phys_addr, rw_flags);
 
     // 2. HHDM: Map all physical memory at HHDM_BASE
     try ctx.mapRange(HHDM_BASE, 0, max_phys_addr, rw_flags);

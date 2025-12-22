@@ -42,16 +42,39 @@ For detailed byte-level layouts, struct alignments, and hardware interface speci
 | `src/boot/uefi/paging.zig` | PML4 page table creation |
 | `src/boot/common/boot_info.zig` | Shared BootInfo structure |
 
+### Boot Methods
+
+Zscapek supports two boot methods for QEMU:
+
+#### GPT Disk Image (Recommended)
+```bash
+zig build run -Drun-iso=false
+```
+This creates `disk.img`, a GPT-partitioned disk with an EFI System Partition. More reliable across UEFI firmware implementations.
+
+The `tools/disk_image.zig` tool generates the disk image:
+- Sector 0: Protective MBR (type 0xEE, signature 0x55AA)
+- Sector 1: GPT header
+- Sectors 2+: Partition entries and EFI System Partition (FAT16)
+
+#### ISO Image (Hybrid GPT)
+```bash
+zig build run -Drun-iso=true   # or just: zig build run
+```
+Creates `zigk.iso` with hybrid GPT/El Torito structure via xorriso's `-isohybrid-gpt-basdat` option.
+
+**Note**: QEMU boots the ISO as a hard disk (not CDROM) to work around an EDK2 El Torito firmware limitation. The ISO file remains valid for burning to real optical media.
+
 ### Running
 
 ```bash
-# Build and run with UEFI
-zig build run -Dbios=/opt/homebrew/share/qemu/edk2-x86_64-code.fd
+# Build and run with UEFI (GPT disk - recommended)
+zig build run -Drun-iso=false -Dbios=/opt/homebrew/share/qemu/edk2-x86_64-code.fd
 
 # Or manually with QEMU
 qemu-system-x86_64 -M q35 -m 256M \
-  -drive if=none,format=raw,id=esp,file=fat:rw:zig-out/efi_root \
-  -device virtio-blk-pci,drive=esp,bootindex=1 \
+  -drive if=none,format=raw,id=esp,file=disk.img \
+  -device ide-hd,drive=esp,bus=ide.0,bootindex=1 \
   -drive if=pflash,format=raw,readonly=on,file=/path/to/edk2-x86_64-code.fd \
   -serial stdio -accel tcg
 ```
@@ -249,7 +272,9 @@ The framebuffer log may scroll too fast or be initialized too late. Rely on the 
 *   **Formatting**: Ensure your console writer supports `std.fmt`. If using a custom writer, be wary of format specifiers like `{:0>16x}` causing parser errors; simple `{x}` is safer for basic debugging.
 *   **Minimal QEMU Command**: For serial-only debugging without display:
     ```bash
-    qemu-system-x86_64 -M q35 -m 128M -cdrom zscapek.iso \
+    qemu-system-x86_64 -M q35 -m 128M \
+      -drive file=zigk.iso,format=raw,if=none,id=boot \
+      -device ide-hd,drive=boot,bus=ide.0,bootindex=1 \
       -drive if=pflash,format=raw,readonly=on,file=/path/to/edk2-x86_64-code.fd \
       -serial stdio -display none -accel tcg
     ```
@@ -375,7 +400,9 @@ zig build iso
 zig build run -Dbios=/opt/homebrew/share/qemu/edk2-x86_64-code.fd
 
 # Or manually with UEFI and SMP (4 cores)
-qemu-system-x86_64 -M q35 -m 256M -smp 4 -cdrom zscapek.iso \
+qemu-system-x86_64 -M q35 -m 256M -smp 4 \
+  -drive file=zigk.iso,format=raw,if=none,id=boot \
+  -device ide-hd,drive=boot,bus=ide.0,bootindex=1 \
   -drive if=pflash,format=raw,readonly=on,file=/path/to/edk2-x86_64-code.fd \
   -serial stdio -display none -accel tcg
 ```
@@ -386,7 +413,9 @@ For better performance on Apple Silicon Macs using Hypervisor.framework:
 
 ```bash
 # Using HVF acceleration (faster than TCG)
-qemu-system-x86_64 -M q35 -m 256M -smp 4 -cdrom zscapek.iso \
+qemu-system-x86_64 -M q35 -m 256M -smp 4 \
+  -drive file=zigk.iso,format=raw,if=none,id=boot \
+  -device ide-hd,drive=boot,bus=ide.0,bootindex=1 \
   -drive if=pflash,format=raw,readonly=on,file=/opt/homebrew/share/qemu/edk2-x86_64-code.fd \
   -serial stdio -accel hvf -cpu host
 ```
@@ -398,7 +427,9 @@ Note: HVF acceleration requires x86_64 emulation layer on ARM. If issues occur, 
 To test the XHCI USB driver explicitly (bypassing default PS/2 emulation):
 
 ```bash
-qemu-system-x86_64 -M q35 -m 256M -cdrom zscapek.iso \
+qemu-system-x86_64 -M q35 -m 256M \
+  -drive file=zigk.iso,format=raw,if=none,id=boot \
+  -device ide-hd,drive=boot,bus=ide.0,bootindex=1 \
   -drive if=pflash,format=raw,readonly=on,file=/opt/homebrew/share/qemu/edk2-x86_64-code.fd \
   -device qemu-xhci -device usb-kbd -device usb-mouse \
   -serial stdio -accel tcg

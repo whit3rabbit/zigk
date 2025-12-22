@@ -101,7 +101,7 @@ The DOOM port uses:
 |------|---------|
 | `src/user/doom/main.zig` | Entry point |
 | `src/user/doom/doomgeneric_zscapek.zig` | Platform hooks |
-| `src/user/doom/i_sound_stub.zig` | Sound stubs (no audio) |
+| `src/user/doom/i_sound.zig` | Sound system (/dev/dsp backend) |
 | `src/user/doom/doomgeneric/` | Original DOOM source |
 | `src/user/lib/libc.zig` | C library implementation |
 
@@ -111,7 +111,7 @@ DOOM runs at 640x400 and is centered on the framebuffer if the display is larger
 
 ## Known Limitations
 
-- **No Sound**: Audio is stubbed out (silent gameplay)
+- **No Music**: MIDI/OPL music is not implemented (SFX works via AC97)
 - **No Save Games**: Filesystem writes are not implemented
 - **Shareware Only**: Full DOOM requires purchasing the commercial WAD
 

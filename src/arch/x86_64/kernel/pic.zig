@@ -11,7 +11,7 @@
 //   - Systems without APIC
 //   - Initial boot before APIC is configured
 
-const io = @import("io.zig");
+const io = @import("../lib/io.zig");
 
 // PIC I/O ports
 const PIC1_COMMAND: u16 = 0x20;

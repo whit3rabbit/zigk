@@ -10,7 +10,7 @@
 // HAL Contract: This module owns all page table manipulation.
 // Kernel code must use VMM interface, not this module directly.
 
-const cpu = @import("cpu.zig");
+const cpu = @import("../kernel/cpu.zig");
 
 // Page size constants
 pub const PAGE_SIZE: usize = 4096;

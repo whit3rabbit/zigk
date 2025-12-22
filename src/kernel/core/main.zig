@@ -181,7 +181,7 @@ export fn _start(boot_info: *BootInfo.BootInfo) callconv(.c) noreturn {
     hal.init(boot_info.hhdm_offset);
 
     // Initialize Serial Driver (UART)
-    uart = serial_driver.Serial.init();
+    uart = serial_driver.Serial.init(serial_driver.COM1);
 
     // Register UART as console backend
     console.addBackend(.{

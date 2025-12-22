@@ -50,6 +50,16 @@ pub const entropy = struct {
         }
     }
 
+    pub fn getRandomU64() u64 {
+        if (@hasDecl(root, "random")) {
+            return root.random.getU64();
+        } else {
+            // Userspace: use hardware entropy directly as a simple PRNG
+            return getHardwareEntropy();
+        }
+    }
+
+
     /// Make getrandom syscall (userspace only)
     /// SYS_GETRANDOM = 318 on x86_64 Linux ABI
     fn userspaceGetrandom(buf: [*]u8, count: usize, flags: u32) isize {
