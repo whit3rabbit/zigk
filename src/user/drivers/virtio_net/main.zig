@@ -688,7 +688,23 @@ fn processRxCompletions() void {
         const buf_idx = elem.id;
         const len = elem.len;
 
-        const buf_virt = driver_state.rx_buffers_dma.virt_addr + @as(u64, buf_idx) * RX_BUFFER_SIZE;
+        // Security: Validate hypervisor-provided descriptor index
+        // Prevents OOB access if hypervisor is malicious or buggy
+        if (buf_idx >= QUEUE_SIZE) {
+            driver_state.rx_last_used_idx +%= 1;
+            continue;
+        }
+
+        // Security: Validate hypervisor-provided length against buffer size
+        // Prevents OOB read if hypervisor reports invalid length
+        if (len > RX_BUFFER_SIZE) {
+            driver_state.rx_last_used_idx +%= 1;
+            continue;
+        }
+
+        // Security: Use checked arithmetic for address calculation
+        const buf_offset = @as(u64, buf_idx) * RX_BUFFER_SIZE;
+        const buf_virt = driver_state.rx_buffers_dma.virt_addr + buf_offset;
         const packet: [*]u8 = @ptrFromInt(buf_virt);
 
         // Skip VirtIO net header (12 bytes typically)
@@ -797,6 +813,14 @@ fn processTxCompletions() void {
         :
         : .{ .memory = true }
     );
+
+    // Security: Validate pending completion count from hypervisor
+    // Prevents advancing past descriptors still in flight if hypervisor is buggy
+    const pending = used_ptr.idx -% driver_state.tx_last_used_idx;
+    if (pending > QUEUE_SIZE) {
+        // Hypervisor reported impossible number of completions - ignore
+        return;
+    }
 
     while (driver_state.tx_last_used_idx != used_ptr.idx) {
         // TX completion - buffer can be reused

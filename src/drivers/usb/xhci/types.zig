@@ -6,6 +6,7 @@ const interrupts = hal.interrupts;
 const context = @import("context.zig");
 const ring = @import("ring.zig");
 const regs = @import("regs.zig");
+const trb = @import("trb.zig");
 
 /// XHCI Controller instance
 /// Contains all state for an XHCI controller.
@@ -45,6 +46,13 @@ pub const Controller = struct {
     /// Polling function for non-MSI mode (breaks dependency cycle)
     poll_events_fn: ?*const fn () usize = null,
 
+    /// Command completion signaling for MSI-X mode
+    /// When MSI-X is enabled, the interrupt handler sets these fields
+    /// instead of letting polling code race on the event ring.
+    pending_cmd_slot_id: u8 = 0,
+    pending_cmd_code: trb.CompletionCode = .Invalid,
+    pending_cmd_valid: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
     /// Controller state
     running: bool,
 
@@ -67,5 +75,49 @@ pub const Controller = struct {
 
         const erdp = regs.Erdp.init(self.event_ring.getDequeuePointer(), 0);
         intr_dev.write64(.erdp, @bitCast(erdp));
+    }
+
+    /// Wait for command completion - handles both MSI-X and polling modes
+    /// Returns slot_id and completion code on success
+    pub fn waitForCommandCompletion(self: *Self, timeout_iterations: u32) error{ Timeout }!struct { slot_id: u8, code: trb.CompletionCode } {
+        var remaining = timeout_iterations;
+
+        while (remaining > 0) : (remaining -= 1) {
+            // Check MSI-X signaled completion first (if MSI-X is enabled)
+            if (self.msix_vectors != null) {
+                // Load with acquire semantics to see the updated slot_id and code
+                if (self.pending_cmd_valid.load(.acquire)) {
+                    const slot_id = self.pending_cmd_slot_id;
+                    const code = self.pending_cmd_code;
+                    // Clear the flag for next command
+                    self.pending_cmd_valid.store(false, .release);
+                    return .{ .slot_id = slot_id, .code = code };
+                }
+            }
+
+            // Poll event ring directly (works for both modes, but MSI-X path above is faster)
+            if (self.event_ring.hasPending()) {
+                const event = self.event_ring.dequeue() orelse {
+                    hal.cpu.stall(10);
+                    continue;
+                };
+                const event_type = ring.getTrbType(event);
+
+                if (event_type == .CommandCompletionEvent) {
+                    const completion = trb.CommandCompletionEventTrb.fromTrb(event);
+                    self.updateErdp();
+                    return .{
+                        .slot_id = completion.getSlotId(),
+                        .code = completion.status.completion_code,
+                    };
+                }
+                // Not a command completion, update ERDP anyway
+                self.updateErdp();
+            }
+
+            hal.cpu.stall(10);
+        }
+
+        return error.Timeout;
     }
 };

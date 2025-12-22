@@ -540,9 +540,15 @@ fn doBlockIo(req: *const BlockRequest, resp: *BlockResponse) u32 {
     hdr_virt.reserved = 0;
     hdr_virt.sector = req.sector;
 
+    // Security: Zero DMA buffer before read to prevent info leak
+    // If device writes fewer bytes than expected, remaining bytes would leak stale data
+    const copy_len = @as(usize, req.sector_count) * SECTOR_SIZE;
+    if (req.request_type == VIRTIO_BLK_T_IN) {
+        @memset(data_virt[0..copy_len], 0);
+    }
+
     // For writes, copy data to DMA buffer
     if (req.request_type == VIRTIO_BLK_T_OUT) {
-        const copy_len = @as(usize, req.sector_count) * SECTOR_SIZE;
         for (0..copy_len) |i| {
             data_virt[i] = req.data[i];
         }
@@ -610,6 +616,15 @@ fn doBlockIo(req: *const BlockRequest, resp: *BlockResponse) u32 {
 
     if (timeout == 0) {
         syscall.print("Block I/O timeout\n");
+        return VIRTIO_BLK_S_IOERR;
+    }
+
+    // Security: Validate used ring entry matches expected descriptor
+    // Prevents processing wrong completion if hypervisor is buggy
+    const used_ring: [*]volatile VirtqUsedElem = @ptrFromInt(@intFromPtr(used_ptr) + 4);
+    const elem = used_ring[driver_state.last_used_idx % QUEUE_SIZE];
+    if (elem.id != head) {
+        syscall.print("Block I/O: used ring descriptor mismatch\n");
         return VIRTIO_BLK_S_IOERR;
     }
 

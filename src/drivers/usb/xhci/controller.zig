@@ -242,31 +242,15 @@ pub fn sendNoOp(ctrl: *Controller) !void {
 
     ctrl.ringDoorbell(0, 0);
 
-    // Wait for completion event
-    var timeout: u32 = 10000;
-    while (timeout > 0) : (timeout -= 1) {
-        if (ctrl.event_ring.hasPending()) {
-            const event = ctrl.event_ring.dequeue() orelse break;
-            const event_type = ring.getTrbType(event);
+    const result = ctrl.waitForCommandCompletion(10000) catch |err| {
+        console.err("XHCI: No-Op command timeout", .{});
+        return err;
+    };
 
-            if (event_type == .CommandCompletionEvent) {
-                const completion = trb.CommandCompletionEventTrb.fromTrb(event);
-                const code = completion.status.completion_code;
-                
-                ctrl.updateErdp();
-
-                if (code == .Success) {
-                    console.info("XHCI: No-Op command completed successfully", .{});
-                    return;
-                } else {
-                    console.err("XHCI: No-Op command failed with code {}", .{@intFromEnum(code)});
-                    return error.CommandFailed;
-                }
-            }
-        }
-        hal.cpu.stall(10);
+    if (result.code == .Success) {
+        console.info("XHCI: No-Op command completed successfully", .{});
+    } else {
+        console.err("XHCI: No-Op command failed with code {}", .{@intFromEnum(result.code)});
+        return error.CommandFailed;
     }
-
-    console.err("XHCI: No-Op command timeout", .{});
-    return error.Timeout;
 }

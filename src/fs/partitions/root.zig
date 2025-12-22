@@ -330,7 +330,9 @@ fn scanGpt(port_num: u5, disk_name: []const u8) !void {
         const entry: *align(1) gpt.GptEntry = @ptrCast(table_buffer[offset..].ptr);
 
         if (entry.isValid()) {
-            const size = entry.last_lba - entry.first_lba + 1;
+            // SECURITY: Use checked arithmetic to prevent overflow from malicious GPT data
+            const diff = std.math.sub(u64, entry.last_lba, entry.first_lba) catch continue;
+            const size = std.math.add(u64, diff, 1) catch continue;
             try registerPartition(port_num, disk_name, index, entry.first_lba, size);
             index += 1;
         }

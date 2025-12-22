@@ -89,7 +89,8 @@ pub fn sys_read(fd_num: usize, buf_ptr: usize, count: usize) SyscallError!usize 
 /// Writes up to count bytes from buf to fd.
 /// Uses FD table to dispatch to appropriate device write operation.
 pub fn sys_write(fd_num: usize, buf_ptr: usize, count: usize) SyscallError!usize {
-    console.debug("sys_write: fd={d} count={d} buf={x}", .{ fd_num, count, buf_ptr });
+    // Debug disabled - floods terminal when Doom writes video buffer
+    // console.debug("sys_write: fd={d} count={d} buf={x}", .{ fd_num, count, buf_ptr });
 
     if (count == 0) {
         return 0;
@@ -136,8 +137,6 @@ pub fn sys_write(fd_num: usize, buf_ptr: usize, count: usize) SyscallError!usize
     defer held.release();
 
     const bytes_written = do_write_locked(fd, kbuf);
-
-    console.debug("sys_write: result={d}", .{bytes_written});
 
     return error_helpers.mapDeviceError(bytes_written);
 }

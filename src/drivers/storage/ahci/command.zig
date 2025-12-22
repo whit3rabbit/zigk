@@ -208,7 +208,8 @@ pub const PrdtEntry = extern struct {
 
     /// Initialize a PRDT entry
     pub fn init(addr: u64, byte_count: u32, interrupt: bool) PrdtEntry {
-        var entry: PrdtEntry = undefined;
+        // Security: Zero-initialize to prevent potential info leaks from padding
+        var entry: PrdtEntry = std.mem.zeroes(PrdtEntry);
         entry.setDataAddr(addr);
         entry._reserved = 0;
         entry.setByteCount(byte_count, interrupt);

@@ -317,9 +317,19 @@ export fn _start(boot_info: *BootInfo.BootInfo) callconv(.c) noreturn {
     input.init();
     console.info("Input subsystem initialized", .{});
 
+    // Initialize PS/2 mouse driver
+    mouse.init();
+    hal.interrupts.setMouseHandler(&mouse.handleIrq);
+    // Route IRQ12 to vector 44 (MOUSE) before enabling
+    hal.apic.routeIrq(12, hal.apic.Vectors.MOUSE, 0);
+    hal.apic.enableIrq(12);
+    console.info("PS/2 mouse initialized, IRQ12 routed to vector {d}", .{hal.apic.Vectors.MOUSE});
+
     hal.interrupts.setSerialHandler(&serial_driver.Serial.handleIrq);
+    // Route IRQ4 to vector 36 (COM1) before enabling
+    hal.apic.routeIrq(4, hal.apic.Vectors.COM1, 0);
     hal.apic.enableIrq(4);
-    console.info("Serial IRQ4 enabled", .{});
+    console.info("Serial IRQ4 routed to vector {d}", .{hal.apic.Vectors.COM1});
 
     hal.interrupts.setCrashHandler(panic_lib.handleCrash);
 

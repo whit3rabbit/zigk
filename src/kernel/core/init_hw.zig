@@ -155,6 +155,103 @@ fn rxCallbackAdapter(data: []u8) void {
     _ = net.processFrame(&net_interface, &pkt);
 }
 
+/// Legacy PCI probe for E1000/E1000e NIC
+/// Fallback for ECAM timing issues on QEMU/TCG/macOS where device list may be corrupted.
+fn probeE1000Legacy(ecam: pci.Ecam) ?*e1000e.E1000e {
+    console.info("E1000e: Trying legacy PCI probe...", .{});
+    const legacy = pci.Legacy.init();
+
+    // E1000 device IDs: 0x100E (82540EM/QEMU), 0x100F (82545EM), 0x10D3 (82574L)
+    const e1000_ids = [_]u16{ 0x100E, 0x100F, 0x10D3, 0x10F6, 0x150C };
+
+    var dev_num: u5 = 0;
+    while (dev_num < 32) : (dev_num += 1) {
+        const vendor_id = legacy.read16(0, dev_num, 0, 0x00);
+        if (vendor_id != 0x8086) continue; // Must be Intel
+
+        const device_id = legacy.read16(0, dev_num, 0, 0x02);
+
+        // Check if it's an E1000 variant
+        var is_e1000 = false;
+        for (e1000_ids) |id| {
+            if (device_id == id) {
+                is_e1000 = true;
+                break;
+            }
+        }
+        if (!is_e1000) continue;
+
+        console.info("E1000e: Found via legacy probe at 00:{x:0>2}.0 (did={x:0>4})", .{ dev_num, device_id });
+
+        // Read BAR0 (MMIO, possibly 64-bit)
+        const bar0_raw = legacy.read32(0, dev_num, 0, 0x10);
+        const bar1_raw = legacy.read32(0, dev_num, 0, 0x14);
+
+        // E1000 uses MMIO BAR (bit 0 = 0), check if 64-bit (bits 2:1 = 10)
+        const is_mmio = (bar0_raw & 0x1) == 0;
+        const is_64bit = ((bar0_raw >> 1) & 0x3) == 2;
+
+        if (!is_mmio) {
+            console.warn("E1000e: BAR0 is not MMIO, skipping", .{});
+            continue;
+        }
+
+        const bar_base = if (is_64bit)
+            (@as(u64, bar1_raw) << 32) | (@as(u64, bar0_raw) & 0xFFFFFFF0)
+        else
+            @as(u64, bar0_raw & 0xFFFFFFF0);
+
+        // Build PciDevice struct
+        var fixed_dev = pci.PciDevice{
+            .bus = 0,
+            .device = dev_num,
+            .func = 0,
+            .vendor_id = vendor_id,
+            .device_id = device_id,
+            .revision = 0,
+            .prog_if = 0,
+            .subclass = 0x00, // Ethernet
+            .class_code = 0x02, // Network
+            .header_type = 0,
+            .bar = undefined,
+            .irq_line = legacy.read8(0, dev_num, 0, 0x3C),
+            .irq_pin = legacy.read8(0, dev_num, 0, 0x3D),
+            .gsi = 0,
+            .subsystem_vendor = legacy.read16(0, dev_num, 0, 0x2C),
+            .subsystem_id = legacy.read16(0, dev_num, 0, 0x2E),
+        };
+
+        // Initialize BAR array
+        for (&fixed_dev.bar) |*bar| {
+            bar.* = pci.Bar{
+                .base = 0,
+                .size = 0,
+                .is_mmio = false,
+                .is_64bit = false,
+                .prefetchable = false,
+                .bar_type = .unused,
+            };
+        }
+
+        // Set BAR0 - E1000 uses 128KB MMIO
+        fixed_dev.bar[0] = pci.Bar{
+            .base = bar_base,
+            .size = 0x20000, // 128KB for E1000
+            .is_mmio = true,
+            .is_64bit = is_64bit,
+            .prefetchable = (bar0_raw & 0x8) != 0,
+            .bar_type = if (is_64bit) .mmio_64bit else .mmio_32bit,
+        };
+
+        return e1000e.init(&fixed_dev, pci.PciAccess{ .ecam = ecam }) catch |err| {
+            console.warn("E1000e: Legacy init failed: {}", .{err});
+            return null;
+        };
+    }
+
+    return null;
+}
+
 /// Initialize the Network subsystem
 /// - Discovers PCI devices via ACPI/ECAM
 /// - Initializes E1000e NIC driver if found
@@ -200,6 +297,11 @@ pub fn initNetwork() void {
                 console.warn("E1000 init failed (no supported NIC?): {}", .{err});
                 break :blk null;
              };
+
+             // Fallback: Legacy PCI probe if ECAM device list has timing issues
+             if (nic_driver_opt == null) {
+                 nic_driver_opt = probeE1000Legacy(ecam_ptr.*);
+             }
         },
         .legacy => |legacy| {
             // 3. Initialize E1000 NIC driver (legacy mode - no MSI-X, uses INTx)
@@ -246,29 +348,114 @@ pub fn initUsb() void {
 }
 
 /// Initialize Audio subsystem (AC97)
-/// Requires PCI and ECAM.
+/// Uses Legacy PCI probe as fallback for ECAM timing issues on macOS/Apple Silicon.
 pub fn initAudio() void {
     console.print("\n");
     console.info("Initializing Audio subsystem...", .{});
-
-    const devices = pci_devices orelse {
-        console.warn("Audio: PCI not initialized, skipping Audio", .{});
-        return;
-    };
 
     const ecam = pci_ecam orelse {
         console.warn("Audio: PCI ECAM not available, skipping Audio", .{});
         return;
     };
 
-    if (devices.findAc97Controller()) |dev| {
-        console.info("Audio: Found AC97 Controller at {d}:{d}.{d}", .{ dev.bus, dev.device, dev.func });
-        audio.ac97.initFromPci(dev, pci.PciAccess{ .ecam = ecam }) catch |err| {
-            console.warn("Audio: Init failed: {}", .{err});
-        };
-    } else {
-        console.info("Audio: No AC97 controller found", .{});
+    // First try device list (may have ECAM timing issues)
+    if (pci_devices) |devices| {
+        if (devices.findAc97Controller()) |dev| {
+            console.info("Audio: Found AC97 Controller at {d}:{d}.{d}", .{ dev.bus, dev.device, dev.func });
+            audio.ac97.initFromPci(dev, pci.PciAccess{ .ecam = ecam }) catch |err| {
+                console.warn("Audio: Init failed: {}", .{err});
+            };
+            return;
+        }
     }
+
+    // Fallback: Legacy PCI I/O probe (ECAM may have timing issues on QEMU/TCG/macOS)
+    console.info("Audio: Trying legacy PCI probe...", .{});
+    const legacy = pci.Legacy.init();
+
+    var dev_num: u5 = 0;
+    while (dev_num < 32) : (dev_num += 1) {
+        const vendor_id = legacy.read16(0, dev_num, 0, 0x00);
+        if (vendor_id == 0xFFFF) continue;
+
+        const device_id = legacy.read16(0, dev_num, 0, 0x02);
+
+        // Intel AC97: VID=0x8086 DID=0x2415
+        if (vendor_id == 0x8086 and device_id == 0x2415) {
+            console.info("Audio: Found AC97 via legacy probe at 00:{x:0>2}.0", .{dev_num});
+
+            // Read BARs and build PciDevice struct
+            const bar0_raw = legacy.read32(0, dev_num, 0, 0x10);
+            const bar1_raw = legacy.read32(0, dev_num, 0, 0x14);
+
+            // AC97 uses I/O BARs (bit 0 = 1)
+            const bar0_io = (bar0_raw & 0x1) == 1;
+            const bar1_io = (bar1_raw & 0x1) == 1;
+
+            var fixed_dev = pci.PciDevice{
+                .bus = 0,
+                .device = dev_num,
+                .func = 0,
+                .vendor_id = vendor_id,
+                .device_id = device_id,
+                .revision = 0,
+                .prog_if = 0,
+                .subclass = 0x01, // Audio controller
+                .class_code = 0x04, // Multimedia
+                .header_type = 0,
+                .bar = undefined,
+                .irq_line = legacy.read8(0, dev_num, 0, 0x3C),
+                .irq_pin = legacy.read8(0, dev_num, 0, 0x3D),
+                .gsi = 0,
+                .subsystem_vendor = legacy.read16(0, dev_num, 0, 0x2C),
+                .subsystem_id = legacy.read16(0, dev_num, 0, 0x2E),
+            };
+
+            // Initialize BAR array
+            for (&fixed_dev.bar) |*bar| {
+                bar.* = pci.Bar{
+                    .base = 0,
+                    .size = 0,
+                    .is_mmio = false,
+                    .is_64bit = false,
+                    .prefetchable = false,
+                    .bar_type = .unused,
+                };
+            }
+
+            // Set BAR0 (NAMBAR - Native Audio Mixer)
+            if (bar0_io) {
+                fixed_dev.bar[0] = pci.Bar{
+                    .base = @as(u64, bar0_raw & 0xFFFFFFFC),
+                    .size = 256, // Mixer registers
+                    .is_mmio = false,
+                    .is_64bit = false,
+                    .prefetchable = false,
+                    .bar_type = .io,
+                };
+            }
+
+            // Set BAR1 (NABMBAR - Native Audio Bus Master)
+            if (bar1_io) {
+                fixed_dev.bar[1] = pci.Bar{
+                    .base = @as(u64, bar1_raw & 0xFFFFFFFC),
+                    .size = 64, // Bus master registers
+                    .is_mmio = false,
+                    .is_64bit = false,
+                    .prefetchable = false,
+                    .bar_type = .io,
+                };
+            }
+
+            audio.ac97.initFromPci(&fixed_dev, pci.PciAccess{ .ecam = ecam }) catch |err| {
+                console.warn("Audio: Init failed: {}", .{err});
+                return;
+            };
+            return;
+        }
+    }
+
+    console.info("Audio: No AC97 controller found", .{});
 }
 
 /// Initialize Storage subsystem (AHCI SATA)

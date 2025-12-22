@@ -1,6 +1,7 @@
 const std = @import("std");
 const console = @import("console");
 const hal = @import("hal");
+const pmm = @import("pmm");
 
 const types = @import("../types.zig");
 const device = @import("../device.zig");
@@ -108,15 +109,26 @@ fn doControlTransfer(
     _ = ep0_ring.enqueueSingle(setup_trb.asTrb().*) orelse return error.RingFull;
 
     // Data Stage TRB (if needed)
+    // For DMA, we need a buffer in HHDM range. Stack buffers are NOT in HHDM.
+    // Allocate a DMA-safe page and copy data to/from it.
     var data_trb_phys: u64 = 0;
+    var dma_page_phys: ?u64 = null;
+    var dma_buf: ?[*]u8 = null;
+
     if (has_data) {
         const buf = buffer.?;
-        // Get physical address of buffer
-        // Note: buffer must be in kernel memory (not user space)
-        const buf_phys = hal.paging.virtToPhys(@intFromPtr(buf.ptr));
-
         // Security: Use checked conversion - TRB length field is 17 bits (max 131071)
         const trb_len: u17 = std.math.cast(u17, buf.len) orelse return error.InvalidParam;
+
+        // Allocate DMA-safe page for data transfer
+        dma_page_phys = pmm.allocZeroedPages(1) orelse return error.OutOfMemory;
+        const buf_phys = dma_page_phys.?;
+        dma_buf = hal.paging.physToVirt(buf_phys);
+
+        // For OUT transfers, copy data to DMA buffer before transfer
+        if (!is_in) {
+            @memcpy(dma_buf.?[0..buf.len], buf);
+        }
 
         var data_trb = trb.DataStageTrb.init(
             buf_phys,
@@ -127,7 +139,10 @@ fn doControlTransfer(
             ep0_ring.getCycleState(),
         );
 
-        data_trb_phys = ep0_ring.enqueueSingle(data_trb.asTrb().*) orelse return error.RingFull;
+        data_trb_phys = ep0_ring.enqueueSingle(data_trb.asTrb().*) orelse {
+            pmm.freePages(dma_page_phys.?, 1);
+            return error.RingFull;
+        };
     }
 
     // Status Stage TRB (direction opposite to data stage)
@@ -141,7 +156,10 @@ fn doControlTransfer(
         ep0_ring.getCycleState(),
     );
 
-    const status_trb_phys = ep0_ring.enqueueSingle(status_trb.asTrb().*) orelse return error.RingFull;
+    const status_trb_phys = ep0_ring.enqueueSingle(status_trb.asTrb().*) orelse {
+        if (dma_page_phys) |phys| pmm.freePages(phys, 1);
+        return error.RingFull;
+    };
 
     // Mark pending transfer for event matching
     device.startPendingTransfer(status_trb_phys, dev.slot_id, 1); // EP0 DCI = 1
@@ -152,6 +170,7 @@ fn doControlTransfer(
 
     // Wait for completion
     const residual = common.waitForCompletion(ctrl, dev, 1, timeout_ms) catch |err| {
+        if (dma_page_phys) |phys| pmm.freePages(phys, 1);
         return err;
     };
 
@@ -159,6 +178,16 @@ fn doControlTransfer(
     // For IN transfers, residual tells us how many bytes were NOT transferred
     const requested = if (buffer) |b| b.len else 0;
     const transferred = if (residual <= requested) requested - residual else 0;
+
+    // For IN transfers, copy data from DMA buffer back to user buffer
+    if (has_data and is_in and dma_buf != null and buffer != null) {
+        @memcpy(buffer.?[0..transferred], dma_buf.?[0..transferred]);
+    }
+
+    // Free DMA page
+    if (dma_page_phys) |phys| {
+        pmm.freePages(phys, 1);
+    }
 
     return transferred;
 }

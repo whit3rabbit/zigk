@@ -99,7 +99,12 @@ pub const MscDriver = struct {
         const tag = self.current_tag;
         self.current_tag +%= 1;
 
-        const data_len: u32 = if (data) |d| @truncate(d.len) else 0;
+        // Security: Use checked cast instead of truncate to prevent silent overflow
+        const data_len: u32 = if (data) |d| std.math.cast(u32, d.len) orelse return error.BufferTooLarge else 0;
+
+        // Security: Validate command length (SCSI commands are max 16 bytes)
+        if (cmd.len > 16) return error.InvalidCommand;
+        const cmd_len: u8 = @intCast(cmd.len);
 
         // 1. Send CBW
         var cbw = CommandBlockWrapper.init(
@@ -107,7 +112,7 @@ pub const MscDriver = struct {
             data_len,
             dir_in,
             lun,
-            @truncate(cmd.len),
+            cmd_len,
             cmd,
         );
         
@@ -124,9 +129,14 @@ pub const MscDriver = struct {
                 console.debug("MSC: Transferring data len={}", .{buf.len});
                 const transferred = try usb.Transfer.queueBulkTransfer(self.ctrl, self.dev, ep, buf);
                 console.debug("MSC: Data transferred={}", .{transferred});
-                
+
                 if (transferred < buf.len) {
                     console.warn("MSC: Short data transfer: {} < {}", .{transferred, buf.len});
+                    // Security: Zero remaining buffer on IN transfers to prevent info leak
+                    // Device may have written less than expected, leaving stale data
+                    if (dir_in) {
+                        @memset(buf[transferred..], 0);
+                    }
                 }
             }
         }

@@ -66,7 +66,8 @@ pub fn sfsRead(file_desc: *fd.FileDescriptor, buf: []u8) isize {
 
     if (sector_count > 1 and sector_count <= MAX_BATCH_SECTORS) {
         const total_bytes = @as(usize, sector_count_u16) * 512;
-        var sector_buf: [MAX_BATCH_SECTORS * 512]u8 = undefined;
+        // SECURITY: Zero-initialize to prevent information leak if DMA fails or returns partial data
+        var sector_buf: [MAX_BATCH_SECTORS * 512]u8 = [_]u8{0} ** (MAX_BATCH_SECTORS * 512);
 
         const end_block = phys_block_start + sector_count_u16 - 1;
         if (end_block >= file.fs.superblock.total_blocks) {
@@ -103,7 +104,8 @@ pub fn sfsRead(file_desc: *fd.FileDescriptor, buf: []u8) isize {
             return -5;
         }
 
-        var sector_buf: [512]u8 = undefined;
+        // SECURITY: Zero-initialize to prevent information leak if read fails
+        var sector_buf: [512]u8 = [_]u8{0} ** 512;
         sfs_io.readSector(file.fs.device_fd, phys_block, &sector_buf) catch return -5;
 
         const chunk = @min(to_read - read_count, 512 - byte_offset);
@@ -412,42 +414,14 @@ pub fn sfsOpen(ctx: ?*anyopaque, path: []const u8, flags: u32) vfs.Error!*fd.Fil
         };
     } else {
         if ((flags & fd.O_CREAT) != 0) {
-            var new_idx: u32 = undefined;
-            {
-                const lock_held = self.alloc_lock.acquire();
-                defer lock_held.release();
-
-                if (self.superblock.file_count >= t.MAX_FILES) return vfs.Error.NoMemory;
-                sfs_io.readDirectoryAsync(self, &dir_buf) catch return vfs.Error.IOError;
-
-                var reserved_idx: ?u32 = null;
-                for (0..t.MAX_FILES) |slot_i| {
-                    const slot_idx: u32 = @intCast(slot_i);
-                    const blk_idx = slot_idx / 4;
-                    const off_idx = slot_idx % 4;
-                    const e: *const t.DirEntry = @ptrCast(@alignCast(&dir_buf[blk_idx * 512 + off_idx * 128]));
-                    if (e.flags == 0) {
-                        reserved_idx = slot_idx;
-                        break;
-                    }
-                }
-
-                new_idx = reserved_idx orelse return vfs.Error.NoMemory;
-                const blk_idx = new_idx / 4;
-                const off_idx = new_idx % 4;
-                const slot: *t.DirEntry = @ptrCast(@alignCast(&dir_buf[blk_idx * 512 + off_idx * 128]));
-                slot.flags = 1;
-
-                self.superblock.file_count += 1;
-            }
-
+            // SECURITY: Allocate block FIRST (takes its own lock internally),
+            // then do all metadata updates atomically under a single lock hold.
+            // This prevents TOCTOU race where another thread could see partial state.
             const start_block = sfs_alloc.allocateBlock(self) catch {
-                const lock_held = self.alloc_lock.acquire();
-                defer lock_held.release();
-                if (self.superblock.file_count > 0) self.superblock.file_count -= 1;
                 return vfs.Error.NoMemory;
             };
 
+            // If anything fails after block allocation, free the block
             errdefer sfs_alloc.freeBlock(self, start_block) catch {};
 
             const default_mode: u32 = meta.S_IFREG | 0o644;
@@ -464,13 +438,42 @@ pub fn sfsOpen(ctx: ?*anyopaque, path: []const u8, flags: u32) vfs.Error!*fd.Fil
             };
             @memcpy(new_entry.name[0..name.len], name);
 
-            const phase3_result: vfs.Error!void = blk: {
+            // SECURITY: Hold lock through entire metadata update to prevent TOCTOU
+            var new_idx: u32 = undefined;
+            const create_result: vfs.Error!void = blk: {
                 const lock_held = self.alloc_lock.acquire();
                 defer lock_held.release();
 
+                // Check file count limit under lock
+                if (self.superblock.file_count >= t.MAX_FILES) {
+                    break :blk vfs.Error.NoMemory;
+                }
+
+                // Re-read directory under lock to get current state
+                sfs_io.readDirectoryAsync(self, &dir_buf) catch {
+                    break :blk vfs.Error.IOError;
+                };
+
+                // Find free slot under lock
+                var reserved_idx: ?u32 = null;
+                for (0..t.MAX_FILES) |slot_i| {
+                    const slot_idx: u32 = @intCast(slot_i);
+                    const blk_idx = slot_idx / 4;
+                    const off_idx = slot_idx % 4;
+                    const e: *const t.DirEntry = @ptrCast(@alignCast(&dir_buf[blk_idx * 512 + off_idx * 128]));
+                    if (e.flags == 0) {
+                        reserved_idx = slot_idx;
+                        break;
+                    }
+                }
+
+                new_idx = reserved_idx orelse {
+                    break :blk vfs.Error.NoMemory;
+                };
+
+                // Write directory entry under lock
                 const block_idx = new_idx / 4;
                 const offset_in_dir = new_idx * 128;
-
                 const dest: *t.DirEntry = @ptrCast(@alignCast(&dir_buf[offset_in_dir]));
                 dest.* = new_entry;
 
@@ -479,22 +482,23 @@ pub fn sfsOpen(ctx: ?*anyopaque, path: []const u8, flags: u32) vfs.Error!*fd.Fil
                     break :blk vfs.Error.IOError;
                 };
 
+                // Update superblock under lock
+                self.superblock.file_count += 1;
                 sfs_io.updateSuperblock(self) catch {
+                    self.superblock.file_count -= 1;
                     break :blk vfs.Error.IOError;
                 };
 
+                // Update open count under lock
                 self.open_counts[new_idx] = std.math.add(u32, self.open_counts[new_idx], 1) catch {
+                    self.superblock.file_count -= 1;
                     break :blk vfs.Error.NoMemory;
                 };
 
                 break :blk {};
             };
 
-            if (phase3_result) |_| {} else |err| {
-                sfs_alloc.freeBlock(self, start_block) catch {};
-                const lock_held = self.alloc_lock.acquire();
-                defer lock_held.release();
-                if (self.superblock.file_count > 0) self.superblock.file_count -= 1;
+            if (create_result) |_| {} else |err| {
                 return err;
             }
 
@@ -549,27 +553,36 @@ pub fn sfsUnlink(ctx: ?*anyopaque, path: []const u8) vfs.Error!void {
             const e_name = std.mem.sliceTo(&e.name, 0);
             if (e_name.len >= 32) continue;
             if (std.mem.eql(u8, e_name, name)) {
-                var is_open = false;
                 const blocks_used: u32 = if (e.size == 0) 1 else (e.size + 511) / 512;
-                {
-                    const lock_held = self.alloc_lock.acquire();
-                    defer lock_held.release();
 
-                    if (self.open_counts[idx] > 0) {
-                        is_open = true;
-                        self.pending_delete[idx] = true;
-                        self.deferred_info[idx] = .{
-                            .start_block = e.start_block,
-                            .block_count = blocks_used,
-                        };
-                        console.info("SFS: Deferring deletion of '{s}' (open_count={}, blocks={})", .{ name, self.open_counts[idx], blocks_used });
-                    }
+                // SECURITY: Hold lock through entire unlink operation to prevent TOCTOU race
+                // A concurrent sfsOpen could otherwise see the entry before we clear it,
+                // then access freed blocks after we release the lock
+                const lock_held = self.alloc_lock.acquire();
+                defer lock_held.release();
+
+                // Re-validate entry under lock (another thread may have deleted it)
+                if (e.flags != 1) {
+                    return vfs.Error.NotFound;
                 }
 
+                var is_open = false;
+                if (self.open_counts[idx] > 0) {
+                    is_open = true;
+                    self.pending_delete[idx] = true;
+                    self.deferred_info[idx] = .{
+                        .start_block = e.start_block,
+                        .block_count = blocks_used,
+                    };
+                    console.info("SFS: Deferring deletion of '{s}' (open_count={}, blocks={})", .{ name, self.open_counts[idx], blocks_used });
+                }
+
+                // Free blocks while holding lock (if not deferred)
                 if (!is_open) {
                     sfs_alloc.freeBlocks(self, e.start_block, blocks_used);
                 }
 
+                // Clear directory entry while holding lock
                 e.flags = 0;
                 e.name = [_]u8{0} ** 32;
                 if (!is_open) {
@@ -577,15 +590,13 @@ pub fn sfsUnlink(ctx: ?*anyopaque, path: []const u8) vfs.Error!void {
                     e.size = 0;
                 }
 
+                // Write directory update while holding lock
                 const block_idx = idx / 4;
                 const block_start = block_idx * 512;
                 sfs_io.writeSectorAsync(self, self.superblock.root_dir_start + block_idx, dir_buf[block_start..][0..512]) catch return vfs.Error.IOError;
 
-                {
-                    const lock_held = self.alloc_lock.acquire();
-                    defer lock_held.release();
-                    self.superblock.file_count = std.math.sub(u32, self.superblock.file_count, 1) catch 0;
-                }
+                // Update superblock while holding lock
+                self.superblock.file_count = std.math.sub(u32, self.superblock.file_count, 1) catch 0;
                 sfs_io.updateSuperblock(self) catch return vfs.Error.IOError;
 
                 console.info("SFS: Unlinked '{s}'", .{name});
@@ -906,7 +917,9 @@ pub const sfs_ops = fd.FileOps{
 };
 
 fn sfsTruncate(file_desc: *fd.FileDescriptor, length: u64) error{ AccessDenied, IOError }!void {
-    truncateFd(file_desc, @intCast(length)) catch {
+    // SECURITY: Use checked cast to prevent truncation on hypothetical 32-bit targets
+    const length_usize = std.math.cast(usize, length) orelse return error.IOError;
+    truncateFd(file_desc, length_usize) catch {
         return error.IOError;
     };
 }

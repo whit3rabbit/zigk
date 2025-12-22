@@ -29,12 +29,25 @@ pub const IommuDmaCapability = struct {
     func: u3,
     /// Maximum total DMA allocation size in bytes
     max_size: u64,
-    /// IOMMU domain ID assigned by kernel (0 = not yet assigned)
-    domain_id: u16,
+    /// IOMMU domain ID assigned by kernel.
+    /// SECURITY: Uses UNASSIGNED_DOMAIN (0xFFFF) as sentinel to prevent
+    /// collision with valid domain 0 (often kernel's identity-mapped domain).
+    domain_id: u16 = UNASSIGNED_DOMAIN,
     /// If true, IOMMU protection is mandatory - syscall fails if IOVA
     /// allocation fails rather than falling back to raw physical addresses.
     /// SECURITY: Prevents DMA attacks when device isolation is required.
     iommu_required: bool = false,
+
+    /// Sentinel value for unassigned IOMMU domain.
+    /// SECURITY: Domain 0 is often valid (kernel identity map), so we use
+    /// 0xFFFF as "not yet assigned" to prevent accidental domain sharing.
+    pub const UNASSIGNED_DOMAIN: u16 = 0xFFFF;
+
+    /// Check if this capability has a valid assigned domain
+    /// SECURITY: Must be called before DMA operations to ensure isolation
+    pub fn hasValidDomain(self: IommuDmaCapability) bool {
+        return self.domain_id != UNASSIGNED_DOMAIN;
+    }
 
     /// Create raw BDF encoding
     pub fn toBdf(self: IommuDmaCapability) u16 {
@@ -74,14 +87,25 @@ pub const PciConfigCapability = struct {
         pub const BAR4: u12 = 0x20;
         pub const BAR5: u12 = 0x24;
         pub const EXPANSION_ROM: u12 = 0x30;
-        // MSI capability register offsets are capability-relative, checked separately
+        /// Start of PCI capabilities region (MSI, MSI-X, PM, etc.)
+        /// SECURITY: All writes to 0x40+ are blocked to prevent MSI/MSI-X
+        /// interrupt redirection attacks without walking the capability list.
+        pub const CAPABILITIES_START: u12 = 0x40;
     };
 
     /// Check if writing to the given offset is allowed
+    /// SECURITY: Blocks writes to Command, BARs, ROM, and the entire
+    /// capabilities region (0x40+) where MSI/MSI-X control registers live.
+    /// This prevents interrupt redirection attacks via MSI address/data modification.
     pub fn allowsWrite(self: PciConfigCapability, offset: u12) bool {
         if (self.allow_unsafe) return true;
 
-        // Block writes to security-sensitive registers
+        // SECURITY: Block ALL writes to capability region (MSI/MSI-X/PM/etc.)
+        // MSI Message Address/Data registers control interrupt destinations.
+        // Allowing writes here enables interrupt redirection attacks.
+        if (offset >= RESTRICTED_OFFSETS.CAPABILITIES_START) return false;
+
+        // Block writes to security-sensitive standard header registers
         return switch (offset) {
             RESTRICTED_OFFSETS.COMMAND,
             RESTRICTED_OFFSETS.BAR0,
@@ -116,8 +140,9 @@ pub const FileCapability = struct {
     pub fn allows(self: FileCapability, path: []const u8, op: u8) bool {
         if ((self.ops & op) == 0) return false;
 
-        // Reject empty capability paths (invalid configuration)
-        if (self.path_len == 0) return false;
+        // SECURITY: Reject invalid path_len to prevent OOB read
+        // A malformed capability with path_len > 64 would cause slice panic or OOB access
+        if (self.path_len == 0 or self.path_len > self.path.len) return false;
 
         const cap_path = self.path[0..self.path_len];
 
@@ -213,8 +238,9 @@ pub const MountCapability = struct {
     pub fn allows(self: MountCapability, path: []const u8, op: u8) bool {
         if ((self.ops & op) == 0) return false;
 
-        // Reject empty capability paths
-        if (self.path_len == 0) return false;
+        // SECURITY: Reject invalid path_len to prevent OOB read
+        // A malformed capability with path_len > 64 would cause slice panic or OOB access
+        if (self.path_len == 0 or self.path_len > self.path.len) return false;
 
         const cap_path = self.path[0..self.path_len];
 
@@ -227,6 +253,46 @@ pub const MountCapability = struct {
 
         // Exact path match only (no prefix matching for mounts)
         return std.mem.eql(u8, cap_path, path);
+    }
+};
+
+/// Capability for injecting keyboard/mouse input events
+///
+/// SECURITY: This capability controls what input events a process can inject.
+/// Without restrictions, a compromised driver could inject arbitrary keystrokes
+/// (including Ctrl+Alt+Del, terminal commands) at unlimited rate.
+pub const InputInjectionCapability = struct {
+    /// Maximum events per second (rate limiting to prevent input flooding)
+    /// Default 1000 allows normal input while preventing DoS
+    max_events_per_second: u32 = 1000,
+
+    /// Allowed device types bitmask:
+    /// - Bit 0 (0x01): Keyboard events
+    /// - Bit 1 (0x02): Mouse/pointer events
+    /// - Bit 2 (0x04): Touch events
+    /// Default allows keyboard and mouse only
+    device_mask: u8 = 0x03,
+
+    /// If true, blocks injection of dangerous key combinations:
+    /// - Ctrl+Alt+Del (reboot trigger)
+    /// - SysRq combinations (kernel debug)
+    /// - Ctrl+C to PID 1 (init kill)
+    /// Default true for defense-in-depth
+    block_dangerous_combos: bool = true,
+
+    pub const DEVICE_KEYBOARD: u8 = 0x01;
+    pub const DEVICE_MOUSE: u8 = 0x02;
+    pub const DEVICE_TOUCH: u8 = 0x04;
+    pub const DEVICE_ALL: u8 = 0x07;
+
+    /// Check if keyboard injection is allowed
+    pub fn allowsKeyboard(self: InputInjectionCapability) bool {
+        return (self.device_mask & DEVICE_KEYBOARD) != 0;
+    }
+
+    /// Check if mouse injection is allowed
+    pub fn allowsMouse(self: InputInjectionCapability) bool {
+        return (self.device_mask & DEVICE_MOUSE) != 0;
     }
 };
 
@@ -254,7 +320,8 @@ pub const Capability = union(CapabilityType) {
     IommuDma: IommuDmaCapability,
     PciConfig: PciConfigCapability,
     /// Allows injecting keyboard/mouse input via IPC to kernel (PID 0)
-    InputInjection: void,
+    /// SECURITY: Now includes rate limiting, device filtering, and combo blocking
+    InputInjection: InputInjectionCapability,
     /// Allows mounting/unmounting filesystems
     Mount: MountCapability,
     /// Allows file write operations (create, delete, modify)

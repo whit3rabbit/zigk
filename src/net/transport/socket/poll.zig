@@ -9,9 +9,13 @@ const poll_def = uapi.poll;
 
 /// Poll socket for events
 /// Returns mask of ready events (POLLIN, POLLOUT, etc.)
+///
+/// Lock ordering: tcp_state.lock (5) -> socket/state.lock (6) per CLAUDE.md.
+/// This matches the RX interrupt handler path which holds tcp_state.lock
+/// while processing incoming packets that update socket state.
 pub fn checkPollEvents(fd: usize, events: u16) u16 {
-    // Acquire TCP state lock FIRST to match RX handler lock ordering.
-    // RX path holds tcp_state.lock then accesses sockets, so we must
+    // Acquire TCP state lock FIRST per documented lock ordering (CLAUDE.md item 5).
+    // RX interrupt path holds tcp_state.lock then accesses sockets, so we must
     // acquire in the same order to prevent deadlock.
     const tcp_held = tcp_state.lock.acquire();
     defer tcp_held.release();

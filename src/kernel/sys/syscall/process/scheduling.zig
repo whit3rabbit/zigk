@@ -190,9 +190,13 @@ pub fn sys_select(nfds: usize, readfds: usize, writefds: usize, exceptfds: usize
             if (want_except) poll_events |= uapi.epoll.EPOLLERR | uapi.epoll.EPOLLPRI;
 
             // Call poll if available
+            // SECURITY: Mask out epoll high bits (EPOLLET, EPOLLONESHOT, etc.)
+            // that cannot be represented in select semantics. These bits could
+            // cause unexpected behavior if poll implementations return them.
+            const EPOLL_EVENT_MASK: u32 = 0x0000FFFF;
             var revents: u32 = 0;
             if (fd_ptr.ops.poll) |poll_fn| {
-                revents = poll_fn(fd_ptr, poll_events);
+                revents = poll_fn(fd_ptr, poll_events) & EPOLL_EVENT_MASK;
             } else {
                 // No poll - assume always ready for the modes the FD supports
                 if (want_read and fd_ptr.isReadable()) revents |= uapi.epoll.EPOLLIN;

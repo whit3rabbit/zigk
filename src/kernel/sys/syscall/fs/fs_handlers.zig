@@ -111,13 +111,23 @@ pub fn sys_mount(
 
     // Copy strings from userspace
     const source = user_mem.copyStringFromUser(source_buf, source_ptr) catch return error.EFAULT;
-    const target = user_mem.copyStringFromUser(target_buf, target_ptr) catch return error.EFAULT;
+    const raw_target = user_mem.copyStringFromUser(target_buf, target_ptr) catch return error.EFAULT;
     const fstype = user_mem.copyStringFromUser(fstype_buf, fstype_ptr) catch return error.EFAULT;
 
     // Validate target is absolute path
-    if (target.len == 0 or target[0] != '/') return error.EINVAL;
+    if (raw_target.len == 0 or raw_target[0] != '/') return error.EINVAL;
 
-    // Capability check
+    // SECURITY: Canonicalize path BEFORE capability check to prevent bypass via "../"
+    // Without this, an attacker with capability for "/data/mnt" could mount to
+    // "/data/../bin" which resolves to "/bin" after the capability check passes.
+    const canon_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(canon_buf);
+    const target = canonicalizePath(raw_target, canon_buf) orelse {
+        // Path contains ".." or other invalid components - reject for security
+        return error.EINVAL;
+    };
+
+    // Capability check on canonicalized path
     const proc = base.getCurrentProcess();
     if (!hasMountCapability(proc, target, MOUNT_OP)) {
         return error.EPERM;
@@ -160,11 +170,18 @@ pub fn sys_umount2(target_ptr: usize, flags: usize) base.SyscallError!usize {
     const target_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
     defer alloc.free(target_buf);
 
-    const target = user_mem.copyStringFromUser(target_buf, target_ptr) catch return error.EFAULT;
+    const raw_target = user_mem.copyStringFromUser(target_buf, target_ptr) catch return error.EFAULT;
 
-    if (target.len == 0 or target[0] != '/') return error.EINVAL;
+    if (raw_target.len == 0 or raw_target[0] != '/') return error.EINVAL;
 
-    // Capability check
+    // SECURITY: Canonicalize path BEFORE capability check to prevent bypass via "../"
+    const canon_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(canon_buf);
+    const target = canonicalizePath(raw_target, canon_buf) orelse {
+        return error.EINVAL;
+    };
+
+    // Capability check on canonicalized path
     const proc = base.getCurrentProcess();
     if (!hasMountCapability(proc, target, UMOUNT_OP)) {
         return error.EPERM;
@@ -582,7 +599,8 @@ pub fn sys_rmdir(path_ptr: usize) base.SyscallError!usize {
         return error.EACCES;
     }
 
-    fs.vfs.Vfs.rmdir(path_buf) catch |err| {
+    // SECURITY: Use canonicalized path, not raw path_buf (fixes path traversal bypass)
+    fs.vfs.Vfs.rmdir(path) catch |err| {
         return switch (err) {
             error.NotEmpty => error.ENOTEMPTY,
             error.NotFound => error.ENOENT,

@@ -21,12 +21,20 @@ const hub = @import("../class/hub.zig");
 
 const Controller = types.Controller;
 
+/// Error type for command operations
+const CommandError = error{
+    RingFull,
+    CommandFailed,
+    Timeout,
+    InvalidSpeed,
+};
+
 // =============================================================================
 // USB Device Enumeration Commands
 // =============================================================================
 
 /// Send Enable Slot command and return allocated slot ID
-pub fn enableSlot(ctrl: *Controller) !u8 {
+pub fn enableSlot(ctrl: *Controller) CommandError!u8 {
     console.info("XHCI: Sending Enable Slot command...", .{});
 
     var enable_cmd = trb.EnableSlotCmdTrb.init(ctrl.command_ring.getCycleState());
@@ -36,35 +44,18 @@ pub fn enableSlot(ctrl: *Controller) !u8 {
 
     ctrl.ringDoorbell(0, 0);
 
-    // Wait for completion
-    var timeout: u32 = 50000;
-    while (timeout > 0) : (timeout -= 1) {
-        if (ctrl.event_ring.hasPending()) {
-            const event = ctrl.event_ring.dequeue() orelse continue;
-            const event_type = ring.getTrbType(event);
-
-            if (event_type == .CommandCompletionEvent) {
-                const completion = trb.CommandCompletionEventTrb.fromTrb(event);
-                ctrl.updateErdp();
-
-                if (completion.status.completion_code == .Success) {
-                    const slot_id = completion.getSlotId();
-                    console.info("XHCI: Enable Slot succeeded, slot_id={}", .{slot_id});
-                    return slot_id;
-                } else {
-                    console.err("XHCI: Enable Slot failed: {}", .{@intFromEnum(completion.status.completion_code)});
-                    return error.CommandFailed;
-                }
-            }
-        }
-        hal.cpu.stall(10);
+    const result = ctrl.waitForCommandCompletion(50000) catch return error.Timeout;
+    if (result.code == .Success) {
+        console.info("XHCI: Enable Slot succeeded, slot_id={}", .{result.slot_id});
+        return result.slot_id;
+    } else {
+        console.err("XHCI: Enable Slot failed: {}", .{@intFromEnum(result.code)});
+        return error.CommandFailed;
     }
-
-    return error.Timeout;
 }
 
 /// Send Address Device command
-pub fn addressDevice(ctrl: *Controller, dev: *device.UsbDevice, bsr: bool) !void {
+pub fn addressDevice(ctrl: *Controller, dev: *device.UsbDevice, bsr: bool) CommandError!void {
     console.info("XHCI: Sending Address Device command (slot={}, BSR={})...", .{ dev.slot_id, bsr });
 
     // Build Address Device command TRB
@@ -84,34 +75,17 @@ pub fn addressDevice(ctrl: *Controller, dev: *device.UsbDevice, bsr: bool) !void
 
     ctrl.ringDoorbell(0, 0);
 
-    // Wait for completion
-    var timeout: u32 = 100000;
-    while (timeout > 0) : (timeout -= 1) {
-        if (ctrl.event_ring.hasPending()) {
-            const event = ctrl.event_ring.dequeue() orelse continue;
-            const event_type = ring.getTrbType(event);
-
-            if (event_type == .CommandCompletionEvent) {
-                const completion = trb.CommandCompletionEventTrb.fromTrb(event);
-                ctrl.updateErdp();
-
-                if (completion.status.completion_code == .Success) {
-                    console.info("XHCI: Address Device succeeded", .{});
-                    return;
-                } else {
-                    console.err("XHCI: Address Device failed: {}", .{@intFromEnum(completion.status.completion_code)});
-                    return error.CommandFailed;
-                }
-            }
-        }
-        hal.cpu.stall(10);
+    const result = ctrl.waitForCommandCompletion(100000) catch return error.Timeout;
+    if (result.code == .Success) {
+        console.info("XHCI: Address Device succeeded", .{});
+    } else {
+        console.err("XHCI: Address Device failed: {}", .{@intFromEnum(result.code)});
+        return error.CommandFailed;
     }
-
-    return error.Timeout;
 }
 
 /// Send Configure Endpoint command
-pub fn configureEndpoint(ctrl: *Controller, dev: *device.UsbDevice) !void {
+pub fn configureEndpoint(ctrl: *Controller, dev: *device.UsbDevice) CommandError!void {
     console.info("XHCI: Sending Configure Endpoint command (slot={})...", .{dev.slot_id});
 
     var config_cmd = trb.ConfigureEndpointCmdTrb.init(
@@ -127,34 +101,17 @@ pub fn configureEndpoint(ctrl: *Controller, dev: *device.UsbDevice) !void {
 
     ctrl.ringDoorbell(0, 0);
 
-    // Wait for completion
-    var timeout: u32 = 100000;
-    while (timeout > 0) : (timeout -= 1) {
-        if (ctrl.event_ring.hasPending()) {
-            const event = ctrl.event_ring.dequeue() orelse continue;
-            const event_type = ring.getTrbType(event);
-
-            if (event_type == .CommandCompletionEvent) {
-                const completion = trb.CommandCompletionEventTrb.fromTrb(event);
-                ctrl.updateErdp();
-
-                if (completion.status.completion_code == .Success) {
-                    console.info("XHCI: Configure Endpoint succeeded", .{});
-                    return;
-                } else {
-                    console.err("XHCI: Configure Endpoint failed: {}", .{@intFromEnum(completion.status.completion_code)});
-                    return error.CommandFailed;
-                }
-            }
-        }
-        hal.cpu.stall(10);
+    const result = ctrl.waitForCommandCompletion(100000) catch return error.Timeout;
+    if (result.code == .Success) {
+        console.info("XHCI: Configure Endpoint succeeded", .{});
+    } else {
+        console.err("XHCI: Configure Endpoint failed: {}", .{@intFromEnum(result.code)});
+        return error.CommandFailed;
     }
-
-    return error.Timeout;
 }
 
 /// Send Evaluate Context command (for updating EP0 max packet size)
-pub fn evaluateContext(ctrl: *Controller, dev: *device.UsbDevice) !void {
+pub fn evaluateContext(ctrl: *Controller, dev: *device.UsbDevice) CommandError!void {
     console.info("XHCI: Sending Evaluate Context command (slot={})...", .{dev.slot_id});
 
     var eval_cmd = trb.EvaluateContextCmdTrb.init(
@@ -169,35 +126,20 @@ pub fn evaluateContext(ctrl: *Controller, dev: *device.UsbDevice) !void {
 
     ctrl.ringDoorbell(0, 0);
 
-    // Wait for completion
-    var timeout: u32 = 50000;
-    while (timeout > 0) : (timeout -= 1) {
-        if (ctrl.event_ring.hasPending()) {
-            const event = ctrl.event_ring.dequeue() orelse continue;
-            const event_type = ring.getTrbType(event);
-
-            if (event_type == .CommandCompletionEvent) {
-                const completion = trb.CommandCompletionEventTrb.fromTrb(event);
-                ctrl.updateErdp();
-
-                if (completion.status.completion_code == .Success) {
-                    console.info("XHCI: Evaluate Context succeeded", .{});
-                    return;
-                } else {
-                    console.err("XHCI: Evaluate Context failed: {}", .{@intFromEnum(completion.status.completion_code)});
-                    return error.CommandFailed;
-                }
-            }
-        }
-        hal.cpu.stall(10);
+    const result = ctrl.waitForCommandCompletion(50000) catch return error.Timeout;
+    if (result.code == .Success) {
+        console.info("XHCI: Evaluate Context succeeded", .{});
+    } else {
+        console.err("XHCI: Evaluate Context failed: {}", .{@intFromEnum(result.code)});
+        return error.CommandFailed;
     }
-
-    return error.Timeout;
 }
 
 /// Start interrupt polling for a HID device (keyboard or mouse)
 pub fn startInterruptPolling(ctrl: *Controller, dev: *device.UsbDevice) !void {
-    console.info("XHCI: Starting HID polling for slot {}", .{dev.slot_id});
+    if (dev.state != .polling) {
+        console.info("XHCI: Starting HID polling for slot {}", .{dev.slot_id});
+    }
     try interrupt_transfer.queueInterruptTransfer(ctrl, dev);
     dev.state = .polling;
 }

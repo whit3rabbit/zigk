@@ -232,32 +232,11 @@ pub fn loadInitProcess() void {
 }
 
 /// Find a module in the InitRD by name
-/// Searches for exact matches and common variations (.elf suffix, bin/ prefix)
+/// Uses single-pass search for variants: name, name.elf, bin/name, bin/name.elf
 fn findModuleInInitRD(name: []const u8) ?ModuleData {
-    // Try exact name match
-    if (fs.initrd.InitRD.instance.findFile(name)) |file| {
+    if (fs.initrd.InitRD.instance.findFileWithVariants(name)) |file| {
         return .{ .name = file.name, .data = file.data };
     }
-
-    // Try with .elf suffix
-    var buf: [128]u8 = undefined;
-    const name_elf = std.fmt.bufPrint(&buf, "{s}.elf", .{name}) catch return null;
-    if (fs.initrd.InitRD.instance.findFile(name_elf)) |file| {
-        return .{ .name = file.name, .data = file.data };
-    }
-
-    // Try with bin/ prefix
-    const bin_name = std.fmt.bufPrint(&buf, "bin/{s}", .{name}) catch return null;
-    if (fs.initrd.InitRD.instance.findFile(bin_name)) |file| {
-        return .{ .name = file.name, .data = file.data };
-    }
-
-    // Try with bin/ prefix and .elf suffix
-    const bin_name_elf = std.fmt.bufPrint(&buf, "bin/{s}.elf", .{name}) catch return null;
-    if (fs.initrd.InitRD.instance.findFile(bin_name_elf)) |file| {
-        return .{ .name = file.name, .data = file.data };
-    }
-
     return null;
 }
 
@@ -500,7 +479,7 @@ fn grantProcessCapabilities(proc: *process.Process, process_name: []const u8) vo
         appendCapabilityOrWarn(proc, alloc, .{ .Interrupt = .{ .irq = 12 } }, process_name);
         appendCapabilityOrWarn(proc, alloc, .{ .IoPort = .{ .port = 0x60, .len = 1 } }, process_name);
         appendCapabilityOrWarn(proc, alloc, .{ .IoPort = .{ .port = 0x64, .len = 1 } }, process_name);
-        appendCapabilityOrWarn(proc, alloc, .{ .InputInjection = {} }, process_name);
+        appendCapabilityOrWarn(proc, alloc, .{ .InputInjection = .{} }, process_name);
         console.info("Init: Granted PS/2 capabilities to pid={}", .{proc.pid});
     }
 
@@ -560,7 +539,7 @@ fn grantDisplayServerCapabilities(proc: *process.Process, alloc: std.mem.Allocat
     // PS/2 controller command/status port
     appendCapabilityOrWarn(proc, alloc, .{ .IoPort = .{ .port = 0x64, .len = 1 } }, process_name);
     // Input injection for IPC-based input routing from other processes
-    appendCapabilityOrWarn(proc, alloc, .{ .InputInjection = {} }, process_name);
+    appendCapabilityOrWarn(proc, alloc, .{ .InputInjection = .{} }, process_name);
 
     // Legacy MMIO capability for framebuffer (backwards compatibility)
     // New code should check DisplayServer capability instead

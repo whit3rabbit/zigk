@@ -18,6 +18,7 @@ const uapi = @import("uapi");
 const sched = @import("sched");
 const thread_mod = @import("thread");
 const io = @import("io");
+const user_mem = @import("user_mem");
 const layout_mod = @import("layout.zig");
 const us_layout = @import("layouts/us.zig");
 const dvorak_layout = @import("layouts/dvorak.zig");
@@ -507,9 +508,14 @@ pub fn handleIrq() void {
             if (keyboard_state.ascii_buffer.pop()) |c| {
                 // If request has a buffer, copy character there
                 if (request.buf_ptr != 0 and request.buf_len > 0) {
-                    const user_buf: [*]u8 = @ptrFromInt(request.buf_ptr);
-                    user_buf[0] = c;
-                    _ = request.complete(.{ .success = 1 });
+                    // Security: Validate user pointer before writing
+                    if (user_mem.isValidUserPtr(request.buf_ptr, 1)) {
+                        const user_buf: [*]u8 = @ptrFromInt(request.buf_ptr);
+                        user_buf[0] = c;
+                        _ = request.complete(.{ .success = 1 });
+                    } else {
+                        _ = request.complete(.{ .err = error.EFAULT });
+                    }
                 } else {
                     // No buffer - return character as result value
                     _ = request.complete(.{ .success = @as(usize, c) });
@@ -795,9 +801,14 @@ pub fn getCharAsync(request: *io.IoRequest) bool {
     if (keyboard_state.ascii_buffer.pop()) |c| {
         // Complete immediately
         if (request.buf_ptr != 0 and request.buf_len > 0) {
-            const user_buf: [*]u8 = @ptrFromInt(request.buf_ptr);
-            user_buf[0] = c;
-            _ = request.complete(.{ .success = 1 });
+            // Security: Validate user pointer before writing
+            if (user_mem.isValidUserPtr(request.buf_ptr, 1)) {
+                const user_buf: [*]u8 = @ptrFromInt(request.buf_ptr);
+                user_buf[0] = c;
+                _ = request.complete(.{ .success = 1 });
+            } else {
+                _ = request.complete(.{ .err = error.EFAULT });
+            }
         } else {
             _ = request.complete(.{ .success = @as(usize, c) });
         }

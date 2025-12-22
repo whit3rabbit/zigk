@@ -51,8 +51,11 @@ pub const EpollEvent = extern struct {
     }
 
     /// Create from events and data
+    /// SECURITY: Zero-initialize data_bytes to prevent kernel stack info leak.
+    /// In ReleaseFast, `undefined` leaves garbage that could leak to userspace
+    /// if setData() were ever skipped (e.g., future refactoring, error path).
     pub fn init(events: u32, data: u64) EpollEvent {
-        var ev = EpollEvent{ .events = events, .data_bytes = undefined };
+        var ev = EpollEvent{ .events = events, .data_bytes = [_]u8{0} ** 8 };
         ev.setData(data);
         return ev;
     }

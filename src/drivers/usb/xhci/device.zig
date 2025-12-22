@@ -431,8 +431,9 @@ pub const PendingTransfer = struct {
     completed: std.atomic.Value(bool),
     /// Completion code from controller
     completion_code: trb.CompletionCode,
-    /// Bytes transferred (or residual for short packet)
-    bytes_transferred: u24,
+    /// Residual: bytes NOT transferred (actual = requested - residual)
+    /// IMPORTANT: This is the RESIDUAL from the Transfer Event TRB, not the actual byte count.
+    residual: u24,
 };
 
 /// Global pending transfer for synchronous operations
@@ -459,7 +460,7 @@ pub fn startPendingTransfer(trb_phys: u64, slot_id: u8, ep_dci: u5) void {
         .ep_dci = ep_dci,
         .completed = std.atomic.Value(bool).init(false),
         .completion_code = .Invalid,
-        .bytes_transferred = 0,
+        .residual = 0,
     };
     // Publish the transfer atomically (within lock)
     pending_transfer_active.store(true, .release);
@@ -473,7 +474,7 @@ pub fn completePendingTransfer(code: trb.CompletionCode, residual: u24) void {
 
     if (pending_transfer_active.load(.acquire)) {
         pending_transfer_storage.completion_code = code;
-        pending_transfer_storage.bytes_transferred = residual;
+        pending_transfer_storage.residual = residual;
         pending_transfer_storage.completed.store(true, .release);
     }
 }
@@ -506,7 +507,7 @@ pub fn getPendingTransfer() ?PendingTransfer {
             .ep_dci = pending_transfer_storage.ep_dci,
             .completed = std.atomic.Value(bool).init(pending_transfer_storage.completed.load(.acquire)),
             .completion_code = pending_transfer_storage.completion_code,
-            .bytes_transferred = pending_transfer_storage.bytes_transferred,
+            .residual = pending_transfer_storage.residual,
         };
     }
     return null;

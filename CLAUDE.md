@@ -39,7 +39,7 @@ pub fn sys_read(fd: usize, buf_ptr: usize, len: usize) SyscallError!usize {
 *   **Refresh State Under Lock**: Never rely on cached metadata (size, permissions, active flags) acquired *before* a lock. Always re-read or verify the state from the source (disk/inode) immediately **after** acquiring the lock.
 *   **Bounds Checks Inside Lock**: If accessing a shared array using an index validated outside the lock, **re-validate** the index against `.len` *inside* the lock. Arrays may have shrunk or reallocated.
 *   **Post-Open Verification**: For filesystem operations, verify permissions/file status *after* obtaining the file descriptor to catch symlink swaps or race conditions.
-*   **Lock Ordering**:
+*   **Lock Ordering** (lower number = acquired first, higher number = acquired later):
     1. `process_tree_lock`
     2. `SFS.alloc_lock` (Filesystem Allocation)
     3. `FileDescriptor.lock`

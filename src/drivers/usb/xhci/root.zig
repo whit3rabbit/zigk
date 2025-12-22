@@ -5,6 +5,7 @@
 const std = @import("std");
 const console = @import("console");
 const pci = @import("pci");
+const hal = @import("hal");
 
 // Submodules
 pub const types = @import("types.zig");
@@ -47,52 +48,125 @@ var g_controller: ?*Controller = null;
 
 /// Probe for XHCI controllers in the PCI device list
 pub fn probe(devices: *const pci.DeviceList, pci_access: pci.PciAccess) void {
-    console.info("XHCI: Probing for controllers (count={})...", .{devices.count});
-
     if (g_controller != null) {
         console.warn("XHCI: Controller already initialized", .{});
         return;
     }
 
-    // Debug: List first 5 devices to see what we have
-    const max_debug = @min(devices.count, 5);
-    for (devices.devices[0..max_debug], 0..) |*dev, i| {
-        console.info("XHCI: Dev[{}]: {x}:{x}.{d} class={x:0>2}/{x:0>2}/{x:0>2}", .{
-            i, dev.bus, dev.device, dev.func, dev.class_code, dev.subclass, dev.prog_if,
-        });
+    // First pass: Check device list for XHCI (class 0x0C/0x03/0x30)
+    for (devices.devices[0..devices.count]) |*dev| {
+        if (dev.class_code == 0x0C and dev.subclass == 0x03 and dev.prog_if == 0x30) {
+            if (initController(dev, pci_access)) return;
+        }
     }
 
-    // Iterate through devices
-    for (devices.devices[0..devices.count]) |*dev| {
-        // Debug: Log all USB controllers (class 0x0C, subclass 0x03)
-        if (dev.class_code == 0x0C and dev.subclass == 0x03) {
-            console.debug("XHCI: USB controller at {x:0>2}:{x:0>2}.{d} prog_if=0x{x:0>2}", .{
-                dev.bus, dev.device, dev.func, dev.prog_if,
-            });
-        }
+    // QEMU/TCG workaround: ECAM MMIO has timing issues on macOS/Apple Silicon.
+    // Use Legacy PCI I/O ports (0xCF8/0xCFC) for reliable device detection.
+    const legacy = pci.Legacy.init();
 
-        // Class 0x0C (Serial Bus), Subclass 0x03 (USB), ProgIF 0x30 (XHCI)
-        if (dev.class_code == 0x0C and dev.subclass == 0x03 and dev.prog_if == 0x30) {
-            console.info("XHCI: Found controller at {x:0>2}:{x:0>2}.{d}", .{
-                dev.bus, dev.device, dev.func,
+    // Scan bus 0 for USB controllers (class 0x0C subclass 0x03)
+    var found_xhci = false;
+    var dev_num: u5 = 0;
+    while (dev_num < 32) : (dev_num += 1) {
+        const vendor_id = legacy.read16(0, dev_num, 0, 0x00);
+        if (vendor_id == 0xFFFF) continue; // No device
+
+        const class_dword = legacy.read32(0, dev_num, 0, 0x08);
+        const class_code: u8 = @truncate(class_dword >> 24);
+        const subclass: u8 = @truncate(class_dword >> 16);
+        const prog_if: u8 = @truncate(class_dword >> 8);
+        const device_id = legacy.read16(0, dev_num, 0, 0x02);
+
+        console.debug("XHCI: Legacy probe 00:{x:0>2}.0: vid={x:0>4} did={x:0>4} class={x:0>2}/{x:0>2}/{x:0>2}", .{
+            dev_num, vendor_id, device_id, class_code, subclass, prog_if,
+        });
+
+        // XHCI: Class 0x0C (Serial Bus), Subclass 0x03 (USB), ProgIF 0x30 (XHCI)
+        if (class_code == 0x0C and subclass == 0x03 and prog_if == 0x30) {
+            // Read BAR0/BAR1 via legacy (since ECAM values are corrupted)
+            const bar0_raw = legacy.read32(0, dev_num, 0, 0x10);
+            const bar1_raw = legacy.read32(0, dev_num, 0, 0x14);
+
+            // Decode BAR0: bits 2:1 indicate type (00=32bit, 10=64bit)
+            const is_64bit = ((bar0_raw >> 1) & 0x3) == 2;
+            const bar_base = if (is_64bit)
+                (@as(u64, bar1_raw) << 32) | (@as(u64, bar0_raw) & 0xFFFFFFF0)
+            else
+                @as(u64, bar0_raw & 0xFFFFFFF0);
+
+            console.info("XHCI: Found via legacy probe at 00:{x:0>2}.0 (vid={x:0>4} did={x:0>4}) BAR={x:0>16}", .{
+                dev_num, vendor_id, device_id, bar_base,
             });
 
-            // Initialize controller
-            g_controller = controller.init(dev, pci_access) catch |err| {
-                console.err("XHCI: Failed to initialize controller: {}", .{err});
-                return;
+            // Build a corrected PciDevice struct using legacy reads
+            var fixed_dev = pci.PciDevice{
+                .bus = 0,
+                .device = dev_num,
+                .func = 0,
+                .vendor_id = vendor_id,
+                .device_id = device_id,
+                .revision = @truncate(class_dword),
+                .prog_if = prog_if,
+                .subclass = subclass,
+                .class_code = class_code,
+                .header_type = 0,
+                .bar = undefined,
+                .irq_line = legacy.read8(0, dev_num, 0, 0x3C),
+                .irq_pin = legacy.read8(0, dev_num, 0, 0x3D),
+                .gsi = 0,
+                .subsystem_vendor = legacy.read16(0, dev_num, 0, 0x2C),
+                .subsystem_id = legacy.read16(0, dev_num, 0, 0x2E),
             };
 
-            // Set global controller helper for interrupts
-            // (Note: controller.init calls interrupts.setupInterrupts which sets interrupts.g_controller.
-            //  We maintain root g_controller for getController access).
+            // Initialize BAR array
+            for (&fixed_dev.bar) |*bar| {
+                bar.* = pci.Bar{
+                    .base = 0,
+                    .size = 0,
+                    .is_mmio = false,
+                    .is_64bit = false,
+                    .prefetchable = false,
+                    .bar_type = .unused,
+                };
+            }
 
-            // Only initialize the first one for now
-            return;
+            // Set BAR0 with correct values from legacy read
+            // Note: We don't know exact size, but XHCI typically needs 64KB
+            // The controller init will read capability regs to verify
+            fixed_dev.bar[0] = pci.Bar{
+                .base = bar_base,
+                .size = 0x10000, // 64KB minimum for XHCI operational regs
+                .is_mmio = true,
+                .is_64bit = is_64bit,
+                .prefetchable = (bar0_raw & 0x8) != 0,
+                .bar_type = if (is_64bit) .mmio_64bit else .mmio_32bit,
+            };
+
+            if (initController(&fixed_dev, pci_access)) {
+                found_xhci = true;
+            }
+
+            if (found_xhci) break;
         }
     }
 
-    console.warn("XHCI: No XHCI controller found", .{});
+    if (!found_xhci) {
+        console.warn("XHCI: No XHCI controller found on bus 0", .{});
+    }
+}
+
+/// Initialize XHCI controller from PCI device
+fn initController(dev: *const pci.PciDevice, pci_access: pci.PciAccess) bool {
+    console.info("XHCI: Found controller at {x:0>2}:{x:0>2}.{d}", .{
+        dev.bus, dev.device, dev.func,
+    });
+
+    g_controller = controller.init(dev, pci_access) catch |err| {
+        console.err("XHCI: Failed to initialize controller: {}", .{err});
+        return false;
+    };
+
+    return true;
 }
 
 /// Get the initialized controller instance

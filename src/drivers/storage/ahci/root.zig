@@ -599,7 +599,8 @@ pub const AhciController = struct {
 
         // Allocate pages for Scatter-Gather (Bounce Buffer)
         // Max 256 sectors (128KB) = 32 pages
-        var pages: [32]u64 = undefined;
+        // Security: Zero-initialize to prevent freeing garbage addresses on error paths
+        var pages: [32]u64 = [_]u64{0} ** 32;
         var page_count: usize = 0;
         
         // Cleanup on error or return
@@ -702,9 +703,10 @@ pub const AhciController = struct {
         }
 
         // Allocate pages for Scatter-Gather (Bounce Buffer)
-        var pages: [32]u64 = undefined;
+        // Security: Zero-initialize to prevent freeing garbage addresses on error paths
+        var pages: [32]u64 = [_]u64{0} ** 32;
         var page_count: usize = 0;
-        
+
         defer {
             for (0..page_count) |i| {
                 pmm.freePage(pages[i]);

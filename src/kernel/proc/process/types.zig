@@ -136,7 +136,15 @@ pub const Process = struct {
     /// Heap break (current top of the heap)
     heap_break: u64,
 
-    /// Capabilities
+    /// Capabilities granted to this process
+    ///
+    /// SECURITY INVARIANT: Capabilities are IMMUTABLE after process creation.
+    /// They are set once during init_proc/spawn and cloned (to a new list) during fork.
+    /// The parent's capability list is never modified by fork.
+    ///
+    /// This invariant allows lock-free iteration in has*Capability() functions.
+    /// If dynamic capability modification is ever added (e.g., cap_grant syscall),
+    /// a reader-writer lock MUST be added to prevent TOCTOU races during iteration.
     capabilities: std.ArrayListUnmanaged(capabilities.Capability) = .{},
 
     /// SECURITY: Cumulative DMA pages allocated by this process.
@@ -457,13 +465,19 @@ pub const Process = struct {
 
     /// Check if process has input injection capability
     pub fn hasInputInjectionCapability(self: *Process) bool {
+        return self.getInputInjectionCapability() != null;
+    }
+
+    /// Get input injection capability if present
+    /// SECURITY: Use this to access rate limiting and device filtering settings
+    pub fn getInputInjectionCapability(self: *Process) ?capabilities.InputInjectionCapability {
         for (self.capabilities.items) |cap| {
             switch (cap) {
-                .InputInjection => return true,
+                .InputInjection => |input_cap| return input_cap,
                 else => {},
             }
         }
-        return false;
+        return null;
     }
 
     /// Check if process has file capability

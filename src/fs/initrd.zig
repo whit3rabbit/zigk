@@ -163,8 +163,6 @@ pub const InitRD = struct {
             return null;
         }
 
-        console.err("InitRD: findFile search='{s}' (orig='{s}')", .{search_name, path});
-
         var offset: usize = 0;
         // Need at least 512 bytes for a header
         while (offset + 512 <= self.data.len) {
@@ -220,9 +218,99 @@ pub const InitRD = struct {
 
             if (next_offset > self.data.len) break;
             offset = next_offset;
-            
-            // Debug Log
-            console.debug("InitRD Scan: '{s}' (norm: '{s}') vs search '{s}'", .{name, header_name, search_name});
+        }
+        return null;
+    }
+
+    /// Check if a normalized header name matches any variant of a base name
+    /// Variants: name, name.elf, bin/name, bin/name.elf
+    fn matchesAnyVariant(header_name: []const u8, base_name: []const u8) bool {
+        // Direct match
+        if (std.mem.eql(u8, header_name, base_name)) return true;
+
+        // Match with .elf suffix
+        if (header_name.len == base_name.len + 4) {
+            if (std.mem.startsWith(u8, header_name, base_name) and
+                std.mem.endsWith(u8, header_name, ".elf"))
+            {
+                return true;
+            }
+        }
+
+        // Match with bin/ prefix
+        if (header_name.len == base_name.len + 4) {
+            if (std.mem.startsWith(u8, header_name, "bin/") and
+                std.mem.eql(u8, header_name[4..], base_name))
+            {
+                return true;
+            }
+        }
+
+        // Match with bin/ prefix and .elf suffix
+        if (header_name.len == base_name.len + 8) {
+            if (std.mem.startsWith(u8, header_name, "bin/") and
+                std.mem.endsWith(u8, header_name, ".elf"))
+            {
+                const middle = header_name[4 .. header_name.len - 4];
+                if (std.mem.eql(u8, middle, base_name)) return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// Find a file by name, trying common variations in a single scan
+    /// Variants tried: name, name.elf, bin/name, bin/name.elf
+    /// This is more efficient than calling findFile() 4 times
+    pub fn findFileWithVariants(self: *const @This(), base_name: []const u8) ?InitRDFile {
+        var offset: usize = 0;
+        while (offset + 512 <= self.data.len) {
+            const header: *const TarHeader = @ptrCast(self.data.ptr + offset);
+
+            if (header.name[0] == 0) break;
+            if (!header.isValid()) break;
+
+            const name = header.getName();
+            const size = header.getSize() orelse break;
+
+            const data_start_result = @addWithOverflow(offset, 512);
+            if (data_start_result[1] != 0) break;
+            const data_start = data_start_result[0];
+
+            const data_end_result = @addWithOverflow(data_start, size);
+            if (data_end_result[1] != 0) break;
+            const data_end = data_end_result[0];
+
+            if (data_end > self.data.len) break;
+
+            // Normalize header name: remove leading './' if present
+            var header_name = name;
+            if (std.mem.startsWith(u8, header_name, "./")) {
+                header_name = header_name[2..];
+            }
+
+            // Check if this file matches any variant
+            if (header.isRegularFile() and matchesAnyVariant(header_name, base_name)) {
+                return InitRDFile{
+                    .name = name,
+                    .data = self.data[data_start..data_end],
+                    .header = header,
+                };
+            }
+
+            // Calculate next offset
+            const padded_size_result = @addWithOverflow(size, 511);
+            if (padded_size_result[1] != 0) break;
+            const data_blocks = padded_size_result[0] / 512;
+
+            const block_bytes_result = @mulWithOverflow(data_blocks, 512);
+            if (block_bytes_result[1] != 0) break;
+
+            const next_offset_result = @addWithOverflow(data_start, block_bytes_result[0]);
+            if (next_offset_result[1] != 0) break;
+
+            if (next_offset_result[0] > self.data.len) break;
+            offset = next_offset_result[0];
         }
         return null;
     }

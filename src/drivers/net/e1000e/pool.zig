@@ -19,7 +19,8 @@ const config = @import("config.zig");
 pub const PacketPool = struct {
     /// Pre-allocated packet buffers
     /// Each buffer is BUFFER_SIZE bytes (2048), total ~2MB for 1024 buffers
-    buffers: [config.PACKET_POOL_SIZE][config.BUFFER_SIZE]u8 = undefined,
+    /// Security: Zero-initialize to prevent info leaks on error paths or partial reads
+    buffers: [config.PACKET_POOL_SIZE][config.BUFFER_SIZE]u8 = [_][config.BUFFER_SIZE]u8{[_]u8{0} ** config.BUFFER_SIZE} ** config.PACKET_POOL_SIZE,
 
     /// Bitmap tracking which buffers are allocated
     allocated: [config.PACKET_POOL_SIZE]bool = [_]bool{false} ** config.PACKET_POOL_SIZE,
@@ -83,6 +84,11 @@ pub const PacketPool = struct {
         // Validate pointer is within our buffer range
         if (ptr < base) return;
         const offset = ptr - base;
+
+        // Security: Verify pointer is properly aligned to buffer boundary
+        // Misaligned pointers indicate corruption or incorrect buffer usage
+        if (offset % config.BUFFER_SIZE != 0) return;
+
         const idx = offset / config.BUFFER_SIZE;
 
         // Validate index and that it was actually allocated

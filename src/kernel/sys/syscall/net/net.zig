@@ -356,8 +356,9 @@ pub fn sys_recvfrom(
     };
     defer heap.allocator().free(kbuf);
 
-    // Prepare kernel buffer for source address
-    var ksrc_addr: socket.SockAddrIn = undefined;
+    // SECURITY: Zero-initialize to prevent kernel stack leak if socket layer
+    // fails to fully populate the structure (e.g., on error paths).
+    var ksrc_addr: socket.SockAddrIn = std.mem.zeroes(socket.SockAddrIn);
     const src_addr_arg: ?*socket.SockAddrIn = if (src_addr_ptr != 0) &ksrc_addr else null;
 
     const received = socket.recvfrom(ctx.socket_idx, kbuf, src_addr_arg) catch |err| {
@@ -804,8 +805,9 @@ pub fn sys_poll(ufds: usize, nfds: usize, timeout: isize) SyscallError!usize {
     }
 
     // Validate pollfd array pointer
+    // SECURITY: Use checked arithmetic to prevent integer overflow.
     const poll_size = @sizeOf(uapi.poll.PollFd);
-    const array_size = nfds * poll_size;
+    const array_size = std.math.mul(usize, nfds, poll_size) catch return error.EINVAL;
     if (!isValidUserAccess(ufds, array_size, AccessMode.Read) or
         !isValidUserAccess(ufds, array_size, AccessMode.Write))
     {
@@ -871,8 +873,15 @@ pub fn sys_poll(ufds: usize, nfds: usize, timeout: isize) SyscallError!usize {
     // Note: timeout is ms. -1 = infinite.
     const current_thread = getCurrentThread();
 
+    // SECURITY: Store socket indices we register on to prevent TOCTOU race.
+    // If an fd is closed and reused while we're blocked, re-looking up by fd
+    // would find the wrong socket. By storing socket_idx at registration time,
+    // we ensure we clear the correct sockets even if fds are recycled.
+    // Max 1024 sockets (matches max_nfds limit above).
+    var registered_sockets: [1024]?usize = [_]?usize{null} ** 1024;
+
     // Register blocked thread on all sockets (using kernel copy of fd values)
-    for (kpollfds) |*pfd| {
+    for (kpollfds, 0..) |*pfd, i| {
         // fd > 2 ensures positive value, safe to cast
         if (pfd.fd > 2) {
             const fd_u: usize = @intCast(pfd.fd);
@@ -883,6 +892,8 @@ pub fn sys_poll(ufds: usize, nfds: usize, timeout: isize) SyscallError!usize {
                         if (sock.tcb) |tcb| {
                             tcb.blocked_thread = t;
                         }
+                        // Store the socket index for cleanup
+                        registered_sockets[i] = ctx.socket_idx;
                     }
                 }
             }
@@ -898,21 +909,17 @@ pub fn sys_poll(ufds: usize, nfds: usize, timeout: isize) SyscallError!usize {
         blockCurrentThread();
     }
 
-    // Woke up - Clear blocked thread registration
-    for (kpollfds) |*pfd| {
-        // fd > 2 ensures positive value, safe to cast
-        if (pfd.fd > 2) {
-            const fd_u: usize = @intCast(pfd.fd);
-            if (getSocketContext(fd_u)) |ctx| {
-                if (socket.getSocket(ctx.socket_idx)) |sock| {
-                    if (current_thread) |t| {
-                        if (sock.blocked_thread == t) {
-                            sock.blocked_thread = null;
-                        }
-                        if (sock.tcb) |tcb| {
-                            if (tcb.blocked_thread == t) {
-                                tcb.blocked_thread = null;
-                            }
+    // Woke up - Clear blocked thread registration using stored socket indices
+    for (registered_sockets[0..nfds]) |maybe_idx| {
+        if (maybe_idx) |sock_idx| {
+            if (socket.getSocket(sock_idx)) |sock| {
+                if (current_thread) |t| {
+                    if (sock.blocked_thread == t) {
+                        sock.blocked_thread = null;
+                    }
+                    if (sock.tcb) |tcb| {
+                        if (tcb.blocked_thread == t) {
+                            tcb.blocked_thread = null;
                         }
                     }
                 }

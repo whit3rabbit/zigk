@@ -43,6 +43,7 @@ pub const TransferError = error{
     RingFull,
     TransferFailed,
     InvalidState,
+    OutOfMemory,
 };
 
 /// Map TRB completion code to error
@@ -119,9 +120,10 @@ pub fn waitForCompletion(
     if (device.getPendingTransfer()) |pt| {
          // Mark as inactive
          device.clearPendingTransfer();
-         
+
          try mapCompletionCode(pt.completion_code);
-         return pt.bytes_transferred;
+         // Return residual (bytes NOT transferred). Caller computes actual = requested - residual
+         return pt.residual;
     }
 
     return error.Undefined;

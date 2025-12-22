@@ -48,7 +48,7 @@ fn poll_events_wrapper() usize {
 /// Process all pending events in the Event Ring
 pub fn processEvents(ctrl: *Controller) usize {
     var count: usize = 0;
-    
+
     while (ctrl.event_ring.hasPending()) {
         const event = ctrl.event_ring.dequeue() orelse break;
         count += 1;
@@ -81,9 +81,13 @@ pub fn processEvents(ctrl: *Controller) usize {
                         // Handle interrupt data
                         if (code == .Success or code == .ShortPacket) {
                             // Data is in dev.report_buffer
-                            // Length is transferred length
-                            // Security: Ensure len doesn't exceed buffer
-                            const data_len = @min(len, dev.report_buffer.len);
+                            // IMPORTANT: trb_transfer_length is RESIDUAL (bytes NOT transferred)
+                            // Actual transferred = request_length - residual
+                            // Interrupt transfers request 8 bytes (see transfer/interrupt.zig)
+                            const request_len: u32 = 8;
+                            const actual_transferred = if (len <= request_len) request_len - len else 0;
+                            // Security: Ensure actual_transferred doesn't exceed buffer
+                            const data_len = @min(actual_transferred, @as(u32, @intCast(dev.report_buffer.len)));
                             device_manager.handleInterrupt(ctrl, dev, dev.report_buffer[0..data_len]);
                         } else {
                             console.warn("XHCI: Interrupt transfer failed: {}", .{@intFromEnum(code)});
@@ -94,11 +98,14 @@ pub fn processEvents(ctrl: *Controller) usize {
                 }
             },
             .CommandCompletionEvent => {
-                // Keep for debug. Waiters currently poll ring manually (race condition).
-                // If we consume it here, waiters might miss it if they don't see it in `pending_command`.
-                // For now, we assume `scanPorts` runs with interrupts disabled/masked or before MSI-X is active.
-                // Or that we simply log it.
-                // console.debug("XHCI: Command Completion Event", .{});
+                // Signal command completion to waiters via atomic flag
+                // This avoids the race condition where waiters poll the event ring
+                // but the interrupt handler has already consumed the event.
+                const completion = trb.CommandCompletionEventTrb.fromTrb(event);
+                ctrl.pending_cmd_slot_id = completion.getSlotId();
+                ctrl.pending_cmd_code = completion.status.completion_code;
+                // Store with release semantics so waiters see updated slot_id and code
+                ctrl.pending_cmd_valid.store(true, .release);
             },
             .PortStatusChangeEvent => {
                 console.info("XHCI: Port Status Change Event", .{});

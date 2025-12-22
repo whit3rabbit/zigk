@@ -2,7 +2,7 @@
 """
 Driver Pattern Query Tool for zigk kernel.
 
-Query driver patterns, MmioDevice usage, Ring IPC, and capabilities.
+Query driver patterns, MmioDevice usage, Ring IPC, interrupts, and capabilities.
 
 Usage:
     python driver_query.py mmio          # MmioDevice pattern
@@ -12,6 +12,9 @@ Usage:
     python driver_query.py kernel        # List kernel drivers
     python driver_query.py userspace     # List userspace drivers
     python driver_query.py pci           # PCI enumeration pattern
+    python driver_query.py irq           # Legacy ISA IRQ routing pattern
+    python driver_query.py msix          # MSI-X interrupt pattern
+    python driver_query.py input         # Input subsystem flow
     python driver_query.py template mmio # Generate MMIO driver boilerplate
     python driver_query.py template ring # Generate Ring IPC driver boilerplate
 """
@@ -264,6 +267,198 @@ const size = ~bar_read + 1;
 
 // CORRECT - mask to 32 bits
 const size = (~bar_read +% 1) & 0xFFFFFFFF;
+```
+""",
+
+    "irq": """
+## Legacy ISA IRQ Routing (IOAPIC)
+
+**CRITICAL**: `enableIrq()` only unmasks. You MUST call `routeIrq()` first!
+
+### Common Bug
+```zig
+// WRONG: IRQ enabled but never routed - interrupts silently lost!
+hal.apic.enableIrq(12);
+
+// CORRECT: Route first, then enable
+hal.apic.routeIrq(12, hal.apic.Vectors.MOUSE, 0);
+hal.apic.enableIrq(12);
+```
+
+### Three-Step Pattern
+```zig
+// 1. Register handler with interrupt dispatcher
+hal.interrupts.setMouseHandler(&mouse.handleIrq);
+
+// 2. Route IRQ to vector in IOAPIC (creates routing entry)
+hal.apic.routeIrq(irq, vector, cpu_id);
+
+// 3. Unmask IRQ in IOAPIC
+hal.apic.enableIrq(irq);
+```
+
+### Pre-routed IRQs (done in APIC init)
+- IRQ0 (Timer) -> Vector 32 (masked when LAPIC timer takes over)
+- IRQ1 (Keyboard) -> Vector 33
+
+### Must Be Routed By Driver
+| IRQ | Vector | Device | Constant |
+|-----|--------|--------|----------|
+| 4 | 36 | COM1 | hal.apic.Vectors.COM1 |
+| 12 | 44 | PS/2 Mouse | hal.apic.Vectors.MOUSE |
+
+### Vector Assignments
+| Vector | Purpose |
+|--------|---------|
+| 32-47 | Legacy ISA IRQs (IRQ+32) |
+| 48 | LAPIC Timer |
+| 240-254 | MSI-X Pool |
+| 255 | Spurious |
+""",
+
+    "msix": """
+## MSI-X Interrupt Pattern (PCI Devices)
+
+MSI-X bypasses IOAPIC - PCI device writes directly to LAPIC.
+
+### Five-Step Pattern
+```zig
+const pci = @import("pci");
+const hal = @import("hal");
+
+// 1. Find MSI-X capability in PCI config space
+const msix_cap = pci.findMsix(ecam, pci_dev) orelse return error.NoMsix;
+
+// 2. Allocate vector from MSI-X pool (240-254)
+const vector = hal.interrupts.allocateMsixVector() orelse return error.NoVectors;
+
+// 3. Register handler for the vector
+if (!hal.interrupts.registerMsixHandler(vector, handleInterrupt)) {
+    hal.interrupts.freeMsixVector(vector);
+    return error.HandlerRegistration;
+}
+
+// 4. Enable MSI-X on the device (programs MSI-X table entry)
+const msix_alloc = pci.enableMsix(ecam, pci_dev, &msix_cap, 0) orelse {
+    hal.interrupts.unregisterMsixHandler(vector);
+    return error.MsixEnable;
+};
+
+// 5. Enable all configured vectors
+pci.enableMsixVectors(ecam, pci_dev, &msix_cap);
+```
+
+### Drivers Using MSI-X
+- XHCI (src/drivers/usb/xhci/interrupts.zig)
+- E1000e (src/drivers/net/e1000e/init.zig)
+- VirtIO-GPU (src/drivers/video/virtio_gpu.zig)
+
+### Cleanup on Error
+```zig
+errdefer {
+    hal.interrupts.unregisterMsixHandler(vector);
+    hal.interrupts.freeMsixVector(vector);
+}
+```
+
+### ISR Rule
+Interrupt handlers must be fast. For complex processing, wake a worker thread:
+```zig
+fn handleInterrupt() void {
+    // Quick: acknowledge interrupt, read status
+    const status = regs.read(.INTR_STATUS);
+    regs.write(.INTR_STATUS, status);  // Clear
+
+    // Wake worker thread for actual processing
+    sched.unblock(worker_thread);
+}
+```
+""",
+
+    "input": """
+## Input Subsystem Flow
+
+### Two Syscall Paths
+- **Keyboard**: `sys_read_scancode()` - reads directly from scancode buffer
+- **Mouse/Tablet**: `sys_read_input_event()` - reads from unified input subsystem
+
+### HID Input Flow
+```
+USB HID Device (keyboard/mouse/tablet)
+      |
+      v
+XHCI Controller (MSI-X interrupt)
+      |
+      v
+xhci/interrupts.zig:handleInterrupt()
+      |
+      v
+device_manager.handleInterrupt(ctrl, dev, buffer)
+      |
+      v
+dev.hid_driver.handleInputReport(buffer)
+      |
+      +---> is_keyboard? --> handleKeyboardReport()
+      |                            |
+      |                            v
+      |                     keyboard.injectScancode()
+      |                            |
+      |                            v
+      |                     scancode buffer
+      |                            |
+      |                            v
+      |                     sys_read_scancode()
+      |
+      +---> is_tablet? ----> handleTabletReport()
+      |                            |
+      |                            v
+      |                     mouse.injectAbsoluteInput()
+      |                            |
+      +---> is_mouse? -----> handleMouseReport()
+                                   |
+                                   v
+                            mouse.injectRawInput()
+                                   |
+                                   v
+                            input.pushRelative/Absolute()
+                                   |
+                                   v
+                            unified input subsystem
+                                   |
+                                   v
+                            sys_read_input_event()
+```
+
+### Key Files
+| Component | Location |
+|-----------|----------|
+| USB HID driver | src/drivers/usb/class/hid/driver.zig |
+| PS/2 mouse | src/drivers/input/mouse.zig |
+| PS/2 keyboard | src/drivers/input/keyboard.zig |
+| Input subsystem | src/drivers/input/input.zig |
+| XHCI interrupts | src/drivers/usb/xhci/interrupts.zig |
+
+### Injection Functions
+```zig
+// For relative mouse movement
+mouse.injectRawInput(dx, dy, dz, buttons);
+
+// For absolute positioning (tablet/touchscreen)
+mouse.injectAbsoluteInput(x, y, screen_w, screen_h, buttons);
+
+// Direct scancode injection
+keyboard.injectScancode(scancode);
+```
+
+### Common Bug: Local Buffer Only
+Injection functions must push to BOTH local buffer AND unified input subsystem:
+```zig
+// In injectRawInput/injectAbsoluteInput:
+if (input.isInitialized()) {
+    input.pushRelative(RelCode.X, dx, timestamp);
+    input.pushRelative(RelCode.Y, dy, timestamp);
+    input.pushSync(timestamp);
+}
 ```
 """,
 

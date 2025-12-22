@@ -1828,6 +1828,7 @@ pub fn build(b: *std.Build) void {
         "-m", "512M",
         "-device", "qemu-xhci,id=xhci",
         "-device", "usb-kbd",
+        "-device", "usb-tablet",
         "-vga", "std",
         "-audiodev",
     });

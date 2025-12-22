@@ -40,6 +40,17 @@ pub fn sys_example(fd: usize, ptr: usize, len: usize) SyscallError!usize {
 - **Forbidden outside src/arch/:** asm volatile, port I/O, direct register access
 - **Required:** Use `hal.io`, `hal.cpu`, `hal.mmio_device.MmioDevice`
 
+### IRQ Routing (Common Bug!)
+```zig
+// WRONG: enableIrq only unmasks - interrupts silently lost!
+hal.apic.enableIrq(12);
+
+// CORRECT: Route first, then enable
+hal.apic.routeIrq(12, hal.apic.Vectors.MOUSE, 0);
+hal.apic.enableIrq(12);
+```
+Query: `python scripts/driver_query.py irq`
+
 ### Common Errors
 EBADF (bad fd), EFAULT (bad ptr), EINVAL (bad arg), ENOSYS (unimplemented), ENOMEM, EAGAIN
 
@@ -71,6 +82,9 @@ python scripts/driver_query.py ring         # Ring IPC pattern
 python scripts/driver_query.py capabilities # Userspace driver caps
 python scripts/driver_query.py split        # Split-process pattern
 python scripts/driver_query.py pci          # PCI enumeration
+python scripts/driver_query.py irq          # Legacy ISA IRQ routing (CRITICAL!)
+python scripts/driver_query.py msix         # MSI-X interrupt pattern
+python scripts/driver_query.py input        # Input subsystem flow (HID/mouse/keyboard)
 ```
 
 ### Async Lookup

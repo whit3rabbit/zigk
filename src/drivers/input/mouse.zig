@@ -265,6 +265,30 @@ pub fn injectRawInput(dx: i16, dy: i16, dz: i8, buttons: Buttons) void {
     if (mouse_state.event_buffer.push(event)) {
         error_stats.buffer_overruns +%= 1;
     }
+
+    // Push to unified input subsystem (for syscall read_input_event)
+    if (input.isInitialized()) {
+        const timestamp: u64 = 0; // TODO: proper timestamp from HAL
+        if (dx != 0) {
+            input.pushRelative(uapi.input.RelCode.X, @as(i32, dx), timestamp);
+        }
+        if (dy != 0) {
+            input.pushRelative(uapi.input.RelCode.Y, @as(i32, dy), timestamp);
+        }
+        if (dz != 0) {
+            input.pushRelative(uapi.input.RelCode.WHEEL, @as(i32, dz), timestamp);
+        }
+        if (buttons_changed.left) {
+            input.pushButton(uapi.input.BtnCode.LEFT, buttons.left, timestamp);
+        }
+        if (buttons_changed.right) {
+            input.pushButton(uapi.input.BtnCode.RIGHT, buttons.right, timestamp);
+        }
+        if (buttons_changed.middle) {
+            input.pushButton(uapi.input.BtnCode.MIDDLE, buttons.middle, timestamp);
+        }
+        input.pushSync(timestamp);
+    }
 }
 
 /// Inject absolute position from a tablet/touchscreen device
@@ -300,6 +324,27 @@ pub fn injectAbsoluteInput(x: u32, y: u32, max_x: u32, max_y: u32, buttons: Butt
 
     if (mouse_state.event_buffer.push(event)) {
         error_stats.buffer_overruns +%= 1;
+    }
+
+    // Push to unified input subsystem (for syscall read_input_event)
+    if (input.isInitialized()) {
+        const timestamp: u64 = 0; // TODO: proper timestamp from HAL
+
+        // Push absolute position events
+        input.pushAbsolute(uapi.input.AbsCode.X, @as(i32, @intCast(x)), timestamp);
+        input.pushAbsolute(uapi.input.AbsCode.Y, @as(i32, @intCast(y)), timestamp);
+
+        // Push button events on change
+        if (buttons_changed.left) {
+            input.pushButton(uapi.input.BtnCode.LEFT, buttons.left, timestamp);
+        }
+        if (buttons_changed.right) {
+            input.pushButton(uapi.input.BtnCode.RIGHT, buttons.right, timestamp);
+        }
+        if (buttons_changed.middle) {
+            input.pushButton(uapi.input.BtnCode.MIDDLE, buttons.middle, timestamp);
+        }
+        input.pushSync(timestamp);
     }
 }
 
