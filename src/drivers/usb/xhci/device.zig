@@ -16,6 +16,7 @@ const pmm = @import("pmm");
 const sync = @import("sync");
 const dma = @import("dma");
 const iommu = @import("iommu");
+const io = @import("io");
 
 const trb = @import("trb.zig");
 const ring = @import("ring.zig");
@@ -54,8 +55,18 @@ pub const UsbDevice = struct {
     /// DCI 2..31 = Other Endpoints
     endpoints: [32]?ring.TransferRing,
 
-    /// Primary Interrupt DCI (for HID polling)
+    /// Primary Interrupt DCI (for HID polling) - DEPRECATED: Use active_interfaces instead
     interrupt_dci: u5,
+
+    /// Active interfaces bound to drivers (supports multi-interface devices)
+    active_interfaces: [MAX_ACTIVE_INTERFACES]ActiveInterface,
+    /// Number of active interfaces
+    active_interface_count: u8,
+
+    /// Pending transfers indexed by DCI (0-31)
+    /// Security: Tracked for safe cancellation during device disconnect.
+    /// Protected by device_lock for thread-safe access.
+    pending_transfers: [MAX_PENDING_TRANSFERS]?*TransferRequest = [_]?*TransferRequest{null} ** MAX_PENDING_TRANSFERS,
 
     // Class driver state
     /// HID driver instance for parsing reports (if HID)
@@ -88,6 +99,11 @@ pub const UsbDevice = struct {
     /// Current device state
     state: DeviceState,
 
+    /// Per-device lock for transfer operations and state transitions
+    /// Security: Uses Spinlock (not RwLock) for IRQ-safe access from interrupt handlers.
+    /// Lock ordering: Acquire after devices_lock (global array lock), before pmm.lock.
+    device_lock: sync.Spinlock = .{},
+
     /// Reference count for safe deallocation
     /// Security: Prevents use-after-free when device is accessed from interrupt handler
     /// while another thread is deallocating. Starts at 1 (creation holds a reference).
@@ -95,7 +111,7 @@ pub const UsbDevice = struct {
 
     const Self = @This();
 
-    /// Device state during enumeration
+    /// Device state during enumeration and lifecycle
     pub const DeviceState = enum {
         /// Slot enabled, not yet addressed
         slot_enabled,
@@ -105,9 +121,184 @@ pub const UsbDevice = struct {
         configured,
         /// Actively polling for HID reports
         polling,
+        /// Disconnect in progress - pending transfers being cancelled
+        /// Security: Prevents new transfers from being queued during cleanup
+        disconnecting,
+        /// Slot disabled, device no longer usable (terminal state)
+        /// Resources may still be held until refcount reaches zero
+        disabled,
         /// Error state - device unusable
         err,
     };
+
+    /// Maximum number of active interfaces per device
+    pub const MAX_ACTIVE_INTERFACES: usize = 8;
+
+    /// Driver type bound to an interface
+    pub const DriverType = enum {
+        none,
+        hid_keyboard,
+        hid_mouse,
+        hid_generic,
+        msc,
+        hub,
+
+        /// Check if this is any HID driver type
+        pub fn isHid(self: DriverType) bool {
+            return self == .hid_keyboard or self == .hid_mouse or self == .hid_generic;
+        }
+    };
+
+    /// Per-interface driver binding info
+    pub const ActiveInterface = struct {
+        interface_num: u8,
+        dci: u5, // Primary endpoint DCI for this interface
+        driver_type: DriverType,
+        /// For MSC: bulk OUT DCI (bulk IN is in `dci`)
+        secondary_dci: u5 = 0,
+    };
+
+    /// Transfer request state for async tracking
+    pub const TransferState = enum(u8) {
+        /// Request allocated but not yet submitted
+        pending,
+        /// Request submitted to hardware, awaiting completion
+        in_progress,
+        /// Transfer completed successfully
+        completed,
+        /// Transfer cancelled (e.g., during disconnect)
+        cancelled,
+        /// Transfer failed with error
+        failed,
+    };
+
+    /// Callback types for transfer completion notification
+    pub const TransferCallback = union(enum) {
+        /// Interrupt endpoint completion (HID, Hub) - receives data buffer
+        interrupt: *const fn (*UsbDevice, []u8) void,
+        /// Control transfer completion - receives completion code and residual
+        control: *const fn (*UsbDevice, trb.CompletionCode, u24) void,
+        /// No callback (polling mode)
+        none: void,
+    };
+
+    /// Pending transfer request for async tracking
+    /// Security: Tracks in-flight transfers for safe cancellation during disconnect.
+    /// Each endpoint (DCI) can have at most one pending transfer at a time.
+    pub const TransferRequest = struct {
+        /// Physical address of first TRB in transfer (for completion matching)
+        trb_phys: u64,
+        /// Device Context Index for this transfer's endpoint
+        dci: u5,
+        /// Atomic state for IRQ-safe transitions
+        state: std.atomic.Value(TransferState),
+        /// Completion code from controller (valid when state == completed/failed)
+        completion_code: trb.CompletionCode,
+        /// Residual bytes NOT transferred (actual = requested - residual)
+        residual: u24,
+        /// Requested transfer length (for residual validation)
+        request_len: u24,
+        /// Callback for completion notification
+        callback: TransferCallback,
+        /// Intrusive linked list for pool free list
+        next: ?*TransferRequest,
+        /// Linked kernel IoRequest for reactor/io_uring integration
+        /// Null for callback-based completion (HID polling)
+        /// Security: When set, complete() also completes the IoRequest
+        io_request: ?*io.IoRequest = null,
+
+        /// Initialize a new transfer request
+        pub fn init(dci: u5, trb_phys: u64, request_len: u24, callback: TransferCallback) TransferRequest {
+            return .{
+                .trb_phys = trb_phys,
+                .dci = dci,
+                .state = std.atomic.Value(TransferState).init(.pending),
+                .completion_code = .Invalid,
+                .residual = 0,
+                .request_len = request_len,
+                .callback = callback,
+                .next = null,
+                .io_request = null,
+            };
+        }
+
+        /// Attempt atomic state transition
+        /// Returns true if transition succeeded, false if current state didn't match expected
+        pub fn compareAndSwapState(self: *TransferRequest, expected: TransferState, new: TransferState) bool {
+            return self.state.cmpxchgStrong(expected, new, .acq_rel, .acquire) == null;
+        }
+
+        /// Complete the transfer with given result
+        /// Security: Writes result fields BEFORE transitioning state to prevent TOCTOU
+        /// Also completes linked IoRequest if present, triggering sched.unblock()
+        pub fn complete(self: *TransferRequest, code: trb.CompletionCode, residual: u24) bool {
+            // Write completion data first
+            self.completion_code = code;
+            self.residual = residual;
+
+            // Then atomically transition state
+            const success_state: TransferState = if (code == .Success or code == .ShortPacket) .completed else .failed;
+            if (!self.compareAndSwapState(.in_progress, success_state)) {
+                return false;
+            }
+
+            // Complete linked IoRequest if present (triggers sched.unblock)
+            if (self.io_request) |io_req| {
+                const io_result = self.toIoResult();
+                _ = io_req.complete(io_result);
+            }
+
+            return true;
+        }
+
+        /// Convert USB completion to kernel IoResult
+        /// Maps CompletionCode to appropriate success/error result
+        pub fn toIoResult(self: *const TransferRequest) io.IoResult {
+            return switch (self.completion_code) {
+                .Success, .ShortPacket => blk: {
+                    // Calculate actual bytes transferred (requested - residual)
+                    const requested: usize = self.request_len;
+                    const residual_usize: usize = @intCast(self.residual);
+                    const transferred = if (residual_usize <= requested)
+                        requested - residual_usize
+                    else
+                        0;
+                    break :blk .{ .success = transferred };
+                },
+                .StallError => .{ .err = error.EPERM },
+                .BabbleDetectedError, .USBTransactionError, .TRBError => .{ .err = error.EIO },
+                .ResourceError, .NoSlotsAvailableError => .{ .err = error.ENOMEM },
+                .BandwidthError => .{ .err = error.EBUSY },
+                .Stopped, .CommandAborted => .{ .err = error.ECANCELED },
+                .ContextStateError => .{ .err = error.EINVAL },
+                .EventRingFullError => .{ .err = error.EAGAIN },
+                else => .{ .err = error.EIO },
+            };
+        }
+
+        /// Cancel the transfer (during disconnect)
+        /// Also cancels linked IoRequest if present
+        pub fn cancel(self: *TransferRequest) bool {
+            // Try to cancel from pending state
+            if (self.compareAndSwapState(.pending, .cancelled)) {
+                if (self.io_request) |io_req| {
+                    _ = io_req.complete(.cancelled);
+                }
+                return true;
+            }
+            // Try to cancel from in_progress state
+            if (self.compareAndSwapState(.in_progress, .cancelled)) {
+                if (self.io_request) |io_req| {
+                    _ = io_req.complete(.cancelled);
+                }
+                return true;
+            }
+            return false;
+        }
+    };
+
+    /// Maximum pending transfers per device (one per endpoint DCI)
+    pub const MAX_PENDING_TRANSFERS: usize = 32;
 
     /// Allocate and initialize a new USB device
     pub fn init(bdf: iommu.DeviceBdf, slot_id: u8, port: u8, speed: context.Speed, parent: ?*UsbDevice, parent_port: u8, route_string: u20) !*Self {
@@ -158,6 +349,8 @@ pub const UsbDevice = struct {
             .input_context_phys = ic.device_addr, // Use device_addr (IOVA) for hardware
             .endpoints = [_]?ring.TransferRing{null} ** 32,
             .interrupt_dci = 0,
+            .active_interfaces = [_]ActiveInterface{.{ .interface_num = 0, .dci = 0, .driver_type = .none }} ** MAX_ACTIVE_INTERFACES,
+            .active_interface_count = 0,
             .hid_driver = .{},
             .hub_driver = undefined,
             .report_buffer = report_virt[0..report_buffer_size],
@@ -303,6 +496,180 @@ pub const UsbDevice = struct {
 
     }
 
+    // =========================================================================
+    // Multi-Interface Support
+    // =========================================================================
+
+    /// Endpoint configuration for multi-endpoint setup
+    pub const EndpointConfig = struct {
+        ep_addr: u8,
+        ep_type: context.EndpointType,
+        max_packet: u16,
+        interval: u8,
+    };
+
+    /// Register an active interface with its driver binding
+    /// Returns true if registered, false if at capacity
+    pub fn registerActiveInterface(
+        self: *Self,
+        interface_num: u8,
+        dci: u5,
+        driver_type: DriverType,
+        secondary_dci: u5,
+    ) bool {
+        if (self.active_interface_count >= MAX_ACTIVE_INTERFACES) {
+            console.warn("XHCI: Cannot register interface {}: at capacity", .{interface_num});
+            return false;
+        }
+
+        self.active_interfaces[self.active_interface_count] = ActiveInterface{
+            .interface_num = interface_num,
+            .dci = dci,
+            .driver_type = driver_type,
+            .secondary_dci = secondary_dci,
+        };
+        self.active_interface_count += 1;
+
+        // Maintain backwards compatibility: set interrupt_dci for first HID
+        if (driver_type.isHid() and self.interrupt_dci == 0) {
+            self.interrupt_dci = dci;
+        }
+
+        console.debug("XHCI: Registered interface {} as {s} (dci={})", .{
+            interface_num,
+            @tagName(driver_type),
+            dci,
+        });
+
+        return true;
+    }
+
+    /// Find active interface by DCI
+    pub fn findActiveInterfaceByDci(self: *const Self, dci: u5) ?*const ActiveInterface {
+        for (self.active_interfaces[0..self.active_interface_count]) |*active| {
+            if (active.dci == dci or active.secondary_dci == dci) {
+                return active;
+            }
+        }
+        return null;
+    }
+
+    /// Get slice of active interfaces for iteration
+    pub fn getActiveInterfaces(self: *const Self) []const ActiveInterface {
+        return self.active_interfaces[0..self.active_interface_count];
+    }
+
+    // =========================================================================
+    // Async Transfer Request Management
+    // =========================================================================
+
+    /// Register a pending transfer for async completion
+    /// Security: Must hold device_lock before calling
+    /// Uses pending_transfers array indexed by DCI (one per endpoint)
+    pub fn registerPendingTransfer(self: *Self, dci: u5, req: *TransferRequest) void {
+        // dci is u5 (0-31), which is within bounds of pending_transfers[32]
+        self.pending_transfers[dci] = req;
+    }
+
+    /// Get and clear pending transfer for completion
+    /// Security: Must hold device_lock before calling
+    /// Returns the request if found, null otherwise
+    /// Clears the slot atomically to prevent double-completion
+    pub fn takePendingTransfer(self: *Self, dci: u5) ?*TransferRequest {
+        // dci is u5 (0-31), which is within bounds of pending_transfers[32]
+        const req = self.pending_transfers[dci];
+        self.pending_transfers[dci] = null;
+        return req;
+    }
+
+    /// Cancel all pending transfers during disconnect
+    /// Security: Sets device state to disconnecting first to prevent new submissions
+    /// Then cancels each pending transfer and completes linked IoRequest
+    pub fn cancelAllPendingTransfers(self: *Self) void {
+        // Set state to prevent new submissions
+        self.state = .disconnecting;
+
+        // Cancel under device_lock
+        const held = self.device_lock.acquire();
+        defer held.release();
+
+        for (&self.pending_transfers) |*slot| {
+            if (slot.*) |req| {
+                // Try to cancel - may fail if already completed
+                _ = req.cancel(); // cancel() handles IoRequest completion internally
+                slot.* = null;
+            }
+        }
+    }
+
+    /// Build Input Context to configure MULTIPLE endpoints in ONE command
+    /// This fixes the critical bug where each call to buildConfigureEndpointContext
+    /// would wipe out previously configured endpoints.
+    pub fn buildMultiEndpointContext(
+        self: *Self,
+        endpoint_configs: []const EndpointConfig,
+    ) !void {
+        if (endpoint_configs.len == 0) return;
+
+        // Clear input context ONCE at the start
+        @memset(@as([*]u8, @ptrCast(self.input_context))[0..@sizeOf(context.InputContext)], 0);
+
+        // Copy current slot context from device context
+        self.input_context.slot = self.device_context.slot;
+
+        var add_flags: u31 = 0;
+        var max_dci: u5 = self.input_context.slot.dw0.context_entries;
+
+        for (endpoint_configs) |cfg| {
+            const dci = context.InputContext.endpointToDci(cfg.ep_addr) orelse {
+                console.warn("XHCI: Invalid endpoint address 0x{x}", .{cfg.ep_addr});
+                continue;
+            };
+
+            // Allocate transfer ring if needed (IOMMU-aware)
+            if (self.endpoints[dci] == null) {
+                self.endpoints[dci] = try ring.TransferRing.init(self.bdf);
+            }
+
+            const ep_ring = &self.endpoints[dci].?;
+
+            // Set add flag for this endpoint
+            // Bit 0 is slot, bits 1-31 are endpoints, so we shift left by dci-1
+            add_flags |= @as(u31, 1) << @truncate(dci - 1);
+
+            // Track maximum DCI
+            if (dci > max_dci) max_dci = dci;
+
+            // Configure endpoint context
+            if (self.input_context.getEndpoint(dci)) |ep| {
+                ep.* = context.EndpointContext.initGeneric(
+                    cfg.ep_type,
+                    cfg.max_packet,
+                    calculateInterval(self.speed, cfg.interval),
+                    ep_ring.getPhysicalAddress(),
+                    ep_ring.getCycleState(),
+                );
+            }
+
+            console.debug("XHCI: Configured endpoint 0x{x:0>2} (DCI={}, type={s})", .{
+                cfg.ep_addr,
+                dci,
+                @tagName(cfg.ep_type),
+            });
+        }
+
+        // Update slot context entries to cover all configured DCIs
+        self.input_context.slot.dw0.context_entries = max_dci;
+
+        // Set add flags: Slot + all configured endpoints
+        self.input_context.input_control.setAddFlags(true, add_flags);
+
+        console.info("XHCI: Built multi-endpoint context with {} endpoint(s), max_dci={}", .{
+            endpoint_configs.len,
+            max_dci,
+        });
+    }
+
     /// Increment reference count
     /// Security: Must be called while holding devices_lock to prevent race with deinit
     pub fn addRef(self: *Self) void {
@@ -416,12 +783,33 @@ pub fn unregisterDevice(slot_id: u8) void {
 }
 
 /// Find a device by slot ID
+/// NOTE: This returns a raw pointer without acquiring a reference.
+/// For interrupt handlers or any code that may race with device disconnect,
+/// use findDeviceWithRef() instead.
 pub fn findDevice(slot_id: u8) ?*UsbDevice {
     // slot_id is u8, max value 255, which is < MAX_DEVICES (256)
     if (slot_id > 0) {
         const held = devices_lock.acquireRead();
         defer held.release();
         return devices[slot_id];
+    }
+    return null;
+}
+
+/// Find a device by slot ID and acquire a reference
+/// Security: Acquires a reference while holding devices_lock to prevent race
+/// with device disconnect. Caller MUST call dev.releaseRef() when done.
+/// Use this in interrupt handlers or any code that may race with disconnect.
+pub fn findDeviceWithRef(slot_id: u8) ?*UsbDevice {
+    // slot_id is u8, max value 255, which is < MAX_DEVICES (256)
+    if (slot_id > 0) {
+        const held = devices_lock.acquireRead();
+        defer held.release();
+        if (devices[slot_id]) |dev| {
+            // Acquire reference while holding lock to prevent race with deinit
+            dev.addRef();
+            return dev;
+        }
     }
     return null;
 }
@@ -567,8 +955,19 @@ pub const PendingTransfer = struct {
 };
 
 /// Global pending transfer for synchronous operations
-/// Only one control transfer at a time per device
-/// Security: Use spinlock to prevent TOCTOU race conditions between
+///
+/// WARNING: KNOWN LIMITATION - This is a GLOBAL singleton, not per-device!
+/// Only ONE synchronous control transfer can be active across ALL devices
+/// at any given time. Concurrent synchronous transfers on different devices
+/// will cause the later one to timeout because the first overwrites the
+/// pending_transfer_storage before its completion event arrives.
+///
+/// Recommended migration path:
+/// 1. Use the async TransferRequest pool (transfer_pool.zig) for new code
+/// 2. TransferRequest supports IoRequest integration for proper async I/O
+/// 3. This legacy path is kept for backwards compatibility only
+///
+/// Security: Uses spinlock to prevent TOCTOU race conditions between
 /// interrupt handler and polling code. The race window was between
 /// writing to storage and setting active=true, where an interrupt
 /// could check active (false) and miss a valid pending transfer.

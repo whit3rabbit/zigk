@@ -7,6 +7,7 @@ const sync = @import("sync");
 const thread = @import("thread");
 const net = @import("net");
 const dma = @import("dma");
+const io = @import("io");
 
 const MmioDevice = hal.mmio_device.MmioDevice;
 const regs = @import("regs.zig");
@@ -58,6 +59,14 @@ pub const E1000e = struct {
 
     /// Current TX descriptor index
     tx_cur: u16,
+
+    /// Pending async TX requests (one per descriptor slot)
+    /// Set when transmitAsync() queues a packet, cleared on TX completion IRQ
+    pending_tx_requests: [TX_DESC_COUNT]?*io.IoRequest,
+
+    /// TX completion tracking: last processed descriptor index
+    /// Used by IRQ handler to scan completed descriptors
+    tx_completion_idx: u16,
 
     /// IRQ line for this device
     irq_line: u8,

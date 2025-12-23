@@ -1,11 +1,13 @@
 const std = @import("std");
 const hal = @import("hal");
 const layout = @import("layout");
+const io = @import("io");
 
 const types = @import("../types.zig");
 const device = @import("../device.zig");
 const trb = @import("../trb.zig");
 const context = @import("../context.zig");
+const transfer_pool = @import("../transfer_pool.zig");
 const common = @import("common.zig");
 
 const Controller = types.Controller;
@@ -82,4 +84,89 @@ pub fn queueBulkTransfer(
     const transferred = if (residual_usize <= requested) requested - residual_usize else 0;
 
     return transferred;
+}
+
+/// Queue an asynchronous bulk transfer with IoRequest
+/// Returns immediately - completion via IoRequest.complete()
+/// The caller must:
+///   1. Allocate IoRequest from kernel pool
+///   2. Call this function to queue the transfer
+///   3. Wait on Future or use io_uring for completion
+///   4. Free IoRequest after completion
+/// Security: Validates buffer is in kernel address space before DMA setup.
+pub fn queueBulkTransferAsync(
+    ctrl: *Controller,
+    dev: *device.UsbDevice,
+    ep_addr: u8,
+    buf_phys: u64,
+    buf_len: usize,
+    io_request: *io.IoRequest,
+) TransferError!void {
+    // Security: Validate endpoint address before calculating DCI
+    const dci = context.InputContext.endpointToDci(ep_addr) orelse return error.InvalidParam;
+
+    // Validate state (DCI 0 is invalid, DCI 1 is EP0 control)
+    if (dci == 0 or dci >= 32) return error.InvalidParam;
+
+    // Check device state - don't queue if disconnecting
+    if (dev.state == .disconnecting or dev.state == .disabled) {
+        return error.InvalidState;
+    }
+
+    var ring_ptr = &(dev.endpoints[dci] orelse return error.InvalidState);
+
+    // Security: Use checked conversion - TRB length field is 17 bits (max 131071)
+    const trb_len: u17 = std.math.cast(u17, buf_len) orelse return error.InvalidParam;
+
+    // Get TRB physical address for tracking before enqueueing
+    const trb_phys = ring_ptr.getEnqueuePhysAddr();
+
+    // Allocate TransferRequest from pool (with io_request linked)
+    const transfer_req = transfer_pool.allocRequest(
+        dci,
+        trb_phys,
+        @truncate(buf_len),
+        .{ .none = {} }, // No callback for bulk - use IoRequest
+        io_request,
+    ) orelse return error.ResourceError;
+    errdefer transfer_pool.freeRequest(transfer_req);
+
+    // Build Normal TRB
+    var normal = trb.NormalTrb.init(
+        buf_phys,
+        trb_len,
+        .{ .ioc = true, .isp = true }, // IOC + ISP (Interrupt on Short Packet)
+        ring_ptr.getCycleState(),
+    );
+
+    _ = ring_ptr.enqueueSingle(normal.asTrb().*) orelse {
+        transfer_pool.freeRequest(transfer_req);
+        return error.RingFull;
+    };
+
+    // Transition TransferRequest to in_progress
+    _ = transfer_req.compareAndSwapState(.pending, .in_progress);
+
+    // Register pending transfer under device lock
+    {
+        const held = dev.device_lock.acquire();
+        defer held.release();
+        dev.registerPendingTransfer(dci, transfer_req);
+    }
+
+    // Transition IoRequest to in_progress
+    _ = io_request.compareAndSwapState(.pending, .in_progress);
+
+    // Set IoRequest metadata for tracing
+    io_request.op_data = .{
+        .usb = .{
+            .slot_id = dev.slot_id,
+            .dci = dci,
+            .request_len = @truncate(buf_len),
+            .buf_phys = buf_phys,
+        },
+    };
+
+    // Ring doorbell (non-blocking - IRQ will complete the transfer)
+    ctrl.ringDoorbell(dev.slot_id, dci);
 }

@@ -9,6 +9,7 @@ const console = @import("console");
 const types = @import("types.zig");
 const regs = @import("regs.zig");
 const rx = @import("rx.zig");
+const tx = @import("tx.zig");
 
 const E1000e = types.E1000e;
 const mmio = hal.mmio;
@@ -103,6 +104,12 @@ pub fn handleIrq(driver: *E1000e) void {
         if (driver.worker_thread) |t| {
             sched.unblock(t);
         }
+    }
+
+    if (icr.tx_desc_written) {
+        // TX completion interrupt - process completed descriptors
+        // This completes any pending IoRequests for async transmits
+        tx.processTxCompletions(driver);
     }
 
     if (icr.link_status_change) {

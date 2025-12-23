@@ -450,8 +450,9 @@ pub fn build(b: *std.Build) void {
     kernel_io_module.addImport("sched", sched_module);
     kernel_io_module.addImport("thread", thread_module);
 
-    // Wire io module into net (deferred from earlier due to dependency order)
+    // Wire io module into net and serial (deferred from earlier due to dependency order)
     net_module.addImport("io", kernel_io_module);
+    serial_module.addImport("io", kernel_io_module);
 
     // Create Stack Guard module (stack canary support)
     const stack_guard_module = b.createModule(.{
@@ -514,6 +515,7 @@ pub fn build(b: *std.Build) void {
     e1000e_module.addImport("net", net_module);
     e1000e_module.addImport("dma", dma_module);
     e1000e_module.addImport("iommu", kernel_iommu_module);
+    e1000e_module.addImport("io", kernel_io_module);
 
     // Create AHCI driver module (SATA storage controller)
     const ahci_module = b.createModule(.{

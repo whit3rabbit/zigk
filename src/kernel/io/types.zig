@@ -85,6 +85,21 @@ pub const IoOpType = enum(u8) {
 
     /// Audio write - async audio buffer submission
     audio_write = 13,
+
+    /// USB control transfer - setup/data/status stages
+    usb_control = 14,
+
+    /// USB bulk transfer - large data transfers
+    usb_bulk = 15,
+
+    /// USB interrupt transfer - periodic polling (HID)
+    usb_interrupt = 16,
+
+    /// Network TX - async packet transmission
+    net_tx = 17,
+
+    /// Serial TX - async serial port transmission
+    serial_tx = 18,
 };
 
 /// Result of an I/O operation
@@ -263,6 +278,30 @@ pub const IoRequest = struct {
             func_ptr: usize,
             /// Argument pointer (cast to appropriate type)
             args_ptr: usize,
+        },
+
+        /// For usb_control/usb_bulk/usb_interrupt: USB transfer parameters
+        usb: extern struct {
+            /// USB device slot ID (1-255)
+            slot_id: u8,
+            /// Device Context Index for endpoint (1-31)
+            dci: u8,
+            /// Requested transfer length (up to 64KB)
+            request_len: u16,
+            /// Reserved padding for alignment
+            _reserved: [4]u8 = .{ 0, 0, 0, 0 },
+            /// DMA buffer physical address
+            buf_phys: u64,
+        },
+
+        /// For net_tx: Network async transmit parameters
+        net_tx: extern struct {
+            /// Packet length queued for transmission
+            bytes_queued: u32,
+            /// TX descriptor ring index
+            descriptor_idx: u16,
+            /// Reserved padding for alignment
+            _reserved: [10]u8 = .{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
         },
 
         /// Raw bytes for custom data

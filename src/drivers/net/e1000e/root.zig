@@ -78,6 +78,20 @@ pub fn transmit(driver: *E1000e, data: []const u8) bool {
     return tx.transmit(driver, data);
 }
 
+/// Transmit a packet asynchronously with IoRequest completion
+///
+/// Unlike `transmit()` which returns immediately with success/failure,
+/// this function queues an IoRequest that will be completed when the
+/// hardware finishes transmitting the packet.
+///
+/// @param driver E1000e driver instance
+/// @param data Packet data (copied to descriptor buffer)
+/// @param io_request IoRequest to complete on TX completion
+/// @return error if packet invalid or ring full
+pub fn transmitAsync(driver: *E1000e, data: []const u8, io_request: *@import("io").IoRequest) tx.AsyncTxError!void {
+    return tx.transmitAsync(driver, data, io_request);
+}
+
 /// Check for TX ring stall and reset if stuck
 pub fn checkTxWatchdog(driver: *E1000e) void {
     tx.checkTxWatchdog(driver);

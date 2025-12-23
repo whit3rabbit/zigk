@@ -2,10 +2,12 @@ const std = @import("std");
 const console = @import("console");
 const hal = @import("hal");
 const pmm = @import("pmm");
+const io = @import("io");
 
 const types = @import("../types.zig");
 const device = @import("../device.zig");
 const trb = @import("../trb.zig");
+const transfer_pool = @import("../transfer_pool.zig");
 const common = @import("common.zig");
 const usb_types = @import("../../types.zig");
 
@@ -388,4 +390,147 @@ pub fn setIdle(
         null,
         CONTROL_TIMEOUT_MS,
     );
+}
+
+// -----------------------------------------------------------------------------
+// Async Control Transfer (IoRequest-based)
+// -----------------------------------------------------------------------------
+
+/// Queue an asynchronous control transfer with IoRequest
+/// Returns immediately - completion via IoRequest.complete()
+///
+/// Caller responsibilities:
+///   1. Allocate IoRequest from kernel pool
+///   2. For OUT transfers: copy data to buf_phys BEFORE calling
+///   3. Call this function to queue the transfer
+///   4. Wait on IoRequest.wait() or use io_uring for completion
+///   5. For IN transfers: copy data from buf_phys AFTER completion
+///   6. Free DMA buffer and IoRequest after completion
+///
+/// Security:
+///   - buf_phys must be a valid DMA-capable physical address (from pmm)
+///   - buf_len must fit in 17-bit TRB length field (max 131071)
+///   - Device state is validated before queueing
+pub fn controlTransferAsync(
+    ctrl: *Controller,
+    dev: *device.UsbDevice,
+    request_type: u8,
+    request: u8,
+    value: u16,
+    index: u16,
+    buf_phys: ?u64,
+    buf_len: usize,
+    io_request: *io.IoRequest,
+) TransferError!void {
+    // Validate device state
+    if (dev.state == .err or dev.state == .disconnecting or dev.state == .disabled) {
+        return error.InvalidState;
+    }
+
+    const ep0_ring = &(dev.endpoints[1] orelse return error.InvalidState);
+
+    // Determine transfer type (direction of data stage)
+    const is_in = (request_type & 0x80) != 0;
+    const has_data = buf_phys != null and buf_len > 0;
+
+    const trt: trb.SetupStageTrb.TransferType = if (!has_data)
+        .no_data
+    else if (is_in)
+        .in
+    else
+        .out;
+
+    // Security: Use checked conversion to prevent silent truncation
+    const w_length: u16 = std.math.cast(u16, buf_len) orelse return error.InvalidParam;
+
+    const setup_data = trb.SetupData{
+        .bm_request_type = request_type,
+        .b_request = request,
+        .w_value = value,
+        .w_index = index,
+        .w_length = w_length,
+    };
+
+    var setup_trb = trb.SetupStageTrb.init(
+        setup_data,
+        trt,
+        ep0_ring.getCycleState(),
+    );
+
+    // Queue Setup TRB
+    _ = ep0_ring.enqueueSingle(setup_trb.asTrb().*) orelse return error.RingFull;
+
+    // Data Stage TRB (if needed)
+    if (has_data) {
+        // Security: Use checked conversion - TRB length field is 17 bits (max 131071)
+        const trb_len: u17 = std.math.cast(u17, buf_len) orelse return error.InvalidParam;
+
+        var data_trb = trb.DataStageTrb.init(
+            buf_phys.?,
+            trb_len,
+            is_in,
+            false, // IOC on data stage (we want it on status)
+            false, // No chain
+            ep0_ring.getCycleState(),
+        );
+
+        _ = ep0_ring.enqueueSingle(data_trb.asTrb().*) orelse return error.RingFull;
+    }
+
+    // Status Stage TRB (direction opposite to data stage)
+    // For Device-to-Host: Status is OUT (host sends ZLP)
+    // For Host-to-Device or No-Data: Status is IN (device sends ZLP)
+    const status_dir = if (has_data and is_in) false else true;
+
+    // Get TRB physical address for tracking BEFORE enqueueing
+    const status_trb_phys = ep0_ring.getEnqueuePhysAddr();
+
+    var status_trb = trb.StatusStageTrb.init(
+        status_dir,
+        true, // IOC - Interrupt On Completion
+        ep0_ring.getCycleState(),
+    );
+
+    // Allocate TransferRequest from pool (with io_request linked)
+    // EP0 DCI = 1
+    const transfer_req = transfer_pool.allocRequest(
+        1, // EP0 DCI
+        status_trb_phys,
+        @truncate(buf_len),
+        .{ .none = {} }, // No callback for async - use IoRequest
+        io_request,
+    ) orelse return error.ResourceError;
+    errdefer transfer_pool.freeRequest(transfer_req);
+
+    // Enqueue Status TRB
+    _ = ep0_ring.enqueueSingle(status_trb.asTrb().*) orelse {
+        transfer_pool.freeRequest(transfer_req);
+        return error.RingFull;
+    };
+
+    // Transition TransferRequest to in_progress
+    _ = transfer_req.compareAndSwapState(.pending, .in_progress);
+
+    // Register pending transfer under device lock
+    {
+        const held = dev.device_lock.acquire();
+        defer held.release();
+        dev.registerPendingTransfer(1, transfer_req); // EP0 DCI = 1
+    }
+
+    // Transition IoRequest to in_progress
+    _ = io_request.compareAndSwapState(.pending, .in_progress);
+
+    // Set IoRequest metadata for tracing
+    io_request.op_data = .{
+        .usb = .{
+            .slot_id = dev.slot_id,
+            .dci = 1, // EP0 DCI
+            .request_len = @truncate(buf_len),
+            .buf_phys = buf_phys orelse 0,
+        },
+    };
+
+    // Ring doorbell (non-blocking - IRQ will complete the transfer)
+    ctrl.ringDoorbell(dev.slot_id, 1); // EP0 DCI = 1
 }

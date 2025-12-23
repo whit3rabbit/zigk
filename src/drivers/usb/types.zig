@@ -109,15 +109,23 @@ pub const DeviceDescriptor = packed struct {
 };
 
 /// Configuration Descriptor Header (9 bytes)
-pub const ConfigurationDescriptor = packed struct {
+/// Note: Uses extern struct with split u16 to ensure exact 9-byte layout.
+/// USB descriptors are little-endian, so we split w_total_length into lo/hi bytes.
+pub const ConfigurationDescriptor = extern struct {
     b_length: u8,
     b_descriptor_type: u8,
-    w_total_length: u16,
+    w_total_length_lo: u8,
+    w_total_length_hi: u8,
     b_num_interfaces: u8,
     b_configuration_value: u8,
     i_configuration: u8,
-    bm_attributes: ConfigAttributes,
+    bm_attributes: u8, // Use raw u8, interpret with ConfigAttributes if needed
     b_max_power: u8, // In 2mA units
+
+    /// Get the total length as a u16 (little-endian)
+    pub fn getTotalLength(self: @This()) u16 {
+        return @as(u16, self.w_total_length_hi) << 8 | self.w_total_length_lo;
+    }
 
     comptime {
         if (@sizeOf(@This()) != 9) @compileError("ConfigurationDescriptor must be 9 bytes");

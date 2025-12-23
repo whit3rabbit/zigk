@@ -9,6 +9,7 @@
 const std = @import("std");
 const hal = @import("hal");
 const sync = @import("sync");
+const io = @import("io");
 
 // Register offsets
 const DATA = 0;
@@ -162,3 +163,154 @@ pub const Writer = struct {
 };
 
 pub const writer = Writer{};
+
+// -----------------------------------------------------------------------------
+// Async I/O Support
+// -----------------------------------------------------------------------------
+
+/// Pending async TX state (single writer, protected by tx_lock)
+var tx_pending: ?*io.IoRequest = null;
+var tx_buffer: []const u8 = &.{};
+var tx_index: usize = 0;
+var tx_lock = std.atomic.Value(bool).init(false);
+
+/// IER bit masks
+const IER_RX_AVAILABLE: u8 = 0x01; // Bit 0: Enable Received Data Available Interrupt
+const IER_TX_EMPTY: u8 = 0x02; // Bit 1: Enable Transmitter Holding Register Empty Interrupt
+
+/// Async transmit error types
+pub const AsyncTxError = error{
+    Busy, // Another async TX is in progress
+    InvalidParam, // Empty or null buffer
+};
+
+/// Write data asynchronously with IoRequest completion
+///
+/// Begins transmission and returns immediately. The IoRequest will be
+/// completed when all bytes have been transmitted via the THRE interrupt.
+///
+/// Flow:
+/// 1. Caller allocates IoRequest via io.allocRequest(.serial_tx)
+/// 2. This function sends first byte and enables THRE interrupt
+/// 3. THRE interrupt fires after each byte, ISR sends next byte
+/// 4. When all bytes sent, ISR completes IoRequest with bytes_sent
+/// 5. Caller's Future becomes ready
+///
+/// @param data Data to transmit (must remain valid until completion)
+/// @param io_request IoRequest to complete on TX completion
+/// @return error if another async TX is in progress
+pub fn writeAsync(data: []const u8, io_request: *io.IoRequest) AsyncTxError!void {
+    if (data.len == 0) {
+        io_request.complete(.{ .err = .EINVAL });
+        return error.InvalidParam;
+    }
+
+    // Acquire TX lock (simple spinlock)
+    while (tx_lock.cmpxchgWeak(false, true, .acquire, .monotonic) != null) {
+        hal.cpu.pause();
+    }
+
+    // Check if async TX already in progress
+    if (tx_pending != null) {
+        tx_lock.store(false, .release);
+        io_request.complete(.{ .err = .EBUSY });
+        return error.Busy;
+    }
+
+    // Store pending state
+    tx_pending = io_request;
+    tx_buffer = data;
+    tx_index = 0;
+
+    // Transition IoRequest to in_progress
+    _ = io_request.compareAndSwapState(.pending, .in_progress);
+
+    // Store metadata for tracing
+    io_request.op_data = .{
+        .raw = .{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+    };
+
+    tx_lock.store(false, .release);
+
+    // Send first byte (this primes the interrupt)
+    const first_byte = data[0];
+    tx_index = 1;
+
+    // Wait for transmit empty before sending first byte
+    while (!isTransmitEmpty()) {
+        hal.cpu.pause();
+    }
+    hal.io.outb(current_port, first_byte);
+
+    // Enable TX empty interrupt (THRE)
+    // Read current IER, set bit 1, preserve receive interrupt if enabled
+    const current_ier = hal.io.inb(current_port + IER);
+    hal.io.outb(current_port + IER, current_ier | IER_TX_EMPTY);
+}
+
+/// Handle TX empty interrupt (called from handleIrq)
+/// Returns true if this was a TX interrupt we handled
+fn handleTxEmptyInterrupt() bool {
+    // Quick check without lock - if no pending, nothing to do
+    if (tx_pending == null) return false;
+
+    // Acquire TX lock
+    while (tx_lock.cmpxchgWeak(false, true, .acquire, .monotonic) != null) {
+        hal.cpu.pause();
+    }
+    defer tx_lock.store(false, .release);
+
+    const request = tx_pending orelse return false;
+
+    // Check if more data to send
+    if (tx_index < tx_buffer.len) {
+        // Send next byte
+        hal.io.outb(current_port, tx_buffer[tx_index]);
+        tx_index += 1;
+        return true;
+    }
+
+    // All data sent - complete the request
+    const bytes_sent = tx_buffer.len;
+
+    // Disable TX empty interrupt
+    const current_ier = hal.io.inb(current_port + IER);
+    hal.io.outb(current_port + IER, current_ier & ~IER_TX_EMPTY);
+
+    // Clear pending state before completing (avoid race)
+    tx_pending = null;
+    tx_buffer = &.{};
+    tx_index = 0;
+
+    // Complete IoRequest (this may wake blocked thread)
+    request.complete(.{ .ok = bytes_sent });
+
+    return true;
+}
+
+/// Extended IRQ handler that also checks TX interrupts
+pub fn handleIrqAsync() void {
+    const port = current_port;
+    // Read Interrupt Identification Register (IIR)
+    const iir = hal.io.inb(port + 2);
+
+    // Check if interrupt is pending (Bit 0 == 0 means pending)
+    if ((iir & 0x01) != 0) return;
+
+    // Check ID (Bits 1-3)
+    // 001 (1) = Transmitter Holding Register Empty (THRE)
+    // 010 (2) = Received Data Available
+    // 110 (6) = Character Timeout
+    const id = (iir >> 1) & 0x07;
+
+    if (id == 1) {
+        // THRE interrupt - transmitter ready for next byte
+        _ = handleTxEmptyInterrupt();
+    } else if (id == 2 or id == 6) {
+        // Received data
+        const data = hal.io.inb(port);
+        if (onByteReceived) |callback| {
+            callback(data);
+        }
+    }
+}

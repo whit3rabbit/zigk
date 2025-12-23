@@ -10,6 +10,8 @@ const ring = @import("ring.zig");
 const device = @import("device.zig");
 const device_manager = @import("device_manager.zig");
 const interrupt_transfer = @import("transfer/interrupt.zig");
+const transfer_pool = @import("transfer_pool.zig");
+const ports = @import("ports.zig");
 
 const interrupts = hal.interrupts;
 const Controller = types.Controller;
@@ -84,7 +86,42 @@ pub fn processEvents(ctrl: *Controller) usize {
                     continue;
                 }
 
-                // 1. Check if it matches a synchronous PendingTransfer
+                // 0. Check for async TransferRequest (new IoRequest-based path)
+                // Pattern: Grab under lock, complete outside lock (AHCI style)
+                // Security: Must acquire reference to device to prevent UAF if device
+                // disconnects on another CPU while we're processing the completion.
+                if (device.findDeviceWithRef(slot_id)) |dev| {
+                    defer _ = dev.releaseRef(); // Security: Always release reference
+
+                    var transfer_req: ?*device.UsbDevice.TransferRequest = null;
+
+                    // Grab pending transfer under device lock
+                    {
+                        const held = dev.device_lock.acquire();
+                        defer held.release();
+                        transfer_req = dev.takePendingTransfer(@truncate(ep_dci));
+                    }
+
+                    // Complete OUTSIDE lock to avoid holding lock during IoRequest completion
+                    if (transfer_req) |req| {
+                        // complete() handles: state transition, IoRequest completion, sched.unblock
+                        if (req.complete(code, @truncate(len))) {
+                            // Execute callback if present (for HID re-queue in IoRequest mode)
+                            // Security: Callbacks must NOT retain references to dev or report_buffer
+                            // past their return - we release the reference after this block.
+                            switch (req.callback) {
+                                .interrupt => |cb| cb(dev, dev.report_buffer),
+                                .control => |cb| cb(dev, code, @truncate(len)),
+                                .none => {},
+                            }
+                        }
+                        // Return request to pool
+                        transfer_pool.freeRequest(req);
+                        continue; // Skip legacy paths
+                    }
+                }
+
+                // 1. Check if it matches a synchronous PendingTransfer (legacy path)
                 if (device.matchesPendingTransfer(slot_id, ep_dci)) {
                     device.completePendingTransfer(code, @truncate(len));
                 }
@@ -141,9 +178,9 @@ pub fn processEvents(ctrl: *Controller) usize {
                 );
             },
             .PortStatusChangeEvent => {
-                console.info("XHCI: Port Status Change Event", .{});
-                // TODO: Handle hotplug
-                // ports.handlePortStatusChange(ctrl, ...);
+                const psc_evt = trb.PortStatusChangeEventTrb.fromTrb(event);
+                const port_id = psc_evt.getPortId();
+                ports.handlePortStatusChange(ctrl, port_id);
             },
             else => {
                 // console.debug("XHCI: Ignored event type {}", .{event_type});

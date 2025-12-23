@@ -396,9 +396,287 @@ pub fn findMscInterface(config_data: []const u8) ?MscInfo {
     return null;
 }
 
+// =============================================================================
+// Multi-Interface Enumeration Support
+// =============================================================================
+// The unified parser below collects ALL interfaces from a configuration
+// descriptor, enabling proper support for composite devices (keyboard+mouse,
+// USB storage, etc.). The legacy findXxxInterface functions above are kept
+// for backwards compatibility but are deprecated.
+
+/// Maximum number of interfaces per USB device
+/// USB spec allows up to 256 interfaces, but we cap for memory safety
+pub const MAX_INTERFACES_PER_DEVICE: usize = 16;
+
+/// Maximum endpoints per interface
+pub const MAX_ENDPOINTS_PER_INTERFACE: usize = 4;
+
+/// Endpoint information extracted from descriptor
+pub const EndpointInfo = struct {
+    address: u8,
+    attributes: u8,
+    max_packet_size: u16,
+    interval: u8,
+
+    /// Check if this is an IN endpoint
+    pub fn isIn(self: EndpointInfo) bool {
+        return (self.address & 0x80) != 0;
+    }
+
+    /// Check if this is an OUT endpoint
+    pub fn isOut(self: EndpointInfo) bool {
+        return (self.address & 0x80) == 0;
+    }
+
+    /// Get endpoint number (0-15)
+    pub fn getNumber(self: EndpointInfo) u4 {
+        return @truncate(self.address & 0x0F);
+    }
+
+    /// Get transfer type from attributes
+    pub fn getTransferType(self: EndpointInfo) usb_types.EndpointAttributes.TransferType {
+        return @enumFromInt(self.attributes & 0x03);
+    }
+
+    /// Check if this is an interrupt endpoint
+    pub fn isInterrupt(self: EndpointInfo) bool {
+        return self.getTransferType() == .interrupt;
+    }
+
+    /// Check if this is a bulk endpoint
+    pub fn isBulk(self: EndpointInfo) bool {
+        return self.getTransferType() == .bulk;
+    }
+};
+
+/// Interface information extracted from descriptor
+pub const InterfaceInfo = struct {
+    interface_num: u8,
+    alternate_setting: u8,
+    class: u8,
+    subclass: u8,
+    protocol: u8,
+    num_endpoints: u8,
+    endpoints: [MAX_ENDPOINTS_PER_INTERFACE]EndpointInfo,
+    endpoint_count: u8,
+
+    /// Check if this is a HID Boot Keyboard (Class 0x03, SubClass 0x01, Protocol 0x01)
+    pub fn isKeyboard(self: InterfaceInfo) bool {
+        return self.class == 0x03 and self.subclass == 0x01 and self.protocol == 0x01;
+    }
+
+    /// Check if this is a HID Boot Mouse (Class 0x03, SubClass 0x01, Protocol 0x02)
+    pub fn isMouse(self: InterfaceInfo) bool {
+        return self.class == 0x03 and self.subclass == 0x01 and self.protocol == 0x02;
+    }
+
+    /// Check if this is any HID device (Class 0x03)
+    pub fn isHid(self: InterfaceInfo) bool {
+        return self.class == 0x03;
+    }
+
+    /// Check if this is MSC BOT (Class 0x08, SubClass 0x06, Protocol 0x50)
+    pub fn isMscBot(self: InterfaceInfo) bool {
+        return self.class == 0x08 and self.subclass == 0x06 and self.protocol == 0x50;
+    }
+
+    /// Check if this is a Hub (Class 0x09)
+    pub fn isHub(self: InterfaceInfo) bool {
+        return self.class == 0x09;
+    }
+
+    /// Find the first interrupt IN endpoint for this interface
+    pub fn findInterruptIn(self: *const InterfaceInfo) ?*const EndpointInfo {
+        for (&self.endpoints, 0..) |*ep, idx| {
+            if (idx >= self.endpoint_count) break;
+            if (ep.isIn() and ep.isInterrupt()) {
+                return ep;
+            }
+        }
+        return null;
+    }
+
+    /// Find the first bulk IN endpoint for this interface
+    pub fn findBulkIn(self: *const InterfaceInfo) ?*const EndpointInfo {
+        for (&self.endpoints, 0..) |*ep, idx| {
+            if (idx >= self.endpoint_count) break;
+            if (ep.isIn() and ep.isBulk()) {
+                return ep;
+            }
+        }
+        return null;
+    }
+
+    /// Find the first bulk OUT endpoint for this interface
+    pub fn findBulkOut(self: *const InterfaceInfo) ?*const EndpointInfo {
+        for (&self.endpoints, 0..) |*ep, idx| {
+            if (idx >= self.endpoint_count) break;
+            if (ep.isOut() and ep.isBulk()) {
+                return ep;
+            }
+        }
+        return null;
+    }
+};
+
+/// Result of parsing a complete configuration descriptor
+pub const ParseResult = struct {
+    interfaces: [MAX_INTERFACES_PER_DEVICE]InterfaceInfo,
+    interface_count: u8,
+    config_value: u8,
+
+    /// Find first interface matching class (and optionally subclass/protocol)
+    pub fn findFirst(self: *const ParseResult, class: u8, subclass_opt: ?u8, protocol_opt: ?u8) ?*const InterfaceInfo {
+        for (&self.interfaces, 0..) |*iface, idx| {
+            if (idx >= self.interface_count) break;
+            if (iface.class != class) continue;
+            if (subclass_opt) |sc| if (iface.subclass != sc) continue;
+            if (protocol_opt) |pr| if (iface.protocol != pr) continue;
+            return iface;
+        }
+        return null;
+    }
+
+    /// Get interface slice for iteration
+    pub fn getInterfaces(self: *const ParseResult) []const InterfaceInfo {
+        return self.interfaces[0..self.interface_count];
+    }
+};
+
+/// Parse entire configuration descriptor and extract ALL interfaces
+/// Security: Validates all descriptor bounds against actual buffer size,
+/// not just the claimed b_length field from untrusted device data.
+/// Returns null if parsing fails or no valid interfaces found.
+pub fn parseConfigDescriptor(config_data: []const u8) ?ParseResult {
+    var result = ParseResult{
+        .interfaces = undefined,
+        .interface_count = 0,
+        .config_value = 0,
+    };
+
+    // Zero-initialize all interface data for security
+    @memset(std.mem.asBytes(&result.interfaces), 0);
+
+    var i: usize = 0;
+    var current_interface_idx: ?usize = null;
+
+    const config_desc_size = @sizeOf(usb_types.ConfigurationDescriptor);
+    const iface_desc_size = @sizeOf(usb_types.InterfaceDescriptor);
+    const ep_desc_size = @sizeOf(usb_types.EndpointDescriptor);
+
+    while (i + 2 <= config_data.len) {
+        const length = config_data[i];
+        const desc_type = config_data[i + 1];
+
+        // Validate length field from device data
+        if (length < 2) break; // Minimum descriptor size is 2 bytes
+        if (i + length > config_data.len) break; // Claimed length exceeds buffer
+
+        switch (desc_type) {
+            usb_types.DescriptorType.CONFIGURATION => {
+                if (length >= config_desc_size and i + config_desc_size <= config_data.len) {
+                    var config: usb_types.ConfigurationDescriptor = undefined;
+                    @memcpy(std.mem.asBytes(&config), config_data[i..][0..config_desc_size]);
+                    result.config_value = config.b_configuration_value;
+                    console.debug("XHCI: Config descriptor: {} interfaces, config_value={}", .{
+                        config.b_num_interfaces,
+                        config.b_configuration_value,
+                    });
+                }
+            },
+
+            usb_types.DescriptorType.INTERFACE => {
+                // Security: Check actual struct size, not just claimed length
+                const required_size = @max(length, iface_desc_size);
+                if (i + required_size > config_data.len) break;
+
+                if (length >= iface_desc_size and result.interface_count < MAX_INTERFACES_PER_DEVICE) {
+                    // Security: Copy to aligned buffer instead of pointer cast
+                    var iface: usb_types.InterfaceDescriptor = undefined;
+                    @memcpy(std.mem.asBytes(&iface), config_data[i..][0..iface_desc_size]);
+
+                    // Only process alternate setting 0 (default)
+                    // Alternate settings are for bandwidth negotiation, not additional functionality
+                    if (iface.b_alternate_setting == 0) {
+                        const idx = result.interface_count;
+                        result.interfaces[idx] = InterfaceInfo{
+                            .interface_num = iface.b_interface_number,
+                            .alternate_setting = iface.b_alternate_setting,
+                            .class = iface.b_interface_class,
+                            .subclass = iface.b_interface_sub_class,
+                            .protocol = iface.b_interface_protocol,
+                            .num_endpoints = iface.b_num_endpoints,
+                            .endpoints = undefined,
+                            .endpoint_count = 0,
+                        };
+                        @memset(std.mem.asBytes(&result.interfaces[idx].endpoints), 0);
+
+                        current_interface_idx = idx;
+                        result.interface_count += 1;
+
+                        console.debug("XHCI: Interface {}: class=0x{x:0>2}, subclass=0x{x:0>2}, protocol=0x{x:0>2}", .{
+                            iface.b_interface_number,
+                            iface.b_interface_class,
+                            iface.b_interface_sub_class,
+                            iface.b_interface_protocol,
+                        });
+                    }
+                }
+            },
+
+            usb_types.DescriptorType.ENDPOINT => {
+                // Security: Check actual struct size, not just claimed length
+                const required_size = @max(length, ep_desc_size);
+                if (i + required_size > config_data.len) break;
+
+                if (length >= ep_desc_size and current_interface_idx != null) {
+                    const iface_idx = current_interface_idx.?;
+                    if (result.interfaces[iface_idx].endpoint_count < MAX_ENDPOINTS_PER_INTERFACE) {
+                        // Security: Copy to aligned buffer instead of pointer cast
+                        var ep: usb_types.EndpointDescriptor = undefined;
+                        @memcpy(std.mem.asBytes(&ep), config_data[i..][0..ep_desc_size]);
+
+                        const ep_idx = result.interfaces[iface_idx].endpoint_count;
+                        result.interfaces[iface_idx].endpoints[ep_idx] = EndpointInfo{
+                            .address = ep.b_endpoint_address,
+                            .attributes = ep.bm_attributes,
+                            .max_packet_size = ep.w_max_packet_size,
+                            .interval = ep.b_interval,
+                        };
+                        result.interfaces[iface_idx].endpoint_count += 1;
+
+                        console.debug("XHCI:   Endpoint 0x{x:0>2}: type={s}, max_packet={}", .{
+                            ep.b_endpoint_address,
+                            @tagName(result.interfaces[iface_idx].endpoints[ep_idx].getTransferType()),
+                            ep.w_max_packet_size,
+                        });
+                    }
+                }
+            },
+
+            else => {},
+        }
+
+        i += length;
+    }
+
+    if (result.interface_count == 0) {
+        console.warn("XHCI: No interfaces found in config descriptor", .{});
+        return null;
+    }
+
+    console.info("XHCI: Parsed {} interface(s) from config descriptor", .{result.interface_count});
+    return result;
+}
+
+// =============================================================================
+// Legacy Functions (Deprecated - kept for backwards compatibility)
+// =============================================================================
+
 /// Parse configuration descriptor to find Generic Hub interface
 /// Security: Validates all descriptor bounds against actual buffer size,
 /// not just the claimed b_length field from untrusted device data.
+/// @deprecated Use parseConfigDescriptor() and InterfaceInfo.isHub() instead
 pub fn findHubInterface(config_data: []const u8) ?HubInfo {
     var i: usize = 0;
 

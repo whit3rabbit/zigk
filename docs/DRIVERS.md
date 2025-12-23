@@ -74,6 +74,471 @@ const data_len = @min(actual_transferred, dev.report_buffer.len);
 
 ---
 
+## XHCI USB Hotplug
+
+Zscapek supports USB device hotplug (connect and disconnect detection) via the xHCI Port Status Change Event mechanism.
+
+### Device State Machine
+
+USB devices transition through these states during their lifecycle:
+
+```
+                    +---------------+
+                    | slot_enabled  |  <-- EnableSlot command succeeded
+                    +-------+-------+
+                            |
+                            v
+                    +-------+-------+
+                    |   addressed   |  <-- SetAddress command succeeded
+                    +-------+-------+
+                            |
+                            v
+                    +-------+-------+
+                    |  configured   |  <-- SetConfiguration succeeded
+                    +-------+-------+
+                            |
+                            v
+                    +-------+-------+
+                    |    polling    |  <-- Interrupt polling active (HID/Hub)
+                    +-------+-------+
+                            |
+                            | (disconnect detected)
+                            v
+                    +-------+-------+
+                    | disconnecting |  <-- Cleanup in progress
+                    +-------+-------+
+                            |
+                            v
+                    +-------+-------+
+                    |   disabled    |  <-- Slot released (terminal)
+                    +---------------+
+```
+
+### Hotplug Event Flow
+
+```
+Port Status Change Event (from hardware)
+            |
+            v
+interrupts.zig: processEvents()
+            |
+            v
+ports.zig: handlePortStatusChange(ctrl, port_id)
+            |
+            +---> CSC bit set + CCS=1 --> handlePortConnect()
+            |                                   |
+            |                                   v
+            |                             resetPort() --> enumerateDevice()
+            |
+            +---> CSC bit set + CCS=0 --> handlePortDisconnect()
+                                                |
+                                                v
+                                        findDevicesOnPort()
+                                                |
+                                                v
+                                        disconnectDevice() (children first)
+```
+
+### Disconnect Handling Sequence
+
+Safe device removal follows this sequence to prevent use-after-free and hardware state inconsistencies:
+
+1. **Transition to `disconnecting` state** - Prevents new transfers from being queued
+2. **Stop all endpoints** - Sends `StopEndpointCmd` for each active DCI
+3. **Cancel pending transfers** - Marks all in-flight transfers as `Stopped`
+4. **Disable slot** - Sends `DisableSlotCmd`, clears DCBAA entry
+5. **Cleanup device** - Calls `dev.deinit()` to free resources
+
+**Hub Cascade**: When a hub is disconnected, child devices are removed first (deepest-first order) to ensure proper cleanup hierarchy.
+
+### Per-Device Locking
+
+Each `UsbDevice` has a `device_lock` Spinlock for IRQ-safe state transitions:
+
+```zig
+pub const UsbDevice = struct {
+    // ... other fields ...
+    device_lock: sync.Spinlock = .{},
+    state: DeviceState,
+    pending_transfers: [32]?*TransferRequest,
+};
+```
+
+**Lock Ordering** (must be acquired in this order to prevent deadlock):
+1. `devices_lock` (global device array)
+2. `UsbDevice.device_lock` (per-device)
+
+### Transfer Request Tracking
+
+Pending USB transfers are tracked per-device for proper cancellation during disconnect:
+
+```zig
+pub const TransferRequest = struct {
+    trb_phys: u64,           // TRB physical address for matching events
+    dci: u5,                 // Device Context Index
+    state: atomic.Value(TransferState),
+    completion_code: trb.CompletionCode,
+    residual: u24,           // Bytes NOT transferred
+    request_len: u24,        // Original request length
+    callback: TransferCallback,
+    next: ?*TransferRequest, // Intrusive list for pool
+};
+
+pub const TransferState = enum(u8) {
+    pending,
+    in_progress,
+    completed,
+    cancelled,
+    failed,
+};
+```
+
+### Transfer Request Pool
+
+To prevent unbounded memory growth from malicious devices, transfer requests use a fixed-size pool:
+
+**Location**: `src/drivers/usb/xhci/transfer_pool.zig`
+
+- **Pool Size**: 256 requests (system-wide limit)
+- **Allocation**: O(1) via intrusive free list
+- **Security**: Pool exhaustion returns `null` (driver returns `EAGAIN`)
+
+```zig
+// Allocate request
+const req = transfer_pool.allocRequest(dci, trb_phys, len, callback) orelse
+    return error.EAGAIN;
+
+// Free after completion
+transfer_pool.freeRequest(req);
+```
+
+### Key Files
+
+| File | Purpose |
+|------|---------|
+| `src/drivers/usb/xhci/ports.zig` | Port state machine, hotplug handlers |
+| `src/drivers/usb/xhci/device.zig` | UsbDevice struct, TransferRequest, states |
+| `src/drivers/usb/xhci/transfer_pool.zig` | Fixed-size request pool |
+| `src/drivers/usb/xhci/interrupts.zig` | PortStatusChangeEvent dispatch |
+| `src/drivers/usb/xhci/device_manager.zig` | stopEndpoint, disableSlot commands |
+| `src/drivers/usb/xhci/trb.zig` | StopEndpointCmdTrb definition |
+
+### Testing Hotplug
+
+1. **QEMU USB passthrough**: Connect/disconnect physical devices
+2. **Hub cascade**: Disconnect hub with attached devices to verify child cleanup
+3. **Stress test**: Rapid connect/disconnect cycles to check for race conditions
+
+---
+
+## XHCI Async I/O Integration
+
+USB transfers integrate with the kernel's IoRequest/Future async infrastructure, enabling both kernel-level and userspace (io_uring) async operations.
+
+### Bridge Pattern
+
+USB uses a **bridge pattern** where `TransferRequest` (USB-specific) links to `IoRequest` (kernel-generic):
+
+```zig
+pub const TransferRequest = struct {
+    trb_phys: u64,                    // TRB physical address for event matching
+    dci: u5,                          // Device Context Index
+    state: atomic.Value(TransferState),
+    completion_code: trb.CompletionCode, // USB-specific error
+    residual: u24,                    // Bytes NOT transferred
+    request_len: u24,                 // Original request length
+    callback: TransferCallback,       // Optional callback (HID polling)
+    io_request: ?*io.IoRequest,       // Bridge to kernel IoRequest
+    next: ?*TransferRequest,          // Pool free list
+};
+```
+
+This allows USB to track hardware-specific state (DCI, TRB phys, CompletionCode) while delegating kernel integration (thread wakeup, io_uring CQE posting) to IoRequest.
+
+### Async Transfer APIs
+
+**Location**: `src/drivers/usb/xhci/transfer/`
+
+| Function | File | Description |
+|----------|------|-------------|
+| `queueBulkTransferAsync()` | `bulk.zig` | Async bulk transfer with IoRequest |
+| `controlTransferAsync()` | `control.zig` | Async control transfer (3-stage) |
+| `queueInterruptTransferAsync()` | `interrupt.zig` | Dual-mode interrupt transfer |
+
+### Completion Flow
+
+```
+USB Device completes transfer
+      |
+      v
+XHCI raises MSI-X interrupt
+      |
+      v
+interrupts.zig: processEvents()
+      |
+      v
+device.takePendingTransfer(dci)  <-- Under device_lock
+      |
+      v
+TransferRequest.complete(code, residual)  <-- Outside lock
+      |
+      +---> Sets completion_code, residual
+      |
+      +---> Calls io_request.complete(toIoResult())
+      |           |
+      |           +---> Maps USB CompletionCode to IoResult
+      |           +---> Calls sched.unblock(submitter)
+      |
+      v
+transfer_pool.freeRequest(req)
+```
+
+**Critical Pattern**: Grab under lock, complete outside lock. This prevents holding device_lock during potentially blocking IoRequest completion.
+
+### Interrupt Transfer Dual Mode
+
+Interrupt transfers support two modes via the `io_request` parameter:
+
+| Mode | io_request | Use Case |
+|------|------------|----------|
+| Callback | `null` | Kernel HID polling (auto re-queues) |
+| IoRequest | non-null | Userspace io_uring (manual requeue) |
+
+```zig
+// Callback mode: kernel HID driver, continuous polling
+queueInterruptTransferAsync(ctrl, dev, dci, null, null, null);
+
+// IoRequest mode: userspace, one-shot for io_uring
+queueInterruptTransferAsync(ctrl, dev, dci, buf_phys, buf_len, io_request);
+```
+
+### CompletionCode to IoResult Mapping
+
+| USB CompletionCode | IoResult | errno |
+|--------------------|----------|-------|
+| Success, ShortPacket | `.success(bytes)` | - |
+| StallError | `.err(EPERM)` | 1 |
+| BabbleDetectedError, USBTransactionError, TRBError | `.err(EIO)` | 5 |
+| ResourceError, NoSlotsAvailableError | `.err(ENOMEM)` | 12 |
+| BandwidthError | `.err(EBUSY)` | 16 |
+| Stopped, CommandAborted | `.err(ECANCELED)` | 125 |
+| ContextStateError | `.err(EINVAL)` | 22 |
+| EventRingFullError | `.err(EAGAIN)` | 11 |
+
+### Async Transfer Example
+
+```zig
+const io = @import("io");
+const bulk = @import("usb/xhci/transfer/bulk.zig");
+const pmm = @import("pmm");
+
+// 1. Allocate IoRequest for async operation
+const req = io.allocRequest(.usb_bulk) orelse return error.ENOMEM;
+defer io.freeRequest(req);
+
+// 2. Allocate DMA buffer
+const buf_phys = pmm.allocZeroedPages(1) orelse return error.ENOMEM;
+defer pmm.freePages(buf_phys, 1);
+
+// 3. Queue async bulk transfer (returns immediately)
+try bulk.queueBulkTransferAsync(ctrl, dev, ep_addr, buf_phys, 512, req);
+
+// 4. Wait for IRQ-driven completion
+var future = io.Future{ .request = req };
+const result = future.wait();
+
+switch (result) {
+    .success => |bytes| console.info("Transferred {} bytes", .{bytes}),
+    .err => |e| return e,
+    .cancelled => console.warn("Transfer cancelled", .{}),
+    .pending => unreachable,
+}
+```
+
+### Lock Ordering (USB-specific)
+
+Extended from CLAUDE.md lock ordering:
+
+```
+8.5. devices_lock (USB global RwLock)
+8.6. UsbDevice.device_lock (per-device Spinlock, IRQ-safe)
+8.7. transfer_pool.lock (global pool Spinlock)
+```
+
+**Pattern**: Acquire device_lock -> take pending transfer -> release lock -> complete transfer.
+
+### Cancellation on Disconnect
+
+When a USB device disconnects:
+
+1. Device state transitions to `.disconnecting`
+2. `cancelAllPendingTransfers()` is called:
+   ```zig
+   pub fn cancelAllPendingTransfers(self: *UsbDevice) void {
+       for (&self.pending_transfers) |*slot| {
+           if (slot.*) |req| {
+               _ = req.compareAndSwapState(.pending, .cancelled) or
+                   req.compareAndSwapState(.in_progress, .cancelled);
+               if (req.io_request) |io_req| {
+                   _ = io_req.complete(.cancelled);
+               }
+               transfer_pool.freeRequest(req);
+               slot.* = null;
+           }
+       }
+   }
+   ```
+3. All pending IoRequests receive `.cancelled` result
+4. Waiting threads are woken via `sched.unblock()`
+
+---
+
+## E1000e Async TX
+
+The E1000e network driver supports asynchronous packet transmission via the IoRequest pattern.
+
+### Architecture
+
+```
+transmitAsync(packet, io_request)
+      |
+      v
+Store in pending_tx_requests[tx_cur]
+      |
+      v
+Copy packet to TX buffer, configure descriptor
+      |
+      v
+Write TDT (notify hardware) -- returns immediately
+      |
+      v
+[Hardware transmits packet]
+      |
+      v
+TXDW interrupt fires
+      |
+      v
+processTxCompletions() scans DD bits
+      |
+      v
+Complete IoRequests for finished descriptors
+      |
+      v
+Caller's Future becomes ready
+```
+
+### Async TX API
+
+**Location**: `src/drivers/net/e1000e/tx.zig`
+
+```zig
+pub fn transmitAsync(
+    driver: *E1000e,
+    data: []const u8,
+    io_request: *io.IoRequest,
+) AsyncTxError!void
+```
+
+### TX Completion Tracking
+
+```zig
+// In E1000e struct (types.zig)
+pending_tx_requests: [TX_DESC_COUNT]?*io.IoRequest,  // 512 slots
+tx_completion_idx: u16,  // Last processed descriptor
+
+// IRQ handler calls processTxCompletions()
+fn processTxCompletions(driver: *E1000e) void {
+    while (idx != driver.tx_cur) {
+        if (descriptor[idx].DD) {
+            if (pending_tx_requests[idx]) |io_req| {
+                io_req.complete(.{ .ok = bytes_sent });
+            }
+        }
+        idx = (idx + 1) % TX_DESC_COUNT;
+    }
+}
+```
+
+### Error Handling
+
+| Error | Meaning |
+|-------|---------|
+| `InvalidPacket` | Packet too large or empty |
+| `RingFull` | TX descriptor ring full (DD=0) |
+
+When ring is full, the IoRequest is completed with `.err(.EAGAIN)` immediately.
+
+---
+
+## Serial Async TX (UART 16550)
+
+The UART driver supports asynchronous transmission using the THRE (Transmitter Holding Register Empty) interrupt.
+
+### Architecture
+
+```
+writeAsync(data, io_request)
+      |
+      v
+Send first byte
+      |
+      v
+Enable THRE interrupt
+      |
+      v
+[Hardware transmits byte]
+      |
+      v
+THRE interrupt fires (transmitter ready)
+      |
+      v
+handleTxEmptyInterrupt() sends next byte
+      |
+      v
+[Repeat until all bytes sent]
+      |
+      v
+Disable THRE interrupt
+      |
+      v
+Complete IoRequest with bytes_sent
+```
+
+### Async TX API
+
+**Location**: `src/drivers/serial/uart_16550.zig`
+
+```zig
+pub fn writeAsync(
+    data: []const u8,
+    io_request: *io.IoRequest,
+) AsyncTxError!void
+```
+
+### State Tracking
+
+```zig
+var tx_pending: ?*io.IoRequest = null;  // Current async request
+var tx_buffer: []const u8 = &.{};       // Data to transmit
+var tx_index: usize = 0;                 // Next byte to send
+var tx_lock = atomic.Value(bool).init(false);  // Simple spinlock
+```
+
+### Important Notes
+
+1. **Single Writer**: Only one async TX at a time (returns `error.Busy` if already in progress)
+2. **Buffer Lifetime**: Caller must ensure `data` remains valid until completion
+3. **Interrupt Efficiency**: Uses byte-by-byte interrupt-driven TX rather than polling
+
+### Error Handling
+
+| Error | Meaning |
+|-------|---------|
+| `Busy` | Another async TX in progress |
+| `InvalidParam` | Empty data buffer |
+
+---
+
 ## Kernel Drivers
 
 Kernel drivers are located in `src/drivers`. They are used for:

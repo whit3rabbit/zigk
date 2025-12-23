@@ -136,12 +136,92 @@ pub fn evaluateContext(ctrl: *Controller, dev: *device.UsbDevice) CommandError!v
     }
 }
 
-/// Start interrupt polling for a HID device (keyboard or mouse)
+// =============================================================================
+// Device Disconnect Commands
+// =============================================================================
+
+/// Send Stop Endpoint command
+/// xHCI Spec 4.6.9: Stops an endpoint to prevent further transfers
+/// Must be sent before disabling a slot during device disconnect
+pub fn stopEndpoint(ctrl: *Controller, dev: *device.UsbDevice, dci: u5) CommandError!void {
+    // Don't stop EP0 (DCI 1) - it's handled by Disable Slot
+    if (dci < 2) return;
+
+    console.debug("XHCI: Sending Stop Endpoint command (slot={}, dci={})...", .{ dev.slot_id, dci });
+
+    var stop_cmd = trb.StopEndpointCmdTrb.init(
+        dev.slot_id,
+        dci,
+        false, // suspend=false means full stop (not suspend)
+        ctrl.command_ring.getCycleState(),
+    );
+
+    _ = ctrl.command_ring.enqueue(stop_cmd.asTrb().*) orelse {
+        return error.RingFull;
+    };
+
+    ctrl.ringDoorbell(0, 0);
+
+    // Wait with shorter timeout - endpoint might already be stopped
+    const result = ctrl.waitForCommandCompletion(10000) catch return error.Timeout;
+
+    // Success or Context State Error are both acceptable
+    // Context State Error means endpoint was already stopped
+    if (result.code == .Success) {
+        console.debug("XHCI: Stop Endpoint succeeded", .{});
+    } else if (result.code == .ContextStateError) {
+        console.debug("XHCI: Endpoint already stopped", .{});
+    } else {
+        console.warn("XHCI: Stop Endpoint failed: {}", .{@intFromEnum(result.code)});
+        return error.CommandFailed;
+    }
+}
+
+/// Send Disable Slot command
+/// xHCI Spec 4.6.4: Releases all resources for a device slot
+/// Must be called after stopping all endpoints during device disconnect
+pub fn disableSlot(ctrl: *Controller, slot_id: u8) CommandError!void {
+    console.info("XHCI: Sending Disable Slot command (slot={})...", .{slot_id});
+
+    var disable_cmd = trb.DisableSlotCmdTrb.init(
+        slot_id,
+        ctrl.command_ring.getCycleState(),
+    );
+
+    _ = ctrl.command_ring.enqueue(disable_cmd.asTrb().*) orelse {
+        return error.RingFull;
+    };
+
+    ctrl.ringDoorbell(0, 0);
+
+    const result = ctrl.waitForCommandCompletion(50000) catch return error.Timeout;
+    if (result.code == .Success) {
+        console.info("XHCI: Disable Slot succeeded", .{});
+
+        // Clear DCBAA entry for this slot
+        ctrl.dcbaa.setSlot(slot_id, 0);
+    } else {
+        console.err("XHCI: Disable Slot failed: {}", .{@intFromEnum(result.code)});
+        return error.CommandFailed;
+    }
+}
+
+/// Start interrupt polling for a device (uses legacy interrupt_dci)
+/// @deprecated Use startInterruptPollingForDci for multi-interface devices
 pub fn startInterruptPolling(ctrl: *Controller, dev: *device.UsbDevice) !void {
     if (dev.state != .polling) {
         console.info("XHCI: Starting HID polling for slot {}", .{dev.slot_id});
     }
     try interrupt_transfer.queueInterruptTransfer(ctrl, dev);
+    dev.state = .polling;
+}
+
+/// Start interrupt polling for a specific DCI (supports multi-interface devices)
+pub fn startInterruptPollingForDci(ctrl: *Controller, dev: *device.UsbDevice, dci: u5) !void {
+    if (dev.state != .polling) {
+        console.info("XHCI: Starting polling for slot {} DCI {}", .{ dev.slot_id, dci });
+    }
+    try interrupt_transfer.queueInterruptTransferForDci(ctrl, dev, dci);
     dev.state = .polling;
 }
 
@@ -270,172 +350,278 @@ pub fn enumerateDevice(
         return err;
     };
 
-    // 8. Parse configuration for HID interface (keyboard or mouse)
-    var interface_num: u8 = 0;
-    var endpoint_addr: u8 = 0;
-    var max_packet: u16 = 0;
-    var interval: u8 = 0;
-
-    if (enumeration.findKeyboardInterface(config_buf[0..config_len])) |info| {
-        console.info("XHCI: Found HID Keyboard", .{});
-        dev.hid_driver.is_keyboard = true;
-        interface_num = info.interface_num;
-        endpoint_addr = info.endpoint_addr;
-        max_packet = info.max_packet;
-        interval = info.interval;
-    } else if (enumeration.findMouseInterface(config_buf[0..config_len])) |info| {
-        console.info("XHCI: Found HID Mouse", .{});
-        dev.hid_driver.is_mouse = true;
-        interface_num = info.interface_num;
-        endpoint_addr = info.endpoint_addr;
-        max_packet = info.max_packet;
-        interval = info.interval;
-    } else if (enumeration.findGenericHidInterface(config_buf[0..config_len])) |info| {
-        // Generic HID device (not Boot Protocol) - could be tablet, touchscreen, etc.
-        // We'll parse the report descriptor later to determine exact type
-        console.info("XHCI: Found generic HID device (subclass={}, protocol={})", .{ info.subclass, info.protocol });
-        // Mark as potential mouse/tablet - report descriptor parsing will refine this
-        dev.hid_driver.is_mouse = true;
-        interface_num = info.interface_num;
-        endpoint_addr = info.endpoint_addr;
-        max_packet = info.max_packet;
-        interval = info.interval;
-    } else if (enumeration.findHubInterface(config_buf[0..config_len])) |hub_info| {
-         console.info("XHCI: Found USB Hub Interface {d}", .{hub_info.interface_num});
-         
-         // Initialize Hub Driver
-         dev.is_hub = true;
-         
-         const int_in = hub_info.int_in_ep;
-         const max_packet_size = hub_info.max_packet;
-         
-         // Initialize Endpoint
-         console.debug("XHCI: Hub Int IN Endpoint 0x{x} max={d}", .{int_in, max_packet_size});
-         try dev.initBulkEndpoint(int_in); // Reusing bulk helper, works for allocating ring
-         try dev.buildConfigureEndpointContext(int_in, .interrupt_in, max_packet_size, 12); // Interval 12 (~32ms)
-         
-         // Send Configuration Command
-         try configureEndpoint(ctrl, dev); 
-         
-         // Initialize Driver
-         // Note: Passing enumerateDevice function pointer to HubDriver to break cycle
-         // Security: Pass current depth so hub can enforce nesting limits for child devices
-         dev.hub_driver = hub.HubDriver.init(ctrl, dev, int_in, enumerateDevice, depth);
-         try dev.hub_driver.configure();
-         
-         console.info("XHCI: USB Hub device enumerated on slot {d}", .{slot_id});
-         
-         device.registerDevice(dev);
-         return dev; 
-
-    } else {
-        console.info("XHCI: Device is not a supported device class", .{});
+    // 8. Parse configuration for ALL interfaces (multi-interface support)
+    const parse_result = enumeration.parseConfigDescriptor(config_buf[0..config_len]) orelse {
+        console.info("XHCI: No valid interfaces found in config descriptor", .{});
         dev.deinit();
-        return null; // Don't return error, just null for "unsupported"
-    }
+        return null;
+    };
 
-    // 9. SET_CONFIGURATION
-    const config_value = config_buf[5]; // bConfigurationValue
-    control_transfer.setConfiguration(ctrl, dev, config_value) catch |err| {
+    // 9. SET_CONFIGURATION first (must be done before endpoint configuration)
+    control_transfer.setConfiguration(ctrl, dev, parse_result.config_value) catch |err| {
         console.err("XHCI: Failed to set configuration: {}", .{err});
         return err;
     };
-    console.info("XHCI: Configuration {} set", .{config_value});
+    console.info("XHCI: Configuration {} set", .{parse_result.config_value});
 
-    // 10. Configure interrupt endpoint
-    try dev.buildConfigureEndpointContext(
-        endpoint_addr,
-        .interrupt_in,
-        max_packet,
-        interval,
-    );
-    try configureEndpoint(ctrl, dev);
-    dev.state = .configured;
+    // 10. Collect endpoint configurations for ALL supported interfaces
+    var endpoint_configs: [32]device.UsbDevice.EndpointConfig = undefined;
+    var endpoint_count: usize = 0;
+    var has_hub = false;
+    var hub_int_in: u8 = 0;
 
-    // 11. GET_REPORT_DESCRIPTOR to parse full HID capabilities
-    // Security: Zero-initialize DMA buffer to prevent kernel memory leaks on short transfers
-    var report_desc_buf: [512]u8 = [_]u8{0} ** 512;
-    const report_desc_len: usize = control_transfer.getReportDescriptor(ctrl, dev, interface_num, &report_desc_buf) catch |err| blk: {
-        console.warn("XHCI: Failed to get report descriptor: {} - using boot protocol", .{err});
-        break :blk 0;
-    };
+    for (parse_result.getInterfaces()) |*iface| {
+        if (iface.isHub()) {
+            // Hub interface - handle specially
+            if (iface.findInterruptIn()) |ep| {
+                has_hub = true;
+                hub_int_in = ep.address;
+                dev.is_hub = true;
 
-    // 12. Parse report descriptor if we got one
-    if (report_desc_len > 0) {
-        dev.hid_driver.parseReportDescriptor(report_desc_buf[0..report_desc_len]) catch |err| {
-            console.warn("XHCI: Failed to parse report descriptor: {}", .{err});
-        };
+                // Add hub interrupt endpoint
+                if (endpoint_count < 32) {
+                    endpoint_configs[endpoint_count] = .{
+                        .ep_addr = ep.address,
+                        .ep_type = .interrupt_in,
+                        .max_packet = ep.max_packet_size,
+                        .interval = 12, // ~32ms for hub
+                    };
+                    endpoint_count += 1;
 
-        // Check if parser detected tablet (overrides initial detection)
-        if (dev.hid_driver.is_tablet) {
-            console.info("XHCI: Device identified as tablet with absolute positioning", .{});
+                    const dci = context.InputContext.endpointToDci(ep.address) orelse continue;
+                    _ = dev.registerActiveInterface(iface.interface_num, dci, .hub, 0);
+                }
+                console.info("XHCI: Found USB Hub on interface {}", .{iface.interface_num});
+            }
+        } else if (iface.isKeyboard()) {
+            // HID Keyboard
+            if (iface.findInterruptIn()) |ep| {
+                if (endpoint_count < 32) {
+                    endpoint_configs[endpoint_count] = .{
+                        .ep_addr = ep.address,
+                        .ep_type = .interrupt_in,
+                        .max_packet = ep.max_packet_size,
+                        .interval = ep.interval,
+                    };
+                    endpoint_count += 1;
+
+                    const dci = context.InputContext.endpointToDci(ep.address) orelse continue;
+                    _ = dev.registerActiveInterface(iface.interface_num, dci, .hid_keyboard, 0);
+                    dev.hid_driver.is_keyboard = true;
+                }
+                console.info("XHCI: Found HID Keyboard on interface {}", .{iface.interface_num});
+            }
+        } else if (iface.isMouse()) {
+            // HID Mouse
+            if (iface.findInterruptIn()) |ep| {
+                if (endpoint_count < 32) {
+                    endpoint_configs[endpoint_count] = .{
+                        .ep_addr = ep.address,
+                        .ep_type = .interrupt_in,
+                        .max_packet = ep.max_packet_size,
+                        .interval = ep.interval,
+                    };
+                    endpoint_count += 1;
+
+                    const dci = context.InputContext.endpointToDci(ep.address) orelse continue;
+                    _ = dev.registerActiveInterface(iface.interface_num, dci, .hid_mouse, 0);
+                    dev.hid_driver.is_mouse = true;
+                }
+                console.info("XHCI: Found HID Mouse on interface {}", .{iface.interface_num});
+            }
+        } else if (iface.isHid()) {
+            // Generic HID (tablet, touchscreen, etc.)
+            if (iface.findInterruptIn()) |ep| {
+                if (endpoint_count < 32) {
+                    endpoint_configs[endpoint_count] = .{
+                        .ep_addr = ep.address,
+                        .ep_type = .interrupt_in,
+                        .max_packet = ep.max_packet_size,
+                        .interval = ep.interval,
+                    };
+                    endpoint_count += 1;
+
+                    const dci = context.InputContext.endpointToDci(ep.address) orelse continue;
+                    _ = dev.registerActiveInterface(iface.interface_num, dci, .hid_generic, 0);
+                    dev.hid_driver.is_mouse = true; // Treat as mouse until report descriptor parsed
+                }
+                console.info("XHCI: Found generic HID on interface {} (subclass={}, protocol={})", .{
+                    iface.interface_num,
+                    iface.subclass,
+                    iface.protocol,
+                });
+            }
+        } else if (iface.isMscBot()) {
+            // MSC Bulk-Only Transport
+            const bulk_in = iface.findBulkIn();
+            const bulk_out = iface.findBulkOut();
+            if (bulk_in != null and bulk_out != null) {
+                const in_ep = bulk_in.?;
+                const out_ep = bulk_out.?;
+
+                if (endpoint_count + 1 < 32) {
+                    // Add BULK IN endpoint
+                    endpoint_configs[endpoint_count] = .{
+                        .ep_addr = in_ep.address,
+                        .ep_type = .bulk_in,
+                        .max_packet = in_ep.max_packet_size,
+                        .interval = 0,
+                    };
+                    endpoint_count += 1;
+
+                    // Add BULK OUT endpoint
+                    endpoint_configs[endpoint_count] = .{
+                        .ep_addr = out_ep.address,
+                        .ep_type = .bulk_out,
+                        .max_packet = out_ep.max_packet_size,
+                        .interval = 0,
+                    };
+                    endpoint_count += 1;
+
+                    const in_dci = context.InputContext.endpointToDci(in_ep.address) orelse continue;
+                    const out_dci = context.InputContext.endpointToDci(out_ep.address) orelse continue;
+                    _ = dev.registerActiveInterface(iface.interface_num, in_dci, .msc, out_dci);
+                }
+                console.info("XHCI: Found MSC BOT on interface {} (bulk_in=0x{x}, bulk_out=0x{x})", .{
+                    iface.interface_num,
+                    in_ep.address,
+                    out_ep.address,
+                });
+            }
+        } else {
+            console.debug("XHCI: Skipping unsupported interface {} (class=0x{x:0>2})", .{
+                iface.interface_num,
+                iface.class,
+            });
         }
     }
 
-    // 13. SET_PROTOCOL - only for boot protocol devices (keyboard/mouse, not tablets)
-    if (!dev.hid_driver.is_tablet) {
-        control_transfer.setProtocol(ctrl, dev, interface_num, 0) catch |err| {
-            console.warn("XHCI: Failed to set boot protocol (may be OK): {}", .{err});
-        };
+    // Check if we found any supported interfaces
+    if (dev.active_interface_count == 0) {
+        console.info("XHCI: Device has no supported interface classes", .{});
+        dev.deinit();
+        return null;
     }
 
-    // 14. SET_IDLE(0) to get reports only on change
-    control_transfer.setIdle(ctrl, dev, interface_num, 0, 0) catch |err| {
-        console.warn("XHCI: Failed to set idle (may be OK): {}", .{err});
-    };
+    // 11. Configure ALL endpoints in ONE command (fixes critical memset bug)
+    if (endpoint_count > 0) {
+        try dev.buildMultiEndpointContext(endpoint_configs[0..endpoint_count]);
+        try configureEndpoint(ctrl, dev);
+    }
+    dev.state = .configured;
 
-    // 15. Register device and start polling
+    // 12. Post-configuration setup for each interface type
+    for (dev.getActiveInterfaces()) |*active| {
+        switch (active.driver_type) {
+            .hub => {
+                // Initialize Hub Driver
+                dev.hub_driver = hub.HubDriver.init(ctrl, dev, hub_int_in, enumerateDevice, depth);
+                try dev.hub_driver.configure();
+                console.info("XHCI: Hub driver configured", .{});
+            },
+            .hid_keyboard, .hid_mouse, .hid_generic => {
+                // Get and parse report descriptor for HID devices
+                var report_desc_buf: [512]u8 = [_]u8{0} ** 512;
+                const report_desc_len: usize = control_transfer.getReportDescriptor(ctrl, dev, active.interface_num, &report_desc_buf) catch |err| blk: {
+                    console.warn("XHCI: Failed to get report descriptor for interface {}: {}", .{ active.interface_num, err });
+                    break :blk 0;
+                };
+
+                if (report_desc_len > 0) {
+                    dev.hid_driver.parseReportDescriptor(report_desc_buf[0..report_desc_len]) catch |err| {
+                        console.warn("XHCI: Failed to parse report descriptor: {}", .{err});
+                    };
+
+                    if (dev.hid_driver.is_tablet) {
+                        console.info("XHCI: Device identified as tablet with absolute positioning", .{});
+                    }
+                }
+
+                // SET_PROTOCOL for boot protocol devices (not tablets)
+                if (!dev.hid_driver.is_tablet) {
+                    control_transfer.setProtocol(ctrl, dev, active.interface_num, 0) catch |err| {
+                        console.warn("XHCI: Failed to set boot protocol for interface {}: {}", .{ active.interface_num, err });
+                    };
+                }
+
+                // SET_IDLE(0) to get reports only on change
+                control_transfer.setIdle(ctrl, dev, active.interface_num, 0, 0) catch |err| {
+                    console.warn("XHCI: Failed to set idle for interface {}: {}", .{ active.interface_num, err });
+                };
+            },
+            .msc => {
+                // MSC initialization would go here
+                console.info("XHCI: MSC interface {} ready (driver not yet implemented)", .{active.interface_num});
+            },
+            .none => {},
+        }
+    }
+
+    // 13. Register device
     device.registerDevice(dev);
-    const device_type: []const u8 = if (dev.hid_driver.is_keyboard)
-        "keyboard"
-    else if (dev.hid_driver.is_tablet)
-        "tablet"
-    else
-        "mouse";
-    console.info("XHCI: USB {s} enumerated successfully on slot {}", .{ device_type, slot_id });
 
-    // TODO: Re-enable input subsystem integration once build.zig adds 'input' dependency to USB module
-    // if (dev.hid_driver.is_mouse or dev.hid_driver.is_tablet) {
-    //     const dev_type: input.DeviceType = if (dev.hid_driver.is_tablet) .usb_tablet else .usb_mouse;
-    //     const has_buttons = dev.hid_driver.capabilities.has_buttons;
-    //     if (input.isInitialized()) {
-    //         dev.hid_driver.input_device_id = input.registerDevice(.{
-    //             .device_type = dev_type,
-    //             .name = if (dev.hid_driver.is_tablet) "usb-tablet" else "usb-mouse",
-    //             .capabilities = .{
-    //                 .has_rel = dev.hid_driver.is_mouse,
-    //                 .has_abs = dev.hid_driver.is_tablet,
-    //                 .has_left = has_buttons,
-    //                 .has_right = has_buttons,
-    //                 .has_middle = has_buttons,
-    //             },
-    //             .is_absolute = dev.hid_driver.is_tablet,
-    //         }) catch 0;
-    //     }
-    // }
+    // Log what we found
+    console.info("XHCI: USB device enumerated on slot {} with {} interface(s)", .{ slot_id, dev.active_interface_count });
 
-    // Start polling if it's a HID device
-    try startInterruptPolling(ctrl, dev);
+    // 14. Start interrupt polling for all HID interfaces
+    for (dev.getActiveInterfaces()) |*active| {
+        if (active.driver_type.isHid()) {
+            startInterruptPollingForDci(ctrl, dev, active.dci) catch |err| {
+                console.err("XHCI: Failed to start polling for interface {}: {}", .{ active.interface_num, err });
+            };
+        } else if (active.driver_type == .hub) {
+            // Hub also needs interrupt polling for port status changes
+            startInterruptPollingForDci(ctrl, dev, active.dci) catch |err| {
+                console.err("XHCI: Failed to start hub polling: {}", .{err});
+            };
+        }
+    }
 
     return dev;
 }
 
 /// Handle interrupt for a device (called from interrupt handler)
+/// @deprecated Use handleInterruptForDci for multi-interface devices
 pub fn handleInterrupt(ctrl: *Controller, dev: *device.UsbDevice, buffer: []u8) void {
-    // 1. Process valid data (Short Packet event might give less than buffer size)
-    // We assume buffer contains the transferred data.
-    
-    // Pass to class driver
-    if (dev.hid_driver.is_keyboard or dev.hid_driver.is_mouse or dev.hid_driver.is_tablet) {
-        dev.hid_driver.handleInputReport(buffer);
-    } else if (dev.is_hub) {
-        dev.hub_driver.handleInterrupt(buffer);
+    // Delegate to DCI-aware version using legacy interrupt_dci
+    handleInterruptForDci(ctrl, dev, dev.interrupt_dci, buffer);
+}
+
+/// Handle interrupt for a specific DCI (supports multi-interface devices)
+/// Routes the interrupt data to the correct driver based on which interface owns the DCI
+pub fn handleInterruptForDci(ctrl: *Controller, dev: *device.UsbDevice, dci: u5, buffer: []u8) void {
+    // Find which interface this DCI belongs to
+    if (dev.findActiveInterfaceByDci(dci)) |active| {
+        switch (active.driver_type) {
+            .hid_keyboard, .hid_mouse, .hid_generic => {
+                dev.hid_driver.handleInputReport(buffer);
+            },
+            .hub => {
+                dev.hub_driver.handleInterrupt(buffer);
+            },
+            .msc => {
+                // MSC bulk transfers don't use this interrupt path
+                console.warn("XHCI: Unexpected interrupt for MSC interface", .{});
+            },
+            .none => {},
+        }
+
+        // Re-queue interrupt transfer for this specific DCI
+        startInterruptPollingForDci(ctrl, dev, dci) catch |err| {
+            console.err("XHCI: Failed to re-queue interrupt for slot {} DCI {}: {}", .{ dev.slot_id, dci, err });
+            dev.state = .err;
+        };
+    } else {
+        // Fallback: use legacy behavior if no active interface found
+        if (dev.hid_driver.is_keyboard or dev.hid_driver.is_mouse or dev.hid_driver.is_tablet) {
+            dev.hid_driver.handleInputReport(buffer);
+        } else if (dev.is_hub) {
+            dev.hub_driver.handleInterrupt(buffer);
+        }
+
+        startInterruptPolling(ctrl, dev) catch |err| {
+            console.err("XHCI: Failed to re-queue interrupt for slot {}: {}", .{ dev.slot_id, err });
+            dev.state = .err;
+        };
     }
-    
-    // 2. Re-queue interrupt transfer to keep polling
-    // This maintains the polling loop
-    startInterruptPolling(ctrl, dev) catch |err| {
-        console.err("XHCI: Failed to re-queue interrupt transfer for slot {}: {}", .{ dev.slot_id, err });
-        dev.state = .err;
-    };
 }

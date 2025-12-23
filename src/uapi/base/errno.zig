@@ -341,6 +341,7 @@ pub const SyscallError = error{
     ENOTCONN,
     EDESTADDRREQ,
     EMSGSIZE,
+    ECANCELED,
 };
 
 /// Convert SyscallError to negative isize return value for syscall ABI
@@ -406,6 +407,7 @@ pub fn errorToReturn(err: SyscallError) isize {
         error.EINPROGRESS => 115,
         error.EDESTADDRREQ => 89,
         error.EMSGSIZE => 90,
+        error.ECANCELED => 125,
     };
     return -@as(isize, errno_val);
 }

@@ -4,6 +4,7 @@
 
 const hal = @import("hal");
 const console = @import("console");
+const io = @import("io");
 
 const regs = @import("regs.zig");
 const desc = @import("desc.zig");
@@ -197,4 +198,182 @@ pub fn resetTx(driver: *E1000e) void {
     driver.tx_watchdog_last_tdh = 0;
 
     console.info("E1000e: TX reset complete", .{});
+}
+
+// -----------------------------------------------------------------------------
+// Async TX Interface
+// -----------------------------------------------------------------------------
+
+/// Async transmit error types
+pub const AsyncTxError = error{
+    InvalidPacket,
+    RingFull,
+    InvalidState,
+};
+
+/// Transmit a packet asynchronously with IoRequest completion
+///
+/// Unlike `transmit()` which returns immediately with success/failure,
+/// this function queues an IoRequest that will be completed when the
+/// hardware finishes transmitting the packet (DD bit set in descriptor).
+///
+/// Flow:
+/// 1. Caller allocates IoRequest via io.allocRequest(.net_tx)
+/// 2. This function queues packet and stores IoRequest in pending_tx_requests
+/// 3. Hardware transmits and sets DD bit
+/// 4. TX interrupt fires, IRQ handler completes pending IoRequests
+/// 5. Caller's Future becomes ready with bytes_sent
+///
+/// @param driver E1000e driver instance
+/// @param data Packet data (copied to descriptor buffer)
+/// @param io_request IoRequest to complete on TX completion
+/// @return error if packet invalid or ring full
+pub fn transmitAsync(driver: *E1000e, data: []const u8, io_request: *io.IoRequest) AsyncTxError!void {
+    // Validate packet size
+    if (data.len > config.BUFFER_SIZE or data.len == 0) {
+        io_request.complete(.{ .err = .EINVAL });
+        return error.InvalidPacket;
+    }
+
+    const held = driver.lock.acquire();
+    defer held.release();
+
+    // Check if current descriptor is available (DD=1 means completed)
+    const tx_desc = &driver.tx_ring[driver.tx_cur];
+    if ((tx_desc.status & desc.TxDesc.STATUS_DD) == 0) {
+        // Ring full - fail immediately rather than blocking
+        driver.tx_dropped += 1;
+        io_request.complete(.{ .err = .EAGAIN });
+        return error.RingFull;
+    }
+
+    // Memory barrier: ensure we see hardware's writes before modifying
+    mmio.readBarrier();
+
+    // Store IoRequest for completion in IRQ handler
+    // The IRQ handler will scan completed descriptors and complete these
+    driver.pending_tx_requests[driver.tx_cur] = io_request;
+
+    // Transition IoRequest to in_progress
+    _ = io_request.compareAndSwapState(.pending, .in_progress);
+
+    // Store packet length for completion handler
+    io_request.op_data = .{
+        .net_tx = .{
+            .bytes_queued = @intCast(data.len),
+            .descriptor_idx = driver.tx_cur,
+        },
+    };
+
+    // Parse packet for hardware checksum offloading (same logic as sync transmit)
+    var css: u8 = 0;
+    var cso: u8 = 0;
+    var cmd_extra: u8 = 0;
+
+    if (data.len >= 34) {
+        const eth_type = (@as(u16, data[12]) << 8) | data[13];
+        if (eth_type == 0x0800) { // IPv4
+            const ver_ihl = data[14];
+            const ip_ver = ver_ihl >> 4;
+            const ip_ihl = ver_ihl & 0x0F;
+            if (ip_ver == 4 and ip_ihl >= 5) {
+                const ip_header_len = @as(usize, ip_ihl) * 4;
+                const l4_offset = 14 + ip_header_len;
+                const ip_proto = data[23];
+                if (l4_offset + 8 <= data.len) {
+                    if (ip_proto == 6) { // TCP
+                        css = @intCast(l4_offset);
+                        cso = @intCast(l4_offset + 16);
+                        cmd_extra = desc.TxDesc.CMD_IC;
+                    } else if (ip_proto == 17) { // UDP
+                        css = @intCast(l4_offset);
+                        cso = @intCast(l4_offset + 6);
+                        cmd_extra = desc.TxDesc.CMD_IC;
+                    }
+                }
+            }
+        }
+    }
+
+    // Copy packet data to descriptor's buffer
+    const buf = driver.tx_buffers[driver.tx_cur];
+    @memcpy(buf[0..data.len], data);
+
+    // Configure descriptor for transmission
+    tx_desc.* = desc.TxDesc{
+        .buffer_addr = driver.tx_buffers_phys[driver.tx_cur],
+        .length = @truncate(data.len),
+        .cso = cso,
+        .cmd = desc.TxDesc.CMD_EOP | desc.TxDesc.CMD_IFCS | desc.TxDesc.CMD_RS | cmd_extra,
+        .status = 0, // Clear DD; hardware will set it after transmission
+        .css = css,
+        .special = 0,
+    };
+
+    // Advance software tail pointer
+    driver.tx_cur = @truncate((@as(u32, driver.tx_cur) + 1) % config.TX_DESC_COUNT);
+
+    // Write barrier ensures descriptor is visible before TDT update
+    mmio.writeBarrier();
+
+    // Notify hardware by writing TDT
+    driver.regs.write(.tdt, driver.tx_cur);
+
+    driver.tx_packets += 1;
+    driver.tx_bytes += data.len;
+
+    // IoRequest will be completed by processTxCompletions() in IRQ handler
+}
+
+/// Process completed TX descriptors and complete pending IoRequests
+///
+/// Called from IRQ handler when TXDW interrupt fires.
+/// Scans from tx_completion_idx up to current TDH, completing any
+/// pending IoRequests for descriptors with DD=1.
+///
+/// Thread safety: Must be called from IRQ context or with driver.lock held
+pub fn processTxCompletions(driver: *E1000e) void {
+    // Read hardware head pointer - this is where hardware has consumed up to
+    const tdh = driver.regs.read(.tdh);
+    const tdh16: u16 = @truncate(tdh);
+
+    // Scan from last processed index up to hardware head
+    // Note: We can't just iterate from tx_completion_idx to tdh because
+    // the ring wraps around. We need to check DD bit on each descriptor.
+    var completed: u32 = 0;
+    var idx = driver.tx_completion_idx;
+
+    // Limit iterations to prevent infinite loop (full ring = TX_DESC_COUNT - 1)
+    var iterations: u32 = 0;
+    const max_iterations = config.TX_DESC_COUNT;
+
+    while (iterations < max_iterations) : (iterations += 1) {
+        // Stop if we've caught up to software tail
+        if (idx == driver.tx_cur) break;
+
+        const tx_desc = &driver.tx_ring[idx];
+
+        // Check DD bit - descriptor done if set
+        if ((tx_desc.status & desc.TxDesc.STATUS_DD) == 0) {
+            // Hardware hasn't finished this descriptor yet
+            break;
+        }
+
+        // Complete pending IoRequest if any
+        if (driver.pending_tx_requests[idx]) |io_req| {
+            // Success: packet was transmitted
+            const bytes_sent: usize = tx_desc.length;
+            io_req.complete(.{ .ok = bytes_sent });
+            driver.pending_tx_requests[idx] = null;
+            completed += 1;
+        }
+
+        // Advance to next descriptor
+        idx = @truncate((@as(u32, idx) + 1) % config.TX_DESC_COUNT);
+    }
+
+    driver.tx_completion_idx = idx;
+
+    // Suppress unused variable warning for tdh16 (used for debugging)
+    _ = tdh16;
 }

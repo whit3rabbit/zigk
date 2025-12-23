@@ -48,6 +48,8 @@ pub fn sys_read(fd: usize, buf_ptr: usize, len: usize) SyscallError!usize {
     6. `socket/state.lock` (Socket table - `src/net/transport/socket/state.zig`)
     7. Per-socket `sock.lock` / Per-TCB `tcb.mutex`
     8. `UserVmm.lock` (read mode for address translation, write mode for munmap - must NOT be held during sleep)
+    8.5. `devices_lock` (USB global device array RwLock - `src/drivers/usb/xhci/device.zig`)
+    8.6. `UsbDevice.device_lock` (per-device Spinlock for transfer operations, IRQ-safe)
     9. `FutexBucket.lock` (per-bucket spinlock for futex wait queues)
     10. `pmm.lock` (internal PMM spinlock, not held across calls)
 

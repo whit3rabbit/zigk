@@ -96,6 +96,8 @@ pub fn init(pci_dev: *const pci.PciDevice, pci_access: pci.PciAccess) !*E1000e {
         .using_iommu_dma = false,
         .rx_cur = 0,
         .tx_cur = 0,
+        .pending_tx_requests = [_]?*@import("io").IoRequest{null} ** types.TX_DESC_COUNT,
+        .tx_completion_idx = 0,
         .irq_line = pci_dev.irq_line,
         .lock = sync.Spinlock{},
         .rx_packets = 0,

@@ -116,3 +116,220 @@ pub fn scanPorts(ctrl: *Controller) void {
         }
     }
 }
+
+// =============================================================================
+// Hotplug Event Handling
+// =============================================================================
+
+/// Handle port status change event from interrupt handler
+/// Security: Called from interrupt context - must be fast and non-blocking
+pub fn handlePortStatusChange(ctrl: *Controller, port_id: u8) void {
+    // Validate port ID
+    if (port_id == 0 or port_id > ctrl.max_ports) {
+        console.warn("XHCI: Invalid port {} in status change event", .{port_id});
+        return;
+    }
+
+    const port_base = ctrl.op_base + regs.portBaseOffset(port_id);
+    const port_dev = MmioDevice(regs.PortReg).init(port_base, 0x10);
+    var portsc = port_dev.readTyped(.portsc, regs.PortSc);
+
+    // Handle Connection Status Change
+    if (portsc.csc) {
+        if (portsc.ccs) {
+            // Device connected
+            console.info("XHCI: Device connected on port {}", .{port_id});
+            handlePortConnect(ctrl, port_id, portsc);
+        } else {
+            // Device disconnected
+            console.info("XHCI: Device disconnected from port {}", .{port_id});
+            handlePortDisconnect(ctrl, port_id);
+        }
+    }
+
+    // Handle Port Enable/Disable Change
+    if (portsc.pec) {
+        if (!portsc.ped and portsc.ccs) {
+            // Port disabled but device still connected - possibly an error
+            console.warn("XHCI: Port {} disabled unexpectedly", .{port_id});
+        }
+    }
+
+    // Clear all change bits by writing 1 (W1C - Write 1 to Clear)
+    // Keep other R/W bits unchanged
+    var clear_bits = portsc;
+    clear_bits.csc = true;  // Clear Connect Status Change
+    clear_bits.pec = true;  // Clear Port Enable/Disable Change
+    clear_bits.wrc = true;  // Clear Warm Port Reset Change
+    clear_bits.occ = true;  // Clear Over-Current Change
+    clear_bits.prc = true;  // Clear Port Reset Change
+    clear_bits.plc = true;  // Clear Port Link State Change
+    clear_bits.cec = true;  // Clear Config Error Change
+    port_dev.writeTyped(.portsc, clear_bits);
+}
+
+/// Handle device connection - reset port and trigger enumeration
+fn handlePortConnect(ctrl: *Controller, port_id: u8, portsc: regs.PortSc) void {
+    // Reset port to enable it and get device to Default state
+    resetPort(ctrl, port_id) catch |err| {
+        console.err("XHCI: Hotplug reset failed for port {}: {}", .{ port_id, err });
+        return;
+    };
+
+    // Re-read PORTSC after reset to get actual speed
+    const port_base = ctrl.op_base + regs.portBaseOffset(port_id);
+    const port_dev = MmioDevice(regs.PortReg).init(port_base, 0x10);
+    const new_portsc = port_dev.readTyped(.portsc, regs.PortSc);
+
+    // Determine speed from post-reset PORTSC
+    const speed: context.Speed = @enumFromInt(new_portsc.speed);
+    _ = portsc; // Original portsc not used after reset
+
+    // Enumerate device with depth=0 (root port)
+    const maybe_dev = device_manager.enumerateDevice(
+        ctrl,
+        null, // parent = null (root hub)
+        port_id,
+        0, // route_string
+        port_id, // root_port_num
+        speed, // speed_override from PORTSC
+        0, // depth = 0 (root level)
+    ) catch |err| {
+        console.err("XHCI: Hotplug enumeration failed for port {}: {}", .{ port_id, err });
+        return;
+    };
+
+    if (maybe_dev) |dev| {
+        console.info("XHCI: Hotplug device enumerated on port {} (slot {})", .{ port_id, dev.slot_id });
+    }
+}
+
+/// Handle device disconnection - find and cleanup device
+fn handlePortDisconnect(ctrl: *Controller, port_id: u8) void {
+    // Find all devices on this root port (including hub children)
+    const devices_to_remove = findDevicesOnPort(port_id);
+
+    // Disconnect devices in reverse order (children first, then parents)
+    // This ensures hub children are cleaned up before the hub itself
+    var i: usize = devices_to_remove.count;
+    while (i > 0) {
+        i -= 1;
+        if (devices_to_remove.devices[i]) |dev| {
+            disconnectDevice(ctrl, dev);
+        }
+    }
+}
+
+/// Result of findDevicesOnPort - contains devices to disconnect
+const DeviceList = struct {
+    devices: [device.MAX_DEVICES]?*device.UsbDevice,
+    count: usize,
+};
+
+/// Find all devices on a root port (including hub children)
+/// Returns devices ordered by depth (deepest first for safe cleanup)
+fn findDevicesOnPort(root_port: u8) DeviceList {
+    var result = DeviceList{
+        .devices = [_]?*device.UsbDevice{null} ** device.MAX_DEVICES,
+        .count = 0,
+    };
+
+    // Scan all registered devices
+    for (1..device.MAX_DEVICES) |slot_id| {
+        if (device.findDevice(@truncate(slot_id))) |dev| {
+            // Check if device is on this root port
+            if (dev.port == root_port and dev.parent == null) {
+                // This is a root device on the port
+                addDeviceAndChildren(&result, dev);
+            }
+        }
+    }
+
+    return result;
+}
+
+/// Recursively add device and all its children to the list
+/// Children are added before parents (deepest first)
+fn addDeviceAndChildren(list: *DeviceList, dev: *device.UsbDevice) void {
+    // First, find and add all children (for hubs)
+    if (dev.is_hub) {
+        for (1..device.MAX_DEVICES) |slot_id| {
+            if (device.findDevice(@truncate(slot_id))) |child| {
+                if (child.parent == dev) {
+                    // Recursively add child and its descendants
+                    addDeviceAndChildren(list, child);
+                }
+            }
+        }
+    }
+
+    // Then add this device (after children)
+    if (list.count < device.MAX_DEVICES) {
+        list.devices[list.count] = dev;
+        list.count += 1;
+    }
+}
+
+/// Disconnect a single device with proper cleanup
+/// Security: Follows xHCI spec sequence to ensure hardware state is consistent
+fn disconnectDevice(ctrl: *Controller, dev: *device.UsbDevice) void {
+    console.info("XHCI: Disconnecting device on slot {}", .{dev.slot_id});
+
+    // 1. Transition to disconnecting state (prevent new transfers)
+    {
+        const held = dev.device_lock.acquire();
+        defer held.release();
+
+        // Check if already being cleaned up
+        if (dev.state == .disconnecting or dev.state == .disabled or dev.state == .err) {
+            return;
+        }
+        dev.state = .disconnecting;
+    }
+
+    // 2. Stop all endpoints
+    for (1..32) |dci_usize| {
+        const dci: u5 = @truncate(dci_usize);
+        if (dev.endpoints[dci] != null) {
+            device_manager.stopEndpoint(ctrl, dev, dci) catch |err| {
+                console.warn("XHCI: Failed to stop endpoint DCI {}: {}", .{ dci, err });
+                // Continue cleanup even if stop fails
+            };
+        }
+    }
+
+    // 3. Cancel pending transfers
+    cancelPendingTransfers(dev);
+
+    // 4. Disable slot
+    device_manager.disableSlot(ctrl, dev.slot_id) catch |err| {
+        console.warn("XHCI: Failed to disable slot {}: {}", .{ dev.slot_id, err });
+    };
+
+    // 5. Mark as disabled and cleanup
+    dev.state = .disabled;
+    dev.deinit();
+}
+
+/// Cancel all pending transfers for a device
+fn cancelPendingTransfers(dev: *device.UsbDevice) void {
+    const held = dev.device_lock.acquire();
+    defer held.release();
+
+    for (&dev.pending_transfers) |*transfer_opt| {
+        if (transfer_opt.*) |transfer| {
+            // Attempt to cancel the transfer
+            if (transfer.cancel()) {
+                transfer.completion_code = .Stopped;
+
+                // Execute callback if present
+                switch (transfer.callback) {
+                    .control => |cb| cb(dev, .Stopped, 0),
+                    .interrupt => {}, // No data to report for cancelled interrupt
+                    .none => {},
+                }
+            }
+            transfer_opt.* = null;
+        }
+    }
+}

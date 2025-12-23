@@ -337,6 +337,40 @@ pub const ResetEndpointCmdTrb = extern struct {
     }
 };
 
+/// Stop Endpoint Command TRB - Stop an endpoint (for disconnect cleanup)
+/// xHCI Spec 6.4.3.8: Used to stop endpoint before disabling slot
+pub const StopEndpointCmdTrb = extern struct {
+    _rsvd0: u64 align(16) = 0,
+    _rsvd1: u32 = 0,
+    control: packed struct(u32) {
+        cycle: bool,
+        _rsvd0: u8,
+        sp: bool, // Suspend - if true, endpoint is suspended (can be resumed), else stopped
+        trb_type: TrbType,
+        ep_id: u5, // Endpoint ID (DCI)
+        _rsvd1: u3,
+        slot_id: u8,
+    },
+
+    pub fn init(slot_id: u8, ep_id: u5, do_suspend: bool, cycle: bool) StopEndpointCmdTrb {
+        return .{
+            .control = .{
+                .cycle = cycle,
+                ._rsvd0 = 0,
+                .sp = do_suspend,
+                .trb_type = .StopEndpointCmd,
+                .ep_id = ep_id,
+                ._rsvd1 = 0,
+                .slot_id = slot_id,
+            },
+        };
+    }
+
+    pub fn asTrb(self: *StopEndpointCmdTrb) *Trb {
+        return @ptrCast(@alignCast(self));
+    }
+};
+
 // =============================================================================
 // Transfer TRBs
 // =============================================================================

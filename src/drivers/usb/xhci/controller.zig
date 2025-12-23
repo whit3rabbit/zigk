@@ -12,6 +12,7 @@ const ring = @import("ring.zig");
 const memory = @import("memory.zig");
 const interrupts = @import("interrupts.zig");
 const ports = @import("ports.zig");
+const transfer_pool = @import("transfer_pool.zig");
 
 const MmioDevice = hal.mmio_device.MmioDevice;
 const Controller = types.Controller;
@@ -118,6 +119,10 @@ pub fn init(pci_dev: *const pci.PciDevice, pci_access: pci.PciAccess) !*Controll
     // Reset and initialize the controller
     try reset(ctrl);
     try memory.initDataStructures(ctrl);
+
+    // Initialize transfer request pool for async I/O (one-time global init)
+    transfer_pool.initGlobal();
+
     try interrupts.setupInterrupts(ctrl);
     try start(ctrl);
 

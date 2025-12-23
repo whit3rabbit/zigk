@@ -5,8 +5,13 @@
 
 const std = @import("std");
 const console = @import("console");
+const io = @import("io");
+const pmm = @import("pmm");
+const hal = @import("hal");
+
 const usb = @import("../xhci/root.zig"); // Access to generic USB types/transfer
 const device = @import("../xhci/device.zig");
+const bulk = @import("../xhci/transfer/bulk.zig");
 
 // =============================================================================
 // Constants and Types
@@ -291,5 +296,198 @@ pub const MscDriver = struct {
         // Ideally sendScsiCommand should take const buffer for data
         const mutable_buf = @constCast(buffer);
         try self.sendScsiCommand(0, &cmd, mutable_buf, false);
+    }
+
+    // =========================================================================
+    // Async I/O Operations
+    // =========================================================================
+
+    /// Async Read (10) with IoRequest
+    ///
+    /// Performs a SCSI READ(10) command asynchronously. The data stage uses
+    /// async bulk transfer while CBW/CSW stages are synchronous (small/fast).
+    ///
+    /// Caller responsibilities:
+    ///   1. Allocate IoRequest from kernel pool
+    ///   2. Allocate DMA buffer via pmm.allocZeroedPages()
+    ///   3. Call readAsync() to queue the transfer
+    ///   4. Wait on IoRequest.wait() or use io_uring
+    ///   5. Copy data from DMA buffer after completion
+    ///   6. Free DMA buffer and IoRequest
+    ///
+    /// Returns: Physical address of DMA buffer containing read data
+    pub fn readAsync(
+        self: *Self,
+        lba: u32,
+        count: u16,
+        io_request: *io.IoRequest,
+    ) !u64 {
+        if (self.sector_size == 0) return error.DeviceNotReady;
+
+        const data_len = @as(usize, count) * self.sector_size;
+        const page_count = (data_len + 4095) / 4096;
+
+        // Allocate DMA buffer for data stage
+        const buf_phys = pmm.allocZeroedPages(page_count) orelse return error.OutOfMemory;
+        errdefer pmm.freePages(buf_phys, page_count);
+
+        const tag = self.current_tag;
+        self.current_tag +%= 1;
+
+        // 1. Send CBW (synchronous - only 31 bytes)
+        var cbw = CommandBlockWrapper.init(
+            tag,
+            @intCast(data_len),
+            true, // IN direction
+            0, // LUN
+            10, // CDB length
+            &[_]u8{
+                0x28, // READ (10)
+                0x00,
+                @truncate(lba >> 24),
+                @truncate(lba >> 16),
+                @truncate(lba >> 8),
+                @truncate(lba),
+                0x00,
+                @truncate(count >> 8),
+                @truncate(count),
+                0x00,
+            },
+        );
+
+        const cbw_bytes = std.mem.asBytes(&cbw)[0..31];
+        _ = usb.Transfer.queueBulkTransfer(self.ctrl, self.dev, self.bulk_out_ep, cbw_bytes) catch |err| {
+            pmm.freePages(buf_phys, page_count);
+            return err;
+        };
+
+        // 2. Data Stage (async - uses IoRequest)
+        bulk.queueBulkTransferAsync(
+            self.ctrl,
+            self.dev,
+            self.bulk_in_ep,
+            buf_phys,
+            data_len,
+            io_request,
+        ) catch |err| {
+            pmm.freePages(buf_phys, page_count);
+            return err;
+        };
+
+        // Set IoRequest metadata
+        io_request.op_data = .{
+            .usb = .{
+                .slot_id = self.dev.slot_id,
+                .dci = 0, // Will be set by queueBulkTransferAsync
+                .request_len = @truncate(data_len),
+                .buf_phys = buf_phys,
+            },
+        };
+
+        // Return physical address - caller must:
+        // 1. Wait on io_request
+        // 2. Receive CSW (via receiveCSW())
+        // 3. Free DMA buffer
+        return buf_phys;
+    }
+
+    /// Receive CSW after async data transfer completes
+    /// Must be called after io_request completes for readAsync/writeAsync
+    pub fn receiveCSW(self: *Self, expected_tag: u32) !void {
+        var csw: CommandStatusWrapper = std.mem.zeroes(CommandStatusWrapper);
+        const csw_bytes = std.mem.asBytes(&csw)[0..13];
+        const csw_len = try usb.Transfer.queueBulkTransfer(self.ctrl, self.dev, self.bulk_in_ep, csw_bytes);
+
+        if (csw_len != 13) return error.ProtocolError;
+        if (csw.signature != CommandStatusWrapper.SIGNATURE) return error.ProtocolError;
+        if (csw.tag != expected_tag) return error.ProtocolError;
+        if (csw.status != 0) return error.CommandFailed;
+    }
+
+    /// Async Write (10) with IoRequest
+    ///
+    /// Performs a SCSI WRITE(10) command asynchronously.
+    ///
+    /// Caller responsibilities:
+    ///   1. Allocate IoRequest from kernel pool
+    ///   2. Allocate DMA buffer via pmm.allocZeroedPages()
+    ///   3. Copy data to DMA buffer
+    ///   4. Call writeAsync() to queue the transfer
+    ///   5. Wait on IoRequest.wait() or use io_uring
+    ///   6. Receive CSW via receiveCSW()
+    ///   7. Free DMA buffer and IoRequest
+    pub fn writeAsync(
+        self: *Self,
+        lba: u32,
+        count: u16,
+        buf_phys: u64,
+        buf_len: usize,
+        io_request: *io.IoRequest,
+    ) !u32 {
+        if (self.sector_size == 0) return error.DeviceNotReady;
+
+        const data_len = @as(usize, count) * self.sector_size;
+        if (buf_len < data_len) return error.BufferTooSmall;
+
+        const tag = self.current_tag;
+        self.current_tag +%= 1;
+
+        // 1. Send CBW (synchronous - only 31 bytes)
+        var cbw = CommandBlockWrapper.init(
+            tag,
+            @intCast(data_len),
+            false, // OUT direction
+            0, // LUN
+            10, // CDB length
+            &[_]u8{
+                0x2A, // WRITE (10)
+                0x00,
+                @truncate(lba >> 24),
+                @truncate(lba >> 16),
+                @truncate(lba >> 8),
+                @truncate(lba),
+                0x00,
+                @truncate(count >> 8),
+                @truncate(count),
+                0x00,
+            },
+        );
+
+        const cbw_bytes = std.mem.asBytes(&cbw)[0..31];
+        _ = try usb.Transfer.queueBulkTransfer(self.ctrl, self.dev, self.bulk_out_ep, cbw_bytes);
+
+        // 2. Data Stage (async - uses IoRequest)
+        try bulk.queueBulkTransferAsync(
+            self.ctrl,
+            self.dev,
+            self.bulk_out_ep,
+            buf_phys,
+            data_len,
+            io_request,
+        );
+
+        // Set IoRequest metadata
+        io_request.op_data = .{
+            .usb = .{
+                .slot_id = self.dev.slot_id,
+                .dci = 0,
+                .request_len = @truncate(data_len),
+                .buf_phys = buf_phys,
+            },
+        };
+
+        // Return tag for CSW verification
+        return tag;
+    }
+
+    /// Get current command tag (for async operations)
+    pub fn getCurrentTag(self: *const Self) u32 {
+        return self.current_tag;
+    }
+
+    /// Calculate page count needed for sector count
+    pub fn pagesForSectors(self: *const Self, sector_count: u16) usize {
+        const data_len = @as(usize, sector_count) * self.sector_size;
+        return (data_len + 4095) / 4096;
     }
 };

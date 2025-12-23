@@ -29,11 +29,11 @@ Syscalls   Syscalls
 | (Future/Reactor) |
 +------------------+
     |
-+---+---+---+---+---+
-|   |   |   |   |
-Socket Pipe Kbd Timer Block
-Async  Async Async Wheel  I/O
-                      (AHCI)
++---+---+---+---+---+---+
+|   |   |   |   |   |
+Socket Pipe Kbd Timer Block USB
+Async  Async Async Wheel  I/O   I/O
+                      (AHCI) (XHCI)
 ```
 
 ## Core Components
@@ -183,6 +183,107 @@ AHCI controller raises an interrupt:
    - Looks up pending `IoRequest` for each completed slot
    - Calls `request.complete()` with success/error result
    - Wakes the waiting thread via `sched.unblock()`
+
+### USB Operations (XHCI)
+
+| Operation | Function | Completion Trigger |
+|-----------|----------|-------------------|
+| Control | `control.controlTransferAsync()` | Transfer Event TRB (Status stage IOC) |
+| Bulk | `bulk.queueBulkTransferAsync()` | Transfer Event TRB |
+| Interrupt | `interrupt.queueInterruptTransferAsync()` | Transfer Event TRB |
+
+**USB-specific IoOpTypes** (`src/kernel/io/types.zig`):
+
+| IoOpType | Value | Description |
+|----------|-------|-------------|
+| `usb_control` | 14 | USB control transfer (setup/data/status) |
+| `usb_bulk` | 15 | USB bulk transfer (large data) |
+| `usb_interrupt` | 16 | USB interrupt transfer (HID polling) |
+
+**OpData for USB:**
+
+```zig
+usb: extern struct {
+    slot_id: u8,      // USB device slot (1-255)
+    dci: u8,          // Device Context Index for endpoint
+    request_len: u16, // Requested transfer length
+    _reserved: [4]u8,
+    buf_phys: u64,    // DMA buffer physical address
+},
+```
+
+**Bridge Pattern:**
+
+USB async uses a bridge pattern linking USB-specific `TransferRequest` to kernel `IoRequest`:
+
+```zig
+// TransferRequest (USB layer)
+pub const TransferRequest = struct {
+    trb_phys: u64,          // TRB physical address for matching
+    dci: u5,                // Endpoint DCI
+    state: atomic(State),   // pending -> in_progress -> completed
+    completion_code: CompletionCode,  // USB-specific result
+    residual: u24,          // Bytes NOT transferred
+    request_len: u24,       // Original request length
+    callback: Callback,     // Optional callback (for HID polling)
+    io_request: ?*IoRequest, // Bridge to kernel async
+};
+```
+
+When the USB hardware completes a transfer:
+1. XHCI raises MSI-X interrupt
+2. `processEvents()` reads Transfer Event TRB
+3. Looks up `TransferRequest` via `takePendingTransfer(dci)`
+4. Calls `TransferRequest.complete()` which:
+   - Sets completion_code and residual
+   - Calls `io_request.complete()` with mapped IoResult
+   - Wakes waiting thread via `sched.unblock()`
+5. Returns `TransferRequest` to pool
+
+**TransferRequest Pool** (`src/drivers/usb/xhci/transfer_pool.zig`):
+
+Fixed-size pool of 256 pre-allocated `TransferRequest` structures:
+- O(1) alloc/free via intrusive free list
+- Pointer validation on free (prevents corruption attacks)
+- Global pool initialized during XHCI controller init
+
+**Interrupt Transfer Dual Mode:**
+
+The interrupt transfer API supports two modes via the `io_request` parameter:
+
+| Mode | io_request | Behavior | Use Case |
+|------|------------|----------|----------|
+| Callback | `null` | Uses device report_buffer, re-queues on completion | Kernel HID driver |
+| IoRequest | non-null | Uses caller buffer, does NOT re-queue | Userspace io_uring |
+
+```zig
+// Callback mode (kernel HID polling)
+queueInterruptTransferAsync(ctrl, dev, dci, null, null, null);
+
+// IoRequest mode (userspace)
+queueInterruptTransferAsync(ctrl, dev, dci, buf_phys, buf_len, io_request);
+```
+
+**Cancellation on Disconnect:**
+
+When a USB device disconnects:
+1. Device state set to `.disconnecting`
+2. `cancelAllPendingTransfers()` iterates pending_transfers array
+3. Each `TransferRequest.cancel()` completes IoRequest with `.cancelled`
+4. Clears pending_transfers array
+
+**CompletionCode to IoResult Mapping:**
+
+| USB CompletionCode | IoResult |
+|--------------------|----------|
+| Success, ShortPacket | `.success(bytes_transferred)` |
+| StallError | `.err(EPERM)` |
+| BabbleDetectedError, USBTransactionError, TRBError | `.err(EIO)` |
+| ResourceError, NoSlotsAvailableError | `.err(ENOMEM)` |
+| BandwidthError | `.err(EBUSY)` |
+| Stopped, CommandAborted | `.err(ECANCELED)` |
+| ContextStateError | `.err(EINVAL)` |
+| EventRingFullError | `.err(EAGAIN)` |
 
 ## io_uring Syscalls
 
@@ -399,6 +500,160 @@ switch (result) {
 }
 ```
 
+### Async USB Bulk Transfer (XHCI)
+
+```zig
+const bulk = @import("usb/xhci/transfer/bulk.zig");
+const io = @import("io");
+const pmm = @import("pmm");
+const hal = @import("hal");
+
+// Allocate IoRequest for async operation
+const req = io.allocRequest(.usb_bulk) orelse return error.ENOMEM;
+defer io.freeRequest(req);
+
+// Allocate DMA buffer (USB requires physical addresses)
+const buf_phys = pmm.allocZeroedPages(1) orelse return error.ENOMEM;
+defer pmm.freePages(buf_phys, 1);
+
+// For OUT transfers, copy data to DMA buffer first
+const dma_buf = hal.paging.physToVirt(buf_phys);
+@memcpy(dma_buf[0..data.len], data);
+
+// Queue async bulk transfer
+try bulk.queueBulkTransferAsync(ctrl, dev, ep_addr, buf_phys, data.len, req);
+
+// Wait for IRQ-driven completion
+var future = io.Future{ .request = req };
+const result = future.wait();
+
+switch (result) {
+    .success => |bytes| {
+        // For IN transfers, copy from DMA buffer
+        @memcpy(user_buffer[0..bytes], dma_buf[0..bytes]);
+    },
+    .err => |e| return e,
+    .cancelled => return error.ECANCELED,
+    .pending => unreachable,
+}
+```
+
+### Async USB HID Polling (Dual Mode)
+
+```zig
+const interrupt = @import("usb/xhci/transfer/interrupt.zig");
+const io = @import("io");
+
+// ---- Mode 1: Callback mode (kernel HID driver) ----
+// Uses device's internal report_buffer, re-queues automatically
+try interrupt.queueInterruptTransferAsync(ctrl, dev, dci, null, null, null);
+// Completion handled by device_manager.handleInterrupt() which:
+//   - Parses HID report
+//   - Injects input events
+//   - Re-queues next transfer
+
+// ---- Mode 2: IoRequest mode (userspace io_uring) ----
+const req = io.allocRequest(.usb_interrupt) orelse return error.ENOMEM;
+defer io.freeRequest(req);
+
+const buf_phys = pmm.allocZeroedPages(1) orelse return error.ENOMEM;
+defer pmm.freePages(buf_phys, 1);
+
+// Queue single interrupt transfer - does NOT auto-requeue
+try interrupt.queueInterruptTransferAsync(ctrl, dev, dci, buf_phys, 8, req);
+
+var future = io.Future{ .request = req };
+const result = future.wait();
+
+switch (result) {
+    .success => |bytes| {
+        // Got HID report - process it and optionally requeue
+        const report = hal.paging.physToVirt(buf_phys)[0..bytes];
+        processHidReport(report);
+        // Caller decides when to requeue for next report
+    },
+    .err => |e| return e,
+    .cancelled => {}, // Device disconnected
+    .pending => unreachable,
+}
+```
+
+### Async Network TX (E1000e)
+
+```zig
+const e1000e = @import("e1000e");
+const io = @import("io");
+
+// Allocate IoRequest for async TX
+const req = io.allocRequest(.net_tx) orelse return error.ENOMEM;
+defer io.freeRequest(req);
+
+// Prepare packet data
+const packet = buildEthernetFrame(dst_mac, src_mac, ethertype, payload);
+
+// Queue async transmit - returns immediately
+try e1000e.transmitAsync(driver, packet, req);
+
+// Wait for TX completion (hardware sets DD bit, IRQ fires)
+var future = io.Future{ .request = req };
+const result = future.wait();
+
+switch (result) {
+    .success => |bytes| {
+        // Packet transmitted successfully
+        log.info("Sent {} bytes", .{bytes});
+    },
+    .err => |e| return e,
+    .cancelled => return error.ECANCELED,
+    .pending => unreachable,
+}
+```
+
+**Completion Flow:**
+1. `transmitAsync()` stores IoRequest in `pending_tx_requests[tx_cur]`
+2. Hardware transmits packet and sets DD bit in descriptor
+3. TXDW interrupt fires, IRQ handler calls `processTxCompletions()`
+4. Handler scans descriptors with DD=1, completes matching IoRequests
+5. Caller's Future becomes ready with bytes_sent
+
+### Async Serial TX (UART 16550)
+
+```zig
+const serial = @import("serial");
+const io = @import("io");
+
+// Allocate IoRequest for async serial TX
+const req = io.allocRequest(.serial_tx) orelse return error.ENOMEM;
+defer io.freeRequest(req);
+
+// Data must remain valid until completion
+const message = "Hello, async serial!\n";
+
+// Queue async write - sends first byte, enables THRE interrupt
+try serial.writeAsync(message, req);
+
+// Wait for all bytes transmitted
+var future = io.Future{ .request = req };
+const result = future.wait();
+
+switch (result) {
+    .success => |bytes| {
+        // All bytes transmitted
+        log.info("Sent {} bytes via serial", .{bytes});
+    },
+    .err => |e| return e,
+    .cancelled => return error.ECANCELED,
+    .pending => unreachable,
+}
+```
+
+**Completion Flow:**
+1. `writeAsync()` sends first byte, enables THRE (Transmitter Holding Register Empty) interrupt
+2. THRE interrupt fires when transmitter ready for next byte
+3. ISR sends next byte from buffer, or completes IoRequest if done
+4. THRE interrupt disabled after last byte sent
+5. Caller's Future becomes ready with bytes_sent
+
 ### Userspace io_uring HTTP Server
 
 The httpd example (`src/user/httpd/main.zig`) demonstrates the io_uring wrapper:
@@ -561,6 +816,27 @@ src/drivers/storage/ahci/
     adapter.zig     - Block device adapter with:
                       blockReadAsync, blockWriteAsync,
                       copyFromDmaBuffer, copyToDmaBuffer, freeDmaBuffer
+
+src/drivers/usb/xhci/
+    device.zig      - UsbDevice with TransferRequest, pending_transfers[32],
+                      registerPendingTransfer, takePendingTransfer,
+                      cancelAllPendingTransfers
+    transfer_pool.zig - TransferRequestPool (256 pre-allocated requests)
+    interrupts.zig  - Event processing with async TransferRequest completion
+    transfer/
+        bulk.zig    - queueBulkTransferAsync
+        control.zig - controlTransferAsync
+        interrupt.zig - queueInterruptTransferAsync (dual mode)
+
+src/drivers/net/e1000e/
+    types.zig       - E1000e struct with pending_tx_requests[512],
+                      tx_completion_idx for tracking
+    tx.zig          - transmitAsync, processTxCompletions
+    worker.zig      - handleIrq with TXDW interrupt handling
+
+src/drivers/serial/
+    uart_16550.zig  - writeAsync, handleIrqAsync, handleTxEmptyInterrupt
+                      Uses THRE interrupt for byte-by-byte async TX
 
 src/user/lib/
     syscall.zig     - Userspace syscall wrappers including:
