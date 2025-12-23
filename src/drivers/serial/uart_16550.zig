@@ -32,11 +32,26 @@ var initialized: bool = false;
 var global_lock = std.atomic.Value(bool).init(false);
 
 /// Callback for received bytes (to avoid circular dependency with keyboard driver)
-pub var onByteReceived: ?*const fn(byte: u8) void = null;
+/// Uses atomic access to prevent data races when modifying from non-ISR context.
+var onByteReceivedAtomic = std.atomic.Value(?*const fn (byte: u8) void).init(null);
+
+/// Get the current receive callback
+pub fn getOnByteReceived() ?*const fn (byte: u8) void {
+    return onByteReceivedAtomic.load(.acquire);
+}
+
+/// Set the receive callback (thread-safe)
+pub fn setOnByteReceived(callback: ?*const fn (byte: u8) void) void {
+    onByteReceivedAtomic.store(callback, .release);
+}
 
 /// Initialize the global serial port (for early boot/panic)
+/// Baud rate must be between 1 and 115200. Invalid values default to 115200.
 pub fn init(port: u16, baud: u32) void {
     current_port = port;
+
+    // Validate baud rate to prevent division by zero and invalid divisor
+    const safe_baud: u32 = if (baud == 0 or baud > 115200) 115200 else baud;
 
     // Disable interrupts
     hal.io.outb(port + IER, 0x00);
@@ -44,8 +59,8 @@ pub fn init(port: u16, baud: u32) void {
     // Enable DLAB (set baud rate divisor)
     hal.io.outb(port + LCR, 0x80);
 
-    // Set divisor
-    const divisor = @as(u16, @truncate(115200 / baud));
+    // Set divisor (safe_baud is guaranteed to be 1..115200, so divisor is 1..115200)
+    const divisor: u16 = @intCast(115200 / safe_baud);
     hal.io.outb(port + DATA, @truncate(divisor & 0xFF));
     hal.io.outb(port + IER, @truncate(divisor >> 8));
 
@@ -74,7 +89,18 @@ fn isTransmitEmpty() bool {
     return (hal.io.inb(current_port + LSR) & 0x20) != 0;
 }
 
+/// Wait for any pending async TX to complete (non-blocking spin-wait).
+/// Used by synchronous write functions to prevent output interleaving.
+fn waitForAsyncComplete() void {
+    // Spin until no async TX is pending
+    while (tx_pending_atomic.load(.acquire) != null) {
+        hal.cpu.pause();
+    }
+}
+
 pub fn writeByte(byte: u8) void {
+    // Wait for any async TX to complete to prevent interleaved output
+    waitForAsyncComplete();
     while (!isTransmitEmpty()) {
         hal.cpu.pause();
     }
@@ -82,22 +108,35 @@ pub fn writeByte(byte: u8) void {
 }
 
 pub fn writeString(str: []const u8) void {
-    // Basic spinlock to prevent interleaved output
+    // Wait for any async TX to complete before acquiring lock
+    waitForAsyncComplete();
+
+    // Basic spinlock to prevent interleaved output from concurrent sync callers
     while (global_lock.cmpxchgWeak(false, true, .acquire, .monotonic) != null) {
         hal.cpu.pause();
     }
     defer global_lock.store(false, .release);
 
     for (str) |c| {
-        if (c == '\n') writeByte('\r');
-        writeByte(c);
+        if (c == '\n') writeByteRaw('\r');
+        writeByteRaw(c);
     }
 }
 
+/// Low-level byte write without async check (for use when async is already clear)
+fn writeByteRaw(byte: u8) void {
+    while (!isTransmitEmpty()) {
+        hal.cpu.pause();
+    }
+    hal.io.outb(current_port, byte);
+}
+
+/// Panic-safe string write - bypasses async wait and locks.
+/// Use only in panic/fault handlers where blocking could deadlock.
 pub fn writeStringPanic(str: []const u8) void {
     for (str) |c| {
-        if (c == '\n') writeByte('\r');
-        writeByte(c);
+        if (c == '\n') writeByteRaw('\r');
+        writeByteRaw(c);
     }
 }
 
@@ -114,19 +153,27 @@ pub const Serial = struct {
     }
 
     pub fn write(self: *Serial, data: []const u8) void {
+        // Wait for any async TX to complete before acquiring lock
+        waitForAsyncComplete();
         const held = self.lock.acquire();
         defer held.release();
         for (data) |c| {
-            if (c == '\n') self.putChar('\r');
-            self.putChar(c);
+            if (c == '\n') self.putCharRaw('\r');
+            self.putCharRaw(c);
         }
     }
 
-    pub fn putChar(self: *Serial, c: u8) void {
+    /// Low-level putChar without async check
+    fn putCharRaw(self: *Serial, c: u8) void {
         while ((hal.io.inb(self.port + LSR) & 0x20) == 0) {
             hal.cpu.pause();
         }
         hal.io.outb(self.port, c);
+    }
+
+    pub fn putChar(self: *Serial, c: u8) void {
+        waitForAsyncComplete();
+        self.putCharRaw(c);
     }
 
     /// UART Interrupt Handler
@@ -143,10 +190,10 @@ pub const Serial = struct {
         // 110 (6) = Character Timeout
         const id = (iir >> 1) & 0x07;
         if (id == 2 or id == 6) {
-             const data = hal.io.inb(port);
-             if (onByteReceived) |callback| {
-                 callback(data);
-             }
+            const data = hal.io.inb(port);
+            if (getOnByteReceived()) |callback| {
+                callback(data);
+            }
         }
     }
 };
@@ -168,8 +215,8 @@ pub const writer = Writer{};
 // Async I/O Support
 // -----------------------------------------------------------------------------
 
-/// Pending async TX state (single writer, protected by tx_lock)
-var tx_pending: ?*io.IoRequest = null;
+/// Pending async TX state (protected by tx_lock, tx_pending uses atomic for early-out check)
+var tx_pending_atomic = std.atomic.Value(?*io.IoRequest).init(null);
 var tx_buffer: []const u8 = &.{};
 var tx_index: usize = 0;
 var tx_lock = std.atomic.Value(bool).init(false);
@@ -211,16 +258,15 @@ pub fn writeAsync(data: []const u8, io_request: *io.IoRequest) AsyncTxError!void
     }
 
     // Check if async TX already in progress
-    if (tx_pending != null) {
+    if (tx_pending_atomic.load(.acquire) != null) {
         tx_lock.store(false, .release);
         io_request.complete(.{ .err = .EBUSY });
         return error.Busy;
     }
 
     // Store pending state
-    tx_pending = io_request;
+    tx_pending_atomic.store(io_request, .release);
     tx_buffer = data;
-    tx_index = 0;
 
     // Transition IoRequest to in_progress
     _ = io_request.compareAndSwapState(.pending, .in_progress);
@@ -230,29 +276,35 @@ pub fn writeAsync(data: []const u8, io_request: *io.IoRequest) AsyncTxError!void
         .raw = .{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
     };
 
-    tx_lock.store(false, .release);
+    // SECURITY FIX: All state updates and first byte TX must happen inside lock
+    // to prevent race with ISR. The ISR cannot fire until we enable THRE interrupt,
+    // but we must ensure tx_index is set correctly before enabling it.
 
-    // Send first byte (this primes the interrupt)
-    const first_byte = data[0];
-    tx_index = 1;
-
-    // Wait for transmit empty before sending first byte
+    // Wait for transmit empty before sending first byte (still inside lock)
     while (!isTransmitEmpty()) {
         hal.cpu.pause();
     }
-    hal.io.outb(current_port, first_byte);
 
-    // Enable TX empty interrupt (THRE)
+    // Send first byte and set index to 1 atomically (w.r.t. ISR)
+    const first_byte = data[0];
+    hal.io.outb(current_port, first_byte);
+    tx_index = 1;
+
+    // Enable TX empty interrupt (THRE) - ISR can now fire safely
     // Read current IER, set bit 1, preserve receive interrupt if enabled
     const current_ier = hal.io.inb(current_port + IER);
     hal.io.outb(current_port + IER, current_ier | IER_TX_EMPTY);
+
+    // Release lock AFTER enabling interrupt - ISR will acquire lock before accessing state
+    tx_lock.store(false, .release);
 }
 
 /// Handle TX empty interrupt (called from handleIrq)
 /// Returns true if this was a TX interrupt we handled
 fn handleTxEmptyInterrupt() bool {
-    // Quick check without lock - if no pending, nothing to do
-    if (tx_pending == null) return false;
+    // Quick check with atomic load - if no pending, nothing to do
+    // This avoids lock acquisition overhead when no async TX is active
+    if (tx_pending_atomic.load(.acquire) == null) return false;
 
     // Acquire TX lock
     while (tx_lock.cmpxchgWeak(false, true, .acquire, .monotonic) != null) {
@@ -260,7 +312,8 @@ fn handleTxEmptyInterrupt() bool {
     }
     defer tx_lock.store(false, .release);
 
-    const request = tx_pending orelse return false;
+    // Re-check under lock (could have been cleared by another interrupt)
+    const request = tx_pending_atomic.load(.acquire) orelse return false;
 
     // Check if more data to send
     if (tx_index < tx_buffer.len) {
@@ -278,7 +331,7 @@ fn handleTxEmptyInterrupt() bool {
     hal.io.outb(current_port + IER, current_ier & ~IER_TX_EMPTY);
 
     // Clear pending state before completing (avoid race)
-    tx_pending = null;
+    tx_pending_atomic.store(null, .release);
     tx_buffer = &.{};
     tx_index = 0;
 
@@ -309,7 +362,7 @@ pub fn handleIrqAsync() void {
     } else if (id == 2 or id == 6) {
         // Received data
         const data = hal.io.inb(port);
-        if (onByteReceived) |callback| {
+        if (getOnByteReceived()) |callback| {
             callback(data);
         }
     }
