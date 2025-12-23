@@ -49,7 +49,10 @@ pub const HidField = struct {
 /// An HID report (Input, Output, or Feature)
 pub const HidReport = struct {
     id: u8 = 0,
-    fields: [types.MAX_FIELDS]HidField = undefined,
+    // Security: Zero-initialize to prevent information leaks if field_count
+    // is ever corrupted or if parsing logic has a bug that increments count
+    // without fully initializing a field.
+    fields: [types.MAX_FIELDS]HidField = std.mem.zeroes([types.MAX_FIELDS]HidField),
     field_count: u8 = 0,
     total_bits: u16 = 0,
 
@@ -323,6 +326,11 @@ pub const Parser = struct {
         switch (tag) {
             @intFromEnum(types.MainItem.collection) => {
                 in_collection.* = true;
+                // Security: Prevent collection_depth overflow (Vuln 4)
+                if (collection_depth.* >= 255) {
+                    console.err("HID: Collection depth overflow - rejecting descriptor", .{});
+                    return;
+                }
                 collection_depth.* += 1;
 
                 if (collection_depth.* == 1 and usage_count.* > 0) {
@@ -403,13 +411,25 @@ pub const Parser = struct {
                     };
 
                     self.input_report.addField(field);
-                    current_bit_offset.* += global.report_size;
+                    // Security: Use checked arithmetic to prevent bit_offset overflow (Vuln 1)
+                    current_bit_offset.* = std.math.add(u16, current_bit_offset.*, global.report_size) catch {
+                        console.err("HID: bit_offset overflow in Input item", .{});
+                        return;
+                    };
                 }
 
                 self.input_report.total_bits = current_bit_offset.*;
             },
             @intFromEnum(types.MainItem.output), @intFromEnum(types.MainItem.feature) => {
-                current_bit_offset.* += @as(u16, global.report_size) * @as(u16, global.report_count);
+                // Security: Use checked arithmetic to prevent bit_offset overflow (Vuln 7)
+                const increment = std.math.mul(u16, global.report_size, global.report_count) catch {
+                    console.err("HID: bit_offset multiplication overflow in Output/Feature item", .{});
+                    return;
+                };
+                current_bit_offset.* = std.math.add(u16, current_bit_offset.*, increment) catch {
+                    console.err("HID: bit_offset overflow in Output/Feature item", .{});
+                    return;
+                };
             },
             else => {},
         }

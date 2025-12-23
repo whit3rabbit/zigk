@@ -111,6 +111,14 @@ pub fn transmit(driver: *E1000e, data: []const u8) bool {
     const buf = driver.tx_buffers[driver.tx_cur];
     @memcpy(buf[0..data.len], data);
 
+    // Zero padding region to prevent information leakage.
+    // Ethernet minimum frame is 64 bytes (60 data + 4 CRC).
+    // Hardware padding (CMD_PSP) may read beyond data.len into stale buffer content.
+    // Zero the region that hardware padding might expose to the network.
+    if (data.len < 60) {
+        @memset(buf[data.len..60], 0);
+    }
+
     // Configure descriptor for transmission
     // CMD_EOP: End of Packet (entire packet in one descriptor)
     // CMD_IFCS: Insert Frame Check Sequence (hardware appends CRC)
@@ -126,8 +134,8 @@ pub fn transmit(driver: *E1000e, data: []const u8) bool {
         .special = 0,
     };
 
-    // Advance software tail pointer
-    driver.tx_cur = @truncate((@as(u32, driver.tx_cur) + 1) % config.TX_DESC_COUNT);
+    // Advance software tail pointer (comptime validates TX_DESC_COUNT fits u16)
+    driver.tx_cur = @intCast((@as(u32, driver.tx_cur) + 1) % config.TX_DESC_COUNT);
 
     // Write barrier ensures descriptor contents are visible to hardware
     // before we update TDT. Without this, hardware might see the new
@@ -299,6 +307,13 @@ pub fn transmitAsync(driver: *E1000e, data: []const u8, io_request: *io.IoReques
     const buf = driver.tx_buffers[driver.tx_cur];
     @memcpy(buf[0..data.len], data);
 
+    // Zero padding region to prevent information leakage.
+    // Ethernet minimum frame is 64 bytes (60 data + 4 CRC).
+    // Hardware padding (CMD_PSP) may read beyond data.len into stale buffer content.
+    if (data.len < 60) {
+        @memset(buf[data.len..60], 0);
+    }
+
     // Configure descriptor for transmission
     tx_desc.* = desc.TxDesc{
         .buffer_addr = driver.tx_buffers_phys[driver.tx_cur],
@@ -310,8 +325,8 @@ pub fn transmitAsync(driver: *E1000e, data: []const u8, io_request: *io.IoReques
         .special = 0,
     };
 
-    // Advance software tail pointer
-    driver.tx_cur = @truncate((@as(u32, driver.tx_cur) + 1) % config.TX_DESC_COUNT);
+    // Advance software tail pointer (comptime validates TX_DESC_COUNT fits u16)
+    driver.tx_cur = @intCast((@as(u32, driver.tx_cur) + 1) % config.TX_DESC_COUNT);
 
     // Write barrier ensures descriptor is visible before TDT update
     mmio.writeBarrier();
@@ -331,11 +346,17 @@ pub fn transmitAsync(driver: *E1000e, data: []const u8, io_request: *io.IoReques
 /// Scans from tx_completion_idx up to current TDH, completing any
 /// pending IoRequests for descriptors with DD=1.
 ///
-/// Thread safety: Must be called from IRQ context or with driver.lock held
+/// Thread safety: Acquires driver.lock to synchronize with transmit path
 pub fn processTxCompletions(driver: *E1000e) void {
+    // Acquire lock to synchronize with transmit() and transmitAsync()
+    // This prevents TOCTOU races where tx_cur or pending_tx_requests
+    // could be modified between our read and use.
+    const held = driver.lock.acquire();
+    defer held.release();
+
     // Read hardware head pointer - this is where hardware has consumed up to
     const tdh = driver.regs.read(.tdh);
-    const tdh16: u16 = @truncate(tdh);
+    const tdh16: u16 = @intCast(tdh & 0xFFFF);
 
     // Scan from last processed index up to hardware head
     // Note: We can't just iterate from tx_completion_idx to tdh because
@@ -361,15 +382,16 @@ pub fn processTxCompletions(driver: *E1000e) void {
 
         // Complete pending IoRequest if any
         if (driver.pending_tx_requests[idx]) |io_req| {
-            // Success: packet was transmitted
-            const bytes_sent: usize = tx_desc.length;
+            // Use the stored packet length from submission, not hardware-reported length.
+            // Hardware could report bogus length values; we trust our own recorded data.
+            const bytes_sent: usize = io_req.op_data.net_tx.bytes_queued;
             io_req.complete(.{ .ok = bytes_sent });
             driver.pending_tx_requests[idx] = null;
             completed += 1;
         }
 
-        // Advance to next descriptor
-        idx = @truncate((@as(u32, idx) + 1) % config.TX_DESC_COUNT);
+        // Advance to next descriptor (comptime validates TX_DESC_COUNT fits u16)
+        idx = @intCast((@as(u32, idx) + 1) % config.TX_DESC_COUNT);
     }
 
     driver.tx_completion_idx = idx;

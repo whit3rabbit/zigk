@@ -95,8 +95,8 @@ pub fn processRxLimited(driver: *E1000e, callback: *const fn ([]u8) void, limit:
                 rx_desc.errors = 0;
                 rx_desc.length = 0;
 
-                // Advance to next descriptor
-                driver.rx_cur = @truncate((@as(u32, driver.rx_cur) + 1) % config.RX_DESC_COUNT);
+                // Advance to next descriptor (comptime validates RX_DESC_COUNT fits u16)
+                driver.rx_cur = @intCast((@as(u32, driver.rx_cur) + 1) % config.RX_DESC_COUNT);
                 processed += 1;
                 batch_count += 1;
 
@@ -120,7 +120,7 @@ pub fn processRxLimited(driver: *E1000e, callback: *const fn ([]u8) void, limit:
         rx_desc.errors = 0;
         rx_desc.length = 0;
 
-        driver.rx_cur = @truncate((@as(u32, driver.rx_cur) + 1) % config.RX_DESC_COUNT);
+        driver.rx_cur = @intCast((@as(u32, driver.rx_cur) + 1) % config.RX_DESC_COUNT);
         processed += 1;
         batch_count += 1;
 
@@ -170,11 +170,17 @@ pub fn updateRdt(driver: *E1000e) void {
 }
 
 /// Check if there are packets waiting
-/// Note: Caller should use processRx() to actually read packets, which
-/// has proper memory barriers. This is just a quick poll check.
+/// Thread safety: Acquires driver.lock briefly to read rx_cur atomically
+/// with respect to processRxLimited() which modifies it.
 pub fn hasPackets(driver: *E1000e) bool {
+    // Acquire lock to prevent TOCTOU race with processRxLimited()
+    // which modifies rx_cur. Without this, we could check the wrong
+    // descriptor if rx_cur is updated between our read and the check.
+    const held = driver.lock.acquire();
     const rx_desc = &driver.rx_ring[driver.rx_cur];
     const has_packet = (rx_desc.status & desc.RxDesc.STATUS_DD) != 0;
+    held.release();
+
     if (has_packet) {
         // Ensure subsequent reads see hardware writes
         mmio.readBarrier();

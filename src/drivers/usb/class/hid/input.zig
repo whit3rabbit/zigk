@@ -68,14 +68,22 @@ pub fn extractFieldValue(data: []const u8, field: *const descriptor.HidField) i3
 // =============================================================================
 
 /// Scale a value from logical range to screen coordinates
+/// Security: Uses i64 arithmetic to prevent overflow from malicious device descriptors (Vuln 2)
 pub fn scaleToScreen(value: i32, logical_min: i32, logical_max: i32, screen_size: u32) u32 {
-    const range = logical_max - logical_min;
-    if (range <= 0) return 0;
+    // Security: Widen to i64 before subtraction to prevent overflow
+    // (e.g., INT32_MAX - INT32_MIN would overflow i32 but not i64)
+    const range_i64 = @as(i64, logical_max) - @as(i64, logical_min);
+    if (range_i64 <= 0) return 0;
 
-    const normalized = value - logical_min;
-    if (normalized < 0) return 0;
+    // Security: Also widen normalized calculation
+    const normalized_i64 = @as(i64, value) - @as(i64, logical_min);
+    if (normalized_i64 < 0) return 0;
 
-    const scaled = @as(u64, @intCast(normalized)) * @as(u64, screen_size) / @as(u64, @intCast(range));
+    // Safe cast: range_i64 is positive and normalized_i64 is non-negative
+    const normalized: u64 = @intCast(normalized_i64);
+    const range: u64 = @intCast(range_i64);
+
+    const scaled = normalized * @as(u64, screen_size) / range;
     return @intCast(@min(scaled, screen_size - 1));
 }
 

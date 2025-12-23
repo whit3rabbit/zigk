@@ -37,11 +37,16 @@ var driver_initialized: bool = false;
 /// Initialize E1000 driver for a PCI device
 /// Supports both legacy E1000 (82540EM) and PCIe E1000e (82574L)
 pub fn init(pci_dev: *const pci.PciDevice, pci_access: pci.PciAccess) !*E1000e {
-    // Guard against double-init without deinit
-    if (@atomicLoad(bool, &driver_initialized, .acquire)) {
+    // Guard against double-init using atomic compare-and-swap.
+    // This prevents the TOCTOU race where two threads could both see
+    // driver_initialized=false and proceed with concurrent initialization.
+    if (@cmpxchgStrong(bool, &driver_initialized, false, true, .acq_rel, .acquire)) |_| {
+        // cmpxchgStrong returns non-null if the exchange failed (already true)
         console.err("E1000e: Driver already initialized - call deinit() first", .{});
         return error.AlreadyInitialized;
     }
+    // Successfully claimed initialization - reset to false on error
+    errdefer @atomicStore(bool, &driver_initialized, false, .release);
 
     console.info("E1000e: Initializing {x:0>4}:{x:0>4}", .{
         pci_dev.vendor_id,
@@ -154,8 +159,8 @@ pub fn init(pci_dev: *const pci.PciDevice, pci_access: pci.PciAccess) !*E1000e {
     // Enable interrupts (uses MSI-X or legacy based on initMsix result)
     enableInterrupts(driver);
 
-    // Mark driver as initialized BEFORE creating worker thread
-    @atomicStore(bool, &driver_initialized, true, .release);
+    // driver_initialized was set to true by cmpxchgStrong at function entry.
+    // errdefer will reset it to false if any error occurs before this point.
 
     // Create worker thread
     // Pass workerEntry directly from worker module
@@ -484,8 +489,19 @@ pub fn deinit(driver: *E1000e) void {
     // Signal worker thread to exit
     @atomicStore(bool, &driver.shutdown_requested, true, .release);
 
-    // Wake worker if it's blocked waiting for packets, then wait for exit
+    // Wake worker if it's blocked waiting for packets, then wait for exit.
+    // Retry unblock multiple times to handle the race condition where the worker
+    // checks shutdown_requested before we set it, but hasn't blocked yet when
+    // we call unblock() - causing the unblock to be lost.
     if (driver.worker_thread) |wt| {
+        // First unblock attempt
+        sched.unblock(wt);
+
+        // Small spin delay then retry - handles race between worker's
+        // hasPackets() check and sched.block() call
+        for (0..10) |_| {
+            asm volatile ("pause");
+        }
         sched.unblock(wt);
 
         // Wait for worker thread to reach Zombie state (exit cleanly).

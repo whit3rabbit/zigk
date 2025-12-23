@@ -86,6 +86,16 @@ fn doControlTransfer(
     else
         .out;
 
+    // Security: Pre-check ring space to prevent orphaned TRBs referencing freed DMA memory.
+    // A control transfer needs: Setup TRB + optional Data TRB + Status TRB.
+    // If we enqueue partially and then fail, orphaned TRBs remain in the ring.
+    // When the next transfer rings the doorbell, the controller processes them,
+    // potentially DMA'ing to/from freed physical memory.
+    const required_slots: usize = if (has_data) 3 else 2;
+    if (ep0_ring.ring.freeSlots() < required_slots) {
+        return error.RingFull;
+    }
+
     // Build Setup Stage TRB
     // Security: Use checked conversion to prevent silent truncation of large buffers
     const w_length: u16 = if (buffer) |b|
