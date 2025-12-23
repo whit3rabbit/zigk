@@ -14,6 +14,8 @@ const console = @import("console");
 const hal = @import("hal");
 const pmm = @import("pmm");
 const sync = @import("sync");
+const dma = @import("dma");
+const iommu = @import("iommu");
 
 const trb = @import("trb.zig");
 const ring = @import("ring.zig");
@@ -27,6 +29,8 @@ const hub = @import("../class/hub.zig");
 
 /// USB Device - tracks all state for an enumerated device
 pub const UsbDevice = struct {
+    /// IOMMU BDF for DMA allocations
+    bdf: iommu.DeviceBdf,
     /// Slot ID assigned by Enable Slot command (1-255)
     slot_id: u8,
     /// Root hub port number (1-based)
@@ -63,6 +67,9 @@ pub const UsbDevice = struct {
     report_buffer_phys: u64,
     /// Allocated size of report_buffer for validation
     report_buffer_len: usize,
+    /// Last queued interrupt request length - used to validate completions
+    /// Security: Must match between queue and completion to detect hardware lies
+    last_interrupt_request_len: u17 = 0,
 
     /// Hub driver state (if is_hub is true)
     hub_driver: hub.HubDriver,
@@ -81,6 +88,11 @@ pub const UsbDevice = struct {
     /// Current device state
     state: DeviceState,
 
+    /// Reference count for safe deallocation
+    /// Security: Prevents use-after-free when device is accessed from interrupt handler
+    /// while another thread is deallocating. Starts at 1 (creation holds a reference).
+    refcount: std.atomic.Value(u32) = std.atomic.Value(u32).init(1),
+
     const Self = @This();
 
     /// Device state during enumeration
@@ -98,27 +110,29 @@ pub const UsbDevice = struct {
     };
 
     /// Allocate and initialize a new USB device
-    pub fn init(slot_id: u8, port: u8, speed: context.Speed, parent: ?*UsbDevice, parent_port: u8, route_string: u20) !*Self {
+    pub fn init(bdf: iommu.DeviceBdf, slot_id: u8, port: u8, speed: context.Speed, parent: ?*UsbDevice, parent_port: u8, route_string: u20) !*Self {
         // Allocate device structure from PMM
         const dev_page = pmm.allocZeroedPages(1) orelse return error.OutOfMemory;
         const dev_virt = @intFromPtr(hal.paging.physToVirt(dev_page));
         const device: *Self = @ptrFromInt(dev_virt);
         errdefer pmm.freePages(dev_page, 1);
 
-        // Allocate Device Context
-        const dc = try context.DeviceContext.alloc();
-        errdefer dc.ctx.free();
+        // Allocate Device Context (IOMMU-aware)
+        const dc = try context.DeviceContext.alloc(bdf);
+        errdefer context.DeviceContext.freeDma(&dc.dma_buf);
 
-        // Allocate Input Context
-        const ic = try context.InputContext.alloc();
-        errdefer ic.ctx.free();
+        // Allocate Input Context (IOMMU-aware)
+        const ic = try context.InputContext.alloc(bdf);
+        errdefer context.InputContext.freeDma(&ic.dma_buf);
 
-        // Allocate EP0 Transfer Ring
-        var ep0_ring = try ring.TransferRing.init();
+        // Allocate EP0 Transfer Ring (IOMMU-aware)
+        var ep0_ring = try ring.TransferRing.init(bdf);
         errdefer ep0_ring.deinit();
 
         // Allocate report buffer (one page for DMA alignment)
-        // Security: Explicit size limit (64 bytes) for max interrupt packet
+        // Security: Entire page is zeroed to prevent information leaks if malicious
+        // hardware writes beyond the tracked 64-byte buffer size. The TRB request
+        // length is also capped to report_buffer_len in queueInterruptTransfer.
         const report_page = pmm.allocZeroedPages(1) orelse return error.OutOfMemory;
         const report_virt: [*]u8 = @ptrCast(hal.paging.physToVirt(report_page));
         const report_buffer_size: usize = 64; // Max HS interrupt packet size
@@ -133,14 +147,15 @@ pub const UsbDevice = struct {
         };
 
         var new_dev = Self{
+            .bdf = bdf,
             .slot_id = slot_id,
             .port = port,
             .speed = speed,
             .max_packet_size = default_max_packet,
             .device_context = dc.ctx,
-            .device_context_phys = dc.phys,
+            .device_context_phys = dc.device_addr, // Use device_addr (IOVA) for hardware
             .input_context = ic.ctx,
-            .input_context_phys = ic.phys,
+            .input_context_phys = ic.device_addr, // Use device_addr (IOVA) for hardware
             .endpoints = [_]?ring.TransferRing{null} ** 32,
             .interrupt_dci = 0,
             .hid_driver = .{},
@@ -198,9 +213,9 @@ pub const UsbDevice = struct {
         // Security: Validate endpoint address before calculating DCI
         const dci = context.InputContext.endpointToDci(ep_addr) orelse return error.InvalidParam;
 
-        // Allocate transfer ring if not present
+        // Allocate transfer ring if not present (IOMMU-aware)
         if (self.endpoints[dci] == null) {
-            self.endpoints[dci] = try ring.TransferRing.init();
+            self.endpoints[dci] = try ring.TransferRing.init(self.bdf);
         }
 
         // We don't update InputContext here immediately;
@@ -218,9 +233,9 @@ pub const UsbDevice = struct {
         // Security: Validate endpoint address before calculating DCI
         const dci = context.InputContext.endpointToDci(ep_addr) orelse return error.InvalidParam;
 
-        // Allocate ring if it doesn't exist (it should, from initXXEndpoint)
+        // Allocate ring if it doesn't exist (it should, from initXXEndpoint) - IOMMU-aware
         if (self.endpoints[dci] == null) {
-            self.endpoints[dci] = try ring.TransferRing.init();
+            self.endpoints[dci] = try ring.TransferRing.init(self.bdf);
         }
 
         const ep_ring = &self.endpoints[dci].?;
@@ -288,8 +303,29 @@ pub const UsbDevice = struct {
 
     }
 
-    /// Free all device resources
-    pub fn deinit(self: *Self) void {
+    /// Increment reference count
+    /// Security: Must be called while holding devices_lock to prevent race with deinit
+    pub fn addRef(self: *Self) void {
+        _ = self.refcount.fetchAdd(1, .monotonic);
+    }
+
+    /// Decrement reference count and free if zero
+    /// Security: Returns true if device was freed, false otherwise
+    pub fn releaseRef(self: *Self) bool {
+        // Use acq_rel ordering to ensure all prior accesses are visible
+        // before we potentially free the resources
+        const old = self.refcount.fetchSub(1, .acq_rel);
+        if (old == 1) {
+            // Last reference - perform cleanup
+            self.freeResources();
+            return true;
+        }
+        return false;
+    }
+
+    /// Internal helper to free all device resources
+    /// Security: Only called when refcount reaches zero
+    fn freeResources(self: *Self) void {
         self.device_context.free();
         self.input_context.free();
         for (&self.endpoints) |*ep_opt| {
@@ -302,6 +338,20 @@ pub const UsbDevice = struct {
         // Free the device structure itself
         const dev_phys = hal.paging.virtToPhys(@intFromPtr(self));
         pmm.freePages(dev_phys, 1);
+    }
+
+    /// Free all device resources
+    /// Security: Unregisters device from global array to prevent double-free
+    /// if a new device is assigned the same slot ID before deinit completes.
+    /// Uses reference counting to ensure safe deallocation.
+    pub fn deinit(self: *Self) void {
+        // Security: Unregister from global array FIRST to prevent race conditions
+        // where another thread looks up this slot while we're freeing resources.
+        // This must happen before any resource cleanup.
+        unregisterDevice(self.slot_id);
+
+        // Release the creation reference - resources freed when refcount hits 0
+        _ = self.releaseRef();
     }
 };
 
@@ -319,23 +369,39 @@ var devices: [MAX_DEVICES]?*UsbDevice = [_]?*UsbDevice{null} ** MAX_DEVICES;
 var devices_lock: sync.RwLock = .{};
 
 /// Register a device in the global array
-/// Security: Validates slot_id bounds and frees existing device to prevent
-/// resource exhaustion from malicious hub enumeration cycling.
-pub fn registerDevice(device: *UsbDevice) void {
+/// Security: Validates slot_id bounds and releases old device reference
+/// to prevent resource exhaustion from malicious hub enumeration cycling.
+/// Uses reference counting to safely handle concurrent access.
+pub fn registerDevice(new_device: *UsbDevice) void {
     // slot_id is u8, max value 255, which is < MAX_DEVICES (256)
     // slot_id 0 is reserved for host controller
-    if (device.slot_id > 0) {
+    if (new_device.slot_id == 0) return;
+
+    // First phase: atomically swap in the new device and get the old one
+    var old_dev_to_release: ?*UsbDevice = null;
+    {
         const held = devices_lock.acquireWrite();
         defer held.release();
-        // Security: Free existing device resources to prevent memory exhaustion
-        if (devices[device.slot_id]) |old_dev| {
+
+        if (devices[new_device.slot_id]) |old_dev| {
             // Avoid double-free if re-registering same device
-            if (old_dev != device) {
-                console.warn("XHCI: Replacing existing device at slot {}", .{device.slot_id});
-                old_dev.deinit();
+            if (old_dev != new_device) {
+                console.warn("XHCI: Replacing existing device at slot {}", .{new_device.slot_id});
+                // Clear the slot first to prevent lookup during cleanup
+                devices[new_device.slot_id] = null;
+                old_dev_to_release = old_dev;
             }
         }
-        devices[device.slot_id] = device;
+        devices[new_device.slot_id] = new_device;
+    }
+
+    // Second phase: release old device reference AFTER releasing the lock
+    // Security: Uses reference counting to safely handle concurrent access.
+    // The old device will only be freed when its refcount reaches zero,
+    // meaning all interrupt handlers have finished using it.
+    if (old_dev_to_release) |old_dev| {
+        // Release the creation reference - resources freed when refcount hits 0
+        _ = old_dev.releaseRef();
     }
 }
 
@@ -386,6 +452,70 @@ pub fn findPollingDevice() ?*UsbDevice {
         }
     }
     return null;
+}
+
+/// Data needed for processing an interrupt event, copied under lock
+/// Security: This struct contains copies of device data and holds a reference
+/// to prevent use-after-free. Caller MUST call releaseRef() when done.
+pub const InterruptEventData = struct {
+    /// Device pointer - protected by reference count acquired during lookup
+    /// Security: Caller MUST call dev.releaseRef() when finished processing
+    dev: *UsbDevice,
+    /// Copy of the interrupt endpoint DCI
+    interrupt_dci: u5,
+    /// Copy of the report buffer slice (bounded by report_buffer_len)
+    report_buffer: []u8,
+    /// Copy of the report buffer length for validation
+    report_buffer_len: usize,
+    /// Copy of the last queued request length for residual calculation
+    /// Security: Use this instead of hardcoded constant to prevent divergence
+    last_request_len: u17,
+    /// Whether device is in polling state
+    is_polling: bool,
+    /// Whether this is a HID device (keyboard/mouse/tablet)
+    is_hid: bool,
+    /// Whether this is a hub device
+    is_hub: bool,
+
+    /// Release the device reference when done processing
+    /// Security: MUST be called after processing to allow device cleanup
+    pub fn release(self: *const InterruptEventData) void {
+        _ = self.dev.releaseRef();
+    }
+};
+
+/// Safely get interrupt event data for a device under the lock
+/// Security: Acquires a reference to prevent use-after-free. Caller MUST
+/// call result.release() when done processing to allow device cleanup.
+/// Returns null if device not found or not in valid state for interrupt.
+pub fn getInterruptEventData(slot_id: u8, ep_dci: u5) ?InterruptEventData {
+    if (slot_id == 0) return null;
+
+    const held = devices_lock.acquireRead();
+    defer held.release();
+
+    const dev = devices[slot_id] orelse return null;
+
+    // Validate this is the expected interrupt endpoint
+    if (dev.interrupt_dci != ep_dci) return null;
+
+    // Only process if device is in polling state
+    if (dev.state != .polling) return null;
+
+    // Security: Acquire reference while holding lock to prevent race with deinit
+    // The caller MUST call result.release() when done processing.
+    dev.addRef();
+
+    return InterruptEventData{
+        .dev = dev,
+        .interrupt_dci = dev.interrupt_dci,
+        .report_buffer = dev.report_buffer,
+        .report_buffer_len = dev.report_buffer_len,
+        .last_request_len = dev.last_interrupt_request_len,
+        .is_polling = true,
+        .is_hid = dev.hid_driver.is_keyboard or dev.hid_driver.is_mouse or dev.hid_driver.is_tablet,
+        .is_hub = dev.is_hub,
+    };
 }
 
 // =============================================================================

@@ -19,6 +19,8 @@ const pmm = @import("pmm");
 const heap = @import("heap");
 const io = @import("io");
 const sync = @import("sync");
+const dma = @import("dma");
+const iommu = @import("iommu");
 
 pub const hba = @import("hba.zig");
 pub const port = @import("port.zig");
@@ -88,23 +90,30 @@ pub const AhciPort = struct {
     /// Device type
     device_type: port.DeviceSignature,
 
-    /// Command list physical address
+    /// Command list physical address (device address for hardware)
     cmd_list_phys: u64,
 
     /// Command list virtual address
     cmd_list_virt: u64,
 
-    /// FIS receive buffer physical address
+    /// FIS receive buffer physical address (device address for hardware)
     fis_phys: u64,
 
     /// FIS receive buffer virtual address
     fis_virt: u64,
 
-    /// Command tables physical address (array of 32)
+    /// Command tables physical address (device addresses for hardware)
     cmd_tables_phys: [32]u64,
 
     /// Command tables virtual address (array of 32)
     cmd_tables_virt: [32]u64,
+
+    /// DMA buffer tracking for IOMMU integration
+    cmd_list_dma: dma.DmaBuffer,
+    fis_dma: dma.DmaBuffer,
+    cmd_tables_dma: [32]dma.DmaBuffer,
+    /// Whether IOMMU-aware DMA is being used
+    using_iommu_dma: bool,
 
     /// Device identify data (if available)
     identify: ?fis.IdentifyData,
@@ -136,6 +145,10 @@ pub const AhciPort = struct {
             .fis_virt = 0,
             .cmd_tables_phys = [_]u64{0} ** 32,
             .cmd_tables_virt = [_]u64{0} ** 32,
+            .cmd_list_dma = undefined,
+            .fis_dma = undefined,
+            .cmd_tables_dma = undefined,
+            .using_iommu_dma = false,
             .identify = null,
             .pending_requests = [_]?*io.IoRequest{null} ** 32,
             .commands_issued = 0,
@@ -346,6 +359,13 @@ pub const AhciController = struct {
             return AhciError.ResetTimeout;
         }
 
+        // Get device BDF for IOMMU domain
+        const bdf = iommu.DeviceBdf{
+            .bus = self.pci_dev.bus,
+            .device = self.pci_dev.device,
+            .func = self.pci_dev.func,
+        };
+
         // Track allocations for cleanup on error
         var cmd_list_allocated = false;
         var fis_allocated = false;
@@ -354,65 +374,80 @@ pub const AhciController = struct {
         // Cleanup on error - free all allocations made so far
         errdefer {
             if (cmd_list_allocated) {
-                pmm.freePages(p.cmd_list_phys, 1);
+                dma.freeBuffer(&p.cmd_list_dma);
                 p.cmd_list_phys = 0;
             }
             if (fis_allocated) {
-                pmm.freePages(p.fis_phys, 1);
+                dma.freeBuffer(&p.fis_dma);
                 p.fis_phys = 0;
             }
             for (0..tables_allocated) |slot| {
                 if (p.cmd_tables_phys[slot] != 0) {
-                    pmm.freePages(p.cmd_tables_phys[slot], 1);
+                    dma.freeBuffer(&p.cmd_tables_dma[slot]);
                     p.cmd_tables_phys[slot] = 0;
                 }
             }
         }
 
-        // Allocate command list (1KB aligned)
-        const cmd_list_phys = pmm.allocZeroedPages(1) orelse {
-            return AhciError.AllocationFailed;
-        };
-        cmd_list_allocated = true;
-        // Check 64-bit capability
-        if (!self.cap.s64a and cmd_list_phys > 0xFFFFFFFF) {
-            console.err("AHCI: Port {d} cmd list > 4GB but controller is 32-bit", .{port_num});
-            return AhciError.AllocationFailed;
-        }
-        p.cmd_list_phys = cmd_list_phys;
-        p.cmd_list_virt = @intFromPtr(hal.paging.physToVirt(cmd_list_phys));
-
-        // Allocate FIS receive buffer (256 bytes, but allocate full page)
-        const fis_phys = pmm.allocZeroedPages(1) orelse {
-            return AhciError.AllocationFailed;
-        };
-        fis_allocated = true;
-        if (!self.cap.s64a and fis_phys > 0xFFFFFFFF) {
-            console.err("AHCI: Port {d} FIS > 4GB but controller is 32-bit", .{port_num});
-            return AhciError.AllocationFailed;
-        }
-        p.fis_phys = fis_phys;
-        p.fis_virt = @intFromPtr(hal.paging.physToVirt(fis_phys));
-
-        // Allocate command tables (one page per table for simplicity)
-        for (0..32) |slot| {
-            const table_phys = pmm.allocZeroedPages(1) orelse {
+        // Allocate command list with IOMMU-aware DMA (1KB aligned, page-sized)
+        if (self.cap.s64a) {
+            p.cmd_list_dma = dma.allocBuffer(bdf, pmm.PAGE_SIZE, true) catch {
                 return AhciError.AllocationFailed;
             };
-            tables_allocated = slot + 1;
-            if (!self.cap.s64a and table_phys > 0xFFFFFFFF) {
-                // Free this one immediately since errdefer won't see it in array yet
-                pmm.freePages(table_phys, 1);
-                console.err("AHCI: Port {d} table > 4GB but controller is 32-bit", .{port_num});
+        } else {
+            // 32-bit controller requires addresses below 4GB
+            p.cmd_list_dma = dma.allocBuffer32(bdf, pmm.PAGE_SIZE, true) catch |err| {
+                if (err == dma.DmaError.AddressTooHigh) {
+                    console.err("AHCI: Port {d} cmd list > 4GB but controller is 32-bit", .{port_num});
+                }
                 return AhciError.AllocationFailed;
-            }
-            p.cmd_tables_phys[slot] = table_phys;
-            p.cmd_tables_virt[slot] = @intFromPtr(hal.paging.physToVirt(table_phys));
-
-            // Set up command header to point to this table
-            const cmd_list: *command.CommandList = @ptrFromInt(p.cmd_list_virt);
-            cmd_list[slot].setCommandTableAddr(table_phys);
+            };
         }
+        cmd_list_allocated = true;
+        p.cmd_list_phys = p.cmd_list_dma.device_addr;
+        p.cmd_list_virt = @intFromPtr(p.cmd_list_dma.getVirt());
+
+        // Allocate FIS receive buffer with IOMMU-aware DMA
+        if (self.cap.s64a) {
+            p.fis_dma = dma.allocBuffer(bdf, pmm.PAGE_SIZE, true) catch {
+                return AhciError.AllocationFailed;
+            };
+        } else {
+            p.fis_dma = dma.allocBuffer32(bdf, pmm.PAGE_SIZE, true) catch |err| {
+                if (err == dma.DmaError.AddressTooHigh) {
+                    console.err("AHCI: Port {d} FIS > 4GB but controller is 32-bit", .{port_num});
+                }
+                return AhciError.AllocationFailed;
+            };
+        }
+        fis_allocated = true;
+        p.fis_phys = p.fis_dma.device_addr;
+        p.fis_virt = @intFromPtr(p.fis_dma.getVirt());
+
+        // Allocate command tables with IOMMU-aware DMA (one page per table)
+        for (0..32) |slot| {
+            if (self.cap.s64a) {
+                p.cmd_tables_dma[slot] = dma.allocBuffer(bdf, pmm.PAGE_SIZE, true) catch {
+                    return AhciError.AllocationFailed;
+                };
+            } else {
+                p.cmd_tables_dma[slot] = dma.allocBuffer32(bdf, pmm.PAGE_SIZE, true) catch |err| {
+                    if (err == dma.DmaError.AddressTooHigh) {
+                        console.err("AHCI: Port {d} table > 4GB but controller is 32-bit", .{port_num});
+                    }
+                    return AhciError.AllocationFailed;
+                };
+            }
+            tables_allocated = slot + 1;
+            p.cmd_tables_phys[slot] = p.cmd_tables_dma[slot].device_addr;
+            p.cmd_tables_virt[slot] = @intFromPtr(p.cmd_tables_dma[slot].getVirt());
+
+            // Set up command header to point to this table (using device address)
+            const cmd_list: *command.CommandList = @ptrFromInt(p.cmd_list_virt);
+            cmd_list[slot].setCommandTableAddr(p.cmd_tables_phys[slot]);
+        }
+
+        p.using_iommu_dma = dma.isIommuAvailable();
 
         // Set command list and FIS base addresses
         port.writeClb(base, p.cmd_list_phys);
@@ -476,38 +511,45 @@ pub const AhciController = struct {
     fn identifyDevice(self: *Self, port_num: u5) AhciError!void {
         const p = &self.ports[port_num];
 
-        // Allocate buffer for identify data
-        const buffer_pages = pmm.allocZeroedPages(1) orelse {
-            return AhciError.AllocationFailed;
+        // Get device BDF for IOMMU domain
+        const bdf = iommu.DeviceBdf{
+            .bus = self.pci_dev.bus,
+            .device = self.pci_dev.device,
+            .func = self.pci_dev.func,
         };
-        defer pmm.freePages(buffer_pages, 1);
 
-        // Check 64-bit capability
-        if (!self.cap.s64a and buffer_pages > 0xFFFFFFFF) {
-            console.err("AHCI: Port {d} identify buffer > 4GB but controller is 32-bit", .{port_num});
-            return AhciError.AllocationFailed;
-        }
+        // Allocate IOMMU-aware buffer for identify data
+        const id_buffer = if (self.cap.s64a)
+            dma.allocBuffer(bdf, 512, true) catch {
+                console.err("AHCI: Port {d} failed to allocate identify buffer", .{port_num});
+                return AhciError.AllocationFailed;
+            }
+        else
+            dma.allocBuffer32(bdf, 512, true) catch |err| {
+                console.err("AHCI: Port {d} 32-bit identify buffer alloc failed: {}", .{ port_num, err });
+                return AhciError.AllocationFailed;
+            };
+        defer dma.freeBuffer(&id_buffer);
 
         // Set up command
         const cmd_list: *command.CommandList = @ptrFromInt(p.cmd_list_virt);
         const table: *command.CommandTableBase = @ptrFromInt(p.cmd_tables_virt[0]);
 
-        // Build IDENTIFY command
-        command.buildIdentify(table, buffer_pages);
+        // Build IDENTIFY command (uses device address for DMA)
+        command.buildIdentify(table, id_buffer.device_addr);
 
         // Set up command header for read (1 sector)
         cmd_list[0].initRead(p.cmd_tables_phys[0], 1);
 
-        // Set up PRDT entry
+        // Set up PRDT entry (uses device address for hardware)
         const prdt: *command.PrdtEntry = @ptrFromInt(p.cmd_tables_virt[0] + @sizeOf(command.CommandTableBase));
-        prdt.* = command.PrdtEntry.init(buffer_pages, 512, true);
+        prdt.* = command.PrdtEntry.init(id_buffer.device_addr, 512, true);
 
         // Issue command
         try self.issueCommand(port_num, 0);
 
-        // Copy identify data
-        // Copy identify data
-        const id_ptr: *fis.IdentifyData = @ptrCast(hal.paging.physToVirt(buffer_pages));
+        // Copy identify data (use phys_addr for CPU access via HHDM)
+        const id_ptr: *fis.IdentifyData = @ptrCast(hal.paging.physToVirt(id_buffer.phys_addr));
         p.identify = id_ptr.*;
 
         // Log device info
@@ -597,16 +639,22 @@ pub const AhciController = struct {
             return AhciError.InvalidParameter;
         }
 
-        // Allocate pages for Scatter-Gather (Bounce Buffer)
+        // Get device BDF for IOMMU domain
+        const bdf = iommu.DeviceBdf{
+            .bus = self.pci_dev.bus,
+            .device = self.pci_dev.device,
+            .func = self.pci_dev.func,
+        };
+
+        // Allocate IOMMU-aware DMA buffers for Scatter-Gather (Bounce Buffer)
         // Max 256 sectors (128KB) = 32 pages
-        // Security: Zero-initialize to prevent freeing garbage addresses on error paths
-        var pages: [32]u64 = [_]u64{0} ** 32;
-        var page_count: usize = 0;
-        
+        var dma_bufs: [32]dma.DmaBuffer = undefined;
+        var buf_count: usize = 0;
+
         // Cleanup on error or return
         defer {
-            for (0..page_count) |i| {
-                pmm.freePage(pages[i]);
+            for (0..buf_count) |i| {
+                dma.freeBuffer(&dma_bufs[i]);
             }
         }
 
@@ -614,16 +662,14 @@ pub const AhciController = struct {
         var bytes_acc: usize = 0;
 
         while (bytes_acc < total_bytes) {
-            const page = pmm.allocZeroedPage() orelse return AhciError.AllocationFailed;
-            
-            // Check 64-bit capability
-            if (!self.cap.s64a and page > 0xFFFFFFFF) {
-                pmm.freePage(page);
-                return AhciError.AllocationFailed;
-            }
-            
-            pages[page_count] = page;
-            page_count += 1;
+            // Allocate IOMMU-aware buffer (writable since device writes to it)
+            const buf = if (self.cap.s64a)
+                dma.allocBuffer(bdf, pmm.PAGE_SIZE, true) catch return AhciError.AllocationFailed
+            else
+                dma.allocBuffer32(bdf, pmm.PAGE_SIZE, true) catch return AhciError.AllocationFailed;
+
+            dma_bufs[buf_count] = buf;
+            buf_count += 1;
             bytes_acc += 4096;
         }
 
@@ -634,18 +680,18 @@ pub const AhciController = struct {
         // Build READ DMA EXT command
         command.buildReadDmaExt(table, @intCast(lba), sector_count);
 
-        // Set up command header (PRDT length = page_count)
-        cmd_list[0].initRead(p.cmd_tables_phys[0], @intCast(page_count));
+        // Set up command header (PRDT length = buf_count)
+        cmd_list[0].initRead(p.cmd_tables_phys[0], @intCast(buf_count));
 
-        // Set up PRDT entries
+        // Set up PRDT entries (use device_addr for hardware DMA)
         var prdt_ptr: [*]command.PrdtEntry = @ptrFromInt(p.cmd_tables_virt[0] + @sizeOf(command.CommandTableBase));
-        
+
         var bytes_remaining = total_bytes;
-        for (0..page_count) |i| {
+        for (0..buf_count) |i| {
             const chunk_size = if (bytes_remaining > 4096) 4096 else @as(u32, @intCast(bytes_remaining));
-            const is_last = (i == page_count - 1);
-            
-            prdt_ptr[i] = command.PrdtEntry.init(pages[i], chunk_size, is_last);
+            const is_last = (i == buf_count - 1);
+
+            prdt_ptr[i] = command.PrdtEntry.init(dma_bufs[i].device_addr, chunk_size, is_last);
             bytes_remaining -= chunk_size;
         }
 
@@ -660,14 +706,14 @@ pub const AhciController = struct {
         else
             @intCast(actual_bytes);
 
-        // Copy verified amount to user buffer
+        // Copy verified amount to user buffer (use phys_addr for CPU access)
         var dest_offset: usize = 0;
         bytes_remaining = verified_bytes;
 
-        for (0..page_count) |i| {
+        for (0..buf_count) |i| {
             if (bytes_remaining == 0) break;
             const chunk_size = if (bytes_remaining > 4096) 4096 else @as(usize, @intCast(bytes_remaining));
-            const src: [*]u8 = @ptrCast(hal.paging.physToVirt(pages[i]));
+            const src: [*]u8 = @ptrCast(hal.paging.physToVirt(dma_bufs[i].phys_addr));
 
             @memcpy(buffer[dest_offset .. dest_offset + chunk_size], src[0..chunk_size]);
 
@@ -702,14 +748,20 @@ pub const AhciController = struct {
             return AhciError.InvalidParameter;
         }
 
-        // Allocate pages for Scatter-Gather (Bounce Buffer)
-        // Security: Zero-initialize to prevent freeing garbage addresses on error paths
-        var pages: [32]u64 = [_]u64{0} ** 32;
-        var page_count: usize = 0;
+        // Get device BDF for IOMMU domain
+        const bdf = iommu.DeviceBdf{
+            .bus = self.pci_dev.bus,
+            .device = self.pci_dev.device,
+            .func = self.pci_dev.func,
+        };
+
+        // Allocate IOMMU-aware DMA buffers for Scatter-Gather (Bounce Buffer)
+        var dma_bufs: [32]dma.DmaBuffer = undefined;
+        var buf_count: usize = 0;
 
         defer {
-            for (0..page_count) |i| {
-                pmm.freePage(pages[i]);
+            for (0..buf_count) |i| {
+                dma.freeBuffer(&dma_bufs[i]);
             }
         }
 
@@ -717,27 +769,25 @@ pub const AhciController = struct {
         var bytes_acc: usize = 0;
         var src_offset: usize = 0;
 
-        // Allocate and fill pages
+        // Allocate and fill buffers
         var bytes_remaining_fill = total_bytes;
-        
-        while (bytes_acc < total_bytes) {
-            const page = pmm.allocZeroedPage() orelse return AhciError.AllocationFailed;
-            
-             // Check 64-bit capability
-            if (!self.cap.s64a and page > 0xFFFFFFFF) {
-                pmm.freePage(page);
-                return AhciError.AllocationFailed;
-            }
 
-            pages[page_count] = page;
-            page_count += 1;
-            
-            // Copy data immediately
+        while (bytes_acc < total_bytes) {
+            // Allocate IOMMU-aware buffer (writable=false since device reads from it)
+            const buf = if (self.cap.s64a)
+                dma.allocBuffer(bdf, pmm.PAGE_SIZE, false) catch return AhciError.AllocationFailed
+            else
+                dma.allocBuffer32(bdf, pmm.PAGE_SIZE, false) catch return AhciError.AllocationFailed;
+
+            dma_bufs[buf_count] = buf;
+            buf_count += 1;
+
+            // Copy data immediately (use phys_addr for CPU access)
             const chunk_size = if (bytes_remaining_fill > 4096) 4096 else @as(usize, @intCast(bytes_remaining_fill));
-            const dest: [*]u8 = @ptrCast(hal.paging.physToVirt(page));
-            
+            const dest: [*]u8 = @ptrCast(hal.paging.physToVirt(buf.phys_addr));
+
             @memcpy(dest[0..chunk_size], buffer[src_offset .. src_offset + chunk_size]);
-            
+
             src_offset += chunk_size;
             bytes_remaining_fill -= chunk_size;
             bytes_acc += 4096;
@@ -750,18 +800,18 @@ pub const AhciController = struct {
         // Build WRITE DMA EXT command
         command.buildWriteDmaExt(table, @intCast(lba), sector_count);
 
-        // Set up command header (PRDT length = page_count)
-        cmd_list[0].initWrite(p.cmd_tables_phys[0], @intCast(page_count));
+        // Set up command header (PRDT length = buf_count)
+        cmd_list[0].initWrite(p.cmd_tables_phys[0], @intCast(buf_count));
 
-        // Set up PRDT entries
+        // Set up PRDT entries (use device_addr for hardware DMA)
         var prdt_ptr: [*]command.PrdtEntry = @ptrFromInt(p.cmd_tables_virt[0] + @sizeOf(command.CommandTableBase));
-        
+
         var bytes_remaining_prdt = total_bytes;
-        for (0..page_count) |i| {
+        for (0..buf_count) |i| {
             const chunk_size = if (bytes_remaining_prdt > 4096) 4096 else @as(u32, @intCast(bytes_remaining_prdt));
-            const is_last = (i == page_count - 1);
-            
-            prdt_ptr[i] = command.PrdtEntry.init(pages[i], chunk_size, is_last);
+            const is_last = (i == buf_count - 1);
+
+            prdt_ptr[i] = command.PrdtEntry.init(dma_bufs[i].device_addr, chunk_size, is_last);
             bytes_remaining_prdt -= chunk_size;
         }
 

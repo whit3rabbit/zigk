@@ -99,6 +99,131 @@ Modern kernel drivers use the `MmioDevice(RegType)` wrapper for zero-cost, type-
 
 ---
 
+## DMA Memory Allocation (IOMMU-Aware)
+
+Zscapek supports Intel VT-d IOMMU for DMA isolation, preventing devices from accessing arbitrary memory. The `dma` module provides a unified API that transparently handles IOMMU when available.
+
+### Why IOMMU Matters
+
+Without IOMMU, any PCI device can read/write to any physical address via DMA. A malicious or buggy device (or firmware) could:
+- Read kernel memory, credentials, or encryption keys
+- Overwrite kernel code or page tables
+- Bypass all OS security mechanisms
+
+With IOMMU enabled, each device gets its own I/O Virtual Address (IOVA) space, limiting DMA to explicitly mapped buffers.
+
+### DmaBuffer API
+
+**Location**: `src/kernel/mm/dma.zig`
+
+```zig
+const dma = @import("dma");
+const iommu = @import("iommu");
+
+// 1. Get device BDF from PCI device
+const bdf = iommu.DeviceBdf{
+    .bus = pci_dev.bus,
+    .device = pci_dev.device,
+    .func = pci_dev.func,
+};
+
+// 2. Allocate IOMMU-aware buffer (zero-initialized for security)
+const buf = try dma.allocBuffer(bdf, 4096, true); // true = device can write
+defer dma.freeBuffer(&buf);
+
+// 3. For CPU access: use buf.getVirt() or buf.slice()
+const cpu_ptr = buf.getVirt();
+const slice = buf.slice();
+
+// 4. For hardware registers/descriptors: use buf.device_addr
+hw_regs.write(.dma_addr_lo, buf.deviceAddrLo());
+hw_regs.write(.dma_addr_hi, buf.deviceAddrHi());
+```
+
+### DmaBuffer Fields
+
+| Field | Description |
+|-------|-------------|
+| `phys_addr` | Physical address (for CPU access via HHDM) |
+| `device_addr` | Device address (IOVA if IOMMU enabled, else same as phys_addr) |
+| `size` | Requested size in bytes |
+| `page_count` | Number of pages allocated |
+| `iommu_mapped` | Whether IOMMU mapping was used |
+
+**Critical**: Always use `device_addr` for hardware descriptors, not `phys_addr`. When IOMMU is enabled, the device cannot access raw physical addresses.
+
+### Helper Methods
+
+```zig
+buf.getVirt()          // [*]u8 for CPU access
+buf.slice()            // []u8 slice for CPU access
+buf.getTypedPtr(T)     // *T typed pointer
+buf.getVolatilePtr(T)  // *volatile T for hardware descriptors
+buf.deviceAddrLo()     // Lower 32 bits of device_addr
+buf.deviceAddrHi()     // Upper 32 bits of device_addr
+```
+
+### 32-Bit Controllers
+
+For controllers that only support 32-bit DMA addresses (e.g., some EHCI, older hardware):
+
+```zig
+// Returns error.AddressTooHigh if allocated above 4GB
+const buf = try dma.allocBuffer32(bdf, size, writable);
+```
+
+### Checking IOMMU Status
+
+```zig
+if (dma.isIommuAvailable()) {
+    console.info("DMA isolation active", .{});
+} else {
+    console.warn("No IOMMU - devices have unrestricted DMA access", .{});
+}
+```
+
+### Driver Integration Examples
+
+**E1000e (Network)**:
+```zig
+// Allocate RX descriptor ring
+driver.rx_dma = try dma.allocBuffer(bdf, rx_ring_size, true);
+driver.regs.write(.rdbal, driver.rx_dma.deviceAddrLo());
+driver.regs.write(.rdbah, driver.rx_dma.deviceAddrHi());
+```
+
+**AHCI (Storage)**:
+```zig
+// Allocate command list
+port.cmd_list_dma = try dma.allocBuffer(bdf, 1024, true);
+port.writeClb(port.cmd_list_dma.device_addr);
+```
+
+**XHCI (USB)**:
+```zig
+// Ring allocation uses device_addr for DCBAA entries
+const dc = try context.DeviceContext.alloc(bdf);
+ctrl.dcbaa.setSlot(slot_id, dc.device_addr);
+```
+
+### Boot-Time Allocations
+
+For early boot allocations before PCI is initialized (e.g., console DMA):
+
+```zig
+// WARNING: Bypasses IOMMU isolation - only use during early boot
+const buf = try dma.allocBufferUnsafe(size);
+```
+
+### Security Considerations
+
+1. **Zero-Initialization**: All DMA buffers are zero-initialized to prevent kernel memory leaks
+2. **Fallback Warning**: If IOMMU mapping fails, a warning is logged but allocation succeeds with raw physical address
+3. **Proper Cleanup**: Always call `dma.freeBuffer()` to unmap from IOMMU and free physical memory
+4. **Validation**: Buffer sizes are validated for overflow before allocation
+
+---
+
 ## Interrupt Handling
 
 Zscapek supports two interrupt delivery mechanisms: **Legacy ISA IRQs** (via IOAPIC) and **MSI-X** (for PCI devices). Understanding the difference is critical for driver development.
@@ -264,8 +389,12 @@ dev.hid_driver.handleInputReport(buffer)
                                                       unified input subsystem
                                                                |
                                                                v
-                                                      sys_read_input_event()
+                                                     sys_read_input_event()
 ```
+
+### Input Device Identity (Best Practice)
+
+`read_input_event` now returns an `InputEvent` that includes a `device_id`. The kernel assigns this ID when registering each input device (PS/2 mouse, USB mouse, USB tablet). Userspace should use `device_id` to differentiate devices and choose policy (e.g., ignore tablet input when a mouse is present), rather than hardcoding type assumptions in the kernel.
 
 ### Debugging Checklist
 

@@ -195,6 +195,9 @@ fn doControlTransfer(
 }
 
 /// Reset an endpoint that has stalled
+/// Security: Uses waitForCommandCompletion to avoid racing with the interrupt
+/// handler on the event ring. The interrupt handler signals completions via
+/// atomic pending_cmd_valid flag, which waitForCommandCompletion checks first.
 fn resetEndpoint(ctrl: *Controller, dev: *device.UsbDevice, ep_dci: u5) !void {
     // Build Reset Endpoint command TRB
     var reset_cmd = trb.ResetEndpointCmdTrb.init(
@@ -212,30 +215,14 @@ fn resetEndpoint(ctrl: *Controller, dev: *device.UsbDevice, ep_dci: u5) !void {
     // Ring command doorbell
     ctrl.ringDoorbell(0, 0);
 
-    // Wait for command completion (short timeout)
-    var timeout: u32 = 10000;
-    while (timeout > 0) : (timeout -= 1) {
-        if (ctrl.event_ring.hasPending()) {
-            const event = ctrl.event_ring.dequeue() orelse continue;
-            // Note: In refined model we should use event handler, but here we peek/consume synchronously
-            // which steals from main handler if strict. But resetEndpoint is rare.
-            // For robust design, we should ideally use a command completion waiter.
-            // But preserving existing logic for now.
-             
-             // Wait: `ctrl.event_ring.dequeue` consumes it. If it's NOT our command completion, we act as if we lost it?
-             // Yes, this is a limitation of the current simple synchronous logic. 
-             // Ideally we should integrate with the event loop.
-             // Given this is a refactor, I won't rewrite the async engine yet.
-            const completion = trb.CommandCompletionEventTrb.fromTrb(event);
-            ctrl.updateErdp();
-            
-            if (completion.status.completion_code == .Success) {
-                return;
-            }
-        }
-        hal.cpu.stall(10);
+    // Security: Use the centralized command completion mechanism instead of
+    // directly polling the event ring. This prevents race conditions where
+    // both the interrupt handler and this function try to dequeue events.
+    const result = ctrl.waitForCommandCompletion(10000) catch return error.Timeout;
+
+    if (result.code != .Success) {
+        return error.TransferFailed;
     }
-    return error.Timeout;
 }
 
 // -----------------------------------------------------------------------------

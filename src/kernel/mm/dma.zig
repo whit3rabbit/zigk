@@ -28,7 +28,15 @@ const pmm = @import("pmm");
 const hal = @import("hal");
 const iommu = @import("iommu");
 const console = @import("console");
-const init_hw = @import("../core/init_hw.zig");
+
+/// IOMMU enabled state (set by init_hw during boot)
+var iommu_enabled: bool = false;
+
+/// Called by init_hw to enable IOMMU integration for DMA allocations
+pub fn enableIommu() void {
+    iommu_enabled = true;
+    console.info("DMA: IOMMU integration enabled", .{});
+}
 
 /// Error types for DMA allocation
 pub const DmaError = error{
@@ -126,7 +134,7 @@ pub fn allocBuffer(
     errdefer pmm.freePages(phys, page_count);
 
     // Check if IOMMU is enabled
-    if (init_hw.iommu_enabled) {
+    if (iommu_enabled) {
         // Allocate IOVA and create mapping
         if (iommu.allocDmaBuffer(bdf, phys, size, writable)) |iova| {
             return DmaBuffer{
@@ -209,5 +217,5 @@ pub fn allocBuffer32(
 
 /// Check if IOMMU DMA isolation is available
 pub fn isIommuAvailable() bool {
-    return init_hw.iommu_enabled;
+    return iommu_enabled;
 }

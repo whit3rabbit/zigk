@@ -8,6 +8,33 @@ const ring = @import("ring.zig");
 const regs = @import("regs.zig");
 const trb = @import("trb.zig");
 
+/// Atomic command completion result
+/// Security: Packed into 32 bits for atomic load/store to prevent TOCTOU race
+/// where slot_id/code could be read stale while valid flag was set.
+/// Uses u32 for ABI compatibility with std.atomic.Value.
+pub const PendingCmdResult = packed struct(u32) {
+    slot_id: u8 = 0,
+    code: u8 = 0, // CompletionCode as u8
+    valid: bool = false,
+    _padding: u15 = 0,
+
+    pub fn init() PendingCmdResult {
+        return .{};
+    }
+
+    pub fn fromCompletion(slot_id: u8, code: trb.CompletionCode) PendingCmdResult {
+        return .{
+            .slot_id = slot_id,
+            .code = @intFromEnum(code),
+            .valid = true,
+        };
+    }
+
+    pub fn getCode(self: PendingCmdResult) trb.CompletionCode {
+        return @enumFromInt(self.code);
+    }
+};
+
 /// XHCI Controller instance
 /// Contains all state for an XHCI controller.
 /// Methods are implemented in `controller.zig` and other submodules to separate concerns,
@@ -49,9 +76,9 @@ pub const Controller = struct {
     /// Command completion signaling for MSI-X mode
     /// When MSI-X is enabled, the interrupt handler sets these fields
     /// instead of letting polling code race on the event ring.
-    pending_cmd_slot_id: u8 = 0,
-    pending_cmd_code: trb.CompletionCode = .Invalid,
-    pending_cmd_valid: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    /// Security: Use atomic packed struct to prevent race between reading
+    /// slot_id/code and the valid flag - all fields update atomically.
+    pending_cmd_result: std.atomic.Value(PendingCmdResult) = std.atomic.Value(PendingCmdResult).init(.{}),
 
     /// Controller state
     running: bool,
@@ -79,19 +106,19 @@ pub const Controller = struct {
 
     /// Wait for command completion - handles both MSI-X and polling modes
     /// Returns slot_id and completion code on success
-    pub fn waitForCommandCompletion(self: *Self, timeout_iterations: u32) error{ Timeout }!struct { slot_id: u8, code: trb.CompletionCode } {
+    /// Security: Uses atomic load/store of packed struct to prevent race conditions
+    pub fn waitForCommandCompletion(self: *Self, timeout_iterations: u32) error{Timeout}!struct { slot_id: u8, code: trb.CompletionCode } {
         var remaining = timeout_iterations;
 
         while (remaining > 0) : (remaining -= 1) {
             // Check MSI-X signaled completion first (if MSI-X is enabled)
             if (self.msix_vectors != null) {
-                // Load with acquire semantics to see the updated slot_id and code
-                if (self.pending_cmd_valid.load(.acquire)) {
-                    const slot_id = self.pending_cmd_slot_id;
-                    const code = self.pending_cmd_code;
-                    // Clear the flag for next command
-                    self.pending_cmd_valid.store(false, .release);
-                    return .{ .slot_id = slot_id, .code = code };
+                // Security: Atomic load of entire result struct prevents TOCTOU race
+                const result = self.pending_cmd_result.load(.acquire);
+                if (result.valid) {
+                    // Clear atomically for next command
+                    self.pending_cmd_result.store(.{}, .release);
+                    return .{ .slot_id = result.slot_id, .code = result.getCode() };
                 }
             }
 

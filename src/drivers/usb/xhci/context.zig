@@ -15,6 +15,8 @@
 
 const hal = @import("hal");
 const pmm = @import("pmm");
+const dma = @import("dma");
+const iommu = @import("iommu");
 
 // =============================================================================
 // Slot Context (32 bytes base, may be 64 with CSZ=1)
@@ -356,19 +358,24 @@ pub const InputContext = extern struct {
 
     const Self = @This();
 
-    /// Allocate an Input Context
-    /// Returns virtual and physical addresses
-    pub fn alloc() !struct { ctx: *Self, phys: u64 } {
+    /// Allocate an Input Context using IOMMU-aware DMA
+    /// Returns virtual pointer, device address, and DMA buffer for cleanup
+    pub fn alloc(bdf: iommu.DeviceBdf) !struct { ctx: *Self, device_addr: u64, dma_buf: dma.DmaBuffer } {
         // Input Context needs 64-byte alignment
         // Size is 32 + 32 + 31*32 = 1024 + 32 = 1056 bytes for 32-byte contexts
         // Use a full page for simplicity and alignment
-        const phys = pmm.allocZeroedPages(1) orelse return error.OutOfMemory;
-        const virt = @intFromPtr(hal.paging.physToVirt(phys));
+        const buf = dma.allocBuffer(bdf, pmm.PAGE_SIZE, true) catch return error.OutOfMemory;
+        const virt = @intFromPtr(hal.paging.physToVirt(buf.phys_addr));
         const ctx: *Self = @ptrFromInt(virt);
-        return .{ .ctx = ctx, .phys = phys };
+        return .{ .ctx = ctx, .device_addr = buf.device_addr, .dma_buf = buf };
     }
 
-    /// Free an Input Context
+    /// Free an Input Context DMA buffer
+    pub fn freeDma(buf: *const dma.DmaBuffer) void {
+        dma.freeBuffer(buf);
+    }
+
+    /// Free an Input Context (legacy, for contexts not using IOMMU)
     pub fn free(self: *Self) void {
         const phys = hal.paging.virtToPhys(@intFromPtr(self));
         pmm.freePages(phys, 1);
@@ -411,15 +418,20 @@ pub const DeviceContext = extern struct {
 
     const Self = @This();
 
-    /// Allocate a Device Context
-    pub fn alloc() !struct { ctx: *Self, phys: u64 } {
-        const phys = pmm.allocZeroedPages(1) orelse return error.OutOfMemory;
-        const virt = @intFromPtr(hal.paging.physToVirt(phys));
+    /// Allocate a Device Context using IOMMU-aware DMA
+    pub fn alloc(bdf: iommu.DeviceBdf) !struct { ctx: *Self, device_addr: u64, dma_buf: dma.DmaBuffer } {
+        const buf = dma.allocBuffer(bdf, pmm.PAGE_SIZE, true) catch return error.OutOfMemory;
+        const virt = @intFromPtr(hal.paging.physToVirt(buf.phys_addr));
         const ctx: *Self = @ptrFromInt(virt);
-        return .{ .ctx = ctx, .phys = phys };
+        return .{ .ctx = ctx, .device_addr = buf.device_addr, .dma_buf = buf };
     }
 
-    /// Free a Device Context
+    /// Free a Device Context DMA buffer
+    pub fn freeDma(buf: *const dma.DmaBuffer) void {
+        dma.freeBuffer(buf);
+    }
+
+    /// Free a Device Context (legacy, for contexts not using IOMMU)
     pub fn free(self: *Self) void {
         const phys = hal.paging.virtToPhys(@intFromPtr(self));
         pmm.freePages(phys, 1);
@@ -447,32 +459,39 @@ pub const DeviceContext = extern struct {
 pub const Dcbaa = struct {
     /// Virtual address of array
     entries: [*]u64,
-    /// Physical address of array
+    /// Physical address of array (for CPU access via HHDM)
     phys_base: u64,
+    /// Device address (IOVA or physical, for hardware registers)
+    device_addr: u64,
+    /// DMA buffer tracking for IOMMU cleanup
+    dma_buf: dma.DmaBuffer,
     /// Number of slots supported
     max_slots: u8,
 
     const Self = @This();
 
-    /// Allocate DCBAA for given number of slots
+    /// Allocate DCBAA for given number of slots using IOMMU-aware DMA
     /// Size = (max_slots + 1) * 8 bytes, 64-byte aligned
-    pub fn alloc(max_slots: u8) !Self {
+    pub fn alloc(max_slots: u8, bdf: iommu.DeviceBdf) !Self {
         // Use a full page for alignment (4KB holds 512 entries)
-        const phys = pmm.allocZeroedPages(1) orelse return error.OutOfMemory;
-        const virt = @intFromPtr(hal.paging.physToVirt(phys));
+        // IOMMU-aware allocation, writable by device
+        const buf = dma.allocBuffer(bdf, pmm.PAGE_SIZE, true) catch return error.OutOfMemory;
+        const virt = @intFromPtr(hal.paging.physToVirt(buf.phys_addr));
         const entries: [*]u64 = @ptrFromInt(virt);
 
         return Self{
             .entries = entries,
-            .phys_base = phys,
+            .phys_base = buf.phys_addr,
+            .device_addr = buf.device_addr,
+            .dma_buf = buf,
             .max_slots = max_slots,
         };
     }
 
-    /// Set Device Context pointer for a slot
-    pub fn setSlot(self: *Self, slot_id: u8, device_context_phys: u64) void {
+    /// Set Device Context pointer for a slot (use device address)
+    pub fn setSlot(self: *Self, slot_id: u8, device_context_addr: u64) void {
         if (slot_id > self.max_slots) return;
-        self.entries[slot_id] = device_context_phys;
+        self.entries[slot_id] = device_context_addr;
     }
 
     /// Get Device Context pointer for a slot
@@ -481,19 +500,24 @@ pub const Dcbaa = struct {
         return self.entries[slot_id];
     }
 
-    /// Set Scratchpad Buffer Array pointer (entry 0)
-    pub fn setScratchpadArray(self: *Self, scratchpad_array_phys: u64) void {
-        self.entries[0] = scratchpad_array_phys;
+    /// Set Scratchpad Buffer Array pointer (entry 0, use device address)
+    pub fn setScratchpadArray(self: *Self, scratchpad_array_addr: u64) void {
+        self.entries[0] = scratchpad_array_addr;
     }
 
-    /// Get physical address for DCBAAP register
+    /// Get device address for DCBAAP register (IOVA or physical)
+    pub fn getDeviceAddress(self: *const Self) u64 {
+        return self.device_addr;
+    }
+
+    /// Get physical address (for legacy code or debugging)
     pub fn getPhysicalAddress(self: *const Self) u64 {
         return self.phys_base;
     }
 
     /// Free DCBAA
     pub fn free(self: *Self) void {
-        pmm.freePages(.{ .phys = self.phys_base }, 1);
+        dma.freeBuffer(&self.dma_buf);
         self.entries = undefined;
     }
 };

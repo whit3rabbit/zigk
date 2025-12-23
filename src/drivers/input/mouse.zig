@@ -136,6 +136,9 @@ const MouseState = struct {
     /// Mouse has scroll wheel (IntelliMouse)
     has_scroll_wheel: bool = false,
 
+    /// Input subsystem device identifier
+    device_id: u16 = 0,
+
     /// Consecutive packet errors for resync detection
     consecutive_errors: u8 = 0,
 };
@@ -238,7 +241,7 @@ fn sendMouseCommandWithData(cmd: u8, data: u8) bool {
 // =============================================================================
 
 /// Inject a mouse event from an external source (e.g., USB HID driver)
-pub fn injectRawInput(dx: i16, dy: i16, dz: i8, buttons: Buttons) void {
+pub fn injectRawInput(device_id: u16, dx: i16, dy: i16, dz: i8, buttons: Buttons) void {
     const flags = hal.cpu.disableInterruptsSaveFlags();
     const held = mouse_lock.acquire();
     defer {
@@ -270,31 +273,31 @@ pub fn injectRawInput(dx: i16, dy: i16, dz: i8, buttons: Buttons) void {
     if (input.isInitialized()) {
         const timestamp: u64 = 0; // TODO: proper timestamp from HAL
         if (dx != 0) {
-            input.pushRelative(uapi.input.RelCode.X, @as(i32, dx), timestamp);
+            input.pushRelative(device_id, uapi.input.RelCode.X, @as(i32, dx), timestamp);
         }
         if (dy != 0) {
-            input.pushRelative(uapi.input.RelCode.Y, @as(i32, dy), timestamp);
+            input.pushRelative(device_id, uapi.input.RelCode.Y, @as(i32, dy), timestamp);
         }
         if (dz != 0) {
-            input.pushRelative(uapi.input.RelCode.WHEEL, @as(i32, dz), timestamp);
+            input.pushRelative(device_id, uapi.input.RelCode.WHEEL, @as(i32, dz), timestamp);
         }
         if (buttons_changed.left) {
-            input.pushButton(uapi.input.BtnCode.LEFT, buttons.left, timestamp);
+            input.pushButton(device_id, uapi.input.BtnCode.LEFT, buttons.left, timestamp);
         }
         if (buttons_changed.right) {
-            input.pushButton(uapi.input.BtnCode.RIGHT, buttons.right, timestamp);
+            input.pushButton(device_id, uapi.input.BtnCode.RIGHT, buttons.right, timestamp);
         }
         if (buttons_changed.middle) {
-            input.pushButton(uapi.input.BtnCode.MIDDLE, buttons.middle, timestamp);
+            input.pushButton(device_id, uapi.input.BtnCode.MIDDLE, buttons.middle, timestamp);
         }
-        input.pushSync(timestamp);
+        input.pushSync(device_id, timestamp);
     }
 }
 
 /// Inject absolute position from a tablet/touchscreen device
 /// x, y: screen coordinates (0 to width-1, 0 to height-1)
 /// max_x, max_y: screen dimensions
-pub fn injectAbsoluteInput(x: u32, y: u32, max_x: u32, max_y: u32, buttons: Buttons) void {
+pub fn injectAbsoluteInput(device_id: u16, x: u32, y: u32, max_x: u32, max_y: u32, buttons: Buttons) void {
     const flags = hal.cpu.disableInterruptsSaveFlags();
     const held = mouse_lock.acquire();
     defer {
@@ -331,20 +334,20 @@ pub fn injectAbsoluteInput(x: u32, y: u32, max_x: u32, max_y: u32, buttons: Butt
         const timestamp: u64 = 0; // TODO: proper timestamp from HAL
 
         // Push absolute position events
-        input.pushAbsolute(uapi.input.AbsCode.X, @as(i32, @intCast(x)), timestamp);
-        input.pushAbsolute(uapi.input.AbsCode.Y, @as(i32, @intCast(y)), timestamp);
+        input.pushAbsolute(device_id, uapi.input.AbsCode.X, @as(i32, @intCast(x)), timestamp);
+        input.pushAbsolute(device_id, uapi.input.AbsCode.Y, @as(i32, @intCast(y)), timestamp);
 
         // Push button events on change
         if (buttons_changed.left) {
-            input.pushButton(uapi.input.BtnCode.LEFT, buttons.left, timestamp);
+            input.pushButton(device_id, uapi.input.BtnCode.LEFT, buttons.left, timestamp);
         }
         if (buttons_changed.right) {
-            input.pushButton(uapi.input.BtnCode.RIGHT, buttons.right, timestamp);
+            input.pushButton(device_id, uapi.input.BtnCode.RIGHT, buttons.right, timestamp);
         }
         if (buttons_changed.middle) {
-            input.pushButton(uapi.input.BtnCode.MIDDLE, buttons.middle, timestamp);
+            input.pushButton(device_id, uapi.input.BtnCode.MIDDLE, buttons.middle, timestamp);
         }
-        input.pushSync(timestamp);
+        input.pushSync(device_id, timestamp);
     }
 }
 
@@ -353,6 +356,20 @@ pub fn init() void {
     if (@atomicLoad(bool, &mouse_initialized, .acquire)) return;
 
     console.info("PS/2 mouse: initializing", .{});
+    if (input.isInitialized()) {
+        mouse_state.device_id = input.registerDevice(.{
+            .device_type = .ps2_mouse,
+            .name = "ps2-mouse",
+            .capabilities = .{
+                .has_rel = true,
+                .has_left = true,
+                .has_right = true,
+                .has_middle = true,
+                .has_wheel = true,
+            },
+            .is_absolute = false,
+        }) catch 0;
+    }
 
     // 1. Enable the second PS/2 port (mouse)
     sendCommand(CMD_ENABLE_SECOND_PORT);
@@ -547,31 +564,32 @@ fn processPacket() void {
     // Push to input subsystem if initialized
     if (input.isInitialized()) {
         const timestamp: u64 = 0; // TODO: proper timestamp from HAL
+        const device_id = mouse_state.device_id;
 
         // Push relative movement events
         if (dx != 0) {
-            input.pushRelative(uapi.input.RelCode.X, @as(i32, dx), timestamp);
+            input.pushRelative(device_id, uapi.input.RelCode.X, @as(i32, dx), timestamp);
         }
         if (dy != 0) {
-            input.pushRelative(uapi.input.RelCode.Y, @as(i32, dy), timestamp);
+            input.pushRelative(device_id, uapi.input.RelCode.Y, @as(i32, dy), timestamp);
         }
         if (dz != 0) {
-            input.pushRelative(uapi.input.RelCode.WHEEL, @as(i32, dz), timestamp);
+            input.pushRelative(device_id, uapi.input.RelCode.WHEEL, @as(i32, dz), timestamp);
         }
 
         // Push button events on change
         if (buttons_changed.left) {
-            input.pushButton(uapi.input.BtnCode.LEFT, buttons.left, timestamp);
+            input.pushButton(device_id, uapi.input.BtnCode.LEFT, buttons.left, timestamp);
         }
         if (buttons_changed.right) {
-            input.pushButton(uapi.input.BtnCode.RIGHT, buttons.right, timestamp);
+            input.pushButton(device_id, uapi.input.BtnCode.RIGHT, buttons.right, timestamp);
         }
         if (buttons_changed.middle) {
-            input.pushButton(uapi.input.BtnCode.MIDDLE, buttons.middle, timestamp);
+            input.pushButton(device_id, uapi.input.BtnCode.MIDDLE, buttons.middle, timestamp);
         }
 
         // Push sync event to mark end of this packet's events
-        input.pushSync(timestamp);
+        input.pushSync(device_id, timestamp);
     }
 
     // Flood detection: track total packets and warn if buffer keeps overflowing

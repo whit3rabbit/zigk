@@ -125,7 +125,7 @@ pub fn isInitialized() bool {
 
 /// Register an input device
 /// Returns device index or error if full
-pub fn registerDevice(info: DeviceInfo) !u8 {
+pub fn registerDevice(info: DeviceInfo) !u16 {
     const held = state.lock.acquire();
     defer held.release();
 
@@ -137,7 +137,7 @@ pub fn registerDevice(info: DeviceInfo) !u8 {
     state.devices[idx] = info;
     state.device_count += 1;
 
-    return idx;
+    return @as(u16, idx);
 }
 
 /// Push an input event to the unified queue
@@ -173,42 +173,50 @@ pub fn pushEvent(event: uapi.input.InputEvent) void {
 }
 
 /// Push a relative movement event (convenience wrapper)
-pub fn pushRelative(code: u16, value: i32, timestamp_ns: u64) void {
+pub fn pushRelative(device_id: u16, code: u16, value: i32, timestamp_ns: u64) void {
     pushEvent(.{
         .timestamp_ns = timestamp_ns,
         .event_type = .EV_REL,
         .code = code,
         .value = value,
+        .device_id = device_id,
+        ._reserved = 0,
     });
 }
 
 /// Push an absolute position event (convenience wrapper)
-pub fn pushAbsolute(code: u16, value: i32, timestamp_ns: u64) void {
+pub fn pushAbsolute(device_id: u16, code: u16, value: i32, timestamp_ns: u64) void {
     pushEvent(.{
         .timestamp_ns = timestamp_ns,
         .event_type = .EV_ABS,
         .code = code,
         .value = value,
+        .device_id = device_id,
+        ._reserved = 0,
     });
 }
 
 /// Push a button event (convenience wrapper)
-pub fn pushButton(code: u16, pressed: bool, timestamp_ns: u64) void {
+pub fn pushButton(device_id: u16, code: u16, pressed: bool, timestamp_ns: u64) void {
     pushEvent(.{
         .timestamp_ns = timestamp_ns,
         .event_type = .EV_KEY,
         .code = code,
         .value = if (pressed) 1 else 0,
+        .device_id = device_id,
+        ._reserved = 0,
     });
 }
 
 /// Push a sync event (marks end of a set of events)
-pub fn pushSync(timestamp_ns: u64) void {
+pub fn pushSync(device_id: u16, timestamp_ns: u64) void {
     pushEvent(.{
         .timestamp_ns = timestamp_ns,
         .event_type = .EV_SYN,
         .code = uapi.input.SynCode.REPORT,
         .value = 0,
+        .device_id = device_id,
+        ._reserved = 0,
     });
 }
 
@@ -338,7 +346,7 @@ test "InputSubsystem basic operations" {
     try std.testing.expect(!hasEvents());
 
     // Push an event
-    pushRelative(uapi.input.RelCode.X, 10, 0);
+    pushRelative(0, uapi.input.RelCode.X, 10, 0);
     try std.testing.expect(hasEvents());
 
     // Pop the event
@@ -359,8 +367,8 @@ test "InputSubsystem cursor tracking" {
     setCursorBounds(1920, 1080);
 
     // Push relative movement
-    pushRelative(uapi.input.RelCode.X, 100, 0);
-    pushRelative(uapi.input.RelCode.Y, -50, 0); // Negative Y moves cursor down
+    pushRelative(0, uapi.input.RelCode.X, 100, 0);
+    pushRelative(0, uapi.input.RelCode.Y, -50, 0); // Negative Y moves cursor down
 
     const pos = getCursorPosition();
     try std.testing.expectEqual(@as(i32, 100), pos.x);
@@ -372,14 +380,14 @@ test "InputSubsystem button state" {
     init();
 
     // Press left button
-    pushButton(uapi.input.BtnCode.LEFT, true, 0);
+    pushButton(0, uapi.input.BtnCode.LEFT, true, 0);
     try std.testing.expectEqual(@as(u8, 0x01), getButtonState());
 
     // Press right button
-    pushButton(uapi.input.BtnCode.RIGHT, true, 0);
+    pushButton(0, uapi.input.BtnCode.RIGHT, true, 0);
     try std.testing.expectEqual(@as(u8, 0x03), getButtonState());
 
     // Release left button
-    pushButton(uapi.input.BtnCode.LEFT, false, 0);
+    pushButton(0, uapi.input.BtnCode.LEFT, false, 0);
     try std.testing.expectEqual(@as(u8, 0x02), getButtonState());
 }

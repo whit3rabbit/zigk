@@ -475,6 +475,27 @@ pub fn build(b: *std.Build) void {
     fd_module.addImport("uapi", uapi_module);
     fd_module.addImport("sync", sync_module);
 
+    // Create kernel IOMMU module (domain management) - before drivers that need it
+    const kernel_iommu_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/mm/iommu/root.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    kernel_iommu_module.addImport("console", console_module);
+    kernel_iommu_module.addImport("pmm", pmm_module);
+    kernel_iommu_module.addImport("hal", hal_module);
+
+    // Create DMA module (IOMMU-aware DMA buffer allocation for drivers)
+    const dma_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/mm/dma.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    dma_module.addImport("console", console_module);
+    dma_module.addImport("pmm", pmm_module);
+    dma_module.addImport("hal", hal_module);
+    dma_module.addImport("iommu", kernel_iommu_module);
+
     // Create E1000e driver module (Intel 82574L NIC)
     const e1000e_module = b.createModule(.{
         .root_source_file = b.path("src/drivers/net/e1000e/root.zig"),
@@ -491,6 +512,8 @@ pub fn build(b: *std.Build) void {
     e1000e_module.addImport("sched", sched_module);
     e1000e_module.addImport("heap", heap_module);
     e1000e_module.addImport("net", net_module);
+    e1000e_module.addImport("dma", dma_module);
+    e1000e_module.addImport("iommu", kernel_iommu_module);
 
     // Create AHCI driver module (SATA storage controller)
     const ahci_module = b.createModule(.{
@@ -508,6 +531,8 @@ pub fn build(b: *std.Build) void {
     ahci_module.addImport("heap", heap_module);
     ahci_module.addImport("io", kernel_io_module);
     ahci_module.addImport("sync", sync_module);
+    ahci_module.addImport("dma", dma_module);
+    ahci_module.addImport("iommu", kernel_iommu_module);
 
     // Create USB driver module (XHCI/EHCI host controllers)
     const usb_module = b.createModule(.{
@@ -522,6 +547,8 @@ pub fn build(b: *std.Build) void {
     usb_module.addImport("console", console_module);
     usb_module.addImport("sync", sync_module);
     usb_module.addImport("io", kernel_io_module);
+    usb_module.addImport("dma", dma_module);
+    usb_module.addImport("iommu", kernel_iommu_module);
 
     // fd_module moved up
 
@@ -688,16 +715,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     capabilities_module.addImport("console", console_module);
-
-    // Create kernel IOMMU module (domain management)
-    const kernel_iommu_module = b.createModule(.{
-        .root_source_file = b.path("src/kernel/mm/iommu/root.zig"),
-        .target = kernel_target,
-        .optimize = optimize,
-    });
-    kernel_iommu_module.addImport("console", console_module);
-    kernel_iommu_module.addImport("pmm", pmm_module);
-    kernel_iommu_module.addImport("hal", hal_module);
 
     // Create atomic module for IPC/Locking (needed by process)
     const ipc_msg_module = b.createModule(.{
@@ -1119,6 +1136,7 @@ pub fn build(b: *std.Build) void {
     syscall_input_module.addImport("base.zig", syscall_base_module);
     syscall_input_module.addImport("uapi", uapi_module);
     syscall_input_module.addImport("input", input_module);
+    syscall_input_module.addImport("usb", usb_module);
 
     // Create syscall net module (socket syscalls)
     const syscall_net_module = b.createModule(.{

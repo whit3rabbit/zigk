@@ -1,18 +1,6 @@
 const std = @import("std");
 const console = @import("console");
 const usb_types = @import("../types.zig"); // Common USB types (not XHCI types)
-// Wait, I need to check where `usb_types` is.
-// In transfer.zig: `const usb_types = @import("../types.zig");`
-// The file structure is `src/drivers/usb/xhci/transfer.zig`.
-// So `../types.zig` refers to `src/drivers/usb/types.zig`?
-// Let's check the file list of `src/drivers/usb/`.
-// I'll assume standard USB types are in `src/drivers/usb/types.zig` or similar.
-// In `transfer.zig` imports: `const usb_types = @import("../types.zig");`
-// If I am in `src/drivers/usb/xhci/enumeration.zig`, I should import `../../types.zig`?
-// No, `transfer.zig` was in `src/drivers/usb/xhci/`. So `../types.zig` is `src/drivers/usb/types.zig`.
-// My new `types.zig` is `src/drivers/usb/xhci/types.zig` (XHCI specific).
-// To avoid confusion, I will import standard USB types as `std_usb`.
-// Let's check if `src/drivers/usb/types.zig` exists.
 
 /// Information about a keyboard interface found in config descriptor
 pub const KeyboardInfo = struct {
@@ -74,7 +62,10 @@ pub fn findKeyboardInterface(config_data: []const u8) ?KeyboardInfo {
                 if (i + required_size > config_data.len) break;
 
                 if (length >= iface_desc_size) {
-                    const iface = @as(*const usb_types.InterfaceDescriptor, @ptrCast(@alignCast(&config_data[i])));
+                    // Security: Copy to aligned buffer instead of pointer cast
+                    // This avoids UB from misaligned access on USB descriptors
+                    var iface: usb_types.InterfaceDescriptor = undefined;
+                    @memcpy(std.mem.asBytes(&iface), config_data[i..][0..iface_desc_size]);
 
                     current_interface = iface.b_interface_number;
 
@@ -97,7 +88,9 @@ pub fn findKeyboardInterface(config_data: []const u8) ?KeyboardInfo {
                 if (i + required_size > config_data.len) break;
 
                 if (length >= ep_desc_size and is_boot_keyboard and current_interface != null) {
-                    const ep = @as(*const usb_types.EndpointDescriptor, @ptrCast(@alignCast(&config_data[i])));
+                    // Security: Copy to aligned buffer instead of pointer cast
+                    var ep: usb_types.EndpointDescriptor = undefined;
+                    @memcpy(std.mem.asBytes(&ep), config_data[i..][0..ep_desc_size]);
 
                     // Check for Interrupt IN endpoint
                     const addr = ep.getAddress();
@@ -158,7 +151,9 @@ pub fn findMouseInterface(config_data: []const u8) ?MouseInfo {
                 if (i + required_size > config_data.len) break;
 
                 if (length >= iface_desc_size) {
-                    const iface = @as(*const usb_types.InterfaceDescriptor, @ptrCast(@alignCast(&config_data[i])));
+                    // Security: Copy to aligned buffer instead of pointer cast
+                    var iface: usb_types.InterfaceDescriptor = undefined;
+                    @memcpy(std.mem.asBytes(&iface), config_data[i..][0..iface_desc_size]);
 
                     current_interface = iface.b_interface_number;
 
@@ -181,7 +176,9 @@ pub fn findMouseInterface(config_data: []const u8) ?MouseInfo {
                 if (i + required_size > config_data.len) break;
 
                 if (length >= ep_desc_size and is_boot_mouse and current_interface != null) {
-                    const ep = @as(*const usb_types.EndpointDescriptor, @ptrCast(@alignCast(&config_data[i])));
+                    // Security: Copy to aligned buffer instead of pointer cast
+                    var ep: usb_types.EndpointDescriptor = undefined;
+                    @memcpy(std.mem.asBytes(&ep), config_data[i..][0..ep_desc_size]);
 
                     // Check for Interrupt IN endpoint
                     const addr = ep.getAddress();
@@ -201,6 +198,104 @@ pub fn findMouseInterface(config_data: []const u8) ?MouseInfo {
                             .endpoint_addr = ep.b_endpoint_address,
                             .max_packet = ep.w_max_packet_size,
                             .interval = ep.b_interval,
+                        };
+                    }
+                }
+            },
+            else => {},
+        }
+
+        i += length;
+    }
+
+    return null;
+}
+
+/// Information about a generic HID interface found in config descriptor
+/// Used for devices that don't use Boot Protocol (SubClass != 0x01)
+/// such as tablets, touchscreens, and digitizers
+pub const GenericHidInfo = struct {
+    interface_num: u8,
+    endpoint_addr: u8,
+    max_packet: u16,
+    interval: u8,
+    subclass: u8,
+    protocol: u8,
+};
+
+/// Parse configuration descriptor to find a generic HID interface
+/// This matches any HID device (Class=0x03) with an Interrupt IN endpoint,
+/// even if it doesn't use Boot Protocol. Used for tablets, touchscreens, etc.
+pub fn findGenericHidInterface(config_data: []const u8) ?GenericHidInfo {
+    var i: usize = 0;
+
+    var current_interface: ?u8 = null;
+    var current_subclass: u8 = 0;
+    var current_protocol: u8 = 0;
+    var is_hid = false;
+
+    const iface_desc_size = @sizeOf(usb_types.InterfaceDescriptor);
+    const ep_desc_size = @sizeOf(usb_types.EndpointDescriptor);
+
+    while (i + 2 <= config_data.len) {
+        const length = config_data[i];
+        const desc_type = config_data[i + 1];
+
+        if (length < 2) break;
+        if (i + length > config_data.len) break;
+
+        switch (desc_type) {
+            usb_types.DescriptorType.INTERFACE => {
+                const required_size = @max(length, iface_desc_size);
+                if (i + required_size > config_data.len) break;
+
+                if (length >= iface_desc_size) {
+                    var iface: usb_types.InterfaceDescriptor = undefined;
+                    @memcpy(std.mem.asBytes(&iface), config_data[i..][0..iface_desc_size]);
+
+                    current_interface = iface.b_interface_number;
+                    current_subclass = iface.b_interface_sub_class;
+                    current_protocol = iface.b_interface_protocol;
+
+                    // Any HID device (Class = 0x03)
+                    is_hid = (iface.b_interface_class == 0x03);
+
+                    if (is_hid) {
+                        console.debug("XHCI: Found HID interface {} (subclass={}, protocol={})", .{
+                            iface.b_interface_number,
+                            iface.b_interface_sub_class,
+                            iface.b_interface_protocol,
+                        });
+                    }
+                }
+            },
+            usb_types.DescriptorType.ENDPOINT => {
+                const required_size = @max(length, ep_desc_size);
+                if (i + required_size > config_data.len) break;
+
+                if (length >= ep_desc_size and is_hid and current_interface != null) {
+                    var ep: usb_types.EndpointDescriptor = undefined;
+                    @memcpy(std.mem.asBytes(&ep), config_data[i..][0..ep_desc_size]);
+
+                    const addr = ep.getAddress();
+                    const attrs = ep.getAttributes();
+                    const is_in = addr.direction == .in;
+                    const is_interrupt = attrs.transfer_type == .interrupt;
+
+                    if (is_in and is_interrupt) {
+                        console.info("XHCI: Found generic HID interrupt endpoint 0x{x:0>2}, max_packet={}, interval={}", .{
+                            ep.b_endpoint_address,
+                            ep.w_max_packet_size,
+                            ep.b_interval,
+                        });
+
+                        return GenericHidInfo{
+                            .interface_num = current_interface.?,
+                            .endpoint_addr = ep.b_endpoint_address,
+                            .max_packet = ep.w_max_packet_size,
+                            .interval = ep.b_interval,
+                            .subclass = current_subclass,
+                            .protocol = current_protocol,
                         };
                     }
                 }
@@ -236,26 +331,29 @@ pub fn findMscInterface(config_data: []const u8) ?MscInfo {
 
         switch (desc_type) {
             usb_types.DescriptorType.INTERFACE => {
-               const required_size = @max(length, iface_desc_size);
+                const required_size = @max(length, iface_desc_size);
                 if (i + required_size > config_data.len) break;
 
-                 if (length >= iface_desc_size) {
-                    const iface = @as(*const usb_types.InterfaceDescriptor, @ptrCast(@alignCast(&config_data[i])));
+                if (length >= iface_desc_size) {
+                    // Security: Copy to aligned buffer instead of pointer cast
+                    var iface: usb_types.InterfaceDescriptor = undefined;
+                    @memcpy(std.mem.asBytes(&iface), config_data[i..][0..iface_desc_size]);
+
                     current_interface = iface.b_interface_number;
-                    
+
                     // Reset endpoint finding for new interface
                     bulk_in = null;
                     bulk_out = null;
 
                     // Class 0x08 (MSC), Subclass 0x06 (SCSI), Protocol 0x50 (BOT)
                     is_msc = (iface.b_interface_class == 0x08 and
-                             iface.b_interface_sub_class == 0x06 and
-                             iface.b_interface_protocol == 0x50);
-                    
+                        iface.b_interface_sub_class == 0x06 and
+                        iface.b_interface_protocol == 0x50);
+
                     if (is_msc) {
                         console.info("XHCI: Found MSC Interface {}", .{iface.b_interface_number});
                     }
-                 }
+                }
             },
             usb_types.DescriptorType.ENDPOINT => {
                 const required_size = @max(length, ep_desc_size);
@@ -263,10 +361,13 @@ pub fn findMscInterface(config_data: []const u8) ?MscInfo {
 
                 if (is_msc and current_interface != null) {
                     if (length >= ep_desc_size) {
-                        const ep = @as(*const usb_types.EndpointDescriptor, @ptrCast(@alignCast(&config_data[i])));
+                        // Security: Copy to aligned buffer instead of pointer cast
+                        var ep: usb_types.EndpointDescriptor = undefined;
+                        @memcpy(std.mem.asBytes(&ep), config_data[i..][0..ep_desc_size]);
+
                         const addr = ep.getAddress();
                         const attrs = ep.getAttributes();
-                        
+
                         if (attrs.transfer_type == .bulk) {
                             if (addr.direction == .in) {
                                 bulk_in = ep.b_endpoint_address;
@@ -275,14 +376,14 @@ pub fn findMscInterface(config_data: []const u8) ?MscInfo {
                                 bulk_out = ep.b_endpoint_address;
                             }
                         }
-                        
+
                         if (bulk_in != null and bulk_out != null) {
-                             return MscInfo{
-                                 .interface_num = current_interface.?,
-                                 .bulk_in_ep = bulk_in.?,
-                                 .bulk_out_ep = bulk_out.?,
-                                 .max_packet = max_packet_size,
-                             };
+                            return MscInfo{
+                                .interface_num = current_interface.?,
+                                .bulk_in_ep = bulk_in.?,
+                                .bulk_out_ep = bulk_out.?,
+                                .max_packet = max_packet_size,
+                            };
                         }
                     }
                 }
@@ -327,7 +428,10 @@ pub fn findHubInterface(config_data: []const u8) ?HubInfo {
                 if (i + required_size > config_data.len) break;
 
                 if (length >= iface_desc_size) {
-                    const iface = @as(*const usb_types.InterfaceDescriptor, @ptrCast(@alignCast(&config_data[i])));
+                    // Security: Copy to aligned buffer instead of pointer cast
+                    var iface: usb_types.InterfaceDescriptor = undefined;
+                    @memcpy(std.mem.asBytes(&iface), config_data[i..][0..iface_desc_size]);
+
                     current_interface = iface.b_interface_number;
 
                     // Class 0x09 (Hub)
@@ -344,7 +448,10 @@ pub fn findHubInterface(config_data: []const u8) ?HubInfo {
 
                 if (is_hub and current_interface != null) {
                     if (length >= ep_desc_size) {
-                        const ep = @as(*const usb_types.EndpointDescriptor, @ptrCast(@alignCast(&config_data[i])));
+                        // Security: Copy to aligned buffer instead of pointer cast
+                        var ep: usb_types.EndpointDescriptor = undefined;
+                        @memcpy(std.mem.asBytes(&ep), config_data[i..][0..ep_desc_size]);
+
                         const addr = ep.getAddress();
                         const attrs = ep.getAttributes();
 

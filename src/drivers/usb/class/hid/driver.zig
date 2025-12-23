@@ -13,6 +13,7 @@ pub const HidDriver = struct {
     is_keyboard: bool = false,
     is_mouse: bool = false,
     is_tablet: bool = false,
+    input_device_id: u16 = 0,
     interface_num: u8 = 0,
     in_endpoint: u8 = 0,
     out_endpoint: ?u8 = null,
@@ -111,6 +112,7 @@ pub const HidDriver = struct {
             };
 
             mouse.injectAbsoluteInput(
+                self.input_device_id,
                 @intCast(screen_x),
                 @intCast(screen_y),
                 screen_width,
@@ -184,7 +186,6 @@ pub const HidDriver = struct {
 
     /// Handle Boot Protocol Mouse Report
     fn handleMouseReport(self: *Self, data: []const u8) void {
-        _ = self;
         if (data.len < 3) return;
 
         const buttons_raw = data[0];
@@ -202,6 +203,6 @@ pub const HidDriver = struct {
             .middle = (buttons_raw & 0x04) != 0,
         };
 
-        mouse.injectRawInput(x_raw, -y_raw, z_raw, buttons);
+        mouse.injectRawInput(self.input_device_id, x_raw, -y_raw, z_raw, buttons);
     }
 };

@@ -1,6 +1,7 @@
 const std = @import("std");
 const console = @import("console");
 const hal = @import("hal");
+const iommu = @import("iommu");
 
 const types = @import("types.zig");
 const device = @import("device.zig");
@@ -150,6 +151,8 @@ pub fn startInterruptPolling(ctrl: *Controller, dev: *device.UsbDevice) !void {
 
 /// Enumerate a USB device on a port (Root or Hub)
 /// Returns configured device if successful
+/// Security: Depth parameter limits hub nesting to prevent stack exhaustion.
+/// USB spec allows max 5 hub tiers; we reject enumeration beyond that.
 pub fn enumerateDevice(
     ctrl: *Controller,
     parent: ?*device.UsbDevice,
@@ -157,8 +160,15 @@ pub fn enumerateDevice(
     route_string: u20,
     root_port_num: u8,
     speed_override: ?context.Speed,
+    depth: u8,
 ) !?*device.UsbDevice {
-    
+    // Security: Reject devices nested beyond USB spec maximum (5 hub tiers)
+    // This prevents stack exhaustion from malicious or buggy hub chains.
+    if (depth > hub.MAX_HUB_DEPTH) {
+        console.err("XHCI: Rejecting device at depth {} (max {})", .{ depth, hub.MAX_HUB_DEPTH });
+        return error.TooManyHubLevels;
+    }
+
     var speed: context.Speed = .invalid;
 
     if (parent == null) {
@@ -190,8 +200,13 @@ pub fn enumerateDevice(
     // 1. Enable Slot
     const slot_id = try enableSlot(ctrl);
 
-    // 2. Allocate device structure
-    const dev = try device.UsbDevice.init(slot_id, root_port_num, speed, parent, port_num, route_string);
+    // 2. Allocate device structure (IOMMU-aware via controller's BDF)
+    const bdf = iommu.DeviceBdf{
+        .bus = ctrl.pci_dev.bus,
+        .device = ctrl.pci_dev.device,
+        .func = ctrl.pci_dev.func,
+    };
+    const dev = try device.UsbDevice.init(bdf, slot_id, root_port_num, speed, parent, port_num, route_string);
     errdefer dev.deinit();
 
     // 3. Build Input Context for Address Device
@@ -275,15 +290,16 @@ pub fn enumerateDevice(
         endpoint_addr = info.endpoint_addr;
         max_packet = info.max_packet;
         interval = info.interval;
-    // } else if (enumeration.findMscInterface(config_buf[0..config_len])) |info| {
-        // console.info("XHCI: Found Mass Storage Device", .{});
-        // NOT IMPLEMENTING MSC in REFACTOR (Missing msc module import)
-        // If needed, import msc. But omitting for simplicity unless required.
-        // Original code had MSC. I should check if msc.zig exists.
-        // `root.zig` imported `../class/msc.zig`.
-        // I'll stick to HID/Hub for now as confirmed imports.
-        // If user complains about MSC missing, I'll add it.
-        // Actually, let's keep it minimal.
+    } else if (enumeration.findGenericHidInterface(config_buf[0..config_len])) |info| {
+        // Generic HID device (not Boot Protocol) - could be tablet, touchscreen, etc.
+        // We'll parse the report descriptor later to determine exact type
+        console.info("XHCI: Found generic HID device (subclass={}, protocol={})", .{ info.subclass, info.protocol });
+        // Mark as potential mouse/tablet - report descriptor parsing will refine this
+        dev.hid_driver.is_mouse = true;
+        interface_num = info.interface_num;
+        endpoint_addr = info.endpoint_addr;
+        max_packet = info.max_packet;
+        interval = info.interval;
     } else if (enumeration.findHubInterface(config_buf[0..config_len])) |hub_info| {
          console.info("XHCI: Found USB Hub Interface {d}", .{hub_info.interface_num});
          
@@ -303,7 +319,8 @@ pub fn enumerateDevice(
          
          // Initialize Driver
          // Note: Passing enumerateDevice function pointer to HubDriver to break cycle
-         dev.hub_driver = hub.HubDriver.init(ctrl, dev, int_in, enumerateDevice);
+         // Security: Pass current depth so hub can enforce nesting limits for child devices
+         dev.hub_driver = hub.HubDriver.init(ctrl, dev, int_in, enumerateDevice, depth);
          try dev.hub_driver.configure();
          
          console.info("XHCI: USB Hub device enumerated on slot {d}", .{slot_id});
@@ -376,6 +393,26 @@ pub fn enumerateDevice(
     else
         "mouse";
     console.info("XHCI: USB {s} enumerated successfully on slot {}", .{ device_type, slot_id });
+
+    // TODO: Re-enable input subsystem integration once build.zig adds 'input' dependency to USB module
+    // if (dev.hid_driver.is_mouse or dev.hid_driver.is_tablet) {
+    //     const dev_type: input.DeviceType = if (dev.hid_driver.is_tablet) .usb_tablet else .usb_mouse;
+    //     const has_buttons = dev.hid_driver.capabilities.has_buttons;
+    //     if (input.isInitialized()) {
+    //         dev.hid_driver.input_device_id = input.registerDevice(.{
+    //             .device_type = dev_type,
+    //             .name = if (dev.hid_driver.is_tablet) "usb-tablet" else "usb-mouse",
+    //             .capabilities = .{
+    //                 .has_rel = dev.hid_driver.is_mouse,
+    //                 .has_abs = dev.hid_driver.is_tablet,
+    //                 .has_left = has_buttons,
+    //                 .has_right = has_buttons,
+    //                 .has_middle = has_buttons,
+    //             },
+    //             .is_absolute = dev.hid_driver.is_tablet,
+    //         }) catch 0;
+    //     }
+    // }
 
     // Start polling if it's a HID device
     try startInterruptPolling(ctrl, dev);

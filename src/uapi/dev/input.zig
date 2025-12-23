@@ -112,10 +112,14 @@ pub const InputEvent = extern struct {
     code: u16,
     /// Event value (delta for relative, position for absolute, 0/1 for buttons)
     value: i32,
+    /// Input device identifier (assigned by kernel)
+    device_id: u16,
+    /// Reserved for future extensions
+    _reserved: u16 = 0,
 
     comptime {
-        // Verify struct is 16 bytes (expected ABI)
-        if (@sizeOf(@This()) != 16) @compileError("InputEvent must be 16 bytes");
+        // Verify struct is 24 bytes (expected ABI)
+        if (@sizeOf(@This()) != 24) @compileError("InputEvent must be 24 bytes");
     }
 
     /// Create a relative movement event
@@ -125,6 +129,8 @@ pub const InputEvent = extern struct {
             .event_type = .EV_REL,
             .code = code,
             .value = value,
+            .device_id = 0,
+            ._reserved = 0,
         };
     }
 
@@ -135,6 +141,8 @@ pub const InputEvent = extern struct {
             .event_type = .EV_ABS,
             .code = code,
             .value = value,
+            .device_id = 0,
+            ._reserved = 0,
         };
     }
 
@@ -145,6 +153,8 @@ pub const InputEvent = extern struct {
             .event_type = .EV_KEY,
             .code = code,
             .value = if (pressed) 1 else 0,
+            .device_id = 0,
+            ._reserved = 0,
         };
     }
 
@@ -155,6 +165,8 @@ pub const InputEvent = extern struct {
             .event_type = .EV_SYN,
             .code = SynCode.REPORT,
             .value = 0,
+            .device_id = 0,
+            ._reserved = 0,
         };
     }
 };
@@ -255,7 +267,7 @@ pub const Capabilities = packed struct(u32) {
 
 test "InputEvent size" {
     const std = @import("std");
-    try std.testing.expectEqual(@as(usize, 16), @sizeOf(InputEvent));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(InputEvent));
 }
 
 test "CursorPosition size" {

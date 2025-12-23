@@ -1,5 +1,6 @@
 const std = @import("std");
 const hal = @import("hal");
+const layout = @import("layout");
 
 const types = @import("../types.zig");
 const device = @import("../device.zig");
@@ -16,6 +17,7 @@ const TransferError = common.TransferError;
 /// but will return the TRB physical address for tracking.
 /// Real implementation should integrate with IoRequest/Reactor.
 /// For now, we will wait synchronously like control transfers for basic testing.
+/// Security: Validates buffer is in kernel address space before DMA setup.
 pub fn queueBulkTransfer(
     ctrl: *Controller,
     dev: *device.UsbDevice,
@@ -27,11 +29,26 @@ pub fn queueBulkTransfer(
 
     // Validate state (DCI 0 is invalid, DCI 1 is EP0 control)
     if (dci == 0 or dci >= 32) return error.InvalidParam;
-    
+
+    // Security: Validate buffer is in kernel address space (HHDM range).
+    // User-space addresses or invalid addresses would produce incorrect
+    // physical addresses from virtToPhys, potentially causing DMA to
+    // read/write arbitrary memory and bypass memory protection.
+    const buf_addr = @intFromPtr(buffer.ptr);
+    if (!layout.isKernelAddress(buf_addr)) {
+        return error.InvalidParam;
+    }
+
+    // Also validate the end of the buffer is in kernel space
+    const buf_end = buf_addr +| buffer.len; // Saturating add to prevent overflow
+    if (!layout.isKernelAddress(buf_end)) {
+        return error.InvalidParam;
+    }
+
     var ring_ptr = &(dev.endpoints[dci] orelse return error.InvalidState);
 
-    // Get physical address of buffer
-    const buf_phys = hal.paging.virtToPhys(@intFromPtr(buffer.ptr));
+    // Get physical address of buffer - now safe since we validated the address
+    const buf_phys = hal.paging.virtToPhys(buf_addr);
 
     // Security: Use checked conversion - TRB length field is 17 bits (max 131071)
     const trb_len: u17 = std.math.cast(u17, buffer.len) orelse return error.InvalidParam;

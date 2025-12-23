@@ -9,6 +9,7 @@ const trb = @import("trb.zig");
 const ring = @import("ring.zig");
 const device = @import("device.zig");
 const device_manager = @import("device_manager.zig");
+const interrupt_transfer = @import("transfer/interrupt.zig");
 
 const interrupts = hal.interrupts;
 const Controller = types.Controller;
@@ -45,16 +46,22 @@ fn poll_events_wrapper() usize {
     return poll_events();
 }
 
+/// Maximum events to process per interrupt to prevent DoS from malicious hardware
+/// Security: Limits CPU time spent in interrupt handler
+const MAX_EVENTS_PER_INTERRUPT: usize = 256;
+
 /// Process all pending events in the Event Ring
+/// Security: Limits events processed per call to prevent DoS attacks
 pub fn processEvents(ctrl: *Controller) usize {
     var count: usize = 0;
 
-    while (ctrl.event_ring.hasPending()) {
+    // Security: Cap iterations to prevent a malicious device from monopolizing CPU
+    while (count < MAX_EVENTS_PER_INTERRUPT and ctrl.event_ring.hasPending()) {
         const event = ctrl.event_ring.dequeue() orelse break;
         count += 1;
 
         const event_type = ring.getTrbType(event);
-        
+
         // Update ERDP for every event (or batch it? Specs say update ERDP to clear EHB)
         // We update at end or per event. Per event is safer for now.
         // Actually, updating ERDP clears the specific event segment?
@@ -70,42 +77,68 @@ pub fn processEvents(ctrl: *Controller) usize {
                 const code = evt.status.completion_code;
                 const len = evt.status.trb_transfer_length;
 
+                // Security: Validate slot_id from hardware before any lookup
+                // slot_id 0 is reserved for host controller, 1-255 are valid device slots
+                if (slot_id == 0 or slot_id > ctrl.max_slots) {
+                    console.warn("XHCI: Invalid slot_id {} in TransferEvent, ignoring", .{slot_id});
+                    continue;
+                }
+
                 // 1. Check if it matches a synchronous PendingTransfer
                 if (device.matchesPendingTransfer(slot_id, ep_dci)) {
                     device.completePendingTransfer(code, @truncate(len));
                 }
-                
+
                 // 2. Check if it's an asynchronous Interrupt endpoint (HID/Hub)
-                if (device.findDevice(slot_id)) |dev| {
-                    if (dev.state == .polling and ep_dci == dev.interrupt_dci) {
-                        // Handle interrupt data
-                        if (code == .Success or code == .ShortPacket) {
-                            // Data is in dev.report_buffer
-                            // IMPORTANT: trb_transfer_length is RESIDUAL (bytes NOT transferred)
-                            // Actual transferred = request_length - residual
-                            // Interrupt transfers request 8 bytes (see transfer/interrupt.zig)
-                            const request_len: u24 = 8; // Use same type as len (u24)
-                            const actual_transferred: u24 = if (len <= request_len) request_len - len else 0;
-                            // Security: Ensure actual_transferred doesn't exceed buffer
-                            const data_len: usize = @min(@as(usize, actual_transferred), dev.report_buffer.len);
-                            device_manager.handleInterrupt(ctrl, dev, dev.report_buffer[0..data_len]);
-                        } else {
-                            console.warn("XHCI: Interrupt transfer failed: {}", .{@intFromEnum(code)});
-                            // Retry?
-                            // device_manager.handleInterrupt handles retry logic or error state
+                // Security: Use getInterruptEventData to safely access device state
+                // under the lock, preventing TOCTOU race with device disconnect.
+                // The returned data holds a reference that we MUST release.
+                if (device.getInterruptEventData(slot_id, ep_dci)) |evt_data| {
+                    defer evt_data.release(); // Security: Always release reference
+
+                    // Handle interrupt data
+                    if (code == .Success or code == .ShortPacket) {
+                        // IMPORTANT: trb_transfer_length is RESIDUAL (bytes NOT transferred)
+                        // Actual transferred = request_length - residual
+                        // Security: Use the stored request length from when transfer was queued,
+                        // not a hardcoded constant that could diverge from actual queued length.
+                        const request_len: u24 = evt_data.last_request_len;
+
+                        // Security: Validate residual doesn't exceed request length
+                        // A malicious device could return invalid residual values
+                        const actual_transferred: u24 = if (len <= request_len) request_len - len else 0;
+
+                        // Security: Double-validate against the pre-validated buffer length
+                        // evt_data.report_buffer_len was captured under lock
+                        const data_len: usize = @min(
+                            @as(usize, actual_transferred),
+                            evt_data.report_buffer_len,
+                        );
+
+                        // Security: Validate data_len is reasonable (non-zero for success)
+                        // and doesn't exceed our buffer. The report_buffer was zeroed before
+                        // transfer was queued (see interrupt_transfer.queueInterruptTransfer),
+                        // so even if hardware lies about residual, we only see zeros.
+                        if (data_len <= evt_data.report_buffer_len) {
+                            device_manager.handleInterrupt(ctrl, evt_data.dev, evt_data.report_buffer[0..data_len]);
                         }
+                    } else {
+                        console.warn("XHCI: Interrupt transfer failed: {}", .{@intFromEnum(code)});
                     }
                 }
             },
             .CommandCompletionEvent => {
-                // Signal command completion to waiters via atomic flag
-                // This avoids the race condition where waiters poll the event ring
-                // but the interrupt handler has already consumed the event.
+                // Signal command completion to waiters via atomic packed struct
+                // Security: Atomic store of entire struct prevents TOCTOU race
+                // where waiters could read stale slot_id/code with new valid flag.
                 const completion = trb.CommandCompletionEventTrb.fromTrb(event);
-                ctrl.pending_cmd_slot_id = completion.getSlotId();
-                ctrl.pending_cmd_code = completion.status.completion_code;
-                // Store with release semantics so waiters see updated slot_id and code
-                ctrl.pending_cmd_valid.store(true, .release);
+                ctrl.pending_cmd_result.store(
+                    types.PendingCmdResult.fromCompletion(
+                        completion.getSlotId(),
+                        completion.status.completion_code,
+                    ),
+                    .release,
+                );
             },
             .PortStatusChangeEvent => {
                 console.info("XHCI: Port Status Change Event", .{});

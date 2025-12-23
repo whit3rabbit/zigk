@@ -270,7 +270,7 @@ fn handleKernelMessage(msg_ptr: usize) SyscallError!usize {
                 .right = (evt.buttons & 2) != 0,
                 .middle = (evt.buttons & 4) != 0,
             };
-            mouse.injectRawInput(evt.dx, evt.dy, evt.dz, buttons);
+            mouse.injectRawInput(0, evt.dx, evt.dy, evt.dz, buttons);
         },
         else => return error.EINVAL, // Unknown kernel message type
     }

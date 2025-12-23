@@ -182,6 +182,10 @@ var mouse_x_accum: i32 = 0;
 var mouse_y_accum: i32 = 0;
 var mouse_buttons: i32 = 0;
 var mouse_buttons_prev: i32 = 0;
+var abs_pending_x: ?i32 = null;
+var abs_pending_y: ?i32 = null;
+var last_abs_x: ?i32 = null;
+var last_abs_y: ?i32 = null;
 
 /// Get keyboard input
 /// Returns 1 if a key event is available, 0 otherwise
@@ -235,6 +239,8 @@ fn pollInputEvents() void {
         .event_type = .EV_SYN,
         .code = 0,
         .value = 0,
+        .device_id = 0,
+        ._reserved = 0,
     };
     while (true) {
         syscall.read_input_event(&event) catch |err| {
@@ -258,6 +264,13 @@ fn processInputEvent(event: syscall.uapi.input.InputEvent) void {
                 else => {},
             }
         },
+        input.EventType.EV_ABS => {
+            switch (event.code) {
+                input.AbsCode.X => abs_pending_x = event.value,
+                input.AbsCode.Y => abs_pending_y = event.value,
+                else => {},
+            }
+        },
         input.EventType.EV_KEY => {
             const pressed: c_int = if (event.value != 0) 1 else 0;
              switch (event.code) {
@@ -269,10 +282,22 @@ fn processInputEvent(event: syscall.uapi.input.InputEvent) void {
                  },
                  input.BtnCode.MIDDLE => {
                      if (pressed != 0) mouse_buttons |= 4 else mouse_buttons &= ~@as(i32, 4);
-                 },
-                 else => {
-                     // Ignore keyboard events here (handled by pollScancodes via keyboard driver)
-                 }, 
+                },
+                else => {
+                    // Ignore keyboard events here (handled by pollScancodes via keyboard driver)
+                }, 
+            }
+        },
+        input.EventType.EV_SYN => {
+            if (event.code == input.SynCode.REPORT and abs_pending_x != null and abs_pending_y != null) {
+                if (last_abs_x != null and last_abs_y != null) {
+                    mouse_x_accum += abs_pending_x.? - last_abs_x.?;
+                    mouse_y_accum += abs_pending_y.? - last_abs_y.?;
+                }
+                last_abs_x = abs_pending_x;
+                last_abs_y = abs_pending_y;
+                abs_pending_x = null;
+                abs_pending_y = null;
             }
         },
         else => {},

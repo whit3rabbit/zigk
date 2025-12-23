@@ -26,6 +26,7 @@ const ahci = @import("ahci");
 const video_driver = @import("video_driver");
 const hal = @import("hal");
 const kernel_iommu = @import("kernel_iommu");
+const dma = @import("dma");
 
 pub var net_interface: net.Interface = undefined;
 pub var pci_devices: ?*const pci.DeviceList = null;
@@ -146,6 +147,7 @@ pub fn initIommu() void {
     hal.iommu.fault.init();
 
     iommu_enabled = true;
+    dma.enableIommu(); // Enable IOMMU integration in DMA module
     console.info("IOMMU: Enabled with {d} unit(s), DMA isolation active", .{units_enabled});
 }
 

@@ -104,14 +104,20 @@ pub const PortStatus = extern struct {
 // Driver State
 // =============================================================================
 
+/// Maximum hub nesting depth per USB specification (5 levels)
+/// Security: Prevents stack exhaustion from malicious nested hub enumeration.
+pub const MAX_HUB_DEPTH: u8 = 5;
+
 /// Function pointer type for enumerating devices (breaks dependency cycle)
+/// Security: Includes depth parameter to prevent stack exhaustion from deep hub nesting.
 pub const EnumerateDeviceFn = *const fn (
     ctrl: *types.Controller,
     parent: ?*device.UsbDevice,
     port_num: u8,
     route_string: u20,
     root_port_num: u8,
-    speed_override: ?context.Speed
+    speed_override: ?context.Speed,
+    depth: u8,
 ) anyerror!?*device.UsbDevice;
 
 pub const HubDriver = struct {
@@ -121,21 +127,26 @@ pub const HubDriver = struct {
     // Hub Properties
     num_ports: u8 = 0,
     power_on_delay_ms: u32 = 0,
-    
+
     // Endpoints
     int_in_ep: u8 = 0, // Endpoint address
 
     // Callback
     enumerate_fn: EnumerateDeviceFn,
 
+    /// Current depth in hub hierarchy (0 = root hub, 1 = first level hub, etc.)
+    /// Security: Used to prevent stack exhaustion from deep nesting.
+    depth: u8 = 0,
+
     const Self = @This();
 
-    pub fn init(ctrl: *types.Controller, dev: *device.UsbDevice, ep_in: u8, enumerate_fn: EnumerateDeviceFn) Self {
+    pub fn init(ctrl: *types.Controller, dev: *device.UsbDevice, ep_in: u8, enumerate_fn: EnumerateDeviceFn, depth: u8) Self {
         return Self{
             .dev = dev,
             .ctrl = ctrl,
             .int_in_ep = ep_in,
             .enumerate_fn = enumerate_fn,
+            .depth = depth,
         };
     }
 
@@ -397,13 +408,15 @@ pub const HubDriver = struct {
              route_string = port;
         }
 
-        // Call recursive enumeration via callback
-       const maybe_child = try self.enumerate_fn(self.ctrl, self.dev, port, route_string, self.dev.port, speed);
+        // Security: Pass depth+1 to prevent stack exhaustion from deep hub nesting.
+        // The enumerateDevice function will reject depths > MAX_HUB_DEPTH.
+        const child_depth = self.depth + 1;
+        const maybe_child = try self.enumerate_fn(self.ctrl, self.dev, port, route_string, self.dev.port, speed, child_depth);
        
        if (maybe_child) |child| {
            // Start polling for child devices that need it
            const interrupt_tr = @import("../xhci/transfer/interrupt.zig");
-           if (child.is_hub or child.hid_driver.is_keyboard or child.hid_driver.is_mouse) {
+           if (child.is_hub or child.hid_driver.is_keyboard or child.hid_driver.is_mouse or child.hid_driver.is_tablet) {
                interrupt_tr.queueInterruptTransfer(self.ctrl, child) catch |err| {
                    console.err("HUB: Failed to start child polling: {}", .{err});
                };

@@ -101,8 +101,8 @@ pub fn scanPorts(ctrl: *Controller) void {
             }
 
             // Enumerate the device on root hub (parent=null)
-            // route_string=0, root_port=port, speed_override=null
-            const maybe_dev = device_manager.enumerateDevice(ctrl, null, port, 0, port, null) catch |err| {
+            // route_string=0, root_port=port, speed_override=null, depth=0 (root level)
+            const maybe_dev = device_manager.enumerateDevice(ctrl, null, port, 0, port, null, 0) catch |err| {
                 console.err("XHCI: Failed to enumerate device on port {d}: {}", .{ port, err });
                 continue;
             };

@@ -275,32 +275,35 @@ fn allocateRings(driver: *E1000e) !void {
 }
 
 pub fn freeRings(driver: *E1000e) void {
+    // Free RX buffers (IOMMU-aware)
     for (0..types.RX_DESC_COUNT) |i| {
         if (driver.rx_buffers_phys[i] != 0) {
-            pmm.freePage(driver.rx_buffers_phys[i]);
+            dma.freeBuffer(&driver.rx_buf_dma[i]);
             driver.rx_buffers_phys[i] = 0;
         }
     }
 
+    // Free TX buffers (IOMMU-aware)
     for (0..types.TX_DESC_COUNT) |i| {
         if (driver.tx_buffers_phys[i] != 0) {
-            pmm.freePage(driver.tx_buffers_phys[i]);
+            dma.freeBuffer(&driver.tx_buf_dma[i]);
             driver.tx_buffers_phys[i] = 0;
         }
     }
 
+    // Free RX ring (IOMMU-aware)
     if (driver.rx_ring_phys != 0) {
-        const rx_ring_size = types.RX_DESC_COUNT * @sizeOf(RxDesc);
-        const rx_ring_pages = (rx_ring_size + pmm.PAGE_SIZE - 1) / pmm.PAGE_SIZE;
-        pmm.freePages(driver.rx_ring_phys, rx_ring_pages);
+        dma.freeBuffer(&driver.rx_ring_dma);
         driver.rx_ring_phys = 0;
     }
+
+    // Free TX ring (IOMMU-aware)
     if (driver.tx_ring_phys != 0) {
-        const tx_ring_size = types.TX_DESC_COUNT * @sizeOf(TxDesc);
-        const tx_ring_pages = (tx_ring_size + pmm.PAGE_SIZE - 1) / pmm.PAGE_SIZE;
-        pmm.freePages(driver.tx_ring_phys, tx_ring_pages);
+        dma.freeBuffer(&driver.tx_ring_dma);
         driver.tx_ring_phys = 0;
     }
+
+    driver.using_iommu_dma = false;
 }
 
 fn initRx(driver: *E1000e) void {

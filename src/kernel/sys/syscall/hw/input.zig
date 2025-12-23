@@ -10,6 +10,7 @@ const std = @import("std");
 const base = @import("base.zig");
 const uapi = @import("uapi");
 const input = @import("input");
+const usb = @import("usb");
 
 const SyscallError = base.SyscallError;
 const UserPtr = base.UserPtr;
@@ -29,6 +30,10 @@ pub fn sys_read_input_event(event_ptr: usize) SyscallError!usize {
     if (!input.isInitialized()) {
         return error.ENODEV;
     }
+
+    // Poll USB events first (fallback for when MSI-X interrupts aren't firing)
+    // This processes any pending HID reports from USB mice/tablets
+    _ = usb.xhci.pollEvents();
 
     // Try to pop an event
     const event = input.popEvent() orelse {

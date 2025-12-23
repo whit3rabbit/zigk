@@ -6,6 +6,7 @@ Query driver patterns, MmioDevice usage, Ring IPC, interrupts, and capabilities.
 
 Usage:
     python driver_query.py mmio          # MmioDevice pattern
+    python driver_query.py dma           # IOMMU-aware DMA allocation
     python driver_query.py ring          # Ring IPC pattern
     python driver_query.py capabilities  # Capability syscalls
     python driver_query.py split         # Split-process pattern
@@ -50,6 +51,85 @@ Drivers using MmioDevice:
 - EHCI: src/drivers/usb/ehci/
 - AHCI: src/drivers/storage/ahci/
 - E1000e: src/drivers/net/e1000e/
+""",
+
+    "dma": """
+## IOMMU-Aware DMA Allocation
+
+Location: src/kernel/mm/dma.zig
+
+When IOMMU (VT-d) is available, devices cannot access raw physical addresses.
+Use the dma module for all DMA buffer allocations.
+
+### Basic Pattern
+```zig
+const dma = @import("dma");
+const iommu = @import("iommu");
+
+// 1. Get device BDF from PCI device
+const bdf = iommu.DeviceBdf{
+    .bus = pci_dev.bus,
+    .device = pci_dev.device,
+    .func = pci_dev.func,
+};
+
+// 2. Allocate IOMMU-aware buffer (zero-initialized)
+const buf = try dma.allocBuffer(bdf, 4096, true);  // true = device can write
+defer dma.freeBuffer(&buf);
+
+// 3. CPU access via HHDM
+const cpu_ptr = buf.getVirt();
+const slice = buf.slice();
+
+// 4. Hardware registers use device_addr (IOVA or physical)
+hw_regs.write(.dma_addr_lo, buf.deviceAddrLo());
+hw_regs.write(.dma_addr_hi, buf.deviceAddrHi());
+```
+
+### DmaBuffer Fields
+| Field | Purpose |
+|-------|---------|
+| phys_addr | Physical address (CPU access via HHDM) |
+| device_addr | Device address (IOVA if IOMMU, else phys) |
+| size | Requested size in bytes |
+| page_count | Number of pages allocated |
+| iommu_mapped | Whether IOMMU mapping was used |
+
+**CRITICAL**: Always use `device_addr` for hardware descriptors!
+
+### Helper Methods
+```zig
+buf.getVirt()          // [*]u8 for CPU access
+buf.slice()            // []u8 slice
+buf.getTypedPtr(T)     // *T typed pointer
+buf.getVolatilePtr(T)  // *volatile T for hardware
+buf.deviceAddrLo()     // Lower 32 bits
+buf.deviceAddrHi()     // Upper 32 bits
+```
+
+### 32-Bit Controllers
+```zig
+// Returns error.AddressTooHigh if > 4GB
+const buf = try dma.allocBuffer32(bdf, size, writable);
+```
+
+### Boot-Time (No BDF)
+```zig
+// WARNING: Bypasses IOMMU - only for early boot
+const buf = try dma.allocBufferUnsafe(size);
+```
+
+### Check IOMMU Status
+```zig
+if (dma.isIommuAvailable()) {
+    console.info("DMA isolation active", .{});
+}
+```
+
+### Drivers Using IOMMU-Aware DMA
+- E1000e: src/drivers/net/e1000e/
+- AHCI: src/drivers/storage/ahci/
+- XHCI: src/drivers/usb/xhci/
 """,
 
     "ring": """

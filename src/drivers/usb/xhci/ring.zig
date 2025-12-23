@@ -20,6 +20,8 @@ const CompletionCode = trb.CompletionCode;
 
 const hal = @import("hal");
 const pmm = @import("pmm");
+const dma = @import("dma");
+const iommu = @import("iommu");
 
 // =============================================================================
 // Ring Configuration
@@ -41,8 +43,12 @@ pub const USABLE_RING_SIZE: usize = DEFAULT_RING_SIZE - 1;
 pub const ProducerRing = struct {
     /// Virtual address of ring buffer
     trbs: [*]Trb,
-    /// Physical address of ring buffer (for hardware)
+    /// Physical address of ring buffer (for CPU access via HHDM)
     phys_base: u64,
+    /// Device address (IOVA or physical, for hardware registers)
+    device_addr: u64,
+    /// DMA buffer tracking for IOMMU cleanup
+    dma_buf: dma.DmaBuffer,
     /// Current enqueue index
     enqueue_idx: usize,
     /// Producer cycle state (toggled on wrap)
@@ -52,22 +58,24 @@ pub const ProducerRing = struct {
 
     const Self = @This();
 
-    /// Allocate and initialize a producer ring
-    pub fn init() !Self {
-        // Allocate one page for ring (4KB = 256 TRBs)
-        const phys = pmm.allocZeroedPages(1) orelse return error.OutOfMemory;
-        const virt = @intFromPtr(hal.paging.physToVirt(phys));
+    /// Allocate and initialize a producer ring using IOMMU-aware DMA
+    pub fn init(bdf: iommu.DeviceBdf) !Self {
+        // Allocate one page for ring (4KB = 256 TRBs) using IOMMU-aware DMA
+        const buf = dma.allocBuffer(bdf, pmm.PAGE_SIZE, true) catch return error.OutOfMemory;
+        const virt = @intFromPtr(hal.paging.physToVirt(buf.phys_addr));
         const trbs: [*]Trb = @ptrFromInt(virt);
 
         var ring = Self{
             .trbs = trbs,
-            .phys_base = phys,
+            .phys_base = buf.phys_addr,
+            .device_addr = buf.device_addr,
+            .dma_buf = buf,
             .enqueue_idx = 0,
             .pcs = true, // Start with cycle bit = 1
             .size = DEFAULT_RING_SIZE,
         };
 
-        // Initialize Link TRB at end to wrap back to start
+        // Initialize Link TRB at end to wrap back to start (use device address)
         ring.setupLinkTrb();
 
         return ring;
@@ -77,7 +85,13 @@ pub const ProducerRing = struct {
     fn setupLinkTrb(self: *Self) void {
         const link_idx = self.size - 1;
         const link: *LinkTrb = @ptrCast(&self.trbs[link_idx]);
-        link.* = LinkTrb.init(self.phys_base, true, self.pcs);
+        // Link TRB points to device address (IOVA) for hardware to follow
+        link.* = LinkTrb.init(self.device_addr, true, self.pcs);
+    }
+
+    /// Get device address for hardware registers (IOVA or physical)
+    pub fn getDeviceAddress(self: *const Self) u64 {
+        return self.device_addr;
     }
 
     /// Enqueue a TRB to the ring
@@ -163,8 +177,12 @@ pub const ProducerRing = struct {
 pub const ConsumerRing = struct {
     /// Virtual address of ring buffer
     trbs: [*]Trb,
-    /// Physical address of ring buffer
+    /// Physical address of ring buffer (for CPU access via HHDM)
     phys_base: u64,
+    /// Device address of ring buffer (IOVA or physical, for hardware)
+    device_addr: u64,
+    /// DMA buffer tracking for ring
+    ring_dma: dma.DmaBuffer,
     /// Current dequeue index
     dequeue_idx: usize,
     /// Consumer cycle state (expected cycle bit value)
@@ -173,74 +191,95 @@ pub const ConsumerRing = struct {
     size: usize,
     /// Event Ring Segment Table
     erst: *ErstEntry,
-    /// Physical address of ERST
-    erst_phys: u64,
+    /// Device address of ERST (for ERSTBA register)
+    erst_device_addr: u64,
+    /// DMA buffer tracking for ERST
+    erst_dma: dma.DmaBuffer,
 
     const Self = @This();
 
-    /// Allocate and initialize an event ring with ERST
-    pub fn init() !Self {
-        // Allocate ring segment (one page)
-        const ring_phys = pmm.allocZeroedPages(1) orelse return error.OutOfMemory;
-        const ring_virt = @intFromPtr(hal.paging.physToVirt(ring_phys));
+    /// Allocate and initialize an event ring with ERST using IOMMU-aware DMA
+    pub fn init(bdf: iommu.DeviceBdf) !Self {
+        // Allocate ring segment (one page) using IOMMU-aware DMA
+        const ring_buf = dma.allocBuffer(bdf, pmm.PAGE_SIZE, true) catch return error.OutOfMemory;
+        const ring_virt = @intFromPtr(hal.paging.physToVirt(ring_buf.phys_addr));
         const trbs: [*]Trb = @ptrFromInt(ring_virt);
 
         // Allocate ERST (one entry, but needs 64-byte alignment)
         // Use a full page for simplicity
-        const erst_phys = pmm.allocZeroedPages(1) orelse {
-            pmm.freePages(ring_phys, 1);
+        const erst_buf = dma.allocBuffer(bdf, pmm.PAGE_SIZE, true) catch {
+            dma.freeBuffer(&ring_buf);
             return error.OutOfMemory;
         };
-        const erst_virt = @intFromPtr(hal.paging.physToVirt(erst_phys));
+        const erst_virt = @intFromPtr(hal.paging.physToVirt(erst_buf.phys_addr));
         const erst: *ErstEntry = @ptrFromInt(erst_virt);
 
-        // Initialize ERST entry
-        erst.* = ErstEntry.init(ring_phys, DEFAULT_RING_SIZE);
+        // Initialize ERST entry (use device address for hardware)
+        erst.* = ErstEntry.init(ring_buf.device_addr, DEFAULT_RING_SIZE);
 
         return Self{
             .trbs = trbs,
-            .phys_base = ring_phys,
+            .phys_base = ring_buf.phys_addr,
+            .device_addr = ring_buf.device_addr,
+            .ring_dma = ring_buf,
             .dequeue_idx = 0,
             .ccs = true, // Expect cycle bit = 1 initially
             .size = DEFAULT_RING_SIZE,
             .erst = erst,
-            .erst_phys = erst_phys,
+            .erst_device_addr = erst_buf.device_addr,
+            .erst_dma = erst_buf,
         };
     }
 
     /// Check if there's a pending event to process
+    /// Security: Returns false if ring state is corrupted
     pub fn hasPending(self: *const Self) bool {
+        // Security: Validate bounds before accessing trbs array
+        if (self.dequeue_idx >= self.size or self.dequeue_idx >= DEFAULT_RING_SIZE) {
+            return false;
+        }
         const current_trb = &self.trbs[self.dequeue_idx];
         return current_trb.control.cycle == self.ccs;
     }
 
     /// Dequeue the next event TRB
-    /// Returns null if no event pending
+    /// Returns null if no event pending or ring corruption detected
+    /// Security: Validates index bounds to detect ring corruption from malicious hardware
     pub fn dequeue(self: *Self) ?*const Trb {
+        // Security: Validate dequeue_idx is within bounds before any access
+        // This detects corruption from malicious hardware or memory corruption
+        if (self.dequeue_idx >= self.size or self.dequeue_idx >= DEFAULT_RING_SIZE) {
+            // Ring corruption detected - reset to safe state
+            self.dequeue_idx = 0;
+            return null;
+        }
+
         if (!self.hasPending()) {
             return null;
         }
 
         const current = &self.trbs[self.dequeue_idx];
 
-        // Advance dequeue pointer
-        self.dequeue_idx += 1;
-        if (self.dequeue_idx >= self.size) {
+        // Security: Use wrapping arithmetic to prevent overflow, then bounds check
+        const next_idx = self.dequeue_idx +% 1;
+        if (next_idx >= self.size) {
             self.dequeue_idx = 0;
             self.ccs = !self.ccs; // Toggle expected cycle bit on wrap
+        } else {
+            self.dequeue_idx = next_idx;
         }
 
         return current;
     }
 
-    /// Get current dequeue pointer physical address for ERDP register
+    /// Get current dequeue pointer device address for ERDP register
     pub fn getDequeuePointer(self: *const Self) u64 {
-        return self.phys_base + @as(u64, self.dequeue_idx) * @sizeOf(Trb);
+        return self.device_addr + @as(u64, self.dequeue_idx) * @sizeOf(Trb);
     }
 
-    /// Get ERST physical address for ERSTBA register
+    /// Get ERST device address for ERSTBA register
     pub fn getErstBase(self: *const Self) u64 {
-        return self.erst_phys;
+        return self.erst_device_addr;
     }
 
     /// Get ERST size (number of segments) for ERSTSZ register
@@ -287,10 +326,10 @@ pub const TransferRing = struct {
 
     const Self = @This();
 
-    /// Initialize a transfer ring
-    pub fn init() !Self {
+    /// Initialize a transfer ring using IOMMU-aware DMA
+    pub fn init(bdf: iommu.DeviceBdf) !Self {
         return Self{
-            .ring = try ProducerRing.init(),
+            .ring = try ProducerRing.init(bdf),
             .pending_tds = 0,
         };
     }
@@ -329,9 +368,14 @@ pub const TransferRing = struct {
         }
     }
 
-    /// Get physical address for endpoint context
+    /// Get device address for endpoint context (IOVA or physical)
+    pub fn getDeviceAddress(self: *const Self) u64 {
+        return self.ring.getDeviceAddress();
+    }
+
+    /// Get physical address (legacy, for debugging)
     pub fn getPhysicalAddress(self: *const Self) u64 {
-        return self.ring.getPhysicalAddress();
+        return self.ring.phys_base;
     }
 
     /// Get cycle state for endpoint context
