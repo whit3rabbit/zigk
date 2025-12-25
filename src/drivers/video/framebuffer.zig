@@ -49,7 +49,7 @@ pub fn FramebufferDriver(comptime buffered: bool) type {
                 @compileError("initWithBackBuffer only available for buffered driver");
             }
 
-            const size_bytes = @as(usize, mode.height) * mode.pitch;
+            const size_bytes = std.math.mul(usize, @as(usize, mode.height), mode.pitch) catch return null;
             const pages_needed = (size_bytes + 0x1000 - 1) / 0x1000;
 
             if (pmm.allocZeroedPages(pages_needed)) |bb_phys| {

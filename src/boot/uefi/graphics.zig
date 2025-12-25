@@ -10,6 +10,7 @@ pub const GraphicsError = error{
     QueryModeFailed,
     SetModeFailed,
     NoSuitableMode,
+    InvalidMode,
 };
 
 /// Initialize GOP and get framebuffer info
@@ -57,7 +58,7 @@ pub fn initGraphics(bs: *uefi.tables.BootServices) GraphicsError!BootInfo.Frameb
         .address = mode.frame_buffer_base,
         .width = info.horizontal_resolution,
         .height = info.vertical_resolution,
-        .pitch = info.pixels_per_scan_line * pixel_info.bytes_per_pixel,
+        .pitch = std.math.mul(u32, info.pixels_per_scan_line, pixel_info.bytes_per_pixel) catch return GraphicsError.InvalidMode,
         .bpp = pixel_info.bpp,
         .blue_mask_shift = pixel_info.blue_shift,
         .blue_mask_size = pixel_info.blue_size,

@@ -1,3 +1,4 @@
+const std = @import("std");
 const interface = @import("interface.zig");
 const font_mod = @import("font.zig");
 const font_types = @import("font/types.zig");
@@ -74,8 +75,8 @@ pub const Console = struct {
             .device = device,
             .cursor_x = 0,
             .cursor_y = 0,
-            .rows = mode.height / default_font.height,
-            .cols = mode.width / default_font.width,
+            .rows = @max(1, mode.height / default_font.height),
+            .cols = @max(1, mode.width / default_font.width),
             .curr_fg = .white,
             .curr_bg = .black,
             .curr_bold = false,
@@ -260,17 +261,19 @@ pub const Console = struct {
     }
     
     fn newline(self: *Console) void {
+        if (self.rows == 0) return; // Safety guard against underflow
+
         self.cursor_x = 0;
         self.write_head = (self.write_head + 1) % HISTORY_ROWS;
-        
+
         for (0..self.cols) |x| {
             self.history[self.write_head][x] = ' ';
         }
-        
+
         if (self.view_offset == 0) {
             const mode = self.device.getMode();
             const font_h = self.current_font.height;
-            const scroll_height = (self.rows - 1) * font_h;
+            const scroll_height = std.math.mul(u32, self.rows - 1, font_h) catch return;
             
             self.device.copyRect(
                 0, font_h,
@@ -279,7 +282,7 @@ pub const Console = struct {
             );
             self.markDirty(0, 0, mode.width, scroll_height);
             
-            const bottom_y = (self.rows - 1) * font_h;
+            const bottom_y = std.math.mul(u32, self.rows - 1, font_h) catch return;
             // Fill bottom with current BG?
             const bg = interface.Color{ .r=0, .g=0, .b=0 };
             self.device.fillRect(0, bottom_y, mode.width, font_h, bg);

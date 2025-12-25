@@ -814,8 +814,15 @@ pub const VirtioGpuDriver = struct {
         // Attach backing memory using Scatter-Gather list
         // Allocate command buffer from heap because it exceeds 4KB cmd_buf
         const attach_header_size = @sizeOf(VirtioGpuResourceAttachBacking);
-        const entries_size = entries.items.len * @sizeOf(VirtioGpuMemEntry);
-        const total_size = attach_header_size + entries_size;
+        // Use checked arithmetic to prevent overflow in size calculation
+        const entries_size = std.math.mul(usize, entries.items.len, @sizeOf(VirtioGpuMemEntry)) catch {
+            console.err("VirtIO-GPU: Entries size overflow", .{});
+            return false;
+        };
+        const total_size = std.math.add(usize, attach_header_size, entries_size) catch {
+            console.err("VirtIO-GPU: Total size overflow", .{});
+            return false;
+        };
 
         const attach_buf = allocator.alloc(u8, total_size) catch {
             console.err("VirtIO-GPU: Failed to allocate attach command buffer", .{});

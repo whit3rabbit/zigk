@@ -54,7 +54,10 @@ pub fn initMemoryManagement(boot_info: *const @import("boot_info").BootInfo) voi
     // Allocate heap pages from PMM (with extra pages for KASLR offset)
     const heap_offset = layout.getHeapOffset();
     const extra_pages = (heap_offset + pmm.PAGE_SIZE - 1) / pmm.PAGE_SIZE;
-    const total_heap_size = config.heap_size + heap_offset;
+    const total_heap_size = std.math.add(usize, config.heap_size, heap_offset) catch {
+        console.err("Heap size overflow!", .{});
+        panic.halt();
+    };
     const heap_pages = total_heap_size / pmm.PAGE_SIZE;
     const heap_phys = pmm.allocZeroedPages(heap_pages) orelse {
         console.err("Failed to allocate heap pages!", .{});
@@ -88,12 +91,13 @@ pub fn logMemoryMap(boot_info: *const BootInfo.BootInfo) void {
 
     const entries = boot_info.memory_map[0..boot_info.memory_map_count];
     for (entries) |entry| {
-        const length = entry.num_pages * pmm.PAGE_SIZE;
-        total_memory += length;
+        // Use checked arithmetic to prevent overflow
+        const length = std.math.mul(u64, entry.num_pages, pmm.PAGE_SIZE) catch continue;
+        total_memory +|= length; // Saturating add for logging safety
 
         const type_str = switch (entry.type) {
             .Conventional => blk: {
-                usable_memory += length;
+                usable_memory +|= length;
                 break :blk "Usable";
             },
             .Reserved => "Reserved",
@@ -107,9 +111,10 @@ pub fn logMemoryMap(boot_info: *const BootInfo.BootInfo) void {
         };
 
         if (config.debug_memory) {
+            const entry_end = std.math.add(u64, entry.phys_start, length) catch 0xFFFFFFFFFFFFFFFF;
             console.printf("  {x} - {x} ({s})\n", .{
                 entry.phys_start,
-                entry.phys_start + length,
+                entry_end,
                 type_str,
             });
         }

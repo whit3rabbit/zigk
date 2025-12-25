@@ -60,12 +60,42 @@ pub fn sys_read(fd: usize, buf_ptr: usize, len: usize) SyscallError!usize {
 *   **Fail Secure**: If a security-critical dependency (like entropy source) fails, **panic** or return a fatal error. Do not fall back to insecure defaults silently.
 
 ### 4. Integer Safety
-*   **Checked Arithmetic**: Use `std.math.add`, `sub`, `mul` (or `@addWithOverflow`) for **all** calculations involving:
+*   **Checked Arithmetic**: Use `std.math.add`, `sub`, `mul` for **all** calculations involving:
     *   File offsets/positions.
     *   Buffer lengths derived from user input.
     *   Sector counts.
     *   Allocation sizes.
+    *   Display dimensions (width, height, pitch, rows, cols).
+    *   Memory region calculations (phys_start + num_pages * PAGE_SIZE).
+    *   Any `count * size` pattern (e.g., `height * pitch`, `rows * font_height`).
+*   **Underflow Prevention**: Before subtracting, verify the value is >= the amount being subtracted, or use `std.math.sub`:
+    ```zig
+    // WRONG: Underflows to u32::MAX if rows == 0
+    const y = (self.rows - 1) * font_h;
+
+    // CORRECT: Early return or use @max
+    if (self.rows == 0) return;
+    const y = std.math.mul(u32, self.rows - 1, font_h) catch return;
+
+    // ALSO CORRECT: Guarantee minimum value at initialization
+    .rows = @max(1, mode.height / font_height),
+    ```
 *   **Panic on Overflow**: In kernel space, unexpected overflow is a security violation. Fail the syscall (return error) rather than wrapping.
+*   **Common Patterns Requiring Checked Arithmetic**:
+    ```zig
+    // Pitch/stride calculations
+    .pitch = std.math.mul(u32, pixels_per_line, bytes_per_pixel) catch return error.InvalidMode,
+
+    // Buffer size calculations
+    const size = std.math.mul(usize, height, pitch) catch return null;
+
+    // Heap/memory size additions
+    const total = std.math.add(usize, base_size, offset) catch { panic.halt(); };
+
+    // Physical region bounds
+    const region_size = std.math.mul(u64, num_pages, PAGE_SIZE) catch continue;
+    const region_end = std.math.add(u64, phys_start, region_size) catch continue;
+    ```
 
 ### 5. Capabilities over Root
 Do not check `uid == 0` for hardware access. Use the Capability system (`src/capabilities/`).

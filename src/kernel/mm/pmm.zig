@@ -121,11 +121,9 @@ pub fn init(memmap: []const BootInfo.MemoryDescriptor) !void {
 
 
     for (entries) |entry| {
-        if (entry.phys_start > std.math.maxInt(u64) - (entry.num_pages * PAGE_SIZE)) {
-            continue;
-        }
-        const length = entry.num_pages * PAGE_SIZE;
-        const end_addr = entry.phys_start + length;
+        // Use checked arithmetic to prevent overflow in multiplication
+        const length = std.math.mul(u64, entry.num_pages, PAGE_SIZE) catch continue;
+        const end_addr = std.math.add(u64, entry.phys_start, length) catch continue;
 
         if (end_addr > highest_addr) {
             highest_addr = end_addr;
@@ -145,11 +143,9 @@ pub fn init(memmap: []const BootInfo.MemoryDescriptor) !void {
     var highest_usable_end: u64 = 0;
     for (entries) |entry| {
         if (entry.type == .Conventional) {
-            if (entry.phys_start > std.math.maxInt(u64) - (entry.num_pages * PAGE_SIZE)) {
-                continue;
-            }
-            const length = entry.num_pages * PAGE_SIZE;
-            const end_addr = entry.phys_start + length;
+            // Use checked arithmetic to prevent overflow
+            const length = std.math.mul(u64, entry.num_pages, PAGE_SIZE) catch continue;
+            const end_addr = std.math.add(u64, entry.phys_start, length) catch continue;
             if (end_addr > highest_usable_end) {
                 highest_usable_end = end_addr;
             }
@@ -176,8 +172,10 @@ pub fn init(memmap: []const BootInfo.MemoryDescriptor) !void {
 
     for (entries) |entry| {
         // Need a usable region large enough for all metadata + safety margin
+        const region_size = std.math.mul(u64, entry.num_pages, PAGE_SIZE) catch continue;
+        const min_size = std.math.add(u64, total_metadata, PAGE_SIZE * 32) catch continue;
         if (entry.type == .Conventional and
-            (entry.num_pages * PAGE_SIZE) >= total_metadata + PAGE_SIZE * 32 and
+            region_size >= min_size and
             entry.phys_start >= 0x100000)
         {
             metadata_phys = paging.pageAlignUp(entry.phys_start);
@@ -212,11 +210,11 @@ pub fn init(memmap: []const BootInfo.MemoryDescriptor) !void {
     // Third pass: mark usable regions as free
     for (entries) |entry| {
         if (entry.type == .Conventional) {
-            if (entry.phys_start > std.math.maxInt(u64) - (entry.num_pages * PAGE_SIZE)) {
-                continue;
-            }
+            // Use checked arithmetic to prevent overflow
+            const region_size = std.math.mul(u64, entry.num_pages, PAGE_SIZE) catch continue;
+            const region_end = std.math.add(u64, entry.phys_start, region_size) catch continue;
             const start_page = paging.pageAlignUp(entry.phys_start) / PAGE_SIZE;
-            const end_page = paging.pageAlignDown(entry.phys_start + (entry.num_pages * PAGE_SIZE)) / PAGE_SIZE;
+            const end_page = paging.pageAlignDown(region_end) / PAGE_SIZE;
 
             var page = start_page;
             while (page < end_page) : (page += 1) {

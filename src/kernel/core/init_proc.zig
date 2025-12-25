@@ -117,7 +117,8 @@ fn isPhysicalRangeUsable(boot_info: *const BootInfo.BootInfo, start: u64, end: u
         if (!is_usable) continue;
 
         const region_start = desc.phys_start;
-        const region_end = desc.phys_start + (desc.num_pages * pmm.PAGE_SIZE);
+        const pages_size = std.math.mul(u64, desc.num_pages, pmm.PAGE_SIZE) catch continue;
+        const region_end = std.math.add(u64, desc.phys_start, pages_size) catch continue;
 
         // Check if our range is fully contained in this region
         if (start >= region_start and end <= region_end) {
