@@ -1,5 +1,5 @@
 // UEFI Bootloader Paging Setup
-// Creates PML4 page tables for kernel handover
+// Creates page tables for kernel handover
 //
 // Memory Layout:
 //   Identity Map:  0x0000_0000_0000_0000 - Low 4GB (for boot transition)
@@ -7,6 +7,7 @@
 //   Kernel:        0xFFFF_FFFF_8000_0000 - Kernel image (2GB window)
 
 const std = @import("std");
+const builtin = @import("builtin");
 const uefi = std.os.uefi;
 
 pub const HHDM_BASE: u64 = 0xFFFF_8000_0000_0000;
@@ -20,307 +21,295 @@ pub const PagingError = error{
     AddressOverflow,
 };
 
-/// Page table entry flags
-pub const PageFlags = packed struct(u64) {
+/// Page table entry flags (Architecture-specific)
+pub const PageFlags = struct {
     present: bool = false,
     writable: bool = false,
     user: bool = false,
-    write_through: bool = false,
-    cache_disable: bool = false,
-    accessed: bool = false,
-    dirty: bool = false,
-    huge_page: bool = false, // PS bit - 2MB/1GB pages
-    global: bool = false,
-    _available: u3 = 0,
-    phys_addr_bits: u40 = 0, // Physical address >> 12
-    _reserved: u11 = 0,
     no_execute: bool = false,
+    huge_page: bool = false,
+    global: bool = false,
 
-    pub fn withPhysAddr(self: PageFlags, phys: u64) PageFlags {
-        var copy = self;
-        copy.phys_addr_bits = @truncate(phys >> 12);
-        return copy;
-    }
+    pub fn toRaw(self: PageFlags, phys_addr: u64) u64 {
+        switch (builtin.cpu.arch) {
+            .x86_64 => {
+                var raw: u64 = 0;
+                if (self.present) raw |= 1 << 0;
+                if (self.writable) raw |= 1 << 1;
+                if (self.user) raw |= 1 << 2;
+                if (self.huge_page) raw |= 1 << 7;
+                if (self.global) raw |= 1 << 8;
+                if (self.no_execute) raw |= 1 << 63;
+                raw |= (phys_addr & 0x000F_FFFF_FFFF_F000);
+                return raw;
+            },
+            .aarch64 => {
+                // AArch64 page/block descriptor format:
+                // [1:0] = 0b11 for page/table, 0b01 for block
+                // [4:2] = AttrIndx (MAIR index: 0=Device, 1=Normal WB, 2=Normal NC)
+                // [6] = AP[1] (1=EL0 accessible)
+                // [7] = AP[2] (1=read-only)
+                // [9:8] = SH (shareability: 3=Inner Shareable)
+                // [10] = AF (Access Flag, must be 1)
+                // [54] = UXN (Unprivileged eXecute Never)
+                var raw: u64 = 0x3; // Valid + Page descriptor
+                if (self.huge_page) raw = 0x1; // Block descriptor instead
 
-    pub fn getPhysAddr(self: PageFlags) u64 {
-        return @as(u64, self.phys_addr_bits) << 12;
-    }
+                // AttrIndx = 1 for normal write-back cacheable memory
+                raw |= (1 << 2); // MAIR index 1 (Normal WB)
 
-    pub fn toU64(self: PageFlags) u64 {
-        return @bitCast(self);
+                if (self.no_execute) raw |= (1 << 54); // UXN
+                if (!self.writable) raw |= (1 << 7); // AP[2] = 1 (RO)
+                if (self.user) raw |= (1 << 6); // AP[1] = 1 (EL0)
+
+                raw |= (1 << 10); // AF (Access Flag) - required
+                raw |= (3 << 8); // SH = Inner Shareable
+                raw |= (phys_addr & 0x000F_FFFF_FFFF_F000);
+                return raw;
+            },
+            else => @compileError("Unsupported architecture"),
+        }
     }
 };
 
-/// Flags for intermediate page table entries (PML4E, PDPTE, PDE pointing to next level)
-/// NX bit in intermediate entries acts as OR gate - if set here, all pages below are NX.
-/// We leave NX=0 in intermediates so leaf entries control executability.
-/// Value: Present(1) + Writable(2) = 0x03, with explicit documentation
-const INTERMEDIATE_FLAGS: u64 = (PageFlags{
-    .present = true,
-    .writable = true,
-    .user = false, // Supervisor only
-    .no_execute = false, // Let leaf entries decide
-}).toU64();
-
-/// Page table (512 entries)
-pub const PageTable = struct {
-    entries: [ENTRIES_PER_TABLE]u64,
-
-    pub fn init() PageTable {
-        return .{ .entries = [_]u64{0} ** ENTRIES_PER_TABLE };
-    }
+const INTERMEDIATE_FLAGS: u64 = switch (builtin.cpu.arch) {
+    .x86_64 => (1 << 0) | (1 << 1), // Present + Writable
+    .aarch64 => 0x3, // Valid + Table
+    else => 0,
 };
 
 /// Paging context for bootloader
 pub const PagingContext = struct {
-    pml4_phys: u64,
+    root_phys: u64,
     bs: *uefi.tables.BootServices,
     max_phys: u64,
 
-    /// Allocate a zeroed page for page tables
     fn allocPage(self: *PagingContext) PagingError!u64 {
-        const pages = self.bs.allocatePages(
-            .any,
-            .loader_data,
-            1,
-        ) catch return PagingError.AllocationFailed;
-
+        const pages = self.bs.allocatePages(.any, .loader_data, 1) catch return PagingError.AllocationFailed;
         const phys = @intFromPtr(pages.ptr);
-
-        // Zero the page
         const ptr: [*]u8 = @ptrCast(pages.ptr);
-        @memset(ptr[0..PAGE_SIZE], 0);
-
+        var i: usize = 0;
+        while (i < PAGE_SIZE) : (i += 1) ptr[i] = 0;
         return phys;
     }
 
-    /// Get virtual address for physical address (UEFI identity maps everything)
     fn physToVirt(self: *PagingContext, phys: u64) [*]u64 {
         _ = self;
         return @ptrFromInt(phys);
     }
 
-    /// Map a single 4KB page
     pub fn mapPage(self: *PagingContext, virt: u64, phys: u64, flags: PageFlags) PagingError!void {
-        const pml4_idx = (virt >> 39) & 0x1FF;
-        const pdpt_idx = (virt >> 30) & 0x1FF;
-        const pd_idx = (virt >> 21) & 0x1FF;
-        const pt_idx = (virt >> 12) & 0x1FF;
+        const idx3 = (virt >> 39) & 0x1FF;
+        const idx2 = (virt >> 30) & 0x1FF;
+        const idx1 = (virt >> 21) & 0x1FF;
+        const idx0 = (virt >> 12) & 0x1FF;
 
-        // Get or create PDPT
-        var pml4 = self.physToVirt(self.pml4_phys);
-        var pdpt_phys: u64 = undefined;
-        if (pml4[pml4_idx] & 1 != 0) {
-            pdpt_phys = pml4[pml4_idx] & 0x000F_FFFF_FFFF_F000;
-        } else {
-            pdpt_phys = try self.allocPage();
-            pml4[pml4_idx] = pdpt_phys | INTERMEDIATE_FLAGS;
+        var table = self.physToVirt(self.root_phys);
+        
+        // Level 3 -> Level 2
+        if ((table[idx3] & 1) == 0) {
+            const next = try self.allocPage();
+            table[idx3] = next | INTERMEDIATE_FLAGS;
         }
+        table = self.physToVirt(table[idx3] & 0x000F_FFFF_FFFF_F000);
 
-        // Get or create PD
-        var pdpt = self.physToVirt(pdpt_phys);
-        var pd_phys: u64 = undefined;
-        if (pdpt[pdpt_idx] & 1 != 0) {
-            pd_phys = pdpt[pdpt_idx] & 0x000F_FFFF_FFFF_F000;
-        } else {
-            pd_phys = try self.allocPage();
-            pdpt[pdpt_idx] = pd_phys | INTERMEDIATE_FLAGS;
+        // Level 2 -> Level 1
+        if ((table[idx2] & 1) == 0) {
+            const next = try self.allocPage();
+            table[idx2] = next | INTERMEDIATE_FLAGS;
         }
+        table = self.physToVirt(table[idx2] & 0x000F_FFFF_FFFF_F000);
 
-        // Get or create PT
-        var pd = self.physToVirt(pd_phys);
-        var pt_phys: u64 = undefined;
-        if (pd[pd_idx] & 1 != 0) {
-            pt_phys = pd[pd_idx] & 0x000F_FFFF_FFFF_F000;
-        } else {
-            pt_phys = try self.allocPage();
-            pd[pd_idx] = pt_phys | INTERMEDIATE_FLAGS;
+        // Level 1 -> Level 0
+        if ((table[idx1] & 1) == 0) {
+            const next = try self.allocPage();
+            table[idx1] = next | INTERMEDIATE_FLAGS;
         }
+        table = self.physToVirt(table[idx1] & 0x000F_FFFF_FFFF_F000);
 
-        // Set PT entry
-        var pt = self.physToVirt(pt_phys);
-        pt[pt_idx] = flags.withPhysAddr(phys).toU64();
+        // Level 0 (Leaf)
+        table[idx0] = flags.toRaw(phys);
     }
 
-    /// Map a 2MB huge page
     pub fn mapHugePage(self: *PagingContext, virt: u64, phys: u64, flags: PageFlags) PagingError!void {
-        const pml4_idx = (virt >> 39) & 0x1FF;
-        const pdpt_idx = (virt >> 30) & 0x1FF;
-        const pd_idx = (virt >> 21) & 0x1FF;
+        const idx3 = (virt >> 39) & 0x1FF;
+        const idx2 = (virt >> 30) & 0x1FF;
+        const idx1 = (virt >> 21) & 0x1FF;
 
-        // Get or create PDPT
-        var pml4 = self.physToVirt(self.pml4_phys);
-        var pdpt_phys: u64 = undefined;
-        if (pml4[pml4_idx] & 1 != 0) {
-            pdpt_phys = pml4[pml4_idx] & 0x000F_FFFF_FFFF_F000;
-        } else {
-            pdpt_phys = try self.allocPage();
-            pml4[pml4_idx] = pdpt_phys | INTERMEDIATE_FLAGS;
+        var table = self.physToVirt(self.root_phys);
+        
+        if ((table[idx3] & 1) == 0) {
+            const next = try self.allocPage();
+            table[idx3] = next | INTERMEDIATE_FLAGS;
         }
+        table = self.physToVirt(table[idx3] & 0x000F_FFFF_FFFF_F000);
 
-        // Get or create PD
-        var pdpt = self.physToVirt(pdpt_phys);
-        var pd_phys: u64 = undefined;
-        if (pdpt[pdpt_idx] & 1 != 0) {
-            pd_phys = pdpt[pdpt_idx] & 0x000F_FFFF_FFFF_F000;
-        } else {
-            pd_phys = try self.allocPage();
-            pdpt[pdpt_idx] = pd_phys | INTERMEDIATE_FLAGS;
+        if ((table[idx2] & 1) == 0) {
+            const next = try self.allocPage();
+            table[idx2] = next | INTERMEDIATE_FLAGS;
         }
+        table = self.physToVirt(table[idx2] & 0x000F_FFFF_FFFF_F000);
 
-        // Set PD entry with huge page flag
-        var pd = self.physToVirt(pd_phys);
         var huge_flags = flags;
         huge_flags.huge_page = true;
-        pd[pd_idx] = huge_flags.withPhysAddr(phys).toU64();
+        table[idx1] = huge_flags.toRaw(phys);
     }
 
-    /// Map a range using 2MB pages where possible
-    /// Uses checked arithmetic to prevent overflow in ReleaseFast builds
     pub fn mapRange(self: *PagingContext, virt_start: u64, phys_start: u64, size: u64, flags: PageFlags) PagingError!void {
-        const huge_size: u64 = 2 * 1024 * 1024; // 2MB
+        const huge_size: u64 = 2 * 1024 * 1024;
         var offset: u64 = 0;
 
         while (offset < size) {
-            // Security: use checked arithmetic to prevent address wrap-around
             const virt = std.math.add(u64, virt_start, offset) catch return PagingError.AddressOverflow;
             const phys = std.math.add(u64, phys_start, offset) catch return PagingError.AddressOverflow;
             const remaining = size - offset;
 
-            // Use 2MB pages if aligned and enough space
             if (virt % huge_size == 0 and phys % huge_size == 0 and remaining >= huge_size) {
                 try self.mapHugePage(virt, phys, flags);
-                offset = std.math.add(u64, offset, huge_size) catch return PagingError.AddressOverflow;
+                offset += huge_size;
             } else {
                 try self.mapPage(virt, phys, flags);
-                offset = std.math.add(u64, offset, PAGE_SIZE) catch return PagingError.AddressOverflow;
+                offset += PAGE_SIZE;
             }
         }
     }
 };
 
-/// Create page tables for kernel
-/// Returns physical address of PML4
 pub fn createKernelPageTables(
     bs: *uefi.tables.BootServices,
     max_phys_addr: u64,
     kernel_segments: []const KernelSegment,
 ) PagingError!u64 {
-    // Allocate PML4
-    const pml4_pages = bs.allocatePages(.any, .loader_data, 1) catch {
-        return PagingError.AllocationFailed;
-    };
-    const pml4_phys = @intFromPtr(pml4_pages.ptr);
-
-    // Zero PML4
-    const pml4_ptr: [*]u8 = @ptrCast(pml4_pages.ptr);
-    @memset(pml4_ptr[0..PAGE_SIZE], 0);
+    const root_pages = bs.allocatePages(.any, .loader_data, 1) catch return PagingError.AllocationFailed;
+    const root_phys = @intFromPtr(root_pages.ptr);
+    const ptr: [*]u8 = @ptrCast(root_pages.ptr);
+    var i: usize = 0;
+    while (i < PAGE_SIZE) : (i += 1) ptr[i] = 0;
 
     var ctx = PagingContext{
-        .pml4_phys = pml4_phys,
+        .root_phys = root_phys,
         .bs = bs,
         .max_phys = max_phys_addr,
     };
 
-    // Data pages: writable but NOT executable (W^X policy)
-    const rw_flags = PageFlags{
-        .present = true,
-        .writable = true,
-        .global = true,
-        .no_execute = true, // Security: prevent code execution from data pages
-    };
+    const rw_flags = PageFlags{ .present = true, .writable = true, .global = true, .no_execute = true };
+    const rx_flags = PageFlags{ .present = true, .writable = false, .global = true, .no_execute = false };
+    const ro_flags = PageFlags{ .present = true, .writable = false, .global = true, .no_execute = true };
+    const identity_flags = PageFlags{ .present = true, .writable = true, .global = true, .no_execute = false };
 
-    // Code pages: executable but NOT writable (W^X policy)
-    const rx_flags = PageFlags{
-        .present = true,
-        .writable = false,
-        .global = true,
-        .no_execute = false, // Executable code
-    };
+    // 1. Identity map low 4GB (or up to max_phys)
+    try ctx.mapRange(0, 0, @min(max_phys_addr, 0x1_0000_0000), identity_flags);
 
-    // Read-only data pages: neither writable nor executable
-    const ro_flags = PageFlags{
-        .present = true,
-        .writable = false,
-        .global = true,
-        .no_execute = true, // Security: .rodata should not be executable
-    };
-
-    // Identity map flags: must be executable since bootloader runs from here
-    // This is temporary and will be unmapped after kernel takes over
-    const identity_flags = PageFlags{
-        .present = true,
-        .writable = true,
-        .global = true,
-        .no_execute = false, // Must be executable for bootloader code
-    };
-
-    // 1. Identity map all physical memory (UEFI stack can live above 4GB on EDK2/QEMU)
-    // Must be executable because bootloader continues running from identity-mapped
-    // addresses after CR3 switch until kernel entry
-    try ctx.mapRange(0, 0, max_phys_addr, identity_flags);
-
-    // 2. HHDM: Map all physical memory at HHDM_BASE
+    // 2. HHDM
     try ctx.mapRange(HHDM_BASE, 0, max_phys_addr, rw_flags);
 
-    // 3. Map kernel segments at high half with proper W^X enforcement
+    // 3. Kernel segments
     for (kernel_segments) |seg| {
-        const flags = blk: {
-            if (seg.writable) {
-                // Writable segments must NOT be executable (W^X)
-                break :blk rw_flags;
-            } else if (seg.executable) {
-                // Executable code: read + execute, no write
-                break :blk rx_flags;
-            } else {
-                // Read-only data (.rodata): no write, no execute
-                break :blk ro_flags;
-            }
-        };
+        const flags = if (seg.writable) rw_flags else if (seg.executable) rx_flags else ro_flags;
         try ctx.mapRange(seg.virt_addr, seg.phys_addr, seg.size, flags);
     }
 
-    return pml4_phys;
+    return root_phys;
 }
 
-/// Kernel segment info (from ELF loader)
 pub const KernelSegment = struct {
     virt_addr: u64,
     phys_addr: u64,
     size: u64,
     writable: bool,
-    executable: bool, // Security: must propagate from ELF PF_X flag
+    executable: bool,
 };
 
-/// Load new page tables (switch CR3)
-pub fn loadPageTables(pml4_phys: u64) void {
-    asm volatile ("mov %[pml4], %%cr3"
-        :
-        : [pml4] "r" (pml4_phys),
-    );
+pub fn loadPageTables(root_phys: u64) void {
+    switch (builtin.cpu.arch) {
+        .x86_64 => {
+            asm volatile ("mov %[root], %%cr3" : : [root] "r" (root_phys));
+        },
+        .aarch64 => {
+            // AArch64 uses TTBR0 for lower half (0x0000...) and TTBR1 for upper half (0xFFFF...)
+            // Kernel is at 0xFFFFFFFF80000000 which is in TTBR1 range
+            // Identity map is at 0x0 which is in TTBR0 range
+            // HHDM is at 0xFFFF800000000000 which is in TTBR1 range
+
+            // Configure MAIR_EL1 (Memory Attribute Indirection Register)
+            // Index 0: Device-nGnRnE (strongly ordered device memory)
+            // Index 1: Normal, Inner/Outer Write-Back, Non-transient, Allocate
+            // Index 2: Normal, Inner/Outer Non-Cacheable
+            const MAIR_DEVICE: u64 = 0x00; // Device-nGnRnE
+            const MAIR_NORMAL_WB: u64 = 0xFF; // Inner/Outer WB, R+W Allocate
+            const MAIR_NORMAL_NC: u64 = 0x44; // Inner/Outer Non-Cacheable
+            const mair_value: u64 = MAIR_DEVICE | (MAIR_NORMAL_WB << 8) | (MAIR_NORMAL_NC << 16);
+
+            // Configure TCR_EL1:
+            // - T0SZ = 16 (48-bit VA for TTBR0)
+            // - T1SZ = 16 (48-bit VA for TTBR1)
+            // - TG0 = 0b00 (4KB granule for TTBR0)
+            // - TG1 = 0b10 (4KB granule for TTBR1)
+            // - IPS = 0b010 (40-bit PA, 1TB)
+            // - SH0/SH1 = 0b11 (Inner Shareable)
+            // - ORGN0/ORGN1 = 0b01 (Write-Back Write-Allocate Cacheable)
+            // - IRGN0/IRGN1 = 0b01 (Write-Back Write-Allocate Cacheable)
+            const TCR_T0SZ: u64 = 16;
+            const TCR_T1SZ: u64 = 16;
+            const TCR_TG0_4K: u64 = 0b00 << 14;
+            const TCR_TG1_4K: u64 = 0b10 << 30;
+            const TCR_SH0_INNER: u64 = 0b11 << 12;
+            const TCR_SH1_INNER: u64 = 0b11 << 28;
+            const TCR_ORGN0_WBWA: u64 = 0b01 << 10;
+            const TCR_ORGN1_WBWA: u64 = 0b01 << 26;
+            const TCR_IRGN0_WBWA: u64 = 0b01 << 8;
+            const TCR_IRGN1_WBWA: u64 = 0b01 << 24;
+            const TCR_IPS_1TB: u64 = 0b010 << 32;
+
+            const tcr_value = TCR_T0SZ | (TCR_T1SZ << 16) | TCR_TG0_4K | TCR_TG1_4K |
+                TCR_SH0_INNER | TCR_SH1_INNER | TCR_ORGN0_WBWA | TCR_ORGN1_WBWA |
+                TCR_IRGN0_WBWA | TCR_IRGN1_WBWA | TCR_IPS_1TB;
+
+            asm volatile (
+                // Disable MMU temporarily to safely switch page tables
+                \\mrs x4, sctlr_el1
+                \\bic x5, x4, #1
+                \\msr sctlr_el1, x5
+                \\isb
+                // Configure memory attributes
+                \\msr mair_el1, %[mair]
+                // Configure translation control
+                \\msr tcr_el1, %[tcr]
+                // Set page table bases
+                \\msr ttbr0_el1, %[root]
+                \\msr ttbr1_el1, %[root]
+                // Invalidate all TLBs
+                \\tlbi vmalle1
+                \\dsb sy
+                \\isb
+                // Re-enable MMU
+                \\msr sctlr_el1, x4
+                \\isb
+                :
+                : [mair] "r" (mair_value), [tcr] "r" (tcr_value), [root] "r" (root_phys)
+                : .{ .x4 = true, .x5 = true, .memory = true }
+            );
+        },
+        else => {},
+    }
 }
 
-/// Remove identity mapping after boot transition is complete
-/// SECURITY: This eliminates the low-address executable region that could
-/// be exploited if an attacker can redirect control flow to addresses < 4GB.
-/// Must be called from kernel init AFTER switching to HHDM addressing.
-///
-/// The identity map covers PML4 entries 0-3 (each entry covers 512GB).
-/// For 4GB identity map, only entry 0 is used.
-pub fn unmapIdentityRegion(pml4_phys: u64) void {
-    // Access PML4 via HHDM since we're now running in higher half
-    const pml4: [*]volatile u64 = @ptrFromInt(HHDM_BASE + pml4_phys);
-
-    // Clear PML4 entry 0 (covers virtual addresses 0x0 - 0x7F_FFFF_FFFF)
-    // This removes the entire identity-mapped region
-    pml4[0] = 0;
-
-    // Flush TLB by reloading CR3
-    asm volatile ("mov %%cr3, %%rax; mov %%rax, %%cr3" ::: .{ .rax = true, .memory = true });
-}
-
-/// Check if identity mapping is still present (for debugging/assertions)
-pub fn isIdentityMapped(pml4_phys: u64) bool {
-    const pml4: [*]volatile u64 = @ptrFromInt(HHDM_BASE + pml4_phys);
-    return (pml4[0] & 1) != 0; // Check present bit
+pub fn unmapIdentityRegion(root_phys: u64) void {
+    const root: [*]volatile u64 = @ptrFromInt(HHDM_BASE + root_phys);
+    root[0] = 0;
+    
+    switch (builtin.cpu.arch) {
+        .x86_64 => {
+            asm volatile ("mov %%cr3, %%rax; mov %%rax, %%cr3" ::: .{ .rax = true, .memory = true });
+        },
+        .aarch64 => {
+            asm volatile (
+                \\tlbi vmalle1
+                \\dsb sy
+                \\isb
+                : : : .{ .memory = true }
+            );
+        },
+        else => {},
+    }
 }

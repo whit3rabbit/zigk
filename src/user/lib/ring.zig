@@ -27,13 +27,23 @@ const ring_uapi = uapi.ring;
 const syscalls = uapi.syscalls;
 pub const SyscallError = syscall.SyscallError;
 
-/// Memory barrier for x86_64 userspace
+const builtin = @import("builtin");
+
+/// Memory barrier for userspace (architecture-dependent)
 inline fn acquireFence() void {
-    asm volatile ("lfence" ::: .{ .memory = true });
+    switch (builtin.cpu.arch) {
+        .x86_64 => asm volatile ("lfence" ::: .{ .memory = true }),
+        .aarch64 => asm volatile ("dmb ishld" ::: .{ .memory = true }),
+        else => @compileError("Unsupported architecture"),
+    }
 }
 
 inline fn releaseFence() void {
-    asm volatile ("sfence" ::: .{ .memory = true });
+    switch (builtin.cpu.arch) {
+        .x86_64 => asm volatile ("sfence" ::: .{ .memory = true }),
+        .aarch64 => asm volatile ("dmb ishst" ::: .{ .memory = true }),
+        else => @compileError("Unsupported architecture"),
+    }
 }
 
 // Re-export uapi types for convenience

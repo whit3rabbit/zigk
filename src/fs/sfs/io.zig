@@ -23,7 +23,7 @@ pub fn readSector(device_fd: *fd.FileDescriptor, lba: u32, buf: *[512]u8) t.Sect
         .success => |bytes| {
             @memset(buf, 0);
             if (bytes < 512) return error.IOError;
-            asm volatile ("mfence" ::: .{ .memory = true });
+            @import("hal").mmio.memoryBarrier(); // 
             ahci.adapter.copyFromDmaBuffer(buf_phys, buf);
         },
         .err => return error.IOError,
@@ -71,7 +71,7 @@ pub fn readSectorAsync(self: *t.SFS, lba: u32, buf: []u8) !void {
     switch (result) {
         .success => |bytes| {
             if (bytes < 512) return error.IOError;
-            asm volatile ("mfence" ::: .{ .memory = true });
+            @import("hal").mmio.memoryBarrier(); // 
             ahci.adapter.copyFromDmaBuffer(buf_phys, buf[0..512]);
         },
         .err => return error.IOError,
@@ -120,7 +120,7 @@ pub fn readSectorsAsync(self: *t.SFS, lba: u32, sector_count: u16, buf: []u8) !v
     switch (result) {
         .success => |bytes| {
             if (bytes < total_bytes) return error.IOError;
-            asm volatile ("mfence" ::: .{ .memory = true });
+            @import("hal").mmio.memoryBarrier(); // 
             ahci.adapter.copyFromDmaBuffer(buf_phys, buf[0..total_bytes]);
         },
         .err => return error.IOError,

@@ -20,7 +20,9 @@
 const std = @import("std");
 
 // HAL layer for interrupt control - only place these operations are permitted
-const is_freestanding = @import("builtin").os.tag == .freestanding;
+const builtin = @import("builtin");
+const is_freestanding = builtin.os.tag == .freestanding;
+
 
 // Scheduler access for lock_depth tracking (yield safety check)
 const sched = if (is_freestanding) @import("sched") else null;
@@ -476,12 +478,13 @@ pub const RwLock = struct {
 ///   - Improves performance on hyperthreaded CPUs
 inline fn spinHint() void {
     if (is_freestanding) {
-        asm volatile ("pause"
-            :
-            :
-            : .{ .memory = true }
-        );
+        switch (builtin.cpu.arch) {
+            .x86_64 => asm volatile ("pause"),
+            .aarch64 => asm volatile ("yield"),
+            else => {},
+        }
     } else {
+
         // On host for testing, yield to OS scheduler
         std.Thread.yield() catch {};
     }

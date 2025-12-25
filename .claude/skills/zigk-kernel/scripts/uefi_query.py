@@ -13,7 +13,8 @@ Usage:
     python uefi_query.py memmap       # Memory map and types
     python uefi_query.py file         # File protocol and loading
     python uefi_query.py exit         # ExitBootServices pattern
-    python uefi_query.py paging       # Page table setup in UEFI
+    python uefi_query.py paging       # Page table setup in UEFI (x86_64)
+    python uefi_query.py aarch64      # AArch64 paging (TTBR/MAIR/TCR)
     python uefi_query.py errors       # Common errors and fixes
 """
 
@@ -635,7 +636,7 @@ fn serialPrint(msg: []const u8) void {
 """,
 
     "paging": """
-## Page Table Setup in UEFI Bootloader
+## Page Table Setup in UEFI Bootloader (x86_64)
 
 ### Memory Layout Goals
 ```text
@@ -857,6 +858,115 @@ if (status != .success) {
     _ = bs._exitBootServices(image, key);
 }
 ```
+""",
+
+    "aarch64": """
+## AArch64 Paging in UEFI Bootloader
+
+AArch64 uses a fundamentally different paging model than x86_64. Key differences:
+- Two page table registers (TTBR0/TTBR1) for address space split
+- Memory attributes via MAIR indirection rather than direct PTE flags
+- Explicit translation control via TCR_EL1
+
+### Address Space Split
+
+| Register | Address Range | Purpose |
+|----------|---------------|---------|
+| TTBR0_EL1 | 0x0000... (lower half) | User space, identity map |
+| TTBR1_EL1 | 0xFFFF... (upper half) | Kernel, HHDM |
+
+The kernel at `0xFFFFFFFF80000000` and HHDM at `0xFFFF800000000000` require TTBR1.
+
+### System Registers
+
+#### MAIR_EL1 (Memory Attribute Indirection Register)
+```zig
+const MAIR_DEVICE: u64 = 0x00;       // Index 0: Device-nGnRnE
+const MAIR_NORMAL_WB: u64 = 0xFF;    // Index 1: Normal, WB, R+W Alloc
+const MAIR_NORMAL_NC: u64 = 0x44;    // Index 2: Normal, Non-Cacheable
+
+const mair = MAIR_DEVICE | (MAIR_NORMAL_WB << 8) | (MAIR_NORMAL_NC << 16);
+```
+
+#### TCR_EL1 (Translation Control Register)
+```zig
+const TCR_T0SZ: u64 = 16;           // 48-bit VA for TTBR0
+const TCR_T1SZ: u64 = 16;           // 48-bit VA for TTBR1
+const TCR_TG0_4K: u64 = 0b00 << 14; // 4KB granule TTBR0
+const TCR_TG1_4K: u64 = 0b10 << 30; // 4KB granule TTBR1
+const TCR_SH_INNER: u64 = 0b11;     // Inner Shareable
+const TCR_IPS_1TB: u64 = 0b010 << 32; // 40-bit PA
+
+const tcr = TCR_T0SZ | (TCR_T1SZ << 16) | TCR_TG0_4K | TCR_TG1_4K |
+    (TCR_SH_INNER << 12) | (TCR_SH_INNER << 28) | // SH0, SH1
+    (0b01 << 10) | (0b01 << 26) | // ORGN0, ORGN1 (WB-WA)
+    (0b01 << 8) | (0b01 << 24) |  // IRGN0, IRGN1 (WB-WA)
+    TCR_IPS_1TB;
+```
+
+### Page Table Entry Format
+```zig
+fn toRawAarch64(flags: PageFlags, phys: u64) u64 {
+    var raw: u64 = 0x3;  // Valid + Page descriptor
+    if (flags.huge_page) raw = 0x1;  // Block descriptor
+
+    raw |= (1 << 2);   // AttrIndx = 1 (Normal WB via MAIR)
+    raw |= (1 << 10);  // AF (Access Flag) - REQUIRED!
+    raw |= (3 << 8);   // SH = Inner Shareable
+
+    if (flags.no_execute) raw |= (1 << 54);  // UXN
+    if (!flags.writable) raw |= (1 << 7);    // AP[2] = RO
+    if (flags.user) raw |= (1 << 6);         // AP[1] = EL0
+
+    raw |= (phys & 0x000F_FFFF_FFFF_F000);
+    return raw;
+}
+```
+
+### Loading Page Tables
+```zig
+asm volatile (
+    // Disable MMU
+    \\\\mrs x4, sctlr_el1
+    \\\\bic x5, x4, #1
+    \\\\msr sctlr_el1, x5
+    \\\\isb
+    // Configure
+    \\\\msr mair_el1, %[mair]
+    \\\\msr tcr_el1, %[tcr]
+    \\\\msr ttbr0_el1, %[root]
+    \\\\msr ttbr1_el1, %[root]
+    // Invalidate TLB
+    \\\\tlbi vmalle1
+    \\\\dsb sy
+    \\\\isb
+    // Re-enable MMU
+    \\\\msr sctlr_el1, x4
+    \\\\isb
+    :
+    : [mair] "r" (mair), [tcr] "r" (tcr), [root] "r" (pml4_phys)
+    : .{ .x4 = true, .x5 = true, .memory = true }
+);
+```
+
+### Common Errors
+
+**Translation fault, zeroth level at 0xFFFFFFFF80xxxxxx**
+- Cause: TTBR1 not set (only TTBR0 was configured)
+- Fix: Set both TTBR0_EL1 and TTBR1_EL1
+
+**Instruction abort after loading page tables**
+- Cause: AttrIndx = 0 (Device memory) used for code
+- Fix: Set AttrIndx = 1 for Normal memory: `raw |= (1 << 2);`
+
+**Repeated faults at same address**
+- Cause: AF (Access Flag) not set
+- Fix: Always set: `raw |= (1 << 10);`
+
+### Key Files
+- `src/boot/uefi/paging.zig` - Dual-arch paging (x86_64/aarch64)
+- `src/arch/aarch64/boot/entry.S` - Kernel entry (`kentry`)
+- `src/arch/aarch64/boot/linker.ld` - Kernel high-half layout
 """,
 }
 

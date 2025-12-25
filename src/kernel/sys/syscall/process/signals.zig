@@ -6,6 +6,7 @@
 // - sys_rt_sigreturn: Return from signal handler
 // - sys_set_tid_address: Set pointer to thread ID (TLS support)
 
+const builtin = @import("builtin");
 const base = @import("base.zig");
 const uapi = @import("uapi");
 const console = @import("console");
@@ -135,10 +136,12 @@ pub fn sys_sigaltstack(ss_ptr: usize, old_ss_ptr: usize) SyscallError!usize {
 
     // Check if we're currently executing on the alternate stack
     // If so, we cannot change it
-    const current_rsp = asm volatile ("mov %%rsp, %[ret]"
-        : [ret] "=r" (-> u64)
-    );
-    const on_altstack = isOnAlternateStack(current_thread, current_rsp);
+    const current_sp: u64 = switch (builtin.cpu.arch) {
+        .x86_64 => asm volatile ("mov %%rsp, %[ret]" : [ret] "=r" (-> u64)),
+        .aarch64 => asm volatile ("mov %[ret], sp" : [ret] "=r" (-> u64)),
+        else => @compileError("Unsupported architecture"),
+    };
+    const on_altstack = isOnAlternateStack(current_thread, current_sp);
 
     // Return old stack info if requested
     if (old_ss_ptr != 0) {

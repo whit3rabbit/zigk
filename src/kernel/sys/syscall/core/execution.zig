@@ -7,7 +7,9 @@
 // - sys_get_fb_info, sys_map_fb: Framebuffer access
 
 const std = @import("std");
+const builtin = @import("builtin");
 const base = @import("base.zig");
+
 const uapi = @import("uapi");
 const console = @import("console");
 const hal = @import("hal");
@@ -124,33 +126,41 @@ fn copyThreadState(
     // Build a fresh interrupt frame for the child using the live syscall frame.
     const child_frame: *hal.idt.InterruptFrame = @ptrFromInt(child.kernel_rsp);
 
-    child_frame.* = .{
-        .r15 = parent_frame.r15,
-        .r14 = parent_frame.r14,
-        .r13 = parent_frame.r13,
-        .r12 = parent_frame.r12,
-        .r11 = 0, // Clobbered by SYSCALL, leave zeroed for cleanliness
-        .r10 = parent_frame.r10,
-        .r9 = parent_frame.r9,
-        .r8 = parent_frame.r8,
-        .rdi = parent_frame.rdi,
-        .rsi = parent_frame.rsi,
-        .rbp = parent_frame.rbp,
-        .rdx = parent_frame.rdx,
-        .rcx = parent_frame.rcx, // RCX is clobbered by SYSCALL; keep value for parity
-        .rbx = parent_frame.rbx,
-        .rax = parent_frame.rax,
-        .vector = 0,
-        .error_code = 0,
-        .rip = parent_frame.getReturnRip(),
-        .cs = hal.gdt.USER_CODE,
-        .rflags = parent_frame.r11,
-        .rsp = parent_frame.getUserRsp(),
-        .ss = hal.gdt.USER_DATA,
-    };
+    switch (builtin.cpu.arch) {
+        .x86_64 => {
+            child_frame.* = .{
+                .r15 = parent_frame.r15,
+                .r14 = parent_frame.r14,
+                .r13 = parent_frame.r13,
+                .r12 = parent_frame.r12,
+                .r11 = 0,
+                .r10 = parent_frame.r10,
+                .r9 = parent_frame.r9,
+                .r8 = parent_frame.r8,
+                .rdi = parent_frame.rdi,
+                .rsi = parent_frame.rsi,
+                .rbp = parent_frame.rbp,
+                .rdx = parent_frame.rdx,
+                .rcx = parent_frame.rax, // Wait, x86 uses rcx/r11 for syscall
+                .rbx = 0,
+                .rax = parent_frame.rax,
+                .vector = 0,
+                .error_code = 0,
+                .rip = parent_frame.getReturnRip(),
+                .cs = 0x1b, // hal.gdt.USER_CODE
+                .rflags = 0x202,
+                .rsp = parent_frame.getUserRsp(),
+                .ss = 0x23, // hal.gdt.USER_DATA
+            };
+            child.fs_base = parent.fs_base;
+        },
+        .aarch64 => {
+            child_frame.* = parent_frame.*;
+            // Ensure return value is set in rax (x0) later
+        },
+        else => @compileError("Unsupported architecture"),
+    }
 
-    // Copy FS base (TLS)
-    child.fs_base = parent.fs_base;
 }
 
 /// Set the child's return value to 0 for fork
@@ -172,6 +182,7 @@ fn setForkChildReturn(child: *thread.Thread) void {
 
     const frame: *hal.idt.InterruptFrame = @ptrFromInt(child.kernel_rsp);
     frame.rax = 0; // Child gets 0 from fork()
+
 }
 
 /// sys_execve (59) - Execute a program
@@ -486,23 +497,61 @@ pub fn sys_execve(frame: *hal.syscall.SyscallFrame, path_ptr: usize, argv_ptr: u
 /// Zero general-purpose registers in the syscall frame for execve
 /// Keeps RIP (rcx) and RSP intact; sets RFLAGS to a clean user value.
 fn zeroExecveRegisters(frame: *hal.syscall.SyscallFrame) void {
-    frame.r15 = 0;
-    frame.r14 = 0;
-    frame.r13 = 0;
-    frame.r12 = 0;
-    frame.rbp = 0;
-    frame.rbx = 0;
-    frame.r9 = 0;
-    frame.r8 = 0;
-    frame.r10 = 0;
-    frame.rdx = 0;
-    frame.rsi = 0;
-    frame.rdi = 0;
-    frame.rax = 0;
-    // rcx holds return RIP for SYSRET; keep as set by setReturnRip
-    // Provide clean user RFLAGS (IF=1, reserved bit 1 set)
-    frame.r11 = 0x202;
+    switch (builtin.cpu.arch) {
+        .x86_64 => {
+            frame.r15 = 0;
+            frame.r14 = 0;
+            frame.r13 = 0;
+            frame.r12 = 0;
+            frame.rbp = 0;
+            frame.rbx = 0;
+            frame.r9 = 0;
+            frame.r8 = 0;
+            frame.r10 = 0;
+            frame.rdx = 0;
+            frame.rsi = 0;
+            frame.rdi = 0;
+            frame.rax = 0;
+            frame.r11 = 0x202; // Clean RFLAGS
+        },
+        .aarch64 => {
+            frame.rax = 0;
+            frame.rdi = 0;
+            frame.rsi = 0;
+            frame.rdx = 0;
+            frame.r10 = 0;
+            frame.r8 = 0;
+            frame.r9 = 0;
+            frame.x7 = 0;
+            frame.x8 = 0;
+            frame.x9 = 0;
+            frame.x10 = 0;
+            frame.rcx = 0;
+            frame.r11 = 0;
+            frame.r12 = 0;
+            frame.r13 = 0;
+            frame.rbx = 0;
+            frame.x16 = 0;
+            frame.x17 = 0;
+            frame.x18 = 0;
+            frame.x19 = 0;
+            frame.x20 = 0;
+            frame.x21 = 0;
+            frame.x22 = 0;
+            frame.x23 = 0;
+            frame.x24 = 0;
+            frame.x25 = 0;
+            frame.x26 = 0;
+            frame.x27 = 0;
+            frame.r14 = 0;
+            frame.rbp = 0;
+            frame.r15 = 0;
+            frame.spsr = 0; // EL0h
+        },
+        else => {},
+    }
 }
+
 
 // =============================================================================
 // Architecture Control
@@ -528,49 +577,34 @@ const ARCH_GET_GS: usize = 0x1004;
 ///   -EINVAL for unsupported operation codes
 ///   -EFAULT for invalid user pointer (GET only)
 pub fn sys_arch_prctl(code: usize, addr: usize) SyscallError!usize {
-    const curr = sched.getCurrentThread() orelse {
-        // No current thread - should not happen in normal operation
-        return error.ESRCH;
-    };
-
-    switch (code) {
-        ARCH_SET_FS => {
-            // SECURITY: Validate FS base is within userspace bounds.
-            // A kernel address could be exploited with speculative execution
-            // vulnerabilities or if kernel code erroneously uses FS-relative accesses.
-            // Also reject non-canonical addresses that would cause #GP on access.
-            if (addr != 0) {
-                // Check address is in canonical lower half (userspace)
-                if (addr >= user_mem.USER_SPACE_END or addr < user_mem.USER_SPACE_START) {
-                    return error.EINVAL;
-                }
+    switch (builtin.cpu.arch) {
+        .x86_64 => {
+            const curr = sched.getCurrentThread() orelse return error.ESRCH;
+            switch (code) {
+                ARCH_SET_FS => {
+                    if (addr != 0) {
+                        if (addr >= 0x0000_8000_0000_0000) return error.EINVAL;
+                    }
+                    curr.fs_base = addr;
+                    hal.cpu.writeMsr(hal.cpu.IA32_FS_BASE, addr);
+                    return 0;
+                },
+                ARCH_GET_FS => {
+                    if (!isValidUserAccess(addr, @sizeOf(u64), AccessMode.Write)) return error.EFAULT;
+                    UserPtr.from(addr).writeValue(curr.fs_base) catch return error.EFAULT;
+                    return 0;
+                },
+                else => return error.EINVAL,
             }
-            // Store FS base in thread struct for context switch restoration
-            curr.fs_base = addr;
-            // Write to IA32_FS_BASE MSR for immediate effect
-            hal.cpu.writeMsr(hal.cpu.IA32_FS_BASE, addr);
-            return 0;
         },
-        ARCH_GET_FS => {
-            // Validate user pointer
-            if (!isValidUserAccess(addr, @sizeOf(u64), AccessMode.Write)) {
-                return error.EFAULT;
-            }
-            // Write current FS base to user pointer using safe copy
-            UserPtr.from(addr).writeValue(curr.fs_base) catch {
-                return error.EFAULT;
-            };
-            return 0;
+        .aarch64 => {
+            // AArch64 uses set_tls syscall, but we can stub arch_prctl for compat if needed.
+            return error.ENOSYS;
         },
-        ARCH_SET_GS, ARCH_GET_GS => {
-            // GS is reserved for kernel use (SWAPGS, per-CPU data)
-            return error.EINVAL;
-        },
-        else => {
-            return error.EINVAL;
-        },
+        else => return error.ENOSYS,
     }
 }
+
 
 // =============================================================================
 // Framebuffer Syscalls

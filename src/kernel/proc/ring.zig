@@ -235,11 +235,7 @@ pub fn allocateRing(
             header.consumer_pid = consumer_pid;
 
             // Memory barrier to ensure header is visible
-            asm volatile ("mfence"
-                :
-                :
-                : .{ .memory = true }
-            );
+            if (comptime @import("builtin").cpu.arch == .x86_64) { @import("hal").mmio.memoryBarrier(); }
 
             console.debug("Ring {}: allocated {} entries x {} bytes = {} pages", .{
                 ring.ring_id,
@@ -475,11 +471,7 @@ pub fn notifyConsumer(ring: *RingDescriptor) !void {
     // For user-facing notification, producer calls futex_wake on prod_idx
 
     // Memory barrier to ensure writes are visible
-    asm volatile ("mfence"
-        :
-        :
-        : .{ .memory = true }
-    );
+    if (comptime @import("builtin").cpu.arch == .x86_64) { @import("hal").mmio.memoryBarrier(); }
 
     // In a full implementation, we would track waiting threads per-ring
     // and wake them directly. For now, rely on userspace futex.

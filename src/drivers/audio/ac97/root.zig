@@ -22,7 +22,7 @@ var ac97_driver: ?*Ac97 = null;
 const idt = hal.idt;
 
 /// IRQ Handler for AC97 buffer completion interrupts.
-fn ac97IrqHandler(frame: *idt.InterruptFrame) void {
+fn ac97IrqHandler(frame: *const idt.InterruptFrame) void {
     _ = frame;
     if (ac97_driver) |driver| {
         ops.handleInterrupt(driver);

@@ -10,7 +10,18 @@ Zscapek includes a port of [doomgeneric](https://github.com/ozkl/doomgeneric), a
 
 - Zscapek kernel built with `zig build`
 - DOOM1.WAD shareware file (legally free to distribute)
-- QEMU or compatible x86_64 emulator
+- QEMU (`qemu-system-x86_64` or `qemu-system-aarch64`)
+
+## Architecture Support
+
+DOOM builds for both x86_64 and aarch64:
+
+```bash
+zig build iso                    # x86_64 (default)
+zig build iso -Darch=aarch64     # aarch64/ARM64
+```
+
+The aarch64 build uses C shims for va_list bootstrap to work around LLVM limitations with `@cVaArg` on ARM64.
 
 ## Downloading the WAD File
 
@@ -52,11 +63,17 @@ The build process will:
 ### Using QEMU
 
 ```bash
-# Standard run
+# x86_64 (default)
 zig build run
+zig build run-x86_64
+
+# aarch64
+zig build run -Darch=aarch64
+zig build run-aarch64
 
 # Or manually with QEMU
-qemu-system-x86_64 -M q35 -m 128M -cdrom zscapek.iso -serial stdio
+qemu-system-x86_64 -M q35 -m 128M -cdrom zigk.iso -serial stdio
+qemu-system-aarch64 -M virt -cpu max -m 512M -cdrom zigk.iso -serial stdio
 ```
 
 ### Boot Menu

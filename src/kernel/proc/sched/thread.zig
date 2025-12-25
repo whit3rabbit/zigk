@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const hal = @import("hal");
 const sync = @import("sync");
 const console = @import("console");
@@ -98,9 +99,15 @@ pub fn unregisterThread(t: *Thread) void {
 /// Get the currently running thread for the current CPU
 pub fn getCurrentThread() ?*Thread {
     // Read from GS:current_thread (offset 16)
-    const ptr = asm volatile ("movq %%gs:16, %[ret]"
-        : [ret] "=r" (-> u64),
-    );
+    const ptr = switch (builtin.cpu.arch) {
+        .x86_64 => asm volatile ("movq %%gs:16, %[ret]" : [ret] "=r" (-> u64)),
+        .aarch64 => blk: {
+            const tpidr = asm volatile ("mrs %[ret], tpidr_el1" : [ret] "=r" (-> u64));
+            const gs_data = @as(*hal.syscall.KernelGsData, @ptrFromInt(tpidr));
+            break :blk gs_data.current_thread;
+        },
+        else => 0,
+    };
 
     if (ptr == 0) return null;
     return @ptrFromInt(ptr);
@@ -109,18 +116,32 @@ pub fn getCurrentThread() ?*Thread {
 /// Set the currently running thread for the current CPU
 pub fn setCurrentThread(t: ?*Thread) void {
     const val = if (t) |thread_ptr| @intFromPtr(thread_ptr) else 0;
-    asm volatile ("movq %[val], %%gs:16"
-        :
-        : [val] "r" (val),
-    );
+    switch (builtin.cpu.arch) {
+        .x86_64 => asm volatile ("movq %[val], %%gs:16"
+            :
+            : [val] "r" (val),
+        ),
+        .aarch64 => {
+            const tpidr = asm volatile ("mrs %[ret], tpidr_el1" : [ret] "=r" (-> u64));
+            const gs_data: *hal.syscall.KernelGsData = @ptrFromInt(tpidr);
+            gs_data.current_thread = val;
+        },
+        else => {},
+    }
 }
 
 /// Get idle thread for current CPU
 pub fn getIdleThread() *Thread {
     // idle_thread is at offset 40 in KernelGsData
-    const ptr = asm volatile ("movq %%gs:40, %[ret]"
-        : [ret] "=r" (-> u64),
-    );
+    const ptr = switch (builtin.cpu.arch) {
+        .x86_64 => asm volatile ("movq %%gs:40, %[ret]" : [ret] "=r" (-> u64)),
+        .aarch64 => blk: {
+            const tpidr = asm volatile ("mrs %[ret], tpidr_el1" : [ret] "=r" (-> u64));
+            const gs_data = @as(*hal.syscall.KernelGsData, @ptrFromInt(tpidr));
+            break :blk gs_data.idle_thread;
+        },
+        else => 0,
+    };
     return @ptrFromInt(ptr);
 }
 

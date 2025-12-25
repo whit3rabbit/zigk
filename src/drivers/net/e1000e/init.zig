@@ -500,7 +500,7 @@ pub fn deinit(driver: *E1000e) void {
         // Small spin delay then retry - handles race between worker's
         // hasPackets() check and sched.block() call
         for (0..10) |_| {
-            asm volatile ("pause");
+            hal.cpu.pause();
         }
         sched.unblock(wt);
 

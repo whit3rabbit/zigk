@@ -10,46 +10,81 @@ fn fileExists(path: []const u8) bool {
     return true;
 }
 
-fn detectHostOvmf(host_os: std.Target.Os.Tag) OvmfPaths {
+fn detectHostOvmf(host_os: std.Target.Os.Tag, target_arch: std.Target.Cpu.Arch) OvmfPaths {
     var code: ?[]const u8 = null;
     var vars: ?[]const u8 = null;
 
     if (host_os == .macos) {
-        if (fileExists("/opt/homebrew/share/qemu/edk2-x86_64-code.fd")) {
-            code = "/opt/homebrew/share/qemu/edk2-x86_64-code.fd";
-        }
-        if (fileExists("/opt/homebrew/share/qemu/edk2-x86_64-vars.fd")) {
-            vars = "/opt/homebrew/share/qemu/edk2-x86_64-vars.fd";
-        }
-
-        if (code == null and fileExists("/usr/local/share/qemu/edk2-x86_64-code.fd")) {
-            code = "/usr/local/share/qemu/edk2-x86_64-code.fd";
-        }
-        if (vars == null and fileExists("/usr/local/share/qemu/edk2-x86_64-vars.fd")) {
-            vars = "/usr/local/share/qemu/edk2-x86_64-vars.fd";
+        if (target_arch == .aarch64) {
+            // AArch64 UEFI firmware paths on macOS
+            if (fileExists("/opt/homebrew/share/qemu/edk2-aarch64-code.fd")) {
+                code = "/opt/homebrew/share/qemu/edk2-aarch64-code.fd";
+            }
+            if (fileExists("/opt/homebrew/share/qemu/edk2-arm-vars.fd")) {
+                vars = "/opt/homebrew/share/qemu/edk2-arm-vars.fd";
+            }
+            if (code == null and fileExists("/usr/local/share/qemu/edk2-aarch64-code.fd")) {
+                code = "/usr/local/share/qemu/edk2-aarch64-code.fd";
+            }
+        } else {
+            // x86_64 UEFI firmware paths on macOS
+            if (fileExists("/opt/homebrew/share/qemu/edk2-x86_64-code.fd")) {
+                code = "/opt/homebrew/share/qemu/edk2-x86_64-code.fd";
+            }
+            if (fileExists("/opt/homebrew/share/qemu/edk2-x86_64-vars.fd")) {
+                vars = "/opt/homebrew/share/qemu/edk2-x86_64-vars.fd";
+            }
+            if (code == null and fileExists("/usr/local/share/qemu/edk2-x86_64-code.fd")) {
+                code = "/usr/local/share/qemu/edk2-x86_64-code.fd";
+            }
+            if (vars == null and fileExists("/usr/local/share/qemu/edk2-x86_64-vars.fd")) {
+                vars = "/usr/local/share/qemu/edk2-x86_64-vars.fd";
+            }
         }
 
         return .{ .code = code, .vars = vars };
     }
 
     if (host_os == .linux) {
-        const pair_paths = [_]struct { code: []const u8, vars: []const u8 }{
-            .{ .code = "/usr/share/OVMF/OVMF_CODE.fd", .vars = "/usr/share/OVMF/OVMF_VARS.fd" },
-            .{ .code = "/usr/share/OVMF/OVMF_CODE.secboot.fd", .vars = "/usr/share/OVMF/OVMF_VARS.secboot.fd" },
-            .{ .code = "/usr/share/edk2/ovmf/OVMF_CODE.fd", .vars = "/usr/share/edk2/ovmf/OVMF_VARS.fd" },
-            .{ .code = "/usr/share/edk2/ovmf/OVMF_CODE.secboot.fd", .vars = "/usr/share/edk2/ovmf/OVMF_VARS.secboot.fd" },
-            .{ .code = "/usr/share/qemu/edk2-x86_64-code.fd", .vars = "/usr/share/qemu/edk2-x86_64-vars.fd" },
-        };
+        if (target_arch == .aarch64) {
+            // AArch64 UEFI firmware paths on Linux
+            const aarch64_paths = [_]struct { code: []const u8, vars: []const u8 }{
+                .{ .code = "/usr/share/AAVMF/AAVMF_CODE.fd", .vars = "/usr/share/AAVMF/AAVMF_VARS.fd" },
+                .{ .code = "/usr/share/qemu-efi-aarch64/QEMU_EFI.fd", .vars = "/usr/share/qemu-efi-aarch64/vars-template-pflash.raw" },
+                .{ .code = "/usr/share/edk2/aarch64/QEMU_EFI.fd", .vars = "/usr/share/edk2/aarch64/vars-template-pflash.raw" },
+                .{ .code = "/usr/share/qemu/edk2-aarch64-code.fd", .vars = "/usr/share/qemu/edk2-arm-vars.fd" },
+            };
 
-        for (pair_paths) |pair| {
-            if (fileExists(pair.code) and fileExists(pair.vars)) {
-                return .{ .code = pair.code, .vars = pair.vars };
+            for (aarch64_paths) |pair| {
+                if (fileExists(pair.code) and fileExists(pair.vars)) {
+                    return .{ .code = pair.code, .vars = pair.vars };
+                }
             }
-        }
 
-        for (pair_paths) |pair| {
-            if (code == null and fileExists(pair.code)) code = pair.code;
-            if (vars == null and fileExists(pair.vars)) vars = pair.vars;
+            for (aarch64_paths) |pair| {
+                if (code == null and fileExists(pair.code)) code = pair.code;
+                if (vars == null and fileExists(pair.vars)) vars = pair.vars;
+            }
+        } else {
+            // x86_64 UEFI firmware paths on Linux
+            const pair_paths = [_]struct { code: []const u8, vars: []const u8 }{
+                .{ .code = "/usr/share/OVMF/OVMF_CODE.fd", .vars = "/usr/share/OVMF/OVMF_VARS.fd" },
+                .{ .code = "/usr/share/OVMF/OVMF_CODE.secboot.fd", .vars = "/usr/share/OVMF/OVMF_VARS.secboot.fd" },
+                .{ .code = "/usr/share/edk2/ovmf/OVMF_CODE.fd", .vars = "/usr/share/edk2/ovmf/OVMF_VARS.fd" },
+                .{ .code = "/usr/share/edk2/ovmf/OVMF_CODE.secboot.fd", .vars = "/usr/share/edk2/ovmf/OVMF_VARS.secboot.fd" },
+                .{ .code = "/usr/share/qemu/edk2-x86_64-code.fd", .vars = "/usr/share/qemu/edk2-x86_64-vars.fd" },
+            };
+
+            for (pair_paths) |pair| {
+                if (fileExists(pair.code) and fileExists(pair.vars)) {
+                    return .{ .code = pair.code, .vars = pair.vars };
+                }
+            }
+
+            for (pair_paths) |pair| {
+                if (code == null and fileExists(pair.code)) code = pair.code;
+                if (vars == null and fileExists(pair.vars)) vars = pair.vars;
+            }
         }
     }
 
@@ -61,39 +96,49 @@ pub fn build(b: *std.Build) void {
         .preferred_optimize_mode = .ReleaseSafe,
     });
 
-    // Freestanding x86_64 target for kernel
-    // Kernel target (No SSE/MMX/AVX) to prevent FPU register clobbering
-    const kernel_target = b.resolveTargetQuery(.{
-        .cpu_arch = .x86_64,
+    const target_arch = b.option(std.Target.Cpu.Arch, "arch", "Target architecture") orelse .x86_64;
+
+    // Freestanding target for kernel
+    // Kernel target (No SSE/MMX/AVX for x86 to prevent FPU register clobbering)
+    var kernel_target_query = std.Target.Query{
+        .cpu_arch = target_arch,
         .os_tag = .freestanding,
         .abi = .none,
-        .cpu_features_sub = std.Target.x86.featureSet(&.{
+    };
+
+    if (target_arch == .x86_64) {
+        kernel_target_query.cpu_features_sub = std.Target.x86.featureSet(&.{
             .mmx, .sse, .sse2, .avx, .avx2,
-        }),
-        .cpu_features_add = std.Target.x86.featureSet(&.{
+        });
+        kernel_target_query.cpu_features_add = std.Target.x86.featureSet(&.{
             .soft_float,
-        }),
-    });
+        });
+    }
 
-    // User target (SSE enabled) for userspace applications
+    const kernel_target = b.resolveTargetQuery(kernel_target_query);
+
+    // User target
     const user_target = b.resolveTargetQuery(.{
-        .cpu_arch = .x86_64,
+        .cpu_arch = target_arch,
         .os_tag = .freestanding,
         .abi = .none,
     });
 
-    // UEFI target (x86_64-uefi-msvc)
+    // UEFI target
     const uefi_target = b.resolveTargetQuery(.{
-        .cpu_arch = .x86_64,
+        .cpu_arch = target_arch,
         .os_tag = .uefi,
-        .abi = .msvc,
+        .abi = if (target_arch == .x86_64) .msvc else .none,
     });
 
     // ============================================================
     // UEFI Bootloader
     // ============================================================
+    // Architecture-specific EFI naming
+    const efi_loader_name = if (target_arch == .aarch64) "bootaa64" else "bootx64";
+    const efi_boot_file = if (target_arch == .aarch64) "BOOTAA64.EFI" else "BOOTX64.EFI";
     const bootloader = b.addExecutable(.{
-        .name = "bootx64",
+        .name = efi_loader_name,
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/boot/uefi/main.zig"),
             .target = uefi_target,
@@ -128,7 +173,7 @@ pub fn build(b: *std.Build) void {
     const qemu_vars_opt = b.option([]const u8, "vars", "Path to UEFI vars (e.g. OVMF_VARS.fd) for QEMU");
     const run_iso = b.option(bool, "run-iso", "Boot QEMU from ISO instead of FAT directory") orelse false;
     const host_os = b.graph.host.result.os.tag;
-    const homebrew_ovmf = detectHostOvmf(host_os);
+    const homebrew_ovmf = detectHostOvmf(host_os, target_arch);
     const qemu_bios = qemu_bios_opt orelse homebrew_ovmf.code;
     const qemu_vars = if (qemu_bios_opt == null) (qemu_vars_opt orelse homebrew_ovmf.vars) else qemu_vars_opt;
     // Display option: "default" (auto), "sdl", "gtk", "cocoa" (macOS), "none" (headless)
@@ -194,9 +239,13 @@ pub fn build(b: *std.Build) void {
     });
     sync_module.addImport("hal", hal_module);
 
-    // Create Serial module (16550 UART)
+    // Create Serial module (Architecture-specific)
+    const serial_source = switch (kernel_target.result.cpu.arch) {
+        .aarch64 => b.path("src/drivers/serial/pl011.zig"),
+        else => b.path("src/drivers/serial/uart_16550.zig"),
+    };
     const serial_module = b.createModule(.{
-        .root_source_file = b.path("src/drivers/serial/uart_16550.zig"),
+        .root_source_file = serial_source,
         .target = kernel_target,
         .optimize = optimize,
     });
@@ -591,6 +640,7 @@ pub fn build(b: *std.Build) void {
 
     fs_module.addImport("io", kernel_io_module);
     fs_module.addImport("pmm", pmm_module);
+    fs_module.addImport("hal", hal_module);
 
 
     // Create Keyboard driver module
@@ -1103,7 +1153,9 @@ pub fn build(b: *std.Build) void {
         .root_module = netstack_mod,
     });
     netstack_exe.setLinkerScript(b.path("src/user/linker.ld"));
-    netstack_exe.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
+    if (target_arch == .x86_64) {
+        netstack_exe.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
+    }
 
     const netstack_cmd = b.addInstallArtifact(netstack_exe, .{});
     b.getInstallStep().dependOn(&netstack_cmd.step);
@@ -1347,7 +1399,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/kernel/core/main.zig"),
             .target = kernel_target,
             .optimize = optimize,
-            .code_model = .kernel,
+            .code_model = if (target_arch == .x86_64) .kernel else .small,
             .pic = false,
             .red_zone = false,
         }),
@@ -1411,17 +1463,21 @@ pub fn build(b: *std.Build) void {
     kernel.root_module.addImport("vdso", vdso_module);
     kernel.root_module.addImport("kernel_iommu", kernel_iommu_module);
 
-    // Add assembly helpers for x86_64 (ISR stubs, lgdt, lidt)
-    kernel.addAssemblyFile(b.path("src/arch/x86_64/lib/asm_helpers.S"));
-    kernel.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
-
-    // Add SMP trampoline code
-    kernel.addAssemblyFile(b.path("src/arch/x86_64/boot/smp_trampoline.S"));
-
-    // Note: boot32.S is no longer needed - Limine handles 64-bit entry directly
-
-    // Set linker script for kernel memory layout
-    kernel.setLinkerScript(b.path("src/arch/x86_64/boot/linker.ld"));
+    // Add architecture-specific assembly and linker script
+    switch (target_arch) {
+        .x86_64 => {
+            kernel.addAssemblyFile(b.path("src/arch/x86_64/lib/asm_helpers.S"));
+            kernel.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
+            kernel.addAssemblyFile(b.path("src/arch/x86_64/boot/smp_trampoline.S"));
+            kernel.setLinkerScript(b.path("src/arch/x86_64/boot/linker.ld"));
+        },
+        .aarch64 => {
+            kernel.addAssemblyFile(b.path("src/arch/aarch64/boot/entry.S"));
+            kernel.addAssemblyFile(b.path("src/arch/aarch64/lib/asm_helpers.S"));
+            kernel.setLinkerScript(b.path("src/arch/aarch64/boot/linker.ld"));
+        },
+        else => {},
+    }
 
     // Install kernel artifact
     b.installArtifact(kernel);
@@ -1459,7 +1515,9 @@ pub fn build(b: *std.Build) void {
         .root_module = shell_mod,
     });
     shell.setLinkerScript(b.path("src/user/linker.ld"));
-    shell.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
+    if (target_arch == .x86_64) {
+        shell.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
+    }
     // shell.entry = .disabled; // let Zig find _start
 
     // Install shell as ELF (required for proper ELF loading in kernel)
@@ -1480,13 +1538,17 @@ pub fn build(b: *std.Build) void {
         .root_module = httpd_mod,
     });
     httpd.setLinkerScript(b.path("src/user/linker.ld"));
-    httpd.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
+    if (target_arch == .x86_64) {
+        httpd.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
+    }
 
     // Install httpd as ELF (required for proper ELF loading in kernel)
     const install_httpd = b.addInstallArtifact(httpd, .{});
     b.getInstallStep().dependOn(&install_httpd.step);
 
     // Build Doom
+    // NOTE: Doom uses libc printf/sscanf. On aarch64, we use C shims to work around
+    // LLVM's @cVaArg limitation (see https://github.com/ziglang/zig/issues/14096)
     // Create platform hooks module
     const doom_platform_module = b.createModule(.{
         .root_source_file = b.path("src/user/doom/doomgeneric_zscapek.zig"),
@@ -1519,8 +1581,10 @@ pub fn build(b: *std.Build) void {
         .name = "doom.elf",
         .root_module = doom_mod,
     });
-    doom.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
-    doom.addAssemblyFile(b.path("src/user/lib/libc/setjmp.S"));
+    if (target_arch == .x86_64) {
+        doom.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
+        doom.addAssemblyFile(b.path("src/user/lib/libc/setjmp.S"));
+    }
 
     // NOTE: uart_driver and ps2_driver removed - source files not yet implemented
     // TODO: Add userspace UART driver (src/user/drivers/uart/main.zig)
@@ -1595,7 +1659,7 @@ pub fn build(b: *std.Build) void {
             "w_file_stdc.c", "w_file.c",     "w_main.c",   "w_wad.c",
             "wi_stuff.c",    "z_zone.c",
         },
-        .flags = &.{
+        .flags = if (target_arch == .x86_64) &.{
             "-DDOOMGENERIC_RESX=640",
             "-DDOOMGENERIC_RESY=400",
             "-ffreestanding",
@@ -1608,12 +1672,34 @@ pub fn build(b: *std.Build) void {
             "-mno-red-zone",
             "-fno-sanitize=undefined",
             "-fno-sanitize=alignment",
+        } else &.{
+            "-DDOOMGENERIC_RESX=640",
+            "-DDOOMGENERIC_RESY=400",
+            "-ffreestanding",
+            "-nostdlib",
+            "-fno-stack-protector",
+            "-fno-builtin",
+            "-fno-sanitize=undefined",
+            "-fno-sanitize=alignment",
         },
     });
     doom.addIncludePath(b.path("src/user/doom/include"));
     doom.addIncludePath(b.path("src/user/doom/doomgeneric"));
 
     doom.setLinkerScript(b.path("src/user/linker.ld"));
+
+    // Add C shim for varargs functions on aarch64
+    if (target_arch == .aarch64) {
+        doom.addCSourceFile(.{
+            .file = b.path("src/user/lib/libc/stdio/shim/printf_shim.c"),
+            .flags = &.{
+                "-ffreestanding",
+                "-nostdlib",
+                "-fno-stack-protector",
+                "-fno-builtin",
+            },
+        });
+    }
 
     // Install doom.elf
     const install_doom = b.addInstallArtifact(doom, .{});
@@ -1647,6 +1733,8 @@ pub fn build(b: *std.Build) void {
     }
 
     // Create libc test runner module (Zig wrapper for C test)
+    // NOTE: test_libc_fixes uses snprintf. On aarch64, we use C shims to work around
+    // LLVM's @cVaArg limitation (see https://github.com/ziglang/zig/issues/14096)
     const test_libc_runner_mod = b.createModule(.{
         .root_source_file = b.path("tests/userland/test_libc_runner.zig"),
         .target = user_target,
@@ -1670,8 +1758,23 @@ pub fn build(b: *std.Build) void {
     });
     test_libc_exe.addIncludePath(b.path("src/user/doom/include"));
     test_libc_exe.setLinkerScript(b.path("src/user/linker.ld"));
-    test_libc_exe.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
-    test_libc_exe.addAssemblyFile(b.path("src/user/lib/libc/setjmp.S"));
+    if (target_arch == .x86_64) {
+        test_libc_exe.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
+        test_libc_exe.addAssemblyFile(b.path("src/user/lib/libc/setjmp.S"));
+    }
+
+    // Add C shim for varargs functions on aarch64
+    if (target_arch == .aarch64) {
+        test_libc_exe.addCSourceFile(.{
+            .file = b.path("src/user/lib/libc/stdio/shim/printf_shim.c"),
+            .flags = &.{
+                "-ffreestanding",
+                "-nostdlib",
+                "-fno-stack-protector",
+                "-fno-builtin",
+            },
+        });
+    }
 
     const install_test_libc = b.addInstallArtifact(test_libc_exe, .{});
     b.getInstallStep().dependOn(&install_test_libc.step);
@@ -1689,7 +1792,9 @@ pub fn build(b: *std.Build) void {
         }),
     });
     test_asm.setLinkerScript(b.path("src/user/linker.ld"));
-    test_asm.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
+    if (target_arch == .x86_64) {
+        test_asm.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
+    }
     const install_test_asm = b.addInstallArtifact(test_asm, .{});
     b.getInstallStep().dependOn(&install_test_asm.step);
 
@@ -1707,7 +1812,9 @@ pub fn build(b: *std.Build) void {
         .root_module = test_writev_mod,
     });
     test_writev.setLinkerScript(b.path("src/user/linker.ld"));
-    test_writev.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
+    if (target_arch == .x86_64) {
+        test_writev.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
+    }
     const install_test_writev = b.addInstallArtifact(test_writev, .{});
     b.getInstallStep().dependOn(&install_test_writev.step);
 
@@ -1725,7 +1832,9 @@ pub fn build(b: *std.Build) void {
         .root_module = audio_test_mod,
     });
     audio_test.setLinkerScript(b.path("src/user/linker.ld"));
-    audio_test.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
+    if (target_arch == .x86_64) {
+        audio_test.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
+    }
     const install_audio_test = b.addInstallArtifact(audio_test, .{});
     b.getInstallStep().dependOn(&install_audio_test.step);
 
@@ -1744,19 +1853,22 @@ pub fn build(b: *std.Build) void {
         .root_module = sound_test_mod,
     });
     sound_test.setLinkerScript(b.path("src/user/linker.ld"));
-    sound_test.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
+    if (target_arch == .x86_64) {
+        sound_test.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
+    }
     const install_sound_test = b.addInstallArtifact(sound_test, .{});
     b.getInstallStep().dependOn(&install_sound_test.step);
 
     // Libc Fix Verification Test (Native C with Custom Libc)
+    // Uses C shim for aarch64 va_list bootstrap
     // Wrapper and C source definition below
-    
+
     // Create a wrapper to link against libc and crt0
     // Create a dummy entry file if needed, or better:
     // Actually, create module with just the C file?
     // b.createModule doesn't take C files easily as root.
     // Use a small Zig wrapper "src/user/test_libc_fix_entry.zig" that imports libc and exports nothing, relying on C main.
-    
+
     // Waiting for file creation in next step, assuming path "src/user/tests/test_libc_fix_wrapper.zig"
     // Let's create the wrapper content inline if possible or use write_to_file next.
     // For now I define the build step, pointing to a wrapper I will create.
@@ -1767,7 +1879,7 @@ pub fn build(b: *std.Build) void {
     });
     test_libc_fix_mod.addImport("libc", user_libc_module);
     test_libc_fix_mod.addImport("syscall", user_syscall_lib);
-    
+
     const test_libc_fix_exe = b.addExecutable(.{
         .name = "test_libc_fix",
         .root_module = test_libc_fix_mod,
@@ -1777,21 +1889,29 @@ pub fn build(b: *std.Build) void {
         .flags = &.{ "-nostdlib", "-ffreestanding", "-I", "src/user/doom/include" },
     });
     test_libc_fix_exe.setLinkerScript(b.path("src/user/linker.ld"));
-    test_libc_fix_exe.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
-    test_libc_fix_exe.addAssemblyFile(b.path("src/user/crt0.S"));
-    test_libc_fix_exe.addAssemblyFile(b.path("src/user/lib/libc/setjmp.S"));
+    if (target_arch == .x86_64) {
+        test_libc_fix_exe.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
+        test_libc_fix_exe.addAssemblyFile(b.path("src/user/crt0.S"));
+        test_libc_fix_exe.addAssemblyFile(b.path("src/user/lib/libc/setjmp.S"));
+    } else if (target_arch == .aarch64) {
+        // aarch64: Use C shim for va_list bootstrap
+        test_libc_fix_exe.addCSourceFile(.{
+            .file = b.path("src/user/lib/libc/stdio/shim/printf_shim.c"),
+            .flags = &.{ "-nostdlib", "-ffreestanding" },
+        });
+    }
     const install_test_libc_fix = b.addInstallArtifact(test_libc_fix_exe, .{});
     b.getInstallStep().dependOn(&install_test_libc_fix.step);
 
     // Create UEFI-only ISO build step
     // Uses custom UEFI bootloader (no Limine dependency)
     // Creates a proper UEFI-bootable ISO with embedded EFI System Partition
-    const iso_cmd = b.addSystemCommand(&.{
-        "sh", "-c",
+    const efi_loader_ext = b.fmt("{s}.efi", .{efi_loader_name});
+    const iso_script = b.fmt(
         \\set -e && \
         \\rm -rf iso_root efi.img && \
         \\mkdir -p iso_root/EFI/BOOT && \
-        \\cp zig-out/bin/bootx64.efi iso_root/EFI/BOOT/BOOTX64.EFI && \
+        \\cp zig-out/bin/{s} iso_root/EFI/BOOT/{s} && \
         \\cp zig-out/bin/kernel.elf iso_root/ && \
         \\mkdir -p .zig-cache && \
         \\tmp_initrd=".zig-cache/esp_initrd.tar" && \
@@ -1804,7 +1924,7 @@ pub fn build(b: *std.Build) void {
         \\    for f in zig-out/bin/*; do \
         \\        base="$(basename "$f")"; \
         \\        case "$base" in \
-        \\            bootx64.efi|bootx64.pdb|kernel.elf|kernel.bin|disk_image) continue ;; \
+        \\            {s}|{s}.pdb|kernel.elf|kernel.bin|disk_image) continue ;; \
         \\        esac; \
         \\        cp "$f" .zig-cache/initrd_root/; \
         \\    done; \
@@ -1818,7 +1938,7 @@ pub fn build(b: *std.Build) void {
         \\mformat -i efi.img -F :: && \
         \\mmd -i efi.img ::/EFI && \
         \\mmd -i efi.img ::/EFI/BOOT && \
-        \\mcopy -i efi.img zig-out/bin/bootx64.efi ::/EFI/BOOT/BOOTX64.EFI && \
+        \\mcopy -i efi.img zig-out/bin/{s} ::/EFI/BOOT/{s} && \
         \\mcopy -i efi.img zig-out/bin/kernel.elf :: && \
         \\if [ -f "$tmp_initrd" ]; then \
         \\    mcopy -i efi.img "$tmp_initrd" ::/initrd.tar; \
@@ -1834,7 +1954,8 @@ pub fn build(b: *std.Build) void {
         \\    iso_root -o zigk.iso && \
         \\rm -f efi.img && \
         \\echo "UEFI ISO created: zigk.iso"
-    });
+    , .{ efi_loader_ext, efi_boot_file, efi_loader_ext, efi_loader_name, efi_loader_ext, efi_boot_file });
+    const iso_cmd = b.addSystemCommand(&.{ "sh", "-c", iso_script });
     iso_cmd.step.dependOn(test_step_build);
     iso_cmd.step.dependOn(b.getInstallStep());
 
@@ -1842,53 +1963,93 @@ pub fn build(b: *std.Build) void {
     iso_step.dependOn(&iso_cmd.step);
 
     // Create run step for QEMU (UEFI boot via ISO or FAT directory)
-    const run_cmd = b.addSystemCommand(&.{
-        "qemu-system-x86_64",
-        "-machine", "q35",
-        "-m", "512M",
-        "-device", "qemu-xhci,id=xhci",
-        "-device", "usb-kbd",
-        "-device", "usb-tablet",
-        "-vga", "std",
-        "-audiodev",
-    });
-    run_cmd.addArg(b.fmt("{s},id=audio0", .{qemu_audio}));
-    run_cmd.addArgs(&.{
-        "-device", "AC97,audiodev=audio0",
-        "-serial", "stdio",
-        "-smp", "4",
-        "-no-reboot",
-        "-no-shutdown",
-        "-accel", "tcg",
-        // USB Mass Storage (optional)
-        "-drive", "if=none,id=usbdisk,format=raw,file=usb_disk.img",
-    });
+    const qemu_cmd = if (target_arch == .aarch64) "qemu-system-aarch64" else "qemu-system-x86_64";
+    const qemu_machine = if (target_arch == .aarch64) "virt,gic-version=2" else "q35";
+
+    const run_cmd = b.addSystemCommand(&.{qemu_cmd});
+
+    if (target_arch == .aarch64) {
+        // AArch64-specific QEMU options
+        run_cmd.addArgs(&.{
+            "-machine", qemu_machine,
+            "-cpu", "max",
+            "-m", "512M",
+            "-device", "qemu-xhci,id=xhci",
+            "-device", "usb-kbd",
+            "-device", "usb-tablet",
+            "-device", "virtio-gpu-pci",
+            "-serial", "stdio",
+            "-smp", "1", // Single-core for initial bring-up
+            "-no-reboot",
+            "-no-shutdown",
+            "-accel", "hvf", // Use Hypervisor.framework on Apple Silicon
+        });
+    } else {
+        // x86_64-specific QEMU options
+        run_cmd.addArgs(&.{
+            "-machine", qemu_machine,
+            "-m", "512M",
+            "-device", "qemu-xhci,id=xhci",
+            "-device", "usb-kbd",
+            "-device", "usb-tablet",
+            "-vga", "std",
+            "-audiodev",
+        });
+        run_cmd.addArg(b.fmt("{s},id=audio0", .{qemu_audio}));
+        run_cmd.addArgs(&.{
+            "-device", "AC97,audiodev=audio0",
+            "-serial", "stdio",
+            "-smp", "4",
+            "-no-reboot",
+            "-no-shutdown",
+            "-accel", "tcg",
+            // USB Mass Storage (optional)
+            "-drive", "if=none,id=usbdisk,format=raw,file=usb_disk.img",
+        });
+    }
 
     if (run_iso) {
         // Boot hybrid ISO as hard disk - bypasses EDK2 El Torito bug
         // The -isohybrid-gpt-basdat xorriso option creates a GPT on the ISO
-        run_cmd.addArgs(&.{
-            "-drive", "file=zigk.iso,format=raw,if=none,id=bootdisk",
-            "-device", "ide-hd,drive=bootdisk,bus=ide.0,bootindex=1",
-        });
+        if (target_arch == .aarch64) {
+            run_cmd.addArgs(&.{
+                "-drive", "file=zigk.iso,format=raw,if=none,id=bootdisk",
+                "-device", "virtio-blk-pci,drive=bootdisk,bootindex=1",
+            });
+        } else {
+            run_cmd.addArgs(&.{
+                "-drive", "file=zigk.iso,format=raw,if=none,id=bootdisk",
+                "-device", "ide-hd,drive=bootdisk,bus=ide.0,bootindex=1",
+            });
+        }
     } else {
         // Use a real FAT disk image for UEFI boot (fat:rw: doesn't work with UEFI)
         // The disk.img is created by the pre-build step
-        run_cmd.addArgs(&.{
-            "-drive", "if=none,format=raw,id=esp,file=disk.img",
-            "-device", "ide-hd,drive=esp,bus=ide.0,bootindex=1",
-        });
+        if (target_arch == .aarch64) {
+            run_cmd.addArgs(&.{
+                "-drive", "if=none,format=raw,id=esp,file=disk.img",
+                "-device", "virtio-blk-pci,drive=esp,bootindex=1",
+            });
+        } else {
+            run_cmd.addArgs(&.{
+                "-drive", "if=none,format=raw,id=esp,file=disk.img",
+                "-device", "ide-hd,drive=esp,bus=ide.0,bootindex=1",
+            });
+        }
     }
 
-    if (qemu_usb_hub) {
-        run_cmd.addArgs(&.{
-            "-device", "usb-hub,bus=xhci.0,id=hub0",
-            "-device", "usb-storage,drive=usbdisk,bus=hub0.0",
-        });
-    } else {
-        run_cmd.addArgs(&.{
-            "-device", "usb-storage,drive=usbdisk",
-        });
+    // USB hub and storage (x86_64 only for now)
+    if (target_arch == .x86_64) {
+        if (qemu_usb_hub) {
+            run_cmd.addArgs(&.{
+                "-device", "usb-hub,bus=xhci.0,id=hub0",
+                "-device", "usb-storage,drive=usbdisk,bus=hub0.0",
+            });
+        } else {
+            run_cmd.addArgs(&.{
+                "-device", "usb-storage,drive=usbdisk",
+            });
+        }
     }
 
     // Add display option (default = let QEMU auto-detect)
@@ -1909,7 +2070,7 @@ pub fn build(b: *std.Build) void {
     }
 
     // Install UEFI bootloader and kernel to efi_root directory
-    const install_uefi = b.addInstallFile(bootloader.getEmittedBin(), "efi_root/EFI/BOOT/BOOTX64.EFI");
+    const install_uefi = b.addInstallFile(bootloader.getEmittedBin(), b.fmt("efi_root/EFI/BOOT/{s}", .{efi_boot_file}));
     const install_kernel_uefi = b.addInstallFile(kernel.getEmittedBin(), "efi_root/kernel.elf");
     const install_startup_nsh = b.addInstallFile(b.path("src/boot/uefi/startup.nsh"), "efi_root/startup.nsh");
     b.getInstallStep().dependOn(&install_uefi.step);
@@ -1917,14 +2078,13 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_startup_nsh.step);
 
     // Create esp_part.img (Raw FAT filesystem)
-    const create_esp_cmd = b.addSystemCommand(&.{
-        "sh", "-c",
+    const esp_script = b.fmt(
         \\set -e && \
         \\dd if=/dev/zero of=esp_part.img bs=1M count=128 2>/dev/null && \
         \\mformat -i esp_part.img -H 2048 :: && \
         \\mmd -i esp_part.img ::/EFI && \
         \\mmd -i esp_part.img ::/EFI/BOOT && \
-        \\mcopy -i esp_part.img zig-out/bin/bootx64.efi ::/EFI/BOOT/BOOTX64.EFI && \
+        \\mcopy -i esp_part.img zig-out/bin/{s} ::/EFI/BOOT/{s} && \
         \\mcopy -i esp_part.img zig-out/bin/kernel.elf :: && \
         \\mcopy -i esp_part.img src/boot/uefi/startup.nsh :: && \
         \\mkdir -p .zig-cache && \
@@ -1938,7 +2098,7 @@ pub fn build(b: *std.Build) void {
         \\    for f in zig-out/bin/*; do \
         \\        base="$(basename "$f")"; \
         \\        case "$base" in \
-        \\            bootx64.efi|bootx64.pdb|kernel.elf|kernel.bin|disk_image) continue ;; \
+        \\            {s}|{s}.pdb|kernel.elf|kernel.bin|disk_image) continue ;; \
         \\        esac; \
         \\        cp "$f" .zig-cache/initrd_root/; \
         \\    done; \
@@ -1952,7 +2112,8 @@ pub fn build(b: *std.Build) void {
         \\fi && \
         \\rm -f "$tmp_initrd" && \
         \\rm -rf .zig-cache/initrd_root
-    });
+    , .{ efi_loader_ext, efi_boot_file, efi_loader_ext, efi_loader_name });
+    const create_esp_cmd = b.addSystemCommand(&.{ "sh", "-c", esp_script });
     create_esp_cmd.step.dependOn(&install_uefi.step);
     create_esp_cmd.step.dependOn(&install_kernel_uefi.step);
 
@@ -2030,4 +2191,36 @@ pub fn build(b: *std.Build) void {
     const run_unit_tests = b.addRunArtifact(unit_tests);
     const test_step = b.step("test", "Run unit tests on host");
     test_step.dependOn(&run_unit_tests.step);
+
+    // =========================================================================
+    // Architecture-specific convenience steps (aliases)
+    // =========================================================================
+
+    // iso-x86_64: Build x86_64 ISO
+    const iso_x86_64_cmd = b.addSystemCommand(&.{
+        "sh", "-c", "zig build iso -Darch=x86_64",
+    });
+    const iso_x86_64_step = b.step("iso-x86_64", "Build bootable x86_64 UEFI ISO");
+    iso_x86_64_step.dependOn(&iso_x86_64_cmd.step);
+
+    // iso-aarch64: Build aarch64 ISO
+    const iso_aarch64_cmd = b.addSystemCommand(&.{
+        "sh", "-c", "zig build iso -Darch=aarch64",
+    });
+    const iso_aarch64_step = b.step("iso-aarch64", "Build bootable aarch64 UEFI ISO");
+    iso_aarch64_step.dependOn(&iso_aarch64_cmd.step);
+
+    // run-x86_64: Build and run x86_64 in QEMU
+    const run_x86_64_cmd = b.addSystemCommand(&.{
+        "sh", "-c", "zig build run -Darch=x86_64",
+    });
+    const run_x86_64_step = b.step("run-x86_64", "Build and run x86_64 kernel in QEMU");
+    run_x86_64_step.dependOn(&run_x86_64_cmd.step);
+
+    // run-aarch64: Build and run aarch64 in QEMU
+    const run_aarch64_cmd = b.addSystemCommand(&.{
+        "sh", "-c", "zig build run -Darch=aarch64",
+    });
+    const run_aarch64_step = b.step("run-aarch64", "Build and run aarch64 kernel in QEMU");
+    run_aarch64_step.dependOn(&run_aarch64_cmd.step);
 }

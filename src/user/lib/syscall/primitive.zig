@@ -1,110 +1,81 @@
 const std = @import("std");
+const builtin = @import("builtin");
 pub const uapi = @import("uapi");
 const syscalls = uapi.syscalls;
 
-/// Memory barrier for x86_64 userspace
+/// Memory barrier
 pub inline fn memoryBarrier() void {
-    asm volatile ("mfence"
-        :
-        :
-        : .{ .memory = true }
-    );
+    switch (builtin.cpu.arch) {
+        .x86_64 => asm volatile ("mfence" : : : .{ .memory = true }),
+        .aarch64 => asm volatile ("dmb sy" : : : .{ .memory = true }),
+        else => {},
+    }
 }
 
 // =============================================================================
 // Raw Syscall Primitives
 // =============================================================================
 
-/// Execute syscall with 0 arguments
+fn syscallRaw(number: usize, arg1: usize, arg2: usize, arg3: usize, arg4: usize, arg5: usize, arg6: usize) usize {
+    return switch (builtin.cpu.arch) {
+        .x86_64 => asm volatile ("syscall"
+            : [ret] "={rax}" (-> usize),
+            : [number] "{rax}" (number),
+              [arg1] "{rdi}" (arg1),
+              [arg2] "{rsi}" (arg2),
+              [arg3] "{rdx}" (arg3),
+              [arg4] "{r10}" (arg4),
+              [arg5] "{r8}" (arg5),
+              [arg6] "{r9}" (arg6),
+            : .{ .rcx = true, .r11 = true, .memory = true }
+        ),
+        .aarch64 => asm volatile ("svc #0"
+            : [ret] "={x0}" (-> usize),
+            : [number] "{x8}" (number),
+              [arg1] "{x0}" (arg1),
+              [arg2] "{x1}" (arg2),
+              [arg3] "{x2}" (arg3),
+              [arg4] "{x3}" (arg4),
+              [arg5] "{x4}" (arg5),
+              [arg6] "{x5}" (arg6),
+            : .{ .memory = true }
+        ),
+        else => @compileError("Unsupported architecture"),
+    };
+}
+
 pub inline fn syscall0(number: usize) usize {
-    return asm volatile ("syscall"
-        : [ret] "={rax}" (-> usize),
-        : [number] "{rax}" (number),
-        : .{ .rcx = true, .r11 = true, .memory = true }
-    );
+    return syscallRaw(number, 0, 0, 0, 0, 0, 0);
 }
 
-/// Execute syscall with 1 argument
 pub inline fn syscall1(number: usize, arg1: usize) usize {
-    return asm volatile ("syscall"
-        : [ret] "={rax}" (-> usize),
-        : [number] "{rax}" (number),
-          [arg1] "{rdi}" (arg1),
-        : .{ .rcx = true, .r11 = true, .memory = true }
-    );
+    return syscallRaw(number, arg1, 0, 0, 0, 0, 0);
 }
 
-/// Execute syscall with 2 arguments
 pub inline fn syscall2(number: usize, arg1: usize, arg2: usize) usize {
-    return asm volatile ("syscall"
-        : [ret] "={rax}" (-> usize),
-        : [number] "{rax}" (number),
-          [arg1] "{rdi}" (arg1),
-          [arg2] "{rsi}" (arg2),
-        : .{ .rcx = true, .r11 = true, .memory = true }
-    );
+    return syscallRaw(number, arg1, arg2, 0, 0, 0, 0);
 }
 
-/// Execute syscall with 3 arguments
 pub inline fn syscall3(number: usize, arg1: usize, arg2: usize, arg3: usize) usize {
-    return asm volatile ("syscall"
-        : [ret] "={rax}" (-> usize),
-        : [number] "{rax}" (number),
-          [arg1] "{rdi}" (arg1),
-          [arg2] "{rsi}" (arg2),
-          [arg3] "{rdx}" (arg3),
-        : .{ .rcx = true, .r11 = true, .memory = true }
-    );
+    return syscallRaw(number, arg1, arg2, arg3, 0, 0, 0);
 }
 
-/// Execute syscall with 4 arguments
-/// Note: R10 is used instead of RCX because syscall clobbers RCX
 pub inline fn syscall4(number: usize, arg1: usize, arg2: usize, arg3: usize, arg4: usize) usize {
-    return asm volatile ("syscall"
-        : [ret] "={rax}" (-> usize),
-        : [number] "{rax}" (number),
-          [arg1] "{rdi}" (arg1),
-          [arg2] "{rsi}" (arg2),
-          [arg3] "{rdx}" (arg3),
-          [arg4] "{r10}" (arg4),
-        : .{ .rcx = true, .r11 = true, .memory = true }
-    );
+    return syscallRaw(number, arg1, arg2, arg3, arg4, 0, 0);
 }
 
-/// Execute syscall with 5 arguments
 pub inline fn syscall5(number: usize, arg1: usize, arg2: usize, arg3: usize, arg4: usize, arg5: usize) usize {
-    return asm volatile ("syscall"
-        : [ret] "={rax}" (-> usize),
-        : [number] "{rax}" (number),
-          [arg1] "{rdi}" (arg1),
-          [arg2] "{rsi}" (arg2),
-          [arg3] "{rdx}" (arg3),
-          [arg4] "{r10}" (arg4),
-          [arg5] "{r8}" (arg5),
-        : .{ .rcx = true, .r11 = true, .memory = true }
-    );
+    return syscallRaw(number, arg1, arg2, arg3, arg4, arg5, 0);
 }
 
-/// Execute syscall with 6 arguments
 pub inline fn syscall6(number: usize, arg1: usize, arg2: usize, arg3: usize, arg4: usize, arg5: usize, arg6: usize) usize {
-    return asm volatile ("syscall"
-        : [ret] "={rax}" (-> usize),
-        : [number] "{rax}" (number),
-          [arg1] "{rdi}" (arg1),
-          [arg2] "{rsi}" (arg2),
-          [arg3] "{rdx}" (arg3),
-          [arg4] "{r10}" (arg4),
-          [arg5] "{r8}" (arg5),
-          [arg6] "{r9}" (arg6),
-        : .{ .rcx = true, .r11 = true, .memory = true }
-    );
+    return syscallRaw(number, arg1, arg2, arg3, arg4, arg5, arg6);
 }
 
 // =============================================================================
 // Error Handling
 // =============================================================================
 
-/// Result type for syscalls that can fail
 pub const SyscallError = error{
     PermissionDenied,
     NoSuchFileOrDirectory,
@@ -128,7 +99,6 @@ pub const SyscallError = error{
     Unexpected,
 };
 
-/// Convert raw syscall return value to error union
 pub fn errorFromReturn(ret: usize) SyscallError {
     const err: isize = @bitCast(ret);
     if (err >= 0) return error.Unexpected;
@@ -158,7 +128,6 @@ pub fn errorFromReturn(ret: usize) SyscallError {
     };
 }
 
-/// Check if return value indicates error (negative)
 pub inline fn isError(ret: usize) bool {
     const signed: isize = @bitCast(ret);
     return signed < 0 and signed >= -4096;

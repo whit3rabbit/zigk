@@ -1,12 +1,22 @@
 //! IO Uring Submission Handling
 
 const std = @import("std");
+const builtin = @import("builtin");
 const uapi = @import("uapi");
 const io_ring = uapi.io_ring;
 const SyscallError = uapi.errno.SyscallError;
 const user_mem = @import("user_mem");
 const instance = @import("instance.zig");
 const ops = @import("ops.zig");
+
+/// Architecture-independent acquire barrier
+inline fn acquireBarrier() void {
+    switch (builtin.cpu.arch) {
+        .x86_64 => asm volatile ("lfence" ::: .{ .memory = true }),
+        .aarch64 => asm volatile ("dmb ishld" ::: .{ .memory = true }),
+        else => @compileError("Unsupported architecture"),
+    }
+}
 
 /// Submit SQEs from shared memory ring
 pub fn submitFromSharedMemory(inst: *instance.IoUringInstance, to_submit: usize) SyscallError!usize {
@@ -15,7 +25,7 @@ pub fn submitFromSharedMemory(inst: *instance.IoUringInstance, to_submit: usize)
     const sqes = inst.getSqes();
 
     // Memory barrier before reading indices
-    asm volatile ("lfence" ::: .{ .memory = true });
+    acquireBarrier();
 
     var submitted: usize = 0;
     var head = sq_ring.head;

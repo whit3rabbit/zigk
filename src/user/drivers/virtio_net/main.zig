@@ -11,8 +11,18 @@
 // Reference: VirtIO Specification 1.1 (OASIS)
 
 const std = @import("std");
+const builtin = @import("builtin");
 const syscall = @import("syscall");
 const ring = @import("ring");
+
+/// Architecture-independent acquire barrier
+inline fn acquireBarrier() void {
+    switch (builtin.cpu.arch) {
+        .x86_64 => asm volatile ("lfence" ::: .{ .memory = true }),
+        .aarch64 => asm volatile ("dmb ishld" ::: .{ .memory = true }),
+        else => @compileError("Unsupported architecture"),
+    }
+}
 
 const SyscallError = syscall.uapi.errno.SyscallError;
 const Ring = ring.Ring;
@@ -673,11 +683,7 @@ fn processRxCompletions() void {
     );
     const used_ptr: *volatile VirtqUsed = @ptrFromInt(driver_state.rx_queue_dma.virt_addr + used_offset);
 
-    asm volatile ("lfence"
-        :
-        :
-        : .{ .memory = true }
-    );
+    acquireBarrier();
 
     while (driver_state.rx_last_used_idx != used_ptr.idx) {
         const ring_idx = driver_state.rx_last_used_idx % QUEUE_SIZE;
@@ -808,11 +814,7 @@ fn processTxCompletions() void {
     );
     const used_ptr: *volatile VirtqUsed = @ptrFromInt(driver_state.tx_queue_dma.virt_addr + used_offset);
 
-    asm volatile ("lfence"
-        :
-        :
-        : .{ .memory = true }
-    );
+    acquireBarrier();
 
     // Security: Validate pending completion count from hypervisor
     // Prevents advancing past descriptors still in flight if hypervisor is buggy

@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const uefi = std.os.uefi;
 const elf = std.elf;
 
@@ -52,27 +53,62 @@ pub fn loadKernel(bs: *uefi.tables.BootServices, segments_buffer: []LoadedSegmen
     const ehdr_bytes_read = kernel_file.read(std.mem.asBytes(&ehdr)) catch return LoaderError.ReadFailed;
 
     // Validate full header was read
-    if (ehdr_bytes_read != @sizeOf(elf.Elf64_Ehdr)) return LoaderError.InvalidElf;
+    if (ehdr_bytes_read != @sizeOf(elf.Elf64_Ehdr)) {
+        debugPrint("[ELF] Header size mismatch\r\n");
+        return LoaderError.InvalidElf;
+    }
 
     // Validate Magic
-    if (!std.mem.eql(u8, ehdr.e_ident[0..4], "\x7fELF")) return LoaderError.InvalidElf;
+    if (!std.mem.eql(u8, ehdr.e_ident[0..4], "\x7fELF")) {
+        debugPrint("[ELF] Invalid magic\r\n");
+        return LoaderError.InvalidElf;
+    }
 
     // Validate ELF class (must be 64-bit)
-    if (ehdr.e_ident[elf.EI_CLASS] != elf.ELFCLASS64) return LoaderError.InvalidElf;
+    if (ehdr.e_ident[elf.EI_CLASS] != elf.ELFCLASS64) {
+        debugPrint("[ELF] Not 64-bit\r\n");
+        return LoaderError.InvalidElf;
+    }
 
     // Validate endianness (must be little-endian)
-    if (ehdr.e_ident[elf.EI_DATA] != elf.ELFDATA2LSB) return LoaderError.InvalidElf;
+    if (ehdr.e_ident[elf.EI_DATA] != elf.ELFDATA2LSB) {
+        debugPrint("[ELF] Not little-endian\r\n");
+        return LoaderError.InvalidElf;
+    }
 
-    // Validate machine type (must be x86_64)
-    if (ehdr.e_machine != elf.EM.X86_64) return LoaderError.InvalidElf;
+    const expected_machine: elf.EM = switch (builtin.cpu.arch) {
+        .x86_64 => .X86_64,
+        .aarch64 => .AARCH64,
+        else => {
+            debugPrint("[ELF] Unsupported arch\r\n");
+            return LoaderError.InvalidElf;
+        },
+    };
+    if (ehdr.e_machine != expected_machine) {
+        debugPrint("[ELF] Machine mismatch: expected ");
+        debugPrintHex(@intFromEnum(expected_machine));
+        debugPrint(" got ");
+        debugPrintHex(@intFromEnum(ehdr.e_machine));
+        debugPrint("\r\n");
+        return LoaderError.InvalidElf;
+    }
 
     // Validate program header offset and entry size
-    if (ehdr.e_phoff == 0) return LoaderError.InvalidElf;
-    if (ehdr.e_phentsize < @sizeOf(elf.Elf64_Phdr)) return LoaderError.InvalidElf;
+    if (ehdr.e_phoff == 0) {
+        debugPrint("[ELF] No program headers\r\n");
+        return LoaderError.InvalidElf;
+    }
+    if (ehdr.e_phentsize < @sizeOf(elf.Elf64_Phdr)) {
+        debugPrint("[ELF] Program header size too small\r\n");
+        return LoaderError.InvalidElf;
+    }
 
     // Sanity check: reject unreasonable program header count (DoS prevention)
     const MAX_PHNUM: u16 = 256;
-    if (ehdr.e_phnum > MAX_PHNUM) return LoaderError.InvalidElf;
+    if (ehdr.e_phnum > MAX_PHNUM) {
+        debugPrint("[ELF] Too many program headers\r\n");
+        return LoaderError.InvalidElf;
+    }
 
     var segment_count: usize = 0;
 
@@ -87,33 +123,54 @@ pub fn loadKernel(bs: *uefi.tables.BootServices, segments_buffer: []LoadedSegmen
         kernel_file.setPosition(offset) catch return LoaderError.SeekFailed;
 
         const phdr_bytes_read = kernel_file.read(std.mem.asBytes(&phdr)) catch return LoaderError.ReadFailed;
-        if (phdr_bytes_read != @sizeOf(elf.Elf64_Phdr)) return LoaderError.InvalidElf;
+        if (phdr_bytes_read != @sizeOf(elf.Elf64_Phdr)) {
+            debugPrint("[ELF] Program header read incomplete\r\n");
+            return LoaderError.InvalidElf;
+        }
 
         if (phdr.p_type == elf.PT_LOAD) {
             if (segment_count >= segments_buffer.len) return LoaderError.SegmentsBufferTooSmall;
 
             // Validate virtual address is in expected kernel range (higher half)
             const KERNEL_VADDR_MIN: u64 = 0xFFFF_8000_0000_0000;
-            if (phdr.p_vaddr < KERNEL_VADDR_MIN) return LoaderError.InvalidElf;
+            if (phdr.p_vaddr < KERNEL_VADDR_MIN) {
+                debugPrint("[ELF] Segment vaddr too low: ");
+                debugPrintHex(phdr.p_vaddr);
+                debugPrint("\r\n");
+                return LoaderError.InvalidElf;
+            }
 
             // Check for overlapping segments with previously loaded ones
-            const seg_end = std.math.add(u64, phdr.p_vaddr, phdr.p_memsz) catch return LoaderError.InvalidElf;
+            const seg_end = std.math.add(u64, phdr.p_vaddr, phdr.p_memsz) catch {
+                debugPrint("[ELF] Segment end overflow\r\n");
+                return LoaderError.InvalidElf;
+            };
             for (segments_buffer[0..segment_count]) |prev| {
-                const prev_end = std.math.add(u64, prev.virtual_address, prev.size) catch return LoaderError.InvalidElf;
+                const prev_end = std.math.add(u64, prev.virtual_address, prev.size) catch {
+                    debugPrint("[ELF] Prev segment end overflow\r\n");
+                    return LoaderError.InvalidElf;
+                };
                 // Overlap if: new_start < prev_end AND prev_start < new_end
                 if (phdr.p_vaddr < prev_end and prev.virtual_address < seg_end) {
+                    debugPrint("[ELF] Overlapping segments\r\n");
                     return LoaderError.InvalidElf;
                 }
             }
 
             // Calculate pages needed with overflow protection
             const mem_size = phdr.p_memsz;
-            const aligned_size = std.math.add(u64, mem_size, 4095) catch return LoaderError.InvalidElf;
+            const aligned_size = std.math.add(u64, mem_size, 4095) catch {
+                debugPrint("[ELF] Size alignment overflow\r\n");
+                return LoaderError.InvalidElf;
+            };
             const page_count = aligned_size / 4096;
 
             // Sanity check: reject unreasonable kernel sizes (> 1GB)
             const MAX_KERNEL_PAGES: u64 = (1024 * 1024 * 1024) / 4096;
-            if (page_count == 0 or page_count > MAX_KERNEL_PAGES) return LoaderError.InvalidElf;
+            if (page_count == 0 or page_count > MAX_KERNEL_PAGES) {
+                debugPrint("[ELF] Invalid page count\r\n");
+                return LoaderError.InvalidElf;
+            }
 
             // Allocate physical memory
             const pages_slice = bs.allocatePages(
@@ -131,7 +188,10 @@ pub fn loadKernel(bs: *uefi.tables.BootServices, segments_buffer: []LoadedSegmen
             // Load file data
             // Security: Reject malformed ELF where file size exceeds memory size
             // p_filesz should never exceed p_memsz (BSS is p_memsz - p_filesz)
-            if (phdr.p_filesz > phdr.p_memsz) return LoaderError.InvalidElf;
+            if (phdr.p_filesz > phdr.p_memsz) {
+                debugPrint("[ELF] filesz > memsz\r\n");
+                return LoaderError.InvalidElf;
+            }
 
             if (phdr.p_filesz > 0) {
                 kernel_file.setPosition(phdr.p_offset) catch return LoaderError.SeekFailed;
@@ -163,16 +223,31 @@ pub fn loadKernel(bs: *uefi.tables.BootServices, segments_buffer: []LoadedSegmen
     // If not found, fall back to e_entry (_start)
     const uefi_entry = findSymbol(kernel_file, &ehdr, bs, "_uefi_start") catch ehdr.e_entry;
 
+    debugPrint("[ELF] Entry point: ");
+    debugPrintHex(uefi_entry);
+    debugPrint(" segments: ");
+    debugPrintNum(segment_count);
+    debugPrint("\r\n");
+
     // Validate entry point is within a loaded executable segment
     var entry_valid = false;
     for (segments_buffer[0..segment_count]) |seg| {
         const seg_end = std.math.add(u64, seg.virtual_address, seg.size) catch continue;
+        debugPrint("[ELF] Seg: ");
+        debugPrintHex(seg.virtual_address);
+        debugPrint("-");
+        debugPrintHex(seg_end);
+        debugPrint(if (seg.executable) " X" else " -");
+        debugPrint("\r\n");
         if (uefi_entry >= seg.virtual_address and uefi_entry < seg_end and seg.executable) {
             entry_valid = true;
             break;
         }
     }
-    if (!entry_valid) return LoaderError.InvalidElf;
+    if (!entry_valid) {
+        debugPrint("[ELF] Entry point not in executable segment\r\n");
+        return LoaderError.InvalidElf;
+    }
 
     return .{
         .entry_point = uefi_entry,
@@ -374,4 +449,58 @@ pub fn loadInitrd(bs: *uefi.tables.BootServices) LoaderError!InitrdResult {
         .address = phys_addr,
         .size = file_size,
     };
+}
+
+// Debug output helpers for diagnostics
+fn debugWrite(c: u8) void {
+    switch (builtin.cpu.arch) {
+        .x86_64 => asm volatile ("outb %%al, %%dx" : : [val] "{al}" (c), [port] "{dx}" (@as(u16, 0x3F8))),
+        .aarch64 => {
+            const uart_base: usize = 0x09000000;
+            const uart_dr: *volatile u32 = @ptrFromInt(uart_base);
+            const uart_fr: *volatile u32 = @ptrFromInt(uart_base + 0x18);
+            while ((uart_fr.* & 0x20) != 0) {}
+            uart_dr.* = c;
+        },
+        else => {},
+    }
+}
+
+fn debugPrint(msg: []const u8) void {
+    for (msg) |c| {
+        debugWrite(c);
+    }
+}
+
+fn debugPrintHex(value: u64) void {
+    const hex = "0123456789ABCDEF";
+    debugPrint("0x");
+    var started = false;
+    var i: u6 = 60;
+    while (true) : (i -= 4) {
+        const nibble: u4 = @truncate(value >> i);
+        if (nibble != 0 or started or i == 0) {
+            debugWrite(hex[nibble]);
+            started = true;
+        }
+        if (i == 0) break;
+    }
+}
+
+fn debugPrintNum(value: u64) void {
+    if (value == 0) {
+        debugWrite('0');
+        return;
+    }
+    var buf: [20]u8 = undefined;
+    var idx: usize = 0;
+    var v = value;
+    while (v > 0) : (v /= 10) {
+        buf[idx] = @truncate((v % 10) + '0');
+        idx += 1;
+    }
+    while (idx > 0) {
+        idx -= 1;
+        debugWrite(buf[idx]);
+    }
 }

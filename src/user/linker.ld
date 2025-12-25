@@ -3,8 +3,8 @@
  * The kernel maps this region with Ring 3 permissions
  */
 
-OUTPUT_FORMAT(elf64-x86-64)
-OUTPUT_ARCH(i386:x86-64)
+/* OUTPUT_FORMAT(elf64-x86-64) */
+/* OUTPUT_ARCH(i386:x86-64) */
 ENTRY(_start)
 
 /* Userland base address - must be in user-accessible address space

@@ -525,8 +525,8 @@ pub const VirtioGpuDriver = struct {
                         // Enable MSI-X
                         if (pci.enableMsix(ecam, pci_dev, &msix_cap, 0)) |msix_alloc| {
                             // Configure vector 0 to point to our allocated vector
-                            const dest_id: u8 = @truncate(hal.apic.lapic.getId());
-                            _ = pci.configureMsixEntry(msix_alloc.table_base, msix_alloc.vector_count, 0, vector, dest_id);
+                            const dest_id: u8 = @intCast(hal.apic.lapic.getId());
+                            _ = pci.configureMsixEntry(msix_alloc.table_base, msix_alloc.vector_count, 0, @intCast(vector), dest_id);
 
                             // Unmask vectors
                             pci.enableMsixVectors(ecam, pci_dev, &msix_cap);
@@ -541,7 +541,7 @@ pub const VirtioGpuDriver = struct {
 
                             // Verify device accepted the vector
                             if (cfg.queue_msix_vector == 0) {
-                                self.msix_vector = vector;
+                                self.msix_vector = @intCast(vector);
                                 console.info("VirtIO-GPU: MSI-X enabled with vector {d}", .{vector});
                                 return;
                             } else {
@@ -1052,7 +1052,7 @@ pub fn getDriver() ?*VirtioGpuDriver {
 }
 
 /// MSI-X interrupt handler for VirtIO-GPU command completion
-fn handleInterrupt(_: *hal.idt.InterruptFrame) void {
+fn handleInterrupt(_: *const hal.idt.InterruptFrame) void {
     if (!driver_initialized) {
         hal.apic.lapic.sendEoi();
         return;

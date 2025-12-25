@@ -69,10 +69,13 @@ pub const tmpnam = streams.tmpnam;
 pub const perror = streams.perror;
 
 // Formatted output
-pub const printf = printf_mod.printf;
-pub const fprintf = fprintf_mod.fprintf;
-pub const sprintf = fprintf_mod.sprintf;
-pub const snprintf = fprintf_mod.snprintf;
+// Note: On x86_64, these are exported via X86*Export structs.
+// On aarch64, these are provided by the C shim.
+// The _impl functions are always available.
+pub const printf_impl = printf_mod.printf_impl;
+pub const fprintf_impl = fprintf_mod.fprintf_impl;
+pub const sprintf_impl = fprintf_mod.sprintf_impl;
+pub const snprintf_impl = fprintf_mod.snprintf_impl;
 
 // v* functions
 pub const vprintf = vprintf_mod.vprintf;
@@ -89,6 +92,8 @@ comptime {
 }
 
 // Formatted input
-pub const sscanf = sscanf_mod.sscanf;
-pub const fscanf = sscanf_mod.fscanf;
-pub const scanf = sscanf_mod.scanf;
+// Note: On x86_64, these are exported via X86*Export structs.
+// On aarch64, these are provided by the C shim.
+pub const sscanf_impl = sscanf_mod.sscanf_impl;
+pub const fscanf_impl = sscanf_mod.fscanf_impl;
+pub const scanf_impl = sscanf_mod.scanf_impl;

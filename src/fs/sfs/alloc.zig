@@ -31,7 +31,7 @@ pub fn loadBitmapBatch(self: *t.SFS) ![]u8 {
                 alloc.free(bitmap_buf);
                 return error.IOError;
             }
-            asm volatile ("mfence" ::: .{ .memory = true });
+            @import("hal").mmio.memoryBarrier();
             ahci.adapter.copyFromDmaBuffer(buf_phys, bitmap_buf);
         },
         .err, .cancelled => {
@@ -61,7 +61,7 @@ pub fn loadBitmapIntoCached(self: *t.SFS, dest: []u8) !void {
     switch (result) {
         .success => |bytes| {
             if (bytes < bitmap_size) return error.IOError;
-            asm volatile ("mfence" ::: .{ .memory = true });
+            @import("hal").mmio.memoryBarrier(); // 
             ahci.adapter.copyFromDmaBuffer(buf_phys, dest[0..bitmap_size]);
         },
         .err, .cancelled => return error.IOError,
@@ -206,13 +206,13 @@ pub fn validateSuperblock(sb: *const t.Superblock) bool {
 
     const expected_root_start = sb.bitmap_start + sb.bitmap_blocks;
     if (sb.root_dir_start != expected_root_start) {
-        console.warn("SFS: Invalid root_dir_start {}, expected {}", .{ sb.root_dir_start, expected_root_start });
+        console.warn("SFS: Invalid root_dir_start {},expected {}", .{ sb.root_dir_start, expected_root_start });
         return false;
     }
 
     const expected_data_start = sb.root_dir_start + t.ROOT_DIR_BLOCKS;
     if (sb.data_start != expected_data_start) {
-        console.warn("SFS: Invalid data_start {}, expected {}", .{ sb.data_start, expected_data_start });
+        console.warn("SFS: Invalid data_start {},expected {}", .{ sb.data_start, expected_data_start });
         return false;
     }
 

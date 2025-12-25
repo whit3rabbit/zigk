@@ -71,11 +71,20 @@ To build the kernel, userspace programs, and generate the bootable ISO:
 zig build -Doptimize=ReleaseSafe
 ```
 
+Architecture-specific build targets:
+
+```
+iso-x86_64    Build bootable x86_64 UEFI ISO
+iso-aarch64   Build bootable aarch64 UEFI ISO
+run-x86_64    Build and run x86_64 kernel in QEMU
+run-aarch64   Build and run aarch64 kernel in QEMU
+```
+
 ### Running in QEMU
 To run the system with networking and VirtIO-GPU enabled (boots from the ISO by default):
 
 ```bash
-zig build run
+zig build run-x86_64
 ```
 
 This configuration forwards local port 8080 to the guest port 80. Once the system boots and the `httpd` process starts, the web server is accessible at `http://localhost:8080`.

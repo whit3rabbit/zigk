@@ -156,7 +156,8 @@ python scripts/uefi_query.py gop         # Graphics Output Protocol
 python scripts/uefi_query.py memmap      # Memory map and types
 python scripts/uefi_query.py file        # File protocol and loading
 python scripts/uefi_query.py exit        # ExitBootServices pattern
-python scripts/uefi_query.py paging      # Page table setup in UEFI
+python scripts/uefi_query.py paging      # Page table setup in UEFI (x86_64)
+python scripts/uefi_query.py aarch64     # AArch64 paging (TTBR/MAIR/TCR)
 python scripts/uefi_query.py errors      # Common errors and fixes
 ```
 
@@ -229,7 +230,8 @@ python scripts/driver_query.py template ring  # Ring IPC userspace driver
 |-----------|----------|
 | Syscall numbers | src/uapi/syscalls/root.zig |
 | Syscall handlers | src/kernel/sys/syscall/{core,fs,memory,process,net,hw,io,io_uring,misc}/*.zig |
-| HAL | src/arch/x86_64/ (via hal import) |
+| HAL (x86_64) | src/arch/x86_64/ (via hal import) |
+| HAL (aarch64) | src/arch/aarch64/ (via hal import) |
 | APIC/IRQ routing | src/arch/x86_64/kernel/apic/root.zig |
 | Kernel drivers | src/drivers/ |
 | Input drivers | src/drivers/input/{keyboard,mouse,input}.zig |
@@ -238,6 +240,6 @@ python scripts/driver_query.py template ring  # Ring IPC userspace driver
 | Libc | src/user/lib/libc/ |
 | Async I/O | src/kernel/io/ |
 | Network stack | src/net/ |
-| UEFI bootloader | src/boot/uefi/ |
+| UEFI bootloader | src/boot/uefi/ (dual-arch: x86_64/aarch64) |
 | Build tools | tools/ (disk_image.zig, docker-build.sh) |
 

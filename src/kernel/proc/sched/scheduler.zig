@@ -1,5 +1,7 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const hal = @import("hal");
+
 const sync = @import("sync");
 const console = @import("console");
 const config = @import("config");
@@ -136,9 +138,13 @@ fn initIdleThread() void {
         hal.cpu.haltForever();
     };
 
-    const gs_base = hal.cpu.readMsr(hal.cpu.IA32_GS_BASE);
-    const gs_data = @as(*hal.syscall.KernelGsData, @ptrFromInt(gs_base));
+    const gs_data = switch (builtin.cpu.arch) {
+        .x86_64 => @as(*hal.syscall.KernelGsData, @ptrFromInt(hal.cpu.readMsr(hal.cpu.IA32_GS_BASE))),
+        .aarch64 => @as(*hal.syscall.KernelGsData, @ptrFromInt(asm volatile ("mrs %[ret], tpidr_el1" : [ret] "=r" (-> u64)))),
+        else => @compileError("Unsupported architecture"),
+    };
     gs_data.idle_thread = @intFromPtr(idle);
+
     gs_data.current_thread = 0; // No current thread yet
 
     console.info("Sched: Idle thread created for CPU {d} (tid={d})", .{gs_data.apic_id, idle.tid});
@@ -210,35 +216,66 @@ pub fn start() noreturn {
 
     // Get idle thread pointer directly from GS:40 inline to minimize stack usage
     // This avoids potential stack overflow on the boot stack
-    const idle_ptr: u64 = asm volatile ("movq %%gs:40, %[ret]"
-        : [ret] "=r" (-> u64),
-    );
+    const idle_ptr: u64 = switch (builtin.cpu.arch) {
+        .x86_64 => asm volatile ("movq %%gs:40, %[ret]" : [ret] "=r" (-> u64)),
+        .aarch64 => blk: {
+            const gs_data_ptr = asm volatile ("mrs %[ret], tpidr_el1" : [ret] "=r" (-> u64));
+            const gs_data = @as(*hal.syscall.KernelGsData, @ptrFromInt(gs_data_ptr));
+            break :blk gs_data.idle_thread;
+        },
+        else => @compileError("Unsupported architecture"),
+    };
+
     const idle: *Thread = @ptrFromInt(idle_ptr);
 
     // Set the idle thread as current
     thread_logic.setCurrentThread(idle);
     idle.state = .Running;
 
-    // Update GDT/TSS with idle thread's kernel stack for syscalls
-    hal.gdt.setKernelStack(idle.kernel_stack_top);
-    const gs_base = hal.cpu.readMsr(hal.cpu.IA32_GS_BASE);
-    const gs_data = @as(*hal.syscall.KernelGsData, @ptrFromInt(gs_base));
-    gs_data.kernel_stack = idle.kernel_stack_top;
-    gs_data.current_thread = @intFromPtr(idle);
+    // Update per-CPU data with idle thread's kernel stack for syscalls
+    switch (builtin.cpu.arch) {
+        .x86_64 => {
+            hal.gdt.setKernelStack(idle.kernel_stack_top);
+            const gs_base = hal.cpu.readMsr(hal.cpu.IA32_GS_BASE);
+            const gs_data = @as(*hal.syscall.KernelGsData, @ptrFromInt(gs_base));
+            gs_data.kernel_stack = idle.kernel_stack_top;
+            gs_data.current_thread = @intFromPtr(idle);
+        },
+        .aarch64 => {
+            // On ARM, use TPIDR_EL1 for per-CPU data
+            const tpidr = asm volatile ("mrs %[ret], tpidr_el1" : [ret] "=r" (-> u64));
+            const gs_data: *hal.syscall.KernelGsData = @ptrFromInt(tpidr);
+            gs_data.kernel_stack = idle.kernel_stack_top;
+            gs_data.current_thread = @intFromPtr(idle);
+        },
+        else => @compileError("Unsupported architecture"),
+    }
 
     // Switch to idle thread's stack and enable interrupts
     const idle_stack = idle.kernel_stack_top;
 
-    asm volatile (
-        \\mov %[stack], %%rsp
-        \\mov %%rsp, %%rbp
-        \\sti
-        \\1: hlt
-        \\jmp 1b
-        :
-        : [stack] "r" (idle_stack),
-        : .{ .rsp = true, .rbp = true, .memory = true }
-    );
+    switch (builtin.cpu.arch) {
+        .x86_64 => asm volatile (
+            \\mov %[stack], %%rsp
+            \\mov %%rsp, %%rbp
+            \\sti
+            \\1: hlt
+            \\jmp 1b
+            :
+            : [stack] "r" (idle_stack)
+        ),
+        .aarch64 => asm volatile (
+            \\mov sp, %[stack]
+            \\mov x29, xzr
+            \\msr daifclr, #2
+            \\1: wfi
+            \\b 1b
+            :
+            : [stack] "r" (idle_stack)
+        ),
+        else => @compileError("Unsupported architecture"),
+    }
+
 
     unreachable;
 }
@@ -246,9 +283,16 @@ pub fn start() noreturn {
 /// Start scheduler on AP
 pub fn startAp() noreturn {
     // Get idle thread pointer directly from GS:40 inline
-    const idle_ptr: u64 = asm volatile ("movq %%gs:40, %[ret]"
-        : [ret] "=r" (-> u64),
-    );
+    const idle_ptr: u64 = switch (builtin.cpu.arch) {
+        .x86_64 => asm volatile ("movq %%gs:40, %[ret]" : [ret] "=r" (-> u64)),
+        .aarch64 => blk: {
+            const gs_data_ptr = asm volatile ("mrs %[ret], tpidr_el1" : [ret] "=r" (-> u64));
+            const gs_data = @as(*hal.syscall.KernelGsData, @ptrFromInt(gs_data_ptr));
+            break :blk gs_data.idle_thread;
+        },
+        else => @compileError("Unsupported architecture"),
+    };
+
     const idle: *Thread = @ptrFromInt(idle_ptr);
 
     thread_logic.setCurrentThread(idle);
@@ -262,16 +306,28 @@ pub fn startAp() noreturn {
 
     const idle_stack = idle.kernel_stack_top;
 
-    asm volatile (
-        \\mov %[stack], %%rsp
-        \\mov %%rsp, %%rbp
-        \\sti
-        \\1: hlt
-        \\jmp 1b
-        :
-        : [stack] "r" (idle_stack),
-        : .{ .rsp = true, .rbp = true, .memory = true }
-    );
+    switch (builtin.cpu.arch) {
+        .x86_64 => asm volatile (
+            \\mov %[stack], %%rsp
+            \\mov %%rsp, %%rbp
+            \\sti
+            \\1: hlt
+            \\jmp 1b
+            :
+            : [stack] "r" (idle_stack)
+        ),
+        .aarch64 => asm volatile (
+            \\mov sp, %[stack]
+            \\mov x29, xzr
+            \\msr daifclr, #2
+            \\1: wfi
+            \\b 1b
+            :
+            : [stack] "r" (idle_stack)
+        ),
+        else => @compileError("Unsupported architecture"),
+    }
+
 
     unreachable;
 }
@@ -460,8 +516,17 @@ pub fn sleepForTicks(ticks: u64) void {
 
 /// Internal schedule function for synchronous switching
 fn schedule_sync() void {
-    asm volatile ("int $32");
+    switch (builtin.cpu.arch) {
+        .x86_64 => asm volatile ("int $32"),
+        .aarch64 => {
+            // Pending: Hardware timer will trigger or we can force an exception
+            // For now, enable interrupts and wait for the tick
+            asm volatile ("msr daifclr, #2");
+        },
+        else => {},
+    }
 }
+
 
 /// Wake up threads whose sleep timer has expired
 fn wakeSleepingThreads(now: u64) void {
@@ -554,7 +619,7 @@ pub fn exitWithStatus(status: i32) void {
 // === Timer Tick & Scheduling ===
 
 /// Timer tick handler - called from IRQ0 handler
-pub fn timerTick(frame: *hal.idt.InterruptFrame) *hal.idt.InterruptFrame {
+pub fn timerTick(frame: if (builtin.cpu.arch == .x86_64) *hal.interrupts.InterruptFrame else *const hal.interrupts.InterruptFrame) if (builtin.cpu.arch == .x86_64) *hal.idt.InterruptFrame else void {
     const local_tick_count = scheduler.tick_count.fetchAdd(1, .monotonic) + 1;
 
     var tick_cb: ?*const fn () void = null;
@@ -574,9 +639,9 @@ pub fn timerTick(frame: *hal.idt.InterruptFrame) *hal.idt.InterruptFrame {
 
     if (tick_cb) |cb| cb();
 
-    if (local_tick_count % 10 == 0) {
-        const vdso = @import("vdso");
-        vdso.update();
+    if (builtin.cpu.arch == .aarch64) {
+        doPerCpuSchedule(frame);
+        return;
     }
 
     if (!is_running) {
@@ -587,7 +652,7 @@ pub fn timerTick(frame: *hal.idt.InterruptFrame) *hal.idt.InterruptFrame {
 }
 
 /// Per-CPU scheduling logic
-fn doPerCpuSchedule(frame: *hal.idt.InterruptFrame) *hal.idt.InterruptFrame {
+fn doPerCpuSchedule(frame: *const hal.interrupts.InterruptFrame) if (builtin.cpu.arch == .x86_64) *hal.idt.InterruptFrame else void {
     const current = thread_logic.getCurrentThread();
 
     if (current) |curr| {
@@ -646,6 +711,7 @@ fn doPerCpuSchedule(frame: *hal.idt.InterruptFrame) *hal.idt.InterruptFrame {
     next.state = .Running;
     thread_logic.setCurrentThread(next);
 
+    if (builtin.cpu.arch == .aarch64) return;
     return @ptrFromInt(next.kernel_rsp);
 }
 

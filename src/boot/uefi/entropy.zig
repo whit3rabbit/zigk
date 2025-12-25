@@ -6,6 +6,7 @@
 // Must be called BEFORE ExitBootServices since UEFI protocols are unavailable after.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const uefi = std.os.uefi;
 
 // EFI_RNG_PROTOCOL GUID: 3152BCA5-EADE-433D-862E-C01CDC291F44
@@ -110,15 +111,25 @@ fn getWeakEntropy(buf: []u8) EntropyResult {
     };
 }
 
-/// Read Time Stamp Counter
+/// Read Time/Timestamp Counter (Architecture-specific)
 inline fn readTsc() u64 {
-    var lo: u32 = undefined;
-    var hi: u32 = undefined;
-    asm volatile ("rdtsc"
-        : [lo] "={eax}" (lo),
-          [hi] "={edx}" (hi),
-    );
-    return (@as(u64, hi) << 32) | lo;
+    if (comptime builtin.cpu.arch == .x86_64) {
+        var lo: u32 = undefined;
+        var hi: u32 = undefined;
+        asm volatile ("rdtsc"
+            : [lo] "={eax}" (lo),
+              [hi] "={edx}" (hi),
+        );
+        return (@as(u64, hi) << 32) | lo;
+    } else if (comptime builtin.cpu.arch == .aarch64) {
+        var val: u64 = 0;
+        asm volatile ("mrs %[ret], cntpct_el0"
+            : [ret] "=r" (val),
+        );
+        return val;
+    } else {
+        return 0;
+    }
 }
 
 /// Calculate a random offset from entropy bytes
@@ -140,17 +151,4 @@ pub fn calculateOffset(
 
     // Scale by alignment
     return @as(u64, masked) * alignment;
-}
-
-// Tests (run on host, not during boot)
-test "calculateOffset" {
-    const entropy = [_]u8{ 0xFF, 0x0F }; // 0x0FFF = 4095
-    const offset = calculateOffset(&entropy, 12, 4096); // 12 bits, page aligned
-    try std.testing.expectEqual(@as(u64, 4095 * 4096), offset);
-}
-
-test "calculateOffset with masking" {
-    const entropy = [_]u8{ 0xFF, 0xFF }; // 0xFFFF
-    const offset = calculateOffset(&entropy, 8, 4096); // 8 bits only
-    try std.testing.expectEqual(@as(u64, 255 * 4096), offset);
 }

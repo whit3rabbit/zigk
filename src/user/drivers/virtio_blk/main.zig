@@ -11,7 +11,17 @@
 // Reference: VirtIO Specification 1.1 (OASIS)
 
 const std = @import("std");
+const builtin = @import("builtin");
 const syscall = @import("syscall");
+
+/// Architecture-independent acquire barrier
+inline fn acquireBarrier() void {
+    switch (builtin.cpu.arch) {
+        .x86_64 => asm volatile ("lfence" ::: .{ .memory = true }),
+        .aarch64 => asm volatile ("dmb ishld" ::: .{ .memory = true }),
+        else => @compileError("Unsupported architecture"),
+    }
+}
 
 const SyscallError = syscall.uapi.errno.SyscallError;
 const PciDeviceInfo = syscall.PciDeviceInfo;
@@ -667,11 +677,7 @@ fn memoryBarrier() void {
 }
 
 fn loadBarrier() void {
-    asm volatile ("lfence"
-        :
-        :
-        : .{ .memory = true }
-    );
+    acquireBarrier();
 }
 
 fn alignUp64(value: u64, alignment: u64) u64 {

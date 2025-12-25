@@ -45,7 +45,7 @@ pub const Process = struct {
                 if (self.locked.cmpxchgWeak(0, 1, .acquire, .monotonic) == null) break;
                 // Spin hint
                 if (@import("builtin").os.tag == .freestanding) {
-                    asm volatile ("pause" ::: .{ .memory = true });
+                    hal.cpu.pause();
                 } else {
                     std.Thread.yield() catch {};
                 }
@@ -77,7 +77,7 @@ pub const Process = struct {
             while (true) {
                 if (self.locked.cmpxchgWeak(0, 1, .acquire, .monotonic) == null) break;
                 if (@import("builtin").os.tag == .freestanding) {
-                    asm volatile ("pause" ::: .{ .memory = true });
+                    hal.cpu.pause();
                 } else {
                     std.Thread.yield() catch {};
                 }

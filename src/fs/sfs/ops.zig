@@ -574,7 +574,7 @@ pub fn sfsUnlink(ctx: ?*anyopaque, path: []const u8) vfs.Error!void {
                         .start_block = e.start_block,
                         .block_count = blocks_used,
                     };
-                    console.info("SFS: Deferring deletion of '{s}' (open_count={}, blocks={})", .{ name, self.open_counts[idx], blocks_used });
+                    console.info("SFS: Deferring deletion of '{s}' (open_count={},blocks={})", .{ name, self.open_counts[idx], blocks_used });
                 }
 
                 // Free blocks while holding lock (if not deferred)
@@ -812,7 +812,7 @@ pub fn refreshSizeFromDisk(self: *t.SfsFile) ?u32 {
     const offset_idx = self.entry_idx % 4;
     var dir_buf: [512]u8 = undefined;
 
-    asm volatile ("mfence" ::: .{ .memory = true });
+    @import("hal").mmio.memoryBarrier(); // 
     sfs_io.readSector(self.fs.device_fd, self.fs.superblock.root_dir_start + block_idx, &dir_buf) catch return null;
 
     const entry: *const t.DirEntry = @ptrCast(@alignCast(&dir_buf[offset_idx * 128]));
@@ -832,7 +832,7 @@ pub fn refreshMetadataFromDisk(self: *t.SfsFile) ?t.SfsFile.RefreshedMetadata {
     const offset_idx = self.entry_idx % 4;
     var dir_buf: [512]u8 = undefined;
 
-    asm volatile ("mfence" ::: .{ .memory = true });
+    @import("hal").mmio.memoryBarrier(); // 
     sfs_io.readSector(self.fs.device_fd, self.fs.superblock.root_dir_start + block_idx, &dir_buf) catch return null;
 
     const entry: *const t.DirEntry = @ptrCast(@alignCast(&dir_buf[offset_idx * 128]));

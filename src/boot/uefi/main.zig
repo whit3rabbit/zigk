@@ -13,6 +13,7 @@
 // 9. Jump to kernel entry point
 
 const std = @import("std");
+const builtin = @import("builtin");
 const uefi = std.os.uefi;
 const BootInfo = @import("boot_info");
 const loader = @import("loader.zig");
@@ -26,7 +27,6 @@ const entropy = @import("entropy.zig");
 const HHDM_OFFSET: u64 = 0xFFFF_8000_0000_0000;
 
 // KASLR configuration
-// Entropy bits determine randomization range; alignment ensures proper memory access
 const KASLR_STACK_ENTROPY_BITS: u5 = 12; // 4096 units * 4KB = 16MB range
 const KASLR_MMIO_ENTROPY_BITS: u5 = 12; // 4096 units * 4KB = 16MB range
 const KASLR_HEAP_ENTROPY_BITS: u5 = 8; // 256 units * 4KB = 1MB range
@@ -35,7 +35,7 @@ const MAX_SEGMENTS: usize = 32;
 const MAX_MEMMAP_ENTRIES: usize = 256;
 const MEMMAP_BUFFER_SIZE: usize = MAX_MEMMAP_ENTRIES * @sizeOf(uefi.tables.MemoryDescriptor);
 
-// Static buffers (zero-initialized for security - prevents information leaks)
+// Static buffers
 var kernel_segments: [MAX_SEGMENTS]loader.LoadedSegment = std.mem.zeroes([MAX_SEGMENTS]loader.LoadedSegment);
 var memmap_buffer: [MEMMAP_BUFFER_SIZE]u8 align(@alignOf(uefi.tables.MemoryDescriptor)) = std.mem.zeroes([MEMMAP_BUFFER_SIZE]u8);
 var boot_memmap: [MAX_MEMMAP_ENTRIES]BootInfo.MemoryDescriptor = std.mem.zeroes([MAX_MEMMAP_ENTRIES]BootInfo.MemoryDescriptor);
@@ -65,7 +65,7 @@ pub fn main() void {
         stallForever();
     };
 
-    // Step 0a: Acquire entropy for KASLR (must be done before ExitBootServices)
+    // Step 0a: Acquire entropy for KASLR
     serialPrint("Acquiring KASLR entropy...\r\n");
     const entropy_result = entropy.getBootEntropy(bs, &kaslr_entropy);
     if (entropy_result.quality == .hardware) {
@@ -125,7 +125,6 @@ pub fn main() void {
     } else |err| {
         serialPrint("WARNING: Initrd not loaded: ");
         serialPrintError(err);
-        // Continue without initrd - kernel will have no userspace processes
     }
 
     // Step 2: Get memory map
@@ -181,11 +180,11 @@ pub fn main() void {
             .phys_addr = seg.physical_address,
             .size = seg.size,
             .writable = seg.writable,
-            .executable = seg.executable, // Security: propagate for W^X enforcement
+            .executable = seg.executable,
         };
     }
 
-    const pml4_phys = paging.createKernelPageTables(
+    const ttbr_phys = paging.createKernelPageTables(
         bs,
         max_phys,
         paging_segments[0..load_result.segment_count],
@@ -193,15 +192,11 @@ pub fn main() void {
         serialPrint("ERROR: Failed to create page tables\r\n");
         stallForever();
     };
-    serialPrint("PML4 created at: ");
-    serialPrintHex(pml4_phys);
+    serialPrint("Page tables created at: ");
+    serialPrintHex(ttbr_phys);
     serialPrint("\r\n");
 
     // Step 6: Prepare BootInfo structure
-    // NOTE: Memory map conversion is deferred until after ExitBootServices
-    // to avoid TOCTOU - allocations between now and exit would make the map stale
-
-    // Find kernel physical/virtual base from first segment
     var kernel_phys_base: u64 = 0;
     var kernel_virt_base: u64 = 0;
     if (load_result.segment_count > 0) {
@@ -209,23 +204,13 @@ pub fn main() void {
         kernel_virt_base = kernel_segments[0].virtual_address;
     }
 
-    // Calculate KASLR offsets from entropy
-    // Each offset uses different bytes from the entropy buffer
     const stack_offset = entropy.calculateOffset(kaslr_entropy[0..2], KASLR_STACK_ENTROPY_BITS, KASLR_PAGE_SIZE);
     const mmio_offset = entropy.calculateOffset(kaslr_entropy[2..4], KASLR_MMIO_ENTROPY_BITS, KASLR_PAGE_SIZE);
     const heap_offset = entropy.calculateOffset(kaslr_entropy[4..6], KASLR_HEAP_ENTROPY_BITS, KASLR_PAGE_SIZE);
 
-    serialPrint("KASLR offsets: stack=");
-    serialPrintHex(stack_offset);
-    serialPrint(" mmio=");
-    serialPrintHex(mmio_offset);
-    serialPrint(" heap=");
-    serialPrintHex(heap_offset);
-    serialPrint("\r\n");
-
     boot_info = .{
         .memory_map = &boot_memmap,
-        .memory_map_count = 0, // Set after ExitBootServices with final memory map
+        .memory_map_count = 0,
         .descriptor_size = @sizeOf(BootInfo.MemoryDescriptor),
         .framebuffer = &framebuffer_info,
         .rsdp = rsdp_addr,
@@ -245,35 +230,26 @@ pub fn main() void {
     // Step 7: Exit boot services
     serialPrint("Calling ExitBootServices...\r\n");
 
-    // Must get fresh memory map right before ExitBootServices
     var exit_memmap = memory.getMemoryMap(bs, &memmap_buffer) catch {
         serialPrint("ERROR: Failed to get final memory map\r\n");
         stallForever();
     };
 
-    // Exit boot services - after this, no more UEFI calls!
     const image_handle = uefi.handle;
     const exit_status = bs._exitBootServices(image_handle, exit_memmap.map_key);
 
     if (exit_status != .success) {
-        // Memory map might have changed, try once more
         exit_memmap = memory.getMemoryMap(bs, &memmap_buffer) catch {
             stallForever();
         };
         const retry_status = bs._exitBootServices(image_handle, exit_memmap.map_key);
         if (retry_status != .success) {
-            // Can't print anymore after this point in real impl
             stallForever();
         }
     }
 
-    // === NO MORE UEFI CALLS AFTER THIS POINT ===
-    // From here we use direct serial I/O only
-
     serialPrint("BOOT: ExitBootServices OK\r\n");
 
-    // Convert FINAL memory map to BootInfo format (TOCTOU fix: use exit_memmap, not stale uefi_memmap)
-    // This is safe to call after ExitBootServices - it only copies data, no UEFI calls
     const memmap_count = memory.convertToBootInfo(&exit_memmap, &boot_memmap);
     boot_info.memory_map_count = memmap_count;
     serialPrint("BOOT: Final memory map: ");
@@ -282,13 +258,10 @@ pub fn main() void {
 
     // Step 8: Load new page tables
     serialPrint("BOOT: Loading page tables...\r\n");
-    paging.loadPageTables(pml4_phys);
-    serialPrint("BOOT: CR3 loaded\r\n");
+    paging.loadPageTables(ttbr_phys);
+    serialPrint("BOOT: Page tables loaded\r\n");
 
     // Step 9: Jump to kernel
-    // IMPORTANT: UEFI uses Microsoft x64 ABI (RCX = first arg)
-    // but kernel uses System V AMD64 ABI (RDI = first arg).
-    // We must manually set RDI and jump to avoid calling convention mismatch.
     const boot_info_ptr = @intFromPtr(&boot_info);
     const entry_addr = load_result.entry_point;
 
@@ -298,21 +271,32 @@ pub fn main() void {
     serialPrintHex(boot_info_ptr);
     serialPrint("\r\n");
 
-    // Put boot_info pointer in RDI (System V first arg) and jump to kernel
-    asm volatile (
-        \\mov %[bi], %%rdi
-        \\jmp *%[entry]
-        :
-        : [bi] "r" (boot_info_ptr),
-          [entry] "r" (entry_addr),
-    );
+    switch (builtin.cpu.arch) {
+        .x86_64 => {
+            asm volatile (
+                \\mov %[bi], %%rdi
+                \\jmp *%[entry]
+                :
+                : [bi] "r" (boot_info_ptr),
+                  [entry] "r" (entry_addr),
+            );
+        },
+        .aarch64 => {
+            asm volatile (
+                \\mov x0, %[bi]
+                \\br %[entry]
+                :
+                : [bi] "r" (boot_info_ptr),
+                  [entry] "r" (entry_addr),
+            );
+        },
+        else => @compileError("Unsupported architecture"),
+    }
 
-    // Should never reach here
     unreachable;
 }
 
 fn findRsdp(system_table: *uefi.tables.SystemTable) u64 {
-    // ACPI 2.0 GUID
     const acpi20_guid = uefi.Guid{
         .time_low = 0x8868e871,
         .time_mid = 0xe4f1,
@@ -322,7 +306,6 @@ fn findRsdp(system_table: *uefi.tables.SystemTable) u64 {
         .node = [_]u8{ 0x00, 0x80, 0xc7, 0x3c, 0x88, 0x81 },
     };
 
-    // ACPI 1.0 GUID
     const acpi10_guid = uefi.Guid{
         .time_low = 0xeb9d2d30,
         .time_mid = 0x2d88,
@@ -332,21 +315,18 @@ fn findRsdp(system_table: *uefi.tables.SystemTable) u64 {
         .node = [_]u8{ 0x00, 0x90, 0x27, 0x3f, 0xc1, 0x4d },
     };
 
-    // Sanity check: reject unreasonable table entry counts (protects against corrupted firmware)
     const MAX_CONFIG_ENTRIES: usize = 1024;
     if (system_table.number_of_table_entries > MAX_CONFIG_ENTRIES) return 0;
     if (system_table.number_of_table_entries == 0) return 0;
 
     const config_entries = system_table.configuration_table[0..system_table.number_of_table_entries];
 
-    // First try ACPI 2.0
     for (config_entries) |entry| {
         if (std.mem.eql(u8, std.mem.asBytes(&entry.vendor_guid), std.mem.asBytes(&acpi20_guid))) {
             return @intFromPtr(entry.vendor_table);
         }
     }
 
-    // Fall back to ACPI 1.0
     for (config_entries) |entry| {
         if (std.mem.eql(u8, std.mem.asBytes(&entry.vendor_guid), std.mem.asBytes(&acpi10_guid))) {
             return @intFromPtr(entry.vendor_table);
@@ -358,13 +338,32 @@ fn findRsdp(system_table: *uefi.tables.SystemTable) u64 {
 
 fn stallForever() noreturn {
     while (true) {
-        asm volatile ("hlt");
+        switch (builtin.cpu.arch) {
+            .x86_64 => asm volatile ("hlt"),
+            .aarch64 => asm volatile ("wfi"),
+            else => {},
+        }
     }
 }
 
 // Serial output helpers
 fn serialWrite(data: u8) void {
-    asm volatile ("outb %%al, %%dx" : : [val] "{al}" (data), [port] "{dx}" (@as(u16, 0x3F8)));
+    switch (builtin.cpu.arch) {
+        .x86_64 => asm volatile ("outb %%al, %%dx" : : [val] "{al}" (data), [port] "{dx}" (@as(u16, 0x3F8))),
+        .aarch64 => {
+            // In AArch64 UEFI, we should really use UEFI console or a known MMIO address.
+            // For now, we stub it or use UEFI console if available.
+            // But main() might have already exited boot services.
+            // If ExitBootServices was called, we need MMIO.
+            // Assume PL011 at 0x09000000 (QEMU virt default) if no other info.
+            const uart_base: usize = 0x09000000;
+            const uart_dr: *volatile u32 = @ptrFromInt(uart_base);
+            const uart_fr: *volatile u32 = @ptrFromInt(uart_base + 0x18);
+            while ((uart_fr.* & 0x20) != 0) {} // Wait while TX full
+            uart_dr.* = data;
+        },
+        else => {},
+    }
 }
 
 fn serialPrint(msg: []const u8) void {

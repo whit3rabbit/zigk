@@ -22,7 +22,7 @@ pub const MsixVectorAllocation = interrupts.MsixVectorAllocation;
 var g_controller: ?*Controller = null;
 
 /// MSI-X Interrupt Handler
-pub fn handleInterrupt(frame: *hal.interrupts.InterruptFrame) void {
+pub fn handleInterrupt(frame: *const hal.interrupts.InterruptFrame) void {
     const vector: u8 = @truncate(frame.vector);
     _ = vector;
     // Identify which interrupter this is
@@ -217,8 +217,8 @@ pub fn setupInterrupts(ctrl: *Controller) !void {
                     // Enable MSI-X
                     if (pci.enableMsix(ecam, ctrl.pci_dev, &msix_cap, 0)) |msix_alloc| {
                         // Configure vector 0 to point to our allocated vector and BSP
-                        const dest_id: u8 = @truncate(hal.apic.lapic.getId());
-                        _ = pci.configureMsixEntry(msix_alloc.table_base, msix_alloc.vector_count, 0, vector, dest_id);
+                        const dest_id: u8 = @intCast(hal.apic.lapic.getId());
+                        _ = pci.configureMsixEntry(msix_alloc.table_base, msix_alloc.vector_count, 0, @intCast(vector), dest_id);
 
                         // Unmask vectors
                         pci.enableMsixVectors(ecam, ctrl.pci_dev, &msix_cap);

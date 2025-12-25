@@ -18,10 +18,11 @@ comptime {
     _ = &libc.free;
     _ = &libc.realloc;
     _ = &libc.calloc;
-    _ = &libc.printf;
-    _ = &libc.fprintf;
-    _ = &libc.sprintf;
-    _ = &libc.snprintf;
+    // Note: printf/fprintf/sprintf/snprintf are exported directly to C
+    _ = &libc.printf_impl;
+    _ = &libc.fprintf_impl;
+    _ = &libc.sprintf_impl;
+    _ = &libc.snprintf_impl;
     _ = &libc.fopen;
     _ = &libc.fclose;
     _ = &libc.fread;
@@ -82,7 +83,7 @@ comptime {
     _ = &libc.toupper;
     _ = &libc.tolower;
     _ = &libc.time;
-    _ = &libc.sscanf;
+    _ = &libc.sscanf_impl;
     _ = &libc.signal;
     _ = &libc.setjmp;
     _ = &libc.longjmp;

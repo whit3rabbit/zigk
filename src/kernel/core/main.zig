@@ -14,7 +14,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const hal = @import("hal");
+pub const hal = @import("hal");
 const syscall_arch = hal.syscall;
 const console = @import("console");
 const config = @import("config");
@@ -178,16 +178,13 @@ fn validateBootInfo(boot_info: *const BootInfo.BootInfo) void {
 }
 
 /// Early serial write byte - before HAL init.
-/// Directly accesses I/O port 0x3F8 (COM1).
 fn earlySerialWrite(c: u8) void {
-    asm volatile ("outb %%al, %%dx" : : [val] "{al}" (c), [port] "{dx}" (@as(u16, 0x3F8)));
+    hal.earlyWrite(c);
 }
 
 /// Early serial print string - before HAL init.
 fn earlySerialPrint(msg: []const u8) void {
-    for (msg) |c| {
-        earlySerialWrite(c);
-    }
+    hal.earlyPrint(msg);
 }
 
 /// Kernel entry point - called by UEFI bootloader with BootInfo.
@@ -450,8 +447,14 @@ fn initApic(boot_info: *const BootInfo.BootInfo) void {
             overrides[i] = .{
                 .source_irq = ovr.source_irq,
                 .gsi = ovr.gsi,
-                .polarity = @enumFromInt(@intFromEnum(ovr.polarity)),
-                .trigger_mode = @enumFromInt(@intFromEnum(ovr.trigger_mode)),
+                .polarity = if (builtin.cpu.arch == .x86_64)
+                    @enumFromInt(@intFromEnum(ovr.polarity))
+                else
+                    @intFromEnum(ovr.polarity),
+                .trigger_mode = if (builtin.cpu.arch == .x86_64)
+                    @enumFromInt(@intFromEnum(ovr.trigger_mode))
+                else
+                    @intFromEnum(ovr.trigger_mode),
             };
         }
     }

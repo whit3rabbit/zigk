@@ -5,30 +5,55 @@ const builtin = @import("builtin");
 /// Userspace syscall wrappers (inlined to avoid module conflicts)
 const userspace = struct {
     pub fn syscall2(number: usize, arg1: usize, arg2: usize) usize {
-        if (builtin.cpu.arch != .x86_64) return 0;
-        var ret: usize = undefined;
-        asm volatile ("syscall"
-            : [ret] "={rax}" (ret),
-            : [number] "{rax}" (number),
-              [arg1] "{rdi}" (arg1),
-              [arg2] "{rsi}" (arg2),
-            : .{ .rcx = true, .r11 = true, .memory = true }
-        );
-        return ret;
+        if (comptime builtin.cpu.arch == .x86_64) {
+            var ret: usize = undefined;
+            asm volatile ("syscall"
+                : [ret] "={rax}" (ret)
+                : [number] "{rax}" (number),
+                  [arg1] "{rdi}" (arg1),
+                  [arg2] "{rsi}" (arg2)
+                : .{ .rcx = true, .r11 = true, .memory = true }
+            );
+            return ret;
+        } else if (comptime builtin.cpu.arch == .aarch64) {
+            var ret: usize = undefined;
+            asm volatile ("svc #0"
+                : [ret] "={x0}" (ret)
+                : [number] "{x8}" (number),
+                  [arg1] "{x0}" (arg1),
+                  [arg2] "{x1}" (arg2)
+                : .{ .memory = true }
+            );
+            return ret;
+        }
+        return 0;
     }
 
     pub fn syscall3(number: usize, arg1: usize, arg2: usize, arg3: usize) usize {
-        if (builtin.cpu.arch != .x86_64) return 0;
-        var ret: usize = undefined;
-        asm volatile ("syscall"
-            : [ret] "={rax}" (ret),
-            : [number] "{rax}" (number),
-              [arg1] "{rdi}" (arg1),
-              [arg2] "{rsi}" (arg2),
-              [arg3] "{rdx}" (arg3),
-            : .{ .rcx = true, .r11 = true, .memory = true }
-        );
-        return ret;
+        if (comptime builtin.cpu.arch == .x86_64) {
+            var ret: usize = undefined;
+            asm volatile ("syscall"
+                : [ret] "={rax}" (ret)
+                : [number] "{rax}" (number),
+                  [arg1] "{rdi}" (arg1),
+                  [arg2] "{rsi}" (arg2),
+                  [arg3] "{rdx}" (arg3)
+                : .{ .rcx = true, .r11 = true, .memory = true }
+            );
+            return ret;
+        } else if (comptime builtin.cpu.arch == .aarch64) {
+            var ret: usize = undefined;
+            asm volatile ("svc #0"
+                : [ret] "={x0}" (ret)
+                : [number] "{x8}" (number),
+                  [arg1] "{x0}" (arg1),
+                  [arg2] "{x1}" (arg2),
+                  [arg3] "{x2}" (arg3)
+                : .{ .memory = true }
+            );
+            return ret;
+        }
+        return 0;
     }
 };
 

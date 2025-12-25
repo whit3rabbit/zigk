@@ -16,10 +16,13 @@ pub const sighandler_t = ?*const fn (c_int) callconv(.c) void;
 pub const SIG_DFL: sighandler_t = null;
 
 /// SIG_IGN - ignore signal
-pub const SIG_IGN: sighandler_t = @ptrFromInt(1);
+pub const SIG_IGN: sighandler_t = @as(sighandler_t, @ptrFromInt(@as(usize, 1)));
 
 /// SIG_ERR - error return
-pub const SIG_ERR: sighandler_t = @ptrFromInt(@as(usize, @bitCast(@as(isize, -1))));
+pub const SIG_ERR: sighandler_t = @as(sighandler_t, @ptrFromInt(@as(usize, 0xFFFFFFFFFFFFFFFC)));
+
+
+
 
 /// Set signal handler
 /// Returns previous handler or SIG_ERR on error

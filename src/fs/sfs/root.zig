@@ -42,7 +42,7 @@ pub fn init(device_path: []const u8) !vfs.FileSystem {
         if (self.superblock.magic == t.SFS_MAGIC_V2) {
             console.warn("SFS: Found legacy V2 filesystem, mounting read-only", .{});
         } else {
-            console.info("SFS: No valid filesystem found on {s}, formatting...", .{device_path});
+            console.info("SFS: No valid filesystem found on {s},formatting...", .{device_path});
             try format(self);
             console.info("SFS: Format complete", .{});
         }

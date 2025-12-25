@@ -13,7 +13,7 @@ const builtin = @import("builtin");
 // Architecture selection at compile time
 pub const arch = switch (builtin.cpu.arch) {
     .x86_64 => @import("x86_64/root.zig"),
-    .aarch64 => @compileError("aarch64 support not yet implemented"),
+    .aarch64 => @import("aarch64/root.zig"),
     else => @compileError("Unsupported architecture"),
 };
 
@@ -39,6 +39,15 @@ pub const timing = arch.timing;
 pub const smp = arch.smp;
 pub const userspace = arch.userspace;
 pub const iommu = arch.iommu;
+
+pub fn earlyWrite(c: u8) void {
+    arch.earlyWrite(c);
+}
+
+pub fn earlyPrint(msg: []const u8) void {
+    arch.earlyPrint(msg);
+}
+
 
 /// Initialize the Hardware Abstraction Layer
 /// Must be called early in kernel boot before using any HAL functions

@@ -185,19 +185,23 @@ pub const tmpnam = stdio.tmpnam;
 pub const perror = stdio.perror;
 
 // Formatted output
-pub const printf = stdio.printf;
-pub const fprintf = stdio.fprintf;
-pub const sprintf = stdio.sprintf;
-pub const snprintf = stdio.snprintf;
+// Note: printf/fprintf/sprintf/snprintf are exported directly to C.
+// For Zig callers, use the _impl versions.
+pub const printf_impl = stdio.printf_impl;
+pub const fprintf_impl = stdio.fprintf_impl;
+pub const sprintf_impl = stdio.sprintf_impl;
+pub const snprintf_impl = stdio.snprintf_impl;
 pub const vprintf = stdio.vprintf;
 pub const vfprintf = stdio.vfprintf;
 pub const vsprintf = stdio.vsprintf;
 pub const vsnprintf = stdio.vsnprintf;
 
 // Formatted input
-pub const sscanf = stdio.sscanf;
-pub const fscanf = stdio.fscanf;
-pub const scanf = stdio.scanf;
+// Note: sscanf/fscanf/scanf are exported directly to C.
+// For Zig callers, use the _impl versions.
+pub const sscanf_impl = stdio.sscanf_impl;
+pub const fscanf_impl = stdio.fscanf_impl;
+pub const scanf_impl = stdio.scanf_impl;
 
 // =============================================================================
 // stdlib

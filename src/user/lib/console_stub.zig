@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const uapi = @import("uapi");
 
 // Inline syscall wrapper to avoid module dependency issues
@@ -8,14 +9,25 @@ fn sys_write(fd: i32, buf: []const u8) usize {
     const arg2 = @intFromPtr(buf.ptr);
     const arg3 = buf.len;
 
-    return asm volatile ("syscall"
-        : [ret] "={rax}" (-> usize)
-        : [number] "{rax}" (number),
-          [arg1] "{rdi}" (arg1),
-          [arg2] "{rsi}" (arg2),
-          [arg3] "{rdx}" (arg3)
-        : .{ .rcx = true, .r11 = true, .memory = true }
-    );
+    return switch (builtin.cpu.arch) {
+        .x86_64 => asm volatile ("syscall"
+            : [ret] "={rax}" (-> usize)
+            : [number] "{rax}" (number),
+              [arg1] "{rdi}" (arg1),
+              [arg2] "{rsi}" (arg2),
+              [arg3] "{rdx}" (arg3)
+            : .{ .rcx = true, .r11 = true, .memory = true }
+        ),
+        .aarch64 => asm volatile ("svc #0"
+            : [ret] "={x0}" (-> usize)
+            : [number] "{x8}" (number),
+              [arg1] "{x0}" (arg1),
+              [arg2] "{x1}" (arg2),
+              [arg3] "{x2}" (arg3)
+            : .{ .memory = true }
+        ),
+        else => 0,
+    };
 }
 
 pub fn print(comptime fmt: []const u8, args: anytype) void {

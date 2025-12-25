@@ -493,3 +493,162 @@ export fn _uefi_start(boot_info: *BootInfo.BootInfo) callconv(.c) noreturn {
     // UEFI-specific initialization
 }
 ```
+
+## AArch64 Boot
+
+The UEFI bootloader supports both x86_64 and aarch64 architectures. AArch64 has significant differences in page table format and system register configuration.
+
+### Running AArch64
+
+```bash
+# Build and run aarch64 target
+zig build run-aarch64 -Dbios=/opt/homebrew/share/qemu/edk2-aarch64-code.fd
+```
+
+### Key Differences from x86_64
+
+| Aspect | x86_64 | AArch64 |
+|--------|--------|---------|
+| Page Table Register | CR3 | TTBR0_EL1 / TTBR1_EL1 |
+| Address Split | Single CR3 for all | TTBR0 = lower half, TTBR1 = upper half |
+| Memory Attributes | Page table flags | MAIR_EL1 + AttrIndx in PTE |
+| Translation Control | Implicit | TCR_EL1 explicit config |
+
+### AArch64 Address Space Split
+
+AArch64 uses two translation table base registers:
+- **TTBR0_EL1**: Translates addresses starting with `0x0000...` (lower half, user space)
+- **TTBR1_EL1**: Translates addresses starting with `0xFFFF...` (upper half, kernel)
+
+The kernel at `0xFFFFFFFF80000000` and HHDM at `0xFFFF800000000000` both require TTBR1.
+
+### Critical System Registers
+
+#### MAIR_EL1 (Memory Attribute Indirection Register)
+Defines memory type attributes referenced by page table entries via AttrIndx field:
+
+```zig
+const MAIR_DEVICE: u64 = 0x00;       // Index 0: Device-nGnRnE
+const MAIR_NORMAL_WB: u64 = 0xFF;    // Index 1: Normal, Write-Back, R+W Allocate
+const MAIR_NORMAL_NC: u64 = 0x44;    // Index 2: Normal, Non-Cacheable
+
+const mair_value: u64 = MAIR_DEVICE | (MAIR_NORMAL_WB << 8) | (MAIR_NORMAL_NC << 16);
+```
+
+#### TCR_EL1 (Translation Control Register)
+Configures translation granule and address size for both TTBR0 and TTBR1:
+
+| Field | Value | Meaning |
+|-------|-------|---------|
+| T0SZ | 16 | 48-bit VA for TTBR0 |
+| T1SZ | 16 | 48-bit VA for TTBR1 |
+| TG0 | 0b00 | 4KB granule for TTBR0 |
+| TG1 | 0b10 | 4KB granule for TTBR1 |
+| IPS | 0b010 | 40-bit physical address (1TB) |
+| SH0/SH1 | 0b11 | Inner Shareable |
+| ORGN/IRGN | 0b01 | Write-Back, Write-Allocate |
+
+### AArch64 Page Table Entry Format
+
+Unlike x86_64 where flags are directly in the PTE, AArch64 uses MAIR indirection:
+
+```zig
+fn toRawAarch64(flags: PageFlags, phys_addr: u64) u64 {
+    var raw: u64 = 0x3;  // Valid + Page descriptor
+    if (flags.huge_page) raw = 0x1;  // Block descriptor
+
+    // AttrIndx = 1 for normal memory (bits [4:2])
+    raw |= (1 << 2);
+
+    if (flags.no_execute) raw |= (1 << 54);  // UXN
+    if (!flags.writable) raw |= (1 << 7);    // AP[2] = read-only
+    if (flags.user) raw |= (1 << 6);         // AP[1] = EL0 accessible
+
+    raw |= (1 << 10);  // AF (Access Flag) - required!
+    raw |= (3 << 8);   // SH = Inner Shareable
+
+    raw |= (phys_addr & 0x000F_FFFF_FFFF_F000);
+    return raw;
+}
+```
+
+**Critical Fields:**
+- **AttrIndx [4:2]**: Index into MAIR_EL1 (0=Device, 1=Normal WB, 2=Normal NC)
+- **AF [10]**: Access Flag - must be set or hardware faults on first access
+- **SH [9:8]**: Shareability (3 = Inner Shareable for SMP)
+
+### Loading Page Tables (AArch64)
+
+The page table switch sequence must:
+1. Temporarily disable MMU (optional but safer)
+2. Configure MAIR_EL1
+3. Configure TCR_EL1
+4. Set TTBR0_EL1 (identity map) and TTBR1_EL1 (kernel/HHDM)
+5. Invalidate TLB
+6. Re-enable MMU
+
+```zig
+asm volatile (
+    // Disable MMU
+    \\mrs x4, sctlr_el1
+    \\bic x5, x4, #1
+    \\msr sctlr_el1, x5
+    \\isb
+    // Configure memory attributes
+    \\msr mair_el1, %[mair]
+    \\msr tcr_el1, %[tcr]
+    // Set page table bases (same table for both in bootloader)
+    \\msr ttbr0_el1, %[root]
+    \\msr ttbr1_el1, %[root]
+    // Invalidate TLB
+    \\tlbi vmalle1
+    \\dsb sy
+    \\isb
+    // Re-enable MMU
+    \\msr sctlr_el1, x4
+    \\isb
+    :
+    : [mair] "r" (mair_value), [tcr] "r" (tcr_value), [root] "r" (root_phys)
+    : .{ .x4 = true, .x5 = true, .memory = true }
+);
+```
+
+### AArch64 Boot Troubleshooting
+
+#### Translation Fault at Kernel Entry
+
+**Symptom**: `Synchronous Exception` with `ESR: EC 0x21` (Instruction Abort) and `Translation fault, zeroth level` at `0xFFFFFFFF800190B4`.
+
+**Cause**: TTBR1_EL1 not configured. The bootloader only set TTBR0, but kernel addresses require TTBR1.
+
+**Fix**: Set both TTBR0_EL1 and TTBR1_EL1 in `loadPageTables()`.
+
+#### Memory Access Faults After Page Table Load
+
+**Symptom**: Data abort or instruction abort after successful jump to kernel.
+
+**Cause**: AttrIndx not set in page table entries. Default (0) means Device memory, which cannot be used for instruction fetch.
+
+**Fix**: Set AttrIndx = 1 (bits [4:2]) for Normal Write-Back memory:
+```zig
+raw |= (1 << 2);  // MAIR index 1
+```
+
+#### Access Flag Fault
+
+**Symptom**: Repeated faults at same address.
+
+**Cause**: AF bit not set in PTE. Hardware requires AF=1.
+
+**Fix**: Always set AF in page table entries:
+```zig
+raw |= (1 << 10);  // Access Flag
+```
+
+### Key Files (AArch64)
+
+| File | Purpose |
+|------|---------|
+| `src/boot/uefi/paging.zig` | Dual-arch page table creation, TTBR/TCR/MAIR setup |
+| `src/arch/aarch64/boot/entry.S` | Kernel entry point (`kentry`) |
+| `src/arch/aarch64/boot/linker.ld` | Kernel linker script with high-half layout |

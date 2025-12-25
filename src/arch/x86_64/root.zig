@@ -26,6 +26,16 @@ pub const smp = @import("kernel/smp.zig");
 pub const userspace = @import("kernel/userspace.zig");
 pub const iommu = @import("mm/iommu/root.zig");
 
+pub fn earlyWrite(c: u8) void {
+    asm volatile ("outb %%al, %%dx" : : [val] "{al}" (c), [port] "{dx}" (@as(u16, 0x3F8)));
+}
+
+pub fn earlyPrint(msg: []const u8) void {
+    for (msg) |c| {
+        earlyWrite(c);
+    }
+}
+
 /// Initialize all x86_64 HAL subsystems
 pub fn init(_: u64) void {
     // Initialize serial port for debug output first

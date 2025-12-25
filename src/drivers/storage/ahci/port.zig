@@ -20,7 +20,7 @@ const MmioDevice = hal.mmio_device.MmioDevice;
 const term = @import("std").os.linux; // Not used here directly but good practice to keep std imports clean
 // We need assembly for memory barriers
 fn memoryBarrier() void {
-    asm volatile ("mfence");
+    hal.mmio.memoryBarrier();
 }
 
 const timing = hal.timing;

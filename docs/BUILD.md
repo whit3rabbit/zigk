@@ -30,6 +30,7 @@ You can customize the build using `-D` flags with `zig build`.
 
 | Option | Default | Description |
 |--------|---------|-------------|
+| `-Darch=[arch]` | x86_64 | Target architecture: `x86_64` or `aarch64` |
 | `-Dversion=[string]` | "0.1.0" | Kernel version string |
 | `-Dname=[string]` | "Zscapek" | Kernel name |
 | `-Dstack-size=[int]` | 16384 | Default thread stack size in bytes |
@@ -55,11 +56,19 @@ Two boot methods are available: ISO and GPT disk image.
 
 #### ISO Image (El Torito)
 ```bash
-zig build iso
+zig build iso                    # Default (x86_64)
+zig build iso -Darch=x86_64      # Explicit x86_64
+zig build iso -Darch=aarch64     # AArch64/ARM64
 ```
 Artifact: `zigk.iso`
 
 This creates a UEFI-bootable ISO with an embedded EFI System Partition using El Torito boot.
+
+**Convenience aliases:**
+```bash
+zig build iso-x86_64             # Build x86_64 ISO
+zig build iso-aarch64            # Build aarch64 ISO
+```
 
 **Note**: Some UEFI firmware implementations may not correctly detect El Torito EFI boot entries. If `zig build run` drops into the UEFI shell instead of booting, use the GPT disk image method below.
 
@@ -79,7 +88,15 @@ This creates a GPT-partitioned disk image with an EFI System Partition. This met
 ### 3. Run in QEMU
 To build and immediately run the ISO in QEMU:
 ```bash
-zig build run
+zig build run                    # Default (x86_64)
+zig build run -Darch=x86_64      # Explicit x86_64
+zig build run -Darch=aarch64     # AArch64/ARM64
+```
+
+**Convenience aliases:**
+```bash
+zig build run-x86_64             # Build and run x86_64 in QEMU
+zig build run-aarch64            # Build and run aarch64 in QEMU
 ```
 
 #### macOS / UEFI Boot
