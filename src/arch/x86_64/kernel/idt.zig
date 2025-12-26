@@ -324,11 +324,20 @@ pub fn setNewFrame(frame: *InterruptFrame) void {
 }
 
 /// Get CPU index for per-CPU data access
-/// Returns LAPIC ID clamped to MAX_CPUS-1
+/// SECURITY: Panics if LAPIC ID exceeds MAX_CPUS to prevent per-CPU array overflow.
+/// Returning 0 for OOB IDs would cause multiple CPUs to share per_cpu_new_frame[0],
+/// leading to context corruption and potential privilege escalation.
 inline fn getCpuIndex() usize {
     if (apic.isActive()) {
         const lapic_id = apic.lapic.getId();
-        return if (lapic_id < MAX_CPUS) lapic_id else 0;
+        if (lapic_id >= MAX_CPUS) {
+            // SECURITY: OOB LAPIC ID detected. This indicates either:
+            // 1. A system with more CPUs than MAX_CPUS (configuration error)
+            // 2. APIC ID spoofing attack from hypervisor
+            // Either way, we cannot safely proceed - halt this CPU.
+            @panic("LAPIC ID exceeds MAX_CPUS - cannot safely access per-CPU data");
+        }
+        return lapic_id;
     }
     return 0; // BSP during early boot
 }

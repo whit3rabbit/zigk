@@ -72,7 +72,7 @@ pub fn init(_: u64) void {
     pit.init(100);
 }
 
-/// Enable CPU security features (SMEP, SMAP) if supported
+/// Enable CPU security features (SMEP, SMAP, speculation control) if supported
 fn initSecurityFeatures() void {
     const console = @import("console");
 
@@ -115,5 +115,14 @@ fn initSecurityFeatures() void {
         }
     } else {
         console.warn("Security: Neither SMEP nor SMAP supported by CPU", .{});
+    }
+
+    // Initialize speculation control (Spectre mitigations)
+    // This detects IBPB/STIBP/SSBD support and caches the result
+    cpu.initSpeculationControl();
+    if (cpu.hasIbpb()) {
+        console.info("Security: IBPB (Indirect Branch Prediction Barrier) available", .{});
+    } else {
+        console.warn("Security: IBPB not supported - Spectre v2 mitigation unavailable", .{});
     }
 }

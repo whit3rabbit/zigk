@@ -71,4 +71,15 @@ pub const BootInfo = extern struct {
     stack_region_offset: u64, // Random offset for kernel stack region
     mmio_region_offset: u64, // Random offset for MMIO mapping region
     heap_offset: u64, // Random offset for kernel heap
+
+    // Device Tree Blob (AArch64 only, zero on x86_64)
+    // Pointer to the FDT in memory, provided by bootloader
+    dtb_addr: u64 = 0,
+
+    // GIC Configuration (AArch64 only, zero on x86_64)
+    // These are populated from DTB parsing or set to defaults
+    gic_dist_base: u64 = 0, // GIC Distributor base address (GICD)
+    gic_cpu_base: u64 = 0, // GIC CPU Interface (GICC for v2) or Redistributor (GICR for v3)
+    gic_version: u8 = 0, // GIC version: 2 or 3
+    _gic_padding: [7]u8 = [_]u8{0} ** 7, // Padding for alignment
 };

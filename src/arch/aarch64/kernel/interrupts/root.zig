@@ -10,6 +10,10 @@ const cpu = @import("../cpu.zig");
 const syscall = @import("../syscall.zig");
 const gic = @import("../gic.zig");
 
+// Extern declaration for syscall dispatch (defined in src/kernel/sys/syscall/core/table.zig)
+// Using extern allows AArch64 to call the common dispatch table without module import issues
+extern fn dispatch_syscall(frame: *syscall.SyscallFrame) callconv(.c) void;
+
 // ============================================================================
 // Handler State Variables
 // ============================================================================
@@ -42,7 +46,19 @@ var crash_handler: ?*const fn (u8, u64) noreturn = null;
 var page_fault_handler: ?*const fn (u64, u64) bool = null;
 
 /// Generic IRQ handlers (for userspace drivers/IPC)
+/// Maps SPIs 32-47 to handler slots 0-15
 var generic_irq_handlers: [16]?*const fn (u8) void = [_]?*const fn (u8) void{null} ** 16;
+
+// SECURITY: Compile-time verification that array size matches the IRQ range check in handle_irq_zig
+// The range check is (irq >= 32 and irq < 48), so slot = irq - 32 produces 0..15
+comptime {
+    const GENERIC_IRQ_START: u32 = 32;
+    const GENERIC_IRQ_END: u32 = 48;
+    const expected_size = GENERIC_IRQ_END - GENERIC_IRQ_START;
+    if (generic_irq_handlers.len != expected_size) {
+        @compileError("generic_irq_handlers array size does not match IRQ range (32..48)");
+    }
+}
 
 // ============================================================================
 // Types
@@ -81,7 +97,7 @@ pub fn earlyPrint(msg: []const u8) void {
 
 fn printHex(val: u64) void {
     const hex = "0123456789abcdef";
-    var buf: [18]u8 = undefined;
+    var buf: [18]u8 = [_]u8{0} ** 18;
     buf[0] = '0';
     buf[1] = 'x';
     var i: usize = 0;
@@ -117,19 +133,67 @@ const ExceptionClass = enum(u6) {
     _,
 };
 
+/// Unhandled exception types for panic diagnostics
+const UnhandledExceptionType = enum(u8) {
+    sp0_sync = 0,
+    sp0_irq = 1,
+    sp0_fiq = 2,
+    sp0_serror = 3,
+    fiq = 4,
+    serror = 5,
+    aarch32 = 6,
+};
+
+/// Handler for unhandled/unexpected exceptions
+/// Called from entry.S when an exception occurs that we don't handle
+pub export fn unhandled_exception_zig(
+    exc_type: u8,
+    esr: u64,
+    elr: u64,
+    far: u64,
+) callconv(.c) noreturn {
+    const type_names = [_][]const u8{
+        "SP0 Sync",
+        "SP0 IRQ",
+        "SP0 FIQ",
+        "SP0 SError",
+        "FIQ",
+        "SError",
+        "AArch32 (unsupported)",
+    };
+
+    earlyPrint("\n!!! UNHANDLED EXCEPTION !!!\n");
+    earlyPrint("Type: ");
+    if (exc_type < type_names.len) {
+        earlyPrint(type_names[exc_type]);
+    } else {
+        earlyPrint("Unknown");
+    }
+    earlyPrint("\nESR_EL1: ");
+    printHex(esr);
+    earlyPrint("\nELR_EL1: ");
+    printHex(elr);
+    earlyPrint("\nFAR_EL1: ");
+    printHex(far);
+    earlyPrint("\n");
+
+    // Halt with interrupts disabled
+    cpu.haltForever();
+}
+
 /// Exception handler called from entry.S
-/// ESR_EL1 contains exception syndrome (type, cause)
-/// FAR_EL1 contains fault address for memory aborts
-pub export fn handle_exception_zig(esr: u64, far: u64) callconv(.c) void {
+/// frame: pointer to saved register context (SyscallFrame) on kernel stack
+/// esr: ESR_EL1 - exception syndrome (type, cause)
+/// far: FAR_EL1 - fault address for memory aborts
+pub export fn handle_exception_zig(frame: *syscall.SyscallFrame, esr: u64, far: u64) callconv(.c) void {
     const ec: ExceptionClass = @enumFromInt(@as(u6, @truncate(esr >> 26)));
 
     switch (ec) {
         .svc_aa64 => {
-            // SVC instruction - this is a syscall from userspace
-            // TODO: Dispatch to syscall handler
-            earlyPrint("SVC from EL0, number: ");
-            printHex(esr & 0xFFFF);
-            earlyPrint("\n");
+            // SVC instruction - dispatch to syscall handler
+            // The dispatch_syscall function reads syscall number from x8,
+            // arguments from x0-x5, and sets return value in x0
+            dispatch_syscall(frame);
         },
         .instr_abort_lower, .instr_abort_same => {
             earlyPrint("Instruction Abort at ");
@@ -181,23 +245,23 @@ pub export fn handle_exception_zig(esr: u64, far: u64) callconv(.c) void {
 // ============================================================================
 
 /// IRQ handler called from entry.S
-pub export fn handle_irq_zig() callconv(.c) void {
+/// frame: pointer to saved register context on kernel stack
+pub export fn handle_irq_zig(frame: *InterruptFrame) callconv(.c) void {
     // Acknowledge interrupt from GIC
     const irq = gic.acknowledgeIrq();
 
-    // Check for spurious interrupt (ID 1023)
-    if (irq >= 1020) {
+    // Check for spurious interrupt (GICv2 spurious is exactly 1023)
+    // No EOI needed for spurious interrupts
+    if (irq == 1023) {
         return;
     }
 
     // Dispatch based on interrupt number
     switch (irq) {
         TIMER_PPI => {
-            // Timer interrupt
+            // Timer interrupt - pass actual frame for context switching
             if (@atomicLoad(?*const fn (*const InterruptFrame) void, &timer_handler, .acquire)) |handler| {
-                // TODO: Pass actual frame pointer from entry.S
-                // For now we pass a dummy - this won't work for context switching
-                handler(undefined);
+                handler(frame);
             }
         },
         UART_SPI => {
@@ -235,7 +299,15 @@ pub fn init() void {
 
     // Set up VBAR_EL1 to point to our exception vector table
     const vbar = @intFromPtr(&exception_vector_table);
-    asm volatile ("msr vbar_el1, %[val]"
+
+    // Validate 2048-byte alignment required by ARM architecture
+    if ((vbar & 0x7FF) != 0) {
+        @panic("Exception vector table not 2048-byte aligned");
+    }
+
+    asm volatile (
+        \\msr vbar_el1, %[val]
+        \\isb                   // ARM ARM requires ISB after VBAR update
         :
         : [val] "r" (vbar),
     );

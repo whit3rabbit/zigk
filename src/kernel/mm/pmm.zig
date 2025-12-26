@@ -178,7 +178,7 @@ pub fn init(memmap: []const BootInfo.MemoryDescriptor) !void {
             region_size >= min_size and
             entry.phys_start >= 0x100000)
         {
-            metadata_phys = paging.pageAlignUp(entry.phys_start);
+            metadata_phys = paging.pageAlignUp(entry.phys_start) orelse continue;
             found_region = true;
             break;
         }
@@ -213,7 +213,7 @@ pub fn init(memmap: []const BootInfo.MemoryDescriptor) !void {
             // Use checked arithmetic to prevent overflow
             const region_size = std.math.mul(u64, entry.num_pages, PAGE_SIZE) catch continue;
             const region_end = std.math.add(u64, entry.phys_start, region_size) catch continue;
-            const start_page = paging.pageAlignUp(entry.phys_start) / PAGE_SIZE;
+            const start_page = (paging.pageAlignUp(entry.phys_start) orelse continue) / PAGE_SIZE;
             const end_page = paging.pageAlignDown(region_end) / PAGE_SIZE;
 
             var page = start_page;
@@ -245,8 +245,8 @@ pub fn init(memmap: []const BootInfo.MemoryDescriptor) !void {
     // Reserve page 0
     reserveRange(0, 1);
 
-    // Reserve metadata pages
-    const metadata_pages = paging.pagesToCover(total_metadata);
+    // Reserve metadata pages (total_metadata is small, so overflow is impossible)
+    const metadata_pages = paging.pagesToCover(total_metadata) orelse unreachable;
     const metadata_start_page = metadata_phys / PAGE_SIZE;
     reserveRange(metadata_start_page, metadata_pages);
 

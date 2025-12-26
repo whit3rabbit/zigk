@@ -17,7 +17,11 @@ pub fn MmioDevice(comptime RegisterMap: type) type {
         size: usize,
 
         const Self = @This();
-        const bounds_check_enabled = builtin.mode == .Debug or builtin.mode == .ReleaseSafe;
+        // SECURITY: MMIO bounds checks are ALWAYS enabled regardless of build mode.
+        // Out-of-bounds MMIO access can read/write unintended hardware registers,
+        // potentially causing privilege escalation or hardware misconfiguration.
+        // The performance cost is negligible compared to the security risk.
+        const bounds_check_enabled = true;
 
         pub fn init(base: u64, size: usize) Self {
             return .{ .base = base, .size = size };

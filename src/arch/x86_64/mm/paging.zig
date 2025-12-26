@@ -10,6 +10,7 @@
 // HAL Contract: This module owns all page table manipulation.
 // Kernel code must use VMM interface, not this module directly.
 
+const std = @import("std");
 const cpu = @import("../kernel/cpu.zig");
 
 // Page size constants
@@ -260,7 +261,16 @@ pub fn pageAlignDown(addr: u64) u64 {
 }
 
 /// Align address up to page boundary
-pub fn pageAlignUp(addr: u64) u64 {
+/// SECURITY: Uses checked arithmetic to detect overflow.
+/// Returns null if the alignment would overflow.
+pub fn pageAlignUp(addr: u64) ?u64 {
+    const sum = std.math.add(u64, addr, PAGE_SIZE - 1) catch return null;
+    return sum & ~@as(u64, PAGE_SIZE - 1);
+}
+
+/// Align address up to page boundary (unchecked, for backwards compatibility)
+/// WARNING: Only use when addr is known to be well below u64::MAX
+pub fn pageAlignUpUnchecked(addr: u64) u64 {
     return (addr + PAGE_SIZE - 1) & ~@as(u64, PAGE_SIZE - 1);
 }
 
@@ -270,6 +280,15 @@ pub fn isPageAligned(addr: u64) bool {
 }
 
 /// Calculate number of pages needed for a given size
-pub fn pagesToCover(size: u64) u64 {
+/// SECURITY: Uses checked arithmetic to detect overflow.
+/// Returns null if the calculation would overflow.
+pub fn pagesToCover(size: u64) ?u64 {
+    const sum = std.math.add(u64, size, PAGE_SIZE - 1) catch return null;
+    return sum / PAGE_SIZE;
+}
+
+/// Calculate number of pages (unchecked, for backwards compatibility)
+/// WARNING: Only use when size is known to be well below u64::MAX
+pub fn pagesToCoverUnchecked(size: u64) u64 {
     return (size + PAGE_SIZE - 1) / PAGE_SIZE;
 }

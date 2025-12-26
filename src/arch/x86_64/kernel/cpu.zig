@@ -14,6 +14,10 @@ pub const IA32_FS_BASE: u32 = 0xC0000100;
 pub const IA32_GS_BASE: u32 = 0xC0000101;
 pub const IA32_KERNEL_GS_BASE: u32 = 0xC0000102;
 
+// Speculation control MSRs (Spectre mitigations)
+pub const IA32_SPEC_CTRL: u32 = 0x48; // IBRS, STIBP, SSBD control
+pub const IA32_PRED_CMD: u32 = 0x49; // IBPB command register
+
 // Control Register Operations
 
 /// Read CR0 (system control flags)
@@ -244,5 +248,62 @@ pub inline fn stall(us: u32) void {
     while (i < us) : (i += 1) {
         // PAUSE instruction for efficient spinning
         asm volatile ("pause");
+    }
+}
+
+// =============================================================================
+// Speculation Control (Spectre Mitigations)
+// =============================================================================
+
+/// CPUID feature bits for speculation control
+const CPUID_EXT_FEATURES_LEAF: u32 = 7;
+const CPUID_IBPB_BIT: u32 = 1 << 26; // EDX bit 26: IBPB supported
+const CPUID_STIBP_BIT: u32 = 1 << 27; // EDX bit 27: STIBP supported
+const CPUID_SSBD_BIT: u32 = 1 << 31; // EDX bit 31: SSBD supported
+
+/// Cached IBPB support flag (set during init)
+var ibpb_supported: bool = false;
+var speculation_ctrl_initialized: bool = false;
+
+/// Initialize speculation control features
+/// Must be called during CPU init to detect and cache feature support.
+pub fn initSpeculationControl() void {
+    const result = cpuid(CPUID_EXT_FEATURES_LEAF, 0);
+    ibpb_supported = (result.edx & CPUID_IBPB_BIT) != 0;
+    speculation_ctrl_initialized = true;
+}
+
+/// Check if IBPB (Indirect Branch Prediction Barrier) is supported
+pub fn hasIbpb() bool {
+    return ibpb_supported;
+}
+
+/// Issue IBPB (Indirect Branch Prediction Barrier)
+///
+/// SECURITY: This flushes indirect branch predictors to prevent Spectre v2
+/// attacks where an attacker trains the branch predictor to speculatively
+/// execute arbitrary code. Should be called:
+///   - On context switch between different security domains
+///   - When switching from user to kernel mode (if not using IBRS)
+///   - When switching between different address spaces
+///
+/// Note: IBPB is expensive (hundreds of cycles). Use judiciously.
+/// For performance, prefer IBRS (per-thread) over IBPB (full flush).
+pub inline fn issueIbpb() void {
+    if (ibpb_supported) {
+        // Write 1 to IA32_PRED_CMD to issue IBPB
+        // This flushes all indirect branch predictors
+        writeMsr(IA32_PRED_CMD, 1);
+    }
+}
+
+/// Issue IBPB if switching to a different address space (CR3)
+/// This is a conditional IBPB that only flushes if the security domain changes.
+/// More efficient than unconditional IBPB on every context switch.
+pub inline fn issueIbpbIfNeeded(old_cr3: u64, new_cr3: u64) void {
+    // Only issue IBPB if switching to a different address space
+    // Same address space means same security domain, no flush needed
+    if (ibpb_supported and old_cr3 != new_cr3) {
+        writeMsr(IA32_PRED_CMD, 1);
     }
 }

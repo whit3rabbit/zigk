@@ -350,6 +350,15 @@ _syscall_entry:
     # Load kernel stack from KernelGsData.kernel_stack (GS:0)
     mov %gs:0, %rsp
 
+    # SECURITY: Validate kernel stack address (defense-in-depth)
+    # Kernel addresses have bit 63 set (higher-half), so they appear negative.
+    # If GS:0 was corrupted to point to user space (positive), crash immediately.
+    test %rsp, %rsp
+    js 1f                       # Jump if Sign flag set (bit 63 = 1 = kernel)
+    # RSP is in user space - this is a security violation
+    ud2                         # Trigger #UD (undefined instruction) to crash
+1:
+
     # Now we're on kernel stack. Save all registers for SyscallFrame.
     # Push in reverse order so struct fields match stack layout.
 
@@ -500,6 +509,10 @@ _asm_copy_from_user:
     test %rdx, %rdx
     jz .Lcopy_done
 
+    # SECURITY: Enable user memory access (SMAP bypass)
+    # Must be paired with clac before returning to kernel code
+    stac
+
     # Calculate number of 8-byte quadwords
     mov %rdx, %rcx
     shr $3, %rcx          # RCX = len / 8 (number of quadwords)
@@ -520,6 +533,7 @@ _asm_copy_user_start:
 _asm_copy_user_end:
 
 .Lcopy_done_success:
+    clac                  # SECURITY: Disable user memory access before return
     xor %rax, %rax        # Success: return 0 bytes remaining
     ret
 
@@ -572,11 +586,13 @@ _asm_copy_user_fixup:
     mov %rdx, %rcx
     and $7, %rcx              # RCX = original len % 8 (remainder bytes)
     add %rcx, %rax            # RAX = RCX*8 + remainder
+    clac                      # SECURITY: Disable user memory access before return
     ret
 
 .Lfixup_was_movsb:
     # Was in movsb phase: remaining = original RCX (saved in R9)
     mov %r9, %rax             # Return the saved RCX directly
+    clac                      # SECURITY: Disable user memory access before return
     ret
 
 _asm_copy_user_fixup_movsq_end:

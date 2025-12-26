@@ -62,8 +62,8 @@ pub fn save(state: *FpuState) void {
     );
 
     // Save FPSR and FPCR
-    var fpsr: u32 = undefined;
-    var fpcr: u32 = undefined;
+    var fpsr: u32 = 0;
+    var fpcr: u32 = 0;
     asm volatile ("mrs %[fpsr], fpsr"
         : [fpsr] "=r" (fpsr),
     );
@@ -122,8 +122,12 @@ pub fn fxrstor(state: *const FpuState) void {
 
 /// Set task switched flag (x86 compat - no-op on AArch64)
 /// On x86, this sets CR0.TS to trigger #NM on FPU access for lazy switching.
-/// AArch64 doesn't have this mechanism - we do eager save/restore.
+/// AArch64 uses eager save/restore via cpu.switchContextWithFpu().
+///
+/// SECURITY: The scheduler MUST use cpu.switchContextWithFpu() for user thread
+/// context switches to prevent information leakage via FPU registers.
 pub fn setTaskSwitched() void {}
 
 /// Clear task switched flag (x86 compat - no-op on AArch64)
+/// See setTaskSwitched() for AArch64 FPU handling strategy.
 pub fn clearTaskSwitched() void {}

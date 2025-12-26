@@ -575,7 +575,7 @@ pub fn mapMmioExplicit(phys_addr: u64, size: usize) VmmError!u64 {
     // Align addresses
     const aligned_phys = paging.pageAlignDown(phys_addr);
     const offset = phys_addr - aligned_phys;
-    const aligned_size = paging.pageAlignUp(size + offset);
+    const aligned_size = paging.pageAlignUp(size + offset) orelse return VmmError.OutOfMemory;
 
     // Allocate virtual address range from MMIO space
     const held = mmio_lock.acquire();
@@ -638,7 +638,7 @@ pub fn unmapMmio(virt_addr: u64, size: usize) void {
 
     const aligned_virt = paging.pageAlignDown(virt_addr);
     const offset = virt_addr - aligned_virt;
-    const aligned_size = paging.pageAlignUp(size + offset);
+    const aligned_size = paging.pageAlignUp(size + offset) orelse return;
 
     // Unmap the pages
     // Note: We do not reclaim the virtual address space (bump allocator),

@@ -110,4 +110,9 @@ pub const pit = struct {
 pub fn init(hhdm_offset: u64) void {
     paging.init(hhdm_offset);
     serial.initDefault();
+
+    // Enable PAN (Privileged Access Never) for security
+    // This prevents the kernel from accidentally accessing user memory
+    // via normal load/store; must use LDTR/STTR instead
+    cpu.enablePAN();
 }

@@ -409,9 +409,11 @@ pub fn initTssForCpu(cpu_id: u32, gdt_ptr: *Gdt) void {
 }
 
 /// Get TSS for a specific CPU
+/// SECURITY: Panics if cpu_id exceeds MAX_CPUS to prevent array overflow.
+/// Returning BSP's TSS would cause incorrect kernel stack on privilege transitions.
 pub fn getTssForCpu(cpu_id: u32) *Tss {
     if (cpu_id >= MAX_CPUS) {
-        return &tss_instances[0]; // Fallback to BSP
+        @panic("CPU ID exceeds MAX_CPUS - cannot access per-CPU TSS");
     }
     return &tss_instances[cpu_id];
 }

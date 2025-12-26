@@ -23,6 +23,29 @@
 const builtin = @import("builtin");
 const std = @import("std");
 
+// SMP safety check support (debug builds only)
+// We check if interrupts are enabled as a proxy for "unprotected access".
+// If interrupts are enabled and we're doing non-atomic RMW on SMP systems,
+// that's a potential race condition.
+inline fn debugCheckSmpSafety(comptime func_name: []const u8) void {
+    if (comptime builtin.mode == .Debug) {
+        // Check RFLAGS.IF to see if interrupts are enabled
+        const rflags = asm volatile ("pushfq; pop %[ret]"
+            : [ret] "=r" (-> u64),
+        );
+        const interrupts_enabled = (rflags & (1 << 9)) != 0;
+
+        // If interrupts are enabled, warn that this RMW might be racy
+        // We can't check SMP CPU count from HAL level, so we just warn
+        // when interrupts are enabled as that's when races are possible.
+        if (interrupts_enabled) {
+            // Use debug.print instead of panic to allow existing code to work
+            // but make the issue visible during development.
+            std.debug.print("MMIO WARNING: {s} called with interrupts enabled (potential race)\n", .{func_name});
+        }
+    }
+}
+
 // Minimum valid MMIO address - addresses below this are likely errors.
 // On x86_64, the first 1MB is real-mode legacy area, and low addresses
 // are typically not used for MMIO.
@@ -156,7 +179,10 @@ pub inline fn writeBarrier() void {
 ///   interrupts.disable();
 ///   defer interrupts.enable();
 ///   mmio.setBits32(ctrl_reg, ENABLE_BIT);
+///
+/// DEBUG: In debug builds, warns if interrupts are enabled (potential race).
 pub inline fn setBits32(addr: u64, bits: u32) void {
+    debugCheckSmpSafety("setBits32");
     write32(addr, read32(addr) | bits);
 }
 
@@ -164,7 +190,10 @@ pub inline fn setBits32(addr: u64, bits: u32) void {
 ///
 /// CONCURRENCY WARNING: This is NOT atomic. See setBits32 for details.
 /// Caller must hold appropriate locks when concurrent access is possible.
+///
+/// DEBUG: In debug builds, warns if interrupts are enabled (potential race).
 pub inline fn clearBits32(addr: u64, bits: u32) void {
+    debugCheckSmpSafety("clearBits32");
     write32(addr, read32(addr) & ~bits);
 }
 
@@ -173,7 +202,10 @@ pub inline fn clearBits32(addr: u64, bits: u32) void {
 ///
 /// CONCURRENCY WARNING: This is NOT atomic. See setBits32 for details.
 /// Caller must hold appropriate locks when concurrent access is possible.
+///
+/// DEBUG: In debug builds, warns if interrupts are enabled (potential race).
 pub inline fn modifyBits32(addr: u64, mask: u32, value: u32) void {
+    debugCheckSmpSafety("modifyBits32");
     write32(addr, (read32(addr) & ~mask) | (value & mask));
 }
 

@@ -694,6 +694,12 @@ fn doPerCpuSchedule(frame: *const hal.interrupts.InterruptFrame) if (builtin.cpu
         if (next.cr3 != 0) {
             const current_cr3 = hal.cpu.readCr3();
             if (next.cr3 != current_cr3) {
+                // SECURITY: Issue IBPB when switching address spaces to prevent
+                // Spectre v2 attacks where an attacker could train the branch
+                // predictor in one address space to leak data from another.
+                if (builtin.cpu.arch == .x86_64) {
+                    hal.cpu.issueIbpbIfNeeded(current_cr3, next.cr3);
+                }
                 hal.cpu.writeCr3(next.cr3);
             }
         }
@@ -703,8 +709,22 @@ fn doPerCpuSchedule(frame: *const hal.interrupts.InterruptFrame) if (builtin.cpu
             hal.cpu.writeMsr(hal.cpu.IA32_FS_BASE, next.fs_base);
         }
 
-        fpu.setTaskSwitched();
-        next.fpu_used = false;
+        // FPU context switching strategy:
+        // - x86_64: Lazy restore via CR0.TS trap (#NM exception triggers handleFpuAccess)
+        // - AArch64: Eager restore (no lazy mechanism available - CPACR_EL1 trap not implemented)
+        //
+        // SECURITY: We do NOT reset next.fpu_used here. That flag indicates whether
+        // the thread has saved FPU state that needs restoring. Resetting it would
+        // cause handleFpuAccess to skip restoration, leaking previous thread's FPU data.
+        if (builtin.cpu.arch == .aarch64) {
+            // Eager FPU restore on AArch64 - prevents info leak between threads
+            if (next.fpu_used) {
+                fpu.fxrstor(&next.fpu_state);
+            }
+        } else {
+            // Lazy FPU on x86_64 - CR0.TS triggers #NM on first FPU access
+            fpu.setTaskSwitched();
+        }
     }
 
     next.last_cpu = @intCast(cpu_mod.getCurrentCpuIndex());
