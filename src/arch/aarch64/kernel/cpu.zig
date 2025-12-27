@@ -49,6 +49,10 @@ pub fn enableAndHalt() noreturn {
     halt();
 }
 
+// SECURITY NOTE: Throughout this file, `undefined` used for ASM output operands
+// is safe - the `mrs` instruction immediately overwrites the value before any
+// read occurs. This is standard practice for inline assembly output operands.
+
 pub fn disableInterruptsSaveFlags() u64 {
     var daif: u64 = 0;
     asm volatile ("mrs %[ret], daif" : [ret] "=r" (daif));
@@ -140,26 +144,32 @@ pub fn readCr4() u64 {
     return 0;
 }
 
-/// Context switch (low-level): saves current state to old_sp, loads new_sp
+/// Low-level context switch for KERNEL-ONLY threads.
 ///
-/// SECURITY WARNING: This function does NOT save/restore FPU/SIMD state.
-/// Use switchContextWithFpu() instead to prevent information leakage between threads.
+/// SECURITY CRITICAL: This function does NOT save/restore FPU/SIMD state.
+/// Using this for user thread switches WILL leak sensitive data (cryptographic
+/// keys, etc.) between threads via SIMD registers q0-q31.
 ///
-/// This function must properly declare all clobbered registers to prevent:
-///   1. Information leakage between threads via stale register values
-///   2. Compiler mis-optimization due to incorrect register assumptions
-///   3. Memory corruption if compiler reuses "preserved" registers
+/// ALLOWED USAGE:
+///   - Kernel worker threads that never execute user code
+///   - Idle threads
+///   - Interrupt context switches (FPU lazily saved elsewhere)
+///
+/// FORBIDDEN USAGE:
+///   - User-to-user thread switches (use switchContextWithFpu)
+///   - User-to-kernel switches where user had FPU state
+///
+/// For user threads, the scheduler MUST call switchContextWithFpu() instead.
 ///
 /// Clobber list rationale:
 ///   - x9: Used as scratch for stack pointer manipulation
 ///   - x19-x30: Callee-saved registers pushed/popped across the switch
 ///   - memory: Stack and memory state changes across context switch
 ///   - cc: Condition codes may be affected by load/store operations
-///
-/// SIMD/FPU registers (q0-q31, FPSR, FPCR) are NOT saved here.
-/// Callers MUST use switchContextWithFpu() for user threads to prevent
-/// cross-thread information disclosure via FPU register contents.
-pub fn switchContext(old_sp: *u64, new_sp: u64) void {
+pub fn switchContextKernelOnly(old_sp: *u64, new_sp: u64) void {
+    // SECURITY: In debug builds, we could add runtime checks here if we had
+    // access to thread metadata. For now, the function name and documentation
+    // serve as the primary defense against misuse.
     asm volatile (
         \\ stp x19, x20, [sp, #-16]!
         \\ stp x21, x22, [sp, #-16]!
@@ -225,11 +235,16 @@ pub fn switchContextWithFpu(
     fpu.save(old_fpu);
 
     // Perform the actual context switch (saves/restores GPRs)
-    switchContext(old_sp, new_sp);
+    switchContextKernelOnly(old_sp, new_sp);
 
     // Restore new thread's FPU state
     fpu.restore(new_fpu);
 }
+
+/// Backwards-compatible alias for switchContextKernelOnly.
+/// DEPRECATED: Use switchContextKernelOnly for kernel threads or
+/// switchContextWithFpu for user threads.
+pub const switchContext = switchContextKernelOnly;
 
 pub fn flushTlb() void {
     asm volatile ("tlbi vmalle1is");

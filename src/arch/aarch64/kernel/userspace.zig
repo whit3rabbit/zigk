@@ -267,13 +267,23 @@ fn printHex(val: u64) void {
 /// stack_top: Top of user stack
 /// entry: Entry point address
 /// argc: Argument count
-/// argv: Pointer to argument vector
-/// envp: Pointer to environment vector
+/// argv: Pointer to argument vector (MUST be valid kernel pointer)
+/// envp: Pointer to environment vector (MUST be valid kernel pointer)
+///
+/// SAFETY PRECONDITIONS (caller responsibility):
+///   - argv MUST point to a valid kernel-allocated array of argc+1 pointers
+///     (null-terminated). The string pointers within argv MUST also be valid.
+///   - envp MUST point to a valid kernel-allocated null-terminated array of
+///     environment variable pointers. The string pointers within envp MUST be valid.
+///   - Both argv and envp arrays are READ from kernel space; if corrupted pointers
+///     are passed, this function will read from arbitrary kernel memory addresses.
+///   - Caller is typically exec() which allocates and populates these arrays.
 ///
 /// SECURITY: This function performs critical validation to prevent:
 ///   1. Privilege escalation via kernel memory writes (validates user address FIRST)
 ///   2. Integer underflow in stack pointer arithmetic (uses checked arithmetic)
 ///   3. Stack exhaustion attacks (validates sufficient space before writes)
+///   4. Unbounded iteration (MAX_ARG_COUNT and MAX_ENV_COUNT limits)
 pub fn enterUserspaceWithArgs(
     entry: u64,
     stack_top: u64,

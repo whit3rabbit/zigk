@@ -128,6 +128,7 @@ pub fn init(offset: u64) void {
     // validation in TLB invalidation functions. Mismatched ASID sizes
     // can cause incorrect TLB entries to be flushed, leaving stale
     // entries that could allow unauthorized memory access.
+    // NOTE: `undefined` for ASM output operands is safe - `mrs` overwrites immediately.
     var tcr: u64 = undefined;
     asm volatile ("mrs %[ret], tcr_el1" : [ret] "=r" (tcr));
 

@@ -88,6 +88,62 @@ pub fn isSecureForCrypto() bool {
     return has_rndr;
 }
 
+/// Require secure entropy or panic.
+/// Call this early in boot for security-critical systems that cannot
+/// tolerate weak entropy sources.
+///
+/// SECURITY: This function MUST be called before using entropy for:
+///   - KASLR (Kernel Address Space Layout Randomization)
+///   - Stack canaries
+///   - Cryptographic key generation
+///   - TCP Initial Sequence Numbers (ISNs)
+///
+/// On systems without FEAT_RNG, this will panic with a clear message
+/// explaining the security implications.
+pub fn requireSecureEntropy() void {
+    if (!initialized) {
+        @panic("entropy: requireSecureEntropy called before init()");
+    }
+    if (!has_rndr) {
+        @panic(
+            \\SECURITY FATAL: Secure entropy source (FEAT_RNG) not available.
+            \\
+            \\This system lacks hardware RNG support. The timing-based fallback
+            \\is NOT secure because CNTPCT_EL0/CNTVCT_EL0 are readable from
+            \\userspace, allowing attackers to predict kernel entropy.
+            \\
+            \\Affected security features:
+            \\  - KASLR may be predictable
+            \\  - Stack canaries may be guessable
+            \\  - TCP ISNs may enable connection hijacking
+            \\  - Cryptographic keys may be weak
+            \\
+            \\To proceed (INSECURE - development only):
+            \\  Call entropy.init() without requireSecureEntropy()
+            \\
+            \\For production: Use hardware with ARMv8.5-RNG or later.
+        );
+    }
+}
+
+/// Get entropy with quality assertion.
+/// Panics if only low-quality entropy is available.
+/// Use this for security-critical entropy needs.
+pub fn getSecureEntropy() u64 {
+    if (!has_rndr) {
+        @panic("getSecureEntropy: FEAT_RNG required but not available");
+    }
+    // Try RNDR up to 10 times
+    var attempts: u32 = 0;
+    while (attempts < 10) : (attempts += 1) {
+        if (tryReadRndr()) |value| {
+            return value;
+        }
+        cpu.pause();
+    }
+    @panic("getSecureEntropy: RNDR consistently failing");
+}
+
 /// Check if entropy is initialized
 pub fn isInitialized() bool {
     return initialized;
@@ -103,6 +159,8 @@ pub fn hasRdrand() bool {
 fn tryReadRndr() ?u64 {
     if (!has_rndr) return null;
 
+    // SECURITY NOTE: `undefined` for ASM output operands is safe - the `mrs`
+    // instruction immediately overwrites the value before any read occurs.
     var value: u64 = undefined;
     var nzcv: u64 = undefined;
 
@@ -212,6 +270,9 @@ fn getTimingEntropy() u64 {
     }
 
     // Mix in stack address (varies with call depth and ASLR)
+    // SECURITY NOTE: `undefined` here is intentional and safe - we only use
+    // @intFromPtr(&stack_addr) to get the ADDRESS, never reading the VALUE.
+    // The address provides entropy from stack layout/ASLR.
     var stack_addr: usize = undefined;
     entropy ^= @intFromPtr(&stack_addr);
 

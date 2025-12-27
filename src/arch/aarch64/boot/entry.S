@@ -62,6 +62,20 @@ exception_vector_table:
     .balign 128
     b unhandled_aarch32
 
+// SECURITY NOTE: Nested Exception Stack Usage
+// Each exception allocates 288 bytes on the kernel stack for SyscallFrame.
+// If an exception occurs while handling another exception (e.g., page fault
+// during interrupt handling), the nested exception will allocate another frame.
+//
+// Mitigations for stack exhaustion:
+//   1. Exception handlers are designed to avoid triggering nested faults
+//   2. Kernel stack is sized to accommodate reasonable nesting depth
+//   3. Page fault handler avoids complex operations that could fault again
+//
+// Future improvements could include:
+//   - Per-CPU exception stacks (separate from thread kernel stacks)
+//   - Nesting depth counter with panic on excessive depth
+//   - Double-fault detection via separate minimal stack
 .macro SAVE_CONTEXT
     sub sp, sp, #288 // Size of SyscallFrame struct (36 fields * 8)
     stp x0, x1, [sp, #0]
