@@ -8,6 +8,15 @@ const regs = @import("regs.zig");
 const port_io = hal.io;
 
 pub fn ioctl(self: *types.Ac97, cmd: u32, arg: usize) isize {
+    // Acquire lock to prevent TOCTOU race with write()/processAudio()
+    // which reads channels/format/sample_rate under lock
+    const flags = hal.cpu.disableInterruptsSaveFlags();
+    const held = self.lock.acquire();
+    defer {
+        held.release();
+        hal.cpu.restoreInterrupts(flags);
+    }
+
     const user_ptr = user_mem.UserPtr.from(arg);
 
     switch (cmd) {
@@ -73,11 +82,8 @@ pub fn ioctl(self: *types.Ac97, cmd: u32, arg: usize) isize {
                 return -5; // EIO
             }
 
+            // Modulo guarantees free_buffers is in [0, BDL_ENTRY_COUNT-1]
             const free_buffers = (civ +% types.BDL_ENTRY_COUNT -% current_buf) % types.BDL_ENTRY_COUNT;
-
-            if (free_buffers > types.BDL_ENTRY_COUNT) {
-                return -5; // EIO
-            }
 
             const info = [4]u32{
                 @intCast(free_buffers),

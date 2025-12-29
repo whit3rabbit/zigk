@@ -826,3 +826,58 @@ isr_stub_no_error 252
 isr_stub_no_error 253
 isr_stub_no_error 254
 isr_stub_no_error 255
+
+# ============================================================================
+# VMware Backdoor Call
+# ============================================================================
+# Performs a VMware backdoor call using the special I/O instruction sequence.
+# The VMware hypervisor traps "in eax, dx" with magic values in registers.
+#
+# Calling convention (System V AMD64 ABI):
+#   rdi = pointer to Registers struct:
+#     struct Registers {
+#       u32 eax;  // offset 0
+#       u32 ebx;  // offset 4
+#       u32 ecx;  // offset 8
+#       u32 edx;  // offset 12
+#       u32 esi;  // offset 16
+#       u32 edi;  // offset 20
+#     };
+#
+# void _asm_vmware_backdoor_call(Registers* regs)
+.global _asm_vmware_backdoor_call
+.type _asm_vmware_backdoor_call, @function
+_asm_vmware_backdoor_call:
+    # Save callee-saved registers we'll clobber
+    push %rbx
+    push %r12
+
+    # Save regs pointer for later
+    mov %rdi, %r12
+
+    # Load input values from struct
+    mov 0(%r12), %eax     # eax
+    mov 4(%r12), %ebx     # ebx
+    mov 8(%r12), %ecx     # ecx
+    mov 12(%r12), %edx    # edx (but dx is the port, so we use 0x5658)
+    mov 16(%r12), %esi    # esi
+    mov 20(%r12), %edi    # edi
+
+    # Force DX to VMware backdoor port (0x5658 = "VX")
+    mov $0x5658, %dx
+
+    # Execute the magic instruction - hypervisor traps this
+    in %dx, %eax
+
+    # Store output values back to struct
+    mov %eax, 0(%r12)
+    mov %ebx, 4(%r12)
+    mov %ecx, 8(%r12)
+    mov %edx, 12(%r12)
+    mov %esi, 16(%r12)
+    mov %edi, 20(%r12)
+
+    # Restore callee-saved registers
+    pop %r12
+    pop %rbx
+    ret

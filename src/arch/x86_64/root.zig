@@ -25,6 +25,7 @@ pub const apic = @import("kernel/apic/root.zig");
 pub const smp = @import("kernel/smp.zig");
 pub const userspace = @import("kernel/userspace.zig");
 pub const iommu = @import("mm/iommu/root.zig");
+pub const vmware = @import("hypervisor/vmware.zig");
 
 pub fn earlyWrite(c: u8) void {
     asm volatile ("outb %%al, %%dx" : : [val] "{al}" (c), [port] "{dx}" (@as(u16, 0x3F8)));

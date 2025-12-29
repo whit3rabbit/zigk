@@ -99,11 +99,12 @@ fn installSocketFd(socket_idx: usize) SyscallError!usize {
     };
     errdefer heap.allocator().destroy(fd);
 
+    // SECURITY: Use atomic allocAndInstall to prevent race between
+    // allocFdNum and install where two threads could get the same fd_num
     const table = base.getGlobalFdTable();
-    const fd_num = table.allocFdNum() orelse {
+    const fd_num = table.allocAndInstall(fd) orelse {
         return error.EMFILE;
     };
-    table.install(fd_num, fd);
     return fd_num;
 }
 

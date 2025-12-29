@@ -122,18 +122,19 @@ pub fn sys_select(nfds: usize, readfds: usize, writefds: usize, exceptfds: usize
     var except_set: [FD_SET_SIZE]u8 = [_]u8{0} ** FD_SET_SIZE;
 
     // Copy sets from userspace
+    // SECURITY: copyFromUser returns bytes NOT copied (0 on success)
     if (readfds != 0) {
-        if (user_mem.copyFromUser(&read_set, readfds) != FD_SET_SIZE) {
+        if (user_mem.copyFromUser(&read_set, readfds) != 0) {
             return error.EFAULT;
         }
     }
     if (writefds != 0) {
-        if (user_mem.copyFromUser(&write_set, writefds) != FD_SET_SIZE) {
+        if (user_mem.copyFromUser(&write_set, writefds) != 0) {
             return error.EFAULT;
         }
     }
     if (exceptfds != 0) {
-        if (user_mem.copyFromUser(&except_set, exceptfds) != FD_SET_SIZE) {
+        if (user_mem.copyFromUser(&except_set, exceptfds) != 0) {
             return error.EFAULT;
         }
     }
@@ -554,14 +555,13 @@ pub fn sys_epoll_create1(flags: usize) SyscallError!usize {
         .lock = .{},
     };
 
-    // Install in FD table
+    // SECURITY: Use atomic allocAndInstall to prevent race between
+    // allocFdNum and install where two threads could get the same fd_num
     const table = base.getGlobalFdTable();
-    const fd_num = table.allocFdNum() orelse {
+    const fd_num = table.allocAndInstall(fd) orelse {
         heap.allocator().destroy(fd);
         return error.EMFILE;
     };
-
-    table.install(fd_num, fd);
 
     return fd_num;
 }

@@ -565,10 +565,10 @@ pub fn sys_mkdir(path_ptr: usize, mode: usize) base.SyscallError!usize {
 
     const path = canonicalizePath(raw_path, canon_buf) orelse return error.ENOENT;
 
-    // Capability check for mkdir
+    // Capability check for mkdir (uses DELETE_OP as proxy for CREATE capability)
     const proc = base.getCurrentProcess();
-    if (!hasFileCapability(proc, path, caps.FileCapability.DELETE_OP)) { // Simplified: use delete op for now or add CREATE
-         // Ideally has separate CREATE capability
+    if (!hasFileCapability(proc, path, caps.FileCapability.DELETE_OP)) {
+        return error.EACCES;
     }
 
     fs.vfs.Vfs.mkdir(path, @intCast(mode & 0o7777)) catch |err| {

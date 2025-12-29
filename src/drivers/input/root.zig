@@ -52,7 +52,6 @@ pub const DeviceType = enum(u8) {
     virtio_tablet = 5,
     vmmouse = 6,
 };
-pub const vmmouse = @import("vmmouse.zig");
 
 /// Input device registration info
 pub const DeviceInfo = struct {
@@ -393,3 +392,14 @@ test "InputSubsystem button state" {
     pushButton(0, uapi.input.BtnCode.LEFT, false, 0);
     try std.testing.expectEqual(@as(u8, 0x02), getButtonState());
 }
+
+// =============================================================================
+// VMware VMMouse Driver
+// =============================================================================
+
+/// VMware VMMouse driver for absolute cursor positioning.
+/// Supports VMware Workstation, Fusion, ESXi, and VirtualBox.
+pub const vmmouse = @import("vmmouse.zig");
+
+/// Re-export VmMouseDriver type for convenience
+pub const VmMouseDriver = vmmouse.VmMouseDriver;

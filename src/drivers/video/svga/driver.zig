@@ -5,7 +5,7 @@
 
 const std = @import("std");
 const hal = @import("hal");
-const pci = @import("../../pci/root.zig");
+const pci = @import("pci");
 const interface = @import("../interface.zig");
 const hw = @import("hardware.zig");
 const console = @import("console");

@@ -28,6 +28,8 @@ pub const IntelDeviceId = struct {
 
     // Audio Devices
     pub const AC97_82801AA: u16 = 0x2415; // Intel 82801AA AC'97 Audio Controller
+    pub const HDA_ICH6: u16 = 0x2668;     // Intel ICH6 (82801FB) HDA Controller
+    pub const HDA_ICH7: u16 = 0x27D8;     // Intel ICH7 (82801GB) HDA Controller
 };
 
 /// VirtIO Device IDs (non-transitional, modern)
@@ -337,6 +339,13 @@ pub const PciDevice = struct {
         return self.vendor_id == VendorId.INTEL and self.device_id == IntelDeviceId.AC97_82801AA;
     }
 
+    /// Check if device is an Intel HDA controller
+    pub fn isHdaController(self: *const Self) bool {
+        return self.vendor_id == VendorId.INTEL and
+            (self.device_id == IntelDeviceId.HDA_ICH6 or
+             self.device_id == IntelDeviceId.HDA_ICH7);
+    }
+
     /// Get the first valid MMIO BAR (for NIC drivers)
     pub fn getMmioBar(self: *const Self) ?Bar {
         for (self.bar) |b| {
@@ -455,6 +464,12 @@ pub const DeviceList = struct {
     /// Find first AC97 controller
     pub fn findAc97Controller(self: *const DeviceList) ?*const PciDevice {
         return self.findDevice(VendorId.INTEL, IntelDeviceId.AC97_82801AA);
+    }
+
+    /// Find first Intel HDA controller
+    pub fn findHdaController(self: *const DeviceList) ?*const PciDevice {
+        if (self.findDevice(VendorId.INTEL, IntelDeviceId.HDA_ICH6)) |dev| return dev;
+        return self.findDevice(VendorId.INTEL, IntelDeviceId.HDA_ICH7);
     }
 
     /// Find first USB controller of a specific type by ProgIF

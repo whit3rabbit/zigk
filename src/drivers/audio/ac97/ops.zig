@@ -174,19 +174,23 @@ pub fn handleInterrupt(self: *types.Ac97) void {
             const new_civ = port_io.inb(self.nabm_base + regs.NABM_PO_CIV);
 
             if (new_civ >= types.BDL_ENTRY_COUNT) {
-                self.enqueueRequest(queued);
+                // Re-queue at HEAD to maintain FIFO order (was incorrectly using tail)
+                queued.next = self.pending_queue_head;
+                self.pending_queue_head = queued;
+                if (queued.next == null) {
+                    self.pending_queue_tail = queued;
+                }
                 console.warn("AC97: Invalid new_civ {} from hardware", .{new_civ});
                 break;
             }
 
             if (self.current_buffer == new_civ) {
+                // Re-queue at HEAD to maintain FIFO order
                 queued.next = self.pending_queue_head;
                 self.pending_queue_head = queued;
-
                 if (queued.next == null) {
                     self.pending_queue_tail = queued;
                 }
-
                 break;
             }
             submitBuffer(self, queued);

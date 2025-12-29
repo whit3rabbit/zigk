@@ -1,6 +1,12 @@
 const std = @import("std");
 const syscall = @import("syscall");
 
+export fn _start() noreturn {
+    const ret = main(0, undefined);
+    syscall.exit(ret) catch {};
+    unreachable;
+}
+
 pub export fn main(argc: i32, argv: [*]const [*:0]const u8) i32 {
     _ = argc;
     _ = argv;

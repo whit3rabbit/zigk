@@ -208,11 +208,19 @@ pub const CapabilityInfo = struct {
 };
 
 /// Parse MSI capability at given offset
+/// Returns null if offset is out of bounds for the capability structure.
+/// Note: Callers should use findMsi() which validates offsets automatically.
 pub fn parseMsiCapability(
     pci_ecam: *const Ecam,
     dev: *const PciDevice,
     offset: u8,
-) MsiCapability {
+) ?MsiCapability {
+    // MSI capability is 10-14 bytes (depends on 64-bit and masking support).
+    // Ensure capability fits in legacy config space (256 bytes).
+    // Max safe offset: 256 - 14 = 242 (0xF2), but must be DWORD-aligned.
+    if (offset > 0xF0) {
+        return null;
+    }
     const msg_ctrl_raw = pci_ecam.read16(dev.bus, dev.device, dev.func, offset + 2);
     const msg_ctrl: MsiMessageControl = @bitCast(msg_ctrl_raw);
 
@@ -226,11 +234,18 @@ pub fn parseMsiCapability(
 }
 
 /// Parse MSI-X capability at given offset
+/// Returns null if offset is out of bounds for the capability structure.
+/// Note: Callers should use findMsix() which validates offsets automatically.
 pub fn parseMsixCapability(
     pci_ecam: *const Ecam,
     dev: *const PciDevice,
     offset: u8,
-) MsixCapability {
+) ?MsixCapability {
+    // MSI-X capability is 12 bytes. Ensure it fits in legacy config space.
+    // Max safe offset: 256 - 12 = 244 (0xF4), but must be DWORD-aligned.
+    if (offset > 0xF0) {
+        return null;
+    }
     const msg_ctrl_raw = pci_ecam.read16(dev.bus, dev.device, dev.func, offset + 2);
     const msg_ctrl: MsixMessageControl = @bitCast(msg_ctrl_raw);
 
@@ -251,11 +266,11 @@ pub fn parseMsixCapability(
 /// Find MSI capability and parse it
 pub fn findMsi(pci_ecam: *const Ecam, dev: *const PciDevice) ?MsiCapability {
     const offset = findCapability(pci_ecam, dev, .msi) orelse return null;
-    return parseMsiCapability(pci_ecam, dev, offset);
+    return parseMsiCapability(pci_ecam, dev, offset); // Returns null if offset invalid
 }
 
 /// Find MSI-X capability and parse it
 pub fn findMsix(pci_ecam: *const Ecam, dev: *const PciDevice) ?MsixCapability {
     const offset = findCapability(pci_ecam, dev, .msi_x) orelse return null;
-    return parseMsixCapability(pci_ecam, dev, offset);
+    return parseMsixCapability(pci_ecam, dev, offset); // Returns null if offset invalid
 }

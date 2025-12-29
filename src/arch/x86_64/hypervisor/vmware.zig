@@ -7,13 +7,13 @@
 //! Magic Value: 0x564D5868 ("VMXh")
 
 const std = @import("std");
-const hal = @import("hal");
 
 pub const BACKDOOR_PORT: u16 = 0x5658;
 pub const BACKDOOR_MAGIC: u32 = 0x564D5868;
 
-/// Low-level register state for backdoor calls
-pub const Registers = struct {
+/// Low-level register state for backdoor calls.
+/// Layout must match the assembly helper expectations (6 consecutive u32 fields).
+pub const Registers = extern struct {
     eax: u32,
     ebx: u32,
     ecx: u32,
@@ -21,6 +21,10 @@ pub const Registers = struct {
     esi: u32 = 0,
     edi: u32 = 0,
 };
+
+/// External assembly function for VMware backdoor call.
+/// Defined in src/arch/x86_64/lib/asm_helpers.S
+extern fn _asm_vmware_backdoor_call(regs: *Registers) void;
 
 /// Command IDs for the backdoor
 pub const Command = enum(u16) {
@@ -53,39 +57,14 @@ pub fn detect() bool {
     return regs.ebx == BACKDOOR_MAGIC;
 }
 
-/// Execute a backdoor command
+/// Execute a backdoor command.
 ///
-/// Note: The VMware backdoor instruction is `in (e)ax, dx` or `out dx, (e)ax`
-/// but with specific values in other registers. This is a "magic" instruction sequence
-/// that triggers the hypervisor trap.
+/// The VMware backdoor instruction is `in eax, dx` with specific values in
+/// other registers. The hypervisor traps this specific I/O operation.
+/// Uses external assembly due to Zig 0.16 inline asm limitations with
+/// multiple register outputs.
 pub inline fn call(regs: *Registers) void {
-    // In Zig inline asm:
-    // Inputs:
-    //   eax: Command / Magic
-    //   ebx: Parameter 1
-    //   ecx: Parameter 2
-    //   edx: Port (0x5658) which doubles as magic parameter sometimes
-    //   esi, edi: High bandwidth data
-    //
-    // The instruction is technically `in eax, dx` (opcode 0xED)
-    // The hypervisor traps this specific I/O operation.
-
-    asm volatile (
-        \\ in (%%dx), %%eax
-        : [eax] "={eax}" (regs.eax),
-          [ebx] "={ebx}" (regs.ebx),
-          [ecx] "={ecx}" (regs.ecx),
-          [edx] "={edx}" (regs.edx),
-          [esi] "={esi}" (regs.esi),
-          [edi] "={edi}" (regs.edi),
-        : [in_eax] "{eax}" (regs.eax),
-          [in_ebx] "{ebx}" (regs.ebx),
-          [in_ecx] "{ecx}" (regs.ecx),
-          [in_edx] "{dx}" (BACKDOOR_PORT), // DX must be the port
-          [in_esi] "{esi}" (regs.esi),
-          [in_edi] "{edi}" (regs.edi),
-        : "memory"
-    );
+    _asm_vmware_backdoor_call(regs);
 }
 
 /// Helper for VMMouse commands which often use simple command ID in EAX

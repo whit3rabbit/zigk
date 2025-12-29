@@ -10,8 +10,8 @@
 
 const std = @import("std");
 const hal = @import("hal");
-const vmware = @import("../../arch/x86_64/hypervisor/vmware.zig");
-const input = @import("input.zig"); // Assuming relative path within drivers/input/ or similar
+const vmware = hal.vmware;
+const mouse = @import("mouse");
 
 // Magic constants
 const VMMOUSE_CMD_READ_ID = 0x45414552; // "REA" (Read / Enable)
@@ -139,7 +139,7 @@ pub const VmMouseDriver = struct {
              
              _ = z; // Scroll wheel
              
-             const buttons = @import("mouse.zig").Buttons{
+             const buttons = mouse.Buttons{
                  .left = (flags & VMMOUSE_LEFT_BUTTON) != 0,
                  .right = (flags & VMMOUSE_RIGHT_BUTTON) != 0,
                  .middle = (flags & VMMOUSE_MIDDLE_BUTTON) != 0,
@@ -149,13 +149,13 @@ pub const VmMouseDriver = struct {
              // But we requested absolute.
              
              // Inject absolute input
-             @import("mouse.zig").injectAbsoluteInput(
+             mouse.injectAbsoluteInput(
                  0xFFFF, // Virtual device ID
                  x,
                  y,
                  self.max_x,
                  self.max_y,
-                 buttons
+                 buttons,
              );
         }
     }

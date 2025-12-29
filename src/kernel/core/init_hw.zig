@@ -380,6 +380,16 @@ pub fn initAudio() void {
 
     // First try device list (may have ECAM timing issues)
     if (pci_devices) |devices| {
+        // Prefer Intel HDA (High Def Audio) - Modern QEMU, VirtualBox, VMware
+        if (devices.findHdaController()) |dev| {
+             console.info("Audio: Found Intel HDA Controller at {d}:{d}.{d}", .{ dev.bus, dev.device, dev.func });
+             _ = audio.hda.init(dev, pci.PciAccess{ .ecam = ecam }) catch |err| {
+                 console.warn("Audio: HDA Init failed: {}", .{err});
+             };
+             return;
+        }
+
+        // Fallback to AC97
         if (devices.findAc97Controller()) |dev| {
             console.info("Audio: Found AC97 Controller at {d}:{d}.{d}", .{ dev.bus, dev.device, dev.func });
             audio.ac97.initFromPci(dev, pci.PciAccess{ .ecam = ecam }) catch |err| {

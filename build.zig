@@ -711,6 +711,8 @@ pub fn build(b: *std.Build) void {
     input_module.addImport("sync", sync_module);
     input_module.addImport("ring_buffer", ring_buffer_module);
     input_module.addImport("uapi", uapi_module);
+    input_module.addImport("hal", hal_module);
+    input_module.addImport("console", console_module);
 
     // Create Mouse driver module
     const mouse_module = b.createModule(.{
@@ -724,6 +726,9 @@ pub fn build(b: *std.Build) void {
     mouse_module.addImport("console", console_module);
     mouse_module.addImport("input", input_module);
     mouse_module.addImport("uapi", uapi_module);
+
+    // Add mouse module to input for vmmouse driver
+    input_module.addImport("mouse", mouse_module);
 
     // Add dependencies to USB module (after keyboard/mouse are defined)
     usb_module.addImport("keyboard", keyboard_module);
