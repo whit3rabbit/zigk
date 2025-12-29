@@ -94,9 +94,8 @@ pub fn sys_stat(path_ptr: usize, stat_buf_ptr: usize) SyscallError!usize {
     // Get file metadata via VFS
     const file_meta = fs.vfs.Vfs.statPath(path) orelse return error.ENOENT;
 
-    // Fill Stat structure
-    const stat_ptr: *uapi.stat.Stat = @ptrFromInt(stat_buf_ptr);
-    stat_ptr.* = .{
+    // SECURITY: Use UserPtr for SMAP-compliant writes to userspace
+    const stat_result: uapi.stat.Stat = .{
         .dev = file_meta.dev,
         .ino = file_meta.ino,
         .nlink = 1,
@@ -116,6 +115,7 @@ pub fn sys_stat(path_ptr: usize, stat_buf_ptr: usize) SyscallError!usize {
         .ctime_nsec = 0,
         .__unused = [_]i64{0} ** 3,
     };
+    UserPtr.from(stat_buf_ptr).writeValue(stat_result) catch return error.EFAULT;
 
     return 0;
 }
@@ -139,26 +139,24 @@ pub fn sys_fstat(fd_num: usize, stat_buf_ptr: usize) SyscallError!usize {
     const fd_u32 = safeFdCast(fd_num) orelse return error.EBADF;
     const file_desc = fd_table.get(fd_u32) orelse return error.EBADF;
 
-    const stat_ptr: *uapi.stat.Stat = @ptrFromInt(stat_buf_ptr);
-
     // Call the FD's stat operation if available
     if (file_desc.ops.stat) |stat_fn| {
-        var kstat: uapi.stat.Stat = undefined;
-        // Zero initialize
-        @memset(std.mem.asBytes(&kstat), 0);
+        // SECURITY: Zero-initialize at declaration per project guidelines
+        var kstat = std.mem.zeroes(uapi.stat.Stat);
 
         const result = stat_fn(file_desc, &kstat);
         if (result < 0) {
             return error.EIO;
         }
-        stat_ptr.* = kstat;
+        // SECURITY: Use UserPtr for SMAP-compliant writes to userspace
+        UserPtr.from(stat_buf_ptr).writeValue(kstat) catch return error.EFAULT;
         return 0;
     }
 
     // No stat operation - return basic info
     // Heuristic: if it has vfs_mount_idx, it came from VFS
     const is_dir = file_desc.ops.read == null and file_desc.ops.write == null;
-    stat_ptr.* = .{
+    const default_stat: uapi.stat.Stat = .{
         .dev = 0,
         .ino = @intCast(fd_num),
         .nlink = if (is_dir) 2 else 1,
@@ -178,6 +176,8 @@ pub fn sys_fstat(fd_num: usize, stat_buf_ptr: usize) SyscallError!usize {
         .ctime_nsec = 0,
         .__unused = [_]i64{0} ** 3,
     };
+    // SECURITY: Use UserPtr for SMAP-compliant writes to userspace
+    UserPtr.from(stat_buf_ptr).writeValue(default_stat) catch return error.EFAULT;
 
     return 0;
 }

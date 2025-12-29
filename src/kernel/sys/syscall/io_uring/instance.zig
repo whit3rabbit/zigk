@@ -89,6 +89,11 @@ pub const IoUringInstance = struct {
             .sqes_virt = 0,
             .sq_ring_entries = 0,
             .cq_ring_entries = 0,
+            // SAFETY INVARIANT: pending_requests[0..pending_count] are always valid.
+            // pending_count is only modified by addPendingRequest() which bounds-checks,
+            // and freeInstance() only iterates 0..pending_count. The undefined portion
+            // is never accessed. Using undefined here avoids zeroing MAX_RING_ENTRIES
+            // pointers on every instance creation.
             .pending_requests = undefined,
             .pending_count = 0,
             .waiting_thread = null,
@@ -192,6 +197,9 @@ pub const IoUringInstance = struct {
 // =============================================================================
 
 /// Global pool of io_uring instances
+/// SAFETY: instances_initialized guards access; initInstances() properly initializes
+/// each instance before any use. The undefined initialization is safe because
+/// all code paths check instances_initialized or call initInstances() first.
 var instances: [types.MAX_RINGS_PER_PROCESS * 16]IoUringInstance = undefined;
 var instances_initialized: bool = false;
 

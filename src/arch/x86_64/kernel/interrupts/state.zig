@@ -43,8 +43,9 @@ pub var page_fault_handler: ?*const fn (u64, u64) bool = null;
 pub var generic_irq_handlers: [16]?*const fn (u8) void = [_]?*const fn (u8) void{null} ** 16;
 
 /// Rate-limited logging state
-pub var unexpected_irq_count: u32 = 0;
-pub var last_unexpected_irq: u8 = 0xFF;
+/// SECURITY: Use atomic counters to prevent lost updates from concurrent IRQs
+pub var unexpected_irq_count: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
+pub var last_unexpected_irq: std.atomic.Value(u8) = std.atomic.Value(u8).init(0xFF);
 
 // MSI-X State
 pub const MSIX_VECTOR_START: u8 = 64;

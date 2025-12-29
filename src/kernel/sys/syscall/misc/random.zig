@@ -96,8 +96,12 @@ pub fn sys_getrandom(buf_ptr: usize, buflen: usize, flags: u32) SyscallError!usi
 
     // FR-RAND-02: Fill buffer with random data
     const STACK_BUF_SIZE: usize = 256;
+    // SECURITY NOTE: Buffer is intentionally undefined here because:
+    // 1. fillFromHardwareEntropy() fully overwrites the entire slice before any copy to user
+    // 2. tryFillFromHardwareEntropy() returns false on failure, triggering early return BEFORE copy
+    // 3. No code path copies uninitialized data to userspace
+    // The defer @memset is for stack hygiene only (prevents entropy leakage to future stack frames)
     var stack_buf: [STACK_BUF_SIZE]u8 = undefined;
-    // SECURITY: Zero buffer on exit to prevent entropy leakage via stack
     defer @memset(&stack_buf, 0);
 
     const uptr = user_mem.UserPtr.from(buf_ptr);

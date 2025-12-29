@@ -33,8 +33,10 @@ pub fn checkAccess(
     request: AccessRequest,
     path: []const u8,
 ) bool {
-    // Root bypass - euid 0 can access anything EXCEPT:
-    // For execute permission, at least one execute bit must be set (POSIX requirement)
+    // POSIX DAC: Root (euid 0) bypasses file permission checks.
+    // This is standard Unix behavior (CAP_DAC_OVERRIDE/CAP_DAC_READ_SEARCH equivalent),
+    // distinct from capability-based hardware access controls in CLAUDE.md.
+    // Exception: For execute permission, at least one execute bit must be set (POSIX requirement)
     if (proc.euid == 0) {
         if (request == .Execute) {
             // Root can only execute if at least one x bit is set
@@ -109,7 +111,7 @@ pub fn checkCreatePermission(
     proc: *process_mod.Process,
     path: []const u8,
 ) bool {
-    // Root can create anywhere
+    // POSIX DAC: Root can create files anywhere (standard Unix behavior)
     if (proc.euid == 0) return true;
 
     // Check for CREATE capability

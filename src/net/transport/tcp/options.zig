@@ -70,13 +70,12 @@ pub fn parseOptions(pkt: *const PacketBuffer, tcp_hdr: *const TcpHeader, opts: *
                 }
                 const mss = (@as(u16, pkt.data[i + 2]) << 8) | pkt.data[i + 3];
                 opts.mss_present = true;
-                // MSS should be clamped down, not up.
-                // tcb.mss = min(peer_mss, our_mtu - headers)
-                // Here we just record what the peer sent. The Tcb initiation logic should 
-                // perform the min() calculation against local MTU.
-                // Ideally we should enforce a sanity Min MSS to avoid silly small packets,
-                // but RFC 879 says we shouldn't send larger than peer advertises.
-                opts.mss = mss;
+                // SECURITY: Enforce minimum MSS (RFC 879: 536 bytes for IPv4) to prevent
+                // DoS attacks where a malicious peer advertises MSS=1, forcing the kernel
+                // to send 1-byte segments and exhausting TX buffers/CPU resources.
+                // We still cap at peer's MSS if they advertise larger than our MTU allows,
+                // but we refuse to go below the RFC minimum.
+                opts.mss = @max(mss, c.MIN_MSS);
                 i += c.TCPOLEN_MSS;
                 bytes_consumed += c.TCPOLEN_MSS;
             },

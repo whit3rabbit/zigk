@@ -51,8 +51,16 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
         return false;
     }
 
-    // Validate length against IP total length
-    const ip_payload_len = ip.getTotalLength() - ip.getHeaderLength();
+    // SECURITY: Validate IP header length does not exceed total length before
+    // subtraction to prevent integer underflow. A malformed packet with
+    // IHL > total_length would wrap to a large value, bypassing bounds checks.
+    // Defense-in-depth per CLAUDE.md integer safety guidelines.
+    const ip_total_len = ip.getTotalLength();
+    const ip_header_len = ip.getHeaderLength();
+    if (ip_total_len < ip_header_len) {
+        return false; // Malformed: header claims more bytes than total length
+    }
+    const ip_payload_len = ip_total_len - ip_header_len;
     if (udp_len > ip_payload_len) {
         return false;
     }
@@ -66,12 +74,22 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
     const src_port = udp_hdr.getSrcPort();
 
     // Security-sensitive ports that require UDP checksum validation
+    // These protocols are vulnerable to spoofed packet injection if checksums aren't validated:
+    // - DNS (53): Cache poisoning attacks
+    // - NTP (123): Time-based authentication bypass, amplification attacks
+    // - SNMP (161/162): Unauthorized device control, information disclosure
     const DNS_PORT: u16 = 53;
-    const is_security_sensitive = (dst_port == DNS_PORT or src_port == DNS_PORT);
+    const NTP_PORT: u16 = 123;
+    const SNMP_PORT: u16 = 161;
+    const SNMP_TRAP_PORT: u16 = 162;
+    const is_security_sensitive = (dst_port == DNS_PORT or src_port == DNS_PORT or
+        dst_port == NTP_PORT or src_port == NTP_PORT or
+        dst_port == SNMP_PORT or src_port == SNMP_PORT or
+        dst_port == SNMP_TRAP_PORT or src_port == SNMP_TRAP_PORT);
 
     if (udp_hdr.checksum == 0) {
         if (is_security_sensitive) {
-            // Reject zero-checksum packets for DNS - potential cache poisoning
+            // Reject zero-checksum packets for security-sensitive protocols
             return false;
         }
         // Allow zero checksum for other UDP traffic per RFC 768
@@ -158,6 +176,8 @@ pub fn sendDatagramWithTos(
     const ip: *Ipv4Header = @ptrCast(@alignCast(&buf[eth_len]));
     ip.version_ihl = 0x45;
     ip.tos = tos;
+    // SAFETY: Truncation is safe because data.len <= MAX_UDP_PAYLOAD (1472) is validated
+    // at function entry. Max ip_len + udp_len = 20 + 8 + 1472 = 1500, fits in u16.
     ip.setTotalLength(@truncate(ip_len + udp_len));
     ip.identification = @byteSwap(ipv4.getNextId());
     ip.flags_fragment = @byteSwap(@as(u16, 0x4000));
@@ -172,6 +192,8 @@ pub fn sendDatagramWithTos(
     const udp_hdr: *UdpHeader = @ptrCast(@alignCast(&buf[eth_len + ip_len]));
     udp_hdr.setSrcPort(src_port);
     udp_hdr.setDstPort(dst_port);
+    // SAFETY: Truncation is safe because data.len <= MAX_UDP_PAYLOAD (1472) is validated
+    // at function entry. Max udp_len = 8 + 1472 = 1480, fits in u16.
     udp_hdr.setLength(@truncate(udp_len));
     udp_hdr.checksum = 0;
 

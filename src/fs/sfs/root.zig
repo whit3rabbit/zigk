@@ -67,7 +67,10 @@ pub fn init(device_path: []const u8) !vfs.FileSystem {
         }
     }
 
-    // SECURITY: Allocate bitmap cache to prevent heap fragmentation
+    // SECURITY: Allocate bitmap cache to prevent heap fragmentation.
+    // Resource exhaustion is bounded by validateSuperblock() which limits bitmap_blocks to 16,
+    // resulting in a maximum allocation of 16 * 512 = 8KB per mount.
+    // System-wide mount limits are enforced at the VFS layer (see vfs.zig MAX_MOUNTS).
     const bitmap_size = self.superblock.bitmap_blocks * t.SECTOR_SIZE;
     self.bitmap_cache = alloc.alloc(u8, bitmap_size) catch null;
     self.bitmap_cache_valid = false;

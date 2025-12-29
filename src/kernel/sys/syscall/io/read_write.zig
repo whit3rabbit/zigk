@@ -20,6 +20,12 @@ const perform_write_locked = utils.perform_write_locked;
 ///
 /// Reads up to count bytes from fd into buf.
 /// Uses FD table to dispatch to appropriate device read operation.
+///
+/// DESIGN NOTE: sys_read intentionally does NOT acquire fd.lock.
+/// This matches Linux behavior where concurrent read() calls can interleave.
+/// File position atomicity is handled by the underlying device driver or
+/// callers should use pread64() for atomic positioned reads.
+/// In contrast, sys_write() acquires the lock to ensure output atomicity.
 pub fn sys_read(fd_num: usize, buf_ptr: usize, count: usize) SyscallError!usize {
     if (count == 0) {
         return 0;

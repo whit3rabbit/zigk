@@ -26,10 +26,10 @@ const entropy = @import("entropy.zig");
 // Constants
 const HHDM_OFFSET: u64 = 0xFFFF_8000_0000_0000;
 
-// KASLR configuration
-const KASLR_STACK_ENTROPY_BITS: u5 = 12; // 4096 units * 4KB = 16MB range
-const KASLR_MMIO_ENTROPY_BITS: u5 = 12; // 4096 units * 4KB = 16MB range
-const KASLR_HEAP_ENTROPY_BITS: u5 = 8; // 256 units * 4KB = 1MB range
+// KASLR configuration (entropy_bits: 1-15, determines range = 2^bits * PAGE_SIZE)
+const KASLR_STACK_ENTROPY_BITS: u4 = 12; // 4096 units * 4KB = 16MB range
+const KASLR_MMIO_ENTROPY_BITS: u4 = 12; // 4096 units * 4KB = 16MB range
+const KASLR_HEAP_ENTROPY_BITS: u4 = 8; // 256 units * 4KB = 1MB range
 const KASLR_PAGE_SIZE: u64 = 4096;
 const MAX_SEGMENTS: usize = 32;
 const MAX_MEMMAP_ENTRIES: usize = 256;
@@ -86,7 +86,15 @@ pub fn main() void {
     };
 
     // Set cmdline from selection
+    // SECURITY: Compile-time check ensures all cmdline options fit in buffer
     const cmdline_str = selection.toCmdline();
+    comptime {
+        for (std.meta.tags(menu.BootSelection)) |sel| {
+            if (sel.toCmdline().len >= cmdline_buffer.len) {
+                @compileError("BootSelection cmdline exceeds buffer size");
+            }
+        }
+    }
     @memcpy(cmdline_buffer[0..cmdline_str.len], cmdline_str);
     serialPrint("Boot selection: ");
     serialPrint(cmdline_str);

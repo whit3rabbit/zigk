@@ -379,7 +379,10 @@ fn checkSignalPermission(target: *sched.Thread, signum: u8) SyscallError!void {
     // Permission checks for signals between different processes
     if (current_proc) |cp| {
         if (target_proc) |tp| {
-            // Root (euid 0) can always send signals
+            // POSIX DAC: Root (euid 0) can always send signals.
+            // This is standard Unix behavior per POSIX signal permission model,
+            // distinct from capability-based hardware access controls.
+            // TODO: Consider adding CAP_KILL capability check as alternative to root.
             if (cp.euid == 0) {
                 return; // Privileged sender, allowed
             }

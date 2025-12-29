@@ -210,10 +210,9 @@ pub fn sfsWrite(file_desc: *fd.FileDescriptor, buf: []const u8) isize {
             return -5;
         }
 
-        var sector_buf: [512]u8 = undefined;
-        sfs_io.readSector(file.fs.device_fd, phys_block, &sector_buf) catch {
-            @memset(&sector_buf, 0);
-        };
+        // SECURITY: Zero-initialize to prevent information leak if read fails or returns partial data
+        var sector_buf: [512]u8 = [_]u8{0} ** 512;
+        sfs_io.readSector(file.fs.device_fd, phys_block, &sector_buf) catch {};
 
         const chunk = @min(buf.len - written_count, 512 - byte_offset);
         @memcpy(sector_buf[byte_offset..][0..chunk], buf[written_count..][0..chunk]);
@@ -235,7 +234,8 @@ pub fn sfsWrite(file_desc: *fd.FileDescriptor, buf: []const u8) isize {
             const block_idx = file.entry_idx / 4;
             const offset_idx = file.entry_idx % 4;
 
-            var dir_buf: [512]u8 = undefined;
+            // SECURITY: Zero-initialize to prevent information leak if read fails
+            var dir_buf: [512]u8 = [_]u8{0} ** 512;
             sfs_io.readSector(file.fs.device_fd, file.fs.superblock.root_dir_start + block_idx, &dir_buf) catch {
                 console.warn("SFS: Failed to read directory for size update, skipping", .{});
                 return std.math.cast(isize, written_count) orelse return -75;
@@ -329,6 +329,17 @@ pub fn sfsUnmount(ctx: ?*anyopaque) void {
     }
 }
 
+/// Open a file in the SFS filesystem.
+///
+/// SECURITY NOTE: Permission checks (mode/uid/gid validation) are intentionally NOT performed here.
+/// This follows the layered security model where:
+///   1. Syscall layer (sys_open) validates user credentials and access rights
+///   2. VFS layer performs path canonicalization and mount-point permission checks
+///   3. Filesystem layer (here) handles storage-level operations only
+///
+/// This design prevents redundant checks and ensures permission policy is centralized.
+/// Direct calls to sfsOpen from kernel code bypass permission checks by design (kernel has full access).
+/// See: src/kernel/sys/syscall/fs/open.zig for permission enforcement.
 pub fn sfsOpen(ctx: ?*anyopaque, path: []const u8, flags: u32) vfs.Error!*fd.FileDescriptor {
     const self: *t.SFS = @ptrCast(@alignCast(ctx));
     if (!self.mounted) return vfs.Error.IOError;
@@ -540,72 +551,88 @@ pub fn sfsUnlink(ctx: ?*anyopaque, path: []const u8) vfs.Error!void {
     if (!sfs_alloc.isValidFilename(name)) return vfs.Error.AccessDenied;
     if (name.len == 0 or name.len >= 32) return vfs.Error.NotFound;
 
-    var dir_buf: [t.ROOT_DIR_BLOCKS * 512]u8 = undefined;
-    sfs_io.readDirectoryAsync(self, &dir_buf) catch return vfs.Error.IOError;
+    // First pass: find the entry index (unlocked, for efficiency)
+    var found_idx: ?u32 = null;
+    {
+        var dir_buf: [t.ROOT_DIR_BLOCKS * 512]u8 = undefined;
+        sfs_io.readDirectoryAsync(self, &dir_buf) catch return vfs.Error.IOError;
 
-    const total_entries = t.ROOT_DIR_BLOCKS * 4;
-    var idx: u32 = 0;
-    while (idx < total_entries) : (idx += 1) {
-        const offset = idx * 128;
-        const e: *t.DirEntry = @ptrCast(@alignCast(&dir_buf[offset]));
+        const total_entries = t.ROOT_DIR_BLOCKS * 4;
+        var idx: u32 = 0;
+        while (idx < total_entries) : (idx += 1) {
+            const offset = idx * 128;
+            const e: *const t.DirEntry = @ptrCast(@alignCast(&dir_buf[offset]));
 
-        if (e.flags == 1) {
-            const e_name = std.mem.sliceTo(&e.name, 0);
-            if (e_name.len >= 32) continue;
-            if (std.mem.eql(u8, e_name, name)) {
-                const blocks_used: u32 = if (e.size == 0) 1 else (e.size + 511) / 512;
-
-                // SECURITY: Hold lock through entire unlink operation to prevent TOCTOU race
-                // A concurrent sfsOpen could otherwise see the entry before we clear it,
-                // then access freed blocks after we release the lock
-                const lock_held = self.alloc_lock.acquire();
-                defer lock_held.release();
-
-                // Re-validate entry under lock (another thread may have deleted it)
-                if (e.flags != 1) {
-                    return vfs.Error.NotFound;
+            if (e.flags == 1) {
+                const e_name = std.mem.sliceTo(&e.name, 0);
+                if (e_name.len >= 32) continue;
+                if (std.mem.eql(u8, e_name, name)) {
+                    found_idx = idx;
+                    break;
                 }
-
-                var is_open = false;
-                if (self.open_counts[idx] > 0) {
-                    is_open = true;
-                    self.pending_delete[idx] = true;
-                    self.deferred_info[idx] = .{
-                        .start_block = e.start_block,
-                        .block_count = blocks_used,
-                    };
-                    console.info("SFS: Deferring deletion of '{s}' (open_count={},blocks={})", .{ name, self.open_counts[idx], blocks_used });
-                }
-
-                // Free blocks while holding lock (if not deferred)
-                if (!is_open) {
-                    sfs_alloc.freeBlocks(self, e.start_block, blocks_used);
-                }
-
-                // Clear directory entry while holding lock
-                e.flags = 0;
-                e.name = [_]u8{0} ** 32;
-                if (!is_open) {
-                    e.start_block = 0;
-                    e.size = 0;
-                }
-
-                // Write directory update while holding lock
-                const block_idx = idx / 4;
-                const block_start = block_idx * 512;
-                sfs_io.writeSectorAsync(self, self.superblock.root_dir_start + block_idx, dir_buf[block_start..][0..512]) catch return vfs.Error.IOError;
-
-                // Update superblock while holding lock
-                self.superblock.file_count = std.math.sub(u32, self.superblock.file_count, 1) catch 0;
-                sfs_io.updateSuperblock(self) catch return vfs.Error.IOError;
-
-                console.info("SFS: Unlinked '{s}'", .{name});
-                return;
             }
         }
     }
 
-    return vfs.Error.NotFound;
+    const idx = found_idx orelse return vfs.Error.NotFound;
+
+    // SECURITY: Hold lock through entire unlink operation to prevent TOCTOU race
+    const lock_held = self.alloc_lock.acquire();
+    defer lock_held.release();
+
+    // SECURITY: Re-read the specific directory block under lock to prevent TOCTOU
+    // The entry we found in the first pass may have been modified by another thread
+    const block_idx = idx / 4;
+    const offset_in_block = (idx % 4) * 128;
+    var block_buf: [512]u8 = [_]u8{0} ** 512;
+    sfs_io.readSector(self.device_fd, self.superblock.root_dir_start + block_idx, &block_buf) catch return vfs.Error.IOError;
+
+    const e: *t.DirEntry = @ptrCast(@alignCast(&block_buf[offset_in_block]));
+
+    // Re-validate entry under lock: check it still exists and has the same name
+    if (e.flags != 1) {
+        return vfs.Error.NotFound;
+    }
+    const e_name = std.mem.sliceTo(&e.name, 0);
+    if (!std.mem.eql(u8, e_name, name)) {
+        // Entry was replaced with a different file - race condition
+        return vfs.Error.NotFound;
+    }
+
+    const blocks_used: u32 = if (e.size == 0) 1 else (e.size + 511) / 512;
+
+    var is_open = false;
+    if (self.open_counts[idx] > 0) {
+        is_open = true;
+        self.pending_delete[idx] = true;
+        self.deferred_info[idx] = .{
+            .start_block = e.start_block,
+            .block_count = blocks_used,
+        };
+        console.info("SFS: Deferring deletion of '{s}' (open_count={},blocks={})", .{ name, self.open_counts[idx], blocks_used });
+    }
+
+    // Free blocks while holding lock (if not deferred)
+    if (!is_open) {
+        sfs_alloc.freeBlocks(self, e.start_block, blocks_used);
+    }
+
+    // Clear directory entry while holding lock
+    e.flags = 0;
+    e.name = [_]u8{0} ** 32;
+    if (!is_open) {
+        e.start_block = 0;
+        e.size = 0;
+    }
+
+    // Write directory update while holding lock
+    sfs_io.writeSector(self.device_fd, self.superblock.root_dir_start + block_idx, &block_buf) catch return vfs.Error.IOError;
+
+    // Update superblock while holding lock
+    self.superblock.file_count = std.math.sub(u32, self.superblock.file_count, 1) catch 0;
+    sfs_io.updateSuperblock(self) catch return vfs.Error.IOError;
+
+    console.info("SFS: Unlinked '{s}'", .{name});
 }
 
 pub fn sfsStatPath(ctx: ?*anyopaque, path: []const u8) ?vfs.FileMeta {

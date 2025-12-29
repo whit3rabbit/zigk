@@ -76,10 +76,12 @@ fn loadGenericIrqHandler(irq: u8) ?*const fn (u8) void {
 
 /// Rate-limited logging for unexpected IRQs
 pub fn logUnexpectedIrq(irq: u8) void {
-    state.unexpected_irq_count +%= 1;
+    // SECURITY: Use atomic operations to prevent lost updates from concurrent IRQs
+    const count = state.unexpected_irq_count.fetchAdd(1, .monotonic) + 1;
+    const last_irq = state.last_unexpected_irq.load(.acquire);
 
-    if (irq != state.last_unexpected_irq or state.unexpected_irq_count <= 1) {
-        state.last_unexpected_irq = irq;
+    if (irq != last_irq or count <= 1) {
+        state.last_unexpected_irq.store(irq, .release);
         if (state.console_writer) |write| {
             write("[WARN] Unexpected IRQ: ");
             const hex_chars = "0123456789ABCDEF";

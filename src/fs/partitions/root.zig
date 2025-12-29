@@ -71,10 +71,14 @@ fn partitionRead(fd: *FileDescriptor, buf: []u8) isize {
     // We will reimplement the logic here (or refactor adapter later).
 
     // Logic similar to adapter.zig:blockRead but with offset
-    const start_lba = part.start_lba + (pos / 512);
+    // SECURITY: Use checked arithmetic to prevent overflow from malicious partition tables
+    const pos_sectors = pos / 512;
+    const start_lba = std.math.add(u64, part.start_lba, pos_sectors) catch return Errno.ERANGE.toReturn();
     const start_offset = pos % 512;
 
-    const end_lba = part.start_lba + ((pos + read_len + 512 - 1) / 512);
+    const end_pos_padded = std.math.add(usize, pos + read_len, 511) catch return Errno.ERANGE.toReturn();
+    const end_lba = std.math.add(u64, part.start_lba, end_pos_padded / 512) catch return Errno.ERANGE.toReturn();
+    if (end_lba < start_lba) return Errno.ERANGE.toReturn();
     const sector_count_u64 = end_lba - start_lba;
 
     if (sector_count_u64 > ahci.MAX_SECTORS_PER_TRANSFER) {
@@ -131,10 +135,14 @@ fn partitionWrite(fd: *FileDescriptor, buf: []const u8) isize {
         write_len = @intCast(part_size_bytes - pos);
     }
 
-    const start_lba = part.start_lba + (pos / 512);
+    // SECURITY: Use checked arithmetic to prevent overflow from malicious partition tables
+    const pos_sectors = pos / 512;
+    const start_lba = std.math.add(u64, part.start_lba, pos_sectors) catch return Errno.ERANGE.toReturn();
     const start_offset = pos % 512;
 
-    const end_lba = part.start_lba + ((pos + write_len + 512 - 1) / 512);
+    const end_pos_padded = std.math.add(usize, pos + write_len, 511) catch return Errno.ERANGE.toReturn();
+    const end_lba = std.math.add(u64, part.start_lba, end_pos_padded / 512) catch return Errno.ERANGE.toReturn();
+    if (end_lba < start_lba) return Errno.ERANGE.toReturn();
     const sector_count_u64 = end_lba - start_lba;
 
     if (sector_count_u64 > ahci.MAX_SECTORS_PER_TRANSFER) {
@@ -238,6 +246,12 @@ pub fn scanAndRegister(port_num: u5) !void {
     console.info("Partitions: Scanning {s}...", .{disk_name});
 
     // Read LBA 0 (MBR)
+    // SECURITY NOTE: Zero-initialization is NOT required here because:
+    //   1. readSectors() is an atomic operation that either fills all 512 bytes or fails completely
+    //   2. On failure, we return immediately without using the buffer contents
+    //   3. The AHCI driver uses DMA which writes the full sector or returns an error
+    //   4. No partial reads are possible - the hardware guarantees sector atomicity
+    // This differs from RMW (read-modify-write) paths where partial data could leak.
     const mbr_sector = try allocator.alloc(u8, 512);
     defer allocator.free(mbr_sector);
 

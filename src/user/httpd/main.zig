@@ -43,6 +43,11 @@ fn decodeFd(user_data: u64) i32 {
 // Per-client state for managing buffers
 const ClientState = struct {
     fd: i32 = -1,
+    // Security note: This buffer is intentionally uninitialized (undefined) because:
+    // 1. It is ONLY used as a destination for recv() - data is written TO it, never read before write
+    // 2. The received data overwrites any previous contents before being processed
+    // 3. Responses are sent from static strings, not from this buffer
+    // Zero-initialization would add overhead with no security benefit here.
     buf: [1024]u8 = undefined,
     in_use: bool = false,
 };
@@ -152,7 +157,12 @@ fn populateRecv(sqe: *syscall.IoUringSqe, ctx: ?*anyopaque) void {
 }
 
 fn submitSend(ring: *syscall.IoUring, fd: i32, data: []const u8) void {
-    // Pack fd and data pointer into a stack struct for the callback
+    // Pack fd and data pointer into a stack struct for the callback.
+    // Security note: This stack-allocated context is safe because:
+    // 1. getSqeAtomicFn calls populateSend SYNCHRONOUSLY before returning
+    // 2. The callback copies fd and data.ptr/len into the SQE structure
+    // 3. After this function returns, the SQE contains copied values, not pointers to send_ctx
+    // 4. The `data` slice points to static string literals, not stack data
     const SendCtx = struct { fd: i32, data: []const u8 };
     var send_ctx = SendCtx{ .fd = fd, .data = data };
     _ = ring.getSqeAtomicFn(&populateSend, @ptrCast(&send_ctx));

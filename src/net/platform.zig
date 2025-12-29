@@ -63,7 +63,10 @@ pub const entropy = struct {
             return root.hal.entropy.getHardwareEntropy();
         } else {
             // Userspace: use getrandom syscall (SYS_GETRANDOM = 318)
-            var buf: [8]u8 = undefined;
+            // SECURITY: Zero-initialize buffer to prevent stack data leakage
+            // if syscall returns partial data before we detect and panic.
+            // Defense-in-depth per CLAUDE.md security guidelines.
+            var buf: [8]u8 = [_]u8{0} ** 8;
             const ret = userspaceGetrandom(&buf, 8, 0);
             if (ret == 8) {
                 return std.mem.readInt(u64, &buf, .little);
@@ -129,8 +132,9 @@ pub const timing = struct {
     fn userspaceGetMonotonicNs() u64 {
         const SYS_CLOCK_GETTIME: usize = 228;
         const CLOCK_MONOTONIC: usize = 1;
-        var ts: Timespec = undefined;
-        var ret: isize = undefined;
+        // Security: Zero-init to prevent undefined behavior on syscall failure (CLAUDE.md)
+        var ts: Timespec = .{ .tv_sec = 0, .tv_nsec = 0 };
+        var ret: isize = -1;
 
         if (builtin.cpu.arch == .x86_64) {
             const ret_val = userspace.syscall2(SYS_CLOCK_GETTIME, CLOCK_MONOTONIC, @intFromPtr(&ts));

@@ -191,8 +191,7 @@ pub fn showMenu(
                         countdown -= 1;
                         if (countdown == 0) {
                             // Timeout - return default selection
-                            // TODO: Changed to doom for testing, revert to .shell
-                            return .doom;
+                            return .shell;
                         }
                         // Set next 1-second timer
                         bs.setTimer(timer_event.?, .relative, ONE_SECOND_100NS) catch {};

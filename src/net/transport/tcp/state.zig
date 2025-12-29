@@ -448,9 +448,13 @@ pub fn evictOldestHalfOpenTcbUnlocked() bool {
         return false;
     }
 
-    // SECURITY FIX: Keep TCB mutex held during freeTcb to prevent IRQ window.
-    // Previously we released the mutex before freeTcb which allowed interrupts
-    // to fire and potentially access the TCB being freed.
+    // SAFETY: No IRQ race window exists here because:
+    // 1. Caller holds state.lock (IrqLock) which disables interrupts on this CPU
+    // 2. The per-TCB mutex protects TCB fields from concurrent CPU access
+    // 3. Setting closing=true before mutex release ensures any thread that somehow
+    //    obtained a reference will see the flag and bail out
+    // 4. freeTcb removes TCB from hash table, preventing new lookups
+    // The mutex release before freeTcb is safe because IRQs are disabled by state.lock.
     if (oldest_tcb.mutex.tryAcquire()) |tcb_held| {
         // Mark as closing before releasing mutex to prevent concurrent access
         oldest_tcb.closing = true;

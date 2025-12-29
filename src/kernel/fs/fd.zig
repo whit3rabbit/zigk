@@ -382,7 +382,21 @@ pub const FdTable = struct {
         if (self.fds[new_fd]) |existing_fd| {
             self.fds[new_fd] = null;
             self.count -= 1;
-            // Release lock before close_fn to avoid deadlock
+            // SECURITY NOTE: Lock release/reacquire pattern for deadlock prevention.
+            //
+            // Why we release the lock:
+            //   close_fn() may block (e.g., flushing buffers, network operations) or
+            //   acquire other locks, which could cause deadlock if we hold FdTable.lock.
+            //
+            // Why this is safe (TOCTOU prevention):
+            //   1. We captured `fd` pointer BEFORE releasing the lock
+            //   2. After reacquiring, we verify old_fd still maps to the SAME pointer
+            //   3. Pointer comparison (recheck_fd != fd) detects if old_fd was:
+            //      - Closed and reallocated to a new FD
+            //      - Replaced via another dup2() call
+            //   4. If the pointer changed, we return BadFd (atomic failure)
+            //
+            // The fd pointer itself is stable (heap-allocated), only the slot mapping can change.
             held.release();
             if (existing_fd.unref()) {
                 if (existing_fd.ops.close) |close_fn| {

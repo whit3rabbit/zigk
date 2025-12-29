@@ -90,6 +90,9 @@ pub fn processListenPacket(
     }
 
     if (tcb.wscale_ok) {
+        // SAFETY: RFC 7323 Section 2.3 specifies maximum window scale of 14.
+        // Values > 14 are clamped to 14 per RFC recommendation. The @intCast is
+        // safe because we've verified snd_wscale <= 14, which fits in u5 (0-31).
         const scale: u5 = if (tcb.snd_wscale > 14) blk: {
             console.warn("TCP: Illegal window scaling value {} > 14 received, using 14", .{tcb.snd_wscale});
             break :blk 14;

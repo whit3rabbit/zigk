@@ -106,14 +106,20 @@ fn sscanf_core(str: [*:0]const u8, fmt: [*:0]const u8, ap: *VaList) c_int {
             f += 1;
         }
 
+        // Security: Cap width at 4095 to prevent overflow from malicious format strings
+        // like "%99999999999999999999s". Overflow would wrap to small value causing
+        // unexpected truncation. Capping provides predictable behavior.
+        const MAX_WIDTH: usize = 4095;
         var width: usize = 0;
         var has_width = false;
         while (f[0] >= '0' and f[0] <= '9') {
             has_width = true;
-            width = width * 10 + @as(usize, f[0] - '0');
+            const digit = @as(usize, f[0] - '0');
+            width = @min(std.math.mul(usize, width, 10) catch MAX_WIDTH, MAX_WIDTH);
+            width = @min(std.math.add(usize, width, digit) catch MAX_WIDTH, MAX_WIDTH);
             f += 1;
         }
-        if (!has_width) width = 4095;
+        if (!has_width) width = MAX_WIDTH;
 
         var is_long = false;
         var is_short = false;
@@ -311,14 +317,18 @@ fn sscanf_cva(str: [*:0]const u8, fmt: [*:0]const u8, args: anytype) c_int {
             f += 1;
         }
 
+        // Security: Cap width at 4095 to prevent overflow from malicious format strings
+        const MAX_WIDTH: usize = 4095;
         var width: usize = 0;
         var has_width = false;
         while (f[0] >= '0' and f[0] <= '9') {
             has_width = true;
-            width = width * 10 + @as(usize, f[0] - '0');
+            const digit = @as(usize, f[0] - '0');
+            width = @min(std.math.mul(usize, width, 10) catch MAX_WIDTH, MAX_WIDTH);
+            width = @min(std.math.add(usize, width, digit) catch MAX_WIDTH, MAX_WIDTH);
             f += 1;
         }
-        if (!has_width) width = 4095;
+        if (!has_width) width = MAX_WIDTH;
 
         var is_long = false;
         var is_short = false;

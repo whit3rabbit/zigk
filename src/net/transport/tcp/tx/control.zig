@@ -26,7 +26,9 @@ pub fn sendSyn(tcb: *Tcb) bool {
     const have_mac = resolved_mac != null;
     var dst_mac = resolved_mac orelse [_]u8{ 0, 0, 0, 0, 0, 0 };
 
-    var options_buf: [c.TCP_MAX_OPTIONS_SIZE]u8 = undefined;
+    // SECURITY: Zero-initialize options buffer to prevent kernel stack data
+    // from leaking into network packets via padding bytes (CLAUDE.md guideline).
+    var options_buf: [c.TCP_MAX_OPTIONS_SIZE]u8 = [_]u8{0} ** c.TCP_MAX_OPTIONS_SIZE;
     const options_len = options.buildSynOptions(&options_buf, tcb, false, null);
 
     const tcp_header_len = c.TCP_HEADER_SIZE + options_len;
@@ -102,7 +104,9 @@ pub fn sendSynAckWithOptions(tcb: *Tcb, peer_opts: ?*const options.TcpOptions) b
     const have_mac = resolved_mac != null;
     var dst_mac = resolved_mac orelse [_]u8{ 0, 0, 0, 0, 0, 0 };
 
-    var options_buf: [c.TCP_MAX_OPTIONS_SIZE]u8 = undefined;
+    // SECURITY: Zero-initialize options buffer to prevent kernel stack data
+    // from leaking into network packets via padding bytes (CLAUDE.md guideline).
+    var options_buf: [c.TCP_MAX_OPTIONS_SIZE]u8 = [_]u8{0} ** c.TCP_MAX_OPTIONS_SIZE;
     const options_len = options.buildSynOptions(&options_buf, tcb, true, peer_opts);
 
     const tcp_header_len = c.TCP_HEADER_SIZE + options_len;
@@ -258,7 +262,9 @@ fn sendAckWithOptions(tcb: *Tcb) bool {
     const have_mac = resolved_mac != null;
     var dst_mac = resolved_mac orelse [_]u8{ 0, 0, 0, 0, 0, 0 };
 
-    var options_buf: [c.TCP_MAX_OPTIONS_SIZE]u8 = undefined;
+    // SECURITY: Zero-initialize options buffer to prevent kernel stack data
+    // from leaking into network packets via padding bytes (CLAUDE.md guideline).
+    var options_buf: [c.TCP_MAX_OPTIONS_SIZE]u8 = [_]u8{0} ** c.TCP_MAX_OPTIONS_SIZE;
     const options_len = options.buildSackOptions(&options_buf, tcb);
 
     const tcp_header_len = c.TCP_HEADER_SIZE + options_len;

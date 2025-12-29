@@ -202,7 +202,14 @@ pub const IoApic = struct {
 };
 
 /// All registered I/O APICs
-var ioapics: [MAX_IOAPICS]IoApic = undefined;
+/// SECURITY: Zero-initialize to prevent info leaks if accessed before full init
+var ioapics: [MAX_IOAPICS]IoApic = [_]IoApic{.{
+    .base = 0,
+    .id = 0,
+    .gsi_base = 0,
+    .max_entries = 0,
+    .initialized = false,
+}} ** MAX_IOAPICS;
 var ioapic_count: u8 = 0;
 
 // ============================================================================

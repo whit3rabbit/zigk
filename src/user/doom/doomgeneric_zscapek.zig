@@ -8,6 +8,7 @@
 // - DG_GetTicksMs(): Get monotonic time
 // - DG_SetWindowTitle(): No-op for framebuffer
 
+const std = @import("std");
 const syscall = @import("syscall");
 
 // Doom screen dimensions
@@ -121,6 +122,11 @@ pub export fn DG_DrawFrame() void {
 
     var y: u32 = 0;
     while (y < DOOMGENERIC_RESY and y + y_offset < fb_info.height) : (y += 1) {
+        // Security: Use checked arithmetic for row offset calculation
+        // Prevents integer overflow if kernel provides malicious fb_info.pitch
+        const row_y = std.math.add(u32, y, y_offset) catch continue;
+        const row_offset = std.math.mul(u32, row_y, fb_info.pitch) catch continue;
+
         var x: u32 = 0;
         while (x < DOOMGENERIC_RESX and x + x_offset < fb_info.width) : (x += 1) {
             // Get source pixel (0x00RRGGBB format from Doom)
@@ -138,8 +144,10 @@ pub export fn DG_DrawFrame() void {
             dest_pixel |= @as(u32, g) << @intCast(fb_info.green_shift);
             dest_pixel |= @as(u32, b) << @intCast(fb_info.blue_shift);
 
-            // Calculate destination offset
-            const dest_offset = (y + y_offset) * fb_info.pitch + (x + x_offset) * fb_bpp;
+            // Security: Use checked arithmetic for column offset calculation
+            const col_x = std.math.add(u32, x, x_offset) catch continue;
+            const col_offset = std.math.mul(u32, col_x, fb_bpp) catch continue;
+            const dest_offset = std.math.add(u32, row_offset, col_offset) catch continue;
 
             // Write pixel to framebuffer
             if (fb_bpp == 4) {

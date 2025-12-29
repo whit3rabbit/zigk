@@ -14,10 +14,28 @@ const ETHERTYPE_VLAN: u16 = 0x8100;
 /// 802.1Q VLAN tag size in bytes
 const VLAN_TAG_SIZE: usize = 4;
 
+/// Deferred ARP reply to avoid transmitting while holding cache lock.
+/// SECURITY: Prevents potential deadlock if transmit() acquires driver lock
+/// and driver lock -> cache lock ordering exists elsewhere.
+const DeferredReply = struct {
+    should_send: bool = false,
+    target_mac: [6]u8 = [_]u8{0} ** 6,
+    target_ip: u32 = 0,
+};
+
 /// Process an incoming ARP packet
 pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
     var pending = cache.PendingPackets{};
     defer pending.transmitAndFree(iface);
+
+    // SECURITY: Defer reply transmission until after releasing cache lock
+    // to prevent potential deadlock (CLAUDE.md lock ordering guidelines).
+    var deferred_reply = DeferredReply{};
+    defer {
+        if (deferred_reply.should_send) {
+            sendReply(iface, deferred_reply.target_mac, deferred_reply.target_ip);
+        }
+    }
 
     const held = cache.lock.acquire();
     defer held.release();
@@ -99,22 +117,13 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
     switch (operation) {
         1 => {
             if (target_ip == iface.ip_addr) {
-                // We should also defer sending reply? 
-                // sendReply() currently transmits directly.
-                // sendReply calls transmit.
-                // Does sendReply use cache lock? No.
-                // Does processPacket hold cache lock? Yes.
-                // So sendReply is called under cache lock.
-                // If transmit takes driver lock, and driver lock -> cache lock exists, then this is unsafe.
-                // Ideally we should defer reply too.
-                // But let's fix the explicit updateCache case first as requested.
-                // Assuming sendReply is safe for now or out of scope for "updateCache locking".
-                // But audit said "Address findings of network audit".
-                // Audit found: "updateCache transmits while holding lock".
-                // Did it find "sendReply transmits while holding lock"?
-                // "Violation: inline asm... Per-socket locks... ARP updateCache...".
-                // I will stick to updateCache fix.
-                sendReply(iface, arp.sender_mac, sender_ip);
+                // SECURITY: Record reply parameters for deferred transmission
+                // after releasing cache lock. This prevents potential deadlock
+                // if transmit() -> driver lock and driver lock -> cache lock
+                // ordering exists elsewhere in the codebase.
+                deferred_reply.should_send = true;
+                @memcpy(&deferred_reply.target_mac, &arp.sender_mac);
+                deferred_reply.target_ip = sender_ip;
                 return true;
             }
         },
@@ -127,7 +136,8 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
 
 /// Send an ARP reply
 pub fn sendReply(iface: *Interface, target_mac: [6]u8, target_ip: u32) void {
-    var buf: [core_packet.ETH_HEADER_SIZE + @sizeOf(ArpHeader)]u8 = undefined;
+    // SECURITY: Zero-init outgoing packet buffer to prevent kernel stack leaks in ReleaseFast
+    var buf: [core_packet.ETH_HEADER_SIZE + @sizeOf(ArpHeader)]u8 = [_]u8{0} ** (core_packet.ETH_HEADER_SIZE + @sizeOf(ArpHeader));
 
     const eth: *EthernetHeader = @ptrCast(@alignCast(&buf[0]));
     @memcpy(&eth.dst_mac, &target_mac);
@@ -152,7 +162,8 @@ pub fn sendReply(iface: *Interface, target_mac: [6]u8, target_ip: u32) void {
 
 /// Send an ARP request
 pub fn sendRequest(iface: *Interface, target_ip: u32) void {
-    var buf: [core_packet.ETH_HEADER_SIZE + @sizeOf(ArpHeader)]u8 = undefined;
+    // SECURITY: Zero-init outgoing packet buffer to prevent kernel stack leaks in ReleaseFast
+    var buf: [core_packet.ETH_HEADER_SIZE + @sizeOf(ArpHeader)]u8 = [_]u8{0} ** (core_packet.ETH_HEADER_SIZE + @sizeOf(ArpHeader));
 
     const eth: *EthernetHeader = @ptrCast(@alignCast(&buf[0]));
     @memcpy(&eth.dst_mac, &ethernet.BROADCAST_MAC);

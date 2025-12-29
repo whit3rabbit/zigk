@@ -48,7 +48,15 @@ comptime {
     }
 }
 
-var ap_gs_data: [MAX_CPUS]syscall_arch.KernelGsData = undefined;
+// SECURITY: Zero-initialize to prevent info leaks if accessed before per-AP init
+var ap_gs_data: [MAX_CPUS]syscall_arch.KernelGsData = [_]syscall_arch.KernelGsData{.{
+    .kernel_stack = 0,
+    .user_stack = 0,
+    .current_thread = 0,
+    .scratch = 0,
+    .apic_id = 0,
+    .idle_thread = 0,
+}} ** MAX_CPUS;
 
 // GDT copy for APs (in HHDM range, accessible without kernel image mappings)
 // We store the physical address so AP can access it via HHDM without reading kernel image
@@ -214,7 +222,11 @@ pub fn init() void {
             continue;
         };
         const stack_virt_base = paging.physToVirt(stack_phys);
-        const stack_top = @intFromPtr(stack_virt_base) + stack_size;
+        // SECURITY: Use checked arithmetic to prevent overflow in stack calculations
+        const stack_top = std.math.add(usize, @intFromPtr(stack_virt_base), stack_size) catch {
+            console.warn("SMP: Stack top overflow for AP {d}", .{apic_id});
+            continue;
+        };
 
         console.debug("SMP: AP stack phys={x} virt_base={x} top={x}", .{ stack_phys, @intFromPtr(stack_virt_base), stack_top });
 

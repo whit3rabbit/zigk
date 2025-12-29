@@ -432,9 +432,13 @@ fn updateHoles(e: *ReassemblyEntry, start: usize, end: usize) void {
         if (start > h.start and end < h.end) {
             if (e.hole_count >= 64) {
                 // Cannot split hole - too many fragments. Mark entry invalid.
-                // SECURITY: Call deinit immediately to free buffer memory.
-                // Previously, buffer persisted until caller checked e.used,
-                // allowing brief memory accumulation under rapid attack.
+                // SECURITY: 64-hole limit prevents DoS via tiny fragment attacks.
+                // Combined with MIN_FRAGMENT_SIZE (256 bytes) for middle fragments,
+                // an attacker would need 64 * 256 = 16KB of traffic minimum to hit
+                // this limit for a single flow. First/last fragments are exempt from
+                // size checks but cannot create unbounded holes since last fragment
+                // sets total_len and first fragment must be >= 20 bytes.
+                // Call deinit immediately to free buffer memory.
                 e.used = false;
                 e.deinit();
                 return;

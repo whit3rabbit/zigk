@@ -269,6 +269,17 @@ pub const MAX_ENTRY_SIZE: u32 = 64 * 1024; // 64KB
 /// Minimum entry size
 pub const MIN_ENTRY_SIZE: u32 = 16;
 
+// Security: Ensure MAX_RING_ENTRIES * MAX_ENTRY_SIZE cannot overflow usize.
+// This guards totalSize() against integer overflow if these constants are ever increased.
+// See: CLAUDE.md Integer Safety guidelines.
+comptime {
+    const max_data = @as(u64, MAX_RING_ENTRIES) * @as(u64, MAX_ENTRY_SIZE);
+    const max_total = max_data + RingHeader.DATA_OFFSET;
+    if (max_total > std.math.maxInt(usize)) {
+        @compileError("MAX_RING_ENTRIES * MAX_ENTRY_SIZE + DATA_OFFSET exceeds usize");
+    }
+}
+
 // =============================================================================
 // Helper Functions
 // =============================================================================

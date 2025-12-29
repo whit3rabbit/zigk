@@ -292,10 +292,18 @@ export fn dispatch_interrupt(frame: *InterruptFrame) callconv(.c) *InterruptFram
 
     // Check if we need to switch to a different frame (context switch)
     // Uses per-CPU storage to avoid race conditions in SMP systems
+    // SECURITY: Use atomic exchange to atomically read and clear the frame pointer,
+    // preventing potential double-use if NMI or nested interrupt occurs
     var ret_frame = frame;
     const cpu_id = getCpuIndex();
-    if (per_cpu_new_frame[cpu_id]) |nf| {
-        per_cpu_new_frame[cpu_id] = null;
+    const new_frame = @atomicRmw(
+        ?*InterruptFrame,
+        &per_cpu_new_frame[cpu_id],
+        .Xchg,
+        null,
+        .acq_rel,
+    );
+    if (new_frame) |nf| {
         ret_frame = nf;
     }
 

@@ -82,10 +82,21 @@ pub fn getBootEntropy(bs: *uefi.tables.BootServices, buf: []u8) EntropyResult {
 
 /// Weak entropy fallback using TSC
 /// WARNING: Predictable - only use when hardware RNG unavailable
+///
+/// SECURITY: This fallback provides minimal entropy from TSC timing variance
+/// and stack layout. It is NOT cryptographically secure. An attacker with
+/// knowledge of boot timing and UEFI memory layout may be able to predict
+/// KASLR offsets with reduced effort. Systems requiring strong KASLR should
+/// ensure UEFI RNG Protocol (hardware RNG) is available. Consider failing
+/// boot entirely in high-security environments when only weak entropy exists.
 fn getWeakEntropy(buf: []u8) EntropyResult {
     var state: u64 = readTsc();
 
-    // Mix in stack address for additional (weak) entropy
+    // Mix in stack address for additional (weak) entropy.
+    // SECURITY NOTE: We declare stack_addr as undefined but ONLY read its ADDRESS
+    // via @intFromPtr, never its VALUE. The undefined contents are never accessed,
+    // so there is no information leak. The entropy comes from the stack pointer
+    // location (ASLR of UEFI stack), not from residual stack data.
     var stack_addr: u64 = undefined;
     const stack_ptr = @intFromPtr(&stack_addr);
     state ^= stack_ptr;
@@ -136,17 +147,17 @@ inline fn readTsc() u64 {
 /// Returns a page-aligned offset within the specified range
 pub fn calculateOffset(
     entropy: []const u8,
-    entropy_bits: u5, // Number of bits of entropy to use (max 16)
+    entropy_bits: u4, // Number of bits of entropy to use (1-15, 0 returns 0)
     alignment: u64, // Required alignment (e.g., 4096 for page)
 ) u64 {
     if (entropy.len < 2) return 0;
+    if (entropy_bits == 0) return 0;
 
     // Extract 16 bits from entropy
     const raw: u16 = @as(u16, entropy[0]) | (@as(u16, entropy[1]) << 8);
 
-    // Mask to requested entropy bits (cast u5 to u4 for shift, max value is 16 which fits)
-    const shift_amount: u4 = @intCast(entropy_bits);
-    const mask: u16 = (@as(u16, 1) << shift_amount) - 1;
+    // Mask to requested entropy bits
+    const mask: u16 = (@as(u16, 1) << entropy_bits) - 1;
     const masked = raw & mask;
 
     // Scale by alignment

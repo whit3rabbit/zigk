@@ -224,11 +224,22 @@ pub const InitRD = struct {
 
     /// Check if a normalized header name matches any variant of a base name
     /// Variants: name, name.elf, bin/name, bin/name.elf
+    ///
+    /// SECURITY NOTE: Path traversal attacks are prevented by strict length checks.
+    /// Each variant requires an EXACT length match (base_name.len + N), which prevents:
+    ///   - "bin/.elf" matching "bin" (8 != 3+4=7)
+    ///   - "foo/../bar.elf" matching "bar" (length mismatch)
+    ///   - Any injection of extra path components
+    ///
+    /// Additionally, findFile() rejects any path containing ".." before calling this function.
+    /// The InitRD is read-only (loaded by bootloader), so even if a malicious tar entry
+    /// somehow matched, it could only return attacker-controlled data that was already
+    /// present in the trusted initrd image.
     fn matchesAnyVariant(header_name: []const u8, base_name: []const u8) bool {
         // Direct match
         if (std.mem.eql(u8, header_name, base_name)) return true;
 
-        // Match with .elf suffix
+        // Match with .elf suffix: header must be EXACTLY base_name + ".elf" (4 chars)
         if (header_name.len == base_name.len + 4) {
             if (std.mem.startsWith(u8, header_name, base_name) and
                 std.mem.endsWith(u8, header_name, ".elf"))
@@ -237,7 +248,7 @@ pub const InitRD = struct {
             }
         }
 
-        // Match with bin/ prefix
+        // Match with bin/ prefix: header must be EXACTLY "bin/" + base_name (4 chars prefix)
         if (header_name.len == base_name.len + 4) {
             if (std.mem.startsWith(u8, header_name, "bin/") and
                 std.mem.eql(u8, header_name[4..], base_name))
@@ -246,7 +257,7 @@ pub const InitRD = struct {
             }
         }
 
-        // Match with bin/ prefix and .elf suffix
+        // Match with bin/ prefix and .elf suffix: EXACTLY "bin/" + base_name + ".elf" (8 chars)
         if (header_name.len == base_name.len + 8) {
             if (std.mem.startsWith(u8, header_name, "bin/") and
                 std.mem.endsWith(u8, header_name, ".elf"))

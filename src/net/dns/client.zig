@@ -49,8 +49,9 @@ const ResolveResult = union(enum) {
 /// server_ip: DNS server address in network byte order
 pub fn resolve(allocator: std.mem.Allocator, hostname: []const u8, server_ip: u32) !u32 {
     // Stack-allocated buffers for CNAME chain (no heap allocation)
-    var current_name_buf: [dns.DNS_MAX_NAME_LENGTH]u8 = undefined;
-    var cname_buf: [dns.DNS_MAX_NAME_LENGTH]u8 = undefined;
+    // Security: Zero-init to prevent stack data leaks on error paths (CLAUDE.md)
+    var current_name_buf: [dns.DNS_MAX_NAME_LENGTH]u8 = [_]u8{0} ** dns.DNS_MAX_NAME_LENGTH;
+    var cname_buf: [dns.DNS_MAX_NAME_LENGTH]u8 = [_]u8{0} ** dns.DNS_MAX_NAME_LENGTH;
     var current_name: []const u8 = hostname;
 
     var depth: u8 = 0;
@@ -60,7 +61,9 @@ pub fn resolve(allocator: std.mem.Allocator, hostname: []const u8, server_ip: u3
         switch (result) {
             .ip => |ip| return ip,
             .cname => |cname_target| {
-                // Copy CNAME target for next iteration
+                // SAFETY: cname_target is a slice into cname_buf (passed to resolveOnce).
+                // We immediately copy to current_name_buf before cname_buf can be reused
+                // in the next iteration. The slice is not retained after this copy.
                 if (cname_target.len > current_name_buf.len) return DnsError.NameTooLong;
                 @memcpy(current_name_buf[0..cname_target.len], cname_target);
                 current_name = current_name_buf[0..cname_target.len];
@@ -113,7 +116,8 @@ fn resolveOnce(allocator: std.mem.Allocator, hostname: []const u8, server_ip: u3
     try socket.setsockopt(fd_idx, socket.SOL_SOCKET, socket.SO_RCVTIMEO, std.mem.asBytes(&socket.TimeVal.fromMillis(2000)), @sizeOf(socket.TimeVal));
 
     // Prepare buffer
-    var send_buf: [512]u8 = undefined;
+    // Security: Zero-init to prevent stack data leaks in padding (CLAUDE.md)
+    var send_buf: [512]u8 = [_]u8{0} ** 512;
     var packet = dns.DnsPacket.init(&send_buf);
 
     // Generate random Transaction ID using hardware entropy with bit mixing.
@@ -142,7 +146,8 @@ fn resolveOnce(allocator: std.mem.Allocator, hostname: []const u8, server_ip: u3
     if (sent != query_len) return DnsError.SendError;
 
     // Receive response
-    var recv_buf: [512]u8 = undefined;
+    // Security: Zero-init to prevent stack data leaks on partial recv (CLAUDE.md)
+    var recv_buf: [512]u8 = [_]u8{0} ** 512;
     var src_addr: socket.SockAddrIn = std.mem.zeroes(socket.SockAddrIn);
     var received: usize = 0;
 
@@ -241,7 +246,8 @@ fn resolveOnce(allocator: std.mem.Allocator, hostname: []const u8, server_ip: u3
 
     // Verify Questions (RFC 5452)
     // The response must contain the same question we asked.
-    var owner_name_buf: [dns.DNS_MAX_NAME_LENGTH]u8 = undefined;
+    // Security: Zero-init to prevent stack data leaks (CLAUDE.md)
+    var owner_name_buf: [dns.DNS_MAX_NAME_LENGTH]u8 = [_]u8{0} ** dns.DNS_MAX_NAME_LENGTH;
     var i: usize = 0;
     while (i < qd_count) : (i += 1) {
         // Read name from question section
