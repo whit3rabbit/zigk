@@ -1,6 +1,21 @@
 // XHCI Driver Root (Facade)
 //
 // Re-exports submodules and provides driver entry point (probe).
+//
+// SECURITY NOTE:
+// This USB driver operates entirely in kernel space. There is NO syscall path
+// that exposes USB transfer functions (controlTransfer, queueBulkTransfer, etc.)
+// to userspace. Therefore, capability checks (CAP_USB, etc.) are NOT required
+// at this layer - the isolation is achieved by not exposing the APIs at all.
+//
+// Userspace access patterns:
+//   - sys_read_input_event / sys_read_scancode: Only poll already-completed HID
+//     reports via pollEvents(). Cannot initiate USB transfers or DMA.
+//   - No sys_usb_* syscalls exist.
+//   - No USB io_uring operations exist.
+//
+// If USB syscalls are added in the future, capability checks MUST be added
+// at the syscall handler layer (src/kernel/sys/syscall/), not here.
 
 const std = @import("std");
 const console = @import("console");

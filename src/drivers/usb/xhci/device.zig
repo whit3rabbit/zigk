@@ -585,6 +585,9 @@ pub const UsbDevice = struct {
     /// Cancel all pending transfers during disconnect
     /// Security: Sets device state to disconnecting first to prevent new submissions
     /// Then cancels each pending transfer and completes linked IoRequest
+    /// WARNING: This method does NOT free requests back to the transfer pool.
+    /// Use ports.cancelPendingTransfers() for proper cleanup during disconnect.
+    /// @deprecated Prefer ports.cancelPendingTransfers() which handles pool freeing.
     pub fn cancelAllPendingTransfers(self: *Self) void {
         // Set state to prevent new submissions
         self.state = .disconnecting;
@@ -597,6 +600,7 @@ pub const UsbDevice = struct {
             if (slot.*) |req| {
                 // Try to cancel - may fail if already completed
                 _ = req.cancel(); // cancel() handles IoRequest completion internally
+                // NOTE: Request is NOT freed to pool here - caller must handle!
                 slot.* = null;
             }
         }

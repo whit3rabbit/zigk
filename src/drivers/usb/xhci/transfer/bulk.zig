@@ -90,10 +90,17 @@ pub fn queueBulkTransfer(
 /// Returns immediately - completion via IoRequest.complete()
 /// The caller must:
 ///   1. Allocate IoRequest from kernel pool
-///   2. Call this function to queue the transfer
-///   3. Wait on Future or use io_uring for completion
-///   4. Free IoRequest after completion
-/// Security: Validates buffer is in kernel address space before DMA setup.
+///   2. Allocate DMA buffer via pmm.allocZeroedPages() or dma.allocBuffer()
+///   3. Zero-initialize the buffer before IN transfers (security requirement)
+///   4. Call this function to queue the transfer
+///   5. Wait on Future or use io_uring for completion
+///   6. Free IoRequest and DMA buffer after completion
+///
+/// Security: CALLER MUST ensure buf_phys is a valid DMA buffer physical address.
+/// This function does NOT validate buf_phys - passing an invalid address allows
+/// the xHCI controller to DMA to arbitrary physical memory. Only call this from
+/// trusted kernel code paths, never with user-supplied physical addresses.
+/// For userspace io_uring, the syscall layer must validate and pin the buffer.
 pub fn queueBulkTransferAsync(
     ctrl: *Controller,
     dev: *device.UsbDevice,
@@ -122,10 +129,11 @@ pub fn queueBulkTransferAsync(
     const trb_phys = ring_ptr.getEnqueuePhysAddr();
 
     // Allocate TransferRequest from pool (with io_request linked)
+    // Security: Use validated trb_len (u17 fits in u24) instead of truncating buf_len
     const transfer_req = transfer_pool.allocRequest(
         dci,
         trb_phys,
-        @truncate(buf_len),
+        trb_len, // Already validated via std.math.cast above
         .{ .none = {} }, // No callback for bulk - use IoRequest
         io_request,
     ) orelse return error.ResourceError;
@@ -162,7 +170,7 @@ pub fn queueBulkTransferAsync(
         .usb = .{
             .slot_id = dev.slot_id,
             .dci = dci,
-            .request_len = @truncate(buf_len),
+            .request_len = trb_len, // Use validated value
             .buf_phys = buf_phys,
         },
     };

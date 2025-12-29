@@ -165,20 +165,34 @@ pub const TransferRequestPool = struct {
 /// Global transfer request pool
 var global_pool: TransferRequestPool = undefined;
 
-/// Initialization flag with proper memory ordering
-/// Security: Uses atomic with acquire/release semantics to ensure pool
-/// initialization is visible to all CPUs before pool_initialized is true.
-/// This prevents weak memory model architectures from observing the flag
-/// as true before the pool contents are fully initialized.
-var pool_initialized: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
+/// Initialization state for thread-safe one-time init
+/// 0 = not started, 1 = in progress, 2 = complete
+/// Security: Uses cmpxchg to prevent TOCTOU race where multiple CPUs
+/// could pass a simple flag check and corrupt the pool by double-init.
+var init_state: std.atomic.Value(u8) = std.atomic.Value(u8).init(0);
 
 /// Initialize the global pool (call once during USB subsystem init)
+/// Thread-safe: Uses compare-and-swap to ensure exactly one CPU initializes.
 pub fn initGlobal() void {
-    // Check with relaxed ordering first (fast path)
-    if (!pool_initialized.load(.acquire)) {
-        global_pool.init();
-        // Release ordering ensures init() writes are visible before flag is true
-        pool_initialized.store(true, .release);
+    while (true) {
+        const state = init_state.load(.acquire);
+        if (state == 2) return; // Already initialized
+
+        if (state == 0) {
+            // Try to claim initialization
+            if (init_state.cmpxchgStrong(0, 1, .acq_rel, .acquire)) |_| {
+                // Lost race - another CPU claimed it, retry
+                continue;
+            }
+            // We won the race - do initialization
+            global_pool.init();
+            // Release ordering ensures init() writes are visible before state=2
+            init_state.store(2, .release);
+            return;
+        }
+
+        // state == 1: Another CPU is initializing, spin-wait
+        std.atomic.spinLoopHint();
     }
 }
 
@@ -191,22 +205,22 @@ pub fn allocRequest(
     callback: TransferCallback,
     io_request: ?*io.IoRequest,
 ) ?*TransferRequest {
-    // Acquire ordering ensures we see all init() writes if flag is true
-    if (!pool_initialized.load(.acquire)) return null;
+    // Only proceed if initialization is complete (state == 2)
+    if (init_state.load(.acquire) != 2) return null;
     return global_pool.alloc(dci, trb_phys, request_len, callback, io_request);
 }
 
 /// Free a transfer request back to the global pool
 pub fn freeRequest(req: *TransferRequest) void {
-    // Acquire ordering ensures we see all init() writes if flag is true
-    if (pool_initialized.load(.acquire)) {
+    // Only proceed if initialization is complete (state == 2)
+    if (init_state.load(.acquire) == 2) {
         global_pool.free(req);
     }
 }
 
 /// Get number of available requests in global pool
 pub fn availableRequests() usize {
-    // Acquire ordering ensures we see all init() writes if flag is true
-    if (!pool_initialized.load(.acquire)) return 0;
+    // Only proceed if initialization is complete (state == 2)
+    if (init_state.load(.acquire) != 2) return 0;
     return global_pool.available();
 }

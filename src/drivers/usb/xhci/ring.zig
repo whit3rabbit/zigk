@@ -388,6 +388,12 @@ pub const TransferRing = struct {
         return self.ring.hasSpace();
     }
 
+    /// Get physical address of the current enqueue position
+    /// Used for tracking async transfers before enqueueing
+    pub fn getEnqueuePhysAddr(self: *const Self) u64 {
+        return self.ring.phys_base + @as(u64, self.ring.enqueue_idx) * @sizeOf(trb.Trb);
+    }
+
     /// Free ring resources
     pub fn deinit(self: *Self) void {
         self.ring.deinit();

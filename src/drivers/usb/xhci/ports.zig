@@ -7,6 +7,7 @@ const regs = @import("regs.zig");
 const device_manager = @import("device_manager.zig");
 const device = @import("device.zig");
 const context = @import("context.zig");
+const transfer_pool = @import("transfer_pool.zig");
 
 const Controller = types.Controller;
 const MmioDevice = hal.mmio_device.MmioDevice;
@@ -312,6 +313,7 @@ fn disconnectDevice(ctrl: *Controller, dev: *device.UsbDevice) void {
 }
 
 /// Cancel all pending transfers for a device
+/// Security: Frees transfer requests back to the pool to prevent memory leaks.
 fn cancelPendingTransfers(dev: *device.UsbDevice) void {
     const held = dev.device_lock.acquire();
     defer held.release();
@@ -329,6 +331,8 @@ fn cancelPendingTransfers(dev: *device.UsbDevice) void {
                     .none => {},
                 }
             }
+            // Security: Free the transfer request back to the pool to prevent leak
+            transfer_pool.freeRequest(transfer);
             transfer_opt.* = null;
         }
     }
