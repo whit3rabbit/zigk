@@ -414,11 +414,24 @@ pub fn processClosing(tcb: *Tcb, tcp_hdr: *TcpHeader) RxAction {
     return .Continue;
 }
 
+/// Process packet in TIME_WAIT state (RFC 793 Section 3.9)
+///
+/// SECURITY (TIME_WAIT Assassination Analysis):
+/// This function is called ONLY after sequence number validation in processEstablishedPacket()
+/// (rx/root.zig lines 136-178). For TIME_WAIT with rcv_wnd=0:
+/// - Only segments with seq == rcv_nxt pass the acceptability check
+/// - RST packets with invalid seq are rejected (line 172-174)
+/// - FIN packets must have valid seq to reach this function
+/// Therefore, an attacker cannot inject FIN/RST without knowing the exact sequence number.
 pub fn processTimeWait(tcb: *Tcb, tcp_hdr: *TcpHeader) RxAction {
+    // RST in TIME_WAIT: Ignore per RFC 1337 (TIME-WAIT Assassination Hazards)
+    // This prevents spoofed RST from prematurely closing TIME_WAIT connections.
     if (tcp_hdr.hasFlag(TcpHeader.FLAG_RST)) {
         return .Continue;
     }
 
+    // FIN retransmit: Reset 2MSL timer and ACK (RFC 793)
+    // Sequence validation already done by caller (processEstablishedPacket).
     if (tcp_hdr.hasFlag(TcpHeader.FLAG_FIN)) {
         tcb.created_at = state.connection_timestamp;
         _ = tx.sendAck(tcb);

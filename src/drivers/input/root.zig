@@ -50,7 +50,9 @@ pub const DeviceType = enum(u8) {
     usb_tablet = 3,
     virtio_mouse = 4,
     virtio_tablet = 5,
+    vmmouse = 6,
 };
+pub const vmmouse = @import("vmmouse.zig");
 
 /// Input device registration info
 pub const DeviceInfo = struct {

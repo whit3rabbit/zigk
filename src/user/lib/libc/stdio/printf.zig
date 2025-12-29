@@ -36,7 +36,8 @@ comptime {
 
 // Core implementation using VaList (for aarch64 and vprintf)
 fn printf_core(fmt_str: [*:0]const u8, ap: *VaList) c_int {
-    var buf: [4096]u8 = undefined;
+    // SECURITY: Zero-initialize to prevent stack data leaks on partial writes
+    var buf: [4096]u8 = [_]u8{0} ** 4096;
     var written: usize = 0;
     var fmt_ptr = fmt_str;
 
@@ -304,8 +305,8 @@ fn printf_core(fmt_str: [*:0]const u8, ap: *VaList) c_int {
 
 // x86_64 implementation using @cVaArg directly (kept for performance/compatibility)
 fn printf_cva(fmt_str: [*:0]const u8, args: anytype) c_int {
-
-    var buf: [4096]u8 = undefined;
+    // SECURITY: Zero-initialize to prevent stack data leaks on partial writes
+    var buf: [4096]u8 = [_]u8{0} ** 4096;
     var written: usize = 0;
     var fmt_ptr = fmt_str;
 

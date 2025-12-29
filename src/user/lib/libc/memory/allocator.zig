@@ -5,6 +5,11 @@
 // - Address-ordered block list for safe coalescing
 // - Physical adjacency checks before merging
 // - Double-linked list for efficiency
+//
+// THREAD SAFETY: This allocator is NOT thread-safe. It uses a no-op spinlock stub
+// and global state without synchronization. This is intentional for single-threaded
+// userspace processes. For multi-threaded usage, wrap calls with a proper mutex or
+// implement thread-local heaps.
 
 const syscall = @import("syscall");
 const internal = @import("../internal.zig");

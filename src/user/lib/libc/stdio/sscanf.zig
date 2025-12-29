@@ -159,7 +159,9 @@ fn sscanf_core(str: [*:0]const u8, fmt: [*:0]const u8, ap: *VaList) c_int {
                         else if (s[0] >= 'A' and s[0] <= 'F') { digit = s[0] - 'A' + 10; }
                     }
                     if (digit == null or digit.? >= base) break;
-                    value = value * base + digit.?;
+                    // SECURITY: Use checked arithmetic to prevent overflow
+                    const mul_result = std.math.mul(i64, value, @as(i64, base)) catch break;
+                    value = std.math.add(i64, mul_result, @as(i64, digit.?)) catch break;
                     s += 1;
                     digits += 1;
                 }
@@ -184,7 +186,9 @@ fn sscanf_core(str: [*:0]const u8, fmt: [*:0]const u8, ap: *VaList) c_int {
                 var value: u64 = 0;
                 var digits: usize = 0;
                 while (digits < width and s[0] >= '0' and s[0] <= '9') {
-                    value = value * 10 + @as(u64, s[0] - '0');
+                    // SECURITY: Use checked arithmetic to prevent overflow
+                    const mul_result = std.math.mul(u64, value, 10) catch break;
+                    value = std.math.add(u64, mul_result, @as(u64, s[0] - '0')) catch break;
                     s += 1;
                     digits += 1;
                 }
@@ -208,7 +212,9 @@ fn sscanf_core(str: [*:0]const u8, fmt: [*:0]const u8, ap: *VaList) c_int {
                 while (digits < width) {
                     const digit = internal.hexDigitValue(s[0]);
                     if (digit == null) break;
-                    value = value * 16 + digit.?;
+                    // SECURITY: Use checked arithmetic to prevent overflow
+                    const mul_result = std.math.mul(u64, value, 16) catch break;
+                    value = std.math.add(u64, mul_result, digit.?) catch break;
                     s += 1;
                     digits += 1;
                 }
@@ -368,7 +374,9 @@ fn sscanf_cva(str: [*:0]const u8, fmt: [*:0]const u8, args: anytype) c_int {
                         else if (s[0] >= 'A' and s[0] <= 'F') { digit = s[0] - 'A' + 10; }
                     }
                     if (digit == null or digit.? >= base) break;
-                    value = value * base + digit.?;
+                    // SECURITY: Use checked arithmetic to prevent overflow
+                    const mul_result = std.math.mul(i64, value, @as(i64, base)) catch break;
+                    value = std.math.add(i64, mul_result, @as(i64, digit.?)) catch break;
                     s += 1;
                     digits += 1;
                 }
@@ -393,7 +401,9 @@ fn sscanf_cva(str: [*:0]const u8, fmt: [*:0]const u8, args: anytype) c_int {
                 var value: u64 = 0;
                 var digits: usize = 0;
                 while (digits < width and s[0] >= '0' and s[0] <= '9') {
-                    value = value * 10 + @as(u64, s[0] - '0');
+                    // SECURITY: Use checked arithmetic to prevent overflow
+                    const mul_result = std.math.mul(u64, value, 10) catch break;
+                    value = std.math.add(u64, mul_result, @as(u64, s[0] - '0')) catch break;
                     s += 1;
                     digits += 1;
                 }
@@ -417,7 +427,9 @@ fn sscanf_cva(str: [*:0]const u8, fmt: [*:0]const u8, args: anytype) c_int {
                 while (digits < width) {
                     const digit = internal.hexDigitValue(s[0]);
                     if (digit == null) break;
-                    value = value * 16 + digit.?;
+                    // SECURITY: Use checked arithmetic to prevent overflow
+                    const mul_result = std.math.mul(u64, value, 16) catch break;
+                    value = std.math.add(u64, mul_result, digit.?) catch break;
                     s += 1;
                     digits += 1;
                 }

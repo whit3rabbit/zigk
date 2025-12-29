@@ -31,7 +31,8 @@ fn sys_write(fd: i32, buf: []const u8) usize {
 }
 
 pub fn print(comptime fmt: []const u8, args: anytype) void {
-    var buf: [1024]u8 = undefined;
+    // SECURITY: Zero-initialize to prevent stack data leaks on partial writes
+    var buf: [1024]u8 = [_]u8{0} ** 1024;
     if (std.fmt.bufPrint(&buf, fmt, args)) |written| {
         _ = sys_write(1, written);
     } else |_| {

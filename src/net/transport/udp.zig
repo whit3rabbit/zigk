@@ -65,6 +65,15 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
         return false;
     }
 
+    // SECURITY: Validate claimed UDP length against actual packet buffer size.
+    // The IP header's total_length field could claim more bytes than were actually
+    // received (truncated packet or malicious crafting). Without this check,
+    // the slice operation at line 98 could cause out-of-bounds access.
+    // Defense-in-depth per CLAUDE.md integer safety guidelines.
+    if (pkt.transport_offset + udp_len > pkt.len) {
+        return false;
+    }
+
     // Verify UDP checksum
     // RFC 768: Checksum 0 means "no checksum computed" and is valid for IPv4.
     // SECURITY: For security-sensitive protocols (DNS port 53), we require

@@ -141,12 +141,16 @@ pub const Ring = struct {
         // Use volatile read with fence for acquire semantics on x86_64
         acquireFence();
         const cons_idx = self.header.cons_idx;
+        // Wrapping subtraction handles index wraparound correctly for ring buffers
         const used = self.local_prod_idx -% cons_idx;
         if (used >= self.entry_count) {
             return null; // Ring full
         }
 
-        // Return pointer to next slot
+        // SECURITY: idx is guaranteed < entry_count because:
+        // 1. ring_mask = entry_count - 1 (validated power-of-2 in attach())
+        // 2. (any_value & ring_mask) produces range [0, entry_count-1]
+        // 3. local_prod_idx is local state, not from shared memory
         const idx = self.local_prod_idx & self.ring_mask;
         return &self.entries[idx];
     }
@@ -240,7 +244,10 @@ pub const Ring = struct {
             return null; // Ring empty
         }
 
-        // Return pointer to next entry
+        // SECURITY: idx is guaranteed < entry_count because:
+        // 1. ring_mask = entry_count - 1 (validated power-of-2 in attach())
+        // 2. (any_value & ring_mask) produces range [0, entry_count-1]
+        // 3. local_cons_idx is local state, not from shared memory
         const idx = self.local_cons_idx & self.ring_mask;
         return &self.entries[idx];
     }

@@ -48,7 +48,9 @@ pub fn clock_gettime(clk_id: ClockId, tp: *Timespec) SyscallError!void {
 
 /// Get monotonic time in milliseconds (convenience wrapper)
 pub fn gettime_ms() SyscallError!u64 {
-    var ts: Timespec = undefined;
+    // SECURITY: Zero-initialize to prevent reading uninitialized data if
+    // syscall has a bug that doesn't fully populate the struct
+    var ts: Timespec = .{ .tv_sec = 0, .tv_nsec = 0 };
     try clock_gettime(.MONOTONIC, &ts);
     // Validate non-negative values before casting to u64
     if (ts.tv_sec < 0 or ts.tv_nsec < 0) return error.Unexpected;

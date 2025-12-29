@@ -72,12 +72,33 @@ The `switchContext` mechanism is designed to be minimal. SIMD/FPU registers are 
 
 ## Project Structure
 
-*   `root.zig`: Central entry point and architecture selector.
+The HAL is organized by architecture, with shared patterns implemented within each:
+
+*   `root.zig`: Central entry point and architecture selector (Unified HAL API).
 *   `x86_64/`: Implementation for AMD64 systems.
+    *   `boot/`: Bootloader-specific entry points and handoff.
+    *   `kernel/`: Interrupt controllers (APIC), syscall entry points, and GDT/IDT.
+    *   `mm/`: Paging, MMIO wrappers, and IOMMU (VT-d).
+    *   `lib/`: Optimized assembly helpers.
 *   `aarch64/`: Implementation for ARMv8-A systems.
-*   `lib/`: Optimized assembly helpers for memory movement and low-level CPU state control.
-*   `mm/`: Paging, MMIO wrappers, and IOMMU drivers.
-*   `kernel/`: Interrupt controllers (APIC/GIC), syscall entry points, and timing calibration.
+    *   `boot/`: Low-level exception vector setup and boot handoff.
+    *   `kernel/`: GICv2 implementation, exception routing, and syscalls.
+    *   `mm/`: AArch64 paging (4KB granules) and MMIO.
+    *   `lib/`: ARM-specific assembly utilities.
+
+## Unified HAL API
+
+The HAL exposes a consistent interface via `src/arch/root.zig`. Kernel-level code should consume features through this unified layer rather than importing architecture-specific files directly.
+
+```zig
+const arch = @import("arch");
+
+// Example: Writing to the early serial console
+arch.earlyPrint("HAL Initialized\n");
+
+// Example: Accessing CPU features
+const cpu_id = arch.cpu.getCoreId();
+```
 
 ## Roadmap
 

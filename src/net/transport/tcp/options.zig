@@ -145,6 +145,12 @@ pub fn parseOptions(pkt: *const PacketBuffer, tcp_hdr: *const TcpHeader, opts: *
                 const sack_bytes = opt_len - 2;
                 if (sack_bytes % 8 != 0) return;
 
+                // SECURITY (Bounds Analysis): The loop below is safe because:
+                // 1. options_end <= pkt.len (validated at line 42)
+                // 2. i + opt_len <= options_end (validated above)
+                // 3. sack_bytes = opt_len - 2, so block reads are within i+2 to i+opt_len-1
+                // 4. Maximum offset accessed: i + 2 + (block_count-1)*8 + 7 = i + opt_len - 1
+                // 5. Therefore max offset < pkt.len, all reads are in-bounds.
                 const block_count = @min(@as(usize, sack_bytes / 8), opts.sack_blocks.len);
                 opts.sack_block_count = @intCast(block_count);
 

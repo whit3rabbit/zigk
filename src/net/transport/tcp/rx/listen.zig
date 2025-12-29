@@ -93,6 +93,13 @@ pub fn processListenPacket(
         // SAFETY: RFC 7323 Section 2.3 specifies maximum window scale of 14.
         // Values > 14 are clamped to 14 per RFC recommendation. The @intCast is
         // safe because we've verified snd_wscale <= 14, which fits in u5 (0-31).
+        //
+        // SECURITY (Integer Overflow Analysis): No overflow is possible here.
+        // 1. snd_wnd is u16 from tcp_hdr.getWindow() (max 65535)
+        // 2. @as(u32, tcb.snd_wnd) promotes to u32 BEFORE the shift operation
+        // 3. scale is clamped to max 14
+        // 4. Maximum result: 65535 << 14 = 1,073,676,288, which fits in u32 (max ~4.2B)
+        // No std.math.mul needed because the promotion happens first and result fits.
         const scale: u5 = if (tcb.snd_wscale > 14) blk: {
             console.warn("TCP: Illegal window scaling value {} > 14 received, using 14", .{tcb.snd_wscale});
             break :blk 14;
