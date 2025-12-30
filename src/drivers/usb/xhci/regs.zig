@@ -316,6 +316,12 @@ pub const ExtCapId = struct {
 // =============================================================================
 
 /// Calculate offset for a specific port base (relative to Op base)
+/// PRECONDITION: port_num must be >= 1 (underflows if 0)
+/// SECURITY REVIEW: All callers validate port_num > 0 before calling:
+/// - handlePortStatusChange(): checks port_id == 0 at line 129
+/// - initializePorts(): loop starts at port = 1
+/// - resetPort(): called only from validated paths
+/// - createDevice(): only for root hub ports with validated port_num
 pub fn portBaseOffset(port_num: u8) u64 {
     // Port 1 is at offset 0x400
     // Each port is 0x10 bytes

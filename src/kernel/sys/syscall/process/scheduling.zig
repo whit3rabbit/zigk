@@ -149,7 +149,8 @@ pub fn sys_select(nfds: usize, readfds: usize, writefds: usize, exceptfds: usize
     if (timeout != 0) {
         var tv: extern struct { tv_sec: i64, tv_usec: i64 } = undefined;
         const tv_bytes = std.mem.asBytes(&tv);
-        if (user_mem.copyFromUser(tv_bytes, timeout) != tv_bytes.len) {
+        // SECURITY: copyFromUser returns bytes NOT copied (0 on success)
+        if (user_mem.copyFromUser(tv_bytes, timeout) != 0) {
             return error.EFAULT;
         }
         // Convert to microseconds

@@ -10,7 +10,11 @@ const SyscallError = uapi.errno.SyscallError;
 // Tracks the thread waiting for a specific IRQ
 var irq_waiters: [16]?*sched.Thread = [_]?*sched.Thread{null} ** 16;
 
-// Track if we've registered our exit callback
+// Track if we've registered our exit callback.
+// NOTE: This has a benign TOCTOU race - multiple threads could both see false and
+// register the callback. However, registerExitCallback is idempotent for the same
+// function pointer, and clearIrqWaitersForThread is idempotent (just nulls pointers).
+// Using atomics here would add complexity for no security benefit.
 var exit_callback_registered: bool = false;
 
 /// Ensure the exit callback is registered with the scheduler.

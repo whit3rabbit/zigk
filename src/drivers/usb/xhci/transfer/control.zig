@@ -182,7 +182,27 @@ fn doControlTransfer(
 
     // Wait for completion
     const residual = common.waitForCompletion(ctrl, dev, 1, timeout_ms) catch |err| {
-        if (dma_page_phys) |phys| pmm.freePages(phys, 1);
+        // SECURITY: Do NOT free DMA buffer on timeout - prevents Use-After-Free.
+        //
+        // When a control transfer times out, the TRBs are still queued in the
+        // transfer ring. If we free the DMA buffer here, the xHCI controller may
+        // still DMA to/from that memory when it eventually processes the TRBs.
+        // This causes memory corruption if the page has been reallocated.
+        //
+        // Proper fix requires:
+        // 1. Stop Endpoint command (xHCI 4.6.9) to halt EP0
+        // 2. Set TR Dequeue Pointer command (xHCI 4.6.10) to skip orphaned TRBs
+        // 3. Only then free the DMA buffer
+        //
+        // For now, we intentionally leak the page (1 page per timeout) to prevent
+        // UAF. This is acceptable because timeouts should be rare in normal
+        // operation and each leak is only 4KB.
+        //
+        // TODO: Implement proper transfer abort sequence with Stop Endpoint +
+        // Set TR Dequeue Pointer commands.
+        if (dma_page_phys) |_| {
+            console.warn("XHCI: Control transfer timeout - DMA page leaked to prevent UAF", .{});
+        }
         return err;
     };
 
@@ -450,6 +470,16 @@ pub fn controlTransferAsync(
     else
         .out;
 
+    // Security: Pre-check ring space to prevent orphaned TRBs referencing freed DMA memory.
+    // A control transfer needs: Setup TRB + optional Data TRB + Status TRB.
+    // If we enqueue partially and then fail, orphaned TRBs remain in the ring.
+    // When the next transfer rings the doorbell, the controller processes them,
+    // potentially DMA'ing to/from freed physical memory.
+    const required_slots: usize = if (has_data) 3 else 2;
+    if (ep0_ring.ring.freeSlots() < required_slots) {
+        return error.RingFull;
+    }
+
     // Security: Use checked conversion to prevent silent truncation
     const w_length: u16 = std.math.cast(u16, buf_len) orelse return error.InvalidParam;
 
@@ -503,6 +533,8 @@ pub fn controlTransferAsync(
 
     // Allocate TransferRequest from pool (with io_request linked)
     // EP0 DCI = 1
+    // Security: @truncate is safe here because w_length check (line 464) already
+    // validated buf_len <= 65535 (u16 max), which fits in u24 request_len field.
     const transfer_req = transfer_pool.allocRequest(
         1, // EP0 DCI
         status_trb_phys,
@@ -532,6 +564,7 @@ pub fn controlTransferAsync(
     _ = io_request.compareAndSwapState(.pending, .in_progress);
 
     // Set IoRequest metadata for tracing
+    // Security: @truncate is safe - buf_len already validated to fit in u16 (line 464)
     io_request.op_data = .{
         .usb = .{
             .slot_id = dev.slot_id,

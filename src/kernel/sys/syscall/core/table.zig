@@ -34,6 +34,7 @@ const mmio = @import("mmio");
 const pci_syscall = @import("pci_syscall");
 const ring = @import("ring");
 const fs_handlers = @import("fs_handlers");
+const io_uring = @import("io_uring");
 
 /// Syscall frame from arch-specific entry
 pub const SyscallFrame = hal.syscall.SyscallFrame;
@@ -95,6 +96,8 @@ pub export fn dispatch_syscall(frame: *SyscallFrame) callconv(.c) void {
                     mod = pci_syscall;
                 } else if (@hasDecl(ring, name)) {
                     mod = ring;
+                } else if (@hasDecl(io_uring, name)) {
+                    mod = io_uring;
                 }
 
                 if (mod) |m| {

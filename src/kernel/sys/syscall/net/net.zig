@@ -429,8 +429,9 @@ pub fn sys_accept(fd: usize, addr_ptr: usize, addrlen_ptr: usize) SyscallError!u
         return error.ENOTSOCK;
     };
 
-    // Prepare kernel buffer for peer address
-    var kpeer_addr: socket.SockAddrIn = undefined;
+    // SECURITY: Zero-initialize to prevent kernel stack leak if accept
+    // returns success but only partially populates the struct (CWE-908)
+    var kpeer_addr: socket.SockAddrIn = std.mem.zeroes(socket.SockAddrIn);
     // recvfrom takes ?*SockAddrIn
     const peer_addr_arg: ?*socket.SockAddrIn = if (addr_ptr != 0) &kpeer_addr else null;
 
@@ -703,8 +704,9 @@ pub fn sys_getsockname(fd: usize, addr_ptr: usize, addrlen_ptr: usize) SyscallEr
         return error.EFAULT;
     }
 
-    // Use kernel buffer for the address
-    var kaddr: socket.SockAddrIn = undefined;
+    // SECURITY: Zero-initialize to prevent kernel stack leak if getsockname
+    // returns success but only partially populates the struct (CWE-908)
+    var kaddr: socket.SockAddrIn = std.mem.zeroes(socket.SockAddrIn);
 
     socket.getsockname(ctx.socket_idx, &kaddr) catch |err| {
         return socketErrorToSyscallError(err);
@@ -747,8 +749,9 @@ pub fn sys_getpeername(fd: usize, addr_ptr: usize, addrlen_ptr: usize) SyscallEr
         return error.EFAULT;
     }
 
-    // Use kernel buffer for the address
-    var kaddr: socket.SockAddrIn = undefined;
+    // SECURITY: Zero-initialize to prevent kernel stack leak if getpeername
+    // returns success but only partially populates the struct (CWE-908)
+    var kaddr: socket.SockAddrIn = std.mem.zeroes(socket.SockAddrIn);
 
     socket.getpeername(ctx.socket_idx, &kaddr) catch |err| {
         return socketErrorToSyscallError(err);
@@ -1026,13 +1029,13 @@ pub fn sys_sendmsg(fd: usize, msg_ptr: usize, flags: usize) SyscallError!usize {
     };
 
     // Calculate total message size and validate
+    // SECURITY: Use checked arithmetic to prevent underflow in ReleaseFast (CWE-190)
     var total_len: usize = 0;
     for (iovecs) |iov| {
-        // Check for overflow
-        if (total_len > MAX_MSG_SIZE - iov.iov_len) {
+        total_len = std.math.add(usize, total_len, iov.iov_len) catch return error.EMSGSIZE;
+        if (total_len > MAX_MSG_SIZE) {
             return error.EMSGSIZE;
         }
-        total_len += iov.iov_len;
     }
 
     if (total_len == 0) {
@@ -1136,12 +1139,13 @@ pub fn sys_recvmsg(fd: usize, msg_ptr: usize, flags: usize) SyscallError!usize {
     };
 
     // Calculate total buffer size and validate write access
+    // SECURITY: Use checked arithmetic to prevent underflow in ReleaseFast (CWE-190)
     var total_len: usize = 0;
     for (iovecs) |iov| {
-        if (total_len > MAX_MSG_SIZE - iov.iov_len) {
+        total_len = std.math.add(usize, total_len, iov.iov_len) catch return error.EMSGSIZE;
+        if (total_len > MAX_MSG_SIZE) {
             return error.EMSGSIZE;
         }
-        total_len += iov.iov_len;
 
         // Validate each iovec buffer for write access
         if (iov.iov_len > 0 and !isValidUserAccess(iov.iov_base, iov.iov_len, AccessMode.Write)) {

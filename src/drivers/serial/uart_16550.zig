@@ -28,7 +28,6 @@ pub const COM3 = 0x3E8;
 pub const COM4 = 0x2E8;
 
 var current_port: u16 = COM1;
-var initialized: bool = false;
 var global_lock = std.atomic.Value(bool).init(false);
 
 /// Callback for received bytes (to avoid circular dependency with keyboard driver)
@@ -72,8 +71,6 @@ pub fn init(port: u16, baud: u32) void {
 
     // IRQs enabled, RTS/DSR set
     hal.io.outb(port + MCR, 0x0B);
-
-    initialized = true;
 }
 
 pub fn initDefault() void {

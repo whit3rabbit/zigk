@@ -11,7 +11,8 @@ const io = @import("io");
 const types = @import("../xhci/types.zig");
 const device = @import("../xhci/device.zig");
 const context = @import("../xhci/context.zig");
-const transfer = @import("../xhci/transfer/control.zig"); 
+const transfer = @import("../xhci/transfer/control.zig");
+const ports = @import("../xhci/ports.zig"); 
 
 // =============================================================================
 // Constants and Types
@@ -428,8 +429,11 @@ pub const HubDriver = struct {
     fn handleDisconnect(self: *Self, port: u8) void {
         if (device.findChildDevice(self.dev, port)) |child| {
             const slot_id = child.slot_id;
-            device.unregisterDevice(slot_id);
-            child.deinit();
+            // Security: Use proper disconnect sequence that stops endpoints,
+            // cancels pending transfers, and disables the slot before cleanup.
+            // This prevents use-after-free if interrupt handler is processing
+            // a transfer completion concurrently.
+            ports.disconnectDevice(self.ctrl, child);
             console.info("HUB: Port {d} device removed (slot {d})", .{ port, slot_id });
         } else {
             console.warn("HUB: Port {d} disconnect without tracked device", .{port});

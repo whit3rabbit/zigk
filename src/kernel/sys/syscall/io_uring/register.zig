@@ -27,7 +27,8 @@ pub fn sys_io_uring_register(
 ) SyscallError!usize {
     // Get fd and validate
     const fd_table = base.getGlobalFdTable();
-    const fd = fd_table.get(ring_fd) orelse return error.EBADF;
+    const ring_fd_u32 = std.math.cast(u32, ring_fd) orelse return error.EBADF;
+    const fd = fd_table.get(ring_fd_u32) orelse return error.EBADF;
     _ = fd_mod.getIoUringData(fd) orelse return error.EBADF;
 
     // Handle registration operations

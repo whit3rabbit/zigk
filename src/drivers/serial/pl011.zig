@@ -4,6 +4,7 @@
 // including the QEMU 'virt' machine.
 
 const std = @import("std");
+const sync = @import("sync");
 
 // Register offsets (multiplied by 4 for 32-bit MMIO)
 const DR     = 0x00; // Data Register
@@ -33,7 +34,7 @@ pub const UART0_BASE = 0x09000000;
 pub const COM1 = UART0_BASE; // For compatibility with x86 code
 
 var uart_base: u64 = UART0_BASE;
-var initialized: bool = false;
+var output_lock: sync.Spinlock = .{};
 
 fn writeReg(offset: u32, val: u32) void {
     const addr: *volatile u32 = @ptrFromInt(uart_base + offset);
@@ -77,14 +78,21 @@ pub fn writeByte(byte: u8) void {
 }
 
 pub fn writeString(str: []const u8) void {
+    const held = output_lock.acquire();
+    defer held.release();
     for (str) |c| {
         if (c == '\n') writeByte('\r');
         writeByte(c);
     }
 }
 
+/// Panic-safe string write - bypasses lock.
+/// Use only in panic/fault handlers where blocking could deadlock.
 pub fn writeStringPanic(str: []const u8) void {
-    writeString(str);
+    for (str) |c| {
+        if (c == '\n') writeByte('\r');
+        writeByte(c);
+    }
 }
 
 pub const Serial = struct {

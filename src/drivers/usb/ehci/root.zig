@@ -88,6 +88,7 @@ pub const Controller = struct {
             console.err("EHCI: Failed to map BAR0 MMIO: {}", .{err});
             return error.MmioMapFailed;
         };
+        errdefer vmm.unmapMmio(bar0_virt, bar0.size);
 
         // Read capability registers
         const cap_dev = MmioDevice(regs.CapReg).init(bar0_virt, 0x100);
@@ -103,11 +104,38 @@ pub const Controller = struct {
             hccparams.addr_64_bit,
         });
 
+        // Validate CAPLENGTH and port count fit within BAR0
+        // Operational registers start at caplength, port registers at op_base+0x44
+        // Each port needs 4 bytes, so max offset is 0x44 + (n_ports * 4)
+        const n_ports_usize: usize = @intCast(hcsparams.n_ports);
+        const port_regs_size = std.math.mul(usize, n_ports_usize, 4) catch {
+            console.err("EHCI: Port count overflow", .{});
+            return error.InvalidDevice;
+        };
+        const min_op_size = std.math.add(usize, 0x44, port_regs_size) catch {
+            console.err("EHCI: Operational register size overflow", .{});
+            return error.InvalidDevice;
+        };
+        const required_bar_size = std.math.add(usize, caplength, min_op_size) catch {
+            console.err("EHCI: BAR size calculation overflow", .{});
+            return error.InvalidDevice;
+        };
+        if (bar0.size < required_bar_size) {
+            console.err("EHCI: BAR0 size {x} too small for CAPLENGTH {} and {} ports (need {x})", .{
+                bar0.size,
+                caplength,
+                hcsparams.n_ports,
+                required_bar_size,
+            });
+            return error.InvalidDevice;
+        }
+
         // Calculate operational register base
         const op_base = bar0_virt + caplength;
 
         // Allocate controller structure
         const ctrl_phys = pmm.allocZeroedPages(1) orelse return error.OutOfMemory;
+        errdefer pmm.freePages(ctrl_phys, 1);
         const ctrl_virt = @intFromPtr(hal.paging.physToVirt(ctrl_phys));
         const ctrl: *Self = @ptrFromInt(ctrl_virt);
 
@@ -142,7 +170,12 @@ pub const Controller = struct {
 
     /// Perform BIOS Handoff (OS ownership)
     fn biosHandoff(self: *Self, eecp: u8) !void {
+        // EHCI spec: EECP must be 0 (no extended caps) or >= 0x40
         if (eecp == 0) return;
+        if (eecp < 0x40) {
+            console.warn("EHCI: Invalid EECP {x} (must be >= 0x40), skipping handoff", .{eecp});
+            return;
+        }
 
         console.info("EHCI: Checking for BIOS ownership at offset {x}", .{eecp});
 
@@ -179,7 +212,16 @@ pub const Controller = struct {
                     }
                 }
 
-                const ctl_offset: u12 = @intCast(@as(u16, cap_ptr) + 0x04);
+                // Validate control register offset stays within PCIe extended config space (4KB)
+                const ctl_ptr = std.math.add(u16, cap_ptr, 0x04) catch {
+                    console.warn("EHCI: Capability control offset overflow", .{});
+                    return;
+                };
+                if (ctl_ptr >= 0x1000) {
+                    console.warn("EHCI: Capability control offset {x} exceeds config space", .{ctl_ptr});
+                    return;
+                }
+                const ctl_offset: u12 = @intCast(ctl_ptr);
                 const smi_mask: u32 = 0x0000FFFF;
                 var legctl = self.pci_access.read32(pci_dev.bus, pci_dev.device, pci_dev.func, ctl_offset);
                 if ((legctl & smi_mask) != 0) {
@@ -368,6 +410,7 @@ pub const Controller = struct {
         if (self.periodic_list_phys != 0 and self.async_qh_phys != 0) return;
 
         const list_phys = pmm.allocZeroedPages(1) orelse return error.OutOfMemory;
+        errdefer pmm.freePages(list_phys, 1);
         const list_virt = @intFromPtr(hal.paging.physToVirt(list_phys));
         const frame_list: [*]u32 = @ptrFromInt(list_virt);
 
@@ -377,6 +420,7 @@ pub const Controller = struct {
         }
 
         const qh_phys = pmm.allocZeroedPages(1) orelse return error.OutOfMemory;
+        // No errdefer needed here - if we reach this point, we're about to succeed
         const qh_virt = @intFromPtr(hal.paging.physToVirt(qh_phys));
         const qh: *regs.Qh = @ptrFromInt(qh_virt);
 

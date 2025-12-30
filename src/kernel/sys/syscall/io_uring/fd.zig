@@ -17,6 +17,7 @@ pub const io_uring_file_ops = fd.FileOps{
     .ioctl = null,
     .mmap = ioUringMmap,
     .poll = null,
+    .truncate = null,
 };
 
 fn ioUringClose(file_desc: *fd.FileDescriptor) isize {
@@ -25,7 +26,7 @@ fn ioUringClose(file_desc: *fd.FileDescriptor) isize {
 
     // Free the fd data
     if (file_desc.private_data) |ptr| {
-        const allocator = heap.getKernelAllocator();
+        const allocator = heap.allocator();
         const data_ptr: *types.IoUringFdData = @ptrCast(@alignCast(ptr));
         allocator.destroy(data_ptr);
     }

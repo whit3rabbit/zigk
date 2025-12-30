@@ -150,18 +150,27 @@ pub const SvgDriver = struct {
         self.width = w;
         self.height = h;
         self.bpp = bpp;
-        
+
         self.writeReg(.WIDTH, w);
         self.writeReg(.HEIGHT, h);
         self.writeReg(.BPP, bpp);
         self.writeReg(.ENABLE, 1);
-        
+
         self.pitch = self.readReg(.BYTES_PER_LINE);
-        
-        // Clear screen
-        // @memset via pointer
-        const len = self.pitch * self.height / 4; // u32 words
-        @memset(self.framebuffer_virt[0..len], 0);
+
+        // Clear screen with overflow-safe calculation
+        const total_bytes = std.math.mul(u32, self.pitch, self.height) catch {
+            // Overflow - malicious hypervisor or invalid config
+            return;
+        };
+        const len = total_bytes / 4; // u32 words
+
+        // Bounds check against actual allocated framebuffer size
+        const max_len = self.framebuffer_size / 4;
+        const safe_len = if (len > max_len) max_len else len;
+        if (safe_len == 0) return;
+
+        @memset(self.framebuffer_virt[0..safe_len], 0);
     }
 
     fn getMode(ctx: *anyopaque) interface.VideoMode {
@@ -185,34 +194,64 @@ pub const SvgDriver = struct {
     }
 
     fn fillRect(ctx: *anyopaque, x: u32, y: u32, w: u32, h: u32, color: interface.Color) void {
-        // Fallback to software fill for now, unless we impl FIFO
         const self: *Self = @ptrCast(@alignCast(ctx));
+
+        // Bounds checking - clip to screen dimensions
+        if (x >= self.width or y >= self.height) return;
+        const clip_w = if (x + w > self.width) self.width - x else w;
+        const clip_h = if (y + h > self.height) self.height - y else h;
+        if (clip_w == 0 or clip_h == 0) return;
+
         const val: u32 = (@as(u32, color.r) << 16) | (@as(u32, color.g) << 8) | color.b;
-        
-        var row: u32 = 0;
+
         const stride = self.pitch / 4;
-        while (row < h) : (row += 1) {
-            const start = ((y + row) * stride) + x;
-            @memset(self.framebuffer_virt[start .. start + w], val);
+        const max_offset = self.framebuffer_size / 4;
+
+        var row: u32 = 0;
+        while (row < clip_h) : (row += 1) {
+            const start = std.math.mul(u32, y + row, stride) catch return;
+            const offset = std.math.add(u32, start, x) catch return;
+            const end = std.math.add(u32, offset, clip_w) catch return;
+
+            // Validate against framebuffer bounds
+            if (end > max_offset) return;
+
+            @memset(self.framebuffer_virt[offset..end], val);
         }
-        
-        // TODO: Send Update command if needed? 
-        // SVGA usually needs explicit update for 2D commands, but direct FB write is visible 
-        // immediately usually, unless in specific mode.
-        // Actually, SVGA requires UpdateRect for the host to redraw the window.
-        self.updateRect(x, y, w, h);
+
+        self.updateRect(x, y, clip_w, clip_h);
     }
     
     fn drawBuffer(ctx: *anyopaque, x: u32, y: u32, w: u32, h: u32, buf: []const u32) void {
-         const self: *Self = @ptrCast(@alignCast(ctx));
-         const stride = self.pitch / 4;
-         var row: u32 = 0;
-         while (row < h) : (row += 1) {
-             const fb_off = ((y + row) * stride) + x;
-             const buf_off = row * w;
-             @memcpy(self.framebuffer_virt[fb_off .. fb_off + w], buf[buf_off .. buf_off + w]);
-         }
-         self.updateRect(x, y, w, h);
+        const self: *Self = @ptrCast(@alignCast(ctx));
+
+        // Bounds checking - clip to screen dimensions
+        if (x >= self.width or y >= self.height) return;
+        const clip_w = if (x + w > self.width) self.width - x else w;
+        const clip_h = if (y + h > self.height) self.height - y else h;
+        if (clip_w == 0 or clip_h == 0) return;
+
+        // Validate source buffer size
+        const required_buf_size = std.math.mul(u32, h, w) catch return;
+        if (buf.len < required_buf_size) return;
+
+        const stride = self.pitch / 4;
+        const max_offset = self.framebuffer_size / 4;
+
+        var row: u32 = 0;
+        while (row < clip_h) : (row += 1) {
+            const fb_start = std.math.mul(u32, y + row, stride) catch return;
+            const fb_off = std.math.add(u32, fb_start, x) catch return;
+            const fb_end = std.math.add(u32, fb_off, clip_w) catch return;
+
+            // Validate against framebuffer bounds
+            if (fb_end > max_offset) return;
+
+            const buf_off = row * w;
+            @memcpy(self.framebuffer_virt[fb_off..fb_end], buf[buf_off .. buf_off + clip_w]);
+        }
+
+        self.updateRect(x, y, clip_w, clip_h);
     }
     
     fn copyRect(ctx: *anyopaque, src_x: u32, src_y: u32, dst_x: u32, dst_y: u32, w: u32, h: u32) void {

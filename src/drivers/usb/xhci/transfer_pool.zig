@@ -28,6 +28,12 @@ const TransferCallback = device.UsbDevice.TransferCallback;
 
 /// Maximum number of concurrent USB transfer requests
 /// This is a system-wide limit across all USB devices
+///
+/// SECURITY REVIEW: Fixed pool size is a deliberate design choice to prevent
+/// memory exhaustion from malicious/buggy devices. Per-device quotas could be
+/// added if needed, but 256 concurrent transfers across all USB devices is
+/// sufficient for typical workloads. Pool exhaustion returns ResourceError
+/// which callers handle gracefully (retry or fail the operation).
 pub const MAX_REQUESTS: usize = 256;
 
 /// Pool of pre-allocated TransferRequest structures

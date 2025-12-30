@@ -33,12 +33,16 @@ pub fn sys_io_uring_setup(entries: usize, params_ptr: usize) SyscallError!usize 
     }
 
     // Validate and read params
-    if (!user_mem.isValidUserAccess(params_ptr, @sizeOf(io_ring.IoUringParams), .write)) {
+    if (!user_mem.isValidUserAccess(params_ptr, @sizeOf(io_ring.IoUringParams), .Write)) {
         return error.EFAULT;
     }
 
-    var params: io_ring.IoUringParams = undefined;
-    user_mem.copyFromUser(io_ring.IoUringParams, params_ptr) catch return error.EFAULT;
+    // SECURITY: Zero-initialize to prevent info leak, then copy from user
+    var params: io_ring.IoUringParams = std.mem.zeroes(io_ring.IoUringParams);
+    const params_bytes = std.mem.asBytes(&params);
+    if (user_mem.copyFromUser(params_bytes, params_ptr) != 0) {
+        return error.EFAULT;
+    }
 
     // Check for unsupported flags
     const supported_flags = io_ring.IORING_SETUP_CQSIZE | io_ring.IORING_SETUP_CLAMP;
@@ -81,37 +85,53 @@ pub fn sys_io_uring_setup(entries: usize, params_ptr: usize) SyscallError!usize 
     };
 
     // Copy params back to user
-    user_mem.copyToUser(io_ring.IoUringParams, params_ptr, params) catch {
+    const params_out_bytes = std.mem.asBytes(&params);
+    if (user_mem.copyToUser(params_ptr, params_out_bytes) != 0) {
         instance.freeInstance(alloc_result.idx);
         return error.EFAULT;
-    };
+    }
 
     // Create file descriptor
     const fd_table = base.getGlobalFdTable();
+    const fd_t = @import("fd");
 
-    const allocator = heap.getKernelAllocator();
+    const allocator = heap.allocator();
     const fd_data = allocator.create(types.IoUringFdData) catch {
         instance.freeInstance(alloc_result.idx);
         return error.ENOMEM;
     };
     fd_data.instance_idx = alloc_result.idx;
 
-    const fd_num = fd_table.allocate() orelse {
+    // Allocate FileDescriptor struct
+    const fd = allocator.create(fd_t.FileDescriptor) catch {
+        allocator.destroy(fd_data);
+        instance.freeInstance(alloc_result.idx);
+        return error.ENOMEM;
+    };
+    errdefer allocator.destroy(fd);
+
+    // Initialize the FileDescriptor
+    fd.* = .{
+        .ops = &fd_mod.io_uring_file_ops,
+        .private_data = fd_data,
+        .flags = 0,
+        .refcount = std.atomic.Value(u32).init(1),
+        .position = 0,
+        .lock = .{},
+        .vfs_mount_idx = null,
+        .cloexec = false,
+    };
+
+    // Allocate fd number
+    const fd_num = fd_table.allocFdNum() orelse {
+        allocator.destroy(fd);
         allocator.destroy(fd_data);
         instance.freeInstance(alloc_result.idx);
         return error.EMFILE;
     };
 
-    const fd = fd_table.get(fd_num) orelse {
-        fd_table.free(fd_num);
-        allocator.destroy(fd_data);
-        instance.freeInstance(alloc_result.idx);
-        return error.EBADF;
-    };
-
-    fd.ops = &fd_mod.io_uring_file_ops;
-    fd.private_data = fd_data;
-    fd.flags = 0;
+    // Install the FileDescriptor at the allocated slot
+    fd_table.install(fd_num, fd);
 
     return fd_num;
 }

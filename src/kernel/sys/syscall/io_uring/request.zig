@@ -30,7 +30,7 @@ pub fn processPendingRequests(inst: *instance.IoUringInstance) u32 {
             }
 
             // Free the request
-            io.pool.free(req);
+            io.freeRequest(req);
 
             // Remove from pending list (swap with last)
             inst.pending_count -= 1;

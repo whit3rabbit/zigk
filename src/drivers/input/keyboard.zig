@@ -508,12 +508,13 @@ pub fn handleIrq() void {
             if (keyboard_state.ascii_buffer.pop()) |c| {
                 // If request has a buffer, copy character there
                 if (request.buf_ptr != 0 and request.buf_len > 0) {
-                    // Security: Validate user pointer before writing
-                    if (user_mem.isValidUserPtr(request.buf_ptr, 1)) {
-                        const user_buf: [*]u8 = @ptrFromInt(request.buf_ptr);
-                        user_buf[0] = c;
+                    // Security: Use SMAP-compliant UserPtr for safe kernel->user copy
+                    // This prevents TOCTOU races where the page could be unmapped
+                    // between validation and access
+                    const uptr = user_mem.UserPtr.from(request.buf_ptr);
+                    if (uptr.copyFromKernel(&[_]u8{c})) |_| {
                         _ = request.complete(.{ .success = 1 });
-                    } else {
+                    } else |_| {
                         _ = request.complete(.{ .err = error.EFAULT });
                     }
                 } else {
@@ -801,12 +802,13 @@ pub fn getCharAsync(request: *io.IoRequest) bool {
     if (keyboard_state.ascii_buffer.pop()) |c| {
         // Complete immediately
         if (request.buf_ptr != 0 and request.buf_len > 0) {
-            // Security: Validate user pointer before writing
-            if (user_mem.isValidUserPtr(request.buf_ptr, 1)) {
-                const user_buf: [*]u8 = @ptrFromInt(request.buf_ptr);
-                user_buf[0] = c;
+            // Security: Use SMAP-compliant UserPtr for safe kernel->user copy
+            // This prevents TOCTOU races where the page could be unmapped
+            // between validation and access
+            const uptr = user_mem.UserPtr.from(request.buf_ptr);
+            if (uptr.copyFromKernel(&[_]u8{c})) |_| {
                 _ = request.complete(.{ .success = 1 });
-            } else {
+            } else |_| {
                 _ = request.complete(.{ .err = error.EFAULT });
             }
         } else {

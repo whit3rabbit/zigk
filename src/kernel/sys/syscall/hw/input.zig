@@ -14,6 +14,22 @@ const usb = @import("usb");
 
 const SyscallError = base.SyscallError;
 const UserPtr = base.UserPtr;
+const Process = base.Process;
+
+/// SECURITY: Check if caller has input receive capability (DisplayServer with receives_input).
+/// Direct input reading is privileged - only the display server should access raw events.
+/// Normal applications receive input via IPC from the display server.
+fn hasInputReceiveCapability(proc: *Process) bool {
+    for (proc.capabilities.items) |cap| {
+        switch (cap) {
+            .DisplayServer => |ds_cap| {
+                if (ds_cap.receives_input) return true;
+            },
+            else => {},
+        }
+    }
+    return false;
+}
 
 // =============================================================================
 // Input Syscall Handlers
@@ -21,10 +37,15 @@ const UserPtr = base.UserPtr;
 
 /// sys_read_input_event (1010) - Read next input event
 /// Non-blocking: returns EAGAIN if no events available
+/// SECURITY: Requires DisplayServer capability with receives_input to prevent keylogging
 pub fn sys_read_input_event(event_ptr: usize) SyscallError!usize {
     if (event_ptr == 0) {
         return error.EFAULT;
     }
+
+    // SECURITY: Verify caller has input receive capability
+    const proc = base.getCurrentProcessOrNull() orelse return error.EPERM;
+    if (!hasInputReceiveCapability(proc)) return error.EPERM;
 
     // Check if input subsystem is initialized
     if (!input.isInitialized()) {
@@ -51,10 +72,15 @@ pub fn sys_read_input_event(event_ptr: usize) SyscallError!usize {
 }
 
 /// sys_get_cursor_position (1011) - Get current cursor position
+/// SECURITY: Requires DisplayServer capability with receives_input
 pub fn sys_get_cursor_position(position_ptr: usize) SyscallError!usize {
     if (position_ptr == 0) {
         return error.EFAULT;
     }
+
+    // SECURITY: Verify caller has input receive capability
+    const proc = base.getCurrentProcessOrNull() orelse return error.EPERM;
+    if (!hasInputReceiveCapability(proc)) return error.EPERM;
 
     // Check if input subsystem is initialized
     if (!input.isInitialized()) {
@@ -82,10 +108,15 @@ pub fn sys_get_cursor_position(position_ptr: usize) SyscallError!usize {
 }
 
 /// sys_set_cursor_bounds (1012) - Set screen dimensions for cursor clamping
+/// SECURITY: Requires DisplayServer capability with receives_input
 pub fn sys_set_cursor_bounds(bounds_ptr: usize) SyscallError!usize {
     if (bounds_ptr == 0) {
         return error.EFAULT;
     }
+
+    // SECURITY: Verify caller has input receive capability
+    const proc = base.getCurrentProcessOrNull() orelse return error.EPERM;
+    if (!hasInputReceiveCapability(proc)) return error.EPERM;
 
     // Check if input subsystem is initialized
     if (!input.isInitialized()) {
@@ -120,7 +151,12 @@ pub fn sys_set_cursor_bounds(bounds_ptr: usize) SyscallError!usize {
 /// Mode 0: relative (mouse deltas)
 /// Mode 1: absolute (tablet coordinates)
 /// Mode 2: raw (no cursor tracking)
+/// SECURITY: Requires DisplayServer capability with receives_input
 pub fn sys_set_input_mode(mode: usize) SyscallError!usize {
+    // SECURITY: Verify caller has input receive capability
+    const proc = base.getCurrentProcessOrNull() orelse return error.EPERM;
+    if (!hasInputReceiveCapability(proc)) return error.EPERM;
+
     // Check if input subsystem is initialized
     if (!input.isInitialized()) {
         return error.ENODEV;

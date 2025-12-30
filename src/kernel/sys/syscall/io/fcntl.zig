@@ -79,6 +79,11 @@ pub fn sys_fcntl(fd_num: usize, cmd: usize, arg: usize) SyscallError!usize {
 ///
 /// MVP: Returns -ENOTTY (inappropriate ioctl for device)
 /// This is sufficient for musl isatty() checks.
+///
+/// SECURITY NOTE: The 'arg' parameter is passed opaquely to device handlers.
+/// This is standard Unix ioctl design where arg semantics depend on cmd.
+/// Device-specific ioctl handlers MUST validate arg if it represents a pointer.
+/// The syscall layer cannot know which ioctls expect pointers vs integers.
 pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) SyscallError!usize {
     const table = base.getGlobalFdTable();
     const fd_u32 = safeFdCast(fd) orelse return error.EBADF;

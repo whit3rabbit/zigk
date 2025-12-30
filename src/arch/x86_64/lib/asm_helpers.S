@@ -83,8 +83,12 @@ isr_common:
 
     # Switch to the returned frame pointer (may be different for context switch)
     # RAX contains the new stack pointer from dispatch_interrupt
-    # Switch to the returned frame pointer (may be different for context switch)
-    # RAX contains the new stack pointer from dispatch_interrupt
+    #
+    # SECURITY NOTE: The returned frame (RAX) is guaranteed to be 16-byte aligned
+    # because it points to a properly constructed InterruptFrame (120 bytes of
+    # registers + 16 bytes vec/error + iret frame). Context switch frames are
+    # built by the scheduler with the same layout. The pre-call alignment
+    # adjustment above is discarded since we use the returned pointer directly.
     mov %rax, %rsp
 
     # SWAPGS if returning to User Mode (CS & 3 == 3)
@@ -227,7 +231,7 @@ isr_stub_\vec:
 
 # Generate exception stubs (vectors 0-31)
 isr_stub_no_error 0          # #DE
-isr_stub_no_error 1          # #DB (Debug can be paranoid? Use common for now)
+isr_stub_paranoid 1          # #DB - PARANOID (can occur in SWAPGS gap during syscall/interrupt)
 isr_stub_paranoid 2          # NMI - PARANOID
 isr_stub_no_error 3          # #BP
 isr_stub_no_error 4          # #OF
@@ -265,6 +269,12 @@ isr_stub_no_error 31         # Reserved
 # u64 _asm_rdrand64(u8* success)
 # Attempts to get 64-bit random value from RDRAND
 # Returns random value in RAX, sets *success = 1 on success, 0 on failure
+#
+# SECURITY NOTE: The success/failure paths have minimal timing difference (a few
+# instructions). This is acceptable because: (1) RDRAND's internal timing is already
+# variable based on DRNG entropy availability, (2) the caller must check the success
+# flag anyway, making timing observable at the API level, (3) constant-time wrappers
+# can be built by callers if needed for specific use cases.
 .global _asm_rdrand64
 .type _asm_rdrand64, @function
 _asm_rdrand64:
@@ -396,6 +406,12 @@ _syscall_entry:
     # Return value is in RAX, already in the frame via setReturnValue()
 
     # Restore all registers
+    #
+    # SECURITY NOTE: These callee-saved registers (r12-r15, rbx, rbp) are restored
+    # from the saved frame, which contains the USER's original values from syscall
+    # entry. This is NOT a register leak - we're restoring what the user had, not
+    # exposing kernel data. The syscall handler may have clobbered these registers
+    # internally, but the frame preserves the user's original values.
     pop %r15
     pop %r14
     pop %r13
@@ -498,6 +514,13 @@ isr_stub_no_error 47         # Secondary ATA (IRQ15)
 # usize _asm_copy_from_user(void* dest, const void* src, usize len)
 # Returns number of bytes NOT copied (0 on success)
 # On fault, returns remaining bytes (len - copied)
+#
+# SECURITY NOTE: This function does NOT validate that src is a user address.
+# The caller (Zig UserPtr layer) MUST validate that src is in user address space
+# before calling. SMAP (Supervisor Mode Access Prevention) via STAC/CLAC ensures
+# kernel code cannot accidentally access user memory without explicit intent,
+# but does not prevent reading kernel memory if src points there. The UserPtr
+# validation in Zig ensures src < USER_SPACE_END before calling this function.
 .global _asm_copy_from_user
 .type _asm_copy_from_user, @function
 _asm_copy_from_user:

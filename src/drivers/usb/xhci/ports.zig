@@ -273,7 +273,9 @@ fn addDeviceAndChildren(list: *DeviceList, dev: *device.UsbDevice) void {
 
 /// Disconnect a single device with proper cleanup
 /// Security: Follows xHCI spec sequence to ensure hardware state is consistent
-fn disconnectDevice(ctrl: *Controller, dev: *device.UsbDevice) void {
+/// This function properly stops endpoints, cancels pending transfers, and disables
+/// the slot before calling deinit. Must be used instead of direct deinit calls.
+pub fn disconnectDevice(ctrl: *Controller, dev: *device.UsbDevice) void {
     console.info("XHCI: Disconnecting device on slot {}", .{dev.slot_id});
 
     // 1. Transition to disconnecting state (prevent new transfers)
@@ -312,28 +314,64 @@ fn disconnectDevice(ctrl: *Controller, dev: *device.UsbDevice) void {
     dev.deinit();
 }
 
+/// Deferred callback info for execution outside lock
+const DeferredCallback = struct {
+    callback: device.UsbDevice.TransferCallback,
+    dev: *device.UsbDevice,
+};
+
 /// Cancel all pending transfers for a device
 /// Security: Frees transfer requests back to the pool to prevent memory leaks.
+/// Callbacks are collected under lock but executed AFTER lock release to prevent
+/// lock ordering violations if callbacks acquire higher-level locks (e.g., devices_lock).
 fn cancelPendingTransfers(dev: *device.UsbDevice) void {
-    const held = dev.device_lock.acquire();
-    defer held.release();
+    // Collect callbacks to execute after releasing lock
+    // Max 32 pending transfers (one per DCI)
+    var deferred_callbacks: [32]?DeferredCallback = [_]?DeferredCallback{null} ** 32;
+    var callback_count: usize = 0;
 
-    for (&dev.pending_transfers) |*transfer_opt| {
-        if (transfer_opt.*) |transfer| {
-            // Attempt to cancel the transfer
-            if (transfer.cancel()) {
-                transfer.completion_code = .Stopped;
+    // Phase 1: Cancel transfers and collect callbacks under lock
+    {
+        const held = dev.device_lock.acquire();
+        defer held.release();
 
-                // Execute callback if present
-                switch (transfer.callback) {
-                    .control => |cb| cb(dev, .Stopped, 0),
-                    .interrupt => {}, // No data to report for cancelled interrupt
-                    .none => {},
+        for (&dev.pending_transfers) |*transfer_opt| {
+            if (transfer_opt.*) |transfer| {
+                // Attempt to cancel the transfer
+                if (transfer.cancel()) {
+                    transfer.completion_code = .Stopped;
+
+                    // Collect callback for deferred execution (control only)
+                    // Interrupt callbacks have no meaningful data when cancelled
+                    switch (transfer.callback) {
+                        .control => {
+                            if (callback_count < 32) {
+                                deferred_callbacks[callback_count] = .{
+                                    .callback = transfer.callback,
+                                    .dev = dev,
+                                };
+                                callback_count += 1;
+                            }
+                        },
+                        .interrupt, .none => {},
+                    }
                 }
+                // Security: Free the transfer request back to the pool to prevent leak
+                transfer_pool.freeRequest(transfer);
+                transfer_opt.* = null;
             }
-            // Security: Free the transfer request back to the pool to prevent leak
-            transfer_pool.freeRequest(transfer);
-            transfer_opt.* = null;
+        }
+    }
+
+    // Phase 2: Execute callbacks OUTSIDE the lock
+    // This prevents deadlock if callbacks acquire devices_lock (lock level 8.5)
+    // since device_lock is at level 8.6 (must be acquired after devices_lock).
+    for (deferred_callbacks[0..callback_count]) |maybe_cb| {
+        if (maybe_cb) |cb| {
+            switch (cb.callback) {
+                .control => |control_cb| control_cb(cb.dev, .Stopped, 0),
+                .interrupt, .none => {},
+            }
         }
     }
 }

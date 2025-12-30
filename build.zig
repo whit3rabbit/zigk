@@ -657,6 +657,7 @@ pub fn build(b: *std.Build) void {
     keyboard_module.addImport("sched", sched_module);
     keyboard_module.addImport("thread", thread_module);
     keyboard_module.addImport("io", kernel_io_module);
+    // Note: user_mem import added after user_mem_module is defined below
 
 
     // Create VirtIO common module
@@ -850,6 +851,9 @@ pub fn build(b: *std.Build) void {
 
     // Add user_mem to audio for ioctl validation
     audio_module.addImport("user_mem", user_mem_module);
+
+    // Add user_mem to keyboard for getCharAsync io_uring integration
+    keyboard_module.addImport("user_mem", user_mem_module);
 
     // Create Pipe module (IPC)
     const pipe_module = b.createModule(.{
@@ -1231,6 +1235,9 @@ pub fn build(b: *std.Build) void {
     syscall_io_uring_module.addImport("net", net_module);
     syscall_io_uring_module.addImport("pipe", pipe_module);
     syscall_io_uring_module.addImport("keyboard", keyboard_module);
+    syscall_io_uring_module.addImport("thread", thread_module);
+    syscall_io_uring_module.addImport("pmm", pmm_module);
+    syscall_io_uring_module.addImport("syscall_fd", syscall_fd_module);
 
     // Create IPC Service Registry module
     const ipc_service_module = b.createModule(.{

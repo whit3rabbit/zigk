@@ -41,7 +41,8 @@ pub fn sys_io_uring_enter(
 ) SyscallError!usize {
     // Get fd and validate
     const fd_table = base.getGlobalFdTable();
-    const fd = fd_table.get(ring_fd) orelse return error.EBADF;
+    const ring_fd_u32 = std.math.cast(u32, ring_fd) orelse return error.EBADF;
+    const fd = fd_table.get(ring_fd_u32) orelse return error.EBADF;
     const data = fd_mod.getIoUringData(fd) orelse return error.EBADF;
     const inst = instance.getInstance(data.instance_idx) orelse return error.EBADF;
 

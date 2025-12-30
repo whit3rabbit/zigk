@@ -311,23 +311,50 @@ pub fn enumerateDevice(
 
     // Update max packet size from descriptor
     // Security: Validate max packet size against USB specification limits
-    const new_max_packet = desc_buf[7];
-    const valid_max_packet = switch (dev.speed) {
-        .low_speed => new_max_packet == 8,
-        .full_speed => new_max_packet == 8 or new_max_packet == 16 or new_max_packet == 32 or new_max_packet == 64,
-        .high_speed => new_max_packet == 64,
-        .super_speed, .super_speed_plus => new_max_packet == 9, // 2^9 = 512
-        else => new_max_packet >= 8 and new_max_packet <= 64, // Fallback for unknown speeds
+    // Note: USB 3.0 devices report bMaxPacketSize0 as an exponent (9 = 2^9 = 512)
+    const desc_max_packet = desc_buf[7];
+    const actual_max_packet: u16 = switch (dev.speed) {
+        .low_speed => blk: {
+            if (desc_max_packet != 8) {
+                console.err("XHCI: Invalid max packet size {} for low speed (must be 8)", .{desc_max_packet});
+                return error.InvalidDescriptor;
+            }
+            break :blk 8;
+        },
+        .full_speed => blk: {
+            if (desc_max_packet != 8 and desc_max_packet != 16 and desc_max_packet != 32 and desc_max_packet != 64) {
+                console.err("XHCI: Invalid max packet size {} for full speed", .{desc_max_packet});
+                return error.InvalidDescriptor;
+            }
+            break :blk desc_max_packet;
+        },
+        .high_speed => blk: {
+            if (desc_max_packet != 64) {
+                console.err("XHCI: Invalid max packet size {} for high speed (must be 64)", .{desc_max_packet});
+                return error.InvalidDescriptor;
+            }
+            break :blk 64;
+        },
+        // USB 3.0 spec: bMaxPacketSize0 is the exponent (9 means 2^9 = 512)
+        .super_speed, .super_speed_plus => blk: {
+            if (desc_max_packet != 9) {
+                console.err("XHCI: Invalid max packet size exponent {} for SuperSpeed (must be 9)", .{desc_max_packet});
+                return error.InvalidDescriptor;
+            }
+            break :blk 512; // 2^9 = 512 bytes
+        },
+        else => blk: {
+            if (desc_max_packet < 8 or desc_max_packet > 64) {
+                console.err("XHCI: Invalid max packet size {} for unknown speed", .{desc_max_packet});
+                return error.InvalidDescriptor;
+            }
+            break :blk desc_max_packet;
+        },
     };
 
-    if (!valid_max_packet) {
-        console.err("XHCI: Invalid max packet size {} for speed {}", .{ new_max_packet, @intFromEnum(dev.speed) });
-        return error.InvalidDescriptor;
-    }
-
-    if (new_max_packet != dev.max_packet_size) {
-        console.info("XHCI: Updating max packet size from {} to {}", .{ dev.max_packet_size, new_max_packet });
-        dev.updateMaxPacketSize(new_max_packet);
+    if (actual_max_packet != dev.max_packet_size) {
+        console.info("XHCI: Updating max packet size from {} to {}", .{ dev.max_packet_size, actual_max_packet });
+        dev.updateMaxPacketSize(actual_max_packet);
         dev.buildEvaluateContext();
         try evaluateContext(ctrl, dev);
     }

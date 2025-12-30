@@ -195,6 +195,12 @@ pub const Errno = enum(i32) {
     /// Operation now in progress
     EINPROGRESS = 115,
 
+    /// Connection aborted
+    ECONNABORTED = 103,
+
+    /// Operation canceled
+    ECANCELED = 125,
+
     /// Convert errno to negative return value for syscall
     pub fn toReturn(self: Errno) isize {
         return -@as(isize, @intFromEnum(self));

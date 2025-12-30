@@ -588,8 +588,15 @@ pub const UsbDevice = struct {
     /// WARNING: This method does NOT free requests back to the transfer pool.
     /// Use ports.cancelPendingTransfers() for proper cleanup during disconnect.
     /// @deprecated Prefer ports.cancelPendingTransfers() which handles pool freeing.
+    ///
+    /// SECURITY REVIEW: Setting state before acquiring lock appears to create a TOCTOU
+    /// race with the interrupt handler, but is actually safe because:
+    /// 1. takePendingTransfer() atomically clears the slot (only one caller gets the request)
+    /// 2. TransferRequest.cancel() uses CAS on request state (only one completion succeeds)
+    /// 3. Even if interrupt completes a transfer while we hold the lock, the slot will be
+    ///    null when we iterate, so no double-free occurs.
     pub fn cancelAllPendingTransfers(self: *Self) void {
-        // Set state to prevent new submissions
+        // Set state to prevent new submissions (interrupt handler checks this)
         self.state = .disconnecting;
 
         // Cancel under device_lock

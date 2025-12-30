@@ -36,10 +36,15 @@ pub fn submitFromSharedMemory(inst: *instance.IoUringInstance, to_submit: usize)
 
         // SQ array contains indices into SQE array
         const sqe_idx = sq_array[idx] & (inst.sq_ring_entries - 1);
-        const sqe = &sqes[sqe_idx];
+        const volatile_sqe = &sqes[sqe_idx];
 
-        // Process the SQE (read from shared memory)
-        const result = ops.processSqe(inst, sqe);
+        // SECURITY: Copy SQE from shared memory to prevent TOCTOU attacks.
+        // Userspace could modify the SQE while we're processing it.
+        var sqe: io_ring.IoUringSqe = undefined;
+        @memcpy(std.mem.asBytes(&sqe), std.mem.asBytes(volatile_sqe));
+
+        // Process the SQE (now in kernel memory)
+        const result = ops.processSqe(inst, &sqe);
         if (result) |_| {
             submitted += 1;
         } else |_| {

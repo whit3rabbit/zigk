@@ -10,6 +10,7 @@ const net = @import("net");
 const socket = net.transport.socket;
 const keyboard = @import("keyboard");
 const fd_mod = @import("fd.zig");
+const syscall_fd = @import("syscall_fd");
 const types = @import("types.zig");
 const instance = @import("instance.zig");
 const heap = @import("heap");
@@ -69,8 +70,8 @@ pub fn processSqe(inst: *instance.IoUringInstance, sqe: *const io_ring.IoUringSq
 
 fn processReadOp(inst: *instance.IoUringInstance, sqe: *const io_ring.IoUringSqe) SyscallError!void {
     // Allocate IoRequest
-    const req = io.pool.alloc(.keyboard_read) orelse return error.ENOMEM;
-    errdefer io.pool.free(req);
+    const req = io.allocRequest(.keyboard_read) orelse return error.ENOMEM;
+    errdefer io.freeRequest(req);
 
     req.fd = sqe.fd;
     req.user_data = sqe.user_data;
@@ -87,7 +88,7 @@ fn processReadOp(inst: *instance.IoUringInstance, sqe: *const io_ring.IoUringSqe
         // Queued for later - add to pending
         if (!inst.addPendingRequest(req)) {
             instance.IoUringInstance.finalizeBounceBuffer(req);
-            io.pool.free(req);
+            io.freeRequest(req);
             return error.EBUSY;
         }
     } else {
@@ -99,7 +100,7 @@ fn processReadOp(inst: *instance.IoUringInstance, sqe: *const io_ring.IoUringSqe
             else => 0,
         };
         _ = inst.addCqe(sqe.user_data, res, 0);
-        io.pool.free(req);
+        io.freeRequest(req);
     }
 }
 
@@ -125,7 +126,7 @@ fn processWriteOp(inst: *instance.IoUringInstance, sqe: *const io_ring.IoUringSq
     const res: i32 = if (result) |n|
         @intCast(@min(n, @as(usize, std.math.maxInt(i32))))
     else |e|
-        -@as(i32, @intFromEnum(e));
+        @intCast(uapi.errno.errorToReturn(e));
 
     _ = inst.addCqe(sqe.user_data, res, 0);
 }
@@ -135,8 +136,8 @@ fn processAcceptOp(inst: *instance.IoUringInstance, sqe: *const io_ring.IoUringS
     const sock_fd: usize = @intCast(sqe.fd);
 
     // Allocate IoRequest
-    const req = io.pool.alloc(.socket_accept) orelse return error.ENOMEM;
-    errdefer io.pool.free(req);
+    const req = io.allocRequest(.socket_accept) orelse return error.ENOMEM;
+    errdefer io.freeRequest(req);
 
     req.fd = sqe.fd;
     req.user_data = sqe.user_data;
@@ -145,14 +146,13 @@ fn processAcceptOp(inst: *instance.IoUringInstance, sqe: *const io_ring.IoUringS
         .addrlen_ptr = sqe.off,
     };
 
-    // Try async accept
-    socket.acceptAsync(sock_fd, req) catch |e| {
-        io.pool.free(req);
+    // Try async accept - returns true if pending, false if completed immediately
+    const is_pending = socket.acceptAsync(sock_fd, req) catch |e| {
+        io.freeRequest(req);
         return socketErrorToSyscallError(e);
     };
 
-    const state = req.getState();
-    if (state == .completed) {
+    if (!is_pending) {
         // Completed immediately
         const res: i32 = switch (req.result) {
             .success => |n| @intCast(@min(n, @as(usize, std.math.maxInt(i32)))),
@@ -160,11 +160,11 @@ fn processAcceptOp(inst: *instance.IoUringInstance, sqe: *const io_ring.IoUringS
             else => 0,
         };
         _ = inst.addCqe(sqe.user_data, res, 0);
-        io.pool.free(req);
+        io.freeRequest(req);
     } else {
         // Queued for later
         if (!inst.addPendingRequest(req)) {
-            io.pool.free(req);
+            io.freeRequest(req);
             return error.EBUSY;
         }
     }
@@ -173,8 +173,8 @@ fn processAcceptOp(inst: *instance.IoUringInstance, sqe: *const io_ring.IoUringS
 fn processConnectOp(inst: *instance.IoUringInstance, sqe: *const io_ring.IoUringSqe) SyscallError!void {
     const sock_fd: usize = @intCast(sqe.fd);
 
-    const req = io.pool.alloc(.socket_connect) orelse return error.ENOMEM;
-    errdefer io.pool.free(req);
+    const req = io.allocRequest(.socket_connect) orelse return error.ENOMEM;
+    errdefer io.freeRequest(req);
 
     req.fd = sqe.fd;
     req.user_data = sqe.user_data;
@@ -184,35 +184,36 @@ fn processConnectOp(inst: *instance.IoUringInstance, sqe: *const io_ring.IoUring
     };
 
     // Copy address from userspace
-    if (!user_mem.isValidUserAccess(sqe.addr, @sizeOf(socket.types.SockAddrIn), .read)) {
-        io.pool.free(req);
+    if (!user_mem.isValidUserAccess(sqe.addr, @sizeOf(socket.SockAddrIn), .Read)) {
+        io.freeRequest(req);
         return error.EFAULT;
     }
 
-    var addr: socket.types.SockAddrIn = undefined;
-    user_mem.copyFromUser(socket.types.SockAddrIn, sqe.addr) catch {
-        io.pool.free(req);
+    // SECURITY: Zero-initialize to prevent info leak
+    var addr: socket.SockAddrIn = std.mem.zeroes(socket.SockAddrIn);
+    const addr_bytes = std.mem.asBytes(&addr);
+    if (user_mem.copyFromUser(addr_bytes, sqe.addr) != 0) {
+        io.freeRequest(req);
         return error.EFAULT;
-    };
+    }
 
-    socket.connectAsync(sock_fd, req, &addr) catch |e| {
-        io.pool.free(req);
+    const is_pending = socket.connectAsync(sock_fd, req, &addr) catch |e| {
+        io.freeRequest(req);
         return socketErrorToSyscallError(e);
     };
 
-    const state = req.getState();
-    if (state == .completed) {
+    if (!is_pending) {
         const res: i32 = switch (req.result) {
             .success => 0,
             .err => @intCast(req.result.toSyscallReturn()),
             else => 0,
         };
         _ = inst.addCqe(sqe.user_data, res, 0);
-        io.pool.free(req);
+        io.freeRequest(req);
     } else {
         if (!inst.addPendingRequest(req)) {
             instance.IoUringInstance.finalizeBounceBuffer(req);
-            io.pool.free(req);
+            io.freeRequest(req);
             return error.EBUSY;
         }
     }
@@ -255,8 +256,8 @@ fn initBounceBuffer(
 fn processRecvOp(inst: *instance.IoUringInstance, sqe: *const io_ring.IoUringSqe) SyscallError!void {
     const sock_fd: usize = @intCast(sqe.fd);
 
-    const req = io.pool.alloc(.socket_read) orelse return error.ENOMEM;
-    errdefer io.pool.free(req);
+    const req = io.allocRequest(.socket_read) orelse return error.ENOMEM;
+    errdefer io.freeRequest(req);
 
     req.fd = sqe.fd;
     req.user_data = sqe.user_data;
@@ -265,17 +266,16 @@ fn processRecvOp(inst: *instance.IoUringInstance, sqe: *const io_ring.IoUringSqe
     req.buf_ptr = @intFromPtr(buf.ptr);
     req.buf_len = buf.len;
 
-    socket.recvAsync(sock_fd, req, buf) catch |e| {
+    const is_pending = socket.recvAsync(sock_fd, req, buf) catch |e| {
         if (req.bounce_buf) |bounce| {
             heap.allocator().free(bounce);
             req.bounce_buf = null;
         }
-        io.pool.free(req);
+        io.freeRequest(req);
         return socketErrorToSyscallError(e);
     };
 
-    const state = req.getState();
-    if (state == .completed) {
+    if (!is_pending) {
         instance.IoUringInstance.finalizeBounceBuffer(req);
         const res: i32 = switch (req.result) {
             .success => |n| @intCast(@min(n, @as(usize, std.math.maxInt(i32)))),
@@ -283,11 +283,11 @@ fn processRecvOp(inst: *instance.IoUringInstance, sqe: *const io_ring.IoUringSqe
             else => 0,
         };
         _ = inst.addCqe(sqe.user_data, res, 0);
-        io.pool.free(req);
+        io.freeRequest(req);
     } else {
         if (!inst.addPendingRequest(req)) {
             instance.IoUringInstance.finalizeBounceBuffer(req);
-            io.pool.free(req);
+            io.freeRequest(req);
             return error.EBUSY;
         }
     }
@@ -296,8 +296,8 @@ fn processRecvOp(inst: *instance.IoUringInstance, sqe: *const io_ring.IoUringSqe
 fn processSendOp(inst: *instance.IoUringInstance, sqe: *const io_ring.IoUringSqe) SyscallError!void {
     const sock_fd: usize = @intCast(sqe.fd);
 
-    const req = io.pool.alloc(.socket_write) orelse return error.ENOMEM;
-    errdefer io.pool.free(req);
+    const req = io.allocRequest(.socket_write) orelse return error.ENOMEM;
+    errdefer io.freeRequest(req);
 
     req.fd = sqe.fd;
     req.user_data = sqe.user_data;
@@ -307,17 +307,16 @@ fn processSendOp(inst: *instance.IoUringInstance, sqe: *const io_ring.IoUringSqe
     req.buf_ptr = @intFromPtr(data.ptr);
     req.buf_len = data.len;
 
-    socket.sendAsync(sock_fd, req, data) catch |e| {
+    const is_pending = socket.sendAsync(sock_fd, req, data) catch |e| {
         if (req.bounce_buf) |bounce| {
             heap.allocator().free(bounce);
             req.bounce_buf = null;
         }
-        io.pool.free(req);
+        io.freeRequest(req);
         return socketErrorToSyscallError(e);
     };
 
-    const state = req.getState();
-    if (state == .completed) {
+    if (!is_pending) {
         instance.IoUringInstance.finalizeBounceBuffer(req);
         const res: i32 = switch (req.result) {
             .success => |n| @intCast(@min(n, @as(usize, std.math.maxInt(i32)))),
@@ -325,10 +324,10 @@ fn processSendOp(inst: *instance.IoUringInstance, sqe: *const io_ring.IoUringSqe
             else => 0,
         };
         _ = inst.addCqe(sqe.user_data, res, 0);
-        io.pool.free(req);
+        io.freeRequest(req);
     } else {
         if (!inst.addPendingRequest(req)) {
-            io.pool.free(req);
+            io.freeRequest(req);
             return error.EBUSY;
         }
     }
@@ -346,8 +345,8 @@ fn processTimeoutOp(inst: *instance.IoUringInstance, sqe: *const io_ring.IoUring
     //   - sqe.len: count (number of completions to wait for, 0 = pure timeout)
     //   - sqe.off: flags (IORING_TIMEOUT_ABS for absolute time)
 
-    const req = io.pool.alloc(.timer) orelse return error.ENOMEM;
-    errdefer io.pool.free(req);
+    const req = io.allocRequest(.timer) orelse return error.ENOMEM;
+    errdefer io.freeRequest(req);
 
     req.user_data = sqe.user_data;
 
@@ -357,7 +356,7 @@ fn processTimeoutOp(inst: *instance.IoUringInstance, sqe: *const io_ring.IoUring
         // Do NOT dereference user memory directly via @ptrFromInt.
         const user_ptr = user_mem.UserPtr.from(sqe.addr);
         const ts = user_ptr.readValue(KernelTimespec) catch {
-            io.pool.free(req);
+            io.freeRequest(req);
             return error.EFAULT;
         };
 
@@ -377,7 +376,7 @@ fn processTimeoutOp(inst: *instance.IoUringInstance, sqe: *const io_ring.IoUring
 
         // Transition request to pending
         if (!req.compareAndSwapState(.idle, .pending)) {
-            io.pool.free(req);
+            io.freeRequest(req);
             return error.EINVAL;
         }
 
@@ -388,14 +387,14 @@ fn processTimeoutOp(inst: *instance.IoUringInstance, sqe: *const io_ring.IoUring
         // Add to pending list for CQE generation
         if (!inst.addPendingRequest(req)) {
             _ = reactor.cancelTimer(req);
-            io.pool.free(req);
+            io.freeRequest(req);
             return error.EBUSY;
         }
     } else {
         // No timeout specified - complete immediately
         _ = req.complete(.{ .success = 0 });
         _ = inst.addCqe(sqe.user_data, 0, 0);
-        io.pool.free(req);
+        io.freeRequest(req);
     }
 }
 
@@ -405,7 +404,7 @@ fn processOpenatOp(inst: *instance.IoUringInstance, sqe: *const io_ring.IoUringS
     //   - sqe.addr: pathname pointer
     //   - sqe.len: flags (O_RDONLY, O_WRONLY, etc.)
     //   - sqe.off: mode (low 32 bits)
-    const result = fd_mod.sys_openat(
+    const result = syscall_fd.sys_openat(
         @bitCast(@as(i64, sqe.fd)), // Handle negative dirfd (AT_FDCWD = -100)
         sqe.addr,
         sqe.len,
@@ -415,7 +414,7 @@ fn processOpenatOp(inst: *instance.IoUringInstance, sqe: *const io_ring.IoUringS
     const res: i32 = if (result) |fd|
         @intCast(@min(fd, @as(usize, std.math.maxInt(i32))))
     else |e|
-        -@as(i32, @intFromEnum(e));
+        @intCast(uapi.errno.errorToReturn(e));
 
     _ = inst.addCqe(sqe.user_data, res, 0);
 }
@@ -428,12 +427,12 @@ fn processCloseOp(inst: *instance.IoUringInstance, sqe: *const io_ring.IoUringSq
         return;
     }
 
-    const result = fd_mod.sys_close(@intCast(sqe.fd));
+    const result = syscall_fd.sys_close(@intCast(sqe.fd));
 
     const res: i32 = if (result) |_|
         0
     else |e|
-        -@as(i32, @intFromEnum(e));
+        @intCast(uapi.errno.errorToReturn(e));
 
     _ = inst.addCqe(sqe.user_data, res, 0);
 }
@@ -460,23 +459,25 @@ fn processAsyncCancelOp(inst: *instance.IoUringInstance, sqe: *const io_ring.IoU
     _ = inst.addCqe(sqe.user_data, -@as(i32, 2), 0); // ENOENT
 }
 
-fn socketErrorToSyscallError(err: socket.errors.SocketError) SyscallError {
+fn socketErrorToSyscallError(err: socket.SocketError) SyscallError {
     return switch (err) {
-        socket.errors.SocketError.InvalidSocket => error.EBADF,
-        socket.errors.SocketError.InvalidState => error.EINVAL,
-        socket.errors.SocketError.NoBufferSpace => error.ENOMEM,
-        socket.errors.SocketError.AddrInUse => error.EADDRINUSE,
-        socket.errors.SocketError.AddrNotAvail => error.EADDRNOTAVAIL,
-        socket.errors.SocketError.ConnectionRefused => error.ECONNREFUSED,
-        socket.errors.SocketError.ConnectionReset => error.ECONNRESET,
-        socket.errors.SocketError.NetworkUnreachable => error.ENETUNREACH,
-        socket.errors.SocketError.HostUnreachable => error.EHOSTUNREACH,
-        socket.errors.SocketError.WouldBlock => error.EAGAIN,
-        socket.errors.SocketError.AlreadyConnected => error.EISCONN,
-        socket.errors.SocketError.NotConnected => error.ENOTCONN,
-        socket.errors.SocketError.Timeout => error.ETIMEDOUT,
-        socket.errors.SocketError.ConnectionAborted => error.ECONNABORTED,
-        socket.errors.SocketError.NotListening => error.EINVAL,
-        socket.errors.SocketError.RoutingError => error.ENETUNREACH,
+        socket.SocketError.BadFd => error.EBADF,
+        socket.SocketError.AfNotSupported => error.EAFNOSUPPORT,
+        socket.SocketError.TypeNotSupported => error.ESOCKTNOSUPPORT,
+        socket.SocketError.NoSocketsAvailable => error.ENFILE,
+        socket.SocketError.AddrInUse => error.EADDRINUSE,
+        socket.SocketError.AddrNotAvail => error.EADDRNOTAVAIL,
+        socket.SocketError.NetworkDown => error.ENETDOWN,
+        socket.SocketError.NetworkUnreachable => error.ENETUNREACH,
+        socket.SocketError.WouldBlock => error.EAGAIN,
+        socket.SocketError.TimedOut => error.ETIMEDOUT,
+        socket.SocketError.InvalidArg => error.EINVAL,
+        socket.SocketError.AlreadyConnected => error.EISCONN,
+        socket.SocketError.NotConnected => error.ENOTCONN,
+        socket.SocketError.ConnectionRefused => error.ECONNREFUSED,
+        socket.SocketError.ConnectionReset => error.ECONNRESET,
+        socket.SocketError.AccessDenied => error.EACCES,
+        socket.SocketError.NoResources => error.ENOMEM,
+        socket.SocketError.SystemError => error.ENOSYS,
     };
 }

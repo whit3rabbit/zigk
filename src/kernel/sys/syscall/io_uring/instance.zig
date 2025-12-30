@@ -6,6 +6,7 @@ const io_ring = uapi.io_ring;
 const types = @import("types.zig");
 const ring = @import("ring.zig");
 const pmm = @import("pmm");
+const hal = @import("hal");
 const heap = @import("heap");
 const io = @import("io");
 const thread_mod = @import("thread");
@@ -242,7 +243,7 @@ pub fn allocInstance(entries: u32) ?struct { idx: usize, instance: *IoUringInsta
                 inst.allocated = false;
                 return null;
             };
-            inst.sq_ring_virt = pmm.physToVirt(inst.sq_ring_phys);
+            inst.sq_ring_virt = @intFromPtr(hal.paging.physToVirt(inst.sq_ring_phys));
 
             // Allocate physical pages for CQ ring
             const cq_pages: u32 = @intCast(inst.cq_ring_size / pmm.PAGE_SIZE);
@@ -251,7 +252,7 @@ pub fn allocInstance(entries: u32) ?struct { idx: usize, instance: *IoUringInsta
                 inst.allocated = false;
                 return null;
             };
-            inst.cq_ring_virt = pmm.physToVirt(inst.cq_ring_phys);
+            inst.cq_ring_virt = @intFromPtr(hal.paging.physToVirt(inst.cq_ring_phys));
 
             // Allocate physical pages for SQE array
             const sqe_pages: u32 = @intCast(inst.sqes_size / pmm.PAGE_SIZE);
@@ -261,7 +262,7 @@ pub fn allocInstance(entries: u32) ?struct { idx: usize, instance: *IoUringInsta
                 inst.allocated = false;
                 return null;
             };
-            inst.sqes_virt = pmm.physToVirt(inst.sqes_phys);
+            inst.sqes_virt = @intFromPtr(hal.paging.physToVirt(inst.sqes_phys));
 
             // Initialize ring headers
             const sq_ring = inst.getSqRing();
@@ -294,7 +295,7 @@ pub fn freeInstance(idx: usize) void {
     // Free any pending requests
     for (0..inst.pending_count) |i| {
         IoUringInstance.finalizeBounceBuffer(inst.pending_requests[i]);
-        io.pool.free(inst.pending_requests[i]);
+        io.freeRequest(inst.pending_requests[i]);
     }
 
     // Free physical pages

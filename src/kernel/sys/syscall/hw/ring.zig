@@ -67,7 +67,9 @@ pub fn sys_ring_create(
     }
 
     // Resolve consumer PID
-    var resolved_consumer_pid: u32 = @intCast(consumer_pid);
+    // SECURITY: Validate PID fits u32 before truncation to prevent targeting wrong process
+    if (consumer_pid > std.math.maxInt(u32)) return error.EINVAL;
+    var resolved_consumer_pid: u32 = @truncate(consumer_pid);
     if (consumer_pid == 0) {
         // Lookup by service name
         if (service_name_len == 0 or service_name_len > service.MAX_SERVICE_NAME) {
@@ -137,7 +139,9 @@ pub fn sys_ring_attach(ring_id: usize, result_ptr: usize) SyscallError!usize {
     const proc: *process_mod.Process = @ptrCast(@alignCast(proc_opaque));
 
     // Get ring
-    const ring = ring_mod.getRing(@intCast(ring_id)) orelse {
+    // SECURITY: Validate ring_id fits u32 before truncation
+    if (ring_id > std.math.maxInt(u32)) return error.EINVAL;
+    const ring = ring_mod.getRing(@truncate(ring_id)) orelse {
         return error.ENOENT;
     };
 
@@ -146,7 +150,10 @@ pub fn sys_ring_attach(ring_id: usize, result_ptr: usize) SyscallError!usize {
         return error.EPERM;
     }
 
-    // Check state
+    // Check state (optimization - attachConsumer re-checks under lock)
+    // NOTE: This check has a benign TOCTOU - if state changes between here and
+    // attachConsumer, the internal lock in attachConsumer prevents double-attach.
+    // We check here to avoid unnecessary mapRingToProcess work in common case.
     if (ring.state != .created) {
         return error.EINVAL;
     }
@@ -156,8 +163,10 @@ pub fn sys_ring_attach(ring_id: usize, result_ptr: usize) SyscallError!usize {
         return error.ENOMEM;
     };
 
-    // Attach consumer
+    // Attach consumer - may fail if another thread attached first (TOCTOU mitigation)
     ring_mod.attachConsumer(ring, proc.pid) catch {
+        // SECURITY: Rollback the mapping to prevent resource leak on race loss
+        unmapRingFromProcess(ring, proc, virt);
         return error.EINVAL;
     };
 
@@ -194,7 +203,8 @@ pub fn sys_ring_detach(ring_id: usize) SyscallError!usize {
     const proc: *process_mod.Process = @ptrCast(@alignCast(proc_opaque));
 
     // Get ring
-    const ring = ring_mod.getRing(@intCast(ring_id)) orelse {
+    if (ring_id > std.math.maxInt(u32)) return error.EINVAL;
+    const ring = ring_mod.getRing(@truncate(ring_id)) orelse {
         return error.ENOENT;
     };
 
@@ -230,7 +240,8 @@ pub fn sys_ring_wait(ring_id: usize, min_entries: usize, timeout_ns: usize) Sysc
     const proc: *process_mod.Process = @ptrCast(@alignCast(proc_opaque));
 
     // Get ring
-    const ring = ring_mod.getRing(@intCast(ring_id)) orelse {
+    if (ring_id > std.math.maxInt(u32)) return error.EINVAL;
+    const ring = ring_mod.getRing(@truncate(ring_id)) orelse {
         return error.ENOENT;
     };
 
@@ -268,7 +279,8 @@ pub fn sys_ring_notify(ring_id: usize) SyscallError!usize {
     const proc: *process_mod.Process = @ptrCast(@alignCast(proc_opaque));
 
     // Get ring
-    const ring = ring_mod.getRing(@intCast(ring_id)) orelse {
+    if (ring_id > std.math.maxInt(u32)) return error.EINVAL;
+    const ring = ring_mod.getRing(@truncate(ring_id)) orelse {
         return error.ENOENT;
     };
 
@@ -315,6 +327,9 @@ pub fn sys_ring_wait_any(
     }
 
     // Copy ring IDs from user
+    // NOTE: Using undefined is safe here - copyToKernel fully initializes [0..ring_count],
+    // and all subsequent access is strictly bounded to that slice. No kernel data leaks
+    // to userspace since this buffer is only read from.
     var ring_ids: [ring_uapi.MAX_RINGS_PER_CONSUMER]u32 = undefined;
     const uptr = user_mem.UserPtr.from(ring_ids_ptr);
     const ids_bytes = std.mem.sliceAsBytes(ring_ids[0..ring_count]);
@@ -411,4 +426,14 @@ fn mapRingToProcess(ring: *ring_mod.RingDescriptor, proc: *process_mod.Process) 
     user_vmm.insertVma(vma);
 
     return virt;
+}
+
+/// Unmap ring from a process's address space (rollback helper)
+fn unmapRingFromProcess(ring: *ring_mod.RingDescriptor, proc: *process_mod.Process, virt: u64) void {
+    const page_count = ring.page_count;
+    const aligned_size = page_count * pmm.PAGE_SIZE;
+
+    // Use user_vmm.munmap which handles VMA removal and page unmapping
+    const user_vmm = proc.user_vmm;
+    _ = user_vmm.munmap(virt, aligned_size);
 }

@@ -131,7 +131,9 @@ fn openPath(path: []const u8, flags: usize, mode: usize) SyscallError!usize {
     // Compare dev+ino to detect symlink swap attacks.
     // We use fstat on the opened FD to verify the actual file identity.
     if (fd.ops.stat) |stat_fn| {
-        var stat_buf: uapi.stat.Stat = undefined;
+        // SECURITY AUDIT (2024-12): Zero-init to prevent kernel stack leak if stat_fn
+        // partially populates the struct or fails silently.
+        var stat_buf = std.mem.zeroes(uapi.stat.Stat);
         const stat_result = stat_fn(fd, &stat_buf);
         if (stat_result == 0) {
             // SECURITY: If we had initial stat, verify dev+ino match.

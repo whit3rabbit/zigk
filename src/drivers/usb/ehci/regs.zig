@@ -189,7 +189,11 @@ pub const Qh = packed struct {
     extended_buffer_4: u32,
 };
 
-// Helper
+// Helper - returns port register offset from operational register base
+// Port numbers are 1-indexed per EHCI spec
 pub fn portBaseOffset(port_num: u8) u64 {
-    return 0x44 + (@as(u64, port_num - 1) * 4);
+    // Defensive: port_num must be >= 1 (1-indexed per EHCI spec)
+    // If 0 is passed, clamp to port 1 to avoid underflow
+    const safe_port = if (port_num == 0) 1 else port_num;
+    return 0x44 + (@as(u64, safe_port - 1) * 4);
 }

@@ -139,20 +139,23 @@ pub const IoResult = union(enum) {
 
     fn errorToReturn(err: uapi.errno.SyscallError) isize {
         // Map error to negative errno value
+        // Use uapi.errno.Errno for canonical errno values
         const errno_val: i32 = switch (err) {
-            error.EPERM => 1,
-            error.ENOENT => 2,
-            error.EINTR => 4,
-            error.EIO => 5,
-            error.EBADF => 9,
-            error.EAGAIN => 11,
-            error.ENOMEM => 12,
-            error.EFAULT => 14,
-            error.EBUSY => 16,
-            error.EINVAL => 22,
-            error.ENOSYS => 38,
-            error.ETIMEDOUT => 110,
-            error.ECANCELED => 125,
+            error.EPERM => @intFromEnum(uapi.errno.Errno.EPERM),
+            error.ENOENT => @intFromEnum(uapi.errno.Errno.ENOENT),
+            error.EINTR => @intFromEnum(uapi.errno.Errno.EINTR),
+            error.EIO => @intFromEnum(uapi.errno.Errno.EIO),
+            error.EBADF => @intFromEnum(uapi.errno.Errno.EBADF),
+            error.EAGAIN => @intFromEnum(uapi.errno.Errno.EAGAIN),
+            error.ENOMEM => @intFromEnum(uapi.errno.Errno.ENOMEM),
+            error.EFAULT => @intFromEnum(uapi.errno.Errno.EFAULT),
+            error.EBUSY => @intFromEnum(uapi.errno.Errno.EBUSY),
+            error.EINVAL => @intFromEnum(uapi.errno.Errno.EINVAL),
+            error.ENOSYS => @intFromEnum(uapi.errno.Errno.ENOSYS),
+            error.ETIMEDOUT => @intFromEnum(uapi.errno.Errno.ETIMEDOUT),
+            error.ECANCELED => @intFromEnum(uapi.errno.Errno.ECANCELED),
+            // Handle all other SyscallError values
+            else => @intFromEnum(uapi.errno.Errno.EIO),
         };
         return -@as(isize, errno_val);
     }
