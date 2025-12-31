@@ -115,6 +115,8 @@ var fb_driver_direct: video_driver.DirectFramebufferDriver = undefined;
 var fb_driver_buffered: video_driver.BufferedFramebufferDriver = undefined;
 var fb_is_buffered: bool = false;
 var graph_console: video_driver.console.Console = undefined;
+var boot_logo_instance: video_driver.boot_logo.BootLogo = undefined;
+var boot_logo_active: bool = false;
 
 /// Wrapper for writing to the UART backend.
 fn uartWriteWrapper(ctx: ?*anyopaque, str: []const u8) void {
@@ -283,13 +285,6 @@ export fn _start(boot_info: *BootInfo.BootInfo) callconv(.c) noreturn {
             .blue_field_position = fb_state.blue_shift,
         };
         fb_driver_direct = video_driver.DirectFramebufferDriver.initDirect(video_mode);
-        graph_console = video_driver.console.Console.init(fb_driver_direct.device());
-
-        console.addBackend(.{
-            .context = @ptrCast(&graph_console),
-            .writeFn = videoWriteWrapper,
-            .scrollFn = videoScrollWrapper,
-        });
 
         console.info("Graphics: Initialized {d}x{d}x{d} framebuffer", .{
             fb_state.width, fb_state.height, fb_state.bpp
@@ -300,8 +295,27 @@ export fn _start(boot_info: *BootInfo.BootInfo) callconv(.c) noreturn {
     if (video_driver.BufferedFramebufferDriver.initWithBackBuffer(fb_driver_direct.mode)) |buffered| {
         fb_driver_buffered = buffered;
         fb_is_buffered = true;
-        graph_console = video_driver.console.Console.init(fb_driver_buffered.device());
         console.info("Graphics: Double Buffering enabled", .{});
+    }
+
+    // Show boot logo or enable console immediately based on config
+    if (config.boot_logo_enabled) {
+        const device = if (fb_is_buffered) fb_driver_buffered.device() else fb_driver_direct.device();
+        boot_logo_instance = video_driver.boot_logo.BootLogo.init(device);
+        video_driver.boot_logo.g_boot_logo = &boot_logo_instance;
+        boot_logo_instance.show();
+        boot_logo_active = true;
+        console.info("Boot logo displayed", .{});
+    } else {
+        // No boot logo - enable graphics console immediately for debugging
+        const device = if (fb_is_buffered) fb_driver_buffered.device() else fb_driver_direct.device();
+        graph_console = video_driver.console.Console.init(device);
+        console.addBackend(.{
+            .context = @ptrCast(&graph_console),
+            .writeFn = videoWriteWrapper,
+            .scrollFn = videoScrollWrapper,
+        });
+        console.info("Graphics console enabled (boot logo disabled)", .{});
     }
 
     // Initialize VFS
@@ -372,13 +386,38 @@ export fn _start(boot_info: *BootInfo.BootInfo) callconv(.c) noreturn {
     // Set RSDP address for hardware subsystems
     init_hw.setRsdpAddress(boot_info.rsdp);
 
-    // Initialize Hardware
+    // Initialize Hardware (with boot logo animation ticks)
     init_hw.initNetwork();
+    if (boot_logo_active) boot_logo_instance.tick();
+
     init_hw.initUsb();
+    if (boot_logo_active) boot_logo_instance.tick();
+
     init_hw.initAudio();
+    if (boot_logo_active) boot_logo_instance.tick();
+
     init_hw.initStorage();
+    if (boot_logo_active) boot_logo_instance.tick();
 
     init_fs.initBlockFs();
+    if (boot_logo_active) boot_logo_instance.tick();
+
+    // Fade out boot logo and enable graphics console
+    if (boot_logo_active) {
+        boot_logo_instance.fadeOut();
+        video_driver.boot_logo.g_boot_logo = null;
+        boot_logo_active = false;
+
+        // Now set up the graphics console
+        const device = if (fb_is_buffered) fb_driver_buffered.device() else fb_driver_direct.device();
+        graph_console = video_driver.console.Console.init(device);
+        console.addBackend(.{
+            .context = @ptrCast(&graph_console),
+            .writeFn = videoWriteWrapper,
+            .scrollFn = videoScrollWrapper,
+        });
+        console.info("Graphics console enabled", .{});
+    }
 
     if (init_hw.initVirtioGpu()) |driver| {
         graph_console = video_driver.console.Console.init(driver.device());

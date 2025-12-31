@@ -180,6 +180,7 @@ pub fn build(b: *std.Build) void {
     const qemu_display = b.option([]const u8, "display", "QEMU display backend (default, sdl, gtk, cocoa, none)") orelse "default";
     const qemu_usb_hub = b.option(bool, "usb-hub", "Attach usb-hub to XHCI and connect storage to it") orelse false;
     const qemu_audio = b.option([]const u8, "audio", "QEMU audio backend (none, coreaudio, pa, file)") orelse "none";
+    const boot_logo_enabled = b.option(bool, "boot-logo", "Show animated boot logo during init (disable for debugging)") orelse true;
 
     // Create kernel config options module
     const config_options = b.addOptions();
@@ -194,6 +195,7 @@ pub fn build(b: *std.Build) void {
     config_options.addOption(bool, "debug_memory", debug_memory);
     config_options.addOption(bool, "debug_scheduler", debug_scheduler);
     config_options.addOption(bool, "debug_network", debug_network);
+    config_options.addOption(bool, "boot_logo_enabled", boot_logo_enabled);
 
     // Create config module from build options
     const config_module = b.createModule(.{
@@ -643,6 +645,14 @@ pub fn build(b: *std.Build) void {
     fs_module.addImport("hal", hal_module);
 
 
+    // Create PS/2 controller module (shared between keyboard and mouse)
+    const ps2_module = b.createModule(.{
+        .root_source_file = b.path("src/drivers/input/ps2/controller.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    ps2_module.addImport("hal", hal_module);
+
     // Create Keyboard driver module
     const keyboard_module = b.createModule(.{
         .root_source_file = b.path("src/drivers/input/keyboard.zig"),
@@ -657,6 +667,7 @@ pub fn build(b: *std.Build) void {
     keyboard_module.addImport("sched", sched_module);
     keyboard_module.addImport("thread", thread_module);
     keyboard_module.addImport("io", kernel_io_module);
+    keyboard_module.addImport("ps2", ps2_module);
     // Note: user_mem import added after user_mem_module is defined below
 
 
@@ -727,6 +738,7 @@ pub fn build(b: *std.Build) void {
     mouse_module.addImport("console", console_module);
     mouse_module.addImport("input", input_module);
     mouse_module.addImport("uapi", uapi_module);
+    mouse_module.addImport("ps2", ps2_module);
 
     // Add mouse module to input for vmmouse driver
     input_module.addImport("mouse", mouse_module);

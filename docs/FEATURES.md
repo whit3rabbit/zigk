@@ -16,7 +16,7 @@ This bullet checklist highlights the unique implementation details and features 
 *   **Intel SYSRET Mitigation**: A security-hardened syscall entry point that manually validates canonical RCX addresses to prevent the "SYSRET privilege escalation" vulnerability.
 *   **Intel VT-d IOMMU**: Implementation of DMA remapping with support for DRHD (DMA Remapping Hardware Unit) discovery and hardware-level fault reporting.
 *   **Dual-Mode APIC**: Support for both xAPIC (MMIO-based) and x2APIC (MSR-based) for high-performance interrupt handling on modern processors.
-*   **Paranoid ISR Stubs**: Special assembly stubs for NMIs and Double Faults that handle the "GS base gap," ensuring the kernel can recover even if an interrupt occurs during a syscall transition.
+*   **Double Fault Handling**: Dedicated handler for double fault exceptions with diagnostic output. SYSCALL entry manages GS base via SWAPGS.
 *   **SMP Trampoline**: A position-independent bootstrap mechanism that transitions Application Processors (APs) from 16-bit Real Mode to 64-bit Long Mode via patched immediate values.
 *   **VMware Backdoor Interface**: A dedicated driver for hypervisor-specific guest-host communication, enabling integrated mouse and time synchronization in virtual environments.
 
@@ -24,11 +24,10 @@ This bullet checklist highlights the unique implementation details and features 
 *   **HHDM Guarding**: The `physToVirt` translation layer includes mandatory overflow checks to ensure physical addresses never wrap around into user virtual space.
 *   **Type-Safe MMIO Wrapper**: The `MmioDevice` utility uses enums and `comptime` to ensure register accesses are always within bounds and correctly aligned without runtime overhead.
 *   **Checked Timing Delays**: Calibration of the TSC (Time Stamp Counter) via the legacy PIT, providing high-precision blocking delays with protection against integer overflow.
-*   **Per-CPU IST Stacks**: Dedicated interrupt stack tables for critical exceptions (like Double Faults) to ensure the kernel can provide diagnostics even during stack exhaustion.
+*   **IST Support**: IDT gates support Interrupt Stack Table selection for critical exceptions. TSS structure includes IST entries.
 
 ### Entropy & Security
 *   **Graded Entropy Quality**: A multi-tier entropy system that categorizes random sources (High/Medium/Low/Critical) and allows the kernel to refuse to boot if high-quality RNG is missing for KASLR.
-*   **Register Sanitization**: Explicit clearing of all general-purpose registers during the transition from kernel to userspace to prevent information leakage.
 *   **Atomic Interrupt Dispatch**: Lock-free registration of interrupt handlers using atomic acquire/release semantics to ensure SMP safety without the bottleneck of a Big Kernel Lock.
 
 This checklist covers the features and unique implementation details of the **Common Boot Structures** and the **UEFI Bootloader** components.
@@ -74,7 +73,8 @@ This checklist covers the features found in your hardware drivers, PCI subsystem
 *   **Multi-Interface Composite Devices**: Unified configuration parser that extracts all interfaces and endpoints, enabling simultaneous keyboard, mouse, and storage functionality.
 *   **USB Hotplug & Disconnect**: Spec-compliant cleanup sequence that stops endpoints and cancels in-flight transfers before releasing device slots.
 *   **HID Report Parser**: A bit-level precise descriptor parser that identifies keyboards, mice, and absolute-position tablets/touchscreens.
-*   **USB Hub Support**: Generic hub class driver supporting nested port enumeration and status-change interrupt polling.
+*   **USB Hub Support**: Generic hub class driver per USB 2.0 Chapter 11 with port feature control, status tracking, and single/multi-TT configurations.
+*   **USB Mass Storage Class**: Bulk-Only Transport (BOT) protocol implementation with SCSI command interface, sector detection, and tag-based request tracking.
 
 ### Networking (E1000e)
 *   **NAPI-Style Polling**: High-performance Intel 82574L driver using a worker thread to drain RX rings, reducing interrupt overhead under heavy load.
@@ -86,6 +86,25 @@ This checklist covers the features found in your hardware drivers, PCI subsystem
 *   **Asynchronous Block I/O**: AHCI driver integrated with kernel `IoRequest` structures for non-blocking sector access.
 *   **LBA48 & Scatter-Gather DMA**: Support for large disks and multi-page transfers using Physical Region Descriptor Tables (PRDT).
 *   **SATA FIS Communication**: Low-level implementation of Frame Information Structures for H2D commands and D2H status reporting.
+
+### Audio (HDA & AC97)
+*   **Intel HDA Controller**: Full High Definition Audio driver with CORB/RIRB ring buffer management, codec detection via STATESTS, and 256-entry command/response rings.
+*   **AC97 Legacy Support**: Fallback audio driver for older hardware and QEMU virtual machines.
+*   **PC Speaker Tones**: PIT channel 2 integration for diagnostic beeps and simple audio feedback via `beep(frequency_hz, duration_ms)`.
+
+### Timekeeping & RTC
+*   **MC146818A RTC Driver**: Full CMOS Real-Time Clock support with date/time read/write, BCD conversion, and 12/24-hour format handling.
+*   **RTC Alarm Interrupts**: Programmable alarm with wildcard fields (0xFF = don't care) and IRQ8 handler.
+*   **Periodic Interrupts**: 13 configurable frequencies from 2 Hz to 8192 Hz for high-resolution timing applications.
+*   **Unix Timestamp Conversion**: Bidirectional conversion functions (`toUnixTimestamp`/`fromUnixTimestamp`) with leap year handling.
+*   **Battery-Backed CMOS**: Access to 128 bytes of CMOS RAM for persistent settings.
+
+### PS/2 Controller & Input
+*   **8042 Controller Abstraction**: Type-safe status register handling via packed structs for ports 0x60 (data) and 0x64 (status/command).
+*   **Controller Self-Test**: Commands 0xAA (controller) and 0xAB/0xA9 (port tests) with timeout detection.
+*   **Dual Port Support**: Independent enable/disable for keyboard (port 1) and mouse (port 2) with IRQ routing.
+*   **Mouse Command Forwarding**: Command 0xD4 for transparent PS/2 mouse communication.
+*   **Dual Ring Buffers**: Separate buffers for ASCII characters and raw scancodes enabling both cooked and raw input modes.
 
 ### Input & Layouts
 *   **Sub-pixel Cursor Management**: Cursor position tracker with fixed-point sensitivity scaling, fractional movement accumulation, and absolute coordinate normalization.
@@ -144,27 +163,43 @@ This checklist covers the features found in the core kernel logic, memory manage
 *   **ChaCha20 CSPRNG**: High-performance cryptographic random number generator (RFC 8439) with entropy pooling and periodic hardware re-seeding.
 
 ### Memory Management
-*   **IOMMU Domain Manager**: Per-device DMA isolation using IOVA (IO Virtual Address) spaces, preventing drivers from accessing memory outside their assigned buffers.
+*   **IOMMU Domain Manager**: Infrastructure for per-device DMA isolation using IOVA spaces. Domain allocation and IOVA management implemented; per-device driver integration in progress.
 *   **Bitmap PMM with Refcounts**: Physical memory manager using a bit-array for speed and a 16-bit refcount array to support future Copy-on-Write and shared memory features.
 *   **Multi-Region ASLR**: Per-process address layout randomization for the stack, heap, PIE base, mmap region, and TLS, providing defense against ROP attacks.
-*   **Hierarchical Slab Allocator**: O(1) allocator for small objects (16B–2KB) using bitmapped slabs to eliminate fragmentation and improve cache locality.
-*   **Secure Page Freeing**: Specialized unmapping sequence that zeros physical memory via HHDM before clearing the PTE to prevent data leakage during TLB races.
+*   **Hierarchical Slab Allocator**: O(1) allocator for small objects (16B-2KB) using bitmapped slabs to eliminate fragmentation and improve cache locality.
+*   **Secure Page Freeing**: Physical pages are zeroed via HHDM during deallocation. PTE clearing and TLB shootdown handled by VMM layer.
 *   **Multicore TLB Shootdown**: Protocol-based cross-CPU TLB invalidation using IPIs and atomic counters to maintain cache consistency across all cores.
+*   **Demand Paging**: Lazy allocation for anonymous memory with zero-fill on page fault, reducing memory pressure for sparse allocations.
+*   **VMA Tracking**: Full Virtual Memory Area management with start/end/prot/flags tracking and support for MAP_SHARED, MAP_PRIVATE, MAP_FIXED, MAP_ANONYMOUS, and MAP_DEVICE.
 
 ### Process & Threading
 *   **Capability-Based Security**: Fine-grained hardware access control (IRQs, I/O ports, MMIO, DMA) assigned to processes by name or manifest rather than broad "root" access.
 *   **SMP-Aware Scheduler**: Per-CPU ready queues with work-stealing and LIFO-based cache locality optimization to reduce lock contention.
-*   **Futex Subsystem**: Fast userspace locking keyed by physical address, enabling synchronization between different processes sharing the same memory.
+*   **Futex Subsystem**: Fast userspace locking keyed by physical address with timeout support and page pinning to prevent TOCTOU races during munmap.
 *   **Zero-Copy Ring IPC**: SPSC (Single-Producer Single-Consumer) shared-memory ring buffers with built-in futex support for low-latency, high-bandwidth inter-process communication.
 *   **Thread-Safe Wait Queues**: Interrupt-safe sleep/wake mechanisms featuring atomic "woken" flags to prevent the "lost wakeup" race condition on SMP systems.
+*   **Process Groups & Sessions**: Full POSIX job control with `setpgid`, `getpgid`, `setsid`, `getsid` syscalls and process group leader enforcement.
+*   **Resource Limits (rlimit)**: Implementation of 16 Linux RLIMIT types including CPU, FSIZE, DATA, STACK, NOFILE, AS, with configurable soft/hard limits.
+*   **CPU Affinity**: Per-thread CPU affinity bitmask allowing processes to be pinned to specific cores for cache optimization.
+*   **Clone Flags**: Full Linux clone() semantics with CLONE_THREAD, CLONE_VM, CLONE_SIGHAND, CLONE_PARENT_SETTID, CLONE_CHILD_CLEARTID, and CLONE_SETTLS.
+*   **Credential Management**: Complete uid/gid/euid/egid/suid/sgid tracking with 16-element supplementary groups array and credential lock for TOCTOU prevention.
+*   **Sorted Sleep List**: Efficient timeout management via wake_time-sorted sleep list with O(1) insertion at correct position.
 
 ### I/O & Syscall Infrastructure
 *   **Async I/O Reactor**: Central coordinator for all non-blocking operations, featuring a fixed-size request pool to ensure Principle IX (Heap Hygiene) compliance.
-*   **Hierarchical Timer Wheel**: A 3-level wheel structure (L0–L2) providing O(1) timer insertion and amortized O(1) expiration for thousands of concurrent timeouts.
+*   **Hierarchical Timer Wheel**: A 3-level wheel structure (L0-L2) providing O(1) timer insertion and amortized O(1) expiration for thousands of concurrent timeouts.
 *   **io_uring Implementation**: High-performance async interface using shared submission/completion rings (SQ/CQ) with mandatory kernel-side bounce buffers to prevent TOCTOU attacks.
 *   **Type-Safe `UserPtr`**: A wrapper that forces developers to validate userspace pointers and handle page faults before any memory dereference occurs.
 *   **vDSO Integration**: Mapping of a "Virtual Dynamic Shared Object" into every user process to provide high-speed, syscall-free access to system time and CPU information.
 *   **Exclusive Framebuffer Ownership**: Atomic ownership tracking for the system display, allowing only a certified "Display Server" process to map and modify the raw video buffer.
+
+### POSIX I/O Multiplexing
+*   **epoll Implementation**: Full Linux epoll API with `epoll_create1`, `epoll_ctl`, `epoll_wait` supporting EPOLLIN, EPOLLOUT, EPOLLERR, EPOLLET (edge-triggered), and EPOLLONESHOT.
+*   **select() Support**: Traditional 1024-FD select with read/write/exception sets and microsecond-precision timeouts.
+*   **poll() Support**: Per-FD event polling with timeout support for portable I/O multiplexing.
+*   **Pipes with Flags**: `pipe` and `pipe2` syscalls with O_CLOEXEC and O_NONBLOCK flag support.
+*   **Scatter-Gather I/O**: `writev` and `pread64` syscalls for efficient multi-buffer and positioned I/O operations.
+*   **clock_getres()**: Clock resolution query for CLOCK_REALTIME, CLOCK_MONOTONIC, and CLOCK_PROCESS_CPUTIME_ID.
 
 This checklist highlights the unique features and automated capabilities of your Zig-based build system.
 
@@ -252,12 +287,19 @@ This checklist highlights the unique architectural design, protocol compliance, 
 *   **RFC 6056 Port Randomization**: Ephemeral port allocation implements "Random Port Randomization" (Algorithm 3) to provide ~32 bits of total entropy when combined with DNS transaction IDs.
 *   **Two-Phase Socket Deletion**: Lifetime management using `AtomicRefcount` and a "closing" flag to prevent use-after-free races during concurrent packet processing and socket teardown.
 *   **Async I/O Reactor Integration**: A Phase 2 API that supports `acceptAsync`, `recvAsync`, and `sendAsync`, allowing the kernel to park requests in the socket and complete them directly from the IRQ handler.
-*   **Deadline-Based Timeouts**: Socket operations use TSC-based absolute deadlines rather than relative timeouts, preventing attacker-controlled packet floods from indefinitely resetting timeout windows.
+*   **Tick-Based Timeouts**: Socket operations use a hierarchical timer wheel with 1ms granularity for timeout management.
 
 ### DNS Client
 *   **Zero-Allocation Resolver**: The hostname resolver uses stack-allocated buffers and a case-insensitive `dnsNameEql` helper to perform hostname resolution without heap pressure.
 *   **Recursion & CNAME Following**: Robust CNAME chain resolution with a mandatory depth limit (8) and protection against malicious pointer loops in compressed DNS names.
 *   **Deadline-Hardened Query Loop**: The resolver loop enforces a total wall-clock deadline and a max-packet-count limit to prevent DoS from spoofed UDP responses.
+*   **RFC 5452 Security**: Randomized source port allocation for query ID entropy amplification.
+*   **Multiple Record Types**: Support for A (IPv4), AAAA (IPv6), CNAME, NS, SOA, PTR, MX, and TXT record parsing.
+
+### Network Interfaces
+*   **Loopback Interface**: Virtual network interface for 127.x.x.x traffic with synchronous packet re-injection into IPv4 stack.
+*   **Multicast Support**: Software-based multicast MAC address filtering with optional driver-specific hardware filter programming and accept-all-multicast mode.
+*   **Interface Abstraction**: Unified `NetworkInterface` structure with driver-specific callbacks for send, receive, and configuration.
 
 ### Synchronization & Safety
 *   **IRQ-Safe "Held" Token Pattern**: A custom `IrqLock` and `Spinlock` architecture that uses a `Held` token to ensure interrupts are always restored to their previous state and locks are never left dangling.
@@ -305,11 +347,23 @@ This bullet checklist highlights the features of the **Userspace Environment**, 
 *   **MPSC Service Pattern**: A Multi-Producer Single-Consumer (MPSC) registry allowing multiple hardware drivers to attach their own rings to a single "Netstack" consumer for centralized packet processing.
 
 ### Security-Hardened Libc (Zig Implementation)
-*   **Recursion-Safe Memory Ops**: Internal `safeCopy` and `safeFill` functions that avoid Zig’s `@memcpy` and `@memset` builtins, preventing infinite recursion in freestanding mode where the compiler might otherwise lower those builtins to the very libc functions they implement.
+*   **Recursion-Safe Memory Ops**: Internal `safeCopy` and `safeFill` functions that avoid Zig's `@memcpy` and `@memset` builtins, preventing infinite recursion in freestanding mode where the compiler might otherwise lower those builtins to the very libc functions they implement.
 *   **Overflow-Protected Allocator**: A standard `malloc` implementation featuring mandatory `checkedMultiply` and `checkedAdd` operations on all size calculations to prevent integer wrap-around exploits.
 *   **Heap Corruption Detection**: Integrated "Magic Number" tracking (`0xDEADBEEF` / `0xFEEDFACE`) in allocation headers to identify heap corruption and double-free attempts in debug builds.
 *   **Safer String Alternatives**: Native implementations of `strlcpy` and `strlcat` provided alongside standard (unsafe) C string functions to encourage truncation-aware string handling.
 *   **Thread-Local PRNG State**: A `rand()` implementation using `threadlocal` storage to ensure independent, race-free PRNG state for every userspace thread without requiring global locks.
+
+### Libc Standard Functions
+*   **Character Classification (ctype.h)**: Full suite including `isspace`, `isdigit`, `isalpha`, `isalnum`, `isupper`, `islower`, `isprint`, `isxdigit`, `iscntrl`, `isgraph`, `ispunct`, `isblank`, `toupper`, `tolower`.
+*   **String Search Functions**: `strchr`, `strrchr`, `strstr` (with bounds checking), `strpbrk`, `strspn`, `strcspn`, `memrchr`.
+*   **String Tokenization**: `strtok`, `strtok_r`, `strsep` for string parsing.
+*   **Case-Insensitive Comparison**: `strcasecmp`, `strncasecmp` for portable string matching.
+*   **Error String Mapping**: `strerror`, `strerror_r` with mapped errno values.
+*   **Math Utilities**: `abs`, `labs`, `llabs` (with INT_MIN overflow handling), `div`, `ldiv`, `lldiv` for quotient/remainder.
+*   **Floating Point Conversion**: `atof`, `strtod`, `strtof` for string-to-float parsing.
+*   **Sorting & Searching**: `qsort`, `bsearch`, `lfind` for array manipulation.
+*   **setjmp/longjmp**: Full implementation saving RBX, RBP, R12-R15, RSP, RIP with architecture-specific assembly for x86_64 and AArch64.
+*   **Signal Handling (stubs)**: `signal`, `raise` with SA_RESTART and SA_RESETHAND flags, SIG_DFL, SIG_IGN, SIG_ERR constants.
 
 ### Advanced Async I/O (io_uring)
 *   **Linux-Compatible io_uring Wrapper**: A high-level `IoUring` Zig structure that provides a type-safe interface for submission and completion queues, matching the standard Linux x86_64 ABI.
@@ -320,6 +374,13 @@ This bullet checklist highlights the features of the **Userspace Environment**, 
 *   **Manual Varargs Abstraction**: A sophisticated `VaList` implementation that manually navigates the ARM 64-bit Procedure Call Standard (AAPCS64) and x86_64 System V ABI, bypassing LLVM's current `@cVaArg` limitations on AArch64.
 *   **TLS & FS_BASE Initialization**: The `crt0` (assembly and Zig) handles early Thread-Local Storage initialization, automatically configuring the `FS` register via `ARCH_SET_FS` for architectural thread-local support.
 *   **Null-Pointer Guarded Linker Script**: A custom linker script that starts the `USER_BASE` at 4MB, ensuring that the first 4MB of virtual memory remain unmapped to catch null-pointer dereferences as hardware faults.
+
+### Userspace Applications
+*   **HTTP Server (httpd)**: Async HTTP/1.1 server using io_uring with support for 32 concurrent clients, fallback poll mode, and proper connection lifecycle management.
+*   **Interactive Shell**: Basic command-line shell with readline support (backspace handling), ANSI escape sequences, and built-in commands (help, exit, clear).
+*   **Network Stack Daemon (netstack)**: Userspace packet routing service receiving packets via shared memory rings from driver processes with 1MB fixed-size heap allocator.
+*   **Doom Port**: Complete port of the classic Doom engine with keyboard/mouse input, software rendering, and audio effects via OSS-compatible interface.
+*   **Test Utilities**: Audio device testing (OSS), multi-format sound tests (S16 stereo, U8 mono), assembly tests, and libc correctness verification.
 
 ### Audio & Graphics Support
 *   **Software Audio Mixer**: An AC97/OSS-compatible sound backend for Doom (`i_sound.zig`) that performs real-time linear interpolation, stereo separation, and frequency scaling in software.
@@ -356,3 +417,99 @@ The following features are intentionally incomplete or stubbed for the MVP relea
 #### Signals & Context
 *   **sigsetjmp**: Does not save/restore signal mask (just calls `setjmp`).
 *   **FPU/SSE State**: Space reserved in `MContext`/`UContext` but not populated during signal delivery.
+
+---
+
+## Roadmap: Missing Features & Security Improvements
+
+This section documents known gaps, incomplete implementations, and security concerns identified during code audit. Items are prioritized by security impact.
+
+### Priority 1: Security-Critical
+
+#### Register Sanitization on Syscall Return
+- **Status**: NOT IMPLEMENTED
+- **Risk**: KASLR bypass via information leakage
+- **Description**: The SYSRET path in `src/arch/x86_64/lib/asm_helpers.S` does not clear general-purpose registers (RAX, RBX, RCX, RDX, RSI, RDI, R8-R15) before returning to userspace. Kernel values, potentially including address bits that reveal KASLR offsets, leak to userspace.
+- **Fix**: Add `xor` instructions to zero all GPRs (except RAX for return value, RCX/R11 which are clobbered by SYSRET) before the `sysretq` instruction.
+- **Files**: `src/arch/x86_64/lib/asm_helpers.S`
+
+#### NMI Handler GS Base Gap
+- **Status**: PARTIAL
+- **Risk**: Kernel crash or privilege escalation if NMI fires during SYSCALL window
+- **Description**: Double Fault handler exists, but dedicated NMI stub with "paranoid" GS base handling is not implemented. If an NMI fires between SYSCALL entry and SWAPGS, the handler may use the wrong GS base.
+- **Fix**: Implement paranoid NMI entry that checks whether SWAPGS is needed by examining the saved CS or using RDMSR on IA32_GS_BASE.
+- **Files**: `src/arch/x86_64/lib/asm_helpers.S`, `src/arch/x86_64/kernel/interrupts/`
+
+### Priority 2: Correctness & Robustness
+
+#### IST Stack Allocation for Double Fault
+- **Status**: INFRASTRUCTURE ONLY
+- **Risk**: Kernel unrecoverable on stack overflow
+- **Description**: IDT gates support IST selection and TSS has IST fields, but no evidence of actual stack allocation or Double Fault IST configuration at runtime.
+- **Fix**: Allocate dedicated per-CPU IST stacks during AP init and configure IDT entry 8 (Double Fault) to use IST1.
+- **Files**: `src/arch/x86_64/kernel/gdt.zig`, `src/arch/x86_64/kernel/idt.zig`, `src/arch/x86_64/kernel/smp.zig`
+
+#### IOMMU Per-Device Integration
+- **Status**: INFRASTRUCTURE ONLY
+- **Risk**: DMA attacks if devices share address space
+- **Description**: IOMMU domain manager and IOVA allocator exist in `src/kernel/mm/iommu/`, but USB and storage drivers do not appear to use per-device IOMMU domains.
+- **Fix**: Integrate IOMMU domain creation into PCI device initialization; update xHCI, AHCI, and E1000e drivers to allocate DMA buffers within their assigned IOVA space.
+- **Files**: `src/kernel/mm/iommu/`, `src/drivers/usb/xhci/`, `src/drivers/storage/ahci/`, `src/drivers/net/e1000e/`
+
+#### Secure Page Free Ordering
+- **Status**: UNCLEAR
+- **Risk**: Information leakage via TLB race
+- **Description**: `zeroPage()` exists in PMM, but the ordering guarantee (zero memory THEN clear PTE THEN TLB shootdown) is not clearly enforced in all paths.
+- **Fix**: Audit all `freePages()` call sites; ensure zeroing happens before PTE modification; add memory barriers if needed.
+- **Files**: `src/kernel/mm/pmm.zig`, `src/kernel/mm/vmm.zig`
+
+### Priority 3: Feature Completeness
+
+#### Signal Mask in sigsetjmp/siglongjmp
+- **Status**: STUB
+- **Description**: `sigsetjmp` simply calls `setjmp` without saving the signal mask.
+- **Fix**: Save current signal mask in jmp_buf when `savesigs` is nonzero; restore on `siglongjmp`.
+- **Files**: `src/user/lib/libc/setjmp.S`, `src/user/lib/libc/setjmp/stubs.zig`
+
+#### FPU/SSE State in Signal Delivery
+- **Status**: STUB
+- **Description**: Space reserved in `MContext`/`UContext` but XMM/YMM registers not saved or restored during signal delivery.
+- **Fix**: Use FXSAVE/FXRSTOR or XSAVE/XRSTOR to preserve FPU state before invoking signal handler.
+- **Files**: `src/kernel/proc/signal.zig`, `src/arch/x86_64/kernel/fpu.zig`
+
+#### Music Playback
+- **Status**: STUB
+- **Description**: `I_PlaySong`, `I_PauseSong`, `I_ResumeSong`, `I_StopSong` are empty stubs in the Doom port.
+- **Fix**: Implement MIDI or OPL3 emulation; alternatively, decode module/tracker formats in software.
+- **Files**: `src/user/doom/i_sound.zig`
+
+#### VirtIO-Blk Large Requests
+- **Status**: LIMITED
+- **Description**: IPC message buffers limited to 4 sectors (2KB) per request.
+- **Fix**: Implement scatter-gather or chunked request protocol for larger transfers.
+- **Files**: `src/user/drivers/virtio_blk/main.zig`
+
+### Audit Notes
+
+This roadmap was generated from a comprehensive feature validation on 2024-12-30, with additional feature discovery on 2025-12-30. The validation compared all claims in this document against actual implementation.
+
+**Discovered During Audit (added to documentation):**
+- RTC driver with alarm/periodic interrupts
+- Intel HDA audio controller driver
+- PS/2 controller abstraction
+- PC speaker tone generation
+- USB Mass Storage Class (MSC)
+- Process groups, sessions, rlimit
+- epoll, select, poll implementations
+- Demand paging and VMA tracking
+- HTTP server, shell, netstack daemon
+- Full libc ctype, string, and math functions
+
+**Methodology**: Codebase exploration using pattern matching across:
+- `src/arch/x86_64/` and `src/arch/aarch64/` for architecture features
+- `src/kernel/mm/` for memory management
+- `src/kernel/proc/` for process/threading
+- `src/kernel/sys/syscall/` for syscall implementations
+- `src/net/` for networking stack
+- `src/drivers/` for hardware drivers
+- `src/user/` for userspace applications and libc

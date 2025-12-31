@@ -27,6 +27,8 @@ pub const port = @import("port.zig");
 pub const command = @import("command.zig");
 pub const fis = @import("fis.zig");
 pub const adapter = @import("adapter.zig");
+pub const init_mod = @import("init.zig");
+pub const irq_mod = @import("irq.zig");
 
 // ============================================================================
 // Constants
@@ -366,119 +368,25 @@ pub const AhciController = struct {
             .func = self.pci_dev.func,
         };
 
-        // Track allocations for cleanup on error
-        var cmd_list_allocated = false;
-        var fis_allocated = false;
-        var tables_allocated: usize = 0;
+        // Allocate DMA memory using helper module
+        const dma_ctx = init_mod.allocatePortDma(port_num, bdf, self.cap.s64a) catch {
+            return AhciError.AllocationFailed;
+        };
 
-        // Cleanup on error - free all allocations made so far
-        errdefer {
-            if (cmd_list_allocated) {
-                dma.freeBuffer(&p.cmd_list_dma);
-                p.cmd_list_phys = 0;
-            }
-            if (fis_allocated) {
-                dma.freeBuffer(&p.fis_dma);
-                p.fis_phys = 0;
-            }
-            for (0..tables_allocated) |slot| {
-                if (p.cmd_tables_phys[slot] != 0) {
-                    dma.freeBuffer(&p.cmd_tables_dma[slot]);
-                    p.cmd_tables_phys[slot] = 0;
-                }
-            }
-        }
+        // Copy DMA context to port struct
+        p.cmd_list_phys = dma_ctx.cmd_list_phys;
+        p.cmd_list_virt = dma_ctx.cmd_list_virt;
+        p.fis_phys = dma_ctx.fis_phys;
+        p.fis_virt = dma_ctx.fis_virt;
+        p.cmd_tables_phys = dma_ctx.cmd_tables_phys;
+        p.cmd_tables_virt = dma_ctx.cmd_tables_virt;
+        p.cmd_list_dma = dma_ctx.cmd_list_dma;
+        p.fis_dma = dma_ctx.fis_dma;
+        p.cmd_tables_dma = dma_ctx.cmd_tables_dma;
+        p.using_iommu_dma = dma_ctx.using_iommu_dma;
 
-        // Allocate command list with IOMMU-aware DMA (1KB aligned, page-sized)
-        if (self.cap.s64a) {
-            p.cmd_list_dma = dma.allocBuffer(bdf, pmm.PAGE_SIZE, true) catch {
-                return AhciError.AllocationFailed;
-            };
-        } else {
-            // 32-bit controller requires addresses below 4GB
-            p.cmd_list_dma = dma.allocBuffer32(bdf, pmm.PAGE_SIZE, true) catch |err| {
-                if (err == dma.DmaError.AddressTooHigh) {
-                    console.err("AHCI: Port {d} cmd list > 4GB but controller is 32-bit", .{port_num});
-                }
-                return AhciError.AllocationFailed;
-            };
-        }
-        cmd_list_allocated = true;
-        p.cmd_list_phys = p.cmd_list_dma.device_addr;
-        p.cmd_list_virt = @intFromPtr(p.cmd_list_dma.getVirt());
-
-        // Allocate FIS receive buffer with IOMMU-aware DMA
-        if (self.cap.s64a) {
-            p.fis_dma = dma.allocBuffer(bdf, pmm.PAGE_SIZE, true) catch {
-                return AhciError.AllocationFailed;
-            };
-        } else {
-            p.fis_dma = dma.allocBuffer32(bdf, pmm.PAGE_SIZE, true) catch |err| {
-                if (err == dma.DmaError.AddressTooHigh) {
-                    console.err("AHCI: Port {d} FIS > 4GB but controller is 32-bit", .{port_num});
-                }
-                return AhciError.AllocationFailed;
-            };
-        }
-        fis_allocated = true;
-        p.fis_phys = p.fis_dma.device_addr;
-        p.fis_virt = @intFromPtr(p.fis_dma.getVirt());
-
-        // Allocate command tables with IOMMU-aware DMA (one page per table)
-        for (0..32) |slot| {
-            if (self.cap.s64a) {
-                p.cmd_tables_dma[slot] = dma.allocBuffer(bdf, pmm.PAGE_SIZE, true) catch {
-                    return AhciError.AllocationFailed;
-                };
-            } else {
-                p.cmd_tables_dma[slot] = dma.allocBuffer32(bdf, pmm.PAGE_SIZE, true) catch |err| {
-                    if (err == dma.DmaError.AddressTooHigh) {
-                        console.err("AHCI: Port {d} table > 4GB but controller is 32-bit", .{port_num});
-                    }
-                    return AhciError.AllocationFailed;
-                };
-            }
-            tables_allocated = slot + 1;
-            p.cmd_tables_phys[slot] = p.cmd_tables_dma[slot].device_addr;
-            p.cmd_tables_virt[slot] = @intFromPtr(p.cmd_tables_dma[slot].getVirt());
-
-            // Set up command header to point to this table (using device address)
-            const cmd_list: *command.CommandList = @ptrFromInt(p.cmd_list_virt);
-            cmd_list[slot].setCommandTableAddr(p.cmd_tables_phys[slot]);
-        }
-
-        p.using_iommu_dma = dma.isIommuAvailable();
-
-        // Set command list and FIS base addresses
-        port.writeClb(base, p.cmd_list_phys);
-        port.writeFb(base, p.fis_phys);
-
-        // Clear SATA error
-        port.clearSerr(base, 0xFFFFFFFF);
-
-        // Clear interrupt status
-        port.clearIs(base, @bitCast(@as(u32, 0xFFFFFFFF)));
-
-        // Enable interrupts (D2H, error)
-        port.writeIe(base, .{
-            .dhrs = true, // Device to Host Register FIS
-            .pss = true, // PIO Setup
-            .dss = true, // DMA Setup
-            .sdbs = true, // Set Device Bits
-            .ufs = false,
-            .dps = false,
-            .pcs = false,
-            .dmps = false,
-            .prcs = false,
-            .ipms = false,
-            .ofs = true,
-            .infs = true,
-            .ifs = true,
-            .hbds = true,
-            .hbfs = true,
-            .tfes = true,
-            .cpds = false,
-        });
+        // Configure port registers using helper module
+        init_mod.configurePortRegisters(base, &dma_ctx);
 
         // Start command engine
         port.startEngine(base);

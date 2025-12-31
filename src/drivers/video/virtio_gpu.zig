@@ -17,133 +17,31 @@ const sync = @import("sync");
 const heap = @import("heap");
 const interrupts = hal.interrupts;
 
-// GPU Command Types
-const VIRTIO_GPU_CMD_GET_DISPLAY_INFO: u32 = 0x0100;
-const VIRTIO_GPU_CMD_RESOURCE_CREATE_2D: u32 = 0x0101;
-const VIRTIO_GPU_CMD_RESOURCE_UNREF: u32 = 0x0102;
-const VIRTIO_GPU_CMD_SET_SCANOUT: u32 = 0x0103;
-const VIRTIO_GPU_CMD_RESOURCE_FLUSH: u32 = 0x0104;
-const VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D: u32 = 0x0105;
-const VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING: u32 = 0x0106;
-const VIRTIO_GPU_CMD_RESOURCE_DETACH_BACKING: u32 = 0x0107;
-const VIRTIO_GPU_CMD_GET_CAPSET_INFO: u32 = 0x0108;
-const VIRTIO_GPU_CMD_GET_CAPSET: u32 = 0x0109;
-const VIRTIO_GPU_CMD_GET_EDID: u32 = 0x010A;
+// Import protocol definitions
+const proto = @import("protocol.zig");
 
-// Response Types
-const VIRTIO_GPU_RESP_OK_NODATA: u32 = 0x1100;
-const VIRTIO_GPU_RESP_OK_DISPLAY_INFO: u32 = 0x1101;
-const VIRTIO_GPU_RESP_OK_CAPSET_INFO: u32 = 0x1102;
-const VIRTIO_GPU_RESP_OK_CAPSET: u32 = 0x1103;
-const VIRTIO_GPU_RESP_OK_EDID: u32 = 0x1104;
+// Re-export commonly used constants for internal use
+const VIRTIO_GPU_CMD_GET_DISPLAY_INFO = proto.VIRTIO_GPU_CMD_GET_DISPLAY_INFO;
+const VIRTIO_GPU_CMD_RESOURCE_CREATE_2D = proto.VIRTIO_GPU_CMD_RESOURCE_CREATE_2D;
+const VIRTIO_GPU_CMD_SET_SCANOUT = proto.VIRTIO_GPU_CMD_SET_SCANOUT;
+const VIRTIO_GPU_CMD_RESOURCE_FLUSH = proto.VIRTIO_GPU_CMD_RESOURCE_FLUSH;
+const VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D = proto.VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D;
+const VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING = proto.VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING;
+const VIRTIO_GPU_RESP_OK_DISPLAY_INFO = proto.VIRTIO_GPU_RESP_OK_DISPLAY_INFO;
+const VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM = proto.VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM;
+const MAX_DISPLAY_WIDTH = proto.MAX_DISPLAY_WIDTH;
+const MAX_DISPLAY_HEIGHT = proto.MAX_DISPLAY_HEIGHT;
 
-const VIRTIO_GPU_RESP_ERR_UNSPEC: u32 = 0x1200;
-const VIRTIO_GPU_RESP_ERR_OUT_OF_MEMORY: u32 = 0x1201;
-const VIRTIO_GPU_RESP_ERR_INVALID_SCANOUT_ID: u32 = 0x1202;
-const VIRTIO_GPU_RESP_ERR_INVALID_RESOURCE_ID: u32 = 0x1203;
-const VIRTIO_GPU_RESP_ERR_INVALID_CONTEXT_ID: u32 = 0x1204;
-const VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER: u32 = 0x1205;
-
-// Pixel Formats
-const VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM: u32 = 1;
-const VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM: u32 = 2;
-const VIRTIO_GPU_FORMAT_A8R8G8B8_UNORM: u32 = 3;
-const VIRTIO_GPU_FORMAT_X8R8G8B8_UNORM: u32 = 4;
-const VIRTIO_GPU_FORMAT_R8G8B8A8_UNORM: u32 = 67;
-const VIRTIO_GPU_FORMAT_X8B8G8R8_UNORM: u32 = 68;
-const VIRTIO_GPU_FORMAT_A8B8G8R8_UNORM: u32 = 121;
-const VIRTIO_GPU_FORMAT_R8G8B8X8_UNORM: u32 = 134;
-
-// Feature bits
-const VIRTIO_GPU_F_VIRGL: u32 = 0;
-const VIRTIO_GPU_F_EDID: u32 = 1;
-const VIRTIO_GPU_F_RESOURCE_UUID: u32 = 2;
-const VIRTIO_GPU_F_RESOURCE_BLOB: u32 = 3;
-const VIRTIO_GPU_F_CONTEXT_INIT: u32 = 4;
-
-const MAX_SCANOUTS: usize = 16;
-
-// Security: Maximum display dimensions to prevent integer overflow and DoS
-const MAX_DISPLAY_WIDTH: u32 = 8192; // 8K resolution
-const MAX_DISPLAY_HEIGHT: u32 = 8192;
-
-/// GPU control header (common to all commands)
-const VirtioGpuCtrlHdr = extern struct {
-    type_: u32,
-    flags: u32,
-    fence_id: u64,
-    ctx_id: u32,
-    ring_idx: u8,
-    _padding: [3]u8 = .{ 0, 0, 0 },
-};
-
-/// Rectangle structure
-const VirtioGpuRect = extern struct {
-    x: u32,
-    y: u32,
-    width: u32,
-    height: u32,
-};
-
-/// Display info response
-const VirtioGpuDisplayOne = extern struct {
-    r: VirtioGpuRect,
-    enabled: u32,
-    flags: u32,
-};
-
-const VirtioGpuRespDisplayInfo = extern struct {
-    hdr: VirtioGpuCtrlHdr,
-    pmodes: [MAX_SCANOUTS]VirtioGpuDisplayOne,
-};
-
-/// Resource create 2D command
-const VirtioGpuResourceCreate2d = extern struct {
-    hdr: VirtioGpuCtrlHdr,
-    resource_id: u32,
-    format: u32,
-    width: u32,
-    height: u32,
-};
-
-/// Set scanout command
-const VirtioGpuSetScanout = extern struct {
-    hdr: VirtioGpuCtrlHdr,
-    r: VirtioGpuRect,
-    scanout_id: u32,
-    resource_id: u32,
-};
-
-/// Resource attach backing command
-const VirtioGpuResourceAttachBacking = extern struct {
-    hdr: VirtioGpuCtrlHdr,
-    resource_id: u32,
-    nr_entries: u32,
-};
-
-/// Memory entry for attach backing
-const VirtioGpuMemEntry = extern struct {
-    addr: u64,
-    length: u32,
-    _padding: u32 = 0,
-};
-
-/// Transfer to host 2D command
-const VirtioGpuTransferToHost2d = extern struct {
-    hdr: VirtioGpuCtrlHdr,
-    r: VirtioGpuRect,
-    offset: u64,
-    resource_id: u32,
-    _padding: u32 = 0,
-};
-
-/// Resource flush command
-const VirtioGpuResourceFlush = extern struct {
-    hdr: VirtioGpuCtrlHdr,
-    r: VirtioGpuRect,
-    resource_id: u32,
-    _padding: u32 = 0,
-};
+// Re-export types
+const VirtioGpuCtrlHdr = proto.VirtioGpuCtrlHdr;
+const VirtioGpuRect = proto.VirtioGpuRect;
+const VirtioGpuRespDisplayInfo = proto.VirtioGpuRespDisplayInfo;
+const VirtioGpuResourceCreate2d = proto.VirtioGpuResourceCreate2d;
+const VirtioGpuSetScanout = proto.VirtioGpuSetScanout;
+const VirtioGpuResourceAttachBacking = proto.VirtioGpuResourceAttachBacking;
+const VirtioGpuMemEntry = proto.VirtioGpuMemEntry;
+const VirtioGpuTransferToHost2d = proto.VirtioGpuTransferToHost2d;
+const VirtioGpuResourceFlush = proto.VirtioGpuResourceFlush;
 
 /// VirtIO-GPU driver state
 pub const VirtioGpuDriver = struct {

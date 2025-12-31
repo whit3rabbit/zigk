@@ -77,6 +77,10 @@ pub fn init(_: u64) void {
     rtc.init();
 }
 
+/// Global flag indicating if SMAP is enabled (exported for assembly)
+/// The assembly copy helpers check this before using STAC/CLAC
+pub export var smap_enabled: u8 = 0;
+
 /// Enable CPU security features (SMEP, SMAP, speculation control) if supported
 fn initSecurityFeatures() void {
     const console = @import("console");
@@ -105,6 +109,7 @@ fn initSecurityFeatures() void {
     if ((cpuid_result.ebx & CPUID_SMAP) != 0) {
         cr4 |= CR4_SMAP;
         features_enabled |= 2;
+        smap_enabled = 1; // Set global flag for assembly code
     }
 
     if (features_enabled != 0) {

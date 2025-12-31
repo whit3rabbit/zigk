@@ -521,6 +521,10 @@ isr_stub_no_error 47         # Secondary ATA (IRQ15)
 # kernel code cannot accidentally access user memory without explicit intent,
 # but does not prevent reading kernel memory if src points there. The UserPtr
 # validation in Zig ensures src < USER_SPACE_END before calling this function.
+#
+# SMAP Compatibility: On CPUs without SMAP support, stac/clac cause #UD.
+# We check the smap_enabled global variable (set by initSecurityFeatures)
+# and skip stac/clac if SMAP is not enabled.
 .global _asm_copy_from_user
 .type _asm_copy_from_user, @function
 _asm_copy_from_user:
@@ -532,9 +536,12 @@ _asm_copy_from_user:
     test %rdx, %rdx
     jz .Lcopy_done
 
-    # SECURITY: Enable user memory access (SMAP bypass)
-    # Must be paired with clac before returning to kernel code
+    # SECURITY: Enable user memory access (SMAP bypass) - only if SMAP enabled
+    # Check smap_enabled global variable
+    cmpb $0, smap_enabled(%rip)
+    je .Lcopy_no_stac
     stac
+.Lcopy_no_stac:
 
     # Calculate number of 8-byte quadwords
     mov %rdx, %rcx
@@ -556,7 +563,11 @@ _asm_copy_user_start:
 _asm_copy_user_end:
 
 .Lcopy_done_success:
-    clac                  # SECURITY: Disable user memory access before return
+    # SECURITY: Disable user memory access before return - only if SMAP enabled
+    cmpb $0, smap_enabled(%rip)
+    je .Lcopy_no_clac
+    clac
+.Lcopy_no_clac:
     xor %rax, %rax        # Success: return 0 bytes remaining
     ret
 
@@ -609,13 +620,21 @@ _asm_copy_user_fixup:
     mov %rdx, %rcx
     and $7, %rcx              # RCX = original len % 8 (remainder bytes)
     add %rcx, %rax            # RAX = RCX*8 + remainder
-    clac                      # SECURITY: Disable user memory access before return
+    # SECURITY: Disable user memory access before return - only if SMAP enabled
+    cmpb $0, smap_enabled(%rip)
+    je .Lfixup_no_clac1
+    clac
+.Lfixup_no_clac1:
     ret
 
 .Lfixup_was_movsb:
     # Was in movsb phase: remaining = original RCX (saved in R9)
     mov %r9, %rax             # Return the saved RCX directly
-    clac                      # SECURITY: Disable user memory access before return
+    # SECURITY: Disable user memory access before return - only if SMAP enabled
+    cmpb $0, smap_enabled(%rip)
+    je .Lfixup_no_clac2
+    clac
+.Lfixup_no_clac2:
     ret
 
 _asm_copy_user_fixup_movsq_end:

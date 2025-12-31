@@ -17,70 +17,11 @@ const console = @import("console");
 const input = @import("input");
 const uapi = @import("uapi");
 
-// =============================================================================
-// PS/2 Controller Ports and Commands
-// =============================================================================
+// Import shared PS/2 controller module
+const ps2 = @import("ps2");
 
-const PS2_DATA_PORT: u16 = 0x60;
-const PS2_CMD_PORT: u16 = 0x64;
-
-// Controller commands (sent to 0x64)
-const CMD_READ_CONFIG: u8 = 0x20;
-const CMD_WRITE_CONFIG: u8 = 0x60;
-const CMD_DISABLE_SECOND_PORT: u8 = 0xA7;
-const CMD_ENABLE_SECOND_PORT: u8 = 0xA8;
-const CMD_TEST_SECOND_PORT: u8 = 0xA9;
-const CMD_WRITE_MOUSE: u8 = 0xD4; // Send next byte to mouse
-
-// Mouse commands (sent via CMD_WRITE_MOUSE)
-const MOUSE_CMD_RESET: u8 = 0xFF;
-const MOUSE_CMD_RESEND: u8 = 0xFE;
-const MOUSE_CMD_SET_DEFAULTS: u8 = 0xF6;
-const MOUSE_CMD_DISABLE_STREAMING: u8 = 0xF5;
-const MOUSE_CMD_ENABLE_STREAMING: u8 = 0xF4;
-const MOUSE_CMD_SET_SAMPLE_RATE: u8 = 0xF3;
-const MOUSE_CMD_GET_DEVICE_ID: u8 = 0xF2;
-const MOUSE_CMD_SET_RESOLUTION: u8 = 0xE8;
-
-// Mouse responses
-const MOUSE_ACK: u8 = 0xFA;
-const MOUSE_RESEND: u8 = 0xFE;
-const MOUSE_SELF_TEST_PASSED: u8 = 0xAA;
-
-// Config byte bits
-const CONFIG_SECOND_PORT_IRQ: u8 = 0x02;
-const CONFIG_SECOND_PORT_CLOCK: u8 = 0x20;
-
-// =============================================================================
-// PS/2 Status Register
-// =============================================================================
-
-const StatusReg = packed struct(u8) {
-    output_buffer_full: bool,
-    input_buffer_full: bool,
-    system_flag: bool,
-    command_data: bool,
-    _reserved1: bool = false,
-    mouse_data: bool, // Bit 5: 1 = data from mouse, 0 = data from keyboard
-    timeout_error: bool,
-    parity_error: bool,
-
-    pub fn read() StatusReg {
-        return @bitCast(hal.io.inb(PS2_CMD_PORT));
-    }
-
-    pub fn hasData(self: StatusReg) bool {
-        return self.output_buffer_full;
-    }
-
-    pub fn isMouseData(self: StatusReg) bool {
-        return self.mouse_data;
-    }
-
-    pub fn canWrite(self: StatusReg) bool {
-        return !self.input_buffer_full;
-    }
-};
+// Re-export StatusReg for backward compatibility
+pub const StatusReg = ps2.StatusReg;
 
 // =============================================================================
 // Mouse Event Types
@@ -164,77 +105,6 @@ var mouse_state: MouseState = .{};
 var mouse_lock: sync.Spinlock = .{};
 var mouse_initialized: bool = false; // Access via atomic ops only
 var error_stats: ErrorStats = .{};
-
-// =============================================================================
-// PS/2 Controller Helpers
-// =============================================================================
-
-fn waitInputEmpty() bool {
-    var timeout: u32 = 100_000;
-    while (timeout > 0) : (timeout -= 1) {
-        if (StatusReg.read().canWrite()) return true;
-    }
-    return false;
-}
-
-fn waitOutputFull() bool {
-    var timeout: u32 = 100_000;
-    while (timeout > 0) : (timeout -= 1) {
-        if (StatusReg.read().hasData()) return true;
-    }
-    return false;
-}
-
-fn sendCommand(cmd: u8) void {
-    _ = waitInputEmpty();
-    hal.io.outb(PS2_CMD_PORT, cmd);
-}
-
-fn sendData(data: u8) void {
-    _ = waitInputEmpty();
-    hal.io.outb(PS2_DATA_PORT, data);
-}
-
-fn readData() ?u8 {
-    if (waitOutputFull()) {
-        return hal.io.inb(PS2_DATA_PORT);
-    }
-    return null;
-}
-
-fn flushBuffer() void {
-    var count: u32 = 0;
-    while (StatusReg.read().output_buffer_full and count < 16) {
-        _ = hal.io.inb(PS2_DATA_PORT);
-        count += 1;
-    }
-}
-
-/// Send a command to the mouse (via controller's D4 command)
-/// Retries on RESEND (0xFE) response, up to 3 attempts
-fn sendMouseCommand(cmd: u8) bool {
-    var retries: u8 = 3;
-    while (retries > 0) : (retries -= 1) {
-        sendCommand(CMD_WRITE_MOUSE);
-        sendData(cmd);
-
-        const response = readData() orelse return false;
-        if (response == MOUSE_ACK) return true;
-        if (response == MOUSE_RESEND) continue; // Retry
-        return false; // Unexpected response
-    }
-    return false; // Max retries exceeded
-}
-
-/// Send a command with a data byte to the mouse
-fn sendMouseCommandWithData(cmd: u8, data: u8) bool {
-    if (!sendMouseCommand(cmd)) return false;
-    sendCommand(CMD_WRITE_MOUSE);
-    sendData(data);
-
-    const response = readData() orelse return false;
-    return response == MOUSE_ACK;
-}
 
 // =============================================================================
 // Public API
@@ -372,11 +242,11 @@ pub fn init() void {
     }
 
     // 1. Enable the second PS/2 port (mouse)
-    sendCommand(CMD_ENABLE_SECOND_PORT);
+    ps2.sendCommand(ps2.CMD_ENABLE_SECOND_PORT);
 
     // 2. Test the second port
-    sendCommand(CMD_TEST_SECOND_PORT);
-    const port_test = readData();
+    ps2.sendCommand(ps2.CMD_TEST_SECOND_PORT);
+    const port_test = ps2.readData();
     if (port_test) |result| {
         if (result != 0x00) {
             console.warn("PS/2 mouse: port test returned 0x{X:0>2}", .{result});
@@ -386,23 +256,23 @@ pub fn init() void {
     }
 
     // 3. Enable second port IRQ in controller config
-    sendCommand(CMD_READ_CONFIG);
-    var config = readData() orelse 0x00;
-    config |= CONFIG_SECOND_PORT_IRQ; // Enable IRQ12
-    config &= ~CONFIG_SECOND_PORT_CLOCK; // Enable clock (clear disable bit)
+    ps2.sendCommand(ps2.CMD_READ_CONFIG);
+    var config = ps2.readData() orelse 0x00;
+    config |= ps2.CONFIG_SECOND_PORT_IRQ; // Enable IRQ12
+    config &= ~ps2.CONFIG_SECOND_PORT_CLOCK; // Enable clock (clear disable bit)
 
-    sendCommand(CMD_WRITE_CONFIG);
-    sendData(config);
+    ps2.sendCommand(ps2.CMD_WRITE_CONFIG);
+    ps2.sendData(config);
 
     // 4. Reset the mouse
-    flushBuffer();
-    if (sendMouseCommand(MOUSE_CMD_RESET)) {
+    ps2.flushBuffer();
+    if (ps2.sendMouseCommand(ps2.MOUSE_CMD_RESET)) {
         // Wait for self-test result (0xAA) and device ID (0x00)
-        const self_test = readData();
-        const device_id = readData();
+        const self_test = ps2.readData();
+        const device_id = ps2.readData();
 
         if (self_test) |st| {
-            if (st != MOUSE_SELF_TEST_PASSED) {
+            if (st != ps2.MOUSE_SELF_TEST_PASSED) {
                 console.warn("PS/2 mouse: self-test returned 0x{X:0>2}", .{st});
             }
         }
@@ -420,12 +290,12 @@ pub fn init() void {
     }
 
     // 6. Set default parameters
-    _ = sendMouseCommand(MOUSE_CMD_SET_DEFAULTS);
-    _ = sendMouseCommandWithData(MOUSE_CMD_SET_SAMPLE_RATE, 100); // 100 samples/sec
-    _ = sendMouseCommandWithData(MOUSE_CMD_SET_RESOLUTION, 2); // 4 counts/mm
+    _ = ps2.sendMouseCommand(ps2.MOUSE_CMD_SET_DEFAULTS);
+    _ = ps2.sendMouseCommandWithData(ps2.MOUSE_CMD_SET_SAMPLE_RATE, 100); // 100 samples/sec
+    _ = ps2.sendMouseCommandWithData(ps2.MOUSE_CMD_SET_RESOLUTION, 2); // 4 counts/mm
 
     // 7. Enable data streaming
-    if (!sendMouseCommand(MOUSE_CMD_ENABLE_STREAMING)) {
+    if (!ps2.sendMouseCommand(ps2.MOUSE_CMD_ENABLE_STREAMING)) {
         console.warn("PS/2 mouse: failed to enable streaming", .{});
     }
 
@@ -436,14 +306,14 @@ pub fn init() void {
 /// Try to enable IntelliMouse scroll wheel mode
 fn enableScrollWheel() bool {
     // Magic sequence: set sample rate to 200, 100, 80
-    if (!sendMouseCommandWithData(MOUSE_CMD_SET_SAMPLE_RATE, 200)) return false;
-    if (!sendMouseCommandWithData(MOUSE_CMD_SET_SAMPLE_RATE, 100)) return false;
-    if (!sendMouseCommandWithData(MOUSE_CMD_SET_SAMPLE_RATE, 80)) return false;
+    if (!ps2.sendMouseCommandWithData(ps2.MOUSE_CMD_SET_SAMPLE_RATE, 200)) return false;
+    if (!ps2.sendMouseCommandWithData(ps2.MOUSE_CMD_SET_SAMPLE_RATE, 100)) return false;
+    if (!ps2.sendMouseCommandWithData(ps2.MOUSE_CMD_SET_SAMPLE_RATE, 80)) return false;
 
     // Get device ID - should be 0x03 for IntelliMouse
-    if (!sendMouseCommand(MOUSE_CMD_GET_DEVICE_ID)) return false;
+    if (!ps2.sendMouseCommand(ps2.MOUSE_CMD_GET_DEVICE_ID)) return false;
 
-    const id = readData() orelse return false;
+    const id = ps2.readData() orelse return false;
     return id == 0x03;
 }
 
@@ -451,18 +321,18 @@ fn enableScrollWheel() bool {
 pub fn handleIrq() void {
     if (!@atomicLoad(bool, &mouse_initialized, .acquire)) {
         // Discard data to acknowledge
-        _ = hal.io.inb(PS2_DATA_PORT);
+        _ = hal.io.inb(ps2.DATA_PORT);
         return;
     }
 
-    const status = StatusReg.read();
+    const status = ps2.StatusReg.read();
 
     // Verify data is from mouse
     if (!status.hasData() or !status.isMouseData()) {
         return;
     }
 
-    const byte = hal.io.inb(PS2_DATA_PORT);
+    const byte = hal.io.inb(ps2.DATA_PORT);
 
     const held = mouse_lock.acquire();
     defer held.release();

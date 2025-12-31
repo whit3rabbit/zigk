@@ -19,6 +19,14 @@ const fd_mod = @import("fd");
 const heap = @import("heap");
 const base = @import("base.zig");
 
+// Import extracted modules
+const poll_mod = @import("poll.zig");
+const msg_mod = @import("msg.zig");
+
+// Re-export helper functions for external use
+pub const hasPendingSignal = poll_mod.hasPendingSignal;
+pub const pollTimeoutToTicks = poll_mod.pollTimeoutToTicks;
+
 /// Wake function for blocked threads - called from TCP/socket layer
 fn wakeBlockedThread(opaque_thread: ?*anyopaque) void {
     if (opaque_thread) |ptr| {
@@ -54,6 +62,10 @@ const isValidUserAccess = user_mem.isValidUserAccess;
 const AccessMode = user_mem.AccessMode;
 
 const FileDescriptor = fd_mod.FileDescriptor;
+
+// =============================================================================
+// Socket FD Management
+// =============================================================================
 
 const SocketFdData = struct {
     socket_idx: usize,
@@ -132,6 +144,10 @@ fn socketErrorToSyscallError(err: socket.SocketError) SyscallError {
     };
 }
 
+// =============================================================================
+// Socket File Operations
+// =============================================================================
+
 fn socketRead(fd: *FileDescriptor, buf: []u8) isize {
     const ctx = getSocketData(fd) orelse {
         return Errno.ENOTSOCK.toReturn();
@@ -188,20 +204,9 @@ fn socketClose(fd: *FileDescriptor) isize {
     return 0;
 }
 
-fn hasPendingSignal() bool {
-    const current = sched.getCurrentThread() orelse return false;
-    const pending = current.pending_signals & ~current.sigmask;
-    return pending != 0;
-}
-
-fn pollTimeoutToTicks(timeout_ms: isize) ?u64 {
-    if (timeout_ms < 0) return null;
-    if (timeout_ms == 0) return 0;
-
-    const tick_ms: u64 = 10;
-    const timeout_u64 = std.math.cast(u64, timeout_ms) orelse return null;
-    return std.math.divCeil(u64, timeout_u64, tick_ms) catch unreachable;
-}
+// =============================================================================
+// Basic Socket Syscalls
+// =============================================================================
 
 /// sys_socket (41) - Create a socket
 /// (domain, type, protocol) -> fd
@@ -233,8 +238,6 @@ pub fn sys_socket(domain: usize, sock_type: usize, protocol: usize) SyscallError
 /// (fd, addr, addrlen) -> int
 ///
 /// SECURITY: Binding to privileged ports (< 1024) requires root (euid == 0).
-/// This prevents unprivileged processes from impersonating system services
-/// (e.g., binding to port 80 to intercept HTTP traffic).
 pub fn sys_bind(fd: usize, addr_ptr: usize, addrlen: usize) SyscallError!usize {
     const ctx = getSocketContext(fd) orelse {
         return error.ENOTSOCK;
@@ -250,11 +253,8 @@ pub fn sys_bind(fd: usize, addr_ptr: usize, addrlen: usize) SyscallError!usize {
     };
 
     // SECURITY: Check privileged port binding (ports < 1024)
-    // Port is in network byte order, convert to host order for comparison
     const host_port = @byteSwap(kaddr.port);
     if (host_port < 1024 and host_port != 0) {
-        // Only root (euid == 0) can bind to privileged ports
-        // TODO: Add CAP_NET_BIND_SERVICE capability check when capability is defined
         const proc = base.getCurrentProcess();
         if (proc.euid != 0) {
             return error.EACCES;
@@ -268,6 +268,10 @@ pub fn sys_bind(fd: usize, addr_ptr: usize, addrlen: usize) SyscallError!usize {
     return 0;
 }
 
+// =============================================================================
+// Data Transfer Syscalls
+// =============================================================================
+
 /// Maximum send buffer size to prevent excessive kernel allocation
 const MAX_SENDTO_BUFFER: usize = 65536;
 
@@ -275,8 +279,6 @@ const MAX_SENDTO_BUFFER: usize = 65536;
 /// (fd, buf, len, flags, dest_addr, addrlen) -> ssize_t
 ///
 /// SECURITY: Copies user data to kernel buffer to prevent TOCTOU.
-/// A racing userspace thread could modify or unmap the buffer between
-/// validation and use by the socket layer.
 pub fn sys_sendto(
     fd: usize,
     buf_ptr: usize,
@@ -291,17 +293,14 @@ pub fn sys_sendto(
         return error.ENOTSOCK;
     };
 
-    // Limit buffer size to prevent excessive kernel allocation
     if (len > MAX_SENDTO_BUFFER) {
         return error.EINVAL;
     }
 
-    // Validate buffer with read permission (kernel reads from user buffer)
     if (!isValidUserAccess(buf_ptr, len, AccessMode.Read)) {
         return error.EFAULT;
     }
 
-    // Copy destination address from user memory if provided
     var kdest_addr: ?socket.SockAddrIn = null;
 
     if (dest_addr_ptr != 0) {
@@ -314,7 +313,6 @@ pub fn sys_sendto(
     }
 
     // SECURITY: Copy user data to kernel buffer to prevent TOCTOU.
-    // Do NOT create a slice from user memory address.
     const kbuf = heap.allocator().alloc(u8, len) catch {
         return error.ENOMEM;
     };
@@ -331,7 +329,6 @@ pub fn sys_sendto(
         };
         return sent;
     } else {
-        // UDP without destination not supported in MVP (unless connect used?)
         return error.EDESTADDRREQ;
     }
 }
@@ -343,7 +340,6 @@ const MAX_RECVFROM_BUFFER: usize = 65536;
 /// (fd, buf, len, flags, src_addr, addrlen_ptr) -> ssize_t
 ///
 /// SECURITY: Receives into kernel buffer then copies to user, preventing TOCTOU.
-/// A racing userspace thread could unmap the buffer while socket layer writes to it.
 pub fn sys_recvfrom(
     fd: usize,
     buf_ptr: usize,
@@ -352,29 +348,23 @@ pub fn sys_recvfrom(
     src_addr_ptr: usize,
     addrlen_ptr: usize,
 ) SyscallError!usize {
-    _ = flags; // Flags ignored for MVP
+    _ = flags;
 
     const ctx = getSocketContext(fd) orelse {
         return error.ENOTSOCK;
     };
 
-    // Limit buffer size to prevent excessive kernel allocation
     const recv_len = @min(len, MAX_RECVFROM_BUFFER);
 
-    // Validate buffer with write permission (kernel writes to user buffer)
     if (!isValidUserAccess(buf_ptr, recv_len, AccessMode.Write)) {
         return error.EFAULT;
     }
 
-    // SECURITY: Allocate kernel buffer to receive into, preventing TOCTOU.
-    // Do NOT create a slice from user memory address.
     const kbuf = heap.allocator().alloc(u8, recv_len) catch {
         return error.ENOMEM;
     };
     defer heap.allocator().free(kbuf);
 
-    // SECURITY: Zero-initialize to prevent kernel stack leak if socket layer
-    // fails to fully populate the structure (e.g., on error paths).
     var ksrc_addr: socket.SockAddrIn = std.mem.zeroes(socket.SockAddrIn);
     const src_addr_arg: ?*socket.SockAddrIn = if (src_addr_ptr != 0) &ksrc_addr else null;
 
@@ -382,7 +372,6 @@ pub fn sys_recvfrom(
         return socketErrorToSyscallError(err);
     };
 
-    // Copy received data to userspace
     if (received > 0) {
         const user_ptr = user_mem.UserPtr.from(buf_ptr);
         _ = user_ptr.copyFromKernel(kbuf[0..received]) catch {
@@ -390,9 +379,7 @@ pub fn sys_recvfrom(
         };
     }
 
-    // Copy source address back to user if requested and successful
     if (src_addr_ptr != 0 and addrlen_ptr != 0) {
-        // Update addrlen first check
         const addrlen_uptr = user_mem.UserPtr.from(addrlen_ptr);
         const input_len = addrlen_uptr.readValue(u32) catch {
             return error.EFAULT;
@@ -402,12 +389,10 @@ pub fn sys_recvfrom(
             return error.EINVAL;
         }
 
-        // Copy address struct
         user_mem.copyStructToUser(socket.SockAddrIn, user_mem.UserPtr.from(src_addr_ptr), ksrc_addr) catch {
             return error.EFAULT;
         };
 
-        // Update length
         addrlen_uptr.writeValue(@as(u32, @sizeOf(socket.SockAddrIn))) catch {
             return error.EFAULT;
         };
@@ -416,9 +401,9 @@ pub fn sys_recvfrom(
     return received;
 }
 
-// ============================================================================
-// TCP-specific syscalls
-// ============================================================================
+// =============================================================================
+// TCP Connection Syscalls
+// =============================================================================
 
 /// sys_listen (50) - Listen for connections on socket
 /// (fd, backlog) -> int
@@ -436,36 +421,27 @@ pub fn sys_listen(fd: usize, backlog: usize) SyscallError!usize {
 
 /// sys_accept (43) - Accept connection on socket
 /// (fd, addr, addrlen_ptr) -> fd
-/// Blocks until a connection is available (for blocking sockets)
 pub fn sys_accept(fd: usize, addr_ptr: usize, addrlen_ptr: usize) SyscallError!usize {
-    // Ensure wake function is registered
     init();
 
     const ctx = getSocketContext(fd) orelse {
         return error.ENOTSOCK;
     };
 
-    // SECURITY: Zero-initialize to prevent kernel stack leak if accept
-    // returns success but only partially populates the struct (CWE-908)
     var kpeer_addr: socket.SockAddrIn = std.mem.zeroes(socket.SockAddrIn);
-    // recvfrom takes ?*SockAddrIn
     const peer_addr_arg: ?*socket.SockAddrIn = if (addr_ptr != 0) &kpeer_addr else null;
 
-    // Get socket to check blocking mode and set blocked_thread
     const sock = socket.getSocket(ctx.socket_idx) orelse {
         return error.EBADF;
     };
 
-    // Blocking accept loop
     while (true) {
         const result = socket.accept(ctx.socket_idx, peer_addr_arg);
 
         if (result) |new_sock_fd| {
-            // Success - copy address back if requested
             if (addr_ptr != 0 and addrlen_ptr != 0) {
                 const addrlen_uptr = user_mem.UserPtr.from(addrlen_ptr);
                 const input_len = addrlen_uptr.readValue(u32) catch {
-                    // Cleanup new socket?
                     _ = socket.close(new_sock_fd) catch {};
                     return error.EFAULT;
                 };
@@ -493,22 +469,14 @@ pub fn sys_accept(fd: usize, addr_ptr: usize, addrlen_ptr: usize) SyscallError!u
             return new_fd_num;
         } else |err| {
             if (err == socket.SocketError.WouldBlock and sock.blocking) {
-                // Block until connection arrives
                 const current = sched.getCurrentThread() orelse {
                     return error.EAGAIN;
                 };
-                // Disable interrupts to atomically set blocked_thread before
-                // entering Blocked state. This prevents a wake event from
-                // occurring between setting blocked_thread and blocking.
                 _ = hal.cpu.disableInterrupts();
                 sock.blocked_thread = current;
-                // block() sets state to Blocked then enables interrupts and
-                // halts. When we return, interrupts are enabled.
                 sched.block();
-                // Woke up - retry accept
                 continue;
             }
-            // Non-blocking or other error
             return socketErrorToSyscallError(err);
         }
     }
@@ -516,9 +484,7 @@ pub fn sys_accept(fd: usize, addr_ptr: usize, addrlen_ptr: usize) SyscallError!u
 
 /// sys_connect (42) - Connect socket to address
 /// (fd, addr, addrlen) -> int
-/// Blocks until connection completes (for blocking sockets)
 pub fn sys_connect(fd: usize, addr_ptr: usize, addrlen: usize) SyscallError!usize {
-    // Ensure wake function is registered
     init();
 
     const ctx = getSocketContext(fd) orelse {
@@ -529,48 +495,34 @@ pub fn sys_connect(fd: usize, addr_ptr: usize, addrlen: usize) SyscallError!usiz
         return error.EINVAL;
     }
 
-    // Safely copy address from user memory
     const kaddr = user_mem.copyStructFromUser(socket.SockAddrIn, user_mem.UserPtr.from(addr_ptr)) catch {
         return error.EFAULT;
     };
 
-    // Get socket to check blocking mode
     const sock = socket.getSocket(ctx.socket_idx) orelse {
         return error.EBADF;
     };
 
-    // Start connection (sends SYN)
     socket.connect(ctx.socket_idx, &kaddr) catch |err| {
         return socketErrorToSyscallError(err);
     };
 
-    // For blocking socket, wait for connection to complete
     if (sock.blocking) {
         while (true) {
-            // Check connection status
             socket.checkConnectStatus(ctx.socket_idx) catch |err| {
                 if (err == socket.SocketError.WouldBlock) {
-                    // Still connecting - block until TCP layer wakes us
                     const current = sched.getCurrentThread() orelse {
                         return error.EAGAIN;
                     };
-                    // Disable interrupts to atomically set blocked_thread before
-                    // entering Blocked state. This prevents a wake event from
-                    // occurring between setting blocked_thread and blocking.
                     _ = hal.cpu.disableInterrupts();
-                    // Set blocked_thread on TCB so TCP layer can wake us
                     if (socket.getTcb(ctx.socket_idx)) |tcb| {
                         tcb.blocked_thread = current;
                     }
-                    // block() sets state to Blocked then enables interrupts and
-                    // halts. When we return, interrupts are enabled.
                     sched.block();
                     continue;
                 }
-                // Connection failed
                 return socketErrorToSyscallError(err);
             };
-            // Connected successfully
             return 0;
         }
     }
@@ -578,18 +530,16 @@ pub fn sys_connect(fd: usize, addr_ptr: usize, addrlen: usize) SyscallError!usiz
     return 0;
 }
 
-// ============================================================================
-// Socket Options syscalls
-// ============================================================================
+// =============================================================================
+// Socket Options Syscalls
+// =============================================================================
 
 /// sys_setsockopt (54) - Set socket option
-/// (fd, level, optname, optval, optlen) -> int
 pub fn sys_setsockopt(fd: usize, level: usize, optname: usize, optval_ptr: usize, optlen: usize) SyscallError!usize {
     const ctx = getSocketContext(fd) orelse {
         return error.ENOTSOCK;
     };
 
-    // Copy option value to kernel buffer to avoid TOCTOU on async access.
     const max_optlen: usize = 256;
     if (optlen > max_optlen) {
         return error.EINVAL;
@@ -608,7 +558,6 @@ pub fn sys_setsockopt(fd: usize, level: usize, optname: usize, optval_ptr: usize
         };
     }
 
-    // Validate socket option parameters
     const level_i32 = std.math.cast(i32, level) orelse return error.EINVAL;
     const optname_i32 = std.math.cast(i32, optname) orelse return error.EINVAL;
 
@@ -620,48 +569,36 @@ pub fn sys_setsockopt(fd: usize, level: usize, optname: usize, optval_ptr: usize
 }
 
 /// sys_getsockopt (55) - Get socket option
-/// (fd, level, optname, optval, optlen_ptr) -> int
 pub fn sys_getsockopt(fd: usize, level: usize, optname: usize, optval_ptr: usize, optlen_ptr: usize) SyscallError!usize {
     const ctx = getSocketContext(fd) orelse {
         return error.ENOTSOCK;
     };
 
-    // Security: Copy optlen to kernel stack first to prevent TOCTOU race
-    // A racing userspace thread could modify optlen between validation and use
     const optlen_uptr = user_mem.UserPtr.from(optlen_ptr);
     var koptlen = optlen_uptr.readValue(usize) catch {
         return error.EFAULT;
     };
 
-    // Validate option value pointer using kernel-copied length
     if (koptlen > 0 and !isValidUserAccess(optval_ptr, koptlen, AccessMode.Write)) {
         return error.EFAULT;
     }
 
-    // Cap optlen to prevent excessive kernel buffer allocation
     const max_optlen: usize = 256;
     if (koptlen > max_optlen) {
         koptlen = max_optlen;
     }
 
-    // Validate socket option parameters
     const level_i32 = std.math.cast(i32, level) orelse return error.EINVAL;
     const optname_i32 = std.math.cast(i32, optname) orelse return error.EINVAL;
 
-    // Allocate kernel buffer for option value
-    // SECURITY NOTE: This is undefined but safe because socket.getsockopt()
-    // fully initializes exactly result_len bytes before returning success.
-    // On error, the function returns early and no bytes are copied to userspace.
     var koptval_buf: [256]u8 = undefined;
     const koptval = koptval_buf[0..koptlen];
 
-    // Call socket layer with kernel buffer
     var result_len = koptlen;
     socket.getsockopt(ctx.socket_idx, level_i32, optname_i32, koptval.ptr, &result_len) catch |err| {
         return socketErrorToSyscallError(err);
     };
 
-    // Copy result back to userspace
     if (result_len > 0) {
         const optval_uptr = user_mem.UserPtr.from(optval_ptr);
         _ = optval_uptr.copyFromKernel(koptval[0..result_len]) catch {
@@ -669,7 +606,6 @@ pub fn sys_getsockopt(fd: usize, level: usize, optname: usize, optval_ptr: usize
         };
     }
 
-    // Write back actual length
     optlen_uptr.writeValue(result_len) catch {
         return error.EFAULT;
     };
@@ -677,19 +613,16 @@ pub fn sys_getsockopt(fd: usize, level: usize, optname: usize, optval_ptr: usize
     return 0;
 }
 
-// ============================================================================
-// Shutdown and Address Query syscalls
-// ============================================================================
+// =============================================================================
+// Shutdown and Address Query Syscalls
+// =============================================================================
 
 /// sys_shutdown (48) - Shut down part of a full-duplex connection
-/// (fd, how) -> int
-/// how: 0=SHUT_RD, 1=SHUT_WR, 2=SHUT_RDWR
 pub fn sys_shutdown(fd: usize, how: usize) SyscallError!usize {
     const ctx = getSocketContext(fd) orelse {
         return error.ENOTSOCK;
     };
 
-    // Validate shutdown mode (0, 1, or 2)
     const how_i32 = std.math.cast(i32, how) orelse return error.EINVAL;
     if (how_i32 < 0 or how_i32 > 2) return error.EINVAL;
 
@@ -701,43 +634,35 @@ pub fn sys_shutdown(fd: usize, how: usize) SyscallError!usize {
 }
 
 /// sys_getsockname (51) - Get local socket address
-/// (fd, addr, addrlen_ptr) -> int
 pub fn sys_getsockname(fd: usize, addr_ptr: usize, addrlen_ptr: usize) SyscallError!usize {
     const ctx = getSocketContext(fd) orelse {
         return error.ENOTSOCK;
     };
 
-    // Security: Copy addrlen to kernel stack first to prevent TOCTOU race
     const addrlen_uptr = user_mem.UserPtr.from(addrlen_ptr);
     const kaddrlen = addrlen_uptr.readValue(u32) catch {
         return error.EFAULT;
     };
 
-    // Check addrlen is large enough using kernel-copied value
     if (kaddrlen < @sizeOf(socket.SockAddrIn)) {
         return error.EINVAL;
     }
 
-    // Validate address pointer
     if (!isValidUserAccess(addr_ptr, @sizeOf(socket.SockAddrIn), AccessMode.Write)) {
         return error.EFAULT;
     }
 
-    // SECURITY: Zero-initialize to prevent kernel stack leak if getsockname
-    // returns success but only partially populates the struct (CWE-908)
     var kaddr: socket.SockAddrIn = std.mem.zeroes(socket.SockAddrIn);
 
     socket.getsockname(ctx.socket_idx, &kaddr) catch |err| {
         return socketErrorToSyscallError(err);
     };
 
-    // Copy address to userspace
     const addr_uptr = user_mem.UserPtr.from(addr_ptr);
     addr_uptr.writeValue(kaddr) catch {
         return error.EFAULT;
     };
 
-    // Write back actual size
     addrlen_uptr.writeValue(@as(u32, @sizeOf(socket.SockAddrIn))) catch {
         return error.EFAULT;
     };
@@ -746,43 +671,35 @@ pub fn sys_getsockname(fd: usize, addr_ptr: usize, addrlen_ptr: usize) SyscallEr
 }
 
 /// sys_getpeername (52) - Get peer socket address
-/// (fd, addr, addrlen_ptr) -> int
 pub fn sys_getpeername(fd: usize, addr_ptr: usize, addrlen_ptr: usize) SyscallError!usize {
     const ctx = getSocketContext(fd) orelse {
         return error.ENOTSOCK;
     };
 
-    // Security: Copy addrlen to kernel stack first to prevent TOCTOU race
     const addrlen_uptr = user_mem.UserPtr.from(addrlen_ptr);
     const kaddrlen = addrlen_uptr.readValue(u32) catch {
         return error.EFAULT;
     };
 
-    // Check addrlen is large enough using kernel-copied value
     if (kaddrlen < @sizeOf(socket.SockAddrIn)) {
         return error.EINVAL;
     }
 
-    // Validate address pointer
     if (!isValidUserAccess(addr_ptr, @sizeOf(socket.SockAddrIn), AccessMode.Write)) {
         return error.EFAULT;
     }
 
-    // SECURITY: Zero-initialize to prevent kernel stack leak if getpeername
-    // returns success but only partially populates the struct (CWE-908)
     var kaddr: socket.SockAddrIn = std.mem.zeroes(socket.SockAddrIn);
 
     socket.getpeername(ctx.socket_idx, &kaddr) catch |err| {
         return socketErrorToSyscallError(err);
     };
 
-    // Copy address to userspace
     const addr_uptr = user_mem.UserPtr.from(addr_ptr);
     addr_uptr.writeValue(kaddr) catch {
         return error.EFAULT;
     };
 
-    // Write back actual size
     addrlen_uptr.writeValue(@as(u32, @sizeOf(socket.SockAddrIn))) catch {
         return error.EFAULT;
     };
@@ -790,462 +707,26 @@ pub fn sys_getpeername(fd: usize, addr_ptr: usize, addrlen_ptr: usize) SyscallEr
     return 0;
 }
 
+// =============================================================================
+// Poll Syscall (delegated to poll.zig)
+// =============================================================================
+
 /// sys_poll (7) - Wait for some event on a file descriptor
 /// (ufds, nfds, timeout) -> int
-///
-/// Security: Copies pollfd array to kernel memory to prevent TOCTOU races.
-/// A malicious userspace thread could modify fd values or unmap memory
-/// while poll is blocked, causing kernel faults or invalid socket access.
 pub fn sys_poll(ufds: usize, nfds: usize, timeout: isize) SyscallError!usize {
-    if (hasPendingSignal()) {
-        return error.EINTR;
-    }
-
-    // Limit nfds to prevent excessive kernel allocations (matches Linux RLIMIT_NOFILE default)
-    const max_nfds: usize = 1024;
-    if (nfds > max_nfds) {
-        return error.EINVAL;
-    }
-
-    if (nfds == 0) {
-        // No fds to poll - if timeout is 0, return immediately; otherwise block
-        if (timeout == 0) return 0;
-        if (pollTimeoutToTicks(timeout)) |ticks| {
-            if (ticks > 0) {
-                sched.sleepForTicks(ticks);
-            }
-            if (hasPendingSignal()) {
-                return error.EINTR;
-            }
-            return 0;
-        }
-
-        blockCurrentThread();
-        if (hasPendingSignal()) {
-            return error.EINTR;
-        }
-        return 0;
-    }
-
-    // Validate pollfd array pointer
-    // SECURITY: Use checked arithmetic to prevent integer overflow.
-    const poll_size = @sizeOf(uapi.poll.PollFd);
-    const array_size = std.math.mul(usize, nfds, poll_size) catch return error.EINVAL;
-    if (!isValidUserAccess(ufds, array_size, AccessMode.Read) or
-        !isValidUserAccess(ufds, array_size, AccessMode.Write))
-    {
-        return error.EFAULT;
-    }
-
-    // Security: Copy pollfd array to kernel memory to prevent TOCTOU
-    // This protects against:
-    // 1. Racing userspace modifying fd values between check and use
-    // 2. Userspace unmapping the pollfd array while poll is blocked
-    const kpollfds = heap.allocator().alloc(uapi.poll.PollFd, nfds) catch {
-        return error.ENOMEM;
-    };
-    defer heap.allocator().free(kpollfds);
-
-    // Copy from userspace
-    const ufds_uptr = user_mem.UserPtr.from(ufds);
-    _ = ufds_uptr.copyToKernel(std.mem.sliceAsBytes(kpollfds)) catch {
-        return error.EFAULT;
-    };
-
-    // Polling loop using kernel copy
-    var ready_count: usize = 0;
-
-    // Check events immediately (non-blocking pass)
-    for (kpollfds) |*pfd| {
-        pfd.revents = 0;
-
-        if (pfd.fd < 0) continue;
-
-        // Basic handling for stdin/stdout/stderr
-        if (pfd.fd <= 2) {
-            const events: u16 = @bitCast(pfd.events);
-            if (pfd.fd > 0 and (events & uapi.poll.POLLOUT) != 0) {
-                pfd.revents |= @bitCast(uapi.poll.POLLOUT);
-            }
-            continue;
-        }
-
-        // Safe cast: fd is positive after checks above
-        const fd_usize: usize = @intCast(pfd.fd);
-        const socket_ctx = getSocketContext(fd_usize) orelse {
-            pfd.revents |= @bitCast(uapi.poll.POLLNVAL);
-            continue;
-        };
-        const events: u16 = @bitCast(pfd.events);
-        pfd.revents = @bitCast(socket.checkPollEvents(socket_ctx.socket_idx, events));
-
-        if (pfd.revents != 0) {
-            ready_count += 1;
-        }
-    }
-
-    if (ready_count > 0 or timeout == 0) {
-        // Copy results back to userspace
-        _ = ufds_uptr.copyFromKernel(std.mem.sliceAsBytes(kpollfds)) catch {
-            return error.EFAULT;
-        };
-        return ready_count;
-    }
-
-    // Blocking Wait
-    // Note: timeout is ms. -1 = infinite.
-    const current_thread = getCurrentThread();
-
-    // SECURITY: Store socket indices we register on to prevent TOCTOU race.
-    // If an fd is closed and reused while we're blocked, re-looking up by fd
-    // would find the wrong socket. By storing socket_idx at registration time,
-    // we ensure we clear the correct sockets even if fds are recycled.
-    // Max 1024 sockets (matches max_nfds limit above).
-    var registered_sockets: [1024]?usize = [_]?usize{null} ** 1024;
-
-    // Register blocked thread on all sockets (using kernel copy of fd values)
-    for (kpollfds, 0..) |*pfd, i| {
-        // fd > 2 ensures positive value, safe to cast
-        if (pfd.fd > 2) {
-            const fd_u: usize = @intCast(pfd.fd);
-            if (getSocketContext(fd_u)) |ctx| {
-                if (socket.getSocket(ctx.socket_idx)) |sock| {
-                    if (current_thread) |t| {
-                        sock.blocked_thread = t;
-                        if (sock.tcb) |tcb| {
-                            tcb.blocked_thread = t;
-                        }
-                        // Store the socket index for cleanup
-                        registered_sockets[i] = ctx.socket_idx;
-                    }
-                }
-            }
-        }
-    }
-
-    // Block
-    if (pollTimeoutToTicks(timeout)) |ticks| {
-        if (ticks > 0) {
-            sched.sleepForTicks(ticks);
-        }
-    } else {
-        blockCurrentThread();
-    }
-
-    // Woke up - Clear blocked thread registration using stored socket indices
-    for (registered_sockets[0..nfds]) |maybe_idx| {
-        if (maybe_idx) |sock_idx| {
-            if (socket.getSocket(sock_idx)) |sock| {
-                if (current_thread) |t| {
-                    if (sock.blocked_thread == t) {
-                        sock.blocked_thread = null;
-                    }
-                    if (sock.tcb) |tcb| {
-                        if (tcb.blocked_thread == t) {
-                            tcb.blocked_thread = null;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Re-check events using kernel copy
-    ready_count = 0;
-    for (kpollfds) |*pfd| {
-        // Ensure consistent reporting
-        pfd.revents = 0;
-
-        if (pfd.fd < 0) continue;
-
-        if (pfd.fd <= 2) {
-            const events: u16 = @bitCast(pfd.events);
-            if (pfd.fd > 0 and (events & uapi.poll.POLLOUT) != 0) {
-                pfd.revents |= @bitCast(uapi.poll.POLLOUT);
-            }
-            continue;
-        }
-
-        // Safe cast: fd is positive after checks above
-        const fd_usize: usize = @intCast(pfd.fd);
-        const socket_ctx = getSocketContext(fd_usize) orelse {
-            pfd.revents |= @bitCast(uapi.poll.POLLNVAL);
-            continue;
-        };
-        const events: u16 = @bitCast(pfd.events);
-        pfd.revents = @bitCast(socket.checkPollEvents(socket_ctx.socket_idx, events));
-
-        if (pfd.revents != 0) {
-            ready_count += 1;
-        }
-    }
-
-    if (ready_count == 0 and hasPendingSignal()) {
-        return error.EINTR;
-    }
-
-    // Copy results back to userspace
-    _ = ufds_uptr.copyFromKernel(std.mem.sliceAsBytes(kpollfds)) catch {
-        return error.EFAULT;
-    };
-
-    return ready_count;
+    return poll_mod.sys_poll(ufds, nfds, timeout, &socket_file_ops);
 }
 
-// ============================================================================
-// Scatter/Gather I/O Syscalls (sendmsg/recvmsg)
-// ============================================================================
-
-const IoVec = uapi.abi.IoVec;
-const MsgHdr = uapi.abi.MsgHdr;
-
-/// Maximum number of iovecs to prevent excessive kernel allocations
-const MAX_IOV_COUNT: usize = 1024;
-
-/// Maximum total message size for sendmsg/recvmsg
-const MAX_MSG_SIZE: usize = 65536;
+// =============================================================================
+// Scatter/Gather I/O Syscalls (delegated to msg.zig)
+// =============================================================================
 
 /// sys_sendmsg (46) - Send a message on a socket with scatter/gather I/O
-/// (fd, msg_ptr, flags) -> ssize_t
-///
-/// Gathers data from multiple user buffers (iovecs) and sends as single message.
-/// SECURITY: All user data is copied to kernel buffers to prevent TOCTOU.
 pub fn sys_sendmsg(fd: usize, msg_ptr: usize, flags: usize) SyscallError!usize {
-    _ = flags; // Flags ignored for MVP (MSG_DONTWAIT, MSG_NOSIGNAL, etc.)
-
-    const ctx = getSocketContext(fd) orelse {
-        return error.ENOTSOCK;
-    };
-
-    // Read msghdr from userspace
-    const msg = user_mem.copyStructFromUser(MsgHdr, user_mem.UserPtr.from(msg_ptr)) catch {
-        return error.EFAULT;
-    };
-
-    // Validate iovec count
-    if (msg.msg_iovlen == 0) {
-        return 0; // Nothing to send
-    }
-    if (msg.msg_iovlen > MAX_IOV_COUNT) {
-        return error.EMSGSIZE;
-    }
-
-    // Validate iovec array pointer
-    const iov_size = msg.msg_iovlen * @sizeOf(IoVec);
-    if (!isValidUserAccess(msg.msg_iov, iov_size, AccessMode.Read)) {
-        return error.EFAULT;
-    }
-
-    // Copy iovec array to kernel
-    const iovecs = heap.allocator().alloc(IoVec, msg.msg_iovlen) catch {
-        return error.ENOMEM;
-    };
-    defer heap.allocator().free(iovecs);
-
-    const iov_uptr = user_mem.UserPtr.from(msg.msg_iov);
-    _ = iov_uptr.copyToKernel(std.mem.sliceAsBytes(iovecs)) catch {
-        return error.EFAULT;
-    };
-
-    // Calculate total message size and validate
-    // SECURITY: Use checked arithmetic to prevent underflow in ReleaseFast (CWE-190)
-    var total_len: usize = 0;
-    for (iovecs) |iov| {
-        total_len = std.math.add(usize, total_len, iov.iov_len) catch return error.EMSGSIZE;
-        if (total_len > MAX_MSG_SIZE) {
-            return error.EMSGSIZE;
-        }
-    }
-
-    if (total_len == 0) {
-        return 0;
-    }
-
-    // Allocate kernel buffer and gather data from iovecs
-    const kbuf = heap.allocator().alloc(u8, total_len) catch {
-        return error.ENOMEM;
-    };
-    defer heap.allocator().free(kbuf);
-
-    var offset: usize = 0;
-    for (iovecs) |iov| {
-        if (iov.iov_len == 0) continue;
-
-        if (!isValidUserAccess(iov.iov_base, iov.iov_len, AccessMode.Read)) {
-            return error.EFAULT;
-        }
-
-        const iov_uptr_base = user_mem.UserPtr.from(iov.iov_base);
-        _ = iov_uptr_base.copyToKernel(kbuf[offset .. offset + iov.iov_len]) catch {
-            return error.EFAULT;
-        };
-        offset += iov.iov_len;
-    }
-
-    // Handle optional destination address
-    var kdest_addr: ?socket.SockAddrIn = null;
-    if (msg.msg_name != 0 and msg.msg_namelen >= @sizeOf(socket.SockAddrIn)) {
-        kdest_addr = user_mem.copyStructFromUser(socket.SockAddrIn, user_mem.UserPtr.from(msg.msg_name)) catch {
-            return error.EFAULT;
-        };
-    }
-
-    // Send the message
-    if (kdest_addr) |*addr| {
-        // UDP-style send with destination address
-        const sent = socket.sendto(ctx.socket_idx, kbuf, addr) catch |err| {
-            return socketErrorToSyscallError(err);
-        };
-        return sent;
-    } else {
-        // TCP-style send (connected socket)
-        const sock = socket.getSocket(ctx.socket_idx) orelse {
-            return error.EBADF;
-        };
-
-        if (sock.sock_type == socket.SOCK_STREAM) {
-            const sent = socket.tcpSend(ctx.socket_idx, kbuf) catch |err| {
-                return socketErrorToSyscallError(err);
-            };
-            return sent;
-        } else {
-            // UDP without destination requires prior connect()
-            return error.EDESTADDRREQ;
-        }
-    }
+    return msg_mod.sys_sendmsg(fd, msg_ptr, flags, &socket_file_ops);
 }
 
 /// sys_recvmsg (47) - Receive a message from a socket with scatter/gather I/O
-/// (fd, msg_ptr, flags) -> ssize_t
-///
-/// Receives data and scatters it into multiple user buffers (iovecs).
-/// SECURITY: Data is received into kernel buffer then copied to user to prevent TOCTOU.
 pub fn sys_recvmsg(fd: usize, msg_ptr: usize, flags: usize) SyscallError!usize {
-    _ = flags; // Flags ignored for MVP (MSG_PEEK, MSG_WAITALL, etc.)
-
-    const ctx = getSocketContext(fd) orelse {
-        return error.ENOTSOCK;
-    };
-
-    // Read msghdr from userspace
-    var msg = user_mem.copyStructFromUser(MsgHdr, user_mem.UserPtr.from(msg_ptr)) catch {
-        return error.EFAULT;
-    };
-
-    // Validate iovec count
-    if (msg.msg_iovlen == 0) {
-        return 0; // Nothing to receive into
-    }
-    if (msg.msg_iovlen > MAX_IOV_COUNT) {
-        return error.EMSGSIZE;
-    }
-
-    // Validate iovec array pointer
-    const iov_size = msg.msg_iovlen * @sizeOf(IoVec);
-    if (!isValidUserAccess(msg.msg_iov, iov_size, AccessMode.Read)) {
-        return error.EFAULT;
-    }
-
-    // Copy iovec array to kernel
-    const iovecs = heap.allocator().alloc(IoVec, msg.msg_iovlen) catch {
-        return error.ENOMEM;
-    };
-    defer heap.allocator().free(iovecs);
-
-    const iov_uptr = user_mem.UserPtr.from(msg.msg_iov);
-    _ = iov_uptr.copyToKernel(std.mem.sliceAsBytes(iovecs)) catch {
-        return error.EFAULT;
-    };
-
-    // Calculate total buffer size and validate write access
-    // SECURITY: Use checked arithmetic to prevent underflow in ReleaseFast (CWE-190)
-    var total_len: usize = 0;
-    for (iovecs) |iov| {
-        total_len = std.math.add(usize, total_len, iov.iov_len) catch return error.EMSGSIZE;
-        if (total_len > MAX_MSG_SIZE) {
-            return error.EMSGSIZE;
-        }
-
-        // Validate each iovec buffer for write access
-        if (iov.iov_len > 0 and !isValidUserAccess(iov.iov_base, iov.iov_len, AccessMode.Write)) {
-            return error.EFAULT;
-        }
-    }
-
-    if (total_len == 0) {
-        return 0;
-    }
-
-    // Allocate kernel receive buffer
-    const recv_len = @min(total_len, MAX_MSG_SIZE);
-    const kbuf = heap.allocator().alloc(u8, recv_len) catch {
-        return error.ENOMEM;
-    };
-    defer heap.allocator().free(kbuf);
-
-    // Prepare for source address if requested
-    var ksrc_addr: socket.SockAddrIn = undefined;
-    const src_addr_arg: ?*socket.SockAddrIn = if (msg.msg_name != 0) &ksrc_addr else null;
-
-    // Receive data
-    const sock = socket.getSocket(ctx.socket_idx) orelse {
-        return error.EBADF;
-    };
-
-    var received: usize = 0;
-    if (sock.sock_type == socket.SOCK_STREAM) {
-        received = socket.tcpRecv(ctx.socket_idx, kbuf) catch |err| {
-            return socketErrorToSyscallError(err);
-        };
-    } else {
-        received = socket.recvfrom(ctx.socket_idx, kbuf, src_addr_arg) catch |err| {
-            return socketErrorToSyscallError(err);
-        };
-    }
-
-    // Scatter received data into user iovecs
-    var bytes_remaining = received;
-    var iov_idx: usize = 0;
-    var buf_offset: usize = 0;
-
-    while (bytes_remaining > 0 and iov_idx < iovecs.len) {
-        const iov = iovecs[iov_idx];
-        if (iov.iov_len == 0) {
-            iov_idx += 1;
-            continue;
-        }
-
-        const copy_len = @min(bytes_remaining, iov.iov_len);
-        const iov_uptr_base = user_mem.UserPtr.from(iov.iov_base);
-        _ = iov_uptr_base.copyFromKernel(kbuf[buf_offset .. buf_offset + copy_len]) catch {
-            return error.EFAULT;
-        };
-
-        buf_offset += copy_len;
-        bytes_remaining -= copy_len;
-        iov_idx += 1;
-    }
-
-    // Copy source address back to user if requested
-    if (msg.msg_name != 0 and msg.msg_namelen >= @sizeOf(socket.SockAddrIn) and src_addr_arg != null) {
-        user_mem.copyStructToUser(socket.SockAddrIn, user_mem.UserPtr.from(msg.msg_name), ksrc_addr) catch {
-            return error.EFAULT;
-        };
-
-        // Update msg_namelen in userspace
-        msg.msg_namelen = @sizeOf(socket.SockAddrIn);
-    } else {
-        msg.msg_namelen = 0;
-    }
-
-    // Clear msg_controllen (ancillary data not implemented)
-    msg.msg_controllen = 0;
-    msg.msg_flags = 0;
-
-    // Write updated msghdr back to userspace
-    user_mem.copyStructToUser(MsgHdr, user_mem.UserPtr.from(msg_ptr), msg) catch {
-        return error.EFAULT;
-    };
-
-    return received;
+    return msg_mod.sys_recvmsg(fd, msg_ptr, flags, &socket_file_ops);
 }
