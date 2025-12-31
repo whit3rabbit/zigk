@@ -231,6 +231,10 @@ pub fn sys_socket(domain: usize, sock_type: usize, protocol: usize) SyscallError
 
 /// sys_bind (49) - Bind socket to address
 /// (fd, addr, addrlen) -> int
+///
+/// SECURITY: Binding to privileged ports (< 1024) requires root (euid == 0).
+/// This prevents unprivileged processes from impersonating system services
+/// (e.g., binding to port 80 to intercept HTTP traffic).
 pub fn sys_bind(fd: usize, addr_ptr: usize, addrlen: usize) SyscallError!usize {
     const ctx = getSocketContext(fd) orelse {
         return error.ENOTSOCK;
@@ -244,6 +248,18 @@ pub fn sys_bind(fd: usize, addr_ptr: usize, addrlen: usize) SyscallError!usize {
     const kaddr = user_mem.copyStructFromUser(socket.SockAddrIn, user_mem.UserPtr.from(addr_ptr)) catch {
         return error.EFAULT;
     };
+
+    // SECURITY: Check privileged port binding (ports < 1024)
+    // Port is in network byte order, convert to host order for comparison
+    const host_port = @byteSwap(kaddr.port);
+    if (host_port < 1024 and host_port != 0) {
+        // Only root (euid == 0) can bind to privileged ports
+        // TODO: Add CAP_NET_BIND_SERVICE capability check when capability is defined
+        const proc = base.getCurrentProcess();
+        if (proc.euid != 0) {
+            return error.EACCES;
+        }
+    }
 
     socket.bind(ctx.socket_idx, &kaddr) catch |err| {
         return socketErrorToSyscallError(err);
@@ -633,6 +649,9 @@ pub fn sys_getsockopt(fd: usize, level: usize, optname: usize, optval_ptr: usize
     const optname_i32 = std.math.cast(i32, optname) orelse return error.EINVAL;
 
     // Allocate kernel buffer for option value
+    // SECURITY NOTE: This is undefined but safe because socket.getsockopt()
+    // fully initializes exactly result_len bytes before returning success.
+    // On error, the function returns early and no bytes are copied to userspace.
     var koptval_buf: [256]u8 = undefined;
     const koptval = koptval_buf[0..koptlen];
 

@@ -198,6 +198,10 @@ pub fn free(stack: KernelStack) void {
     // 1. Double-free physical pages (PMM corruption)
     // 2. Potentially free pages now owned by another thread
     if (!getBitmapBit(stack.slot)) {
+        // Double-free is a serious bug - panic in Debug mode
+        if (@import("builtin").mode == .Debug) {
+            @panic("KernelStack: Double-free detected - possible exploit attempt");
+        }
         console.warn("KernelStack: Double-free detected for slot {d}", .{stack.slot});
         return;
     }

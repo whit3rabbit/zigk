@@ -25,6 +25,10 @@ pub fn cqHasSpace(ring: *volatile types.CqRingHeader, ring_entries: u32) bool {
 
 /// Add a CQE to the completion queue
 /// Returns true on success, false if ring is full
+/// SECURITY NOTE: Unlike SQ array in submission.zig, ring.tail is kernel-controlled
+/// and ring_entries is fixed at setup. The mask operation is safe because:
+/// 1. ring_entries is guaranteed power-of-2 by setup validation
+/// 2. Any value & (power_of_2 - 1) is always < power_of_2
 pub fn addCqe(
     ring: *volatile types.CqRingHeader,
     cqes: [*]volatile io_ring.IoUringCqe,
@@ -37,6 +41,7 @@ pub fn addCqe(
         return false;
     }
 
+    // SAFE: ring.tail is kernel-controlled, mask guarantees idx < ring_entries
     const idx = ring.tail & (ring_entries - 1);
 
     // Write CQE to shared memory

@@ -137,10 +137,28 @@ pub fn allocatePid() u32 {
 }
 
 /// Find process by PID (public, acquiring lock)
+/// WARNING: The returned pointer may become invalid after the lock is released.
+/// SECURITY: For safe usage across lock boundaries, use findAndRefProcess() instead.
 pub fn findProcessByPid(target_pid: u32) ?*Process {
     const held = sched.process_tree_lock.acquireRead();
     defer held.release();
     return findProcessByPidLocked(target_pid);
+}
+
+/// Find process by PID and increment its reference count (SAFE)
+/// Returns null if not found
+/// The caller MUST call process.unref() when done with the pointer.
+/// This is the safe version for use when the pointer will be used after
+/// releasing the process tree lock.
+pub fn findAndRefProcess(target_pid: u32) ?*Process {
+    const held = sched.process_tree_lock.acquireRead();
+    defer held.release();
+
+    if (findProcessByPidLocked(target_pid)) |proc| {
+        proc.ref(); // Increment refcount before returning
+        return proc;
+    }
+    return null;
 }
 
 /// Internal find helper (no lock)

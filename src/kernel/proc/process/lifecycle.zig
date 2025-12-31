@@ -71,7 +71,7 @@ pub fn createProcess(parent: ?*Process) !*Process {
         .gid = 0,
         .euid = 0,
         .egid = 0,
-        .cwd = undefined,
+        .cwd = [_]u8{0} ** uapi.abi.MAX_PATH,
         .cwd_len = 1,
         .aslr_offsets = aslr_offsets,
     };

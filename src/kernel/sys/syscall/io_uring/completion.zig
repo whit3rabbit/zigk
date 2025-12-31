@@ -83,6 +83,10 @@ pub fn copyCompletionsToUser(inst: *instance.IoUringInstance, cqes_ptr: usize, m
     const cqes = inst.getCqes();
 
     // Copy each CQE to userspace
+    // SECURITY NOTE: cq_ring.head is in shared memory but the mask operation
+    // guarantees idx < cq_ring_entries for any head value (power-of-2 mask).
+    // Unlike submission.zig's sq_array which contains user-provided indices,
+    // here we mask the head directly which is always safe.
     for (0..copy_count) |i| {
         const idx = cq_ring.head & (inst.cq_ring_entries - 1);
         const cqe = cqes[idx];

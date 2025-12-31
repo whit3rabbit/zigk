@@ -65,10 +65,11 @@ pub fn addThread(t: *Thread) void {
     cpu.addToReadyQueue(t);
 }
 
-/// Find a thread by its TID
+/// Find a thread by its TID (UNSAFE - see warning)
 /// Returns null if not found or if thread has exited
 /// WARNING: The returned pointer may become invalid after the lock is released.
 /// Caller must ensure thread lifetime or hold appropriate locks during use.
+/// SECURITY: For safe usage across lock boundaries, use findAndRefThread() instead.
 pub fn findThreadByTid(tid: u64) ?*Thread {
     const held = sched_mod.scheduler.lock.acquire();
     defer held.release();
@@ -76,6 +77,26 @@ pub fn findThreadByTid(tid: u64) ?*Thread {
     for (all_threads) |maybe_t| {
         if (maybe_t) |t| {
             if (t.tid == tid) {
+                return t;
+            }
+        }
+    }
+    return null;
+}
+
+/// Find a thread by TID and increment its reference count (SAFE)
+/// Returns null if not found or if thread has exited
+/// The caller MUST call thread.unref() when done with the pointer.
+/// This is the safe version for use when the pointer will be used after
+/// releasing the scheduler lock.
+pub fn findAndRefThread(tid: u64) ?*Thread {
+    const held = sched_mod.scheduler.lock.acquire();
+    defer held.release();
+
+    for (all_threads) |maybe_t| {
+        if (maybe_t) |t| {
+            if (t.tid == tid) {
+                t.ref(); // Increment refcount before returning
                 return t;
             }
         }

@@ -175,6 +175,11 @@ pub const Thread = struct {
     wait_queue_next: ?*Thread = null,
     wait_queue_prev: ?*Thread = null,
 
+    /// Reference count for safe pointer handling across lock boundaries
+    /// Starts at 1, thread can be freed when drops to 0
+    /// SECURITY: Prevents use-after-free when findThreadByTid returns pointer after lock release
+    refcount: std.atomic.Value(u32) = std.atomic.Value(u32).init(1),
+
     /// Get thread name as a slice
     pub fn getName(self: *const Thread) []const u8 {
         // Find null terminator
@@ -188,6 +193,23 @@ pub const Thread = struct {
         const copy_len = @min(new_name.len, self.name.len - 1);
         hal.mem.copy(self.name[0..copy_len].ptr, new_name[0..copy_len].ptr, copy_len);
         self.name[copy_len] = 0; // Null terminate
+    }
+
+    /// Increment reference count
+    /// Call this when storing a pointer to this thread outside of scheduler lock
+    pub fn ref(self: *Thread) void {
+        _ = self.refcount.fetchAdd(1, .acquire);
+    }
+
+    /// Decrement reference count
+    /// Returns true if this was the last reference (caller should free)
+    pub fn unref(self: *Thread) bool {
+        const prev = self.refcount.fetchSub(1, .release);
+        if (prev == 1) {
+            // Last reference dropped - thread can be freed
+            return true;
+        }
+        return false;
     }
 };
 

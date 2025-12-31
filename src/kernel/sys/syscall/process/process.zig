@@ -196,9 +196,16 @@ pub fn sys_getgid() SyscallError!usize {
 /// POSIX behavior:
 /// - If euid == 0 (root) or has CAP_SETUID: set real, effective, and saved UID
 /// - If euid != 0: set effective UID only if uid matches real or saved UID
+///
+/// SECURITY: Uses cred_lock to prevent TOCTOU races between permission check
+/// and credential writes when multiple threads call setuid/setgid concurrently.
 pub fn sys_setuid(uid: usize) SyscallError!usize {
     const proc = base.getCurrentProcess();
     const new_uid: u32 = @truncate(uid);
+
+    // SECURITY: Acquire credential lock for atomic check-and-modify
+    const held = proc.cred_lock.acquire();
+    defer held.release();
 
     // Root or CAP_SETUID holder can set any UID
     if (proc.euid == 0 or proc.hasSetUidCapability(new_uid)) {
@@ -222,9 +229,16 @@ pub fn sys_setuid(uid: usize) SyscallError!usize {
 /// POSIX behavior:
 /// - If euid == 0 (root) or has CAP_SETGID: set real, effective, and saved GID
 /// - If euid != 0: set effective GID only if gid matches real or saved GID
+///
+/// SECURITY: Uses cred_lock to prevent TOCTOU races between permission check
+/// and credential writes when multiple threads call setuid/setgid concurrently.
 pub fn sys_setgid(gid: usize) SyscallError!usize {
     const proc = base.getCurrentProcess();
     const new_gid: u32 = @truncate(gid);
+
+    // SECURITY: Acquire credential lock for atomic check-and-modify
+    const held = proc.cred_lock.acquire();
+    defer held.release();
 
     // Root or CAP_SETGID holder can set any GID
     if (proc.euid == 0 or proc.hasSetGidCapability(new_gid)) {

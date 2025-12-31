@@ -87,6 +87,7 @@ pub const SYS_FCHOWN = linux.SYS_FCHOWN;
 pub const SYS_LCHOWN = linux.SYS_LCHOWN;
 pub const SYS_UMASK = linux.SYS_UMASK;
 pub const SYS_GETTIMEOFDAY = linux.SYS_GETTIMEOFDAY;
+pub const SYS_SETTIMEOFDAY = linux.SYS_SETTIMEOFDAY;
 pub const SYS_GETRLIMIT = linux.SYS_GETRLIMIT;
 pub const SYS_GETRUSAGE = linux.SYS_GETRUSAGE;
 pub const SYS_PTRACE = linux.SYS_PTRACE;

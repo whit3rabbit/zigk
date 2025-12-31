@@ -226,6 +226,8 @@ pub const SYS_ARCH_PRCTL: usize = 158;
 pub const SYS_SETRLIMIT: usize = 160;
 /// Commit buffer cache to disk
 pub const SYS_SYNC: usize = 162;
+/// Set time of day (requires root)
+pub const SYS_SETTIMEOFDAY: usize = 164;
 /// Mount a filesystem
 pub const SYS_MOUNT: usize = 165;
 /// Unmount a filesystem

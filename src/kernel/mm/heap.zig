@@ -491,6 +491,10 @@ fn freeToFreeList(buf: []u8) void {
     }
 
     if (!header.isAllocated()) {
+        // Double-free is a serious bug - panic in Debug mode
+        if (@import("builtin").mode == .Debug) {
+            @panic("Heap: Double-free detected - possible exploit attempt");
+        }
         if (is_freestanding) {
             console.warn("Heap: Double-free at {x}", .{ptr_addr});
         }

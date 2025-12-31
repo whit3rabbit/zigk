@@ -20,6 +20,7 @@ pub const syscall = @import("kernel/syscall.zig");
 pub const mmio = @import("mm/mmio.zig");
 pub const mmio_device = @import("mm/mmio_device.zig");
 pub const pit = @import("kernel/pit.zig");
+pub const rtc = @import("kernel/rtc.zig");
 pub const timing = @import("kernel/timing.zig");
 pub const apic = @import("kernel/apic/root.zig");
 pub const smp = @import("kernel/smp.zig");
@@ -71,6 +72,9 @@ pub fn init(_: u64) void {
 
     // Initialize PIT channel 0 to 100Hz for scheduler
     pit.init(100);
+
+    // Initialize RTC for wall-clock time
+    rtc.init();
 }
 
 /// Enable CPU security features (SMEP, SMAP, speculation control) if supported

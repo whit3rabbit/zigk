@@ -13,10 +13,12 @@
 // - rx.zig: Input processing (Segment arrival)
 // - tx.zig: Output processing (Segment transmission)
 // - timers.zig: Retransmission and timeouts
-// - options.zig: TCP Options parsing/buildingementation with:
+// - options.zig: TCP Options parsing/building
+//
+// Current implementation:
 //   - 7-state machine (CLOSED, LISTEN, SYN-SENT, SYN-RECEIVED, ESTABLISHED, CLOSE-WAIT, LAST-ACK)
-//   - Fixed 8KB receive window (no auto-tuning)
-//   - Timeout-based retransmission (no fast retransmit)
+//   - RFC 7323 window scaling (dynamic receive window)
+//   - RFC 6582 fast retransmit/recovery (dup ACK detection)
 //   - In-order delivery only (out-of-order segments dropped)
 
 const constants = @import("constants.zig");

@@ -36,6 +36,16 @@ pub fn submitFromSharedMemory(inst: *instance.IoUringInstance, to_submit: usize)
 
         // SQ array contains indices into SQE array
         const sqe_idx = sq_array[idx] & (inst.sq_ring_entries - 1);
+
+        // SECURITY: Explicit bounds check even after masking.
+        // Malicious userspace could craft indices that bypass mask if ring size changes.
+        if (sqe_idx >= inst.sq_ring_entries) {
+            _ = inst.addCqe(0, -@as(i32, 22), 0); // EINVAL
+            submitted += 1;
+            head +%= 1;
+            continue;
+        }
+
         const volatile_sqe = &sqes[sqe_idx];
 
         // SECURITY: Copy SQE from shared memory to prevent TOCTOU attacks.
@@ -73,7 +83,10 @@ pub fn copySqesAndSubmit(inst: *instance.IoUringInstance, sqes_ptr: usize, count
         return error.EFAULT;
     }
 
-    // Limit to ring size
+    // SECURITY NOTE: copy_count is bounded by sq_ring_entries which is <= MAX_RING_ENTRIES (256).
+    // sqe_size is 64 bytes, so copy_count * sqe_size <= 256 * 64 = 16KB.
+    // This multiplication cannot overflow. Additionally, isValidUserAccess internally uses
+    // @addWithOverflow to safely detect ptr+len overflow.
     const copy_count = @min(count, inst.sq_ring_entries);
     const sqe_size = @sizeOf(io_ring.IoUringSqe);
 

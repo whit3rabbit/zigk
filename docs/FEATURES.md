@@ -1,0 +1,358 @@
+This bullet checklist highlights the unique implementation details and features found in your Zig kernel codebase, organized by architecture and core design patterns.
+
+### Core Architectural Features
+*   **Provider Pattern Design**: The kernel uses a compile-time architecture selector in `root.zig` to provide a unified HAL (Hardware Abstraction Layer) while maintaining zero-cost abstraction.
+*   **Cross-Architecture Syscall Parity**: The `SyscallFrame` uses x86 register naming conventions (rax, rdi, etc.) on AArch64 to allow shared, architecture-independent syscall dispatch logic.
+*   **Comptime Safety Assertions**: Extensive use of Zig’s `comptime` to verify that memory layouts (like `SyscallFrame`) and interrupt handler array sizes exactly match low-level assembly expectations.
+
+### AArch64 Implementation (ARMv8-A)
+*   **Privileged Access Never (PAN)**: Enforcement of ARM’s PAN feature, requiring explicit `LDTR`/`STTR` assembly helpers for kernel-to-user memory access to prevent security exploits.
+*   **Exception Vector Hardening**: Low-level exception vectors include universal bit-63 sign checks to prevent the kernel from accidentally returning to a kernel address while in a user context.
+*   **GICv2/v3 Hybrid Support**: A dynamic interrupt controller driver that parses Device Tree information but falls back to safe QEMU virt machine defaults if necessary.
+*   **FEAT_RNG Integration**: Utilization of the `RNDR` register for hardware-grade entropy, with a sophisticated timing-based fallback that uses `SplitMix64` for bit distribution.
+*   **Flexible ASID Detection**: Runtime detection of 8-bit vs. 16-bit Address Space Identifiers (ASIDs) to optimize TLB management and prevent process-space collisions.
+
+### x86_64 Implementation (AMD64)
+*   **Intel SYSRET Mitigation**: A security-hardened syscall entry point that manually validates canonical RCX addresses to prevent the "SYSRET privilege escalation" vulnerability.
+*   **Intel VT-d IOMMU**: Implementation of DMA remapping with support for DRHD (DMA Remapping Hardware Unit) discovery and hardware-level fault reporting.
+*   **Dual-Mode APIC**: Support for both xAPIC (MMIO-based) and x2APIC (MSR-based) for high-performance interrupt handling on modern processors.
+*   **Paranoid ISR Stubs**: Special assembly stubs for NMIs and Double Faults that handle the "GS base gap," ensuring the kernel can recover even if an interrupt occurs during a syscall transition.
+*   **SMP Trampoline**: A position-independent bootstrap mechanism that transitions Application Processors (APs) from 16-bit Real Mode to 64-bit Long Mode via patched immediate values.
+*   **VMware Backdoor Interface**: A dedicated driver for hypervisor-specific guest-host communication, enabling integrated mouse and time synchronization in virtual environments.
+
+### Memory & MMIO
+*   **HHDM Guarding**: The `physToVirt` translation layer includes mandatory overflow checks to ensure physical addresses never wrap around into user virtual space.
+*   **Type-Safe MMIO Wrapper**: The `MmioDevice` utility uses enums and `comptime` to ensure register accesses are always within bounds and correctly aligned without runtime overhead.
+*   **Checked Timing Delays**: Calibration of the TSC (Time Stamp Counter) via the legacy PIT, providing high-precision blocking delays with protection against integer overflow.
+*   **Per-CPU IST Stacks**: Dedicated interrupt stack tables for critical exceptions (like Double Faults) to ensure the kernel can provide diagnostics even during stack exhaustion.
+
+### Entropy & Security
+*   **Graded Entropy Quality**: A multi-tier entropy system that categorizes random sources (High/Medium/Low/Critical) and allows the kernel to refuse to boot if high-quality RNG is missing for KASLR.
+*   **Register Sanitization**: Explicit clearing of all general-purpose registers during the transition from kernel to userspace to prevent information leakage.
+*   **Atomic Interrupt Dispatch**: Lock-free registration of interrupt handlers using atomic acquire/release semantics to ensure SMP safety without the bottleneck of a Big Kernel Lock.
+
+This checklist covers the features and unique implementation details of the **Common Boot Structures** and the **UEFI Bootloader** components.
+
+### Bootloader Core & Handoff
+*   **Unified BootInfo**: A standardized handoff structure sharing memory maps, framebuffer info, ACPI RSDP, and InitRD metadata across architectures.
+*   **Dual-Arch Support**: A single codebase that manages x86_64 and AArch64 boot flows using Zig’s `builtin.cpu.arch` for compile-time logic branching.
+*   **KASLR Offset Generation**: Calculation of random, page-aligned offsets for kernel stack, heap, and MMIO regions to enhance system security from the moment of boot.
+*   **Symbol-Based Entry Discovery**: An ELF loader that prioritizes a specific `_uefi_start` symbol over the standard entry point to handle UEFI-specific initialization.
+
+### Entropy & Security
+*   **UEFI RNG Protocol Integration**: Acquisition of high-quality boot-time entropy using the `EFI_RNG_PROTOCOL` to seed KASLR and kernel random generators.
+*   **TSC-Based Entropy Fallback**: A sophisticated "weak" entropy collector that mixes TSC timing variance and UEFI stack ASLR jitter when hardware RNG is missing.
+*   **Buffer Sanitization**: Mandatory zero-initialization of entropy and file buffers to prevent information leakage from previous boot stages.
+*   **ELF Validation Hardening**: Robust ELF header checks, including machine type verification and DoS prevention by capping program/section header counts.
+
+### Memory & Paging
+*   **4-Level Paging Handover**: Pre-construction of the translation hierarchy (PML4 for x86 / L0-L3 for ARM) to map the Identity region, HHDM, and Kernel segments.
+*   **Checked Memory Iterators**: UEFI memory map processing using checked arithmetic (`std.math`) to prevent overflows from malformed firmware descriptors.
+*   **HHDM Base Mapping**: Automated mapping of all physical RAM to a higher-half direct map (HHDM) base (defaulting to `0xFFFF800000000000`).
+*   **Flexible Segment Loading**: Support for multiple `PT_LOAD` segments with individual permission handling (RW, RX, RO) and overlap detection.
+
+### Graphics & UI
+*   **GOP Framebuffer Standardization**: Automatic conversion of various UEFI Graphics Output Protocol formats (RGB, BGR, Bitmask) into a uniform kernel representation.
+*   **Interactive Boot Menu**: A console-based UI with a 5-second auto-boot countdown, timer events, and submenus for selecting specialized test kernels.
+*   **Dynamic Video Mode Setting**: Ability to query and set specific horizontal/vertical resolutions before handed-off to the kernel.
+
+### System Discovery
+*   **ACPI RSDP Discovery**: Automated scanning of the UEFI Configuration Table to locate the Root System Description Pointer for both ACPI 1.0 and 2.0.
+*   **InitRD Discovery**: Automatic loading of `initrd.tar` from the EFI System Partition into kernel-accessible memory.
+*   **Early Serial Debugging**: Architecture-specific serial output drivers (I/O port 0x3F8 for x86, PL011 MMIO for ARM) for loader-stage diagnostics.
+
+This checklist covers the features found in your hardware drivers, PCI subsystem, and peripheral stack, focusing on the specialized implementations for x86_64 and AArch64.
+
+### PCI & Hardware Discovery
+*   **Dual PCI Access Mechanisms**: Support for both PCIe ECAM (memory-mapped) and legacy Port I/O (x86 0xCF8/0xCFC) with automatic fallback.
+*   **SMP-Safe Enumeration**: Strict enumeration invariants and global locking to prevent race conditions during BAR sizing and interrupt registration.
+*   **Automated BAR Sizing**: Intelligent resource probing that handles 32-bit and 64-bit BARs, prefetchable memory, and I/O space.
+*   **Capability Linked-List Parsing**: Robust parser for PCI capabilities (MSI, MSI-X, Power Management) with built-in cycle detection to prevent malicious device hangs.
+
+### USB Stack (xHCI & EHCI)
+*   **xHCI Transfer Ring Management**: Implementation of Command, Event, and Transfer rings using producer/consumer models and cycle-bit toggling.
+*   **Multi-Interface Composite Devices**: Unified configuration parser that extracts all interfaces and endpoints, enabling simultaneous keyboard, mouse, and storage functionality.
+*   **USB Hotplug & Disconnect**: Spec-compliant cleanup sequence that stops endpoints and cancels in-flight transfers before releasing device slots.
+*   **HID Report Parser**: A bit-level precise descriptor parser that identifies keyboards, mice, and absolute-position tablets/touchscreens.
+*   **USB Hub Support**: Generic hub class driver supporting nested port enumeration and status-change interrupt polling.
+
+### Networking (E1000e)
+*   **NAPI-Style Polling**: High-performance Intel 82574L driver using a worker thread to drain RX rings, reducing interrupt overhead under heavy load.
+*   **Pre-allocated Packet Pool**: A bounded, zero-copy buffer pool that eliminates heap allocation latency and fragmentation during packet processing.
+*   **IOMMU-Aware DMA**: Full integration with the system IOMMU for all descriptor rings and packet buffers to ensure hardware memory isolation.
+*   **TX Watchdog**: Hardware stall detection that automatically resets the transmit subsystem if the head pointer stops advancing.
+
+### Storage & AHCI
+*   **Asynchronous Block I/O**: AHCI driver integrated with kernel `IoRequest` structures for non-blocking sector access.
+*   **LBA48 & Scatter-Gather DMA**: Support for large disks and multi-page transfers using Physical Region Descriptor Tables (PRDT).
+*   **SATA FIS Communication**: Low-level implementation of Frame Information Structures for H2D commands and D2H status reporting.
+
+### Input & Layouts
+*   **Sub-pixel Cursor Management**: Cursor position tracker with fixed-point sensitivity scaling, fractional movement accumulation, and absolute coordinate normalization.
+*   **Multilingual Keyboard Layouts**: Support for US QWERTY and Dvorak layouts with an extensible mapping architecture for shift/altgr/caps states.
+*   **VMware VMMouse Support**: Direct integration with the VMware backdoor interface for high-precision absolute cursor positioning in VMs.
+
+### Video & Graphics
+*   **VirtIO-GPU 2D Acceleration**: Paravirtualized GPU driver supporting 2D scanout, resource-based memory tracking, and accelerated host blitting.
+*   **VMware SVGA II Driver**: Specialized driver for VMware/VirtualBox graphics with support for resolution switching and hardware FIFO command rings.
+*   **ANSI Terminal Emulation**: Full state-machine parser for ANSI escape sequences (colors, bold, inverse) integrated into the kernel console.
+*   **Dual-Mode Framebuffer**: Comptime-generic driver providing both direct-to-VRAM and back-buffered rendering paths to eliminate runtime branches.
+*   **PSF Font Support**: Robust loaders for PSF1 and PSF2 bitmap fonts with checked arithmetic for glyph indexing.
+
+### Serial & Async I/O
+*   **Interrupt-Driven Serial**: Standard 16550 and PL011 drivers featuring asynchronous, non-blocking transmission via THRE interrupts.
+*   **Panic-Safe I/O**: Specialized write paths that bypass spinlocks and async buffers to ensure crash diagnostics are visible during kernel failures.
+*   **Unified Async Request Pool**: A system-wide, fixed-size pool of transfer structures for xHCI, AHCI, and Serial to prevent memory exhaustion.
+
+### Virtual File System (VFS)
+*   **Longest-Path Mount Resolution**: A central VFS that resolves absolute paths to the most specific mount point available in an 8-slot registry.
+*   **Unmount Protection**: Reference counting for open file handles per mount point to prevent use-after-free and filesystem corruption during unmount.
+*   **Layered Security Model**: Centralized permission enforcement at the syscall and VFS layers, allowing filesystems to focus on storage-level operations.
+*   **TOCTOU Detection**: Metadata structures (`FileMeta`) designed to store device IDs and inode numbers to detect symlink swaps and race conditions.
+
+### Simple File System (SFS)
+*   **Sync-over-Async I/O Pattern**: Block-based filesystem designed around the AHCI async I/O model, using `Future` types to bridge async hardware calls with sync-like logic.
+*   **Deferred Block Deletion**: Implementation where files are unlinked from the directory immediately, but underlying blocks are only freed after the last open handle is closed.
+*   **Superblock Security Hardening**: Strict validation of disk metadata (e.g., bitmap sizes, file counts) to prevent memory exhaustion or out-of-bounds access from malicious disk images.
+*   **Batched Bitmap Loading**: Performance optimization that loads all allocation bitmap blocks in a single contiguous async I/O operation.
+*   **Write-Through Bitmap Cache**: In-memory caching of allocation state to minimize redundant disk reads while maintaining on-disk consistency via atomic updates.
+
+### Partition Management
+*   **Hybrid MBR/GPT Detection**: Automatic scanning of LBA 0 to detect legacy MBR tables or GPT "Protective MBR" headers to switch between parsing logic.
+*   **Dynamic DevFS Registration**: Automated discovery and registration of partitions as unique devices (e.g., `/dev/sda1`) using a shared `partition_ops` interface.
+*   **Partition Bound Enforcement**: Checked arithmetic on all partition-relative I/O to prevent malicious partition tables from accessing data on other segments of the disk.
+
+### Initial RAM Disk (InitRD)
+*   **USTAR TAR Integration**: Native support for the USTAR tar format, allowing the kernel to mount bootloader-provided modules as a read-only root filesystem.
+*   **Auto-Variant Resolution**: A search mechanism that automatically checks common path variants (e.g., `name`, `name.elf`, `bin/name`) during a single archive scan.
+*   **Security-Hardened Path Normalization**: Rejection of all path traversal attempts (`..`) and strict length-based matching to prevent injection attacks within the InitRD.
+*   **Safe Octal Metadata Parsing**: Built-in protection against integer overflows when interpreting octal size, mode, and ownership fields from TAR headers.
+
+This checklist covers the features found in the core kernel logic, memory management, process handling, and syscall infrastructure.
+
+### ACPI & System Discovery
+*   **DMAR/VT-d Parser**: Advanced parsing of DMA Remapping tables to discover IOMMU hardware units, including support for RMRR (Reserved Memory) and complex device scopes.
+*   **MADT/APIC Topology**: Comprehensive Multiple APIC Description Table parser that identifies Local APICs, I/O APICs, and provides support for x2APIC and ISA interrupt overrides.
+*   **MCFG/ECAM Setup**: Robust parsing of PCIe configuration space regions with built-in validation of bus ranges and alignment to prevent firmware-level address calculation errors.
+*   **Dual-Version RSDP**: Support for both ACPI 1.0 (RSDT) and ACPI 2.0+ (XSDT) root structures with manual checksum and signature validation.
+
+### Core Kernel & Security
+*   **Multi-Backend Console**: Architecture-agnostic logging system supporting multiple simultaneous outputs (Serial UART, Graphical Console, and IPC-based remote logging).
+*   **Hardened ELF Loader**: Security-focused loader featuring segment overlap detection, strict size limits (DoS prevention), and mandatory execution-segment validation.
+*   **Stack Guard Canaries**: Compiler-integrated stack smashing protection using randomized canaries seeded from hardware RNG or a kernel CSPRNG.
+*   **Release-Mode KASLR Masking**: Panic and debug handlers that automatically mask absolute kernel addresses in release builds to prevent KASLR bypass via information leaks.
+*   **ChaCha20 CSPRNG**: High-performance cryptographic random number generator (RFC 8439) with entropy pooling and periodic hardware re-seeding.
+
+### Memory Management
+*   **IOMMU Domain Manager**: Per-device DMA isolation using IOVA (IO Virtual Address) spaces, preventing drivers from accessing memory outside their assigned buffers.
+*   **Bitmap PMM with Refcounts**: Physical memory manager using a bit-array for speed and a 16-bit refcount array to support future Copy-on-Write and shared memory features.
+*   **Multi-Region ASLR**: Per-process address layout randomization for the stack, heap, PIE base, mmap region, and TLS, providing defense against ROP attacks.
+*   **Hierarchical Slab Allocator**: O(1) allocator for small objects (16B–2KB) using bitmapped slabs to eliminate fragmentation and improve cache locality.
+*   **Secure Page Freeing**: Specialized unmapping sequence that zeros physical memory via HHDM before clearing the PTE to prevent data leakage during TLB races.
+*   **Multicore TLB Shootdown**: Protocol-based cross-CPU TLB invalidation using IPIs and atomic counters to maintain cache consistency across all cores.
+
+### Process & Threading
+*   **Capability-Based Security**: Fine-grained hardware access control (IRQs, I/O ports, MMIO, DMA) assigned to processes by name or manifest rather than broad "root" access.
+*   **SMP-Aware Scheduler**: Per-CPU ready queues with work-stealing and LIFO-based cache locality optimization to reduce lock contention.
+*   **Futex Subsystem**: Fast userspace locking keyed by physical address, enabling synchronization between different processes sharing the same memory.
+*   **Zero-Copy Ring IPC**: SPSC (Single-Producer Single-Consumer) shared-memory ring buffers with built-in futex support for low-latency, high-bandwidth inter-process communication.
+*   **Thread-Safe Wait Queues**: Interrupt-safe sleep/wake mechanisms featuring atomic "woken" flags to prevent the "lost wakeup" race condition on SMP systems.
+
+### I/O & Syscall Infrastructure
+*   **Async I/O Reactor**: Central coordinator for all non-blocking operations, featuring a fixed-size request pool to ensure Principle IX (Heap Hygiene) compliance.
+*   **Hierarchical Timer Wheel**: A 3-level wheel structure (L0–L2) providing O(1) timer insertion and amortized O(1) expiration for thousands of concurrent timeouts.
+*   **io_uring Implementation**: High-performance async interface using shared submission/completion rings (SQ/CQ) with mandatory kernel-side bounce buffers to prevent TOCTOU attacks.
+*   **Type-Safe `UserPtr`**: A wrapper that forces developers to validate userspace pointers and handle page faults before any memory dereference occurs.
+*   **vDSO Integration**: Mapping of a "Virtual Dynamic Shared Object" into every user process to provide high-speed, syscall-free access to system time and CPU information.
+*   **Exclusive Framebuffer Ownership**: Atomic ownership tracking for the system display, allowing only a certified "Display Server" process to map and modify the raw video buffer.
+
+This checklist highlights the unique features and automated capabilities of your Zig-based build system.
+
+### Platform & Firmware Orchestration
+*   **Intelligent OVMF Detection**: Automated discovery of UEFI firmware (OVMF/EDK2) paths across macOS (Homebrew/Intel/M1) and multiple Linux distributions (Ubuntu, Debian, Fedora).
+*   **Dual-Arch UEFI Target**: Unified build logic for `bootaa64.efi` and `bootx64.efi` using Zig’s native UEFI target support and architecture-specific ABIs (MSVC for x86_64).
+*   **Custom Firmware Handoff**: Support for user-provided UEFI code and variable store paths via `-Dbios` and `-Dvars` options for testing custom firmware environments.
+
+### Kernel Hardening & Safety
+*   **FPU-Safe Kernel Configuration**: Explicitly disables MMX, SSE, and AVX features for x86_64 kernel code while enabling `soft_float` to prevent implicit FPU register corruption.
+*   **Interrupt-Safe Code Model**: Enforces the `kernel` code model and disables the `red_zone` to protect the stack from corruption during asynchronous interrupt handling.
+*   **LLVM Backend Enforcement**: Forced use of the LLVM backend as a stability workaround for Zig 0.16 regressions, ensuring reliable higher-half kernel linking via linker scripts.
+
+### Build Orchestration & Modules
+*   **Module-Based Dependency Injection**: Extensive use of Zig `Module` system to handle complex dependency graphs and resolve circular dependencies between the HAL, Console, and Scheduler.
+*   **Comptime Configuration Injection**: Dynamic generation of a `config` module that injects build-time parameters (heap size, max threads, baud rate) directly into the kernel source.
+*   **Architecture-Specific Source Selection**: Compile-time branching for driver selection, automatically wiring the correct UART (PL011 vs. 16550) based on the target architecture.
+
+### Deployment & Tooling
+*   **Automated InitRD Packaging**: A built-in orchestration step that automatically gathers all compiled userland ELFs and packages them into a USTAR-formatted `initrd.tar`.
+*   **Hybrid GPT/ISO Generation**: Integration with `xorriso` and `mtools` to create "isohybrid" images containing GPT-partitioned FAT32 partitions for maximum hardware compatibility.
+*   **Host-Agnostic Disk Tooling**: Compiles and executes a native `disk_image` tool on the host to generate GPT-compliant disk images without external dependency on loopback mounting.
+
+### Emulation & Testing
+*   **Multi-Backend QEMU Runner**: Support for diverse display (SDL, GTK, Cocoa, Headless) and audio (CoreAudio, PA, File) backends directly through the `zig build run` command.
+*   **Virtualized Hardware Simulation**: Automated QEMU configuration for complex topologies including XHCI controllers, USB hubs, paravirtualized VirtIO-GPUs, and legacy AC97 audio.
+*   **Target-Specific Acceleration**: Intelligent selection of QEMU acceleration parameters, utilizing `hvf` for high-performance ARM-on-ARM virtualization on Apple Silicon.
+*   **Cross-Arch Build Aliases**: Convenience steps (e.g., `iso-aarch64`, `run-x86_64`) that simplify cross-compilation and testing of the entire stack from a single host.
+
+You can append these sections to your `features.md`. I have organized them into **Core Utility Structures**, updated **System Discovery**, and expanded the **Entropy & Security** sections to reflect the specific implementation details found in your new files.
+
+### Core Utility Structures
+*   **Zero-Allocation Intrusive List**: An `IntrusiveDoublyLinkedList` implementation that eliminates external node allocations by embedding pointers directly in structures, critical for high-performance scheduler runqueues.
+*   **Double-Remove Protection**: List implementation uses a combination of debug assertions and `std.math.sub` checked arithmetic to trigger an explicit kernel panic on count underflow, preventing use-after-free bugs caused by double-removals.
+*   **Comptime Ring Buffer Validation**: A generic circular buffer that enforces power-of-2 capacities at compile-time, allowing the use of bitwise `& MASK` instead of expensive modulo operations for wraparound.
+*   **Anti-Leak Ring Semantics**: Security-hardened `pop()` and `clear()` operations that perform mandatory `@memset` zeroing on consumed or cleared slots to prevent sensitive data (like keyboard scancodes) from lingering in memory.
+
+### System Discovery (AArch64 focus)
+*   **Hardened DTB Parser**: A minimalist Device Tree Blob parser designed with a "security-first" approach, including a 64MB `MAX_DTB_SIZE` limit to prevent Denial-of-Service (DoS) attacks via malicious `totalsize` claims.
+*   **Bounded DTB Scanning**: Implementation of strictly bounded node-name scanning (256-byte limit) and property-offset validation to prevent out-of-bounds reads when parsing malformed firmware blobs.
+*   **Checked Address Calculation**: Utilization of Zig’s `std.math` checked arithmetic when calculating `address_cells` and `size_cells` to prevent integer overflows during GIC (Generic Interrupt Controller) base address discovery.
+
+### Entropy & Security (Updated)
+*   **Fail-Secure Entropy Policy**: A `require_hardware_entropy` build-time toggle that forces a kernel panic during boot if high-quality hardware RNG (RDRAND/RDSEED) is unavailable, ensuring the system never runs in a compromised state.
+*   **Multi-Source Fallback Mixing**: A sophisticated fallback seeder that combines TSC (Time Stamp Counter) variance, stack-address jitter, and MurmurHash3 (MurmurHash3_fmix64) to generate the best possible seed on legacy hardware.
+*   **Xoroshiro128+ PRNG**: Implementation of the `xoroshiro128+` algorithm for fast, non-cryptographic kernel randomization (stack canaries, ASLR), protected by a global spinlock for SMP safety.
+*   **Tiered Security Monitoring**: A `SecurityLevel` API (Secure/Degraded/Critical) that allows the kernel to monitor entropy quality and log high-visibility warnings if the system is operating with predictable random values.
+*   **Atomic PRNG State Guarding**: Use of atomic booleans with `Acquire/Release` memory ordering to track PRNG initialization, preventing TOCTOU (Time-of-Check to Time-of-Use) races during early multicore boot.
+*   **Direct Hardware Entropy Bypass**: Dedicated paths (`fillFromHardwareEntropy`) that bypass the PRNG to provide raw, hardware-grade entropy directly to sensitive syscalls like `sys_getrandom`.
+
+### Data Integrity & Safety
+*   **Panic-on-Corruption**: Widespread use of `@panic` in release builds for low-level data structure corruption (e.g., list count underflow), choosing system halt over continued execution with compromised internal state.
+*   **Memory-Safe Pointer Arithmetic**: Use of bounded slices (`ptr[start..end]`) instead of raw pointer arithmetic throughout the DTB and Ring Buffer implementations to leverage Zig's safety checks.
+*   **Explicit Zeroing of Sensitive Slots**: Standardized pattern of zeroing memory immediately after use in I/O buffers to minimize the "blast radius" of potential kernel heap leaks.
+
+This checklist highlights the unique architectural design, protocol compliance, and security-hardened features of your Zig network stack.
+
+### Network Core & Memory Management
+*   **Zero-Copy Packet Buffer**: The `PacketBuffer` utilizes layer-specific offsets (`eth_offset`, `ip_offset`, etc.) to process data across the stack without redundant memory copies.
+*   **Shared Memory Budgeting**: A centralized `pool.zig` manages TX buffers and reassembly allocations under a single system-wide memory budget to prevent network-driven heap exhaustion.
+*   **Safe Header Accessors**: Use of bounds-checked accessor functions (e.g., `getIpv4Header`) that return optional pointers, preventing out-of-bounds access on malformed frames even in `ReleaseFast` builds.
+*   **Incremental Checksum Updates**: Implementation of RFC 1624 for efficient header updates (like TTL decrements) without recalculating the entire ones' complement sum.
+
+### Layer 2 - Ethernet & ARP
+*   **RFC 894 Padding Security**: Outgoing short frames are padded to the 60-byte minimum with explicit zero-initialization to prevent leaking stale kernel stack data.
+*   **Anti-Spoofing ARP Cache**: The ARP subsystem includes conflict detection that identifies MAC address swaps for the same IP, utilizing exponential backoff and entry blocking to mitigate MITM attacks.
+*   **O(1) MAC Lookup**: A dedicated ARP hash table allows constant-time resolution of IP-to-MAC mappings, supplemented by a doubly-linked LRU eviction strategy for cache aging.
+*   **Static ARP Binding**: Support for administrative static entries that are protected from being overwritten by unsolicited ARP replies.
+
+### Layer 3 - IPv4 & ICMP
+*   **Hardened IP Reassembly**: A "hole-tracking" reassembly engine that enforces a 64-fragment limit and rejects overlapping fragments (RFC 5722) to defend against "Teardrop" and "Ping of Death" attacks.
+*   **Security-Conscious Option Filtering**: Automatic rejection of dangerous IPv4 options like Loose/Strict Source Routing (LSRR/SSRR) and Record Route (RR) at the validation layer.
+*   **Tick-Based PMTU Discovery**: Path MTU Discovery (RFC 1191) uses a monotonic tick-based rate limiter rather than an operation-counter, preventing attackers from flooding ICMP messages to bypass rate limits.
+*   **ICMP Smurf Prevention**: Explicit checks to ensure the kernel never replies to ICMP Echo Requests sent to broadcast/multicast addresses or originating from a multicast source.
+*   **RFC 5927 ICMP Validation**: ICMP errors (like Fragmentation Needed) are validated against active TCP/UDP flows using 4-tuple and sequence number checks before updating the PMTU cache.
+
+### Layer 4 - TCP & UDP
+*   **Cryptographically Secure ISNs**: Initial Sequence Numbers (ISNs) are generated using SipHash-2-4 seeded with hardware entropy (RFC 6528), with periodic key re-seeding to prevent sequence prediction attacks.
+*   **O(1) SYN Flood Mitigation**: A dedicated "half-open" intrusive list allows the kernel to evict the oldest pending connection in constant time when the `MAX_HALF_OPEN` limit is reached.
+*   **High-Performance Extensions**: Support for RFC 7323 (Window Scaling and Timestamps) and RFC 2018 (Selective Acknowledgments - SACK) to optimize throughput on high-latency links.
+*   **Jacobson/Karels RTT Estimation**: Per-connection Smoothed Round-Trip Time (SRTT) and RTT Variation (RTTVAR) tracking with exponential backoff for retransmission timeouts.
+*   **Mandatory UDP Checksums**: Enforcement of non-zero UDP checksums for security-sensitive ports (DNS, NTP, SNMP) to prevent cache poisoning and spoofing, while allowing zero-checksums for general traffic.
+
+### Sockets & Async I/O
+*   **RFC 6056 Port Randomization**: Ephemeral port allocation implements "Random Port Randomization" (Algorithm 3) to provide ~32 bits of total entropy when combined with DNS transaction IDs.
+*   **Two-Phase Socket Deletion**: Lifetime management using `AtomicRefcount` and a "closing" flag to prevent use-after-free races during concurrent packet processing and socket teardown.
+*   **Async I/O Reactor Integration**: A Phase 2 API that supports `acceptAsync`, `recvAsync`, and `sendAsync`, allowing the kernel to park requests in the socket and complete them directly from the IRQ handler.
+*   **Deadline-Based Timeouts**: Socket operations use TSC-based absolute deadlines rather than relative timeouts, preventing attacker-controlled packet floods from indefinitely resetting timeout windows.
+
+### DNS Client
+*   **Zero-Allocation Resolver**: The hostname resolver uses stack-allocated buffers and a case-insensitive `dnsNameEql` helper to perform hostname resolution without heap pressure.
+*   **Recursion & CNAME Following**: Robust CNAME chain resolution with a mandatory depth limit (8) and protection against malicious pointer loops in compressed DNS names.
+*   **Deadline-Hardened Query Loop**: The resolver loop enforces a total wall-clock deadline and a max-packet-count limit to prevent DoS from spoofed UDP responses.
+
+### Synchronization & Safety
+*   **IRQ-Safe "Held" Token Pattern**: A custom `IrqLock` and `Spinlock` architecture that uses a `Held` token to ensure interrupts are always restored to their previous state and locks are never left dangling.
+*   **Generation Counter Guarding**: Use of monotonic generation counters on TCBs and ARP entries to detect object reuse, preventing stale pointers from being used after a connection has been recycled.
+*   **Comptime ABI Verification**: Extensive use of `extern struct` with `comptime` size assertions to ensure network headers exactly match wire specifications and are safe for unaligned access.
+
+This checklist highlights the unique implementation details, Linux ABI compatibility, and security-hardened features found in your Userland API (UAPI) and System Interface layers.
+
+### ABI Stability & Verification
+*   **Comptime ABI Assertions**: Extensive use of Zig’s `comptime` to verify that userland-visible structures (`Timespec`, `SockAddrIn`, `MsgHdr`) exactly match the Linux x86_64 ABI layout, preventing ABI drift at compile-time.
+*   **Struct Padding Validation**: Explicit security audits of `Stat` and `Statfs` structures to ensure all reserved fields and internal padding are zero-initialized, preventing kernel-to-user information leaks.
+*   **Type-Safe Errno Mapping**: A robust `SyscallError` set that uses Zig’s error union pattern to automatically map kernel errors to their standard negative Linux `errno` counterparts (e.g., `error.EBADF` → `-9`).
+*   **Zero-Length Array Protection**: The `Dirent64` implementation includes documented safety rules for the `d_name` flexible array member, ensuring the struct header and name data are handled separately to prevent stack memory corruption.
+
+### Zero-Copy IPC & Ring Buffers
+*   **Cache-Line Separation**: The `RingHeader` for shared-memory IPC is designed with 128-byte alignment/padding between producer and consumer indices to prevent "false sharing" and optimize cache performance on multicore systems.
+*   **SPSC-to-MPSC Semantics**: Implementation of Single-Producer Single-Consumer (SPSC) rings that can be decomposed and managed by the kernel to provide Multi-Producer (MPSC) semantics for high-performance service communication.
+*   **Atomic Refcounted Sockets**: Lifetime management using `AtomicRefcount` combined with an atomic `closing` flag to prevent TOCTOU (Time-of-Check to Time-of-Use) races during concurrent socket teardown.
+*   **Futex-Backed Ring Synchronization**: Ring buffer structures include built-in `futex_offset` metadata, allowing userspace producers and consumers to block efficiently using the kernel’s futex subsystem.
+
+### System Extensions (Zscapek-Specific)
+*   **Unified Input Event ABI**: A custom `InputEvent` format that provides a stable interface for relative movement, absolute positioning, and button states, including nanosecond-precision timestamps since boot.
+*   **Hardware Access Syscalls**: Special "microkernel-style" extensions (1000+ series) that allow authorized userspace drivers to perform PCI enumeration, I/O port access (`INB`/`OUTB`), and DMA allocation.
+*   **Named Service Registry**: A built-in service discovery mechanism (`SYS_REGISTER_SERVICE` / `SYS_LOOKUP_SERVICE`) allowing processes to register as named providers (e.g., "netstack") and resolve peer PIDs for IPC.
+*   **Direct Framebuffer Mapping**: Dedicated syscalls for acquiring display metadata and mapping the raw video buffer directly into a process's address space for high-performance graphics servers.
+
+### I/O & Event Management
+*   **io_uring Compatibility**: Implementation of `IoUringSqe` and `IoUringCqe` structures matching the Linux 6.x+ ABI, supporting asynchronous submission and completion queues for high-throughput I/O.
+*   **Poll-to-Epoll Conversion Safety**: Specialized helpers that convert 32-bit `epoll` events to 16-bit `poll` events, with mandatory checks to prevent silent truncation of high-bit flags (like `EPOLLET` or `EPOLLONESHOT`).
+*   **Packed Epoll Events**: Use of byte-array backings and `align(1)` pointers within the `EpollEvent` struct to strictly match the 12-byte packed layout required by the Linux x86_64 ABI.
+*   **OSS Sound Compatibility**: Definition of standard Open Sound System (OSS) constants (`SNDCTL_DSP_SPEED`, etc.) to support legacy applications like Doom via a `/dev/dsp` emulation layer.
+
+### Process & Signal Management
+*   **Standardized Context Tracking**: Full `UContext` and `MContext` structures that capture the complete machine state (registers, segments, signal masks), enabling userspace signal handling and cooperative multitasking.
+*   **Signal Set Helper API**: A bitmask-based `SigSet` implementation (64-bit) with helper functions (`sigaddset`, `sigismember`) for efficient signal mask manipulation within the kernel and userland.
+*   **Clone Logic Consistency**: Support for standard Linux `CLONE_*` flags, enabling shared virtual memory, file descriptor tables, and thread-group semantics during process creation.
+*   **Overflow-Safe Time Conversion**: The `TimeVal` and `Timespec` structures include saturating arithmetic helpers to convert between seconds and milliseconds without risking integer overflow on large values.
+
+This bullet checklist highlights the features of the **Userspace Environment**, **Libc Implementation**, and **Hardware Drivers**, focusing on the unique design patterns and security-focused implementations in your Zig-based userspace.
+
+### Userspace Drivers & Capability Access
+*   **Pure Userspace VirtIO Drivers**: Implementation of high-performance VirtIO-Net and VirtIO-Blk drivers entirely in userspace, utilizing capability-based syscalls for MMIO mapping (`SYS_MMAP_PHYS`) and DMA allocation (`SYS_ALLOC_DMA`).
+*   **Zero-Copy Ring-Buffer IPC**: A high-level `Ring` library providing zero-copy packet and data transfers between drivers and the netstack, featuring cache-line separation (128-byte alignment) to prevent "false sharing" and optimize multicore performance.
+*   **Parallel Driver Architecture**: The VirtIO-Net driver utilizes a multi-process model (via `fork`) to separate RX and TX handling into independent execution contexts, maximizing throughput on full-duplex links.
+*   **MPSC Service Pattern**: A Multi-Producer Single-Consumer (MPSC) registry allowing multiple hardware drivers to attach their own rings to a single "Netstack" consumer for centralized packet processing.
+
+### Security-Hardened Libc (Zig Implementation)
+*   **Recursion-Safe Memory Ops**: Internal `safeCopy` and `safeFill` functions that avoid Zig’s `@memcpy` and `@memset` builtins, preventing infinite recursion in freestanding mode where the compiler might otherwise lower those builtins to the very libc functions they implement.
+*   **Overflow-Protected Allocator**: A standard `malloc` implementation featuring mandatory `checkedMultiply` and `checkedAdd` operations on all size calculations to prevent integer wrap-around exploits.
+*   **Heap Corruption Detection**: Integrated "Magic Number" tracking (`0xDEADBEEF` / `0xFEEDFACE`) in allocation headers to identify heap corruption and double-free attempts in debug builds.
+*   **Safer String Alternatives**: Native implementations of `strlcpy` and `strlcat` provided alongside standard (unsafe) C string functions to encourage truncation-aware string handling.
+*   **Thread-Local PRNG State**: A `rand()` implementation using `threadlocal` storage to ensure independent, race-free PRNG state for every userspace thread without requiring global locks.
+
+### Advanced Async I/O (io_uring)
+*   **Linux-Compatible io_uring Wrapper**: A high-level `IoUring` Zig structure that provides a type-safe interface for submission and completion queues, matching the standard Linux x86_64 ABI.
+*   **Kernel-Level Blocking**: Unlike spin-polling implementations, the `IoUring` library uses `io_uring_enter` with the `IORING_ENTER_GETEVENTS` flag to properly park userspace threads in the kernel until I/O completion.
+*   **Atomic SQE Population**: A callback-based `getSqeAtomicFn` pattern ensures that submission queue entries are fully initialized and committed before being visible to the kernel reactor.
+
+### Cross-Architecture Runtime (CRT0)
+*   **Manual Varargs Abstraction**: A sophisticated `VaList` implementation that manually navigates the ARM 64-bit Procedure Call Standard (AAPCS64) and x86_64 System V ABI, bypassing LLVM's current `@cVaArg` limitations on AArch64.
+*   **TLS & FS_BASE Initialization**: The `crt0` (assembly and Zig) handles early Thread-Local Storage initialization, automatically configuring the `FS` register via `ARCH_SET_FS` for architectural thread-local support.
+*   **Null-Pointer Guarded Linker Script**: A custom linker script that starts the `USER_BASE` at 4MB, ensuring that the first 4MB of virtual memory remain unmapped to catch null-pointer dereferences as hardware faults.
+
+### Audio & Graphics Support
+*   **Software Audio Mixer**: An AC97/OSS-compatible sound backend for Doom (`i_sound.zig`) that performs real-time linear interpolation, stereo separation, and frequency scaling in software.
+*   **LRU Sound Cache**: A sound effect caching system using a doubly-linked Least Recently Used (LRU) eviction strategy and a dedicated 64MB memory budget to manage digital audio lumps.
+*   **Dynamic Framebuffer Centering**: The `doomgeneric` platform layer automatically detects hardware resolution and applies centered blitting with on-the-fly BPP (Bits Per Pixel) conversion and VirtIO-GPU flushing.
+
+### System Utilities
+*   **Deadline-Aware IPC**: The `Ring.wait` implementation uses nanosecond-precision TSC deadlines to bound wait times, preventing process starvation during high-contention IPC scenarios.
+*   **Standardized Error Mapping**: An internal `setErrno` utility that bridges Zig's error-set paradigm with the POSIX `errno` convention, ensuring consistent error reporting across the entire library stack.
+*   **Checked Clock Wrappers**: Saturating arithmetic and overflow-checked multipliers in `gettime_ms` to ensure that malformed kernel timespecs cannot cause userspace crashes or logic loops.
+
+### Current Limitations & Development Stubs
+
+The following features are intentionally incomplete or stubbed for the MVP release:
+
+#### Libc Surface (Doom Port Compatibility)
+*   **Environment Variables**: `getenv`, `setenv`, `unsetenv`, `putenv` return `ENOSYS` - no environment block support.
+*   **Filesystem Ops**: `mkdir`, `rmdir`, `chdir`, `getcwd` return `ENOSYS` - InitRD is read-only.
+*   **Stdio Input**: `scanf`, `fscanf` return 0 - no input parsing implemented.
+*   **Security Stubs**: `gets()` intentionally disabled (returns null with `ENOSYS`) per C11 removal.
+*   **Process Control**: `system()` returns -1 - no userspace shell available.
+*   **Dynamic Allocation**: `vasprintf` stubbed - requires allocator integration.
+
+#### Networking
+*   **DNS Buffer Size**: Hardcoded 512-byte UDP buffer (RFC 1035). EDNS0 large responses not supported.
+*   **PMTU Cache Expiration**: LRU cache with tick-based rate limiting but no background expiration timer.
+*   **Loopback Interface**: Synchronous processing only - protocol handlers must copy data before returning.
+
+#### Drivers & Hardware
+*   **Audio/Music**: Doom sound effects work; music playback functions (`I_PlaySong`, `I_PauseSong`) are empty stubs.
+*   **VirtIO-Blk IPC**: Message buffers limited to 4 sectors (2KB) per request.
+*   **VirtIO-Net Features**: `VIRTIO_NET_F_MRG_RXBUF` and `EVENT_IDX` defined but not negotiated.
+
+#### Signals & Context
+*   **sigsetjmp**: Does not save/restore signal mask (just calls `setjmp`).
+*   **FPU/SSE State**: Space reserved in `MContext`/`UContext` but not populated during signal delivery.

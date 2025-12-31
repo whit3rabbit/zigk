@@ -213,7 +213,10 @@ pub const SlabHeader = struct {
         const mask = @as(u64, 1) << bit_idx;
 
         if ((self.bitmap[word_idx] & mask) == 0) {
-            // Double free
+            // Double free detected - possible exploit attempt
+            if (@import("builtin").mode == .Debug) {
+                @panic("Slab: Double-free detected - possible exploit attempt");
+            }
             if (is_freestanding) {
                 console.warn("Slab: Double free at {x}", .{ptr_addr});
             }

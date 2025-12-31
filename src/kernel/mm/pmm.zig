@@ -409,6 +409,10 @@ pub fn freePage(phys_addr: u64) void {
     }
 
     if (!isBitSet(page_num)) {
+        // Double-free is a serious bug - panic in Debug mode
+        if (@import("builtin").mode == .Debug) {
+            @panic("PMM: Double-free detected - possible exploit attempt");
+        }
         console.warn("PMM: Double-free/Unallocated free detected at {x}!", .{phys_addr});
         return;
     }

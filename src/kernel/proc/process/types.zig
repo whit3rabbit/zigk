@@ -170,6 +170,12 @@ pub const Process = struct {
     /// Per-process file creation mask
     umask: u32 = 0o022,
 
+    /// SECURITY: Lock for credential fields (uid/gid/euid/egid/suid/sgid).
+    /// Required to prevent TOCTOU races where concurrent setuid/setgid calls
+    /// could observe inconsistent credential state during permission checks.
+    /// Similar to Linux's cred_guard_mutex.
+    cred_lock: CwdLock = .{},
+
     /// User and group identity (Linux-compatible uid/gid)
     uid: u32 = 0,
     gid: u32 = 0,

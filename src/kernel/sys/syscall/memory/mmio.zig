@@ -333,6 +333,12 @@ pub fn sys_free_dma(virt_addr_arg: usize, size_arg: usize) SyscallError!usize {
 
     const proc = base.getCurrentProcess();
 
+    // SECURITY FIX: Acquire write lock for the entire VMA validation + zeroing + unmap
+    // sequence to prevent TOCTOU race where another thread could munmap the region
+    // between validation and zeroing, causing kernel page fault or corruption.
+    const held = proc.user_vmm.lock.acquireWrite();
+    defer held.release();
+
     // SECURITY FIX (Vuln 1): Validate that virt_addr belongs to a valid DMA VMA
     // BEFORE zeroing. Without this check, an attacker could pass a kernel address
     // and zero arbitrary kernel memory, leading to privilege escalation.
@@ -378,9 +384,9 @@ pub fn sys_free_dma(virt_addr_arg: usize, size_arg: usize) SyscallError!usize {
         buffer_ptr[i] = 0;
     }
 
-    // Use munmap to free the region
+    // Use munmapLocked since we already hold the lock
     // This will unmap pages and free physical memory via VMA cleanup
-    const result = proc.user_vmm.munmap(virt_addr, size);
+    const result = proc.user_vmm.munmapLocked(virt_addr, size);
     if (result < 0) {
         return error.EINVAL;
     }
@@ -676,6 +682,12 @@ pub fn sys_free_iommu_dma(virt_addr_arg: usize, size_arg: usize, device_bdf_arg:
         return error.EPERM;
     }
 
+    // SECURITY FIX (Vuln 2): Acquire lock for entire VMA validation + zeroing + unmap.
+    // This prevents TOCTOU where another thread could remap the VMA between
+    // validation and zeroing, allowing kernel memory zeroing.
+    const held = proc.user_vmm.lock.acquireWrite();
+    defer held.release();
+
     // SECURITY FIX (Vuln 1): Validate that virt_addr belongs to a valid DMA VMA
     // BEFORE zeroing. Without this check, attacker could zero kernel memory.
     const vma = proc.user_vmm.findOverlappingVma(virt_addr, virt_addr + size) orelse {
@@ -721,8 +733,8 @@ pub fn sys_free_iommu_dma(virt_addr_arg: usize, size_arg: usize, device_bdf_arg:
         kernel_iommu.freeDmaBuffer(bdf, dma_addr, size);
     }
 
-    // Use munmap to free the region
-    const result = proc.user_vmm.munmap(virt_addr, size);
+    // Use munmapLocked since we already hold the lock
+    const result = proc.user_vmm.munmapLocked(virt_addr, size);
     if (result < 0) {
         return error.EINVAL;
     }

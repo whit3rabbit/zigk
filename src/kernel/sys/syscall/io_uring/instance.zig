@@ -11,7 +11,9 @@ const heap = @import("heap");
 const io = @import("io");
 const thread_mod = @import("thread");
 const Thread = thread_mod.Thread;
-const user_mem = @import("user_mem"); // Needed for bounce buffer cleanup if we keep it here?
+const user_mem = @import("user_mem");
+
+// Bounce buffer cleanup note:
 // Actually finalizeBounceBuffer uses user_mem. Let's move finalizeBounceBuffer to request.zig
 // But freeInstance calls finalizeBounceBuffer. So freeInstance needs to call a function in request.zig?
 // Cycle: instance -> request -> instance.
@@ -204,6 +206,31 @@ pub const IoUringInstance = struct {
 var instances: [types.MAX_RINGS_PER_PROCESS * 16]IoUringInstance = undefined;
 var instances_initialized: bool = false;
 
+/// SECURITY: Pool lock to prevent concurrent allocInstance/freeInstance races.
+/// Without this lock, two concurrent allocInstance calls could both see the same
+/// instance as unallocated and return it to different processes.
+/// Using atomic spinlock pattern directly since sync module not in dependencies.
+var pool_lock: std.atomic.Value(u32) = .{ .raw = 0 };
+
+/// Lock state returned by acquirePoolLock, passed to releasePoolLock
+const LockState = struct { irq_state: bool };
+
+/// Acquire the pool lock (IRQ-safe spinlock pattern)
+fn acquirePoolLock() LockState {
+    const irq_state = hal.cpu.interruptsEnabled();
+    hal.cpu.disableInterrupts();
+    while (pool_lock.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) {
+        hal.cpu.pause();
+    }
+    return .{ .irq_state = irq_state };
+}
+
+/// Release the pool lock
+fn releasePoolLock(state: LockState) void {
+    pool_lock.store(0, .release);
+    if (state.irq_state) hal.cpu.enableInterrupts();
+}
+
 fn initInstances() void {
     if (instances_initialized) return;
 
@@ -216,6 +243,10 @@ fn initInstances() void {
 /// Allocate physical pages for io_uring shared memory rings
 pub fn allocInstance(entries: u32) ?struct { idx: usize, instance: *IoUringInstance } {
     initInstances();
+
+    // SECURITY: Acquire pool lock to prevent concurrent allocation of same instance
+    const lock_state = acquirePoolLock();
+    defer releasePoolLock(lock_state);
 
     for (&instances, 0..) |*inst, idx| {
         if (!inst.allocated) {
@@ -288,6 +319,10 @@ pub fn allocInstance(entries: u32) ?struct { idx: usize, instance: *IoUringInsta
 
 pub fn freeInstance(idx: usize) void {
     if (idx >= instances.len) return;
+
+    // SECURITY: Acquire pool lock to prevent concurrent free/alloc races
+    const lock_state = acquirePoolLock();
+    defer releasePoolLock(lock_state);
 
     var inst = &instances[idx];
     if (!inst.allocated) return;

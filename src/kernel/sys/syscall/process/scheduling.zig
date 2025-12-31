@@ -26,6 +26,16 @@ pub const Timespec = extern struct {
     tv_nsec: i64,
 };
 
+// Clock IDs (Linux compatible)
+const CLOCK_REALTIME: usize = 0;
+const CLOCK_MONOTONIC: usize = 1;
+const CLOCK_PROCESS_CPUTIME_ID: usize = 2;
+const CLOCK_THREAD_CPUTIME_ID: usize = 3;
+const CLOCK_MONOTONIC_RAW: usize = 4;
+const CLOCK_REALTIME_COARSE: usize = 5;
+const CLOCK_MONOTONIC_COARSE: usize = 6;
+const CLOCK_BOOTTIME: usize = 7;
+
 // =============================================================================
 // Scheduling
 // =============================================================================
@@ -250,48 +260,63 @@ pub fn sys_select(nfds: usize, readfds: usize, writefds: usize, exceptfds: usize
     return ready_count;
 }
 
-/// sys_clock_gettime (228) - Get time from a clock
-///
-/// MVP: Returns tick count converted to timespec.
-pub fn sys_clock_gettime(clk_id: usize, tp_ptr: usize) SyscallError!usize {
-    _ = clk_id; // Ignore clock ID for MVP (all clocks return same value)
-
-    if (tp_ptr == 0) {
-        return error.EFAULT;
-    }
-
-    var tp: Timespec = undefined;
-
-    // Try to use TSC-based high resolution timing
+/// Get monotonic time (time since boot) using TSC or tick count
+fn getMonotonicTime() Timespec {
     const freq = hal.timing.getTscFrequency();
     if (freq > 0) {
         const tsc = hal.timing.rdtsc();
-        // Convert TSC ticks to nanoseconds
-        // ns = (tsc * 1_000_000_000) / freq
-        // We use 128-bit math implicitly or carefully to avoid overflow
-        // u64 * u64 -> u128 isn't directly supported in all simple expressions
-        // but Zig has mulWide.
         const tsc_u128 = @as(u128, tsc);
         const ns_u128 = (tsc_u128 * 1_000_000_000) / freq;
         const total_ns: u64 = @truncate(ns_u128);
-
-        // Clamp to i64 max to prevent overflow
         const max_sec: u64 = @intCast(std.math.maxInt(i64));
         const sec_val = total_ns / 1_000_000_000;
-        tp = Timespec{
+        return .{
             .tv_sec = if (sec_val > max_sec) std.math.maxInt(i64) else @intCast(sec_val),
             .tv_nsec = @intCast(total_ns % 1_000_000_000),
         };
     } else {
         // Fallback to tick count (10ms resolution)
         const ticks = sched.getTickCount();
-        const ms = ticks *| 10; // saturating mul to prevent overflow
+        const ms = ticks *| 10; // saturating mul
         const max_sec_ms: u64 = @intCast(std.math.maxInt(i64));
         const sec_ms = ms / 1000;
-        tp = Timespec{
+        return .{
             .tv_sec = if (sec_ms > max_sec_ms) std.math.maxInt(i64) else @intCast(sec_ms),
             .tv_nsec = @intCast((ms % 1000) * 1_000_000),
         };
+    }
+}
+
+/// sys_clock_gettime (228) - Get time from a clock
+///
+/// CLOCK_REALTIME: Wall-clock time from RTC
+/// CLOCK_MONOTONIC: Time since boot (TSC or tick-based)
+pub fn sys_clock_gettime(clk_id: usize, tp_ptr: usize) SyscallError!usize {
+    if (tp_ptr == 0) {
+        return error.EFAULT;
+    }
+
+    var tp: Timespec = undefined;
+
+    switch (clk_id) {
+        CLOCK_REALTIME, CLOCK_REALTIME_COARSE => {
+            // Wall-clock time from RTC
+            if (hal.rtc.isInitialized()) {
+                const timestamp = hal.rtc.getUnixTimestamp();
+                tp = .{
+                    .tv_sec = timestamp,
+                    .tv_nsec = 0, // RTC has second granularity
+                };
+            } else {
+                // Fallback to monotonic time if RTC not initialized
+                tp = getMonotonicTime();
+            }
+        },
+        CLOCK_MONOTONIC, CLOCK_MONOTONIC_RAW, CLOCK_MONOTONIC_COARSE, CLOCK_BOOTTIME => {
+            // Monotonic time since boot
+            tp = getMonotonicTime();
+        },
+        else => return error.EINVAL,
     }
 
     UserPtr.from(tp_ptr).writeValue(tp) catch {
@@ -332,7 +357,7 @@ pub const Timeval = extern struct {
 
 /// sys_gettimeofday (96) - Get time of day (legacy)
 ///
-/// MVP: Returns tick count converted to timeval
+/// Returns wall-clock time from RTC, or fallback to monotonic time.
 pub fn sys_gettimeofday(tv_ptr: usize, tz_ptr: usize) SyscallError!usize {
     _ = tz_ptr; // Timezone not supported
 
@@ -342,36 +367,74 @@ pub fn sys_gettimeofday(tv_ptr: usize, tz_ptr: usize) SyscallError!usize {
 
     var tv: Timeval = undefined;
 
-    // Try to use TSC-based high resolution timing
-    const freq = hal.timing.getTscFrequency();
-    if (freq > 0) {
-        const tsc = hal.timing.rdtsc();
-        const tsc_u128 = @as(u128, tsc);
-        const us_u128 = (tsc_u128 * 1_000_000) / freq;
-        const total_us: u64 = @truncate(us_u128);
-
-        // Clamp to i64 max to prevent overflow
-        const max_sec_tv: u64 = @intCast(std.math.maxInt(i64));
-        const sec_us = total_us / 1_000_000;
-        tv = Timeval{
-            .tv_sec = if (sec_us > max_sec_tv) std.math.maxInt(i64) else @intCast(sec_us),
-            .tv_usec = @intCast(total_us % 1_000_000),
+    // Use RTC for wall-clock time if initialized
+    if (hal.rtc.isInitialized()) {
+        const timestamp = hal.rtc.getUnixTimestamp();
+        tv = .{
+            .tv_sec = timestamp,
+            .tv_usec = 0, // RTC has second granularity
         };
     } else {
-        // Fallback to tick count
-        const ticks = sched.getTickCount();
-        const ms = ticks *| 10; // saturating mul
-        const max_sec_tv2: u64 = @intCast(std.math.maxInt(i64));
-        const sec_ms2 = ms / 1000;
-        tv = Timeval{
-            .tv_sec = if (sec_ms2 > max_sec_tv2) std.math.maxInt(i64) else @intCast(sec_ms2),
-            .tv_usec = @intCast((ms % 1000) * 1000),
-        };
+        // Fallback to TSC-based timing
+        const freq = hal.timing.getTscFrequency();
+        if (freq > 0) {
+            const tsc = hal.timing.rdtsc();
+            const tsc_u128 = @as(u128, tsc);
+            const us_u128 = (tsc_u128 * 1_000_000) / freq;
+            const total_us: u64 = @truncate(us_u128);
+            const max_sec_tv: u64 = @intCast(std.math.maxInt(i64));
+            const sec_us = total_us / 1_000_000;
+            tv = .{
+                .tv_sec = if (sec_us > max_sec_tv) std.math.maxInt(i64) else @intCast(sec_us),
+                .tv_usec = @intCast(total_us % 1_000_000),
+            };
+        } else {
+            // Fallback to tick count
+            const ticks = sched.getTickCount();
+            const ms = ticks *| 10;
+            const max_sec_tv2: u64 = @intCast(std.math.maxInt(i64));
+            const sec_ms2 = ms / 1000;
+            tv = .{
+                .tv_sec = if (sec_ms2 > max_sec_tv2) std.math.maxInt(i64) else @intCast(sec_ms2),
+                .tv_usec = @intCast((ms % 1000) * 1000),
+            };
+        }
     }
 
     UserPtr.from(tv_ptr).writeValue(tv) catch {
         return error.EFAULT;
     };
+
+    return 0;
+}
+
+/// sys_settimeofday (164) - Set time of day
+///
+/// SECURITY: Requires root (euid == 0) per POSIX.
+/// Writing system time is a privileged operation.
+pub fn sys_settimeofday(tv_ptr: usize, tz_ptr: usize) SyscallError!usize {
+    _ = tz_ptr; // Timezone not supported
+
+    // SECURITY: Check root permission (POSIX-style)
+    const proc = base.getCurrentProcess();
+    if (proc.euid != 0) return error.EPERM;
+
+    if (tv_ptr == 0) return error.EINVAL;
+
+    // Read timeval from userspace
+    const tv = UserPtr.from(tv_ptr).readValue(Timeval) catch {
+        return error.EFAULT;
+    };
+
+    // Validate values
+    if (tv.tv_sec < 0 or tv.tv_usec < 0 or tv.tv_usec >= 1_000_000) {
+        return error.EINVAL;
+    }
+
+    // Convert to DateTime and write to RTC
+    const timestamp = tv.tv_sec;
+    const dt = hal.rtc.DateTime.fromUnixTimestamp(timestamp);
+    hal.rtc.writeDateTime(&dt);
 
     return 0;
 }

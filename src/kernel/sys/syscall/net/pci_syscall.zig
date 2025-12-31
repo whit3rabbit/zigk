@@ -129,6 +129,9 @@ pub fn sys_pci_enumerate(buf_ptr_arg: usize, max_count_arg: usize) SyscallError!
         return error.ENODEV;
     };
 
+    // SECURITY NOTE: count is bounded by devices.count which is <= MAX_DEVICES (64).
+    // Even though max_count is user-controlled, @min ensures count <= 64.
+    // Therefore, count * entry_size cannot overflow (64 * ~140 bytes = ~9KB).
     const count = @min(devices.count, max_count);
 
     if (count == 0) {

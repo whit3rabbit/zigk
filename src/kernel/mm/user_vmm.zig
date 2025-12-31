@@ -307,7 +307,12 @@ pub const UserVmm = struct {
         // Acquire write lock as we are modifying the VMA list
         const held = self.lock.acquireWrite();
         defer held.release();
+        return self.munmapLocked(addr, len);
+    }
 
+    /// Internal munmap that assumes lock is already held.
+    /// SECURITY: Used by sys_free_dma to hold lock during VMA validation + zeroing + unmap.
+    pub fn munmapLocked(self: *UserVmm, addr: u64, len: usize) isize {
         if (!paging.isPageAligned(addr)) {
             return Errno.EINVAL.toReturn();
         }

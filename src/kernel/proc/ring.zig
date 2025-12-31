@@ -254,6 +254,11 @@ pub fn allocateRing(
 }
 
 /// Get ring by ID
+/// NOTE: Unlike Thread/Process, RingDescriptor is in a fixed global array and
+/// is never deallocated - only transitions to .free state. The returned pointer
+/// is always valid memory, but the ring may be closed by another thread after
+/// this returns. Callers should check ring.state if needed.
+/// This is acceptable because ring operations check state internally.
 pub fn getRing(ring_id: u32) ?*RingDescriptor {
     ensureInit();
 
