@@ -99,6 +99,16 @@ Offset  Size    Type                    Field               Description
 0x40    8       u64                     hhdm_offset         HHDM base (0xFFFF800000000000)
 0x48    8       u64                     kernel_phys_base    Kernel physical load address
 0x50    8       u64                     kernel_virt_base    Kernel virtual base address
+0x58    8       u64                     stack_region_offset KASLR offset for kernel stack region
+0x60    8       u64                     mmio_region_offset  KASLR offset for MMIO mapping region
+0x68    8       u64                     heap_offset         KASLR offset for kernel heap
+0x70    8       u64                     dtb_addr            Device Tree Blob (AArch64, 0 on x86_64)
+0x78    8       u64                     gic_dist_base       GIC Distributor base (AArch64)
+0x80    8       u64                     gic_cpu_base        GIC CPU Interface base (AArch64)
+0x88    1       u8                      gic_version         GIC version (2 or 3, AArch64)
+0x89    7       [7]u8                   _gic_padding        Alignment padding
+
+Total size: 144 bytes (0x90)
 ```
 
 #### MemoryDescriptor Layout
@@ -586,6 +596,31 @@ This causes string-based overflows to include the null terminator in the overwri
 ### KASLR
 The UEFI bootloader acquires hardware entropy (RDRAND/RDSEED) for KASLR. The kernel is linked to high memory with virtual addresses fixed by the linker script to `0xffffffff80000000`. Physical load addresses may vary.
 
+### IOMMU (VT-d) DMA Isolation
+
+Intel VT-d provides DMA isolation, preventing devices from accessing arbitrary physical memory. The kernel initializes IOMMU before device drivers to ensure all DMA operations are protected.
+
+**Initialization Sequence** (`src/kernel/core/init_hw.zig:initIommu`):
+1. Parse ACPI DMAR (DMA Remapping) table to discover IOMMU hardware
+2. Initialize VT-d registers and enable translation
+3. Store DMAR info for RMRR lookups during device assignment
+4. Load RMRR regions into domain manager
+
+**RMRR (Reserved Memory Region Reporting)**:
+
+Firmware may reserve memory regions that devices must access via identity mapping (IOVA == physical address). Common examples:
+- USB controllers accessing legacy BIOS keyboard buffers
+- Integrated graphics accessing firmware-reserved memory
+
+When a device is assigned to an IOMMU domain, the kernel automatically sets up identity mappings for any RMRR regions that apply to that device.
+
+**Key Files**:
+| File | Purpose |
+|------|---------|
+| `src/kernel/mm/iommu/domain.zig` | Domain management, RMRR setup |
+| `src/arch/x86_64/mm/iommu/vtd.zig` | VT-d register access |
+| `src/kernel/core/init_hw.zig` | IOMMU initialization |
+
 ### User-Space ASLR
 
 Zscapek implements full user-space ASLR to randomize critical memory regions per-process.
@@ -607,10 +642,11 @@ Offset  Size    Type    Field           Description
 
 | Component | Base Address | Entropy Bits | Granularity | Max Offset |
 |-----------|--------------|--------------|-------------|------------|
-| Stack top | `0x7FFF_FFFF_F000` | 11 | 4KB (page) | 8MB down |
+| Stack top | `0x7FFF_FFFF_F000` | 22 | 4KB (page) | 16GB down |
 | PIE base | `0x5555_5000_0000` | 16 | 64KB | 4GB up |
 | mmap base | `0x1000_0000_0000` | 20 | 4KB (page) | 4TB up |
-| Heap gap | After ELF end | 8 | 4KB (page) | 1MB up |
+| Heap gap | After ELF end | 16 | 4KB (page) | 256MB up |
+| TLS base | `0xB000_0000` | 16 | 4KB (page) | 256MB up |
 | VDSO | `0x7FFF_E000_0000` | 16 | 4KB (page) | 256MB down |
 
 **Address Computation**:
@@ -620,6 +656,7 @@ stack_top  = STACK_TOP_BASE  - (stack_offset * PAGE_SIZE)
 pie_base   = PIE_BASE        + (pie_offset * 64KB)
 mmap_start = MMAP_BASE       + (mmap_offset * PAGE_SIZE)
 heap_start = align(elf_end)  + (heap_gap * PAGE_SIZE)
+tls_base   = TLS_BASE        + (tls_offset * PAGE_SIZE)
 ```
 
 **Lifecycle**:

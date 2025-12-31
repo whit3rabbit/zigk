@@ -27,6 +27,8 @@ pub const initHardware = domain.initHardware;
 pub const allocDmaBuffer = domain.allocDmaBuffer;
 pub const freeDmaBuffer = domain.freeDmaBuffer;
 pub const isAvailable = domain.isAvailable;
+pub const setDmarInfo = domain.setDmarInfo;
+pub const getDmarInfo = domain.getDmarInfo;
 
 // Access to global domain manager
 pub const domain_manager = &domain.domain_manager;

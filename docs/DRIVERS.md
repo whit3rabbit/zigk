@@ -686,6 +686,23 @@ const buf = try dma.allocBufferUnsafe(size);
 2. **Fallback Warning**: If IOMMU mapping fails, a warning is logged but allocation succeeds with raw physical address
 3. **Proper Cleanup**: Always call `dma.freeBuffer()` to unmap from IOMMU and free physical memory
 4. **Validation**: Buffer sizes are validated for overflow before allocation
+5. **IOTLB Invalidation**: All IOMMU page table modifications are followed by IOTLB invalidation to prevent stale translations
+
+### RMRR Identity Mappings
+
+Some devices require access to firmware-reserved memory regions at boot. These Reserved Memory Region Reporting (RMRR) entries are parsed from the ACPI DMAR table and automatically identity-mapped when a device is assigned to an IOMMU domain.
+
+**Automatic Setup**: When `getDomainForDevice()` assigns a device to a domain, it calls `setupRmrrForDevice()` to create identity mappings (IOVA == physical address) for any RMRR regions that apply to that device.
+
+**Common RMRR Users**:
+- USB controllers (legacy BIOS keyboard buffer access)
+- Integrated graphics (firmware-reserved memory)
+- Some network controllers
+
+**Boot Log**: Look for messages like:
+```
+IOMMU: Identity-mapped RMRR 0xabc00000-0xabffffff for 00:14.0
+```
 
 ---
 

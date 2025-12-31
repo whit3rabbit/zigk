@@ -386,6 +386,9 @@ export fn _start(boot_info: *BootInfo.BootInfo) callconv(.c) noreturn {
     // Set RSDP address for hardware subsystems
     init_hw.setRsdpAddress(boot_info.rsdp);
 
+    // Initialize IOMMU before device drivers for DMA isolation
+    init_hw.initIommu();
+
     // Initialize Hardware (with boot logo animation ticks)
     init_hw.initNetwork();
     if (boot_logo_active) boot_logo_instance.tick();

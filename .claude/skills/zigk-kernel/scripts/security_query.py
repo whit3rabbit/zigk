@@ -117,16 +117,17 @@ scheduler.init()       →  Protected threads start
     "aslr": """
 ## Address Space Layout Randomization
 
-Location: src/kernel/aslr.zig
+Location: src/kernel/mm/aslr.zig
 
 ### Randomized Regions
-| Component | Base Address | Entropy | Granularity |
-|-----------|--------------|---------|-------------|
-| Stack | 0x7FFF_FFFF_F000 | 11 bits | 4KB (page) |
-| PIE | 0x5555_5000_0000 | 16 bits | 64KB |
-| mmap | 0x1000_0000_0000 | 20 bits | 4KB (page) |
-| Heap gap | After ELF | 8 bits | 4KB (page) |
-| VDSO | 0x7FFF_E000_0000 | 16 bits | 4KB (page) |
+| Component | Base Address | Entropy | Granularity | Range |
+|-----------|--------------|---------|-------------|-------|
+| Stack | 0x7FFF_FFFF_F000 | 22 bits | 4KB (page) | 16GB |
+| PIE | 0x5555_5000_0000 | 16 bits | 64KB | 4GB |
+| mmap | 0x1000_0000_0000 | 20 bits | 4KB (page) | 4TB |
+| Heap gap | After ELF | 16 bits | 4KB (page) | 256MB |
+| TLS | 0xB000_0000 | 16 bits | 4KB (page) | 256MB |
+| VDSO | 0x7FFF_E000_0000 | 16 bits | 4KB (page) | 256MB |
 
 ### AslrOffsets Structure
 ```zig
@@ -134,9 +135,11 @@ pub const AslrOffsets = struct {
     stack_offset: u16,    // Subtracted from stack base
     pie_offset: u16,      // Added to PIE base (64KB units)
     mmap_offset: u32,     // Added to mmap base (pages)
-    heap_gap: u8,         // Gap after ELF (pages)
+    heap_gap: u16,        // Gap after ELF (16 bits entropy)
+    tls_offset: u16,      // TLS offset (16 bits entropy)
     stack_top: u64,       // Computed stack top
     mmap_start: u64,      // Computed mmap start
+    tls_base: u64,        // Computed TLS base
 };
 ```
 
@@ -148,11 +151,17 @@ pub const AslrOffsets = struct {
 | sys_execve() | New random offsets |
 
 ### Entropy Source
-Uses prng.range() with rejection sampling for unbiased random.
+Uses kernel PRNG (xoroshiro128+) seeded from RDRAND/RDSEED at boot.
+prng.range() uses rejection sampling to avoid modulo bias.
+
+### Security Notes
+- Fail-secure: If entropy is weak, process creation should fail
+- 22-bit stack entropy provides strong protection vs heap spraying
+- 16-bit heap gap entropy prevents brute-force heap layout prediction
 
 ### Debug Output
 ```
-ASLR[pid=1]: stack_top=7fffff8bf000 pie_base=5555c3470000 mmap=10002a590000
+ASLR[pid=1]: stack_top=7fffff8bf000 pie_base=5555c3470000 mmap=10002a590000 heap_gap=49 tls_base=b0001000
 ```
 """,
 

@@ -4,12 +4,13 @@
 //! exploitation techniques that rely on predictable addresses (ROP, ret2libc).
 //!
 //! Components randomized:
-//!   - Stack top: 11 bits entropy (8MB range)
+//!   - Stack top: 22 bits entropy (16GB range)
 //!   - PIE base: 16 bits entropy (4GB range, 64KB granularity)
 //!   - mmap base: 20 bits entropy (4TB range)
-//!   - Heap gap: 8 bits entropy (1MB range after ELF end)
+//!   - Heap gap: 16 bits entropy (256MB range after ELF end)
+//!   - TLS base: 16 bits entropy (256MB range)
 //!
-//! Note: VDSO randomization is handled separately in vdso.zig (already implemented).
+//! Note: VDSO randomization is handled separately in vdso.zig.
 //!
 //! Entropy source: Kernel PRNG (xoroshiro128+) seeded from RDRAND/RDSEED at boot.
 

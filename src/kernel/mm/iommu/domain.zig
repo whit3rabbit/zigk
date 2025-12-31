@@ -458,7 +458,7 @@ pub const Domain = struct {
         }
     }
 
-    /// Map a specific IOVA to physical memory
+    /// Map a specific IOVA to physical memory (for identity mappings like RMRR)
     pub fn mapIova(
         self: *Self,
         iova: u64,
@@ -471,7 +471,42 @@ pub const Domain = struct {
             console.err("IOMMU: Failed to map IOVA 0x{x}", .{iova});
             return false;
         };
+
+        // SECURITY: Invalidate IOTLB after mapping changes
+        // This ensures hardware sees updated page tables before DMA proceeds.
+        self.invalidateIotlb() catch |err| {
+            console.err("IOMMU: IOTLB invalidation failed: {}", .{err});
+            self.page_tables.unmapRange(iova, size);
+            return false;
+        };
+
         return true;
+    }
+
+    /// Setup identity mappings for RMRR regions that apply to a specific device
+    /// Uses DmarInfo.findRmrrForDevice() helper
+    pub fn setupRmrrForDevice(self: *Self, bdf: DeviceBdf, dmar_info: *const acpi.DmarInfo) void {
+        // Use existing helper to find RMRR for this device
+        const rmrr = dmar_info.findRmrrForDevice(bdf.bus, bdf.device, bdf.func) orelse return;
+
+        const size = rmrr.region_limit - rmrr.region_base + 1;
+
+        // Identity map: IOVA == physical address
+        if (self.mapIova(rmrr.region_base, rmrr.region_base, size, true, true)) {
+            console.info("IOMMU: Identity-mapped RMRR 0x{x}-0x{x} for {x:0>2}:{x:0>2}.{d}", .{
+                rmrr.region_base,
+                rmrr.region_limit,
+                bdf.bus,
+                bdf.device,
+                bdf.func,
+            });
+        } else {
+            console.warn("IOMMU: Failed to identity-map RMRR for {x:0>2}:{x:0>2}.{d}", .{
+                bdf.bus,
+                bdf.device,
+                bdf.func,
+            });
+        }
     }
 
     /// Unmap an IOVA range
@@ -662,6 +697,11 @@ pub const DomainManager = struct {
             _ = tables.configureDevice(bdf.bus, bdf.device, bdf.func, domain.id, &domain.page_tables);
         }
 
+        // Setup RMRR identity mappings for this device
+        if (getDmarInfo()) |dmar_info| {
+            domain.setupRmrrForDevice(bdf, dmar_info);
+        }
+
         return domain;
     }
 
@@ -709,6 +749,19 @@ pub const DomainManager = struct {
 
 /// Global domain manager instance
 pub var domain_manager: DomainManager = undefined;
+
+/// Cached DMAR information for RMRR lookups during device assignment
+var cached_dmar_info: ?acpi.DmarInfo = null;
+
+/// Set DMAR info (called by init_hw during IOMMU initialization)
+pub fn setDmarInfo(info: acpi.DmarInfo) void {
+    cached_dmar_info = info;
+}
+
+/// Get cached DMAR info (for RMRR lookups during device assignment)
+pub fn getDmarInfo() ?*const acpi.DmarInfo {
+    return if (cached_dmar_info) |*info| info else null;
+}
 
 /// Initialize the IOMMU domain subsystem
 pub fn init() void {

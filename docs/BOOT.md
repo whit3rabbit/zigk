@@ -27,7 +27,7 @@ For detailed byte-level layouts, struct alignments, and hardware interface speci
    - Loads new page tables (switches CR3)
    - Jumps to `_uefi_start` with BootInfo pointer
 
-3. **Kernel Entry** (`_uefi_start` in `src/kernel/core/main.zig`):
+3. **Kernel Entry** (`_start` in `src/kernel/core/main.zig`):
    - Receives BootInfo structure with memory map, framebuffer, RSDP, and initrd
    - Initializes HAL, memory management, and all subsystems
 
@@ -92,6 +92,7 @@ qemu-system-x86_64 -M q35 -m 256M \
    - Initializes SMP (brings up Application Processors)
    - Initializes Async I/O Reactor
    - Initializes Signal Handling
+   - Initializes IOMMU (VT-d DMA isolation, RMRR identity mappings) via `core/init_hw.zig`
    - Initializes Hardware (PCI, Network*, USB, Audio, Storage, VirtIO-GPU) via `core/init_hw.zig`
      * *Note: Kernel network stack is currently disabled for userspace migration.*
    - Loads Init Process (scans modules for drivers and init candidate)
@@ -161,10 +162,11 @@ Zscapek implements full ASLR to randomize critical memory regions per-process, m
 
 | Component | Base Address | Entropy | Range |
 |-----------|--------------|---------|-------|
-| Stack top | `0x7FFF_FFFF_F000` | 11 bits | 8MB (2048 pages) |
+| Stack top | `0x7FFF_FFFF_F000` | 22 bits | 16GB (4M pages) |
 | PIE base | `0x5555_5000_0000` | 16 bits | 4GB (64KB granularity) |
 | mmap base | `0x1000_0000_0000` | 20 bits | 4TB |
-| Heap gap | After ELF end | 8 bits | 1MB (256 pages) |
+| Heap gap | After ELF end | 16 bits | 256MB (65536 pages) |
+| TLS base | `0xB000_0000` | 16 bits | 256MB |
 | VDSO | `0x7FFF_E000_0000` | 16 bits | 256MB (65536 pages) |
 
 ### Behavior
@@ -484,13 +486,13 @@ asm volatile (
 
 **Symptom**: Kernel crashes immediately on entry.
 
-**Cause**: UEFI bootloader defaults to ELF entry point (`_start`) if `_uefi_start` symbol is not found.
+**Cause**: UEFI bootloader defaults to ELF entry point (`e_entry`) if `_uefi_start` symbol is not found in the symbol table.
 
-**Solution**: The loader searches the ELF symbol table for `_uefi_start`. If not found, it falls back to `e_entry` which is `_start`. Ensure the kernel exports `_uefi_start`:
+**Solution**: The loader searches the ELF symbol table for `_uefi_start`. If not found, it falls back to `e_entry` which points to `_start`. The kernel exports `_start` as the entry point:
 
 ```zig
-export fn _uefi_start(boot_info: *BootInfo.BootInfo) callconv(.c) noreturn {
-    // UEFI-specific initialization
+export fn _start(boot_info: *BootInfo.BootInfo) callconv(.c) noreturn {
+    // Kernel initialization
 }
 ```
 

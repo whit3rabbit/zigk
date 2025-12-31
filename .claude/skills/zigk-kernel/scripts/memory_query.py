@@ -100,24 +100,38 @@ pub fn virtToPhys(virt: u64) u64 {
     "aslr": """
 ## ASLR Configuration
 
+Location: src/kernel/mm/aslr.zig
+
 | Component | Base Address | Entropy | Granularity | Max Offset |
 |-----------|--------------|---------|-------------|------------|
-| Stack top | 0x7FFF_FFFF_F000 | 11 bits | 4KB (page) | 8MB down |
+| Stack top | 0x7FFF_FFFF_F000 | 22 bits | 4KB (page) | 16GB down |
 | PIE base | 0x5555_5000_0000 | 16 bits | 64KB | 4GB up |
 | mmap base | 0x1000_0000_0000 | 20 bits | 4KB (page) | 4TB up |
-| Heap gap | After ELF end | 8 bits | 4KB (page) | 1MB up |
+| Heap gap | After ELF end | 16 bits | 4KB (page) | 256MB up |
+| TLS base | 0xB000_0000 | 16 bits | 4KB (page) | 256MB up |
 | VDSO | 0x7FFF_E000_0000 | 16 bits | 4KB (page) | 256MB down |
 
 ### AslrOffsets Structure
 ```zig
 pub const AslrOffsets = struct {
-    stack_offset: u16,    // Subtracted from stack base
+    stack_offset: u16,    // Subtracted from stack base (22 bits entropy)
     pie_offset: u16,      // Added to PIE base (64KB units)
     mmap_offset: u32,     // Added to mmap base (pages)
-    heap_gap: u8,         // Gap after ELF (pages)
+    heap_gap: u16,        // Gap after ELF (16 bits entropy)
+    tls_offset: u16,      // TLS offset (16 bits entropy)
     stack_top: u64,       // Computed stack top
     mmap_start: u64,      // Computed mmap start
+    tls_base: u64,        // Computed TLS base
 };
+```
+
+### Entropy Constants
+```zig
+pub const STACK_ENTROPY_BITS: u5 = 22;   // 4M pages = 16GB range
+pub const PIE_ENTROPY_BITS: u5 = 16;     // 64KB units = 4GB range
+pub const MMAP_ENTROPY_BITS: u5 = 20;    // 1M pages = 4TB range
+pub const HEAP_ENTROPY_BITS: u5 = 16;    // 64K pages = 256MB range
+pub const TLS_ENTROPY_BITS: u5 = 16;     // 64K pages = 256MB range
 ```
 """,
 

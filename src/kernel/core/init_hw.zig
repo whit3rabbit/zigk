@@ -25,6 +25,7 @@ const audio = @import("audio");
 const ahci = @import("ahci");
 const video_driver = @import("video_driver");
 const hal = @import("hal");
+const acpi = @import("acpi");
 const kernel_iommu = @import("kernel_iommu");
 const dma = @import("dma");
 
@@ -57,15 +58,21 @@ pub fn initIommu() void {
         console.warn("IOMMU: RSDP not found, IOMMU disabled", .{});
         return;
     }
-    const rsdp_ptr: *align(1) const hal.acpi.Rsdp = @ptrFromInt(rsdp_address);
+    const rsdp_ptr: *align(1) const acpi.Rsdp = @ptrFromInt(rsdp_address);
 
     // 2. Parse DMAR table
-    const dmar_info = hal.acpi.parseDmar(rsdp_ptr) orelse {
+    const dmar_info = acpi.parseDmar(rsdp_ptr) orelse {
         console.info("IOMMU: No DMAR table found (IOMMU not present)", .{});
         return;
     };
 
-    hal.acpi.logDmarInfo(dmar_info);
+    acpi.logDmarInfo(&dmar_info);
+
+    // Store DMAR info in kernel_iommu for RMRR lookups during device assignment
+    kernel_iommu.setDmarInfo(dmar_info);
+
+    // Load RMRR regions into domain manager for overlap checking
+    kernel_iommu.domain_manager.loadRmrrRegions(&dmar_info);
 
     if (dmar_info.drhd_count == 0) {
         console.warn("IOMMU: No DMA remapping hardware units found", .{});

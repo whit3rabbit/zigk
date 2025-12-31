@@ -287,6 +287,9 @@ pub fn build(b: *std.Build) void {
     acpi_module.addImport("hal", hal_module);
     acpi_module.addImport("console", console_module);
 
+    // HAL needs acpi for VT-d initialization (DrhdInfo type)
+    hal_module.addImport("acpi", acpi_module);
+
     // Create PMM module (Physical Memory Manager)
     const pmm_module = b.createModule(.{
         .root_source_file = b.path("src/kernel/mm/pmm.zig"),
@@ -536,6 +539,7 @@ pub fn build(b: *std.Build) void {
     kernel_iommu_module.addImport("console", console_module);
     kernel_iommu_module.addImport("pmm", pmm_module);
     kernel_iommu_module.addImport("hal", hal_module);
+    kernel_iommu_module.addImport("acpi", acpi_module);
 
     // Create DMA module (IOMMU-aware DMA buffer allocation for drivers)
     const dma_module = b.createModule(.{
@@ -1486,6 +1490,7 @@ pub fn build(b: *std.Build) void {
     kernel.root_module.addImport("futex", futex_module);
     kernel.root_module.addImport("vdso", vdso_module);
     kernel.root_module.addImport("kernel_iommu", kernel_iommu_module);
+    kernel.root_module.addImport("dma", dma_module);
 
     // Add architecture-specific assembly and linker script
     switch (target_arch) {

@@ -104,7 +104,7 @@ pub const VtdUnit = struct {
 
         // Map the IOMMU registers via HHDM
         const reg_virt = paging.physToVirt(drhd.reg_base);
-        const reg_ptr: [*]volatile u8 = @ptrFromInt(reg_virt);
+        const reg_ptr: [*]volatile u8 = @volatileCast(reg_virt);
 
         var unit = Self{
             .reg_base_phys = drhd.reg_base,

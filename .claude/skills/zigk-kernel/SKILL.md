@@ -24,6 +24,7 @@ Run these scripts to get targeted information without loading full docs:
 | `scripts/debug_query.py` | Debugging | `python scripts/debug_query.py panic` |
 | `scripts/uefi_query.py` | UEFI bootloader | `python scripts/uefi_query.py event` |
 | `scripts/network_query.py` | Network stack | `python scripts/network_query.py tcp` |
+| `scripts/boot_query.py` | Boot process | `python scripts/boot_query.py flow` |
 
 ## Quick Reference (Always Available)
 
@@ -182,6 +183,19 @@ python scripts/network_query.py template packet_parse # Safe packet parsing temp
 python scripts/network_query.py template state_machine # Protocol state machine
 ```
 
+### Boot Process Lookup
+```bash
+python scripts/boot_query.py flow          # Boot flow stages (UEFI -> kernel)
+python scripts/boot_query.py bootinfo      # BootInfo structure (144 bytes)
+python scripts/boot_query.py memory        # Memory layout (HHDM, kernel, user)
+python scripts/boot_query.py paging        # Page table setup (PML4/TTBR)
+python scripts/boot_query.py abi           # Calling convention (MS x64 vs SysV)
+python scripts/boot_query.py entry         # Kernel entry points
+python scripts/boot_query.py init          # Initialization sequence (14 steps)
+python scripts/boot_query.py troubleshoot  # Common boot failures and fixes
+python scripts/boot_query.py aarch64       # AArch64 differences (TTBR/MAIR/TCR)
+```
+
 ### Driver Template Generation
 ```bash
 python scripts/driver_query.py template mmio  # MMIO kernel driver boilerplate
@@ -241,5 +255,6 @@ python scripts/driver_query.py template ring  # Ring IPC userspace driver
 | Async I/O | src/kernel/io/ |
 | Network stack | src/net/ |
 | UEFI bootloader | src/boot/uefi/ (dual-arch: x86_64/aarch64) |
+| Boot info | src/boot/common/boot_info.zig |
 | Build tools | tools/ (disk_image.zig, docker-build.sh) |
 
