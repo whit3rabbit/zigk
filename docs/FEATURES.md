@@ -432,27 +432,27 @@ This section documents known gaps, incomplete implementations, and security conc
 - **Files**: `src/arch/x86_64/lib/asm_helpers.S`
 
 #### NMI Handler GS Base Gap
-- **Status**: PARTIAL
-- **Risk**: Kernel crash or privilege escalation if NMI fires during SYSCALL window
-- **Description**: Double Fault handler exists, but dedicated NMI stub with "paranoid" GS base handling is not implemented. If an NMI fires between SYSCALL entry and SWAPGS, the handler may use the wrong GS base.
-- **Fix**: Implement paranoid NMI entry that checks whether SWAPGS is needed by examining the saved CS or using RDMSR on IA32_GS_BASE.
-- **Files**: `src/arch/x86_64/lib/asm_helpers.S`, `src/arch/x86_64/kernel/interrupts/`
+- **Status**: IMPLEMENTED (2025-12-30)
+- **Description**: The `isr_stub_paranoid` entry in `asm_helpers.S` correctly handles NMI, MCE, Debug, and Double Fault by reading `MSR_GS_BASE` to determine if SWAPGS is needed. This prevents kernel crash if NMI fires during the SYSCALL/SYSRET gap. The paranoid code checks if GS_BASE is a kernel address (negative/high bit set) and only performs SWAPGS when needed.
+- **Remaining**: NMI and MCE should use dedicated IST stacks (IST2/IST3) for additional safety against stack corruption.
+- **Files**: `src/arch/x86_64/lib/asm_helpers.S`
 
 ### Priority 2: Correctness & Robustness
 
 #### IST Stack Allocation for Double Fault
-- **Status**: INFRASTRUCTURE ONLY
-- **Risk**: Kernel unrecoverable on stack overflow
-- **Description**: IDT gates support IST selection and TSS has IST fields, but no evidence of actual stack allocation or Double Fault IST configuration at runtime.
-- **Fix**: Allocate dedicated per-CPU IST stacks during AP init and configure IDT entry 8 (Double Fault) to use IST1.
-- **Files**: `src/arch/x86_64/kernel/gdt.zig`, `src/arch/x86_64/kernel/idt.zig`, `src/arch/x86_64/kernel/smp.zig`
+- **Status**: PARTIAL (Double Fault complete, NMI/MCE pending)
+- **Description**: IST1 is fully configured for Double Fault with per-CPU 4KB stacks allocated in `gdt.zig` (`double_fault_stacks`). IDT entry 8 uses `interruptWithIst(handler, 0, 1)`. TSS structure has all 7 IST entries defined. `initTssForCpu()` correctly sets IST1 for each CPU during SMP boot.
+- **Remaining**: Allocate IST2 for NMI (vector 2) and IST3 for MCE (vector 18). Update IDT entries to use their respective IST stacks.
+- **Files**: `src/arch/x86_64/kernel/gdt.zig`, `src/arch/x86_64/kernel/idt.zig`
 
 #### IOMMU Per-Device Integration
-- **Status**: PARTIAL (IOVA allocator improved 2025-12-30)
-- **Risk**: DMA attacks if devices share address space
-- **Description**: IOMMU domain manager exists with proper bitmap-based IOVA allocator supporting allocation and deallocation. The allocator uses 64KB granularity with first-fit search and wrap-around for efficient space reuse. Per-device driver integration is still pending.
-- **Remaining**: Update xHCI, AHCI, and E1000e drivers to allocate DMA buffers within their assigned IOVA space.
-- **Files**: `src/kernel/mm/iommu/`, `src/drivers/usb/xhci/`, `src/drivers/storage/ahci/`, `src/drivers/net/e1000e/`
+- **Status**: MOSTLY COMPLETE (driver integration done, hardening pending)
+- **Description**: IOMMU domain manager with bitmap-based IOVA allocator (64KB granularity). Drivers (xHCI, AHCI, E1000e) properly use `dma.allocBuffer(bdf, size, writable)` which integrates with IOMMU when enabled. The DMA subsystem transparently returns IOVA addresses for hardware and physical addresses for CPU access. DMAR parsing extracts RMRR regions.
+- **Remaining**:
+  1. Add IOTLB invalidation after `mapRange()` calls in `domain.zig`
+  2. Validate IOVA allocations don't overlap RMRR regions
+  3. Return error if IOTLB invalidation fails
+- **Files**: `src/kernel/mm/iommu/domain.zig`, `src/arch/x86_64/mm/iommu/vtd.zig`
 
 #### Secure Page Free Ordering
 - **Status**: UNCLEAR
@@ -468,11 +468,10 @@ This section documents known gaps, incomplete implementations, and security conc
 - **Description**: `sigsetjmp` now properly saves the signal mask when `savemask` is nonzero, using `rt_sigprocmask` syscall (14) to query the current mask. `siglongjmp` restores the mask using `SIG_SETMASK` before jumping. The `sigjmp_buf` is 80 bytes (10 x u64) to accommodate the flag and mask.
 - **Files**: `src/user/lib/libc/setjmp.S`, `src/user/doom/include/setjmp.h`
 
-#### FPU/SSE State in Signal Delivery
-- **Status**: PARTIAL (XSAVE detection added 2025-12-30)
-- **Description**: HAL now detects and enables XSAVE/XRSTOR for AVX support (if available) with automatic FXSAVE/FXRSTOR fallback. The `fpu.zig` module provides `getXsaveAreaSize()`, `xsave()`, and `xrstor()` functions. Integration with dynamic thread FPU state allocation and signal delivery remains pending.
-- **Remaining**: Update thread creation to dynamically allocate FPU state based on detected size; update signal delivery to use dynamic-sized FPU frames.
-- **Files**: `src/kernel/proc/signal.zig`, `src/arch/x86_64/kernel/fpu.zig`, `src/kernel/proc/thread.zig`
+#### FPU/SSE/AVX State in Signal Delivery
+- **Status**: IMPLEMENTED (2025-12-30)
+- **Description**: Full XSAVE support with dynamic FPU state sizing. The HAL detects CPU capabilities and enables XSAVE/XRSTOR for AVX support with automatic FXSAVE/FXRSTOR fallback. Thread creation dynamically allocates 64-byte aligned FPU buffers based on `fpu.getXsaveAreaSize()`. Signal delivery saves FPU state to user stack with dynamic sizing and proper alignment. Signal return restores FPU state using `copyToKernel` and `fpu.restoreState()`. Context switching uses `fpu.saveState()`/`fpu.restoreState()` wrappers that automatically select XSAVE or FXSAVE.
+- **Files**: `src/kernel/proc/thread.zig`, `src/kernel/proc/signal.zig`, `src/kernel/sys/syscall/process/signals.zig`, `src/kernel/proc/sched/scheduler.zig`, `src/kernel/proc/sched/thread.zig`, `src/arch/x86_64/kernel/fpu.zig`
 
 #### Music Playback
 - **Status**: STUB
@@ -501,6 +500,16 @@ This roadmap was generated from a comprehensive feature validation on 2024-12-30
 - Demand paging and VMA tracking
 - HTTP server, shell, netstack daemon
 - Full libc ctype, string, and math functions
+
+**Implemented 2025-12-30:**
+- Register sanitization on SYSRET (zero caller-saved registers)
+- IOVA bitmap allocator with proper free support
+- sigsetjmp/siglongjmp signal mask save/restore
+- XSAVE/XRSTOR support with dynamic FPU state sizing
+- Dynamic thread FPU buffer allocation (64-byte aligned)
+- Signal delivery/return with dynamic FPU frame sizes
+- Paranoid ISR stubs for NMI/MCE/DF/DB with correct GS base handling (discovered - was already implemented)
+- Double Fault IST1 stack allocation per-CPU (discovered - was already implemented)
 
 **Methodology**: Codebase exploration using pattern matching across:
 - `src/arch/x86_64/` and `src/arch/aarch64/` for architecture features

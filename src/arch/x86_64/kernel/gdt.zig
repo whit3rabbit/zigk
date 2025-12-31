@@ -350,6 +350,17 @@ var tss_instances: [MAX_CPUS]Tss = [_]Tss{.{}} ** MAX_CPUS;
 // occurs before stack is used. Using undefined would leak stale memory contents.
 var double_fault_stacks: [MAX_CPUS][4096]u8 align(16) = [_][4096]u8{[_]u8{0} ** 4096} ** MAX_CPUS;
 
+// NMI stacks - one per CPU for IST2
+// SECURITY: Zero-initialized. NMI can occur at any time, including during the
+// SYSCALL/SYSRET gap. Having a dedicated stack prevents corruption if NMI
+// fires while the kernel stack is in an inconsistent state.
+var nmi_stacks: [MAX_CPUS][4096]u8 align(16) = [_][4096]u8{[_]u8{0} ** 4096} ** MAX_CPUS;
+
+// Machine Check Exception stacks - one per CPU for IST3
+// SECURITY: Zero-initialized. MCE indicates unrecoverable hardware error.
+// Dedicated stack ensures we can log diagnostics even if main stack is corrupted.
+var mce_stacks: [MAX_CPUS][4096]u8 align(16) = [_][4096]u8{[_]u8{0} ** 4096} ** MAX_CPUS;
+
 // Legacy aliases for BSP (CPU 0)
 fn getBspTss() *Tss {
     return &tss_instances[0];
@@ -378,6 +389,8 @@ pub fn init() void {
 /// This function sets up per-CPU TSS with:
 ///   - RSP0 = 0 (will be set by scheduler when switching threads)
 ///   - IST1 = per-CPU double fault stack
+///   - IST2 = per-CPU NMI stack
+///   - IST3 = per-CPU MCE stack
 /// The GDT's TSS descriptor is updated to point to this CPU's TSS.
 ///
 /// For BSP: called with cpu_id=0, gdt_ptr=&gdt
@@ -397,6 +410,16 @@ pub fn initTssForCpu(cpu_id: u32, gdt_ptr: *Gdt) void {
     // Stack grows downward, so point to end of array
     const df_stack_top = @intFromPtr(&double_fault_stacks[cpu_id]) + double_fault_stacks[cpu_id].len;
     tss.ist1 = df_stack_top;
+
+    // Set up IST2 for NMI handler
+    // NMI can occur during SYSCALL/SYSRET gap when kernel stack may be inconsistent
+    const nmi_stack_top = @intFromPtr(&nmi_stacks[cpu_id]) + nmi_stacks[cpu_id].len;
+    tss.ist2 = nmi_stack_top;
+
+    // Set up IST3 for Machine Check Exception handler
+    // MCE indicates hardware failure - needs dedicated stack for diagnostics
+    const mce_stack_top = @intFromPtr(&mce_stacks[cpu_id]) + mce_stacks[cpu_id].len;
+    tss.ist3 = mce_stack_top;
 
     // Create TSS descriptor pointing to this CPU's TSS
     const tss_base = @intFromPtr(tss);

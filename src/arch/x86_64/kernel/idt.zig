@@ -226,6 +226,14 @@ pub fn init() void {
         if (i == @intFromEnum(Exception.DoubleFault)) {
             // Double fault uses IST1 (separate stack)
             idt_table[i] = IdtGate.interruptWithIst(handler_addr, 0, 1);
+        } else if (i == @intFromEnum(Exception.NMI)) {
+            // NMI uses IST2 (separate stack)
+            // NMI can occur during SYSCALL/SYSRET gap - dedicated stack prevents corruption
+            idt_table[i] = IdtGate.interruptWithIst(handler_addr, 0, 2);
+        } else if (i == @intFromEnum(Exception.MachineCheck)) {
+            // MCE uses IST3 (separate stack)
+            // Hardware failure may corrupt kernel stack - dedicated stack for diagnostics
+            idt_table[i] = IdtGate.interruptWithIst(handler_addr, 0, 3);
         } else {
             idt_table[i] = IdtGate.interrupt(handler_addr, 0);
         }

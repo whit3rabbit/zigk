@@ -111,6 +111,16 @@ pub fn exceptionHandler(frame: *idt.InterruptFrame) void {
     printFrame(frame);
 
     switch (vector) {
+        2 => {
+            // NMI - Non-Maskable Interrupt
+            // Sources: hardware failure, watchdog, external NMI button, IPI for debugging
+            // NMI uses IST2 stack to handle case when it occurs during SYSCALL/SYSRET gap
+            console.printUnsafe("NMI received - checking for hardware issues\n");
+            // Future: Read MCE status MSRs to check for pending machine check
+            // Future: Check for watchdog timeout
+            // For now, log and continue - NMI is often benign (e.g., debugging IPI)
+            return;
+        },
         14 => {
             const cr2 = cpu.readCr2();
             const rip = frame.rip;
@@ -140,7 +150,19 @@ pub fn exceptionHandler(frame: *idt.InterruptFrame) void {
             debug.dumpControlRegisters();
         },
         8 => {
+            // Double Fault - uses IST1 stack
             console.printUnsafe("DOUBLE FAULT - System halted\n");
+        },
+        18 => {
+            // Machine Check Exception - uses IST3 stack
+            // MCE indicates unrecoverable hardware error (memory ECC, bus parity, etc.)
+            console.printUnsafe("MACHINE CHECK EXCEPTION - Unrecoverable hardware error\n");
+            // Future: Read MCE MSRs for detailed diagnosis
+            // MSR_IA32_MCG_STATUS (0x17A) - global MCE status
+            // MSR_IA32_MCi_STATUS (0x401+) - per-bank error info
+            console.printUnsafe("System halted due to hardware failure.\n");
+            cpu.halt();
+            return;
         },
         13 => {
             const rip = frame.rip;

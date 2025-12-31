@@ -17,9 +17,13 @@ const builtin = @import("builtin");
 const console = @import("console");
 const pmm = @import("pmm");
 const hal = @import("hal");
+const acpi = @import("acpi");
 
 const paging = hal.paging;
 const iommu = hal.iommu;
+
+/// Maximum number of RMRR regions to track
+const MAX_RMRR_REGIONS: usize = 8;
 
 /// IOVA address space constants
 /// Start at 4GB to avoid conflicts with low memory addresses
@@ -426,12 +430,32 @@ pub const Domain = struct {
         // Create page table mappings
         self.page_tables.mapRange(iova, phys_addr, size, readable, writable) catch {
             console.err("IOMMU: Failed to map IOVA 0x{x} to phys 0x{x}", .{ iova, phys_addr });
-            // Return IOVA to allocator (currently no-op)
+            self.iova_alloc.free(iova, size);
+            return null;
+        };
+
+        // SECURITY: Invalidate IOTLB after mapping changes
+        // This ensures hardware sees updated page tables before DMA proceeds.
+        // Without this, stale TLB entries could allow access to wrong memory.
+        self.invalidateIotlb() catch |err| {
+            console.err("IOMMU: IOTLB invalidation failed for domain {d}: {}", .{ self.id, err });
+            // Roll back mapping on invalidation failure - DMA would be unsafe
+            self.page_tables.unmapRange(iova, size);
             self.iova_alloc.free(iova, size);
             return null;
         };
 
         return iova;
+    }
+
+    /// Invalidate IOTLB for this domain across all VT-d units
+    fn invalidateIotlb(self: *Self) !void {
+        var i: u8 = 0;
+        while (i < iommu.getUnitCount()) : (i += 1) {
+            if (iommu.getUnit(i)) |unit| {
+                try unit.invalidateIotlbDomain(self.id);
+            }
+        }
     }
 
     /// Map a specific IOVA to physical memory
@@ -454,6 +478,13 @@ pub const Domain = struct {
     pub fn unmapIova(self: *Self, iova: u64, size: u64) void {
         self.page_tables.unmapRange(iova, size);
         self.iova_alloc.free(iova, size);
+
+        // SECURITY: Invalidate IOTLB after unmapping
+        // Prevents stale TLB entries from allowing access to freed pages
+        self.invalidateIotlb() catch |err| {
+            console.warn("IOMMU: IOTLB invalidation after unmap failed: {}", .{err});
+            // Continue anyway - unmap is best effort, and pages are freed
+        };
     }
 
     /// Translate IOVA to physical address
@@ -480,6 +511,15 @@ pub const Domain = struct {
     }
 };
 
+/// RMRR (Reserved Memory Region Reporting) entry
+/// These regions must be identity-mapped and never used for general IOVA allocation
+pub const RmrrRegion = struct {
+    /// Physical base address of reserved region
+    phys_base: u64,
+    /// Physical limit address (inclusive) of reserved region
+    phys_limit: u64,
+};
+
 /// Global domain manager
 pub const DomainManager = struct {
     /// All domains (indexed by domain ID)
@@ -497,6 +537,10 @@ pub const DomainManager = struct {
     /// IOMMU initialized flag
     initialized: bool,
 
+    /// RMRR regions to protect (firmware-reserved memory)
+    rmrr_regions: [MAX_RMRR_REGIONS]RmrrRegion,
+    rmrr_count: u8,
+
     const Self = @This();
 
     /// Initialize the domain manager
@@ -507,6 +551,8 @@ pub const DomainManager = struct {
             .next_id = 0,
             .iommu_tables = null,
             .initialized = false,
+            .rmrr_regions = undefined,
+            .rmrr_count = 0,
         };
     }
 
@@ -519,6 +565,46 @@ pub const DomainManager = struct {
         self.initialized = true;
         console.info("IOMMU: Hardware tables initialized at 0x{x}", .{self.iommu_tables.?.root_phys});
         return true;
+    }
+
+    /// Load RMRR regions from parsed DMAR information
+    /// These regions are firmware-reserved and must not be used for DMA remapping
+    pub fn loadRmrrRegions(self: *Self, dmar_info: *const acpi.DmarInfo) void {
+        self.rmrr_count = 0;
+
+        for (dmar_info.rmrr_entries[0..dmar_info.rmrr_count]) |rmrr| {
+            if (self.rmrr_count >= MAX_RMRR_REGIONS) {
+                console.warn("IOMMU: Too many RMRR regions, some will be unprotected", .{});
+                break;
+            }
+
+            self.rmrr_regions[self.rmrr_count] = RmrrRegion{
+                .phys_base = rmrr.region_base,
+                .phys_limit = rmrr.region_limit,
+            };
+            self.rmrr_count += 1;
+
+            console.info("IOMMU: Protected RMRR 0x{x}-0x{x} ({d}KB)", .{
+                rmrr.region_base,
+                rmrr.region_limit,
+                (rmrr.region_limit - rmrr.region_base + 1) / 1024,
+            });
+        }
+    }
+
+    /// Check if a physical address range overlaps any RMRR region
+    /// SECURITY: Prevents DMA buffers from being allocated in firmware-reserved memory
+    pub fn overlapsRmrr(self: *const Self, phys_start: u64, size: u64) bool {
+        const phys_end = std.math.add(u64, phys_start, size) catch return true;
+
+        for (self.rmrr_regions[0..self.rmrr_count]) |rmrr| {
+            // Check for overlap: !(end1 <= start2 || start1 > limit2)
+            // Note: region_limit is inclusive
+            if (!(phys_end <= rmrr.phys_base or phys_start > rmrr.phys_limit)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /// Allocate a domain slot (internal)

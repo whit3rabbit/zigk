@@ -1,59 +1,44 @@
 # Zscapek
 [![ISO Release Build](https://github.com/whit3rabbit/zigk/actions/workflows/build-iso.yml/badge.svg?event=release)](https://github.com/whit3rabbit/zigk/actions/workflows/build-iso.yml)
 
-Zscapek is a 64-bit modular monolithic operating system kernel written in Zig. It targets the x86_64 architecture and includes a custom UEFI bootloader.
+Zscapek is a 64-bit modular monolithic operating system kernel written in Zig. It targets both **x86_64** (AMD64) and **AArch64** (ARMv8-A) architectures, featuring a custom UEFI bootloader and a unified Hardware Abstraction Layer (HAL).
 
-While the project uses a clean module structure to separate concerns, it operates as a monolithic kernel. Device drivers, the network stack, and file system logic run in kernel space (Ring 0) to maximize performance and simplify hardware access.
+While the project uses a clean module structure to separate concerns, it operates as a monolithic kernel. Device drivers, the network stack, and file system logic run in kernel space (Ring 0 / EL1) to maximize performance and simplify hardware access.
 
 ## Architecture
 
 Zscapek is designed with a modular monolithic architecture. Unlike a microkernel, essential system services and drivers are compiled directly into the kernel binary.
 
-- **Privilege Level:** Drivers (Network, Storage, GPU) and the TCP/IP stack execute in Ring 0.
+- **Privilege Level:** Drivers (Network, Storage, GPU) and the TCP/IP stack execute in Ring 0 (x86) or EL1 (ARM).
 - **Memory Model:** The kernel utilizes a Higher Half Direct Map (HHDM) for physical memory access.
 - **System Calls:** Userspace interacts with the kernel via a Linux-compatible syscall ABI (interrupt 0x80/syscall instruction) rather than IPC message passing.
 - **Further reading:** Boot flow and memory layout are detailed in [docs/BOOT.md](docs/BOOT.md) and [docs/BOOT_ARCHITECTURE.md](docs/BOOT_ARCHITECTURE.md). The HAL boundary and directory map are in [docs/FILESYSTEM.md](docs/FILESYSTEM.md).
 
 ## Features
 
-### Core Kernel
-- **Memory Management:**
-  - Physical Memory Manager (PMM) using bitmap allocation.
-  - Virtual Memory Manager (VMM) supporting 4-level paging.
-  - Slab-like kernel heap allocator with immediate coalescing.
-  - Userspace Virtual Memory Area (VMA) tracking for `mmap` and `brk`.
-  - Compiler-inserted stack guard protection seeded via hardware entropy.
-- **Scheduling:**
-  - Preemptive Round-Robin scheduler.
-  - Support for kernel and user threads.
-  - Process model supporting `fork`, `execve`, and `waitpid`.
+### Best Features
 
-### Networking
-Zscapek includes a native, in-kernel TCP/IP stack.
-- **Protocols:** Ethernet, ARP, IPv4, ICMP, UDP, and TCP.
-- **TCP Support:** Implements RFC 793 state machine, sliding windows, retransmission timers, and congestion control.
-- **Socket API:** BSD-style interface supporting `socket`, `bind`, `connect`, `accept`, `listen`, `send`, and `recv`.
-- **Drivers:** Intel E1000e (PCIe Gigabit Ethernet) and VirtIO-Net (paravirtualized) with NAPI-style interrupt handling.
-- **Zero-Copy IPC:** Ring buffer based inter-process communication between VirtIO-Net driver and netstack using decomposed SPSC pattern for MPSC semantics. 128-byte cache line alignment prevents false sharing.
+A quick overview of the capabilities detailed in [docs/FEATURES.md](docs/FEATURES.md):
 
-### Hardware Support
-- **Bus:** PCI enumeration with BAR mapping and MSI/MSI-X interrupt support.
-- **Video:**
-  - VirtIO-GPU driver for paravirtualized 2D acceleration.
-  - UEFI Framebuffer fallback.
-  - Double-buffered console with ANSI escape code support.
-- **Storage:** AHCI (SATA) driver implementing DMA Scatter/Gather.
-- **Input:** PS/2 Keyboard and Mouse drivers.
-- **Interrupts:** APIC and I/O APIC support.
-- **Entropy:** RDRAND (Intel/AMD) support with RDTSC fallback.
+#### 🏗️ Architecture & Core
+- **Dual-Arch Support**: Single codebase for **x86_64** and **AArch64** with a unified, zero-cost HAL.
+- **Security First**: KASLR, Stack Canaries, Hardware Entropy (RDRAND/FEAT_RNG), and strict User/Kernel isolation (SMAP/PAN).
+- **Modern Memory**: Higher-Half Direct Map (HHDM), IOMMU protection (VT-d), and slab-like kernel heap allocator.
 
-### Userspace
-- **ELF64 Loader:** Parses and loads static binaries.
-- **InitRD:** TAR-based initial ramdisk for loading user programs.
-- **System Services:**
-  - **Shell:** Interactive shell with basic command processing.
-  - **HTTPD:** Multi-threaded web server demonstrating the kernel TCP stack.
-- **CRT0:** Custom C Runtime startup code.
+#### 🌐 Networking
+- **Zero-Copy Stack**: In-kernel TCP/IP (RFC 793) designed for performance with zero-copy packet processing.
+- **High Performance**: NAPI-style interrupt handling and ring-buffer IPC (128-byte cache line alignment).
+- **Drivers**: Intel E1000e (PCIe), VirtIO-Net, and Loopback.
+
+#### 🎮 Graphics & Userspace
+- **Graphics**: VirtIO-GPU 2D acceleration, UEFI Framebuffer, and redundant "Double-Fault" display handling.
+- **Doom Port**: Runs vanilla Doom with music and sound effects to demonstrate system stability and audio/video subsystems.
+- **Linux Compatibility**: `io_uring` support, standard libc (musl-like), and ELF64 loader.
+
+#### 🔌 Hardware Support
+- **USB Stack**: Native xHCI (USB 3.0) and EHCI (USB 2.0) support.
+- **Storage**: AHCI (SATA) driver with DMA Scatter/Gather and async I/O.
+- **Audio**: Intel HDA and AC97 drivers for high-fidelity sound.
 
 ## Build and Run
 
@@ -80,35 +65,38 @@ run-x86_64    Build and run x86_64 kernel in QEMU
 run-aarch64   Build and run aarch64 kernel in QEMU
 ```
 
-### Running in QEMU
-To run the system with networking and VirtIO-GPU enabled (boots from the ISO by default):
+### Running with QEMU
 
+The build system wraps QEMU for easy testing. The `run` steps automatically configure networking (user mode), KVM/HVF acceleration, and device flags.
+
+| Command | Architecture | Description |
+| :--- | :--- | :--- |
+| `zig build run-x86_64` | x86_64 | Runs in QEMU (uses KVM on Linux, HVF on macOS if avail) |
+| `zig build run-aarch64` | AArch64 | Runs in QEMU (uses HVF on Apple Silicon, TCG otherwise) |
+
+#### Common Options
+
+**Networking**:
+By default, port **8080** on localhost is forwarded to guest port **80**.
+- Access the web server: `http://localhost:8080`
+
+**Firmware Overrides**:
+If the auto-detection fails or you want to test specific firmware:
 ```bash
-zig build run-x86_64
+zig build run-x86_64 -Dbios=/path/to/OVMF.fd
 ```
 
-This configuration forwards local port 8080 to the guest port 80. Once the system boots and the `httpd` process starts, the web server is accessible at `http://localhost:8080`.
-
-On macOS, the run step auto-detects Homebrew OVMF firmware if present (`brew install qemu`). On Linux, it auto-detects OVMF from common distro paths (e.g. `ovmf`/`edk2-ovmf` packages).
-
-Linux packages:
-- Debian/Ubuntu: `sudo apt install qemu-system-x86 ovmf`
-- Fedora: `sudo dnf install qemu-system-x86 edk2-ovmf`
-- Arch: `sudo pacman -S qemu-system-x86 edk2-ovmf`
-
-To override:
-
+**Boot from Disk Image**:
+To boot from the GPT-partitioned disk (`disk.img`) instead of the ISO:
 ```bash
-zig build run -Dbios=/path/to/OVMF_CODE.fd -Dvars=/path/to/OVMF_VARS.fd
+zig build run-x86_64 -Drun-iso=false
 ```
 
-To boot directly from the generated GPT disk image (`disk.img`) instead of the ISO:
-
+**Headless Mode**:
+To run without a display (useful for CI):
 ```bash
-zig build run -Drun-iso=false
+zig build run-x86_64 -Dheadless=true
 ```
-
-Note: This requires `tools/disk_image.zig` (automatically built) to generate a valid GPT partition table for the FAT filesystem.
 
 ## Roadmap
 
