@@ -58,6 +58,10 @@ pub fn init(_: u64) void {
     // Initialize FPU subsystem for state save/restore
     fpu.init();
 
+    // Initialize XSAVE support for extended FPU state (AVX, etc.)
+    // Must be called after fpu.init() and on every CPU
+    fpu.initXsave();
+
     // SECURITY: Enable SMEP/SMAP if supported
     // SMEP: Supervisor Mode Execution Prevention - prevents kernel from executing user-space code
     // SMAP: Supervisor Mode Access Prevention - prevents kernel from accessing user-space memory

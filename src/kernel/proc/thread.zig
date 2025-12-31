@@ -82,8 +82,10 @@ pub const Thread = struct {
     /// Page table root (CR3 value, 0 = use kernel page tables)
     cr3: u64,
 
-    /// FPU/SSE state for this thread
-    fpu_state: fpu.FpuState,
+    /// FPU/SSE/AVX state for this thread (dynamically sized for XSAVE support)
+    /// Buffer is allocated based on fpu.getXsaveAreaSize() to support AVX if available
+    /// Uses 64-byte alignment for XSAVE compatibility
+    fpu_state_buffer: []align(64) u8,
 
     /// Whether this thread has used FPU/SSE instructions since last context switch
     /// Used for lazy FPU switching - only save/restore if thread actually used FPU
@@ -214,8 +216,9 @@ pub const Thread = struct {
 };
 
 comptime {
-    // FXSAVE/FXRSTOR require 16-byte alignment for the FPU state area
-    std.debug.assert(@alignOf(Thread) >= 16);
+    // FPU state buffer is separately allocated with 64-byte alignment for XSAVE.
+    // Thread struct alignment is no longer constrained by FPU state requirements.
+    // Slice fields (fpu_state_buffer) have pointer alignment (8 bytes on x86_64).
 }
 
 /// Thread creation errors
@@ -340,6 +343,26 @@ pub fn createKernelThread(
 
     // Allocate thread structure from heap
     const alloc = heap.allocator();
+
+    // Allocate FPU state buffer (dynamically sized for XSAVE/FXSAVE)
+    const fpu_size = fpu.getXsaveAreaSize();
+    const fpu_buffer = alloc.alignedAlloc(u8, .@"64", fpu_size) catch {
+        if (stack_info) |si| {
+            kernel_stack.free(si);
+        }
+        return ThreadError.OutOfMemory;
+    };
+    errdefer alloc.free(fpu_buffer);
+
+    // Initialize FPU buffer with defaults (MXCSR=0x1F80, FCW=0x037F)
+    @memset(fpu_buffer, 0);
+    // MXCSR at offset 24 (little-endian)
+    fpu_buffer[24] = 0x80;
+    fpu_buffer[25] = 0x1F;
+    // FCW at offset 0
+    fpu_buffer[0] = 0x7F;
+    fpu_buffer[1] = 0x03;
+
     const thread = alloc.create(Thread) catch {
         if (stack_info) |si| {
             kernel_stack.free(si);
@@ -360,7 +383,7 @@ pub fn createKernelThread(
         .use_kernel_stack_allocator = use_ks_allocator,
         .user_stack_top = 0, // Kernel thread
         .cr3 = options.cr3,
-        .fpu_state = fpu.FpuState.init(),
+        .fpu_state_buffer = fpu_buffer,
         .fpu_used = false, // Lazy FPU: will be set true on first FPU access
         .fs_base = 0, // TLS base, set via arch_prctl
         .clear_child_tid = 0,
@@ -475,6 +498,28 @@ pub fn createUserThread(
 
     // Allocate thread structure
     const alloc = heap.allocator();
+
+    // Allocate FPU state buffer (dynamically sized for XSAVE/FXSAVE)
+    const fpu_size = fpu.getXsaveAreaSize();
+    const fpu_buffer = alloc.alignedAlloc(u8, .@"64", fpu_size) catch {
+        if (use_ks_allocator) {
+            if (stack_info) |si| kernel_stack.free(si);
+        } else if (fallback_stack_pages > 0) {
+            pmm.freePages(fallback_stack_phys, fallback_stack_pages);
+        }
+        return ThreadError.OutOfMemory;
+    };
+    errdefer alloc.free(fpu_buffer);
+
+    // Initialize FPU buffer with defaults (MXCSR=0x1F80, FCW=0x037F)
+    @memset(fpu_buffer, 0);
+    // MXCSR at offset 24 (little-endian)
+    fpu_buffer[24] = 0x80;
+    fpu_buffer[25] = 0x1F;
+    // FCW at offset 0
+    fpu_buffer[0] = 0x7F;
+    fpu_buffer[1] = 0x03;
+
     const thread = alloc.create(Thread) catch {
         if (use_ks_allocator) {
             if (stack_info) |si| kernel_stack.free(si);
@@ -497,7 +542,7 @@ pub fn createUserThread(
         .use_kernel_stack_allocator = use_ks_allocator,
         .user_stack_top = options.user_stack_top,
         .cr3 = options.cr3, // Must be provided for user thread
-        .fpu_state = fpu.FpuState.init(),
+        .fpu_state_buffer = fpu_buffer,
         .fpu_used = false,
         .fs_base = 0, // TLS base, set via arch_prctl
         .clear_child_tid = 0,
@@ -711,8 +756,13 @@ pub fn destroyThread(thread: *Thread) ?*anyopaque {
     const proc = thread.process;
     thread.process = null;
 
-    // Free thread structure
+    // Free FPU state buffer
     const alloc = heap.allocator();
+    if (thread.fpu_state_buffer.len > 0) {
+        alloc.free(thread.fpu_state_buffer);
+    }
+
+    // Free thread structure
     alloc.destroy(thread);
 
     _ = active_thread_count.fetchSub(1, .release);

@@ -13,6 +13,7 @@
 // providing hardware-enforced isolation between drivers.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const console = @import("console");
 const pmm = @import("pmm");
 const hal = @import("hal");
@@ -62,78 +63,258 @@ pub const DeviceBdf = struct {
     }
 };
 
-/// Simple bump allocator for IOVA space
-/// Thread-safe with atomic next pointer
-pub const IovaAllocator = struct {
-    /// Next available IOVA address (atomic for thread-safety)
-    next: std.atomic.Value(u64),
+// ============================================================================
+// Simple IRQ-safe Spinlock (inline, no external dependencies)
+// ============================================================================
 
-    /// End of IOVA space
-    limit: u64,
+/// Minimal spinlock for IOVA allocator - uses HAL primitives directly
+const IommuSpinlock = struct {
+    locked: std.atomic.Value(u32) = .{ .raw = 0 },
+
+    const Held = struct {
+        lock: *IommuSpinlock,
+        irq_state: bool,
+
+        pub fn release(self: Held) void {
+            self.lock.locked.store(0, .release);
+            if (self.irq_state) {
+                hal.cpu.enableInterrupts();
+            }
+        }
+    };
+
+    pub fn acquire(self: *IommuSpinlock) Held {
+        const irq_was_enabled = hal.cpu.interruptsEnabled();
+        hal.cpu.disableInterrupts();
+
+        while (true) {
+            const prev = self.locked.cmpxchgWeak(0, 1, .acquire, .monotonic);
+            if (prev == null) break;
+            // Spin with pause hint
+            switch (builtin.cpu.arch) {
+                .x86_64 => asm volatile ("pause"),
+                .aarch64 => asm volatile ("yield"),
+                else => {},
+            }
+        }
+
+        return .{ .lock = self, .irq_state = irq_was_enabled };
+    }
+};
+
+/// Bitmap-based IOVA allocator with proper free support
+/// Uses 64KB allocation granularity to keep bitmap size reasonable
+/// Thread-safe with spinlock protection
+///
+/// Memory usage: ~2MB bitmap for 1TB IOVA range at 64KB granularity
+/// Formula: (IOVA_SIZE / ALLOC_GRANULARITY) / 8 bytes
+pub const IovaAllocator = struct {
+    /// Bitmap: 1 = allocated, 0 = free
+    /// Each bit represents ALLOC_GRANULARITY bytes (64KB)
+    /// Allocated from PMM (physical pages mapped via HHDM)
+    bitmap: ?[]u8,
+
+    /// Physical address of bitmap pages (for deallocation)
+    bitmap_phys: u64,
+
+    /// Number of pages allocated for bitmap
+    bitmap_pages: usize,
+
+    /// Lock for thread-safety
+    lock: IommuSpinlock,
+
+    /// Statistics
+    allocated_units: u64,
+    total_units: u64,
+
+    /// Hint for next allocation (first-fit with locality)
+    search_hint: usize,
+
+    /// Allocation granularity (64KB = 16 pages per unit)
+    /// This keeps bitmap at ~2MB for 1TB range instead of 32MB
+    const ALLOC_GRANULARITY: u64 = 64 * 1024; // 64KB
+    const UNITS_PER_BYTE: usize = 8;
 
     const Self = @This();
 
     /// Create a new IOVA allocator
+    /// Bitmap is lazily allocated on first use
     pub fn init() Self {
         return .{
-            .next = std.atomic.Value(u64).init(IOVA_BASE),
-            .limit = IOVA_LIMIT,
+            .bitmap = null,
+            .bitmap_phys = 0,
+            .bitmap_pages = 0,
+            .lock = .{},
+            .allocated_units = 0,
+            .total_units = IOVA_SIZE / ALLOC_GRANULARITY,
+            .search_hint = 0,
         };
+    }
+
+    /// Ensure bitmap is allocated using PMM
+    fn ensureBitmap(self: *Self) bool {
+        if (self.bitmap != null) return true;
+
+        // Calculate bitmap size
+        const bitmap_bytes: usize = @intCast((self.total_units + 7) / 8);
+        const pages_needed = (bitmap_bytes + PAGE_SIZE - 1) / PAGE_SIZE;
+
+        // Allocate zeroed pages from PMM
+        const phys = pmm.allocZeroedPages(pages_needed) orelse {
+            console.err("IOMMU: Failed to allocate IOVA bitmap ({d} pages)", .{pages_needed});
+            return false;
+        };
+
+        // Convert to virtual address via HHDM (always succeeds for valid physical addresses)
+        const virt_ptr = paging.physToVirt(phys);
+
+        self.bitmap_phys = phys;
+        self.bitmap_pages = pages_needed;
+        self.bitmap = virt_ptr[0..bitmap_bytes];
+
+        console.info("IOMMU: IOVA bitmap allocated ({d} pages, {d} KB)", .{
+            pages_needed,
+            bitmap_bytes / 1024,
+        });
+        return true;
     }
 
     /// Allocate a contiguous IOVA range
     /// Returns the starting IOVA address, or null if out of space
-    /// Thread-safe: uses atomic compare-and-swap loop
     pub fn allocate(self: *Self, size: u64) ?u64 {
-        // Align size to page boundary (checked arithmetic)
-        const aligned_size = std.math.add(u64, size, PAGE_SIZE - 1) catch {
-            console.warn("IOMMU: IOVA size overflow during alignment", .{});
+        if (size == 0) return null;
+
+        // Calculate units needed (round up)
+        const units_needed = std.math.divCeil(u64, size, ALLOC_GRANULARITY) catch return null;
+        if (units_needed == 0) return null;
+        if (units_needed > self.total_units - self.allocated_units) return null;
+
+        const held = self.lock.acquire();
+        defer held.release();
+
+        // Lazy bitmap allocation
+        if (!self.ensureBitmap()) return null;
+        const bitmap = self.bitmap.?;
+
+        // First-fit search starting from hint
+        const found = self.findContiguous(bitmap, units_needed) orelse {
+            console.warn("IOMMU: IOVA space exhausted (fragmented)", .{});
             return null;
         };
-        const aligned_size_masked = aligned_size & ~@as(u64, PAGE_SIZE - 1);
 
-        // Atomic allocation loop
-        while (true) {
-            const current = self.next.load(.acquire);
+        // Mark units as allocated
+        self.markRange(bitmap, found, units_needed, true);
+        self.allocated_units += units_needed;
 
-            // Check for overflow: current + aligned_size_masked must not wrap
-            const new_next = std.math.add(u64, current, aligned_size_masked) catch {
-                console.warn("IOMMU: IOVA allocation overflow", .{});
-                return null;
-            };
+        // Update hint for locality
+        self.search_hint = found + @as(usize, @intCast(units_needed));
+        if (self.search_hint >= self.total_units) {
+            self.search_hint = 0;
+        }
 
-            // Check if we have enough space
-            if (new_next > self.limit) {
-                console.warn("IOMMU: IOVA space exhausted", .{});
-                return null;
+        return IOVA_BASE + @as(u64, @intCast(found)) * ALLOC_GRANULARITY;
+    }
+
+    /// Free an IOVA range
+    pub fn free(self: *Self, iova: u64, size: u64) void {
+        if (iova < IOVA_BASE or iova >= IOVA_LIMIT) return;
+        if (size == 0) return;
+
+        const units = std.math.divCeil(u64, size, ALLOC_GRANULARITY) catch return;
+        const start_unit = (iova - IOVA_BASE) / ALLOC_GRANULARITY;
+
+        const held = self.lock.acquire();
+        defer held.release();
+
+        if (self.bitmap) |bitmap| {
+            self.markRange(bitmap, @intCast(start_unit), units, false);
+            if (self.allocated_units >= units) {
+                self.allocated_units -= units;
             }
 
-            // Attempt atomic update
-            if (self.next.cmpxchgWeak(current, new_next, .acq_rel, .acquire)) |_| {
-                // CAS failed, another thread updated - retry
-                continue;
-            } else {
-                // CAS succeeded, return the old value as our allocation
-                return current;
+            // Update hint for locality (prefer reusing recently freed space)
+            if (@as(usize, @intCast(start_unit)) < self.search_hint) {
+                self.search_hint = @intCast(start_unit);
             }
         }
     }
 
-    /// Free an IOVA range (currently a no-op for bump allocator)
-    /// Future: Implement proper free list for IOVA recycling
-    pub fn free(self: *Self, iova: u64, size: u64) void {
-        _ = self;
-        _ = iova;
-        _ = size;
-        // Bump allocator doesn't support free
-        // A production implementation would use a free list or buddy allocator
+    /// Find contiguous free units using first-fit with wrap-around
+    fn findContiguous(self: *Self, bitmap: []u8, count: u64) ?usize {
+        const total: usize = @intCast(self.total_units);
+
+        // Search from hint to end
+        if (self.searchRange(bitmap, self.search_hint, total, count)) |found| {
+            return found;
+        }
+
+        // Wrap around: search from 0 to hint
+        if (self.search_hint > 0) {
+            if (self.searchRange(bitmap, 0, self.search_hint, count)) |found| {
+                return found;
+            }
+        }
+
+        return null;
     }
 
-    /// Get remaining IOVA space
+    fn searchRange(self: *Self, bitmap: []u8, start: usize, end: usize, count: u64) ?usize {
+        _ = self;
+        var run_start: usize = start;
+        var run_length: u64 = 0;
+
+        var unit = start;
+        while (unit < end) : (unit += 1) {
+            if (isBitSet(bitmap, unit)) {
+                // Allocated unit - reset run
+                run_start = unit + 1;
+                run_length = 0;
+            } else {
+                run_length += 1;
+                if (run_length >= count) {
+                    return run_start;
+                }
+            }
+        }
+        return null;
+    }
+
+    fn isBitSet(bitmap: []u8, unit: usize) bool {
+        const byte_idx = unit / UNITS_PER_BYTE;
+        if (byte_idx >= bitmap.len) return true; // Out of bounds = allocated
+        const bit_idx: u3 = @truncate(unit % UNITS_PER_BYTE);
+        return (bitmap[byte_idx] & (@as(u8, 1) << bit_idx)) != 0;
+    }
+
+    fn markRange(self: *Self, bitmap: []u8, start: usize, count: u64, allocated: bool) void {
+        _ = self;
+        var i: u64 = 0;
+        while (i < count) : (i += 1) {
+            const unit = start + @as(usize, @intCast(i));
+            const byte_idx = unit / UNITS_PER_BYTE;
+            if (byte_idx >= bitmap.len) continue;
+            const bit_idx: u3 = @truncate(unit % UNITS_PER_BYTE);
+            if (allocated) {
+                bitmap[byte_idx] |= (@as(u8, 1) << bit_idx);
+            } else {
+                bitmap[byte_idx] &= ~(@as(u8, 1) << bit_idx);
+            }
+        }
+    }
+
+    /// Get remaining IOVA space in bytes
     pub fn remaining(self: *const Self) u64 {
-        const current = self.next.load(.acquire);
-        if (current >= self.limit) return 0;
-        return self.limit - current;
+        return (self.total_units - self.allocated_units) * ALLOC_GRANULARITY;
+    }
+
+    /// Deinitialize and free bitmap pages
+    pub fn deinit(self: *Self) void {
+        if (self.bitmap != null and self.bitmap_pages > 0) {
+            pmm.freePages(self.bitmap_phys, self.bitmap_pages);
+            self.bitmap = null;
+            self.bitmap_phys = 0;
+            self.bitmap_pages = 0;
+        }
     }
 };
 

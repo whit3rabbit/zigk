@@ -173,26 +173,27 @@ fn setupSignalFrame(frame: *hal.idt.InterruptFrame, signum: usize, action: uapi.
     
     // Reserve space for FPU state (512 bytes) + alignment
     // We do this first (higher address) so ucontext can point to it
-    // 512 bytes is standard size for FXSAVE area
+    // FPU state size is dynamic based on XSAVE/FXSAVE support
     var fpstate_addr: usize = 0;
+    const fpu_size = hal.fpu.getXsaveAreaSize();
 
     // Check if we need to save FPU state
     // always save FPU state to stack (it might be in regs or memory)
     if (current_thread.fpu_used) {
         // State is in registers, save to memory first
-        hal.fpu.fxsave(&current_thread.fpu_state);
+        hal.fpu.saveState(current_thread.fpu_state_buffer);
     }
 
-    // Now current_thread.fpu_state is up to date. Copy to stack.
-    sp -= 512; // Standard FXSAVE size
-    sp &= ~@as(u64, 15); // Align to 16 bytes
+    // Now thread's FPU buffer is up to date. Copy to stack.
+    sp -= fpu_size; // Dynamic size for XSAVE or FXSAVE
+    sp &= ~@as(u64, 63); // Align to 64 bytes for XSAVE compatibility
     fpstate_addr = sp;
 
     // Copy FPU state to user stack
-    UserPtr.from(fpstate_addr).writeValue(current_thread.fpu_state) catch {
-            console.err("Signal: Failed to write FPU state to stack", .{});
-            sched.exitWithStatus(128 + 11);
-            return frame;
+    _ = UserPtr.from(fpstate_addr).copyFromKernel(current_thread.fpu_state_buffer) catch {
+        console.err("Signal: Failed to write FPU state to stack", .{});
+        sched.exitWithStatus(128 + 11);
+        return frame;
     };
 
     const ucontext_size = @sizeOf(uapi.signal.UContext);
@@ -383,16 +384,17 @@ fn setupSignalFrameForSyscall(frame: *hal.syscall.SyscallFrame, current_thread: 
     // Align stack to 16 bytes, reserve red zone
     sp = (sp - 128) & ~@as(u64, 15);
 
-    // Save FPU state
+    // Save FPU state (dynamic size for XSAVE/FXSAVE)
     var fpstate_addr: usize = 0;
+    const fpu_size = hal.fpu.getXsaveAreaSize();
     if (current_thread.fpu_used) {
-        hal.fpu.fxsave(&current_thread.fpu_state);
+        hal.fpu.saveState(current_thread.fpu_state_buffer);
     }
-    sp -= 512;
-    sp &= ~@as(u64, 15);
+    sp -= fpu_size;
+    sp &= ~@as(u64, 63); // 64-byte alignment for XSAVE
     fpstate_addr = sp;
 
-    UserPtr.from(fpstate_addr).writeValue(current_thread.fpu_state) catch {
+    _ = UserPtr.from(fpstate_addr).copyFromKernel(current_thread.fpu_state_buffer) catch {
         console.err("Signal: Failed to write FPU state to stack", .{});
         sched.exitWithStatus(128 + 11);
         return;

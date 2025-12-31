@@ -428,6 +428,22 @@ _syscall_entry:
 
     pop %rax                # Return value (set by dispatcher)
 
+    # ==========================================================================
+    # SECURITY: Zero caller-saved registers to prevent kernel data leaks
+    # ==========================================================================
+    # RDX, RSI, RDI, R8, R9, R10 are caller-saved per AMD64 ABI.
+    # Userspace cannot rely on these being preserved across syscalls.
+    # Defense-in-depth: Zero them to prevent leaking kernel stack/address data
+    # when a kernel bug corrupts the saved frame. This prevents KASLR bypass.
+    # RAX is preserved (contains syscall return value).
+    # RCX and R11 will be overwritten by SYSRET instruction anyway.
+    xor %edx, %edx          # Clear RDX (zeroes upper 32 bits too)
+    xor %esi, %esi          # Clear RSI
+    xor %edi, %edi          # Clear RDI
+    xor %r8d, %r8d          # Clear R8
+    xor %r9d, %r9d          # Clear R9
+    xor %r10d, %r10d        # Clear R10
+
     pop %rcx                # Return RIP
     pop %r11                # Return RFLAGS
 

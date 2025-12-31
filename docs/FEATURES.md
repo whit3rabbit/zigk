@@ -415,8 +415,8 @@ The following features are intentionally incomplete or stubbed for the MVP relea
 *   **VirtIO-Net Features**: `VIRTIO_NET_F_MRG_RXBUF` and `EVENT_IDX` defined but not negotiated.
 
 #### Signals & Context
-*   **sigsetjmp**: Does not save/restore signal mask (just calls `setjmp`).
-*   **FPU/SSE State**: Space reserved in `MContext`/`UContext` but not populated during signal delivery.
+*   **sigsetjmp**: Now properly saves/restores signal mask (implemented 2025-12-30).
+*   **FPU/SSE/AVX State**: Full XSAVE support with dynamic sizing (implemented 2025-12-30). Thread FPU buffers are allocated based on CPU capabilities (512 bytes for FXSAVE, up to 2688+ bytes for AVX-512). Signal delivery and return properly save/restore dynamic-sized FPU state with 64-byte alignment.
 
 ---
 
@@ -427,10 +427,8 @@ This section documents known gaps, incomplete implementations, and security conc
 ### Priority 1: Security-Critical
 
 #### Register Sanitization on Syscall Return
-- **Status**: NOT IMPLEMENTED
-- **Risk**: KASLR bypass via information leakage
-- **Description**: The SYSRET path in `src/arch/x86_64/lib/asm_helpers.S` does not clear general-purpose registers (RAX, RBX, RCX, RDX, RSI, RDI, R8-R15) before returning to userspace. Kernel values, potentially including address bits that reveal KASLR offsets, leak to userspace.
-- **Fix**: Add `xor` instructions to zero all GPRs (except RAX for return value, RCX/R11 which are clobbered by SYSRET) before the `sysretq` instruction.
+- **Status**: IMPLEMENTED (2025-12-30)
+- **Description**: The SYSRET path in `src/arch/x86_64/lib/asm_helpers.S` now zeros caller-saved registers (RDX, RSI, RDI, R8, R9, R10) before returning to userspace. RAX is preserved (syscall return value), RCX/R11 are overwritten by SYSRET instruction, and RBX/RBP/R12-R15 are callee-saved and restored from the user's saved frame.
 - **Files**: `src/arch/x86_64/lib/asm_helpers.S`
 
 #### NMI Handler GS Base Gap
@@ -450,10 +448,10 @@ This section documents known gaps, incomplete implementations, and security conc
 - **Files**: `src/arch/x86_64/kernel/gdt.zig`, `src/arch/x86_64/kernel/idt.zig`, `src/arch/x86_64/kernel/smp.zig`
 
 #### IOMMU Per-Device Integration
-- **Status**: INFRASTRUCTURE ONLY
+- **Status**: PARTIAL (IOVA allocator improved 2025-12-30)
 - **Risk**: DMA attacks if devices share address space
-- **Description**: IOMMU domain manager and IOVA allocator exist in `src/kernel/mm/iommu/`, but USB and storage drivers do not appear to use per-device IOMMU domains.
-- **Fix**: Integrate IOMMU domain creation into PCI device initialization; update xHCI, AHCI, and E1000e drivers to allocate DMA buffers within their assigned IOVA space.
+- **Description**: IOMMU domain manager exists with proper bitmap-based IOVA allocator supporting allocation and deallocation. The allocator uses 64KB granularity with first-fit search and wrap-around for efficient space reuse. Per-device driver integration is still pending.
+- **Remaining**: Update xHCI, AHCI, and E1000e drivers to allocate DMA buffers within their assigned IOVA space.
 - **Files**: `src/kernel/mm/iommu/`, `src/drivers/usb/xhci/`, `src/drivers/storage/ahci/`, `src/drivers/net/e1000e/`
 
 #### Secure Page Free Ordering
@@ -466,16 +464,15 @@ This section documents known gaps, incomplete implementations, and security conc
 ### Priority 3: Feature Completeness
 
 #### Signal Mask in sigsetjmp/siglongjmp
-- **Status**: STUB
-- **Description**: `sigsetjmp` simply calls `setjmp` without saving the signal mask.
-- **Fix**: Save current signal mask in jmp_buf when `savesigs` is nonzero; restore on `siglongjmp`.
-- **Files**: `src/user/lib/libc/setjmp.S`, `src/user/lib/libc/setjmp/stubs.zig`
+- **Status**: IMPLEMENTED (2025-12-30)
+- **Description**: `sigsetjmp` now properly saves the signal mask when `savemask` is nonzero, using `rt_sigprocmask` syscall (14) to query the current mask. `siglongjmp` restores the mask using `SIG_SETMASK` before jumping. The `sigjmp_buf` is 80 bytes (10 x u64) to accommodate the flag and mask.
+- **Files**: `src/user/lib/libc/setjmp.S`, `src/user/doom/include/setjmp.h`
 
 #### FPU/SSE State in Signal Delivery
-- **Status**: STUB
-- **Description**: Space reserved in `MContext`/`UContext` but XMM/YMM registers not saved or restored during signal delivery.
-- **Fix**: Use FXSAVE/FXRSTOR or XSAVE/XRSTOR to preserve FPU state before invoking signal handler.
-- **Files**: `src/kernel/proc/signal.zig`, `src/arch/x86_64/kernel/fpu.zig`
+- **Status**: PARTIAL (XSAVE detection added 2025-12-30)
+- **Description**: HAL now detects and enables XSAVE/XRSTOR for AVX support (if available) with automatic FXSAVE/FXRSTOR fallback. The `fpu.zig` module provides `getXsaveAreaSize()`, `xsave()`, and `xrstor()` functions. Integration with dynamic thread FPU state allocation and signal delivery remains pending.
+- **Remaining**: Update thread creation to dynamically allocate FPU state based on detected size; update signal delivery to use dynamic-sized FPU frames.
+- **Files**: `src/kernel/proc/signal.zig`, `src/arch/x86_64/kernel/fpu.zig`, `src/kernel/proc/thread.zig`
 
 #### Music Playback
 - **Status**: STUB

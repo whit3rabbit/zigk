@@ -76,7 +76,7 @@ pub fn sys_fork(frame: *hal.syscall.SyscallFrame) SyscallError!usize {
     // is captured in the thread struct before the child is created.
     // Note: The child gets fresh FPU state from createUserThread (fpu_used=false).
     if (parent_thread.fpu_used) {
-        hal.fpu.fxsave(&parent_thread.fpu_state);
+        hal.fpu.saveState(parent_thread.fpu_state_buffer);
     }
 
     // Create child thread

@@ -185,3 +185,192 @@ pub fn clearTaskSwitched() void {
 pub fn isTaskSwitched() bool {
     return (cpu.readCr0() & CR0_TS) != 0;
 }
+
+// =============================================================================
+// XSAVE Support for Extended FPU State (AVX, AVX-512, etc.)
+// =============================================================================
+
+// CPUID feature bits for XSAVE
+const CPUID_FEAT_ECX_XSAVE: u32 = 1 << 26; // XSAVE/XRSTOR supported
+const CPUID_FEAT_ECX_OSXSAVE: u32 = 1 << 27; // OSXSAVE (CR4.OSXSAVE set)
+const CPUID_FEAT_ECX_AVX: u32 = 1 << 28; // AVX supported
+
+// XCR0 feature bits (XSAVE state components)
+const XCR0_X87: u64 = 1 << 0; // x87 FPU state (mandatory)
+const XCR0_SSE: u64 = 1 << 1; // SSE state (XMM registers)
+const XCR0_AVX: u64 = 1 << 2; // AVX state (YMM upper halves)
+// AVX-512 components (optional, for future)
+// const XCR0_OPMASK: u64 = 1 << 5;    // AVX-512 opmask registers
+// const XCR0_ZMM_HI256: u64 = 1 << 6; // AVX-512 ZMM upper halves
+// const XCR0_HI16_ZMM: u64 = 1 << 7;  // AVX-512 ZMM16-ZMM31
+
+// CR4 bits for XSAVE
+const CR4_OSXSAVE: u64 = 1 << 18;
+
+// Cached XSAVE state - initialized once at boot
+var xsave_supported: bool = false;
+var xsave_area_size: usize = FXSAVE_SIZE; // Default to FXSAVE size
+var xcr0_mask: u64 = 0;
+var xsave_initialized: bool = false;
+
+/// Alignment requirement for XSAVE area (64 bytes per Intel spec)
+pub const XSAVE_ALIGN: usize = 64;
+
+/// Check if CPU supports XSAVE/XRSTOR instructions
+pub fn hasXsaveSupport() bool {
+    if (xsave_initialized) return xsave_supported;
+    const result = cpu.cpuid(1, 0);
+    return (result.ecx & CPUID_FEAT_ECX_XSAVE) != 0;
+}
+
+/// Get the required XSAVE area size for all enabled features
+/// Returns FXSAVE_SIZE (512) if XSAVE is not supported
+pub fn getXsaveAreaSize() usize {
+    return xsave_area_size;
+}
+
+/// Get whether XSAVE is enabled and active
+pub fn isXsaveEnabled() bool {
+    return xsave_initialized and xsave_supported;
+}
+
+/// Read XCR0 (Extended Control Register 0)
+fn readXcr0() u64 {
+    var low: u32 = undefined;
+    var high: u32 = undefined;
+    asm volatile ("xgetbv"
+        : [low] "={eax}" (low),
+          [high] "={edx}" (high),
+        : [xcr] "{ecx}" (@as(u32, 0)),
+    );
+    return (@as(u64, high) << 32) | low;
+}
+
+/// Write XCR0 (Extended Control Register 0)
+fn writeXcr0(value: u64) void {
+    const low: u32 = @truncate(value);
+    const high: u32 = @truncate(value >> 32);
+    asm volatile ("xsetbv"
+        :
+        : [xcr] "{ecx}" (@as(u32, 0)),
+          [low] "{eax}" (low),
+          [high] "{edx}" (high),
+    );
+}
+
+/// Initialize XSAVE subsystem
+/// Detects supported features, enables them in XCR0, queries size
+/// Must be called after init() and on every CPU (BSP and APs)
+pub fn initXsave() void {
+    // Only detect once (on BSP), but enable on all CPUs
+    if (!xsave_initialized) {
+        const cpuid1 = cpu.cpuid(1, 0);
+        xsave_supported = (cpuid1.ecx & CPUID_FEAT_ECX_XSAVE) != 0;
+
+        if (!xsave_supported) {
+            xsave_initialized = true;
+            return;
+        }
+
+        // Build XCR0 mask based on supported features
+        xcr0_mask = XCR0_X87 | XCR0_SSE; // Always enable x87 and SSE
+
+        // Enable AVX if supported
+        if ((cpuid1.ecx & CPUID_FEAT_ECX_AVX) != 0) {
+            xcr0_mask |= XCR0_AVX;
+        }
+
+        // AVX-512 detection would require CPUID leaf 7, skipped for now
+    }
+
+    if (!xsave_supported) {
+        xsave_initialized = true;
+        return;
+    }
+
+    // Enable XSAVE in CR4 (must be done on each CPU)
+    var cr4 = cpu.readCr4();
+    cr4 |= CR4_OSXSAVE;
+    cpu.writeCr4(cr4);
+
+    // Write XCR0 to enable selected features (must be done on each CPU)
+    writeXcr0(xcr0_mask);
+
+    // Query actual size for enabled features (only once on BSP)
+    if (!xsave_initialized) {
+        // CPUID.(EAX=0DH, ECX=0): EBX = size for currently enabled features
+        const cpuid_0d_0 = cpu.cpuid(0x0D, 0);
+        xsave_area_size = cpuid_0d_0.ebx;
+
+        // Ensure minimum alignment (64 bytes for XSAVE)
+        xsave_area_size = (xsave_area_size + (XSAVE_ALIGN - 1)) & ~(XSAVE_ALIGN - 1);
+
+        // Sanity check: must be at least FXSAVE size
+        if (xsave_area_size < FXSAVE_SIZE) {
+            xsave_area_size = FXSAVE_SIZE;
+        }
+
+        xsave_initialized = true;
+    }
+}
+
+/// Save extended FPU state using XSAVE (or FXSAVE fallback)
+/// The buffer must be properly aligned (64 bytes for XSAVE, 16 for FXSAVE)
+/// and sized according to getXsaveAreaSize()
+pub fn xsave(state: []u8) void {
+    if (!xsave_supported or state.len < FXSAVE_SIZE) {
+        // Fallback to FXSAVE
+        if (state.len >= FXSAVE_SIZE) {
+            const fpu_state: *FpuState = @ptrCast(@alignCast(state.ptr));
+            fxsave(fpu_state);
+        }
+        return;
+    }
+
+    const addr = @intFromPtr(state.ptr);
+    // XSAVE with all enabled components (EDX:EAX = -1 for full mask)
+    asm volatile (
+        \\mov $0xFFFFFFFF, %%eax
+        \\mov $0xFFFFFFFF, %%edx
+        \\xsave (%[ptr])
+        :
+        : [ptr] "r" (addr),
+        : .{ .rax = true, .rdx = true, .memory = true }
+    );
+}
+
+/// Restore extended FPU state using XRSTOR (or FXRSTOR fallback)
+/// The buffer must be properly aligned and sized
+pub fn xrstor(state: []const u8) void {
+    if (!xsave_supported or state.len < FXSAVE_SIZE) {
+        // Fallback to FXRSTOR
+        if (state.len >= FXSAVE_SIZE) {
+            const fpu_state: *const FpuState = @ptrCast(@alignCast(state.ptr));
+            fxrstor(fpu_state);
+        }
+        return;
+    }
+
+    const addr = @intFromPtr(state.ptr);
+    // XRSTOR with all enabled components
+    asm volatile (
+        \\mov $0xFFFFFFFF, %%eax
+        \\mov $0xFFFFFFFF, %%edx
+        \\xrstor (%[ptr])
+        :
+        : [ptr] "r" (addr),
+        : .{ .rax = true, .rdx = true, .memory = true }
+    );
+}
+
+/// Save FPU state to a slice (convenience wrapper)
+/// Uses XSAVE if available, otherwise FXSAVE
+pub fn saveState(state: []u8) void {
+    xsave(state);
+}
+
+/// Restore FPU state from a slice (convenience wrapper)
+/// Uses XRSTOR if available, otherwise FXRSTOR
+pub fn restoreState(state: []const u8) void {
+    xrstor(state);
+}

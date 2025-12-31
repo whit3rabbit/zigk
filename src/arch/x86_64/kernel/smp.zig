@@ -393,6 +393,8 @@ export fn apEntry() callconv(.c) noreturn {
 
     // Initialize FPU (enable SSE, OSFXSR)
     fpu.init();
+    // Enable XSAVE for extended FPU state (AVX, etc.)
+    fpu.initXsave();
     writeChar('F');
 
     // Step 8: Set up GS base for per-CPU data

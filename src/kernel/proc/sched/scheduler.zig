@@ -659,7 +659,7 @@ fn doPerCpuSchedule(frame: *const hal.interrupts.InterruptFrame) if (builtin.cpu
         curr.kernel_rsp = @intFromPtr(frame);
 
         if (curr.fpu_used) {
-            fpu.fxsave(&curr.fpu_state);
+            fpu.saveState(curr.fpu_state_buffer);
         }
 
         if (curr.state == .Running) {
@@ -719,7 +719,7 @@ fn doPerCpuSchedule(frame: *const hal.interrupts.InterruptFrame) if (builtin.cpu
         if (builtin.cpu.arch == .aarch64) {
             // Eager FPU restore on AArch64 - prevents info leak between threads
             if (next.fpu_used) {
-                fpu.fxrstor(&next.fpu_state);
+                fpu.restoreState(next.fpu_state_buffer);
             }
         } else {
             // Lazy FPU on x86_64 - CR0.TS triggers #NM on first FPU access

@@ -282,22 +282,19 @@ pub fn sys_rt_sigreturn(frame: *hal.syscall.SyscallFrame) SyscallError!usize {
 
         t.sigmask = ucontext.sigmask;
 
-        // Restore FPU state if present
+        // Restore FPU state if present (dynamic size for XSAVE/FXSAVE)
         if (mc.fpstate != 0) {
-            // Validate pointer
-            if (base.isValidUserAccess(mc.fpstate, @sizeOf(hal.fpu.FpuState), base.AccessMode.Read)) {
-                const fpstate_val = UserPtr.from(mc.fpstate).readValue(hal.fpu.FpuState) catch {
+            const fpu_size = hal.fpu.getXsaveAreaSize();
+            // Validate pointer with dynamic FPU state size
+            if (base.isValidUserAccess(mc.fpstate, fpu_size, base.AccessMode.Read)) {
+                _ = UserPtr.from(mc.fpstate).copyToKernel(t.fpu_state_buffer) catch {
                     sched.exitWithStatus(128 + 11);
                     unreachable;
                 };
 
-                // Update thread state
-                t.fpu_state = fpstate_val;
+                // Update thread state and restore to hardware
                 t.fpu_used = true;
-
-                // Restore mechanisms
-                // We need to ensure the FPU hardware is updated.
-                hal.fpu.fxrstor(&t.fpu_state);
+                hal.fpu.restoreState(t.fpu_state_buffer);
             }
         }
     }

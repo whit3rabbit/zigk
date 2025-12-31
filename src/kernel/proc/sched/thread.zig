@@ -252,7 +252,7 @@ pub fn handleFpuAccess() bool {
     if (current) |curr| {
         fpu.clearTaskSwitched();
         if (curr.fpu_used) {
-            fpu.fxrstor(&curr.fpu_state);
+            fpu.restoreState(curr.fpu_state_buffer);
         } else {
             curr.fpu_used = true;
         }
