@@ -222,7 +222,7 @@ src/kernel/sys/syscall/
 | 18 | pwrite64 | (fd, buf, count, off) -> ssize_t | io.zig (-) |
 | 19 | readv | (fd, iov, iovcnt) -> ssize_t | io.zig (-) |
 | 20 | writev | (fd, iov, iovcnt) -> ssize_t | io.zig |
-| 21 | access | (path, mode) -> int | - |
+| 21 | access | (path, mode) -> int | fd.zig |
 | 22 | pipe | (pipefd) -> int | fd.zig |
 | 23 | select | (nfds, r, w, e, timeout) -> int | scheduling.zig |
 | 24 | sched_yield | () -> int | scheduling.zig |
@@ -249,7 +249,8 @@ src/kernel/sys/syscall/
 | 59 | execve | (path, argv, envp) -> int | execution.zig |
 | 60 | exit | (code) -> noreturn | process.zig |
 | 61 | wait4 | (pid, wstatus, options, rusage) -> pid_t | process.zig |
-| 63 | uname | (name) -> int | - |
+| 62 | kill | (pid, sig) -> int | signals.zig |
+| 63 | uname | (name) -> int | process.zig |
 | 72 | fcntl | (fd, cmd, arg) -> int | io.zig |
 | 74 | fsync | (fd) -> int | io.zig |
 | 75 | fdatasync | (fd) -> int | io.zig |
@@ -262,7 +263,7 @@ src/kernel/sys/syscall/
 | 82 | rename | (old, new) -> int | io.zig |
 | 83 | mkdir | (path, mode) -> int | io.zig |
 | 84 | rmdir | (path) -> int | io.zig |
-| 85 | creat | (path, mode) -> fd | - |
+| 85 | creat | (path, mode) -> fd | fd.zig |
 | 86 | link | (old, new) -> int | io.zig |
 | 87 | unlink | (path) -> int | fs_handlers.zig |
 | 88 | symlink | (target, link) -> int | io.zig |
@@ -272,34 +273,43 @@ src/kernel/sys/syscall/
 | 92 | chown | (path, uid, gid) -> int | io.zig |
 | 93 | fchown | (fd, uid, gid) -> int | io.zig |
 | 94 | lchown | (path, uid, gid) -> int | io.zig |
-| 95 | umask | (mask) -> mode_t | - |
-| 96 | gettimeofday | (tv, tz) -> int | - |
-| 97 | getrlimit | (res, rlim) -> int | - |
+| 95 | umask | (mask) -> mode_t | process.zig |
+| 96 | gettimeofday | (tv, tz) -> int | scheduling.zig |
+| 97 | getrlimit | (res, rlim) -> int | process.zig |
 | 102 | getuid | () -> uid_t | process.zig |
 | 104 | getgid | () -> gid_t | process.zig |
-| 105 | setuid | (uid) -> int | - |
-| 106 | setgid | (gid) -> int | - |
-| 107 | geteuid | () -> uid_t | - |
-| 108 | getegid | () -> gid_t | - |
+| 105 | setuid | (uid) -> int | process.zig |
+| 106 | setgid | (gid) -> int | process.zig |
+| 107 | geteuid | () -> uid_t | process.zig |
+| 108 | getegid | () -> gid_t | process.zig |
 | 110 | getppid | () -> pid_t | process.zig |
+| 117 | setresuid | (ruid, euid, suid) -> int | process.zig |
+| 118 | getresuid | (ruid, euid, suid) -> int | process.zig |
+| 119 | setresgid | (rgid, egid, sgid) -> int | process.zig |
+| 120 | getresgid | (rgid, egid, sgid) -> int | process.zig |
+| 137 | statfs | (path, buf) -> int | io.zig |
+| 138 | fstatfs | (fd, buf) -> int | io.zig |
 | 158 | arch_prctl | (code, addr) -> int | execution.zig |
-| 160 | setrlimit | (res, rlim) -> int | - |
+| 160 | setrlimit | (res, rlim) -> int | process.zig |
+| 164 | settimeofday | (tv, tz) -> int | scheduling.zig |
 | 165 | mount | (src, tgt, type, flags, data) -> int | fs_handlers.zig |
 | 166 | umount2 | (target, flags) -> int | fs_handlers.zig |
-| 170 | sethostname | (name, len) -> int | - |
-| 171 | setdomainname | (name, len) -> int | - |
-| 202 | futex | (uaddr, op, val, timeout, uaddr2, val3) -> int | - |
+| 170 | sethostname | (name, len) -> int | process.zig |
+| 171 | setdomainname | (name, len) -> int | process.zig |
+| 200 | tkill | (tid, sig) -> int | signals.zig |
+| 202 | futex | (uaddr, op, val, timeout, uaddr2, val3) -> int | scheduling.zig |
 | 217 | getdents64 | (fd, dirp, count) -> int | io.zig |
 | 218 | set_tid_address | (tidptr) -> pid_t | signals.zig |
 | 228 | clock_gettime | (clk_id, tp) -> int | scheduling.zig |
-| 229 | clock_getres | (clk_id, res) -> int | - |
+| 229 | clock_getres | (clk_id, res) -> int | scheduling.zig |
 | 231 | exit_group | (code) -> noreturn | process.zig |
-| 232 | epoll_wait | (epfd, events, max, timeout) -> int | - |
-| 233 | epoll_ctl | (epfd, op, fd, event) -> int | - |
-| 257 | openat | (dfd, filename, flags, mode) -> int | - |
-| 291 | epoll_create1 | (flags) -> int | - |
-| 292 | dup3 | (old, new, flags) -> int | - |
-| 293 | pipe2 | (pipefd, flags) -> int | - |
+| 232 | epoll_wait | (epfd, events, max, timeout) -> int | scheduling.zig |
+| 233 | epoll_ctl | (epfd, op, fd, event) -> int | scheduling.zig |
+| 234 | tgkill | (tgid, tid, sig) -> int | signals.zig |
+| 257 | openat | (dfd, filename, flags, mode) -> int | fd.zig |
+| 291 | epoll_create1 | (flags) -> int | scheduling.zig |
+| 292 | dup3 | (old, new, flags) -> int | fd.zig |
+| 293 | pipe2 | (pipefd, flags) -> int | fd.zig |
 | 318 | getrandom | (buf, count, flags) -> ssize_t | random.zig |
 | 425 | io_uring_setup | (entries, params) -> int | - |
 | 426 | io_uring_enter | (fd, submit, complete, flags, sig) -> int | - |
@@ -315,6 +325,7 @@ src/kernel/sys/syscall/
 | 1003 | read_scancode | () -> int | custom.zig |
 | 1004 | getchar | () -> int | custom.zig |
 | 1005 | putchar | (c) -> int | custom.zig |
+| 1006 | fb_flush | () -> int | execution.zig |
 | 1010 | read_input_event | (event_ptr) -> int | input.zig |
 | 1011 | get_cursor_position | (pos_ptr) -> int | input.zig |
 | 1012 | set_cursor_bounds | (bounds_ptr) -> int | input.zig |
@@ -345,12 +356,12 @@ src/kernel/sys/syscall/
 | 1044 | ring_notify | (id) -> int | ring.zig |
 | 1045 | ring_wait_any | (ids, cnt, min, time) -> id | ring.zig |
 
-### IOMMU DMA Syscalls (1050+)
+### IOMMU DMA Syscalls (1046-1047)
 
 | # | Name | Signature | Handler |
 |---|------|-----------|---------|
-| 1050 | alloc_iommu_dma | (domain_id, size, flags) -> addr | iommu/root.zig |
-| 1051 | free_iommu_dma | (domain_id, addr, size) -> int | iommu/root.zig |
+| 1046 | alloc_iommu_dma | (bdf, result, pages) -> int | mmio.zig |
+| 1047 | free_iommu_dma | (bdf, virt, pages, dma_addr) -> int | mmio.zig |
 
 ### Implementation Status Legend
 
