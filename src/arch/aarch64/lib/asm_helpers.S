@@ -105,3 +105,59 @@ _asm_copy_user_start = _asm_copy_from_user_start
 _asm_copy_user_end = _asm_copy_to_user_end
 .global _asm_copy_user_fixup
 _asm_copy_user_fixup = _asm_copy_from_user_fixup
+
+// =============================================================================
+// VMware Hypercall (ARM64)
+// =============================================================================
+//
+// VMware on ARM64 uses a different mechanism than x86:
+// - x86 uses I/O port 0x5658 with "in eax, dx" instruction
+// - ARM64 uses system register trap via "mrs xzr, mdccsr_el0"
+//
+// The hypervisor traps access to MDCCSR_EL0 (Monitor Debug Configuration
+// Status Register) and interprets pre-loaded registers x0-x7 as hypercall
+// parameters.
+//
+// Register convention:
+//   x0 = eax equivalent (magic value 0x564D5868 / return value)
+//   x1 = ebx equivalent (command or data)
+//   x2 = ecx equivalent (command ID)
+//   x3 = edx equivalent (flags + port identifier)
+//   x4 = esi equivalent (input parameter)
+//   x5 = edi equivalent (input parameter)
+//   x6 = bp equivalent (base pointer for high-bandwidth)
+//   x7 = control word: (0x86 << 32) | flags
+//
+// Reference: Linux kernel vmwgfx ARM64 patches (drm/vmwgfx)
+
+// void _asm_vmware_hypercall(HypercallRegs* regs)
+// HypercallRegs is a struct of 8 consecutive u64 values (x0-x7)
+// x0 = pointer to HypercallRegs struct
+.global _asm_vmware_hypercall
+.type _asm_vmware_hypercall, @function
+_asm_vmware_hypercall:
+    // Save callee-saved registers we'll use
+    stp x19, x20, [sp, #-16]!
+    mov x19, x0                  // Save struct pointer in x19
+
+    // Load hypercall parameters from struct
+    // Struct layout: [x0, x1, x2, x3, x4, x5, x6, x7] as 8 consecutive u64
+    ldp x0, x1, [x19, #0]        // x0 (eax), x1 (ebx)
+    ldp x2, x3, [x19, #16]       // x2 (ecx), x3 (edx)
+    ldp x4, x5, [x19, #32]       // x4 (esi), x5 (edi)
+    ldp x6, x7, [x19, #48]       // x6 (bp), x7 (control)
+
+    // Execute VMware hypercall trap
+    // The hypervisor intercepts this system register read
+    mrs xzr, mdccsr_el0
+
+    // Store results back to struct
+    stp x0, x1, [x19, #0]
+    stp x2, x3, [x19, #16]
+    stp x4, x5, [x19, #32]
+    stp x6, x7, [x19, #48]
+
+    // Restore and return
+    ldp x19, x20, [sp], #16
+    ret
+.size _asm_vmware_hypercall, . - _asm_vmware_hypercall

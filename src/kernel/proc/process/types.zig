@@ -525,6 +525,28 @@ pub const Process = struct {
         return false;
     }
 
+    /// Check if process has hypervisor capability
+    pub fn hasHypervisorCapability(self: *Process) bool {
+        for (self.capabilities.items) |cap| {
+            switch (cap) {
+                .Hypervisor => return true,
+                else => {},
+            }
+        }
+        return false;
+    }
+
+    /// Get hypervisor capability if present
+    pub fn getHypervisorCapability(self: *Process) ?capabilities.HypervisorCapability {
+        for (self.capabilities.items) |cap| {
+            switch (cap) {
+                .Hypervisor => |hv_cap| return hv_cap,
+                else => {},
+            }
+        }
+        return null;
+    }
+
     /// Check if process is member of a group (egid or supplementary)
     /// Used for POSIX permission checking
     pub fn isGroupMember(self: *const Process, gid: u32) bool {

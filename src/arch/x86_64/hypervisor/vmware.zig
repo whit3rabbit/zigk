@@ -13,10 +13,18 @@ pub const BACKDOOR_MAGIC: u32 = 0x564D5868;
 
 /// Low-level register state for backdoor calls.
 /// Layout must match the assembly helper expectations (6 consecutive u32 fields).
+///
+/// SECURITY NOTE on edx: The assembly helper (_asm_vmware_backdoor_call) intentionally
+/// ignores the input edx value and hardcodes the port to 0x5658 ("VX"). This is a
+/// security feature that prevents callers from using this interface to access
+/// arbitrary I/O ports. The edx field is OUTPUT-ONLY and contains the result
+/// after the backdoor call.
 pub const Registers = extern struct {
     eax: u32,
     ebx: u32,
     ecx: u32,
+    /// OUTPUT-ONLY: Input value ignored by assembly; port is fixed to 0x5658.
+    /// Contains output value after the backdoor call.
     edx: u32,
     esi: u32 = 0,
     edi: u32 = 0,

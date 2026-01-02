@@ -2,11 +2,13 @@
 // Provides virtqueue primitives for VirtIO device drivers
 
 pub const common = @import("common.zig");
+pub const rng = @import("rng.zig");
 
 // Re-export commonly used types
 pub const Virtqueue = common.Virtqueue;
 pub const VirtqDesc = common.VirtqDesc;
 pub const VirtioPciCommonCfg = common.VirtioPciCommonCfg;
+pub const VirtioRngDriver = rng.VirtioRngDriver;
 
 // Re-export status bits
 pub const VIRTIO_STATUS_ACKNOWLEDGE = common.VIRTIO_STATUS_ACKNOWLEDGE;

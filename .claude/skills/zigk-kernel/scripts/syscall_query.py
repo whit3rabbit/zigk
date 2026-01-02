@@ -35,6 +35,7 @@ Categories:
     mmio     - Zscapek MMIO/DMA/PCI
     input    - Zscapek input
     fb       - Zscapek framebuffer
+    hypervisor - Zscapek hypervisor access (VMware, KVM, etc.)
 """
 
 import sys
@@ -261,6 +262,8 @@ SYSCALLS = {
     1045: {"name": "SYS_RING_WAIT_ANY", "doc": "Wait for entries on any of multiple rings (MPSC consumer)", "sig": "ring_wait_any(ring_ids, count, min_entries, timeout_ns) -> ring_id"},
     1046: {"name": "SYS_ALLOC_IOMMU_DMA", "doc": "Allocate IOMMU-protected DMA memory for a specific device", "sig": "alloc_iommu_dma(bdf, result, num_pages) -> 0"},
     1047: {"name": "SYS_FREE_IOMMU_DMA", "doc": "Free IOMMU-protected DMA memory", "sig": "free_iommu_dma(bdf, virt, num_pages) -> 0"},
+    1050: {"name": "SYS_VMWARE_BACKDOOR", "doc": "Execute VMware backdoor command (requires CAP_HYPERVISOR)", "sig": "vmware_backdoor(regs_ptr) -> 0"},
+    1051: {"name": "SYS_GET_HYPERVISOR", "doc": "Get hypervisor type (0=none, 1=vmware, 2=vbox, 3=kvm, 4=hyperv, 5=xen, 6=qemu)", "sig": "get_hypervisor() -> type"},
 }
 
 # Categories for grouping
@@ -286,6 +289,7 @@ CATEGORIES = {
     "mmio": [1030, 1031, 1032, 1033, 1034, 1035, 1036, 1037, 1046, 1047],
     "input": [1003, 1004, 1005, 1010, 1011, 1012, 1013],
     "fb": [1000, 1001, 1002, 1006],
+    "hypervisor": [1050, 1051],
 }
 
 # Optional: Try to parse live from source if available (for updates)

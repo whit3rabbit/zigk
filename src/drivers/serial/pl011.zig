@@ -35,6 +35,7 @@ pub const COM1 = UART0_BASE; // For compatibility with x86 code
 
 var uart_base: u64 = UART0_BASE;
 var output_lock: sync.Spinlock = .{};
+var initialized: bool = false;
 
 fn writeReg(offset: u32, val: u32) void {
     const addr: *volatile u32 = @ptrFromInt(uart_base + offset);

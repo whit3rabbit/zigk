@@ -23,6 +23,10 @@ pub const timing = @import("kernel/timing.zig");
 pub const smp = @import("kernel/smp.zig");
 pub const userspace = @import("kernel/userspace.zig");
 
+// Hypervisor support
+pub const vmware = @import("hypervisor/vmware.zig");
+pub const hypervisor = @import("hypervisor/root.zig");
+
 pub const gdt = struct {
     pub const MAX_CPUS = 8;
     pub const USER_DATA = 0x23; 
@@ -88,6 +92,42 @@ pub const apic = struct {
 
 pub const iommu = struct {
     pub const page_table = @import("mm/paging.zig");
+
+    // VT-d stub for aarch64 (VT-d is Intel x86 specific)
+    pub const vtd = struct {
+        pub const VtdUnit = struct {
+            pub fn init(_: anytype) !VtdUnit {
+                return error.NotSupported;
+            }
+            pub fn logInfo(_: *const VtdUnit) void {}
+            pub fn setRootTable(_: *VtdUnit, _: u64) void {}
+            pub fn invalidateContextGlobal(_: *VtdUnit) !void {}
+            pub fn invalidateIotlbDomain(_: *VtdUnit, _: u16) !void {}
+            pub fn invalidateIotlbGlobal(_: *VtdUnit) !void {}
+            pub fn enableTranslation(_: *VtdUnit) !void {}
+            pub fn enableFaultInterrupt(_: *VtdUnit) void {}
+        };
+        pub fn registerUnit(_: VtdUnit) void {}
+        pub fn getUnitCount() usize {
+            return 0;
+        }
+        pub fn getUnit(_: usize) ?*VtdUnit {
+            return null;
+        }
+    };
+
+    // Stub for kernel IOMMU domain code
+    pub fn getUnitCount() usize {
+        return 0;
+    }
+    pub fn getUnit(_: usize) ?*vtd.VtdUnit {
+        return null;
+    }
+
+    // Fault handling stub
+    pub const fault = struct {
+        pub fn init() void {}
+    };
 };
 
 // x86 compatibility stubs (these don't exist on ARM but kernel code may reference them)
@@ -221,4 +261,8 @@ pub fn init(hhdm_offset: u64) void {
     // This prevents the kernel from accidentally accessing user memory
     // via normal load/store; must use LDTR/STTR instead
     cpu.enablePAN();
+
+    // Initialize GIC and exception vectors
+    // Must be done before any code calls setSerialHandler or other IRQ functions
+    interrupts.init();
 }

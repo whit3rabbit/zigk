@@ -296,6 +296,23 @@ pub const InputInjectionCapability = struct {
     }
 };
 
+/// Capability for hypervisor interface access (VMware backdoor, etc.)
+///
+/// SECURITY: This capability grants access to hypervisor-specific interfaces
+/// that can be used for:
+/// - Time synchronization with host
+/// - Clipboard sharing (copy/paste between host and guest)
+/// - Screen resolution hints
+/// - Graceful shutdown handling
+///
+/// Only trusted guest tools services should have this capability.
+pub const HypervisorCapability = struct {
+    /// If true, allows VMware backdoor access (port 0x5658)
+    vmware_backdoor: bool = true,
+    /// If true, allows reading hypervisor type info
+    detect_hypervisor: bool = true,
+};
+
 pub const CapabilityType = enum {
     Interrupt,
     IoPort,
@@ -309,6 +326,7 @@ pub const CapabilityType = enum {
     SetUid,
     SetGid,
     DisplayServer,
+    Hypervisor,
 };
 
 pub const Capability = union(CapabilityType) {
@@ -332,4 +350,6 @@ pub const Capability = union(CapabilityType) {
     SetGid: SetGidCapability,
     /// Allows display server access (framebuffer + input routing)
     DisplayServer: DisplayServerCapability,
+    /// Allows hypervisor interface access (VMware backdoor, etc.)
+    Hypervisor: HypervisorCapability,
 };

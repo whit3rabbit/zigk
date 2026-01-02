@@ -86,8 +86,8 @@ pub fn writeMsr(msr: u32, val: u64) void {
             asm volatile ("msr tpidr_el0, %[val]" : : [val] "r" (val));
         },
         IA32_GS_BASE, IA32_KERNEL_GS_BASE => {
-            // Kernel per-CPU pointer - TPIDR_EL1 (not directly settable here,
-            // typically set during per-CPU init)
+            // Kernel per-CPU pointer - TPIDR_EL1
+            asm volatile ("msr tpidr_el1, %[val]" : : [val] "r" (val));
         },
         else => {},
     }

@@ -16,11 +16,11 @@ pub const SvgDriver = struct {
     framebuffer_virt: [*]u32,
     framebuffer_size: u32,
     vram_size: u32,
-    
+
     fifo_phys: u64,
     fifo_virt: [*]u32,
     fifo_size: u32,
-    
+
     width: u32 = 0,
     height: u32 = 0,
     bpp: u32 = 32,
@@ -40,78 +40,96 @@ pub const SvgDriver = struct {
         // Iterate manually as we don't have a generic find method for vendor/device
         // But we can check pci.DeviceList implementation.
         // Assuming we iterate or use a helper if available.
-        // Actually, looking at pci/root.zig examples, "devices.findE1000()" exists. 
+        // Actually, looking at pci/root.zig examples, "devices.findE1000()" exists.
         // We'll iterate the slice directly.
         for (devices.devices[0..devices.count]) |*dev| {
-            if (dev.vendor_id == hw.PCI_VENDOR_ID_VMWARE and 
-                dev.device_id == hw.PCI_DEVICE_ID_VMWARE_SVGA2) {
+            if (dev.vendor_id == hw.PCI_VENDOR_ID_VMWARE and
+                dev.device_id == hw.PCI_DEVICE_ID_VMWARE_SVGA2)
+            {
                 svga_dev = dev.*;
                 break;
             }
         }
-        
+
         const dev = svga_dev orelse return null;
 
         // 2. Get Resources from BARs
         // BAR0: IO Base
         // BAR1: Framebuffer
         // BAR2: FIFO (Optional)
-        const bar0 = dev.bars[0];
-        const bar1 = dev.bars[1];
-        const bar2 = dev.bars[2];
+        const bar0 = dev.bar[0];
+        const bar1 = dev.bar[1];
+        const bar2 = dev.bar[2];
 
-        if (bar0.type != .io) return null;
-        const io_base: u16 = @intCast(bar0.address & 0xFFFC);
+        if (bar0.bar_type != .io) return null;
+        const io_base: u16 = @intCast(bar0.base & 0xFFFC);
 
         // 3. Enable Bus Mastering and IO
         // We need ECAM access to write to command register
         // Or assume it's already enabled by firmware? Better to enable.
         // Check `pci.access` or `dev.enableBusMastering(ecam)`
         if (pci.getEcam()) |ecam| {
-            // Re-read current command
-            const cmd_reg = ecam.readConfig(dev.bus, dev.device, dev.function, .command);
+            // Re-read current command (offset 0x04)
+            const cmd_reg = ecam.read16(dev.bus, dev.device, dev.func, 0x04);
             // Enable IO (bit 0), Memory (bit 1), Bus Master (bit 2)
-            ecam.writeConfig(dev.bus, dev.device, dev.function, .command, cmd_reg | 0x7);
+            ecam.write16(dev.bus, dev.device, dev.func, 0x04, cmd_reg | 0x7);
         }
 
         instance.io_base = io_base;
-        
+
         // 4. Negotiate Version
         // Write ID to index port, then read/write value port
         instance.writeReg(.ID, hw.SVGA_ID_2);
         if (instance.readReg(.ID) != hw.SVGA_ID_2) {
-             // Fallback to older version?
-             return null;
+            // Fallback to older version?
+            return null;
         }
 
         // 5. Read Capabilities
         instance.vram_size = instance.readReg(.VRAM_SIZE);
         instance.framebuffer_size = instance.readReg(.FB_SIZE);
         instance.fifo_size = instance.readReg(.MEM_SIZE);
-        
+
         // Map Framebuffer
-        instance.framebuffer_phys = bar1.address & 0xFFFFFFF0;
+        instance.framebuffer_phys = bar1.base & 0xFFFFFFF0;
         // Map to virtual address (Upper Half)
-        // Using HAL paging/Direct map? 
+        // Using HAL paging/Direct map?
         // Assuming HHDM is available, we can compute virt address if it's in physical memory range.
         // However, PCI BARs are MMIO, so we usually need to `ioremap`.
         // For now, assuming direct map covers it or `physToVirt` handles MMIO ranges if they are identity mapped in higher half?
         // Zigk HAL likely has `hal.paging.mapMmio` or similar.
         // Looking at `framebuffer.zig`, it uses `hal.paging.physToVirt(bb_phys)`.
-        // Depending on `physToVirt` logic (usually just adds HHDM offset). 
+        // Depending on `physToVirt` logic (usually just adds HHDM offset).
         // If BAR is high physical address, it needs explicit mapping.
         // We will assume `physToVirt` works for now or valid ident mapping exists.
         instance.framebuffer_virt = @ptrFromInt(@intFromPtr(hal.paging.physToVirt(instance.framebuffer_phys)));
 
-        // FIFO Mapping (ignore for basic implementation if complicated, but good for acc)
-        if (instance.fifo_size > 0 and bar2.address != 0) {
-             instance.fifo_phys = bar2.address & 0xFFFFFFF0;
-             instance.fifo_virt = @ptrFromInt(@intFromPtr(hal.paging.physToVirt(instance.fifo_phys)));
-             
-             // Initialize FIFO
-             instance.writeReg(.MEM_START, @intCast(instance.fifo_phys));
-             instance.writeReg(.MEM_SIZE, instance.fifo_size);
-             instance.writeReg(.CONFIG_DONE, 1);
+        // FIFO Mapping
+        if (instance.fifo_size > 0 and bar2.base != 0) {
+            instance.fifo_phys = bar2.base & 0xFFFFFFF0;
+            instance.fifo_virt = @ptrFromInt(@intFromPtr(hal.paging.physToVirt(instance.fifo_phys)));
+
+            // Initialize FIFO memory structure
+            // The first 4 u32 words are the FIFO header:
+            //   [0] = MIN      - byte offset where commands start (after header)
+            //   [1] = MAX      - byte offset of end of FIFO
+            //   [2] = NEXT_CMD - byte offset to write next command (starts at MIN)
+            //   [3] = STOP     - byte offset where host has read to (starts at MIN)
+            const fifo_header_size: u32 = 4 * @sizeOf(u32); // 16 bytes
+            instance.fifo_virt[hw.FIFO_MIN] = fifo_header_size;
+            instance.fifo_virt[hw.FIFO_MAX] = instance.fifo_size;
+            instance.fifo_virt[hw.FIFO_NEXT_CMD] = fifo_header_size;
+            instance.fifo_virt[hw.FIFO_STOP] = fifo_header_size;
+
+            // Tell device about FIFO location
+            instance.writeReg(.MEM_START, @intCast(instance.fifo_phys));
+            instance.writeReg(.MEM_SIZE, instance.fifo_size);
+
+            // Memory barrier before signaling CONFIG_DONE
+            asm volatile ("mfence" ::: .{ .memory = true });
+
+            // Signal that FIFO configuration is complete
+            instance.writeReg(.CONFIG_DONE, 1);
         }
 
         initialized = true;
@@ -120,13 +138,13 @@ pub const SvgDriver = struct {
 
     // Helper I/O
     fn writeReg(self: *Self, reg: hw.Registers, val: u32) void {
-        hal.io.outd(self.io_base + hw.SVGA_INDEX_PORT, @intFromEnum(reg));
-        hal.io.outd(self.io_base + hw.SVGA_VALUE_PORT, val);
+        hal.io.outl(self.io_base + hw.SVGA_INDEX_PORT, @intFromEnum(reg));
+        hal.io.outl(self.io_base + hw.SVGA_VALUE_PORT, val);
     }
 
     fn readReg(self: *Self, reg: hw.Registers) u32 {
-        hal.io.outd(self.io_base + hw.SVGA_INDEX_PORT, @intFromEnum(reg));
-        return hal.io.ind(self.io_base + hw.SVGA_VALUE_PORT);
+        hal.io.outl(self.io_base + hw.SVGA_INDEX_PORT, @intFromEnum(reg));
+        return hal.io.inl(self.io_base + hw.SVGA_VALUE_PORT);
     }
 
     // Interface Implementation
@@ -187,7 +205,7 @@ pub const SvgDriver = struct {
     fn putPixel(ctx: *anyopaque, x: u32, y: u32, color: interface.Color) void {
         const self: *Self = @ptrCast(@alignCast(ctx));
         if (x >= self.width or y >= self.height) return;
-        
+
         const offset = (y * self.pitch / 4) + x;
         const val: u32 = (@as(u32, color.r) << 16) | (@as(u32, color.g) << 8) | color.b;
         self.framebuffer_virt[offset] = val;
@@ -221,7 +239,7 @@ pub const SvgDriver = struct {
 
         self.updateRect(x, y, clip_w, clip_h);
     }
-    
+
     fn drawBuffer(ctx: *anyopaque, x: u32, y: u32, w: u32, h: u32, buf: []const u32) void {
         const self: *Self = @ptrCast(@alignCast(ctx));
 
@@ -253,13 +271,19 @@ pub const SvgDriver = struct {
 
         self.updateRect(x, y, clip_w, clip_h);
     }
-    
+
     fn copyRect(ctx: *anyopaque, src_x: u32, src_y: u32, dst_x: u32, dst_y: u32, w: u32, h: u32) void {
-         // Software fallback
-         const self: *Self = @ptrCast(@alignCast(ctx));
-         // Similar to framebuffer.zig impl, but trigger update
-         // ... implementation omitted for brevity, reuse logic or utilize hardware copy later ...
-         _ = self; _ = src_x; _ = src_y; _ = dst_x; _ = dst_y; _ = w; _ = h;
+        // Software fallback
+        const self: *Self = @ptrCast(@alignCast(ctx));
+        // Similar to framebuffer.zig impl, but trigger update
+        // ... implementation omitted for brevity, reuse logic or utilize hardware copy later ...
+        _ = self;
+        _ = src_x;
+        _ = src_y;
+        _ = dst_x;
+        _ = dst_y;
+        _ = w;
+        _ = h;
     }
 
     fn present(ctx: *anyopaque, dirty_rect: ?interface.Rect) void {
@@ -270,21 +294,66 @@ pub const SvgDriver = struct {
             self.updateRect(0, 0, self.width, self.height);
         }
     }
-    
+
     fn updateRect(self: *Self, x: u32, y: u32, w: u32, h: u32) void {
-        // Write to FIFO update command
-        // For now, simpler I/O based update?
-        // Registers.UPDATE (1)
-        // This is deprecated/slow but simple.
-        // Actually the registers are:
-        // UPDATE_X, UPDATE_Y, UPDATE_WIDTH, UPDATE_HEIGHT, UPDATE_ENABLE?
-        // Wait, standard hardware.zig doesn't list UPDATE registers directly.
-        // They might be standard registers 1,2,3,4? No those are ID, ENABLE etc.
-        // The "Update" capability typically requires FIFO.
-        // UNLESS we use legacy IO, but that's what I am trying to support.
-        // OSDev says: "To update the screen... use the FIFO_CMD_UPDATE".
-        // If FIFO is not init, maybe we can't update efficiently?
-        // There is SVGA_REG_UPDATE_X, etc? 
-        _ = self; _ = x; _ = y; _ = w; _ = h;
+        // Check if FIFO is available
+        if (self.fifo_size == 0) {
+            // No FIFO - use legacy sync register approach
+            // Writing to SYNC forces the device to read framebuffer
+            self.writeReg(.SYNC, 1);
+            // Wait for device to finish (BUSY goes to 0)
+            while (self.readReg(.BUSY) != 0) {}
+            return;
+        }
+
+        // FIFO-based update command
+        // FIFO memory layout:
+        //   [0] = MIN    - byte offset where commands start (typically 16)
+        //   [1] = MAX    - byte offset of end of FIFO
+        //   [2] = NEXT_CMD - byte offset to write next command
+        //   [3] = STOP   - byte offset where host has read to
+        //
+        // Command format for Update (cmd=1):
+        //   u32: command (1)
+        //   u32: x
+        //   u32: y
+        //   u32: width
+        //   u32: height
+        const cmd_size: u32 = 5 * @sizeOf(u32); // 20 bytes
+
+        // Read current FIFO state
+        const fifo_min = self.fifo_virt[hw.FIFO_MIN];
+        const fifo_max = self.fifo_virt[hw.FIFO_MAX];
+        var next_cmd = self.fifo_virt[hw.FIFO_NEXT_CMD];
+        const stop = self.fifo_virt[hw.FIFO_STOP];
+
+        // Check if there's space in the FIFO
+        // Simple check: if next_cmd + cmd_size would wrap or hit stop, sync first
+        const space_needed = next_cmd + cmd_size;
+        if (space_needed > fifo_max) {
+            // Need to wrap or sync - for simplicity, sync and reset
+            self.writeReg(.SYNC, 1);
+            while (self.readReg(.BUSY) != 0) {}
+            next_cmd = fifo_min;
+        } else if (next_cmd < stop and space_needed >= stop) {
+            // Would overrun host read position - sync first
+            self.writeReg(.SYNC, 1);
+            while (self.readReg(.BUSY) != 0) {}
+        }
+
+        // Write command to FIFO at byte offset next_cmd
+        // Convert byte offset to u32 index
+        const word_idx = next_cmd / @sizeOf(u32);
+        self.fifo_virt[word_idx + 0] = @intFromEnum(hw.Cmd.Update);
+        self.fifo_virt[word_idx + 1] = x;
+        self.fifo_virt[word_idx + 2] = y;
+        self.fifo_virt[word_idx + 3] = w;
+        self.fifo_virt[word_idx + 4] = h;
+
+        // Update NEXT_CMD pointer
+        self.fifo_virt[hw.FIFO_NEXT_CMD] = next_cmd + cmd_size;
+
+        // Memory barrier to ensure writes are visible to device
+        asm volatile ("mfence" ::: .{ .memory = true });
     }
 };

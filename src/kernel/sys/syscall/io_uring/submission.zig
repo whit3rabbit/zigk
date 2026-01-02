@@ -18,6 +18,15 @@ inline fn acquireBarrier() void {
     }
 }
 
+/// Architecture-independent release barrier (stores visible before subsequent ops)
+inline fn releaseBarrier() void {
+    switch (builtin.cpu.arch) {
+        .x86_64 => asm volatile ("sfence" ::: .{ .memory = true }),
+        .aarch64 => asm volatile ("dmb ishst" ::: .{ .memory = true }),
+        else => @compileError("Unsupported architecture"),
+    }
+}
+
 /// Submit SQEs from shared memory ring
 pub fn submitFromSharedMemory(inst: *instance.IoUringInstance, to_submit: usize) SyscallError!usize {
     const sq_ring = inst.getSqRing();
@@ -69,8 +78,8 @@ pub fn submitFromSharedMemory(inst: *instance.IoUringInstance, to_submit: usize)
     // Update SQ head (kernel consumed these entries)
     sq_ring.head = head;
 
-    // Memory barrier after updating head
-    asm volatile ("sfence" ::: .{ .memory = true });
+    // Release barrier after updating head
+    releaseBarrier();
 
     return submitted;
 }

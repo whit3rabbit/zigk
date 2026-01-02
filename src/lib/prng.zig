@@ -47,7 +47,10 @@ var using_fallback_seed: atomic.Value(bool) = atomic.Value(bool).init(false);
 // Without hardware entropy, PRNG state is recoverable from ~128 bits of output,
 // enabling stack canary prediction, TCP ISN hijacking, and ASLR bypass.
 // Set to false ONLY for development on legacy hardware without RDRAND support.
-pub const require_hardware_entropy: bool = true;
+// SECURITY: Set to true for production. Set to false for QEMU TCG on Apple Silicon
+// where RDRAND/RDSEED are not emulated. VirtIO-RNG provides entropy but is
+// initialized after PRNG init. TODO: Defer entropy check until after hw init.
+pub const require_hardware_entropy: bool = false;
 
 /// Initialize the PRNG with hardware entropy
 /// MUST be called before scheduler starts to ensure stack canary

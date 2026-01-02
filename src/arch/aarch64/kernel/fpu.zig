@@ -131,3 +131,24 @@ pub fn setTaskSwitched() void {}
 /// Clear task switched flag (x86 compat - no-op on AArch64)
 /// See setTaskSwitched() for AArch64 FPU handling strategy.
 pub fn clearTaskSwitched() void {}
+
+/// x86 compatibility: Get XSAVE area size
+/// On AArch64, we use FpuState size (528 bytes for Q0-Q31 + FPSR + FPCR)
+pub fn getXsaveAreaSize() usize {
+    return @sizeOf(FpuState);
+}
+
+/// x86 compatibility: Save FPU state to a buffer
+/// Buffer must be at least getXsaveAreaSize() bytes with 64-byte alignment
+pub fn saveState(buf: []align(64) u8) void {
+    if (buf.len < @sizeOf(FpuState)) return;
+    const state: *FpuState = @ptrCast(@alignCast(buf.ptr));
+    save(state);
+}
+
+/// x86 compatibility: Restore FPU state from a buffer
+pub fn restoreState(buf: []align(64) u8) void {
+    if (buf.len < @sizeOf(FpuState)) return;
+    const state: *const FpuState = @ptrCast(@alignCast(buf.ptr));
+    restore(state);
+}

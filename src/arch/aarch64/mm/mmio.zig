@@ -115,16 +115,16 @@ pub fn write64(addr: u64, val: u64) void {
     memoryBarrier();
 }
 
+// Minimum valid MMIO address - addresses below this are likely errors.
+// On AArch64, like x86_64, low addresses are typically not used for MMIO.
+const MIN_MMIO_ADDR: u64 = 0x1000;
+
 /// Debug-mode validation for MMIO addresses.
-/// Checks that addresses are not in kernel virtual space and are non-null.
+/// Checks for null/low addresses and alignment.
 fn validateMmioAddress(addr: u64, size: usize) void {
-    // Null address check
-    if (addr == 0) {
-        @panic("MMIO: null address");
-    }
-    // Kernel virtual address check (upper canonical half)
-    if (addr >= 0xFFFF_0000_0000_0000) {
-        @panic("MMIO: address in kernel virtual space");
+    // Null/low address check - catches null pointers and misconfigurations
+    if (addr < MIN_MMIO_ADDR) {
+        @panic("MMIO: invalid address (null or too low)");
     }
     // Alignment check
     if (addr % size != 0) {

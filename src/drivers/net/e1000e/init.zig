@@ -31,7 +31,9 @@ const ReceiveCtl = ctl.ReceiveCtl;
 const TransmitCtl = ctl.TransmitCtl;
 
 /// Static driver instance (singleton for now)
-var driver_instance: E1000e = undefined;
+/// Explicit 64-byte alignment ensures @alignCast in worker thread succeeds
+/// (E1000e contains arrays/pointers that may require high alignment)
+var driver_instance: E1000e align(64) = undefined;
 var driver_initialized: bool = false;
 
 /// Initialize E1000 driver for a PCI device

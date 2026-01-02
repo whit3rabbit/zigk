@@ -38,6 +38,7 @@ build.zig
     |       |-- syscall_mmio_module       -> sys/syscall/memory/mmio.zig
     |       |-- syscall_pci_module        -> sys/syscall/net/pci_syscall.zig
     |       |-- syscall_ring_module       -> sys/syscall/hw/ring.zig
+    |       |-- syscall_hypervisor_module -> sys/syscall/hw/hypervisor.zig
     |       `-- syscall_fs_handlers_module -> sys/syscall/fs/fs_handlers.zig
     |
     +-- syscall_table_module (src/kernel/sys/syscall/core/table.zig)
@@ -175,6 +176,7 @@ src/kernel/sys/syscall/
         interrupt.zig  - Userspace interrupt waiting
         port_io.zig    - Raw port I/O access
         ring.zig       - Ring buffer IPC (create, attach, wait, notify)
+        hypervisor.zig - Hypervisor access (VMware backdoor, detection)
 
     io/             - Async I/O
         root.zig       - I/O operations (read, write, writev, stat, fstat, ioctl, fcntl)
@@ -362,6 +364,17 @@ src/kernel/sys/syscall/
 |---|------|-----------|---------|
 | 1046 | alloc_iommu_dma | (bdf, result, pages) -> int | mmio.zig |
 | 1047 | free_iommu_dma | (bdf, virt, pages, dma_addr) -> int | mmio.zig |
+
+### Hypervisor Syscalls (1050-1059)
+
+| # | Name | Signature | Handler |
+|---|------|-----------|---------|
+| 1050 | vmware_backdoor | (regs_ptr) -> int | hypervisor.zig |
+| 1051 | get_hypervisor | () -> type | hypervisor.zig |
+
+**Notes:**
+- `vmware_backdoor`: Requires `CAP_HYPERVISOR` capability. Passes register struct to VMware backdoor interface.
+- `get_hypervisor`: Returns hypervisor type enum (0=none, 1=vmware, 2=virtualbox, 3=kvm, 4=hyperv, 5=xen, 6=qemu_tcg).
 
 ### Implementation Status Legend
 

@@ -14,6 +14,7 @@
 //! - ACPI RSDP must be set via setRsdpAddress().
 
 const std = @import("std");
+const builtin = @import("builtin");
 const console = @import("console");
 const heap = @import("heap");
 const sched = @import("sched");
@@ -28,11 +29,21 @@ const hal = @import("hal");
 const acpi = @import("acpi");
 const kernel_iommu = @import("kernel_iommu");
 const dma = @import("dma");
+const input = @import("input");
+const virtio = @import("virtio");
+const prng = @import("prng");
 
 pub var net_interface: net.Interface = undefined;
 pub var pci_devices: ?*const pci.DeviceList = null;
 pub var pci_ecam: ?pci.Ecam = null;
 pub var virtio_gpu_driver: ?*video_driver.VirtioGpuDriver = null;
+// SVGA driver is x86_64 only (VMware-specific, uses port I/O)
+pub var svga_driver: if (builtin.cpu.arch == .x86_64) ?*video_driver.SvgaDriver else ?*void = null;
+pub var vmmouse_enabled: bool = false;
+pub var virtio_rng_driver: ?*virtio.VirtioRngDriver = null;
+
+/// Detected hypervisor type
+pub var detected_hypervisor: hal.hypervisor.HypervisorType = .none;
 
 /// Whether IOMMU is available and enabled
 pub var iommu_enabled: bool = false;
@@ -44,6 +55,32 @@ var rsdp_address: u64 = 0;
 /// Must be called before initIommu() or initNetwork()
 pub fn setRsdpAddress(addr: u64) void {
     rsdp_address = addr;
+}
+
+/// Detect and log hypervisor type
+/// Should be called early in boot to enable platform-specific optimizations
+pub fn initHypervisor() void {
+    const info = hal.hypervisor.detect.detect();
+    detected_hypervisor = info.hypervisor;
+
+    if (info.hypervisor == .none) {
+        console.info("Platform: Bare metal (no hypervisor detected)", .{});
+    } else {
+        const sig = hal.hypervisor.detect.formatSignature(info.signature);
+        console.info("Platform: {s} (signature: {s}, max_leaf: 0x{x})", .{
+            info.hypervisor.name(),
+            &sig,
+            info.max_leaf,
+        });
+
+        // Log platform-specific hints
+        if (info.hypervisor.isVmwareCompatible()) {
+            console.info("  - VMware-compatible: VMMouse and SVGA available", .{});
+        }
+        if (info.hypervisor.isKvmCompatible()) {
+            console.info("  - KVM-compatible: VirtIO devices available", .{});
+        }
+    }
 }
 
 /// Initialize IOMMU (VT-d) subsystem
@@ -591,4 +628,111 @@ pub fn initVirtioGpu() ?*video_driver.VirtioGpuDriver {
 
     console.info("VirtIO-GPU: No device found, using framebuffer", .{});
     return null;
+}
+
+/// Initialize Video subsystem
+/// Tries VirtIO-GPU first (best for KVM/QEMU), then SVGA (VMware/VirtualBox)
+/// Falls back to boot framebuffer if neither is available.
+pub fn initVideo() void {
+    console.print("\n");
+    console.info("Initializing video subsystem...", .{});
+
+    // First try VirtIO-GPU (best paravirtualized option)
+    if (initVirtioGpu()) |driver| {
+        console.info("Video: Using VirtIO-GPU driver", .{});
+        _ = driver; // Driver stored in virtio_gpu_driver
+        return;
+    }
+
+    // Try VMware SVGA II (x86_64 only - uses port I/O)
+    if (builtin.cpu.arch == .x86_64) {
+        if (video_driver.SvgaDriver.init()) |driver| {
+            svga_driver = driver;
+            console.info("Video: Using VMware SVGA II driver", .{});
+            return;
+        }
+    }
+
+    // Fall back to boot framebuffer
+    console.info("Video: Using boot framebuffer (no GPU driver)", .{});
+}
+
+/// Initialize Input subsystem
+/// Sets up the unified input queue and probes for enhanced input devices.
+/// - VMMouse: Absolute positioning for VMware/VirtualBox
+/// - Falls back to PS/2 mouse (relative positioning)
+pub fn initInput() void {
+    console.print("\n");
+    console.info("Initializing input subsystem...", .{});
+
+    // Initialize the unified input subsystem
+    input.init();
+    console.info("Input: Unified event queue initialized", .{});
+
+    // Probe for VMMouse (VMware/VirtualBox absolute positioning)
+    var vmmouse_driver = input.VmMouseDriver.init();
+    if (vmmouse_driver.probe()) {
+        vmmouse_enabled = true;
+        console.info("Input: VMMouse detected - absolute positioning enabled", .{});
+
+        // Register with input subsystem
+        _ = input.registerDevice(.{
+            .device_type = .vmmouse,
+            .name = "VMware VMMouse",
+            .capabilities = .{ .has_abs = true, .has_left = true, .has_right = true, .has_middle = true },
+            .is_absolute = true,
+        }) catch |err| {
+            console.warn("Input: Failed to register VMMouse: {}", .{err});
+        };
+
+        // Set up polling (VMMouse needs periodic polling, not IRQ-driven)
+        // The poll function should be called from a timer or main loop
+        // For now, we'll rely on the scheduler tick callback or explicit polling
+    } else {
+        console.info("Input: VMMouse not available, using PS/2 mouse", .{});
+    }
+
+    // PS/2 keyboard/mouse are initialized separately by the PS/2 controller driver
+    // They will register themselves with the input subsystem when detected
+}
+
+/// Initialize VirtIO-RNG (entropy device)
+/// Provides hardware entropy from hypervisor to kernel PRNG
+pub fn initVirtioRng() void {
+    console.print("\n");
+    console.info("Checking for VirtIO-RNG...", .{});
+
+    // Only probe on KVM-compatible hypervisors (QEMU, KVM, Proxmox)
+    // VirtIO devices won't be present on VMware/VirtualBox
+    if (detected_hypervisor != .none and
+        !detected_hypervisor.isKvmCompatible() and
+        detected_hypervisor != .unknown)
+    {
+        console.info("VirtIO-RNG: Skipping (not a KVM-compatible hypervisor)", .{});
+        return;
+    }
+
+    if (virtio.VirtioRngDriver.init()) |driver| {
+        virtio_rng_driver = driver;
+        console.info("VirtIO-RNG: Driver initialized", .{});
+
+        // Seed kernel PRNG with initial hardware entropy
+        var entropy: [64]u8 = undefined;
+        const bytes_read = driver.getEntropy(&entropy) catch |err| {
+            console.warn("VirtIO-RNG: Failed to read initial entropy: {}", .{err});
+            return;
+        };
+
+        if (bytes_read > 0) {
+            // Mix entropy into kernel PRNG
+            var i: usize = 0;
+            while (i + 8 <= bytes_read) : (i += 8) {
+                const val = @as(*align(1) const u64, @ptrCast(entropy[i..].ptr)).*;
+                prng.mixEntropy(val);
+            }
+            console.info("VirtIO-RNG: Seeded kernel PRNG with {d} bytes", .{bytes_read});
+        }
+    } else {
+        console.info("VirtIO-RNG: No device found", .{});
+    }
 }

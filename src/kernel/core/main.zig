@@ -386,11 +386,18 @@ export fn _start(boot_info: *BootInfo.BootInfo) callconv(.c) noreturn {
     // Set RSDP address for hardware subsystems
     init_hw.setRsdpAddress(boot_info.rsdp);
 
+    // Detect hypervisor early to enable platform-specific optimizations
+    init_hw.initHypervisor();
+
     // Initialize IOMMU before device drivers for DMA isolation
     init_hw.initIommu();
 
     // Initialize Hardware (with boot logo animation ticks)
     init_hw.initNetwork();
+    if (boot_logo_active) boot_logo_instance.tick();
+
+    // Initialize VirtIO-RNG for hardware entropy (after PCI is available)
+    init_hw.initVirtioRng();
     if (boot_logo_active) boot_logo_instance.tick();
 
     init_hw.initUsb();
@@ -422,10 +429,22 @@ export fn _start(boot_info: *BootInfo.BootInfo) callconv(.c) noreturn {
         console.info("Graphics console enabled", .{});
     }
 
-    if (init_hw.initVirtioGpu()) |driver| {
+    // Initialize Video subsystem (VirtIO-GPU, SVGA, or fallback to boot framebuffer)
+    init_hw.initVideo();
+    if (init_hw.virtio_gpu_driver) |driver| {
         graph_console = video_driver.console.Console.init(driver.device());
         console.info("VirtIO-GPU: Console switched to paravirtualized GPU", .{});
+    } else if (builtin.cpu.arch == .x86_64) {
+        // SVGA is x86_64 only (VMware-specific, uses port I/O)
+        if (init_hw.svga_driver) |driver| {
+            driver.setMode(1024, 768, 32);
+            graph_console = video_driver.console.Console.init(driver.device());
+            console.info("SVGA: Console switched to VMware graphics", .{});
+        }
     }
+
+    // Initialize Input subsystem (VMMouse probe, etc.)
+    init_hw.initInput();
 
     // Load Init Process from InitRD
     console.info("Main: Calling loadInitProcess()...", .{});

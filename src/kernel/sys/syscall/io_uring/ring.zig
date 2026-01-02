@@ -4,9 +4,19 @@
 //! Designed to be independent of the IoUringInstance struct to avoid cycles.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const uapi = @import("uapi");
 const io_ring = uapi.io_ring;
 const types = @import("types.zig");
+
+/// Architecture-independent release barrier (stores visible before subsequent ops)
+inline fn releaseBarrier() void {
+    switch (builtin.cpu.arch) {
+        .x86_64 => asm volatile ("sfence" ::: .{ .memory = true }),
+        .aarch64 => asm volatile ("dmb ishst" ::: .{ .memory = true }),
+        else => @compileError("Unsupported architecture"),
+    }
+}
 
 /// Get number of SQEs ready to submit
 pub fn sqReady(ring: *volatile types.SqRingHeader) u32 {
@@ -51,8 +61,8 @@ pub fn addCqe(
         .flags = cqe_flags,
     };
 
-    // Memory barrier before updating tail
-    asm volatile ("mfence" ::: .{ .memory = true });
+    // Release barrier ensures CQE is visible before tail update
+    releaseBarrier();
 
     ring.tail +%= 1;
     return true;

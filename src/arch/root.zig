@@ -40,25 +40,12 @@ pub const timing = arch.timing;
 pub const smp = arch.smp;
 pub const userspace = arch.userspace;
 pub const iommu = arch.iommu;
+pub const hypervisor = arch.hypervisor;
 
-// VMware hypervisor interface (x86_64 only - provides backdoor for vmmouse)
-pub const vmware = if (builtin.cpu.arch == .x86_64) arch.vmware else struct {
-    // Stub for non-x86_64 architectures
-    pub const Registers = struct {
-        eax: u32,
-        ebx: u32,
-        ecx: u32,
-        edx: u32,
-        esi: u32 = 0,
-        edi: u32 = 0,
-    };
-    pub const BACKDOOR_MAGIC: u32 = 0;
-    pub const BACKDOOR_PORT: u16 = 0;
-    pub fn detect() bool {
-        return false;
-    }
-    pub fn call(_: *Registers) void {}
-};
+// VMware hypervisor interface
+// - x86_64: Uses I/O port 0x5658 with "in eax, dx" instruction
+// - aarch64: Uses hypercall via "mrs xzr, mdccsr_el0" instruction
+pub const vmware = arch.vmware;
 
 pub fn earlyWrite(c: u8) void {
     arch.earlyWrite(c);

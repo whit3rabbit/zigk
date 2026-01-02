@@ -683,6 +683,10 @@ pub fn build(b: *std.Build) void {
     });
     virtio_module.addImport("pmm", pmm_module);
     virtio_module.addImport("hal", hal_module);
+    virtio_module.addImport("pci", pci_module);
+    virtio_module.addImport("vmm", vmm_module);
+    virtio_module.addImport("console", console_module);
+    virtio_module.addImport("prng", prng_module);
 
     // Create Video driver module
     const video_module = b.createModule(.{
@@ -1369,6 +1373,18 @@ pub fn build(b: *std.Build) void {
     syscall_ring_module.addImport("hal", hal_module);
     syscall_ring_module.addImport("user_vmm", user_vmm_module);
 
+    // Create syscall hypervisor module (VMware backdoor, hypervisor detection)
+    const syscall_hypervisor_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/sys/syscall/hw/hypervisor.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    syscall_hypervisor_module.addImport("uapi", uapi_module);
+    syscall_hypervisor_module.addImport("hal", hal_module);
+    syscall_hypervisor_module.addImport("sched", sched_module);
+    syscall_hypervisor_module.addImport("process", process_module);
+    syscall_hypervisor_module.addImport("user_mem", user_mem_module);
+
     // Create syscall fs_handlers module (mount, umount, unlink)
     const syscall_fs_handlers_module = b.createModule(.{
         .root_source_file = b.path("src/kernel/sys/syscall/fs/fs_handlers.zig"),
@@ -1417,6 +1433,7 @@ pub fn build(b: *std.Build) void {
     syscall_table_module.addImport("pci_syscall", syscall_pci_module);
     syscall_table_module.addImport("ring", syscall_ring_module);
     syscall_table_module.addImport("fs_handlers", syscall_fs_handlers_module);
+    syscall_table_module.addImport("hypervisor", syscall_hypervisor_module);
 
     // Create kernel executable
     // NOTE: red_zone must be disabled for kernel code to prevent stack corruption
@@ -1491,6 +1508,7 @@ pub fn build(b: *std.Build) void {
     kernel.root_module.addImport("vdso", vdso_module);
     kernel.root_module.addImport("kernel_iommu", kernel_iommu_module);
     kernel.root_module.addImport("dma", dma_module);
+    kernel.root_module.addImport("virtio", virtio_module);
 
     // Add architecture-specific assembly and linker script
     switch (target_arch) {
@@ -1574,6 +1592,94 @@ pub fn build(b: *std.Build) void {
     // Install httpd as ELF (required for proper ELF loading in kernel)
     const install_httpd = b.addInstallArtifact(httpd, .{});
     b.getInstallStep().dependOn(&install_httpd.step);
+
+    // Build VMware Tools Service
+    const vmware_tools_mod = b.createModule(.{
+        .root_source_file = b.path("src/user/services/vmware_tools/main.zig"),
+        .target = user_target,
+        .optimize = optimize,
+        .code_model = .small,
+    });
+    vmware_tools_mod.addImport("syscall", user_syscall_lib);
+    vmware_tools_mod.addImport("libc", user_libc_module);
+
+    const vmware_tools = b.addExecutable(.{
+        .name = "vmware_tools.elf",
+        .root_module = vmware_tools_mod,
+    });
+    vmware_tools.setLinkerScript(b.path("src/user/linker.ld"));
+    if (target_arch == .x86_64) {
+        vmware_tools.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
+    }
+
+    const install_vmware_tools = b.addInstallArtifact(vmware_tools, .{});
+    b.getInstallStep().dependOn(&install_vmware_tools.step);
+
+    // Build QEMU Guest Agent Service
+    const qemu_ga_mod = b.createModule(.{
+        .root_source_file = b.path("src/user/services/qemu_ga/main.zig"),
+        .target = user_target,
+        .optimize = optimize,
+        .code_model = .small,
+    });
+    qemu_ga_mod.addImport("syscall", user_syscall_lib);
+    qemu_ga_mod.addImport("libc", user_libc_module);
+
+    const qemu_ga = b.addExecutable(.{
+        .name = "qemu_ga.elf",
+        .root_module = qemu_ga_mod,
+    });
+    qemu_ga.setLinkerScript(b.path("src/user/linker.ld"));
+    if (target_arch == .x86_64) {
+        qemu_ga.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
+    }
+
+    const install_qemu_ga = b.addInstallArtifact(qemu_ga, .{});
+    b.getInstallStep().dependOn(&install_qemu_ga.step);
+
+    // Build VirtIO-Balloon Driver
+    const virtio_balloon_mod = b.createModule(.{
+        .root_source_file = b.path("src/user/drivers/virtio_balloon/main.zig"),
+        .target = user_target,
+        .optimize = optimize,
+        .code_model = .small,
+    });
+    virtio_balloon_mod.addImport("syscall", user_syscall_lib);
+    virtio_balloon_mod.addImport("libc", user_libc_module);
+
+    const virtio_balloon = b.addExecutable(.{
+        .name = "virtio_balloon.elf",
+        .root_module = virtio_balloon_mod,
+    });
+    virtio_balloon.setLinkerScript(b.path("src/user/linker.ld"));
+    if (target_arch == .x86_64) {
+        virtio_balloon.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
+    }
+
+    const install_virtio_balloon = b.addInstallArtifact(virtio_balloon, .{});
+    b.getInstallStep().dependOn(&install_virtio_balloon.step);
+
+    // Build VirtIO-Console Driver
+    const virtio_console_mod = b.createModule(.{
+        .root_source_file = b.path("src/user/drivers/virtio_console/main.zig"),
+        .target = user_target,
+        .optimize = optimize,
+        .code_model = .small,
+    });
+    virtio_console_mod.addImport("syscall", user_syscall_lib);
+    virtio_console_mod.addImport("libc", user_libc_module);
+
+    const virtio_console = b.addExecutable(.{
+        .name = "virtio_console.elf",
+        .root_module = virtio_console_mod,
+    });
+    virtio_console.setLinkerScript(b.path("src/user/linker.ld"));
+    if (target_arch == .x86_64) {
+        virtio_console.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
+    }
+
+    const install_virtio_console = b.addInstallArtifact(virtio_console, .{});
+    b.getInstallStep().dependOn(&install_virtio_console.step);
 
     // Build Doom
     // NOTE: Doom uses libc printf/sscanf. On aarch64, we use C shims to work around

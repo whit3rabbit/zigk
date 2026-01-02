@@ -8,7 +8,7 @@
 //!   - Immediate coalescing on `free()` to prevent fragmentation
 //!   - First-fit allocation strategy (simple, good cache locality)
 //!   - Minimum allocation size: 32 bytes (header + footer + min payload)
-//!   - Alignment: 16 bytes (required for SSE and cache lines)
+//!   - Alignment: 64 bytes (required for XSAVE/AVX-512 and cache lines)
 //!   - Thread-safe via Spinlock (protects all global state)
 //!
 //! Memory Layout:
@@ -101,8 +101,8 @@ else
     };
 
 // Constants
-pub const ALIGNMENT: usize = 16; // 16-byte alignment for SSE compatibility
-pub const MIN_BLOCK_SIZE: usize = 64; // Minimum block size (32 hdr + 16 payload + 16 ftr)
+pub const ALIGNMENT: usize = 64; // 64-byte alignment for XSAVE/AVX-512 compatibility
+pub const MIN_BLOCK_SIZE: usize = 128; // Minimum block size (64 hdr + 48 min payload + 16 ftr)
 
 /// Block header stored at the start of each block.
 ///
@@ -121,6 +121,11 @@ pub const BlockHeader = extern struct {
     // Magic number for integrity verification
     // Repurposing padding field (was 8 bytes)
     magic: usize = ALLOCATOR_MAGIC,
+
+    // Padding to make BlockHeader exactly 64 bytes
+    // This ensures payload starts at a 64-byte aligned address when the block
+    // itself is 64-byte aligned, satisfying XSAVE/AVX-512 alignment requirements
+    _padding: [32]u8 = [_]u8{0} ** 32,
 
     // "HEAPZIGK" in hex
     pub const ALLOCATOR_MAGIC: usize = 0x48454150_5A49474B;
@@ -221,9 +226,10 @@ pub const BlockHeader = extern struct {
         return prev_block;
     }
 
-    // 4 usize fields = 32 bytes on x86_64
+    // 4 usize fields + 32-byte padding = 64 bytes on x86_64
+    // 64-byte header ensures payload starts at 64-byte aligned address
     comptime {
-        if (@sizeOf(BlockHeader) != 32) @compileError("BlockHeader must be 32 bytes");
+        if (@sizeOf(BlockHeader) != 64) @compileError("BlockHeader must be 64 bytes");
         if (@alignOf(BlockHeader) != 8) @compileError("BlockHeader must have 8-byte alignment");
     }
 };
@@ -409,18 +415,20 @@ fn allocFromFreeList(size: usize) ?[]u8 {
 
     // Calculate required block size (header + payload + footer, aligned)
     // Using checked arithmetic to detect overflow
-    const payload_size = std.mem.alignForward(usize, size, ALIGNMENT);
-    const overhead = @sizeOf(BlockHeader) + @sizeOf(BlockFooter);
+    const overhead = @sizeOf(BlockHeader) + @sizeOf(BlockFooter); // 64 + 16 = 80
 
-    // Check for overflow: payload_size + overhead must not wrap
-    if (payload_size > std.math.maxInt(usize) - overhead) {
+    // Check for overflow: size + overhead must not wrap
+    if (size > std.math.maxInt(usize) - overhead) {
         if (is_freestanding and config.debug_memory) {
             console.warn("Heap: Size overflow detected for allocation of {d} bytes", .{size});
         }
         return null;
     }
 
-    const required_size = payload_size + overhead;
+    // Total block size must be 64-byte aligned so that when we split blocks,
+    // the next block starts at a 64-byte aligned address. This ensures all
+    // payloads are 64-byte aligned (since header is 64 bytes).
+    const required_size = std.mem.alignForward(usize, size + overhead, ALIGNMENT);
     const min_size = @max(required_size, MIN_BLOCK_SIZE);
 
     // First-fit search through free list
