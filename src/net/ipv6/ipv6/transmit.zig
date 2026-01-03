@@ -4,10 +4,10 @@
 // Implements RFC 8200 (IPv6 Specification).
 //
 // Key Differences from IPv4:
-// - Fixed 40-byte header (no options in base header)
+// - Fixed 40-byte header (no options in base header) (RFC 8200 Section 3)
 // - No header checksum (relies on L2 and transport checksums)
-// - Fragmentation only at source, not by intermediate routers
-// - Uses NDP for address resolution (not ARP)
+// - Fragmentation only at source, not by intermediate routers (RFC 8200 Section 4.5)
+// - Uses NDP for address resolution (not ARP) (RFC 4861)
 
 const std = @import("std");
 const packet = @import("../../core/packet.zig");
@@ -27,7 +27,7 @@ pub const IPV6_HEADER_SIZE: usize = types.HEADER_SIZE;
 /// Maximum IPv6 payload size (64KB - 1, can be larger with Jumbograms)
 const MAX_IPV6_PAYLOAD: usize = 65535;
 
-/// Build an IPv6 packet header.
+/// Build an IPv6 packet header (RFC 8200 Section 3).
 /// Assumes Ethernet header space is already reserved.
 ///
 /// Sets up:
@@ -109,7 +109,7 @@ pub fn buildPacketWithOptions(
 }
 
 /// Select the best source address for a given destination.
-/// Per RFC 6724, we prefer:
+/// Per RFC 6724 (Default Address Selection), we prefer:
 /// - Link-local source for link-local destination
 /// - Global source for global destination
 pub fn selectSourceAddress(iface: *const Interface, dst_addr: [16]u8) ?[16]u8 {
@@ -165,7 +165,7 @@ pub fn sendPacket(iface: *Interface, pkt: *PacketBuffer, dst_addr: [16]u8) bool 
     var dst_mac: [6]u8 = undefined;
 
     if (types.isMulticast(dst_addr)) {
-        // IPv6 multicast to Ethernet multicast (RFC 2464)
+        // IPv6 multicast to Ethernet multicast (RFC 2464 Section 7)
         // 33:33:xx:xx:xx:xx (last 32 bits of IPv6 address)
         dst_mac[0] = 0x33;
         dst_mac[1] = 0x33;
@@ -234,6 +234,7 @@ fn sendLoopback(iface: *Interface, pkt: *PacketBuffer) bool {
 
 /// Send an IPv6 packet with fragmentation support.
 /// Fragments packets larger than Path MTU using Fragment extension header.
+/// RFC 8200 Section 4.5: Fragment Header
 ///
 /// Note: This is more complex than IPv4 fragmentation because:
 /// - Fragment header is an extension header, not part of base header

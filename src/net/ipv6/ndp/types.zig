@@ -2,6 +2,9 @@
 //
 // Implements RFC 4861 packet structures and constants.
 //
+// References:
+// - RFC 4861: Neighbor Discovery for IP version 6 (IPv6)
+//
 // NDP message types (ICMPv6):
 // - Router Solicitation (133)
 // - Router Advertisement (134)
@@ -25,11 +28,11 @@ pub const TYPE_REDIRECT: u8 = 137;
 // NDP Option Types (RFC 4861 Section 4.6)
 // =============================================================================
 
-pub const OPT_SOURCE_LINK_ADDR: u8 = 1;
-pub const OPT_TARGET_LINK_ADDR: u8 = 2;
-pub const OPT_PREFIX_INFO: u8 = 3;
-pub const OPT_REDIRECTED_HEADER: u8 = 4;
-pub const OPT_MTU: u8 = 5;
+pub const OPT_SOURCE_LINK_ADDR: u8 = 1; // RFC 4861 4.6.1
+pub const OPT_TARGET_LINK_ADDR: u8 = 2; // RFC 4861 4.6.1
+pub const OPT_PREFIX_INFO: u8 = 3; // RFC 4861 4.6.2
+pub const OPT_REDIRECTED_HEADER: u8 = 4; // RFC 4861 4.6.3
+pub const OPT_MTU: u8 = 5; // RFC 4861 4.6.4
 
 // =============================================================================
 // NDP Constants
