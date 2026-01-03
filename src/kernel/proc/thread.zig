@@ -273,6 +273,12 @@ fn allocateTid() u64 {
 /// Sets up the initial stack frame to simulate a return from interrupt into `entry`.
 /// The thread is added to the global list but not the ready queue (use `sched.addThread`).
 ///
+/// This function handles:
+/// - Allocating a unique TID.
+/// - Allocating a kernel stack (with guard page).
+/// - Allocating an FPU state buffer (dynamically sized).
+/// - Creating the initial stack frame for `iretq`.
+///
 /// Arguments:
 ///   entry: Function to execute (must not return)
 ///   options: Configuration options (name, stack size, etc.)
@@ -432,6 +438,12 @@ pub fn createKernelThread(
 ///
 /// Similar to kernel thread, but sets up the stack for a return to Ring 3 (User Mode).
 /// Requires a valid CR3 (address space) and user stack pointer.
+///
+/// This function handles:
+/// - Allocating a unique TID.
+/// - Allocating a kernel stack for syscalls/interrupts.
+/// - Setting up the `iretq` frame to jump to user code.
+/// - Initializing FPU state with safe defaults (MXCSR/FCW).
 ///
 /// Arguments:
 ///   entry: User virtual address of entry point

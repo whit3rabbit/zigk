@@ -241,6 +241,8 @@ fn pipeRead(fd: *fd_mod.FileDescriptor, buf: []u8) isize {
         }
 
         // Wait for data - SMP-safe lost wakeup prevention
+        // We must register as a blocked reader before releasing the lock to ensure
+        // writers see us.
         pipe.blocked_readers = sched.getCurrentThread();
 
         // Clear the woken flag before releasing lock.
@@ -250,12 +252,14 @@ fn pipeRead(fd: *fd_mod.FileDescriptor, buf: []u8) isize {
         // Disable interrupts to minimize the gap between lock release and block().
         // On single core this prevents the race entirely.
         // On SMP, we use the woken flag as a secondary check.
+        // This is a critical section for scheduler interaction.
         const interrupt_state = hal.cpu.disableInterruptsSaveFlags();
         held.release();
 
         // SECURITY: Check if woken flag was set before we block.
         // This catches the SMP race where unblock() happens between
         // release() and block(). If woken, skip the block entirely.
+        // This pattern prevents "lost wakeups" where a thread sleeps forever.
         if (!pipe.reader_woken.load(.acquire)) {
             sched.block();
         }
@@ -360,6 +364,8 @@ fn pipeWrite(fd: *fd_mod.FileDescriptor, buf: []const u8) isize {
         }
 
         // Wait for space - SMP-safe lost wakeup prevention
+        // We must register as a blocked writer before releasing the lock to ensure
+        // readers see us.
         pipe.blocked_writers = sched.getCurrentThread();
 
         // Clear the woken flag before releasing lock.
@@ -367,12 +373,15 @@ fn pipeWrite(fd: *fd_mod.FileDescriptor, buf: []const u8) isize {
         pipe.writer_woken.store(false, .release);
 
         // Disable interrupts to minimize the gap between lock release and block().
+        // This ensures that we don't get preempted between releasing the lock
+        // and calling block(), which would widen the race window.
         const interrupt_state = hal.cpu.disableInterruptsSaveFlags();
         held.release();
 
         // SECURITY: Check if woken flag was set before we block.
         // This catches the SMP race where unblock() happens between
         // release() and block(). If woken, skip the block entirely.
+        // This pattern prevents "lost wakeups" where a thread sleeps forever.
         if (!pipe.writer_woken.load(.acquire)) {
             sched.block();
         }
