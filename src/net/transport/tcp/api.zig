@@ -3,21 +3,23 @@ const types = @import("types.zig");
 const state = @import("state.zig");
 const tx = @import("tx/root.zig");
 const errors = @import("errors.zig");
+const addr_mod = @import("../../core/addr.zig");
 
+const IpAddr = addr_mod.IpAddr;
 const Tcb = types.Tcb;
 const TcpError = errors.TcpError;
 
-/// Create a listening TCB (called from sys_listen)
-pub fn listen(local_ip: u32, local_port: u16, socket_idx: usize) TcpError!*Tcb {
+/// Create a listening TCB (called from sys_listen) - polymorphic version
+pub fn listenIp(local_addr: IpAddr, local_port: u16, socket_idx: usize) TcpError!*Tcb {
     const held = state.lock.acquire();
     defer held.release();
 
     const tcb = state.allocateTcb() orelse return TcpError.NoResources;
 
     // Initialize TCB (newly allocated, no need for mutex)
-    tcb.local_ip = local_ip;
+    tcb.local_addr = local_addr;
     tcb.local_port = local_port;
-    tcb.remote_ip = 0;
+    tcb.remote_addr = .none;
     tcb.remote_port = 0;
     tcb.state = .Listen;
     tcb.parent_socket = socket_idx;
@@ -30,26 +32,31 @@ pub fn listen(local_ip: u32, local_port: u16, socket_idx: usize) TcpError!*Tcb {
     return tcb;
 }
 
-/// Initiate connection (called from sys_connect)
-pub fn connect(local_ip: u32, local_port: u16, remote_ip: u32, remote_port: u16) TcpError!*Tcb {
+/// Create a listening TCB (called from sys_listen) - IPv4 wrapper
+pub fn listen(local_ip: u32, local_port: u16, socket_idx: usize) TcpError!*Tcb {
+    return listenIp(IpAddr{ .v4 = local_ip }, local_port, socket_idx);
+}
+
+/// Initiate connection (called from sys_connect) - polymorphic version
+pub fn connectIp(local_addr: IpAddr, local_port: u16, remote_addr: IpAddr, remote_port: u16) TcpError!*Tcb {
     const held = state.lock.acquire();
     defer held.release();
 
     // Check for existing connection
-    if (state.findTcb(local_ip, local_port, remote_ip, remote_port) != null) {
+    if (state.findTcbIp(local_addr, local_port, remote_addr, remote_port) != null) {
         return TcpError.AlreadyConnected;
     }
 
     const tcb = state.allocateTcb() orelse return TcpError.NoResources;
 
     // Initialize TCB
-    tcb.local_ip = local_ip;
+    tcb.local_addr = local_addr;
     tcb.local_port = local_port;
-    tcb.remote_ip = remote_ip;
+    tcb.remote_addr = remote_addr;
     tcb.remote_port = remote_port;
 
-    // Generate ISN and initialize sequence numbers
-    tcb.iss = state.generateIsn(tcb.local_ip, tcb.local_port, tcb.remote_ip, tcb.remote_port);
+    // Generate ISN and initialize sequence numbers (polymorphic)
+    tcb.iss = state.generateIsnIp(local_addr, local_port, remote_addr, remote_port);
     tcb.snd_nxt = tcb.iss +% 1;
     tcb.snd_una = tcb.iss;
 
@@ -57,9 +64,7 @@ pub fn connect(local_ip: u32, local_port: u16, remote_ip: u32, remote_port: u16)
 
     state.insertTcbIntoHash(tcb);
 
-    // Send SYN (requires valid TCB)
-    // We hold state.lock, but sendSyn might access TCB fields.
-    // It's safe since no one else can see TCB yet (except rx looking up hash, but we hold state.lock)
+    // Send SYN (requires valid TCB) - sendSyn auto-dispatches to IPv6 if needed
     if (!tx.sendSyn(tcb)) {
         state.freeTcb(tcb);
         return TcpError.NetworkError;
@@ -68,6 +73,11 @@ pub fn connect(local_ip: u32, local_port: u16, remote_ip: u32, remote_port: u16)
     tcb.retrans_timer = 1; // Start retransmit timer
 
     return tcb;
+}
+
+/// Initiate connection (called from sys_connect) - IPv4 wrapper
+pub fn connect(local_ip: u32, local_port: u16, remote_ip: u32, remote_port: u16) TcpError!*Tcb {
+    return connectIp(IpAddr{ .v4 = local_ip }, local_port, IpAddr{ .v4 = remote_ip }, remote_port);
 }
 
 /// Close a connection (called from socket close)

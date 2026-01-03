@@ -51,7 +51,9 @@ pub const processPacket = rx.processPacket;
 
 // Socket API surface
 pub const listen = api.listen;
+pub const listenIp = api.listenIp;
 pub const connect = api.connect;
+pub const connectIp = api.connectIp;
 pub const close = api.close;
 pub const sendFinPacket = api.sendFinPacket;
 pub const send = api.send;

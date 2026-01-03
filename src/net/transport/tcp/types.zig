@@ -1,5 +1,7 @@
 const c = @import("constants.zig");
 const sync = @import("sync");
+const addr_mod = @import("../../core/addr.zig");
+pub const IpAddr = addr_mod.IpAddr;
 
 // TCP header (20 bytes minimum, options may follow). All multi-byte fields are
 // in network byte order. Kept here to preserve the original documentation
@@ -122,12 +124,12 @@ pub const OooBlock = struct {
 
 /// TCP Control Block - per-connection state
 pub const Tcb = struct {
-    // Connection identity (4-tuple)
-    local_ip: u32,
+    // Connection identity (4-tuple) - supports IPv4 and IPv6
+    local_addr: IpAddr,
     local_port: u16,
-    remote_ip: u32,
+    remote_addr: IpAddr,
     remote_port: u16,
-    
+
     // Lock protecting this TCB
     mutex: sync.Spinlock,
 
@@ -244,9 +246,9 @@ pub const Tcb = struct {
 
     pub fn init() Self {
         return Self{
-            .local_ip = 0,
+            .local_addr = .none,
             .local_port = 0,
-            .remote_ip = 0,
+            .remote_addr = .none,
             .remote_port = 0,
             .mutex = .{},
             .state = .Closed,
@@ -366,6 +368,32 @@ pub const Tcb = struct {
     /// Reset TCB to initial state
     pub fn reset(self: *Self) void {
         self.* = Self.init();
+    }
+
+    /// Get local IPv4 address (returns 0 if not IPv4)
+    pub fn getLocalIpV4(self: *const Self) u32 {
+        return switch (self.local_addr) {
+            .v4 => |ip| ip,
+            else => 0,
+        };
+    }
+
+    /// Get remote IPv4 address (returns 0 if not IPv4)
+    pub fn getRemoteIpV4(self: *const Self) u32 {
+        return switch (self.remote_addr) {
+            .v4 => |ip| ip,
+            else => 0,
+        };
+    }
+
+    /// Check if this is an IPv4 connection
+    pub fn isIpv4(self: *const Self) bool {
+        return self.local_addr.isV4() and self.remote_addr.isV4();
+    }
+
+    /// Check if this is an IPv6 connection
+    pub fn isIpv6(self: *const Self) bool {
+        return self.local_addr.isV6() and self.remote_addr.isV6();
     }
 
     /// Calculate bytes available in send buffer

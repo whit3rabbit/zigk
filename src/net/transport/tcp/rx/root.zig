@@ -7,11 +7,14 @@ const tx = @import("../tx/root.zig");
 const socket = @import("../../socket.zig");
 
 const packet = @import("../../../core/packet.zig");
+const checksum = @import("../../../core/checksum.zig");
+const addr_mod = @import("../../../core/addr.zig");
 const Interface = @import("../../../core/interface.zig").Interface;
 const PacketBuffer = packet.PacketBuffer;
 const TcpHeader = types.TcpHeader;
 const Tcb = types.Tcb;
 const RxAction = types.RxAction;
+const IpAddr = types.IpAddr;
 
 pub const listen = @import("listen.zig");
 pub const syn = @import("syn.zig");
@@ -124,6 +127,105 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
 
     state_held.release();
     _ = tx.sendRstForPacket(iface, pkt, tcp_hdr);
+    return true;
+}
+
+/// TCP Input Processing Entry Point for IPv6
+pub fn processPacket6(iface: *Interface, pkt: *PacketBuffer) bool {
+    // Validate minimum TCP header size
+    if (pkt.len < pkt.transport_offset + c.TCP_HEADER_SIZE) {
+        return false;
+    }
+
+    const tcp_hdr: *TcpHeader = @ptrCast(@alignCast(&pkt.data[pkt.transport_offset]));
+    const ip6_hdr = packet.getIpv6Header(pkt.data, pkt.ip_offset) orelse return false;
+
+    // Validate TCP data offset
+    const data_offset = tcp_hdr.getDataOffset();
+    if (data_offset < c.TCP_HEADER_SIZE) {
+        return false;
+    }
+
+    // Get payload length from IPv6 header (includes TCP header + data)
+    const payload_len = ip6_hdr.getPayloadLength();
+    if (pkt.transport_offset + payload_len > pkt.len) {
+        return false;
+    }
+
+    // Verify TCP checksum with IPv6 pseudo-header
+    const tcp_segment = pkt.data[pkt.transport_offset..][0..payload_len];
+    const calc_checksum = checksum.tcpChecksum6(ip6_hdr.src_addr, ip6_hdr.dst_addr, tcp_segment);
+
+    if (calc_checksum != 0xFFFF) {
+        return false; // Bad checksum
+    }
+
+    // Don't accept TCP on broadcast/multicast (multicast check for IPv6)
+    if (pkt.is_broadcast or pkt.is_multicast) {
+        return false;
+    }
+
+    const local_addr = IpAddr{ .v6 = ip6_hdr.dst_addr };
+    const local_port = tcp_hdr.getDstPort();
+    const remote_addr = IpAddr{ .v6 = ip6_hdr.src_addr };
+    const remote_port = tcp_hdr.getSrcPort();
+
+    var state_held = state.lock.acquire();
+
+    // Try established connection first
+    if (state.findTcbIp(local_addr, local_port, remote_addr, remote_port)) |tcb| {
+        if (tcb.closing) {
+            state_held.release();
+            return false;
+        }
+
+        const tcb_held = tcb.mutex.acquire();
+        const expected_generation = tcb.generation;
+
+        if (tcb.state == .SynReceived) {
+            const is_established = syn.processSynReceivedLocked(tcb, tcp_hdr);
+            tcb_held.release();
+            state_held.release();
+
+            if (!is_established) {
+                return true;
+            }
+
+            return handleSynReceivedEstablished(tcb);
+        }
+
+        state_held.release();
+
+        const action = processEstablishedPacket(tcb, pkt, tcp_hdr);
+        tcb_held.release();
+
+        if (action == .FreeTcb) {
+            state_held = state.lock.acquire();
+            if (state.isTcbValid(tcb) and tcb.generation == expected_generation) {
+                state.freeTcb(tcb);
+            }
+            state_held.release();
+        }
+
+        return true;
+    }
+
+    // Try listening socket with IPv6 address
+    if (state.findListeningTcbIp(local_port, local_addr)) |listen_tcb| {
+        if (listen_tcb.closing) {
+            state_held.release();
+            return false;
+        }
+
+        const listen_held = listen_tcb.mutex.acquire();
+        state_held.release();
+        defer listen_held.release();
+
+        return listen.processListenPacket6(iface, listen_tcb, pkt, tcp_hdr);
+    }
+
+    state_held.release();
+    _ = tx.sendRstForPacket6(iface, pkt, tcp_hdr);
     return true;
 }
 

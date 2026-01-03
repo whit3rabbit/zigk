@@ -64,6 +64,7 @@ pub const close = root.close;
 pub const sendto = root.sendto;
 pub const recvfrom = root.recvfrom;
 pub const deliverUdpPacket = root.deliverUdpPacket;
+pub const deliverUdpPacket6 = root.deliverUdpPacket6;
 
 // TCP path
 pub const listen = root.listen;

@@ -70,6 +70,7 @@ pub const close = lifecycle.close;
 pub const sendto = udp_api.sendto;
 pub const recvfrom = udp_api.recvfrom;
 pub const deliverUdpPacket = udp_api.deliverUdpPacket;
+pub const deliverUdpPacket6 = udp_api.deliverUdpPacket6;
 
 // TCP path
 pub const listen = tcp_api.listen;

@@ -37,8 +37,8 @@ pub var net_interface: net.Interface = undefined;
 pub var pci_devices: ?*const pci.DeviceList = null;
 pub var pci_ecam: ?pci.Ecam = null;
 pub var virtio_gpu_driver: ?*video_driver.VirtioGpuDriver = null;
-// SVGA driver is x86_64 only (VMware-specific, uses port I/O)
-pub var svga_driver: if (builtin.cpu.arch == .x86_64) ?*video_driver.SvgaDriver else ?*void = null;
+// SVGA driver supports x86_64 (port I/O) and aarch64 (MMIO)
+pub var svga_driver: if (builtin.cpu.arch == .x86_64 or builtin.cpu.arch == .aarch64) ?*video_driver.SvgaDriver else ?*void = null;
 pub var vmmouse_enabled: bool = false;
 pub var virtio_rng_driver: ?*virtio.VirtioRngDriver = null;
 
@@ -47,6 +47,16 @@ pub var detected_hypervisor: hal.hypervisor.HypervisorType = .none;
 
 /// Whether IOMMU is available and enabled
 pub var iommu_enabled: bool = false;
+
+/// Callback for VMMouse to update SVGA hardware cursor position
+/// Called when VMMouse reports absolute cursor coordinates
+fn svgaCursorCallback(x: u32, y: u32) void {
+    if (builtin.cpu.arch == .x86_64 or builtin.cpu.arch == .aarch64) {
+        if (svga_driver) |driver| {
+            driver.getCursor().setPosition(x, y);
+        }
+    }
+}
 
 /// RSDP address from boot info (set by main.zig during kernel init)
 var rsdp_address: u64 = 0;
@@ -644,8 +654,8 @@ pub fn initVideo() void {
         return;
     }
 
-    // Try VMware SVGA II (x86_64 only - uses port I/O)
-    if (builtin.cpu.arch == .x86_64) {
+    // Try VMware SVGA II (x86_64: port I/O, aarch64: MMIO)
+    if (builtin.cpu.arch == .x86_64 or builtin.cpu.arch == .aarch64) {
         if (video_driver.SvgaDriver.init()) |driver| {
             svga_driver = driver;
             console.info("Video: Using VMware SVGA II driver", .{});
@@ -688,6 +698,18 @@ pub fn initInput() void {
         // Set up polling (VMMouse needs periodic polling, not IRQ-driven)
         // The poll function should be called from a timer or main loop
         // For now, we'll rely on the scheduler tick callback or explicit polling
+
+        // Integrate with SVGA hardware cursor if available (x86_64 and aarch64)
+        if (builtin.cpu.arch == .x86_64 or builtin.cpu.arch == .aarch64) {
+            if (svga_driver) |driver| {
+                // Set screen size for coordinate scaling
+                vmmouse_driver.setScreenSize(driver.width, driver.height);
+
+                // Register cursor position callback for hardware cursor
+                input.vmmouse.registerCursorCallback(&svgaCursorCallback);
+                console.info("Input: VMMouse integrated with SVGA hardware cursor", .{});
+            }
+        }
     } else {
         console.info("Input: VMMouse not available, using PS/2 mouse", .{});
     }

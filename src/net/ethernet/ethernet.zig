@@ -22,8 +22,9 @@ const PacketBuffer = packet.PacketBuffer;
 const EthernetHeader = packet.EthernetHeader;
 const Interface = interface.Interface;
 
-// Import protocol handlers (will be implemented)
+// Import protocol handlers
 const ipv4 = @import("../ipv4/root.zig").ipv4;
+const ipv6 = @import("../ipv6/root.zig").ipv6;
 const arp = @import("../ipv4/arp/root.zig");
 
 /// Ethertype values in host byte order
@@ -74,6 +75,9 @@ pub fn processFrame(iface: *Interface, pkt: *PacketBuffer) bool {
     switch (pkt.ethertype) {
         ETHERTYPE_IPV4 => {
             return ipv4.processPacket(iface, pkt);
+        },
+        ETHERTYPE_IPV6 => {
+            return ipv6.processPacket(iface, pkt);
         },
         ETHERTYPE_ARP => {
             return arp.processPacket(iface, pkt);

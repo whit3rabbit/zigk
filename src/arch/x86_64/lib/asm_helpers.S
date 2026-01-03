@@ -886,10 +886,13 @@ isr_stub_no_error 254
 isr_stub_no_error 255
 
 # ============================================================================
-# VMware Backdoor Call
+# VMware Hypercall
 # ============================================================================
-# Performs a VMware backdoor call using the special I/O instruction sequence.
+# Performs a VMware hypercall using the special I/O instruction sequence.
 # The VMware hypervisor traps "in eax, dx" with magic values in registers.
+#
+# Note: This interface is historically called "backdoor" in VMware documentation.
+# We use "hypercall" following modern Linux 6.11+ convention.
 #
 # Calling convention (System V AMD64 ABI):
 #   rdi = pointer to Registers struct:
@@ -902,10 +905,10 @@ isr_stub_no_error 255
 #       u32 edi;  // offset 20
 #     };
 #
-# void _asm_vmware_backdoor_call(Registers* regs)
-.global _asm_vmware_backdoor_call
-.type _asm_vmware_backdoor_call, @function
-_asm_vmware_backdoor_call:
+# void _asm_vmware_hypercall(Registers* regs)
+.global _asm_vmware_hypercall
+.type _asm_vmware_hypercall, @function
+_asm_vmware_hypercall:
     # Save callee-saved registers we'll clobber
     push %rbx
     push %r12
@@ -921,7 +924,7 @@ _asm_vmware_backdoor_call:
     mov 16(%r12), %esi    # esi
     mov 20(%r12), %edi    # edi
 
-    # Force DX to VMware backdoor port (0x5658 = "VX")
+    # Force DX to VMware hypercall port (0x5658 = "VX")
     mov $0x5658, %dx
 
     # Execute the magic instruction - hypervisor traps this

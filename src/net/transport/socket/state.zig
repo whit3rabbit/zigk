@@ -270,6 +270,37 @@ pub fn findUdpSocket(port: u16) ?*types.Socket {
     return udp_sockets[port];
 }
 
+/// Find an IPv6 UDP socket matching port and optionally address
+/// Uses O(n) scan since IPv6 sockets aren't port-indexed
+pub fn findUdpSocket6(port: u16, dst_addr: [16]u8) ?*types.Socket {
+    var wildcard_match: ?*types.Socket = null;
+
+    // Search through socket table for AF_INET6 UDP sockets
+    for (socket_table.items) |maybe_sock| {
+        const sock = maybe_sock orelse continue;
+        if (!sock.allocated) continue;
+        if (sock.family != types.AF_INET6) continue;
+        if (sock.sock_type != types.SOCK_DGRAM) continue;
+        if (sock.local_port != port) continue;
+
+        // Check address match
+        switch (sock.local_addr) {
+            .none => {
+                // in6addr_any equivalent - matches any address
+                wildcard_match = sock;
+            },
+            .v6 => |bound_addr| {
+                if (std.mem.eql(u8, &bound_addr, &dst_addr)) {
+                    return sock; // Exact match takes priority
+                }
+            },
+            else => {}, // v4 won't match IPv6 packets
+        }
+    }
+
+    return wildcard_match;
+}
+
 pub fn registerUdpSocket(sock: *types.Socket) void {
     if (sock.local_port != 0 and sock.sock_type == types.SOCK_DGRAM) {
         udp_sockets[sock.local_port] = sock;

@@ -8,13 +8,20 @@ const ipv4 = @import("../../../ipv4/root.zig").ipv4;
 const ethernet = @import("../../../ethernet/ethernet.zig");
 const arp = @import("../../../ipv4/root.zig").arp;
 
+// IPv6 imports for dual-stack support
+const ipv6_mod = @import("../../../ipv6/root.zig");
+const ipv6_types = ipv6_mod.ipv6.types;
+const ndp = ipv6_mod.ndp;
+const addr_mod = @import("../../../core/addr.zig");
+
 const PacketBuffer = packet.PacketBuffer;
 const Ipv4Header = packet.Ipv4Header;
+const Ipv6Header = packet.Ipv6Header;
 const EthernetHeader = packet.EthernetHeader;
 const TcpHeader = types.TcpHeader;
 const Tcb = types.Tcb;
 
-/// Send a TCP segment
+/// Send a TCP segment (dispatches to IPv4 or IPv6 based on TCB address family)
 pub fn sendSegment(
     tcb: *Tcb,
     flags: u16,
@@ -22,10 +29,15 @@ pub fn sendSegment(
     ack: u32,
     data: ?[]const u8,
 ) bool {
+    // Branch based on address family
+    if (tcb.isIpv6()) {
+        return sendSegment6(tcb, flags, seq, ack, data);
+    }
+
     const iface = state.global_iface orelse return false;
 
     // Resolve destination MAC (single atomic lookup to avoid TOCTOU race)
-    const next_hop = iface.getGateway(tcb.remote_ip);
+    const next_hop = iface.getGateway(tcb.getRemoteIpV4());
     const resolved_mac = arp.resolve(next_hop);
     const have_mac = resolved_mac != null;
     var dst_mac = resolved_mac orelse [_]u8{ 0, 0, 0, 0, 0, 0 };
@@ -63,8 +75,8 @@ pub fn sendSegment(
     ip.ttl = ipv4.DEFAULT_TTL;
     ip.protocol = ipv4.PROTO_TCP;
     ip.checksum = 0;
-    ip.setSrcIp(tcb.local_ip);
-    ip.setDstIp(tcb.remote_ip);
+    ip.setSrcIp(tcb.getLocalIpV4());
+    ip.setDstIp(tcb.getRemoteIpV4());
     ip.checksum = checksum.ipChecksum(buf[packet.ETH_HEADER_SIZE..][0..packet.IP_HEADER_SIZE]);
 
     // Build TCP header
@@ -104,4 +116,112 @@ pub fn sendSegment(
         }
         return true;
     }
+}
+
+/// Send a TCP segment over IPv6
+pub fn sendSegment6(
+    tcb: *Tcb,
+    flags: u16,
+    seq: u32,
+    ack: u32,
+    data: ?[]const u8,
+) bool {
+    const iface = state.global_iface orelse return false;
+
+    // Extract IPv6 addresses from TCB
+    const local_v6 = switch (tcb.local_addr) {
+        .v6 => |addr| addr,
+        else => return false,
+    };
+    const remote_v6 = switch (tcb.remote_addr) {
+        .v6 => |addr| addr,
+        else => return false,
+    };
+
+    // Resolve destination MAC via NDP
+    var dst_mac: [6]u8 = undefined;
+    var have_mac = false;
+
+    if (ipv6_types.isMulticast(remote_v6)) {
+        // Multicast to Ethernet mapping (33:33:xx:xx:xx:xx)
+        dst_mac = addr_mod.ipv6MulticastToMac(remote_v6);
+        have_mac = true;
+    } else {
+        // Unicast: Resolve via NDP
+        // Determine next hop - use gateway if not link-local
+        const next_hop = if (ipv6_types.isLinkLocal(remote_v6))
+            remote_v6
+        else if (iface.getIpv6Gateway(remote_v6)) |gw|
+            gw
+        else
+            remote_v6;
+
+        if (ndp.cache.lookup(next_hop)) |mac| {
+            dst_mac = mac;
+            have_mac = true;
+        } else {
+            // Need NDP resolution - trigger NS and let retransmission handle it
+            _ = ndp.sendNeighborSolicitation(iface, next_hop);
+            return false;
+        }
+    }
+
+    // Calculate sizes with validation
+    const tcp_data_len: usize = if (data) |d| blk: {
+        if (d.len > c.MAX_TCP_PAYLOAD) return false;
+        break :blk d.len;
+    } else 0;
+    const tcp_len = c.TCP_HEADER_SIZE + tcp_data_len;
+    // IPv6 payload length field is 16-bit (max 65535)
+    if (tcp_len > 65535) return false;
+    const ipv6_len = packet.IPV6_HEADER_SIZE + tcp_len;
+    const total_len = packet.ETH_HEADER_SIZE + ipv6_len;
+
+    // Use static buffer pool
+    const buf = state.allocTxBuffer() orelse return false;
+    defer state.freeTxBuffer(buf);
+
+    if (total_len > buf.len) return false;
+
+    // Build Ethernet header
+    const eth: *EthernetHeader = @ptrCast(@alignCast(&buf[0]));
+    @memcpy(&eth.dst_mac, &dst_mac);
+    @memcpy(&eth.src_mac, &iface.mac_addr);
+    eth.setEthertype(ethernet.ETHERTYPE_IPV6);
+
+    // Build IPv6 header
+    const ip6: *Ipv6Header = @ptrCast(@alignCast(&buf[packet.ETH_HEADER_SIZE]));
+    ip6.setVersionTcFlow(6, tcb.tos, 0);
+    ip6.setPayloadLength(@intCast(tcp_len));
+    ip6.next_header = ipv6_types.PROTO_TCP;
+    ip6.hop_limit = ipv6_types.DEFAULT_HOP_LIMIT;
+    ip6.src_addr = local_v6;
+    ip6.dst_addr = remote_v6;
+
+    // Build TCP header
+    const tcp_offset = packet.ETH_HEADER_SIZE + packet.IPV6_HEADER_SIZE;
+    const tcp: *TcpHeader = @ptrCast(@alignCast(&buf[tcp_offset]));
+    tcp.setSrcPort(tcb.local_port);
+    tcp.setDstPort(tcb.remote_port);
+    tcp.setSeqNum(seq);
+    tcp.setAckNum(ack);
+    tcp.setDataOffsetFlags(5, flags);
+    tcp.setWindow(tcb.currentRecvWindow());
+    tcp.checksum = 0;
+    tcp.urgent_ptr = 0;
+
+    // Copy payload data
+    if (data) |d| {
+        @memcpy(buf[tcp_offset + c.TCP_HEADER_SIZE ..][0..d.len], d);
+    }
+
+    // Calculate TCP checksum with IPv6 pseudo-header
+    const tcp_segment = buf[tcp_offset..][0..tcp_len];
+    tcp.checksum = checksum.tcpChecksum6(local_v6, remote_v6, tcp_segment);
+
+    // Transmit
+    if (have_mac) {
+        return iface.transmit(buf[0..total_len]);
+    }
+    return false;
 }

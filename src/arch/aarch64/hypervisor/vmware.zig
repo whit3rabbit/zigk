@@ -12,8 +12,8 @@
 
 const std = @import("std");
 
-pub const BACKDOOR_PORT: u16 = 0x5658;
-pub const BACKDOOR_MAGIC: u32 = 0x564D5868;
+pub const HYPERCALL_PORT: u16 = 0x5658;
+pub const HYPERCALL_MAGIC: u32 = 0x564D5868;
 
 /// Magic value indicating x86 I/O port emulation mode in x7
 const X86_IO_MAGIC: u64 = 0x86;
@@ -35,7 +35,7 @@ const HypercallRegs = extern struct {
 /// Defined in src/arch/aarch64/lib/asm_helpers.S
 extern fn _asm_vmware_hypercall(regs: *HypercallRegs) void;
 
-/// Low-level register state for backdoor calls.
+/// Low-level register state for hypercall.
 /// API compatible with x86_64 version for cross-architecture code.
 ///
 /// Note: On ARM64, the actual hypercall uses 64-bit registers internally,
@@ -50,7 +50,7 @@ pub const Registers = extern struct {
     edi: u32 = 0,
 };
 
-/// Command IDs for the backdoor
+/// Command IDs for the hypercall
 pub const Command = enum(u16) {
     GetVersion = 10,
     GetCursorPos = 0x04,
@@ -68,14 +68,14 @@ pub const Command = enum(u16) {
     GetTimeDiff = 47,
 };
 
-/// Check if the VMware backdoor/hypercall is available.
+/// Check if the VMware hypercall interface is available.
 /// Sends GET_VERSION command and checks for magic response.
 pub fn detect() bool {
     var regs = HypercallRegs{
-        .x0 = BACKDOOR_MAGIC,
-        .x1 = ~@as(u64, BACKDOOR_MAGIC), // Initialize with non-magic
+        .x0 = HYPERCALL_MAGIC,
+        .x1 = ~@as(u64, HYPERCALL_MAGIC), // Initialize with non-magic
         .x2 = @intFromEnum(Command.GetVersion),
-        .x3 = BACKDOOR_PORT,
+        .x3 = HYPERCALL_PORT,
         .x4 = 0,
         .x5 = 0,
         .x6 = 0,
@@ -85,10 +85,10 @@ pub fn detect() bool {
     _asm_vmware_hypercall(&regs);
 
     // If successful, x1 (ebx equivalent) should contain the magic value
-    return @as(u32, @truncate(regs.x1)) == BACKDOOR_MAGIC;
+    return @as(u32, @truncate(regs.x1)) == HYPERCALL_MAGIC;
 }
 
-/// Execute a backdoor command using the ARM64 hypercall mechanism.
+/// Execute a hypercall command using the ARM64 mechanism.
 ///
 /// The VMware hypervisor intercepts the `mrs xzr, mdccsr_el0` instruction
 /// and interprets the register state as a hypercall.
@@ -122,22 +122,22 @@ pub inline fn call(regs: *Registers) void {
 /// Helper for VMMouse commands which often use simple command ID in EAX
 pub fn sendCommand(cmd: Command) void {
     var regs = Registers{
-        .eax = BACKDOOR_MAGIC,
+        .eax = HYPERCALL_MAGIC,
         .ebx = @intFromEnum(cmd),
         .ecx = 0,
-        .edx = BACKDOOR_PORT,
+        .edx = HYPERCALL_PORT,
     };
     call(&regs);
 }
 
 /// Helper specifically for VMMouse data exchange.
-/// VMMouse uses the backdoor for cursor position and button state.
+/// VMMouse uses the hypercall interface for cursor position and button state.
 pub fn sendVMMouseCommand(sub_cmd: u32, data: u32) Registers {
     var regs = Registers{
-        .eax = BACKDOOR_MAGIC,
+        .eax = HYPERCALL_MAGIC,
         .ebx = sub_cmd,
         .ecx = data,
-        .edx = BACKDOOR_PORT,
+        .edx = HYPERCALL_PORT,
         .esi = 0,
         .edi = 0,
     };

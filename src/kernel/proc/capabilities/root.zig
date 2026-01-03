@@ -296,7 +296,7 @@ pub const InputInjectionCapability = struct {
     }
 };
 
-/// Capability for hypervisor interface access (VMware backdoor, etc.)
+/// Capability for hypervisor interface access (VMware hypercall, etc.)
 ///
 /// SECURITY: This capability grants access to hypervisor-specific interfaces
 /// that can be used for:
@@ -307,8 +307,8 @@ pub const InputInjectionCapability = struct {
 ///
 /// Only trusted guest tools services should have this capability.
 pub const HypervisorCapability = struct {
-    /// If true, allows VMware backdoor access (port 0x5658)
-    vmware_backdoor: bool = true,
+    /// If true, allows VMware hypercall access (port 0x5658)
+    vmware_hypercall: bool = true,
     /// If true, allows reading hypervisor type info
     detect_hypervisor: bool = true,
 };
@@ -350,6 +350,6 @@ pub const Capability = union(CapabilityType) {
     SetGid: SetGidCapability,
     /// Allows display server access (framebuffer + input routing)
     DisplayServer: DisplayServerCapability,
-    /// Allows hypervisor interface access (VMware backdoor, etc.)
+    /// Allows hypervisor interface access (VMware hypercall, etc.)
     Hypervisor: HypervisorCapability,
 };

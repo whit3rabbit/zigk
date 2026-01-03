@@ -10,6 +10,7 @@ const platform = @import("../../platform.zig");
 
 pub const TcpState = types.TcpState;
 pub const Tcb = types.Tcb;
+pub const IpAddr = types.IpAddr;
 
 /// TCB pool (list of active TCBs)
 pub var tcb_pool: std.ArrayListUnmanaged(*Tcb) = .{};
@@ -243,28 +244,46 @@ pub fn freeTcb(tcb: *Tcb) void {
     tcp_allocator.destroy(tcb);
 }
 
-/// Hash function for connection lookup
+/// Hash function for connection lookup - polymorphic version supporting IPv4/IPv6
 /// Uses SipHash-2-4 for protection against hash flooding DoS
-pub fn hashConnection(local_ip: u32, local_port: u16, remote_ip: u32, remote_port: u16) usize {
+pub fn hashConnectionIp(local_addr: IpAddr, local_port: u16, remote_addr: IpAddr, remote_port: u16) usize {
     var hasher = std.crypto.auth.siphash.SipHash64(2, 4).init(&hash_key);
-    hasher.update(std.mem.asBytes(&local_ip));
+
+    // Hash local address based on family
+    switch (local_addr) {
+        .none => hasher.update(&[_]u8{0} ** 4),
+        .v4 => |ip| hasher.update(std.mem.asBytes(&ip)),
+        .v6 => |ip| hasher.update(&ip),
+    }
     hasher.update(std.mem.asBytes(&local_port));
-    hasher.update(std.mem.asBytes(&remote_ip));
+
+    // Hash remote address based on family
+    switch (remote_addr) {
+        .none => hasher.update(&[_]u8{0} ** 4),
+        .v4 => |ip| hasher.update(std.mem.asBytes(&ip)),
+        .v6 => |ip| hasher.update(&ip),
+    }
     hasher.update(std.mem.asBytes(&remote_port));
 
     return @as(usize, @truncate(hasher.finalInt())) % c.TCB_HASH_SIZE;
 }
 
-/// Insert TCB into hash table
+/// Hash function for connection lookup (IPv4 wrapper for backward compatibility)
+/// Uses SipHash-2-4 for protection against hash flooding DoS
+pub fn hashConnection(local_ip: u32, local_port: u16, remote_ip: u32, remote_port: u16) usize {
+    return hashConnectionIp(.{ .v4 = local_ip }, local_port, .{ .v4 = remote_ip }, remote_port);
+}
+
+/// Insert TCB into hash table (works for both IPv4 and IPv6)
 pub fn insertTcbIntoHash(tcb: *Tcb) void {
-    const idx = hashConnection(tcb.local_ip, tcb.local_port, tcb.remote_ip, tcb.remote_port);
+    const idx = hashConnectionIp(tcb.local_addr, tcb.local_port, tcb.remote_addr, tcb.remote_port);
     tcb.hash_next = tcb_hash[idx];
     tcb_hash[idx] = tcb;
 }
 
-/// Remove TCB from hash table
+/// Remove TCB from hash table (works for both IPv4 and IPv6)
 pub fn removeTcbFromHash(tcb: *Tcb) void {
-    const idx = hashConnection(tcb.local_ip, tcb.local_port, tcb.remote_ip, tcb.remote_port);
+    const idx = hashConnectionIp(tcb.local_addr, tcb.local_port, tcb.remote_addr, tcb.remote_port);
 
     var prev: ?*Tcb = null;
     var curr = tcb_hash[idx];
@@ -284,15 +303,15 @@ pub fn removeTcbFromHash(tcb: *Tcb) void {
     }
 }
 
-/// Find TCB by connection 4-tuple
-pub fn findTcb(local_ip: u32, local_port: u16, remote_ip: u32, remote_port: u16) ?*Tcb {
+/// Find TCB by connection 4-tuple - polymorphic version supporting IPv4/IPv6
+pub fn findTcbIp(local_addr: IpAddr, local_port: u16, remote_addr: IpAddr, remote_port: u16) ?*Tcb {
     // Caller must hold state.lock for the duration of any lookup-then-modify sequence.
-    const idx = hashConnection(local_ip, local_port, remote_ip, remote_port);
+    const idx = hashConnectionIp(local_addr, local_port, remote_addr, remote_port);
     var curr = tcb_hash[idx];
 
     while (curr) |tcb| {
-        if (tcb.local_ip == local_ip and tcb.local_port == local_port and
-            tcb.remote_ip == remote_ip and tcb.remote_port == remote_port)
+        if (tcb.local_addr.eql(local_addr) and tcb.local_port == local_port and
+            tcb.remote_addr.eql(remote_addr) and tcb.remote_port == remote_port)
         {
             return tcb;
         }
@@ -301,24 +320,49 @@ pub fn findTcb(local_ip: u32, local_port: u16, remote_ip: u32, remote_port: u16)
     return null;
 }
 
-/// Find listening TCB by local port and local IP
+/// Find TCB by connection 4-tuple (IPv4 wrapper for backward compatibility)
+pub fn findTcb(local_ip: u32, local_port: u16, remote_ip: u32, remote_port: u16) ?*Tcb {
+    return findTcbIp(.{ .v4 = local_ip }, local_port, .{ .v4 = remote_ip }, remote_port);
+}
+
+/// Find listening TCB by local port and address - polymorphic version
+/// Returns a listener bound to exact address, or to unspecified address (wildcard)
+/// Prefers exact IP match over wildcard.
+/// For wildcard listeners, also checks address family compatibility.
+pub fn findListeningTcbIp(local_port: u16, local_addr: IpAddr) ?*Tcb {
+    var any_match: ?*Tcb = null;
+
+    for (listen_tcbs.items) |tcb| {
+        if (tcb.local_port == local_port and tcb.state == .Listen) {
+            // Check for exact address match
+            if (tcb.local_addr.eql(local_addr)) {
+                return tcb; // Exact match found
+            }
+            // Check for wildcard match with address family compatibility
+            if (tcb.local_addr.isUnspecified()) {
+                // .none accepts any family
+                // .v4 with 0.0.0.0 accepts IPv4 only
+                // .v6 with :: accepts IPv6 only (unless IPV6_V6ONLY is false)
+                const family_match = switch (tcb.local_addr) {
+                    .none => true,
+                    .v4 => local_addr.isV4(),
+                    .v6 => local_addr.isV6(),
+                };
+                if (family_match) {
+                    any_match = tcb;
+                }
+            }
+        }
+    }
+    return any_match;
+}
+
+/// Find listening TCB by local port and local IP (IPv4 wrapper for backward compatibility)
 /// local_ip: The destination IP of the incoming packet
 /// Returns a listener bound to local_ip, or to 0.0.0.0 (INADDR_ANY)
 /// Prefers exact IP match over wildcard.
 pub fn findListeningTcb(local_port: u16, local_ip: u32) ?*Tcb {
-    var any_match: ?*Tcb = null;
-
-    for (listen_tcbs.items) |tcb| {
-         if (tcb.local_port == local_port and tcb.state == .Listen) {
-             if (tcb.local_ip == local_ip) {
-                 return tcb; // Exact match found
-             }
-             if (tcb.local_ip == 0) {
-                 any_match = tcb; // Wildcard match candidate
-             }
-         }
-    }
-    return any_match;
+    return findListeningTcbIp(local_port, .{ .v4 = local_ip });
 }
 
 /// Validate that a connection exists for the given 4-tuple.
@@ -366,20 +410,20 @@ pub fn removeFromListenTable(tcb: *Tcb) void {
     }
 }
 
-/// Generate Initial Sequence Number (RFC 6528)
+/// Generate Initial Sequence Number (RFC 6528) - polymorphic version supporting IPv4/IPv6
 /// Uses hardware entropy + counter for unpredictability
 /// ISN = M + F(localip, localport, remoteip, remoteport, secret_key)
 /// Secret key is periodically re-seeded for defense-in-depth
-pub fn generateIsn(l_ip: u32, l_port: u16, r_ip: u32, r_port: u16) u32 {
+pub fn generateIsnIp(local_addr: IpAddr, l_port: u16, remote_addr: IpAddr, r_port: u16) u32 {
     // M = Timer. RFC 6528 suggests a 4us timer.
     // We use our millisecond connection_timestamp scaled to approximate higher resolution
     // and prevent easy guessing, combined with the global entropy counter.
     // 250 increments per ms = 4us resolution approx
     const time_component = @as(u32, @truncate(connection_timestamp)) *% 250;
-    
-    // Use the time component as the linear basline 'M'
+
+    // Use the time component as the linear baseline 'M'
     const M = time_component;
-    
+
     isn_generation_count +%= 1;
 
     // Periodically re-seed secret key with fresh entropy
@@ -399,17 +443,34 @@ pub fn generateIsn(l_ip: u32, l_port: u16, r_ip: u32, r_port: u16) u32 {
     const fresh_entropy = platform.entropy.getHardwareEntropy();
 
     var hasher = std.crypto.auth.siphash.SipHash64(2, 4).init(&isn_key);
-    hasher.update(std.mem.asBytes(&l_ip));
+
+    // Hash local address based on family
+    switch (local_addr) {
+        .none => hasher.update(&[_]u8{0} ** 4),
+        .v4 => |ip| hasher.update(std.mem.asBytes(&ip)),
+        .v6 => |ip| hasher.update(&ip),
+    }
     hasher.update(std.mem.asBytes(&l_port));
-    hasher.update(std.mem.asBytes(&r_ip));
+
+    // Hash remote address based on family
+    switch (remote_addr) {
+        .none => hasher.update(&[_]u8{0} ** 4),
+        .v4 => |ip| hasher.update(std.mem.asBytes(&ip)),
+        .v6 => |ip| hasher.update(&ip),
+    }
     hasher.update(std.mem.asBytes(&r_port));
     hasher.update(std.mem.asBytes(&fresh_entropy));
-    
+
     // ISN = M + F.
     // SipHash64 returns u64, we take lower 32 bits
     const k: u32 = @truncate(hasher.finalInt());
 
     return M +% k;
+}
+
+/// Generate Initial Sequence Number (RFC 6528) - IPv4 wrapper for backward compatibility
+pub fn generateIsn(l_ip: u32, l_port: u16, r_ip: u32, r_port: u16) u32 {
+    return generateIsnIp(.{ .v4 = l_ip }, l_port, .{ .v4 = r_ip }, r_port);
 }
 
 /// Get current timestamp for TCP Timestamps option (RFC 7323)

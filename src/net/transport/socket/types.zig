@@ -12,7 +12,12 @@ const sync = @import("../../sync.zig");
 pub const IpMreq = uapi.abi.IpMreq;
 pub const TimeVal = uapi.abi.TimeVal;
 pub const SockAddrIn = uapi.abi.SockAddrIn;
+pub const SockAddrIn6 = uapi.abi.SockAddrIn6;
 pub const SockAddr = uapi.abi.SockAddr;
+
+// Import IpAddr tagged union for dual-stack support
+const addr_mod = @import("../../core/addr.zig");
+pub const IpAddr = addr_mod.IpAddr;
 
 // Network byte order helpers (x86_64 is little-endian, network is big-endian)
 pub fn htons(v: u16) u16 {
@@ -23,8 +28,9 @@ pub fn htonl(v: u32) u32 {
     return @byteSwap(v);
 }
 
-/// Socket address family
+/// Socket address families
 pub const AF_INET: i32 = 2;
+pub const AF_INET6: i32 = 10;
 
 /// Socket types
 pub const SOCK_STREAM: i32 = 1; // TCP
@@ -73,7 +79,7 @@ pub const ACCEPT_QUEUE_SIZE: usize = 8;
 const RxQueueEntry = struct {
     data: [packet.MAX_PACKET_SIZE]u8,
     len: usize,
-    src_addr: u32, // Source IP (host byte order)
+    src_addr: IpAddr, // Source IP (IPv4 or IPv6)
     src_port: u16, // Source port (host byte order)
     valid: bool,
 };
@@ -90,8 +96,8 @@ pub const Socket = struct {
     protocol: i32,
     /// Local port (host byte order, 0 = not bound)
     local_port: u16,
-    /// Local address (host byte order, 0 = INADDR_ANY)
-    local_addr: u32,
+    /// Local address (IPv4 or IPv6, .none = INADDR_ANY / in6addr_any)
+    local_addr: IpAddr,
 
     // UDP-specific: receive queue
     rx_queue: [SOCKET_RX_QUEUE_SIZE]RxQueueEntry,
@@ -186,11 +192,11 @@ pub const Socket = struct {
             .sock_type = 0,
             .protocol = 0,
             .local_port = 0,
-            .local_addr = 0,
+            .local_addr = .none,
             .rx_queue = [_]RxQueueEntry{.{
                 .data = undefined,
                 .len = 0,
-                .src_addr = 0,
+                .src_addr = .none,
                 .src_port = 0,
                 .valid = false,
             }} ** SOCKET_RX_QUEUE_SIZE,
@@ -270,8 +276,13 @@ pub const Socket = struct {
         return false; // Not a member
     }
 
-    /// Enqueue a received packet
+    /// Enqueue a received packet (IPv4 version for compatibility)
     pub fn enqueuePacket(self: *Self, data: []const u8, src_addr: u32, src_port: u16) bool {
+        return self.enqueuePacketIp(data, IpAddr{ .v4 = src_addr }, src_port);
+    }
+
+    /// Enqueue a received packet (dual-stack version)
+    pub fn enqueuePacketIp(self: *Self, data: []const u8, src_addr: IpAddr, src_port: u16) bool {
         if (self.rx_count >= SOCKET_RX_QUEUE_SIZE) {
             // Queue full - drop packet
             return false;
@@ -294,8 +305,21 @@ pub const Socket = struct {
         return true;
     }
 
-    /// Dequeue a received packet
+    /// Dequeue a received packet (IPv4 version for compatibility)
     pub fn dequeuePacket(self: *Self, buf: []u8, src_addr: ?*u32, src_port: ?*u16) ?usize {
+        var ip_addr: IpAddr = .none;
+        const result = self.dequeuePacketIp(buf, &ip_addr, src_port);
+        if (result != null and src_addr != null) {
+            switch (ip_addr) {
+                .v4 => |v4| src_addr.?.* = v4,
+                else => src_addr.?.* = 0, // IPv6 addresses can't fit in u32
+            }
+        }
+        return result;
+    }
+
+    /// Dequeue a received packet (dual-stack version)
+    pub fn dequeuePacketIp(self: *Self, buf: []u8, src_addr: ?*IpAddr, src_port: ?*u16) ?usize {
         if (self.rx_count == 0) {
             return null;
         }

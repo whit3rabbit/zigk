@@ -21,6 +21,30 @@ Use `-Dbios=/path/to/OVMF.fd` to specify UEFI firmware.
 Use `-Dqemu-args="-accel tcg,thread=multi -cpu max"` to prevent stability issues.
 To prevent hangs on CI/Testing, ensure test runner implements timeouts (e.g., 30s).
 
+## Reference Skills
+
+### Linux Kernel Reference (`.claude/skills/linux-kernel-ref/`)
+**Query this skill** when implementing:
+- **Drivers**: PCI enumeration, MMIO access, MSI-X interrupts, DMA buffers
+- **Network stack**: Socket layer, TCP/UDP protocols, sk_buff handling
+- **Filesystems**: VFS, inode/dentry operations, superblock, block I/O
+
+```bash
+# Driver patterns
+python .claude/skills/linux-kernel-ref/scripts/driver_query.py ahci interrupt
+python .claude/skills/linux-kernel-ref/scripts/driver_query.py e1000e mmio
+
+# Network stack
+python .claude/skills/linux-kernel-ref/scripts/driver_query.py tcp socket
+python .claude/skills/linux-kernel-ref/scripts/subsystem_query.py net
+
+# Filesystem
+python .claude/skills/linux-kernel-ref/scripts/driver_query.py ext4 inode
+python .claude/skills/linux-kernel-ref/scripts/subsystem_query.py vfs
+```
+
+First-time setup: `bash .claude/skills/linux-kernel-ref/scripts/setup_kernel.sh`
+
 ## Security Standards (Strict)
 
 ### 1. Memory Access (`UserPtr`)

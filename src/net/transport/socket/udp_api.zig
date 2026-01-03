@@ -3,6 +3,7 @@
 const std = @import("std");
 const udp = @import("../udp.zig");
 const ipv4 = @import("../../ipv4/root.zig").ipv4;
+const ipv6_mod = @import("../../ipv6/root.zig");
 const packet = @import("../../core/packet.zig");
 const types = @import("types.zig");
 const state = @import("state.zig");
@@ -10,6 +11,8 @@ const errors = @import("errors.zig");
 const scheduler = @import("scheduler.zig");
 const platform = @import("../../platform.zig");
 const clock = @import("../../clock.zig");
+const addr_mod = @import("../../core/addr.zig");
+const IpAddr = addr_mod.IpAddr;
 
 pub fn sendto(
     sock_fd: usize,
@@ -234,7 +237,15 @@ pub fn deliverUdpPacket(pkt: *packet.PacketBuffer) bool {
             // RFC Compliance: If socket is bound to a specific IP, it should STILL accept broadcast
             // packets arriving on that interface, provided it's bound to INADDR_ANY or the specific IP.
             // The check below was too strict.
-            if (sock.local_addr != 0 and sock.local_addr != dst_ip and !pkt.is_broadcast and !pkt.is_multicast) continue;
+            // Use isUnspecified() to check if bound to any address
+            if (!sock.local_addr.isUnspecified()) {
+                // Socket is bound to a specific address, check if it matches
+                const matches = switch (sock.local_addr) {
+                    .v4 => |ip| ip == dst_ip,
+                    else => false, // IPv6 addresses won't match IPv4 dst_ip
+                };
+                if (!matches and !pkt.is_broadcast and !pkt.is_multicast) continue;
+            }
 
             // For multicast, also check group membership
             if (pkt.is_multicast) {
@@ -271,6 +282,94 @@ pub fn deliverUdpPacket(pkt: *packet.PacketBuffer) bool {
         const unicast_sock_held = sock.lock.acquire();
         defer unicast_sock_held.release();
         if (sock.enqueuePacket(payload, pkt.src_ip, pkt.src_port)) {
+            // Wake blocked thread if any
+            if (sock.blocked_thread) |thread| {
+                scheduler.wakeThread(thread);
+                sock.blocked_thread = null;
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Deliver a received IPv6 UDP packet to the appropriate socket(s)
+/// For multicast packets, delivers to ALL matching sockets
+pub fn deliverUdpPacket6(pkt: *packet.PacketBuffer) bool {
+    // Acquire global socket lock to prevent UAF
+    const held = state.lock.acquire();
+    defer held.release();
+
+    const udp_hdr = packet.getUdpHeader(pkt.data, pkt.transport_offset) orelse return false;
+    const dst_port = udp_hdr.getDstPort();
+
+    // Extract payload once
+    const payload_offset = pkt.transport_offset + packet.UDP_HEADER_SIZE;
+    const udp_len = udp_hdr.getLength();
+    if (udp_len <= packet.UDP_HEADER_SIZE) {
+        return false;
+    }
+    const payload_len = udp_len - packet.UDP_HEADER_SIZE;
+
+    if (payload_offset + payload_len > pkt.len) {
+        return false;
+    }
+
+    const payload = pkt.data[payload_offset..][0..payload_len];
+
+    // Check if multicast
+    const is_multicast = ipv6_mod.ipv6.types.isMulticast(pkt.dst_ipv6);
+
+    // For multicast, deliver to ALL matching sockets
+    if (is_multicast) {
+        var delivered = false;
+
+        for (state.getSocketTable()) |maybe_sock| {
+            const sock = maybe_sock orelse continue;
+            if (!sock.allocated) continue;
+            if (sock.sock_type != types.SOCK_DGRAM) continue;
+            if (sock.family != types.AF_INET6) continue;
+            if (sock.local_port != dst_port) continue;
+
+            // Check address binding
+            if (!sock.local_addr.isUnspecified()) {
+                const matches = switch (sock.local_addr) {
+                    .v6 => |v6| std.mem.eql(u8, &v6, &pkt.dst_ipv6),
+                    else => false,
+                };
+                if (!matches and !is_multicast) continue;
+            }
+
+            // TODO: Check IPv6 multicast group membership (not yet implemented)
+
+            // Deliver to this socket using IPv6 source address
+            {
+                const inner_sock_held = sock.lock.acquire();
+                defer inner_sock_held.release();
+                if (sock.enqueuePacketIp(payload, IpAddr{ .v6 = pkt.src_ipv6 }, pkt.src_port)) {
+                    delivered = true;
+                    // Wake blocked thread if any
+                    if (sock.blocked_thread) |thread| {
+                        scheduler.wakeThread(thread);
+                        sock.blocked_thread = null;
+                    }
+                }
+            }
+        }
+
+        return delivered;
+    }
+
+    // Unicast delivery - find single matching socket
+    const sock = state.findUdpSocket6(dst_port, pkt.dst_ipv6) orelse {
+        return false; // No socket listening on this port
+    };
+
+    // Enqueue packet with IPv6 source info
+    {
+        const unicast_sock_held = sock.lock.acquire();
+        defer unicast_sock_held.release();
+        if (sock.enqueuePacketIp(payload, IpAddr{ .v6 = pkt.src_ipv6 }, pkt.src_port)) {
             // Wake blocked thread if any
             if (sock.blocked_thread) |thread| {
                 scheduler.wakeThread(thread);

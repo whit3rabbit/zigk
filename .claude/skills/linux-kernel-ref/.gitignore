@@ -1,0 +1,3 @@
+# Linux kernel source (too large to commit, ~300-500MB)
+# Run: bash scripts/setup_kernel.sh to clone locally
+kernel/

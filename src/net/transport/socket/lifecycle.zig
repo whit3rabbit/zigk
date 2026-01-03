@@ -7,8 +7,8 @@ const errors = @import("errors.zig");
 const tcp = @import("../tcp.zig");
 
 pub fn socket(family: i32, sock_type: i32, protocol: i32) errors.SocketError!usize {
-    // Validate parameters
-    if (family != types.AF_INET) {
+    // Validate parameters - support both IPv4 and IPv6
+    if (family != types.AF_INET and family != types.AF_INET6) {
         return errors.SocketError.AfNotSupported;
     }
 
@@ -45,15 +45,24 @@ pub fn socket(family: i32, sock_type: i32, protocol: i32) errors.SocketError!usi
     return slot;
 }
 
-/// Bind socket to local address/port
+/// Bind socket to local IPv4 address/port
 pub fn bind(sock_fd: usize, addr: *const types.SockAddrIn) errors.SocketError!void {
+    const ip = types.IpAddr{ .v4 = addr.getAddr() };
+    return bindInternal(sock_fd, addr.getPort(), ip);
+}
+
+/// Bind socket to local IPv6 address/port
+pub fn bind6(sock_fd: usize, addr: *const types.SockAddrIn6) errors.SocketError!void {
+    const ip = types.IpAddr{ .v6 = addr.addr };
+    return bindInternal(sock_fd, addr.getPort(), ip);
+}
+
+/// Internal bind implementation for both address families
+fn bindInternal(sock_fd: usize, port: u16, ip: types.IpAddr) errors.SocketError!void {
     const held = state.lock.acquire();
     defer held.release();
 
     const sock = state.getSocketLocked(sock_fd) orelse return errors.SocketError.BadFd;
-
-    const port = addr.getPort();
-    const ip = addr.getAddr();
 
     // Check port isn't already in use
     if (port != 0) {

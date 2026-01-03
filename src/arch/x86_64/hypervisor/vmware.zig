@@ -1,40 +1,43 @@
-//! VMware/VirtualBox Backdoor Interface
+//! VMware/VirtualBox Hypercall Interface
 //!
-//! Provides access to the "Backdoor" I/O port interface used by VMware and VirtualBox
+//! Provides access to the hypercall I/O port interface used by VMware and VirtualBox
 //! for guest-host communication (mouse integration, time sync, clipboard, etc.).
+//!
+//! Note: This interface is historically called "backdoor" in VMware documentation
+//! and Linux kernel code. We use "hypercall" following modern Linux 6.11+ convention.
 //!
 //! Magic Port: 0x5658 ("VX")
 //! Magic Value: 0x564D5868 ("VMXh")
 
 const std = @import("std");
 
-pub const BACKDOOR_PORT: u16 = 0x5658;
-pub const BACKDOOR_MAGIC: u32 = 0x564D5868;
+pub const HYPERCALL_PORT: u16 = 0x5658;
+pub const HYPERCALL_MAGIC: u32 = 0x564D5868;
 
-/// Low-level register state for backdoor calls.
+/// Low-level register state for hypercall.
 /// Layout must match the assembly helper expectations (6 consecutive u32 fields).
 ///
-/// SECURITY NOTE on edx: The assembly helper (_asm_vmware_backdoor_call) intentionally
+/// SECURITY NOTE on edx: The assembly helper (_asm_vmware_hypercall) intentionally
 /// ignores the input edx value and hardcodes the port to 0x5658 ("VX"). This is a
 /// security feature that prevents callers from using this interface to access
 /// arbitrary I/O ports. The edx field is OUTPUT-ONLY and contains the result
-/// after the backdoor call.
+/// after the hypercall.
 pub const Registers = extern struct {
     eax: u32,
     ebx: u32,
     ecx: u32,
     /// OUTPUT-ONLY: Input value ignored by assembly; port is fixed to 0x5658.
-    /// Contains output value after the backdoor call.
+    /// Contains output value after the hypercall.
     edx: u32,
     esi: u32 = 0,
     edi: u32 = 0,
 };
 
-/// External assembly function for VMware backdoor call.
+/// External assembly function for VMware hypercall.
 /// Defined in src/arch/x86_64/lib/asm_helpers.S
-extern fn _asm_vmware_backdoor_call(regs: *Registers) void;
+extern fn _asm_vmware_hypercall(regs: *Registers) void;
 
-/// Command IDs for the backdoor
+/// Command IDs for the hypercall
 pub const Command = enum(u16) {
     GetVersion = 10,
     GetCursorPos = 0x04,
@@ -49,39 +52,39 @@ pub const Command = enum(u16) {
     AbsPointerCmd = 41,
 };
 
-/// Check if the backdoor is available
+/// Check if the hypercall interface is available
 pub fn detect() bool {
     var regs = Registers{
         .eax = @intFromEnum(Command.GetVersion),
-        .ebx = ~BACKDOOR_MAGIC, // Initialize with non-magic
+        .ebx = ~HYPERCALL_MAGIC, // Initialize with non-magic
         .ecx = 0,
-        .edx = BACKDOOR_PORT, // Port goes in DX (sometimes modified by in/out but port is fixed)
+        .edx = HYPERCALL_PORT, // Port goes in DX (sometimes modified by in/out but port is fixed)
     };
 
     call(&regs);
 
     // If successful, EBX should contain the magic value 0x564D5868
     // and EAX should usually be valid (not -1 or garbage, though version specific)
-    return regs.ebx == BACKDOOR_MAGIC;
+    return regs.ebx == HYPERCALL_MAGIC;
 }
 
-/// Execute a backdoor command.
+/// Execute a hypercall command.
 ///
-/// The VMware backdoor instruction is `in eax, dx` with specific values in
+/// The VMware hypercall instruction is `in eax, dx` with specific values in
 /// other registers. The hypervisor traps this specific I/O operation.
 /// Uses external assembly due to Zig 0.16 inline asm limitations with
 /// multiple register outputs.
 pub inline fn call(regs: *Registers) void {
-    _asm_vmware_backdoor_call(regs);
+    _asm_vmware_hypercall(regs);
 }
 
 /// Helper for VMMouse commands which often use simple command ID in EAX
 pub fn sendCommand(cmd: Command) void {
     var regs = Registers{
-        .eax = BACKDOOR_MAGIC,
+        .eax = HYPERCALL_MAGIC,
         .ebx = @intFromEnum(cmd),
         .ecx = 0,
-        .edx = BACKDOOR_PORT,
+        .edx = HYPERCALL_PORT,
     };
     call(&regs);
 }
@@ -89,17 +92,17 @@ pub fn sendCommand(cmd: Command) void {
 /// Helper specifically for VMMouse data exchange
 pub fn sendVMMouseCommand(sub_cmd: u32, data: u32) Registers {
     var regs = Registers{
-        .eax = BACKDOOR_MAGIC,
+        .eax = HYPERCALL_MAGIC,
         .ebx = sub_cmd,
         .ecx = data,
-        .edx = BACKDOOR_PORT,
+        .edx = HYPERCALL_PORT,
         .esi = 0,
         .edi = 0,
     };
     // VMMouse uses "Set" commands or "Data" commands via the AbsPointerCmd (41) usually?
     // Actually, VMMouse protocol is slightly different:
     // It sets EBX to the VMMouse command word.
-    
+
     // Low level call
     call(&regs);
     return regs;

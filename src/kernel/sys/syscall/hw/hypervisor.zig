@@ -1,12 +1,13 @@
 //! Hypervisor Syscalls
 //!
-//! Provides userspace access to hypervisor interfaces (VMware backdoor, etc.)
+//! Provides userspace access to hypervisor interfaces (VMware hypercall, etc.)
 //! Requires CAP_HYPERVISOR capability for security.
 //!
 //! Security Design:
-//! - Only allowlisted VMware backdoor commands are permitted
-//! - Dangerous commands (clipboard, RPCI messaging) are blocked by default
-//! - The HypervisorCapability.vmware_backdoor field must be true
+//! - Only allowlisted VMware hypercall commands are permitted
+//! - RPCI messaging (30-33) is enabled for guest tools (shutdown, resolution)
+//! - Clipboard commands (6-9) remain blocked to prevent data exfiltration
+//! - The HypervisorCapability.vmware_hypercall field must be true
 
 const std = @import("std");
 const uapi = @import("uapi");
@@ -17,8 +18,8 @@ const user_mem = @import("user_mem");
 
 const SyscallError = uapi.errno.SyscallError;
 
-/// VMware backdoor register state (matches hal.vmware.Registers layout)
-pub const VmwareBackdoorRegs = extern struct {
+/// VMware hypercall register state (matches hal.vmware.Registers layout)
+pub const VmwareHypercallRegs = extern struct {
     eax: u32,
     ebx: u32,
     ecx: u32,
@@ -27,7 +28,7 @@ pub const VmwareBackdoorRegs = extern struct {
     edi: u32,
 };
 
-/// VMware backdoor command IDs
+/// VMware hypercall command IDs
 /// Reference: https://wiki.osdev.org/VMware_tools
 const VmwareCommand = struct {
     // Safe commands (allowlisted)
@@ -40,20 +41,24 @@ const VmwareCommand = struct {
     const ABS_POINTER_STATUS: u16 = 40;
     const ABS_POINTER_CMD: u16 = 41;
 
+    // RPCI messaging commands (allowlisted for guest tools integration)
+    // Used for: graceful shutdown, screen resolution hints, guest info
+    const MESSAGE_OPEN: u16 = 30;
+    const MESSAGE_SEND: u16 = 31;
+    const MESSAGE_RECEIVE: u16 = 32;
+    const MESSAGE_CLOSE: u16 = 33;
+
     // Dangerous commands (blocked) - documented for security review
     // const GET_CLIPBOARD_LEN: u16 = 6;   // Can exfiltrate host clipboard
     // const GET_CLIPBOARD_DATA: u16 = 7;  // Can exfiltrate host clipboard
     // const SET_CLIPBOARD_LEN: u16 = 8;   // Can inject into host clipboard
     // const SET_CLIPBOARD_DATA: u16 = 9;  // Can inject into host clipboard
-    // const MESSAGE_OPEN: u16 = 30;       // RPCI channel - arbitrary host interaction
-    // const MESSAGE_SEND: u16 = 31;       // RPCI channel - arbitrary host interaction
-    // const MESSAGE_RECEIVE: u16 = 32;    // RPCI channel - arbitrary host interaction
-    // const MESSAGE_CLOSE: u16 = 33;      // RPCI channel - arbitrary host interaction
 };
 
-/// Allowlist of safe VMware backdoor commands
-/// These commands only provide read-only guest utilities (time, cursor, version)
-/// and do not allow data exfiltration or host interaction.
+/// Allowlist of VMware hypercall commands
+/// These commands provide guest utilities (time, cursor, version) and
+/// RPCI messaging for VMware Tools integration (shutdown, resolution hints).
+/// Clipboard commands remain blocked to prevent data exfiltration.
 const allowed_commands = [_]u16{
     VmwareCommand.GET_VERSION,
     VmwareCommand.GET_CURSOR_POS,
@@ -63,9 +68,14 @@ const allowed_commands = [_]u16{
     VmwareCommand.ABS_POINTER_DATA,
     VmwareCommand.ABS_POINTER_STATUS,
     VmwareCommand.ABS_POINTER_CMD,
+    // RPCI messaging for guest tools
+    VmwareCommand.MESSAGE_OPEN,
+    VmwareCommand.MESSAGE_SEND,
+    VmwareCommand.MESSAGE_RECEIVE,
+    VmwareCommand.MESSAGE_CLOSE,
 };
 
-/// Check if a VMware backdoor command is in the allowlist
+/// Check if a VMware hypercall command is in the allowlist
 fn isCommandAllowed(cmd: u16) bool {
     for (allowed_commands) |allowed| {
         if (cmd == allowed) return true;
@@ -73,34 +83,34 @@ fn isCommandAllowed(cmd: u16) bool {
     return false;
 }
 
-/// Execute VMware backdoor command
+/// Execute VMware hypercall command
 ///
 /// Arguments:
-///   regs_ptr: Pointer to VmwareBackdoorRegs structure (in/out)
+///   regs_ptr: Pointer to VmwareHypercallRegs structure (in/out)
 ///
 /// Returns: 0 on success, -EPERM if not permitted, -EFAULT if bad pointer
 ///
 /// Security:
-/// - Requires CAP_HYPERVISOR capability with vmware_backdoor=true
+/// - Requires CAP_HYPERVISOR capability with vmware_hypercall=true
 /// - Only allowlisted commands are permitted (blocks clipboard, RPCI)
 /// - Only allowed when running under a VMware-compatible hypervisor
-pub fn sys_vmware_backdoor(regs_ptr: usize) SyscallError!usize {
+pub fn sys_vmware_hypercall(regs_ptr: usize) SyscallError!usize {
     // Permission check
     const current = sched.getCurrentThread() orelse return error.EPERM;
     const proc_opaque = current.process orelse return error.EPERM;
     const proc: *process_mod.Process = @ptrCast(@alignCast(proc_opaque));
 
-    // Check for hypervisor capability AND that vmware_backdoor is enabled
+    // Check for hypervisor capability AND that vmware_hypercall is enabled
     const hv_cap = proc.getHypervisorCapability() orelse return error.EPERM;
-    if (!hv_cap.vmware_backdoor) return error.EPERM;
+    if (!hv_cap.vmware_hypercall) return error.EPERM;
 
-    // Check if VMware backdoor is available
+    // Check if VMware hypercall interface is available
     if (!hal.vmware.detect()) return error.ENODEV;
 
     // Copy registers from userspace using safe copy primitives (SMAP-compliant)
     // copyFromUser returns bytes NOT copied (0 on success)
     // Zero-initialize first for defense-in-depth (per CLAUDE.md security guidelines)
-    var user_regs: VmwareBackdoorRegs = .{
+    var user_regs: VmwareHypercallRegs = .{
         .eax = 0,
         .ebx = 0,
         .ecx = 0,
@@ -115,7 +125,7 @@ pub fn sys_vmware_backdoor(regs_ptr: usize) SyscallError!usize {
     if (bytes_not_copied_in != 0) return error.EFAULT;
 
     // Extract command from ECX (low 16 bits contain the command ID)
-    // VMware backdoor protocol: command in low 16 bits of ECX
+    // VMware hypercall protocol: command in low 16 bits of ECX
     const cmd: u16 = @truncate(user_regs.ecx);
 
     // Security: Only allow safe commands from the allowlist
@@ -134,7 +144,7 @@ pub fn sys_vmware_backdoor(regs_ptr: usize) SyscallError!usize {
         .edi = user_regs.edi,
     };
 
-    // Execute backdoor call
+    // Execute hypercall
     hal.vmware.call(&kernel_regs);
 
     // Copy results back to kernel buffer

@@ -1373,7 +1373,7 @@ pub fn build(b: *std.Build) void {
     syscall_ring_module.addImport("hal", hal_module);
     syscall_ring_module.addImport("user_vmm", user_vmm_module);
 
-    // Create syscall hypervisor module (VMware backdoor, hypervisor detection)
+    // Create syscall hypervisor module (VMware hypercall, hypervisor detection)
     const syscall_hypervisor_module = b.createModule(.{
         .root_source_file = b.path("src/kernel/sys/syscall/hw/hypervisor.zig"),
         .target = kernel_target,

@@ -11,6 +11,7 @@ This bullet checklist highlights the unique implementation details and features 
 *   **GICv2/v3 Hybrid Support**: A dynamic interrupt controller driver that parses Device Tree information but falls back to safe QEMU virt machine defaults if necessary.
 *   **FEAT_RNG Integration**: Utilization of the `RNDR` register for hardware-grade entropy, with a sophisticated timing-based fallback that uses `SplitMix64` for bit distribution.
 *   **Flexible ASID Detection**: Runtime detection of 8-bit vs. 16-bit Address Space Identifiers (ASIDs) to optimize TLB management and prevent process-space collisions.
+*   **VMware Fusion Support**: Full VMware hypervisor detection and hypercall interface using ARM64-specific `mrs xzr, mdccsr_el0` trap instruction, enabling SVGA graphics, VMMouse, and time synchronization on Apple Silicon Macs.
 
 ### x86_64 Implementation (AMD64)
 *   **Intel SYSRET Mitigation**: A security-hardened syscall entry point that manually validates canonical RCX addresses to prevent the "SYSRET privilege escalation" vulnerability.
@@ -18,7 +19,7 @@ This bullet checklist highlights the unique implementation details and features 
 *   **Dual-Mode APIC**: Support for both xAPIC (MMIO-based) and x2APIC (MSR-based) for high-performance interrupt handling on modern processors.
 *   **Double Fault Handling**: Dedicated handler for double fault exceptions with diagnostic output. SYSCALL entry manages GS base via SWAPGS.
 *   **SMP Trampoline**: A position-independent bootstrap mechanism that transitions Application Processors (APs) from 16-bit Real Mode to 64-bit Long Mode via patched immediate values.
-*   **VMware Backdoor Interface**: A dedicated driver for hypervisor-specific guest-host communication, enabling integrated mouse and time synchronization in virtual environments.
+*   **VMware Hypercall Interface**: A cross-architecture driver for hypervisor-specific guest-host communication, enabling integrated mouse and time synchronization in virtual environments. Uses I/O port 0x5658 on x86_64 and `mrs xzr, mdccsr_el0` trap on aarch64.
 
 ### Memory & MMIO
 *   **HHDM Guarding**: The `physToVirt` translation layer includes mandatory overflow checks to ensure physical addresses never wrap around into user virtual space.
@@ -109,11 +110,11 @@ This checklist covers the features found in your hardware drivers, PCI subsystem
 ### Input & Layouts
 *   **Sub-pixel Cursor Management**: Cursor position tracker with fixed-point sensitivity scaling, fractional movement accumulation, and absolute coordinate normalization.
 *   **Multilingual Keyboard Layouts**: Support for US QWERTY and Dvorak layouts with an extensible mapping architecture for shift/altgr/caps states.
-*   **VMware VMMouse Support**: Direct integration with the VMware backdoor interface for high-precision absolute cursor positioning in VMs.
+*   **VMware VMMouse Support**: Direct integration with the VMware hypercall interface for high-precision absolute cursor positioning in VMs.
 
 ### Video & Graphics
 *   **VirtIO-GPU 2D Acceleration**: Paravirtualized GPU driver supporting 2D scanout, resource-based memory tracking, and accelerated host blitting.
-*   **VMware SVGA II Driver**: Specialized driver for VMware/VirtualBox graphics with support for resolution switching and hardware FIFO command rings.
+*   **VMware SVGA II Driver**: Cross-architecture driver for VMware/VirtualBox graphics with support for resolution switching, hardware FIFO command rings, 2D acceleration (RectFill/RectCopy), and hardware cursor. Supports both x86_64 (I/O port access) and aarch64 (MMIO access for VMware Fusion on Apple Silicon).
 *   **ANSI Terminal Emulation**: Full state-machine parser for ANSI escape sequences (colors, bold, inverse) integrated into the kernel console.
 *   **Dual-Mode Framebuffer**: Comptime-generic driver providing both direct-to-VRAM and back-buffered rendering paths to eliminate runtime branches.
 *   **PSF Font Support**: Robust loaders for PSF1 and PSF2 bitmap fonts with checked arithmetic for glyph indexing.
@@ -511,6 +512,13 @@ This roadmap was generated from a comprehensive feature validation on 2024-12-30
 - Paranoid ISR stubs for NMI/MCE/DF/DB with correct GS base handling (discovered - was already implemented)
 - Double Fault IST1 stack allocation per-CPU (discovered - was already implemented)
 
+**Implemented 2026-01-02:**
+- VMware SVGA II aarch64 support via MMIO register access (VMware Fusion on Apple Silicon)
+- Architecture-independent register access abstraction (`src/drivers/video/svga/regs.zig`)
+- Portable memory barriers (`mfence` on x86_64, `dmb sy` on aarch64)
+- Portable CPU pause hints (`pause` on x86_64, `yield` on aarch64)
+- VMware hypercall interface for aarch64 using `mrs xzr, mdccsr_el0` trap
+
 **Methodology**: Codebase exploration using pattern matching across:
 - `src/arch/x86_64/` and `src/arch/aarch64/` for architecture features
 - `src/kernel/mm/` for memory management
@@ -519,3 +527,273 @@ This roadmap was generated from a comprehensive feature validation on 2024-12-30
 - `src/net/` for networking stack
 - `src/drivers/` for hardware drivers
 - `src/user/` for userspace applications and libc
+
+---
+
+## Hypervisor Support Matrix
+
+### Current Implementation Status
+
+| Feature | VMware | VirtualBox | QEMU/KVM | Proxmox | Hyper-V |
+|---------|--------|------------|----------|---------|---------|
+| Hypervisor Detection | Yes | Yes | Yes | Yes | Yes |
+| Time Sync | Yes | Yes | No | No | No |
+| Graceful Shutdown | Yes | Partial | No | No | No |
+| Graphics (2D) | SVGA II | SVGA II | VirtIO-GPU | VirtIO-GPU | No |
+| Absolute Mouse | VMMouse | VMMouse | No | No | No |
+| Network | E1000e | E1000e | VirtIO-Net | VirtIO-Net | No |
+| Storage | AHCI | AHCI | AHCI/VirtIO-Blk | AHCI/VirtIO-Blk | No |
+| Balloon Memory | No | No | VirtIO-Balloon | VirtIO-Balloon | No |
+| Guest Agent | VMware Tools | VMware Tools | Partial | Partial | No |
+
+### VMware/VirtualBox (Current)
+**Implemented:**
+- VMware SVGA II driver (x86_64 + aarch64)
+- VMMouse absolute positioning
+- VMware hypercall interface (RPCI/TCLO)
+- Time synchronization via hypercall
+- Graceful shutdown/reboot handling
+- Guest info reporting (OS name, tools version)
+- Capability registration (softPowerOp, syncTime, resolution_set)
+- Heartbeat mechanism
+
+**Missing:**
+- PVSCSI paravirtualized SCSI controller
+- VMXNET3 paravirtualized NIC (10GbE capable)
+- Shared Folders (HGFS protocol)
+- Clipboard/drag-and-drop (security-disabled by design)
+- Screen resolution auto-resize (display driver integration pending)
+
+### QEMU/KVM (Partial)
+**Implemented:**
+- VirtIO-RNG (kernel driver)
+- VirtIO-GPU 2D (kernel driver)
+- VirtIO-Net (userspace driver)
+- VirtIO-Blk (userspace driver)
+- VirtIO-Balloon (userspace driver)
+- VirtIO-Console (userspace driver)
+- QEMU Guest Agent (partial - detection only, VirtIO-Console integration pending)
+- E1000e NIC (kernel driver)
+- AHCI SATA (kernel driver)
+
+**Missing - Critical for Proxmox/Production:**
+- VirtIO-SCSI (preferred storage for Proxmox)
+- VirtIO-9P (shared folders via Plan 9 protocol)
+- VirtIO-FS (virtiofs, modern shared folder replacement)
+- VirtIO-Input (keyboard/mouse/tablet, replaces PS/2)
+- VirtIO-Sound (modern audio)
+- kvmclock paravirtualized timing source
+- SPICE display protocol (Proxmox default)
+- SPICE agent (vdagent for clipboard, resolution)
+- QXL display driver (SPICE acceleration)
+
+### VirtualBox-Specific (Not Implemented)
+- VBoxGuest driver (guest additions core)
+- VBoxSF shared folders
+- VBoxVideo paravirtualized display
+- Seamless window mode
+- 3D acceleration (VMSVGA/VBoxSVGA)
+
+### Hyper-V (Not Implemented)
+- VMBus transport layer
+- StorVSC paravirtualized storage
+- NetVSC paravirtualized network
+- Hyper-V time sync integration
+- Hyper-V shutdown integration
+- Synthetic interrupt controller
+
+---
+
+## Missing Features Roadmap: Hypervisor & Network
+
+### Tier 1: Essential for Production VMs
+
+#### Network Stack Gaps
+| Feature | Status | Impact |
+|---------|--------|--------|
+| IPv6 | **Implemented** | RX/TX, extension headers, fragmentation |
+| ICMPv6/NDP | **Implemented** | Neighbor discovery, DAD, ping6 |
+| SLAAC | Not Implemented | RA prefix processing for autoconfiguration |
+| DHCP Client | Not Implemented | VMs cannot auto-configure networking |
+| DHCPv6 | Not Implemented | IPv6 address autoconfiguration |
+| Multicast Routing | Partial | mDNS/service discovery |
+| Raw Sockets | Not Implemented | Network diagnostics (ping, traceroute) |
+| UNIX Domain Sockets | Not Implemented | Local IPC (systemd, dbus patterns) |
+
+#### Storage Gaps
+| Feature | Status | Impact |
+|---------|--------|--------|
+| NVMe | Not Implemented | Modern VMs use NVMe emulation |
+| VirtIO-SCSI | Not Implemented | Proxmox default storage |
+| IDE/PIIX | Not Implemented | Legacy VM compatibility |
+| GPT Partition Write | Read-Only | Cannot modify partitions |
+
+#### Display Gaps
+| Feature | Status | Impact |
+|---------|--------|--------|
+| QXL Driver | Not Implemented | SPICE acceleration |
+| Bochs VGA | Not Implemented | SeaBIOS/legacy boot |
+| Cirrus VGA | Not Implemented | Oldest VMs |
+| Resolution Auto-Change | Partial | Host-requested resize pending |
+
+### Tier 2: Enhanced Guest Experience
+
+#### Shared Folders
+| Feature | Hypervisor | Protocol |
+|---------|------------|----------|
+| VirtIO-9P | QEMU/KVM | Plan 9 filesystem |
+| VirtIO-FS | QEMU/KVM | FUSE-based virtiofs |
+| HGFS | VMware | Host-Guest File System |
+| VBoxSF | VirtualBox | Shared Folder protocol |
+
+#### Paravirtualized Devices
+| Device | Hypervisor | Benefit |
+|--------|------------|---------|
+| VMXNET3 | VMware | 10GbE performance |
+| PVSCSI | VMware | Low-latency storage |
+| kvmclock | QEMU/KVM | Stable TSC source |
+| VirtIO-Input | QEMU/KVM | Modern HID replacement |
+| VirtIO-Sound | QEMU/KVM | Modern audio |
+
+### Tier 3: Advanced Features
+
+#### Agent Services
+| Service | Status | Features Needed |
+|---------|--------|-----------------|
+| QEMU GA | Partial | VirtIO-Console integration, fs-freeze |
+| SPICE Agent | Not Implemented | Clipboard, resolution, file transfer |
+| open-vm-tools | Partial | Full feature parity with VMware Tools |
+
+#### Graphics Acceleration
+| Feature | Status | Requirement |
+|---------|--------|-------------|
+| SVGA3D | Defined Only | 3D command submission |
+| VirtIO-GPU 3D | Not Implemented | Virgl 3D rendering |
+| VBoxSVGA | Not Implemented | VirtualBox 3D |
+
+---
+
+## Implementation Priority
+
+### Phase 1: Network Fundamentals (High Priority)
+1. **DHCP Client** - Essential for any VM deployment
+   - Location: `src/net/dhcp/`
+   - Dependencies: UDP (done), raw ethernet (done)
+   - Effort: Medium (DHCP state machine, option parsing)
+
+2. **IPv6 Core** - Required for modern infrastructure
+   - Location: `src/net/ipv6/`
+   - Components: ICMPv6, NDP, SLAAC
+   - Effort: High (new protocol layer)
+
+### Phase 2: Storage Expansion (High Priority)
+1. **NVMe Driver** - Modern VM default
+   - Location: `src/drivers/storage/nvme/`
+   - Pattern: Similar to AHCI async I/O
+   - Effort: Medium-High (NVMe queue pairs)
+
+2. **VirtIO-SCSI** - Proxmox default
+   - Location: `src/drivers/virtio/scsi.zig` or userspace
+   - Pattern: Extend VirtIO common layer
+   - Effort: Medium
+
+### Phase 3: Guest Integration (Medium Priority)
+1. **VirtIO-Input** - Replace legacy PS/2
+   - Location: `src/drivers/input/virtio_input.zig`
+   - Enables: Tablet mode, modern HID
+   - Effort: Low-Medium
+
+2. **kvmclock** - Stable timekeeping
+   - Location: `src/arch/x86_64/kernel/kvmclock.zig`
+   - Enables: TSC stability under migration
+   - Effort: Low
+
+3. **SPICE Agent** - Proxmox integration
+   - Location: `src/user/services/vdagent/`
+   - Enables: Clipboard, resolution
+   - Effort: Medium
+
+### Phase 4: Shared Folders (Medium Priority)
+1. **VirtIO-9P** - QEMU shared folders
+   - Location: `src/fs/9p/` or `src/user/drivers/virtio_9p/`
+   - Protocol: Plan 9 filesystem
+   - Effort: Medium-High (new filesystem)
+
+### Phase 5: Advanced Display (Lower Priority)
+1. **QXL Driver** - SPICE acceleration
+2. **SVGA3D** - VMware 3D
+3. **VirtIO-GPU 3D** - Virgl rendering
+
+---
+
+## VirtIO Device Coverage
+
+### Kernel Drivers (`src/drivers/virtio/`)
+| Device ID | Name | Status | Notes |
+|-----------|------|--------|-------|
+| 0x1001 | Network | Userspace | `virtio_net` |
+| 0x1002 | Block | Userspace | `virtio_blk` |
+| 0x1003 | Console | Userspace | `virtio_console` |
+| 0x1004 | Entropy (RNG) | Kernel | `rng.zig` |
+| 0x1005 | Balloon | Userspace | `virtio_balloon` |
+| 0x1009 | 9P Transport | Not Impl | Shared folders |
+| 0x1010 | GPU | Kernel | `virtio_gpu.zig` |
+| 0x1012 | Input | Not Impl | HID devices |
+| 0x1019 | FS | Not Impl | virtiofs |
+| 0x1021 | Sound | Not Impl | Audio |
+| 0x1035 | SCSI | Not Impl | Storage |
+
+### Modern Device IDs (1040+)
+Modern VirtIO devices use 0x1040 + device_type. The kernel should detect both legacy (0x1000+type) and modern (0x1040+type) device IDs.
+
+---
+
+## Network Stack Gaps Detail
+
+### Implemented
+- IPv4 with options filtering
+- ARP with anti-spoofing
+- ICMP with rate limiting
+- TCP with RFC 7323, SACK (IPv4 and IPv6)
+- UDP with checksum enforcement (IPv4 and IPv6)
+- DNS resolver with anti-spoofing
+- Socket API (SOCK_STREAM, SOCK_DGRAM)
+- Path MTU Discovery (IPv4)
+- IPv6 (RFC 8200) - RX/TX paths, extension header parsing, fragment reassembly
+- ICMPv6 (RFC 4443) - Echo, Dest Unreachable, Packet Too Big, Time Exceeded
+- NDP (RFC 4861) - Neighbor cache, NS/NA, RS/RA, DAD, packet queuing
+
+### Partially Implemented
+| Protocol | RFC | Status |
+|----------|-----|--------|
+| NDP | 4861 | RA received but prefix options not processed for SLAAC |
+| IPv6 PMTU | 8201 | Packet Too Big handled but no PMTU cache |
+| IPv6 Fragmentation TX | 8200 | Code exists but not wired up |
+
+### Not Implemented
+| Protocol | RFC | Use Case |
+|----------|-----|----------|
+| SLAAC | 4862 | IPv6 autoconfiguration |
+| DHCPv4 | 2131 | VM IP assignment |
+| DHCPv6 | 8415 | IPv6 IP assignment |
+| IGMP | 3376 | Multicast group membership |
+| Raw Sockets | - | ping, traceroute |
+| UNIX Sockets | - | Local IPC |
+| Netlink | - | Network configuration |
+
+---
+
+## Quick Reference: Hypervisor Detection
+
+The kernel detects hypervisors via CPUID and MSRs:
+
+| Hypervisor | Detection Method | Type ID |
+|------------|------------------|---------|
+| VMware | CPUID leaf 0x40000000 "VMwareVMware" | 1 |
+| VirtualBox | CPUID leaf 0x40000000 "VBoxVBoxVBox" | 2 |
+| KVM | CPUID leaf 0x40000000 "KVMKVMKVM" | 3 |
+| Hyper-V | CPUID leaf 0x40000000 "Microsoft Hv" | 4 |
+| Xen | CPUID leaf 0x40000000 "XenVMMXenVMM" | 5 |
+| QEMU (TCG) | Fallback when no hypervisor leaf | 6 |
+
+Syscall: `sys_get_hypervisor()` returns the type ID.

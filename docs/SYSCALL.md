@@ -176,7 +176,7 @@ src/kernel/sys/syscall/
         interrupt.zig  - Userspace interrupt waiting
         port_io.zig    - Raw port I/O access
         ring.zig       - Ring buffer IPC (create, attach, wait, notify)
-        hypervisor.zig - Hypervisor access (VMware backdoor, detection)
+        hypervisor.zig - Hypervisor access (VMware hypercall, detection)
 
     io/             - Async I/O
         root.zig       - I/O operations (read, write, writev, stat, fstat, ioctl, fcntl)
@@ -369,11 +369,11 @@ src/kernel/sys/syscall/
 
 | # | Name | Signature | Handler |
 |---|------|-----------|---------|
-| 1050 | vmware_backdoor | (regs_ptr) -> int | hypervisor.zig |
+| 1050 | vmware_hypercall | (regs_ptr) -> int | hypervisor.zig |
 | 1051 | get_hypervisor | () -> type | hypervisor.zig |
 
 **Notes:**
-- `vmware_backdoor`: Requires `CAP_HYPERVISOR` capability. Passes register struct to VMware backdoor interface.
+- `vmware_hypercall`: Requires `CAP_HYPERVISOR` capability. Passes register struct to VMware hypercall interface.
 - `get_hypervisor`: Returns hypervisor type enum (0=none, 1=vmware, 2=virtualbox, 3=kvm, 4=hyperv, 5=xen, 6=qemu_tcg).
 
 ### Implementation Status Legend

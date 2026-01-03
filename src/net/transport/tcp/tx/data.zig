@@ -44,7 +44,7 @@ pub fn transmitPendingData(tcb: *Tcb) bool {
 
     if (buffered == 0) return true;
 
-    const pmtu_mss = ipv4.getEffectiveMss(tcb.remote_ip);
+    const pmtu_mss = ipv4.getEffectiveMss(tcb.getRemoteIpV4());
     const effective_mss = @min(tcb.mss, pmtu_mss);
 
     const eff_wnd = @min(@as(u32, tcb.snd_wnd), tcb.cwnd);
@@ -117,7 +117,7 @@ pub fn retransmitFromSeq(tcb: *Tcb, seq: u32) bool {
     const offset: usize = @as(usize, seq -% tcb.snd_una);
     if (offset >= buffered) return false;
 
-    const pmtu_mss = ipv4.getEffectiveMss(tcb.remote_ip);
+    const pmtu_mss = ipv4.getEffectiveMss(tcb.getRemoteIpV4());
     const effective_mss = @min(tcb.mss, pmtu_mss);
     const remaining = buffered - offset;
     const send_len = @min(remaining, @as(usize, effective_mss));
@@ -143,7 +143,7 @@ pub fn selectRetransmitSeq(tcb: *Tcb) u32 {
         return tcb.snd_una;
     }
 
-    const pmtu_mss = ipv4.getEffectiveMss(tcb.remote_ip);
+    const pmtu_mss = ipv4.getEffectiveMss(tcb.getRemoteIpV4());
     const effective_mss = @min(tcb.mss, pmtu_mss);
     var seq = tcb.snd_una;
 

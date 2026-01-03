@@ -12,6 +12,7 @@ pub const sendAck = control.sendAck;
 pub const sendFin = control.sendFin;
 pub const sendRst = control.sendRst;
 pub const sendRstForPacket = control.sendRstForPacket;
+pub const sendRstForPacket6 = control.sendRstForPacket6;
 pub const calculateSegmentLength = data.calculateSegmentLength;
 pub const transmitPendingData = data.transmitPendingData;
 pub const retransmitLoss = data.retransmitLoss;

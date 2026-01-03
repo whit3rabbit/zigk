@@ -57,17 +57,24 @@ pub fn getsockname(sock_fd: usize, addr: *types.SockAddrIn) errors.SocketError!v
     const held = sock.lock.acquire();
     defer held.release();
 
-    // Get local address - use interface IP if bound to INADDR_ANY
-    var local_ip = sock.local_addr;
-    if (local_ip == 0) {
-        // Return actual interface IP if available
-        if (state.getInterface()) |iface| {
-            local_ip = iface.ip_addr;
+    // Get local address - use interface IP if bound to INADDR_ANY or .none
+    const local_ip: u32 = blk: {
+        if (sock.local_addr.isUnspecified()) {
+            // Return actual interface IP if available
+            if (state.getInterface()) |iface| {
+                break :blk iface.ip_addr;
+            }
+            break :blk 0;
         }
-    }
+        // Extract IPv4 address if bound to one
+        break :blk switch (sock.local_addr) {
+            .v4 => |ip| ip,
+            else => 0, // IPv6 addresses can't be returned via SockAddrIn
+        };
+    };
 
     // Fill in address structure
-    addr.family = types.AF_INET;
+    addr.family = @intCast(types.AF_INET);
     addr.port = types.htons(sock.local_port);
     addr.addr = types.htonl(local_ip);
     addr.zero = [_]u8{0} ** 8;
@@ -91,7 +98,7 @@ pub fn getpeername(sock_fd: usize, addr: *types.SockAddrIn) errors.SocketError!v
             }
             addr.family = types.AF_INET;
             addr.port = types.htons(tcb.remote_port);
-            addr.addr = types.htonl(tcb.remote_ip);
+            addr.addr = types.htonl(tcb.getRemoteIpV4());
             addr.zero = [_]u8{0} ** 8;
             return;
         }

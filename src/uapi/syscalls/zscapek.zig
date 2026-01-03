@@ -82,7 +82,7 @@ pub const SYS_ALLOC_IOMMU_DMA: usize = 1046;
 pub const SYS_FREE_IOMMU_DMA: usize = 1047;
 
 // Hypervisor Syscalls (1050-1059)
-/// Execute VMware backdoor command (requires CAP_HYPERVISOR)
-pub const SYS_VMWARE_BACKDOOR: usize = 1050;
+/// Execute VMware hypercall command (requires CAP_HYPERVISOR)
+pub const SYS_VMWARE_HYPERCALL: usize = 1050;
 /// Get hypervisor type (returns HypervisorType enum value)
 pub const SYS_GET_HYPERVISOR: usize = 1051;

@@ -50,7 +50,7 @@ pub const HypervisorType = enum {
     }
 
     /// Check if this is a VMware-compatible environment
-    /// (VirtualBox uses VMware backdoor for some features)
+    /// (VirtualBox uses VMware hypercall interface for some features)
     pub fn isVmwareCompatible(self: HypervisorType) bool {
         return self == .vmware or self == .virtualbox;
     }

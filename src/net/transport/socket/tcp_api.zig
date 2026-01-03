@@ -24,9 +24,13 @@ pub fn listen(sock_fd: usize, backlog_arg: usize) errors.SocketError!void {
 
     // Create listening TCB
     const iface = state.getInterface() orelse return errors.SocketError.NetworkDown;
-    const local_ip = if (sock.local_addr == 0) iface.ip_addr else sock.local_addr;
+    // Use interface IP if socket is unbound (local_addr is .none or unspecified v4/v6)
+    const local_addr = if (sock.local_addr.isUnspecified())
+        @import("../../core/addr.zig").IpAddr{ .v4 = iface.ip_addr }
+    else
+        sock.local_addr;
 
-    const listen_tcb = tcp.listen(local_ip, sock.local_port, sock_fd) catch {
+    const listen_tcb = tcp.listenIp(local_addr, sock.local_port, sock_fd) catch {
         return errors.SocketError.NoSocketsAvailable;
     };
 
@@ -131,14 +135,14 @@ pub fn accept(sock_fd: usize, peer_addr: ?*types.SockAddrIn) errors.SocketError!
     };
     new_sock.tcb = tcb;
     new_sock.local_port = tcb.local_port;
-    new_sock.local_addr = tcb.local_ip;
+    new_sock.local_addr = tcb.local_addr;
     new_sock.tcp_nodelay = tcb.nodelay;
     state.retainPort(new_sock.local_port);
     new_sock.tcp_nodelay = tcb.nodelay;
 
     // Fill peer address if requested
     if (peer_addr) |addr| {
-        addr.* = types.SockAddrIn.init(tcb.remote_ip, tcb.remote_port);
+        addr.* = types.SockAddrIn.init(tcb.getRemoteIpV4(), tcb.remote_port);
     }
 
     return new_sock_fd;
@@ -160,18 +164,25 @@ pub fn connect(sock_fd: usize, dest_addr: *const types.SockAddrIn) errors.Socket
     }
 
     const iface = state.getInterface() orelse return errors.SocketError.NetworkDown;
+    const IpAddr = @import("../../core/addr.zig").IpAddr;
 
     // Auto-bind if not bound
     if (sock.local_port == 0) {
         sock.local_port = state.allocateEphemeralPort();
     }
 
-    const local_ip = if (sock.local_addr == 0) iface.ip_addr else sock.local_addr;
-    const remote_ip = dest_addr.getAddr();
+    // Use interface IP if socket is unbound
+    const local_addr = if (sock.local_addr.isUnspecified())
+        IpAddr{ .v4 = iface.ip_addr }
+    else
+        sock.local_addr;
+
+    // Destination is IPv4 from SockAddrIn
+    const remote_addr = IpAddr{ .v4 = dest_addr.getAddr() };
     const remote_port = dest_addr.getPort();
 
-    // Initiate connection
-    const tcb = tcp.connect(local_ip, sock.local_port, remote_ip, remote_port) catch |err| {
+    // Initiate connection using polymorphic API
+    const tcb = tcp.connectIp(local_addr, sock.local_port, remote_addr, remote_port) catch |err| {
         return switch (err) {
             tcp.TcpError.NoResources => errors.SocketError.NoSocketsAvailable,
             tcp.TcpError.AlreadyConnected => errors.SocketError.AlreadyConnected,
@@ -407,7 +418,7 @@ pub fn acceptAsync(sock_fd: usize, request: *IoRequest) errors.SocketError!bool 
     };
     new_sock.tcb = tcb;
     new_sock.local_port = tcb.local_port;
-    new_sock.local_addr = tcb.local_ip;
+    new_sock.local_addr = tcb.local_addr;
     state.retainPort(new_sock.local_port);
     new_sock.tcp_nodelay = tcb.nodelay;
 
@@ -521,18 +532,25 @@ pub fn connectAsync(sock_fd: usize, request: *IoRequest, dest_addr: *const types
         _ = request.complete(.{ .err = error.ENETDOWN });
         return true;
     };
+    const IpAddr = @import("../../core/addr.zig").IpAddr;
 
     // Auto-bind if not bound
     if (sock.local_port == 0) {
         sock.local_port = state.allocateEphemeralPort();
     }
 
-    const local_ip = if (sock.local_addr == 0) iface.ip_addr else sock.local_addr;
-    const remote_ip = dest_addr.getAddr();
+    // Use interface IP if socket is unbound
+    const local_addr = if (sock.local_addr.isUnspecified())
+        IpAddr{ .v4 = iface.ip_addr }
+    else
+        sock.local_addr;
+
+    // Destination is IPv4 from SockAddrIn
+    const remote_addr = IpAddr{ .v4 = dest_addr.getAddr() };
     const remote_port = dest_addr.getPort();
 
-    // Initiate connection
-    const tcb = tcp.connect(local_ip, sock.local_port, remote_ip, remote_port) catch |err| {
+    // Initiate connection using polymorphic API
+    const tcb = tcp.connectIp(local_addr, sock.local_port, remote_addr, remote_port) catch |err| {
         const syscall_err = switch (err) {
             tcp.TcpError.NoResources => error.ENOMEM,
             tcp.TcpError.AlreadyConnected => error.EISCONN,
@@ -584,7 +602,7 @@ pub fn completePendingAccept(socket_idx: usize, tcb: *tcp.Tcb) bool {
     };
     new_sock.tcb = tcb;
     new_sock.local_port = tcb.local_port;
-    new_sock.local_addr = tcb.local_ip;
+    new_sock.local_addr = tcb.local_addr;
 
     _ = request.complete(.{ .success = new_sock_fd });
     return true;

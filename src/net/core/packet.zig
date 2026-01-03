@@ -41,9 +41,13 @@ pub const PacketBuffer = struct {
     src_mac: [6]u8,
     src_ip: u32,
     src_port: u16,
-    
+
     /// Destination information (essential for reassembled packets where IP header is stripped)
     dst_ip: u32,
+
+    /// IPv6 source and destination addresses
+    src_ipv6: [16]u8,
+    dst_ipv6: [16]u8,
 
     /// Protocol info
     ethertype: u16,
@@ -71,6 +75,8 @@ pub const PacketBuffer = struct {
             .src_ip = 0,
             .src_port = 0,
             .dst_ip = 0,
+            .src_ipv6 = [_]u8{0} ** 16,
+            .dst_ipv6 = [_]u8{0} ** 16,
             .ethertype = 0,
             .ip_protocol = 0,
             .is_broadcast = false,
@@ -264,6 +270,149 @@ pub const Ipv4Header = extern struct {
     }
 };
 
+/// IPv6 header size (fixed, no variable-length like IPv4 options)
+pub const IPV6_HEADER_SIZE: usize = 40;
+
+/// IPv6 header (40 bytes, fixed size per RFC 8200)
+/// Extension headers follow after the base header if present.
+pub const Ipv6Header = extern struct {
+    /// Version (4 bits) + Traffic Class (8 bits) + Flow Label (20 bits)
+    /// In network byte order: [ver:4][tc:8][flow:20]
+    version_tc_flow: u32,
+    /// Payload length (excludes this header, includes extension headers)
+    payload_length: u16,
+    /// Next header type (protocol number or extension header type)
+    next_header: u8,
+    /// Hop limit (equivalent to TTL in IPv4)
+    hop_limit: u8,
+    /// Source address (128 bits, network byte order)
+    src_addr: [16]u8,
+    /// Destination address (128 bits, network byte order)
+    dst_addr: [16]u8,
+
+    // Next Header / Protocol values
+    pub const PROTO_HOPOPT: u8 = 0; // Hop-by-Hop Options
+    pub const PROTO_ICMP: u8 = 1; // ICMP (IPv4, not used in IPv6)
+    pub const PROTO_TCP: u8 = 6;
+    pub const PROTO_UDP: u8 = 17;
+    pub const PROTO_ROUTING: u8 = 43; // Routing Header
+    pub const PROTO_FRAGMENT: u8 = 44; // Fragment Header
+    pub const PROTO_ESP: u8 = 50; // Encapsulating Security Payload
+    pub const PROTO_AH: u8 = 51; // Authentication Header
+    pub const PROTO_ICMPV6: u8 = 58; // ICMPv6
+    pub const PROTO_NONE: u8 = 59; // No Next Header
+    pub const PROTO_DSTOPTS: u8 = 60; // Destination Options
+
+    /// Default hop limit for outgoing packets
+    pub const DEFAULT_HOP_LIMIT: u8 = 64;
+
+    /// Get IP version (should always be 6)
+    pub fn getVersion(self: *align(1) const Ipv6Header) u4 {
+        return @truncate(@byteSwap(self.version_tc_flow) >> 28);
+    }
+
+    /// Get traffic class (8 bits, similar to IPv4 TOS/DSCP)
+    pub fn getTrafficClass(self: *align(1) const Ipv6Header) u8 {
+        return @truncate((@byteSwap(self.version_tc_flow) >> 20) & 0xFF);
+    }
+
+    /// Get flow label (20 bits, for QoS and traffic management)
+    pub fn getFlowLabel(self: *align(1) const Ipv6Header) u20 {
+        return @truncate(@byteSwap(self.version_tc_flow) & 0xFFFFF);
+    }
+
+    /// Set version, traffic class, and flow label
+    pub fn setVersionTcFlow(self: *align(1) Ipv6Header, version: u4, tc: u8, flow: u20) void {
+        const val: u32 = (@as(u32, version) << 28) |
+            (@as(u32, tc) << 20) |
+            @as(u32, flow);
+        self.version_tc_flow = @byteSwap(val);
+    }
+
+    /// Get payload length in host byte order
+    pub fn getPayloadLength(self: *align(1) const Ipv6Header) u16 {
+        return @byteSwap(self.payload_length);
+    }
+
+    /// Set payload length from host byte order
+    pub fn setPayloadLength(self: *align(1) Ipv6Header, len: u16) void {
+        self.payload_length = @byteSwap(len);
+    }
+
+    /// Check if next_header is an extension header type
+    pub fn isExtensionHeader(next_hdr: u8) bool {
+        return next_hdr == PROTO_HOPOPT or
+            next_hdr == PROTO_ROUTING or
+            next_hdr == PROTO_FRAGMENT or
+            next_hdr == PROTO_DSTOPTS or
+            next_hdr == PROTO_AH;
+        // Note: ESP (50) is special - it encrypts the rest
+    }
+
+    comptime {
+        if (@sizeOf(Ipv6Header) != 40) @compileError("Ipv6Header must be 40 bytes");
+    }
+};
+
+/// IPv6 Extension Header common format (first 2 bytes)
+/// Used for Hop-by-Hop, Routing, and Destination Options headers.
+/// Fragment header has a different format.
+pub const Ipv6ExtHeader = extern struct {
+    next_header: u8,
+    /// Length in 8-octet units, NOT counting the first 8 octets
+    hdr_ext_len: u8,
+
+    /// Get total header length in bytes
+    pub fn getTotalLength(self: *align(1) const Ipv6ExtHeader) usize {
+        return (@as(usize, self.hdr_ext_len) + 1) * 8;
+    }
+};
+
+/// IPv6 Fragment Header (8 bytes)
+pub const Ipv6FragmentHeader = extern struct {
+    next_header: u8,
+    reserved: u8,
+    /// Fragment offset (13 bits) + reserved (2 bits) + M flag (1 bit)
+    frag_offset_m: u16,
+    /// Identification (for reassembly)
+    identification: u32,
+
+    /// Get fragment offset in 8-octet units (0-8191)
+    pub fn getFragmentOffset(self: *align(1) const Ipv6FragmentHeader) u13 {
+        return @truncate(@byteSwap(self.frag_offset_m) >> 3);
+    }
+
+    /// Get fragment offset in bytes
+    pub fn getFragmentOffsetBytes(self: *align(1) const Ipv6FragmentHeader) usize {
+        return @as(usize, self.getFragmentOffset()) * 8;
+    }
+
+    /// Check if More Fragments flag is set
+    pub fn hasMoreFragments(self: *align(1) const Ipv6FragmentHeader) bool {
+        return (@byteSwap(self.frag_offset_m) & 1) != 0;
+    }
+
+    /// Check if this is the first fragment (offset == 0)
+    pub fn isFirstFragment(self: *align(1) const Ipv6FragmentHeader) bool {
+        return self.getFragmentOffset() == 0;
+    }
+
+    /// Check if this is the last fragment (M flag == 0)
+    pub fn isLastFragment(self: *align(1) const Ipv6FragmentHeader) bool {
+        return !self.hasMoreFragments();
+    }
+
+    /// Set fragment offset and M flag
+    pub fn setFragmentOffsetM(self: *align(1) Ipv6FragmentHeader, offset: u13, more: bool) void {
+        const val: u16 = (@as(u16, offset) << 3) | @as(u16, if (more) 1 else 0);
+        self.frag_offset_m = @byteSwap(val);
+    }
+
+    comptime {
+        if (@sizeOf(Ipv6FragmentHeader) != 8) @compileError("Ipv6FragmentHeader must be 8 bytes");
+    }
+};
+
 /// UDP header (8 bytes)
 pub const UdpHeader = extern struct {
     src_port: u16,  // Network byte order
@@ -400,6 +549,42 @@ pub fn getIpv4Header(buf: []const u8, offset: usize) ?*align(1) const Ipv4Header
 /// Get mutable IPv4 header from buffer with bounds checking.
 pub fn getIpv4HeaderMut(buf: []u8, offset: usize) ?*align(1) Ipv4Header {
     const end = std.math.add(usize, offset, IP_HEADER_SIZE) catch return null;
+    if (end > buf.len) return null;
+    return @ptrCast(&buf[offset]);
+}
+
+/// Get IPv6 header from buffer with bounds checking.
+/// Returns null if buffer is too small to contain an IPv6 header.
+pub fn getIpv6Header(buf: []const u8, offset: usize) ?*align(1) const Ipv6Header {
+    const end = std.math.add(usize, offset, IPV6_HEADER_SIZE) catch return null;
+    if (end > buf.len) return null;
+    return @ptrCast(&buf[offset]);
+}
+
+/// Get mutable IPv6 header from buffer with bounds checking.
+pub fn getIpv6HeaderMut(buf: []u8, offset: usize) ?*align(1) Ipv6Header {
+    const end = std.math.add(usize, offset, IPV6_HEADER_SIZE) catch return null;
+    if (end > buf.len) return null;
+    return @ptrCast(&buf[offset]);
+}
+
+/// Get IPv6 extension header from buffer with bounds checking.
+pub fn getIpv6ExtHeader(buf: []const u8, offset: usize) ?*align(1) const Ipv6ExtHeader {
+    const end = std.math.add(usize, offset, 2) catch return null;
+    if (end > buf.len) return null;
+    return @ptrCast(&buf[offset]);
+}
+
+/// Get IPv6 fragment header from buffer with bounds checking.
+pub fn getIpv6FragmentHeader(buf: []const u8, offset: usize) ?*align(1) const Ipv6FragmentHeader {
+    const end = std.math.add(usize, offset, 8) catch return null;
+    if (end > buf.len) return null;
+    return @ptrCast(&buf[offset]);
+}
+
+/// Get mutable IPv6 fragment header from buffer with bounds checking.
+pub fn getIpv6FragmentHeaderMut(buf: []u8, offset: usize) ?*align(1) Ipv6FragmentHeader {
+    const end = std.math.add(usize, offset, 8) catch return null;
     if (end > buf.len) return null;
     return @ptrCast(&buf[offset]);
 }

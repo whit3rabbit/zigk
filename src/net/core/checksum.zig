@@ -184,6 +184,131 @@ pub fn verifyIpChecksum(header: []const u8) bool {
     return (@as(u16, @truncate(sum)) == 0xFFFF);
 }
 
+// =============================================================================
+// IPv6 Pseudo-Header Checksums (RFC 8200 Section 8.1)
+// =============================================================================
+// IPv6 uses a different pseudo-header format than IPv4:
+//   Source Address (16 bytes)
+//   Destination Address (16 bytes)
+//   Upper-Layer Packet Length (4 bytes, zero-extended)
+//   Zero (3 bytes)
+//   Next Header (1 byte)
+
+/// Calculate checksum with IPv6 pseudo-header.
+/// Used by TCP, UDP, and ICMPv6 over IPv6.
+///
+/// Parameters:
+///   src_addr: Source IPv6 address (16 bytes, network byte order)
+///   dst_addr: Destination IPv6 address (16 bytes, network byte order)
+///   next_header: Upper-layer protocol (6=TCP, 17=UDP, 58=ICMPv6)
+///   payload: Upper-layer header + data
+///
+/// Returns: Ones' complement checksum for direct assignment to header field.
+///   Returns 0xFFFF instead of 0x0000 (per RFC 768/793 conventions).
+///
+/// SECURITY: Same considerations as IPv4 checksums - caller must validate
+/// payload length against actual buffer size before calling.
+pub fn checksumWithIpv6Pseudo(
+    src_addr: [16]u8,
+    dst_addr: [16]u8,
+    next_header: u8,
+    payload: []const u8,
+) u16 {
+    // SECURITY: Reject segments that exceed maximum length.
+    // IPv6 payload_length is 16-bit (max 65535), but with jumbograms could be larger.
+    // We don't support jumbograms, so reject anything over 65535.
+    if (payload.len > 65535) {
+        return 0; // Invalid - checksum will fail validation
+    }
+
+    var sum: u32 = 0;
+
+    // Add source address (16 bytes = 8 words)
+    var i: usize = 0;
+    while (i < 16) : (i += 2) {
+        const word = (@as(u32, src_addr[i]) << 8) | @as(u32, src_addr[i + 1]);
+        sum += word;
+    }
+
+    // Add destination address (16 bytes = 8 words)
+    i = 0;
+    while (i < 16) : (i += 2) {
+        const word = (@as(u32, dst_addr[i]) << 8) | @as(u32, dst_addr[i + 1]);
+        sum += word;
+    }
+
+    // Add upper-layer packet length (4 bytes, big-endian)
+    // IPv6 pseudo-header uses 32-bit length field
+    const len32: u32 = @intCast(payload.len);
+    sum += (len32 >> 16) & 0xFFFF; // High 16 bits
+    sum += len32 & 0xFFFF; // Low 16 bits
+
+    // Add zero (3 bytes) + next header (1 byte)
+    // The 3 zero bytes don't contribute to the sum
+    sum += @as(u32, next_header);
+
+    // Add payload (upper-layer header + data)
+    i = 0;
+    while (i + 1 < payload.len) : (i += 2) {
+        const word = (@as(u32, payload[i]) << 8) | @as(u32, payload[i + 1]);
+        sum += word;
+    }
+
+    // Handle odd byte
+    if (i < payload.len) {
+        sum += @as(u32, payload[i]) << 8;
+    }
+
+    // Fold 32-bit sum to 16 bits
+    while (sum > 0xFFFF) {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+
+    // Return ones' complement
+    const result = ~@as(u16, @truncate(sum));
+    return if (result == 0) 0xFFFF else result;
+}
+
+/// Calculate TCP checksum over IPv6 (RFC 8200 + RFC 793).
+/// Protocol value (6) is passed to the pseudo-header.
+pub fn tcpChecksum6(src_addr: [16]u8, dst_addr: [16]u8, tcp_segment: []const u8) u16 {
+    return checksumWithIpv6Pseudo(src_addr, dst_addr, 6, tcp_segment);
+}
+
+/// Calculate UDP checksum over IPv6 (RFC 8200 + RFC 768).
+/// Protocol value (17) is passed to the pseudo-header.
+/// Note: Unlike IPv4, UDP checksum is MANDATORY over IPv6.
+pub fn udpChecksum6(src_addr: [16]u8, dst_addr: [16]u8, udp_segment: []const u8) u16 {
+    return checksumWithIpv6Pseudo(src_addr, dst_addr, 17, udp_segment);
+}
+
+/// Calculate ICMPv6 checksum (RFC 4443).
+/// Protocol value (58) is passed to the pseudo-header.
+/// ICMPv6 ALWAYS includes the pseudo-header in checksum calculation.
+pub fn icmpv6Checksum(src_addr: [16]u8, dst_addr: [16]u8, icmpv6_message: []const u8) u16 {
+    return checksumWithIpv6Pseudo(src_addr, dst_addr, 58, icmpv6_message);
+}
+
+/// Verify ICMPv6 checksum by computing and checking if result is valid.
+/// Returns true if checksum is valid, false otherwise.
+pub fn verifyIcmpv6Checksum(
+    src_addr: [16]u8,
+    dst_addr: [16]u8,
+    icmpv6_message: []const u8,
+) bool {
+    // When computing checksum over data that includes its own checksum field,
+    // the result should be 0xFFFF if the checksum is correct.
+    // However, our function replaces 0 with 0xFFFF, so we need special handling.
+
+    // Compute checksum with the existing checksum field included
+    const computed = checksumWithIpv6Pseudo(src_addr, dst_addr, 58, icmpv6_message);
+
+    // If the original checksum was correct, adding it to the sum should give 0xFFFF
+    // after ones' complement. Since we return ~sum, a valid checksum gives 0.
+    // But we convert 0 to 0xFFFF, so valid checksum gives 0xFFFF.
+    return computed == 0xFFFF;
+}
+
 /// Incremental checksum update when modifying a single 16-bit field (RFC 1624).
 /// Use this for efficient checksum recalculation when only one field changes
 /// (e.g., TTL decrement during IP forwarding).
