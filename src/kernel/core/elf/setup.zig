@@ -152,7 +152,7 @@ pub fn setupStack(
     }
 
     // Align to 16 bytes
-    sp = sp & ~@as(u64, 15);
+    sp = std.mem.alignBackward(u64, sp, 16);
     try checkStackBounds(sp, stack_base);
 
     // Push auxv NULL terminator (AT_NULL = 0, 0)
@@ -282,8 +282,7 @@ pub fn setupTls(
 
     // TCB pointer (TP) must be aligned to p_align
     // We use the preferred_tp as a starting point and align it up
-    const align_mask = alignment - 1;
-    const tp = (preferred_tp + align_mask) & ~align_mask;
+    const tp = std.mem.alignForward(u64, preferred_tp, alignment);
 
     // TLS data is located at tp - aligned_size
     // According to x86_64 ABI Variant II
@@ -307,7 +306,7 @@ pub fn setupTls(
     // Align allocation to page boundaries
     const page_size = pmm.PAGE_SIZE;
     // Ensure we start allocating at a page boundary below or at tls_start
-    const alloc_start = tls_start & ~(page_size - 1);
+    const alloc_start = std.mem.alignBackward(u64, tls_start, page_size);
     // Ensure we end allocating at a page boundary above or at tp + tcb_size
     const alloc_end = std.mem.alignForward(u64, tp + tcb_size, page_size);
     const total_size = alloc_end - alloc_start;
