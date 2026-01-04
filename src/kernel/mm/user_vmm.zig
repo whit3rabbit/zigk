@@ -659,7 +659,7 @@ pub const UserVmm = struct {
         }
 
         // 4. Check if page is already mapped (another thread handled it, or spurious fault)
-        const page_base = addr & ~@as(u64, pmm.PAGE_SIZE - 1);
+        const page_base = std.mem.alignBackward(u64, addr, pmm.PAGE_SIZE);
         if (vmm.translate(self.pml4_phys, page_base) != null) {
             // Page is already mapped - success (race with another fault handler)
             console.debug("PageFault: page at {x} already mapped (race)", .{page_base});

@@ -4,6 +4,7 @@
 // This module provides the low-level virtqueue primitives used by all
 // VirtIO device drivers (GPU, block, network, etc.).
 
+const std = @import("std");
 const pmm = @import("pmm");
 const hal = @import("hal");
 
@@ -93,8 +94,8 @@ pub const Virtqueue = struct {
         const used_size = 6 + @as(usize, queue_size) * @sizeOf(VirtqUsedElem); // flags + idx + ring[n] + avail_event
 
         // Total size with alignment
-        const desc_avail_size = alignUp(desc_size + avail_size, 4096);
-        const total_size = desc_avail_size + alignUp(used_size, 4096);
+        const desc_avail_size = std.mem.alignForward(usize, desc_size + avail_size, 4096);
+        const total_size = desc_avail_size + std.mem.alignForward(usize, used_size, 4096);
         const pages_needed = (total_size + 4095) / 4096;
 
         // Allocate contiguous physical pages
@@ -314,11 +315,6 @@ pub const Virtqueue = struct {
         @memset(self.used.ring[0..self.size], VirtqUsedElem{ .id = 0, .len = 0 });
     }
 };
-
-/// Align value up to alignment boundary
-fn alignUp(value: usize, alignment: usize) usize {
-    return (value + alignment - 1) & ~(alignment - 1);
-}
 
 // VirtIO PCI capability types
 pub const VIRTIO_PCI_CAP_COMMON_CFG: u8 = 1;

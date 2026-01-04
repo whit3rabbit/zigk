@@ -257,7 +257,7 @@ pub fn getIndices(virt_addr: u64) struct { pml4: usize, pdpt: usize, pd: usize, 
 
 /// Align address down to page boundary
 pub fn pageAlignDown(addr: u64) u64 {
-    return addr & ~@as(u64, PAGE_SIZE - 1);
+    return std.mem.alignBackward(u64, addr, PAGE_SIZE);
 }
 
 /// Align address up to page boundary
@@ -265,13 +265,13 @@ pub fn pageAlignDown(addr: u64) u64 {
 /// Returns null if the alignment would overflow.
 pub fn pageAlignUp(addr: u64) ?u64 {
     const sum = std.math.add(u64, addr, PAGE_SIZE - 1) catch return null;
-    return sum & ~@as(u64, PAGE_SIZE - 1);
+    return std.mem.alignBackward(u64, sum, PAGE_SIZE);
 }
 
 /// Align address up to page boundary (unchecked, for backwards compatibility)
 /// WARNING: Only use when addr is known to be well below u64::MAX
 pub fn pageAlignUpUnchecked(addr: u64) u64 {
-    return (addr + PAGE_SIZE - 1) & ~@as(u64, PAGE_SIZE - 1);
+    return std.mem.alignForward(u64, addr, PAGE_SIZE);
 }
 
 /// Check if address is page-aligned

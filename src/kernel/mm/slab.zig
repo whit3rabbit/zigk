@@ -480,7 +480,7 @@ pub fn free(ptr: []u8) bool {
 
     // Find which slab this pointer belongs to by aligning down to slab boundary
     const ptr_addr = @intFromPtr(ptr.ptr);
-    const slab_addr = ptr_addr & ~@as(usize, SLAB_SIZE - 1);
+    const slab_addr = std.mem.alignBackward(usize, ptr_addr, SLAB_SIZE);
     const slab: *SlabHeader = @ptrFromInt(slab_addr);
 
     // SECURITY: First validate magic canary to detect fake slab injection
