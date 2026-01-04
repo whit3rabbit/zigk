@@ -1,6 +1,11 @@
 // ICMPv6 Types and Constants
 //
 // Implements RFC 4443 (ICMPv6) message types and structures.
+// Also includes NDP (RFC 4861) constants.
+//
+// References:
+// - RFC 4443: Internet Control Message Protocol (ICMPv6) for the IPv6 Specification
+// - RFC 4861: Neighbor Discovery for IP version 6 (IPv6)
 
 const std = @import("std");
 
@@ -22,6 +27,7 @@ pub const Icmpv6Header = extern struct {
 pub const ICMPV6_HEADER_SIZE: usize = 4;
 
 /// ICMPv6 Echo Header (extends base header with identifier and sequence)
+/// RFC 4443 Section 4.1, 4.2
 pub const Icmpv6EchoHeader = extern struct {
     msg_type: u8,
     code: u8,
@@ -86,7 +92,7 @@ pub const Icmpv6ParamProblem = extern struct {
 
 /// Destination Unreachable (RFC 4443 Section 3.1)
 pub const TYPE_DEST_UNREACHABLE: u8 = 1;
-/// Packet Too Big (RFC 4443 Section 3.2) - Used for PMTUD
+/// Packet Too Big (RFC 4443 Section 3.2) - Used for PMTUD (RFC 8201)
 pub const TYPE_PACKET_TOO_BIG: u8 = 2;
 /// Time Exceeded (RFC 4443 Section 3.3)
 pub const TYPE_TIME_EXCEEDED: u8 = 3;
@@ -103,15 +109,15 @@ pub const TYPE_ECHO_REQUEST: u8 = 128;
 pub const TYPE_ECHO_REPLY: u8 = 129;
 
 // NDP Message Types (RFC 4861) - Handled by NDP module
-/// Router Solicitation
+/// Router Solicitation (RFC 4861 Section 4.1)
 pub const TYPE_ROUTER_SOLICITATION: u8 = 133;
-/// Router Advertisement
+/// Router Advertisement (RFC 4861 Section 4.2)
 pub const TYPE_ROUTER_ADVERTISEMENT: u8 = 134;
-/// Neighbor Solicitation
+/// Neighbor Solicitation (RFC 4861 Section 4.3)
 pub const TYPE_NEIGHBOR_SOLICITATION: u8 = 135;
-/// Neighbor Advertisement
+/// Neighbor Advertisement (RFC 4861 Section 4.4)
 pub const TYPE_NEIGHBOR_ADVERTISEMENT: u8 = 136;
-/// Redirect
+/// Redirect (RFC 4861 Section 4.5)
 pub const TYPE_REDIRECT: u8 = 137;
 
 // =============================================================================

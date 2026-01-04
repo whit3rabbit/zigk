@@ -3,9 +3,9 @@
 // Implements RFC 4861 transmit functions for Neighbor Discovery.
 //
 // Functions:
-// - sendNeighborSolicitation: Address resolution and DAD
-// - sendNeighborAdvertisement: Response to NS
-// - sendRouterSolicitation: Request router info
+// - sendNeighborSolicitation: Address resolution and DAD (RFC 4861 Section 7.2.2)
+// - sendNeighborAdvertisement: Response to NS (RFC 4861 Section 7.2.4)
+// - sendRouterSolicitation: Request router info (RFC 4861 Section 6.3.7)
 
 const std = @import("std");
 const packet = @import("../../core/packet.zig");

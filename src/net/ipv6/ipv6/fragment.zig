@@ -8,6 +8,10 @@
 // - 32-bit identification field (vs 16-bit in IPv4)
 // - Fragment header is an extension header, not part of base header
 // - RFC 5722 mandates dropping overlapping fragments (same as modern IPv4)
+//
+// References:
+// - RFC 8200: Internet Protocol, Version 6 (IPv6) Specification
+// - RFC 5722: Handling of Overlapping IPv6 Fragments
 
 const std = @import("std");
 const packet = @import("../../core/packet.zig");

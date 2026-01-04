@@ -4,10 +4,10 @@
 // Implements RFC 8200 (IPv6 Specification).
 //
 // Processing Steps:
-// 1. Validate version (must be 6)
+// 1. Validate version (must be 6) (RFC 8200 Section 3)
 // 2. Validate payload length against buffer
-// 3. Parse extension header chain (with DoS limits)
-// 4. Handle fragmentation via Fragment extension header
+// 3. Parse extension header chain (with DoS limits) (RFC 8200 Section 4)
+// 4. Handle fragmentation via Fragment extension header (RFC 8200 Section 4.5)
 // 5. Dispatch to upper-layer protocol (ICMPv6, TCP, UDP)
 
 const std = @import("std");
@@ -25,9 +25,9 @@ const Interface = interface.Interface;
 ///
 /// Performs the following steps:
 /// 1. Validation: Version (6), payload length bounds.
-/// 2. Extension Headers: Parse chain with MAX_EXTENSION_HEADERS limit.
+/// 2. Extension Headers: Parse chain with MAX_EXTENSION_HEADERS limit (RFC 8200 Section 4).
 /// 3. Destination Check: Unicast (to us), or Multicast we subscribed to.
-/// 4. Fragmentation: Handle via Fragment extension header (Phase 3b).
+/// 4. Fragmentation: Handle via Fragment extension header (RFC 8200 Section 4.5).
 /// 5. Dispatch: Route to appropriate transport protocol (ICMPv6, UDP, TCP).
 pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
     // Get IPv6 header with bounds check
@@ -146,6 +146,7 @@ fn isDestinationForUs(iface: *Interface, dst_addr: [16]u8) bool {
 }
 
 /// Parse IPv6 extension header chain.
+/// RFC 8200 Section 4: Extension Headers
 /// Returns the final next_header (upper-layer protocol) and transport offset.
 /// Returns null if parsing fails or DoS limit exceeded.
 fn parseExtensionHeaders(pkt: *PacketBuffer, first_next_header: u8) ?types.ExtensionParseResult {

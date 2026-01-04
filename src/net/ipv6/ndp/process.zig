@@ -3,7 +3,7 @@
 // Implements RFC 4861 receive path for Neighbor Discovery messages.
 //
 // Security considerations:
-// - Hop Limit must be 255 (link-local only)
+// - Hop Limit must be 255 (link-local only) (RFC 4861 Section 11.2)
 // - ICMPv6 checksum validation (done by ICMPv6 layer)
 // - Source address validation
 // - Option length validation
@@ -43,6 +43,7 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer, msg_type: u8) bool {
 // Neighbor Solicitation (Type 135)
 // =============================================================================
 
+/// Handle Neighbor Solicitation (RFC 4861 Section 7.1.1)
 fn handleNeighborSolicitation(iface: *Interface, pkt: *PacketBuffer) bool {
     // Validate minimum size
     const ns_offset = pkt.transport_offset + icmpv6_types.ICMPV6_HEADER_SIZE;
@@ -58,7 +59,7 @@ fn handleNeighborSolicitation(iface: *Interface, pkt: *PacketBuffer) bool {
         return false;
     }
 
-    // RFC 4861 7.1.1: Check if target is our address
+    // Check if target is our address
     if (!isOurAddress(iface, target_addr)) {
         return false; // Not for us
     }
@@ -114,6 +115,7 @@ fn handleNeighborSolicitation(iface: *Interface, pkt: *PacketBuffer) bool {
 // Neighbor Advertisement (Type 136)
 // =============================================================================
 
+/// Handle Neighbor Advertisement (RFC 4861 Section 7.1.2)
 fn handleNeighborAdvertisement(iface: *Interface, pkt: *PacketBuffer) bool {
     // Validate minimum size
     const na_offset = pkt.transport_offset + icmpv6_types.ICMPV6_HEADER_SIZE;
@@ -156,6 +158,7 @@ fn handleNeighborAdvertisement(iface: *Interface, pkt: *PacketBuffer) bool {
 // Router Solicitation (Type 133)
 // =============================================================================
 
+/// Handle Router Solicitation (RFC 4861 Section 6.2.6)
 fn handleRouterSolicitation(iface: *Interface, pkt: *PacketBuffer) bool {
     // We're not a router, so just ignore RS
     _ = iface;
@@ -167,6 +170,7 @@ fn handleRouterSolicitation(iface: *Interface, pkt: *PacketBuffer) bool {
 // Router Advertisement (Type 134)
 // =============================================================================
 
+/// Handle Router Advertisement (RFC 4861 Section 6.1.2)
 fn handleRouterAdvertisement(iface: *Interface, pkt: *PacketBuffer) bool {
     // Validate minimum size
     const ra_offset = pkt.transport_offset + icmpv6_types.ICMPV6_HEADER_SIZE;
@@ -209,6 +213,7 @@ fn handleRouterAdvertisement(iface: *Interface, pkt: *PacketBuffer) bool {
 // Redirect (Type 137)
 // =============================================================================
 
+/// Handle Redirect (RFC 4861 Section 8.1)
 fn handleRedirect(iface: *Interface, pkt: *PacketBuffer) bool {
     // TODO: Implement redirect processing
     // For now, ignore redirects (security: redirects can be spoofed)

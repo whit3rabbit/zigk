@@ -2,6 +2,11 @@
 //
 // Contains protocol constants, extension header types, and helper structures
 // for IPv6 packet processing.
+//
+// References:
+// - RFC 8200: Internet Protocol, Version 6 (IPv6) Specification
+// - RFC 4291: IP Version 6 Addressing Architecture
+// - RFC 4007: IPv6 Scoped Address Architecture
 
 const std = @import("std");
 const packet = @import("../../core/packet.zig");
@@ -16,20 +21,21 @@ pub const Ipv6FragmentHeader = packet.Ipv6FragmentHeader;
 // =============================================================================
 
 /// Next Header / Protocol values (same as IPv4 protocol field)
-pub const PROTO_HOPOPT: u8 = 0; // Hop-by-Hop Options
+/// See IANA Protocol Numbers
+pub const PROTO_HOPOPT: u8 = 0; // Hop-by-Hop Options (RFC 8200)
 pub const PROTO_ICMP: u8 = 1; // ICMP (IPv4 only)
-pub const PROTO_TCP: u8 = 6;
-pub const PROTO_UDP: u8 = 17;
+pub const PROTO_TCP: u8 = 6; // RFC 793
+pub const PROTO_UDP: u8 = 17; // RFC 768
 pub const PROTO_ENCAP: u8 = 41; // IPv6 Encapsulation
-pub const PROTO_ROUTING: u8 = 43; // Routing Header
-pub const PROTO_FRAGMENT: u8 = 44; // Fragment Header
-pub const PROTO_GRE: u8 = 47; // GRE
-pub const PROTO_ESP: u8 = 50; // Encapsulating Security Payload
-pub const PROTO_AH: u8 = 51; // Authentication Header
-pub const PROTO_ICMPV6: u8 = 58; // ICMPv6
-pub const PROTO_NONE: u8 = 59; // No Next Header
-pub const PROTO_DSTOPTS: u8 = 60; // Destination Options
-pub const PROTO_SCTP: u8 = 132; // SCTP
+pub const PROTO_ROUTING: u8 = 43; // Routing Header (RFC 8200)
+pub const PROTO_FRAGMENT: u8 = 44; // Fragment Header (RFC 8200)
+pub const PROTO_GRE: u8 = 47; // GRE (RFC 2784)
+pub const PROTO_ESP: u8 = 50; // Encapsulating Security Payload (RFC 4303)
+pub const PROTO_AH: u8 = 51; // Authentication Header (RFC 4302)
+pub const PROTO_ICMPV6: u8 = 58; // ICMPv6 (RFC 4443)
+pub const PROTO_NONE: u8 = 59; // No Next Header (RFC 8200)
+pub const PROTO_DSTOPTS: u8 = 60; // Destination Options (RFC 8200)
+pub const PROTO_SCTP: u8 = 132; // SCTP (RFC 4960)
 
 /// Default hop limit for outgoing packets
 pub const DEFAULT_HOP_LIMIT: u8 = 64;
@@ -40,16 +46,16 @@ pub const MAX_EXTENSION_HEADERS: usize = 10;
 /// IPv6 header size
 pub const HEADER_SIZE: usize = 40;
 
-/// Minimum MTU for IPv6 (RFC 8200)
+/// Minimum MTU for IPv6 (RFC 8200 Section 5)
 pub const MIN_MTU: u16 = 1280;
 
 /// Default MTU for Ethernet
 pub const DEFAULT_MTU: u16 = 1500;
 
-/// IPv6 unspecified address (::)
+/// IPv6 unspecified address (::) (RFC 4291 Section 2.5.2)
 pub const UNSPECIFIED_ADDR: [16]u8 = [_]u8{0} ** 16;
 
-/// IPv6 loopback address (::1)
+/// IPv6 loopback address (::1) (RFC 4291 Section 2.5.3)
 pub const LOOPBACK_ADDR: [16]u8 = [_]u8{0} ** 15 ++ [_]u8{1};
 
 // =============================================================================
@@ -178,13 +184,13 @@ pub fn addressEqual(a: [16]u8, b: [16]u8) bool {
 // Multicast Address Utilities
 // =============================================================================
 
-/// All-nodes multicast address (ff02::1)
+/// All-nodes multicast address (ff02::1) (RFC 4291 Section 2.7.1)
 pub const ALL_NODES_MULTICAST: [16]u8 = .{ 0xFF, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 };
 
-/// All-routers multicast address (ff02::2)
+/// All-routers multicast address (ff02::2) (RFC 4291 Section 2.7.1)
 pub const ALL_ROUTERS_MULTICAST: [16]u8 = .{ 0xFF, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2 };
 
-/// Generate solicited-node multicast address for NDP
+/// Generate solicited-node multicast address for NDP (RFC 4291 Section 2.7.1)
 /// Result is ff02::1:ffXX:XXXX where XX:XXXX are the last 24 bits
 pub fn solicitedNodeMulticast(addr: [16]u8) [16]u8 {
     return .{
@@ -208,7 +214,7 @@ pub fn solicitedNodeMulticast(addr: [16]u8) [16]u8 {
 }
 
 /// Map IPv6 multicast address to Ethernet multicast MAC
-/// Per RFC 2464: 33:33:XX:XX:XX:XX where XX are last 4 bytes of IPv6 address
+/// Per RFC 2464 Section 7: 33:33:XX:XX:XX:XX where XX are last 32 bits of IPv6 address
 pub fn multicastToMac(addr: [16]u8) [6]u8 {
     return .{ 0x33, 0x33, addr[12], addr[13], addr[14], addr[15] };
 }
