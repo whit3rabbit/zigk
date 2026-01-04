@@ -67,6 +67,12 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
 }
 
 /// Handle ICMPv6 Echo Request (ping6) (RFC 4443 Section 4.1)
+///
+/// SECURITY NOTE: No per-destination rate limiting is currently implemented.
+/// While echo replies are 1:1 (no amplification), they can be used for reflection
+/// attacks where an attacker with a spoofed source IP causes this kernel to send
+/// replies to the victim. This is low severity since there's no amplification.
+/// TODO: Consider adding per-destination rate limiting if abuse is observed.
 fn handleEchoRequest(iface: *Interface, req_pkt: *PacketBuffer, icmpv6_len: usize) bool {
     // Validate Echo header size
     if (icmpv6_len < types.ICMPV6_ECHO_HEADER_SIZE) {

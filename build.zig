@@ -1236,6 +1236,8 @@ pub fn build(b: *std.Build) void {
     syscall_net_module.addImport("base.zig", syscall_base_module);
     syscall_net_module.addImport("heap", heap_module);
     syscall_net_module.addImport("fd", fd_module);
+    syscall_net_module.addImport("capabilities", capabilities_module);
+    syscall_net_module.addImport("console", console_module);
 
     // Create syscall io_uring module (async I/O syscalls)
     const syscall_io_uring_module = b.createModule(.{
@@ -1636,6 +1638,28 @@ pub fn build(b: *std.Build) void {
 
     const install_qemu_ga = b.addInstallArtifact(qemu_ga, .{});
     b.getInstallStep().dependOn(&install_qemu_ga.step);
+
+    // Build netcfgd (Network Configuration Daemon)
+    const netcfgd_mod = b.createModule(.{
+        .root_source_file = b.path("src/user/services/netcfgd/main.zig"),
+        .target = user_target,
+        .optimize = optimize,
+        .code_model = .small,
+    });
+    netcfgd_mod.addImport("syscall", user_syscall_lib);
+    netcfgd_mod.addImport("libc", user_libc_module);
+
+    const netcfgd = b.addExecutable(.{
+        .name = "netcfgd.elf",
+        .root_module = netcfgd_mod,
+    });
+    netcfgd.setLinkerScript(b.path("src/user/linker.ld"));
+    if (target_arch == .x86_64) {
+        netcfgd.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
+    }
+
+    const install_netcfgd = b.addInstallArtifact(netcfgd, .{});
+    b.getInstallStep().dependOn(&install_netcfgd.step);
 
     // Build VirtIO-Balloon Driver
     const virtio_balloon_mod = b.createModule(.{

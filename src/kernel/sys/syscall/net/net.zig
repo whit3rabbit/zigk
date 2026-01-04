@@ -730,3 +730,27 @@ pub fn sys_sendmsg(fd: usize, msg_ptr: usize, flags: usize) SyscallError!usize {
 pub fn sys_recvmsg(fd: usize, msg_ptr: usize, flags: usize) SyscallError!usize {
     return msg_mod.sys_recvmsg(fd, msg_ptr, flags, &socket_file_ops);
 }
+
+// =============================================================================
+// Network Interface Configuration (delegated to netif.zig)
+// =============================================================================
+
+const netif_mod = @import("netif.zig");
+
+/// sys_netif_config (1060) - Configure network interface
+/// See netif.zig for implementation details
+pub const sys_netif_config = netif_mod.sys_netif_config;
+
+// =============================================================================
+// ARP Syscalls (delegated to arp.zig)
+// =============================================================================
+
+const arp_mod = @import("arp.zig");
+
+/// sys_arp_probe (1061) - ARP probe for IP conflict detection (RFC 5227)
+/// See arp.zig for implementation details
+pub const sys_arp_probe = arp_mod.sys_arp_probe;
+
+/// sys_arp_announce (1062) - Gratuitous ARP announcement (RFC 5227)
+/// See arp.zig for implementation details
+pub const sys_arp_announce = arp_mod.sys_arp_announce;

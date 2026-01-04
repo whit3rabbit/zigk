@@ -103,6 +103,7 @@ python scripts/security_query.py spinlock   # Spinlock usage
 python scripts/security_query.py canary     # Stack canary
 python scripts/security_query.py aslr       # ASLR config
 python scripts/security_query.py capability # Capability system
+python scripts/security_query.py entropy    # Entropy and PRNG selection
 ```
 
 ### Memory Layout Lookup

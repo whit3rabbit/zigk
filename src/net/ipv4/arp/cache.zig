@@ -66,6 +66,10 @@ pub const ARP_MAX_RETRIES: u8 = 3;
 /// Minimum interval between ARP cache updates for same IP (ticks)
 pub const ARP_UPDATE_RATE_LIMIT: u64 = 100;
 /// Maximum incomplete entries allowed (DoS protection).
+/// SECURITY NOTE: Combined with QUEUE_SIZE=4 and MAX_PACKET_SIZE=2048, worst-case
+/// memory for pending packets is 64*4*2048 = 512KB. This is bounded and acceptable.
+/// Unlike reassembly buffers, ARP pending packets use the kernel allocator directly
+/// because entries timeout quickly (3 ticks) and the attack requires LAN access.
 pub const MAX_INCOMPLETE_ENTRIES: usize = 64;
 /// Maximum ARP cache entries (DoS protection)
 pub const MAX_ARP_ENTRIES: usize = 256;

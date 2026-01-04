@@ -71,7 +71,29 @@ pub const FifoManager = struct {
         self.initialized = true;
     }
 
+    /// Validate FIFO header invariants
+    /// Returns true if the FIFO state is consistent, false if corrupted
+    fn validateFifoState(self: *const Self, min: u32, max: u32, next_cmd: u32, stop: u32) bool {
+        const header_size: u32 = 4 * @sizeOf(u32); // 16 bytes
+
+        // Basic sanity: min must be at least header size
+        if (min < header_size) return false;
+
+        // max must be greater than min and within allocated size
+        if (max <= min or max > self.size) return false;
+
+        // Pointers must be within [min, max) and word-aligned
+        if (next_cmd < min or next_cmd >= max) return false;
+        if (stop < min or stop >= max) return false;
+        if (next_cmd % 4 != 0 or stop % 4 != 0) return false;
+
+        return true;
+    }
+
     /// Get available space in FIFO (in bytes)
+    ///
+    /// SECURITY: Uses checked arithmetic and validates FIFO invariants to prevent
+    /// overflow/underflow attacks from corrupted volatile registers.
     pub fn availableSpace(self: *const Self) u32 {
         const virt = self.virt orelse return 0;
 
@@ -80,11 +102,18 @@ pub const FifoManager = struct {
         const next_cmd = virt[hw.FIFO_NEXT_CMD];
         const stop = virt[hw.FIFO_STOP];
 
+        // Validate invariants before arithmetic to prevent underflow
+        if (!self.validateFifoState(min, max, next_cmd, stop)) return 0;
+
         if (next_cmd >= stop) {
             // next_cmd is ahead of stop: available = (max - next_cmd) + (stop - min)
-            return (max - next_cmd) + (stop - min);
+            // Safe: validated max > next_cmd >= min, stop >= min
+            const tail = max - next_cmd;
+            const head = stop - min;
+            return std.math.add(u32, tail, head) catch 0;
         } else {
             // stop is ahead: available = stop - next_cmd
+            // Safe: validated stop > next_cmd (both in valid range)
             return stop - next_cmd;
         }
     }
@@ -98,6 +127,9 @@ pub const FifoManager = struct {
 
     /// Reserve space in FIFO for a command
     /// Returns slice to write command data, or error if insufficient space
+    ///
+    /// SECURITY: Validates FIFO invariants and uses checked arithmetic to prevent
+    /// overflow attacks from corrupted volatile registers.
     pub fn reserve(self: *Self, cmd_size_bytes: u32) FifoError![]volatile u32 {
         if (!self.initialized) return error.NotInitialized;
         if (cmd_size_bytes == 0) return error.InvalidSize;
@@ -112,7 +144,10 @@ pub const FifoManager = struct {
         var next_cmd = virt[hw.FIFO_NEXT_CMD];
         const stop = virt[hw.FIFO_STOP];
 
-        // Calculate available space
+        // SECURITY: Validate FIFO invariants before any arithmetic
+        if (!self.validateFifoState(min, max, next_cmd, stop)) return error.NotInitialized;
+
+        // Calculate available space (safe after validation)
         const available = if (next_cmd >= stop)
             (max - next_cmd) + (stop - min)
         else
@@ -121,17 +156,20 @@ pub const FifoManager = struct {
         // Need space for command plus potential wraparound
         if (available < cmd_size_bytes) return error.FifoFull;
 
-        // Check if we need to wrap around
-        if (next_cmd + cmd_size_bytes > max) {
+        // Check if we need to wrap around (using checked arithmetic)
+        const end_offset = std.math.add(u32, next_cmd, cmd_size_bytes) catch return error.InvalidSize;
+        if (end_offset > max) {
             // Not enough contiguous space at end - check if we can wrap
             if (stop - min < cmd_size_bytes) return error.FifoFull;
 
             // Fill remaining space with NOP/padding and wrap
-            // Write remaining bytes as zeros (acts as padding)
             const remaining_words = (max - next_cmd) / 4;
+            const max_word_idx = self.size / 4;
             var i: u32 = 0;
             while (i < remaining_words) : (i += 1) {
-                const idx = (next_cmd / 4) + i;
+                const idx = std.math.add(u32, next_cmd / 4, i) catch return error.InvalidSize;
+                // SECURITY: Bounds check before write
+                if (idx >= max_word_idx) return error.InvalidSize;
                 virt[idx] = 0;
             }
 
@@ -144,14 +182,17 @@ pub const FifoManager = struct {
         const word_offset = next_cmd / 4;
         const word_count = cmd_size_bytes / 4;
 
-        // Bounds check
-        if (word_offset + word_count > self.size / 4) return error.InvalidSize;
+        // SECURITY: Bounds check with checked arithmetic
+        const end_word = std.math.add(u32, word_offset, word_count) catch return error.InvalidSize;
+        if (end_word > self.size / 4) return error.InvalidSize;
 
-        return virt[word_offset .. word_offset + word_count];
+        return virt[word_offset..end_word];
     }
 
     /// Commit command after writing to reserved space
     /// new_offset is the byte offset after the command
+    ///
+    /// SECURITY: Uses checked arithmetic for wraparound calculation.
     pub fn commit(self: *Self, cmd_size_bytes: u32) void {
         const virt = self.virt orelse return;
 
@@ -159,14 +200,18 @@ pub const FifoManager = struct {
         const max = virt[hw.FIFO_MAX];
         const min = virt[hw.FIFO_MIN];
 
+        // Validate basic invariants
+        if (max <= min or next_cmd < min) return;
+
         var new_next = std.math.add(u32, next_cmd, cmd_size_bytes) catch {
             // Overflow - this shouldn't happen if reserve was called correctly
             return;
         };
 
-        // Handle wraparound
+        // Handle wraparound with checked arithmetic
         if (new_next >= max) {
-            new_next = min + (new_next - max);
+            const excess = std.math.sub(u32, new_next, max) catch return;
+            new_next = std.math.add(u32, min, excess) catch return;
         }
 
         // Update NEXT_CMD pointer

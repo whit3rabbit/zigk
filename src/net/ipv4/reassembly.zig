@@ -221,6 +221,8 @@ pub fn processFragment(
     if (start >= MAX_IP_PACKET_SIZE) return null;
     if (payload.len > MAX_IP_PACKET_SIZE - start) return null;
 
+    // SECURITY NOTE: This addition cannot overflow. The checks above guarantee:
+    // start < 65535 AND payload.len <= 65535 - start, therefore start + payload.len <= 65535.
     const end = start + payload.len;
     if (end > MAX_IP_PACKET_SIZE) return null;
 
@@ -252,6 +254,8 @@ pub fn processFragment(
     if (end > e.buffer.len) {
         // Grow needed
         // Align to 2KB
+        // SECURITY NOTE: Overflow not possible here because line 225 guarantees
+        // end <= MAX_IP_PACKET_SIZE (65535), so end + 2047 <= 67582, well within usize.
         var new_len = (end + 2047) & ~@as(usize, 2047);
         if (new_len > MAX_IP_PACKET_SIZE) new_len = MAX_IP_PACKET_SIZE;
 
@@ -262,13 +266,20 @@ pub fn processFragment(
                 // e.deinit not needed (buffer empty)
                 return null;
             };
+            // SECURITY: Zero-initialize for defense-in-depth per CLAUDE.md.
+            // Although hole tracking prevents returning incomplete packets,
+            // zero-init guards against potential bugs in hole management.
+            @memset(e.buffer, 0);
         } else {
             // Reallocation
+            const old_len = e.buffer.len;
             const new_buf = net_pool.reallocReassemblyBuffer(e.buffer, new_len) orelse {
                 e.used = false;
                 e.deinit();
                 return null;
             };
+            // SECURITY: Zero the newly allocated portion for defense-in-depth.
+            @memset(new_buf[old_len..], 0);
             e.buffer = new_buf;
         }
     }

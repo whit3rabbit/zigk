@@ -51,6 +51,11 @@ pub fn sendEchoReply(
 
     if (total_len > buf.len) return false;
 
+    // SAFETY: icmpv6_len must fit in u16 for IPv6 payload length field.
+    // Caller (handleEchoRequest) already limits echo_data to MAX_ECHO_DATA_SIZE (1232 bytes),
+    // so icmpv6_len is at most 1240, well under u16::MAX.
+    if (icmpv6_len > std.math.maxInt(u16)) return false;
+
     // Select source address
     const src_addr = ipv6_transmit.selectSourceAddress(iface, dst_addr) orelse {
         return false;
@@ -71,7 +76,7 @@ pub fn sendEchoReply(
     const ip6: *Ipv6Header = @ptrCast(@alignCast(&buf[eth_len]));
     ip6.* = std.mem.zeroes(Ipv6Header);
     ip6.setVersionTcFlow(6, 0, 0);
-    ip6.setPayloadLength(@truncate(icmpv6_len));
+    ip6.setPayloadLength(@intCast(icmpv6_len));
     ip6.next_header = ipv6_types.PROTO_ICMPV6;
     ip6.hop_limit = DEFAULT_HOP_LIMIT;
     ip6.src_addr = src_addr;
@@ -119,6 +124,11 @@ pub fn sendEchoRequest(
 
     if (total_len > buf.len) return false;
 
+    // SAFETY: icmpv6_len must fit in u16 for IPv6 payload length field.
+    // This is guaranteed by the buffer check above since buf.len << 65535,
+    // but we add explicit check for defense-in-depth.
+    if (icmpv6_len > std.math.maxInt(u16)) return false;
+
     const src_addr = ipv6_transmit.selectSourceAddress(iface, dst_addr) orelse {
         return false;
     };
@@ -137,7 +147,7 @@ pub fn sendEchoRequest(
     const ip6: *Ipv6Header = @ptrCast(@alignCast(&buf[eth_len]));
     ip6.* = std.mem.zeroes(Ipv6Header);
     ip6.setVersionTcFlow(6, 0, 0);
-    ip6.setPayloadLength(@truncate(icmpv6_len));
+    ip6.setPayloadLength(@intCast(icmpv6_len));
     ip6.next_header = ipv6_types.PROTO_ICMPV6;
     ip6.hop_limit = DEFAULT_HOP_LIMIT;
     ip6.src_addr = src_addr;
@@ -275,6 +285,10 @@ fn sendError(
 
     if (total_len > buf.len) return false;
 
+    // SAFETY: icmpv6_len = 8 + payload_len where payload_len <= max_payload (~1232 bytes).
+    // Therefore icmpv6_len <= 1240, well under u16::MAX. Check anyway for defense-in-depth.
+    if (icmpv6_len > std.math.maxInt(u16)) return false;
+
     // Reply to original source
     const dst_addr = orig_ip6.src_addr;
 
@@ -296,7 +310,7 @@ fn sendError(
     const ip6: *Ipv6Header = @ptrCast(@alignCast(&buf[eth_len]));
     ip6.* = std.mem.zeroes(Ipv6Header);
     ip6.setVersionTcFlow(6, 0, 0);
-    ip6.setPayloadLength(@truncate(icmpv6_len));
+    ip6.setPayloadLength(@intCast(icmpv6_len));
     ip6.next_header = ipv6_types.PROTO_ICMPV6;
     ip6.hop_limit = DEFAULT_HOP_LIMIT;
     ip6.src_addr = src_addr;

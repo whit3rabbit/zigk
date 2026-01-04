@@ -93,7 +93,79 @@ pub const Interface = struct {
     ipv6_multicast_addrs: [MAX_IPV6_MULTICAST][16]u8,
     ipv6_multicast_count: usize,
 
+    // =========================================================================
+    // Router Advertisement Info (for SLAAC - RFC 4862)
+    // =========================================================================
+
+    /// Last received Router Advertisement info
+    /// Updated by NDP processing, queried by userspace DHCP daemon
+    ra_info: RaInfo,
+    /// Whether we have valid RA info
+    has_ra_info: bool,
+
     const Self = @This();
+
+    /// Router Advertisement information from NDP processing
+    pub const RaInfo = struct {
+        /// Router source address
+        router_addr: [16]u8,
+        /// Prefix from PrefixInfo option
+        prefix: [16]u8,
+        /// Prefix length
+        prefix_len: u8,
+        /// RA flags: M (bit 7), O (bit 6)
+        /// From Router Advertisement header
+        ra_flags: u8,
+        /// Prefix flags: L (bit 7), A (bit 6)
+        /// From PrefixInfo option
+        prefix_flags: u8,
+        /// Reserved
+        _reserved: u8,
+        /// Valid lifetime in seconds (0xFFFFFFFF = infinite)
+        valid_lifetime: u32,
+        /// Preferred lifetime in seconds
+        preferred_lifetime: u32,
+        /// MTU from RA (0 if not specified)
+        mtu: u32,
+        /// Tick count when RA was received
+        timestamp: u64,
+
+        /// Check if M-flag (managed address config) is set
+        pub fn isManagedFlag(self: RaInfo) bool {
+            return (self.ra_flags & 0x80) != 0;
+        }
+
+        /// Check if O-flag (other config) is set
+        pub fn isOtherFlag(self: RaInfo) bool {
+            return (self.ra_flags & 0x40) != 0;
+        }
+
+        /// Check if A-flag (autonomous address config) is set in prefix
+        pub fn isAutonomousFlag(self: RaInfo) bool {
+            return (self.prefix_flags & 0x40) != 0;
+        }
+
+        /// Check if L-flag (on-link) is set in prefix
+        pub fn isOnLinkFlag(self: RaInfo) bool {
+            return (self.prefix_flags & 0x80) != 0;
+        }
+
+        /// Initialize to zero state
+        pub fn init() RaInfo {
+            return .{
+                .router_addr = [_]u8{0} ** 16,
+                .prefix = [_]u8{0} ** 16,
+                .prefix_len = 0,
+                .ra_flags = 0,
+                .prefix_flags = 0,
+                ._reserved = 0,
+                .valid_lifetime = 0,
+                .preferred_lifetime = 0,
+                .mtu = 0,
+                .timestamp = 0,
+            };
+        }
+    };
 
     /// Initialize a new interface
     pub fn init(name: []const u8, mac: [6]u8) Self {
@@ -130,6 +202,9 @@ pub const Interface = struct {
             .has_ipv6_gateway = false,
             .ipv6_multicast_addrs = [_][16]u8{[_]u8{0} ** 16} ** MAX_IPV6_MULTICAST,
             .ipv6_multicast_count = 0,
+            // Router Advertisement info for SLAAC
+            .ra_info = RaInfo.init(),
+            .has_ra_info = false,
         };
 
         const copy_len = @min(name.len, 15);
@@ -392,6 +467,53 @@ pub const Interface = struct {
         // Route through gateway
         if (self.has_ipv6_gateway) {
             return self.ipv6_gateway;
+        }
+        return null;
+    }
+
+    // =========================================================================
+    // Router Advertisement Methods (for SLAAC)
+    // =========================================================================
+
+    /// Update Router Advertisement info from NDP processing
+    /// Called by NDP when an RA with prefix info is received
+    pub fn updateRaInfo(
+        self: *Self,
+        router_addr: [16]u8,
+        ra_flags: u8,
+        prefix: [16]u8,
+        prefix_len: u8,
+        prefix_flags: u8,
+        valid_lifetime: u32,
+        preferred_lifetime: u32,
+        mtu: u32,
+        timestamp: u64,
+    ) void {
+        self.ra_info = .{
+            .router_addr = router_addr,
+            .prefix = prefix,
+            .prefix_len = prefix_len,
+            .ra_flags = ra_flags,
+            .prefix_flags = prefix_flags,
+            ._reserved = 0,
+            .valid_lifetime = valid_lifetime,
+            .preferred_lifetime = preferred_lifetime,
+            .mtu = mtu,
+            .timestamp = timestamp,
+        };
+        self.has_ra_info = true;
+    }
+
+    /// Clear RA info (e.g., when link goes down)
+    pub fn clearRaInfo(self: *Self) void {
+        self.ra_info = RaInfo.init();
+        self.has_ra_info = false;
+    }
+
+    /// Get RA info if available
+    pub fn getRaInfo(self: *const Self) ?RaInfo {
+        if (self.has_ra_info) {
+            return self.ra_info;
         }
         return null;
     }

@@ -306,16 +306,17 @@ pub const Console = struct {
     fn drawCharAtRaw(self: *Console, char: u8, cx: u32, cy: u32, fg_enum: ansi.Color, bg_enum: ansi.Color, bold: bool, inverse: bool) void {
         const font_w = self.current_font.width;
         const font_h = self.current_font.height;
-        
-        const x = cx * font_w;
-        const y = cy * font_h;
-        
-        const glyph = self.current_font.getGlyph(char);
-        
-        // Use static buffer protected by lock (caller holds history_lock)
-        // var pixel_buf: [32 * 32]u32 = undefined; // REMOVED stack allocation
-        
+
+        // SECURITY: Check font dimensions first, before any arithmetic
         if (font_w > 32 or font_h > 32) return;
+
+        // SECURITY: Use checked arithmetic for position calculation
+        const x = std.math.mul(u32, cx, font_w) catch return;
+        const y = std.math.mul(u32, cy, font_h) catch return;
+
+        const glyph = self.current_font.getGlyph(char);
+
+        // Use static buffer protected by lock (caller holds history_lock)
         
         // Resolve colors
         // Inverse swaps FG and BG

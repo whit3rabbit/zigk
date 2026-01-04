@@ -13,11 +13,67 @@ pub const SyscallError = primitive.SyscallError;
 pub const GRND_NONBLOCK: u32 = 1;
 pub const GRND_RANDOM: u32 = 2;
 
-/// Get random bytes from kernel
+/// EINTR errno value
+const EINTR: usize = 4;
+
+/// Get random bytes from kernel (raw syscall - prefer getSecureRandom for crypto)
 pub fn getrandom(buf: [*]u8, count: usize, flags: u32) SyscallError!usize {
     const ret = primitive.syscall3(syscalls.SYS_GETRANDOM, @intFromPtr(buf), count, flags);
     if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
     return ret;
+}
+
+/// Fill buffer with cryptographically secure random bytes.
+/// SECURITY: Handles partial reads and EINTR. Panics on failure (fail-secure).
+/// Use this for: XID generation, nonces, session tokens, cryptographic keys.
+/// Do NOT use raw getrandom() for security-critical operations.
+pub fn getSecureRandom(buf: []u8) void {
+    var offset: usize = 0;
+
+    while (offset < buf.len) {
+        const ret = primitive.syscall3(
+            syscalls.SYS_GETRANDOM,
+            @intFromPtr(buf.ptr + offset),
+            buf.len - offset,
+            0,
+        );
+
+        if (primitive.isError(ret)) {
+            // Extract errno from return value (syscall returns -errno on error)
+            const err: isize = @bitCast(ret);
+            const errno: usize = @intCast(-err);
+            if (errno == EINTR) {
+                continue; // Retry on signal interruption
+            }
+            // SECURITY: Fail secure - entropy is critical for security operations.
+            // Never fall back to weak PRNG or return partial data.
+            @panic("getSecureRandom: kernel entropy unavailable");
+        }
+
+        const bytes_read = ret;
+        if (bytes_read == 0) {
+            // Should not happen for getrandom, but handle defensively
+            @panic("getSecureRandom: unexpected zero-length read");
+        }
+
+        offset += bytes_read;
+    }
+}
+
+/// Generate a cryptographically random u32.
+/// SECURITY: Fail-secure - panics if entropy unavailable.
+pub fn getSecureRandomU32() u32 {
+    var buf: [4]u8 = undefined;
+    getSecureRandom(&buf);
+    return std.mem.readInt(u32, &buf, .little);
+}
+
+/// Generate a cryptographically random u64.
+/// SECURITY: Fail-secure - panics if entropy unavailable.
+pub fn getSecureRandomU64() u64 {
+    var buf: [8]u8 = undefined;
+    getSecureRandom(&buf);
+    return std.mem.readInt(u64, &buf, .little);
 }
 
 // =============================================================================

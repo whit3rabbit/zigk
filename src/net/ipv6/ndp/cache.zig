@@ -23,6 +23,10 @@ pub const NeighborState = types.NeighborState;
 pub const MAX_NEIGHBOR_ENTRIES: usize = 256;
 
 /// Maximum incomplete entries (DoS protection)
+/// SECURITY: Limits neighbor cache exhaustion attacks. An attacker flooding packets
+/// to non-existent hosts can only create 64 incomplete entries. After this limit,
+/// new resolution requests fail until existing entries timeout (3 seconds).
+/// This is a tradeoff: lower = more DoS resistant but may block legitimate resolution.
 pub const MAX_INCOMPLETE_ENTRIES: usize = 64;
 
 /// Hash table size (power of 2 for fast modulo)

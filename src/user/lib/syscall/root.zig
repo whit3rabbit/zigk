@@ -119,11 +119,15 @@ pub const nanosleep = time.nanosleep;
 pub const sleep_ms = time.sleep_ms;
 pub const clock_gettime = time.clock_gettime;
 pub const gettime_ms = time.gettime_ms;
+pub const getTickMs = time.getTickMs;
 
 // Re-export Resources
 pub const GRND_NONBLOCK = resource.GRND_NONBLOCK;
 pub const GRND_RANDOM = resource.GRND_RANDOM;
 pub const getrandom = resource.getrandom;
+pub const getSecureRandom = resource.getSecureRandom;
+pub const getSecureRandomU32 = resource.getSecureRandomU32;
+pub const getSecureRandomU64 = resource.getSecureRandomU64;
 pub const FramebufferInfo = resource.FramebufferInfo;
 pub const get_framebuffer_info = resource.get_framebuffer_info;
 pub const map_framebuffer = resource.map_framebuffer;

@@ -59,3 +59,8 @@ pub fn gettime_ms() SyscallError!u64 {
     const nsec_ms = @as(u64, @intCast(ts.tv_nsec)) / 1_000_000;
     return std.math.add(u64, sec_ms, nsec_ms) catch return error.Unexpected;
 }
+
+/// Alias for gettime_ms (used by netcfgd)
+pub fn getTickMs() u64 {
+    return gettime_ms() catch 0;
+}

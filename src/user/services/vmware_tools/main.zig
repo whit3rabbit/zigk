@@ -209,7 +209,19 @@ fn syncTime() bool {
 
     const host_secs: u64 = (@as(u64, host_secs_hi) << 32) | host_secs_lo;
 
+    // Validate time values from hypervisor to prevent @intCast panic
+    // A malicious hypervisor could return values exceeding i64::MAX
+    const max_valid_secs: u64 = @intCast(std.math.maxInt(i64));
+    if (host_secs > max_valid_secs) {
+        return false; // Invalid timestamp from hypervisor
+    }
+    // Microseconds must be < 1,000,000 per POSIX timeval semantics
+    if (host_usecs >= 1_000_000) {
+        return false; // Invalid microseconds value
+    }
+
     // Set system time via settimeofday syscall
+    // Safe: we validated host_secs <= i64::MAX and host_usecs < 1M above
     var tv = timeval{
         .tv_sec = @intCast(host_secs),
         .tv_usec = @intCast(host_usecs),
@@ -525,7 +537,8 @@ fn handleResolutionSet(cmd: []const u8) void {
     var i: usize = 15;
     var parsing_height = false;
 
-    // Parse width and height
+    // Parse width and height with overflow protection
+    // A malicious hypervisor could send crafted values to trigger overflow
     while (i < cmd.len) : (i += 1) {
         const c = cmd[i];
         if (c == ' ') {
@@ -533,10 +546,25 @@ fn handleResolutionSet(cmd: []const u8) void {
             continue;
         }
         if (c >= '0' and c <= '9') {
+            const digit: u32 = c - '0';
             if (parsing_height) {
-                height = height * 10 + (c - '0');
+                height = std.math.mul(u32, height, 10) catch {
+                    sendTcloReply("ERROR overflow");
+                    return;
+                };
+                height = std.math.add(u32, height, digit) catch {
+                    sendTcloReply("ERROR overflow");
+                    return;
+                };
             } else {
-                width = width * 10 + (c - '0');
+                width = std.math.mul(u32, width, 10) catch {
+                    sendTcloReply("ERROR overflow");
+                    return;
+                };
+                width = std.math.add(u32, width, digit) catch {
+                    sendTcloReply("ERROR overflow");
+                    return;
+                };
             }
         }
     }
@@ -557,6 +585,13 @@ fn handleResolutionSet(cmd: []const u8) void {
 }
 
 /// Poll for host commands (shutdown, reset, etc.)
+///
+/// SECURITY NOTE: The hypervisor is in a higher trust domain than the guest.
+/// We do not sanitize ANSI escape sequences in logged commands because:
+/// 1. The hypervisor can already shutdown/reboot the guest via TCLO
+/// 2. Log tampering is not an escalation vs. the power the hypervisor already has
+/// 3. The kernel requires CAP_HYPERVISOR to issue hypercalls, preventing
+///    unprivileged guest processes from injecting malicious TCLO responses
 fn pollHostCommands() void {
     if (!tclo_channel.is_open) return;
 

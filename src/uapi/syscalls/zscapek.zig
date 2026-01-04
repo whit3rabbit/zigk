@@ -86,3 +86,148 @@ pub const SYS_FREE_IOMMU_DMA: usize = 1047;
 pub const SYS_VMWARE_HYPERCALL: usize = 1050;
 /// Get hypervisor type (returns HypervisorType enum value)
 pub const SYS_GET_HYPERVISOR: usize = 1051;
+
+// Network Interface Configuration Syscalls (1060-1069)
+/// Configure network interface (requires CAP_NET_CONFIG)
+/// arg1: interface index, arg2: command (NetifCmd), arg3: data_ptr, arg4: data_len
+pub const SYS_NETIF_CONFIG: usize = 1060;
+
+/// ARP probe for IP conflict detection (RFC 5227)
+/// arg1: interface index, arg2: target IP (host order), arg3: timeout_ms
+/// Returns: 0 = no conflict (safe), 1 = conflict detected, 2 = timeout (safe)
+pub const SYS_ARP_PROBE: usize = 1061;
+
+/// Gratuitous ARP announcement (RFC 5227)
+/// arg1: interface index, arg2: IP address to announce (host order)
+/// Returns: 0 on success
+pub const SYS_ARP_ANNOUNCE: usize = 1062;
+
+/// Network interface configuration commands
+pub const NetifCmd = enum(u32) {
+    /// Get interface info (MAC, name, link state) -> InterfaceInfo
+    GetInfo = 0,
+    /// Set IPv4 address, netmask, gateway <- Ipv4Config
+    SetIpv4 = 1,
+    /// Add/remove IPv6 address <- Ipv6AddrConfig
+    SetIpv6Addr = 2,
+    /// Set IPv6 default gateway <- [16]u8 address
+    SetIpv6Gateway = 3,
+    /// Get last Router Advertisement info (for SLAAC) -> RaInfo
+    GetRaInfo = 4,
+    /// Set interface MTU <- u16
+    SetMtu = 5,
+    /// Get link up/down state -> bool
+    GetLinkState = 6,
+};
+
+/// IPv4 configuration structure for SET_IPV4 command
+pub const Ipv4Config = extern struct {
+    /// IPv4 address in network byte order
+    ip_addr: u32,
+    /// Subnet mask in network byte order
+    netmask: u32,
+    /// Gateway address in network byte order
+    gateway: u32,
+
+    comptime {
+        if (@sizeOf(@This()) != 12) @compileError("Ipv4Config must be 12 bytes");
+    }
+};
+
+/// IPv6 address configuration for SET_IPV6_ADDR command
+pub const Ipv6AddrConfig = extern struct {
+    /// IPv6 address (16 bytes)
+    addr: [16]u8,
+    /// Prefix length (0-128)
+    prefix_len: u8,
+    /// Address scope: 2=link-local, 5=site-local, 14=global
+    scope: u8,
+    /// Action: 0=add, 1=remove
+    action: u8,
+    /// Padding for alignment
+    _pad: u8 = 0,
+
+    pub const ACTION_ADD: u8 = 0;
+    pub const ACTION_REMOVE: u8 = 1;
+
+    comptime {
+        if (@sizeOf(@This()) != 20) @compileError("Ipv6AddrConfig must be 20 bytes");
+    }
+};
+
+/// Router Advertisement info (from kernel NDP processing)
+pub const RaInfo = extern struct {
+    /// Router source address
+    router_addr: [16]u8,
+    /// Prefix from PrefixInfo option
+    prefix: [16]u8,
+    /// Prefix length
+    prefix_len: u8,
+    /// RA flags: M (bit 7), O (bit 6), A (bit 5), L (bit 4)
+    flags: u8,
+    /// Padding
+    _pad: [2]u8 = [_]u8{0} ** 2,
+    /// Valid lifetime in seconds (0xFFFFFFFF = infinite)
+    valid_lifetime: u32,
+    /// Preferred lifetime in seconds
+    preferred_lifetime: u32,
+    /// MTU from RA (0 if not specified)
+    mtu: u32,
+    /// Kernel tick when RA was received
+    timestamp: u64,
+
+    /// Check if M-flag (managed address config) is set
+    pub fn isManagedFlag(self: RaInfo) bool {
+        return (self.flags & 0x80) != 0;
+    }
+
+    /// Check if O-flag (other config) is set
+    pub fn isOtherFlag(self: RaInfo) bool {
+        return (self.flags & 0x40) != 0;
+    }
+
+    /// Check if A-flag (autonomous address config) is set
+    pub fn isAutonomousFlag(self: RaInfo) bool {
+        return (self.flags & 0x20) != 0;
+    }
+
+    comptime {
+        if (@sizeOf(@This()) != 56) @compileError("RaInfo must be 56 bytes");
+    }
+};
+
+/// Interface information returned by GET_INFO command
+pub const InterfaceInfo = extern struct {
+    /// Interface name (null-terminated)
+    name: [16]u8,
+    /// MAC address
+    mac_addr: [6]u8,
+    /// Interface is administratively up
+    is_up: bool,
+    /// Physical link is connected
+    link_up: bool,
+    /// MTU
+    mtu: u16,
+    /// Padding
+    _pad: [2]u8 = [_]u8{0} ** 2,
+    /// IPv4 address (network byte order)
+    ipv4_addr: u32,
+    /// IPv4 netmask (network byte order)
+    ipv4_netmask: u32,
+    /// IPv4 gateway (network byte order)
+    ipv4_gateway: u32,
+    /// Has IPv6 gateway configured
+    has_ipv6_gateway: bool,
+    /// Padding
+    _pad2: [3]u8 = [_]u8{0} ** 3,
+    /// IPv6 default gateway
+    ipv6_gateway: [16]u8,
+    /// Number of IPv6 addresses configured
+    ipv6_addr_count: u8,
+    /// Padding
+    _pad3: [7]u8 = [_]u8{0} ** 7,
+
+    comptime {
+        if (@sizeOf(@This()) != 72) @compileError("InterfaceInfo must be 72 bytes");
+    }
+};

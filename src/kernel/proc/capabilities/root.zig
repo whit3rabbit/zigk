@@ -313,6 +313,37 @@ pub const HypervisorCapability = struct {
     detect_hypervisor: bool = true,
 };
 
+/// Capability for network interface configuration (like Linux CAP_NET_ADMIN)
+///
+/// SECURITY: This capability grants access to configure network interfaces:
+/// - Set IPv4/IPv6 addresses, netmask, gateway
+/// - Query Router Advertisement info for SLAAC
+/// - Change interface MTU
+/// - Query link state
+///
+/// Only trusted network configuration daemons (DHCP client, netcfgd) should
+/// have this capability. Allows complete control over network identity.
+pub const NetConfigCapability = struct {
+    /// If true, allows setting IPv4 configuration
+    allow_ipv4: bool = true,
+    /// If true, allows setting IPv6 configuration
+    allow_ipv6: bool = true,
+    /// If true, allows querying RA info for SLAAC
+    allow_ra_query: bool = true,
+    /// If true, allows setting MTU
+    allow_mtu: bool = true,
+    /// Interface index to allow (0xFFFFFFFF = any interface)
+    interface_mask: u32 = ANY_INTERFACE,
+
+    pub const ANY_INTERFACE: u32 = 0xFFFFFFFF;
+
+    /// Check if this capability allows operations on the given interface
+    pub fn allowsInterface(self: NetConfigCapability, iface_idx: usize) bool {
+        return self.interface_mask == ANY_INTERFACE or
+            self.interface_mask == @as(u32, @intCast(iface_idx));
+    }
+};
+
 pub const CapabilityType = enum {
     Interrupt,
     IoPort,
@@ -327,6 +358,7 @@ pub const CapabilityType = enum {
     SetGid,
     DisplayServer,
     Hypervisor,
+    NetConfig,
 };
 
 pub const Capability = union(CapabilityType) {
@@ -352,4 +384,6 @@ pub const Capability = union(CapabilityType) {
     DisplayServer: DisplayServerCapability,
     /// Allows hypervisor interface access (VMware hypercall, etc.)
     Hypervisor: HypervisorCapability,
+    /// Allows network interface configuration (DHCP client, etc.)
+    NetConfig: NetConfigCapability,
 };

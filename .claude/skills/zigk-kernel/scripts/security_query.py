@@ -2,7 +2,7 @@
 """
 Security Pattern Query Tool for zigk kernel.
 
-Query security features: spinlocks, stack canary, ASLR, capabilities.
+Query security features: spinlocks, stack canary, ASLR, capabilities, entropy.
 
 Usage:
     python security_query.py spinlock      # Spinlock usage
@@ -11,6 +11,7 @@ Usage:
     python security_query.py capability    # Capability system
     python security_query.py privilege     # Ring 0/3 separation
     python security_query.py validation    # Input validation patterns
+    python security_query.py entropy       # Entropy and PRNG selection
 """
 
 import sys
@@ -308,6 +309,87 @@ if (std.mem.indexOf(u8, path, "..")) |_| {
 const fd_table = base.getGlobalFdTable();
 const file = fd_table.get(fd) orelse return error.EBADF;
 ```
+""",
+
+    "entropy": """
+## Entropy & Random Number Generation
+
+### Use Case Selection Table
+| Use Case | Kernel | Userspace |
+|----------|--------|-----------|
+| XID, nonces, tokens | `random.getU64()` | `syscall.getSecureRandomU32/U64()` |
+| Crypto keys, buffers | `random.fillRandom(buf)` | `syscall.getSecureRandom(buf)` |
+| Non-security (jitter) | `prng.fill(buf)` | `libc rand()` |
+| Custom error handling | `hal.entropy.*` | Raw `syscall.getrandom()` |
+
+### Key Files
+| File | Purpose |
+|------|---------|
+| `src/kernel/core/random.zig` | ChaCha20 CSPRNG (crypto-quality) |
+| `src/lib/prng.zig` | xoroshiro128+ (fast, non-crypto) |
+| `src/arch/*/kernel/entropy.zig` | Hardware entropy (RDRAND/RDSEED/RNDR) |
+| `src/user/lib/syscall/resource.zig` | Userspace secure wrappers |
+| `src/net/transport/tcp/state.zig` | TCP ISN generation (RFC 6528) |
+
+### Kernel CSPRNG Usage
+```zig
+const random = @import("random");
+
+// Single u64
+const val = random.getU64();
+
+// Fill buffer
+var key: [32]u8 = undefined;
+random.fillRandom(&key);
+```
+
+### Userspace Secure Random
+```zig
+const syscall = @import("syscall");
+
+// PREFERRED: Handles partial reads, EINTR, panics on failure
+const xid = syscall.getSecureRandomU32();
+
+// Buffer fill
+var nonce: [12]u8 = undefined;
+syscall.getSecureRandom(&nonce);
+```
+
+### WRONG Patterns
+```zig
+// WRONG: Partial reads not handled!
+_ = syscall.getrandom(buf.ptr, buf.len, 0);
+
+// WRONG: Tick-based fallback is predictable!
+const xid = if (getrandom fails) getTickMs() ^ 0xDEADBEEF;
+
+// WRONG: rand() for security!
+const session_id = rand();
+```
+
+### Hardware Entropy Hierarchy
+1. RDSEED (x86_64) / RNDR (AArch64) - True hardware entropy
+2. RDRAND (x86_64) - CPU entropy (cryptographic)
+3. ChaCha20 CSPRNG - Seeded from hardware
+4. xoroshiro128+ - Fast non-crypto PRNG
+5. TSC/timing - Weak fallback (avoid for security)
+
+### TCP ISN Security (RFC 6528)
+Location: `src/net/transport/tcp/state.zig`
+```
+ISN = M + F(secret_key, src_ip, src_port, dst_ip, dst_port)
+M = milliseconds * 250 (4us per increment)
+F = SipHash-2-4
+```
+- Fresh hardware entropy mixed per connection
+- Key re-seeded every 10,000 ISNs
+- Prevents TCP sequence number prediction attacks
+
+### Fail-Secure Policy
+- `getSecureRandom()` panics on entropy failure
+- Never fall back to weak PRNG silently
+- VirtIO-RNG feeds entropy to kernel pool
+- Build flag `require_hardware_entropy` for production
 """,
 }
 

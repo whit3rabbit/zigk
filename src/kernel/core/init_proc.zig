@@ -516,6 +516,19 @@ fn grantProcessCapabilities(proc: *process.Process, process_name: []const u8) vo
         appendCapabilityOrWarn(proc, alloc, .{ .IoPort = .{ .port = 0x3F8, .len = 8 } }, process_name);
         console.info("Init: Granted Doom capabilities to pid={}", .{proc.pid});
     }
+
+    // Network Configuration Daemon (netcfgd) capabilities
+    // Grants ability to configure network interfaces via SYS_NETIF_CONFIG
+    if (std.mem.eql(u8, process_name, "netcfgd")) {
+        appendCapabilityOrWarn(proc, alloc, .{ .NetConfig = .{
+            .allow_ipv4 = true,
+            .allow_ipv6 = true,
+            .allow_ra_query = true,
+            .allow_mtu = true,
+            .interface_mask = capabilities.NetConfigCapability.ANY_INTERFACE,
+        } }, process_name);
+        console.info("Init: Granted network config capabilities to pid={}", .{proc.pid});
+    }
 }
 
 /// Grant display server capabilities to a process.

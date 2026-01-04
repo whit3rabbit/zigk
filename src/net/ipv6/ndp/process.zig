@@ -171,6 +171,20 @@ fn handleRouterSolicitation(iface: *Interface, pkt: *PacketBuffer) bool {
 // =============================================================================
 
 /// Handle Router Advertisement (RFC 4861 Section 6.1.2)
+///
+/// SECURITY NOTE: Router Advertisement messages are inherently trust-based.
+/// Any host on the same L2 segment with a link-local address can send RAs and
+/// potentially become the default gateway (MITM attack). This is RFC-compliant
+/// but insecure on untrusted networks.
+///
+/// Mitigations (not currently implemented):
+/// - RA-Guard (RFC 6105): Requires L2 switch support to filter unauthorized RAs
+/// - SEND (RFC 3971): Cryptographic authentication of NDP messages
+/// - Static gateway configuration: Disable RA learning entirely
+/// - Rate limiting: Limit RA processing per source to slow attackers
+///
+/// For trusted networks, RFC-compliant RA processing is acceptable.
+/// For untrusted networks, configure gateway statically and ignore RAs.
 fn handleRouterAdvertisement(iface: *Interface, pkt: *PacketBuffer) bool {
     // Validate minimum size
     const ra_offset = pkt.transport_offset + icmpv6_types.ICMPV6_HEADER_SIZE;
@@ -202,11 +216,94 @@ fn handleRouterAdvertisement(iface: *Interface, pkt: *PacketBuffer) bool {
         updateRouterEntry(iface, pkt.src_ipv6, mac, router_lifetime);
     }
 
-    // TODO: Process prefix options for SLAAC
-    // TODO: Update interface MTU from MTU option
-    // TODO: Update ReachableTime and RetransTimer from RA
+    // Parse options for prefix info, MTU
+    const ra_flags = ra.flags;
+    var discovered_mtu: u32 = 0;
+
+    if (options_offset < pkt.len) {
+        parseRaOptions(iface, pkt.data[options_offset..pkt.len], pkt.src_ipv6, ra_flags, &discovered_mtu);
+    }
 
     return true;
+}
+
+/// Parse Router Advertisement options
+/// Extracts PrefixInfo (for SLAAC) and MTU options
+fn parseRaOptions(
+    iface: *Interface,
+    options: []const u8,
+    router_addr: [16]u8,
+    ra_flags: u8,
+    discovered_mtu: *u32,
+) void {
+    var offset: usize = 0;
+
+    // Safety limit: max 64 options to prevent DoS from malformed packets
+    var option_count: usize = 0;
+    const MAX_OPTIONS: usize = 64;
+
+    while (offset + 2 <= options.len and option_count < MAX_OPTIONS) : (option_count += 1) {
+        const opt_type = options[offset];
+        const opt_len = options[offset + 1];
+
+        // Length of 0 would cause infinite loop
+        if (opt_len == 0) break;
+
+        // Length is in units of 8 bytes
+        const opt_bytes = std.math.mul(usize, @as(usize, opt_len), 8) catch break;
+        if (offset + opt_bytes > options.len) break;
+
+        switch (opt_type) {
+            types.OPT_PREFIX_INFO => {
+                // Prefix Info option must be exactly 32 bytes (length = 4)
+                if (opt_len == 4 and offset + @sizeOf(types.PrefixInfoOption) <= options.len) {
+                    const prefix_opt: *const types.PrefixInfoOption = @ptrCast(@alignCast(&options[offset]));
+
+                    // Only process if Autonomous flag is set (for SLAAC)
+                    if (prefix_opt.isAutonomous()) {
+                        // Get current tick for timestamp
+                        const timestamp = getCurrentTick();
+
+                        // Update interface RA info for userspace query
+                        iface.updateRaInfo(
+                            router_addr,
+                            ra_flags,
+                            prefix_opt.prefix,
+                            prefix_opt.prefix_length,
+                            prefix_opt.flags,
+                            prefix_opt.getValidLifetime(),
+                            prefix_opt.getPreferredLifetime(),
+                            discovered_mtu.*,
+                            timestamp,
+                        );
+                    }
+                }
+            },
+            types.OPT_MTU => {
+                // MTU option is 8 bytes (length = 1)
+                if (opt_len == 1 and offset + @sizeOf(types.MtuOption) <= options.len) {
+                    const mtu_opt: *const types.MtuOption = @ptrCast(@alignCast(&options[offset]));
+                    const mtu = mtu_opt.getMtu();
+
+                    // RFC 4861: MTU must be >= 1280
+                    if (mtu >= 1280) {
+                        discovered_mtu.* = mtu;
+                    }
+                }
+            },
+            else => {
+                // Skip unknown options
+            },
+        }
+
+        offset += opt_bytes;
+    }
+}
+
+/// Get current tick count for timestamps
+/// Uses the NDP cache's tick counter
+fn getCurrentTick() u64 {
+    return cache.current_tick;
 }
 
 // =============================================================================

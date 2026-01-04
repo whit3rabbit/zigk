@@ -560,4 +560,30 @@ pub const Process = struct {
 
         return false;
     }
+
+    /// Check if process has network configuration capability for given interface
+    pub fn hasNetConfigCapability(self: *Process, iface_idx: usize) bool {
+        for (self.capabilities.items) |cap| {
+            switch (cap) {
+                .NetConfig => |net_cap| {
+                    if (net_cap.allowsInterface(iface_idx)) return true;
+                },
+                else => {},
+            }
+        }
+        return false;
+    }
+
+    /// Get network config capability if present and allowed for interface
+    pub fn getNetConfigCapability(self: *Process, iface_idx: usize) ?capabilities.NetConfigCapability {
+        for (self.capabilities.items) |cap| {
+            switch (cap) {
+                .NetConfig => |net_cap| {
+                    if (net_cap.allowsInterface(iface_idx)) return net_cap;
+                },
+                else => {},
+            }
+        }
+        return null;
+    }
 };

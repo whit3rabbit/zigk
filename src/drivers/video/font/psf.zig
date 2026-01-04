@@ -43,12 +43,16 @@ pub fn loadFont(data: []const u8) !types.Font {
         const char_size = data[3];
         const header_size = 4;
         
-        if (data.len < header_size + (256 * @as(usize, char_size))) {
-             return Error.InvalidSize;
+        const total_glyph_size = 256 * @as(usize, char_size);
+        if (data.len < header_size + total_glyph_size) {
+            return Error.InvalidSize;
         }
 
-        const glyph_data = data[header_size..];
-        
+        // SECURITY: Slice exactly to glyph bounds to prevent out-of-bounds
+        // access if getGlyph is called with char >= 256.
+        const glyph_end = header_size + total_glyph_size;
+        const glyph_data = data[header_size..glyph_end];
+
         return types.Font{
             .width = 8, // PSF1 is always 8 pixels wide
             .height = char_size,
@@ -82,8 +86,11 @@ pub fn loadFont(data: []const u8) !types.Font {
         
         if (width == 0 or height == 0 or char_size == 0) return Error.InvalidSize;
 
-        const glyph_data = data[header_size..];
-        
+        // SECURITY: Slice exactly to glyph bounds to prevent out-of-bounds
+        // access if getGlyph is called with char >= length.
+        const glyph_end = header_size + total_glyph_size;
+        const glyph_data = data[header_size..glyph_end];
+
         return types.Font{
             .width = @intCast(width),
             .height = @intCast(height),

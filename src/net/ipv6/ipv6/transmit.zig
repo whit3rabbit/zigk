@@ -317,17 +317,26 @@ fn sendFragmentedPacket(iface: *Interface, pkt: *PacketBuffer, dst_mac: [6]u8) b
 
 /// Generate a unique fragment identification value.
 /// Per RFC 8200, this should be unique for each {Source, Destination, Next Header} tuple.
-/// SECURITY: Uses entropy source (RDRAND in kernel, getrandom in userspace) to prevent
-/// fragment ID prediction attacks (RFC 7739).
+///
+/// SECURITY (RFC 7739): Fragment IDs must be unpredictable to prevent fragment injection
+/// attacks where an attacker predicts the next ID and injects malicious fragments.
+///
+/// - Kernel mode: Uses hardware entropy (RDRAND) - cryptographically secure.
+/// - Userspace mode: Uses sequential counter - INSECURE but acceptable because:
+///   1. Userspace mode is ONLY used for unit tests, not production networking.
+///   2. Unit tests run locally without actual network transmission.
+///   3. Production always runs in kernel mode with HAL entropy.
+///
+/// WARNING: Do not copy this pattern to userspace networking code without
+/// replacing the counter with std.crypto.random or similar CSPRNG.
 fn generateFragmentId() u32 {
     const root = @import("root");
 
     if (@hasDecl(root, "hal")) {
-        // Kernel mode: use hardware entropy
+        // Kernel mode: use hardware entropy (RDRAND)
         return @truncate(root.hal.entropy.getHardwareEntropy());
     } else {
-        // Userspace: use a simple counter (fragmentation shouldn't happen in userspace)
-        // This is acceptable because userspace processes rely on kernel for fragmentation
+        // Userspace (unit tests only): sequential counter - see security note above
         const Counter = struct {
             var value: u32 = 0;
         };

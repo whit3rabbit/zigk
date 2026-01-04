@@ -83,7 +83,29 @@ pub fn sys_read(fd: usize, buf_ptr: usize, len: usize) SyscallError!usize {
 *   **Secure Initialization**: Prefer `var buf = [_]u8{0} ** N;` over `undefined` for security-sensitive buffers (keys, RNG, network packets). `undefined` in `ReleaseFast` leaks stack data.
 *   **Fail Secure**: If a security-critical dependency (like entropy source) fails, **panic** or return a fatal error. Do not fall back to insecure defaults silently.
 
-### 4. Integer Safety
+### 4. Entropy & Random Number Generation
+Use the correct entropy source for each use case. **Never use weak fallbacks for security-critical operations.**
+
+| Use Case | Kernel | Userspace |
+|----------|--------|-----------|
+| XID, nonces, session tokens | `random.getU64()` | `syscall.getSecureRandomU32/U64()` |
+| Crypto keys, arbitrary buffers | `random.fillRandom(buf)` | `syscall.getSecureRandom(buf)` |
+| Non-security (shuffling, jitter) | `prng.fill(buf)` | `libc rand()` (after seeding) |
+| Low-level with custom handling | `hal.entropy.*` | Raw `syscall.getrandom()` |
+
+**Key Files:**
+*   Kernel CSPRNG (ChaCha20): `src/kernel/core/random.zig`
+*   Kernel fast PRNG (xoroshiro128+): `src/lib/prng.zig`
+*   Hardware entropy (RDRAND/RDSEED): `src/arch/*/kernel/entropy.zig`
+*   Userspace secure wrappers: `src/user/lib/syscall/resource.zig`
+
+**Rules:**
+*   `getSecureRandom()` handles partial reads, EINTR, and panics on failure (fail-secure).
+*   Raw `syscall.getrandom()` does NOT handle partial reads - use only if you implement the loop yourself.
+*   TCP ISN uses SipHash-2-4 with hardware entropy mixing (RFC 6528) - see `src/net/transport/tcp/state.zig`.
+*   Never use tick-based or time-based values as entropy fallbacks for security operations.
+
+### 5. Integer Safety
 *   **Checked Arithmetic**: Use `std.math.add`, `sub`, `mul` for **all** calculations involving:
     *   File offsets/positions.
     *   Buffer lengths derived from user input.
@@ -121,7 +143,7 @@ pub fn sys_read(fd: usize, buf_ptr: usize, len: usize) SyscallError!usize {
     const region_end = std.math.add(u64, phys_start, region_size) catch continue;
     ```
 
-### 5. Capabilities over Root
+### 6. Capabilities over Root
 Do not check `uid == 0` for hardware access. Use the Capability system (`src/capabilities/`).
 
 ```zig
@@ -129,7 +151,7 @@ Do not check `uid == 0` for hardware access. Use the Capability system (`src/cap
 if (!proc.hasMmioCapability(phys_addr, size)) return error.EPERM;
 ```
 
-### 6. Network Stack Security (Zero-Trust)
+### 7. Network Stack Security (Zero-Trust)
 Treat all incoming packets as malicious.
 
 *   **Packet Parsing**: NEVER rely on length fields inside the packet headers (IP Total Len, TCP Data Offset) without verifying them against the actual buffer slice length first.
