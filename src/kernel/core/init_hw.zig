@@ -24,6 +24,7 @@ const e1000e = @import("e1000e");
 const usb = @import("usb");
 const audio = @import("audio");
 const ahci = @import("ahci");
+const nvme = @import("nvme");
 const video_driver = @import("video_driver");
 const hal = @import("hal");
 const acpi = @import("acpi");
@@ -544,22 +545,24 @@ pub fn initAudio() void {
     console.info("Audio: No AC97 controller found", .{});
 }
 
-/// Initialize Storage subsystem (AHCI SATA)
-/// Scans for AHCI controllers and connected drives.
+/// Initialize Storage subsystem (AHCI SATA and NVMe)
+/// Scans for AHCI and NVMe controllers and connected drives.
 /// Registers found partitions with DevFS.
 pub fn initStorage() void {
     console.print("\n");
     console.info("Initializing storage subsystem...", .{});
 
     const devices = pci_devices orelse {
-        console.warn("Storage: PCI not initialized, skipping AHCI", .{});
+        console.warn("Storage: PCI not initialized, skipping storage init", .{});
         return;
     };
 
     const ecam = pci_ecam orelse {
-        console.warn("Storage: PCI ECAM not available, skipping AHCI", .{});
+        console.warn("Storage: PCI ECAM not available, skipping storage init", .{});
         return;
     };
+
+    const partitions = @import("partitions");
 
     // Search for AHCI controller (Class 0x01 Mass Storage, Subclass 0x06 SATA)
     var found_ahci = false;
@@ -571,7 +574,6 @@ pub fn initStorage() void {
 
             if (ahci.initFromPci(dev, pci.PciAccess{ .ecam = ecam })) |controller| {
                 // Report detected drives and scan for partitions
-                const partitions = @import("partitions");
                 for (0..ahci.MAX_PORTS) |i| {
                     const port_num: u5 = @intCast(i);
                     if (controller.getPort(port_num)) |port| {
@@ -602,6 +604,47 @@ pub fn initStorage() void {
 
     if (!found_ahci) {
         console.info("Storage: No AHCI controllers found", .{});
+    }
+
+    // Search for NVMe controller (Class 0x01 Mass Storage, Subclass 0x08 NVM, Prog-IF 0x02 NVMe)
+    var found_nvme = false;
+    for (devices.devices[0..devices.count]) |*dev| {
+        if (dev.class_code == 0x01 and dev.subclass == 0x08 and dev.prog_if == 0x02) {
+            console.info("Storage: Found NVMe controller at {x:0>2}:{x:0>2}.{d}", .{
+                dev.bus, dev.device, dev.func,
+            });
+
+            if (nvme.initFromPci(dev, pci.PciAccess{ .ecam = ecam })) |controller| {
+                // Report detected namespaces
+                console.info("  Namespaces: {d}", .{controller.namespace_count});
+
+                for (0..controller.namespace_count) |i| {
+                    if (controller.getNamespace(@intCast(i))) |ns| {
+                        const size_mb = (ns.total_lbas * ns.lba_size) / (1024 * 1024);
+                        console.info("  NS{d}: {d} MB ({d} LBAs, {d}B sectors)", .{
+                            ns.nsid,
+                            size_mb,
+                            ns.total_lbas,
+                            ns.lba_size,
+                        });
+
+                        // Scan for partitions on this namespace
+                        partitions.scanAndRegisterNvme(@intCast(i), ns.nsid) catch |err| {
+                            console.warn("  Partition scan failed for NS{d}: {}", .{ ns.nsid, err });
+                        };
+                    }
+                }
+
+                found_nvme = true;
+                break; // Only initialize first controller
+            } else |err| {
+                console.warn("Storage: NVMe init failed: {}", .{err});
+            }
+        }
+    }
+
+    if (!found_nvme) {
+        console.info("Storage: No NVMe controllers found", .{});
     }
 }
 

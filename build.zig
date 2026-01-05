@@ -179,6 +179,7 @@ pub fn build(b: *std.Build) void {
     // Display option: "default" (auto), "sdl", "gtk", "cocoa" (macOS), "none" (headless)
     const qemu_display = b.option([]const u8, "display", "QEMU display backend (default, sdl, gtk, cocoa, none)") orelse "default";
     const qemu_usb_hub = b.option(bool, "usb-hub", "Attach usb-hub to XHCI and connect storage to it") orelse false;
+    const qemu_nvme = b.option(bool, "nvme", "Add NVMe storage device for testing") orelse false;
     const qemu_audio = b.option([]const u8, "audio", "QEMU audio backend (none, coreaudio, pa, file)") orelse "none";
     const boot_logo_enabled = b.option(bool, "boot-logo", "Show animated boot logo during init (disable for debugging)") orelse true;
 
@@ -591,6 +592,25 @@ pub fn build(b: *std.Build) void {
     ahci_module.addImport("dma", dma_module);
     ahci_module.addImport("iommu", kernel_iommu_module);
 
+    // Create NVMe driver module (NVM Express storage controller)
+    const nvme_module = b.createModule(.{
+        .root_source_file = b.path("src/drivers/storage/nvme/root.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    nvme_module.addImport("pci", pci_module);
+    nvme_module.addImport("vmm", vmm_module);
+    nvme_module.addImport("pmm", pmm_module);
+    nvme_module.addImport("console", console_module);
+    nvme_module.addImport("hal", hal_module);
+    nvme_module.addImport("fd", fd_module);
+    nvme_module.addImport("uapi", uapi_module);
+    nvme_module.addImport("heap", heap_module);
+    nvme_module.addImport("io", kernel_io_module);
+    nvme_module.addImport("sync", sync_module);
+    nvme_module.addImport("dma", dma_module);
+    nvme_module.addImport("iommu", kernel_iommu_module);
+
     // Create USB driver module (XHCI/EHCI host controllers)
     const usb_module = b.createModule(.{
         .root_source_file = b.path("src/drivers/usb/root.zig"),
@@ -641,6 +661,7 @@ pub fn build(b: *std.Build) void {
     fs_module.addImport("uapi", uapi_module);
     fs_module.addImport("console", console_module);
     fs_module.addImport("ahci", ahci_module);
+    fs_module.addImport("nvme", nvme_module);
 
     fs_module.addImport("sync", sync_module);
 
@@ -768,6 +789,7 @@ pub fn build(b: *std.Build) void {
     devfs_module.addImport("sched", sched_module);
     devfs_module.addImport("uapi", uapi_module);
     devfs_module.addImport("ahci", ahci_module);
+    devfs_module.addImport("nvme", nvme_module);
     devfs_module.addImport("heap", heap_module);
     devfs_module.addImport("audio", audio_module);
     devfs_module.addImport("fs", fs_module);
@@ -780,6 +802,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     partitions_module.addImport("ahci", ahci_module);
+    partitions_module.addImport("nvme", nvme_module);
     partitions_module.addImport("devfs", devfs_module);
     partitions_module.addImport("heap", heap_module);
     partitions_module.addImport("fd", fd_module);
@@ -1470,6 +1493,7 @@ pub fn build(b: *std.Build) void {
     kernel.root_module.addImport("tlb", tlb_module);
     kernel.root_module.addImport("e1000e", e1000e_module);
     kernel.root_module.addImport("ahci", ahci_module);
+    kernel.root_module.addImport("nvme", nvme_module);
     kernel.root_module.addImport("usb", usb_module);
     kernel.root_module.addImport("net", net_module);
     kernel.root_module.addImport("config", config_module);
@@ -2212,6 +2236,14 @@ pub fn build(b: *std.Build) void {
                 "-device", "usb-storage,drive=usbdisk",
             });
         }
+    }
+
+    // NVMe storage device (for testing NVMe driver)
+    if (qemu_nvme) {
+        run_cmd.addArgs(&.{
+            "-drive", "file=nvme_test.img,format=raw,if=none,id=nvmedisk",
+            "-device", "nvme,serial=ZIGKNVME01,drive=nvmedisk",
+        });
     }
 
     // Add display option (default = let QEMU auto-detect)

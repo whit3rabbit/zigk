@@ -11,6 +11,7 @@
 
 const std = @import("std");
 const ahci = @import("ahci");
+const nvme = @import("nvme");
 const devfs = @import("devfs");
 const heap = @import("heap");
 const mbr = @import("mbr.zig");
@@ -372,4 +373,323 @@ fn registerPartition(port_num: u5, disk_name: []const u8, index: u32, start: u64
     try devfs.registerDevice(name, &partition_ops, part);
 
     console.info("Partitions: Registered {s} (start={d}, sectors={d})", .{name, start, count});
+}
+
+// =============================================================================
+// NVMe Partition Support
+// =============================================================================
+
+/// NVMe partition information
+pub const NvmePartition = struct {
+    ns_index: u8,
+    nsid: u32,
+    start_lba: u64,
+    sector_count: u64,
+    lba_size: u32,
+    index: u32, // Partition index (1-based)
+};
+
+pub const nvme_partition_ops = FileOps{
+    .read = nvmePartitionRead,
+    .write = nvmePartitionWrite,
+    .close = nvmePartitionClose,
+    .seek = nvmePartitionSeek,
+    .stat = null,
+    .ioctl = null,
+    .mmap = null,
+    .poll = null,
+    .truncate = null,
+};
+
+fn nvmePartitionRead(fd: *FileDescriptor, buf: []u8) isize {
+    const part = @as(*NvmePartition, @ptrCast(@alignCast(fd.private_data)));
+    const controller = nvme.getController() orelse return Errno.EIO.toReturn();
+
+    const pos = fd.position;
+    const lba_size = part.lba_size;
+
+    // Security: Use checked arithmetic to prevent overflow
+    const part_size_bytes = std.math.mul(u64, part.sector_count, lba_size) catch return Errno.ERANGE.toReturn();
+    if (pos >= part_size_bytes) return 0; // EOF
+
+    var read_len = buf.len;
+    const end_pos = std.math.add(usize, pos, buf.len) catch return Errno.ERANGE.toReturn();
+    if (end_pos > part_size_bytes) {
+        read_len = @intCast(part_size_bytes - pos);
+    }
+
+    // Calculate LBA relative to namespace
+    const pos_lbas = pos / lba_size;
+    const start_lba = std.math.add(u64, part.start_lba, pos_lbas) catch return Errno.ERANGE.toReturn();
+    const start_offset = pos % lba_size;
+
+    const end_pos_padded = std.math.add(usize, pos + read_len, lba_size - 1) catch return Errno.ERANGE.toReturn();
+    const end_lba = std.math.add(u64, part.start_lba, end_pos_padded / lba_size) catch return Errno.ERANGE.toReturn();
+    if (end_lba < start_lba) return Errno.ERANGE.toReturn();
+    const block_count_u64 = end_lba - start_lba;
+
+    // NVMe max transfer is typically 65535 blocks
+    if (block_count_u64 > 65535) {
+        return Errno.EINVAL.toReturn();
+    }
+    const block_count: u32 = @intCast(block_count_u64);
+
+    // Fast path: aligned
+    if (start_offset == 0 and read_len % lba_size == 0) {
+        controller.readBlocks(part.nsid, start_lba, block_count, buf[0..read_len]) catch {
+            return Errno.EIO.toReturn();
+        };
+        fd.position += read_len;
+        const result = std.math.cast(isize, read_len) orelse return Errno.ERANGE.toReturn();
+        return result;
+    }
+
+    // Bounce buffer path
+    const bounce_size = @as(usize, block_count) * lba_size;
+    const allocator = heap.allocator();
+    const bounce = allocator.alloc(u8, bounce_size) catch {
+        return Errno.ENOMEM.toReturn();
+    };
+    defer allocator.free(bounce);
+
+    controller.readBlocks(part.nsid, start_lba, block_count, bounce) catch {
+        return Errno.EIO.toReturn();
+    };
+
+    const copy_start: usize = start_offset;
+    @memcpy(buf[0..read_len], bounce[copy_start .. copy_start + read_len]);
+
+    fd.position += read_len;
+    const result = std.math.cast(isize, read_len) orelse return Errno.ERANGE.toReturn();
+    return result;
+}
+
+fn nvmePartitionWrite(fd: *FileDescriptor, buf: []const u8) isize {
+    const part = @as(*NvmePartition, @ptrCast(@alignCast(fd.private_data)));
+    const controller = nvme.getController() orelse return Errno.EIO.toReturn();
+
+    const pos = fd.position;
+    const lba_size = part.lba_size;
+
+    const part_size_bytes = std.math.mul(u64, part.sector_count, lba_size) catch return Errno.ERANGE.toReturn();
+    if (pos >= part_size_bytes) return Errno.ENOSPC.toReturn();
+
+    var write_len = buf.len;
+    const end_pos = std.math.add(usize, pos, write_len) catch return Errno.ERANGE.toReturn();
+    if (end_pos > part_size_bytes) {
+        write_len = @intCast(part_size_bytes - pos);
+    }
+
+    const pos_lbas = pos / lba_size;
+    const start_lba = std.math.add(u64, part.start_lba, pos_lbas) catch return Errno.ERANGE.toReturn();
+    const start_offset = pos % lba_size;
+
+    const end_pos_padded = std.math.add(usize, pos + write_len, lba_size - 1) catch return Errno.ERANGE.toReturn();
+    const end_lba = std.math.add(u64, part.start_lba, end_pos_padded / lba_size) catch return Errno.ERANGE.toReturn();
+    if (end_lba < start_lba) return Errno.ERANGE.toReturn();
+    const block_count_u64 = end_lba - start_lba;
+
+    if (block_count_u64 > 65535) {
+        return Errno.EINVAL.toReturn();
+    }
+    const block_count: u32 = @intCast(block_count_u64);
+
+    if (start_offset == 0 and write_len % lba_size == 0) {
+        controller.writeBlocks(part.nsid, start_lba, block_count, buf[0..write_len]) catch {
+            return Errno.EIO.toReturn();
+        };
+        fd.position += write_len;
+        const result = std.math.cast(isize, write_len) orelse return Errno.ERANGE.toReturn();
+        return result;
+    }
+
+    // RMW
+    const bounce_size = @as(usize, block_count) * lba_size;
+    const allocator = heap.allocator();
+    const bounce = allocator.alloc(u8, bounce_size) catch {
+        return Errno.ENOMEM.toReturn();
+    };
+    defer allocator.free(bounce);
+
+    controller.readBlocks(part.nsid, start_lba, block_count, bounce) catch {
+        return Errno.EIO.toReturn();
+    };
+
+    const copy_start: usize = start_offset;
+    @memcpy(bounce[copy_start .. copy_start + write_len], buf[0..write_len]);
+
+    controller.writeBlocks(part.nsid, start_lba, block_count, bounce) catch {
+        return Errno.EIO.toReturn();
+    };
+
+    fd.position += write_len;
+    const result = std.math.cast(isize, write_len) orelse return Errno.ERANGE.toReturn();
+    return result;
+}
+
+fn nvmePartitionClose(fd: *FileDescriptor) isize {
+    const part = @as(*NvmePartition, @ptrCast(@alignCast(fd.private_data)));
+    if (nvme.getController()) |controller| {
+        controller.flush(part.nsid) catch {};
+    }
+    return 0;
+}
+
+fn nvmePartitionSeek(fd: *FileDescriptor, offset: i64, whence: u32) isize {
+    const part = @as(*NvmePartition, @ptrCast(@alignCast(fd.private_data)));
+    const part_size = std.math.mul(u64, part.sector_count, part.lba_size) catch return Errno.ERANGE.toReturn();
+
+    const SEEK_SET: u32 = 0;
+    const SEEK_CUR: u32 = 1;
+    const SEEK_END: u32 = 2;
+
+    const pos_i64 = std.math.cast(i64, fd.position) orelse return Errno.ERANGE.toReturn();
+    const size_i64 = std.math.cast(i64, part_size) orelse return Errno.ERANGE.toReturn();
+
+    const new_pos: i64 = switch (whence) {
+        SEEK_SET => offset,
+        SEEK_CUR => pos_i64 + offset,
+        SEEK_END => size_i64 + offset,
+        else => return Errno.EINVAL.toReturn(),
+    };
+
+    if (new_pos < 0) {
+        return Errno.EINVAL.toReturn();
+    }
+
+    fd.position = std.math.cast(usize, new_pos) orelse return Errno.ERANGE.toReturn();
+    return std.math.cast(isize, fd.position) orelse return Errno.ERANGE.toReturn();
+}
+
+/// Scan an NVMe namespace for partitions and register them
+pub fn scanAndRegisterNvme(ns_index: u8, nsid: u32) !void {
+    const allocator = heap.allocator();
+    const controller = nvme.getController() orelse return;
+    const ns = controller.getNamespace(ns_index) orelse return;
+
+    // Register the raw namespace first (e.g. nvme0n1)
+    const disk_name = try std.fmt.allocPrint(allocator, "nvme0n{d}", .{nsid});
+
+    // Register with NVMe adapter's block_ops
+    try devfs.registerDevice(disk_name, &nvme.adapter.block_ops, @ptrFromInt(@as(usize, nsid)));
+
+    console.info("Partitions: Scanning {s}...", .{disk_name});
+
+    // Read LBA 0 (MBR)
+    const lba_size = ns.lba_size;
+    const mbr_buf_size = @max(lba_size, 512);
+    const mbr_sector = try allocator.alloc(u8, mbr_buf_size);
+    defer allocator.free(mbr_sector);
+
+    controller.readBlocks(nsid, 0, 1, mbr_sector) catch |err| {
+        console.warn("Partitions: Failed to read MBR from {s}: {}", .{ disk_name, err });
+        return;
+    };
+
+    const mbr_data: *align(1) mbr.Mbr = @ptrCast(mbr_sector);
+
+    if (!mbr_data.isValid()) {
+        console.info("Partitions: No valid MBR signature on {s}", .{disk_name});
+        return;
+    }
+
+    // Check for GPT
+    if (mbr_data.isGptProtective()) {
+        console.info("Partitions: Found GPT protective MBR on {s}", .{disk_name});
+        try scanGptNvme(ns_index, nsid, disk_name, lba_size);
+        return;
+    }
+
+    // Process MBR partitions
+    console.info("Partitions: Found MBR on {s}", .{disk_name});
+    var index: u32 = 1;
+    for (mbr_data.partitions()) |entry| {
+        if (entry.isValid()) {
+            try registerNvmePartition(ns_index, nsid, disk_name, index, entry.lba_start, entry.sector_count, lba_size);
+            index += 1;
+        }
+    }
+}
+
+fn scanGptNvme(ns_index: u8, nsid: u32, disk_name: []const u8, lba_size: u32) !void {
+    const allocator = heap.allocator();
+    const controller = nvme.getController() orelse return;
+
+    // Read GPT Header (LBA 1)
+    const header_buf_size = @max(lba_size, 512);
+    const header_sector = try allocator.alloc(u8, header_buf_size);
+    defer allocator.free(header_sector);
+
+    controller.readBlocks(nsid, 1, 1, header_sector) catch {
+        console.warn("Partitions: Failed to read GPT header", .{});
+        return;
+    };
+
+    const header: *align(1) gpt.GptHeader = @ptrCast(header_sector);
+    if (!header.isValid()) {
+        console.warn("Partitions: Invalid GPT signature", .{});
+        return;
+    }
+
+    // Read Partition Entries
+    const entries_size = std.math.mul(u64, header.num_partition_entries, header.size_partition_entry) catch {
+        console.warn("Partitions: GPT table size overflow", .{});
+        return;
+    };
+    const entries_lbas = (entries_size + lba_size - 1) / lba_size;
+
+    // Limit reasonable size
+    if (entries_lbas > 128) {
+        console.warn("Partitions: GPT table too large ({} LBAs)", .{entries_lbas});
+        return;
+    }
+
+    const table_buffer = try allocator.alloc(u8, entries_lbas * lba_size);
+    defer allocator.free(table_buffer);
+
+    const entries_lbas_u32: u32 = @intCast(entries_lbas);
+    controller.readBlocks(nsid, header.partition_entry_lba, entries_lbas_u32, table_buffer) catch {
+        console.warn("Partitions: Failed to read GPT entries", .{});
+        return;
+    };
+
+    var index: u32 = 1;
+    var i: u32 = 0;
+    while (i < header.num_partition_entries) : (i += 1) {
+        const offset = std.math.mul(u32, i, header.size_partition_entry) catch break;
+        const end_offset = std.math.add(u32, offset, @sizeOf(gpt.GptEntry)) catch break;
+        if (end_offset > table_buffer.len) break;
+
+        const entry: *align(1) gpt.GptEntry = @ptrCast(table_buffer[offset..].ptr);
+
+        if (entry.isValid()) {
+            const diff = std.math.sub(u64, entry.last_lba, entry.first_lba) catch continue;
+            const size = std.math.add(u64, diff, 1) catch continue;
+            try registerNvmePartition(ns_index, nsid, disk_name, index, entry.first_lba, size, lba_size);
+            index += 1;
+        }
+    }
+}
+
+fn registerNvmePartition(ns_index: u8, nsid: u32, disk_name: []const u8, index: u32, start: u64, count: u64, lba_size: u32) !void {
+    const allocator = heap.allocator();
+
+    // Create partition struct
+    const part = try allocator.create(NvmePartition);
+    part.* = NvmePartition{
+        .ns_index = ns_index,
+        .nsid = nsid,
+        .start_lba = start,
+        .sector_count = count,
+        .lba_size = lba_size,
+        .index = index,
+    };
+
+    // Create name: nvme0n1p1, nvme0n1p2...
+    const name = try std.fmt.allocPrint(allocator, "{s}p{d}", .{ disk_name, index });
+
+    // Register
+    try devfs.registerDevice(name, &nvme_partition_ops, part);
+
+    console.info("Partitions: Registered {s} (start={d}, sectors={d})", .{ name, start, count });
 }
