@@ -1,5 +1,5 @@
 const std = @import("std");
-const cache = @import("cache.zig");
+pub const cache = @import("cache.zig");
 const packet = @import("packet.zig");
 const monitor = @import("monitor.zig");
 

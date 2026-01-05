@@ -3,6 +3,8 @@
 // Userland entry point providing SysV ABI compliant stack setup.
 // This is the first code executed when a userland process starts.
 
+const builtin = @import("builtin");
+
 // Note: syscall module is imported via build system as "syscall"
 // However, crt0 only uses inline assembly for the syscall instruction
 // to avoid circular dependencies during early startup.
@@ -10,51 +12,93 @@
 // External main function provided by the user program
 extern fn main(argc: i32, argv: [*]const [*:0]const u8) i32;
 
-// Global assembly entry point
+// Global assembly entry point - architecture-specific
 comptime {
-    asm (
-        \\.global _start
-        \\_start:
-        // Clear frame pointer
-        \\xor %rbp, %rbp
-        
-        // Save argc and argv to callee-saved regs (preserved across syscall)
-        \\movq (%rsp), %r12      // argc
-        \\leaq 8(%rsp), %r13     // argv
-        
-        // Align stack
-        \\andq $-16, %rsp
+    switch (builtin.cpu.arch) {
+        .x86_64 => asm (
+            \\.global _start
+            \\_start:
+            // Clear frame pointer
+            \\xor %rbp, %rbp
 
-        // Initialize TLS: main_thread_tcb[0] = &main_thread_tcb
-        \\leaq main_thread_tcb(%rip), %rax
-        \\movq %rax, main_thread_tcb(%rip)
+            // Save argc and argv to callee-saved regs (preserved across syscall)
+            \\movq (%rsp), %r12      // argc
+            \\leaq 8(%rsp), %r13     // argv
 
-        // sys_arch_prctl(ARCH_SET_FS, &main_thread_tcb)
-        \\movq $158, %rax         // SYS_ARCH_PRCTL
-        \\movq $0x1002, %rdi      // ARCH_SET_FS
-        \\leaq main_thread_tcb(%rip), %rsi // addr
-        \\syscall
+            // Align stack
+            \\andq $-16, %rsp
 
-        // Restore args for main
-        \\movq %r12, %rdi        // argc
-        \\movq %r13, %rsi        // argv
-        
-        // Call main
-        \\call main
-        
-        // Exit(rax)
-        \\movq %rax, %rdi
-        \\movq $60, %rax
-        \\syscall
-        \\ud2
+            // Initialize TLS: main_thread_tcb[0] = &main_thread_tcb
+            \\leaq main_thread_tcb(%rip), %rax
+            \\movq %rax, main_thread_tcb(%rip)
 
-        // Define TCB in data section
-        \\.data
-        \\.align 8
-        \\.global main_thread_tcb
-        \\main_thread_tcb: .quad 0
-        \\.text
-    );
+            // sys_arch_prctl(ARCH_SET_FS, &main_thread_tcb)
+            \\movq $158, %rax         // SYS_ARCH_PRCTL
+            \\movq $0x1002, %rdi      // ARCH_SET_FS
+            \\leaq main_thread_tcb(%rip), %rsi // addr
+            \\syscall
+
+            // Restore args for main
+            \\movq %r12, %rdi        // argc
+            \\movq %r13, %rsi        // argv
+
+            // Call main
+            \\call main
+
+            // Exit(rax)
+            \\movq %rax, %rdi
+            \\movq $60, %rax
+            \\syscall
+            \\ud2
+
+            // Define TCB in data section
+            \\.data
+            \\.align 8
+            \\.global main_thread_tcb
+            \\main_thread_tcb: .quad 0
+            \\.text
+        ),
+        .aarch64 => asm (
+            \\.global _start
+            \\_start:
+            // Clear frame pointer (x29)
+            \\mov x29, #0
+
+            // Get argc and argv from stack (kernel places them there)
+            \\ldr x19, [sp]          // argc (save in callee-saved reg)
+            \\add x20, sp, #8        // argv (save in callee-saved reg)
+
+            // Align stack to 16 bytes
+            \\and sp, sp, #-16
+
+            // Initialize TLS: main_thread_tcb[0] = &main_thread_tcb
+            // On AArch64, we write directly to TPIDR_EL0 (user-accessible)
+            \\adrp x0, main_thread_tcb
+            \\add x0, x0, :lo12:main_thread_tcb
+            \\str x0, [x0]           // main_thread_tcb[0] = &main_thread_tcb
+            \\msr tpidr_el0, x0      // Set TLS base
+
+            // Set up arguments for main(argc, argv)
+            \\mov w0, w19            // argc (32-bit)
+            \\mov x1, x20            // argv
+
+            // Call main
+            \\bl main
+
+            // Exit with return value from main (in w0)
+            \\mov x8, #93            // SYS_EXIT (aarch64)
+            \\svc #0
+            \\brk #0                 // Should never reach here
+
+            // Define TCB in data section
+            \\.data
+            \\.align 8
+            \\.global main_thread_tcb
+            \\main_thread_tcb: .quad 0
+            \\.text
+        ),
+        else => @compileError("Unsupported architecture for crt0"),
+    }
 }
 
 // Provide a default weak main for programs that don't define one

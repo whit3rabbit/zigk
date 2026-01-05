@@ -307,6 +307,14 @@ This checklist highlights the unique architectural design, protocol compliance, 
 *   **Generation Counter Guarding**: Use of monotonic generation counters on TCBs and ARP entries to detect object reuse, preventing stale pointers from being used after a connection has been recycled.
 *   **Comptime ABI Verification**: Extensive use of `extern struct` with `comptime` size assertions to ensure network headers exactly match wire specifications and are safe for unaligned access.
 
+### Network Configuration Daemon (netcfgd)
+*   **DHCPv4 Client (RFC 2131/2132/5227)**: Full DORA (Discover-Offer-Request-Acknowledge) state machine with exponential backoff (4s-64s) and jitter. Includes ARP probe/announce for conflict detection (RFC 5227), DHCPDECLINE on conflict, DHCPRELEASE on shutdown, T1/T2 renewal timers defaulting to 0.5/0.875 of lease time.
+*   **DHCPv6 Client (RFC 8415)**: Complete stateful DHCPv6 implementation with SOLICIT/ADVERTISE/REQUEST/REPLY message handling, Rapid Commit optimization for 2-message exchange, IA_NA (Identity Association for Non-temporary Addresses), DUID-LL generation from MAC, T1/T2 renewal with default calculations, and multicast to ff02::1:2.
+*   **SLAAC (RFC 4862)**: Stateless Address Autoconfiguration from Router Advertisements with Modified EUI-64 interface identifier generation, M/O/A flag detection, global address configuration, and timestamp-based RA deduplication.
+*   **Security-Hardened Transaction IDs**: Both DHCPv4 (32-bit) and DHCPv6 (24-bit) use CSPRNG for transaction ID generation to prevent spoofing attacks. Server ID and MAC address validation on responses.
+*   **Zero-Initialized Packets**: All outbound packets zero-initialized to prevent kernel memory leaks; partial reads from recvfrom leave zeros (treated as PAD) in unwritten bytes.
+*   **Initial Delay (Thundering Herd Prevention)**: DHCPv4 implements RFC 2131 Section 4.4.1 random delay (1-10 seconds) on startup to prevent synchronized lease requests after power outage recovery.
+
 This checklist highlights the unique implementation details, Linux ABI compatibility, and security-hardened features found in your Userland API (UAPI) and System Interface layers.
 
 ### ABI Stability & Verification
@@ -519,6 +527,28 @@ This roadmap was generated from a comprehensive feature validation on 2024-12-30
 - Portable CPU pause hints (`pause` on x86_64, `yield` on aarch64)
 - VMware hypercall interface for aarch64 using `mrs xzr, mdccsr_el0` trap
 
+**Discovered 2026-01-04 (documentation update - features were already implemented):**
+- DHCPv4 client fully functional in netcfgd service (`src/user/services/netcfgd/dhcpv4.zig`)
+  - Full RFC 2131/2132 state machine with T1/T2 renewal
+  - RFC 5227 ARP probe/announce for conflict detection
+  - CSPRNG transaction IDs, exponential backoff with jitter
+- DHCPv6 client fully functional in netcfgd service (`src/user/services/netcfgd/dhcpv6.zig`)
+  - Full RFC 8415 state machine: Waiting -> Solicit -> Request -> Bound -> Renew -> Rebind
+  - DUID-LL generation from MAC address (RFC 8415 Section 11.4)
+  - IA_NA (Identity Association for Non-temporary Addresses) with IA_ADDR parsing
+  - Rapid Commit support for 2-message exchange optimization
+  - T1/T2 timer handling with RFC-compliant default calculations
+  - Option Request Option (ORO) for DNS server discovery
+  - Server DUID storage for unicast RENEW
+  - Multicast to ff02::1:2 (All_DHCP_Servers)
+  - CSPRNG transaction IDs (24-bit)
+- SLAAC functional in netcfgd (`src/user/services/netcfgd/slaac.zig`)
+  - RFC 4862 Stateless Address Autoconfiguration
+  - Modified EUI-64 interface identifier generation from MAC
+  - M/O/A flag detection from Router Advertisements
+  - Global address configuration with gateway setting
+  - Timestamp-based RA deduplication
+
 **Methodology**: Codebase exploration using pattern matching across:
 - `src/arch/x86_64/` and `src/arch/aarch64/` for architecture features
 - `src/kernel/mm/` for memory management
@@ -613,9 +643,9 @@ This roadmap was generated from a comprehensive feature validation on 2024-12-30
 |---------|--------|--------|
 | IPv6 | **Implemented** | RX/TX, extension headers, fragmentation |
 | ICMPv6/NDP | **Implemented** | Neighbor discovery, DAD, ping6 |
-| SLAAC | Not Implemented | RA prefix processing for autoconfiguration |
-| DHCP Client | Not Implemented | VMs cannot auto-configure networking |
-| DHCPv6 | Not Implemented | IPv6 address autoconfiguration |
+| SLAAC | **Implemented** | RFC 4862 with EUI-64 generation, M/O/A flags |
+| DHCP Client | **Implemented** | Full RFC 2131 client with ARP conflict detection |
+| DHCPv6 | **Implemented** | Full RFC 8415 client with Rapid Commit, T1/T2 renewal |
 | Multicast Routing | Partial | mDNS/service discovery |
 | Raw Sockets | Not Implemented | Network diagnostics (ping, traceroute) |
 | UNIX Domain Sockets | Not Implemented | Local IPC (systemd, dbus patterns) |
@@ -676,15 +706,22 @@ This roadmap was generated from a comprehensive feature validation on 2024-12-30
 ## Implementation Priority
 
 ### Phase 1: Network Fundamentals (High Priority)
-1. **DHCP Client** - Essential for any VM deployment
-   - Location: `src/net/dhcp/`
-   - Dependencies: UDP (done), raw ethernet (done)
-   - Effort: Medium (DHCP state machine, option parsing)
+1. ~~**DHCP Client**~~ - **COMPLETE** (2026-01-04)
+   - Location: `src/user/services/netcfgd/dhcpv4.zig`
+   - Full RFC 2131/2132/5227 implementation with ARP conflict detection
 
-2. **IPv6 Core** - Required for modern infrastructure
+2. ~~**DHCPv6 Client**~~ - **COMPLETE** (2026-01-04)
+   - Location: `src/user/services/netcfgd/dhcpv6.zig`
+   - Full RFC 8415 implementation with Rapid Commit and T1/T2 renewal
+
+3. ~~**SLAAC**~~ - **COMPLETE** (2026-01-04)
+   - Location: `src/user/services/netcfgd/slaac.zig`
+   - RFC 4862 with EUI-64 generation, M/O/A flag handling
+
+4. **IPv6 Core** - Mostly complete
    - Location: `src/net/ipv6/`
-   - Components: ICMPv6, NDP, SLAAC
-   - Effort: High (new protocol layer)
+   - Components: ICMPv6 (done), NDP (done), SLAAC (done), DHCPv6 (done)
+   - Remaining: IPv6 PMTU cache, TX fragmentation wiring
 
 ### Phase 2: Storage Expansion (High Priority)
 1. **NVMe Driver** - Modern VM default
@@ -770,12 +807,20 @@ Modern VirtIO devices use 0x1040 + device_type. The kernel should detect both le
 | IPv6 PMTU | 8201 | Packet Too Big handled but no PMTU cache |
 | IPv6 Fragmentation TX | 8200 | Code exists but not wired up |
 
+### Fully Implemented (Network)
+| Protocol | RFC | Description |
+|----------|-----|-------------|
+| SLAAC | 4862 | RFC 4862 with EUI-64 generation, M/O/A flag handling |
+| DHCPv6 | 8415 | Full client with SOLICIT/ADVERTISE/REQUEST/REPLY, Rapid Commit, T1/T2 |
+
+### Implemented (Network)
+| Protocol | RFC | Description |
+|----------|-----|-------------|
+| DHCPv4 | 2131/2132/5227 | Full client with DORA, T1/T2 renewal, ARP probe |
+
 ### Not Implemented
 | Protocol | RFC | Use Case |
 |----------|-----|----------|
-| SLAAC | 4862 | IPv6 autoconfiguration |
-| DHCPv4 | 2131 | VM IP assignment |
-| DHCPv6 | 8415 | IPv6 IP assignment |
 | IGMP | 3376 | Multicast group membership |
 | Raw Sockets | - | ping, traceroute |
 | UNIX Sockets | - | Local IPC |

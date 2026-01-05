@@ -1,11 +1,24 @@
 // ARP Syscall Handlers
 //
-// Implements ARP probe and announce syscalls for DHCP IP conflict detection
-// per RFC 5227 (IPv4 Address Conflict Detection).
+// RFC 5227 - IPv4 Address Conflict Detection
 //
-// Security: Requires CAP_NET_CONFIG capability for both operations.
-// These syscalls allow userspace (netcfgd) to detect IP conflicts before
-// configuring an address and announce new addresses to update ARP caches.
+// Implements ARP probe and announce syscalls for DHCP IP conflict detection.
+// These operations are critical for preventing IP address collisions on
+// the local network segment.
+//
+// ARP Probe (Section 2.1.1):
+//   Sender IP = 0.0.0.0 (indicates probe, not claim)
+//   Target IP = address being probed
+//   Any response indicates conflict
+//
+// ARP Announcement (Section 2.3):
+//   Gratuitous ARP reply to broadcast
+//   Updates neighbor caches with our new MAC/IP binding
+//
+// Security:
+//   - Requires CAP_NET_CONFIG capability for both operations
+//   - Prevents unprivileged processes from spoofing network addresses
+//   - Rate limiting handled implicitly by probe timeout
 
 const std = @import("std");
 const uapi = @import("uapi");
@@ -206,10 +219,19 @@ pub fn sys_arp_announce(
 // Internal Helper Functions
 // =============================================================================
 
-/// Send an ARP probe packet (RFC 5227)
-/// Sender IP is 0.0.0.0, target IP is the IP we're probing for.
+/// Send an ARP probe packet
+///
+/// RFC 5227 Section 2.1.1:
+/// "A host probes to see if an address is already in use by broadcasting
+/// an ARP Request for the desired address. The client MUST fill in the
+/// 'sender hardware address' field of the ARP Request with the hardware
+/// address of the interface through which it is sending the packet. The
+/// 'sender IP address' field MUST be set to all zeroes."
+///
+/// The zero sender IP distinguishes a probe from a normal ARP request,
+/// ensuring we don't accidentally update anyone's ARP cache.
 fn sendArpProbe(iface: *socket_state.Interface, target_ip: u32) void {
-    // SECURITY: Zero-init to prevent stack leaks
+    // SECURITY: Zero-init to prevent stack leaks in padding bytes
     var buf: [core_packet.ETH_HEADER_SIZE + @sizeOf(core_packet.ArpHeader)]u8 =
         [_]u8{0} ** (core_packet.ETH_HEADER_SIZE + @sizeOf(core_packet.ArpHeader));
 
@@ -219,7 +241,7 @@ fn sendArpProbe(iface: *socket_state.Interface, target_ip: u32) void {
     eth.setEthertype(ethernet.ETHERTYPE_ARP);
 
     const arp: *align(1) core_packet.ArpHeader = @ptrCast(&buf[core_packet.ETH_HEADER_SIZE]);
-    arp.hw_type = @byteSwap(@as(u16, 1)); // Ethernet
+    arp.hw_type = @byteSwap(@as(u16, 1)); // Ethernet (RFC 826)
     arp.proto_type = @byteSwap(@as(u16, 0x0800)); // IPv4
     arp.hw_len = 6;
     arp.proto_len = 4;
@@ -235,9 +257,18 @@ fn sendArpProbe(iface: *socket_state.Interface, target_ip: u32) void {
 }
 
 /// Send a gratuitous ARP announcement
-/// Announces our ownership of an IP to update neighbor caches.
+///
+/// RFC 5227 Section 2.3:
+/// "Having probed to determine that an address is not in use, the host
+/// announces its claim to the address... An ARP Announcement is identical
+/// to the ARP Probe described above, except that now the sender and
+/// target IP addresses are both set to the host's newly selected IPv4 address."
+///
+/// RFC 5227 Section 3:
+/// "A host SHOULD transmit an ARP Announcement... This allows other hosts
+/// on the link to update their ARP caches with the new information."
 fn sendGratuitousArp(iface: *socket_state.Interface, ip: u32) void {
-    // SECURITY: Zero-init to prevent stack leaks
+    // SECURITY: Zero-init to prevent stack leaks in padding bytes
     var buf: [core_packet.ETH_HEADER_SIZE + @sizeOf(core_packet.ArpHeader)]u8 =
         [_]u8{0} ** (core_packet.ETH_HEADER_SIZE + @sizeOf(core_packet.ArpHeader));
 
@@ -247,8 +278,8 @@ fn sendGratuitousArp(iface: *socket_state.Interface, ip: u32) void {
     eth.setEthertype(ethernet.ETHERTYPE_ARP);
 
     const arp: *align(1) core_packet.ArpHeader = @ptrCast(&buf[core_packet.ETH_HEADER_SIZE]);
-    arp.hw_type = @byteSwap(@as(u16, 1));
-    arp.proto_type = @byteSwap(@as(u16, 0x0800));
+    arp.hw_type = @byteSwap(@as(u16, 1)); // Ethernet (RFC 826)
+    arp.proto_type = @byteSwap(@as(u16, 0x0800)); // IPv4
     arp.hw_len = 6;
     arp.proto_len = 4;
     arp.operation = core_packet.ArpHeader.OP_REPLY; // Gratuitous uses reply
@@ -256,7 +287,7 @@ fn sendGratuitousArp(iface: *socket_state.Interface, ip: u32) void {
     @memcpy(&arp.sender_mac, &iface.mac_addr);
     arp.sender_ip = @byteSwap(ip);
 
-    // Gratuitous ARP: target = sender (announce to all)
+    // RFC 5227: sender = target for announcement (claims ownership)
     @memcpy(&arp.target_mac, &iface.mac_addr);
     arp.target_ip = @byteSwap(ip);
 

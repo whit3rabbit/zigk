@@ -246,7 +246,8 @@ pub fn sys_recvmsg(fd: usize, msg_ptr: usize, flags: usize, socket_file_ops: *co
     defer heap.allocator().free(kbuf);
 
     // Prepare for source address if requested
-    var ksrc_addr: socket.SockAddrIn = undefined;
+    // SECURITY: Zero-init to prevent kernel stack leak if tcpRecv path doesn't fill it
+    var ksrc_addr: socket.SockAddrIn = std.mem.zeroes(socket.SockAddrIn);
     const src_addr_arg: ?*socket.SockAddrIn = if (msg.msg_name != 0) &ksrc_addr else null;
 
     // Receive data

@@ -234,7 +234,7 @@ pub fn sys_socket(domain: usize, sock_type: usize, protocol: usize) SyscallError
     return fd_num;
 }
 
-/// sys_bind (49) - Bind socket to address
+/// sys_bind (49) - Bind socket to address (dual-stack: IPv4 and IPv6)
 /// (fd, addr, addrlen) -> int
 ///
 /// SECURITY: Binding to privileged ports (< 1024) requires root (euid == 0).
@@ -243,27 +243,62 @@ pub fn sys_bind(fd: usize, addr_ptr: usize, addrlen: usize) SyscallError!usize {
         return error.ENOTSOCK;
     };
 
-    if (addrlen < @sizeOf(socket.SockAddrIn)) {
+    // Read address family first (offset 0, 2 bytes in both sockaddr_in and sockaddr_in6)
+    if (addrlen < 2) {
         return error.EINVAL;
     }
 
-    // Safely copy address from user memory
-    const kaddr = user_mem.copyStructFromUser(socket.SockAddrIn, user_mem.UserPtr.from(addr_ptr)) catch {
+    const family = user_mem.UserPtr.from(addr_ptr).readValue(u16) catch {
         return error.EFAULT;
     };
 
-    // SECURITY: Check privileged port binding (ports < 1024)
-    const host_port = @byteSwap(kaddr.port);
-    if (host_port < 1024 and host_port != 0) {
-        const proc = base.getCurrentProcess();
-        if (proc.euid != 0) {
-            return error.EACCES;
+    if (family == socket.AF_INET) {
+        // IPv4 path
+        if (addrlen < @sizeOf(socket.SockAddrIn)) {
+            return error.EINVAL;
         }
-    }
 
-    socket.bind(ctx.socket_idx, &kaddr) catch |err| {
-        return socketErrorToSyscallError(err);
-    };
+        const kaddr = user_mem.copyStructFromUser(socket.SockAddrIn, user_mem.UserPtr.from(addr_ptr)) catch {
+            return error.EFAULT;
+        };
+
+        // SECURITY: Check privileged port binding (ports < 1024)
+        const host_port = @byteSwap(kaddr.port);
+        if (host_port < 1024 and host_port != 0) {
+            const proc = base.getCurrentProcess();
+            if (proc.euid != 0) {
+                return error.EACCES;
+            }
+        }
+
+        socket.bind(ctx.socket_idx, &kaddr) catch |err| {
+            return socketErrorToSyscallError(err);
+        };
+    } else if (family == socket.AF_INET6) {
+        // IPv6 path
+        if (addrlen < @sizeOf(socket.SockAddrIn6)) {
+            return error.EINVAL;
+        }
+
+        const kaddr6 = user_mem.copyStructFromUser(socket.SockAddrIn6, user_mem.UserPtr.from(addr_ptr)) catch {
+            return error.EFAULT;
+        };
+
+        // SECURITY: Check privileged port binding (ports < 1024)
+        const host_port = @byteSwap(kaddr6.port);
+        if (host_port < 1024 and host_port != 0) {
+            const proc = base.getCurrentProcess();
+            if (proc.euid != 0) {
+                return error.EACCES;
+            }
+        }
+
+        socket.bind6(ctx.socket_idx, &kaddr6) catch |err| {
+            return socketErrorToSyscallError(err);
+        };
+    } else {
+        return error.EAFNOSUPPORT;
+    }
 
     return 0;
 }
@@ -275,7 +310,7 @@ pub fn sys_bind(fd: usize, addr_ptr: usize, addrlen: usize) SyscallError!usize {
 /// Maximum send buffer size to prevent excessive kernel allocation
 const MAX_SENDTO_BUFFER: usize = 65536;
 
-/// sys_sendto (44) - Send message on socket
+/// sys_sendto (44) - Send message on socket (dual-stack: IPv4 and IPv6)
 /// (fd, buf, len, flags, dest_addr, addrlen) -> ssize_t
 ///
 /// SECURITY: Copies user data to kernel buffer to prevent TOCTOU.
@@ -301,16 +336,18 @@ pub fn sys_sendto(
         return error.EFAULT;
     }
 
-    var kdest_addr: ?socket.SockAddrIn = null;
-
-    if (dest_addr_ptr != 0) {
-        if (addrlen < @sizeOf(socket.SockAddrIn)) {
-            return error.EINVAL;
-        }
-        kdest_addr = user_mem.copyStructFromUser(socket.SockAddrIn, user_mem.UserPtr.from(dest_addr_ptr)) catch {
-            return error.EFAULT;
-        };
+    if (dest_addr_ptr == 0) {
+        return error.EDESTADDRREQ;
     }
+
+    // Read address family first
+    if (addrlen < 2) {
+        return error.EINVAL;
+    }
+
+    const family = user_mem.UserPtr.from(dest_addr_ptr).readValue(u16) catch {
+        return error.EFAULT;
+    };
 
     // SECURITY: Copy user data to kernel buffer to prevent TOCTOU.
     const kbuf = heap.allocator().alloc(u8, len) catch {
@@ -323,23 +360,45 @@ pub fn sys_sendto(
         return error.EFAULT;
     };
 
-    if (kdest_addr) |*addr| {
-        const sent = socket.sendto(ctx.socket_idx, kbuf, addr) catch |err| {
+    if (family == socket.AF_INET) {
+        // IPv4 path
+        if (addrlen < @sizeOf(socket.SockAddrIn)) {
+            return error.EINVAL;
+        }
+        const kdest_addr = user_mem.copyStructFromUser(socket.SockAddrIn, user_mem.UserPtr.from(dest_addr_ptr)) catch {
+            return error.EFAULT;
+        };
+
+        const sent = socket.sendto(ctx.socket_idx, kbuf, &kdest_addr) catch |err| {
+            return socketErrorToSyscallError(err);
+        };
+        return sent;
+    } else if (family == socket.AF_INET6) {
+        // IPv6 path
+        if (addrlen < @sizeOf(socket.SockAddrIn6)) {
+            return error.EINVAL;
+        }
+        const kdest_addr6 = user_mem.copyStructFromUser(socket.SockAddrIn6, user_mem.UserPtr.from(dest_addr_ptr)) catch {
+            return error.EFAULT;
+        };
+
+        const sent = socket.sendto6(ctx.socket_idx, kbuf, &kdest_addr6) catch |err| {
             return socketErrorToSyscallError(err);
         };
         return sent;
     } else {
-        return error.EDESTADDRREQ;
+        return error.EAFNOSUPPORT;
     }
 }
 
 /// Maximum receive buffer size to prevent excessive kernel allocation
 const MAX_RECVFROM_BUFFER: usize = 65536;
 
-/// sys_recvfrom (45) - Receive message from socket
+/// sys_recvfrom (45) - Receive message from socket (dual-stack: IPv4 and IPv6)
 /// (fd, buf, len, flags, src_addr, addrlen_ptr) -> ssize_t
 ///
 /// SECURITY: Receives into kernel buffer then copies to user, preventing TOCTOU.
+/// Returns source address as SockAddrIn for IPv4 sources, SockAddrIn6 for IPv6.
 pub fn sys_recvfrom(
     fd: usize,
     buf_ptr: usize,
@@ -365,10 +424,11 @@ pub fn sys_recvfrom(
     };
     defer heap.allocator().free(kbuf);
 
-    var ksrc_addr: socket.SockAddrIn = std.mem.zeroes(socket.SockAddrIn);
-    const src_addr_arg: ?*socket.SockAddrIn = if (src_addr_ptr != 0) &ksrc_addr else null;
+    // Use dual-stack receive function
+    var src_ip: socket.IpAddr = .none;
+    var src_port: u16 = 0;
 
-    const received = socket.recvfrom(ctx.socket_idx, kbuf, src_addr_arg) catch |err| {
+    const received = socket.recvfromIp(ctx.socket_idx, kbuf, &src_ip, &src_port) catch |err| {
         return socketErrorToSyscallError(err);
     };
 
@@ -379,23 +439,49 @@ pub fn sys_recvfrom(
         };
     }
 
+    // Return source address based on IP version
     if (src_addr_ptr != 0 and addrlen_ptr != 0) {
         const addrlen_uptr = user_mem.UserPtr.from(addrlen_ptr);
         const input_len = addrlen_uptr.readValue(u32) catch {
             return error.EFAULT;
         };
 
-        if (input_len < @sizeOf(socket.SockAddrIn)) {
-            return error.EINVAL;
+        switch (src_ip) {
+            .v4 => |v4| {
+                if (input_len < @sizeOf(socket.SockAddrIn)) {
+                    return error.EINVAL;
+                }
+                const ksrc_addr = socket.SockAddrIn.init(v4, src_port);
+                user_mem.copyStructToUser(socket.SockAddrIn, user_mem.UserPtr.from(src_addr_ptr), ksrc_addr) catch {
+                    return error.EFAULT;
+                };
+                addrlen_uptr.writeValue(@as(u32, @sizeOf(socket.SockAddrIn))) catch {
+                    return error.EFAULT;
+                };
+            },
+            .v6 => |v6| {
+                if (input_len < @sizeOf(socket.SockAddrIn6)) {
+                    return error.EINVAL;
+                }
+                const ksrc_addr6 = socket.SockAddrIn6.init(v6, src_port);
+                user_mem.copyStructToUser(socket.SockAddrIn6, user_mem.UserPtr.from(src_addr_ptr), ksrc_addr6) catch {
+                    return error.EFAULT;
+                };
+                addrlen_uptr.writeValue(@as(u32, @sizeOf(socket.SockAddrIn6))) catch {
+                    return error.EFAULT;
+                };
+            },
+            .none => {
+                // No source address available, write zeros
+                const ksrc_addr = std.mem.zeroes(socket.SockAddrIn);
+                user_mem.copyStructToUser(socket.SockAddrIn, user_mem.UserPtr.from(src_addr_ptr), ksrc_addr) catch {
+                    return error.EFAULT;
+                };
+                addrlen_uptr.writeValue(@as(u32, @sizeOf(socket.SockAddrIn))) catch {
+                    return error.EFAULT;
+                };
+            },
         }
-
-        user_mem.copyStructToUser(socket.SockAddrIn, user_mem.UserPtr.from(src_addr_ptr), ksrc_addr) catch {
-            return error.EFAULT;
-        };
-
-        addrlen_uptr.writeValue(@as(u32, @sizeOf(socket.SockAddrIn))) catch {
-            return error.EFAULT;
-        };
     }
 
     return received;

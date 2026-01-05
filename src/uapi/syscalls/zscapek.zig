@@ -228,6 +228,7 @@ pub const InterfaceInfo = extern struct {
     _pad3: [7]u8 = [_]u8{0} ** 7,
 
     comptime {
-        if (@sizeOf(@This()) != 72) @compileError("InterfaceInfo must be 72 bytes");
+        // 16 + 6 + 1 + 1 + 2 + 2 + 4 + 4 + 4 + 1 + 3 + 16 + 1 + 7 = 68 bytes
+        if (@sizeOf(@This()) != 68) @compileError("InterfaceInfo must be 68 bytes");
     }
 };

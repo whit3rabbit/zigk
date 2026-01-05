@@ -1,7 +1,9 @@
 const std = @import("std");
-const core = @import("core/root.zig");
-const ethernet = @import("ethernet/root.zig");
-const ipv4 = @import("ipv4/root.zig");
+
+// Export submodules for syscall handlers that need deeper access
+pub const core = @import("core/root.zig");
+pub const ethernet = @import("ethernet/root.zig");
+pub const ipv4 = @import("ipv4/root.zig");
 pub const transport = @import("transport/root.zig");
 const dns = @import("dns/root.zig");
 pub const loopback = @import("drivers/loopback.zig");

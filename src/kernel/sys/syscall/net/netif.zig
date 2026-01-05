@@ -1,12 +1,23 @@
 // Network Interface Configuration Syscall Handler
 //
-// Implements SYS_NETIF_CONFIG (1060) for userspace network configuration.
-// Used by netcfgd daemon to configure IPv4/IPv6 addresses, query RA info
-// for SLAAC, and manage interface parameters.
+// SYS_NETIF_CONFIG (1060) - Unified network interface management
 //
-// Security: Requires CAP_NET_CONFIG capability for configuration changes.
-// Read operations (GetInfo, GetRaInfo, GetLinkState) also require capability
-// to prevent information disclosure about network configuration.
+// Enables userspace daemons (netcfgd) to configure network interfaces:
+// - IPv4 address/netmask/gateway configuration
+// - IPv6 address management (SLAAC, DHCPv6, static)
+// - MTU configuration
+// - Link state monitoring
+//
+// Related RFCs:
+// - RFC 2131: DHCP (requires interface configuration after lease)
+// - RFC 4861: NDP (Router Advertisements for SLAAC)
+// - RFC 4862: IPv6 SLAAC (address autoconfiguration)
+//
+// Security Model:
+// - Requires CAP_NET_CONFIG capability for ALL operations
+// - Read operations also require capability to prevent information
+//   disclosure about network topology and configuration
+// - Capability can be scoped to specific interface indices
 
 const std = @import("std");
 const uapi = @import("uapi");
@@ -127,7 +138,7 @@ fn handleGetInfo(iface: *Interface, data_ptr: usize, data_len: usize) SyscallErr
 
     // Copy to userspace
     const user_ptr = user_mem.UserPtr.from(data_ptr);
-    user_ptr.copyToUser(std.mem.asBytes(&info)) catch {
+    _ = user_ptr.copyFromKernel(std.mem.asBytes(&info)) catch {
         return error.EFAULT;
     };
 
@@ -157,7 +168,7 @@ fn handleSetIpv4(
     // Read configuration from userspace
     var config: Ipv4Config = undefined;
     const user_ptr = user_mem.UserPtr.from(data_ptr);
-    user_ptr.copyFromUser(std.mem.asBytes(&config)) catch {
+    _ = user_ptr.copyToKernel(std.mem.asBytes(&config)) catch {
         return error.EFAULT;
     };
 
@@ -200,7 +211,7 @@ fn handleSetIpv6Addr(
     // Read configuration from userspace
     var config: Ipv6AddrConfig = undefined;
     const user_ptr = user_mem.UserPtr.from(data_ptr);
-    user_ptr.copyFromUser(std.mem.asBytes(&config)) catch {
+    _ = user_ptr.copyToKernel(std.mem.asBytes(&config)) catch {
         return error.EFAULT;
     };
 
@@ -253,7 +264,7 @@ fn handleSetIpv6Gateway(
     // Read gateway address from userspace
     var gateway: [16]u8 = undefined;
     const user_ptr = user_mem.UserPtr.from(data_ptr);
-    user_ptr.copyFromUser(&gateway) catch {
+    _ = user_ptr.copyToKernel(&gateway) catch {
         return error.EFAULT;
     };
 
@@ -298,7 +309,7 @@ fn handleGetRaInfo(iface: *Interface, data_ptr: usize, data_len: usize) SyscallE
 
     // Copy to userspace
     const user_ptr = user_mem.UserPtr.from(data_ptr);
-    user_ptr.copyToUser(std.mem.asBytes(&uapi_ra)) catch {
+    _ = user_ptr.copyFromKernel(std.mem.asBytes(&uapi_ra)) catch {
         return error.EFAULT;
     };
 
@@ -328,7 +339,7 @@ fn handleSetMtu(
     // Read MTU from userspace
     var mtu: u16 = undefined;
     const user_ptr = user_mem.UserPtr.from(data_ptr);
-    user_ptr.copyFromUser(std.mem.asBytes(&mtu)) catch {
+    _ = user_ptr.copyToKernel(std.mem.asBytes(&mtu)) catch {
         return error.EFAULT;
     };
 
@@ -357,7 +368,7 @@ fn handleGetLinkState(iface: *Interface, data_ptr: usize, data_len: usize) Sysca
 
     // Copy to userspace
     const user_ptr = user_mem.UserPtr.from(data_ptr);
-    user_ptr.copyToUser(std.mem.asBytes(&link_up)) catch {
+    _ = user_ptr.copyFromKernel(std.mem.asBytes(&link_up)) catch {
         return error.EFAULT;
     };
 

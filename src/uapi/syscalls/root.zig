@@ -3,7 +3,9 @@
 // Uses explicit struct merging instead of deprecated usingnamespace.
 
 const linux = @import("linux.zig");
-const zscapek = @import("zscapek.zig");
+
+// Export zscapek module for syscall handlers that need UAPI structures
+pub const zscapek = @import("zscapek.zig");
 
 // Linux x86_64 ABI Syscalls
 pub const SYS_READ = linux.SYS_READ;

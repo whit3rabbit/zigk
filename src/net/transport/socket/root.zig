@@ -17,11 +17,13 @@ pub const htonl = types.htonl;
 
 // Constants and types
 pub const AF_INET = types.AF_INET;
+pub const AF_INET6 = types.AF_INET6;
 pub const SOCK_STREAM = types.SOCK_STREAM;
 pub const SOCK_DGRAM = types.SOCK_DGRAM;
 pub const SOL_SOCKET = types.SOL_SOCKET;
 pub const IPPROTO_IP = types.IPPROTO_IP;
 pub const IPPROTO_TCP = types.IPPROTO_TCP;
+pub const IPPROTO_IPV6 = types.IPPROTO_IPV6;
 pub const TCP_NODELAY = types.TCP_NODELAY;
 pub const SO_REUSEADDR = types.SO_REUSEADDR;
 pub const SO_BROADCAST = types.SO_BROADCAST;
@@ -34,14 +36,20 @@ pub const IP_DROP_MEMBERSHIP = types.IP_DROP_MEMBERSHIP;
 pub const IP_MULTICAST_IF = types.IP_MULTICAST_IF;
 pub const IP_MULTICAST_TTL = types.IP_MULTICAST_TTL;
 pub const IP_RECVTOS = types.IP_RECVTOS;
+pub const IPV6_JOIN_GROUP = types.IPV6_JOIN_GROUP;
+pub const IPV6_LEAVE_GROUP = types.IPV6_LEAVE_GROUP;
+pub const IPV6_MULTICAST_HOPS = types.IPV6_MULTICAST_HOPS;
 pub const SHUT_RD = control.SHUT_RD;
 pub const SHUT_WR = control.SHUT_WR;
 pub const SHUT_RDWR = control.SHUT_RDWR;
 pub const IpMreq = types.IpMreq;
+pub const Ipv6Mreq = types.Ipv6Mreq;
 pub const TimeVal = types.TimeVal;
 pub const SockAddrIn = types.SockAddrIn;
+pub const SockAddrIn6 = types.SockAddrIn6;
 pub const SockAddr = types.SockAddr;
 pub const Socket = types.Socket;
+pub const IpAddr = types.IpAddr;
 
 // Scheduler hooks
 pub const ThreadPtr = scheduler.ThreadPtr;
@@ -64,11 +72,14 @@ pub const allocateRandomEphemeralPort = state.allocateRandomEphemeralPort;
 // Lifecycle
 pub const socket = lifecycle.socket;
 pub const bind = lifecycle.bind;
+pub const bind6 = lifecycle.bind6;
 pub const close = lifecycle.close;
 
 // UDP path
 pub const sendto = udp_api.sendto;
+pub const sendto6 = udp_api.sendto6;
 pub const recvfrom = udp_api.recvfrom;
+pub const recvfromIp = udp_api.recvfromIp;
 pub const deliverUdpPacket = udp_api.deliverUdpPacket;
 pub const deliverUdpPacket6 = udp_api.deliverUdpPacket6;
 

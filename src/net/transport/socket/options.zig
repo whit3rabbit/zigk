@@ -128,6 +128,62 @@ pub fn setsockopt(sock_fd: usize, level: i32, optname: i32, optval: [*]const u8,
             },
             else => return errors.SocketError.InvalidArg,
         }
+    } else if (level == types.IPPROTO_IPV6) {
+        switch (optname) {
+            types.IPV6_JOIN_GROUP => {
+                if (optlen < @sizeOf(types.Ipv6Mreq)) return errors.SocketError.InvalidArg;
+                const mreq: *const types.Ipv6Mreq = @ptrCast(@alignCast(optval));
+                const group_ip = mreq.getMultiaddr();
+
+                // Validate multicast address (ff00::/8)
+                if (group_ip[0] != 0xff) {
+                    return errors.SocketError.InvalidArg;
+                }
+
+                // Add to socket's multicast group list
+                if (!sock.addMulticastGroup6(group_ip)) {
+                    return errors.SocketError.NoResources; // No slots available
+                }
+
+                // Inform interface to accept this multicast group at MAC layer
+                // IPv6 multicast -> Ethernet: 33:33:xx:xx:xx:xx (last 4 bytes of IPv6 addr)
+                const iface = state.getInterface();
+                if (iface) |ifc| {
+                    var mac = [_]u8{ 0x33, 0x33, 0, 0, 0, 0 };
+                    mac[2] = group_ip[12];
+                    mac[3] = group_ip[13];
+                    mac[4] = group_ip[14];
+                    mac[5] = group_ip[15];
+                    _ = ifc.joinMulticastMac(mac);
+                }
+            },
+            types.IPV6_LEAVE_GROUP => {
+                if (optlen < @sizeOf(types.Ipv6Mreq)) return errors.SocketError.InvalidArg;
+                const mreq: *const types.Ipv6Mreq = @ptrCast(@alignCast(optval));
+                const group_ip = mreq.getMultiaddr();
+
+                // Remove from socket's multicast group list
+                if (!sock.dropMulticastGroup6(group_ip)) {
+                    return errors.SocketError.AddrNotAvail; // Not a member
+                }
+
+                // Inform interface to leave
+                const iface = state.getInterface();
+                if (iface) |ifc| {
+                    var mac = [_]u8{ 0x33, 0x33, 0, 0, 0, 0 };
+                    mac[2] = group_ip[12];
+                    mac[3] = group_ip[13];
+                    mac[4] = group_ip[14];
+                    mac[5] = group_ip[15];
+                    _ = ifc.leaveMulticastMac(mac);
+                }
+            },
+            types.IPV6_MULTICAST_HOPS => {
+                if (optlen < 1) return errors.SocketError.InvalidArg;
+                sock.multicast_hops_v6 = optval[0];
+            },
+            else => return errors.SocketError.InvalidArg,
+        }
     } else {
         return errors.SocketError.InvalidArg;
     }

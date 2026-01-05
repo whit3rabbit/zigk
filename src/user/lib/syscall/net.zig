@@ -11,6 +11,18 @@ pub const SyscallError = primitive.SyscallError;
 
 /// Address family constants
 pub const AF_INET: i32 = 2;
+pub const AF_INET6: i32 = 10;
+
+/// Socket option levels
+pub const SOL_SOCKET: i32 = 1;
+pub const IPPROTO_IP: i32 = 0;
+pub const IPPROTO_TCP: i32 = 6;
+pub const IPPROTO_IPV6: i32 = 41;
+
+/// IPPROTO_IPV6 options
+pub const IPV6_JOIN_GROUP: i32 = 20;
+pub const IPV6_LEAVE_GROUP: i32 = 21;
+pub const IPV6_MULTICAST_HOPS: i32 = 18;
 
 /// Socket type constants
 pub const SOCK_STREAM: i32 = 1; // TCP
@@ -42,6 +54,58 @@ pub const SockAddrIn = extern struct {
     /// Get address in host byte order
     pub fn getAddr(self: *const SockAddrIn) u32 {
         return @byteSwap(self.addr);
+    }
+};
+
+/// Socket address structure (IPv6)
+/// Compatible with Linux sockaddr_in6 (28 bytes)
+pub const SockAddrIn6 = extern struct {
+    family: u16, // AF_INET6
+    port: u16, // Network byte order
+    flowinfo: u32, // Flow label
+    addr: [16]u8, // IPv6 address (network byte order)
+    scope_id: u32, // Scope ID
+
+    /// Create sockaddr from IPv6 address and port (host order)
+    pub fn init(ip: [16]u8, port_host: u16) SockAddrIn6 {
+        return .{
+            .family = @as(u16, @intCast(AF_INET6)),
+            .port = @byteSwap(port_host),
+            .flowinfo = 0,
+            .addr = ip,
+            .scope_id = 0,
+        };
+    }
+
+    /// Get port in host byte order
+    pub fn getPort(self: *const SockAddrIn6) u16 {
+        return @byteSwap(self.port);
+    }
+
+    comptime {
+        if (@sizeOf(@This()) != 28) {
+            @compileError("SockAddrIn6 must be 28 bytes");
+        }
+    }
+};
+
+/// IPv6 multicast request structure
+/// Used with IPV6_JOIN_GROUP/IPV6_LEAVE_GROUP (20 bytes)
+pub const Ipv6Mreq = extern struct {
+    ipv6mr_multiaddr: [16]u8, // IPv6 multicast address
+    ipv6mr_interface: u32, // Interface index
+
+    pub fn init(multiaddr: [16]u8, iface_idx: u32) Ipv6Mreq {
+        return .{
+            .ipv6mr_multiaddr = multiaddr,
+            .ipv6mr_interface = iface_idx,
+        };
+    }
+
+    comptime {
+        if (@sizeOf(@This()) != 20) {
+            @compileError("Ipv6Mreq must be 20 bytes");
+        }
     }
 };
 
@@ -104,6 +168,106 @@ pub fn recvfrom(fd: i32, buf: []u8, src_addr: ?*SockAddrIn) SyscallError!usize {
     );
     if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
     return ret;
+}
+
+// =============================================================================
+// IPv6 Socket Operations
+// =============================================================================
+
+/// Bind socket to IPv6 local address
+pub fn bind6(fd: i32, addr: *const SockAddrIn6) SyscallError!void {
+    const ret = primitive.syscall3(
+        syscalls.SYS_BIND,
+        @bitCast(@as(isize, fd)),
+        @intFromPtr(addr),
+        @sizeOf(SockAddrIn6),
+    );
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Send data on socket to IPv6 destination
+/// Returns number of bytes sent
+pub fn sendto6(fd: i32, buf: []const u8, dest_addr: *const SockAddrIn6) SyscallError!usize {
+    const ret = primitive.syscall6(
+        syscalls.SYS_SENDTO,
+        @bitCast(@as(isize, fd)),
+        @intFromPtr(buf.ptr),
+        buf.len,
+        0, // flags
+        @intFromPtr(dest_addr),
+        @sizeOf(SockAddrIn6),
+    );
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return ret;
+}
+
+/// Receive data from socket with IPv6 source address
+/// Returns number of bytes received
+/// src_addr is filled with sender's address if non-null
+pub fn recvfrom6(fd: i32, buf: []u8, src_addr: ?*SockAddrIn6) SyscallError!usize {
+    var addrlen: u32 = @sizeOf(SockAddrIn6);
+    const src_addr_ptr: usize = if (src_addr) |a| @intFromPtr(a) else 0;
+    const addrlen_ptr: usize = if (src_addr != null) @intFromPtr(&addrlen) else 0;
+
+    const ret = primitive.syscall6(
+        syscalls.SYS_RECVFROM,
+        @bitCast(@as(isize, fd)),
+        @intFromPtr(buf.ptr),
+        buf.len,
+        0, // flags
+        src_addr_ptr,
+        addrlen_ptr,
+    );
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return ret;
+}
+
+// =============================================================================
+// Socket Options
+// =============================================================================
+
+/// Set socket option
+pub fn setsockopt(fd: i32, level: i32, optname: i32, optval: []const u8) SyscallError!void {
+    const ret = primitive.syscall5(
+        syscalls.SYS_SETSOCKOPT,
+        @bitCast(@as(isize, fd)),
+        @bitCast(@as(isize, level)),
+        @bitCast(@as(isize, optname)),
+        @intFromPtr(optval.ptr),
+        optval.len,
+    );
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Get socket option
+pub fn getsockopt(fd: i32, level: i32, optname: i32, optval: []u8) SyscallError!usize {
+    var optlen: u32 = @truncate(optval.len);
+    const ret = primitive.syscall5(
+        syscalls.SYS_GETSOCKOPT,
+        @bitCast(@as(isize, fd)),
+        @bitCast(@as(isize, level)),
+        @bitCast(@as(isize, optname)),
+        @intFromPtr(optval.ptr),
+        @intFromPtr(&optlen),
+    );
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return optlen;
+}
+
+/// Join IPv6 multicast group
+/// For DHCPv6: joinMulticastGroup6(fd, ALL_DHCP_SERVERS, 0)
+/// ALL_DHCP_SERVERS = ff02::1:2
+pub fn joinMulticastGroup6(fd: i32, group_addr: [16]u8, iface_idx: u32) SyscallError!void {
+    const mreq = Ipv6Mreq.init(group_addr, iface_idx);
+    const mreq_bytes = std.mem.asBytes(&mreq);
+    return setsockopt(fd, IPPROTO_IPV6, IPV6_JOIN_GROUP, mreq_bytes);
+}
+
+/// Leave IPv6 multicast group
+pub fn leaveMulticastGroup6(fd: i32, group_addr: [16]u8, iface_idx: u32) SyscallError!void {
+    const mreq = Ipv6Mreq.init(group_addr, iface_idx);
+    const mreq_bytes = std.mem.asBytes(&mreq);
+    return setsockopt(fd, IPPROTO_IPV6, IPV6_LEAVE_GROUP, mreq_bytes);
 }
 
 /// Listen for connections on a socket
@@ -339,26 +503,40 @@ pub fn setIpv6Gateway(iface_idx: u32, gateway: [16]u8) SyscallError!void {
 
 // =============================================================================
 // ARP Operations (SYS_ARP_PROBE 1061, SYS_ARP_ANNOUNCE 1062)
+//
+// RFC 5227 - IPv4 Address Conflict Detection
+//
+// These functions implement the userspace interface for ARP-based IP
+// conflict detection, used by DHCP clients before configuring addresses.
 // =============================================================================
 
-/// ARP probe result codes
+/// ARP probe result codes (RFC 5227 Section 2.1.1)
 pub const ArpProbeResult = enum(u8) {
     /// No conflict detected - safe to use IP
     NoConflict = 0,
-    /// Conflict detected - IP is already in use
+    /// Conflict detected - IP is already in use on the network
     Conflict = 1,
-    /// Timeout - no response, safe to use IP
+    /// Timeout - no response received, IP is safe to use
     Timeout = 2,
 };
 
-/// Send ARP probe to detect IP conflicts before configuring address (RFC 5227)
+/// Send ARP probe to detect IP conflicts before configuring address
+///
+/// RFC 5227 Section 2.1.1:
+/// "A host probes to see if an address is already in use by broadcasting
+/// an ARP Request for the desired address."
+///
+/// This SHOULD be called before configuring any IP address obtained via
+/// DHCP or manual configuration to prevent address conflicts.
 ///
 /// Arguments:
 ///   iface_idx: Interface index (currently only 0 supported)
 ///   ip: Target IP address in host byte order
 ///   timeout_ms: Maximum time to wait for response in milliseconds
 ///
-/// Returns: ArpProbeResult indicating whether IP is safe to use
+/// Returns:
+///   .NoConflict or .Timeout: Safe to use the IP address
+///   .Conflict: IP is in use - do not configure, send DHCPDECLINE
 pub fn arpProbe(iface_idx: u32, ip: u32, timeout_ms: u64) SyscallError!ArpProbeResult {
     const ret = primitive.syscall3(
         syscalls.zscapek.SYS_ARP_PROBE,
@@ -370,13 +548,22 @@ pub fn arpProbe(iface_idx: u32, ip: u32, timeout_ms: u64) SyscallError!ArpProbeR
     return @enumFromInt(@as(u8, @truncate(ret)));
 }
 
-/// Send gratuitous ARP announcement after configuring address (RFC 5227)
+/// Send gratuitous ARP announcement after configuring address
+///
+/// RFC 5227 Section 2.3:
+/// "Having probed to determine that an address is not in use, a host
+/// announces its claim to the address."
+///
+/// RFC 5227 Section 3:
+/// "A host SHOULD transmit an ARP Announcement immediately after
+/// successfully completing its final ARP Probe."
+///
+/// This updates neighbor ARP caches with our new MAC/IP binding,
+/// preventing stale cache entries from causing connectivity issues.
 ///
 /// Arguments:
 ///   iface_idx: Interface index (currently only 0 supported)
 ///   ip: IP address to announce in host byte order
-///
-/// This updates neighbor ARP caches with our new address.
 pub fn arpAnnounce(iface_idx: u32, ip: u32) SyscallError!void {
     const ret = primitive.syscall2(
         syscalls.zscapek.SYS_ARP_ANNOUNCE,

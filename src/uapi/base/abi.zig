@@ -225,12 +225,16 @@ pub const TimeVal = extern struct {
     }
 
     /// Convert milliseconds to TimeVal with bounds checking.
-    /// Clamps tv_sec to maxInt(i64) for very large ms values.
+    /// Saturates to maximum representable TimeVal for very large ms values.
     pub fn fromMillis(ms: u64) TimeVal {
         const max_sec: u64 = @intCast(std.math.maxInt(i64));
         const sec = ms / 1000;
+        // When saturating tv_sec, also saturate tv_usec for consistency
+        if (sec > max_sec) {
+            return .{ .tv_sec = std.math.maxInt(i64), .tv_usec = 999999 };
+        }
         return .{
-            .tv_sec = if (sec > max_sec) std.math.maxInt(i64) else @intCast(sec),
+            .tv_sec = @intCast(sec),
             .tv_usec = @intCast((ms % 1000) * 1000),
         };
     }
@@ -259,6 +263,27 @@ pub const IpMreq = extern struct {
     comptime {
         if (@sizeOf(@This()) != 8) {
             @compileError("IpMreq must be 8 bytes");
+        }
+    }
+};
+
+/// struct ipv6_mreq - Reference: Linux <netinet/in.h>
+/// Must be 20 bytes: ipv6mr_multiaddr([16]u8) + ipv6mr_interface(u32)
+pub const Ipv6Mreq = extern struct {
+    ipv6mr_multiaddr: [16]u8,
+    ipv6mr_interface: u32,
+
+    pub fn getMultiaddr(self: *const Ipv6Mreq) [16]u8 {
+        return self.ipv6mr_multiaddr;
+    }
+
+    pub fn getInterface(self: *const Ipv6Mreq) u32 {
+        return self.ipv6mr_interface;
+    }
+
+    comptime {
+        if (@sizeOf(@This()) != 20) {
+            @compileError("Ipv6Mreq must be 20 bytes");
         }
     }
 };
@@ -360,6 +385,7 @@ pub fn verifyAbi() void {
         _ = SockAddr{};
         _ = TimeVal{};
         _ = IpMreq{};
+        _ = Ipv6Mreq{};
         _ = PollFd{};
         _ = IoVec{};
         _ = MsgHdr{};

@@ -10,6 +10,7 @@ const sync = @import("../../sync.zig");
 
 // Re-export ABI types (canonical definitions with comptime size checks)
 pub const IpMreq = uapi.abi.IpMreq;
+pub const Ipv6Mreq = uapi.abi.Ipv6Mreq;
 pub const TimeVal = uapi.abi.TimeVal;
 pub const SockAddrIn = uapi.abi.SockAddrIn;
 pub const SockAddrIn6 = uapi.abi.SockAddrIn6;
@@ -44,6 +45,7 @@ pub const SOCK_DGRAM: i32 = 2; // UDP
 pub const SOL_SOCKET: i32 = 1;
 pub const IPPROTO_IP: i32 = 0;
 pub const IPPROTO_TCP: i32 = 6;
+pub const IPPROTO_IPV6: i32 = 41;
 
 /// IPPROTO_TCP options
 pub const TCP_NODELAY: i32 = 1;
@@ -62,6 +64,11 @@ pub const IP_DROP_MEMBERSHIP: i32 = 36;
 pub const IP_MULTICAST_IF: i32 = 32;
 pub const IP_MULTICAST_TTL: i32 = 33;
 pub const IP_RECVTOS: i32 = 13;
+
+/// IPPROTO_IPV6 options
+pub const IPV6_JOIN_GROUP: i32 = 20;
+pub const IPV6_LEAVE_GROUP: i32 = 21;
+pub const IPV6_MULTICAST_HOPS: i32 = 18;
 
 /// Maximum multicast group memberships per socket
 pub const MAX_MULTICAST_GROUPS: usize = 8;
@@ -183,6 +190,14 @@ pub const Socket = struct {
     /// Multicast TTL (default 1 = local subnet only)
     multicast_ttl: u8,
 
+    /// IPv6 multicast group memberships (16-byte addresses)
+    /// All zeros = unused slot
+    multicast_groups_v6: [MAX_MULTICAST_GROUPS][16]u8,
+    multicast_count_v6: usize,
+
+    /// IPv6 multicast hop limit (default 1 = link-local only)
+    multicast_hops_v6: u8,
+
     const Self = @This();
 
     pub fn init() Self {
@@ -231,6 +246,10 @@ pub const Socket = struct {
             .multicast_groups = [_]u32{0} ** MAX_MULTICAST_GROUPS,
             .multicast_count = 0,
             .multicast_ttl = 1, // Default: local subnet only
+            // IPv6 Multicast
+            .multicast_groups_v6 = [_][16]u8{[_]u8{0} ** 16} ** MAX_MULTICAST_GROUPS,
+            .multicast_count_v6 = 0,
+            .multicast_hops_v6 = 1, // Default: link-local only
         };
     }
 
@@ -269,6 +288,55 @@ pub const Socket = struct {
                 slot.* = 0;
                 if (self.multicast_count > 0) {
                     self.multicast_count -= 1;
+                }
+                return true;
+            }
+        }
+        return false; // Not a member
+    }
+
+    /// Check if socket is a member of an IPv6 multicast group
+    pub fn isMulticastMember6(self: *const Self, group_ip: [16]u8) bool {
+        const zeros = [_]u8{0} ** 16;
+        for (self.multicast_groups_v6) |group| {
+            if (std.mem.eql(u8, &group, &group_ip)) {
+                return true;
+            }
+            // Skip empty slots
+            if (std.mem.eql(u8, &group, &zeros)) {
+                continue;
+            }
+        }
+        return false;
+    }
+
+    /// Add IPv6 multicast group membership
+    pub fn addMulticastGroup6(self: *Self, group_ip: [16]u8) bool {
+        // Check if already a member
+        if (self.isMulticastMember6(group_ip)) {
+            return true; // Already joined
+        }
+
+        const zeros = [_]u8{0} ** 16;
+        // Find empty slot
+        for (&self.multicast_groups_v6) |*slot| {
+            if (std.mem.eql(u8, slot, &zeros)) {
+                slot.* = group_ip;
+                self.multicast_count_v6 += 1;
+                return true;
+            }
+        }
+        return false; // No slots available
+    }
+
+    /// Remove IPv6 multicast group membership
+    pub fn dropMulticastGroup6(self: *Self, group_ip: [16]u8) bool {
+        const zeros = [_]u8{0} ** 16;
+        for (&self.multicast_groups_v6) |*slot| {
+            if (std.mem.eql(u8, slot, &group_ip)) {
+                slot.* = zeros;
+                if (self.multicast_count_v6 > 0) {
+                    self.multicast_count_v6 -= 1;
                 }
                 return true;
             }

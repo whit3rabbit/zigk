@@ -1881,10 +1881,13 @@ pub fn build(b: *std.Build) void {
 
     const test_step_build = b.step("build-tests", "Build C integration tests");
 
+    // Select target based on architecture
+    const c_test_target = if (target_arch == .aarch64) "aarch64-linux-musl" else "x86_64-linux-musl";
+
     inline for (c_tests) |test_name| {
         const test_exe = b.addSystemCommand(&.{
             "zig",                       "cc",
-            "-target",                   "x86_64-linux-musl",
+            "-target",                   c_test_target,
             "-static",                   "-o",
             "zig-out/bin/" ++ test_name ++ ".elf", "tests/userland/" ++ test_name ++ ".c",
         });

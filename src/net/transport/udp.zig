@@ -401,9 +401,7 @@ pub fn sendDatagram6WithTrafficClass(
 
     // Build IPv6 header
     const ip6: *Ipv6Header = @ptrCast(@alignCast(&buf[eth_len]));
-    ip6.setVersion(6);
-    ip6.setTrafficClass(traffic_class);
-    ip6.setFlowLabel(0);
+    ip6.setVersionTcFlow(6, traffic_class, 0);
     // SAFETY: Truncation is safe because data.len <= MAX_UDP6_PAYLOAD is validated
     // at function entry. Max udp_len = 8 + MAX_UDP6_PAYLOAD fits in u16.
     ip6.setPayloadLength(@truncate(udp_len));

@@ -43,8 +43,8 @@ pub const DhcpPacket = extern struct {
     file: [128]u8,
     /// DHCP magic cookie
     magic_cookie: u32,
-    /// Options (variable, up to 312 bytes for 576 byte min)
-    options: [312]u8,
+    /// Options (variable, up to 308 bytes - magic cookie is separate field)
+    options: [308]u8,
 
     comptime {
         // Verify structure size matches RFC 2131

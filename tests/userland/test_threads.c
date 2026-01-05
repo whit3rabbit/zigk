@@ -6,14 +6,29 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
-// Define missing syscall numbers/constants if not provided by minimal libc
-// headers
+// Architecture-specific syscall numbers
+#if defined(__x86_64__)
 #ifndef __NR_clone
 #define __NR_clone 56
 #endif
-
 #ifndef __NR_futex
 #define __NR_futex 202
+#endif
+#ifndef __NR_exit
+#define __NR_exit 60
+#endif
+#elif defined(__aarch64__)
+#ifndef __NR_clone
+#define __NR_clone 220
+#endif
+#ifndef __NR_futex
+#define __NR_futex 98
+#endif
+#ifndef __NR_exit
+#define __NR_exit 93
+#endif
+#else
+#error "Unsupported architecture"
 #endif
 
 #define FUTEX_WAIT 0
@@ -54,8 +69,10 @@ int thread_fn(void *arg) {
   return 0; // exit
 }
 
-// Wrapper for sys_clone
-// Note: Actual sys_clone signature varies by arch. For x86_64:
+// Architecture-specific syscall wrappers
+#if defined(__x86_64__)
+
+// Wrapper for sys_clone on x86_64
 // sys_clone(flags, stack, parent_tidptr, child_tidptr, tls)
 long sys_clone(unsigned long flags, void *child_stack, int *ptid, int *ctid,
                unsigned long tls) {
@@ -86,8 +103,62 @@ long sys_futex(int *uaddr, int op, int val, const struct timespec *timeout,
   return ret;
 }
 
+static inline void sys_exit(int code) {
+  asm volatile("syscall" : : "a"(__NR_exit), "D"(code) : "memory");
+}
+
+#elif defined(__aarch64__)
+
+// Wrapper for sys_clone on aarch64
+// sys_clone(flags, stack, parent_tidptr, child_tidptr, tls)
+long sys_clone(unsigned long flags, void *child_stack, int *ptid, int *ctid,
+               unsigned long tls) {
+  register long x0 asm("x0") = flags;
+  register long x1 asm("x1") = (long)child_stack;
+  register long x2 asm("x2") = (long)ptid;
+  register long x3 asm("x3") = (long)ctid;
+  register long x4 asm("x4") = tls;
+  register long x8 asm("x8") = __NR_clone;
+
+  asm volatile("svc #0"
+               : "+r"(x0)
+               : "r"(x1), "r"(x2), "r"(x3), "r"(x4), "r"(x8)
+               : "memory");
+  return x0;
+}
+
+long sys_futex(int *uaddr, int op, int val, const struct timespec *timeout,
+               int *uaddr2, int val3) {
+  register long x0 asm("x0") = (long)uaddr;
+  register long x1 asm("x1") = op;
+  register long x2 asm("x2") = val;
+  register long x3 asm("x3") = (long)timeout;
+  register long x4 asm("x4") = (long)uaddr2;
+  register long x5 asm("x5") = val3;
+  register long x8 asm("x8") = __NR_futex;
+
+  asm volatile("svc #0"
+               : "+r"(x0)
+               : "r"(x1), "r"(x2), "r"(x3), "r"(x4), "r"(x5), "r"(x8)
+               : "memory");
+  return x0;
+}
+
+static inline void sys_exit(int code) {
+  register long x0 asm("x0") = code;
+  register long x8 asm("x8") = __NR_exit;
+  asm volatile("svc #0" : : "r"(x0), "r"(x8) : "memory");
+}
+
+#endif
+
 int main() {
   printf("Parent: Starting thread test...\n");
+#if defined(__x86_64__)
+  printf("Architecture: x86_64\n");
+#elif defined(__aarch64__)
+  printf("Architecture: aarch64\n");
+#endif
 
   void *stack = mmap(NULL, STACK_SIZE, PROT_READ | PROT_WRITE,
                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -108,6 +179,7 @@ int main() {
   // We pass child_tid address for both parent_tid (to get TID in parent)
   // and child_cleartid (to clear it on exit).
   int tid = 0;
+  (void)tid; // suppress unused warning
 
   // Note: We need a raw clone call because libc wrapper might do other things.
   // Also we need to handle stack setup for the child function manually if we
@@ -132,10 +204,7 @@ int main() {
     thread_fn((void *)123);
 
     // Raw exit syscall to avoid libc teardown issues
-    asm volatile("syscall"
-                 :
-                 : "a"(60), "D"(0) // sys_exit(0)
-                 : "memory");
+    sys_exit(0);
     while (1) {
     }
   }

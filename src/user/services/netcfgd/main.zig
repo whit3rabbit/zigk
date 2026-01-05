@@ -16,6 +16,7 @@ const syscall = @import("syscall");
 const net = syscall.net;
 
 const dhcpv4 = @import("dhcpv4.zig");
+const dhcpv6 = @import("dhcpv6.zig");
 const slaac = @import("slaac.zig");
 
 // Service state
@@ -60,9 +61,13 @@ pub fn main() void {
     // Initialize SLAAC state
     var slaac_state = slaac.SlaacState.init(iface_info.mac_addr);
 
+    // Initialize DHCPv6 client (for stateful IPv6 when M-flag is set)
+    var dhcpv6_state = dhcpv6.Dhcpv6Client.init(iface_info.mac_addr, IFACE_IDX);
+
     // Main service loop
     var last_dhcp_tick: u64 = 0;
     var last_slaac_tick: u64 = 0;
+    var last_dhcpv6_tick: u64 = 0;
 
     while (running) {
         const current_tick = syscall.getTickMs();
@@ -79,9 +84,22 @@ pub fn main() void {
             last_slaac_tick = current_tick;
         }
 
+        // Process DHCPv6 (triggered by M-flag in Router Advertisement)
+        // The DHCPv6 client monitors the M-flag via getRaInfo() internally
+        if (current_tick -% last_dhcpv6_tick >= dhcpv6_state.getNextTimeout()) {
+            dhcpv6_state.process(current_tick);
+            last_dhcpv6_tick = current_tick;
+        }
+
         // Sleep for a bit to avoid busy-waiting
-        syscall.sleep_ms(100);
+        syscall.sleep_ms(100) catch {};
     }
+
+    // RFC 2131: Release DHCP lease on shutdown
+    dhcp_state.release();
+
+    // Close DHCPv6 socket
+    dhcpv6_state.closeSocket();
 
     syscall.print("netcfgd: Shutting down\n");
 }
@@ -89,7 +107,7 @@ pub fn main() void {
 fn waitForLink() void {
     while (running) {
         const info = net.getInterfaceInfo(IFACE_IDX) catch {
-            syscall.sleep_ms(LINK_POLL_INTERVAL_MS);
+            syscall.sleep_ms(LINK_POLL_INTERVAL_MS) catch {};
             continue;
         };
 
@@ -97,7 +115,7 @@ fn waitForLink() void {
             return;
         }
 
-        syscall.sleep_ms(LINK_POLL_INTERVAL_MS);
+        syscall.sleep_ms(LINK_POLL_INTERVAL_MS) catch {};
     }
 }
 
@@ -124,4 +142,10 @@ fn printError(msg: []const u8, err: anyerror) void {
     syscall.print(": ");
     syscall.print(@errorName(err));
     syscall.print("\n");
+}
+
+// Entry point
+export fn _start() noreturn {
+    main();
+    syscall.exit(0);
 }

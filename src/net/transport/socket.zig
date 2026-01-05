@@ -7,17 +7,22 @@
 
 const root = @import("socket/root.zig");
 
+// Sub-modules for syscall handlers that need deeper access
+pub const state = @import("socket/state.zig");
+
 // Helpers
 pub const htons = root.htons;
 pub const htonl = root.htonl;
 
 // Constants and types
 pub const AF_INET = root.AF_INET;
+pub const AF_INET6 = root.AF_INET6;
 pub const SOCK_STREAM = root.SOCK_STREAM;
 pub const SOCK_DGRAM = root.SOCK_DGRAM;
 pub const SOL_SOCKET = root.SOL_SOCKET;
 pub const IPPROTO_IP = root.IPPROTO_IP;
 pub const IPPROTO_TCP = root.IPPROTO_TCP;
+pub const IPPROTO_IPV6 = root.IPPROTO_IPV6;
 pub const SO_REUSEADDR = root.SO_REUSEADDR;
 pub const SO_BROADCAST = root.SO_BROADCAST;
 pub const SO_RCVTIMEO = root.SO_RCVTIMEO;
@@ -29,15 +34,21 @@ pub const IP_DROP_MEMBERSHIP = root.IP_DROP_MEMBERSHIP;
 pub const IP_MULTICAST_IF = root.IP_MULTICAST_IF;
 pub const IP_MULTICAST_TTL = root.IP_MULTICAST_TTL;
 pub const IP_RECVTOS = root.IP_RECVTOS;
+pub const IPV6_JOIN_GROUP = root.IPV6_JOIN_GROUP;
+pub const IPV6_LEAVE_GROUP = root.IPV6_LEAVE_GROUP;
+pub const IPV6_MULTICAST_HOPS = root.IPV6_MULTICAST_HOPS;
 pub const SHUT_RD = root.SHUT_RD;
 pub const SHUT_WR = root.SHUT_WR;
 pub const SHUT_RDWR = root.SHUT_RDWR;
 
 pub const IpMreq = root.IpMreq;
+pub const Ipv6Mreq = root.Ipv6Mreq;
 pub const TimeVal = root.TimeVal;
 pub const SockAddrIn = root.SockAddrIn;
+pub const SockAddrIn6 = root.SockAddrIn6;
 pub const SockAddr = root.SockAddr;
 pub const Socket = root.Socket;
+pub const IpAddr = root.IpAddr;
 
 // Scheduler hooks
 pub const ThreadPtr = root.ThreadPtr;
@@ -58,11 +69,14 @@ pub const findByPort = root.findByPort;
 // Lifecycle
 pub const socket = root.socket;
 pub const bind = root.bind;
+pub const bind6 = root.bind6;
 pub const close = root.close;
 
 // UDP path
 pub const sendto = root.sendto;
+pub const sendto6 = root.sendto6;
 pub const recvfrom = root.recvfrom;
+pub const recvfromIp = root.recvfromIp;
 pub const deliverUdpPacket = root.deliverUdpPacket;
 pub const deliverUdpPacket6 = root.deliverUdpPacket6;
 

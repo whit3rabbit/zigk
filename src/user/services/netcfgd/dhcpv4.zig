@@ -1,12 +1,27 @@
-//! DHCPv4 Client Implementation (RFC 2131)
+//! DHCPv4 Client Implementation
+//!
+//! RFC 2131 - Dynamic Host Configuration Protocol
+//! RFC 2132 - DHCP Options and BOOTP Vendor Extensions
+//! RFC 5227 - IPv4 Address Conflict Detection
 //!
 //! Implements the DHCP DORA (Discover, Offer, Request, Acknowledge) flow
 //! with full lease management including T1/T2 timers for renewal.
 //!
+//! State Machine (RFC 2131 Figure 5):
+//!   INIT -> SELECTING -> REQUESTING -> BOUND -> RENEWING -> REBINDING
+//!
+//! Key RFC Compliance:
+//! - Section 4.1: Retransmission with exponential backoff (4s, 8s, 16s, 32s, 64s)
+//! - Section 4.4.1: Initial random delay (1-10 seconds) to prevent thundering herd
+//! - Section 4.4.1: ARP probe before IP configuration (RFC 5227)
+//! - Section 4.4.4: DHCPDECLINE on IP conflict detection
+//! - Section 4.4.6: DHCPRELEASE on voluntary shutdown
+//!
 //! Security:
-//! - Transaction ID from getrandom() to prevent spoofing
-//! - Zero-initialized packets to prevent info leaks
-//! - Validated server responses
+//! - Transaction ID from CSPRNG to prevent spoofing (Section 3.1)
+//! - Zero-initialized packets to prevent kernel info leaks
+//! - Server ID verification to prevent rogue server attacks
+//! - MAC address validation on responses
 
 const std = @import("std");
 const syscall = @import("syscall");
@@ -52,6 +67,10 @@ pub const DhcpClient = struct {
     server_id: u32,
     /// Offered IP address
     offered_ip: u32,
+    /// RFC 2131: Initial random delay (1-10s) done
+    initial_delay_done: bool,
+    /// Track if rebind request was sent (fix race condition)
+    rebind_request_sent: bool,
 
     const Self = @This();
 
@@ -60,9 +79,21 @@ pub const DhcpClient = struct {
     const SERVER_PORT: u16 = 67;
 
     // Timeouts (milliseconds)
-    const DISCOVER_TIMEOUT_MS: u64 = 4000;
-    const REQUEST_TIMEOUT_MS: u64 = 4000;
+    // RFC 2131 Section 4.1: "The client SHOULD wait a minimum of four seconds
+    // before rebroadcasting... the delay before the first retransmission
+    // SHOULD be 4 seconds randomized by the value of a uniform random number
+    // chosen from the range -1 to +1"
+    const BASE_TIMEOUT_MS: u64 = 4000; // Base 4 seconds
+    const MAX_TIMEOUT_MS: u64 = 64000; // Max 64 seconds (4 doublings)
     const MAX_RETRIES: u8 = 4;
+
+    // RFC 5227 Section 2.1.1: "PROBE_WAIT... 1-2 seconds"
+    // We use 1 second as a reasonable probe timeout
+    const ARP_PROBE_TIMEOUT_MS: u64 = 1000;
+
+    // RFC 2131 Section 4.4.4: After DECLINE, client "SHOULD wait a minimum
+    // of ten seconds before restarting the configuration process"
+    const DECLINE_WAIT_MS: u64 = 10000;
 
     /// Initialize DHCP client
     pub fn init(mac: [6]u8) Self {
@@ -76,17 +107,45 @@ pub const DhcpClient = struct {
             .last_action_tick = 0,
             .server_id = 0,
             .offered_ip = 0,
+            .initial_delay_done = false,
+            .rebind_request_sent = false,
         };
+    }
+
+    /// Calculate timeout with exponential backoff and jitter
+    ///
+    /// RFC 2131 Section 4.1:
+    /// "The retransmission delay SHOULD be doubled with subsequent
+    /// retransmissions up to a maximum of 64 seconds."
+    ///
+    /// "The delay before the first retransmission SHOULD be 4 seconds
+    /// randomized by the value of a uniform random number chosen from
+    /// the range -1 to +1."
+    ///
+    /// Timeout progression: 4s -> 8s -> 16s -> 32s -> 64s (with +/- 1s jitter)
+    fn getRetryTimeout(retry_count: u8) u64 {
+        // Exponential backoff: 4s << retry_count, capped at 64s
+        const shift: u6 = @min(retry_count, 4);
+        const base = BASE_TIMEOUT_MS << shift;
+        const capped = @min(base, MAX_TIMEOUT_MS);
+
+        // Add jitter: +/- 1 second (RFC 2131 Section 4.1)
+        const random = syscall.getSecureRandomU32();
+        const jitter_raw = random % 2001; // 0-2000
+        const jitter: i64 = @as(i64, @intCast(jitter_raw)) - 1000; // -1000 to +1000 ms
+        const with_jitter = @as(i64, @intCast(capped)) + jitter;
+
+        // Ensure minimum 1 second timeout
+        return @intCast(@max(1000, with_jitter));
     }
 
     /// Get timeout until next action
     pub fn getNextTimeout(self: *const Self) u64 {
         return switch (self.state) {
             .Init => 0, // Immediate
-            .Selecting, .Requesting => DISCOVER_TIMEOUT_MS,
+            .Selecting, .Requesting, .Rebinding => getRetryTimeout(self.retries),
             .Bound => self.lease_info.getTimeToT1(),
             .Renewing => self.lease_info.getTimeToT2(),
-            .Rebinding => self.lease_info.getTimeToExpiry(),
         };
     }
 
@@ -104,6 +163,17 @@ pub const DhcpClient = struct {
 
     /// Send DHCPDISCOVER
     fn doDiscover(self: *Self) void {
+        // RFC 2131 Section 4.4.1: Wait 1-10 seconds on first discover
+        // to prevent synchronized startup storms (e.g., power outage recovery)
+        if (!self.initial_delay_done) {
+            const delay_ms = 1000 + (syscall.getSecureRandomU32() % 9001); // 1000-10000ms
+            syscall.print("dhcpv4: Initial delay ");
+            printDecimal(delay_ms);
+            syscall.print("ms\n");
+            syscall.sleep_ms(delay_ms) catch {};
+            self.initial_delay_done = true;
+        }
+
         syscall.print("dhcpv4: Sending DISCOVER\n");
 
         // Create socket if needed
@@ -146,15 +216,19 @@ pub const DhcpClient = struct {
             }
         }
 
-        // Check timeout
-        if (syscall.getTickMs() -% self.last_action_tick > DISCOVER_TIMEOUT_MS) {
+        // Check timeout with exponential backoff
+        const timeout = getRetryTimeout(self.retries);
+        if (syscall.getTickMs() -% self.last_action_tick > timeout) {
             self.retries += 1;
             if (self.retries >= MAX_RETRIES) {
                 syscall.print("dhcpv4: DISCOVER timeout, resetting\n");
                 self.state = .Init;
                 self.xid = generateXid(); // New transaction
+                self.retries = 0;
             } else {
-                syscall.print("dhcpv4: DISCOVER retry\n");
+                syscall.print("dhcpv4: DISCOVER retry ");
+                printDecimal(self.retries);
+                syscall.print("\n");
                 self.state = .Init; // Re-send DISCOVER
             }
         }
@@ -189,24 +263,30 @@ pub const DhcpClient = struct {
             const msg_type = options.getMsgType(&pkt);
             if (msg_type == options.DHCPACK) {
                 syscall.print("dhcpv4: Received ACK\n");
-                self.applyLease(&pkt);
+                self.applyLease(&pkt, 0); // iface_idx 0 for now
                 return;
             } else if (msg_type == options.DHCPNAK) {
                 syscall.print("dhcpv4: Received NAK, restarting\n");
                 self.state = .Init;
                 self.xid = generateXid();
+                self.retries = 0;
                 return;
             }
         }
 
-        // Check timeout
-        if (syscall.getTickMs() -% self.last_action_tick > REQUEST_TIMEOUT_MS) {
+        // Check timeout with exponential backoff
+        const timeout = getRetryTimeout(self.retries);
+        if (syscall.getTickMs() -% self.last_action_tick > timeout) {
             self.retries += 1;
             if (self.retries >= MAX_RETRIES) {
                 syscall.print("dhcpv4: REQUEST timeout, resetting\n");
                 self.state = .Init;
                 self.xid = generateXid();
+                self.retries = 0;
             } else {
+                syscall.print("dhcpv4: REQUEST retry ");
+                printDecimal(self.retries);
+                syscall.print("\n");
                 self.doRequest(); // Retry REQUEST
             }
         }
@@ -250,13 +330,19 @@ pub const DhcpClient = struct {
     }
 
     fn handleRebinding(self: *Self) void {
-        // Broadcast REQUEST
-        var pkt: packet.DhcpPacket = std.mem.zeroes(packet.DhcpPacket);
-        self.buildRebindPacket(&pkt);
+        // FIX: Only send request once per timeout period to avoid race condition
+        // where we send and immediately try to receive with no time for response
+        if (!self.rebind_request_sent) {
+            syscall.print("dhcpv4: Sending rebind REQUEST\n");
+            var pkt: packet.DhcpPacket = std.mem.zeroes(packet.DhcpPacket);
+            self.buildRebindPacket(&pkt);
 
-        self.sendBroadcast(&pkt) catch {
-            return;
-        };
+            self.sendBroadcast(&pkt) catch {
+                return;
+            };
+            self.rebind_request_sent = true;
+            self.last_action_tick = syscall.getTickMs();
+        }
 
         // Try to receive response
         // SECURITY: Zero-initialize to prevent info leaks if receivePacket partially fills
@@ -275,7 +361,32 @@ pub const DhcpClient = struct {
                 self.server_id = options.getServerId(&resp);
                 self.updateLease(&resp);
                 self.state = .Bound;
+                self.rebind_request_sent = false;
+                self.retries = 0;
                 return;
+            } else if (msg_type == options.DHCPNAK) {
+                syscall.print("dhcpv4: Rebind NAK, restarting\n");
+                self.state = .Init;
+                self.xid = generateXid();
+                self.rebind_request_sent = false;
+                self.retries = 0;
+                return;
+            }
+        }
+
+        // Check timeout with exponential backoff - allow next send
+        const timeout = getRetryTimeout(self.retries);
+        if (syscall.getTickMs() -% self.last_action_tick > timeout) {
+            self.retries += 1;
+            self.rebind_request_sent = false; // Allow next send
+
+            if (self.retries >= MAX_RETRIES) {
+                syscall.print("dhcpv4: Rebind timeout after max retries\n");
+                // Don't reset yet - check lease expiry below
+            } else {
+                syscall.print("dhcpv4: Rebind retry ");
+                printDecimal(self.retries);
+                syscall.print("\n");
             }
         }
 
@@ -284,6 +395,8 @@ pub const DhcpClient = struct {
             syscall.print("dhcpv4: Lease expired, restarting\n");
             self.state = .Init;
             self.xid = generateXid();
+            self.rebind_request_sent = false;
+            self.retries = 0;
         }
     }
 
@@ -300,23 +413,118 @@ pub const DhcpClient = struct {
         };
     }
 
-    fn applyLease(self: *Self, pkt: *const packet.DhcpPacket) void {
+    /// Apply received DHCP lease after ACK
+    ///
+    /// RFC 2131 Section 4.4.1:
+    /// "The client SHOULD perform a final check on the parameters
+    /// (e.g., ARP for allocated network address), and notes the
+    /// duration of the lease."
+    ///
+    /// RFC 5227 Section 2.1.1:
+    /// "A host SHOULD perform this check on any IP address it obtains
+    /// via any mechanism, as a final sanity check before using an address."
+    fn applyLease(self: *Self, pkt: *const packet.DhcpPacket, iface_idx: u32) void {
         const ip = @byteSwap(pkt.yiaddr);
         const netmask = options.getSubnetMask(pkt);
         const gateway = options.getRouter(pkt);
         const lease_time = options.getLeaseTime(pkt);
 
+        // RFC 5227 Section 2.1.1: ARP probe before configuring
+        // Send probe with sender IP = 0, target IP = offered IP
+        printIpAddress("dhcpv4: Probing for conflicts: ", ip);
+        const probe_result = net.arpProbe(iface_idx, ip, ARP_PROBE_TIMEOUT_MS) catch |err| {
+            // Best effort - continue on failure
+            printError("ARP probe failed", err);
+            // Assume no conflict if probe syscall fails
+            configureInterface(self, ip, netmask, gateway, lease_time, iface_idx);
+            return;
+        };
+
+        switch (probe_result) {
+            .Conflict => {
+                // RFC 2131 Section 4.4.1: "If the network address appears to be
+                // in use, the client MUST send a DHCPDECLINE message to the server"
+                syscall.print("dhcpv4: IP conflict detected! Sending DECLINE\n");
+                self.sendDecline(ip);
+                self.state = .Init;
+                self.xid = generateXid();
+                self.retries = 0;
+                // RFC 2131 Section 4.4.4: Wait 10 seconds before restarting
+                syscall.sleep_ms(DECLINE_WAIT_MS) catch {};
+                return;
+            },
+            .NoConflict, .Timeout => {
+                // Safe to use IP - no response means address is available
+                configureInterface(self, ip, netmask, gateway, lease_time, iface_idx);
+            },
+        }
+    }
+
+    fn configureInterface(self: *Self, ip: u32, netmask: u32, gateway: u32, lease_time: u32, iface_idx: u32) void {
         // Configure interface
-        net.setIpv4Config(0, ip, netmask, gateway) catch |err| {
+        net.setIpv4Config(iface_idx, ip, netmask, gateway) catch |err| {
             printError("Failed to configure interface", err);
             return;
+        };
+
+        // RFC 5227: Gratuitous ARP announcement to update neighbor caches
+        net.arpAnnounce(iface_idx, ip) catch |err| {
+            // Best effort - continue on failure
+            printError("ARP announce failed", err);
         };
 
         // Update lease info
         self.lease_info.setLease(ip, netmask, gateway, lease_time);
         self.state = .Bound;
+        self.retries = 0;
 
         printIpAddress("dhcpv4: Configured IP: ", ip);
+    }
+
+    /// Send DHCPDECLINE when IP conflict detected (RFC 2131 Section 4.4.4)
+    fn sendDecline(self: *Self, declined_ip: u32) void {
+        var pkt: packet.DhcpPacket = std.mem.zeroes(packet.DhcpPacket);
+        pkt.op = packet.BOOTREQUEST;
+        pkt.htype = 1;
+        pkt.hlen = 6;
+        pkt.xid = @byteSwap(self.xid);
+        @memcpy(pkt.chaddr[0..6], &self.mac_addr);
+        pkt.magic_cookie = @byteSwap(packet.DHCP_MAGIC);
+
+        options.buildDeclineOptions(&pkt.options, declined_ip, self.server_id);
+
+        self.sendBroadcast(&pkt) catch |err| {
+            printError("Failed to send DECLINE", err);
+        };
+    }
+
+    /// Release DHCP lease voluntarily (RFC 2131 Section 4.4.6)
+    /// Call this when shutting down to inform the server.
+    pub fn release(self: *Self) void {
+        if (self.state != .Bound and self.state != .Renewing and self.state != .Rebinding) {
+            return; // No lease to release
+        }
+
+        syscall.print("dhcpv4: Sending RELEASE\n");
+
+        var pkt: packet.DhcpPacket = std.mem.zeroes(packet.DhcpPacket);
+        pkt.op = packet.BOOTREQUEST;
+        pkt.htype = 1;
+        pkt.hlen = 6;
+        pkt.xid = @byteSwap(self.xid);
+        pkt.ciaddr = @byteSwap(self.lease_info.ip_addr); // Must include current IP
+        @memcpy(pkt.chaddr[0..6], &self.mac_addr);
+        pkt.magic_cookie = @byteSwap(packet.DHCP_MAGIC);
+
+        options.buildReleaseOptions(&pkt.options, self.server_id);
+
+        // Unicast to server
+        self.sendUnicast(&pkt, self.server_id) catch |err| {
+            printError("Failed to send RELEASE", err);
+        };
+
+        self.lease_info.invalidate();
+        self.state = .Init;
     }
 
     fn updateLease(self: *Self, pkt: *const packet.DhcpPacket) void {
