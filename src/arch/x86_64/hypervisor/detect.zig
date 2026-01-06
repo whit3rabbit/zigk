@@ -61,6 +61,11 @@ pub const HypervisorType = enum {
     }
 };
 
+// KVM CPUID feature constants
+const KVM_CPUID_FEATURES: u32 = 0x40000001;
+const KVM_FEATURE_CLOCKSOURCE: u32 = 1 << 0; // Legacy kvmclock (MSR 0x11/0x12)
+const KVM_FEATURE_CLOCKSOURCE2: u32 = 1 << 3; // Modern kvmclock (MSR 0x4b564d00/01)
+
 /// Hypervisor detection result with additional info
 pub const HypervisorInfo = struct {
     /// Detected hypervisor type
@@ -176,6 +181,24 @@ pub fn detect() HypervisorInfo {
 /// Get the hypervisor type (convenience function)
 pub fn getHypervisor() HypervisorType {
     return detect().hypervisor;
+}
+
+/// Check if kvmclock (MSR_KVM_SYSTEM_TIME_NEW) is supported
+/// Must be called after detect() confirms KVM hypervisor
+pub fn hasKvmclock() bool {
+    const info = detect();
+    if (info.hypervisor != .kvm) {
+        return false;
+    }
+
+    // Check if CPUID leaf 0x40000001 is available
+    if (info.max_leaf < KVM_CPUID_FEATURES) {
+        return false;
+    }
+
+    // Read KVM feature bits from CPUID leaf 0x40000001
+    const features = cpuid(KVM_CPUID_FEATURES, 0);
+    return (features.eax & KVM_FEATURE_CLOCKSOURCE2) != 0;
 }
 
 /// Reset cached result (for testing or re-detection)

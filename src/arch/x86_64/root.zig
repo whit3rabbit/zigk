@@ -72,8 +72,9 @@ pub fn init(_: u64) void {
     // Initialize SYSCALL/SYSRET MSRs for fast system calls
     syscall.init();
 
-    // Calibrate TSC for timing utilities (uses PIT channel 2, not channel 0)
-    timing.calibrate();
+    // Initialize timing subsystem with best available clock source
+    // Prefers kvmclock under KVM, falls back to PIT-calibrated TSC
+    timing.initBest();
 
     // Initialize PIT channel 0 to 100Hz for scheduler
     pit.init(100);

@@ -61,7 +61,8 @@ pub fn sys_netif_config(
     data_len: usize,
 ) SyscallError!usize {
     // Validate command
-    const command = std.meta.intToEnum(NetifCmd, @as(u32, @truncate(cmd))) catch {
+    // Zig 0.16.x: std.meta.intToEnum removed, use std.enums.fromInt
+    const command = std.enums.fromInt(NetifCmd, @as(u32, @truncate(cmd))) orelse {
         return error.EINVAL;
     };
 

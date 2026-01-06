@@ -419,6 +419,10 @@ export fn apEntry() callconv(.c) noreturn {
 
     writeChar('G'); // GS base set
 
+    // Initialize kvmclock for this AP (registers per-vCPU time page with hypervisor)
+    const kvmclock = @import("../hypervisor/kvmclock.zig");
+    kvmclock.initAp(apic_id);
+
     // Signal boot complete to BSP
     ap_boot_complete.store(1, .release);
     writeChar('!');

@@ -109,7 +109,9 @@ pub const PageFlags = struct {
     global: bool = false,
     mmio: bool = false,
 
-    pub const MMIO = PageFlags{ .mmio = true };
+    /// MMIO: Device memory (uncacheable + write-through semantics).
+    /// On AArch64, attr_index=0 selects Device-nGnRnE memory type from MAIR.
+    pub const MMIO: PageFlags = .{ .writable = true, .user = false, .cache_disable = true, .write_through = true, .mmio = true };
 };
 
 pub const PageTable = struct {
@@ -121,7 +123,16 @@ pub const PageTable = struct {
 /// Initialized to a sensible default in case init() is not called.
 var hhdm_offset: u64 = HHDM_OFFSET_DEFAULT;
 
+// Minimum valid HHDM offset (must be in kernel space - TTBR1 range)
+const HHDM_MIN_OFFSET: u64 = 0xFFFF_0000_0000_0000;
+
 pub fn init(offset: u64) void {
+    // SECURITY: Validate offset is in kernel space (higher half / TTBR1 range).
+    // A malicious or buggy bootloader could pass a user-space offset, causing
+    // physToVirt() to return pointers into user-controllable memory.
+    if (offset < HHDM_MIN_OFFSET) {
+        @panic("HHDM offset not in kernel space");
+    }
     hhdm_offset = offset;
 
     // SECURITY: Detect ASID size from TCR_EL1.AS bit to enable proper

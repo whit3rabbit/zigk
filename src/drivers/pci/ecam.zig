@@ -69,12 +69,23 @@ pub const Ecam = struct {
             size / (1024 * 1024),
         });
 
-        // Map ECAM region to virtual address space with an explicit mapping.
+        // Map ECAM region to virtual address space with an explicit ALIGNED mapping.
+        // CRITICAL: The virtual address MUST be 1MB aligned because configAddr() uses
+        // bitwise OR to calculate device addresses. Without proper alignment, the OR
+        // operation produces incorrect addresses that alias to the same memory location.
         // ECAM is often in a high MMIO hole that may not be covered by the HHDM map.
-        const base_virt = vmm.mapMmioExplicit(ecam_phys, size) catch |err| {
+        const ecam_alignment_usize: usize = @intCast(ecam_alignment);
+        const base_virt = vmm.mapMmioExplicitAligned(ecam_phys, size, ecam_alignment_usize) catch |err| {
             console.err("PCI ECAM: Failed to map MMIO region: {}", .{err});
             return error.MappingFailed;
         };
+
+        // SECURITY: Verify the virtual address is actually 1MB aligned.
+        // This guards against VMM bugs that could cause address aliasing.
+        if ((base_virt & (ecam_alignment - 1)) != 0) {
+            console.err("PCI ECAM: VMM returned misaligned virtual address 0x{x}", .{base_virt});
+            return error.MappingFailed;
+        }
 
         return Self{
             .base_virt = base_virt,

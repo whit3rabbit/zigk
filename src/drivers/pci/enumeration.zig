@@ -39,12 +39,17 @@ const ConfigReg = device.ConfigReg;
 // SMP Safety: Track whether enumeration has completed.
 // This flag is set to true after enumerate() completes and is never reset.
 // Drivers must check this before registering ISRs to prevent race conditions.
-var enumeration_complete: bool = false;
+//
+// SECURITY: Uses atomic operations with acquire/release semantics to ensure:
+// 1. The store is visible to other CPUs before enumerate() returns
+// 2. All enumeration writes are visible before the flag becomes true
+// 3. Future hot-plug support can safely check this flag from any CPU
+var enumeration_complete = std.atomic.Value(bool).init(false);
 
 /// Check if PCI enumeration has completed.
 /// Drivers should call this before registering interrupt handlers.
 pub fn isEnumerationComplete() bool {
-    return enumeration_complete;
+    return enumeration_complete.load(.acquire);
 }
 
 /// Assert that PCI enumeration has completed.
@@ -55,7 +60,7 @@ pub fn isEnumerationComplete() bool {
 /// If this assertion fires, it means a driver is being initialized too early,
 /// which could lead to race conditions during BAR sizing.
 pub fn assertEnumerationComplete() void {
-    if (!enumeration_complete) {
+    if (!enumeration_complete.load(.acquire)) {
         @panic("PCI: Driver init before enumeration complete - kernel init order bug");
     }
 }
@@ -79,10 +84,12 @@ pub fn enumerate(allocator: std.mem.Allocator, pci: PciAccess) !*DeviceList {
 
     console.info("PCI: Found {d} devices", .{devices.count});
 
-    // SECURITY: Mark enumeration as complete. After this point, drivers may
-    // safely register ISRs and perform device I/O without risk of BAR sizing
-    // race conditions. This flag is never reset (no hot-plug support yet).
-    enumeration_complete = true;
+    // SECURITY: Mark enumeration as complete with release semantics.
+    // This ensures all BAR sizing writes are visible before the flag becomes true.
+    // After this point, drivers may safely register ISRs and perform device I/O
+    // without risk of BAR sizing race conditions. This flag is never reset
+    // (future hot-plug support must use proper locking).
+    enumeration_complete.store(true, .release);
 
     return devices;
 }

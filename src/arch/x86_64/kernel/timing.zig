@@ -1,22 +1,33 @@
 // x86_64 Timing Utilities
 //
 // Provides calibrated time delays using TSC (Time Stamp Counter).
-// TSC is calibrated at boot using the PIT channel 2 as a reference clock.
+// Supports kvmclock as preferred clock source under KVM/QEMU.
+// Falls back to PIT-calibrated TSC on bare metal or other hypervisors.
 //
-// Must call calibrate() before using delayUs/delayMs/hasTimedOut.
+// Call initBest() during boot to auto-select best clock source.
+// Alternatively, call calibrate() for TSC-only mode.
 
 const io = @import("../lib/io.zig");
 const cpu = @import("cpu.zig");
 const console = @import("console");
+const kvmclock = @import("../hypervisor/kvmclock.zig");
 
 // PIT Constants
 const PIT_CHANNEL2: u16 = 0x42;
 const PIT_COMMAND: u16 = 0x43;
 const PIT_BASE_FREQUENCY: u64 = 1193182;
 
+/// Active clock source
+pub const ClockSource = enum {
+    none,
+    tsc_calibrated,
+    kvmclock,
+};
+
 // TSC frequency in Hz (set during calibration)
 var tsc_frequency_hz: u64 = 0;
 var calibrated: bool = false;
+var active_clock_source: ClockSource = .none;
 
 /// Read TSC (Time Stamp Counter)
 pub inline fn rdtsc() u64 {
@@ -72,6 +83,73 @@ pub fn calibrate() void {
     const mhz = tsc_frequency_hz / 1_000_000;
     const khz_frac = (tsc_frequency_hz % 1_000_000) / 1000;
     console.info("Timing: TSC calibrated to {d}.{d:0>3} MHz", .{ mhz, khz_frac });
+    active_clock_source = .tsc_calibrated;
+}
+
+/// Initialize timing with best available clock source
+/// Prefers kvmclock under KVM, falls back to PIT-calibrated TSC
+pub fn initBest() void {
+    // Try kvmclock first (preferred under KVM)
+    kvmclock.init();
+
+    if (kvmclock.isAvailable()) {
+        active_clock_source = .kvmclock;
+        console.info("Timing: Using kvmclock as clock source", .{});
+        // Still calibrate TSC for delay functions
+        calibrateSilent();
+    } else {
+        // Fall back to PIT-calibrated TSC
+        calibrate();
+    }
+}
+
+/// Calibrate TSC without logging (for kvmclock fallback)
+fn calibrateSilent() void {
+    const calibration_ms: u64 = 10;
+    const pit_divisor: u16 = @intCast((PIT_BASE_FREQUENCY * calibration_ms) / 1000);
+
+    var port61 = io.inb(0x61);
+    port61 = (port61 & 0xFC) | 0x01;
+    io.outb(0x61, port61);
+
+    io.outb(PIT_COMMAND, 0xB0);
+    io.outb(PIT_CHANNEL2, @truncate(pit_divisor));
+    io.outb(PIT_CHANNEL2, @truncate(pit_divisor >> 8));
+
+    const tsc_start = rdtsc();
+
+    while ((io.inb(0x61) & 0x20) == 0) {
+        cpu.pause();
+    }
+
+    const tsc_end = rdtsc();
+    const tsc_delta = tsc_end - tsc_start;
+    tsc_frequency_hz = (tsc_delta * 1000) / calibration_ms;
+    calibrated = true;
+}
+
+/// Get current time in nanoseconds (monotonic since boot)
+/// Uses kvmclock if available, otherwise calculates from TSC
+pub fn getNanoseconds() u64 {
+    if (active_clock_source == .kvmclock) {
+        if (kvmclock.getSystemTimeNs()) |ns| {
+            return ns;
+        }
+    }
+
+    // Fallback to TSC-based calculation
+    if (tsc_frequency_hz > 0) {
+        // Use u128 to avoid overflow on high TSC values
+        const tsc = rdtsc();
+        return @truncate((@as(u128, tsc) * 1_000_000_000) / tsc_frequency_hz);
+    }
+
+    return 0;
+}
+
+/// Get current clock source
+pub fn getClockSource() ClockSource {
+    return active_clock_source;
 }
 
 /// Get TSC frequency in Hz (must call calibrate first)

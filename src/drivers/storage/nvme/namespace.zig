@@ -7,6 +7,23 @@
 
 const std = @import("std");
 
+// Helper function for trimRight (Zig 0.16.x: std.mem.trimRight removed)
+fn trimRight(comptime T: type, slice: []const T, values_to_strip: []const T) []const T {
+    var end: usize = slice.len;
+    while (end > 0) {
+        var found = false;
+        for (values_to_strip) |c| {
+            if (slice[end - 1] == c) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) break;
+        end -= 1;
+    }
+    return slice[0..end];
+}
+
 // ============================================================================
 // Identify Controller Data Structure (4096 bytes)
 // ============================================================================
@@ -204,17 +221,17 @@ pub const IdentifyController = extern struct {
 
     /// Get serial number as string (trimmed)
     pub fn serialNumber(self: *const IdentifyController) []const u8 {
-        return std.mem.trimRight(u8, &self.sn, " ");
+        return trimRight(u8, &self.sn, " ");
     }
 
     /// Get model number as string (trimmed)
     pub fn modelNumber(self: *const IdentifyController) []const u8 {
-        return std.mem.trimRight(u8, &self.mn, " ");
+        return trimRight(u8, &self.mn, " ");
     }
 
     /// Get firmware revision as string (trimmed)
     pub fn firmwareRevision(self: *const IdentifyController) []const u8 {
-        return std.mem.trimRight(u8, &self.fr, " ");
+        return trimRight(u8, &self.fr, " ");
     }
 
     /// Get max data transfer size in bytes
@@ -379,9 +396,10 @@ pub const IdentifyNamespace = extern struct {
         return self.currentFormat().ms;
     }
 
-    /// Get total capacity in bytes
+    /// Get total capacity in bytes (returns null on overflow)
     pub fn capacityBytes(self: *const IdentifyNamespace) u64 {
-        return self.nsze * @as(u64, self.lbaSize());
+        // Use checked arithmetic to handle hardware-provided values safely
+        return std.math.mul(u64, self.nsze, @as(u64, self.lbaSize())) catch 0;
     }
 
     /// Check if namespace is thin-provisioned

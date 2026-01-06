@@ -12,6 +12,7 @@ This bullet checklist highlights the unique implementation details and features 
 *   **FEAT_RNG Integration**: Utilization of the `RNDR` register for hardware-grade entropy, with a sophisticated timing-based fallback that uses `SplitMix64` for bit distribution.
 *   **Flexible ASID Detection**: Runtime detection of 8-bit vs. 16-bit Address Space Identifiers (ASIDs) to optimize TLB management and prevent process-space collisions.
 *   **VMware Fusion Support**: Full VMware hypervisor detection and hypercall interface using ARM64-specific `mrs xzr, mdccsr_el0` trap instruction, enabling SVGA graphics, VMMouse, and time synchronization on Apple Silicon Macs.
+*   **Paravirtualized Time (pvtime)**: ARM KVM stolen time tracking via SMCCC hypercalls (HVC), providing accurate CPU time measurement under hypervisor by accounting for vCPU preemption. Integrated with timing subsystem for optional stolen-time-adjusted nanoseconds.
 
 ### x86_64 Implementation (AMD64)
 *   **Intel SYSRET Mitigation**: A security-hardened syscall entry point that manually validates canonical RCX addresses to prevent the "SYSRET privilege escalation" vulnerability.
@@ -24,6 +25,8 @@ This bullet checklist highlights the unique implementation details and features 
 ### Memory & MMIO
 *   **HHDM Guarding**: The `physToVirt` translation layer includes mandatory overflow checks to ensure physical addresses never wrap around into user virtual space.
 *   **Type-Safe MMIO Wrapper**: The `MmioDevice` utility uses enums and `comptime` to ensure register accesses are always within bounds and correctly aligned without runtime overhead.
+*   **Aligned MMIO Mapping**: The `mapMmioExplicitAligned()` function supports hardware that requires specific virtual address alignment (e.g., PCI ECAM requires 1MB alignment for bitwise OR address calculations).
+*   **Write-Through MMIO Pages**: `PageFlags.MMIO` includes both `cache_disable` and `write_through` flags for strict uncacheable semantics, preventing CPU prefetch buffers from serving stale data.
 *   **Checked Timing Delays**: Calibration of the TSC (Time Stamp Counter) via the legacy PIT, providing high-precision blocking delays with protection against integer overflow.
 *   **IST Support**: IDT gates support Interrupt Stack Table selection for critical exceptions. TSS structure includes IST entries.
 
@@ -65,6 +68,7 @@ This checklist covers the features found in your hardware drivers, PCI subsystem
 
 ### PCI & Hardware Discovery
 *   **Dual PCI Access Mechanisms**: Support for both PCIe ECAM (memory-mapped) and legacy Port I/O (x86 0xCF8/0xCFC) with automatic fallback.
+*   **ECAM 1MB-Aligned Mapping**: The ECAM driver uses `mapMmioExplicitAligned()` to guarantee the virtual base address is 1MB aligned, enabling correct bitwise OR address calculations per PCIe spec. Runtime assertions verify alignment to prevent address aliasing bugs.
 *   **SMP-Safe Enumeration**: Strict enumeration invariants and global locking to prevent race conditions during BAR sizing and interrupt registration.
 *   **Automated BAR Sizing**: Intelligent resource probing that handles 32-bit and 64-bit BARs, prefetchable memory, and I/O space.
 *   **Capability Linked-List Parsing**: Robust parser for PCI capabilities (MSI, MSI-X, Power Management) with built-in cycle detection to prevent malicious device hangs.
@@ -87,6 +91,16 @@ This checklist covers the features found in your hardware drivers, PCI subsystem
 *   **Asynchronous Block I/O**: AHCI driver integrated with kernel `IoRequest` structures for non-blocking sector access.
 *   **LBA48 & Scatter-Gather DMA**: Support for large disks and multi-page transfers using Physical Region Descriptor Tables (PRDT).
 *   **SATA FIS Communication**: Low-level implementation of Frame Information Structures for H2D commands and D2H status reporting.
+
+### Storage & NVMe
+*   **NVMe 1.4+ Compliant Driver**: Full NVMe driver supporting Admin Queue and I/O Queue pairs with proper phase bit toggling for completion detection.
+*   **Identify Controller/Namespace**: Complete parsing of 4KB Identify structures with compile-time size verification (`comptime` assertions ensure exact 4096-byte layouts).
+*   **PRP-Based Data Transfer**: Physical Region Page (PRP) support for DMA transfers, with automatic PRP list allocation for multi-page operations.
+*   **MSI-X Interrupt Integration**: Preference for MSI-X over legacy INTx interrupts, with vector allocation and handler registration through the HAL.
+*   **Async I/O Reactor Integration**: NVMe read/write operations integrate with the kernel's `IoRequest` and `Future` patterns for non-blocking disk access.
+*   **Namespace Discovery**: Automatic enumeration of active namespaces via Active Namespace List (CNS=02h), with per-namespace LBA size and capacity tracking.
+*   **Queue Pair Management**: Separate Admin Queue (QID 0) and I/O Queues with configurable depth, command ID tracking, and SQ/CQ doorbell management.
+*   **Controller Reset & Initialization**: Proper CC.EN disable/enable sequence with CSTS.RDY polling and timeout detection per NVMe spec.
 
 ### Audio (HDA & AC97)
 *   **Intel HDA Controller**: Full High Definition Audio driver with CORB/RIRB ring buffer management, codec detection via STATESTS, and 256-entry command/response rings.
@@ -527,6 +541,33 @@ This roadmap was generated from a comprehensive feature validation on 2024-12-30
 - Portable CPU pause hints (`pause` on x86_64, `yield` on aarch64)
 - VMware hypercall interface for aarch64 using `mrs xzr, mdccsr_el0` trap
 
+**Implemented 2026-01-05:**
+- **NVMe Driver**: Full NVMe 1.4+ driver (`src/drivers/storage/nvme/`)
+  - Admin Queue and I/O Queue pairs with phase bit completion detection
+  - Identify Controller/Namespace parsing with comptime 4096-byte size assertions
+  - PRP-based DMA transfers with automatic PRP list allocation
+  - MSI-X interrupt support with HAL vector allocation
+  - Async I/O reactor integration via IoRequest/Future patterns
+  - Namespace discovery and per-namespace LBA/capacity tracking
+  - Controller reset sequence with CC.EN/CSTS.RDY handling
+- PCI ECAM enumeration bug fix: Virtual address misalignment caused all PCI devices to return identical data
+- Added `mapMmioExplicitAligned()` to VMM for hardware requiring specific virtual address alignment
+- ECAM now uses 1MB-aligned virtual mapping to enable correct bitwise OR address calculations
+- `PageFlags.MMIO` updated to include `write_through = true` on both x86_64 and aarch64 for strict MMIO semantics
+- **kvmclock Paravirtualized Clock (x86_64)**: KVM paravirtualized timekeeping (`src/arch/x86_64/hypervisor/kvmclock.zig`)
+  - MSR_KVM_WALL_CLOCK_NEW and MSR_KVM_SYSTEM_TIME_NEW support
+  - Per-vCPU time info structures with seqlock synchronization
+  - Automatic detection via CPUID leaf 0x40000001 feature bit
+  - SMP support with per-AP MSR registration
+  - Integration with timing.zig (initBest() prefers kvmclock over PIT calibration)
+  - VDSO integration for userspace time access
+- **pvtime Paravirtualized Time (aarch64)**: ARM KVM stolen time tracking (`src/arch/aarch64/hypervisor/pvtime.zig`)
+  - SMCCC hypercalls (HV_PV_TIME_ST: 0xC6000021, HV_PV_TIME_FEATURES: 0xC6000020)
+  - Per-vCPU stolen time structure (16 bytes) with seqlock synchronization
+  - Automatic KVM detection via hypervisor probing
+  - Integration with timing.zig (initBest() enables pvtime under KVM)
+  - Stolen time tracking for accurate CPU accounting under VM preemption
+
 **Discovered 2026-01-04 (documentation update - features were already implemented):**
 - DHCPv4 client fully functional in netcfgd service (`src/user/services/netcfgd/dhcpv4.zig`)
   - Full RFC 2131/2132 state machine with T1/T2 renewal
@@ -567,7 +608,7 @@ This roadmap was generated from a comprehensive feature validation on 2024-12-30
 | Feature | VMware | VirtualBox | QEMU/KVM | Proxmox | Hyper-V |
 |---------|--------|------------|----------|---------|---------|
 | Hypervisor Detection | Yes | Yes | Yes | Yes | Yes |
-| Time Sync | Yes | Yes | No | No | No |
+| Time Sync | Yes | Yes | Yes (kvmclock/pvtime) | Yes (kvmclock/pvtime) | No |
 | Graceful Shutdown | Yes | Partial | No | No | No |
 | Graphics (2D) | SVGA II | SVGA II | VirtIO-GPU | VirtIO-GPU | No |
 | Absolute Mouse | VMMouse | VMMouse | No | No | No |
@@ -612,7 +653,7 @@ This roadmap was generated from a comprehensive feature validation on 2024-12-30
 - VirtIO-FS (virtiofs, modern shared folder replacement)
 - VirtIO-Input (keyboard/mouse/tablet, replaces PS/2)
 - VirtIO-Sound (modern audio)
-- kvmclock paravirtualized timing source
+- ~~kvmclock paravirtualized timing source~~ **IMPLEMENTED** (2026-01-05)
 - SPICE display protocol (Proxmox default)
 - SPICE agent (vdagent for clipboard, resolution)
 - QXL display driver (SPICE acceleration)
@@ -653,7 +694,7 @@ This roadmap was generated from a comprehensive feature validation on 2024-12-30
 #### Storage Gaps
 | Feature | Status | Impact |
 |---------|--------|--------|
-| NVMe | Not Implemented | Modern VMs use NVMe emulation |
+| NVMe | **Implemented** | Full driver with Admin/IO queues, PRP DMA, MSI-X |
 | VirtIO-SCSI | Not Implemented | Proxmox default storage |
 | IDE/PIIX | Not Implemented | Legacy VM compatibility |
 | GPT Partition Write | Read-Only | Cannot modify partitions |
@@ -681,7 +722,7 @@ This roadmap was generated from a comprehensive feature validation on 2024-12-30
 |--------|------------|---------|
 | VMXNET3 | VMware | 10GbE performance |
 | PVSCSI | VMware | Low-latency storage |
-| kvmclock | QEMU/KVM | Stable TSC source |
+| ~~kvmclock/pvtime~~ | QEMU/KVM | **IMPLEMENTED** - Stable TSC source (x86_64: kvmclock, aarch64: pvtime) |
 | VirtIO-Input | QEMU/KVM | Modern HID replacement |
 | VirtIO-Sound | QEMU/KVM | Modern audio |
 
@@ -724,10 +765,10 @@ This roadmap was generated from a comprehensive feature validation on 2024-12-30
    - Remaining: IPv6 PMTU cache, TX fragmentation wiring
 
 ### Phase 2: Storage Expansion (High Priority)
-1. **NVMe Driver** - Modern VM default
+1. ~~**NVMe Driver**~~ - **COMPLETE** (2026-01-05)
    - Location: `src/drivers/storage/nvme/`
-   - Pattern: Similar to AHCI async I/O
-   - Effort: Medium-High (NVMe queue pairs)
+   - Full NVMe 1.4+ driver with Admin/IO queues, PRP DMA, MSI-X interrupts
+   - Async I/O reactor integration, namespace discovery, queue pair management
 
 2. **VirtIO-SCSI** - Proxmox default
    - Location: `src/drivers/virtio/scsi.zig` or userspace
@@ -740,10 +781,11 @@ This roadmap was generated from a comprehensive feature validation on 2024-12-30
    - Enables: Tablet mode, modern HID
    - Effort: Low-Medium
 
-2. **kvmclock** - Stable timekeeping
-   - Location: `src/arch/x86_64/kernel/kvmclock.zig`
-   - Enables: TSC stability under migration
-   - Effort: Low
+2. ~~**kvmclock/pvtime**~~ - **COMPLETE** (2026-01-05)
+   - x86_64: `src/arch/x86_64/hypervisor/kvmclock.zig` (MSR-based wall/system time)
+   - aarch64: `src/arch/aarch64/hypervisor/pvtime.zig` (SMCCC-based stolen time)
+   - Enables: Stable timing under VM migration (x86_64), accurate CPU accounting (aarch64)
+   - Integrated with timing.zig (initBest()), SMP (per-vCPU pages), and VDSO
 
 3. **SPICE Agent** - Proxmox integration
    - Location: `src/user/services/vdagent/`

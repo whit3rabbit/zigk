@@ -132,7 +132,9 @@ pub const PageFlags = struct {
     pub const USER_RW: PageFlags = .{ .writable = true, .user = true };
     pub const USER_RO: PageFlags = .{ .writable = false, .user = true };
     pub const USER_RWX: PageFlags = .{ .writable = true, .user = true, .no_execute = false };
-    pub const MMIO: PageFlags = .{ .writable = true, .user = false, .cache_disable = true };
+    /// MMIO: Uncacheable + Write-Through for strict hardware access semantics.
+    /// Write-through prevents CPU prefetch buffers from serving stale data.
+    pub const MMIO: PageFlags = .{ .writable = true, .user = false, .cache_disable = true, .write_through = true };
 };
 
 /// Page table (array of 512 entries, 4KB aligned)
@@ -213,8 +215,13 @@ pub fn virtToPhys(virt: u64) u64 {
 }
 
 /// Get pointer to page table from physical address using HHDM
+/// SECURITY: Panics if physical address would overflow into user space.
 pub fn getTablePtr(phys_addr: u64) *PageTable {
-    const virt: u64 = phys_addr + hhdm_offset;
+    const virt = phys_addr +% hhdm_offset;
+    // SECURITY: Ensure physical address doesn't wrap into user virtual space.
+    if (virt < hhdm_offset) {
+        @panic("getTablePtr: integer overflow - physical address too large");
+    }
     return @ptrFromInt(virt);
 }
 

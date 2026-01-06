@@ -5,9 +5,9 @@ const OvmfPaths = struct {
     vars: ?[]const u8,
 };
 
-fn fileExists(path: []const u8) bool {
-    std.fs.accessAbsolute(path, .{}) catch return false;
-    return true;
+fn fileExists(path: [:0]const u8) bool {
+    // Use std.c.access for Zig 0.16.x compatibility (std.fs.cwd() was deprecated)
+    return std.c.access(path.ptr, std.c.F_OK) == 0;
 }
 
 fn detectHostOvmf(host_os: std.Target.Os.Tag, target_arch: std.Target.Cpu.Arch) OvmfPaths {
@@ -48,7 +48,7 @@ fn detectHostOvmf(host_os: std.Target.Os.Tag, target_arch: std.Target.Cpu.Arch) 
     if (host_os == .linux) {
         if (target_arch == .aarch64) {
             // AArch64 UEFI firmware paths on Linux
-            const aarch64_paths = [_]struct { code: []const u8, vars: []const u8 }{
+            const aarch64_paths = [_]struct { code: [:0]const u8, vars: [:0]const u8 }{
                 .{ .code = "/usr/share/AAVMF/AAVMF_CODE.fd", .vars = "/usr/share/AAVMF/AAVMF_VARS.fd" },
                 .{ .code = "/usr/share/qemu-efi-aarch64/QEMU_EFI.fd", .vars = "/usr/share/qemu-efi-aarch64/vars-template-pflash.raw" },
                 .{ .code = "/usr/share/edk2/aarch64/QEMU_EFI.fd", .vars = "/usr/share/edk2/aarch64/vars-template-pflash.raw" },
@@ -67,7 +67,7 @@ fn detectHostOvmf(host_os: std.Target.Os.Tag, target_arch: std.Target.Cpu.Arch) 
             }
         } else {
             // x86_64 UEFI firmware paths on Linux
-            const pair_paths = [_]struct { code: []const u8, vars: []const u8 }{
+            const pair_paths = [_]struct { code: [:0]const u8, vars: [:0]const u8 }{
                 .{ .code = "/usr/share/OVMF/OVMF_CODE.fd", .vars = "/usr/share/OVMF/OVMF_VARS.fd" },
                 .{ .code = "/usr/share/OVMF/OVMF_CODE.secboot.fd", .vars = "/usr/share/OVMF/OVMF_VARS.secboot.fd" },
                 .{ .code = "/usr/share/edk2/ovmf/OVMF_CODE.fd", .vars = "/usr/share/edk2/ovmf/OVMF_VARS.fd" },
@@ -1206,7 +1206,7 @@ pub fn build(b: *std.Build) void {
     });
     netstack_exe.setLinkerScript(b.path("src/user/linker.ld"));
     if (target_arch == .x86_64) {
-        netstack_exe.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
+        netstack_exe.root_module.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
     }
 
     const netstack_cmd = b.addInstallArtifact(netstack_exe, .{});
@@ -1539,14 +1539,14 @@ pub fn build(b: *std.Build) void {
     // Add architecture-specific assembly and linker script
     switch (target_arch) {
         .x86_64 => {
-            kernel.addAssemblyFile(b.path("src/arch/x86_64/lib/asm_helpers.S"));
-            kernel.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
-            kernel.addAssemblyFile(b.path("src/arch/x86_64/boot/smp_trampoline.S"));
+            kernel.root_module.addAssemblyFile(b.path("src/arch/x86_64/lib/asm_helpers.S"));
+            kernel.root_module.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
+            kernel.root_module.addAssemblyFile(b.path("src/arch/x86_64/boot/smp_trampoline.S"));
             kernel.setLinkerScript(b.path("src/arch/x86_64/boot/linker.ld"));
         },
         .aarch64 => {
-            kernel.addAssemblyFile(b.path("src/arch/aarch64/boot/entry.S"));
-            kernel.addAssemblyFile(b.path("src/arch/aarch64/lib/asm_helpers.S"));
+            kernel.root_module.addAssemblyFile(b.path("src/arch/aarch64/boot/entry.S"));
+            kernel.root_module.addAssemblyFile(b.path("src/arch/aarch64/lib/asm_helpers.S"));
             kernel.setLinkerScript(b.path("src/arch/aarch64/boot/linker.ld"));
         },
         else => {},
@@ -1589,7 +1589,7 @@ pub fn build(b: *std.Build) void {
     });
     shell.setLinkerScript(b.path("src/user/linker.ld"));
     if (target_arch == .x86_64) {
-        shell.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
+        shell.root_module.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
     }
     // shell.entry = .disabled; // let Zig find _start
 
@@ -1612,7 +1612,7 @@ pub fn build(b: *std.Build) void {
     });
     httpd.setLinkerScript(b.path("src/user/linker.ld"));
     if (target_arch == .x86_64) {
-        httpd.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
+        httpd.root_module.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
     }
 
     // Install httpd as ELF (required for proper ELF loading in kernel)
@@ -1635,7 +1635,7 @@ pub fn build(b: *std.Build) void {
     });
     vmware_tools.setLinkerScript(b.path("src/user/linker.ld"));
     if (target_arch == .x86_64) {
-        vmware_tools.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
+        vmware_tools.root_module.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
     }
 
     const install_vmware_tools = b.addInstallArtifact(vmware_tools, .{});
@@ -1657,7 +1657,7 @@ pub fn build(b: *std.Build) void {
     });
     qemu_ga.setLinkerScript(b.path("src/user/linker.ld"));
     if (target_arch == .x86_64) {
-        qemu_ga.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
+        qemu_ga.root_module.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
     }
 
     const install_qemu_ga = b.addInstallArtifact(qemu_ga, .{});
@@ -1679,7 +1679,7 @@ pub fn build(b: *std.Build) void {
     });
     netcfgd.setLinkerScript(b.path("src/user/linker.ld"));
     if (target_arch == .x86_64) {
-        netcfgd.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
+        netcfgd.root_module.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
     }
 
     const install_netcfgd = b.addInstallArtifact(netcfgd, .{});
@@ -1701,7 +1701,7 @@ pub fn build(b: *std.Build) void {
     });
     virtio_balloon.setLinkerScript(b.path("src/user/linker.ld"));
     if (target_arch == .x86_64) {
-        virtio_balloon.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
+        virtio_balloon.root_module.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
     }
 
     const install_virtio_balloon = b.addInstallArtifact(virtio_balloon, .{});
@@ -1723,7 +1723,7 @@ pub fn build(b: *std.Build) void {
     });
     virtio_console.setLinkerScript(b.path("src/user/linker.ld"));
     if (target_arch == .x86_64) {
-        virtio_console.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
+        virtio_console.root_module.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
     }
 
     const install_virtio_console = b.addInstallArtifact(virtio_console, .{});
@@ -1765,8 +1765,8 @@ pub fn build(b: *std.Build) void {
         .root_module = doom_mod,
     });
     if (target_arch == .x86_64) {
-        doom.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
-        doom.addAssemblyFile(b.path("src/user/lib/libc/setjmp.S"));
+        doom.root_module.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
+        doom.root_module.addAssemblyFile(b.path("src/user/lib/libc/setjmp.S"));
     }
 
     // NOTE: uart_driver and ps2_driver removed - source files not yet implemented
@@ -1818,7 +1818,7 @@ pub fn build(b: *std.Build) void {
     // b.getInstallStep().dependOn(&install_virtio_blk_driver.step);
 
     // Add doomgeneric C source files
-    doom.addCSourceFiles(.{
+    doom.root_module.addCSourceFiles(.{
         .root = b.path("src/user/doom/doomgeneric"),
         .files = &.{
             "am_map.c",   "d_event.c",  "d_items.c",    "d_iwad.c",   "d_loop.c",
@@ -1866,14 +1866,14 @@ pub fn build(b: *std.Build) void {
             "-fno-sanitize=alignment",
         },
     });
-    doom.addIncludePath(b.path("src/user/doom/include"));
-    doom.addIncludePath(b.path("src/user/doom/doomgeneric"));
+    doom.root_module.addIncludePath(b.path("src/user/doom/include"));
+    doom.root_module.addIncludePath(b.path("src/user/doom/doomgeneric"));
 
     doom.setLinkerScript(b.path("src/user/linker.ld"));
 
     // Add C shim for varargs functions on aarch64
     if (target_arch == .aarch64) {
-        doom.addCSourceFile(.{
+        doom.root_module.addCSourceFile(.{
             .file = b.path("src/user/lib/libc/stdio/shim/printf_shim.c"),
             .flags = &.{
                 "-ffreestanding",
@@ -1932,7 +1932,7 @@ pub fn build(b: *std.Build) void {
         .name = "test_libc_fixes.elf",
         .root_module = test_libc_runner_mod,
     });
-    test_libc_exe.addCSourceFile(.{
+    test_libc_exe.root_module.addCSourceFile(.{
         .file = b.path("tests/userland/test_libc_fixes.c"),
         .flags = &.{
             "-ffreestanding",
@@ -1942,16 +1942,16 @@ pub fn build(b: *std.Build) void {
             "-fno-builtin", // Use our libc functions, not compiler builtins
         },
     });
-    test_libc_exe.addIncludePath(b.path("src/user/doom/include"));
+    test_libc_exe.root_module.addIncludePath(b.path("src/user/doom/include"));
     test_libc_exe.setLinkerScript(b.path("src/user/linker.ld"));
     if (target_arch == .x86_64) {
-        test_libc_exe.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
-        test_libc_exe.addAssemblyFile(b.path("src/user/lib/libc/setjmp.S"));
+        test_libc_exe.root_module.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
+        test_libc_exe.root_module.addAssemblyFile(b.path("src/user/lib/libc/setjmp.S"));
     }
 
     // Add C shim for varargs functions on aarch64
     if (target_arch == .aarch64) {
-        test_libc_exe.addCSourceFile(.{
+        test_libc_exe.root_module.addCSourceFile(.{
             .file = b.path("src/user/lib/libc/stdio/shim/printf_shim.c"),
             .flags = &.{
                 "-ffreestanding",
@@ -1979,7 +1979,7 @@ pub fn build(b: *std.Build) void {
     });
     test_asm.setLinkerScript(b.path("src/user/linker.ld"));
     if (target_arch == .x86_64) {
-        test_asm.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
+        test_asm.root_module.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
     }
     const install_test_asm = b.addInstallArtifact(test_asm, .{});
     b.getInstallStep().dependOn(&install_test_asm.step);
@@ -1999,7 +1999,7 @@ pub fn build(b: *std.Build) void {
     });
     test_writev.setLinkerScript(b.path("src/user/linker.ld"));
     if (target_arch == .x86_64) {
-        test_writev.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
+        test_writev.root_module.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
     }
     const install_test_writev = b.addInstallArtifact(test_writev, .{});
     b.getInstallStep().dependOn(&install_test_writev.step);
@@ -2019,7 +2019,7 @@ pub fn build(b: *std.Build) void {
     });
     audio_test.setLinkerScript(b.path("src/user/linker.ld"));
     if (target_arch == .x86_64) {
-        audio_test.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
+        audio_test.root_module.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
     }
     const install_audio_test = b.addInstallArtifact(audio_test, .{});
     b.getInstallStep().dependOn(&install_audio_test.step);
@@ -2040,7 +2040,7 @@ pub fn build(b: *std.Build) void {
     });
     sound_test.setLinkerScript(b.path("src/user/linker.ld"));
     if (target_arch == .x86_64) {
-        sound_test.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
+        sound_test.root_module.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
     }
     const install_sound_test = b.addInstallArtifact(sound_test, .{});
     b.getInstallStep().dependOn(&install_sound_test.step);
@@ -2070,18 +2070,18 @@ pub fn build(b: *std.Build) void {
         .name = "test_libc_fix",
         .root_module = test_libc_fix_mod,
     });
-    test_libc_fix_exe.addCSourceFile(.{
+    test_libc_fix_exe.root_module.addCSourceFile(.{
         .file = b.path("tests/userland/test_libc_fix.c"),
         .flags = &.{ "-nostdlib", "-ffreestanding", "-I", "src/user/doom/include" },
     });
     test_libc_fix_exe.setLinkerScript(b.path("src/user/linker.ld"));
     if (target_arch == .x86_64) {
-        test_libc_fix_exe.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
-        test_libc_fix_exe.addAssemblyFile(b.path("src/user/crt0.S"));
-        test_libc_fix_exe.addAssemblyFile(b.path("src/user/lib/libc/setjmp.S"));
+        test_libc_fix_exe.root_module.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
+        test_libc_fix_exe.root_module.addAssemblyFile(b.path("src/user/crt0.S"));
+        test_libc_fix_exe.root_module.addAssemblyFile(b.path("src/user/lib/libc/setjmp.S"));
     } else if (target_arch == .aarch64) {
         // aarch64: Use C shim for va_list bootstrap
-        test_libc_fix_exe.addCSourceFile(.{
+        test_libc_fix_exe.root_module.addCSourceFile(.{
             .file = b.path("src/user/lib/libc/stdio/shim/printf_shim.c"),
             .flags = &.{ "-nostdlib", "-ffreestanding" },
         });

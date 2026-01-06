@@ -535,16 +535,28 @@ pub const NvmeController = struct {
 
         // Validate
         if (block_count == 0) return error.InvalidParameter;
-        if (buffer.len < @as(usize, block_count) * ns.lba_size) {
+
+        // Use checked arithmetic to prevent integer overflow (CLAUDE.md security)
+        const bytes_needed = std.math.mul(usize, @as(usize, block_count), @as(usize, ns.lba_size)) catch {
             return error.InvalidParameter;
-        }
-        if (lba + block_count > ns.total_lbas) {
+        };
+        if (buffer.len < bytes_needed) {
             return error.InvalidParameter;
         }
 
-        // Allocate DMA buffer
-        const bytes_needed = @as(usize, block_count) * ns.lba_size;
-        const pages = (bytes_needed + init_mod.PAGE_SIZE - 1) / init_mod.PAGE_SIZE;
+        // Checked addition for LBA range validation
+        const end_lba = std.math.add(u64, lba, @as(u64, block_count)) catch {
+            return error.InvalidParameter;
+        };
+        if (end_lba > ns.total_lbas) {
+            return error.InvalidParameter;
+        }
+
+        // Allocate DMA buffer (checked page calculation)
+        const pages_raw = std.math.add(usize, bytes_needed, init_mod.PAGE_SIZE - 1) catch {
+            return error.InvalidParameter;
+        };
+        const pages = pages_raw / init_mod.PAGE_SIZE;
         const buf_dma = dma.allocBuffer(self.bdf, pages * init_mod.PAGE_SIZE, true) catch {
             return error.AllocationFailed;
         };
@@ -622,16 +634,28 @@ pub const NvmeController = struct {
 
         // Validate
         if (block_count == 0) return error.InvalidParameter;
-        if (buffer.len < @as(usize, block_count) * ns.lba_size) {
+
+        // Use checked arithmetic to prevent integer overflow (CLAUDE.md security)
+        const bytes_needed = std.math.mul(usize, @as(usize, block_count), @as(usize, ns.lba_size)) catch {
             return error.InvalidParameter;
-        }
-        if (lba + block_count > ns.total_lbas) {
+        };
+        if (buffer.len < bytes_needed) {
             return error.InvalidParameter;
         }
 
-        // Allocate DMA buffer
-        const bytes_needed = @as(usize, block_count) * ns.lba_size;
-        const pages = (bytes_needed + init_mod.PAGE_SIZE - 1) / init_mod.PAGE_SIZE;
+        // Checked addition for LBA range validation
+        const end_lba = std.math.add(u64, lba, @as(u64, block_count)) catch {
+            return error.InvalidParameter;
+        };
+        if (end_lba > ns.total_lbas) {
+            return error.InvalidParameter;
+        }
+
+        // Allocate DMA buffer (checked page calculation)
+        const pages_raw = std.math.add(usize, bytes_needed, init_mod.PAGE_SIZE - 1) catch {
+            return error.InvalidParameter;
+        };
+        const pages = pages_raw / init_mod.PAGE_SIZE;
         const buf_dma = dma.allocBuffer(self.bdf, pages * init_mod.PAGE_SIZE, true) catch {
             return error.AllocationFailed;
         };
@@ -849,6 +873,14 @@ pub const NvmeController = struct {
         while (qp.hasCompletion() and processed < qp.size) {
             const cqe = qp.getCqEntry(qp.cq_head);
             const cid = cqe.getCid();
+
+            // Validate CID bounds (security: hardware-provided value)
+            if (cid >= queue.MAX_PENDING_REQUESTS) {
+                console.err("NVMe: Invalid CID {} from hardware (max {})", .{ cid, queue.MAX_PENDING_REQUESTS });
+                qp.advanceCqHead();
+                processed += 1;
+                continue;
+            }
 
             // Complete pending request
             const held = qp.pending_lock.acquire();

@@ -632,6 +632,96 @@ pub fn mapMmioExplicit(phys_addr: u64, size: usize) VmmError!u64 {
     return virt_base + offset;
 }
 
+/// Map MMIO region with explicit virtual address alignment
+/// Used when hardware requires the virtual base address to be aligned to a specific boundary.
+/// For example, PCI ECAM requires 1MB alignment for bitwise OR address calculation.
+///
+/// Parameters:
+///   phys_addr: Physical address of the MMIO region
+///   size: Size in bytes of the region
+///   alignment: Required virtual address alignment (must be power of 2, >= PAGE_SIZE)
+///
+/// Returns: Virtual address of mapped region (with offset preserved)
+pub fn mapMmioExplicitAligned(phys_addr: u64, size: usize, alignment: usize) VmmError!u64 {
+    if (!initialized) {
+        return VmmError.NotInitialized;
+    }
+
+    // Validate alignment is power of 2 and at least PAGE_SIZE
+    if (alignment < PAGE_SIZE or (alignment & (alignment - 1)) != 0) {
+        console.err("VMM: Invalid alignment {x} (must be power of 2 >= PAGE_SIZE)", .{alignment});
+        return VmmError.InvalidAddress;
+    }
+
+    // Align physical addresses to page boundary
+    const aligned_phys = paging.pageAlignDown(phys_addr);
+    const offset = phys_addr - aligned_phys;
+    const aligned_size = paging.pageAlignUp(size + offset) orelse return VmmError.OutOfMemory;
+
+    // Allocate virtual address range from MMIO space with requested alignment
+    const held = mmio_lock.acquire();
+
+    // Align mmio_current UP to the requested alignment boundary
+    const align_u64: u64 = @intCast(alignment);
+    const remainder = mmio_current & (align_u64 - 1);
+    const virt_base = if (remainder == 0) mmio_current else mmio_current + (align_u64 - remainder);
+
+    // Verify alignment succeeded
+    if ((virt_base & (align_u64 - 1)) != 0) {
+        held.release();
+        console.err("VMM: Alignment calculation failed (base=0x{x}, align=0x{x})", .{ virt_base, alignment });
+        return VmmError.OutOfMemory;
+    }
+
+    // SECURITY: Check for overflow and ensure we stay within MMIO region bounds
+    if (std.math.maxInt(u64) - virt_base < aligned_size) {
+        held.release();
+        return VmmError.OutOfMemory;
+    }
+
+    const new_mmio_current = virt_base + aligned_size;
+    const mmio_end = getMmioEnd();
+    if (new_mmio_current > mmio_end) {
+        console.err("VMM: MMIO region exhausted (requested={d}KB, current=0x{x}, limit=0x{x})", .{
+            aligned_size / 1024,
+            virt_base,
+            mmio_end,
+        });
+        held.release();
+        return VmmError.OutOfMemory;
+    }
+
+    mmio_current = new_mmio_current;
+    held.release();
+
+    // Map each page with cache-disabled flag
+    const page_count = aligned_size / PAGE_SIZE;
+    var i: usize = 0;
+    while (i < page_count) : (i += 1) {
+        const page_phys = aligned_phys + i * PAGE_SIZE;
+        const page_virt = virt_base + i * PAGE_SIZE;
+
+        mapPage(kernel_pml4_phys, page_virt, page_phys, PageFlags.MMIO) catch |err| {
+            // Rollback on failure: unmap pages mapped so far
+            var j: usize = 0;
+            while (j < i) : (j += 1) {
+                const cleanup_virt = virt_base + j * PAGE_SIZE;
+                unmapPage(kernel_pml4_phys, cleanup_virt) catch {};
+            }
+            return err;
+        };
+    }
+
+    console.info("VMM: MMIO aligned map: phys=0x{x:0>16} virt=0x{x:0>16} size={d}KB align={d}MB", .{
+        phys_addr,
+        virt_base + offset,
+        size / 1024,
+        alignment / (1024 * 1024),
+    });
+
+    return virt_base + offset;
+}
+
 /// Unmap MMIO region
 pub fn unmapMmio(virt_addr: u64, size: usize) void {
     if (!initialized) return;

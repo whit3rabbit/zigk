@@ -303,6 +303,44 @@ pub fn enableMsix(
         return null;
     }
 
+    // SECURITY: Validate PBA (Pending Bit Array) bounds.
+    // The PBA may be in the same BAR as the table or a different BAR.
+    // PBA size = ceil(table_size / 64) * 8 bytes (64 bits per QWORD, 8 bytes per QWORD).
+    // A malicious device could report pba_bir pointing to an invalid BAR or
+    // pba_offset extending beyond the BAR, causing OOB reads when drivers check pending bits.
+    {
+        const pba_bar_index = msix_cap.pba_bir;
+        if (pba_bar_index > 5) {
+            console.err("MSI-X: SECURITY - Invalid PBA BAR index {d} (max 5)", .{pba_bar_index});
+            return null;
+        }
+
+        const pba_bar = dev.bar[pba_bar_index];
+        if (!pba_bar.isValid() or !pba_bar.is_mmio) {
+            console.err("MSI-X: PBA BAR{d} not valid or not MMIO", .{pba_bar_index});
+            return null;
+        }
+
+        // PBA size calculation: ceil(table_size / 64) QWORDs, each 8 bytes
+        // Equivalent to: ((table_size + 63) / 64) * 8
+        const pba_qwords = (@as(u64, msix_cap.table_size) + 63) / 64;
+        const pba_size = pba_qwords * 8;
+        const pba_end_offset = std.math.add(u64, msix_cap.pba_offset, pba_size) catch {
+            console.err("MSI-X: SECURITY - PBA offset overflow", .{});
+            return null;
+        };
+
+        if (pba_end_offset > pba_bar.size) {
+            console.err("MSI-X: SECURITY - PBA extends beyond BAR{d} (offset={x} + size={d} > bar_size={x})", .{
+                pba_bar_index,
+                msix_cap.pba_offset,
+                pba_size,
+                pba_bar.size,
+            });
+            return null;
+        }
+    }
+
     // Calculate table address
     const table_addr = table_base + msix_cap.table_offset;
 

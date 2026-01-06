@@ -265,4 +265,8 @@ pub fn init(hhdm_offset: u64) void {
     // Initialize GIC and exception vectors
     // Must be done before any code calls setSerialHandler or other IRQ functions
     interrupts.init();
+
+    // Initialize timing subsystem with best available clock source
+    // Uses Generic Timer, with pvtime stolen time tracking under KVM
+    timing.initBest();
 }

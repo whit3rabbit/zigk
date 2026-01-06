@@ -73,11 +73,12 @@ fn blockRead(file: *fd.FileDescriptor, buf: []u8) isize {
     const pos = file.position;
     const lba_size = priv.lba_size;
 
-    // Calculate LBA range
+    // Calculate LBA range (checked arithmetic per CLAUDE.md security)
     const start_lba = pos / lba_size;
     const start_offset = pos % lba_size;
     const end_pos = std.math.add(u64, pos, buf.len) catch return EINVAL;
-    const end_lba_raw = (end_pos + lba_size - 1) / lba_size;
+    const end_pos_aligned = std.math.add(u64, end_pos, lba_size - 1) catch return EINVAL;
+    const end_lba_raw = end_pos_aligned / lba_size;
 
     // Check bounds
     if (start_lba >= priv.total_lbas) {
@@ -140,11 +141,12 @@ fn blockWrite(file: *fd.FileDescriptor, buf: []const u8) isize {
     const pos = file.position;
     const lba_size = priv.lba_size;
 
-    // Calculate LBA range
+    // Calculate LBA range (checked arithmetic per CLAUDE.md security)
     const start_lba = pos / lba_size;
     const start_offset = pos % lba_size;
     const end_pos = std.math.add(u64, pos, buf.len) catch return EINVAL;
-    const end_lba_raw = (end_pos + lba_size - 1) / lba_size;
+    const end_pos_aligned = std.math.add(u64, end_pos, lba_size - 1) catch return EINVAL;
+    const end_lba_raw = end_pos_aligned / lba_size;
 
     // Check bounds
     if (start_lba >= priv.total_lbas) {
@@ -221,7 +223,16 @@ fn blockClose(file: *fd.FileDescriptor) isize {
 fn blockSeek(file: *fd.FileDescriptor, offset: i64, whence: u32) isize {
     const priv = getPrivateData(file) orelse return EIO;
 
-    const total_size: i64 = @intCast(priv.total_lbas * priv.lba_size);
+    // Checked multiplication for total size (CLAUDE.md security)
+    const total_size_u64 = std.math.mul(u64, priv.total_lbas, @as(u64, priv.lba_size)) catch {
+        return EINVAL;
+    };
+    // Ensure total_size fits in i64
+    if (total_size_u64 > @as(u64, @intCast(std.math.maxInt(i64)))) {
+        return EINVAL;
+    }
+    const total_size: i64 = @intCast(total_size_u64);
+
     var new_pos: i64 = undefined;
 
     switch (whence) {
@@ -229,10 +240,10 @@ fn blockSeek(file: *fd.FileDescriptor, offset: i64, whence: u32) isize {
             new_pos = offset;
         },
         1 => { // SEEK_CUR
-            new_pos = @as(i64, @intCast(file.position)) + offset;
+            new_pos = std.math.add(i64, @as(i64, @intCast(file.position)), offset) catch return EINVAL;
         },
         2 => { // SEEK_END
-            new_pos = total_size + offset;
+            new_pos = std.math.add(i64, total_size, offset) catch return EINVAL;
         },
         else => return EINVAL,
     }

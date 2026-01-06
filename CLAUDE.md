@@ -21,6 +21,38 @@ Use `-Dbios=/path/to/OVMF.fd` to specify UEFI firmware.
 Use `-Dqemu-args="-accel tcg,thread=multi -cpu max"` to prevent stability issues.
 To prevent hangs on CI/Testing, ensure test runner implements timeouts (e.g., 30s).
 
+## Zig 0.16.x Compatibility Notes
+
+### Breaking API Changes from 0.15.x
+
+**build.zig changes:**
+- `std.fs.accessAbsolute(path, flags)` removed - use `std.c.access(path.ptr, std.c.F_OK)` with `[:0]const u8` paths
+- `compile.addAssemblyFile(...)` deprecated - use `compile.root_module.addAssemblyFile(...)`
+- `compile.addCSourceFile(...)` deprecated - use `compile.root_module.addCSourceFile(...)`
+- `compile.addCSourceFiles(...)` deprecated - use `compile.root_module.addCSourceFiles(...)`
+- `compile.addIncludePath(...)` deprecated - use `compile.root_module.addIncludePath(...)`
+- `compile.linkLibC()` deprecated - use `compile.root_module.link_libc = true`
+- `setLinkerScript` remains on Step.Compile (not deprecated)
+
+**Standard library changes:**
+- `std.atomic.compilerFence(.seq_cst)` removed - use `asm volatile ("" ::: "memory")`
+- `std.mem.trimRight(T, slice, chars)` removed - implement manually or use helper function
+- `std.meta.intToEnum(Enum, int)` removed - use `std.enums.fromInt(Enum, int)` which returns `?Enum`
+- `std.fs.cwd()` removed - filesystem APIs moved to `std.Io.Dir` with required `Io` context parameter
+
+**Pattern for file existence check in build.zig:**
+```zig
+fn fileExists(path: [:0]const u8) bool {
+    return std.c.access(path.ptr, std.c.F_OK) == 0;
+}
+```
+
+**Pattern for compiler fence:**
+```zig
+// Instead of: std.atomic.compilerFence(.seq_cst)
+asm volatile ("" ::: "memory");
+```
+
 ## Reference Skills
 
 ### Linux Kernel Reference (`.claude/skills/linux-kernel-ref/`)

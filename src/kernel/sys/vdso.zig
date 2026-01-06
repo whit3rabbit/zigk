@@ -103,6 +103,47 @@ pub fn updateTime(sec: u64, nsec: u64) void {
     _ = @atomicRmw(u32, &v.sequence, .Add, 1, .release);
 }
 
+/// Update VDSO time from kvmclock if available (x86_64 only)
+/// Provides higher-accuracy time when running under KVM hypervisor
+pub fn updateFromKvmclock() void {
+    // Only available on x86_64
+    if (comptime @import("builtin").cpu.arch != .x86_64) {
+        return;
+    }
+
+    const kvmclock = hal.hypervisor.kvmclock;
+    if (!kvmclock.isAvailable()) {
+        return;
+    }
+
+    // Get current time from kvmclock
+    if (kvmclock.getSystemTimeNs()) |ns| {
+        const sec = ns / 1_000_000_000;
+        const nsec_part = ns % 1_000_000_000;
+        updateTime(sec, nsec_part);
+    }
+}
+
+/// Update VDSO time from paravirtualized clock source
+/// - x86_64: Uses kvmclock for wall time
+/// - aarch64: Uses Generic Timer (pvtime provides stolen time, not wall time)
+///
+/// Note: On aarch64, the Generic Timer (CNTVCT_EL0) is already virtualized
+/// by the hypervisor, providing accurate time without special handling.
+/// pvtime supplements this with stolen time tracking, not wall time.
+pub fn updateFromHypervisor() void {
+    const arch = @import("builtin").cpu.arch;
+
+    if (comptime arch == .x86_64) {
+        updateFromKvmclock();
+    } else if (comptime arch == .aarch64) {
+        // On aarch64, the Generic Timer is already virtualized by the hypervisor.
+        // Just use the standard update() which reads the Generic Timer.
+        // pvtime provides stolen time for CPU accounting, not wall time.
+        update();
+    }
+}
+
 // VDSO placement
 //
 // WE use ASLR for VDSO/VVAR addresses to mitigate ROP and info leaks.

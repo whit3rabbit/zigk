@@ -3,11 +3,26 @@
 // Provides timing using the ARMv8-A Generic Timer (system counter).
 // Unlike x86 TSC, the AArch64 system counter frequency is typically
 // constant and provided by the system.
+//
+// Under KVM, pvtime provides stolen time tracking for accurate CPU time.
 
 const std = @import("std");
+const console = @import("console");
+const pvtime = @import("../hypervisor/pvtime.zig");
+
+/// Available clock sources for aarch64
+pub const ClockSource = enum {
+    /// No clock source initialized
+    none,
+    /// ARMv8-A Generic Timer (cntpct_el0)
+    generic_timer,
+    /// Generic Timer + pvtime stolen time tracking
+    generic_timer_pvtime,
+};
 
 var system_counter_freq: u64 = 0;
 var calibrated: bool = false;
+var active_clock_source: ClockSource = .none;
 
 /// Read System Counter (AArch64's rdtsc equivalent)
 /// Usually cntpct_el0 (physical counter) or cntvct_el0 (virtual counter)
@@ -96,4 +111,62 @@ pub fn ticksToUs(ticks: u64) u64 {
     // to indicate "very large" rather than wrapping to small value.
     const product = std.math.mul(u64, ticks, 1_000_000) catch return std.math.maxInt(u64);
     return product / system_counter_freq;
+}
+
+// =============================================================================
+// Paravirtualized Timing Support
+// =============================================================================
+
+/// Initialize timing with best available clock source
+/// On AArch64 under KVM: Generic Timer + pvtime stolen time tracking
+/// On bare metal/other: Generic Timer only
+pub fn initBest() void {
+    // Always initialize the generic timer first
+    init();
+
+    // Try to enable pvtime for stolen time tracking under KVM
+    pvtime.init();
+    if (pvtime.isAvailable()) {
+        active_clock_source = .generic_timer_pvtime;
+        console.info("Timing: Using Generic Timer + pvtime (stolen time tracking)", .{});
+    } else {
+        active_clock_source = .generic_timer;
+        console.info("Timing: Using Generic Timer", .{});
+    }
+}
+
+/// Get current time in nanoseconds
+/// Returns time adjusted for stolen time when running under KVM with pvtime
+pub fn getNanoseconds() u64 {
+    if (!calibrated) init();
+    if (system_counter_freq == 0) return 0;
+
+    // Read counter and convert to nanoseconds
+    const counter = rdtsc();
+    const ns = @as(u128, counter) * 1_000_000_000 / system_counter_freq;
+
+    return @as(u64, @truncate(ns));
+}
+
+/// Get adjusted time (wall time minus stolen time) when available
+/// Returns null if pvtime is not available
+pub fn getAdjustedNanoseconds() ?u64 {
+    if (active_clock_source != .generic_timer_pvtime) {
+        return null;
+    }
+    return pvtime.getAdjustedTimeNs();
+}
+
+/// Get the active clock source
+pub fn getClockSource() ClockSource {
+    return active_clock_source;
+}
+
+/// Get accumulated stolen time in nanoseconds (time vCPU was preempted)
+/// Returns null if not running under KVM with pvtime
+pub fn getStolenTimeNs() ?u64 {
+    if (active_clock_source != .generic_timer_pvtime) {
+        return null;
+    }
+    return pvtime.getStolenTimeNs();
 }
