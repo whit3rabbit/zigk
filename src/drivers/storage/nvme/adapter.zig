@@ -86,19 +86,30 @@ fn blockRead(file: *fd.FileDescriptor, buf: []u8) isize {
     }
 
     const end_lba = @min(end_lba_raw, priv.total_lbas);
-    const block_count: u32 = @intCast(end_lba - start_lba);
+    const raw_block_count = end_lba - start_lba;
+
+    // SECURITY FIX: Clamp block count to prevent u32 truncation on large drives.
+    // Also enforce the driver's max transfer limit (controller limits to 2 pages).
+    // With 4KB pages and 512B sectors: max 16 blocks. With 4KB sectors: max 2 blocks.
+    // Use conservative limit that works for all sector sizes.
+    const MAX_BLOCKS: u64 = 16; // 8KB max with 512B sectors
+    const block_count: u32 = @intCast(@min(raw_block_count, MAX_BLOCKS));
 
     if (block_count == 0) {
         return 0;
     }
 
     // Fast path: aligned access, single transfer
-    if (start_offset == 0 and buf.len >= block_count * lba_size) {
+    if (start_offset == 0 and buf.len >= @as(usize, block_count) * lba_size) {
         // Aligned - can read directly into user buffer if it's DMA-safe
         // For now, always use bounce buffer for safety
     }
 
     // Allocate bounce buffer
+    // SECURITY NOTE: This multiplication cannot overflow on 64-bit systems because:
+    // - block_count is bounded by total_lbas (lines 84-89 above)
+    // - max namespace size * max sector size << usize::MAX on x86_64
+    // In Debug mode, Zig's checked arithmetic would panic on overflow anyway.
     const total_bytes = @as(usize, block_count) * lba_size;
 
     const bounce = heap.allocator().alloc(u8, total_bytes) catch {
@@ -154,7 +165,11 @@ fn blockWrite(file: *fd.FileDescriptor, buf: []const u8) isize {
     }
 
     const end_lba = @min(end_lba_raw, priv.total_lbas);
-    const block_count: u32 = @intCast(end_lba - start_lba);
+    const raw_block_count = end_lba - start_lba;
+
+    // SECURITY FIX: Clamp block count (same as blockRead)
+    const MAX_BLOCKS: u64 = 16;
+    const block_count: u32 = @intCast(@min(raw_block_count, MAX_BLOCKS));
 
     if (block_count == 0) {
         return 0;
@@ -318,19 +333,22 @@ pub fn blockReadAsync(
 
     const buf_phys = pmm.allocZeroedPages(pages) orelse return error.AllocationFailed;
 
-    // Store buffer info in request for cleanup
-    request.buf_ptr = buf_phys;
-    request.buf_len = bytes_needed;
-
     // Submit async request
     controller.readBlocksAsync(nsid, lba, block_count, buf_phys, request) catch |err| {
         pmm.freePages(buf_phys, pages);
+        // SECURITY FIX: Do NOT set buf_ptr/buf_len before potential failure.
+        // Setting them before the call could lead to double-free if caller
+        // checks these fields to determine cleanup responsibility.
         return switch (err) {
             error.NamespaceNotFound => error.NamespaceNotFound,
             error.NoCapacity => error.QueueFull,
             else => error.AllocationFailed,
         };
     };
+
+    // Store buffer info in request for cleanup (only after success)
+    request.buf_ptr = buf_phys;
+    request.buf_len = bytes_needed;
 
     return buf_phys;
 }
@@ -357,19 +375,20 @@ pub fn blockWriteAsync(
     const copy_len = @min(data.len, bytes_needed);
     @memcpy(buf_virt[0..copy_len], data[0..copy_len]);
 
-    // Store buffer info in request for cleanup
-    request.buf_ptr = buf_phys;
-    request.buf_len = bytes_needed;
-
     // Submit async request
     controller.writeBlocksAsync(nsid, lba, block_count, buf_phys, request) catch |err| {
         pmm.freePages(buf_phys, pages);
+        // SECURITY FIX: Do NOT set buf_ptr/buf_len before potential failure.
         return switch (err) {
             error.NamespaceNotFound => error.NamespaceNotFound,
             error.NoCapacity => error.QueueFull,
             else => error.AllocationFailed,
         };
     };
+
+    // Store buffer info in request for cleanup (only after success)
+    request.buf_ptr = buf_phys;
+    request.buf_len = bytes_needed;
 
     return buf_phys;
 }

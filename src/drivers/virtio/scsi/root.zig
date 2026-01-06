@@ -204,6 +204,23 @@ pub const VirtioScsiController = struct {
                     continue;
                 }
 
+                // Security: Validate offset + structure size fits within BAR
+                // A malicious hypervisor could provide an offset that exceeds BAR size,
+                // causing kernel memory corruption when dereferencing the computed address.
+                const bar_size = bar.size;
+                const struct_size: u64 = switch (cfg_type) {
+                    virtio.common.VIRTIO_PCI_CAP_COMMON_CFG => @sizeOf(virtio.VirtioPciCommonCfg),
+                    virtio.common.VIRTIO_PCI_CAP_NOTIFY_CFG => 4, // Minimum notify size
+                    virtio.common.VIRTIO_PCI_CAP_ISR_CFG => 4, // ISR is at least 1 byte, align to 4
+                    virtio.common.VIRTIO_PCI_CAP_DEVICE_CFG => @sizeOf(config.VirtioScsiConfig),
+                    else => 0,
+                };
+                if (struct_size > 0 and (offset > bar_size or struct_size > bar_size - offset)) {
+                    console.warn("VirtIO-SCSI: Capability offset {x} + size {x} exceeds BAR{d} size {x}", .{ offset, struct_size, bar_idx, bar_size });
+                    cap_ptr = next_ptr;
+                    continue;
+                }
+
                 // Map BAR if not already mapped
                 const bar_virt = vmm.mapMmio(bar.base, bar.size) catch {
                     cap_ptr = next_ptr;

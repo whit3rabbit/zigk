@@ -63,14 +63,14 @@ pub fn setupMsix(controller: *root.NvmeController, pci_access: pci.PciAccess) !v
         );
 
         if (!configured) {
-            hal.interrupts.freeMsixVector(vector);
+            _ = hal.interrupts.freeMsixVector(vector);
             console.warn("NVMe: Failed to configure MSI-X entry {}", .{i});
             continue;
         }
 
-        // Register handler
-        if (!hal.interrupts.registerMsixHandler(vector, nvmeIrqHandler, @ptrCast(controller))) {
-            hal.interrupts.freeMsixVector(vector);
+        // Register handler (uses global controller)
+        if (!hal.interrupts.registerMsixHandler(vector, nvmeIrqHandler)) {
+            _ = hal.interrupts.freeMsixVector(vector);
             console.warn("NVMe: Failed to register handler for vector {}", .{vector});
             continue;
         }
@@ -100,18 +100,16 @@ pub fn cleanupMsix(controller: *root.NvmeController) void {
 
 /// NVMe interrupt handler
 /// Called by the interrupt dispatcher when an NVMe MSI-X vector fires
-pub fn nvmeIrqHandler(ctx: ?*anyopaque) void {
-    if (ctx) |ptr| {
-        const controller: *root.NvmeController = @ptrCast(@alignCast(ptr));
-        controller.handleInterrupt();
-    } else if (root.getController()) |controller| {
+pub fn nvmeIrqHandler(_: *hal.idt.InterruptFrame) void {
+    if (root.getController()) |controller| {
         controller.handleInterrupt();
     }
 }
 
 /// Register legacy IRQ handler (fallback if MSI-X unavailable)
 pub fn registerLegacyIrq(controller: *root.NvmeController) void {
-    const irq = controller.pci_dev.irq_line;
+    _ = controller; // Uses global controller via root.getController()
+    const irq = root.getController().?.pci_dev.irq_line;
 
     if (irq == 0 or irq == 255) {
         console.warn("NVMe: No IRQ line assigned, using polling", .{});
@@ -120,14 +118,12 @@ pub fn registerLegacyIrq(controller: *root.NvmeController) void {
 
     const vector = @as(u8, @intCast(irq)) + 32; // PIC offset
 
-    if (hal.interrupts.registerHandler(vector, nvmeIrqHandler, @ptrCast(controller))) {
-        console.info("NVMe: Registered legacy IRQ {} (vector {})", .{ irq, vector });
+    // Register with interrupt system (uses global controller)
+    hal.interrupts.registerHandler(vector, nvmeIrqHandler);
+    console.info("NVMe: Registered legacy IRQ {} (vector {})", .{ irq, vector });
 
-        // Unmask the interrupt
-        hal.apic.enableIrq(irq);
-    } else {
-        console.warn("NVMe: Failed to register legacy IRQ handler", .{});
-    }
+    // Unmask the interrupt
+    hal.apic.enableIrq(irq);
 }
 
 // ============================================================================

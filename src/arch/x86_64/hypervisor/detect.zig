@@ -90,6 +90,7 @@ const known_signatures = [_]Signature{
     .{ .bytes = "Microsoft Hv".*, .hypervisor = .hyperv },
     .{ .bytes = "XenVMMXenVMM".*, .hypervisor = .xen },
     .{ .bytes = "TCGTCGTCGTCG".*, .hypervisor = .qemu_tcg },
+    .{ .bytes = "TCGTGTCGCGTC".*, .hypervisor = .qemu_tcg }, // QEMU 10.x TCG on macOS
     .{ .bytes = " prl hyperv ".*, .hypervisor = .parallels },
     .{ .bytes = " lrpepyh  vr".*, .hypervisor = .parallels }, // Alternative
     .{ .bytes = "ACRNACRNACRN".*, .hypervisor = .acrn },

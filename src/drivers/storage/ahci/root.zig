@@ -1045,11 +1045,8 @@ pub fn getController() ?*AhciController {
 // ============================================================================
 
 /// AHCI IRQ handler - called from interrupt dispatcher
-pub fn ahciIrqHandler(ctx: ?*anyopaque) void {
-    if (ctx) |ptr| {
-        const controller: *AhciController = @ptrCast(@alignCast(ptr));
-        controller.handleInterrupt();
-    } else if (controller_instance) |controller| {
+pub fn ahciIrqHandler(_: *hal.idt.InterruptFrame) void {
+    if (controller_instance) |controller| {
         controller.handleInterrupt();
     }
 }
@@ -1066,8 +1063,8 @@ pub fn registerIrqHandler(controller: *AhciController) void {
     // IRQ line + PIC offset (typically 32 for hardware IRQs)
     const vector = @as(u8, @intCast(irq)) + 32;
 
-    // Register with interrupt system
-    hal.interrupts.registerHandler(vector, ahciIrqHandler, @ptrCast(controller));
+    // Register with interrupt system (uses global controller_instance)
+    hal.interrupts.registerHandler(vector, ahciIrqHandler);
 
     // Enable global HBA interrupts
     var ghc = hba.readGhc(controller.hba_base);

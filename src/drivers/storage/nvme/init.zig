@@ -298,6 +298,9 @@ pub fn executeAdminCommand(
             const cqe = admin_qp.getCqEntry(admin_qp.cq_head);
 
             // Verify this is our command
+            // SECURITY NOTE: No bounds check needed here because we only compare CID
+            // for equality, we don't index arrays with the hardware-provided CID.
+            // The interrupt path (root.zig:884) does bounds-check before array access.
             if (cqe.getCid() == cid) {
                 // Save completion before advancing
                 const result = cqe.*;

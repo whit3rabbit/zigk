@@ -126,16 +126,6 @@ fn scsiIrqHandlerWrapper(_: *hal.idt.InterruptFrame) void {
     }
 }
 
-/// VirtIO-SCSI interrupt handler (context-aware version for legacy IRQ)
-pub fn scsiIrqHandler(ctx: ?*anyopaque) void {
-    if (ctx) |ptr| {
-        const controller: *root.VirtioScsiController = @ptrCast(@alignCast(ptr));
-        controller.handleInterrupt();
-    } else if (root.getController()) |controller| {
-        controller.handleInterrupt();
-    }
-}
-
 /// Register legacy IRQ handler (fallback if MSI-X unavailable)
 pub fn registerLegacyIrq(controller: *root.VirtioScsiController) void {
     const irq = controller.pci_dev.irq_line;
@@ -147,15 +137,13 @@ pub fn registerLegacyIrq(controller: *root.VirtioScsiController) void {
 
     const vector = @as(u8, @intCast(irq)) + 32; // PIC offset
 
-    if (hal.interrupts.registerHandler(vector, scsiIrqHandler, @ptrCast(controller))) {
-        console.info("VirtIO-SCSI: Registered legacy IRQ {} (vector {})", .{ irq, vector });
+    // Register with interrupt system (uses global controller via scsiIrqHandlerWrapper)
+    hal.interrupts.registerHandler(vector, scsiIrqHandlerWrapper);
+    console.info("VirtIO-SCSI: Registered legacy IRQ {} (vector {})", .{ irq, vector });
 
-        // Route the IRQ and unmask it
-        hal.apic.routeIrq(irq, vector, 0);
-        hal.apic.enableIrq(irq);
-    } else {
-        console.warn("VirtIO-SCSI: Failed to register legacy IRQ handler", .{});
-    }
+    // Route the IRQ and unmask it
+    hal.apic.routeIrq(irq, vector, 0);
+    hal.apic.enableIrq(irq);
 }
 
 // ============================================================================

@@ -19,3 +19,8 @@ pub const VIRTIO_STATUS_FAILED = common.VIRTIO_STATUS_FAILED;
 
 // Re-export feature bits
 pub const VIRTIO_F_VERSION_1 = common.VIRTIO_F_VERSION_1;
+
+// Re-export descriptor flags
+pub const VIRTQ_DESC_F_NEXT = common.VIRTQ_DESC_F_NEXT;
+pub const VIRTQ_DESC_F_WRITE = common.VIRTQ_DESC_F_WRITE;
+pub const VIRTQ_DESC_F_INDIRECT = common.VIRTQ_DESC_F_INDIRECT;

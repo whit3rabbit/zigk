@@ -799,6 +799,23 @@ pub fn build(b: *std.Build) void {
     usb_module.addImport("keyboard", keyboard_module);
     usb_module.addImport("mouse", mouse_module);
 
+    // Create VirtIO-Input driver module (keyboard/mouse/tablet via VirtIO)
+    const virtio_input_module = b.createModule(.{
+        .root_source_file = b.path("src/drivers/virtio/input/root.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    virtio_input_module.addImport("pci", pci_module);
+    virtio_input_module.addImport("vmm", vmm_module);
+    virtio_input_module.addImport("pmm", pmm_module);
+    virtio_input_module.addImport("console", console_module);
+    virtio_input_module.addImport("hal", hal_module);
+    virtio_input_module.addImport("heap", heap_module);
+    virtio_input_module.addImport("sync", sync_module);
+    virtio_input_module.addImport("virtio", virtio_module);
+    virtio_input_module.addImport("input", input_module);
+    virtio_input_module.addImport("uapi", uapi_module);
+
     // Create DevFS module (device filesystem shim)
     const devfs_module = b.createModule(.{
         .root_source_file = b.path("src/kernel/fs/devfs.zig"),
@@ -1561,6 +1578,7 @@ pub fn build(b: *std.Build) void {
     kernel.root_module.addImport("kernel_iommu", kernel_iommu_module);
     kernel.root_module.addImport("dma", dma_module);
     kernel.root_module.addImport("virtio", virtio_module);
+    kernel.root_module.addImport("virtio_input", virtio_input_module);
 
     // Add architecture-specific assembly and linker script
     switch (target_arch) {

@@ -398,11 +398,15 @@ pub const NvmeController = struct {
                 continue;
             };
 
-            if (id_ns.nsze > 0) {
+            const lba_size = id_ns.lbaSize();
+            // SECURITY FIX: Validate lba_size to prevent division-by-zero.
+            // Malicious/buggy hardware could report lbads=0 causing lba_size=0.
+            // Minimum valid LBA size is 512 bytes (2^9).
+            if (id_ns.nsze > 0 and lba_size >= 512) {
                 self.namespaces[count] = NvmeNamespace{
                     .nsid = nsid,
                     .active = true,
-                    .lba_size = id_ns.lbaSize(),
+                    .lba_size = lba_size,
                     .total_lbas = id_ns.nsze,
                     .capacity_bytes = id_ns.capacityBytes(),
                     .metadata_size = id_ns.metadataSize(),
@@ -413,12 +417,15 @@ pub const NvmeController = struct {
                 console.info("NVMe: Namespace {}: {} LBAs, {} bytes/LBA, {} MB", .{
                     nsid,
                     id_ns.nsze,
-                    id_ns.lbaSize(),
+                    lba_size,
                     id_ns.capacityBytes() / (1024 * 1024),
                 });
 
                 count += 1;
             } else {
+                if (id_ns.nsze > 0 and lba_size < 512) {
+                    console.warn("NVMe: Namespace {} has invalid LBA size {}, skipping", .{ nsid, lba_size });
+                }
                 heap.allocator().destroy(id_ns);
             }
         }
@@ -447,11 +454,13 @@ pub const NvmeController = struct {
                 continue;
             };
 
-            if (id_ns.nsze > 0) {
+            const lba_size = id_ns.lbaSize();
+            // SECURITY FIX: Validate lba_size (same as discoverNamespaces)
+            if (id_ns.nsze > 0 and lba_size >= 512) {
                 self.namespaces[count] = NvmeNamespace{
                     .nsid = nsid,
                     .active = true,
-                    .lba_size = id_ns.lbaSize(),
+                    .lba_size = lba_size,
                     .total_lbas = id_ns.nsze,
                     .capacity_bytes = id_ns.capacityBytes(),
                     .metadata_size = id_ns.metadataSize(),
@@ -466,6 +475,9 @@ pub const NvmeController = struct {
 
                 count += 1;
             } else {
+                if (id_ns.nsze > 0 and lba_size < 512) {
+                    console.warn("NVMe: Namespace {} has invalid LBA size {}, skipping", .{ nsid, lba_size });
+                }
                 heap.allocator().destroy(id_ns);
             }
         }
@@ -557,6 +569,16 @@ pub const NvmeController = struct {
             return error.InvalidParameter;
         };
         const pages = pages_raw / init_mod.PAGE_SIZE;
+
+        // SECURITY FIX: Validate page count for PRP handling.
+        // - 1 page: PRP1 only (PRP2 = 0)
+        // - 2 pages: PRP1 + PRP2 (PRP2 = second page address)
+        // - >2 pages: Requires PRP list (not yet implemented)
+        // For now, reject transfers larger than 2 pages to prevent silent data corruption.
+        if (pages > 2) {
+            return error.InvalidParameter;
+        }
+
         const buf_dma = dma.allocBuffer(self.bdf, pages * init_mod.PAGE_SIZE, true) catch {
             return error.AllocationFailed;
         };
@@ -569,11 +591,17 @@ pub const NvmeController = struct {
         // Select queue and build command
         const io_qp = self.selectIoQueue() orelse &self.admin_queue;
 
-        const held = self.io_lock.acquire();
+        // SECURITY: Use pending_lock (not io_lock) for CID allocation to prevent
+        // race with async path which also uses pending_lock. Both paths must use
+        // the same lock when allocating CIDs from the same queue.
+        const held = io_qp.pending_lock.acquire();
         defer held.release();
 
         // Allocate CID
         const cid = io_qp.allocCidLocked() orelse return error.NoCapacity;
+
+        // Calculate PRP2 for 2-page transfers
+        const prp2: u64 = if (pages == 2) buf_dma.device_addr + init_mod.PAGE_SIZE else 0;
 
         // Build read command
         const sqe = io_qp.getSqEntry(io_qp.sq_tail);
@@ -584,7 +612,7 @@ pub const NvmeController = struct {
             lba,
             @truncate(block_count - 1), // 0-based
             buf_dma.device_addr,
-            0, // PRP2 not needed for single page
+            prp2,
         );
         sqe.setCid(cid);
 
@@ -656,6 +684,12 @@ pub const NvmeController = struct {
             return error.InvalidParameter;
         };
         const pages = pages_raw / init_mod.PAGE_SIZE;
+
+        // SECURITY FIX: Validate page count for PRP handling (same as readBlocks).
+        if (pages > 2) {
+            return error.InvalidParameter;
+        }
+
         const buf_dma = dma.allocBuffer(self.bdf, pages * init_mod.PAGE_SIZE, true) catch {
             return error.AllocationFailed;
         };
@@ -668,11 +702,17 @@ pub const NvmeController = struct {
         // Select queue and build command
         const io_qp = self.selectIoQueue() orelse &self.admin_queue;
 
-        const held = self.io_lock.acquire();
+        // SECURITY: Use pending_lock (not io_lock) for CID allocation to prevent
+        // race with async path which also uses pending_lock. Both paths must use
+        // the same lock when allocating CIDs from the same queue.
+        const held = io_qp.pending_lock.acquire();
         defer held.release();
 
         // Allocate CID
         const cid = io_qp.allocCidLocked() orelse return error.NoCapacity;
+
+        // Calculate PRP2 for 2-page transfers
+        const prp2: u64 = if (pages == 2) buf_dma.device_addr + init_mod.PAGE_SIZE else 0;
 
         // Build write command
         const sqe = io_qp.getSqEntry(io_qp.sq_tail);
@@ -683,7 +723,7 @@ pub const NvmeController = struct {
             lba,
             @truncate(block_count - 1), // 0-based
             buf_dma.device_addr,
-            0, // PRP2 not needed for single page
+            prp2,
         );
         sqe.setCid(cid);
 
@@ -724,7 +764,11 @@ pub const NvmeController = struct {
 
         const io_qp = self.selectIoQueue() orelse &self.admin_queue;
 
-        const held = self.io_lock.acquire();
+        // SECURITY FIX: Use pending_lock (not io_lock) for CID allocation.
+        // allocCidLocked() expects the caller holds pending_lock, same as
+        // readBlocks() and writeBlocks(). Using a different lock would cause
+        // CID collision race conditions.
+        const held = io_qp.pending_lock.acquire();
         defer held.release();
 
         const cid = io_qp.allocCidLocked() orelse return error.NoCapacity;
@@ -777,6 +821,15 @@ pub const NvmeController = struct {
         request: *io.IoRequest,
     ) NvmeError!void {
         const ns = self.findNamespace(nsid) orelse return error.NamespaceNotFound;
+
+        // SECURITY: Validate LBA range (same as sync path) to prevent out-of-bounds access
+        const end_lba = std.math.add(u64, lba, @as(u64, block_count)) catch {
+            return error.InvalidParameter;
+        };
+        if (end_lba > ns.total_lbas) {
+            return error.InvalidParameter;
+        }
+
         const io_qp = self.selectIoQueue() orelse return error.NoCapacity;
 
         const held = io_qp.pending_lock.acquire();
@@ -804,8 +857,6 @@ pub const NvmeController = struct {
 
         io_qp.submit();
         self.nvme_regs.ringSqTailDoorbell(io_qp.qid, self.doorbell_stride, io_qp.sq_tail);
-
-        _ = ns;
     }
 
     /// Write blocks asynchronously
@@ -818,6 +869,15 @@ pub const NvmeController = struct {
         request: *io.IoRequest,
     ) NvmeError!void {
         const ns = self.findNamespace(nsid) orelse return error.NamespaceNotFound;
+
+        // SECURITY: Validate LBA range (same as sync path) to prevent out-of-bounds access
+        const end_lba = std.math.add(u64, lba, @as(u64, block_count)) catch {
+            return error.InvalidParameter;
+        };
+        if (end_lba > ns.total_lbas) {
+            return error.InvalidParameter;
+        }
+
         const io_qp = self.selectIoQueue() orelse return error.NoCapacity;
 
         const held = io_qp.pending_lock.acquire();
@@ -844,8 +904,6 @@ pub const NvmeController = struct {
 
         io_qp.submit();
         self.nvme_regs.ringSqTailDoorbell(io_qp.qid, self.doorbell_stride, io_qp.sq_tail);
-
-        _ = ns;
     }
 
     // ========================================================================
@@ -883,16 +941,18 @@ pub const NvmeController = struct {
             }
 
             // Complete pending request
+            // SECURITY: Complete request BEFORE releasing lock to prevent use-after-free.
+            // If lock is released first, another thread could reuse this CID slot with a
+            // new request, potentially invalidating our request pointer.
             const held = qp.pending_lock.acquire();
             if (qp.pending_requests[cid]) |request| {
                 qp.pending_requests[cid] = null;
+                const result: io.IoResult = if (cqe.succeeded())
+                    .{ .success = 0 }
+                else
+                    .{ .err = error.EIO };
+                _ = request.complete(result);
                 held.release();
-
-                if (cqe.succeeded()) {
-                    _ = request.complete(.{ .success = 0 });
-                } else {
-                    _ = request.complete(.{ .err = error.TransferError });
-                }
             } else {
                 held.release();
             }

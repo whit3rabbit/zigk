@@ -330,13 +330,16 @@ pub const VirtioRngDriver = struct {
             return error.DeviceError;
         };
 
-        self.releaseBuffer(idx);
-
-        // Copy received bytes to output buffer
+        // Copy received bytes to output buffer BEFORE releasing
+        // Security: Prevents use-after-release race where another thread
+        // could acquire this buffer index and zero/modify it before we copy
         const bytes_received: usize = @min(result.len, @as(u32, @intCast(buffer.len)));
         if (bytes_received > 0 and bytes_received <= REQUEST_BUFFER_SIZE) {
             @memcpy(buffer[0..bytes_received], self.buffers[idx][0..bytes_received]);
         }
+
+        // Release buffer AFTER copy completes
+        self.releaseBuffer(idx);
 
         return bytes_received;
     }
@@ -364,6 +367,10 @@ pub const VirtioRngDriver = struct {
 pub fn feedKernelEntropy() void {
     const driver = VirtioRngDriver.getInstance() orelse return;
 
+    // Safety: Using undefined is safe here because getEntropy() zeroes the buffer
+    // at entry (line 266) before any device interaction. If getEntropy returns
+    // error before memset (only possible if !ready or len==0), we return
+    // immediately without reading the buffer. No information leak possible.
     var buffer: [REQUEST_BUFFER_SIZE]u8 = undefined;
     const bytes_read = driver.getEntropy(&buffer) catch return;
 

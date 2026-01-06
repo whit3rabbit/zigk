@@ -33,6 +33,7 @@ const kernel_iommu = @import("kernel_iommu");
 const dma = @import("dma");
 const input = @import("input");
 const virtio = @import("virtio");
+const virtio_input = @import("virtio_input");
 const prng = @import("prng");
 
 // SECURITY NOTE (Global State Synchronization): These variables are written during
@@ -624,6 +625,10 @@ pub fn initStorage() void {
                         }
                     }
                 }
+
+                // Register IRQ handler to enable interrupt-driven I/O
+                ahci.registerIrqHandler(controller);
+
                 found_ahci = true;
                 break; // Only initialize first controller
             } else |err| {
@@ -664,6 +669,10 @@ pub fn initStorage() void {
                         };
                     }
                 }
+
+                // Register interrupt handler (MSI-X preferred, legacy fallback)
+                nvme.irq_mod.setupMsix(controller, pci.PciAccess{ .ecam = ecam }) catch {};
+                nvme.irq_mod.registerLegacyIrq(controller);
 
                 found_nvme = true;
                 break; // Only initialize first controller
@@ -712,6 +721,11 @@ pub fn initStorage() void {
                 }
 
                 console.info("Storage: VirtIO-SCSI initialized with {d} LUNs", .{lun_count});
+
+                // Register interrupt handler (MSI-X preferred, legacy fallback)
+                virtio_scsi.irq.setupMsix(controller, pci.PciAccess{ .ecam = ecam }) catch {};
+                virtio_scsi.irq.registerLegacyIrq(controller);
+
                 found_virtio_scsi = true;
                 break; // Only initialize first controller
             } else |err| {
@@ -836,6 +850,44 @@ pub fn initInput() void {
 
     // PS/2 keyboard/mouse are initialized separately by the PS/2 controller driver
     // They will register themselves with the input subsystem when detected
+
+    // Probe for VirtIO-Input devices (keyboard/mouse/tablet)
+    // On KVM/QEMU/TCG where VirtIO devices are expected, or bare metal (testing)
+    if (detected_hypervisor.isKvmCompatible() or detected_hypervisor == .none or detected_hypervisor == .unknown) {
+        initVirtioInput();
+    }
+}
+
+/// Initialize VirtIO-Input devices
+fn initVirtioInput() void {
+    const devices = pci_devices orelse return;
+    const ecam = pci_ecam orelse return;
+
+    var found_count: u32 = 0;
+
+    for (devices.devices[0..devices.count]) |*dev| {
+        if (virtio_input.isVirtioInput(dev)) {
+            console.info("VirtIO-Input: Found device at {d}:{d}.{d}", .{
+                dev.bus, dev.device, dev.func,
+            });
+
+            const driver = virtio_input.initFromPci(dev, pci.PciAccess{ .ecam = ecam }) catch |err| {
+                console.warn("VirtIO-Input: Init failed: {}", .{err});
+                continue;
+            };
+
+            // Set up MSI-X interrupts
+            virtio_input.irq.setupMsix(driver, pci.PciAccess{ .ecam = ecam }) catch |err| {
+                console.warn("VirtIO-Input: MSI-X setup failed: {}, using polling", .{err});
+            };
+
+            found_count += 1;
+        }
+    }
+
+    if (found_count > 0) {
+        console.info("Input: Initialized {} VirtIO-Input device(s)", .{found_count});
+    }
 }
 
 /// Initialize VirtIO-RNG (entropy device)
