@@ -646,9 +646,9 @@ This roadmap was generated from a comprehensive feature validation on 2024-12-30
 - QEMU Guest Agent (partial - detection only, VirtIO-Console integration pending)
 - E1000e NIC (kernel driver)
 - AHCI SATA (kernel driver)
+- VirtIO-SCSI (kernel driver) **NEW** (2026-01-05)
 
 **Missing - Critical for Proxmox/Production:**
-- VirtIO-SCSI (preferred storage for Proxmox)
 - VirtIO-9P (shared folders via Plan 9 protocol)
 - VirtIO-FS (virtiofs, modern shared folder replacement)
 - VirtIO-Input (keyboard/mouse/tablet, replaces PS/2)
@@ -695,7 +695,7 @@ This roadmap was generated from a comprehensive feature validation on 2024-12-30
 | Feature | Status | Impact |
 |---------|--------|--------|
 | NVMe | **Implemented** | Full driver with Admin/IO queues, PRP DMA, MSI-X |
-| VirtIO-SCSI | Not Implemented | Proxmox default storage |
+| VirtIO-SCSI | **Implemented** | Proxmox default storage, LUN enumeration, MSI-X, partition scanning |
 | IDE/PIIX | Not Implemented | Legacy VM compatibility |
 | GPT Partition Write | Read-Only | Cannot modify partitions |
 
@@ -770,10 +770,10 @@ This roadmap was generated from a comprehensive feature validation on 2024-12-30
    - Full NVMe 1.4+ driver with Admin/IO queues, PRP DMA, MSI-X interrupts
    - Async I/O reactor integration, namespace discovery, queue pair management
 
-2. **VirtIO-SCSI** - Proxmox default
-   - Location: `src/drivers/virtio/scsi.zig` or userspace
-   - Pattern: Extend VirtIO common layer
-   - Effort: Medium
+2. ~~**VirtIO-SCSI**~~ - **COMPLETE** (2026-01-05)
+   - Location: `src/drivers/virtio/scsi/`
+   - Kernel driver with LUN enumeration, SCSI READ/WRITE, MSI-X interrupts
+   - DevFS integration (`/dev/vdX`), MBR/GPT partition scanning
 
 ### Phase 3: Guest Integration (Medium Priority)
 1. **VirtIO-Input** - Replace legacy PS/2

@@ -21,6 +21,25 @@ const console = @import("console");
 const virtio = @import("root.zig");
 const common = @import("common.zig");
 
+/// Simple spinlock for buffer synchronization (inlined to avoid sync module dependency)
+const BufferLock = struct {
+    locked: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
+    fn acquire(self: *BufferLock) void {
+        while (self.locked.cmpxchgWeak(false, true, .acquire, .monotonic) != null) {
+            hal.cpu.pause();
+        }
+    }
+
+    fn release(self: *BufferLock) void {
+        self.locked.store(false, .release);
+    }
+
+    fn init() BufferLock {
+        return .{ .locked = std.atomic.Value(bool).init(false) };
+    }
+};
+
 /// VirtIO-RNG PCI identifiers
 pub const VIRTIO_VENDOR_ID: u16 = 0x1AF4;
 pub const VIRTIO_RNG_DEVICE_ID_MODERN: u16 = 0x1044; // 0x1040 + device_type(4)
@@ -54,6 +73,9 @@ pub const VirtioRngDriver = struct {
 
     /// Tracks which buffers are currently in use
     buffer_in_use: [NUM_BUFFERS]bool,
+
+    /// Lock protecting buffer_in_use and virtqueue operations
+    lock: BufferLock,
 
     /// PCI device reference
     pci_dev: pci.PciDevice,
@@ -172,6 +194,9 @@ pub const VirtioRngDriver = struct {
             @memset(buf, 0);
         }
 
+        // Initialize spinlock for thread safety
+        instance.lock = BufferLock.init();
+
         instance.pci_dev = dev.*;
         instance.ready = true;
 
@@ -240,29 +265,35 @@ pub const VirtioRngDriver = struct {
         // Zero-initialize buffer before DMA (security: prevents info leak)
         @memset(buffer, 0);
 
-        // Find a free internal buffer
-        var buf_idx: ?usize = null;
-        for (self.buffer_in_use, 0..) |in_use, i| {
-            if (!in_use) {
-                buf_idx = i;
-                break;
-            }
-        }
+        // Find a free internal buffer (protected by lock to prevent race)
+        const idx = blk: {
+            self.lock.acquire();
+            defer self.lock.release();
 
-        if (buf_idx == null) {
-            // All buffers in use, try to reclaim one
-            if (self.vq.getUsed()) |result| {
-                // A buffer completed
-                const idx = result.head % NUM_BUFFERS;
-                self.buffer_in_use[idx] = false;
-                buf_idx = idx;
-            } else {
-                return error.ResourceBusy;
+            var buf_idx: ?usize = null;
+            for (self.buffer_in_use, 0..) |in_use, i| {
+                if (!in_use) {
+                    buf_idx = i;
+                    break;
+                }
             }
-        }
 
-        const idx = buf_idx.?;
-        self.buffer_in_use[idx] = true;
+            if (buf_idx == null) {
+                // All buffers in use, try to reclaim one
+                if (self.vq.getUsed()) |result| {
+                    // A buffer completed
+                    const reclaim_idx = result.head % NUM_BUFFERS;
+                    self.buffer_in_use[reclaim_idx] = false;
+                    buf_idx = reclaim_idx;
+                } else {
+                    return error.ResourceBusy;
+                }
+            }
+
+            const found_idx = buf_idx.?;
+            self.buffer_in_use[found_idx] = true;
+            break :blk found_idx;
+        };
 
         // Zero the internal buffer
         @memset(&self.buffers[idx], 0);
@@ -275,7 +306,7 @@ pub const VirtioRngDriver = struct {
         const out_bufs: [0][]const u8 = .{};
 
         _ = self.vq.addBuf(&out_bufs, &in_bufs) orelse {
-            self.buffer_in_use[idx] = false;
+            self.releaseBuffer(idx);
             return error.VirtqueueFull;
         };
 
@@ -289,17 +320,17 @@ pub const VirtioRngDriver = struct {
         }
 
         if (timeout == 0) {
-            self.buffer_in_use[idx] = false;
+            self.releaseBuffer(idx);
             return error.Timeout;
         }
 
         // Get result
         const result = self.vq.getUsed() orelse {
-            self.buffer_in_use[idx] = false;
+            self.releaseBuffer(idx);
             return error.DeviceError;
         };
 
-        self.buffer_in_use[idx] = false;
+        self.releaseBuffer(idx);
 
         // Copy received bytes to output buffer
         const bytes_received: usize = @min(result.len, @as(u32, @intCast(buffer.len)));
@@ -308,6 +339,13 @@ pub const VirtioRngDriver = struct {
         }
 
         return bytes_received;
+    }
+
+    /// Release a buffer back to the pool (thread-safe)
+    fn releaseBuffer(self: *Self, idx: usize) void {
+        self.lock.acquire();
+        defer self.lock.release();
+        self.buffer_in_use[idx] = false;
     }
 
     /// Check if driver is available and ready

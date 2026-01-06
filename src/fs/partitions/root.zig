@@ -12,6 +12,7 @@
 const std = @import("std");
 const ahci = @import("ahci");
 const nvme = @import("nvme");
+const virtio_scsi = @import("virtio_scsi");
 const devfs = @import("devfs");
 const heap = @import("heap");
 const mbr = @import("mbr.zig");
@@ -207,20 +208,18 @@ fn partitionSeek(fd: *FileDescriptor, offset: i64, whence: u32) isize {
     const pos_i64 = std.math.cast(i64, fd.position) orelse return Errno.ERANGE.toReturn();
     const size_i64 = std.math.cast(i64, part_size) orelse return Errno.ERANGE.toReturn();
 
+    // SECURITY: Use checked arithmetic to prevent signed overflow on SEEK_CUR/SEEK_END.
+    // An attacker could craft offset values that wrap around in ReleaseFast builds.
     const new_pos: i64 = switch (whence) {
         SEEK_SET => offset,
-        SEEK_CUR => pos_i64 + offset,
-        SEEK_END => size_i64 + offset,
+        SEEK_CUR => std.math.add(i64, pos_i64, offset) catch return Errno.ERANGE.toReturn(),
+        SEEK_END => std.math.add(i64, size_i64, offset) catch return Errno.ERANGE.toReturn(),
         else => return Errno.EINVAL.toReturn(),
     };
 
     if (new_pos < 0) {
         return Errno.EINVAL.toReturn();
     }
-
-    // Allow seek past end? Standard linux behavior allows it, but read/write will fail or expand.
-    // For block devices, usually fixed size.
-    // Let's cap at end or just allow it and let read fail.
 
     fd.position = std.math.cast(usize, new_pos) orelse return Errno.ERANGE.toReturn();
     return std.math.cast(isize, fd.position) orelse return Errno.ERANGE.toReturn();
@@ -305,6 +304,13 @@ fn scanGpt(port_num: u5, disk_name: []const u8) !void {
         return;
     }
 
+    // SECURITY: Validate minimum partition entry size per UEFI spec (128 bytes).
+    // Smaller values would cause overlapping reads when iterating entries.
+    if (header.size_partition_entry < @sizeOf(gpt.GptEntry)) {
+        console.warn("Partitions: GPT entry size too small ({} < 128)", .{header.size_partition_entry});
+        return;
+    }
+
     // Read Partition Entries
     // They start at partition_entry_lba (usually 2)
     // Size is num_partition_entries * size_partition_entry
@@ -354,6 +360,12 @@ fn scanGpt(port_num: u5, disk_name: []const u8) !void {
     }
 }
 
+/// Register a partition with devfs.
+/// SECURITY NOTE (Partition Bounds): We do not validate start+count against disk capacity here.
+/// This is defense-in-depth: the underlying AHCI driver validates LBA bounds on every I/O
+/// operation and returns errors for out-of-bounds access. A malicious partition table could
+/// specify invalid bounds, but I/O would fail safely at the driver level rather than
+/// accessing wrong memory regions.
 fn registerPartition(port_num: u5, disk_name: []const u8, index: u32, start: u64, count: u64) !void {
     const allocator = heap.allocator();
 
@@ -546,10 +558,11 @@ fn nvmePartitionSeek(fd: *FileDescriptor, offset: i64, whence: u32) isize {
     const pos_i64 = std.math.cast(i64, fd.position) orelse return Errno.ERANGE.toReturn();
     const size_i64 = std.math.cast(i64, part_size) orelse return Errno.ERANGE.toReturn();
 
+    // SECURITY: Use checked arithmetic to prevent signed overflow on SEEK_CUR/SEEK_END.
     const new_pos: i64 = switch (whence) {
         SEEK_SET => offset,
-        SEEK_CUR => pos_i64 + offset,
-        SEEK_END => size_i64 + offset,
+        SEEK_CUR => std.math.add(i64, pos_i64, offset) catch return Errno.ERANGE.toReturn(),
+        SEEK_END => std.math.add(i64, size_i64, offset) catch return Errno.ERANGE.toReturn(),
         else => return Errno.EINVAL.toReturn(),
     };
 
@@ -631,6 +644,12 @@ fn scanGptNvme(ns_index: u8, nsid: u32, disk_name: []const u8, lba_size: u32) !v
         return;
     }
 
+    // SECURITY: Validate minimum partition entry size per UEFI spec (128 bytes).
+    if (header.size_partition_entry < @sizeOf(gpt.GptEntry)) {
+        console.warn("Partitions: GPT entry size too small ({} < 128)", .{header.size_partition_entry});
+        return;
+    }
+
     // Read Partition Entries
     const entries_size = std.math.mul(u64, header.num_partition_entries, header.size_partition_entry) catch {
         console.warn("Partitions: GPT table size overflow", .{});
@@ -671,6 +690,9 @@ fn scanGptNvme(ns_index: u8, nsid: u32, disk_name: []const u8, lba_size: u32) !v
     }
 }
 
+/// Register an NVMe partition with devfs.
+/// SECURITY NOTE (Partition Bounds): Bounds validation deferred to NVMe driver layer.
+/// See registerPartition() for rationale.
 fn registerNvmePartition(ns_index: u8, nsid: u32, disk_name: []const u8, index: u32, start: u64, count: u64, lba_size: u32) !void {
     const allocator = heap.allocator();
 
@@ -690,6 +712,333 @@ fn registerNvmePartition(ns_index: u8, nsid: u32, disk_name: []const u8, index: 
 
     // Register
     try devfs.registerDevice(name, &nvme_partition_ops, part);
+
+    console.info("Partitions: Registered {s} (start={d}, sectors={d})", .{ name, start, count });
+}
+
+// =============================================================================
+// VirtIO-SCSI Partition Support
+// =============================================================================
+
+/// VirtIO-SCSI partition information
+pub const VirtioScsiPartition = struct {
+    lun_index: u8,
+    start_lba: u64,
+    sector_count: u64,
+    block_size: u32,
+    index: u32, // Partition index (1-based)
+};
+
+pub const virtio_scsi_partition_ops = FileOps{
+    .read = virtioScsiPartitionRead,
+    .write = virtioScsiPartitionWrite,
+    .close = virtioScsiPartitionClose,
+    .seek = virtioScsiPartitionSeek,
+    .stat = null,
+    .ioctl = null,
+    .mmap = null,
+    .poll = null,
+    .truncate = null,
+};
+
+fn virtioScsiPartitionRead(fd: *FileDescriptor, buf: []u8) isize {
+    const part = @as(*VirtioScsiPartition, @ptrCast(@alignCast(fd.private_data)));
+    const controller = virtio_scsi.getController() orelse return Errno.EIO.toReturn();
+
+    const pos = fd.position;
+    const block_size = part.block_size;
+
+    // Security: Use checked arithmetic to prevent overflow
+    const part_size_bytes = std.math.mul(u64, part.sector_count, block_size) catch return Errno.ERANGE.toReturn();
+    if (pos >= part_size_bytes) return 0; // EOF
+
+    var read_len = buf.len;
+    const end_pos = std.math.add(usize, pos, buf.len) catch return Errno.ERANGE.toReturn();
+    if (end_pos > part_size_bytes) {
+        read_len = @intCast(part_size_bytes - pos);
+    }
+
+    // Calculate LBA relative to LUN
+    const pos_blocks = pos / block_size;
+    const start_lba = std.math.add(u64, part.start_lba, pos_blocks) catch return Errno.ERANGE.toReturn();
+    const start_offset = pos % block_size;
+
+    const end_pos_padded = std.math.add(usize, pos + read_len, block_size - 1) catch return Errno.ERANGE.toReturn();
+    const end_lba = std.math.add(u64, part.start_lba, end_pos_padded / block_size) catch return Errno.ERANGE.toReturn();
+    if (end_lba < start_lba) return Errno.ERANGE.toReturn();
+    const block_count_u64 = end_lba - start_lba;
+
+    // VirtIO-SCSI max transfer is typically 256 blocks
+    if (block_count_u64 > 256) {
+        return Errno.EINVAL.toReturn();
+    }
+    const block_count: u32 = @intCast(block_count_u64);
+
+    // Fast path: aligned
+    if (start_offset == 0 and read_len % block_size == 0) {
+        _ = controller.readBlocks(part.lun_index, start_lba, block_count, buf[0..read_len]) catch {
+            return Errno.EIO.toReturn();
+        };
+        fd.position += read_len;
+        const result = std.math.cast(isize, read_len) orelse return Errno.ERANGE.toReturn();
+        return result;
+    }
+
+    // Bounce buffer path
+    const bounce_size = @as(usize, block_count) * block_size;
+    const allocator = heap.allocator();
+    const bounce = allocator.alloc(u8, bounce_size) catch {
+        return Errno.ENOMEM.toReturn();
+    };
+    defer allocator.free(bounce);
+
+    _ = controller.readBlocks(part.lun_index, start_lba, block_count, bounce) catch {
+        return Errno.EIO.toReturn();
+    };
+
+    const copy_start: usize = start_offset;
+    @memcpy(buf[0..read_len], bounce[copy_start .. copy_start + read_len]);
+
+    fd.position += read_len;
+    const result = std.math.cast(isize, read_len) orelse return Errno.ERANGE.toReturn();
+    return result;
+}
+
+fn virtioScsiPartitionWrite(fd: *FileDescriptor, buf: []const u8) isize {
+    const part = @as(*VirtioScsiPartition, @ptrCast(@alignCast(fd.private_data)));
+    const controller = virtio_scsi.getController() orelse return Errno.EIO.toReturn();
+
+    const pos = fd.position;
+    const block_size = part.block_size;
+
+    const part_size_bytes = std.math.mul(u64, part.sector_count, block_size) catch return Errno.ERANGE.toReturn();
+    if (pos >= part_size_bytes) return Errno.ENOSPC.toReturn();
+
+    var write_len = buf.len;
+    const end_pos = std.math.add(usize, pos, write_len) catch return Errno.ERANGE.toReturn();
+    if (end_pos > part_size_bytes) {
+        write_len = @intCast(part_size_bytes - pos);
+    }
+
+    const pos_blocks = pos / block_size;
+    const start_lba = std.math.add(u64, part.start_lba, pos_blocks) catch return Errno.ERANGE.toReturn();
+    const start_offset = pos % block_size;
+
+    const end_pos_padded = std.math.add(usize, pos + write_len, block_size - 1) catch return Errno.ERANGE.toReturn();
+    const end_lba = std.math.add(u64, part.start_lba, end_pos_padded / block_size) catch return Errno.ERANGE.toReturn();
+    if (end_lba < start_lba) return Errno.ERANGE.toReturn();
+    const block_count_u64 = end_lba - start_lba;
+
+    if (block_count_u64 > 256) {
+        return Errno.EINVAL.toReturn();
+    }
+    const block_count: u32 = @intCast(block_count_u64);
+
+    if (start_offset == 0 and write_len % block_size == 0) {
+        _ = controller.writeBlocks(part.lun_index, start_lba, block_count, buf[0..write_len]) catch {
+            return Errno.EIO.toReturn();
+        };
+        fd.position += write_len;
+        const result = std.math.cast(isize, write_len) orelse return Errno.ERANGE.toReturn();
+        return result;
+    }
+
+    // RMW
+    const bounce_size = @as(usize, block_count) * block_size;
+    const allocator = heap.allocator();
+    const bounce = allocator.alloc(u8, bounce_size) catch {
+        return Errno.ENOMEM.toReturn();
+    };
+    defer allocator.free(bounce);
+
+    _ = controller.readBlocks(part.lun_index, start_lba, block_count, bounce) catch {
+        return Errno.EIO.toReturn();
+    };
+
+    const copy_start: usize = start_offset;
+    @memcpy(bounce[copy_start .. copy_start + write_len], buf[0..write_len]);
+
+    _ = controller.writeBlocks(part.lun_index, start_lba, block_count, bounce) catch {
+        return Errno.EIO.toReturn();
+    };
+
+    fd.position += write_len;
+    const result = std.math.cast(isize, write_len) orelse return Errno.ERANGE.toReturn();
+    return result;
+}
+
+fn virtioScsiPartitionClose(_: *FileDescriptor) isize {
+    // VirtIO-SCSI sync is handled by adapter.blockClose
+    return 0;
+}
+
+fn virtioScsiPartitionSeek(fd: *FileDescriptor, offset: i64, whence: u32) isize {
+    const part = @as(*VirtioScsiPartition, @ptrCast(@alignCast(fd.private_data)));
+    const part_size = std.math.mul(u64, part.sector_count, part.block_size) catch return Errno.ERANGE.toReturn();
+
+    const SEEK_SET: u32 = 0;
+    const SEEK_CUR: u32 = 1;
+    const SEEK_END: u32 = 2;
+
+    const pos_i64 = std.math.cast(i64, fd.position) orelse return Errno.ERANGE.toReturn();
+    const size_i64 = std.math.cast(i64, part_size) orelse return Errno.ERANGE.toReturn();
+
+    // SECURITY: Use checked arithmetic to prevent signed overflow on SEEK_CUR/SEEK_END.
+    const new_pos: i64 = switch (whence) {
+        SEEK_SET => offset,
+        SEEK_CUR => std.math.add(i64, pos_i64, offset) catch return Errno.ERANGE.toReturn(),
+        SEEK_END => std.math.add(i64, size_i64, offset) catch return Errno.ERANGE.toReturn(),
+        else => return Errno.EINVAL.toReturn(),
+    };
+
+    if (new_pos < 0) {
+        return Errno.EINVAL.toReturn();
+    }
+
+    fd.position = std.math.cast(usize, new_pos) orelse return Errno.ERANGE.toReturn();
+    return std.math.cast(isize, fd.position) orelse return Errno.ERANGE.toReturn();
+}
+
+/// Scan a VirtIO-SCSI LUN for partitions and register them
+pub fn scanAndRegisterVirtioScsi(lun_index: u8) !void {
+    const allocator = heap.allocator();
+    const controller = virtio_scsi.getController() orelse return;
+    const lun_info = controller.getLun(lun_index) orelse return;
+
+    if (!lun_info.active) return;
+
+    // Register the raw LUN first (e.g. vda, vdb)
+    const drive_char = @as(u8, 'a') + lun_index;
+    const disk_name = try std.fmt.allocPrint(allocator, "vd{c}", .{drive_char});
+
+    // Register with VirtIO-SCSI adapter's block_ops
+    try devfs.registerDevice(disk_name, &virtio_scsi.adapter.block_ops, @ptrFromInt(@as(usize, lun_index)));
+
+    console.info("Partitions: Scanning {s}...", .{disk_name});
+
+    // Read LBA 0 (MBR)
+    const block_size = lun_info.block_size;
+    const mbr_buf_size = @max(block_size, 512);
+    const mbr_sector = try allocator.alloc(u8, mbr_buf_size);
+    defer allocator.free(mbr_sector);
+
+    _ = controller.readBlocks(lun_index, 0, 1, mbr_sector) catch |err| {
+        console.warn("Partitions: Failed to read MBR from {s}: {}", .{ disk_name, err });
+        return;
+    };
+
+    const mbr_data: *align(1) mbr.Mbr = @ptrCast(mbr_sector);
+
+    if (!mbr_data.isValid()) {
+        console.info("Partitions: No valid MBR signature on {s}", .{disk_name});
+        return;
+    }
+
+    // Check for GPT
+    if (mbr_data.isGptProtective()) {
+        console.info("Partitions: Found GPT protective MBR on {s}", .{disk_name});
+        try scanGptVirtioScsi(lun_index, disk_name, block_size);
+        return;
+    }
+
+    // Process MBR partitions
+    console.info("Partitions: Found MBR on {s}", .{disk_name});
+    var index: u32 = 1;
+    for (mbr_data.partitions()) |entry| {
+        if (entry.isValid()) {
+            try registerVirtioScsiPartition(lun_index, disk_name, index, entry.lba_start, entry.sector_count, block_size);
+            index += 1;
+        }
+    }
+}
+
+fn scanGptVirtioScsi(lun_index: u8, disk_name: []const u8, block_size: u32) !void {
+    const allocator = heap.allocator();
+    const controller = virtio_scsi.getController() orelse return;
+
+    // Read GPT Header (LBA 1)
+    const header_buf_size = @max(block_size, 512);
+    const header_sector = try allocator.alloc(u8, header_buf_size);
+    defer allocator.free(header_sector);
+
+    _ = controller.readBlocks(lun_index, 1, 1, header_sector) catch {
+        console.warn("Partitions: Failed to read GPT header", .{});
+        return;
+    };
+
+    const header: *align(1) gpt.GptHeader = @ptrCast(header_sector);
+    if (!header.isValid()) {
+        console.warn("Partitions: Invalid GPT signature", .{});
+        return;
+    }
+
+    // SECURITY: Validate minimum partition entry size per UEFI spec (128 bytes).
+    if (header.size_partition_entry < @sizeOf(gpt.GptEntry)) {
+        console.warn("Partitions: GPT entry size too small ({} < 128)", .{header.size_partition_entry});
+        return;
+    }
+
+    // Read Partition Entries
+    const entries_size = std.math.mul(u64, header.num_partition_entries, header.size_partition_entry) catch {
+        console.warn("Partitions: GPT table size overflow", .{});
+        return;
+    };
+    const entries_blocks = (entries_size + block_size - 1) / block_size;
+
+    // Limit reasonable size
+    if (entries_blocks > 128) {
+        console.warn("Partitions: GPT table too large ({} blocks)", .{entries_blocks});
+        return;
+    }
+
+    const table_buffer = try allocator.alloc(u8, entries_blocks * block_size);
+    defer allocator.free(table_buffer);
+
+    const entries_blocks_u32: u32 = @intCast(entries_blocks);
+    _ = controller.readBlocks(lun_index, header.partition_entry_lba, entries_blocks_u32, table_buffer) catch {
+        console.warn("Partitions: Failed to read GPT entries", .{});
+        return;
+    };
+
+    var index: u32 = 1;
+    var i: u32 = 0;
+    while (i < header.num_partition_entries) : (i += 1) {
+        const offset = std.math.mul(u32, i, header.size_partition_entry) catch break;
+        const end_offset = std.math.add(u32, offset, @sizeOf(gpt.GptEntry)) catch break;
+        if (end_offset > table_buffer.len) break;
+
+        const entry: *align(1) gpt.GptEntry = @ptrCast(table_buffer[offset..].ptr);
+
+        if (entry.isValid()) {
+            const diff = std.math.sub(u64, entry.last_lba, entry.first_lba) catch continue;
+            const size = std.math.add(u64, diff, 1) catch continue;
+            try registerVirtioScsiPartition(lun_index, disk_name, index, entry.first_lba, size, block_size);
+            index += 1;
+        }
+    }
+}
+
+/// Register a VirtIO-SCSI partition with devfs.
+/// SECURITY NOTE (Partition Bounds): Bounds validation deferred to VirtIO-SCSI driver layer.
+/// See registerPartition() for rationale.
+fn registerVirtioScsiPartition(lun_index: u8, disk_name: []const u8, index: u32, start: u64, count: u64, block_size: u32) !void {
+    const allocator = heap.allocator();
+
+    // Create partition struct
+    const part = try allocator.create(VirtioScsiPartition);
+    part.* = VirtioScsiPartition{
+        .lun_index = lun_index,
+        .start_lba = start,
+        .sector_count = count,
+        .block_size = block_size,
+        .index = index,
+    };
+
+    // Create name: vda1, vda2...
+    const name = try std.fmt.allocPrint(allocator, "{s}{d}", .{ disk_name, index });
+
+    // Register
+    try devfs.registerDevice(name, &virtio_scsi_partition_ops, part);
 
     console.info("Partitions: Registered {s} (start={d}, sectors={d})", .{ name, start, count });
 }

@@ -8,6 +8,16 @@
 //! - LBA 0: Protective MBR
 //! - LBA 1: GPT Header
 //! - LBA 2+: Partition Entry Array
+//!
+//! SECURITY NOTE (CRC32 Validation):
+//! The GPT header contains crc32_header and crc32_partition_array fields per UEFI spec.
+//! We intentionally do NOT validate these checksums because:
+//! 1. An attacker with local disk write access has a broader attack surface (kernel modification)
+//! 2. All partition values are bounds-checked with std.math.* before use (memory safety)
+//! 3. Entry size minimum (128 bytes) is validated to prevent overlapping reads
+//! 4. Table size limits (128 sectors max) prevent OOM attacks
+//! CRC32 primarily detects accidental corruption, not malicious modification.
+//! Adding CRC32 validation would provide defense-in-depth for data integrity if desired.
 
 const std = @import("std");
 

@@ -338,9 +338,9 @@ fn readWallClockRaw() ?struct { sec: u32, nsec: u32 } {
 }
 
 /// Get current CPU ID
-/// Uses LAPIC ID if APIC is active, otherwise returns 0 (BSP)
+/// Uses LAPIC ID if APIC is enabled, otherwise returns 0 (BSP)
 fn getCurrentCpuId() usize {
-    if (apic.lapic.isActive()) {
+    if (apic.lapic.isEnabled()) {
         return apic.lapic.getId();
     }
     return 0;

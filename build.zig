@@ -611,6 +611,25 @@ pub fn build(b: *std.Build) void {
     nvme_module.addImport("dma", dma_module);
     nvme_module.addImport("iommu", kernel_iommu_module);
 
+    // Create VirtIO-SCSI driver module (VirtIO SCSI storage controller)
+    const virtio_scsi_module = b.createModule(.{
+        .root_source_file = b.path("src/drivers/virtio/scsi/root.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    virtio_scsi_module.addImport("pci", pci_module);
+    virtio_scsi_module.addImport("vmm", vmm_module);
+    virtio_scsi_module.addImport("pmm", pmm_module);
+    virtio_scsi_module.addImport("console", console_module);
+    virtio_scsi_module.addImport("hal", hal_module);
+    virtio_scsi_module.addImport("fd", fd_module);
+    virtio_scsi_module.addImport("uapi", uapi_module);
+    virtio_scsi_module.addImport("heap", heap_module);
+    virtio_scsi_module.addImport("io", kernel_io_module);
+    virtio_scsi_module.addImport("sync", sync_module);
+    virtio_scsi_module.addImport("dma", dma_module);
+    virtio_scsi_module.addImport("iommu", kernel_iommu_module);
+
     // Create USB driver module (XHCI/EHCI host controllers)
     const usb_module = b.createModule(.{
         .root_source_file = b.path("src/drivers/usb/root.zig"),
@@ -662,6 +681,7 @@ pub fn build(b: *std.Build) void {
     fs_module.addImport("console", console_module);
     fs_module.addImport("ahci", ahci_module);
     fs_module.addImport("nvme", nvme_module);
+    fs_module.addImport("virtio_scsi", virtio_scsi_module);
 
     fs_module.addImport("sync", sync_module);
 
@@ -708,6 +728,9 @@ pub fn build(b: *std.Build) void {
     virtio_module.addImport("vmm", vmm_module);
     virtio_module.addImport("console", console_module);
     virtio_module.addImport("prng", prng_module);
+
+    // Add virtio import to virtio_scsi_module (defined earlier but virtio_module wasn't ready yet)
+    virtio_scsi_module.addImport("virtio", virtio_module);
 
     // Create Video driver module
     const video_module = b.createModule(.{
@@ -790,6 +813,7 @@ pub fn build(b: *std.Build) void {
     devfs_module.addImport("uapi", uapi_module);
     devfs_module.addImport("ahci", ahci_module);
     devfs_module.addImport("nvme", nvme_module);
+    devfs_module.addImport("virtio_scsi", virtio_scsi_module);
     devfs_module.addImport("heap", heap_module);
     devfs_module.addImport("audio", audio_module);
     devfs_module.addImport("fs", fs_module);
@@ -803,6 +827,7 @@ pub fn build(b: *std.Build) void {
     });
     partitions_module.addImport("ahci", ahci_module);
     partitions_module.addImport("nvme", nvme_module);
+    partitions_module.addImport("virtio_scsi", virtio_scsi_module);
     partitions_module.addImport("devfs", devfs_module);
     partitions_module.addImport("heap", heap_module);
     partitions_module.addImport("fd", fd_module);
@@ -1494,6 +1519,7 @@ pub fn build(b: *std.Build) void {
     kernel.root_module.addImport("e1000e", e1000e_module);
     kernel.root_module.addImport("ahci", ahci_module);
     kernel.root_module.addImport("nvme", nvme_module);
+    kernel.root_module.addImport("virtio_scsi", virtio_scsi_module);
     kernel.root_module.addImport("usb", usb_module);
     kernel.root_module.addImport("net", net_module);
     kernel.root_module.addImport("config", config_module);

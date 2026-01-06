@@ -25,6 +25,7 @@ const usb = @import("usb");
 const audio = @import("audio");
 const ahci = @import("ahci");
 const nvme = @import("nvme");
+const virtio_scsi = @import("virtio_scsi");
 const video_driver = @import("video_driver");
 const hal = @import("hal");
 const acpi = @import("acpi");
@@ -34,6 +35,13 @@ const input = @import("input");
 const virtio = @import("virtio");
 const prng = @import("prng");
 
+// SECURITY NOTE (Global State Synchronization): These variables are written during
+// single-threaded BSP boot (before SMP init) and only read after boot completes.
+// No synchronization is required because:
+// 1. BSP initialization is strictly sequential (initHypervisor -> initIommu -> initNetwork -> ...)
+// 2. AP startup occurs AFTER BSP init, with proper memory barriers in the AP trampoline
+// 3. These are never modified after init completes (effectively immutable post-boot)
+// If future code modifies these at runtime, use std.atomic.Value for thread safety.
 pub var net_interface: net.Interface = undefined;
 pub var pci_devices: ?*const pci.DeviceList = null;
 pub var pci_ecam: ?pci.Ecam = null;
@@ -106,6 +114,10 @@ pub fn initIommu() void {
         console.warn("IOMMU: RSDP not found, IOMMU disabled", .{});
         return;
     }
+    // SECURITY NOTE (RSDP Trust): The RSDP address comes from trusted UEFI boot firmware
+    // via BootInfo. If the bootloader/hypervisor is compromised, the attacker has broader
+    // attack surface (kernel image modification, page table poisoning). Additional range
+    // validation here provides minimal benefit vs. cost. The ACPI parser validates structure.
     const rsdp_ptr: *align(1) const acpi.Rsdp = @ptrFromInt(rsdp_address);
 
     // 2. Parse DMAR table
@@ -196,6 +208,16 @@ pub fn initIommu() void {
     if (units_enabled == 0) {
         console.err("IOMMU: No units successfully enabled", .{});
         return;
+    }
+
+    // SECURITY: Warn if partial IOMMU initialization occurred.
+    // Devices on segments covered by failed units may not have DMA isolation.
+    // This is still better than no IOMMU - protected segments benefit from isolation.
+    if (units_enabled < units_initialized) {
+        console.warn("IOMMU: Partial init - {d}/{d} units enabled. Some devices may lack DMA isolation.", .{
+            units_enabled,
+            units_initialized,
+        });
     }
 
     // 7. Initialize fault handler
@@ -309,9 +331,15 @@ fn probeE1000Legacy(ecam: pci.Ecam) ?*e1000e.E1000e {
         }
 
         // Set BAR0 - E1000 uses 128KB MMIO
+        // SECURITY NOTE (Hardcoded BAR Size): This legacy fallback uses the datasheet-specified
+        // 128KB size rather than PCI BAR sizing protocol. This is acceptable because:
+        // 1. This is a fallback path only used when ECAM fails (which does proper sizing)
+        // 2. A malicious hypervisor has broader attack surface than BAR size misreporting
+        // 3. The E1000 driver bounds-checks all register accesses within this region
+        // 4. Implementing BAR sizing in legacy I/O mode adds significant complexity
         fixed_dev.bar[0] = pci.Bar{
             .base = bar_base,
-            .size = 0x20000, // 128KB for E1000
+            .size = 0x20000, // 128KB per Intel E1000 datasheet
             .is_mmio = true,
             .is_64bit = is_64bit,
             .prefetchable = (bar0_raw & 0x8) != 0,
@@ -510,11 +538,13 @@ pub fn initAudio() void {
                 };
             }
 
+            // SECURITY NOTE (Hardcoded BAR Sizes): Same rationale as E1000 legacy probe.
+            // Sizes are per Intel AC97 specification. Primary ECAM path does proper sizing.
             // Set BAR0 (NAMBAR - Native Audio Mixer)
             if (bar0_io) {
                 fixed_dev.bar[0] = pci.Bar{
                     .base = @as(u64, bar0_raw & 0xFFFFFFFC),
-                    .size = 256, // Mixer registers
+                    .size = 256, // Mixer registers per AC97 spec
                     .is_mmio = false,
                     .is_64bit = false,
                     .prefetchable = false,
@@ -526,7 +556,7 @@ pub fn initAudio() void {
             if (bar1_io) {
                 fixed_dev.bar[1] = pci.Bar{
                     .base = @as(u64, bar1_raw & 0xFFFFFFFC),
-                    .size = 64, // Bus master registers
+                    .size = 64, // Bus master registers per AC97 spec
                     .is_mmio = false,
                     .is_64bit = false,
                     .prefetchable = false,
@@ -645,6 +675,53 @@ pub fn initStorage() void {
 
     if (!found_nvme) {
         console.info("Storage: No NVMe controllers found", .{});
+    }
+
+    // Search for VirtIO-SCSI controller (VirtIO vendor, SCSI device)
+    var found_virtio_scsi = false;
+    for (devices.devices[0..devices.count]) |*dev| {
+        if (virtio_scsi.isVirtioScsi(dev)) {
+            console.info("Storage: Found VirtIO-SCSI at {x:0>2}:{x:0>2}.{d}", .{
+                dev.bus, dev.device, dev.func,
+            });
+
+            if (virtio_scsi.initFromPci(dev, pci.PciAccess{ .ecam = ecam })) |controller| {
+                // Report detected LUNs
+                var lun_count: u8 = 0;
+                for (0..controller.getLunCount()) |i| {
+                    if (controller.getLun(@intCast(i))) |lun_info| {
+                        if (lun_info.active) {
+                            const size_mb = lun_info.capacity_bytes / (1024 * 1024);
+                            console.info("  LUN{d}: {d} MB ({d} blocks, {d}B sectors) - {s} {s}", .{
+                                i,
+                                size_mb,
+                                lun_info.total_blocks,
+                                lun_info.block_size,
+                                &lun_info.vendor,
+                                &lun_info.product,
+                            });
+
+                            // Scan for partitions on this LUN
+                            partitions.scanAndRegisterVirtioScsi(@intCast(i)) catch |err| {
+                                console.warn("  Partition scan failed for LUN{d}: {}", .{ i, err });
+                            };
+
+                            lun_count += 1;
+                        }
+                    }
+                }
+
+                console.info("Storage: VirtIO-SCSI initialized with {d} LUNs", .{lun_count});
+                found_virtio_scsi = true;
+                break; // Only initialize first controller
+            } else |err| {
+                console.warn("Storage: VirtIO-SCSI init failed: {}", .{err});
+            }
+        }
+    }
+
+    if (!found_virtio_scsi) {
+        console.info("Storage: No VirtIO-SCSI controllers found", .{});
     }
 }
 
@@ -782,7 +859,9 @@ pub fn initVirtioRng() void {
         console.info("VirtIO-RNG: Driver initialized", .{});
 
         // Seed kernel PRNG with initial hardware entropy
-        var entropy: [64]u8 = undefined;
+        // SECURITY: Zero-init to prevent stack data leaks if getEntropy returns partial data.
+        // In ReleaseFast, `undefined` contains whatever was on the stack.
+        var entropy = [_]u8{0} ** 64;
         const bytes_read = driver.getEntropy(&entropy) catch |err| {
             console.warn("VirtIO-RNG: Failed to read initial entropy: {}", .{err});
             return;
