@@ -816,6 +816,24 @@ pub fn build(b: *std.Build) void {
     virtio_input_module.addImport("input", input_module);
     virtio_input_module.addImport("uapi", uapi_module);
 
+    // Create VirtIO-Sound driver module (audio playback/capture via VirtIO)
+    const virtio_sound_module = b.createModule(.{
+        .root_source_file = b.path("src/drivers/virtio/sound/root.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    virtio_sound_module.addImport("pci", pci_module);
+    virtio_sound_module.addImport("vmm", vmm_module);
+    virtio_sound_module.addImport("pmm", pmm_module);
+    virtio_sound_module.addImport("console", console_module);
+    virtio_sound_module.addImport("hal", hal_module);
+    virtio_sound_module.addImport("heap", heap_module);
+    virtio_sound_module.addImport("sync", sync_module);
+    virtio_sound_module.addImport("virtio", virtio_module);
+    virtio_sound_module.addImport("uapi", uapi_module);
+    virtio_sound_module.addImport("fd", fd_module);
+    // user_mem added later (after user_mem_module is defined)
+
     // Create DevFS module (device filesystem shim)
     const devfs_module = b.createModule(.{
         .root_source_file = b.path("src/kernel/fs/devfs.zig"),
@@ -832,9 +850,14 @@ pub fn build(b: *std.Build) void {
     devfs_module.addImport("nvme", nvme_module);
     devfs_module.addImport("virtio_scsi", virtio_scsi_module);
     devfs_module.addImport("heap", heap_module);
-    devfs_module.addImport("audio", audio_module);
     devfs_module.addImport("fs", fs_module);
     devfs_module.addImport("sync", sync_module);
+
+    // Add devfs to VirtIO-Sound (for /dev/dsp registration)
+    virtio_sound_module.addImport("devfs", devfs_module);
+
+    // Add devfs to audio module (AC97 /dev/dsp registration)
+    audio_module.addImport("devfs", devfs_module);
 
     // Create Partitions module
     const partitions_module = b.createModule(.{
@@ -939,6 +962,9 @@ pub fn build(b: *std.Build) void {
 
     // Add user_mem to keyboard for getCharAsync io_uring integration
     keyboard_module.addImport("user_mem", user_mem_module);
+
+    // Add user_mem to VirtIO-Sound for ioctl validation
+    virtio_sound_module.addImport("user_mem", user_mem_module);
 
     // Create Pipe module (IPC)
     const pipe_module = b.createModule(.{
@@ -1579,6 +1605,7 @@ pub fn build(b: *std.Build) void {
     kernel.root_module.addImport("dma", dma_module);
     kernel.root_module.addImport("virtio", virtio_module);
     kernel.root_module.addImport("virtio_input", virtio_input_module);
+    kernel.root_module.addImport("virtio_sound", virtio_sound_module);
 
     // Add architecture-specific assembly and linker script
     switch (target_arch) {

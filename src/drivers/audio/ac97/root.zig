@@ -4,6 +4,7 @@ const pci = @import("pci");
 const fd = @import("fd");
 const console = @import("console");
 const kernel_io = @import("io");
+const devfs = @import("devfs");
 const types = @import("types.zig");
 const init_mod = @import("init.zig");
 const ops = @import("ops.zig");
@@ -62,6 +63,11 @@ pub fn initFromPci(pci_dev: *const pci.PciDevice, pci_access: pci.PciAccess) !vo
     ac97_driver = try init_mod.init(pci_dev, pci_access);
     if (ac97_driver) |drv| {
         enableAsyncMode(drv);
+
+        // Register /dev/dsp with devfs
+        devfs.registerDevice("dsp", &dsp_ops, null) catch |err| {
+            console.warn("AC97: Failed to register /dev/dsp: {}", .{err});
+        };
     }
 }
 

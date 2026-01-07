@@ -651,7 +651,7 @@ This roadmap was generated from a comprehensive feature validation on 2024-12-30
 **Missing - Critical for Proxmox/Production:**
 - VirtIO-9P (shared folders via Plan 9 protocol)
 - VirtIO-FS (virtiofs, modern shared folder replacement)
-- VirtIO-Input (keyboard/mouse/tablet, replaces PS/2)
+- ~~VirtIO-Input (keyboard/mouse/tablet, replaces PS/2)~~ **IMPLEMENTED** (2026-01-05)
 - VirtIO-Sound (modern audio)
 - ~~kvmclock paravirtualized timing source~~ **IMPLEMENTED** (2026-01-05)
 - SPICE display protocol (Proxmox default)
@@ -723,7 +723,7 @@ This roadmap was generated from a comprehensive feature validation on 2024-12-30
 | VMXNET3 | VMware | 10GbE performance |
 | PVSCSI | VMware | Low-latency storage |
 | ~~kvmclock/pvtime~~ | QEMU/KVM | **IMPLEMENTED** - Stable TSC source (x86_64: kvmclock, aarch64: pvtime) |
-| VirtIO-Input | QEMU/KVM | Modern HID replacement |
+| ~~VirtIO-Input~~ | QEMU/KVM | **IMPLEMENTED** - Modern HID replacement (keyboard/mouse/tablet) |
 | VirtIO-Sound | QEMU/KVM | Modern audio |
 
 ### Tier 3: Advanced Features
@@ -776,10 +776,12 @@ This roadmap was generated from a comprehensive feature validation on 2024-12-30
    - DevFS integration (`/dev/vdX`), MBR/GPT partition scanning
 
 ### Phase 3: Guest Integration (Medium Priority)
-1. **VirtIO-Input** - Replace legacy PS/2
-   - Location: `src/drivers/input/virtio_input.zig`
-   - Enables: Tablet mode, modern HID
-   - Effort: Low-Medium
+1. ~~**VirtIO-Input**~~ - **COMPLETE** (2026-01-05)
+   - Location: `src/drivers/virtio/input/`
+   - Kernel driver with keyboard, mouse, tablet support
+   - Auto-detects device type from event capabilities
+   - MSI-X interrupt support with polling fallback
+   - Integration with unified input subsystem
 
 2. ~~**kvmclock/pvtime**~~ - **COMPLETE** (2026-01-05)
    - x86_64: `src/arch/x86_64/hypervisor/kvmclock.zig` (MSR-based wall/system time)
@@ -817,10 +819,10 @@ This roadmap was generated from a comprehensive feature validation on 2024-12-30
 | 0x1005 | Balloon | Userspace | `virtio_balloon` |
 | 0x1009 | 9P Transport | Not Impl | Shared folders |
 | 0x1010 | GPU | Kernel | `virtio_gpu.zig` |
-| 0x1012 | Input | Not Impl | HID devices |
+| 0x1012 | Input | Kernel | `input/root.zig` **NEW** (2026-01-05) |
 | 0x1019 | FS | Not Impl | virtiofs |
 | 0x1021 | Sound | Not Impl | Audio |
-| 0x1035 | SCSI | Not Impl | Storage |
+| 0x1008 | SCSI | Kernel | `scsi/root.zig` **NEW** (2026-01-05) |
 
 ### Modern Device IDs (1040+)
 Modern VirtIO devices use 0x1040 + device_type. The kernel should detect both legacy (0x1000+type) and modern (0x1040+type) device IDs.

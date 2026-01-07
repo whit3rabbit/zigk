@@ -34,6 +34,7 @@ const dma = @import("dma");
 const input = @import("input");
 const virtio = @import("virtio");
 const virtio_input = @import("virtio_input");
+const virtio_sound = @import("virtio_sound");
 const prng = @import("prng");
 
 // SECURITY NOTE (Global State Synchronization): These variables are written during
@@ -451,11 +452,19 @@ pub fn initUsb() void {
     usb.initFromPci(devices, pci.PciAccess{ .ecam = ecam });
 }
 
-/// Initialize Audio subsystem (AC97)
+/// Initialize Audio subsystem (VirtIO-Sound, HDA, AC97)
+/// Priority: VirtIO-Sound (KVM) > Intel HDA > AC97
 /// Uses Legacy PCI probe as fallback for ECAM timing issues on macOS/Apple Silicon.
 pub fn initAudio() void {
     console.print("\n");
     console.info("Initializing Audio subsystem...", .{});
+
+    // For KVM-compatible hypervisors, try VirtIO-Sound first
+    if (detected_hypervisor.isKvmCompatible() or detected_hypervisor == .none or detected_hypervisor == .unknown) {
+        if (initVirtioSound()) {
+            return; // VirtIO-Sound initialized successfully
+        }
+    }
 
     const ecam = pci_ecam orelse {
         console.warn("Audio: PCI ECAM not available, skipping Audio", .{});
@@ -931,4 +940,34 @@ pub fn initVirtioRng() void {
     } else {
         console.info("VirtIO-RNG: No device found", .{});
     }
+}
+
+/// Initialize VirtIO-Sound device
+/// Returns true if a VirtIO-Sound device was found and initialized
+fn initVirtioSound() bool {
+    const devices = pci_devices orelse return false;
+    const ecam = pci_ecam orelse return false;
+
+    for (devices.devices[0..devices.count]) |*dev| {
+        if (virtio_sound.isVirtioSound(dev)) {
+            console.info("VirtIO-Sound: Found device at {d}:{d}.{d}", .{
+                dev.bus, dev.device, dev.func,
+            });
+
+            const driver = virtio_sound.initFromPci(dev, pci.PciAccess{ .ecam = ecam }) catch |err| {
+                console.warn("VirtIO-Sound: Init failed: {}", .{err});
+                continue;
+            };
+
+            // Set up MSI-X interrupts
+            virtio_sound.irq.setupMsix(driver, pci.PciAccess{ .ecam = ecam }) catch |err| {
+                console.warn("VirtIO-Sound: MSI-X setup failed: {}, using polling", .{err});
+            };
+
+            console.info("VirtIO-Sound: Driver initialized", .{});
+            return true;
+        }
+    }
+
+    return false;
 }

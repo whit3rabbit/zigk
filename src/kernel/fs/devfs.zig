@@ -19,7 +19,6 @@ const keyboard = @import("keyboard");
 const sched = @import("sched");
 const uapi = @import("uapi");
 const ahci = @import("ahci");
-const audio = @import("audio");
 const vfs = @import("fs").vfs; // Import VFS for Error type
 const meta = @import("fs").meta;
 const heap = @import("heap");
@@ -182,8 +181,8 @@ const builtin_devices = [_]DeviceEntry{
     .{ .name = "stderr", .ops = &console_ops },
     .{ .name = "null", .ops = &null_ops },
     .{ .name = "zero", .ops = &zero_ops },
-    // sda is now registered dynamically
-    .{ .name = "dsp", .ops = &audio.ac97.dsp_ops },
+    // sda is registered dynamically by AHCI/NVMe/VirtIO-SCSI drivers
+    // dsp is registered dynamically by audio driver (VirtIO-Sound, HDA, or AC97)
 };
 
 /// Dynamic device list head
@@ -222,6 +221,13 @@ pub fn registerDevice(name: []const u8, ops: *const FileOps, private_data: ?*any
 /// Look up device entry by path
 /// Returns null if path is not a known device
 /// Thread-safe: dynamic device list access protected by registry_lock
+///
+/// SAFETY INVARIANT: Dynamic device entries are never freed after registration.
+/// The returned pointer remains valid for the lifetime of the kernel. If device
+/// unregistration is ever added, this function MUST be refactored to either:
+/// 1. Hold lock during usage (restructure callers), or
+/// 2. Add reference counting to DeviceEntry, or
+/// 3. Return a copy of ops/private_data instead of a pointer
 pub fn lookupDeviceEntry(path: []const u8) ?*const DeviceEntry {
     // Check if path starts with /dev/
     const name = if (std.mem.startsWith(u8, path, "/dev/"))
@@ -284,38 +290,45 @@ fn devfsOpen(ctx: ?*anyopaque, path: []const u8, flags: u32) vfs.Error!*fd_mod.F
 
 /// Snapshot device names for directory listing.
 /// Returns slices pointing to persistent device name storage.
+///
+/// SECURITY: Uses single lock acquisition to prevent TOCTOU race where
+/// device count could change between counting and copying phases.
 pub fn snapshotDeviceNames(alloc: std.mem.Allocator) ![]const []const u8 {
-    var dynamic_count: usize = 0;
-    {
-        const held = registry_lock.acquire();
-        defer held.release();
+    // Hold lock for entire operation to prevent race condition where
+    // new devices are registered between count and copy phases.
+    const held = registry_lock.acquire();
+    defer held.release();
 
-        var current = dynamic_devices;
-        while (current) |dev| {
-            dynamic_count += 1;
-            current = dev.next;
-        }
+    // Count dynamic devices while holding lock
+    var dynamic_count: usize = 0;
+    var current = dynamic_devices;
+    while (current) |_| {
+        dynamic_count += 1;
+        current = current.?.next;
     }
 
-    const total = builtin_devices.len + dynamic_count;
-    const names = try alloc.alloc([]const u8, total);
+    // Use checked arithmetic to prevent overflow (per CLAUDE.md security guidelines)
+    const total = std.math.add(usize, builtin_devices.len, dynamic_count) catch {
+        return error.OutOfMemory; // Overflow implies impossibly large count
+    };
 
+    // Allocate while holding lock - acceptable since device registration
+    // is infrequent and allocation is fast for small arrays
+    const names = try alloc.alloc([]const u8, total);
+    errdefer alloc.free(names);
+
+    // Copy builtin device names
     for (builtin_devices, 0..) |dev, i| {
         names[i] = dev.name;
     }
 
-    {
-        const held = registry_lock.acquire();
-        defer held.release();
-
-        var idx: usize = builtin_devices.len;
-        var current = dynamic_devices;
-        while (current) |dev| {
-            if (idx >= names.len) break;
-            names[idx] = dev.name;
-            idx += 1;
-            current = dev.next;
-        }
+    // Copy dynamic device names - count is now guaranteed accurate
+    var idx: usize = builtin_devices.len;
+    current = dynamic_devices;
+    while (current) |dev| {
+        names[idx] = dev.name;
+        idx += 1;
+        current = dev.next;
     }
 
     return names;
@@ -345,24 +358,17 @@ fn devfsStatPath(ctx: ?*anyopaque, path: []const u8) ?vfs.FileMeta {
     // Normalize path (remove leading /)
     const name = if (path.len > 0 and path[0] == '/') path[1..] else path;
 
-    // Check static devices
-    const static_devices = [_][]const u8{
-        "null", "zero", "console", "tty", "random", "urandom", "fb0",
-    };
-    for (static_devices) |dev| {
-        if (std.mem.eql(u8, name, dev)) {
-            return vfs.FileMeta{
-                .mode = meta.S_IFCHR | 0o666, // Character device with rw-rw-rw-
-                .uid = 0,
-                .gid = 0,
-                .exists = true,
-                .readonly = false,
-            };
-        }
-    }
+    // Use lookupDeviceEntry to check actual registry (both builtin and dynamic)
+    // This ensures stat() and open() have consistent behavior.
+    const entry = lookupDeviceEntry(name) orelse return null;
 
-    // Check block devices (sda, sdb, etc.)
-    if (name.len >= 3 and std.mem.startsWith(u8, name, "sd")) {
+    // Determine device type based on ops or name pattern
+    // Block devices: sda, sdb, nvme*, etc. (registered by storage drivers)
+    // Character devices: console, tty, null, zero, dsp, etc.
+    const is_block_device = std.mem.startsWith(u8, entry.name, "sd") or
+        std.mem.startsWith(u8, entry.name, "nvme");
+
+    if (is_block_device) {
         return vfs.FileMeta{
             .mode = meta.S_IFBLK | 0o660, // Block device with rw-rw----
             .uid = 0,
@@ -370,21 +376,15 @@ fn devfsStatPath(ctx: ?*anyopaque, path: []const u8) ?vfs.FileMeta {
             .exists = true,
             .readonly = false,
         };
-    }
-
-    // Check dynamic devices registry
-    // (For now, check if path matches a known pattern)
-    if (std.mem.eql(u8, name, "dsp")) {
+    } else {
         return vfs.FileMeta{
-            .mode = meta.S_IFCHR | 0o666,
+            .mode = meta.S_IFCHR | 0o666, // Character device with rw-rw-rw-
             .uid = 0,
             .gid = 0,
             .exists = true,
             .readonly = false,
         };
     }
-
-    return null;
 }
 
 /// DevFS filesystem interface
