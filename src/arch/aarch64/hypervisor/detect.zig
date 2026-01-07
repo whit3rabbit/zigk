@@ -281,3 +281,18 @@ pub fn formatSignature(signature: [12]u8) [12]u8 {
     }
     return result;
 }
+
+// Tests - match x86_64 parity
+test "detect returns consistent results" {
+    resetCache();
+    const info1 = detect();
+    const info2 = detect();
+    try std.testing.expectEqual(info1.hypervisor, info2.hypervisor);
+    try std.testing.expectEqual(info1.el2_present, info2.el2_present);
+}
+
+test "signature formatting handles non-printable chars" {
+    const sig = [12]u8{ 'A', 'B', 0, 'C', 0x1F, 0x7F, 'D', 'E', 'F', 'G', 'H', 'I' };
+    const formatted = formatSignature(sig);
+    try std.testing.expectEqualStrings("AB.C..DEFGHI", &formatted);
+}

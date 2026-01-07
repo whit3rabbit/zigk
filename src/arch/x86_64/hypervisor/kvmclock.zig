@@ -142,8 +142,18 @@ pub fn init() void {
     // Allocate physical page(s) for per-vCPU time info
     // Each entry is 32 bytes, so MAX_CPUS * 32 bytes needed
     // For MAX_CPUS=64, that's 2KB (fits in one 4KB page)
-    const bytes_needed = MAX_CPUS * @sizeOf(PvclockVcpuTimeInfo);
-    const pages_needed = (bytes_needed + 4095) / 4096;
+    // Note: These are comptime calculations, so overflow is caught at compile time.
+    // We add explicit comptime checks for documentation and to fail clearly if MAX_CPUS grows.
+    const bytes_needed = comptime blk: {
+        const size = std.math.mul(usize, MAX_CPUS, @sizeOf(PvclockVcpuTimeInfo)) catch
+            @compileError("MAX_CPUS * sizeof(PvclockVcpuTimeInfo) overflows usize");
+        break :blk size;
+    };
+    const pages_needed = comptime blk: {
+        const val = std.math.add(usize, bytes_needed, 4095) catch
+            @compileError("bytes_needed + 4095 overflows usize");
+        break :blk val / 4096;
+    };
     const vcpu_page = pmm.allocZeroedPages(pages_needed) orelse {
         console.warn("kvmclock: Failed to allocate vcpu time info page", .{});
         // Free wall clock page on failure
@@ -212,7 +222,9 @@ pub fn getSystemTimeNs() ?u64 {
     const cpu_id = getCurrentCpuId();
     if (cpu_id >= MAX_CPUS) return null;
 
-    const info: *volatile PvclockVcpuTimeInfo = &vcpu_time_info.?[cpu_id];
+    // Explicit null check for defensive programming
+    const vcpu_info = vcpu_time_info orelse return null;
+    const info: *volatile PvclockVcpuTimeInfo = &vcpu_info[cpu_id];
 
     // Seqlock read loop
     var attempts: u32 = 0;
@@ -279,13 +291,16 @@ pub fn getWallClockTime() ?struct { sec: u64, nsec: u32 } {
     const mono_ns = getSystemTimeNs() orelse return null;
 
     // Combine with cached wall clock base
-    const total_ns = wall_clock_base_nsec + @as(u32, @truncate(mono_ns % 1_000_000_000));
-    const carry: u64 = if (total_ns >= 1_000_000_000) 1 else 0;
-    const nsec = if (total_ns >= 1_000_000_000) total_ns - 1_000_000_000 else total_ns;
+    // Use u64 for intermediate calculation to prevent overflow:
+    // wall_clock_base_nsec (u32) + mono_ns_part (u32) can exceed u32 max (~2B)
+    const mono_ns_part: u64 = mono_ns % 1_000_000_000;
+    const total_ns: u64 = @as(u64, wall_clock_base_nsec) + mono_ns_part;
+    const carry: u64 = total_ns / 1_000_000_000;
+    const nsec: u32 = @truncate(total_ns % 1_000_000_000);
 
     const sec = wall_clock_base_sec + (mono_ns / 1_000_000_000) + carry;
 
-    return .{ .sec = sec, .nsec = @truncate(nsec) };
+    return .{ .sec = sec, .nsec = nsec };
 }
 
 /// Check if TSC is stable (can optimize seqlock reads)
@@ -295,7 +310,8 @@ pub fn isTscStable() bool {
     const cpu_id = getCurrentCpuId();
     if (cpu_id >= MAX_CPUS) return false;
 
-    return (vcpu_time_info.?[cpu_id].flags & PVCLOCK_TSC_STABLE_BIT) != 0;
+    const vcpu_info = vcpu_time_info orelse return false;
+    return (vcpu_info[cpu_id].flags & PVCLOCK_TSC_STABLE_BIT) != 0;
 }
 
 /// Check if guest was stopped (migration/suspend occurred)
@@ -305,7 +321,8 @@ pub fn wasGuestStopped() bool {
     const cpu_id = getCurrentCpuId();
     if (cpu_id >= MAX_CPUS) return false;
 
-    return (vcpu_time_info.?[cpu_id].flags & PVCLOCK_GUEST_STOPPED) != 0;
+    const vcpu_info = vcpu_time_info orelse return false;
+    return (vcpu_info[cpu_id].flags & PVCLOCK_GUEST_STOPPED) != 0;
 }
 
 // =============================================================================

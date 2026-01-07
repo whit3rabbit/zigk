@@ -208,8 +208,10 @@ pub fn resetCache() void {
 }
 
 /// Format signature as printable string
+/// SECURITY: Zero-initialize buffer per project guidelines to prevent
+/// potential information disclosure if loop were ever modified/interrupted.
 pub fn formatSignature(signature: [12]u8) [12]u8 {
-    var result: [12]u8 = undefined;
+    var result: [12]u8 = [_]u8{0} ** 12;
     for (signature, 0..) |c, i| {
         result[i] = if (c >= 0x20 and c < 0x7F) c else '.';
     }
