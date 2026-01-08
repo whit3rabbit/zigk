@@ -367,11 +367,9 @@ pub const VirtioRngDriver = struct {
 pub fn feedKernelEntropy() void {
     const driver = VirtioRngDriver.getInstance() orelse return;
 
-    // Safety: Using undefined is safe here because getEntropy() zeroes the buffer
-    // at entry (line 266) before any device interaction. If getEntropy returns
-    // error before memset (only possible if !ready or len==0), we return
-    // immediately without reading the buffer. No information leak possible.
-    var buffer: [REQUEST_BUFFER_SIZE]u8 = undefined;
+    // SECURITY: Zero-initialize for defense-in-depth, even though getEntropy()
+    // also zeroes at entry (line 266). Prevents info leak if code paths change.
+    var buffer: [REQUEST_BUFFER_SIZE]u8 = [_]u8{0} ** REQUEST_BUFFER_SIZE;
     const bytes_read = driver.getEntropy(&buffer) catch return;
 
     if (bytes_read == 0) return;

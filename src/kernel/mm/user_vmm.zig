@@ -549,6 +549,7 @@ pub const UserVmm = struct {
     /// new_brk: New heap break (page aligned)
     /// Returns: 0 on success
     /// Note: Caller must update process RSS accounting
+    /// SECURITY: Zeros pages BEFORE clearing PTEs to prevent TLB race info leaks.
     pub fn shrinkHeap(self: *UserVmm, old_brk: u64, new_brk: u64) void {
         // Acquire write lock for VMA manipulation
         const held = self.lock.acquireWrite();
@@ -558,8 +559,21 @@ pub const UserVmm = struct {
 
         const size = old_brk - new_brk;
 
-        // Unmap and free physical pages
+        // Phase 1: Zero all pages via HHDM BEFORE any unmapping
         var offset: u64 = 0;
+        while (offset < size) : (offset += pmm.PAGE_SIZE) {
+            const vaddr = new_brk + offset;
+            if (vmm.translate(self.pml4_phys, vaddr)) |phys| {
+                const hhdm_ptr = paging.physToVirt(phys);
+                @memset(hhdm_ptr[0..pmm.PAGE_SIZE], 0);
+            }
+        }
+
+        // Phase 2: Memory barrier - ensures zeros globally visible before PTE clear
+        hal.mmio.memoryBarrier();
+
+        // Phase 3 & 4: Clear PTEs (includes TLB shootdown) and return to PMM
+        offset = 0;
         while (offset < size) : (offset += pmm.PAGE_SIZE) {
             const vaddr = new_brk + offset;
             if (vmm.translate(self.pml4_phys, vaddr)) |phys| {
@@ -837,13 +851,32 @@ pub const UserVmm = struct {
     }
 
     /// Free physical pages for a VMA and unmap them
+    /// SECURITY: Zeros pages BEFORE clearing PTEs to prevent TLB race info leaks.
+    /// Ordering: zero via HHDM -> memory barrier -> clear PTE -> TLB shootdown -> free to PMM
     fn freeVmaPages(self: *UserVmm, vma: *Vma) void {
         const page_count = vma.pageCount();
-        var i: usize = 0;
         const should_free_phys = (vma.flags & MAP_DEVICE) == 0;
+
+        // Phase 1: Zero all pages via HHDM BEFORE any unmapping
+        // Kernel HHDM mapping remains valid even after user PTE is cleared
+        if (should_free_phys) {
+            var i: usize = 0;
+            while (i < page_count) : (i += 1) {
+                const addr = vma.start + i * pmm.PAGE_SIZE;
+                if (vmm.translate(self.pml4_phys, addr)) |phys| {
+                    const hhdm_ptr = paging.physToVirt(phys);
+                    @memset(hhdm_ptr[0..pmm.PAGE_SIZE], 0);
+                }
+            }
+
+            // Phase 2: Memory barrier - ensures zeros globally visible before PTE clear
+            hal.mmio.memoryBarrier();
+        }
+
+        // Phase 3 & 4: Clear PTEs (includes TLB shootdown) and return to PMM
+        var i: usize = 0;
         while (i < page_count) : (i += 1) {
             const addr = vma.start + i * pmm.PAGE_SIZE;
-            // Get physical address before unmapping
             if (vmm.translate(self.pml4_phys, addr)) |phys| {
                 vmm.unmapPage(self.pml4_phys, addr) catch {};
                 if (should_free_phys) {

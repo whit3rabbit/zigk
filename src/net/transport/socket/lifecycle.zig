@@ -18,8 +18,26 @@ pub fn socket(family: i32, sock_type: i32, protocol: i32) errors.SocketError!usi
     const SOCK_TYPE_MASK = 0xF; // types.SOCK_DGRAM/STREAM are small integers
     const type_masked = sock_type & SOCK_TYPE_MASK;
 
-    if (type_masked != types.SOCK_DGRAM and type_masked != types.SOCK_STREAM) {
+    if (type_masked != types.SOCK_DGRAM and type_masked != types.SOCK_STREAM and type_masked != types.SOCK_RAW) {
         return errors.SocketError.TypeNotSupported;
+    }
+
+    // SOCK_RAW requires explicit protocol specification
+    if (type_masked == types.SOCK_RAW) {
+        // Support IPPROTO_ICMP (IPv4 ping) and IPPROTO_ICMPV6 (IPv6 ping6)
+        if (protocol == types.IPPROTO_ICMPV6) {
+            // Raw ICMPv6 sockets require IPv6 family
+            if (family != types.AF_INET6) {
+                return errors.SocketError.AfNotSupported;
+            }
+        } else if (protocol == types.IPPROTO_ICMP) {
+            // Raw ICMP sockets require IPv4 family
+            if (family != types.AF_INET) {
+                return errors.SocketError.AfNotSupported;
+            }
+        } else {
+            return errors.SocketError.ProtoNotSupported;
+        }
     }
     
     // TODO: Handle SOCK_NONBLOCK/CLOEXEC if we support them in the future
@@ -64,11 +82,26 @@ fn bindInternal(sock_fd: usize, port: u16, ip: types.IpAddr) errors.SocketError!
 
     const sock = state.getSocketLocked(sock_fd) orelse return errors.SocketError.BadFd;
 
-    // Check port isn't already in use
+    // Check for port conflicts with SO_REUSEADDR logic (POSIX compliant)
     if (port != 0) {
         for (state.getSocketTable()) |maybe_other| {
             if (maybe_other) |other| {
-                if (other.allocated and other.local_port == port) {
+                // Skip self and unallocated slots
+                if (other == sock or !other.allocated) continue;
+                // Skip if different port
+                if (other.local_port != port) continue;
+
+                // Check address overlap:
+                // - Unspecified (0.0.0.0 / :: / .none) conflicts with any address
+                // - Specific addresses conflict only with same address or unspecified
+                const addrs_conflict = ip.isUnspecified() or
+                    other.local_addr.isUnspecified() or
+                    ip.eql(other.local_addr);
+
+                if (!addrs_conflict) continue;
+
+                // Addresses and port conflict - check SO_REUSEADDR rules
+                if (!canReuseAddress(sock, other)) {
                     return errors.SocketError.AddrInUse;
                 }
             }
@@ -87,6 +120,51 @@ fn bindInternal(sock_fd: usize, port: u16, ip: types.IpAddr) errors.SocketError!
     if (sock.sock_type == types.SOCK_DGRAM) {
         state.registerUdpSocket(sock);
     }
+}
+
+/// Check if this socket can reuse the address of another socket.
+/// Implements POSIX SO_REUSEADDR semantics:
+/// 1. Both sockets must have SO_REUSEADDR set
+/// 2. For TCP: TIME_WAIT always allows reuse (server restart case)
+/// 3. For TCP: Cannot have two listeners on same addr:port
+/// 4. For UDP: Just require both SO_REUSEADDR (load balancing use case)
+fn canReuseAddress(new_sock: *types.Socket, existing: *types.Socket) bool {
+    // Both sockets must have SO_REUSEADDR set
+    if (!new_sock.so_reuseaddr or !existing.so_reuseaddr) {
+        return false;
+    }
+
+    // TCP-specific rules
+    if (new_sock.sock_type == types.SOCK_STREAM and existing.sock_type == types.SOCK_STREAM) {
+        // TIME_WAIT always allows reuse - this is the primary use case for
+        // SO_REUSEADDR: allowing a server to restart and rebind immediately
+        if (existing.tcb) |tcb| {
+            if (tcb.state == tcp.TcpState.TimeWait) {
+                return true;
+            }
+        }
+
+        // CRITICAL: Prevent two LISTEN sockets on same addr:port.
+        // This would cause ambiguous connection acceptance (which listener gets SYN?).
+        // Note: At bind() time, sockets typically don't have a TCB yet - the TCB and
+        // Listen state are set later via listen() syscall. So most binds succeed here.
+        const new_is_listen = if (new_sock.tcb) |tcb| tcb.state == tcp.TcpState.Listen else false;
+        const existing_is_listen = if (existing.tcb) |tcb| tcb.state == tcp.TcpState.Listen else false;
+
+        if (new_is_listen and existing_is_listen) {
+            return false;
+        }
+
+        return true;
+    }
+
+    // UDP: allow with SO_REUSEADDR (multiple receivers on same port for load balancing)
+    if (new_sock.sock_type == types.SOCK_DGRAM) {
+        return true;
+    }
+
+    // Mixed types or unknown - disallow
+    return false;
 }
 
 /// Close a socket

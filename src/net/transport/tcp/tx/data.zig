@@ -5,6 +5,7 @@ const state = @import("../state.zig");
 const segment = @import("segment.zig");
 const packet = @import("../../../core/packet.zig");
 const ipv4 = @import("../../../ipv4/root.zig").ipv4;
+const pmtu6 = @import("../../../ipv6/pmtu.zig");
 
 const PacketBuffer = packet.PacketBuffer;
 const TcpHeader = types.TcpHeader;
@@ -44,7 +45,11 @@ pub fn transmitPendingData(tcb: *Tcb) bool {
 
     if (buffered == 0) return true;
 
-    const pmtu_mss = ipv4.getEffectiveMss(tcb.getRemoteIpV4());
+    // Get effective MSS based on PMTU for the connection's address family
+    const pmtu_mss = if (tcb.isIpv6())
+        pmtu6.getEffectiveMss6(tcb.remote_addr.v6)
+    else
+        ipv4.getEffectiveMss(tcb.getRemoteIpV4());
     const effective_mss = @min(tcb.mss, pmtu_mss);
 
     const eff_wnd = @min(@as(u32, tcb.snd_wnd), tcb.cwnd);
@@ -57,7 +62,7 @@ pub fn transmitPendingData(tcb: *Tcb) bool {
             }
             
             if (flight_size == 0) {
-                 var data_buf: [1]u8 = undefined;
+                 var data_buf: [1]u8 = [_]u8{0} ** 1;
                  const idx = tcb.send_tail % c.BUFFER_SIZE;
                  data_buf[0] = tcb.send_buf[idx];
                  
@@ -83,7 +88,7 @@ pub fn transmitPendingData(tcb: *Tcb) bool {
 
     if (send_len == 0) return true;
 
-    var data_buf: [c.MAX_TCP_PAYLOAD]u8 = undefined;
+    var data_buf: [c.MAX_TCP_PAYLOAD]u8 = [_]u8{0} ** c.MAX_TCP_PAYLOAD;
     for (0..send_len) |i| {
         const idx = (tcb.send_tail + i) % c.BUFFER_SIZE;
         data_buf[i] = tcb.send_buf[idx];
@@ -123,7 +128,7 @@ pub fn retransmitFromSeq(tcb: *Tcb, seq: u32) bool {
     const send_len = @min(remaining, @as(usize, effective_mss));
     if (send_len == 0) return false;
 
-    var data_buf: [c.MAX_TCP_PAYLOAD]u8 = undefined;
+    var data_buf: [c.MAX_TCP_PAYLOAD]u8 = [_]u8{0} ** c.MAX_TCP_PAYLOAD;
     for (0..send_len) |i| {
         const idx = (tcb.send_tail + @as(usize, offset) + i) % c.BUFFER_SIZE;
         data_buf[i] = tcb.send_buf[idx];

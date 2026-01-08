@@ -1,4 +1,6 @@
 const std = @import("std");
+const posix = std.posix;
+const c = std.c;
 
 const GptHeader = extern struct {
     signature: u64,
@@ -56,36 +58,74 @@ fn calculateCrc32(data: []const u8) u32 {
     return Crc32.hash(data);
 }
 
-pub fn main() !void {
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
+fn writeAll(fd: posix.fd_t, data: []const u8) !void {
+    var written: usize = 0;
+    while (written < data.len) {
+        const n = try posix.write(fd, data[written..]);
+        if (n == 0) return error.UnexpectedEndOfFile;
+        written += n;
+    }
+}
 
-    const args = try std.process.argsAlloc(allocator);
-    if (args.len != 3) {
-        std.debug.print("Usage: {s} <input_fs_img> <output_disk_img>\n", .{args[0]});
+fn pwriteAll(fd: posix.fd_t, data: []const u8, offset: i64) !void {
+    var written: usize = 0;
+    while (written < data.len) {
+        const result = c.pwrite(fd, data[written..].ptr, data.len - written, offset + @as(i64, @intCast(written)));
+        if (result < 0) return error.WriteError;
+        if (result == 0) return error.UnexpectedEndOfFile;
+        written += @intCast(result);
+    }
+}
+
+fn readAll(fd: posix.fd_t, buf: []u8) !usize {
+    var total: usize = 0;
+    while (total < buf.len) {
+        const n = try posix.read(fd, buf[total..]);
+        if (n == 0) break;
+        total += n;
+    }
+    return total;
+}
+
+pub fn main(init: std.process.Init.Minimal) !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    // Access args vector directly on POSIX systems
+    const args = init.args.vector;
+
+    const prog_name = if (args.len > 0) std.mem.span(args[0]) else "disk_image";
+
+    if (args.len < 3) {
+        std.debug.print("Usage: {s} <input_fs_img> <output_disk_img>\n", .{prog_name});
         return error.InvalidArgs;
     }
 
-    const input_path = args[1];
-    const output_path = args[2];
+    const input_path = std.mem.span(args[1]);
+    const output_path = std.mem.span(args[2]);
 
-    const input_file = try std.fs.cwd().openFile(input_path, .{});
-    defer input_file.close();
+    // Open input file
+    const input_fd = try posix.open(input_path, .{ .ACCMODE = .RDONLY }, 0);
+    defer posix.close(input_fd);
 
-    const stat = try input_file.stat();
-    const input_data = try allocator.alloc(u8, stat.size);
-    
-    var total_read: usize = 0;
-    while (total_read < input_data.len) {
-        const n = try input_file.read(input_data[total_read..]);
-        if (n == 0) break;
-        total_read += n;
-    }
+    // Get file size via fstat
+    const stat = try posix.fstat(input_fd);
+    const input_size: usize = @intCast(stat.size);
+
+    const input_data = try allocator.alloc(u8, input_size);
+    defer allocator.free(input_data);
+
+    const total_read = try readAll(input_fd, input_data);
     if (total_read != input_data.len) return error.UnexpectedEndOfFile;
 
-    const output_file = try std.fs.cwd().createFile(output_path, .{});
-    defer output_file.close();
+    // Create output file
+    const output_fd = try posix.open(output_path, .{
+        .ACCMODE = .WRONLY,
+        .CREAT = true,
+        .TRUNC = true
+    }, 0o644);
+    defer posix.close(output_fd);
 
     // 1. Protective MBR (LBA 0)
     var mbr: [MBR_SIZE]u8 = [_]u8{0} ** MBR_SIZE;
@@ -102,40 +142,40 @@ pub fn main() !void {
     const num_partition_entries = 128;
     const partition_entry_size = @sizeOf(GptPartitionEntry);
     const partition_entries_sectors = (num_partition_entries * partition_entry_size + sector_size - 1) / sector_size;
-    
+
     const first_usable_lba = partition_entries_start_lba + partition_entries_sectors;
-    
+
     // Align first LBA to 2048 (1MB) if possible, or just use next available
     // Standard practice aligns to 1MB (2048 sectors)
     const aligned_first_usable_lba = @max(first_usable_lba, 2048);
-    
+
     const input_sectors = (input_data.len + sector_size - 1) / sector_size;
     const last_usable_lba = aligned_first_usable_lba + input_sectors - 1;
-    
+
     // Backup GPT structures
     const backup_partition_entries_sectors = partition_entries_sectors;
     const backup_header_lba = last_usable_lba + 1 + backup_partition_entries_sectors;
     const current_lba = header_lba;
-    
+
     // Total disk size
     const total_sectors = backup_header_lba + 1;
-    
+
     // Update MBR partition size (sectors field is at offset 12 within the partition entry)
     const mbr_sectors: u32 = if (total_sectors > 0xFFFFFFFF) 0xFFFFFFFF else @as(u32, @intCast(total_sectors)) - 1;
     std.mem.writeInt(u32, mbr[MBR_PARTITION_OFFSET + 12 ..][0..4], mbr_sectors, .little);
 
     // Write MBR (LBA 0)
-    try output_file.seekTo(0);
-    try output_file.writeAll(&mbr);
-    
+    try pwriteAll(output_fd, &mbr, 0);
+
     // 3. Prepare Partition Entries
     var entries = try allocator.alloc(GptPartitionEntry, num_partition_entries);
+    defer allocator.free(entries);
     @memset(entries, std.mem.zeroes(GptPartitionEntry));
-    
+
     // Create ESP partition entry
     var unique_guid: [16]u8 = undefined;
     std.crypto.random.bytes(&unique_guid);
-    
+
     entries[0] = .{
         .type_guid = EFI_SYSTEM_PARTITION_GUID.*,
         .unique_guid = unique_guid,
@@ -147,10 +187,10 @@ pub fn main() !void {
     const name = std.unicode.utf8ToUtf16LeStringLiteral("EFI System Partition");
     const name_bytes = std.mem.sliceAsBytes(name);
     @memcpy(entries[0].name[0..name_bytes.len], name_bytes);
-    
+
     const entries_bytes = std.mem.sliceAsBytes(entries);
     const partition_crc32 = calculateCrc32(entries_bytes);
-    
+
     // 4. Primary GPT Header (LBA 1)
     var header: GptHeader = .{
         .signature = 0x5452415020494645, // "EFI PART"
@@ -169,35 +209,32 @@ pub fn main() !void {
         .partition_crc32 = partition_crc32,
     };
     std.crypto.random.bytes(&header.disk_guid);
-    
+
     // Calc Header CRC
     header.crc32 = calculateCrc32(std.mem.asBytes(&header)[0..92]);
 
     // Write Primary Header
-    try output_file.seekTo(header_lba * sector_size);
-    try output_file.writeAll(std.mem.asBytes(&header)[0..92]);
-    
+    try pwriteAll(output_fd, std.mem.asBytes(&header)[0..92], @intCast(header_lba * sector_size));
+
     // Write Primary Partition Entries
-    try output_file.seekTo(partition_entries_start_lba * sector_size);
-    try output_file.writeAll(entries_bytes);
-    
+    try pwriteAll(output_fd, entries_bytes, @intCast(partition_entries_start_lba * sector_size));
+
     // 5. Write Data
-    try output_file.seekTo(aligned_first_usable_lba * sector_size);
-    try output_file.writeAll(input_data);
+    try pwriteAll(output_fd, input_data, @intCast(aligned_first_usable_lba * sector_size));
     // Pad end of partition if needed (shouldn't be if we calculated logical blocks correctly)
     const written_size = input_data.len;
     const aligned_size = input_sectors * sector_size;
     if (aligned_size > written_size) {
-        const padding = try allocator.alloc(u8, aligned_size - written_size);
-        @memset(padding, 0);
-        try output_file.writeAll(padding);
+        const pad = try allocator.alloc(u8, aligned_size - written_size);
+        defer allocator.free(pad);
+        @memset(pad, 0);
+        try pwriteAll(output_fd, pad, @intCast(aligned_first_usable_lba * sector_size + written_size));
     }
 
     // 6. Backup Partition Entries
     const backup_entries_lba = last_usable_lba + 1;
-    try output_file.seekTo(backup_entries_lba * sector_size);
-    try output_file.writeAll(entries_bytes);
-    
+    try pwriteAll(output_fd, entries_bytes, @intCast(backup_entries_lba * sector_size));
+
     // 7. Backup GPT Header
     var backup_header = header;
     backup_header.current_lba = backup_header_lba;
@@ -205,11 +242,10 @@ pub fn main() !void {
     backup_header.partition_entry_lba = backup_entries_lba;
     backup_header.crc32 = 0;
     backup_header.crc32 = calculateCrc32(std.mem.asBytes(&backup_header)[0..92]);
-    
-    try output_file.seekTo(backup_header_lba * sector_size);
-    try output_file.writeAll(std.mem.asBytes(&backup_header)[0..92]);
+
+    try pwriteAll(output_fd, std.mem.asBytes(&backup_header)[0..92], @intCast(backup_header_lba * sector_size));
     const padding = [_]u8{0} ** (sector_size - 92);
-    try output_file.writeAll(&padding);
-    
+    try pwriteAll(output_fd, &padding, @intCast(backup_header_lba * sector_size + 92));
+
     std.debug.print("Created GPT disk image at {s}\n", .{output_path});
 }

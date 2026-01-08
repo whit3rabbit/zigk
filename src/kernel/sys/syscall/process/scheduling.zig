@@ -247,14 +247,23 @@ pub fn sys_select(nfds: usize, readfds: usize, writefds: usize, exceptfds: usize
     }
 
     // Copy output sets back to userspace
+    // SECURITY: Check copyToUser return values. If user unmapped the memory
+    // after initial validation (TOCTOU), the copy fails silently and we must
+    // return EFAULT rather than a stale ready_count that doesn't match reality.
     if (readfds != 0) {
-        _ = user_mem.copyToUser(readfds, &read_out);
+        if (user_mem.copyToUser(readfds, &read_out) != 0) {
+            return error.EFAULT;
+        }
     }
     if (writefds != 0) {
-        _ = user_mem.copyToUser(writefds, &write_out);
+        if (user_mem.copyToUser(writefds, &write_out) != 0) {
+            return error.EFAULT;
+        }
     }
     if (exceptfds != 0) {
-        _ = user_mem.copyToUser(exceptfds, &except_out);
+        if (user_mem.copyToUser(exceptfds, &except_out) != 0) {
+            return error.EFAULT;
+        }
     }
 
     return ready_count;

@@ -404,7 +404,7 @@ fn updateNeighborFromNa(
     is_solicited: bool,
     is_override: bool,
 ) bool {
-    _ = iface;
+    // Note: iface used below for transmitting pending packets
 
     var pending = cache.PendingPackets{};
 
@@ -486,12 +486,26 @@ fn updateNeighborFromNa(
         }
     }
 
-    // TODO: Transmit pending packets (need interface reference)
-    // For now, just free them
-    for (&pending.pkts) |*slot| {
-        if (slot.*) |buf| {
-            cache.cache_allocator.free(buf);
-            slot.* = null;
+    // Transmit pending packets now that we have the destination MAC.
+    // The packets are complete Ethernet frames waiting for MAC resolution.
+    // SECURITY: No race condition - packet buffers were atomically moved (not copied)
+    // from the cache entry to local `pending` struct under lock. Entry pointers were
+    // set to null, so these buffers are now uniquely owned by this function. Processing
+    // outside the lock avoids deadlock during transmit I/O.
+    for (0..pending.count) |i| {
+        if (pending.pkts[i]) |pkt_data| {
+            const pkt_len = pending.lens[i];
+            // Validate packet length (minimum Ethernet header size)
+            if (pkt_len >= 14 and pkt_len <= pkt_data.len) {
+                // Update Ethernet destination MAC in the packet header
+                // EthernetHeader layout: dst_mac[6], src_mac[6], ethertype[2]
+                @memcpy(pkt_data[0..6], &pending.mac);
+
+                // Transmit the packet
+                _ = iface.transmit(pkt_data[0..pkt_len]);
+            }
+            // Free the buffer after transmission (or if invalid)
+            cache.cache_allocator.free(pkt_data);
         }
     }
 

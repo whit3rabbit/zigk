@@ -30,13 +30,18 @@ pub const VirtqDesc = extern struct {
     next: u16,
 };
 
+/// Maximum queue size supported by this implementation.
+/// Security: This constant MUST match the array sizes in VirtqAvail and VirtqUsed,
+/// and the validation check in Virtqueue.init(). Changing this requires updating all three.
+pub const MAX_QUEUE_SIZE: u16 = 256;
+
 /// Virtqueue available ring - driver writes, device reads
 pub const VirtqAvail = extern struct {
     flags: u16,
     /// Next available entry (wraps)
     idx: u16,
-    /// Ring of descriptor head indices (variable size, 256 max)
-    ring: [256]u16,
+    /// Ring of descriptor head indices (variable size, MAX_QUEUE_SIZE max)
+    ring: [MAX_QUEUE_SIZE]u16,
     // used_event follows ring if EVENT_IDX enabled (not included here)
 };
 
@@ -53,8 +58,8 @@ pub const VirtqUsed = extern struct {
     flags: u16,
     /// Next used entry (wraps)
     idx: u16,
-    /// Ring of used elements (variable size, 256 max)
-    ring: [256]VirtqUsedElem,
+    /// Ring of used elements (variable size, MAX_QUEUE_SIZE max)
+    ring: [MAX_QUEUE_SIZE]VirtqUsedElem,
     // avail_event follows ring if EVENT_IDX enabled (not included here)
 };
 
@@ -84,9 +89,33 @@ pub const Virtqueue = struct {
     const Self = @This();
 
     /// Allocate and initialize a virtqueue with the given size
-    /// Returns null if allocation fails
+    /// Returns null if allocation fails or queue_size exceeds MAX_QUEUE_SIZE
     pub fn init(queue_size: u16) ?Self {
-        if (queue_size == 0 or queue_size > 256) return null;
+        // Security: Validate queue_size against MAX_QUEUE_SIZE to prevent OOB access
+        // on the fixed-size ring arrays in VirtqAvail and VirtqUsed.
+        if (queue_size == 0 or queue_size > MAX_QUEUE_SIZE) return null;
+
+        // Comptime assertion: Ensure validation matches array sizes
+        // Security: Prevents regression where someone changes one constant/array size
+        // without updating the others, which would cause OOB access.
+        comptime {
+            const avail_fields = @typeInfo(VirtqAvail).@"struct".fields;
+            const used_fields = @typeInfo(VirtqUsed).@"struct".fields;
+            for (avail_fields) |f| {
+                if (std.mem.eql(u8, f.name, "ring")) {
+                    if (MAX_QUEUE_SIZE != @typeInfo(f.type).array.len) {
+                        @compileError("MAX_QUEUE_SIZE must match VirtqAvail.ring array size");
+                    }
+                }
+            }
+            for (used_fields) |f| {
+                if (std.mem.eql(u8, f.name, "ring")) {
+                    if (MAX_QUEUE_SIZE != @typeInfo(f.type).array.len) {
+                        @compileError("MAX_QUEUE_SIZE must match VirtqUsed.ring array size");
+                    }
+                }
+            }
+        }
 
         // Calculate sizes (aligned as per VirtIO spec)
         const desc_size = @as(usize, queue_size) * @sizeOf(VirtqDesc);
@@ -197,7 +226,13 @@ pub const Virtqueue = struct {
             if (head == null) head = idx;
 
             self.desc[idx].addr = hal.paging.virtToPhys(@intFromPtr(buf.ptr));
-            self.desc[idx].len = @intCast(buf.len);
+            // Security: Use checked cast to prevent silent truncation in ReleaseFast
+            // if buf.len exceeds u32 max (4GB). VirtIO descriptor len is u32.
+            self.desc[idx].len = std.math.cast(u32, buf.len) orelse {
+                // Buffer too large for VirtIO descriptor - free allocated descriptors
+                self.freeDescChain(head.?);
+                return null;
+            };
             self.desc[idx].flags = 0;
 
             if (prev) |p| {
@@ -213,7 +248,13 @@ pub const Virtqueue = struct {
             if (head == null) head = idx;
 
             self.desc[idx].addr = hal.paging.virtToPhys(@intFromPtr(buf.ptr));
-            self.desc[idx].len = @intCast(buf.len);
+            // Security: Use checked cast to prevent silent truncation in ReleaseFast
+            // if buf.len exceeds u32 max (4GB). VirtIO descriptor len is u32.
+            self.desc[idx].len = std.math.cast(u32, buf.len) orelse {
+                // Buffer too large for VirtIO descriptor - free allocated descriptors
+                self.freeDescChain(head.?);
+                return null;
+            };
             self.desc[idx].flags = VIRTQ_DESC_F_WRITE;
 
             if (prev) |p| {

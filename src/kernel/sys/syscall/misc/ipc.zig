@@ -44,6 +44,10 @@ pub fn sys_send(target_pid: usize, msg_ptr: usize, len: usize) SyscallError!usiz
     const user_ptr = user_mem.UserPtr.from(msg_ptr);
 
     // Read message from user space (manual copy)
+    // SECURITY: msg is a local stack variable. User data is copied into it, then
+    // sender_pid is overwritten with the true caller PID below. No other code can
+    // access this local variable between copy and overwrite, so sender spoofing
+    // is not possible despite the temporary user-controlled value.
     var msg: Message = undefined;
     msg.sender_pid = 0; // Filled by kernel
     const msg_bytes = std.mem.asBytes(&msg);
@@ -53,7 +57,7 @@ pub fn sys_send(target_pid: usize, msg_ptr: usize, len: usize) SyscallError!usiz
         return error.EFAULT;
     };
 
-    // Fill in true sender PID
+    // Overwrite sender_pid with true caller PID (cannot be spoofed)
     if (sched.getCurrentThread()) |t| {
         if (t.process) |p_opaque| {
             const p: *process.Process = @ptrCast(@alignCast(p_opaque));
@@ -140,7 +144,10 @@ pub fn sys_recv(msg_ptr: usize, len: usize) SyscallError!usize {
 pub fn sendKernelMessage(target_pid: usize, payload: []const u8) !void {
     const target = process.findProcessByPid(@intCast(target_pid)) orelse return error.ESRCH;
 
-    var msg: Message = undefined;
+    // SECURITY: Zero-initialize to prevent kernel stack data leaking to userspace.
+    // Without this, msg.payload[len..MAX_PAYLOAD_SIZE] would contain uninitialized
+    // stack data that gets copied to the receiving process in sys_recv.
+    var msg: Message = std.mem.zeroes(Message);
     msg.sender_pid = 0; // 0 = Kernel
 
     // Copy payload (truncate if too long)

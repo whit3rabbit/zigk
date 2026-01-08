@@ -27,6 +27,11 @@ pub fn init(pci_dev: *const pci.PciDevice, pci_access: pci.PciAccess) !*types.Hd
     }
 
     // Allocate driver instance
+    // Security note: Heap allocation is safe here because the Hda struct itself is NOT
+    // a DMA target - it only holds pointers to DMA buffers. The actual DMA buffers
+    // (CORB/RIRB rings) are allocated from PMM below with pmm.allocZeroedPage().
+    // Hardware never accesses this struct directly; it only accesses the PMM-allocated
+    // physical addresses stored in corb_phys/rirb_phys fields.
     const driver = try heap.allocator().create(types.Hda);
     errdefer heap.allocator().destroy(driver);
 

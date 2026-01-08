@@ -447,6 +447,11 @@ fn deliverSignalToThread(target: *sched.Thread, signum: u8) void {
 ///   pid < -1: Send to process group -pid (not impl)
 ///
 /// Returns: 0 on success, negative errno on error
+///
+/// ABI Note: The truncation of pid/sig from usize to u32/u8 is intentional and
+/// correct per Linux x86_64 ABI. pid_t is a 32-bit signed type, and signal
+/// numbers fit in 8 bits. The syscall receives full 64-bit register values
+/// but only the low bits are meaningful. This matches Linux kernel behavior.
 pub fn sys_kill(pid: usize, sig: usize) SyscallError!usize {
     const pid_i: i32 = @bitCast(@as(u32, @truncate(pid)));
     const signum: u8 = @truncate(sig);

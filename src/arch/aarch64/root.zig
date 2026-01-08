@@ -47,6 +47,7 @@ pub const apic = struct {
     pub fn enableIrq(_: u32) void {}
     pub fn disableIrq(_: u32) void {}
     pub fn setLegacyPicMode() void {}
+    pub fn sendEoi() void {}
     pub const Vectors = struct {
         pub const MOUSE: u32 = 44;
         pub const COM1: u32 = 36;

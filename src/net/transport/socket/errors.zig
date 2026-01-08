@@ -4,6 +4,7 @@ pub const SocketError = error{
     BadFd,
     AfNotSupported,
     TypeNotSupported,
+    ProtoNotSupported,
     NoSocketsAvailable,
     AddrInUse,
     AddrNotAvail,
@@ -18,6 +19,8 @@ pub const SocketError = error{
     ConnectionReset,
     AccessDenied,
     NoResources,
+    NoBuffers, // No buffer space available (ENOBUFS)
+    MsgSize, // Message too large (EMSGSIZE)
     SystemError, // Scheduler/thread integration not available
 };
 
@@ -30,6 +33,7 @@ pub fn errorToErrno(err: SocketError) isize {
         SocketError.BadFd => -@as(isize, @intFromEnum(E.EBADF)),
         SocketError.AfNotSupported => -@as(isize, @intFromEnum(E.EAFNOSUPPORT)),
         SocketError.TypeNotSupported => -@as(isize, @intFromEnum(E.ESOCKTNOSUPPORT)),
+        SocketError.ProtoNotSupported => -@as(isize, @intFromEnum(E.EPROTONOSUPPORT)),
         SocketError.NoSocketsAvailable => -@as(isize, @intFromEnum(E.ENFILE)),
         SocketError.AddrInUse => -@as(isize, @intFromEnum(E.EADDRINUSE)),
         SocketError.AddrNotAvail => -@as(isize, @intFromEnum(E.EADDRNOTAVAIL)),
@@ -44,6 +48,8 @@ pub fn errorToErrno(err: SocketError) isize {
         SocketError.ConnectionReset => -@as(isize, @intFromEnum(E.ECONNRESET)),
         SocketError.AccessDenied => -@as(isize, @intFromEnum(E.EACCES)),
         SocketError.NoResources => -@as(isize, @intFromEnum(E.ENOMEM)),
+        SocketError.NoBuffers => -@as(isize, @intFromEnum(E.ENOBUFS)),
+        SocketError.MsgSize => -@as(isize, @intFromEnum(E.EMSGSIZE)),
         SocketError.SystemError => -@as(isize, @intFromEnum(E.ENOSYS)),
     };
 }

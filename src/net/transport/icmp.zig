@@ -32,6 +32,8 @@ const Interface = interface.Interface;
 const tcp = @import("tcp.zig");
 const udp = @import("udp.zig");
 const sync = @import("../sync.zig");
+const socket_state = @import("socket/state.zig");
+const socket_types = @import("socket/types.zig");
 
 /// SECURITY: Recent UDP transmit cache for PMTU validation (RFC 5927 defense).
 /// Tracks destination IPs we've recently sent UDP packets to, preventing spoofed
@@ -145,11 +147,24 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
             return handleEchoRequest(iface, pkt, icmp_len);
         },
         TYPE_ECHO_REPLY => {
-            // Could notify waiting ping processes
+            // Deliver to raw sockets listening on IPPROTO_ICMP
+            // This enables userspace ping implementation via SOCK_RAW
+            const src_ip = ip.getSrcIp();
+            if (pkt.transport_offset < pkt.len) {
+                const reply_data = pkt.data[pkt.transport_offset..pkt.len];
+                _ = socket_state.deliverToRawSockets4(
+                    socket_types.IPPROTO_ICMP,
+                    reply_data,
+                    src_ip,
+                );
+            }
             return true;
         },
         TYPE_DEST_UNREACHABLE => {
             return handleDestUnreachable(pkt, icmp);
+        },
+        TYPE_TIME_EXCEEDED => {
+            return handleTimeExceeded(pkt);
         },
         else => {
             // Unknown or unsupported type
@@ -207,7 +222,10 @@ fn handleEchoRequest(iface: *Interface, req_pkt: *PacketBuffer, icmp_len: usize)
     const reply_ip: *Ipv4Header = @ptrCast(@alignCast(&reply_buf[eth_len]));
     reply_ip.version_ihl = 0x45; // Version 4, IHL 5
     reply_ip.tos = 0;
-    reply_ip.setTotalLength(@truncate(ip_len + icmp_len));
+    // SECURITY: Checked arithmetic per CLAUDE.md to prevent u16 overflow truncation.
+    const reply_ip_total = std.math.add(usize, ip_len, icmp_len) catch return false;
+    if (reply_ip_total > std.math.maxInt(u16)) return false;
+    reply_ip.setTotalLength(@intCast(reply_ip_total));
     reply_ip.identification = @byteSwap(ipv4.getNextId());
     reply_ip.flags_fragment = @byteSwap(@as(u16, 0x4000)); // Don't Fragment
     reply_ip.ttl = ipv4.DEFAULT_TTL;
@@ -368,6 +386,26 @@ fn handleDestUnreachable(pkt: *PacketBuffer, icmp: *align(1) const IcmpHeader) b
     return true;
 }
 
+/// Handle ICMP Time Exceeded messages (Type 11)
+/// Delivers to raw ICMP sockets for traceroute support.
+/// RFC 792: Time Exceeded contains IP header + first 8 bytes of original datagram.
+fn handleTimeExceeded(pkt: *PacketBuffer) bool {
+    const ip = packet.getIpv4Header(pkt.data, pkt.ip_offset) orelse return false;
+    const src_ip = ip.getSrcIp();
+
+    // Deliver entire ICMP message (including original packet excerpt) to raw sockets
+    if (pkt.transport_offset < pkt.len) {
+        const icmp_data = pkt.data[pkt.transport_offset..pkt.len];
+        _ = socket_state.deliverToRawSockets4(
+            socket_types.IPPROTO_ICMP,
+            icmp_data,
+            src_ip,
+        );
+    }
+
+    return true;
+}
+
 /// Verify ICMP checksum
 fn verifyIcmpChecksum(data: []const u8) bool {
     var sum: u32 = 0;
@@ -429,7 +467,10 @@ pub fn sendEchoRequest(
     const ip: *Ipv4Header = @ptrCast(@alignCast(&buf[eth_len]));
     ip.version_ihl = 0x45;
     ip.tos = 0;
-    ip.setTotalLength(@truncate(ip_len + icmp_len));
+    // SECURITY: Checked arithmetic per CLAUDE.md to prevent u16 overflow truncation.
+    const req_ip_total = std.math.add(usize, ip_len, icmp_len) catch return false;
+    if (req_ip_total > std.math.maxInt(u16)) return false;
+    ip.setTotalLength(@intCast(req_ip_total));
     ip.identification = @byteSwap(ipv4.getNextId());
     ip.flags_fragment = @byteSwap(@as(u16, 0x4000));
     ip.ttl = ipv4.DEFAULT_TTL;
@@ -512,7 +553,10 @@ pub fn sendDestUnreachable(
     const ip: *Ipv4Header = @ptrCast(@alignCast(&buf[eth_len]));
     ip.version_ihl = 0x45;
     ip.tos = 0;
-    ip.setTotalLength(@truncate(ip_len + icmp_len));
+    // SECURITY: Checked arithmetic per CLAUDE.md to prevent u16 overflow truncation.
+    const err_ip_total = std.math.add(usize, ip_len, icmp_len) catch return false;
+    if (err_ip_total > std.math.maxInt(u16)) return false;
+    ip.setTotalLength(@intCast(err_ip_total));
     ip.identification = @byteSwap(ipv4.getNextId());
     ip.flags_fragment = @byteSwap(@as(u16, 0x4000));
     ip.ttl = ipv4.DEFAULT_TTL;

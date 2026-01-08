@@ -62,6 +62,7 @@ pub const recv = api.recv;
 // Timer hooks
 pub const processTimers = timers.processTimers;
 pub const handleIcmpError = timers.handleIcmpError;
+pub const handleIcmpErrorIp = timers.handleIcmpErrorIp;
 
 // Errors
 pub const TcpError = errors.TcpError;

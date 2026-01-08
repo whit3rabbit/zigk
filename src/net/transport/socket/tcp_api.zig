@@ -6,6 +6,7 @@ const state = @import("state.zig");
 const tcp_state = @import("../tcp/state.zig");
 const errors = @import("errors.zig");
 const scheduler = @import("scheduler.zig");
+const ipv6_transmit = @import("../../ipv6/ipv6/transmit.zig");
 
 /// Mark socket as listening for connections (TCP only)
 pub fn listen(sock_fd: usize, backlog_arg: usize) errors.SocketError!void {
@@ -104,14 +105,25 @@ pub fn accept(sock_fd: usize, peer_addr: ?*types.SockAddrIn) errors.SocketError!
 
                 // CRITICAL: Release socket ref before blocking!
                 // calling queueAcceptConnection requires this lock.
-                // If we hold it while sleeping, we deadock.
+                // If we hold it while sleeping, we deadlock.
                 state.releaseSocket(sock);
 
                 // block_fn() sets state=Blocked then atomically enables
                 // interrupts and halts (STI; HLT sequence)
                 block_fn();
 
-                sock.blocked_thread = null;
+                // SECURITY FIX: Do NOT access sock.blocked_thread here!
+                // After releaseSocket(), another thread may have closed the socket,
+                // dropping refcount to 0 and freeing the memory. Accessing sock
+                // would be Use-After-Free.
+                //
+                // The blocked_thread field will be cleared by:
+                // 1. queueAcceptConnection() when it wakes us (sets to null after wake)
+                // 2. close() which clears the socket state before freeing
+                //
+                // If we wake spuriously, the next loop iteration re-acquires the
+                // socket and will either find data or re-register blocked_thread.
+                //
                 // Woke up - loop around to re-acquire locks and check queue
                 continue;
             } else {
@@ -257,6 +269,117 @@ pub fn connect(sock_fd: usize, dest_addr: *const types.SockAddrIn) errors.Socket
         .Closed => return errors.SocketError.ConnectionRefused,
         .SynSent => return errors.SocketError.WouldBlock, // Should not happen if we blocked
         else => return, // Other states might imply connected or closing
+    }
+}
+
+/// Initiate connection to remote IPv6 address (TCP only)
+pub fn connect6(sock_fd: usize, dest_addr: *const types.SockAddrIn6) errors.SocketError!void {
+    const sock = state.acquireSocket(sock_fd) orelse return errors.SocketError.BadFd;
+    defer state.releaseSocket(sock);
+
+    // Must be SOCK_STREAM (TCP)
+    if (sock.sock_type != types.SOCK_STREAM) {
+        return errors.SocketError.TypeNotSupported;
+    }
+
+    // Already connected?
+    if (sock.tcb != null) {
+        return errors.SocketError.AlreadyConnected;
+    }
+
+    const iface = state.getInterface() orelse return errors.SocketError.NetworkDown;
+    const IpAddr = @import("../../core/addr.zig").IpAddr;
+
+    // Auto-bind if not bound
+    if (sock.local_port == 0) {
+        sock.local_port = state.allocateEphemeralPort();
+    }
+
+    // Select source address using RFC 6724 algorithm from IPv6 transmit module
+    const remote_v6 = dest_addr.addr;
+    const local_v6 = ipv6_transmit.selectSourceAddress(iface, remote_v6) orelse {
+        return errors.SocketError.NetworkUnreachable;
+    };
+
+    // Create IpAddr from IPv6 addresses
+    const local_addr = IpAddr{ .v6 = local_v6 };
+    const remote_addr = IpAddr{ .v6 = remote_v6 };
+    const remote_port = dest_addr.getPort();
+
+    // Initiate connection using polymorphic API
+    const tcb = tcp.connectIp(local_addr, sock.local_port, remote_addr, remote_port) catch |err| {
+        return switch (err) {
+            tcp.TcpError.NoResources => errors.SocketError.NoSocketsAvailable,
+            tcp.TcpError.AlreadyConnected => errors.SocketError.AlreadyConnected,
+            tcp.TcpError.NetworkError => errors.SocketError.NetworkUnreachable,
+            else => errors.SocketError.NetworkUnreachable,
+        };
+    };
+
+    sock.tcb = tcb;
+    sock.family = types.AF_INET6;
+    sock.local_addr = local_addr;
+    tcb.nodelay = sock.tcp_nodelay;
+
+    // Store socket index in TCB for async completion lookup
+    tcb.parent_socket = sock_fd;
+
+    // Copy socket options to TCB
+    tcb.tos = sock.tos;
+
+    // Capture generation for race checking
+    const tcb_gen = tcb.generation;
+
+    // Connection started - SYN sent
+
+    // Handle blocking if requested
+    if (sock.blocking) {
+        if (scheduler.blockFn()) |block_fn| {
+            const get_current = scheduler.currentThreadFn() orelse return errors.SocketError.SystemError;
+
+            // Loop until state changes from SynSent (or error occurs)
+            while (true) {
+                const connect_held = tcp_state.lock.acquire();
+                const still_valid = tcp_state.isTcbValid(tcb) and sock.tcb == tcb and tcb.generation == tcb_gen;
+                if (!still_valid) {
+                    connect_held.release();
+                    return errors.SocketError.ConnectionRefused;
+                }
+
+                if (tcb.state != .SynSent) {
+                    tcb.blocked_thread = null;
+                    connect_held.release();
+                    break;
+                }
+
+                sock.blocked_thread = get_current();
+                tcb.blocked_thread = sock.blocked_thread;
+                connect_held.release();
+
+                block_fn();
+
+                sock.blocked_thread = null;
+            }
+        } else {
+            return errors.SocketError.WouldBlock;
+        }
+    }
+
+    // Check final state
+    const final_state = blk: {
+        const final_held = tcp_state.lock.acquire();
+        defer final_held.release();
+        const final_tcb = sock.tcb;
+        if (final_tcb == null) break :blk .Closed;
+        if (!tcp_state.isTcbValid(final_tcb.?)) break :blk .Closed;
+        break :blk final_tcb.?.state;
+    };
+
+    switch (final_state) {
+        .Established => return,
+        .Closed => return errors.SocketError.ConnectionRefused,
+        .SynSent => return errors.SocketError.WouldBlock,
+        else => return,
     }
 }
 
@@ -574,6 +697,73 @@ pub fn connectAsync(sock_fd: usize, request: *IoRequest, dest_addr: *const types
     return false; // Pending - handshake in progress
 }
 
+/// Async connect to IPv6 address - queue request for connection establishment
+/// Returns true if completed synchronously, false if pending
+pub fn connectAsync6(sock_fd: usize, request: *IoRequest, dest_addr: *const types.SockAddrIn6) errors.SocketError!bool {
+    const sock = state.acquireSocket(sock_fd) orelse return errors.SocketError.BadFd;
+    defer state.releaseSocket(sock);
+
+    // Must be SOCK_STREAM (TCP)
+    if (sock.sock_type != types.SOCK_STREAM) {
+        return errors.SocketError.TypeNotSupported;
+    }
+
+    // Already connected?
+    if (sock.tcb != null) {
+        _ = request.complete(.{ .err = error.EISCONN });
+        return true;
+    }
+
+    const iface = state.getInterface() orelse {
+        _ = request.complete(.{ .err = error.ENETDOWN });
+        return true;
+    };
+    const IpAddr = @import("../../core/addr.zig").IpAddr;
+
+    // Auto-bind if not bound
+    if (sock.local_port == 0) {
+        sock.local_port = state.allocateEphemeralPort();
+    }
+
+    // Select source address using RFC 6724 algorithm from IPv6 transmit module
+    const remote_v6 = dest_addr.addr;
+    const local_v6 = ipv6_transmit.selectSourceAddress(iface, remote_v6) orelse {
+        _ = request.complete(.{ .err = error.ENETUNREACH });
+        return true;
+    };
+
+    // Create IpAddr from IPv6 addresses
+    const local_addr = IpAddr{ .v6 = local_v6 };
+    const remote_addr = IpAddr{ .v6 = remote_v6 };
+    const remote_port = dest_addr.getPort();
+
+    // Initiate connection using polymorphic API
+    const tcb = tcp.connectIp(local_addr, sock.local_port, remote_addr, remote_port) catch |err| {
+        const syscall_err = switch (err) {
+            tcp.TcpError.NoResources => error.ENOMEM,
+            tcp.TcpError.AlreadyConnected => error.EISCONN,
+            tcp.TcpError.NetworkError => error.ENETUNREACH,
+            else => error.ENETUNREACH,
+        };
+        _ = request.complete(.{ .err = syscall_err });
+        return true;
+    };
+
+    sock.tcb = tcb;
+    sock.family = types.AF_INET6;
+    sock.local_addr = local_addr;
+    tcb.tos = sock.tos;
+
+    // Store socket index in TCB for async completion lookup
+    tcb.parent_socket = sock_fd;
+
+    // Store pending connect request - will be completed when handshake finishes
+    sock.pending_connect = request;
+    request.fd = @intCast(sock_fd);
+
+    return false; // Pending - handshake in progress
+}
+
 /// Complete pending accept request (called from TCP layer when connection arrives)
 /// Returns true if a pending request was completed
 pub fn completePendingAccept(socket_idx: usize, tcb: *tcp.Tcb) bool {
@@ -610,18 +800,33 @@ pub fn completePendingAccept(socket_idx: usize, tcb: *tcp.Tcb) bool {
 
 /// Complete pending recv request (called from TCP layer when data arrives)
 /// Returns true if a pending request was completed
+///
+/// SECURITY: This function runs in IRQ/softirq context (TCP RX path). We copy data
+/// to the kernel bounce buffer here (safe), and finalizeBounceBuffer() copies to
+/// user space in syscall context via UserPtr (handles SMAP, page faults, TOCTOU).
 pub fn completePendingRecv(socket_idx: usize, data: []const u8) bool {
     const sock = state.acquireSocket(socket_idx) orelse return false;
     defer state.releaseSocket(sock);
 
-    const pending = sock.pending_recv orelse return false;
-    const request: *IoRequest = @ptrCast(@alignCast(pending));
-    sock.pending_recv = null;
+    // Access pending_recv under lock to prevent race with recvAsync
+    const request: *IoRequest = blk: {
+        const held = sock.lock.acquire();
+        defer held.release();
+        const pending = sock.pending_recv orelse return false;
+        sock.pending_recv = null;
+        break :blk @ptrCast(@alignCast(pending));
+    };
 
-    // Copy data to request buffer
-    const buf_ptr: [*]u8 = @ptrFromInt(request.buf_ptr);
-    const copy_len = @min(data.len, request.buf_len);
-    @memcpy(buf_ptr[0..copy_len], data[0..copy_len]);
+    // Copy to kernel bounce buffer (allocated at io_uring submission in ops.zig).
+    // finalizeBounceBuffer() handles the safe copy to user space in syscall context.
+    const bounce = request.bounce_buf orelse {
+        // No bounce buffer means non-io_uring path or allocation failure at submission.
+        _ = request.complete(.{ .err = error.EFAULT });
+        return true;
+    };
+
+    const copy_len = @min(data.len, bounce.len);
+    @memcpy(bounce[0..copy_len], data[0..copy_len]);
 
     _ = request.complete(.{ .success = copy_len });
     return true;
@@ -633,9 +838,14 @@ pub fn completePendingConnect(socket_idx: usize, success: bool) bool {
     const sock = state.acquireSocket(socket_idx) orelse return false;
     defer state.releaseSocket(sock);
 
-    const pending = sock.pending_connect orelse return false;
-    const request: *IoRequest = @ptrCast(@alignCast(pending));
-    sock.pending_connect = null;
+    // Access pending_connect under lock to prevent race with connectAsync/timeout
+    const request: *IoRequest = blk: {
+        const held = sock.lock.acquire();
+        defer held.release();
+        const pending = sock.pending_connect orelse return false;
+        sock.pending_connect = null;
+        break :blk @ptrCast(@alignCast(pending));
+    };
 
     if (success) {
         _ = request.complete(.{ .success = 0 });
@@ -651,9 +861,14 @@ pub fn completePendingSend(socket_idx: usize, bytes_sent: usize) bool {
     const sock = state.acquireSocket(socket_idx) orelse return false;
     defer state.releaseSocket(sock);
 
-    const pending = sock.pending_send orelse return false;
-    const request: *IoRequest = @ptrCast(@alignCast(pending));
-    sock.pending_send = null;
+    // Access pending_send under lock to prevent race with sendAsync/timeout
+    const request: *IoRequest = blk: {
+        const held = sock.lock.acquire();
+        defer held.release();
+        const pending = sock.pending_send orelse return false;
+        sock.pending_send = null;
+        break :blk @ptrCast(@alignCast(pending));
+    };
 
     _ = request.complete(.{ .success = bytes_sent });
     return true;

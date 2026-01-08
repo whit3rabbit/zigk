@@ -290,6 +290,7 @@ This checklist highlights the unique architectural design, protocol compliance, 
 *   **Tick-Based PMTU Discovery**: Path MTU Discovery (RFC 1191) uses a monotonic tick-based rate limiter rather than an operation-counter, preventing attackers from flooding ICMP messages to bypass rate limits.
 *   **ICMP Smurf Prevention**: Explicit checks to ensure the kernel never replies to ICMP Echo Requests sent to broadcast/multicast addresses or originating from a multicast source.
 *   **RFC 5927 ICMP Validation**: ICMP errors (like Fragmentation Needed) are validated against active TCP/UDP flows using 4-tuple and sequence number checks before updating the PMTU cache.
+*   **Raw ICMP Sockets**: Support for `SOCK_RAW` with `IPPROTO_ICMP` enabling userspace ping utilities. Echo replies are delivered to matching raw sockets with source IP address metadata.
 
 ### Layer 4 - TCP & UDP
 *   **Cryptographically Secure ISNs**: Initial Sequence Numbers (ISNs) are generated using SipHash-2-4 seeded with hardware entropy (RFC 6528), with periodic key re-seeding to prevent sequence prediction attacks.
@@ -301,7 +302,8 @@ This checklist highlights the unique architectural design, protocol compliance, 
 ### Sockets & Async I/O
 *   **RFC 6056 Port Randomization**: Ephemeral port allocation implements "Random Port Randomization" (Algorithm 3) to provide ~32 bits of total entropy when combined with DNS transaction IDs.
 *   **Two-Phase Socket Deletion**: Lifetime management using `AtomicRefcount` and a "closing" flag to prevent use-after-free races during concurrent packet processing and socket teardown.
-*   **Async I/O Reactor Integration**: A Phase 2 API that supports `acceptAsync`, `recvAsync`, and `sendAsync`, allowing the kernel to park requests in the socket and complete them directly from the IRQ handler.
+*   **Async I/O Reactor Integration**: A Phase 2 API that supports `acceptAsync`, `recvAsync`, and `sendAsync`. Async recv uses kernel bounce buffers - IRQ context copies data to kernel memory, then `finalizeBounceBuffer()` safely copies to userspace in syscall context via `UserPtr`, preventing SMAP violations and TOCTOU attacks.
+*   **SO_REUSEADDR Support**: POSIX-compliant address reuse semantics allowing server restart without TIME_WAIT delays. Both sockets must set SO_REUSEADDR; TIME_WAIT connections always allow reuse; two LISTEN sockets on the same port are still prevented.
 *   **Tick-Based Timeouts**: Socket operations use a hierarchical timer wheel with 1ms granularity for timeout management.
 
 ### DNS Client
@@ -433,7 +435,7 @@ The following features are intentionally incomplete or stubbed for the MVP relea
 *   **Loopback Interface**: Synchronous processing only - protocol handlers must copy data before returning.
 
 #### Drivers & Hardware
-*   **Audio/Music**: Doom sound effects work; music playback functions (`I_PlaySong`, `I_PauseSong`) are empty stubs.
+*   **Audio/Music**: Doom sound effects and music playback fully implemented with OPL3 FM synthesis.
 *   **VirtIO-Blk IPC**: Message buffers limited to 4 sectors (2KB) per request.
 *   **VirtIO-Net Features**: `VIRTIO_NET_F_MRG_RXBUF` and `EVENT_IDX` defined but not negotiated.
 
@@ -469,20 +471,18 @@ This section documents known gaps, incomplete implementations, and security conc
 - **Files**: `src/arch/x86_64/kernel/gdt.zig`, `src/arch/x86_64/kernel/idt.zig`
 
 #### IOMMU Per-Device Integration
-- **Status**: MOSTLY COMPLETE (driver integration done, hardening pending)
+- **Status**: COMPLETE (2026-01-07)
 - **Description**: IOMMU domain manager with bitmap-based IOVA allocator (64KB granularity). Drivers (xHCI, AHCI, E1000e) properly use `dma.allocBuffer(bdf, size, writable)` which integrates with IOMMU when enabled. The DMA subsystem transparently returns IOVA addresses for hardware and physical addresses for CPU access. DMAR parsing extracts RMRR regions.
-- **Remaining**:
-  1. Add IOTLB invalidation after `mapRange()` calls in `domain.zig`
-  2. Validate IOVA allocations don't overlap RMRR regions
-  3. Return error if IOTLB invalidation fails
-- **Files**: `src/kernel/mm/iommu/domain.zig`, `src/arch/x86_64/mm/iommu/vtd.zig`
+- **Hardening (Implemented 2026-01-07)**:
+  1. IOTLB invalidation after `mapRange()` calls - already correct in `allocateAndMap()`
+  2. RMRR overlap validation - `allocateAndMap()` now rejects physical buffers overlapping firmware-reserved RMRR regions
+  3. IOTLB invalidation error handling - `unmapIova()` now returns `UnmapError` on failure; callers leak physical memory rather than risk use-after-free via stale TLB entries
+- **Files**: `src/kernel/mm/iommu/domain.zig`, `src/kernel/mm/dma.zig`, `src/arch/x86_64/mm/iommu/vtd.zig`
 
 #### Secure Page Free Ordering
-- **Status**: UNCLEAR
-- **Risk**: Information leakage via TLB race
-- **Description**: `zeroPage()` exists in PMM, but the ordering guarantee (zero memory THEN clear PTE THEN TLB shootdown) is not clearly enforced in all paths.
-- **Fix**: Audit all `freePages()` call sites; ensure zeroing happens before PTE modification; add memory barriers if needed.
-- **Files**: `src/kernel/mm/pmm.zig`, `src/kernel/mm/vmm.zig`
+- **Status**: IMPLEMENTED (2026-01-07)
+- **Description**: All user page free paths now enforce correct ordering: zero via HHDM -> memory barrier (`std.atomic.fence(.seq_cst)`) -> clear PTE -> TLB shootdown -> return to PMM. This prevents TLB race information leakage where a page could be reallocated before all CPUs process the TLB shootdown IPI. Fixed in `freeVmaPages()` (munmap, process exit) and `shrinkHeap()` (brk shrink).
+- **Files**: `src/kernel/mm/user_vmm.zig`
 
 ### Priority 3: Feature Completeness
 
@@ -497,10 +497,9 @@ This section documents known gaps, incomplete implementations, and security conc
 - **Files**: `src/kernel/proc/thread.zig`, `src/kernel/proc/signal.zig`, `src/kernel/sys/syscall/process/signals.zig`, `src/kernel/proc/sched/scheduler.zig`, `src/kernel/proc/sched/thread.zig`, `src/arch/x86_64/kernel/fpu.zig`
 
 #### Music Playback
-- **Status**: STUB
-- **Description**: `I_PlaySong`, `I_PauseSong`, `I_ResumeSong`, `I_StopSong` are empty stubs in the Doom port.
-- **Fix**: Implement MIDI or OPL3 emulation; alternatively, decode module/tracker formats in software.
-- **Files**: `src/user/doom/i_sound.zig`
+- **Status**: IMPLEMENTED (2026-01-07)
+- **Description**: Full OPL3 FM synthesis for Doom music playback. Features include: MUS-to-MIDI conversion via `mus2mid`, MIDI sequencer with tick-based timing, OPL3 emulator with 18 2-operator voices, ADSR envelope generators, 8 waveform types, GENMIDI instrument bank loading from WAD, and integration with the audio mixer.
+- **Files**: `src/user/doom/i_sound.zig`, `src/user/doom/opl3.zig`, `src/user/doom/midi.zig`, `src/user/doom/midi_parser.zig`, `src/user/doom/sequencer.zig`, `src/user/doom/genmidi.zig`
 
 #### VirtIO-Blk Large Requests
 - **Status**: LIMITED
@@ -568,6 +567,33 @@ This roadmap was generated from a comprehensive feature validation on 2024-12-30
   - Integration with timing.zig (initBest() enables pvtime under KVM)
   - Stolen time tracking for accurate CPU accounting under VM preemption
 
+**Implemented 2026-01-07:**
+- **Secure Page Free Ordering**: Fixed TLB race information leakage (`src/kernel/mm/user_vmm.zig`)
+  - All user page free paths (munmap, brk shrink, process exit) now enforce: zero via HHDM -> memory barrier -> clear PTE -> TLB shootdown -> return to PMM
+  - Prevents page reallocation before all CPUs process TLB shootdown IPI
+  - Added `hal.mmio.memoryBarrier()` between zeroing and PTE clear
+- **Doom Music Playback (OPL3 FM Synthesis)**: Full music playback for Doom port
+  - MUS-to-MIDI conversion via existing `mus2mid.c`
+  - MIDI parser for SMF Type 0/1 files (`midi_parser.zig`)
+  - Tick-based MIDI sequencer with per-channel state tracking (`sequencer.zig`)
+  - Software OPL3/YMF262 FM synthesizer emulation (`opl3.zig`): 18 2-operator voices, 8 waveforms, ADSR envelopes, LRU voice allocation
+  - GENMIDI instrument bank loading from WAD lumps (`genmidi.zig`)
+  - Integration with audio mixer in `i_sound.zig` for simultaneous SFX + music
+- **VirtIO-Sound Driver**: Full paravirtualized audio driver (`src/drivers/virtio/sound/`)
+  - VirtIO Specification 1.2+ Section 5.14 compliant
+  - OSS-compatible /dev/dsp interface for legacy applications (Doom)
+  - PCM playback with multiple stream support
+  - Control queue for stream configuration (PCM_INFO, PCM_SET_PARAMS, PCM_PREPARE, PCM_START, PCM_STOP)
+  - TX queue for audio data transfer with double-buffering
+  - Sample rate support: 8kHz-192kHz (device-dependent)
+  - Format support: S8, U8, S16, U16, S24, S32, FLOAT
+  - Integrated with audio subsystem init (priority: VirtIO-Sound > HDA > AC97)
+- **IPv6 Socket Dual-Stack Completion**: Full IPv6 parity for socket syscalls
+  - sys_getsockname/sys_getpeername: Return correct AF_INET6 addresses
+  - sendtoRaw6/recvfromRaw6: Raw ICMPv6 socket support for ping6
+  - PMTU cache: Path MTU discovery per RFC 8201
+  - Error handling: NoBuffers/MsgSize socket errors properly mapped
+
 **Discovered 2026-01-04 (documentation update - features were already implemented):**
 - DHCPv4 client fully functional in netcfgd service (`src/user/services/netcfgd/dhcpv4.zig`)
   - Full RFC 2131/2132 state machine with T1/T2 renewal
@@ -611,9 +637,10 @@ This roadmap was generated from a comprehensive feature validation on 2024-12-30
 | Time Sync | Yes | Yes | Yes (kvmclock/pvtime) | Yes (kvmclock/pvtime) | No |
 | Graceful Shutdown | Yes | Partial | No | No | No |
 | Graphics (2D) | SVGA II | SVGA II | VirtIO-GPU | VirtIO-GPU | No |
-| Absolute Mouse | VMMouse | VMMouse | No | No | No |
+| Absolute Mouse | VMMouse | VMMouse | VirtIO-Input | VirtIO-Input | No |
 | Network | E1000e | E1000e | VirtIO-Net | VirtIO-Net | No |
-| Storage | AHCI | AHCI | AHCI/VirtIO-Blk | AHCI/VirtIO-Blk | No |
+| Storage | AHCI | AHCI | AHCI/VirtIO-Blk/SCSI | AHCI/VirtIO-Blk/SCSI | No |
+| Audio | HDA/AC97 | HDA/AC97 | VirtIO-Sound | VirtIO-Sound | No |
 | Balloon Memory | No | No | VirtIO-Balloon | VirtIO-Balloon | No |
 | Guest Agent | VMware Tools | VMware Tools | Partial | Partial | No |
 
@@ -652,7 +679,7 @@ This roadmap was generated from a comprehensive feature validation on 2024-12-30
 - VirtIO-9P (shared folders via Plan 9 protocol)
 - VirtIO-FS (virtiofs, modern shared folder replacement)
 - ~~VirtIO-Input (keyboard/mouse/tablet, replaces PS/2)~~ **IMPLEMENTED** (2026-01-05)
-- VirtIO-Sound (modern audio)
+- ~~VirtIO-Sound (modern audio)~~ **IMPLEMENTED** (2026-01-07)
 - ~~kvmclock paravirtualized timing source~~ **IMPLEMENTED** (2026-01-05)
 - SPICE display protocol (Proxmox default)
 - SPICE agent (vdagent for clipboard, resolution)
@@ -688,7 +715,9 @@ This roadmap was generated from a comprehensive feature validation on 2024-12-30
 | DHCP Client | **Implemented** | Full RFC 2131 client with ARP conflict detection |
 | DHCPv6 | **Implemented** | Full RFC 8415 client with Rapid Commit, T1/T2 renewal |
 | Multicast Routing | Partial | mDNS/service discovery |
-| Raw Sockets | Not Implemented | Network diagnostics (ping, traceroute) |
+| Raw Sockets (IPv4 ICMP) | **Implemented** | ping utility support (2026-01-07) |
+| Raw Sockets (IPv6 ICMPv6) | **Implemented** | ping6 utility support |
+| Raw Sockets (traceroute) | **Implemented** | TTL control + TIME_EXCEEDED delivery (2026-01-07) |
 | UNIX Domain Sockets | Not Implemented | Local IPC (systemd, dbus patterns) |
 
 #### Storage Gaps
@@ -724,7 +753,7 @@ This roadmap was generated from a comprehensive feature validation on 2024-12-30
 | PVSCSI | VMware | Low-latency storage |
 | ~~kvmclock/pvtime~~ | QEMU/KVM | **IMPLEMENTED** - Stable TSC source (x86_64: kvmclock, aarch64: pvtime) |
 | ~~VirtIO-Input~~ | QEMU/KVM | **IMPLEMENTED** - Modern HID replacement (keyboard/mouse/tablet) |
-| VirtIO-Sound | QEMU/KVM | Modern audio |
+| ~~VirtIO-Sound~~ | QEMU/KVM | **IMPLEMENTED** - OSS-compatible /dev/dsp, PCM playback |
 
 ### Tier 3: Advanced Features
 
@@ -759,10 +788,11 @@ This roadmap was generated from a comprehensive feature validation on 2024-12-30
    - Location: `src/user/services/netcfgd/slaac.zig`
    - RFC 4862 with EUI-64 generation, M/O/A flag handling
 
-4. **IPv6 Core** - Mostly complete
-   - Location: `src/net/ipv6/`
-   - Components: ICMPv6 (done), NDP (done), SLAAC (done), DHCPv6 (done)
-   - Remaining: IPv6 PMTU cache, TX fragmentation wiring
+4. ~~**IPv6 Core**~~ - **COMPLETE** (2026-01-07)
+   - Location: `src/net/ipv6/`, `src/net/transport/socket/`
+   - Components: ICMPv6, NDP, SLAAC, DHCPv6, PMTU cache
+   - Socket dual-stack: sys_getsockname/sys_getpeername IPv4/IPv6 aware
+   - Raw sockets: sendtoRaw6/recvfromRaw6 for ping6 utility
 
 ### Phase 2: Storage Expansion (High Priority)
 1. ~~**NVMe Driver**~~ - **COMPLETE** (2026-01-05)
@@ -821,7 +851,7 @@ This roadmap was generated from a comprehensive feature validation on 2024-12-30
 | 0x1010 | GPU | Kernel | `virtio_gpu.zig` |
 | 0x1012 | Input | Kernel | `input/root.zig` **NEW** (2026-01-05) |
 | 0x1019 | FS | Not Impl | virtiofs |
-| 0x1021 | Sound | Not Impl | Audio |
+| 0x1021 | Sound | Kernel | `sound/root.zig` **NEW** (2026-01-07) |
 | 0x1008 | SCSI | Kernel | `scsi/root.zig` **NEW** (2026-01-05) |
 
 ### Modern Device IDs (1040+)
@@ -838,18 +868,13 @@ Modern VirtIO devices use 0x1040 + device_type. The kernel should detect both le
 - TCP with RFC 7323, SACK (IPv4 and IPv6)
 - UDP with checksum enforcement (IPv4 and IPv6)
 - DNS resolver with anti-spoofing
-- Socket API (SOCK_STREAM, SOCK_DGRAM)
+- Socket API (SOCK_STREAM, SOCK_DGRAM, SOCK_RAW)
+- Raw Sockets (ICMP/ICMPv6 for ping/ping6)
+- Traceroute support (IP_TTL setsockopt, TIME_EXCEEDED delivery)
 - Path MTU Discovery (IPv4)
 - IPv6 (RFC 8200) - RX/TX paths, extension header parsing, fragment reassembly
 - ICMPv6 (RFC 4443) - Echo, Dest Unreachable, Packet Too Big, Time Exceeded
 - NDP (RFC 4861) - Neighbor cache, NS/NA, RS/RA, DAD, packet queuing
-
-### Partially Implemented
-| Protocol | RFC | Status |
-|----------|-----|--------|
-| NDP | 4861 | RA received but prefix options not processed for SLAAC |
-| IPv6 PMTU | 8201 | Packet Too Big handled but no PMTU cache |
-| IPv6 Fragmentation TX | 8200 | Code exists but not wired up |
 
 ### Fully Implemented (Network)
 | Protocol | RFC | Description |
@@ -862,11 +887,18 @@ Modern VirtIO devices use 0x1040 + device_type. The kernel should detect both le
 |----------|-----|-------------|
 | DHCPv4 | 2131/2132/5227 | Full client with DORA, T1/T2 renewal, ARP probe |
 
+### Recently Added (2026-01-07)
+| Protocol | RFC | Use Case |
+|----------|-----|----------|
+| Raw Sockets (ICMP) | - | IPv4 ping support via SOCK_RAW + IPPROTO_ICMP |
+| Raw Sockets (ICMPv6) | - | IPv6 ping6 support via SOCK_RAW + IPPROTO_ICMPV6 |
+| Raw Sockets (traceroute) | - | IPv4/IPv6 traceroute via TTL/hop limit control and TIME_EXCEEDED delivery |
+| IPv6 Dual-Stack Syscalls | - | sys_getsockname/sys_getpeername return AF_INET6 addresses |
+
 ### Not Implemented
 | Protocol | RFC | Use Case |
 |----------|-----|----------|
 | IGMP | 3376 | Multicast group membership |
-| Raw Sockets | - | ping, traceroute |
 | UNIX Sockets | - | Local IPC |
 | Netlink | - | Network configuration |
 

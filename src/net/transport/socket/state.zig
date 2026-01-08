@@ -196,6 +196,8 @@ pub fn releasePort(port: u16) void {
     releasePortLocked(port);
 }
 
+/// SECURITY NOTE: Saturation at maxInt(u16) is theoretical only. MAX_SOCKETS=4096
+/// prevents reaching 65535 binds to same port. Saturation check prevents overflow.
 pub fn retainPortLocked(port: u16) void {
     if (ephemeralIndex(port)) |idx| {
         if (ephemeral_port_counts[idx] != std.math.maxInt(u16)) {
@@ -299,6 +301,114 @@ pub fn findUdpSocket6(port: u16, dst_addr: [16]u8) ?*types.Socket {
     }
 
     return wildcard_match;
+}
+
+/// Find a raw socket matching protocol (e.g., IPPROTO_ICMPV6)
+/// Used for delivering ICMPv6 echo replies to ping6 sockets.
+/// Returns the first matching raw socket (raw sockets receive all matching packets).
+pub fn findRawSocket6(protocol: i32) ?*types.Socket {
+    // Search through socket table for AF_INET6 SOCK_RAW sockets
+    for (socket_table.items) |maybe_sock| {
+        const sock = maybe_sock orelse continue;
+        if (!sock.allocated) continue;
+        if (sock.family != types.AF_INET6) continue;
+        if (sock.sock_type != types.SOCK_RAW) continue;
+        if (sock.protocol != protocol) continue;
+
+        return sock;
+    }
+
+    return null;
+}
+
+/// Find all raw sockets matching protocol and deliver packet to each.
+/// Raw sockets receive a copy of matching packets (unlike TCP/UDP which are exclusive).
+/// Returns number of sockets the packet was delivered to.
+pub fn deliverToRawSockets6(protocol: i32, pkt_data: []const u8, src_ipv6: [16]u8) usize {
+    var delivered: usize = 0;
+
+    // Iterate through all sockets
+    for (socket_table.items) |maybe_sock| {
+        const sock = maybe_sock orelse continue;
+        if (!sock.allocated) continue;
+        if (sock.family != types.AF_INET6) continue;
+        if (sock.sock_type != types.SOCK_RAW) continue;
+        if (sock.protocol != protocol) continue;
+
+        // Acquire socket lock to enqueue packet
+        const sock_held = sock.lock.acquire();
+        defer sock_held.release();
+
+        // Check if there's room in the RX queue
+        if (sock.rx_count < types.SOCKET_RX_QUEUE_SIZE) {
+            // Copy packet to RX queue entry
+            const entry = &sock.rx_queue[sock.rx_head];
+            const copy_len = @min(pkt_data.len, types.MAX_PACKET_SIZE);
+            @memcpy(entry.data[0..copy_len], pkt_data[0..copy_len]);
+            entry.len = copy_len;
+            entry.src_addr = .{ .v6 = src_ipv6 };
+            entry.src_port = 0; // Raw sockets don't have ports
+
+            sock.rx_head = (sock.rx_head + 1) % types.SOCKET_RX_QUEUE_SIZE;
+            sock.rx_count += 1;
+
+            delivered += 1;
+
+            // Wake blocked thread if any
+            if (sock.blocked_thread) |thread| {
+                types.scheduler.wakeThread(thread);
+                sock.blocked_thread = null;
+            }
+        }
+    }
+
+    return delivered;
+}
+
+/// Find all IPv4 raw sockets matching protocol and deliver packet to each.
+/// Raw sockets receive a copy of matching packets (unlike TCP/UDP which are exclusive).
+/// Used for delivering ICMP echo replies to ping sockets.
+/// Returns number of sockets the packet was delivered to.
+pub fn deliverToRawSockets4(protocol: i32, pkt_data: []const u8, src_ipv4: u32) usize {
+    var delivered: usize = 0;
+
+    // Iterate through all sockets
+    for (socket_table.items) |maybe_sock| {
+        const sock = maybe_sock orelse continue;
+        if (!sock.allocated) continue;
+        if (sock.family != types.AF_INET) continue;
+        if (sock.sock_type != types.SOCK_RAW) continue;
+        if (sock.protocol != protocol) continue;
+
+        // Acquire socket lock to enqueue packet
+        const sock_held = sock.lock.acquire();
+        defer sock_held.release();
+
+        // Check if there's room in the RX queue
+        if (sock.rx_count < types.SOCKET_RX_QUEUE_SIZE) {
+            // Copy packet to RX queue entry
+            const entry = &sock.rx_queue[sock.rx_head];
+            const copy_len = @min(pkt_data.len, types.MAX_PACKET_SIZE);
+            @memcpy(entry.data[0..copy_len], pkt_data[0..copy_len]);
+            entry.len = copy_len;
+            entry.src_addr = .{ .v4 = src_ipv4 };
+            entry.src_port = 0; // Raw sockets don't have ports
+            entry.valid = true;
+
+            sock.rx_head = (sock.rx_head + 1) % types.SOCKET_RX_QUEUE_SIZE;
+            sock.rx_count += 1;
+
+            delivered += 1;
+
+            // Wake blocked thread if any
+            if (sock.blocked_thread) |thread| {
+                types.scheduler.wakeThread(thread);
+                sock.blocked_thread = null;
+            }
+        }
+    }
+
+    return delivered;
 }
 
 pub fn registerUdpSocket(sock: *types.Socket) void {

@@ -139,7 +139,7 @@ pub fn sendSegment6(
     };
 
     // Resolve destination MAC via NDP
-    var dst_mac: [6]u8 = undefined;
+    var dst_mac: [6]u8 = [_]u8{0} ** 6;
     var have_mac = false;
 
     if (ipv6_types.isMulticast(remote_v6)) {

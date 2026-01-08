@@ -288,6 +288,12 @@ fn getRingUnsafe(ring_id: u32) ?*RingDescriptor {
 ///
 /// Called when consumer maps the ring into their address space.
 /// Transitions ring from .created to .attached state.
+///
+/// SECURITY (PID Reuse): The state machine prevents PID reuse attacks:
+///   1. If expected consumer exits before attaching, cleanupByPid sets state=.closing
+///   2. This function requires state=.created, so a new process with the same PID
+///      cannot attach after the original consumer exits
+///   3. The ring is freed when both producer and consumer have exited
 pub fn attachConsumer(ring: *RingDescriptor, consumer_pid: u32) !void {
     const held = rings_lock.acquire();
     defer held.release();
@@ -297,7 +303,7 @@ pub fn attachConsumer(ring: *RingDescriptor, consumer_pid: u32) !void {
         return error.PermissionDenied;
     }
 
-    // Check state
+    // Check state - prevents PID reuse attack (exited process sets state=.closing)
     if (ring.state != .created) {
         return error.InvalidState;
     }

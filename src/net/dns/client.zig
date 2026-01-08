@@ -128,7 +128,7 @@ fn resolveOnce(allocator: std.mem.Allocator, hostname: []const u8, server_ip: u3
     const tx_id = @as(u16, @truncate(entropy ^ (entropy >> 16) ^ (entropy >> 32) ^ (entropy >> 48)));
 
     // Write Query
-    packet.writeHeader(tx_id, dns.FLAGS_RD); // Recursion Desired
+    try packet.writeHeader(tx_id, dns.FLAGS_RD); // Recursion Desired
     try packet.writeName(hostname);
     try packet.writeQuestion(dns.TYPE_A, dns.CLASS_IN);
 
@@ -314,7 +314,15 @@ fn resolveOnce(allocator: std.mem.Allocator, hostname: []const u8, server_ip: u3
         }
 
         if (rtype == dns.TYPE_CNAME and rclass == dns.CLASS_IN and cname_result == null and owner_matches) {
-            // Found CNAME for our query - extract target name for potential follow-up
+            // Found CNAME for our query - extract target name for potential follow-up.
+            //
+            // Security note (trust model): The CNAME target domain is not validated against
+            // the original query domain. This is intentional - DNS protocol allows CNAMEs to
+            // redirect to any domain. If the DNS server is malicious, it could return any IP
+            // directly without needing CNAME tricks. The caller implicitly trusts the configured
+            // DNS server. Defense: CNAME depth is limited to DNS_MAX_CNAME_DEPTH (8) to prevent
+            // infinite loops. For higher assurance, callers should use DNSSEC validation or
+            // DNS-over-HTTPS with certificate pinning.
             const name_result = dns.readName(resp, pos, cname_buf) catch |err| switch (err) {
                 error.FormatError => return DnsError.FormatError,
                 error.BufferTooSmall => return DnsError.BufferTooSmall,

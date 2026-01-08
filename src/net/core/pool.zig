@@ -9,7 +9,7 @@ const TX_BUF_SIZE = 2048;
 const TX_POOL_BYTES: usize = TX_POOL_SIZE * TX_BUF_SIZE;
 pub const DEFAULT_MAX_MEMORY: usize = 512 * 1024 + TX_POOL_BYTES;
 
-var tx_pool: [TX_POOL_SIZE][TX_BUF_SIZE]u8 = undefined;
+var tx_pool: [TX_POOL_SIZE][TX_BUF_SIZE]u8 = [_][TX_BUF_SIZE]u8{[_]u8{0} ** TX_BUF_SIZE} ** TX_POOL_SIZE;
 var tx_pool_bitmap: u64 = 0xFFFFFFFFFFFFFFFF; // 1 = free
 var tx_pool_lock: sync.Spinlock = .{};
 

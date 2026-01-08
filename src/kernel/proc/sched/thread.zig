@@ -36,16 +36,21 @@ var exit_callbacks: [4]?ThreadExitCallbackType = [_]?ThreadExitCallbackType{null
 pub var process_tree_lock: sync.RwLock = .{};
 
 /// Register a callback to be called when a thread exits.
-pub fn registerExitCallback(cb: ThreadExitCallbackType) void {
+/// Returns true on success, false if all callback slots are full.
+pub fn registerExitCallback(cb: ThreadExitCallbackType) bool {
     const held = sched_mod.scheduler.lock.acquire();
     defer held.release();
 
     for (&exit_callbacks) |*slot| {
         if (slot.* == null) {
             slot.* = cb;
-            return;
+            return true;
         }
     }
+
+    // All slots full - log warning so this doesn't go unnoticed
+    console.warn("Thread exit callback registration failed: all {} slots full", .{exit_callbacks.len});
+    return false;
 }
 
 /// Add a thread to the scheduler
@@ -67,9 +72,19 @@ pub fn addThread(t: *Thread) void {
 
 /// Find a thread by its TID (UNSAFE - see warning)
 /// Returns null if not found or if thread has exited
+///
 /// WARNING: The returned pointer may become invalid after the lock is released.
 /// Caller must ensure thread lifetime or hold appropriate locks during use.
-/// SECURITY: For safe usage across lock boundaries, use findAndRefThread() instead.
+///
+/// SECURITY: This function is DEPRECATED for cross-lock-boundary use.
+/// The returned pointer can become a use-after-free if:
+///   1. This function returns a Thread pointer
+///   2. Scheduler lock is released (by defer)
+///   3. Thread exits on another CPU, Thread struct is freed
+///   4. Caller dereferences the now-freed pointer
+///
+/// Use findAndRefThread() instead - it increments refcount before returning,
+/// preventing destruction until caller calls unref().
 pub fn findThreadByTid(tid: u64) ?*Thread {
     const held = sched_mod.scheduler.lock.acquire();
     defer held.release();

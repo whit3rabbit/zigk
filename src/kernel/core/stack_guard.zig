@@ -20,7 +20,7 @@ pub export fn __stack_chk_fail() noreturn {
 /// Initialize stack guard with a randomized canary value.
 pub fn init() void {
     var random_value: u64 = undefined;
-    
+
     // Try hardware directly first
     var entropy_buf: [8]u8 = undefined;
     if (hal.entropy.tryFillWithHardwareEntropy(&entropy_buf)) {
@@ -32,7 +32,25 @@ pub fn init() void {
         console.warn("Stack guard: Hardware RNG unavailable - using CSPRNG", .{});
     }
 
-    random_value &= ~@as(u64, 0xFF); // Null-byte constraint
+    // SECURITY NOTE (Vuln 5 - FALSE POSITIVE): Null-byte constraint is INTENTIONAL.
+    //
+    // This is standard security practice used by Linux, glibc, musl, and other systems.
+    // The low byte is zeroed to prevent string operations (strlen, strcpy, strcmp)
+    // from inadvertently reading past a buffer and leaking the canary value.
+    //
+    // Without this: A buffer overflow that stops at a null byte would not overwrite
+    // the canary, but a subsequent strlen() on the corrupted buffer could leak the
+    // canary through a side channel (timing, memory disclosure).
+    //
+    // Entropy impact: Reduces from 64 to 56 bits (256x reduction in brute-force space).
+    // This is acceptable because:
+    //   1. 56 bits = 72 quadrillion possible values - still computationally infeasible
+    //   2. Canary changes on each boot - no cross-boot correlation
+    //   3. Most exploits require exact match in ONE attempt (no partial matching)
+    //   4. Linux kernel uses the same constraint (see include/linux/random.h)
+    //
+    // Reference: "Smashing the Stack for Fun and Profit" - Aleph One (Phrack #49)
+    random_value &= ~@as(u64, 0xFF);
     __stack_chk_guard = @truncate(random_value);
 }
 

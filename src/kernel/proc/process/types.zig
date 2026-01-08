@@ -586,4 +586,16 @@ pub const Process = struct {
         }
         return null;
     }
+
+    /// Check if process has raw socket capability (CAP_NET_RAW equivalent).
+    /// Required for creating SOCK_RAW sockets for ICMP, packet crafting, etc.
+    pub fn hasNetRawCapability(self: *Process) bool {
+        for (self.capabilities.items) |cap| {
+            switch (cap) {
+                .NetRaw => return true,
+                else => {},
+            }
+        }
+        return false;
+    }
 };

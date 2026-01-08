@@ -11,9 +11,10 @@ build.zig
     |
     +-- uapi_module (src/uapi/root.zig)
     |       |-- syscalls/       <- Syscall number definitions
-    |       |   |-- root.zig    <- Re-exports all numbers (linux + zscapek)
-    |       |   |-- linux.zig   <- Standard Linux syscall numbers
-    |       |   `-- zscapek.zig <- Custom Zscapek extensions
+    |       |   |-- root.zig    <- Re-exports all numbers (arch-conditional linux + zscapek)
+    |       |   |-- linux.zig   <- Linux x86_64 syscall numbers
+    |       |   |-- linux_aarch64.zig <- Linux aarch64 syscall numbers
+    |       |   `-- zscapek.zig <- Custom Zscapek extensions (same on all architectures)
     |       `-- errno.zig       <- SyscallError type and errno conversion
     |
     +-- syscall_base_module (src/kernel/sys/syscall/core/base.zig)
@@ -48,10 +49,15 @@ build.zig
 
 ### How build.zig Wires Syscalls
 
-1. **UAPI Module** - Defines syscall numbers in `src/uapi/syscalls/root.zig` by re-exporting from `linux.zig` and `zscapek.zig`.
+1. **UAPI Module** - Defines syscall numbers in `src/uapi/syscalls/root.zig`:
+   - On x86_64: Re-exports from `linux.zig` + `zscapek.zig`
+   - On aarch64: Re-exports from `linux_aarch64.zig` + `zscapek.zig`
+   - Architecture selection happens at compile time via `builtin.cpu.arch`
 2. **Base Module** - Provides shared state accessed by all handlers
 3. **Handler Modules** - Each handler file is a separate Zig module with explicit imports
 4. **Table Module** - Uses comptime reflection to auto-discover handlers
+
+**Note**: Handler code is architecture-agnostic. The dispatch table matches `SYS_READ` to `sys_read` by name, so changing the numeric value of `SYS_READ` (0 on x86_64, 63 on aarch64) does not require any handler modifications.
 
 ## Dispatch Mechanism
 
@@ -192,14 +198,38 @@ src/kernel/sys/syscall/
 
 ## Syscall Quick Reference
 
-### Conventions
+### Architecture Support
+
+zigk uses **standard Linux syscall numbers** for both supported architectures:
+
+| Architecture | Syscall Numbers | ABI Source |
+|--------------|-----------------|------------|
+| x86_64 | `src/uapi/syscalls/linux.zig` | Linux x86_64 |
+| aarch64 | `src/uapi/syscalls/linux_aarch64.zig` | Linux aarch64 |
+
+**Important**: The syscall numbers in the tables below are **x86_64 specific**. aarch64 uses different numbers for the same syscalls. Use `syscall_query.py --arch aarch64 <name>` to look up aarch64 numbers.
+
+Example differences:
+- `read`: x86_64=0, aarch64=63
+- `write`: x86_64=1, aarch64=64
+- `mmap`: x86_64=9, aarch64=222
+- `socket`: x86_64=41, aarch64=198
+
+### Conventions (x86_64)
 
 - **ABI**: Linux x86_64 syscall convention
 - **Entry**: RAX=number, RDI/RSI/RDX/R10/R8/R9=args 1-6
 - **Return**: RAX >= 0 success, RAX < 0 is -errno
 - **Clobbers**: RCX, R11
 
-### Linux-Compatible Syscalls (0-999)
+### Conventions (aarch64)
+
+- **ABI**: Linux aarch64 syscall convention
+- **Entry**: X8=number, X0-X5=args 1-6
+- **Return**: X0 >= 0 success, X0 < 0 is -errno
+- **Clobbers**: None (caller-saved registers preserved)
+
+### Linux-Compatible Syscalls (x86_64 numbers)
 
 | # | Name | Signature | Handler |
 |---|------|-----------|---------|

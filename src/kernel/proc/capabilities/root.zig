@@ -359,6 +359,13 @@ pub const CapabilityType = enum {
     DisplayServer,
     Hypervisor,
     NetConfig,
+    /// Allows creation of raw sockets (SOCK_RAW) for ICMP, packet crafting, etc.
+    /// SECURITY: Equivalent to Linux CAP_NET_RAW. Required for:
+    /// - Raw ICMP sockets (ping utilities)
+    /// - Packet sniffing/injection
+    /// - Network diagnostics
+    /// Without this capability, unprivileged processes cannot create SOCK_RAW sockets.
+    NetRaw,
 };
 
 pub const Capability = union(CapabilityType) {
@@ -386,4 +393,6 @@ pub const Capability = union(CapabilityType) {
     Hypervisor: HypervisorCapability,
     /// Allows network interface configuration (DHCP client, etc.)
     NetConfig: NetConfigCapability,
+    /// Allows raw socket creation (like Linux CAP_NET_RAW)
+    NetRaw: void,
 };

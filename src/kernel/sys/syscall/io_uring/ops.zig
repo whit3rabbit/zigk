@@ -464,6 +464,7 @@ fn socketErrorToSyscallError(err: socket.SocketError) SyscallError {
         socket.SocketError.BadFd => error.EBADF,
         socket.SocketError.AfNotSupported => error.EAFNOSUPPORT,
         socket.SocketError.TypeNotSupported => error.ESOCKTNOSUPPORT,
+        socket.SocketError.ProtoNotSupported => error.EPROTONOSUPPORT,
         socket.SocketError.NoSocketsAvailable => error.ENFILE,
         socket.SocketError.AddrInUse => error.EADDRINUSE,
         socket.SocketError.AddrNotAvail => error.EADDRNOTAVAIL,
@@ -478,6 +479,8 @@ fn socketErrorToSyscallError(err: socket.SocketError) SyscallError {
         socket.SocketError.ConnectionReset => error.ECONNRESET,
         socket.SocketError.AccessDenied => error.EACCES,
         socket.SocketError.NoResources => error.ENOMEM,
+        socket.SocketError.NoBuffers => error.ENOBUFS,
+        socket.SocketError.MsgSize => error.EMSGSIZE,
         socket.SocketError.SystemError => error.ENOSYS,
     };
 }

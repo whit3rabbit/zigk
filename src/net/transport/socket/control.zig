@@ -50,6 +50,10 @@ pub fn shutdown(sock_fd: usize, how: i32) errors.SocketError!void {
 
 /// Get local socket address
 /// Returns local IP and port bound to this socket
+///
+/// SECURITY NOTE: No info leak risk here. Function either errors before touching addr
+/// (BadFd at acquireSocket) or fully initializes all 4 fields including zero padding.
+/// Syscall layer also zero-initializes addr before calling (defense in depth).
 pub fn getsockname(sock_fd: usize, addr: *types.SockAddrIn) errors.SocketError!void {
     const sock = state.acquireSocket(sock_fd) orelse return errors.SocketError.BadFd;
     defer state.releaseSocket(sock);
@@ -100,6 +104,89 @@ pub fn getpeername(sock_fd: usize, addr: *types.SockAddrIn) errors.SocketError!v
             addr.port = types.htons(tcb.remote_port);
             addr.addr = types.htonl(tcb.getRemoteIpV4());
             addr.zero = [_]u8{0} ** 8;
+            return;
+        }
+        return errors.SocketError.NotConnected;
+    }
+
+    // UDP: connectionless - no peer address
+    return errors.SocketError.NotConnected;
+}
+
+/// Get local socket address (IPv6)
+/// Returns local IPv6 address and port bound to this socket
+pub fn getsockname6(sock_fd: usize, addr: *types.SockAddrIn6) errors.SocketError!void {
+    const sock = state.acquireSocket(sock_fd) orelse return errors.SocketError.BadFd;
+    defer state.releaseSocket(sock);
+
+    const held = sock.lock.acquire();
+    defer held.release();
+
+    // Verify this is an IPv6 socket
+    if (sock.family != types.AF_INET6) {
+        return errors.SocketError.AfNotSupported;
+    }
+
+    // Get local address - use interface IPv6 if bound to in6addr_any
+    const local_addr: [16]u8 = blk: {
+        if (sock.local_addr.isUnspecified()) {
+            // Return actual interface IPv6 if available
+            if (state.getInterface()) |iface| {
+                // Prefer first global address, fall back to link-local
+                if (iface.ipv6_addr_count > 0) {
+                    break :blk iface.ipv6_addrs[0].addr;
+                } else if (iface.has_link_local) {
+                    break :blk iface.link_local_addr;
+                }
+            }
+            break :blk [_]u8{0} ** 16;
+        }
+        // Extract IPv6 address if bound to one
+        break :blk switch (sock.local_addr) {
+            .v6 => |ip| ip,
+            else => [_]u8{0} ** 16,
+        };
+    };
+
+    // Fill in address structure
+    addr.family = @intCast(types.AF_INET6);
+    addr.port = types.htons(sock.local_port);
+    addr.flowinfo = 0;
+    addr.addr = local_addr;
+    addr.scope_id = 0; // TODO: Track scope_id for link-local addresses
+}
+
+/// Get peer socket address (IPv6, for connected sockets)
+/// Returns remote IPv6 address and port of connected peer
+pub fn getpeername6(sock_fd: usize, addr: *types.SockAddrIn6) errors.SocketError!void {
+    const sock = state.acquireSocket(sock_fd) orelse return errors.SocketError.BadFd;
+    defer state.releaseSocket(sock);
+
+    const held = sock.lock.acquire();
+    defer held.release();
+
+    // Verify this is an IPv6 socket
+    if (sock.family != types.AF_INET6) {
+        return errors.SocketError.AfNotSupported;
+    }
+
+    // TCP: get peer address from TCB
+    if (sock.sock_type == types.SOCK_STREAM) {
+        if (sock.tcb) |tcb| {
+            // Must be connected (not listening)
+            if (tcb.state != .Established and tcb.state != .CloseWait) {
+                return errors.SocketError.NotConnected;
+            }
+            // Extract IPv6 from TCB remote_addr
+            const remote_v6 = switch (tcb.remote_addr) {
+                .v6 => |ip| ip,
+                else => return errors.SocketError.AfNotSupported,
+            };
+            addr.family = @intCast(types.AF_INET6);
+            addr.port = types.htons(tcb.remote_port);
+            addr.flowinfo = 0;
+            addr.addr = remote_v6;
+            addr.scope_id = 0;
             return;
         }
         return errors.SocketError.NotConnected;

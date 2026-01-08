@@ -284,7 +284,7 @@ pub fn init(start: usize, size: usize) void {
     var hw_entropy: u64 = 0;
     if (is_freestanding and hal.entropy.isInitialized()) {
         // Use hardware entropy if available
-        var entropy_buf: [8]u8 = undefined;
+        var entropy_buf: [8]u8 = [_]u8{0} ** 8;
         if (hal.entropy.tryFillWithHardwareEntropy(&entropy_buf)) {
             hw_entropy = @bitCast(entropy_buf);
         }

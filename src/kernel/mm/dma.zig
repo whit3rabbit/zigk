@@ -186,15 +186,24 @@ pub fn allocBufferUnsafe(size: u64) DmaError!DmaBuffer {
 }
 
 /// Free a DMA buffer
+/// If IOMMU unmap fails, physical memory is intentionally leaked to prevent use-after-free
 pub fn freeBuffer(buf: *const DmaBuffer) void {
     // Unmap from IOMMU if it was mapped
     if (buf.iommu_mapped) {
         if (buf.bdf) |bdf| {
-            iommu.freeDmaBuffer(bdf, buf.device_addr, buf.size);
+            iommu.freeDmaBuffer(bdf, buf.device_addr, buf.size) catch |err| {
+                // SECURITY: Do NOT free physical memory if IOTLB invalidation failed
+                // Device may still access via stale TLB entries (use-after-free)
+                console.err("DMA: IOMMU unmap failed ({any}), leaking {d} pages to prevent use-after-free", .{
+                    err,
+                    buf.page_count,
+                });
+                return; // Intentional leak - do NOT call pmm.freePages
+            };
         }
     }
 
-    // Free physical pages
+    // Safe to free physical memory only if IOMMU unmap succeeded (or wasn't mapped)
     pmm.freePages(buf.phys_addr, buf.page_count);
 }
 

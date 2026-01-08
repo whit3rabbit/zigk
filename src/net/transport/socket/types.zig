@@ -4,7 +4,7 @@
 const std = @import("std");
 const packet = @import("../../core/packet.zig");
 const tcp_types = @import("../tcp/types.zig");
-const scheduler = @import("scheduler.zig");
+pub const scheduler = @import("scheduler.zig");
 const uapi = @import("uapi");
 const sync = @import("../../sync.zig");
 
@@ -36,6 +36,7 @@ pub const AF_INET6: i32 = 10;
 /// Socket types
 pub const SOCK_STREAM: i32 = 1; // TCP
 pub const SOCK_DGRAM: i32 = 2; // UDP
+pub const SOCK_RAW: i32 = 3; // Raw socket (for ping6, traceroute6)
 
 // =============================================================================
 // Socket Option Constants (Linux-compatible)
@@ -44,8 +45,10 @@ pub const SOCK_DGRAM: i32 = 2; // UDP
 /// Socket option levels
 pub const SOL_SOCKET: i32 = 1;
 pub const IPPROTO_IP: i32 = 0;
+pub const IPPROTO_ICMP: i32 = 1; // IPv4 ICMP (for ping)
 pub const IPPROTO_TCP: i32 = 6;
 pub const IPPROTO_IPV6: i32 = 41;
+pub const IPPROTO_ICMPV6: i32 = 58;
 
 /// IPPROTO_TCP options
 pub const TCP_NODELAY: i32 = 1;
@@ -81,6 +84,9 @@ pub const SOCKET_RX_QUEUE_SIZE: usize = 8;
 
 /// Maximum pending connections for listen()
 pub const ACCEPT_QUEUE_SIZE: usize = 8;
+
+/// Maximum packet size (re-exported from core/packet for convenience)
+pub const MAX_PACKET_SIZE: usize = packet.MAX_PACKET_SIZE;
 
 /// Received packet entry in queue
 const RxQueueEntry = struct {
@@ -174,6 +180,9 @@ pub const Socket = struct {
     /// Type of Service for outgoing IP packets (default: 0)
     tos: u8,
 
+    /// IP Time-to-Live for outgoing packets (default: 64)
+    ttl: u8,
+
     /// Allow sending to broadcast addresses (SO_BROADCAST)
     so_broadcast: bool,
 
@@ -208,8 +217,13 @@ pub const Socket = struct {
             .protocol = 0,
             .local_port = 0,
             .local_addr = .none,
+            // SECURITY NOTE: Zero-initialize RX buffer for defense-in-depth per project
+            // guidelines. While dequeuePacketIp only copies entry.len bytes (set by
+            // enqueuePacketIp to actual packet size), zero-init prevents any theoretical
+            // leak if future code paths read beyond len. Audit 2026-01-06: No current
+            // leak path exists since dequeue bounds copy to entry.len.
             .rx_queue = [_]RxQueueEntry{.{
-                .data = undefined,
+                .data = [_]u8{0} ** packet.MAX_PACKET_SIZE,
                 .len = 0,
                 .src_addr = .none,
                 .src_port = 0,
@@ -239,6 +253,7 @@ pub const Socket = struct {
             .rcv_timeout_ms = 0, // Infinite timeout (blocking forever)
             .snd_timeout_ms = 0,
             .tos = 0, // Normal service
+            .ttl = 64, // DEFAULT_TTL
             .so_broadcast = false,
             .so_reuseaddr = false,
             .tcp_nodelay = false,

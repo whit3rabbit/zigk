@@ -67,6 +67,10 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
 
     if (iface.isLocalSubnet(sender_ip)) {
         if (sender_ip == iface.ip_addr) return false;
+        // SECURITY: Reject invalid sender IPs before cache operations.
+        // IP 0 (0.0.0.0) has special meaning per RFC 5227 (ARP probe) and should
+        // not create cache entries. IP 0xFFFFFFFF (broadcast) is never a valid host.
+        if (sender_ip == 0 or sender_ip == 0xFFFFFFFF) return false;
 
         if (operation == 2) {
             if (cache.findEntry(sender_ip)) |entry| {

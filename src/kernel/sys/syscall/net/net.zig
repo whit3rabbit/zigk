@@ -126,6 +126,7 @@ fn socketErrorToSyscallError(err: socket.SocketError) SyscallError {
         socket.SocketError.BadFd => error.EBADF,
         socket.SocketError.AfNotSupported => error.EAFNOSUPPORT,
         socket.SocketError.TypeNotSupported => error.ESOCKTNOSUPPORT,
+        socket.SocketError.ProtoNotSupported => error.EPROTONOSUPPORT,
         socket.SocketError.NoSocketsAvailable => error.EMFILE,
         socket.SocketError.AddrInUse => error.EADDRINUSE,
         socket.SocketError.AddrNotAvail => error.EADDRNOTAVAIL,
@@ -140,6 +141,8 @@ fn socketErrorToSyscallError(err: socket.SocketError) SyscallError {
         socket.SocketError.ConnectionReset => error.ECONNRESET,
         socket.SocketError.AccessDenied => error.EACCES,
         socket.SocketError.NoResources => error.ENOMEM,
+        socket.SocketError.NoBuffers => error.ENOBUFS,
+        socket.SocketError.MsgSize => error.EMSGSIZE,
         socket.SocketError.SystemError => error.EIO,
     };
 }
@@ -210,6 +213,10 @@ fn socketClose(fd: *FileDescriptor) isize {
 
 /// sys_socket (41) - Create a socket
 /// (domain, type, protocol) -> fd
+///
+/// SECURITY: Raw sockets (SOCK_RAW) require root (euid == 0) or CAP_NET_RAW.
+/// This prevents unprivileged processes from crafting arbitrary packets,
+/// performing network scanning, ICMP tunneling, or source address spoofing.
 pub fn sys_socket(domain: usize, sock_type: usize, protocol: usize) SyscallError!usize {
     init();
 
@@ -217,6 +224,17 @@ pub fn sys_socket(domain: usize, sock_type: usize, protocol: usize) SyscallError
     const domain_u16 = std.math.cast(u16, domain) orelse return error.EINVAL;
     const sock_type_u16 = std.math.cast(u16, sock_type) orelse return error.EINVAL;
     const protocol_u16 = std.math.cast(u16, protocol) orelse return error.EINVAL;
+
+    // SECURITY: Raw sockets require CAP_NET_RAW or root privileges.
+    // Mask off flags (SOCK_NONBLOCK, SOCK_CLOEXEC) to get actual type.
+    const SOCK_TYPE_MASK: u16 = 0xF;
+    const type_masked = sock_type_u16 & SOCK_TYPE_MASK;
+    if (type_masked == socket.SOCK_RAW) {
+        const proc = base.getCurrentProcess();
+        if (proc.euid != 0 and !proc.hasNetRawCapability()) {
+            return error.EPERM;
+        }
+    }
 
     const sock_idx = socket.socket(
         domain_u16,
@@ -360,6 +378,11 @@ pub fn sys_sendto(
         return error.EFAULT;
     };
 
+    // Get socket to check type/protocol for raw socket dispatch
+    const sock = socket.getSocket(ctx.socket_idx) orelse {
+        return error.EBADF;
+    };
+
     if (family == socket.AF_INET) {
         // IPv4 path
         if (addrlen < @sizeOf(socket.SockAddrIn)) {
@@ -368,6 +391,14 @@ pub fn sys_sendto(
         const kdest_addr = user_mem.copyStructFromUser(socket.SockAddrIn, user_mem.UserPtr.from(dest_addr_ptr)) catch {
             return error.EFAULT;
         };
+
+        // Check for raw ICMP socket (for ping)
+        if (sock.sock_type == socket.SOCK_RAW and sock.protocol == socket.IPPROTO_ICMP) {
+            const sent = socket.sendtoRaw(ctx.socket_idx, kbuf, &kdest_addr) catch |err| {
+                return socketErrorToSyscallError(err);
+            };
+            return sent;
+        }
 
         const sent = socket.sendto(ctx.socket_idx, kbuf, &kdest_addr) catch |err| {
             return socketErrorToSyscallError(err);
@@ -381,6 +412,14 @@ pub fn sys_sendto(
         const kdest_addr6 = user_mem.copyStructFromUser(socket.SockAddrIn6, user_mem.UserPtr.from(dest_addr_ptr)) catch {
             return error.EFAULT;
         };
+
+        // Check for raw ICMPv6 socket (for ping6)
+        if (sock.sock_type == socket.SOCK_RAW and sock.protocol == socket.IPPROTO_ICMPV6) {
+            const sent = socket.sendtoRaw6(ctx.socket_idx, kbuf, &kdest_addr6) catch |err| {
+                return socketErrorToSyscallError(err);
+            };
+            return sent;
+        }
 
         const sent = socket.sendto6(ctx.socket_idx, kbuf, &kdest_addr6) catch |err| {
             return socketErrorToSyscallError(err);
@@ -507,6 +546,7 @@ pub fn sys_listen(fd: usize, backlog: usize) SyscallError!usize {
 
 /// sys_accept (43) - Accept connection on socket
 /// (fd, addr, addrlen_ptr) -> fd
+/// Supports both AF_INET (IPv4) and AF_INET6 (IPv6) return addresses
 pub fn sys_accept(fd: usize, addr_ptr: usize, addrlen_ptr: usize) SyscallError!usize {
     init();
 
@@ -514,17 +554,16 @@ pub fn sys_accept(fd: usize, addr_ptr: usize, addrlen_ptr: usize) SyscallError!u
         return error.ENOTSOCK;
     };
 
-    var kpeer_addr: socket.SockAddrIn = std.mem.zeroes(socket.SockAddrIn);
-    const peer_addr_arg: ?*socket.SockAddrIn = if (addr_ptr != 0) &kpeer_addr else null;
-
     const sock = socket.getSocket(ctx.socket_idx) orelse {
         return error.EBADF;
     };
 
     while (true) {
-        const result = socket.accept(ctx.socket_idx, peer_addr_arg);
+        // Accept without filling peer_addr - we'll determine family from TCB
+        const result = socket.accept(ctx.socket_idx, null);
 
         if (result) |new_sock_fd| {
+            // Fill in peer address if requested
             if (addr_ptr != 0 and addrlen_ptr != 0) {
                 const addrlen_uptr = user_mem.UserPtr.from(addrlen_ptr);
                 const input_len = addrlen_uptr.readValue(u32) catch {
@@ -532,20 +571,60 @@ pub fn sys_accept(fd: usize, addr_ptr: usize, addrlen_ptr: usize) SyscallError!u
                     return error.EFAULT;
                 };
 
-                if (input_len < @sizeOf(socket.SockAddrIn)) {
+                // Get the new socket's TCB to check remote address family
+                const new_sock = socket.getSocket(new_sock_fd) orelse {
                     _ = socket.close(new_sock_fd) catch {};
-                    return error.EINVAL;
+                    return error.EBADF;
+                };
+                const tcb = new_sock.tcb orelse {
+                    _ = socket.close(new_sock_fd) catch {};
+                    return error.ENOTCONN;
+                };
+
+                // Determine family from TCB's remote_addr and fill appropriate structure
+                switch (tcb.remote_addr) {
+                    .v4 => |v4| {
+                        // IPv4 connection
+                        if (input_len < @sizeOf(socket.SockAddrIn)) {
+                            _ = socket.close(new_sock_fd) catch {};
+                            return error.EINVAL;
+                        }
+
+                        const kpeer_addr = socket.SockAddrIn.init(v4, tcb.remote_port);
+                        user_mem.copyStructToUser(socket.SockAddrIn, user_mem.UserPtr.from(addr_ptr), kpeer_addr) catch {
+                            _ = socket.close(new_sock_fd) catch {};
+                            return error.EFAULT;
+                        };
+
+                        addrlen_uptr.writeValue(@as(u32, @sizeOf(socket.SockAddrIn))) catch {
+                            _ = socket.close(new_sock_fd) catch {};
+                            return error.EFAULT;
+                        };
+                    },
+                    .v6 => |v6| {
+                        // IPv6 connection
+                        if (input_len < @sizeOf(socket.SockAddrIn6)) {
+                            _ = socket.close(new_sock_fd) catch {};
+                            return error.EINVAL;
+                        }
+
+                        const kpeer_addr6 = socket.SockAddrIn6.init(v6, tcb.remote_port);
+                        user_mem.copyStructToUser(socket.SockAddrIn6, user_mem.UserPtr.from(addr_ptr), kpeer_addr6) catch {
+                            _ = socket.close(new_sock_fd) catch {};
+                            return error.EFAULT;
+                        };
+
+                        addrlen_uptr.writeValue(@as(u32, @sizeOf(socket.SockAddrIn6))) catch {
+                            _ = socket.close(new_sock_fd) catch {};
+                            return error.EFAULT;
+                        };
+                    },
+                    .none => {
+                        // Should not happen for connected socket
+                        _ = socket.close(new_sock_fd) catch {};
+                        return error.ENOTCONN;
+                    },
                 }
-
-                user_mem.copyStructToUser(socket.SockAddrIn, user_mem.UserPtr.from(addr_ptr), kpeer_addr) catch {
-                    _ = socket.close(new_sock_fd) catch {};
-                    return error.EFAULT;
-                };
-
-                addrlen_uptr.writeValue(@as(u32, @sizeOf(socket.SockAddrIn))) catch {
-                    _ = socket.close(new_sock_fd) catch {};
-                    return error.EFAULT;
-                };
             }
 
             const new_fd_num = installSocketFd(new_sock_fd) catch |err| {
@@ -570,6 +649,7 @@ pub fn sys_accept(fd: usize, addr_ptr: usize, addrlen_ptr: usize) SyscallError!u
 
 /// sys_connect (42) - Connect socket to address
 /// (fd, addr, addrlen) -> int
+/// Supports both AF_INET (IPv4) and AF_INET6 (IPv6)
 pub fn sys_connect(fd: usize, addr_ptr: usize, addrlen: usize) SyscallError!usize {
     init();
 
@@ -577,22 +657,55 @@ pub fn sys_connect(fd: usize, addr_ptr: usize, addrlen: usize) SyscallError!usiz
         return error.ENOTSOCK;
     };
 
-    if (addrlen < @sizeOf(socket.SockAddrIn)) {
+    // Need at least 2 bytes for address family
+    if (addrlen < 2) {
         return error.EINVAL;
     }
 
-    const kaddr = user_mem.copyStructFromUser(socket.SockAddrIn, user_mem.UserPtr.from(addr_ptr)) catch {
+    // Read address family first (first 2 bytes of sockaddr)
+    // SockAddrIn and SockAddrIn6 both have family as first field (i16)
+    var family_buf: [2]u8 = undefined;
+    if (user_mem.copyFromUser(&family_buf, addr_ptr) != 0) {
         return error.EFAULT;
-    };
+    }
+    const family = std.mem.readInt(i16, &family_buf, .little);
 
     const sock = socket.getSocket(ctx.socket_idx) orelse {
         return error.EBADF;
     };
 
-    socket.connect(ctx.socket_idx, &kaddr) catch |err| {
-        return socketErrorToSyscallError(err);
-    };
+    // Dispatch based on address family
+    if (family == socket.AF_INET) {
+        // IPv4 connect
+        if (addrlen < @sizeOf(socket.SockAddrIn)) {
+            return error.EINVAL;
+        }
 
+        const kaddr = user_mem.copyStructFromUser(socket.SockAddrIn, user_mem.UserPtr.from(addr_ptr)) catch {
+            return error.EFAULT;
+        };
+
+        socket.connect(ctx.socket_idx, &kaddr) catch |err| {
+            return socketErrorToSyscallError(err);
+        };
+    } else if (family == socket.AF_INET6) {
+        // IPv6 connect
+        if (addrlen < @sizeOf(socket.SockAddrIn6)) {
+            return error.EINVAL;
+        }
+
+        const kaddr6 = user_mem.copyStructFromUser(socket.SockAddrIn6, user_mem.UserPtr.from(addr_ptr)) catch {
+            return error.EFAULT;
+        };
+
+        socket.connect6(ctx.socket_idx, &kaddr6) catch |err| {
+            return socketErrorToSyscallError(err);
+        };
+    } else {
+        return error.EAFNOSUPPORT;
+    }
+
+    // Handle blocking for both IPv4 and IPv6
     if (sock.blocking) {
         while (true) {
             socket.checkConnectStatus(ctx.socket_idx) catch |err| {
@@ -719,7 +832,7 @@ pub fn sys_shutdown(fd: usize, how: usize) SyscallError!usize {
     return 0;
 }
 
-/// sys_getsockname (51) - Get local socket address
+/// sys_getsockname (51) - Get local socket address (dual-stack: IPv4 and IPv6)
 pub fn sys_getsockname(fd: usize, addr_ptr: usize, addrlen_ptr: usize) SyscallError!usize {
     const ctx = getSocketContext(fd) orelse {
         return error.ENOTSOCK;
@@ -730,33 +843,65 @@ pub fn sys_getsockname(fd: usize, addr_ptr: usize, addrlen_ptr: usize) SyscallEr
         return error.EFAULT;
     };
 
-    if (kaddrlen < @sizeOf(socket.SockAddrIn)) {
-        return error.EINVAL;
+    // Get socket to check address family
+    const sock = socket.getSocket(ctx.socket_idx) orelse {
+        return error.EBADF;
+    };
+
+    if (sock.family == socket.AF_INET6) {
+        // IPv6 path
+        if (kaddrlen < @sizeOf(socket.SockAddrIn6)) {
+            return error.EINVAL;
+        }
+
+        if (!isValidUserAccess(addr_ptr, @sizeOf(socket.SockAddrIn6), AccessMode.Write)) {
+            return error.EFAULT;
+        }
+
+        var kaddr6: socket.SockAddrIn6 = std.mem.zeroes(socket.SockAddrIn6);
+
+        socket.getsockname6(ctx.socket_idx, &kaddr6) catch |err| {
+            return socketErrorToSyscallError(err);
+        };
+
+        const addr_uptr = user_mem.UserPtr.from(addr_ptr);
+        addr_uptr.writeValue(kaddr6) catch {
+            return error.EFAULT;
+        };
+
+        addrlen_uptr.writeValue(@as(u32, @sizeOf(socket.SockAddrIn6))) catch {
+            return error.EFAULT;
+        };
+    } else {
+        // IPv4 path (default)
+        if (kaddrlen < @sizeOf(socket.SockAddrIn)) {
+            return error.EINVAL;
+        }
+
+        if (!isValidUserAccess(addr_ptr, @sizeOf(socket.SockAddrIn), AccessMode.Write)) {
+            return error.EFAULT;
+        }
+
+        var kaddr: socket.SockAddrIn = std.mem.zeroes(socket.SockAddrIn);
+
+        socket.getsockname(ctx.socket_idx, &kaddr) catch |err| {
+            return socketErrorToSyscallError(err);
+        };
+
+        const addr_uptr = user_mem.UserPtr.from(addr_ptr);
+        addr_uptr.writeValue(kaddr) catch {
+            return error.EFAULT;
+        };
+
+        addrlen_uptr.writeValue(@as(u32, @sizeOf(socket.SockAddrIn))) catch {
+            return error.EFAULT;
+        };
     }
-
-    if (!isValidUserAccess(addr_ptr, @sizeOf(socket.SockAddrIn), AccessMode.Write)) {
-        return error.EFAULT;
-    }
-
-    var kaddr: socket.SockAddrIn = std.mem.zeroes(socket.SockAddrIn);
-
-    socket.getsockname(ctx.socket_idx, &kaddr) catch |err| {
-        return socketErrorToSyscallError(err);
-    };
-
-    const addr_uptr = user_mem.UserPtr.from(addr_ptr);
-    addr_uptr.writeValue(kaddr) catch {
-        return error.EFAULT;
-    };
-
-    addrlen_uptr.writeValue(@as(u32, @sizeOf(socket.SockAddrIn))) catch {
-        return error.EFAULT;
-    };
 
     return 0;
 }
 
-/// sys_getpeername (52) - Get peer socket address
+/// sys_getpeername (52) - Get peer socket address (dual-stack: IPv4 and IPv6)
 pub fn sys_getpeername(fd: usize, addr_ptr: usize, addrlen_ptr: usize) SyscallError!usize {
     const ctx = getSocketContext(fd) orelse {
         return error.ENOTSOCK;
@@ -767,28 +912,60 @@ pub fn sys_getpeername(fd: usize, addr_ptr: usize, addrlen_ptr: usize) SyscallEr
         return error.EFAULT;
     };
 
-    if (kaddrlen < @sizeOf(socket.SockAddrIn)) {
-        return error.EINVAL;
+    // Get socket to check address family
+    const sock = socket.getSocket(ctx.socket_idx) orelse {
+        return error.EBADF;
+    };
+
+    if (sock.family == socket.AF_INET6) {
+        // IPv6 path
+        if (kaddrlen < @sizeOf(socket.SockAddrIn6)) {
+            return error.EINVAL;
+        }
+
+        if (!isValidUserAccess(addr_ptr, @sizeOf(socket.SockAddrIn6), AccessMode.Write)) {
+            return error.EFAULT;
+        }
+
+        var kaddr6: socket.SockAddrIn6 = std.mem.zeroes(socket.SockAddrIn6);
+
+        socket.getpeername6(ctx.socket_idx, &kaddr6) catch |err| {
+            return socketErrorToSyscallError(err);
+        };
+
+        const addr_uptr = user_mem.UserPtr.from(addr_ptr);
+        addr_uptr.writeValue(kaddr6) catch {
+            return error.EFAULT;
+        };
+
+        addrlen_uptr.writeValue(@as(u32, @sizeOf(socket.SockAddrIn6))) catch {
+            return error.EFAULT;
+        };
+    } else {
+        // IPv4 path (default)
+        if (kaddrlen < @sizeOf(socket.SockAddrIn)) {
+            return error.EINVAL;
+        }
+
+        if (!isValidUserAccess(addr_ptr, @sizeOf(socket.SockAddrIn), AccessMode.Write)) {
+            return error.EFAULT;
+        }
+
+        var kaddr: socket.SockAddrIn = std.mem.zeroes(socket.SockAddrIn);
+
+        socket.getpeername(ctx.socket_idx, &kaddr) catch |err| {
+            return socketErrorToSyscallError(err);
+        };
+
+        const addr_uptr = user_mem.UserPtr.from(addr_ptr);
+        addr_uptr.writeValue(kaddr) catch {
+            return error.EFAULT;
+        };
+
+        addrlen_uptr.writeValue(@as(u32, @sizeOf(socket.SockAddrIn))) catch {
+            return error.EFAULT;
+        };
     }
-
-    if (!isValidUserAccess(addr_ptr, @sizeOf(socket.SockAddrIn), AccessMode.Write)) {
-        return error.EFAULT;
-    }
-
-    var kaddr: socket.SockAddrIn = std.mem.zeroes(socket.SockAddrIn);
-
-    socket.getpeername(ctx.socket_idx, &kaddr) catch |err| {
-        return socketErrorToSyscallError(err);
-    };
-
-    const addr_uptr = user_mem.UserPtr.from(addr_ptr);
-    addr_uptr.writeValue(kaddr) catch {
-        return error.EFAULT;
-    };
-
-    addrlen_uptr.writeValue(@as(u32, @sizeOf(socket.SockAddrIn))) catch {
-        return error.EFAULT;
-    };
 
     return 0;
 }

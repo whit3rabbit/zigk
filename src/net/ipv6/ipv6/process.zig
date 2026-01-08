@@ -241,12 +241,11 @@ fn handleTcp6(iface: *Interface, pkt: *PacketBuffer) bool {
 
 /// Dispatch reassembled packet to upper-layer protocol handler.
 /// Unlike dispatchToTransport, this handles data in a separate reassembled buffer.
+///
+/// To reuse the existing transport handlers (which expect a full packet with IP header),
+/// we build a synthetic PacketBuffer containing a minimal IPv6 header followed by the
+/// reassembled transport data. This approach avoids duplicating validation logic.
 fn dispatchReassembled(iface: *Interface, pkt: *PacketBuffer, reassembled: []u8, protocol: u8) bool {
-    // Suppress unused parameter warnings for stubs
-    _ = iface;
-    _ = pkt;
-    _ = reassembled;
-
     const min_size: usize = switch (protocol) {
         types.PROTO_ICMPV6 => 4,
         types.PROTO_UDP => 8,
@@ -255,16 +254,54 @@ fn dispatchReassembled(iface: *Interface, pkt: *PacketBuffer, reassembled: []u8,
         else => 0,
     };
 
-    // TODO: Phase 4/7 - when implemented, check reassembled.len < min_size here
-    _ = min_size;
+    if (reassembled.len < min_size) return false;
 
-    // For now, reassembled packets follow the same stub paths
-    // When Phase 4/7 are implemented, these will call the appropriate handlers
-    // with the reassembled buffer
+    // Transport handlers expect a PacketBuffer with valid IPv6 header for checksum
+    // calculation and length validation. Build a synthetic packet on the stack.
+    const IPV6_HEADER_SIZE = types.HEADER_SIZE; // 40 bytes
+    const total_len = std.math.add(usize, IPV6_HEADER_SIZE, reassembled.len) catch return false;
+    if (total_len > packet.MAX_PACKET_SIZE) return false;
+
+    // Stack-allocated buffer for synthetic packet (no heap allocation needed).
+    // SECURITY: Buffer is zeroed unconditionally on the next line before any use,
+    // so no uninitialized stack data can leak. The undefined -> memset pattern is
+    // equivalent to zero-init but may have different compile-time behavior.
+    var synthetic_buf: [packet.MAX_PACKET_SIZE]u8 = undefined;
+    @memset(&synthetic_buf, 0);
+
+    // Build minimal IPv6 header
+    const ip6_hdr = packet.getIpv6HeaderMut(&synthetic_buf, 0) orelse return false;
+    ip6_hdr.setVersionTcFlow(6, 0, 0); // version=6, traffic_class=0, flow_label=0
+
+    // Set payload length (transport data only, no extension headers)
+    if (reassembled.len > std.math.maxInt(u16)) return false;
+    ip6_hdr.setPayloadLength(@intCast(reassembled.len));
+
+    ip6_hdr.next_header = protocol;
+    ip6_hdr.hop_limit = 64; // Arbitrary, not used by transport layer
+
+    // Copy addresses from original packet
+    ip6_hdr.src_addr = pkt.src_ipv6;
+    ip6_hdr.dst_addr = pkt.dst_ipv6;
+
+    // Copy reassembled transport data after IPv6 header
+    @memcpy(synthetic_buf[IPV6_HEADER_SIZE..][0..reassembled.len], reassembled);
+
+    // Create synthetic PacketBuffer
+    var synthetic_pkt = PacketBuffer.init(&synthetic_buf, total_len);
+    synthetic_pkt.ip_offset = 0;
+    synthetic_pkt.transport_offset = IPV6_HEADER_SIZE;
+    synthetic_pkt.src_ipv6 = pkt.src_ipv6;
+    synthetic_pkt.dst_ipv6 = pkt.dst_ipv6;
+    synthetic_pkt.is_multicast = pkt.is_multicast;
+    synthetic_pkt.is_broadcast = false;
+    synthetic_pkt.ip_protocol = protocol;
+
+    // Dispatch to transport handler using the synthetic packet
     return switch (protocol) {
-        types.PROTO_ICMPV6 => false, // TODO: Phase 4
-        types.PROTO_UDP => false, // TODO: Phase 7
-        types.PROTO_TCP => false, // TODO: Phase 7
+        types.PROTO_ICMPV6 => icmpv6.processPacket(iface, &synthetic_pkt),
+        types.PROTO_UDP => handleUdp6(iface, &synthetic_pkt),
+        types.PROTO_TCP => handleTcp6(iface, &synthetic_pkt),
         types.PROTO_NONE => true,
         else => false,
     };

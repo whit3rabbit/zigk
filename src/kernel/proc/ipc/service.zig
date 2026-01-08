@@ -6,15 +6,26 @@
 //! they wish to communicate with.
 //!
 //! The registry is a global singly-linked list protected by a spinlock.
+//!
+//! SECURITY: Resource limits prevent DoS via unbounded registration:
+//!   - MAX_SERVICES_GLOBAL: Maximum services system-wide
+//!   - MAX_SERVICES_PER_PID: Maximum services per process
 
 const std = @import("std");
 const heap = @import("heap");
 const sync = @import("sync");
 const process = @import("process");
 const hal = @import("hal");
+const console = @import("console");
 
 /// Maximum length of a service name in bytes.
 pub const MAX_SERVICE_NAME = 32;
+
+/// Maximum total services system-wide (prevents heap exhaustion)
+pub const MAX_SERVICES_GLOBAL = 256;
+
+/// Maximum services per process (prevents single-process DoS)
+pub const MAX_SERVICES_PER_PID = 16;
 
 /// A registered service entry.
 pub const Service = struct {
@@ -32,6 +43,8 @@ pub const Service = struct {
 var services_head: ?*Service = null;
 /// Spinlock protecting the global services list.
 var services_lock = sync.Spinlock{};
+/// Global service count (for limit enforcement)
+var services_count: usize = 0;
 
 /// Register a service name for the given PID.
 ///
@@ -45,21 +58,36 @@ var services_lock = sync.Spinlock{};
 /// Returns:
 ///   true on success.
 ///   false if the name is already taken.
-///   Error if name is too long or memory allocation fails.
+///   Error if name is too long, limits exceeded, or memory allocation fails.
 pub fn register(name: []const u8, pid: u32) !bool {
     if (name.len > MAX_SERVICE_NAME) return error.NameTooLong;
 
     const held = services_lock.acquire();
     defer held.release();
 
-    // Check if name already exists
+    // SECURITY: Check global limit to prevent heap exhaustion DoS
+    if (services_count >= MAX_SERVICES_GLOBAL) {
+        console.warn("Service registry: global limit ({}) reached, rejecting registration", .{MAX_SERVICES_GLOBAL});
+        return error.TooManyServices;
+    }
+
+    // SECURITY: Check per-PID limit to prevent single-process DoS
+    var pid_count: usize = 0;
     var curr = services_head;
     while (curr) |s| {
         if (std.mem.eql(u8, s.name[0..s.len], name)) {
             // Name taken
             return false;
         }
+        if (s.pid == pid) {
+            pid_count += 1;
+        }
         curr = s.next;
+    }
+
+    if (pid_count >= MAX_SERVICES_PER_PID) {
+        console.warn("Service registry: per-PID limit ({}) reached for PID {}", .{ MAX_SERVICES_PER_PID, pid });
+        return error.TooManyServices;
     }
 
     // Allocate new service node
@@ -71,6 +99,7 @@ pub fn register(name: []const u8, pid: u32) !bool {
     // Prepend to list
     node.next = services_head;
     services_head = node;
+    services_count += 1;
 
     return true;
 }
@@ -121,10 +150,11 @@ pub fn unregisterByPid(pid: u32) void {
             } else {
                 services_head = s.next;
             }
-            
+
             // Advance first, then free
             const next = s.next;
             heap.allocator().destroy(s);
+            services_count -|= 1; // Decrement global count (saturating to prevent underflow)
             curr = next;
         } else {
             prev = s;

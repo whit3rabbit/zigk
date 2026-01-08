@@ -326,6 +326,10 @@ pub fn deliverUdpPacket(pkt: *packet.PacketBuffer) bool {
     // Extract payload once
     const payload_offset = pkt.transport_offset + packet.UDP_HEADER_SIZE;
     const udp_len = udp_hdr.getLength();
+    // SECURITY AUDIT 2026-01-06: This subtraction is safe because:
+    // 1. udp_len is u16, UDP_HEADER_SIZE is comptime 8
+    // 2. The check below guarantees udp_len > UDP_HEADER_SIZE before subtraction
+    // 3. Therefore payload_len >= 1 and no underflow can occur
     if (udp_len <= packet.UDP_HEADER_SIZE) {
         return false;
     }
@@ -422,6 +426,8 @@ pub fn deliverUdpPacket6(pkt: *packet.PacketBuffer) bool {
     // Extract payload once
     const payload_offset = pkt.transport_offset + packet.UDP_HEADER_SIZE;
     const udp_len = udp_hdr.getLength();
+    // SECURITY AUDIT 2026-01-06: Same safety analysis as deliverUdpPacket (IPv4).
+    // The <= check guarantees udp_len > UDP_HEADER_SIZE before subtraction.
     if (udp_len <= packet.UDP_HEADER_SIZE) {
         return false;
     }
@@ -456,7 +462,9 @@ pub fn deliverUdpPacket6(pkt: *packet.PacketBuffer) bool {
                 if (!matches and !is_multicast) continue;
             }
 
-            // TODO: Check IPv6 multicast group membership (not yet implemented)
+            // Check IPv6 multicast group membership
+            // Socket must have joined this multicast group via IPV6_JOIN_GROUP
+            if (!sock.isMulticastMember6(pkt.dst_ipv6)) continue;
 
             // Deliver to this socket using IPv6 source address
             {

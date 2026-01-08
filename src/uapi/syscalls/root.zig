@@ -1,13 +1,22 @@
 // Syscall Numbers - Re-exports from linux and zscapek modules
 //
 // Uses explicit struct merging instead of deprecated usingnamespace.
+// Architecture-specific syscall numbers are selected at compile time.
 
-const linux = @import("linux.zig");
+const builtin = @import("builtin");
+
+// Select architecture-specific Linux syscall numbers
+// x86_64: Standard Linux x86_64 ABI
+// aarch64: Standard Linux aarch64 ABI (with zigk compat stubs in 500+ range)
+const linux = if (builtin.cpu.arch == .aarch64)
+    @import("linux_aarch64.zig")
+else
+    @import("linux.zig");
 
 // Export zscapek module for syscall handlers that need UAPI structures
 pub const zscapek = @import("zscapek.zig");
 
-// Linux x86_64 ABI Syscalls
+// Linux ABI Syscalls (architecture-specific numbers selected at compile time)
 pub const SYS_READ = linux.SYS_READ;
 pub const SYS_WRITE = linux.SYS_WRITE;
 pub const SYS_OPEN = linux.SYS_OPEN;

@@ -21,7 +21,9 @@ var exit_callback_registered: bool = false;
 /// Called lazily on first use of sys_wait_interrupt.
 fn ensureExitCallbackRegistered() void {
     if (!exit_callback_registered) {
-        sched.registerExitCallback(clearIrqWaitersForThread);
+        // Ignore return value - if registration fails, IRQ cleanup on thread
+        // exit won't happen, but this is a rare edge case and logged by the callee
+        _ = sched.registerExitCallback(clearIrqWaitersForThread);
         exit_callback_registered = true;
     }
 }

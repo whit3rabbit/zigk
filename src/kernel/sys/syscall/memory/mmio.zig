@@ -609,7 +609,8 @@ pub fn sys_alloc_iommu_dma(result_ptr_arg: usize, page_count_arg: usize, device_
         // Full rollback
         if (is_iova) {
             const bdf = kernel_iommu.DeviceBdf{ .bus = bus, .device = device, .func = func };
-            kernel_iommu.freeDmaBuffer(bdf, dma_addr, size);
+            // Ignore error during rollback - we're already in failure path
+            kernel_iommu.freeDmaBuffer(bdf, dma_addr, size) catch {};
         }
         proc.user_vmm.removeVma(vma);
         proc.user_vmm.total_mapped -= @intCast(size);
@@ -730,7 +731,12 @@ pub fn sys_free_iommu_dma(virt_addr_arg: usize, size_arg: usize, device_bdf_arg:
         // Let the IOMMU module determine if this is a valid IOVA for this device.
         // If dma_addr is a physical address (not an IOVA), freeDmaBuffer should
         // be a no-op or return without error.
-        kernel_iommu.freeDmaBuffer(bdf, dma_addr, size);
+        // SECURITY: If IOTLB invalidation fails, the physical pages will be leaked
+        // by the kernel to prevent use-after-free via stale TLB entries.
+        kernel_iommu.freeDmaBuffer(bdf, dma_addr, size) catch |err| {
+            console.err("MMIO: IOMMU unmap failed ({any}) - physical memory leaked", .{err});
+            // Continue with VMA/virtual unmap - physical memory intentionally leaked
+        };
     }
 
     // Use munmapLocked since we already hold the lock

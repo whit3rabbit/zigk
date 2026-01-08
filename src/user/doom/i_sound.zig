@@ -1,10 +1,18 @@
 // Doom Sound System (Zscapek /dev/dsp backend)
 //
 // Implements Doom's I_* sound API on top of /dev/dsp (AC97).
+// Includes OPL3 FM synthesis for music playback.
 
 const std = @import("std");
 const syscall = @import("syscall");
 const sound_uapi = @import("uapi").sound;
+
+// Music modules
+const midi = @import("midi.zig");
+const midi_parser = @import("midi_parser.zig");
+const sequencer_mod = @import("sequencer.zig");
+const opl3 = @import("opl3.zig");
+const genmidi = @import("genmidi.zig");
 
 const CBool = c_int;
 
@@ -106,6 +114,14 @@ extern fn M_BindVariable(name: [*:0]const u8, location: ?*anyopaque) void;
 extern fn M_CheckParm(check: [*:0]const u8) c_int;
 extern var snd_channels: c_int;
 
+// MUS to MIDI conversion (from doomgeneric/mus2mid.c)
+const MEMFILE = opaque {};
+extern fn mem_fopen_read(buf: ?*anyopaque, buflen: usize) ?*MEMFILE;
+extern fn mem_fopen_write() ?*MEMFILE;
+extern fn mem_fclose(stream: ?*MEMFILE) void;
+extern fn mem_get_buf(stream: ?*MEMFILE, buf: *?*anyopaque, buflen: *usize) void;
+extern fn mus2mid(musinput: ?*MEMFILE, midioutput: ?*MEMFILE) CBool;
+
 // -----------------------------------------------------------------------------
 // Internal State
 // -----------------------------------------------------------------------------
@@ -148,6 +164,30 @@ var mix_frames: usize = 0;
 var cache_head: ?*SfxCache = null;
 var cache_tail: ?*SfxCache = null;
 var cache_bytes: usize = 0;
+
+// -----------------------------------------------------------------------------
+// Music State
+// -----------------------------------------------------------------------------
+
+var music_initialized: bool = false;
+var music_volume: u8 = 127;
+
+// OPL3 synthesizer instance
+var music_synth: ?*opl3.Opl3Synth = null;
+
+// MIDI sequencer instance
+var music_sequencer: ?*sequencer_mod.Sequencer = null;
+
+// Current track (allocated per-song)
+var current_track: ?*midi.MidiTrack = null;
+
+// Event buffer for MIDI parsing
+var midi_events_buffer: ?[*]midi.MidiEvent = null;
+
+// GENMIDI instrument banks
+var genmidi_instruments: [128]genmidi.GenmidiInstrument = undefined;
+var genmidi_percussion: [47]genmidi.GenmidiInstrument = undefined;
+var genmidi_loaded: bool = false;
 
 // -----------------------------------------------------------------------------
 // Helpers
@@ -472,9 +512,14 @@ fn mixAndWrite() void {
     @memset(accum, 0);
 
     const rate = if (snd_samplerate > 0) @as(u32, @intCast(snd_samplerate)) else 48000;
+
+    // Mix SFX channels
     for (channelsSlice(), 0..) |*ch, idx| {
         mixChannel(idx, ch, accum, frames, rate);
     }
+
+    // Mix music (OPL3 synthesis)
+    mixMusic(accum, frames);
 
     var i: usize = 0;
     while (i < accum.len) : (i += 1) {
@@ -484,6 +529,34 @@ fn mixAndWrite() void {
 
     const bytes = std.mem.sliceAsBytes(out);
     writeAll(dsp_fd, bytes);
+}
+
+/// Mix music into the accumulator buffer
+fn mixMusic(accum: []i32, frames: usize) void {
+    const seq = music_sequencer orelse return;
+    const synth = music_synth orelse return;
+
+    if (!seq.isPlaying()) return;
+
+    // Scale factor for music volume (0-127 mapped to 0-256)
+    const vol_scale: i32 = @as(i32, music_volume) * 2;
+
+    var frame_idx: usize = 0;
+    while (frame_idx < frames) : (frame_idx += 1) {
+        // Process MIDI events and advance sequencer
+        seq.processSample(synth);
+
+        // Generate stereo sample from OPL3
+        const sample = synth.generateSample();
+
+        // Apply music volume and add to accumulator
+        const left = @divTrunc(@as(i32, sample[0]) * vol_scale, 256);
+        const right = @divTrunc(@as(i32, sample[1]) * vol_scale, 256);
+
+        const out_idx = frame_idx * 2;
+        accum[out_idx] += left;
+        accum[out_idx + 1] += right;
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -630,28 +703,189 @@ pub export fn I_PrecacheSounds(sounds: ?[*]SfxInfo, count: c_int) callconv(.c) v
     }
 }
 
-pub export fn I_InitMusic() callconv(.c) void {}
-pub export fn I_ShutdownMusic() callconv(.c) void {}
+pub export fn I_InitMusic() callconv(.c) void {
+    if (music_initialized) return;
+
+    // Check for -nomusic command line option
+    if (M_CheckParm("-nomusic") > 0) return;
+    if (snd_musicdevice == SNDDEVICE_NONE) return;
+
+    // Allocate MIDI events buffer
+    const events_size = @sizeOf(midi.MidiEvent) * midi.MAX_EVENTS_PER_TRACK;
+    const events_raw = allocBuffer(events_size, PU_STATIC) orelse return;
+    midi_events_buffer = @ptrCast(@alignCast(events_raw));
+
+    // Allocate OPL3 synthesizer
+    const synth_raw = allocBuffer(@sizeOf(opl3.Opl3Synth), PU_STATIC) orelse {
+        freeBuffer(events_raw);
+        midi_events_buffer = null;
+        return;
+    };
+    music_synth = @ptrCast(@alignCast(synth_raw));
+    music_synth.?.* = opl3.Opl3Synth.init();
+
+    // Load GENMIDI instrument bank
+    if (genmidi.loadGenmidi(&genmidi_instruments, &genmidi_percussion)) {
+        music_synth.?.loadInstruments(&genmidi_instruments, &genmidi_percussion);
+        genmidi_loaded = true;
+    }
+
+    // Allocate sequencer
+    const seq_raw = allocBuffer(@sizeOf(sequencer_mod.Sequencer), PU_STATIC) orelse {
+        freeBuffer(synth_raw);
+        freeBuffer(events_raw);
+        music_synth = null;
+        midi_events_buffer = null;
+        return;
+    };
+    music_sequencer = @ptrCast(@alignCast(seq_raw));
+
+    const rate = if (snd_samplerate > 0) @as(u32, @intCast(snd_samplerate)) else 48000;
+    music_sequencer.?.* = sequencer_mod.Sequencer.init(rate);
+
+    music_initialized = true;
+}
+
+pub export fn I_ShutdownMusic() callconv(.c) void {
+    if (!music_initialized) return;
+
+    // Stop any playing music
+    I_StopSong();
+
+    // Free current track if any
+    if (current_track) |track| {
+        freeBuffer(@ptrCast(track));
+        current_track = null;
+    }
+
+    // Free sequencer
+    if (music_sequencer) |seq| {
+        freeBuffer(@ptrCast(seq));
+        music_sequencer = null;
+    }
+
+    // Free synthesizer
+    if (music_synth) |synth| {
+        freeBuffer(@ptrCast(synth));
+        music_synth = null;
+    }
+
+    // Free events buffer
+    if (midi_events_buffer) |buf| {
+        freeBuffer(@ptrCast(buf));
+        midi_events_buffer = null;
+    }
+
+    genmidi_loaded = false;
+    music_initialized = false;
+}
+
 pub export fn I_SetMusicVolume(vol: c_int) callconv(.c) void {
-    _ = vol;
+    // Doom volume is 0-15, scale to 0-127
+    const scaled = if (vol < 0) 0 else if (vol > 15) 127 else @as(u8, @intCast(vol * 8));
+    music_volume = scaled;
 }
-pub export fn I_PauseSong() callconv(.c) void {}
-pub export fn I_ResumeSong() callconv(.c) void {}
+
+pub export fn I_PauseSong() callconv(.c) void {
+    if (music_sequencer) |seq| {
+        seq.pause();
+    }
+}
+
+pub export fn I_ResumeSong() callconv(.c) void {
+    if (music_sequencer) |seq| {
+        seq.resumePlayback();
+    }
+}
+
 pub export fn I_PlaySong(handle: ?*anyopaque, looping: CBool) callconv(.c) void {
-    _ = handle;
-    _ = looping;
+    if (!music_initialized) return;
+    const seq = music_sequencer orelse return;
+
+    // Handle is a pointer to our MidiTrack
+    const track: *midi.MidiTrack = @ptrCast(@alignCast(handle orelse return));
+
+    // Load and start playback
+    seq.loadTrack(track);
+    seq.play(looping != 0);
 }
-pub export fn I_StopSong() callconv(.c) void {}
+
+pub export fn I_StopSong() callconv(.c) void {
+    const seq = music_sequencer orelse return;
+    const synth = music_synth orelse return;
+    seq.stop(synth);
+}
+
 pub export fn I_RegisterSong(data: ?*anyopaque, len: c_int) callconv(.c) ?*anyopaque {
-    _ = data;
-    _ = len;
+    if (!music_initialized) return null;
+    if (data == null or len <= 0) return null;
+
+    const mus_len: usize = @intCast(len);
+
+    // Open MUS data as MEMFILE for reading
+    const mus_file = mem_fopen_read(data, mus_len) orelse return null;
+    defer mem_fclose(mus_file);
+
+    // Open output MEMFILE for MIDI data
+    const midi_file = mem_fopen_write() orelse return null;
+
+    // Convert MUS to MIDI
+    if (mus2mid(mus_file, midi_file) == 0) {
+        mem_fclose(midi_file);
+        return null;
+    }
+
+    // Get MIDI data from output
+    var midi_buf: ?*anyopaque = null;
+    var midi_len: usize = 0;
+    mem_get_buf(midi_file, &midi_buf, &midi_len);
+
+    if (midi_buf == null or midi_len == 0) {
+        mem_fclose(midi_file);
+        return null;
+    }
+
+    // Parse MIDI into track
+    const events_buf = midi_events_buffer orelse {
+        mem_fclose(midi_file);
+        return null;
+    };
+    const events_slice = events_buf[0..midi.MAX_EVENTS_PER_TRACK];
+
+    const midi_bytes: [*]const u8 = @ptrCast(midi_buf.?);
+    const track_opt = midi_parser.parseMidi(midi_bytes[0..midi_len], events_slice);
+
+    mem_fclose(midi_file);
+
+    if (track_opt) |track| {
+        // Allocate persistent track storage
+        const track_raw = allocBuffer(@sizeOf(midi.MidiTrack), PU_STATIC) orelse return null;
+        const track_ptr: *midi.MidiTrack = @ptrCast(@alignCast(track_raw));
+        track_ptr.* = track;
+        return @ptrCast(track_ptr);
+    }
+
     return null;
 }
+
 pub export fn I_UnRegisterSong(handle: ?*anyopaque) callconv(.c) void {
-    _ = handle;
+    if (handle == null) return;
+
+    // Stop if this track is playing
+    if (current_track) |track| {
+        if (@intFromPtr(track) == @intFromPtr(handle.?)) {
+            I_StopSong();
+            current_track = null;
+        }
+    }
+
+    // Free the track
+    freeBuffer(handle);
 }
+
 pub export fn I_MusicIsPlaying() callconv(.c) CBool {
-    return 0;
+    const seq = music_sequencer orelse return 0;
+    return if (seq.isPlaying()) 1 else 0;
 }
 
 pub export fn I_BindSoundVariables() callconv(.c) void {
@@ -709,32 +943,49 @@ fn soundModuleCache(sounds: ?[*]SfxInfo, count: c_int) callconv(.c) void {
 }
 
 fn musicModuleInit() callconv(.c) CBool {
-    return 0;
+    I_InitMusic();
+    return if (music_initialized) 1 else 0;
 }
 
-fn musicModuleShutdown() callconv(.c) void {}
+fn musicModuleShutdown() callconv(.c) void {
+    I_ShutdownMusic();
+}
+
 fn musicModuleSetVolume(vol: c_int) callconv(.c) void {
-    _ = vol;
+    I_SetMusicVolume(vol);
 }
-fn musicModulePause() callconv(.c) void {}
-fn musicModuleResume() callconv(.c) void {}
+
+fn musicModulePause() callconv(.c) void {
+    I_PauseSong();
+}
+
+fn musicModuleResume() callconv(.c) void {
+    I_ResumeSong();
+}
+
 fn musicModuleRegister(data: ?*anyopaque, len: c_int) callconv(.c) ?*anyopaque {
-    _ = data;
-    _ = len;
-    return null;
+    return I_RegisterSong(data, len);
 }
+
 fn musicModuleUnregister(handle: ?*anyopaque) callconv(.c) void {
-    _ = handle;
+    I_UnRegisterSong(handle);
 }
+
 fn musicModulePlay(handle: ?*anyopaque, looping: CBool) callconv(.c) void {
-    _ = handle;
-    _ = looping;
+    I_PlaySong(handle, looping);
 }
-fn musicModuleStop() callconv(.c) void {}
+
+fn musicModuleStop() callconv(.c) void {
+    I_StopSong();
+}
+
 fn musicModuleIsPlaying() callconv(.c) CBool {
-    return 0;
+    return I_MusicIsPlaying();
 }
-fn musicModulePoll() callconv(.c) void {}
+
+fn musicModulePoll() callconv(.c) void {
+    // Music is mixed in mixAndWrite(), no separate poll needed
+}
 
 const sfx_devices = [_]snddevice_t{SNDDEVICE_SB};
 const music_devices = [_]snddevice_t{SNDDEVICE_SB};

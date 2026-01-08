@@ -13,6 +13,7 @@
 pub const ipv6 = @import("ipv6/root.zig");
 pub const icmpv6 = @import("icmpv6/root.zig");
 pub const ndp = @import("ndp/root.zig");
+pub const pmtu = @import("pmtu.zig");
 
 // Re-export common types from core
 const packet = @import("../core/packet.zig");

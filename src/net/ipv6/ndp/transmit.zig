@@ -167,7 +167,7 @@ pub fn sendNeighborAdvertisement(
     const src_addr = advertised_addr;
 
     // Determine destination MAC
-    var dst_mac: [6]u8 = undefined;
+    var dst_mac: [6]u8 = [_]u8{0} ** 6;
     if (ipv6_types.isMulticast(dst_addr)) {
         dst_mac = ipv6_types.multicastToMac(dst_addr);
     } else {

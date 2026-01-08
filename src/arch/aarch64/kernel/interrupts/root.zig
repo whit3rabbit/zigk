@@ -372,30 +372,30 @@ pub fn setGenericIrqHandler(irq_num: u8, handler: *const fn (u8) void) void {
     }
 }
 
-pub fn registerHandler(_: u32, _: *const fn (*const InterruptFrame) void) void {
+pub fn registerHandler(_: u8, _: *const fn (*InterruptFrame) void) void {
     // AArch64 uses GIC-based routing, not per-vector registration
 }
 
-pub fn unregisterHandler(_: u32) void {}
+pub fn unregisterHandler(_: u8) void {}
 
 // ============================================================================
 // MSI-X Stubs (Not applicable to GICv2, would need GICv3+ ITS)
 // ============================================================================
 
-pub fn allocateMsixVectors(_: u32) !MsixVectorAllocation {
+pub fn allocateMsixVectors(_: u8) !MsixVectorAllocation {
     return error.Unimplemented;
 }
 
 pub fn freeMsixVectors(_: MsixVectorAllocation) void {}
 
-pub fn registerMsixHandler(_: u32, _: *const fn (*const InterruptFrame) void) bool {
+pub fn registerMsixHandler(_: u8, _: *const fn (*InterruptFrame) void) bool {
     return false;
 }
 
-pub fn unregisterMsixHandler(_: u32) void {}
+pub fn unregisterMsixHandler(_: u8) void {}
 
-pub fn allocateMsixVector() ?u32 {
+pub fn allocateMsixVector() ?u8 {
     return null;
 }
 
-pub fn freeMsixVector(_: u32) void {}
+pub fn freeMsixVector(_: u8) void {}

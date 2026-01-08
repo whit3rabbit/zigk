@@ -103,6 +103,8 @@ pub fn checkSignals(frame: *hal.idt.InterruptFrame) *hal.idt.InterruptFrame {
     if (pending == 0) return frame;
 
     // Find lowest set bit (lowest signal number)
+    // BOUNDS SAFETY: @ctz on non-zero u64 returns 0-63, so signum is 1-64.
+    // signal_actions is a 64-element array (indices 0-63), so signum-1 is always valid.
     const sig_bit = @ctz(pending);
     const signum = sig_bit + 1;
 
@@ -112,7 +114,7 @@ pub fn checkSignals(frame: *hal.idt.InterruptFrame) *hal.idt.InterruptFrame {
     current_thread.pending_signals &= ~(@as(u64, 1) << @truncate(sig_bit));
 
     // Get the action for this signal
-    // signal_actions index is signum-1
+    // signal_actions index is signum-1 (0-63 for signals 1-64)
     const action = current_thread.signal_actions[signum - 1];
 
     // If handler is SIG_DFL (0) or SIG_IGN (1), handle default action

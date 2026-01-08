@@ -20,6 +20,7 @@ pub const Domain = domain.Domain;
 pub const DomainManager = domain.DomainManager;
 pub const DeviceBdf = domain.DeviceBdf;
 pub const IovaAllocator = domain.IovaAllocator;
+pub const UnmapError = domain.UnmapError;
 
 // Re-export public functions
 pub const init = domain.init;

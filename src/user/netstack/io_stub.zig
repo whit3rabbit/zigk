@@ -12,7 +12,8 @@ pub const IoRequest = struct {
     ctx: *anyopaque,
     buf_ptr: usize = 0,
     buf_len: usize = 0,
-    
+    bounce_buf: ?[]u8 = null, // Stub for kernel compatibility (unused in userspace)
+
     pub fn complete(self: *IoRequest, result: IoResult) bool {
         _ = self;
         _ = result;

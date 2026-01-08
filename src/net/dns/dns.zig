@@ -76,7 +76,12 @@ pub const DnsPacket = struct {
         };
     }
 
-    pub fn writeHeader(self: *DnsPacket, id: u16, flags: u16) void {
+    /// Write DNS header (12 bytes) to packet buffer.
+    /// Returns error.BufferTooSmall if insufficient space remains.
+    pub fn writeHeader(self: *DnsPacket, id: u16, flags: u16) error{BufferTooSmall}!void {
+        // Security: Bounds check before write (consistent with writeName/writeQuestion)
+        if (self.pos + DNS_HEADER_SIZE > self.buffer.len) return error.BufferTooSmall;
+
         const hdr = Header{
             .id = @byteSwap(id),
             .flags = @byteSwap(flags),
@@ -85,8 +90,8 @@ pub const DnsPacket = struct {
             .ns_count = 0,
             .ar_count = 0,
         };
-        const invalid: *const [12]u8 = @ptrCast(&hdr);
-        @memcpy(self.buffer[self.pos..][0..12], invalid);
+        const hdr_bytes: *const [12]u8 = @ptrCast(&hdr);
+        @memcpy(self.buffer[self.pos..][0..12], hdr_bytes);
         self.pos += 12;
     }
 
@@ -175,7 +180,9 @@ pub fn readName(buf: []const u8, start: usize, out: []u8) error{ FormatError, Bu
 
         // RFC 1035: Enforce total name length limit (253 bytes)
         // Each label contributes: label_len + 1 (for dot or null terminator)
-        total_name_len += label_len + 1;
+        // Security: Use checked arithmetic per CLAUDE.md guidelines (defense in depth)
+        const label_contribution = std.math.add(usize, label_len, 1) catch return error.FormatError;
+        total_name_len = std.math.add(usize, total_name_len, label_contribution) catch return error.FormatError;
         if (total_name_len > DNS_MAX_NAME_LENGTH) return error.FormatError;
 
         // Add dot separator (except for first label)

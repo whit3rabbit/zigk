@@ -21,12 +21,20 @@ pub const Backend = struct {
 
 var backends: [4]Backend = undefined;
 var backend_count: usize = 0;
+// SECURITY (Vuln 4): Spinlock to protect backend array and count from race conditions.
+// Without this, concurrent calls to print() and disableGraphicalBackend() could cause:
+// - Out-of-bounds access if backend_count is decremented while iterating
+// - Use of stale/corrupted function pointers if array is reordered during iteration
+// The lock is held briefly during iteration, which is acceptable for debug output.
+var backend_lock: sync.Spinlock = .{};
 
 var log_buffer: [4096]u8 = undefined;
 var log_lock: sync.Spinlock = .{};
 
 /// Add a new output backend
 pub fn addBackend(backend: Backend) void {
+    const held = backend_lock.acquire();
+    defer held.release();
     if (backend_count < backends.len) {
         backends[backend_count] = backend;
         backend_count += 1;
@@ -59,13 +67,26 @@ pub fn addIpcBackend(pid: usize) void {
 
 /// Print a string to the debug console
 pub fn print(str: []const u8) void {
-    if (backend_count == 0) {
+    // SECURITY (Vuln 4): Snapshot backends under lock to prevent TOCTOU race.
+    // We copy the array to avoid holding lock during potentially slow writeFn calls.
+    var snapshot: [4]Backend = undefined;
+    var count: usize = 0;
+    {
+        const held = backend_lock.acquire();
+        count = backend_count;
+        if (count > 0) {
+            @memcpy(snapshot[0..count], backends[0..count]);
+        }
+        held.release();
+    }
+
+    if (count == 0) {
         // Fallback to HAL serial until backends are registered
         hal.serial.writeString(str);
         return;
     }
 
-    for (backends[0..backend_count]) |b| {
+    for (snapshot[0..count]) |b| {
         b.writeFn(b.context, str);
     }
 }
@@ -81,11 +102,23 @@ pub fn printUnsafe(str: []const u8) void {
 
 /// Scroll standard output up/down
 pub fn scroll(lines: usize, up: bool) void {
-    if (backend_count == 0) return;
+    // SECURITY (Vuln 4): Snapshot backends under lock (same pattern as print)
+    var snapshot: [4]Backend = undefined;
+    var count: usize = 0;
+    {
+        const held = backend_lock.acquire();
+        count = backend_count;
+        if (count > 0) {
+            @memcpy(snapshot[0..count], backends[0..count]);
+        }
+        held.release();
+    }
+
+    if (count == 0) return;
 
     // Only scroll the first backend usually (graphical console)
     // Or iterate all? Typically only one graphical console exists.
-    for (backends[0..backend_count]) |b| {
+    for (snapshot[0..count]) |b| {
         if (b.scrollFn) |scrollFn| {
             scrollFn(b.context, lines, up);
         }
@@ -96,6 +129,9 @@ pub fn scroll(lines: usize, up: bool) void {
 /// Kernel output continues on serial only. Graphical backends are identified by
 /// having a non-null scrollFn (serial backends don't support scrolling).
 pub fn disableGraphicalBackend() void {
+    const held = backend_lock.acquire();
+    defer held.release();
+
     var new_count: usize = 0;
     for (backends[0..backend_count]) |b| {
         // Keep backends without scroll support (serial)

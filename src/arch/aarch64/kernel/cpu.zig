@@ -241,10 +241,14 @@ pub fn switchContextWithFpu(
     fpu.restore(new_fpu);
 }
 
-/// Backwards-compatible alias for switchContextKernelOnly.
-/// DEPRECATED: Use switchContextKernelOnly for kernel threads or
-/// switchContextWithFpu for user threads.
-pub const switchContext = switchContextKernelOnly;
+// NOTE: The generic `switchContext` alias was REMOVED for security.
+// Callers MUST explicitly choose:
+//   - switchContextKernelOnly: For kernel threads that NEVER touch FPU
+//   - switchContextWithFpu: For user threads (prevents FPU state leaks)
+//
+// If you got here from a compile error, audit your call site:
+// - User thread switch? Use switchContextWithFpu()
+// - Kernel-only thread? Use switchContextKernelOnly()
 
 pub fn flushTlb() void {
     asm volatile ("tlbi vmalle1is");

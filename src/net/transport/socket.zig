@@ -19,10 +19,14 @@ pub const AF_INET = root.AF_INET;
 pub const AF_INET6 = root.AF_INET6;
 pub const SOCK_STREAM = root.SOCK_STREAM;
 pub const SOCK_DGRAM = root.SOCK_DGRAM;
+pub const SOCK_RAW = root.SOCK_RAW;
 pub const SOL_SOCKET = root.SOL_SOCKET;
 pub const IPPROTO_IP = root.IPPROTO_IP;
+pub const IPPROTO_ICMP = root.IPPROTO_ICMP;
 pub const IPPROTO_TCP = root.IPPROTO_TCP;
 pub const IPPROTO_IPV6 = root.IPPROTO_IPV6;
+pub const IPPROTO_ICMPV6 = root.IPPROTO_ICMPV6;
+pub const TCP_NODELAY = root.TCP_NODELAY;
 pub const SO_REUSEADDR = root.SO_REUSEADDR;
 pub const SO_BROADCAST = root.SO_BROADCAST;
 pub const SO_RCVTIMEO = root.SO_RCVTIMEO;
@@ -84,6 +88,7 @@ pub const deliverUdpPacket6 = root.deliverUdpPacket6;
 pub const listen = root.listen;
 pub const accept = root.accept;
 pub const connect = root.connect;
+pub const connect6 = root.connect6;
 pub const getTcb = root.getTcb;
 pub const checkConnectStatus = root.checkConnectStatus;
 pub const queueAcceptConnection = root.queueAcceptConnection;
@@ -95,6 +100,7 @@ pub const acceptAsync = root.acceptAsync;
 pub const recvAsync = root.recvAsync;
 pub const sendAsync = root.sendAsync;
 pub const connectAsync = root.connectAsync;
+pub const connectAsync6 = root.connectAsync6;
 pub const completePendingAccept = root.completePendingAccept;
 pub const completePendingRecv = root.completePendingRecv;
 pub const completePendingConnect = root.completePendingConnect;
@@ -113,6 +119,14 @@ pub const checkPollEvents = root.checkPollEvents;
 pub const shutdown = root.shutdown;
 pub const getsockname = root.getsockname;
 pub const getpeername = root.getpeername;
+pub const getsockname6 = root.getsockname6;
+pub const getpeername6 = root.getpeername6;
+
+// Raw socket path (SOCK_RAW for ping/traceroute)
+pub const sendtoRaw = root.sendtoRaw;
+pub const recvfromRaw = root.recvfromRaw;
+pub const sendtoRaw6 = root.sendtoRaw6;
+pub const recvfromRaw6 = root.recvfromRaw6;
 
 // Errors
 pub const SocketError = root.SocketError;

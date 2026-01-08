@@ -209,6 +209,70 @@ pub fn handleIcmpError(local_ip: u32, local_port: u16, remote_ip: u32, remote_po
     }
 }
 
+/// Handle ICMP error for a connection (dual-stack version using IpAddr)
+/// Supports both IPv4 and IPv6 connections via the IpAddr tagged union.
+/// Called by ICMPv6 Destination Unreachable handler.
+pub fn handleIcmpErrorIp(
+    local_addr: state.IpAddr,
+    local_port: u16,
+    remote_addr: state.IpAddr,
+    remote_port: u16,
+    icmp_type: u8,
+    icmp_code: u8,
+    seq_num: ?u32,
+) void {
+    const held = state.lock.acquire();
+    defer held.release();
+
+    const tcb = state.findTcbIp(local_addr, local_port, remote_addr, remote_port) orelse return;
+
+    // RFC 5927: Validate sequence number if present
+    if (seq_num) |seq| {
+        // Must be in range [SND.UNA, SND.NXT]
+        const snd_una = tcb.snd_una;
+        const snd_nxt = tcb.snd_nxt;
+
+        // seq < snd_una OR seq > snd_nxt
+        if (types.seqLt(seq, snd_una) or types.seqGt(seq, snd_nxt)) {
+            return; // Ignore invalid ICMP error
+        }
+    }
+
+    // Handle Destination Unreachable (type 3 for IPv4, type 1 for ICMPv6)
+    // Caller normalizes ICMPv6 type 1 to IPv4 type 3 for compatibility
+    if (icmp_type != 3) return;
+
+    const is_hard_error = switch (icmp_code) {
+        // Net/Host unreachable are "soft" errors (transient routing issues)
+        0, 1 => false,
+        // Proto/Port unreachable are "hard" errors (permanent)
+        2, 3 => true,
+        // Fragmentation needed (IPv4) / Packet Too Big (ICMPv6) - PMTU update, not error
+        4 => false,
+        else => false,
+    };
+
+    // Connection Setup Phase: All Unreachables are hard errors
+    if (tcb.state == .SynSent or tcb.state == .SynReceived) {
+        // Abort connection
+        tcb.state = .Closed;
+        // Wake blocked connect()
+        if (tcb.blocked_thread) |thread| {
+            socket.wakeThread(thread);
+            tcb.blocked_thread = null;
+        }
+        state.freeTcb(tcb);
+        return;
+    }
+
+    // Established Phase: RFC 5927 / RFC 1122
+    // We MUST NOT abort on "hard" errors (Port/Proto Unreach) because they are easily spoofed.
+    // Rely on TCP's own retransmission limits to time out the connection.
+    if ((tcb.state == .Established or tcb.state == .CloseWait) and is_hard_error) {
+        return;
+    }
+}
+
 /// Get state timeout in milliseconds (0 = no timeout)
 pub fn getStateTimeout(tcp_state: @TypeOf(state.tcb_pool.items[0].state)) u64 {
     const timeouts = c.STATE_TIMEOUT_MS{};

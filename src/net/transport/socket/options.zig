@@ -114,6 +114,13 @@ pub fn setsockopt(sock_fd: usize, level: i32, optname: i32, optval: [*]const u8,
                 if (optlen < 1) return errors.SocketError.InvalidArg;
                 sock.multicast_ttl = optval[0];
             },
+            types.IP_TTL => {
+                // Set unicast IP TTL (1-255, 0 would make packet unroutable)
+                if (optlen < 4) return errors.SocketError.InvalidArg;
+                const val: *const i32 = @ptrCast(@alignCast(optval));
+                if (val.* < 1 or val.* > 255) return errors.SocketError.InvalidArg;
+                sock.ttl = @intCast(@as(u32, @bitCast(val.*)));
+            },
             else => return errors.SocketError.InvalidArg,
         }
     } else if (level == types.IPPROTO_TCP) {
@@ -235,6 +242,12 @@ pub fn getsockopt(sock_fd: usize, level: i32, optname: i32, optval: [*]u8, optle
                 if (optlen.* < 1) return errors.SocketError.InvalidArg;
                 optval[0] = sock.tos;
                 optlen.* = 1;
+            },
+            types.IP_TTL => {
+                if (optlen.* < 4) return errors.SocketError.InvalidArg;
+                const val: *i32 = @ptrCast(@alignCast(optval));
+                val.* = @intCast(sock.ttl);
+                optlen.* = 4;
             },
             else => return errors.SocketError.InvalidArg,
         }

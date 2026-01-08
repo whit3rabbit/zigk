@@ -198,6 +198,9 @@ pub const Errno = enum(i32) {
     /// Connection aborted
     ECONNABORTED = 103,
 
+    /// No buffer space available
+    ENOBUFS = 105,
+
     /// Operation canceled
     ECANCELED = 125,
 
@@ -347,6 +350,7 @@ pub const SyscallError = error{
     ENOTCONN,
     EDESTADDRREQ,
     EMSGSIZE,
+    ENOBUFS,
     ECANCELED,
 };
 
@@ -413,6 +417,7 @@ pub fn errorToReturn(err: SyscallError) isize {
         error.EINPROGRESS => 115,
         error.EDESTADDRREQ => 89,
         error.EMSGSIZE => 90,
+        error.ENOBUFS => 105,
         error.ECANCELED => 125,
     };
     return -@as(isize, errno_val);

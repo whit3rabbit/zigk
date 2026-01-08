@@ -373,7 +373,7 @@ fn sendSyn6(tcb: *Tcb) bool {
     };
 
     // Resolve destination MAC via NDP
-    var dst_mac: [6]u8 = undefined;
+    var dst_mac: [6]u8 = [_]u8{0} ** 6;
 
     if (ipv6_types.isMulticast(remote_v6)) {
         dst_mac = addr_mod.ipv6MulticastToMac(remote_v6);
@@ -461,7 +461,7 @@ fn sendSynAckWithOptions6(tcb: *Tcb, peer_opts: ?*const options.TcpOptions) bool
     };
 
     // Resolve destination MAC via NDP
-    var dst_mac: [6]u8 = undefined;
+    var dst_mac: [6]u8 = [_]u8{0} ** 6;
 
     if (ipv6_types.isMulticast(remote_v6)) {
         dst_mac = addr_mod.ipv6MulticastToMac(remote_v6);
@@ -549,7 +549,7 @@ fn sendAckWithOptions6(tcb: *Tcb) bool {
     };
 
     // Resolve destination MAC via NDP
-    var dst_mac: [6]u8 = undefined;
+    var dst_mac: [6]u8 = [_]u8{0} ** 6;
 
     if (ipv6_types.isMulticast(remote_v6)) {
         dst_mac = addr_mod.ipv6MulticastToMac(remote_v6);
@@ -637,7 +637,7 @@ pub fn sendRstForPacket6(iface: *interface.Interface, pkt: *const PacketBuffer, 
         return true;
     }
 
-    var dst_mac: [6]u8 = undefined;
+    var dst_mac: [6]u8 = [_]u8{0} ** 6;
     const next_hop = if (ipv6_types.isLinkLocal(dst_v6))
         dst_v6
     else if (iface.getIpv6Gateway(dst_v6)) |gw|

@@ -93,11 +93,11 @@ fn runRingLoop(iface: *net.Interface) void {
             if (rx_ring_set.get(idx)) |rx_ring| {
                 while (rx_ring.peek()) |entry| {
                     if (entry.len > 0 and entry.len <= net.MAX_PACKET_SIZE) {
-                        // Zero-copy: process directly from ring buffer
+                        // Copy from ring buffer into properly initialized PacketBuffer
                         const data = @as([*]const u8, @volatileCast(&entry.data));
-                        var pkt_buf: net.PacketBuffer = undefined;
+                        var backing_buf: [net.MAX_PACKET_SIZE]u8 = undefined;
+                        var pkt_buf = net.PacketBuffer.init(&backing_buf, entry.len);
                         @memcpy(pkt_buf.data[0..entry.len], data[0..entry.len]);
-                        pkt_buf.len = @intCast(entry.len);
                         _ = net.processFrame(iface, &pkt_buf);
                         processed += 1;
                     }
@@ -146,9 +146,9 @@ fn runLegacyLoop(iface: *net.Interface) void {
             if (data_len > net.MAX_PACKET_SIZE) continue;
 
             const payload = msg.payload[@sizeOf(net_ipc.PacketHeader)..][0..data_len];
-            var pkt_buf: net.PacketBuffer = undefined;
+            var backing_buf: [net.MAX_PACKET_SIZE]u8 = undefined;
+            var pkt_buf = net.PacketBuffer.init(&backing_buf, data_len);
             @memcpy(pkt_buf.data[0..data_len], payload);
-            pkt_buf.len = @intCast(data_len);
 
             _ = net.processFrame(iface, &pkt_buf);
         }

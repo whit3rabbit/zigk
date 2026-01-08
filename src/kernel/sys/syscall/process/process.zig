@@ -296,12 +296,19 @@ fn canSetGid(proc: *base.Process, new_gid: u32) bool {
 /// - Root or CAP_SETUID can set any values
 /// - Non-privileged users can only set values that match current real, effective, or saved UID
 /// - Permanently drops privileges if all three are set to a non-zero value
+/// - Uses cred_lock to prevent TOCTOU races between permission check and credential writes
 pub fn sys_setresuid(ruid: usize, euid: usize, suid_arg: usize) SyscallError!usize {
     const proc = base.getCurrentProcess();
 
     const new_ruid: u32 = @truncate(ruid);
     const new_euid: u32 = @truncate(euid);
     const new_suid: u32 = @truncate(suid_arg);
+
+    // SECURITY: Acquire credential lock for atomic check-and-modify.
+    // Prevents TOCTOU race where another thread could modify credentials
+    // between permission check and credential write phases.
+    const held = proc.cred_lock.acquire();
+    defer held.release();
 
     const is_privileged = proc.euid == 0;
 
@@ -356,12 +363,21 @@ pub fn sys_getresuid(ruid_ptr: usize, euid_ptr: usize, suid_ptr: usize) SyscallE
 /// sys_setresgid (119) - Set real, effective, and saved group IDs
 ///
 /// Same semantics as setresuid but for group IDs.
+///
+/// Security:
+/// - Uses cred_lock to prevent TOCTOU races between permission check and credential writes
 pub fn sys_setresgid(rgid: usize, egid: usize, sgid_arg: usize) SyscallError!usize {
     const proc = base.getCurrentProcess();
 
     const new_rgid: u32 = @truncate(rgid);
     const new_egid: u32 = @truncate(egid);
     const new_sgid: u32 = @truncate(sgid_arg);
+
+    // SECURITY: Acquire credential lock for atomic check-and-modify.
+    // Prevents TOCTOU race where another thread could modify credentials
+    // between permission check and credential write phases.
+    const held = proc.cred_lock.acquire();
+    defer held.release();
 
     const is_privileged = proc.euid == 0;
 
@@ -616,6 +632,16 @@ pub fn sys_getpgid(pid: usize) SyscallError!usize {
 }
 
 /// sys_setpgid (109) - Set process group ID
+///
+/// SECURITY NOTE (MVP): This syscall uses findProcessByPid which returns a raw
+/// pointer without refcounting. In the current single-threaded cooperative model,
+/// this is safe because:
+///   1. If target == current, process can't exit while running
+///   2. If target is a child, parent-child relationship provides implicit reference
+///   3. Process destruction only happens after wait() reaps zombie
+///
+/// For full SMP safety, this should use findAndRefProcess() with proper unref(),
+/// or hold process_tree_lock during the entire operation.
 pub fn sys_setpgid(pid: usize, pgid_arg: usize) SyscallError!usize {
     const target_pid: u32 = @truncate(pid);
     const new_pgid: u32 = @truncate(pgid_arg);

@@ -29,6 +29,10 @@ pub fn init(pci_dev: *const pci.PciDevice, pci_access: pci.PciAccess) !*types.Ac
     pci_access.enableMemorySpace(pci_dev.bus, pci_dev.device, pci_dev.func);
 
     // Allocate instance
+    // Security note: Heap allocation is safe here because the Ac97 struct itself is NOT
+    // a DMA target - it only holds pointers to DMA buffers. The actual DMA buffers
+    // (BDL and audio buffers) are allocated from PMM below with pmm.allocZeroedPage().
+    // Hardware accesses only the physical addresses (bdl_phys, buffers_phys), not this struct.
     const driver = try heap.allocator().create(types.Ac97);
     errdefer heap.allocator().destroy(driver);
     driver.* = types.Ac97{

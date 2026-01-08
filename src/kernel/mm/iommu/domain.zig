@@ -41,6 +41,13 @@ const MAX_DEVICES_PER_DOMAIN: usize = 8;
 /// Maximum number of IOMMU domains
 const MAX_DOMAINS: usize = 64;
 
+/// Error returned when IOVA unmap fails
+/// SECURITY: Callers MUST NOT free physical memory on this error, as devices
+/// may still access via stale IOTLB entries (use-after-free vulnerability)
+pub const UnmapError = error{
+    IotlbInvalidationFailed,
+};
+
 /// PCI Bus/Device/Function identifier
 pub const DeviceBdf = struct {
     bus: u8,
@@ -424,6 +431,14 @@ pub const Domain = struct {
         readable: bool,
         writable: bool,
     ) ?u64 {
+        // SECURITY: Reject buffers overlapping firmware-reserved RMRR regions
+        // RMRR regions are identity-mapped for firmware/BIOS and must not be
+        // used for general DMA buffers.
+        if (domain_manager.overlapsRmrr(phys_addr, size)) {
+            console.err("IOMMU: DMA buffer 0x{x}+{d} overlaps RMRR region", .{ phys_addr, size });
+            return null;
+        }
+
         // Allocate IOVA space
         const iova = self.iova_alloc.allocate(size) orelse return null;
 
@@ -510,15 +525,17 @@ pub const Domain = struct {
     }
 
     /// Unmap an IOVA range
-    pub fn unmapIova(self: *Self, iova: u64, size: u64) void {
+    /// Returns error if IOTLB invalidation fails - caller MUST NOT free physical memory
+    pub fn unmapIova(self: *Self, iova: u64, size: u64) UnmapError!void {
         self.page_tables.unmapRange(iova, size);
         self.iova_alloc.free(iova, size);
 
-        // SECURITY: Invalidate IOTLB after unmapping
-        // Prevents stale TLB entries from allowing access to freed pages
+        // SECURITY: IOTLB invalidation is REQUIRED after unmap
+        // Failure means stale TLB entries could allow device access to freed memory
         self.invalidateIotlb() catch |err| {
-            console.warn("IOMMU: IOTLB invalidation after unmap failed: {}", .{err});
-            // Continue anyway - unmap is best effort, and pages are freed
+            console.err("IOMMU: CRITICAL - IOTLB invalidation after unmap failed: {}", .{err});
+            // IOVA space freed, but physical memory MUST NOT be freed by caller
+            return UnmapError.IotlbInvalidationFailed;
         };
     }
 
@@ -785,10 +802,11 @@ pub fn allocDmaBuffer(bdf: DeviceBdf, phys_addr: u64, size: u64, writable: bool)
     return domain.allocateAndMap(phys_addr, size, true, writable);
 }
 
-/// Free a DMA buffer
-pub fn freeDmaBuffer(bdf: DeviceBdf, iova: u64, size: u64) void {
+/// Free a DMA buffer's IOVA mapping
+/// Returns error if IOTLB invalidation failed - caller MUST NOT free physical memory
+pub fn freeDmaBuffer(bdf: DeviceBdf, iova: u64, size: u64) UnmapError!void {
     const domain = domain_manager.getDomainForDevice(bdf) orelse return;
-    domain.unmapIova(iova, size);
+    try domain.unmapIova(iova, size);
 }
 
 /// Check if IOMMU is available and initialized

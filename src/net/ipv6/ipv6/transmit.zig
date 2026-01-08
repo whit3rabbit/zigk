@@ -162,7 +162,7 @@ pub fn sendPacket(iface: *Interface, pkt: *PacketBuffer, dst_addr: [16]u8) bool 
     };
 
     // 3. Resolve MAC Address
-    var dst_mac: [6]u8 = undefined;
+    var dst_mac: [6]u8 = [_]u8{0} ** 6;
 
     if (types.isMulticast(dst_addr)) {
         // IPv6 multicast to Ethernet multicast (RFC 2464 Section 7)
@@ -190,25 +190,23 @@ pub fn sendPacket(iface: *Interface, pkt: *PacketBuffer, dst_addr: [16]u8) bool 
         }
     }
 
-    // 4. Build Ethernet frame
+    // 4. Calculate packet length and check MTU
+    // IPv6 minimum MTU is 1280 bytes (RFC 8200)
+    // For packets > MTU, we must fragment at the source (not intermediate routers)
+    const ip6_hdr = packet.getIpv6Header(pkt.data, pkt.ip_offset) orelse return false;
+    const ip_total_len = std.math.add(usize, IPV6_HEADER_SIZE, ip6_hdr.getPayloadLength()) catch return false;
+
+    // 5. Fragment if needed
+    if (ip_total_len > iface.mtu) {
+        return sendFragmentedPacket(iface, pkt, dst_mac);
+    }
+
+    // 6. Build Ethernet frame (only for non-fragmented packets)
     if (!ethernet.buildFrame(iface, pkt, dst_mac, ethernet.ETHERTYPE_IPV6)) {
         return false;
     }
 
-    // 5. Calculate packet length
-    const ip6_hdr = packet.getIpv6Header(pkt.data, pkt.ip_offset) orelse return false;
-    const ip_total_len = std.math.add(usize, IPV6_HEADER_SIZE, ip6_hdr.getPayloadLength()) catch return false;
     pkt.len = std.math.add(usize, pkt.ip_offset, ip_total_len) catch return false;
-
-    // 6. Check MTU and fragment if needed
-    // Note: IPv6 minimum MTU is 1280 bytes (RFC 8200)
-    // For packets > MTU, we need to fragment at the source
-    if (ip_total_len > iface.mtu) {
-        // TODO: Implement IPv6 fragmentation
-        // Unlike IPv4, IPv6 fragmentation uses a Fragment extension header
-        // and is only done at the source, not by intermediate routers
-        return false;
-    }
 
     // 7. Transmit
     return ethernet.sendFrame(iface, pkt);
@@ -293,7 +291,9 @@ fn sendFragmentedPacket(iface: *Interface, pkt: *PacketBuffer, dst_mac: [6]u8) b
         frag_hdr.next_header = orig_next_header;
         frag_hdr.reserved = 0;
 
-        // Fragment offset (in 8-octet units) + MF bit
+        // Fragment offset (in 8-octet units) + MF bit.
+        // SECURITY: Safe cast - offset < payload.len <= MAX_IPV6_PAYLOAD (65535).
+        // Max value: 65535/8 = 8191, which fits in u16 and the 13-bit field exactly.
         const frag_offset_val: u16 = @intCast(offset / 8);
         var frag_offset_field: u16 = frag_offset_val << 3;
         if (!last_frag) frag_offset_field |= 0x0001; // MF bit
@@ -369,7 +369,7 @@ test "multicast MAC mapping" {
     // ff02::1 should map to 33:33:00:00:00:01
     const mcast_addr = [_]u8{ 0xFF, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 };
 
-    var dst_mac: [6]u8 = undefined;
+    var dst_mac: [6]u8 = [_]u8{0} ** 6;
     dst_mac[0] = 0x33;
     dst_mac[1] = 0x33;
     dst_mac[2] = mcast_addr[12];
