@@ -15,6 +15,7 @@
 //!   `[Stack Top]             <- RSP starts here`
 
 const std = @import("std");
+const builtin = @import("builtin");
 const hal = @import("hal");
 const pmm = @import("pmm");
 const vmm = @import("vmm");
@@ -596,15 +597,61 @@ pub fn createUserThread(
 
 /// Set up initial stack frame for a kernel thread
 ///
-/// Builds a fake interrupt frame on the kernel stack.
+/// Builds a fake interrupt/exception frame on the kernel stack.
+/// Architecture-specific: dispatches to x86_64 or AArch64 implementation.
+///
+///   arg: Argument to pass to the thread (passed in RDI/x0)
+///
+/// Returns the adjusted stack pointer (initial RSP/kernel_rsp).
+fn setupInitialStack(stack_top: u64, entry_rip: u64, arg: u64) u64 {
+    if (builtin.cpu.arch == .aarch64) {
+        return setupInitialStackAarch64(stack_top, entry_rip, arg);
+    } else {
+        return setupInitialStackX86_64(stack_top, entry_rip, arg);
+    }
+}
+
+/// AArch64: Build exception frame for kernel thread
+/// Creates a SyscallFrame that RESTORE_CONTEXT in entry.S will use to start the thread.
+fn setupInitialStackAarch64(stack_top: u64, entry_rip: u64, arg: u64) u64 {
+    // SyscallFrame is 288 bytes (36 fields * 8)
+    const frame_size: u64 = 288;
+    const frame_base = stack_top - frame_size;
+
+    // Zero-initialize the entire frame
+    const frame_ptr: [*]u8 = @ptrFromInt(frame_base);
+    @memset(frame_ptr[0..frame_size], 0);
+
+    // SyscallFrame layout (see syscall.zig):
+    //   Offset 0:   x0/rax - first argument
+    //   Offset 248: ELR_EL1 - entry point
+    //   Offset 256: SPSR_EL1 - processor state
+    //   Offset 264: SP_EL0 - user stack (0 for kernel thread)
+
+    // x0 = argument (first parameter in AArch64 calling convention)
+    writeStackU64(frame_base + 0, arg);
+
+    // ELR_EL1 = entry point (where eret will jump to)
+    writeStackU64(frame_base + 248, entry_rip);
+
+    // SPSR_EL1 = kernel mode with interrupts disabled
+    // M[3:0] = 0b0101 = 5 (EL1h: EL1 using SP_EL1)
+    // DAIF[9:6] = 0b1111 (all exceptions masked, thread enables as needed)
+    const spsr_el1h_irq_disabled: u64 = 0x3C5;
+    writeStackU64(frame_base + 256, spsr_el1h_irq_disabled);
+
+    // SP_EL0 = 0 (kernel thread doesn't use user stack)
+    writeStackU64(frame_base + 264, 0);
+
+    return frame_base;
+}
+
+/// x86_64: Build interrupt frame for kernel thread
+/// Creates a fake interrupt frame that isr_common expects.
 /// When the scheduler switches to this thread using `iretq`, the CPU will:
 /// 1. Pop CS, RIP, RFLAGS, RSP, SS (privilege level change or not).
 /// 2. Jump to `entry_rip` with the specified stack.
-///
-///   arg: Argument to pass to the thread (passed in RDI)
-///
-/// Returns the adjusted stack pointer (initial RSP).
-fn setupInitialStack(stack_top: u64, entry_rip: u64, arg: u64) u64 {
+fn setupInitialStackX86_64(stack_top: u64, entry_rip: u64, arg: u64) u64 {
     var sp = stack_top;
 
     // Build a fake interrupt frame that matches what isr_common expects
@@ -667,13 +714,21 @@ fn setupInitialStack(stack_top: u64, entry_rip: u64, arg: u64) u64 {
 
 /// Set up initial kernel stack for switching to user mode
 fn setupUserStack(kernel_stack_top: u64, entry_rip: u64, user_stack_top: u64) u64 {
-    var sp = kernel_stack_top;
-
     console.debug("setupUserStack: top={x} entry={x} user_sp={x}", .{
         kernel_stack_top, entry_rip, user_stack_top,
     });
 
-    // Build interrupt frame for iretq to Ring 3
+    if (builtin.cpu.arch == .aarch64) {
+        return setupUserStackAarch64(kernel_stack_top, entry_rip, user_stack_top);
+    } else {
+        return setupUserStackX86_64(kernel_stack_top, entry_rip, user_stack_top);
+    }
+}
+
+/// x86_64: Build interrupt frame for iretq to Ring 3
+fn setupUserStackX86_64(kernel_stack_top: u64, entry_rip: u64, user_stack_top: u64) u64 {
+    var sp = kernel_stack_top;
+
     // Stack layout (pushed by CPU on interrupt / expected by iretq):
     // SS (user data)
     // RSP (user stack)
@@ -732,6 +787,40 @@ fn setupUserStack(kernel_stack_top: u64, entry_rip: u64, user_stack_top: u64) u6
     });
 
     return sp;
+}
+
+/// AArch64: Build exception return frame matching SyscallFrame layout
+/// This frame will be restored by RESTORE_CONTEXT macro and eret in entry.S
+fn setupUserStackAarch64(kernel_stack_top: u64, entry_rip: u64, user_stack_top: u64) u64 {
+    // SyscallFrame layout (288 bytes total):
+    //   Offset 0-240:   x0-x30 (31 registers * 8)
+    //   Offset 248:     elr (Exception Link Register - return address)
+    //   Offset 256:     spsr (Saved Program Status Register)
+    //   Offset 264:     sp_el0 (User stack pointer)
+    //   Offset 272:     rsp (unused, for x86 compat)
+    //   Offset 280:     vector (unused, for x86 compat)
+    const frame_size: u64 = 288;
+    const frame_base = kernel_stack_top - frame_size;
+
+    // Zero the entire frame first (clears all GPRs x0-x30, prevents info leak)
+    const frame_ptr: [*]u8 = @ptrFromInt(frame_base);
+    @memset(frame_ptr[0..frame_size], 0);
+
+    // Set ELR (return address) at offset 248
+    writeStackU64(frame_base + 248, entry_rip);
+
+    // Set SPSR at offset 256
+    // SPSR = 0 means: return to EL0 with SP_EL0, all interrupts enabled, AArch64 mode
+    writeStackU64(frame_base + 256, 0);
+
+    // Set SP_EL0 (user stack) at offset 264
+    writeStackU64(frame_base + 264, user_stack_top);
+
+    console.debug("setupUserStack(aarch64): frame at {x}, elr={x}, sp_el0={x}", .{
+        frame_base, entry_rip, user_stack_top,
+    });
+
+    return frame_base;
 }
 
 /// Write a u64 value to a stack address

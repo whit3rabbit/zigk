@@ -29,6 +29,7 @@ pub const PageFlags = struct {
     no_execute: bool = false,
     huge_page: bool = false,
     global: bool = false,
+    device: bool = false, // For MMIO: use Device-nGnRnE memory type (AArch64)
 
     pub fn toRaw(self: PageFlags, phys_addr: u64) u64 {
         switch (builtin.cpu.arch) {
@@ -49,21 +50,28 @@ pub const PageFlags = struct {
                 // [4:2] = AttrIndx (MAIR index: 0=Device, 1=Normal WB, 2=Normal NC)
                 // [6] = AP[1] (1=EL0 accessible)
                 // [7] = AP[2] (1=read-only)
-                // [9:8] = SH (shareability: 3=Inner Shareable)
+                // [9:8] = SH (shareability: 3=Inner Shareable, 2=Outer Shareable)
                 // [10] = AF (Access Flag, must be 1)
                 // [54] = UXN (Unprivileged eXecute Never)
                 var raw: u64 = 0x3; // Valid + Page descriptor
                 if (self.huge_page) raw = 0x1; // Block descriptor instead
 
-                // AttrIndx = 1 for normal write-back cacheable memory
-                raw |= (1 << 2); // MAIR index 1 (Normal WB)
+                // AttrIndx: 0=Device-nGnRnE, 1=Normal WB
+                if (self.device) {
+                    // Device memory: MAIR index 0, Outer Shareable, no caching
+                    // raw |= (0 << 2); // MAIR index 0 (already 0)
+                    raw |= (2 << 8); // SH = Outer Shareable for device memory
+                } else {
+                    // Normal memory: MAIR index 1, Inner Shareable, WB cacheable
+                    raw |= (1 << 2); // MAIR index 1 (Normal WB)
+                    raw |= (3 << 8); // SH = Inner Shareable
+                }
 
                 if (self.no_execute) raw |= (1 << 54); // UXN
                 if (!self.writable) raw |= (1 << 7); // AP[2] = 1 (RO)
                 if (self.user) raw |= (1 << 6); // AP[1] = 1 (EL0)
 
                 raw |= (1 << 10); // AF (Access Flag) - required
-                raw |= (3 << 8); // SH = Inner Shareable
                 raw |= (phys_addr & 0x000F_FFFF_FFFF_F000);
                 return raw;
             },
@@ -196,12 +204,54 @@ pub fn createKernelPageTables(
     const rx_flags = PageFlags{ .present = true, .writable = false, .global = true, .no_execute = false };
     const ro_flags = PageFlags{ .present = true, .writable = false, .global = true, .no_execute = true };
     const identity_flags = PageFlags{ .present = true, .writable = true, .global = true, .no_execute = false };
+    const device_flags = PageFlags{ .present = true, .writable = true, .global = true, .no_execute = true, .device = true };
 
     // 1. Identity map low 4GB (or up to max_phys)
-    try ctx.mapRange(0, 0, @min(max_phys_addr, 0x1_0000_0000), identity_flags);
+    // On AArch64, we need to map MMIO regions (0x08000000-0x10000000 for QEMU virt) as Device memory
+    const MMIO_START: u64 = 0x08000000;
+    const MMIO_END: u64 = 0x10000000;
+    const identity_end = @min(max_phys_addr, 0x1_0000_0000);
 
-    // 2. HHDM
-    try ctx.mapRange(HHDM_BASE, 0, max_phys_addr, rw_flags);
+    if (builtin.cpu.arch == .aarch64) {
+        // Map RAM before MMIO region as normal memory
+        if (MMIO_START > 0) {
+            try ctx.mapRange(0, 0, @min(MMIO_START, identity_end), identity_flags);
+        }
+        // Map MMIO region as device memory
+        if (identity_end > MMIO_START) {
+            const mmio_map_end = @min(MMIO_END, identity_end);
+            try ctx.mapRange(MMIO_START, MMIO_START, mmio_map_end - MMIO_START, device_flags);
+        }
+        // Map remainder after MMIO as normal memory
+        if (identity_end > MMIO_END) {
+            try ctx.mapRange(MMIO_END, MMIO_END, identity_end - MMIO_END, identity_flags);
+        }
+    } else {
+        // x86_64: simple identity map (MMIO handled by MTRR/PAT)
+        try ctx.mapRange(0, 0, identity_end, identity_flags);
+    }
+
+    // 2. HHDM - also needs device memory for MMIO regions on AArch64
+    if (builtin.cpu.arch == .aarch64) {
+        const hhdm_device_flags = PageFlags{ .present = true, .writable = true, .global = true, .no_execute = true, .device = true };
+        // Map RAM before MMIO as normal
+        if (MMIO_START > 0) {
+            try ctx.mapRange(HHDM_BASE, 0, @min(MMIO_START, max_phys_addr), rw_flags);
+        }
+        // Map MMIO region as device memory
+        if (max_phys_addr > MMIO_START) {
+            const mmio_map_start = MMIO_START;
+            const mmio_map_end = @min(MMIO_END, max_phys_addr);
+            try ctx.mapRange(HHDM_BASE + mmio_map_start, mmio_map_start, mmio_map_end - mmio_map_start, hhdm_device_flags);
+        }
+        // Map remainder after MMIO as normal
+        if (max_phys_addr > MMIO_END) {
+            try ctx.mapRange(HHDM_BASE + MMIO_END, MMIO_END, max_phys_addr - MMIO_END, rw_flags);
+        }
+    } else {
+        // x86_64: MMIO attributes handled by MTRR/PAT
+        try ctx.mapRange(HHDM_BASE, 0, max_phys_addr, rw_flags);
+    }
 
     // 3. Kernel segments
     for (kernel_segments) |seg| {

@@ -41,6 +41,10 @@ var free_pages: usize = 0;
 var allocated_pages: usize = 0;
 var pmm_lock: sync.Spinlock = .{};
 
+/// Hint for bitmap search - start searching from this byte index
+/// This optimization avoids scanning reserved regions at the start of memory
+var search_hint: usize = 0;
+
 // Memory bounds
 var memory_start: u64 = 0;
 var memory_end: u64 = 0;
@@ -253,6 +257,16 @@ pub fn init(memmap: []const BootInfo.MemoryDescriptor) !void {
     // Reserve kernel/module safety margin (1MB - 4MB)
     reserveRange(0x100000 / PAGE_SIZE, (0x400000 - 0x100000) / PAGE_SIZE);
 
+    // Initialize search hint to skip reserved regions at start of physical memory
+    // This dramatically speeds up allocation on platforms where RAM starts at high addresses
+    // (e.g., AArch64 QEMU virt where RAM starts at 0x40000000 / 1GB)
+    const start_page = memory_start / PAGE_SIZE;
+    search_hint = start_page / 8; // Convert page number to byte index in bitmap
+    if (search_hint >= bitmap_size) {
+        search_hint = 0;
+    }
+    console.info("PMM: Search hint initialized to byte {d} (page {d})", .{ search_hint, start_page });
+
     initialized = true;
     
     console.info("PMM: Initialized - {d} MB usable, {d} free pages", .{
@@ -298,14 +312,19 @@ pub fn allocPage() ?u64 {
     defer held.release();
 
     if (free_pages == 0) {
-        console.warn("PMM: Out of memory!", .{});
+        console.warn("PMM: Out of memory! (free_pages=0, allocated={d})", .{allocated_pages});
         return null;
     }
 
-    // Search bitmap for first free page
-    // Using bitmap.len for bounds - slice provides automatic bounds checking
-    var byte_idx: usize = 0;
-    while (byte_idx < bitmap.len) : (byte_idx += 1) {
+    // Search bitmap for first free page, starting from search_hint
+    // This optimization dramatically speeds up allocation when RAM doesn't start at physical 0
+    // (e.g., AArch64 QEMU virt where RAM starts at 0x40000000)
+
+    // Start from the hint, wrapping around if necessary
+    var byte_idx = search_hint;
+    var wrapped = false;
+
+    while (true) {
         if (bitmap[byte_idx] != 0xFF) {
             // Found a byte with at least one free bit
             var bit: u3 = 0;
@@ -321,6 +340,9 @@ pub fn allocPage() ?u64 {
 
                     const phys_addr = @as(u64, page_num) * PAGE_SIZE;
 
+                    // Update search hint to this byte for next allocation
+                    search_hint = byte_idx;
+
                     if (config.debug_memory) {
                         console.debug("PMM: Allocated page {x}", .{phys_addr});
                     }
@@ -329,9 +351,30 @@ pub fn allocPage() ?u64 {
                 }
             }
         }
+
+        // Move to next byte
+        byte_idx += 1;
+
+        // Handle wrap-around
+        if (byte_idx >= bitmap.len) {
+            if (wrapped) {
+                // We've searched the entire bitmap
+                break;
+            }
+            byte_idx = 0;
+            wrapped = true;
+        }
+
+        // If we've wrapped and reached our starting point, we're done
+        if (wrapped and byte_idx >= search_hint) {
+            break;
+        }
     }
 
-    console.warn("PMM: No free pages found!", .{});
+    // We've searched the entire bitmap without finding a free page
+    // Reset search hint to beginning for next attempt
+    search_hint = 0;
+    console.warn("PMM: No free pages found! (free_pages={d}, total_pages={d})", .{ free_pages, total_pages });
     return null;
 }
 
@@ -385,7 +428,7 @@ pub fn allocPages(count: usize) ?u64 {
         }
     }
 
-    console.warn("PMM: Could not find {d} contiguous pages!", .{count});
+    console.warn("PMM: Could not find {d} contiguous pages! (free_pages={d}, total_pages={d})", .{ count, free_pages, total_pages });
     return null;
 }
 

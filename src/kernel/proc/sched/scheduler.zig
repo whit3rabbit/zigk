@@ -619,7 +619,9 @@ pub fn exitWithStatus(status: i32) void {
 // === Timer Tick & Scheduling ===
 
 /// Timer tick handler - called from IRQ0 handler
-pub fn timerTick(frame: if (builtin.cpu.arch == .x86_64) *hal.interrupts.InterruptFrame else *const hal.interrupts.InterruptFrame) if (builtin.cpu.arch == .x86_64) *hal.idt.InterruptFrame else void {
+/// On x86_64: returns new InterruptFrame pointer for context switch
+/// On AArch64: returns new SP value for context switch (0 if no switch needed)
+pub fn timerTick(frame: if (builtin.cpu.arch == .x86_64) *hal.interrupts.InterruptFrame else *const hal.interrupts.InterruptFrame) if (builtin.cpu.arch == .x86_64) *hal.idt.InterruptFrame else u64 {
     const local_tick_count = scheduler.tick_count.fetchAdd(1, .monotonic) + 1;
 
     var tick_cb: ?*const fn () void = null;
@@ -639,20 +641,21 @@ pub fn timerTick(frame: if (builtin.cpu.arch == .x86_64) *hal.interrupts.Interru
 
     if (tick_cb) |cb| cb();
 
-    if (builtin.cpu.arch == .aarch64) {
-        doPerCpuSchedule(frame);
-        return;
-    }
-
+    // Don't do scheduling if scheduler hasn't started yet
     if (!is_running) {
-        return frame;
+        if (builtin.cpu.arch == .x86_64) {
+            return frame;
+        }
+        return 0; // No context switch
     }
 
     return doPerCpuSchedule(frame);
 }
 
 /// Per-CPU scheduling logic
-fn doPerCpuSchedule(frame: *const hal.interrupts.InterruptFrame) if (builtin.cpu.arch == .x86_64) *hal.idt.InterruptFrame else void {
+/// On x86_64: returns new InterruptFrame pointer
+/// On AArch64: returns new SP value for context switch
+fn doPerCpuSchedule(frame: *const hal.interrupts.InterruptFrame) if (builtin.cpu.arch == .x86_64) *hal.idt.InterruptFrame else u64 {
     const current = thread_logic.getCurrentThread();
 
     if (current) |curr| {
@@ -685,11 +688,21 @@ fn doPerCpuSchedule(frame: *const hal.interrupts.InterruptFrame) if (builtin.cpu
             // console.debug("Sched: Switch {s} -> {s}", .{ curr_name, next.getName() });
         }
 
-        gdt.setKernelStack(next.kernel_stack_top);
+        // x86_64: Update TSS with new kernel stack
+        if (builtin.cpu.arch == .x86_64) {
+            gdt.setKernelStack(next.kernel_stack_top);
+        }
 
-        const gs_base = hal.cpu.readMsr(hal.cpu.IA32_GS_BASE);
-        const gs_data = @as(*hal.syscall.KernelGsData, @ptrFromInt(gs_base));
-        gs_data.kernel_stack = next.kernel_stack_top;
+        // Update per-CPU data with new kernel stack
+        if (builtin.cpu.arch == .x86_64) {
+            const gs_base = hal.cpu.readMsr(hal.cpu.IA32_GS_BASE);
+            const gs_data = @as(*hal.syscall.KernelGsData, @ptrFromInt(gs_base));
+            gs_data.kernel_stack = next.kernel_stack_top;
+        } else if (builtin.cpu.arch == .aarch64) {
+            const tpidr = asm volatile ("mrs %[ret], tpidr_el1" : [ret] "=r" (-> u64));
+            const gs_data: *hal.syscall.KernelGsData = @ptrFromInt(tpidr);
+            gs_data.kernel_stack = next.kernel_stack_top;
+        }
 
         if (next.cr3 != 0) {
             const current_cr3 = hal.cpu.readCr3();
@@ -700,7 +713,12 @@ fn doPerCpuSchedule(frame: *const hal.interrupts.InterruptFrame) if (builtin.cpu
                 if (builtin.cpu.arch == .x86_64) {
                     hal.cpu.issueIbpbIfNeeded(current_cr3, next.cr3);
                 }
-                hal.cpu.writeCr3(next.cr3);
+                // On AArch64, user processes use TTBR0_EL1 (not TTBR1_EL1)
+                if (builtin.cpu.arch == .aarch64) {
+                    hal.cpu.writeTtbr0(next.cr3);
+                } else {
+                    hal.cpu.writeCr3(next.cr3);
+                }
             }
         }
 
@@ -725,14 +743,31 @@ fn doPerCpuSchedule(frame: *const hal.interrupts.InterruptFrame) if (builtin.cpu
             // Lazy FPU on x86_64 - CR0.TS triggers #NM on first FPU access
             fpu.setTaskSwitched();
         }
+
+        // Debug: log context switch on AArch64
+        if (builtin.cpu.arch == .aarch64 and config.debug_scheduler) {
+            const src_frame: *const hal.interrupts.InterruptFrame = @ptrFromInt(next.kernel_rsp);
+            console.debug("AArch64 ctx: new_sp={x}, elr={x}, spsr={x}, sp_el0={x}", .{
+                next.kernel_rsp,
+                src_frame.elr,
+                src_frame.spsr,
+                src_frame.sp_el0,
+            });
+        }
     }
 
     next.last_cpu = @intCast(cpu_mod.getCurrentCpuIndex());
     next.state = .Running;
     thread_logic.setCurrentThread(next);
 
-    if (builtin.cpu.arch == .aarch64) return;
-    return @ptrFromInt(next.kernel_rsp);
+    // Return new stack pointer for context switch
+    // On AArch64, assembly will switch SP to this value before RESTORE_CONTEXT
+    // On x86_64, ISR uses this as new frame pointer
+    if (builtin.cpu.arch == .aarch64) {
+        return next.kernel_rsp;
+    } else {
+        return @ptrFromInt(next.kernel_rsp);
+    }
 }
 
 /// Check if the scheduler is currently running

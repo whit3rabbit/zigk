@@ -32,21 +32,21 @@ exception_vector_table:
     .balign 128
     b unhandled_sp0_serror
 
-    /* Current EL with SPx */
+    /* Current EL with SPx (kernel mode exceptions) */
     .balign 128
-    b handle_sync_exception
+    b handle_sync_exception_kernel
     .balign 128
-    b handle_irq
+    b handle_irq_kernel
     .balign 128
     b unhandled_fiq
     .balign 128
     b unhandled_serror
 
-    /* Lower EL using AArch64 */
+    /* Lower EL using AArch64 (user mode exceptions) */
     .balign 128
-    b handle_sync_exception
+    b handle_sync_exception_user
     .balign 128
-    b handle_irq
+    b handle_irq_user
     .balign 128
     b unhandled_fiq
     .balign 128
@@ -110,10 +110,6 @@ exception_vector_table:
     msr sp_el0, x0
 
     // SECURITY: Validate ELR and SPSR before eret (defense-in-depth).
-    // If kernel memory is corrupted, an attacker could:
-    //   1. Set SPSR.EL to 1 to return to EL1 (kernel mode)
-    //   2. Set ELR to a kernel address for ROP/code execution
-    // We validate these values when returning to EL0 (userspace).
     ldp x0, x1, [sp, #248]      // x0 = ELR, x1 = SPSR
 
     // Check if returning to EL0 (SPSR.M[3:0] == 0)
@@ -121,23 +117,12 @@ exception_vector_table:
     and x2, x1, #0xF            // Extract EL bits
     cbnz x2, .Lrestore_no_validate_\@
 
-    // Returning to EL0: validate SPSR.EL is exactly 0 (not just low 4 bits)
-    // and ELR is in user address space.
-    //
-    // SECURITY: Check bit 63 (sign bit) rather than bit 55 for robustness.
-    // This works regardless of VA size configuration (48-bit or 52-bit LPA2):
-    //   - User addresses (canonical lower half): bits 63:VA_SIZE-1 all 0, so bit 63 = 0
-    //   - Kernel addresses (canonical upper half): bits 63:VA_SIZE-1 all 1, so bit 63 = 1
-    // Bit 63 check is universal and future-proof for any VA size.
+    // Returning to EL0: validate ELR is in user address space.
     tbnz x0, #63, .Lbad_elr_\@  // If bit 63 set, ELR is in kernel space
-
-    // Validation passed, proceed with restore
     b .Lrestore_validated_\@
 
 .Lbad_elr_\@:
     // SECURITY VIOLATION: Attempt to eret to kernel address from EL0 context
-    // This indicates kernel memory corruption or exploitation attempt.
-    // Halt immediately - do NOT proceed with eret.
     msr daifset, #0xf           // Disable all interrupts
     mov x0, #0xBAD0             // Panic code: bad ELR
     movk x0, #0xE12, lsl #16    // 0xE120BAD0
@@ -169,22 +154,54 @@ exception_vector_table:
     eret
 .endm
 
-handle_sync_exception:
+// Debug: Output a character to PL011 UART (0x09000000)
+// Clobbers x10, x11
+.macro DEBUG_CHAR char
+    mov x10, #0x09000000        // PL011 base address
+    mov x11, #\char
+    strb w11, [x10]             // Write character to UART DR
+.endm
+
+handle_sync_exception_kernel:
     SAVE_CONTEXT
-    dsb ish                 // Ensure context fully saved before reading system regs
-    mov x0, sp              // Pass frame pointer as first argument
-    mrs x1, esr_el1         // Exception syndrome as second argument
-    mrs x2, far_el1         // Fault address as third argument
+    dsb ish
+    mov x0, sp
+    mrs x1, esr_el1
+    mrs x2, far_el1
     bl handle_exception_zig
-    dsb ish                 // Ensure handler writes visible before restore
+    dsb ish
     RESTORE_CONTEXT
 
-handle_irq:
+handle_sync_exception_user:
     SAVE_CONTEXT
-    dsb ish                 // Ensure context fully saved
-    mov x0, sp              // Pass frame pointer as first argument
+    dsb ish
+    mov x0, sp
+    mrs x1, esr_el1
+    mrs x2, far_el1
+    bl handle_exception_zig
+    dsb ish
+    RESTORE_CONTEXT
+
+handle_irq_kernel:
+    SAVE_CONTEXT
+    dsb ish
+    mov x0, sp
     bl handle_irq_zig
-    dsb ish                 // Ensure handler writes visible before restore
+    dsb ish
+    cbz x0, 1f
+    mov sp, x0
+1:
+    RESTORE_CONTEXT
+
+handle_irq_user:
+    SAVE_CONTEXT
+    dsb ish
+    mov x0, sp
+    bl handle_irq_zig
+    dsb ish
+    cbz x0, 1f
+    mov sp, x0
+1:
     RESTORE_CONTEXT
 
 // Unhandled exception handlers - these call Zig with exception type code

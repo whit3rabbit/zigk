@@ -259,6 +259,16 @@ pub fn init(hhdm_offset: u64) void {
     paging.init(hhdm_offset);
     serial.initDefault();
 
+    // Clear TTBR0 - no user page tables yet
+    // We set TTBR0 to 0 (invalid) since we don't have user processes yet.
+    // NOTE: TLBI is skipped here because it causes hangs in QEMU TCG.
+    // We use ASID switching in writeTtbr0 to avoid stale TLB entries.
+    asm volatile (
+        // Set TTBR0 to 0 with ASID 0 in upper bits
+        \\msr ttbr0_el1, xzr
+        \\isb
+    );
+
     // Enable PAN (Privileged Access Never) for security
     // This prevents the kernel from accidentally accessing user memory
     // via normal load/store; must use LDTR/STTR instead

@@ -648,7 +648,7 @@ pub const VirtioGpuDriver = struct {
         var i: usize = 0;
         while (i < pages_needed) : (i += 1) {
             const phys = pmm.allocZeroedPage() orelse {
-                console.err("VirtIO-GPU: Failed to allocate framebuffer page {}", .{i});
+                console.err("VirtIO-GPU: Failed to allocate framebuffer page {d}/{d}", .{ i, pages_needed });
                 cleanup.run(&allocated_pages, kernel_pml4, FB_VIRT_BASE);
                 return false;
             };
@@ -677,7 +677,6 @@ pub const VirtioGpuDriver = struct {
                 .length = 4096,
                 ._padding = 0,
             }) catch {
-                console.err("VirtIO-GPU: Failed to append SG entry", .{});
                 cleanup.run(&allocated_pages, kernel_pml4, FB_VIRT_BASE);
                 return false;
             };

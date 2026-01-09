@@ -217,8 +217,9 @@ fn readBars(pci: PciAccess, dev: *PciDevice) void {
     // NOTE: This only disables interrupts on the local CPU. On SMP systems, other CPUs could still
     // run ISRs. The module-level SMP SAFETY INVARIANT ensures this is safe by requiring enumeration
     // to complete before any drivers (and thus ISRs) are registered.
+    const irq_was_enabled = hal.cpu.interruptsEnabled();
     hal.cpu.disableInterrupts();
-    defer hal.cpu.enableInterrupts();
+    defer if (irq_was_enabled) hal.cpu.enableInterrupts();
 
     var i: u8 = 0;
     while (i < 6) : (i += 1) {

@@ -13,6 +13,7 @@
 
 const std = @import("std");
 const console = @import("console");
+const paging = @import("../mm/paging.zig");
 
 // SECURITY: GIC configuration is bundled into an immutable struct.
 // We use atomic pointer swap to publish the configuration atomically.
@@ -93,27 +94,34 @@ fn getConfigOrPanic() *const GicConfig {
     return getConfig() orelse @panic("GIC: Not initialized");
 }
 
+/// Access GIC Distributor register via HHDM
+/// SECURITY: Uses HHDM mapping for post-VMM safety
 fn writeGicd(offset: u32, val: u32) void {
     const config = getConfigOrPanic();
-    const addr: *volatile u32 = @ptrFromInt(config.gicd_base + offset);
+    const virt = paging.physToVirt(config.gicd_base + offset);
+    const addr: *volatile u32 = @ptrCast(@alignCast(virt));
     addr.* = val;
 }
 
 fn readGicd(offset: u32) u32 {
     const config = getConfigOrPanic();
-    const addr: *volatile u32 = @ptrFromInt(config.gicd_base + offset);
+    const virt = paging.physToVirt(config.gicd_base + offset);
+    const addr: *volatile u32 = @ptrCast(@alignCast(virt));
     return addr.*;
 }
 
+/// Access GIC CPU Interface register via HHDM
 fn writeGicc(offset: u32, val: u32) void {
     const config = getConfigOrPanic();
-    const addr: *volatile u32 = @ptrFromInt(config.gicc_base + offset);
+    const virt = paging.physToVirt(config.gicc_base + offset);
+    const addr: *volatile u32 = @ptrCast(@alignCast(virt));
     addr.* = val;
 }
 
 fn readGicc(offset: u32) u32 {
     const config = getConfigOrPanic();
-    const addr: *volatile u32 = @ptrFromInt(config.gicc_base + offset);
+    const virt = paging.physToVirt(config.gicc_base + offset);
+    const addr: *volatile u32 = @ptrCast(@alignCast(virt));
     return addr.*;
 }
 
@@ -174,26 +182,76 @@ pub fn init() void {
 }
 
 /// Write to GICD during initialization (before pointer is published)
+/// Uses identity mapping during early init - bootloader maps GIC as Device memory
 fn writeGicdInit(offset: u32, val: u32) void {
-    const addr: *volatile u32 = @ptrFromInt(gic_config_storage.gicd_base + offset);
+    const phys = gic_config_storage.gicd_base + offset;
+    const addr: *volatile u32 = @ptrFromInt(phys);
+    // DSB+ISB sequence for QEMU TCG stability
+    asm volatile ("dsb sy" ::: "memory");
+    asm volatile ("isb" ::: "memory");
     addr.* = val;
+    asm volatile ("dsb sy" ::: "memory");
+    asm volatile ("isb" ::: "memory");
+}
+
+fn earlyPrintHex(val: u32) void {
+    const hex = "0123456789abcdef";
+    var buf: [10]u8 = undefined;
+    buf[0] = '0';
+    buf[1] = 'x';
+    var i: u32 = 0;
+    while (i < 8) : (i += 1) {
+        const shift: u5 = @truncate(i * 4);
+        buf[9 - @as(usize, i)] = hex[@as(usize, (val >> shift) & 0xF)];
+    }
+    earlyPrint(&buf);
 }
 
 /// Read from GICD during initialization (before pointer is published)
+/// Uses identity mapping during early init - bootloader maps GIC as Device memory
 fn readGicdInit(offset: u32) u32 {
-    const addr: *volatile u32 = @ptrFromInt(gic_config_storage.gicd_base + offset);
-    return addr.*;
+    const phys = gic_config_storage.gicd_base + offset;
+    const addr: *volatile u32 = @ptrFromInt(phys);
+    asm volatile ("dsb sy" ::: "memory");
+    asm volatile ("isb" ::: "memory");
+    const val = addr.*;
+    asm volatile ("dsb sy" ::: "memory");
+    return val;
 }
 
 /// Write to GICC during initialization (before pointer is published)
+/// Uses identity mapping during early init - bootloader maps GIC as Device memory
 fn writeGiccInit(offset: u32, val: u32) void {
-    const addr: *volatile u32 = @ptrFromInt(gic_config_storage.gicc_base + offset);
+    const phys = gic_config_storage.gicc_base + offset;
+    const addr: *volatile u32 = @ptrFromInt(phys);
+    asm volatile ("dsb sy" ::: "memory");
+    asm volatile ("isb" ::: "memory");
     addr.* = val;
+    asm volatile ("dsb sy" ::: "memory");
+    asm volatile ("isb" ::: "memory");
 }
 
 /// Core GIC initialization (called after addresses are set in gic_config_storage)
 /// SECURITY: Uses *Init variants that access storage directly since pointer
 /// is not yet published. Publishes atomically at the end.
+// Direct serial write for debugging (bypasses console lock)
+fn earlyPrint(msg: []const u8) void {
+    const UART_BASE: u64 = 0x09000000;
+    const FR: u32 = 0x18;
+    const DR: u32 = 0x00;
+    const FR_TXFF: u32 = 1 << 5;
+
+    for (msg) |c| {
+        // Wait for TX FIFO to have space
+        while (true) {
+            const fr_ptr: *volatile u32 = @ptrFromInt(UART_BASE + FR);
+            if ((fr_ptr.* & FR_TXFF) == 0) break;
+        }
+        const dr_ptr: *volatile u32 = @ptrFromInt(UART_BASE + DR);
+        dr_ptr.* = c;
+    }
+}
+
 fn initCore() void {
     // Disable Distributor
     writeGicdInit(GICD_CTLR, 0);

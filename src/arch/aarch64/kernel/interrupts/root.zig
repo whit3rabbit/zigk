@@ -31,8 +31,8 @@ var mouse_handler: ?*const fn () void = null;
 /// Serial IRQ handler callback
 var serial_handler: ?*const fn () void = null;
 
-/// Timer IRQ handler callback
-var timer_handler: ?*const fn (*const InterruptFrame) void = null;
+/// Timer IRQ handler callback (returns new SP for context switch, or 0 if none)
+var timer_handler: ?*const fn (*const InterruptFrame) u64 = null;
 
 /// Guard page fault checker callback
 var guard_page_checker: ?*const fn (u64) ?GuardPageInfo = null;
@@ -98,7 +98,7 @@ pub fn earlyPrint(msg: []const u8) void {
     pl011.writeString(msg);
 }
 
-fn printHex(val: u64) void {
+pub fn printHex(val: u64) void {
     const hex = "0123456789abcdef";
     var buf: [18]u8 = [_]u8{0} ** 18;
     buf[0] = '0';
@@ -193,6 +193,8 @@ pub export fn handle_exception_zig(frame: *syscall.SyscallFrame, esr: u64, far: 
 
     switch (ec) {
         .svc_aa64 => {
+            // Debug: print 'S' for each syscall
+            earlyPrint("S");
             // SVC instruction - dispatch to syscall handler
             // The dispatch_syscall function reads syscall number from x8,
             // arguments from x0-x5, and sets return value in x0
@@ -249,15 +251,18 @@ pub export fn handle_exception_zig(frame: *syscall.SyscallFrame, esr: u64, far: 
 
 /// IRQ handler called from entry.S
 /// frame: pointer to saved register context on kernel stack
-pub export fn handle_irq_zig(frame: *InterruptFrame) callconv(.c) void {
+/// Returns: new SP value for context switch (or 0 if no switch)
+pub export fn handle_irq_zig(frame: *InterruptFrame) callconv(.c) u64 {
     // Acknowledge interrupt from GIC
     const irq = gic.acknowledgeIrq();
 
     // Check for spurious interrupt (GICv2 spurious is exactly 1023)
     // No EOI needed for spurious interrupts
     if (irq == 1023) {
-        return;
+        return 0;
     }
+
+    var new_sp: u64 = 0;
 
     // Dispatch based on interrupt number
     switch (irq) {
@@ -265,9 +270,9 @@ pub export fn handle_irq_zig(frame: *InterruptFrame) callconv(.c) void {
             // Re-arm the timer for the next interval
             timing.rearmTimer();
 
-            // Timer interrupt - pass actual frame for context switching
-            if (@atomicLoad(?*const fn (*const InterruptFrame) void, &timer_handler, .acquire)) |handler| {
-                handler(frame);
+            // Call scheduler on timer ticks
+            if (@atomicLoad(?*const fn (*const InterruptFrame) u64, &timer_handler, .acquire)) |handler| {
+                new_sp = handler(frame);
             }
         },
         UART_SPI => {
@@ -293,6 +298,8 @@ pub export fn handle_irq_zig(frame: *InterruptFrame) callconv(.c) void {
 
     // Signal end of interrupt to GIC
     gic.endOfInterrupt(irq);
+
+    return new_sp;
 }
 
 // ============================================================================
@@ -351,8 +358,8 @@ pub fn setSerialHandler(handler: ?*const fn () void) void {
     }
 }
 
-pub fn setTimerHandler(handler: *const fn (*const InterruptFrame) void) void {
-    @atomicStore(?*const fn (*const InterruptFrame) void, &timer_handler, handler, .release);
+pub fn setTimerHandler(handler: *const fn (*const InterruptFrame) u64) void {
+    @atomicStore(?*const fn (*const InterruptFrame) u64, &timer_handler, handler, .release);
     gic.enableIrq(TIMER_PPI);
 }
 

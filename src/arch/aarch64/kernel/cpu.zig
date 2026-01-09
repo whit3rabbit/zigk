@@ -121,6 +121,38 @@ pub fn writeCr3(val: u64) void {
     );
 }
 
+/// ASID counter for TLB isolation without TLBI
+/// Each TTBR0 switch gets a new ASID to prevent stale TLB entry usage
+var asid_counter: u8 = 1; // Start at 1, 0 is reserved for "no user space"
+
+/// Write user page table base (TTBR0_EL1 - user mappings)
+/// Used for switching to user process address spaces
+///
+/// WORKAROUND: TLBI instructions cause hangs in QEMU TCG.
+/// Instead, we use ASID switching to isolate TLB entries.
+/// Each TTBR0 switch gets a new ASID, so old TLB entries won't match.
+pub fn writeTtbr0(val: u64) void {
+    // Get next ASID (wraps at 255, but 0 is reserved)
+    const asid = asid_counter;
+    asid_counter +%= 1;
+    if (asid_counter == 0) asid_counter = 1;
+
+    // Combine page table base with ASID in upper bits
+    // TTBR0_EL1 format: [63:48] = ASID, [47:1] = BADDR, [0] = CnP
+    const ttbr0_val = (val & 0x0000_FFFF_FFFF_F000) | (@as(u64, asid) << 48);
+
+    asm volatile (
+        // DSB ensures all previous memory accesses complete
+        \\dsb ishst
+        // Write the new TTBR0 value with ASID
+        \\msr ttbr0_el1, %[addr]
+        // ISB ensures TTBR0 is visible to subsequent instructions
+        \\isb
+        :
+        : [addr] "r" (ttbr0_val),
+    );
+}
+
 /// Read page table base (TTBR1_EL1 - kernel mappings)
 pub fn readCr3() u64 {
     var ttbr1: u64 = undefined;
@@ -251,7 +283,8 @@ pub fn switchContextWithFpu(
 // - Kernel-only thread? Use switchContextKernelOnly()
 
 pub fn flushTlb() void {
-    asm volatile ("tlbi vmalle1is");
+    // Use non-IS variant for single core - the IS version hangs on QEMU virt
+    asm volatile ("tlbi vmalle1");
 }
 
 pub fn invlpg(virt: u64) void {

@@ -647,6 +647,41 @@ raw |= (1 << 2);  // MAIR index 1
 raw |= (1 << 10);  // Access Flag
 ```
 
+#### OutOfMemory Errors During Boot
+
+**Symptom**: `error.OutOfMemory` during driver initialization (XHCI, VirtIO-GPU) or `Failed to setup user stack: error.OutOfMemory` despite having plenty of free pages (e.g., 80,000+ reported free).
+
+**Cause**: On AArch64 QEMU virt, RAM starts at physical address `0x40000000` (1GB), not at `0x0`. The PMM bitmap covers all physical address space from 0 to the highest address. When allocating pages, a naive linear search from byte 0 must scan ~32,768 bitmap bytes (262,144 pages / 8 bits per byte) before finding the first free page.
+
+With each allocation taking 30,000+ iterations, and multiple allocations required per operation (framebuffer pages + page table pages), the kernel times out in QEMU before completing initialization.
+
+**Detection**:
+1. Enable verbose PMM logging: `zig build run-aarch64 -Ddebug-memory=true`
+2. Check where RAM starts: Look for `PMM: Metadata at phys XXXXXXXX` - if this is high (e.g., `40000000`), the bitmap search optimization is critical
+3. Check search hint: Look for `PMM: Search hint initialized to byte XXXXX` - should match `(memory_start / PAGE_SIZE) / 8`
+
+**Fix**: The PMM uses a `search_hint` variable that tracks the last successful allocation location:
+- Initialized to `(memory_start / PAGE_SIZE) / 8` during PMM init
+- Updated after each successful allocation
+- Search starts from the hint and wraps around if needed
+
+**Key Code** (`src/kernel/mm/pmm.zig`):
+```zig
+// Initialize search hint to skip reserved regions at start of physical memory
+const start_page = memory_start / PAGE_SIZE;
+search_hint = start_page / 8;
+
+// In allocPage():
+var byte_idx = search_hint;  // Start from hint, not 0
+// ... search with wrap-around ...
+search_hint = byte_idx;  // Update hint on success
+```
+
+**Prevention**: When adding support for new platforms with non-zero RAM base addresses:
+1. Ensure `memory_start` is correctly set from the memory map
+2. Verify `search_hint` is initialized based on `memory_start`
+3. Test allocation performance - each allocation should complete in 1-2 iterations, not thousands
+
 ### Key Files (AArch64)
 
 | File | Purpose |
@@ -654,3 +689,4 @@ raw |= (1 << 10);  // Access Flag
 | `src/boot/uefi/paging.zig` | Dual-arch page table creation, TTBR/TCR/MAIR setup |
 | `src/arch/aarch64/boot/entry.S` | Kernel entry point (`kentry`) |
 | `src/arch/aarch64/boot/linker.ld` | Kernel linker script with high-half layout |
+| `src/kernel/mm/pmm.zig` | PMM with search hint optimization for non-zero RAM bases |

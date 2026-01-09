@@ -188,6 +188,15 @@ pub fn loadInitProcess() void {
     }
 
     // 2. Check cmdline for explicit init selection (from boot menu)
+    // DEBUG: Force test_asm for AArch64 testing
+    if (@import("builtin").cpu.arch == .aarch64) {
+        const forced_init = "test_asm";
+        console.info("DEBUG: Forcing init={s} for AArch64 testing", .{forced_init});
+        if (findModuleInInitRD(forced_init)) |mod| {
+            spawnProcessFromData(mod, forced_init);
+            return;
+        }
+    }
     if (parseInitFromCmdline()) |init_name| {
         console.info("Cmdline specifies init={s}", .{init_name});
         if (findModuleInInitRD(init_name)) |mod| {
