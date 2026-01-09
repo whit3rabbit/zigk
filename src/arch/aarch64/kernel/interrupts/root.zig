@@ -9,6 +9,7 @@ const std = @import("std");
 const cpu = @import("../cpu.zig");
 const syscall = @import("../syscall.zig");
 const gic = @import("../gic.zig");
+const timing = @import("../timing.zig");
 
 // Extern declaration for syscall dispatch (defined in src/kernel/sys/syscall/core/table.zig)
 // Using extern allows AArch64 to call the common dispatch table without module import issues
@@ -83,7 +84,9 @@ pub const MsixVectorAllocation = struct {
 };
 
 // GIC interrupt numbers for QEMU virt machine
-const TIMER_PPI = 30; // Virtual timer (PPI 14, +16 = 30)
+// Timer INTIDs: Physical=30 (PPI14), Virtual=27 (PPI11)
+// We use the virtual timer (CNTV_*) so we need INTID 27
+const TIMER_PPI = 27; // EL1 Virtual timer (PPI 11, +16 = 27)
 const UART_SPI = 33; // PL011 UART (SPI 1, +32 = 33)
 
 // ============================================================================
@@ -259,6 +262,9 @@ pub export fn handle_irq_zig(frame: *InterruptFrame) callconv(.c) void {
     // Dispatch based on interrupt number
     switch (irq) {
         TIMER_PPI => {
+            // Re-arm the timer for the next interval
+            timing.rearmTimer();
+
             // Timer interrupt - pass actual frame for context switching
             if (@atomicLoad(?*const fn (*const InterruptFrame) void, &timer_handler, .acquire)) |handler| {
                 handler(frame);
@@ -312,8 +318,10 @@ pub fn init() void {
         : [val] "r" (vbar),
     );
 
-    // Enable interrupts at CPU level
-    cpu.enableInterrupts();
+    // NOTE: Interrupts are NOT enabled here.
+    // They are enabled later by the scheduler's start() function,
+    // after per-CPU data (tpidr_el1) is initialized.
+    // This matches x86_64 behavior where `sti` is in scheduler start.
 }
 
 extern const exception_vector_table: anyopaque;

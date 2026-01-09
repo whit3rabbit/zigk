@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const console = @import("console");
 const types = @import("types.zig");
 
@@ -37,9 +38,14 @@ pub fn validateHeader(ehdr: *const Elf64_Ehdr) ElfError!void {
         return ElfError.InvalidVersion;
     }
 
-    // Check machine type (x86_64)
-    if (ehdr.e_machine != types.EM_X86_64) {
-        console.err("ELF: Not x86_64 (machine={})", .{ehdr.e_machine});
+    // Check machine type (architecture-specific)
+    const expected_machine: u16 = switch (builtin.cpu.arch) {
+        .x86_64 => types.EM_X86_64,
+        .aarch64 => types.EM_AARCH64,
+        else => @compileError("Unsupported architecture for ELF loading"),
+    };
+    if (ehdr.e_machine != expected_machine) {
+        console.err("ELF: Wrong architecture (machine={}, expected={})", .{ ehdr.e_machine, expected_machine });
         return ElfError.InvalidMachine;
     }
 

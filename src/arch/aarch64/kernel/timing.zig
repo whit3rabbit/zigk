@@ -23,6 +23,7 @@ pub const ClockSource = enum {
 var system_counter_freq: u64 = 0;
 var calibrated: bool = false;
 var active_clock_source: ClockSource = .none;
+var timer_ticks_per_interval: u64 = 0;
 
 /// Read System Counter (AArch64's rdtsc equivalent)
 /// Usually cntpct_el0 (physical counter) or cntvct_el0 (virtual counter)
@@ -169,4 +170,83 @@ pub fn getStolenTimeNs() ?u64 {
         return null;
     }
     return pvtime.getStolenTimeNs();
+}
+
+// =============================================================================
+// Periodic Timer (for scheduler)
+// =============================================================================
+
+/// Start the periodic timer at the specified frequency (Hz)
+/// Uses the EL1 virtual timer (CNTV)
+/// Note: Uses CVAL approach (compare value) which is better emulated in QEMU TCG
+pub fn startPeriodicTimer(freq_hz: u32) void {
+    if (!calibrated) init();
+    if (system_counter_freq == 0) {
+        console.err("Timing: Cannot start timer, frequency unknown", .{});
+        return;
+    }
+
+    // Calculate ticks per interval
+    timer_ticks_per_interval = system_counter_freq / freq_hz;
+
+    console.info("Timing: Starting periodic timer at {d}Hz ({d} ticks/interval)", .{ freq_hz, timer_ticks_per_interval });
+
+    // Read current virtual counter and set compare value
+    var cntvct: u64 = 0;
+    asm volatile ("mrs %[ret], cntvct_el0"
+        : [ret] "=r" (cntvct),
+    );
+
+    const cval = cntvct + timer_ticks_per_interval;
+    asm volatile ("msr cntv_cval_el0, %[val]"
+        :
+        : [val] "r" (cval),
+    );
+
+    // Enable the timer (bit 0 = enable, bit 1 = mask interrupt)
+    // Set ENABLE=1, IMASK=0 to generate interrupts
+    asm volatile ("msr cntv_ctl_el0, %[val]"
+        :
+        : [val] "r" (@as(u64, 1)),
+    );
+
+    // Debug: verify timer is enabled
+    var ctl: u64 = 0;
+    asm volatile ("mrs %[ret], cntv_ctl_el0"
+        : [ret] "=r" (ctl),
+    );
+    console.debug("Timing: CNTV_CTL_EL0 = {x} (ENABLE={d}, IMASK={d}, ISTATUS={d})", .{
+        ctl,
+        ctl & 1,
+        (ctl >> 1) & 1,
+        (ctl >> 2) & 1,
+    });
+}
+
+/// Re-arm the timer for the next interval
+/// Must be called from the timer interrupt handler
+/// Uses CVAL approach for better QEMU TCG compatibility
+pub fn rearmTimer() void {
+    if (timer_ticks_per_interval == 0) return;
+
+    // Read current virtual counter and set next compare value
+    var cntvct: u64 = 0;
+    asm volatile ("mrs %[ret], cntvct_el0"
+        : [ret] "=r" (cntvct),
+    );
+
+    const cval = cntvct + timer_ticks_per_interval;
+    asm volatile ("msr cntv_cval_el0, %[val]"
+        :
+        : [val] "r" (cval),
+    );
+}
+
+/// Stop the periodic timer
+pub fn stopTimer() void {
+    // Disable the timer (clear ENABLE bit)
+    asm volatile ("msr cntv_ctl_el0, %[val]"
+        :
+        : [val] "r" (@as(u64, 0)),
+    );
 }

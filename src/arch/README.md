@@ -100,6 +100,39 @@ arch.earlyPrint("HAL Initialized\n");
 const cpu_id = arch.cpu.getCoreId();
 ```
 
+## Building for Different Architectures
+
+The HAL is compiled as part of the kernel build. Architecture selection is done via the `-Darch` flag:
+
+```bash
+# Build for x86_64 (default)
+zig build -Darch=x86_64
+
+# Build for AArch64
+zig build -Darch=aarch64
+```
+
+The build system produces architecture-named outputs that coexist without overwrites:
+
+| Architecture | Kernel Binary | Bootloader |
+| :--- | :--- | :--- |
+| x86_64 | `kernel-x86_64.elf` | `bootx64.efi` |
+| AArch64 | `kernel-aarch64.elf` | `bootaa64.efi` |
+
+To build and test both architectures:
+
+```bash
+# Build both (binaries coexist in zig-out/bin/)
+zig build -Darch=x86_64
+zig build -Darch=aarch64
+
+# Run x86_64 in QEMU
+zig build run -Darch=x86_64
+
+# Run AArch64 in QEMU (uses HVF on Apple Silicon)
+zig build run -Darch=aarch64
+```
+
 ## Roadmap
 
 *   Implementation of GICv3 and GICv4 support for AArch64.

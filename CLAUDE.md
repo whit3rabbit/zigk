@@ -1,20 +1,24 @@
 # zscapek Development Guidelines
 
-A Zig-based microkernel for x86_64 with a custom UEFI bootloader.
+A Zig-based microkernel for x86_64 and AArch64 with a custom UEFI bootloader.
 
 ## Environment & Build
 - **Zig Version**: 0.16.x (Nightly)
-- **Target**: `x86_64-freestanding`
+- **Target**: `x86_64-freestanding` or `aarch64-freestanding`
 - **Bootloader**: Custom UEFI (src/boot/uefi/)
-- **Host**: macOS (Apple Silicon) -> Requires QEMU TCG
+- **Host**: macOS (Apple Silicon) -> Requires QEMU TCG for x86_64
 
 ### Commands
 ```bash
-zig build              # Build kernel + userland + UEFI bootloader
-zig build iso          # Create bootable UEFI ISO
-zig build run          # Run via QEMU with UEFI
-zig build test         # Run unit tests
+zig build -Darch=x86_64   # Build for x86_64 (default)
+zig build -Darch=aarch64  # Build for AArch64
+zig build iso -Darch=x86_64   # Create x86_64 UEFI ISO
+zig build run -Darch=x86_64   # Run x86_64 in QEMU
+zig build run -Darch=aarch64  # Run AArch64 in QEMU
+zig build test            # Run unit tests
 ```
+
+**Note:** Kernel binaries are architecture-named (`kernel-x86_64.elf`, `kernel-aarch64.elf`) and coexist in `zig-out/bin/`.
 
 **QEMU on macOS (Apple Silicon):**
 Use `-Dbios=/path/to/OVMF.fd` to specify UEFI firmware.

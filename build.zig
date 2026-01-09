@@ -137,6 +137,7 @@ pub fn build(b: *std.Build) void {
     // Architecture-specific EFI naming
     const efi_loader_name = if (target_arch == .aarch64) "bootaa64" else "bootx64";
     const efi_boot_file = if (target_arch == .aarch64) "BOOTAA64.EFI" else "BOOTX64.EFI";
+    const kernel_elf_name = if (target_arch == .aarch64) "kernel-aarch64.elf" else "kernel-x86_64.elf";
     const bootloader = b.addExecutable(.{
         .name = efi_loader_name,
         .root_module = b.createModule(.{
@@ -1532,7 +1533,7 @@ pub fn build(b: *std.Build) void {
     // NOTE: red_zone must be disabled for kernel code to prevent stack corruption
     // from interrupts. code_model=kernel enables top-2GB addressing.
     const kernel = b.addExecutable(.{
-        .name = "kernel.elf",
+        .name = kernel_elf_name,
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/kernel/core/main.zig"),
             .target = kernel_target,
@@ -2169,7 +2170,7 @@ pub fn build(b: *std.Build) void {
         \\rm -rf iso_root efi.img && \
         \\mkdir -p iso_root/EFI/BOOT && \
         \\cp zig-out/bin/{s} iso_root/EFI/BOOT/{s} && \
-        \\cp zig-out/bin/kernel.elf iso_root/ && \
+        \\cp zig-out/bin/{s} iso_root/ && \
         \\mkdir -p .zig-cache && \
         \\tmp_initrd=".zig-cache/esp_initrd.tar" && \
         \\rm -rf .zig-cache/initrd_root && \
@@ -2181,7 +2182,7 @@ pub fn build(b: *std.Build) void {
         \\    for f in zig-out/bin/*; do \
         \\        base="$(basename "$f")"; \
         \\        case "$base" in \
-        \\            {s}|{s}.pdb|kernel.elf|kernel.bin|disk_image) continue ;; \
+        \\            {s}|{s}.pdb|kernel-*.elf|kernel.bin|disk_image) continue ;; \
         \\        esac; \
         \\        cp "$f" .zig-cache/initrd_root/; \
         \\    done; \
@@ -2196,7 +2197,7 @@ pub fn build(b: *std.Build) void {
         \\mmd -i efi.img ::/EFI && \
         \\mmd -i efi.img ::/EFI/BOOT && \
         \\mcopy -i efi.img zig-out/bin/{s} ::/EFI/BOOT/{s} && \
-        \\mcopy -i efi.img zig-out/bin/kernel.elf :: && \
+        \\mcopy -i efi.img zig-out/bin/{s} :: && \
         \\if [ -f "$tmp_initrd" ]; then \
         \\    mcopy -i efi.img "$tmp_initrd" ::/initrd.tar; \
         \\fi && \
@@ -2211,7 +2212,7 @@ pub fn build(b: *std.Build) void {
         \\    iso_root -o zigk.iso && \
         \\rm -f efi.img && \
         \\echo "UEFI ISO created: zigk.iso"
-    , .{ efi_loader_ext, efi_boot_file, efi_loader_ext, efi_loader_name, efi_loader_ext, efi_boot_file });
+    , .{ efi_loader_ext, efi_boot_file, kernel_elf_name, efi_loader_ext, efi_loader_name, efi_loader_ext, efi_boot_file, kernel_elf_name });
     const iso_cmd = b.addSystemCommand(&.{ "sh", "-c", iso_script });
     iso_cmd.step.dependOn(test_step_build);
     iso_cmd.step.dependOn(b.getInstallStep());
@@ -2336,8 +2337,9 @@ pub fn build(b: *std.Build) void {
 
     // Install UEFI bootloader and kernel to efi_root directory
     const install_uefi = b.addInstallFile(bootloader.getEmittedBin(), b.fmt("efi_root/EFI/BOOT/{s}", .{efi_boot_file}));
-    const install_kernel_uefi = b.addInstallFile(kernel.getEmittedBin(), "efi_root/kernel.elf");
-    const install_startup_nsh = b.addInstallFile(b.path("src/boot/uefi/startup.nsh"), "efi_root/startup.nsh");
+    const install_kernel_uefi = b.addInstallFile(kernel.getEmittedBin(), b.fmt("efi_root/{s}", .{kernel_elf_name}));
+    const startup_nsh_source = if (target_arch == .aarch64) "src/boot/uefi/startup-aarch64.nsh" else "src/boot/uefi/startup-x86_64.nsh";
+    const install_startup_nsh = b.addInstallFile(b.path(startup_nsh_source), "efi_root/startup.nsh");
     b.getInstallStep().dependOn(&install_uefi.step);
     b.getInstallStep().dependOn(&install_kernel_uefi.step);
     b.getInstallStep().dependOn(&install_startup_nsh.step);
@@ -2350,8 +2352,8 @@ pub fn build(b: *std.Build) void {
         \\mmd -i esp_part.img ::/EFI && \
         \\mmd -i esp_part.img ::/EFI/BOOT && \
         \\mcopy -i esp_part.img zig-out/bin/{s} ::/EFI/BOOT/{s} && \
-        \\mcopy -i esp_part.img zig-out/bin/kernel.elf :: && \
-        \\mcopy -i esp_part.img src/boot/uefi/startup.nsh :: && \
+        \\mcopy -i esp_part.img zig-out/bin/{s} :: && \
+        \\mcopy -i esp_part.img {s} :: && \
         \\mkdir -p .zig-cache && \
         \\tmp_initrd=".zig-cache/esp_initrd.tar" && \
         \\rm -rf .zig-cache/initrd_root && \
@@ -2363,7 +2365,7 @@ pub fn build(b: *std.Build) void {
         \\    for f in zig-out/bin/*; do \
         \\        base="$(basename "$f")"; \
         \\        case "$base" in \
-        \\            {s}|{s}.pdb|kernel.elf|kernel.bin|disk_image) continue ;; \
+        \\            {s}|{s}.pdb|kernel-*.elf|kernel.bin|disk_image) continue ;; \
         \\        esac; \
         \\        cp "$f" .zig-cache/initrd_root/; \
         \\    done; \
@@ -2377,7 +2379,7 @@ pub fn build(b: *std.Build) void {
         \\fi && \
         \\rm -f "$tmp_initrd" && \
         \\rm -rf .zig-cache/initrd_root
-    , .{ efi_loader_ext, efi_boot_file, efi_loader_ext, efi_loader_name });
+    , .{ efi_loader_ext, efi_boot_file, kernel_elf_name, startup_nsh_source, efi_loader_ext, efi_loader_name });
     const create_esp_cmd = b.addSystemCommand(&.{ "sh", "-c", esp_script });
     create_esp_cmd.step.dependOn(&install_uefi.step);
     create_esp_cmd.step.dependOn(&install_kernel_uefi.step);

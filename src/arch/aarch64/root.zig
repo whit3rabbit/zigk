@@ -141,8 +141,9 @@ pub const pic = struct {
 };
 
 pub const pit = struct {
-    pub fn init(_: u32) void {
-        // ARM uses GIC timer (PPI 30) instead of PIT
+    pub fn init(freq_hz: u32) void {
+        // ARM uses the Generic Timer (virtual timer) instead of PIT
+        timing.startPeriodicTimer(freq_hz);
     }
     pub fn disable() void {}
     pub fn readCount(_: anytype) u16 {
@@ -270,4 +271,7 @@ pub fn init(hhdm_offset: u64) void {
     // Initialize timing subsystem with best available clock source
     // Uses Generic Timer, with pvtime stolen time tracking under KVM
     timing.initBest();
+
+    // Initialize periodic timer at 100Hz for scheduler
+    pit.init(100);
 }

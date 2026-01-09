@@ -27,7 +27,8 @@ pub const ET_EXEC: u16 = 2; // Executable file
 pub const ET_DYN: u16 = 3; // Shared object / PIE executable
 
 /// ELF machine types
-pub const EM_X86_64: u16 = 62; // AMD x86-64
+pub const EM_X86_64: u16 = 62;   // AMD x86-64
+pub const EM_AARCH64: u16 = 183; // ARM AArch64
 
 /// Program header types
 pub const PT_NULL: u32 = 0; // Unused entry

@@ -50,20 +50,32 @@ See [docs/BUILD.md](docs/BUILD.md) for platform-specific notes and Docker-based 
 - xorriso (for ISO generation)
 
 ### Compilation
+
 To build the kernel, userspace programs, and generate the bootable ISO:
 
 ```bash
-zig build -Doptimize=ReleaseSafe
+# Build for x86_64 (default)
+zig build -Darch=x86_64 -Doptimize=ReleaseSafe
+
+# Build for AArch64
+zig build -Darch=aarch64 -Doptimize=ReleaseSafe
+```
+
+**Dual-Architecture Support:** The build system produces architecture-named kernel binaries (`kernel-x86_64.elf`, `kernel-aarch64.elf`) that coexist in `zig-out/bin/`. You can build for both architectures without overwrites:
+
+```bash
+zig build -Darch=x86_64 && zig build -Darch=aarch64
+ls zig-out/bin/kernel-*.elf  # Both exist
 ```
 
 Architecture-specific build targets:
 
-```
-iso-x86_64    Build bootable x86_64 UEFI ISO
-iso-aarch64   Build bootable aarch64 UEFI ISO
-run-x86_64    Build and run x86_64 kernel in QEMU
-run-aarch64   Build and run aarch64 kernel in QEMU
-```
+| Target | Description |
+| :--- | :--- |
+| `iso -Darch=x86_64` | Build bootable x86_64 UEFI ISO |
+| `iso -Darch=aarch64` | Build bootable AArch64 UEFI ISO |
+| `run -Darch=x86_64` | Build and run x86_64 kernel in QEMU |
+| `run -Darch=aarch64` | Build and run AArch64 kernel in QEMU |
 
 ### Running with QEMU
 
@@ -71,8 +83,8 @@ The build system wraps QEMU for easy testing. The `run` steps automatically conf
 
 | Command | Architecture | Description |
 | :--- | :--- | :--- |
-| `zig build run-x86_64` | x86_64 | Runs in QEMU (uses KVM on Linux, HVF on macOS if avail) |
-| `zig build run-aarch64` | AArch64 | Runs in QEMU (uses HVF on Apple Silicon, TCG otherwise) |
+| `zig build run -Darch=x86_64` | x86_64 | Runs in QEMU (uses KVM on Linux, HVF on macOS if avail) |
+| `zig build run -Darch=aarch64` | AArch64 | Runs in QEMU (uses HVF on Apple Silicon, TCG otherwise) |
 
 #### Common Options
 
@@ -83,19 +95,19 @@ By default, port **8080** on localhost is forwarded to guest port **80**.
 **Firmware Overrides**:
 If the auto-detection fails or you want to test specific firmware:
 ```bash
-zig build run-x86_64 -Dbios=/path/to/OVMF.fd
+zig build run -Darch=x86_64 -Dbios=/path/to/OVMF.fd
 ```
 
 **Boot from Disk Image**:
 To boot from the GPT-partitioned disk (`disk.img`) instead of the ISO:
 ```bash
-zig build run-x86_64 -Drun-iso=false
+zig build run -Darch=x86_64 -Drun-iso=false
 ```
 
 **Headless Mode**:
 To run without a display (useful for CI):
 ```bash
-zig build run-x86_64 -Dheadless=true
+zig build run -Darch=x86_64 -Dheadless=true
 ```
 
 ## Roadmap

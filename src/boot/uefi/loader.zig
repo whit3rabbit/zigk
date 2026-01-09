@@ -42,7 +42,12 @@ pub fn loadKernel(bs: *uefi.tables.BootServices, segments_buffer: []LoadedSegmen
     };
     defer _ = root.close() catch {};
 
-    const kernel_path = [_:0]u16{ 'k', 'e', 'r', 'n', 'e', 'l', '.', 'e', 'l', 'f' };
+    // Architecture-specific kernel filename
+    const kernel_path = switch (builtin.cpu.arch) {
+        .aarch64 => [_:0]u16{ 'k', 'e', 'r', 'n', 'e', 'l', '-', 'a', 'a', 'r', 'c', 'h', '6', '4', '.', 'e', 'l', 'f' },
+        .x86_64 => [_:0]u16{ 'k', 'e', 'r', 'n', 'e', 'l', '-', 'x', '8', '6', '_', '6', '4', '.', 'e', 'l', 'f' },
+        else => @compileError("Unsupported architecture for kernel loading"),
+    };
     var kernel_file = root.open(&kernel_path, .read, .{}) catch {
         return LoaderError.KernelNotFound;
     };

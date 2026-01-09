@@ -328,6 +328,23 @@ fn loadSegment(
     var current_vaddr = vaddr_aligned;
 
     while (page_index < page_count) : (page_index += 1) {
+        // Check if page is already mapped (shared page boundary with previous segment)
+        if (vmm.isMapped(pml4_phys, current_vaddr)) {
+            // Page already mapped by a previous segment that shares this page boundary.
+            // Upgrade permissions if this segment needs write access.
+            if (is_writable) {
+                vmm.protectPage(pml4_phys, current_vaddr, page_flags) catch {
+                    // Failed to upgrade permissions - this is unexpected
+                    console.err("ELF: Failed to upgrade permissions on shared page {x}", .{current_vaddr});
+                    cleanupMappedSegment(pml4_phys, vaddr_aligned, page_size, mapped_pages.items);
+                    return ElfError.MappingFailed;
+                };
+            }
+            // Don't zero the page - it contains data from the previous segment
+            current_vaddr += page_size;
+            continue;
+        }
+
         // Allocate a physical page
         const phys_page = pmm.allocPage() orelse {
             cleanupMappedSegment(pml4_phys, vaddr_aligned, page_size, mapped_pages.items);

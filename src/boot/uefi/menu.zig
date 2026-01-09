@@ -190,8 +190,13 @@ pub fn showMenu(
                     if (countdown > 0) {
                         countdown -= 1;
                         if (countdown == 0) {
-                            // Timeout - return default selection
-                            return .shell;
+                            // Timeout - return current selection
+                            const item: MainMenuItem = @enumFromInt(main_selection);
+                            return switch (item) {
+                                .shell => .shell,
+                                .tests => .shell, // Tests submenu can't auto-select
+                                .doom => .doom,
+                            };
                         }
                         // Set next 1-second timer
                         bs.setTimer(timer_event.?, .relative, ONE_SECOND_100NS) catch {};
