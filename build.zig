@@ -2383,6 +2383,7 @@ pub fn build(b: *std.Build) void {
     const create_esp_cmd = b.addSystemCommand(&.{ "sh", "-c", esp_script });
     create_esp_cmd.step.dependOn(&install_uefi.step);
     create_esp_cmd.step.dependOn(&install_kernel_uefi.step);
+    create_esp_cmd.step.dependOn(b.getInstallStep()); // Ensure bootloader is installed to zig-out/bin/
 
     // Build disk_image tool
     const disk_image_tool = b.addExecutable(.{

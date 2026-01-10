@@ -110,23 +110,52 @@ inline fn readCurrentEl() u64 {
     );
 }
 
-/// Execute SMC (Secure Monitor Call) instruction
+/// Return type for SMC/HVC calls
+const SmcResult = struct { x0: u64, x1: u64, x2: u64, x3: u64 };
+
+/// Execute HVC (Hypervisor Call) instruction
 /// Returns x0-x3 result registers
 ///
-/// SECURITY NOTE: We use SMC instead of HVC for hypervisor probing because:
-/// - SMC is always handled by firmware (TF-A/ATF) on both bare metal and VMs
-/// - HVC on bare metal without an active EL2 handler causes undefined behavior
-///   or kernel hang (the exception falls through to cpu.halt())
-/// - PSCI calls work via both SMC and HVC, but SMC is safer for probing
-inline fn smc(func_id: u32, arg1: u64, arg2: u64, arg3: u64) struct { x0: u64, x1: u64, x2: u64, x3: u64 } {
+/// Use this when EL2 is present (running under a hypervisor like KVM, hvf).
+/// HVC traps to EL2 where the hypervisor handles PSCI calls.
+inline fn hvc(func_id: u32, arg1: u64, arg2: u64, arg3: u64) SmcResult {
     var x0: u64 = undefined;
     var x1: u64 = undefined;
     var x2: u64 = undefined;
     var x3: u64 = undefined;
 
-    // SMC #0 encoded as raw bytes (0xD4000003) to avoid LLVM assembler
-    // rejecting it due to missing 'el3' feature on baseline target.
-    // SMC can be executed from any exception level - it traps to EL3/EL2.
+    // HVC #0 encoded as raw bytes (0xD4000002)
+    asm volatile (
+        \\.word 0xD4000002
+        : [x0] "={x0}" (x0),
+          [x1] "={x1}" (x1),
+          [x2] "={x2}" (x2),
+          [x3] "={x3}" (x3),
+        : [func] "{x0}" (func_id),
+          [a1] "{x1}" (arg1),
+          [a2] "{x2}" (arg2),
+          [a3] "{x3}" (arg3),
+        : .{ .memory = true }
+    );
+
+    return .{ .x0 = x0, .x1 = x1, .x2 = x2, .x3 = x3 };
+}
+
+/// Execute SMC (Secure Monitor Call) instruction
+/// Returns x0-x3 result registers
+///
+/// Use this when EL2 is NOT present (bare metal with TF-A firmware).
+/// SMC traps to EL3 where the secure monitor handles PSCI calls.
+///
+/// WARNING: SMC hangs on systems with EL2 but no EL3 (e.g., macOS hvf).
+/// Always check isEl2Implemented() and prefer HVC when EL2 is present.
+inline fn smc(func_id: u32, arg1: u64, arg2: u64, arg3: u64) SmcResult {
+    var x0: u64 = undefined;
+    var x1: u64 = undefined;
+    var x2: u64 = undefined;
+    var x3: u64 = undefined;
+
+    // SMC #0 encoded as raw bytes (0xD4000003)
     asm volatile (
         \\.word 0xD4000003
         : [x0] "={x0}" (x0),
@@ -141,6 +170,19 @@ inline fn smc(func_id: u32, arg1: u64, arg2: u64, arg3: u64) struct { x0: u64, x
     );
 
     return .{ .x0 = x0, .x1 = x1, .x2 = x2, .x3 = x3 };
+}
+
+/// Execute PSCI call using the appropriate instruction based on EL2 presence.
+/// - EL2 present (hypervisor): use HVC (traps to hypervisor at EL2)
+/// - EL2 absent (bare metal): use SMC (traps to secure monitor at EL3)
+inline fn psciCall(func_id: u32, arg1: u64, arg2: u64, arg3: u64) SmcResult {
+    if (isEl2Implemented()) {
+        // Hypervisor present - use HVC (e.g., KVM, hvf, Xen)
+        return hvc(func_id, arg1, arg2, arg3);
+    } else {
+        // Bare metal - use SMC to reach TF-A at EL3
+        return smc(func_id, arg1, arg2, arg3);
+    }
 }
 
 /// Check if EL2 (hypervisor level) is implemented in hardware
@@ -164,20 +206,19 @@ pub fn isVirtualized() bool {
     return info.hypervisor != .none;
 }
 
-/// Probe for KVM/QEMU hypervisor using SMCCC via SMC
+/// Probe for KVM/QEMU hypervisor using PSCI version call.
 ///
-/// We use SMC (Secure Monitor Call) rather than HVC (Hypervisor Call) because:
-/// - SMC is always handled by EL3 firmware (TF-A) on all ARM systems
-/// - HVC requires an active EL2 hypervisor; on bare metal it causes exceptions
-/// - PSCI is mandatory on SBSA-compliant systems, so PSCI_VERSION always works
+/// Uses HVC when EL2 is present (hypervisor handles PSCI), or SMC when
+/// running on bare metal with TF-A firmware. This avoids hangs on systems
+/// like macOS hvf where EL2 exists but EL3 does not.
 ///
 /// Detection logic:
-/// - If PSCI responds with a valid version, we have firmware support
-/// - If EL2 is implemented (checked earlier), we're likely under KVM/QEMU
+/// - If PSCI responds with a valid version, we have firmware/hypervisor support
+/// - If EL2 is implemented (checked earlier), we're likely under KVM/QEMU/hvf
 /// - On bare metal with EL2 but no hypervisor, we return false here
 fn probeKvm() bool {
-    // Try PSCI version call via SMC - this is safe on all ARM systems
-    const result = smc(@intFromEnum(SmcccFunctionId.psci_version), 0, 0, 0);
+    // Try PSCI version call - uses HVC if EL2 present, SMC otherwise
+    const result = psciCall(@intFromEnum(SmcccFunctionId.psci_version), 0, 0, 0);
 
     // PSCI version format: major in bits [31:16], minor in bits [15:0]
     // PSCI_NOT_SUPPORTED (-1) = 0xFFFFFFFF or 0xFFFFFFFFFFFFFFFF
