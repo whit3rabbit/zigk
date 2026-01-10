@@ -3,12 +3,13 @@
 // Provides an interactive boot menu with:
 // - Main menu: Shell (default), Tests submenu, Doom
 // - Tests submenu: Individual test selection
-// - 5-second auto-boot timeout to default (shell)
+// - 5-second auto-boot timeout to default selection
 //
 // Uses UEFI SimpleTextInput for keyboard and timer events for countdown.
 
 const std = @import("std");
 const uefi = std.os.uefi;
+const boot_config = @import("boot_config");
 
 /// Boot selection options
 pub const BootSelection = enum(u8) {
@@ -132,7 +133,8 @@ pub fn showMenu(
     _ = con_in.reset(false) catch {};
 
     var state: MenuState = .main;
-    var main_selection: usize = 0; // Default to shell
+    // Set default selection based on build config
+    var main_selection: usize = if (std.mem.eql(u8, boot_config.default_boot, "doom")) 2 else 0;
     var test_selection: usize = 0; // 0 = back
     var countdown: u8 = MENU_TIMEOUT_SECONDS;
     var timeout_active = true;

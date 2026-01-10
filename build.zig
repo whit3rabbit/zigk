@@ -138,6 +138,12 @@ pub fn build(b: *std.Build) void {
     const efi_loader_name = if (target_arch == .aarch64) "bootaa64" else "bootx64";
     const efi_boot_file = if (target_arch == .aarch64) "BOOTAA64.EFI" else "BOOTX64.EFI";
     const kernel_elf_name = if (target_arch == .aarch64) "kernel-aarch64.elf" else "kernel-x86_64.elf";
+
+    // Bootloader config options (parsed before other options for early use)
+    const default_boot_early = b.option([]const u8, "default-boot", "Default boot target (shell, doom)") orelse "shell";
+    const boot_config = b.addOptions();
+    boot_config.addOption([]const u8, "default_boot", default_boot_early);
+
     const bootloader = b.addExecutable(.{
         .name = efi_loader_name,
         .root_module = b.createModule(.{
@@ -150,6 +156,7 @@ pub fn build(b: *std.Build) void {
                     .target = uefi_target,
                     .optimize = optimize,
                 }) },
+                .{ .name = "boot_config", .module = boot_config.createModule() },
             },
         }),
     });
@@ -2235,7 +2242,7 @@ pub fn build(b: *std.Build) void {
             "-device", "qemu-xhci,id=xhci",
             "-device", "usb-kbd",
             "-device", "usb-tablet",
-            "-device", "virtio-gpu-pci",
+            "-device", "ramfb", // Simple framebuffer for UEFI GOP (no driver needed)
             "-serial", "stdio",
             "-smp", "1", // Single-core for initial bring-up
             "-no-reboot",
