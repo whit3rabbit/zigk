@@ -96,8 +96,8 @@ pub fn sys_debug_log(buf_ptr: usize, len: usize) SyscallError!usize {
 /// sys_putchar (1005) - Write single character to console
 pub fn sys_putchar(c: usize) SyscallError!usize {
     const char: u8 = @truncate(c);
-    // Use HAL serial driver directly for single character output
-    hal.serial.writeByte(char);
+    // Write to console (serial + framebuffer)
+    console.print(&[_]u8{char});
     return 0;
 }
 
