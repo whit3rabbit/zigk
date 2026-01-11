@@ -16,6 +16,11 @@ zig build iso -Darch=x86_64   # Create x86_64 UEFI ISO
 zig build run -Darch=x86_64   # Run x86_64 in QEMU
 zig build run -Darch=aarch64  # Run AArch64 in QEMU
 zig build test            # Run unit tests
+
+# Boot target selection
+zig build run -Darch=x86_64 -Ddefault-boot=shell   # Run shell
+zig build run -Darch=aarch64 -Ddefault-boot=shell  # Run shell on aarch64
+zig build run -Darch=x86_64 -Ddefault-boot=doom    # Run Doom (default)
 ```
 
 **Note:** Kernel binaries are architecture-named (`kernel-x86_64.elf`, `kernel-aarch64.elf`) and coexist in `zig-out/bin/`.

@@ -88,6 +88,13 @@ The build system wraps QEMU for easy testing. The `run` steps automatically conf
 
 #### Common Options
 
+**Boot Target**:
+Choose what to boot into with `-Ddefault-boot`:
+```bash
+zig build run -Darch=x86_64 -Ddefault-boot=shell  # Interactive shell
+zig build run -Darch=x86_64 -Ddefault-boot=doom   # Doom (default)
+```
+
 **Networking**:
 By default, port **8080** on localhost is forwarded to guest port **80**.
 - Access the web server: `http://localhost:8080`
