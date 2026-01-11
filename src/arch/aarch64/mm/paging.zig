@@ -50,49 +50,58 @@ pub const VirtualAddress = packed struct(u64) {
 
 pub const PageTableEntry = packed struct(u64) {
     valid: bool = false,
-    table: bool = false,
-    attr_index: u3 = 0,
+    table: bool = false, // For L3: must be 1 for page descriptor
+    attr_index: u3 = 0, // MAIR index (0=Device, 1=Normal)
     non_secure: bool = false,
-    ap: u2 = 0,
-    shareability: u2 = 0,
-    accessed: bool = false,
-    non_global: bool = false,
-    phys_addr_bits: u36 = 0,
-    reserved0: u4 = 0,
-    privileged_execute_never: bool = false,
-    execute_never: bool = false,
-    user_accessible: bool = false,
-    writable: bool = false,
-    ignored: u8 = 0,
+    ap: u2 = 0, // AP[2:1] - Access Permissions
+    shareability: u2 = 0, // SH[1:0]
+    accessed: bool = false, // AF - Access Flag
+    non_global: bool = false, // nG
+    phys_addr_bits: u36 = 0, // OA[47:12]
+    reserved0: u3 = 0, // Bits 48-50: reserved/GP
+    dbm: bool = false, // Bit 51: Dirty Bit Modifier
+    contiguous: bool = false, // Bit 52: Contiguous hint
+    pxn: bool = false, // Bit 53: Privileged Execute Never
+    uxn: bool = false, // Bit 54: User Execute Never (XN for EL0)
+    // Software-defined bits 55-63 (used for VMM compatibility)
+    user_accessible: bool = false, // Bit 55: Software flag for user page tracking
+    writable: bool = false, // Bit 56: Software flag for writable tracking
+    software: u7 = 0, // Bits 57-63: Reserved for software use
 
     pub fn empty() Self { return .{}; }
     const Self = @This();
-    pub fn tableEntry(phys_addr: u64, _: bool) Self {
+    pub fn tableEntry(phys_addr: u64, user: bool) Self {
         return .{
             .valid = true,
             .table = true,
             .phys_addr_bits = @truncate(phys_addr >> PAGE_SHIFT),
+            .user_accessible = user, // Software flag for VMM tracking
         };
     }
     pub fn pageEntry(phys_addr: u64, flags: anytype) Self {
         var entry = Self{
             .valid = true,
-            .table = true,
+            .table = true, // For L3: 1 = page descriptor
             .phys_addr_bits = @truncate(phys_addr >> PAGE_SHIFT),
             .accessed = true,
-            .shareability = 0b11,
+            .shareability = 0b11, // Inner Shareable
             .attr_index = if (flags.cache_disable) 0 else 1,
-            .user_accessible = flags.user,
-            .writable = flags.writable,
+            .user_accessible = flags.user, // Software flag for VMM tracking
+            .writable = flags.writable, // Software flag for VMM tracking
         };
+        // Set AP bits based on user/writable flags
+        // AP[2:1]: 00=RW/None, 01=RW/RW, 10=RO/None, 11=RO/RO
         if (flags.user) {
             entry.ap = if (flags.writable) 0b01 else 0b11;
         } else {
             entry.ap = if (flags.writable) 0b00 else 0b10;
         }
-        entry.execute_never = flags.no_execute;
-        entry.privileged_execute_never = flags.no_execute;
-        entry.non_global = flags.user;
+        // Set execute-never bits
+        // PXN: Prevents EL1 (kernel) execution
+        // UXN: Prevents EL0 (user) execution
+        entry.pxn = flags.no_execute;
+        entry.uxn = flags.no_execute; // User can execute only if no_execute=false
+        entry.non_global = flags.user; // Use ASID for user pages
         return entry;
     }
     pub fn getPhysAddr(self: Self) u64 { return @as(u64, self.phys_addr_bits) << PAGE_SHIFT; }

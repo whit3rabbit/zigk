@@ -245,9 +245,16 @@ fn probeXen() bool {
 
 /// Probe for VMware hypervisor using ARM hypercall mechanism.
 /// VMware on ARM64 uses `mrs xzr, mdccsr_el0` as the trap instruction.
+///
+/// WARNING: The VMware hypercall (mrs xzr, mdccsr_el0) hangs on non-VMware
+/// hypervisors like macOS hvf because they don't trap this instruction.
+/// For safety, we skip VMware probing entirely and rely on other detection.
+/// This can be re-enabled if VMware ARM support becomes relevant.
 fn probeVmware() bool {
-    const vmware = @import("vmware.zig");
-    return vmware.detect();
+    // DISABLED: mrs xzr, mdccsr_el0 hangs on hvf/QEMU
+    // const vmware = @import("vmware.zig");
+    // return vmware.detect();
+    return false;
 }
 
 /// Detect hypervisor type and return detailed info

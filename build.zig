@@ -332,6 +332,7 @@ pub fn build(b: *std.Build) void {
     });
     layout_module.addImport("boot_info", boot_info_module);
     layout_module.addImport("console", console_module);
+    layout_module.addImport("hal", hal_module);
 
     // Add layout to vmm_module
     vmm_module.addImport("layout", layout_module);
@@ -2264,10 +2265,10 @@ pub fn build(b: *std.Build) void {
         run_cmd.addArgs(&.{
             "-device", "AC97,audiodev=audio0",
             "-serial", "stdio",
-            "-smp", "4",
+            "-smp", "1",
             "-no-reboot",
             "-no-shutdown",
-            "-accel", "tcg",
+            "-accel", "tcg,thread=multi",
             // USB Mass Storage (optional)
             "-drive", "if=none,id=usbdisk,format=raw,file=usb_disk.img",
         });

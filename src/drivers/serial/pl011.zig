@@ -2,6 +2,10 @@
 //
 // Provides support for the ARM PL011 UART found on many AArch64 systems
 // including the QEMU 'virt' machine.
+//
+// NOTE: This driver supports both early boot (using identity-mapped physical
+// addresses) and normal operation (using HHDM virtual addresses). The
+// hhdm_offset must be set before clearing TTBR0.
 
 const std = @import("std");
 const sync = @import("sync");
@@ -33,22 +37,40 @@ const CR_RXE    = 1 << 9; // Receive enable
 pub const UART0_BASE = 0x09000000;
 pub const COM1 = UART0_BASE; // For compatibility with x86 code
 
-var uart_base: u64 = UART0_BASE;
+// HHDM offset for converting physical to virtual addresses
+// Set by setHhdmOffset() before TTBR0 is cleared
+var hhdm_offset: u64 = 0;
+
+var uart_base_phys: u64 = UART0_BASE;
 var output_lock: sync.Spinlock = .{};
 var initialized: bool = false;
 
+/// Set the HHDM offset for virtual address translation
+/// Must be called before TTBR0 is cleared
+pub fn setHhdmOffset(offset: u64) void {
+    hhdm_offset = offset;
+}
+
+/// Get the effective UART address (physical during early boot, virtual after HHDM set)
+fn getUartAddr() u64 {
+    return hhdm_offset + uart_base_phys;
+}
+
 fn writeReg(offset: u32, val: u32) void {
-    const addr: *volatile u32 = @ptrFromInt(uart_base + offset);
+    const addr: *volatile u32 = @ptrFromInt(getUartAddr() + offset);
+    asm volatile ("dsb sy" ::: "memory");
     addr.* = val;
+    asm volatile ("dsb sy" ::: "memory");
 }
 
 fn readReg(offset: u32) u32 {
-    const addr: *volatile u32 = @ptrFromInt(uart_base + offset);
+    const addr: *volatile u32 = @ptrFromInt(getUartAddr() + offset);
+    asm volatile ("dsb sy" ::: "memory");
     return addr.*;
 }
 
 pub fn init(base: u64, _: u32) void {
-    uart_base = base;
+    uart_base_phys = base;
 
     // Disable UART before configuration
     writeReg(CR, 0);

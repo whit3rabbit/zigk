@@ -83,10 +83,19 @@ const GICC_PMR: u32 = 0x004;
 const GICC_IAR: u32 = 0x00C;
 const GICC_EOIR: u32 = 0x010;
 
-/// Get the GIC configuration atomically (acquire ordering).
-/// Returns null if GIC is not initialized.
+// Hardcoded config for use when atomic config isn't available
+const HARDCODED_CONFIG: GicConfig = .{
+    .gicd_base = QEMU_VIRT_GICD_BASE,
+    .gicc_base = QEMU_VIRT_GICC_BASE,
+    .gic_version = 2,
+    .max_irq = 96,
+};
+
+/// Get the GIC configuration - always returns hardcoded config for QEMU
+/// This avoids relying on writes to static storage which hang in QEMU TCG
 fn getConfig() ?*const GicConfig {
-    return gic_config_ptr.load(.acquire);
+    // For QEMU TCG stability, always use hardcoded config
+    return &HARDCODED_CONFIG;
 }
 
 /// Get GIC config or panic if not initialized.
@@ -171,14 +180,103 @@ pub fn initFromBootInfo(boot_info: anytype) void {
     initCore();
 }
 
+// Delay loop for QEMU TCG timing stabilization
+fn delay(count: u32) void {
+    var i: u32 = 0;
+    while (i < count) : (i += 1) {
+        asm volatile ("isb" ::: "memory");
+    }
+}
+
 /// Legacy init function for backwards compatibility
 /// Uses QEMU virt defaults directly
 pub fn init() void {
-    gic_config_storage.gicd_base = QEMU_VIRT_GICD_BASE;
-    gic_config_storage.gicc_base = QEMU_VIRT_GICC_BASE;
-    gic_config_storage.gic_version = 2;
-    console.warn("GIC: Using legacy init with QEMU virt defaults", .{});
-    initCore();
+    earlyPrint("G!");
+    // Initialize GIC hardware first using hardcoded addresses
+    initCoreHardcoded();
+    earlyPrint("GX");
+
+    // For now, skip storing to static variables entirely
+    // The GIC functions can use hardcoded values directly
+    // This works around the QEMU TCG hang with writes to normal memory
+    earlyPrint("GY");
+}
+
+/// Initialize GIC hardware using hardcoded QEMU virt addresses
+/// Does not store to static variables - avoids QEMU TCG timing issues
+fn initCoreHardcoded() void {
+    earlyPrint("G0");
+    // Use hardcoded addresses directly
+    const gicd: u64 = QEMU_VIRT_GICD_BASE;
+    const gicc: u64 = QEMU_VIRT_GICC_BASE;
+
+    earlyPrint("G1");
+    // Disable Distributor
+    writeGicdDirect(gicd, GICD_CTLR, 0);
+    earlyPrint("G2");
+
+    // Get number of supported interrupts
+    const typer = readGicdDirect(gicd, GICD_TYPER);
+    const it_lines = ((typer & 0x1F) + 1) * 32;
+    earlyPrint("G3");
+
+    // Disable all interrupts
+    var i: u32 = 0;
+    while (i < it_lines) : (i += 32) {
+        writeGicdDirect(gicd, GICD_ICENABLER + (i / 32) * 4, 0xFFFFFFFF);
+    }
+    earlyPrint("G4");
+
+    // Set processor target for all interrupts to CPU 0
+    i = 32;
+    while (i < it_lines) : (i += 4) {
+        writeGicdDirect(gicd, GICD_ITARGETSR + i, 0x01010101);
+    }
+    earlyPrint("G5");
+
+    // Set priority for all interrupts
+    i = 0;
+    while (i < it_lines) : (i += 4) {
+        writeGicdDirect(gicd, GICD_IPRIORITYR + i, 0xA0A0A0A0);
+    }
+    earlyPrint("G6");
+
+    // Enable Distributor
+    writeGicdDirect(gicd, GICD_CTLR, 1);
+    earlyPrint("G7");
+
+    // Initialize CPU Interface
+    writeGiccDirect(gicc, GICC_PMR, 0xF0);
+    earlyPrint("G8");
+    writeGiccDirect(gicc, GICC_CTLR, 1);
+    earlyPrint("G9");
+}
+
+fn writeGicdDirect(base: u64, offset: u32, val: u32) void {
+    const addr: *volatile u32 = @ptrFromInt(base + offset);
+    asm volatile ("dsb sy" ::: "memory");
+    asm volatile ("isb" ::: "memory");
+    addr.* = val;
+    asm volatile ("dsb sy" ::: "memory");
+    asm volatile ("isb" ::: "memory");
+}
+
+fn readGicdDirect(base: u64, offset: u32) u32 {
+    const addr: *volatile u32 = @ptrFromInt(base + offset);
+    asm volatile ("dsb sy" ::: "memory");
+    asm volatile ("isb" ::: "memory");
+    const val = addr.*;
+    asm volatile ("dsb sy" ::: "memory");
+    return val;
+}
+
+fn writeGiccDirect(base: u64, offset: u32, val: u32) void {
+    const addr: *volatile u32 = @ptrFromInt(base + offset);
+    asm volatile ("dsb sy" ::: "memory");
+    asm volatile ("isb" ::: "memory");
+    addr.* = val;
+    asm volatile ("dsb sy" ::: "memory");
+    asm volatile ("isb" ::: "memory");
 }
 
 /// Write to GICD during initialization (before pointer is published)

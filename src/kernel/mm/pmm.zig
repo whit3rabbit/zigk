@@ -202,14 +202,20 @@ pub fn init(memmap: []const BootInfo.MemoryDescriptor) !void {
     refcounts = @alignCast(std.mem.bytesAsSlice(u16, refcount_bytes));
 
     console.info("PMM: Metadata at phys {x}", .{ metadata_phys });
+    console.debug("PMM: bitmap at virt {x}, size {d}", .{ @intFromPtr(bitmap.ptr), bitmap.len });
+    console.debug("PMM: refcounts at virt {x}, len {d}", .{ @intFromPtr(refcounts.ptr), refcounts.len });
 
     // Initialize bitmap: mark all used (1)
+    console.debug("PMM: Filling bitmap...", .{});
     hal.mem.fill(bitmap.ptr, 0xFF, bitmap.len);
-    
+    console.debug("PMM: Bitmap filled", .{});
+
     // Initialize refcounts: default to 1
+    console.debug("PMM: Initializing refcounts ({d} entries)...", .{refcounts.len});
     for (refcounts) |*entry| {
         entry.* = 1;
     }
+    console.debug("PMM: Refcounts initialized", .{});
 
     // Third pass: mark usable regions as free
     for (entries) |entry| {
@@ -228,7 +234,7 @@ pub fn init(memmap: []const BootInfo.MemoryDescriptor) !void {
             }
         }
     }
-
+    
     // Helper to reserve a range
     const reserveRange = struct {
         fn reserve(start: usize, count: usize) void {
@@ -256,7 +262,7 @@ pub fn init(memmap: []const BootInfo.MemoryDescriptor) !void {
 
     // Reserve kernel/module safety margin (1MB - 4MB)
     reserveRange(0x100000 / PAGE_SIZE, (0x400000 - 0x100000) / PAGE_SIZE);
-
+    
     // Initialize search hint to skip reserved regions at start of physical memory
     // This dramatically speeds up allocation on platforms where RAM starts at high addresses
     // (e.g., AArch64 QEMU virt where RAM starts at 0x40000000 / 1GB)
@@ -265,7 +271,7 @@ pub fn init(memmap: []const BootInfo.MemoryDescriptor) !void {
     if (search_hint >= bitmap_size) {
         search_hint = 0;
     }
-    console.info("PMM: Search hint initialized to byte {d} (page {d})", .{ search_hint, start_page });
+        console.info("PMM: Search hint initialized to byte {d} (page {d})", .{ search_hint, start_page });
 
     initialized = true;
     
@@ -273,7 +279,7 @@ pub fn init(memmap: []const BootInfo.MemoryDescriptor) !void {
         (free_pages * PAGE_SIZE) / (1024 * 1024),
         free_pages,
     });
-}
+    }
 
 
 

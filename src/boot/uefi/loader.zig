@@ -237,16 +237,19 @@ pub fn loadKernel(bs: *uefi.tables.BootServices, segments_buffer: []LoadedSegmen
     // Validate entry point is within a loaded executable segment
     var entry_valid = false;
     for (segments_buffer[0..segment_count]) |seg| {
-        const seg_end = std.math.add(u64, seg.virtual_address, seg.size) catch continue;
+        const seg_end = std.math.add(u64, seg.virtual_address, seg.size) catch {
+            debugPrint("[ELF] Seg: size overflow\r\n");
+            continue;
+        };
         debugPrint("[ELF] Seg: ");
         debugPrintHex(seg.virtual_address);
         debugPrint("-");
         debugPrintHex(seg_end);
-        debugPrint(if (seg.executable) " X" else " -");
+        debugPrint(if (seg.executable) " X" else if (seg.writable) " W" else " R");
         debugPrint("\r\n");
         if (uefi_entry >= seg.virtual_address and uefi_entry < seg_end and seg.executable) {
             entry_valid = true;
-            break;
+            // Don't break - print all segments for debugging
         }
     }
     if (!entry_valid) {

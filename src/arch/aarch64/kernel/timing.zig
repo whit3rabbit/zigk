@@ -10,6 +10,30 @@ const std = @import("std");
 const console = @import("console");
 const pvtime = @import("../hypervisor/pvtime.zig");
 
+// Direct UART output for debugging (bypasses console locks)
+// Uses DSB barriers for QEMU TCG stability
+fn earlyPrint(msg: []const u8) void {
+    const UART_BASE: u64 = 0x09000000;
+    const FR: u32 = 0x18;
+    const DR: u32 = 0x00;
+    const FR_TXFF: u32 = 1 << 5;
+
+    for (msg) |c| {
+        // Wait for TX FIFO to have space
+        while (true) {
+            asm volatile ("dsb sy" ::: "memory");
+            const fr_ptr: *volatile u32 = @ptrFromInt(UART_BASE + FR);
+            if ((fr_ptr.* & FR_TXFF) == 0) break;
+            asm volatile ("isb" ::: "memory");
+        }
+        const dr_ptr: *volatile u32 = @ptrFromInt(UART_BASE + DR);
+        dr_ptr.* = c;
+        asm volatile ("dsb sy" ::: "memory");
+    }
+    asm volatile ("dsb sy" ::: "memory");
+    asm volatile ("isb" ::: "memory");
+}
+
 /// Available clock sources for aarch64
 pub const ClockSource = enum {
     /// No clock source initialized
@@ -209,18 +233,6 @@ pub fn startPeriodicTimer(freq_hz: u32) void {
         :
         : [val] "r" (@as(u64, 1)),
     );
-
-    // Debug: verify timer is enabled
-    var ctl: u64 = 0;
-    asm volatile ("mrs %[ret], cntv_ctl_el0"
-        : [ret] "=r" (ctl),
-    );
-    console.debug("Timing: CNTV_CTL_EL0 = {x} (ENABLE={d}, IMASK={d}, ISTATUS={d})", .{
-        ctl,
-        ctl & 1,
-        (ctl >> 1) & 1,
-        (ctl >> 2) & 1,
-    });
 }
 
 /// Re-arm the timer for the next interval

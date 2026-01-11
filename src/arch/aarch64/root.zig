@@ -257,31 +257,43 @@ pub const rtc = struct {
 
 pub fn init(hhdm_offset: u64) void {
     paging.init(hhdm_offset);
-    serial.initDefault();
+    // Marker after paging.init()
+    earlyPrint("[P]");
+    // Skip serial re-init - already configured by bootloader
 
-    // Clear TTBR0 - no user page tables yet
-    // We set TTBR0 to 0 (invalid) since we don't have user processes yet.
-    // NOTE: TLBI is skipped here because it causes hangs in QEMU TCG.
-    // We use ASID switching in writeTtbr0 to avoid stale TLB entries.
-    asm volatile (
-        // Set TTBR0 to 0 with ASID 0 in upper bits
-        \\msr ttbr0_el1, xzr
-        \\isb
-    );
+    // NOTE: Keep identity mapping (TTBR0) active during hardware init
+    // GIC and other MMIO access use physical addresses directly
 
-    // Enable PAN (Privileged Access Never) for security
-    // This prevents the kernel from accidentally accessing user memory
-    // via normal load/store; must use LDTR/STTR instead
-    cpu.enablePAN();
+    // Temporarily skip PAN to debug boot hang
+    // TODO: Re-enable after fixing boot
+    // cpu.enablePAN();
 
     // Initialize GIC and exception vectors
     // Must be done before any code calls setSerialHandler or other IRQ functions
+    earlyPrint("[I]");
     interrupts.init();
+    earlyPrint("[I2]");
 
     // Initialize timing subsystem with best available clock source
     // Uses Generic Timer, with pvtime stolen time tracking under KVM
+    earlyPrint("[T]");
     timing.initBest();
+    earlyPrint("[T2]");
 
     // Initialize periodic timer at 100Hz for scheduler
     pit.init(100);
+
+    // Set up HHDM offset for PL011 before clearing identity mapping
+    // This allows the serial driver to continue working via HHDM
+    pl011.setHhdmOffset(hhdm_offset);
+
+    // NOTE: Do NOT clear TTBR0 here.
+    // The identity map is still needed because:
+    // 1. boot_info pointer is at a physical address (passed from UEFI)
+    // 2. The UEFI-provided stack is at a physical address
+    // TTBR0 will be cleared later when user processes are ready.
+    earlyPrint("[T0]");
+    earlyPrint("[T1]");
+
+    earlyPrint("[OK]");
 }

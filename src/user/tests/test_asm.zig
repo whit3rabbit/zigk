@@ -16,6 +16,7 @@ const message = "Hello\n";
 export fn _start() callconv(.naked) noreturn {
     switch (builtin.cpu.arch) {
         .x86_64 => {
+            // Note: Use message (the pointer) not &message (address of the pointer variable)
             asm volatile (
                 \\    mov $1, %%rax
                 \\    mov $1, %%rdi
@@ -25,10 +26,11 @@ export fn _start() callconv(.naked) noreturn {
                 \\    xor %%rdi, %%rdi
                 \\    syscall
                 :
-                : [msg] "{rsi}" (&message)
+                : [msg] "{rsi}" (message)
             );
         },
         .aarch64 => {
+            // Note: Use message (the pointer) not &message (address of the pointer variable)
             asm volatile (
                 \\    mov x8, #64 // sys_write
                 \\    mov x0, #1  // stdout
@@ -38,7 +40,7 @@ export fn _start() callconv(.naked) noreturn {
                 \\    mov x0, #0
                 \\    svc #0
                 :
-                : [msg] "{x1}" (&message)
+                : [msg] "{x1}" (message)
             );
         },
         else => @compileError("Unsupported architecture"),

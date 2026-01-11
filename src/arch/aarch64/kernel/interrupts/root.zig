@@ -95,7 +95,8 @@ const UART_SPI = 33; // PL011 UART (SPI 1, +32 = 33)
 
 pub fn earlyPrint(msg: []const u8) void {
     const pl011 = @import("serial");
-    pl011.writeString(msg);
+    // Use panic-safe version to bypass spinlock during early boot
+    pl011.writeStringPanic(msg);
 }
 
 pub fn printHex(val: u64) void {
@@ -193,8 +194,6 @@ pub export fn handle_exception_zig(frame: *syscall.SyscallFrame, esr: u64, far: 
 
     switch (ec) {
         .svc_aa64 => {
-            // Debug: print 'S' for each syscall
-            earlyPrint("S");
             // SVC instruction - dispatch to syscall handler
             // The dispatch_syscall function reads syscall number from x8,
             // arguments from x0-x5, and sets return value in x0
@@ -307,8 +306,11 @@ pub export fn handle_irq_zig(frame: *InterruptFrame) callconv(.c) u64 {
 // ============================================================================
 
 pub fn init() void {
+    earlyPrint("I0");
+    earlyPrint("I@");
     // Initialize GIC (Distributor + CPU Interface)
     gic.init();
+    earlyPrint("I1");
 
     // Set up VBAR_EL1 to point to our exception vector table
     const vbar = @intFromPtr(&exception_vector_table);

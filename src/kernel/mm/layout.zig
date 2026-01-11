@@ -13,6 +13,7 @@
 const std = @import("std");
 const BootInfo = @import("boot_info");
 const console = @import("console");
+const hal = @import("hal");
 
 // Default base addresses (before KASLR randomization)
 // These are used as fallbacks if KASLR offsets are zero
