@@ -88,6 +88,16 @@ pub const Controller = struct {
     /// Ring the doorbell for a specific slot and target
     /// Target: 0=Command Ring, 1=EP0, 2..31=EPs (DCI)
     pub fn ringDoorbell(self: *Self, slot_id: u8, target: u8) void {
+        const builtin = @import("builtin");
+
+        // Memory barrier to ensure TRB writes are visible to hardware before doorbell
+        // Critical on aarch64 where memory ordering is weaker than x86
+        if (builtin.cpu.arch == .aarch64) {
+            asm volatile ("dsb sy" ::: "memory");
+        } else {
+            asm volatile ("" ::: "memory");
+        }
+
         const db_base = self.doorbell_base + (@as(u64, slot_id) * @sizeOf(u32));
         // Write to doorbell register directly
         const ptr = @as(*volatile u32, @ptrFromInt(db_base));

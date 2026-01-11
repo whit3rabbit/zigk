@@ -102,8 +102,13 @@ pub fn sys_putchar(c: usize) SyscallError!usize {
 }
 
 /// sys_getchar (1004) - Read single character from keyboard (blocking)
+/// On aarch64, USB keyboards require explicit polling since MSI-X is not available.
 pub fn sys_getchar() SyscallError!usize {
     while (true) {
+        // Poll USB events to process any pending HID keyboard reports.
+        // This is essential on aarch64 where MSI-X interrupts don't work.
+        _ = usb.xhci.pollEvents();
+
         if (keyboard.getChar()) |c| {
             return c;
         }

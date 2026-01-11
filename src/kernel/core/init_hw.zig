@@ -450,6 +450,24 @@ pub fn initUsb() void {
     };
 
     usb.initFromPci(devices, pci.PciAccess{ .ecam = ecam });
+
+    // On aarch64, MSI-X interrupts don't work (LAPIC is x86-specific).
+    // Register a tick callback to poll XHCI events periodically.
+    // This is essential for USB keyboard input to work on aarch64.
+    if (builtin.cpu.arch == .aarch64) {
+        if (usb.xhci.getController()) |ctrl| {
+            if (ctrl.msix_vectors == null) {
+                // In polling mode - register tick callback
+                sched.setTickCallback(usbPollTickCallback);
+                console.info("USB: Registered tick callback for aarch64 polling", .{});
+            }
+        }
+    }
+}
+
+/// Tick callback to poll USB events on aarch64 (where MSI-X is unavailable)
+fn usbPollTickCallback() void {
+    _ = usb.xhci.pollEvents();
 }
 
 /// Initialize Audio subsystem (VirtIO-Sound, HDA, AC97)

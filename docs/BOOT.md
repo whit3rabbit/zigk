@@ -552,32 +552,71 @@ Configures translation granule and address size for both TTBR0 and TTBR1:
 
 ### AArch64 Page Table Entry Format
 
-Unlike x86_64 where flags are directly in the PTE, AArch64 uses MAIR indirection:
+Unlike x86_64 where flags are directly in the PTE, AArch64 uses MAIR indirection for memory attributes. The page table entry is a 64-bit packed struct with specific bit positions:
 
+```text
+63  62 61 60 59 58 57 56 55 54 53 52 51 50 49 48 47          12 11 10 9  8  7  6  5  4  3  2  1  0
++---+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+-------------+--+--+----+--+-----+--+-----+--+--+
+|   |        Software       |UXN|PXN|Ct|DBM| Reserved |  Physical Address [47:12]   |nG|AF| SH |AP|NS| AttrIdx |Tbl|Val|
++---+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+-------------+--+--+----+--+-----+--+-----+--+--+
+```
+
+**Critical Bit Positions:**
+| Bits | Field | Description |
+|------|-------|-------------|
+| 0 | Valid | Entry is valid (1 = valid) |
+| 1 | Table | For L3: must be 1 for page descriptor |
+| 4:2 | AttrIndx | Index into MAIR_EL1 (0=Device, 1=Normal WB, 2=Normal NC) |
+| 5 | NS | Non-Secure (EL3/TrustZone only) |
+| 7:6 | AP | Access Permissions - see table below |
+| 9:8 | SH | Shareability (3 = Inner Shareable for SMP) |
+| 10 | AF | Access Flag - **must be set or hardware faults on first access** |
+| 11 | nG | Non-Global (set for user pages, cleared for kernel) |
+| 47:12 | OA | Physical address (output address) |
+| 50:48 | Reserved | Reserved bits (must be 0) |
+| 51 | DBM | Dirty Bit Modifier |
+| 52 | Contiguous | Contiguous hint for TLB |
+| 53 | PXN | Privileged Execute Never (kernel execution blocked if set) |
+| 54 | UXN | User Execute Never (user execution blocked if set) |
+| 63:55 | Software | Software-defined bits (used for VMM tracking) |
+
+**Access Permission (AP) Encoding:**
+| AP[1:0] | EL1 (Kernel) | EL0 (User) |
+|---------|--------------|------------|
+| 0b00 | Read/Write | No access |
+| 0b01 | Read/Write | Read/Write |
+| 0b10 | Read-only | No access |
+| 0b11 | Read-only | Read-only |
+
+**Page Entry Creation Pattern:**
 ```zig
-fn toRawAarch64(flags: PageFlags, phys_addr: u64) u64 {
-    var raw: u64 = 0x3;  // Valid + Page descriptor
-    if (flags.huge_page) raw = 0x1;  // Block descriptor
+pub fn pageEntry(phys_addr: u64, flags: anytype) PageTableEntry {
+    var entry = PageTableEntry{
+        .valid = true,
+        .table = true,  // Required for L3 page descriptor
+        .phys_addr_bits = @truncate(phys_addr >> 12),
+        .accessed = true,  // AF must be set
+        .shareability = 0b11,  // Inner Shareable for SMP
+        .attr_index = if (flags.cache_disable) 0 else 1,  // MAIR index
+    };
 
-    // AttrIndx = 1 for normal memory (bits [4:2])
-    raw |= (1 << 2);
+    // Set AP bits based on user/writable flags
+    if (flags.user) {
+        entry.ap = if (flags.writable) 0b01 else 0b11;
+    } else {
+        entry.ap = if (flags.writable) 0b00 else 0b10;
+    }
 
-    if (flags.no_execute) raw |= (1 << 54);  // UXN
-    if (!flags.writable) raw |= (1 << 7);    // AP[2] = read-only
-    if (flags.user) raw |= (1 << 6);         // AP[1] = EL0 accessible
+    // Execute permission: UXN/PXN control execution
+    entry.pxn = flags.no_execute;
+    entry.uxn = flags.no_execute;  // User can execute only if no_execute=false
+    entry.non_global = flags.user;
 
-    raw |= (1 << 10);  // AF (Access Flag) - required!
-    raw |= (3 << 8);   // SH = Inner Shareable
-
-    raw |= (phys_addr & 0x000F_FFFF_FFFF_F000);
-    return raw;
+    return entry;
 }
 ```
 
-**Critical Fields:**
-- **AttrIndx [4:2]**: Index into MAIR_EL1 (0=Device, 1=Normal WB, 2=Normal NC)
-- **AF [10]**: Access Flag - must be set or hardware faults on first access
-- **SH [9:8]**: Shareability (3 = Inner Shareable for SMP)
+**Warning - UXN Bit (Bit 54):** This bit controls whether user-mode (EL0) can execute code at the mapped address. If UXN=1, user execution is blocked and will cause an Instruction Abort. See troubleshooting section below for common issues.
 
 ### Loading Page Tables (AArch64)
 
@@ -647,6 +686,40 @@ raw |= (1 << 2);  // MAIR index 1
 raw |= (1 << 10);  // Access Flag
 ```
 
+#### User Process Instruction Abort (UXN Bug)
+
+**Symptom**: Instruction Abort at user entry point with ESR showing EC=0x20 or 0x21 (Instruction Abort from lower/same EL). Example: `Instruction Abort at 0x418c88 ESR=0x8200000f`.
+
+**Cause**: The UXN (User Execute Never) bit at position 54 is incorrectly set for user code pages. When UXN=1, user-mode (EL0) cannot execute instructions at that address. This commonly happens when:
+1. The PageTableEntry packed struct has incorrect bit positions
+2. A non-execute related field (e.g., `user_accessible`) is accidentally mapped to bit 54
+3. The page entry creation logic sets UXN when setting user permissions
+
+**Detection**:
+1. Check ESR_EL1 error code - Instruction Abort (EC=0x20/0x21) at a user address
+2. Dump the PTE for the faulting address and verify bit 54 is 0 for executable user pages
+3. Review the PageTableEntry packed struct to ensure correct bit assignments:
+   - Bit 53 should be PXN (Privileged Execute Never)
+   - Bit 54 should be UXN (User Execute Never)
+   - Bits 55+ are software-defined
+
+**Fix**: Ensure the PageTableEntry correctly separates UXN from other flags:
+```zig
+pub const PageTableEntry = packed struct(u64) {
+    // ... bits 0-52 ...
+    pxn: bool = false,           // Bit 53: Privileged Execute Never
+    uxn: bool = false,           // Bit 54: User Execute Never
+    user_accessible: bool = false, // Bit 55: Software flag (NOT hardware UXN!)
+    // ... remaining software bits ...
+};
+
+// When creating user code pages:
+entry.uxn = flags.no_execute;  // Only set if page should not be executable
+// Do NOT set entry.uxn = flags.user (this was the bug!)
+```
+
+**Key Insight**: The AP bits (6:7) control read/write permissions between EL0/EL1. The UXN bit (54) separately controls execution permission. Both must be correctly set for user code to run.
+
 #### OutOfMemory Errors During Boot
 
 **Symptom**: `error.OutOfMemory` during driver initialization (XHCI, VirtIO-GPU) or `Failed to setup user stack: error.OutOfMemory` despite having plenty of free pages (e.g., 80,000+ reported free).
@@ -682,6 +755,22 @@ search_hint = byte_idx;  // Update hint on success
 2. Verify `search_hint` is initialized based on `memory_start`
 3. Test allocation performance - each allocation should complete in 1-2 iterations, not thousands
 
+#### AArch64 USB Keyboard Support
+
+USB keyboards on AArch64 require software polling since MSI-X interrupts are not available (LAPIC stubs are used). Key implementation details:
+
+1. **Memory Barriers**: The XHCI driver includes a DSB (Data Synchronization Barrier) before doorbell writes to ensure TRB data is visible to hardware. This is critical on AArch64 where memory ordering is weaker than x86.
+
+2. **Polling**: Both `sys_getchar` and `sys_read_scancode` explicitly call `usb.xhci.pollEvents()` to process USB events.
+
+3. **Max ESIT Payload**: Periodic endpoint contexts (interrupt/isochronous) include the `max_esit_payload` field for XHCI bandwidth calculations.
+
+**Testing AArch64 Keyboard Input**:
+```bash
+zig build run -Darch=aarch64 -Ddefault-boot=shell
+```
+Click inside the QEMU window to capture keyboard focus.
+
 ### Key Files (AArch64)
 
 | File | Purpose |
@@ -690,3 +779,4 @@ search_hint = byte_idx;  // Update hint on success
 | `src/arch/aarch64/boot/entry.S` | Kernel entry point (`kentry`) |
 | `src/arch/aarch64/boot/linker.ld` | Kernel linker script with high-half layout |
 | `src/kernel/mm/pmm.zig` | PMM with search hint optimization for non-zero RAM bases |
+| `src/drivers/usb/xhci/types.zig` | XHCI controller with AArch64 memory barriers |

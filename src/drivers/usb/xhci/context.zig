@@ -253,16 +253,26 @@ pub const EndpointContext = extern struct {
         ctx.dw1.max_packet_size = max_packet_size;
         ctx.tr_dequeue_ptr.dcs = dcs;
         ctx.tr_dequeue_ptr.ptr = @truncate(tr_phys >> 4);
-        
+
         // Set average TRB length based on type
         switch (ep_type) {
             .control_bidirectional => ctx.dw4.average_trb_length = 8,
-            .interrupt_in, .interrupt_out => ctx.dw4.average_trb_length = max_packet_size,
+            .interrupt_in, .interrupt_out => {
+                ctx.dw4.average_trb_length = max_packet_size;
+                // For periodic endpoints, set max ESIT payload (required for bandwidth calc)
+                // USB 2.0 HS without bursting: max_esit_payload = max_packet_size
+                ctx.dw4.max_esit_payload_lo = max_packet_size;
+                ctx.dw0.max_esit_payload_hi = 0; // max_packet_size fits in 16 bits
+            },
             .bulk_in, .bulk_out => ctx.dw4.average_trb_length = 1024,
-            .isoch_in, .isoch_out => ctx.dw4.average_trb_length = max_packet_size, // simplified
+            .isoch_in, .isoch_out => {
+                ctx.dw4.average_trb_length = max_packet_size;
+                ctx.dw4.max_esit_payload_lo = max_packet_size;
+                ctx.dw0.max_esit_payload_hi = 0;
+            },
             else => ctx.dw4.average_trb_length = 8,
         }
-        
+
         return ctx;
     }
 

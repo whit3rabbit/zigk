@@ -126,7 +126,7 @@ pub const HidDriver = struct {
     fn handleKeyboardReport(self: *Self, data: []const u8) void {
         if (data.len < 8) {
             if (data.len != 0) {
-                console.debug("HID: Invalid keyboard report size: {} (expected 8)", .{data.len});
+                console.warn("HID: Invalid keyboard report size: {} (expected 8)", .{data.len});
             }
             return;
         }

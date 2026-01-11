@@ -107,7 +107,7 @@ qemu-system-x86_64 -M q35 -m 512M -cdrom zscapek.iso \
 
 ## MSI-X Polling Workaround
 
-On some platforms (notably macOS with TCG), XHCI MSI-X interrupts may not fire reliably. The kernel implements a software polling fallback:
+On some platforms (notably macOS with TCG and AArch64), XHCI MSI-X interrupts may not fire reliably. The kernel implements a software polling fallback:
 
 ```zig
 // In sys_read_scancode (src/kernel/sys/syscall/misc/custom.zig)
@@ -123,6 +123,21 @@ pub fn sys_read_scancode() SyscallError!usize {
 ```
 
 This ensures USB keyboard input works even without interrupt-driven event processing.
+
+### AArch64-Specific Considerations
+
+On AArch64, MSI-X is not available (LAPIC stubs), so USB input relies entirely on polling. The XHCI driver includes critical memory barriers for correct operation:
+
+1. **DSB barrier before doorbell writes** - Ensures TRB data is visible to hardware before signaling. Without this, the XHCI controller may read stale ring buffer entries.
+
+2. **Both `sys_getchar` and `sys_read_scancode` poll USB events** - The blocking `sys_getchar` polls USB on each iteration to ensure keyboard input is processed.
+
+```zig
+// In types.zig - ringDoorbell()
+if (builtin.cpu.arch == .aarch64) {
+    asm volatile ("dsb sy" ::: "memory");  // Data Synchronization Barrier
+}
+```
 
 ## Scancode Format
 

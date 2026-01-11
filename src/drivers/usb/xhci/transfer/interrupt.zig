@@ -1,4 +1,5 @@
 const std = @import("std");
+const console = @import("console");
 const io = @import("io");
 
 const types = @import("../types.zig");
@@ -62,7 +63,10 @@ pub fn queueInterruptTransferForDci(
         int_ring.getCycleState(),
     );
 
-    _ = int_ring.enqueueSingle(normal.asTrb().*) orelse return error.RingFull;
+    _ = int_ring.enqueueSingle(normal.asTrb().*) orelse {
+        console.warn("XHCI: Interrupt ring full for slot {} DCI {}", .{ dev.slot_id, dci });
+        return error.RingFull;
+    };
 
     // Ring doorbell for this specific DCI
     ctrl.ringDoorbell(dev.slot_id, dci);

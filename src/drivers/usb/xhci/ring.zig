@@ -11,6 +11,9 @@
 //
 // Reference: xHCI Specification 1.2, Chapter 4.9
 
+const std = @import("std");
+const builtin = @import("builtin");
+
 const trb = @import("trb.zig");
 const Trb = trb.Trb;
 const TrbType = trb.TrbType;
@@ -233,7 +236,19 @@ pub const ConsumerRing = struct {
 
     /// Check if there's a pending event to process
     /// Security: Returns false if ring state is corrupted
+    /// Note: Uses memory barrier on aarch64 to ensure CPU sees hardware's writes
     pub fn hasPending(self: *const Self) bool {
+        // Memory barrier to ensure we see hardware's writes to Event Ring.
+        // On aarch64, DSB (Data Synchronization Barrier) ensures all prior
+        // memory accesses complete before we read the TRB cycle bit.
+        // On x86_64, PCIe snooping handles this automatically, but we still
+        // use a compiler barrier to prevent reordering.
+        if (builtin.cpu.arch == .aarch64) {
+            asm volatile ("dsb sy" ::: "memory");
+        } else {
+            asm volatile ("" ::: "memory");
+        }
+
         // Security: Validate bounds before accessing trbs array
         if (self.dequeue_idx >= self.size or self.dequeue_idx >= DEFAULT_RING_SIZE) {
             return false;
