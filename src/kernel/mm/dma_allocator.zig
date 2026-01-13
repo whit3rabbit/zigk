@@ -84,11 +84,22 @@ const sync = if (is_freestanding) @import("sync") else struct {
     };
 };
 
-fn getTracking() *std.AutoHashMap(usize, PhysAlloc) {
+/// Initialize the tracking hashmap.
+/// Called during kernel init to catch allocation failures early.
+pub fn initTracking() void {
+    const held = dma_lock.acquire();
+    defer held.release();
+
     if (allocations == null) {
         allocations = std.AutoHashMap(usize, PhysAlloc).init(heap.allocator());
     }
-    return &allocations.?;
+}
+
+fn getTracking() ?*std.AutoHashMap(usize, PhysAlloc) {
+    if (allocations == null) {
+        allocations = std.AutoHashMap(usize, PhysAlloc).init(heap.allocator());
+    }
+    return if (allocations != null) &allocations.? else null;
 }
 
 /// DMA Allocator struct for instance-based usage
@@ -119,7 +130,7 @@ pub const DmaAllocator = struct {
         const held = dma_lock.acquire();
         defer held.release();
 
-        const tracking = getTracking();
+        const tracking = getTracking() orelse return null;
         if (tracking.get(virt_addr)) |alloc| {
             return alloc.phys;
         }
@@ -163,7 +174,7 @@ pub const DmaAllocator = struct {
             const held = dma_lock.acquire();
             defer held.release();
 
-            const tracking = getTracking();
+            const tracking = getTracking() orelse break :blk false;
             tracking.put(virt_addr, .{ .phys = phys, .pages = pages }) catch {
                 break :blk false;
             };
@@ -196,7 +207,7 @@ pub const DmaAllocator = struct {
             const held = dma_lock.acquire();
             defer held.release();
 
-            const tracking = getTracking();
+            const tracking = getTracking() orelse break :blk null;
             break :blk tracking.fetchRemove(virt_addr);
         };
 

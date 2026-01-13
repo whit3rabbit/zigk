@@ -95,6 +95,10 @@ var csprng_index: usize = 64;
 var entropy_pool: [4]u64 = .{ 0, 0, 0, 0 };
 var pool_counter: u64 = 0;
 
+/// Tracks whether CSPRNG was seeded with high-quality hardware entropy.
+/// Set during init(), used by ASLR to enforce fail-secure policy.
+var entropy_high_quality: bool = false;
+
 pub fn init() void {
     const held = lock.acquire();
     defer held.release();
@@ -126,6 +130,9 @@ pub fn init() void {
     nonce = std.mem.bytesAsValue([3]u32, seed_buf[32..44]).*;
 
     global_csprng = ChaCha20State.init(key, nonce);
+
+    // Store entropy quality for security-critical callers (ASLR, etc.)
+    entropy_high_quality = high_quality;
 
     if (high_quality) {
         console.info("Entropy: CSPRNG initialized with hardware entropy", .{});
@@ -181,4 +188,14 @@ pub fn mixEntropy(val: u64) void {
         }
         csprng_index = 64;
     }
+}
+
+/// Check if CSPRNG is using weak (timing-based) entropy.
+/// Used by ASLR to enforce fail-secure policy per CLAUDE.md:
+/// "Security-critical dependencies must not silently degrade."
+///
+/// Returns true if only TSC/timing-based entropy was available at init.
+/// Returns false if hardware entropy (RDRAND/RDSEED/FEAT_RNG) was used.
+pub fn isEntropyWeak() bool {
+    return !entropy_high_quality;
 }

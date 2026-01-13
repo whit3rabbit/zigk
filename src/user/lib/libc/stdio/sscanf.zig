@@ -180,10 +180,14 @@ fn sscanf_core(str: [*:0]const u8, fmt: [*:0]const u8, ap: *VaList) c_int {
                         if (ptr) |p| p.* = value;
                     } else if (is_short) {
                         const ptr = ap.arg(?*i16);
-                        if (ptr) |p| p.* = @intCast(value);
+                        // SECURITY: Saturate to i16 range to prevent UB from @intCast
+                        const clamped = std.math.clamp(value, std.math.minInt(i16), std.math.maxInt(i16));
+                        if (ptr) |p| p.* = @intCast(clamped);
                     } else {
                         const ptr = ap.arg(?*i32);
-                        if (ptr) |p| p.* = @intCast(value);
+                        // SECURITY: Saturate to i32 range to prevent UB from @intCast
+                        const clamped = std.math.clamp(value, std.math.minInt(i32), std.math.maxInt(i32));
+                        if (ptr) |p| p.* = @intCast(clamped);
                     }
                     matched += 1;
                 }
@@ -206,7 +210,9 @@ fn sscanf_core(str: [*:0]const u8, fmt: [*:0]const u8, ap: *VaList) c_int {
                         if (ptr) |p| p.* = value;
                     } else {
                         const ptr = ap.arg(?*u32);
-                        if (ptr) |p| p.* = @intCast(value);
+                        // SECURITY: Saturate to u32 range to prevent UB from @intCast
+                        const clamped = @min(value, std.math.maxInt(u32));
+                        if (ptr) |p| p.* = @intCast(clamped);
                     }
                     matched += 1;
                 }
@@ -232,7 +238,9 @@ fn sscanf_core(str: [*:0]const u8, fmt: [*:0]const u8, ap: *VaList) c_int {
                         if (ptr) |p| p.* = value;
                     } else {
                         const ptr = ap.arg(?*u32);
-                        if (ptr) |p| p.* = @intCast(value);
+                        // SECURITY: Saturate to u32 range to prevent UB from @intCast
+                        const clamped = @min(value, std.math.maxInt(u32));
+                        if (ptr) |p| p.* = @intCast(clamped);
                     }
                     matched += 1;
                 }
@@ -503,10 +511,14 @@ fn fscanf_core(stream: *FILE, fmt: [*:0]const u8, ap: *VaList) c_int {
                         if (ptr) |p| p.* = value;
                     } else if (is_short) {
                         const ptr = ap.arg(?*i16);
-                        if (ptr) |p| p.* = @intCast(value);
+                        // SECURITY: Saturate to i16 range to prevent UB from @intCast
+                        const clamped = std.math.clamp(value, std.math.minInt(i16), std.math.maxInt(i16));
+                        if (ptr) |p| p.* = @intCast(clamped);
                     } else {
                         const ptr = ap.arg(?*i32);
-                        if (ptr) |p| p.* = @intCast(value);
+                        // SECURITY: Saturate to i32 range to prevent UB from @intCast
+                        const clamped = std.math.clamp(value, std.math.minInt(i32), std.math.maxInt(i32));
+                        if (ptr) |p| p.* = @intCast(clamped);
                     }
                     matched += 1;
                 }
@@ -542,7 +554,9 @@ fn fscanf_core(stream: *FILE, fmt: [*:0]const u8, ap: *VaList) c_int {
                         if (ptr) |p| p.* = value;
                     } else {
                         const ptr = ap.arg(?*u32);
-                        if (ptr) |p| p.* = @intCast(value);
+                        // SECURITY: Saturate to u32 range to prevent UB from @intCast
+                        const clamped = @min(value, std.math.maxInt(u32));
+                        if (ptr) |p| p.* = @intCast(clamped);
                     }
                     matched += 1;
                 }
@@ -594,7 +608,9 @@ fn fscanf_core(stream: *FILE, fmt: [*:0]const u8, ap: *VaList) c_int {
                         if (ptr) |p| p.* = value;
                     } else {
                         const ptr = ap.arg(?*u32);
-                        if (ptr) |p| p.* = @intCast(value);
+                        // SECURITY: Saturate to u32 range to prevent UB from @intCast
+                        const clamped = @min(value, std.math.maxInt(u32));
+                        if (ptr) |p| p.* = @intCast(clamped);
                     }
                     matched += 1;
                 }
@@ -819,13 +835,19 @@ fn sscanf_cva(str: [*:0]const u8, fmt: [*:0]const u8, args: anytype) c_int {
                 if (!suppress) {
                     if (is_long) {
                         const ptr = @cVaArg(args, ?*c_long);
-                        if (ptr) |p| p.* = @intCast(value);
+                        // SECURITY: Saturate to c_long range to prevent UB from @intCast
+                        const clamped = std.math.clamp(value, std.math.minInt(c_long), std.math.maxInt(c_long));
+                        if (ptr) |p| p.* = @intCast(clamped);
                     } else if (is_short) {
                         const ptr = @cVaArg(args, ?*c_short);
-                        if (ptr) |p| p.* = @intCast(value);
+                        // SECURITY: Saturate to c_short range to prevent UB from @intCast
+                        const clamped = std.math.clamp(value, std.math.minInt(c_short), std.math.maxInt(c_short));
+                        if (ptr) |p| p.* = @intCast(clamped);
                     } else {
                         const ptr = @cVaArg(args, ?*c_int);
-                        if (ptr) |p| p.* = @intCast(value);
+                        // SECURITY: Saturate to c_int range to prevent UB from @intCast
+                        const clamped = std.math.clamp(value, std.math.minInt(c_int), std.math.maxInt(c_int));
+                        if (ptr) |p| p.* = @intCast(clamped);
                     }
                     matched += 1;
                 }
@@ -845,10 +867,14 @@ fn sscanf_cva(str: [*:0]const u8, fmt: [*:0]const u8, args: anytype) c_int {
                 if (!suppress) {
                     if (is_long) {
                         const ptr = @cVaArg(args, ?*c_ulong);
-                        if (ptr) |p| p.* = @intCast(value);
+                        // SECURITY: Saturate to c_ulong range to prevent UB from @intCast
+                        const clamped = @min(value, std.math.maxInt(c_ulong));
+                        if (ptr) |p| p.* = @intCast(clamped);
                     } else {
                         const ptr = @cVaArg(args, ?*c_uint);
-                        if (ptr) |p| p.* = @intCast(value);
+                        // SECURITY: Saturate to c_uint range to prevent UB from @intCast
+                        const clamped = @min(value, std.math.maxInt(c_uint));
+                        if (ptr) |p| p.* = @intCast(clamped);
                     }
                     matched += 1;
                 }
@@ -871,10 +897,14 @@ fn sscanf_cva(str: [*:0]const u8, fmt: [*:0]const u8, args: anytype) c_int {
                 if (!suppress) {
                     if (is_long) {
                         const ptr = @cVaArg(args, ?*c_ulong);
-                        if (ptr) |p| p.* = @intCast(value);
+                        // SECURITY: Saturate to c_ulong range to prevent UB from @intCast
+                        const clamped = @min(value, std.math.maxInt(c_ulong));
+                        if (ptr) |p| p.* = @intCast(clamped);
                     } else {
                         const ptr = @cVaArg(args, ?*c_uint);
-                        if (ptr) |p| p.* = @intCast(value);
+                        // SECURITY: Saturate to c_uint range to prevent UB from @intCast
+                        const clamped = @min(value, std.math.maxInt(c_uint));
+                        if (ptr) |p| p.* = @intCast(clamped);
                     }
                     matched += 1;
                 }

@@ -113,8 +113,7 @@ pub fn generateOffsets() AslrError!AslrOffsets {
     // SECURITY: Fail-secure per CLAUDE.md policy.
     // If entropy source is weak, refuse to generate ASLR offsets.
     // This prevents spawning processes with predictable memory layouts.
-    // (Future: random module will track this quality)
-    // if (random.isEntropyWeak()) return error.WeakEntropy;
+    if (random.isEntropyWeak()) return error.WeakEntropy;
 
     // Generate random values using kernel random module (CSPRNG)
     offsets.stack_offset = @truncate(random.getU64() % (Config.STACK_MAX_OFFSET + 1));
@@ -171,6 +170,5 @@ pub fn logOffsets(offsets: *const AslrOffsets, pid: u32) void {
 
 /// Check if PRNG is using fallback seed (weak entropy warning)
 pub fn isEntropyWeak() bool {
-    // return random.isEntropyWeak();
-    return false; // placeholder for now
+    return random.isEntropyWeak();
 }

@@ -75,11 +75,13 @@ pub const VaList = struct {
     ptr: [*]u8,
 
     /// Create VaList from raw va_list pointer
+    /// SECURITY: Panics if raw is null - this indicates a programming error
+    /// where a varargs function was called with a null va_list pointer.
     pub fn from(raw: ?*anyopaque) VaList {
         if (raw) |r| {
             return .{ .ptr = @ptrCast(r) };
         } else {
-            return .{ .ptr = undefined };
+            @panic("VaList.from: null va_list pointer - programming error");
         }
     }
 

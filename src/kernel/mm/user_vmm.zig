@@ -152,6 +152,16 @@ pub const UserVmm = struct {
     /// mprotect and page faults.
     lock: sync.RwLock = .{},
 
+    /// Safely subtract from total_mapped with underflow protection.
+    /// Saturates to 0 instead of wrapping.
+    inline fn subTotalMapped(self: *UserVmm, size: usize) void {
+        if (self.total_mapped >= size) {
+            self.total_mapped -= size;
+        } else {
+            self.total_mapped = 0;
+        }
+    }
+
     /// Initialize a new UserVmm with a fresh address space (default mmap base)
     pub fn init() !*UserVmm {
         return initWithMmapBase(USER_MMAP_START);
@@ -340,7 +350,7 @@ pub const UserVmm = struct {
                     // Full overlap: remove entire VMA
                     self.freeVmaPages(v);
                     self.removeVma(v);
-                    self.total_mapped -= v.size();
+                    self.subTotalMapped(v.size());
 
                     const alloc = heap.allocator();
                     alloc.destroy(v);
@@ -348,13 +358,13 @@ pub const UserVmm = struct {
                     // Partial from start: shrink VMA
                     const unmap_end = @min(end_addr, v.end);
                     self.unmapRange(v.start, @intCast(unmap_end - v.start));
-                    self.total_mapped -= @intCast(unmap_end - v.start);
+                    self.subTotalMapped(@intCast(unmap_end - v.start));
                     v.start = unmap_end;
                 } else if (end_addr >= v.end) {
                     // Partial from end: shrink VMA
                     const unmap_start = @max(addr, v.start);
                     self.unmapRange(unmap_start, @intCast(v.end - unmap_start));
-                    self.total_mapped -= @intCast(v.end - unmap_start);
+                    self.subTotalMapped(@intCast(v.end - unmap_start));
                     v.end = unmap_start;
                 } else {
                     // Hole in middle: split VMA
@@ -365,7 +375,7 @@ pub const UserVmm = struct {
 
                     // Unmap the middle portion
                     self.unmapRange(addr, aligned_len);
-                    self.total_mapped -= aligned_len;
+                    self.subTotalMapped(aligned_len);
 
                     // Shrink existing VMA to be the left part
                     v.end = addr;
@@ -598,11 +608,7 @@ pub const UserVmm = struct {
             }
         }
 
-        if (self.total_mapped >= size) {
-            self.total_mapped -= size;
-        } else {
-            self.total_mapped = 0;
-        }
+        self.subTotalMapped(size);
     }
 
     // =========================================================================

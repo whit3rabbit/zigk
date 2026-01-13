@@ -62,21 +62,27 @@ fn printf_core(fmt_str: [*:0]const u8, ap: *VaList) c_int {
                 else => break,
             };
 
-            // Width
+            // SECURITY: Cap width to prevent integer overflow
+            const MAX_WIDTH: usize = 4095;
             var width: usize = 0;
             while (fmt_ptr[0] >= '0' and fmt_ptr[0] <= '9') {
-                width = width * 10 + (fmt_ptr[0] - '0');
+                const digit = fmt_ptr[0] - '0';
+                width = @min(std.math.mul(usize, width, 10) catch MAX_WIDTH, MAX_WIDTH);
+                width = @min(std.math.add(usize, width, digit) catch MAX_WIDTH, MAX_WIDTH);
                 fmt_ptr += 1;
             }
 
-            // Precision
+            // SECURITY: Cap precision to prevent integer overflow
+            const MAX_PRECISION: usize = 4095;
             var precision: usize = 0;
             var has_precision = false;
             if (fmt_ptr[0] == '.') {
                 has_precision = true;
                 fmt_ptr += 1;
                 while (fmt_ptr[0] >= '0' and fmt_ptr[0] <= '9') {
-                    precision = precision * 10 + (fmt_ptr[0] - '0');
+                    const p_digit = fmt_ptr[0] - '0';
+                    precision = @min(std.math.mul(usize, precision, 10) catch MAX_PRECISION, MAX_PRECISION);
+                    precision = @min(std.math.add(usize, precision, p_digit) catch MAX_PRECISION, MAX_PRECISION);
                     fmt_ptr += 1;
                 }
             }
@@ -331,21 +337,27 @@ fn printf_cva(fmt_str: [*:0]const u8, args: anytype) c_int {
                 else => break,
             };
 
-            // Width
+            // SECURITY: Cap width to prevent integer overflow
+            const MAX_WIDTH: usize = 4095;
             var width: usize = 0;
             while (fmt_ptr[0] >= '0' and fmt_ptr[0] <= '9') {
-                width = width * 10 + (fmt_ptr[0] - '0');
+                const digit = fmt_ptr[0] - '0';
+                width = @min(std.math.mul(usize, width, 10) catch MAX_WIDTH, MAX_WIDTH);
+                width = @min(std.math.add(usize, width, digit) catch MAX_WIDTH, MAX_WIDTH);
                 fmt_ptr += 1;
             }
 
-            // Precision
+            // SECURITY: Cap precision to prevent integer overflow
+            const MAX_PRECISION: usize = 4095;
             var precision: usize = 0;
             var has_precision = false;
             if (fmt_ptr[0] == '.') {
                 has_precision = true;
                 fmt_ptr += 1;
                 while (fmt_ptr[0] >= '0' and fmt_ptr[0] <= '9') {
-                    precision = precision * 10 + (fmt_ptr[0] - '0');
+                    const p_digit = fmt_ptr[0] - '0';
+                    precision = @min(std.math.mul(usize, precision, 10) catch MAX_PRECISION, MAX_PRECISION);
+                    precision = @min(std.math.add(usize, precision, p_digit) catch MAX_PRECISION, MAX_PRECISION);
                     fmt_ptr += 1;
                 }
             }

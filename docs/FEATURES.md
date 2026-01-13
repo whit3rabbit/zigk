@@ -178,6 +178,8 @@ This checklist covers the features found in the core kernel logic, memory manage
 *   **ChaCha20 CSPRNG**: High-performance cryptographic random number generator (RFC 8439) with entropy pooling and periodic hardware re-seeding.
 
 ### Memory Management
+*   **Architecture-Aware Kernel Stacks**: Per-thread kernel stacks with architecture-specific sizing (32KB for x86_64, 64KB for AArch64) to compensate for AArch64's 2.25x larger SyscallFrame (288 bytes vs 128 bytes due to 31 GPRs).
+*   **Security-Hardened Stack Allocator**: Kernel stack allocator (`kernel_stack.zig`) with comprehensive overflow protection: checked arithmetic on all address calculations, guard page unmap failure detection, stack_region_base kernel space validation, double-free detection with Debug-mode panic, and descriptor field validation on free.
 *   **IOMMU Domain Manager**: Infrastructure for per-device DMA isolation using IOVA spaces. Domain allocation and IOVA management implemented; per-device driver integration in progress.
 *   **Bitmap PMM with Refcounts**: Physical memory manager using a bit-array for speed and a 16-bit refcount array to support future Copy-on-Write and shared memory features.
 *   **Multi-Region ASLR**: Per-process address layout randomization for the stack, heap, PIE base, mmap region, and TLS, providing defense against ROP attacks.
@@ -566,6 +568,34 @@ This roadmap was generated from a comprehensive feature validation on 2024-12-30
   - Automatic KVM detection via hypervisor probing
   - Integration with timing.zig (initBest() enables pvtime under KVM)
   - Stolen time tracking for accurate CPU accounting under VM preemption
+
+**Implemented 2026-01-12/13:**
+- **Kernel Stack Security Hardening** (`src/kernel/mm/kernel_stack.zig`):
+  - Architecture-aware stack sizing: AArch64 gets 64KB (16 pages) vs x86_64's 32KB (8 pages) to compensate for larger SyscallFrame
+  - Checked arithmetic on all address calculations using `std.math.add/mul` to prevent integer overflow
+  - Guard page unmap failure now returns error instead of silently continuing (prevents guard bypass)
+  - stack_region_base validation: must be in kernel space and not overflow address space
+  - Descriptor validation in free(): verifies stack_base matches expected address for slot
+  - Initialization race fix: moved `initialized` check inside spinlock
+  - Bitmap bounds assertions with `std.debug.assert`
+  - Changed `@intCast` to `@truncate` for bit index calculation
+  - Comptime validation of constants for overflow safety
+  - Added MEMORY.md documentation
+- **ASLR Fail-Secure Entropy Enforcement** (`src/kernel/core/random.zig`, `src/kernel/mm/aslr.zig`):
+  - Added `isEntropyWeak()` API to random module tracking whether CSPRNG was seeded with hardware entropy
+  - ASLR now returns `WeakEntropy` error if only timing-based entropy available at init
+  - Prevents spawning processes with predictable memory layouts under degraded security
+- **DMA Allocator Robustness** (`src/kernel/mm/dma_allocator.zig`):
+  - Added `initTracking()` for early initialization during kernel boot
+  - `getTracking()` now returns optional, handling allocation failure gracefully
+- **User VMM Underflow Protection** (`src/kernel/mm/user_vmm.zig`):
+  - Added `subTotalMapped()` helper with saturating arithmetic to prevent underflow
+- **Libc Security Hardening** (`src/user/lib/libc/`):
+  - Zero-initialized buffers in printf/fprintf/snprintf to prevent stack data leaks on partial writes
+  - Checked arithmetic on width/precision parsing with MAX_WIDTH/MAX_PRECISION caps (4095)
+  - Saturating casts in sscanf to prevent undefined behavior from @intCast overflow
+  - VaList.from() now panics on null instead of using undefined (x86_64, aarch64)
+  - Added sprintf security warning comment (inherently unsafe, use snprintf)
 
 **Implemented 2026-01-07:**
 - **Secure Page Free Ordering**: Fixed TLB race information leakage (`src/kernel/mm/user_vmm.zig`)
