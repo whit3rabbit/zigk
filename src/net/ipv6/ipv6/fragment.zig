@@ -238,12 +238,20 @@ pub fn processFragment(
                 e.used = false;
                 return null;
             };
+            // SECURITY: Zero-initialize for defense-in-depth per CLAUDE.md.
+            // Although hole tracking prevents returning incomplete packets,
+            // zero-init guards against potential bugs in hole management.
+            @memset(e.buffer, 0);
         } else {
+            // Reallocation
+            const old_len = e.buffer.len;
             const new_buf = net_pool.reallocReassemblyBuffer(e.buffer, new_len) orelse {
                 e.used = false;
                 e.deinit();
                 return null;
             };
+            // SECURITY: Zero the newly allocated portion for defense-in-depth.
+            @memset(new_buf[old_len..], 0);
             e.buffer = new_buf;
         }
     }

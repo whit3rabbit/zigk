@@ -44,9 +44,13 @@ pub fn disableInterrupts() void {
     asm volatile ("msr daifset, #2");
 }
 
-pub fn enableAndHalt() noreturn {
+/// Atomically enable interrupts and halt until next interrupt
+/// Used for yield: enables interrupts, waits for one interrupt, then returns
+/// This matches x86_64's "sti; hlt" behavior
+pub inline fn enableAndHalt() void {
     enableInterrupts();
-    halt();
+    asm volatile ("wfi");
+    // Returns after interrupt is handled
 }
 
 // SECURITY NOTE: Throughout this file, `undefined` used for ASM output operands

@@ -78,7 +78,6 @@ pub fn processEvents(ctrl: *Controller) usize {
                 const ep_dci = evt.control.ep_id;
                 const code = evt.status.completion_code;
                 const len = evt.status.trb_transfer_length;
-
                 // Security: Validate slot_id from hardware before any lookup
                 // slot_id 0 is reserved for host controller, 1-255 are valid device slots
                 if (slot_id == 0 or slot_id > ctrl.max_slots) {

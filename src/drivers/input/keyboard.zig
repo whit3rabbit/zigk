@@ -104,6 +104,11 @@ pub var irq_count: u32 = 0;
 
 /// Inject a scancode from an external source (e.g., USB HID driver)
 pub fn injectScancode(scancode: u8) void {
+    // Check initialization - translator needs valid layout
+    if (!keyboard_initialized) {
+        console.warn("KB: injectScancode(0x{x}) called before init!", .{scancode});
+        return;
+    }
     const flags = hal.cpu.disableInterruptsSaveFlags();
     const held = keyboard_lock.acquire();
 
@@ -127,6 +132,23 @@ pub fn injectScancode(scancode: u8) void {
 
     held.release();
     hal.cpu.restoreInterrupts(flags);
+}
+
+/// Initialize keyboard state for USB HID keyboards (no PS/2 controller setup)
+/// Call this when a USB keyboard is detected to enable scancode injection.
+pub fn initForUsb() void {
+    if (keyboard_initialized) {
+        return;
+    }
+
+    console.info("Keyboard: initializing for USB HID", .{});
+
+    // Reset keyboard state (initializes translator with US layout)
+    keyboard_state = KeyboardState.init();
+    error_stats = .{};
+
+    keyboard_initialized = true;
+    console.info("Keyboard: USB HID ready", .{});
 }
 
 /// Initialize the keyboard driver with proper PS/2 controller setup

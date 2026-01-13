@@ -765,11 +765,49 @@ USB keyboards on AArch64 require software polling since MSI-X interrupts are not
 
 3. **Max ESIT Payload**: Periodic endpoint contexts (interrupt/isochronous) include the `max_esit_payload` field for XHCI bandwidth calculations.
 
+4. **enableAndHalt() Must Return**: The `hal.cpu.enableAndHalt()` function must return `void`, not `noreturn`. This is critical for the scheduler's `yield()` function to work correctly. On x86_64, `sti; hlt` waits for one interrupt then continues. On AArch64, `wfi` (Wait For Interrupt) has the same behavior. If `enableAndHalt()` is incorrectly implemented as `noreturn` (e.g., calling `halt()` with an infinite loop), `sched.yield()` will never return and blocking syscalls like `sys_getchar()` will hang.
+
 **Testing AArch64 Keyboard Input**:
 ```bash
 zig build run -Darch=aarch64 -Ddefault-boot=shell
 ```
 Click inside the QEMU window to capture keyboard focus.
+
+#### Keyboard Input Works But Characters Don't Echo
+
+**Symptom**: USB HID reports are received (visible in debug logs), scancodes are injected, but characters never appear in the shell. The shell appears to hang after the prompt.
+
+**Cause**: `sched.yield()` calls `hal.cpu.enableAndHalt()`, which must enable interrupts, wait for one interrupt, then return. If `enableAndHalt()` never returns, the `sys_getchar()` polling loop cannot continue.
+
+**Detection**:
+1. Add debug logging around `sched.yield()` in `sys_getchar()`:
+   ```zig
+   console.debug("sys_getchar: calling yield...", .{});
+   sched.yield();
+   console.debug("sys_getchar: yield returned", .{});
+   ```
+2. If "calling yield" appears but "yield returned" never does, `enableAndHalt()` is the problem.
+
+**Fix** (`src/arch/aarch64/kernel/cpu.zig`):
+```zig
+// WRONG - never returns, breaks scheduler
+pub fn enableAndHalt() noreturn {
+    enableInterrupts();
+    halt();  // halt() is an infinite loop
+}
+
+// CORRECT - matches x86_64 behavior
+pub inline fn enableAndHalt() void {
+    enableInterrupts();
+    asm volatile ("wfi");
+    // Returns after interrupt is handled
+}
+```
+
+**Key Files**:
+- `src/arch/aarch64/kernel/cpu.zig` - Contains `enableAndHalt()`
+- `src/arch/x86_64/kernel/cpu.zig` - Reference implementation (uses `sti; hlt`)
+- `src/kernel/sys/syscall/misc/custom.zig` - `sys_getchar()` polling loop
 
 ### Key Files (AArch64)
 

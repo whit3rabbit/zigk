@@ -466,8 +466,10 @@ pub fn initUsb() void {
 }
 
 /// Tick callback to poll USB events on aarch64 (where MSI-X is unavailable)
+var usb_poll_counter: u32 = 0;
 fn usbPollTickCallback() void {
     _ = usb.xhci.pollEvents();
+    usb_poll_counter +%= 1;
 }
 
 /// Initialize Audio subsystem (VirtIO-Sound, HDA, AC97)

@@ -102,6 +102,12 @@ pub const Controller = struct {
         // Write to doorbell register directly
         const ptr = @as(*volatile u32, @ptrFromInt(db_base));
         ptr.* = @as(u32, target);
+
+        // DSB after doorbell write to ensure write reaches the device
+        // On aarch64, device writes need explicit ordering
+        if (builtin.cpu.arch == .aarch64) {
+            asm volatile ("dsb sy" ::: "memory");
+        }
     }
 
     /// Update Event Ring Dequeue Pointer (ERDP)

@@ -254,7 +254,7 @@ const TSS = extern struct {
 """,
 
     "pte": """
-## Page Table Entry (8 bytes)
+## Page Table Entry (8 bytes) - x86_64
 
 ```text
 63  62     52 51                                       12 11 9 8 7 6 5 4 3 2 1 0
@@ -296,6 +296,50 @@ const USER_CODE = PRESENT | USER;
 
 // User data: present, writable, user, no exec
 const USER_DATA = PRESENT | WRITABLE | USER | NO_EXECUTE;
+```
+
+---
+
+## Page Table Entry (8 bytes) - AArch64
+
+```text
+63  62 61 60 59 58 57 56 55 54 53 52 51 50 49 48 47          12 11 10 9  8  7  6  5  4  3  2  1  0
++---+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+-------------+--+--+----+--+-----+--+-----+--+--+
+|   |        Software       |UXN|PXN|Ct|DBM| Reserved |  Physical Address [47:12]   |nG|AF| SH |AP|NS|AttrIdx|Tbl|Val|
++---+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+-------------+--+--+----+--+-----+--+-----+--+--+
+```
+
+### Critical Bits (AArch64)
+| Bits | Field | Description |
+|------|-------|-------------|
+| 0 | Valid | Entry is valid (1 = valid) |
+| 1 | Table | For L3: must be 1 for page descriptor |
+| 4:2 | AttrIndx | Index into MAIR_EL1 (0=Device, 1=Normal WB, 2=Normal NC) |
+| 7:6 | AP | Access Permissions (see below) |
+| 9:8 | SH | Shareability (3 = Inner Shareable) |
+| 10 | AF | Access Flag - MUST be set! |
+| 11 | nG | Non-Global (set for user pages) |
+| 53 | PXN | Privileged Execute Never |
+| 54 | UXN | User Execute Never (CRITICAL for user code!) |
+| 63:55 | Software | Software-defined bits |
+
+### Access Permission (AP) - AArch64
+| AP[1:0] | EL1 (Kernel) | EL0 (User) |
+|---------|--------------|------------|
+| 0b00 | Read/Write | No access |
+| 0b01 | Read/Write | Read/Write |
+| 0b10 | Read-only | No access |
+| 0b11 | Read-only | Read-only |
+
+### Common Bug: UXN Bit
+If user process gets Instruction Abort, check bit 54 (UXN).
+UXN=1 blocks user execution! Must be 0 for executable user pages.
+```zig
+// WRONG: Sets UXN when making user page
+entry.uxn = flags.user;  // Bug! UXN blocks execution
+
+// CORRECT: Only set UXN for non-executable pages
+entry.uxn = flags.no_execute;
 ```
 """,
 

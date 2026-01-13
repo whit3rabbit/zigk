@@ -89,6 +89,15 @@ pub fn allocReassemblyBuffer(len: usize) ?[]u8 {
     return buf;
 }
 
+/// Free a reassembly buffer.
+///
+/// IMPORTANT: `buf` MUST be the exact slice returned by `allocReassemblyBuffer`
+/// or `reallocReassemblyBuffer`. Passing a sub-slice will corrupt accounting
+/// and may cause denial-of-service (quota exhaustion).
+///
+/// SECURITY: This function trusts buf.len for accounting. The underlying
+/// allocator tracks actual size in BlockHeader, so the memory is correctly
+/// freed, but pool accounting uses slice length.
 pub fn freeReassemblyBuffer(buf: []u8) void {
     if (!initialized or buf.len == 0) return;
 
@@ -100,7 +109,9 @@ pub fn freeReassemblyBuffer(buf: []u8) void {
     if (current_usage >= buf.len) {
         current_usage -= buf.len;
     } else {
-        std.log.warn("packet pool accounting underflow: current={} freed={}", .{ current_usage, buf.len });
+        // This indicates a bug: either double-free, sliced buffer, or
+        // accounting corruption. Log as error for visibility.
+        std.log.err("packet pool accounting corruption: current={} freed={}", .{ current_usage, buf.len });
         current_usage = 0;
     }
 }

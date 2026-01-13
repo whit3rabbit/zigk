@@ -486,12 +486,27 @@ const mair_value = MAIR_DEVICE | (MAIR_NORMAL_WB << 8) | (MAIR_NORMAL_NC << 16);
 | TG1 | 0b10 | 4KB granule for TTBR1 |
 | IPS | 0b010 | 40-bit physical address (1TB) |
 
-### Page Table Entry Format
-```zig
-raw |= (1 << 2);   // AttrIndx = 1 (Normal WB, from MAIR)
-raw |= (1 << 10);  // AF (Access Flag) - REQUIRED!
-raw |= (3 << 8);   // SH = Inner Shareable
-```
+### Page Table Entry Format (Critical Bits)
+| Bits | Field | Description |
+|------|-------|-------------|
+| 0 | Valid | Entry is valid |
+| 1 | Table | 1 for L3 page descriptor |
+| 4:2 | AttrIndx | MAIR index (0=Device, 1=Normal WB) |
+| 7:6 | AP | Access Permissions |
+| 9:8 | SH | Shareability (3 = Inner Shareable) |
+| 10 | AF | Access Flag - MUST be set! |
+| 11 | nG | Non-Global (set for user pages) |
+| 53 | PXN | Privileged Execute Never |
+| 54 | UXN | User Execute Never (CRITICAL!) |
+| 63:55 | Software | Software-defined bits |
+
+### Access Permission (AP) Encoding
+| AP[1:0] | Kernel | User |
+|---------|--------|------|
+| 0b00 | RW | None |
+| 0b01 | RW | RW |
+| 0b10 | RO | None |
+| 0b11 | RO | RO |
 
 ### Common AArch64 Boot Errors
 
@@ -506,6 +521,24 @@ raw |= (3 << 8);   // SH = Inner Shareable
 **Repeated faults at same address**
 - Cause: AF (Access Flag) not set
 - Fix: Always set: `raw |= (1 << 10);`
+
+**User process Instruction Abort (UXN Bug)**
+- Symptom: Instruction Abort at user entry point (EC=0x20/0x21)
+- Cause: UXN bit (54) set for user code pages
+- Detection: ESR shows Instruction Abort at user address
+- Fix: Set `entry.uxn = flags.no_execute` NOT `entry.uxn = flags.user`
+```zig
+// WRONG: Accidentally sets UXN=1 for user pages
+entry.user_accessible = flags.user;  // If mapped to bit 54!
+
+// CORRECT: UXN only set for non-executable pages
+entry.uxn = flags.no_execute;
+```
+
+**Memory exhaustion during boot**
+- Symptom: OutOfMemory errors despite free pages
+- Cause: RAM starts at 0x40000000 on QEMU virt, PMM searches from 0
+- Fix: Initialize PMM search_hint based on memory_start
 
 ### Page Table Loading (AArch64)
 ```zig
@@ -539,6 +572,7 @@ asm volatile (
 | src/boot/uefi/paging.zig | Dual-arch paging |
 | src/arch/aarch64/boot/entry.S | Kernel entry |
 | src/arch/aarch64/boot/linker.ld | High-half layout |
+| src/arch/aarch64/mm/paging.zig | AArch64 page table entry format |
 """,
 }
 

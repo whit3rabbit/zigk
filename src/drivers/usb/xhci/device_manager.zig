@@ -2,6 +2,7 @@ const std = @import("std");
 const console = @import("console");
 const hal = @import("hal");
 const iommu = @import("iommu");
+const keyboard = @import("keyboard");
 
 const types = @import("types.zig");
 const device = @import("device.zig");
@@ -105,6 +106,16 @@ pub fn configureEndpoint(ctrl: *Controller, dev: *device.UsbDevice) CommandError
     const result = ctrl.waitForCommandCompletion(100000) catch return error.Timeout;
     if (result.code == .Success) {
         console.info("XHCI: Configure Endpoint succeeded", .{});
+
+        // Verify configured endpoints are in Running state
+        const dc = dev.device_context;
+        for (0..31) |i| {
+            const ep_state = dc.endpoints[i].dw0.ep_state;
+            if (ep_state != .disabled and ep_state != .running) {
+                const dci: u5 = @intCast(i + 1);
+                console.warn("XHCI: EP DCI {} in unexpected state {}", .{ dci, @intFromEnum(ep_state) });
+            }
+        }
     } else {
         console.err("XHCI: Configure Endpoint failed: {}", .{@intFromEnum(result.code)});
         return error.CommandFailed;
@@ -437,6 +448,8 @@ pub fn enumerateDevice(
                     dev.hid_driver.is_keyboard = true;
                 }
                 console.info("XHCI: Found HID Keyboard on interface {}", .{iface.interface_num});
+                // Initialize keyboard subsystem for USB HID input
+                keyboard.initForUsb();
             }
         } else if (iface.isMouse()) {
             // HID Mouse

@@ -1,5 +1,6 @@
 const std = @import("std");
 const console = @import("console");
+const keyboard = @import("keyboard");
 const usb_types = @import("../types.zig"); // Common USB types (not XHCI types)
 
 /// Information about a keyboard interface found in config descriptor
@@ -79,6 +80,8 @@ pub fn findKeyboardInterface(config_data: []const u8) ?KeyboardInfo {
 
                     if (is_boot_keyboard) {
                         console.info("XHCI: Found HID Boot Keyboard on interface {}", .{iface.b_interface_number});
+                        // Initialize keyboard subsystem for USB HID input
+                        keyboard.initForUsb();
                     }
                 }
             },
