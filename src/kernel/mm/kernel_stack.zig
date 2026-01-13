@@ -8,14 +8,16 @@
 //! calculated from HHDM is still actually mapped. This module solves that
 //! by using a separate VA range where guard pages are truly unmapped.
 //!
-//! Layout per stack slot (5 pages = 20KB):
-//!   `[Guard Page (unmapped)] [Stack pages (4 pages)] [Stack Top]`
+//! Layout per stack slot:
+//!   - x86_64:  9 pages = 36KB (1 guard + 8 stack)
+//!   - AArch64: 17 pages = 68KB (1 guard + 16 stack)
 //!
 //! Stack grows downward, so overflow writes into the guard page trigger #PF.
 //!
 //! This module allocates stacks from a pre-reserved region (stack_region_base).
 
 const std = @import("std");
+const builtin = @import("builtin");
 const console = @import("console");
 const pmm = @import("pmm");
 const vmm = @import("vmm");
@@ -27,8 +29,13 @@ const paging = hal.paging;
 // Configuration
 pub const PAGE_SIZE: usize = pmm.PAGE_SIZE;
 
-/// Number of pages per stack (excluding guard page)
-pub const STACK_PAGES: usize = 8;
+/// Number of pages per stack (excluding guard page).
+/// AArch64 needs more due to larger SyscallFrame (288 bytes vs 128 bytes on x86_64).
+/// This compensates for the 2.25x larger exception frames.
+pub const STACK_PAGES: usize = switch (builtin.cpu.arch) {
+    .aarch64 => 16, // 64 KB - matches x86_64's effective frame depth
+    else => 8, // 32 KB - sufficient for x86_64
+};
 
 /// Total size of each stack slot (guard + stack pages)
 pub const STACK_SLOT_PAGES: usize = STACK_PAGES + 1;

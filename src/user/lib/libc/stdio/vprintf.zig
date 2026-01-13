@@ -1,103 +1,18 @@
 // vprintf family implementations (stdio.h)
 //
-// Implements va_list traversal for x86_64 System V ABI.
-// The va_list structure tracks both register-saved and stack-passed arguments.
+// Implements va_list traversal using architecture-aware VaList abstraction.
+// Supports both x86_64 System V ABI and aarch64 AAPCS64.
 
 const std = @import("std");
 const syscall = @import("syscall");
 const file_mod = @import("file.zig");
+const va_list_mod = @import("../va_list.zig");
 
 const FILE = file_mod.FILE;
+const VaList = va_list_mod.VaList;
 
-/// va_list type for C interop (x86_64 System V ABI)
-/// This is a pointer to a 24-byte structure
+/// va_list type for C interop - raw pointer to architecture-specific structure
 pub const va_list = ?*anyopaque;
-
-/// x86_64 System V ABI va_list structure layout:
-/// - gp_offset (4 bytes): offset in reg_save_area for next GP register arg
-/// - fp_offset (4 bytes): offset in reg_save_area for next FP register arg
-/// - overflow_arg_area (8 bytes): pointer to stack-passed arguments
-/// - reg_save_area (8 bytes): pointer to register save area
-const VA_GP_OFFSET = 0;
-const VA_FP_OFFSET = 4;
-const VA_OVERFLOW_ARG_AREA = 8;
-const VA_REG_SAVE_AREA = 16;
-
-/// Maximum GP registers used for argument passing (6 registers * 8 bytes = 48)
-const GP_REG_LIMIT: u32 = 48;
-
-/// Read a u32 from potentially unaligned memory
-inline fn readU32(ptr: [*]const u8) u32 {
-    return @as(u32, ptr[0]) |
-        (@as(u32, ptr[1]) << 8) |
-        (@as(u32, ptr[2]) << 16) |
-        (@as(u32, ptr[3]) << 24);
-}
-
-/// Read a u64 from potentially unaligned memory
-inline fn readU64(ptr: [*]const u8) u64 {
-    return @as(u64, ptr[0]) |
-        (@as(u64, ptr[1]) << 8) |
-        (@as(u64, ptr[2]) << 16) |
-        (@as(u64, ptr[3]) << 24) |
-        (@as(u64, ptr[4]) << 32) |
-        (@as(u64, ptr[5]) << 40) |
-        (@as(u64, ptr[6]) << 48) |
-        (@as(u64, ptr[7]) << 56);
-}
-
-/// Write a u32 to potentially unaligned memory
-inline fn writeU32(ptr: [*]u8, val: u32) void {
-    ptr[0] = @truncate(val);
-    ptr[1] = @truncate(val >> 8);
-    ptr[2] = @truncate(val >> 16);
-    ptr[3] = @truncate(val >> 24);
-}
-
-/// Get next argument from va_list (advances the va_list state)
-fn vaArg(ap: va_list) usize {
-    const ptr: [*]u8 = @ptrCast(ap orelse return 0);
-
-    // Read current gp_offset
-    const gp_offset = readU32(ptr + VA_GP_OFFSET);
-
-    if (gp_offset < GP_REG_LIMIT) {
-        // Argument is in register save area
-        const reg_save_addr = readU64(ptr + VA_REG_SAVE_AREA);
-        if (reg_save_addr != 0) {
-            const reg_save: [*]const u8 = @ptrFromInt(reg_save_addr);
-            const val = readU64(reg_save + gp_offset);
-
-            // Advance gp_offset by 8 bytes
-            writeU32(ptr + VA_GP_OFFSET, gp_offset + 8);
-
-            return val;
-        }
-    }
-
-    // Argument is on the stack (overflow area)
-    const overflow_addr = readU64(ptr + VA_OVERFLOW_ARG_AREA);
-    if (overflow_addr != 0) {
-        const overflow: [*]const u8 = @ptrFromInt(overflow_addr);
-        const val = readU64(overflow);
-
-        // Advance overflow_arg_area by 8 bytes
-        const new_overflow = overflow_addr + 8;
-        const overflow_ptr = ptr + VA_OVERFLOW_ARG_AREA;
-        overflow_ptr[0] = @truncate(new_overflow);
-        overflow_ptr[1] = @truncate(new_overflow >> 8);
-        overflow_ptr[2] = @truncate(new_overflow >> 16);
-        overflow_ptr[3] = @truncate(new_overflow >> 24);
-        overflow_ptr[4] = @truncate(new_overflow >> 32);
-        overflow_ptr[5] = @truncate(new_overflow >> 40);
-        overflow_ptr[6] = @truncate(new_overflow >> 48);
-        overflow_ptr[7] = @truncate(new_overflow >> 56);
-
-        return val;
-    }
-
-    return 0;
-}
 
 /// Format output buffer size for vfprintf/vprintf
 const FORMAT_BUF_SIZE = 4096;
@@ -185,8 +100,8 @@ fn formatHex(buf: []u8, val: u64, uppercase: bool) []const u8 {
     return buf[0..len];
 }
 
-/// Core formatting function - formats to a buffer
-fn formatToBuffer(dest: [*]u8, limit: usize, fmt: [*:0]const u8, ap: va_list) usize {
+/// Core formatting function - formats to a buffer using VaList abstraction
+fn formatToBuffer(dest: [*]u8, limit: usize, fmt: [*:0]const u8, valist: *VaList) usize {
     if (limit == 0) return 0;
 
     var d_idx: usize = 0;
@@ -255,11 +170,11 @@ fn formatToBuffer(dest: [*]u8, limit: usize, fmt: [*:0]const u8, ap: va_list) us
 
         switch (spec) {
             '%' => {
-                dest[d_idx] = '%';
+                if (d_idx < write_limit) dest[d_idx] = '%';
                 d_idx += 1;
             },
             's' => {
-                const str_ptr = vaArg(ap);
+                const str_ptr = valist.arg(usize);
                 if (str_ptr != 0) {
                     const s: [*:0]const u8 = @ptrFromInt(str_ptr);
                     var s_idx: usize = 0;
@@ -278,12 +193,12 @@ fn formatToBuffer(dest: [*]u8, limit: usize, fmt: [*:0]const u8, ap: va_list) us
                 }
             },
             'c' => {
-                const ch: u8 = @truncate(vaArg(ap));
-                dest[d_idx] = ch;
+                const ch: u8 = @truncate(valist.arg(usize));
+                if (d_idx < write_limit) dest[d_idx] = ch;
                 d_idx += 1;
             },
             'd', 'i' => {
-                const val: i64 = @bitCast(vaArg(ap));
+                const val: i64 = @bitCast(valist.arg(usize));
                 const formatted = formatDecimal(&num_buf, val);
                 // Apply precision (minimum digits) with leading zeros
                 const min_digits = if (has_precision) precision else 1;
@@ -313,7 +228,7 @@ fn formatToBuffer(dest: [*]u8, limit: usize, fmt: [*:0]const u8, ap: va_list) us
                 }
             },
             'u' => {
-                const val = vaArg(ap);
+                const val = valist.arg(usize);
                 const formatted = formatUnsigned(&num_buf, val);
                 // Apply precision (minimum digits) with leading zeros
                 const min_digits = if (has_precision) precision else 1;
@@ -331,7 +246,7 @@ fn formatToBuffer(dest: [*]u8, limit: usize, fmt: [*:0]const u8, ap: va_list) us
                 }
             },
             'x' => {
-                const val = vaArg(ap);
+                const val = valist.arg(usize);
                 const formatted = formatHex(&num_buf, val, false);
                 // Apply precision (minimum digits) with leading zeros
                 const min_digits = if (has_precision) precision else 1;
@@ -349,7 +264,7 @@ fn formatToBuffer(dest: [*]u8, limit: usize, fmt: [*:0]const u8, ap: va_list) us
                 }
             },
             'X' => {
-                const val = vaArg(ap);
+                const val = valist.arg(usize);
                 const formatted = formatHex(&num_buf, val, true);
                 // Apply precision (minimum digits) with leading zeros
                 const min_digits = if (has_precision) precision else 1;
@@ -367,7 +282,7 @@ fn formatToBuffer(dest: [*]u8, limit: usize, fmt: [*:0]const u8, ap: va_list) us
                 }
             },
             'p' => {
-                const val = vaArg(ap);
+                const val = valist.arg(usize);
                 // Print "0x" prefix
                 if (d_idx < limit - 1) {
                     dest[d_idx] = '0';
@@ -387,13 +302,13 @@ fn formatToBuffer(dest: [*]u8, limit: usize, fmt: [*:0]const u8, ap: va_list) us
             'n' => {
                 // SECURITY: %n is disabled - allows arbitrary memory write
                 // Consume the argument but do nothing with it
-                _ = vaArg(ap);
+                _ = valist.arg(usize);
             },
             else => {
                 // Unknown specifier, print it literally
-                dest[d_idx] = '%';
+                if (d_idx < write_limit) dest[d_idx] = '%';
                 d_idx += 1;
-                if (d_idx < limit - 1) {
+                if (d_idx < write_limit) {
                     dest[d_idx] = spec;
                     d_idx += 1;
                 }
@@ -408,7 +323,8 @@ fn formatToBuffer(dest: [*]u8, limit: usize, fmt: [*:0]const u8, ap: va_list) us
 /// vprintf - print formatted output to stdout
 pub export fn vprintf(fmt: [*:0]const u8, ap: va_list) c_int {
     var buf: [FORMAT_BUF_SIZE]u8 = undefined;
-    const len = formatToBuffer(&buf, buf.len, fmt, ap);
+    var valist = VaList.from(ap);
+    const len = formatToBuffer(&buf, buf.len, fmt, &valist);
     if (len > 0) {
         _ = syscall.write(1, &buf, len) catch return -1;
     }
@@ -421,7 +337,8 @@ pub export fn vfprintf(stream: ?*FILE, fmt: [*:0]const u8, ap: va_list) c_int {
     const f = stream.?;
 
     var buf: [FORMAT_BUF_SIZE]u8 = undefined;
-    const len = formatToBuffer(&buf, buf.len, fmt, ap);
+    var valist = VaList.from(ap);
+    const len = formatToBuffer(&buf, buf.len, fmt, &valist);
     if (len > 0) {
         _ = syscall.write(f.fd, &buf, len) catch return -1;
     }
@@ -431,7 +348,8 @@ pub export fn vfprintf(stream: ?*FILE, fmt: [*:0]const u8, ap: va_list) c_int {
 /// vsnprintf - format to string with size limit
 pub export fn vsnprintf(dest: ?[*]u8, size: usize, fmt: [*:0]const u8, ap: va_list) c_int {
     if (dest == null or size == 0) return 0;
-    const len = formatToBuffer(dest.?, size, fmt, ap);
+    var valist = VaList.from(ap);
+    const len = formatToBuffer(dest.?, size, fmt, &valist);
     return @intCast(len);
 }
 
@@ -443,7 +361,10 @@ pub export fn vsprintf(dest: ?[*]u8, fmt: [*:0]const u8, ap: va_list) c_int {
     // SECURITY: Limit to 1024 bytes as a safety measure.
     // This is still unsafe but reduces the damage from legacy code.
     // New code should ALWAYS use vsnprintf() with explicit size.
-    return vsnprintf(dest, 1024, fmt, ap);
+    if (dest == null) return 0;
+    var valist = VaList.from(ap);
+    const len = formatToBuffer(dest.?, 1024, fmt, &valist);
+    return @intCast(len);
 }
 
 /// vasprintf - allocate and format string (stub - needs allocator)
