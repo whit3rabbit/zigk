@@ -44,6 +44,7 @@ pub const idt = struct {
 
 pub const apic = struct {
     pub fn routeIrq(_: u32, _: u32, _: u32) void {}
+    pub fn routePciIrq(_: u8, _: u8, _: u8) void {}
     pub fn enableIrq(_: u32) void {}
     pub fn disableIrq(_: u32) void {}
     pub fn setLegacyPicMode() void {}

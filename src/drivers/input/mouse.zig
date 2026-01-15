@@ -327,8 +327,18 @@ pub fn handleIrq() void {
 
     const status = ps2.StatusReg.read();
 
-    // Verify data is from mouse
-    if (!status.hasData() or !status.isMouseData()) {
+    // Check if data is available
+    if (!status.hasData()) {
+        // Spurious IRQ - still read from data port to clear controller state
+        // Some emulators may not deliver subsequent IRQs if buffer isn't cleared
+        _ = hal.io.inb(ps2.DATA_PORT);
+        return;
+    }
+
+    // Skip keyboard data - read to clear buffer but don't process
+    // (Symmetric with keyboard handler which skips mouse data)
+    if (!status.isMouseData()) {
+        _ = hal.io.inb(ps2.DATA_PORT);
         return;
     }
 
