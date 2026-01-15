@@ -35,6 +35,7 @@ const input = @import("input");
 const virtio = @import("virtio");
 const virtio_input = @import("virtio_input");
 const virtio_sound = @import("virtio_sound");
+const virtio_9p = @import("virtio_9p");
 const prng = @import("prng");
 
 // SECURITY NOTE (Global State Synchronization): These variables are written during
@@ -765,6 +766,46 @@ pub fn initStorage() void {
 
     if (!found_virtio_scsi) {
         console.info("Storage: No VirtIO-SCSI controllers found", .{});
+    }
+
+    // Initialize VirtIO-9P shared folders
+    initVirtio9P();
+}
+
+/// Initialize VirtIO-9P shared folders driver
+/// Enables host-guest file sharing via QEMU's -virtfs option
+pub fn initVirtio9P() void {
+    const devices = pci_devices orelse {
+        return;
+    };
+
+    const ecam = pci_ecam orelse {
+        return;
+    };
+
+    for (devices.devices[0..devices.count]) |*dev| {
+        if (virtio_9p.isVirtio9P(dev)) {
+            console.info("VirtIO-9P: Found device at {d}:{d}.{d}", .{
+                dev.bus, dev.device, dev.func,
+            });
+
+            const device = virtio_9p.initFromPci(dev, pci.PciAccess{ .ecam = ecam }) catch |err| {
+                console.warn("VirtIO-9P: Init failed: {}", .{err});
+                continue;
+            };
+
+            // Attach to root
+            device.attach("") catch |err| {
+                console.warn("VirtIO-9P: Attach failed: {}", .{err});
+                continue;
+            };
+
+            const tag = device.getMountTag();
+            console.info("VirtIO-9P: Device initialized, tag=\"{s}\"", .{tag});
+
+            // TODO: Mount at /mnt/<tag> once VFS integration is complete
+            break; // Only initialize first device for now
+        }
     }
 }
 

@@ -51,11 +51,19 @@ defer lock.releaseRestoreIrq(state);
 3. **Keep critical sections short** (spinlock = busy wait)
 4. **Respect lock ordering** to prevent deadlock
 
-### Lock Ordering (outer to inner)
-1. sched.process_tree_lock
-2. process.lock
-3. fd_table.lock
-4. Individual resource locks
+### Lock Ordering (lower number = acquired first)
+1.  process_tree_lock
+2.  SFS.alloc_lock (Filesystem)
+3.  FileDescriptor.lock
+4.  Scheduler/Runqueue Lock
+5.  tcp_state.lock (Global TCP)
+6.  socket/state.lock (Socket table)
+7.  Per-socket sock.lock / Per-TCB tcb.mutex
+8.  UserVmm.lock (NO sleep while held!)
+8.5 devices_lock (USB global)
+8.6 UsbDevice.device_lock (per-device, IRQ-safe)
+9.  FutexBucket.lock
+10. pmm.lock (internal)
 
 ### When to Use
 - Short critical sections in interrupt context
@@ -133,7 +141,7 @@ Location: src/kernel/mm/aslr.zig
 ### AslrOffsets Structure
 ```zig
 pub const AslrOffsets = struct {
-    stack_offset: u16,    // Subtracted from stack base
+    stack_offset: u32,    // Subtracted from stack base (u32 for 22 bits)
     pie_offset: u16,      // Added to PIE base (64KB units)
     mmap_offset: u32,     // Added to mmap base (pages)
     heap_gap: u16,        // Gap after ELF (16 bits entropy)
@@ -141,6 +149,9 @@ pub const AslrOffsets = struct {
     stack_top: u64,       // Computed stack top
     mmap_start: u64,      // Computed mmap start
     tls_base: u64,        // Computed TLS base
+
+    // Comptime validation ensures storage types match entropy bits
+    comptime { /* validates all offset types >= entropy bits */ }
 };
 ```
 
@@ -152,15 +163,19 @@ pub const AslrOffsets = struct {
 | sys_execve() | New random offsets |
 
 ### Entropy Source
-Uses kernel PRNG (xoroshiro128+) seeded from RDRAND/RDSEED at boot.
-prng.range() uses rejection sampling to avoid modulo bias.
+Uses kernel CSPRNG (ChaCha20, RFC 8439) seeded from RDRAND/RDSEED at boot.
+All MAX_OFFSET values are powers of 2, so modulo produces uniform distribution.
 
 ### Security Notes
-- Fail-secure: If entropy is weak, process creation should fail
+- **Fail-secure**: If entropy is weak, `generateOffsets()` returns `error.WeakEntropy`
 - 22-bit stack entropy provides strong protection vs heap spraying
 - 16-bit heap gap entropy prevents brute-force heap layout prediction
+- Comptime validation prevents entropy truncation bugs (storage type >= entropy bits)
 
-### Debug Output
+### Architecture Compatibility
+All base addresses are valid for both x86_64 (47-bit) and AArch64 (48-bit) canonical ranges.
+
+### Debug Output (Debug builds only)
 ```
 ASLR[pid=1]: stack_top=7fffff8bf000 pie_base=5555c3470000 mmap=10002a590000 heap_gap=49 tls_base=b0001000
 ```

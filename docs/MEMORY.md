@@ -145,6 +145,6 @@ O(1) small object allocator using bitmapped slabs.
 ### Features
 
 - Size classes: 16B to 2KB
-- Cache-line aligned allocations
+- 16-byte aligned header with fixed-size objects
 - Zero-fragmentation for fixed-size objects
 - Per-slab bitmap for allocation tracking

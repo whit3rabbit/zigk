@@ -278,6 +278,21 @@ pub fn routeIrq(irq: u8, vector: u8, cpu_id: u8) void {
     ioapic.routeIsaIrq(irq, vector, target, gsi, info.getOverridePtr(irq));
 }
 
+/// Route a PCI INTx interrupt (level-triggered, active-low)
+/// irq: PCI IRQ line (from PCI config space)
+/// vector: Interrupt vector to deliver
+/// cpu_id: Target APIC ID (or 0 for BSP)
+pub fn routePciIrq(irq: u8, vector: u8, cpu_id: u8) void {
+    if (interrupt_mode != .Apic) {
+        console.warn("APIC: Not in APIC mode, cannot route PCI IRQ", .{});
+        return;
+    }
+
+    const target = if (cpu_id == 0) @as(u8, @truncate(lapic.getId())) else cpu_id;
+    // PCI interrupts use level-triggered, active-low polarity (unlike ISA edge-triggered)
+    ioapic.routeGsi(irq, vector, target, .level, .active_low);
+}
+
 /// Enable (unmask) an IRQ
 pub fn enableIrq(irq: u8) void {
     if (interrupt_mode != .Apic) return;

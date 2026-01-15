@@ -37,8 +37,6 @@ pub const RX_BUFFER_WRITE: usize = 16;
 ///
 /// Returns number of packets processed
 pub fn processRxLimited(driver: *E1000e, callback: *const fn ([]u8) void, limit: usize) usize {
-    console.debug("E1000e: processRxLimited self={*} cb={*} limit={d}", .{ driver, callback, limit });
-
     var processed: usize = 0;
     var batch_count: usize = 0;
 

@@ -23,14 +23,12 @@ fn defaultRxCallback(data: []u8) void {
 /// Static worker entry point
 /// Runs workerLoop then exits cleanly so deinit() can join the thread.
 pub fn workerEntry(ctx: ?*anyopaque) callconv(.c) void {
-    console.info("E1000e: Worker thread started", .{});
     if (ctx) |ptr| {
         // Convert ?*anyopaque to *E1000e without runtime alignment check.
         // The pointer comes from &driver_instance which has align(64), guaranteeing
         // correct alignment. We use @ptrFromInt to bypass @alignCast which would
         // otherwise fail because alignment info is lost through ?*anyopaque.
         const driver: *E1000e = @ptrFromInt(@intFromPtr(ptr));
-        console.info("E1000e: Worker thread entering loop with driver={*}", .{driver});
 
         // Now we can safely call the member function because we have the correct self pointer
         workerLoop(driver);
@@ -39,7 +37,6 @@ pub fn workerEntry(ctx: ?*anyopaque) callconv(.c) void {
     }
     // Worker thread finished - call scheduler exit to mark thread as Zombie.
     // This allows deinit() to join (wait for Zombie state) before freeing resources.
-    console.info("E1000e: Worker thread exiting", .{});
     sched.exit();
 }
 

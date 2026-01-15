@@ -562,6 +562,19 @@ Modern kernel drivers use the `MmioDevice(RegType)` wrapper for zero-cost, type-
 - **AHCI** (`src/drivers/storage/ahci`)
 - **E1000e** (`src/drivers/net/e1000e`)
 
+### Architecture-Specific Behavior
+
+MmioDevice has different characteristics on x86_64 and aarch64:
+
+| Feature | x86_64 | aarch64 |
+|---------|--------|---------|
+| Bounds checking | Debug/ReleaseSafe only | Always enabled (security) |
+| `pollTimed()` | Uses TSC for timeout | No-op stub (returns false) |
+| `writeRaw()` | Functional | No-op stub |
+| Atomic bit ops | Available (LOCK prefix) | Not available |
+
+**Security Note**: On aarch64, bounds checking cannot be disabled. Out-of-bounds MMIO access could read/write unintended hardware registers, potentially causing privilege escalation or hardware misconfiguration.
+
 ---
 
 ## DMA Memory Allocation (IOMMU-Aware)
@@ -613,6 +626,7 @@ hw_regs.write(.dma_addr_hi, buf.deviceAddrHi());
 | `device_addr` | Device address (IOVA if IOMMU enabled, else same as phys_addr) |
 | `size` | Requested size in bytes |
 | `page_count` | Number of pages allocated |
+| `bdf` | Device BDF for IOMMU cleanup on free |
 | `iommu_mapped` | Whether IOMMU mapping was used |
 
 **Critical**: Always use `device_addr` for hardware descriptors, not `phys_addr`. When IOMMU is enabled, the device cannot access raw physical addresses.
@@ -706,6 +720,34 @@ IOMMU: Identity-mapped RMRR 0xabc00000-0xabffffff for 00:14.0
 
 ---
 
+## Architecture-Specific Notes
+
+### x86_64
+
+- **IOMMU**: Intel VT-d fully supported with RMRR identity mappings
+- **Interrupts**: IOAPIC + LAPIC with MSI-X support (vectors 64-128)
+- **MmioDevice**: Full feature set including `pollTimed()` with TSC
+- **Memory Barriers**: Uses `mfence`, `lfence`, `sfence` instructions
+
+### aarch64
+
+- **IOMMU**: NOT IMPLEMENTED (stubs return `NotSupported`)
+  - DMA allocations fall back to raw physical addresses
+  - No DMA isolation on ARM systems
+  - Would require ARM SMMU implementation for full support
+- **Interrupts**: GIC (Generic Interrupt Controller) replaces IOAPIC/LAPIC
+  - MSI-X NOT IMPLEMENTED (would require GICv3 ITS)
+  - `hal.interrupts.allocateMsixVector()` returns `null`
+  - `hal.interrupts.registerMsixHandler()` returns `false`
+  - Drivers must use legacy interrupt routing on aarch64
+- **MmioDevice**: Security-hardened variant
+  - Bounds checking always enabled (cannot be disabled)
+  - `pollTimed()` is a no-op stub (returns false)
+  - No atomic bit operations (`setBits32Atomic`, `clearBits32Atomic` unavailable)
+- **Memory Barriers**: Uses `dsb sy`, `dsb ld`, `dsb st` (ARM barriers)
+
+---
+
 ## Interrupt Handling
 
 Zscapek supports two interrupt delivery mechanisms: **Legacy ISA IRQs** (via IOAPIC) and **MSI-X** (for PCI devices). Understanding the difference is critical for driver development.
@@ -755,7 +797,7 @@ Modern PCI devices (XHCI, E1000e, VirtIO-GPU) use MSI-X for direct LAPIC deliver
 // 1. Find MSI-X capability in PCI config space
 const msix_cap = pci.findMsix(ecam, pci_dev) orelse return error.NoMsix;
 
-// 2. Allocate vector from MSI-X pool (240-254)
+// 2. Allocate vector from MSI-X pool (64-128 on x86_64)
 const vector = hal.interrupts.allocateMsixVector() orelse return error.NoVectors;
 
 // 3. Register handler for the vector
@@ -774,7 +816,9 @@ const msix_alloc = pci.enableMsix(ecam, pci_dev, &msix_cap, 0) orelse {
 pci.enableMsixVectors(ecam, pci_dev, &msix_cap);
 ```
 
-### Vector Assignments
+**aarch64 Note**: MSI-X is only supported on x86_64. On aarch64, `allocateMsixVector()` returns `null` and drivers must fall back to legacy interrupt routing or implement GICv3 ITS support.
+
+### Vector Assignments (x86_64)
 
 | Vector | IRQ | Device | Type |
 |--------|-----|--------|------|
@@ -784,8 +828,10 @@ pci.enableMsixVectors(ecam, pci_dev, &msix_cap);
 | 36 | 4 | COM1 | ISA |
 | 44 | 12 | PS/2 Mouse | ISA |
 | 48 | - | LAPIC Timer | Local |
-| 240-254 | - | MSI-X Pool | PCI |
+| 64-128 | - | MSI-X Pool | PCI (x86_64 only) |
 | 255 | - | Spurious | Special |
+
+**Note**: On aarch64, the GIC (Generic Interrupt Controller) replaces IOAPIC/LAPIC. MSI-X is not currently implemented on aarch64.
 
 ### Generic Interrupt Flow
 
@@ -888,6 +934,39 @@ When interrupts are not working:
 4. **For MSI-X: Is the vector allocated?** `allocateMsixVector()` returns non-null?
 5. **For MSI-X: Is the device's MSI-X table programmed?** `pci.enableMsix()` succeeded?
 6. **Does the handler push to the right subsystem?** (e.g., input subsystem vs local buffer)
+7. **Are there garbage GSI warnings?** If boot log shows `IOAPIC: No I/O APIC for GSI <large number>`, this indicates use-after-free in APIC initialization (see below)
+
+### APIC Initialization Pitfall (Use-After-Free)
+
+**Problem**: The `initApic()` function in `src/kernel/core/main.zig` passes pointers to the `io_apics` and `overrides` arrays to `hal.apic.init()`, which caches them. If these are stack-allocated local variables, they become dangling pointers after `initApic()` returns.
+
+**Symptom**: Boot log shows garbage GSI values like:
+```
+[WARN]  IOAPIC: No I/O APIC for GSI 2151629072
+[WARN]  IOAPIC: No I/O APIC for GSI 535184920
+```
+
+These appear when `routeIrq()` is called later (for keyboard, mouse, serial) and reads garbage from the invalidated stack memory.
+
+**Solution**: Arrays passed to `hal.apic.init()` must be static to outlive the function:
+
+```zig
+// WRONG: Stack-allocated, becomes dangling pointer
+fn initApic(...) {
+    var overrides: [16]?InterruptOverride = ...;
+    hal.apic.init(&.{ .overrides = &overrides, ... });
+}  // overrides is invalid after return!
+
+// CORRECT: Static storage via embedded struct
+fn initApic(...) {
+    const overrides_static = struct {
+        var data: [16]?InterruptOverride = ...;
+    };
+    hal.apic.init(&.{ .overrides = &overrides_static.data, ... });
+}  // data persists after return
+```
+
+**Affected Arrays**: `io_apics`, `overrides` (and `madt_info` which was already correctly static)
 
 ---
 

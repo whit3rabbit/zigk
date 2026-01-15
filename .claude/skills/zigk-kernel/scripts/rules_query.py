@@ -269,29 +269,37 @@ scheduler.createKernelThread(struct { fn run() void { self.x; } }.run, null);
     "lock": """
 ## Lock Ordering
 
-**Standard order (outer to inner):**
-1. sched.process_tree_lock
-2. process.lock
-3. fd_table.lock
-4. Individual resource locks
+**Full lock ordering (lower number = acquired first):**
+1.  `process_tree_lock`
+2.  `SFS.alloc_lock` (Filesystem Allocation)
+3.  `FileDescriptor.lock`
+4.  `Scheduler/Runqueue Lock`
+5.  `tcp_state.lock` (Global TCP state)
+6.  `socket/state.lock` (Socket table)
+7.  Per-socket `sock.lock` / Per-TCB `tcb.mutex`
+8.  `UserVmm.lock` (must NOT hold during sleep)
+8.5. `devices_lock` (USB global device array RwLock)
+8.6. `UsbDevice.device_lock` (per-device Spinlock, IRQ-safe)
+9.  `FutexBucket.lock` (per-bucket spinlock)
+10. `pmm.lock` (internal PMM spinlock, not held across calls)
 
 **Pattern:**
 ```zig
 {
-    sched.process_tree_lock.acquire();
-    defer sched.process_tree_lock.release();
+    const held = process_tree_lock.acquire();
+    defer held.release();
 
-    fd_table.lock.acquire();
-    defer fd_table.lock.release();
+    const fd_held = fd_table.lock.acquire();
+    defer fd_held.release();
 
     // ... operate on resources
 }
 ```
 
-**Page fault context:**
-- No locks when calling pmm.allocZeroedPage()
-- VMA list is per-process (no global lock)
-- Page table uses per-process PML4
+**UserVmm.lock special rule:**
+- Read mode: address translation
+- Write mode: munmap
+- **NEVER** hold during sleep/block operations
 
 **Spinlock usage:**
 ```zig

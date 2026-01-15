@@ -164,8 +164,7 @@ pub fn init(pci_dev: *const pci.PciDevice, pci_access: pci.PciAccess) !*E1000e {
     // driver_initialized was set to true by cmpxchgStrong at function entry.
     // errdefer will reset it to false if any error occurs before this point.
 
-    // Create worker thread
-    // Pass workerEntry directly from worker module
+    // Create worker thread for NAPI-style RX processing
     driver.worker_thread = try thread.createKernelThread(worker.workerEntry, driver, .{
         .name = "net_worker",
         .priority = 10, // High priority

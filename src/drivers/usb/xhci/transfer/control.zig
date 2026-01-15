@@ -16,10 +16,32 @@ const Controller = types.Controller;
 const TransferError = common.TransferError;
 
 /// Timeout for control transfers in milliseconds
+/// Real hardware: 500ms (USB spec allows up to 5 seconds)
+/// Emulators: 50ms (faster failure for non-responsive devices)
 pub const CONTROL_TIMEOUT_MS: u32 = 500;
+pub const CONTROL_TIMEOUT_MS_EMULATOR: u32 = 50;
 
 /// Maximum retry count for transient errors
+/// Reduced on emulators to speed up boot when devices don't respond
 pub const MAX_RETRIES: u8 = 3;
+pub const MAX_RETRIES_EMULATOR: u8 = 1;
+
+/// Check if running on an emulator with potentially broken USB emulation
+fn isEmulatorPlatform() bool {
+    const hv = hal.hypervisor.getHypervisor();
+    return hv == .qemu_tcg or hv == .unknown;
+}
+
+/// Get platform-appropriate timeout
+pub fn getControlTimeout() u32 {
+    const timeout = if (isEmulatorPlatform()) CONTROL_TIMEOUT_MS_EMULATOR else CONTROL_TIMEOUT_MS;
+    return timeout;
+}
+
+/// Get platform-appropriate retry count
+fn getMaxRetries() u8 {
+    return if (isEmulatorPlatform()) MAX_RETRIES_EMULATOR else MAX_RETRIES;
+}
 
 /// Perform a USB control transfer
 /// Returns number of bytes transferred in data stage, or error
@@ -38,8 +60,8 @@ pub fn controlTransfer(
         return error.InvalidState;
     }
 
-    // Retry loop for transient errors
-    var retries: u8 = MAX_RETRIES;
+    // Retry loop for transient errors (fewer retries on emulators for faster boot)
+    var retries: u8 = getMaxRetries();
     while (retries > 0) : (retries -= 1) {
         const result = doControlTransfer(ctrl, dev, request_type, request, value, index, buffer, timeout_ms) catch |err| {
             switch (err) {
@@ -58,7 +80,7 @@ pub fn controlTransfer(
         return result;
     }
 
-    console.err("XHCI: Control transfer failed after {} retries", .{MAX_RETRIES});
+    console.err("XHCI: Control transfer failed after {} retries", .{getMaxRetries()});
     return error.TransferFailed;
 }
 
@@ -283,7 +305,7 @@ pub fn getDeviceDescriptor(
         usb_types.descriptorValue(usb_types.DescriptorType.DEVICE, 0),
         0,
         buffer,
-        CONTROL_TIMEOUT_MS,
+        getControlTimeout(),
     );
 }
 
@@ -310,7 +332,7 @@ pub fn getConfigDescriptor(
         usb_types.descriptorValue(usb_types.DescriptorType.CONFIGURATION, index),
         0,
         buffer,
-        CONTROL_TIMEOUT_MS,
+        getControlTimeout(),
     );
 }
 
@@ -339,7 +361,7 @@ pub fn getReportDescriptor(
         wValue,
         @as(u16, iface),
         buffer,
-        CONTROL_TIMEOUT_MS,
+        getControlTimeout(),
     );
 }
 
@@ -363,7 +385,7 @@ pub fn setConfiguration(
         @as(u16, config_value),
         0,
         null,
-        CONTROL_TIMEOUT_MS,
+        getControlTimeout(),
     );
 }
 
@@ -390,7 +412,7 @@ pub fn setProtocol(
         @as(u16, protocol),
         @as(u16, interface),
         null,
-        CONTROL_TIMEOUT_MS,
+        getControlTimeout(),
     );
 }
 
@@ -418,7 +440,7 @@ pub fn setIdle(
         (@as(u16, duration) << 8) | @as(u16, report_id),
         @as(u16, interface),
         null,
-        CONTROL_TIMEOUT_MS,
+        getControlTimeout(),
     );
 }
 

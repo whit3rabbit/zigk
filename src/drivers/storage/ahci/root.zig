@@ -46,6 +46,7 @@ pub const MAX_SECTORS_PER_TRANSFER: usize = 256; // 128KB
 // AHCI Timeout Constants (microseconds)
 // Based on Linux kernel libahci.c best practices
 pub const Timeouts = struct {
+    // Real hardware timeouts (per AHCI/Linux kernel specs)
     pub const BIOS_HANDOFF_US: u64 = 25_000; // 25ms - Primary BIOS handoff
     pub const BIOS_BUSY_US: u64 = 2_000_000; // 2s - BIOS busy extended wait
     pub const ENGINE_STOP_US: u64 = 1_000_000; // 1s - CR/FR clear timeout
@@ -55,7 +56,45 @@ pub const Timeouts = struct {
     pub const FLUSH_US: u64 = 30_000_000; // 30s - Cache flush timeout
     pub const POST_RESET_US: u64 = 150_000; // 150ms - Post-reset stability delay
     pub const COMRESET_US: u64 = 1_000; // 1ms - COMRESET signal duration
+
+    // Emulator timeouts (shorter - QEMU either works fast or not at all)
+    pub const ENGINE_STOP_US_EMU: u64 = 100_000; // 100ms
+    pub const DEVICE_DETECT_US_EMU: u64 = 200_000; // 200ms
+    pub const DEVICE_READY_US_EMU: u64 = 500_000; // 500ms
+    pub const COMMAND_US_EMU: u64 = 1_000_000; // 1s
+    pub const POST_RESET_US_EMU: u64 = 50_000; // 50ms
 };
+
+/// Check if running on emulator platform (QEMU TCG, unknown hypervisor)
+fn isEmulatorPlatform() bool {
+    const hv = hal.hypervisor.getHypervisor();
+    return hv == .qemu_tcg or hv == .unknown;
+}
+
+/// Get engine stop timeout based on platform
+pub fn getEngineStopTimeout() u64 {
+    return if (isEmulatorPlatform()) Timeouts.ENGINE_STOP_US_EMU else Timeouts.ENGINE_STOP_US;
+}
+
+/// Get device detect timeout based on platform
+pub fn getDeviceDetectTimeout() u64 {
+    return if (isEmulatorPlatform()) Timeouts.DEVICE_DETECT_US_EMU else Timeouts.DEVICE_DETECT_US;
+}
+
+/// Get device ready timeout based on platform
+pub fn getDeviceReadyTimeout() u64 {
+    return if (isEmulatorPlatform()) Timeouts.DEVICE_READY_US_EMU else Timeouts.DEVICE_READY_US;
+}
+
+/// Get command timeout based on platform
+pub fn getCommandTimeout() u64 {
+    return if (isEmulatorPlatform()) Timeouts.COMMAND_US_EMU else Timeouts.COMMAND_US;
+}
+
+/// Get post-reset delay based on platform
+pub fn getPostResetDelay() u64 {
+    return if (isEmulatorPlatform()) Timeouts.POST_RESET_US_EMU else Timeouts.POST_RESET_US;
+}
 
 // ============================================================================
 // Error Types
@@ -391,8 +430,8 @@ pub const AhciController = struct {
         // Start command engine
         port.startEngine(base);
 
-        // Wait for device to be ready (5s per AHCI spec BSY timeout)
-        if (!port.waitReady(base, Timeouts.DEVICE_READY_US)) {
+        // Wait for device to be ready (platform-aware timeout)
+        if (!port.waitReady(base, @truncate(getDeviceReadyTimeout()))) {
             console.warn("AHCI: Port {d} device not ready", .{port_num});
         }
 
@@ -468,7 +507,7 @@ pub const AhciController = struct {
 
     /// Issue a command and wait for completion
     fn issueCommand(self: *Self, port_num: u5, slot: u5) AhciError!void {
-        return self.issueCommandWithTimeout(port_num, slot, Timeouts.COMMAND_US);
+        return self.issueCommandWithTimeout(port_num, slot, getCommandTimeout());
     }
 
     /// Issue a command and wait for completion with custom timeout
@@ -476,8 +515,8 @@ pub const AhciController = struct {
         const p = &self.ports[port_num];
         const base = p.base;
 
-        // Wait for port to be ready (5s per AHCI spec BSY timeout)
-        if (!port.waitReady(base, Timeouts.DEVICE_READY_US)) {
+        // Wait for port to be ready (platform-aware timeout)
+        if (!port.waitReady(base, @truncate(getDeviceReadyTimeout()))) {
             return AhciError.CommandTimeout;
         }
 
@@ -845,8 +884,11 @@ pub const AhciController = struct {
         p.pending_requests[slot] = request;
         p.commands_issued |= @as(u32, 1) << slot;
 
-        // Transition request to in_progress
-        _ = request.compareAndSwapState(.pending, .in_progress);
+        // Transition request to in_progress (accept both idle and pending states)
+        // Some callers submit through reactor (pending), others call directly (idle)
+        if (!request.compareAndSwapState(.pending, .in_progress)) {
+            _ = request.compareAndSwapState(.idle, .in_progress);
+        }
 
         // Issue the command (non-blocking - IRQ will complete it)
         port.writeCi(p.base, @as(u32, 1) << slot);
@@ -909,8 +951,10 @@ pub const AhciController = struct {
         p.pending_requests[slot] = request;
         p.commands_issued |= @as(u32, 1) << slot;
 
-        // Transition request to in_progress
-        _ = request.compareAndSwapState(.pending, .in_progress);
+        // Transition request to in_progress (accept both idle and pending states)
+        if (!request.compareAndSwapState(.pending, .in_progress)) {
+            _ = request.compareAndSwapState(.idle, .in_progress);
+        }
 
         // Issue the command
         port.writeCi(p.base, @as(u32, 1) << slot);
@@ -1065,6 +1109,11 @@ pub fn registerIrqHandler(controller: *AhciController) void {
 
     // Register with interrupt system (uses global controller_instance)
     hal.interrupts.registerHandler(vector, ahciIrqHandler);
+
+    // Route PCI IRQ through I/O APIC (level-triggered, active-low)
+    // CRITICAL: PCI INTx uses different polarity than ISA IRQs
+    hal.apic.routePciIrq(irq, vector, 0);
+    hal.apic.enableIrq(irq);
 
     // Enable global HBA interrupts
     var ghc = hba.readGhc(controller.hba_base);

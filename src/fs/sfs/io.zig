@@ -4,12 +4,29 @@ const ahci = @import("ahci");
 const io = @import("io");
 const pmm = @import("pmm");
 const console = @import("console");
+const hal = @import("hal");
 const t = @import("types.zig");
 
-/// Read a single sector using async AHCI I/O (sync-over-async pattern)
+/// Check if running on emulator platform (QEMU TCG, unknown hypervisor)
+/// On emulators, PCI interrupts may not work correctly, so use sync I/O
+fn isEmulatorPlatform() bool {
+    const hv = hal.hypervisor.getHypervisor();
+    return hv == .qemu_tcg or hv == .unknown;
+}
+
+/// Read a single sector - uses sync I/O on emulators (PCI IRQs unreliable),
+/// async I/O on real hardware
 pub fn readSector(device_fd: *fd.FileDescriptor, lba: u32, buf: *[512]u8) t.SectorError!void {
     const port_num: u5 = @intCast(@intFromPtr(device_fd.private_data) & 0x1F);
 
+    // On emulators, PCI interrupts may not work - use sync (polling) I/O
+    if (isEmulatorPlatform()) {
+        const controller = ahci.getController() orelse return error.IOError;
+        controller.readSectors(port_num, lba, 1, buf) catch return error.IOError;
+        return;
+    }
+
+    // On real hardware, use async I/O with IRQ completion
     const req = io.allocRequest(.disk_read) orelse return error.IOError;
     defer io.freeRequest(req);
 
@@ -23,7 +40,7 @@ pub fn readSector(device_fd: *fd.FileDescriptor, lba: u32, buf: *[512]u8) t.Sect
         .success => |bytes| {
             @memset(buf, 0);
             if (bytes < 512) return error.IOError;
-            @import("hal").mmio.memoryBarrier(); // 
+            hal.mmio.memoryBarrier();
             ahci.adapter.copyFromDmaBuffer(buf_phys, buf);
         },
         .err => return error.IOError,
@@ -32,11 +49,22 @@ pub fn readSector(device_fd: *fd.FileDescriptor, lba: u32, buf: *[512]u8) t.Sect
     }
 }
 
-/// Write a single sector using async AHCI I/O (sync-over-async pattern)
+/// Write a single sector - uses sync I/O on emulators, async on real hardware
 pub fn writeSector(device_fd: *fd.FileDescriptor, lba: u32, buf: []const u8) t.SectorError!void {
     if (buf.len < 512) return error.IOError;
     const port_num: u5 = @intCast(@intFromPtr(device_fd.private_data) & 0x1F);
 
+    // On emulators, PCI interrupts may not work - use sync (polling) I/O
+    if (isEmulatorPlatform()) {
+        const controller = ahci.getController() orelse return error.IOError;
+        // writeSectors expects a mutable slice, but the data won't be modified
+        var write_buf: [512]u8 = undefined;
+        @memcpy(&write_buf, buf[0..512]);
+        controller.writeSectors(port_num, lba, 1, &write_buf) catch return error.IOError;
+        return;
+    }
+
+    // On real hardware, use async I/O with IRQ completion
     const req = io.allocRequest(.disk_write) orelse return error.IOError;
     defer io.freeRequest(req);
 
@@ -57,8 +85,16 @@ pub fn writeSector(device_fd: *fd.FileDescriptor, lba: u32, buf: []const u8) t.S
     }
 }
 
-/// Read a single sector using async AHCI I/O (associated with SFS instance)
+/// Read a single sector (SFS instance method) - uses sync I/O on emulators
 pub fn readSectorAsync(self: *t.SFS, lba: u32, buf: []u8) !void {
+    // On emulators, use sync I/O
+    if (isEmulatorPlatform()) {
+        const controller = ahci.getController() orelse return error.IOError;
+        controller.readSectors(self.port_num, lba, 1, buf[0..512]) catch return error.IOError;
+        return;
+    }
+
+    // On real hardware, use async I/O
     const req = io.allocRequest(.disk_read) orelse return error.IOError;
     defer io.freeRequest(req);
 
@@ -71,7 +107,7 @@ pub fn readSectorAsync(self: *t.SFS, lba: u32, buf: []u8) !void {
     switch (result) {
         .success => |bytes| {
             if (bytes < 512) return error.IOError;
-            @import("hal").mmio.memoryBarrier(); // 
+            hal.mmio.memoryBarrier();
             ahci.adapter.copyFromDmaBuffer(buf_phys, buf[0..512]);
         },
         .err => return error.IOError,
@@ -80,8 +116,18 @@ pub fn readSectorAsync(self: *t.SFS, lba: u32, buf: []u8) !void {
     }
 }
 
-/// Write a single sector using async AHCI I/O
+/// Write a single sector (SFS instance method) - uses sync I/O on emulators
 pub fn writeSectorAsync(self: *t.SFS, lba: u32, buf: []const u8) !void {
+    // On emulators, use sync I/O
+    if (isEmulatorPlatform()) {
+        const controller = ahci.getController() orelse return error.IOError;
+        var write_buf: [512]u8 = undefined;
+        @memcpy(&write_buf, buf[0..512]);
+        controller.writeSectors(self.port_num, lba, 1, &write_buf) catch return error.IOError;
+        return;
+    }
+
+    // On real hardware, use async I/O
     const req = io.allocRequest(.disk_write) orelse return error.IOError;
     defer io.freeRequest(req);
 
@@ -103,11 +149,29 @@ pub fn writeSectorAsync(self: *t.SFS, lba: u32, buf: []const u8) !void {
 }
 
 /// Read multiple sectors using async AHCI I/O (batched)
+/// On emulators, falls back to sync I/O since PCI interrupts may not work
 pub fn readSectorsAsync(self: *t.SFS, lba: u32, sector_count: u16, buf: []u8) !void {
     if (sector_count == 0) return;
     const total_bytes = @as(usize, sector_count) * 512;
     if (buf.len < total_bytes) return error.IOError;
 
+    // On emulators, use sync I/O (read sector by sector)
+    if (isEmulatorPlatform()) {
+        const controller = ahci.getController() orelse return error.IOError;
+        var current_lba = lba;
+        var offset: usize = 0;
+        var remaining = sector_count;
+        while (remaining > 0) : ({
+            current_lba += 1;
+            offset += 512;
+            remaining -= 1;
+        }) {
+            controller.readSectors(self.port_num, current_lba, 1, buf[offset..][0..512]) catch return error.IOError;
+        }
+        return;
+    }
+
+    // On real hardware, use async I/O with IRQ completion
     const req = io.allocRequest(.disk_read) orelse return error.IOError;
     defer io.freeRequest(req);
 
@@ -120,7 +184,7 @@ pub fn readSectorsAsync(self: *t.SFS, lba: u32, sector_count: u16, buf: []u8) !v
     switch (result) {
         .success => |bytes| {
             if (bytes < total_bytes) return error.IOError;
-            @import("hal").mmio.memoryBarrier(); // 
+            hal.mmio.memoryBarrier();
             ahci.adapter.copyFromDmaBuffer(buf_phys, buf[0..total_bytes]);
         },
         .err => return error.IOError,
@@ -130,11 +194,31 @@ pub fn readSectorsAsync(self: *t.SFS, lba: u32, sector_count: u16, buf: []u8) !v
 }
 
 /// Write multiple sectors using async AHCI I/O (batched)
+/// On emulators, falls back to sync I/O since PCI interrupts may not work
 pub fn writeSectorsAsync(self: *t.SFS, lba: u32, sector_count: u16, buf: []const u8) !void {
     if (sector_count == 0) return;
     const total_bytes = @as(usize, sector_count) * 512;
     if (buf.len < total_bytes) return error.IOError;
 
+    // On emulators, use sync I/O (write sector by sector)
+    if (isEmulatorPlatform()) {
+        const controller = ahci.getController() orelse return error.IOError;
+        var current_lba = lba;
+        var offset: usize = 0;
+        var remaining = sector_count;
+        var write_buf: [512]u8 = undefined;
+        while (remaining > 0) : ({
+            current_lba += 1;
+            offset += 512;
+            remaining -= 1;
+        }) {
+            @memcpy(&write_buf, buf[offset..][0..512]);
+            controller.writeSectors(self.port_num, current_lba, 1, &write_buf) catch return error.IOError;
+        }
+        return;
+    }
+
+    // On real hardware, use async I/O with IRQ completion
     const req = io.allocRequest(.disk_write) orelse return error.IOError;
     defer io.freeRequest(req);
 

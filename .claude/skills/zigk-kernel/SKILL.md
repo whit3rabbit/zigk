@@ -79,13 +79,15 @@ python scripts/rules_query.py lock      # Lock ordering
 ### Driver Lookup
 ```bash
 python scripts/driver_query.py mmio         # MmioDevice pattern
+python scripts/driver_query.py dma          # IOMMU-aware DMA allocation
 python scripts/driver_query.py ring         # Ring IPC pattern
 python scripts/driver_query.py capabilities # Userspace driver caps
 python scripts/driver_query.py split        # Split-process pattern
 python scripts/driver_query.py pci          # PCI enumeration
 python scripts/driver_query.py irq          # Legacy ISA IRQ routing (CRITICAL!)
-python scripts/driver_query.py msix         # MSI-X interrupt pattern
+python scripts/driver_query.py msix         # MSI-X interrupt pattern (x86_64 only)
 python scripts/driver_query.py input        # Input subsystem flow (HID/mouse/keyboard)
+python scripts/driver_query.py arch         # Architecture differences (x86_64 vs aarch64)
 ```
 
 ### Async Lookup
@@ -214,10 +216,12 @@ python scripts/driver_query.py template ring  # Ring IPC userspace driver
 ### New Driver (Kernel)
 1. Generate template: `python scripts/driver_query.py template mmio`
 2. Query PCI: `python scripts/driver_query.py pci`
-3. Query interrupt pattern: `python scripts/driver_query.py msix` (PCI) or `irq` (ISA)
-4. Create in `src/drivers/`
-5. Customize template with device-specific registers
-6. For ISA IRQs: Call `routeIrq()` BEFORE `enableIrq()` (see `irq` pattern)
+3. Query arch differences: `python scripts/driver_query.py arch`
+4. Query interrupt pattern: `python scripts/driver_query.py msix` (PCI, x86_64 only) or `irq` (ISA)
+5. Create in `src/drivers/`
+6. Customize template with device-specific registers
+7. For ISA IRQs: Call `routeIrq()` BEFORE `enableIrq()` (see `irq` pattern)
+8. For cross-platform: Check `allocateMsixVector()` return value for aarch64 fallback
 
 ### New Driver (Userspace)
 1. Generate template: `python scripts/driver_query.py template ring`
@@ -247,7 +251,10 @@ python scripts/driver_query.py template ring  # Ring IPC userspace driver
 | Syscall handlers | src/kernel/sys/syscall/{core,fs,memory,process,net,hw,io,io_uring,misc}/*.zig |
 | HAL (x86_64) | src/arch/x86_64/ (via hal import) |
 | HAL (aarch64) | src/arch/aarch64/ (via hal import) |
-| APIC/IRQ routing | src/arch/x86_64/kernel/apic/root.zig |
+| APIC/IRQ routing (x86_64) | src/arch/x86_64/kernel/apic/root.zig |
+| GIC (aarch64) | src/arch/aarch64/kernel/gic.zig |
+| MmioDevice (x86_64) | src/arch/x86_64/mm/mmio_device.zig |
+| MmioDevice (aarch64) | src/arch/aarch64/mm/mmio_device.zig |
 | Kernel drivers | src/drivers/ |
 | Input drivers | src/drivers/input/{keyboard,mouse,input}.zig |
 | USB HID driver | src/drivers/usb/class/hid/ |

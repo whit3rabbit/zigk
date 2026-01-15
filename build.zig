@@ -190,6 +190,7 @@ pub fn build(b: *std.Build) void {
     const qemu_nvme = b.option(bool, "nvme", "Add NVMe storage device for testing") orelse false;
     const qemu_audio = b.option([]const u8, "audio", "QEMU audio backend (none, coreaudio, pa, file)") orelse "none";
     const boot_logo_enabled = b.option(bool, "boot-logo", "Show animated boot logo during init (disable for debugging)") orelse true;
+    const allow_weak_entropy = b.option(bool, "allow-weak-entropy", "Allow weak entropy for ASLR (TESTING ONLY - insecure!)") orelse false;
 
     // Create kernel config options module
     const config_options = b.addOptions();
@@ -205,6 +206,7 @@ pub fn build(b: *std.Build) void {
     config_options.addOption(bool, "debug_scheduler", debug_scheduler);
     config_options.addOption(bool, "debug_network", debug_network);
     config_options.addOption(bool, "boot_logo_enabled", boot_logo_enabled);
+    config_options.addOption(bool, "allow_weak_entropy", allow_weak_entropy);
 
     // Create config module from build options
     const config_module = b.createModule(.{
@@ -379,6 +381,8 @@ pub fn build(b: *std.Build) void {
     aslr_module.addImport("random", random_module);
     aslr_module.addImport("pmm", pmm_module);
     aslr_module.addImport("console", console_module);
+    aslr_module.addImport("config", config_module);
+    aslr_module.addImport("hal", hal_module);
 
     // Create Slab module (Kernel Slab Allocator)
     const slab_module = b.createModule(.{
@@ -842,6 +846,23 @@ pub fn build(b: *std.Build) void {
     virtio_sound_module.addImport("uapi", uapi_module);
     virtio_sound_module.addImport("fd", fd_module);
     // user_mem added later (after user_mem_module is defined)
+
+    // Create VirtIO-9P driver module (shared folders via 9P protocol)
+    const virtio_9p_module = b.createModule(.{
+        .root_source_file = b.path("src/drivers/virtio/9p/root.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    virtio_9p_module.addImport("pci", pci_module);
+    virtio_9p_module.addImport("vmm", vmm_module);
+    virtio_9p_module.addImport("pmm", pmm_module);
+    virtio_9p_module.addImport("console", console_module);
+    virtio_9p_module.addImport("hal", hal_module);
+    virtio_9p_module.addImport("heap", heap_module);
+    virtio_9p_module.addImport("sync", sync_module);
+    virtio_9p_module.addImport("virtio", virtio_module);
+    virtio_9p_module.addImport("dma", dma_module);
+    virtio_9p_module.addImport("iommu", kernel_iommu_module);
 
     // Create DevFS module (device filesystem shim)
     const devfs_module = b.createModule(.{
@@ -1615,6 +1636,7 @@ pub fn build(b: *std.Build) void {
     kernel.root_module.addImport("virtio", virtio_module);
     kernel.root_module.addImport("virtio_input", virtio_input_module);
     kernel.root_module.addImport("virtio_sound", virtio_sound_module);
+    kernel.root_module.addImport("virtio_9p", virtio_9p_module);
 
     // Add architecture-specific assembly and linker script
     switch (target_arch) {
@@ -2256,11 +2278,13 @@ pub fn build(b: *std.Build) void {
         });
     } else {
         // x86_64-specific QEMU options
+        // Note: We don't use USB keyboard on x86_64 because QEMU TCG has USB transfer
+        // timeout issues. Instead, keyboard input goes to the built-in i8042 PS/2 controller.
+        // USB tablet is still used for mouse input (absolute positioning).
         run_cmd.addArgs(&.{
             "-machine", qemu_machine,
             "-m", "512M",
             "-device", "qemu-xhci,id=xhci",
-            "-device", "usb-kbd",
             "-device", "usb-tablet",
             "-vga", "std",
             "-audiodev",

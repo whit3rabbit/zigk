@@ -14,8 +14,9 @@ Usage:
     python driver_query.py userspace     # List userspace drivers
     python driver_query.py pci           # PCI enumeration pattern
     python driver_query.py irq           # Legacy ISA IRQ routing pattern
-    python driver_query.py msix          # MSI-X interrupt pattern
+    python driver_query.py msix          # MSI-X interrupt pattern (x86_64 only)
     python driver_query.py input         # Input subsystem flow
+    python driver_query.py arch          # Architecture differences (x86_64 vs aarch64)
     python driver_query.py template mmio # Generate MMIO driver boilerplate
     python driver_query.py template ring # Generate Ring IPC driver boilerplate
 """
@@ -26,7 +27,7 @@ PATTERNS = {
     "mmio": """
 ## MmioDevice Pattern (Kernel Drivers)
 
-Location: src/arch/x86_64/mmio_device.zig (via hal.mmio_device)
+Location: src/arch/{x86_64,aarch64}/mm/mmio_device.zig (via hal.mmio_device)
 
 ```zig
 const hal = @import("hal");
@@ -46,7 +47,19 @@ const status = regs.read(.STATUS);
 regs.write(.CTRL, CTRL_ENABLE | CTRL_RESET);
 ```
 
-Drivers using MmioDevice:
+### Architecture Differences
+
+| Feature | x86_64 | aarch64 |
+|---------|--------|---------|
+| Bounds checking | Debug/ReleaseSafe only | Always enabled (security) |
+| `pollTimed()` | Uses TSC for timeout | No-op stub (returns false) |
+| `writeRaw()` | Functional | No-op stub |
+| Atomic bit ops | Available (LOCK prefix) | Not available |
+
+**Security Note**: On aarch64, bounds checking cannot be disabled. Out-of-bounds
+MMIO access could cause privilege escalation or hardware misconfiguration.
+
+### Drivers using MmioDevice
 - XHCI: src/drivers/usb/xhci/
 - EHCI: src/drivers/usb/ehci/
 - AHCI: src/drivers/storage/ahci/
@@ -60,6 +73,10 @@ Location: src/kernel/mm/dma.zig
 
 When IOMMU (VT-d) is available, devices cannot access raw physical addresses.
 Use the dma module for all DMA buffer allocations.
+
+**Architecture Note**: IOMMU is only implemented on x86_64 (Intel VT-d). On aarch64,
+IOMMU stubs return `NotSupported` and DMA allocations fall back to raw physical
+addresses (no DMA isolation). ARM SMMU would be required for full support.
 
 ### Basic Pattern
 ```zig
@@ -93,6 +110,7 @@ hw_regs.write(.dma_addr_hi, buf.deviceAddrHi());
 | device_addr | Device address (IOVA if IOMMU, else phys) |
 | size | Requested size in bytes |
 | page_count | Number of pages allocated |
+| bdf | Device BDF for IOMMU cleanup on free |
 | iommu_mapped | Whether IOMMU mapping was used |
 
 **CRITICAL**: Always use `device_addr` for hardware descriptors!
@@ -387,19 +405,26 @@ hal.apic.enableIrq(irq);
 | 4 | 36 | COM1 | hal.apic.Vectors.COM1 |
 | 12 | 44 | PS/2 Mouse | hal.apic.Vectors.MOUSE |
 
-### Vector Assignments
+### Vector Assignments (x86_64)
 | Vector | Purpose |
 |--------|---------|
 | 32-47 | Legacy ISA IRQs (IRQ+32) |
 | 48 | LAPIC Timer |
-| 240-254 | MSI-X Pool |
+| 64-128 | MSI-X Pool (x86_64 only) |
 | 255 | Spurious |
+
+**aarch64 Note**: GIC (Generic Interrupt Controller) replaces IOAPIC/LAPIC.
+MSI-X is not implemented on aarch64 (would require GICv3 ITS).
 """,
 
     "msix": """
-## MSI-X Interrupt Pattern (PCI Devices)
+## MSI-X Interrupt Pattern (PCI Devices) - x86_64 Only
 
 MSI-X bypasses IOAPIC - PCI device writes directly to LAPIC.
+
+**aarch64 Note**: MSI-X is NOT implemented on aarch64. `allocateMsixVector()`
+returns `null` and `registerMsixHandler()` returns `false`. Would require
+GICv3 ITS implementation for full support.
 
 ### Five-Step Pattern
 ```zig
@@ -409,7 +434,7 @@ const hal = @import("hal");
 // 1. Find MSI-X capability in PCI config space
 const msix_cap = pci.findMsix(ecam, pci_dev) orelse return error.NoMsix;
 
-// 2. Allocate vector from MSI-X pool (240-254)
+// 2. Allocate vector from MSI-X pool (64-128 on x86_64)
 const vector = hal.interrupts.allocateMsixVector() orelse return error.NoVectors;
 
 // 3. Register handler for the vector
@@ -538,6 +563,57 @@ if (input.isInitialized()) {
     input.pushRelative(RelCode.X, dx, timestamp);
     input.pushRelative(RelCode.Y, dy, timestamp);
     input.pushSync(timestamp);
+}
+```
+""",
+
+    "arch": """
+## Architecture-Specific Driver Notes
+
+### x86_64
+
+- **IOMMU**: Intel VT-d fully supported with RMRR identity mappings
+- **Interrupts**: IOAPIC + LAPIC with MSI-X support (vectors 64-128)
+- **MmioDevice**: Full feature set including `pollTimed()` with TSC
+- **Memory Barriers**: Uses `mfence`, `lfence`, `sfence` instructions
+- **HAL Location**: src/arch/x86_64/
+
+### aarch64
+
+- **IOMMU**: NOT IMPLEMENTED (stubs return `NotSupported`)
+  - DMA allocations fall back to raw physical addresses
+  - No DMA isolation on ARM systems
+  - Would require ARM SMMU implementation for full support
+- **Interrupts**: GIC (Generic Interrupt Controller) replaces IOAPIC/LAPIC
+  - MSI-X NOT IMPLEMENTED (would require GICv3 ITS)
+  - `hal.interrupts.allocateMsixVector()` returns `null`
+  - `hal.interrupts.registerMsixHandler()` returns `false`
+  - Drivers must use legacy interrupt routing on aarch64
+- **MmioDevice**: Security-hardened variant
+  - Bounds checking always enabled (cannot be disabled)
+  - `pollTimed()` is a no-op stub (returns false)
+  - No atomic bit operations (`setBits32Atomic`, `clearBits32Atomic` unavailable)
+- **Memory Barriers**: Uses `dsb sy`, `dsb ld`, `dsb st` (ARM barriers)
+- **HAL Location**: src/arch/aarch64/
+
+### Writing Cross-Platform Drivers
+
+```zig
+// Check for MSI-X support at runtime
+if (hal.interrupts.allocateMsixVector()) |vector| {
+    // x86_64: use MSI-X
+    hal.interrupts.registerMsixHandler(vector, handleInterrupt);
+} else {
+    // aarch64 fallback: use legacy interrupt routing
+    hal.apic.routeIrq(irq, vector, 0);
+    hal.apic.enableIrq(irq);
+}
+
+// Check for IOMMU support
+if (dma.isIommuAvailable()) {
+    // x86_64: use IOVA
+} else {
+    // aarch64: use raw physical addresses
 }
 ```
 """,

@@ -17,11 +17,25 @@ const port = @import("port.zig");
 const command = @import("command.zig");
 const fis = @import("fis.zig");
 
-// Re-export from root for timeout constants
+// Timeout constants
 pub const Timeouts = struct {
+    // Real hardware timeouts
     pub const DEVICE_READY_US: u64 = 5_000_000; // 5s - BSY/DRQ clear (AHCI spec minimum)
     pub const COMMAND_US: u64 = 7_000_000; // 7s - Standard command timeout
+    // Emulator timeouts
+    pub const COMMAND_US_EMU: u64 = 1_000_000; // 1s
 };
+
+/// Check if running on emulator platform (QEMU TCG, unknown hypervisor)
+fn isEmulatorPlatform() bool {
+    const hv = hal.hypervisor.getHypervisor();
+    return hv == .qemu_tcg or hv == .unknown;
+}
+
+/// Get command timeout based on platform
+pub fn getCommandTimeout() u64 {
+    return if (isEmulatorPlatform()) Timeouts.COMMAND_US_EMU else Timeouts.COMMAND_US;
+}
 
 /// Port DMA memory context
 pub const PortDmaContext = struct {
@@ -204,7 +218,7 @@ pub fn identifyDevice(
 
     // Issue command using provided function pointer
     _ = port_base; // Port base is used internally by issueCommandFn
-    try issueCommandFn(port_num, 0, Timeouts.COMMAND_US);
+    try issueCommandFn(port_num, 0, getCommandTimeout());
 
     // Copy identify data (use phys_addr for CPU access via HHDM)
     const id_ptr: *fis.IdentifyData = @ptrCast(hal.paging.physToVirt(id_buffer.phys_addr));

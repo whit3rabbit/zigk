@@ -31,6 +31,32 @@ const ENGINE_STOP_MS: u32 = 1000; // CR/FR clear timeout (Linux uses 500-1000ms)
 const DEVICE_DETECT_MS: u32 = 2000; // PHY establishment (2s for slow devices)
 const POST_RESET_MS: u32 = 150; // Post-reset stability delay
 
+// Emulator timeout constants (shorter - QEMU either works fast or not at all)
+const ENGINE_STOP_MS_EMU: u32 = 100; // 100ms
+const DEVICE_DETECT_MS_EMU: u32 = 200; // 200ms
+const POST_RESET_MS_EMU: u32 = 50; // 50ms
+
+/// Check if running on emulator platform (QEMU TCG, unknown hypervisor)
+fn isEmulatorPlatform() bool {
+    const hv = hal.hypervisor.getHypervisor();
+    return hv == .qemu_tcg or hv == .unknown;
+}
+
+/// Get engine stop timeout based on platform
+fn getEngineStopMs() u32 {
+    return if (isEmulatorPlatform()) ENGINE_STOP_MS_EMU else ENGINE_STOP_MS;
+}
+
+/// Get device detect timeout based on platform
+fn getDeviceDetectMs() u32 {
+    return if (isEmulatorPlatform()) DEVICE_DETECT_MS_EMU else DEVICE_DETECT_MS;
+}
+
+/// Get post-reset delay based on platform
+fn getPostResetMs() u32 {
+    return if (isEmulatorPlatform()) POST_RESET_MS_EMU else POST_RESET_MS;
+}
+
 // ============================================================================
 // Port Register Offsets (relative to port base)
 // ============================================================================
@@ -497,8 +523,8 @@ pub fn stopEngine(base: u64) bool {
     writeCmd(base, cmd);
     memoryBarrier();
 
-    // Wait for CR to clear (1s timeout per Linux kernel)
-    var timeout_ms: u32 = ENGINE_STOP_MS;
+    // Wait for CR to clear (platform-aware timeout)
+    var timeout_ms: u32 = getEngineStopMs();
     while (timeout_ms > 0) : (timeout_ms -= 1) {
         cmd = readCmd(base);
         if (!cmd.cr) break;
@@ -516,8 +542,8 @@ pub fn stopEngine(base: u64) bool {
     writeCmd(base, cmd);
     memoryBarrier();
 
-    // Wait for FR to clear (1s timeout)
-    timeout_ms = ENGINE_STOP_MS;
+    // Wait for FR to clear (platform-aware timeout)
+    timeout_ms = getEngineStopMs();
     while (timeout_ms > 0) : (timeout_ms -= 1) {
         cmd = readCmd(base);
         if (!cmd.fr) break;
@@ -530,8 +556,8 @@ pub fn stopEngine(base: u64) bool {
 /// Start port command engine
 /// Sets FRE, then ST
 pub fn startEngine(base: u64) void {
-    // Wait for CR to be clear before starting (1s timeout)
-    var timeout_ms: u32 = ENGINE_STOP_MS;
+    // Wait for CR to be clear before starting (platform-aware timeout)
+    var timeout_ms: u32 = getEngineStopMs();
     while (timeout_ms > 0) : (timeout_ms -= 1) {
         const cmd = readCmd(base);
         if (!cmd.cr) break;
@@ -563,14 +589,14 @@ pub fn portReset(base: u64) bool {
     sctl.det = 0;
     writeSctl(base, sctl);
 
-    // Wait for device detection (2s timeout for slow devices per Linux kernel)
-    var timeout_ms: u32 = DEVICE_DETECT_MS;
+    // Wait for device detection (platform-aware timeout)
+    var timeout_ms: u32 = getDeviceDetectMs();
     while (timeout_ms > 0) : (timeout_ms -= 1) {
         const ssts = readSsts(base);
         if (ssts.det == 3) {
             // Device present and PHY established
-            // Critical: wait 150ms after reset for device stability (Linux kernel best practice)
-            hal.timing.delayMs(POST_RESET_MS);
+            // Platform-aware post-reset stability delay
+            hal.timing.delayMs(getPostResetMs());
             return true;
         }
         hal.timing.delayUs(1000);

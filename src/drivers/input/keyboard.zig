@@ -243,11 +243,8 @@ pub fn init() void {
 /// Handle keyboard IRQ (called from interrupt handler)
 /// Reads scancode from port and populates all buffers
 pub fn handleIrq() void {
-    // Count all IRQs for diagnostics (even before init check)
+    // Count all IRQs for diagnostics
     irq_count +%= 1;
-    if (irq_count == 1 or irq_count % 100 == 0) {
-        console.info("KBD IRQ #{d}", .{irq_count});
-    }
 
     if (!keyboard_initialized) {
         // Just read and discard to acknowledge
@@ -260,16 +257,19 @@ pub fn handleIrq() void {
 
     if (!status.hasData()) {
         // No data ready - spurious interrupt
-        if (error_stats.spurious_irqs % 100 == 0) {
-            console.debug("KBD: Spurious IRQ (Status=0x{X:0>2})", .{@as(u8, @bitCast(status))});
-        }
+        // IMPORTANT: Still read from data port to fully clear controller state
+        // Some emulators may not deliver subsequent edge-triggered IRQs
+        // if the data port isn't read, even when status says buffer is empty
+        _ = hal.io.inb(ps2.DATA_PORT);
         error_stats.spurious_irqs +%= 1;
         return;
     }
 
-    // Skip mouse data - let mouse IRQ handler deal with it
+    // Skip mouse data - but MUST read it to clear the buffer
+    // Some emulators (QEMU TCG) may fire IRQ1 for mouse data incorrectly
+    // If we don't clear the buffer, no further interrupts will be delivered
     if (status.isMouseData()) {
-        console.debug("KBD: Mouse data ignored (Status=0x{X:0>2})", .{@as(u8, @bitCast(status))});
+        _ = hal.io.inb(ps2.DATA_PORT); // Read and discard to clear buffer
         return;
     }
 
@@ -285,7 +285,6 @@ pub fn handleIrq() void {
 
     // Read scancode from keyboard data port
     const scancode = hal.io.inb(ps2.DATA_PORT);
-    console.debug("KBD: Scancode 0x{X:0>2}", .{scancode});
 
     // Acquire lock to protect buffer access
     const held = keyboard_lock.acquire();

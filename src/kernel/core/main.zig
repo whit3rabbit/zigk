@@ -338,23 +338,31 @@ export fn _start(boot_info: *BootInfo.BootInfo) callconv(.c) noreturn {
     hal.smp.init();
     console.info("Returned from hal.smp.init()", .{});
 
-    console.info("Keyboard IRQ1 explicitly enabled", .{});
     input.init();
     console.info("Input subsystem initialized", .{});
 
-    // Initialize PS/2 mouse driver
-    mouse.init();
-    hal.interrupts.setMouseHandler(&mouse.handleIrq);
-    // Route IRQ12 to vector 44 (MOUSE) before enabling
-    hal.apic.routeIrq(12, hal.apic.Vectors.MOUSE, 0);
-    hal.apic.enableIrq(12);
-    console.info("PS/2 mouse initialized, IRQ12 routed to vector {d}", .{hal.apic.Vectors.MOUSE});
+    // Initialize PS/2 keyboard and mouse (x86_64 only - uses APIC and PS/2 controller)
+    if (builtin.cpu.arch == .x86_64) {
+        keyboard.init();
+        hal.interrupts.setKeyboardHandler(&keyboard.handleIrq);
+        // Route IRQ1 to vector 33 (KEYBOARD) before enabling
+        hal.apic.routeIrq(1, hal.apic.Vectors.KEYBOARD, 0);
+        hal.apic.enableIrq(1);
+        console.info("PS/2 keyboard initialized, IRQ1 routed to vector {d}", .{hal.apic.Vectors.KEYBOARD});
 
-    hal.interrupts.setSerialHandler(&serial_driver.Serial.handleIrq);
-    // Route IRQ4 to vector 36 (COM1) before enabling
-    hal.apic.routeIrq(4, hal.apic.Vectors.COM1, 0);
-    hal.apic.enableIrq(4);
-    console.info("Serial IRQ4 routed to vector {d}", .{hal.apic.Vectors.COM1});
+        mouse.init();
+        hal.interrupts.setMouseHandler(&mouse.handleIrq);
+        // Route IRQ12 to vector 44 (MOUSE) before enabling
+        hal.apic.routeIrq(12, hal.apic.Vectors.MOUSE, 0);
+        hal.apic.enableIrq(12);
+        console.info("PS/2 mouse initialized, IRQ12 routed to vector {d}", .{hal.apic.Vectors.MOUSE});
+
+        hal.interrupts.setSerialHandler(&serial_driver.Serial.handleIrq);
+        // Route IRQ4 to vector 36 (COM1) before enabling
+        hal.apic.routeIrq(4, hal.apic.Vectors.COM1, 0);
+        hal.apic.enableIrq(4);
+        console.info("Serial IRQ4 routed to vector {d}", .{hal.apic.Vectors.COM1});
+    }
 
     hal.interrupts.setCrashHandler(panic_lib.handleCrash);
 
@@ -492,20 +500,26 @@ fn initApic(boot_info: *const BootInfo.BootInfo) void {
     acpi.logMadtInfo(madt_info);
 
     // Convert MADT info to APIC init info
-    var io_apics: [hal.apic.ioapic.MAX_IOAPICS]hal.apic.IoApicInfo = undefined;
+    // IMPORTANT: These must be static to outlive initApic() since hal.apic caches the pointers.
+    // Otherwise we get use-after-free when routeIrq() is called later.
+    const io_apics_static = struct {
+        var data: [hal.apic.ioapic.MAX_IOAPICS]hal.apic.IoApicInfo = undefined;
+    };
     for (madt_info.io_apics[0..madt_info.io_apic_count], 0..) |ioapic, i| {
-        io_apics[i] = .{
+        io_apics_static.data[i] = .{
             .id = ioapic.id,
             .addr = ioapic.addr,
             .gsi_base = ioapic.gsi_base,
         };
     }
 
-    // Convert overrides
-    var overrides: [16]?hal.apic.InterruptOverride = [_]?hal.apic.InterruptOverride{null} ** 16;
+    // Convert overrides - also must be static for same reason
+    const overrides_static = struct {
+        var data: [16]?hal.apic.InterruptOverride = [_]?hal.apic.InterruptOverride{null} ** 16;
+    };
     for (madt_info.overrides, 0..) |maybe_ovr, i| {
         if (maybe_ovr) |ovr| {
-            overrides[i] = .{
+            overrides_static.data[i] = .{
                 .source_irq = ovr.source_irq,
                 .gsi = ovr.gsi,
                 .polarity = if (builtin.cpu.arch == .x86_64)
@@ -522,8 +536,8 @@ fn initApic(boot_info: *const BootInfo.BootInfo) void {
 
     const apic_init_info = hal.apic.ApicInitInfo{
         .local_apic_addr = madt_info.local_apic_addr,
-        .io_apics = io_apics[0..madt_info.io_apic_count],
-        .overrides = &overrides,
+        .io_apics = io_apics_static.data[0..madt_info.io_apic_count],
+        .overrides = &overrides_static.data,
         .pcat_compat = madt_info.pcat_compat,
         .lapic_ids = madt_info.lapic_ids[0..madt_info.lapic_count],
     };

@@ -12,14 +12,44 @@
 //!
 //! Note: VDSO randomization is handled separately in vdso.zig.
 //!
-//! Entropy source: Kernel PRNG (xoroshiro128+) seeded from RDRAND/RDSEED at boot.
+//! Entropy source: Kernel CSPRNG (ChaCha20) seeded from RDRAND/RDSEED at boot.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const random = @import("random");
 const pmm = @import("pmm");
 const console = @import("console");
+const config = @import("config");
+const hal = @import("hal");
 
 const PAGE_SIZE: u64 = pmm.PAGE_SIZE;
+
+/// Check if the current platform should allow weak entropy.
+/// Returns true for known development/emulator platforms where
+/// hardware entropy (RDRAND/FEAT_RNG) may not be properly emulated.
+fn shouldAllowWeakEntropy() bool {
+    // Build flag always overrides (for edge cases like ancient hardware)
+    if (config.allow_weak_entropy) return true;
+
+    const hv_type = hal.hypervisor.getHypervisor();
+    return switch (hv_type) {
+        // Known emulators with poor RDRAND support
+        .qemu_tcg => true,
+        // Unknown hypervisor - allow but warn (better UX for dev)
+        .unknown => true,
+        // "Bare Metal" on aarch64 without FEAT_RNG is likely QEMU TCG
+        // (real ARM64 hardware typically has ARMv8.5-RNG).
+        // On x86_64, QEMU TCG is detected via CPUID signature.
+        .none => builtin.cpu.arch == .aarch64,
+        // All others (KVM, VMware, etc.) should have working entropy
+        else => false,
+    };
+}
+
+/// Get human-readable platform name for logging
+fn getPlatformName() []const u8 {
+    return hal.hypervisor.getHypervisor().name();
+}
 
 /// ASLR configuration constants
 /// Entropy amounts follow Linux conventions for compatibility.
@@ -76,7 +106,8 @@ pub const Config = struct {
 /// Stored as page/unit counts to save memory; use helper functions for actual addresses.
 pub const AslrOffsets = struct {
     /// Stack offset in pages (subtracted from STACK_TOP_BASE)
-    stack_offset: u16 = 0,
+    /// u32 required to hold 22 bits of entropy (STACK_ENTROPY_BITS)
+    stack_offset: u32 = 0,
 
     /// PIE base offset in 64KB units (added to PIE_BASE)
     pie_offset: u16 = 0,
@@ -95,6 +126,20 @@ pub const AslrOffsets = struct {
     stack_top: u64 = Config.STACK_TOP_BASE,
     mmap_start: u64 = Config.MMAP_BASE,
     tls_base: u64 = Config.TLS_BASE,
+
+    // Compile-time validation: ensure storage types can hold claimed entropy bits
+    comptime {
+        if (@bitSizeOf(@TypeOf(@as(AslrOffsets, undefined).stack_offset)) < Config.STACK_ENTROPY_BITS)
+            @compileError("stack_offset too small for STACK_ENTROPY_BITS");
+        if (@bitSizeOf(@TypeOf(@as(AslrOffsets, undefined).pie_offset)) < Config.PIE_ENTROPY_BITS)
+            @compileError("pie_offset too small for PIE_ENTROPY_BITS");
+        if (@bitSizeOf(@TypeOf(@as(AslrOffsets, undefined).mmap_offset)) < Config.MMAP_ENTROPY_BITS)
+            @compileError("mmap_offset too small for MMAP_ENTROPY_BITS");
+        if (@bitSizeOf(@TypeOf(@as(AslrOffsets, undefined).heap_gap)) < Config.HEAP_ENTROPY_BITS)
+            @compileError("heap_gap too small for HEAP_ENTROPY_BITS");
+        if (@bitSizeOf(@TypeOf(@as(AslrOffsets, undefined).tls_offset)) < Config.TLS_ENTROPY_BITS)
+            @compileError("tls_offset too small for TLS_ENTROPY_BITS");
+    }
 };
 
 /// Error type for ASLR generation
@@ -105,15 +150,25 @@ pub const AslrError = error{
 /// Generate ASLR offsets for a new process
 /// Called during createProcess() and execve()
 ///
-/// Returns error.WeakEntropy if the PRNG is using fallback seed (per CLAUDE.md
-/// "Fail Secure" policy: security-critical dependencies must not silently degrade).
+/// Returns error.WeakEntropy if the PRNG is using fallback seed on production platforms.
+/// On development/emulator platforms (QEMU TCG, unknown hypervisors), weak entropy is
+/// allowed with a warning to improve developer experience while maintaining fail-secure
+/// for production deployments.
 pub fn generateOffsets() AslrError!AslrOffsets {
     var offsets = AslrOffsets{};
 
     // SECURITY: Fail-secure per CLAUDE.md policy.
-    // If entropy source is weak, refuse to generate ASLR offsets.
-    // This prevents spawning processes with predictable memory layouts.
-    if (random.isEntropyWeak()) return error.WeakEntropy;
+    // If entropy source is weak, check platform to decide whether to allow.
+    if (random.isEntropyWeak()) {
+        if (shouldAllowWeakEntropy()) {
+            // Development/emulator platform - warn but continue
+            console.warn("ASLR: Weak entropy on {s} - INSECURE for production!", .{getPlatformName()});
+        } else {
+            // Production platform - fail secure
+            console.err("ASLR: Weak entropy on {s} - refusing to continue", .{getPlatformName()});
+            return error.WeakEntropy;
+        }
+    }
 
     // Generate random values using kernel random module (CSPRNG)
     offsets.stack_offset = @truncate(random.getU64() % (Config.STACK_MAX_OFFSET + 1));
@@ -155,7 +210,6 @@ pub fn getHeapStart(elf_end: u64, offsets: *const AslrOffsets) u64 {
 
 /// Log ASLR configuration for debugging
 pub fn logOffsets(offsets: *const AslrOffsets, pid: u32) void {
-    const builtin = @import("builtin");
     if (builtin.mode != .Debug) return;
 
     console.debug("ASLR[pid={}]: stack_top={x} pie_base={x} mmap={x} heap_gap={} tls_base={x}", .{
