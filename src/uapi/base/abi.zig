@@ -158,6 +158,53 @@ pub const SockAddrIn6 = extern struct {
     }
 };
 
+/// struct sockaddr_un - Reference: Linux <sys/un.h>
+/// Must be 110 bytes: family(2) + sun_path(108)
+/// Used for UNIX domain socket addresses in bind(), connect(), etc.
+pub const SockAddrUn = extern struct {
+    family: u16,
+    sun_path: [108]u8,
+
+    pub const AF_UNIX: u16 = 1;
+    pub const PATH_MAX: usize = 108;
+
+    /// Check if this is an abstract socket (path starts with null byte).
+    /// Abstract sockets live in kernel namespace, not filesystem.
+    pub fn isAbstract(self: *const SockAddrUn) bool {
+        return self.sun_path[0] == 0;
+    }
+
+    /// Get the effective path length from the address.
+    /// For abstract sockets: full provided length (after null byte).
+    /// For filesystem sockets: up to first null terminator.
+    pub fn pathLen(self: *const SockAddrUn, addrlen: usize) usize {
+        if (addrlen <= 2) return 0;
+        const max_path = @min(addrlen - 2, PATH_MAX);
+        if (self.isAbstract()) {
+            return max_path; // Abstract: full provided length
+        }
+        // Filesystem: find null terminator
+        for (self.sun_path[0..max_path], 0..) |c, i| {
+            if (c == 0) return i;
+        }
+        return max_path;
+    }
+
+    /// Create a zeroed SockAddrUn with AF_UNIX family.
+    pub fn init() SockAddrUn {
+        return .{
+            .family = AF_UNIX,
+            .sun_path = [_]u8{0} ** 108,
+        };
+    }
+
+    comptime {
+        if (@sizeOf(@This()) != 110) {
+            @compileError("SockAddrUn must be 110 bytes");
+        }
+    }
+};
+
 /// struct sockaddr_storage - Reference: Linux <sys/socket.h>
 /// Generic socket address storage that can hold either IPv4 or IPv6 addresses.
 /// Must be 128 bytes with 8-byte alignment per POSIX.
@@ -182,6 +229,16 @@ pub const SockAddrStorage = extern struct {
 
     pub fn asSockAddrIn6Mut(self: *SockAddrStorage) ?*SockAddrIn6 {
         if (self.family != SockAddrIn6.AF_INET6) return null;
+        return @ptrCast(self);
+    }
+
+    pub fn asSockAddrUn(self: *const SockAddrStorage) ?*const SockAddrUn {
+        if (self.family != SockAddrUn.AF_UNIX) return null;
+        return @ptrCast(self);
+    }
+
+    pub fn asSockAddrUnMut(self: *SockAddrStorage) ?*SockAddrUn {
+        if (self.family != SockAddrUn.AF_UNIX) return null;
         return @ptrCast(self);
     }
 
@@ -381,6 +438,7 @@ pub fn verifyAbi() void {
         _ = Timespec{};
         _ = SockAddrIn{};
         _ = SockAddrIn6{};
+        _ = SockAddrUn.init();
         _ = SockAddrStorage{};
         _ = SockAddr{};
         _ = TimeVal{};

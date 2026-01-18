@@ -30,6 +30,8 @@ pub fn htonl(v: u32) u32 {
 }
 
 /// Socket address families
+pub const AF_UNIX: i32 = 1; // UNIX domain sockets (local IPC)
+pub const AF_LOCAL: i32 = AF_UNIX; // Alias for AF_UNIX (POSIX)
 pub const AF_INET: i32 = 2;
 pub const AF_INET6: i32 = 10;
 

@@ -438,7 +438,7 @@ The following features are intentionally incomplete or stubbed for the MVP relea
 
 #### Drivers & Hardware
 *   **Audio/Music**: Doom sound effects and music playback fully implemented with OPL3 FM synthesis.
-*   **VirtIO-Blk IPC**: Message buffers limited to 4 sectors (2KB) per request.
+*   **VirtIO-Blk IPC**: Message buffers support up to 32 sectors (16KB) per message with automatic chunking for larger requests up to 256 sectors (128KB).
 *   **VirtIO-Net Features**: `VIRTIO_NET_F_MRG_RXBUF` and `EVENT_IDX` defined but not negotiated.
 
 #### Signals & Context
@@ -466,11 +466,14 @@ This section documents known gaps, incomplete implementations, and security conc
 
 ### Priority 2: Correctness & Robustness
 
-#### IST Stack Allocation for Double Fault
-- **Status**: PARTIAL (Double Fault complete, NMI/MCE pending)
-- **Description**: IST1 is fully configured for Double Fault with per-CPU 4KB stacks allocated in `gdt.zig` (`double_fault_stacks`). IDT entry 8 uses `interruptWithIst(handler, 0, 1)`. TSS structure has all 7 IST entries defined. `initTssForCpu()` correctly sets IST1 for each CPU during SMP boot.
-- **Remaining**: Allocate IST2 for NMI (vector 2) and IST3 for MCE (vector 18). Update IDT entries to use their respective IST stacks.
-- **Files**: `src/arch/x86_64/kernel/gdt.zig`, `src/arch/x86_64/kernel/idt.zig`
+#### IST Stack Allocation for Critical Exceptions
+- **Status**: COMPLETE (2026-01-15)
+- **Description**: IST stacks are fully configured for all critical exceptions that can occur during the SYSCALL/SYSRET gap or when the kernel stack may be corrupted:
+  - **IST1 (Double Fault)**: Per-CPU 4KB stacks in `double_fault_stacks`. IDT entry 8 uses `interruptWithIst(handler, 0, 1)`.
+  - **IST2 (NMI)**: Per-CPU 4KB stacks in `nmi_stacks`. IDT entry 2 uses `interruptWithIst(handler, 0, 2)`. NMI can occur at any time including during SYSCALL/SYSRET gap.
+  - **IST3 (MCE)**: Per-CPU 4KB stacks in `mce_stacks`. IDT entry 18 uses `interruptWithIst(handler, 0, 3)`. MCE indicates hardware failure requiring dedicated stack for diagnostics.
+- **Security**: All IST stacks are zero-initialized to prevent information disclosure. The `isr_paranoid` assembly handler reads `MSR_GS_BASE` to determine if SWAPGS is needed, correctly handling the kernel-mode SYSCALL/SYSRET gap where GS base may be in user or kernel state.
+- **Files**: `src/arch/x86_64/kernel/gdt.zig`, `src/arch/x86_64/kernel/idt.zig`, `src/arch/x86_64/lib/asm_helpers.S`
 
 #### IOMMU Per-Device Integration
 - **Status**: COMPLETE (2026-01-07)
@@ -504,9 +507,14 @@ This section documents known gaps, incomplete implementations, and security conc
 - **Files**: `src/user/doom/i_sound.zig`, `src/user/doom/opl3.zig`, `src/user/doom/midi.zig`, `src/user/doom/midi_parser.zig`, `src/user/doom/sequencer.zig`, `src/user/doom/genmidi.zig`
 
 #### VirtIO-Blk Large Requests
-- **Status**: LIMITED
-- **Description**: IPC message buffers limited to 4 sectors (2KB) per request.
-- **Fix**: Implement scatter-gather or chunked request protocol for larger transfers.
+- **Status**: IMPROVED (2026-01-16)
+- **Description**: IPC message buffers now support up to 32 sectors (16KB) per message, an 8x improvement from the original 4 sectors (2KB). Requests up to 256 sectors (128KB) are automatically chunked by the driver using a multi-message protocol with `more_chunks` continuation flag.
+- **Implementation**:
+  - `MAX_SECTORS_PER_MESSAGE = 32` for inline data in IPC messages
+  - `MAX_SECTORS_PER_REQUEST = 256` total sectors with automatic chunking
+  - Static buffers for IPC messages to avoid stack overflow
+  - `BlockResponse.more_chunks` field for chunked read continuation
+  - Bounds checking includes full request range validation
 - **Files**: `src/user/drivers/virtio_blk/main.zig`
 
 ### Audit Notes
@@ -533,7 +541,10 @@ This roadmap was generated from a comprehensive feature validation on 2024-12-30
 - Dynamic thread FPU buffer allocation (64-byte aligned)
 - Signal delivery/return with dynamic FPU frame sizes
 - Paranoid ISR stubs for NMI/MCE/DF/DB with correct GS base handling (discovered - was already implemented)
-- Double Fault IST1 stack allocation per-CPU (discovered - was already implemented)
+- All critical exception IST stacks per-CPU (discovered - was already implemented):
+  - IST1 for Double Fault (vector 8)
+  - IST2 for NMI (vector 2)
+  - IST3 for MCE (vector 18)
 
 **Implemented 2026-01-02:**
 - VMware SVGA II aarch64 support via MMIO register access (VMware Fusion on Apple Silicon)
@@ -646,6 +657,32 @@ This roadmap was generated from a comprehensive feature validation on 2024-12-30
   - Global address configuration with gateway setting
   - Timestamp-based RA deduplication
 
+**Implemented 2026-01-16:**
+- **UNIX Domain Sockets (Full Implementation)**: Complete path-based and anonymous sockets for local IPC
+  - Location: `src/net/transport/socket/unix_socket.zig`, `src/kernel/sys/syscall/net/net.zig`
+  - `socket(AF_UNIX, SOCK_STREAM, 0)` creates unbound sockets
+  - `socketpair(AF_UNIX, SOCK_STREAM|SOCK_DGRAM, 0, sv)` for anonymous pairs
+  - `bind()` to filesystem paths or abstract namespace (\0-prefixed)
+  - `listen()` / `accept()` for server sockets (8-connection accept queue)
+  - `connect()` for client connections with proper queuing
+  - Bidirectional 4KB circular buffers per connection
+  - Blocking and non-blocking I/O modes (SOCK_NONBLOCK flag support)
+  - `poll()` support for I/O multiplexing on all socket states
+  - Reference counting for proper cleanup when endpoints close
+  - SMP-safe with spinlock protection and wakeup flags to prevent lost wakeups
+  - Generation counters for stale reference detection
+  - Path registry (256 slots) for socket name resolution
+  - Limitations: SO_PEERCRED returns zeros, no cmsg/FD passing, 256 socket limit
+- **VirtIO-Blk Large Request Support**: 8x improvement in per-message capacity (`src/user/drivers/virtio_blk/main.zig`)
+  - Increased `MAX_SECTORS_PER_MESSAGE` from 4 to 32 sectors (2KB to 16KB)
+  - Added `MAX_SECTORS_PER_REQUEST` of 256 sectors (128KB) with automatic chunking
+  - Static IPC buffers to avoid stack overflow with larger messages
+  - `BlockResponse.more_chunks` continuation flag for multi-message transfers
+  - Full request range bounds validation
+- **IST Stack Documentation Update**: Confirmed IST2 (NMI) and IST3 (MCE) were already implemented
+  - All critical exception IST stacks (DF/NMI/MCE) documented as complete
+  - Paranoid ISR handlers with MSR_GS_BASE check were already in place
+
 **Methodology**: Codebase exploration using pattern matching across:
 - `src/arch/x86_64/` and `src/arch/aarch64/` for architecture features
 - `src/kernel/mm/` for memory management
@@ -748,7 +785,7 @@ This roadmap was generated from a comprehensive feature validation on 2024-12-30
 | Raw Sockets (IPv4 ICMP) | **Implemented** | ping utility support (2026-01-07) |
 | Raw Sockets (IPv6 ICMPv6) | **Implemented** | ping6 utility support |
 | Raw Sockets (traceroute) | **Implemented** | TTL control + TIME_EXCEEDED delivery (2026-01-07) |
-| UNIX Domain Sockets | Not Implemented | Local IPC (systemd, dbus patterns) |
+| UNIX Domain Sockets | **Implemented** | Full bind/listen/accept/connect + socketpair (2026-01-18) |
 
 #### Storage Gaps
 | Feature | Status | Impact |
@@ -925,11 +962,15 @@ Modern VirtIO devices use 0x1040 + device_type. The kernel should detect both le
 | Raw Sockets (traceroute) | - | IPv4/IPv6 traceroute via TTL/hop limit control and TIME_EXCEEDED delivery |
 | IPv6 Dual-Stack Syscalls | - | sys_getsockname/sys_getpeername return AF_INET6 addresses |
 
+### Recently Added (2026-01-16)
+| Protocol | RFC | Use Case |
+|----------|-----|----------|
+| UNIX Sockets | - | Full path-based IPC: socket/bind/listen/accept/connect + socketpair |
+
 ### Not Implemented
 | Protocol | RFC | Use Case |
 |----------|-----|----------|
 | IGMP | 3376 | Multicast group membership |
-| UNIX Sockets | - | Local IPC |
 | Netlink | - | Network configuration |
 
 ---

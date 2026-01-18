@@ -11,12 +11,15 @@ const options = @import("options.zig");
 const poll_mod = @import("poll.zig");
 const control = @import("control.zig");
 const errors = @import("errors.zig");
+pub const unix_socket = @import("unix_socket.zig");
 
 // Helpers
 pub const htons = types.htons;
 pub const htonl = types.htonl;
 
 // Constants and types
+pub const AF_UNIX = types.AF_UNIX;
+pub const AF_LOCAL = types.AF_LOCAL;
 pub const AF_INET = types.AF_INET;
 pub const AF_INET6 = types.AF_INET6;
 pub const SOCK_STREAM = types.SOCK_STREAM;
