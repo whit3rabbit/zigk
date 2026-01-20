@@ -101,6 +101,36 @@ pub fn access(path: [*:0]const u8, mode: i32) SyscallError!void {
     if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
 }
 
+// =============================================================================
+// Directory Operations (sys_mkdir, sys_rmdir, sys_chdir, sys_getcwd)
+// =============================================================================
+
+/// Create a directory
+pub fn mkdir(path: [*:0]const u8, mode: u32) SyscallError!void {
+    const ret = primitive.syscall2(syscalls.SYS_MKDIR, @intFromPtr(path), mode);
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Remove a directory
+pub fn rmdir(path: [*:0]const u8) SyscallError!void {
+    const ret = primitive.syscall1(syscalls.SYS_RMDIR, @intFromPtr(path));
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Change current working directory
+pub fn chdir(path: [*:0]const u8) SyscallError!void {
+    const ret = primitive.syscall1(syscalls.SYS_CHDIR, @intFromPtr(path));
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Get current working directory
+/// Returns the length of the path on success (excluding null terminator)
+pub fn getcwd(buf: [*]u8, size: usize) SyscallError!usize {
+    const ret = primitive.syscall2(syscalls.SYS_GETCWD, @intFromPtr(buf), size);
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return ret;
+}
+
 /// Device control
 pub fn ioctl(fd: i32, cmd: u32, arg: usize) SyscallError!i32 {
     const ret = primitive.syscall3(syscalls.SYS_IOCTL, @bitCast(@as(isize, fd)), cmd, arg);

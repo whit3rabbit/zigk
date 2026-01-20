@@ -7,6 +7,7 @@ const std = @import("std");
 const syscall = @import("syscall");
 const file_mod = @import("file.zig");
 const va_list_mod = @import("../va_list.zig");
+const memory = @import("../memory/root.zig");
 
 const FILE = file_mod.FILE;
 const VaList = va_list_mod.VaList;
@@ -367,11 +368,38 @@ pub export fn vsprintf(dest: ?[*]u8, fmt: [*:0]const u8, ap: va_list) c_int {
     return @intCast(len);
 }
 
-/// vasprintf - allocate and format string (stub - needs allocator)
+/// vasprintf - allocate and format string
+/// Allocates a buffer and formats the string into it.
+/// Sets *strp to the allocated buffer on success.
+/// Returns length on success (excluding null terminator), -1 on error.
+/// Note: Without va_copy, limited to FORMAT_BUF_SIZE (4096) characters.
 pub export fn vasprintf(strp: ?*?[*:0]u8, fmt: [*:0]const u8, ap: va_list) c_int {
-    _ = fmt;
-    _ = ap;
     if (strp == null) return -1;
     strp.?.* = null;
-    return -1;
+
+    // Format to stack buffer to measure length
+    var buf: [FORMAT_BUF_SIZE]u8 = undefined;
+    var valist = VaList.from(ap);
+    const len = formatToBuffer(&buf, buf.len, fmt, &valist);
+
+    // Check if output was truncated (len >= buf.len - 1 means truncation)
+    // Note: formatToBuffer null-terminates, so usable space is buf.len - 1
+    if (len >= FORMAT_BUF_SIZE - 1) {
+        // Output would be truncated - return error
+        // Without va_copy, we cannot safely re-format with a larger buffer
+        return -1;
+    }
+
+    // Allocate buffer for result (len + 1 for null terminator)
+    const alloc_size = len + 1;
+    const ptr = memory.malloc(alloc_size) orelse return -1;
+
+    // Copy formatted string to allocated buffer
+    const dest: [*]u8 = @ptrCast(ptr);
+    for (0..alloc_size) |i| {
+        dest[i] = buf[i];
+    }
+
+    strp.?.* = @ptrCast(dest);
+    return @intCast(len);
 }

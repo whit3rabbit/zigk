@@ -79,11 +79,23 @@ pub const EBUSY: c_int = 16;
 /// File exists
 pub const EEXIST: c_int = 17;
 
+/// Read-only file system
+pub const EROFS: c_int = 30;
+
 /// Function not implemented
 pub const ENOSYS: c_int = 38;
 
 /// Value too large for defined data type
 pub const EOVERFLOW: c_int = 75;
+
+/// Not a directory
+pub const ENOTDIR: c_int = 20;
+
+/// Is a directory
+pub const EISDIR: c_int = 21;
+
+/// File name too long
+pub const ENAMETOOLONG: c_int = 36;
 
 // Error string table for strerror
 pub const error_strings = [_][:0]const u8{

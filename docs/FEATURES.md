@@ -229,7 +229,7 @@ Zig-based microkernel for x86_64 and AArch64 with custom UEFI bootloader.
 - **VirtIO Drivers**: Userspace VirtIO-Net/Blk with capability syscalls
 - **Ring IPC**: Zero-copy with 128-byte cache-line separation
 - **SPICE Agent**: Display resolution sync via VDI protocol over VirtIO-Serial
-- **Libc**: Recursion-safe memcpy/memset, overflow-protected malloc, strlcpy/strlcat
+- **Libc**: Recursion-safe memcpy/memset, overflow-protected malloc, strlcpy/strlcat, getenv/setenv/unsetenv/putenv, scanf/sscanf, vasprintf
 - **setjmp/longjmp**: Full implementation with signal mask save/restore
 - **io_uring Wrapper**: Type-safe SQ/CQ with kernel blocking
 - **CRT0**: Manual varargs for AAPCS64/SysV, TLS init, 4MB null-pointer guard
@@ -299,15 +299,20 @@ Zig-based microkernel for x86_64 and AArch64 with custom UEFI bootloader.
 - **StorVSC/NetVSC**: Paravirtualized storage/network
 - **Synthetic Interrupt Controller**
 
-### Libc Stubs
-- **Environment**: getenv/setenv/unsetenv (no env block)
-- **Filesystem**: mkdir/rmdir/chdir/getcwd (InitRD read-only)
-- **Input Parsing**: scanf/fscanf
-- **Dynamic Alloc**: vasprintf
+### Libc Limitations
+- **Directory Ops**: mkdir/rmdir return EROFS on InitRD (read-only); chdir only works for "/" (flat InitRD)
+- **Environment**: Static storage (4096 bytes, 128 vars max)
+- **vasprintf**: Limited to 4096 bytes output (no va_copy)
 
 ---
 
 ## Recent Implementation Log
+
+### 2026-01-20
+- Libc environment variables: getenv/setenv/unsetenv/putenv with static storage
+- scanf/fscanf reading from stdin (was stub returning 0)
+- vasprintf with malloc allocation (4096 byte limit without va_copy)
+- Directory syscall wrappers: mkdir/rmdir/chdir/getcwd
 
 ### 2026-01-19
 - SPICE Agent service with VDI protocol for Proxmox/QEMU display sync

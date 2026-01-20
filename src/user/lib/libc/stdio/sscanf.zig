@@ -34,11 +34,13 @@ pub export fn fscanf_impl(stream: ?*anyopaque, fmt: ?[*:0]const u8, ap_raw: ?*an
     return fscanf_core(f, fmt.?, &ap);
 }
 
-/// scanf_impl - called by C shim on aarch64 (stub)
+/// scanf_impl - called by C shim on aarch64
 pub export fn scanf_impl(fmt: ?[*:0]const u8, ap_raw: ?*anyopaque) c_int {
-    _ = fmt;
-    _ = ap_raw;
-    return 0;
+    if (fmt == null) return EOF;
+    const stdin_ptr = streams.stdin;
+    if (stdin_ptr == null) return EOF;
+    var ap = VaList.from(ap_raw);
+    return fscanf_core(stdin_ptr.?, fmt.?, &ap);
 }
 
 // ============================================================================
@@ -65,8 +67,13 @@ const X86SscanfExports = if (builtin.cpu.arch == .x86_64) struct {
     }
 
     pub export fn scanf(fmt: ?[*:0]const u8, ...) callconv(.c) c_int {
-        _ = fmt;
-        return 0;
+        if (fmt == null) return EOF;
+        const stdin_ptr = streams.stdin;
+        if (stdin_ptr == null) return EOF;
+        var args = @cVaStart();
+        defer @cVaEnd(&args);
+        var ap = VaList.from(@ptrCast(&args));
+        return fscanf_core(stdin_ptr.?, fmt.?, &ap);
     }
 } else struct {};
 
