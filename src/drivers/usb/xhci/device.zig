@@ -109,6 +109,12 @@ pub const UsbDevice = struct {
     /// while another thread is deallocating. Starts at 1 (creation holds a reference).
     refcount: std.atomic.Value(u32) = std.atomic.Value(u32).init(1),
 
+    /// Consecutive control transfer timeout counter
+    /// Security: Tracks consecutive timeouts to detect malicious devices that
+    /// intentionally hang to exhaust memory (each timeout leaks 4KB DMA page).
+    /// Device is disconnected when MAX_CONSECUTIVE_TIMEOUTS is exceeded.
+    consecutive_timeout_count: u8 = 0,
+
     const Self = @This();
 
     /// Device state during enumeration and lifecycle
@@ -701,6 +707,25 @@ pub const UsbDevice = struct {
         return false;
     }
 
+    /// Record a control transfer timeout
+    /// Security: Returns true if device should be disconnected (exceeded threshold)
+    pub fn recordTimeout(self: *Self) bool {
+        self.consecutive_timeout_count +|= 1; // Saturating add
+        if (self.consecutive_timeout_count >= MAX_CONSECUTIVE_TIMEOUTS) {
+            console.err("XHCI: Device slot {} exceeded timeout threshold ({} consecutive)", .{
+                self.slot_id,
+                self.consecutive_timeout_count,
+            });
+            return true;
+        }
+        return false;
+    }
+
+    /// Reset timeout counter on successful transfer
+    pub fn resetTimeoutCount(self: *Self) void {
+        self.consecutive_timeout_count = 0;
+    }
+
     /// Internal helper to free all device resources
     /// Security: Only called when refcount reaches zero
     fn freeResources(self: *Self) void {
@@ -741,6 +766,11 @@ pub const UsbDevice = struct {
 /// Security: Increased to 256 to match xHCI spec (slot IDs 1-255)
 /// Using 256 allows direct indexing without bounds check failures in ReleaseFast
 pub const MAX_DEVICES: usize = 256;
+
+/// Maximum consecutive control transfer timeouts before disconnecting device
+/// Security: Prevents memory exhaustion from malicious devices that intentionally
+/// timeout to leak DMA pages (4KB per timeout). 5 consecutive timeouts = 20KB max leak.
+pub const MAX_CONSECUTIVE_TIMEOUTS: u8 = 5;
 
 /// Global device array indexed by slot_id
 var devices: [MAX_DEVICES]?*UsbDevice = [_]?*UsbDevice{null} ** MAX_DEVICES;

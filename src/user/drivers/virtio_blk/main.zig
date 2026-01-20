@@ -72,26 +72,35 @@ const QUEUE_SIZE: u16 = 128;
 const SECTOR_SIZE: usize = 512;
 const MAX_SECTORS_PER_REQUEST: usize = 256;
 
+// IPC message size configuration
+// Max sectors per single IPC message (32 sectors = 16KB inline data)
+// Larger requests are handled via internal chunking
+const MAX_SECTORS_PER_MESSAGE: usize = 32;
+
 // Syscall numbers
 const SYS_WAIT_INTERRUPT: usize = 1022;
 const SYS_SEND: usize = 1020;
 const SYS_RECV: usize = 1021;
 
 // IPC message structures for block operations
+// Supports up to MAX_SECTORS_PER_MESSAGE sectors (32 = 16KB) per message
+// Larger requests are chunked internally by the driver
 const BlockRequest = extern struct {
     sender_pid: u64,
     request_type: u32, // VIRTIO_BLK_T_IN or VIRTIO_BLK_T_OUT
     _pad: u32,
     sector: u64,
-    sector_count: u32,
-    _pad2: u32,
-    data: [SECTOR_SIZE * 4]u8, // Up to 4 sectors for write
+    sector_count: u32,       // Total sectors requested (can exceed MAX_SECTORS_PER_MESSAGE)
+    chunk_offset: u32,       // For chunked requests: current chunk's sector offset
+    data: [SECTOR_SIZE * MAX_SECTORS_PER_MESSAGE]u8, // Up to 32 sectors for write
 };
 
 const BlockResponse = extern struct {
     status: u32,
     bytes_transferred: u32,
-    data: [SECTOR_SIZE * 4]u8, // Up to 4 sectors for read
+    more_chunks: u32,        // Non-zero if more chunks remain for this request
+    _pad: u32,
+    data: [SECTOR_SIZE * MAX_SECTORS_PER_MESSAGE]u8, // Up to 32 sectors for read
 };
 
 // VirtIO block request header
@@ -482,31 +491,46 @@ fn setupQueue() bool {
     return true;
 }
 
+// Static buffers for IPC messages (avoid large stack allocations)
+// Using static storage since BlockRequest/BlockResponse are now ~16KB each
+var static_req: BlockRequest = undefined;
+var static_resp: BlockResponse = undefined;
+
 fn requestLoop() noreturn {
-    var req: BlockRequest = undefined;
-    var resp: BlockResponse = undefined;
+    const req = &static_req;
+    const resp = &static_resp;
 
     while (true) {
         // Wait for IPC request
-        const sender = syscall.syscall2(SYS_RECV, @intFromPtr(&req), @sizeOf(BlockRequest));
+        const sender = syscall.syscall2(SYS_RECV, @intFromPtr(req), @sizeOf(BlockRequest));
 
         if (sender < 0) {
             continue;
         }
 
         // Validate request
-        if (req.sector_count == 0 or req.sector_count > 4) {
+        if (req.sector_count == 0 or req.sector_count > MAX_SECTORS_PER_REQUEST) {
             resp.status = VIRTIO_BLK_S_UNSUPP;
             resp.bytes_transferred = 0;
-            _ = syscall.syscall3(SYS_SEND, @intCast(sender), @intFromPtr(&resp), @sizeOf(BlockResponse));
+            resp.more_chunks = 0;
+            _ = syscall.syscall3(SYS_SEND, @intCast(sender), @intFromPtr(resp), @sizeOf(BlockResponse));
             continue;
         }
 
-        // Check bounds
-        if (req.sector >= driver_state.capacity) {
+        // Check bounds (including full request range)
+        // Defense-in-depth: use checked arithmetic to prevent overflow
+        const end_sector = std.math.add(u64, req.sector, req.sector_count) catch {
             resp.status = VIRTIO_BLK_S_IOERR;
             resp.bytes_transferred = 0;
-            _ = syscall.syscall3(SYS_SEND, @intCast(sender), @intFromPtr(&resp), @sizeOf(BlockResponse));
+            resp.more_chunks = 0;
+            _ = syscall.syscall3(SYS_SEND, @intCast(sender), @intFromPtr(resp), @sizeOf(BlockResponse));
+            continue;
+        };
+        if (req.sector >= driver_state.capacity or end_sector > driver_state.capacity) {
+            resp.status = VIRTIO_BLK_S_IOERR;
+            resp.bytes_transferred = 0;
+            resp.more_chunks = 0;
+            _ = syscall.syscall3(SYS_SEND, @intCast(sender), @intFromPtr(resp), @sizeOf(BlockResponse));
             continue;
         }
 
@@ -514,16 +538,93 @@ fn requestLoop() noreturn {
         if (req.request_type == VIRTIO_BLK_T_OUT and driver_state.read_only) {
             resp.status = VIRTIO_BLK_S_IOERR;
             resp.bytes_transferred = 0;
-            _ = syscall.syscall3(SYS_SEND, @intCast(sender), @intFromPtr(&resp), @sizeOf(BlockResponse));
+            resp.more_chunks = 0;
+            _ = syscall.syscall3(SYS_SEND, @intCast(sender), @intFromPtr(resp), @sizeOf(BlockResponse));
             continue;
         }
 
-        // Perform I/O
-        const status = doBlockIo(&req, &resp);
-        resp.status = status;
+        // Handle request (with chunking for large requests)
+        handleBlockRequest(req, resp, @intCast(sender));
+    }
+}
 
-        // Send response
-        _ = syscall.syscall3(SYS_SEND, @intCast(sender), @intFromPtr(&resp), @sizeOf(BlockResponse));
+/// Handle a block request, chunking if necessary for large transfers
+fn handleBlockRequest(req: *BlockRequest, resp: *BlockResponse, sender: usize) void {
+    var sectors_remaining = req.sector_count;
+    var current_sector = req.sector;
+    var data_offset: usize = 0;
+
+    while (sectors_remaining > 0) {
+        // Determine chunk size (limited by MAX_SECTORS_PER_MESSAGE and DMA buffer)
+        const chunk_sectors: u32 = @min(sectors_remaining, MAX_SECTORS_PER_MESSAGE);
+
+        // For writes, data is in req.data starting at data_offset
+        // For reads, we'll fill resp.data
+
+        // Create a temporary request for this chunk
+        var chunk_req = BlockRequest{
+            .sender_pid = req.sender_pid,
+            .request_type = req.request_type,
+            ._pad = 0,
+            .sector = current_sector,
+            .sector_count = chunk_sectors,
+            .chunk_offset = 0,
+            .data = undefined,
+        };
+
+        // Copy write data for this chunk
+        if (req.request_type == VIRTIO_BLK_T_OUT) {
+            const copy_len = @as(usize, chunk_sectors) * SECTOR_SIZE;
+            const src_end = @min(data_offset + copy_len, req.data.len);
+            const actual_copy = src_end - data_offset;
+            @memcpy(chunk_req.data[0..actual_copy], req.data[data_offset..src_end]);
+        }
+
+        // Perform the I/O for this chunk
+        const status = doBlockIo(&chunk_req, resp);
+
+        if (status != VIRTIO_BLK_S_OK) {
+            resp.status = status;
+            resp.bytes_transferred = @intCast(data_offset); // Partial transfer
+            resp.more_chunks = 0;
+            _ = syscall.syscall3(SYS_SEND, sender, @intFromPtr(resp), @sizeOf(BlockResponse));
+            return;
+        }
+
+        // For reads, copy data back to response buffer
+        if (req.request_type == VIRTIO_BLK_T_IN) {
+            const copy_len = @as(usize, chunk_sectors) * SECTOR_SIZE;
+            // For chunked reads, we need to send each chunk's response
+            // to the client separately since the response buffer is limited
+            resp.status = VIRTIO_BLK_S_OK;
+            resp.bytes_transferred = @intCast(copy_len);
+            resp.more_chunks = if (sectors_remaining > chunk_sectors) 1 else 0;
+
+            _ = syscall.syscall3(SYS_SEND, sender, @intFromPtr(resp), @sizeOf(BlockResponse));
+
+            // If more chunks remain, wait for client to request next chunk
+            if (resp.more_chunks != 0) {
+                // Wait for continuation request
+                const cont_sender = syscall.syscall2(SYS_RECV, @intFromPtr(req), @sizeOf(BlockRequest));
+                if (cont_sender < 0 or @as(usize, @intCast(cont_sender)) != sender) {
+                    // Client disconnected or wrong sender
+                    return;
+                }
+            }
+        }
+
+        // Update for next chunk
+        sectors_remaining -= chunk_sectors;
+        current_sector += chunk_sectors;
+        data_offset += @as(usize, chunk_sectors) * SECTOR_SIZE;
+    }
+
+    // For writes (or single-chunk reads already sent), send final response
+    if (req.request_type == VIRTIO_BLK_T_OUT) {
+        resp.status = VIRTIO_BLK_S_OK;
+        resp.bytes_transferred = @intCast(@as(usize, req.sector_count) * SECTOR_SIZE);
+        resp.more_chunks = 0;
+        _ = syscall.syscall3(SYS_SEND, sender, @intFromPtr(resp), @sizeOf(BlockResponse));
     }
 }
 

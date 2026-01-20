@@ -408,6 +408,14 @@ fn pipeClose(fd: *fd_mod.FileDescriptor) isize {
         if (pipe.pending_write) |pending| {
             const request: *io.IoRequest = @ptrCast(@alignCast(pending));
             pipe.pending_write = null;
+
+            // SECURITY: Free bounce buffer allocated by writeAsync.
+            // The request was cancelled, so caller won't process it.
+            if (request.bounce_buf) |bounce| {
+                alloc.free(bounce);
+                request.bounce_buf = null;
+            }
+
             _ = request.complete(.{ .err = error.EPIPE });
         }
         // Wake up writers so they see EPIPE - set flag BEFORE unblock
@@ -422,6 +430,14 @@ fn pipeClose(fd: *fd_mod.FileDescriptor) isize {
         if (pipe.pending_read) |pending| {
             const request: *io.IoRequest = @ptrCast(@alignCast(pending));
             pipe.pending_read = null;
+
+            // SECURITY: Free bounce buffer allocated by readAsync.
+            // The request was cancelled with EOF, so caller won't process it.
+            if (request.bounce_buf) |bounce| {
+                alloc.free(bounce);
+                request.bounce_buf = null;
+            }
+
             _ = request.complete(.{ .success = 0 }); // EOF
         }
         // Wake up readers so they see EOF - set flag BEFORE unblock
@@ -451,6 +467,10 @@ const IoRequest = io.IoRequest;
 
 /// Async pipe read - queue request for incoming data
 /// Returns true if completed synchronously, false if pending
+///
+/// SECURITY: Uses kernel bounce buffer for async path to prevent use-after-free
+/// if caller unmaps buffer before completion. The caller must copy from
+/// bounce_buf to user_buf_ptr after completion and free the bounce buffer.
 pub fn readAsync(fd: *fd_mod.FileDescriptor, request: *IoRequest, buf: []u8) !bool {
     const handle: *PipeHandle = @ptrCast(@alignCast(fd.private_data));
     if (handle.end != .Read) return error.EBADF;
@@ -459,7 +479,7 @@ pub fn readAsync(fd: *fd_mod.FileDescriptor, request: *IoRequest, buf: []u8) !bo
     const held = pipe.lock.acquire();
     defer held.release();
 
-    // If data available, read it
+    // If data available, read it synchronously (no bounce buffer needed)
     if (pipe.data_len > 0) {
         const read_len = @min(buf.len, pipe.data_len);
 
@@ -489,14 +509,28 @@ pub fn readAsync(fd: *fd_mod.FileDescriptor, request: *IoRequest, buf: []u8) !bo
         return error.EAGAIN; // Already have pending read
     }
 
+    // SECURITY FIX: Allocate kernel bounce buffer to prevent UAF.
+    // The caller's buffer might be unmapped before async completion.
+    // Completion will write to bounce_buf; caller copies to user_buf_ptr.
+    const allocator = heap.allocator();
+    const bounce = allocator.alloc(u8, buf.len) catch return error.ENOMEM;
+
+    request.bounce_buf = bounce;
+    request.user_buf_ptr = @intFromPtr(buf.ptr);
+    request.user_buf_len = buf.len;
+    request.buf_ptr = @intFromPtr(bounce.ptr);
+    request.buf_len = bounce.len;
+
     pipe.pending_read = request;
-    request.buf_ptr = @intFromPtr(buf.ptr);
-    request.buf_len = buf.len;
     return false; // Pending
 }
 
 /// Async pipe write - queue request for buffer space
 /// Returns true if completed synchronously, false if pending
+///
+/// SECURITY: Uses kernel bounce buffer for async path to prevent use-after-free
+/// if caller unmaps buffer before completion. Data is copied to bounce buffer
+/// at submission time, so completion reads from kernel memory.
 pub fn writeAsync(fd: *fd_mod.FileDescriptor, request: *IoRequest, buf: []const u8) !bool {
     const handle: *PipeHandle = @ptrCast(@alignCast(fd.private_data));
     if (handle.end != .Write) return error.EBADF;
@@ -513,6 +547,7 @@ pub fn writeAsync(fd: *fd_mod.FileDescriptor, request: *IoRequest, buf: []const 
 
     const space = PIPE_BUF_SIZE - pipe.data_len;
     if (space > 0) {
+        // Synchronous completion - no bounce buffer needed
         const to_write = @min(buf.len, space);
 
         const first_chunk = @min(to_write, PIPE_BUF_SIZE - pipe.write_pos);
@@ -535,8 +570,21 @@ pub fn writeAsync(fd: *fd_mod.FileDescriptor, request: *IoRequest, buf: []const 
         return error.EAGAIN; // Already have pending write
     }
 
+    // SECURITY FIX: Allocate kernel bounce buffer and copy data now.
+    // The caller's buffer might be unmapped before async completion.
+    // Completion will read from bounce_buf (kernel memory).
+    const allocator = heap.allocator();
+    const bounce = allocator.alloc(u8, buf.len) catch return error.ENOMEM;
+
+    // Copy user data to bounce buffer at submission time
+    @memcpy(bounce, buf);
+
+    request.bounce_buf = bounce;
+    request.user_buf_ptr = @intFromPtr(buf.ptr);
+    request.user_buf_len = buf.len;
+    request.buf_ptr = @intFromPtr(bounce.ptr);
+    request.buf_len = bounce.len;
+
     pipe.pending_write = request;
-    request.buf_ptr = @intFromPtr(buf.ptr);
-    request.buf_len = buf.len;
     return false; // Pending
 }

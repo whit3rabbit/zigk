@@ -433,13 +433,17 @@ fn snprintf_core(dest: [*]u8, size: usize, fmt_str: [*:0]const u8, ap: *VaList) 
             while (fmt_ptr[0] == '-' or fmt_ptr[0] == '+' or fmt_ptr[0] == ' ' or
                 fmt_ptr[0] == '#' or fmt_ptr[0] == '0') { fmt_ptr += 1; }
             while (fmt_ptr[0] >= '0' and fmt_ptr[0] <= '9') fmt_ptr += 1;
+            // SECURITY: Cap precision to prevent integer overflow
+            const MAX_PRECISION: usize = 8191;
             var precision: usize = 0;
             var has_precision = false;
             if (fmt_ptr[0] == '.') {
                 has_precision = true;
                 fmt_ptr += 1;
                 while (fmt_ptr[0] >= '0' and fmt_ptr[0] <= '9') {
-                    precision = precision * 10 + (fmt_ptr[0] - '0');
+                    const p_digit = fmt_ptr[0] - '0';
+                    precision = @min(std.math.mul(usize, precision, 10) catch MAX_PRECISION, MAX_PRECISION);
+                    precision = @min(std.math.add(usize, precision, p_digit) catch MAX_PRECISION, MAX_PRECISION);
                     fmt_ptr += 1;
                 }
             }

@@ -80,7 +80,9 @@ pub fn loadFont(data: []const u8) !types.Font {
 
         // Validation
         if (header_size > data.len) return Error.InvalidSize;
-        
+
+        // SAFETY: On 64-bit targets (x86_64, aarch64), usize is 64-bit.
+        // max(u32) * max(u32) < max(u64), so overflow is not possible.
         const total_glyph_size = @as(usize, length) * char_size;
         if (header_size + total_glyph_size > data.len) return Error.InvalidSize;
         

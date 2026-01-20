@@ -206,7 +206,8 @@ fn handlePortConnect(ctrl: *Controller, port_id: u8, portsc: regs.PortSc) void {
 }
 
 /// Handle device disconnection - find and cleanup device
-fn handlePortDisconnect(ctrl: *Controller, port_id: u8) void {
+/// Public: Called from control.zig for timeout-based disconnect
+pub fn handlePortDisconnect(ctrl: *Controller, port_id: u8) void {
     // Find all devices on this root port (including hub children)
     const devices_to_remove = findDevicesOnPort(port_id);
 

@@ -322,6 +322,8 @@ pub const SYS_FALLOCATE: usize = 285;
 pub const SYS_TIMERFD_SETTIME: usize = 286;
 /// Get timerfd state
 pub const SYS_TIMERFD_GETTIME: usize = 287;
+/// Accept connection with flags (SOCK_CLOEXEC, SOCK_NONBLOCK)
+pub const SYS_ACCEPT4: usize = 288;
 /// signalfd with flags
 pub const SYS_SIGNALFD4: usize = 289;
 /// eventfd with flags

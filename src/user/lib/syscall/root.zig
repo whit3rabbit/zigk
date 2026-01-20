@@ -150,6 +150,7 @@ pub const pci_config_read = resource.pci_config_read;
 pub const pci_config_write = resource.pci_config_write;
 pub const outb = resource.outb;
 pub const inb = resource.inb;
+pub const set_display_mode = resource.set_display_mode;
 
 // Re-export io_uring
 pub const IoUringSqe = io_uring.IoUringSqe;

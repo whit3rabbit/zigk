@@ -236,3 +236,4 @@ pub const SYS_GET_HYPERVISOR = zscapek.SYS_GET_HYPERVISOR;
 pub const SYS_NETIF_CONFIG = zscapek.SYS_NETIF_CONFIG;
 pub const SYS_ARP_PROBE = zscapek.SYS_ARP_PROBE;
 pub const SYS_ARP_ANNOUNCE = zscapek.SYS_ARP_ANNOUNCE;
+pub const SYS_SET_DISPLAY_MODE = zscapek.SYS_SET_DISPLAY_MODE;

@@ -169,3 +169,17 @@ pub const VirtioGpuResourceFlush = extern struct {
     resource_id: u32,
     _padding: u32 = 0,
 };
+
+/// Resource unref command (releases a resource)
+pub const VirtioGpuResourceUnref = extern struct {
+    hdr: VirtioGpuCtrlHdr,
+    resource_id: u32,
+    _padding: u32 = 0,
+};
+
+/// Resource detach backing command (detaches memory from resource)
+pub const VirtioGpuResourceDetachBacking = extern struct {
+    hdr: VirtioGpuCtrlHdr,
+    resource_id: u32,
+    _padding: u32 = 0,
+};

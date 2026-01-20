@@ -130,6 +130,13 @@ const ISN_RESEED_THRESHOLD: u32 = 10000;
 /// Increments with each call, providing monotonic values
 var tcp_timestamp_counter: std.atomic.Value(u32) = .{ .raw = 0 };
 
+/// SECURITY: Re-seed timestamp counter every N calls to reduce predictability.
+/// Unlike ISNs, timestamps just need monotonicity (RFC 7323), so we add a
+/// random forward jump rather than resetting. This prevents cross-connection
+/// correlation and activity pattern leakage while maintaining correctness.
+const TIMESTAMP_RESEED_THRESHOLD: u32 = 1000;
+var timestamp_reseed_counter: std.atomic.Value(u32) = .{ .raw = 0 };
+
 /// Milliseconds per timer tick (default 1ms for 1000Hz)
 pub var ms_per_tick: u32 = 1;
 
@@ -476,15 +483,31 @@ pub fn generateIsn(l_ip: u32, l_port: u16, r_ip: u32, r_port: u16) u32 {
 /// Get current timestamp for TCP Timestamps option (RFC 7323)
 /// Returns a monotonically increasing 32-bit value
 /// Uses entropy-seeded counter since we don't have a dedicated timer
+///
+/// SECURITY: Periodically mixes in fresh entropy to prevent:
+/// - Cross-connection timestamp correlation
+/// - Activity pattern inference from linear increments
+/// RFC 7323 only requires monotonicity, not contiguity.
 pub fn nextTimestamp() u32 {
-    // Increment counter each call - provides monotonicity required by RFC 7323
     // Seed with entropy on first call for unpredictability
     if (tcp_timestamp_counter.load(.acquire) == 0) {
         const seed: u32 = @truncate(platform.entropy.getHardwareEntropy());
         _ = tcp_timestamp_counter.cmpxchgStrong(0, seed, .acq_rel, .acquire);
     }
-    const prev = tcp_timestamp_counter.fetchAdd(1, .acq_rel);
-    return prev +% 1;
+
+    // SECURITY: Periodically add random forward jump to break predictability.
+    // We add 1-256 extra ticks randomly every TIMESTAMP_RESEED_THRESHOLD calls.
+    // This maintains monotonicity while preventing correlation attacks.
+    const reseed_count = timestamp_reseed_counter.fetchAdd(1, .acq_rel);
+    var increment: u32 = 1;
+    if (reseed_count % TIMESTAMP_RESEED_THRESHOLD == 0) {
+        // Add random forward jump (1-256 extra ticks)
+        const entropy: u32 = @truncate(platform.entropy.getHardwareEntropy());
+        increment +%= (entropy & 0xFF) +| 1; // 1-256 range, saturating add
+    }
+
+    const prev = tcp_timestamp_counter.fetchAdd(increment, .acq_rel);
+    return prev +% increment;
 }
 
 /// Evict oldest half-open TCB to make space for valid connections (DoS mitigation)

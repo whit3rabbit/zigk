@@ -10,6 +10,7 @@ const trb = @import("../trb.zig");
 const transfer_pool = @import("../transfer_pool.zig");
 const common = @import("common.zig");
 const usb_types = @import("../../types.zig");
+const ports = @import("../ports.zig");
 
 // Forward declare Controller type (since we use *types.Controller)
 const Controller = types.Controller;
@@ -220,13 +221,25 @@ fn doControlTransfer(
         // UAF. This is acceptable because timeouts should be rare in normal
         // operation and each leak is only 4KB.
         //
-        // TODO: Implement proper transfer abort sequence with Stop Endpoint +
-        // Set TR Dequeue Pointer commands.
+        // SECURITY: Track consecutive timeouts to detect malicious devices.
+        // A device that consistently times out will exhaust memory (4KB per timeout).
+        // Disconnect device after MAX_CONSECUTIVE_TIMEOUTS to limit damage.
+        if (err == error.Timeout) {
+            if (dev.recordTimeout()) {
+                // Device exceeded timeout threshold - trigger disconnect
+                console.err("XHCI: Disconnecting device slot {} due to excessive timeouts", .{dev.slot_id});
+                ports.handlePortDisconnect(ctrl, dev.port);
+            }
+        }
+
         if (dma_page_phys) |_| {
             console.warn("XHCI: Control transfer timeout - DMA page leaked to prevent UAF", .{});
         }
         return err;
     };
+
+    // Success - reset timeout counter
+    dev.resetTimeoutCount();
 
     // Calculate bytes transferred
     // For IN transfers, residual tells us how many bytes were NOT transferred

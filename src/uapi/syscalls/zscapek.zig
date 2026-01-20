@@ -196,6 +196,12 @@ pub const RaInfo = extern struct {
     }
 };
 
+// Display Mode Syscalls (1070-1079)
+/// Set display resolution (requires DisplayServer capability)
+/// arg1: width (u32), arg2: height (u32), arg3: flags (reserved, pass 0)
+/// Returns: 0 on success, -errno on failure
+pub const SYS_SET_DISPLAY_MODE: usize = 1070;
+
 /// Interface information returned by GET_INFO command
 pub const InterfaceInfo = extern struct {
     /// Interface name (null-terminated)

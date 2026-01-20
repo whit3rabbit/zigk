@@ -11,7 +11,9 @@ const MAX_COLS = 200;
 const HISTORY_ROWS = 2000;
 
 // Static buffer to avoid stack overflow (400KB BSS)
-var history_buffer: [HISTORY_ROWS][MAX_COLS]u8 = undefined;
+// Defense-in-depth: Initialize with spaces to prevent any possibility of
+// uninitialized memory disclosure, even if access patterns change in the future.
+var history_buffer: [HISTORY_ROWS][MAX_COLS]u8 = [_][MAX_COLS]u8{[_]u8{' '} ** MAX_COLS} ** HISTORY_ROWS;
 
 // Static pixel buffer for rendering to avoid kernel stack overflow
 var static_pixel_buf: [32 * 32]u32 = undefined;
@@ -294,6 +296,8 @@ pub const Console = struct {
         }
     }
     
+    // SAFETY: cx is always cursor_x which is checked < self.cols before calling,
+    // and self.cols <= MAX_COLS (enforced at init). write_head is always < HISTORY_ROWS.
     fn drawCharAt(self: *Console, char: u8, cx: u32) void {
         self.history[self.write_head][cx] = char;
         
@@ -338,13 +342,19 @@ pub const Console = struct {
                    const byte = glyph[row_start + byte_offset];
                    const is_set = (byte & (@as(u8, 1) << @as(u3, @truncate(col % 8)))) != 0;
                    static_pixel_buf[row * font_w + col] = if (is_set) fg_u32 else bg_u32;
-               } 
+               } else {
+                   // SECURITY: Always write bg_u32 if glyph data is truncated/missing
+                   // to prevent uninitialized memory from being rendered to screen.
+                   static_pixel_buf[row * font_w + col] = bg_u32;
+               }
            }
         }
         self.device.drawBuffer(x, y, font_w, font_h, static_pixel_buf[0..(font_w*font_h)]);
         self.markDirty(x, y, font_w, font_h);
     }
     
+    // SAFETY: Arithmetic overflow not possible - all inputs bounded by display dimensions
+    // (max ~8K) and font dimensions (max 32). u32 max is ~4 billion.
     fn markDirty(self: *Console, x: u32, y: u32, w: u32, h: u32) void {
         if (self.dirty_rect) |*r| {
              // Union

@@ -40,6 +40,10 @@ pub const SOCK_STREAM: i32 = 1; // TCP
 pub const SOCK_DGRAM: i32 = 2; // UDP
 pub const SOCK_RAW: i32 = 3; // Raw socket (for ping6, traceroute6)
 
+/// Socket type flags (can be ORed with socket type)
+pub const SOCK_NONBLOCK: i32 = 0x800; // O_NONBLOCK for socket
+pub const SOCK_CLOEXEC: i32 = 0x80000; // O_CLOEXEC for socket (close-on-exec)
+
 // =============================================================================
 // Socket Option Constants (Linux-compatible)
 // =============================================================================
@@ -58,6 +62,7 @@ pub const TCP_NODELAY: i32 = 1;
 /// SOL_SOCKET options
 pub const SO_REUSEADDR: i32 = 2;
 pub const SO_BROADCAST: i32 = 6;
+pub const SO_PEERCRED: i32 = 17; // Retrieve peer credentials (AF_UNIX only)
 pub const SO_RCVTIMEO: i32 = 20;
 pub const SO_SNDTIMEO: i32 = 21;
 

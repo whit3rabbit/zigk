@@ -178,6 +178,7 @@ pub fn loadInitProcess() void {
         "ps2_driver",
         "virtio_net_driver",
         "virtio_blk_driver",
+        "spice_agent", // SPICE/Proxmox display resolution sync
         // "netstack",
     };
 
@@ -529,6 +530,19 @@ fn grantProcessCapabilities(proc: *process.Process, process_name: []const u8) vo
             .interface_mask = capabilities.NetConfigCapability.ANY_INTERFACE,
         } }, process_name);
         console.info("Init: Granted network config capabilities to pid={}", .{proc.pid});
+    }
+
+    // SPICE Agent capabilities
+    // Grants ability to change display resolution via SYS_SET_DISPLAY_MODE
+    // and communicate with host via virtio-serial
+    if (std.mem.eql(u8, process_name, "spice_agent")) {
+        // DisplayServer capability for display mode changes
+        // Note: owns_framebuffer=true grants SYS_SET_DISPLAY_MODE permission
+        appendCapabilityOrWarn(proc, alloc, .{ .DisplayServer = .{
+            .receives_input = false, // SPICE agent doesn't handle input
+            .owns_framebuffer = true, // Required for display mode changes
+        } }, process_name);
+        console.info("Init: Granted SPICE agent capabilities to pid={}", .{proc.pid});
     }
 }
 

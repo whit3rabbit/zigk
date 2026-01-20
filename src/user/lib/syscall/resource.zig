@@ -269,3 +269,19 @@ pub fn inb(port: u16) SyscallError!u8 {
     if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
     return @truncate(ret);
 }
+
+// =============================================================================
+// Display Mode Syscalls (1070-1079)
+// =============================================================================
+
+/// Set display resolution
+/// width: Display width in pixels (640-8192)
+/// height: Display height in pixels (480-8192)
+/// flags: Reserved, pass 0
+/// Returns: true on success
+/// Requires: DisplayServer capability
+pub fn set_display_mode(width: u32, height: u32, flags: u32) SyscallError!bool {
+    const ret = primitive.syscall3(syscalls.SYS_SET_DISPLAY_MODE, width, height, flags);
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return true;
+}

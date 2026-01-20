@@ -5,6 +5,7 @@
 const syscall = @import("syscall");
 const memory = @import("../memory/root.zig");
 const internal = @import("../internal.zig");
+const errno_mod = @import("../errno.zig");
 
 /// Opaque FILE structure
 pub const FILE = extern struct {
@@ -98,7 +99,10 @@ pub export fn fread(ptr: ?*anyopaque, size: usize, nmemb: usize, stream: ?*FILE)
 
     // SECURITY: Check for multiplication overflow to prevent reading
     // an unintended small amount due to integer wrap-around.
-    var total_bytes = internal.checkedMultiply(size, nmemb) orelse return 0;
+    var total_bytes = internal.checkedMultiply(size, nmemb) orelse {
+        errno_mod.errno = errno_mod.EOVERFLOW;
+        return 0;
+    };
     var total_read: usize = 0;
 
     if (total_bytes == 0) return 0;
@@ -129,7 +133,10 @@ pub export fn fwrite(ptr: ?*const anyopaque, size: usize, nmemb: usize, stream: 
     const p = ptr.?;
 
     // SECURITY: Check for multiplication overflow
-    const total_bytes = internal.checkedMultiply(size, nmemb) orelse return 0;
+    const total_bytes = internal.checkedMultiply(size, nmemb) orelse {
+        errno_mod.errno = errno_mod.EOVERFLOW;
+        return 0;
+    };
     if (total_bytes == 0) return 0;
 
     const bytes_written = syscall.write(f.fd, @ptrCast(p), total_bytes) catch {

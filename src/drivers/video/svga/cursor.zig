@@ -122,6 +122,8 @@ pub const HardwareCursor = struct {
         const pixel_count: u32 = @as(u32, safe_size) * @as(u32, safe_size);
 
         // Allocate temporary buffer for cursor pixels
+        // SAFETY: Only pixels[0..pixel_count] is passed to defineAlphaCursor,
+        // and memset initializes exactly that range. Uninitialized elements are never accessed.
         var pixels: [32 * 32]u32 = undefined;
         @memset(pixels[0..pixel_count], color);
 

@@ -99,7 +99,7 @@ fn getSocketContext(fd_num: usize) ?struct { fd: *FileDescriptor, socket_idx: us
     return .{ .fd = fd, .socket_idx = ctx.socket_idx };
 }
 
-fn installSocketFd(socket_idx: usize) SyscallError!usize {
+fn installSocketFd(socket_idx: usize, cloexec: bool) SyscallError!usize {
     const ctx = heap.allocator().create(SocketFdData) catch {
         return error.ENOMEM;
     };
@@ -109,6 +109,7 @@ fn installSocketFd(socket_idx: usize) SyscallError!usize {
     const fd = fd_mod.createFd(&socket_file_ops, fd_mod.O_RDWR, ctx) catch {
         return error.ENOMEM;
     };
+    fd.cloexec = cloexec;
     errdefer heap.allocator().destroy(fd);
 
     // SECURITY: Use atomic allocAndInstall to prevent race between
@@ -222,12 +223,15 @@ pub fn sys_socket(domain: usize, sock_type: usize, protocol: usize) SyscallError
 
     // Validate socket parameters fit target types
     const domain_u16 = std.math.cast(u16, domain) orelse return error.EINVAL;
-    const sock_type_u16 = std.math.cast(u16, sock_type) orelse return error.EINVAL;
     const protocol_u16 = std.math.cast(u16, protocol) orelse return error.EINVAL;
 
-    // Mask off flags (SOCK_NONBLOCK, SOCK_CLOEXEC) to get actual type.
-    const SOCK_TYPE_MASK: u16 = 0xF;
-    const type_masked = sock_type_u16 & SOCK_TYPE_MASK;
+    // Extract flags from sock_type (SOCK_NONBLOCK, SOCK_CLOEXEC are ORed with type)
+    // Use u32 because SOCK_CLOEXEC (0x80000) doesn't fit in u16
+    const sock_type_u32 = std.math.cast(u32, sock_type) orelse return error.EINVAL;
+    const SOCK_TYPE_MASK: u32 = 0xF;
+    const type_masked: i32 = @intCast(sock_type_u32 & SOCK_TYPE_MASK);
+    const is_nonblock = (sock_type_u32 & @as(u32, @intCast(socket.SOCK_NONBLOCK))) != 0;
+    const is_cloexec = (sock_type_u32 & @as(u32, @intCast(socket.SOCK_CLOEXEC))) != 0;
 
     // Handle AF_UNIX domain sockets
     if (domain_u16 == socket.AF_UNIX or domain_u16 == socket.AF_LOCAL) {
@@ -242,16 +246,16 @@ pub fn sys_socket(domain: usize, sock_type: usize, protocol: usize) SyscallError
         }
 
         // Allocate a full UNIX socket
-        const result = unix_socket.allocateSocket(@intCast(type_masked)) orelse {
+        const result = unix_socket.allocateSocket(type_masked) orelse {
             return error.ENOMEM;
         };
 
         // Handle SOCK_NONBLOCK flag
-        if ((sock_type_u16 & 0x800) != 0) {
+        if (is_nonblock) {
             result.sock.blocking = false;
         }
 
-        const fd_num = installUnixSocketFullFd(result.idx, result.sock.generation) catch |err| {
+        const fd_num = installUnixSocketFullFd(result.idx, result.sock.generation, is_cloexec) catch |err| {
             unix_socket.releaseSocket(result.sock);
             return err;
         };
@@ -267,15 +271,16 @@ pub fn sys_socket(domain: usize, sock_type: usize, protocol: usize) SyscallError
         }
     }
 
+    // For network sockets, pass the masked type to the socket layer
     const sock_idx = socket.socket(
         domain_u16,
-        sock_type_u16,
+        @intCast(sock_type_u32 & 0xFFFF), // Lower 16 bits include type + NONBLOCK flag
         protocol_u16,
     ) catch |err| {
         return socketErrorToSyscallError(err);
     };
 
-    const fd_num = installSocketFd(sock_idx) catch |err| {
+    const fd_num = installSocketFd(sock_idx, is_cloexec) catch |err| {
         _ = socket.close(sock_idx) catch {};
         return err;
     };
@@ -661,12 +666,14 @@ pub fn sys_accept(fd: usize, addr_ptr: usize, addrlen_ptr: usize) SyscallError!u
             return error.EBADF;
         }
 
-        const result = unix_socket.acceptSocket(listen_sock) catch |err| {
+        // Get current process credentials for SO_PEERCRED
+        const proc = base.getCurrentProcess();
+        const result = unix_socket.acceptSocket(listen_sock, proc.pid, proc.euid, proc.egid) catch |err| {
             return unixSocketErrorToSyscallError(err);
         };
 
-        // Install FD for the new connected socket
-        const new_fd_num = installUnixSocketFullFd(result.new_idx, result.new_sock.generation) catch |err| {
+        // Install FD for the new connected socket (no cloexec - use accept4 for that)
+        const new_fd_num = installUnixSocketFullFd(result.new_idx, result.new_sock.generation, false) catch |err| {
             unix_socket.closeSocket(result.new_sock);
             return err;
         };
@@ -771,7 +778,160 @@ pub fn sys_accept(fd: usize, addr_ptr: usize, addrlen_ptr: usize) SyscallError!u
                 }
             }
 
-            const new_fd_num = installSocketFd(new_sock_fd) catch |err| {
+            const new_fd_num = installSocketFd(new_sock_fd, false) catch |err| {
+                _ = socket.close(new_sock_fd) catch {};
+                return err;
+            };
+            return new_fd_num;
+        } else |err| {
+            if (err == socket.SocketError.WouldBlock and sock.blocking) {
+                const current = sched.getCurrentThread() orelse {
+                    return error.EAGAIN;
+                };
+                _ = hal.cpu.disableInterrupts();
+                sock.blocked_thread = current;
+                sched.block();
+                continue;
+            }
+            return socketErrorToSyscallError(err);
+        }
+    }
+}
+
+/// sys_accept4 (288 on x86_64, 242 on aarch64) - Accept connection with flags
+/// (fd, addr, addrlen_ptr, flags) -> fd
+/// Like accept() but with a flags parameter for SOCK_CLOEXEC and SOCK_NONBLOCK.
+pub fn sys_accept4(fd: usize, addr_ptr: usize, addrlen_ptr: usize, flags: usize) SyscallError!usize {
+    init();
+
+    // Extract flags
+    const flags_u32 = std.math.cast(u32, flags) orelse return error.EINVAL;
+    const is_cloexec = (flags_u32 & @as(u32, @intCast(socket.SOCK_CLOEXEC))) != 0;
+    const is_nonblock = (flags_u32 & @as(u32, @intCast(socket.SOCK_NONBLOCK))) != 0;
+
+    // Check for UNIX socket first
+    if (getUnixSocketFullContext(fd)) |unix_ctx| {
+        const listen_sock = unix_socket.getSocketByIdx(unix_ctx.data.socket_idx) orelse {
+            return error.EBADF;
+        };
+
+        if (listen_sock.generation != unix_ctx.data.generation) {
+            return error.EBADF;
+        }
+
+        // Get current process credentials for SO_PEERCRED
+        const proc = base.getCurrentProcess();
+        const result = unix_socket.acceptSocket(listen_sock, proc.pid, proc.euid, proc.egid) catch |err| {
+            return unixSocketErrorToSyscallError(err);
+        };
+
+        // Handle SOCK_NONBLOCK on the new socket
+        if (is_nonblock) {
+            result.new_sock.blocking = false;
+        }
+
+        // Install FD for the new connected socket with cloexec flag
+        const new_fd_num = installUnixSocketFullFd(result.new_idx, result.new_sock.generation, is_cloexec) catch |err| {
+            unix_socket.closeSocket(result.new_sock);
+            return err;
+        };
+
+        // Fill in peer address if requested (AF_UNIX returns unnamed address)
+        if (addr_ptr != 0 and addrlen_ptr != 0) {
+            const addrlen_uptr = user_mem.UserPtr.from(addrlen_ptr);
+            const input_len = addrlen_uptr.readValue(u32) catch {
+                return new_fd_num;
+            };
+
+            if (input_len >= 2) {
+                const SockAddrUn = uapi.abi.SockAddrUn;
+                var kaddr = SockAddrUn.init();
+                const addr_uptr = user_mem.UserPtr.from(addr_ptr);
+                const write_len = @min(input_len, @sizeOf(SockAddrUn));
+                _ = addr_uptr.copyFromKernel(std.mem.asBytes(&kaddr)[0..write_len]) catch {};
+                addrlen_uptr.writeValue(@as(u32, 2)) catch {};
+            }
+        }
+
+        return new_fd_num;
+    }
+
+    // Network socket path
+    const ctx = getSocketContext(fd) orelse {
+        return error.ENOTSOCK;
+    };
+
+    const sock = socket.getSocket(ctx.socket_idx) orelse {
+        return error.EBADF;
+    };
+
+    while (true) {
+        const result = socket.accept(ctx.socket_idx, null);
+
+        if (result) |new_sock_fd| {
+            // Handle SOCK_NONBLOCK on the new socket
+            if (is_nonblock) {
+                if (socket.getSocket(new_sock_fd)) |new_sock| {
+                    new_sock.blocking = false;
+                }
+            }
+
+            // Fill in peer address if requested
+            if (addr_ptr != 0 and addrlen_ptr != 0) {
+                const addrlen_uptr = user_mem.UserPtr.from(addrlen_ptr);
+                const input_len = addrlen_uptr.readValue(u32) catch {
+                    _ = socket.close(new_sock_fd) catch {};
+                    return error.EFAULT;
+                };
+
+                const new_sock = socket.getSocket(new_sock_fd) orelse {
+                    _ = socket.close(new_sock_fd) catch {};
+                    return error.EBADF;
+                };
+                const tcb = new_sock.tcb orelse {
+                    _ = socket.close(new_sock_fd) catch {};
+                    return error.ENOTCONN;
+                };
+
+                switch (tcb.remote_addr) {
+                    .v4 => |v4| {
+                        if (input_len < @sizeOf(socket.SockAddrIn)) {
+                            _ = socket.close(new_sock_fd) catch {};
+                            return error.EINVAL;
+                        }
+                        const kpeer_addr = socket.SockAddrIn.init(v4, tcb.remote_port);
+                        user_mem.copyStructToUser(socket.SockAddrIn, user_mem.UserPtr.from(addr_ptr), kpeer_addr) catch {
+                            _ = socket.close(new_sock_fd) catch {};
+                            return error.EFAULT;
+                        };
+                        addrlen_uptr.writeValue(@as(u32, @sizeOf(socket.SockAddrIn))) catch {
+                            _ = socket.close(new_sock_fd) catch {};
+                            return error.EFAULT;
+                        };
+                    },
+                    .v6 => |v6| {
+                        if (input_len < @sizeOf(socket.SockAddrIn6)) {
+                            _ = socket.close(new_sock_fd) catch {};
+                            return error.EINVAL;
+                        }
+                        const kpeer_addr6 = socket.SockAddrIn6.init(v6, tcb.remote_port);
+                        user_mem.copyStructToUser(socket.SockAddrIn6, user_mem.UserPtr.from(addr_ptr), kpeer_addr6) catch {
+                            _ = socket.close(new_sock_fd) catch {};
+                            return error.EFAULT;
+                        };
+                        addrlen_uptr.writeValue(@as(u32, @sizeOf(socket.SockAddrIn6))) catch {
+                            _ = socket.close(new_sock_fd) catch {};
+                            return error.EFAULT;
+                        };
+                    },
+                    .none => {
+                        _ = socket.close(new_sock_fd) catch {};
+                        return error.ENOTCONN;
+                    },
+                }
+            }
+
+            const new_fd_num = installSocketFd(new_sock_fd, is_cloexec) catch |err| {
                 _ = socket.close(new_sock_fd) catch {};
                 return err;
             };
@@ -851,7 +1011,9 @@ pub fn sys_connect(fd: usize, addr_ptr: usize, addrlen: usize) SyscallError!usiz
         else
             kaddr.sun_path[0..path_len];
 
-        unix_socket.connectSocket(sock, path, is_abstract) catch |err| {
+        // Get current process credentials for SO_PEERCRED
+        const proc = base.getCurrentProcess();
+        unix_socket.connectSocket(sock, path, is_abstract, proc.pid, proc.euid, proc.egid) catch |err| {
             return unixSocketErrorToSyscallError(err);
         };
 
@@ -962,6 +1124,62 @@ pub fn sys_setsockopt(fd: usize, level: usize, optname: usize, optval_ptr: usize
 
 /// sys_getsockopt (55) - Get socket option
 pub fn sys_getsockopt(fd: usize, level: usize, optname: usize, optval_ptr: usize, optlen_ptr: usize) SyscallError!usize {
+    const level_i32 = std.math.cast(i32, level) orelse return error.EINVAL;
+    const optname_i32 = std.math.cast(i32, optname) orelse return error.EINVAL;
+
+    // Check for UNIX socket SO_PEERCRED first
+    if (level_i32 == socket.SOL_SOCKET and optname_i32 == socket.SO_PEERCRED) {
+        if (getUnixSocketFullContext(fd)) |unix_ctx| {
+            const sock = unix_socket.getSocketByIdx(unix_ctx.data.socket_idx) orelse {
+                return error.EBADF;
+            };
+
+            if (sock.generation != unix_ctx.data.generation) {
+                return error.EBADF;
+            }
+
+            // Get peer credentials
+            const creds = unix_socket.getPeerCredentials(sock) catch |err| {
+                return unixSocketErrorToSyscallError(err);
+            };
+
+            // Verify buffer size
+            const optlen_uptr = user_mem.UserPtr.from(optlen_ptr);
+            const koptlen = optlen_uptr.readValue(usize) catch {
+                return error.EFAULT;
+            };
+
+            const UCred = uapi.abi.UCred;
+            if (koptlen < @sizeOf(UCred)) {
+                return error.EINVAL;
+            }
+
+            if (!isValidUserAccess(optval_ptr, @sizeOf(UCred), AccessMode.Write)) {
+                return error.EFAULT;
+            }
+
+            // Write UCred to user buffer
+            const ucred = UCred{
+                .pid = creds.pid,
+                .uid = creds.uid,
+                .gid = creds.gid,
+            };
+
+            const optval_uptr = user_mem.UserPtr.from(optval_ptr);
+            optval_uptr.writeValue(ucred) catch {
+                return error.EFAULT;
+            };
+
+            optlen_uptr.writeValue(@as(usize, @sizeOf(UCred))) catch {
+                return error.EFAULT;
+            };
+
+            return 0;
+        }
+        // SO_PEERCRED only valid for AF_UNIX sockets
+        return error.EINVAL;
+    }
+
     const ctx = getSocketContext(fd) orelse {
         return error.ENOTSOCK;
     };
@@ -979,9 +1197,6 @@ pub fn sys_getsockopt(fd: usize, level: usize, optname: usize, optval_ptr: usize
     if (koptlen > max_optlen) {
         koptlen = max_optlen;
     }
-
-    const level_i32 = std.math.cast(i32, level) orelse return error.EINVAL;
-    const optname_i32 = std.math.cast(i32, optname) orelse return error.EINVAL;
 
     var koptval_buf: [256]u8 = undefined;
     const koptval = koptval_buf[0..koptlen];
@@ -1011,12 +1226,30 @@ pub fn sys_getsockopt(fd: usize, level: usize, optname: usize, optval_ptr: usize
 
 /// sys_shutdown (48) - Shut down part of a full-duplex connection
 pub fn sys_shutdown(fd: usize, how: usize) SyscallError!usize {
+    const how_i32 = std.math.cast(i32, how) orelse return error.EINVAL;
+    if (how_i32 < 0 or how_i32 > 2) return error.EINVAL;
+
+    // Check for UNIX socket first
+    if (getUnixSocketFullContext(fd)) |unix_ctx| {
+        const sock = unix_socket.getSocketByIdx(unix_ctx.data.socket_idx) orelse {
+            return error.EBADF;
+        };
+
+        if (sock.generation != unix_ctx.data.generation) {
+            return error.EBADF;
+        }
+
+        unix_socket.shutdownSocket(sock, how_i32) catch |err| {
+            return unixSocketErrorToSyscallError(err);
+        };
+
+        return 0;
+    }
+
+    // Network socket path
     const ctx = getSocketContext(fd) orelse {
         return error.ENOTSOCK;
     };
-
-    const how_i32 = std.math.cast(i32, how) orelse return error.EINVAL;
-    if (how_i32 < 0 or how_i32 > 2) return error.EINVAL;
 
     socket.shutdown(ctx.socket_idx, how_i32) catch |err| {
         return socketErrorToSyscallError(err);
@@ -1025,15 +1258,52 @@ pub fn sys_shutdown(fd: usize, how: usize) SyscallError!usize {
     return 0;
 }
 
-/// sys_getsockname (51) - Get local socket address (dual-stack: IPv4 and IPv6)
+/// sys_getsockname (51) - Get local socket address (dual-stack: IPv4, IPv6, and AF_UNIX)
 pub fn sys_getsockname(fd: usize, addr_ptr: usize, addrlen_ptr: usize) SyscallError!usize {
-    const ctx = getSocketContext(fd) orelse {
-        return error.ENOTSOCK;
-    };
-
     const addrlen_uptr = user_mem.UserPtr.from(addrlen_ptr);
     const kaddrlen = addrlen_uptr.readValue(u32) catch {
         return error.EFAULT;
+    };
+
+    // Check for UNIX socket first
+    if (getUnixSocketFullContext(fd)) |unix_ctx| {
+        const sock = unix_socket.getSocketByIdx(unix_ctx.data.socket_idx) orelse {
+            return error.EBADF;
+        };
+
+        if (sock.generation != unix_ctx.data.generation) {
+            return error.EBADF;
+        }
+
+        const SockAddrUn = uapi.abi.SockAddrUn;
+        if (kaddrlen < 2) {
+            return error.EINVAL;
+        }
+
+        if (!isValidUserAccess(addr_ptr, @min(kaddrlen, @sizeOf(SockAddrUn)), AccessMode.Write)) {
+            return error.EFAULT;
+        }
+
+        var kaddr: SockAddrUn = undefined;
+        const actual_len = unix_socket.getsocknameSocket(sock, &kaddr);
+
+        // Copy to user space (only as much as fits)
+        const copy_len = @min(kaddrlen, actual_len);
+        const addr_uptr = user_mem.UserPtr.from(addr_ptr);
+        _ = addr_uptr.copyFromKernel(std.mem.asBytes(&kaddr)[0..copy_len]) catch {
+            return error.EFAULT;
+        };
+
+        addrlen_uptr.writeValue(@as(u32, @intCast(actual_len))) catch {
+            return error.EFAULT;
+        };
+
+        return 0;
+    }
+
+    // Network socket path
+    const ctx = getSocketContext(fd) orelse {
+        return error.ENOTSOCK;
     };
 
     // Get socket to check address family
@@ -1094,15 +1364,54 @@ pub fn sys_getsockname(fd: usize, addr_ptr: usize, addrlen_ptr: usize) SyscallEr
     return 0;
 }
 
-/// sys_getpeername (52) - Get peer socket address (dual-stack: IPv4 and IPv6)
+/// sys_getpeername (52) - Get peer socket address (dual-stack: IPv4, IPv6, and AF_UNIX)
 pub fn sys_getpeername(fd: usize, addr_ptr: usize, addrlen_ptr: usize) SyscallError!usize {
-    const ctx = getSocketContext(fd) orelse {
-        return error.ENOTSOCK;
-    };
-
     const addrlen_uptr = user_mem.UserPtr.from(addrlen_ptr);
     const kaddrlen = addrlen_uptr.readValue(u32) catch {
         return error.EFAULT;
+    };
+
+    // Check for UNIX socket first
+    if (getUnixSocketFullContext(fd)) |unix_ctx| {
+        const sock = unix_socket.getSocketByIdx(unix_ctx.data.socket_idx) orelse {
+            return error.EBADF;
+        };
+
+        if (sock.generation != unix_ctx.data.generation) {
+            return error.EBADF;
+        }
+
+        const SockAddrUn = uapi.abi.SockAddrUn;
+        if (kaddrlen < 2) {
+            return error.EINVAL;
+        }
+
+        if (!isValidUserAccess(addr_ptr, @min(kaddrlen, @sizeOf(SockAddrUn)), AccessMode.Write)) {
+            return error.EFAULT;
+        }
+
+        var kaddr: SockAddrUn = undefined;
+        const actual_len = unix_socket.getpeernameSocket(sock, &kaddr) catch |err| {
+            return unixSocketErrorToSyscallError(err);
+        };
+
+        // Copy to user space (only as much as fits)
+        const copy_len = @min(kaddrlen, actual_len);
+        const addr_uptr = user_mem.UserPtr.from(addr_ptr);
+        _ = addr_uptr.copyFromKernel(std.mem.asBytes(&kaddr)[0..copy_len]) catch {
+            return error.EFAULT;
+        };
+
+        addrlen_uptr.writeValue(@as(u32, @intCast(actual_len))) catch {
+            return error.EFAULT;
+        };
+
+        return 0;
+    }
+
+    // Network socket path
+    const ctx = getSocketContext(fd) orelse {
+        return error.ENOTSOCK;
     };
 
     // Get socket to check address family
@@ -1178,13 +1487,29 @@ pub fn sys_poll(ufds: usize, nfds: usize, timeout: isize) SyscallError!usize {
 // =============================================================================
 
 /// sys_sendmsg (46) - Send a message on a socket with scatter/gather I/O
+/// Supports SCM_RIGHTS ancillary data for passing FDs over UNIX sockets
 pub fn sys_sendmsg(fd: usize, msg_ptr: usize, flags: usize) SyscallError!usize {
-    return msg_mod.sys_sendmsg(fd, msg_ptr, flags, &socket_file_ops);
+    return msg_mod.sys_sendmsg(
+        fd,
+        msg_ptr,
+        flags,
+        &socket_file_ops,
+        &unix_socket_file_ops,
+        &unix_socket_full_file_ops,
+    );
 }
 
 /// sys_recvmsg (47) - Receive a message from a socket with scatter/gather I/O
+/// Supports SCM_RIGHTS ancillary data for receiving FDs over UNIX sockets
 pub fn sys_recvmsg(fd: usize, msg_ptr: usize, flags: usize) SyscallError!usize {
-    return msg_mod.sys_recvmsg(fd, msg_ptr, flags, &socket_file_ops);
+    return msg_mod.sys_recvmsg(
+        fd,
+        msg_ptr,
+        flags,
+        &socket_file_ops,
+        &unix_socket_file_ops,
+        &unix_socket_full_file_ops,
+    );
 }
 
 // =============================================================================
@@ -1267,7 +1592,7 @@ fn isUnixSocketFullFd(fd_num: usize) bool {
 }
 
 /// Install a full UNIX socket FD
-fn installUnixSocketFullFd(socket_idx: usize, generation: u32) SyscallError!usize {
+fn installUnixSocketFullFd(socket_idx: usize, generation: u32, cloexec: bool) SyscallError!usize {
     const data = heap.allocator().create(UnixSocketFullFdData) catch {
         return error.ENOMEM;
     };
@@ -1277,6 +1602,7 @@ fn installUnixSocketFullFd(socket_idx: usize, generation: u32) SyscallError!usiz
     const fd = fd_mod.createFd(&unix_socket_full_file_ops, fd_mod.O_RDWR, data) catch {
         return error.ENOMEM;
     };
+    fd.cloexec = cloexec;
     errdefer heap.allocator().destroy(fd);
 
     const table = base.getGlobalFdTable();
@@ -1531,6 +1857,7 @@ fn unixSocketPoll(fd: *fd_mod.FileDescriptor, requested_events: u32) u32 {
 /// Creates two connected anonymous sockets for local IPC.
 /// Only AF_UNIX domain is supported. Protocol must be 0.
 /// sv is a pointer to an array of two integers that will receive the file descriptors.
+/// Supports SOCK_NONBLOCK and SOCK_CLOEXEC flags ORed with the type.
 pub fn sys_socketpair(domain: usize, sock_type: usize, protocol: usize, sv_ptr: usize) SyscallError!usize {
     // Validate domain is AF_UNIX
     if (domain != socket.AF_UNIX and domain != socket.AF_LOCAL) {
@@ -1548,7 +1875,10 @@ pub fn sys_socketpair(domain: usize, sock_type: usize, protocol: usize, sv_ptr: 
         return error.EFAULT;
     }
 
-    const sock_type_i32 = std.math.cast(i32, sock_type) orelse return error.EINVAL;
+    // Extract flags from sock_type (use u32 because SOCK_CLOEXEC is 0x80000)
+    const sock_type_u32 = std.math.cast(u32, sock_type) orelse return error.EINVAL;
+    const sock_type_i32: i32 = @intCast(sock_type_u32 & 0xFFFF); // Lower bits for type + NONBLOCK
+    const is_cloexec = (sock_type_u32 & @as(u32, @intCast(socket.SOCK_CLOEXEC))) != 0;
 
     // Validate socket type
     if (!unix_socket.validateSocketType(sock_type_i32)) {
@@ -1592,6 +1922,7 @@ pub fn sys_socketpair(domain: usize, sock_type: usize, protocol: usize, sv_ptr: 
         pair.allocated = false;
         return error.ENOMEM;
     };
+    fd0.cloexec = is_cloexec;
     errdefer heap.allocator().destroy(fd0);
 
     const fd0_num = table.allocAndInstall(fd0) orelse {
@@ -1611,6 +1942,7 @@ pub fn sys_socketpair(domain: usize, sock_type: usize, protocol: usize, sv_ptr: 
         pair.allocated = false;
         return error.ENOMEM;
     };
+    fd1.cloexec = is_cloexec;
 
     const fd1_num = table.allocAndInstall(fd1) orelse {
         heap.allocator().destroy(fd1);

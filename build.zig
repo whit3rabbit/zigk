@@ -188,7 +188,12 @@ pub fn build(b: *std.Build) void {
     const qemu_display = b.option([]const u8, "display", "QEMU display backend (default, sdl, gtk, cocoa, none)") orelse "default";
     const qemu_usb_hub = b.option(bool, "usb-hub", "Attach usb-hub to XHCI and connect storage to it") orelse false;
     const qemu_nvme = b.option(bool, "nvme", "Add NVMe storage device for testing") orelse false;
-    const qemu_audio = b.option([]const u8, "audio", "QEMU audio backend (none, coreaudio, pa, file)") orelse "none";
+    const default_audio: []const u8 = switch (host_os) {
+        .macos => "coreaudio",
+        .linux => "pa",
+        else => "none",
+    };
+    const qemu_audio = b.option([]const u8, "audio", "QEMU audio backend (none, coreaudio, pa, file)") orelse default_audio;
     const boot_logo_enabled = b.option(bool, "boot-logo", "Show animated boot logo during init (disable for debugging)") orelse true;
     const allow_weak_entropy = b.option(bool, "allow-weak-entropy", "Allow weak entropy for ASLR (TESTING ONLY - insecure!)") orelse false;
 
@@ -1508,6 +1513,18 @@ pub fn build(b: *std.Build) void {
     syscall_hypervisor_module.addImport("process", process_module);
     syscall_hypervisor_module.addImport("user_mem", user_mem_module);
 
+    // Create syscall display module (display mode changes)
+    const syscall_display_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/sys/syscall/hw/display.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    syscall_display_module.addImport("uapi", uapi_module);
+    syscall_display_module.addImport("sched", sched_module);
+    syscall_display_module.addImport("process", process_module);
+    syscall_display_module.addImport("console", console_module);
+    syscall_display_module.addImport("video_driver", video_module);
+
     // Create syscall fs_handlers module (mount, umount, unlink)
     const syscall_fs_handlers_module = b.createModule(.{
         .root_source_file = b.path("src/kernel/sys/syscall/fs/fs_handlers.zig"),
@@ -1557,6 +1574,7 @@ pub fn build(b: *std.Build) void {
     syscall_table_module.addImport("ring", syscall_ring_module);
     syscall_table_module.addImport("fs_handlers", syscall_fs_handlers_module);
     syscall_table_module.addImport("hypervisor", syscall_hypervisor_module);
+    syscall_table_module.addImport("display", syscall_display_module);
 
     // Create kernel executable
     // NOTE: red_zone must be disabled for kernel code to prevent stack corruption
@@ -1989,6 +2007,31 @@ pub fn build(b: *std.Build) void {
     // Install doom.elf
     const install_doom = b.addInstallArtifact(doom, .{});
     b.getInstallStep().dependOn(&install_doom.step);
+
+    // ============================================================
+    // SPICE Agent Service
+    // ============================================================
+    // Userspace service for SPICE/Proxmox display resolution sync
+    const spice_agent_mod = b.createModule(.{
+        .root_source_file = b.path("src/user/services/spice_agent/main.zig"),
+        .target = user_target,
+        .optimize = optimize,
+        .code_model = .small,
+    });
+    spice_agent_mod.addImport("syscall", user_syscall_lib);
+    spice_agent_mod.addImport("libc", user_libc_module);
+
+    const spice_agent = b.addExecutable(.{
+        .name = "spice_agent.elf",
+        .root_module = spice_agent_mod,
+    });
+    spice_agent.setLinkerScript(b.path("src/user/linker.ld"));
+    if (target_arch == .x86_64) {
+        spice_agent.root_module.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
+    }
+
+    const install_spice_agent = b.addInstallArtifact(spice_agent, .{});
+    b.getInstallStep().dependOn(&install_spice_agent.step);
 
     // Compile C integration tests
     const c_tests = [_][]const u8{

@@ -303,6 +303,21 @@ pub const TimeVal = extern struct {
     }
 };
 
+/// struct ucred - Reference: Linux <sys/socket.h>
+/// Must be 12 bytes: pid(u32) + uid(u32) + gid(u32)
+/// Used with SO_PEERCRED to get peer credentials on AF_UNIX sockets.
+pub const UCred = extern struct {
+    pid: u32,
+    uid: u32,
+    gid: u32,
+
+    comptime {
+        if (@sizeOf(@This()) != 12) {
+            @compileError("UCred must be 12 bytes");
+        }
+    }
+};
+
 /// struct ip_mreq - Reference: Linux <netinet/in.h>
 /// Must be 8 bytes: imr_multiaddr(u32) + imr_interface(u32)
 pub const IpMreq = extern struct {
@@ -400,6 +415,59 @@ pub const MsgHdr = extern struct {
     }
 };
 
+/// struct cmsghdr - Reference: Linux <sys/socket.h>
+/// Control message header for ancillary data in sendmsg/recvmsg.
+/// Must be 16 bytes on x86_64.
+pub const CmsgHdr = extern struct {
+    cmsg_len: usize, // Data byte count including header
+    cmsg_level: i32, // Originating protocol (SOL_SOCKET)
+    cmsg_type: i32, // Protocol-specific type (SCM_RIGHTS)
+
+    comptime {
+        if (@sizeOf(@This()) != 16) {
+            @compileError("CmsgHdr must be 16 bytes");
+        }
+    }
+};
+
+/// Socket-level option for ancillary data
+pub const SOL_SOCKET: i32 = 1;
+
+/// Ancillary data type: pass file descriptors
+pub const SCM_RIGHTS: i32 = 0x01;
+
+/// Ancillary data type: pass credentials (UCred: pid, uid, gid)
+pub const SCM_CREDENTIALS: i32 = 0x02;
+
+/// Message flags for recvmsg
+pub const MSG_CTRUNC: i32 = 0x08; // Control data truncated
+pub const MSG_TRUNC: i32 = 0x20; // Data was truncated (datagram)
+
+/// Align length to natural alignment (size of usize)
+pub inline fn CMSG_ALIGN(len: usize) usize {
+    return (len + @sizeOf(usize) - 1) & ~(@as(usize, @sizeOf(usize) - 1));
+}
+
+/// Space needed for ancillary data with payload of given length
+pub inline fn CMSG_SPACE(len: usize) usize {
+    return CMSG_ALIGN(@sizeOf(CmsgHdr)) + CMSG_ALIGN(len);
+}
+
+/// Length of control message including header (for cmsg_len field)
+pub inline fn CMSG_LEN(len: usize) usize {
+    return @sizeOf(CmsgHdr) + len;
+}
+
+/// Get pointer to data portion of control message
+pub inline fn CMSG_DATA(cmsg: *const CmsgHdr) [*]const u8 {
+    return @ptrFromInt(@intFromPtr(cmsg) + @sizeOf(CmsgHdr));
+}
+
+/// Get mutable pointer to data portion of control message
+pub inline fn CMSG_DATA_MUT(cmsg: *CmsgHdr) [*]u8 {
+    return @ptrFromInt(@intFromPtr(cmsg) + @sizeOf(CmsgHdr));
+}
+
 // =============================================================================
 // Zscapek-specific ABI Layouts
 // =============================================================================
@@ -442,11 +510,13 @@ pub fn verifyAbi() void {
         _ = SockAddrStorage{};
         _ = SockAddr{};
         _ = TimeVal{};
+        _ = UCred{};
         _ = IpMreq{};
         _ = Ipv6Mreq{};
         _ = PollFd{};
         _ = IoVec{};
         _ = MsgHdr{};
+        _ = CmsgHdr{};
         _ = FramebufferInfo{};
     }
 }

@@ -174,7 +174,7 @@ src/kernel/sys/syscall/
         mmio.zig       - MMIO mapping for userspace drivers
 
     net/            - Networking
-        net.zig        - Sockets (socket, bind, listen, accept, connect, send, recv, poll)
+        net.zig        - Sockets (socket, bind, listen, accept, connect, socketpair, send, recv, poll)
         pci_syscall.zig- PCI configuration and enumeration
 
     hw/             - Hardware I/O
@@ -274,6 +274,7 @@ Example differences:
 | 50 | listen | (fd, backlog) -> int | net.zig |
 | 51 | getsockname | (fd, addr, addrlen) -> int | net.zig |
 | 52 | getpeername | (fd, addr, addrlen) -> int | net.zig |
+| 53 | socketpair | (domain, type, protocol, sv) -> int | net.zig |
 | 54 | setsockopt | (fd, level, name, val, len) -> int | net.zig |
 | 55 | getsockopt | (fd, level, name, val, len) -> int | net.zig |
 | 56 | clone | (flags, stack, ptid, ctid, tls) -> pid_t | execution.zig |
@@ -339,6 +340,7 @@ Example differences:
 | 233 | epoll_ctl | (epfd, op, fd, event) -> int | scheduling.zig |
 | 234 | tgkill | (tgid, tid, sig) -> int | signals.zig |
 | 257 | openat | (dfd, filename, flags, mode) -> int | fd.zig |
+| 288 | accept4 | (fd, addr, addrlen, flags) -> fd | net.zig |
 | 291 | epoll_create1 | (flags) -> int | scheduling.zig |
 | 292 | dup3 | (old, new, flags) -> int | fd.zig |
 | 293 | pipe2 | (pipefd, flags) -> int | fd.zig |

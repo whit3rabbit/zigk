@@ -42,6 +42,10 @@ const VirtioGpuResourceAttachBacking = proto.VirtioGpuResourceAttachBacking;
 const VirtioGpuMemEntry = proto.VirtioGpuMemEntry;
 const VirtioGpuTransferToHost2d = proto.VirtioGpuTransferToHost2d;
 const VirtioGpuResourceFlush = proto.VirtioGpuResourceFlush;
+const VirtioGpuResourceUnref = proto.VirtioGpuResourceUnref;
+const VirtioGpuResourceDetachBacking = proto.VirtioGpuResourceDetachBacking;
+const VIRTIO_GPU_CMD_RESOURCE_UNREF = proto.VIRTIO_GPU_CMD_RESOURCE_UNREF;
+const VIRTIO_GPU_CMD_RESOURCE_DETACH_BACKING = proto.VIRTIO_GPU_CMD_RESOURCE_DETACH_BACKING;
 
 /// VirtIO-GPU driver state
 pub const VirtioGpuDriver = struct {
@@ -194,7 +198,7 @@ pub const VirtioGpuDriver = struct {
         }
 
         console.info("VirtIO-GPU: Initialized {d}x{d}", .{ driver.width, driver.height });
-        driver_initialized = true;
+        driver_initialized.store(true, .release);
         return driver;
     }
 
@@ -943,21 +947,267 @@ pub const VirtioGpuDriver = struct {
 
         _ = self.sendCommand(flush_bytes, resp_bytes);
     }
+
+    // =========================================================================
+    // Display Mode Management
+    // =========================================================================
+
+    /// Error type for setDisplayMode
+    pub const SetDisplayModeError = error{
+        OutOfMemory,
+        InvalidDimensions,
+        DeviceFailed,
+    };
+
+    /// Change display resolution dynamically
+    ///
+    /// This is used by SPICE agent for display synchronization with host.
+    /// The process:
+    /// 1. Detach and free old framebuffer
+    /// 2. Create new resource with new dimensions
+    /// 3. Allocate and attach new framebuffer
+    /// 4. Set scanout
+    ///
+    /// Thread safety: Uses cmd_lock internally
+    pub fn setDisplayMode(self: *Self, new_width: u32, new_height: u32) SetDisplayModeError!void {
+        // Validate dimensions
+        if (new_width < 640 or new_width > MAX_DISPLAY_WIDTH or
+            new_height < 480 or new_height > MAX_DISPLAY_HEIGHT)
+        {
+            return SetDisplayModeError.InvalidDimensions;
+        }
+
+        // Calculate new framebuffer size with checked arithmetic
+        const new_pitch = std.math.mul(u32, new_width, 4) catch return SetDisplayModeError.InvalidDimensions;
+        const fb_size = std.math.mul(usize, @as(usize, new_pitch), new_height) catch {
+            return SetDisplayModeError.InvalidDimensions;
+        };
+        const new_pages_needed = (fb_size + 4095) / 4096;
+
+        // Calculate old framebuffer size for cleanup
+        const old_fb_size = std.math.mul(usize, @as(usize, self.pitch), self.height) catch 0;
+        const old_pages = if (old_fb_size > 0) (old_fb_size + 4095) / 4096 else 0;
+
+        const allocator = heap.allocator();
+        const kernel_pml4 = vmm.getKernelPml4();
+        const FB_VIRT_BASE = vmm.getKernelBase() + 0x4000000000;
+
+        console.info("VirtIO-GPU: Changing mode from {}x{} to {}x{}", .{
+            self.width,
+            self.height,
+            new_width,
+            new_height,
+        });
+
+        // Step 1: Detach backing from old resource
+        if (self.resource_id > 0) {
+            const detach_cmd: *VirtioGpuResourceDetachBacking = @ptrCast(@alignCast(self.cmd_buf_virt));
+            detach_cmd.* = .{
+                .hdr = .{
+                    .type_ = VIRTIO_GPU_CMD_RESOURCE_DETACH_BACKING,
+                    .flags = 0,
+                    .fence_id = 0,
+                    .ctx_id = 0,
+                    .ring_idx = 0,
+                },
+                .resource_id = self.resource_id,
+            };
+            const detach_bytes = @as([*]const u8, @ptrCast(detach_cmd))[0..@sizeOf(VirtioGpuResourceDetachBacking)];
+            const resp_bytes = self.resp_buf_virt[0..@sizeOf(VirtioGpuCtrlHdr)];
+            _ = self.sendCommand(detach_bytes, resp_bytes);
+
+            // Step 2: Unref old resource
+            const unref_cmd: *VirtioGpuResourceUnref = @ptrCast(@alignCast(self.cmd_buf_virt));
+            unref_cmd.* = .{
+                .hdr = .{
+                    .type_ = VIRTIO_GPU_CMD_RESOURCE_UNREF,
+                    .flags = 0,
+                    .fence_id = 0,
+                    .ctx_id = 0,
+                    .ring_idx = 0,
+                },
+                .resource_id = self.resource_id,
+            };
+            const unref_bytes = @as([*]const u8, @ptrCast(unref_cmd))[0..@sizeOf(VirtioGpuResourceUnref)];
+            _ = self.sendCommand(unref_bytes, resp_bytes);
+        }
+
+        // Step 3: Free old framebuffer pages and unmap
+        var i: usize = 0;
+        while (i < old_pages) : (i += 1) {
+            const virt_addr = FB_VIRT_BASE + i * 4096;
+            // Get physical address before unmapping
+            if (vmm.translate(kernel_pml4, virt_addr)) |phys| {
+                vmm.unmapPage(kernel_pml4, virt_addr) catch {};
+                pmm.freePage(phys);
+            }
+        }
+
+        // Step 4: Allocate new framebuffer pages
+        var entries = std.ArrayListUnmanaged(VirtioGpuMemEntry){};
+        defer entries.deinit(allocator);
+
+        var allocated_pages = std.ArrayListUnmanaged(u64){};
+        defer allocated_pages.deinit(allocator);
+
+        const cleanup = struct {
+            fn run(pages: *std.ArrayListUnmanaged(u64), pml4: anytype, base_virt: u64) void {
+                for (pages.items, 0..) |phys, idx| {
+                    vmm.unmapPage(pml4, base_virt + idx * 4096) catch {};
+                    pmm.freePage(phys);
+                }
+            }
+        };
+
+        i = 0;
+        while (i < new_pages_needed) : (i += 1) {
+            const phys = pmm.allocZeroedPage() orelse {
+                console.err("VirtIO-GPU: Failed to allocate framebuffer page {}/{}", .{ i, new_pages_needed });
+                cleanup.run(&allocated_pages, kernel_pml4, FB_VIRT_BASE);
+                return SetDisplayModeError.OutOfMemory;
+            };
+
+            allocated_pages.append(allocator, phys) catch {
+                pmm.freePage(phys);
+                cleanup.run(&allocated_pages, kernel_pml4, FB_VIRT_BASE);
+                return SetDisplayModeError.OutOfMemory;
+            };
+
+            if (i == 0) self.fb_phys = phys;
+
+            const virt_addr = FB_VIRT_BASE + i * 4096;
+            const flags = vmm.PageFlags{ .writable = true, .global = true };
+
+            vmm.mapPage(kernel_pml4, virt_addr, phys, flags) catch {
+                cleanup.run(&allocated_pages, kernel_pml4, FB_VIRT_BASE);
+                return SetDisplayModeError.OutOfMemory;
+            };
+
+            entries.append(allocator, .{
+                .addr = phys,
+                .length = 4096,
+                ._padding = 0,
+            }) catch {
+                cleanup.run(&allocated_pages, kernel_pml4, FB_VIRT_BASE);
+                return SetDisplayModeError.OutOfMemory;
+            };
+        }
+
+        // Step 5: Create new 2D resource
+        const new_resource_id = self.next_resource_id;
+        self.next_resource_id += 1;
+
+        const create_cmd: *VirtioGpuResourceCreate2d = @ptrCast(@alignCast(self.cmd_buf_virt));
+        create_cmd.* = .{
+            .hdr = .{
+                .type_ = VIRTIO_GPU_CMD_RESOURCE_CREATE_2D,
+                .flags = 0,
+                .fence_id = 0,
+                .ctx_id = 0,
+                .ring_idx = 0,
+            },
+            .resource_id = new_resource_id,
+            .format = VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM,
+            .width = new_width,
+            .height = new_height,
+        };
+
+        const create_bytes = @as([*]const u8, @ptrCast(create_cmd))[0..@sizeOf(VirtioGpuResourceCreate2d)];
+        const resp_bytes = self.resp_buf_virt[0..@sizeOf(VirtioGpuCtrlHdr)];
+
+        if (!self.sendCommand(create_bytes, resp_bytes)) {
+            cleanup.run(&allocated_pages, kernel_pml4, FB_VIRT_BASE);
+            return SetDisplayModeError.DeviceFailed;
+        }
+
+        // Step 6: Attach backing memory
+        const attach_header_size = @sizeOf(VirtioGpuResourceAttachBacking);
+        const entries_size = std.math.mul(usize, entries.items.len, @sizeOf(VirtioGpuMemEntry)) catch {
+            cleanup.run(&allocated_pages, kernel_pml4, FB_VIRT_BASE);
+            return SetDisplayModeError.InvalidDimensions;
+        };
+        const total_size = std.math.add(usize, attach_header_size, entries_size) catch {
+            cleanup.run(&allocated_pages, kernel_pml4, FB_VIRT_BASE);
+            return SetDisplayModeError.InvalidDimensions;
+        };
+
+        const attach_buf = allocator.alloc(u8, total_size) catch {
+            cleanup.run(&allocated_pages, kernel_pml4, FB_VIRT_BASE);
+            return SetDisplayModeError.OutOfMemory;
+        };
+        defer allocator.free(attach_buf);
+
+        const attach_cmd: *VirtioGpuResourceAttachBacking = @ptrCast(@alignCast(attach_buf.ptr));
+        attach_cmd.* = .{
+            .hdr = .{
+                .type_ = VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING,
+                .flags = 0,
+                .fence_id = 0,
+                .ctx_id = 0,
+                .ring_idx = 0,
+            },
+            .resource_id = new_resource_id,
+            .nr_entries = @intCast(entries.items.len),
+        };
+
+        const entries_dest = attach_buf[attach_header_size..];
+        const entries_src = std.mem.sliceAsBytes(entries.items);
+        @memcpy(entries_dest, entries_src);
+
+        if (!self.sendCommand(attach_buf, resp_bytes)) {
+            cleanup.run(&allocated_pages, kernel_pml4, FB_VIRT_BASE);
+            return SetDisplayModeError.DeviceFailed;
+        }
+
+        // Step 7: Set scanout
+        const scanout_cmd: *VirtioGpuSetScanout = @ptrCast(@alignCast(self.cmd_buf_virt));
+        scanout_cmd.* = .{
+            .hdr = .{
+                .type_ = VIRTIO_GPU_CMD_SET_SCANOUT,
+                .flags = 0,
+                .fence_id = 0,
+                .ctx_id = 0,
+                .ring_idx = 0,
+            },
+            .r = .{ .x = 0, .y = 0, .width = new_width, .height = new_height },
+            .scanout_id = 0,
+            .resource_id = new_resource_id,
+        };
+
+        const scanout_bytes = @as([*]const u8, @ptrCast(scanout_cmd))[0..@sizeOf(VirtioGpuSetScanout)];
+
+        if (!self.sendCommand(scanout_bytes, resp_bytes)) {
+            // At this point we've committed, so just warn
+            console.warn("VirtIO-GPU: SET_SCANOUT failed but continuing", .{});
+        }
+
+        // Step 8: Update driver state
+        self.resource_id = new_resource_id;
+        self.width = new_width;
+        self.height = new_height;
+        self.pitch = new_pitch;
+        self.fb_virt = @ptrFromInt(FB_VIRT_BASE);
+
+        console.info("VirtIO-GPU: Display mode changed to {}x{}", .{ new_width, new_height });
+    }
 };
 
 // Global driver instance
 var driver_instance: VirtioGpuDriver = undefined;
-var driver_initialized: bool = false;
+// SECURITY: Use atomic for driver_initialized to ensure proper memory ordering
+// on weak memory model architectures (aarch64). The release store in init()
+// synchronizes-with the acquire load in getDriver()/handleInterrupt().
+var driver_initialized: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 
 /// Get initialized VirtIO-GPU driver if available
 pub fn getDriver() ?*VirtioGpuDriver {
-    if (driver_initialized) return &driver_instance;
+    if (driver_initialized.load(.acquire)) return &driver_instance;
     return null;
 }
 
 /// MSI-X interrupt handler for VirtIO-GPU command completion
 fn handleInterrupt(_: *const hal.idt.InterruptFrame) void {
-    if (!driver_initialized) {
+    if (!driver_initialized.load(.acquire)) {
         hal.apic.lapic.sendEoi();
         return;
     }

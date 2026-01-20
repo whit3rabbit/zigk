@@ -15,11 +15,15 @@ pub const htons = root.htons;
 pub const htonl = root.htonl;
 
 // Constants and types
+pub const AF_UNIX = root.AF_UNIX;
+pub const AF_LOCAL = root.AF_LOCAL;
 pub const AF_INET = root.AF_INET;
 pub const AF_INET6 = root.AF_INET6;
 pub const SOCK_STREAM = root.SOCK_STREAM;
 pub const SOCK_DGRAM = root.SOCK_DGRAM;
 pub const SOCK_RAW = root.SOCK_RAW;
+pub const SOCK_NONBLOCK = root.SOCK_NONBLOCK;
+pub const SOCK_CLOEXEC = root.SOCK_CLOEXEC;
 pub const SOL_SOCKET = root.SOL_SOCKET;
 pub const IPPROTO_IP = root.IPPROTO_IP;
 pub const IPPROTO_ICMP = root.IPPROTO_ICMP;
@@ -29,6 +33,7 @@ pub const IPPROTO_ICMPV6 = root.IPPROTO_ICMPV6;
 pub const TCP_NODELAY = root.TCP_NODELAY;
 pub const SO_REUSEADDR = root.SO_REUSEADDR;
 pub const SO_BROADCAST = root.SO_BROADCAST;
+pub const SO_PEERCRED = root.SO_PEERCRED;
 pub const SO_RCVTIMEO = root.SO_RCVTIMEO;
 pub const SO_SNDTIMEO = root.SO_SNDTIMEO;
 pub const IP_TOS = root.IP_TOS;
@@ -131,3 +136,6 @@ pub const recvfromRaw6 = root.recvfromRaw6;
 // Errors
 pub const SocketError = root.SocketError;
 pub const errorToErrno = root.errorToErrno;
+
+// UNIX domain sockets
+pub const unix_socket = root.unix_socket;
