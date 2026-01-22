@@ -362,12 +362,23 @@ export fn _start(boot_info: *BootInfo.BootInfo) callconv(.c) noreturn {
         hal.apic.routeIrq(4, hal.apic.Vectors.COM1, 0);
         hal.apic.enableIrq(4);
         console.info("Serial IRQ4 routed to vector {d}", .{hal.apic.Vectors.COM1});
+
+        // Enable serial receive interrupts for -nographic mode (keyboard input via serial)
+        serial_driver.setOnByteReceived(&serialInputCallback);
+        serial_driver.enableReceiveInterrupts();
+        console.info("Serial RX interrupts enabled (for -nographic mode)", .{});
     }
 
     hal.interrupts.setCrashHandler(panic_lib.handleCrash);
 
-    // Initialize scheduler
+    // Initialize scheduler (sets up timer handler)
     sched.init();
+
+    // Initialize APIC timer AFTER scheduler sets up the timer handler
+    // This provides periodic interrupts to wake the CPU from halt state
+    if (builtin.cpu.arch == .x86_64) {
+        hal.apic.initTimer();
+    }
     hal.interrupts.setPageFaultHandler(pageFaultHandler);
     console.info("Demand paging enabled", .{});
 
@@ -546,6 +557,14 @@ fn initApic(boot_info: *const BootInfo.BootInfo) void {
     hal.apic.init(&apic_init_info);
 
     console.info("APIC subsystem initialized", .{});
+}
+
+/// Serial input callback for -nographic mode.
+/// Injects received bytes into the keyboard buffer so getchar() works via serial console.
+/// Converts CR (0x0D) to LF (0x0A) since serial terminals send CR on Enter.
+fn serialInputCallback(byte: u8) void {
+    const ch: u8 = if (byte == '\r') '\n' else byte;
+    keyboard.injectChar(ch);
 }
 
 /// Page fault handler for demand paging.

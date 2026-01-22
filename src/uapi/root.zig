@@ -23,6 +23,7 @@ pub const io_ring = @import("io/io_ring.zig");
 pub const net_ipc = @import("ipc/net_ipc.zig");
 pub const ipc_msg = @import("ipc/ipc_msg.zig");
 pub const ring = @import("ipc/ring.zig");
+pub const virt_pci = @import("virt_pci/root.zig");
 
 
 // Re-export commonly used types

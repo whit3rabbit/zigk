@@ -14,6 +14,7 @@ const keyboard = @import("keyboard");
 const heap = @import("heap");
 const sched = @import("sched");
 const usb = @import("usb");
+const virtio_input = @import("virtio_input");
 
 const SyscallError = base.SyscallError;
 const UserPtr = base.UserPtr;
@@ -100,17 +101,48 @@ pub fn sys_putchar(c: usize) SyscallError!usize {
     return 0;
 }
 
+/// Poll serial port for input (for -nographic mode)
+/// Returns character if available, null otherwise
+fn pollSerial() ?u8 {
+    const COM1: u16 = 0x3F8;
+    const LSR: u16 = 5; // Line Status Register offset
+    const DATA: u16 = 0; // Data register offset
+
+    // Check if data is available (LSR bit 0 = Data Ready)
+    const lsr = hal.io.inb(COM1 + LSR);
+
+    if ((lsr & 0x01) != 0) {
+        return hal.io.inb(COM1 + DATA);
+    }
+    return null;
+}
+
 /// sys_getchar (1004) - Read single character from keyboard (blocking)
 /// On aarch64, USB keyboards require explicit polling since MSI-X is not available.
+/// On x86_64 QEMU TCG/macOS, PS/2 IRQs may not fire reliably, so we poll there too.
+/// In -nographic mode, keyboard input comes via serial port.
 pub fn sys_getchar() SyscallError!usize {
     while (true) {
         // Poll USB events to process any pending HID keyboard reports.
         // This is essential on aarch64 where MSI-X interrupts don't work.
         _ = usb.xhci.pollEvents();
 
+        // Poll VirtIO-Input devices (keyboard on macOS TCG where PS/2 is unreliable)
+        virtio_input.pollAll();
+
+        // Poll PS/2 data port directly as fallback for unreliable IRQs.
+        // On QEMU TCG/macOS, edge-triggered IRQ1 may not fire for every keypress.
+        keyboard.pollPs2();
+
+        // Poll serial port for -nographic mode input
+        if (pollSerial()) |c| {
+            return c;
+        }
+
         if (keyboard.getChar()) |c| {
             return c;
         }
+
         // No character available, yield and try again
         sched.yield();
     }

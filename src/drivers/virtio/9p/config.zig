@@ -80,8 +80,8 @@ comptime {
 pub const P9_PROTO_2000U = "9P2000.u";
 pub const P9_PROTO_2000L = "9P2000.L"; // Linux extension (more features)
 
-/// Default message size for negotiation
-pub const P9_DEFAULT_MSIZE: u32 = 8192;
+/// Default message size for negotiation (matches QEMU's default)
+pub const P9_DEFAULT_MSIZE: u32 = 65536;
 
 /// Maximum message size we support
 pub const P9_MAX_MSIZE: u32 = 65536;

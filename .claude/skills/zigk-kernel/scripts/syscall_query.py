@@ -43,6 +43,7 @@ Categories:
     fb       - Zscapek framebuffer
     hypervisor - Zscapek hypervisor access (VMware, KVM, etc.)
     netconfig- Zscapek network interface configuration (SLAAC, ARP)
+    virt_pci - Zscapek virtual PCI device emulation (pciem port)
 """
 
 import sys
@@ -276,6 +277,19 @@ SYSCALLS = {
     1060: {"name": "SYS_NETIF_CONFIG", "doc": "Configure network interface (requires CAP_NET_CONFIG)", "sig": "netif_config(iface_idx, cmd, data_ptr, data_len) -> 0"},
     1061: {"name": "SYS_ARP_PROBE", "doc": "ARP probe for IP conflict detection (RFC 5227)", "sig": "arp_probe(iface_idx, target_ip, timeout_ms) -> 0=safe, 1=conflict, 2=timeout"},
     1062: {"name": "SYS_ARP_ANNOUNCE", "doc": "Gratuitous ARP announcement (RFC 5227)", "sig": "arp_announce(iface_idx, ip_addr) -> 0"},
+
+    # Virtual PCI Device Emulation Syscalls (1080-1090)
+    1080: {"name": "SYS_VPCI_CREATE", "doc": "Create virtual PCI device (requires VirtualPciCapability)", "sig": "vpci_create() -> device_id"},
+    1081: {"name": "SYS_VPCI_ADD_BAR", "doc": "Add BAR to virtual PCI device", "sig": "vpci_add_bar(dev_id, config_ptr) -> 0"},
+    1082: {"name": "SYS_VPCI_ADD_CAP", "doc": "Add PCI capability (MSI, MSI-X, PM)", "sig": "vpci_add_cap(dev_id, cap_ptr) -> offset"},
+    1083: {"name": "SYS_VPCI_SET_CONFIG", "doc": "Set PCI config header (vendor/device ID, class)", "sig": "vpci_set_config(dev_id, header_ptr) -> 0"},
+    1084: {"name": "SYS_VPCI_REGISTER", "doc": "Make device visible to PCI subsystem, create event ring", "sig": "vpci_register(dev_id) -> ring_id"},
+    1085: {"name": "SYS_VPCI_INJECT_IRQ", "doc": "Inject MSI/MSI-X interrupt", "sig": "vpci_inject_irq(dev_id, irq_ptr) -> 0"},
+    1086: {"name": "SYS_VPCI_DMA", "doc": "Perform DMA read/write operation", "sig": "vpci_dma(dma_op_ptr) -> bytes"},
+    1087: {"name": "SYS_VPCI_GET_BAR_INFO", "doc": "Get BAR physical address after registration", "sig": "vpci_get_bar_info(dev_id, idx, info_ptr) -> 0"},
+    1088: {"name": "SYS_VPCI_DESTROY", "doc": "Unregister and destroy virtual device", "sig": "vpci_destroy(dev_id) -> 0"},
+    1089: {"name": "SYS_VPCI_WAIT_EVENT", "doc": "Wait for MMIO event on device's event ring", "sig": "vpci_wait_event(dev_id, timeout_ms) -> count"},
+    1090: {"name": "SYS_VPCI_RESPOND", "doc": "Submit response to MMIO read event", "sig": "vpci_respond(dev_id, response_ptr) -> 0"},
 }
 
 # Linux aarch64 ABI syscall numbers
@@ -513,6 +527,19 @@ SYSCALLS_AARCH64 = {
     1050: {"name": "SYS_VMWARE_HYPERCALL", "doc": "Execute VMware hypercall command", "sig": "vmware_hypercall(regs_ptr) -> 0"},
     1051: {"name": "SYS_GET_HYPERVISOR", "doc": "Get hypervisor type", "sig": "get_hypervisor() -> type"},
     1060: {"name": "SYS_NETIF_CONFIG", "doc": "Configure network interface", "sig": "netif_config(iface_idx, cmd, data_ptr, data_len) -> 0"},
+
+    # Virtual PCI Device Emulation Syscalls (1080-1090) - same as x86_64
+    1080: {"name": "SYS_VPCI_CREATE", "doc": "Create virtual PCI device (requires VirtualPciCapability)", "sig": "vpci_create() -> device_id"},
+    1081: {"name": "SYS_VPCI_ADD_BAR", "doc": "Add BAR to virtual PCI device", "sig": "vpci_add_bar(dev_id, config_ptr) -> 0"},
+    1082: {"name": "SYS_VPCI_ADD_CAP", "doc": "Add PCI capability (MSI, MSI-X, PM)", "sig": "vpci_add_cap(dev_id, cap_ptr) -> offset"},
+    1083: {"name": "SYS_VPCI_SET_CONFIG", "doc": "Set PCI config header (vendor/device ID, class)", "sig": "vpci_set_config(dev_id, header_ptr) -> 0"},
+    1084: {"name": "SYS_VPCI_REGISTER", "doc": "Make device visible to PCI subsystem, create event ring", "sig": "vpci_register(dev_id) -> ring_id"},
+    1085: {"name": "SYS_VPCI_INJECT_IRQ", "doc": "Inject MSI/MSI-X interrupt", "sig": "vpci_inject_irq(dev_id, irq_ptr) -> 0"},
+    1086: {"name": "SYS_VPCI_DMA", "doc": "Perform DMA read/write operation", "sig": "vpci_dma(dma_op_ptr) -> bytes"},
+    1087: {"name": "SYS_VPCI_GET_BAR_INFO", "doc": "Get BAR physical address after registration", "sig": "vpci_get_bar_info(dev_id, idx, info_ptr) -> 0"},
+    1088: {"name": "SYS_VPCI_DESTROY", "doc": "Unregister and destroy virtual device", "sig": "vpci_destroy(dev_id) -> 0"},
+    1089: {"name": "SYS_VPCI_WAIT_EVENT", "doc": "Wait for MMIO event on device's event ring", "sig": "vpci_wait_event(dev_id, timeout_ms) -> count"},
+    1090: {"name": "SYS_VPCI_RESPOND", "doc": "Submit response to MMIO read event", "sig": "vpci_respond(dev_id, response_ptr) -> 0"},
 }
 
 # Categories for aarch64 (using aarch64 syscall numbers)
@@ -540,6 +567,7 @@ CATEGORIES_AARCH64 = {
     "fb": [1000, 1001, 1002, 1006],
     "hypervisor": [1050, 1051],
     "netconfig": [1060],
+    "virt_pci": [1080, 1081, 1082, 1083, 1084, 1085, 1086, 1087, 1088, 1089, 1090],
 }
 
 # Categories for grouping (x86_64)
@@ -567,6 +595,7 @@ CATEGORIES = {
     "fb": [1000, 1001, 1002, 1006],
     "hypervisor": [1050, 1051],
     "netconfig": [1060, 1061, 1062],
+    "virt_pci": [1080, 1081, 1082, 1083, 1084, 1085, 1086, 1087, 1088, 1089, 1090],
 }
 
 # Optional: Try to parse live from source if available (for updates)

@@ -238,3 +238,64 @@ pub const InterfaceInfo = extern struct {
         if (@sizeOf(@This()) != 68) @compileError("InterfaceInfo must be 68 bytes");
     }
 };
+
+// =============================================================================
+// Virtual PCI Device Emulation Syscalls (1080-1099)
+// =============================================================================
+// These syscalls implement the pciem-compatible virtual PCI device framework.
+// Requires VirtualPciCapability.
+
+/// Create a new virtual PCI device
+/// Returns: device_id on success, -errno on failure
+/// Requires: VirtualPciCapability
+pub const SYS_VPCI_CREATE: usize = 1080;
+
+/// Add a BAR to a virtual device (before registration)
+/// arg1: device_id, arg2: bar_config_ptr (VPciBarConfig)
+/// Returns: 0 on success, -errno on failure
+pub const SYS_VPCI_ADD_BAR: usize = 1081;
+
+/// Add a capability to a virtual device (MSI, MSI-X, PM, etc.)
+/// arg1: device_id, arg2: cap_config_ptr (VPciCapConfig)
+/// Returns: capability offset on success, -errno on failure
+pub const SYS_VPCI_ADD_CAP: usize = 1082;
+
+/// Set the PCI configuration header (vendor/device ID, class, etc.)
+/// arg1: device_id, arg2: config_header_ptr (VPciConfigHeader)
+/// Returns: 0 on success, -errno on failure
+pub const SYS_VPCI_SET_CONFIG: usize = 1083;
+
+/// Register device with PCI subsystem and create event ring
+/// arg1: device_id
+/// Returns: ring_id on success (for event ring mapping), -errno on failure
+pub const SYS_VPCI_REGISTER: usize = 1084;
+
+/// Inject MSI/MSI-X interrupt
+/// arg1: device_id, arg2: irq_config_ptr (VPciIrqConfig)
+/// Returns: 0 on success, -errno on failure
+pub const SYS_VPCI_INJECT_IRQ: usize = 1085;
+
+/// Perform DMA read/write operation
+/// arg1: dma_op_ptr (VPciDmaOp)
+/// Returns: bytes transferred on success, -errno on failure
+pub const SYS_VPCI_DMA: usize = 1086;
+
+/// Get BAR info (physical address after mapping)
+/// arg1: device_id, arg2: bar_index, arg3: bar_info_ptr (VPciBarInfo)
+/// Returns: 0 on success, -errno on failure
+pub const SYS_VPCI_GET_BAR_INFO: usize = 1087;
+
+/// Unregister and destroy a virtual device
+/// arg1: device_id
+/// Returns: 0 on success, -errno on failure
+pub const SYS_VPCI_DESTROY: usize = 1088;
+
+/// Wait for MMIO event (blocking)
+/// arg1: device_id, arg2: timeout_ns (0 = infinite)
+/// Returns: number of pending events, -errno on failure
+pub const SYS_VPCI_WAIT_EVENT: usize = 1089;
+
+/// Submit response to an MMIO read event
+/// arg1: device_id, arg2: response_ptr (VPciResponse)
+/// Returns: 0 on success, -errno on failure
+pub const SYS_VPCI_RESPOND: usize = 1090;

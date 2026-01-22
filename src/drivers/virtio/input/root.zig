@@ -21,6 +21,7 @@ const heap = @import("heap");
 const sync = @import("sync");
 const virtio = @import("virtio");
 const input = @import("input");
+const keyboard = @import("keyboard");
 const uapi = @import("uapi");
 
 pub const config = @import("config.zig");
@@ -119,6 +120,9 @@ pub const VirtioInputDriver = struct {
     /// Initialization complete flag
     initialized: bool,
 
+    /// Keyboard modifier state (for ASCII conversion)
+    shift_pressed: bool,
+
     /// Lock for thread-safe access
     lock: sync.Spinlock,
 
@@ -138,6 +142,7 @@ pub const VirtioInputDriver = struct {
         self.abs_x_info = null;
         self.abs_y_info = null;
         self.pending_abs_x = null;
+        self.shift_pressed = false;
         self.msix_vector = null;
         self.status_queue = null;
         self.lock = .{};
@@ -650,6 +655,28 @@ pub const VirtioInputDriver = struct {
             config.EventType.EV_KEY => {
                 // Button/key press
                 input.pushButton(self.input_device_id, event.code, event.value != 0, timestamp);
+
+                // Debug: log keyboard events
+                if (self.device_type == .keyboard) {
+                    console.debug("VirtIO-KB: code={d} value={d}", .{ event.code, event.value });
+                }
+
+                // For keyboard devices, also inject to keyboard subsystem for getchar()
+                if (self.device_type == .keyboard and event.value != 0) {
+                    if (linuxKeycodeToAscii(event.code, self.shift_pressed)) |char| {
+                        console.debug("VirtIO-KB: injecting char '{c}' (0x{X:0>2})", .{ char, char });
+                        keyboard.injectChar(char);
+                    }
+                    // Track modifier state
+                    if (event.code == 42 or event.code == 54) { // Left/Right Shift
+                        self.shift_pressed = true;
+                    }
+                } else if (self.device_type == .keyboard and event.value == 0) {
+                    // Key release - update modifier state
+                    if (event.code == 42 or event.code == 54) {
+                        self.shift_pressed = false;
+                    }
+                }
             },
             config.EventType.EV_REL => {
                 // Relative movement
@@ -805,4 +832,59 @@ pub fn pollAll() void {
             driver.poll();
         }
     }
+}
+
+// =============================================================================
+// Linux Keycode to ASCII Conversion
+// =============================================================================
+
+/// Convert Linux keycode to ASCII character
+/// Linux keycodes follow the evdev standard (include/uapi/linux/input-event-codes.h)
+fn linuxKeycodeToAscii(keycode: u16, shift: bool) ?u8 {
+    // Basic keycode mapping (subset of evdev codes)
+    const unshifted = [_]?u8{
+        null, // 0: KEY_RESERVED
+        0x1B, // 1: KEY_ESC
+        '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', // 2-11
+        '-', '=', 0x08, // 12-14: minus, equal, backspace
+        '\t', // 15: KEY_TAB
+        'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', // 16-25
+        '[', ']', '\n', // 26-28: leftbrace, rightbrace, enter
+        null, // 29: KEY_LEFTCTRL
+        'a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', // 30-38
+        ';', '\'', '`', // 39-41: semicolon, apostrophe, grave
+        null, // 42: KEY_LEFTSHIFT
+        '\\', // 43: backslash
+        'z', 'x', 'c', 'v', 'b', 'n', 'm', // 44-50
+        ',', '.', '/', // 51-53: comma, dot, slash
+        null, // 54: KEY_RIGHTSHIFT
+        '*', // 55: KEY_KPASTERISK
+        null, // 56: KEY_LEFTALT
+        ' ', // 57: KEY_SPACE
+    };
+
+    const shifted = [_]?u8{
+        null, // 0: KEY_RESERVED
+        0x1B, // 1: KEY_ESC
+        '!', '@', '#', '$', '%', '^', '&', '*', '(', ')', // 2-11
+        '_', '+', 0x08, // 12-14
+        '\t', // 15: KEY_TAB
+        'Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P', // 16-25
+        '{', '}', '\n', // 26-28
+        null, // 29: KEY_LEFTCTRL
+        'A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L', // 30-38
+        ':', '"', '~', // 39-41
+        null, // 42: KEY_LEFTSHIFT
+        '|', // 43
+        'Z', 'X', 'C', 'V', 'B', 'N', 'M', // 44-50
+        '<', '>', '?', // 51-53
+        null, // 54: KEY_RIGHTSHIFT
+        '*', // 55
+        null, // 56: KEY_LEFTALT
+        ' ', // 57: KEY_SPACE
+    };
+
+    if (keycode >= unshifted.len) return null;
+
+    return if (shift) shifted[keycode] else unshifted[keycode];
 }

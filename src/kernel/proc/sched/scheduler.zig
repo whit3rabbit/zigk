@@ -610,9 +610,16 @@ pub fn exitWithStatus(status: i32) void {
 
     held.release();
 
-    hal.cpu.disableInterrupts();
+    // Trigger reschedule so the next runnable thread gets picked.
+    // currentThread is null, so doPerCpuSchedule will skip saving state
+    // and just pick the next thread from the ready queue.
+    // The ISR context-switches to the new thread; this code is never reached again.
+    schedule_sync();
+
+    // Safety: if schedule_sync somehow returns, halt with interrupts enabled
+    // so the periodic timer can still fire and schedule other threads.
     while (true) {
-        hal.cpu.halt();
+        hal.cpu.enableAndHalt();
     }
 }
 
@@ -657,6 +664,7 @@ pub fn timerTick(frame: if (builtin.cpu.arch == .x86_64) *hal.interrupts.Interru
 /// On AArch64: returns new SP value for context switch
 fn doPerCpuSchedule(frame: *const hal.interrupts.InterruptFrame) if (builtin.cpu.arch == .x86_64) *hal.idt.InterruptFrame else u64 {
     const current = thread_logic.getCurrentThread();
+    const idle = thread_logic.getIdleThread();
 
     if (current) |curr| {
         curr.kernel_rsp = @intFromPtr(frame);
@@ -665,7 +673,10 @@ fn doPerCpuSchedule(frame: *const hal.interrupts.InterruptFrame) if (builtin.cpu
             fpu.saveState(curr.fpu_state_buffer);
         }
 
-        if (curr.state == .Running) {
+        // Don't add the idle thread to the ready queue - it's the fallback
+        // when the queue is empty. Adding it pollutes the queue and delays
+        // real threads from being scheduled.
+        if (curr.state == .Running and curr != idle) {
             cpu_mod.addToReadyQueue(curr);
         }
     }

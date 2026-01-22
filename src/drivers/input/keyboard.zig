@@ -97,10 +97,41 @@ var keyboard_initialized: bool = false;
 var error_stats: ErrorStats = .{};
 /// Public IRQ counter for diagnostics
 pub var irq_count: u32 = 0;
+/// Poll hit counter for diagnostics
+pub var poll_count: u32 = 0;
 
 // =============================================================================
 // Public API
 // =============================================================================
+
+/// Inject an ASCII character directly (e.g., from VirtIO-input)
+/// This bypasses scancode translation - use for input sources that provide keycodes
+pub fn injectChar(char: u8) void {
+    if (!keyboard_initialized) {
+        // Initialize for external input if not already done
+        initForUsb();
+    }
+
+    const flags = hal.cpu.disableInterruptsSaveFlags();
+    const held = keyboard_lock.acquire();
+
+    // Push directly to ASCII buffer
+    if (keyboard_state.ascii_buffer.push(char)) {
+        error_stats.buffer_overruns +%= 1;
+    }
+
+    // Wake up blocked threads if needed
+    if (keyboard_state.blocked_thread) |blocked| {
+        keyboard_state.blocked_thread = null;
+        held.release();
+        hal.cpu.restoreInterrupts(flags);
+        sched.unblock(blocked);
+        return;
+    }
+
+    held.release();
+    hal.cpu.restoreInterrupts(flags);
+}
 
 /// Inject a scancode from an external source (e.g., USB HID driver)
 pub fn injectScancode(scancode: u8) void {
@@ -153,7 +184,9 @@ pub fn initForUsb() void {
 
 /// Initialize the keyboard driver with proper PS/2 controller setup
 pub fn init() void {
+    console.info("PS/2 keyboard: init() called, initialized={}", .{keyboard_initialized});
     if (keyboard_initialized) {
+        console.warn("PS/2 keyboard: already initialized, skipping", .{});
         return;
     }
 
@@ -376,6 +409,42 @@ pub fn getChar() ?u8 {
     }
 
     return keyboard_state.ascii_buffer.pop();
+}
+
+/// Poll PS/2 data port directly (fallback for unreliable IRQs on QEMU TCG/macOS)
+///
+/// On some emulators, edge-triggered IRQ1 may not fire reliably for every keypress.
+/// This function provides a polling fallback that can be called from sys_getchar()
+/// to check the PS/2 data port directly.
+pub fn pollPs2() void {
+    if (!keyboard_initialized) {
+        return;
+    }
+
+    const status = ps2.StatusReg.read();
+    if (!status.hasData()) {
+        return;
+    }
+    if (status.isMouseData()) {
+        // Read and discard mouse data to clear buffer
+        _ = hal.io.inb(ps2.DATA_PORT);
+        return;
+    }
+
+    // Read scancode from PS/2 data port
+    const scancode = hal.io.inb(ps2.DATA_PORT);
+    poll_count +%= 1;
+
+    const held = keyboard_lock.acquire();
+    defer held.release();
+
+    // Store raw scancode
+    if (keyboard_state.scancode_buffer.push(scancode)) {
+        error_stats.buffer_overruns +%= 1;
+    }
+
+    // Process for ASCII translation
+    processScancode(scancode);
 }
 
 /// Get an ASCII character from the input buffer (blocking with optional timeout)

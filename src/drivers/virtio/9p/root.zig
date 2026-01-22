@@ -227,8 +227,6 @@ pub const Virtio9PDevice = struct {
 
         self.initialized = true;
         g_device = self;
-
-        console.info("VirtIO-9P: Device initialized, tag=\"{s}\"", .{self.mount_tag[0..self.mount_tag_len]});
     }
 
     /// Parse VirtIO PCI capabilities
@@ -690,7 +688,7 @@ pub const Virtio9PDevice = struct {
         fid_entry.open(result.qid, result.iounit, mode);
 
         self.p9queue.?.releaseRequest(pending);
-        return result;
+        return .{ .qid = result.qid, .iounit = result.iounit };
     }
 
     /// Read from an open fid

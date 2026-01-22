@@ -32,10 +32,12 @@ const acpi = @import("acpi");
 const kernel_iommu = @import("kernel_iommu");
 const dma = @import("dma");
 const input = @import("input");
+const keyboard = @import("keyboard");
 const virtio = @import("virtio");
 const virtio_input = @import("virtio_input");
 const virtio_sound = @import("virtio_sound");
 const virtio_9p = @import("virtio_9p");
+const fs = @import("fs");
 const prng = @import("prng");
 
 // SECURITY NOTE (Global State Synchronization): These variables are written during
@@ -783,12 +785,32 @@ pub fn initVirtio9P() void {
         return;
     };
 
+    // Track mounted tags to skip duplicates (QEMU creates multiple PCI slots for same tag)
+    const MountedTags = struct {
+        var tags: [16][128]u8 = undefined;
+        var lens: [16]usize = [_]usize{0} ** 16;
+        var count: usize = 0;
+
+        fn isAlreadyMounted(tag: []const u8) bool {
+            for (0..count) |i| {
+                if (lens[i] == tag.len and std.mem.eql(u8, tags[i][0..lens[i]], tag)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        fn recordTag(tag: []const u8) void {
+            if (count < tags.len and tag.len <= 128) {
+                @memcpy(tags[count][0..tag.len], tag);
+                lens[count] = tag.len;
+                count += 1;
+            }
+        }
+    };
+
     for (devices.devices[0..devices.count]) |*dev| {
         if (virtio_9p.isVirtio9P(dev)) {
-            console.info("VirtIO-9P: Found device at {d}:{d}.{d}", .{
-                dev.bus, dev.device, dev.func,
-            });
-
             const device = virtio_9p.initFromPci(dev, pci.PciAccess{ .ecam = ecam }) catch |err| {
                 console.warn("VirtIO-9P: Init failed: {}", .{err});
                 continue;
@@ -801,10 +823,35 @@ pub fn initVirtio9P() void {
             };
 
             const tag = device.getMountTag();
-            console.info("VirtIO-9P: Device initialized, tag=\"{s}\"", .{tag});
 
-            // TODO: Mount at /mnt/<tag> once VFS integration is complete
-            break; // Only initialize first device for now
+            // Skip duplicates silently (QEMU creates multiple PCI slots)
+            if (MountedTags.isAlreadyMounted(tag)) {
+                continue;
+            }
+
+            // Create VFS filesystem wrapper and mount
+            const filesystem = fs.virtio9p.createFilesystem(device) catch |err| {
+                console.warn("VirtIO-9P: VFS wrapper failed: {}", .{err});
+                continue;
+            };
+
+            // Mount at /mnt/<tag> (e.g., /mnt/hostshare)
+            var mount_path: [256]u8 = undefined;
+            const path_slice = std.fmt.bufPrint(&mount_path, "/mnt/{s}", .{tag}) catch {
+                console.warn("VirtIO-9P: Mount path too long", .{});
+                continue;
+            };
+
+            fs.vfs.Vfs.mount(path_slice, filesystem) catch |err| {
+                console.warn("VirtIO-9P: Mount at {s} failed: {}", .{ path_slice, err });
+                continue;
+            };
+
+            // Record successfully mounted tag
+            MountedTags.recordTag(tag);
+
+            console.info("VirtIO-9P: Mounted at {s}", .{path_slice});
+            // Continue to next device (support multiple unique mounts)
         }
     }
 }
@@ -918,8 +965,15 @@ pub fn initInput() void {
         console.info("Input: VMMouse not available, using PS/2 mouse", .{});
     }
 
-    // PS/2 keyboard/mouse are initialized separately by the PS/2 controller driver
-    // They will register themselves with the input subsystem when detected
+    // Initialize PS/2 keyboard on x86_64 (uses i8042 controller)
+    if (builtin.cpu.arch == .x86_64) {
+        keyboard.init();
+        hal.interrupts.setKeyboardHandler(&keyboard.handleIrq);
+        // Route IRQ1 to vector 33 (KEYBOARD) and enable it
+        hal.apic.routeIrq(1, hal.apic.Vectors.KEYBOARD, 0);
+        hal.apic.enableIrq(1);
+        console.info("Input: PS/2 keyboard initialized (IRQ1 -> vector {d})", .{hal.apic.Vectors.KEYBOARD});
+    }
 
     // Probe for VirtIO-Input devices (keyboard/mouse/tablet)
     // On KVM/QEMU/TCG where VirtIO devices are expected, or bare metal (testing)

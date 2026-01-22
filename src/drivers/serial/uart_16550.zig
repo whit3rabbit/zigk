@@ -178,7 +178,7 @@ pub const Serial = struct {
         const port = current_port;
         // Read Interrupt Identification Register (IIR)
         const iir = hal.io.inb(port + 2);
-        
+
         // Check if interrupt is pending (Bit 0 == 0 means pending)
         if ((iir & 0x01) != 0) return;
 

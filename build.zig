@@ -188,12 +188,16 @@ pub fn build(b: *std.Build) void {
     const qemu_display = b.option([]const u8, "display", "QEMU display backend (default, sdl, gtk, cocoa, none)") orelse "default";
     const qemu_usb_hub = b.option(bool, "usb-hub", "Attach usb-hub to XHCI and connect storage to it") orelse false;
     const qemu_nvme = b.option(bool, "nvme", "Add NVMe storage device for testing") orelse false;
+    const qemu_virtfs = b.option([]const u8, "virtfs", "Share host directory via VirtIO-9P (e.g. /tmp/share)") orelse null;
     const default_audio: []const u8 = switch (host_os) {
         .macos => "coreaudio",
         .linux => "pa",
         else => "none",
     };
     const qemu_audio = b.option([]const u8, "audio", "QEMU audio backend (none, coreaudio, pa, file)") orelse default_audio;
+    const qemu_extra_args = b.option([]const u8, "qemu-args", "Extra QEMU arguments (e.g. -nographic for serial console mode)");
+    // Check if -nographic is requested (implies -serial stdio, so we must not add it explicitly)
+    const qemu_nographic = if (qemu_extra_args) |args| std.mem.indexOf(u8, args, "-nographic") != null else false;
     const boot_logo_enabled = b.option(bool, "boot-logo", "Show animated boot logo during init (disable for debugging)") orelse true;
     const allow_weak_entropy = b.option(bool, "allow-weak-entropy", "Allow weak entropy for ASLR (TESTING ONLY - insecure!)") orelse false;
 
@@ -784,6 +788,18 @@ pub fn build(b: *std.Build) void {
     audio_module.addImport("thread", thread_module);
     audio_module.addImport("io", kernel_io_module);
 
+    // Create Virtual PCI driver module (pciem framework port)
+    const virt_pci_module = b.createModule(.{
+        .root_source_file = b.path("src/drivers/virt_pci/root.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    virt_pci_module.addImport("uapi", uapi_module);
+    virt_pci_module.addImport("sync", sync_module);
+    virt_pci_module.addImport("pmm", pmm_module);
+    virt_pci_module.addImport("console", console_module);
+    virt_pci_module.addImport("hal", hal_module);
+
     // Create Input subsystem module
     const input_module = b.createModule(.{
         .root_source_file = b.path("src/drivers/input/root.zig"),
@@ -832,6 +848,7 @@ pub fn build(b: *std.Build) void {
     virtio_input_module.addImport("sync", sync_module);
     virtio_input_module.addImport("virtio", virtio_module);
     virtio_input_module.addImport("input", input_module);
+    virtio_input_module.addImport("keyboard", keyboard_module);
     virtio_input_module.addImport("uapi", uapi_module);
 
     // Create VirtIO-Sound driver module (audio playback/capture via VirtIO)
@@ -868,6 +885,9 @@ pub fn build(b: *std.Build) void {
     virtio_9p_module.addImport("virtio", virtio_module);
     virtio_9p_module.addImport("dma", dma_module);
     virtio_9p_module.addImport("iommu", kernel_iommu_module);
+
+    // Add virtio_9p to fs module for VFS integration
+    fs_module.addImport("virtio_9p", virtio_9p_module);
 
     // Create DevFS module (device filesystem shim)
     const devfs_module = b.createModule(.{
@@ -1324,6 +1344,7 @@ pub fn build(b: *std.Build) void {
     syscall_custom_module.addImport("heap", heap_module);
     syscall_custom_module.addImport("sched", sched_module);
     syscall_custom_module.addImport("usb", usb_module);
+    syscall_custom_module.addImport("virtio_input", virtio_input_module);
 
     // Create syscall random module
     const syscall_random_module = b.createModule(.{
@@ -1525,6 +1546,21 @@ pub fn build(b: *std.Build) void {
     syscall_display_module.addImport("console", console_module);
     syscall_display_module.addImport("video_driver", video_module);
 
+    // Create syscall virt_pci module (virtual PCI device emulation)
+    const syscall_virt_pci_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/sys/syscall/hw/virt_pci.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    syscall_virt_pci_module.addImport("uapi", uapi_module);
+    syscall_virt_pci_module.addImport("sched", sched_module);
+    syscall_virt_pci_module.addImport("process", process_module);
+    syscall_virt_pci_module.addImport("user_mem", user_mem_module);
+    syscall_virt_pci_module.addImport("console", console_module);
+    syscall_virt_pci_module.addImport("virt_pci", virt_pci_module);
+    syscall_virt_pci_module.addImport("caps", capabilities_module);
+    syscall_virt_pci_module.addImport("hal", hal_module);
+
     // Create syscall fs_handlers module (mount, umount, unlink)
     const syscall_fs_handlers_module = b.createModule(.{
         .root_source_file = b.path("src/kernel/sys/syscall/fs/fs_handlers.zig"),
@@ -1575,6 +1611,7 @@ pub fn build(b: *std.Build) void {
     syscall_table_module.addImport("fs_handlers", syscall_fs_handlers_module);
     syscall_table_module.addImport("hypervisor", syscall_hypervisor_module);
     syscall_table_module.addImport("display", syscall_display_module);
+    syscall_table_module.addImport("virt_pci", syscall_virt_pci_module);
 
     // Create kernel executable
     // NOTE: red_zone must be disabled for kernel code to prevent stack corruption
@@ -2312,8 +2349,24 @@ pub fn build(b: *std.Build) void {
             "-device", "qemu-xhci,id=xhci",
             "-device", "usb-kbd",
             "-device", "usb-tablet",
-            "-device", "ramfb", // Simple framebuffer for UEFI GOP (no driver needed)
-            "-serial", "stdio",
+        });
+        // Configure display and serial for console I/O
+        if (qemu_nographic) {
+            // For -nographic mode on macOS, use explicit chardev for proper stdin handling
+            // signal=off prevents QEMU from intercepting Ctrl+C on macOS
+            run_cmd.addArgs(&.{
+                "-display", "none",
+                "-chardev", "stdio,id=char0,mux=on,signal=off",
+                "-serial", "chardev:char0",
+                "-mon", "chardev=char0",
+            });
+        } else {
+            run_cmd.addArgs(&.{
+                "-device", "ramfb", // Simple framebuffer for UEFI GOP (no driver needed)
+                "-serial", "stdio",
+            });
+        }
+        run_cmd.addArgs(&.{
             "-smp", "1", // Single-core for initial bring-up
             "-no-reboot",
             "-no-shutdown",
@@ -2329,13 +2382,31 @@ pub fn build(b: *std.Build) void {
             "-m", "512M",
             "-device", "qemu-xhci,id=xhci",
             "-device", "usb-tablet",
-            "-vga", "std",
-            "-audiodev",
+            "-device", "virtio-keyboard-pci", // VirtIO keyboard for reliable input on macOS TCG
         });
-        run_cmd.addArg(b.fmt("{s},id=audio0", .{qemu_audio}));
+        // Only add VGA if not using -nographic
+        if (!qemu_nographic) {
+            run_cmd.addArgs(&.{ "-vga", "std" });
+        }
+        run_cmd.addArgs(&.{ "-audiodev", b.fmt("{s},id=audio0", .{qemu_audio}) });
         run_cmd.addArgs(&.{
             "-device", "AC97,audiodev=audio0",
-            "-serial", "stdio",
+        });
+        // Configure serial port for console I/O
+        if (qemu_nographic) {
+            // For -nographic mode on macOS, use explicit chardev for proper stdin handling
+            // signal=off prevents QEMU from intercepting Ctrl+C on macOS
+            // We also add -display none since we'll filter out -nographic from extra args
+            run_cmd.addArgs(&.{
+                "-display", "none",
+                "-chardev", "stdio,id=char0,mux=on,signal=off",
+                "-serial", "chardev:char0",
+                "-mon", "chardev=char0",
+            });
+        } else {
+            run_cmd.addArgs(&.{ "-serial", "stdio" });
+        }
+        run_cmd.addArgs(&.{
             "-smp", "1",
             "-no-reboot",
             "-no-shutdown",
@@ -2397,6 +2468,14 @@ pub fn build(b: *std.Build) void {
         });
     }
 
+    // VirtIO-9P shared folder (for host-guest file sharing)
+    if (qemu_virtfs) |virtfs_path| {
+        run_cmd.addArgs(&.{
+            "-virtfs",
+            b.fmt("local,path={s},mount_tag=hostshare,security_model=passthrough", .{virtfs_path}),
+        });
+    }
+
     // Add display option (default = let QEMU auto-detect)
     if (!std.mem.eql(u8, qemu_display, "default")) {
         run_cmd.addArgs(&.{ "-display", qemu_display });
@@ -2411,6 +2490,20 @@ pub fn build(b: *std.Build) void {
             }
         } else {
             run_cmd.addArgs(&.{ "-bios", bios_path });
+        }
+    }
+
+    // Add extra QEMU arguments (for workarounds like -nographic on macOS TCG)
+    if (qemu_extra_args) |extra| {
+        // Split space-separated args and add them
+        var iter = std.mem.splitScalar(u8, extra, ' ');
+        while (iter.next()) |arg| {
+            if (arg.len > 0) {
+                // Skip -nographic since we handle it explicitly with chardev above
+                // (explicit chardev with signal=off is required for stdin on macOS)
+                if (qemu_nographic and std.mem.eql(u8, arg, "-nographic")) continue;
+                run_cmd.addArg(arg);
+            }
         }
     }
 

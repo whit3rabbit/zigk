@@ -21,14 +21,23 @@ zig build test            # Run unit tests
 zig build run -Darch=x86_64 -Ddefault-boot=shell   # Run shell
 zig build run -Darch=aarch64 -Ddefault-boot=shell  # Run shell on aarch64
 zig build run -Darch=x86_64 -Ddefault-boot=doom    # Run Doom (default)
+zig build run -Darch=x86_64 -Dvirtfs=/tmp/share   # Run with VirtIO-9P shared folder
 ```
 
 **Note:** Kernel binaries are architecture-named (`kernel-x86_64.elf`, `kernel-aarch64.elf`) and coexist in `zig-out/bin/`.
 
 **QEMU on macOS (Apple Silicon):**
 Use `-Dbios=/path/to/OVMF.fd` to specify UEFI firmware.
-Use `-Dqemu-args="-accel tcg,thread=multi -cpu max"` to prevent stability issues.
 To prevent hangs on CI/Testing, ensure test runner implements timeouts (e.g., 30s).
+
+**Keyboard Input on macOS TCG (x86_64):**
+Keyboard input may not work in the QEMU graphical window due to Cocoa keyboard capture issues.
+Use serial console mode which redirects all I/O to the terminal:
+```bash
+zig build run -Darch=x86_64 -Ddefault-boot=shell -Dqemu-args="-nographic"
+```
+The build system automatically configures explicit chardev with `signal=off` for proper stdin handling on macOS when `-nographic` is detected. Press `Ctrl+A X` to exit QEMU in this mode.
+Note: `-Ddisplay=sdl` and `-Ddisplay=gtk` are NOT available on Homebrew QEMU (macOS only has cocoa).
 
 ## Zig 0.16.x Compatibility Notes
 
@@ -210,6 +219,52 @@ Treat all incoming packets as malicious.
     *   Limit the number of "embryonic" (SYN_RCVD) connections per listener.
     *   Use a fixed-size memory pool for packet buffers (`mbufs`). Do not allocate heap memory per incoming packet; drop packets if the pool is empty.
 *   **Checksum Arithmetic**: Use `u32` accumulators for 16-bit checksum calculations to safely catch overflows before folding bits.
+
+## Scheduler & Timer Invariants
+
+### 1. APIC Timer Initialization Order
+The LAPIC timer (`hal.apic.initTimer()`) **must** be initialized **after** `sched.init()`. The scheduler registers the timer tick handler during init; if the timer fires before the handler is installed, interrupts are lost and no preemption occurs.
+
+```zig
+// In main.zig kernel init:
+sched.init();
+// Timer AFTER scheduler - handler must be registered first
+if (builtin.cpu.arch == .x86_64) {
+    hal.apic.initTimer();
+}
+```
+
+### 2. Thread Exit Must Not Halt the CPU
+When a thread exits (`exitWithStatus`), it must trigger a reschedule so the next runnable thread is picked. **Never** use `disableInterrupts() + halt()` in the exit path -- this permanently stops the CPU core and prevents all further timer ticks and scheduling on that core.
+
+```zig
+// WRONG: Halts the core, no more interrupts fire
+hal.cpu.disableInterrupts();
+hal.cpu.halt();
+
+// CORRECT: Trigger reschedule, fallback to idle with interrupts enabled
+schedule_sync();
+while (true) {
+    hal.cpu.enableAndHalt(); // sti; hlt - allows timer to fire
+}
+```
+
+### 3. Idle Thread Must Not Enter the Ready Queue
+The idle thread is the scheduler's fallback when the ready queue is empty. If it gets added to the queue (e.g., during preemption), it can be picked over real runnable threads, starving them.
+
+In `doPerCpuSchedule`, guard the `addToReadyQueue` call:
+```zig
+if (curr.state == .Running and curr != idle) {
+    cpu_mod.addToReadyQueue(curr);
+}
+```
+
+### 4. `yield()` vs `schedule_sync()`
+- `yield()` = `sti; hlt` -- enables interrupts and halts until next interrupt. The timer ISR will fire and run the scheduler. Use for voluntary waits (polling loops).
+- `schedule_sync()` = `int $32` -- software interrupt that immediately triggers `irqHandler` -> `timerTick` -> `doPerCpuSchedule`. Use when you need an immediate context switch (thread exit, blocking).
+
+### 5. Serial Input: CR to LF Conversion
+Serial terminals send `\r` (0x0D) when Enter is pressed. The serial input callback in `main.zig` converts this to `\n` (0x0A) before injecting into the keyboard buffer, since the shell and libc line discipline expect LF as the line terminator.
 
 ## Async I/O & IPC Architecture
 

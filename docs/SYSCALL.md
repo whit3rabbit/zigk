@@ -40,6 +40,7 @@ build.zig
     |       |-- syscall_pci_module        -> sys/syscall/net/pci_syscall.zig
     |       |-- syscall_ring_module       -> sys/syscall/hw/ring.zig
     |       |-- syscall_hypervisor_module -> sys/syscall/hw/hypervisor.zig
+    |       |-- syscall_virt_pci_module  -> sys/syscall/hw/virt_pci.zig
     |       `-- syscall_fs_handlers_module -> sys/syscall/fs/fs_handlers.zig
     |
     +-- syscall_table_module (src/kernel/sys/syscall/core/table.zig)
@@ -183,6 +184,7 @@ src/kernel/sys/syscall/
         port_io.zig    - Raw port I/O access
         ring.zig       - Ring buffer IPC (create, attach, wait, notify)
         hypervisor.zig - Hypervisor access (VMware hypercall, detection)
+        virt_pci.zig   - Virtual PCI device emulation (create, BAR, caps, MMIO)
 
     io/             - Async I/O
         root.zig       - I/O operations (read, write, writev, stat, fstat, ioctl, fcntl)
@@ -407,6 +409,45 @@ Example differences:
 **Notes:**
 - `vmware_hypercall`: Requires `CAP_HYPERVISOR` capability. Passes register struct to VMware hypercall interface.
 - `get_hypervisor`: Returns hypervisor type enum (0=none, 1=vmware, 2=virtualbox, 3=kvm, 4=hyperv, 5=xen, 6=qemu_tcg).
+
+### Virtual PCI Device Emulation Syscalls (1080-1090)
+
+| # | Name | Signature | Handler |
+|---|------|-----------|---------|
+| 1080 | vpci_create | () -> device_id | virt_pci.zig |
+| 1081 | vpci_add_bar | (dev_id, config_ptr) -> int | virt_pci.zig |
+| 1082 | vpci_add_cap | (dev_id, cap_ptr) -> offset | virt_pci.zig |
+| 1083 | vpci_set_config | (dev_id, header_ptr) -> int | virt_pci.zig |
+| 1084 | vpci_register | (dev_id) -> ring_id | virt_pci.zig |
+| 1085 | vpci_inject_irq | (dev_id, irq_ptr) -> int | virt_pci.zig |
+| 1086 | vpci_dma | (dma_op_ptr) -> bytes | virt_pci.zig |
+| 1087 | vpci_get_bar_info | (dev_id, idx, info_ptr) -> int | virt_pci.zig |
+| 1088 | vpci_destroy | (dev_id) -> int | virt_pci.zig |
+| 1089 | vpci_wait_event | (dev_id, timeout_ms) -> count | virt_pci.zig |
+| 1090 | vpci_respond | (dev_id, response_ptr) -> int | virt_pci.zig |
+
+**Notes:**
+- Requires `VirtualPciCapability` - controls max_devices, max_bar_size_mb, allowed_class, allow_dma, allow_irq_injection.
+- `vpci_create`: Creates a virtual PCI device owned by the calling process. Returns device ID.
+- `vpci_add_bar`: Adds a BAR to the device. Config includes bar_index, size, flags (MMIO/IO, 64-bit, prefetchable, intercept).
+- `vpci_add_cap`: Adds a PCI capability (MSI, MSI-X, PM). Returns capability offset in config space.
+- `vpci_set_config`: Sets the config header (vendor_id, device_id, class_code, etc.).
+- `vpci_register`: Makes device visible to PCI subsystem. Creates event ring for MMIO interception if any BARs have intercept enabled. Returns ring_id.
+- `vpci_inject_irq`: Injects MSI/MSI-X interrupt. Requires allow_irq_injection capability.
+- `vpci_dma`: Performs DMA read/write operation. Requires allow_dma capability.
+- `vpci_get_bar_info`: Retrieves BAR physical address and size after registration.
+- `vpci_destroy`: Unregisters and destroys the virtual device. Frees all resources.
+- `vpci_wait_event`: Waits for MMIO event on device's event ring. Blocks up to timeout_ms.
+- `vpci_respond`: Submits response to an MMIO read event.
+
+**UAPI Types** (see `src/uapi/virt_pci/`):
+- `VPciConfigHeader` (24 bytes) - PCI config header fields
+- `VPciBarConfig` (16 bytes) - BAR configuration
+- `VPciCapConfig` (16 bytes) - Capability configuration
+- `VPciDmaOp` (40 bytes) - DMA operation descriptor
+- `VPciIrqConfig` (8 bytes) - IRQ injection parameters
+- `VPciEvent` (48 bytes) - MMIO event from device
+- `VPciResponse` (24 bytes) - Response to MMIO read
 
 ### Implementation Status Legend
 

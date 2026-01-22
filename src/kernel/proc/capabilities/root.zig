@@ -344,6 +344,47 @@ pub const NetConfigCapability = struct {
     }
 };
 
+/// Capability for creating and managing virtual PCI devices
+///
+/// SECURITY: This capability grants the ability to:
+/// - Create virtual PCI devices visible to the PCI subsystem
+/// - Define BARs with MMIO interception
+/// - Inject MSI/MSI-X interrupts
+/// - Perform DMA operations on behalf of the virtual device
+///
+/// Only trusted driver development processes should have this capability.
+/// The capability limits the number of devices and total BAR size to prevent
+/// resource exhaustion attacks.
+pub const VirtualPciCapability = struct {
+    /// Maximum number of virtual devices this process can create
+    max_devices: u8 = 4,
+    /// Maximum total BAR size in megabytes across all devices
+    max_bar_size_mb: u16 = 64,
+    /// Allowed PCI class codes (0 = any class allowed)
+    /// SECURITY: Restricts which device types can be emulated
+    allowed_class: u8 = 0,
+    /// If true, allows DMA operations (requires additional validation)
+    allow_dma: bool = true,
+    /// If true, allows interrupt injection
+    allow_irq_injection: bool = true,
+
+    /// Check if creating another device would exceed limits
+    pub fn canCreateDevice(self: VirtualPciCapability, current_count: u8) bool {
+        return current_count < self.max_devices;
+    }
+
+    /// Check if adding a BAR would exceed total size limit
+    pub fn canAddBar(self: VirtualPciCapability, current_total_mb: u32, new_bar_mb: u32) bool {
+        const total = current_total_mb +| new_bar_mb;
+        return total <= self.max_bar_size_mb;
+    }
+
+    /// Check if the device class is allowed
+    pub fn allowsClass(self: VirtualPciCapability, class_code: u8) bool {
+        return self.allowed_class == 0 or self.allowed_class == class_code;
+    }
+};
+
 pub const CapabilityType = enum {
     Interrupt,
     IoPort,
@@ -366,6 +407,8 @@ pub const CapabilityType = enum {
     /// - Network diagnostics
     /// Without this capability, unprivileged processes cannot create SOCK_RAW sockets.
     NetRaw,
+    /// Allows creating and managing virtual PCI devices
+    VirtualPci,
 };
 
 pub const Capability = union(CapabilityType) {
@@ -395,4 +438,6 @@ pub const Capability = union(CapabilityType) {
     NetConfig: NetConfigCapability,
     /// Allows raw socket creation (like Linux CAP_NET_RAW)
     NetRaw: void,
+    /// Allows creating and managing virtual PCI devices
+    VirtualPci: VirtualPciCapability,
 };

@@ -37,6 +37,7 @@ const fs_handlers = @import("fs_handlers");
 const io_uring = @import("io_uring");
 const hypervisor = @import("hypervisor");
 const display = @import("display");
+const virt_pci = @import("virt_pci");
 
 /// Syscall frame from arch-specific entry
 pub const SyscallFrame = hal.syscall.SyscallFrame;
@@ -104,6 +105,8 @@ pub export fn dispatch_syscall(frame: *SyscallFrame) callconv(.c) void {
                     mod = hypervisor;
                 } else if (@hasDecl(display, name)) {
                     mod = display;
+                } else if (@hasDecl(virt_pci, name)) {
+                    mod = virt_pci;
                 }
 
                 if (mod) |m| {

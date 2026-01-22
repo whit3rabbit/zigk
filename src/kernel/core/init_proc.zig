@@ -392,6 +392,8 @@ fn spawnProcessFromData(mod: ModuleData, process_name: []const u8) void {
         return;
     };
 
+    console.debug("Init: Thread created, setting up TLS...", .{});
+
     // Set up TCB/TLS using ELF header information
     const tls_base_addr = proc.aslr_offsets.tls_base;
     var fs_base: u64 = 0;

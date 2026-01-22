@@ -71,6 +71,9 @@ Creates `zigk.iso` with hybrid GPT/El Torito structure via xorriso's `-isohybrid
 # Build and run with UEFI (GPT disk - recommended)
 zig build run -Drun-iso=false -Dbios=/opt/homebrew/share/qemu/edk2-x86_64-code.fd
 
+# Build and run with VirtIO-9P shared folder (host-guest file sharing)
+zig build run -Darch=x86_64 -Ddefault-boot=shell -Dvirtfs=/tmp/share
+
 # Or manually with QEMU
 qemu-system-x86_64 -M q35 -m 256M \
   -drive if=none,format=raw,id=esp,file=disk.img \
