@@ -127,8 +127,8 @@ pub const BlockHeader = extern struct {
     // itself is 64-byte aligned, satisfying XSAVE/AVX-512 alignment requirements
     _padding: [32]u8 = [_]u8{0} ** 32,
 
-    // "HEAPZIGK" in hex
-    pub const ALLOCATOR_MAGIC: usize = 0x48454150_5A49474B;
+    // "HEAP__ZK" in hex
+    pub const ALLOCATOR_MAGIC: usize = 0x48454150_5F5F5A4B;
 
     const ALLOCATED_FLAG: usize = 1;
     const SIZE_MASK: usize = ~@as(usize, ALLOCATED_FLAG);

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Build System Query Tool for zigk kernel.
+Build System Query Tool for zk kernel.
 
 Query build configuration, module wiring, targets, and QEMU options.
 
@@ -183,7 +183,7 @@ zig-out/bin/
 ├── virtio_net_driver.elf
 └── virtio_blk_driver.elf
 
-zigk.iso                 # Bootable ISO (El Torito)
+zk.iso                 # Bootable ISO (El Torito)
 disk.img                 # GPT disk image (recommended)
 esp_part.img             # EFI System Partition (FAT16)
 iso_root/                # ISO staging directory
@@ -196,7 +196,7 @@ iso_root/                # ISO staging directory
 
 ### Boot Images
 - **disk.img (GPT)**: Recommended. Created by tools/disk_image.zig
-- **zigk.iso (El Torito)**: May not work with all UEFI firmware
+- **zk.iso (El Torito)**: May not work with all UEFI firmware
 
 ### InitRD Format
 - USTAR tarball created from initrd_contents/
@@ -289,7 +289,7 @@ zig build run -Dqemu-args="-accel tcg,thread=multi -cpu max"
 qemu-system-x86_64 \\
     -M q35 \\
     -m 256M \\
-    -cdrom zscapek.iso \\
+    -cdrom zk.iso \\
     -device qemu-xhci,id=xhci \\
     -device usb-storage,drive=stick,bus=xhci.0 \\
     -drive id=stick,if=none,format=raw,file=disk.img \\
@@ -336,7 +336,7 @@ zig build test               # Run unit tests
 ### Clean Build
 ```bash
 rm -rf zig-cache zig-out     # Clean all build artifacts
-rm -rf iso_root zscapek.iso  # Clean ISO artifacts
+rm -rf iso_root zk.iso  # Clean ISO artifacts
 ```
 
 ### Check Syntax

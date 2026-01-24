@@ -1,4 +1,4 @@
-// Syscall Numbers - Re-exports from linux and zscapek modules
+// Syscall Numbers - Re-exports from linux and zk modules
 //
 // Uses explicit struct merging instead of deprecated usingnamespace.
 // Architecture-specific syscall numbers are selected at compile time.
@@ -7,14 +7,14 @@ const builtin = @import("builtin");
 
 // Select architecture-specific Linux syscall numbers
 // x86_64: Standard Linux x86_64 ABI
-// aarch64: Standard Linux aarch64 ABI (with zigk compat stubs in 500+ range)
+// aarch64: Standard Linux aarch64 ABI (with zk compat stubs in 500+ range)
 const linux = if (builtin.cpu.arch == .aarch64)
     @import("linux_aarch64.zig")
 else
     @import("linux.zig");
 
-// Export zscapek module for syscall handlers that need UAPI structures
-pub const zscapek = @import("zscapek.zig");
+// Export zk module for syscall handlers that need UAPI structures
+pub const zk = @import("zk.zig");
 
 // Linux ABI Syscalls (architecture-specific numbers selected at compile time)
 pub const SYS_READ = linux.SYS_READ;
@@ -197,43 +197,43 @@ pub const SYS_IO_URING_ENTER = linux.SYS_IO_URING_ENTER;
 pub const SYS_IO_URING_REGISTER = linux.SYS_IO_URING_REGISTER;
 pub const SYS_CLONE3 = linux.SYS_CLONE3;
 
-// Zscapek Custom Extensions (1000+)
-pub const SYS_DEBUG_LOG = zscapek.SYS_DEBUG_LOG;
-pub const SYS_GET_FB_INFO = zscapek.SYS_GET_FB_INFO;
-pub const SYS_MAP_FB = zscapek.SYS_MAP_FB;
-pub const SYS_FB_FLUSH = zscapek.SYS_FB_FLUSH;
-pub const SYS_READ_SCANCODE = zscapek.SYS_READ_SCANCODE;
-pub const SYS_GETCHAR = zscapek.SYS_GETCHAR;
-pub const SYS_PUTCHAR = zscapek.SYS_PUTCHAR;
-pub const SYS_READ_INPUT_EVENT = zscapek.SYS_READ_INPUT_EVENT;
-pub const SYS_GET_CURSOR_POSITION = zscapek.SYS_GET_CURSOR_POSITION;
-pub const SYS_SET_CURSOR_BOUNDS = zscapek.SYS_SET_CURSOR_BOUNDS;
-pub const SYS_SET_INPUT_MODE = zscapek.SYS_SET_INPUT_MODE;
-pub const SYS_SEND = zscapek.SYS_SEND;
-pub const SYS_RECV = zscapek.SYS_RECV;
-pub const SYS_WAIT_INTERRUPT = zscapek.SYS_WAIT_INTERRUPT;
-pub const SYS_REGISTER_IPC_LOGGER = zscapek.SYS_REGISTER_IPC_LOGGER;
-pub const SYS_REGISTER_SERVICE = zscapek.SYS_REGISTER_SERVICE;
-pub const SYS_LOOKUP_SERVICE = zscapek.SYS_LOOKUP_SERVICE;
-pub const SYS_MMAP_PHYS = zscapek.SYS_MMAP_PHYS;
-pub const SYS_ALLOC_DMA = zscapek.SYS_ALLOC_DMA;
-pub const SYS_FREE_DMA = zscapek.SYS_FREE_DMA;
-pub const SYS_PCI_ENUMERATE = zscapek.SYS_PCI_ENUMERATE;
-pub const SYS_PCI_CONFIG_READ = zscapek.SYS_PCI_CONFIG_READ;
-pub const SYS_PCI_CONFIG_WRITE = zscapek.SYS_PCI_CONFIG_WRITE;
-pub const SYS_OUTB = zscapek.SYS_OUTB;
-pub const SYS_INB = zscapek.SYS_INB;
-pub const SYS_RING_CREATE = zscapek.SYS_RING_CREATE;
-pub const SYS_RING_ATTACH = zscapek.SYS_RING_ATTACH;
-pub const SYS_RING_DETACH = zscapek.SYS_RING_DETACH;
-pub const SYS_RING_WAIT = zscapek.SYS_RING_WAIT;
-pub const SYS_RING_NOTIFY = zscapek.SYS_RING_NOTIFY;
-pub const SYS_RING_WAIT_ANY = zscapek.SYS_RING_WAIT_ANY;
-pub const SYS_ALLOC_IOMMU_DMA = zscapek.SYS_ALLOC_IOMMU_DMA;
-pub const SYS_FREE_IOMMU_DMA = zscapek.SYS_FREE_IOMMU_DMA;
-pub const SYS_VMWARE_HYPERCALL = zscapek.SYS_VMWARE_HYPERCALL;
-pub const SYS_GET_HYPERVISOR = zscapek.SYS_GET_HYPERVISOR;
-pub const SYS_NETIF_CONFIG = zscapek.SYS_NETIF_CONFIG;
-pub const SYS_ARP_PROBE = zscapek.SYS_ARP_PROBE;
-pub const SYS_ARP_ANNOUNCE = zscapek.SYS_ARP_ANNOUNCE;
-pub const SYS_SET_DISPLAY_MODE = zscapek.SYS_SET_DISPLAY_MODE;
+// ZK Custom Extensions (1000+)
+pub const SYS_DEBUG_LOG = zk.SYS_DEBUG_LOG;
+pub const SYS_GET_FB_INFO = zk.SYS_GET_FB_INFO;
+pub const SYS_MAP_FB = zk.SYS_MAP_FB;
+pub const SYS_FB_FLUSH = zk.SYS_FB_FLUSH;
+pub const SYS_READ_SCANCODE = zk.SYS_READ_SCANCODE;
+pub const SYS_GETCHAR = zk.SYS_GETCHAR;
+pub const SYS_PUTCHAR = zk.SYS_PUTCHAR;
+pub const SYS_READ_INPUT_EVENT = zk.SYS_READ_INPUT_EVENT;
+pub const SYS_GET_CURSOR_POSITION = zk.SYS_GET_CURSOR_POSITION;
+pub const SYS_SET_CURSOR_BOUNDS = zk.SYS_SET_CURSOR_BOUNDS;
+pub const SYS_SET_INPUT_MODE = zk.SYS_SET_INPUT_MODE;
+pub const SYS_SEND = zk.SYS_SEND;
+pub const SYS_RECV = zk.SYS_RECV;
+pub const SYS_WAIT_INTERRUPT = zk.SYS_WAIT_INTERRUPT;
+pub const SYS_REGISTER_IPC_LOGGER = zk.SYS_REGISTER_IPC_LOGGER;
+pub const SYS_REGISTER_SERVICE = zk.SYS_REGISTER_SERVICE;
+pub const SYS_LOOKUP_SERVICE = zk.SYS_LOOKUP_SERVICE;
+pub const SYS_MMAP_PHYS = zk.SYS_MMAP_PHYS;
+pub const SYS_ALLOC_DMA = zk.SYS_ALLOC_DMA;
+pub const SYS_FREE_DMA = zk.SYS_FREE_DMA;
+pub const SYS_PCI_ENUMERATE = zk.SYS_PCI_ENUMERATE;
+pub const SYS_PCI_CONFIG_READ = zk.SYS_PCI_CONFIG_READ;
+pub const SYS_PCI_CONFIG_WRITE = zk.SYS_PCI_CONFIG_WRITE;
+pub const SYS_OUTB = zk.SYS_OUTB;
+pub const SYS_INB = zk.SYS_INB;
+pub const SYS_RING_CREATE = zk.SYS_RING_CREATE;
+pub const SYS_RING_ATTACH = zk.SYS_RING_ATTACH;
+pub const SYS_RING_DETACH = zk.SYS_RING_DETACH;
+pub const SYS_RING_WAIT = zk.SYS_RING_WAIT;
+pub const SYS_RING_NOTIFY = zk.SYS_RING_NOTIFY;
+pub const SYS_RING_WAIT_ANY = zk.SYS_RING_WAIT_ANY;
+pub const SYS_ALLOC_IOMMU_DMA = zk.SYS_ALLOC_IOMMU_DMA;
+pub const SYS_FREE_IOMMU_DMA = zk.SYS_FREE_IOMMU_DMA;
+pub const SYS_VMWARE_HYPERCALL = zk.SYS_VMWARE_HYPERCALL;
+pub const SYS_GET_HYPERVISOR = zk.SYS_GET_HYPERVISOR;
+pub const SYS_NETIF_CONFIG = zk.SYS_NETIF_CONFIG;
+pub const SYS_ARP_PROBE = zk.SYS_ARP_PROBE;
+pub const SYS_ARP_ANNOUNCE = zk.SYS_ARP_ANNOUNCE;
+pub const SYS_SET_DISPLAY_MODE = zk.SYS_SET_DISPLAY_MODE;

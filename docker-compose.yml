@@ -1,4 +1,4 @@
-# Zscapek Docker Compose Configuration
+# ZK Docker Compose Configuration
 # Multi-architecture kernel build orchestration
 #
 # Usage:
@@ -68,7 +68,7 @@ services:
       - build-out:/workspace/zig-out
     working_dir: /workspace
     environment:
-      - ZIGK_TARGET_ARCH=x86_64
+      - ZK_TARGET_ARCH=x86_64
     command: zig build
 
   # aarch64 target build (future)
@@ -82,7 +82,7 @@ services:
       - build-out:/workspace/zig-out
     working_dir: /workspace
     environment:
-      - ZIGK_TARGET_ARCH=aarch64
+      - ZK_TARGET_ARCH=aarch64
     command: zig build -Dtarget=aarch64-freestanding
 
   # Build all architectures

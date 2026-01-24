@@ -1,4 +1,4 @@
-// Doom Sound System (Zscapek /dev/dsp backend)
+// Doom Sound System (ZK /dev/dsp backend)
 //
 // Implements Doom's I_* sound API on top of /dev/dsp (AC97).
 // Includes OPL3 FM synthesis for music playback.

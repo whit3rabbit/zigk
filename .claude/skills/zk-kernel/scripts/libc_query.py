@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Libc/Userspace Query Tool for zigk kernel.
+Libc/Userspace Query Tool for zk kernel.
 
 Query libc implementation details and userspace patterns.
 

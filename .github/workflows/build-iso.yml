@@ -32,10 +32,10 @@ jobs:
       - name: Build release ISO
         run: |
           zig build iso -Doptimize=ReleaseSafe -Darch=${{ matrix.arch }}
-          mv zigk.iso zscapek-${{ matrix.arch }}.iso
+          mv zk.iso zk-${{ matrix.arch }}.iso
 
       - name: Upload ISO artifact
         uses: actions/upload-artifact@v4
         with:
-          name: zscapek-${{ matrix.arch }}
-          path: zscapek-${{ matrix.arch }}.iso
+          name: zk-${{ matrix.arch }}
+          path: zk-${{ matrix.arch }}.iso

@@ -1,6 +1,6 @@
 # Syscall Architecture
 
-Quick reference for the Zscapek syscall subsystem. Covers build system integration, dispatch mechanism, developer guidelines, and supported syscalls.
+Quick reference for the ZK syscall subsystem. Covers build system integration, dispatch mechanism, developer guidelines, and supported syscalls.
 
 ## Build System Integration
 
@@ -11,10 +11,10 @@ build.zig
     |
     +-- uapi_module (src/uapi/root.zig)
     |       |-- syscalls/       <- Syscall number definitions
-    |       |   |-- root.zig    <- Re-exports all numbers (arch-conditional linux + zscapek)
+    |       |   |-- root.zig    <- Re-exports all numbers (arch-conditional linux + zk)
     |       |   |-- linux.zig   <- Linux x86_64 syscall numbers
     |       |   |-- linux_aarch64.zig <- Linux aarch64 syscall numbers
-    |       |   `-- zscapek.zig <- Custom Zscapek extensions (same on all architectures)
+    |       |   `-- zk.zig <- Custom ZK extensions (same on all architectures)
     |       `-- errno.zig       <- SyscallError type and errno conversion
     |
     +-- syscall_base_module (src/kernel/sys/syscall/core/base.zig)
@@ -51,8 +51,8 @@ build.zig
 ### How build.zig Wires Syscalls
 
 1. **UAPI Module** - Defines syscall numbers in `src/uapi/syscalls/root.zig`:
-   - On x86_64: Re-exports from `linux.zig` + `zscapek.zig`
-   - On aarch64: Re-exports from `linux_aarch64.zig` + `zscapek.zig`
+   - On x86_64: Re-exports from `linux.zig` + `zk.zig`
+   - On aarch64: Re-exports from `linux_aarch64.zig` + `zk.zig`
    - Architecture selection happens at compile time via `builtin.cpu.arch`
 2. **Base Module** - Provides shared state accessed by all handlers
 3. **Handler Modules** - Each handler file is a separate Zig module with explicit imports
@@ -136,7 +136,7 @@ The `callHandler` function auto-converts error unions to negative errno at the b
 
 ## Adding New Syscalls
 
-   // In src/uapi/syscalls/zscapek.zig (for custom) or linux.zig
+   // In src/uapi/syscalls/zk.zig (for custom) or linux.zig
    pub const SYS_MYSYSCALL: usize = 999;
    ```
 
@@ -193,7 +193,7 @@ src/kernel/sys/syscall/
         root.zig       - io_uring setup, enter, register
 
     misc/           - Miscellaneous
-        custom.zig     - Zscapek extensions (debug_log, putchar, getchar, read_scancode)
+        custom.zig     - ZK extensions (debug_log, putchar, getchar, read_scancode)
         random.zig     - Random numbers (getrandom)
         ipc.zig        - Inter-process communication
 ```
@@ -202,7 +202,7 @@ src/kernel/sys/syscall/
 
 ### Architecture Support
 
-zigk uses **standard Linux syscall numbers** for both supported architectures:
+zk uses **standard Linux syscall numbers** for both supported architectures:
 
 | Architecture | Syscall Numbers | ABI Source |
 |--------------|-----------------|------------|
@@ -351,7 +351,7 @@ Example differences:
 | 426 | io_uring_enter | (fd, submit, complete, flags, sig) -> int | - |
 | 427 | io_uring_register | (fd, opcode, arg, nr_args) -> int | - |
 
-### Zscapek Custom Extensions (1000-1999)
+### ZK Custom Extensions (1000-1999)
 
 | # | Name | Signature | Handler |
 |---|------|-----------|---------|

@@ -1,4 +1,4 @@
-// Custom Syscall Handlers (Zscapek-specific)
+// Custom Syscall Handlers (ZK-specific)
 //
 // Implements kernel-specific debug and I/O syscalls:
 // - sys_debug_log: Write debug message to kernel log
@@ -20,7 +20,7 @@ const SyscallError = base.SyscallError;
 const UserPtr = base.UserPtr;
 
 // =============================================================================
-// Zscapek Custom Syscalls
+// ZK Custom Syscalls
 // =============================================================================
 
 /// Escape control characters in user-supplied strings for safe logging.

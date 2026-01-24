@@ -1,4 +1,4 @@
-// Boot Menu for Zscapek UEFI Bootloader
+// Boot Menu for ZK UEFI Bootloader
 //
 // Provides an interactive boot menu with:
 // - Main menu: Shell (default), Tests submenu, Doom
@@ -295,7 +295,7 @@ fn drawMainMenu(
     countdown: u8,
 ) void {
     printLine(con_out, "");
-    printLine(con_out, "  === Zscapek Boot Menu ===");
+    printLine(con_out, "  === ZK Boot Menu ===");
     printLine(con_out, "");
 
     // Menu items

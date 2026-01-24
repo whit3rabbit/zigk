@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Driver Pattern Query Tool for zigk kernel.
+Driver Pattern Query Tool for zk kernel.
 
 Query driver patterns, MmioDevice usage, Ring IPC, interrupts, and capabilities.
 

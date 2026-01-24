@@ -1,10 +1,10 @@
-# Zscapek Filesystem Structure
+# ZK Filesystem Structure
 
 This structure mirrors the Linux kernel organization while keeping Zig modules aligned to the HAL boundary.
 
 ## Current Implementation Status
 
-zscapek/
+zk/
 ├── .claude/
 │   ├── commands/            # Codex CLI command definitions
 │   └── hooks/               # Local automation hooks
@@ -378,7 +378,7 @@ zscapek/
     │   └── syscalls/
     │       ├── root.zig
     │       ├── linux.zig
-    │       └── zscapek.zig
+    │       └── zk.zig
     │
     └── user/
         ├── root.zig
@@ -451,7 +451,7 @@ zscapek/
         │   └── main.zig
         └── doom/
             ├── main.zig
-            ├── doomgeneric_zscapek.zig
+            ├── doomgeneric_zk.zig
             ├── i_sound.zig
             ├── include/
             │   └── (C headers for DOOM port)
@@ -470,7 +470,7 @@ These files and directories are produced by builds or tooling and are not source
 - `esp_part.img` - Raw FAT filesystem image (ESP partition)
 - `usb_disk.img` - QEMU USB disk image
 - `zig-out/` - Zig build output
-- `zigk.iso` - Bootable ISO (El Torito EFI boot)
+- `zk.iso` - Bootable ISO (El Torito EFI boot)
 
 ## Module Reference
 
@@ -685,7 +685,7 @@ Syscall handlers organized by category:
 ### `src/kernel/sys/syscall/misc/`
 | File | Description |
 |------|-------------|
-| `custom.zig` | Zscapek extensions (`debug_log`, `putchar`, `getchar`, `read_scancode`). |
+| `custom.zig` | ZK extensions (`debug_log`, `putchar`, `getchar`, `read_scancode`). |
 | `random.zig` | `getrandom` (syscall 318). |
 | `ipc.zig` | IPC message passing syscalls. |
 
@@ -867,7 +867,7 @@ The User API is organized into functional subdirectories:
 | `ipc/` | Shared memory rings, futex, and IPC message types. |
 | `process/` | Scheduling and signal definitions. |
 | `dev/` | Device-specific ABI definitions (input, sound). |
-| `syscalls/` | Syscall number definitions for x86_64 and Zscapek specific calls. |
+| `syscalls/` | Syscall number definitions for x86_64 and ZK specific calls. |
 
 ### `tools/vdso_gen/`
 | File | Description |

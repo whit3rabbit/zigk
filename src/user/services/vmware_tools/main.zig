@@ -72,7 +72,7 @@ const GUESTINFO_TOOLS_VERSION: u32 = 4;
 const TOOLS_VERSION_MAJOR: u32 = 1;
 const TOOLS_VERSION_MINOR: u32 = 0;
 const TOOLS_VERSION_BUILD: u32 = 0;
-const TOOLS_VERSION_STRING = "1.0.0-zscapek";
+const TOOLS_VERSION_STRING = "1.0.0-zk";
 
 pub fn main() void {
     syscall.print("VMware Tools Service Starting...\n");
@@ -471,17 +471,17 @@ fn guestRpc(cmd: []const u8, response_buf: ?[]u8) ?usize {
 /// Send guest information to VMware host
 fn sendGuestInfo() void {
     // Report OS name
-    _ = guestRpc("SetGuestInfo  2 zscapek", null);
+    _ = guestRpc("SetGuestInfo  2 zk", null);
 
     // Report full OS name
-    _ = guestRpc("SetGuestInfo  3 zscapek Microkernel 1.0", null);
+    _ = guestRpc("SetGuestInfo  3 ZK Microkernel 1.0", null);
 
     // Report tools version (uses info-set for newer protocol)
     _ = guestRpc("info-set guestinfo.vmtools.versionString " ++ TOOLS_VERSION_STRING, null);
     _ = guestRpc("info-set guestinfo.vmtools.versionNumber 1000", null);
 
     // Report tools description
-    _ = guestRpc("info-set guestinfo.vmtools.description zscapek VMware Tools", null);
+    _ = guestRpc("info-set guestinfo.vmtools.description ZK VMware Tools", null);
 
     syscall.print("VMware Tools: Sent guest info to host\n");
 }

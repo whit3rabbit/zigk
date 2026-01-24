@@ -1,6 +1,6 @@
 # Driver Architecture
 
-Zscapek uses a hybrid architecture where critical drivers run in the kernel for performance and boot capability, while other drivers run in userspace for stability and security.
+ZK uses a hybrid architecture where critical drivers run in the kernel for performance and boot capability, while other drivers run in userspace for stability and security.
 
 ## PCI ECAM Timing Workaround
 
@@ -76,7 +76,7 @@ const data_len = @min(actual_transferred, dev.report_buffer.len);
 
 ## XHCI USB Hotplug
 
-Zscapek supports USB device hotplug (connect and disconnect detection) via the xHCI Port Status Change Event mechanism.
+ZK supports USB device hotplug (connect and disconnect detection) via the xHCI Port Status Change Event mechanism.
 
 ### Device State Machine
 
@@ -541,7 +541,7 @@ var tx_lock = atomic.Value(bool).init(false);  // Simple spinlock
 
 ## PCI Driver Probing Framework
 
-Zscapek implements a Linux-style PCI driver registration and probing mechanism. Drivers register a `PciDriver` struct containing an ID table and a probe function. On device discovery (boot or virtual device registration), the framework matches devices against registered drivers and calls probe on the first match.
+ZK implements a Linux-style PCI driver registration and probing mechanism. Drivers register a `PciDriver` struct containing an ID table and a probe function. On device discovery (boot or virtual device registration), the framework matches devices against registered drivers and calls probe on the first match.
 
 **Location**: `src/drivers/pci/driver.zig`
 
@@ -707,7 +707,7 @@ MmioDevice has different characteristics on x86_64 and aarch64:
 
 ## DMA Memory Allocation (IOMMU-Aware)
 
-Zscapek supports Intel VT-d IOMMU for DMA isolation, preventing devices from accessing arbitrary memory. The `dma` module provides a unified API that transparently handles IOMMU when available.
+ZK supports Intel VT-d IOMMU for DMA isolation, preventing devices from accessing arbitrary memory. The `dma` module provides a unified API that transparently handles IOMMU when available.
 
 ### Why IOMMU Matters
 
@@ -878,7 +878,7 @@ IOMMU: Identity-mapped RMRR 0xabc00000-0xabffffff for 00:14.0
 
 ## Interrupt Handling
 
-Zscapek supports two interrupt delivery mechanisms: **Legacy ISA IRQs** (via IOAPIC) and **MSI-X** (for PCI devices). Understanding the difference is critical for driver development.
+ZK supports two interrupt delivery mechanisms: **Legacy ISA IRQs** (via IOAPIC) and **MSI-X** (for PCI devices). Understanding the difference is critical for driver development.
 
 ### Common Bug: Enabling Without Routing
 

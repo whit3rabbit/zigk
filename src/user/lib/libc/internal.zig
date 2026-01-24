@@ -10,8 +10,8 @@
 
 const builtin = @import("builtin");
 
-extern fn zscapek_memcpy(dest: [*]u8, src: [*]const u8, n: usize) callconv(.c) [*]u8;
-extern fn zscapek_memset(dest: [*]u8, value: u8, n: usize) callconv(.c) [*]u8;
+extern fn zk_memcpy(dest: [*]u8, src: [*]const u8, n: usize) callconv(.c) [*]u8;
+extern fn zk_memset(dest: [*]u8, value: u8, n: usize) callconv(.c) [*]u8;
 
 /// Debug mode heap checks - compiles out in release
 pub const DEBUG_HEAP = builtin.mode == .Debug;
@@ -32,7 +32,7 @@ pub const FREED_MAGIC: u32 = 0xFEEDFACE;
 pub inline fn safeCopy(dest: [*]u8, src: [*]const u8, n: usize) void {
     if (n == 0) return;
     if (builtin.cpu.arch == .x86_64 and n >= @sizeOf(usize)) {
-        _ = zscapek_memcpy(dest, src, n);
+        _ = zk_memcpy(dest, src, n);
         return;
     }
 
@@ -46,7 +46,7 @@ pub inline fn safeCopy(dest: [*]u8, src: [*]const u8, n: usize) void {
 pub inline fn safeFill(dest: [*]u8, value: u8, n: usize) void {
     if (n == 0) return;
     if (builtin.cpu.arch == .x86_64 and n >= @sizeOf(usize)) {
-        _ = zscapek_memset(dest, value, n);
+        _ = zk_memset(dest, value, n);
         return;
     }
 

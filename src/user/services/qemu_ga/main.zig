@@ -165,8 +165,8 @@ fn handleInfo() void {
 }
 
 fn handleGetHostname() void {
-    // Return hostname (we use "zscapek" as the OS name)
-    sendResponse("{\"return\":{\"host-name\":\"zscapek\"}}");
+    // Return hostname (we use "zk" as the OS name)
+    sendResponse("{\"return\":{\"host-name\":\"zk\"}}");
 }
 
 fn handleShutdown(data: []const u8) void {

@@ -1,6 +1,6 @@
-// Zscapek Custom Extensions
+// ZK Custom Extensions
 //
-// These syscalls are unique to Zscapek and use numbers 1000+.
+// These syscalls are unique to ZK and use numbers 1000+.
 
 /// Write debug message to kernel log
 pub const SYS_DEBUG_LOG: usize = 1000;

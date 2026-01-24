@@ -1,6 +1,6 @@
 // Async HTTP Server using io_uring
 //
-// Demonstrates Zscapek's async I/O capabilities with proper kernel-level
+// Demonstrates ZK's async I/O capabilities with proper kernel-level
 // blocking (no spin-polling). Uses io_uring for accept, recv, send operations.
 //
 // Flow:
@@ -223,8 +223,8 @@ fn handleCompletion(ring: *syscall.IoUring, listener: i32, cqe: *syscall.IoUring
                 "Content-Type: text/html\r\n" ++
                 "Connection: close\r\n" ++
                 "\r\n" ++
-                "<html><head><title>Zscapek HTTPD</title></head>" ++
-                "<body><h1>Hello from Zscapek!</h1>" ++
+                "<html><head><title>ZK HTTPD</title></head>" ++
+                "<body><h1>Hello from ZK!</h1>" ++
                 "<p>This is a microkernel running a userspace HTTP server.</p>" ++
                 "<p>Powered by io_uring async I/O.</p>" ++
                 "</body></html>";
@@ -358,8 +358,8 @@ fn handleClientPoll(pfd: *syscall.PollFd) void {
         "Content-Type: text/html\r\n" ++
         "Connection: close\r\n" ++
         "\r\n" ++
-        "<html><head><title>Zscapek HTTPD</title></head>" ++
-        "<body><h1>Hello from Zscapek!</h1>" ++
+        "<html><head><title>ZK HTTPD</title></head>" ++
+        "<body><h1>Hello from ZK!</h1>" ++
         "<p>This is a microkernel running a userspace HTTP server.</p>" ++
         "<p>Powered by poll() (fallback mode).</p>" ++
         "</body></html>";

@@ -1,4 +1,4 @@
-// Doomgeneric Platform Implementation for Zscapek
+// Doomgeneric Platform Implementation for ZK
 //
 // Implements the platform hooks required by doomgeneric:
 // - DG_Init(): Initialize framebuffer

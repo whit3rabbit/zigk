@@ -1,4 +1,4 @@
-// Zscapek Scheduler API (Linux-compatible)
+// ZK Scheduler API (Linux-compatible)
 //
 // Defines constants for clone(), sched_setscheduler(), etc.
 

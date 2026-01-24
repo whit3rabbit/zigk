@@ -1,4 +1,4 @@
-/* Zscapek C Runtime Zero (crt0) - Assembly Implementation */
+/* ZK C Runtime Zero (crt0) - Assembly Implementation */
 
 .section .text
 .global _start

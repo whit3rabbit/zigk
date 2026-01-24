@@ -2,7 +2,7 @@
 zig-out/
 zig-cache/
 .zig-cache/
-zigk.iso
+zk.iso
 
 # IDE and editor files
 .vscode/

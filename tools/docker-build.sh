@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Zscapek Docker Build Helper
+# ZK Docker Build Helper
 # Simplifies building the kernel using Docker
 #
 # Usage:
@@ -65,7 +65,7 @@ build_image() {
     docker build \
         --platform "$DOCKER_PLATFORM" \
         --target "$target" \
-        -t "zscapek-builder:$target" \
+        -t "zk-builder:$target" \
         "$PROJECT_ROOT"
 }
 
@@ -76,7 +76,7 @@ run_in_container() {
     local cmd="$*"
 
     # Ensure image exists
-    if ! docker image inspect "zscapek-builder:$target" &> /dev/null; then
+    if ! docker image inspect "zk-builder:$target" &> /dev/null; then
         build_image "$target"
     fi
 
@@ -85,7 +85,7 @@ run_in_container() {
         --platform "$DOCKER_PLATFORM" \
         -v "$PROJECT_ROOT:/workspace" \
         -w /workspace \
-        "zscapek-builder:$target" \
+        "zk-builder:$target" \
         $cmd
 }
 
@@ -98,7 +98,7 @@ cmd_build() {
 cmd_iso() {
 
     run_in_container builder zig build iso
-    log_info "ISO created: zscapek.iso"
+    log_info "ISO created: zk.iso"
 }
 
 cmd_test() {
@@ -111,13 +111,13 @@ cmd_shell() {
         --platform "$DOCKER_PLATFORM" \
         -v "$PROJECT_ROOT:/workspace" \
         -w /workspace \
-        "zscapek-builder:dev" \
+        "zk-builder:dev" \
         /bin/bash
 }
 
 cmd_clean() {
     log_info "Cleaning build artifacts..."
-    rm -rf "$PROJECT_ROOT/zig-out" "$PROJECT_ROOT/zig-cache" "$PROJECT_ROOT/zscapek.iso"
+    rm -rf "$PROJECT_ROOT/zig-out" "$PROJECT_ROOT/zig-cache" "$PROJECT_ROOT/zk.iso"
 
     log_info "Removing Docker volumes..."
     docker compose -f "$PROJECT_ROOT/docker-compose.yml" down -v 2>/dev/null || true
@@ -143,7 +143,7 @@ cmd_all() {
 # Show usage
 usage() {
     cat << EOF
-Zscapek Docker Build Helper
+ZK Docker Build Helper
 
 Usage: $(basename "$0") [command] [options]
 

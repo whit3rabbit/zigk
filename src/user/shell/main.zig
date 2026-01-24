@@ -2,13 +2,13 @@ const std = @import("std");
 const syscall = @import("syscall");
 
 pub fn main() void {
-    syscall.print("\nZscapek Shell v0.1\n");
+    syscall.print("\nZK Shell v0.1\n");
     syscall.print("Type 'help' for commands\n\n");
 
     var buffer: [128]u8 = undefined;
 
     while (true) {
-        syscall.print("zscapek> ");
+        syscall.print("zk> ");
 
         // Read line
         var len: usize = 0;

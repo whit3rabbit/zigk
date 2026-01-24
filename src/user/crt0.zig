@@ -1,4 +1,4 @@
-// Zscapek C Runtime Zero (crt0)
+// ZK C Runtime Zero (crt0)
 //
 // Userland entry point providing SysV ABI compliant stack setup.
 // This is the first code executed when a userland process starts.

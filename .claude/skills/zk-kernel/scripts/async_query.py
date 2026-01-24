@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Async I/O Query Tool for zigk kernel.
+Async I/O Query Tool for zk kernel.
 
 Query async patterns: reactor, io_uring, ring buffers, timers, filesystems.
 

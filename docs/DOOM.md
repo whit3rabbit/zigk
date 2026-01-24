@@ -1,14 +1,14 @@
-# Running DOOM on Zscapek
+# Running DOOM on ZK
 
-This guide explains how to run the classic DOOM game on the Zscapek microkernel.
+This guide explains how to run the classic DOOM game on the ZK microkernel.
 
 ## Overview
 
-Zscapek includes a port of [doomgeneric](https://github.com/ozkl/doomgeneric), a portable DOOM implementation that runs on custom platforms. The port uses the kernel's framebuffer for graphics and PS/2 keyboard for input.
+ZK includes a port of [doomgeneric](https://github.com/ozkl/doomgeneric), a portable DOOM implementation that runs on custom platforms. The port uses the kernel's framebuffer for graphics and PS/2 keyboard for input.
 
 ## Requirements
 
-- Zscapek kernel built with `zig build`
+- ZK kernel built with `zig build`
 - DOOM1.WAD shareware file (legally free to distribute)
 - QEMU (`qemu-system-x86_64` or `qemu-system-aarch64`)
 
@@ -56,7 +56,7 @@ zig build iso
 The build process will:
 1. Compile doom.elf (~10MB)
 2. Create initrd.tar from initrd_contents/
-3. Package everything into zscapek.iso
+3. Package everything into zk.iso
 
 ## Running DOOM
 
@@ -72,8 +72,8 @@ zig build run -Darch=aarch64
 zig build run-aarch64
 
 # Or manually with QEMU
-qemu-system-x86_64 -M q35 -m 128M -cdrom zigk.iso -serial stdio
-qemu-system-aarch64 -M virt -cpu max -m 512M -cdrom zigk.iso -serial stdio
+qemu-system-x86_64 -M q35 -m 128M -cdrom zk.iso -serial stdio
+qemu-system-aarch64 -M virt -cpu max -m 512M -cdrom zk.iso -serial stdio
 ```
 
 ### Boot Menu
@@ -117,7 +117,7 @@ The DOOM port uses:
 | File | Purpose |
 |------|---------|
 | `src/user/doom/main.zig` | Entry point |
-| `src/user/doom/doomgeneric_zscapek.zig` | Platform hooks |
+| `src/user/doom/doomgeneric_zk.zig` | Platform hooks |
 | `src/user/doom/i_sound.zig` | Sound system (/dev/dsp backend) |
 | `src/user/doom/doomgeneric/` | Original DOOM source |
 | `src/user/lib/libc.zig` | C library implementation |

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Kernel Rules Query Tool for zigk kernel.
+Kernel Rules Query Tool for zk kernel.
 
 Query kernel development rules and required patterns.
 

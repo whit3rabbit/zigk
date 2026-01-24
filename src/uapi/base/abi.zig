@@ -1,4 +1,4 @@
-// Zscapek ABI Assertions
+// ZK ABI Assertions
 //
 // Comptime verification that userland-visible structs match Linux x86_64 ABI.
 // These checks run at compile time and prevent ABI drift.
@@ -469,10 +469,10 @@ pub inline fn CMSG_DATA_MUT(cmsg: *CmsgHdr) [*]u8 {
 }
 
 // =============================================================================
-// Zscapek-specific ABI Layouts
+// ZK-specific ABI Layouts
 // =============================================================================
 
-/// FramebufferInfo - Zscapek syscall ABI for sys_get_fb_info
+/// FramebufferInfo - ZK syscall ABI for sys_get_fb_info
 /// Must be 24 bytes: 4*u32 + 6*u8 + 2*u8 padding
 pub const FramebufferInfo = extern struct {
     width: u32,

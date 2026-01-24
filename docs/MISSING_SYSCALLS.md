@@ -1,16 +1,16 @@
 # Missing Linux Syscalls
 
-This document lists Linux x86_64 syscalls not yet implemented in zigk.
+This document lists Linux x86_64 syscalls not yet implemented in zk.
 
 ## Summary
 
 | Metric | Count |
 |--------|-------|
 | Linux x86_64 syscalls | 420 |
-| Implemented in zigk | 181 (43%) |
+| Implemented in zk | 181 (43%) |
 | Missing | 239 |
 
-All implemented syscalls use **correct Linux x86_64 numbers**. Zscapek extensions (1000+) do not conflict with Linux.
+All implemented syscalls use **correct Linux x86_64 numbers**. ZK extensions (1000+) do not conflict with Linux.
 
 ## Architecture Compatibility
 
@@ -22,7 +22,7 @@ Fully compatible with Linux x86_64 syscall ABI. Binaries compiled for Linux x86_
 
 **Fully compatible with Linux aarch64 syscall ABI.** Binaries compiled for Linux aarch64 will work (for implemented syscalls).
 
-zigk uses the correct Linux aarch64 syscall numbers on aarch64, matching the official Linux kernel ABI. The syscall number definitions are selected at compile time based on the target architecture:
+zk uses the correct Linux aarch64 syscall numbers on aarch64, matching the official Linux kernel ABI. The syscall number definitions are selected at compile time based on the target architecture:
 
 | Syscall | x86_64 | aarch64 | Notes |
 |---------|--------|---------|-------|
@@ -42,9 +42,9 @@ zigk uses the correct Linux aarch64 syscall numbers on aarch64, matching the off
 
 **Legacy Syscall Compatibility (aarch64 only):**
 
-Linux aarch64 does not have certain legacy syscalls (e.g., `open`, `pipe`, `stat`, `fork`). On zigk/aarch64, these are available at reserved numbers (500-599) and internally redirect to modern variants:
+Linux aarch64 does not have certain legacy syscalls (e.g., `open`, `pipe`, `stat`, `fork`). On zk/aarch64, these are available at reserved numbers (500-599) and internally redirect to modern variants:
 
-| Legacy Syscall | zigk/aarch64 Number | Redirects To |
+| Legacy Syscall | zk/aarch64 Number | Redirects To |
 |----------------|---------------------|--------------|
 | `open` | 500 | `openat(AT_FDCWD, ...)` |
 | `stat` | 503 | `newfstatat(AT_FDCWD, ...)` |
@@ -53,7 +53,7 @@ Linux aarch64 does not have certain legacy syscalls (e.g., `open`, `pipe`, `stat
 | `pipe` | 502 | `pipe2(..., 0)` |
 | `fork` | 506 | `clone(...)` |
 
-These 500+ numbers are zigk-specific compatibility extensions, NOT part of the Linux aarch64 ABI. Standard Linux aarch64 binaries do not use them.
+These 500+ numbers are zk-specific compatibility extensions, NOT part of the Linux aarch64 ABI. Standard Linux aarch64 binaries do not use them.
 
 ## Priority Guide
 
@@ -264,11 +264,11 @@ These syscalls are deprecated or obsolete in modern Linux.
 
 ```bash
 # Query missing syscalls
-python3 .claude/skills/zigk-kernel/scripts/syscall_query.py 73
+python3 .claude/skills/zk-kernel/scripts/syscall_query.py 73
 # Returns: No syscall with number 73 (if not implemented)
 
 # List all implemented
-python3 .claude/skills/zigk-kernel/scripts/syscall_query.py --all
+python3 .claude/skills/zk-kernel/scripts/syscall_query.py --all
 ```
 
 ## Adding New Syscalls

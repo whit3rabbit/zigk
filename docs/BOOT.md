@@ -2,7 +2,7 @@
 
 ## Overview
 
-Zscapek uses a custom UEFI bootloader written in Zig. The kernel is compiled as a standard 64-bit ELF executable and loaded into the higher half of virtual memory.
+ZK uses a custom UEFI bootloader written in Zig. The kernel is compiled as a standard 64-bit ELF executable and loaded into the higher half of virtual memory.
 
 **Developer Reference**:
 
@@ -44,7 +44,7 @@ For detailed byte-level layouts, struct alignments, and hardware interface speci
 
 ### Boot Methods
 
-Zscapek supports two boot methods for QEMU:
+ZK supports two boot methods for QEMU:
 
 #### GPT Disk Image (Recommended)
 ```bash
@@ -61,7 +61,7 @@ The `tools/disk_image.zig` tool generates the disk image:
 ```bash
 zig build run -Drun-iso=true   # or just: zig build run
 ```
-Creates `zigk.iso` with hybrid GPT/El Torito structure via xorriso's `-isohybrid-gpt-basdat` option.
+Creates `zk.iso` with hybrid GPT/El Torito structure via xorriso's `-isohybrid-gpt-basdat` option.
 
 **Note**: QEMU boots the ISO as a hard disk (not CDROM) to work around an EDK2 El Torito firmware limitation. The ISO file remains valid for burning to real optical media.
 
@@ -125,7 +125,7 @@ qemu-system-x86_64 -M q35 -m 256M \
 
 ## Demand Paging
 
-Zscapek implements lazy (demand) paging for anonymous memory mappings. When userspace calls `mmap()`, the kernel reserves virtual address space by creating a VMA (Virtual Memory Area) but does not allocate physical pages. Physical pages are allocated on-demand when the memory is first accessed.
+ZK implements lazy (demand) paging for anonymous memory mappings. When userspace calls `mmap()`, the kernel reserves virtual address space by creating a VMA (Virtual Memory Area) but does not allocate physical pages. Physical pages are allocated on-demand when the memory is first accessed.
 
 ### How It Works
 
@@ -159,7 +159,7 @@ Zscapek implements lazy (demand) paging for anonymous memory mappings. When user
 
 ## Address Space Layout Randomization (ASLR)
 
-Zscapek implements full ASLR to randomize critical memory regions per-process, mitigating exploitation techniques that rely on predictable addresses (ROP, ret2libc, etc.).
+ZK implements full ASLR to randomize critical memory regions per-process, mitigating exploitation techniques that rely on predictable addresses (ROP, ret2libc, etc.).
 
 ### Randomized Regions
 
@@ -278,7 +278,7 @@ The framebuffer log may scroll too fast or be initialized too late. Rely on the 
 *   **Minimal QEMU Command**: For serial-only debugging without display:
     ```bash
     qemu-system-x86_64 -M q35 -m 128M \
-      -drive file=zigk.iso,format=raw,if=none,id=boot \
+      -drive file=zk.iso,format=raw,if=none,id=boot \
       -device ide-hd,drive=boot,bus=ide.0,bootindex=1 \
       -drive if=pflash,format=raw,readonly=on,file=/path/to/edk2-x86_64-code.fd \
       -serial stdio -display none -accel tcg
@@ -292,7 +292,7 @@ The framebuffer log may scroll too fast or be initialized too late. Rely on the 
     *   **Cause 1**: Unaligned memory access, often when reading packed ACPI structs.
     *   **Fix**: Ensure all pointers to packed structs (like `*Rsdp` or `*McfgBase`) are cast with `align(1)`, e.g., `@as(*align(1) const T, ptr)`.
     *   **Cause 2**: CS register pointing to wrong GDT entry (e.g., TSS selector 0x28 instead of KERNEL_CODE 0x08).
-    *   **Fix**: The GDT initialization must reload CS via far return after loading the new GDT. The UEFI bootloader uses a different GDT layout where kernel code may be at a different index than Zscapek's GDT. See "GDT Initialization and CS Reload" section below.
+    *   **Fix**: The GDT initialization must reload CS via far return after loading the new GDT. The UEFI bootloader uses a different GDT layout where kernel code may be at a different index than ZK's GDT. See "GDT Initialization and CS Reload" section below.
 *   **"Integer Overflow" Panic**:
     *   **Cause**: Zig's safety checks (enabled in Debug/ReleaseSafe) catch overflows that other languages ignore.
     *   **Hint**: Check loop counters (e.g., `u3` cannot hold 8) and bitwise operations on differing integer widths (e.g., `~u32` inside `u64`). Use `+%` for wrapping addition if intentional.
@@ -347,11 +347,11 @@ The first context switch to user mode (via `isr_common` IRETQ) does SWAPGS, whic
 
 ### 4. GDT Initialization and CS Reload
 
-When the kernel loads its own GDT, it must also reload the CS register. The UEFI firmware uses its own GDT with a different layout than Zscapek's GDT.
+When the kernel loads its own GDT, it must also reload the CS register. The UEFI firmware uses its own GDT with a different layout than ZK's GDT.
 
 **The Problem:**
 
-| GDT Index | UEFI GDT | Zscapek GDT |
+| GDT Index | UEFI GDT | ZK GDT |
 |-----------|------------|----------|
 | 0 | Null | Null |
 | 1 (0x08) | Kernel Code | Kernel Code |
@@ -360,7 +360,7 @@ When the kernel loads its own GDT, it must also reload the CS register. The UEFI
 | 4 (0x20) | ? | User Code |
 | 5 (0x28) | Kernel Code (16-bit?) | **TSS** |
 
-If the GDT is loaded but CS is not reloaded, CS still contains the old selector value. When Zscapek's GDT is active, that selector now points to the TSS entry instead of kernel code. The next `iretq` instruction triggers a GP fault with error code 0x28.
+If the GDT is loaded but CS is not reloaded, CS still contains the old selector value. When ZK's GDT is active, that selector now points to the TSS entry instead of kernel code. The next `iretq` instruction triggers a GP fault with error code 0x28.
 
 **The Fix:**
 
@@ -406,7 +406,7 @@ zig build run -Dbios=/opt/homebrew/share/qemu/edk2-x86_64-code.fd
 
 # Or manually with UEFI and SMP (4 cores)
 qemu-system-x86_64 -M q35 -m 256M -smp 4 \
-  -drive file=zigk.iso,format=raw,if=none,id=boot \
+  -drive file=zk.iso,format=raw,if=none,id=boot \
   -device ide-hd,drive=boot,bus=ide.0,bootindex=1 \
   -drive if=pflash,format=raw,readonly=on,file=/path/to/edk2-x86_64-code.fd \
   -serial stdio -display none -accel tcg
@@ -419,7 +419,7 @@ For better performance on Apple Silicon Macs using Hypervisor.framework:
 ```bash
 # Using HVF acceleration (faster than TCG)
 qemu-system-x86_64 -M q35 -m 256M -smp 4 \
-  -drive file=zigk.iso,format=raw,if=none,id=boot \
+  -drive file=zk.iso,format=raw,if=none,id=boot \
   -device ide-hd,drive=boot,bus=ide.0,bootindex=1 \
   -drive if=pflash,format=raw,readonly=on,file=/opt/homebrew/share/qemu/edk2-x86_64-code.fd \
   -serial stdio -accel hvf -cpu host
@@ -433,7 +433,7 @@ To test the XHCI USB driver explicitly (bypassing default PS/2 emulation):
 
 ```bash
 qemu-system-x86_64 -M q35 -m 256M \
-  -drive file=zigk.iso,format=raw,if=none,id=boot \
+  -drive file=zk.iso,format=raw,if=none,id=boot \
   -device ide-hd,drive=boot,bus=ide.0,bootindex=1 \
   -drive if=pflash,format=raw,readonly=on,file=/opt/homebrew/share/qemu/edk2-x86_64-code.fd \
   -device qemu-xhci -device usb-kbd -device usb-mouse \

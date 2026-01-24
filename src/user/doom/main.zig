@@ -1,4 +1,4 @@
-// Doom Entry Point for Zscapek
+// Doom Entry Point for ZK
 //
 // Initializes doomgeneric and runs the main game loop.
 // The WAD file is expected to be at /doom1.wad in the InitRD.
@@ -9,7 +9,7 @@ const std = @import("std");
 // Import libc to ensure all exports are linked
 // These modules contain exported C-callable functions that doomgeneric needs
 pub const libc = @import("libc");
-pub const platform = @import("doomgeneric_zscapek.zig");
+pub const platform = @import("doomgeneric_zk.zig");
 pub const sound = @import("i_sound.zig");
 
 // Force linker to keep libc exports by referencing them
@@ -120,7 +120,7 @@ var argv_storage: [4][*:0]u8 = undefined;
 var argv_buffer: [128]u8 = undefined;
 
 pub fn main() void {
-    syscall.print("Doom for Zscapek starting...\n");
+    syscall.print("Doom for ZK starting...\n");
 
     // Set up argv
     // argv[0] = "doom"

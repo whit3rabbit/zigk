@@ -1,4 +1,4 @@
-# Zig Advantages in Zigk Kernel
+# Zig Advantages in ZK Kernel
 
 How this kernel leverages Zig's unique features compared to a traditional C Linux kernel.
 
@@ -96,7 +96,7 @@ How this kernel leverages Zig's unique features compared to a traditional C Linu
 
 ## Comparison Table
 
-| Pattern | C Linux Kernel | Zigk Kernel |
+| Pattern | C Linux Kernel | ZK Kernel |
 |---------|----------------|-------------|
 | Syscall dispatch | Assembly glue + `void*` table | `@typeInfo` introspection + type-safe `@call` |
 | Feature toggles | `#ifdef CONFIG_SMP` | `if (comptime config.smp_enabled)` with DCE |

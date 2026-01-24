@@ -1,6 +1,6 @@
 # Keyboard Input
 
-This document describes keyboard input handling in zscapek, covering both PS/2 and USB keyboard paths.
+This document describes keyboard input handling in zk, covering both PS/2 and USB keyboard paths.
 
 ## Architecture Overview
 
@@ -78,7 +78,7 @@ USB keyboards use the XHCI controller with HID Boot Protocol.
 ### USB Keyboard (Recommended)
 
 ```bash
-qemu-system-x86_64 -M q35 -m 512M -cdrom zscapek.iso \
+qemu-system-x86_64 -M q35 -m 512M -cdrom zk.iso \
     -device qemu-xhci,id=xhci \
     -device usb-kbd \
     -serial stdio \
@@ -98,7 +98,7 @@ With `-display none`, keyboard input cannot be captured.
 To use PS/2 instead of USB, omit the USB keyboard device:
 
 ```bash
-qemu-system-x86_64 -M q35 -m 512M -cdrom zscapek.iso \
+qemu-system-x86_64 -M q35 -m 512M -cdrom zk.iso \
     -device qemu-xhci,id=xhci \
     -serial stdio \
     -display cocoa \

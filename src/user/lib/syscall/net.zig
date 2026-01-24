@@ -416,7 +416,7 @@ pub const InterfaceInfo = extern struct {
 /// Configure network interface
 pub fn netif_config(iface_idx: u32, cmd: NetifCmd, data: []u8) SyscallError!void {
     const ret = primitive.syscall4(
-        syscalls.zscapek.SYS_NETIF_CONFIG,
+        syscalls.zk.SYS_NETIF_CONFIG,
         @as(usize, iface_idx),
         @as(usize, @intFromEnum(cmd)),
         @intFromPtr(data.ptr),
@@ -429,7 +429,7 @@ pub fn netif_config(iface_idx: u32, cmd: NetifCmd, data: []u8) SyscallError!void
 pub fn getInterfaceInfo(iface_idx: u32) SyscallError!InterfaceInfo {
     var info: InterfaceInfo = undefined;
     const ret = primitive.syscall4(
-        syscalls.zscapek.SYS_NETIF_CONFIG,
+        syscalls.zk.SYS_NETIF_CONFIG,
         @as(usize, iface_idx),
         @as(usize, @intFromEnum(NetifCmd.GetInfo)),
         @intFromPtr(&info),
@@ -447,7 +447,7 @@ pub fn setIpv4Config(iface_idx: u32, ip: u32, netmask: u32, gateway: u32) Syscal
         .gateway = @byteSwap(gateway),
     };
     const ret = primitive.syscall4(
-        syscalls.zscapek.SYS_NETIF_CONFIG,
+        syscalls.zk.SYS_NETIF_CONFIG,
         @as(usize, iface_idx),
         @as(usize, @intFromEnum(NetifCmd.SetIpv4)),
         @intFromPtr(&config),
@@ -460,7 +460,7 @@ pub fn setIpv4Config(iface_idx: u32, ip: u32, netmask: u32, gateway: u32) Syscal
 pub fn getRaInfo(iface_idx: u32) SyscallError!RaInfo {
     var ra_info: RaInfo = undefined;
     const ret = primitive.syscall4(
-        syscalls.zscapek.SYS_NETIF_CONFIG,
+        syscalls.zk.SYS_NETIF_CONFIG,
         @as(usize, iface_idx),
         @as(usize, @intFromEnum(NetifCmd.GetRaInfo)),
         @intFromPtr(&ra_info),
@@ -479,7 +479,7 @@ pub fn addIpv6Address(iface_idx: u32, addr: [16]u8, prefix_len: u8, scope: u8) S
         .action = Ipv6AddrConfig.ACTION_ADD,
     };
     const ret = primitive.syscall4(
-        syscalls.zscapek.SYS_NETIF_CONFIG,
+        syscalls.zk.SYS_NETIF_CONFIG,
         @as(usize, iface_idx),
         @as(usize, @intFromEnum(NetifCmd.SetIpv6Addr)),
         @intFromPtr(&config),
@@ -492,7 +492,7 @@ pub fn addIpv6Address(iface_idx: u32, addr: [16]u8, prefix_len: u8, scope: u8) S
 pub fn setIpv6Gateway(iface_idx: u32, gateway: [16]u8) SyscallError!void {
     var gw = gateway;
     const ret = primitive.syscall4(
-        syscalls.zscapek.SYS_NETIF_CONFIG,
+        syscalls.zk.SYS_NETIF_CONFIG,
         @as(usize, iface_idx),
         @as(usize, @intFromEnum(NetifCmd.SetIpv6Gateway)),
         @intFromPtr(&gw),
@@ -539,7 +539,7 @@ pub const ArpProbeResult = enum(u8) {
 ///   .Conflict: IP is in use - do not configure, send DHCPDECLINE
 pub fn arpProbe(iface_idx: u32, ip: u32, timeout_ms: u64) SyscallError!ArpProbeResult {
     const ret = primitive.syscall3(
-        syscalls.zscapek.SYS_ARP_PROBE,
+        syscalls.zk.SYS_ARP_PROBE,
         @as(usize, iface_idx),
         @as(usize, ip),
         @as(usize, @truncate(timeout_ms)),
@@ -566,7 +566,7 @@ pub fn arpProbe(iface_idx: u32, ip: u32, timeout_ms: u64) SyscallError!ArpProbeR
 ///   ip: IP address to announce in host byte order
 pub fn arpAnnounce(iface_idx: u32, ip: u32) SyscallError!void {
     const ret = primitive.syscall2(
-        syscalls.zscapek.SYS_ARP_ANNOUNCE,
+        syscalls.zk.SYS_ARP_ANNOUNCE,
         @as(usize, iface_idx),
         @as(usize, ip),
     );

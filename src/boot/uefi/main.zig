@@ -1,4 +1,4 @@
-// Zscapek UEFI Bootloader
+// ZK UEFI Bootloader
 // Phase 3: Full boot implementation
 //
 // Boot sequence:
@@ -47,13 +47,13 @@ var kaslr_entropy: [32]u8 = std.mem.zeroes([32]u8); // Entropy for KASLR offsets
 pub fn main() void {
     const system_table = uefi.system_table;
 
-    serialPrint("=== Zscapek UEFI Bootloader ===\r\n");
+    serialPrint("=== ZK UEFI Bootloader ===\r\n");
 
     // Clear screen and print banner
     if (system_table.con_out) |con_out| {
         _ = con_out.clearScreen() catch {};
 
-        const msg = "Zscapek UEFI Bootloader - Phase 3\r\n";
+        const msg = "ZK UEFI Bootloader - Phase 3\r\n";
         for (msg) |c| {
             var buf = [2:0]u16{ c, 0 };
             _ = con_out.outputString(&buf) catch {};

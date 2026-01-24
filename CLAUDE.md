@@ -1,4 +1,4 @@
-# zscapek Development Guidelines
+# zk Development Guidelines
 
 A Zig-based microkernel for x86_64 and AArch64 with a custom UEFI bootloader.
 

@@ -1,10 +1,10 @@
 # Boot Architecture & ABI Reference
 
-This document provides the definitive technical reference for Zscapek's boot process, struct alignments, memory layout, and hardware interfaces. It is intended for kernel developers needing byte-level precision.
+This document provides the definitive technical reference for ZK's boot process, struct alignments, memory layout, and hardware interfaces. It is intended for kernel developers needing byte-level precision.
 
 ## 1. Virtual Memory Map (x86_64)
 
-Zscapek uses the standard Higher Half Kernel model.
+ZK uses the standard Higher Half Kernel model.
 
 ```text
 0xFFFF_FFFF_FFFF_FFFF  ─── Top of Memory
@@ -70,7 +70,7 @@ pub fn physToVirt(phys: u64) [*]u8 {
 
 ## 2. Boot Protocol ABI
 
-Zscapek uses a custom UEFI bootloader (`src/boot/uefi/`) that directly loads the kernel ELF and hands off via the BootInfo structure.
+ZK uses a custom UEFI bootloader (`src/boot/uefi/`) that directly loads the kernel ELF and hands off via the BootInfo structure.
 
 ### GS Base Register
 The first context switch to user mode (via `isr_common` IRETQ) does SWAPGS, which swaps the values. So you must set GS_BASE initially so it ends up in KERNEL_GS_BASE after that first swap.
@@ -283,7 +283,7 @@ Defined in `src/arch/x86_64/paging.zig`.
 
 ## 4. Demand Paging Architecture
 
-Zscapek implements lazy (demand) paging for anonymous memory allocations. Physical pages are not allocated until first access.
+ZK implements lazy (demand) paging for anonymous memory allocations. Physical pages are not allocated until first access.
 
 ### Virtual Memory Area (VMA) Structure
 
@@ -379,7 +379,7 @@ Page faults can occur while other locks are held. The handler must avoid deadloc
 
 ## 5. VDSO & VVAR Architecture
 
-To reduce syscall overhead for high-frequency operations (like `gettimeofday`), Zscapek implements a Virtual Dynamic Shared Object (VDSO).
+To reduce syscall overhead for high-frequency operations (like `gettimeofday`), ZK implements a Virtual Dynamic Shared Object (VDSO).
 
 ### Memory Layout
 
@@ -420,7 +420,7 @@ These functions read the VVAR page directly. If the hardware clock source (TSC) 
 
 ## 6. Input Subsystem Architecture
 
-Zscapek supports two input paths for keyboard and mouse devices.
+ZK supports two input paths for keyboard and mouse devices.
 
 ### Dual-Path Input Architecture
 
@@ -525,7 +525,7 @@ When an interrupt occurs:
 ```
 
 ### Syscall Interface (Linux ABI)
-Zscapek implements a subset of the Linux ABI.
+ZK implements a subset of the Linux ABI.
 
 | Register | Purpose |
 |---|---|
@@ -623,7 +623,7 @@ When a device is assigned to an IOMMU domain, the kernel automatically sets up i
 
 ### User-Space ASLR
 
-Zscapek implements full user-space ASLR to randomize critical memory regions per-process.
+ZK implements full user-space ASLR to randomize critical memory regions per-process.
 
 **AslrOffsets Structure** (`src/kernel/mm/aslr.zig`):
 

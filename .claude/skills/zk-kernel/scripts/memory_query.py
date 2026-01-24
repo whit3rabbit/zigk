@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Memory Layout Query Tool for zigk kernel.
+Memory Layout Query Tool for zk kernel.
 
 Query virtual memory map, HHDM, hardware structures (GDT, IDT, PTE).
 
@@ -502,7 +502,7 @@ pub const MemoryType = enum(u64) {
 | 240-254 | MSI-X Vectors (dynamic) |
 | 255 | Spurious Interrupt |
 
-### Zscapek Specifics
+### ZK Specifics
 ```zig
 // Vector 128: Syscall entry (via int 0x80 or syscall instruction)
 pub const SYSCALL_VECTOR: u8 = 0x80;

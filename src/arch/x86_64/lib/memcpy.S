@@ -3,10 +3,10 @@
 
 .text
 
-# void *zscapek_memcpy(void *dest, const void *src, size_t n)
-.global zscapek_memcpy
-.type zscapek_memcpy, @function
-zscapek_memcpy:
+# void *zk_memcpy(void *dest, const void *src, size_t n)
+.global zk_memcpy
+.type zk_memcpy, @function
+zk_memcpy:
     cld
     mov %rdi, %rax
     mov %rdx, %rcx
@@ -17,10 +17,10 @@ zscapek_memcpy:
     rep movsb
     ret
 
-# void *zscapek_memset(void *dest, int c, size_t n)
-.global zscapek_memset
-.type zscapek_memset, @function
-zscapek_memset:
+# void *zk_memset(void *dest, int c, size_t n)
+.global zk_memset
+.type zk_memset, @function
+zk_memset:
     cld
     mov %rdi, %r11
     mov %rsi, %rax

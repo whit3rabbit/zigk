@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Syscall Query Tool for zigk kernel.
+Syscall Query Tool for zk kernel.
 
 Query syscalls by name, number, category, or handler file.
 Data is hardcoded for standalone operation without filesystem dependencies.
@@ -11,7 +11,7 @@ Usage:
     python syscall_query.py --category net    # List category
     python syscall_query.py --handler io.zig  # List syscalls in handler file
     python syscall_query.py --all             # List all syscalls
-    python syscall_query.py --zscapek         # List Zscapek extensions (1000+)
+    python syscall_query.py --zk               # List ZK extensions (1000+)
     python syscall_query.py --security        # List security-critical syscalls
     python syscall_query.py --arch aarch64    # Use aarch64 syscall numbers
     python syscall_query.py --arch x86_64 41  # Explicitly use x86_64 numbers
@@ -36,14 +36,14 @@ Categories:
     security - Security (ptrace, prctl, seccomp, capget/capset)
     container- Container/namespace (unshare, setns)
     uring    - io_uring async I/O
-    ipc      - Zscapek IPC
-    ring     - Zscapek ring buffer IPC
-    mmio     - Zscapek MMIO/DMA/PCI
-    input    - Zscapek input
-    fb       - Zscapek framebuffer
-    hypervisor - Zscapek hypervisor access (VMware, KVM, etc.)
-    netconfig- Zscapek network interface configuration (SLAAC, ARP)
-    virt_pci - Zscapek virtual PCI device emulation (pciem port)
+    ipc      - ZK IPC
+    ring     - ZK ring buffer IPC
+    mmio     - ZK MMIO/DMA/PCI
+    input    - ZK input
+    fb       - ZK framebuffer
+    hypervisor - ZK hypervisor access (VMware, KVM, etc.)
+    netconfig- ZK network interface configuration (SLAAC, ARP)
+    virt_pci - ZK virtual PCI device emulation (pciem port)
 """
 
 import sys
@@ -236,7 +236,7 @@ SYSCALLS = {
     427: {"name": "SYS_IO_URING_REGISTER", "doc": "Register buffers/files with io_uring", "sig": "io_uring_register(fd, opcode, arg, nr_args) -> 0"},
     435: {"name": "SYS_CLONE3", "doc": "Create child process with clone_args struct", "sig": "clone3(cl_args, size) -> pid"},
 
-    # Zscapek Custom Extensions (1000+)
+    # ZK Custom Extensions (1000+)
     1000: {"name": "SYS_DEBUG_LOG", "doc": "Write debug message to kernel log", "sig": "debug_log(msg, len) -> 0"},
     1001: {"name": "SYS_GET_FB_INFO", "doc": "Get framebuffer info", "sig": "get_fb_info(info) -> 0"},
     1002: {"name": "SYS_MAP_FB", "doc": "Map framebuffer into process address space", "sig": "map_fb() -> addr"},
@@ -489,19 +489,19 @@ SYSCALLS_AARCH64 = {
     426: {"name": "SYS_IO_URING_ENTER", "doc": "Submit and wait for io_uring operations", "sig": "io_uring_enter(fd, to_submit, min_complete, flags, sig) -> count"},
     427: {"name": "SYS_IO_URING_REGISTER", "doc": "Register buffers/files with io_uring", "sig": "io_uring_register(fd, opcode, arg, nr_args) -> 0"},
 
-    # Legacy compatibility stubs (zigk-specific, 500-599 range)
-    500: {"name": "SYS_OPEN", "doc": "[zigk compat] Open a file (redirects to openat)", "sig": "open(path, flags, mode) -> fd"},
-    502: {"name": "SYS_PIPE", "doc": "[zigk compat] Create a pipe (redirects to pipe2)", "sig": "pipe(pipefd[2]) -> 0"},
-    503: {"name": "SYS_STAT", "doc": "[zigk compat] Get file status (redirects to newfstatat)", "sig": "stat(path, statbuf) -> 0"},
-    504: {"name": "SYS_LSTAT", "doc": "[zigk compat] Get file status no follow (redirects to newfstatat)", "sig": "lstat(path, statbuf) -> 0"},
-    505: {"name": "SYS_ACCESS", "doc": "[zigk compat] Check permissions (redirects to faccessat)", "sig": "access(path, mode) -> 0"},
-    506: {"name": "SYS_DUP2", "doc": "[zigk compat] Duplicate FD (redirects to dup3)", "sig": "dup2(oldfd, newfd) -> newfd"},
-    507: {"name": "SYS_FORK", "doc": "[zigk compat] Create child process (redirects to clone)", "sig": "fork() -> pid"},
-    508: {"name": "SYS_SELECT", "doc": "[zigk compat] Examine FDs (redirects to pselect6)", "sig": "select(nfds, r, w, e, timeout) -> count"},
-    509: {"name": "SYS_EPOLL_WAIT", "doc": "[zigk compat] Wait for epoll (redirects to epoll_pwait)", "sig": "epoll_wait(epfd, events, maxevents, timeout) -> count"},
-    510: {"name": "SYS_POLL", "doc": "[zigk compat] Wait for events (redirects to ppoll)", "sig": "poll(fds, nfds, timeout) -> count"},
+    # Legacy compatibility stubs (zk-specific, 500-599 range)
+    500: {"name": "SYS_OPEN", "doc": "[zk compat] Open a file (redirects to openat)", "sig": "open(path, flags, mode) -> fd"},
+    502: {"name": "SYS_PIPE", "doc": "[zk compat] Create a pipe (redirects to pipe2)", "sig": "pipe(pipefd[2]) -> 0"},
+    503: {"name": "SYS_STAT", "doc": "[zk compat] Get file status (redirects to newfstatat)", "sig": "stat(path, statbuf) -> 0"},
+    504: {"name": "SYS_LSTAT", "doc": "[zk compat] Get file status no follow (redirects to newfstatat)", "sig": "lstat(path, statbuf) -> 0"},
+    505: {"name": "SYS_ACCESS", "doc": "[zk compat] Check permissions (redirects to faccessat)", "sig": "access(path, mode) -> 0"},
+    506: {"name": "SYS_DUP2", "doc": "[zk compat] Duplicate FD (redirects to dup3)", "sig": "dup2(oldfd, newfd) -> newfd"},
+    507: {"name": "SYS_FORK", "doc": "[zk compat] Create child process (redirects to clone)", "sig": "fork() -> pid"},
+    508: {"name": "SYS_SELECT", "doc": "[zk compat] Examine FDs (redirects to pselect6)", "sig": "select(nfds, r, w, e, timeout) -> count"},
+    509: {"name": "SYS_EPOLL_WAIT", "doc": "[zk compat] Wait for epoll (redirects to epoll_pwait)", "sig": "epoll_wait(epfd, events, maxevents, timeout) -> count"},
+    510: {"name": "SYS_POLL", "doc": "[zk compat] Wait for events (redirects to ppoll)", "sig": "poll(fds, nfds, timeout) -> count"},
 
-    # Zscapek Custom Extensions (1000+) - same as x86_64
+    # ZK Custom Extensions (1000+) - same as x86_64
     1000: {"name": "SYS_DEBUG_LOG", "doc": "Write debug message to kernel log", "sig": "debug_log(msg, len) -> 0"},
     1001: {"name": "SYS_GET_FB_INFO", "doc": "Get framebuffer info", "sig": "get_fb_info(info) -> 0"},
     1002: {"name": "SYS_MAP_FB", "doc": "Map framebuffer into process address space", "sig": "map_fb() -> addr"},
@@ -615,7 +615,7 @@ def parse_syscalls_from_source():
     syscalls = {}
 
     # Check both possible locations
-    for subpath in ["src/uapi/syscalls/linux.zig", "src/uapi/syscalls/zscapek.zig", "src/uapi/syscalls/root.zig", "src/uapi/syscalls.zig"]:
+    for subpath in ["src/uapi/syscalls/linux.zig", "src/uapi/syscalls/zk.zig", "src/uapi/syscalls/root.zig", "src/uapi/syscalls.zig"]:
         zig_file = root / subpath
         if not zig_file.exists():
             continue
@@ -736,9 +736,9 @@ def main():
             print(format_syscall(num, syscalls[num]))
         return
 
-    # --zscapek: list Zscapek extensions (1000+)
-    if arg == "--zscapek":
-        print(f"Zscapek Extensions (1000+) ({arch}):")
+    # --zk: list ZK extensions (1000+)
+    if arg == "--zk":
+        print(f"ZK Extensions (1000+) ({arch}):")
         for num in sorted(syscalls.keys()):
             if num >= 1000:
                 print(format_syscall(num, syscalls[num]))

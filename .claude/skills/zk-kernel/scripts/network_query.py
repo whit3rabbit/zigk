@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Network Stack Query Tool for zigk kernel.
+Network Stack Query Tool for zk kernel.
 
 Query network protocols, socket API, constants, and security features.
 

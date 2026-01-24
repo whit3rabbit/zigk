@@ -1,12 +1,12 @@
-# Zscapek Build Environment
+# ZK Build Environment
 # Multi-architecture kernel build container
 #
 # Usage:
-#   docker build -t zscapek-builder .
-#   docker run --rm -v $(pwd):/workspace zscapek-builder zig build
+#   docker build -t zk-builder .
+#   docker run --rm -v $(pwd):/workspace zk-builder zig build
 #
 # For different architectures, set KERNEL_ARCH build arg:
-#   docker build --build-arg KERNEL_ARCH=aarch64 -t zscapek-builder-arm .
+#   docker build --build-arg KERNEL_ARCH=aarch64 -t zk-builder-arm .
 
 ARG ZIG_VERSION=0.16.0-dev.1484
 

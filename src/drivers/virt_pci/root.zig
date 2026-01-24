@@ -1,7 +1,7 @@
 // Virtual PCI Device Emulation Framework
 //
 // Provides userspace-controlled virtual PCI devices for driver testing.
-// Port of the pciem framework from Linux/C to zigk.
+// Port of the pciem framework from Linux/C to zk.
 //
 // Features:
 //   - Create virtual PCI devices visible to the PCI subsystem

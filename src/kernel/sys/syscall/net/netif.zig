@@ -29,12 +29,12 @@ const console = @import("console");
 const capabilities = @import("capabilities");
 
 // Import UAPI structures
-const zscapek = uapi.syscalls.zscapek;
-const NetifCmd = zscapek.NetifCmd;
-const Ipv4Config = zscapek.Ipv4Config;
-const Ipv6AddrConfig = zscapek.Ipv6AddrConfig;
-const RaInfo = zscapek.RaInfo;
-const InterfaceInfo = zscapek.InterfaceInfo;
+const zk = uapi.syscalls.zk;
+const NetifCmd = zk.NetifCmd;
+const Ipv4Config = zk.Ipv4Config;
+const Ipv6AddrConfig = zk.Ipv6AddrConfig;
+const RaInfo = zk.RaInfo;
+const InterfaceInfo = zk.InterfaceInfo;
 
 // Network interface access
 const socket_state = net.transport.socket.state;

@@ -32,7 +32,7 @@ You can customize the build using `-D` flags with `zig build`.
 |--------|---------|-------------|
 | `-Darch=[arch]` | x86_64 | Target architecture: `x86_64` or `aarch64` |
 | `-Dversion=[string]` | "0.1.0" | Kernel version string |
-| `-Dname=[string]` | "Zscapek" | Kernel name |
+| `-Dname=[string]` | "ZK" | Kernel name |
 | `-Dstack-size=[int]` | 16384 | Default thread stack size in bytes |
 | `-Dheap-size=[int]` | 2097152 | Kernel heap size in bytes (2MB) |
 | `-Dmax-threads=[int]` | 64 | Maximum number of threads |
@@ -67,7 +67,7 @@ zig build iso                    # Default (x86_64)
 zig build iso -Darch=x86_64      # Explicit x86_64
 zig build iso -Darch=aarch64     # AArch64/ARM64
 ```
-Artifact: `zigk.iso`
+Artifact: `zk.iso`
 
 This creates a UEFI-bootable ISO with an embedded EFI System Partition using El Torito boot.
 
@@ -133,7 +133,7 @@ zig build run -Drun-iso=true
 #### Common Run Flags
 | Flag | Default | Description |
 |------|---------|-------------|
-| `-Drun-iso=[bool]` | false | Boot from `zigk.iso` (UEFI El Torito). Default boots from `disk.img` (GPT Disk Image). |
+| `-Drun-iso=[bool]` | false | Boot from `zk.iso` (UEFI El Torito). Default boots from `disk.img` (GPT Disk Image). |
 | `-Dbios=[string]` | auto | Path to UEFI firmware code image. Auto-detects Homebrew paths on macOS. |
 | `-Dvars=[string]` | auto | Path to UEFI vars image. Auto-detects Homebrew paths on macOS. |
 | `-Ddisplay=[string]` | default | QEMU display backend: `default`, `sdl`, `gtk`, `cocoa`, `none`. |

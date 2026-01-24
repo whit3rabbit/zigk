@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Security Pattern Query Tool for zigk kernel.
+Security Pattern Query Tool for zk kernel.
 
 Query security features: spinlocks, stack canary, ASLR, capabilities, entropy.
 

@@ -1,4 +1,4 @@
-// Zscapek Unit Tests
+// ZK Unit Tests
 //
 // Host-side unit tests for kernel components.
 // These run on the host system, not in the kernel environment.

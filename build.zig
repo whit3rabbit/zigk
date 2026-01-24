@@ -166,7 +166,7 @@ pub fn build(b: *std.Build) void {
     // Build Steps & Runnersfiguration Options
     // ============================================================
     const version = b.option([]const u8, "version", "Kernel version string") orelse "0.1.0";
-    const kernel_name = b.option([]const u8, "name", "Kernel name") orelse "Zscapek";
+    const kernel_name = b.option([]const u8, "name", "Kernel name") orelse "ZK";
     const stack_size = b.option(usize, "stack-size", "Default thread stack size in bytes") orelse 16 * 1024;
     const heap_size_opt = b.option(usize, "heap-size", "Kernel heap size in bytes") orelse 2 * 1024 * 1024;
     const max_threads = b.option(usize, "max-threads", "Maximum number of threads") orelse 64;
@@ -1898,7 +1898,7 @@ pub fn build(b: *std.Build) void {
     // LLVM's @cVaArg limitation (see https://github.com/ziglang/zig/issues/14096)
     // Create platform hooks module
     const doom_platform_module = b.createModule(.{
-        .root_source_file = b.path("src/user/doom/doomgeneric_zscapek.zig"),
+        .root_source_file = b.path("src/user/doom/doomgeneric_zk.zig"),
         .target = user_target,
         .optimize = optimize,
     });
@@ -1921,7 +1921,7 @@ pub fn build(b: *std.Build) void {
     });
     doom_mod.addImport("syscall", user_syscall_lib);
     doom_mod.addImport("libc", user_libc_module);
-    doom_mod.addImport("doomgeneric_zscapek.zig", doom_platform_module);
+    doom_mod.addImport("doomgeneric_zk.zig", doom_platform_module);
     doom_mod.addImport("i_sound.zig", doom_sound_module);
 
     const doom = b.addExecutable(.{
@@ -2325,13 +2325,13 @@ pub fn build(b: *std.Build) void {
         \\rm -rf .zig-cache/initrd_root && \
         \\cp efi.img iso_root/ && \
         \\xorriso -as mkisofs \
-        \\    -r -V "ZIGK" \
+        \\    -r -V "ZK" \
         \\    -e efi.img \
         \\    -no-emul-boot \
         \\    -isohybrid-gpt-basdat \
-        \\    iso_root -o zigk.iso && \
+        \\    iso_root -o zk.iso && \
         \\rm -f efi.img && \
-        \\echo "UEFI ISO created: zigk.iso"
+        \\echo "UEFI ISO created: zk.iso"
     , .{ efi_loader_ext, efi_boot_file, kernel_elf_name, efi_loader_ext, efi_loader_name, efi_loader_ext, efi_boot_file, kernel_elf_name });
     const iso_cmd = b.addSystemCommand(&.{ "sh", "-c", iso_script });
     // TEMP: Commented out due to zig cc cache issues
@@ -2428,12 +2428,12 @@ pub fn build(b: *std.Build) void {
         // The -isohybrid-gpt-basdat xorriso option creates a GPT on the ISO
         if (target_arch == .aarch64) {
             run_cmd.addArgs(&.{
-                "-drive", "file=zigk.iso,format=raw,if=none,id=bootdisk",
+                "-drive", "file=zk.iso,format=raw,if=none,id=bootdisk",
                 "-device", "virtio-blk-pci,drive=bootdisk,bootindex=1",
             });
         } else {
             run_cmd.addArgs(&.{
-                "-drive", "file=zigk.iso,format=raw,if=none,id=bootdisk",
+                "-drive", "file=zk.iso,format=raw,if=none,id=bootdisk",
                 "-device", "ide-hd,drive=bootdisk,bus=ide.0,bootindex=1",
             });
         }
@@ -2471,7 +2471,7 @@ pub fn build(b: *std.Build) void {
     if (qemu_nvme) {
         run_cmd.addArgs(&.{
             "-drive", "file=nvme_test.img,format=raw,if=none,id=nvmedisk",
-            "-device", "nvme,serial=ZIGKNVME01,drive=nvmedisk",
+            "-device", "nvme,serial=ZKNVME01,drive=nvmedisk",
         });
     }
 

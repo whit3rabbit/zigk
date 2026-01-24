@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-UEFI API Query Tool for zigk kernel bootloader.
+UEFI API Query Tool for zk kernel bootloader.
 
 Query UEFI protocols, boot services, and common patterns used in Zig UEFI bootloaders.
 

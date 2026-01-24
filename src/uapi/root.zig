@@ -1,7 +1,7 @@
-// Zscapek User API Root Module
+// ZK User API Root Module
 //
 // Provides constants shared between kernel and userland:
-//   - Syscall numbers (Linux x86_64 ABI + Zscapek extensions)
+//   - Syscall numbers (Linux x86_64 ABI + ZK extensions)
 //   - Error codes (errno values)
 //
 // This module is the single source of truth for ABI compatibility.

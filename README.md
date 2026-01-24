@@ -1,13 +1,13 @@
-# Zscapek
+# ZK
 [![ISO Release Build](https://github.com/whit3rabbit/zigk/actions/workflows/build-iso.yml/badge.svg?event=release)](https://github.com/whit3rabbit/zigk/actions/workflows/build-iso.yml)
 
-Zscapek is a 64-bit modular monolithic operating system kernel written in Zig. It targets both **x86_64** (AMD64) and **AArch64** (ARMv8-A) architectures, featuring a custom UEFI bootloader and a unified Hardware Abstraction Layer (HAL).
+ZK is a 64-bit modular monolithic operating system kernel written in Zig. It targets both **x86_64** (AMD64) and **AArch64** (ARMv8-A) architectures, featuring a custom UEFI bootloader and a unified Hardware Abstraction Layer (HAL).
 
 While the project uses a clean module structure to separate concerns, it operates as a monolithic kernel. Device drivers, the network stack, and file system logic run in kernel space (Ring 0 / EL1) to maximize performance and simplify hardware access.
 
 ## Architecture
 
-Zscapek is designed with a modular monolithic architecture. Unlike a microkernel, essential system services and drivers are compiled directly into the kernel binary.
+ZK is designed with a modular monolithic architecture. Unlike a microkernel, essential system services and drivers are compiled directly into the kernel binary.
 
 - **Privilege Level:** Drivers (Network, Storage, GPU) and the TCP/IP stack execute in Ring 0 (x86) or EL1 (ARM).
 - **Memory Model:** The kernel utilizes a Higher Half Direct Map (HHDM) for physical memory access.

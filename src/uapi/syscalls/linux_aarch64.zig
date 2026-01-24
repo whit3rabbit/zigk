@@ -46,7 +46,7 @@ pub const SYS_DUP3: usize = 24;
 /// Create pipe with flags
 pub const SYS_PIPE2: usize = 59;
 /// Create a file (legacy, use openat with O_CREAT)
-pub const SYS_CREAT: usize = 500; // zigk compat: not in Linux aarch64
+pub const SYS_CREAT: usize = 500; // zk compat: not in Linux aarch64
 
 // ============================================================================
 // File Status
@@ -159,7 +159,7 @@ pub const SYS_WAIT4: usize = 260;
 /// Wait for process/thread state change
 pub const SYS_WAITID: usize = 95;
 /// Create child process sharing VM until exec/exit
-pub const SYS_VFORK: usize = 501; // zigk compat: redirects to clone
+pub const SYS_VFORK: usize = 501; // zk compat: redirects to clone
 
 // ============================================================================
 // Signals
@@ -427,58 +427,58 @@ pub const SYS_IO_URING_ENTER: usize = 426;
 pub const SYS_IO_URING_REGISTER: usize = 427;
 
 // ============================================================================
-// Legacy Syscall Compatibility Stubs (zigk-specific, 500-599 range)
+// Legacy Syscall Compatibility Stubs (zk-specific, 500-599 range)
 // These are NOT part of Linux aarch64 ABI but provided for source compatibility
 // with code that uses legacy syscall names. Handlers redirect to modern *at() variants.
 // ============================================================================
 
-/// Open a file (zigk compat: redirects to openat with AT_FDCWD)
+/// Open a file (zk compat: redirects to openat with AT_FDCWD)
 pub const SYS_OPEN: usize = 500;
-/// Create a pipe (zigk compat: redirects to pipe2 with flags=0)
+/// Create a pipe (zk compat: redirects to pipe2 with flags=0)
 pub const SYS_PIPE: usize = 502;
-/// Get file status (zigk compat: redirects to newfstatat with AT_FDCWD)
+/// Get file status (zk compat: redirects to newfstatat with AT_FDCWD)
 pub const SYS_STAT: usize = 503;
-/// Get file status (do not follow symlinks) (zigk compat: redirects to newfstatat)
+/// Get file status (do not follow symlinks) (zk compat: redirects to newfstatat)
 pub const SYS_LSTAT: usize = 504;
-/// Check user's permissions for a file (zigk compat: redirects to faccessat)
+/// Check user's permissions for a file (zk compat: redirects to faccessat)
 pub const SYS_ACCESS: usize = 505;
-/// Duplicate a file descriptor to specific number (zigk compat: redirects to dup3)
+/// Duplicate a file descriptor to specific number (zk compat: redirects to dup3)
 pub const SYS_DUP2: usize = 506;
-/// Create a child process (zigk compat: redirects to clone)
+/// Create a child process (zk compat: redirects to clone)
 pub const SYS_FORK: usize = 507;
-/// Examine multiple file descriptors (zigk compat: redirects to pselect6)
+/// Examine multiple file descriptors (zk compat: redirects to pselect6)
 pub const SYS_SELECT: usize = 508;
-/// Wait for I/O events on an epoll instance (zigk compat: redirects to epoll_pwait)
+/// Wait for I/O events on an epoll instance (zk compat: redirects to epoll_pwait)
 pub const SYS_EPOLL_WAIT: usize = 509;
-/// Wait for some event on a set of file descriptors (zigk compat: redirects to ppoll)
+/// Wait for some event on a set of file descriptors (zk compat: redirects to ppoll)
 pub const SYS_POLL: usize = 510;
-/// Rename a file (zigk compat: redirects to renameat)
+/// Rename a file (zk compat: redirects to renameat)
 pub const SYS_RENAME: usize = 511;
-/// Create a directory (zigk compat: redirects to mkdirat)
+/// Create a directory (zk compat: redirects to mkdirat)
 pub const SYS_MKDIR: usize = 512;
-/// Remove a directory (zigk compat: redirects to unlinkat with AT_REMOVEDIR)
+/// Remove a directory (zk compat: redirects to unlinkat with AT_REMOVEDIR)
 pub const SYS_RMDIR: usize = 513;
-/// Delete a file (zigk compat: redirects to unlinkat)
+/// Delete a file (zk compat: redirects to unlinkat)
 pub const SYS_UNLINK: usize = 514;
-/// Create a symbolic link (zigk compat: redirects to symlinkat)
+/// Create a symbolic link (zk compat: redirects to symlinkat)
 pub const SYS_SYMLINK: usize = 515;
-/// Read value of symbolic link (zigk compat: redirects to readlinkat)
+/// Read value of symbolic link (zk compat: redirects to readlinkat)
 pub const SYS_READLINK: usize = 516;
-/// Create a hard link (zigk compat: redirects to linkat)
+/// Create a hard link (zk compat: redirects to linkat)
 pub const SYS_LINK: usize = 517;
-/// Change file mode (zigk compat: redirects to fchmodat)
+/// Change file mode (zk compat: redirects to fchmodat)
 pub const SYS_CHMOD: usize = 518;
-/// Change file owner (zigk compat: redirects to fchownat)
+/// Change file owner (zk compat: redirects to fchownat)
 pub const SYS_CHOWN: usize = 519;
-/// Change symlink owner (don't follow) (zigk compat: redirects to fchownat)
+/// Change symlink owner (don't follow) (zk compat: redirects to fchownat)
 pub const SYS_LCHOWN: usize = 520;
-/// Get directory entries (zigk compat: redirects to getdents64)
+/// Get directory entries (zk compat: redirects to getdents64)
 pub const SYS_GETDENTS: usize = 521;
-/// Initialize an inotify instance (zigk compat: redirects to inotify_init1)
+/// Initialize an inotify instance (zk compat: redirects to inotify_init1)
 pub const SYS_INOTIFY_INIT: usize = 522;
-/// Create file descriptor for signal handling (zigk compat: redirects to signalfd4)
+/// Create file descriptor for signal handling (zk compat: redirects to signalfd4)
 pub const SYS_SIGNALFD: usize = 523;
-/// Create event notification file descriptor (zigk compat: redirects to eventfd2)
+/// Create event notification file descriptor (zk compat: redirects to eventfd2)
 pub const SYS_EVENTFD: usize = 524;
 
 // ============================================================================
@@ -486,10 +486,10 @@ pub const SYS_EVENTFD: usize = 524;
 // ============================================================================
 
 /// Set architecture-specific thread state (x86_64 only, use prctl on aarch64)
-pub const SYS_ARCH_PRCTL: usize = 525; // zigk compat: emulated via prctl where possible
+pub const SYS_ARCH_PRCTL: usize = 525; // zk compat: emulated via prctl where possible
 
 // ============================================================================
-// Additional syscalls implemented in zigk
+// Additional syscalls implemented in zk
 // ============================================================================
 
 /// Sync file segment with disk

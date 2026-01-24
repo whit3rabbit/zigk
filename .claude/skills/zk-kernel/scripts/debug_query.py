@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Debug Query Tool for zigk kernel.
+Debug Query Tool for zk kernel.
 
 Query debugging techniques, panic handling, logging, and QEMU tips.
 

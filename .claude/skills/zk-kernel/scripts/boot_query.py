@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Boot Process Query Tool for zigk kernel.
+Boot Process Query Tool for zk kernel.
 
 Query boot flow, BootInfo structure, memory layout, and troubleshooting.
 

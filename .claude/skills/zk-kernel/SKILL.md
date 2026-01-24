@@ -1,11 +1,11 @@
 ---
-name: zigk-kernel
-description: Provides queryable reference for zigk/zscapek kernel development. Run scripts to lookup syscalls, patterns, rules, drivers, async I/O, security, and libc. Use when implementing syscalls, drivers, or kernel features. Token-efficient - scripts return only needed info.
+name: zk-kernel
+description: Provides queryable reference for zk kernel development. Run scripts to lookup syscalls, patterns, rules, drivers, async I/O, security, and libc. Use when implementing syscalls, drivers, or kernel features. Token-efficient - scripts return only needed info.
 ---
 
-# Zigk Kernel Development
+# ZK Kernel Development
 
-Queryable reference for the zscapek Zig kernel. Run scripts instead of loading docs.
+Queryable reference for the zk Zig kernel. Run scripts instead of loading docs.
 
 ## Query Scripts
 
@@ -63,7 +63,7 @@ python scripts/syscall_query.py socket        # Find by name
 python scripts/syscall_query.py 41            # Find by number
 python scripts/syscall_query.py --category net    # List network syscalls
 python scripts/syscall_query.py --handler io.zig  # List handler's syscalls
-python scripts/syscall_query.py --zscapek         # Zscapek extensions (1000+)
+python scripts/syscall_query.py --zk               # ZK extensions (1000+)
 ```
 
 ### Rules Lookup

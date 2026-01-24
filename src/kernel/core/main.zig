@@ -1,6 +1,6 @@
 //! Kernel Entry Point
 //!
-//! This module contains the main entry point (`_start`) for the Zscapek microkernel.
+//! This module contains the main entry point (`_start`) for the ZK microkernel.
 //! It is responsible for initializing the hardware, memory management, scheduler,
 //! and other core subsystems before launching the initial process.
 //!

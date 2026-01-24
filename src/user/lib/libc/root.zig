@@ -1,4 +1,4 @@
-// Zscapek libc Root Module
+// ZK libc Root Module
 //
 // Provides C-compatible standard library functions for userland programs.
 // Re-exports all subsystem modules to maintain a stable public API.
