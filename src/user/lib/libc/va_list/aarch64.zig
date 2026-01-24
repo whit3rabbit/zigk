@@ -70,6 +70,20 @@ inline fn writeI32(ptr: [*]u8, val: i32) void {
     ptr[3] = @truncate(unsigned >> 24);
 }
 
+/// Size of the aarch64 va_list structure (__stack + __gr_top + __vr_top + __gr_offs + __vr_offs)
+const VA_LIST_SIZE = 32;
+
+/// Saved va_list state for va_copy semantics.
+/// Stores a snapshot of the 32-byte va_list structure that can be independently traversed.
+pub const VaListState = struct {
+    data: [VA_LIST_SIZE]u8,
+
+    /// Create a VaList pointing to this saved state
+    pub fn toVaList(self: *VaListState) VaList {
+        return .{ .ptr = &self.data };
+    }
+};
+
 /// aarch64 VaList wrapper for manual argument extraction
 pub const VaList = struct {
     ptr: [*]u8,
@@ -83,6 +97,17 @@ pub const VaList = struct {
         } else {
             @panic("VaList.from: null va_list pointer - programming error");
         }
+    }
+
+    /// Save the current va_list state (va_copy semantics).
+    /// The returned VaListState can be independently traversed without
+    /// affecting the original va_list.
+    pub fn save(self: *VaList) VaListState {
+        var state: VaListState = undefined;
+        for (0..VA_LIST_SIZE) |i| {
+            state.data[i] = self.ptr[i];
+        }
+        return state;
     }
 
     /// Get next argument of type T from va_list (advances the va_list state)

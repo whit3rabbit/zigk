@@ -15,5 +15,8 @@ pub const impl = switch (builtin.cpu.arch) {
 /// Cross-platform VaList wrapper for manual argument extraction
 pub const VaList = impl.VaList;
 
+/// Saved va_list state for va_copy semantics
+pub const VaListState = impl.VaListState;
+
 /// C-compatible va_list type (pointer to opaque structure)
 pub const c_va_list = ?*anyopaque;

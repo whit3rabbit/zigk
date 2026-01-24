@@ -12,10 +12,10 @@ const errno_mod = @import("../errno.zig");
 // =============================================================================
 
 /// Maximum number of environment variables
-const MAX_ENV_VARS = 128;
+const MAX_ENV_VARS = 256;
 
 /// Maximum total storage for environment strings
-const MAX_ENV_SIZE = 4096;
+const MAX_ENV_SIZE = 16384;
 
 /// Static storage for environment variable strings
 var env_storage: [MAX_ENV_SIZE]u8 = [_]u8{0} ** MAX_ENV_SIZE;
@@ -66,6 +66,60 @@ fn containsEquals(name: [*:0]const u8) bool {
     return false;
 }
 
+/// Check if a pointer falls within env_storage
+fn isInStorage(ptr: [*]const u8) bool {
+    const storage_start = @intFromPtr(&env_storage[0]);
+    const storage_end = storage_start + MAX_ENV_SIZE;
+    const p = @intFromPtr(ptr);
+    return p >= storage_start and p < storage_end;
+}
+
+/// Get length of a null-terminated entry (including the null byte)
+fn entryLen(ptr: [*:0]const u8) usize {
+    return strLen(ptr) + 1;
+}
+
+/// Compact env_storage by removing bytes at a given offset and shifting remaining data down.
+/// Fixes all environ_ptrs that point past the removed region.
+/// Security: Zeros reclaimed space to prevent data leaks.
+fn compactStorage(remove_start: usize, remove_len: usize) void {
+    if (remove_len == 0) return;
+    if (remove_start + remove_len > env_storage_used) return;
+
+    // Shift bytes after the removed region down (manual loop for overlapping regions)
+    const remaining = env_storage_used - (remove_start + remove_len);
+    var i: usize = 0;
+    while (i < remaining) : (i += 1) {
+        env_storage[remove_start + i] = env_storage[remove_start + remove_len + i];
+    }
+
+    // Zero reclaimed space
+    const new_used = env_storage_used - remove_len;
+    i = new_used;
+    while (i < env_storage_used) : (i += 1) {
+        env_storage[i] = 0;
+    }
+
+    // Fix environ_ptrs that point past the removed region
+    const storage_base = @intFromPtr(&env_storage[0]);
+    for (0..environ_count) |idx| {
+        if (environ_ptrs[idx]) |ptr| {
+            const ptr_addr = @intFromPtr(ptr);
+            // Only fix pointers within env_storage that are past the removed region
+            if (ptr_addr >= storage_base and ptr_addr < storage_base + MAX_ENV_SIZE) {
+                const offset = ptr_addr - storage_base;
+                if (offset > remove_start) {
+                    // This pointer needs to shift back by remove_len
+                    const new_offset = offset - remove_len;
+                    environ_ptrs[idx] = @ptrCast(&env_storage[new_offset]);
+                }
+            }
+        }
+    }
+
+    env_storage_used = new_used;
+}
+
 // =============================================================================
 // Environment Variable Functions
 // =============================================================================
@@ -114,14 +168,30 @@ pub export fn setenv(name: ?[*:0]const u8, value: ?[*:0]const u8, overwrite: c_i
     if (findEnvVar(n)) |idx| {
         if (overwrite == 0) return 0; // Don't overwrite, success
 
-        // Remove old entry by shifting array
-        // Note: We don't reclaim storage space (simple implementation)
-        var i = idx;
-        while (i < environ_count - 1) : (i += 1) {
-            environ_ptrs[i] = environ_ptrs[i + 1];
+        // Compact storage for old entry if it's in our storage
+        if (environ_ptrs[idx]) |old_ptr| {
+            if (isInStorage(@ptrCast(old_ptr))) {
+                const old_len = entryLen(old_ptr);
+                const storage_base = @intFromPtr(&env_storage[0]);
+                const old_offset = @intFromPtr(old_ptr) - storage_base;
+                // Remove from pointer array first (before compaction fixes pointers)
+                var i = idx;
+                while (i < environ_count - 1) : (i += 1) {
+                    environ_ptrs[i] = environ_ptrs[i + 1];
+                }
+                environ_ptrs[environ_count - 1] = null;
+                environ_count -= 1;
+                compactStorage(old_offset, old_len);
+            } else {
+                // External pointer (from putenv) - just remove from array
+                var i = idx;
+                while (i < environ_count - 1) : (i += 1) {
+                    environ_ptrs[i] = environ_ptrs[i + 1];
+                }
+                environ_ptrs[environ_count - 1] = null;
+                environ_count -= 1;
+            }
         }
-        environ_ptrs[environ_count - 1] = null;
-        environ_count -= 1;
     }
 
     // Calculate required space: name + '=' + value + '\0'
@@ -183,13 +253,25 @@ pub export fn unsetenv(name: ?[*:0]const u8) c_int {
     }
 
     if (findEnvVar(n)) |idx| {
-        // Remove by shifting array
-        var i = idx;
-        while (i < environ_count - 1) : (i += 1) {
-            environ_ptrs[i] = environ_ptrs[i + 1];
+        // Compact storage if entry is in our storage
+        if (environ_ptrs[idx]) |old_ptr| {
+            const do_compact = isInStorage(@ptrCast(old_ptr));
+            const old_len = if (do_compact) entryLen(old_ptr) else @as(usize, 0);
+            const storage_base = @intFromPtr(&env_storage[0]);
+            const old_offset = if (do_compact) @intFromPtr(old_ptr) - storage_base else @as(usize, 0);
+
+            // Remove from pointer array
+            var i = idx;
+            while (i < environ_count - 1) : (i += 1) {
+                environ_ptrs[i] = environ_ptrs[i + 1];
+            }
+            environ_ptrs[environ_count - 1] = null;
+            environ_count -= 1;
+
+            if (do_compact) {
+                compactStorage(old_offset, old_len);
+            }
         }
-        environ_ptrs[environ_count - 1] = null;
-        environ_count -= 1;
     }
 
     return 0; // Success even if not found (POSIX behavior)

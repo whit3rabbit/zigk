@@ -61,6 +61,20 @@ inline fn writeU64(ptr: [*]u8, val: u64) void {
     ptr[7] = @truncate(val >> 56);
 }
 
+/// Size of the x86_64 va_list structure (gp_offset + fp_offset + overflow_arg_area + reg_save_area)
+const VA_LIST_SIZE = 24;
+
+/// Saved va_list state for va_copy semantics.
+/// Stores a snapshot of the 24-byte va_list structure that can be independently traversed.
+pub const VaListState = struct {
+    data: [VA_LIST_SIZE]u8,
+
+    /// Create a VaList pointing to this saved state
+    pub fn toVaList(self: *VaListState) VaList {
+        return .{ .ptr = &self.data };
+    }
+};
+
 /// x86_64 VaList wrapper for manual argument extraction
 pub const VaList = struct {
     ptr: [*]u8,
@@ -74,6 +88,17 @@ pub const VaList = struct {
         } else {
             @panic("VaList.from: null va_list pointer - programming error");
         }
+    }
+
+    /// Save the current va_list state (va_copy semantics).
+    /// The returned VaListState can be independently traversed without
+    /// affecting the original va_list.
+    pub fn save(self: *VaList) VaListState {
+        var state: VaListState = undefined;
+        for (0..VA_LIST_SIZE) |i| {
+            state.data[i] = self.ptr[i];
+        }
+        return state;
     }
 
     /// Get next argument of type T from va_list (advances the va_list state)

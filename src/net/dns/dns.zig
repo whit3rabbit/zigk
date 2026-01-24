@@ -18,6 +18,11 @@ pub const TYPE_MX: u16 = 15; // Mail Exchange
 pub const TYPE_TXT: u16 = 16; // Text
 pub const TYPE_AAAA: u16 = 28; // IPv6 Address
 
+/// EDNS0 (RFC 6891) constants
+pub const EDNS0_UDP_SIZE: u16 = 2048; // Advertised UDP payload size
+pub const TYPE_OPT: u16 = 41; // OPT pseudo-RR type
+pub const OPT_RR_SIZE: usize = 11; // Root name(1) + type(2) + udp_size(2) + ext_rcode(4) + rdlen(2)
+
 /// DNS Classes
 pub const CLASS_IN: u16 = 1; // Internet
 
@@ -119,6 +124,46 @@ pub const DnsPacket = struct {
         self.pos += 2;
         std.mem.writeInt(u16, self.buffer[self.pos..][0..2], qclass, .big);
         self.pos += 2;
+    }
+
+    /// Write an EDNS0 OPT pseudo-RR (RFC 6891) to the additional section.
+    /// This advertises the client's UDP payload size to allow responses > 512 bytes.
+    /// Format: root name (0x00) + TYPE_OPT + UDP size (as CLASS) + ext RCODE/version/flags + RDLENGTH
+    pub fn writeOptRR(self: *DnsPacket, udp_size: u16) !void {
+        if (self.pos + OPT_RR_SIZE > self.buffer.len) return error.BufferTooSmall;
+
+        // Root name (empty label)
+        self.buffer[self.pos] = 0x00;
+        self.pos += 1;
+
+        // TYPE = OPT (41)
+        std.mem.writeInt(u16, self.buffer[self.pos..][0..2], TYPE_OPT, .big);
+        self.pos += 2;
+
+        // CLASS = UDP payload size
+        std.mem.writeInt(u16, self.buffer[self.pos..][0..2], udp_size, .big);
+        self.pos += 2;
+
+        // Extended RCODE (1 byte) + Version (1 byte) + DO + Z (2 bytes) = 4 bytes, all zero
+        self.buffer[self.pos] = 0;
+        self.buffer[self.pos + 1] = 0;
+        self.buffer[self.pos + 2] = 0;
+        self.buffer[self.pos + 3] = 0;
+        self.pos += 4;
+
+        // RDLENGTH = 0 (no OPT options)
+        std.mem.writeInt(u16, self.buffer[self.pos..][0..2], 0, .big);
+        self.pos += 2;
+    }
+
+    /// Update the AR (additional record) count in an already-written header.
+    /// header_start is the offset where the header begins in the buffer.
+    pub fn setArCount(self: *DnsPacket, header_start: usize, count: u16) void {
+        // ar_count is at offset 10-11 within the DNS header
+        const ar_offset = header_start + 10;
+        if (ar_offset + 2 <= self.buffer.len) {
+            std.mem.writeInt(u16, self.buffer[ar_offset..][0..2], count, .big);
+        }
     }
 };
 

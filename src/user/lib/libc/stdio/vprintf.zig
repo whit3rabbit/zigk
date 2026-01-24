@@ -108,13 +108,12 @@ fn formatToBuffer(dest: [*]u8, limit: usize, fmt: [*:0]const u8, valist: *VaList
     var d_idx: usize = 0;
     var f_idx: usize = 0;
 
-    // Max index we can write to (leaving room for null)
-    const write_limit = if (limit > 0) limit - 1 else 0;
-    const can_write = limit > 0;
+    // Max index we can write to (leaving room for null terminator)
+    const write_limit = limit - 1;
 
     while (fmt[f_idx] != 0) {
         if (fmt[f_idx] != '%') {
-            if (can_write and d_idx < write_limit) dest[d_idx] = fmt[f_idx];
+            if (d_idx < write_limit) dest[d_idx] = fmt[f_idx];
             d_idx += 1;
             f_idx += 1;
             continue;
@@ -179,16 +178,14 @@ fn formatToBuffer(dest: [*]u8, limit: usize, fmt: [*:0]const u8, valist: *VaList
                 if (str_ptr != 0) {
                     const s: [*:0]const u8 = @ptrFromInt(str_ptr);
                     var s_idx: usize = 0;
-                    while (s[s_idx] != 0 and d_idx < limit - 1) : (s_idx += 1) {
-                        dest[d_idx] = s[s_idx];
+                    while (s[s_idx] != 0) : (s_idx += 1) {
+                        if (d_idx < write_limit) dest[d_idx] = s[s_idx];
                         d_idx += 1;
                     }
                 } else {
-                    // Handle NULL string
                     const null_str = "(null)";
                     for (null_str) |c| {
-                        if (d_idx >= limit - 1) break;
-                        dest[d_idx] = c;
+                        if (d_idx < write_limit) dest[d_idx] = c;
                         d_idx += 1;
                     }
                 }
@@ -201,102 +198,83 @@ fn formatToBuffer(dest: [*]u8, limit: usize, fmt: [*:0]const u8, valist: *VaList
             'd', 'i' => {
                 const val: i64 = @bitCast(valist.arg(usize));
                 const formatted = formatDecimal(&num_buf, val);
-                // Apply precision (minimum digits) with leading zeros
                 const min_digits = if (has_precision) precision else 1;
                 const is_negative = val < 0;
                 const digit_count = if (is_negative) formatted.len - 1 else formatted.len;
-                // Print sign first if negative
                 if (is_negative) {
-                    if (d_idx < limit - 1) {
-                        dest[d_idx] = '-';
-                        d_idx += 1;
-                    }
+                    if (d_idx < write_limit) dest[d_idx] = '-';
+                    d_idx += 1;
                 }
-                // Pad with zeros
                 if (digit_count < min_digits) {
                     var zeros = min_digits - digit_count;
-                    while (zeros > 0 and d_idx < limit - 1) : (zeros -= 1) {
-                        dest[d_idx] = '0';
+                    while (zeros > 0) : (zeros -= 1) {
+                        if (d_idx < write_limit) dest[d_idx] = '0';
                         d_idx += 1;
                     }
                 }
-                // Print digits (skip sign if negative)
                 const start: usize = if (is_negative) 1 else 0;
                 for (formatted[start..]) |c| {
-                    if (d_idx >= limit - 1) break;
-                    dest[d_idx] = c;
+                    if (d_idx < write_limit) dest[d_idx] = c;
                     d_idx += 1;
                 }
             },
             'u' => {
                 const val = valist.arg(usize);
                 const formatted = formatUnsigned(&num_buf, val);
-                // Apply precision (minimum digits) with leading zeros
                 const min_digits = if (has_precision) precision else 1;
                 if (formatted.len < min_digits) {
                     var zeros = min_digits - formatted.len;
-                    while (zeros > 0 and d_idx < limit - 1) : (zeros -= 1) {
-                        dest[d_idx] = '0';
+                    while (zeros > 0) : (zeros -= 1) {
+                        if (d_idx < write_limit) dest[d_idx] = '0';
                         d_idx += 1;
                     }
                 }
                 for (formatted) |c| {
-                    if (d_idx >= limit - 1) break;
-                    dest[d_idx] = c;
+                    if (d_idx < write_limit) dest[d_idx] = c;
                     d_idx += 1;
                 }
             },
             'x' => {
                 const val = valist.arg(usize);
                 const formatted = formatHex(&num_buf, val, false);
-                // Apply precision (minimum digits) with leading zeros
                 const min_digits = if (has_precision) precision else 1;
                 if (formatted.len < min_digits) {
                     var zeros = min_digits - formatted.len;
-                    while (zeros > 0 and d_idx < limit - 1) : (zeros -= 1) {
-                        dest[d_idx] = '0';
+                    while (zeros > 0) : (zeros -= 1) {
+                        if (d_idx < write_limit) dest[d_idx] = '0';
                         d_idx += 1;
                     }
                 }
                 for (formatted) |c| {
-                    if (d_idx >= limit - 1) break;
-                    dest[d_idx] = c;
+                    if (d_idx < write_limit) dest[d_idx] = c;
                     d_idx += 1;
                 }
             },
             'X' => {
                 const val = valist.arg(usize);
                 const formatted = formatHex(&num_buf, val, true);
-                // Apply precision (minimum digits) with leading zeros
                 const min_digits = if (has_precision) precision else 1;
                 if (formatted.len < min_digits) {
                     var zeros = min_digits - formatted.len;
-                    while (zeros > 0 and d_idx < limit - 1) : (zeros -= 1) {
-                        dest[d_idx] = '0';
+                    while (zeros > 0) : (zeros -= 1) {
+                        if (d_idx < write_limit) dest[d_idx] = '0';
                         d_idx += 1;
                     }
                 }
                 for (formatted) |c| {
-                    if (d_idx >= limit - 1) break;
-                    dest[d_idx] = c;
+                    if (d_idx < write_limit) dest[d_idx] = c;
                     d_idx += 1;
                 }
             },
             'p' => {
                 const val = valist.arg(usize);
-                // Print "0x" prefix
-                if (d_idx < limit - 1) {
-                    dest[d_idx] = '0';
-                    d_idx += 1;
-                }
-                if (d_idx < limit - 1) {
-                    dest[d_idx] = 'x';
-                    d_idx += 1;
-                }
+                if (d_idx < write_limit) dest[d_idx] = '0';
+                d_idx += 1;
+                if (d_idx < write_limit) dest[d_idx] = 'x';
+                d_idx += 1;
                 const formatted = formatHex(&num_buf, val, false);
                 for (formatted) |c| {
-                    if (d_idx >= limit - 1) break;
-                    dest[d_idx] = c;
+                    if (d_idx < write_limit) dest[d_idx] = c;
                     d_idx += 1;
                 }
             },
@@ -317,7 +295,12 @@ fn formatToBuffer(dest: [*]u8, limit: usize, fmt: [*:0]const u8, valist: *VaList
         }
     }
 
-    dest[d_idx] = 0; // null terminate
+    // Null-terminate: write at d_idx if within buffer, otherwise at last position
+    if (d_idx < limit) {
+        dest[d_idx] = 0;
+    } else if (limit > 0) {
+        dest[limit - 1] = 0;
+    }
     return d_idx;
 }
 
@@ -368,37 +351,29 @@ pub export fn vsprintf(dest: ?[*]u8, fmt: [*:0]const u8, ap: va_list) c_int {
     return @intCast(len);
 }
 
-/// vasprintf - allocate and format string
-/// Allocates a buffer and formats the string into it.
+/// vasprintf - allocate and format string (unlimited output size)
+/// Uses two-pass approach with va_copy: first pass counts characters needed,
+/// second pass formats into an exactly-sized allocated buffer.
 /// Sets *strp to the allocated buffer on success.
 /// Returns length on success (excluding null terminator), -1 on error.
-/// Note: Without va_copy, limited to FORMAT_BUF_SIZE (4096) characters.
 pub export fn vasprintf(strp: ?*?[*:0]u8, fmt: [*:0]const u8, ap: va_list) c_int {
     if (strp == null) return -1;
     strp.?.* = null;
 
-    // Format to stack buffer to measure length
-    var buf: [FORMAT_BUF_SIZE]u8 = undefined;
     var valist = VaList.from(ap);
-    const len = formatToBuffer(&buf, buf.len, fmt, &valist);
+    var saved = valist.save();
 
-    // Check if output was truncated (len >= buf.len - 1 means truncation)
-    // Note: formatToBuffer null-terminates, so usable space is buf.len - 1
-    if (len >= FORMAT_BUF_SIZE - 1) {
-        // Output would be truncated - return error
-        // Without va_copy, we cannot safely re-format with a larger buffer
-        return -1;
-    }
+    // Pass 1: count characters needed (1-byte buffer forces counting only)
+    var dummy: [1]u8 = undefined;
+    const len = formatToBuffer(&dummy, 1, fmt, &valist);
 
-    // Allocate buffer for result (len + 1 for null terminator)
+    // Pass 2: allocate exact buffer and format
     const alloc_size = len + 1;
     const ptr = memory.malloc(alloc_size) orelse return -1;
-
-    // Copy formatted string to allocated buffer
     const dest: [*]u8 = @ptrCast(ptr);
-    for (0..alloc_size) |i| {
-        dest[i] = buf[i];
-    }
+
+    var restored = saved.toVaList();
+    _ = formatToBuffer(dest, alloc_size, fmt, &restored);
 
     strp.?.* = @ptrCast(dest);
     return @intCast(len);

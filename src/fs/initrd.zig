@@ -326,6 +326,84 @@ pub const InitRD = struct {
         return null;
     }
 
+    /// Check if a path corresponds to a directory in the tarball.
+    /// Matches explicit directory entries (typeflag '5') or implicit directories
+    /// (paths that are prefixes of existing file entries).
+    pub fn isDirectory(self: *const @This(), path: []const u8) bool {
+        if (path.len == 0) return false;
+
+        // Normalize: strip leading '/'
+        var search = if (path[0] == '/') path[1..] else path;
+
+        // Strip trailing '/'
+        while (search.len > 0 and search[search.len - 1] == '/') {
+            search = search[0 .. search.len - 1];
+        }
+
+        // Root is always a directory
+        if (search.len == 0) return true;
+
+        // Reject path traversal
+        if (std.mem.indexOf(u8, search, "..")) |_| return false;
+
+        // Strip leading "./"
+        while (std.mem.startsWith(u8, search, "./")) {
+            search = search[2..];
+        }
+
+        if (search.len == 0) return true;
+
+        var offset: usize = 0;
+        while (offset + 512 <= self.data.len) {
+            const header: *const TarHeader = @ptrCast(self.data.ptr + offset);
+
+            if (header.name[0] == 0) break;
+            if (!header.isValid()) break;
+
+            var header_name = header.getName();
+
+            // Normalize header name
+            if (std.mem.startsWith(u8, header_name, "./")) {
+                header_name = header_name[2..];
+            }
+            // Strip trailing '/' from header name for comparison
+            var cmp_name = header_name;
+            while (cmp_name.len > 0 and cmp_name[cmp_name.len - 1] == '/') {
+                cmp_name = cmp_name[0 .. cmp_name.len - 1];
+            }
+
+            // Explicit directory entry (typeflag '5')
+            if (header.typeflag == '5' and std.mem.eql(u8, cmp_name, search)) {
+                return true;
+            }
+
+            // Implicit directory: this file has our path as a prefix
+            // e.g., searching for "bin" matches file "bin/hello"
+            if (header_name.len > search.len and
+                std.mem.startsWith(u8, header_name, search) and
+                header_name[search.len] == '/')
+            {
+                return true;
+            }
+
+            // Advance to next entry
+            const size = header.getSize() orelse break;
+            const data_start_result = @addWithOverflow(offset, 512);
+            if (data_start_result[1] != 0) break;
+            const padded_size_result = @addWithOverflow(size, 511);
+            if (padded_size_result[1] != 0) break;
+            const data_blocks = padded_size_result[0] / 512;
+            const block_bytes_result = @mulWithOverflow(data_blocks, 512);
+            if (block_bytes_result[1] != 0) break;
+            const next_offset_result = @addWithOverflow(data_start_result[0], block_bytes_result[0]);
+            if (next_offset_result[1] != 0) break;
+            if (next_offset_result[0] > self.data.len) break;
+            offset = next_offset_result[0];
+        }
+
+        return false;
+    }
+
     /// Iterator for listing files
     pub fn listFiles(self: *const @This()) FileIterator {
         return FileIterator{ .initrd = self, .offset = 0 };

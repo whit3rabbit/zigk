@@ -205,21 +205,41 @@ pub fn sys_chdir(path_ptr: usize) SyscallError!usize {
 
     if (path.len == 0) return error.ENOENT;
 
-    // Verify path exists (in InitRD)
-    // Note: InitRD is flat, so only "/" is a directory.
-    // All other paths are files.
+    // Canonicalize path: strip trailing slashes, handle "." and "/.."
+    var canonical: [uapi.abi.MAX_PATH]u8 = undefined;
+    var canon_len: usize = 0;
 
     if (std.mem.eql(u8, path, "/") or std.mem.eql(u8, path, "/.")) {
-        const proc = base.getCurrentProcess();
-        // SECURITY: Acquire cwd_lock when modifying cwd to prevent
-        // races with concurrent openat reading the cwd
-        const held = proc.cwd_lock.acquire();
-        proc.cwd[0] = '/';
-        proc.cwd_len = 1;
-        held.release();
-        return 0;
+        canonical[0] = '/';
+        canon_len = 1;
+    } else {
+        // Check if InitRD recognizes this as a directory
+        const initrd = &fs.initrd.InitRD.instance;
+        if (!initrd.isDirectory(path)) {
+            return error.ENOENT;
+        }
+
+        // Build canonical path: ensure leading '/', strip trailing '/'
+        if (path[0] != '/') {
+            canonical[0] = '/';
+            canon_len = 1;
+        }
+        for (path) |c| {
+            if (canon_len >= uapi.abi.MAX_PATH) return error.ENAMETOOLONG;
+            canonical[canon_len] = c;
+            canon_len += 1;
+        }
+        // Strip trailing slashes
+        while (canon_len > 1 and canonical[canon_len - 1] == '/') {
+            canon_len -= 1;
+        }
     }
 
-    return error.ENOENT;
+    const proc = base.getCurrentProcess();
+    const held = proc.cwd_lock.acquire();
+    @memcpy(proc.cwd[0..canon_len], canonical[0..canon_len]);
+    proc.cwd_len = canon_len;
+    held.release();
+    return 0;
 }
 

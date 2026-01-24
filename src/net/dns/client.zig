@@ -45,7 +45,7 @@ const ResolveResult = union(enum) {
 
 /// Resolve hostname to IPv4 address with CNAME following.
 /// Follows up to DNS_MAX_CNAME_DEPTH (8) CNAME redirects per RFC 1034.
-/// allocator: Reserved for future use (EDNS0 large responses, DNS caching, TCP fallback)
+/// allocator: Reserved for future use (DNS caching, TCP fallback)
 /// server_ip: DNS server address in network byte order
 pub fn resolve(allocator: std.mem.Allocator, hostname: []const u8, server_ip: u32) !u32 {
     // Stack-allocated buffers for CNAME chain (no heap allocation)
@@ -88,7 +88,7 @@ fn dnsNameEql(a: []const u8, b: []const u8) bool {
 /// Single DNS query - returns either IP address or CNAME target.
 /// cname_buf is used to store CNAME target if one is found.
 fn resolveOnce(allocator: std.mem.Allocator, hostname: []const u8, server_ip: u32, cname_buf: []u8) !ResolveResult {
-    _ = allocator; // Reserved for future use (EDNS0, caching, TCP fallback)
+    _ = allocator; // Reserved for future use (DNS caching, TCP fallback)
 
     // Validate hostname length per RFC 1035 (max 253 bytes)
     if (hostname.len > dns.DNS_MAX_NAME_LENGTH) return DnsError.NameTooLong;
@@ -132,6 +132,11 @@ fn resolveOnce(allocator: std.mem.Allocator, hostname: []const u8, server_ip: u3
     try packet.writeName(hostname);
     try packet.writeQuestion(dns.TYPE_A, dns.CLASS_IN);
 
+    // EDNS0 (RFC 6891): Add OPT RR to advertise larger UDP payload size.
+    // This allows the server to send responses > 512 bytes without TCP fallback.
+    try packet.writeOptRR(dns.EDNS0_UDP_SIZE);
+    packet.setArCount(0, 1); // 1 additional record (the OPT RR)
+
     const query_len = packet.pos;
 
     // Send to server
@@ -145,9 +150,9 @@ fn resolveOnce(allocator: std.mem.Allocator, hostname: []const u8, server_ip: u3
     const sent = try socket.sendto(fd_idx, send_buf[0..query_len], &dest);
     if (sent != query_len) return DnsError.SendError;
 
-    // Receive response
+    // Receive response (EDNS0: buffer matches advertised UDP payload size)
     // Security: Zero-init to prevent stack data leaks on partial recv (CLAUDE.md)
-    var recv_buf: [512]u8 = [_]u8{0} ** 512;
+    var recv_buf: [dns.EDNS0_UDP_SIZE]u8 = [_]u8{0} ** dns.EDNS0_UDP_SIZE;
     var src_addr: socket.SockAddrIn = std.mem.zeroes(socket.SockAddrIn);
     var received: usize = 0;
 
