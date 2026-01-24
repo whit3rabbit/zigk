@@ -12,6 +12,7 @@ const base = @import("base.zig");
 const uapi = @import("uapi");
 const console = @import("console");
 const pci = @import("pci");
+const virt_pci = @import("virt_pci");
 
 const SyscallError = base.SyscallError;
 const UserPtr = base.UserPtr;
@@ -102,6 +103,50 @@ fn deviceToInfo(dev: *const pci.PciDevice) PciDeviceInfo {
     return info;
 }
 
+/// Convert a virtual PCI device to userspace PciDeviceInfo
+fn virtualDeviceToInfo(vdev: *const virt_pci.VirtualPciDevice, slot: u8) PciDeviceInfo {
+    const virt_pci_uapi = uapi.virt_pci;
+
+    var info = PciDeviceInfo{
+        .bus = virt_pci_uapi.VIRTUAL_BUS_NUMBER, // 0xFE
+        .device = @truncate(slot & 0x1F),
+        .func = 0,
+        .vendor_id = @as(u16, vdev.config_space[1]) << 8 | vdev.config_space[0],
+        .device_id = @as(u16, vdev.config_space[3]) << 8 | vdev.config_space[2],
+        .class_code = vdev.config_space[11],
+        .subclass = vdev.config_space[10],
+        .prog_if = vdev.config_space[9],
+        .revision = vdev.config_space[8],
+        .irq_line = vdev.config_space[0x3C],
+        .irq_pin = vdev.config_space[0x3D],
+        .bar = undefined,
+    };
+
+    // Convert BAR info from virtual device
+    for (&info.bar, 0..) |*bar_info, i| {
+        const bar = &vdev.bars[i];
+        if (bar.configured and bar.size > 0) {
+            bar_info.* = BarInfo{
+                .base = bar.backing_phys,
+                .size = bar.size,
+                .is_mmio = if (bar.flags.is_mmio) @as(u8, 1) else 0,
+                .is_64bit = if (bar.flags.is_64bit) @as(u8, 1) else 0,
+                .prefetchable = if (bar.flags.prefetchable) @as(u8, 1) else 0,
+            };
+        } else {
+            bar_info.* = BarInfo{
+                .base = 0,
+                .size = 0,
+                .is_mmio = 0,
+                .is_64bit = 0,
+                .prefetchable = 0,
+            };
+        }
+    }
+
+    return info;
+}
+
 /// sys_pci_enumerate (1033) - List PCI devices
 ///
 /// Copies information about discovered PCI devices to userspace.
@@ -123,73 +168,96 @@ pub fn sys_pci_enumerate(buf_ptr_arg: usize, max_count_arg: usize) SyscallError!
     const buf_ptr: u64 = @intCast(buf_ptr_arg);
     const max_count = max_count_arg;
 
-    // Get PCI device list
-    const devices = pci.getDevices() orelse {
-        console.warn("sys_pci_enumerate: PCI not initialized", .{});
-        return error.ENODEV;
-    };
+    if (max_count == 0) return 0;
 
-    // SECURITY NOTE: count is bounded by devices.count which is <= MAX_DEVICES (64).
-    // Even though max_count is user-controlled, @min ensures count <= 64.
-    // Therefore, count * entry_size cannot overflow (64 * ~140 bytes = ~9KB).
-    const count = @min(devices.count, max_count);
-
-    if (count == 0) {
-        return 0;
-    }
-
-    // Validate user buffer
+    // Validate user buffer for max_count entries
     const entry_size = @sizeOf(PciDeviceInfo);
-    if (!base.isValidUserAccess(@intCast(buf_ptr), count * entry_size, base.AccessMode.Write)) {
+    // SECURITY: Bound max_count to prevent overflow in size calculation.
+    // Physical (64) + virtual (256) = 320 max possible devices.
+    const bounded_max = @min(max_count, pci.DeviceList.MAX_DEVICES + uapi.virt_pci.MAX_DEVICES);
+    const buf_size = std.math.mul(usize, bounded_max, entry_size) catch return error.EINVAL;
+    if (!base.isValidUserAccess(@intCast(buf_ptr), buf_size, base.AccessMode.Write)) {
         return error.EFAULT;
     }
 
     // Get current process for capability checking
     const proc = base.getCurrentProcess();
 
-    // Copy device info to userspace
-    for (0..count) |i| {
-        if (devices.get(i)) |dev| {
-            var info = deviceToInfo(dev);
+    var total: usize = 0;
 
-            // SECURITY: Redact physical BAR addresses unless the process has
-            // capability to access this device's config space or MMIO.
-            // This prevents unprivileged processes from learning physical
-            // memory layout (defeats ASLR/KASLR bypass attacks).
-            const has_pci_cap = proc.hasPciConfigCapability(dev.bus, dev.device, dev.func);
+    // Copy physical PCI devices to userspace
+    if (pci.getDevices()) |devices| {
+        const phys_count = @min(devices.count, bounded_max);
+        for (0..phys_count) |i| {
+            if (devices.get(i)) |dev| {
+                var info = deviceToInfo(dev);
 
-            if (!has_pci_cap) {
-                // Check if process has MMIO capability for any of the BARs
-                var has_any_mmio_cap = false;
-                for (&info.bar) |*bar_info| {
-                    if (bar_info.base != 0 and bar_info.size != 0) {
-                        if (proc.hasMmioCapability(bar_info.base, bar_info.size)) {
-                            has_any_mmio_cap = true;
-                            break;
+                // SECURITY: Redact physical BAR addresses unless the process has
+                // capability to access this device's config space or MMIO.
+                const has_pci_cap = proc.hasPciConfigCapability(dev.bus, dev.device, dev.func);
+
+                if (!has_pci_cap) {
+                    var has_any_mmio_cap = false;
+                    for (&info.bar) |*bar_info| {
+                        if (bar_info.base != 0 and bar_info.size != 0) {
+                            if (proc.hasMmioCapability(bar_info.base, bar_info.size)) {
+                                has_any_mmio_cap = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (!has_any_mmio_cap) {
+                        for (&info.bar) |*bar_info| {
+                            bar_info.base = 0;
                         }
                     }
                 }
 
-                // No capability - redact all physical addresses
-                if (!has_any_mmio_cap) {
-                    for (&info.bar) |*bar_info| {
-                        bar_info.base = 0; // Redact physical address
-                        // Keep size/type info - these are useful and not sensitive
-                    }
+                const offset = total * entry_size;
+                const dest_ptr = UserPtr.from(buf_ptr + offset);
+                _ = dest_ptr.copyFromKernel(std.mem.asBytes(&info)) catch {
+                    return error.EFAULT;
+                };
+                total += 1;
+            }
+        }
+    }
+
+    // Append virtual PCI devices (bus 0xFE)
+    if (total < bounded_max) {
+        const virt_lock = virt_pci.acquireReadLock();
+        defer virt_lock.release();
+
+        var dev_slot: u8 = 0;
+        var iter = virt_pci.registeredDevices();
+        while (iter.next()) |vdev| {
+            if (total >= bounded_max) break;
+
+            var info = virtualDeviceToInfo(vdev, dev_slot);
+
+            // SECURITY: Only expose BAR physical addresses to the process that owns
+            // this specific device. A blanket VirtualPciCapability check would leak
+            // physical addresses of other processes' device BARs, defeating ASLR and
+            // potentially enabling cross-process attacks if combined with other flaws.
+            if (vdev.owner_pid != proc.pid) {
+                for (&info.bar) |*bar_info| {
+                    bar_info.base = 0;
                 }
             }
 
-            const offset = i * entry_size;
+            const offset = total * entry_size;
             const dest_ptr = UserPtr.from(buf_ptr + offset);
             _ = dest_ptr.copyFromKernel(std.mem.asBytes(&info)) catch {
                 return error.EFAULT;
             };
+            total += 1;
+            dev_slot +%= 1;
         }
     }
 
-    console.debug("sys_pci_enumerate: Returned {} devices", .{count});
+    console.debug("sys_pci_enumerate: Returned {} devices", .{total});
 
-    return count;
+    return total;
 }
 
 /// sys_pci_config_read (1034) - Read PCI config register

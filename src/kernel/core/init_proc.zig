@@ -271,12 +271,12 @@ fn spawnProcessFromData(mod: ModuleData, process_name: []const u8) void {
 
     // Step 2: Set as current process so syscall handlers can access FD table
     syscall_base.setCurrentProcess(proc);
-    console.info("Created process pid={d} with FD table", .{proc.pid});
+    console.debug("Created process pid={d} with FD table", .{proc.pid});
 
     // Grant capabilities based on process name
     grantProcessCapabilities(proc, process_name);
 
-    console.info("Init: Loading ELF...", .{});
+    console.debug("Init: Loading ELF...", .{});
 
     // Step 3: Validate module data
     if (mod.data.len == 0) {
@@ -318,7 +318,7 @@ fn spawnProcessFromData(mod: ModuleData, process_name: []const u8) void {
         console.info("Init: Heap initialized at {x} (ASLR gap={})", .{ heap_start, proc.aslr_offsets.heap_gap });
     }
 
-    console.info("Init: Setting up user stack...", .{});
+    console.debug("Init: Setting up user stack...", .{});
 
     // Step 5: Allocate and map user stack with arguments
     const stack_virt_top: u64 = proc.aslr_offsets.stack_top;
@@ -331,7 +331,7 @@ fn spawnProcessFromData(mod: ModuleData, process_name: []const u8) void {
 
     // Workaround: If this is Doom, inject default arguments
     if (std.mem.eql(u8, process_name, "doom")) {
-        console.warn("Init: Detecting Doom, injecting defaults...", .{});
+        console.debug("Init: Detecting Doom, injecting defaults...", .{});
         argv_buf[1] = "-iwad";
         argv_buf[2] = "/doom1.wad";
         argv_count = 3;
@@ -379,7 +379,7 @@ fn spawnProcessFromData(mod: ModuleData, process_name: []const u8) void {
     if (builtin.mode == .Debug) {
         console.info("User stack created (rsp={x})", .{initial_rsp});
     }
-    console.info("Init: Creating user thread...", .{});
+    console.debug("Init: Creating user thread...", .{});
 
     // Step 6: Create user thread with entry point from ELF header
     const user_thread = thread.createUserThread(load_result.entry_point, .{
@@ -435,7 +435,7 @@ fn spawnProcessFromData(mod: ModuleData, process_name: []const u8) void {
         user_thread.fs_base = fs_base;
     }
 
-    console.info("Init: Adding thread to scheduler...", .{});
+    console.debug("Init: Adding thread to scheduler...", .{});
     sched.addThread(user_thread);
     console.info("Init process started (pid={d}, tid={d})", .{ proc.pid, user_thread.tid });
 }
@@ -475,7 +475,7 @@ fn grantProcessCapabilities(proc: *process.Process, process_name: []const u8) vo
     if (std.mem.eql(u8, process_name, "uart_driver")) {
         appendCapabilityOrWarn(proc, alloc, .{ .Interrupt = .{ .irq = 4 } }, process_name);
         appendCapabilityOrWarn(proc, alloc, .{ .IoPort = .{ .port = 0x3F8, .len = 8 } }, process_name);
-        console.info("Init: Granted UART capabilities to pid={}", .{proc.pid});
+        console.debug("Init: Granted UART capabilities to pid={}", .{proc.pid});
     }
 
     // PS/2 driver capabilities
@@ -485,13 +485,13 @@ fn grantProcessCapabilities(proc: *process.Process, process_name: []const u8) vo
         appendCapabilityOrWarn(proc, alloc, .{ .IoPort = .{ .port = 0x60, .len = 1 } }, process_name);
         appendCapabilityOrWarn(proc, alloc, .{ .IoPort = .{ .port = 0x64, .len = 1 } }, process_name);
         appendCapabilityOrWarn(proc, alloc, .{ .InputInjection = .{} }, process_name);
-        console.info("Init: Granted PS/2 capabilities to pid={}", .{proc.pid});
+        console.debug("Init: Granted PS/2 capabilities to pid={}", .{proc.pid});
     }
 
     // VirtIO-Net capabilities
     if (std.mem.eql(u8, process_name, "virtio_net_driver")) {
         if (grantVirtioCapabilities(proc, .Net)) {
-            console.info("Init: Granted VirtIO-Net capabilities to pid={}", .{proc.pid});
+            console.debug("Init: Granted VirtIO-Net capabilities to pid={}", .{proc.pid});
         } else {
             console.warn("Init: Failed to find VirtIO-Net device for pid={}", .{proc.pid});
         }
@@ -500,7 +500,7 @@ fn grantProcessCapabilities(proc: *process.Process, process_name: []const u8) vo
     // VirtIO-Blk capabilities
     if (std.mem.eql(u8, process_name, "virtio_blk_driver")) {
         if (grantVirtioCapabilities(proc, .Blk)) {
-            console.info("Init: Granted VirtIO-Blk capabilities to pid={}", .{proc.pid});
+            console.debug("Init: Granted VirtIO-Blk capabilities to pid={}", .{proc.pid});
         } else {
             console.warn("Init: Failed to find VirtIO-Blk device for pid={}", .{proc.pid});
         }
@@ -518,7 +518,7 @@ fn grantProcessCapabilities(proc: *process.Process, process_name: []const u8) vo
         grantDisplayServerCapabilities(proc, alloc, process_name);
         // Additional UART capability for debug output
         appendCapabilityOrWarn(proc, alloc, .{ .IoPort = .{ .port = 0x3F8, .len = 8 } }, process_name);
-        console.info("Init: Granted Doom capabilities to pid={}", .{proc.pid});
+        console.debug("Init: Granted Doom capabilities to pid={}", .{proc.pid});
     }
 
     // Network Configuration Daemon (netcfgd) capabilities
@@ -531,7 +531,7 @@ fn grantProcessCapabilities(proc: *process.Process, process_name: []const u8) vo
             .allow_mtu = true,
             .interface_mask = capabilities.NetConfigCapability.ANY_INTERFACE,
         } }, process_name);
-        console.info("Init: Granted network config capabilities to pid={}", .{proc.pid});
+        console.debug("Init: Granted network config capabilities to pid={}", .{proc.pid});
     }
 
     // SPICE Agent capabilities
@@ -544,7 +544,12 @@ fn grantProcessCapabilities(proc: *process.Process, process_name: []const u8) vo
             .receives_input = false, // SPICE agent doesn't handle input
             .owns_framebuffer = true, // Required for display mode changes
         } }, process_name);
-        console.info("Init: Granted SPICE agent capabilities to pid={}", .{proc.pid});
+        console.debug("Init: Granted SPICE agent capabilities to pid={}", .{proc.pid});
+    }
+
+    // Summary: single info-level message if any capabilities were granted
+    if (proc.capabilities.items.len > 0) {
+        console.info("Init: Capabilities granted for {s} (pid={d})", .{ process_name, proc.pid });
     }
 }
 
@@ -579,10 +584,10 @@ fn grantDisplayServerCapabilities(proc: *process.Process, alloc: std.mem.Allocat
             .phys_addr = fb_state.phys_addr,
             .size = fb_state.size,
         } }, process_name);
-        console.info("Init: Granted display server framebuffer at 0x{x} size=0x{x}", .{ fb_state.phys_addr, fb_state.size });
+        console.debug("Init: Granted display server framebuffer at 0x{x} size=0x{x}", .{ fb_state.phys_addr, fb_state.size });
     }
 
-    console.info("Init: Granted display server capabilities to pid={}", .{proc.pid});
+    console.debug("Init: Granted display server capabilities to pid={}", .{proc.pid});
 }
 
 const VirtioDriverType = enum {

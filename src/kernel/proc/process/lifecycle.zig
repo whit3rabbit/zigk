@@ -3,6 +3,7 @@ const heap = @import("heap");
 const console = @import("console");
 const fd_mod = @import("fd");
 const framebuffer = @import("framebuffer");
+const virt_pci = @import("virt_pci");
 
 const user_vmm_mod = @import("user_vmm");
 const vmm = @import("vmm");
@@ -317,6 +318,10 @@ pub fn destroyProcess(proc: *Process) void {
     // Release framebuffer ownership if this process owned it.
     // This prevents resource leaks when a display server crashes or exits.
     framebuffer.releaseOwnership(proc.pid);
+
+    // Free any virtual PCI devices owned by this process.
+    // This releases BAR backing memory and event ring pages.
+    virt_pci.cleanupByPid(proc.pid);
 
     // Reparent children to init (PID 1) per POSIX semantics
     if (proc.first_child != null) {

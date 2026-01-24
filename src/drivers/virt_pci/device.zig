@@ -11,6 +11,7 @@ const virt_pci_uapi = uapi.virt_pci;
 const sync = @import("sync");
 const pmm = @import("pmm");
 const console = @import("console");
+const sched = @import("sched");
 
 const VPciDeviceState = virt_pci_uapi.VPciDeviceState;
 const VPciConfigHeader = virt_pci_uapi.VPciConfigHeader;
@@ -36,6 +37,11 @@ pub const VirtualBar = struct {
     page_count: usize = 0,
     /// True if this BAR is configured
     configured: bool = false,
+    /// Doorbell offset within this BAR (writes here trigger events).
+    /// Default: last 4 bytes of the BAR. Set to 0xFFFFFFFF to disable.
+    doorbell_offset: u32 = 0xFFFFFFFF,
+    /// Doorbell size (1, 2, or 4 bytes)
+    doorbell_size: u8 = 4,
 
     /// Check if BAR is valid and configured
     pub fn isValid(self: *const VirtualBar) bool {
@@ -45,6 +51,13 @@ pub const VirtualBar = struct {
     /// Check if this BAR intercepts MMIO
     pub fn interceptsMmio(self: *const VirtualBar) bool {
         return self.configured and self.flags.intercept_mmio;
+    }
+
+    /// Check if an offset is the doorbell register
+    pub fn isDoorbell(self: *const VirtualBar, offset: u32) bool {
+        if (self.doorbell_offset == 0xFFFFFFFF) return false;
+        return offset >= self.doorbell_offset and
+            offset < self.doorbell_offset + self.doorbell_size;
     }
 };
 
@@ -173,6 +186,32 @@ pub const VirtualPciDevice = struct {
     /// Total BAR size in bytes (for limit checking)
     total_bar_size: u64 = 0,
 
+    /// Reference count for safe concurrent access.
+    /// Prevents UAF when a syscall handler holds a device pointer while
+    /// a concurrent thread destroys the device. Resources are only freed
+    /// when refcount drops to 0 after beginDestroy() is called.
+    ref_count: u32 = 0,
+
+    /// Wait queue for threads blocked in sys_vpci_wait_event
+    event_queue: sched.WaitQueue = .{},
+    /// Spinlock protecting event ring writes and event_queue
+    event_lock: sync.Spinlock = .{},
+
+    /// Pending MMIO read requests awaiting responses
+    pending_reads: [MAX_PENDING_READS]PendingRead = [_]PendingRead{.{}} ** MAX_PENDING_READS,
+
+    const MAX_PENDING_READS = 16;
+
+    /// A pending MMIO read that blocks a thread until response arrives
+    pub const PendingRead = struct {
+        seq: u64 = 0,
+        response_data: u64 = 0,
+        state: PendingState = .free,
+        waiter_queue: sched.WaitQueue = .{},
+
+        pub const PendingState = enum { free, pending, responded };
+    };
+
     const Self = @This();
 
     /// Initialize device with defaults
@@ -289,6 +328,12 @@ pub const VirtualPciDevice = struct {
         bar.backing_virt = virt;
         bar.page_count = page_count;
         bar.configured = true;
+
+        // Set default doorbell at last 4 bytes if MMIO interception is enabled
+        if (flags.intercept_mmio) {
+            bar.doorbell_offset = @truncate(size - 4);
+            bar.doorbell_size = 4;
+        }
 
         // Update total BAR size
         self.total_bar_size += size;
@@ -490,6 +535,200 @@ pub const VirtualPciDevice = struct {
         }
     }
 
+    /// Write to a BAR's backing memory. If the write targets the doorbell
+    /// offset, an MMIO write event is pushed to the event ring.
+    ///
+    /// This is the primary mechanism for kernel drivers to interact with
+    /// virtual devices: reads/writes go to shared BAR memory (fast path),
+    /// and doorbell writes generate notifications (slow path).
+    pub fn writeBar(self: *Self, bar_index: u8, offset: u32, data: u64, access_size: u8) void {
+        if (bar_index >= MAX_BARS) return;
+        const bar = &self.bars[bar_index];
+        if (!bar.isValid()) return;
+        // Check that the entire access [offset, offset+access_size) fits within the BAR.
+        // Without this, an offset near bar.size with access_size > 1 writes past the allocation.
+        const access_end = std.math.add(u64, @as(u64, offset), @as(u64, access_size)) catch return;
+        if (access_end > bar.size) return;
+
+        // Write to BAR backing memory
+        const dest_addr = bar.backing_virt + offset;
+        switch (access_size) {
+            1 => {
+                const ptr: *volatile u8 = @ptrFromInt(dest_addr);
+                ptr.* = @truncate(data);
+            },
+            2 => {
+                const ptr: *volatile u16 = @ptrFromInt(dest_addr);
+                ptr.* = @truncate(data);
+            },
+            4 => {
+                const ptr: *volatile u32 = @ptrFromInt(dest_addr);
+                ptr.* = @truncate(data);
+            },
+            8 => {
+                const ptr: *volatile u64 = @ptrFromInt(dest_addr);
+                ptr.* = data;
+            },
+            else => return,
+        }
+
+        // Check if this is a doorbell write
+        if (bar.isDoorbell(offset)) {
+            _ = self.pushEvent(.mmio_write, bar_index, offset, access_size, data, false);
+        }
+    }
+
+    /// Read from a BAR's backing memory.
+    /// For intercepted BARs, this generates a read event and blocks until
+    /// the emulator responds. For non-intercepted BARs, reads directly.
+    pub fn readBar(self: *Self, bar_index: u8, offset: u32, access_size: u8) u64 {
+        if (bar_index >= MAX_BARS) return 0xFFFFFFFF;
+        const bar = &self.bars[bar_index];
+        if (!bar.isValid()) return 0xFFFFFFFF;
+        // Check that the entire access [offset, offset+access_size) fits within the BAR.
+        const access_end = std.math.add(u64, @as(u64, offset), @as(u64, access_size)) catch return 0xFFFFFFFF;
+        if (access_end > bar.size) return 0xFFFFFFFF;
+
+        // Direct read from BAR backing memory
+        const src_addr = bar.backing_virt + offset;
+        return switch (access_size) {
+            1 => @as(u64, @as(*volatile u8, @ptrFromInt(src_addr)).*),
+            2 => @as(u64, @as(*volatile u16, @ptrFromInt(src_addr)).*),
+            4 => @as(u64, @as(*volatile u32, @ptrFromInt(src_addr)).*),
+            8 => @as(*volatile u64, @ptrFromInt(src_addr)).*,
+            else => 0xFFFFFFFF,
+        };
+    }
+
+    /// Configure the doorbell for a BAR.
+    /// offset: byte offset within the BAR where doorbell register lives
+    /// size: access width (1, 2, or 4 bytes)
+    pub fn setDoorbell(self: *Self, bar_index: u8, offset: u32, size: u8) void {
+        if (bar_index >= MAX_BARS) return;
+        const bar = &self.bars[bar_index];
+        if (!bar.isValid()) return;
+
+        // Validate offset is within BAR
+        if (offset >= bar.size) return;
+
+        bar.doorbell_offset = offset;
+        bar.doorbell_size = size;
+        console.debug("VirtPCI[{}]: BAR{} doorbell at offset 0x{x} size={}", .{ self.id, bar_index, offset, size });
+    }
+
+    /// Find which BAR contains the given IOVA (physical address).
+    /// Returns a pointer to the corresponding kernel virtual memory, or null.
+    pub fn findBarForIova(self: *Self, iova: u64, length: u64) ?[*]u8 {
+        // Use checked arithmetic to prevent overflow-based bounds check bypass.
+        // Without this, a crafted iova near u64::MAX could wrap iova+length to a
+        // small value, passing the upper bound check and yielding an arbitrary pointer.
+        const iova_end = std.math.add(u64, iova, length) catch return null;
+        for (&self.bars) |*bar| {
+            if (!bar.isValid()) continue;
+            const bar_end = std.math.add(u64, bar.backing_phys, bar.size) catch continue;
+            if (iova >= bar.backing_phys and iova_end <= bar_end) {
+                const offset = iova - bar.backing_phys;
+                return @ptrFromInt(bar.backing_virt + offset);
+            }
+        }
+        return null;
+    }
+
+    /// Push an event to the ring buffer and wake any waiting threads.
+    /// Returns the sequence number assigned, or null if ring is full.
+    pub fn pushEvent(self: *Self, event_type: virt_pci_uapi.VPciEventType, bar: u8, offset: u32, size: u8, data: u64, needs_response: bool) ?u64 {
+        if (self.ring_virt == 0) return null;
+
+        const event_lock_held = self.event_lock.acquire();
+
+        const header: *volatile virt_pci_uapi.VPciRingHeader = @ptrFromInt(self.ring_virt);
+
+        // Check ring space
+        if (header.freeSlots() == 0) {
+            event_lock_held.release();
+            return null;
+        }
+
+        // Assign sequence number
+        const seq = self.nextSequence();
+
+        // Calculate event slot
+        const prod = @atomicLoad(u64, &header.prod_idx, .acquire);
+        const slot_idx = prod & header.ring_mask;
+        const event_offset = virt_pci_uapi.VPciRingHeader.DATA_OFFSET + slot_idx * @sizeOf(virt_pci_uapi.VPciEvent);
+        const event_ptr: *volatile virt_pci_uapi.VPciEvent = @ptrFromInt(self.ring_virt + event_offset);
+
+        // Write event
+        event_ptr.seq = seq;
+        event_ptr.event_type = event_type;
+        event_ptr.bar = bar;
+        event_ptr.size = size;
+        event_ptr._reserved = 0;
+        event_ptr.offset = offset;
+        event_ptr.data = data;
+        event_ptr.timestamp = 0; // TODO: monotonic ticks
+        event_ptr.flags = if (needs_response) virt_pci_uapi.VPciEvent.FLAG_NEEDS_RESPONSE else 0;
+        event_ptr._pad = 0;
+
+        // Advance producer index
+        @atomicStore(u64, &header.prod_idx, prod + 1, .release);
+
+        if (needs_response) {
+            _ = @atomicRmw(u32, &header.pending_responses, .Add, 1, .monotonic);
+        }
+
+        // Wake one waiter
+        _ = self.event_queue.wakeUp(1);
+
+        event_lock_held.release();
+
+        return seq;
+    }
+
+    /// Allocate a pending read slot for an MMIO read that needs a response.
+    /// Returns the slot index, or null if all slots are busy.
+    pub fn allocPendingRead(self: *Self, seq: u64) ?usize {
+        const held = self.lock.acquire();
+        defer held.release();
+
+        for (&self.pending_reads, 0..) |*slot, idx| {
+            if (slot.state == .free) {
+                slot.seq = seq;
+                slot.state = .pending;
+                slot.response_data = 0;
+                return idx;
+            }
+        }
+        return null;
+    }
+
+    /// Submit a response to a pending MMIO read, waking the blocked thread.
+    pub fn submitResponse(self: *Self, seq: u64, data: u64) bool {
+        const held = self.lock.acquire();
+
+        for (&self.pending_reads) |*slot| {
+            if (slot.state == .pending and slot.seq == seq) {
+                slot.response_data = data;
+                slot.state = .responded;
+                // Wake the thread waiting on this slot
+                _ = slot.waiter_queue.wakeUp(1);
+                held.release();
+                return true;
+            }
+        }
+
+        held.release();
+        return false;
+    }
+
+    /// Free a pending read slot after the response has been consumed.
+    pub fn freePendingRead(self: *Self, slot_idx: usize) void {
+        if (slot_idx >= MAX_PENDING_READS) return;
+        const held = self.lock.acquire();
+        defer held.release();
+        self.pending_reads[slot_idx].state = .free;
+    }
+
     /// Allocate event ring
     pub fn allocateEventRing(self: *Self, entry_count: u32) !void {
         if (!virt_pci_uapi.isPowerOf2(entry_count)) {
@@ -524,13 +763,24 @@ pub const VirtualPciDevice = struct {
         console.debug("VirtPCI[{}]: Allocated event ring entries={} pages={}", .{ self.id, entry_count, page_count });
     }
 
-    /// Free all resources
-    pub fn destroy(self: *Self) void {
+    /// Mark device as closing. Returns true if resources can be freed immediately
+    /// (refcount is 0), false if deferred cleanup is needed (active refs exist).
+    /// Caller must hold the global devices_lock (write) to prevent new refs.
+    /// NOTE: Caller is responsible for waking event_queue waiters AFTER releasing
+    /// devices_lock, to respect lock ordering (scheduler lock #4 < devices_lock #8.5).
+    pub fn beginDestroy(self: *Self) bool {
         const held = self.lock.acquire();
         defer held.release();
 
         self.state = .closing;
 
+        // If no active references, caller can free resources now.
+        return @atomicLoad(u32, &self.ref_count, .acquire) == 0;
+    }
+
+    /// Actually free BAR and ring backing memory.
+    /// Only safe to call when refcount is 0 and state is .closing.
+    pub fn destroyResources(self: *Self) void {
         // Free BAR backing memory
         for (&self.bars) |*bar| {
             if (bar.configured and bar.page_count > 0 and bar.backing_phys != 0) {

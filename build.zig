@@ -799,6 +799,7 @@ pub fn build(b: *std.Build) void {
     virt_pci_module.addImport("pmm", pmm_module);
     virt_pci_module.addImport("console", console_module);
     virt_pci_module.addImport("hal", hal_module);
+    virt_pci_module.addImport("sched", sched_module);
 
     // Create Input subsystem module
     const input_module = b.createModule(.{
@@ -998,6 +999,9 @@ pub fn build(b: *std.Build) void {
 
     // Add framebuffer to process_module (deferred due to definition order)
     process_module.addImport("framebuffer", framebuffer_module);
+
+    // Add virt_pci for process exit cleanup
+    process_module.addImport("virt_pci", virt_pci_module);
 
     // Create user memory validation module (shared by all syscall modules)
     const user_mem_module = b.createModule(.{
@@ -1488,6 +1492,7 @@ pub fn build(b: *std.Build) void {
     syscall_pci_module.addImport("uapi", uapi_module);
     syscall_pci_module.addImport("console", console_module);
     syscall_pci_module.addImport("pci", pci_module);
+    syscall_pci_module.addImport("virt_pci", virt_pci_module);
 
     // Create ring buffer manager module (kernel/ring.zig)
     const ring_module = b.createModule(.{
@@ -1560,6 +1565,7 @@ pub fn build(b: *std.Build) void {
     syscall_virt_pci_module.addImport("virt_pci", virt_pci_module);
     syscall_virt_pci_module.addImport("caps", capabilities_module);
     syscall_virt_pci_module.addImport("hal", hal_module);
+    syscall_virt_pci_module.addImport("pci", pci_module);
 
     // Create syscall fs_handlers module (mount, umount, unlink)
     const syscall_fs_handlers_module = b.createModule(.{
@@ -1692,6 +1698,7 @@ pub fn build(b: *std.Build) void {
     kernel.root_module.addImport("virtio_input", virtio_input_module);
     kernel.root_module.addImport("virtio_sound", virtio_sound_module);
     kernel.root_module.addImport("virtio_9p", virtio_9p_module);
+    kernel.root_module.addImport("virt_pci", virt_pci_module);
 
     // Add architecture-specific assembly and linker script
     switch (target_arch) {

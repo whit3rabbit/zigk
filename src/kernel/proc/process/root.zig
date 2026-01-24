@@ -36,6 +36,7 @@ pub const hasMmioCapability = Process.hasMmioCapability;
 pub const hasDmaCapability = Process.hasDmaCapability;
 pub const hasPciConfigCapability = Process.hasPciConfigCapability;
 pub const hasInputInjectionCapability = Process.hasInputInjectionCapability;
+pub const hasVirtualPciCapability = Process.hasVirtualPciCapability;
 pub const hasFileCapability = Process.hasFileCapability;
 pub const hasSetUidCapability = Process.hasSetUidCapability;
 pub const hasSetGidCapability = Process.hasSetGidCapability;

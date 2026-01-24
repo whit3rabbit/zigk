@@ -539,6 +539,134 @@ var tx_lock = atomic.Value(bool).init(false);  // Simple spinlock
 
 ---
 
+## PCI Driver Probing Framework
+
+Zscapek implements a Linux-style PCI driver registration and probing mechanism. Drivers register a `PciDriver` struct containing an ID table and a probe function. On device discovery (boot or virtual device registration), the framework matches devices against registered drivers and calls probe on the first match.
+
+**Location**: `src/drivers/pci/driver.zig`
+
+### Core Types
+
+```zig
+const pci = @import("pci");
+
+// Device ID entry (Linux: struct pci_device_id)
+pub const PciDeviceId = struct {
+    vendor: u16 = 0,              // PCI_ANY_ID (0xFFFF) = match any
+    device: u16 = 0,
+    subvendor: u16 = PCI_ANY_ID,
+    subdevice: u16 = PCI_ANY_ID,
+    class: u32 = 0,               // 24-bit: (class<<16 | subclass<<8 | prog_if)
+    class_mask: u32 = 0,          // 0 = don't check class
+    driver_data: usize = 0,       // Opaque, passed to probe
+};
+
+// Driver descriptor (Linux: struct pci_driver)
+pub const PciDriver = struct {
+    name: []const u8,
+    id_table: []const PciDeviceId,  // Sentinel-terminated
+    probe: ProbeFn,
+    remove: ?RemoveFn = null,
+};
+```
+
+### Registering a Driver
+
+```zig
+const my_ids = [_]pci.PciDeviceId{
+    pci.deviceId(0x8086, 0x100E),            // Intel E1000 (vendor:device match)
+    pci.classId(0x01, 0x06, 0xFFFF00),       // Any SATA controller (class match)
+    .{},                                      // Sentinel (all-zero terminator)
+};
+
+fn myProbe(dev: *const pci.PciDevice, access: pci.PciAccess, id: *const pci.PciDeviceId) ?*anyopaque {
+    _ = id;
+    const ctrl = initFromPci(dev, access) catch return null;
+    return @ptrCast(ctrl);
+}
+
+pub const my_driver = pci.PciDriver{
+    .name = "my_driver",
+    .id_table = &my_ids,
+    .probe = &myProbe,
+    .remove = null,
+};
+
+// During boot (e.g., in init_hw.zig):
+pci.pciRegisterDriver(&my_driver) catch {};
+```
+
+### Helper Constructors
+
+| Function | Equivalent Linux Macro | Description |
+|----------|----------------------|-------------|
+| `pci.deviceId(vendor, device)` | `PCI_DEVICE(v, d)` | Match specific vendor:device pair |
+| `pci.classId(class, subclass, mask)` | `PCI_DEVICE_CLASS(c, m)` | Match by class code with mask |
+
+### Matching Rules
+
+Matching follows Linux's `pci_match_one_device()` semantics:
+- `PCI_ANY_ID` (0xFFFF) in any field means "match anything"
+- `class_mask = 0` means class is not checked
+- Class comparison: `((id.class ^ dev_class) & id.class_mask) != 0` rejects
+- First matching entry in `id_table` wins
+- First driver whose probe returns non-null wins
+
+### Boot Probe Flow
+
+```
+initNetwork()     -- PCI enumeration, hardcoded driver inits
+initUsb()         -- Hardcoded XHCI/EHCI init
+initAudio()       -- Hardcoded HDA/AC97 init
+initStorage()     -- Hardcoded AHCI/NVMe init
+initInput()       -- Hardcoded VirtIO-Input init
+                     |
+                     v
+probeRemainingDevices()  -- Catch-all: probes unbound devices
+                            against all registered PciDrivers
+```
+
+### Virtual Device Probe
+
+When a virtual PCI device is registered via `sys_vpci_register`, the framework automatically probes it against registered drivers:
+
+```
+sys_vpci_register()
+      |
+      v
+dev.state = .registered
+      |
+      v
+pci.probeVirtualDeviceFromConfig(config_space, ...)
+      |
+      v
+Matches against registered drivers, calls probe on match
+```
+
+### Thread Safety
+
+- `driver_registry_lock` (RwLock) protects the driver table and binding arrays
+- Matching is done under read lock; lock is released before calling probe
+- Probe functions may allocate/sleep freely
+- Write lock is only held briefly to update bindings after successful probe
+
+### Registry Limits
+
+- Maximum 32 registered drivers (static array, no heap allocation)
+- Per-device bindings indexed by DeviceList position (max 64 physical devices)
+- Virtual devices use binding slots 32-63 to avoid collision with physical devices
+
+### Key Files
+
+| File | Purpose |
+|------|---------|
+| `src/drivers/pci/driver.zig` | PciDeviceId, PciDriver, registry, matching, probe |
+| `src/drivers/pci/root.zig` | Re-exports driver framework types |
+| `src/kernel/core/init_hw.zig` | `probeRemainingDevices()` entry point |
+| `src/kernel/sys/syscall/hw/virt_pci.zig` | Virtual device probe trigger |
+
+---
+
 ## Kernel Drivers
 
 Kernel drivers are located in `src/drivers`. They are used for:

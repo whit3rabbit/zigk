@@ -8,6 +8,7 @@
 //! - `/mnt`: SFS (Simple File System) - read/write persistent storage (on /dev/sda)
 
 const std = @import("std");
+const builtin = @import("builtin");
 const console = @import("console");
 const fs = @import("fs");
 const devfs = @import("devfs");
@@ -56,8 +57,8 @@ pub fn initBlockFs() void {
 
     console.info("SFS: Mounted at /mnt", .{});
 
-    // Run simple filesystem test
-    testBlockFs();
+    // Run simple filesystem test (debug builds only)
+    if (builtin.mode == .Debug) testBlockFs();
 }
 
 /// Simple read/write test for the mounted block filesystem

@@ -103,42 +103,124 @@ pub fn getDevice(device_id: u32) ?*VirtualPciDevice {
     return null;
 }
 
-/// Get device by ID with ownership check
+/// Get device by ID with ownership check (no refcount -- use getDeviceRef for syscalls)
 pub fn getDeviceForPid(device_id: u32, pid: u32) ?*VirtualPciDevice {
     const dev = getDevice(device_id) orelse return null;
     if (dev.owner_pid != pid) return null;
     return dev;
 }
 
-/// Free a device
-pub fn freeDevice(device_id: u32) void {
+/// Acquire a reference-counted handle to a device.
+/// The caller MUST call putDeviceRef() when done to prevent resource leaks.
+/// Returns null if the device does not exist, is not owned by `pid`, or is closing.
+pub fn getDeviceRef(device_id: u32, pid: u32) ?*VirtualPciDevice {
     ensureInit();
 
-    const held = devices_lock.acquireWrite();
+    const held = devices_lock.acquireRead();
     defer held.release();
 
     for (&devices, 0..) |*dev, idx| {
         if (device_used[idx] and dev.id == device_id) {
-            dev.destroy();
+            if (dev.owner_pid != pid) return null;
+            if (dev.state == .closing) return null;
+            // Increment refcount while holding read lock.
+            // This prevents racing with freeDevice which requires write lock.
+            _ = @atomicRmw(u32, &dev.ref_count, .Add, 1, .acquire);
+            return dev;
+        }
+    }
+    return null;
+}
+
+/// Release a reference-counted handle to a device.
+/// If this was the last reference and the device is closing, frees resources
+/// and marks the device slot as reusable.
+pub fn putDeviceRef(dev: *VirtualPciDevice) void {
+    const prev = @atomicRmw(u32, &dev.ref_count, .Sub, 1, .release);
+    // prev is the value BEFORE subtraction. If it was 1, refcount is now 0.
+    if (prev == 1 and dev.state == .closing) {
+        dev.destroyResources();
+        // Mark slot as reusable under write lock.
+        const held = devices_lock.acquireWrite();
+        defer held.release();
+        if (getSlotIndex(dev)) |idx| {
             device_used[idx] = false;
-            console.debug("VirtPCI: Freed device {}", .{device_id});
-            return;
         }
     }
 }
 
-/// Free all devices owned by a process (on exit)
+/// Free a device. Marks it as closing under write lock.
+/// If no active references, frees resources immediately and marks slot unused.
+/// If active references exist, resource cleanup is deferred to the last putDeviceRef.
+/// Wakes blocked waiters after releasing the write lock (lock ordering requirement).
+pub fn freeDevice(device_id: u32) void {
+    ensureInit();
+
+    var dev_to_wake: ?*VirtualPciDevice = null;
+    {
+        const held = devices_lock.acquireWrite();
+        defer held.release();
+
+        for (&devices, 0..) |*dev, idx| {
+            if (device_used[idx] and dev.id == device_id) {
+                const can_free_now = dev.beginDestroy();
+                if (can_free_now) {
+                    dev.destroyResources();
+                    device_used[idx] = false;
+                } else {
+                    // Slot stays occupied until last ref is released.
+                    // getDeviceRef will reject it (state == .closing).
+                    dev_to_wake = dev;
+                }
+                console.debug("VirtPCI: Freed device {} (immediate={})", .{ device_id, can_free_now });
+                break;
+            }
+        }
+    }
+
+    // Wake blocked waiters OUTSIDE devices_lock to respect lock ordering:
+    // scheduler lock (#4) must be acquired before devices_lock (#8.5).
+    if (dev_to_wake) |dev| {
+        const event_held = dev.event_lock.acquire();
+        _ = dev.event_queue.wakeUp(std.math.maxInt(usize));
+        event_held.release();
+    }
+}
+
+/// Free all devices owned by a process (on exit).
+/// Defers resource cleanup if active references exist.
+/// Wakes blocked waiters after releasing the write lock.
 pub fn cleanupByPid(pid: u32) void {
     ensureInit();
 
-    const held = devices_lock.acquireWrite();
-    defer held.release();
+    var deferred_wakes: [MAX_DEVICES]?*VirtualPciDevice = [_]?*VirtualPciDevice{null} ** MAX_DEVICES;
+    var wake_count: usize = 0;
 
-    for (&devices, 0..) |*dev, idx| {
-        if (device_used[idx] and dev.owner_pid == pid) {
-            dev.destroy();
-            device_used[idx] = false;
-            console.debug("VirtPCI: Cleaned up device {} for PID {}", .{ dev.id, pid });
+    {
+        const held = devices_lock.acquireWrite();
+        defer held.release();
+
+        for (&devices, 0..) |*dev, idx| {
+            if (device_used[idx] and dev.owner_pid == pid) {
+                const can_free_now = dev.beginDestroy();
+                if (can_free_now) {
+                    dev.destroyResources();
+                    device_used[idx] = false;
+                } else {
+                    deferred_wakes[wake_count] = dev;
+                    wake_count += 1;
+                }
+                console.debug("VirtPCI: Cleaned up device {} for PID {} (immediate={})", .{ dev.id, pid, can_free_now });
+            }
+        }
+    }
+
+    // Wake blocked waiters OUTSIDE devices_lock (lock ordering).
+    for (deferred_wakes[0..wake_count]) |maybe_dev| {
+        if (maybe_dev) |dev| {
+            const event_held = dev.event_lock.acquire();
+            _ = dev.event_queue.wakeUp(std.math.maxInt(usize));
+            event_held.release();
         }
     }
 }
@@ -237,7 +319,20 @@ pub fn registeredDevices() RegisteredDeviceIterator {
 }
 
 /// Acquire read lock for iteration
-pub fn acquireReadLock() sync.RwLock.Held(.shared) {
+pub fn acquireReadLock() sync.RwLock.ReadHeld {
     ensureInit();
     return devices_lock.acquireRead();
+}
+
+/// Get the slot index for a device pointer (needed for probe binding).
+/// Returns the index into the global device table, or null if the pointer
+/// is not within the device array.
+pub fn getSlotIndex(dev: *const VirtualPciDevice) ?usize {
+    const base = @intFromPtr(&devices[0]);
+    const ptr = @intFromPtr(dev);
+    if (ptr < base) return null;
+    const offset = ptr - base;
+    const idx = offset / @sizeOf(VirtualPciDevice);
+    if (idx >= MAX_DEVICES) return null;
+    return idx;
 }

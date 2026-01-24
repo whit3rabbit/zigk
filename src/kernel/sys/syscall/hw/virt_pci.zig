@@ -14,6 +14,7 @@
 //   - sys_vpci_respond (1090): Respond to MMIO read
 
 const std = @import("std");
+const builtin = @import("builtin");
 const uapi = @import("uapi");
 const virt_pci_uapi = uapi.virt_pci;
 const SyscallError = uapi.errno.SyscallError;
@@ -23,6 +24,7 @@ const sched = @import("sched");
 const console = @import("console");
 const virt_pci = @import("virt_pci");
 const caps = @import("caps");
+const hal = @import("hal");
 
 // =============================================================================
 // Helper Functions
@@ -37,13 +39,67 @@ fn getCurrentProcess() SyscallError!*process_mod.Process {
 
 /// Check if process has VirtualPciCapability
 fn checkVirtualPciCapability(proc: *process_mod.Process) ?caps.VirtualPciCapability {
-    for (proc.capabilities[0..proc.cap_count]) |cap| {
+    for (proc.capabilities.items) |cap| {
         switch (cap) {
             .VirtualPci => |vpci_cap| return vpci_cap,
             else => {},
         }
     }
     return null;
+}
+
+/// Deliver an MSI/MSI-X interrupt by parsing the address/data and sending an IPI.
+///
+/// x86 MSI Address format (Intel SDM Vol 3, 10.11.1):
+///   [31:20] = 0xFEE (fixed, identifies as MSI address)
+///   [19:12] = Destination APIC ID (physical mode)
+///   [3]     = RH (Redirection Hint)
+///   [2]     = DM (Destination Mode: 0=physical, 1=logical)
+///
+/// x86 MSI Data format (Intel SDM Vol 3, 10.11.2):
+///   [7:0]   = Vector
+///   [10:8]  = Delivery Mode (000=Fixed, 001=Lowest Priority, etc.)
+///   [14]    = Level (assert/deassert)
+///   [15]    = Trigger Mode (0=edge, 1=level)
+fn deliverMsi(address: u64, data: u32) void {
+    // Validate MSI address prefix (must be 0xFEE in bits [31:20])
+    if ((address >> 20) & 0xFFF != 0xFEE) {
+        console.warn("VirtPCI: Invalid MSI address 0x{x} (bad prefix)", .{address});
+        return;
+    }
+
+    // Extract destination APIC ID and vector
+    const dest_apic_id: u32 = @truncate((address >> 12) & 0xFF);
+    const vector: u8 = @truncate(data & 0xFF);
+    const delivery_mode_raw: u3 = @truncate((data >> 8) & 0x7);
+
+    // Validate vector (must be >= 32 for non-exception interrupts)
+    if (vector < 32) {
+        console.warn("VirtPCI: MSI vector {} < 32 (reserved for exceptions)", .{vector});
+        return;
+    }
+
+    if (comptime builtin.cpu.arch == .x86_64) {
+        // SECURITY: Only allow safe delivery modes from virtual device MSI injection.
+        // SMI (mode 2), NMI (mode 4), INIT (mode 5), and STARTUP (mode 6) are
+        // privileged CPU operations that must never be triggered by virtual devices.
+        // Only Fixed (0) and Lowest Priority (1) are safe for interrupt delivery.
+        const lapic = hal.apic.lapic;
+        const delivery_mode: lapic.DeliveryMode = switch (delivery_mode_raw) {
+            0 => .fixed,
+            1 => .lowest_priority,
+            else => {
+                console.warn("VirtPCI: Rejected unsafe MSI delivery mode {} (only fixed/lowest_priority allowed)", .{delivery_mode_raw});
+                return;
+            },
+        };
+
+        lapic.sendIpi(dest_apic_id, vector, delivery_mode, .none);
+        console.debug("VirtPCI: MSI delivered vec={} dest={} mode={}", .{ vector, dest_apic_id, delivery_mode_raw });
+    } else {
+        // AArch64: MSI injection not yet supported
+        console.warn("VirtPCI: MSI injection not supported on this architecture", .{});
+    }
 }
 
 // =============================================================================
@@ -90,10 +146,11 @@ pub fn sys_vpci_add_bar(device_id: usize, bar_config_ptr: usize) SyscallError!us
     // Validate device_id
     if (device_id > std.math.maxInt(u32)) return error.EINVAL;
 
-    // Get device
-    const dev = virt_pci.getDeviceForPid(@truncate(device_id), proc.pid) orelse {
+    // Get device (ref-counted to prevent UAF if concurrent destroy occurs)
+    const dev = virt_pci.getDeviceRef(@truncate(device_id), proc.pid) orelse {
         return error.ENOENT;
     };
+    defer virt_pci.putDeviceRef(dev);
 
     // Check capability for BAR size limits
     const vpci_cap = checkVirtualPciCapability(proc) orelse return error.EPERM;
@@ -144,9 +201,10 @@ pub fn sys_vpci_add_cap(device_id: usize, cap_config_ptr: usize) SyscallError!us
 
     if (device_id > std.math.maxInt(u32)) return error.EINVAL;
 
-    const dev = virt_pci.getDeviceForPid(@truncate(device_id), proc.pid) orelse {
+    const dev = virt_pci.getDeviceRef(@truncate(device_id), proc.pid) orelse {
         return error.ENOENT;
     };
+    defer virt_pci.putDeviceRef(dev);
 
     // Copy config from user
     var config: virt_pci_uapi.VPciCapConfig = undefined;
@@ -177,9 +235,10 @@ pub fn sys_vpci_set_config(device_id: usize, config_header_ptr: usize) SyscallEr
 
     if (device_id > std.math.maxInt(u32)) return error.EINVAL;
 
-    const dev = virt_pci.getDeviceForPid(@truncate(device_id), proc.pid) orelse {
+    const dev = virt_pci.getDeviceRef(@truncate(device_id), proc.pid) orelse {
         return error.ENOENT;
     };
+    defer virt_pci.putDeviceRef(dev);
 
     // Check capability for class restrictions
     const vpci_cap = checkVirtualPciCapability(proc) orelse return error.EPERM;
@@ -215,9 +274,10 @@ pub fn sys_vpci_register(device_id: usize) SyscallError!usize {
 
     if (device_id > std.math.maxInt(u32)) return error.EINVAL;
 
-    const dev = virt_pci.getDeviceForPid(@truncate(device_id), proc.pid) orelse {
+    const dev = virt_pci.getDeviceRef(@truncate(device_id), proc.pid) orelse {
         return error.ENOENT;
     };
+    defer virt_pci.putDeviceRef(dev);
 
     // Check state
     if (dev.state != .configuring) {
@@ -237,10 +297,21 @@ pub fn sys_vpci_register(device_id: usize) SyscallError!usize {
     dev.state = .registered;
     held.release();
 
-    // TODO: Add to PCI enumeration as virtual device
-    // This would make the device visible to pci.getDevices()
-
     console.info("VirtPCI: Device {} registered for PID {}", .{ dev.id, proc.pid });
+
+    // Trigger driver probe for this newly registered virtual device
+    const pci = @import("pci");
+    const slot_idx = virt_pci.getSlotIndex(dev) orelse 0;
+    const ecam = pci.getEcam();
+    if (ecam) |e| {
+        _ = pci.probeVirtualDeviceFromConfig(
+            &dev.config_space,
+            @as(u16, dev.config_space[0x2C]) | (@as(u16, dev.config_space[0x2D]) << 8),
+            @as(u16, dev.config_space[0x2E]) | (@as(u16, dev.config_space[0x2F]) << 8),
+            slot_idx,
+            pci.PciAccess{ .ecam = e },
+        );
+    }
 
     // Return a ring_id (use device_id for now, could be separate)
     return dev.id;
@@ -257,9 +328,10 @@ pub fn sys_vpci_inject_irq(device_id: usize, irq_config_ptr: usize) SyscallError
 
     if (device_id > std.math.maxInt(u32)) return error.EINVAL;
 
-    const dev = virt_pci.getDeviceForPid(@truncate(device_id), proc.pid) orelse {
+    const dev = virt_pci.getDeviceRef(@truncate(device_id), proc.pid) orelse {
         return error.ENOENT;
     };
+    defer virt_pci.putDeviceRef(dev);
 
     // Check capability allows IRQ injection
     const vpci_cap = checkVirtualPciCapability(proc) orelse return error.EPERM;
@@ -283,19 +355,14 @@ pub fn sys_vpci_inject_irq(device_id: usize, irq_config_ptr: usize) SyscallError
     switch (irq_config.irq_type) {
         .msi => {
             if (!dev.msi_enabled) return error.EINVAL;
-            // TODO: Implement MSI injection
-            // This requires writing to the APIC's ICR (Interrupt Command Register)
-            // to send an edge-triggered interrupt to the configured address/data
-            //
-            // For now, log and return success (interrupt won't actually fire)
-            console.debug("VirtPCI: MSI inject addr=0x{x} data=0x{x} (not implemented)", .{ dev.msi_address, dev.msi_data });
+            deliverMsi(dev.msi_address, dev.msi_data);
             return 0;
         },
         .msix => {
             if (!dev.msix_enabled) return error.EINVAL;
             if (irq_config.vector >= dev.msix_table_size) return error.EINVAL;
 
-            // Read MSI-X table entry
+            // Read MSI-X table entry from BAR backing memory
             if (dev.msix_table_base == 0) return error.EINVAL;
 
             const entry_addr = dev.msix_table_base + @as(u64, irq_config.vector) * 16;
@@ -304,12 +371,11 @@ pub fn sys_vpci_inject_irq(device_id: usize, irq_config_ptr: usize) SyscallError
             const data: *volatile u32 = @ptrFromInt(entry_addr + 8);
             const ctrl: *volatile u32 = @ptrFromInt(entry_addr + 12);
 
-            // Check if masked
+            // Check if vector is masked
             if ((ctrl.* & 1) != 0) return error.EINVAL;
 
             const address = (@as(u64, addr_hi.*) << 32) | addr_lo.*;
-            // TODO: Implement MSI-X injection (same as MSI, different address/data source)
-            console.debug("VirtPCI: MSI-X inject vec={} addr=0x{x} data=0x{x} (not implemented)", .{ irq_config.vector, address, data.* });
+            deliverMsi(address, data.*);
             return 0;
         },
         .intx => {
@@ -343,10 +409,11 @@ pub fn sys_vpci_dma(dma_op_ptr: usize) SyscallError!usize {
         return error.EFAULT;
     };
 
-    // Get device
-    const dev = virt_pci.getDeviceForPid(dma_op.device_id, proc.pid) orelse {
+    // Get device (ref-counted to prevent UAF during DMA copy)
+    const dev = virt_pci.getDeviceRef(dma_op.device_id, proc.pid) orelse {
         return error.ENOENT;
     };
+    defer virt_pci.putDeviceRef(dev);
 
     if (dev.state != .registered and dev.state != .active) {
         return error.EINVAL;
@@ -357,16 +424,37 @@ pub fn sys_vpci_dma(dma_op_ptr: usize) SyscallError!usize {
         return error.EINVAL;
     }
 
-    // TODO: Implement IOVA translation and actual DMA
-    // For now, we would need to:
-    // 1. Translate IOVA to physical address (if IOMMU domain exists)
-    // 2. Map physical pages
-    // 3. Copy data between userspace buffer and physical memory
+    // Validate user buffer access
+    const host_addr: usize = @intCast(dma_op.host_buffer);
+    const len: usize = @intCast(dma_op.length);
+    const access_mode: user_mem.AccessMode = switch (dma_op.direction) {
+        .to_device => .Read, // User buffer is read source
+        .from_device => .Write, // User buffer is write destination
+    };
+    if (!user_mem.isValidUserAccess(host_addr, len, access_mode)) {
+        return error.EFAULT;
+    }
 
-    // Placeholder - actual implementation requires IOMMU integration
-    console.debug("VirtPCI: DMA op dev={} dir={} iova=0x{x} len={}", .{ dma_op.device_id, @intFromEnum(dma_op.direction), dma_op.iova, dma_op.length });
+    // Find which BAR the IOVA maps to (no-IOMMU path: IOVA = physical address)
+    const bar_ptr = dev.findBarForIova(dma_op.iova, dma_op.length) orelse {
+        console.debug("VirtPCI: DMA IOVA 0x{x} not in any BAR", .{dma_op.iova});
+        return error.EINVAL;
+    };
 
-    return error.ENOTSUP;
+    const user_ptr = user_mem.UserPtr.from(host_addr);
+
+    switch (dma_op.direction) {
+        .to_device => {
+            // User -> BAR memory (device receives data)
+            _ = user_ptr.copyToKernel(bar_ptr[0..len]) catch return error.EFAULT;
+        },
+        .from_device => {
+            // BAR memory -> User (device sends data)
+            _ = user_ptr.copyFromKernel(bar_ptr[0..len]) catch return error.EFAULT;
+        },
+    }
+
+    return len;
 }
 
 // =============================================================================
@@ -381,9 +469,10 @@ pub fn sys_vpci_get_bar_info(device_id: usize, bar_index: usize, bar_info_ptr: u
     if (device_id > std.math.maxInt(u32)) return error.EINVAL;
     if (bar_index >= 6) return error.EINVAL;
 
-    const dev = virt_pci.getDeviceForPid(@truncate(device_id), proc.pid) orelse {
+    const dev = virt_pci.getDeviceRef(@truncate(device_id), proc.pid) orelse {
         return error.ENOENT;
     };
+    defer virt_pci.putDeviceRef(dev);
 
     const bar = &dev.bars[bar_index];
     if (!bar.configured) {
@@ -391,9 +480,11 @@ pub fn sys_vpci_get_bar_info(device_id: usize, bar_index: usize, bar_info_ptr: u
     }
 
     // Build bar info
+    // SECURITY: Never expose kernel virtual addresses to userspace.
+    // Userspace uses phys_addr for DMA IOVA targeting; virt_addr is kernel-only.
     const info = virt_pci_uapi.VPciBarInfo{
         .phys_addr = bar.backing_phys,
-        .virt_addr = bar.backing_virt,
+        .virt_addr = 0,
         .size = bar.size,
         .flags = bar.flags,
     };
@@ -418,13 +509,13 @@ pub fn sys_vpci_destroy(device_id: usize) SyscallError!usize {
 
     if (device_id > std.math.maxInt(u32)) return error.EINVAL;
 
-    // Verify ownership
-    const dev = virt_pci.getDeviceForPid(@truncate(device_id), proc.pid) orelse {
+    // Verify ownership (ref-counted: freeDevice marks closing, putDeviceRef triggers cleanup)
+    const dev = virt_pci.getDeviceRef(@truncate(device_id), proc.pid) orelse {
         return error.ENOENT;
     };
+    defer virt_pci.putDeviceRef(dev);
 
-    // Mark as closing and free
-    _ = dev; // Used for ownership check
+    // Mark as closing and initiate destruction
     virt_pci.freeDevice(@truncate(device_id));
 
     return 0;
@@ -442,9 +533,10 @@ pub fn sys_vpci_wait_event(device_id: usize, timeout_ns: usize) SyscallError!usi
 
     if (device_id > std.math.maxInt(u32)) return error.EINVAL;
 
-    const dev = virt_pci.getDeviceForPid(@truncate(device_id), proc.pid) orelse {
+    const dev = virt_pci.getDeviceRef(@truncate(device_id), proc.pid) orelse {
         return error.ENOENT;
     };
+    defer virt_pci.putDeviceRef(dev);
 
     if (dev.state != .registered and dev.state != .active) {
         return error.EINVAL;
@@ -457,35 +549,41 @@ pub fn sys_vpci_wait_event(device_id: usize, timeout_ns: usize) SyscallError!usi
     // Get ring header
     const header: *volatile virt_pci_uapi.VPciRingHeader = @ptrFromInt(dev.ring_virt);
 
-    // Check if events available
-    var available = header.availableEvents();
+    // Fast path: events already available
+    const available = header.availableEvents();
     if (available > 0) {
         return available;
     }
 
-    // Block waiting for events
-    // TODO: Implement proper futex-based waiting
-    const timeout: ?u64 = if (timeout_ns == 0) null else @intCast(timeout_ns);
+    // Slow path: block on the device's event wait queue
+    const timeout_ticks: u64 = if (timeout_ns == 0)
+        0 // Infinite wait
+    else
+        @max(1, (timeout_ns + 999_999) / 1_000_000);
 
-    if (timeout) |ns| {
-        const timeout_ticks = (ns + 999_999) / 1_000_000;
-        if (timeout_ticks > 0) {
-            sched.sleepForTicks(timeout_ticks);
-        }
-    } else {
-        sched.yield();
+    // Acquire event_lock, check again under lock, then sleep
+    const lock_held = dev.event_lock.acquire();
+
+    // Re-check under lock to prevent lost wakeup
+    const avail_locked = header.availableEvents();
+    if (avail_locked > 0) {
+        lock_held.release();
+        return avail_locked;
     }
 
-    // Re-check
-    available = header.availableEvents();
-    if (available > 0) {
-        return available;
+    // Block: waitOnWithTimeout releases lock_held atomically with sleep
+    sched.waitOnWithTimeout(&dev.event_queue, lock_held, timeout_ticks, null);
+
+    // Woken up - check events
+    const final_available = header.availableEvents();
+    if (final_available > 0) {
+        return final_available;
     }
 
-    if (timeout != null) {
+    // No events after wake - must have been a timeout
+    if (timeout_ns != 0) {
         return error.ETIMEDOUT;
     }
-
     return error.EAGAIN;
 }
 
@@ -500,9 +598,10 @@ pub fn sys_vpci_respond(device_id: usize, response_ptr: usize) SyscallError!usiz
 
     if (device_id > std.math.maxInt(u32)) return error.EINVAL;
 
-    const dev = virt_pci.getDeviceForPid(@truncate(device_id), proc.pid) orelse {
+    const dev = virt_pci.getDeviceRef(@truncate(device_id), proc.pid) orelse {
         return error.ENOENT;
     };
+    defer virt_pci.putDeviceRef(dev);
 
     if (dev.state != .registered and dev.state != .active) {
         return error.EINVAL;
@@ -515,15 +614,19 @@ pub fn sys_vpci_respond(device_id: usize, response_ptr: usize) SyscallError!usiz
         return error.EFAULT;
     };
 
-    // TODO: Match response.seq to pending request and complete it
-    // This requires tracking pending MMIO reads and waking blocked threads
+    // Match response to pending MMIO read and wake blocked thread
+    if (!dev.submitResponse(response.seq, response.data)) {
+        // No pending read with this seq - might be a stale/duplicate response
+        console.debug("VirtPCI: No pending read for seq={}", .{response.seq});
+    }
 
-    console.debug("VirtPCI: Response seq={} data=0x{x}", .{ response.seq, response.data });
-
-    // Decrement pending response count
+    // Decrement pending response count in ring header
     if (dev.ring_virt != 0) {
         const header: *volatile virt_pci_uapi.VPciRingHeader = @ptrFromInt(dev.ring_virt);
-        _ = @atomicRmw(u32, &header.pending_responses, .Sub, 1, .release);
+        const prev = @atomicLoad(u32, &header.pending_responses, .acquire);
+        if (prev > 0) {
+            _ = @atomicRmw(u32, &header.pending_responses, .Sub, 1, .release);
+        }
     }
 
     return 0;

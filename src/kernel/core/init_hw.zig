@@ -37,6 +37,7 @@ const virtio = @import("virtio");
 const virtio_input = @import("virtio_input");
 const virtio_sound = @import("virtio_sound");
 const virtio_9p = @import("virtio_9p");
+const virt_pci = @import("virt_pci");
 const fs = @import("fs");
 const prng = @import("prng");
 
@@ -373,9 +374,6 @@ pub fn initNetwork() void {
         console.warn("RSDP not found, network disabled.", .{});
         return;
     }
-    console.info("Debug: RSDP at 0x{x}", .{rsdp_address});
-    console.info("Debug: Calling pci.initFromAcpi with 0x{x}", .{rsdp_address});
-
     // 2. Initialize PCI
     const pci_res = pci.initFromAcpi(heap.allocator(), rsdp_address) catch |err| {
         console.err("PCI init failed: {}", .{err});
@@ -429,7 +427,7 @@ pub fn initNetwork() void {
         // OR we skip driver initialization if the userspace driver is taking over.
 
         // For now, let's just log and skip.
-        console.warn("[NETSTACK] Kernel network stack disabled for userspace migration.", .{});
+        console.debug("[NETSTACK] NIC available, no in-kernel stack (userspace driver expected)", .{});
         _ = nic_driver; // Unused
     } else {
         console.warn("Network stack skipped (no NIC driver)", .{});
@@ -860,7 +858,6 @@ pub fn initVirtio9P() void {
 /// Returns the driver instance if successful, enabling the console to switch modes.
 pub fn initVirtioGpu() ?*video_driver.VirtioGpuDriver {
     console.print("\n");
-    console.info("Checking for VirtIO-GPU...", .{});
 
     const devices = pci_devices orelse {
         console.info("VirtIO-GPU: PCI not initialized, skipping", .{});
@@ -887,7 +884,7 @@ pub fn initVirtioGpu() ?*video_driver.VirtioGpuDriver {
         }
     }
 
-    console.info("VirtIO-GPU: No device found, using framebuffer", .{});
+    console.debug("VirtIO-GPU: No device found, using framebuffer", .{});
     return null;
 }
 
@@ -1018,7 +1015,6 @@ fn initVirtioInput() void {
 /// Provides hardware entropy from hypervisor to kernel PRNG
 pub fn initVirtioRng() void {
     console.print("\n");
-    console.info("Checking for VirtIO-RNG...", .{});
 
     // Only probe on KVM-compatible hypervisors (QEMU, KVM, Proxmox)
     // VirtIO devices won't be present on VMware/VirtualBox
@@ -1053,8 +1049,24 @@ pub fn initVirtioRng() void {
             console.info("VirtIO-RNG: Seeded kernel PRNG with {d} bytes", .{bytes_read});
         }
     } else {
-        console.info("VirtIO-RNG: No device found", .{});
+        console.debug("VirtIO-RNG: No device found", .{});
     }
+}
+
+/// Initialize Virtual PCI subsystem
+/// Sets up the global device table for userspace-controlled virtual PCI devices.
+/// Virtual devices are created at runtime via sys_vpci_create syscalls.
+pub fn initVirtPci() void {
+    virt_pci.init();
+}
+
+/// Probe unbound PCI devices against registered drivers.
+/// Called after all subsystem inits are complete, as a catch-all for devices
+/// that weren't claimed by the hardcoded init paths above.
+pub fn probeRemainingDevices() void {
+    const devices = pci_devices orelse return;
+    const ecam = pci_ecam orelse return;
+    pci.driver.probeAllDevices(devices, pci.PciAccess{ .ecam = ecam });
 }
 
 /// Initialize VirtIO-Sound device

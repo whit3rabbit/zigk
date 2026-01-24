@@ -486,6 +486,17 @@ pub const Process = struct {
         return null;
     }
 
+    /// Check if process has VirtualPci capability (for virtual PCI device management)
+    pub fn hasVirtualPciCapability(self: *Process) bool {
+        for (self.capabilities.items) |cap| {
+            switch (cap) {
+                .VirtualPci => return true,
+                else => {},
+            }
+        }
+        return false;
+    }
+
     /// Check if process has file capability
     pub fn hasFileCapability(self: *Process, path: []const u8, op: u8) bool {
         for (self.capabilities.items) |cap| {

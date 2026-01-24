@@ -19,6 +19,7 @@ pub const device = @import("device.zig");
 pub const enumeration = @import("enumeration.zig");
 pub const capabilities = @import("capabilities.zig");
 pub const msi = @import("msi.zig");
+pub const driver = @import("driver.zig");
 
 // Re-export commonly used types
 pub const Ecam = ecam.Ecam;
@@ -50,6 +51,19 @@ pub const configureMsixEntry = msi.configureMsixEntry;
 pub const enableMsixVectors = msi.enableMsixVectors;
 pub const disableMsix = msi.disableMsix;
 pub const MsixAllocation = msi.MsixAllocation;
+
+// Re-export driver framework types
+pub const PciDeviceId = driver.PciDeviceId;
+pub const PciDriver = driver.PciDriver;
+pub const PciBinding = driver.PciBinding;
+pub const PCI_ANY_ID = driver.PCI_ANY_ID;
+pub const pciRegisterDriver = driver.pciRegisterDriver;
+pub const pciUnregisterDriver = driver.pciUnregisterDriver;
+pub const probeDevice = driver.probeDevice;
+pub const probeAllDevices = driver.probeAllDevices;
+pub const probeVirtualDeviceFromConfig = driver.probeVirtualDeviceFromConfig;
+pub const deviceId = driver.deviceId;
+pub const classId = driver.classId;
 
 // Re-export functions
 pub const enumerate = enumeration.enumerate;

@@ -193,23 +193,23 @@ fn earlySerialPrint(msg: []const u8) void {
 /// This is the C-calling-convention entry point that receives control
 /// from the bootloader stub.
 export fn _start(boot_info: *BootInfo.BootInfo) callconv(.c) noreturn {
-    // CRITICAL: First thing - prove we got here
-    earlySerialPrint("KERNEL: Entry point reached!\r\n");
+    // CRITICAL: First thing - prove we got here (debug builds only)
+    if (builtin.mode == .Debug) earlySerialPrint("KERNEL: Entry point reached!\r\n");
 
     // SECURITY: Validate boot info before using any fields
     // This must be first - a malicious bootloader could provide invalid data
-    earlySerialPrint("KERNEL: Validating BootInfo...\r\n");
+    if (builtin.mode == .Debug) earlySerialPrint("KERNEL: Validating BootInfo...\r\n");
     validateBootInfo(boot_info);
-    earlySerialPrint("KERNEL: BootInfo valid\r\n");
+    if (builtin.mode == .Debug) earlySerialPrint("KERNEL: BootInfo valid\r\n");
 
     // Store the boot info globally
     boot_info_ptr = boot_info;
 
     // Initialize HAL (serial port, GDT, PIC, IDT, interrupts)
     // This must be first - serial is needed for any debug output
-    earlySerialPrint("KERNEL: Calling hal.init()...\r\n");
+    if (builtin.mode == .Debug) earlySerialPrint("KERNEL: Calling hal.init()...\r\n");
     hal.init(boot_info.hhdm_offset);
-    earlySerialPrint("KERNEL: HAL initialized\r\n");
+    if (builtin.mode == .Debug) earlySerialPrint("KERNEL: HAL initialized\r\n");
 
     // Initialize Serial Driver (UART)
     uart = serial_driver.Serial.init(serial_driver.COM1);
@@ -334,9 +334,7 @@ export fn _start(boot_info: *BootInfo.BootInfo) callconv(.c) noreturn {
     tlb.init();
 
     // Initialize SMP
-    console.info("About to call hal.smp.init()", .{});
     hal.smp.init();
-    console.info("Returned from hal.smp.init()", .{});
 
     input.init();
     console.info("Input subsystem initialized", .{});
@@ -419,6 +417,9 @@ export fn _start(boot_info: *BootInfo.BootInfo) callconv(.c) noreturn {
     init_hw.initVirtioRng();
     if (boot_logo_active) boot_logo_instance.tick();
 
+    // Initialize Virtual PCI device emulation subsystem
+    init_hw.initVirtPci();
+
     init_hw.initUsb();
     if (boot_logo_active) boot_logo_instance.tick();
 
@@ -465,8 +466,10 @@ export fn _start(boot_info: *BootInfo.BootInfo) callconv(.c) noreturn {
     // Initialize Input subsystem (VMMouse probe, etc.)
     init_hw.initInput();
 
+    // Probe unbound PCI devices against registered drivers (catch-all)
+    init_hw.probeRemainingDevices();
+
     // Load Init Process from InitRD
-    console.info("Main: Calling loadInitProcess()...", .{});
     init_proc.loadInitProcess();
 
     // Initialize Futex subsystem
