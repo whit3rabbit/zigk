@@ -614,6 +614,19 @@ pub fn build(b: *std.Build) void {
     ahci_module.addImport("dma", dma_module);
     ahci_module.addImport("iommu", kernel_iommu_module);
 
+    // Create IDE driver module (Legacy IDE/PATA storage controller)
+    const ide_module = b.createModule(.{
+        .root_source_file = b.path("src/drivers/storage/ide/root.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    ide_module.addImport("pci", pci_module);
+    ide_module.addImport("console", console_module);
+    ide_module.addImport("hal", hal_module);
+    ide_module.addImport("fd", fd_module);
+    ide_module.addImport("uapi", uapi_module);
+    ide_module.addImport("heap", heap_module);
+
     // Create NVMe driver module (NVM Express storage controller)
     const nvme_module = b.createModule(.{
         .root_source_file = b.path("src/drivers/storage/nvme/root.zig"),
@@ -702,6 +715,7 @@ pub fn build(b: *std.Build) void {
     fs_module.addImport("uapi", uapi_module);
     fs_module.addImport("console", console_module);
     fs_module.addImport("ahci", ahci_module);
+    fs_module.addImport("ide", ide_module);
     fs_module.addImport("nvme", nvme_module);
     fs_module.addImport("virtio_scsi", virtio_scsi_module);
 
@@ -923,6 +937,7 @@ pub fn build(b: *std.Build) void {
     devfs_module.addImport("sched", sched_module);
     devfs_module.addImport("uapi", uapi_module);
     devfs_module.addImport("ahci", ahci_module);
+    devfs_module.addImport("ide", ide_module);
     devfs_module.addImport("nvme", nvme_module);
     devfs_module.addImport("virtio_scsi", virtio_scsi_module);
     devfs_module.addImport("heap", heap_module);
@@ -935,6 +950,9 @@ pub fn build(b: *std.Build) void {
     // Add devfs to audio module (AC97 /dev/dsp registration)
     audio_module.addImport("devfs", devfs_module);
 
+    // Add devfs to IDE module (for /dev/hda registration)
+    ide_module.addImport("devfs", devfs_module);
+
     // Create Partitions module
     const partitions_module = b.createModule(.{
         .root_source_file = b.path("src/fs/partitions/root.zig"),
@@ -942,6 +960,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     partitions_module.addImport("ahci", ahci_module);
+    partitions_module.addImport("ide", ide_module);
     partitions_module.addImport("nvme", nvme_module);
     partitions_module.addImport("virtio_scsi", virtio_scsi_module);
     partitions_module.addImport("devfs", devfs_module);
@@ -1672,6 +1691,7 @@ pub fn build(b: *std.Build) void {
     kernel.root_module.addImport("tlb", tlb_module);
     kernel.root_module.addImport("e1000e", e1000e_module);
     kernel.root_module.addImport("ahci", ahci_module);
+    kernel.root_module.addImport("ide", ide_module);
     kernel.root_module.addImport("nvme", nvme_module);
     kernel.root_module.addImport("virtio_scsi", virtio_scsi_module);
     kernel.root_module.addImport("usb", usb_module);

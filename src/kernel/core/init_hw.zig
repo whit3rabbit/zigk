@@ -25,6 +25,7 @@ const usb = @import("usb");
 const audio = @import("audio");
 const ahci = @import("ahci");
 const nvme = @import("nvme");
+const ide = @import("ide");
 const virtio_scsi = @import("virtio_scsi");
 const video_driver = @import("video_driver");
 const hal = @import("hal");
@@ -769,6 +770,42 @@ pub fn initStorage() void {
 
     if (!found_virtio_scsi) {
         console.info("Storage: No VirtIO-SCSI controllers found", .{});
+    }
+
+    // Search for IDE controller (Class 0x01 Mass Storage, Subclass 0x01 IDE)
+    // IDE is lower priority than AHCI/NVMe/VirtIO-SCSI, but useful for legacy/PIIX support
+    var found_ide = false;
+    for (devices.devices[0..devices.count]) |*dev| {
+        if (ide.isIdeController(dev)) {
+            console.info("Storage: Found IDE controller at {x:0>2}:{x:0>2}.{d}", .{
+                dev.bus, dev.device, dev.func,
+            });
+
+            if (ide.initFromPci(dev, pci.PciAccess{ .ecam = ecam })) |controller| {
+                // Report detected drives
+                console.info("  Drives detected: {d}", .{controller.drive_count});
+
+                // Register IRQ handler for interrupt-driven I/O
+                ide.registerIrqHandler(controller);
+
+                found_ide = true;
+                break; // Only initialize first controller
+            } else |err| {
+                console.warn("Storage: IDE init failed: {}", .{err});
+            }
+        }
+    }
+
+    // If no PCI IDE controller found, try legacy ISA ports
+    if (!found_ide) {
+        if (ide.probeLegacy()) |controller| {
+            console.info("Storage: Found legacy IDE controller", .{});
+            console.info("  Drives detected: {d}", .{controller.drive_count});
+            ide.registerIrqHandler(controller);
+            found_ide = true;
+        } else |_| {
+            console.info("Storage: No IDE controllers found", .{});
+        }
     }
 
     // Initialize VirtIO-9P shared folders
