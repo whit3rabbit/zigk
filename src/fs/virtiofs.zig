@@ -204,6 +204,11 @@ fn mapDriverError(err: virtio_fs.FsError) vfs.Error {
         error.NoSpace => error.IOError,
         error.NotEmpty => error.NotEmpty,
         error.Exists => error.AlreadyExists,
+        error.SetAttrFailed => error.IOError,
+        error.SymlinkFailed => error.IOError,
+        error.ReadlinkFailed => error.IOError,
+        error.LinkFailed => error.IOError,
+        error.TargetTooLong => error.NameTooLong,
     };
 }
 
@@ -452,6 +457,117 @@ fn vfsRmdir(ctx: ?*anyopaque, path: []const u8) vfs.Error!void {
     };
 }
 
+/// Change file mode (permissions)
+fn vfsChmod(ctx: ?*anyopaque, path: []const u8, mode: u32) vfs.Error!void {
+    const mount: *VirtioFsMount = @ptrCast(@alignCast(ctx orelse return error.IOError));
+
+    if (!mount.mounted) {
+        return error.IOError;
+    }
+
+    // Resolve path to nodeid
+    const nodeid = try resolvePath(mount, path);
+
+    // Call driver chmod operation
+    _ = mount.device.chmod(nodeid, mode) catch |err| {
+        return mapDriverError(err);
+    };
+}
+
+/// Change file owner and group
+fn vfsChown(ctx: ?*anyopaque, path: []const u8, uid: ?u32, gid: ?u32) vfs.Error!void {
+    const mount: *VirtioFsMount = @ptrCast(@alignCast(ctx orelse return error.IOError));
+
+    if (!mount.mounted) {
+        return error.IOError;
+    }
+
+    // Resolve path to nodeid
+    const nodeid = try resolvePath(mount, path);
+
+    // Use 0xFFFFFFFF to indicate "no change" per POSIX convention
+    const uid_val: u32 = uid orelse 0xFFFFFFFF;
+    const gid_val: u32 = gid orelse 0xFFFFFFFF;
+
+    // Call driver chown operation
+    _ = mount.device.chown(nodeid, uid_val, gid_val) catch |err| {
+        return mapDriverError(err);
+    };
+}
+
+/// Truncate (resize) a file
+fn vfsTruncate(ctx: ?*anyopaque, path: []const u8, length: u64) vfs.Error!void {
+    const mount: *VirtioFsMount = @ptrCast(@alignCast(ctx orelse return error.IOError));
+
+    if (!mount.mounted) {
+        return error.IOError;
+    }
+
+    // Resolve path to nodeid
+    const nodeid = try resolvePath(mount, path);
+
+    // Call driver truncate operation (no file handle for path-based truncate)
+    _ = mount.device.truncate(nodeid, length, null) catch |err| {
+        return mapDriverError(err);
+    };
+}
+
+/// Create a symbolic link
+fn vfsSymlink(ctx: ?*anyopaque, target: []const u8, linkpath: []const u8) vfs.Error!void {
+    const mount: *VirtioFsMount = @ptrCast(@alignCast(ctx orelse return error.IOError));
+
+    if (!mount.mounted) {
+        return error.IOError;
+    }
+
+    // Resolve linkpath to parent directory and name
+    const parent_info = try resolveParentAndName(mount, linkpath);
+
+    // Call driver symlink operation
+    _ = mount.device.symlink(parent_info.parent, parent_info.name, target) catch |err| {
+        return mapDriverError(err);
+    };
+}
+
+/// Read the target of a symbolic link
+fn vfsReadlink(ctx: ?*anyopaque, path: []const u8, buf: []u8) vfs.Error!usize {
+    const mount: *VirtioFsMount = @ptrCast(@alignCast(ctx orelse return error.IOError));
+
+    if (!mount.mounted) {
+        return error.IOError;
+    }
+
+    // Resolve path to nodeid
+    const nodeid = try resolvePath(mount, path);
+
+    // Call driver readlink operation
+    const target = mount.device.readlink(nodeid, buf) catch |err| {
+        return mapDriverError(err);
+    };
+
+    return target.len;
+}
+
+/// Create a hard link
+fn vfsLink(ctx: ?*anyopaque, old_path: []const u8, new_path: []const u8) vfs.Error!void {
+    const mount: *VirtioFsMount = @ptrCast(@alignCast(ctx orelse return error.IOError));
+
+    if (!mount.mounted) {
+        return error.IOError;
+    }
+
+    // Resolve old_path to nodeid
+    const old_nodeid = try resolvePath(mount, old_path);
+
+    // Resolve new_path to parent directory and name
+    const new_info = try resolveParentAndName(mount, new_path);
+
+    // Call driver link operation
+    _ = mount.device.link(old_nodeid, new_info.parent, new_info.name) catch |err| {
+        return mapDriverError(err);
+    };
+}
+
 // ============================================================================
 // FileOps Implementation
 // ============================================================================
@@ -654,15 +770,15 @@ pub fn createFilesystem(device: *virtio_fs.VirtioFsDevice) !vfs.FileSystem {
         .unmount = vfsUnmount,
         .unlink = vfsUnlink,
         .stat_path = vfsStatPath,
-        .chmod = null,
-        .chown = null,
+        .chmod = vfsChmod,
+        .chown = vfsChown,
         .statfs = vfsStatfs,
         .rename = vfsRename,
-        .truncate = null,
+        .truncate = vfsTruncate,
         .mkdir = vfsMkdir,
         .rmdir = vfsRmdir,
-        .link = null,
-        .symlink = null,
-        .readlink = null,
+        .link = vfsLink,
+        .symlink = vfsSymlink,
+        .readlink = vfsReadlink,
     };
 }

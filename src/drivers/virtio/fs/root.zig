@@ -71,6 +71,11 @@ pub const FsError = error{
     NoSpace,
     NotEmpty,
     Exists,
+    SetAttrFailed,
+    SymlinkFailed,
+    ReadlinkFailed,
+    LinkFailed,
+    TargetTooLong,
 };
 
 // ============================================================================
@@ -1238,6 +1243,328 @@ pub const VirtioFsDevice = struct {
         protocol.buildForget(&req_buf, 0, nodeid, nlookup) catch return;
 
         _ = self.queues.?.hiprio.submitForget(req_buf.getMessage());
+    }
+
+    /// Set file attributes (generic setter)
+    /// valid_mask indicates which attributes to set (FuseSetAttrFlags)
+    pub fn setAttr(
+        self: *Self,
+        nodeid: u64,
+        valid_mask: u32,
+        mode: u32,
+        uid: u32,
+        gid: u32,
+        size: u64,
+        atime: u64,
+        atime_nsec: u32,
+        mtime: u64,
+        mtime_nsec: u32,
+        fh: ?u64,
+    ) FsError!protocol.FuseAttrOut {
+        const held = self.op_lock.acquire();
+        defer held.release();
+
+        // Zero-init request buffer before use (security: DMA hygiene)
+        @memset(self.getRequestBuf(), 0);
+
+        var req_buf = protocol.FuseBuffer.init(self.getRequestBuf());
+        const unique = self.queues.?.request.allocUnique();
+
+        protocol.buildSetAttr(
+            &req_buf,
+            unique,
+            nodeid,
+            valid_mask,
+            mode,
+            uid,
+            gid,
+            size,
+            atime,
+            atime_nsec,
+            mtime,
+            mtime_nsec,
+            fh,
+        ) catch {
+            return error.ProtocolError;
+        };
+
+        const pending = self.queues.?.request.submitRequest(
+            req_buf.getMessage(),
+            self.getResponseBuf(),
+            unique,
+            .SETATTR,
+        ) orelse return error.QueueFull;
+
+        if (!self.waitForCompletion(pending, 5_000_000_000)) {
+            return error.Timeout;
+        }
+
+        const resp_data = self.getResponseBuf()[0..pending.response_len];
+        const out_hdr = protocol.parseOutHeader(resp_data) orelse return error.ProtocolError;
+
+        if (out_hdr.@"error" < 0) {
+            self.queues.?.request.releaseRequest(pending);
+            const errno = config.fuseErrorToErrno(out_hdr.@"error");
+            return switch (errno) {
+                1 => error.PermissionDenied, // EPERM
+                2 => error.NotFound, // ENOENT
+                13 => error.PermissionDenied, // EACCES
+                22 => error.SetAttrFailed, // EINVAL
+                else => error.SetAttrFailed,
+            };
+        }
+
+        const attr_out = protocol.parseAttrOut(resp_data) orelse {
+            self.queues.?.request.releaseRequest(pending);
+            return error.ProtocolError;
+        };
+
+        // Invalidate inode cache (attributes changed)
+        self.inodes.invalidate(nodeid);
+
+        self.queues.?.request.releaseRequest(pending);
+        return attr_out;
+    }
+
+    /// Change file mode (permissions)
+    pub fn chmod(self: *Self, nodeid: u64, mode: u32) FsError!protocol.FuseAttrOut {
+        return self.setAttr(
+            nodeid,
+            config.FuseSetAttrFlags.MODE,
+            mode,
+            0, // uid (unused)
+            0, // gid (unused)
+            0, // size (unused)
+            0, // atime (unused)
+            0, // atime_nsec (unused)
+            0, // mtime (unused)
+            0, // mtime_nsec (unused)
+            null, // fh
+        );
+    }
+
+    /// Change file owner (uid/gid)
+    pub fn chown(self: *Self, nodeid: u64, uid: u32, gid: u32) FsError!protocol.FuseAttrOut {
+        var valid_mask: u32 = 0;
+        if (uid != @as(u32, 0xFFFFFFFF)) {
+            valid_mask |= config.FuseSetAttrFlags.UID;
+        }
+        if (gid != @as(u32, 0xFFFFFFFF)) {
+            valid_mask |= config.FuseSetAttrFlags.GID;
+        }
+        return self.setAttr(
+            nodeid,
+            valid_mask,
+            0, // mode (unused)
+            uid,
+            gid,
+            0, // size (unused)
+            0, // atime (unused)
+            0, // atime_nsec (unused)
+            0, // mtime (unused)
+            0, // mtime_nsec (unused)
+            null, // fh
+        );
+    }
+
+    /// Truncate file to specified size
+    pub fn truncate(self: *Self, nodeid: u64, size: u64, fh: ?u64) FsError!protocol.FuseAttrOut {
+        return self.setAttr(
+            nodeid,
+            config.FuseSetAttrFlags.SIZE,
+            0, // mode (unused)
+            0, // uid (unused)
+            0, // gid (unused)
+            size,
+            0, // atime (unused)
+            0, // atime_nsec (unused)
+            0, // mtime (unused)
+            0, // mtime_nsec (unused)
+            fh,
+        );
+    }
+
+    /// Create a symbolic link
+    pub fn symlink(self: *Self, parent_nodeid: u64, name: []const u8, target: []const u8) FsError!protocol.FuseEntryOut {
+        if (name.len > config.Limits.MAX_NAME_LEN) {
+            return error.NameTooLong;
+        }
+        if (target.len > config.Limits.MAX_PATH_LEN) {
+            return error.TargetTooLong;
+        }
+
+        const held = self.op_lock.acquire();
+        defer held.release();
+
+        // Zero-init request buffer before use (security: DMA hygiene)
+        @memset(self.getRequestBuf(), 0);
+
+        var req_buf = protocol.FuseBuffer.init(self.getRequestBuf());
+        const unique = self.queues.?.request.allocUnique();
+
+        protocol.buildSymlink(&req_buf, unique, parent_nodeid, name, target) catch {
+            return error.ProtocolError;
+        };
+
+        const pending = self.queues.?.request.submitRequest(
+            req_buf.getMessage(),
+            self.getResponseBuf(),
+            unique,
+            .SYMLINK,
+        ) orelse return error.QueueFull;
+
+        if (!self.waitForCompletion(pending, 5_000_000_000)) {
+            return error.Timeout;
+        }
+
+        const resp_data = self.getResponseBuf()[0..pending.response_len];
+        const out_hdr = protocol.parseOutHeader(resp_data) orelse return error.ProtocolError;
+
+        if (out_hdr.@"error" < 0) {
+            self.queues.?.request.releaseRequest(pending);
+            const errno = config.fuseErrorToErrno(out_hdr.@"error");
+            return switch (errno) {
+                2 => error.NotFound, // ENOENT (parent not found)
+                13 => error.PermissionDenied, // EACCES
+                17 => error.Exists, // EEXIST
+                28 => error.NoSpace, // ENOSPC
+                else => error.SymlinkFailed,
+            };
+        }
+
+        const entry_out = protocol.parseEntryOut(resp_data) orelse {
+            self.queues.?.request.releaseRequest(pending);
+            return error.ProtocolError;
+        };
+
+        // Cache the new symlink entry
+        const entry_ttl_ns = entry_out.entry_valid * 1_000_000_000 + entry_out.entry_valid_nsec;
+        const attr_ttl_ns = entry_out.attr_valid * 1_000_000_000 + entry_out.attr_valid_nsec;
+
+        self.inodes.insert(entry_out.nodeid, entry_out.generation, entry_out.attr, attr_ttl_ns);
+        self.dentries.insert(parent_nodeid, name, entry_out.nodeid, entry_out.generation, entry_ttl_ns);
+
+        self.queues.?.request.releaseRequest(pending);
+        return entry_out;
+    }
+
+    /// Read symbolic link target
+    pub fn readlink(self: *Self, nodeid: u64, out_buf: []u8) FsError![]const u8 {
+        const held = self.op_lock.acquire();
+        defer held.release();
+
+        // Zero-init request buffer before use (security: DMA hygiene)
+        @memset(self.getRequestBuf(), 0);
+
+        var req_buf = protocol.FuseBuffer.init(self.getRequestBuf());
+        const unique = self.queues.?.request.allocUnique();
+
+        protocol.buildReadlink(&req_buf, unique, nodeid) catch {
+            return error.ProtocolError;
+        };
+
+        const pending = self.queues.?.request.submitRequest(
+            req_buf.getMessage(),
+            self.getResponseBuf(),
+            unique,
+            .READLINK,
+        ) orelse return error.QueueFull;
+
+        if (!self.waitForCompletion(pending, 5_000_000_000)) {
+            return error.Timeout;
+        }
+
+        const resp_data = self.getResponseBuf()[0..pending.response_len];
+        const out_hdr = protocol.parseOutHeader(resp_data) orelse return error.ProtocolError;
+
+        if (out_hdr.@"error" < 0) {
+            self.queues.?.request.releaseRequest(pending);
+            const errno = config.fuseErrorToErrno(out_hdr.@"error");
+            return switch (errno) {
+                2 => error.NotFound, // ENOENT
+                13 => error.PermissionDenied, // EACCES
+                22 => error.ReadlinkFailed, // EINVAL (not a symlink)
+                else => error.ReadlinkFailed,
+            };
+        }
+
+        // READLINK response is just the target path as raw data (no null terminator)
+        const target_data = protocol.parseReadData(resp_data) orelse {
+            self.queues.?.request.releaseRequest(pending);
+            return error.ProtocolError;
+        };
+
+        const copy_len = @min(target_data.len, out_buf.len);
+        @memcpy(out_buf[0..copy_len], target_data[0..copy_len]);
+
+        self.queues.?.request.releaseRequest(pending);
+        return out_buf[0..copy_len];
+    }
+
+    /// Create a hard link
+    pub fn link(self: *Self, oldnodeid: u64, new_parent: u64, new_name: []const u8) FsError!protocol.FuseEntryOut {
+        if (new_name.len > config.Limits.MAX_NAME_LEN) {
+            return error.NameTooLong;
+        }
+
+        const held = self.op_lock.acquire();
+        defer held.release();
+
+        // Zero-init request buffer before use (security: DMA hygiene)
+        @memset(self.getRequestBuf(), 0);
+
+        var req_buf = protocol.FuseBuffer.init(self.getRequestBuf());
+        const unique = self.queues.?.request.allocUnique();
+
+        protocol.buildLink(&req_buf, unique, oldnodeid, new_parent, new_name) catch {
+            return error.ProtocolError;
+        };
+
+        const pending = self.queues.?.request.submitRequest(
+            req_buf.getMessage(),
+            self.getResponseBuf(),
+            unique,
+            .LINK,
+        ) orelse return error.QueueFull;
+
+        if (!self.waitForCompletion(pending, 5_000_000_000)) {
+            return error.Timeout;
+        }
+
+        const resp_data = self.getResponseBuf()[0..pending.response_len];
+        const out_hdr = protocol.parseOutHeader(resp_data) orelse return error.ProtocolError;
+
+        if (out_hdr.@"error" < 0) {
+            self.queues.?.request.releaseRequest(pending);
+            const errno = config.fuseErrorToErrno(out_hdr.@"error");
+            return switch (errno) {
+                1 => error.PermissionDenied, // EPERM (cross-device link)
+                2 => error.NotFound, // ENOENT
+                13 => error.PermissionDenied, // EACCES
+                17 => error.Exists, // EEXIST
+                18 => error.LinkFailed, // EXDEV (cross-filesystem)
+                31 => error.LinkFailed, // EMLINK (too many links)
+                else => error.LinkFailed,
+            };
+        }
+
+        const entry_out = protocol.parseEntryOut(resp_data) orelse {
+            self.queues.?.request.releaseRequest(pending);
+            return error.ProtocolError;
+        };
+
+        // Cache the new link entry
+        const entry_ttl_ns = entry_out.entry_valid * 1_000_000_000 + entry_out.entry_valid_nsec;
+        const attr_ttl_ns = entry_out.attr_valid * 1_000_000_000 + entry_out.attr_valid_nsec;
+
+        self.inodes.insert(entry_out.nodeid, entry_out.generation, entry_out.attr, attr_ttl_ns);
+        self.dentries.insert(new_parent, new_name, entry_out.nodeid, entry_out.generation, entry_ttl_ns);
+
+        // Also invalidate the original inode cache since nlink changed
+        self.inodes.invalidate(oldnodeid);
+
+        self.queues.?.request.releaseRequest(pending);
+        return entry_out;
     }
 
     // ========================================================================

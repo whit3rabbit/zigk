@@ -1143,6 +1143,124 @@ pub fn buildForget(buf: *FuseBuffer, unique: u64, nodeid: u64, nlookup: u64) Fus
     buf.finalize();
 }
 
+/// Build FUSE_SETATTR request
+/// valid_mask uses FuseSetAttrFlags to indicate which fields to set
+pub fn buildSetAttr(
+    buf: *FuseBuffer,
+    unique: u64,
+    nodeid: u64,
+    valid_mask: u32,
+    mode: u32,
+    uid: u32,
+    gid: u32,
+    size: u64,
+    atime: u64,
+    atime_nsec: u32,
+    mtime: u64,
+    mtime_nsec: u32,
+    fh: ?u64,
+) FuseBuffer.Error!void {
+    buf.reset();
+
+    // Header
+    try buf.writeU32(0);
+    try buf.writeU32(@intFromEnum(config.FuseOpcode.SETATTR));
+    try buf.writeU64(unique);
+    try buf.writeU64(nodeid);
+    try buf.writeU32(0); // uid
+    try buf.writeU32(0); // gid
+    try buf.writeU32(0); // pid
+    try buf.writeU32(0); // padding
+
+    // FuseSetAttrIn body (88 bytes)
+    var mask = valid_mask;
+    if (fh != null) {
+        mask |= config.FuseSetAttrFlags.FH;
+    }
+    try buf.writeU32(mask); // valid
+    try buf.writeU32(0); // padding
+    try buf.writeU64(fh orelse 0); // fh
+    try buf.writeU64(size); // size
+    try buf.writeU64(0); // lock_owner
+    try buf.writeU64(atime); // atime
+    try buf.writeU64(mtime); // mtime
+    try buf.writeU64(0); // ctime (unused, kernel sets)
+    try buf.writeU32(atime_nsec); // atimensec
+    try buf.writeU32(mtime_nsec); // mtimensec
+    try buf.writeU32(0); // ctimensec
+    try buf.writeU32(mode); // mode
+    try buf.writeU32(0); // unused4
+    try buf.writeU32(uid); // uid
+    try buf.writeU32(gid); // gid
+    try buf.writeU32(0); // unused5
+
+    buf.finalize();
+}
+
+/// Build FUSE_SYMLINK request
+/// Creates a symbolic link at parent_nodeid/name pointing to target
+pub fn buildSymlink(buf: *FuseBuffer, unique: u64, parent_nodeid: u64, name: []const u8, target: []const u8) FuseBuffer.Error!void {
+    buf.reset();
+
+    // Header
+    try buf.writeU32(0);
+    try buf.writeU32(@intFromEnum(config.FuseOpcode.SYMLINK));
+    try buf.writeU64(unique);
+    try buf.writeU64(parent_nodeid);
+    try buf.writeU32(0); // uid
+    try buf.writeU32(0); // gid
+    try buf.writeU32(0); // pid
+    try buf.writeU32(0); // padding
+
+    // Body: name (null-terminated) + target (null-terminated)
+    try buf.writeString(name);
+    try buf.writeString(target);
+
+    buf.finalize();
+}
+
+/// Build FUSE_READLINK request
+/// Returns the symlink target for the given nodeid
+pub fn buildReadlink(buf: *FuseBuffer, unique: u64, nodeid: u64) FuseBuffer.Error!void {
+    buf.reset();
+
+    // Header only - no body for READLINK
+    try buf.writeU32(0);
+    try buf.writeU32(@intFromEnum(config.FuseOpcode.READLINK));
+    try buf.writeU64(unique);
+    try buf.writeU64(nodeid);
+    try buf.writeU32(0); // uid
+    try buf.writeU32(0); // gid
+    try buf.writeU32(0); // pid
+    try buf.writeU32(0); // padding
+
+    buf.finalize();
+}
+
+/// Build FUSE_LINK request
+/// Creates a hard link at new_parent/new_name pointing to oldnodeid
+pub fn buildLink(buf: *FuseBuffer, unique: u64, oldnodeid: u64, new_parent: u64, new_name: []const u8) FuseBuffer.Error!void {
+    buf.reset();
+
+    // Header - nodeid is the new parent directory
+    try buf.writeU32(0);
+    try buf.writeU32(@intFromEnum(config.FuseOpcode.LINK));
+    try buf.writeU64(unique);
+    try buf.writeU64(new_parent);
+    try buf.writeU32(0); // uid
+    try buf.writeU32(0); // gid
+    try buf.writeU32(0); // pid
+    try buf.writeU32(0); // padding
+
+    // FuseLinkIn body
+    try buf.writeU64(oldnodeid);
+
+    // New name (null-terminated)
+    try buf.writeString(new_name);
+
+    buf.finalize();
+}
+
 // ============================================================================
 // Response Parsers
 // ============================================================================
@@ -1200,6 +1318,18 @@ pub fn parseStatfsOut(data: []const u8) ?FuseStatfsOut {
     if (data.len < FuseOutHeader.SIZE + FuseStatfsOut.SIZE) return null;
     const ptr: *align(1) const FuseStatfsOut = @ptrCast(data[FuseOutHeader.SIZE..].ptr);
     return ptr.*;
+}
+
+/// Parse FUSE_READLINK response (returns symlink target as string slice)
+pub fn parseReadlinkData(data: []const u8) ?[]const u8 {
+    if (data.len < FuseOutHeader.SIZE) return null;
+    // The target path follows the header, not null-terminated
+    // Length is determined by (total_len - header_size)
+    const header = parseOutHeader(data) orelse return null;
+    if (header.@"error" != 0) return null;
+    const payload_len = header.len -| FuseOutHeader.SIZE;
+    if (data.len < FuseOutHeader.SIZE + payload_len) return null;
+    return data[FuseOutHeader.SIZE..][0..payload_len];
 }
 
 // ============================================================================
