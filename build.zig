@@ -890,6 +890,26 @@ pub fn build(b: *std.Build) void {
     // Add virtio_9p to fs module for VFS integration
     fs_module.addImport("virtio_9p", virtio_9p_module);
 
+    // Create VirtIO-FS driver module (shared folders via FUSE protocol)
+    const virtio_fs_module = b.createModule(.{
+        .root_source_file = b.path("src/drivers/virtio/fs/root.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    virtio_fs_module.addImport("pci", pci_module);
+    virtio_fs_module.addImport("vmm", vmm_module);
+    virtio_fs_module.addImport("pmm", pmm_module);
+    virtio_fs_module.addImport("console", console_module);
+    virtio_fs_module.addImport("hal", hal_module);
+    virtio_fs_module.addImport("heap", heap_module);
+    virtio_fs_module.addImport("sync", sync_module);
+    virtio_fs_module.addImport("virtio", virtio_module);
+    virtio_fs_module.addImport("dma", dma_module);
+    virtio_fs_module.addImport("iommu", kernel_iommu_module);
+
+    // Add virtio_fs to fs module for VFS integration
+    fs_module.addImport("virtio_fs", virtio_fs_module);
+
     // Create DevFS module (device filesystem shim)
     const devfs_module = b.createModule(.{
         .root_source_file = b.path("src/kernel/fs/devfs.zig"),
@@ -1698,6 +1718,7 @@ pub fn build(b: *std.Build) void {
     kernel.root_module.addImport("virtio_input", virtio_input_module);
     kernel.root_module.addImport("virtio_sound", virtio_sound_module);
     kernel.root_module.addImport("virtio_9p", virtio_9p_module);
+    kernel.root_module.addImport("virtio_fs", virtio_fs_module);
     kernel.root_module.addImport("virt_pci", virt_pci_module);
 
     // Add architecture-specific assembly and linker script

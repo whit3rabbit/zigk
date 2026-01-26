@@ -40,6 +40,7 @@ pub const O_WRONLY: u32 = 0x0001;
 pub const O_RDWR: u32 = 0x0002;
 pub const O_ACCMODE: u32 = 0x0003; // Mask for access mode
 pub const O_CREAT: u32 = 0x0040;
+pub const O_EXCL: u32 = 0x0080;
 pub const O_TRUNC: u32 = 0x0200;
 pub const O_APPEND: u32 = 0x0400;
 pub const O_NONBLOCK: u32 = 0x0800;

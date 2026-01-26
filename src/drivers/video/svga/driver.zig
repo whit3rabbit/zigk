@@ -501,7 +501,143 @@ pub const SvgaDriver = struct {
             regs.cpuPause();
         }
     }
+
+    // =========================================================================
+    // Display Mode Management
+    // =========================================================================
+
+    /// Error type for setDisplayMode
+    pub const SetDisplayModeError = error{
+        OutOfMemory,
+        InvalidDimensions,
+        DeviceFailed,
+        FramebufferTooSmall,
+    };
+
+    /// Change display resolution dynamically
+    ///
+    /// This is used for display synchronization with host window resize.
+    /// Unlike VirtIO-GPU, SVGA uses a fixed framebuffer allocated at init.
+    /// We simply reprogram the display registers if the new mode fits.
+    ///
+    /// Returns error if:
+    /// - Dimensions exceed hardware limits (MAX_WIDTH_LIMIT, MAX_HEIGHT_LIMIT)
+    /// - Dimensions are too small (< 640x480)
+    /// - Required framebuffer size exceeds allocated VRAM
+    pub fn setDisplayMode(self: *Self, new_width: u32, new_height: u32) SetDisplayModeError!void {
+        // Validate dimensions against hardware limits
+        if (new_width < 640 or new_height < 480) {
+            return SetDisplayModeError.InvalidDimensions;
+        }
+        if (new_width > hw.MAX_WIDTH_LIMIT or new_height > hw.MAX_HEIGHT_LIMIT) {
+            return SetDisplayModeError.InvalidDimensions;
+        }
+
+        // Calculate new pitch (bytes per line) with checked arithmetic
+        // Assuming 32bpp (4 bytes per pixel)
+        const bytes_per_pixel: u32 = 4;
+        const new_pitch = std.math.mul(u32, new_width, bytes_per_pixel) catch {
+            return SetDisplayModeError.InvalidDimensions;
+        };
+
+        // Calculate required framebuffer size with checked arithmetic
+        const required_size = std.math.mul(u32, new_pitch, new_height) catch {
+            return SetDisplayModeError.InvalidDimensions;
+        };
+
+        // Verify the new mode fits in the allocated framebuffer
+        if (required_size > self.framebuffer_size) {
+            console.warn("SVGA: Requested mode {}x{} requires {} bytes, but only {} available", .{
+                new_width,
+                new_height,
+                required_size,
+                self.framebuffer_size,
+            });
+            return SetDisplayModeError.FramebufferTooSmall;
+        }
+
+        // Also check against VRAM size as a secondary limit
+        if (required_size > self.vram_size) {
+            console.warn("SVGA: Requested mode exceeds VRAM size", .{});
+            return SetDisplayModeError.FramebufferTooSmall;
+        }
+
+        console.info("SVGA: Changing mode from {}x{} to {}x{}", .{
+            self.width,
+            self.height,
+            new_width,
+            new_height,
+        });
+
+        // Disable display before mode change
+        self.writeReg(.ENABLE, 0);
+
+        // Memory barrier to ensure disable takes effect
+        regs.memoryBarrier();
+
+        // Program new mode
+        self.writeReg(.WIDTH, new_width);
+        self.writeReg(.HEIGHT, new_height);
+        self.writeReg(.BPP, self.bpp); // Keep existing bpp (32)
+
+        // Re-enable display
+        self.writeReg(.ENABLE, 1);
+
+        // Memory barrier before reading back pitch
+        regs.memoryBarrier();
+
+        // Read back the pitch (device may align it)
+        const actual_pitch = self.readReg(.BYTES_PER_LINE);
+
+        // Verify device accepted the mode by checking pitch is reasonable
+        if (actual_pitch == 0 or actual_pitch < new_pitch) {
+            console.err("SVGA: Device rejected mode change (pitch={})", .{actual_pitch});
+            // Attempt to restore old mode
+            self.writeReg(.ENABLE, 0);
+            self.writeReg(.WIDTH, self.width);
+            self.writeReg(.HEIGHT, self.height);
+            self.writeReg(.BPP, self.bpp);
+            self.writeReg(.ENABLE, 1);
+            return SetDisplayModeError.DeviceFailed;
+        }
+
+        // Update driver state
+        self.width = new_width;
+        self.height = new_height;
+        self.pitch = actual_pitch;
+
+        // Update cursor screen size
+        self.hw_cursor.setScreenSize(new_width, new_height);
+
+        // Clear screen with the new dimensions
+        const total_bytes = std.math.mul(u32, actual_pitch, new_height) catch {
+            // Should not happen since we already validated, but be safe
+            return SetDisplayModeError.InvalidDimensions;
+        };
+        const len = total_bytes / 4;
+        const max_len = self.framebuffer_size / 4;
+        const safe_len = if (len > max_len) max_len else len;
+
+        if (safe_len > 0) {
+            @memset(self.framebuffer_virt[0..safe_len], 0);
+        }
+
+        // Sync to ensure device processed the changes
+        self.sync();
+
+        console.info("SVGA: Display mode changed to {}x{} (pitch={})", .{
+            new_width,
+            new_height,
+            actual_pitch,
+        });
+    }
 };
+
+/// Get initialized SVGA driver if available
+pub fn getDriver() ?*SvgaDriver {
+    if (SvgaDriver.initialized) return &SvgaDriver.instance;
+    return null;
+}
 
 // Re-export for convenience
 pub const HardwareCursor = cursor_mod.HardwareCursor;

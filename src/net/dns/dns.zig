@@ -17,6 +17,8 @@ pub const TYPE_PTR: u16 = 12; // Pointer
 pub const TYPE_MX: u16 = 15; // Mail Exchange
 pub const TYPE_TXT: u16 = 16; // Text
 pub const TYPE_AAAA: u16 = 28; // IPv6 Address
+pub const TYPE_SRV: u16 = 33; // Service Location (RFC 2782)
+pub const TYPE_ANY: u16 = 255; // Any type (query only)
 
 /// EDNS0 (RFC 6891) constants
 pub const EDNS0_UDP_SIZE: u16 = 2048; // Advertised UDP payload size
@@ -25,6 +27,27 @@ pub const OPT_RR_SIZE: usize = 11; // Root name(1) + type(2) + udp_size(2) + ext
 
 /// DNS Classes
 pub const CLASS_IN: u16 = 1; // Internet
+
+/// mDNS Constants (RFC 6762)
+pub const MDNS_PORT: u16 = 5353;
+pub const MDNS_MULTICAST_IPV4: u32 = 0xE00000FB; // 224.0.0.251
+pub const MDNS_MULTICAST_IPV6: [16]u8 = .{ 0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xfb };
+pub const MDNS_TTL: u8 = 255; // Required TTL for link-local
+pub const MDNS_CACHE_FLUSH_BIT: u16 = 0x8000; // Bit 15 of CLASS field
+pub const MDNS_DEFAULT_TTL: u32 = 120; // Default record TTL (2 minutes)
+pub const MDNS_HOST_TTL: u32 = 120; // Hostname record TTL
+pub const MDNS_SERVICE_TTL: u32 = 4500; // Service record TTL (75 minutes)
+
+/// mDNS response flags (Authoritative response, no recursion)
+pub const FLAGS_MDNS_RESPONSE: u16 = FLAGS_QR_RESPONSE | FLAGS_AA;
+
+/// SRV Record Data (RFC 2782)
+pub const SrvRecord = struct {
+    priority: u16,
+    weight: u16,
+    port: u16,
+    target: []const u8, // DNS-encoded target name
+};
 
 /// DNS Header (12 bytes)
 /// All fields are Network Byte Order (Big Endian)
@@ -103,7 +126,7 @@ pub const DnsPacket = struct {
     /// Write hostname in DNS format (length-prefixed labels)
     /// e.g. "google.com" -> \x06google\x03com\x00
     pub fn writeName(self: *DnsPacket, name: []const u8) !void {
-        var it = std.mem.split(u8, name, ".");
+        var it = std.mem.splitScalar(u8, name, '.');
         while (it.next()) |label| {
             if (label.len > 63) return error.LabelTooLong;
             if (self.pos + 1 + label.len > self.buffer.len) return error.BufferTooSmall;
@@ -164,6 +187,111 @@ pub const DnsPacket = struct {
         if (ar_offset + 2 <= self.buffer.len) {
             std.mem.writeInt(u16, self.buffer[ar_offset..][0..2], count, .big);
         }
+    }
+
+    /// Update the AN (answer record) count in an already-written header.
+    pub fn setAnCount(self: *DnsPacket, header_start: usize, count: u16) void {
+        const an_offset = header_start + 6;
+        if (an_offset + 2 <= self.buffer.len) {
+            std.mem.writeInt(u16, self.buffer[an_offset..][0..2], count, .big);
+        }
+    }
+
+    /// Write an SRV record RDATA section (RFC 2782).
+    /// Format: Priority (2) + Weight (2) + Port (2) + Target (variable DNS name)
+    /// Note: This writes only the RDATA portion. Caller must write name, type, class, TTL, rdlength first.
+    pub fn writeSrvRdata(self: *DnsPacket, priority: u16, weight: u16, port: u16, target: []const u8) !void {
+        // Need 6 bytes for fixed fields + variable target name
+        if (self.pos + 6 > self.buffer.len) return error.BufferTooSmall;
+
+        std.mem.writeInt(u16, self.buffer[self.pos..][0..2], priority, .big);
+        self.pos += 2;
+        std.mem.writeInt(u16, self.buffer[self.pos..][0..2], weight, .big);
+        self.pos += 2;
+        std.mem.writeInt(u16, self.buffer[self.pos..][0..2], port, .big);
+        self.pos += 2;
+
+        // Write target as DNS name
+        try self.writeName(target);
+    }
+
+    /// Write a complete resource record (name, type, class, TTL, rdlength placeholder).
+    /// Returns the position of rdlength field for later update.
+    pub fn writeResourceRecordHeader(self: *DnsPacket, name: []const u8, rtype: u16, class: u16, ttl: u32) !usize {
+        try self.writeName(name);
+
+        if (self.pos + 10 > self.buffer.len) return error.BufferTooSmall;
+
+        std.mem.writeInt(u16, self.buffer[self.pos..][0..2], rtype, .big);
+        self.pos += 2;
+        std.mem.writeInt(u16, self.buffer[self.pos..][0..2], class, .big);
+        self.pos += 2;
+        std.mem.writeInt(u32, self.buffer[self.pos..][0..4], ttl, .big);
+        self.pos += 4;
+
+        // Return position of rdlength for later update
+        const rdlen_pos = self.pos;
+        std.mem.writeInt(u16, self.buffer[self.pos..][0..2], 0, .big);
+        self.pos += 2;
+
+        return rdlen_pos;
+    }
+
+    /// Update rdlength field at a previously saved position.
+    pub fn setRdLength(self: *DnsPacket, rdlen_pos: usize, length: u16) void {
+        if (rdlen_pos + 2 <= self.buffer.len) {
+            std.mem.writeInt(u16, self.buffer[rdlen_pos..][0..2], length, .big);
+        }
+    }
+
+    /// Write an A record (IPv4 address).
+    pub fn writeARecord(self: *DnsPacket, name: []const u8, class: u16, ttl: u32, ip: u32) !void {
+        const rdlen_pos = try self.writeResourceRecordHeader(name, TYPE_A, class, ttl);
+        const rdata_start = self.pos;
+
+        if (self.pos + 4 > self.buffer.len) return error.BufferTooSmall;
+        std.mem.writeInt(u32, self.buffer[self.pos..][0..4], ip, .big);
+        self.pos += 4;
+
+        self.setRdLength(rdlen_pos, @intCast(self.pos - rdata_start));
+    }
+
+    /// Write a PTR record (pointer to name).
+    pub fn writePtrRecord(self: *DnsPacket, name: []const u8, class: u16, ttl: u32, target: []const u8) !void {
+        const rdlen_pos = try self.writeResourceRecordHeader(name, TYPE_PTR, class, ttl);
+        const rdata_start = self.pos;
+
+        try self.writeName(target);
+
+        self.setRdLength(rdlen_pos, @intCast(self.pos - rdata_start));
+    }
+
+    /// Write a TXT record (one or more character strings).
+    pub fn writeTxtRecord(self: *DnsPacket, name: []const u8, class: u16, ttl: u32, txt: []const u8) !void {
+        const rdlen_pos = try self.writeResourceRecordHeader(name, TYPE_TXT, class, ttl);
+        const rdata_start = self.pos;
+
+        // TXT record is one or more length-prefixed strings
+        // For simplicity, write as single string (max 255 bytes per string)
+        if (txt.len > 255) return error.LabelTooLong;
+        if (self.pos + 1 + txt.len > self.buffer.len) return error.BufferTooSmall;
+
+        self.buffer[self.pos] = @intCast(txt.len);
+        self.pos += 1;
+        @memcpy(self.buffer[self.pos..][0..txt.len], txt);
+        self.pos += txt.len;
+
+        self.setRdLength(rdlen_pos, @intCast(self.pos - rdata_start));
+    }
+
+    /// Write a complete SRV record.
+    pub fn writeSrvRecord(self: *DnsPacket, name: []const u8, class: u16, ttl: u32, priority: u16, weight: u16, port: u16, target: []const u8) !void {
+        const rdlen_pos = try self.writeResourceRecordHeader(name, TYPE_SRV, class, ttl);
+        const rdata_start = self.pos;
+
+        try self.writeSrvRdata(priority, weight, port, target);
+
+        self.setRdLength(rdlen_pos, @intCast(self.pos - rdata_start));
     }
 };
 
@@ -245,4 +373,69 @@ pub fn readName(buf: []const u8, start: usize, out: []u8) error{ FormatError, Bu
     }
 
     return .{ .name = out[0..out_pos], .end_pos = end_pos.? };
+}
+
+/// Result of reading an SRV record
+pub const ReadSrvResult = struct {
+    priority: u16,
+    weight: u16,
+    port: u16,
+    target: []const u8,
+    end_pos: usize,
+};
+
+/// Read SRV record RDATA from buffer.
+/// buf is the full packet, start is the offset to the RDATA section, rdlength is the RDATA length.
+/// out is a buffer for the target name.
+pub fn readSrvRecord(buf: []const u8, start: usize, rdlength: u16, out: []u8) error{ FormatError, BufferTooSmall }!ReadSrvResult {
+    // SRV RDATA: priority(2) + weight(2) + port(2) + target(variable)
+    if (rdlength < 7) return error.FormatError; // Minimum: 6 bytes fixed + 1 byte null root
+    if (start + 6 > buf.len) return error.FormatError;
+
+    const priority = std.mem.readInt(u16, buf[start..][0..2], .big);
+    const weight = std.mem.readInt(u16, buf[start + 2 ..][0..2], .big);
+    const port = std.mem.readInt(u16, buf[start + 4 ..][0..2], .big);
+
+    // Read target name (may use compression pointers)
+    const name_result = try readName(buf, start + 6, out);
+
+    return .{
+        .priority = priority,
+        .weight = weight,
+        .port = port,
+        .target = name_result.name,
+        .end_pos = start + rdlength,
+    };
+}
+
+/// Read a resource record header from buffer.
+/// Returns the type, class, TTL, rdlength, and position after the header.
+pub const ReadRRHeaderResult = struct {
+    name: []const u8,
+    rtype: u16,
+    class: u16,
+    ttl: u32,
+    rdlength: u16,
+    rdata_pos: usize,
+};
+
+pub fn readResourceRecordHeader(buf: []const u8, start: usize, name_out: []u8) error{ FormatError, BufferTooSmall }!ReadRRHeaderResult {
+    const name_result = try readName(buf, start, name_out);
+    const pos = name_result.end_pos;
+
+    if (pos + 10 > buf.len) return error.FormatError;
+
+    const rtype = std.mem.readInt(u16, buf[pos..][0..2], .big);
+    const class = std.mem.readInt(u16, buf[pos + 2 ..][0..2], .big);
+    const ttl = std.mem.readInt(u32, buf[pos + 4 ..][0..4], .big);
+    const rdlength = std.mem.readInt(u16, buf[pos + 8 ..][0..2], .big);
+
+    return .{
+        .name = name_result.name,
+        .rtype = rtype,
+        .class = class & ~MDNS_CACHE_FLUSH_BIT, // Mask out cache-flush bit
+        .ttl = ttl,
+        .rdlength = rdlength,
+        .rdata_pos = pos + 10,
+    };
 }

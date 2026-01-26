@@ -6,6 +6,7 @@ pub const ethernet = @import("ethernet/root.zig");
 pub const ipv4 = @import("ipv4/root.zig");
 pub const transport = @import("transport/root.zig");
 const dns = @import("dns/root.zig");
+pub const mdns = @import("mdns/root.zig");
 pub const loopback = @import("drivers/loopback.zig");
 const net_clock = @import("clock.zig");
 const io = @import("io");
@@ -56,6 +57,9 @@ pub fn init(iface: *Interface, allocator: std.mem.Allocator, ticks_per_sec: u32,
     // Clear ARP cache (redundant if init clears it, but kept for logic)
     ipv4.arp.clearCache();
 
+    // Initialize mDNS responder
+    mdns.init(iface, allocator);
+
     // Mark interface as up
     iface.up();
 }
@@ -69,6 +73,7 @@ pub fn processFrame(iface: *Interface, pkt: *PacketBuffer) bool {
 pub fn tick() void {
     ipv4.arp.tick();
     transport.tcp.tick();
+    mdns.tick();
 
     // Process async I/O timer expirations (Phase 2)
     io.timerTick();

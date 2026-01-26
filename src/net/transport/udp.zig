@@ -102,10 +102,12 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
     const NTP_PORT: u16 = 123;
     const SNMP_PORT: u16 = 161;
     const SNMP_TRAP_PORT: u16 = 162;
+    const MDNS_PORT: u16 = 5353;
     const is_security_sensitive = (dst_port == DNS_PORT or src_port == DNS_PORT or
         dst_port == NTP_PORT or src_port == NTP_PORT or
         dst_port == SNMP_PORT or src_port == SNMP_PORT or
-        dst_port == SNMP_TRAP_PORT or src_port == SNMP_TRAP_PORT);
+        dst_port == SNMP_TRAP_PORT or src_port == SNMP_TRAP_PORT or
+        dst_port == MDNS_PORT or src_port == MDNS_PORT);
 
     if (udp_hdr.checksum == 0) {
         if (is_security_sensitive) {
@@ -120,6 +122,21 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
         const calc_checksum = checksum.udpChecksum(pkt.src_ip, pkt.dst_ip, udp_data);
         if (udp_hdr.checksum != calc_checksum) {
             // Checksum mismatch
+            return false;
+        }
+    }
+
+    // SECURITY: RFC 6762 Section 11 - mDNS packets MUST have IP TTL=255
+    // This ensures the packet originated on the local link and wasn't routed
+    // from an off-link attacker attempting to inject malicious DNS responses.
+    // Without this check, an attacker on a different network could:
+    // - Poison the mDNS cache with spoofed responses
+    // - Redirect traffic by advertising fake service locations
+    // - Impersonate local hosts
+    if (dst_port == MDNS_PORT or src_port == MDNS_PORT) {
+        if (ip.ttl != 255) {
+            // RFC 6762: "Multicast DNS implementations SHOULD silently ignore
+            // any Multicast DNS packets where the IP TTL is not 255."
             return false;
         }
     }
@@ -187,6 +204,18 @@ pub fn processPacket6(iface: *Interface, pkt: *PacketBuffer) bool {
         return false;
     }
 
+    // SECURITY: RFC 6762 Section 11 - mDNS packets MUST have hop limit=255
+    // For IPv6, the hop_limit field is equivalent to IPv4 TTL.
+    // This ensures the packet originated on the local link and wasn't routed
+    // from an off-link attacker.
+    const MDNS_PORT: u16 = 5353;
+    if (dst_port == MDNS_PORT or src_port == MDNS_PORT) {
+        if (ip6.hop_limit != 255) {
+            // RFC 6762: Silently ignore mDNS packets not from the local link
+            return false;
+        }
+    }
+
     // Record source port and addresses for socket delivery
     pkt.src_port = src_port;
     // Copy IPv6 addresses to packet buffer for socket layer
@@ -203,7 +232,6 @@ pub fn processPacket6(iface: *Interface, pkt: *PacketBuffer) bool {
         // TODO: Send ICMPv6 Destination Unreachable (Port Unreachable)
         // icmpv6.sendDestUnreachable(iface, pkt, icmpv6.CODE_PORT_UNREACHABLE);
         _ = iface;
-        _ = dst_port;
         return true;
     }
     return delivered;

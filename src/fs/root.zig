@@ -14,4 +14,5 @@ pub const sfs = @import("sfs/root.zig");
 pub const partitions = @import("partitions");
 pub const meta = @import("fs_meta");
 pub const virtio9p = @import("virtio9p.zig");
+pub const virtiofs = @import("virtiofs.zig");
 

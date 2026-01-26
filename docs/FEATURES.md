@@ -101,7 +101,8 @@ Zig-based microkernel for x86_64 and AArch64 with custom UEFI bootloader.
 
 ## Video & Graphics
 - **VirtIO-GPU 2D**: Scanout, resource tracking, host blitting, runtime resolution changes
-- **VMware SVGA II**: Cross-arch driver (x86_64 I/O, aarch64 MMIO) with 2D accel and hardware cursor
+- **VMware SVGA II**: Cross-arch driver (x86_64 I/O, aarch64 MMIO) with 2D accel, hardware cursor, and runtime resolution changes
+- **Bochs VGA**: VBE Dispi interface for QEMU/Bochs/VirtualBox with cross-arch register access
 - **ANSI Terminal**: State machine parser for colors, bold, inverse
 - **Dual-Mode Framebuffer**: Direct-to-VRAM and back-buffered paths
 - **PSF Fonts**: PSF1/PSF2 loaders with checked glyph indexing
@@ -116,6 +117,8 @@ Zig-based microkernel for x86_64 and AArch64 with custom UEFI bootloader.
 - **SFS Filesystem**: Async I/O pattern with deferred block deletion
 - **MBR/GPT Detection**: Automatic partition table parsing
 - **InitRD (USTAR)**: Read-only TAR with path traversal rejection
+- **VirtIO-9P**: 9P2000.u host-guest shared folders for QEMU/KVM with VFS integration
+- **VirtIO-FS**: FUSE-based virtiofs with TTL inode/dentry caching for better performance than 9P
 
 ## ACPI
 - **DMAR/VT-d Parser**: IOMMU discovery with RMRR and device scopes
@@ -168,6 +171,8 @@ Zig-based microkernel for x86_64 and AArch64 with custom UEFI bootloader.
 - **PMTU Discovery**: Tick-based rate limiting (RFC 1191)
 - **ICMP Smurf Prevention**: No replies to broadcast/multicast
 - **Raw ICMP Sockets**: SOCK_RAW for ping/traceroute utilities
+- **mDNS Responder**: RFC 6762 multicast DNS with hostname probing and conflict detection
+- **DNS-SD**: RFC 6763 service discovery with PTR/SRV/TXT record support
 
 ## TCP/UDP
 - **Secure ISNs**: SipHash-2-4 with hardware entropy (RFC 6528)
@@ -195,6 +200,7 @@ Zig-based microkernel for x86_64 and AArch64 with custom UEFI bootloader.
 - **CNAME Following**: 8-depth limit with pointer loop protection
 - **Deadline Enforcement**: Wall-clock timeout and max-packet-count limit
 - **RFC 5452**: Randomized source ports for query ID entropy
+- **EDNS0**: RFC 6891 OPT RR advertising 2048-byte UDP payload for large responses
 
 ## UNIX Domain Sockets
 - **socket/socketpair**: AF_UNIX SOCK_STREAM/DGRAM
@@ -225,7 +231,7 @@ Zig-based microkernel for x86_64 and AArch64 with custom UEFI bootloader.
 - **VirtIO Drivers**: Userspace VirtIO-Net/Blk with capability syscalls
 - **Ring IPC**: Zero-copy with 128-byte cache-line separation
 - **SPICE Agent**: Display resolution sync via VDI protocol over VirtIO-Serial
-- **Libc**: Recursion-safe memcpy/memset, overflow-protected malloc, strlcpy/strlcat, getenv/setenv/unsetenv/putenv, scanf/sscanf, vasprintf
+- **Libc**: Recursion-safe memcpy/memset, overflow-protected malloc, strlcpy/strlcat, getenv/setenv/unsetenv/putenv (with storage compaction), scanf/sscanf, vasprintf (unlimited via va_copy), chdir subdirectory support
 - **setjmp/longjmp**: Full implementation with signal mask save/restore
 - **io_uring Wrapper**: Type-safe SQ/CQ with kernel blocking
 - **CRT0**: Manual varargs for AAPCS64/SysV, TLS init, 4MB null-pointer guard

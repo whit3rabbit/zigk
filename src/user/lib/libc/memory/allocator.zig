@@ -60,7 +60,11 @@ pub export fn malloc(size: usize) ?*anyopaque {
     if (size == 0) return null;
 
     // Align size to 16 bytes (required for SSE/FPU state)
-    const aligned_size = internal.alignTo16(size);
+    // SECURITY FIX: alignTo16 now returns null on overflow
+    const aligned_size = internal.alignTo16(size) orelse {
+        errno_mod.errno = errno_mod.ENOMEM;
+        return null;
+    };
 
     // SECURITY FIX: Check for overflow when adding header size
     const total_size = internal.checkedAdd(aligned_size, @sizeOf(BlockHeader)) orelse {
@@ -232,7 +236,11 @@ pub export fn realloc(ptr: ?*anyopaque, size: usize) ?*anyopaque {
         }
     }
 
-    const aligned_size = internal.alignTo16(size);
+    // SECURITY FIX: alignTo16 now returns null on overflow
+    const aligned_size = internal.alignTo16(size) orelse {
+        errno_mod.errno = errno_mod.ENOMEM;
+        return null;
+    };
 
     // Current block is big enough
     if (block.size >= aligned_size) {

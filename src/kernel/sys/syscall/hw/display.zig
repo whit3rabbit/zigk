@@ -16,6 +16,7 @@ const process_mod = @import("process");
 const console = @import("console");
 const video_driver = @import("video_driver");
 const virtio_gpu = video_driver.virtio_gpu;
+const svga = video_driver.svga.driver;
 
 const SyscallError = uapi.errno.SyscallError;
 
@@ -86,35 +87,66 @@ pub fn sys_set_display_mode(width: usize, height: usize, flags: usize) SyscallEr
         return error.EINVAL;
     }
 
-    // Get VirtIO-GPU driver
-    const drv = virtio_gpu.getDriver() orelse {
-        console.warn("sys_set_display_mode: No VirtIO-GPU driver available", .{});
-        return error.ENODEV;
-    };
+    // Try VirtIO-GPU first (preferred for QEMU/KVM)
+    if (virtio_gpu.getDriver()) |drv| {
+        // Get current dimensions to check if change is needed
+        const current_mode = drv.device().vtable.getMode(drv);
+        if (current_mode.width == w and current_mode.height == h) {
+            // No change needed
+            return 0;
+        }
 
-    // Get current dimensions to check if change is needed
-    const current_mode = drv.device().vtable.getMode(drv);
-    if (current_mode.width == w and current_mode.height == h) {
-        // No change needed
+        console.info("sys_set_display_mode: VirtIO-GPU changing resolution from {}x{} to {}x{}", .{
+            current_mode.width,
+            current_mode.height,
+            w,
+            h,
+        });
+
+        // Call driver to change display mode
+        drv.setDisplayMode(w, h) catch |err| {
+            console.err("sys_set_display_mode: VirtIO-GPU failed to set mode: {}", .{err});
+            return switch (err) {
+                error.OutOfMemory => error.ENOMEM,
+                error.InvalidDimensions => error.EINVAL,
+                error.DeviceFailed => error.EIO,
+            };
+        };
+
         return 0;
     }
 
-    console.info("sys_set_display_mode: Changing resolution from {}x{} to {}x{}", .{
-        current_mode.width,
-        current_mode.height,
-        w,
-        h,
-    });
+    // Fallback to SVGA driver (VMware/VirtualBox)
+    if (svga.getDriver()) |drv| {
+        // Get current dimensions to check if change is needed
+        const current_mode = drv.device().vtable.getMode(drv);
+        if (current_mode.width == w and current_mode.height == h) {
+            // No change needed
+            return 0;
+        }
 
-    // Call driver to change display mode
-    drv.setDisplayMode(w, h) catch |err| {
-        console.err("sys_set_display_mode: Failed to set mode: {}", .{err});
-        return switch (err) {
-            error.OutOfMemory => error.ENOMEM,
-            error.InvalidDimensions => error.EINVAL,
-            error.DeviceFailed => error.EIO,
+        console.info("sys_set_display_mode: SVGA changing resolution from {}x{} to {}x{}", .{
+            current_mode.width,
+            current_mode.height,
+            w,
+            h,
+        });
+
+        // Call driver to change display mode
+        drv.setDisplayMode(w, h) catch |err| {
+            console.err("sys_set_display_mode: SVGA failed to set mode: {}", .{err});
+            return switch (err) {
+                error.OutOfMemory => error.ENOMEM,
+                error.InvalidDimensions => error.EINVAL,
+                error.DeviceFailed => error.EIO,
+                error.FramebufferTooSmall => error.ENOMEM,
+            };
         };
-    };
 
-    return 0;
+        return 0;
+    }
+
+    // No display driver available
+    console.warn("sys_set_display_mode: No display driver available (tried VirtIO-GPU and SVGA)", .{});
+    return error.ENODEV;
 }

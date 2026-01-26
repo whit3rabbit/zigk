@@ -3,8 +3,7 @@
 > When a feature is completed, move it to `FEATURES.md` using the same `- **Name**: one-sentence description` format.
 
 ## Network Stack
-- **Multicast Routing**: mDNS/service discovery (partial)
-- **EDNS0**: Large DNS responses (>512 bytes)
+- *(mDNS/DNS-SD moved to FEATURES.md)*
 
 ## Storage
 - **IDE/PIIX**: Legacy VM compatibility
@@ -12,12 +11,9 @@
 
 ## Display
 - **QXL Driver**: SPICE acceleration
-- **Bochs/Cirrus VGA**: Legacy boot support
-- **Resolution Auto-Resize**: Host-requested resize pending
+- **Cirrus VGA**: Legacy graphics for older VMs
 
 ## Shared Folders
-- **VirtIO-9P**: Plan 9 filesystem for QEMU/KVM
-- **VirtIO-FS**: FUSE-based virtiofs
 - **HGFS**: VMware Host-Guest File System
 - **VBoxSF**: VirtualBox Shared Folders
 
@@ -45,6 +41,4 @@
 - **Synthetic Interrupt Controller**
 
 ## Libc Limitations
-- **Directory Ops**: mkdir/rmdir return EROFS on InitRD (read-only); chdir only works for "/" (flat InitRD)
-- **Environment**: Static storage (4096 bytes, 128 vars max)
-- **vasprintf**: Limited to 4096 bytes output (no va_copy)
+- **Directory Ops**: mkdir/rmdir return EROFS on InitRD (read-only filesystem)

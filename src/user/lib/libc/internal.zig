@@ -87,9 +87,15 @@ pub fn checkedMultiply(a: usize, b: usize) ?usize {
 }
 
 /// Align size up to 16-byte boundary
-pub fn alignTo16(size: usize) usize {
+/// Returns null if alignment would overflow (size > MAX - 15)
+pub fn alignTo16(size: usize) ?usize {
+    // SECURITY: Check for overflow before alignment
+    // If size > MAX_USIZE - 15, the addition wraps in ReleaseFast
+    if (size > std.math.maxInt(usize) - 15) return null;
     return (size + 15) & ~@as(usize, 15);
 }
+
+const std = @import("std");
 
 /// Check if a character is a whitespace character
 pub fn isWhitespace(c: u8) bool {

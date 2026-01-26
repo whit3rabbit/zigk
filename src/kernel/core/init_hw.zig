@@ -37,6 +37,7 @@ const virtio = @import("virtio");
 const virtio_input = @import("virtio_input");
 const virtio_sound = @import("virtio_sound");
 const virtio_9p = @import("virtio_9p");
+const virtio_fs = @import("virtio_fs");
 const virt_pci = @import("virt_pci");
 const fs = @import("fs");
 const prng = @import("prng");
@@ -54,6 +55,8 @@ pub var pci_ecam: ?pci.Ecam = null;
 pub var virtio_gpu_driver: ?*video_driver.VirtioGpuDriver = null;
 // SVGA driver supports x86_64 (port I/O) and aarch64 (MMIO)
 pub var svga_driver: if (builtin.cpu.arch == .x86_64 or builtin.cpu.arch == .aarch64) ?*video_driver.SvgaDriver else ?*void = null;
+// BGA driver for Bochs/QEMU std VGA
+pub var bga_driver: ?*video_driver.BgaDriver = null;
 pub var vmmouse_enabled: bool = false;
 pub var virtio_rng_driver: ?*virtio.VirtioRngDriver = null;
 
@@ -770,6 +773,9 @@ pub fn initStorage() void {
 
     // Initialize VirtIO-9P shared folders
     initVirtio9P();
+
+    // Initialize VirtIO-FS shared folders (FUSE-based, better caching)
+    initVirtioFs();
 }
 
 /// Initialize VirtIO-9P shared folders driver
@@ -854,6 +860,82 @@ pub fn initVirtio9P() void {
     }
 }
 
+/// Initialize VirtIO-FS shared folders driver
+/// Enables host-guest file sharing via QEMU's virtiofsd with FUSE protocol
+/// Provides better performance than VirtIO-9P through TTL-based caching
+pub fn initVirtioFs() void {
+    const devices = pci_devices orelse {
+        return;
+    };
+
+    const ecam = pci_ecam orelse {
+        return;
+    };
+
+    // Track mounted tags to skip duplicates
+    const MountedTags = struct {
+        var tags: [16][128]u8 = undefined;
+        var lens: [16]usize = [_]usize{0} ** 16;
+        var count: usize = 0;
+
+        fn isAlreadyMounted(tag: []const u8) bool {
+            for (0..count) |i| {
+                if (lens[i] == tag.len and std.mem.eql(u8, tags[i][0..lens[i]], tag)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        fn recordTag(tag: []const u8) void {
+            if (count < tags.len and tag.len <= 128) {
+                @memcpy(tags[count][0..tag.len], tag);
+                lens[count] = tag.len;
+                count += 1;
+            }
+        }
+    };
+
+    for (devices.devices[0..devices.count]) |*dev| {
+        if (virtio_fs.isVirtioFs(dev)) {
+            const device = virtio_fs.initFromPci(dev, pci.PciAccess{ .ecam = ecam }) catch |err| {
+                console.warn("VirtIO-FS: Init failed: {}", .{err});
+                continue;
+            };
+
+            const tag = device.getMountTag();
+
+            // Skip duplicates silently
+            if (MountedTags.isAlreadyMounted(tag)) {
+                continue;
+            }
+
+            // Create VFS filesystem wrapper and mount
+            const filesystem = fs.virtiofs.createFilesystem(device) catch |err| {
+                console.warn("VirtIO-FS: VFS wrapper failed: {}", .{err});
+                continue;
+            };
+
+            // Mount at /mnt/<tag> (e.g., /mnt/myfs)
+            var mount_path: [256]u8 = undefined;
+            const path_slice = std.fmt.bufPrint(&mount_path, "/mnt/{s}", .{tag}) catch {
+                console.warn("VirtIO-FS: Mount path too long", .{});
+                continue;
+            };
+
+            fs.vfs.Vfs.mount(path_slice, filesystem) catch |err| {
+                console.warn("VirtIO-FS: Mount at {s} failed: {}", .{ path_slice, err });
+                continue;
+            };
+
+            // Record successfully mounted tag
+            MountedTags.recordTag(tag);
+
+            console.info("VirtIO-FS: Mounted at {s}", .{path_slice});
+        }
+    }
+}
+
 /// Initialize VirtIO GPU driver
 /// Returns the driver instance if successful, enabling the console to switch modes.
 pub fn initVirtioGpu() ?*video_driver.VirtioGpuDriver {
@@ -889,8 +971,8 @@ pub fn initVirtioGpu() ?*video_driver.VirtioGpuDriver {
 }
 
 /// Initialize Video subsystem
-/// Tries VirtIO-GPU first (best for KVM/QEMU), then SVGA (VMware/VirtualBox)
-/// Falls back to boot framebuffer if neither is available.
+/// Tries VirtIO-GPU first (best for KVM/QEMU), then SVGA (VMware/VirtualBox),
+/// then BGA (Bochs/QEMU std VGA). Falls back to boot framebuffer if none available.
 pub fn initVideo() void {
     console.print("\n");
     console.info("Initializing video subsystem...", .{});
@@ -909,6 +991,13 @@ pub fn initVideo() void {
             console.info("Video: Using VMware SVGA II driver", .{});
             return;
         }
+    }
+
+    // Try Bochs VGA (QEMU default, VirtualBox VBoxVGA)
+    if (video_driver.BgaDriver.init()) |driver| {
+        bga_driver = driver;
+        console.info("Video: Using Bochs VGA driver", .{});
+        return;
     }
 
     // Fall back to boot framebuffer

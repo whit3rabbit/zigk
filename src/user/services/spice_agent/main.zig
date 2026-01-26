@@ -85,53 +85,32 @@ var rx_buffer: [4096]u8 = [_]u8{0} ** 4096;
 // ============================================================================
 
 pub fn main() void {
-    syscall.print("SPICE Agent: Starting...\n");
-
     // Register as a service
     syscall.register_service(SERVICE_NAME) catch |err| {
-        printError("Failed to register service", err);
+        printError("SPICE Agent: Failed to register service", err);
         return;
     };
-    syscall.print("SPICE Agent: Registered as '");
-    syscall.print(SERVICE_NAME);
-    syscall.print("'\n");
 
     // Initialize transport
-    const transport = Transport.init() catch |err| {
-        switch (err) {
-            TransportError.DeviceNotFound => {
-                syscall.print("SPICE Agent: VirtIO-Serial device not found (not a SPICE VM?)\n");
-            },
-            else => {
-                syscall.print("SPICE Agent: Transport initialization failed\n");
-            },
-        }
+    const transport = Transport.init() catch {
+        // Silently exit if VirtIO-Serial not available (not a SPICE VM)
         return;
     };
 
     agent_state.transport = transport;
-    syscall.print("SPICE Agent: VirtIO-Serial transport initialized\n");
 
     // Get initial framebuffer info
     var fb_info: syscall.FramebufferInfo = undefined;
     if (syscall.get_framebuffer_info(&fb_info)) |_| {
         agent_state.current_width = fb_info.width;
         agent_state.current_height = fb_info.height;
-        syscall.print("SPICE Agent: Current display: ");
-        printDec(fb_info.width);
-        syscall.print("x");
-        printDec(fb_info.height);
-        syscall.print("\n");
-    } else |_| {
-        syscall.print("SPICE Agent: Could not get framebuffer info\n");
-    }
+    } else |_| {}
 
     // Announce capabilities to host
     sendCapabilities();
 
     // Enter main loop
     agent_state.running = true;
-    syscall.print("SPICE Agent: Entering main loop\n");
     mainLoop();
 }
 
@@ -187,7 +166,6 @@ fn processMessage(data: []const u8) void {
 
     // Validate protocol version
     if (msg.protocol != protocol.VD_AGENT_PROTOCOL) {
-        syscall.print("SPICE Agent: Unknown protocol version\n");
         return;
     }
 
@@ -214,8 +192,6 @@ fn handleCapabilities(data: []const u8) void {
 
     const caps: *const protocol.VDAgentAnnounceCapabilities = @ptrCast(@alignCast(data.ptr));
     agent_state.host_caps = caps.caps;
-
-    syscall.print("SPICE Agent: Received host capabilities\n");
 
     // If host requested our capabilities, send them
     if (caps.request != 0) {
@@ -246,7 +222,6 @@ fn handleMonitorsConfig(data: []const u8) void {
 
     // Validate dimensions
     if (!protocol.validateDisplayDimensions(mon.width, mon.height)) {
-        syscall.print("SPICE Agent: Invalid display dimensions\n");
         sendReply(protocol.VD_AGENT_MONITORS_CONFIG, false);
         return;
     }
@@ -256,7 +231,6 @@ fn handleMonitorsConfig(data: []const u8) void {
     if (current_ms > 0 and agent_state.last_mode_change_ms > 0) {
         const elapsed = current_ms -| agent_state.last_mode_change_ms;
         if (elapsed < MODE_CHANGE_MIN_INTERVAL_MS) {
-            syscall.print("SPICE Agent: Rate limiting display change\n");
             sendReply(protocol.VD_AGENT_MONITORS_CONFIG, false);
             return;
         }
@@ -268,12 +242,6 @@ fn handleMonitorsConfig(data: []const u8) void {
         return;
     }
 
-    syscall.print("SPICE Agent: Setting display to ");
-    printDec(mon.width);
-    syscall.print("x");
-    printDec(mon.height);
-    syscall.print("\n");
-
     // Call syscall to change display mode
     if (setDisplayMode(mon.width, mon.height)) {
         agent_state.current_width = mon.width;
@@ -281,7 +249,6 @@ fn handleMonitorsConfig(data: []const u8) void {
         agent_state.last_mode_change_ms = current_ms;
         sendReply(protocol.VD_AGENT_MONITORS_CONFIG, true);
     } else {
-        syscall.print("SPICE Agent: Failed to set display mode\n");
         sendReply(protocol.VD_AGENT_MONITORS_CONFIG, false);
     }
 }
@@ -307,9 +274,7 @@ fn sendCapabilities() void {
     @memcpy(tx_buffer[offset..][0..@sizeOf(protocol.VDAgentAnnounceCapabilities)], std.mem.asBytes(&caps));
     offset += @sizeOf(protocol.VDAgentAnnounceCapabilities);
 
-    transport.send(tx_buffer[0..offset]) catch {
-        syscall.print("SPICE Agent: Failed to send capabilities\n");
-    };
+    transport.send(tx_buffer[0..offset]) catch {};
 }
 
 /// Send reply message
@@ -364,22 +329,6 @@ fn printError(msg: []const u8, err: anyerror) void {
     syscall.print(": ");
     syscall.print(@errorName(err));
     syscall.print("\n");
-}
-
-fn printDec(value: u64) void {
-    if (value == 0) {
-        syscall.print("0");
-        return;
-    }
-    var buf: [20]u8 = undefined;
-    var i: usize = 20;
-    var v = value;
-    while (v > 0) {
-        i -= 1;
-        buf[i] = @intCast('0' + (v % 10));
-        v /= 10;
-    }
-    syscall.print(buf[i..]);
 }
 
 // ============================================================================
