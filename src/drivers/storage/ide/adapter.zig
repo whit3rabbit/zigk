@@ -12,6 +12,7 @@ const math = std.math;
 const fd_mod = @import("fd");
 const uapi = @import("uapi");
 const heap = @import("heap");
+const console = @import("console");
 
 const registers = @import("registers.zig");
 const command = @import("command.zig");
@@ -286,8 +287,16 @@ fn blockClose(fd: *FileDescriptor) isize {
     const ref = DriveRef.decode(fd.private_data);
     const channel = getChannel(ref);
 
-    command.flushCache(channel, ref.drive, ref.supports_lba48) catch {
-        // Ignore flush errors on close
+    command.flushCache(channel, ref.drive, ref.supports_lba48) catch |err| {
+        // Log flush errors but don't fail the close
+        // Data may already be on disk, but user should be aware
+        const channel_name = if (ref.channel == 0) "primary" else "secondary";
+        const drive_name = if (ref.drive == 0) "master" else "slave";
+        console.warn("IDE: flush cache failed on {s}/{s}: {}", .{
+            channel_name,
+            drive_name,
+            err,
+        });
     };
 
     fd.private_data = null;

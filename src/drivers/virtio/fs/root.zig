@@ -1489,7 +1489,8 @@ pub const VirtioFsDevice = struct {
         }
 
         // READLINK response is just the target path as raw data (no null terminator)
-        const target_data = protocol.parseReadData(resp_data) orelse {
+        // Use parseReadlinkData which validates header.len against actual buffer bounds
+        const target_data = protocol.parseReadlinkData(resp_data) orelse {
             self.queues.?.request.releaseRequest(pending);
             return error.ProtocolError;
         };

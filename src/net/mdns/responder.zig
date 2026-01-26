@@ -284,6 +284,8 @@ pub const Responder = struct {
 
         // Update header to show 0 questions, 1 answer
         pkt.setArCount(0, 0); // No additional
+        // Security: Bounds check before direct header writes (CLAUDE.md - Network Stack Security)
+        if (buf.len < dns.DNS_HEADER_SIZE) return;
         std.mem.writeInt(u16, buf[4..6], 0, .big); // 0 questions
         std.mem.writeInt(u16, buf[6..8], 1, .big); // 1 answer
 
@@ -442,6 +444,8 @@ pub const Responder = struct {
         var pkt = dns.DnsPacket.init(&buf);
 
         pkt.writeHeader(0x0000, dns.FLAGS_MDNS_RESPONSE) catch return;
+        // Security: Bounds check before direct header writes (CLAUDE.md - Network Stack Security)
+        if (buf.len < dns.DNS_HEADER_SIZE) return;
         std.mem.writeInt(u16, buf[4..6], 0, .big); // 0 questions
         std.mem.writeInt(u16, buf[6..8], @truncate(type_count), .big); // N answers
 
@@ -510,6 +514,8 @@ pub const Responder = struct {
         if (answer_count == 0) return;
 
         // Update answer count in header
+        // Security: Bounds check before direct header writes (CLAUDE.md - Network Stack Security)
+        if (buf.len < dns.DNS_HEADER_SIZE) return;
         std.mem.writeInt(u16, buf[4..6], 0, .big);
         std.mem.writeInt(u16, buf[6..8], answer_count, .big);
 
@@ -530,6 +536,8 @@ pub const Responder = struct {
         var pkt = dns.DnsPacket.init(&buf);
 
         pkt.writeHeader(0x0000, dns.FLAGS_MDNS_RESPONSE) catch return;
+        // Security: Bounds check before direct header writes (CLAUDE.md - Network Stack Security)
+        if (buf.len < dns.DNS_HEADER_SIZE) return;
         std.mem.writeInt(u16, buf[4..6], 0, .big); // 0 questions
         std.mem.writeInt(u16, buf[6..8], 1, .big); // 1 answer
 
@@ -571,6 +579,8 @@ pub const Responder = struct {
         var pkt = dns.DnsPacket.init(&buf);
 
         pkt.writeHeader(0x0000, dns.FLAGS_MDNS_RESPONSE) catch return;
+        // Security: Bounds check before direct header writes (CLAUDE.md - Network Stack Security)
+        if (buf.len < dns.DNS_HEADER_SIZE) return;
         std.mem.writeInt(u16, buf[4..6], 0, .big); // 0 questions
         std.mem.writeInt(u16, buf[6..8], 1, .big); // 1 answer
 
@@ -648,6 +658,8 @@ pub const Responder = struct {
         pkt.writeHeader(0x0000, dns.FLAGS_MDNS_RESPONSE) catch return;
 
         // Update header: 0 questions, 1 answer
+        // Security: Bounds check before direct header writes (CLAUDE.md - Network Stack Security)
+        if (buf.len < dns.DNS_HEADER_SIZE) return;
         std.mem.writeInt(u16, buf[4..6], 0, .big);
         std.mem.writeInt(u16, buf[6..8], 1, .big);
 

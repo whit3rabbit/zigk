@@ -271,7 +271,71 @@ pub const DetectError = error{
     DeviceError,
     NotPresent,
     InvalidSignature,
+    InvalidIdentifyData,
 };
+
+/// Validate IDENTIFY data for basic sanity (ATA devices)
+/// Returns error if the data appears corrupted or invalid
+fn validateIdentifyData(identify: *const IdentifyData) DetectError!void {
+    // Perform common validation first
+    try validateIdentifyDataCommon(identify);
+
+    // Validate sector counts are within reasonable bounds
+    // LBA28 max: 2^28 sectors = 128 GB
+    // LBA48 max: 2^48 sectors = 128 PB (practical limit ~16 TB for drives)
+    const MAX_LBA28_SECTORS: u32 = 0x0FFFFFFF; // 268 million sectors
+    const MAX_LBA48_SECTORS: u64 = 0x0000FFFFFFFFFFFF; // 281 trillion sectors
+
+    if (identify.total_sectors_28 > MAX_LBA28_SECTORS) {
+        return error.InvalidIdentifyData;
+    }
+
+    if (identify.total_sectors_48 > MAX_LBA48_SECTORS) {
+        return error.InvalidIdentifyData;
+    }
+
+    // If LBA48 is claimed, the LBA48 sector count should be >= LBA28 count
+    if (identify.command_set_2.lba48) {
+        if (identify.total_sectors_48 != 0 and
+            identify.total_sectors_48 < identify.total_sectors_28)
+        {
+            return error.InvalidIdentifyData;
+        }
+    }
+}
+
+/// Validate IDENTIFY PACKET data for basic sanity (ATAPI devices)
+fn validateIdentifyDataAtapi(identify: *const IdentifyData) DetectError!void {
+    // ATAPI uses different sector count semantics (via SCSI READ CAPACITY)
+    // so we only perform common validation
+    try validateIdentifyDataCommon(identify);
+}
+
+/// Common validation for both ATA and ATAPI IDENTIFY data
+fn validateIdentifyDataCommon(identify: *const IdentifyData) DetectError!void {
+    // Word 0: General configuration - check for invalid patterns
+    // 0x0000 or 0xFFFF typically indicate no device or bad read
+    if (identify.general_config == 0x0000 or identify.general_config == 0xFFFF) {
+        return error.InvalidIdentifyData;
+    }
+
+    // Word 255: Integrity word (ATA-5+)
+    // If present, low byte should be 0xA5 (checksum signature)
+    // High byte is checksum that makes sum of all words 0
+    const integrity_signature = identify.integrity & 0xFF;
+    if (integrity_signature == 0xA5) {
+        // Validate checksum - sum of all 256 words should be 0
+        const words: *const [256]u16 = @ptrCast(@alignCast(identify));
+        var checksum: u8 = 0;
+        for (words) |w| {
+            checksum +%= @truncate(w);
+            checksum +%= @truncate(w >> 8);
+        }
+        if (checksum != 0) {
+            return error.InvalidIdentifyData;
+        }
+    }
+}
 
 /// Swap bytes in ATA string (ATA strings are byte-swapped)
 fn swapAtaString(dest: []u8, src: []const u8) void {
@@ -363,6 +427,9 @@ pub fn detectDrive(channel: registers.Channel, drive: u1) DetectError!DriveInfo 
     // Parse IDENTIFY data
     const identify: *const IdentifyData = @ptrCast(@alignCast(&identify_data));
 
+    // Validate IDENTIFY data before trusting it
+    try validateIdentifyData(identify);
+
     info.drive_type = .ata;
     info.supports_lba = identify.capabilities.lba_supported;
     info.supports_lba48 = identify.command_set_2.lba48;
@@ -416,6 +483,9 @@ fn detectAtapiDrive(channel: registers.Channel, drive: u1) DetectError!DriveInfo
     registers.readSector(channel, &identify_data);
 
     const identify: *const IdentifyData = @ptrCast(@alignCast(&identify_data));
+
+    // Validate IDENTIFY PACKET data before trusting it
+    try validateIdentifyDataAtapi(identify);
 
     info.drive_type = .atapi;
     info.supports_lba = true; // ATAPI always uses LBA

@@ -429,18 +429,22 @@ pub fn setLba48(channel: Channel, drive: u1, lba: u48, count: u16) void {
 // ============================================================================
 
 /// Read a sector (512 bytes) from data port
+/// Uses std.mem.writeInt for safe unaligned access
 pub fn readSector(channel: Channel, buffer: *[512]u8) void {
-    const words: *[256]u16 = @ptrCast(@alignCast(buffer));
-    for (words) |*w| {
-        w.* = readData16(channel);
+    var i: usize = 0;
+    while (i < 512) : (i += 2) {
+        const word = readData16(channel);
+        std.mem.writeInt(u16, buffer[i..][0..2], word, .little);
     }
 }
 
 /// Write a sector (512 bytes) to data port
+/// Uses std.mem.readInt for safe unaligned access
 pub fn writeSector(channel: Channel, buffer: *const [512]u8) void {
-    const words: *const [256]u16 = @ptrCast(@alignCast(buffer));
-    for (words) |w| {
-        writeData16(channel, w);
+    var i: usize = 0;
+    while (i < 512) : (i += 2) {
+        const word = std.mem.readInt(u16, buffer[i..][0..2], .little);
+        writeData16(channel, word);
     }
 }
 
