@@ -13,10 +13,6 @@
 - **QXL Driver**: SPICE acceleration
 - **Cirrus VGA**: Legacy graphics for older VMs
 
-## Shared Folders
-- **HGFS**: VMware Host-Guest File System
-- **VBoxSF**: VirtualBox Shared Folders
-
 ## Paravirtualized Devices
 - **VMXNET3**: VMware 10GbE performance
 - **PVSCSI**: VMware low-latency storage

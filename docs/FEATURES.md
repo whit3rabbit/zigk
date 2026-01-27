@@ -119,6 +119,8 @@ Zig-based microkernel for x86_64 and AArch64 with custom UEFI bootloader.
 - **InitRD (USTAR)**: Read-only TAR with path traversal rejection
 - **VirtIO-9P**: 9P2000.u host-guest shared folders for QEMU/KVM with VFS integration
 - **VirtIO-FS**: FUSE-based virtiofs with TTL inode/dentry caching, full POSIX ops (chmod, chown, truncate, symlink, readlink, link)
+- **VBoxSF**: VirtualBox Shared Folders via VMMDev/HGCM with full read-write, directory enumeration, and fstat support
+- **HGFS**: VMware Host-Guest File System via RPCI with session management, directory operations, and path traversal protection
 
 ## ACPI
 - **DMAR/VT-d Parser**: IOMMU discovery with RMRR and device scopes

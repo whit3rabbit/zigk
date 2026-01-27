@@ -924,6 +924,70 @@ pub fn build(b: *std.Build) void {
     // Add virtio_fs to fs module for VFS integration
     fs_module.addImport("virtio_fs", virtio_fs_module);
 
+    // Create VirtualBox VMMDev driver module (Guest Additions communication)
+    const vmmdev_module = b.createModule(.{
+        .root_source_file = b.path("src/drivers/vbox/vmmdev/root.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    vmmdev_module.addImport("pci", pci_module);
+    vmmdev_module.addImport("vmm", vmm_module);
+    vmmdev_module.addImport("pmm", pmm_module);
+    vmmdev_module.addImport("console", console_module);
+    vmmdev_module.addImport("hal", hal_module);
+    vmmdev_module.addImport("heap", heap_module);
+    vmmdev_module.addImport("sync", sync_module);
+    vmmdev_module.addImport("dma", dma_module);
+    vmmdev_module.addImport("iommu", kernel_iommu_module);
+
+    // Create VirtualBox Shared Folders (VBoxSF) driver module
+    const vboxsf_module = b.createModule(.{
+        .root_source_file = b.path("src/drivers/vbox/sf/root.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    vboxsf_module.addImport("hal", hal_module);
+    vboxsf_module.addImport("console", console_module);
+    vboxsf_module.addImport("heap", heap_module);
+    vboxsf_module.addImport("sync", sync_module);
+    vboxsf_module.addImport("dma", dma_module);
+    vboxsf_module.addImport("iommu", kernel_iommu_module);
+    vboxsf_module.addImport("vmmdev", vmmdev_module);
+
+    // Create VirtualBox facade module (re-exports vmmdev, vboxsf)
+    const vbox_module = b.createModule(.{
+        .root_source_file = b.path("src/drivers/vbox/root.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    vbox_module.addImport("hal", hal_module);
+    // vmmdev and vboxsf are imported via relative paths in root.zig
+
+    // Add vboxsf to fs module for VFS integration
+    fs_module.addImport("vboxsf", vboxsf_module);
+
+    // Create VMware HGFS driver module (Host-Guest File System over RPCI)
+    const hgfs_module = b.createModule(.{
+        .root_source_file = b.path("src/drivers/vmware/hgfs/root.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    hgfs_module.addImport("hal", hal_module);
+    hgfs_module.addImport("console", console_module);
+    hgfs_module.addImport("heap", heap_module);
+    hgfs_module.addImport("sync", sync_module);
+
+    // Create VMware facade module (re-exports hgfs)
+    const vmware_module = b.createModule(.{
+        .root_source_file = b.path("src/drivers/vmware/root.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    vmware_module.addImport("hal", hal_module);
+
+    // Add hgfs to fs module for VFS integration
+    fs_module.addImport("hgfs", hgfs_module);
+
     // Create DevFS module (device filesystem shim)
     const devfs_module = b.createModule(.{
         .root_source_file = b.path("src/kernel/fs/devfs.zig"),
@@ -1739,6 +1803,11 @@ pub fn build(b: *std.Build) void {
     kernel.root_module.addImport("virtio_sound", virtio_sound_module);
     kernel.root_module.addImport("virtio_9p", virtio_9p_module);
     kernel.root_module.addImport("virtio_fs", virtio_fs_module);
+    kernel.root_module.addImport("vmmdev", vmmdev_module);
+    kernel.root_module.addImport("vboxsf", vboxsf_module);
+    kernel.root_module.addImport("vbox", vbox_module);
+    kernel.root_module.addImport("vmware", vmware_module);
+    kernel.root_module.addImport("hgfs", hgfs_module);
     kernel.root_module.addImport("virt_pci", virt_pci_module);
 
     // Add architecture-specific assembly and linker script

@@ -39,6 +39,9 @@ const virtio_input = @import("virtio_input");
 const virtio_sound = @import("virtio_sound");
 const virtio_9p = @import("virtio_9p");
 const virtio_fs = @import("virtio_fs");
+const hgfs = @import("hgfs");
+const vmmdev = @import("vmmdev");
+const vboxsf = @import("vboxsf");
 const virt_pci = @import("virt_pci");
 const fs = @import("fs");
 const prng = @import("prng");
@@ -60,6 +63,8 @@ pub var svga_driver: if (builtin.cpu.arch == .x86_64 or builtin.cpu.arch == .aar
 pub var bga_driver: ?*video_driver.BgaDriver = null;
 pub var vmmouse_enabled: bool = false;
 pub var virtio_rng_driver: ?*virtio.VirtioRngDriver = null;
+/// VirtualBox VMMDev driver (for Guest Additions / shared folders)
+pub var vmmdev_driver: ?*vmmdev.VmmDevDevice = null;
 
 /// Detected hypervisor type
 pub var detected_hypervisor: hal.hypervisor.HypervisorType = .none;
@@ -813,6 +818,12 @@ pub fn initStorage() void {
 
     // Initialize VirtIO-FS shared folders (FUSE-based, better caching)
     initVirtioFs();
+
+    // Initialize VMware HGFS shared folders
+    initHgfs();
+
+    // Initialize VirtualBox shared folders
+    initVBoxSf();
 }
 
 /// Initialize VirtIO-9P shared folders driver
@@ -969,6 +980,78 @@ pub fn initVirtioFs() void {
             MountedTags.recordTag(tag);
 
             console.info("VirtIO-FS: Mounted at {s}", .{path_slice});
+        }
+    }
+}
+
+/// Initialize VMware HGFS shared folders driver
+/// Enables host-guest file sharing via VMware Workstation/Fusion/ESXi shared folders
+pub fn initHgfs() void {
+    // Only probe on VMware-compatible hypervisors
+    if (!detected_hypervisor.isVmwareCompatible() and
+        detected_hypervisor != .none and
+        detected_hypervisor != .unknown)
+    {
+        return;
+    }
+
+    // Check if VMware backdoor interface is available
+    if (!hal.vmware.detect()) {
+        return;
+    }
+
+    console.info("HGFS: VMware backdoor detected, initializing...", .{});
+
+    // Initialize HGFS driver
+    const driver = hgfs.initDriver() catch |err| {
+        console.warn("HGFS: Driver init failed: {}", .{err});
+        return;
+    };
+
+    // Create VFS filesystem wrapper and mount at /mnt/hgfs
+    const filesystem = fs.hgfs.createFilesystem(driver) catch |err| {
+        console.warn("HGFS: VFS wrapper failed: {}", .{err});
+        return;
+    };
+
+    fs.vfs.Vfs.mount("/mnt/hgfs", filesystem) catch |err| {
+        console.warn("HGFS: Mount at /mnt/hgfs failed: {}", .{err});
+        return;
+    };
+
+    console.info("HGFS: Mounted at /mnt/hgfs", .{});
+}
+
+/// Initialize VirtualBox VMMDev driver
+/// Enables Guest Additions features including shared folders (VBoxSF)
+pub fn initVmmDev() void {
+    const devices = pci_devices orelse {
+        return;
+    };
+
+    const ecam = pci_ecam orelse {
+        return;
+    };
+
+    // Only probe on VirtualBox hypervisor
+    if (detected_hypervisor != .virtualbox and detected_hypervisor != .none and detected_hypervisor != .unknown) {
+        return;
+    }
+
+    for (devices.devices[0..devices.count]) |*dev| {
+        if (vmmdev.isVmmDev(dev)) {
+            console.info("VMMDev: Found device at {d}:{d}.{d}", .{
+                dev.bus, dev.device, dev.func,
+            });
+
+            const driver = vmmdev.initFromPci(dev, pci.PciAccess{ .ecam = ecam }) catch |err| {
+                console.warn("VMMDev: Init failed: {}", .{err});
+                continue;
+            };
+
+            vmmdev_driver = driver;
+            console.info("VMMDev: Driver initialized (HGCM={})", .{driver.hasHgcm()});
+            return;
         }
     }
 }
@@ -1223,4 +1306,52 @@ fn initVirtioSound() bool {
     }
 
     return false;
+}
+
+/// Initialize VirtualBox Shared Folders
+/// Connects to HGCM VBoxSharedFolders service and mounts available shares
+pub fn initVBoxSf() void {
+    // Only run on VirtualBox
+    if (detected_hypervisor != .virtualbox) {
+        return;
+    }
+
+    // VMMDev must be initialized first
+    const device = vmmdev_driver orelse {
+        console.debug("VBoxSF: VMMDev not available", .{});
+        return;
+    };
+
+    // Check HGCM support
+    if (!device.hasHgcm()) {
+        console.warn("VBoxSF: HGCM not available on VMMDev", .{});
+        return;
+    }
+
+    // Initialize VBoxSF driver
+    const driver = vboxsf.init() catch |err| {
+        console.warn("VBoxSF: Driver init failed: {}", .{err});
+        return;
+    };
+
+    console.info("VBoxSF: Driver initialized", .{});
+
+    // Try to mount common share names
+    // VirtualBox doesn't have a "list shares" API, so we try known names
+    const share_names = [_][]const u8{ "shared", "share", "vboxshare", "home" };
+
+    for (share_names) |name| {
+        var mount_path: [256]u8 = undefined;
+        const path = std.fmt.bufPrint(&mount_path, "/mnt/vbox/{s}", .{name}) catch continue;
+
+        fs.vboxsf.mount(driver, name, path) catch |err| {
+            // Silently skip shares that don't exist
+            if (err != error.NotFound) {
+                console.debug("VBoxSF: Mount '{s}' failed: {}", .{ name, err });
+            }
+            continue;
+        };
+
+        console.info("VBoxSF: Mounted '{s}' at {s}", .{ name, path });
+    }
 }

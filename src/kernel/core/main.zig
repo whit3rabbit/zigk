@@ -429,6 +429,14 @@ export fn _start(boot_info: *BootInfo.BootInfo) callconv(.c) noreturn {
     init_hw.initStorage();
     if (boot_logo_active) boot_logo_instance.tick();
 
+    // Initialize VirtualBox VMMDev (Guest Additions communication)
+    // Must be after PCI init, before shared folder mounting
+    init_hw.initVmmDev();
+    if (boot_logo_active) boot_logo_instance.tick();
+
+    // Note: VBoxSF and HGFS shared folders are initialized in initStorage()
+    // after VirtIO-9P and VirtIO-FS
+
     init_fs.initBlockFs();
     if (boot_logo_active) boot_logo_instance.tick();
 
