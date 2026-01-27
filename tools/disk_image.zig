@@ -1,6 +1,4 @@
 const std = @import("std");
-const posix = std.posix;
-const c = std.c;
 
 const GptHeader = extern struct {
     signature: u64,
@@ -58,74 +56,65 @@ fn calculateCrc32(data: []const u8) u32 {
     return Crc32.hash(data);
 }
 
-fn writeAll(fd: posix.fd_t, data: []const u8) !void {
+fn pwriteAll(io: std.Io, file: std.Io.File, data: []const u8, offset: u64) !void {
     var written: usize = 0;
     while (written < data.len) {
-        const n = try posix.write(fd, data[written..]);
+        const iovecs: [1][]const u8 = .{data[written..]};
+        const n = try file.writePositional(io, &iovecs, offset + written);
         if (n == 0) return error.UnexpectedEndOfFile;
         written += n;
     }
 }
 
-fn pwriteAll(fd: posix.fd_t, data: []const u8, offset: i64) !void {
-    var written: usize = 0;
-    while (written < data.len) {
-        const result = c.pwrite(fd, data[written..].ptr, data.len - written, offset + @as(i64, @intCast(written)));
-        if (result < 0) return error.WriteError;
-        if (result == 0) return error.UnexpectedEndOfFile;
-        written += @intCast(result);
-    }
-}
-
-fn readAll(fd: posix.fd_t, buf: []u8) !usize {
+fn readAll(io: std.Io, file: std.Io.File, buf: []u8) !usize {
     var total: usize = 0;
     while (total < buf.len) {
-        const n = try posix.read(fd, buf[total..]);
+        var iovecs: [1][]u8 = .{buf[total..]};
+        const n = try file.readPositional(io, &iovecs, total);
         if (n == 0) break;
         total += n;
     }
     return total;
 }
 
-pub fn main(init: std.process.Init.Minimal) !void {
+pub fn main(init: std.process.Init) !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    // Access args vector directly on POSIX systems
-    const args = init.args.vector;
+    const io = init.io;
 
-    const prog_name = if (args.len > 0) std.mem.span(args[0]) else "disk_image";
+    // Access args via Init
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
+
+    const prog_name = if (args.len > 0) args[0] else "disk_image";
 
     if (args.len < 3) {
         std.debug.print("Usage: {s} <input_fs_img> <output_disk_img>\n", .{prog_name});
         return error.InvalidArgs;
     }
 
-    const input_path = std.mem.span(args[1]);
-    const output_path = std.mem.span(args[2]);
+    const input_path = args[1];
+    const output_path = args[2];
 
-    // Open input file
-    const input_fd = try posix.open(input_path, .{ .ACCMODE = .RDONLY }, 0);
-    defer posix.close(input_fd);
+    // Open input file using new Io API
+    const input_file = try std.Io.Dir.openFileAbsolute(io, input_path, .{});
+    defer input_file.close(io);
 
-    // Get file size via fstat
-    const stat = try posix.fstat(input_fd);
-    const input_size: usize = @intCast(stat.size);
+    // Get file size via length()
+    const input_size = try input_file.length(io);
 
     const input_data = try allocator.alloc(u8, input_size);
     defer allocator.free(input_data);
 
-    const total_read = try readAll(input_fd, input_data);
+    const total_read = try readAll(io, input_file, input_data);
     if (total_read != input_data.len) return error.UnexpectedEndOfFile;
 
-    // Create output file
-    const output_fd = try posix.open(output_path, .{
-        .ACCMODE = .WRONLY,
-        .CREAT = true,
-        .TRUNC = true
-    }, 0o644);
-    defer posix.close(output_fd);
+    // Create output file using new Io API
+    const output_file = try std.Io.Dir.createFileAbsolute(io, output_path, .{
+        .truncate = true,
+    });
+    defer output_file.close(io);
 
     // 1. Protective MBR (LBA 0)
     var mbr: [MBR_SIZE]u8 = [_]u8{0} ** MBR_SIZE;
@@ -165,7 +154,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     std.mem.writeInt(u32, mbr[MBR_PARTITION_OFFSET + 12 ..][0..4], mbr_sectors, .little);
 
     // Write MBR (LBA 0)
-    try pwriteAll(output_fd, &mbr, 0);
+    try pwriteAll(io, output_file, &mbr, 0);
 
     // 3. Prepare Partition Entries
     var entries = try allocator.alloc(GptPartitionEntry, num_partition_entries);
@@ -174,7 +163,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     // Create ESP partition entry
     var unique_guid: [16]u8 = undefined;
-    std.crypto.random.bytes(&unique_guid);
+    io.random(&unique_guid);
 
     entries[0] = .{
         .type_guid = EFI_SYSTEM_PARTITION_GUID.*,
@@ -208,19 +197,19 @@ pub fn main(init: std.process.Init.Minimal) !void {
         .partition_entry_size = partition_entry_size,
         .partition_crc32 = partition_crc32,
     };
-    std.crypto.random.bytes(&header.disk_guid);
+    io.random(&header.disk_guid);
 
     // Calc Header CRC
     header.crc32 = calculateCrc32(std.mem.asBytes(&header)[0..92]);
 
     // Write Primary Header
-    try pwriteAll(output_fd, std.mem.asBytes(&header)[0..92], @intCast(header_lba * sector_size));
+    try pwriteAll(io, output_file, std.mem.asBytes(&header)[0..92], @intCast(header_lba * sector_size));
 
     // Write Primary Partition Entries
-    try pwriteAll(output_fd, entries_bytes, @intCast(partition_entries_start_lba * sector_size));
+    try pwriteAll(io, output_file, entries_bytes, @intCast(partition_entries_start_lba * sector_size));
 
     // 5. Write Data
-    try pwriteAll(output_fd, input_data, @intCast(aligned_first_usable_lba * sector_size));
+    try pwriteAll(io, output_file, input_data, @intCast(aligned_first_usable_lba * sector_size));
     // Pad end of partition if needed (shouldn't be if we calculated logical blocks correctly)
     const written_size = input_data.len;
     const aligned_size = input_sectors * sector_size;
@@ -228,12 +217,12 @@ pub fn main(init: std.process.Init.Minimal) !void {
         const pad = try allocator.alloc(u8, aligned_size - written_size);
         defer allocator.free(pad);
         @memset(pad, 0);
-        try pwriteAll(output_fd, pad, @intCast(aligned_first_usable_lba * sector_size + written_size));
+        try pwriteAll(io, output_file, pad, @intCast(aligned_first_usable_lba * sector_size + written_size));
     }
 
     // 6. Backup Partition Entries
     const backup_entries_lba = last_usable_lba + 1;
-    try pwriteAll(output_fd, entries_bytes, @intCast(backup_entries_lba * sector_size));
+    try pwriteAll(io, output_file, entries_bytes, @intCast(backup_entries_lba * sector_size));
 
     // 7. Backup GPT Header
     var backup_header = header;
@@ -243,9 +232,9 @@ pub fn main(init: std.process.Init.Minimal) !void {
     backup_header.crc32 = 0;
     backup_header.crc32 = calculateCrc32(std.mem.asBytes(&backup_header)[0..92]);
 
-    try pwriteAll(output_fd, std.mem.asBytes(&backup_header)[0..92], @intCast(backup_header_lba * sector_size));
+    try pwriteAll(io, output_file, std.mem.asBytes(&backup_header)[0..92], @intCast(backup_header_lba * sector_size));
     const padding = [_]u8{0} ** (sector_size - 92);
-    try pwriteAll(output_fd, &padding, @intCast(backup_header_lba * sector_size + 92));
+    try pwriteAll(io, output_file, &padding, @intCast(backup_header_lba * sector_size + 92));
 
     std.debug.print("Created GPT disk image at {s}\n", .{output_path});
 }

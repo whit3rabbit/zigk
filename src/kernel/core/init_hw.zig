@@ -61,6 +61,10 @@ pub var virtio_gpu_driver: ?*video_driver.VirtioGpuDriver = null;
 pub var svga_driver: if (builtin.cpu.arch == .x86_64 or builtin.cpu.arch == .aarch64) ?*video_driver.SvgaDriver else ?*void = null;
 // BGA driver for Bochs/QEMU std VGA
 pub var bga_driver: ?*video_driver.BgaDriver = null;
+// Cirrus Logic CL-GD5446 driver for legacy VGA compatibility (x86_64 only)
+pub var cirrus_driver: if (builtin.cpu.arch == .x86_64) ?*video_driver.CirrusDriver else ?*void = null;
+// QXL paravirtualized graphics driver for SPICE (x86_64 only)
+pub var qxl_driver: if (builtin.cpu.arch == .x86_64) ?*video_driver.QxlDriver else ?*void = null;
 pub var vmmouse_enabled: bool = false;
 pub var virtio_rng_driver: ?*virtio.VirtioRngDriver = null;
 /// VirtualBox VMMDev driver (for Guest Additions / shared folders)
@@ -1104,6 +1108,16 @@ pub fn initVideo() void {
         return;
     }
 
+    // Try QXL (QEMU/KVM with SPICE) - x86_64 only
+    // QXL probed before SVGA as it's more feature-rich for SPICE environments
+    if (builtin.cpu.arch == .x86_64) {
+        if (video_driver.QxlDriver.init()) |driver| {
+            qxl_driver = driver;
+            console.info("Video: Using QXL driver", .{});
+            return;
+        }
+    }
+
     // Try VMware SVGA II (x86_64: port I/O, aarch64: MMIO)
     if (builtin.cpu.arch == .x86_64 or builtin.cpu.arch == .aarch64) {
         if (video_driver.SvgaDriver.init()) |driver| {
@@ -1118,6 +1132,16 @@ pub fn initVideo() void {
         bga_driver = driver;
         console.info("Video: Using Bochs VGA driver", .{});
         return;
+    }
+
+    // Try Cirrus Logic CL-GD5446 (legacy VGA) - x86_64 only
+    // Cirrus probed after BGA as it's a fallback for older VM configurations
+    if (builtin.cpu.arch == .x86_64) {
+        if (video_driver.CirrusDriver.init()) |driver| {
+            cirrus_driver = driver;
+            console.info("Video: Using Cirrus VGA driver", .{});
+            return;
+        }
     }
 
     // Fall back to boot framebuffer

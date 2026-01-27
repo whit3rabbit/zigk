@@ -43,9 +43,40 @@ pub const bga = struct {
     pub const BgaDriver = driver.BgaDriver;
 };
 
+// Cirrus Logic CL-GD5446 VGA driver (x86_64 only)
+// Used with QEMU -vga cirrus for legacy VM compatibility
+pub const cirrus = if (builtin.cpu.arch == .x86_64) struct {
+    pub const driver = @import("cirrus/driver.zig");
+    pub const hardware = @import("cirrus/hardware.zig");
+    pub const regs = @import("cirrus/regs.zig");
+
+    pub const CirrusDriver = driver.CirrusDriver;
+} else struct {
+    pub const CirrusDriver = void;
+};
+
+// QXL paravirtualized graphics driver (x86_64 only)
+// Used with QEMU/KVM -vga qxl for SPICE support
+pub const qxl = if (builtin.cpu.arch == .x86_64) struct {
+    pub const driver = @import("qxl/driver.zig");
+    pub const hardware = @import("qxl/hardware.zig");
+    pub const rom = @import("qxl/rom.zig");
+    pub const regs = @import("qxl/regs.zig");
+
+    pub const QxlDriver = driver.QxlDriver;
+    pub const RomParser = rom.RomParser;
+    pub const ModeInfo = rom.ModeInfo;
+} else struct {
+    pub const QxlDriver = void;
+    pub const RomParser = void;
+    pub const ModeInfo = void;
+};
+
 // Convenience type aliases
 pub const BufferedFramebufferDriver = framebuffer.BufferedFramebufferDriver;
 pub const DirectFramebufferDriver = framebuffer.DirectFramebufferDriver;
 pub const VirtioGpuDriver = virtio_gpu.VirtioGpuDriver;
 pub const SvgaDriver = if (builtin.cpu.arch == .x86_64 or builtin.cpu.arch == .aarch64) svga.SvgaDriver else void;
 pub const BgaDriver = bga.BgaDriver;
+pub const CirrusDriver = if (builtin.cpu.arch == .x86_64) cirrus.CirrusDriver else void;
+pub const QxlDriver = if (builtin.cpu.arch == .x86_64) qxl.QxlDriver else void;

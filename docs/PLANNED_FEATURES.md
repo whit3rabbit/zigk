@@ -2,6 +2,9 @@
 
 > When a feature is completed, move it to `FEATURES.md` using the same `- **Name**: one-sentence description` format.
 
+## Build System Fixes (Priority)
+- **disk_image.zig Zig 0.16 Compat**: `tools/disk_image.zig:109` uses `posix.open()` which was removed in Zig 0.16 - migrate to new `std.fs` or `std.Io.Dir` APIs
+
 ## Network Stack
 - *(mDNS/DNS-SD moved to FEATURES.md)*
 
@@ -10,8 +13,8 @@
 - **GPT Write**: Partition modification (read-only only)
 
 ## Display
-- **QXL Driver**: SPICE acceleration
-- **Cirrus VGA**: Legacy graphics for older VMs
+- **QXL 2D Accel**: Command rings for hardware-accelerated 2D operations (Phase 2)
+- **QXL Cursor**: Hardware cursor support via QXL command interface
 
 ## Paravirtualized Devices
 - **VMXNET3**: VMware 10GbE performance
