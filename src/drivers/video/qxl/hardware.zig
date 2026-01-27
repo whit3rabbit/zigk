@@ -152,3 +152,97 @@ pub fn surfaceFormatFromBpp(bpp: u16) u32 {
         else => SURFACE_FMT_32_xRGB,
     };
 }
+
+// =============================================================================
+// QXL 2D Acceleration Structures
+// =============================================================================
+
+/// QXL Command Types for the command ring
+pub const CmdType = enum(u8) {
+    nop = 0,
+    draw = 1,
+    update = 2,
+    cursor = 3,
+    surface = 4,
+};
+
+/// QXL Draw Types for drawable commands
+pub const DrawType = enum(u8) {
+    fill = 0,
+    opaque_draw = 1,
+    copy = 2,
+    transparent = 3,
+    alpha_blend = 4,
+    copy_bits = 5,
+    blend = 6,
+    blackness = 7,
+    whiteness = 8,
+    invers = 9,
+};
+
+/// Rectangle structure for QXL commands
+pub const QxlRect = extern struct {
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+};
+
+/// Point structure for QXL commands
+pub const QxlPoint = extern struct {
+    x: i32,
+    y: i32,
+};
+
+/// Clip descriptor for drawable commands
+pub const QxlClip = extern struct {
+    type: u8,
+    _pad: [7]u8 = .{0} ** 7,
+    data: u64,
+};
+
+/// Release info for tracking command completion
+pub const QxlReleaseInfo = extern struct {
+    id: u64,
+    next: u64,
+};
+
+/// Brush descriptor for fill operations
+pub const QxlBrush = extern struct {
+    type: u8,
+    _pad: [3]u8 = .{0} ** 3,
+    color: u32,
+};
+
+/// QMask structure (used in fill operations, typically zeroed for simple fills)
+pub const QxlQMask = extern struct {
+    flags: u8 = 0,
+    _pad: [3]u8 = .{0} ** 3,
+    pos: QxlPoint = .{ .x = 0, .y = 0 },
+    bitmap: u64 = 0,
+};
+
+/// Fill command data
+pub const QxlFill = extern struct {
+    brush: QxlBrush,
+    rop_descriptor: u16,
+    _pad: [6]u8 = .{0} ** 6,
+    mask: QxlQMask,
+};
+
+// Brush types
+pub const BRUSH_TYPE_NONE: u8 = 0;
+pub const BRUSH_TYPE_SOLID: u8 = 1;
+pub const BRUSH_TYPE_PATTERN: u8 = 2;
+
+// Clip types
+pub const CLIP_TYPE_NONE: u8 = 0;
+pub const CLIP_TYPE_RECTS: u8 = 1;
+
+// ROP descriptors (common raster operations)
+pub const ROP_COPY: u16 = 0x00CC; // SRCCOPY
+pub const ROP_XOR: u16 = 0x0066; // SRCINVERT
+pub const ROP_AND: u16 = 0x0088; // SRCAND
+pub const ROP_OR: u16 = 0x00EE; // SRCPAINT
+pub const ROP_CLEAR: u16 = 0x0000; // BLACKNESS
+pub const ROP_SET: u16 = 0x00FF; // WHITENESS

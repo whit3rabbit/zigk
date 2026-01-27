@@ -103,7 +103,7 @@ Zig-based microkernel for x86_64 and AArch64 with custom UEFI bootloader.
 - **VirtIO-GPU 2D**: Scanout, resource tracking, host blitting, runtime resolution changes
 - **VMware SVGA II**: Cross-arch driver (x86_64 I/O, aarch64 MMIO) with 2D accel, hardware cursor, and runtime resolution changes
 - **Bochs VGA**: VBE Dispi interface for QEMU/Bochs/VirtualBox with cross-arch register access
-- **QXL Driver**: Framebuffer mode for QEMU/KVM SPICE with ROM-based mode enumeration
+- **QXL Driver**: Framebuffer mode with 2D command ring acceleration for QEMU/KVM SPICE
 - **Cirrus VGA**: CL-GD5446 legacy driver for older VM configurations with linear framebuffer
 - **ANSI Terminal**: State machine parser for colors, bold, inverse
 - **Dual-Mode Framebuffer**: Direct-to-VRAM and back-buffered paths

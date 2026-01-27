@@ -21,6 +21,9 @@ const interface = @import("../interface.zig");
 const hw = @import("hardware.zig");
 const rom = @import("rom.zig");
 const regs = @import("regs.zig");
+const ram = @import("ram.zig");
+const drawable = @import("drawable.zig");
+const commands = @import("commands.zig");
 const console = @import("console");
 
 pub const QxlDriver = struct {
@@ -48,6 +51,18 @@ pub const QxlDriver = struct {
 
     /// PCI device info (for reference)
     pci_dev: ?pci.PciDevice = null,
+
+    /// RAM manager for 2D acceleration command rings
+    ram_manager: ?ram.RamManager = null,
+
+    /// Pool of pre-allocated drawable structures
+    drawable_pool: ?drawable.DrawablePool = null,
+
+    /// Whether 2D acceleration is enabled
+    accel_enabled: bool = false,
+
+    /// Release ID counter for tracking command completion
+    release_id_counter: u64 = 0,
 
     const Self = @This();
 
@@ -156,6 +171,47 @@ pub const QxlDriver = struct {
         // 8. Reset device
         io.reset();
 
+        // 9. Initialize 2D acceleration (optional - driver works without it)
+        var ram_manager: ?ram.RamManager = null;
+        var drawable_pool: ?drawable.DrawablePool = null;
+        var accel_enabled = false;
+
+        // Get BAR2 (RAM) for command rings
+        const bar2 = dev.bar[hw.BAR_RAM];
+        if (bar2.base != 0 and bar2.size > 0) {
+            const bar2_phys = bar2.base & 0xFFFFFFF0;
+
+            // Initialize RAM manager
+            if (ram.RamManager.init(bar2_phys, bar2.size)) |rm| {
+                ram_manager = rm;
+                console.info("QXL: RAM manager initialized at 0x{x}", .{bar2_phys});
+
+                // Initialize drawable pool
+                if (drawable.DrawablePool.init()) |dp| {
+                    drawable_pool = dp;
+                    console.info("QXL: Drawable pool initialized with {} slots", .{
+                        drawable.DrawablePool.POOL_SIZE,
+                    });
+
+                    // Setup memory slot 0 for drawable pool
+                    if (ram_manager.?.setupMemSlot(0, dp.phys_base, drawable.DrawablePool.POOL_SIZE * @sizeOf(drawable.QxlDrawable))) {
+                        // Tell device about the memory slot
+                        io.addMemslot(0);
+                        accel_enabled = true;
+                        console.info("QXL: 2D acceleration enabled", .{});
+                    } else {
+                        console.warn("QXL: Failed to setup memory slot, acceleration disabled", .{});
+                    }
+                } else {
+                    console.warn("QXL: Failed to allocate drawable pool, acceleration disabled", .{});
+                }
+            } else {
+                console.warn("QXL: Failed to initialize RAM manager, acceleration disabled", .{});
+            }
+        } else {
+            console.debug("QXL: BAR2 (RAM) not available, acceleration disabled", .{});
+        }
+
         // Store instance
         instance = Self{
             .io = io,
@@ -164,6 +220,9 @@ pub const QxlDriver = struct {
             .framebuffer_virt = fb_virt,
             .vram_size = vram_size,
             .pci_dev = dev,
+            .ram_manager = ram_manager,
+            .drawable_pool = drawable_pool,
+            .accel_enabled = accel_enabled,
         };
 
         initialized = true;
@@ -171,7 +230,7 @@ pub const QxlDriver = struct {
         // Log available modes
         instance.rom_parser.logModes();
 
-        console.info("QXL: Driver initialized successfully", .{});
+        console.info("QXL: Driver initialized successfully (accel={})", .{accel_enabled});
 
         return &instance;
     }
@@ -307,6 +366,63 @@ pub const QxlDriver = struct {
         self.framebuffer_virt[pixel_offset] = val;
     }
 
+    /// Attempt accelerated fill rectangle using QXL 2D command ring
+    /// Returns true if acceleration was used, false to fall back to software
+    fn fillRectAccel(self: *Self, x: u32, y: u32, w: u32, h: u32, color: u32) bool {
+        // Check if acceleration is available
+        if (!self.accel_enabled) return false;
+
+        var rm = &(self.ram_manager orelse return false);
+        var dp = &(self.drawable_pool orelse return false);
+
+        // Process any completed commands (free drawables back to pool)
+        while (rm.popRelease()) |release_addr| {
+            // Convert physical address back to drawable pointer
+            // The release ring gives us the physical address of the completed drawable
+            const pool_base = dp.phys_base;
+            if (release_addr >= pool_base) {
+                const offset = release_addr - pool_base;
+                const index = offset / @sizeOf(drawable.QxlDrawable);
+                if (index < drawable.DrawablePool.POOL_SIZE) {
+                    const drawable_ptr = &dp.virt_base[index];
+                    dp.free(drawable_ptr);
+                }
+            }
+        }
+
+        // Get next release ID
+        const release_id = self.release_id_counter;
+        self.release_id_counter +%= 1;
+
+        // Build the fill command
+        const draw = commands.buildFill(
+            dp,
+            @intCast(x),
+            @intCast(y),
+            w,
+            h,
+            color,
+            release_id,
+        ) orelse return false;
+
+        // Get physical address for command submission
+        const phys_addr = dp.toPhysical(draw) orelse {
+            dp.free(draw);
+            return false;
+        };
+
+        // Push command to ring
+        if (!rm.pushCommand(phys_addr, hw.CmdType.draw)) {
+            dp.free(draw);
+            return false;
+        }
+
+        // Notify device of new command
+        self.io.notifyCmd();
+
+        return true;
+    }
+
     fn fillRect(ctx: *anyopaque, x: u32, y: u32, w: u32, h: u32, color: interface.Color) void {
         const self: *Self = @ptrCast(@alignCast(ctx));
 
@@ -318,6 +434,12 @@ pub const QxlDriver = struct {
 
         const pixel_color: u32 = (@as(u32, color.r) << 16) | (@as(u32, color.g) << 8) | color.b;
 
+        // Try hardware-accelerated path first
+        if (self.fillRectAccel(x, y, clip_w, clip_h, pixel_color)) {
+            return;
+        }
+
+        // Fall back to software path
         const stride = self.pitch / 4;
         const max_offset = self.vram_size / 4;
 
