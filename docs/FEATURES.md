@@ -117,6 +117,8 @@ Zig-based microkernel for x86_64 and AArch64 with custom UEFI bootloader.
 - **Longest-Path Mount**: 8-slot registry with most-specific resolution
 - **Unmount Protection**: Reference counting prevents use-after-free
 - **SFS Filesystem**: Async I/O pattern with deferred block deletion
+- **Directory Operations**: mkdir/rmdir fully supported on writable filesystems (SFS at /mnt)
+- **Multi-Filesystem VFS**: InitRD (read-only root at /), DevFS (virtual at /dev), SFS (read-write at /mnt)
 - **MBR/GPT Detection**: Automatic partition table parsing
 - **InitRD (USTAR)**: Read-only TAR with path traversal rejection
 - **VirtIO-9P**: 9P2000.u host-guest shared folders for QEMU/KVM with VFS integration

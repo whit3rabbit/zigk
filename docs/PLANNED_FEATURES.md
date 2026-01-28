@@ -36,5 +36,3 @@
 - **StorVSC/NetVSC**: Paravirtualized storage/network
 - **Synthetic Interrupt Controller**
 
-## Libc Limitations
-- **Directory Ops**: mkdir/rmdir return EROFS on InitRD (read-only filesystem)

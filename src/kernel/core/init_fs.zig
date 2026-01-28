@@ -11,6 +11,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const console = @import("console");
 const fs = @import("fs");
+const meta = @import("fs").meta;
 const devfs = @import("devfs");
 const heap = @import("heap");
 const fd_mod = @import("fd");
@@ -112,5 +113,43 @@ fn testBlockFs() void {
         } else {
             console.err("SFS Test: FAILED (read 0 bytes)", .{});
         }
+    }
+
+    // Test directory operations
+    console.info("SFS: Testing directory operations...", .{});
+
+    // Create directory
+    const dir_path = "/mnt/testdir";
+    fs.vfs.Vfs.mkdir(dir_path, 0o755) catch |err| {
+        console.err("SFS Test: mkdir failed: {}", .{err});
+        return;
+    };
+    console.info("SFS Test: Created {s}", .{dir_path});
+
+    // Verify it exists by stat
+    const meta_result = fs.vfs.Vfs.statPath(dir_path) orelse {
+        console.err("SFS Test: statPath returned null", .{});
+        return;
+    };
+
+    if (meta_result.mode & meta.S_IFDIR != 0) {
+        console.info("SFS Test: Directory verified (mode=0x{x})", .{meta_result.mode});
+    } else {
+        console.err("SFS Test: FAILED (not a directory, mode=0x{x})", .{meta_result.mode});
+        return;
+    }
+
+    // Remove directory
+    fs.vfs.Vfs.rmdir(dir_path) catch |err| {
+        console.err("SFS Test: rmdir failed: {}", .{err});
+        return;
+    };
+    console.info("SFS Test: Removed {s}", .{dir_path});
+
+    // Verify removal (stat should return null)
+    if (fs.vfs.Vfs.statPath(dir_path)) |_| {
+        console.err("SFS Test: FAILED (directory still exists after rmdir)", .{});
+    } else {
+        console.info("SFS Directory Test: PASSED", .{});
     }
 }

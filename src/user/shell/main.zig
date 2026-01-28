@@ -29,16 +29,22 @@ fn tokenize(input: []const u8, tokens: *[8][]const u8) usize {
 // Print human-readable error message for syscall errors
 fn printError(err: anyerror) void {
     const msg = switch (err) {
-        error.ENOENT => "No such file or directory",
-        error.ENOTDIR => "Not a directory",
-        error.EISDIR => "Is a directory",
-        error.EACCES => "Permission denied",
-        error.EEXIST => "File exists",
-        error.ENOTEMPTY => "Directory not empty",
-        error.EBUSY => "Device or resource busy",
-        error.ENOMEM => "Out of memory",
-        error.ENOSPC => "No space left on device",
-        error.EROFS => "Read-only file system",
+        error.NoSuchFileOrDirectory => "No such file or directory",
+        error.NotADirectory => "Not a directory",
+        error.IsADirectory => "Is a directory",
+        error.AccessDenied => "Permission denied",
+        error.PermissionDenied => "Operation not permitted",
+        error.FileExists => "File exists",
+        error.DirectoryNotEmpty => "Directory not empty",
+        error.DeviceBusy => "Device or resource busy",
+        error.OutOfMemory => "Out of memory",
+        error.NoSpace => "No space left on device",
+        error.ReadOnlyFilesystem => "Read-only file system",
+        error.FilenameTooLong => "Filename too long",
+        error.TooManySymbolicLinks => "Too many levels of symbolic links",
+        error.InvalidArgument => "Invalid argument",
+        error.BadFileDescriptor => "Bad file descriptor",
+        error.IoError => "I/O error",
         else => "Unknown error",
     };
     syscall.print(msg);
@@ -178,6 +184,11 @@ fn cmd_mkdir(path: []const u8) void {
         syscall.print(path);
         syscall.print("': ");
         printError(err);
+
+        // Add helpful hint for read-only filesystem errors
+        if (err == error.ReadOnlyFilesystem) {
+            syscall.print("hint: InitRD (/) is read-only. Try /mnt/ for writable storage\n");
+        }
         return;
     };
 }
@@ -204,6 +215,11 @@ fn cmd_rmdir(path: []const u8) void {
         syscall.print(path);
         syscall.print("': ");
         printError(err);
+
+        // Add helpful hint for read-only filesystem errors
+        if (err == error.ReadOnlyFilesystem) {
+            syscall.print("hint: InitRD (/) is read-only. Try /mnt/ for writable storage\n");
+        }
         return;
     };
 }

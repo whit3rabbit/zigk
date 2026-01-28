@@ -66,8 +66,14 @@ pub fn sfsRead(file_desc: *fd.FileDescriptor, buf: []u8) isize {
 
     if (sector_count > 1 and sector_count <= MAX_BATCH_SECTORS) {
         const total_bytes = @as(usize, sector_count_u16) * 512;
+
+        // SECURITY: Allocate on heap to prevent stack overflow (16KB is too large for kernel stack)
+        const alloc = heap.allocator();
+        const sector_buf = alloc.alloc(u8, MAX_BATCH_SECTORS * 512) catch return -12; // ENOMEM
+        defer alloc.free(sector_buf);
+
         // SECURITY: Zero-initialize to prevent information leak if DMA fails or returns partial data
-        var sector_buf: [MAX_BATCH_SECTORS * 512]u8 = [_]u8{0} ** (MAX_BATCH_SECTORS * 512);
+        @memset(sector_buf, 0);
 
         const end_block = phys_block_start + sector_count_u16 - 1;
         if (end_block >= file.fs.superblock.total_blocks) {
@@ -348,14 +354,37 @@ pub fn sfsOpen(ctx: ?*anyopaque, path: []const u8, flags: u32) vfs.Error!*fd.Fil
     const name = if (path.len > 0 and path[0] == '/') path[1..] else path;
 
     if (!sfs_alloc.isValidFilename(name)) return vfs.Error.AccessDenied;
-    if (name.len == 0 or std.mem.eql(u8, name, ".")) return vfs.Error.IsDirectory;
+
+    // Handle directory opening (root directory "/" or ".")
+    if (name.len == 0 or std.mem.eql(u8, name, ".")) {
+        // Create a directory file descriptor for getdents support
+        const file_ctx = alloc.create(t.SfsFile) catch return vfs.Error.NoMemory;
+        file_ctx.* = .{
+            .fs = self,
+            .start_block = 0, // Not used for directory
+            .size = 0, // Not used for directory
+            .entry_idx = 0, // Root directory
+            .mode = meta.S_IFDIR | 0o755, // Directory mode
+            .uid = 0,
+            .gid = 0,
+        };
+
+        // Create FD - use sfs_ops which includes our getdents function
+        return fd.createFd(&sfs_ops, flags, file_ctx) catch {
+            alloc.destroy(file_ctx);
+            return vfs.Error.NoMemory;
+        };
+    }
+
     if (name.len >= 32) return vfs.Error.NameTooLong;
 
     var entry_idx: ?u32 = null;
     var entry: t.DirEntry = undefined;
 
-    var dir_buf: [t.ROOT_DIR_BLOCKS * 512]u8 = undefined;
-    sfs_io.readDirectoryAsync(self, &dir_buf) catch return vfs.Error.IOError;
+    // SECURITY: Allocate directory buffer on heap to prevent stack overflow
+    const dir_buf = alloc.alloc(u8, t.ROOT_DIR_BLOCKS * 512) catch return vfs.Error.NoMemory;
+    defer alloc.free(dir_buf);
+    sfs_io.readDirectoryAsync(self, dir_buf) catch return vfs.Error.IOError;
 
     const total_entries = t.ROOT_DIR_BLOCKS * 4;
     var idx: u32 = 0;
@@ -461,7 +490,7 @@ pub fn sfsOpen(ctx: ?*anyopaque, path: []const u8, flags: u32) vfs.Error!*fd.Fil
                 }
 
                 // Re-read directory under lock to get current state
-                sfs_io.readDirectoryAsync(self, &dir_buf) catch {
+                sfs_io.readDirectoryAsync(self, dir_buf) catch {
                     break :blk vfs.Error.IOError;
                 };
 
@@ -551,17 +580,21 @@ pub fn sfsUnlink(ctx: ?*anyopaque, path: []const u8) vfs.Error!void {
     if (!sfs_alloc.isValidFilename(name)) return vfs.Error.AccessDenied;
     if (name.len == 0 or name.len >= 32) return vfs.Error.NotFound;
 
+    // SECURITY: Allocate directory buffer on heap to prevent stack overflow
+    const alloc = heap.allocator();
+    const dir_buf_unlink = alloc.alloc(u8, t.ROOT_DIR_BLOCKS * 512) catch return vfs.Error.NoMemory;
+    defer alloc.free(dir_buf_unlink);
+
     // First pass: find the entry index (unlocked, for efficiency)
     var found_idx: ?u32 = null;
     {
-        var dir_buf: [t.ROOT_DIR_BLOCKS * 512]u8 = undefined;
-        sfs_io.readDirectoryAsync(self, &dir_buf) catch return vfs.Error.IOError;
+        sfs_io.readDirectoryAsync(self, dir_buf_unlink) catch return vfs.Error.IOError;
 
         const total_entries = t.ROOT_DIR_BLOCKS * 4;
         var idx: u32 = 0;
         while (idx < total_entries) : (idx += 1) {
             const offset = idx * 128;
-            const e: *const t.DirEntry = @ptrCast(@alignCast(&dir_buf[offset]));
+            const e: *const t.DirEntry = @ptrCast(@alignCast(&dir_buf_unlink[offset]));
 
             if (e.flags == 1) {
                 const e_name = std.mem.sliceTo(&e.name, 0);
@@ -653,8 +686,11 @@ pub fn sfsStatPath(ctx: ?*anyopaque, path: []const u8) ?vfs.FileMeta {
     if (!sfs_alloc.isValidFilename(name)) return null;
     if (name.len == 0 or name.len >= 32) return null;
 
-    var dir_buf: [t.ROOT_DIR_BLOCKS * 512]u8 = undefined;
-    sfs_io.readDirectoryAsync(self, &dir_buf) catch return null;
+    // SECURITY: Allocate directory buffer on heap to prevent stack overflow
+    const alloc = heap.allocator();
+    const dir_buf = alloc.alloc(u8, t.ROOT_DIR_BLOCKS * 512) catch return null;
+    defer alloc.free(dir_buf);
+    sfs_io.readDirectoryAsync(self, dir_buf) catch return null;
 
     const total_entries = t.ROOT_DIR_BLOCKS * 4;
     var idx: u32 = 0;
@@ -688,11 +724,15 @@ pub fn sfsChmod(ctx: ?*anyopaque, path: []const u8, mode: u32) vfs.Error!void {
     if (!sfs_alloc.isValidFilename(name)) return vfs.Error.AccessDenied;
     if (name.len == 0 or name.len >= 32) return vfs.Error.NotFound;
 
+    // SECURITY: Allocate directory buffer on heap to prevent stack overflow
+    const alloc = heap.allocator();
+    const dir_buf = alloc.alloc(u8, t.ROOT_DIR_BLOCKS * 512) catch return vfs.Error.NoMemory;
+    defer alloc.free(dir_buf);
+
     const held = self.alloc_lock.acquire();
     defer held.release();
 
-    var dir_buf: [t.ROOT_DIR_BLOCKS * 512]u8 = undefined;
-    sfs_io.readDirectoryAsync(self, &dir_buf) catch return vfs.Error.IOError;
+    sfs_io.readDirectoryAsync(self, dir_buf) catch return vfs.Error.IOError;
 
     const total_entries = t.ROOT_DIR_BLOCKS * 4;
     var idx: u32 = 0;
@@ -726,11 +766,15 @@ pub fn sfsChown(ctx: ?*anyopaque, path: []const u8, uid: ?u32, gid: ?u32) vfs.Er
     if (!sfs_alloc.isValidFilename(name)) return vfs.Error.AccessDenied;
     if (name.len == 0 or name.len >= 32) return vfs.Error.NotFound;
 
+    // SECURITY: Allocate directory buffer on heap to prevent stack overflow
+    const alloc = heap.allocator();
+    const dir_buf = alloc.alloc(u8, t.ROOT_DIR_BLOCKS * 512) catch return vfs.Error.NoMemory;
+    defer alloc.free(dir_buf);
+
     const held = self.alloc_lock.acquire();
     defer held.release();
 
-    var dir_buf: [t.ROOT_DIR_BLOCKS * 512]u8 = undefined;
-    sfs_io.readDirectoryAsync(self, &dir_buf) catch return vfs.Error.IOError;
+    sfs_io.readDirectoryAsync(self, dir_buf) catch return vfs.Error.IOError;
 
     const total_entries = t.ROOT_DIR_BLOCKS * 4;
     var idx: u32 = 0;
@@ -790,6 +834,12 @@ pub fn sfsMkdir(ctx: ?*anyopaque, path: []const u8, mode: u32) vfs.Error!void {
     // Reject root directory creation
     if (std.mem.eql(u8, name, ".")) return vfs.Error.InvalidPath;
 
+    // SECURITY: Allocate directory buffer on heap to prevent stack overflow
+    // 8704 bytes is too large for kernel stack (32KB total, includes syscall frame)
+    const alloc = heap.allocator();
+    const dir_buf = alloc.alloc(u8, t.ROOT_DIR_BLOCKS * 512) catch return vfs.Error.NoMemory;
+    defer alloc.free(dir_buf);
+
     // SECURITY: Hold lock through entire metadata update to prevent TOCTOU
     const held = self.alloc_lock.acquire();
     defer held.release();
@@ -800,8 +850,7 @@ pub fn sfsMkdir(ctx: ?*anyopaque, path: []const u8, mode: u32) vfs.Error!void {
     }
 
     // Re-read directory under lock to get current state
-    var dir_buf: [t.ROOT_DIR_BLOCKS * 512]u8 = undefined;
-    sfs_io.readDirectoryAsync(self, &dir_buf) catch return vfs.Error.IOError;
+    sfs_io.readDirectoryAsync(self, dir_buf) catch return vfs.Error.IOError;
 
     // Scan for conflicts and find free slot
     var free_slot: ?u32 = null;
@@ -929,18 +978,22 @@ pub fn sfsRmdir(ctx: ?*anyopaque, path: []const u8) vfs.Error!void {
     // Cannot remove root directory
     if (std.mem.eql(u8, name, ".")) return vfs.Error.AccessDenied;
 
+    // SECURITY: Allocate directory buffer on heap to prevent stack overflow
+    const alloc = heap.allocator();
+    const dir_buf_search = alloc.alloc(u8, t.ROOT_DIR_BLOCKS * 512) catch return vfs.Error.NoMemory;
+    defer alloc.free(dir_buf_search);
+
     // SECURITY: First pass - find entry index unlocked for efficiency
     var found_idx: ?u32 = null;
     {
-        var dir_buf: [t.ROOT_DIR_BLOCKS * 512]u8 = undefined;
-        sfs_io.readDirectoryAsync(self, &dir_buf) catch return vfs.Error.IOError;
+        sfs_io.readDirectoryAsync(self, dir_buf_search) catch return vfs.Error.IOError;
 
         const total_entries = t.ROOT_DIR_BLOCKS * 4;
         var idx: u32 = 0;
         while (idx < total_entries) : (idx += 1) {
             // SECURITY: Use checked arithmetic for offset calculation
             const offset = std.math.mul(usize, idx, 128) catch return vfs.Error.IOError;
-            const e: *const t.DirEntry = @ptrCast(@alignCast(&dir_buf[offset]));
+            const e: *const t.DirEntry = @ptrCast(@alignCast(&dir_buf_search[offset]));
 
             if (e.flags == 1) {
                 const e_name = std.mem.sliceTo(&e.name, 0);
@@ -1202,7 +1255,92 @@ pub const sfs_ops = fd.FileOps{
     .mmap = null,
     .poll = null,
     .truncate = sfsTruncate,
+    .getdents = sfsGetdents,
 };
+
+/// Get directory entries for SFS root directory
+/// NOTE: dirp is a user-space pointer that must be validated by the caller (syscall layer)
+pub fn sfsGetdents(file_desc: *fd.FileDescriptor, dirp: usize, count: usize) isize {
+    const DT_DIR: u8 = 4;
+    const DT_REG: u8 = 8;
+
+    const held = file_desc.lock.acquire();
+    defer held.release();
+
+    const file: *t.SfsFile = @ptrCast(@alignCast(file_desc.private_data));
+    const sfs = file.fs;
+
+    // SECURITY: Allocate directory buffer on heap to prevent stack overflow
+    const alloc = heap.allocator();
+    const dir_buf = alloc.alloc(u8, t.ROOT_DIR_BLOCKS * t.SECTOR_SIZE) catch return -12; // ENOMEM
+    defer alloc.free(dir_buf);
+
+    // Read root directory entries
+    var i: u32 = 0;
+    while (i < t.ROOT_DIR_BLOCKS) : (i += 1) {
+        const sector = sfs.superblock.root_dir_start + i;
+        const offset = i * t.SECTOR_SIZE;
+        sfs_io.readSector(sfs.device_fd, sector, dir_buf[offset..][0..t.SECTOR_SIZE]) catch return -5;
+    }
+
+    const entries: [*]const t.DirEntry = @ptrCast(@alignCast(dir_buf.ptr));
+    const start_index = std.math.cast(usize, file_desc.position) orelse return -22;
+
+    var bytes_written: usize = 0;
+
+    // SECURITY NOTE: This function assumes dirp has been validated as a valid user address
+    // by the syscall layer before being called. We use volatile writes to prevent compiler
+    // optimization from reordering user-space writes.
+    const user_buf: [*]volatile u8 = @ptrFromInt(dirp);
+
+    var idx: usize = start_index;
+    while (idx < t.MAX_FILES) : (idx += 1) {
+        const entry = &entries[idx];
+
+        // Skip inactive entries
+        if ((entry.flags & 1) == 0) continue;
+
+        // Get null-terminated name
+        const name_end = std.mem.indexOfScalar(u8, &entry.name, 0) orelse entry.name.len;
+        const name = entry.name[0..name_end];
+        if (name.len == 0) continue;
+
+        const name_len = name.len;
+        const reclen = @sizeOf(uapi.dirent.Dirent64) + name_len + 1;
+        const aligned_reclen = std.mem.alignForward(usize, reclen, 8);
+
+        if (bytes_written + aligned_reclen > count) {
+            break;
+        }
+
+        var ent: uapi.dirent.Dirent64 = .{
+            .d_ino = idx + 1,
+            .d_off = @intCast(idx + 1),
+            .d_reclen = @intCast(aligned_reclen),
+            .d_type = if (entry.isDirectory()) DT_DIR else DT_REG,
+            .d_name = undefined,
+        };
+
+        // Copy dirent structure
+        const ent_bytes = std.mem.asBytes(&ent);
+        for (ent_bytes, 0..) |byte, j| {
+            user_buf[bytes_written + j] = byte;
+        }
+
+        // Copy filename
+        const name_offset = bytes_written + @offsetOf(uapi.dirent.Dirent64, "d_name");
+        for (name, 0..) |byte, j| {
+            user_buf[name_offset + j] = byte;
+        }
+        // Null terminator
+        user_buf[name_offset + name_len] = 0;
+
+        bytes_written += aligned_reclen;
+        file_desc.position = idx + 1;
+    }
+
+    return std.math.cast(isize, bytes_written) orelse -75;
+}
 
 fn sfsTruncate(file_desc: *fd.FileDescriptor, length: u64) error{ AccessDenied, IOError }!void {
     // SECURITY: Use checked cast to prevent truncation on hypothetical 32-bit targets

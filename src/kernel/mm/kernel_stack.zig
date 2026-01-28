@@ -34,8 +34,8 @@ pub const PAGE_SIZE: usize = pmm.PAGE_SIZE;
 /// AArch64 needs more due to larger SyscallFrame (288 bytes vs 128 bytes on x86_64).
 /// This compensates for the 2.25x larger exception frames.
 pub const STACK_PAGES: usize = switch (builtin.cpu.arch) {
-    .aarch64 => 16, // 64 KB - matches x86_64's effective frame depth
-    .x86_64 => 8, // 32 KB - sufficient for x86_64
+    .aarch64 => 16, // 64 KB
+    .x86_64 => 16, // 64 KB - increased from 8 pages due to deep SFS call chains
     else => @compileError("Unsupported architecture for kernel stacks"),
 };
 

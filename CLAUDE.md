@@ -315,6 +315,37 @@ pub fn sys_example(arg1: usize) SyscallError!usize {
 *   **Mount**: Loaded by UEFI bootloader, passed to kernel via BootInfo, mounted at `/` by `init_proc.zig`.
 *   **Security**: Read-only. Paths must be canonicalized to prevent `../../` traversal.
 
+## Filesystem Layout
+
+zk uses a multi-filesystem VFS architecture with distinct mount points:
+
+| Mount Point | Filesystem | Read/Write | Purpose |
+|-------------|------------|------------|---------|
+| `/` | InitRD | Read-only | Boot image (USTAR tar) |
+| `/dev` | DevFS | Virtual | Device files |
+| `/mnt` | SFS | Read-write | Persistent storage (/dev/sda) |
+
+**Important**: Directory operations (mkdir/rmdir) only work on writable filesystems.
+*   **InitRD (/)**: Read-only by design for security. Attempting `mkdir /testdir` returns EROFS.
+*   **SFS (/mnt)**: Fully writable. Commands like `mkdir /mnt/testdir` work correctly.
+
+**SFS Limitations**:
+*   Flat filesystem (no nested subdirectories under /mnt)
+*   64 files/directories maximum
+*   32-character filename limit
+
+**Example Usage**:
+```bash
+# These commands FAIL with EROFS (by design)
+mkdir /testdir
+rmdir /somedir
+
+# These commands SUCCEED (SFS is writable)
+mkdir /mnt/mydir
+echo "test" > /mnt/mydir/file.txt
+rmdir /mnt/mydir
+```
+
 ## File Descriptors
 *   **Location**: `src/kernel/fd.zig`
 *   **Purpose**: Manage file descriptors (FDs) which abstract access to files, devices, sockets, and pipes.
