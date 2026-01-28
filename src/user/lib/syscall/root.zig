@@ -35,6 +35,7 @@ pub const mkdir = io.mkdir;
 pub const rmdir = io.rmdir;
 pub const chdir = io.chdir;
 pub const getcwd = io.getcwd;
+pub const getdents64 = io.getdents64;
 pub const ioctl = io.ioctl;
 pub const poll = io.poll;
 pub const PollFd = io.PollFd;

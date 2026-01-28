@@ -658,13 +658,13 @@ pub const VirtioInputDriver = struct {
 
                 // Debug: log keyboard events
                 if (self.device_type == .keyboard) {
-                    console.debug("VirtIO-KB: code={d} value={d}", .{ event.code, event.value });
+                    // console.debug("VirtIO-KB: code={d} value={d}", .{ event.code, event.value });
                 }
 
                 // For keyboard devices, also inject to keyboard subsystem for getchar()
                 if (self.device_type == .keyboard and event.value != 0) {
                     if (linuxKeycodeToAscii(event.code, self.shift_pressed)) |char| {
-                        console.debug("VirtIO-KB: injecting char '{c}' (0x{X:0>2})", .{ char, char });
+                        // console.debug("VirtIO-KB: injecting char '{c}' (0x{X:0>2})", .{ char, char });
                         keyboard.injectChar(char);
                     }
                     // Track modifier state

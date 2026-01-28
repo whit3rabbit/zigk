@@ -756,6 +756,267 @@ pub fn sfsChown(ctx: ?*anyopaque, path: []const u8, uid: ?u32, gid: ?u32) vfs.Er
     return vfs.Error.NotFound;
 }
 
+/// Create a directory in the SFS filesystem.
+///
+/// SECURITY NOTES:
+/// - Validates path to reject nested paths (SFS is flat - no subdirectories)
+/// - Uses TOCTOU prevention by holding alloc_lock during entire metadata update
+/// - Uses checked arithmetic for all index calculations
+/// - Directories are metadata-only (no block allocation needed)
+///
+/// SFS Directory Representation:
+/// - mode = S_IFDIR | 0o755 (directory type + permissions)
+/// - size = 0 (directories don't store data)
+/// - start_block = 0 (sentinel - no block allocation)
+/// - flags = 1 (active entry)
+pub fn sfsMkdir(ctx: ?*anyopaque, path: []const u8, mode: u32) vfs.Error!void {
+    const self: *t.SFS = @ptrCast(@alignCast(ctx));
+    if (!self.mounted) return vfs.Error.IOError;
+
+    // Extract name from path (strip leading '/')
+    const name = if (path.len > 0 and path[0] == '/') path[1..] else path;
+
+    // Validate filename: no nested paths, no path traversal
+    if (!sfs_alloc.isValidFilename(name)) return vfs.Error.AccessDenied;
+
+    // Check for nested paths (SFS is flat - no subdirectories)
+    if (std.mem.indexOf(u8, name, "/")) |_| {
+        return vfs.Error.NotSupported;
+    }
+
+    // Validate name length
+    if (name.len == 0 or name.len >= 32) return vfs.Error.InvalidPath;
+
+    // Reject root directory creation
+    if (std.mem.eql(u8, name, ".")) return vfs.Error.InvalidPath;
+
+    // SECURITY: Hold lock through entire metadata update to prevent TOCTOU
+    const held = self.alloc_lock.acquire();
+    defer held.release();
+
+    // Check file count limit under lock
+    if (self.superblock.file_count >= t.MAX_FILES) {
+        return vfs.Error.NoMemory;
+    }
+
+    // Re-read directory under lock to get current state
+    var dir_buf: [t.ROOT_DIR_BLOCKS * 512]u8 = undefined;
+    sfs_io.readDirectoryAsync(self, &dir_buf) catch return vfs.Error.IOError;
+
+    // Scan for conflicts and find free slot
+    var free_slot: ?u32 = null;
+    const total_entries = t.ROOT_DIR_BLOCKS * 4;
+
+    // SECURITY: Use checked arithmetic for index calculation
+    const total_entries_checked = @min(total_entries, t.MAX_FILES);
+
+    var idx: u32 = 0;
+    while (idx < total_entries_checked) : (idx += 1) {
+        // SECURITY: Use checked multiplication to prevent overflow
+        const offset = std.math.mul(usize, idx, 128) catch {
+            console.err("SFS: Integer overflow in mkdir offset calculation", .{});
+            return vfs.Error.IOError;
+        };
+
+        const e: *const t.DirEntry = @ptrCast(@alignCast(&dir_buf[offset]));
+
+        if (e.flags == 1) {
+            // Entry is active - check for name conflict
+            const e_name = std.mem.sliceTo(&e.name, 0);
+            if (e_name.len >= 32) continue;
+            if (std.mem.eql(u8, e_name, name)) {
+                // Name already exists (could be file OR directory)
+                return vfs.Error.AlreadyExists;
+            }
+        } else if (free_slot == null) {
+            // Found first free slot
+            free_slot = idx;
+        }
+    }
+
+    // Check if we found a free slot
+    const new_idx = free_slot orelse {
+        return vfs.Error.NoMemory;
+    };
+
+    // Build directory entry
+    // SECURITY: Directories don't own blocks, so start_block=0 (no allocation needed)
+    const dir_mode = meta.S_IFDIR | (mode & 0o7777);
+    var new_entry = t.DirEntry{
+        .name = [_]u8{0} ** 32,
+        .start_block = 0, // Directories don't own blocks
+        .size = 0, // Directories have no size
+        .flags = 1, // Active entry
+        .mode = dir_mode,
+        .uid = 0, // TODO: inherit from process context when available
+        .gid = 0,
+        .mtime = 0, // TODO: set actual timestamp
+        ._pad = [_]u8{0} ** (128 - 60),
+    };
+    @memcpy(new_entry.name[0..name.len], name);
+
+    // Write directory entry under lock
+    const block_idx = new_idx / 4;
+    // SECURITY: Use checked multiplication for offset calculation
+    const offset_in_dir = std.math.mul(usize, new_idx, 128) catch {
+        console.err("SFS: Integer overflow in mkdir entry offset calculation", .{});
+        return vfs.Error.IOError;
+    };
+
+    const dest: *t.DirEntry = @ptrCast(@alignCast(&dir_buf[offset_in_dir]));
+    dest.* = new_entry;
+
+    // SECURITY: Use checked multiplication for block offset calculation
+    const block_start = std.math.mul(usize, block_idx, 512) catch {
+        console.err("SFS: Integer overflow in mkdir block offset calculation", .{});
+        return vfs.Error.IOError;
+    };
+
+    // SECURITY: Use checked addition for directory block address
+    const dir_block = std.math.add(u32, self.superblock.root_dir_start, block_idx) catch {
+        console.err("SFS: Integer overflow in mkdir directory block calculation", .{});
+        return vfs.Error.IOError;
+    };
+
+    sfs_io.writeSectorAsync(self, dir_block, dir_buf[block_start..][0..512]) catch {
+        return vfs.Error.IOError;
+    };
+
+    // Update superblock under lock
+    self.superblock.file_count = std.math.add(u32, self.superblock.file_count, 1) catch {
+        console.err("SFS: Integer overflow in file_count increment", .{});
+        // Attempt rollback (best effort)
+        dest.flags = 0;
+        _ = sfs_io.writeSectorAsync(self, dir_block, dir_buf[block_start..][0..512]) catch {};
+        return vfs.Error.IOError;
+    };
+
+    sfs_io.updateSuperblock(self) catch {
+        // Rollback file_count on superblock write failure
+        self.superblock.file_count -= 1;
+        return vfs.Error.IOError;
+    };
+
+    console.info("SFS: Created directory '{s}' at slot {}", .{ name, new_idx });
+}
+
+/// Remove a directory from the SFS filesystem.
+///
+/// SECURITY NOTES:
+/// - TOCTOU Prevention: Re-reads directory entry under lock to prevent race conditions
+/// - Directory Verification: Uses isDirectory() method to ensure entry is a directory type
+/// - Open Directory Protection: Checks open_counts to prevent removing directories with active FDs
+/// - Integer Safety: Uses checked arithmetic for all offset calculations
+///
+/// Error Codes:
+/// - NotFound: Directory does not exist
+/// - NotDirectory: Entry exists but is a regular file
+/// - Busy: Directory is currently open (has active file descriptors)
+/// - IOError: Disk read/write failure
+pub fn sfsRmdir(ctx: ?*anyopaque, path: []const u8) vfs.Error!void {
+    const self: *t.SFS = @ptrCast(@alignCast(ctx));
+    if (!self.mounted) return vfs.Error.IOError;
+
+    // Extract name, stripping leading slash
+    const name = if (path.len > 0 and path[0] == '/') path[1..] else path;
+
+    // Validate filename - reject invalid characters and nested paths
+    if (!sfs_alloc.isValidFilename(name)) return vfs.Error.AccessDenied;
+
+    // Reject empty names and names that are too long
+    if (name.len == 0 or name.len >= 32) return vfs.Error.NotFound;
+
+    // Cannot remove root directory
+    if (std.mem.eql(u8, name, ".")) return vfs.Error.AccessDenied;
+
+    // SECURITY: First pass - find entry index unlocked for efficiency
+    var found_idx: ?u32 = null;
+    {
+        var dir_buf: [t.ROOT_DIR_BLOCKS * 512]u8 = undefined;
+        sfs_io.readDirectoryAsync(self, &dir_buf) catch return vfs.Error.IOError;
+
+        const total_entries = t.ROOT_DIR_BLOCKS * 4;
+        var idx: u32 = 0;
+        while (idx < total_entries) : (idx += 1) {
+            // SECURITY: Use checked arithmetic for offset calculation
+            const offset = std.math.mul(usize, idx, 128) catch return vfs.Error.IOError;
+            const e: *const t.DirEntry = @ptrCast(@alignCast(&dir_buf[offset]));
+
+            if (e.flags == 1) {
+                const e_name = std.mem.sliceTo(&e.name, 0);
+                if (e_name.len >= 32) continue;
+                if (std.mem.eql(u8, e_name, name)) {
+                    found_idx = idx;
+                    break;
+                }
+            }
+        }
+    }
+
+    const idx = found_idx orelse return vfs.Error.NotFound;
+
+    // SECURITY: Hold lock through entire operation to prevent TOCTOU race
+    const lock_held = self.alloc_lock.acquire();
+    defer lock_held.release();
+
+    // SECURITY: Re-read the specific directory block under lock
+    // The entry we found may have been modified by another thread
+    const block_idx = idx / 4;
+    const offset_in_block = std.math.mul(usize, idx % 4, 128) catch return vfs.Error.IOError;
+
+    var block_buf: [512]u8 = [_]u8{0} ** 512;
+    sfs_io.readSector(self.device_fd, self.superblock.root_dir_start + block_idx, &block_buf) catch return vfs.Error.IOError;
+
+    const e: *t.DirEntry = @ptrCast(@alignCast(&block_buf[offset_in_block]));
+
+    // SECURITY: Re-validate entry under lock - check it still exists and has the same name
+    if (e.flags != 1) {
+        return vfs.Error.NotFound;
+    }
+
+    const e_name = std.mem.sliceTo(&e.name, 0);
+    if (!std.mem.eql(u8, e_name, name)) {
+        // Entry was replaced with a different file - race condition detected
+        return vfs.Error.NotFound;
+    }
+
+    // SECURITY: Verify entry is a directory, not a regular file
+    if (!e.isDirectory()) {
+        return vfs.Error.NotDirectory;
+    }
+
+    // SECURITY: Check if directory is currently open
+    // Validate index bounds before accessing open_counts array
+    if (idx >= t.MAX_FILES) {
+        return vfs.Error.IOError;
+    }
+
+    if (self.open_counts[idx] > 0) {
+        // Directory has active file descriptors - cannot remove
+        return vfs.Error.Busy;
+    }
+
+    // NOTE: For SFS (flat filesystem), directories don't own data blocks
+    // They are metadata-only entries (size=0, start_block=0)
+    // No block deallocation needed unlike sfsUnlink for files
+
+    // Clear directory entry under lock
+    e.flags = 0;
+    e.name = [_]u8{0} ** 32;
+    e.start_block = 0;
+    e.size = 0;
+    e.mode = 0;
+
+    // Write updated directory block while holding lock
+    sfs_io.writeSector(self.device_fd, self.superblock.root_dir_start + block_idx, &block_buf) catch return vfs.Error.IOError;
+
+    // Update superblock file count while holding lock
+    self.superblock.file_count = std.math.sub(u32, self.superblock.file_count, 1) catch 0;
+    sfs_io.updateSuperblock(self) catch return vfs.Error.IOError;
+
+    console.info("SFS: Removed directory '{s}'", .{name});
+}
+
 pub fn sfsSeek(file_desc: *fd.FileDescriptor, offset: i64, whence: u32) isize {
     const file: *t.SfsFile = @ptrCast(@alignCast(file_desc.private_data));
     const size: i64 = @intCast(file.size);

@@ -131,6 +131,14 @@ pub fn getcwd(buf: [*]u8, size: usize) SyscallError!usize {
     return ret;
 }
 
+/// Get directory entries (getdents64)
+/// Returns number of bytes read into buffer
+pub fn getdents64(fd: i32, dirp: [*]u8, count: usize) SyscallError!usize {
+    const ret = primitive.syscall3(syscalls.SYS_GETDENTS64, @bitCast(@as(isize, fd)), @intFromPtr(dirp), count);
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return ret;
+}
+
 /// Device control
 pub fn ioctl(fd: i32, cmd: u32, arg: usize) SyscallError!i32 {
     const ret = primitive.syscall3(syscalls.SYS_IOCTL, @bitCast(@as(isize, fd)), cmd, arg);
