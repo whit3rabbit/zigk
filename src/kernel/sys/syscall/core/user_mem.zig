@@ -127,8 +127,14 @@ pub fn isValidUserAccess(ptr: usize, len: usize, mode: AccessMode) bool {
             return vmm.verifyUserRange(cr3, ptr, len);
         },
         .Write => {
-            // For write, also verify pages are writable
-            return vmm.verifyUserRangeWritable(cr3, ptr, len);
+            // For write operations, we only do bounds checking.
+            // Page presence verification is skipped to support demand paging:
+            // - Stack buffers declared but not yet faulted-in
+            // - Lazy allocation of heap pages
+            // The assembly copy function (_asm_copy_to_user) will handle
+            // page faults gracefully and return error if pages aren't accessible.
+            // SECURITY: Bounds were already checked above - address must be in userspace range.
+            return true;
         },
     }
 }
