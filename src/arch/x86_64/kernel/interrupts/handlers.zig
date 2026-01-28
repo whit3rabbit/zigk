@@ -101,6 +101,16 @@ pub fn exceptionHandler(frame: *idt.InterruptFrame) void {
         unreachable;
     }
 
+    // Check for page fault fixup BEFORE printing exception
+    if (vector == 14) {
+        const rip = frame.rip;
+        if (rip >= @intFromPtr(&_asm_copy_user_start) and rip < @intFromPtr(&_asm_copy_user_end)) {
+            // Fixup user copy operation - redirect to fixup handler
+            frame.rip = @intFromPtr(&_asm_copy_user_fixup);
+            return;
+        }
+    }
+
     // Print exception info for kernel mode
     console.printUnsafe("\n!!! EXCEPTION: ");
     if (vector < exception_names.len) {
@@ -122,13 +132,8 @@ pub fn exceptionHandler(frame: *idt.InterruptFrame) void {
             return;
         },
         14 => {
+            // Page fault - if we get here, it wasn't a copy_user fixup
             const cr2 = cpu.readCr2();
-            const rip = frame.rip;
-            if (rip >= @intFromPtr(&_asm_copy_user_start) and rip < @intFromPtr(&_asm_copy_user_end)) {
-                frame.rip = @intFromPtr(&_asm_copy_user_fixup);
-                return;
-            }
-
             const gp_checker = @atomicLoad(?*const fn (u64) ?state.GuardPageInfo, &state.guard_page_checker, .acquire);
             if (gp_checker) |checker| {
                 if (checker(cr2)) |guard_info| {
