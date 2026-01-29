@@ -77,25 +77,34 @@ pub inline fn syscall6(number: usize, arg1: usize, arg2: usize, arg3: usize, arg
 // =============================================================================
 
 pub const SyscallError = error{
-    PermissionDenied,
-    NoSuchFileOrDirectory,
-    NoSuchProcess,
-    Interrupted,
-    IoError,
-    NoSuchDevice,
-    ArgumentListTooLong,
-    ExecFormatError,
-    BadFileDescriptor,
-    NoChildProcesses,
-    WouldBlock,
-    OutOfMemory,
-    AccessDenied,
-    BadAddress,
-    DeviceBusy,
-    FileExists,
-    InvalidArgument,
-    TooManyOpenFiles,
-    NotImplemented,
+    PermissionDenied,        // 1
+    NoSuchFileOrDirectory,   // 2
+    NoSuchProcess,           // 3
+    Interrupted,             // 4
+    IoError,                 // 5
+    NoSuchDevice,            // 6
+    ArgumentListTooLong,     // 7
+    ExecFormatError,         // 8
+    BadFileDescriptor,       // 9
+    NoChildProcesses,        // 10
+    WouldBlock,              // 11
+    OutOfMemory,             // 12
+    AccessDenied,            // 13
+    BadAddress,              // 14
+    DeviceBusy,              // 16
+    FileExists,              // 17
+    NotADirectory,           // 20
+    IsADirectory,            // 21
+    InvalidArgument,         // 22
+    TooManyOpenFiles,        // 24
+    NoSpace,                 // 28
+    IllegalSeek,             // 29
+    ReadOnlyFilesystem,      // 30
+    TooManyLinks,            // 31
+    FilenameTooLong,         // 36
+    NotImplemented,          // 38
+    DirectoryNotEmpty,       // 39
+    TooManySymbolicLinks,    // 40
     Unexpected,
 };
 
@@ -121,9 +130,18 @@ pub fn errorFromReturn(ret: usize) SyscallError {
         14 => error.BadAddress,
         16 => error.DeviceBusy,
         17 => error.FileExists,
+        20 => error.NotADirectory,
+        21 => error.IsADirectory,
         22 => error.InvalidArgument,
         24 => error.TooManyOpenFiles,
+        28 => error.NoSpace,
+        29 => error.IllegalSeek,
+        30 => error.ReadOnlyFilesystem,
+        31 => error.TooManyLinks,
+        36 => error.FilenameTooLong,
         38 => error.NotImplemented,
+        39 => error.DirectoryNotEmpty,
+        40 => error.TooManySymbolicLinks,
         else => error.Unexpected,
     };
 }

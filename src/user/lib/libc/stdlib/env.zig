@@ -365,9 +365,18 @@ fn syscallErrorToErrno(err: syscall.SyscallError) c_int {
         error.BadAddress => errno_mod.EFAULT,
         error.DeviceBusy => errno_mod.EBUSY,
         error.FileExists => errno_mod.EEXIST,
+        error.NotADirectory => errno_mod.ENOTDIR,
+        error.IsADirectory => errno_mod.EISDIR,
         error.InvalidArgument => errno_mod.EINVAL,
         error.TooManyOpenFiles => errno_mod.EMFILE,
+        error.NoSpace => errno_mod.ENOSPC,
+        error.IllegalSeek => errno_mod.ESPIPE,
+        error.ReadOnlyFilesystem => errno_mod.EROFS,
+        error.TooManyLinks => errno_mod.EMLINK,
+        error.FilenameTooLong => errno_mod.ENAMETOOLONG,
         error.NotImplemented => errno_mod.ENOSYS,
+        error.DirectoryNotEmpty => errno_mod.ENOTEMPTY,
+        error.TooManySymbolicLinks => errno_mod.ELOOP,
         error.Unexpected => errno_mod.EIO, // Map unexpected to I/O error
     };
 }

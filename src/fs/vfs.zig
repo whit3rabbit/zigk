@@ -82,6 +82,9 @@ pub const FileSystem = struct {
     /// Remove a directory - optional
     rmdir: ?*const fn (ctx: ?*anyopaque, path: []const u8) Error!void = null,
 
+    /// Get directory entries - optional, for filesystems that support directory listing
+    getdents: ?*const fn (file_desc: *fd.FileDescriptor, dirp: usize, count: usize) isize = null,
+
     /// Create a hard link - optional
     link: ?*const fn (ctx: ?*anyopaque, old_path: []const u8, new_path: []const u8) Error!void = null,
 
@@ -242,12 +245,15 @@ pub const Vfs = struct {
             // For dev mount (/dev), path "/dev/null" -> rel_path "/null".
 
             const file_desc = try mp.fs.open(mp.fs.context, rel_path, flags);
+            @import("console").debug("VFS: FS open returned, tracking open file", .{});
 
             // Track open file for unmount protection
             mp.open_files += 1;
+            @import("console").debug("VFS: Incremented open_files, storing mount idx", .{});
 
             // Store mount index in FD for close tracking
             file_desc.vfs_mount_idx = @intCast(idx);
+            @import("console").debug("VFS: Returning file descriptor", .{});
 
             return file_desc;
         }
@@ -885,8 +891,8 @@ fn initrdStatPath(ctx: ?*anyopaque, path: []const u8) ?FileMeta {
         };
     }
 
-    // Look up file in InitRD
-    const file = initrd.InitRD.instance.findFile(path) orelse return null;
+    // Look up any entry (file, directory, symlink) in InitRD
+    const file = initrd.InitRD.instance.findEntry(path) orelse return null;
 
     // Parse permissions from TAR header
     const header = file.header;

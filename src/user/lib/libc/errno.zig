@@ -55,6 +55,18 @@ pub const EMFILE: c_int = 24;
 /// No space left on device
 pub const ENOSPC: c_int = 28;
 
+/// Illegal seek
+pub const ESPIPE: c_int = 29;
+
+/// Too many links
+pub const EMLINK: c_int = 31;
+
+/// Directory not empty
+pub const ENOTEMPTY: c_int = 39;
+
+/// Too many symbolic links encountered
+pub const ELOOP: c_int = 40;
+
 /// Math result not representable
 pub const ERANGE: c_int = 34;
 

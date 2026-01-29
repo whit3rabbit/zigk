@@ -222,6 +222,89 @@ pub const InitRD = struct {
         return null;
     }
 
+    /// Find any entry (file, directory, symlink) by path in the InitRD
+    /// Unlike findFile(), this returns entries regardless of typeflag
+    pub fn findEntry(self: *const @This(), path: []const u8) ?InitRDFile {
+        // Normalize path: remove leading '/' if present
+        var search_name = if (path.len > 0 and path[0] == '/')
+            path[1..]
+        else
+            path;
+
+        // Security: Reject path traversal attempts
+        if (std.mem.indexOf(u8, search_name, "..")) |_| {
+            console.warn("InitRD: Rejecting path traversal attempt: '{s}'", .{path});
+            return null;
+        }
+
+        // Strip leading "./" sequences (common in tar archives)
+        while (std.mem.startsWith(u8, search_name, "./")) {
+            search_name = search_name[2..];
+        }
+
+        // Reject if path is now empty after normalization
+        if (search_name.len == 0) {
+            return null;
+        }
+
+        var offset: usize = 0;
+        while (offset + 512 <= self.data.len) {
+            const header: *const TarHeader = @ptrCast(self.data.ptr + offset);
+
+            // Check for end of archive
+            if (header.name[0] == 0) break;
+
+            // Validate USTAR magic
+            if (!header.isValid()) break;
+
+            const name = header.getName();
+            const size = header.getSize() orelse break;
+
+            // Calculate data bounds with overflow checking
+            const data_start_result = @addWithOverflow(offset, 512);
+            if (data_start_result[1] != 0) break;
+            const data_start = data_start_result[0];
+
+            const data_end_result = @addWithOverflow(data_start, size);
+            if (data_end_result[1] != 0) break;
+            const data_end = data_end_result[0];
+
+            // Validate data bounds before slicing
+            if (data_end > self.data.len) break;
+
+            // Normalize header name: remove leading './' if present
+            var header_name = name;
+            if (std.mem.startsWith(u8, header_name, "./")) {
+                header_name = header_name[2..];
+            }
+
+            // Match ANY entry type (file, directory, symlink)
+            if (std.mem.eql(u8, header_name, search_name)) {
+                return InitRDFile{
+                    .name = name,
+                    .data = self.data[data_start..data_end],
+                    .header = header,
+                };
+            }
+
+            // Calculate next offset with overflow checking
+            const padded_size_result = @addWithOverflow(size, 511);
+            if (padded_size_result[1] != 0) break;
+            const data_blocks = padded_size_result[0] / 512;
+
+            const block_bytes_result = @mulWithOverflow(data_blocks, 512);
+            if (block_bytes_result[1] != 0) break;
+
+            const next_offset_result = @addWithOverflow(data_start, block_bytes_result[0]);
+            if (next_offset_result[1] != 0) break;
+            const next_offset = next_offset_result[0];
+
+            if (next_offset > self.data.len) break;
+            offset = next_offset;
+        }
+        return null;
+    }
+
     /// Check if a normalized header name matches any variant of a base name
     /// Variants: name, name.elf, bin/name, bin/name.elf
     ///

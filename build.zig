@@ -2345,6 +2345,26 @@ pub fn build(b: *std.Build) void {
     const install_sound_test = b.addInstallArtifact(sound_test, .{});
     b.getInstallStep().dependOn(&install_sound_test.step);
 
+    // Test Runner (Integration Tests)
+    const test_runner_mod = b.createModule(.{
+        .root_source_file = b.path("src/user/test_runner/main.zig"),
+        .target = user_target,
+        .optimize = optimize,
+    });
+    test_runner_mod.addImport("syscall", user_syscall_lib);
+
+    const test_runner = b.addExecutable(.{
+        .name = "test_runner.elf",
+        .root_module = test_runner_mod,
+    });
+    test_runner.setLinkerScript(b.path("src/user/linker.ld"));
+    if (target_arch == .x86_64) {
+        test_runner.root_module.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
+        test_runner.root_module.addAssemblyFile(b.path("src/user/crt0.S"));
+    }
+    const install_test_runner = b.addInstallArtifact(test_runner, .{});
+    b.getInstallStep().dependOn(&install_test_runner.step);
+
     // Libc Fix Verification Test (Native C with Custom Libc)
     // Uses C shim for aarch64 va_list bootstrap
     // Wrapper and C source definition below
@@ -2780,4 +2800,15 @@ pub fn build(b: *std.Build) void {
     });
     const run_aarch64_step = b.step("run-aarch64", "Build and run aarch64 kernel in QEMU");
     run_aarch64_step.dependOn(&run_aarch64_cmd.step);
+
+    // Kernel test runner target (integration tests in QEMU)
+    const test_kernel_cmd = b.addSystemCommand(&.{
+        "bash",
+        "-c",
+        "scripts/run_tests.sh",
+    });
+    test_kernel_cmd.step.dependOn(b.getInstallStep());
+
+    const test_kernel_step = b.step("test-kernel", "Run integration tests in QEMU");
+    test_kernel_step.dependOn(&test_kernel_cmd.step);
 }

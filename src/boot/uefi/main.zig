@@ -16,6 +16,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const uefi = std.os.uefi;
 const BootInfo = @import("boot_info");
+const boot_config = @import("boot_config");
 const loader = @import("loader.zig");
 const memory = @import("memory.zig");
 const graphics = @import("graphics.zig");
@@ -76,13 +77,23 @@ pub fn main() void {
         serialPrint("WARNING: No entropy for KASLR\r\n");
     }
 
-    // Step 0b: Show boot menu and get selection
-    serialPrint("Showing boot menu...\r\n");
-    const selection = menu.showMenu(bs, system_table.con_in, system_table.con_out) catch |err| blk: {
-        serialPrint("WARNING: Menu failed (");
-        serialPrintMenuError(err);
-        serialPrint("), defaulting to shell\r\n");
-        break :blk .shell;
+    // Step 0b: Show boot menu and get selection (or bypass if specific target set)
+    const selection = blk: {
+        // Bypass menu for specific boot targets
+        if (std.mem.eql(u8, boot_config.default_boot, "test_runner.elf") or
+            std.mem.eql(u8, boot_config.default_boot, "test_runner"))
+        {
+            serialPrint("Auto-booting test_runner (menu bypassed)\r\n");
+            break :blk menu.BootSelection.test_runner;
+        }
+
+        serialPrint("Showing boot menu...\r\n");
+        break :blk menu.showMenu(bs, system_table.con_in, system_table.con_out) catch |err| {
+            serialPrint("WARNING: Menu failed (");
+            serialPrintMenuError(err);
+            serialPrint("), defaulting to shell\r\n");
+            break :blk .shell;
+        };
     };
 
     // Set cmdline from selection

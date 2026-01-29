@@ -126,9 +126,7 @@ pub fn sfsRead(file_desc: *fd.FileDescriptor, buf: []u8) isize {
 }
 
 pub fn sfsWrite(file_desc: *fd.FileDescriptor, buf: []const u8) isize {
-    const held = file_desc.lock.acquire();
-    defer held.release();
-
+    // NOTE: Caller (sys_write) holds file_desc.lock
     const file: *t.SfsFile = @ptrCast(@alignCast(file_desc.private_data));
 
     const prelim_current_blocks: u32 = if (file.size == 0) 1 else (file.size + 511) / 512;
@@ -140,34 +138,60 @@ pub fn sfsWrite(file_desc: *fd.FileDescriptor, buf: []const u8) isize {
     const new_blocks_needed_u32 = std.math.cast(u32, new_blocks_needed) orelse return -27;
 
     if (new_blocks_needed_u32 > prelim_current_blocks) {
-        const alloc_held = file.fs.alloc_lock.acquire();
-        defer alloc_held.release();
+        // PHASE 1: Allocate UNDER LOCK with double-check
+        var allocated = false;
+        var old_next_free: u32 = 0;
+        var blocks_added: u32 = 0;
+        {
+            const alloc_held = file.fs.alloc_lock.acquire();
+            defer alloc_held.release();
 
-        const current_blocks: u32 = if (file.size == 0) 1 else (file.size + 511) / 512;
-        const end_block = file.start_block + current_blocks;
+            // Re-validate under lock (another thread may have allocated)
+            const current_blocks: u32 = if (file.size == 0) 1 else (file.size + 511) / 512;
+            const end_block = file.start_block + current_blocks;
 
-        if (new_blocks_needed_u32 > current_blocks) {
-            if (end_block != file.fs.superblock.next_free_block) {
-                if (file.size != 0) {
-                    console.warn("SFS: Cannot grow file not at end of allocation", .{});
-                    return -28; // ENOSPC
+            if (new_blocks_needed_u32 > current_blocks) {
+                // Verify file is at end of allocation zone
+                if (end_block != file.fs.superblock.next_free_block) {
+                    if (file.size != 0) {
+                        console.warn("SFS: Cannot grow file not at end of allocation", .{});
+                        return -28; // ENOSPC
+                    }
                 }
-            }
 
-            const blocks_to_add = new_blocks_needed_u32 - current_blocks;
-            if (blocks_to_add > file.fs.superblock.free_blocks) {
-                return -28;
-            }
+                blocks_added = new_blocks_needed_u32 - current_blocks;
+                if (blocks_added > file.fs.superblock.free_blocks) {
+                    return -28;
+                }
 
-            const new_next_free = std.math.add(u32, file.fs.superblock.next_free_block, blocks_to_add) catch {
-                return -28;
+                const new_next_free = std.math.add(u32, file.fs.superblock.next_free_block, blocks_added) catch {
+                    return -28;
+                };
+                if (new_next_free > file.fs.superblock.total_blocks) {
+                    return -28;
+                }
+
+                // Save old value for rollback
+                old_next_free = file.fs.superblock.next_free_block;
+
+                // Update in-memory superblock under lock
+                file.fs.superblock.next_free_block = new_next_free;
+                file.fs.superblock.free_blocks -= blocks_added;
+                allocated = true;
+            }
+            // Lock released here
+        }
+
+        // PHASE 2: Persist AFTER lock release
+        if (allocated) {
+            sfs_io.updateSuperblock(file.fs) catch {
+                // Rollback in-memory state on persist failure
+                const rollback_held = file.fs.alloc_lock.acquire();
+                defer rollback_held.release();
+                file.fs.superblock.next_free_block = old_next_free;
+                file.fs.superblock.free_blocks += blocks_added;
+                return -5;
             };
-            if (new_next_free > file.fs.superblock.total_blocks) {
-                return -28;
-            }
-
-            file.fs.superblock.next_free_block = new_next_free;
-            sfs_io.updateSuperblock(file.fs) catch return -5;
         }
     }
 
@@ -234,22 +258,32 @@ pub fn sfsWrite(file_desc: *fd.FileDescriptor, buf: []const u8) isize {
         file.size = std.math.cast(u32, file_desc.position) orelse return -27;
 
         if (file.entry_idx < t.MAX_FILES) {
-            const lock_held = file.fs.alloc_lock.acquire();
-            defer lock_held.release();
-
+            // PHASE 1: Calculate block location UNLOCKED
             const block_idx = file.entry_idx / 4;
             const offset_idx = file.entry_idx % 4;
+            const offset_in_block = offset_idx * 128;
 
-            // SECURITY: Zero-initialize to prevent information leak if read fails
+            // PHASE 2: Read directory block UNLOCKED
             var dir_buf: [512]u8 = [_]u8{0} ** 512;
             sfs_io.readSector(file.fs.device_fd, file.fs.superblock.root_dir_start + block_idx, &dir_buf) catch {
-                console.warn("SFS: Failed to read directory for size update, skipping", .{});
+                // Graceful degradation: data written, metadata update failed
                 return std.math.cast(isize, written_count) orelse return -75;
             };
 
-            const entry: *t.DirEntry = @ptrCast(@alignCast(&dir_buf[offset_idx * 128]));
+            // PHASE 3: Acquire lock for atomic update
+            const lock_held = file.fs.alloc_lock.acquire();
+            defer lock_held.release();
 
-            if (entry.flags == 1) {
+            // PHASE 4: Re-read under lock (TOCTOU prevention)
+            sfs_io.readSector(file.fs.device_fd, file.fs.superblock.root_dir_start + block_idx, &dir_buf) catch {
+                return std.math.cast(isize, written_count) orelse return -75;
+            };
+
+            // PHASE 5: Validate and update
+            const entry: *t.DirEntry = @ptrCast(@alignCast(&dir_buf[offset_in_block]));
+
+            // SECURITY: Validate start_block to prevent wrong-file race
+            if (entry.flags == 1 and entry.start_block == file.start_block) {
                 entry.size = file.size;
                 sfs_io.writeSector(file.fs.device_fd, file.fs.superblock.root_dir_start + block_idx, &dir_buf) catch {
                     console.warn("SFS: Failed to write directory size update", .{});
@@ -353,9 +387,8 @@ pub fn sfsOpen(ctx: ?*anyopaque, path: []const u8, flags: u32) vfs.Error!*fd.Fil
     const alloc = heap.allocator();
     const name = if (path.len > 0 and path[0] == '/') path[1..] else path;
 
-    if (!sfs_alloc.isValidFilename(name)) return vfs.Error.AccessDenied;
-
-    // Handle directory opening (root directory "/" or ".")
+    // Handle directory opening (root directory "/" or ".") BEFORE validation
+    // Empty name is allowed for root directory
     if (name.len == 0 or std.mem.eql(u8, name, ".")) {
         // Create a directory file descriptor for getdents support
         const file_ctx = alloc.create(t.SfsFile) catch return vfs.Error.NoMemory;
@@ -375,6 +408,9 @@ pub fn sfsOpen(ctx: ?*anyopaque, path: []const u8, flags: u32) vfs.Error!*fd.Fil
             return vfs.Error.NoMemory;
         };
     }
+
+    // Validate filename for regular files (after root directory handling)
+    if (!sfs_alloc.isValidFilename(name)) return vfs.Error.AccessDenied;
 
     if (name.len >= 32) return vfs.Error.NameTooLong;
 
@@ -404,18 +440,22 @@ pub fn sfsOpen(ctx: ?*anyopaque, path: []const u8, flags: u32) vfs.Error!*fd.Fil
     }
 
     if (entry_idx) |found_idx| {
-        if (entry.start_block < self.superblock.data_start or
-            entry.start_block >= self.superblock.total_blocks)
-        {
-            console.warn("SFS: Corrupted entry '{s}' with invalid start_block {}", .{ name, entry.start_block });
-            return vfs.Error.IOError;
-        }
+        // Validate block range for regular files only
+        // Directories have start_block=0 and don't own data blocks
+        if (!entry.isDirectory()) {
+            if (entry.start_block < self.superblock.data_start or
+                entry.start_block >= self.superblock.total_blocks)
+            {
+                console.warn("SFS: Corrupted entry '{s}' with invalid start_block {}", .{ name, entry.start_block });
+                return vfs.Error.IOError;
+            }
 
-        const max_possible_blocks = self.superblock.total_blocks - entry.start_block;
-        const max_possible_size = max_possible_blocks * 512;
-        if (entry.size > max_possible_size) {
-            console.warn("SFS: Corrupted entry '{s}' with size {} > max {}", .{ name, entry.size, max_possible_size });
-            return vfs.Error.IOError;
+            const max_possible_blocks = self.superblock.total_blocks - entry.start_block;
+            const max_possible_size = max_possible_blocks * 512;
+            if (entry.size > max_possible_size) {
+                console.warn("SFS: Corrupted entry '{s}' with size {} > max {}", .{ name, entry.size, max_possible_size });
+                return vfs.Error.IOError;
+            }
         }
 
         const file_ctx = alloc.create(t.SfsFile) catch return vfs.Error.NoMemory;
@@ -454,12 +494,14 @@ pub fn sfsOpen(ctx: ?*anyopaque, path: []const u8, flags: u32) vfs.Error!*fd.Fil
         };
     } else {
         if ((flags & fd.O_CREAT) != 0) {
+            console.debug("SFS: O_CREAT - allocating block", .{});
             // SECURITY: Allocate block FIRST (takes its own lock internally),
             // then do all metadata updates atomically under a single lock hold.
             // This prevents TOCTOU race where another thread could see partial state.
             const start_block = sfs_alloc.allocateBlock(self) catch {
                 return vfs.Error.NoMemory;
             };
+            console.debug("SFS: Allocated block {}", .{start_block});
 
             // If anything fails after block allocation, free the block
             errdefer sfs_alloc.freeBlock(self, start_block) catch {};
@@ -478,56 +520,80 @@ pub fn sfsOpen(ctx: ?*anyopaque, path: []const u8, flags: u32) vfs.Error!*fd.Fil
             };
             @memcpy(new_entry.name[0..name.len], name);
 
-            // SECURITY: Hold lock through entire metadata update to prevent TOCTOU
-            var new_idx: u32 = undefined;
+            console.debug("SFS: Reading directory (unlocked)", .{});
+            // PHASE 1: Read directory UNLOCKED to find free slot
+            sfs_io.readDirectoryAsync(self, dir_buf) catch {
+                return vfs.Error.IOError;
+            };
+            console.debug("SFS: Directory read complete", .{});
+
+            // PHASE 2: Find free slot UNLOCKED
+            var free_slot: ?u32 = null;
+            for (0..t.MAX_FILES) |slot_i| {
+                const slot_idx: u32 = @intCast(slot_i);
+                const blk_idx = slot_idx / 4;
+                const off_idx = slot_idx % 4;
+                const e: *const t.DirEntry = @ptrCast(@alignCast(&dir_buf[blk_idx * 512 + off_idx * 128]));
+                if (e.flags == 0) {
+                    free_slot = slot_idx;
+                    break;
+                }
+            }
+
+            const new_idx = free_slot orelse {
+                console.debug("SFS: No free slots available", .{});
+                return vfs.Error.NoMemory;
+            };
+            console.debug("SFS: Found free slot {}", .{new_idx});
+
+            // PHASE 3: Atomic update UNDER LOCK
+            console.debug("SFS: Acquiring alloc_lock", .{});
             const create_result: vfs.Error!void = blk: {
                 const lock_held = self.alloc_lock.acquire();
                 defer lock_held.release();
+                console.debug("SFS: Lock acquired", .{});
 
-                // Check file count limit under lock
+                // Check file count under lock
                 if (self.superblock.file_count >= t.MAX_FILES) {
                     break :blk vfs.Error.NoMemory;
                 }
 
-                // Re-read directory under lock to get current state
-                sfs_io.readDirectoryAsync(self, dir_buf) catch {
+                // Re-read SPECIFIC BLOCK under lock to validate slot still free (TOCTOU prevention)
+                const block_idx = new_idx / 4;
+                const offset_in_block = std.math.mul(usize, new_idx % 4, 128) catch break :blk vfs.Error.IOError;
+
+                console.debug("SFS: Reading block {} under lock", .{block_idx});
+                var block_buf: [512]u8 = [_]u8{0} ** 512;
+                sfs_io.readSector(self.device_fd, self.superblock.root_dir_start + block_idx, &block_buf) catch {
                     break :blk vfs.Error.IOError;
                 };
+                console.debug("SFS: Block read complete", .{});
 
-                // Find free slot under lock
-                var reserved_idx: ?u32 = null;
-                for (0..t.MAX_FILES) |slot_i| {
-                    const slot_idx: u32 = @intCast(slot_i);
-                    const blk_idx = slot_idx / 4;
-                    const off_idx = slot_idx % 4;
-                    const e: *const t.DirEntry = @ptrCast(@alignCast(&dir_buf[blk_idx * 512 + off_idx * 128]));
-                    if (e.flags == 0) {
-                        reserved_idx = slot_idx;
-                        break;
-                    }
+                const verify_entry: *const t.DirEntry = @ptrCast(@alignCast(&block_buf[offset_in_block]));
+                if (verify_entry.flags != 0) {
+                    // Slot taken by another thread - race detected
+                    break :blk vfs.Error.NoMemory;
                 }
 
-                new_idx = reserved_idx orelse {
-                    break :blk vfs.Error.NoMemory;
-                };
-
-                // Write directory entry under lock
-                const block_idx = new_idx / 4;
-                const offset_in_dir = new_idx * 128;
-                const dest: *t.DirEntry = @ptrCast(@alignCast(&dir_buf[offset_in_dir]));
+                // Write new entry to block
+                const dest: *t.DirEntry = @ptrCast(@alignCast(&block_buf[offset_in_block]));
                 dest.* = new_entry;
 
-                const block_start = block_idx * 512;
-                sfs_io.writeSectorAsync(self, self.superblock.root_dir_start + block_idx, dir_buf[block_start..][0..512]) catch {
+                console.debug("SFS: Writing block {} under lock", .{block_idx});
+                // Write block back
+                sfs_io.writeSector(self.device_fd, self.superblock.root_dir_start + block_idx, &block_buf) catch {
                     break :blk vfs.Error.IOError;
                 };
+                console.debug("SFS: Block write complete", .{});
 
                 // Update superblock under lock
                 self.superblock.file_count += 1;
+                console.debug("SFS: Updating superblock", .{});
                 sfs_io.updateSuperblock(self) catch {
                     self.superblock.file_count -= 1;
                     break :blk vfs.Error.IOError;
                 };
+                console.debug("SFS: Superblock updated", .{});
 
                 // Update open count under lock
                 self.open_counts[new_idx] = std.math.add(u32, self.open_counts[new_idx], 1) catch {
@@ -535,12 +601,16 @@ pub fn sfsOpen(ctx: ?*anyopaque, path: []const u8, flags: u32) vfs.Error!*fd.Fil
                     break :blk vfs.Error.NoMemory;
                 };
 
+                console.debug("SFS: Lock will be released", .{});
                 break :blk {};
             };
 
+            console.debug("SFS: Checking create_result", .{});
             if (create_result) |_| {} else |err| {
+                console.debug("SFS: Create failed with error", .{});
                 return err;
             }
+            console.debug("SFS: Create succeeded, allocating file context", .{});
 
             const file_ctx = alloc.create(t.SfsFile) catch {
                 const lock_held = self.alloc_lock.acquire();
@@ -548,6 +618,7 @@ pub fn sfsOpen(ctx: ?*anyopaque, path: []const u8, flags: u32) vfs.Error!*fd.Fil
                 if (self.open_counts[new_idx] > 0) self.open_counts[new_idx] -= 1;
                 return vfs.Error.NoMemory;
             };
+            console.debug("SFS: File context allocated", .{});
 
             file_ctx.* = .{
                 .fs = self,
@@ -559,7 +630,9 @@ pub fn sfsOpen(ctx: ?*anyopaque, path: []const u8, flags: u32) vfs.Error!*fd.Fil
                 .gid = new_entry.gid,
             };
 
+            console.debug("SFS: Creating file descriptor", .{});
             return fd.createFd(&sfs_ops, flags, file_ctx) catch {
+                console.debug("SFS: createFd failed, rolling back", .{});
                 const lock_held = self.alloc_lock.acquire();
                 defer lock_held.release();
                 if (self.open_counts[new_idx] > 0) self.open_counts[new_idx] -= 1;
@@ -724,38 +797,62 @@ pub fn sfsChmod(ctx: ?*anyopaque, path: []const u8, mode: u32) vfs.Error!void {
     if (!sfs_alloc.isValidFilename(name)) return vfs.Error.AccessDenied;
     if (name.len == 0 or name.len >= 32) return vfs.Error.NotFound;
 
-    // SECURITY: Allocate directory buffer on heap to prevent stack overflow
+    // PHASE 1: Read directory UNLOCKED to find entry
     const alloc = heap.allocator();
     const dir_buf = alloc.alloc(u8, t.ROOT_DIR_BLOCKS * 512) catch return vfs.Error.NoMemory;
     defer alloc.free(dir_buf);
 
-    const held = self.alloc_lock.acquire();
-    defer held.release();
-
     sfs_io.readDirectoryAsync(self, dir_buf) catch return vfs.Error.IOError;
 
+    // PHASE 2: Find entry UNLOCKED
+    var found_idx: ?u32 = null;
     const total_entries = t.ROOT_DIR_BLOCKS * 4;
     var idx: u32 = 0;
     while (idx < total_entries) : (idx += 1) {
         const offset = idx * 128;
-        const e: *t.DirEntry = @ptrCast(@alignCast(&dir_buf[offset]));
+        const e: *const t.DirEntry = @ptrCast(@alignCast(&dir_buf[offset]));
 
         if (e.flags == 1) {
             const e_name = std.mem.sliceTo(&e.name, 0);
             if (e_name.len >= 32) continue;
             if (std.mem.eql(u8, e_name, name)) {
-                const file_type = e.mode & 0o170000;
-                e.mode = file_type | (mode & 0o7777);
-
-                const block_idx = idx / 4;
-                const block_start = block_idx * 512;
-                sfs_io.writeSectorAsync(self, self.superblock.root_dir_start + block_idx, dir_buf[block_start..][0..512]) catch return vfs.Error.IOError;
-                return;
+                found_idx = idx;
+                break;
             }
         }
     }
 
-    return vfs.Error.NotFound;
+    const entry_idx = found_idx orelse return vfs.Error.NotFound;
+
+    // PHASE 3: Atomic update UNDER LOCK
+    const held = self.alloc_lock.acquire();
+    defer held.release();
+
+    // Re-read specific block under lock (TOCTOU prevention)
+    const block_idx = entry_idx / 4;
+    const offset_in_block = std.math.mul(usize, entry_idx % 4, 128) catch return vfs.Error.IOError;
+
+    var block_buf: [512]u8 = [_]u8{0} ** 512;
+    sfs_io.readSector(self.device_fd, self.superblock.root_dir_start + block_idx, &block_buf) catch return vfs.Error.IOError;
+
+    const e: *t.DirEntry = @ptrCast(@alignCast(&block_buf[offset_in_block]));
+
+    // Validate entry still exists and has same name (TOCTOU check)
+    if (e.flags != 1) {
+        return vfs.Error.NotFound;
+    }
+
+    const e_name = std.mem.sliceTo(&e.name, 0);
+    if (!std.mem.eql(u8, e_name, name)) {
+        return vfs.Error.NotFound;
+    }
+
+    // Update mode
+    const file_type = e.mode & 0o170000;
+    e.mode = file_type | (mode & 0o7777);
+
+    // Write block back
+    sfs_io.writeSector(self.device_fd, self.superblock.root_dir_start + block_idx, &block_buf) catch return vfs.Error.IOError;
 }
 
 pub fn sfsChown(ctx: ?*anyopaque, path: []const u8, uid: ?u32, gid: ?u32) vfs.Error!void {
@@ -766,38 +863,62 @@ pub fn sfsChown(ctx: ?*anyopaque, path: []const u8, uid: ?u32, gid: ?u32) vfs.Er
     if (!sfs_alloc.isValidFilename(name)) return vfs.Error.AccessDenied;
     if (name.len == 0 or name.len >= 32) return vfs.Error.NotFound;
 
-    // SECURITY: Allocate directory buffer on heap to prevent stack overflow
+    // PHASE 1: Read directory UNLOCKED to find entry
     const alloc = heap.allocator();
     const dir_buf = alloc.alloc(u8, t.ROOT_DIR_BLOCKS * 512) catch return vfs.Error.NoMemory;
     defer alloc.free(dir_buf);
 
-    const held = self.alloc_lock.acquire();
-    defer held.release();
-
     sfs_io.readDirectoryAsync(self, dir_buf) catch return vfs.Error.IOError;
 
+    // PHASE 2: Find entry UNLOCKED
+    var found_idx: ?u32 = null;
     const total_entries = t.ROOT_DIR_BLOCKS * 4;
     var idx: u32 = 0;
     while (idx < total_entries) : (idx += 1) {
         const offset = idx * 128;
-        const e: *t.DirEntry = @ptrCast(@alignCast(&dir_buf[offset]));
+        const e: *const t.DirEntry = @ptrCast(@alignCast(&dir_buf[offset]));
 
         if (e.flags == 1) {
             const e_name = std.mem.sliceTo(&e.name, 0);
             if (e_name.len >= 32) continue;
             if (std.mem.eql(u8, e_name, name)) {
-                if (uid) |new_uid| e.uid = new_uid;
-                if (gid) |new_gid| e.gid = new_gid;
-
-                const block_idx = idx / 4;
-                const block_start = block_idx * 512;
-                sfs_io.writeSectorAsync(self, self.superblock.root_dir_start + block_idx, dir_buf[block_start..][0..512]) catch return vfs.Error.IOError;
-                return;
+                found_idx = idx;
+                break;
             }
         }
     }
 
-    return vfs.Error.NotFound;
+    const entry_idx = found_idx orelse return vfs.Error.NotFound;
+
+    // PHASE 3: Atomic update UNDER LOCK
+    const held = self.alloc_lock.acquire();
+    defer held.release();
+
+    // Re-read specific block under lock (TOCTOU prevention)
+    const block_idx = entry_idx / 4;
+    const offset_in_block = std.math.mul(usize, entry_idx % 4, 128) catch return vfs.Error.IOError;
+
+    var block_buf: [512]u8 = [_]u8{0} ** 512;
+    sfs_io.readSector(self.device_fd, self.superblock.root_dir_start + block_idx, &block_buf) catch return vfs.Error.IOError;
+
+    const e: *t.DirEntry = @ptrCast(@alignCast(&block_buf[offset_in_block]));
+
+    // Validate entry still exists and has same name (TOCTOU check)
+    if (e.flags != 1) {
+        return vfs.Error.NotFound;
+    }
+
+    const e_name = std.mem.sliceTo(&e.name, 0);
+    if (!std.mem.eql(u8, e_name, name)) {
+        return vfs.Error.NotFound;
+    }
+
+    // Update ownership
+    if (uid) |new_uid| e.uid = new_uid;
+    if (gid) |new_gid| e.gid = new_gid;
+
+    // Write block back
+    sfs_io.writeSector(self.device_fd, self.superblock.root_dir_start + block_idx, &block_buf) catch return vfs.Error.IOError;
 }
 
 /// Create a directory in the SFS filesystem.
@@ -834,34 +955,20 @@ pub fn sfsMkdir(ctx: ?*anyopaque, path: []const u8, mode: u32) vfs.Error!void {
     // Reject root directory creation
     if (std.mem.eql(u8, name, ".")) return vfs.Error.InvalidPath;
 
-    // SECURITY: Allocate directory buffer on heap to prevent stack overflow
-    // 8704 bytes is too large for kernel stack (32KB total, includes syscall frame)
+    // PHASE 1: Read directory UNLOCKED to check conflicts and find free slot
     const alloc = heap.allocator();
     const dir_buf = alloc.alloc(u8, t.ROOT_DIR_BLOCKS * 512) catch return vfs.Error.NoMemory;
     defer alloc.free(dir_buf);
 
-    // SECURITY: Hold lock through entire metadata update to prevent TOCTOU
-    const held = self.alloc_lock.acquire();
-    defer held.release();
-
-    // Check file count limit under lock
-    if (self.superblock.file_count >= t.MAX_FILES) {
-        return vfs.Error.NoMemory;
-    }
-
-    // Re-read directory under lock to get current state
     sfs_io.readDirectoryAsync(self, dir_buf) catch return vfs.Error.IOError;
 
-    // Scan for conflicts and find free slot
+    // PHASE 2: Scan for conflicts and find free slot UNLOCKED
     var free_slot: ?u32 = null;
     const total_entries = t.ROOT_DIR_BLOCKS * 4;
-
-    // SECURITY: Use checked arithmetic for index calculation
     const total_entries_checked = @min(total_entries, t.MAX_FILES);
 
     var idx: u32 = 0;
     while (idx < total_entries_checked) : (idx += 1) {
-        // SECURITY: Use checked multiplication to prevent overflow
         const offset = std.math.mul(usize, idx, 128) catch {
             console.err("SFS: Integer overflow in mkdir offset calculation", .{});
             return vfs.Error.IOError;
@@ -870,26 +977,21 @@ pub fn sfsMkdir(ctx: ?*anyopaque, path: []const u8, mode: u32) vfs.Error!void {
         const e: *const t.DirEntry = @ptrCast(@alignCast(&dir_buf[offset]));
 
         if (e.flags == 1) {
-            // Entry is active - check for name conflict
             const e_name = std.mem.sliceTo(&e.name, 0);
             if (e_name.len >= 32) continue;
             if (std.mem.eql(u8, e_name, name)) {
-                // Name already exists (could be file OR directory)
                 return vfs.Error.AlreadyExists;
             }
         } else if (free_slot == null) {
-            // Found first free slot
             free_slot = idx;
         }
     }
 
-    // Check if we found a free slot
     const new_idx = free_slot orelse {
         return vfs.Error.NoMemory;
     };
 
-    // Build directory entry
-    // SECURITY: Directories don't own blocks, so start_block=0 (no allocation needed)
+    // PHASE 3: Build directory entry
     const dir_mode = meta.S_IFDIR | (mode & 0o7777);
     var new_entry = t.DirEntry{
         .name = [_]u8{0} ** 32,
@@ -897,51 +999,70 @@ pub fn sfsMkdir(ctx: ?*anyopaque, path: []const u8, mode: u32) vfs.Error!void {
         .size = 0, // Directories have no size
         .flags = 1, // Active entry
         .mode = dir_mode,
-        .uid = 0, // TODO: inherit from process context when available
+        .uid = 0,
         .gid = 0,
-        .mtime = 0, // TODO: set actual timestamp
+        .mtime = 0,
         ._pad = [_]u8{0} ** (128 - 60),
     };
     @memcpy(new_entry.name[0..name.len], name);
 
-    // Write directory entry under lock
+    // PHASE 4: Atomic update UNDER LOCK
+    const held = self.alloc_lock.acquire();
+    defer held.release();
+
+    // Check file count limit under lock
+    if (self.superblock.file_count >= t.MAX_FILES) {
+        return vfs.Error.NoMemory;
+    }
+
+    // Re-read specific block under lock (TOCTOU prevention)
     const block_idx = new_idx / 4;
-    // SECURITY: Use checked multiplication for offset calculation
-    const offset_in_dir = std.math.mul(usize, new_idx, 128) catch {
-        console.err("SFS: Integer overflow in mkdir entry offset calculation", .{});
+    const offset_in_block = std.math.mul(usize, new_idx % 4, 128) catch {
         return vfs.Error.IOError;
     };
 
-    const dest: *t.DirEntry = @ptrCast(@alignCast(&dir_buf[offset_in_dir]));
+    var block_buf: [512]u8 = [_]u8{0} ** 512;
+    const dir_block = std.math.add(u32, self.superblock.root_dir_start, block_idx) catch {
+        return vfs.Error.IOError;
+    };
+
+    sfs_io.readSector(self.device_fd, dir_block, &block_buf) catch {
+        return vfs.Error.IOError;
+    };
+
+    // Validate slot is still free (TOCTOU check)
+    const verify_entry: *const t.DirEntry = @ptrCast(@alignCast(&block_buf[offset_in_block]));
+    if (verify_entry.flags != 0) {
+        return vfs.Error.NoMemory; // Slot taken by another thread
+    }
+
+    // Re-check for name conflicts in this block
+    for (0..4) |i| {
+        const check_offset = i * 128;
+        const check_entry: *const t.DirEntry = @ptrCast(@alignCast(&block_buf[check_offset]));
+        if (check_entry.flags == 1) {
+            const check_name = std.mem.sliceTo(&check_entry.name, 0);
+            if (std.mem.eql(u8, check_name, name)) {
+                return vfs.Error.AlreadyExists;
+            }
+        }
+    }
+
+    // Write new entry
+    const dest: *t.DirEntry = @ptrCast(@alignCast(&block_buf[offset_in_block]));
     dest.* = new_entry;
 
-    // SECURITY: Use checked multiplication for block offset calculation
-    const block_start = std.math.mul(usize, block_idx, 512) catch {
-        console.err("SFS: Integer overflow in mkdir block offset calculation", .{});
-        return vfs.Error.IOError;
-    };
-
-    // SECURITY: Use checked addition for directory block address
-    const dir_block = std.math.add(u32, self.superblock.root_dir_start, block_idx) catch {
-        console.err("SFS: Integer overflow in mkdir directory block calculation", .{});
-        return vfs.Error.IOError;
-    };
-
-    sfs_io.writeSectorAsync(self, dir_block, dir_buf[block_start..][0..512]) catch {
+    sfs_io.writeSector(self.device_fd, dir_block, &block_buf) catch {
         return vfs.Error.IOError;
     };
 
     // Update superblock under lock
     self.superblock.file_count = std.math.add(u32, self.superblock.file_count, 1) catch {
         console.err("SFS: Integer overflow in file_count increment", .{});
-        // Attempt rollback (best effort)
-        dest.flags = 0;
-        _ = sfs_io.writeSectorAsync(self, dir_block, dir_buf[block_start..][0..512]) catch {};
         return vfs.Error.IOError;
     };
 
     sfs_io.updateSuperblock(self) catch {
-        // Rollback file_count on superblock write failure
         self.superblock.file_count -= 1;
         return vfs.Error.IOError;
     };
@@ -1167,14 +1288,17 @@ pub fn refreshSizeFromDisk(self: *t.SfsFile) ?u32 {
 }
 
 pub fn refreshMetadataFromDisk(self: *t.SfsFile) ?t.SfsFile.RefreshedMetadata {
+    console.debug("SFS: refreshMetadataFromDisk entry_idx={}", .{self.entry_idx});
     if (self.entry_idx >= t.MAX_FILES) return null;
 
     const block_idx = self.entry_idx / 4;
     const offset_idx = self.entry_idx % 4;
     var dir_buf: [512]u8 = undefined;
 
-    @import("hal").mmio.memoryBarrier(); // 
+    console.debug("SFS: refreshMetadata calling readSector block={}", .{block_idx});
+    @import("hal").mmio.memoryBarrier(); //
     sfs_io.readSector(self.fs.device_fd, self.fs.superblock.root_dir_start + block_idx, &dir_buf) catch return null;
+    console.debug("SFS: refreshMetadata readSector complete", .{});
 
     const entry: *const t.DirEntry = @ptrCast(@alignCast(&dir_buf[offset_idx * 128]));
     if (entry.flags != 1) return null;

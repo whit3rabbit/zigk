@@ -89,6 +89,10 @@ pub const FileOps = struct {
 
     /// Truncate file to specified length (optional)
     truncate: ?*const fn (fd: *FileDescriptor, length: u64) error{ AccessDenied, IOError }!void,
+
+    /// Get directory entries (optional, for directory listing)
+    /// Returns bytes written to dirp buffer, 0 for EOF, or negative errno
+    getdents: ?*const fn (fd: *FileDescriptor, dirp: usize, count: usize) isize = null,
 };
 
 /// Directory-only operations marker for synthetic directory FDs.
@@ -465,8 +469,11 @@ pub const FdTable = struct {
 
 /// Create a new FileDescriptor
 pub fn createFd(ops: *const FileOps, flags: u32, private_data: ?*anyopaque) !*FileDescriptor {
+    console.debug("FD: createFd called", .{});
     const alloc = heap.allocator();
+    console.debug("FD: Got allocator, allocating descriptor", .{});
     const fd = try alloc.create(FileDescriptor);
+    console.debug("FD: Descriptor allocated, initializing", .{});
     fd.* = FileDescriptor{
         .ops = ops,
         .private_data = private_data,
@@ -478,6 +485,7 @@ pub fn createFd(ops: *const FileOps, flags: u32, private_data: ?*anyopaque) !*Fi
         // SECURITY: Set cloexec flag based on O_CLOEXEC in open flags
         .cloexec = (flags & O_CLOEXEC) != 0,
     };
+    console.debug("FD: Returning descriptor", .{});
     return fd;
 }
 

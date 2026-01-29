@@ -22,6 +22,11 @@ zig build run -Darch=x86_64 -Ddefault-boot=shell   # Run shell
 zig build run -Darch=aarch64 -Ddefault-boot=shell  # Run shell on aarch64
 zig build run -Darch=x86_64 -Ddefault-boot=doom    # Run Doom (default)
 zig build run -Darch=x86_64 -Dvirtfs=/tmp/share   # Run with VirtIO-9P shared folder
+
+# Testing
+zig build test-kernel                              # Run all integration tests
+zig build run -Darch=x86_64 -Ddefault-boot=test_runner  # Manual test run
+./scripts/run_tests.sh                             # Automated test runner with 30s timeout
 ```
 
 **Note:** Kernel binaries are architecture-named (`kernel-x86_64.elf`, `kernel-aarch64.elf`) and coexist in `zig-out/bin/`.
@@ -70,6 +75,34 @@ fn fileExists(path: [:0]const u8) bool {
 // Instead of: std.atomic.compilerFence(.seq_cst)
 asm volatile ("" ::: "memory");
 ```
+
+## Testing Infrastructure
+
+**Test Runner**: Userspace test harness at `src/user/test_runner/`.
+**Test Suite**: Integration tests in `src/user/test_runner/tests/`.
+**Automation**: `scripts/run_tests.sh` with 30s timeout for CI.
+**Boot Target**: `-Ddefault-boot=test_runner` auto-runs tests.
+
+### Running Tests
+```bash
+# Automated (recommended)
+zig build test-kernel          # Runs via script with timeout
+./scripts/run_tests.sh         # Direct script invocation
+
+# Manual
+zig build run -Darch=x86_64 -Ddefault-boot=test_runner
+
+# Unit tests (kernel modules)
+zig build test                 # Standard Zig unit tests
+```
+
+### Test Categories
+- **Filesystem**: VFS, SFS, InitRD operations
+- **Syscalls**: open, read, write, mkdir, chdir
+- **Process**: Basic process lifecycle
+- **Memory**: User memory validation
+
+**Note**: Tests output TAP format. Failing tests block on kernel panic for debugging.
 
 ## Reference Skills
 

@@ -15,24 +15,26 @@ const boot_config = @import("boot_config");
 pub const BootSelection = enum(u8) {
     shell = 0,
     doom = 1,
-    test_asm = 2,
-    test_vdso = 3,
-    test_signals_fpu = 4,
-    test_clock = 5,
-    test_devnull = 6,
-    test_random = 7,
-    test_stdio = 8,
-    test_threads = 9,
-    test_wait4 = 10,
-    audio_test = 11,
-    sound_test = 12,
-    soak_test = 13,
+    test_runner = 2,
+    test_asm = 3,
+    test_vdso = 4,
+    test_signals_fpu = 5,
+    test_clock = 6,
+    test_devnull = 7,
+    test_random = 8,
+    test_stdio = 9,
+    test_threads = 10,
+    test_wait4 = 11,
+    audio_test = 12,
+    sound_test = 13,
+    soak_test = 14,
 
     /// Convert selection to cmdline string for kernel
     pub fn toCmdline(self: BootSelection) []const u8 {
         return switch (self) {
             .shell => "init=shell",
             .doom => "init=doom",
+            .test_runner => "init=test_runner.elf",
             .test_asm => "init=test_asm",
             .test_vdso => "init=test_vdso",
             .test_signals_fpu => "init=test_signals_fpu",
@@ -53,6 +55,7 @@ pub const BootSelection = enum(u8) {
         return switch (self) {
             .shell => "Shell (default)",
             .doom => "Doom",
+            .test_runner => "Test Runner (comprehensive tests)",
             .test_asm => "test_asm",
             .test_vdso => "test_vdso",
             .test_signals_fpu => "test_signals_fpu",
@@ -86,6 +89,7 @@ const MainMenuItem = enum(usize) {
 
 /// Tests submenu items (index 0 = back)
 const test_items = [_]BootSelection{
+    .test_runner,
     .test_asm,
     .test_vdso,
     .test_signals_fpu,
@@ -134,8 +138,18 @@ pub fn showMenu(
 
     var state: MenuState = .main;
     // Set default selection based on build config
-    var main_selection: usize = if (std.mem.eql(u8, boot_config.default_boot, "doom")) 2 else 0;
-    var test_selection: usize = 0; // 0 = back
+    var main_selection: usize = if (std.mem.eql(u8, boot_config.default_boot, "doom"))
+        2
+    else if (std.mem.eql(u8, boot_config.default_boot, "test_runner.elf") or
+             std.mem.eql(u8, boot_config.default_boot, "test_runner"))
+        1  // Tests submenu
+    else
+        0;
+    var test_selection: usize = if (std.mem.eql(u8, boot_config.default_boot, "test_runner.elf") or
+                                    std.mem.eql(u8, boot_config.default_boot, "test_runner"))
+        0  // First test item (test_runner)
+    else
+        0;
     var countdown: u8 = MENU_TIMEOUT_SECONDS;
     var timeout_active = true;
 

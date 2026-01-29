@@ -262,9 +262,18 @@ fn printError(err: syscall.SyscallError) void {
         error.BadAddress => "EFAULT",
         error.DeviceBusy => "EBUSY",
         error.FileExists => "EEXIST",
+        error.NotADirectory => "ENOTDIR",
+        error.IsADirectory => "EISDIR",
         error.InvalidArgument => "EINVAL",
         error.TooManyOpenFiles => "EMFILE",
+        error.NoSpace => "ENOSPC",
+        error.IllegalSeek => "ESPIPE",
+        error.ReadOnlyFilesystem => "EROFS",
+        error.TooManyLinks => "EMLINK",
+        error.FilenameTooLong => "ENAMETOOLONG",
         error.NotImplemented => "ENOSYS",
+        error.DirectoryNotEmpty => "ENOTEMPTY",
+        error.TooManySymbolicLinks => "ELOOP",
         error.Unexpected => "UNKNOWN",
     };
     syscall.print(msg);

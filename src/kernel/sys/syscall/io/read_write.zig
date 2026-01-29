@@ -95,6 +95,7 @@ pub fn sys_read(fd_num: usize, buf_ptr: usize, count: usize) SyscallError!usize 
 /// Writes up to count bytes from buf to fd.
 /// Uses FD table to dispatch to appropriate device write operation.
 pub fn sys_write(fd_num: usize, buf_ptr: usize, count: usize) SyscallError!usize {
+    console.debug("SYSCALL: sys_write fd={} count={}", .{ fd_num, count });
     if (count == 0) {
         return 0;
     }
@@ -130,17 +131,21 @@ pub fn sys_write(fd_num: usize, buf_ptr: usize, count: usize) SyscallError!usize
     };
     defer heap.allocator().free(kbuf);
 
+    console.debug("SYSCALL: sys_write copying from user", .{});
     // Copy from user to kernel
     const uptr = UserPtr.from(buf_ptr);
     _ = uptr.copyToKernel(kbuf) catch return error.EFAULT;
 
+    console.debug("SYSCALL: sys_write acquiring fd.lock", .{});
     // Write from kernel buffer (legacy isize return from device ops)
     // Acquire lock for atomicity
     const held = fd.lock.acquire();
     defer held.release();
 
+    console.debug("SYSCALL: sys_write calling do_write_locked", .{});
     const bytes_written = do_write_locked(fd, kbuf);
 
+    console.debug("SYSCALL: sys_write complete, bytes={}", .{bytes_written});
     return error_helpers.mapDeviceError(bytes_written);
 }
 

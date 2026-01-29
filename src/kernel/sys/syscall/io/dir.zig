@@ -44,6 +44,17 @@ pub fn sys_getdents64(fd_num: usize, dirp: usize, count: usize) SyscallError!usi
     const fd_u32 = safeFdCast(fd_num) orelse return error.EBADF;
     const fd = table.get(fd_u32) orelse return error.EBADF;
 
+    // Check if this FD has a getdents operation (e.g., SFS, ext2, etc.)
+    if (fd.ops.getdents) |getdents_fn| {
+        const result = getdents_fn(fd, dirp, count);
+        if (result < 0) {
+            // Negative errno - return as IoError for now
+            // TODO: Map specific errno values to proper errors
+            return error.EIO;
+        }
+        return std.math.cast(usize, result) orelse return error.EIO;
+    }
+
     if (fd.ops != &fd_mod.dir_ops) {
         return error.ENOTDIR;
     }
@@ -188,7 +199,7 @@ pub fn sys_getcwd(buf_ptr: usize, size: usize) SyscallError!usize {
     // Null terminate
     uptr.offset(cwd_len).writeValue(@as(u8, 0)) catch return error.EFAULT;
 
-    return cwd_len + 1; // Return length including null
+    return cwd_len; // Return length excluding null (POSIX convention)
 }
 
 /// sys_chdir (80) - Change working directory
@@ -213,10 +224,12 @@ pub fn sys_chdir(path_ptr: usize) SyscallError!usize {
         canonical[0] = '/';
         canon_len = 1;
     } else {
-        // Check if InitRD recognizes this as a directory
-        const initrd = &fs.initrd.InitRD.instance;
-        if (!initrd.isDirectory(path)) {
+        // Check if path exists via VFS and is a directory
+        const file_meta = fs.vfs.Vfs.statPath(path) orelse {
             return error.ENOENT;
+        };
+        if (!fs.meta.isDirectory(file_meta.mode)) {
+            return error.ENOTDIR;
         }
 
         // Build canonical path: ensure leading '/', strip trailing '/'

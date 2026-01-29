@@ -1,6 +1,7 @@
 const syscall = @import("syscall");
 const syscall_tests = @import("tests/syscall/dir_ops.zig");
 const file_io_tests = @import("tests/syscall/file_ops.zig");
+const memory_tests = @import("tests/syscall/memory.zig");
 const fs_tests = @import("tests/fs/basic.zig");
 const fs_error_tests = @import("tests/fs/errors.zig");
 const regression_tests = @import("tests/regression/sfs_issues.zig");
@@ -9,6 +10,7 @@ const edge_case_tests = @import("tests/fs/edge_cases.zig");
 const TestRunner = struct {
     passed: usize = 0,
     failed: usize = 0,
+    skipped: usize = 0,
     total: usize = 0,
 
     fn runTest(self: *TestRunner, name: []const u8, test_fn: fn () anyerror!void) void {
@@ -19,6 +21,13 @@ const TestRunner = struct {
         syscall.debug_print("\n");
 
         test_fn() catch |err| {
+            if (err == error.SkipTest) {
+                syscall.debug_print("SKIP: ");
+                syscall.debug_print(name);
+                syscall.debug_print(" (not implemented)\n");
+                self.skipped += 1;
+                return;
+            }
             syscall.debug_print("FAIL: ");
             syscall.debug_print(name);
             syscall.debug_print(" (");
@@ -41,6 +50,8 @@ const TestRunner = struct {
         syscall.debug_print(" passed, ");
         printNumber(self.failed);
         syscall.debug_print(" failed, ");
+        printNumber(self.skipped);
+        syscall.debug_print(" skipped, ");
         printNumber(self.total);
         syscall.debug_print(" total\n");
         syscall.debug_print("====================================\n");
@@ -137,6 +148,18 @@ export fn main(argc: i32, argv: [*][*:0]u8) i32 {
     runner.runTest("edge: getdents empty directory", edge_case_tests.testGetdentsEmptyDirectory);
     runner.runTest("edge: filename 31 chars on sfs", edge_case_tests.testFilename31CharsOnSfs);
     runner.runTest("edge: filename 32 chars fails", edge_case_tests.testFilename32CharsFails);
+
+    // Memory tests
+    runner.runTest("memory: mmap anonymous", memory_tests.testMmapAnonymous);
+    runner.runTest("memory: mmap fixed address", memory_tests.testMmapFixed);
+    runner.runTest("memory: mmap with protection", memory_tests.testMmapWithProtection);
+    runner.runTest("memory: munmap releases memory", memory_tests.testMunmap);
+    runner.runTest("memory: brk expand heap", memory_tests.testBrkExpand);
+    runner.runTest("memory: brk shrink heap", memory_tests.testBrkShrink);
+    runner.runTest("memory: mmap length zero", memory_tests.testMmapLengthZero);
+    runner.runTest("memory: mmap length overflow", memory_tests.testMmapLengthOverflow);
+    runner.runTest("memory: multiple small allocations", memory_tests.testMultipleSmallAllocations);
+    runner.runTest("memory: alloc write munmap realloc", memory_tests.testAllocWriteMunmapRealloc);
 
     // Basic sanity test
     runner.runTest("dummy: always passes", testDummy);
