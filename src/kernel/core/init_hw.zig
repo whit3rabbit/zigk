@@ -25,7 +25,7 @@ const usb = @import("usb");
 const audio = @import("audio");
 const ahci = @import("ahci");
 const nvme = @import("nvme");
-const ide = @import("ide");
+const ide = if (@hasDecl(@import("root"), "ide")) @import("ide") else null;
 const virtio_scsi = @import("virtio_scsi");
 const video_driver = @import("video_driver");
 const hal = @import("hal");
@@ -39,7 +39,7 @@ const virtio_input = @import("virtio_input");
 const virtio_sound = @import("virtio_sound");
 const virtio_9p = @import("virtio_9p");
 const virtio_fs = @import("virtio_fs");
-const hgfs = @import("hgfs");
+const hgfs = if (@hasDecl(@import("root"), "hgfs")) @import("hgfs") else null;
 const vmmdev = @import("vmmdev");
 const vboxsf = @import("vboxsf");
 const virt_pci = @import("virt_pci");
@@ -782,38 +782,40 @@ pub fn initStorage() void {
     }
 
     // Search for IDE controller (Class 0x01 Mass Storage, Subclass 0x01 IDE)
-    // IDE is lower priority than AHCI/NVMe/VirtIO-SCSI, but useful for legacy/PIIX support
-    var found_ide = false;
-    for (devices.devices[0..devices.count]) |*dev| {
-        if (ide.isIdeController(dev)) {
-            console.info("Storage: Found IDE controller at {x:0>2}:{x:0>2}.{d}", .{
-                dev.bus, dev.device, dev.func,
-            });
+    // IDE is lower priority than AHCI/NVMe/VirtIO-SCSI, but useful for legacy/PIIX support (x86_64 only)
+    if (ide) |ide_driver| {
+        var found_ide = false;
+        for (devices.devices[0..devices.count]) |*dev| {
+            if (ide_driver.isIdeController(dev)) {
+                console.info("Storage: Found IDE controller at {x:0>2}:{x:0>2}.{d}", .{
+                    dev.bus, dev.device, dev.func,
+                });
 
-            if (ide.initFromPci(dev, pci.PciAccess{ .ecam = ecam })) |controller| {
-                // Report detected drives
-                console.info("  Drives detected: {d}", .{controller.drive_count});
+                if (ide_driver.initFromPci(dev, pci.PciAccess{ .ecam = ecam })) |controller| {
+                    // Report detected drives
+                    console.info("  Drives detected: {d}", .{controller.drive_count});
 
-                // Register IRQ handler for interrupt-driven I/O
-                ide.registerIrqHandler(controller);
+                    // Register IRQ handler for interrupt-driven I/O
+                    ide_driver.registerIrqHandler(controller);
 
-                found_ide = true;
-                break; // Only initialize first controller
-            } else |err| {
-                console.warn("Storage: IDE init failed: {}", .{err});
+                    found_ide = true;
+                    break; // Only initialize first controller
+                } else |err| {
+                    console.warn("Storage: IDE init failed: {}", .{err});
+                }
             }
         }
-    }
 
-    // If no PCI IDE controller found, try legacy ISA ports
-    if (!found_ide) {
-        if (ide.probeLegacy()) |controller| {
-            console.info("Storage: Found legacy IDE controller", .{});
-            console.info("  Drives detected: {d}", .{controller.drive_count});
-            ide.registerIrqHandler(controller);
-            found_ide = true;
-        } else |_| {
-            console.info("Storage: No IDE controllers found", .{});
+        // If no PCI IDE controller found, try legacy ISA ports
+        if (!found_ide) {
+            if (ide_driver.probeLegacy()) |controller| {
+                console.info("Storage: Found legacy IDE controller", .{});
+                console.info("  Drives detected: {d}", .{controller.drive_count});
+                ide_driver.registerIrqHandler(controller);
+                found_ide = true;
+            } else |_| {
+                console.info("Storage: No IDE controllers found", .{});
+            }
         }
     }
 
@@ -988,42 +990,44 @@ pub fn initVirtioFs() void {
     }
 }
 
-/// Initialize VMware HGFS shared folders driver
+/// Initialize VMware HGFS shared folders driver (x86_64 only)
 /// Enables host-guest file sharing via VMware Workstation/Fusion/ESXi shared folders
 pub fn initHgfs() void {
-    // Only probe on VMware-compatible hypervisors
-    if (!detected_hypervisor.isVmwareCompatible() and
-        detected_hypervisor != .none and
-        detected_hypervisor != .unknown)
-    {
-        return;
+    if (hgfs) |hgfs_driver| {
+        // Only probe on VMware-compatible hypervisors
+        if (!detected_hypervisor.isVmwareCompatible() and
+            detected_hypervisor != .none and
+            detected_hypervisor != .unknown)
+        {
+            return;
+        }
+
+        // Check if VMware backdoor interface is available
+        if (!hal.vmware.detect()) {
+            return;
+        }
+
+        console.info("HGFS: VMware backdoor detected, initializing...", .{});
+
+        // Initialize HGFS driver
+        const driver = hgfs_driver.initDriver() catch |err| {
+            console.warn("HGFS: Driver init failed: {}", .{err});
+            return;
+        };
+
+        // Create VFS filesystem wrapper and mount at /mnt/hgfs
+        const filesystem = fs.hgfs.createFilesystem(driver) catch |err| {
+            console.warn("HGFS: VFS wrapper failed: {}", .{err});
+            return;
+        };
+
+        fs.vfs.Vfs.mount("/mnt/hgfs", filesystem) catch |err| {
+            console.warn("HGFS: Mount at /mnt/hgfs failed: {}", .{err});
+            return;
+        };
+
+        console.info("HGFS: Mounted at /mnt/hgfs", .{});
     }
-
-    // Check if VMware backdoor interface is available
-    if (!hal.vmware.detect()) {
-        return;
-    }
-
-    console.info("HGFS: VMware backdoor detected, initializing...", .{});
-
-    // Initialize HGFS driver
-    const driver = hgfs.initDriver() catch |err| {
-        console.warn("HGFS: Driver init failed: {}", .{err});
-        return;
-    };
-
-    // Create VFS filesystem wrapper and mount at /mnt/hgfs
-    const filesystem = fs.hgfs.createFilesystem(driver) catch |err| {
-        console.warn("HGFS: VFS wrapper failed: {}", .{err});
-        return;
-    };
-
-    fs.vfs.Vfs.mount("/mnt/hgfs", filesystem) catch |err| {
-        console.warn("HGFS: Mount at /mnt/hgfs failed: {}", .{err});
-        return;
-    };
-
-    console.info("HGFS: Mounted at /mnt/hgfs", .{});
 }
 
 /// Initialize VirtualBox VMMDev driver

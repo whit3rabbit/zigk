@@ -614,18 +614,20 @@ pub fn build(b: *std.Build) void {
     ahci_module.addImport("dma", dma_module);
     ahci_module.addImport("iommu", kernel_iommu_module);
 
-    // Create IDE driver module (Legacy IDE/PATA storage controller)
-    const ide_module = b.createModule(.{
+    // Create IDE driver module (Legacy IDE/PATA storage controller - x86_64 only)
+    const ide_module = if (target_arch == .x86_64) b.createModule(.{
         .root_source_file = b.path("src/drivers/storage/ide/root.zig"),
         .target = kernel_target,
         .optimize = optimize,
-    });
-    ide_module.addImport("pci", pci_module);
-    ide_module.addImport("console", console_module);
-    ide_module.addImport("hal", hal_module);
-    ide_module.addImport("fd", fd_module);
-    ide_module.addImport("uapi", uapi_module);
-    ide_module.addImport("heap", heap_module);
+    }) else null;
+    if (ide_module) |mod| {
+        mod.addImport("pci", pci_module);
+        mod.addImport("console", console_module);
+        mod.addImport("hal", hal_module);
+        mod.addImport("fd", fd_module);
+        mod.addImport("uapi", uapi_module);
+        mod.addImport("heap", heap_module);
+    }
 
     // Create NVMe driver module (NVM Express storage controller)
     const nvme_module = b.createModule(.{
@@ -715,7 +717,9 @@ pub fn build(b: *std.Build) void {
     fs_module.addImport("uapi", uapi_module);
     fs_module.addImport("console", console_module);
     fs_module.addImport("ahci", ahci_module);
-    fs_module.addImport("ide", ide_module);
+    if (ide_module) |mod| {
+        fs_module.addImport("ide", mod);
+    }
     fs_module.addImport("nvme", nvme_module);
     fs_module.addImport("virtio_scsi", virtio_scsi_module);
 
@@ -966,27 +970,33 @@ pub fn build(b: *std.Build) void {
     // Add vboxsf to fs module for VFS integration
     fs_module.addImport("vboxsf", vboxsf_module);
 
-    // Create VMware HGFS driver module (Host-Guest File System over RPCI)
-    const hgfs_module = b.createModule(.{
+    // Create VMware HGFS driver module (Host-Guest File System over RPCI - x86_64 only)
+    const hgfs_module = if (target_arch == .x86_64) b.createModule(.{
         .root_source_file = b.path("src/drivers/vmware/hgfs/root.zig"),
         .target = kernel_target,
         .optimize = optimize,
-    });
-    hgfs_module.addImport("hal", hal_module);
-    hgfs_module.addImport("console", console_module);
-    hgfs_module.addImport("heap", heap_module);
-    hgfs_module.addImport("sync", sync_module);
+    }) else null;
+    if (hgfs_module) |mod| {
+        mod.addImport("hal", hal_module);
+        mod.addImport("console", console_module);
+        mod.addImport("heap", heap_module);
+        mod.addImport("sync", sync_module);
+    }
 
-    // Create VMware facade module (re-exports hgfs)
-    const vmware_module = b.createModule(.{
+    // Create VMware facade module (re-exports hgfs - x86_64 only)
+    const vmware_module = if (target_arch == .x86_64) b.createModule(.{
         .root_source_file = b.path("src/drivers/vmware/root.zig"),
         .target = kernel_target,
         .optimize = optimize,
-    });
-    vmware_module.addImport("hal", hal_module);
+    }) else null;
+    if (vmware_module) |mod| {
+        mod.addImport("hal", hal_module);
+    }
 
-    // Add hgfs to fs module for VFS integration
-    fs_module.addImport("hgfs", hgfs_module);
+    // Add hgfs to fs module for VFS integration (x86_64 only)
+    if (hgfs_module) |mod| {
+        fs_module.addImport("hgfs", mod);
+    }
 
     // Create DevFS module (device filesystem shim)
     const devfs_module = b.createModule(.{
@@ -1001,7 +1011,9 @@ pub fn build(b: *std.Build) void {
     devfs_module.addImport("sched", sched_module);
     devfs_module.addImport("uapi", uapi_module);
     devfs_module.addImport("ahci", ahci_module);
-    devfs_module.addImport("ide", ide_module);
+    if (ide_module) |mod| {
+        devfs_module.addImport("ide", mod);
+    }
     devfs_module.addImport("nvme", nvme_module);
     devfs_module.addImport("virtio_scsi", virtio_scsi_module);
     devfs_module.addImport("heap", heap_module);
@@ -1014,8 +1026,10 @@ pub fn build(b: *std.Build) void {
     // Add devfs to audio module (AC97 /dev/dsp registration)
     audio_module.addImport("devfs", devfs_module);
 
-    // Add devfs to IDE module (for /dev/hda registration)
-    ide_module.addImport("devfs", devfs_module);
+    // Add devfs to IDE module (for /dev/hda registration - x86_64 only)
+    if (ide_module) |mod| {
+        mod.addImport("devfs", devfs_module);
+    }
 
     // Create Partitions module
     const partitions_module = b.createModule(.{
@@ -1024,7 +1038,9 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     partitions_module.addImport("ahci", ahci_module);
-    partitions_module.addImport("ide", ide_module);
+    if (ide_module) |mod| {
+        partitions_module.addImport("ide", mod);
+    }
     partitions_module.addImport("nvme", nvme_module);
     partitions_module.addImport("virtio_scsi", virtio_scsi_module);
     partitions_module.addImport("devfs", devfs_module);
@@ -1755,7 +1771,9 @@ pub fn build(b: *std.Build) void {
     kernel.root_module.addImport("tlb", tlb_module);
     kernel.root_module.addImport("e1000e", e1000e_module);
     kernel.root_module.addImport("ahci", ahci_module);
-    kernel.root_module.addImport("ide", ide_module);
+    if (ide_module) |mod| {
+        kernel.root_module.addImport("ide", mod);
+    }
     kernel.root_module.addImport("nvme", nvme_module);
     kernel.root_module.addImport("virtio_scsi", virtio_scsi_module);
     kernel.root_module.addImport("usb", usb_module);
@@ -1806,8 +1824,12 @@ pub fn build(b: *std.Build) void {
     kernel.root_module.addImport("vmmdev", vmmdev_module);
     kernel.root_module.addImport("vboxsf", vboxsf_module);
     kernel.root_module.addImport("vbox", vbox_module);
-    kernel.root_module.addImport("vmware", vmware_module);
-    kernel.root_module.addImport("hgfs", hgfs_module);
+    if (vmware_module) |mod| {
+        kernel.root_module.addImport("vmware", mod);
+    }
+    if (hgfs_module) |mod| {
+        kernel.root_module.addImport("hgfs", mod);
+    }
     kernel.root_module.addImport("virt_pci", virt_pci_module);
 
     // Add architecture-specific assembly and linker script
@@ -1893,27 +1915,27 @@ pub fn build(b: *std.Build) void {
     const install_httpd = b.addInstallArtifact(httpd, .{});
     b.getInstallStep().dependOn(&install_httpd.step);
 
-    // Build VMware Tools Service
-    const vmware_tools_mod = b.createModule(.{
-        .root_source_file = b.path("src/user/services/vmware_tools/main.zig"),
-        .target = user_target,
-        .optimize = optimize,
-        .code_model = .small,
-    });
-    vmware_tools_mod.addImport("syscall", user_syscall_lib);
-    vmware_tools_mod.addImport("libc", user_libc_module);
-
-    const vmware_tools = b.addExecutable(.{
-        .name = "vmware_tools.elf",
-        .root_module = vmware_tools_mod,
-    });
-    vmware_tools.setLinkerScript(b.path("src/user/linker.ld"));
+    // Build VMware Tools Service (x86_64 only)
     if (target_arch == .x86_64) {
-        vmware_tools.root_module.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
-    }
+        const vmware_tools_mod = b.createModule(.{
+            .root_source_file = b.path("src/user/services/vmware_tools/main.zig"),
+            .target = user_target,
+            .optimize = optimize,
+            .code_model = .small,
+        });
+        vmware_tools_mod.addImport("syscall", user_syscall_lib);
+        vmware_tools_mod.addImport("libc", user_libc_module);
 
-    const install_vmware_tools = b.addInstallArtifact(vmware_tools, .{});
-    b.getInstallStep().dependOn(&install_vmware_tools.step);
+        const vmware_tools = b.addExecutable(.{
+            .name = "vmware_tools.elf",
+            .root_module = vmware_tools_mod,
+        });
+        vmware_tools.setLinkerScript(b.path("src/user/linker.ld"));
+        vmware_tools.root_module.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
+
+        const install_vmware_tools = b.addInstallArtifact(vmware_tools, .{});
+        b.getInstallStep().dependOn(&install_vmware_tools.step);
+    }
 
     // Build QEMU Guest Agent Service
     const qemu_ga_mod = b.createModule(.{
