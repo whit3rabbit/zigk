@@ -2,10 +2,12 @@ const syscall = @import("syscall");
 const syscall_tests = @import("tests/syscall/dir_ops.zig");
 const file_io_tests = @import("tests/syscall/file_ops.zig");
 const memory_tests = @import("tests/syscall/memory.zig");
+const process_tests = @import("tests/syscall/process.zig");
 const fs_tests = @import("tests/fs/basic.zig");
 const fs_error_tests = @import("tests/fs/errors.zig");
 const regression_tests = @import("tests/regression/sfs_issues.zig");
 const edge_case_tests = @import("tests/fs/edge_cases.zig");
+const stress_tests = @import("tests/fs/stress.zig");
 
 const TestRunner = struct {
     passed: usize = 0,
@@ -160,6 +162,24 @@ export fn main(argc: i32, argv: [*][*:0]u8) i32 {
     runner.runTest("memory: mmap length overflow", memory_tests.testMmapLengthOverflow);
     runner.runTest("memory: multiple small allocations", memory_tests.testMultipleSmallAllocations);
     runner.runTest("memory: alloc write munmap realloc", memory_tests.testAllocWriteMunmapRealloc);
+
+    // Process tests
+    runner.runTest("process: fork creates child", process_tests.testForkCreatesChild);
+    runner.runTest("process: fork independent memory", process_tests.testForkIndependentMemory);
+    runner.runTest("process: exit with status", process_tests.testExitWithStatus);
+    runner.runTest("process: wait4 blocks", process_tests.testWait4Blocks);
+    runner.runTest("process: wait4 nohang", process_tests.testWait4Nohang);
+    runner.runTest("process: getpid unique", process_tests.testGetpidUnique);
+    runner.runTest("process: getppid returns parent", process_tests.testGetppidReturnsParent);
+    runner.runTest("process: exec replaces process", process_tests.testExecReplacesProcess);
+
+    // Stress tests
+    runner.runTest("stress: write 10MB file", stress_tests.testWrite10MbFile);
+    runner.runTest("stress: create 100 files", stress_tests.testCreate100Files);
+    runner.runTest("stress: fragmented writes", stress_tests.testFragmentedWrites);
+    runner.runTest("stress: max open FDs", stress_tests.testMaxOpenFds);
+    runner.runTest("stress: large directory listing", stress_tests.testLargeDirectoryListing);
+    runner.runTest("stress: rapid process ops", stress_tests.testRapidProcessOps);
 
     // Basic sanity test
     runner.runTest("dummy: always passes", testDummy);
