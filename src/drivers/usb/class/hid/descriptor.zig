@@ -57,10 +57,12 @@ pub const HidReport = struct {
     total_bits: u16 = 0,
 
     pub fn addField(self: *HidReport, field: HidField) void {
-        if (self.field_count < types.MAX_FIELDS) {
-            self.fields[self.field_count] = field;
-            self.field_count += 1;
+        if (self.field_count >= types.MAX_FIELDS) {
+            console.debug("HID: Attempted to add field beyond MAX_FIELDS limit", .{});
+            return;
         }
+        self.fields[self.field_count] = field;
+        self.field_count += 1;
     }
 
     pub fn findFieldByUsage(self: *const HidReport, usage: u32) ?*const HidField {
@@ -392,8 +394,14 @@ pub const Parser = struct {
                     }
                 }
 
+                // Security: Cap field processing to MAX_FIELDS to prevent array overflow
+                const max_processable = @min(count, types.MAX_FIELDS);
+                if (count > types.MAX_FIELDS) {
+                    console.warn("HID: Report descriptor has {} fields, capping to MAX_FIELDS ({})", .{ count, types.MAX_FIELDS });
+                }
+
                 var field_idx: usize = 0;
-                while (field_idx < count) : (field_idx += 1) {
+                while (field_idx < max_processable) : (field_idx += 1) {
                     const usage = if (field_idx < effective_count)
                         effective_usages[field_idx]
                     else if (effective_count > 0)
@@ -439,7 +447,13 @@ pub const Parser = struct {
         const x_usage = makeUsage(types.UsagePage.GENERIC_DESKTOP, types.UsageGeneric.X);
         const y_usage = makeUsage(types.UsagePage.GENERIC_DESKTOP, types.UsageGeneric.Y);
 
-        for (self.input_report.fields[0..self.input_report.field_count]) |*field| {
+        // Security: Defensive bounds validation to prevent panic
+        const safe_field_count = @min(self.input_report.field_count, types.MAX_FIELDS);
+        if (self.input_report.field_count > types.MAX_FIELDS) {
+            console.warn("HID: field_count ({}) exceeds MAX_FIELDS ({}), capping", .{ self.input_report.field_count, types.MAX_FIELDS });
+        }
+
+        for (self.input_report.fields[0..safe_field_count]) |*field| {
             if (field.usage == x_usage) {
                 self.capabilities.has_x = true;
                 self.capabilities.x_logical_min = field.logical_min;
