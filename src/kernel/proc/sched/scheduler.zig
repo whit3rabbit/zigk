@@ -631,6 +631,12 @@ pub fn exitWithStatus(status: i32) void {
 pub fn timerTick(frame: if (builtin.cpu.arch == .x86_64) *hal.interrupts.InterruptFrame else *const hal.interrupts.InterruptFrame) if (builtin.cpu.arch == .x86_64) *hal.idt.InterruptFrame else u64 {
     const local_tick_count = scheduler.tick_count.fetchAdd(1, .monotonic) + 1;
 
+    // Architecture-specific: Poll XHCI on platforms without MSI-X
+    if (builtin.cpu.arch == .aarch64) {
+        const usb = @import("usb");
+        _ = usb.xhci.interrupts.pollAllControllers();
+    }
+
     var tick_cb: ?*const fn () void = null;
     var is_running: bool = false;
 

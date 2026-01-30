@@ -683,6 +683,9 @@ pub fn build(b: *std.Build) void {
     usb_module.addImport("dma", dma_module);
     usb_module.addImport("iommu", kernel_iommu_module);
 
+    // Add USB to scheduler for XHCI polling on aarch64
+    sched_module.addImport("usb", usb_module);
+
     // fd_module moved up
 
     // Create User VMM module (userspace memory management for mmap/munmap)
@@ -2383,6 +2386,8 @@ pub fn build(b: *std.Build) void {
     if (target_arch == .x86_64) {
         test_runner.root_module.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
         test_runner.root_module.addAssemblyFile(b.path("src/user/crt0.S"));
+    } else if (target_arch == .aarch64) {
+        test_runner.root_module.addAssemblyFile(b.path("src/arch/aarch64/lib/crt0.S"));
     }
     const install_test_runner = b.addInstallArtifact(test_runner, .{});
     b.getInstallStep().dependOn(&install_test_runner.step);
@@ -2422,6 +2427,7 @@ pub fn build(b: *std.Build) void {
         test_libc_fix_exe.root_module.addAssemblyFile(b.path("src/user/crt0.S"));
         test_libc_fix_exe.root_module.addAssemblyFile(b.path("src/user/lib/libc/setjmp.S"));
     } else if (target_arch == .aarch64) {
+        test_libc_fix_exe.root_module.addAssemblyFile(b.path("src/arch/aarch64/lib/crt0.S"));
         // aarch64: Use C shim for va_list bootstrap
         test_libc_fix_exe.root_module.addCSourceFile(.{
             .file = b.path("src/user/lib/libc/stdio/shim/printf_shim.c"),

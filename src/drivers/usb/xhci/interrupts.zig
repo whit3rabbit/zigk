@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const console = @import("console");
 const hal = @import("hal");
 const pci = @import("pci");
@@ -15,6 +16,13 @@ const ports = @import("ports.zig");
 
 const interrupts = hal.interrupts;
 const Controller = types.Controller;
+
+// Polling support for aarch64 (timer-based event processing)
+const MAX_POLLED_CONTROLLERS = 4;
+var polled_controllers: [MAX_POLLED_CONTROLLERS]?*Controller = [_]?*Controller{null} ** MAX_POLLED_CONTROLLERS;
+var polled_count: usize = 0;
+var poll_tick_count: usize = 0;
+var poll_event_count: usize = 0;
 
 pub const MsixVectorAllocation = interrupts.MsixVectorAllocation;
 
@@ -250,6 +258,11 @@ pub fn setupInterrupts(ctrl: *Controller) !void {
 
     if (ctrl.msix_vectors == null) {
         console.info("XHCI: Using polling mode for events", .{});
+
+        // Register for timer-based polling on aarch64
+        if (builtin.cpu.arch == .aarch64) {
+            registerForPolling(ctrl);
+        }
     }
 
     // Enable interrupter
@@ -258,4 +271,39 @@ pub fn setupInterrupts(ctrl: *Controller) !void {
     var iman = intr_dev.readTyped(.iman, regs.Iman);
     iman.ie = true;
     intr_dev.writeTyped(.iman, iman);
+}
+
+/// Register a controller for timer-based polling (used on aarch64 when MSI-X unavailable)
+pub fn registerForPolling(ctrl: *Controller) void {
+    if (polled_count >= MAX_POLLED_CONTROLLERS) {
+        console.warn("XHCI: Cannot register more than {} controllers for polling", .{MAX_POLLED_CONTROLLERS});
+        return;
+    }
+    polled_controllers[polled_count] = ctrl;
+    polled_count += 1;
+    console.info("XHCI: Registered controller for polling (total: {})", .{polled_count});
+}
+
+/// Poll all registered controllers for events (called from scheduler timer tick)
+pub fn pollAllControllers() usize {
+    poll_tick_count += 1;
+    var total: usize = 0;
+
+    for (polled_controllers[0..polled_count]) |maybe_ctrl| {
+        if (maybe_ctrl) |ctrl| {
+            // Only poll if no MSI-X (aarch64 case)
+            if (ctrl.msix_vectors == null) {
+                total += processEvents(ctrl);
+            }
+        }
+    }
+
+    poll_event_count += total;
+
+    // Debug log every 1000 polls (10 seconds at 100Hz)
+    if (poll_tick_count % 1000 == 0) {
+        console.debug("XHCI: Polled {} times, processed {} events", .{poll_tick_count, poll_event_count});
+    }
+
+    return total;
 }
