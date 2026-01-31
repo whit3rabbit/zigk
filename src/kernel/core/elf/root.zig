@@ -6,6 +6,7 @@ const types = @import("types.zig");
 const loader = @import("loader.zig");
 const setup = @import("setup.zig");
 const validation = @import("validation.zig");
+const user_vmm_mod = @import("user_vmm");
 
 // Export public types and constants
 pub const ELF_MAGIC = types.ELF_MAGIC;
@@ -53,6 +54,7 @@ pub const setupTls = setup.setupTls;
 ///   envp: Environment strings
 ///
 /// Returns: ExecResult with entry point, stack pointer, and page table
+///
 pub fn exec(
     data: []const u8,
     argv: []const []const u8,
@@ -66,6 +68,11 @@ pub fn exec(
         return error.OutOfMemory;
     };
     errdefer vmm.destroyAddressSpace(pml4_phys);
+
+    // Create user VMM for VMA tracking
+    // TODO: Get ASLR mmap_start from somewhere instead of hardcoding
+    const user_vmm_instance = try user_vmm_mod.UserVmm.initWithMmapBase(0x100000000000);
+    errdefer user_vmm_instance.deinit();
 
     // Use provided PIE base or default (for ASLR)
     const pie_base: u64 = pie_base_opt orelse 0x400000;
@@ -81,7 +88,7 @@ pub fn exec(
     };
 
     // Load the ELF
-    const load_result = loader.load(data, pml4_phys, pie_base, stack_bounds) catch |err| {
+    const load_result = loader.load(data, pml4_phys, user_vmm_instance, pie_base, stack_bounds) catch |err| {
         console.err("ELF: Load failed: {}", .{err});
         return error.InvalidExecutable;
     };
@@ -111,7 +118,7 @@ pub fn exec(
 
     const auxv = auxv_buf[0..auxv_count];
 
-    const sp = setup.setupStack(pml4_phys, stack_top, stack_size, argv, envp, auxv) catch |err| {
+    const sp = setup.setupStack(pml4_phys, user_vmm_instance, stack_top, stack_size, argv, envp, auxv) catch |err| {
         console.err("ELF: Stack setup failed: {}", .{err});
         return error.OutOfMemory;
     };

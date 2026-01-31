@@ -5,6 +5,7 @@ const pmm = @import("pmm");
 const console = @import("console");
 const types = @import("types.zig");
 const utils = @import("utils.zig");
+const user_vmm_mod = @import("user_vmm");
 
 const ElfError = types.ElfError;
 const AuxEntry = types.AuxEntry;
@@ -33,6 +34,7 @@ const writeU64ToUserspace = utils.writeU64ToUserspace;
 ///
 /// Args:
 ///   pml4_phys: Page table physical address
+///   user_vmm: User virtual memory manager (for creating stack VMA)
 ///   stack_top: Top of stack virtual address
 ///   stack_size: Stack size in bytes
 ///   argv: Argument strings (can be empty)
@@ -42,6 +44,7 @@ const writeU64ToUserspace = utils.writeU64ToUserspace;
 /// Returns: Initial RSP value
 pub fn setupStack(
     pml4_phys: u64,
+    user_vmm: *user_vmm_mod.UserVmm,
     stack_top: u64,
     stack_size: usize,
     argv: []const []const u8,
@@ -116,6 +119,25 @@ pub fn setupStack(
 
         current_vaddr += page_size;
     }
+
+    // CRITICAL: Create VMA for stack region
+    // Without this, page faults in the stack will fail to find the VMA and SIGSEGV
+    // This was the root cause of the aarch64 crash - no VMAs were being created
+    //
+    // NOTE: Extend VMA one page above stack_top to handle potential access at boundary
+    // (e.g., aarch64 might access SP+offset where offset reaches stack_top)
+    const stack_vma_end = stack_top + page_size;
+    const stack_vma = user_vmm.createVma(
+        stack_base,
+        stack_vma_end,
+        user_vmm_mod.PROT_READ | user_vmm_mod.PROT_WRITE,
+        user_vmm_mod.MAP_PRIVATE | user_vmm_mod.MAP_ANONYMOUS,
+    ) catch {
+        console.err("ELF: Failed to create stack VMA", .{});
+        return error.OutOfMemory;
+    };
+    user_vmm.insertVma(stack_vma);
+    console.debug("ELF: Created stack VMA {x}-{x}", .{ stack_base, stack_vma_end });
 
     // Build stack contents from the top down
     var sp = stack_top;
@@ -219,6 +241,7 @@ const StackBounds = types.StackBounds;
 ///
 /// Args:
 ///   pml4_phys: Page table physical address
+///   user_vmm: User virtual memory manager (for creating TLS VMA)
 ///   phdr: PT_TLS program header
 ///   file_data: Raw ELF file data
 ///   preferred_tp: Preferred thread pointer address
@@ -227,6 +250,7 @@ const StackBounds = types.StackBounds;
 /// Returns: The FS base address (pointer to TCB)
 pub fn setupTls(
     pml4_phys: u64,
+    user_vmm: *user_vmm_mod.UserVmm,
     phdr: Elf64_Phdr,
     file_data: []const u8,
     preferred_tp: u64,
@@ -415,6 +439,20 @@ pub fn setupTls(
     // Set up TCB self-pointer at TP (first 8 bytes)
     // This is required for %fs:0 to work
     try writeU64ToUserspace(pml4_phys, tp, tp);
+
+    // CRITICAL: Create VMA for TLS region
+    // Without this, page faults in TLS will fail (same issue as stack)
+    const tls_vma = user_vmm.createVma(
+        alloc_start,
+        alloc_end,
+        user_vmm_mod.PROT_READ | user_vmm_mod.PROT_WRITE,
+        user_vmm_mod.MAP_PRIVATE | user_vmm_mod.MAP_ANONYMOUS,
+    ) catch {
+        console.err("ELF: Failed to create TLS VMA", .{});
+        return ElfError.OutOfMemory;
+    };
+    user_vmm.insertVma(tls_vma);
+    console.debug("ELF: Created TLS VMA {x}-{x}", .{ alloc_start, alloc_end });
 
     return tp;
 }

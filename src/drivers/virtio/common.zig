@@ -276,6 +276,73 @@ pub const Virtqueue = struct {
         return head;
     }
 
+    /// DMA buffer descriptor for VirtIO (physical address + length)
+    pub const DmaBuf = struct {
+        phys_addr: u64,
+        len: u32,
+    };
+
+    /// Add a buffer chain using physical addresses (DMA-safe)
+    /// Use this when buffers are allocated via dma.allocBuffer()
+    /// out_bufs: device-readable buffers with physical addresses
+    /// in_bufs: device-writable buffers with physical addresses
+    /// Returns the descriptor head index, or null if no space
+    pub fn addBufDma(
+        self: *Self,
+        out_bufs: []const DmaBuf,
+        in_bufs: []const DmaBuf,
+    ) ?u16 {
+        const total_bufs = out_bufs.len + in_bufs.len;
+        if (total_bufs == 0) return null;
+        if (self.num_free < total_bufs) return null;
+
+        var head: ?u16 = null;
+        var prev: ?u16 = null;
+
+        // Add device-readable (out) buffers
+        for (out_bufs) |buf| {
+            const idx = self.allocDesc() orelse unreachable;
+            if (head == null) head = idx;
+
+            self.desc[idx].addr = buf.phys_addr;
+            self.desc[idx].len = buf.len;
+            self.desc[idx].flags = 0;
+
+            if (prev) |p| {
+                self.desc[p].next = idx;
+                self.desc[p].flags |= VIRTQ_DESC_F_NEXT;
+            }
+            prev = idx;
+        }
+
+        // Add device-writable (in) buffers
+        for (in_bufs) |buf| {
+            const idx = self.allocDesc() orelse unreachable;
+            if (head == null) head = idx;
+
+            self.desc[idx].addr = buf.phys_addr;
+            self.desc[idx].len = buf.len;
+            self.desc[idx].flags = VIRTQ_DESC_F_WRITE;
+
+            if (prev) |p| {
+                self.desc[p].next = idx;
+                self.desc[p].flags |= VIRTQ_DESC_F_NEXT;
+            }
+            prev = idx;
+        }
+
+        // Add to available ring
+        const avail_idx = self.avail.idx % self.size;
+        self.avail.ring[avail_idx] = head.?;
+
+        // Memory barrier before updating idx
+        hal.mmio.memoryBarrier();
+
+        self.avail.idx +%= 1;
+
+        return head;
+    }
+
     /// Check for and return the next used buffer
     /// Returns (head_idx, bytes_written) or null if no new entries
     /// Security: Validates device-provided elem.id before use

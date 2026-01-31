@@ -52,6 +52,8 @@ pub const ScsiError = error{
     LunNotFound,
     VirtqueueFull,
     DeviceError,
+    BufferTooLarge,
+    DeviceNotReady,
 };
 
 // ============================================================================
@@ -455,18 +457,21 @@ pub const VirtioScsiController = struct {
 
     /// Try to enumerate LUNs via REPORT LUNS command
     fn tryReportLuns(self: *Self) bool {
-        var lun_list: [256]u8 align(8) = [_]u8{0} ** 256;
+        const lun_list_dma = dma.allocBuffer(self.bdf, 256, true) catch return false;
+        defer dma.freeBuffer(&lun_list_dma);
+
         var cdb: [config.Limits.MAX_CDB_SIZE]u8 = undefined;
         command.buildReportLuns(&cdb, 256);
 
-        const result = self.executeCommandSync(0, 0, &cdb, null, &lun_list) catch {
+        const result = self.executeCommandSyncDma(0, 0, &cdb, null, lun_list_dma) catch {
             return false;
         };
 
         if (!result.isSuccess()) return false;
 
-        // Parse response
-        const header: *const command.ReportLunsHeader = @ptrCast(&lun_list);
+        // Parse response from DMA buffer
+        const lun_list = lun_list_dma.slice();
+        const header: *const command.ReportLunsHeader = @ptrCast(lun_list.ptr);
         const lun_count = @min(header.lunCount(), config.Limits.MAX_LUNS);
 
         var i: u32 = 0;
@@ -497,19 +502,41 @@ pub const VirtioScsiController = struct {
     fn probeLun(self: *Self, target: u16, lun_num: u32) ScsiError!void {
         if (self.lun_count >= config.Limits.MAX_LUNS) return error.AllocationFailed;
 
-        // Send INQUIRY
-        var inquiry_buf: [36]u8 align(4) = [_]u8{0} ** 36;
+        // Send TEST UNIT READY first to ensure device is ready
         var cdb: [config.Limits.MAX_CDB_SIZE]u8 = undefined;
+        command.buildTestUnitReady(&cdb);
+
+        // TEST UNIT READY has no data transfer, just check status
+        const dummy_dma = dma.allocBuffer(self.bdf, 4, true) catch
+            return error.AllocationFailed;
+        defer dma.freeBuffer(&dummy_dma);
+
+        const tur_result = self.executeCommandSyncDma(target, lun_num, &cdb, null, dummy_dma) catch {
+            // Device not ready - skip this LUN
+            return error.DeviceNotReady;
+        };
+
+        // If device returns CHECK CONDITION, it might not be ready - skip
+        if (!tur_result.isSuccess()) {
+            return error.DeviceNotReady;
+        }
+
+        // Allocate DMA buffer for INQUIRY response
+        const inquiry_dma = dma.allocBuffer(self.bdf, 36, true) catch
+            return error.AllocationFailed;
+        defer dma.freeBuffer(&inquiry_dma);
+
+        // Send INQUIRY
         command.buildInquiry(&cdb, 36);
 
-        const result = self.executeCommandSync(target, lun_num, &cdb, null, &inquiry_buf) catch {
+        const result = self.executeCommandSyncDma(target, lun_num, &cdb, null, inquiry_dma) catch {
             return error.CommandFailed;
         };
 
         if (!result.isSuccess()) return error.DeviceError;
 
-        // Parse INQUIRY
-        const inquiry: *const command.InquiryData = @ptrCast(&inquiry_buf);
+        // Parse INQUIRY from DMA buffer
+        const inquiry: *const command.InquiryData = @ptrCast(@alignCast(inquiry_dma.getVirt()));
         if (!inquiry.isPresent()) return error.LunNotFound;
 
         // Initialize LUN
@@ -537,38 +564,56 @@ pub const VirtioScsiController = struct {
 
     /// Get LUN capacity
     fn getLunCapacity(self: *Self, scsi_lun: *lun.ScsiLun) ScsiError!void {
-        var cap_buf: [8]u8 align(4) = [_]u8{0} ** 8;
+        // Allocate DMA buffer for capacity response
+        const cap_dma = dma.allocBuffer(self.bdf, 8, true) catch |err| {
+            console.warn("VirtIO-SCSI: Failed to allocate DMA buffer for capacity: {}", .{err});
+            return error.AllocationFailed;
+        };
+        defer dma.freeBuffer(&cap_dma);
+
         var cdb: [config.Limits.MAX_CDB_SIZE]u8 = undefined;
         command.buildReadCapacity10(&cdb);
 
-        const result = self.executeCommandSync(
+        const result = self.executeCommandSyncDma(
             scsi_lun.target,
             scsi_lun.lun,
             &cdb,
             null,
-            &cap_buf,
-        ) catch return error.CommandFailed;
+            cap_dma,
+        ) catch |err| {
+            console.warn("VirtIO-SCSI: READ CAPACITY command failed: {}", .{err});
+            return error.CommandFailed;
+        };
 
-        if (!result.isSuccess()) return error.DeviceError;
+        if (!result.isSuccess()) {
+            console.warn("VirtIO-SCSI: READ CAPACITY returned error status: {x}", .{result.status});
+            return error.DeviceError;
+        }
 
-        const cap_data: *const command.ReadCapacity10Data = @ptrCast(&cap_buf);
+        const cap_data: *const command.ReadCapacity10Data = @ptrCast(@alignCast(cap_dma.getVirt()));
+        console.info("VirtIO-SCSI: READ CAPACITY returned: last_lba={x}, block_size={}", .{
+            cap_data.lastLba(),
+            cap_data.blockSize(),
+        });
         scsi_lun.updateCapacity10(cap_data);
 
         // If device reports 0xFFFFFFFF, try READ CAPACITY (16)
         if (cap_data.needsCapacity16()) {
-            var cap16_buf: [32]u8 align(4) = [_]u8{0} ** 32;
+            const cap16_dma = dma.allocBuffer(self.bdf, 32, true) catch return;
+            defer dma.freeBuffer(&cap16_dma);
+
             command.buildReadCapacity16(&cdb, 32);
 
-            const result16 = self.executeCommandSync(
+            const result16 = self.executeCommandSyncDma(
                 scsi_lun.target,
                 scsi_lun.lun,
                 &cdb,
                 null,
-                &cap16_buf,
+                cap16_dma,
             ) catch return;
 
             if (result16.isSuccess()) {
-                const cap16_data: *const command.ReadCapacity16Data = @ptrCast(&cap16_buf);
+                const cap16_data: *const command.ReadCapacity16Data = @ptrCast(@alignCast(cap16_dma.getVirt()));
                 scsi_lun.updateCapacity16(cap16_data);
             }
         }
@@ -614,31 +659,48 @@ pub const VirtioScsiController = struct {
         // Get a request queue
         const q = self.queues.selectRequestQueue() orelse return error.VirtqueueFull;
 
-        // Build descriptor chain
-        var out_bufs: [2][]const u8 = undefined;
+        // Build descriptor chain using physical addresses from DMA buffers
+        const DmaBuf = virtio.Virtqueue.DmaBuf;
+        var out_bufs: [2]DmaBuf = undefined;
         var out_count: usize = 0;
 
-        out_bufs[out_count] = std.mem.asBytes(req_ptr);
+        out_bufs[out_count] = .{
+            .phys_addr = req_dma.device_addr,
+            .len = @intCast(@sizeOf(request.ScsiRequestCmd)),
+        };
         out_count += 1;
 
         if (data_out) |d| {
-            out_bufs[out_count] = d;
+            // For data_out, we need the physical address - caller must provide DMA buffer
+            // For now, this will panic if data_out is not in HHDM (requires API change)
+            out_bufs[out_count] = .{
+                .phys_addr = hal.paging.virtToPhys(@intFromPtr(d.ptr)),
+                .len = std.math.cast(u32, d.len) orelse return error.BufferTooLarge,
+            };
             out_count += 1;
         }
 
-        var in_bufs: [2][]u8 = undefined;
+        var in_bufs: [2]DmaBuf = undefined;
         var in_count: usize = 0;
 
-        in_bufs[in_count] = std.mem.asBytes(resp_ptr);
+        in_bufs[in_count] = .{
+            .phys_addr = resp_dma.device_addr,
+            .len = @intCast(@sizeOf(request.ScsiResponseCmd)),
+        };
         in_count += 1;
 
         if (data_in) |d| {
-            in_bufs[in_count] = d;
+            // For data_in, we need the physical address - caller must provide DMA buffer
+            // For now, this will panic if data_in is not in HHDM (requires API change)
+            in_bufs[in_count] = .{
+                .phys_addr = hal.paging.virtToPhys(@intFromPtr(d.ptr)),
+                .len = std.math.cast(u32, d.len) orelse return error.BufferTooLarge,
+            };
             in_count += 1;
         }
 
-        // Submit to virtqueue
-        const head = q.vq.addBuf(out_bufs[0..out_count], in_bufs[0..in_count]) orelse
+        // Submit to virtqueue using DMA-safe API
+        const head = q.vq.addBufDma(out_bufs[0..out_count], in_bufs[0..in_count]) orelse
             return error.VirtqueueFull;
 
         // Notify device
@@ -655,6 +717,107 @@ pub const VirtioScsiController = struct {
             if (q.vq.getUsed()) |used| {
                 if (used.head == head) {
                     return resp_ptr.*;
+                }
+            }
+            hal.cpu.pause();
+        }
+    }
+
+    /// Execute a SCSI command synchronously with DMA buffer for data_in
+    /// This variant avoids virtToPhys issues by accepting pre-allocated DMA buffers
+    fn executeCommandSyncDma(
+        self: *Self,
+        target: u16,
+        lun_num: u32,
+        cdb: []const u8,
+        data_out_dma: ?dma.DmaBuffer,
+        data_in_dma: ?dma.DmaBuffer,
+    ) ScsiError!request.ScsiResponseCmd {
+        // Allocate DMA buffers for request/response headers
+        const req_dma = dma.allocBuffer(self.bdf, @sizeOf(request.ScsiRequestCmd), false) catch
+            return error.AllocationFailed;
+        defer dma.freeBuffer(&req_dma);
+
+        const resp_dma = dma.allocBuffer(self.bdf, @sizeOf(request.ScsiResponseCmd), true) catch
+            return error.AllocationFailed;
+        defer dma.freeBuffer(&resp_dma);
+
+        // Build request header
+        const req_ptr: *request.ScsiRequestCmd = @ptrCast(@alignCast(req_dma.getVirt()));
+        @memset(std.mem.asBytes(req_ptr), 0);
+        req_ptr.lun = request.encodeLun(target, lun_num);
+        req_ptr.tag = request.generateTag();
+        req_ptr.task_attr = @intFromEnum(request.TaskAttr.SIMPLE);
+
+        const cdb_len = @min(cdb.len, config.Limits.MAX_CDB_SIZE);
+        @memcpy(req_ptr.cdb[0..cdb_len], cdb[0..cdb_len]);
+
+        const resp_ptr: *request.ScsiResponseCmd = @ptrCast(@alignCast(resp_dma.getVirt()));
+        @memset(std.mem.asBytes(resp_ptr), 0);
+
+        const q = self.queues.selectRequestQueue() orelse return error.VirtqueueFull;
+
+        // Build descriptor chain
+        const DmaBuf = virtio.Virtqueue.DmaBuf;
+        var out_bufs: [2]DmaBuf = undefined;
+        var out_count: usize = 0;
+
+        out_bufs[out_count] = .{
+            .phys_addr = req_dma.device_addr,
+            .len = @intCast(@sizeOf(request.ScsiRequestCmd)),
+        };
+        out_count += 1;
+
+        if (data_out_dma) |d| {
+            console.info("VirtIO-SCSI: Adding data_out DMA buf: phys=0x{X}, device=0x{X}, len={}", .{
+                d.phys_addr, d.device_addr, d.size
+            });
+            out_bufs[out_count] = .{
+                .phys_addr = d.device_addr,
+                .len = std.math.cast(u32, d.size) orelse return error.BufferTooLarge,
+            };
+            out_count += 1;
+        }
+
+        var in_bufs: [2]DmaBuf = undefined;
+        var in_count: usize = 0;
+
+        in_bufs[in_count] = .{
+            .phys_addr = resp_dma.device_addr,
+            .len = @intCast(@sizeOf(request.ScsiResponseCmd)),
+        };
+        in_count += 1;
+
+        // Use DMA buffer for data_in (if provided)
+        if (data_in_dma) |d| {
+            in_bufs[in_count] = .{
+                .phys_addr = d.device_addr,
+                .len = std.math.cast(u32, d.size) orelse return error.BufferTooLarge,
+            };
+            in_count += 1;
+        }
+
+        const head = q.vq.addBufDma(out_bufs[0..out_count], in_bufs[0..in_count]) orelse
+            return error.VirtqueueFull;
+
+        q.kick();
+
+        // Poll for completion
+        const timeout_ns: u64 = 5_000_000_000;
+        const start = hal.timing.getNanoseconds();
+        while (true) {
+            const now = hal.timing.getNanoseconds();
+            if (now >= start and (now - start) > timeout_ns) {
+                console.warn("VirtIO-SCSI: Command timeout!", .{});
+                return error.CommandTimeout;
+            }
+            if (q.vq.getUsed()) |used| {
+                if (used.head == head) {
+                    const result = resp_ptr.*;
+                    console.info("VirtIO-SCSI: Command complete: status=0x{X}, response=0x{X}, residual={}", .{
+                        result.status, result.response, result.residual
+                    });
+                    return result;
                 }
             }
             hal.cpu.pause();
@@ -681,6 +844,11 @@ pub const VirtioScsiController = struct {
             return error.InvalidParameter;
         if (buffer.len < transfer_size) return error.InvalidParameter;
 
+        // Allocate DMA buffer for data transfer
+        const data_dma = dma.allocBuffer(self.bdf, transfer_size, true) catch
+            return error.AllocationFailed;
+        defer dma.freeBuffer(&data_dma);
+
         // Build CDB based on LBA size
         var cdb: [config.Limits.MAX_CDB_SIZE]u8 = undefined;
         if (lba > 0xFFFFFFFF or block_count > 0xFFFF) {
@@ -689,13 +857,13 @@ pub const VirtioScsiController = struct {
             command.buildRead10(&cdb, @truncate(lba), @truncate(block_count));
         }
 
-        // Execute command
-        const result = try self.executeCommandSync(
+        // Execute command with DMA buffer
+        const result = try self.executeCommandSyncDma(
             scsi_lun.target,
             scsi_lun.lun,
             &cdb,
-            null,
-            buffer[0..transfer_size],
+            null, // data_out_dma
+            data_dma, // data_in_dma
         );
 
         if (!result.isSuccess()) return error.TransferError;
@@ -703,6 +871,11 @@ pub const VirtioScsiController = struct {
         // Calculate bytes transferred (validate residual from device)
         if (result.residual > transfer_size) return error.DeviceError;
         const transferred = transfer_size - result.residual;
+
+        // Copy from DMA buffer to user buffer
+        const src: [*]const u8 = @ptrCast(data_dma.getVirt());
+        @memcpy(buffer[0..transferred], src[0..transferred]);
+
         return transferred;
     }
 
@@ -722,6 +895,15 @@ pub const VirtioScsiController = struct {
             return error.InvalidParameter;
         if (buffer.len < transfer_size) return error.InvalidParameter;
 
+        // Allocate DMA buffer for write data
+        const data_dma = dma.allocBuffer(self.bdf, transfer_size, false) catch
+            return error.AllocationFailed;
+        defer dma.freeBuffer(&data_dma);
+
+        // Copy user data to DMA buffer
+        const dest: [*]u8 = @ptrCast(data_dma.getVirt());
+        @memcpy(dest[0..transfer_size], buffer[0..transfer_size]);
+
         // Build CDB based on LBA size
         var cdb: [config.Limits.MAX_CDB_SIZE]u8 = undefined;
         if (lba > 0xFFFFFFFF or block_count > 0xFFFF) {
@@ -730,13 +912,13 @@ pub const VirtioScsiController = struct {
             command.buildWrite10(&cdb, @truncate(lba), @truncate(block_count));
         }
 
-        // Execute command
-        const result = try self.executeCommandSync(
+        // Execute command with DMA buffer - preserves physical address for aarch64 compatibility
+        const result = try self.executeCommandSyncDma(
             scsi_lun.target,
             scsi_lun.lun,
             &cdb,
-            buffer[0..transfer_size],
-            null,
+            data_dma, // data_out_dma
+            null, // data_in_dma
         );
 
         if (!result.isSuccess()) return error.TransferError;

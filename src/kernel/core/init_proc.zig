@@ -294,7 +294,7 @@ fn spawnProcessFromData(mod: ModuleData, process_name: []const u8) void {
         .stack_size = stack_size,
     };
 
-    const load_result = elf.load(mod.data, proc.cr3, load_base, stack_bounds) catch |err| {
+    const load_result = elf.load(mod.data, proc.cr3, proc.user_vmm, load_base, stack_bounds) catch |err| {
         console.err("ELF load failed: {}", .{err});
         return;
     };
@@ -362,9 +362,10 @@ fn spawnProcessFromData(mod: ModuleData, process_name: []const u8) void {
     // Log ASLR configuration for this process (already guarded in aslr.zig)
     aslr.logOffsets(&proc.aslr_offsets, proc.pid);
 
-    // setupStack allocates pages, maps them, and pushes args
+    // setupStack allocates pages, maps them, pushes args, and creates stack VMA
     const initial_rsp = elf.setupStack(
         proc.cr3,
+        proc.user_vmm,
         stack_virt_top,
         stack_size,
         argv,
@@ -377,7 +378,9 @@ fn spawnProcessFromData(mod: ModuleData, process_name: []const u8) void {
 
     // SECURITY: Only log rsp in debug builds
     if (builtin.mode == .Debug) {
-        console.info("User stack created (rsp={x})", .{initial_rsp});
+        console.info("User stack created (rsp={x}, stack_base={x}, stack_top={x})", .{
+            initial_rsp, stack_virt_top - stack_size, stack_virt_top
+        });
     }
     console.debug("Init: Creating user thread...", .{});
 
@@ -401,7 +404,7 @@ fn spawnProcessFromData(mod: ModuleData, process_name: []const u8) void {
     if (load_result.tls_phdr) |phdr| {
         // Use TLS segment from ELF
         // SECURITY: Pass actual ASLR stack bounds for TLS overlap validation
-        if (elf.setupTls(proc.cr3, phdr, mod.data, tls_base_addr, stack_bounds)) |tp| {
+        if (elf.setupTls(proc.cr3, proc.user_vmm, phdr, mod.data, tls_base_addr, stack_bounds)) |tp| {
             fs_base = tp;
             // SECURITY: Only log TLS address in debug builds
             if (builtin.mode == .Debug) {
@@ -424,7 +427,7 @@ fn spawnProcessFromData(mod: ModuleData, process_name: []const u8) void {
             .p_align = 16,
         };
         // SECURITY: Pass actual ASLR stack bounds for TLS overlap validation
-        if (elf.setupTls(proc.cr3, minimal_phdr, mod.data, tls_base_addr, stack_bounds)) |tp| {
+        if (elf.setupTls(proc.cr3, proc.user_vmm, minimal_phdr, mod.data, tls_base_addr, stack_bounds)) |tp| {
             fs_base = tp;
         } else |err| {
             console.warn("Init: Failed to setup minimal TCB: {}", .{err});

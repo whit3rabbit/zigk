@@ -13,6 +13,7 @@ const root = @import("root.zig");
 const fd_mod = @import("fd");
 const uapi = @import("uapi");
 const heap = @import("heap");
+const console = @import("console");
 
 const FileDescriptor = fd_mod.FileDescriptor;
 const FileOps = fd_mod.FileOps;
@@ -72,24 +73,34 @@ fn blockRead(fd: *FileDescriptor, buf: []u8) isize {
     const start_offset = pos % block_size;
 
     const end_pos = math.add(u64, pos, buf.len) catch {
+        console.warn("VirtIO-SCSI read: overflow in end_pos calculation (pos={}, buf.len={})", .{pos, buf.len});
         return Errno.EINVAL.toReturn();
     };
     const end_pos_clamped = @min(end_pos, lun_info.capacity_bytes);
 
-    const end_block = math.add(u64, end_pos_clamped, block_size - 1) catch {
-        return Errno.EINVAL.toReturn();
-    } / block_size;
+    // Calculate end block (exclusive): for bytes [start, end), we need blocks [start_block, end_block)
+    // If end_pos lands exactly on a block boundary, don't round up
+    // Formula: end_block = ceil(end_pos / block_size) but only round up if there's a remainder
+    const end_block_raw = end_pos_clamped / block_size;
+    const end_block_remainder = end_pos_clamped % block_size;
+    const end_block = if (end_block_remainder > 0) end_block_raw + 1 else end_block_raw;
 
     // Underflow check
     if (end_block < start_block) {
+        console.warn("VirtIO-SCSI read: underflow (end_block={} < start_block={})", .{end_block, start_block});
         return Errno.EINVAL.toReturn();
     }
     const block_count_u64 = end_block - start_block;
 
     // Limit to max blocks per transfer
     if (block_count_u64 > MAX_BLOCKS_PER_TRANSFER) {
+        console.warn("VirtIO-SCSI read: too many blocks ({} > MAX={})", .{block_count_u64, MAX_BLOCKS_PER_TRANSFER});
         return Errno.EINVAL.toReturn();
     }
+
+    console.info("VirtIO-SCSI read: pos={}, buf.len={}, lun_cap={}, start_block={}, end_block={}, block_count={}", .{
+        pos, buf.len, lun_info.capacity_bytes, start_block, end_block, block_count_u64
+    });
 
     const block_count: u32 = @intCast(block_count_u64);
 
@@ -168,9 +179,10 @@ fn blockWrite(fd: *FileDescriptor, buf: []const u8) isize {
     };
     const end_pos_clamped = @min(end_pos, lun_info.capacity_bytes);
 
-    const end_block = math.add(u64, end_pos_clamped, block_size - 1) catch {
-        return Errno.EINVAL.toReturn();
-    } / block_size;
+    // Calculate end block (exclusive): ceil(end_pos / block_size) only if remainder
+    const end_block_raw = end_pos_clamped / block_size;
+    const end_block_remainder = end_pos_clamped % block_size;
+    const end_block = if (end_block_remainder > 0) end_block_raw + 1 else end_block_raw;
 
     if (end_block < start_block) {
         return Errno.EINVAL.toReturn();

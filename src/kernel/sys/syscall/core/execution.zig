@@ -366,6 +366,7 @@ pub fn sys_execve(frame: *hal.syscall.SyscallFrame, path_ptr: usize, argv_ptr: u
         return switch (err) {
             error.OutOfMemory => error.ENOMEM,
             error.InvalidExecutable => error.ENOEXEC,
+            error.InvalidAddress => error.EINVAL,
         };
     };
 

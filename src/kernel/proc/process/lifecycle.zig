@@ -49,6 +49,7 @@ pub fn createProcess(parent: ?*Process) !*Process {
     // Create user address space with randomized mmap base
     const user_vmm = try UserVmm.initWithMmapBase(aslr_offsets.mmap_start);
     errdefer user_vmm.deinit();
+    console.debug("Process: Created user_vmm at {*} (mmap_base={x})", .{ user_vmm, aslr_offsets.mmap_start });
 
     // Allocate process struct
     const proc = try alloc.create(Process);

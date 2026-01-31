@@ -907,9 +907,10 @@ pub fn scanAndRegisterVirtioScsi(lun_index: u8) !void {
 
     if (!lun_info.active) return;
 
-    // Register the raw LUN first (e.g. vda, vdb)
+    // Register the raw LUN first (e.g. sda, sdb)
+    // Use sd* naming for SCSI devices (consistent with AHCI and Linux convention)
     const drive_char = @as(u8, 'a') + lun_index;
-    const disk_name = try std.fmt.allocPrint(allocator, "vd{c}", .{drive_char});
+    const disk_name = try std.fmt.allocPrint(allocator, "sd{c}", .{drive_char});
 
     // Register with VirtIO-SCSI adapter's block_ops
     try devfs.registerDevice(disk_name, &virtio_scsi.adapter.block_ops, @ptrFromInt(@as(usize, lun_index)));
@@ -1034,7 +1035,7 @@ fn registerVirtioScsiPartition(lun_index: u8, disk_name: []const u8, index: u32,
         .index = index,
     };
 
-    // Create name: vda1, vda2...
+    // Create name: sda1, sda2...
     const name = try std.fmt.allocPrint(allocator, "{s}{d}", .{ disk_name, index });
 
     // Register

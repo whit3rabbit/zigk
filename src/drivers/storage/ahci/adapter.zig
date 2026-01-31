@@ -58,9 +58,11 @@ fn blockRead(fd: *FileDescriptor, buf: []u8) isize {
     const end_pos = math.add(u64, pos, buf.len) catch {
         return Errno.EINVAL.toReturn();
     };
-    const end_lba = math.add(u64, end_pos, SECTOR_SIZE - 1) catch {
-        return Errno.EINVAL.toReturn();
-    } / SECTOR_SIZE;
+
+    // Calculate end LBA (exclusive): ceil(end_pos / SECTOR_SIZE) only if remainder
+    const end_lba_raw = end_pos / SECTOR_SIZE;
+    const end_lba_remainder = end_pos % SECTOR_SIZE;
+    const end_lba = if (end_lba_remainder > 0) end_lba_raw + 1 else end_lba_raw;
 
     // Underflow check: end_lba must be >= start_lba
     if (end_lba < start_lba) {
@@ -124,9 +126,11 @@ fn blockWrite(fd: *FileDescriptor, buf: []const u8) isize {
     const end_pos = math.add(u64, pos, buf.len) catch {
         return Errno.EINVAL.toReturn();
     };
-    const end_lba = math.add(u64, end_pos, SECTOR_SIZE - 1) catch {
-        return Errno.EINVAL.toReturn();
-    } / SECTOR_SIZE;
+
+    // Calculate end LBA (exclusive): ceil(end_pos / SECTOR_SIZE) only if remainder
+    const end_lba_raw = end_pos / SECTOR_SIZE;
+    const end_lba_remainder = end_pos % SECTOR_SIZE;
+    const end_lba = if (end_lba_remainder > 0) end_lba_raw + 1 else end_lba_raw;
 
     // Underflow check: end_lba must be >= start_lba
     if (end_lba < start_lba) {

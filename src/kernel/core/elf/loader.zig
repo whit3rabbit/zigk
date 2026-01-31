@@ -7,6 +7,7 @@ const console = @import("console");
 const types = @import("types.zig");
 const utils = @import("utils.zig");
 const validation = @import("validation.zig");
+const user_vmm_mod = @import("user_vmm");
 
 const ElfError = types.ElfError;
 const Elf64_Ehdr = types.Elf64_Ehdr;
@@ -25,6 +26,7 @@ const StackBounds = types.StackBounds;
 /// Args:
 ///   data: Raw ELF file data (e.g., from InitRD module)
 ///   pml4_phys: Physical address of target page table (PML4)
+///   user_vmm: User virtual memory manager (for creating VMAs)
 ///   load_base: Base address for PIE executables (0 for ET_EXEC)
 ///   stack_bounds: Actual stack bounds (ASLR). If null, uses default bounds.
 ///
@@ -32,7 +34,7 @@ const StackBounds = types.StackBounds;
 /// where a malicious ELF places segments at the randomized stack location.
 ///
 /// Returns: ElfLoadResult with entry point and address range
-pub fn load(data: []const u8, pml4_phys: u64, load_base: u64, stack_bounds: ?StackBounds) ElfError!ElfLoadResult {
+pub fn load(data: []const u8, pml4_phys: u64, user_vmm: *user_vmm_mod.UserVmm, load_base: u64, stack_bounds: ?StackBounds) ElfError!ElfLoadResult {
     const bounds = stack_bounds orelse StackBounds.default;
     // Verify we have enough data for the header
     if (data.len < @sizeOf(Elf64_Ehdr)) {
@@ -185,7 +187,7 @@ pub fn load(data: []const u8, pml4_phys: u64, load_base: u64, stack_bounds: ?Sta
         if (vaddr_end > highest_addr) highest_addr = vaddr_end;
 
         // Load this segment
-        try loadSegment(data, phdr, pml4_phys, actual_base, bounds);
+        try loadSegment(data, phdr, pml4_phys, user_vmm, actual_base, bounds);
 
         // Record this segment's range for future overlap checks
         loaded_ranges[load_count] = .{ .start = vaddr, .end = vaddr_end };
@@ -264,6 +266,7 @@ fn loadSegment(
     data: []const u8,
     phdr: *const Elf64_Phdr,
     pml4_phys: u64,
+    user_vmm: *user_vmm_mod.UserVmm,
     base: u64,
     bounds: StackBounds,
 ) ElfError!void {
@@ -413,4 +416,26 @@ fn loadSegment(
 
     // BSS (p_memsz > p_filesz) is already zeroed since we zero pages on allocation
 
+    // CRITICAL: Create VMA for this segment
+    // Without VMAs, page faults in unmapped portions of the segment will fail
+    // Convert page flags back to VMA protection flags
+    const prot: u8 = blk: {
+        var p: u8 = 0;
+        if ((phdr.p_flags & types.PF_R) != 0) p |= user_vmm_mod.PROT_READ;
+        if ((phdr.p_flags & types.PF_W) != 0) p |= user_vmm_mod.PROT_WRITE;
+        if ((phdr.p_flags & types.PF_X) != 0) p |= user_vmm_mod.PROT_EXEC;
+        break :blk p;
+    };
+    const segment_vma = user_vmm.createVma(
+        vaddr_aligned,
+        vaddr_aligned + total_size,
+        prot,
+        user_vmm_mod.MAP_PRIVATE | user_vmm_mod.MAP_ANONYMOUS,
+    ) catch {
+        console.err("ELF: Failed to create segment VMA", .{});
+        cleanupMappedSegment(pml4_phys, vaddr_aligned, page_size, mapped_pages.items);
+        return ElfError.OutOfMemory;
+    };
+    user_vmm.insertVma(segment_vma);
+    console.debug("ELF: Created segment VMA {x}-{x} prot={x}", .{ vaddr_aligned, vaddr_aligned + total_size, prot });
 }

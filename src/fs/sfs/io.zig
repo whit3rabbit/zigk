@@ -14,75 +14,62 @@ fn isEmulatorPlatform() bool {
     return hv == .qemu_tcg or hv == .unknown;
 }
 
-/// Read a single sector - uses sync I/O on emulators (PCI IRQs unreliable),
-/// async I/O on real hardware
+/// Read a single sector - uses file descriptor operations (works with any block device)
 pub fn readSector(device_fd: *fd.FileDescriptor, lba: u32, buf: *[512]u8) t.SectorError!void {
-    const port_num: u5 = @intCast(@intFromPtr(device_fd.private_data) & 0x1F);
+    // Use file descriptor read operation - works for AHCI, VirtIO-SCSI, NVMe, etc.
+    const old_pos = device_fd.position;
+    device_fd.position = @as(u64, lba) * 512;
 
-    // On emulators, PCI interrupts may not work - use sync (polling) I/O
-    if (isEmulatorPlatform()) {
-        const controller = ahci.getController() orelse return error.IOError;
-        controller.readSectors(port_num, lba, 1, buf) catch return error.IOError;
+    if (device_fd.ops.read) |read_fn| {
+        const bytes_read = read_fn(device_fd, buf);
+        device_fd.position = old_pos; // Restore position
+
+        if (bytes_read < 0) {
+            console.warn("SFS: Read failed with error code: {}", .{bytes_read});
+            return error.IOError;
+        }
+        if (bytes_read < 512) {
+            console.warn("SFS: Read returned only {} bytes (expected 512)", .{bytes_read});
+            return error.IOError;
+        }
         return;
     }
 
-    // On real hardware, use async I/O with IRQ completion
-    const req = io.allocRequest(.disk_read) orelse return error.IOError;
-    defer io.freeRequest(req);
-
-    const buf_phys = ahci.adapter.blockReadAsync(port_num, lba, 1, req) catch return error.IOError;
-    defer ahci.adapter.freeDmaBuffer(buf_phys, 512);
-
-    var future = io.Future{ .request = req };
-    const result = future.wait();
-
-    switch (result) {
-        .success => |bytes| {
-            @memset(buf, 0);
-            if (bytes < 512) return error.IOError;
-            hal.mmio.memoryBarrier();
-            ahci.adapter.copyFromDmaBuffer(buf_phys, buf);
-        },
-        .err => return error.IOError,
-        .cancelled => return error.IOError,
-        .pending => unreachable,
-    }
+    console.warn("SFS: No read operation available on file descriptor", .{});
+    device_fd.position = old_pos;
+    return error.IOError;
 }
 
-/// Write a single sector - uses sync I/O on emulators, async on real hardware
+/// Write a single sector - uses file descriptor operations (works with any block device)
 pub fn writeSector(device_fd: *fd.FileDescriptor, lba: u32, buf: []const u8) t.SectorError!void {
     if (buf.len < 512) return error.IOError;
-    const port_num: u5 = @intCast(@intFromPtr(device_fd.private_data) & 0x1F);
 
-    // On emulators, PCI interrupts may not work - use sync (polling) I/O
-    if (isEmulatorPlatform()) {
-        const controller = ahci.getController() orelse return error.IOError;
-        // writeSectors expects a mutable slice, but the data won't be modified
-        var write_buf: [512]u8 = undefined;
-        @memcpy(&write_buf, buf[0..512]);
-        controller.writeSectors(port_num, lba, 1, &write_buf) catch return error.IOError;
+    // Use file descriptor write operation - works for AHCI, VirtIO-SCSI, NVMe, etc.
+    const old_pos = device_fd.position;
+    device_fd.position = @as(u64, lba) * 512;
+
+    console.info("SFS writeSector: lba={}, position={}", .{lba, device_fd.position});
+
+    if (device_fd.ops.write) |write_fn| {
+        const bytes_written = write_fn(device_fd, buf[0..512]);
+        device_fd.position = old_pos; // Restore position
+
+        console.info("SFS writeSector: bytes_written={}", .{bytes_written});
+
+        if (bytes_written < 0) {
+            console.warn("SFS writeSector: write failed with error code {}", .{bytes_written});
+            return error.IOError;
+        }
+        if (bytes_written < 512) {
+            console.warn("SFS writeSector: short write {} < 512", .{bytes_written});
+            return error.IOError;
+        }
         return;
     }
 
-    // On real hardware, use async I/O with IRQ completion
-    const req = io.allocRequest(.disk_write) orelse return error.IOError;
-    defer io.freeRequest(req);
-
-    const buf_phys = pmm.allocZeroedPages(1) orelse return error.IOError;
-    defer pmm.freePages(buf_phys, 1);
-
-    ahci.adapter.copyToDmaBuffer(buf_phys, buf[0..512]);
-    ahci.adapter.blockWriteAsync(port_num, lba, 1, buf_phys, req) catch return error.IOError;
-
-    var future = io.Future{ .request = req };
-    const result = future.wait();
-
-    switch (result) {
-        .success => {},
-        .err => return error.IOError,
-        .cancelled => return error.IOError,
-        .pending => unreachable,
-    }
+    console.warn("SFS writeSector: No write function available", .{});
+    device_fd.position = old_pos;
+    return error.IOError;
 }
 
 /// Read a single sector (SFS instance method) - uses sync I/O on emulators

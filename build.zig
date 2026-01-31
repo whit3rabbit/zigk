@@ -1108,6 +1108,7 @@ pub fn build(b: *std.Build) void {
     elf_module.addImport("heap", heap_module);
     elf_module.addImport("console", console_module);
     elf_module.addImport("uapi", uapi_module);
+    elf_module.addImport("user_vmm", user_vmm_module);
 
     // Create framebuffer module (for fb syscalls)
     const framebuffer_module = b.createModule(.{
@@ -2609,6 +2610,15 @@ pub fn build(b: *std.Build) void {
                 "-device", "ide-hd,drive=esp,bus=ide.0,bootindex=1",
             });
         }
+    }
+
+    // SFS storage disk (aarch64 uses VirtIO-SCSI, x86_64 uses AHCI on boot disk)
+    if (target_arch == .aarch64) {
+        run_cmd.addArgs(&.{
+            "-device", "virtio-scsi-pci,id=scsi0",
+            "-drive", "file=sfs.img,format=raw,if=none,id=sfsdisk",
+            "-device", "scsi-hd,drive=sfsdisk,bus=scsi0.0",
+        });
     }
 
     // USB hub and storage (x86_64 only for now)
