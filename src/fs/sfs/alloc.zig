@@ -1,124 +1,51 @@
 const std = @import("std");
 const t = @import("types.zig");
 const sfs_io = @import("io.zig");
-const ahci = @import("ahci");
-const io = @import("io");
 const heap = @import("heap");
 const console = @import("console");
-const hal = @import("hal");
 
-/// Check if running on emulator platform (QEMU TCG, unknown hypervisor)
-/// On emulators, PCI interrupts may not work correctly, so use sync I/O
-fn isEmulatorPlatform() bool {
-    const hv = hal.hypervisor.getHypervisor();
-    return hv == .qemu_tcg or hv == .unknown;
-}
-
-/// Load all bitmap blocks in a single batched async I/O operation
-/// On emulators, uses sync I/O since PCI interrupts may not work
+/// Load all bitmap blocks using FD-based I/O (driver portable)
 pub fn loadBitmapBatch(self: *t.SFS) ![]u8 {
     const alloc = heap.allocator();
     const bitmap_size = self.superblock.bitmap_blocks * t.SECTOR_SIZE;
     const bitmap_buf = alloc.alloc(u8, bitmap_size) catch return error.ENOMEM;
 
-    // On emulators, use sync I/O (read sector by sector)
-    if (isEmulatorPlatform()) {
-        const controller = ahci.getController() orelse {
+    // Read bitmap using file descriptor (sector by sector)
+    var lba = self.superblock.bitmap_start;
+    var offset: usize = 0;
+    var remaining = self.superblock.bitmap_blocks;
+    var sector_buf: [512]u8 = undefined;
+    while (remaining > 0) : ({
+        lba += 1;
+        offset += 512;
+        remaining -= 1;
+    }) {
+        sfs_io.readSector(self.device_fd, lba, &sector_buf) catch {
             alloc.free(bitmap_buf);
             return error.IOError;
         };
-        var lba = self.superblock.bitmap_start;
-        var offset: usize = 0;
-        var remaining = self.superblock.bitmap_blocks;
-        while (remaining > 0) : ({
-            lba += 1;
-            offset += 512;
-            remaining -= 1;
-        }) {
-            controller.readSectors(self.port_num, lba, 1, bitmap_buf[offset..][0..512]) catch {
-                alloc.free(bitmap_buf);
-                return error.IOError;
-            };
-        }
-        return bitmap_buf;
+        @memcpy(bitmap_buf[offset..][0..512], &sector_buf);
     }
-
-    // On real hardware, use async I/O with IRQ completion
-    const req = io.allocRequest(.disk_read) orelse {
-        alloc.free(bitmap_buf);
-        return error.IOError;
-    };
-    defer io.freeRequest(req);
-
-    const buf_phys = ahci.adapter.blockReadAsync(self.port_num, self.superblock.bitmap_start, @truncate(self.superblock.bitmap_blocks), req) catch |err| {
-        alloc.free(bitmap_buf);
-        console.err("SFS: Failed to submit bitmap batch read: {}", .{err});
-        return error.IOError;
-    };
-    defer ahci.adapter.freeDmaBuffer(buf_phys, bitmap_size);
-
-    var future = io.Future{ .request = req };
-    const result = future.wait();
-
-    switch (result) {
-        .success => |bytes| {
-            if (bytes < bitmap_size) {
-                alloc.free(bitmap_buf);
-                return error.IOError;
-            }
-            hal.mmio.memoryBarrier();
-            ahci.adapter.copyFromDmaBuffer(buf_phys, bitmap_buf);
-        },
-        .err, .cancelled => {
-            alloc.free(bitmap_buf);
-            return error.IOError;
-        },
-        .pending => unreachable,
-    }
-
     return bitmap_buf;
 }
 
-/// Load bitmap into pre-allocated buffer (avoids heap allocation)
-/// On emulators, uses sync I/O since PCI interrupts may not work
+/// Load bitmap into pre-allocated buffer using FD-based I/O (driver portable)
 pub fn loadBitmapIntoCached(self: *t.SFS, dest: []u8) !void {
     const bitmap_size = self.superblock.bitmap_blocks * t.SECTOR_SIZE;
     if (dest.len < bitmap_size) return error.IOError;
 
-    // On emulators, use sync I/O (read sector by sector)
-    if (isEmulatorPlatform()) {
-        const controller = ahci.getController() orelse return error.IOError;
-        var lba = self.superblock.bitmap_start;
-        var offset: usize = 0;
-        var remaining = self.superblock.bitmap_blocks;
-        while (remaining > 0) : ({
-            lba += 1;
-            offset += 512;
-            remaining -= 1;
-        }) {
-            controller.readSectors(self.port_num, lba, 1, dest[offset..][0..512]) catch return error.IOError;
-        }
-        return;
-    }
-
-    // On real hardware, use async I/O with IRQ completion
-    const req = io.allocRequest(.disk_read) orelse return error.IOError;
-    defer io.freeRequest(req);
-
-    const buf_phys = ahci.adapter.blockReadAsync(self.port_num, self.superblock.bitmap_start, @truncate(self.superblock.bitmap_blocks), req) catch return error.IOError;
-    defer ahci.adapter.freeDmaBuffer(buf_phys, bitmap_size);
-
-    var future = io.Future{ .request = req };
-    const result = future.wait();
-
-    switch (result) {
-        .success => |bytes| {
-            if (bytes < bitmap_size) return error.IOError;
-            hal.mmio.memoryBarrier();
-            ahci.adapter.copyFromDmaBuffer(buf_phys, dest[0..bitmap_size]);
-        },
-        .err, .cancelled => return error.IOError,
-        .pending => unreachable,
+    // Read bitmap using file descriptor (sector by sector)
+    var lba = self.superblock.bitmap_start;
+    var offset: usize = 0;
+    var remaining = self.superblock.bitmap_blocks;
+    var sector_buf: [512]u8 = undefined;
+    while (remaining > 0) : ({
+        lba += 1;
+        offset += 512;
+        remaining -= 1;
+    }) {
+        try sfs_io.readSector(self.device_fd, lba, &sector_buf);
+        @memcpy(dest[offset..][0..512], &sector_buf);
     }
 }
 
