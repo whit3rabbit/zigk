@@ -139,3 +139,54 @@ pub fn lookup_service(name: []const u8) SyscallError!u32 {
     if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
     return @truncate(ret);
 }
+
+// =============================================================================
+// Process Management Syscalls (fork, wait4, execve)
+// =============================================================================
+
+/// Fork the current process
+/// Returns: child PID to parent, 0 to child
+pub fn fork() SyscallError!i32 {
+    const ret = primitive.syscall0(syscalls.SYS_FORK);
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return @truncate(@as(isize, @bitCast(ret)));
+}
+
+/// Wait for a child process to change state
+/// pid: Process ID to wait for (-1 = any child, >0 = specific child)
+/// wstatus: Pointer to store exit status (null if not needed)
+/// options: Wait options (WNOHANG = 1)
+/// Returns: PID of child that changed state
+pub fn wait4(pid: i32, wstatus: ?*i32, options: u32) SyscallError!i32 {
+    const wstatus_ptr = if (wstatus) |ptr| @intFromPtr(ptr) else 0;
+    const ret = primitive.syscall4(
+        syscalls.SYS_WAIT4,
+        @bitCast(@as(isize, pid)),
+        wstatus_ptr,
+        options,
+        0, // rusage not implemented
+    );
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return @truncate(@as(isize, @bitCast(ret)));
+}
+
+/// Wait options
+pub const WNOHANG: u32 = 1; // Don't block if no child has exited
+
+/// Execute a program
+/// path: Path to executable
+/// argv: Null-terminated array of argument strings
+/// envp: Null-terminated array of environment strings (can be null)
+/// This function does not return on success
+pub fn execve(path: []const u8, argv: [*:null]const ?[*:0]const u8, envp: ?[*:null]const ?[*:0]const u8) SyscallError!void {
+    const envp_ptr = if (envp) |ptr| @intFromPtr(ptr) else 0;
+    const ret = primitive.syscall3(
+        syscalls.SYS_EXECVE,
+        @intFromPtr(path.ptr),
+        @intFromPtr(argv),
+        envp_ptr,
+    );
+    // If we get here, execve failed
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    unreachable;
+}

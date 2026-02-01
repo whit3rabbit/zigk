@@ -289,12 +289,21 @@ pub fn exit(status: i32) noreturn {
         if (curr.process) |proc_opaque| {
             const proc: *Process = @ptrCast(@alignCast(proc_opaque));
 
-            // Decrement refcount. Returns true if this was the last thread.
-            if (proc.unref()) {
+            // Check if this is the last thread WITHOUT decrementing yet
+            const is_last_thread = blk: {
+                const REFCOUNT_MASK: u32 = 0x7FFFFFFF;
+                const current = proc.refcount.load(.acquire);
+                const thread_count = current & REFCOUNT_MASK;
+                break :blk thread_count == 1;
+            };
+
+            if (is_last_thread) {
                 // Last thread exiting - process becomes Zombie
+                // Do NOT unref yet - wait4() will do that when reaping
                 proc.exitWithStatus(status);
             } else {
-                // Other threads remain - just this thread exits
+                // Other threads remain - decrement refcount for this thread
+                _ = proc.unref();
                 console.debug("Thread: Exiting thread (pid={}, tid={})", .{ proc.pid, curr.tid });
             }
         }

@@ -93,6 +93,10 @@ pub const send = process.send;
 pub const recv = process.recv;
 pub const register_service = process.register_service;
 pub const lookup_service = process.lookup_service;
+pub const fork = process.fork;
+pub const wait4 = process.wait4;
+pub const WNOHANG = process.WNOHANG;
+pub const execve = process.execve;
 
 // Re-export Signal
 pub const kill = signal.kill;

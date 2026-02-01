@@ -2803,9 +2803,27 @@ pub fn build(b: *std.Build) void {
         .root_module = test_module,
     });
 
+    // Syscall unit tests (isolated, no kernel dependencies)
+    const syscall_test_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/sys/syscall/tests/root.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+
+    // Add minimal dependencies for syscall tests
+    syscall_test_module.addImport("fs", fs_module);
+    syscall_test_module.addImport("uapi", uapi_module);
+
+    const syscall_unit_tests = b.addTest(.{
+        .root_module = syscall_test_module,
+    });
+
     const run_unit_tests = b.addRunArtifact(unit_tests);
+    const run_syscall_unit_tests = b.addRunArtifact(syscall_unit_tests);
+
     const test_step = b.step("test", "Run unit tests on host");
     test_step.dependOn(&run_unit_tests.step);
+    test_step.dependOn(&run_syscall_unit_tests.step);
 
     // =========================================================================
     // Architecture-specific convenience steps (aliases)

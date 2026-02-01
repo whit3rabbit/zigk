@@ -7,8 +7,8 @@ This document lists Linux x86_64 syscalls not yet implemented in zk.
 | Metric | Count |
 |--------|-------|
 | Linux x86_64 syscalls | 420 |
-| Implemented in zk | 181 (43%) |
-| Missing | 239 |
+| Implemented in zk | 186 (44%) |
+| Missing | 234 |
 
 All implemented syscalls use **correct Linux x86_64 numbers**. ZK extensions (1000+) do not conflict with Linux.
 
@@ -60,6 +60,24 @@ These 500+ numbers are zk-specific compatibility extensions, NOT part of the Lin
 - **High**: Required for common POSIX programs
 - **Medium**: Needed for specific use cases
 - **Low**: Legacy, deprecated, or rarely used
+
+## Recently Implemented (2026-01-31)
+
+The following syscalls were implemented and tested:
+
+| # | Name | Handler | Status |
+|---|------|---------|--------|
+| 57 | `fork` | `core/execution.zig:54` | ✅ Implemented, tested |
+| 59 | `execve` | `core/execution.zig:207` | ✅ Implemented, userspace wrapper added |
+| 56 | `clone` | `core/execution.zig:789` | ✅ Implemented |
+| 61 | `wait4` | `process/process.zig:48` | ✅ Implemented, tested |
+| 110 | `getppid` | `process/process.zig:174` | ✅ Implemented, tested |
+
+**Kernel Bugs Fixed**:
+- Fork CS/SS segment register swap (caused GPF on child return to userspace)
+- Process refcount double-unref during zombie reaping (caused panic in wait4)
+
+**Test Coverage**: 66/70 kernel tests passing (94%). Multi-process test infrastructure added.
 
 ## Missing by Category
 

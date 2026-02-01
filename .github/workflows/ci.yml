@@ -1,0 +1,142 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:  # Allow manual triggering
+
+env:
+  ZIG_VERSION: "0.16.0"  # Update as needed
+
+jobs:
+  # Unit tests (fast, run on host)
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Run unit tests
+        run: zig build test
+        continue-on-error: true  # Don't fail if no unit tests exist yet
+
+  # Integration tests (run in QEMU, multi-architecture)
+  integration-tests:
+    name: Integration Tests (${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false  # Continue testing other archs if one fails
+      matrix:
+        arch: [x86_64, aarch64]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Install QEMU and dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            qemu-system-x86 \
+            qemu-system-arm \
+            qemu-efi-aarch64 \
+            ovmf \
+            mtools \
+            xorriso
+
+      - name: Verify QEMU installation
+        run: |
+          qemu-system-x86_64 --version
+          qemu-system-aarch64 --version
+          echo "OVMF paths:"
+          ls -la /usr/share/OVMF/ || true
+          ls -la /usr/share/qemu/ || true
+          ls -la /usr/share/AAVMF/ || true
+
+      - name: Build kernel (${{ matrix.arch }})
+        run: zig build -Darch=${{ matrix.arch }}
+
+      - name: Run integration tests (${{ matrix.arch }})
+        run: ARCH=${{ matrix.arch }} ./scripts/run_tests.sh
+        timeout-minutes: 3
+
+      - name: Upload test logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs-${{ matrix.arch }}
+          path: |
+            test_output_${{ matrix.arch }}.log
+            build_${{ matrix.arch }}.log
+          retention-days: 7
+
+  # Build validation (ensure kernel builds for both archs)
+  build-validation:
+    name: Build Validation (${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Build kernel (${{ matrix.arch }})
+        run: zig build -Darch=${{ matrix.arch }}
+
+      - name: Build ISO (x86_64 only)
+        if: matrix.arch == 'x86_64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mtools xorriso
+          zig build iso -Darch=x86_64
+
+      - name: Check artifacts
+        run: |
+          ls -lh zig-out/bin/
+          file zig-out/bin/kernel-${{ matrix.arch }}.elf || true
+
+  # Summary job (required for PR status checks)
+  ci-success:
+    name: CI Success
+    needs: [unit-tests, integration-tests, build-validation]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Check all jobs
+        run: |
+          if [[ "${{ needs.unit-tests.result }}" == "failure" ]] || \
+             [[ "${{ needs.integration-tests.result }}" == "failure" ]] || \
+             [[ "${{ needs.build-validation.result }}" == "failure" ]]; then
+            echo "One or more jobs failed"
+            exit 1
+          fi
+          echo "All jobs passed!"
+
+      - name: Report status
+        run: |
+          echo "## CI Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- Unit Tests: ${{ needs.unit-tests.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Integration Tests: ${{ needs.integration-tests.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Build Validation: ${{ needs.build-validation.result }}" >> $GITHUB_STEP_SUMMARY

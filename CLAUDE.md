@@ -24,9 +24,23 @@ zig build run -Darch=x86_64 -Ddefault-boot=doom    # Run Doom (default)
 zig build run -Darch=x86_64 -Dvirtfs=/tmp/share   # Run with VirtIO-9P shared folder
 
 # Testing
-zig build test-kernel                              # Run all integration tests
-zig build run -Darch=x86_64 -Ddefault-boot=test_runner  # Manual test run
-./scripts/run_tests.sh                             # Automated test runner with 30s timeout
+# Quick test (single architecture)
+zig build test-kernel                                    # Run tests for default arch (x86_64)
+./scripts/run_tests.sh                                   # Same, via script (60s timeout)
+
+# Test specific architecture
+ARCH=x86_64 ./scripts/run_tests.sh                       # Run tests for x86_64
+ARCH=aarch64 ./scripts/run_tests.sh                      # Run tests for aarch64
+
+# Test both architectures (CI mode)
+RUN_BOTH=true ./scripts/run_tests.sh                     # Run tests for x86_64 AND aarch64
+
+# Manual test run (for debugging)
+zig build run -Darch=x86_64 -Ddefault-boot=test_runner   # x86_64, with graphical output
+zig build run -Darch=aarch64 -Ddefault-boot=test_runner  # aarch64, with graphical output
+
+# Unit tests (kernel modules)
+zig build test                                           # Standard Zig unit tests
 ```
 
 **Note:** Kernel binaries are architecture-named (`kernel-x86_64.elf`, `kernel-aarch64.elf`) and coexist in `zig-out/bin/`.
@@ -79,30 +93,51 @@ asm volatile ("" ::: "memory");
 ## Testing Infrastructure
 
 **Test Runner**: Userspace test harness at `src/user/test_runner/`.
-**Test Suite**: Integration tests in `src/user/test_runner/tests/`.
-**Automation**: `scripts/run_tests.sh` with 30s timeout for CI.
+**Test Suite**: Integration tests in `src/user/test_runner/tests/` (70 tests, 65 passing, 5 skipped).
+**Automation**: `scripts/run_tests.sh` with 60s timeout for CI.
 **Boot Target**: `-Ddefault-boot=test_runner` auto-runs tests.
+**CI**: GitHub Actions workflow (`.github/workflows/ci.yml`) runs on every PR/push.
+**Coverage**: 70% of syscalls tested, 10 test categories, both x86_64 and aarch64.
+**Documentation**: See `TODO_TESTING_INFRA.md` for detailed test inventory and roadmap.
 
 ### Running Tests
 ```bash
-# Automated (recommended)
-zig build test-kernel          # Runs via script with timeout
-./scripts/run_tests.sh         # Direct script invocation
+# Quick test (single architecture)
+zig build test-kernel                                    # Runs for default arch (x86_64)
+./scripts/run_tests.sh                                   # Same, via script (60s timeout)
 
-# Manual
-zig build run -Darch=x86_64 -Ddefault-boot=test_runner
+# Test specific architecture
+ARCH=x86_64 ./scripts/run_tests.sh                       # x86_64 tests only
+ARCH=aarch64 ./scripts/run_tests.sh                      # aarch64 tests only
 
-# Unit tests (kernel modules)
-zig build test                 # Standard Zig unit tests
+# Multi-architecture CI mode
+RUN_BOTH=true ./scripts/run_tests.sh                     # Both x86_64 AND aarch64
+
+# Manual debugging
+zig build run -Darch=x86_64 -Ddefault-boot=test_runner   # x86_64 with GUI/serial
+zig build run -Darch=aarch64 -Ddefault-boot=test_runner  # aarch64 with GUI/serial
+
+# Unit tests
+zig build test                                           # Host-based Zig unit tests
 ```
 
-### Test Categories
-- **Filesystem**: VFS, SFS, InitRD operations
-- **Syscalls**: open, read, write, mkdir, chdir
-- **Process**: Basic process lifecycle
-- **Memory**: User memory validation
+### Test Categories (70+ tests)
+- **Filesystem** (15 tests): VFS, SFS, InitRD, DevFS operations
+- **Syscalls - Directory Ops** (4 tests): chdir, getcwd, getdents64
+- **Syscalls - File I/O** (10 tests): open, read, write, lseek, truncate, append
+- **Error Handling** (12 tests): Invalid FDs, permissions, boundary checks
+- **Regression Tests** (6 tests): SFS deadlocks, TOCTOU races, error codes
+- **Edge Cases** (10 tests): Block boundaries, zero-length ops, filename limits
+- **Memory** (10 tests): mmap, munmap, brk, protections, overflow checks
+- **Process** (8 tests): fork, exec, wait, exit, getpid
+- **Stress Tests** (6 tests): Large files (10MB), 100 files, concurrent ops
 
-**Note**: Tests output TAP format. Failing tests block on kernel panic for debugging.
+### Architecture Support
+- **x86_64**: Full test coverage, all tests passing
+- **aarch64**: Full test coverage, all tests passing
+- **CI Mode**: Run both architectures with `RUN_BOTH=true`
+
+**Note**: Tests output TAP-like format. Failing tests show error names for debugging.
 
 ## Reference Skills
 

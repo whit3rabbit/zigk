@@ -147,10 +147,10 @@ fn copyThreadState(
                 .vector = 0,
                 .error_code = 0,
                 .rip = parent_frame.getReturnRip(),
-                .cs = 0x1b, // hal.gdt.USER_CODE
+                .cs = 0x23, // USER_CODE = 0x20 | 3
                 .rflags = 0x202,
                 .rsp = parent_frame.getUserRsp(),
-                .ss = 0x23, // hal.gdt.USER_DATA
+                .ss = 0x1b, // USER_DATA = 0x18 | 3
             };
             child.fs_base = parent.fs_base;
         },

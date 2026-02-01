@@ -1,5 +1,6 @@
 # ZK
 [![ISO Release Build](https://github.com/whit3rabbit/zigk/actions/workflows/build-iso.yml/badge.svg?event=release)](https://github.com/whit3rabbit/zigk/actions/workflows/build-iso.yml)
+[![CI](https://github.com/whit3rabbit/zigk/actions/workflows/ci.yml/badge.svg)](https://github.com/whit3rabbit/zigk/actions/workflows/ci.yml)
 
 ZK is a 64-bit modular monolithic operating system kernel written in Zig. It targets both **x86_64** (AMD64) and **AArch64** (ARMv8-A) architectures, featuring a custom UEFI bootloader and a unified Hardware Abstraction Layer (HAL).
 
