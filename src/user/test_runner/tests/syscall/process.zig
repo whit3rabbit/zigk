@@ -102,8 +102,42 @@ pub fn testGetppidReturnsParent() !void {
 }
 
 // Process Test 8: exec replaces process image
-// NOTE: This test requires a test binary to exec into
-// For now we'll skip it until we have a simple test program
 pub fn testExecReplacesProcess() !void {
-    return error.SkipTest; // Need test binary infrastructure
+    const pid = try syscall.fork();
+
+    if (pid == 0) {
+        // Child: exec into test_binary.elf
+        const path = "/test_binary.elf";
+
+        // Create null-terminated argv and envp arrays
+        const arg0: [*:0]const u8 = "test_binary.elf";
+        const argv = [_:null]?[*:0]const u8{arg0};
+        const envp = [_:null]?[*:0]const u8{};
+
+        // This should replace the process image
+        _ = syscall.execve(path, &argv, &envp) catch |err| {
+            // If exec fails, exit with error code 1
+            syscall.debug_print("exec failed: ");
+            syscall.debug_print(@errorName(err));
+            syscall.debug_print("\n");
+            syscall.exit(1);
+        };
+
+        // Should never reach here if exec succeeds
+        syscall.exit(1);
+    } else {
+        // Parent: wait for child to complete
+        var status: i32 = 0;
+        const wait_pid = try syscall.wait4(pid, &status, 0);
+
+        if (wait_pid != pid) {
+            return error.WaitFailed;
+        }
+
+        // test_binary.elf exits with status 42
+        const exit_code = (status >> 8) & 0xFF;
+        if (exit_code != 42) {
+            return error.WrongExitStatus;
+        }
+    }
 }

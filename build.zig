@@ -2393,6 +2393,28 @@ pub fn build(b: *std.Build) void {
     const install_test_runner = b.addInstallArtifact(test_runner, .{});
     b.getInstallStep().dependOn(&install_test_runner.step);
 
+    // Test Binary (Simple exec target for integration tests)
+    const test_binary_mod = b.createModule(.{
+        .root_source_file = b.path("src/user/test_binary/main.zig"),
+        .target = user_target,
+        .optimize = optimize,
+    });
+    test_binary_mod.addImport("syscall", user_syscall_lib);
+
+    const test_binary = b.addExecutable(.{
+        .name = "test_binary.elf",
+        .root_module = test_binary_mod,
+    });
+    test_binary.setLinkerScript(b.path("src/user/linker.ld"));
+    if (target_arch == .x86_64) {
+        test_binary.root_module.addAssemblyFile(b.path("src/arch/x86_64/lib/memcpy.S"));
+        test_binary.root_module.addAssemblyFile(b.path("src/user/crt0.S"));
+    } else if (target_arch == .aarch64) {
+        test_binary.root_module.addAssemblyFile(b.path("src/arch/aarch64/lib/crt0.S"));
+    }
+    const install_test_binary = b.addInstallArtifact(test_binary, .{});
+    b.getInstallStep().dependOn(&install_test_binary.step);
+
     // Libc Fix Verification Test (Native C with Custom Libc)
     // Uses C shim for aarch64 va_list bootstrap
     // Wrapper and C source definition below

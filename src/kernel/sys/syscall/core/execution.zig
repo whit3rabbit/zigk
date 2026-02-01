@@ -459,6 +459,24 @@ pub fn sys_execve(frame: *hal.syscall.SyscallFrame, path_ptr: usize, argv_ptr: u
     current_proc.heap_break = heap_with_gap;
     current_thread.cr3 = result.pml4_phys;
 
+    // Replace the process's user_vmm with the new one from the ELF loader.
+    // The ELF loader created a fresh UserVmm with VMAs for all loaded segments.
+    // We need to free the old user_vmm and replace it with the new one.
+    const old_user_vmm = current_proc.user_vmm;
+    current_proc.user_vmm = result.user_vmm;
+
+    // Free old VMA structures (but not the physical pages - destroyAddressSpace will do that).
+    // Walk the VMA list and free each struct. Reuse the allocator defined earlier in this function.
+    var vma = old_user_vmm.vma_head;
+    while (vma) |v| {
+        const next = v.next;
+        alloc.destroy(v);
+        vma = next;
+    }
+
+    // Free the old UserVmm struct itself (but not its page tables - destroyAddressSpace will do that).
+    alloc.destroy(old_user_vmm);
+
     // Switch to new address space immediately
     hal.cpu.writeCr3(result.pml4_phys);
 

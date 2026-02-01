@@ -131,5 +131,6 @@ pub fn exec(
         .stack_pointer = sp,
         .pml4_phys = pml4_phys,
         .heap_start = heap_start,
+        .user_vmm = user_vmm_instance,
     };
 }

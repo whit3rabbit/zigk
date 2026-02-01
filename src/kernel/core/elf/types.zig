@@ -186,4 +186,5 @@ pub const ExecResult = struct {
     stack_pointer: u64,
     pml4_phys: u64,
     heap_start: u64,
+    user_vmm: *@import("user_vmm").UserVmm,
 };

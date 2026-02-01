@@ -191,5 +191,6 @@ export fn main(argc: i32, argv: [*][*:0]u8) i32 {
     printNumber(@intCast(exit_code));
     syscall.debug_print("\n");
 
-    return exit_code;
+    // Exit cleanly to shutdown QEMU (no timeout needed)
+    syscall.exit(exit_code);
 }
