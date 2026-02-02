@@ -259,5 +259,17 @@ pub fn debug_print(str: []const u8) void {
     _ = debug_log(str.ptr, str.len) catch {};
 }
 
+// =============================================================================
+// File Locking Syscalls
+// =============================================================================
+
+/// Apply or remove an advisory lock on an open file
+/// operation: LOCK_SH (shared), LOCK_EX (exclusive), LOCK_UN (unlock)
+///            Can be OR'd with LOCK_NB for non-blocking
+pub fn flock(fd: i32, operation: u32) SyscallError!void {
+    const ret = primitive.syscall2(syscalls.SYS_FLOCK, @bitCast(@as(isize, fd)), operation);
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
 // Alias size_t to usize for compatibility if needed, but usize is standard in Zig.
 const size_t = usize;

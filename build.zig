@@ -509,6 +509,7 @@ pub fn build(b: *std.Build) void {
     sched_module.addImport("list", list_module);
     sched_module.addImport("kernel_stack", kernel_stack_module);
     sched_module.addImport("vdso", vdso_module);
+    sched_module.addImport("uapi", uapi_module);
 
     // Break circular dependency shim
     sync_module.addImport("sched", sched_module);
@@ -552,6 +553,20 @@ pub fn build(b: *std.Build) void {
     fd_module.addImport("console", console_module);
     fd_module.addImport("uapi", uapi_module);
     fd_module.addImport("sync", sync_module);
+
+    // Create flock module (advisory file locking manager)
+    const flock_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/fs/flock.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    flock_module.addImport("sync", sync_module);
+    flock_module.addImport("sched", sched_module);
+    flock_module.addImport("uapi", uapi_module);
+    flock_module.addImport("console", console_module);
+
+    // fd needs flock for cleanup
+    fd_module.addImport("flock", flock_module);
 
     // Create kernel IOMMU module (domain management) - before drivers that need it
     const kernel_iommu_module = b.createModule(.{
@@ -1259,6 +1274,10 @@ pub fn build(b: *std.Build) void {
     sched_module.addImport("futex", futex_module);
     // sched needs base.zig for CLONE_CHILD_CLEARTID handling
     sched_module.addImport("base.zig", syscall_base_module);
+    // sched needs process for alarm list (Process.alarm_deadline/alarm_next/alarm_prev fields)
+    sched_module.addImport("process", process_module);
+    // sched needs signal for alarm expiration (deliverSignalToThread, SIGALRM)
+    sched_module.addImport("signal", signal_module);
 
     // Create syscall scheduling module (sched_yield, nanosleep, etc.)
     const syscall_scheduling_module = b.createModule(.{
@@ -1483,6 +1502,14 @@ pub fn build(b: *std.Build) void {
     syscall_random_module.addImport("prng", prng_module);
     syscall_random_module.addImport("user_mem", user_mem_module);
 
+    // Create syscall alarm module
+    const syscall_alarm_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/sys/syscall/misc/alarm.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    syscall_alarm_module.addImport("base.zig", syscall_base_module);
+    syscall_alarm_module.addImport("sched", sched_module);
 
     // Create syscall input module (mouse/input syscalls)
     const syscall_input_module = b.createModule(.{
@@ -1708,6 +1735,17 @@ pub fn build(b: *std.Build) void {
     syscall_fs_handlers_module.addImport("perms", perms_module);
     syscall_fs_handlers_module.addImport("vmm", vmm_module);
 
+    // Create syscall flock module (advisory file locking)
+    const syscall_flock_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/sys/syscall/fs/flock.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    syscall_flock_module.addImport("base.zig", syscall_base_module);
+    syscall_flock_module.addImport("uapi", uapi_module);
+    syscall_flock_module.addImport("fd", fd_module);
+    syscall_flock_module.addImport("flock", flock_module);
+
     // Create syscall dispatch table module
     const syscall_table_module = b.createModule(.{
         .root_source_file = b.path("src/kernel/sys/syscall/core/table.zig"),
@@ -1729,6 +1767,7 @@ pub fn build(b: *std.Build) void {
     syscall_table_module.addImport("custom", syscall_custom_module);
     syscall_table_module.addImport("net", syscall_net_module);
     syscall_table_module.addImport("random", syscall_random_module);
+    syscall_table_module.addImport("alarm", syscall_alarm_module);
     syscall_table_module.addImport("input", syscall_input_module);
     syscall_table_module.addImport("io_uring", syscall_io_uring_module);
     syscall_table_module.addImport("ipc", syscall_ipc_module);
@@ -1738,6 +1777,7 @@ pub fn build(b: *std.Build) void {
     syscall_table_module.addImport("pci_syscall", syscall_pci_module);
     syscall_table_module.addImport("ring", syscall_ring_module);
     syscall_table_module.addImport("fs_handlers", syscall_fs_handlers_module);
+    syscall_table_module.addImport("flock_syscall", syscall_flock_module);
     syscall_table_module.addImport("hypervisor", syscall_hypervisor_module);
     syscall_table_module.addImport("display", syscall_display_module);
     syscall_table_module.addImport("virt_pci", syscall_virt_pci_module);
@@ -1813,6 +1853,7 @@ pub fn build(b: *std.Build) void {
     kernel.root_module.addImport("signal", signal_module);
     kernel.root_module.addImport("devfs", devfs_module);
     kernel.root_module.addImport("fd", fd_module);
+    kernel.root_module.addImport("flock", flock_module);
     kernel.root_module.addImport("io", kernel_io_module);
     kernel.root_module.addImport("capabilities", capabilities_module);
     kernel.root_module.addImport("syscall_ipc", syscall_ipc_module);

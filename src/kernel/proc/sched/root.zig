@@ -55,6 +55,7 @@ pub const wakeOnCpu = scheduler.wakeOnCpu;
 pub const exit = scheduler.exit;
 pub const exitWithStatus = scheduler.exitWithStatus;
 pub const timerTick = scheduler.timerTick; // Called by IRQ wrapper
+pub const setAlarm = scheduler.setAlarm; // Set process alarm for SIGALRM delivery
 
 // CPU Logic (needed by syscalls or debug? Maybe)
 pub const getCurrentCpuIndex = cpu_logic.getCurrentCpuIndex;

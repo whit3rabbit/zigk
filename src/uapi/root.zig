@@ -18,6 +18,7 @@ pub const input = @import("dev/input.zig");
 pub const mman = @import("base/mman.zig");
 pub const sched = @import("process/sched.zig");
 pub const futex = @import("ipc/futex.zig");
+pub const flock = @import("flock.zig");
 pub const epoll = @import("io/epoll.zig");
 pub const io_ring = @import("io/io_ring.zig");
 pub const net_ipc = @import("ipc/net_ipc.zig");

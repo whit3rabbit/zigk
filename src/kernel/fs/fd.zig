@@ -150,6 +150,11 @@ pub const FileDescriptor = struct {
     /// When true, this FD is automatically closed during execve
     cloexec: bool = false,
 
+    /// File identifier for flock: (mount_idx << 32) | filesystem_file_id
+    /// Used to track advisory locks across duplicate FDs
+    /// 0 = no identifier assigned (device files, sockets, etc.)
+    file_identifier: u64 = 0,
+
     /// Increment reference count (atomic, thread-safe)
     pub fn ref(self: *FileDescriptor) void {
         _ = self.refcount.fetchAdd(1, .monotonic);
@@ -171,6 +176,13 @@ pub const FileDescriptor = struct {
             // Was 1, now 0 - we're the last reference
             // On x86_64, the release ordering in fetchSub combined with
             // the strong memory model provides sufficient synchronization
+
+            // Release flock if this file had one
+            if (self.file_identifier != 0) {
+                const flock = @import("flock");
+                flock.releaseOnClose(self.file_identifier);
+            }
+
             return true;
         }
         return false;

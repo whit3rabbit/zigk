@@ -190,3 +190,23 @@ pub fn execve(path: []const u8, argv: [*:null]const ?[*:0]const u8, envp: ?[*:nu
     if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
     unreachable;
 }
+
+// =============================================================================
+// Signal and Timing Syscalls
+// =============================================================================
+
+/// Wait for a signal
+/// Always returns error.EINTR when interrupted by a signal
+pub fn pause() SyscallError!void {
+    const ret = primitive.syscall0(syscalls.SYS_PAUSE);
+    // pause() always returns -EINTR when woken by a signal
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Set an alarm to deliver SIGALRM after specified seconds
+/// Returns: Number of seconds remaining from previous alarm (0 if none)
+pub fn alarm(seconds: u32) u32 {
+    const ret = primitive.syscall1(syscalls.SYS_ALARM, seconds);
+    // alarm() never fails, returns remaining seconds
+    return @truncate(ret);
+}

@@ -141,3 +141,41 @@ pub fn testExecReplacesProcess() !void {
         }
     }
 }
+
+// Process Test 9: alarm() sets and cancels alarms
+pub fn testAlarmSetAndCancel() !void {
+    // Set alarm for 5 seconds
+    const remaining1 = syscall.alarm(5);
+
+    // First alarm, should return 0
+    if (remaining1 != 0) return error.TestFailed;
+
+    // Set alarm for 3 seconds (cancels previous)
+    const remaining2 = syscall.alarm(3);
+
+    // Should return ~5 seconds remaining
+    if (remaining2 < 4 or remaining2 > 5) return error.TestFailed;
+
+    // Cancel alarm
+    const remaining3 = syscall.alarm(0);
+
+    // Should return ~3 seconds remaining
+    if (remaining3 < 2 or remaining3 > 3) return error.TestFailed;
+
+    // No alarm set, should return 0
+    const remaining4 = syscall.alarm(0);
+    if (remaining4 != 0) return error.TestFailed;
+}
+
+// Process Test 10: alarm() delivers SIGALRM (basic check)
+// NOTE: Full signal testing requires signal handler setup
+pub fn testAlarmBasic() !void {
+    // Set a very short alarm (1 second)
+    const remaining = syscall.alarm(1);
+
+    // Should return 0 (no previous alarm)
+    if (remaining != 0) return error.TestFailed;
+
+    // Alarm is now set, cancel it to avoid interference with other tests
+    _ = syscall.alarm(0);
+}

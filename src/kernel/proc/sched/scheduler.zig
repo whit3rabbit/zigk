@@ -37,6 +37,13 @@ pub const Scheduler = struct {
     /// Sleep list lock - protects sleep_head and sleep list operations
     sleep_lock: sync.Spinlock = .{},
 
+    /// Alarm list head (sorted by deadline ascending)
+    /// Protected by alarm_lock
+    alarm_head: ?*@import("process").Process = null,
+
+    /// Alarm list lock - protects alarm_head and alarm list operations
+    alarm_lock: sync.Spinlock = .{},
+
     /// Is the scheduler running?
     running: bool = false,
 
@@ -103,6 +110,104 @@ pub fn removeFromSleepList(t: *Thread) void {
     t.sleep_next = null;
     t.sleep_prev = null;
     t.wake_time = 0;
+}
+
+// === Alarm List Helpers ===
+
+const Process = @import("process").Process;
+
+/// Insert a process into the sorted alarm list (deadline ascending)
+/// CALLER MUST HOLD alarm_lock
+fn insertAlarmProcess(proc: *Process) void {
+    proc.alarm_next = null;
+    proc.alarm_prev = null;
+
+    if (scheduler.alarm_head) |head| {
+        if (proc.alarm_deadline <= head.alarm_deadline) {
+            proc.alarm_next = head;
+            head.alarm_prev = proc;
+            scheduler.alarm_head = proc;
+            return;
+        }
+
+        var cursor = head;
+        while (cursor.alarm_next) |next| {
+            if (proc.alarm_deadline <= next.alarm_deadline) {
+                proc.alarm_next = next;
+                proc.alarm_prev = cursor;
+                next.alarm_prev = proc;
+                cursor.alarm_next = proc;
+                return;
+            }
+            cursor = next;
+        }
+
+        cursor.alarm_next = proc;
+        proc.alarm_prev = cursor;
+    } else {
+        scheduler.alarm_head = proc;
+    }
+}
+
+/// Remove a process from the alarm list
+/// CALLER MUST HOLD alarm_lock
+pub fn removeFromAlarmList(proc: *Process) void {
+    if (proc.alarm_prev) |prev| {
+        prev.alarm_next = proc.alarm_next;
+    } else if (scheduler.alarm_head == proc) {
+        scheduler.alarm_head = proc.alarm_next;
+    }
+
+    if (proc.alarm_next) |next| {
+        next.alarm_prev = proc.alarm_prev;
+    }
+
+    proc.alarm_next = null;
+    proc.alarm_prev = null;
+    proc.alarm_deadline = 0;
+}
+
+/// Set or cancel an alarm for a process
+/// Returns remaining seconds from old alarm (0 if none)
+/// SECURITY: Clamps seconds to prevent overflow (max_u64 / 100)
+pub fn setAlarm(proc: *Process, seconds: u64) u64 {
+    const held = scheduler.alarm_lock.acquire();
+    defer held.release();
+
+    const current_tick = scheduler.tick_count.load(.monotonic);
+
+    // Calculate remaining seconds from old alarm
+    var remaining: u64 = 0;
+    if (proc.alarm_deadline > 0 and proc.alarm_deadline > current_tick) {
+        const remaining_ticks = proc.alarm_deadline - current_tick;
+        // Round up: (ticks + 99) / 100 to convert 100Hz ticks to seconds
+        remaining = (remaining_ticks + 99) / 100;
+    }
+
+    // Remove from alarm list if currently scheduled
+    if (proc.alarm_deadline > 0) {
+        removeFromAlarmList(proc);
+    }
+
+    // If seconds > 0, schedule new alarm
+    if (seconds > 0) {
+        // Clamp to prevent overflow (max tick is max_u64, tick freq is 100Hz)
+        const max_seconds: u64 = std.math.maxInt(u64) / 100;
+        const clamped_seconds = @min(seconds, max_seconds);
+
+        const duration_ticks = clamped_seconds * 100; // 100 ticks per second
+        proc.alarm_deadline = current_tick + duration_ticks;
+
+        // Save current thread as alarm target
+        proc.alarm_target_thread = thread_logic.getCurrentThread();
+
+        insertAlarmProcess(proc);
+    } else {
+        // Canceling alarm - clear target thread
+        proc.alarm_target_thread = null;
+    }
+
+    return remaining;
 }
 
 // === Public API ===
@@ -554,6 +659,35 @@ fn wakeSleepingThreads(now: u64) void {
     }
 }
 
+/// Process alarm expirations and deliver SIGALRM
+/// CALLER MUST HOLD alarm_lock
+fn processAlarmExpirations(now: u64) void {
+    const uapi = @import("uapi");
+
+    while (scheduler.alarm_head) |proc| {
+        if (proc.alarm_deadline > now) break; // Future alarm
+
+        // Deliver SIGALRM to target thread
+        // MVP: Deliver to the thread that called alarm(). If that thread exited,
+        // the signal is lost (acceptable for Phase 1).
+        if (proc.alarm_target_thread) |thread_ptr| {
+            const thread: *Thread = @ptrCast(@alignCast(thread_ptr));
+
+            // Set SIGALRM pending bit (signal number 14)
+            const sig_bit: u64 = @as(u64, 1) << @intCast(uapi.signal.SIGALRM - 1);
+            thread.pending_signals |= sig_bit;
+
+            // Wake thread if blocked so signal handler can run
+            if (thread.state == .Blocked) {
+                unblock(thread);
+            }
+        }
+
+        // Remove from alarm list
+        removeFromAlarmList(proc);
+    }
+}
+
 /// Exit the current thread
 pub fn exit() void {
     exitWithStatus(0);
@@ -650,6 +784,12 @@ pub fn timerTick(frame: if (builtin.cpu.arch == .x86_64) *hal.interrupts.Interru
     if (scheduler.sleep_lock.tryAcquire()) |sleep_held| {
         wakeSleepingThreads(local_tick_count);
         sleep_held.release();
+    }
+
+    // Process alarm expirations
+    if (scheduler.alarm_lock.tryAcquire()) |alarm_held| {
+        processAlarmExpirations(local_tick_count);
+        alarm_held.release();
     }
 
     if (tick_cb) |cb| cb();

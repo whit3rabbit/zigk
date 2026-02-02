@@ -26,6 +26,7 @@ const execution = @import("execution");
 const custom = @import("custom");
 const net = @import("net");
 const random = @import("random");
+const alarm = @import("alarm");
 const input_handlers = @import("input");
 const ipc = @import("ipc");
 const interrupt = @import("interrupt");
@@ -34,6 +35,7 @@ const mmio = @import("mmio");
 const pci_syscall = @import("pci_syscall");
 const ring = @import("ring");
 const fs_handlers = @import("fs_handlers");
+const flock_syscall = @import("flock_syscall");
 const io_uring = @import("io_uring");
 const hypervisor = @import("hypervisor");
 const display = @import("display");
@@ -77,6 +79,8 @@ pub export fn dispatch_syscall(frame: *SyscallFrame) callconv(.c) void {
                     mod = fd;
                 } else if (@hasDecl(fs_handlers, name)) {
                     mod = fs_handlers;
+                } else if (@hasDecl(flock_syscall, name)) {
+                    mod = flock_syscall;
                 } else if (@hasDecl(memory, name)) {
                     mod = memory;
                 } else if (@hasDecl(execution, name)) {
@@ -85,6 +89,8 @@ pub export fn dispatch_syscall(frame: *SyscallFrame) callconv(.c) void {
                     mod = custom;
                 } else if (@hasDecl(random, name)) {
                     mod = random;
+                } else if (@hasDecl(alarm, name)) {
+                    mod = alarm;
                 } else if (@hasDecl(input_handlers, name)) {
                     mod = input_handlers;
                 } else if (@hasDecl(ipc, name)) {

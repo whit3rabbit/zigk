@@ -103,6 +103,15 @@ pub const Process = struct {
     /// Session ID
     sid: u32,
 
+    /// Alarm deadline (tick count when SIGALRM fires, 0 = no alarm)
+    alarm_deadline: u64 = 0,
+    /// Thread to deliver SIGALRM to (opaque pointer to avoid circular dependency)
+    alarm_target_thread: ?*anyopaque = null,
+    /// Next process in alarm list
+    alarm_next: ?*Process = null,
+    /// Previous process in alarm list
+    alarm_prev: ?*Process = null,
+
     /// Parent process (null for init)
     parent: ?*Process,
 

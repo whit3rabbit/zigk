@@ -46,6 +46,21 @@ pub fn sys_sched_yield() SyscallError!usize {
     return 0;
 }
 
+/// sys_pause (34) - Wait for signal
+///
+/// Blocks the calling thread until a signal is received and handled.
+/// Always returns -EINTR when interrupted by a signal.
+///
+/// SECURITY: Uses existing signal infrastructure (checkSignalsOnSyscallExit)
+/// to deliver pending signals. The Thread.pending_wakeup atomic flag prevents
+/// lost wakeups if signal arrives before block() is called.
+pub fn sys_pause() SyscallError!usize {
+    sched.block();
+    // When woken by a signal, the signal handler runs first, then
+    // checkSignalsOnSyscallExit() sets the return value to -EINTR.
+    return error.EINTR;
+}
+
 /// sys_nanosleep (35) - High-resolution sleep
 ///
 /// Args:

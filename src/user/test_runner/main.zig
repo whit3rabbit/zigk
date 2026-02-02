@@ -111,6 +111,9 @@ export fn main(argc: i32, argv: [*][*:0]u8) i32 {
     runner.runTest("file_io: multiple reads advance position", file_io_tests.testMultipleReadsAdvancePosition);
     runner.runTest("file_io: write one block", file_io_tests.testWriteExactlyOneBlock);
     runner.runTest("file_io: write two blocks", file_io_tests.testWriteTwoBlocks);
+    runner.runTest("file_io: flock shared lock", file_io_tests.testFlockSharedLock);
+    runner.runTest("file_io: flock exclusive lock", file_io_tests.testFlockExclusiveLock);
+    runner.runTest("file_io: flock non-blocking", file_io_tests.testFlockNonBlocking);
 
     // Filesystem tests
     runner.runTest("initrd: read ELF file", fs_tests.testInitrdReadFile);
@@ -172,6 +175,8 @@ export fn main(argc: i32, argv: [*][*:0]u8) i32 {
     runner.runTest("process: getpid unique", process_tests.testGetpidUnique);
     runner.runTest("process: getppid returns parent", process_tests.testGetppidReturnsParent);
     runner.runTest("process: exec replaces process", process_tests.testExecReplacesProcess);
+    runner.runTest("process: alarm set and cancel", process_tests.testAlarmSetAndCancel);
+    runner.runTest("process: alarm basic", process_tests.testAlarmBasic);
 
     // Stress tests
     runner.runTest("stress: write 10MB file", stress_tests.testWrite10MbFile);

@@ -388,6 +388,9 @@ export fn _start(boot_info: *BootInfo.BootInfo) callconv(.c) noreturn {
     const signal = @import("signal");
     signal.init();
 
+    const flock = @import("flock");
+    flock.init();
+
     sched.setGsData(&bsp_gs_data);
 
     console.print("\n");

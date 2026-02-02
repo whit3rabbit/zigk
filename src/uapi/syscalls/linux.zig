@@ -64,8 +64,12 @@ pub const SYS_MADVISE: usize = 28;
 pub const SYS_DUP: usize = 32;
 /// Duplicate a file descriptor to specific number
 pub const SYS_DUP2: usize = 33;
+/// Wait for signal
+pub const SYS_PAUSE: usize = 34;
 /// High-resolution sleep
 pub const SYS_NANOSLEEP: usize = 35;
+/// Set an alarm clock for delivery of a signal
+pub const SYS_ALARM: usize = 37;
 /// Get process ID
 pub const SYS_GETPID: usize = 39;
 /// Transfer data between file descriptors (zero-copy)
@@ -118,6 +122,8 @@ pub const SYS_KILL: usize = 62;
 pub const SYS_UNAME: usize = 63;
 /// Manipulate file descriptor flags (e.g., O_NONBLOCK)
 pub const SYS_FCNTL: usize = 72;
+/// Apply or remove an advisory lock on an open file
+pub const SYS_FLOCK: usize = 73;
 /// Synchronize file's in-core state with storage
 pub const SYS_FSYNC: usize = 74;
 /// Synchronize file data (not metadata)

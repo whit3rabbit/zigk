@@ -255,6 +255,16 @@ pub const Vfs = struct {
             file_desc.vfs_mount_idx = @intCast(idx);
             @import("console").debug("VFS: Returning file descriptor", .{});
 
+            // Assign file identifier for flock
+            // Composite key: (mount_idx << 32) | file_id
+            // For MVP, use hash of private_data pointer as file_id
+            const mount_idx_u64: u64 = @intCast(idx);
+            const file_id: u64 = if (file_desc.private_data) |ptr|
+                @intFromPtr(ptr) & 0xFFFFFFFF // Use lower 32 bits of pointer
+            else
+                0;
+            file_desc.file_identifier = (mount_idx_u64 << 32) | file_id;
+
             return file_desc;
         }
 

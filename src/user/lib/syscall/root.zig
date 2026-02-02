@@ -51,6 +51,10 @@ pub const O_CREAT = io.O_CREAT;
 pub const O_EXCL = io.O_EXCL;
 pub const O_TRUNC = io.O_TRUNC;
 pub const O_APPEND = io.O_APPEND;
+pub const LOCK_SH = uapi.flock.LOCK_SH;
+pub const LOCK_EX = uapi.flock.LOCK_EX;
+pub const LOCK_UN = uapi.flock.LOCK_UN;
+pub const LOCK_NB = uapi.flock.LOCK_NB;
 pub const SEEK_SET = io.SEEK_SET;
 pub const SEEK_CUR = io.SEEK_CUR;
 pub const SEEK_END = io.SEEK_END;
@@ -63,6 +67,7 @@ pub const eprint_safe = io.eprint_safe;
 pub const eprint = io.eprint;
 pub const debug_log = io.debug_log;
 pub const debug_print = io.debug_print;
+pub const flock = io.flock;
 pub const PROT_NONE = io.PROT_NONE;
 pub const PROT_READ = io.PROT_READ;
 pub const PROT_WRITE = io.PROT_WRITE;
@@ -97,6 +102,8 @@ pub const fork = process.fork;
 pub const wait4 = process.wait4;
 pub const WNOHANG = process.WNOHANG;
 pub const execve = process.execve;
+pub const pause = process.pause;
+pub const alarm = process.alarm;
 
 // Re-export Signal
 pub const kill = signal.kill;
