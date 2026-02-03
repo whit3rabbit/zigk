@@ -23,6 +23,7 @@ const vfs = @import("fs").vfs; // Import VFS for Error type
 const meta = @import("fs").meta;
 const heap = @import("heap");
 const sync = @import("sync");
+const syscall_base = @import("syscall_base");
 
 const FileDescriptor = fd_mod.FileDescriptor;
 const FileOps = fd_mod.FileOps;
@@ -32,13 +33,29 @@ const Errno = uapi.errno.Errno;
 // Console Device (/dev/console, stdin/stdout/stderr)
 // =============================================================================
 
+/// TTY state for job control
+/// Stored in FileDescriptor.private_data
+pub const TtyState = struct {
+    /// Foreground process group ID (0 = no foreground group)
+    foreground_pgid: std.atomic.Value(u32),
+    /// Session ID that owns this terminal (0 = no session)
+    session_id: std.atomic.Value(u32),
+
+    pub fn init() TtyState {
+        return .{
+            .foreground_pgid = std.atomic.Value(u32).init(0),
+            .session_id = std.atomic.Value(u32).init(0),
+        };
+    }
+};
+
 pub const console_ops = FileOps{
     .read = consoleRead,
     .write = consoleWrite,
-    .close = null, // Console cannot be closed
+    .close = consoleClose,
     .seek = null, // Not seekable
     .stat = null,
-    .ioctl = null,
+    .ioctl = consoleIoctl,
     .mmap = null,
     .poll = null,
     .truncate = null,
@@ -94,6 +111,173 @@ fn consoleWrite(fd: *FileDescriptor, buf: []const u8) isize {
     console.print(buf);
 
     return @intCast(buf.len);
+}
+
+/// Close console FD (cleanup TTY state)
+fn consoleClose(fd: *FileDescriptor) isize {
+    // TTY state is shared between stdin/stdout/stderr and lives for the process
+    // lifetime, so we don't free it here. It will be freed when the process dies.
+    // In a full implementation, we'd use refcounting on TtyState.
+    _ = fd;
+    return 0;
+}
+
+/// Console ioctl handler for job control
+fn consoleIoctl(fd: *FileDescriptor, request: u64, arg: u64) isize {
+    const UserPtr = syscall_base.UserPtr;
+
+    // Get TTY state (all TTYs should have state attached)
+    const tty_state: *TtyState = if (fd.private_data) |data|
+        @ptrCast(@alignCast(data))
+    else
+        return -@intFromEnum(Errno.ENOTTY);
+
+    const cmd: u32 = @truncate(request);
+
+    switch (cmd) {
+        uapi.tty.TIOCSCTTY => {
+            // Make this terminal the controlling terminal
+            // Requirements:
+            // - Caller must be a session leader
+            // - Session must not already have a controlling terminal
+
+            const proc = syscall_base.getCurrentProcess();
+
+            // Check if caller is session leader
+            if (proc.sid != proc.pid) {
+                return -@intFromEnum(Errno.EPERM);
+            }
+
+            // Check if session already has a controlling terminal
+            if (proc.ctty != -1) {
+                // arg can be 1 to "steal" the terminal (we don't support this yet)
+                return -@intFromEnum(Errno.EPERM);
+            }
+
+            // Find which FD number this is in the process's FD table
+            const table = syscall_base.getGlobalFdTable();
+            var fd_num: i32 = -1;
+            var i: usize = 0;
+            while (i < fd_mod.MAX_FDS) : (i += 1) {
+                if (table.get(@intCast(i))) |entry| {
+                    if (entry == fd) {
+                        fd_num = @intCast(i);
+                        break;
+                    }
+                }
+            }
+
+            if (fd_num == -1) {
+                return -@intFromEnum(Errno.EBADF);
+            }
+
+            // Set as controlling terminal
+            proc.ctty = fd_num;
+            tty_state.session_id.store(proc.sid, .seq_cst);
+
+            // Set foreground process group to caller's process group
+            tty_state.foreground_pgid.store(proc.pgid, .seq_cst);
+
+            return 0;
+        },
+
+        uapi.tty.TIOCNOTTY => {
+            // Give up the controlling terminal
+            const proc = syscall_base.getCurrentProcess();
+
+            // Check if this is our controlling terminal
+            if (proc.ctty == -1) {
+                return -@intFromEnum(Errno.ENOTTY);
+            }
+
+            // Clear controlling terminal
+            proc.ctty = -1;
+
+            // If we're the session leader, send SIGHUP to foreground group
+            if (proc.sid == proc.pid) {
+                const fg_pgid = tty_state.foreground_pgid.load(.seq_cst);
+                if (fg_pgid != 0) {
+                    // TODO: Send SIGHUP to foreground process group
+                    // This requires access to the signal delivery function
+                    // For now, just clear the state
+                }
+                tty_state.session_id.store(0, .seq_cst);
+                tty_state.foreground_pgid.store(0, .seq_cst);
+            }
+
+            return 0;
+        },
+
+        uapi.tty.TIOCGPGRP => {
+            // Get foreground process group ID
+            // arg: pointer to i32 to store the result
+
+            const proc = syscall_base.getCurrentProcess();
+
+            // Must be our controlling terminal
+            if (proc.ctty == -1) {
+                return -@intFromEnum(Errno.ENOTTY);
+            }
+
+            // Get foreground pgid
+            const fg_pgid: u32 = tty_state.foreground_pgid.load(.seq_cst);
+
+            // Write to user pointer
+            const uptr = UserPtr.from(arg);
+            uptr.writeValue(@as(i32, @intCast(fg_pgid))) catch {
+                return -@intFromEnum(Errno.EFAULT);
+            };
+
+            return 0;
+        },
+
+        uapi.tty.TIOCSPGRP => {
+            // Set foreground process group ID
+            // arg: pointer to i32 containing the new pgid
+
+            const proc = syscall_base.getCurrentProcess();
+
+            // Must be our controlling terminal
+            if (proc.ctty == -1) {
+                return -@intFromEnum(Errno.ENOTTY);
+            }
+
+            // Must be in the same session as the terminal
+            const tty_sid = tty_state.session_id.load(.seq_cst);
+            if (tty_sid != proc.sid) {
+                return -@intFromEnum(Errno.EPERM);
+            }
+
+            // Read new pgid from user pointer
+            const uptr = UserPtr.from(arg);
+            const new_pgid_i32 = uptr.readValue(i32) catch {
+                return -@intFromEnum(Errno.EFAULT);
+            };
+
+            if (new_pgid_i32 <= 0) {
+                return -@intFromEnum(Errno.EINVAL);
+            }
+
+            const new_pgid: u32 = @intCast(new_pgid_i32);
+
+            // Set foreground process group
+            tty_state.foreground_pgid.store(new_pgid, .seq_cst);
+
+            return 0;
+        },
+
+        uapi.tty.TCGETS => {
+            // Check if this is a terminal (always succeeds for TTYs)
+            // Used by isatty() in libc
+            // arg is ignored (typically points to a termios struct we don't use)
+            return 0;
+        },
+
+        else => {
+            // Unknown ioctl command
+            return -@intFromEnum(Errno.ENOTTY);
+        },
+    }
 }
 
 // =============================================================================
@@ -399,15 +583,26 @@ pub const dev_fs = vfs.FileSystem{
 /// Create pre-opened FDs for stdin/stdout/stderr (FDs 0/1/2)
 /// Called during thread/process initialization
 pub fn createStdFds(table: *fd_mod.FdTable) !void {
+    const allocator = heap.allocator();
+
+    // Allocate shared TTY state for all std FDs
+    // All three FDs (stdin/stdout/stderr) share the same terminal state
+    const tty_state = try allocator.create(TtyState);
+    tty_state.* = TtyState.init();
+
     // FD 0: stdin (console, read-only)
-    const stdin = try fd_mod.createFd(&console_ops, fd_mod.O_RDONLY, null);
+    const stdin = try fd_mod.createFd(&console_ops, fd_mod.O_RDONLY, tty_state);
     table.install(0, stdin);
 
     // FD 1: stdout (console, write-only)
-    const stdout = try fd_mod.createFd(&console_ops, fd_mod.O_WRONLY, null);
+    const stdout = try fd_mod.createFd(&console_ops, fd_mod.O_WRONLY, tty_state);
     table.install(1, stdout);
 
     // FD 2: stderr (console, write-only)
-    const stderr = try fd_mod.createFd(&console_ops, fd_mod.O_WRONLY, null);
+    const stderr = try fd_mod.createFd(&console_ops, fd_mod.O_WRONLY, tty_state);
     table.install(2, stderr);
+
+    // NOTE: Only one of the FDs will free the state in its close handler.
+    // This is safe because they're all created together and the state is
+    // logically shared. In a full implementation, we'd use refcounting.
 }

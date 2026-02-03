@@ -1244,6 +1244,10 @@ pub fn build(b: *std.Build) void {
     syscall_process_module.addImport("process", process_module);
     syscall_process_module.addImport("config", config_module);
 
+    // Add syscall_base and user_mem to devfs (required for TTY ioctl job control)
+    devfs_module.addImport("syscall_base", syscall_base_module);
+    devfs_module.addImport("user_mem", user_mem_module);
+
     // Create syscall signals module (rt_sigprocmask, rt_sigaction, etc.)
     const syscall_signals_module = b.createModule(.{
         .root_source_file = b.path("src/kernel/sys/syscall/process/signals.zig"),
