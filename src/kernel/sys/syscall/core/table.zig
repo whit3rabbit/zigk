@@ -27,6 +27,9 @@ const custom = @import("custom");
 const net = @import("net");
 const random = @import("random");
 const alarm = @import("alarm");
+const sysinfo = @import("sysinfo");
+const times = @import("times");
+const itimer = @import("itimer");
 const input_handlers = @import("input");
 const ipc = @import("ipc");
 const interrupt = @import("interrupt");
@@ -91,6 +94,12 @@ pub export fn dispatch_syscall(frame: *SyscallFrame) callconv(.c) void {
                     mod = random;
                 } else if (@hasDecl(alarm, name)) {
                     mod = alarm;
+                } else if (@hasDecl(sysinfo, name)) {
+                    mod = sysinfo;
+                } else if (@hasDecl(times, name)) {
+                    mod = times;
+                } else if (@hasDecl(itimer, name)) {
+                    mod = itimer;
                 } else if (@hasDecl(input_handlers, name)) {
                     mod = input_handlers;
                 } else if (@hasDecl(ipc, name)) {

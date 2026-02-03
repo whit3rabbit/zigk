@@ -64,3 +64,82 @@ pub fn gettime_ms() SyscallError!u64 {
 pub fn getTickMs() u64 {
     return gettime_ms() catch 0;
 }
+
+// =============================================================================
+// System Information & Process Times (99-100)
+// =============================================================================
+
+/// System information structure (from sysinfo syscall)
+pub const SysInfo = extern struct {
+    uptime: i64,
+    loads: [3]usize,
+    totalram: usize,
+    freeram: usize,
+    sharedram: usize,
+    bufferram: usize,
+    totalswap: usize,
+    freeswap: usize,
+    procs: u16,
+    pad: u16,
+    totalhigh: usize,
+    freehigh: usize,
+    mem_unit: u32,
+    _reserved: [20]u8,
+};
+
+/// Process times structure (from times syscall)
+pub const Tms = extern struct {
+    tms_utime: i64,
+    tms_stime: i64,
+    tms_cutime: i64,
+    tms_cstime: i64,
+};
+
+/// Get system information (uptime, memory, load averages)
+pub fn sysinfo(info: *SysInfo) SyscallError!void {
+    const ret = primitive.syscall1(syscalls.SYS_SYSINFO, @intFromPtr(info));
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Get process CPU times
+/// Returns current tick count
+pub fn times(buf: *Tms) SyscallError!usize {
+    const ret = primitive.syscall1(syscalls.SYS_TIMES, @intFromPtr(buf));
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return ret;
+}
+
+// =============================================================================
+// Interval Timers (36, 38)
+// =============================================================================
+
+/// Timeval structure for interval timers
+pub const Timeval = extern struct {
+    tv_sec: i64,
+    tv_usec: i64,
+};
+
+/// Interval timer value structure
+pub const ITimerVal = extern struct {
+    it_interval: Timeval,
+    it_value: Timeval,
+};
+
+/// Interval timer types
+pub const ITIMER_REAL: u32 = 0; // Wall clock time (SIGALRM)
+pub const ITIMER_VIRTUAL: u32 = 1; // User CPU time (SIGVTALRM)
+pub const ITIMER_PROF: u32 = 2; // User + Kernel CPU time (SIGPROF)
+
+/// Get interval timer value
+pub fn getitimer(which: u32, value: *ITimerVal) SyscallError!void {
+    const ret = primitive.syscall2(syscalls.SYS_GETITIMER, which, @intFromPtr(value));
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Set interval timer
+/// If old_value is null, previous value is not returned
+pub fn setitimer(which: u32, new_value: *const ITimerVal, old_value: ?*ITimerVal) SyscallError!void {
+    const old_ptr: usize = if (old_value) |v| @intFromPtr(v) else 0;
+    const ret = primitive.syscall3(syscalls.SYS_SETITIMER, which, @intFromPtr(new_value), old_ptr);
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}

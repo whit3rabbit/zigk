@@ -108,6 +108,16 @@ pub fn sys_wait4(pid_arg: usize, wstatus_ptr: usize, options: usize, rusage_ptr:
             const reaped_pid = zombie.pid;
             const exit_status = zombie.exit_status;
 
+            // Propagate child's CPU times to parent's cumulative counters
+            // Get the main thread's CPU times from the zombie process
+            if (sched.findThreadByTid(zombie.pid)) |child_thread| {
+                current_proc.cutime += child_thread.utime;
+                current_proc.cstime += child_thread.stime;
+            }
+            // Also inherit the zombie's cumulative children times
+            current_proc.cutime += zombie.cutime;
+            current_proc.cstime += zombie.cstime;
+
             // Write exit status if pointer provided
             if (wstatus_ptr != 0) {
                 UserPtr.from(wstatus_ptr).writeValue(exit_status) catch {
@@ -696,6 +706,16 @@ pub fn sys_getsid(pid: usize) SyscallError!usize {
         process_mod.findProcessByPid(target_pid) orelse return error.ESRCH;
 
     return proc.sid;
+}
+
+/// sys_getpgrp (111) - Get process group of calling process
+///
+/// Equivalent to getpgid(0) but with no arguments.
+/// This is the POSIX getpgrp() - not to be confused with the
+/// obsolete BSD getpgrp(pid) which takes an argument.
+pub fn sys_getpgrp() SyscallError!usize {
+    const proc = base.getCurrentProcess();
+    return proc.pgid;
 }
 
 /// sys_sethostname (170) - Set hostname

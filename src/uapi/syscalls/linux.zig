@@ -68,8 +68,12 @@ pub const SYS_DUP2: usize = 33;
 pub const SYS_PAUSE: usize = 34;
 /// High-resolution sleep
 pub const SYS_NANOSLEEP: usize = 35;
+/// Get interval timer value
+pub const SYS_GETITIMER: usize = 36;
 /// Set an alarm clock for delivery of a signal
 pub const SYS_ALARM: usize = 37;
+/// Set interval timer
+pub const SYS_SETITIMER: usize = 38;
 /// Get process ID
 pub const SYS_GETPID: usize = 39;
 /// Transfer data between file descriptors (zero-copy)
@@ -174,6 +178,10 @@ pub const SYS_GETTIMEOFDAY: usize = 96;
 pub const SYS_GETRLIMIT: usize = 97;
 /// Get resource usage statistics
 pub const SYS_GETRUSAGE: usize = 98;
+/// Get system information
+pub const SYS_SYSINFO: usize = 99;
+/// Get process times
+pub const SYS_TIMES: usize = 100;
 /// Process tracing and debugging
 pub const SYS_PTRACE: usize = 101;
 /// Get user ID
@@ -190,6 +198,16 @@ pub const SYS_GETEUID: usize = 107;
 pub const SYS_GETEGID: usize = 108;
 /// Get parent process ID
 pub const SYS_GETPPID: usize = 110;
+/// Set process group ID
+pub const SYS_SETPGID: usize = 109;
+/// Get process group of calling process
+pub const SYS_GETPGRP: usize = 111;
+/// Create session and set process group ID
+pub const SYS_SETSID: usize = 112;
+/// Get process group ID
+pub const SYS_GETPGID: usize = 121;
+/// Get session ID
+pub const SYS_GETSID: usize = 124;
 /// Set real, effective, and saved user IDs
 pub const SYS_SETRESUID: usize = 117;
 /// Get real, effective, and saved user IDs

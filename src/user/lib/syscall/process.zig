@@ -48,6 +48,44 @@ pub fn getppid() i32 {
     return @truncate(@as(isize, @bitCast(ret)));
 }
 
+// =============================================================================
+// Process Groups and Sessions
+// =============================================================================
+
+/// Get process group ID of a process
+pub fn getpgid(pid: i32) SyscallError!i32 {
+    const ret = primitive.syscall1(syscalls.SYS_GETPGID, @bitCast(@as(isize, pid)));
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return @truncate(@as(isize, @bitCast(ret)));
+}
+
+/// Get process group of calling process
+pub fn getpgrp() SyscallError!i32 {
+    const ret = primitive.syscall0(syscalls.SYS_GETPGRP);
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return @truncate(@as(isize, @bitCast(ret)));
+}
+
+/// Set process group ID
+pub fn setpgid(pid: i32, pgid: i32) SyscallError!void {
+    const ret = primitive.syscall2(syscalls.SYS_SETPGID, @bitCast(@as(isize, pid)), @bitCast(@as(isize, pgid)));
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Create new session and set process group ID
+pub fn setsid() SyscallError!i32 {
+    const ret = primitive.syscall0(syscalls.SYS_SETSID);
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return @truncate(@as(isize, @bitCast(ret)));
+}
+
+/// Get session ID of a process
+pub fn getsid(pid: i32) SyscallError!i32 {
+    const ret = primitive.syscall1(syscalls.SYS_GETSID, @bitCast(@as(isize, pid)));
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return @truncate(@as(isize, @bitCast(ret)));
+}
+
 /// Get user ID
 pub fn getuid() u32 {
     const ret = primitive.syscall0(syscalls.SYS_GETUID);

@@ -183,6 +183,14 @@ pub const Thread = struct {
     /// SECURITY: Prevents use-after-free when findThreadByTid returns pointer after lock release
     refcount: std.atomic.Value(u32) = std.atomic.Value(u32).init(1),
 
+    /// CPU time tracking (in ticks, 100 Hz = 10ms granularity)
+    /// User mode CPU time consumed by this thread
+    utime: u64 = 0,
+    /// Kernel mode CPU time consumed by this thread
+    stime: u64 = 0,
+    /// Creation tick (for accounting)
+    start_time: u64 = 0,
+
     /// Get thread name as a slice
     pub fn getName(self: *const Thread) []const u8 {
         // Find null terminator

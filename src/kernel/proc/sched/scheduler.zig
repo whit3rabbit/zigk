@@ -49,6 +49,14 @@ pub const Scheduler = struct {
 
     /// Callback function to be called on every timer tick
     tick_callback: ?*const fn () void = null,
+
+    /// Load averages (fixed-point: actual_load * 65536)
+    /// Updated every 5 seconds (500 ticks) via exponential moving average
+    load_1min: u64 = 0,
+    load_5min: u64 = 0,
+    load_15min: u64 = 0,
+    /// Last tick when load averages were updated
+    load_last_update: u64 = 0,
 };
 
 /// Global scheduler instance
@@ -771,6 +779,20 @@ pub fn timerTick(frame: if (builtin.cpu.arch == .x86_64) *hal.interrupts.Interru
         _ = usb.xhci.interrupts.pollAllControllers();
     }
 
+    // CPU time tracking and interval timer processing
+    if (thread_logic.getCurrentThread()) |current_thread| {
+        if (current_thread.process) |proc_ptr| {
+            const proc = @as(*@import("process").Process, @ptrCast(@alignCast(proc_ptr)));
+            accumulateCpuTime(current_thread, frame);
+            processIntervalTimers(proc, current_thread, frame);
+        }
+    }
+
+    // Update load averages every 5 seconds (500 ticks)
+    if (local_tick_count - scheduler.load_last_update >= 500) {
+        updateLoadAverages(local_tick_count);
+    }
+
     var tick_cb: ?*const fn () void = null;
     var is_running: bool = false;
 
@@ -960,5 +982,118 @@ pub fn getStats() SchedulerStats {
         .ready_count = total_ready,
         .is_running = scheduler.running,
         .current_tid = if (current) |c| c.tid else null,
+    };
+}
+
+// === CPU Time Tracking & Interval Timers ===
+
+/// Accumulate CPU time for the current thread
+/// Determines if thread is in user or kernel mode and increments appropriate counter
+fn accumulateCpuTime(thread: *Thread, frame: *const hal.interrupts.InterruptFrame) void {
+    // Determine CPU mode from saved context
+    const in_user_mode = if (builtin.cpu.arch == .x86_64)
+        (frame.cs & 3) == 3 // RPL bits 0-1, Ring 3 = user mode
+    else
+        frame.elr >= 0x0000_0000_0000_0000 and frame.elr < 0xFFFF_0000_0000_0000; // aarch64 EL0 address space
+
+    if (in_user_mode) {
+        thread.utime += 1;
+    } else {
+        thread.stime += 1;
+    }
+}
+
+/// Process interval timers for a process
+/// Decrements timer values and delivers signals on expiry
+fn processIntervalTimers(proc: *@import("process").Process, thread: *Thread, frame: *const hal.interrupts.InterruptFrame) void {
+    const TICK_MICROS: u64 = 10000; // 10ms per tick (100 Hz)
+    const uapi = @import("uapi");
+
+    // Determine if thread is in user mode
+    const in_user_mode = if (builtin.cpu.arch == .x86_64)
+        (frame.cs & 3) == 3
+    else
+        frame.elr >= 0x0000_0000_0000_0000 and frame.elr < 0xFFFF_0000_0000_0000;
+
+    // ITIMER_REAL (always decrements)
+    if (proc.itimer_real_value > 0) {
+        if (proc.itimer_real_value <= TICK_MICROS) {
+            // Set SIGALRM pending bit (signal number 14)
+            const sig_bit: u64 = @as(u64, 1) << @intCast(uapi.signal.SIGALRM - 1);
+            _ = @atomicRmw(u64, &thread.pending_signals, .Or, sig_bit, .seq_cst);
+            proc.itimer_real_value = proc.itimer_real_interval; // Reload for periodic
+        } else {
+            proc.itimer_real_value -= TICK_MICROS;
+        }
+    }
+
+    // ITIMER_VIRTUAL (only user mode)
+    if (in_user_mode and proc.itimer_virtual_value > 0) {
+        if (proc.itimer_virtual_value <= TICK_MICROS) {
+            // Set SIGVTALRM pending bit (signal number 26)
+            const sig_bit: u64 = @as(u64, 1) << @intCast(uapi.signal.SIGVTALRM - 1);
+            _ = @atomicRmw(u64, &thread.pending_signals, .Or, sig_bit, .seq_cst);
+            proc.itimer_virtual_value = proc.itimer_virtual_interval;
+        } else {
+            proc.itimer_virtual_value -= TICK_MICROS;
+        }
+    }
+
+    // ITIMER_PROF (both user and kernel)
+    if (proc.itimer_prof_value > 0) {
+        if (proc.itimer_prof_value <= TICK_MICROS) {
+            // Set SIGPROF pending bit (signal number 27)
+            const sig_bit: u64 = @as(u64, 1) << @intCast(uapi.signal.SIGPROF - 1);
+            _ = @atomicRmw(u64, &thread.pending_signals, .Or, sig_bit, .seq_cst);
+            proc.itimer_prof_value = proc.itimer_prof_interval;
+        } else {
+            proc.itimer_prof_value -= TICK_MICROS;
+        }
+    }
+}
+
+/// Update load averages using exponential moving average
+/// Called every 5 seconds (500 ticks)
+fn updateLoadAverages(now: u64) void {
+    // Count runnable threads across all CPUs
+    var n_running: usize = 0;
+    const cpu_count = @atomicLoad(u32, &cpu_mod.active_cpu_count, .acquire);
+
+    for (cpu_mod.cpu_sched[0..cpu_count]) |*cpu_data| {
+        if (cpu_data.initialized) {
+            const held_cpu = cpu_data.lock.acquire();
+            defer held_cpu.release();
+            n_running += cpu_data.ready_queue.count;
+        }
+    }
+
+    // Add currently running threads (one per CPU)
+    n_running += cpu_count;
+
+    // Fixed-point math: load = n_running * 65536
+    const n_running_fp: u64 = @as(u64, n_running) << 16;
+
+    // Exponential decay constants (precomputed e^(-5/T) * 65536)
+    // 1 min:  exp(-5/60)  * 65536 = 59460
+    // 5 min:  exp(-5/300) * 65536 = 64419
+    // 15 min: exp(-5/900) * 65536 = 65172
+    const EXP_1:  u64 = 59460;
+    const EXP_5:  u64 = 64419;
+    const EXP_15: u64 = 65172;
+
+    // Update each load average: load = load * exp + n * (1 - exp)
+    scheduler.load_1min = (scheduler.load_1min * EXP_1 + n_running_fp * (65536 - EXP_1)) >> 16;
+    scheduler.load_5min = (scheduler.load_5min * EXP_5 + n_running_fp * (65536 - EXP_5)) >> 16;
+    scheduler.load_15min = (scheduler.load_15min * EXP_15 + n_running_fp * (65536 - EXP_15)) >> 16;
+
+    scheduler.load_last_update = now;
+}
+
+/// Get load averages for sysinfo syscall
+pub fn getLoadAverages() [3]usize {
+    return [3]usize{
+        @intCast(scheduler.load_1min),
+        @intCast(scheduler.load_5min),
+        @intCast(scheduler.load_15min),
     };
 }

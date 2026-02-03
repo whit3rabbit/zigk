@@ -7,8 +7,8 @@ This document lists Linux x86_64 syscalls not yet implemented in zk.
 | Metric | Count |
 |--------|-------|
 | Linux x86_64 syscalls | 420 |
-| Implemented in zk | 186 (44%) |
-| Missing | 234 |
+| Implemented in zk | 190 (45%) |
+| Missing | 230 |
 
 All implemented syscalls use **correct Linux x86_64 numbers**. ZK extensions (1000+) do not conflict with Linux.
 
@@ -61,9 +61,31 @@ These 500+ numbers are zk-specific compatibility extensions, NOT part of the Lin
 - **Medium**: Needed for specific use cases
 - **Low**: Legacy, deprecated, or rarely used
 
-## Recently Implemented (2026-01-31)
+## Recently Implemented
 
-The following syscalls were implemented and tested:
+### 2026-02-03: System Information and Timers
+
+Phase 2 system compatibility syscalls:
+
+| # | Name | Handler | Status |
+|---|------|---------|--------|
+| 99 | `sysinfo` | `misc/sysinfo.zig` | ✅ Implemented, tested (x86_64, aarch64) |
+| 100 | `times` | `misc/times.zig` | ✅ Implemented, tested (x86_64, aarch64) |
+| 36 | `getitimer` | `misc/itimer.zig` | ✅ Implemented, tested (x86_64, aarch64) |
+| 38 | `setitimer` | `misc/itimer.zig` | ✅ Implemented, tested (x86_64, aarch64) |
+
+**Features**:
+- System statistics (uptime, memory, load averages, process count)
+- Process CPU time tracking (user/system, self/children)
+- Interval timers (ITIMER_REAL, ITIMER_VIRTUAL, ITIMER_PROF)
+
+**Test Coverage**: 9 new tests covering basic operations, periodic timers, and timer independence. All tests passing on x86_64.
+
+**Note**: Timer countdown/signal delivery not yet implemented (timers can be set/retrieved but do not expire).
+
+### 2026-01-31: Process Management
+
+Multi-process support syscalls:
 
 | # | Name | Handler | Status |
 |---|------|---------|--------|

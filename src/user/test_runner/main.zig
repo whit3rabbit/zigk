@@ -177,6 +177,22 @@ export fn main(argc: i32, argv: [*][*:0]u8) i32 {
     runner.runTest("process: exec replaces process", process_tests.testExecReplacesProcess);
     runner.runTest("process: alarm set and cancel", process_tests.testAlarmSetAndCancel);
     runner.runTest("process: alarm basic", process_tests.testAlarmBasic);
+    runner.runTest("process: sysinfo valid", process_tests.testSysinfoValid);
+    runner.runTest("process: sysinfo consistent", process_tests.testSysinfoConsistent);
+    runner.runTest("process: times basic", process_tests.testTimesBasic);
+    runner.runTest("process: times children", process_tests.testTimesChildren);
+    runner.runTest("process: getitimer basic", process_tests.testGetitimerBasic);
+    runner.runTest("process: setitimer basic", process_tests.testSetitimerBasic);
+    runner.runTest("process: setitimer periodic", process_tests.testSetitimerPeriodic);
+    runner.runTest("process: setitimer cancel", process_tests.testSetitimerCancel);
+    runner.runTest("process: itimer independent", process_tests.testItimerIndependent);
+    runner.runTest("process: getpgid basic", process_tests.testGetpgidBasic);
+    runner.runTest("process: getpgrp equivalence", process_tests.testGetpgrpEquivalence);
+    runner.runTest("process: setpgid self", process_tests.testSetpgidSelf);
+    runner.runTest("process: setpgid child", process_tests.testSetpgidChild);
+    runner.runTest("process: setsid basic", process_tests.testSetsidBasic);
+    runner.runTest("process: setsid fails for group leader", process_tests.testSetsidFailsForGroupLeader);
+    runner.runTest("process: getsid basic", process_tests.testGetsidBasic);
 
     // Stress tests
     runner.runTest("stress: write 10MB file", stress_tests.testWrite10MbFile);

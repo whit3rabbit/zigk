@@ -205,6 +205,23 @@ pub const Process = struct {
     /// Current resident set size (tracked for enforcement)
     rss_current: u64 = 0,
 
+    /// CPU time tracking (cumulative children times in ticks)
+    /// Accumulated user time of reaped children
+    cutime: u64 = 0,
+    /// Accumulated system time of reaped children
+    cstime: u64 = 0,
+
+    /// Interval timers (microseconds)
+    /// ITIMER_REAL (wall clock, delivers SIGALRM)
+    itimer_real_interval: u64 = 0,
+    itimer_real_value: u64 = 0,
+    /// ITIMER_VIRTUAL (user CPU time, delivers SIGVTALRM)
+    itimer_virtual_interval: u64 = 0,
+    itimer_virtual_value: u64 = 0,
+    /// ITIMER_PROF (total CPU time, delivers SIGPROF)
+    itimer_prof_interval: u64 = 0,
+    itimer_prof_value: u64 = 0,
+
     // Methods for hierarchy management that operate directly on state
     // Moved here to allow simple imports
 

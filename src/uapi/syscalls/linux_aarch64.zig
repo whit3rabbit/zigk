@@ -47,6 +47,8 @@ pub const SYS_DUP3: usize = 24;
 pub const SYS_PIPE2: usize = 59;
 /// Create a file (legacy, use openat with O_CREAT)
 pub const SYS_CREAT: usize = 500; // zk compat: not in Linux aarch64
+/// Apply or remove an advisory lock on an open file
+pub const SYS_FLOCK: usize = 32;
 
 // ============================================================================
 // File Status
@@ -142,6 +144,16 @@ pub const SYS_MUNLOCKALL: usize = 231;
 pub const SYS_GETPID: usize = 172;
 /// Get parent process ID
 pub const SYS_GETPPID: usize = 173;
+/// Set process group ID
+pub const SYS_SETPGID: usize = 154;
+/// Get process group ID
+pub const SYS_GETPGID: usize = 155;
+/// Get process group of calling process (uses getpgid on aarch64)
+pub const SYS_GETPGRP: usize = 155;
+/// Get session ID
+pub const SYS_GETSID: usize = 156;
+/// Create session and set process group ID
+pub const SYS_SETSID: usize = 157;
 /// Get thread ID
 pub const SYS_GETTID: usize = 178;
 /// Exit the current process
@@ -160,6 +172,8 @@ pub const SYS_WAIT4: usize = 260;
 pub const SYS_WAITID: usize = 95;
 /// Create child process sharing VM until exec/exit
 pub const SYS_VFORK: usize = 501; // zk compat: redirects to clone
+/// Get process accounting information
+pub const SYS_TIMES: usize = 153;
 
 // ============================================================================
 // Signals
@@ -363,6 +377,8 @@ pub const SYS_PWRITEV: usize = 70;
 
 /// Get system information
 pub const SYS_UNAME: usize = 160;
+/// Get system statistics
+pub const SYS_SYSINFO: usize = 179;
 /// Set host name
 pub const SYS_SETHOSTNAME: usize = 161;
 /// Set domain name
@@ -480,6 +496,10 @@ pub const SYS_INOTIFY_INIT: usize = 522;
 pub const SYS_SIGNALFD: usize = 523;
 /// Create event notification file descriptor (zk compat: redirects to eventfd2)
 pub const SYS_EVENTFD: usize = 524;
+/// Wait for signal (zk compat: not in Linux aarch64, use rt_sigsuspend)
+pub const SYS_PAUSE: usize = 526;
+/// Set an alarm clock for delivery of a signal (zk compat: not in Linux aarch64)
+pub const SYS_ALARM: usize = 527;
 
 // ============================================================================
 // NOT available on aarch64 - x86_64 specific

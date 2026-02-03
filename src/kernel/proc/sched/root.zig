@@ -30,6 +30,7 @@ pub const isRunning = scheduler.isRunning;
 pub const getStats = scheduler.getStats;
 pub const setTickCallback = scheduler.setTickCallback;
 pub const getTickCount = scheduler.getTickCount;
+pub const getLoadAverages = scheduler.getLoadAverages;
 
 // Thread Management
 pub const addThread = thread_logic.addThread;
