@@ -6,6 +6,7 @@ pub const net = @import("net.zig");
 pub const time = @import("time.zig");
 const resource = @import("resource.zig");
 const io_uring = @import("io_uring.zig");
+const tty = @import("tty.zig");
 
 // Re-export core primitives
 pub const uapi = primitive.uapi;
@@ -119,6 +120,13 @@ pub const sigprocmask = signal.sigprocmask;
 pub const sigreturn = signal.sigreturn;
 pub const SigAction = signal.SigAction;
 pub const SigSet = signal.SigSet;
+
+// Re-export TTY (terminal control for job control)
+pub const tiocsctty = tty.tiocsctty;
+pub const tiocnotty = tty.tiocnotty;
+pub const tiocgpgrp = tty.tiocgpgrp;
+pub const tiocspgrp = tty.tiocspgrp;
+pub const tcgets = tty.tcgets;
 
 // Re-export Net
 pub const SockAddrIn = net.SockAddrIn;
