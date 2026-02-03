@@ -201,6 +201,14 @@ export fn main(argc: i32, argv: [*][*:0]u8) i32 {
     runner.runTest("wait: wait4 process group (pid=0)", process_tests.testWait4ProcessGroup);
     runner.runTest("wait: wait4 specific process group", process_tests.testWait4SpecificProcessGroup);
 
+    // Job control tests
+    runner.runTest("job: terminal foreground pgroup", process_tests.testTerminalForegroundPgroup);
+    runner.runTest("job: SIGTSTP stops process", process_tests.testSigtstpStopsProcess);
+    runner.runTest("job: SIGCONT resumes process", process_tests.testSigcontResumesProcess);
+    runner.runTest("job: controlling terminal", process_tests.testControllingTerminal);
+    runner.runTest("job: SIGTTOU background write", process_tests.testSigttouBackgroundWrite);
+    runner.runTest("job: background process group", process_tests.testBackgroundProcessGroup);
+
     // Stress tests
     runner.runTest("stress: write 10MB file", stress_tests.testWrite10MbFile);
     runner.runTest("stress: create 100 files", stress_tests.testCreate100Files);

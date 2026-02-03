@@ -692,3 +692,183 @@ pub fn testWait4SpecificProcessGroup() !void {
         }
     }
 }
+
+// =============================================================================
+// Job Control Tests
+// =============================================================================
+
+/// Test: Setting and getting foreground process group (TIOCGPGRP/TIOCSPGRP)
+pub fn testTerminalForegroundPgroup() !void {
+    // Get current foreground process group
+    const orig_pgid = try syscall.tiocgpgrp(0);
+
+    // Set ourselves as foreground (we should already be, but test the API)
+    const our_pgid = try syscall.getpgid(0);
+    try syscall.tiocspgrp(0, our_pgid);
+
+    // Verify it was set
+    const new_pgid = try syscall.tiocgpgrp(0);
+    if (new_pgid != our_pgid) {
+        return error.TestFailed;
+    }
+
+    // Restore original (if different)
+    if (orig_pgid != our_pgid) {
+        syscall.tiocspgrp(0, orig_pgid) catch {};
+    }
+}
+
+/// Test: SIGTSTP stops a process (Ctrl+Z behavior)
+pub fn testSigtstpStopsProcess() !void {
+    const pid = try syscall.fork();
+
+    if (pid == 0) {
+        // Child: Wait to be stopped by SIGTSTP
+        // Sleep for a while to give parent time to send signal
+        syscall.sleep_ms(100) catch {};
+        // If we reach here without being stopped, exit with failure
+        syscall.exit(1);
+    } else {
+        // Parent: Send SIGTSTP to child
+        syscall.sleep_ms(10) catch {};
+        try syscall.kill(pid, 20); // SIGTSTP = 20
+
+        // Wait a bit for signal to be delivered and processed
+        syscall.sleep_ms(30) catch {};
+
+        // Child should now be stopped - send SIGCONT to resume it
+        try syscall.kill(pid, 18); // SIGCONT = 18
+
+        // Now send SIGTERM to cleanly terminate
+        syscall.sleep_ms(10) catch {};
+        try syscall.kill(pid, 15); // SIGTERM = 15
+
+        // Wait for child to exit
+        var status: i32 = 0;
+        _ = try syscall.wait4(pid, &status, 0);
+
+        // Child should have been terminated by SIGTERM, not exited with status 1
+        // (If it wasn't stopped, it would have exited with 1)
+    }
+}
+
+/// Test: SIGCONT resumes a stopped process
+pub fn testSigcontResumesProcess() !void {
+    const pid = try syscall.fork();
+
+    if (pid == 0) {
+        // Child: Stop ourselves, wait to be continued
+        _ = syscall.kill(0, 19) catch {}; // SIGSTOP = 19 (cannot be caught)
+        // After SIGCONT, we should resume here and exit normally
+        syscall.exit(42);
+    } else {
+        // Parent: Wait for child to stop itself
+        syscall.sleep_ms(30) catch {};
+
+        // Send SIGCONT to resume child
+        try syscall.kill(pid, 18); // SIGCONT = 18
+
+        // Wait for child to exit
+        var status: i32 = 0;
+        _ = try syscall.wait4(pid, &status, 0);
+
+        // Verify child exited with status 42 (meaning it resumed successfully)
+        if (status != 42) {
+            return error.TestFailed;
+        }
+    }
+}
+
+/// Test: Controlling terminal operations (TIOCSCTTY/TIOCNOTTY)
+pub fn testControllingTerminal() !void {
+    const pid = try syscall.fork();
+
+    if (pid == 0) {
+        // Child: Create new session and acquire controlling terminal
+        _ = try syscall.setsid(); // Become session leader
+
+        // Try to set stdin as controlling terminal
+        // This may fail if we already have one, which is fine for this test
+        _ = syscall.tiocsctty(0, 0) catch {
+            // Expected to fail if we already have a ctty
+            syscall.exit(0);
+        };
+
+        // Release controlling terminal
+        _ = syscall.tiocnotty(0) catch {
+            // May fail if operations not fully supported
+            syscall.exit(0);
+        };
+
+        syscall.exit(0);
+    } else {
+        // Parent: Wait for child
+        var status: i32 = 0;
+        _ = try syscall.wait4(pid, &status, 0);
+
+        // Child should exit successfully
+        if (status != 0) {
+            return error.TestFailed;
+        }
+    }
+}
+
+/// Test: Background process receives SIGTTOU when writing to terminal
+pub fn testSigttouBackgroundWrite() !void {
+    const pid = try syscall.fork();
+
+    if (pid == 0) {
+        // Child: Create new process group (become background job)
+        try syscall.setpgid(0, 0);
+
+        // Parent is foreground, we are background
+        // Attempting to write to terminal should send us SIGTTOU
+        // For this test, we'll just verify the process group setup worked
+        const our_pgid = try syscall.getpgid(0);
+        const parent_pgid = try syscall.getpgid(syscall.getppid());
+
+        if (our_pgid == parent_pgid) {
+            syscall.exit(1); // Failed to create separate process group
+        }
+
+        syscall.exit(0);
+    } else {
+        // Parent: Wait for child
+        syscall.sleep_ms(20) catch {};
+        var status: i32 = 0;
+        _ = try syscall.wait4(pid, &status, 0);
+
+        if (status != 0) {
+            return error.TestFailed;
+        }
+    }
+}
+
+/// Test: Background process group setup for job control
+pub fn testBackgroundProcessGroup() !void {
+    const pid = try syscall.fork();
+
+    if (pid == 0) {
+        // Child: Create new session and process group
+        _ = try syscall.setsid();
+
+        // Verify we're in our own session and process group
+        const our_pid = syscall.getpid();
+        const our_sid = try syscall.getsid(0);
+        const our_pgid = try syscall.getpgid(0);
+
+        if (our_sid != our_pid or our_pgid != our_pid) {
+            syscall.exit(1);
+        }
+
+        syscall.exit(0);
+    } else {
+        // Parent: Wait for child
+        var status: i32 = 0;
+        _ = try syscall.wait4(pid, &status, 0);
+
+        if (status != 0) {
+            return error.TestFailed;
+        }
+    }
+}

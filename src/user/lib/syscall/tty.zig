@@ -21,7 +21,8 @@ const SyscallError = syscall.SyscallError;
 ///
 /// Returns 0 on success, error on failure
 pub fn tiocsctty(fd: i32, arg: i32) SyscallError!void {
-    _ = try syscall.ioctl(fd, uapi.tty.TIOCSCTTY, @bitCast(@as(usize, @as(isize, arg))));
+    const arg_usize: usize = @bitCast(@as(isize, arg));
+    _ = try syscall.ioctl(fd, uapi.tty.TIOCSCTTY, arg_usize);
 }
 
 /// Release the controlling terminal (give up control)
