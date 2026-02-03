@@ -571,12 +571,43 @@ fn deliverSignalToThread(target: *sched.Thread, signum: u8) void {
         // SIGCONT is still delivered (pending_signals set below) so handler can run if set
     }
 
+    // Special handling for stopping signals (SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU)
+    // These signals stop the thread if using default action
+    if (signum == signal.SIGSTOP or
+        signum == signal.SIGTSTP or
+        signum == signal.SIGTTIN or
+        signum == signal.SIGTTOU)
+    {
+        // SIGSTOP cannot be caught or ignored (always stops)
+        // Others only stop if using default action
+        const action = target.signal_actions[signum - 1];
+        const uses_default = (action.handler == signal.SIG_DFL);
+        const is_ignored = (action.handler == signal.SIG_IGN);
+
+        if (signum == signal.SIGSTOP or (uses_default and !is_ignored)) {
+            // Stop the thread
+            target.stopped = true;
+
+            // If thread is currently running or ready, block it
+            if (target.state == .Running or target.state == .Ready) {
+                // Mark as blocked - scheduler will skip it
+                target.state = .Blocked;
+            }
+
+            // Don't set pending signal for default stop action
+            // (signal is consumed by stopping the thread)
+            if (uses_default or signum == signal.SIGSTOP) {
+                return; // Don't queue signal
+            }
+        }
+    }
+
     // Set pending signal bit
     const sig_bit: u64 = @as(u64, 1) << @intCast(signum - 1);
     target.pending_signals |= sig_bit;
 
-    // If thread is blocked, wake it to handle signal
-    if (target.state == .Blocked) {
+    // If thread is blocked (and not stopped), wake it to handle signal
+    if (target.state == .Blocked and !target.stopped) {
         sched.unblock(target);
     }
 }

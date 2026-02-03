@@ -6,6 +6,10 @@ pub const SIG_BLOCK: usize = 0;
 pub const SIG_UNBLOCK: usize = 1;
 pub const SIG_SETMASK: usize = 2;
 
+// Special signal handler values
+pub const SIG_DFL: usize = 0; // Default action
+pub const SIG_IGN: usize = 1; // Ignore signal
+
 // Standard signal numbers (Linux x86_64)
 pub const SIGHUP: usize = 1;
 pub const SIGINT: usize = 2;

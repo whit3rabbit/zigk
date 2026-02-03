@@ -851,6 +851,17 @@ fn doPerCpuSchedule(frame: *const hal.interrupts.InterruptFrame) if (builtin.cpu
 
     var next_thread = cpu_mod.removeFromReadyQueue();
 
+    // Skip stopped threads (job control)
+    // Stopped threads should be Blocked, but check as a safety measure
+    while (next_thread) |t| {
+        if (!t.stopped) {
+            break;
+        }
+        // Thread is stopped - put it back in blocked state and get another
+        t.state = .Blocked;
+        next_thread = cpu_mod.removeFromReadyQueue();
+    }
+
     if (next_thread == null) {
         next_thread = thread_logic.getIdleThread();
     }
