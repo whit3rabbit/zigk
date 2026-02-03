@@ -556,7 +556,7 @@ fn deliverSignalBroadcast(signum: u8, sender_proc: *base.Process) SyscallError!u
 }
 
 /// Deliver a signal to a thread
-fn deliverSignalToThread(target: *sched.Thread, signum: u8) void {
+pub fn deliverSignalToThread(target: *sched.Thread, signum: u8) void {
     const signal = @import("uapi").signal;
 
     // Special handling for SIGCONT: resume stopped threads

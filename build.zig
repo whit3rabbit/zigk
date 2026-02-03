@@ -1260,6 +1260,8 @@ pub fn build(b: *std.Build) void {
     syscall_signals_module.addImport("hal", hal_module);
     syscall_signals_module.addImport("sched", sched_module);
     syscall_signals_module.addImport("process", process_module);
+    // Add signals module to devfs for SIGTTOU/SIGTTIN job control
+    devfs_module.addImport("signals", syscall_signals_module);
 
     // Create Futex module
     const futex_module = b.createModule(.{

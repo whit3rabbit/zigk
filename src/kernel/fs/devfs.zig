@@ -24,6 +24,7 @@ const meta = @import("fs").meta;
 const heap = @import("heap");
 const sync = @import("sync");
 const syscall_base = @import("syscall_base");
+const signals = @import("signals");
 
 const FileDescriptor = fd_mod.FileDescriptor;
 const FileOps = fd_mod.FileOps;
@@ -64,9 +65,26 @@ pub const console_ops = FileOps{
 /// Read from console (keyboard input)
 /// Blocking read - waits for input if buffer is empty
 fn consoleRead(fd: *FileDescriptor, buf: []u8) isize {
-    _ = fd; // Console has no per-fd state
-
     if (buf.len == 0) return 0;
+
+    // Job control: Check if background process is trying to read from terminal
+    const signal = uapi.signal;
+    const proc = syscall_base.getCurrentProcess();
+    const thread = sched.getCurrentThread() orelse return -@as(isize, @intCast(@intFromEnum(Errno.ESRCH)));
+
+    if (fd.private_data) |data| {
+        const tty_state: *TtyState = @ptrCast(@alignCast(data));
+        const fg_pgid = tty_state.foreground_pgid.load(.seq_cst);
+
+        // If this process is in background (not foreground group), send SIGTTIN
+        if (fg_pgid != 0 and proc.pgid != fg_pgid) {
+            signals.deliverSignalToThread(thread, signal.SIGTTIN);
+            // If signal stopped the thread (default action), return EINTR
+            if (thread.stopped) {
+                return -@as(isize, @intCast(@intFromEnum(Errno.EINTR)));
+            }
+        }
+    }
 
     var bytes_read: usize = 0;
     while (bytes_read < buf.len) {
@@ -103,9 +121,26 @@ fn consoleRead(fd: *FileDescriptor, buf: []u8) isize {
 
 /// Write to console (serial output)
 fn consoleWrite(fd: *FileDescriptor, buf: []const u8) isize {
-    _ = fd; // Console has no per-fd state
-
     if (buf.len == 0) return 0;
+
+    // Job control: Check if background process is trying to write to terminal
+    const signal = uapi.signal;
+    const proc = syscall_base.getCurrentProcess();
+    const thread = sched.getCurrentThread() orelse return -@as(isize, @intCast(@intFromEnum(Errno.ESRCH)));
+
+    if (fd.private_data) |data| {
+        const tty_state: *TtyState = @ptrCast(@alignCast(data));
+        const fg_pgid = tty_state.foreground_pgid.load(.seq_cst);
+
+        // If this process is in background (not foreground group), send SIGTTOU
+        if (fg_pgid != 0 and proc.pgid != fg_pgid) {
+            signals.deliverSignalToThread(thread, signal.SIGTTOU);
+            // If signal stopped the thread (default action), return EINTR
+            if (thread.stopped) {
+                return -@as(isize, @intCast(@intFromEnum(Errno.EINTR)));
+            }
+        }
+    }
 
     // Write to serial console
     console.print(buf);
