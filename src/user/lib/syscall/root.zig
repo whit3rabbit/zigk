@@ -105,6 +105,7 @@ pub const register_service = process.register_service;
 pub const lookup_service = process.lookup_service;
 pub const fork = process.fork;
 pub const wait4 = process.wait4;
+pub const waitpid = process.waitpid;
 pub const WNOHANG = process.WNOHANG;
 pub const execve = process.execve;
 pub const pause = process.pause;
@@ -112,6 +113,7 @@ pub const alarm = process.alarm;
 
 // Re-export Signal
 pub const kill = signal.kill;
+pub const killpg = signal.killpg;
 pub const sigaction = signal.sigaction;
 pub const sigprocmask = signal.sigprocmask;
 pub const sigreturn = signal.sigreturn;

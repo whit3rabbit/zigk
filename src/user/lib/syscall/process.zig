@@ -211,6 +211,18 @@ pub fn wait4(pid: i32, wstatus: ?*i32, options: u32) SyscallError!i32 {
 /// Wait options
 pub const WNOHANG: u32 = 1; // Don't block if no child has exited
 
+/// Wait for process state change (wrapper around wait4)
+///
+/// Standard POSIX waitpid() wrapper.
+/// pid: Process ID to wait for (or -1 for any, 0 for process group, < -1 for specific group)
+/// wstatus: Pointer to store exit status (null if not needed)
+/// options: Wait options (WNOHANG = 1)
+/// Returns: PID of child that changed state
+pub fn waitpid(pid: i32, wstatus: ?*i32, options: u32) SyscallError!i32 {
+    return try wait4(pid, wstatus, options);
+}
+
+
 /// Execute a program
 /// path: Path to executable
 /// argv: Null-terminated array of argument strings

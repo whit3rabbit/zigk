@@ -408,6 +408,153 @@ fn checkSignalPermission(target: *sched.Thread, signum: u8) SyscallError!void {
     // If we can't determine processes, allow for kernel threads
 }
 
+/// Helper to iterate all processes and apply a function
+fn forEachProcess(init: *base.Process, context: anytype, comptime func: fn (@TypeOf(context), *base.Process) void) void {
+    func(context, init);
+    var child = init.first_child;
+    while (child) |c| {
+        forEachProcess(c, context, func);
+        child = c.next_sibling;
+    }
+}
+
+/// Context for process group signal delivery
+const PgroupSignalCtx = struct {
+    pgid: u32,
+    signum: u8,
+    sender_proc: ?*base.Process,
+    delivered_count: *usize,
+    last_error: *?SyscallError,
+};
+
+/// Helper: deliver signal to a process if it matches the target process group
+fn deliverToPgroupMember(ctx: *PgroupSignalCtx, proc: *base.Process) void {
+    // Check if process is in the target process group
+    if (proc.pgid != ctx.pgid) {
+        return;
+    }
+
+    // Find the main thread for this process
+    const target_thread = sched.findThreadByTid(proc.pid) orelse {
+        return; // Process has no main thread, skip
+    };
+
+    // Signal 0 is just a check - count it but don't deliver
+    if (ctx.signum == 0) {
+        ctx.delivered_count.* += 1;
+        return;
+    }
+
+    // Check permission before delivering
+    checkSignalPermission(target_thread, ctx.signum) catch |err| {
+        ctx.last_error.* = err;
+        return;
+    };
+
+    // Deliver the signal
+    deliverSignalToThread(target_thread, ctx.signum);
+    ctx.delivered_count.* += 1;
+}
+
+/// Deliver signal to all processes in a process group
+/// Returns the number of processes signaled, or error if permission denied
+fn deliverSignalToProcessGroup(pgid: u32, signum: u8, sender_proc: ?*base.Process) SyscallError!usize {
+    const process_mod = @import("process");
+    const init = process_mod.getInitProcess() catch {
+        return error.ESRCH;
+    };
+
+    var delivered_count: usize = 0;
+    var last_error: ?SyscallError = null;
+    var ctx = PgroupSignalCtx{
+        .pgid = pgid,
+        .signum = signum,
+        .sender_proc = sender_proc,
+        .delivered_count = &delivered_count,
+        .last_error = &last_error,
+    };
+
+    // Iterate all processes and deliver to matching pgid
+    const held = sched.process_tree_lock.acquireRead();
+    defer held.release();
+    forEachProcess(init, &ctx, deliverToPgroupMember);
+
+    // If no processes were signaled and we had permission errors, return the error
+    if (delivered_count == 0) {
+        if (last_error) |err| {
+            return err;
+        }
+        return error.ESRCH; // No matching processes found
+    }
+
+    return delivered_count;
+}
+
+/// Context for broadcast signal delivery
+const BroadcastSignalCtx = struct {
+    signum: u8,
+    sender_proc: *base.Process,
+    delivered_count: *usize,
+};
+
+/// Helper: deliver signal to a process in broadcast mode (kill(-1, sig))
+fn deliverToBroadcastTarget(ctx: *BroadcastSignalCtx, proc: *base.Process) void {
+    // Don't signal init (pid 1)
+    if (proc.pid == 1) {
+        return;
+    }
+
+    // Don't signal the sender
+    if (proc == ctx.sender_proc) {
+        return;
+    }
+
+    // Find the main thread for this process
+    const target_thread = sched.findThreadByTid(proc.pid) orelse {
+        return; // Process has no main thread, skip
+    };
+
+    // Signal 0 is just a check - count it but don't deliver
+    if (ctx.signum == 0) {
+        ctx.delivered_count.* += 1;
+        return;
+    }
+
+    // Check permission (silently skip if denied)
+    checkSignalPermission(target_thread, ctx.signum) catch {
+        return; // Permission denied, skip this process
+    };
+
+    // Deliver the signal
+    deliverSignalToThread(target_thread, ctx.signum);
+    ctx.delivered_count.* += 1;
+}
+
+/// Deliver signal to all processes (broadcast mode: kill(-1, sig))
+/// Skips init (pid 1) and the sender process
+/// Returns the number of processes signaled
+fn deliverSignalBroadcast(signum: u8, sender_proc: *base.Process) SyscallError!usize {
+    const process_mod = @import("process");
+    const init = process_mod.getInitProcess() catch {
+        return error.ESRCH;
+    };
+
+    var delivered_count: usize = 0;
+    var ctx = BroadcastSignalCtx{
+        .signum = signum,
+        .sender_proc = sender_proc,
+        .delivered_count = &delivered_count,
+    };
+
+    // Iterate all processes and deliver to valid targets
+    const held = sched.process_tree_lock.acquireRead();
+    defer held.release();
+    forEachProcess(init, &ctx, deliverToBroadcastTarget);
+
+    // Broadcast always succeeds (even if no processes signaled)
+    return delivered_count;
+}
+
 /// Deliver a signal to a thread
 fn deliverSignalToThread(target: *sched.Thread, signum: u8) void {
     const signal = @import("uapi").signal;
@@ -461,12 +608,31 @@ pub fn sys_kill(pid: usize, sig: usize) SyscallError!usize {
         return error.EINVAL;
     }
 
-    // Only handle positive PIDs for now
-    if (pid_i <= 0) {
-        // Process groups not implemented
+    const current = sched.getCurrentThread() orelse return error.ESRCH;
+    const current_proc: *base.Process = if (current.process) |p|
+        @ptrCast(@alignCast(p))
+    else
         return error.ESRCH;
+
+    // Handle process group and broadcast modes
+    if (pid_i <= 0) {
+        if (pid_i == 0) {
+            // pid == 0: Send to all processes in current process group
+            _ = try deliverSignalToProcessGroup(current_proc.pgid, signum, current_proc);
+            return 0;
+        } else if (pid_i == -1) {
+            // pid == -1: Send to all processes (broadcast)
+            _ = try deliverSignalBroadcast(signum, current_proc);
+            return 0;
+        } else {
+            // pid < -1: Send to all processes in process group |pid|
+            const target_pgid: u32 = @intCast(-pid_i);
+            _ = try deliverSignalToProcessGroup(target_pgid, signum, current_proc);
+            return 0;
+        }
     }
 
+    // pid > 0: Send to specific process
     // Find the target process's main thread
     // For MVP, we search threads by PID (treating PID as TID of main thread)
     const target = sched.findThreadByTid(@intCast(pid_i)) orelse {

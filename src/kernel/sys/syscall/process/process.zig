@@ -77,11 +77,19 @@ pub fn sys_wait4(pid_arg: usize, wstatus_ptr: usize, options: usize, rusage_ptr:
                 const next_child = c.next_sibling;
 
                 // Check if this child matches target_pid
-                // pid = -1: wait for any child
+                // POSIX semantics:
+                // pid == -1: wait for any child
                 // pid > 0: wait for specific child
-                // pid = 0: wait for process group (not implemented, treat as -1)
-                // pid < -1: wait for process group -pid (not implemented)
-                const matches = if (target_pid == -1) true else if (target_pid > 0) (c.pid == @as(u32, @intCast(target_pid))) else true; // MVP fallback
+                // pid == 0: wait for any child in same process group as caller
+                // pid < -1: wait for any child in process group |pid|
+                const matches = if (target_pid == -1)
+                    true
+                else if (target_pid > 0)
+                    (c.pid == @as(u32, @intCast(target_pid)))
+                else if (target_pid == 0)
+                    (c.pgid == current_proc.pgid)
+                else
+                    (c.pgid == @as(u32, @intCast(-target_pid)));
 
                 if (matches) {
                     has_children = true;

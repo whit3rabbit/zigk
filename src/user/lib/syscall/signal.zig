@@ -13,6 +13,15 @@ pub fn kill(pid: i32, sig: i32) SyscallError!void {
     if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
 }
 
+/// Send signal to a process group
+///
+/// Convenience wrapper around kill(-pgid, sig).
+/// pgid: Process group ID to signal
+/// sig: Signal number to send
+pub fn killpg(pgid: i32, sig: i32) SyscallError!void {
+    return try kill(-pgid, sig);
+}
+
 pub fn sigaction(sig: i32, act: ?*const SigAction, oldact: ?*SigAction) SyscallError!void {
     const ret = primitive.syscall4(syscalls.SYS_RT_SIGACTION,
         @bitCast(@as(isize, sig)),

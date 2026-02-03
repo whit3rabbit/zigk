@@ -1255,6 +1255,7 @@ pub fn build(b: *std.Build) void {
     syscall_signals_module.addImport("console", console_module);
     syscall_signals_module.addImport("hal", hal_module);
     syscall_signals_module.addImport("sched", sched_module);
+    syscall_signals_module.addImport("process", process_module);
 
     // Create Futex module
     const futex_module = b.createModule(.{

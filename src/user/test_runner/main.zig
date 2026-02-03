@@ -193,6 +193,13 @@ export fn main(argc: i32, argv: [*][*:0]u8) i32 {
     runner.runTest("process: setsid basic", process_tests.testSetsidBasic);
     runner.runTest("process: setsid fails for group leader", process_tests.testSetsidFailsForGroupLeader);
     runner.runTest("process: getsid basic", process_tests.testGetsidBasic);
+    runner.runTest("signal: kill single process", process_tests.testKillToSingleProcess);
+    runner.runTest("signal: kill current process group", process_tests.testKillToCurrentProcessGroup);
+    runner.runTest("signal: kill specific process group", process_tests.testKillToSpecificProcessGroup);
+    runner.runTest("signal: killpg wrapper", process_tests.testKillpgWrapper);
+    runner.runTest("wait: waitpid wrapper", process_tests.testWaitpidWrapper);
+    runner.runTest("wait: wait4 process group (pid=0)", process_tests.testWait4ProcessGroup);
+    runner.runTest("wait: wait4 specific process group", process_tests.testWait4SpecificProcessGroup);
 
     // Stress tests
     runner.runTest("stress: write 10MB file", stress_tests.testWrite10MbFile);
