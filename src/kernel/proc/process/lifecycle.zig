@@ -12,6 +12,7 @@ const hal = @import("hal");
 const sched = @import("sched");
 const uapi = @import("uapi");
 const aslr = @import("aslr");
+const signals = @import("signals");
 const types = @import("types.zig");
 const manager = @import("manager.zig");
 
@@ -285,6 +286,70 @@ fn copyUserVmm(src: *UserVmm) !*UserVmm {
 // Process Termination
 // =============================================================================
 
+/// Helper to recursively deliver signals to all processes in a process group
+fn deliverSignalToPgroup(proc: *Process, target_pgid: u32, signum: u8) void {
+    // Check current process
+    if (proc.pgid == target_pgid) {
+        if (sched.findThreadByTid(proc.pid)) |t| {
+            signals.deliverSignalToThread(t, signum);
+        }
+    }
+
+    // Recursively check children
+    var child = proc.first_child;
+    while (child) |c| : (child = c.next_sibling) {
+        deliverSignalToPgroup(c, target_pgid, signum);
+    }
+}
+
+/// Check for orphaned process groups when a process exits
+///
+/// An orphaned process group is a group where all members have lost their
+/// parent(s) in the same session. If an orphaned group has stopped members,
+/// POSIX requires sending SIGHUP and SIGCONT to notify them.
+fn checkOrphanedProcessGroups(exiting_proc: *Process) void {
+    const signal = uapi.signal;
+
+    // Get init process to walk the entire tree
+    const init = manager.getInitProcess() catch {
+        // No init process yet, nothing to check
+        return;
+    };
+
+    // Acquire tree lock to safely iterate children
+    const held = sched.process_tree_lock.acquireRead();
+    defer held.release();
+
+    var child = exiting_proc.first_child;
+    while (child) |c| : (child = c.next_sibling) {
+        // Skip if child is in same process group (not a separate job)
+        if (c.pgid == exiting_proc.pgid) continue;
+
+        // Skip if child is not in same session (orphan detection only for same session)
+        if (c.sid != exiting_proc.sid) continue;
+
+        // Skip if child is not stopped (orphan detection only matters for stopped jobs)
+        const has_stopped_threads = blk: {
+            if (sched.findThreadByTid(c.pid)) |t| {
+                break :blk t.stopped;
+            }
+            break :blk false;
+        };
+
+        if (!has_stopped_threads) continue;
+
+        // Process group might be orphaned - send SIGHUP and SIGCONT
+        // Note: A complete implementation would check if ANY other parent
+        // in the same session exists. This simplified version assumes that
+        // if the direct parent exits, the group becomes orphaned.
+        console.debug("Process: Orphaned group detected (pgid={}), sending SIGHUP+SIGCONT", .{c.pgid});
+
+        // Send signals to all members of the process group
+        deliverSignalToPgroup(init, c.pgid, signal.SIGHUP);
+        deliverSignalToPgroup(init, c.pgid, signal.SIGCONT);
+    }
+}
+
 /// Exit the current process/thread with the given status.
 pub fn exit(status: i32) noreturn {
     if (sched.getCurrentThread()) |curr| {
@@ -300,6 +365,9 @@ pub fn exit(status: i32) noreturn {
             };
 
             if (is_last_thread) {
+                // Check for orphaned process groups before exiting
+                checkOrphanedProcessGroups(proc);
+
                 // Last thread exiting - process becomes Zombie
                 // Do NOT unref yet - wait4() will do that when reaping
                 proc.exitWithStatus(status);

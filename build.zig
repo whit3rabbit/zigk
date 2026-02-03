@@ -1262,6 +1262,8 @@ pub fn build(b: *std.Build) void {
     syscall_signals_module.addImport("process", process_module);
     // Add signals module to devfs for SIGTTOU/SIGTTIN job control
     devfs_module.addImport("signals", syscall_signals_module);
+    // Add signals module to process for orphaned process group detection
+    process_module.addImport("signals", syscall_signals_module);
 
     // Create Futex module
     const futex_module = b.createModule(.{
