@@ -574,3 +574,121 @@ pub fn testGetsidBasic() !void {
         return error.TestFailed;
     }
 }
+
+// =============================================================================
+// Signal and Process Group Tests
+// =============================================================================
+
+// Signal Test: kill() with positive PID
+pub fn testKillToSingleProcess() !void {
+    // Simple test: Use kill(0, 0) to check if our own process exists
+    // Signal 0 is a "null signal" that checks if the process exists without actually sending a signal
+    const my_pid = syscall.getpid();
+    try syscall.kill(my_pid, 0);
+}
+
+// Signal Test: kill() to current process group (pid == 0)
+pub fn testKillToCurrentProcessGroup() !void {
+    // Test kill(0, sig) which sends to all processes in current process group
+    // Using signal 0 (null signal) to just check accessibility without side effects
+    try syscall.kill(0, 0);
+}
+
+// Signal Test: kill() to specific process group (pid < -1)
+pub fn testKillToSpecificProcessGroup() !void {
+    // Get our process group ID
+    const my_pgid = try syscall.getpgid(0);
+
+    // Test kill(-pgid, sig) which sends to all processes in that group
+    // Using signal 0 to test without side effects
+    try syscall.kill(-my_pgid, 0);
+}
+
+// Signal Test: killpg() wrapper function
+pub fn testKillpgWrapper() !void {
+    // Get our process group ID
+    const my_pgid = try syscall.getpgid(0);
+
+    // Test the killpg convenience wrapper
+    // Using signal 0 to test without side effects
+    try syscall.killpg(my_pgid, 0);
+}
+
+// Wait Test: waitpid() wrapper function
+pub fn testWaitpidWrapper() !void {
+    const pid = try syscall.fork();
+
+    if (pid == 0) {
+        // Child: exit immediately with status 42
+        syscall.exit(42);
+    } else {
+        // Parent: use waitpid wrapper to wait for child
+        var status: i32 = 0;
+        const waited_pid = try syscall.waitpid(pid, &status, 0);
+
+        if (waited_pid != pid) {
+            return error.TestFailed;
+        }
+
+        // Verify exit status (42)
+        if (status != 42) {
+            return error.TestFailed;
+        }
+    }
+}
+
+// Wait Test: wait4() with process group (pid == 0)
+pub fn testWait4ProcessGroup() !void {
+    // This test verifies wait4(0, ...) waits for children in same process group
+    const pid = try syscall.fork();
+
+    if (pid == 0) {
+        // Child: we're in the same process group as parent by default
+        syscall.exit(33);
+    } else {
+        // Parent: wait for any child in our process group
+        var status: i32 = 0;
+        const waited_pid = try syscall.wait4(0, &status, 0);
+
+        if (waited_pid != pid) {
+            return error.TestFailed;
+        }
+
+        // Verify exit status (33)
+        if (status != 33) {
+            return error.TestFailed;
+        }
+    }
+}
+
+// Wait Test: wait4() with specific process group (pid < -1)
+pub fn testWait4SpecificProcessGroup() !void {
+    // Fork a child, have it create a new process group, then wait for it via wait4(-pgid, ...)
+    const pid = try syscall.fork();
+
+    if (pid == 0) {
+        // Child: create new process group with our PID
+        try syscall.setpgid(0, 0);
+        // Exit with status 55
+        syscall.exit(55);
+    } else {
+        // Parent: get child's process group (should be equal to its PID)
+        // Wait a bit for child to call setpgid
+        syscall.sleep_ms(10) catch {};
+
+        const child_pgid = try syscall.getpgid(pid);
+
+        // Wait for any child in that process group
+        var status: i32 = 0;
+        const waited_pid = try syscall.wait4(-child_pgid, &status, 0);
+
+        if (waited_pid != pid) {
+            return error.TestFailed;
+        }
+
+        // Verify exit status (55)
+        if (status != 55) {
+            return error.TestFailed;
+        }
+    }
+}

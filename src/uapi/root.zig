@@ -15,6 +15,7 @@ pub const stat = @import("fs/stat.zig");
 pub const dirent = @import("fs/dirent.zig");
 pub const sound = @import("dev/sound.zig");
 pub const input = @import("dev/input.zig");
+pub const tty = @import("dev/tty.zig");
 pub const mman = @import("base/mman.zig");
 pub const sched = @import("process/sched.zig");
 pub const futex = @import("ipc/futex.zig");

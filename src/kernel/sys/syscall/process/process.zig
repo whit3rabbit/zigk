@@ -702,6 +702,9 @@ pub fn sys_setsid() SyscallError!usize {
     proc.sid = proc.pid;
     proc.pgid = proc.pid;
 
+    // POSIX: Creating a new session loses the controlling terminal
+    proc.ctty = -1;
+
     return proc.sid;
 }
 

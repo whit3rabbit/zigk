@@ -57,6 +57,7 @@ pub fn createProcess(parent: ?*Process) !*Process {
         .pid = manager.allocatePid(),
         .pgid = 0, // Set below
         .sid = 0,  // Set below
+        .ctty = -1, // No controlling terminal initially
         .parent = null,
         .first_child = null,
         .next_sibling = null,
@@ -135,6 +136,7 @@ pub fn forkProcess(parent: *Process) !*Process {
         .pid = manager.allocatePid(),
         .pgid = parent.pgid,
         .sid = parent.sid,
+        .ctty = parent.ctty, // Inherit controlling terminal
         .parent = null, // Set by addChild
         .first_child = null,
         .next_sibling = null,

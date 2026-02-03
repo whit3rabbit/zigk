@@ -102,6 +102,10 @@ pub const Process = struct {
     pgid: u32,
     /// Session ID
     sid: u32,
+    /// Controlling terminal (file descriptor number, -1 if none)
+    /// Set via TIOCSCTTY ioctl, cleared via TIOCNOTTY or setsid()
+    /// Used for job control - only foreground process group can read/write
+    ctty: i32,
 
     /// Alarm deadline (tick count when SIGALRM fires, 0 = no alarm)
     alarm_deadline: u64 = 0,
