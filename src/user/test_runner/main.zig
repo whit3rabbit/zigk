@@ -5,6 +5,7 @@ const memory_tests = @import("tests/syscall/memory.zig");
 const process_tests = @import("tests/syscall/process.zig");
 const uid_gid_tests = @import("tests/syscall/uid_gid.zig");
 const signal_tests = @import("tests/syscall/signals.zig");
+const socket_tests = @import("tests/syscall/sockets.zig");
 const fs_tests = @import("tests/fs/basic.zig");
 const fs_error_tests = @import("tests/fs/errors.zig");
 const regression_tests = @import("tests/regression/sfs_issues.zig");
@@ -244,6 +245,16 @@ export fn main(argc: i32, argv: [*][*:0]u8) i32 {
     runner.runTest("signal: kill self", signal_tests.testKillSelf);
     runner.runTest("signal: sigaltstack setup", signal_tests.testSigaltstackSetup);
     runner.runTest("signal: multiple handlers", signal_tests.testMultipleHandlers);
+
+    // Socket tests
+    runner.runTest("socket: create TCP", socket_tests.testSocketCreateTcp);
+    runner.runTest("socket: create UDP", socket_tests.testSocketCreateUdp);
+    runner.runTest("socket: invalid domain", socket_tests.testSocketInvalidDomain);
+    runner.runTest("socket: bind localhost", socket_tests.testBindLocalhost);
+    runner.runTest("socket: listen on socket", socket_tests.testListenOnSocket);
+    runner.runTest("socket: getsockname", socket_tests.testGetSockName);
+    runner.runTest("socket: setsockopt SO_REUSEADDR", socket_tests.testSetSockoptReuseAddr);
+    runner.runTest("socket: connect to unbound port", socket_tests.testConnectToUnboundPort);
 
     // Stress tests
     runner.runTest("stress: write 10MB file", stress_tests.testWrite10MbFile);

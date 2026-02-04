@@ -157,7 +157,12 @@ pub const listen = net.listen;
 pub const accept = net.accept;
 pub const connect = net.connect;
 pub const shutdown = net.shutdown;
+pub const getsockname = net.getsockname;
+pub const setsockopt = net.setsockopt;
+pub const getsockopt = net.getsockopt;
 pub const parseIp = net.parseIp;
+pub const SOL_SOCKET = net.SOL_SOCKET;
+pub const SO_REUSEADDR = net.SO_REUSEADDR;
 
 // Re-export Time
 pub const Timespec = time.Timespec;

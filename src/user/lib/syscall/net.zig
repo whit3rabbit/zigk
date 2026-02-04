@@ -28,6 +28,9 @@ pub const IPV6_MULTICAST_HOPS: i32 = 18;
 pub const SOCK_STREAM: i32 = 1; // TCP
 pub const SOCK_DGRAM: i32 = 2; // UDP
 
+/// Socket options
+pub const SO_REUSEADDR: i32 = 2;
+
 /// Socket address structure (IPv4)
 /// Compatible with Linux sockaddr_in
 pub const SockAddrIn = extern struct {
@@ -304,6 +307,18 @@ pub fn connect(fd: i32, addr: *const SockAddrIn) SyscallError!void {
 pub fn shutdown(fd: i32, how: i32) SyscallError!void {
      const ret = primitive.syscall2(syscalls.SYS_SHUTDOWN, @bitCast(@as(isize, fd)), @bitCast(@as(isize, how)));
      if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Get socket name (local address)
+pub fn getsockname(fd: i32, addr: *SockAddrIn) SyscallError!void {
+    var addrlen: u32 = @sizeOf(SockAddrIn);
+    const ret = primitive.syscall3(
+        syscalls.SYS_GETSOCKNAME,
+        @bitCast(@as(isize, fd)),
+        @intFromPtr(addr),
+        @intFromPtr(&addrlen)
+    );
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
 }
 
 /// Parse dotted-decimal IP string to u32 (host byte order)
