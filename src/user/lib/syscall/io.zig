@@ -220,6 +220,59 @@ pub fn munmap(addr: [*]u8, length: usize) SyscallError!void {
     if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
 }
 
+/// Change memory protection
+pub fn mprotect(addr: [*]u8, length: usize, prot: i32) SyscallError!void {
+    const ret = primitive.syscall3(
+        syscalls.SYS_MPROTECT,
+        @intFromPtr(addr),
+        length,
+        @bitCast(@as(isize, prot)),
+    );
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Lock memory pages (prevent swapping)
+pub fn mlock(addr: [*]u8, length: usize) SyscallError!void {
+    const ret = primitive.syscall2(
+        syscalls.SYS_MLOCK,
+        @intFromPtr(addr),
+        length,
+    );
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Unlock memory pages
+pub fn munlock(addr: [*]u8, length: usize) SyscallError!void {
+    const ret = primitive.syscall2(
+        syscalls.SYS_MUNLOCK,
+        @intFromPtr(addr),
+        length,
+    );
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Memory advise hint to kernel
+pub fn madvise(addr: [*]u8, length: usize, advice: i32) SyscallError!void {
+    const ret = primitive.syscall3(
+        syscalls.SYS_MADVISE,
+        @intFromPtr(addr),
+        length,
+        @bitCast(@as(isize, advice)),
+    );
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Synchronize memory with storage
+pub fn msync(addr: [*]u8, length: usize, flags: i32) SyscallError!void {
+    const ret = primitive.syscall3(
+        syscalls.SYS_MSYNC,
+        @intFromPtr(addr),
+        length,
+        @bitCast(@as(isize, flags)),
+    );
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
 // =============================================================================
 // Standard File Descriptors
 // =============================================================================

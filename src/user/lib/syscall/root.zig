@@ -81,6 +81,11 @@ pub const MAP_ANONYMOUS = io.MAP_ANONYMOUS;
 pub const MAP_POPULATE = io.MAP_POPULATE;
 pub const mmap = io.mmap;
 pub const munmap = io.munmap;
+pub const mprotect = io.mprotect;
+pub const mlock = io.mlock;
+pub const munlock = io.munlock;
+pub const madvise = io.madvise;
+pub const msync = io.msync;
 
 // Re-export Process
 pub const sched_yield = process.sched_yield;

@@ -264,3 +264,202 @@ pub fn testAllocWriteMunmapRealloc() !void {
     // Cleanup
     try syscall.munmap(addr2, 4096);
 }
+
+// Memory Test 11: mprotect to read-only
+pub fn testMprotectReadOnly() !void {
+    const MAP_ANONYMOUS = 0x20;
+    const MAP_PRIVATE = 0x02;
+    const PROT_READ = 0x1;
+    const PROT_WRITE = 0x2;
+
+    const size: usize = 4096;
+
+    // Map with read-write
+    const addr = syscall.mmap(null, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, 0, 0) catch |err| {
+        if (err == error.NotImplemented) return error.SkipTest;
+        return err;
+    };
+    defer _ = syscall.munmap(addr, size) catch {};
+
+    // Write to verify it's writable
+    addr[0] = 42;
+
+    // Change protection to read-only
+    syscall.mprotect(addr, size, PROT_READ) catch |err| {
+        if (err == error.NotImplemented) return error.SkipTest;
+        return err;
+    };
+
+    // Verify we can still read
+    if (addr[0] != 42) return error.TestFailed;
+
+    // Note: We cannot test that writes fail without causing a fault
+    // Just verify mprotect succeeded
+}
+
+// Memory Test 12: mprotect upgrade to read-write
+pub fn testMprotectReadWrite() !void {
+    const MAP_ANONYMOUS = 0x20;
+    const MAP_PRIVATE = 0x02;
+    const PROT_READ = 0x1;
+    const PROT_WRITE = 0x2;
+
+    const size: usize = 4096;
+
+    // Map with read-only
+    const addr = syscall.mmap(null, size, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, 0, 0) catch |err| {
+        if (err == error.NotImplemented) return error.SkipTest;
+        return err;
+    };
+    defer _ = syscall.munmap(addr, size) catch {};
+
+    // Upgrade protection to read-write
+    syscall.mprotect(addr, size, PROT_READ | PROT_WRITE) catch |err| {
+        if (err == error.NotImplemented) return error.SkipTest;
+        return err;
+    };
+
+    // Now we should be able to write
+    addr[0] = 123;
+    if (addr[0] != 123) return error.TestFailed;
+}
+
+// Memory Test 13: mprotect on invalid address
+pub fn testMprotectInvalidAddr() !void {
+    const PROT_READ = 0x1;
+
+    // Try to mprotect an unmapped address
+    const invalid_addr: [*]u8 = @ptrFromInt(0x12340000);
+    const size: usize = 4096;
+
+    const result = syscall.mprotect(invalid_addr, size, PROT_READ);
+
+    if (result) |_| {
+        return error.TestFailed; // Should have failed
+    } else |err| {
+        // Should fail with ENOMEM or EINVAL
+        if (err != error.OutOfMemory and err != error.InvalidArgument) {
+            if (err == error.NotImplemented) return error.SkipTest;
+            return error.TestFailed;
+        }
+    }
+}
+
+// Memory Test 14: mlock pages
+pub fn testMlockPages() !void {
+    const MAP_ANONYMOUS = 0x20;
+    const MAP_PRIVATE = 0x02;
+    const PROT_READ = 0x1;
+    const PROT_WRITE = 0x2;
+
+    const size: usize = 4096;
+
+    const addr = syscall.mmap(null, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, 0, 0) catch |err| {
+        if (err == error.NotImplemented) return error.SkipTest;
+        return err;
+    };
+    defer _ = syscall.munmap(addr, size) catch {};
+
+    // Lock the pages (may be a no-op in current implementation)
+    syscall.mlock(addr, size) catch |err| {
+        if (err == error.NotImplemented) return error.SkipTest;
+        // Other errors are acceptable - mlock might fail due to limits
+        return;
+    };
+
+    // Pages should still be accessible
+    addr[0] = 42;
+    if (addr[0] != 42) return error.TestFailed;
+}
+
+// Memory Test 15: mlock + munlock sequence
+pub fn testMunlockPages() !void {
+    const MAP_ANONYMOUS = 0x20;
+    const MAP_PRIVATE = 0x02;
+    const PROT_READ = 0x1;
+    const PROT_WRITE = 0x2;
+
+    const size: usize = 4096;
+
+    const addr = syscall.mmap(null, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, 0, 0) catch |err| {
+        if (err == error.NotImplemented) return error.SkipTest;
+        return err;
+    };
+    defer _ = syscall.munmap(addr, size) catch {};
+
+    // Lock the pages
+    syscall.mlock(addr, size) catch |err| {
+        if (err == error.NotImplemented) return error.SkipTest;
+        // If mlock fails, skip the test
+        return error.SkipTest;
+    };
+
+    // Unlock the pages
+    syscall.munlock(addr, size) catch |err| {
+        if (err == error.NotImplemented) return error.SkipTest;
+        return err;
+    };
+
+    // Pages should still be accessible
+    addr[0] = 123;
+    if (addr[0] != 123) return error.TestFailed;
+}
+
+// Memory Test 16: madvise sequential hint
+pub fn testMadviseSequential() !void {
+    const MAP_ANONYMOUS = 0x20;
+    const MAP_PRIVATE = 0x02;
+    const PROT_READ = 0x1;
+    const PROT_WRITE = 0x2;
+
+    const size: usize = 8192; // Two pages
+
+    const addr = syscall.mmap(null, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, 0, 0) catch |err| {
+        if (err == error.NotImplemented) return error.SkipTest;
+        return err;
+    };
+    defer _ = syscall.munmap(addr, size) catch {};
+
+    // Give hint that we'll access sequentially (MADV_SEQUENTIAL = 2)
+    const MADV_SEQUENTIAL = 2;
+    syscall.madvise(addr, size, MADV_SEQUENTIAL) catch |err| {
+        if (err == error.NotImplemented) return error.SkipTest;
+        // Other errors are acceptable - madvise is just a hint
+        return;
+    };
+
+    // Verify memory is still accessible
+    addr[0] = 1;
+    addr[4096] = 2;
+    if (addr[0] != 1 or addr[4096] != 2) return error.TestFailed;
+}
+
+// Memory Test 17: msync on anonymous mapping
+pub fn testMsyncNoOp() !void {
+    const MAP_ANONYMOUS = 0x20;
+    const MAP_PRIVATE = 0x02;
+    const PROT_READ = 0x1;
+    const PROT_WRITE = 0x2;
+
+    const size: usize = 4096;
+
+    const addr = syscall.mmap(null, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, 0, 0) catch |err| {
+        if (err == error.NotImplemented) return error.SkipTest;
+        return err;
+    };
+    defer _ = syscall.munmap(addr, size) catch {};
+
+    // Write some data
+    addr[0] = 42;
+
+    // Sync to storage (MS_SYNC = 4, should be no-op for anonymous mapping)
+    const MS_SYNC = 4;
+    syscall.msync(addr, size, MS_SYNC) catch |err| {
+        if (err == error.NotImplemented) return error.SkipTest;
+        // Other errors are acceptable - msync might not work on anonymous mappings
+        return;
+    };
+
+    // Data should still be there
+    if (addr[0] != 42) return error.TestFailed;
+}

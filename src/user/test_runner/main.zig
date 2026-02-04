@@ -175,6 +175,13 @@ export fn main(argc: i32, argv: [*][*:0]u8) i32 {
     runner.runTest("memory: mmap length overflow", memory_tests.testMmapLengthOverflow);
     runner.runTest("memory: multiple small allocations", memory_tests.testMultipleSmallAllocations);
     runner.runTest("memory: alloc write munmap realloc", memory_tests.testAllocWriteMunmapRealloc);
+    runner.runTest("memory: mprotect read-only", memory_tests.testMprotectReadOnly);
+    runner.runTest("memory: mprotect read-write", memory_tests.testMprotectReadWrite);
+    runner.runTest("memory: mprotect invalid addr", memory_tests.testMprotectInvalidAddr);
+    runner.runTest("memory: mlock pages", memory_tests.testMlockPages);
+    runner.runTest("memory: munlock pages", memory_tests.testMunlockPages);
+    runner.runTest("memory: madvise sequential", memory_tests.testMadviseSequential);
+    runner.runTest("memory: msync no-op", memory_tests.testMsyncNoOp);
 
     // Process tests
     runner.runTest("process: fork creates child", process_tests.testForkCreatesChild);
