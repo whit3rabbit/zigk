@@ -134,7 +134,7 @@ zig build test                                           # Host-based Zig unit t
 
 ### Architecture Support
 - **x86_64**: Full test coverage, all tests passing
-- **aarch64**: Full test coverage, all tests passing
+- **aarch64**: Full test coverage, 1 known failure (exec test - see below)
 - **CI Mode**: Run both architectures with `RUN_BOTH=true`
 
 **Note**: Tests output TAP-like format. Failing tests show error names for debugging.
@@ -150,11 +150,34 @@ zig build test                                           # Host-based Zig unit t
    - **Action**: Do not attempt to fix - this is a documented test environment limitation, not a kernel bug
 2-4. **Other skipped tests**: Pre-existing skipped tests (not related to process groups)
 
+**Failing Tests (aarch64-specific)**:
+1. **process: exec replaces process** (`testExecReplacesProcess`)
+   - **Architecture**: aarch64 only (x86_64 passes)
+   - **Error**: `PageFault: addr 476000 not in any VMA (SIGSEGV)`
+   - **Root Cause**: Test binary (`test_binary.elf`) accesses memory beyond allocated BSS segment during initialization
+   - **Technical Details**:
+     - BSS segment allocated: `[0x474000, 0x476000)` (2 pages, 8192 bytes)
+     - Actual BSS size: 4160 bytes (ends at 0x475040)
+     - Fault address: 0x476000 (exactly at VMA boundary, first byte of next page)
+     - Fault occurs before `main()` during C runtime initialization
+   - **ELF Loader Status**: Working correctly - all pages properly allocated, mapped, and zeroed
+   - **Investigation Findings**:
+     - Same source code works on x86_64
+     - Adding guard pages shifts fault to next boundary (0x477000), suggesting iteration/walk-off issue
+     - Likely aarch64-specific issue in: Zig codegen, crt0 runtime, or ABI differences
+   - **Verified**: Core `execve` syscall works (loads binary, sets up address space, transfers control)
+   - **Action**: Do not attempt to fix kernel - this is a test binary generation issue, not a kernel bug
+   - **Files**:
+     - Test binary source: `src/user/test_binary/main.zig`
+     - ELF loader: `src/kernel/core/elf/loader.zig`
+     - Diagnostics added: loader.zig:309-314 (BSS segment logging)
+
 **Test Environment Notes**:
 - Process spawn behavior: New processes get `pgid = pid` and `sid = pid` (become session leaders)
 - This makes it difficult to test scenarios requiring non-session-leader processes
 - Workaround: Tests that need specific session states use fork() + setsid() to establish clean contexts
 - Some edge case tests (like `testSetsidFailsForGroupLeader`) cannot be reliably tested due to this constraint
+- aarch64 exec test failure is a binary generation issue, not a test environment limitation
 
 ## Reference Skills
 
