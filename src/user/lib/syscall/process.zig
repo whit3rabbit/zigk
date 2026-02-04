@@ -92,10 +92,78 @@ pub fn getuid() u32 {
     return @truncate(ret);
 }
 
+/// Get effective user ID
+pub fn geteuid() u32 {
+    const ret = primitive.syscall0(syscalls.SYS_GETEUID);
+    return @truncate(ret);
+}
+
 /// Get group ID
 pub fn getgid() u32 {
     const ret = primitive.syscall0(syscalls.SYS_GETGID);
     return @truncate(ret);
+}
+
+/// Get effective group ID
+pub fn getegid() u32 {
+    const ret = primitive.syscall0(syscalls.SYS_GETEGID);
+    return @truncate(ret);
+}
+
+/// Set user ID
+pub fn setuid(uid: u32) SyscallError!void {
+    const ret = primitive.syscall1(syscalls.SYS_SETUID, uid);
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Set group ID
+pub fn setgid(gid: u32) SyscallError!void {
+    const ret = primitive.syscall1(syscalls.SYS_SETGID, gid);
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Get real, effective, and saved user IDs
+pub fn getresuid(ruid: *u32, euid: *u32, suid: *u32) SyscallError!void {
+    const ret = primitive.syscall3(
+        syscalls.SYS_GETRESUID,
+        @intFromPtr(ruid),
+        @intFromPtr(euid),
+        @intFromPtr(suid),
+    );
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Set real, effective, and saved user IDs
+pub fn setresuid(ruid: i32, euid: i32, suid: i32) SyscallError!void {
+    const ret = primitive.syscall3(
+        syscalls.SYS_SETRESUID,
+        @bitCast(@as(u32, @bitCast(ruid))),
+        @bitCast(@as(u32, @bitCast(euid))),
+        @bitCast(@as(u32, @bitCast(suid))),
+    );
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Get real, effective, and saved group IDs
+pub fn getresgid(rgid: *u32, egid: *u32, sgid: *u32) SyscallError!void {
+    const ret = primitive.syscall3(
+        syscalls.SYS_GETRESGID,
+        @intFromPtr(rgid),
+        @intFromPtr(egid),
+        @intFromPtr(sgid),
+    );
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Set real, effective, and saved group IDs
+pub fn setresgid(rgid: i32, egid: i32, sgid: i32) SyscallError!void {
+    const ret = primitive.syscall3(
+        syscalls.SYS_SETRESGID,
+        @bitCast(@as(u32, @bitCast(rgid))),
+        @bitCast(@as(u32, @bitCast(egid))),
+        @bitCast(@as(u32, @bitCast(sgid))),
+    );
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
 }
 
 // =============================================================================

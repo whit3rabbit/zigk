@@ -195,6 +195,51 @@ pub fn sfsWrite(file_desc: *fd.FileDescriptor, buf: []const u8) isize {
         }
     }
 
+    // SECURITY: Handle sparse file writes - zero-fill gaps when writing beyond EOF
+    // This prevents information leaks from uninitialized disk sectors
+    const current_size: u64 = file.size;
+    if (file_desc.position > current_size) {
+        // Calculate blocks that need zero-filling
+        const gap_start_byte = current_size;
+        const gap_end_byte = file_desc.position;
+
+        // Zero-fill the gap sector by sector
+        var fill_pos = gap_start_byte;
+        while (fill_pos < gap_end_byte) {
+            const block_offset = fill_pos / 512;
+            const byte_offset = fill_pos % 512;
+
+            const block_offset_u32 = std.math.cast(u32, block_offset) orelse return -27;
+            const phys_block = file.start_block + block_offset_u32;
+
+            if (phys_block >= file.fs.superblock.total_blocks) {
+                console.warn("SFS: Gap fill block {} exceeds total_blocks {}", .{ phys_block, file.fs.superblock.total_blocks });
+                return -5;
+            }
+
+            // SECURITY: Zero-initialize buffer to prevent information leak
+            var zero_sector: [512]u8 = [_]u8{0} ** 512;
+
+            // If not starting at sector boundary, read existing data first
+            if (byte_offset != 0 or (gap_end_byte - fill_pos) < (512 - byte_offset)) {
+                sfs_io.readSector(file.fs.device_fd, phys_block, &zero_sector) catch {};
+            }
+
+            // Calculate how many bytes to zero in this sector
+            const bytes_to_zero = @min(512 - byte_offset, gap_end_byte - fill_pos);
+            @memset(zero_sector[byte_offset..][0..bytes_to_zero], 0);
+
+            // Write back the sector
+            sfs_io.writeSector(file.fs.device_fd, phys_block, &zero_sector) catch return -5;
+
+            // Advance to next sector or end of gap
+            fill_pos = std.math.add(u64, fill_pos, bytes_to_zero) catch return -27;
+        }
+
+        // Update file size to include the gap (but don't update directory yet - that happens at end of write)
+        file.size = std.math.cast(u32, gap_end_byte) orelse return -27;
+    }
+
     var written_count: usize = 0;
     var current_pos = file_desc.position;
 
@@ -458,6 +503,40 @@ pub fn sfsOpen(ctx: ?*anyopaque, path: []const u8, flags: u32) vfs.Error!*fd.Fil
             }
         }
 
+        // SECURITY: Handle O_TRUNC before creating file context
+        // This must be done atomically under lock to prevent TOCTOU races
+        if ((flags & fd.O_TRUNC) != 0 and !entry.isDirectory()) {
+            // Check if file is writable
+            const access_mode = flags & fd.O_ACCMODE;
+            if (access_mode == fd.O_WRONLY or access_mode == fd.O_RDWR) {
+                // Truncate file to zero
+                const held_trunc = self.alloc_lock.acquire();
+                defer held_trunc.release();
+
+                // Re-read directory entry under lock (TOCTOU prevention)
+                const block_idx = found_idx / 4;
+                const offset_in_block = std.math.mul(usize, found_idx % 4, 128) catch return vfs.Error.IOError;
+
+                var block_buf: [512]u8 = [_]u8{0} ** 512;
+                sfs_io.readSector(self.device_fd, self.superblock.root_dir_start + block_idx, &block_buf) catch return vfs.Error.IOError;
+
+                const trunc_entry: *t.DirEntry = @ptrCast(@alignCast(&block_buf[offset_in_block]));
+
+                // Validate entry still exists and matches
+                if (trunc_entry.flags != 1) return vfs.Error.NotFound;
+                if (trunc_entry.start_block != entry.start_block) return vfs.Error.NotFound;
+
+                // Update size to 0 (keep blocks allocated for simplicity)
+                trunc_entry.size = 0;
+
+                // Write directory sector back
+                sfs_io.writeSector(self.device_fd, self.superblock.root_dir_start + block_idx, &block_buf) catch return vfs.Error.IOError;
+
+                // Update entry in our local copy so file_ctx gets correct size
+                entry.size = 0;
+            }
+        }
+
         const file_ctx = alloc.create(t.SfsFile) catch return vfs.Error.NoMemory;
         file_ctx.* = .{
             .fs = self,
@@ -483,7 +562,7 @@ pub fn sfsOpen(ctx: ?*anyopaque, path: []const u8, flags: u32) vfs.Error!*fd.Fil
             };
         }
 
-        return fd.createFd(&sfs_ops, flags, file_ctx) catch {
+        const file_fd = fd.createFd(&sfs_ops, flags, file_ctx) catch {
             const lock_held = self.alloc_lock.acquire();
             defer lock_held.release();
             if (self.open_counts[found_idx] > 0) {
@@ -492,6 +571,17 @@ pub fn sfsOpen(ctx: ?*anyopaque, path: []const u8, flags: u32) vfs.Error!*fd.Fil
             alloc.destroy(file_ctx);
             return vfs.Error.NoMemory;
         };
+
+        // SECURITY: Handle O_APPEND by seeking to EOF
+        // This must be done after FD creation to access position field
+        if ((flags & fd.O_APPEND) != 0 and !entry.isDirectory()) {
+            const fd_held = file_fd.lock.acquire();
+            defer fd_held.release();
+            // Use the actual current size (may have been truncated by O_TRUNC above)
+            file_fd.position = file_ctx.size;
+        }
+
+        return file_fd;
     } else {
         if ((flags & fd.O_CREAT) != 0) {
             console.debug("SFS: O_CREAT - allocating block", .{});

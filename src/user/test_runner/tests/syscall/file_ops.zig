@@ -1,3 +1,4 @@
+const std = @import("std");
 const syscall = @import("syscall");
 
 // Test 1: Open, read, close from InitRD (happy path)
@@ -35,17 +36,74 @@ pub fn testOpenWriteCloseSfs() !void {
 }
 
 // Test 3: Open with O_TRUNC clears file content
-// NOTE: Skipped - SFS doesn't support reopening files with O_TRUNC on existing files
 pub fn testOpenWithTruncate() !void {
-    // FIXME: SFS limitation - O_TRUNC on existing files not fully supported
-    // This test would require kernel-side fixes
+    const filepath = "/mnt/trunc_test.txt";
+
+    // Create file with initial content
+    const fd1 = try syscall.open(filepath, syscall.O_WRONLY | syscall.O_CREAT, 0o644);
+    const original_data = "original content";
+    _ = try syscall.write(fd1, original_data.ptr, original_data.len);
+    try syscall.close(@intCast(fd1));
+
+    // Reopen with O_TRUNC - should truncate file to 0
+    const fd2 = try syscall.open(filepath, syscall.O_RDWR | syscall.O_TRUNC, 0);
+    defer syscall.close(@intCast(fd2)) catch {};
+
+    // Verify file size is 0 by trying to read
+    var buf: [100]u8 = undefined;
+    const bytes_read = try syscall.read(fd2, &buf, buf.len);
+    if (bytes_read != 0) return error.TestFailed;
+
+    // Write new content
+    const new_data = "new";
+    const written = try syscall.write(fd2, new_data.ptr, new_data.len);
+    if (written != new_data.len) return error.TestFailed;
+
+    // Reopen and verify only new content exists
+    try syscall.close(@intCast(fd2));
+    const fd3 = try syscall.open(filepath, syscall.O_RDONLY, 0);
+    defer syscall.close(@intCast(fd3)) catch {};
+
+    const verify_read = try syscall.read(fd3, &buf, buf.len);
+    if (verify_read != new_data.len) return error.TestFailed;
+    if (!std.mem.eql(u8, buf[0..verify_read], new_data)) return error.TestFailed;
+
+    // Cleanup
+    syscall.unlink(filepath) catch {};
 }
 
 // Test 4: Open with O_APPEND starts at EOF
-// NOTE: Skipped - SFS doesn't support reopening files with O_APPEND
 pub fn testOpenWithAppend() !void {
-    // FIXME: SFS limitation - O_APPEND on existing files not fully supported
-    // This test would require kernel-side fixes
+    const filepath = "/mnt/append_test.txt";
+
+    // Create file with initial content
+    const fd1 = try syscall.open(filepath, syscall.O_WRONLY | syscall.O_CREAT, 0o644);
+    const first_data = "first";
+    _ = try syscall.write(fd1, first_data.ptr, first_data.len);
+    try syscall.close(@intCast(fd1));
+
+    // Reopen with O_APPEND - should position at EOF
+    const fd2 = try syscall.open(filepath, syscall.O_WRONLY | syscall.O_APPEND, 0);
+    defer syscall.close(@intCast(fd2)) catch {};
+
+    // Write more data - should append at end
+    const second_data = "second";
+    const written = try syscall.write(fd2, second_data.ptr, second_data.len);
+    if (written != second_data.len) return error.TestFailed;
+
+    // Close and verify file contains both parts concatenated
+    try syscall.close(@intCast(fd2));
+    const fd3 = try syscall.open(filepath, syscall.O_RDONLY, 0);
+    defer syscall.close(@intCast(fd3)) catch {};
+
+    var buf: [100]u8 = undefined;
+    const bytes_read = try syscall.read(fd3, &buf, buf.len);
+    const expected = "firstsecond";
+    if (bytes_read != expected.len) return error.TestFailed;
+    if (!std.mem.eql(u8, buf[0..bytes_read], expected)) return error.TestFailed;
+
+    // Cleanup
+    syscall.unlink(filepath) catch {};
 }
 
 // Test 5: Lseek from start (SEEK_SET)
@@ -87,10 +145,44 @@ pub fn testLseekFromEnd() !void {
 }
 
 // Test 7: Lseek beyond EOF (sparse file behavior)
-// NOTE: Skipped - SFS doesn't support sparse files (writing after lseek past EOF)
+// NOTE: Due to SFS architectural limitation (can only grow last-allocated file),
+// this test creates a file and writes everything in a single operation
 pub fn testLseekBeyondEof() !void {
-    // FIXME: SFS doesn't support sparse files
-    // The lseek succeeds but write returns NoSpace
+    const filepath = "/mnt/sparse_test.txt";
+    const SEEK_SET = 0;
+
+    // Create file, seek beyond start, write - all without any intermediate operations
+    const fd1 = try syscall.open(filepath, syscall.O_RDWR | syscall.O_CREAT, 0o644);
+    defer syscall.close(@intCast(fd1)) catch {};
+
+    // Immediately seek to offset 100 (small offset to minimize blocks needed)
+    const new_pos = try syscall.lseek(fd1, 100, SEEK_SET);
+    if (new_pos != 100) return error.TestFailed;
+
+    // Write data at offset 100
+    const data = "end";
+    const written = try syscall.write(fd1, data.ptr, data.len);
+    if (written != data.len) return error.TestFailed;
+
+    // Seek back to start and read entire file
+    const reset_pos = try syscall.lseek(fd1, 0, SEEK_SET);
+    if (reset_pos != 0) return error.TestFailed;
+
+    var buf: [200]u8 = undefined;
+    const bytes_read = try syscall.read(fd1, &buf, buf.len);
+    const expected_size = 100 + data.len;
+    if (bytes_read != expected_size) return error.TestFailed;
+
+    // Verify gap is zeros (bytes 0-99)
+    for (buf[0..100]) |byte| {
+        if (byte != 0) return error.TestFailed;
+    }
+
+    // Verify data (bytes 100-102)
+    if (!std.mem.eql(u8, buf[100..][0..data.len], data)) return error.TestFailed;
+
+    // Cleanup
+    syscall.unlink(filepath) catch {};
 }
 
 // Test 8: Multiple reads advance file position correctly

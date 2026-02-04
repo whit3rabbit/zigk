@@ -117,6 +117,12 @@ pub fn rmdir(path: [*:0]const u8) SyscallError!void {
     if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
 }
 
+/// Delete a file
+pub fn unlink(path: [*:0]const u8) SyscallError!void {
+    const ret = primitive.syscall1(syscalls.SYS_UNLINK, @intFromPtr(path));
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
 /// Change current working directory
 pub fn chdir(path: [*:0]const u8) SyscallError!void {
     const ret = primitive.syscall1(syscalls.SYS_CHDIR, @intFromPtr(path));

@@ -3,6 +3,7 @@ const syscall_tests = @import("tests/syscall/dir_ops.zig");
 const file_io_tests = @import("tests/syscall/file_ops.zig");
 const memory_tests = @import("tests/syscall/memory.zig");
 const process_tests = @import("tests/syscall/process.zig");
+const uid_gid_tests = @import("tests/syscall/uid_gid.zig");
 const fs_tests = @import("tests/fs/basic.zig");
 const fs_error_tests = @import("tests/fs/errors.zig");
 const regression_tests = @import("tests/regression/sfs_issues.zig");
@@ -208,6 +209,16 @@ export fn main(argc: i32, argv: [*][*:0]u8) i32 {
     runner.runTest("job: controlling terminal", process_tests.testControllingTerminal);
     runner.runTest("job: SIGTTOU background write", process_tests.testSigttouBackgroundWrite);
     runner.runTest("job: background process group", process_tests.testBackgroundProcessGroup);
+
+    // UID/GID tests
+    runner.runTest("uid/gid: getuid returns 0", uid_gid_tests.testGetuidReturnsZero);
+    runner.runTest("uid/gid: geteuid returns 0", uid_gid_tests.testGeteuidReturnsZero);
+    runner.runTest("uid/gid: getgid returns 0", uid_gid_tests.testGetgidReturnsZero);
+    runner.runTest("uid/gid: getegid returns 0", uid_gid_tests.testGetegidReturnsZero);
+    runner.runTest("uid/gid: setuid as root succeeds", uid_gid_tests.testSetuidAsRootSucceeds);
+    runner.runTest("uid/gid: setgid as root succeeds", uid_gid_tests.testSetgidAsRootSucceeds);
+    runner.runTest("uid/gid: getresuid returns all zeros", uid_gid_tests.testGetresuidReturnsAllZeros);
+    runner.runTest("uid/gid: getresgid returns all zeros", uid_gid_tests.testGetresgidReturnsAllZeros);
 
     // Stress tests
     runner.runTest("stress: write 10MB file", stress_tests.testWrite10MbFile);
