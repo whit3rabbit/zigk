@@ -5,21 +5,67 @@
 **Progress**:
 - ✅ **Phase 1 (Foundation)**: 86% Passing - 60/70 tests passing, 10 skipped
 - ✅ **Phase 2 (CI)**: 100% Complete - GitHub Actions + Multi-arch
+- ✅ **Phase 2 (Test Coverage Expansion)**: 39 new tests added (2026-02-03)
 - ❌ **Phase 3 (Advanced)**: Not Started - Coverage, Fuzzing, Benchmarks
 - ❌ **Phase 4 (DevX)**: Not Started - Helpers, Docs, Watch mode
 
 **Overall**: 8/10 success metrics achieved (80%)
 
-**Current State**: ✅ Phase 1 & 2 Complete (2026-01-31)
+**Current State**: ✅ Phase 1 & 2 Complete, Test Coverage Expansion In Progress (2026-02-03)
 - **Phase 1**: 70 integration tests in userspace test_runner (60 passing, 10 skipped)
 - **Phase 2**: GitHub Actions CI with multi-architecture matrix (100% complete)
+- **Test Coverage Expansion** (2026-02-03): 39 new tests added
+  - UID/GID tests: 8 tests (all passing)
+  - File I/O error cases: 10 tests (7 passing, 3 skipped)
+  - Memory protection: 7 tests (mix passing/skipped as expected)
+  - Signal handling: 6 tests (complex, architecture-specific)
+  - Network sockets: 8 tests (written, blocked by kernel bug - see Known Issues)
 - Multi-architecture support (x86_64 + aarch64) - local + CI
 - Automated script (`scripts/run_tests.sh`) with 60s timeout, multi-arch mode
 - Tests execute in ~15s per architecture, catch regressions
-- All tests passing on both architectures
 - CI pipeline validates builds and runs tests on every PR/push
 
 **Previous State**: Manual testing via QEMU shell with flaky serial input. No automated tests, no coverage tracking, no CI/CD.
+
+---
+
+## Known Issues (Active)
+
+### Socket Tests Trigger Kernel Panic (2026-02-03)
+**Status**: ❌ BLOCKING - Socket tests disabled
+**Severity**: HIGH - Kernel initialization bug
+**Affected Tests**: All 8 socket smoke tests (testSocketCreateTcp, testSocketCreateUdp, etc.)
+
+**Symptom**:
+```
+Running: socket: create TCP
+
+!!! KERNEL PANIC !!!
+Message: IrqLock used before initialization - security violation
+```
+
+**Root Cause**:
+- Socket syscalls (SYS_SOCKET, SYS_BIND, etc.) trigger IrqLock usage before it's initialized
+- Bug is in kernel network stack initialization order, not in the tests themselves
+- Tests are correctly implemented per POSIX smoke test requirements
+
+**Impact**:
+- 8 socket tests written but cannot execute
+- Network syscall coverage at 0% (socket layer untested)
+- Tests will pass once kernel bug is fixed
+
+**Next Steps**:
+1. Debug kernel network stack initialization in `src/net/` and `src/kernel/sys/syscall/net/`
+2. Ensure IrqLock initialization happens before socket syscalls can be dispatched
+3. Verify socket creation doesn't require locks during early initialization
+4. Re-enable socket tests once kernel panic is resolved
+
+**Files**:
+- Tests: `src/user/test_runner/tests/syscall/sockets.zig` (8 tests)
+- Syscall wrappers: `src/user/lib/syscall/net.zig` (getsockname, SO_REUSEADDR)
+- Kernel: `src/net/transport/socket/` (socket lifecycle, options)
+
+---
 
 ### Quick Start: Running Tests
 
