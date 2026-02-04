@@ -565,7 +565,7 @@ fn zeroExecveRegisters(frame: *hal.syscall.SyscallFrame) void {
             frame.r14 = 0;
             frame.rbp = 0;
             frame.r15 = 0;
-            frame.spsr = 0; // EL0h
+            frame.spsr = 0; // EL0t: Return to EL0 with SP_EL0, interrupts enabled
         },
         else => {},
     }

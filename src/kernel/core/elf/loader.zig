@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const hal = @import("hal");
 const vmm = @import("vmm");
 const pmm = @import("pmm");
@@ -304,6 +305,14 @@ fn loadSegment(
     // Calculate total size needed (including alignment padding)
     const total_size = std.mem.alignForward(u64, phdr.p_memsz + vaddr_offset, page_size);
     const page_count = total_size / page_size;
+
+    // DEBUG: Log BSS details to diagnose aarch64 page fault
+    if (phdr.p_memsz > phdr.p_filesz) {
+        const bss_size = phdr.p_memsz - phdr.p_filesz;
+        console.debug("ELF: Segment vaddr={x} filesz={x} memsz={x} BSS={x} total={x} pages={}", .{
+            vaddr, phdr.p_filesz, phdr.p_memsz, bss_size, total_size, page_count
+        });
+    }
 
     // SECURITY: Warn on W+X segments (violates W^X principle).
     // Segments that are both writable and executable defeat exploit mitigations
