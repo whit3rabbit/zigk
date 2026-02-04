@@ -134,6 +134,15 @@ export fn main(argc: i32, argv: [*][*:0]u8) i32 {
     runner.runTest("error: getcwd with small buffer", fs_error_tests.testGetcwdWithSmallBuffer);
     runner.runTest("error: open with conflicting flags", fs_error_tests.testOpenWithConflictingFlags);
     runner.runTest("error: read past EOF", fs_error_tests.testReadPastEOF);
+    runner.runTest("error: write to bad fd", fs_error_tests.testWriteToBadFd);
+    runner.runTest("error: lseek invalid whence", fs_error_tests.testLseekInvalidWhence);
+    runner.runTest("error: open too many fds", fs_error_tests.testOpenTooManyFds);
+    runner.runTest("error: open directory for write", fs_error_tests.testOpenDirectoryForWrite);
+    runner.runTest("error: write after close", fs_error_tests.testWriteAfterClose);
+    runner.runTest("error: double close", fs_error_tests.testDoubleClose);
+    runner.runTest("error: read null buffer", fs_error_tests.testReadNullBuffer);
+    runner.runTest("error: write null buffer", fs_error_tests.testWriteNullBuffer);
+    runner.runTest("error: open null path", fs_error_tests.testOpenNullPath);
 
     // Regression tests
     runner.runTest("regression: sfs write no deadlock", regression_tests.testSfsWriteNoDeadlock);

@@ -180,3 +180,112 @@ pub fn testReadPastEOF() !void {
     // Should return 0, not error
     if (bytes_read != 0) return error.TestFailed;
 }
+
+// Test 13: Write to bad FD - should return EBADF
+pub fn testWriteToBadFd() !void {
+    const data = "test";
+    const result = syscall.write(9999, data.ptr, data.len);
+
+    if (result) |_| {
+        return error.TestFailed; // Should have errored
+    } else |err| {
+        if (err != error.BadFileDescriptor) return error.TestFailed;
+    }
+}
+
+// Test 14: Lseek with invalid whence - should return EINVAL
+pub fn testLseekInvalidWhence() !void {
+    const fd = try syscall.open("/shell.elf", 0, 0);
+    defer syscall.close(@intCast(fd)) catch {};
+
+    // Try to lseek with invalid whence (valid values are 0, 1, 2)
+    const result = syscall.lseek(fd, 0, 99);
+
+    if (result) |_| {
+        return error.TestFailed; // Should have errored
+    } else |err| {
+        if (err != error.InvalidArgument) return error.TestFailed;
+    }
+}
+
+// Test 15: Open too many FDs - should return EMFILE
+pub fn testOpenTooManyFds() !void {
+    // Try to open many files until we hit the limit
+    // Note: We skip this test as it's in stress_tests.zig already
+    return error.SkipTest;
+}
+
+// Test 16: Open directory for write - should return EISDIR or EACCES
+pub fn testOpenDirectoryForWrite() !void {
+    const O_WRONLY = 1;
+    const result = syscall.open("/", O_WRONLY, 0);
+
+    if (result) |fd| {
+        syscall.close(@intCast(fd)) catch {};
+        return error.TestFailed; // Should have errored
+    } else |err| {
+        // Accept either EISDIR or EACCES (some implementations return EACCES for read-only FS)
+        if (err != error.IsADirectory and err != error.AccessDenied and err != error.ReadOnlyFilesystem) {
+            return error.TestFailed;
+        }
+    }
+}
+
+// Test 17: Write after close - should return EBADF
+pub fn testWriteAfterClose() !void {
+    // Open and immediately close
+    const fd = try syscall.open("/shell.elf", 0, 0);
+    try syscall.close(@intCast(fd));
+
+    // Try to write to closed FD
+    const data = "test";
+    const result = syscall.write(fd, data.ptr, data.len);
+
+    if (result) |_| {
+        return error.TestFailed; // Should have errored
+    } else |err| {
+        if (err != error.BadFileDescriptor) return error.TestFailed;
+    }
+}
+
+// Test 18: Double close - should return EBADF on second close
+pub fn testDoubleClose() !void {
+    // Open file
+    const fd = try syscall.open("/shell.elf", 0, 0);
+
+    // First close should succeed
+    try syscall.close(@intCast(fd));
+
+    // Second close should fail
+    const result = syscall.close(@intCast(fd));
+
+    if (result) |_| {
+        return error.TestFailed; // Should have errored
+    } else |err| {
+        if (err != error.BadFileDescriptor) return error.TestFailed;
+    }
+}
+
+// Test 19: Read with null buffer - should return EFAULT
+// NOTE: Skipped - Requires kernel-side user memory validation improvements
+pub fn testReadNullBuffer() !void {
+    // FIXME: Kernel doesn't properly validate all invalid user addresses yet
+    // Need to improve isValidUserAccess() to catch kernel-space pointers
+    return error.SkipTest;
+}
+
+// Test 20: Write with null buffer - should return EFAULT
+// NOTE: Skipped - Requires kernel-side user memory validation improvements
+pub fn testWriteNullBuffer() !void {
+    // FIXME: Kernel doesn't properly validate all invalid user addresses yet
+    // Need to improve isValidUserAccess() to catch kernel-space pointers
+    return error.SkipTest;
+}
+
+// Test 21: Open with null path - should return EFAULT
+// NOTE: Skipped - Requires kernel-side user memory validation improvements
+pub fn testOpenNullPath() !void {
+    // FIXME: Kernel doesn't properly validate all invalid user addresses yet
+    // Need to improve isValidUserAccess() to catch kernel-space pointers
+    return error.SkipTest;
+}
