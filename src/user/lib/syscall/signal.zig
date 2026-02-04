@@ -47,3 +47,21 @@ pub fn sigreturn() noreturn {
     _ = primitive.syscall0(syscalls.SYS_RT_SIGRETURN);
     unreachable;
 }
+
+/// Get pending signals
+pub fn sigpending(set: *SigSet) SyscallError!void {
+    const ret = primitive.syscall2(syscalls.SYS_RT_SIGPENDING,
+        @intFromPtr(set),
+        @sizeOf(SigSet)
+    );
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Set alternate signal stack
+pub fn sigaltstack(ss: ?*const uapi.signal.StackT, old_ss: ?*uapi.signal.StackT) SyscallError!void {
+    const ret = primitive.syscall2(syscalls.SYS_SIGALTSTACK,
+        if (ss) |s| @intFromPtr(s) else 0,
+        if (old_ss) |s| @intFromPtr(s) else 0
+    );
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}

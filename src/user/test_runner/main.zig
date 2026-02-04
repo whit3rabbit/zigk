@@ -4,6 +4,7 @@ const file_io_tests = @import("tests/syscall/file_ops.zig");
 const memory_tests = @import("tests/syscall/memory.zig");
 const process_tests = @import("tests/syscall/process.zig");
 const uid_gid_tests = @import("tests/syscall/uid_gid.zig");
+const signal_tests = @import("tests/syscall/signals.zig");
 const fs_tests = @import("tests/fs/basic.zig");
 const fs_error_tests = @import("tests/fs/errors.zig");
 const regression_tests = @import("tests/regression/sfs_issues.zig");
@@ -235,6 +236,14 @@ export fn main(argc: i32, argv: [*][*:0]u8) i32 {
     runner.runTest("uid/gid: setgid as root succeeds", uid_gid_tests.testSetgidAsRootSucceeds);
     runner.runTest("uid/gid: getresuid returns all zeros", uid_gid_tests.testGetresuidReturnsAllZeros);
     runner.runTest("uid/gid: getresgid returns all zeros", uid_gid_tests.testGetresgidReturnsAllZeros);
+
+    // Signal handling tests
+    runner.runTest("signal: sigaction install handler", signal_tests.testSigactionInstallHandler);
+    runner.runTest("signal: sigprocmask block signal", signal_tests.testSigprocmaskBlockSignal);
+    runner.runTest("signal: sigpending after block", signal_tests.testSigpendingAfterBlock);
+    runner.runTest("signal: kill self", signal_tests.testKillSelf);
+    runner.runTest("signal: sigaltstack setup", signal_tests.testSigaltstackSetup);
+    runner.runTest("signal: multiple handlers", signal_tests.testMultipleHandlers);
 
     // Stress tests
     runner.runTest("stress: write 10MB file", stress_tests.testWrite10MbFile);

@@ -132,6 +132,8 @@ pub const killpg = signal.killpg;
 pub const sigaction = signal.sigaction;
 pub const sigprocmask = signal.sigprocmask;
 pub const sigreturn = signal.sigreturn;
+pub const sigpending = signal.sigpending;
+pub const sigaltstack = signal.sigaltstack;
 pub const SigAction = signal.SigAction;
 pub const SigSet = signal.SigSet;
 
