@@ -50,6 +50,21 @@ pub fn init(iface: *Interface, allocator: std.mem.Allocator) void {
     ephemeral_port_counts = [_]u16{0} ** EPHEMERAL_RANGE;
 }
 
+/// Initialize socket subsystem for syscall support only (no network stack).
+/// This is used when the kernel boots without an in-kernel network stack
+/// but still needs socket syscalls to work for testing/userspace drivers.
+/// SECURITY: Must be called before any socket operations.
+pub fn initSyscallOnly(allocator: std.mem.Allocator) void {
+    // SECURITY: Initialize lock before first use
+    lock.init();
+
+    global_iface = null; // No network interface
+    socket_allocator = allocator;
+    socket_table = .{};
+    udp_sockets = [_]?*types.Socket{null} ** 65536;
+    ephemeral_port_counts = [_]u16{0} ** EPHEMERAL_RANGE;
+}
+
 pub fn getInterface() ?*Interface {
     return global_iface;
 }

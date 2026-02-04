@@ -70,6 +70,7 @@ pub const wakeThread = root.wakeThread;
 // State management
 pub const setLock = root.setLock;
 pub const init = root.init;
+pub const initSyscallOnly = state.initSyscallOnly;
 pub const getSocket = root.getSocket;
 pub const acquireSocket = root.acquireSocket;
 pub const releaseSocket = root.releaseSocket;

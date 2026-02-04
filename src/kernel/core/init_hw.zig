@@ -432,11 +432,17 @@ pub fn initNetwork() void {
         }
     }
 
-    // 4. Setup Network if Driver Available
+    // 4. Initialize Socket Subsystem (Syscall Support)
+    // Even without in-kernel network stack, socket syscalls need lock initialization.
+    // This enables socket tests and userspace network drivers.
+    net.transport.initSyscallOnly(heap.allocator());
+    console.debug("[NETSTACK] Socket subsystem initialized (syscall-only mode)", .{});
+
+    // 5. Setup Network Driver if Available
     if (nic_driver_opt) |nic_driver| {
         // [NETSTACK MIGRATION]
         // Disable in-kernel network stack initialization.
-        // We still initialize the driver hardware if needed, bu we don't bind it to the kernel stack
+        // We still initialize the driver hardware if needed, but we don't bind it to the kernel stack
         // OR we skip driver initialization if the userspace driver is taking over.
 
         // For now, let's just log and skip.

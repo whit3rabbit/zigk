@@ -2,6 +2,8 @@
 //
 // Re-exports ICMP, UDP, TCP, and Socket types and functions.
 
+const std = @import("std");
+
 pub const icmp = @import("icmp.zig");
 pub const udp = @import("udp.zig");
 pub const tcp = @import("tcp.zig");
@@ -47,6 +49,14 @@ pub const IPPROTO_IP = socket.IPPROTO_IP;
 pub const IPPROTO_TCP = socket.IPPROTO_TCP;
 pub const SO_RCVTIMEO = socket.SO_RCVTIMEO;
 pub const SO_SNDTIMEO = socket.SO_SNDTIMEO;
+
+/// Initialize socket and TCP subsystems for syscall support without network stack.
+/// This allows socket syscalls to work even when the in-kernel network stack
+/// is disabled (e.g., for userspace driver migration or testing).
+pub fn initSyscallOnly(allocator: std.mem.Allocator) void {
+    socket.initSyscallOnly(allocator);
+    tcp.initSyscallOnly();
+}
 pub const SO_BROADCAST = socket.SO_BROADCAST;
 pub const SO_REUSEADDR = socket.SO_REUSEADDR;
 pub const IP_TOS = socket.IP_TOS;

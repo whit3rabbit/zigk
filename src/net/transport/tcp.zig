@@ -1,6 +1,7 @@
 
 // TCP module entrypoint
 const root = @import("tcp/root.zig");
+const state = @import("tcp/state.zig");
 
 // Constants and Types
 pub const MAX_TCP_PAYLOAD = root.MAX_TCP_PAYLOAD;
@@ -11,6 +12,7 @@ pub const TcpState = root.TcpState;
 // Functions
 pub const setLock = root.setLock;
 pub const init = root.init;
+pub const initSyscallOnly = state.initSyscallOnly;
 pub const validateConnectionExists = root.validateConnectionExists;
 pub const tick = root.tick;
 pub const tcpChecksum = root.tcpChecksum;

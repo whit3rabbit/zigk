@@ -179,6 +179,12 @@ pub fn init(iface: *Interface, allocator: std.mem.Allocator, ticks_per_sec: u32)
     @memcpy(isn_key[8..16], std.mem.asBytes(&k4));
 }
 
+/// Initialize TCP state lock for syscall-only mode (no network stack).
+/// SECURITY: Must be called before any TCP socket operations.
+pub fn initSyscallOnly() void {
+    lock.init();
+}
+
 /// Count connections in SYN-RECEIVED state (half-open)
 pub fn countHalfOpen() usize {
     return half_open_count;
