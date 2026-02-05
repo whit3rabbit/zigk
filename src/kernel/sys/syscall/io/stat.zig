@@ -127,6 +127,46 @@ pub fn sys_lstat(path_ptr: usize, stat_buf: usize) SyscallError!usize {
     return sys_stat(path_ptr, stat_buf);
 }
 
+/// sys_fstatat (262/79 - SYS_NEWFSTATAT) - Get file status relative to directory FD
+pub fn sys_fstatat(dirfd: usize, path_ptr: usize, statbuf_ptr: usize, flags: usize) SyscallError!usize {
+    const AT_SYMLINK_NOFOLLOW: usize = 0x100;
+    const fd_syscall = @import("syscall_fd");
+
+    const alloc = heap.allocator();
+    const path_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(path_buf);
+
+    const path = user_mem.copyStringFromUser(path_buf, path_ptr) catch |err| {
+        if (err == error.NameTooLong) return error.ENAMETOOLONG;
+        return error.EFAULT;
+    };
+
+    if (path.len == 0) return error.ENOENT;
+
+    // Handle absolute paths directly (bypass dirfd)
+    if (path[0] == '/') {
+        if (flags & AT_SYMLINK_NOFOLLOW != 0) {
+            return sys_lstat(@intFromPtr(path.ptr), statbuf_ptr);
+        } else {
+            return sys_stat(@intFromPtr(path.ptr), statbuf_ptr);
+        }
+    }
+
+    // Allocate buffer for resolved path
+    const resolved_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(resolved_buf);
+
+    // Resolve path relative to dirfd
+    const resolved = fd_syscall.resolvePathAt(dirfd, path, resolved_buf) catch |err| return err;
+
+    // Call appropriate base syscall based on flags
+    if (flags & AT_SYMLINK_NOFOLLOW != 0) {
+        return sys_lstat(@intFromPtr(resolved.ptr), statbuf_ptr);
+    } else {
+        return sys_stat(@intFromPtr(resolved.ptr), statbuf_ptr);
+    }
+}
+
 /// sys_fstat (5) - Get file status by file descriptor
 pub fn sys_fstat(fd_num: usize, stat_buf_ptr: usize) SyscallError!usize {
     // Validate userspace buffer

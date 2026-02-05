@@ -15,6 +15,7 @@ const user_mem = @import("user_mem");
 const caps = @import("capabilities");
 const devfs = @import("devfs");
 const vmm = @import("vmm");
+const fd_syscall = @import("syscall_fd");
 
 const perms = @import("perms");
 
@@ -407,6 +408,43 @@ pub fn sys_chmod(path_ptr: usize, mode_arg: usize) base.SyscallError!usize {
     return 0;
 }
 
+/// sys_fchmodat (268/53) - Change file permissions relative to directory FD
+pub fn sys_fchmodat(dirfd: usize, path_ptr: usize, mode: usize, flags: usize) base.SyscallError!usize {
+    const AT_SYMLINK_NOFOLLOW: usize = 0x100;
+
+    // Reject unsupported AT_SYMLINK_NOFOLLOW flag for MVP
+    // (chmod on symlinks themselves is rarely used)
+    if (flags & AT_SYMLINK_NOFOLLOW != 0) {
+        return error.ENOSYS;
+    }
+
+    const alloc = heap.allocator();
+    const path_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(path_buf);
+
+    const path = user_mem.copyStringFromUser(path_buf, path_ptr) catch |err| {
+        if (err == error.NameTooLong) return error.ENAMETOOLONG;
+        return error.EFAULT;
+    };
+
+    if (path.len == 0) return error.ENOENT;
+
+    // Handle absolute paths directly (bypass dirfd)
+    if (path[0] == '/') {
+        return sys_chmod(@intFromPtr(path.ptr), mode);
+    }
+
+    // Allocate buffer for resolved path
+    const resolved_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(resolved_buf);
+
+    // Resolve path relative to dirfd
+    const resolved = fd_syscall.resolvePathAt(dirfd, path, resolved_buf) catch |err| return err;
+
+    // Call base syscall with resolved path
+    return sys_chmod(@intFromPtr(resolved.ptr), mode);
+}
+
 /// sys_chown (92) - Change file owner and group
 ///
 /// Args:
@@ -552,6 +590,61 @@ pub fn sys_rename(old_ptr: usize, new_ptr: usize) base.SyscallError!usize {
     return 0;
 }
 
+/// sys_renameat (264/38) - Rename file relative to directory file descriptors
+pub fn sys_renameat(olddirfd: usize, oldpath_ptr: usize, newdirfd: usize, newpath_ptr: usize) base.SyscallError!usize {
+
+    const alloc = heap.allocator();
+
+    // Allocate buffers for both paths
+    const old_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(old_buf);
+    const new_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(new_buf);
+
+    // Copy both paths from userspace
+    const oldpath = user_mem.copyStringFromUser(old_buf, oldpath_ptr) catch |err| {
+        if (err == error.NameTooLong) return error.ENAMETOOLONG;
+        return error.EFAULT;
+    };
+    const newpath = user_mem.copyStringFromUser(new_buf, newpath_ptr) catch |err| {
+        if (err == error.NameTooLong) return error.ENAMETOOLONG;
+        return error.EFAULT;
+    };
+
+    if (oldpath.len == 0 or newpath.len == 0) return error.ENOENT;
+
+    // Handle absolute old path
+    var resolved_old: []const u8 = undefined;
+    var resolved_old_buf: []u8 = undefined;
+    var need_free_old = false;
+    defer if (need_free_old) alloc.free(resolved_old_buf);
+
+    if (oldpath[0] == '/') {
+        resolved_old = oldpath;
+    } else {
+        resolved_old_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+        need_free_old = true;
+        resolved_old = fd_syscall.resolvePathAt(olddirfd, oldpath, resolved_old_buf) catch |err| return err;
+    }
+
+    // Handle absolute new path
+    var resolved_new: []const u8 = undefined;
+    var resolved_new_buf: []u8 = undefined;
+    var need_free_new = false;
+    defer if (need_free_new) alloc.free(resolved_new_buf);
+
+    if (newpath[0] == '/') {
+        resolved_new = newpath;
+    } else {
+        resolved_new_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+        need_free_new = true;
+        resolved_new = fd_syscall.resolvePathAt(newdirfd, newpath, resolved_new_buf) catch |err| return err;
+    }
+
+    // Call base syscall with resolved paths
+    return sys_rename(@intFromPtr(resolved_old.ptr), @intFromPtr(resolved_new.ptr));
+}
+
 /// sys_mkdir (83) - Create a directory
 pub fn sys_mkdir(path_ptr: usize, mode: usize) base.SyscallError!usize {
     const alloc = heap.allocator();
@@ -582,6 +675,36 @@ pub fn sys_mkdir(path_ptr: usize, mode: usize) base.SyscallError!usize {
     };
 
     return 0;
+}
+
+/// sys_mkdirat (258/34) - Create directory relative to directory file descriptor
+pub fn sys_mkdirat(dirfd: usize, path_ptr: usize, mode: usize) base.SyscallError!usize {
+
+    const alloc = heap.allocator();
+    const path_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(path_buf);
+
+    const path = user_mem.copyStringFromUser(path_buf, path_ptr) catch |err| {
+        if (err == error.NameTooLong) return error.ENAMETOOLONG;
+        return error.EFAULT;
+    };
+
+    if (path.len == 0) return error.ENOENT;
+
+    // Handle absolute paths directly (bypass dirfd)
+    if (path[0] == '/') {
+        return sys_mkdir(@intFromPtr(path.ptr), mode);
+    }
+
+    // Allocate buffer for resolved path
+    const resolved_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(resolved_buf);
+
+    // Resolve path relative to dirfd
+    const resolved = fd_syscall.resolvePathAt(dirfd, path, resolved_buf) catch |err| return err;
+
+    // Call base syscall with resolved path
+    return sys_mkdir(@intFromPtr(resolved.ptr), mode);
 }
 
 /// sys_rmdir (84) - Remove a directory
@@ -616,6 +739,45 @@ pub fn sys_rmdir(path_ptr: usize) base.SyscallError!usize {
     };
 
     return 0;
+}
+
+/// sys_unlinkat (263/35) - Remove file or directory relative to directory FD
+pub fn sys_unlinkat(dirfd: usize, path_ptr: usize, flags: usize) base.SyscallError!usize {
+    const AT_REMOVEDIR: usize = 0x200;
+
+    const alloc = heap.allocator();
+    const path_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(path_buf);
+
+    const path = user_mem.copyStringFromUser(path_buf, path_ptr) catch |err| {
+        if (err == error.NameTooLong) return error.ENAMETOOLONG;
+        return error.EFAULT;
+    };
+
+    if (path.len == 0) return error.ENOENT;
+
+    // Handle absolute paths directly (bypass dirfd)
+    if (path[0] == '/') {
+        if (flags & AT_REMOVEDIR != 0) {
+            return sys_rmdir(@intFromPtr(path.ptr));
+        } else {
+            return sys_unlink(@intFromPtr(path.ptr));
+        }
+    }
+
+    // Allocate buffer for resolved path
+    const resolved_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(resolved_buf);
+
+    // Resolve path relative to dirfd
+    const resolved = fd_syscall.resolvePathAt(dirfd, path, resolved_buf) catch |err| return err;
+
+    // Call appropriate base syscall based on flags
+    if (flags & AT_REMOVEDIR != 0) {
+        return sys_rmdir(@intFromPtr(resolved.ptr));
+    } else {
+        return sys_unlink(@intFromPtr(resolved.ptr));
+    }
 }
 
 /// sys_link (86) - Create a hard link
@@ -658,6 +820,64 @@ pub fn sys_link(old_ptr: usize, new_ptr: usize) base.SyscallError!usize {
     return 0;
 }
 
+/// sys_linkat (265/37) - Create hard link relative to directory file descriptors
+pub fn sys_linkat(olddirfd: usize, oldpath_ptr: usize, newdirfd: usize, newpath_ptr: usize, flags: usize) base.SyscallError!usize {
+
+    // For MVP, ignore flags parameter (AT_SYMLINK_FOLLOW is default behavior)
+    _ = flags;
+
+    const alloc = heap.allocator();
+
+    // Allocate buffers for both paths
+    const old_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(old_buf);
+    const new_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(new_buf);
+
+    // Copy both paths from userspace
+    const oldpath = user_mem.copyStringFromUser(old_buf, oldpath_ptr) catch |err| {
+        if (err == error.NameTooLong) return error.ENAMETOOLONG;
+        return error.EFAULT;
+    };
+    const newpath = user_mem.copyStringFromUser(new_buf, newpath_ptr) catch |err| {
+        if (err == error.NameTooLong) return error.ENAMETOOLONG;
+        return error.EFAULT;
+    };
+
+    if (oldpath.len == 0 or newpath.len == 0) return error.ENOENT;
+
+    // Handle absolute old path
+    var resolved_old: []const u8 = undefined;
+    var resolved_old_buf: []u8 = undefined;
+    var need_free_old = false;
+    defer if (need_free_old) alloc.free(resolved_old_buf);
+
+    if (oldpath[0] == '/') {
+        resolved_old = oldpath;
+    } else {
+        resolved_old_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+        need_free_old = true;
+        resolved_old = fd_syscall.resolvePathAt(olddirfd, oldpath, resolved_old_buf) catch |err| return err;
+    }
+
+    // Handle absolute new path
+    var resolved_new: []const u8 = undefined;
+    var resolved_new_buf: []u8 = undefined;
+    var need_free_new = false;
+    defer if (need_free_new) alloc.free(resolved_new_buf);
+
+    if (newpath[0] == '/') {
+        resolved_new = newpath;
+    } else {
+        resolved_new_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+        need_free_new = true;
+        resolved_new = fd_syscall.resolvePathAt(newdirfd, newpath, resolved_new_buf) catch |err| return err;
+    }
+
+    // Call base syscall with resolved paths
+    return sys_link(@intFromPtr(resolved_old.ptr), @intFromPtr(resolved_new.ptr));
+}
+
 /// sys_symlink (88) - Create a symbolic link
 pub fn sys_symlink(target_ptr: usize, linkpath_ptr: usize) base.SyscallError!usize {
     const alloc = heap.allocator();
@@ -688,6 +908,43 @@ pub fn sys_symlink(target_ptr: usize, linkpath_ptr: usize) base.SyscallError!usi
     };
 
     return 0;
+}
+
+/// sys_symlinkat (266/36) - Create symbolic link relative to directory file descriptor
+pub fn sys_symlinkat(target_ptr: usize, newdirfd: usize, linkpath_ptr: usize) base.SyscallError!usize {
+
+    const alloc = heap.allocator();
+
+    // Copy target from userspace (NOT resolved - symlinks store paths as-is)
+    const target_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(target_buf);
+    const target = user_mem.copyStringFromUser(target_buf, target_ptr) catch |err| {
+        if (err == error.NameTooLong) return error.ENAMETOOLONG;
+        return error.EFAULT;
+    };
+
+    // Copy linkpath from userspace
+    const link_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(link_buf);
+    const linkpath = user_mem.copyStringFromUser(link_buf, linkpath_ptr) catch |err| {
+        if (err == error.NameTooLong) return error.ENAMETOOLONG;
+        return error.EFAULT;
+    };
+
+    if (target.len == 0 or linkpath.len == 0) return error.ENOENT;
+
+    // Handle absolute linkpath
+    if (linkpath[0] == '/') {
+        return sys_symlink(@intFromPtr(target.ptr), @intFromPtr(linkpath.ptr));
+    }
+
+    // Resolve linkpath relative to newdirfd
+    const resolved_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(resolved_buf);
+    const resolved_link = fd_syscall.resolvePathAt(newdirfd, linkpath, resolved_buf) catch |err| return err;
+
+    // Call base syscall with literal target and resolved linkpath
+    return sys_symlink(@intFromPtr(target.ptr), @intFromPtr(resolved_link.ptr));
 }
 
 /// sys_readlink (89) - Read target of a symbolic link
@@ -725,4 +982,34 @@ pub fn sys_readlink(path_ptr: usize, buf_ptr: usize, bufsiz: usize) base.Syscall
     _ = uptr.copyFromKernel(kbuf[0..bytes_read]) catch return error.EFAULT;
 
     return bytes_read;
+}
+
+/// sys_readlinkat (267/78) - Read symbolic link relative to directory file descriptor
+pub fn sys_readlinkat(dirfd: usize, path_ptr: usize, buf_ptr: usize, bufsiz: usize) base.SyscallError!usize {
+
+    const alloc = heap.allocator();
+    const path_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(path_buf);
+
+    const path = user_mem.copyStringFromUser(path_buf, path_ptr) catch |err| {
+        if (err == error.NameTooLong) return error.ENAMETOOLONG;
+        return error.EFAULT;
+    };
+
+    if (path.len == 0) return error.ENOENT;
+
+    // Handle absolute paths directly (bypass dirfd)
+    if (path[0] == '/') {
+        return sys_readlink(@intFromPtr(path.ptr), buf_ptr, bufsiz);
+    }
+
+    // Allocate buffer for resolved path
+    const resolved_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(resolved_buf);
+
+    // Resolve path relative to dirfd
+    const resolved = fd_syscall.resolvePathAt(dirfd, path, resolved_buf) catch |err| return err;
+
+    // Call base syscall with resolved path
+    return sys_readlink(@intFromPtr(resolved.ptr), buf_ptr, bufsiz);
 }

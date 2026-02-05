@@ -1336,6 +1336,9 @@ pub fn build(b: *std.Build) void {
     syscall_fd_module.addImport("user_mem", user_mem_module);
     syscall_fd_module.addImport("perms", perms_module);
 
+    // Now that syscall_fd_module is defined, add it to syscall_io_module
+    syscall_io_module.addImport("syscall_fd", syscall_fd_module);
+
     // Create syscall memory module (mmap, mprotect, munmap, brk)
     const syscall_memory_module = b.createModule(.{
         .root_source_file = b.path("src/kernel/sys/syscall/memory/memory.zig"),
@@ -1778,6 +1781,7 @@ pub fn build(b: *std.Build) void {
     syscall_fs_handlers_module.addImport("devfs", devfs_module);
     syscall_fs_handlers_module.addImport("perms", perms_module);
     syscall_fs_handlers_module.addImport("vmm", vmm_module);
+    syscall_fs_handlers_module.addImport("syscall_fd", syscall_fd_module);
 
     // Create syscall flock module (advisory file locking)
     const syscall_flock_module = b.createModule(.{

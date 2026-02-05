@@ -330,5 +330,63 @@ pub fn flock(fd: i32, operation: u32) SyscallError!void {
     if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
 }
 
+// =============================================================================
+// AT* Family Syscalls (directory-relative operations)
+// =============================================================================
+
+/// Create directory relative to directory file descriptor
+/// dirfd: directory FD or AT_FDCWD (-100) for current working directory
+pub fn mkdirat(dirfd: i32, path: [*:0]const u8, mode: u32) SyscallError!void {
+    const ret = primitive.syscall3(syscalls.SYS_MKDIRAT, @bitCast(@as(isize, dirfd)), @intFromPtr(path), mode);
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Get file status relative to directory file descriptor
+/// flags: 0 or AT_SYMLINK_NOFOLLOW (0x100)
+pub fn fstatat(dirfd: i32, path: [*:0]const u8, statbuf: *uapi.stat.Stat, flags: i32) SyscallError!void {
+    const ret = primitive.syscall4(syscalls.SYS_NEWFSTATAT, @bitCast(@as(isize, dirfd)), @intFromPtr(path), @intFromPtr(statbuf), @bitCast(@as(isize, flags)));
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Remove file or directory relative to directory FD
+/// flags: 0 for file, AT_REMOVEDIR (0x200) for directory
+pub fn unlinkat(dirfd: i32, path: [*:0]const u8, flags: i32) SyscallError!void {
+    const ret = primitive.syscall3(syscalls.SYS_UNLINKAT, @bitCast(@as(isize, dirfd)), @intFromPtr(path), @bitCast(@as(isize, flags)));
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Rename file relative to directory file descriptors
+pub fn renameat(olddirfd: i32, oldpath: [*:0]const u8, newdirfd: i32, newpath: [*:0]const u8) SyscallError!void {
+    const ret = primitive.syscall4(syscalls.SYS_RENAMEAT, @bitCast(@as(isize, olddirfd)), @intFromPtr(oldpath), @bitCast(@as(isize, newdirfd)), @intFromPtr(newpath));
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Create hard link relative to directory file descriptors
+/// flags: 0 or AT_SYMLINK_FOLLOW (0x400)
+pub fn linkat(olddirfd: i32, oldpath: [*:0]const u8, newdirfd: i32, newpath: [*:0]const u8, flags: i32) SyscallError!void {
+    const ret = primitive.syscall5(syscalls.SYS_LINKAT, @bitCast(@as(isize, olddirfd)), @intFromPtr(oldpath), @bitCast(@as(isize, newdirfd)), @intFromPtr(newpath), @bitCast(@as(isize, flags)));
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Create symbolic link relative to directory file descriptor
+pub fn symlinkat(target: [*:0]const u8, newdirfd: i32, linkpath: [*:0]const u8) SyscallError!void {
+    const ret = primitive.syscall3(syscalls.SYS_SYMLINKAT, @intFromPtr(target), @bitCast(@as(isize, newdirfd)), @intFromPtr(linkpath));
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Read symbolic link relative to directory file descriptor
+pub fn readlinkat(dirfd: i32, path: [*:0]const u8, buf: [*]u8, bufsiz: usize) SyscallError!size_t {
+    const ret = primitive.syscall4(syscalls.SYS_READLINKAT, @bitCast(@as(isize, dirfd)), @intFromPtr(path), @intFromPtr(buf), bufsiz);
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return ret;
+}
+
+/// Change file permissions relative to directory FD
+/// flags: 0 or AT_SYMLINK_NOFOLLOW (0x100) - currently ENOTSUP for AT_SYMLINK_NOFOLLOW
+pub fn fchmodat(dirfd: i32, path: [*:0]const u8, mode: u32, flags: i32) SyscallError!void {
+    const ret = primitive.syscall4(syscalls.SYS_FCHMODAT, @bitCast(@as(isize, dirfd)), @intFromPtr(path), mode, @bitCast(@as(isize, flags)));
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
 // Alias size_t to usize for compatibility if needed, but usize is standard in Zig.
 const size_t = usize;

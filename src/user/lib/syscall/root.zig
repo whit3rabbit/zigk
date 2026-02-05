@@ -38,6 +38,16 @@ pub const unlink = io.unlink;
 pub const chdir = io.chdir;
 pub const getcwd = io.getcwd;
 pub const getdents64 = io.getdents64;
+
+// AT* family syscalls (directory-relative operations)
+pub const mkdirat = io.mkdirat;
+pub const fstatat = io.fstatat;
+pub const unlinkat = io.unlinkat;
+pub const renameat = io.renameat;
+pub const linkat = io.linkat;
+pub const symlinkat = io.symlinkat;
+pub const readlinkat = io.readlinkat;
+pub const fchmodat = io.fchmodat;
 pub const ioctl = io.ioctl;
 pub const poll = io.poll;
 pub const PollFd = io.PollFd;

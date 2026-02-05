@@ -54,6 +54,66 @@ fn joinPaths(base_path: []const u8, rel: []const u8, out_buf: []u8) ?[]const u8 
     return out_buf[0..out_idx];
 }
 
+/// Resolve a path relative to a directory file descriptor
+/// Used by at* family syscalls to avoid code duplication
+/// Returns slice into output_buf or error
+pub fn resolvePathAt(dirfd: usize, path: []const u8, output_buf: []u8) base.SyscallError![]const u8 {
+    const AT_FDCWD: usize = @bitCast(@as(isize, -100));
+
+    // Handle absolute paths - they ignore dirfd
+    if (path.len > 0 and path[0] == '/') {
+        if (path.len > output_buf.len) return error.ENAMETOOLONG;
+        @memcpy(output_buf[0..path.len], path);
+        return output_buf[0..path.len];
+    }
+
+    // Determine base directory
+    var base_path: []const u8 = undefined;
+    if (dirfd == AT_FDCWD) {
+        // Use current working directory
+        const proc = base.getCurrentProcess();
+        var cwd_copy: [user_mem.MAX_PATH_LEN]u8 = undefined;
+        var cwd_copy_len: usize = 0;
+
+        // SECURITY: Acquire cwd_lock to get consistent snapshot of cwd
+        const held = proc.cwd_lock.acquire();
+        cwd_copy_len = proc.cwd_len;
+        if (cwd_copy_len > 0 and cwd_copy_len <= user_mem.MAX_PATH_LEN) {
+            @memcpy(cwd_copy[0..cwd_copy_len], proc.cwd[0..cwd_copy_len]);
+        }
+        held.release();
+
+        if (cwd_copy_len == 0 or cwd_copy_len > user_mem.MAX_PATH_LEN) {
+            return error.ENOENT;
+        }
+        base_path = cwd_copy[0..cwd_copy_len];
+    } else {
+        // Validate dirfd is a directory
+        const table = base.getGlobalFdTable();
+        const fd_u32 = safeFdCast(dirfd) orelse return error.EBADF;
+        const fd = table.get(fd_u32) orelse return error.EBADF;
+
+        if (fd.ops != &fd_mod.dir_ops) {
+            return error.ENOTDIR;
+        }
+
+        // SECURITY: Directory FD validation uses pointer comparison against known tags
+        const initrd_tag_ptr: ?*anyopaque = @ptrCast(@constCast(&fd_mod.initrd_dir_tag));
+        const devfs_tag_ptr: ?*anyopaque = @ptrCast(@constCast(&fd_mod.devfs_dir_tag));
+
+        if (fd.private_data == devfs_tag_ptr) {
+            base_path = "/dev";
+        } else if (fd.private_data == null or fd.private_data == initrd_tag_ptr) {
+            base_path = "/";
+        } else {
+            return error.ENOTDIR;
+        }
+    }
+
+    // Join paths
+    return joinPaths(base_path, path, output_buf) orelse error.ENAMETOOLONG;
+}
+
 fn openPath(path: []const u8, flags: usize, mode: usize) SyscallError!usize {
     if (path.len == 0) {
         return error.ENOENT;
