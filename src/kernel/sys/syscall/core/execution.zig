@@ -361,7 +361,7 @@ pub fn sys_execve(frame: *hal.syscall.SyscallFrame, path_ptr: usize, argv_ptr: u
         aslr_offsets.stack_top, // ASLR stack top
         aslr.getPieBase(&aslr_offsets), // ASLR PIE base
     ) catch |err| {
-        console.err("sys_execve: Failed to exec: {}", .{err});
+        console.err("sys_execve: elf.exec() FAILED: {}", .{err});
         // Map ELF loader errors to appropriate syscall errors
         return switch (err) {
             error.OutOfMemory => error.ENOMEM,
@@ -478,7 +478,14 @@ pub fn sys_execve(frame: *hal.syscall.SyscallFrame, path_ptr: usize, argv_ptr: u
     alloc.destroy(old_user_vmm);
 
     // Switch to new address space immediately
-    hal.cpu.writeCr3(result.pml4_phys);
+    // On aarch64, user-space pages are walked via TTBR0_EL1, not TTBR1_EL1.
+    // writeCr3 writes to TTBR1 (kernel), so we must use writeTtbr0 for the
+    // user address space switch, matching the scheduler's behavior.
+    if (builtin.cpu.arch == .aarch64) {
+        hal.cpu.writeTtbr0(result.pml4_phys);
+    } else {
+        hal.cpu.writeCr3(result.pml4_phys);
+    }
 
     // Update the SyscallFrame to return to the new entry point with new stack.
     // Using the typed SyscallFrame struct instead of magic offsets ensures

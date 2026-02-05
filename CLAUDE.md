@@ -150,34 +150,26 @@ zig build test                                           # Host-based Zig unit t
    - **Action**: Do not attempt to fix - this is a documented test environment limitation, not a kernel bug
 2-4. **Other skipped tests**: Pre-existing skipped tests (not related to process groups)
 
-**Failing Tests (aarch64-specific)**:
-1. **process: exec replaces process** (`testExecReplacesProcess`)
-   - **Architecture**: aarch64 only (x86_64 passes)
-   - **Error**: `PageFault: addr 476000 not in any VMA (SIGSEGV)`
-   - **Root Cause**: Test binary (`test_binary.elf`) accesses memory beyond allocated BSS segment during initialization
-   - **Technical Details**:
-     - BSS segment allocated: `[0x474000, 0x476000)` (2 pages, 8192 bytes)
-     - Actual BSS size: 4160 bytes (ends at 0x475040)
-     - Fault address: 0x476000 (exactly at VMA boundary, first byte of next page)
-     - Fault occurs before `main()` during C runtime initialization
-   - **ELF Loader Status**: Working correctly - all pages properly allocated, mapped, and zeroed
-   - **Investigation Findings**:
-     - Same source code works on x86_64
-     - Adding guard pages shifts fault to next boundary (0x477000), suggesting iteration/walk-off issue
-     - Likely aarch64-specific issue in: Zig codegen, crt0 runtime, or ABI differences
-   - **Verified**: Core `execve` syscall works (loads binary, sets up address space, transfers control)
-   - **Action**: Do not attempt to fix kernel - this is a test binary generation issue, not a kernel bug
-   - **Files**:
-     - Test binary source: `src/user/test_binary/main.zig`
-     - ELF loader: `src/kernel/core/elf/loader.zig`
-     - Diagnostics added: loader.zig:309-314 (BSS segment logging)
+**Fixed Tests (aarch64-specific)**:
+1. **process: exec replaces process** (`testExecReplacesProcess`) -- FIXED
+   - **Previously**: `PageFault: addr 478000 not in any VMA (SIGSEGV)` on aarch64 only
+   - **Root Causes** (two bugs found):
+     1. **Missing copy_from_user fixup on aarch64**: The aarch64 data abort handler did not check
+        if the fault occurred during `_asm_copy_from_user` (which uses `ldtrb` unprivileged loads).
+        On x86_64, the exception handler redirects faults in this range to a fixup handler; on aarch64,
+        the fault fell through to the page fault handler, which saw "not in any VMA" and killed the process.
+        The fault happened when `copyStringFromUser` read argv past the end of mapped user memory.
+        **Fix**: `src/arch/aarch64/kernel/interrupts/root.zig` -- added fixup check matching x86_64.
+     2. **Wrong page table register in sys_execve**: `sys_execve` called `writeCr3()` which writes TTBR1_EL1
+        (kernel page table). On aarch64, user-space pages are walked via TTBR0_EL1. The scheduler already
+        used `writeTtbr0()` for context switches, but sys_execve did not.
+        **Fix**: `src/kernel/sys/syscall/core/execution.zig` -- use `writeTtbr0` on aarch64.
 
 **Test Environment Notes**:
 - Process spawn behavior: New processes get `pgid = pid` and `sid = pid` (become session leaders)
 - This makes it difficult to test scenarios requiring non-session-leader processes
 - Workaround: Tests that need specific session states use fork() + setsid() to establish clean contexts
 - Some edge case tests (like `testSetsidFailsForGroupLeader`) cannot be reliably tested due to this constraint
-- aarch64 exec test failure is a binary generation issue, not a test environment limitation
 
 ## Reference Skills
 

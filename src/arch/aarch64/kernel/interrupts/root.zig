@@ -15,6 +15,13 @@ const timing = @import("../timing.zig");
 // Using extern allows AArch64 to call the common dispatch table without module import issues
 extern fn dispatch_syscall(frame: *syscall.SyscallFrame) callconv(.c) void;
 
+// External symbols for safe copy fixup (defined in asm_helpers.S)
+// Used to detect page faults during copy_from_user/copy_to_user and redirect
+// to the fixup handler instead of treating them as genuine faults.
+extern const _asm_copy_user_start: anyopaque;
+extern const _asm_copy_user_end: anyopaque;
+extern const _asm_copy_user_fixup: anyopaque;
+
 // ============================================================================
 // Handler State Variables
 // ============================================================================
@@ -208,6 +215,18 @@ pub export fn handle_exception_zig(frame: *syscall.SyscallFrame, esr: u64, far: 
             cpu.halt();
         },
         .data_abort_lower, .data_abort_same => {
+            // Check for copy_from_user / copy_to_user fixup BEFORE page fault handler.
+            // If the faulting instruction is within the user-copy assembly range,
+            // redirect to the fixup handler which returns the remaining byte count.
+            // This matches the x86_64 behavior in handlers.zig.
+            const elr = frame.elr;
+            const copy_start = @intFromPtr(&_asm_copy_user_start);
+            const copy_end = @intFromPtr(&_asm_copy_user_end);
+            if (elr >= copy_start and elr < copy_end) {
+                frame.elr = @intFromPtr(&_asm_copy_user_fixup);
+                return;
+            }
+
             // Check if page fault handler can handle it
             if (@atomicLoad(?*const fn (u64, u64) bool, &page_fault_handler, .acquire)) |handler| {
                 if (handler(far, esr)) {

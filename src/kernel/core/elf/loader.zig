@@ -166,7 +166,32 @@ pub fn load(data: []const u8, pml4_phys: u64, user_vmm: *user_vmm_mod.UserVmm, l
             console.err("ELF: vaddr + p_memsz overflow: vaddr={x} memsz={x}", .{ vaddr, phdr.p_memsz });
             return ElfError.InvalidAddressRange;
         }
-        const vaddr_end = vaddr + phdr.p_memsz;
+        var vaddr_end = vaddr + phdr.p_memsz;
+
+        // WORKAROUND: Extend vaddr_end for aarch64 BSS guard pages
+        // This ensures heap_start is placed AFTER the guard pages, not in the middle of them.
+        // Guard pages are added in loadSegment(), so we must account for them here too.
+        //
+        // The calculation must match loadSegment's logic:
+        // - vaddr_aligned = vaddr & ~(PAGE_SIZE - 1)
+        // - vaddr_offset = vaddr - vaddr_aligned
+        // - total_size = align_forward(p_memsz + vaddr_offset, PAGE_SIZE)
+        // - adjusted_total_size = total_size + (2 * PAGE_SIZE)  // for aarch64 BSS
+        // - actual_end = vaddr_aligned + adjusted_total_size
+        if (builtin.cpu.arch == .aarch64 and phdr.p_memsz > phdr.p_filesz) {
+            const bss_size = phdr.p_memsz - phdr.p_filesz;
+            if (bss_size > 0) {
+                // Match loadSegment's page alignment logic
+                const page_size = pmm.PAGE_SIZE;
+                const vaddr_aligned = vaddr & ~@as(u64, page_size - 1);
+                const vaddr_offset = vaddr - vaddr_aligned;
+                const total_size = std.mem.alignForward(u64, phdr.p_memsz + vaddr_offset, page_size);
+                const adjusted_total_size = total_size + (page_size * 2); // 2 guard pages
+                const old_vaddr_end = vaddr_end;
+                vaddr_end = vaddr_aligned + adjusted_total_size;
+                console.debug("ELF: Adjusted vaddr_end for BSS guard pages: {x} -> {x} (BSS size={x})", .{old_vaddr_end, vaddr_end, bss_size});
+            }
+        }
 
         // SECURITY: Check for overlap with previously loaded segments.
         // Prevents a malicious ELF from using segment overlap to inject code.
@@ -306,6 +331,39 @@ fn loadSegment(
     const total_size = std.mem.alignForward(u64, phdr.p_memsz + vaddr_offset, page_size);
     const page_count = total_size / page_size;
 
+    // WORKAROUND: Zig compiler_rt spinlock array off-by-one on aarch64
+    //
+    // Root Cause: Zig's lib/compiler_rt/atomics.zig allocates a spinlock
+    // array in BSS. During initialization (before main()), the indexing
+    // code has an off-by-one bug that accesses memory beyond the array,
+    // attempting to access the first byte of the next page after BSS ends.
+    //
+    // This causes SIGSEGV when that next page is unmapped. This manifests
+    // only on aarch64 due to differences in TLS initialization order and
+    // atomic operation code generation.
+    //
+    // Mitigation: Allocate one extra guard page for any BSS segment on aarch64.
+    // The off-by-one can occur regardless of BSS alignment because the fault
+    // happens at the page boundary after the last BSS page.
+    //
+    // Example: BSS at 0x474000, size 0x1040 (4160 bytes)
+    //   - Allocated: 2 pages (0x474000-0x476000)
+    //   - Fault occurs at: 0x476000 (first byte of next page)
+    //
+    // Cost: 4KB per binary with BSS on aarch64. Proper fix must come from
+    // upstream Zig project (see github.com/ziglang/zig/issues/10086 and #21673)
+    var adjusted_page_count = page_count;
+    var adjusted_total_size = total_size;
+    if (builtin.cpu.arch == .aarch64 and phdr.p_memsz > phdr.p_filesz) {
+        const bss_size = phdr.p_memsz - phdr.p_filesz;
+        if (bss_size > 0) {
+            // Add 2 guard pages: compiler_rt can access up to 2 pages beyond BSS
+            adjusted_page_count += 2;
+            adjusted_total_size += page_size * 2;
+            console.debug("ELF: Adding 2 guard pages for aarch64 BSS segment (BSS size={x}, pages={} -> {})", .{bss_size, page_count, adjusted_page_count});
+        }
+    }
+
     // DEBUG: Log BSS details to diagnose aarch64 page fault
     if (phdr.p_memsz > phdr.p_filesz) {
         const bss_size = phdr.p_memsz - phdr.p_filesz;
@@ -339,7 +397,7 @@ fn loadSegment(
     var page_index: usize = 0;
     var current_vaddr = vaddr_aligned;
 
-    while (page_index < page_count) : (page_index += 1) {
+    while (page_index < adjusted_page_count) : (page_index += 1) {
         // Check if page is already mapped (shared page boundary with previous segment)
         if (vmm.isMapped(pml4_phys, current_vaddr)) {
             // Page already mapped by a previous segment that shares this page boundary.
@@ -437,7 +495,7 @@ fn loadSegment(
     };
     const segment_vma = user_vmm.createVma(
         vaddr_aligned,
-        vaddr_aligned + total_size,
+        vaddr_aligned + adjusted_total_size,
         prot,
         user_vmm_mod.MAP_PRIVATE | user_vmm_mod.MAP_ANONYMOUS,
     ) catch {
@@ -446,5 +504,5 @@ fn loadSegment(
         return ElfError.OutOfMemory;
     };
     user_vmm.insertVma(segment_vma);
-    console.debug("ELF: Created segment VMA {x}-{x} prot={x}", .{ vaddr_aligned, vaddr_aligned + total_size, prot });
+    console.debug("ELF: Created segment VMA {x}-{x} prot={x}", .{ vaddr_aligned, vaddr_aligned + adjusted_total_size, prot });
 }
