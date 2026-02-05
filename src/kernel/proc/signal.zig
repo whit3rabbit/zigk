@@ -8,6 +8,7 @@
 //! - `setupSignalFrame`: Constructs the `ucontext_t` structure on the user stack.
 //! - `sys_rt_sigreturn` (implied): Restores the thread context from the user stack after the handler returns.
 
+const builtin = @import("builtin");
 const std = @import("std");
 const sched = @import("sched");
 const thread = @import("thread");
@@ -435,7 +436,7 @@ fn setupSignalFrameForSyscall(frame: *hal.syscall.SyscallFrame, current_thread: 
             .rax = frame.rax,
             .rip = frame.getReturnRip(),
             .cs = 0x23, // User code segment
-            .rflags = frame.r11, // SYSCALL saves RFLAGS in R11
+            .rflags = if (builtin.cpu.arch == .aarch64) frame.spsr else frame.r11,
             .rsp = frame.getUserRsp(),
             .ss = 0x1b, // User data segment
             .gs = 0,
@@ -458,24 +459,43 @@ fn setupSignalFrameForSyscall(frame: *hal.syscall.SyscallFrame, current_thread: 
         return;
     };
 
-    // Push return address (restorer)
+    // Push return address (restorer trampoline)
     const restorer = action.restorer;
     if (restorer == 0) {
         console.warn("Signal: No restorer provided for signal {d}", .{signum});
     }
-    sp -= 8;
-    UserPtr.from(sp).writeValue(restorer) catch {
-        sched.exitWithStatus(128 + 11);
-        return;
-    };
+
+    if (builtin.cpu.arch == .aarch64) {
+        // On aarch64, 'ret' branches to x30 (link register), not stack.
+        // Set LR to restorer. Don't push to stack -- SP must point to ucontext
+        // so sys_rt_sigreturn reads the right data.
+        frame.r15 = restorer; // r15 = x30 (LR)
+    } else {
+        // On x86_64, 'ret' pops return address from stack.
+        sp -= 8;
+        UserPtr.from(sp).writeValue(restorer) catch {
+            sched.exitWithStatus(128 + 11);
+            return;
+        };
+    }
 
     // Update frame to execute handler
     frame.setReturnRip(action.handler);
     frame.setUserRsp(sp);
-    frame.rdi = @intCast(signum); // Arg 1: signum
 
-    // Clear direction flag in R11 (will become RFLAGS on sysret)
-    frame.r11 &= ~@as(u64, 0x400);
+    // First argument: signal number
+    // x86_64 C ABI: rdi = first arg. aarch64 C ABI: x0 (= frame.rax) = first arg.
+    if (builtin.cpu.arch == .aarch64) {
+        frame.rax = @intCast(signum);
+    } else {
+        frame.rdi = @intCast(signum);
+    }
+
+    if (builtin.cpu.arch == .x86_64) {
+        // Clear direction flag in R11 (will become RFLAGS on sysret)
+        frame.r11 &= ~@as(u64, 0x400);
+    }
+    // aarch64: SPSR is set correctly by exception return, no DF flag to clear
 
     // Update signal mask
     current_thread.sigmask |= action.mask;

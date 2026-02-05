@@ -253,21 +253,24 @@ pub fn sys_rt_sigreturn(frame: *hal.syscall.SyscallFrame) SyscallError!usize {
     frame.setReturnRip(mc.rip);
     frame.setUserRsp(mc.rsp); // Restore stack pointer
 
-    // SECURITY: Sanitize RFLAGS before restoration.
-    // User-controlled RFLAGS could contain dangerous bits that must be cleared:
-    // - IOPL (bits 12-13): If set to 3, allows user to execute IN/OUT instructions
-    //   directly, bypassing kernel I/O port protection. This would allow arbitrary
-    //   hardware access (disk, network, display).
-    // - VIF/VIP (bits 19-20): Virtual interrupt flags, should be kernel-controlled.
-    // - VM (bit 17): Virtual-8086 mode, must not be set.
-    // - RF (bit 16): Resume flag, kernel-controlled.
-    // - NT (bit 14): Nested task flag, kernel-controlled.
-    //
-    // We allow: CF, PF, AF, ZF, SF, TF, DF, OF (arithmetic/control flags).
-    // We force: IF=1 (interrupts enabled), reserved bit 1 set.
-    const SAFE_RFLAGS_MASK: u64 = 0x0000_0000_0000_0CD5; // CF,PF,AF,ZF,SF,DF,OF
-    const REQUIRED_RFLAGS: u64 = 0x0000_0000_0000_0202; // IF=1, reserved bit 1
-    frame.r11 = (mc.rflags & SAFE_RFLAGS_MASK) | REQUIRED_RFLAGS;
+    // SECURITY: Sanitize saved processor state before restoration.
+    if (builtin.cpu.arch == .aarch64) {
+        // Restore SPSR_EL1 with sanitization.
+        // Allow NZCV condition flags (bits 31:28).
+        // Force EL0t mode (bits 4:0 = 0) and interrupts unmasked (bits 9:6 = 0).
+        const SAFE_SPSR_MASK: u64 = 0xF000_0000; // NZCV only
+        frame.spsr = (mc.rflags & SAFE_SPSR_MASK);
+    } else {
+        // x86_64: Sanitize RFLAGS.
+        // User-controlled RFLAGS could contain dangerous bits:
+        // - IOPL (bits 12-13): allows direct IN/OUT if set to 3
+        // - VIF/VIP (bits 19-20), VM (bit 17), RF (bit 16), NT (bit 14)
+        // We allow: CF, PF, AF, ZF, SF, TF, DF, OF (arithmetic/control flags).
+        // We force: IF=1 (interrupts enabled), reserved bit 1 set.
+        const SAFE_RFLAGS_MASK: u64 = 0x0000_0000_0000_0CD5;
+        const REQUIRED_RFLAGS: u64 = 0x0000_0000_0000_0202;
+        frame.r11 = (mc.rflags & SAFE_RFLAGS_MASK) | REQUIRED_RFLAGS;
+    }
 
     // Restore FS/GS bases
     // GS is kernel-managed, but FS is TLS.
