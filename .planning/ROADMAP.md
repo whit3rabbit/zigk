@@ -12,7 +12,7 @@ Systematic expansion of Linux/POSIX syscall coverage from 190 to 300+ syscalls a
 
 Decimal phases appear between their surrounding integers in numeric order.
 
-- [ ] **Phase 1: Quick Wins - Trivial Stubs** - 24 syscalls returning defaults/ENOSYS/EPERM
+- [ ] **Phase 1: Quick Wins - Trivial Stubs** - 14 missing syscalls (10 already implemented) returning defaults/no-ops
 - [ ] **Phase 2: Credentials & Ownership** - UID/GID infrastructure + chown family
 - [ ] **Phase 3: I/O Multiplexing** - epoll backend + select/pselect6
 - [ ] **Phase 4: Event Notification FDs** - eventfd, timerfd, signalfd
@@ -25,19 +25,22 @@ Decimal phases appear between their surrounding integers in numeric order.
 ## Phase Details
 
 ### Phase 1: Quick Wins - Trivial Stubs
-**Goal**: Implement 24 trivial syscalls that return defaults, hardcoded values, or ENOSYS to boost coverage count and prevent programs from crashing when they probe capabilities
+**Goal**: Implement 14 missing trivial syscalls (of 24 originally scoped -- 10 already exist) that return defaults, hardcoded values, or accept-but-ignore parameters to boost coverage and prevent programs from crashing when they probe capabilities
 **Depends on**: Nothing (first phase)
-**Requirements**: STUB-01, STUB-02, STUB-03, STUB-04, STUB-05, STUB-06, STUB-07, STUB-08, STUB-09, STUB-10, STUB-11, STUB-12, STUB-13, STUB-14, STUB-15, STUB-16, STUB-17, STUB-18, STUB-19, STUB-20, STUB-21, STUB-22, STUB-23, STUB-24
+**Requirements**: STUB-01 through STUB-24
 **Success Criteria** (what must be TRUE):
   1. Programs can call dup3/accept4 with O_CLOEXEC/O_NONBLOCK flags and receive valid file descriptors
   2. Programs can query resource limits via getrlimit/prlimit64 and receive sensible defaults (no crashes)
   3. Programs can query scheduling parameters (sched_getscheduler, sched_get_priority_max/min) and receive valid values
   4. Programs can query filesystem stats (statfs/fstatfs) and receive basic metadata
   5. Programs can query signal/memory state (rt_sigpending, getresuid/getresgid, mincore) without ENOSYS errors
-**Plans**: TBD
+**Plans**: 4 plans
 
 Plans:
-- [ ] 01-01: TBD
+- [ ] 01-01-PLAN.md -- Infrastructure: syscall numbers, Process struct fields, memory no-ops (madvise, mlock, munlock, mlockall, munlockall, mincore)
+- [ ] 01-02-PLAN.md -- Scheduling stubs: sched_get/set_priority/scheduler/param, sched_rr_get_interval, ppoll
+- [ ] 01-03-PLAN.md -- Resource limits and signals: prlimit64, getrusage, rt_sigpending, rt_sigsuspend
+- [ ] 01-04-PLAN.md -- Integration tests and userspace wrappers for all 14 new syscalls
 
 ### Phase 2: Credentials & Ownership
 **Goal**: Implement user/group ID tracking and manipulation infrastructure, enabling multi-user permission checks and file ownership changes
@@ -157,11 +160,11 @@ Plans:
 ## Progress
 
 **Execution Order:**
-Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9
+Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Quick Wins - Trivial Stubs | 0/TBD | Not started | - |
+| 1. Quick Wins - Trivial Stubs | 0/4 | Planned | - |
 | 2. Credentials & Ownership | 0/TBD | Not started | - |
 | 3. I/O Multiplexing | 0/TBD | Not started | - |
 | 4. Event Notification FDs | 0/TBD | Not started | - |
