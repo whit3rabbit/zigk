@@ -46,7 +46,7 @@ pub const SYS_DUP3: usize = 24;
 /// Create pipe with flags
 pub const SYS_PIPE2: usize = 59;
 /// Create a file (legacy, use openat with O_CREAT)
-pub const SYS_CREAT: usize = 500; // zk compat: not in Linux aarch64
+pub const SYS_CREAT: usize = 529; // zk compat: not in Linux aarch64 (must differ from SYS_OPEN=500)
 /// Apply or remove an advisory lock on an open file
 pub const SYS_FLOCK: usize = 32;
 
