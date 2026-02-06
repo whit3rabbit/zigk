@@ -60,6 +60,8 @@ build.zig
 
 **Note**: Handler code is architecture-agnostic. The dispatch table matches `SYS_READ` to `sys_read` by name, so changing the numeric value of `SYS_READ` (0 on x86_64, 63 on aarch64) does not require any handler modifications.
 
+**WARNING -- Syscall Number Collisions**: If two `SYS_*` constants in `uapi/syscalls/` resolve to the **same numeric value**, the comptime dispatch table will silently pick whichever handler it finds first in the `inline for` loop. The shadowed handler will never be called. This is especially dangerous on aarch64 where legacy x86_64 syscalls (e.g., `getpgrp`, `open`, `pipe`) do not exist natively and must be given unique compat numbers in the 500+ range. Every `SYS_*` constant **must** have a unique value within its architecture.
+
 ## Dispatch Mechanism
 
 ### Entry Point
@@ -129,6 +131,7 @@ The `callHandler` function auto-converts error unions to negative errno at the b
     - Never dereference user pointers directly. Use `UserPtr` helpers.
     - Allocate kernel buffers for large data transfers (avoid large stack allocations).
     - Be aware of the `AccessMode` (Read/Write/Exec) when validating pointers.
+    - **Linux ABI type sizes matter**: `socklen_t` is `u32` (4 bytes), not `usize`. Reading 8 bytes from a 4-byte user variable via `readValue(usize)` picks up garbage from adjacent stack memory. This may silently work on x86_64 (adjacent bytes often zero) but fail on aarch64. Always match the exact C type size in `readValue`/`writeValue` calls.
 
 5.  **Debugging**:
     - Use `console.debug` sparingly; it can flood the logs.
@@ -216,6 +219,8 @@ Example differences:
 - `write`: x86_64=1, aarch64=64
 - `mmap`: x86_64=9, aarch64=222
 - `socket`: x86_64=41, aarch64=198
+
+**aarch64 Compat Range (500+)**: Linux aarch64 omits several legacy x86_64 syscalls (`open`, `pipe`, `getpgrp`, `dup2`, etc.). ZK assigns these unique numbers in the 500-599 range in `linux_aarch64.zig` so userspace code can use the same syscall wrappers on both architectures. These numbers must not collide with any native aarch64 syscall number.
 
 ### Conventions (x86_64)
 
@@ -317,11 +322,16 @@ Example differences:
 | 106 | setgid | (gid) -> int | process.zig |
 | 107 | geteuid | () -> uid_t | process.zig |
 | 108 | getegid | () -> gid_t | process.zig |
+| 109 | setpgid | (pid, pgid) -> int | process.zig |
 | 110 | getppid | () -> pid_t | process.zig |
+| 111 | getpgrp | () -> pid_t | process.zig |
+| 112 | setsid | () -> pid_t | process.zig |
 | 117 | setresuid | (ruid, euid, suid) -> int | process.zig |
 | 118 | getresuid | (ruid, euid, suid) -> int | process.zig |
 | 119 | setresgid | (rgid, egid, sgid) -> int | process.zig |
 | 120 | getresgid | (rgid, egid, sgid) -> int | process.zig |
+| 121 | getpgid | (pid) -> pid_t | process.zig |
+| 124 | getsid | (pid) -> pid_t | process.zig |
 | 137 | statfs | (path, buf) -> int | io.zig |
 | 138 | fstatfs | (fd, buf) -> int | io.zig |
 | 158 | arch_prctl | (code, addr) -> int | execution.zig |

@@ -148,8 +148,10 @@ pub const SYS_GETPPID: usize = 173;
 pub const SYS_SETPGID: usize = 154;
 /// Get process group ID
 pub const SYS_GETPGID: usize = 155;
-/// Get process group of calling process (uses getpgid on aarch64)
-pub const SYS_GETPGRP: usize = 155;
+/// Get process group of calling process
+/// Note: Linux aarch64 does NOT have a native getpgrp syscall (libc uses getpgid(0)).
+/// Must NOT share the same number as SYS_GETPGID or the dispatch table will shadow it.
+pub const SYS_GETPGRP: usize = 528; // zk compat: separate from getpgid
 /// Get session ID
 pub const SYS_GETSID: usize = 156;
 /// Create session and set process group ID

@@ -99,6 +99,48 @@ pub fn findThreadByTid(tid: u64) ?*Thread {
     return null;
 }
 
+/// Find a thread by the PID of its owning process.
+/// This correctly maps PID -> thread even when PID != TID.
+/// Skips zombie threads to avoid use-after-free on freed process structs.
+/// Returns null if no live thread belongs to a process with the given PID.
+pub fn findThreadByPid(pid: u32) ?*Thread {
+    const process_mod = @import("process");
+    const held = sched_mod.scheduler.lock.acquire();
+    defer held.release();
+
+    for (all_threads) |maybe_t| {
+        if (maybe_t) |t| {
+            // process is nulled by detachProcess when process struct is freed
+            if (t.process) |proc_opaque| {
+                const proc: *process_mod.Process = @ptrCast(@alignCast(proc_opaque));
+                if (proc.pid == pid) {
+                    return t;
+                }
+            }
+        }
+    }
+    return null;
+}
+
+/// Find the main thread for a process by matching the process pointer.
+/// Skips zombie threads to avoid stale matches.
+/// Returns null if no live thread belongs to this process.
+pub fn findThreadByProcess(proc: *anyopaque) ?*Thread {
+    const held = sched_mod.scheduler.lock.acquire();
+    defer held.release();
+
+    for (all_threads) |maybe_t| {
+        if (maybe_t) |t| {
+            // process pointer is nulled by detachProcess after destruction,
+            // so this comparison is safe even for zombie threads
+            if (t.process == proc) {
+                return t;
+            }
+        }
+    }
+    return null;
+}
+
 /// Find a thread by TID and increment its reference count (SAFE)
 /// Returns null if not found or if thread has exited
 /// The caller MUST call thread.unref() when done with the pointer.
@@ -117,6 +159,22 @@ pub fn findAndRefThread(tid: u64) ?*Thread {
         }
     }
     return null;
+}
+
+/// Detach a process from all threads that reference it.
+/// Called by destroyProcess before freeing the process struct
+/// to prevent use-after-free in findThreadByPid/findThreadByProcess.
+pub fn detachProcess(proc: *anyopaque) void {
+    const held = sched_mod.scheduler.lock.acquire();
+    defer held.release();
+
+    for (&all_threads) |*slot| {
+        if (slot.*) |t| {
+            if (t.process == proc) {
+                t.process = null;
+            }
+        }
+    }
 }
 
 /// Unregister a thread from TID lookup (called when thread is destroyed)

@@ -19,6 +19,12 @@ run_tests_for_arch() {
 
     echo -e "${BLUE}Running ZK kernel tests (arch=${arch}, timeout=${TIMEOUT}s)...${NC}"
 
+    # Recreate SFS disk image for aarch64 (prevents stale files from previous runs)
+    if [ "$arch" = "aarch64" ]; then
+        echo "Creating fresh SFS disk image..."
+        dd if=/dev/zero of=sfs.img bs=1M count=32 2>/dev/null
+    fi
+
     # Build test runner
     echo "Building test runner for ${arch}..."
     zig build -Darch=$arch -Ddefault-boot=test_runner 2>&1 | tee "build_${arch}.log"

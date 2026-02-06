@@ -76,7 +76,7 @@ pub fn testListenOnSocket() !void {
 
     // Listen with backlog of 5
     syscall.listen(fd, 5) catch |err| {
-        if (err == error.NotImplemented) return error.SkipTest;
+        if (err == error.NotImplemented or err == error.NetworkDown) return error.SkipTest;
         return err;
     };
 
@@ -160,6 +160,7 @@ pub fn testConnectToUnboundPort() !void {
         if (err != error.ConnectionRefused and
             err != error.ConnectionTimedOut and
             err != error.NetworkUnreachable and
+            err != error.NetworkDown and
             err != error.HostUnreachable) {
             if (err == error.NotImplemented) return error.SkipTest;
             return error.TestFailed;

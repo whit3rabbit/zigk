@@ -105,6 +105,23 @@ pub const SyscallError = error{
     NotImplemented,          // 38
     DirectoryNotEmpty,       // 39
     TooManySymbolicLinks,    // 40
+    NotASocket,              // 88
+    OperationNotSupported,   // 95
+    AddressFamilyNotSupported, // 97
+    AddressInUse,            // 98
+    AddressNotAvailable,     // 99
+    NetworkDown,             // 100
+    NetworkUnreachable,      // 101
+    ConnectionAborted,       // 103
+    ConnectionReset,         // 104
+    NoBufferSpace,           // 105
+    AlreadyConnected,        // 106
+    NotConnected,            // 107
+    ConnectionTimedOut,      // 110
+    ConnectionRefused,       // 111
+    HostUnreachable,         // 113
+    AlreadyInProgress,       // 114
+    InProgress,              // 115
     Unexpected,
 };
 
@@ -142,6 +159,23 @@ pub fn errorFromReturn(ret: usize) SyscallError {
         38 => error.NotImplemented,
         39 => error.DirectoryNotEmpty,
         40 => error.TooManySymbolicLinks,
+        88 => error.NotASocket,
+        95 => error.OperationNotSupported,
+        97 => error.AddressFamilyNotSupported,
+        98 => error.AddressInUse,
+        99 => error.AddressNotAvailable,
+        100 => error.NetworkDown,
+        101 => error.NetworkUnreachable,
+        103 => error.ConnectionAborted,
+        104 => error.ConnectionReset,
+        105 => error.NoBufferSpace,
+        106 => error.AlreadyConnected,
+        107 => error.NotConnected,
+        110 => error.ConnectionTimedOut,
+        111 => error.ConnectionRefused,
+        113 => error.HostUnreachable,
+        114 => error.AlreadyInProgress,
+        115 => error.InProgress,
         else => error.Unexpected,
     };
 }

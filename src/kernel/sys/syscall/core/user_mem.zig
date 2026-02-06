@@ -120,23 +120,20 @@ pub fn isValidUserAccess(ptr: usize, len: usize, mode: AccessMode) bool {
         return true;
     };
 
-    // Verify pages are mapped with appropriate permissions
-    switch (mode) {
-        .Read, .Execute => {
-            // For read/execute, just verify pages are user-accessible
-            return vmm.verifyUserRange(cr3, ptr, len);
-        },
-        .Write => {
-            // For write operations, we only do bounds checking.
-            // Page presence verification is skipped to support demand paging:
-            // - Stack buffers declared but not yet faulted-in
-            // - Lazy allocation of heap pages
-            // The assembly copy function (_asm_copy_to_user) will handle
-            // page faults gracefully and return error if pages aren't accessible.
-            // SECURITY: Bounds were already checked above - address must be in userspace range.
-            return true;
-        },
-    }
+    // Page presence verification is skipped for all modes to support demand paging:
+    // - Stack buffers declared but not yet faulted-in
+    // - Lazy allocation of heap pages
+    // - Pages that are mapped but whose software tracking bits may not match
+    //   the hardware state on aarch64 (where page table entry formats differ
+    //   between intermediate table descriptors and page descriptors)
+    //
+    // SECURITY: Bounds were already checked above -- address must be in
+    // userspace range. The assembly copy functions (_asm_copy_from_user /
+    // _asm_copy_to_user) handle page faults gracefully via the fixup
+    // mechanism and return error if pages aren't accessible.
+    _ = cr3;
+    _ = mode;
+    return true;
 }
 
 // =============================================================================

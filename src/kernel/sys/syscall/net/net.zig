@@ -1143,9 +1143,9 @@ pub fn sys_getsockopt(fd: usize, level: usize, optname: usize, optval_ptr: usize
                 return unixSocketErrorToSyscallError(err);
             };
 
-            // Verify buffer size
+            // Verify buffer size (socklen_t is u32 per Linux ABI)
             const optlen_uptr = user_mem.UserPtr.from(optlen_ptr);
-            const koptlen = optlen_uptr.readValue(usize) catch {
+            const koptlen: usize = optlen_uptr.readValue(u32) catch {
                 return error.EFAULT;
             };
 
@@ -1170,7 +1170,7 @@ pub fn sys_getsockopt(fd: usize, level: usize, optname: usize, optval_ptr: usize
                 return error.EFAULT;
             };
 
-            optlen_uptr.writeValue(@as(usize, @sizeOf(UCred))) catch {
+            optlen_uptr.writeValue(@as(u32, @sizeOf(UCred))) catch {
                 return error.EFAULT;
             };
 
@@ -1184,10 +1184,12 @@ pub fn sys_getsockopt(fd: usize, level: usize, optname: usize, optval_ptr: usize
         return error.ENOTSOCK;
     };
 
+    // Linux ABI: optlen is socklen_t* (u32*), not usize*
     const optlen_uptr = user_mem.UserPtr.from(optlen_ptr);
-    var koptlen = optlen_uptr.readValue(usize) catch {
+    const koptlen_u32 = optlen_uptr.readValue(u32) catch {
         return error.EFAULT;
     };
+    var koptlen: usize = koptlen_u32;
 
     if (koptlen > 0 and !isValidUserAccess(optval_ptr, koptlen, AccessMode.Write)) {
         return error.EFAULT;
@@ -1213,7 +1215,8 @@ pub fn sys_getsockopt(fd: usize, level: usize, optname: usize, optval_ptr: usize
         };
     }
 
-    optlen_uptr.writeValue(result_len) catch {
+    // Write back as u32 to match socklen_t ABI
+    optlen_uptr.writeValue(@as(u32, @truncate(result_len))) catch {
         return error.EFAULT;
     };
 

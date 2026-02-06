@@ -97,9 +97,15 @@ pub fn createProcess(parent: ?*Process) !*Process {
         proc.vdso_base = base;
     }
 
-    // Add to parent's children list
+    // Add to process tree
     if (parent) |p| {
         p.addChild(proc);
+    } else if (manager.init_process) |init| {
+        // No parent specified but init exists -- adopt under init (e.g. driver processes)
+        init.addChild(proc);
+    } else {
+        // Very first process created -- this IS init (PID 1)
+        manager.setInitProcess(proc);
     }
 
     _ = manager.process_count.fetchAdd(1, .monotonic);
@@ -452,6 +458,11 @@ pub fn destroyProcess(proc: *Process) void {
 
     // Free capabilities
     proc.capabilities.deinit(alloc);
+
+    // Detach process from any threads that still reference it.
+    // This prevents use-after-free in findThreadByPid/findThreadByProcess
+    // when zombie threads remain in all_threads after the process struct is freed.
+    sched.detachProcess(proc);
 
     // Free process struct
     alloc.destroy(proc);

@@ -377,7 +377,7 @@ fn syscallErrorToErrno(err: syscall.SyscallError) c_int {
         error.NotImplemented => errno_mod.ENOSYS,
         error.DirectoryNotEmpty => errno_mod.ENOTEMPTY,
         error.TooManySymbolicLinks => errno_mod.ELOOP,
-        error.Unexpected => errno_mod.EIO, // Map unexpected to I/O error
+        else => errno_mod.EIO, // Network errors and unexpected map to I/O error
     };
 }
 

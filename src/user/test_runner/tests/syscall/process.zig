@@ -189,8 +189,8 @@ pub fn testSysinfoValid() !void {
     var info: syscall.time.SysInfo = undefined;
     try syscall.time.sysinfo(&info);
 
-    // Uptime should be positive
-    if (info.uptime <= 0) return error.TestFailed;
+    // Uptime should be non-negative (may be 0 if system just booted within first second)
+    if (info.uptime < 0) return error.TestFailed;
 
     // Total RAM should be greater than free RAM
     if (info.totalram < info.freeram) return error.TestFailed;
@@ -630,8 +630,9 @@ pub fn testWaitpidWrapper() !void {
             return error.TestFailed;
         }
 
-        // Verify exit status (42)
-        if (status != 42) {
+        // Verify exit status (42) - wstatus format: exit code in bits [15:8]
+        const exit_code = (@as(u32, @bitCast(status)) >> 8) & 0xFF;
+        if (exit_code != 42) {
             return error.TestFailed;
         }
     }
@@ -654,8 +655,9 @@ pub fn testWait4ProcessGroup() !void {
             return error.TestFailed;
         }
 
-        // Verify exit status (33)
-        if (status != 33) {
+        // Verify exit status (33) - wstatus format: exit code in bits [15:8]
+        const exit_code = (@as(u32, @bitCast(status)) >> 8) & 0xFF;
+        if (exit_code != 33) {
             return error.TestFailed;
         }
     }
@@ -668,13 +670,15 @@ pub fn testWait4SpecificProcessGroup() !void {
 
     if (pid == 0) {
         // Child: create new process group with our PID
-        try syscall.setpgid(0, 0);
+        syscall.setpgid(0, 0) catch {
+            syscall.exit(99);
+        };
         // Exit with status 55
         syscall.exit(55);
     } else {
         // Parent: get child's process group (should be equal to its PID)
-        // Wait a bit for child to call setpgid
-        syscall.sleep_ms(10) catch {};
+        // Wait a bit for child to call setpgid and exit
+        syscall.sleep_ms(50) catch {};
 
         const child_pgid = try syscall.getpgid(pid);
 
@@ -686,8 +690,9 @@ pub fn testWait4SpecificProcessGroup() !void {
             return error.TestFailed;
         }
 
-        // Verify exit status (55)
-        if (status != 55) {
+        // Verify exit status (55) - wstatus format: exit code in bits [15:8]
+        const exit_code = (@as(u32, @bitCast(status)) >> 8) & 0xFF;
+        if (exit_code != 55) {
             return error.TestFailed;
         }
     }
@@ -699,6 +704,9 @@ pub fn testWait4SpecificProcessGroup() !void {
 
 /// Test: Setting and getting foreground process group (TIOCGPGRP/TIOCSPGRP)
 pub fn testTerminalForegroundPgroup() !void {
+    // Ensure we have a controlling terminal (required for TIOCGPGRP/TIOCSPGRP)
+    _ = syscall.tiocsctty(0, 0) catch {};
+
     // Get current foreground process group
     const orig_pgid = try syscall.tiocgpgrp(0);
 
@@ -758,7 +766,9 @@ pub fn testSigcontResumesProcess() !void {
 
     if (pid == 0) {
         // Child: Stop ourselves, wait to be continued
-        _ = syscall.kill(0, 19) catch {}; // SIGSTOP = 19 (cannot be caught)
+        // Use getpid() to send SIGSTOP only to this process, not the whole group
+        const my_pid = syscall.getpid();
+        _ = syscall.kill(my_pid, 19) catch {}; // SIGSTOP = 19 (cannot be caught)
         // After SIGCONT, we should resume here and exit normally
         syscall.exit(42);
     } else {
@@ -773,7 +783,9 @@ pub fn testSigcontResumesProcess() !void {
         _ = try syscall.wait4(pid, &status, 0);
 
         // Verify child exited with status 42 (meaning it resumed successfully)
-        if (status != 42) {
+        // wstatus format: exit code in bits [15:8]
+        const exit_code = (@as(u32, @bitCast(status)) >> 8) & 0xFF;
+        if (exit_code != 42) {
             return error.TestFailed;
         }
     }

@@ -35,7 +35,10 @@ pub const getLoadAverages = scheduler.getLoadAverages;
 // Thread Management
 pub const addThread = thread_logic.addThread;
 pub const findThreadByTid = thread_logic.findThreadByTid;
+pub const findThreadByPid = thread_logic.findThreadByPid;
+pub const findThreadByProcess = thread_logic.findThreadByProcess;
 pub const unregisterThread = thread_logic.unregisterThread;
+pub const detachProcess = thread_logic.detachProcess;
 pub const getCurrentThread = thread_logic.getCurrentThread;
 pub const setCurrentThread = thread_logic.setCurrentThread;
 pub const getIdleThread = thread_logic.getIdleThread; // Maybe internal?

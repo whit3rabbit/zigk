@@ -437,9 +437,9 @@ fn deliverToPgroupMember(ctx: *PgroupSignalCtx, proc: *base.Process) void {
         return;
     }
 
-    // Find the main thread for this process
-    const target_thread = sched.findThreadByTid(proc.pid) orelse {
-        return; // Process has no main thread, skip
+    // Find the main thread for this process by matching the process pointer
+    const target_thread = sched.findThreadByProcess(proc) orelse {
+        return; // Process has no thread, skip
     };
 
     // Signal 0 is just a check - count it but don't deliver
@@ -512,9 +512,9 @@ fn deliverToBroadcastTarget(ctx: *BroadcastSignalCtx, proc: *base.Process) void 
         return;
     }
 
-    // Find the main thread for this process
-    const target_thread = sched.findThreadByTid(proc.pid) orelse {
-        return; // Process has no main thread, skip
+    // Find the main thread for this process by matching the process pointer
+    const target_thread = sched.findThreadByProcess(proc) orelse {
+        return; // Process has no thread, skip
     };
 
     // Signal 0 is just a check - count it but don't deliver
@@ -667,9 +667,8 @@ pub fn sys_kill(pid: usize, sig: usize) SyscallError!usize {
     }
 
     // pid > 0: Send to specific process
-    // Find the target process's main thread
-    // For MVP, we search threads by PID (treating PID as TID of main thread)
-    const target = sched.findThreadByTid(@intCast(pid_i)) orelse {
+    // Find the target process's main thread by process PID
+    const target = sched.findThreadByPid(@intCast(pid_i)) orelse {
         return error.ESRCH;
     };
 
