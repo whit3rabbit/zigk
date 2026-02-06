@@ -280,6 +280,20 @@ pub const SYS_CLOCK_GETTIME: usize = 113;
 pub const SYS_CLOCK_GETRES: usize = 114;
 /// High-resolution sleep with clock selection
 pub const SYS_CLOCK_NANOSLEEP: usize = 115;
+/// Set scheduling parameters
+pub const SYS_SCHED_SETPARAM: usize = 118;
+/// Set scheduling policy and parameters
+pub const SYS_SCHED_SETSCHEDULER: usize = 119;
+/// Get scheduling policy
+pub const SYS_SCHED_GETSCHEDULER: usize = 120;
+/// Get scheduling parameters
+pub const SYS_SCHED_GETPARAM: usize = 121;
+/// Get maximum priority value
+pub const SYS_SCHED_GET_PRIORITY_MAX: usize = 125;
+/// Get minimum priority value
+pub const SYS_SCHED_GET_PRIORITY_MIN: usize = 126;
+/// Get round-robin time quantum
+pub const SYS_SCHED_RR_GET_INTERVAL: usize = 127;
 /// High-resolution sleep
 pub const SYS_NANOSLEEP: usize = 101;
 /// Get interval timer
@@ -307,6 +321,8 @@ pub const SYS_EPOLL_CREATE1: usize = 20;
 pub const SYS_EPOLL_CTL: usize = 21;
 /// Wait for I/O events with signal mask
 pub const SYS_EPOLL_PWAIT: usize = 22;
+/// Wait for events on file descriptors with signal mask
+pub const SYS_PPOLL: usize = 73;
 /// eventfd with flags
 pub const SYS_EVENTFD2: usize = 19;
 /// signalfd with flags

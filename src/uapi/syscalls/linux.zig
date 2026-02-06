@@ -242,6 +242,20 @@ pub const SYS_MUNLOCK: usize = 150;
 pub const SYS_MLOCKALL: usize = 151;
 /// Unlock all memory pages
 pub const SYS_MUNLOCKALL: usize = 152;
+/// Set scheduling parameters
+pub const SYS_SCHED_SETPARAM: usize = 142;
+/// Get scheduling parameters
+pub const SYS_SCHED_GETPARAM: usize = 143;
+/// Set scheduling policy and parameters
+pub const SYS_SCHED_SETSCHEDULER: usize = 144;
+/// Get scheduling policy
+pub const SYS_SCHED_GETSCHEDULER: usize = 145;
+/// Get maximum priority value
+pub const SYS_SCHED_GET_PRIORITY_MAX: usize = 146;
+/// Get minimum priority value
+pub const SYS_SCHED_GET_PRIORITY_MIN: usize = 147;
+/// Get round-robin time quantum
+pub const SYS_SCHED_RR_GET_INTERVAL: usize = 148;
 /// Process control operations
 pub const SYS_PRCTL: usize = 157;
 /// Set architecture-specific thread state
@@ -322,6 +336,8 @@ pub const SYS_READLINKAT: usize = 267;
 pub const SYS_FCHMODAT: usize = 268;
 /// Check access relative to directory FD
 pub const SYS_FACCESSAT: usize = 269;
+/// Wait for events on file descriptors with signal mask
+pub const SYS_PPOLL: usize = 271;
 /// Disassociate parts of execution context
 pub const SYS_UNSHARE: usize = 272;
 /// Splice data between file descriptors

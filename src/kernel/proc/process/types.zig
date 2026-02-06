@@ -226,6 +226,11 @@ pub const Process = struct {
     itimer_prof_interval: u64 = 0,
     itimer_prof_value: u64 = 0,
 
+    /// Scheduler policy (SCHED_NORMAL, SCHED_RR, SCHED_FIFO, etc.)
+    sched_policy: u8 = 0,
+    /// Scheduler priority (static priority for RT policies, nice value for NORMAL)
+    sched_priority: i32 = 0,
+
     // Methods for hierarchy management that operate directly on state
     // Moved here to allow simple imports
 
