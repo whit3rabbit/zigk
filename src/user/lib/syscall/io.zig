@@ -388,5 +388,116 @@ pub fn fchmodat(dirfd: i32, path: [*:0]const u8, mode: u32, flags: i32) SyscallE
     if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
 }
 
+// =============================================================================
+// File Descriptor Duplication & Pipes
+// =============================================================================
+
+/// Duplicate a file descriptor
+pub fn dup(oldfd: i32) SyscallError!i32 {
+    const ret = primitive.syscall1(syscalls.SYS_DUP, @bitCast(@as(isize, oldfd)));
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return @truncate(@as(isize, @bitCast(ret)));
+}
+
+/// Duplicate a file descriptor to a specific number
+pub fn dup2(oldfd: i32, newfd: i32) SyscallError!i32 {
+    const ret = primitive.syscall2(syscalls.SYS_DUP2, @bitCast(@as(isize, oldfd)), @bitCast(@as(isize, newfd)));
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return @truncate(@as(isize, @bitCast(ret)));
+}
+
+/// Create a pipe
+pub fn pipe(pipefd: *[2]i32) SyscallError!void {
+    const ret = primitive.syscall1(syscalls.SYS_PIPE, @intFromPtr(pipefd));
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Create a pipe with flags
+pub fn pipe2(pipefd: *[2]i32, flags: i32) SyscallError!void {
+    const ret = primitive.syscall2(syscalls.SYS_PIPE2, @intFromPtr(pipefd), @bitCast(@as(isize, flags)));
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// File control operations
+pub fn fcntl(fd: i32, cmd: i32, arg: usize) SyscallError!usize {
+    const ret = primitive.syscall3(syscalls.SYS_FCNTL, @bitCast(@as(isize, fd)), @bitCast(@as(isize, cmd)), arg);
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return ret;
+}
+
+/// Read from file descriptor at a given offset without changing file position
+pub fn pread64(fd: i32, buf: [*]u8, count: usize, offset: u64) SyscallError!size_t {
+    const ret = primitive.syscall4(syscalls.SYS_PREAD64, @bitCast(@as(isize, fd)), @intFromPtr(buf), count, offset);
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return ret;
+}
+
+// =============================================================================
+// File Info Operations (stat, truncate, rename, chmod, link, symlink, readlink)
+// =============================================================================
+
+pub const Stat = uapi.stat.Stat;
+
+/// Get file status by path
+pub fn stat(path: [*:0]const u8, buf: *Stat) SyscallError!void {
+    const ret = primitive.syscall2(syscalls.SYS_STAT, @intFromPtr(path), @intFromPtr(buf));
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Get file status by file descriptor
+pub fn fstat(fd: i32, buf: *Stat) SyscallError!void {
+    const ret = primitive.syscall2(syscalls.SYS_FSTAT, @bitCast(@as(isize, fd)), @intFromPtr(buf));
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Get file status by path (does not follow symlinks)
+pub fn lstat(path: [*:0]const u8, buf: *Stat) SyscallError!void {
+    const ret = primitive.syscall2(syscalls.SYS_LSTAT, @intFromPtr(path), @intFromPtr(buf));
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Truncate a file to a specified length by path
+pub fn truncate(path: [*:0]const u8, length: usize) SyscallError!void {
+    const ret = primitive.syscall2(syscalls.SYS_TRUNCATE, @intFromPtr(path), length);
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Truncate a file to a specified length by file descriptor
+pub fn ftruncate(fd: i32, length: usize) SyscallError!void {
+    const ret = primitive.syscall2(syscalls.SYS_FTRUNCATE, @bitCast(@as(isize, fd)), length);
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Rename a file
+pub fn rename(old: [*:0]const u8, new: [*:0]const u8) SyscallError!void {
+    const ret = primitive.syscall2(syscalls.SYS_RENAME, @intFromPtr(old), @intFromPtr(new));
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Change file permissions
+pub fn chmod(path: [*:0]const u8, mode: u32) SyscallError!void {
+    const ret = primitive.syscall2(syscalls.SYS_CHMOD, @intFromPtr(path), mode);
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Create a hard link
+pub fn link(old: [*:0]const u8, new_path: [*:0]const u8) SyscallError!void {
+    const ret = primitive.syscall2(syscalls.SYS_LINK, @intFromPtr(old), @intFromPtr(new_path));
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Create a symbolic link
+pub fn symlink(target: [*:0]const u8, linkpath: [*:0]const u8) SyscallError!void {
+    const ret = primitive.syscall2(syscalls.SYS_SYMLINK, @intFromPtr(target), @intFromPtr(linkpath));
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Read the target of a symbolic link
+pub fn readlink(path: [*:0]const u8, buf: [*]u8, bufsiz: usize) SyscallError!size_t {
+    const ret = primitive.syscall3(syscalls.SYS_READLINK, @intFromPtr(path), @intFromPtr(buf), bufsiz);
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return ret;
+}
+
 // Alias size_t to usize for compatibility if needed, but usize is standard in Zig.
 const size_t = usize;

@@ -328,3 +328,30 @@ pub fn alarm(seconds: u32) u32 {
     // alarm() never fails, returns remaining seconds
     return @truncate(ret);
 }
+
+// =============================================================================
+// Misc Process/System Syscalls (umask, uname)
+// =============================================================================
+
+/// Set file mode creation mask
+/// Returns the previous mask value
+pub fn umask(mask: u32) u32 {
+    const ret = primitive.syscall1(syscalls.SYS_UMASK, mask);
+    return @truncate(ret);
+}
+
+/// System identification structure
+pub const Utsname = extern struct {
+    sysname: [65]u8,
+    nodename: [65]u8,
+    release: [65]u8,
+    version: [65]u8,
+    machine: [65]u8,
+    domainname: [65]u8,
+};
+
+/// Get system identification
+pub fn uname(buf: *Utsname) SyscallError!void {
+    const ret = primitive.syscall1(syscalls.SYS_UNAME, @intFromPtr(buf));
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}

@@ -6,6 +6,11 @@ const process_tests = @import("tests/syscall/process.zig");
 const uid_gid_tests = @import("tests/syscall/uid_gid.zig");
 const signal_tests = @import("tests/syscall/signals.zig");
 const socket_tests = @import("tests/syscall/sockets.zig");
+const fd_ops_tests = @import("tests/syscall/fd_ops.zig");
+const file_info_tests = @import("tests/syscall/file_info.zig");
+const time_ops_tests = @import("tests/syscall/time_ops.zig");
+const misc_tests = @import("tests/syscall/misc.zig");
+const at_ops_tests = @import("tests/syscall/at_ops.zig");
 const fs_tests = @import("tests/fs/basic.zig");
 const fs_error_tests = @import("tests/fs/errors.zig");
 const regression_tests = @import("tests/regression/sfs_issues.zig");
@@ -255,6 +260,60 @@ export fn main(argc: i32, argv: [*][*:0]u8) i32 {
     runner.runTest("socket: getsockname", socket_tests.testGetSockName);
     runner.runTest("socket: setsockopt SO_REUSEADDR", socket_tests.testSetSockoptReuseAddr);
     runner.runTest("socket: connect to unbound port", socket_tests.testConnectToUnboundPort);
+
+    // FD operations tests
+    runner.runTest("fd_ops: dup basic", fd_ops_tests.testDupBasic);
+    runner.runTest("fd_ops: dup2 basic", fd_ops_tests.testDup2Basic);
+    runner.runTest("fd_ops: dup2 same fd", fd_ops_tests.testDup2SameFd);
+    runner.runTest("fd_ops: dup2 closes target", fd_ops_tests.testDup2ClosesTarget);
+    runner.runTest("fd_ops: pipe basic", fd_ops_tests.testPipeBasic);
+    runner.runTest("fd_ops: pipe direction", fd_ops_tests.testPipeDirection);
+    runner.runTest("fd_ops: pipe close EOF", fd_ops_tests.testPipeClose);
+    runner.runTest("fd_ops: fcntl getflags", fd_ops_tests.testFcntlGetFlags);
+    runner.runTest("fd_ops: fcntl dupfd", fd_ops_tests.testFcntlDupfd);
+    runner.runTest("fd_ops: pread64 basic", fd_ops_tests.testPread64Basic);
+
+    // File info tests
+    runner.runTest("file_info: stat basic file", file_info_tests.testStatBasicFile);
+    runner.runTest("file_info: fstat open file", file_info_tests.testFstatOpenFile);
+    runner.runTest("file_info: stat size matches", file_info_tests.testStatSize);
+    runner.runTest("file_info: stat directory mode", file_info_tests.testStatModeDirectory);
+    runner.runTest("file_info: ftruncate file", file_info_tests.testFtruncateFile);
+    runner.runTest("file_info: rename file", file_info_tests.testRenameFile);
+    runner.runTest("file_info: chmod file", file_info_tests.testChmodFile);
+    runner.runTest("file_info: unlink file", file_info_tests.testUnlinkFile);
+    runner.runTest("file_info: rmdir directory", file_info_tests.testRmdirDirectory);
+    runner.runTest("file_info: access exists", file_info_tests.testAccessExists);
+    runner.runTest("file_info: access nonexistent", file_info_tests.testAccessNonexistent);
+    runner.runTest("file_info: lstat basic", file_info_tests.testLstatBasic);
+
+    // Time operations tests
+    runner.runTest("time_ops: nanosleep basic", time_ops_tests.testNanosleepBasic);
+    runner.runTest("time_ops: clock_gettime monotonic", time_ops_tests.testClockGettimeMonotonic);
+    runner.runTest("time_ops: clock_gettime realtime", time_ops_tests.testClockGettimeRealtime);
+    runner.runTest("time_ops: monotonic 2 calls", time_ops_tests.testClockGettimeMonotonic2Calls);
+    runner.runTest("time_ops: clock_getres monotonic", time_ops_tests.testClockGetresMonotonic);
+    runner.runTest("time_ops: gettimeofday basic", time_ops_tests.testGettimeofdayBasic);
+    runner.runTest("time_ops: sleep_ms basic", time_ops_tests.testSleepMsBasic);
+    runner.runTest("time_ops: sched_yield", time_ops_tests.testSchedYield);
+
+    // Misc syscall tests
+    runner.runTest("misc: uname basic", misc_tests.testUnameBasic);
+    runner.runTest("misc: uname machine arch", misc_tests.testUnameMachineArch);
+    runner.runTest("misc: umask basic", misc_tests.testUmaskBasic);
+    runner.runTest("misc: umask restore", misc_tests.testUmaskRestore);
+    runner.runTest("misc: getrandom basic", misc_tests.testGetrandomBasic);
+    runner.runTest("misc: getrandom nonblocking", misc_tests.testGetrandomNonblocking);
+    runner.runTest("misc: writev basic", misc_tests.testWritevBasic);
+    runner.runTest("misc: poll timeout", misc_tests.testPollTimeout);
+
+    // AT* family tests
+    runner.runTest("at_ops: fstatat basic", at_ops_tests.testFstatatBasic);
+    runner.runTest("at_ops: mkdirat basic", at_ops_tests.testMkdiratBasic);
+    runner.runTest("at_ops: unlinkat file", at_ops_tests.testUnlinkatFile);
+    runner.runTest("at_ops: unlinkat dir", at_ops_tests.testUnlinkatDir);
+    runner.runTest("at_ops: renameat basic", at_ops_tests.testRenameatBasic);
+    runner.runTest("at_ops: fchmodat basic", at_ops_tests.testFchmodatBasic);
 
     // Stress tests
     runner.runTest("stress: write 10MB file", stress_tests.testWrite10MbFile);

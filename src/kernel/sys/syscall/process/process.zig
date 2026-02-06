@@ -623,8 +623,12 @@ pub fn sys_uname(buf_ptr: usize) SyscallError!usize {
     const version = "#1 SMP";
     hal.mem.copy(utsname[3 * UTSNAME_LEN .. 3 * UTSNAME_LEN + version.len].ptr, version.ptr, version.len);
 
-    // machine
-    const machine = "x86_64";
+    // machine - architecture-dependent
+    const machine = switch (@import("builtin").cpu.arch) {
+        .x86_64 => "x86_64",
+        .aarch64 => "aarch64",
+        else => "unknown",
+    };
     hal.mem.copy(utsname[4 * UTSNAME_LEN .. 4 * UTSNAME_LEN + machine.len].ptr, machine.ptr, machine.len);
 
     const uptr = UserPtr.from(buf_ptr);

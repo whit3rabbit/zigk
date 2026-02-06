@@ -72,20 +72,9 @@ fn canonicalizePath(path: []const u8, out_buf: []u8) ?[]const u8 {
     return out_buf[0..out_idx];
 }
 
-/// sys_stat (4) - Get file status by path
-pub fn sys_stat(path_ptr: usize, stat_buf_ptr: usize) SyscallError!usize {
-    const alloc = heap.allocator();
-    const path_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
-    defer alloc.free(path_buf);
-    const canon_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
-    defer alloc.free(canon_buf);
-
-    const raw_path = user_mem.copyStringFromUser(path_buf, path_ptr) catch return error.EFAULT;
-    if (raw_path.len == 0) return error.ENOENT;
-
-    // Canonicalize path
-    const path = canonicalizePath(raw_path, canon_buf) orelse return error.ENOENT;
-
+/// Internal: stat a canonicalized kernel-space path and write result to userspace buffer.
+/// Used by sys_stat and sys_fstatat to avoid redundant copyStringFromUser calls.
+fn statPathKernel(path: []const u8, stat_buf_ptr: usize) SyscallError!usize {
     // Validate userspace buffer
     if (!isValidUserAccess(stat_buf_ptr, @sizeOf(uapi.stat.Stat), AccessMode.Write)) {
         return error.EFAULT;
@@ -120,6 +109,22 @@ pub fn sys_stat(path_ptr: usize, stat_buf_ptr: usize) SyscallError!usize {
     return 0;
 }
 
+/// sys_stat (4) - Get file status by path
+pub fn sys_stat(path_ptr: usize, stat_buf_ptr: usize) SyscallError!usize {
+    const alloc = heap.allocator();
+    const path_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(path_buf);
+    const canon_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(canon_buf);
+
+    const raw_path = user_mem.copyStringFromUser(path_buf, path_ptr) catch return error.EFAULT;
+    if (raw_path.len == 0) return error.ENOENT;
+
+    const path = canonicalizePath(raw_path, canon_buf) orelse return error.ENOENT;
+
+    return statPathKernel(path, stat_buf_ptr);
+}
+
 /// sys_lstat (6) - Get file status (do not follow symlinks)
 pub fn sys_lstat(path_ptr: usize, stat_buf: usize) SyscallError!usize {
     // Current VFS implementation doesn't support symlinks fully,
@@ -129,27 +134,26 @@ pub fn sys_lstat(path_ptr: usize, stat_buf: usize) SyscallError!usize {
 
 /// sys_fstatat (262/79 - SYS_NEWFSTATAT) - Get file status relative to directory FD
 pub fn sys_fstatat(dirfd: usize, path_ptr: usize, statbuf_ptr: usize, flags: usize) SyscallError!usize {
-    const AT_SYMLINK_NOFOLLOW: usize = 0x100;
+    _ = flags; // AT_SYMLINK_NOFOLLOW not yet meaningful (no symlink support)
     const fd_syscall = @import("syscall_fd");
 
     const alloc = heap.allocator();
     const path_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
     defer alloc.free(path_buf);
+    const canon_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(canon_buf);
 
-    const path = user_mem.copyStringFromUser(path_buf, path_ptr) catch |err| {
+    const raw_path = user_mem.copyStringFromUser(path_buf, path_ptr) catch |err| {
         if (err == error.NameTooLong) return error.ENAMETOOLONG;
         return error.EFAULT;
     };
 
-    if (path.len == 0) return error.ENOENT;
+    if (raw_path.len == 0) return error.ENOENT;
 
-    // Handle absolute paths directly (bypass dirfd)
-    if (path[0] == '/') {
-        if (flags & AT_SYMLINK_NOFOLLOW != 0) {
-            return sys_lstat(@intFromPtr(path.ptr), statbuf_ptr);
-        } else {
-            return sys_stat(@intFromPtr(path.ptr), statbuf_ptr);
-        }
+    // For absolute paths, bypass dirfd resolution
+    if (raw_path[0] == '/') {
+        const path = canonicalizePath(raw_path, canon_buf) orelse return error.ENOENT;
+        return statPathKernel(path, statbuf_ptr);
     }
 
     // Allocate buffer for resolved path
@@ -157,14 +161,9 @@ pub fn sys_fstatat(dirfd: usize, path_ptr: usize, statbuf_ptr: usize, flags: usi
     defer alloc.free(resolved_buf);
 
     // Resolve path relative to dirfd
-    const resolved = fd_syscall.resolvePathAt(dirfd, path, resolved_buf) catch |err| return err;
-
-    // Call appropriate base syscall based on flags
-    if (flags & AT_SYMLINK_NOFOLLOW != 0) {
-        return sys_lstat(@intFromPtr(resolved.ptr), statbuf_ptr);
-    } else {
-        return sys_stat(@intFromPtr(resolved.ptr), statbuf_ptr);
-    }
+    const resolved = fd_syscall.resolvePathAt(dirfd, raw_path, resolved_buf) catch |err| return err;
+    const path = canonicalizePath(resolved, canon_buf) orelse return error.ENOENT;
+    return statPathKernel(path, statbuf_ptr);
 }
 
 /// sys_fstat (5) - Get file status by file descriptor

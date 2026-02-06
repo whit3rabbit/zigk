@@ -12,6 +12,7 @@ pub const sys_pread64 = read_write.sys_pread64;
 pub const sys_stat = stat.sys_stat;
 pub const sys_lstat = stat.sys_lstat;
 pub const sys_fstat = stat.sys_fstat;
+pub const sys_newfstatat = stat.sys_fstatat;
 pub const sys_statfs = stat.sys_statfs;
 pub const sys_fstatfs = stat.sys_fstatfs;
 

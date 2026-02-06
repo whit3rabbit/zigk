@@ -12,6 +12,7 @@ pub const SyscallError = primitive.SyscallError;
 /// Flags for getrandom
 pub const GRND_NONBLOCK: u32 = 1;
 pub const GRND_RANDOM: u32 = 2;
+pub const GRND_INSECURE: u32 = 4;
 
 /// EINTR errno value
 const EINTR: usize = 4;

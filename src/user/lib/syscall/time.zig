@@ -46,6 +46,18 @@ pub fn clock_gettime(clk_id: ClockId, tp: *Timespec) SyscallError!void {
     if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
 }
 
+/// Get clock resolution
+pub fn clock_getres(clk_id: ClockId, res: *Timespec) SyscallError!void {
+    const ret = primitive.syscall2(syscalls.SYS_CLOCK_GETRES, @bitCast(@as(isize, @intFromEnum(clk_id))), @intFromPtr(res));
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Get time of day (wall clock time)
+pub fn gettimeofday(tv: *Timeval) SyscallError!void {
+    const ret = primitive.syscall2(syscalls.SYS_GETTIMEOFDAY, @intFromPtr(tv), 0);
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
 /// Get monotonic time in milliseconds (convenience wrapper)
 pub fn gettime_ms() SyscallError!u64 {
     // SECURITY: Zero-initialize to prevent reading uninitialized data if

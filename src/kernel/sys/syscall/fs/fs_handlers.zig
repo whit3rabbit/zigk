@@ -204,31 +204,23 @@ pub fn sys_umount2(target_ptr: usize, flags: usize) base.SyscallError!usize {
 }
 
 /// sys_unlink (87) - Delete a file
-pub fn sys_unlink(path_ptr: usize) base.SyscallError!usize {
+/// Internal: unlink using a kernel-space path (already copied from userspace).
+fn unlinkKernel(raw_path: []const u8) base.SyscallError!usize {
     const alloc = heap.allocator();
-    const path_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
-    defer alloc.free(path_buf);
     const canon_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
     defer alloc.free(canon_buf);
 
-    const raw_path = user_mem.copyStringFromUser(path_buf, path_ptr) catch return error.EFAULT;
-
     if (raw_path.len == 0 or raw_path[0] != '/') return error.ENOENT;
 
-    // Security: Canonicalize path to normalize and reject traversal
-    // This handles //, /./, and rejects any .. components
     const path = canonicalizePath(raw_path, canon_buf) orelse {
-        // Path contains .. or other invalid components
         return error.EACCES;
     };
 
-    // Permission check: require root OR FileCapability with DELETE_OP
     const proc = base.getCurrentProcess();
     if (!hasFileCapability(proc, path, caps.FileCapability.DELETE_OP)) {
         return error.EACCES;
     }
 
-    // Delegate to VFS (which delegates to appropriate FS)
     fs.vfs.Vfs.unlink(path) catch |err| {
         return switch (err) {
             error.NotFound => error.ENOENT,
@@ -242,6 +234,16 @@ pub fn sys_unlink(path_ptr: usize) base.SyscallError!usize {
     };
 
     return 0;
+}
+
+pub fn sys_unlink(path_ptr: usize) base.SyscallError!usize {
+    const alloc = heap.allocator();
+    const path_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(path_buf);
+
+    const raw_path = user_mem.copyStringFromUser(path_buf, path_ptr) catch return error.EFAULT;
+
+    return unlinkKernel(raw_path);
 }
 
 /// Helper: Check if process has mount capability for the given path and operation
@@ -370,32 +372,25 @@ pub fn sys_access(path_ptr: usize, mode: usize) base.SyscallError!usize {
 /// Args:
 ///   path_ptr: Path to file
 ///   mode: New file mode (permissions only, lower 12 bits)
-pub fn sys_chmod(path_ptr: usize, mode_arg: usize) base.SyscallError!usize {
+/// Internal: chmod using a kernel-space path (already copied from userspace).
+fn chmodKernel(raw_path: []const u8, mode_arg: usize) base.SyscallError!usize {
     const alloc = heap.allocator();
-    const path_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
-    defer alloc.free(path_buf);
     const canon_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
     defer alloc.free(canon_buf);
 
-    const raw_path = user_mem.copyStringFromUser(path_buf, path_ptr) catch return error.EFAULT;
     if (raw_path.len == 0) return error.ENOENT;
 
-    // Canonicalize path
     const path = canonicalizePath(raw_path, canon_buf) orelse return error.ENOENT;
 
-    // Get current file metadata to check ownership
     const file_meta = fs.vfs.Vfs.statPath(path) orelse return error.ENOENT;
 
-    // Only owner or root can chmod
     const proc = base.getCurrentProcess();
     if (proc.euid != 0 and proc.euid != file_meta.uid) {
         return error.EPERM;
     }
 
-    // Only use permission bits (lower 12 bits including setuid/setgid/sticky)
     const new_mode: u32 = @truncate(mode_arg & 0o7777);
 
-    // Perform chmod via VFS
     fs.vfs.Vfs.chmod(path, new_mode) catch |err| {
         return switch (err) {
             error.NotFound => error.ENOENT,
@@ -408,12 +403,20 @@ pub fn sys_chmod(path_ptr: usize, mode_arg: usize) base.SyscallError!usize {
     return 0;
 }
 
+pub fn sys_chmod(path_ptr: usize, mode_arg: usize) base.SyscallError!usize {
+    const alloc = heap.allocator();
+    const path_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(path_buf);
+
+    const raw_path = user_mem.copyStringFromUser(path_buf, path_ptr) catch return error.EFAULT;
+
+    return chmodKernel(raw_path, mode_arg);
+}
+
 /// sys_fchmodat (268/53) - Change file permissions relative to directory FD
 pub fn sys_fchmodat(dirfd: usize, path_ptr: usize, mode: usize, flags: usize) base.SyscallError!usize {
     const AT_SYMLINK_NOFOLLOW: usize = 0x100;
 
-    // Reject unsupported AT_SYMLINK_NOFOLLOW flag for MVP
-    // (chmod on symlinks themselves is rarely used)
     if (flags & AT_SYMLINK_NOFOLLOW != 0) {
         return error.ENOSYS;
     }
@@ -422,27 +425,23 @@ pub fn sys_fchmodat(dirfd: usize, path_ptr: usize, mode: usize, flags: usize) ba
     const path_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
     defer alloc.free(path_buf);
 
-    const path = user_mem.copyStringFromUser(path_buf, path_ptr) catch |err| {
+    const raw_path = user_mem.copyStringFromUser(path_buf, path_ptr) catch |err| {
         if (err == error.NameTooLong) return error.ENAMETOOLONG;
         return error.EFAULT;
     };
 
-    if (path.len == 0) return error.ENOENT;
+    if (raw_path.len == 0) return error.ENOENT;
 
-    // Handle absolute paths directly (bypass dirfd)
-    if (path[0] == '/') {
-        return sys_chmod(@intFromPtr(path.ptr), mode);
+    if (raw_path[0] == '/') {
+        return chmodKernel(raw_path, mode);
     }
 
-    // Allocate buffer for resolved path
     const resolved_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
     defer alloc.free(resolved_buf);
 
-    // Resolve path relative to dirfd
-    const resolved = fd_syscall.resolvePathAt(dirfd, path, resolved_buf) catch |err| return err;
+    const resolved = fd_syscall.resolvePathAt(dirfd, raw_path, resolved_buf) catch |err| return err;
 
-    // Call base syscall with resolved path
-    return sys_chmod(@intFromPtr(resolved.ptr), mode);
+    return chmodKernel(resolved, mode);
 }
 
 /// sys_chown (92) - Change file owner and group
@@ -549,28 +548,19 @@ pub fn sys_ftruncate(fd_num: usize, length: usize) base.SyscallError!usize {
     return error.EINVAL;
 }
 
-/// sys_rename (82) - Rename a file or directory
-pub fn sys_rename(old_ptr: usize, new_ptr: usize) base.SyscallError!usize {
+/// Internal: rename using kernel-space paths (already copied from userspace).
+fn renameKernel(raw_old: []const u8, raw_new: []const u8) base.SyscallError!usize {
     const alloc = heap.allocator();
-    const old_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
-    defer alloc.free(old_buf);
-    const new_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
-    defer alloc.free(new_buf);
     const c_old_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
     defer alloc.free(c_old_buf);
     const c_new_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
     defer alloc.free(c_new_buf);
-
-    const raw_old = user_mem.copyStringFromUser(old_buf, old_ptr) catch return error.EFAULT;
-    const raw_new = user_mem.copyStringFromUser(new_buf, new_ptr) catch return error.EFAULT;
 
     if (raw_old.len == 0 or raw_new.len == 0) return error.ENOENT;
 
     const old_path = canonicalizePath(raw_old, c_old_buf) orelse return error.ENOENT;
     const new_path = canonicalizePath(raw_new, c_new_buf) orelse return error.ENOENT;
 
-    // Check permissions: require write access to parent directories (simplified for now)
-    // For MVP, we check write access to the old file itself, but ideally we check the parent.
     const file_meta = fs.vfs.Vfs.statPath(old_path) orelse return error.ENOENT;
     const proc = base.getCurrentProcess();
     if (!@import("perms").checkAccess(proc, file_meta, .Write, old_path)) {
@@ -590,18 +580,29 @@ pub fn sys_rename(old_ptr: usize, new_ptr: usize) base.SyscallError!usize {
     return 0;
 }
 
-/// sys_renameat (264/38) - Rename file relative to directory file descriptors
-pub fn sys_renameat(olddirfd: usize, oldpath_ptr: usize, newdirfd: usize, newpath_ptr: usize) base.SyscallError!usize {
-
+/// sys_rename (82) - Rename a file or directory
+pub fn sys_rename(old_ptr: usize, new_ptr: usize) base.SyscallError!usize {
     const alloc = heap.allocator();
-
-    // Allocate buffers for both paths
     const old_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
     defer alloc.free(old_buf);
     const new_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
     defer alloc.free(new_buf);
 
-    // Copy both paths from userspace
+    const raw_old = user_mem.copyStringFromUser(old_buf, old_ptr) catch return error.EFAULT;
+    const raw_new = user_mem.copyStringFromUser(new_buf, new_ptr) catch return error.EFAULT;
+
+    return renameKernel(raw_old, raw_new);
+}
+
+/// sys_renameat (264/38) - Rename file relative to directory file descriptors
+pub fn sys_renameat(olddirfd: usize, oldpath_ptr: usize, newdirfd: usize, newpath_ptr: usize) base.SyscallError!usize {
+    const alloc = heap.allocator();
+
+    const old_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(old_buf);
+    const new_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(new_buf);
+
     const oldpath = user_mem.copyStringFromUser(old_buf, oldpath_ptr) catch |err| {
         if (err == error.NameTooLong) return error.ENAMETOOLONG;
         return error.EFAULT;
@@ -613,7 +614,7 @@ pub fn sys_renameat(olddirfd: usize, oldpath_ptr: usize, newdirfd: usize, newpat
 
     if (oldpath.len == 0 or newpath.len == 0) return error.ENOENT;
 
-    // Handle absolute old path
+    // Resolve old path
     var resolved_old: []const u8 = undefined;
     var resolved_old_buf: []u8 = undefined;
     var need_free_old = false;
@@ -627,7 +628,7 @@ pub fn sys_renameat(olddirfd: usize, oldpath_ptr: usize, newdirfd: usize, newpat
         resolved_old = fd_syscall.resolvePathAt(olddirfd, oldpath, resolved_old_buf) catch |err| return err;
     }
 
-    // Handle absolute new path
+    // Resolve new path
     var resolved_new: []const u8 = undefined;
     var resolved_new_buf: []u8 = undefined;
     var need_free_new = false;
@@ -641,8 +642,7 @@ pub fn sys_renameat(olddirfd: usize, oldpath_ptr: usize, newdirfd: usize, newpat
         resolved_new = fd_syscall.resolvePathAt(newdirfd, newpath, resolved_new_buf) catch |err| return err;
     }
 
-    // Call base syscall with resolved paths
-    return sys_rename(@intFromPtr(resolved_old.ptr), @intFromPtr(resolved_new.ptr));
+    return renameKernel(resolved_old, resolved_new);
 }
 
 /// sys_mkdir (83) - Create a directory
@@ -650,15 +650,22 @@ pub fn sys_mkdir(path_ptr: usize, mode: usize) base.SyscallError!usize {
     const alloc = heap.allocator();
     const path_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
     defer alloc.free(path_buf);
-    const canon_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
-    defer alloc.free(canon_buf);
 
     const raw_path = user_mem.copyStringFromUser(path_buf, path_ptr) catch return error.EFAULT;
     if (raw_path.len == 0) return error.ENOENT;
 
+    return mkdirKernel(raw_path, mode);
+}
+
+/// Internal: mkdir using a kernel-space path (already copied from userspace).
+/// Shared by sys_mkdir (after copyStringFromUser) and sys_mkdirat (after path resolution).
+fn mkdirKernel(raw_path: []const u8, mode: usize) base.SyscallError!usize {
+    const alloc = heap.allocator();
+    const canon_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(canon_buf);
+
     const path = canonicalizePath(raw_path, canon_buf) orelse return error.ENOENT;
 
-    // Capability check for mkdir (uses DELETE_OP as proxy for CREATE capability)
     const proc = base.getCurrentProcess();
     if (!hasFileCapability(proc, path, caps.FileCapability.DELETE_OP)) {
         return error.EACCES;
@@ -679,21 +686,20 @@ pub fn sys_mkdir(path_ptr: usize, mode: usize) base.SyscallError!usize {
 
 /// sys_mkdirat (258/34) - Create directory relative to directory file descriptor
 pub fn sys_mkdirat(dirfd: usize, path_ptr: usize, mode: usize) base.SyscallError!usize {
-
     const alloc = heap.allocator();
     const path_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
     defer alloc.free(path_buf);
 
-    const path = user_mem.copyStringFromUser(path_buf, path_ptr) catch |err| {
+    const raw_path = user_mem.copyStringFromUser(path_buf, path_ptr) catch |err| {
         if (err == error.NameTooLong) return error.ENAMETOOLONG;
         return error.EFAULT;
     };
 
-    if (path.len == 0) return error.ENOENT;
+    if (raw_path.len == 0) return error.ENOENT;
 
     // Handle absolute paths directly (bypass dirfd)
-    if (path[0] == '/') {
-        return sys_mkdir(@intFromPtr(path.ptr), mode);
+    if (raw_path[0] == '/') {
+        return mkdirKernel(raw_path, mode);
     }
 
     // Allocate buffer for resolved path
@@ -701,32 +707,26 @@ pub fn sys_mkdirat(dirfd: usize, path_ptr: usize, mode: usize) base.SyscallError
     defer alloc.free(resolved_buf);
 
     // Resolve path relative to dirfd
-    const resolved = fd_syscall.resolvePathAt(dirfd, path, resolved_buf) catch |err| return err;
+    const resolved = fd_syscall.resolvePathAt(dirfd, raw_path, resolved_buf) catch |err| return err;
 
-    // Call base syscall with resolved path
-    return sys_mkdir(@intFromPtr(resolved.ptr), mode);
+    return mkdirKernel(resolved, mode);
 }
 
-/// sys_rmdir (84) - Remove a directory
-pub fn sys_rmdir(path_ptr: usize) base.SyscallError!usize {
+/// Internal: rmdir using a kernel-space path (already copied from userspace).
+fn rmdirKernel(raw_path: []const u8) base.SyscallError!usize {
     const alloc = heap.allocator();
-    const path_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
-    defer alloc.free(path_buf);
     const canon_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
     defer alloc.free(canon_buf);
 
-    const raw_path = user_mem.copyStringFromUser(path_buf, path_ptr) catch return error.EFAULT;
     if (raw_path.len == 0) return error.ENOENT;
 
     const path = canonicalizePath(raw_path, canon_buf) orelse return error.ENOENT;
 
-    // Capability check
     const proc = base.getCurrentProcess();
     if (!hasFileCapability(proc, path, caps.FileCapability.DELETE_OP)) {
         return error.EACCES;
     }
 
-    // SECURITY: Use canonicalized path, not raw path_buf (fixes path traversal bypass)
     fs.vfs.Vfs.rmdir(path) catch |err| {
         return switch (err) {
             error.NotEmpty => error.ENOTEMPTY,
@@ -741,6 +741,17 @@ pub fn sys_rmdir(path_ptr: usize) base.SyscallError!usize {
     return 0;
 }
 
+/// sys_rmdir (84) - Remove a directory
+pub fn sys_rmdir(path_ptr: usize) base.SyscallError!usize {
+    const alloc = heap.allocator();
+    const path_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(path_buf);
+
+    const raw_path = user_mem.copyStringFromUser(path_buf, path_ptr) catch return error.EFAULT;
+
+    return rmdirKernel(raw_path);
+}
+
 /// sys_unlinkat (263/35) - Remove file or directory relative to directory FD
 pub fn sys_unlinkat(dirfd: usize, path_ptr: usize, flags: usize) base.SyscallError!usize {
     const AT_REMOVEDIR: usize = 0x200;
@@ -749,19 +760,19 @@ pub fn sys_unlinkat(dirfd: usize, path_ptr: usize, flags: usize) base.SyscallErr
     const path_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
     defer alloc.free(path_buf);
 
-    const path = user_mem.copyStringFromUser(path_buf, path_ptr) catch |err| {
+    const raw_path = user_mem.copyStringFromUser(path_buf, path_ptr) catch |err| {
         if (err == error.NameTooLong) return error.ENAMETOOLONG;
         return error.EFAULT;
     };
 
-    if (path.len == 0) return error.ENOENT;
+    if (raw_path.len == 0) return error.ENOENT;
 
     // Handle absolute paths directly (bypass dirfd)
-    if (path[0] == '/') {
+    if (raw_path[0] == '/') {
         if (flags & AT_REMOVEDIR != 0) {
-            return sys_rmdir(@intFromPtr(path.ptr));
+            return rmdirKernel(raw_path);
         } else {
-            return sys_unlink(@intFromPtr(path.ptr));
+            return unlinkKernel(raw_path);
         }
     }
 
@@ -770,13 +781,12 @@ pub fn sys_unlinkat(dirfd: usize, path_ptr: usize, flags: usize) base.SyscallErr
     defer alloc.free(resolved_buf);
 
     // Resolve path relative to dirfd
-    const resolved = fd_syscall.resolvePathAt(dirfd, path, resolved_buf) catch |err| return err;
+    const resolved = fd_syscall.resolvePathAt(dirfd, raw_path, resolved_buf) catch |err| return err;
 
-    // Call appropriate base syscall based on flags
     if (flags & AT_REMOVEDIR != 0) {
-        return sys_rmdir(@intFromPtr(resolved.ptr));
+        return rmdirKernel(resolved);
     } else {
-        return sys_unlink(@intFromPtr(resolved.ptr));
+        return unlinkKernel(resolved);
     }
 }
 
