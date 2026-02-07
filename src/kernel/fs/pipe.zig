@@ -82,6 +82,44 @@ const PipeHandle = struct {
     end: PipeEnd,
 };
 
+fn pipePoll(fd: *fd_mod.FileDescriptor, requested_events: u32) u32 {
+    _ = requested_events; // Don't mask - POLLERR/POLLHUP always reported
+
+    const handle: *PipeHandle = @ptrCast(@alignCast(fd.private_data));
+    const pipe = handle.pipe;
+
+    const held = pipe.lock.acquire();
+    defer held.release();
+
+    var revents: u32 = 0;
+
+    if (handle.end == .Read) {
+        // Read end: report POLLIN when data available
+        if (pipe.data_len > 0) {
+            revents |= uapi.epoll.EPOLLIN | uapi.epoll.EPOLLRDNORM;
+        }
+
+        // Read end: report POLLHUP when all write ends closed
+        // Per Linux behavior: if writers == 0 AND data_len > 0, set BOTH POLLIN and POLLHUP
+        if (pipe.writers == 0) {
+            revents |= uapi.epoll.EPOLLHUP;
+        }
+    } else {
+        // Write end: report POLLOUT when space available
+        const space = PIPE_BUF_SIZE - pipe.data_len;
+        if (space > 0) {
+            revents |= uapi.epoll.EPOLLOUT | uapi.epoll.EPOLLWRNORM;
+        }
+
+        // Write end: report POLLERR when no readers (broken pipe)
+        if (pipe.readers == 0) {
+            revents |= uapi.epoll.EPOLLERR;
+        }
+    }
+
+    return revents;
+}
+
 /// File operations for pipe
 const pipe_ops = fd_mod.FileOps{
     .read = pipeRead,
@@ -91,7 +129,7 @@ const pipe_ops = fd_mod.FileOps{
     .stat = null, // TODO: stat
     .ioctl = null,
     .mmap = null,
-    .poll = null,
+    .poll = pipePoll,
     .truncate = null,
 };
 
