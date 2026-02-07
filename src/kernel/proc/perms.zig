@@ -33,11 +33,11 @@ pub fn checkAccess(
     request: AccessRequest,
     path: []const u8,
 ) bool {
-    // POSIX DAC: Root (euid 0) bypasses file permission checks.
+    // POSIX DAC: Root (fsuid 0) bypasses file permission checks.
     // This is standard Unix behavior (CAP_DAC_OVERRIDE/CAP_DAC_READ_SEARCH equivalent),
     // distinct from capability-based hardware access controls in CLAUDE.md.
     // Exception: For execute permission, at least one execute bit must be set (POSIX requirement)
-    if (proc.euid == 0) {
+    if (proc.fsuid == 0) {
         if (request == .Execute) {
             // Root can only execute if at least one x bit is set
             const any_exec = (file_meta.mode & 0o111) != 0;
@@ -53,7 +53,7 @@ pub fn checkAccess(
     // Initialize to 0 for safety (will be overwritten in all branches)
     var applicable_bits: u32 = 0;
 
-    if (proc.euid == file_meta.uid) {
+    if (proc.fsuid == file_meta.uid) {
         // Owner permissions (bits 6-8)
         applicable_bits = (mode >> 6) & 7;
     } else if (proc.isGroupMember(file_meta.gid)) {
@@ -112,7 +112,7 @@ pub fn checkCreatePermission(
     path: []const u8,
 ) bool {
     // POSIX DAC: Root can create files anywhere (standard Unix behavior)
-    if (proc.euid == 0) return true;
+    if (proc.fsuid == 0) return true;
 
     // Check for CREATE capability
     return proc.hasFileCapability(path, capabilities.FileCapability.CREATE_OP);

@@ -198,6 +198,11 @@ pub const Process = struct {
     suid: u32 = 0,
     sgid: u32 = 0,
 
+    /// Filesystem UID/GID (for permission checks only)
+    /// Auto-syncs with euid/egid unless explicitly set via setfsuid/setfsgid
+    fsuid: u32 = 0,
+    fsgid: u32 = 0,
+
     /// Supplementary group IDs (POSIX supplementary groups)
     /// NGROUPS_MAX is typically 32 on Linux; we use 16 for simplicity
     supplementary_groups: [16]u32 = [_]u32{0} ** 16,
