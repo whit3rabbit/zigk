@@ -71,6 +71,16 @@ const SocketFdData = struct {
     socket_idx: usize,
 };
 
+fn socketPoll(fd: *fd_mod.FileDescriptor, requested_events: u32) u32 {
+    const data = getSocketData(fd) orelse return 0; // Invalid socket fd
+
+    // Delegate to socket layer's checkPollEvents (returns u16)
+    // Convert u32 -> u16 for call, u16 -> u32 for return
+    const events_u16: u16 = @truncate(requested_events);
+    const result = socket.checkPollEvents(data.socket_idx, events_u16);
+    return @as(u32, result);
+}
+
 const socket_file_ops = fd_mod.FileOps{
     .read = socketRead,
     .write = socketWrite,
@@ -79,7 +89,7 @@ const socket_file_ops = fd_mod.FileOps{
     .stat = null,
     .ioctl = null,
     .mmap = null,
-    .poll = null,
+    .poll = socketPoll,
     .truncate = null,
 };
 
