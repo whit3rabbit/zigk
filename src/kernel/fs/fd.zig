@@ -93,6 +93,10 @@ pub const FileOps = struct {
     /// Get directory entries (optional, for directory listing)
     /// Returns bytes written to dirp buffer, 0 for EOF, or negative errno
     getdents: ?*const fn (fd: *FileDescriptor, dirp: usize, count: usize) isize = null,
+
+    /// Change file ownership (optional, for fchown support)
+    /// uid/gid: new owner/group, null means keep current
+    chown: ?*const fn (fd: *FileDescriptor, uid: ?u32, gid: ?u32) isize = null,
 };
 
 /// Directory-only operations marker for synthetic directory FDs.

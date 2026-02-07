@@ -530,6 +530,13 @@ pub const Vfs = struct {
         return error.NotFound;
     }
 
+    /// Change file owner and group (without following symlinks)
+    /// Same as chown() in this kernel since VFS does not resolve symlinks,
+    /// but maintained as separate entry point for API correctness (lchown).
+    pub fn chownNoFollow(path: []const u8, uid: ?u32, gid: ?u32) Error!void {
+        return chown(path, uid, gid);
+    }
+
     /// Rename a file or directory
     pub fn rename(old_path: []const u8, new_path: []const u8) Error!void {
         if (old_path.len == 0 or new_path.len == 0) return error.InvalidPath;
