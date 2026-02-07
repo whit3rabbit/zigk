@@ -69,10 +69,13 @@ Plans:
   2. Programs can use epoll_wait to monitor sockets and receive EPOLLIN/EPOLLOUT events based on recv/send queue state
   3. Programs can use select/pselect6 to monitor multiple file descriptors with timeout support
   4. Programs like nginx, redis, and Python asyncio can use epoll for async I/O without errors
-**Plans**: TBD
+**Plans**: 4 plans
 
 Plans:
-- [ ] 03-01: TBD
+- [ ] 03-01-PLAN.md -- FileOps.poll implementations for pipes, regular files (initrd, SFS), and DevFS devices
+- [ ] 03-02-PLAN.md -- Upgrade sys_epoll_wait with real poll dispatch, blocking, edge-triggered, EPOLLONESHOT
+- [ ] 03-03-PLAN.md -- Upgrade sys_select/sys_poll/sys_ppoll to use FileOps.poll, add sys_pselect6, userspace wrappers
+- [ ] 03-04-PLAN.md -- Integration tests: epoll with pipes/files, select read/write/timeout, poll pipe events
 
 ### Phase 4: Event Notification FDs
 **Goal**: Implement eventfd, timerfd, and signalfd as pollable file descriptor types that integrate with the completed epoll backend
@@ -169,7 +172,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9
 |-------|----------------|--------|-----------|
 | 1. Quick Wins - Trivial Stubs | 4/4 | Complete | 2026-02-06 |
 | 2. Credentials & Ownership | 4/4 | Complete | 2026-02-06 |
-| 3. I/O Multiplexing | 0/TBD | Not started | - |
+| 3. I/O Multiplexing | 0/4 | Not started | - |
 | 4. Event Notification FDs | 0/TBD | Not started | - |
 | 5. Vectored & Positional I/O | 0/TBD | Not started | - |
 | 6. Filesystem Extras | 0/TBD | Not started | - |
@@ -179,4 +182,4 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9
 
 ---
 *Roadmap created: 2026-02-06*
-*Last updated: 2026-02-06*
+*Last updated: 2026-02-07*
