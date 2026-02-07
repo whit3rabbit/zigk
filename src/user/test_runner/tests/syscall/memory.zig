@@ -515,12 +515,14 @@ pub fn testMadviseInvalidAlign() !void {
 
 // Memory Test 21: mlockall with invalid flags
 pub fn testMlockallInvalidFlags() !void {
-    const result = syscall.mlockall(0);
+    // Test with invalid flag bits (not MCL_CURRENT, MCL_FUTURE, MCL_ONFAULT)
+    const INVALID_FLAG = 0x8; // Not a valid MCL_* flag
+    const result = syscall.mlockall(INVALID_FLAG);
 
     if (result) |_| {
         return error.TestFailed;
     } else |err| {
-        // Should fail with EINVAL (flags=0 is invalid)
+        // Should fail with EINVAL
         if (err != error.InvalidArgument) {
             if (err == error.NotImplemented) return error.SkipTest;
             return error.TestFailed;
