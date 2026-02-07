@@ -10,28 +10,28 @@ See: .planning/PROJECT.md (updated 2026-02-06)
 ## Current Position
 
 Phase: 1 of 9 (Quick Wins - Trivial Stubs)
-Plan: 1 of TBD in current phase
+Plan: 3 of TBD in current phase
 Status: In progress
-Last activity: 2026-02-06 - Completed 01-02-PLAN.md (scheduling stubs)
+Last activity: 2026-02-06 - Completed 01-03-PLAN.md (resource limits and signals)
 
-Progress: [█░░░░░░░░░] 10%
+Progress: [██░░░░░░░░] 15%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 1
+- Total plans completed: 3
 - Average duration: 3 min
-- Total execution time: 0.05 hours
+- Total execution time: 0.15 hours
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| 1 | 1 | 3 min | 3 min |
+| 1 | 3 | 9 min | 3 min |
 
 **Recent Trend:**
-- Last 5 plans: 01-02 (3min)
-- Trend: First plan completed
+- Last 5 plans: 01-01 (3min), 01-02 (3min), 01-03 (3min)
+- Trend: Consistent 3-minute execution
 
 *Updated after each plan completion*
 
@@ -47,6 +47,9 @@ Recent decisions affecting current work:
 - UID/GID tracking as infrastructure - Many syscalls (chown, setuid, access checks) depend on per-process credential state
 - Skip ptrace entirely - Extremely complex, separate debugger project
 - **01-02:** ppoll implemented as standalone stub instead of delegating to net/poll.zig to avoid cross-module dependencies for MVP
+- **01-03:** prlimit64 enforces only RLIMIT_AS, accepts others for compatibility (MVP pattern)
+- **01-03:** getrusage returns zeroed Rusage struct - kernel doesn't track usage yet
+- **01-03:** RUSAGE_CHILDREN uses @bitCast(@as(isize, -1)) for usize representation of -1
 
 ### Pending Todos
 
@@ -73,7 +76,7 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-02-06 (plan execution)
-Stopped at: Completed 01-02-PLAN.md (scheduling syscall stubs)
+Stopped at: Completed 01-03-PLAN.md (resource limits and signals)
 Resume file: None
 
 ---
