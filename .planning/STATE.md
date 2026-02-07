@@ -10,18 +10,18 @@ See: .planning/PROJECT.md (updated 2026-02-06)
 ## Current Position
 
 Phase: 3 of 9 (I/O Multiplexing)
-Plan: 1 of 6 in current phase
+Plan: 2 of 6 in current phase
 Status: In progress
-Last activity: 2026-02-07 - Completed 03-01-PLAN.md (FileOps poll foundation)
+Last activity: 2026-02-07 - Completed 03-02-PLAN.md (epoll_wait implementation)
 
-Progress: [██░░░░░░░░] 25%
+Progress: [███░░░░░░░] 28%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 9
+- Total plans completed: 10
 - Average duration: 5 min
-- Total execution time: 0.77 hours
+- Total execution time: 0.89 hours
 
 **By Phase:**
 
@@ -29,11 +29,11 @@ Progress: [██░░░░░░░░] 25%
 |-------|-------|-------|----------|
 | 1 | 4 | 21 min | 5 min |
 | 2 | 4 | 20 min | 5 min |
-| 3 | 1 | 4 min | 4 min |
+| 3 | 2 | 11 min | 5.5 min |
 
 **Recent Trend:**
-- Last 5 plans: 02-02 (4min), 02-03 (5min), 02-04 (6min), 03-01 (4min)
-- Trend: Steady 4-6min for syscall implementation and testing
+- Last 5 plans: 02-03 (5min), 02-04 (6min), 03-01 (4min), 03-02 (7min)
+- Trend: Steady 4-7min for syscall implementation and testing
 
 *Updated after each plan completion*
 
@@ -70,6 +70,9 @@ Recent decisions affecting current work:
 - **03-01:** FileOps.poll methods for all FD types - pipes state-dependent, regular files always ready, sockets delegate to transport
 - **03-01:** Pipes follow Linux semantics - POLLERR/POLLHUP always reported regardless of requested_events
 - **03-01:** Socket readiness via checkPollEvents - POLLIN when recv data, POLLOUT when send space, POLLHUP on peer close
+- **03-02:** Use sched.yield() for epoll_wait blocking instead of sleep queues (matches sys_select pattern)
+- **03-02:** Store full revents in last_revents for edge-triggered detection (revents | entry_last_revents)
+- **03-02:** EPOLLONESHOT disables by zeroing events field, not removing entry from watch list
 
 ### Pending Todos
 
@@ -86,9 +89,9 @@ Recent decisions affecting current work:
 
 **Phase 3 In Progress (I/O Multiplexing):**
 - ✅ FileOps.poll foundation complete (03-01) - all FD types now have poll methods
-- Next: sys_poll, sys_select, sys_epoll_* family, integration tests
+- ✅ sys_epoll_wait implementation complete (03-02) - blocking, edge-triggered, oneshot modes
+- Next: sys_poll, sys_select enhancement, ppoll update, integration tests
 - Success of Phase 3 directly unlocks Phase 4 (event FDs need epoll integration)
-- **01-02:** ppoll stub returns 0 (no FDs ready) - will be updated in 03-02 to use real poll infrastructure
 
 **Phase 9 Considerations (SysV IPC):**
 - SFS filesystem has close deadlock and 64-file limit
@@ -103,7 +106,7 @@ Recent decisions affecting current work:
 ## Session Continuity
 
 Last session: 2026-02-07 (plan execution)
-Stopped at: Completed 03-01-PLAN.md (FileOps poll foundation) - Phase 3 started
+Stopped at: Completed 03-02-PLAN.md (epoll_wait implementation) - Phase 3 in progress
 Resume file: None
 
 ---
