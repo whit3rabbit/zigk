@@ -1320,6 +1320,8 @@ pub fn build(b: *std.Build) void {
     syscall_io_module.addImport("user_mem", user_mem_module);
     syscall_io_module.addImport("hal", hal_module);
     syscall_io_module.addImport("devfs", devfs_module);
+    syscall_io_module.addImport("sched", sched_module);
+    syscall_io_module.addImport("sync", sync_module);
 
     // Create syscall fd module (open, close, dup, pipe, lseek)
     const syscall_fd_module = b.createModule(.{
