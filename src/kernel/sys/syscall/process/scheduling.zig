@@ -16,6 +16,7 @@ const fd_mod = @import("fd");
 const sync = @import("sync");
 const futex = @import("futex");
 const user_mem = @import("user_mem");
+const process_mod = @import("process");
 
 const SyscallError = base.SyscallError;
 const UserPtr = base.UserPtr;
@@ -59,6 +60,181 @@ pub fn sys_pause() SyscallError!usize {
     // When woken by a signal, the signal handler runs first, then
     // checkSignalsOnSyscallExit() sets the return value to -EINTR.
     return error.EINTR;
+}
+
+// =============================================================================
+// Scheduling Policy Queries/Sets
+// =============================================================================
+
+// POSIX scheduling policies
+const SCHED_OTHER: usize = 0;
+const SCHED_FIFO: usize = 1;
+const SCHED_RR: usize = 2;
+const SCHED_BATCH: usize = 3;
+const SCHED_IDLE: usize = 5;
+
+const SchedParam = extern struct {
+    sched_priority: i32,
+};
+
+/// sys_sched_get_priority_max (146) - Get maximum priority for a policy
+pub fn sys_sched_get_priority_max(policy: usize) SyscallError!usize {
+    return switch (policy) {
+        SCHED_FIFO, SCHED_RR => 99,
+        SCHED_OTHER, SCHED_BATCH, SCHED_IDLE => 0,
+        else => error.EINVAL,
+    };
+}
+
+/// sys_sched_get_priority_min (147) - Get minimum priority for a policy
+pub fn sys_sched_get_priority_min(policy: usize) SyscallError!usize {
+    return switch (policy) {
+        SCHED_FIFO, SCHED_RR => 1,
+        SCHED_OTHER, SCHED_BATCH, SCHED_IDLE => 0,
+        else => error.EINVAL,
+    };
+}
+
+/// sys_sched_getscheduler (145) - Get scheduling policy
+pub fn sys_sched_getscheduler(pid: usize) SyscallError!usize {
+    const target_pid: u32 = @truncate(pid);
+
+    const proc = if (target_pid == 0)
+        base.getCurrentProcess()
+    else
+        process_mod.findProcessByPid(target_pid) orelse return error.ESRCH;
+
+    return proc.sched_policy;
+}
+
+/// sys_sched_getparam (143) - Get scheduling parameters
+pub fn sys_sched_getparam(pid: usize, param_ptr: usize) SyscallError!usize {
+    if (param_ptr == 0) return error.EFAULT;
+
+    const target_pid: u32 = @truncate(pid);
+
+    const proc = if (target_pid == 0)
+        base.getCurrentProcess()
+    else
+        process_mod.findProcessByPid(target_pid) orelse return error.ESRCH;
+
+    const param = SchedParam{
+        .sched_priority = proc.sched_priority,
+    };
+
+    UserPtr.from(param_ptr).writeValue(param) catch {
+        return error.EFAULT;
+    };
+
+    return 0;
+}
+
+/// sys_sched_setscheduler (144) - Set scheduling policy and parameters
+pub fn sys_sched_setscheduler(pid: usize, policy: usize, param_ptr: usize) SyscallError!usize {
+    if (param_ptr == 0) return error.EFAULT;
+
+    const target_pid: u32 = @truncate(pid);
+
+    const proc = if (target_pid == 0)
+        base.getCurrentProcess()
+    else
+        process_mod.findProcessByPid(target_pid) orelse return error.ESRCH;
+
+    // Validate policy
+    switch (policy) {
+        SCHED_OTHER, SCHED_FIFO, SCHED_RR, SCHED_BATCH, SCHED_IDLE => {},
+        else => return error.EINVAL,
+    }
+
+    // Read parameters from userspace
+    const param = UserPtr.from(param_ptr).readValue(SchedParam) catch {
+        return error.EFAULT;
+    };
+
+    // Validate priority range for the policy
+    switch (policy) {
+        SCHED_FIFO, SCHED_RR => {
+            if (param.sched_priority < 1 or param.sched_priority > 99) {
+                return error.EINVAL;
+            }
+        },
+        SCHED_OTHER, SCHED_BATCH, SCHED_IDLE => {
+            if (param.sched_priority != 0) {
+                return error.EINVAL;
+            }
+        },
+        else => unreachable,
+    }
+
+    // Store policy and priority
+    proc.sched_policy = @truncate(policy);
+    proc.sched_priority = param.sched_priority;
+
+    return 0;
+}
+
+/// sys_sched_setparam (142) - Set scheduling parameters
+pub fn sys_sched_setparam(pid: usize, param_ptr: usize) SyscallError!usize {
+    if (param_ptr == 0) return error.EFAULT;
+
+    const target_pid: u32 = @truncate(pid);
+
+    const proc = if (target_pid == 0)
+        base.getCurrentProcess()
+    else
+        process_mod.findProcessByPid(target_pid) orelse return error.ESRCH;
+
+    // Read parameters from userspace
+    const param = UserPtr.from(param_ptr).readValue(SchedParam) catch {
+        return error.EFAULT;
+    };
+
+    // Validate priority range based on current policy
+    switch (proc.sched_policy) {
+        SCHED_FIFO, SCHED_RR => {
+            if (param.sched_priority < 1 or param.sched_priority > 99) {
+                return error.EINVAL;
+            }
+        },
+        SCHED_OTHER, SCHED_BATCH, SCHED_IDLE => {
+            if (param.sched_priority != 0) {
+                return error.EINVAL;
+            }
+        },
+        else => {},
+    }
+
+    // Store priority
+    proc.sched_priority = param.sched_priority;
+
+    return 0;
+}
+
+/// sys_sched_rr_get_interval (148) - Get the SCHED_RR time quantum
+pub fn sys_sched_rr_get_interval(pid: usize, interval_ptr: usize) SyscallError!usize {
+    if (interval_ptr == 0) return error.EFAULT;
+
+    const target_pid: u32 = @truncate(pid);
+
+    // Verify process exists
+    const proc = if (target_pid == 0)
+        base.getCurrentProcess()
+    else
+        process_mod.findProcessByPid(target_pid) orelse return error.ESRCH;
+
+    _ = proc; // Process exists, not used otherwise
+
+    // Return 100ms RR quantum (Linux default)
+    const interval = Timespec{
+        .tv_sec = 0,
+        .tv_nsec = 100_000_000,
+    };
+
+    UserPtr.from(interval_ptr).writeValue(interval) catch {
+        return error.EFAULT;
+    };
+
+    return 0;
 }
 
 /// sys_nanosleep (35) - High-resolution sleep

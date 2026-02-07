@@ -1303,6 +1303,7 @@ pub fn build(b: *std.Build) void {
     syscall_scheduling_module.addImport("fd", fd_module);
     syscall_scheduling_module.addImport("sync", sync_module);
     syscall_scheduling_module.addImport("user_mem", user_mem_module);
+    syscall_scheduling_module.addImport("process", process_module);
 
     // Create syscall io module (read, write, stat, etc.)
     const syscall_io_module = b.createModule(.{
