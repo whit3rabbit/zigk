@@ -5,33 +5,34 @@
 See: .planning/PROJECT.md (updated 2026-02-06)
 
 **Core value:** Every implemented syscall works correctly on both x86_64 and aarch64, tested via the integration test harness.
-**Current focus:** Phase 1 complete. Ready for Phase 2 - Credentials & Ownership
+**Current focus:** Phase 2 in progress - Credentials & Ownership
 
 ## Current Position
 
-Phase: 1 of 9 (Quick Wins - Trivial Stubs)
-Plan: 4 of 4 in current phase
-Status: Phase complete
-Last activity: 2026-02-07 - Phase 1 complete, verified (6/6 must-haves passed)
+Phase: 2 of 9 (Credentials & Ownership)
+Plan: 1 of 10 in current phase
+Status: In progress
+Last activity: 2026-02-07 - Completed 02-01-PLAN.md (infrastructure)
 
-Progress: [█░░░░░░░░░] 11%
+Progress: [█░░░░░░░░░] 13%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 4
+- Total plans completed: 5
 - Average duration: 5 min
-- Total execution time: 0.35 hours
+- Total execution time: 0.43 hours
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 1 | 4 | 21 min | 5 min |
+| 2 | 1 | 5 min | 5 min |
 
 **Recent Trend:**
-- Last 5 plans: 01-01 (3min), 01-02 (3min), 01-03 (3min), 01-04 (12min)
-- Trend: Testing phase took longer (expected)
+- Last 5 plans: 01-02 (3min), 01-03 (3min), 01-04 (12min), 02-01 (5min)
+- Trend: Infrastructure work steady at 5min
 
 *Updated after each plan completion*
 
@@ -52,6 +53,9 @@ Recent decisions affecting current work:
 - **01-03:** RUSAGE_CHILDREN uses @bitCast(@as(isize, -1)) for usize representation of -1
 - **01-04:** Timespec type separation - resource.zig defines TimespecLocal to avoid circular dependency on time.zig
 - **01-04:** mlockall accepts flags=0 as no-op (bitwise validation allows zero)
+- **02-01:** fsuid/fsgid replace euid/egid only in filesystem permission checks (open, access, stat, chown), not signal delivery or ptrace
+- **02-01:** Auto-sync fsuid/fsgid whenever euid/egid changes to maintain default POSIX behavior
+- **02-01:** Syscall numbers follow standard Linux ABI values (x86_64 and aarch64 have different numbering)
 
 ### Pending Todos
 
@@ -78,7 +82,7 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-02-07 (plan execution)
-Stopped at: Completed 01-04-PLAN.md (integration tests) - Phase 1 complete
+Stopped at: Completed 02-01-PLAN.md (infrastructure) - Phase 2 in progress
 Resume file: None
 
 ---
