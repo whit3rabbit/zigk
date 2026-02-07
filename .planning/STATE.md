@@ -9,19 +9,19 @@ See: .planning/PROJECT.md (updated 2026-02-06)
 
 ## Current Position
 
-Phase: 2 of 9 (Credentials & Ownership)
-Plan: 4 of 4 in current phase
-Status: Phase complete
-Last activity: 2026-02-07 - Completed 02-04-PLAN.md (integration tests)
+Phase: 3 of 9 (I/O Multiplexing)
+Plan: 1 of 6 in current phase
+Status: In progress
+Last activity: 2026-02-07 - Completed 03-01-PLAN.md (FileOps poll foundation)
 
-Progress: [██░░░░░░░░] 22%
+Progress: [██░░░░░░░░] 25%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 8
+- Total plans completed: 9
 - Average duration: 5 min
-- Total execution time: 0.70 hours
+- Total execution time: 0.77 hours
 
 **By Phase:**
 
@@ -29,9 +29,10 @@ Progress: [██░░░░░░░░] 22%
 |-------|-------|-------|----------|
 | 1 | 4 | 21 min | 5 min |
 | 2 | 4 | 20 min | 5 min |
+| 3 | 1 | 4 min | 4 min |
 
 **Recent Trend:**
-- Last 5 plans: 02-01 (5min), 02-02 (4min), 02-03 (5min), 02-04 (6min)
+- Last 5 plans: 02-02 (4min), 02-03 (5min), 02-04 (6min), 03-01 (4min)
 - Trend: Steady 4-6min for syscall implementation and testing
 
 *Updated after each plan completion*
@@ -66,6 +67,9 @@ Recent decisions affecting current work:
 - **02-04:** Fork isolation for privilege-drop tests (runInChild helper prevents test pollution)
 - **02-04:** SFS deadlock workaround - don't close/unlink SFS files in tests
 - **02-04:** Bitcast pattern for i32/u32 to usize - use @as(usize, @as(u32, @bitCast(i32)))
+- **03-01:** FileOps.poll methods for all FD types - pipes state-dependent, regular files always ready, sockets delegate to transport
+- **03-01:** Pipes follow Linux semantics - POLLERR/POLLHUP always reported regardless of requested_events
+- **03-01:** Socket readiness via checkPollEvents - POLLIN when recv data, POLLOUT when send space, POLLHUP on peer close
 
 ### Pending Todos
 
@@ -80,11 +84,11 @@ Recent decisions affecting current work:
 - Socket extras implementation may be blocked until IrqLock bug is fixed
 - Workaround: Defer Phase 7 if panic is not resolved by Phase 6 completion
 
-**Phase 3 Dependency (I/O Multiplexing):**
-- Epoll infrastructure exists but FileOps.poll methods are unimplemented
-- Requires poll implementations for pipes, sockets, regular files
+**Phase 3 In Progress (I/O Multiplexing):**
+- ✅ FileOps.poll foundation complete (03-01) - all FD types now have poll methods
+- Next: sys_poll, sys_select, sys_epoll_* family, integration tests
 - Success of Phase 3 directly unlocks Phase 4 (event FDs need epoll integration)
-- **01-02:** ppoll stub returns 0 (no FDs ready) - needs real FD monitoring when Phase 3 implements poll infrastructure
+- **01-02:** ppoll stub returns 0 (no FDs ready) - will be updated in 03-02 to use real poll infrastructure
 
 **Phase 9 Considerations (SysV IPC):**
 - SFS filesystem has close deadlock and 64-file limit
@@ -99,7 +103,7 @@ Recent decisions affecting current work:
 ## Session Continuity
 
 Last session: 2026-02-07 (plan execution)
-Stopped at: Completed 02-04-PLAN.md (integration tests) - Phase 2 complete
+Stopped at: Completed 03-01-PLAN.md (FileOps poll foundation) - Phase 3 started
 Resume file: None
 
 ---
