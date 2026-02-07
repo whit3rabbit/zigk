@@ -228,6 +228,18 @@ pub const SYS_GETRESUID: usize = 148;
 pub const SYS_SETRESGID: usize = 149;
 /// Get real, effective, and saved group IDs
 pub const SYS_GETRESGID: usize = 150;
+/// Set real and effective group IDs
+pub const SYS_SETREGID: usize = 143;
+/// Set real and effective user IDs
+pub const SYS_SETREUID: usize = 145;
+/// Set filesystem user ID
+pub const SYS_SETFSUID: usize = 151;
+/// Set filesystem group ID
+pub const SYS_SETFSGID: usize = 152;
+/// Get supplementary group IDs
+pub const SYS_GETGROUPS: usize = 158;
+/// Set supplementary group IDs
+pub const SYS_SETGROUPS: usize = 159;
 
 // ============================================================================
 // Sockets

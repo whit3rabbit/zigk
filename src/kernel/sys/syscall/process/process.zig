@@ -231,12 +231,14 @@ pub fn sys_setuid(uid: usize) SyscallError!usize {
         proc.uid = new_uid;
         proc.euid = new_uid;
         proc.suid = new_uid;
+        proc.fsuid = new_uid; // Auto-sync fsuid
         return 0;
     }
 
     // Non-root: can only set effective UID to real or saved UID
     if (new_uid == proc.uid or new_uid == proc.suid) {
         proc.euid = new_uid;
+        proc.fsuid = new_uid; // Auto-sync fsuid
         return 0;
     }
 
@@ -264,12 +266,14 @@ pub fn sys_setgid(gid: usize) SyscallError!usize {
         proc.gid = new_gid;
         proc.egid = new_gid;
         proc.sgid = new_gid;
+        proc.fsgid = new_gid; // Auto-sync fsgid
         return 0;
     }
 
     // Non-root: can only set effective GID to real or saved GID
     if (new_gid == proc.gid or new_gid == proc.sgid) {
         proc.egid = new_gid;
+        proc.fsgid = new_gid; // Auto-sync fsgid
         return 0;
     }
 
@@ -350,7 +354,10 @@ pub fn sys_setresuid(ruid: usize, euid: usize, suid_arg: usize) SyscallError!usi
 
     // All checks passed, apply changes
     if (new_ruid != UNCHANGED) proc.uid = new_ruid;
-    if (new_euid != UNCHANGED) proc.euid = new_euid;
+    if (new_euid != UNCHANGED) {
+        proc.euid = new_euid;
+        proc.fsuid = new_euid; // Auto-sync fsuid
+    }
     if (new_suid != UNCHANGED) proc.suid = new_suid;
 
     return 0;
@@ -419,7 +426,10 @@ pub fn sys_setresgid(rgid: usize, egid: usize, sgid_arg: usize) SyscallError!usi
 
     // All checks passed, apply changes
     if (new_rgid != UNCHANGED) proc.gid = new_rgid;
-    if (new_egid != UNCHANGED) proc.egid = new_egid;
+    if (new_egid != UNCHANGED) {
+        proc.egid = new_egid;
+        proc.fsgid = new_egid; // Auto-sync fsgid
+    }
     if (new_sgid != UNCHANGED) proc.sgid = new_sgid;
 
     return 0;

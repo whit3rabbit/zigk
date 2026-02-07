@@ -204,8 +204,20 @@ pub const SYS_SETPGID: usize = 109;
 pub const SYS_GETPGRP: usize = 111;
 /// Create session and set process group ID
 pub const SYS_SETSID: usize = 112;
+/// Set real and effective user IDs
+pub const SYS_SETREUID: usize = 113;
+/// Set real and effective group IDs
+pub const SYS_SETREGID: usize = 114;
+/// Get supplementary group IDs
+pub const SYS_GETGROUPS: usize = 115;
+/// Set supplementary group IDs
+pub const SYS_SETGROUPS: usize = 116;
 /// Get process group ID
 pub const SYS_GETPGID: usize = 121;
+/// Set filesystem user ID
+pub const SYS_SETFSUID: usize = 122;
+/// Set filesystem group ID
+pub const SYS_SETFSGID: usize = 123;
 /// Get session ID
 pub const SYS_GETSID: usize = 124;
 /// Set real, effective, and saved user IDs

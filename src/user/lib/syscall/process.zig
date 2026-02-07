@@ -166,6 +166,90 @@ pub fn setresgid(rgid: i32, egid: i32, sgid: i32) SyscallError!void {
     if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
 }
 
+/// Set real and effective user IDs
+pub fn setreuid(ruid: i32, euid: i32) SyscallError!void {
+    const ret = primitive.syscall2(
+        syscalls.SYS_SETREUID,
+        @bitCast(@as(u32, @bitCast(ruid))),
+        @bitCast(@as(u32, @bitCast(euid))),
+    );
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Set real and effective group IDs
+pub fn setregid(rgid: i32, egid: i32) SyscallError!void {
+    const ret = primitive.syscall2(
+        syscalls.SYS_SETREGID,
+        @bitCast(@as(u32, @bitCast(rgid))),
+        @bitCast(@as(u32, @bitCast(egid))),
+    );
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Get supplementary group IDs
+pub fn getgroups(size: i32, list: [*]u32) SyscallError!i32 {
+    const ret = primitive.syscall2(
+        syscalls.SYS_GETGROUPS,
+        @bitCast(@as(u32, @bitCast(size))),
+        @intFromPtr(list),
+    );
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return @truncate(@as(isize, @bitCast(ret)));
+}
+
+/// Set supplementary group IDs
+pub fn setgroups(size: usize, list: [*]const u32) SyscallError!void {
+    const ret = primitive.syscall2(
+        syscalls.SYS_SETGROUPS,
+        size,
+        @intFromPtr(list),
+    );
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Set filesystem user ID -- returns previous fsuid value
+pub fn setfsuid(fsuid: u32) u32 {
+    const ret = primitive.syscall1(syscalls.SYS_SETFSUID, fsuid);
+    return @truncate(ret);
+}
+
+/// Set filesystem group ID -- returns previous fsgid value
+pub fn setfsgid(fsgid: u32) u32 {
+    const ret = primitive.syscall1(syscalls.SYS_SETFSGID, fsgid);
+    return @truncate(ret);
+}
+
+/// Change file owner and group by path
+pub fn chown(path_ptr: [*]const u8, owner: u32, group: u32) SyscallError!void {
+    const ret = primitive.syscall3(syscalls.SYS_CHOWN, @intFromPtr(path_ptr), owner, group);
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Change file owner and group by file descriptor
+pub fn fchown(fd: i32, owner: u32, group: u32) SyscallError!void {
+    const ret = primitive.syscall3(syscalls.SYS_FCHOWN, @bitCast(@as(u32, @bitCast(fd))), owner, group);
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Change symlink owner and group (no follow)
+pub fn lchown(path_ptr: [*]const u8, owner: u32, group: u32) SyscallError!void {
+    const ret = primitive.syscall3(syscalls.SYS_LCHOWN, @intFromPtr(path_ptr), owner, group);
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Change file owner and group relative to directory fd
+pub fn fchownat(dirfd: i32, path_ptr: [*]const u8, owner: u32, group: u32, flags: u32) SyscallError!void {
+    const ret = primitive.syscall5(
+        syscalls.SYS_FCHOWNAT,
+        @bitCast(@as(u32, @bitCast(dirfd))),
+        @intFromPtr(path_ptr),
+        owner,
+        group,
+        flags,
+    );
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
 // =============================================================================
 // Memory Management (sys_brk)
 // =============================================================================
