@@ -179,6 +179,78 @@ pub fn poll(ufds: []PollFd, timeout: i32) SyscallError!usize {
 }
 
 // =============================================================================
+// I/O Multiplexing - epoll
+// =============================================================================
+
+/// Create epoll instance with flags
+pub fn epoll_create1(flags: u32) SyscallError!i32 {
+    const ret = primitive.syscall1(syscalls.SYS_EPOLL_CREATE1, @as(usize, flags));
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return @intCast(@as(isize, @bitCast(ret)));
+}
+
+/// Control epoll instance (add/modify/delete file descriptors)
+pub fn epoll_ctl(epfd: i32, op: u32, fd: i32, event: ?*EpollEvent) SyscallError!usize {
+    const ev_ptr: usize = if (event) |e| @intFromPtr(e) else 0;
+    const ret = primitive.syscall4(
+        syscalls.SYS_EPOLL_CTL,
+        @bitCast(@as(isize, epfd)),
+        @as(usize, op),
+        @bitCast(@as(isize, fd)),
+        ev_ptr,
+    );
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return ret;
+}
+
+/// Wait for I/O events on epoll instance
+pub fn epoll_wait(epfd: i32, events: [*]EpollEvent, maxevents: u32, timeout: i32) SyscallError!usize {
+    const ret = primitive.syscall4(
+        syscalls.SYS_EPOLL_WAIT,
+        @bitCast(@as(isize, epfd)),
+        @intFromPtr(events),
+        @as(usize, maxevents),
+        @bitCast(@as(isize, timeout)),
+    );
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return ret;
+}
+
+/// Epoll event structure
+pub const EpollEvent = uapi.epoll.EpollEvent;
+
+/// Epoll control operations
+pub const EPOLL_CTL_ADD = uapi.epoll.EPOLL_CTL_ADD;
+pub const EPOLL_CTL_DEL = uapi.epoll.EPOLL_CTL_DEL;
+pub const EPOLL_CTL_MOD = uapi.epoll.EPOLL_CTL_MOD;
+
+/// Epoll event flags
+pub const EPOLLIN = uapi.epoll.EPOLLIN;
+pub const EPOLLOUT = uapi.epoll.EPOLLOUT;
+pub const EPOLLERR = uapi.epoll.EPOLLERR;
+pub const EPOLLHUP = uapi.epoll.EPOLLHUP;
+pub const EPOLLET = uapi.epoll.EPOLLET;
+pub const EPOLLONESHOT = uapi.epoll.EPOLLONESHOT;
+
+// =============================================================================
+// I/O Multiplexing - select/pselect6
+// =============================================================================
+
+/// Synchronous I/O multiplexing
+pub fn select(nfds: i32, readfds: ?*[128]u8, writefds: ?*[128]u8, exceptfds: ?*[128]u8, timeout: ?*extern struct { tv_sec: i64, tv_usec: i64 }) SyscallError!usize {
+    const ret = primitive.syscall5(
+        syscalls.SYS_SELECT,
+        @bitCast(@as(isize, nfds)),
+        if (readfds) |p| @intFromPtr(p) else 0,
+        if (writefds) |p| @intFromPtr(p) else 0,
+        if (exceptfds) |p| @intFromPtr(p) else 0,
+        if (timeout) |p| @intFromPtr(p) else 0,
+    );
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return ret;
+}
+
+// =============================================================================
 // Memory Mapping
 // =============================================================================
 

@@ -131,28 +131,42 @@ pub fn sys_poll(ufds: usize, nfds: usize, timeout: isize, socket_file_ops: *cons
     var ready_count: usize = 0;
 
     // Check events immediately (non-blocking pass)
+    const fd_table = base.getGlobalFdTable();
     for (kpollfds) |*pfd| {
         pfd.revents = 0;
 
         if (pfd.fd < 0) continue;
 
-        // Basic handling for stdin/stdout/stderr
-        if (pfd.fd <= 2) {
-            const events: u16 = @bitCast(pfd.events);
-            if (pfd.fd > 0 and (events & uapi.poll.POLLOUT) != 0) {
-                pfd.revents |= @bitCast(uapi.poll.POLLOUT);
-            }
-            continue;
-        }
-
-        // Safe cast: fd is positive after checks above
-        const fd_usize: usize = @intCast(pfd.fd);
-        const socket_ctx = getSocketContext(fd_usize, socket_file_ops) orelse {
-            pfd.revents |= @bitCast(uapi.poll.POLLNVAL);
+        // Cast to u32 for fd table lookup
+        const fd_u32 = std.math.cast(u32, @as(usize, @intCast(pfd.fd))) orelse {
+            pfd.revents = @bitCast(uapi.poll.POLLNVAL);
+            ready_count += 1;
             continue;
         };
-        const events: u16 = @bitCast(pfd.events);
-        pfd.revents = @bitCast(socket.checkPollEvents(socket_ctx.socket_idx, events));
+
+        // Look up fd in FdTable
+        if (fd_table.get(fd_u32)) |fd_obj| {
+            // Call poll if available
+            var revents: u32 = 0;
+            if (fd_obj.ops.poll) |poll_fn| {
+                const events_u32: u32 = @as(u16, @bitCast(pfd.events));
+                revents = poll_fn(fd_obj, events_u32);
+            } else {
+                // No poll - assume always ready for the modes the FD supports
+                const events: u16 = @bitCast(pfd.events);
+                if ((events & uapi.poll.POLLIN) != 0 and fd_obj.isReadable()) {
+                    revents |= uapi.poll.POLLIN;
+                }
+                if ((events & uapi.poll.POLLOUT) != 0 and fd_obj.isWritable()) {
+                    revents |= uapi.poll.POLLOUT;
+                }
+            }
+            const revents_i16: i16 = @bitCast(@as(u16, @truncate(revents)));
+            pfd.revents = revents_i16;
+        } else {
+            // FD no longer valid
+            pfd.revents = @bitCast(uapi.poll.POLLNVAL);
+        }
 
         if (pfd.revents != 0) {
             ready_count += 1;
@@ -233,22 +247,36 @@ pub fn sys_poll(ufds: usize, nfds: usize, timeout: isize, socket_file_ops: *cons
 
         if (pfd.fd < 0) continue;
 
-        if (pfd.fd <= 2) {
-            const events: u16 = @bitCast(pfd.events);
-            if (pfd.fd > 0 and (events & uapi.poll.POLLOUT) != 0) {
-                pfd.revents |= @bitCast(uapi.poll.POLLOUT);
-            }
-            continue;
-        }
-
-        // Safe cast: fd is positive after checks above
-        const fd_usize: usize = @intCast(pfd.fd);
-        const socket_ctx = getSocketContext(fd_usize, socket_file_ops) orelse {
-            pfd.revents |= @bitCast(uapi.poll.POLLNVAL);
+        // Cast to u32 for fd table lookup
+        const fd_u32 = std.math.cast(u32, @as(usize, @intCast(pfd.fd))) orelse {
+            pfd.revents = @bitCast(uapi.poll.POLLNVAL);
+            ready_count += 1;
             continue;
         };
-        const events: u16 = @bitCast(pfd.events);
-        pfd.revents = @bitCast(socket.checkPollEvents(socket_ctx.socket_idx, events));
+
+        // Look up fd in FdTable
+        if (fd_table.get(fd_u32)) |fd_obj| {
+            // Call poll if available
+            var revents: u32 = 0;
+            if (fd_obj.ops.poll) |poll_fn| {
+                const events_u32: u32 = @as(u16, @bitCast(pfd.events));
+                revents = poll_fn(fd_obj, events_u32);
+            } else {
+                // No poll - assume always ready for the modes the FD supports
+                const events: u16 = @bitCast(pfd.events);
+                if ((events & uapi.poll.POLLIN) != 0 and fd_obj.isReadable()) {
+                    revents |= uapi.poll.POLLIN;
+                }
+                if ((events & uapi.poll.POLLOUT) != 0 and fd_obj.isWritable()) {
+                    revents |= uapi.poll.POLLOUT;
+                }
+            }
+            const revents_i16: i16 = @bitCast(@as(u16, @truncate(revents)));
+            pfd.revents = revents_i16;
+        } else {
+            // FD no longer valid
+            pfd.revents = @bitCast(uapi.poll.POLLNVAL);
+        }
 
         if (pfd.revents != 0) {
             ready_count += 1;
