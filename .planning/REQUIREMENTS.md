@@ -11,28 +11,28 @@ Requirements for this milestone. Each maps to roadmap phases.
 
 - [ ] **STUB-01**: dup3 returns new fd with O_CLOEXEC flag support
 - [ ] **STUB-02**: accept4 returns new socket fd with O_CLOEXEC/O_NONBLOCK flags
-- [ ] **STUB-03**: ppoll blocks on fd set with signal mask and timeout
+- [x] **STUB-03**: ppoll blocks on fd set with signal mask and timeout
 - [ ] **STUB-04**: getrlimit returns per-process resource limits (hardcoded defaults)
 - [ ] **STUB-05**: setrlimit sets per-process resource limits
-- [ ] **STUB-06**: prlimit64 gets/sets resource limits for any process
-- [ ] **STUB-07**: getrusage returns resource usage stats (user/system time, max RSS)
-- [ ] **STUB-08**: rt_sigpending returns set of pending signals
-- [ ] **STUB-09**: rt_sigsuspend atomically replaces signal mask and suspends
+- [x] **STUB-06**: prlimit64 gets/sets resource limits for any process
+- [x] **STUB-07**: getrusage returns resource usage stats (user/system time, max RSS)
+- [x] **STUB-08**: rt_sigpending returns set of pending signals
+- [x] **STUB-09**: rt_sigsuspend atomically replaces signal mask and suspends
 - [ ] **STUB-10**: sigaltstack sets/gets alternate signal stack
-- [ ] **STUB-11**: sched_get_priority_max returns max priority for scheduling policy
-- [ ] **STUB-12**: sched_get_priority_min returns min priority for scheduling policy
-- [ ] **STUB-13**: sched_getscheduler returns scheduling policy for process
-- [ ] **STUB-14**: sched_getparam returns scheduling parameters for process
-- [ ] **STUB-15**: sched_rr_get_interval returns round-robin time quantum
+- [x] **STUB-11**: sched_get_priority_max returns max priority for scheduling policy
+- [x] **STUB-12**: sched_get_priority_min returns min priority for scheduling policy
+- [x] **STUB-13**: sched_getscheduler returns scheduling policy for process
+- [x] **STUB-14**: sched_getparam returns scheduling parameters for process
+- [x] **STUB-15**: sched_rr_get_interval returns round-robin time quantum
 - [ ] **STUB-16**: statfs returns filesystem statistics for path
 - [ ] **STUB-17**: fstatfs returns filesystem statistics for fd
-- [ ] **STUB-18**: madvise accepts memory usage hints (no-op initially)
-- [ ] **STUB-19**: mlock/munlock accept page locking requests (no-op initially)
-- [ ] **STUB-20**: mlockall/munlockall accept process-wide locking requests (no-op initially)
-- [ ] **STUB-21**: mincore reports page residency (all pages resident initially)
+- [x] **STUB-18**: madvise accepts memory usage hints (no-op initially)
+- [x] **STUB-19**: mlock/munlock accept page locking requests (no-op initially)
+- [x] **STUB-20**: mlockall/munlockall accept process-wide locking requests (no-op initially)
+- [x] **STUB-21**: mincore reports page residency (all pages resident initially)
 - [ ] **STUB-22**: getresuid/getresgid return real/effective/saved UID/GID
-- [ ] **STUB-23**: sched_setscheduler sets scheduling policy (validates args, stores policy)
-- [ ] **STUB-24**: sched_setparam sets scheduling parameters (validates args, stores params)
+- [x] **STUB-23**: sched_setscheduler sets scheduling policy (validates args, stores policy)
+- [x] **STUB-24**: sched_setparam sets scheduling parameters (validates args, stores params)
 
 ### Credentials & Ownership
 
@@ -183,7 +183,7 @@ Deferred to future milestone. Tracked but not in current roadmap.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| STUB-01 through STUB-24 | Phase 1 | Pending |
+| STUB-01 through STUB-24 | Phase 1 | Complete |
 | CRED-01 through CRED-14 | Phase 2 | Pending |
 | MUX-01 through MUX-06 | Phase 3 | Pending |
 | EVT-01 through EVT-07 | Phase 4 | Pending |
