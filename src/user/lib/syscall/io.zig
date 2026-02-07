@@ -288,6 +288,70 @@ pub fn eventfd(initval: u32) SyscallError!i32 {
 }
 
 // =============================================================================
+// Timer File Descriptors
+// =============================================================================
+
+/// Timespec structure (time specification with nanosecond precision)
+pub const TimeSpec = extern struct {
+    tv_sec: i64,
+    tv_nsec: i64,
+};
+
+/// ITimerSpec structure (interval timer specification)
+pub const ITimerSpec = extern struct {
+    it_interval: TimeSpec, // Timer interval (periodic reload value)
+    it_value: TimeSpec,    // Time until next expiration
+};
+
+/// timerfd_create flags
+pub const TFD_CLOEXEC: u32 = 0x80000; // Close-on-exec
+pub const TFD_NONBLOCK: u32 = 0x800;  // Non-blocking mode
+
+/// timerfd_settime flags
+pub const TFD_TIMER_ABSTIME: u32 = 0x1; // Absolute time (instead of relative)
+
+/// Clock types
+pub const CLOCK_REALTIME: i32 = 0;  // Wall clock time
+pub const CLOCK_MONOTONIC: i32 = 1; // Monotonic time (not affected by time jumps)
+
+/// Create a timerfd
+/// Returns a file descriptor for timer notification
+pub fn timerfd_create(clockid: i32, flags: u32) SyscallError!i32 {
+    const ret = primitive.syscall2(
+        syscalls.SYS_TIMERFD_CREATE,
+        @bitCast(@as(isize, clockid)),
+        @as(usize, flags),
+    );
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return @intCast(@as(isize, @bitCast(ret)));
+}
+
+/// Arm or disarm a timerfd
+/// new_value: New timer settings
+/// old_value: Optional pointer to receive old timer settings (null = ignore)
+pub fn timerfd_settime(fd: i32, flags: u32, new_value: *const ITimerSpec, old_value: ?*ITimerSpec) SyscallError!void {
+    const ret = primitive.syscall4(
+        syscalls.SYS_TIMERFD_SETTIME,
+        @bitCast(@as(isize, fd)),
+        @as(usize, flags),
+        @intFromPtr(new_value),
+        if (old_value) |p| @intFromPtr(p) else 0,
+    );
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Get current timer settings
+/// curr_value: Pointer to receive current timer settings
+pub fn timerfd_gettime(fd: i32, curr_value: *ITimerSpec) SyscallError!void {
+    const ret = primitive.syscall2(
+        syscalls.SYS_TIMERFD_GETTIME,
+        @bitCast(@as(isize, fd)),
+        @intFromPtr(curr_value),
+    );
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+// =============================================================================
 // Memory Mapping
 // =============================================================================
 
