@@ -137,9 +137,9 @@ pub fn getresuid(ruid: *u32, euid: *u32, suid: *u32) SyscallError!void {
 pub fn setresuid(ruid: i32, euid: i32, suid: i32) SyscallError!void {
     const ret = primitive.syscall3(
         syscalls.SYS_SETRESUID,
-        @bitCast(@as(u32, @bitCast(ruid))),
-        @bitCast(@as(u32, @bitCast(euid))),
-        @bitCast(@as(u32, @bitCast(suid))),
+        @as(usize, @as(u32, @bitCast(ruid))),
+        @as(usize, @as(u32, @bitCast(euid))),
+        @as(usize, @as(u32, @bitCast(suid))),
     );
     if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
 }
@@ -159,9 +159,9 @@ pub fn getresgid(rgid: *u32, egid: *u32, sgid: *u32) SyscallError!void {
 pub fn setresgid(rgid: i32, egid: i32, sgid: i32) SyscallError!void {
     const ret = primitive.syscall3(
         syscalls.SYS_SETRESGID,
-        @bitCast(@as(u32, @bitCast(rgid))),
-        @bitCast(@as(u32, @bitCast(egid))),
-        @bitCast(@as(u32, @bitCast(sgid))),
+        @as(usize, @as(u32, @bitCast(rgid))),
+        @as(usize, @as(u32, @bitCast(egid))),
+        @as(usize, @as(u32, @bitCast(sgid))),
     );
     if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
 }
@@ -170,8 +170,8 @@ pub fn setresgid(rgid: i32, egid: i32, sgid: i32) SyscallError!void {
 pub fn setreuid(ruid: i32, euid: i32) SyscallError!void {
     const ret = primitive.syscall2(
         syscalls.SYS_SETREUID,
-        @bitCast(@as(u32, @bitCast(ruid))),
-        @bitCast(@as(u32, @bitCast(euid))),
+        @as(usize, @as(u32, @bitCast(ruid))),
+        @as(usize, @as(u32, @bitCast(euid))),
     );
     if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
 }
@@ -180,8 +180,8 @@ pub fn setreuid(ruid: i32, euid: i32) SyscallError!void {
 pub fn setregid(rgid: i32, egid: i32) SyscallError!void {
     const ret = primitive.syscall2(
         syscalls.SYS_SETREGID,
-        @bitCast(@as(u32, @bitCast(rgid))),
-        @bitCast(@as(u32, @bitCast(egid))),
+        @as(usize, @as(u32, @bitCast(rgid))),
+        @as(usize, @as(u32, @bitCast(egid))),
     );
     if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
 }
@@ -190,7 +190,7 @@ pub fn setregid(rgid: i32, egid: i32) SyscallError!void {
 pub fn getgroups(size: i32, list: [*]u32) SyscallError!i32 {
     const ret = primitive.syscall2(
         syscalls.SYS_GETGROUPS,
-        @bitCast(@as(u32, @bitCast(size))),
+        @as(usize, @as(u32, @bitCast(size))),
         @intFromPtr(list),
     );
     if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
@@ -227,7 +227,7 @@ pub fn chown(path_ptr: [*]const u8, owner: u32, group: u32) SyscallError!void {
 
 /// Change file owner and group by file descriptor
 pub fn fchown(fd: i32, owner: u32, group: u32) SyscallError!void {
-    const ret = primitive.syscall3(syscalls.SYS_FCHOWN, @bitCast(@as(u32, @bitCast(fd))), owner, group);
+    const ret = primitive.syscall3(syscalls.SYS_FCHOWN, @as(usize, @as(u32, @bitCast(fd))), owner, group);
     if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
 }
 
@@ -241,7 +241,7 @@ pub fn lchown(path_ptr: [*]const u8, owner: u32, group: u32) SyscallError!void {
 pub fn fchownat(dirfd: i32, path_ptr: [*]const u8, owner: u32, group: u32, flags: u32) SyscallError!void {
     const ret = primitive.syscall5(
         syscalls.SYS_FCHOWNAT,
-        @bitCast(@as(u32, @bitCast(dirfd))),
+        @as(usize, @as(u32, @bitCast(dirfd))),
         @intFromPtr(path_ptr),
         owner,
         group,
