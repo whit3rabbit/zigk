@@ -52,10 +52,13 @@ Plans:
   3. Processes can manage supplementary groups via getgroups/setgroups and membership affects file access checks
   4. File owner and group can be changed via chown/fchown/lchown/fchownat with proper permission validation
   5. Filesystem UID/GID can be set independently for permission checks via setfsuid/setfsgid
-**Plans**: TBD
+**Plans**: 4 plans
 
 Plans:
-- [ ] 02-01: TBD
+- [ ] 02-01-PLAN.md -- Infrastructure: fsuid/fsgid fields, syscall numbers (both arch), perms.zig fsuid, auto-sync, userspace wrappers
+- [ ] 02-02-PLAN.md -- Credential syscalls: setreuid, setregid, getgroups, setgroups, setfsuid, setfsgid
+- [ ] 02-03-PLAN.md -- Chown family: enhanced sys_chown with POSIX enforcement, fchown, lchown, fchownat, FileOps.chown, suid/sgid clearing
+- [ ] 02-04-PLAN.md -- Integration tests: 20+ tests with fork isolation covering all new syscalls
 
 ### Phase 3: I/O Multiplexing
 **Goal**: Complete the existing epoll infrastructure by implementing FileOps.poll for pipes, sockets, and regular files, enabling select/pselect6 and functional epoll_wait
@@ -165,7 +168,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Quick Wins - Trivial Stubs | 4/4 | Complete | 2026-02-06 |
-| 2. Credentials & Ownership | 0/TBD | Not started | - |
+| 2. Credentials & Ownership | 0/4 | Not started | - |
 | 3. I/O Multiplexing | 0/TBD | Not started | - |
 | 4. Event Notification FDs | 0/TBD | Not started | - |
 | 5. Vectored & Positional I/O | 0/TBD | Not started | - |
