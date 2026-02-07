@@ -10,18 +10,18 @@ See: .planning/PROJECT.md (updated 2026-02-06)
 ## Current Position
 
 Phase: 3 of 9 (I/O Multiplexing)
-Plan: 2 of 6 in current phase
+Plan: 3 of 6 in current phase
 Status: In progress
-Last activity: 2026-02-07 - Completed 03-02-PLAN.md (epoll_wait implementation)
+Last activity: 2026-02-07 - Completed 03-03-PLAN.md (select/pselect6/poll/ppoll upgrade)
 
-Progress: [███░░░░░░░] 28%
+Progress: [████░░░░░░] 31%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 10
+- Total plans completed: 11
 - Average duration: 5 min
-- Total execution time: 0.89 hours
+- Total execution time: 0.99 hours
 
 **By Phase:**
 
@@ -29,10 +29,10 @@ Progress: [███░░░░░░░] 28%
 |-------|-------|-------|----------|
 | 1 | 4 | 21 min | 5 min |
 | 2 | 4 | 20 min | 5 min |
-| 3 | 2 | 11 min | 5.5 min |
+| 3 | 3 | 17 min | 5.7 min |
 
 **Recent Trend:**
-- Last 5 plans: 02-03 (5min), 02-04 (6min), 03-01 (4min), 03-02 (7min)
+- Last 5 plans: 02-04 (6min), 03-01 (4min), 03-02 (7min), 03-03 (6min)
 - Trend: Steady 4-7min for syscall implementation and testing
 
 *Updated after each plan completion*
@@ -73,6 +73,10 @@ Recent decisions affecting current work:
 - **03-02:** Use sched.yield() for epoll_wait blocking instead of sleep queues (matches sys_select pattern)
 - **03-02:** Store full revents in last_revents for edge-triggered detection (revents | entry_last_revents)
 - **03-02:** EPOLLONESHOT disables by zeroing events field, not removing entry from watch list
+- **03-03:** pselect6 6th arg is struct { sigset_t *ss; size_t ss_len; }, not direct sigset pointer (Linux ABI)
+- **03-03:** sys_poll uses FileOps.poll uniformly - no socket special-casing needed
+- **03-03:** PollFd.revents is i16, truncate u32 FileOps.poll result with @bitCast(@as(u16, @truncate))
+- **03-03:** Old sys_poll blocking mechanism (sock.blocked_thread) kept for backward compat, will be replaced with futex
 
 ### Pending Todos
 
@@ -90,7 +94,8 @@ Recent decisions affecting current work:
 **Phase 3 In Progress (I/O Multiplexing):**
 - ✅ FileOps.poll foundation complete (03-01) - all FD types now have poll methods
 - ✅ sys_epoll_wait implementation complete (03-02) - blocking, edge-triggered, oneshot modes
-- Next: sys_poll, sys_select enhancement, ppoll update, integration tests
+- ✅ select/pselect6/poll/ppoll upgrade complete (03-03) - uniform FileOps.poll, userspace wrappers
+- Next: integration tests, io_uring setup (if applicable), or move to Phase 4
 - Success of Phase 3 directly unlocks Phase 4 (event FDs need epoll integration)
 
 **Phase 9 Considerations (SysV IPC):**
