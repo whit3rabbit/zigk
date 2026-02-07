@@ -634,6 +634,113 @@ pub fn sys_setfsgid(fsgid: usize) SyscallError!usize {
     return old_fsgid;
 }
 
+/// sys_getgroups (115) - Get supplementary group list
+///
+/// Returns the list of supplementary group IDs for the calling process.
+/// If size == 0, returns the count without writing to the list.
+/// If size > 0, writes up to size group IDs to the list.
+///
+/// Args:
+///   size: Size of the list array (in number of u32 elements), or 0 to query count
+///   list_ptr: Pointer to u32 array in userspace
+///
+/// Returns:
+///   Number of supplementary groups (on success)
+///   EINVAL if size < count (buffer too small)
+///   EFAULT if list_ptr is invalid
+pub fn sys_getgroups(size: usize, list_ptr: usize) SyscallError!usize {
+    const proc = base.getCurrentProcess();
+    const count = proc.supplementary_groups_count;
+
+    // If size == 0, just return count (query only)
+    if (size == 0) {
+        return count;
+    }
+
+    // Check buffer size
+    if (size < count) {
+        return error.EINVAL;
+    }
+
+    // Validate user buffer
+    if (!isValidUserAccess(list_ptr, size * @sizeOf(u32), AccessMode.Write)) {
+        return error.EFAULT;
+    }
+
+    // Copy supplementary groups to userspace
+    if (count > 0) {
+        const data_bytes = @as(*const [@sizeOf(u32) * 16]u8, @ptrCast(&proc.supplementary_groups));
+        const uptr = UserPtr.from(list_ptr);
+        _ = uptr.copyFromKernel(data_bytes[0 .. count * @sizeOf(u32)]) catch return error.EFAULT;
+    }
+
+    return count;
+}
+
+/// sys_setgroups (116) - Set supplementary group list
+///
+/// Sets the list of supplementary group IDs for the calling process.
+/// Requires root privileges (euid == 0) or CAP_SETGID.
+///
+/// Args:
+///   size: Number of group IDs in the list (max 16)
+///   list_ptr: Pointer to u32 array in userspace
+///
+/// Returns:
+///   0 on success
+///   EINVAL if size > 16
+///   EPERM if not privileged
+///   EFAULT if list_ptr is invalid
+pub fn sys_setgroups(size: usize, list_ptr: usize) SyscallError!usize {
+    const proc = base.getCurrentProcess();
+
+    // Permission check: must be root or have CAP_SETGID
+    if (proc.euid != 0 and !proc.hasSetGidCapability(0)) {
+        return error.EPERM;
+    }
+
+    // Validate size
+    if (size > 16) {
+        return error.EINVAL;
+    }
+
+    // Read groups from userspace (if any)
+    if (size > 0) {
+        // Validate user buffer
+        if (!isValidUserAccess(list_ptr, size * @sizeOf(u32), AccessMode.Read)) {
+            return error.EFAULT;
+        }
+
+        // Copy from userspace
+        const uptr = UserPtr.from(list_ptr);
+        var temp_groups: [16]u32 = undefined;
+        const data_bytes = @as(*[16 * @sizeOf(u32)]u8, @ptrCast(&temp_groups));
+        _ = uptr.copyToKernel(data_bytes[0 .. size * @sizeOf(u32)]) catch return error.EFAULT;
+
+        // SECURITY: Acquire credential lock
+        const held = proc.cred_lock.acquire();
+        defer held.release();
+
+        // Copy to process structure
+        @memcpy(proc.supplementary_groups[0..size], temp_groups[0..size]);
+        proc.supplementary_groups_count = @truncate(size);
+
+        // Zero remaining entries to prevent info leak
+        if (size < 16) {
+            @memset(proc.supplementary_groups[size..16], 0);
+        }
+    } else {
+        // size == 0: clear supplementary groups
+        const held = proc.cred_lock.acquire();
+        defer held.release();
+
+        proc.supplementary_groups_count = 0;
+        @memset(&proc.supplementary_groups, 0);
+    }
+
+    return 0;
+}
+
 /// sys_umask (95) - Set file creation mask
 ///
 /// MVP: Stored per-process but not enforced yet
