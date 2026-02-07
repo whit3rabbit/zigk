@@ -286,3 +286,111 @@ pub fn set_display_mode(width: u32, height: u32, flags: u32) SyscallError!bool {
     if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
     return true;
 }
+
+// =============================================================================
+// Scheduling Syscalls
+// =============================================================================
+
+/// Scheduling parameter structure
+pub const SchedParam = extern struct {
+    sched_priority: i32,
+};
+
+/// Get maximum scheduling priority for a policy
+pub fn sched_get_priority_max(policy: u32) SyscallError!usize {
+    const ret = primitive.syscall1(syscalls.SYS_SCHED_GET_PRIORITY_MAX, policy);
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return ret;
+}
+
+/// Get minimum scheduling priority for a policy
+pub fn sched_get_priority_min(policy: u32) SyscallError!usize {
+    const ret = primitive.syscall1(syscalls.SYS_SCHED_GET_PRIORITY_MIN, policy);
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return ret;
+}
+
+/// Get scheduling policy for a process
+pub fn sched_getscheduler(pid: u32) SyscallError!usize {
+    const ret = primitive.syscall1(syscalls.SYS_SCHED_GETSCHEDULER, pid);
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return ret;
+}
+
+/// Get scheduling parameters for a process
+pub fn sched_getparam(pid: u32, param: *SchedParam) SyscallError!void {
+    const ret = primitive.syscall2(syscalls.SYS_SCHED_GETPARAM, pid, @intFromPtr(param));
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Set scheduling policy and parameters for a process
+pub fn sched_setscheduler(pid: u32, policy: u32, param: *const SchedParam) SyscallError!void {
+    const ret = primitive.syscall3(syscalls.SYS_SCHED_SETSCHEDULER, pid, policy, @intFromPtr(param));
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Set scheduling parameters for a process
+pub fn sched_setparam(pid: u32, param: *const SchedParam) SyscallError!void {
+    const ret = primitive.syscall2(syscalls.SYS_SCHED_SETPARAM, pid, @intFromPtr(param));
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Get round-robin time quantum
+pub fn sched_rr_get_interval(pid: u32, interval: *Timespec) SyscallError!void {
+    const ret = primitive.syscall2(syscalls.SYS_SCHED_RR_GET_INTERVAL, pid, @intFromPtr(interval));
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+// =============================================================================
+// Resource Limit Syscalls
+// =============================================================================
+
+/// Timespec structure (for sched_rr_get_interval)
+pub const Timespec = extern struct {
+    tv_sec: i64,
+    tv_nsec: i64,
+};
+
+/// Resource limit structure
+pub const Rlimit = extern struct {
+    rlim_cur: u64,
+    rlim_max: u64,
+};
+
+/// Resource usage structure
+pub const Rusage = extern struct {
+    ru_utime: extern struct { tv_sec: i64, tv_usec: i64 },
+    ru_stime: extern struct { tv_sec: i64, tv_usec: i64 },
+    ru_maxrss: i64,
+    ru_ixrss: i64,
+    ru_idrss: i64,
+    ru_isrss: i64,
+    ru_minflt: i64,
+    ru_majflt: i64,
+    ru_nswap: i64,
+    ru_inblock: i64,
+    ru_oublock: i64,
+    ru_msgsnd: i64,
+    ru_msgrcv: i64,
+    ru_nsignals: i64,
+    ru_nvcsw: i64,
+    ru_nivcsw: i64,
+};
+
+/// Get or set resource limits for a process
+pub fn prlimit64(pid: u32, resource_id: u32, new_limit: ?*const Rlimit, old_limit: ?*Rlimit) SyscallError!void {
+    const ret = primitive.syscall4(
+        syscalls.SYS_PRLIMIT64,
+        pid,
+        resource_id,
+        if (new_limit) |p| @intFromPtr(p) else 0,
+        if (old_limit) |p| @intFromPtr(p) else 0
+    );
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Get resource usage
+pub fn getrusage(who: usize, usage: *Rusage) SyscallError!void {
+    const ret = primitive.syscall2(syscalls.SYS_GETRUSAGE, who, @intFromPtr(usage));
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}

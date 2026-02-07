@@ -113,6 +113,10 @@ pub const mlock = io.mlock;
 pub const munlock = io.munlock;
 pub const madvise = io.madvise;
 pub const msync = io.msync;
+pub const mlockall = io.mlockall;
+pub const munlockall = io.munlockall;
+pub const mincore = io.mincore;
+pub const ppoll = io.ppoll;
 
 // Re-export Process
 pub const sched_yield = process.sched_yield;
@@ -164,6 +168,8 @@ pub const sigprocmask = signal.sigprocmask;
 pub const sigreturn = signal.sigreturn;
 pub const sigpending = signal.sigpending;
 pub const sigaltstack = signal.sigaltstack;
+pub const rt_sigpending = signal.rt_sigpending;
+pub const rt_sigsuspend = signal.rt_sigsuspend;
 pub const SigAction = signal.SigAction;
 pub const SigSet = signal.SigSet;
 
@@ -237,6 +243,22 @@ pub const pci_config_write = resource.pci_config_write;
 pub const outb = resource.outb;
 pub const inb = resource.inb;
 pub const set_display_mode = resource.set_display_mode;
+
+// Scheduling
+pub const SchedParam = resource.SchedParam;
+pub const sched_get_priority_max = resource.sched_get_priority_max;
+pub const sched_get_priority_min = resource.sched_get_priority_min;
+pub const sched_getscheduler = resource.sched_getscheduler;
+pub const sched_getparam = resource.sched_getparam;
+pub const sched_setscheduler = resource.sched_setscheduler;
+pub const sched_setparam = resource.sched_setparam;
+pub const sched_rr_get_interval = resource.sched_rr_get_interval;
+
+// Resource limits
+pub const Rlimit = resource.Rlimit;
+pub const Rusage = resource.Rusage;
+pub const prlimit64 = resource.prlimit64;
+pub const getrusage = resource.getrusage;
 
 // Re-export io_uring
 pub const IoUringSqe = io_uring.IoUringSqe;

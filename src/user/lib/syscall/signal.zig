@@ -95,3 +95,20 @@ pub fn sigaltstack(ss: ?*const uapi.signal.StackT, old_ss: ?*uapi.signal.StackT)
     );
     if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
 }
+
+// =============================================================================
+// Additional RT Signal Syscalls
+// =============================================================================
+
+/// Get pending signals (rt_sigpending)
+pub fn rt_sigpending(set: *u64) SyscallError!void {
+    const ret = primitive.syscall2(syscalls.SYS_RT_SIGPENDING, @intFromPtr(set), 8);
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Suspend execution until signal arrives (rt_sigsuspend)
+/// Note: Always returns EINTR on success per POSIX
+pub fn rt_sigsuspend(mask: *const u64) SyscallError!void {
+    const ret = primitive.syscall2(syscalls.SYS_RT_SIGSUSPEND, @intFromPtr(mask), 8);
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}

@@ -499,5 +499,51 @@ pub fn readlink(path: [*:0]const u8, buf: [*]u8, bufsiz: usize) SyscallError!siz
     return ret;
 }
 
+// =============================================================================
+// Additional Memory Management Syscalls
+// =============================================================================
+
+/// Lock all pages in address space
+pub fn mlockall(flags: u32) SyscallError!void {
+    const ret = primitive.syscall1(syscalls.SYS_MLOCKALL, flags);
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Unlock all pages in address space
+pub fn munlockall() SyscallError!void {
+    const ret = primitive.syscall0(syscalls.SYS_MUNLOCKALL);
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Get information about which pages are resident in memory
+pub fn mincore(addr: [*]u8, length: usize, vec: [*]u8) SyscallError!void {
+    const ret = primitive.syscall3(syscalls.SYS_MINCORE, @intFromPtr(addr), length, @intFromPtr(vec));
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+// =============================================================================
+// Advanced I/O Syscalls
+// =============================================================================
+
+/// Timespec for ppoll (re-export from time module if available, or define locally)
+const Timespec = extern struct {
+    tv_sec: i64,
+    tv_nsec: i64,
+};
+
+/// Wait for events on file descriptors with timeout and signal mask
+pub fn ppoll(fds: [*]PollFd, nfds: usize, timeout: ?*const Timespec, sigmask: ?*const u64) SyscallError!usize {
+    const ret = primitive.syscall5(
+        syscalls.SYS_PPOLL,
+        @intFromPtr(fds),
+        nfds,
+        if (timeout) |t| @intFromPtr(t) else 0,
+        if (sigmask) |m| @intFromPtr(m) else 0,
+        8  // sigsetsize
+    );
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return ret;
+}
+
 // Alias size_t to usize for compatibility if needed, but usize is standard in Zig.
 const size_t = usize;
