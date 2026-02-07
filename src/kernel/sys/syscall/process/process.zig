@@ -457,6 +457,183 @@ pub fn sys_getresgid(rgid_ptr: usize, egid_ptr: usize, sgid_ptr: usize) SyscallE
     return 0;
 }
 
+/// sys_setreuid (113) - Set real and effective user IDs
+///
+/// Atomically sets real and effective UID. POSIX semantics:
+/// - Privileged (euid==0 or CAP_SETUID): can set any values
+/// - Non-privileged: ruid can be set to current real or effective UID,
+///   euid can be set to current real, effective, or saved UID
+/// - If ruid is set (or euid is set to a value != old ruid), saved UID = new euid
+/// - Value -1 (0xFFFFFFFF) means "leave unchanged"
+///
+/// Security:
+/// - Uses cred_lock to prevent TOCTOU races
+/// - Auto-syncs fsuid when euid changes
+pub fn sys_setreuid(ruid: usize, euid: usize) SyscallError!usize {
+    const proc = base.getCurrentProcess();
+    const new_ruid: u32 = @truncate(ruid);
+    const new_euid: u32 = @truncate(euid);
+
+    // SECURITY: Acquire credential lock for atomic check-and-modify
+    const held = proc.cred_lock.acquire();
+    defer held.release();
+
+    const old_ruid = proc.uid;
+    const old_euid = proc.euid;
+    const is_privileged = old_euid == 0;
+
+    // Check permissions
+    if (new_ruid != UNCHANGED) {
+        if (!is_privileged and !proc.hasSetUidCapability(new_ruid)) {
+            if (new_ruid != old_ruid and new_ruid != old_euid) {
+                return error.EPERM;
+            }
+        }
+    }
+    if (new_euid != UNCHANGED) {
+        if (!is_privileged and !proc.hasSetUidCapability(new_euid)) {
+            if (new_euid != old_ruid and new_euid != old_euid and new_euid != proc.suid) {
+                return error.EPERM;
+            }
+        }
+    }
+
+    // Apply changes
+    if (new_ruid != UNCHANGED) proc.uid = new_ruid;
+    if (new_euid != UNCHANGED) {
+        proc.euid = new_euid;
+        proc.fsuid = new_euid; // Auto-sync fsuid
+    }
+
+    // POSIX: If ruid was set, or euid was set to value != old real UID, set saved UID to new euid
+    if (new_ruid != UNCHANGED or (new_euid != UNCHANGED and new_euid != old_ruid)) {
+        proc.suid = proc.euid;
+    }
+
+    return 0;
+}
+
+/// sys_setregid (114) - Set real and effective group IDs
+///
+/// Atomically sets real and effective GID. Same semantics as setreuid but for GIDs.
+///
+/// Security:
+/// - Uses cred_lock to prevent TOCTOU races
+/// - Auto-syncs fsgid when egid changes
+pub fn sys_setregid(rgid: usize, egid: usize) SyscallError!usize {
+    const proc = base.getCurrentProcess();
+    const new_rgid: u32 = @truncate(rgid);
+    const new_egid: u32 = @truncate(egid);
+
+    // SECURITY: Acquire credential lock for atomic check-and-modify
+    const held = proc.cred_lock.acquire();
+    defer held.release();
+
+    const old_rgid = proc.gid;
+    const old_egid = proc.egid;
+    const is_privileged = proc.euid == 0;
+
+    // Check permissions
+    if (new_rgid != UNCHANGED) {
+        if (!is_privileged and !proc.hasSetGidCapability(new_rgid)) {
+            if (new_rgid != old_rgid and new_rgid != old_egid) {
+                return error.EPERM;
+            }
+        }
+    }
+    if (new_egid != UNCHANGED) {
+        if (!is_privileged and !proc.hasSetGidCapability(new_egid)) {
+            if (new_egid != old_rgid and new_egid != old_egid and new_egid != proc.sgid) {
+                return error.EPERM;
+            }
+        }
+    }
+
+    // Apply changes
+    if (new_rgid != UNCHANGED) proc.gid = new_rgid;
+    if (new_egid != UNCHANGED) {
+        proc.egid = new_egid;
+        proc.fsgid = new_egid; // Auto-sync fsgid
+    }
+
+    // POSIX: If rgid was set, or egid was set to value != old real GID, set saved GID to new egid
+    if (new_rgid != UNCHANGED or (new_egid != UNCHANGED and new_egid != old_rgid)) {
+        proc.sgid = proc.egid;
+    }
+
+    return 0;
+}
+
+/// sys_setfsuid (122) - Set filesystem user ID
+///
+/// Sets the filesystem UID used for permission checks. This is a Linux extension.
+/// Returns the PREVIOUS fsuid value, NOT 0 on success. This is by design.
+///
+/// Security:
+/// - Non-privileged users can only set to uid, euid, suid, or current fsuid
+/// - If not permitted, returns old fsuid without changing it (NOT an error)
+/// - Uses cred_lock to prevent races
+pub fn sys_setfsuid(fsuid: usize) SyscallError!usize {
+    const proc = base.getCurrentProcess();
+    const new_fsuid: u32 = @truncate(fsuid);
+
+    // SECURITY: Acquire credential lock
+    const held = proc.cred_lock.acquire();
+    defer held.release();
+
+    const old_fsuid = proc.fsuid;
+    const is_privileged = proc.euid == 0;
+
+    // Permission check: non-privileged must match one of the UIDs
+    if (!is_privileged) {
+        if (new_fsuid != proc.uid and new_fsuid != proc.euid and
+            new_fsuid != proc.suid and new_fsuid != old_fsuid)
+        {
+            // Not permitted - return old value unchanged
+            return old_fsuid;
+        }
+    }
+
+    // Permitted - apply change
+    proc.fsuid = new_fsuid;
+    return old_fsuid;
+}
+
+/// sys_setfsgid (123) - Set filesystem group ID
+///
+/// Sets the filesystem GID used for permission checks. This is a Linux extension.
+/// Returns the PREVIOUS fsgid value, NOT 0 on success. This is by design.
+///
+/// Security:
+/// - Non-privileged users can only set to gid, egid, sgid, or current fsgid
+/// - If not permitted, returns old fsgid without changing it (NOT an error)
+/// - Uses cred_lock to prevent races
+pub fn sys_setfsgid(fsgid: usize) SyscallError!usize {
+    const proc = base.getCurrentProcess();
+    const new_fsgid: u32 = @truncate(fsgid);
+
+    // SECURITY: Acquire credential lock
+    const held = proc.cred_lock.acquire();
+    defer held.release();
+
+    const old_fsgid = proc.fsgid;
+    const is_privileged = proc.euid == 0;
+
+    // Permission check: non-privileged must match one of the GIDs
+    if (!is_privileged) {
+        if (new_fsgid != proc.gid and new_fsgid != proc.egid and
+            new_fsgid != proc.sgid and new_fsgid != old_fsgid)
+        {
+            // Not permitted - return old value unchanged
+            return old_fsgid;
+        }
+    }
+
+    // Permitted - apply change
+    proc.fsgid = new_fsgid;
+    return old_fsgid;
+}
+
 /// sys_umask (95) - Set file creation mask
 ///
 /// MVP: Stored per-process but not enforced yet
