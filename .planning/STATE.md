@@ -10,28 +10,28 @@ See: .planning/PROJECT.md (updated 2026-02-06)
 ## Current Position
 
 Phase: 2 of 9 (Credentials & Ownership)
-Plan: 2 of 4 in current phase
+Plan: 3 of 4 in current phase
 Status: In progress
-Last activity: 2026-02-07 - Completed 02-02-PLAN.md (credential syscalls)
+Last activity: 2026-02-07 - Completed 02-03-PLAN.md (chown family)
 
-Progress: [██████░░░░] 75%
+Progress: [███████░░░] 75%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 6
+- Total plans completed: 7
 - Average duration: 5 min
-- Total execution time: 0.52 hours
+- Total execution time: 0.60 hours
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 1 | 4 | 21 min | 5 min |
-| 2 | 2 | 9 min | 5 min |
+| 2 | 3 | 14 min | 5 min |
 
 **Recent Trend:**
-- Last 5 plans: 01-03 (3min), 01-04 (12min), 02-01 (5min), 02-02 (4min)
+- Last 5 plans: 01-04 (12min), 02-01 (5min), 02-02 (4min), 02-03 (5min)
 - Trend: Steady ~5min for infrastructure and syscall implementation
 
 *Updated after each plan completion*
@@ -59,6 +59,10 @@ Recent decisions affecting current work:
 - **02-02:** setfsuid/setfsgid return previous value even on 'failure' (Linux ABI, not POSIX error convention)
 - **02-02:** setreuid/setregid follow POSIX saved-set-user-ID rule (if ruid set, suid = new euid)
 - **02-02:** Supplementary groups limited to 16 (NGROUPS_MAX historical value, sufficient for MVP)
+- **02-03:** Use fsuid (not euid) for chown permission checks per 02-01 infrastructure
+- **02-03:** Clear suid/sgid bits on ownership change for POSIX security compliance
+- **02-03:** fchown uses FileOps.chown for direct fd access, avoiding path TOCTOU
+- **02-03:** chownKernel helper consolidates POSIX permission logic for all chown variants
 
 ### Pending Todos
 
@@ -85,7 +89,7 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-02-07 (plan execution)
-Stopped at: Completed 02-02-PLAN.md (credential syscalls) - Phase 2 in progress
+Stopped at: Completed 02-03-PLAN.md (chown family) - Phase 2 in progress
 Resume file: None
 
 ---
