@@ -13,7 +13,7 @@ Systematic expansion of Linux/POSIX syscall coverage from 190 to 300+ syscalls a
 Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 1: Quick Wins - Trivial Stubs** - 14 missing syscalls (10 already implemented) returning defaults/no-ops
-- [ ] **Phase 2: Credentials & Ownership** - UID/GID infrastructure + chown family
+- [x] **Phase 2: Credentials & Ownership** - UID/GID infrastructure + chown family
 - [ ] **Phase 3: I/O Multiplexing** - epoll backend + select/pselect6
 - [ ] **Phase 4: Event Notification FDs** - eventfd, timerfd, signalfd
 - [ ] **Phase 5: Vectored & Positional I/O** - readv/preadv/sendfile
@@ -55,10 +55,10 @@ Plans:
 **Plans**: 4 plans
 
 Plans:
-- [ ] 02-01-PLAN.md -- Infrastructure: fsuid/fsgid fields, syscall numbers (both arch), perms.zig fsuid, auto-sync, userspace wrappers
-- [ ] 02-02-PLAN.md -- Credential syscalls: setreuid, setregid, getgroups, setgroups, setfsuid, setfsgid
-- [ ] 02-03-PLAN.md -- Chown family: enhanced sys_chown with POSIX enforcement, fchown, lchown, fchownat, FileOps.chown, suid/sgid clearing
-- [ ] 02-04-PLAN.md -- Integration tests: 20+ tests with fork isolation covering all new syscalls
+- [x] 02-01-PLAN.md -- Infrastructure: fsuid/fsgid fields, syscall numbers (both arch), perms.zig fsuid, auto-sync, userspace wrappers
+- [x] 02-02-PLAN.md -- Credential syscalls: setreuid, setregid, getgroups, setgroups, setfsuid, setfsgid
+- [x] 02-03-PLAN.md -- Chown family: enhanced sys_chown with POSIX enforcement, fchown, lchown, fchownat, FileOps.chown, suid/sgid clearing
+- [x] 02-04-PLAN.md -- Integration tests: 21 tests with fork isolation covering all new syscalls
 
 ### Phase 3: I/O Multiplexing
 **Goal**: Complete the existing epoll infrastructure by implementing FileOps.poll for pipes, sockets, and regular files, enabling select/pselect6 and functional epoll_wait
@@ -168,7 +168,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Quick Wins - Trivial Stubs | 4/4 | Complete | 2026-02-06 |
-| 2. Credentials & Ownership | 0/4 | Not started | - |
+| 2. Credentials & Ownership | 4/4 | Complete | 2026-02-06 |
 | 3. I/O Multiplexing | 0/TBD | Not started | - |
 | 4. Event Notification FDs | 0/TBD | Not started | - |
 | 5. Vectored & Positional I/O | 0/TBD | Not started | - |
@@ -179,4 +179,4 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9
 
 ---
 *Roadmap created: 2026-02-06*
-*Last updated: 2026-02-07*
+*Last updated: 2026-02-06*

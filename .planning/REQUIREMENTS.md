@@ -36,20 +36,20 @@ Requirements for this milestone. Each maps to roadmap phases.
 
 ### Credentials & Ownership
 
-- [ ] **CRED-01**: setuid sets effective UID for calling process
-- [ ] **CRED-02**: setgid sets effective GID for calling process
-- [ ] **CRED-03**: setreuid sets real and effective UID atomically
-- [ ] **CRED-04**: setregid sets real and effective GID atomically
-- [ ] **CRED-05**: setresuid sets real, effective, and saved UID
-- [ ] **CRED-06**: setresgid sets real, effective, and saved GID
-- [ ] **CRED-07**: getgroups returns supplementary group list
-- [ ] **CRED-08**: setgroups sets supplementary group list
-- [ ] **CRED-09**: setfsuid sets filesystem UID for permission checks
-- [ ] **CRED-10**: setfsgid sets filesystem GID for permission checks
-- [ ] **CRED-11**: chown changes file owner and group by path
-- [ ] **CRED-12**: fchown changes file owner and group by fd
-- [ ] **CRED-13**: lchown changes symlink owner and group (no follow)
-- [ ] **CRED-14**: fchownat changes file owner and group with dirfd
+- [x] **CRED-01**: setuid sets effective UID for calling process
+- [x] **CRED-02**: setgid sets effective GID for calling process
+- [x] **CRED-03**: setreuid sets real and effective UID atomically
+- [x] **CRED-04**: setregid sets real and effective GID atomically
+- [x] **CRED-05**: setresuid sets real, effective, and saved UID
+- [x] **CRED-06**: setresgid sets real, effective, and saved GID
+- [x] **CRED-07**: getgroups returns supplementary group list
+- [x] **CRED-08**: setgroups sets supplementary group list
+- [x] **CRED-09**: setfsuid sets filesystem UID for permission checks
+- [x] **CRED-10**: setfsgid sets filesystem GID for permission checks
+- [x] **CRED-11**: chown changes file owner and group by path
+- [x] **CRED-12**: fchown changes file owner and group by fd
+- [x] **CRED-13**: lchown changes symlink owner and group (no follow)
+- [x] **CRED-14**: fchownat changes file owner and group with dirfd
 
 ### I/O Multiplexing
 
