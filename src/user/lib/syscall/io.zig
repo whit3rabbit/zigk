@@ -250,6 +250,20 @@ pub fn select(nfds: i32, readfds: ?*[128]u8, writefds: ?*[128]u8, exceptfds: ?*[
     return ret;
 }
 
+pub fn pselect6(nfds: i32, readfds: ?*[128]u8, writefds: ?*[128]u8, exceptfds: ?*[128]u8, timeout: ?*const extern struct { tv_sec: i64, tv_nsec: i64 }, sigmask_ptr: usize) SyscallError!usize {
+    const ret = primitive.syscall6(
+        syscalls.SYS_PSELECT6,
+        @bitCast(@as(isize, nfds)),
+        if (readfds) |p| @intFromPtr(p) else 0,
+        if (writefds) |p| @intFromPtr(p) else 0,
+        if (exceptfds) |p| @intFromPtr(p) else 0,
+        if (timeout) |p| @intFromPtr(p) else 0,
+        sigmask_ptr,
+    );
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return ret;
+}
+
 // =============================================================================
 // Memory Mapping
 // =============================================================================
