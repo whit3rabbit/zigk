@@ -979,6 +979,12 @@ pub fn sys_epoll_ctl(epfd: usize, op: usize, fd: usize, event_ptr: usize) Syscal
 ///
 /// Wait for events on the epoll instance.
 /// Returns number of ready fds, or 0 on timeout.
+///
+/// Supports:
+/// - Level-triggered (default): report events as long as condition is true
+/// - Edge-triggered (EPOLLET): report only when state transitions from not-ready to ready
+/// - One-shot (EPOLLONESHOT): disable entry after one event until re-armed via EPOLL_CTL_MOD
+/// - Blocking with timeout: -1 = infinite, 0 = immediate, >0 = milliseconds
 pub fn sys_epoll_wait(epfd: usize, events_ptr: usize, maxevents: usize, timeout: usize) SyscallError!usize {
     if (maxevents == 0 or maxevents > 1024) {
         return error.EINVAL;
@@ -998,69 +1004,134 @@ pub fn sys_epoll_wait(epfd: usize, events_ptr: usize, maxevents: usize, timeout:
     };
     defer heap.allocator().free(result_buf);
 
-    // Check events (simplified - does one pass)
-    var ready_count: usize = 0;
+    // Parse timeout: -1 = infinite, 0 = immediate, >0 = milliseconds
     const timeout_i: isize = @bitCast(timeout);
+    const start_tsc = hal.timing.rdtsc();
+    const timeout_us: ?u64 = if (timeout_i < 0)
+        null // Infinite
+    else if (timeout_i == 0)
+        0 // Immediate
+    else
+        @as(u64, @intCast(timeout_i)) * 1000; // Convert ms to us
 
-    // Take a snapshot of entries under lock
-    var entries_copy: [EPOLL_MAX_FDS]EpollEntry = undefined;
-    {
-        const held = instance.lock.acquire();
-        entries_copy = instance.entries;
-        held.release();
-    }
+    const fd_table = base.getGlobalFdTable();
 
-    // Check each watched fd
-    for (&entries_copy) |*entry| {
-        if (!entry.active) continue;
-        if (ready_count >= maxevents) break;
+    // Poll loop - check FDs until ready or timeout
+    while (true) {
+        var ready_count: usize = 0;
 
-        // Check if fd has events
-        // MVP: Only check stdin (0), stdout (1), stderr (2) for basic events
-        var revents: u32 = 0;
+        // Snapshot entries under lock
+        var entries_copy: [EPOLL_MAX_FDS]EpollEntry = undefined;
+        {
+            const held = instance.lock.acquire();
+            entries_copy = instance.entries;
+            held.release();
+        }
 
-        if (entry.fd >= 0 and entry.fd <= 2) {
-            // stdout/stderr are always writable
-            if (entry.fd > 0 and (entry.events & uapi.epoll.EPOLLOUT) != 0) {
-                revents |= uapi.epoll.EPOLLOUT;
-            }
-            // stdin - check if data available (MVP: assume not unless keyboard has data)
-            if (entry.fd == 0 and (entry.events & uapi.epoll.EPOLLIN) != 0) {
-                // Would need keyboard buffer check here
-            }
-        } else {
-            // For other fds, check via FD table
-            const table = base.getGlobalFdTable();
-            const fd_u32 = std.math.cast(u32, @as(usize, @intCast(entry.fd))) orelse continue;
-            if (table.get(fd_u32)) |fd_obj| {
-                // Check if fd has poll operation
+        // Check each watched fd
+        for (&entries_copy) |*entry| {
+            if (!entry.active) continue;
+            if (ready_count >= maxevents) break;
+
+            const entry_fd = entry.fd;
+            const entry_events = entry.events;
+            const entry_data = entry.data;
+            const entry_last_revents = entry.last_revents;
+
+            // Look up fd in FdTable
+            var revents: u32 = 0;
+            const fd_u32 = std.math.cast(u32, @as(usize, @intCast(entry_fd))) orelse {
+                revents = uapi.epoll.EPOLLNVAL;
+                // Invalid fd - skip to reporting
+                if (revents != 0) {
+                    result_buf[ready_count] = uapi.epoll.EpollEvent.init(revents, entry_data);
+                    ready_count += 1;
+                }
+                continue;
+            };
+
+            if (fd_table.get(fd_u32)) |fd_obj| {
+                // Call poll if available
                 if (fd_obj.ops.poll) |poll_fn| {
-                    const poll_events = poll_fn(fd_obj, @truncate(entry.events));
-                    revents = @intCast(poll_events);
+                    revents = poll_fn(fd_obj, entry_events);
+                } else {
+                    // No poll - assume always ready for the modes the FD supports
+                    if ((entry_events & uapi.epoll.EPOLLIN) != 0 and fd_obj.isReadable()) {
+                        revents |= uapi.epoll.EPOLLIN;
+                    }
+                    if ((entry_events & uapi.epoll.EPOLLOUT) != 0 and fd_obj.isWritable()) {
+                        revents |= uapi.epoll.EPOLLOUT;
+                    }
                 }
             } else {
                 // FD no longer valid
                 revents = uapi.epoll.EPOLLNVAL;
             }
+
+            // Always OR in EPOLLERR and EPOLLHUP even if not in requested events
+            // (Linux behavior - these are always reported)
+            revents = revents & (entry_events | uapi.epoll.EPOLLERR | uapi.epoll.EPOLLHUP | uapi.epoll.EPOLLNVAL);
+
+            // Edge-triggered check
+            if ((entry_events & uapi.epoll.EPOLLET) != 0) {
+                // Only report newly set bits (state transition)
+                const new_events = revents & ~entry_last_revents;
+                if (new_events == 0) {
+                    continue; // No state transition, skip this entry
+                }
+                // Report only the new events
+                revents = new_events;
+            }
+
+            // Update last_revents in the instance (before edge masking for next iteration)
+            {
+                const held = instance.lock.acquire();
+                if (instance.findEntry(entry_fd)) |e| {
+                    // Store the full revents (before edge filtering) for next comparison
+                    e.last_revents = revents | entry_last_revents;
+                }
+                held.release();
+            }
+
+            // EPOLLONESHOT check
+            if ((entry_events & uapi.epoll.EPOLLONESHOT) != 0 and revents != 0) {
+                // Disable entry after one event delivery
+                const held = instance.lock.acquire();
+                if (instance.findEntry(entry_fd)) |e| {
+                    e.events = 0; // Disabled until EPOLL_CTL_MOD
+                }
+                held.release();
+            }
+
+            // Add to result buffer if events are ready
+            if (revents != 0) {
+                result_buf[ready_count] = uapi.epoll.EpollEvent.init(revents, entry_data);
+                ready_count += 1;
+            }
         }
 
-        if (revents != 0) {
-            result_buf[ready_count] = uapi.epoll.EpollEvent.init(revents, entry.data);
-            ready_count += 1;
+        // If any FDs ready, return immediately
+        if (ready_count > 0) {
+            const out_slice = result_buf[0..ready_count];
+            _ = UserPtr.from(events_ptr).copyFromKernel(std.mem.sliceAsBytes(out_slice)) catch {
+                return error.EFAULT;
+            };
+            return ready_count;
         }
+
+        // Check timeout
+        if (timeout_us) |us| {
+            if (us == 0) break; // Immediate return (timeout=0)
+            if (hal.timing.hasTimedOut(start_tsc, us)) break; // Timeout expired
+        } else {
+            // timeout_i == -1 (infinite) - will loop forever until events ready
+        }
+
+        // No FDs ready and not timed out - yield and retry
+        if (timeout_i == 0) break; // Zero timeout means poll once
+        sched.yield();
     }
 
-    // If events found or timeout is 0, return immediately
-    if (ready_count > 0 or timeout_i == 0) {
-        // Copy results to userspace
-        const out_slice = result_buf[0..ready_count];
-        _ = UserPtr.from(events_ptr).copyFromKernel(std.mem.sliceAsBytes(out_slice)) catch {
-            return error.EFAULT;
-        };
-        return ready_count;
-    }
-
-    // If timeout is -1 (infinite) or positive, we would block here
-    // MVP: Just return 0 (timeout) since blocking requires more infrastructure
+    // Timeout or immediate return with no events
     return 0;
 }
