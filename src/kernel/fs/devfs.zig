@@ -50,6 +50,13 @@ pub const TtyState = struct {
     }
 };
 
+fn devfsPoll(fd: *FileDescriptor, requested_events: u32) u32 {
+    _ = fd;
+    _ = requested_events;
+    // Device files are always ready (Linux behavior)
+    return uapi.epoll.EPOLLIN | uapi.epoll.EPOLLOUT;
+}
+
 pub const console_ops = FileOps{
     .read = consoleRead,
     .write = consoleWrite,
@@ -58,7 +65,7 @@ pub const console_ops = FileOps{
     .stat = null,
     .ioctl = consoleIoctl,
     .mmap = null,
-    .poll = null,
+    .poll = devfsPoll,
     .truncate = null,
 };
 
@@ -328,7 +335,7 @@ pub const null_ops = FileOps{
     .stat = null,
     .ioctl = null,
     .mmap = null,
-    .poll = null,
+    .poll = devfsPoll,
     .truncate = null,
 };
 
@@ -358,7 +365,7 @@ pub const zero_ops = FileOps{
     .stat = null,
     .ioctl = null,
     .mmap = null,
-    .poll = null,
+    .poll = devfsPoll,
     .truncate = null,
 };
 

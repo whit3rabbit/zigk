@@ -506,6 +506,13 @@ pub const InitRD = struct {
     }
 };
 
+fn initrdPoll(file_desc: *fd.FileDescriptor, requested_events: u32) u32 {
+    _ = file_desc;
+    _ = requested_events;
+    // Regular files are always ready (Linux behavior)
+    return uapi.epoll.EPOLLIN | uapi.epoll.EPOLLOUT;
+}
+
 // File Operations for InitRD
 const initrd_ops = fd.FileOps{
     .read = initrdRead,
@@ -515,7 +522,7 @@ const initrd_ops = fd.FileOps{
     .stat = initrdStat,
     .ioctl = null,
     .mmap = null,
-    .poll = null,
+    .poll = initrdPoll,
     .truncate = null,
 };
 

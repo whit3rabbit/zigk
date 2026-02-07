@@ -1459,6 +1459,13 @@ pub fn truncateFd(file_desc: *fd.FileDescriptor, length: usize) !void {
     sfs_io.writeSector(file.fs.device_fd, file.fs.superblock.root_dir_start + block_idx, &dir_buf) catch return error.IOError;
 }
 
+fn sfsPoll(file_desc: *fd.FileDescriptor, requested_events: u32) u32 {
+    _ = file_desc;
+    _ = requested_events;
+    // Regular files are always ready (Linux behavior)
+    return uapi.epoll.EPOLLIN | uapi.epoll.EPOLLOUT;
+}
+
 pub const sfs_ops = fd.FileOps{
     .read = sfsRead,
     .write = sfsWrite,
@@ -1467,7 +1474,7 @@ pub const sfs_ops = fd.FileOps{
     .stat = sfsStat,
     .ioctl = null,
     .mmap = null,
-    .poll = null,
+    .poll = sfsPoll,
     .truncate = sfsTruncate,
     .getdents = sfsGetdents,
 };
