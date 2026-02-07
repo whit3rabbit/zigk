@@ -444,6 +444,58 @@ pub fn sys_fchmodat(dirfd: usize, path_ptr: usize, mode: usize, flags: usize) ba
     return chmodKernel(resolved, mode);
 }
 
+/// Internal: chown using a kernel-space path with POSIX permission enforcement.
+fn chownKernel(raw_path: []const u8, owner: usize, group: usize) base.SyscallError!usize {
+    const alloc = heap.allocator();
+    const canon_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(canon_buf);
+
+    if (raw_path.len == 0) return error.ENOENT;
+    const path = canonicalizePath(raw_path, canon_buf) orelse return error.ENOENT;
+
+    // Get current file metadata for permission checks
+    const file_meta = fs.vfs.Vfs.statPath(path) orelse return error.ENOENT;
+    const proc = base.getCurrentProcess();
+
+    // Convert -1 (0xFFFFFFFF) to null for "keep current"
+    const new_uid: ?u32 = if (owner == 0xFFFFFFFF or owner == 0xFFFFFFFFFFFFFFFF) null else @truncate(owner);
+    const new_gid: ?u32 = if (group == 0xFFFFFFFF or group == 0xFFFFFFFFFFFFFFFF) null else @truncate(group);
+
+    // POSIX permission enforcement:
+    // - Root (fsuid == 0) can change anything
+    // - File owner can change group to a group they belong to
+    // - Non-owner gets EPERM
+    if (proc.fsuid != 0) {
+        if (proc.fsuid != file_meta.uid) return error.EPERM;
+        if (new_uid != null and new_uid.? != file_meta.uid) return error.EPERM;
+        if (new_gid) |gid| {
+            if (!proc.isGroupMember(gid)) return error.EPERM;
+        }
+    }
+
+    // Perform the chown via VFS
+    fs.vfs.Vfs.chown(path, new_uid, new_gid) catch |err| {
+        return switch (err) {
+            error.NotFound => error.ENOENT,
+            error.NotSupported => error.EROFS,
+            error.IOError => error.EIO,
+            else => error.EIO,
+        };
+    };
+
+    // Clear suid/sgid bits on ownership change
+    if (new_uid != null or new_gid != null) {
+        const current_mode = file_meta.mode;
+        const suid_sgid_mask: u32 = 0o6000;
+        if (current_mode & suid_sgid_mask != 0) {
+            const cleared_mode = current_mode & ~suid_sgid_mask;
+            fs.vfs.Vfs.chmod(path, cleared_mode) catch {};
+        }
+    }
+
+    return 0;
+}
+
 /// sys_chown (92) - Change file owner and group
 ///
 /// Args:
@@ -454,36 +506,98 @@ pub fn sys_chown(path_ptr: usize, owner: usize, group: usize) base.SyscallError!
     const alloc = heap.allocator();
     const path_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
     defer alloc.free(path_buf);
-    const canon_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
-    defer alloc.free(canon_buf);
-
     const raw_path = user_mem.copyStringFromUser(path_buf, path_ptr) catch return error.EFAULT;
-    if (raw_path.len == 0) return error.ENOENT;
+    return chownKernel(raw_path, owner, group);
+}
 
-    // Canonicalize path
-    const path = canonicalizePath(raw_path, canon_buf) orelse return error.ENOENT;
+/// sys_lchown (94) - Change file owner and group (no symlink follow)
+///
+/// Args:
+///   path_ptr: Path to file
+///   owner: New owner UID (-1 to keep current)
+///   group: New group GID (-1 to keep current)
+pub fn sys_lchown(path_ptr: usize, owner: usize, group: usize) base.SyscallError!usize {
+    const alloc = heap.allocator();
+    const path_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(path_buf);
+    const raw_path = user_mem.copyStringFromUser(path_buf, path_ptr) catch return error.EFAULT;
+    return chownKernel(raw_path, owner, group);
+}
 
-    // Only root can chown
+/// sys_fchown (93) - Change file owner and group via file descriptor
+///
+/// Args:
+///   fd_num: File descriptor number
+///   owner: New owner UID (-1 to keep current)
+///   group: New group GID (-1 to keep current)
+pub fn sys_fchown(fd_num: usize, owner: usize, group: usize) base.SyscallError!usize {
+    const table = base.getGlobalFdTable();
+    const fd_u32 = std.math.cast(u32, fd_num) orelse return error.EBADF;
+    const file_desc = table.get(fd_u32) orelse return error.EBADF;
     const proc = base.getCurrentProcess();
-    if (proc.euid != 0) {
-        return error.EPERM;
+    const new_uid: ?u32 = if (owner == 0xFFFFFFFF or owner == 0xFFFFFFFFFFFFFFFF) null else @truncate(owner);
+    const new_gid: ?u32 = if (group == 0xFFFFFFFF or group == 0xFFFFFFFFFFFFFFFF) null else @truncate(group);
+
+    // Try direct FileOps.chown first
+    if (file_desc.ops.chown) |chown_fn| {
+        if (file_desc.ops.stat) |stat_fn| {
+            var stat_buf: uapi.stat.Stat = undefined;
+            const stat_ret = stat_fn(file_desc, @ptrCast(&stat_buf));
+            if (stat_ret >= 0) {
+                if (proc.fsuid != 0) {
+                    if (proc.fsuid != stat_buf.uid) return error.EPERM;
+                    if (new_uid != null and new_uid.? != stat_buf.uid) return error.EPERM;
+                    if (new_gid) |gid| {
+                        if (!proc.isGroupMember(gid)) return error.EPERM;
+                    }
+                }
+            }
+        }
+        const result = chown_fn(file_desc, new_uid, new_gid);
+        if (result < 0) return error.EIO;
+        return 0;
     }
 
-    // Convert -1 (0xFFFFFFFF) to null for "keep current"
-    const new_uid: ?u32 = if (owner == 0xFFFFFFFF) null else @truncate(owner);
-    const new_gid: ?u32 = if (group == 0xFFFFFFFF) null else @truncate(group);
+    return error.ENOSYS;
+}
 
-    // Perform chown via VFS
-    fs.vfs.Vfs.chown(path, new_uid, new_gid) catch |err| {
-        return switch (err) {
-            error.NotFound => error.ENOENT,
-            error.NotSupported => error.EROFS,
-            error.IOError => error.EIO,
-            else => error.EIO,
-        };
+/// sys_fchownat (260) - Change file owner and group (relative to directory fd)
+///
+/// Args:
+///   dirfd: Directory file descriptor (or AT_FDCWD for current working directory)
+///   path_ptr: Path to file (relative or absolute)
+///   owner: New owner UID (-1 to keep current)
+///   group: New group GID (-1 to keep current)
+///   flags: AT_SYMLINK_NOFOLLOW, AT_EMPTY_PATH
+pub fn sys_fchownat(dirfd: usize, path_ptr: usize, owner: usize, group: usize, flags: usize) base.SyscallError!usize {
+    const AT_SYMLINK_NOFOLLOW: usize = 0x100;
+    const AT_EMPTY_PATH: usize = 0x1000;
+
+    if (flags & AT_EMPTY_PATH != 0) {
+        return sys_fchown(dirfd, owner, group);
+    }
+
+    const alloc = heap.allocator();
+    const path_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(path_buf);
+
+    const raw_path = user_mem.copyStringFromUser(path_buf, path_ptr) catch |err| {
+        if (err == error.NameTooLong) return error.ENAMETOOLONG;
+        return error.EFAULT;
     };
 
-    return 0;
+    if (raw_path.len == 0) return error.ENOENT;
+
+    if (raw_path[0] == '/') {
+        return chownKernel(raw_path, owner, group);
+    }
+
+    const resolved_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(resolved_buf);
+    const resolved = fd_syscall.resolvePathAt(dirfd, raw_path, resolved_buf) catch |err| return err;
+
+    _ = flags & AT_SYMLINK_NOFOLLOW; // Acknowledged, same codepath currently
+    return chownKernel(resolved, owner, group);
 }
 
 // =============================================================================
