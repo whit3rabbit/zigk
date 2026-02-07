@@ -248,6 +248,27 @@ export fn main(argc: i32, argv: [*][*:0]u8) i32 {
     runner.runTest("uid/gid: setgid as root succeeds", uid_gid_tests.testSetgidAsRootSucceeds);
     runner.runTest("uid/gid: getresuid returns all zeros", uid_gid_tests.testGetresuidReturnsAllZeros);
     runner.runTest("uid/gid: getresgid returns all zeros", uid_gid_tests.testGetresgidReturnsAllZeros);
+    runner.runTest("uid/gid: setreuid as root", uid_gid_tests.testSetreuidAsRoot);
+    runner.runTest("uid/gid: setreuid unchanged", uid_gid_tests.testSetreuidUnchanged);
+    runner.runTest("uid/gid: setreuid non-root restricted", uid_gid_tests.testSetreuidNonRootRestricted);
+    runner.runTest("uid/gid: setregid as root", uid_gid_tests.testSetregidAsRoot);
+    runner.runTest("uid/gid: setregid non-root restricted", uid_gid_tests.testSetregidNonRootRestricted);
+    runner.runTest("uid/gid: getgroups initial empty", uid_gid_tests.testGetgroupsInitialEmpty);
+    runner.runTest("uid/gid: setgroups as root", uid_gid_tests.testSetgroupsAsRoot);
+    runner.runTest("uid/gid: setgroups non-root fails", uid_gid_tests.testSetgroupsNonRootFails);
+    runner.runTest("uid/gid: getgroups count only", uid_gid_tests.testGetgroupsCountOnly);
+    runner.runTest("uid/gid: setfsuid returns previous", uid_gid_tests.testSetfsuidReturnsPrevious);
+    runner.runTest("uid/gid: setfsgid returns previous", uid_gid_tests.testSetfsgidReturnsPrevious);
+    runner.runTest("uid/gid: setfsuid non-root restricted", uid_gid_tests.testSetfsuidNonRootRestricted);
+    runner.runTest("uid/gid: fsuid auto-sync", uid_gid_tests.testFsuidAutoSync);
+    runner.runTest("uid/gid: chown as root", uid_gid_tests.testChownAsRoot);
+    runner.runTest("uid/gid: chown non-owner fails", uid_gid_tests.testChownNonOwnerFails);
+    runner.runTest("uid/gid: chown non-root can chgrp to own group", uid_gid_tests.testChownNonRootCanChgrpToOwnGroup);
+    runner.runTest("uid/gid: chown non-root cannot change uid", uid_gid_tests.testChownNonRootCannotChangeUid);
+    runner.runTest("uid/gid: fchown basic", uid_gid_tests.testFchownBasic);
+    runner.runTest("uid/gid: fchownat with AT_FDCWD", uid_gid_tests.testFchownatWithATFdcwd);
+    runner.runTest("uid/gid: fchownat symlink nofollow", uid_gid_tests.testFchownatSymlinkNofollow);
+    runner.runTest("uid/gid: privilege drop full", uid_gid_tests.testPrivilegeDropFull);
 
     // Signal handling tests
     runner.runTest("signal: sigaction install handler", signal_tests.testSigactionInstallHandler);
