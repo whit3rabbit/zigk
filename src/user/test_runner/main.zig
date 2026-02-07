@@ -189,6 +189,12 @@ export fn main(argc: i32, argv: [*][*:0]u8) i32 {
     runner.runTest("memory: munlock pages", memory_tests.testMunlockPages);
     runner.runTest("memory: madvise sequential", memory_tests.testMadviseSequential);
     runner.runTest("memory: msync no-op", memory_tests.testMsyncNoOp);
+    runner.runTest("memory: mlockall munlockall", memory_tests.testMlockallMunlockall);
+    runner.runTest("memory: mincore basic", memory_tests.testMincoreBasic);
+    runner.runTest("memory: madvise invalid align", memory_tests.testMadviseInvalidAlign);
+    runner.runTest("memory: mlockall invalid flags", memory_tests.testMlockallInvalidFlags);
+    runner.runTest("memory: mincore invalid align", memory_tests.testMincoreInvalidAlign);
+    runner.runTest("memory: mlockall future flag", memory_tests.testMlockallFutureFlag);
 
     // Process tests
     runner.runTest("process: fork creates child", process_tests.testForkCreatesChild);

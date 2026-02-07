@@ -463,3 +463,93 @@ pub fn testMsyncNoOp() !void {
     // Data should still be there
     if (addr[0] != 42) return error.TestFailed;
 }
+
+// Memory Test 18: mlockall + munlockall sequence
+pub fn testMlockallMunlockall() !void {
+    // Lock all current pages (MCL_CURRENT = 1)
+    const MCL_CURRENT = 1;
+    try syscall.mlockall(MCL_CURRENT);
+
+    // Unlock all pages
+    try syscall.munlockall();
+}
+
+// Memory Test 19: mincore checks page residency
+pub fn testMincoreBasic() !void {
+    const MAP_ANONYMOUS = 0x20;
+    const MAP_PRIVATE = 0x02;
+    const PROT_READ = 0x1;
+    const PROT_WRITE = 0x2;
+
+    // First mmap an anonymous page
+    const addr = syscall.mmap(null, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, 0, 0) catch |err| {
+        if (err == error.NotImplemented) return error.SkipTest;
+        return err;
+    };
+    defer _ = syscall.munmap(addr, 4096) catch {};
+
+    // Check residency
+    var vec: [1]u8 = .{0};
+    try syscall.mincore(addr, 4096, &vec);
+
+    // Page should be resident (bit 0 set)
+    if (vec[0] != 1) return error.TestFailed;
+}
+
+// Memory Test 20: madvise with invalid alignment
+pub fn testMadviseInvalidAlign() !void {
+    const MADV_NORMAL = 0;
+    const unaligned_addr: [*]u8 = @ptrFromInt(1);
+    const result = syscall.madvise(unaligned_addr, 4096, MADV_NORMAL);
+
+    if (result) |_| {
+        return error.TestFailed;
+    } else |err| {
+        // Should fail with EINVAL
+        if (err != error.InvalidArgument) {
+            if (err == error.NotImplemented) return error.SkipTest;
+            return error.TestFailed;
+        }
+    }
+}
+
+// Memory Test 21: mlockall with invalid flags
+pub fn testMlockallInvalidFlags() !void {
+    const result = syscall.mlockall(0);
+
+    if (result) |_| {
+        return error.TestFailed;
+    } else |err| {
+        // Should fail with EINVAL (flags=0 is invalid)
+        if (err != error.InvalidArgument) {
+            if (err == error.NotImplemented) return error.SkipTest;
+            return error.TestFailed;
+        }
+    }
+}
+
+// Memory Test 22: mincore with invalid alignment
+pub fn testMincoreInvalidAlign() !void {
+    const unaligned_addr: [*]u8 = @ptrFromInt(1);
+    var vec: [1]u8 = .{0};
+    const result = syscall.mincore(unaligned_addr, 4096, &vec);
+
+    if (result) |_| {
+        return error.TestFailed;
+    } else |err| {
+        // Should fail with EINVAL
+        if (err != error.InvalidArgument) {
+            if (err == error.NotImplemented) return error.SkipTest;
+            return error.TestFailed;
+        }
+    }
+}
+
+// Memory Test 23: mlockall with MCL_FUTURE flag
+pub fn testMlockallFutureFlag() !void {
+    const MCL_FUTURE = 2;
+    try syscall.mlockall(MCL_FUTURE);
+
+    // Unlock after test
+    try syscall.munlockall();
+}
