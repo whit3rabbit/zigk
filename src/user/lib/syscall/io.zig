@@ -265,6 +265,29 @@ pub fn pselect6(nfds: i32, readfds: ?*[128]u8, writefds: ?*[128]u8, exceptfds: ?
 }
 
 // =============================================================================
+// Event Notification File Descriptors
+// =============================================================================
+
+/// eventfd2 flags
+pub const EFD_CLOEXEC: u32 = 0x80000;
+pub const EFD_NONBLOCK: u32 = 0x800;
+pub const EFD_SEMAPHORE: u32 = 0x1;
+
+/// Create eventfd with flags
+/// Returns a file descriptor for event notification
+pub fn eventfd2(initval: u32, flags: u32) SyscallError!i32 {
+    const ret = primitive.syscall2(syscalls.SYS_EVENTFD2, @as(usize, initval), @as(usize, flags));
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return @intCast(@as(isize, @bitCast(ret)));
+}
+
+/// Create eventfd with default flags (0)
+/// Returns a file descriptor for event notification
+pub fn eventfd(initval: u32) SyscallError!i32 {
+    return eventfd2(initval, 0);
+}
+
+// =============================================================================
 // Memory Mapping
 // =============================================================================
 
