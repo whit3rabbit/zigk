@@ -9,19 +9,19 @@ See: .planning/PROJECT.md (updated 2026-02-06)
 
 ## Current Position
 
-Phase: 3 of 9 (I/O Multiplexing)
-Plan: 4 of 4 in current phase
-Status: Phase complete
-Last activity: 2026-02-07 - Completed 03-04-PLAN.md (I/O multiplexing integration tests)
+Phase: 4 of 9 (Event Notification FDs)
+Plan: 1 of 4 in current phase
+Status: In progress
+Last activity: 2026-02-07 - Completed 04-01-PLAN.md (UAPI constants + eventfd implementation)
 
-Progress: [████░░░░░░] 33%
+Progress: [████░░░░░░] 36%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 12
-- Average duration: 5.2 min
-- Total execution time: 1.05 hours
+- Total plans completed: 13
+- Average duration: 5.4 min
+- Total execution time: 1.17 hours
 
 **By Phase:**
 
@@ -30,10 +30,11 @@ Progress: [████░░░░░░] 33%
 | 1 | 4 | 21 min | 5 min |
 | 2 | 4 | 20 min | 5 min |
 | 3 | 4 | 26 min | 6.5 min |
+| 4 | 1 | 7 min | 7 min |
 
 **Recent Trend:**
-- Last 5 plans: 03-01 (4min), 03-02 (7min), 03-03 (6min), 03-04 (9min)
-- Trend: Testing phases take longer (9min vs 4-6min for implementation)
+- Last 5 plans: 03-02 (7min), 03-03 (6min), 03-04 (9min), 04-01 (7min)
+- Trend: Testing phases take longer (9min vs 4-7min for implementation)
 
 *Updated after each plan completion*
 
@@ -77,6 +78,10 @@ Recent decisions affecting current work:
 - **03-03:** sys_poll uses FileOps.poll uniformly - no socket special-casing needed
 - **03-03:** PollFd.revents is i16, truncate u32 FileOps.poll result with @bitCast(@as(u16, @truncate))
 - **03-03:** Old sys_poll blocking mechanism (sock.blocked_thread) kept for backward compat, will be replaced with futex
+- **04-01:** All event FD UAPI constants created upfront (eventfd, timerfd, signalfd) to avoid repeated uapi module changes
+- **04-01:** EventFdState uses spinlock + atomic woken flags for SMP-safe lost wakeup prevention (pipe.zig pattern)
+- **04-01:** MAX_COUNTER = 0xfffffffffffffffe per Linux semantics (allows overflow detection)
+- **04-01:** Added sched and sync module imports to syscall_io_module in build.zig
 
 ### Pending Todos
 
@@ -97,7 +102,13 @@ Recent decisions affecting current work:
 - ✅ select/pselect6/poll/ppoll upgrade complete (03-03) - uniform FileOps.poll, userspace wrappers
 - ✅ Integration tests complete (03-04) - 10 tests covering epoll, select, poll on both architectures
 - Test count: 217 total (up from 207)
-- Ready for Phase 4 (Event FDs) which will integrate with epoll infrastructure
+
+**Phase 4 In Progress (Event Notification FDs):**
+- ✅ UAPI constants complete (04-01) - eventfd, timerfd, signalfd UAPI files created
+- ✅ eventfd2/eventfd syscalls complete (04-01) - full semantics with blocking, semaphore mode, epoll integration
+- ✅ eventfd userspace wrappers complete (04-01)
+- Test count: 217 (no new tests yet - Phase 4 tests in plan 04-04)
+- Next: 04-02 timerfd implementation
 
 **Phase 9 Considerations (SysV IPC):**
 - SFS filesystem has close deadlock and 64-file limit
@@ -118,7 +129,7 @@ Recent decisions affecting current work:
 ## Session Continuity
 
 Last session: 2026-02-07 (plan execution)
-Stopped at: Completed 03-04-PLAN.md (I/O multiplexing integration tests) - Phase 3 complete
+Stopped at: Completed 04-01-PLAN.md (UAPI constants + eventfd implementation)
 Resume file: None
 
 ---
