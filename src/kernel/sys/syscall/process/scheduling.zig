@@ -237,6 +237,82 @@ pub fn sys_sched_rr_get_interval(pid: usize, interval_ptr: usize) SyscallError!u
     return 0;
 }
 
+/// sys_ppoll (271) - Poll file descriptors with signal mask and timespec timeout
+///
+/// MVP: Standalone timeout-based stub. Validates arguments and sleeps for timeout.
+/// Does not actually monitor file descriptors (requires poll infrastructure from Phase 3).
+///
+/// Args:
+///   fds_ptr: Pointer to array of pollfd structures
+///   nfds: Number of file descriptors
+///   timeout_ptr: Pointer to timespec timeout (NULL = infinite wait)
+///   sigmask_ptr: Pointer to signal mask (MVP: ignored)
+///   sigsetsize: Size of signal mask (must be 8 for u64 SigSet)
+pub fn sys_ppoll(fds_ptr: usize, nfds: usize, timeout_ptr: usize, sigmask_ptr: usize, sigsetsize: usize) SyscallError!usize {
+    // Validate sigmask size if provided
+    // MVP: sigmask ignored. Full implementation requires atomic mask swap around poll.
+    if (sigmask_ptr != 0 and sigsetsize != 8) {
+        return error.EINVAL;
+    }
+
+    // Parse timeout
+    var timeout_ms: ?u64 = null;
+    if (timeout_ptr != 0) {
+        const ts = UserPtr.from(timeout_ptr).readValue(Timespec) catch {
+            return error.EFAULT;
+        };
+
+        // Validate timespec values
+        if (ts.tv_sec < 0 or ts.tv_nsec < 0 or ts.tv_nsec >= 1_000_000_000) {
+            return error.EINVAL;
+        }
+
+        // Convert to milliseconds
+        const sec_ms: u64 = @as(u64, @intCast(ts.tv_sec)) * 1000;
+        const nsec_ms: u64 = @as(u64, @intCast(ts.tv_nsec)) / 1_000_000;
+        timeout_ms = sec_ms + nsec_ms;
+    }
+
+    // Handle nfds=0 case (pure timeout)
+    if (nfds == 0) {
+        if (timeout_ms) |ms| {
+            if (ms == 0) {
+                // Zero timeout - return immediately
+                return 0;
+            }
+            // Sleep for timeout duration
+            const ticks = ms / 10; // 10ms per tick
+            sched.sleepForTicks(ticks);
+        } else {
+            // MVP: infinite timeout not supported without fd polling infrastructure, return 0
+            return 0;
+        }
+        return 0;
+    }
+
+    // Handle nfds > 0 case
+    // Validate fds_ptr
+    if (!user_mem.isValidUserAccess(fds_ptr, nfds * @sizeOf(uapi.poll.PollFd), .Read)) {
+        return error.EFAULT;
+    }
+
+    // MVP: fd polling not implemented in ppoll stub. Real implementation in Phase 3
+    // (I/O Multiplexing) will delegate to shared poll infrastructure.
+    if (timeout_ms) |ms| {
+        if (ms == 0) {
+            // Zero timeout - return 0 immediately (no fds ready)
+            return 0;
+        }
+        // Sleep for timeout and return 0 (no fds ready)
+        const ticks = ms / 10;
+        sched.sleepForTicks(ticks);
+        return 0;
+    } else {
+        // NULL timeout (infinite wait) - return 0 immediately for MVP
+        return 0;
+    }
+}
+
 /// sys_nanosleep (35) - High-resolution sleep
 ///
 /// Args:
