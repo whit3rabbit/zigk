@@ -10,29 +10,29 @@ See: .planning/PROJECT.md (updated 2026-02-06)
 ## Current Position
 
 Phase: 2 of 9 (Credentials & Ownership)
-Plan: 1 of 10 in current phase
+Plan: 2 of 4 in current phase
 Status: In progress
-Last activity: 2026-02-07 - Completed 02-01-PLAN.md (infrastructure)
+Last activity: 2026-02-07 - Completed 02-02-PLAN.md (credential syscalls)
 
-Progress: [█░░░░░░░░░] 13%
+Progress: [██████░░░░] 75%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 5
+- Total plans completed: 6
 - Average duration: 5 min
-- Total execution time: 0.43 hours
+- Total execution time: 0.52 hours
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 1 | 4 | 21 min | 5 min |
-| 2 | 1 | 5 min | 5 min |
+| 2 | 2 | 9 min | 5 min |
 
 **Recent Trend:**
-- Last 5 plans: 01-02 (3min), 01-03 (3min), 01-04 (12min), 02-01 (5min)
-- Trend: Infrastructure work steady at 5min
+- Last 5 plans: 01-03 (3min), 01-04 (12min), 02-01 (5min), 02-02 (4min)
+- Trend: Steady ~5min for infrastructure and syscall implementation
 
 *Updated after each plan completion*
 
@@ -56,6 +56,9 @@ Recent decisions affecting current work:
 - **02-01:** fsuid/fsgid replace euid/egid only in filesystem permission checks (open, access, stat, chown), not signal delivery or ptrace
 - **02-01:** Auto-sync fsuid/fsgid whenever euid/egid changes to maintain default POSIX behavior
 - **02-01:** Syscall numbers follow standard Linux ABI values (x86_64 and aarch64 have different numbering)
+- **02-02:** setfsuid/setfsgid return previous value even on 'failure' (Linux ABI, not POSIX error convention)
+- **02-02:** setreuid/setregid follow POSIX saved-set-user-ID rule (if ruid set, suid = new euid)
+- **02-02:** Supplementary groups limited to 16 (NGROUPS_MAX historical value, sufficient for MVP)
 
 ### Pending Todos
 
@@ -82,7 +85,7 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-02-07 (plan execution)
-Stopped at: Completed 02-01-PLAN.md (infrastructure) - Phase 2 in progress
+Stopped at: Completed 02-02-PLAN.md (credential syscalls) - Phase 2 in progress
 Resume file: None
 
 ---
