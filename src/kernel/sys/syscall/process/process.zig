@@ -6,6 +6,7 @@
 // - sys_getpid, sys_getppid: Process identity
 // - sys_getuid, sys_getgid: User/group identity (always root for MVP)
 
+const std = @import("std");
 const base = @import("base.zig");
 const uapi = @import("uapi");
 const console = @import("console");
@@ -463,7 +464,6 @@ const Rlimit = extern struct {
 
     comptime {
         // Validate struct matches Linux ABI (16 bytes, no padding)
-        const std = @import("std");
         std.debug.assert(@sizeOf(Rlimit) == 16);
         std.debug.assert(@alignOf(Rlimit) == 8);
     }
@@ -585,6 +585,140 @@ pub fn sys_setrlimit(resource: usize, rlim_ptr: usize) SyscallError!usize {
             return error.EINVAL;
         },
     }
+
+    return 0;
+}
+
+/// sys_prlimit64 (302) - Get/set resource limits for any process
+///
+/// Modern replacement for getrlimit/setrlimit. Can read and/or set limits
+/// in a single atomic operation. Can target any process by PID.
+pub fn sys_prlimit64(pid: usize, resource: usize, new_limit_ptr: usize, old_limit_ptr: usize) SyscallError!usize {
+    // Resolve target process
+    const target_pid: u32 = @truncate(pid);
+    const proc = if (target_pid == 0)
+        base.getCurrentProcess()
+    else
+        process_mod.findProcessByPid(target_pid) orelse return error.ESRCH;
+
+    // If old_limit_ptr != 0, return current limits
+    if (old_limit_ptr != 0) {
+        const old_limit: Rlimit = switch (resource) {
+            RLIMIT_AS => .{
+                .rlim_cur = proc.rlimit_as,
+                .rlim_max = proc.rlimit_as,
+            },
+            RLIMIT_STACK => .{
+                .rlim_cur = DEFAULT_STACK_LIMIT,
+                .rlim_max = RLIM_INFINITY,
+            },
+            RLIMIT_NOFILE => .{
+                .rlim_cur = DEFAULT_NOFILE_SOFT,
+                .rlim_max = DEFAULT_NOFILE_HARD,
+            },
+            RLIMIT_NPROC => .{
+                .rlim_cur = RLIM_INFINITY,
+                .rlim_max = RLIM_INFINITY,
+            },
+            RLIMIT_CORE => .{
+                .rlim_cur = 0,
+                .rlim_max = RLIM_INFINITY,
+            },
+            RLIMIT_CPU, RLIMIT_FSIZE, RLIMIT_DATA, RLIMIT_RSS, RLIMIT_MEMLOCK, RLIMIT_LOCKS, RLIMIT_SIGPENDING, RLIMIT_MSGQUEUE, RLIMIT_NICE, RLIMIT_RTPRIO, RLIMIT_RTTIME => .{
+                .rlim_cur = RLIM_INFINITY,
+                .rlim_max = RLIM_INFINITY,
+            },
+            else => {
+                return error.EINVAL;
+            },
+        };
+
+        UserPtr.from(old_limit_ptr).writeValue(old_limit) catch {
+            return error.EFAULT;
+        };
+    }
+
+    // If new_limit_ptr != 0, set new limits
+    if (new_limit_ptr != 0) {
+        const new_limit = UserPtr.from(new_limit_ptr).readValue(Rlimit) catch {
+            return error.EFAULT;
+        };
+
+        // Validate soft <= hard
+        if (new_limit.rlim_cur > new_limit.rlim_max and new_limit.rlim_max != RLIM_INFINITY) {
+            return error.EINVAL;
+        }
+
+        switch (resource) {
+            RLIMIT_AS => {
+                // Check permission for raising hard limit
+                if (new_limit.rlim_max > proc.rlimit_as and proc.euid != 0) {
+                    return error.EPERM;
+                }
+                proc.rlimit_as = new_limit.rlim_cur;
+            },
+            RLIMIT_STACK, RLIMIT_NOFILE, RLIMIT_NPROC, RLIMIT_CORE, RLIMIT_CPU, RLIMIT_FSIZE, RLIMIT_DATA, RLIMIT_RSS, RLIMIT_MEMLOCK, RLIMIT_LOCKS, RLIMIT_SIGPENDING, RLIMIT_MSGQUEUE, RLIMIT_NICE, RLIMIT_RTPRIO, RLIMIT_RTTIME => {
+                // Accept but don't enforce for MVP
+            },
+            else => {
+                return error.EINVAL;
+            },
+        }
+    }
+
+    return 0;
+}
+
+/// sys_getrusage (98) - Get resource usage statistics
+///
+/// Returns resource usage information for the calling process, its children,
+/// or the calling thread. For MVP, returns zeroed statistics (no tracking yet).
+pub fn sys_getrusage(who: usize, usage_ptr: usize) SyscallError!usize {
+    if (usage_ptr == 0) return error.EFAULT;
+
+    // Define Linux-compatible rusage struct
+    const Timeval = extern struct {
+        tv_sec: i64,
+        tv_usec: i64,
+    };
+
+    const Rusage = extern struct {
+        ru_utime: Timeval, // user CPU time
+        ru_stime: Timeval, // system CPU time
+        ru_maxrss: i64, // max RSS in KB
+        ru_ixrss: i64,
+        ru_idrss: i64,
+        ru_isrss: i64,
+        ru_minflt: i64,
+        ru_majflt: i64,
+        ru_nswap: i64,
+        ru_inblock: i64,
+        ru_oublock: i64,
+        ru_msgsnd: i64,
+        ru_msgrcv: i64,
+        ru_nsignals: i64,
+        ru_nvcsw: i64,
+        ru_nivcsw: i64,
+    };
+
+    // Validate who parameter
+    // RUSAGE_SELF = 0
+    // RUSAGE_CHILDREN = -1 (as usize = 0xFFFFFFFFFFFFFFFF)
+    // RUSAGE_THREAD = 1
+    const RUSAGE_SELF: usize = 0;
+    const RUSAGE_CHILDREN: usize = @bitCast(@as(isize, -1));
+    const RUSAGE_THREAD: usize = 1;
+
+    if (who != RUSAGE_SELF and who != RUSAGE_CHILDREN and who != RUSAGE_THREAD) {
+        return error.EINVAL;
+    }
+
+    // For MVP, return zeroed statistics (kernel doesn't track usage yet)
+    const usage = std.mem.zeroes(Rusage);
+
+    UserPtr.from(usage_ptr).writeValue(usage) catch {
+        return error.EFAULT;
+    };
 
     return 0;
 }
