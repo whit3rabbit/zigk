@@ -3,6 +3,7 @@ const stat = @import("stat.zig");
 const dir = @import("dir.zig");
 const fcntl = @import("fcntl.zig");
 const eventfd = @import("eventfd.zig");
+const timerfd = @import("timerfd.zig");
 
 // Export public syscall handlers
 pub const sys_read = read_write.sys_read;
@@ -12,6 +13,10 @@ pub const sys_pread64 = read_write.sys_pread64;
 
 pub const sys_eventfd2 = eventfd.sys_eventfd2;
 pub const sys_eventfd = eventfd.sys_eventfd;
+
+pub const sys_timerfd_create = timerfd.sys_timerfd_create;
+pub const sys_timerfd_settime = timerfd.sys_timerfd_settime;
+pub const sys_timerfd_gettime = timerfd.sys_timerfd_gettime;
 
 pub const sys_stat = stat.sys_stat;
 pub const sys_lstat = stat.sys_lstat;
