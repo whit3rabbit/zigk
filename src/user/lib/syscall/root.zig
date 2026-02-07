@@ -118,6 +118,24 @@ pub const munlockall = io.munlockall;
 pub const mincore = io.mincore;
 pub const ppoll = io.ppoll;
 
+// Re-export epoll
+pub const epoll_create1 = io.epoll_create1;
+pub const epoll_ctl = io.epoll_ctl;
+pub const epoll_wait = io.epoll_wait;
+pub const EpollEvent = io.EpollEvent;
+pub const EPOLL_CTL_ADD = io.EPOLL_CTL_ADD;
+pub const EPOLL_CTL_DEL = io.EPOLL_CTL_DEL;
+pub const EPOLL_CTL_MOD = io.EPOLL_CTL_MOD;
+pub const EPOLLIN = io.EPOLLIN;
+pub const EPOLLOUT = io.EPOLLOUT;
+pub const EPOLLERR = io.EPOLLERR;
+pub const EPOLLHUP = io.EPOLLHUP;
+pub const EPOLLET = io.EPOLLET;
+pub const EPOLLONESHOT = io.EPOLLONESHOT;
+
+// Re-export select
+pub const select = io.select;
+
 // Re-export Process
 pub const sched_yield = process.sched_yield;
 pub const exit = process.exit;

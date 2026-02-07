@@ -11,6 +11,7 @@ const file_info_tests = @import("tests/syscall/file_info.zig");
 const time_ops_tests = @import("tests/syscall/time_ops.zig");
 const misc_tests = @import("tests/syscall/misc.zig");
 const at_ops_tests = @import("tests/syscall/at_ops.zig");
+const io_mux_tests = @import("tests/syscall/io_mux.zig");
 const fs_tests = @import("tests/fs/basic.zig");
 const fs_error_tests = @import("tests/fs/errors.zig");
 const regression_tests = @import("tests/regression/sfs_issues.zig");
@@ -352,6 +353,18 @@ export fn main(argc: i32, argv: [*][*:0]u8) i32 {
     runner.runTest("at_ops: unlinkat dir", at_ops_tests.testUnlinkatDir);
     runner.runTest("at_ops: renameat basic", at_ops_tests.testRenameatBasic);
     runner.runTest("at_ops: fchmodat basic", at_ops_tests.testFchmodatBasic);
+
+    // I/O Multiplexing tests
+    runner.runTest("io_mux: epoll create and close", io_mux_tests.testEpollCreateAndClose);
+    runner.runTest("io_mux: epoll ctl add and wait", io_mux_tests.testEpollCtlAddAndWait);
+    runner.runTest("io_mux: epoll wait no events", io_mux_tests.testEpollWaitNoEvents);
+    runner.runTest("io_mux: epoll pipe HUP", io_mux_tests.testEpollPipeHup);
+    runner.runTest("io_mux: epoll regular file always ready", io_mux_tests.testEpollRegularFileAlwaysReady);
+    runner.runTest("io_mux: select pipe readable", io_mux_tests.testSelectPipeReadable);
+    runner.runTest("io_mux: select pipe writable", io_mux_tests.testSelectPipeWritable);
+    runner.runTest("io_mux: select timeout", io_mux_tests.testSelectTimeout);
+    runner.runTest("io_mux: poll pipe events", io_mux_tests.testPollPipeEvents);
+    runner.runTest("io_mux: poll pipe HUP", io_mux_tests.testPollPipeHup);
 
     // Stress tests
     runner.runTest("stress: write 10MB file", stress_tests.testWrite10MbFile);
