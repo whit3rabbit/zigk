@@ -298,3 +298,189 @@ pub fn sys_brk(brk: usize) SyscallError!usize {
     proc.heap_break = new_break_aligned;
     return @intCast(new_break_aligned);
 }
+
+// =============================================================================
+// Memory Management No-op Syscalls (Trivial Stubs)
+// =============================================================================
+
+/// sys_madvise (28) - Give advice about memory usage patterns
+///
+/// No-op stub: zk kernel does not swap, so memory advice is ignored.
+/// Validates args for compatibility and returns success.
+///
+/// Args:
+///   addr: Start address (must be page-aligned)
+///   len: Size in bytes
+///   advice: Memory usage advice constant
+///
+/// Returns: 0 on success, error on invalid args
+pub fn sys_madvise(addr: usize, len: usize, advice: usize) SyscallError!usize {
+    // Validate addr is page-aligned
+    if (!std.mem.isAligned(addr, pmm.PAGE_SIZE)) {
+        return error.EINVAL;
+    }
+
+    // Validate length (must be non-zero)
+    if (len == 0) {
+        return error.EINVAL;
+    }
+
+    // Validate advice constant (Linux MADV_* constants)
+    const MADV_NORMAL: usize = 0;
+    const MADV_RANDOM: usize = 1;
+    const MADV_SEQUENTIAL: usize = 2;
+    const MADV_WILLNEED: usize = 3;
+    const MADV_DONTNEED: usize = 4;
+    const MADV_FREE: usize = 8;
+    const MADV_REMOVE: usize = 9;
+    const MADV_DONTFORK: usize = 10;
+    const MADV_DOFORK: usize = 11;
+    const MADV_MERGEABLE: usize = 12;
+    const MADV_UNMERGEABLE: usize = 13;
+    const MADV_HUGEPAGE: usize = 14;
+    const MADV_NOHUGEPAGE: usize = 15;
+
+    switch (advice) {
+        MADV_NORMAL,
+        MADV_RANDOM,
+        MADV_SEQUENTIAL,
+        MADV_WILLNEED,
+        MADV_DONTNEED,
+        MADV_FREE,
+        MADV_REMOVE,
+        MADV_DONTFORK,
+        MADV_DOFORK,
+        MADV_MERGEABLE,
+        MADV_UNMERGEABLE,
+        MADV_HUGEPAGE,
+        MADV_NOHUGEPAGE,
+        => {},
+        else => return error.EINVAL,
+    }
+
+    // No-op: zk kernel does not swap, advice is ignored
+    return 0;
+}
+
+/// sys_mlock (149/228) - Lock memory pages to prevent swapping
+///
+/// No-op stub: zk kernel does not swap, so pages are always resident.
+/// Validates args for compatibility and returns success.
+///
+/// Args:
+///   addr: Start address (must be page-aligned)
+///   len: Size in bytes
+///
+/// Returns: 0 on success, error on invalid args
+pub fn sys_mlock(addr: usize, len: usize) SyscallError!usize {
+    // Validate addr is page-aligned
+    if (!std.mem.isAligned(addr, pmm.PAGE_SIZE)) {
+        return error.EINVAL;
+    }
+
+    // Validate length (must be non-zero)
+    if (len == 0) {
+        return error.EINVAL;
+    }
+
+    // No-op: zk kernel does not swap, pages are always locked
+    return 0;
+}
+
+/// sys_munlock (150/229) - Unlock memory pages
+///
+/// No-op stub: zk kernel does not swap, so unlock has no effect.
+/// Validates args for compatibility and returns success.
+///
+/// Args:
+///   addr: Start address (must be page-aligned)
+///   len: Size in bytes
+///
+/// Returns: 0 on success, error on invalid args
+pub fn sys_munlock(addr: usize, len: usize) SyscallError!usize {
+    // Validate addr is page-aligned
+    if (!std.mem.isAligned(addr, pmm.PAGE_SIZE)) {
+        return error.EINVAL;
+    }
+
+    // Validate length (must be non-zero)
+    if (len == 0) {
+        return error.EINVAL;
+    }
+
+    // No-op: zk kernel does not swap
+    return 0;
+}
+
+/// sys_mlockall (151/230) - Lock all memory pages
+///
+/// No-op stub: zk kernel does not swap, so all pages are always resident.
+/// Validates flags for compatibility and returns success.
+///
+/// Args:
+///   flags: MCL_CURRENT and/or MCL_FUTURE
+///
+/// Returns: 0 on success, error on invalid flags
+pub fn sys_mlockall(flags: usize) SyscallError!usize {
+    const MCL_CURRENT: usize = 1;
+    const MCL_FUTURE: usize = 2;
+    const MCL_ONFAULT: usize = 4;
+
+    // Validate flags (must be MCL_CURRENT, MCL_FUTURE, MCL_ONFAULT, or combinations)
+    if ((flags & ~(MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT)) != 0) {
+        return error.EINVAL;
+    }
+
+    // No-op: zk kernel does not swap, all pages are always locked
+    return 0;
+}
+
+/// sys_munlockall (152/231) - Unlock all memory pages
+///
+/// No-op stub: zk kernel does not swap, so unlock has no effect.
+/// No args to validate.
+///
+/// Returns: 0
+pub fn sys_munlockall() SyscallError!usize {
+    // No-op: zk kernel does not swap
+    return 0;
+}
+
+/// sys_mincore (27/232) - Determine whether pages are resident in memory
+///
+/// No-op stub: zk kernel does not swap, so all mapped pages are always resident.
+/// Fills the result vector with 1s (all pages present).
+///
+/// Args:
+///   addr: Start address (must be page-aligned)
+///   len: Size in bytes
+///   vec_ptr: Pointer to output byte vector (1 byte per page)
+///
+/// Returns: 0 on success, error on invalid args
+pub fn sys_mincore(addr: usize, len: usize, vec_ptr: usize) SyscallError!usize {
+    // Validate addr is page-aligned
+    if (!std.mem.isAligned(addr, pmm.PAGE_SIZE)) {
+        return error.EINVAL;
+    }
+
+    // Validate length (must be non-zero)
+    if (len == 0) {
+        return error.EINVAL;
+    }
+
+    // Calculate number of pages
+    const page_count = std.mem.alignForward(usize, len, pmm.PAGE_SIZE) / pmm.PAGE_SIZE;
+
+    // Validate vec_ptr is in user space and writable
+    if (!user_mem.isValidUserAccess(vec_ptr, page_count, .Write)) {
+        return error.EFAULT;
+    }
+
+    // Fill vector with 1s (all pages resident -- kernel does not swap)
+    var i: usize = 0;
+    while (i < page_count) : (i += 1) {
+        user_mem.UserPtr.from(vec_ptr + i).writeValue(@as(u8, 1)) catch return error.EFAULT;
+    }
+
+    return 0;
+}
