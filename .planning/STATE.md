@@ -5,12 +5,12 @@
 See: .planning/PROJECT.md (updated 2026-02-06)
 
 **Core value:** Every implemented syscall works correctly on both x86_64 and aarch64, tested via the integration test harness.
-**Current focus:** Phase 2 complete. Ready for Phase 3 - I/O Multiplexing
+**Current focus:** Phase 3 complete. Ready for Phase 4 - Event Notification FDs
 
 ## Current Position
 
 Phase: 3 of 9 (I/O Multiplexing)
-Plan: 4 of 6 in current phase (Phase 03 complete)
+Plan: 4 of 4 in current phase
 Status: Phase complete
 Last activity: 2026-02-07 - Completed 03-04-PLAN.md (I/O multiplexing integration tests)
 

@@ -53,12 +53,12 @@ Requirements for this milestone. Each maps to roadmap phases.
 
 ### I/O Multiplexing
 
-- [ ] **MUX-01**: epoll backend completes FileOps.poll for pipes
-- [ ] **MUX-02**: epoll backend completes FileOps.poll for sockets
-- [ ] **MUX-03**: epoll backend completes FileOps.poll for regular files (always ready)
-- [ ] **MUX-04**: epoll_wait returns real events from monitored fds
-- [ ] **MUX-05**: select blocks on fd sets (read/write/except) with timeout
-- [ ] **MUX-06**: pselect6 provides select with signal mask atomicity
+- [x] **MUX-01**: epoll backend completes FileOps.poll for pipes
+- [x] **MUX-02**: epoll backend completes FileOps.poll for sockets
+- [x] **MUX-03**: epoll backend completes FileOps.poll for regular files (always ready)
+- [x] **MUX-04**: epoll_wait returns real events from monitored fds
+- [x] **MUX-05**: select blocks on fd sets (read/write/except) with timeout
+- [x] **MUX-06**: pselect6 provides select with signal mask atomicity
 
 ### Event Notification FDs
 
@@ -185,7 +185,7 @@ Deferred to future milestone. Tracked but not in current roadmap.
 |-------------|-------|--------|
 | STUB-01 through STUB-24 | Phase 1 | Complete |
 | CRED-01 through CRED-14 | Phase 2 | Pending |
-| MUX-01 through MUX-06 | Phase 3 | Pending |
+| MUX-01 through MUX-06 | Phase 3 | Complete |
 | EVT-01 through EVT-07 | Phase 4 | Pending |
 | VIO-01 through VIO-07 | Phase 5 | Pending |
 | FS-01 through FS-05 | Phase 6 | Pending |

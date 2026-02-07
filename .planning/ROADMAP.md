@@ -14,7 +14,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 1: Quick Wins - Trivial Stubs** - 14 missing syscalls (10 already implemented) returning defaults/no-ops
 - [x] **Phase 2: Credentials & Ownership** - UID/GID infrastructure + chown family
-- [ ] **Phase 3: I/O Multiplexing** - epoll backend + select/pselect6
+- [x] **Phase 3: I/O Multiplexing** - epoll backend + select/pselect6
 - [ ] **Phase 4: Event Notification FDs** - eventfd, timerfd, signalfd
 - [ ] **Phase 5: Vectored & Positional I/O** - readv/preadv/sendfile
 - [ ] **Phase 6: Filesystem Extras** - readlinkat, linkat, symlinkat, utimensat
@@ -72,10 +72,10 @@ Plans:
 **Plans**: 4 plans
 
 Plans:
-- [ ] 03-01-PLAN.md -- FileOps.poll implementations for pipes, regular files (initrd, SFS), and DevFS devices
-- [ ] 03-02-PLAN.md -- Upgrade sys_epoll_wait with real poll dispatch, blocking, edge-triggered, EPOLLONESHOT
-- [ ] 03-03-PLAN.md -- Upgrade sys_select/sys_poll/sys_ppoll to use FileOps.poll, add sys_pselect6, userspace wrappers
-- [ ] 03-04-PLAN.md -- Integration tests: epoll with pipes/files, select read/write/timeout, poll pipe events
+- [x] 03-01-PLAN.md -- FileOps.poll implementations for pipes, regular files (initrd, SFS), and DevFS devices
+- [x] 03-02-PLAN.md -- Upgrade sys_epoll_wait with real poll dispatch, blocking, edge-triggered, EPOLLONESHOT
+- [x] 03-03-PLAN.md -- Upgrade sys_select/sys_poll/sys_ppoll to use FileOps.poll, add sys_pselect6, userspace wrappers
+- [x] 03-04-PLAN.md -- Integration tests: epoll with pipes/files, select read/write/timeout, poll pipe events
 
 ### Phase 4: Event Notification FDs
 **Goal**: Implement eventfd, timerfd, and signalfd as pollable file descriptor types that integrate with the completed epoll backend
@@ -172,7 +172,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9
 |-------|----------------|--------|-----------|
 | 1. Quick Wins - Trivial Stubs | 4/4 | Complete | 2026-02-06 |
 | 2. Credentials & Ownership | 4/4 | Complete | 2026-02-06 |
-| 3. I/O Multiplexing | 0/4 | Not started | - |
+| 3. I/O Multiplexing | 4/4 | Complete | 2026-02-07 |
 | 4. Event Notification FDs | 0/TBD | Not started | - |
 | 5. Vectored & Positional I/O | 0/TBD | Not started | - |
 | 6. Filesystem Extras | 0/TBD | Not started | - |
