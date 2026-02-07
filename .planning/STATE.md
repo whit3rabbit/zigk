@@ -10,18 +10,18 @@ See: .planning/PROJECT.md (updated 2026-02-06)
 ## Current Position
 
 Phase: 4 of 9 (Event Notification FDs)
-Plan: 1 of 4 in current phase
+Plan: 2 of 4 in current phase
 Status: In progress
-Last activity: 2026-02-07 - Completed 04-01-PLAN.md (UAPI constants + eventfd implementation)
+Last activity: 2026-02-07 - Completed 04-02-PLAN.md (timerfd implementation)
 
-Progress: [████░░░░░░] 36%
+Progress: [████░░░░░░] 39%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 13
-- Average duration: 5.4 min
-- Total execution time: 1.17 hours
+- Total plans completed: 14
+- Average duration: 5.3 min
+- Total execution time: 1.25 hours
 
 **By Phase:**
 
@@ -30,11 +30,11 @@ Progress: [████░░░░░░] 36%
 | 1 | 4 | 21 min | 5 min |
 | 2 | 4 | 20 min | 5 min |
 | 3 | 4 | 26 min | 6.5 min |
-| 4 | 1 | 7 min | 7 min |
+| 4 | 2 | 12 min | 6 min |
 
 **Recent Trend:**
-- Last 5 plans: 03-02 (7min), 03-03 (6min), 03-04 (9min), 04-01 (7min)
-- Trend: Testing phases take longer (9min vs 4-7min for implementation)
+- Last 5 plans: 03-03 (6min), 03-04 (9min), 04-01 (7min), 04-02 (5min)
+- Trend: Implementation plans back to 5-7min range after testing spike
 
 *Updated after each plan completion*
 
@@ -82,6 +82,10 @@ Recent decisions affecting current work:
 - **04-01:** EventFdState uses spinlock + atomic woken flags for SMP-safe lost wakeup prevention (pipe.zig pattern)
 - **04-01:** MAX_COUNTER = 0xfffffffffffffffe per Linux semantics (allows overflow detection)
 - **04-01:** Added sched and sync module imports to syscall_io_module in build.zig
+- **04-02:** Polling-based timerfd expiration instead of TimerWheel integration (simpler MVP, avoids IoRequest complexity)
+- **04-02:** Blocking timerfd read uses yield loop (similar to epoll_wait) with 10ms tick granularity
+- **04-02:** CLOCK_BOOTTIME mapped to CLOCK_MONOTONIC (no suspend time tracking yet)
+- **04-02:** getClockNanoseconds helper reuses hal.timing TSC and hal.rtc for time sources
 
 ### Pending Todos
 
@@ -107,8 +111,10 @@ Recent decisions affecting current work:
 - ✅ UAPI constants complete (04-01) - eventfd, timerfd, signalfd UAPI files created
 - ✅ eventfd2/eventfd syscalls complete (04-01) - full semantics with blocking, semaphore mode, epoll integration
 - ✅ eventfd userspace wrappers complete (04-01)
+- ✅ timerfd_create/settime/gettime syscalls complete (04-02) - polling-based expiration, one-shot/periodic timers
+- ✅ timerfd userspace wrappers complete (04-02)
 - Test count: 217 (no new tests yet - Phase 4 tests in plan 04-04)
-- Next: 04-02 timerfd implementation
+- Next: 04-03 signalfd implementation
 
 **Phase 9 Considerations (SysV IPC):**
 - SFS filesystem has close deadlock and 64-file limit
@@ -129,7 +135,7 @@ Recent decisions affecting current work:
 ## Session Continuity
 
 Last session: 2026-02-07 (plan execution)
-Stopped at: Completed 04-01-PLAN.md (UAPI constants + eventfd implementation)
+Stopped at: Completed 04-02-PLAN.md (timerfd implementation)
 Resume file: None
 
 ---
