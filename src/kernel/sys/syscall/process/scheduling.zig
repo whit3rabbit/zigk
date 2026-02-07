@@ -798,6 +798,7 @@ const EpollEntry = struct {
     events: u32,
     data: u64,
     active: bool,
+    last_revents: u32, // Previous poll result for edge-triggered detection
 };
 
 /// Epoll instance data stored in FD private_data
@@ -808,7 +809,7 @@ const EpollInstance = struct {
 
     fn init() EpollInstance {
         return .{
-            .entries = [_]EpollEntry{.{ .fd = -1, .events = 0, .data = 0, .active = false }} ** EPOLL_MAX_FDS,
+            .entries = [_]EpollEntry{.{ .fd = -1, .events = 0, .data = 0, .active = false, .last_revents = 0 }} ** EPOLL_MAX_FDS,
             .count = 0,
             .lock = .{},
         };
@@ -941,6 +942,7 @@ pub fn sys_epoll_ctl(epfd: usize, op: usize, fd: usize, event_ptr: usize) Syscal
                 .events = ev.events,
                 .data = ev.getData(),
                 .active = true,
+                .last_revents = 0,
             };
             instance.count += 1;
         },
@@ -965,6 +967,7 @@ pub fn sys_epoll_ctl(epfd: usize, op: usize, fd: usize, event_ptr: usize) Syscal
 
             entry.events = ev.events;
             entry.data = ev.getData();
+            entry.last_revents = 0; // Reset edge state on modify
         },
         else => return error.EINVAL,
     }
