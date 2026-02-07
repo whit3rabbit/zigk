@@ -336,7 +336,7 @@ pub fn sched_setparam(pid: u32, param: *const SchedParam) SyscallError!void {
 }
 
 /// Get round-robin time quantum
-pub fn sched_rr_get_interval(pid: u32, interval: *Timespec) SyscallError!void {
+pub fn sched_rr_get_interval(pid: u32, interval: *TimespecLocal) SyscallError!void {
     const ret = primitive.syscall2(syscalls.SYS_SCHED_RR_GET_INTERVAL, pid, @intFromPtr(interval));
     if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
 }
@@ -345,8 +345,8 @@ pub fn sched_rr_get_interval(pid: u32, interval: *Timespec) SyscallError!void {
 // Resource Limit Syscalls
 // =============================================================================
 
-/// Timespec structure (for sched_rr_get_interval)
-pub const Timespec = extern struct {
+/// Timespec structure (local to resource module to avoid dependency on time.zig)
+const TimespecLocal = extern struct {
     tv_sec: i64,
     tv_nsec: i64,
 };

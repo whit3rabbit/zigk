@@ -306,6 +306,17 @@ export fn main(argc: i32, argv: [*][*:0]u8) i32 {
     runner.runTest("misc: getrandom nonblocking", misc_tests.testGetrandomNonblocking);
     runner.runTest("misc: writev basic", misc_tests.testWritevBasic);
     runner.runTest("misc: poll timeout", misc_tests.testPollTimeout);
+    runner.runTest("misc: sched_get_priority_max", misc_tests.testSchedGetPriorityMax);
+    runner.runTest("misc: sched_get_priority_min", misc_tests.testSchedGetPriorityMin);
+    runner.runTest("misc: sched_get_priority_invalid", misc_tests.testSchedGetPriorityInvalid);
+    runner.runTest("misc: sched_getscheduler", misc_tests.testSchedGetScheduler);
+    runner.runTest("misc: sched_getparam", misc_tests.testSchedGetParam);
+    runner.runTest("misc: sched_setscheduler", misc_tests.testSchedSetScheduler);
+    runner.runTest("misc: sched_rr_get_interval", misc_tests.testSchedRrGetInterval);
+    runner.runTest("misc: prlimit64 get NOFILE", misc_tests.testPrlimit64GetNofile);
+    runner.runTest("misc: getrusage self", misc_tests.testGetrusageSelf);
+    runner.runTest("misc: getrusage invalid", misc_tests.testGetrusageInvalid);
+    runner.runTest("misc: rt_sigpending", misc_tests.testRtSigpending);
 
     // AT* family tests
     runner.runTest("at_ops: fstatat basic", at_ops_tests.testFstatatBasic);

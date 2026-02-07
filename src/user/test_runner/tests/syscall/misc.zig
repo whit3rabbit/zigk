@@ -126,3 +126,98 @@ pub fn testPollTimeout() !void {
     // File should be readable (or poll returned 0 for timeout - both are acceptable)
     _ = n;
 }
+
+// Test 9: sched_get_priority_max returns max priority
+pub fn testSchedGetPriorityMax() !void {
+    const max_prio = try syscall.sched_get_priority_max(1); // SCHED_FIFO
+    if (max_prio != 99) return error.TestFailed;
+}
+
+// Test 10: sched_get_priority_min returns min priority
+pub fn testSchedGetPriorityMin() !void {
+    const min_prio = try syscall.sched_get_priority_min(1); // SCHED_FIFO
+    if (min_prio != 1) return error.TestFailed;
+}
+
+// Test 11: sched_get_priority with invalid policy returns error
+pub fn testSchedGetPriorityInvalid() !void {
+    const result = syscall.sched_get_priority_max(999);
+    if (result) |_| {
+        return error.TestFailed;
+    } else |_| {
+        // Expected error
+    }
+}
+
+// Test 12: sched_getscheduler returns current policy
+pub fn testSchedGetScheduler() !void {
+    const policy = try syscall.sched_getscheduler(0);
+    if (policy != 0) return error.TestFailed; // SCHED_OTHER
+}
+
+// Test 13: sched_getparam retrieves scheduling parameters
+pub fn testSchedGetParam() !void {
+    var param: syscall.SchedParam = .{ .sched_priority = -1 };
+    try syscall.sched_getparam(0, &param);
+    if (param.sched_priority != 0) return error.TestFailed;
+}
+
+// Test 14: sched_setscheduler changes scheduling policy
+pub fn testSchedSetScheduler() !void {
+    const param = syscall.SchedParam{ .sched_priority = 50 };
+    try syscall.sched_setscheduler(0, 2, &param); // SCHED_RR
+
+    const policy = try syscall.sched_getscheduler(0);
+    if (policy != 2) return error.TestFailed;
+
+    // Restore original policy
+    const restore = syscall.SchedParam{ .sched_priority = 0 };
+    try syscall.sched_setscheduler(0, 0, &restore);
+}
+
+// Test 15: sched_rr_get_interval returns time quantum
+pub fn testSchedRrGetInterval() !void {
+    var ts = std.mem.zeroes([16]u8); // Timespec struct (i64+i64 = 16 bytes)
+    const ptr: *anyopaque = &ts;
+    const ret = @import("syscall").syscall2(
+        @import("syscall").uapi.syscalls.SYS_SCHED_RR_GET_INTERVAL,
+        0,
+        @intFromPtr(ptr)
+    );
+    if (@import("syscall").isError(ret)) return @import("syscall").errorFromReturn(ret);
+
+    // Extract tv_nsec (second i64)
+    const tv_nsec: i64 = @bitCast(std.mem.readInt(u64, ts[8..16], .little));
+    if (tv_nsec != 100_000_000) return error.TestFailed;
+}
+
+// Test 16: prlimit64 retrieves RLIMIT_NOFILE
+pub fn testPrlimit64GetNofile() !void {
+    var old: syscall.Rlimit = undefined;
+    try syscall.prlimit64(0, 7, null, &old); // RLIMIT_NOFILE
+    if (old.rlim_cur == 0) return error.TestFailed;
+}
+
+// Test 17: getrusage self returns usage stats
+pub fn testGetrusageSelf() !void {
+    var usage: syscall.Rusage = undefined;
+    try syscall.getrusage(0, &usage); // RUSAGE_SELF
+}
+
+// Test 18: getrusage with invalid who returns error
+pub fn testGetrusageInvalid() !void {
+    var usage: syscall.Rusage = undefined;
+    const result = syscall.getrusage(99, &usage);
+    if (result) |_| {
+        return error.TestFailed;
+    } else |_| {
+        // Expected error
+    }
+}
+
+// Test 19: rt_sigpending retrieves pending signals
+pub fn testRtSigpending() !void {
+    var set: u64 = 0xFFFF;
+    try syscall.rt_sigpending(&set);
+    // Any value is acceptable, just verify syscall completes
+}
