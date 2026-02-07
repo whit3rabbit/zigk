@@ -221,3 +221,40 @@ pub fn testRtSigpending() !void {
     try syscall.rt_sigpending(&set);
     // Any value is acceptable, just verify syscall completes
 }
+
+// Test 20: Non-root cannot raise hard limit via prlimit64
+pub fn testPrlimit64NonRootCannotRaise() !void {
+    const pid = try syscall.fork();
+    if (pid == 0) {
+        // Drop privileges
+        syscall.setresuid(1000, 1000, 1000) catch syscall.exit(1);
+        // Try to raise RLIMIT_AS hard limit
+        const new_limit = syscall.Rlimit{ .rlim_cur = 0xFFFFFFFFFFFFFFFF, .rlim_max = 0xFFFFFFFFFFFFFFFF };
+        if (syscall.prlimit64(0, 9, &new_limit, null)) |_| {
+            syscall.exit(1); // Should have failed
+        } else |_| {
+            syscall.exit(0); // Expected EPERM
+        }
+    }
+    var status: i32 = undefined;
+    const waited = try syscall.waitpid(pid, &status, 0);
+    if (waited != pid) return error.TestFailed;
+    if ((status & 0x7F) != 0) return error.TestFailed;
+    if (((status >> 8) & 0xFF) != 0) return error.TestFailed;
+}
+
+// Test 21: Self-targeting prlimit64 works as non-root (reading own limits)
+pub fn testPrlimit64SelfAsNonRoot() !void {
+    const pid = try syscall.fork();
+    if (pid == 0) {
+        syscall.setresuid(1000, 1000, 1000) catch syscall.exit(1);
+        var old: syscall.Rlimit = undefined;
+        syscall.prlimit64(0, 7, null, &old) catch syscall.exit(1); // RLIMIT_NOFILE
+        syscall.exit(if (old.rlim_cur > 0) 0 else 1);
+    }
+    var status: i32 = undefined;
+    const waited = try syscall.waitpid(pid, &status, 0);
+    if (waited != pid) return error.TestFailed;
+    if ((status & 0x7F) != 0) return error.TestFailed;
+    if (((status >> 8) & 0xFF) != 0) return error.TestFailed;
+}

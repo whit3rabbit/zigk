@@ -63,6 +63,23 @@ These 500+ numbers are zk-specific compatibility extensions, NOT part of the Lin
 
 ## Recently Implemented
 
+### 2026-02-05: Expanded Test Coverage & Kernel Bug Fixes
+
+Added 95 new integration tests (186 total, up from 91) with 20 new userspace syscall wrappers. Fixed several kernel bugs discovered during testing.
+
+**New Userspace Wrappers** (added to `src/user/lib/syscall/`):
+- FD ops: `dup`, `dup2`, `pipe`, `pipe2`, `fcntl`, `pread64`
+- File info: `stat`, `fstat`, `lstat`, `truncate`, `ftruncate`, `rename`, `chmod`, `link`, `symlink`, `readlink`
+- Process: `umask`, `uname`
+- Time: `clock_getres`, `gettimeofday`
+
+**Kernel Bugs Fixed**:
+- **`*at` syscall kernel pointer delegation**: All `*at` syscalls (fstatat, mkdirat, unlinkat, renameat, fchmodat) copied paths from userspace to kernel buffers, then passed kernel pointers to base syscalls which called `copyStringFromUser` again -- causing EFAULT. Fixed by extracting internal helpers (`statPathKernel`, `mkdirKernel`, `unlinkKernel`, `rmdirKernel`, `chmodKernel`, `renameKernel`).
+- **`sys_newfstatat` not registered**: Dispatch table converts `SYS_NEWFSTATAT` to `sys_newfstatat` but function was named `sys_fstatat`. Fixed with alias in `io/root.zig`.
+- **`sys_uname` machine field**: Was hardcoded to "x86_64" regardless of architecture. Fixed to use `@import("builtin").cpu.arch`.
+
+**Test Coverage**: 166 pass, 0 fail, 20 skip on both x86_64 and aarch64.
+
 ### 2026-02-03: System Information and Timers
 
 Phase 2 system compatibility syscalls:
@@ -131,28 +148,13 @@ Required for legacy IPC. Consider implementing for PostgreSQL, Redis compatibili
 | 70 | `msgrcv` | Receive message from queue |
 | 71 | `msgctl` | Message queue control |
 
-### Timers & Alarms (High Priority)
+### ~~Timers & Alarms~~ (DONE)
 
-Required for signal-based timers. Many programs use `alarm()`.
+All implemented: `pause` (scheduling.zig), `alarm` (alarm.zig), `getitimer`/`setitimer` (itimer.zig).
 
-| # | Name | Description |
-|---|------|-------------|
-| 34 | `pause` | Wait for signal |
-| 36 | `getitimer` | Get interval timer |
-| 37 | `alarm` | Set alarm clock |
-| 38 | `setitimer` | Set interval timer |
+### ~~Process Groups & Sessions~~ (DONE)
 
-### Process Groups & Sessions (High Priority)
-
-Required for job control, shell implementations, daemons.
-
-| # | Name | Description |
-|---|------|-------------|
-| 109 | `setpgid` | Set process group ID |
-| 111 | `getpgrp` | Get process group |
-| 112 | `setsid` | Create session, become leader |
-| 121 | `getpgid` | Get process group ID |
-| 124 | `getsid` | Get session ID |
+All implemented: `setpgid`, `getpgrp`, `setsid`, `getpgid`, `getsid` (process.zig).
 
 ### User/Group IDs (Medium Priority)
 
@@ -200,21 +202,17 @@ Used for SELinux, ACLs, capabilities on files.
 | 198 | `lremovexattr` | Remove xattr (no follow) |
 | 199 | `fremovexattr` | Remove xattr by fd |
 
-### File Locking (High Priority)
+### ~~File Locking~~ (DONE)
 
-Required for database file locking, concurrent access.
-
-| # | Name | Description |
-|---|------|-------------|
-| 73 | `flock` | Apply/remove advisory lock |
+Implemented: `flock` (flock.zig).
 
 ### System Info (Medium Priority)
 
 | # | Name | Description |
 |---|------|-------------|
-| 99 | `sysinfo` | Get system statistics |
-| 100 | `times` | Get process times |
 | 103 | `syslog` | Read/control kernel log |
+
+`sysinfo` (99) and `times` (100) are now implemented (sysinfo.zig, times.zig).
 
 ### Filesystem (Low Priority)
 
@@ -273,20 +271,13 @@ These syscalls are deprecated or obsolete in modern Linux.
 
 ## Implementation Recommendations
 
-### Phase 1: Essential POSIX
+### ~~Phase 1: Essential POSIX~~ (COMPLETE)
 
-1. `flock` (73) - File locking
-2. `pause` (34) - Signal wait
-3. `alarm` (37) - Simple timer
-4. `setpgid`/`getpgid` (109, 121) - Process groups
-5. `setsid`/`getsid` (112, 124) - Sessions
+All implemented: flock, pause, alarm, setpgid/getpgid, setsid/getsid.
 
-### Phase 2: System Compatibility
+### ~~Phase 2: System Compatibility~~ (MOSTLY COMPLETE)
 
-1. `sysinfo` (99) - System stats
-2. `times` (100) - Process times
-3. `getitimer`/`setitimer` (36, 38) - Interval timers
-4. User/group ID syscalls (113-116)
+Implemented: sysinfo, times, getitimer/setitimer. Remaining: User/group ID syscalls (113-116).
 
 ### Phase 3: Advanced Features
 

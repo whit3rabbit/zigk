@@ -342,6 +342,8 @@ export fn main(argc: i32, argv: [*][*:0]u8) i32 {
     runner.runTest("misc: sched_setscheduler", misc_tests.testSchedSetScheduler);
     runner.runTest("misc: sched_rr_get_interval", misc_tests.testSchedRrGetInterval);
     runner.runTest("misc: prlimit64 get NOFILE", misc_tests.testPrlimit64GetNofile);
+    runner.runTest("misc: prlimit64 non-root cannot raise", misc_tests.testPrlimit64NonRootCannotRaise);
+    runner.runTest("misc: prlimit64 self as non-root", misc_tests.testPrlimit64SelfAsNonRoot);
     runner.runTest("misc: getrusage self", misc_tests.testGetrusageSelf);
     runner.runTest("misc: getrusage invalid", misc_tests.testGetrusageInvalid);
     runner.runTest("misc: rt_sigpending", misc_tests.testRtSigpending);

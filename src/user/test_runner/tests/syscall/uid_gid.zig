@@ -143,9 +143,21 @@ pub fn testSetregidAsRoot() !void {
 
 // Test 13: Non-root setregid to privileged gid fails with EPERM
 pub fn testSetregidNonRootRestricted() !void {
-    // Skip - kernel setregid permission check appears to have a bug
-    // After setresgid(1000, 1000, 1000), setregid(2000, 2000) should fail but doesn't
-    return error.SkipTest;
+    const ChildTest = struct {
+        fn run() bool {
+            // Drop GID privileges first (while still root, so we have permission)
+            syscall.setresgid(1000, 1000, 1000) catch return false;
+            // Then drop UID privileges (makes euid non-zero)
+            syscall.setresuid(1000, 1000, 1000) catch return false;
+            // Try to setregid to unauthorized value -- should fail
+            if (syscall.setregid(2000, 2000)) |_| {
+                return false; // Should have failed with EPERM
+            } else |_| {
+                return true;
+            }
+        }
+    };
+    try runInChild(ChildTest.run);
 }
 
 // =============================================================================

@@ -26,7 +26,7 @@ zig build run -Darch=x86_64 -Dvirtfs=/tmp/share   # Run with VirtIO-9P shared fo
 # Testing
 # Quick test (single architecture)
 zig build test-kernel                                    # Run tests for default arch (x86_64)
-./scripts/run_tests.sh                                   # Same, via script (60s timeout)
+./scripts/run_tests.sh                                   # Same, via script (90s timeout)
 
 # Test specific architecture
 ARCH=x86_64 ./scripts/run_tests.sh                       # Run tests for x86_64
@@ -93,18 +93,18 @@ asm volatile ("" ::: "memory");
 ## Testing Infrastructure
 
 **Test Runner**: Userspace test harness at `src/user/test_runner/`.
-**Test Suite**: Integration tests in `src/user/test_runner/tests/` (91 tests, 87 passing, 4 skipped).
-**Automation**: `scripts/run_tests.sh` with 60s timeout for CI.
+**Test Suite**: Integration tests in `src/user/test_runner/tests/` (186 tests, 166 passing, 20 skipped).
+**Automation**: `scripts/run_tests.sh` with 90s timeout for CI.
 **Boot Target**: `-Ddefault-boot=test_runner` auto-runs tests.
 **CI**: GitHub Actions workflow (`.github/workflows/ci.yml`) runs on every PR/push.
-**Coverage**: 75+ syscalls tested, 10 test categories, both x86_64 and aarch64.
+**Coverage**: 95+ syscalls tested, 15 test categories, both x86_64 and aarch64.
 **Documentation**: See `TODO_TESTING_INFRA.md` for detailed test inventory and roadmap.
 
 ### Running Tests
 ```bash
 # Quick test (single architecture)
 zig build test-kernel                                    # Runs for default arch (x86_64)
-./scripts/run_tests.sh                                   # Same, via script (60s timeout)
+./scripts/run_tests.sh                                   # Same, via script (90s timeout)
 
 # Test specific architecture
 ARCH=x86_64 ./scripts/run_tests.sh                       # x86_64 tests only
@@ -121,10 +121,15 @@ zig build run -Darch=aarch64 -Ddefault-boot=test_runner  # aarch64 with GUI/seri
 zig build test                                           # Host-based Zig unit tests
 ```
 
-### Test Categories (91 tests)
+### Test Categories (186 tests)
 - **Filesystem** (15 tests): VFS, SFS, InitRD, DevFS operations
 - **Syscalls - Directory Ops** (4 tests): chdir, getcwd, getdents64
 - **Syscalls - File I/O** (10 tests): open, read, write, lseek, truncate, append
+- **Syscalls - FD Ops** (10 tests): dup, dup2, pipe, pipe2, fcntl, pread64
+- **Syscalls - File Info** (12 tests): stat, fstat, lstat, chmod, access, truncate, rename
+- **Syscalls - Time Ops** (8 tests): nanosleep, clock_gettime, clock_getres, gettimeofday, sched_yield
+- **Syscalls - Misc** (8 tests): uname, umask, getrandom, writev, poll
+- **Syscalls - AT* Family** (6 tests): fstatat, mkdirat, unlinkat, renameat, fchmodat
 - **Error Handling** (12 tests): Invalid FDs, permissions, boundary checks
 - **Regression Tests** (6 tests): SFS deadlocks, TOCTOU races, error codes
 - **Edge Cases** (10 tests): Block boundaries, zero-length ops, filename limits
@@ -134,21 +139,20 @@ zig build test                                           # Host-based Zig unit t
 
 ### Architecture Support
 - **x86_64**: Full test coverage, all tests passing
-- **aarch64**: Full test coverage, 1 known failure (exec test - see below)
+- **aarch64**: Full test coverage, all tests passing
 - **CI Mode**: Run both architectures with `RUN_BOTH=true`
 
 **Note**: Tests output TAP-like format. Failing tests show error names for debugging.
 
 ### Known Test Limitations
 
-**Skipped Tests** (4 total):
+**Skipped Tests** (20 total):
 1. **process: setsid fails for group leader** (`testSetsidFailsForGroupLeader`)
    - **Reason**: Test environment constraint - every spawned process starts as its own session leader (pid == pgid == sid)
    - **Status**: Syscall implementation is POSIX-compliant and working correctly
-   - **Issue**: Edge case testing requires complex multi-level fork() scenarios that are unreliable in test environment
-   - **Verified**: Core `setsid` functionality tested by `testSetsidBasic` (passing)
-   - **Action**: Do not attempt to fix - this is a documented test environment limitation, not a kernel bug
-2-4. **Other skipped tests**: Pre-existing skipped tests (not related to process groups)
+   - **Action**: Do not attempt to fix - documented test environment limitation, not a kernel bug
+2. **SFS-related skips** (16 tests): Tests that require SFS file close/rmdir/rename after many operations are skipped due to SFS close deadlock and VFS re-lock bugs. These are SFS limitations, not syscall bugs. Affected tests: ftruncate, rename, unlink, rmdir (file_info); unlinkat dir, renameat (at_ops); and others.
+3. **Pre-existing skips** (3 tests): Earlier process and filesystem tests skipped for known limitations.
 
 **Fixed Tests (aarch64-specific)**:
 1. **process: exec replaces process** (`testExecReplacesProcess`) -- FIXED

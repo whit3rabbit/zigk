@@ -888,12 +888,22 @@ pub fn sys_setrlimit(resource: usize, rlim_ptr: usize) SyscallError!usize {
 /// Modern replacement for getrlimit/setrlimit. Can read and/or set limits
 /// in a single atomic operation. Can target any process by PID.
 pub fn sys_prlimit64(pid: usize, resource: usize, new_limit_ptr: usize, old_limit_ptr: usize) SyscallError!usize {
-    // Resolve target process
+    const caller = base.getCurrentProcess();
     const target_pid: u32 = @truncate(pid);
     const proc = if (target_pid == 0)
-        base.getCurrentProcess()
+        caller
     else
         process_mod.findProcessByPid(target_pid) orelse return error.ESRCH;
+
+    // SECURITY: Cross-process permission check (POSIX DAC model)
+    if (proc != caller and caller.euid != 0) {
+        // Caller's real/effective UID must match target's real/effective UID
+        if (caller.uid != proc.uid and caller.uid != proc.euid and
+            caller.euid != proc.uid and caller.euid != proc.euid)
+        {
+            return error.EPERM;
+        }
+    }
 
     // If old_limit_ptr != 0, return current limits
     if (old_limit_ptr != 0) {
@@ -946,7 +956,7 @@ pub fn sys_prlimit64(pid: usize, resource: usize, new_limit_ptr: usize, old_limi
         switch (resource) {
             RLIMIT_AS => {
                 // Check permission for raising hard limit
-                if (new_limit.rlim_max > proc.rlimit_as and proc.euid != 0) {
+                if (new_limit.rlim_max > proc.rlimit_as and caller.euid != 0) {
                     return error.EPERM;
                 }
                 proc.rlimit_as = new_limit.rlim_cur;

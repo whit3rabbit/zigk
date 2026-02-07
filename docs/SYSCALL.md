@@ -327,15 +327,15 @@ Example differences:
 | 79 | getcwd | (buf, size) -> char* | io.zig |
 | 80 | chdir | (path) -> int | io.zig |
 | 81 | fchdir | (fd) -> int | io.zig (-) |
-| 82 | rename | (old, new) -> int | io.zig |
-| 83 | mkdir | (path, mode) -> int | io.zig |
-| 84 | rmdir | (path) -> int | io.zig |
+| 82 | rename | (old, new) -> int | fs_handlers.zig |
+| 83 | mkdir | (path, mode) -> int | fs_handlers.zig |
+| 84 | rmdir | (path) -> int | fs_handlers.zig |
 | 85 | creat | (path, mode) -> fd | fd.zig |
 | 86 | link | (old, new) -> int | io.zig |
 | 87 | unlink | (path) -> int | fs_handlers.zig |
 | 88 | symlink | (target, link) -> int | io.zig |
 | 89 | readlink | (path, buf, size) -> ssize_t | io.zig |
-| 90 | chmod | (path, mode) -> int | io.zig |
+| 90 | chmod | (path, mode) -> int | fs_handlers.zig |
 | 91 | fchmod | (fd, mode) -> int | io.zig |
 | 92 | chown | (path, uid, gid) -> int | io.zig |
 | 93 | fchown | (fd, uid, gid) -> int | io.zig |
@@ -411,11 +411,11 @@ Example differences:
 | 260 | fchownat | (dfd, path, uid, gid, flags) -> int | io.zig |
 | 262 | newfstatat | (dfd, path, statbuf, flags) -> int | io.zig |
 | 263 | unlinkat | (dfd, path, flags) -> int | fs_handlers.zig |
-| 264 | renameat | (olddfd, old, newdfd, new) -> int | io.zig |
+| 264 | renameat | (olddfd, old, newdfd, new) -> int | fs_handlers.zig |
 | 265 | linkat | (olddfd, old, newdfd, new, flags) -> int | io.zig |
 | 266 | symlinkat | (target, newdfd, link) -> int | io.zig |
 | 267 | readlinkat | (dfd, path, buf, size) -> ssize_t | io.zig |
-| 268 | fchmodat | (dfd, path, mode, flags) -> int | io.zig |
+| 268 | fchmodat | (dfd, path, mode, flags) -> int | fs_handlers.zig |
 | 269 | faccessat | (dfd, path, mode, flags) -> int | fd.zig |
 | 272 | unshare | (flags) -> int | - |
 | 275 | splice | (fd_in, off_in, fd_out, off_out, len, flags) -> ssize_t | - |

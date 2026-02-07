@@ -210,7 +210,7 @@ python scripts/driver_query.py template ring  # Ring IPC userspace driver
 ### New Syscall
 1. Query existing: `python scripts/syscall_query.py --category <relevant>`
 2. Query pattern: `python scripts/rules_query.py handler`
-3. Add to `src/uapi/syscalls.zig`
+3. Add to `src/uapi/syscalls/linux.zig` (x86_64) or `linux_aarch64.zig` (aarch64)
 4. Add handler to appropriate subdirectory in `src/kernel/sys/syscall/` (core/, fs/, memory/, process/, net/, hw/, io/, io_uring/, misc/)
 
 ### New Driver (Kernel)
