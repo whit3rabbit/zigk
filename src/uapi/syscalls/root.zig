@@ -188,6 +188,7 @@ pub const SYS_SYMLINKAT = linux.SYS_SYMLINKAT;
 pub const SYS_READLINKAT = linux.SYS_READLINKAT;
 pub const SYS_FCHMODAT = linux.SYS_FCHMODAT;
 pub const SYS_FACCESSAT = linux.SYS_FACCESSAT;
+pub const SYS_PSELECT6 = linux.SYS_PSELECT6;
 pub const SYS_PPOLL = linux.SYS_PPOLL;
 pub const SYS_UNSHARE = linux.SYS_UNSHARE;
 pub const SYS_SPLICE = linux.SYS_SPLICE;

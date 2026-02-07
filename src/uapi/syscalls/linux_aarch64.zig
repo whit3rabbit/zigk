@@ -333,6 +333,8 @@ pub const SYS_EPOLL_CREATE1: usize = 20;
 pub const SYS_EPOLL_CTL: usize = 21;
 /// Wait for I/O events with signal mask
 pub const SYS_EPOLL_PWAIT: usize = 22;
+/// Synchronous I/O multiplexing with signal mask and nanosecond timeout
+pub const SYS_PSELECT6: usize = 72;
 /// Wait for events on file descriptors with signal mask
 pub const SYS_PPOLL: usize = 73;
 /// eventfd with flags

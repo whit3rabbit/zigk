@@ -42,6 +42,7 @@ pub const SYS_CLOSE = syscalls.SYS_CLOSE;
 pub const SYS_IOCTL = syscalls.SYS_IOCTL;
 pub const SYS_POLL = syscalls.SYS_POLL;
 pub const SYS_SELECT = syscalls.SYS_SELECT;
+pub const SYS_PSELECT6 = syscalls.SYS_PSELECT6;
 pub const SYS_MMAP = syscalls.SYS_MMAP;
 pub const SYS_MPROTECT = syscalls.SYS_MPROTECT;
 pub const SYS_MUNMAP = syscalls.SYS_MUNMAP;

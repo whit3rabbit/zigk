@@ -239,24 +239,37 @@ pub fn sys_sched_rr_get_interval(pid: usize, interval_ptr: usize) SyscallError!u
 
 /// sys_ppoll (271) - Poll file descriptors with signal mask and timespec timeout
 ///
-/// MVP: Standalone timeout-based stub. Validates arguments and sleeps for timeout.
-/// Does not actually monitor file descriptors (requires poll infrastructure from Phase 3).
-///
 /// Args:
 ///   fds_ptr: Pointer to array of pollfd structures
 ///   nfds: Number of file descriptors
 ///   timeout_ptr: Pointer to timespec timeout (NULL = infinite wait)
-///   sigmask_ptr: Pointer to signal mask (MVP: ignored)
+///   sigmask_ptr: Pointer to signal mask
 ///   sigsetsize: Size of signal mask (must be 8 for u64 SigSet)
 pub fn sys_ppoll(fds_ptr: usize, nfds: usize, timeout_ptr: usize, sigmask_ptr: usize, sigsetsize: usize) SyscallError!usize {
+    const thread = sched.getCurrentThread() orelse return error.ESRCH;
+
     // Validate sigmask size if provided
-    // MVP: sigmask ignored. Full implementation requires atomic mask swap around poll.
     if (sigmask_ptr != 0 and sigsetsize != 8) {
         return error.EINVAL;
     }
 
+    // Apply signal mask if provided
+    var old_mask: u64 = 0;
+    var mask_applied = false;
+    if (sigmask_ptr != 0) {
+        const new_mask = UserPtr.from(sigmask_ptr).readValue(u64) catch {
+            return error.EFAULT;
+        };
+        old_mask = thread.sigmask;
+        thread.sigmask = new_mask;
+        mask_applied = true;
+    }
+    defer if (mask_applied) {
+        thread.sigmask = old_mask;
+    };
+
     // Parse timeout
-    var timeout_ms: ?u64 = null;
+    var timeout_us: ?u64 = null;
     if (timeout_ptr != 0) {
         const ts = UserPtr.from(timeout_ptr).readValue(Timespec) catch {
             return error.EFAULT;
@@ -267,50 +280,126 @@ pub fn sys_ppoll(fds_ptr: usize, nfds: usize, timeout_ptr: usize, sigmask_ptr: u
             return error.EINVAL;
         }
 
-        // Convert to milliseconds
-        const sec_ms: u64 = @as(u64, @intCast(ts.tv_sec)) * 1000;
-        const nsec_ms: u64 = @as(u64, @intCast(ts.tv_nsec)) / 1_000_000;
-        timeout_ms = sec_ms + nsec_ms;
+        // Convert to microseconds
+        const sec_us: u64 = @as(u64, @intCast(ts.tv_sec)) * 1_000_000;
+        const nsec_us: u64 = @as(u64, @intCast(ts.tv_nsec)) / 1_000;
+        timeout_us = sec_us + nsec_us;
     }
 
     // Handle nfds=0 case (pure timeout)
     if (nfds == 0) {
-        if (timeout_ms) |ms| {
-            if (ms == 0) {
+        if (timeout_us) |us| {
+            if (us == 0) {
                 // Zero timeout - return immediately
                 return 0;
             }
             // Sleep for timeout duration
-            const ticks = ms / 10; // 10ms per tick
-            sched.sleepForTicks(ticks);
+            const ticks = us / 10_000; // 10ms per tick, us to ticks
+            if (ticks > 0) {
+                sched.sleepForTicks(ticks);
+            }
         } else {
-            // MVP: infinite timeout not supported without fd polling infrastructure, return 0
-            return 0;
+            // NULL timeout (infinite wait) - block forever
+            sched.block();
         }
         return 0;
     }
 
-    // Handle nfds > 0 case
     // Validate fds_ptr
-    if (!user_mem.isValidUserAccess(fds_ptr, nfds * @sizeOf(uapi.poll.PollFd), .Read)) {
+    const poll_size = @sizeOf(uapi.poll.PollFd);
+    const array_size = std.math.mul(usize, nfds, poll_size) catch return error.EINVAL;
+    if (!user_mem.isValidUserAccess(fds_ptr, array_size, .Read) or
+        !user_mem.isValidUserAccess(fds_ptr, array_size, .Write))
+    {
         return error.EFAULT;
     }
 
-    // MVP: fd polling not implemented in ppoll stub. Real implementation in Phase 3
-    // (I/O Multiplexing) will delegate to shared poll infrastructure.
-    if (timeout_ms) |ms| {
-        if (ms == 0) {
-            // Zero timeout - return 0 immediately (no fds ready)
-            return 0;
+    // Copy pollfd array to kernel memory
+    const kpollfds = heap.allocator().alloc(uapi.poll.PollFd, nfds) catch {
+        return error.ENOMEM;
+    };
+    defer heap.allocator().free(kpollfds);
+
+    const ufds_uptr = user_mem.UserPtr.from(fds_ptr);
+    _ = ufds_uptr.copyToKernel(std.mem.sliceAsBytes(kpollfds)) catch {
+        return error.EFAULT;
+    };
+
+    const fd_table = base.getGlobalFdTable();
+    const start_tsc = hal.timing.rdtsc();
+
+    // Poll loop
+    while (true) {
+        var ready_count: usize = 0;
+
+        // Check each pollfd
+        for (kpollfds) |*pfd| {
+            pfd.revents = 0;
+
+            if (pfd.fd < 0) continue;
+
+            const fd_u32 = std.math.cast(u32, @as(usize, @intCast(pfd.fd))) orelse {
+                pfd.revents = @bitCast(uapi.poll.POLLNVAL);
+                ready_count += 1;
+                continue;
+            };
+
+            if (fd_table.get(fd_u32)) |fd_obj| {
+                // Call poll if available
+                var revents: u32 = 0;
+                if (fd_obj.ops.poll) |poll_fn| {
+                    const events_u32: u32 = @as(u16, @bitCast(pfd.events));
+                    revents = poll_fn(fd_obj, events_u32);
+                } else {
+                    // No poll - assume always ready for the modes the FD supports
+                    const events: u16 = @bitCast(pfd.events);
+                    if ((events & uapi.poll.POLLIN) != 0 and fd_obj.isReadable()) {
+                        revents |= uapi.poll.POLLIN;
+                    }
+                    if ((events & uapi.poll.POLLOUT) != 0 and fd_obj.isWritable()) {
+                        revents |= uapi.poll.POLLOUT;
+                    }
+                }
+                const revents_i16: i16 = @bitCast(@as(u16, @truncate(revents)));
+                pfd.revents = revents_i16;
+            } else {
+                // FD no longer valid
+                pfd.revents = @bitCast(uapi.poll.POLLNVAL);
+            }
+
+            if (pfd.revents != 0) {
+                ready_count += 1;
+            }
         }
-        // Sleep for timeout and return 0 (no fds ready)
-        const ticks = ms / 10;
-        sched.sleepForTicks(ticks);
-        return 0;
-    } else {
-        // NULL timeout (infinite wait) - return 0 immediately for MVP
-        return 0;
+
+        // If any FDs ready, return
+        if (ready_count > 0) break;
+
+        // Check timeout
+        if (timeout_us) |us| {
+            if (us == 0) break; // Immediate return (timeout=0)
+            if (hal.timing.hasTimedOut(start_tsc, us)) break; // Timeout expired
+        }
+        // else: null timeout means infinite wait, keep looping
+
+        // No FDs ready and not timed out - yield and retry
+        sched.yield();
     }
+
+    // Copy results back to userspace
+    _ = ufds_uptr.copyFromKernel(std.mem.sliceAsBytes(kpollfds)) catch {
+        return error.EFAULT;
+    };
+
+    // Count ready fds
+    var final_count: usize = 0;
+    for (kpollfds) |pfd| {
+        if (pfd.revents != 0) {
+            final_count += 1;
+        }
+    }
+
+    return final_count;
 }
 
 /// sys_nanosleep (35) - High-resolution sleep
@@ -370,18 +459,8 @@ pub fn sys_nanosleep(req_ptr: usize, rem_ptr: usize) SyscallError!usize {
     return 0;
 }
 
-/// sys_select (23) - Synchronous I/O multiplexing
-///
-/// Args:
-///   nfds: Highest-numbered file descriptor + 1
-///   readfds: FD set to watch for read readiness
-///   writefds: FD set to watch for write readiness
-///   exceptfds: FD set to watch for exceptions
-///   timeout: Maximum wait time
-///
-/// Implements basic non-blocking poll of FD sets.
-/// Blocking with timeout is supported via scheduler.
-pub fn sys_select(nfds: usize, readfds: usize, writefds: usize, exceptfds: usize, timeout: usize) SyscallError!usize {
+/// Internal select implementation shared by sys_select and sys_pselect6
+fn selectInternal(nfds: usize, readfds: usize, writefds: usize, exceptfds: usize, timeout_us: ?u64) SyscallError!usize {
     // fd_set is 128 bytes (1024 bits) on Linux x86_64
     const FD_SET_SIZE = 128;
     const FD_SET_BITS = FD_SET_SIZE * 8;
@@ -420,21 +499,6 @@ pub fn sys_select(nfds: usize, readfds: usize, writefds: usize, exceptfds: usize
     var read_out: [FD_SET_SIZE]u8 = [_]u8{0} ** FD_SET_SIZE;
     var write_out: [FD_SET_SIZE]u8 = [_]u8{0} ** FD_SET_SIZE;
     var except_out: [FD_SET_SIZE]u8 = [_]u8{0} ** FD_SET_SIZE;
-
-    // Parse timeout (struct timeval)
-    var timeout_us: ?u64 = null;
-    if (timeout != 0) {
-        var tv: extern struct { tv_sec: i64, tv_usec: i64 } = undefined;
-        const tv_bytes = std.mem.asBytes(&tv);
-        // SECURITY: copyFromUser returns bytes NOT copied (0 on success)
-        if (user_mem.copyFromUser(tv_bytes, timeout) != 0) {
-            return error.EFAULT;
-        }
-        // Convert to microseconds
-        const sec_us = @as(u64, @intCast(@max(0, tv.tv_sec))) * 1_000_000;
-        const usec = @as(u64, @intCast(@max(0, tv.tv_usec)));
-        timeout_us = sec_us + usec;
-    }
 
     var ready_count: usize = 0;
     const start_tsc = hal.timing.rdtsc();
@@ -502,14 +566,12 @@ pub fn sys_select(nfds: usize, readfds: usize, writefds: usize, exceptfds: usize
 
         // Check timeout
         if (timeout_us) |us| {
+            if (us == 0) break; // Immediate return (timeout=0)
             if (hal.timing.hasTimedOut(start_tsc, us)) break; // Timeout expired
-        } else if (timeout != 0) {
-            // timeout was provided but was zero - immediate return
-            break;
         }
+        // else: null timeout means infinite wait, keep looping
 
         // No FDs ready and not timed out - yield and retry
-        if (timeout == 0) break; // No timeout means poll once
         sched.yield();
     }
 
@@ -534,6 +596,102 @@ pub fn sys_select(nfds: usize, readfds: usize, writefds: usize, exceptfds: usize
     }
 
     return ready_count;
+}
+
+/// sys_select (23) - Synchronous I/O multiplexing
+///
+/// Args:
+///   nfds: Highest-numbered file descriptor + 1
+///   readfds: FD set to watch for read readiness
+///   writefds: FD set to watch for write readiness
+///   exceptfds: FD set to watch for exceptions
+///   timeout: Pointer to struct timeval with maximum wait time
+///
+/// Implements basic non-blocking poll of FD sets.
+/// Blocking with timeout is supported via scheduler.
+pub fn sys_select(nfds: usize, readfds: usize, writefds: usize, exceptfds: usize, timeout: usize) SyscallError!usize {
+    // Parse timeout (struct timeval)
+    var timeout_us: ?u64 = null;
+    if (timeout != 0) {
+        var tv: extern struct { tv_sec: i64, tv_usec: i64 } = undefined;
+        const tv_bytes = std.mem.asBytes(&tv);
+        // SECURITY: copyFromUser returns bytes NOT copied (0 on success)
+        if (user_mem.copyFromUser(tv_bytes, timeout) != 0) {
+            return error.EFAULT;
+        }
+        // Convert to microseconds
+        const sec_us = @as(u64, @intCast(@max(0, tv.tv_sec))) * 1_000_000;
+        const usec = @as(u64, @intCast(@max(0, tv.tv_usec)));
+        timeout_us = sec_us + usec;
+    }
+    return selectInternal(nfds, readfds, writefds, exceptfds, timeout_us);
+}
+
+/// sys_pselect6 (270) - Synchronous I/O multiplexing with signal mask
+///
+/// Args:
+///   nfds: Highest-numbered file descriptor + 1
+///   readfds: FD set to watch for read readiness
+///   writefds: FD set to watch for write readiness
+///   exceptfds: FD set to watch for exceptions
+///   timeout_ptr: Pointer to struct timespec with maximum wait time
+///   sigmask_ptr: Pointer to sigmask_arg struct { sigset_t *ss; size_t ss_len; }
+///
+/// Like select, but with nanosecond-resolution timeout and atomic signal mask swap.
+pub fn sys_pselect6(nfds: usize, readfds: usize, writefds: usize, exceptfds: usize, timeout_ptr: usize, sigmask_ptr: usize) SyscallError!usize {
+    const thread = sched.getCurrentThread() orelse return error.ESRCH;
+
+    // Apply signal mask if provided
+    var old_mask: u64 = 0;
+    var mask_applied = false;
+    if (sigmask_ptr != 0) {
+        // Read the pselect6 sigmask argument struct
+        const SigmaskArg = extern struct {
+            ss: usize,
+            ss_len: usize,
+        };
+        const arg = UserPtr.from(sigmask_ptr).readValue(SigmaskArg) catch {
+            return error.EFAULT;
+        };
+
+        // Validate ss_len == 8 (size of u64 sigset)
+        if (arg.ss_len != 8) {
+            return error.EINVAL;
+        }
+
+        // Read the signal mask
+        if (arg.ss != 0) {
+            const new_mask = UserPtr.from(arg.ss).readValue(u64) catch {
+                return error.EFAULT;
+            };
+            old_mask = thread.sigmask;
+            thread.sigmask = new_mask;
+            mask_applied = true;
+        }
+    }
+    defer if (mask_applied) {
+        thread.sigmask = old_mask;
+    };
+
+    // Parse timeout (struct timespec)
+    var timeout_us: ?u64 = null;
+    if (timeout_ptr != 0) {
+        const ts = UserPtr.from(timeout_ptr).readValue(Timespec) catch {
+            return error.EFAULT;
+        };
+
+        // Validate timespec values
+        if (ts.tv_sec < 0 or ts.tv_nsec < 0 or ts.tv_nsec >= 1_000_000_000) {
+            return error.EINVAL;
+        }
+
+        // Convert to microseconds
+        const sec_us = @as(u64, @intCast(ts.tv_sec)) * 1_000_000;
+        const nsec_us = @as(u64, @intCast(ts.tv_nsec)) / 1_000;
+        timeout_us = sec_us + nsec_us;
+    }
+
+    return selectInternal(nfds, readfds, writefds, exceptfds, timeout_us);
 }
 
 /// Get monotonic time (time since boot) using TSC or tick count

@@ -348,6 +348,8 @@ pub const SYS_READLINKAT: usize = 267;
 pub const SYS_FCHMODAT: usize = 268;
 /// Check access relative to directory FD
 pub const SYS_FACCESSAT: usize = 269;
+/// Synchronous I/O multiplexing with signal mask and nanosecond timeout
+pub const SYS_PSELECT6: usize = 270;
 /// Wait for events on file descriptors with signal mask
 pub const SYS_PPOLL: usize = 271;
 /// Disassociate parts of execution context
