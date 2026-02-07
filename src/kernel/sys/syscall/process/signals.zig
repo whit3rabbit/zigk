@@ -198,6 +198,70 @@ fn isOnAlternateStack(thread: *sched.Thread, rsp: u64) bool {
     return rsp >= alt.sp and rsp < alt.sp + alt.size;
 }
 
+/// sys_rt_sigpending (127) - Examine pending signals
+///
+/// Returns the set of signals that are pending for the calling thread and blocked
+/// by the current signal mask. This is the intersection of pending_signals and sigmask.
+pub fn sys_rt_sigpending(set_ptr: usize, sigsetsize: usize) SyscallError!usize {
+    // Validate sigsetsize
+    if (sigsetsize != @sizeOf(uapi.signal.SigSet)) {
+        return error.EINVAL;
+    }
+
+    const current_thread = sched.getCurrentThread() orelse {
+        return error.ESRCH;
+    };
+
+    // Compute pending signals that are blocked
+    const pending = current_thread.pending_signals & current_thread.sigmask;
+
+    // Write to userspace
+    UserPtr.from(set_ptr).writeValue(pending) catch {
+        return error.EFAULT;
+    };
+
+    return 0;
+}
+
+/// sys_rt_sigsuspend (130) - Wait for a signal with temporary mask
+///
+/// Atomically replaces the signal mask with the provided mask, blocks until
+/// a signal is delivered, then restores the original mask. Always returns EINTR.
+pub fn sys_rt_sigsuspend(mask_ptr: usize, sigsetsize: usize) SyscallError!usize {
+    // Validate sigsetsize
+    if (sigsetsize != @sizeOf(uapi.signal.SigSet)) {
+        return error.EINVAL;
+    }
+
+    // Read new mask from userspace
+    const new_mask = UserPtr.from(mask_ptr).readValue(uapi.signal.SigSet) catch {
+        return error.EFAULT;
+    };
+
+    const current_thread = sched.getCurrentThread() orelse {
+        return error.ESRCH;
+    };
+
+    // Save old mask
+    const old_mask = current_thread.sigmask;
+
+    // Set new mask (temporarily)
+    current_thread.sigmask = new_mask;
+
+    // Ensure SIGKILL and SIGSTOP cannot be blocked (same as rt_sigprocmask)
+    uapi.signal.sigdelset(&current_thread.sigmask, uapi.signal.SIGKILL);
+    uapi.signal.sigdelset(&current_thread.sigmask, uapi.signal.SIGSTOP);
+
+    // Suspend until a signal arrives
+    sched.block();
+
+    // Restore old mask
+    current_thread.sigmask = old_mask;
+
+    // Always return EINTR (sigsuspend always fails with this errno per POSIX)
+    return error.EINTR;
+}
+
 /// sys_rt_sigreturn (15) - Return from signal handler and restore context
 ///
 /// This syscall is called by the signal trampoline. It restores the user context
