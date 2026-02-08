@@ -691,6 +691,109 @@ pub fn pread64(fd: i32, buf: [*]u8, count: usize, offset: u64) SyscallError!size
     return ret;
 }
 
+/// Write to file descriptor at a given offset without changing file position
+pub fn pwrite64(fd: i32, buf: [*]const u8, count: usize, offset: u64) SyscallError!size_t {
+    const ret = primitive.syscall4(syscalls.SYS_PWRITE64, @bitCast(@as(isize, fd)), @intFromPtr(buf), count, offset);
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return ret;
+}
+
+/// Read data into multiple buffers (scatter-gather read)
+/// Returns total bytes read, or error
+pub fn readv(fd: i32, iov: []const Iovec) SyscallError!size_t {
+    const ret = primitive.syscall3(
+        syscalls.SYS_READV,
+        @bitCast(@as(isize, fd)),
+        @intFromPtr(iov.ptr),
+        iov.len,
+    );
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return ret;
+}
+
+/// Read into multiple buffers at a given offset (vectored positional read)
+/// Returns total bytes read, or error
+pub fn preadv(fd: i32, iov: []const Iovec, offset: u64) SyscallError!size_t {
+    const ret = primitive.syscall4(
+        syscalls.SYS_PREADV,
+        @bitCast(@as(isize, fd)),
+        @intFromPtr(iov.ptr),
+        iov.len,
+        offset,
+    );
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return ret;
+}
+
+/// Write from multiple buffers at a given offset (vectored positional write)
+/// Returns total bytes written, or error
+pub fn pwritev(fd: i32, iov: []const Iovec, offset: u64) SyscallError!size_t {
+    const ret = primitive.syscall4(
+        syscalls.SYS_PWRITEV,
+        @bitCast(@as(isize, fd)),
+        @intFromPtr(iov.ptr),
+        iov.len,
+        offset,
+    );
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return ret;
+}
+
+/// RWF_* flags for preadv2/pwritev2
+pub const RWF_HIPRI: u32 = 0x00000001;
+pub const RWF_DSYNC: u32 = 0x00000002;
+pub const RWF_SYNC: u32 = 0x00000004;
+pub const RWF_NOWAIT: u32 = 0x00000008;
+pub const RWF_APPEND: u32 = 0x00000010;
+
+/// Read into multiple buffers at a given offset with flags (extended vectored positional read)
+/// offset=-1 uses current file position
+/// Returns total bytes read, or error
+pub fn preadv2(fd: i32, iov: []const Iovec, offset: i64, flags: u32) SyscallError!size_t {
+    const ret = primitive.syscall5(
+        syscalls.SYS_PREADV2,
+        @bitCast(@as(isize, fd)),
+        @intFromPtr(iov.ptr),
+        iov.len,
+        @bitCast(@as(usize, @as(isize, offset))),
+        @as(usize, flags),
+    );
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return ret;
+}
+
+/// Write from multiple buffers at a given offset with flags (extended vectored positional write)
+/// offset=-1 uses current file position
+/// Returns total bytes written, or error
+pub fn pwritev2(fd: i32, iov: []const Iovec, offset: i64, flags: u32) SyscallError!size_t {
+    const ret = primitive.syscall5(
+        syscalls.SYS_PWRITEV2,
+        @bitCast(@as(isize, fd)),
+        @intFromPtr(iov.ptr),
+        iov.len,
+        @bitCast(@as(usize, @as(isize, offset))),
+        @as(usize, flags),
+    );
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return ret;
+}
+
+/// Transfer data from file to file descriptor (zero-copy)
+/// offset: optional pointer to read position (updated on success), null for current position
+/// Returns total bytes transferred, or error
+pub fn sendfile(out_fd: i32, in_fd: i32, offset: ?*u64, count: usize) SyscallError!size_t {
+    const offset_ptr: usize = if (offset) |o| @intFromPtr(o) else 0;
+    const ret = primitive.syscall4(
+        syscalls.SYS_SENDFILE,
+        @bitCast(@as(isize, out_fd)),
+        @bitCast(@as(isize, in_fd)),
+        offset_ptr,
+        count,
+    );
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return ret;
+}
+
 // =============================================================================
 // File Info Operations (stat, truncate, rename, chmod, link, symlink, readlink)
 // =============================================================================
