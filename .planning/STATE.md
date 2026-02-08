@@ -10,18 +10,18 @@ See: .planning/PROJECT.md (updated 2026-02-06)
 ## Current Position
 
 Phase: 6 of 9 (Filesystem Extras)
-Plan: 1 of 4 in current phase
+Plan: 2 of 4 in current phase
 Status: In progress
-Last activity: 2026-02-08 - Completed 06-01-PLAN.md (filesystem extras foundation)
+Last activity: 2026-02-08 - Completed 06-02-PLAN.md (timestamp control syscalls)
 
-Progress: [█████░░░░░] 47%
+Progress: [█████░░░░░] 50%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 17
-- Average duration: 5.5 min
-- Total execution time: 1.58 hours
+- Total plans completed: 18
+- Average duration: 5.4 min
+- Total execution time: 1.63 hours
 
 **By Phase:**
 
@@ -31,11 +31,11 @@ Progress: [█████░░░░░] 47%
 | 2 | 4 | 20 min | 5 min |
 | 3 | 4 | 26 min | 6.5 min |
 | 4 | 4 | 24 min | 6 min |
-| 6 | 1 | 7 min | 7 min |
+| 6 | 2 | 11 min | 5.5 min |
 
 **Recent Trend:**
-- Last 5 plans: 04-02 (5min), 04-03 (5min), 04-04 (7min), 06-01 (7min)
-- Trend: Infrastructure plans 5-7min, testing plans 7-9min
+- Last 5 plans: 04-03 (5min), 04-04 (7min), 06-01 (7min), 06-02 (4min)
+- Trend: Infrastructure plans 4-7min, testing plans 7-9min
 
 *Updated after each plan completion*
 
@@ -96,6 +96,10 @@ Recent decisions affecting current work:
 - **06-01:** All *at syscalls must use kernel-space helpers instead of @intFromPtr(resolved.ptr) to prevent EFAULT on relative paths
 - **06-01:** FUTIMESAT compat number 528 on aarch64 (505 already taken by SYS_ACCESS)
 - **06-01:** VFS timestamp infrastructure returns NotSupported for read-only/virtual filesystems (InitRD, DevFS)
+- **06-02:** Use hal.timing.getTscFrequency() + rdtsc() for nanosecond-precision current time with sched.getTickCount() fallback
+- **06-02:** UTIME_NOW (0x3fffffff) and UTIME_OMIT (0x3ffffffe) constants per POSIX spec for timestamp control
+- **06-02:** Reuse existing Timeval type from time.zig instead of duplicating in io.zig
+- **06-02:** AT_SYMLINK_NOFOLLOW returns ENOSYS for MVP (symlink timestamp modification not supported)
 
 ### Pending Todos
 
@@ -161,7 +165,7 @@ Recent decisions affecting current work:
 ## Session Continuity
 
 Last session: 2026-02-08 (plan execution)
-Stopped at: Completed 06-01-PLAN.md (filesystem extras foundation) - Phase 6 in progress
+Stopped at: Completed 06-02-PLAN.md (timestamp control syscalls) - Phase 6 in progress
 Resume file: None
 
 ---
