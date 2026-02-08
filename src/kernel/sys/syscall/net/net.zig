@@ -1242,7 +1242,42 @@ pub fn sys_shutdown(fd: usize, how: usize) SyscallError!usize {
     const how_i32 = std.math.cast(i32, how) orelse return error.EINVAL;
     if (how_i32 < 0 or how_i32 > 2) return error.EINVAL;
 
-    // Check for UNIX socket first
+    // Check for socketpair handle (uses unix_socket_file_ops, not full_file_ops)
+    if (getSocketpairHandle(fd)) |handle| {
+        const pair = handle.pair;
+        const held = pair.lock.acquire();
+        if (handle.endpoint == 0) {
+            if (how_i32 == unix_socket.SHUT_RD or how_i32 == unix_socket.SHUT_RDWR) {
+                pair.read_shutdown_0 = true;
+            }
+            if (how_i32 == unix_socket.SHUT_WR or how_i32 == unix_socket.SHUT_RDWR) {
+                pair.shutdown_0 = true;
+                if (pair.blocked_reader_1) |t| {
+                    pair.reader_1_woken.store(true, .release);
+                    held.release();
+                    sched.unblock(@ptrCast(@alignCast(t)));
+                    return 0;
+                }
+            }
+        } else {
+            if (how_i32 == unix_socket.SHUT_RD or how_i32 == unix_socket.SHUT_RDWR) {
+                pair.read_shutdown_1 = true;
+            }
+            if (how_i32 == unix_socket.SHUT_WR or how_i32 == unix_socket.SHUT_RDWR) {
+                pair.shutdown_1 = true;
+                if (pair.blocked_reader_0) |t| {
+                    pair.reader_0_woken.store(true, .release);
+                    held.release();
+                    sched.unblock(@ptrCast(@alignCast(t)));
+                    return 0;
+                }
+            }
+        }
+        held.release();
+        return 0;
+    }
+
+    // Check for UNIX socket (full socket from socket() + connect())
     if (getUnixSocketFullContext(fd)) |unix_ctx| {
         const sock = unix_socket.getSocketByIdx(unix_ctx.data.socket_idx) orelse {
             return error.EBADF;
@@ -1596,6 +1631,16 @@ fn getUnixSocketFullContext(fd_num: usize) ?struct { fd: *fd_mod.FileDescriptor,
     return .{ .fd = fd, .data = data };
 }
 
+/// Get socketpair handle from FD number (socketpair FDs use unix_socket_file_ops)
+fn getSocketpairHandle(fd_num: usize) ?*unix_socket.UnixSocketHandle {
+    const table = base.getGlobalFdTable();
+    const fd_u32 = std.math.cast(u32, fd_num) orelse return null;
+    const fd = table.get(fd_u32) orelse return null;
+    if (fd.ops != &unix_socket_file_ops) return null;
+    const data_ptr = fd.private_data orelse return null;
+    return @ptrCast(@alignCast(data_ptr));
+}
+
 /// Check if FD is a full UNIX socket
 fn isUnixSocketFullFd(fd_num: usize) bool {
     const table = base.getGlobalFdTable();
@@ -1737,8 +1782,8 @@ fn unixSocketRead(fd: *fd_mod.FileDescriptor, buf: []u8) isize {
             return @intCast(bytes_read);
         }
 
-        // No data - check if peer is closed
-        if (pair.isPeerClosed(handle.endpoint)) {
+        // No data - check if peer is closed or our read side is shut down
+        if (pair.isPeerClosed(handle.endpoint) or pair.isReadShutdown(handle.endpoint)) {
             held.release();
             return 0; // EOF
         }

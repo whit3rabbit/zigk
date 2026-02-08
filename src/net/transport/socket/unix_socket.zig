@@ -170,9 +170,13 @@ pub const UnixSocketPair = struct {
     reader_0_woken: std.atomic.Value(bool),
     reader_1_woken: std.atomic.Value(bool),
 
-    /// Shutdown flags
-    shutdown_0: bool, // Endpoint 0 is shut down
-    shutdown_1: bool, // Endpoint 1 is shut down
+    /// Write shutdown flags (signals EOF to peer's reads)
+    shutdown_0: bool, // Endpoint 0 write side shut down
+    shutdown_1: bool, // Endpoint 1 write side shut down
+
+    /// Read shutdown flags (local read returns EOF immediately)
+    read_shutdown_0: bool, // Endpoint 0 read side shut down
+    read_shutdown_1: bool, // Endpoint 1 read side shut down
 
     /// Credentials of endpoint 0 (connecting client) - peer of endpoint 1
     peer_cred_0_pid: u32,
@@ -216,53 +220,21 @@ pub const UnixSocketPair = struct {
 
     const Self = @This();
 
-    pub fn init(sock_type: i32) Self {
-        return Self{
-            // SECURITY: Zero-initialize buffers to prevent kernel memory leaks.
-            // In ReleaseFast builds, `undefined` would retain heap/stack garbage that could
-            // leak to userspace via read() if data_len is corrupted or across socket
-            // pair reallocations.
-            .buffer_0_to_1 = [_]u8{0} ** UNIX_SOCKET_BUF_SIZE,
-            .read_pos_0_to_1 = 0,
-            .write_pos_0_to_1 = 0,
-            .data_len_0_to_1 = 0,
-            .buffer_1_to_0 = [_]u8{0} ** UNIX_SOCKET_BUF_SIZE,
-            .read_pos_1_to_0 = 0,
-            .write_pos_1_to_0 = 0,
-            .data_len_1_to_0 = 0,
-            .sock_type = sock_type,
-            .refcount = 2, // Both endpoints hold a reference
-            .lock = .{},
-            .blocked_reader_0 = null,
-            .blocked_reader_1 = null,
-            .reader_0_woken = std.atomic.Value(bool).init(false),
-            .reader_1_woken = std.atomic.Value(bool).init(false),
-            .shutdown_0 = false,
-            .shutdown_1 = false,
-            .peer_cred_0_pid = 0,
-            .peer_cred_0_uid = 0,
-            .peer_cred_0_gid = 0,
-            .peer_cred_1_pid = 0,
-            .peer_cred_1_uid = 0,
-            .peer_cred_1_gid = 0,
-            .allocated = true,
-            .ancillary_0_to_1 = [_]PendingAncillary{PendingAncillary.init()} ** MAX_PENDING_ANCILLARY,
-            .ancillary_0_to_1_count = 0,
-            .ancillary_1_to_0 = [_]PendingAncillary{PendingAncillary.init()} ** MAX_PENDING_ANCILLARY,
-            .ancillary_1_to_0_count = 0,
-            .credentials_0_to_1 = [_]PendingCredentials{PendingCredentials.init()} ** MAX_PENDING_ANCILLARY,
-            .credentials_0_to_1_count = 0,
-            .credentials_1_to_0 = [_]PendingCredentials{PendingCredentials.init()} ** MAX_PENDING_ANCILLARY,
-            .credentials_1_to_0_count = 0,
-            .msg_ring_0_to_1 = [_]MessageDescriptor{MessageDescriptor.init()} ** MAX_DGRAM_MESSAGES,
-            .msg_head_0_to_1 = 0,
-            .msg_tail_0_to_1 = 0,
-            .msg_count_0_to_1 = 0,
-            .msg_ring_1_to_0 = [_]MessageDescriptor{MessageDescriptor.init()} ** MAX_DGRAM_MESSAGES,
-            .msg_head_1_to_0 = 0,
-            .msg_tail_1_to_0 = 0,
-            .msg_count_1_to_0 = 0,
-        };
+    /// Initialize a socket pair in place to avoid 11KB stack allocation.
+    /// UnixSocketPair is ~11KB; returning by value overflows the 64KB kernel
+    /// stack on aarch64 when called from the syscall path.
+    pub fn initInPlace(self: *Self, sock_type: i32) void {
+        // SECURITY: Zero the entire struct first to prevent kernel memory leaks.
+        // In ReleaseFast builds, `undefined` would retain heap/stack garbage that
+        // could leak to userspace via read() if data_len is corrupted or across
+        // socket pair reallocations.
+        const ptr: [*]u8 = @ptrCast(self);
+        @memset(ptr[0..@sizeOf(Self)], 0);
+
+        // Set non-zero fields
+        self.sock_type = sock_type;
+        self.refcount = 2; // Both endpoints hold a reference
+        self.allocated = true;
     }
 
     /// Write data from endpoint to the peer's read buffer
@@ -323,12 +295,21 @@ pub const UnixSocketPair = struct {
         }
     }
 
-    /// Check if the peer endpoint is closed
+    /// Check if the peer endpoint's write side is shut down (EOF for our reads)
     pub fn isPeerClosed(self: *const Self, endpoint: u1) bool {
         if (endpoint == 0) {
             return self.shutdown_1;
         } else {
             return self.shutdown_0;
+        }
+    }
+
+    /// Check if our own read side is shut down (SHUT_RD or SHUT_RDWR)
+    pub fn isReadShutdown(self: *const Self, endpoint: u1) bool {
+        if (endpoint == 0) {
+            return self.read_shutdown_0;
+        } else {
+            return self.read_shutdown_1;
         }
     }
 
@@ -490,7 +471,7 @@ pub fn allocatePair(sock_type: i32) ?*UnixSocketPair {
 
     for (&unix_socket_pairs) |*pair| {
         if (!pair.allocated) {
-            pair.* = UnixSocketPair.init(sock_type);
+            pair.initInPlace(sock_type);
             return pair;
         }
     }
