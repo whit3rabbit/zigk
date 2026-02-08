@@ -382,6 +382,12 @@ pub fn initNetwork() void {
     console.print("\n");
     console.info("Initializing network subsystem...", .{});
 
+    // Initialize Socket Subsystem FIRST (before PCI/NIC).
+    // Socket syscalls need lock initialization even without a network stack.
+    // This MUST happen before any early return, otherwise IrqLock panics.
+    net.transport.initSyscallOnly(heap.allocator());
+    console.debug("[NETSTACK] Socket subsystem initialized (syscall-only mode)", .{});
+
     // 1. Get RSDP for PCI ECAM
     if (rsdp_address == 0) {
         console.warn("RSDP not found, network disabled.", .{});
@@ -432,13 +438,7 @@ pub fn initNetwork() void {
         }
     }
 
-    // 4. Initialize Socket Subsystem (Syscall Support)
-    // Even without in-kernel network stack, socket syscalls need lock initialization.
-    // This enables socket tests and userspace network drivers.
-    net.transport.initSyscallOnly(heap.allocator());
-    console.debug("[NETSTACK] Socket subsystem initialized (syscall-only mode)", .{});
-
-    // 5. Setup Network Driver if Available
+    // 4. Setup Network Driver if Available
     if (nic_driver_opt) |nic_driver| {
         // [NETSTACK MIGRATION]
         // Disable in-kernel network stack initialization.
