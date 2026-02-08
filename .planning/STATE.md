@@ -10,18 +10,18 @@ See: .planning/PROJECT.md (updated 2026-02-06)
 ## Current Position
 
 Phase: 8 of 9 (Process Control)
-Plan: 1 of 2 in current phase
-Status: In progress
-Last activity: 2026-02-08 - Completed 08-01-PLAN.md (prctl and CPU affinity syscalls)
+Plan: 2 of 2 in current phase (PHASE COMPLETE)
+Status: Phase 8 complete
+Last activity: 2026-02-08 - Completed 08-02-PLAN.md (userspace wrappers and integration tests)
 
-Progress: [████████░░] 89%
+Progress: [█████████░] 90%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 25
-- Average duration: 7.5 min
-- Total execution time: 3.09 hours
+- Total plans completed: 26
+- Average duration: 7.7 min
+- Total execution time: 3.32 hours
 
 **By Phase:**
 
@@ -34,11 +34,11 @@ Progress: [████████░░] 89%
 | 5 | 3 | 17 min | 5.7 min |
 | 6 | 3 | 56 min | 18.7 min |
 | 7 | 2 | 31 min | 15.5 min |
-| 8 | 1 | 5 min | 5 min |
+| 8 | 2 | 19 min | 9.5 min |
 
 **Recent Trend:**
-- Last 5 plans: 05-03 (8min), 06-03 (45min), 07-01 (5.5min), 07-02 (25min), 08-01 (5min)
-- Trend: 08-01 returned to fast pace, simple syscall wrappers with no architectural complexity
+- Last 5 plans: 06-03 (45min), 07-01 (5.5min), 07-02 (25min), 08-01 (5min), 08-02 (14min)
+- Trend: Phase 8 complete - userspace wrappers and tests for process control syscalls
 
 *Updated after each plan completion*
 
@@ -124,12 +124,16 @@ Recent decisions affecting current work:
 - **08-01:** Thread name stored in existing thread.name[32] field, implementing Linux 15 chars + null semantics
 - **08-01:** Single-CPU kernel validates CPU 0 in affinity mask, returns EINVAL if missing (no state stored)
 - **08-01:** sys_sched_getaffinity returns 128-byte buffer (1024 CPUs) with CPU 0 set
+- **08-02:** Userspace prctl and CPU affinity wrappers complete (9/10 tests passing on both architectures)
+- **08-02:** SFS-dependent tests moved to end of test suite to prevent cumulative deadlock from blocking other tests
+- **08-02:** Kernel copyStringFromUser bug discovered - rejects stack buffers with EFAULT but accepts string literals (needs investigation)
 
 ### Pending Todos
 
 **Kernel Bugs Exposed by Tests:**
 - sys_setregid permission check - after setresgid(1000,1000,1000), should not allow setregid(2000,2000)
 - SFS FileOps.chown - fchown not implemented for SFS filesystem
+- copyStringFromUser validation - rejects stack-allocated buffers with EFAULT but accepts string literals (user memory validation false positive)
 
 **Event FD Test Infrastructure Issues:**
 - 4 event FD tests fail (write and read) with no syscall trace - test code issue, not kernel bug
@@ -143,6 +147,16 @@ Recent decisions affecting current work:
 - 6 tests skip (expected -- SFS lacks link, symlink, and timestamp support)
 
 ### Blockers/Concerns
+
+**Phase 8 Complete (Process Control):**
+- ✅ Kernel syscalls complete (08-01) - sys_prctl, sys_sched_setaffinity, sys_sched_getaffinity
+- ✅ UAPI constants complete (08-01) - PR_SET_NAME, PR_GET_NAME
+- ✅ Userspace wrappers complete (08-02) - prctl, sched_setaffinity, sched_getaffinity
+- ✅ Integration tests complete (08-02) - 10 tests, 9 passing on both architectures
+- ✅ Thread naming works correctly (15 char + null truncation)
+- ✅ CPU affinity validation works (single-CPU kernel requires CPU 0)
+- ⚠️ 1 test skips due to kernel bug (copyStringFromUser rejects stack buffers)
+- Test count: 294 total (284 + 10 new), 262-264 passing depending on architecture
 
 **Phase 7 Complete (Socket Extras):**
 - ✅ IrqLock initialization bug FIXED (07-01) - moved initSyscallOnly before early returns
@@ -223,8 +237,8 @@ Recent decisions affecting current work:
 ## Session Continuity
 
 Last session: 2026-02-08 (phase execution)
-Stopped at: Completed 08-01-PLAN.md (prctl and CPU affinity syscalls)
-Resume file: Next: 08-02-PLAN.md (userspace wrappers and integration tests)
+Stopped at: Completed 08-02-PLAN.md (userspace wrappers and integration tests)
+Resume file: Phase 8 complete. Next: Phase 9 planning or final integration
 
 ---
 *State initialized: 2026-02-06*
