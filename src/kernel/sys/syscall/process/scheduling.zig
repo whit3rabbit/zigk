@@ -1293,3 +1293,12 @@ pub fn sys_epoll_wait(epfd: usize, events_ptr: usize, maxevents: usize, timeout:
     // Timeout or immediate return with no events
     return 0;
 }
+
+// =============================================================================
+// Process Control (prctl, CPU affinity) - separate module for organization
+// =============================================================================
+
+const control = @import("control.zig");
+pub const sys_prctl = control.sys_prctl;
+pub const sys_sched_setaffinity = control.sys_sched_setaffinity;
+pub const sys_sched_getaffinity = control.sys_sched_getaffinity;
