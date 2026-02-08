@@ -439,3 +439,51 @@ pub fn uname(buf: *Utsname) SyscallError!void {
     const ret = primitive.syscall1(syscalls.SYS_UNAME, @intFromPtr(buf));
     if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
 }
+
+// =============================================================================
+// Process Control (prctl, CPU affinity)
+// =============================================================================
+
+/// prctl option constants
+pub const PR_SET_NAME: usize = 15;
+pub const PR_GET_NAME: usize = 16;
+
+/// Perform process control operations
+/// option: Operation to perform (PR_SET_NAME, PR_GET_NAME, etc)
+/// arg2-arg5: Operation-specific arguments
+/// Returns: Operation-specific value or 0 on success
+pub fn prctl(option: usize, arg2: usize, arg3: usize, arg4: usize, arg5: usize) SyscallError!usize {
+    const ret = primitive.syscall5(syscalls.SYS_PRCTL, option, arg2, arg3, arg4, arg5);
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return ret;
+}
+
+/// Set CPU affinity mask for a process/thread
+/// pid: Process/thread ID (0 = current thread)
+/// cpusetsize: Size of mask buffer in bytes
+/// mask: Pointer to CPU set bitmask
+pub fn sched_setaffinity(pid: i32, cpusetsize: usize, mask: [*]const u8) SyscallError!void {
+    const ret = primitive.syscall3(
+        syscalls.SYS_SCHED_SETAFFINITY,
+        @as(usize, @as(u32, @bitCast(pid))),
+        cpusetsize,
+        @intFromPtr(mask),
+    );
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Get CPU affinity mask for a process/thread
+/// pid: Process/thread ID (0 = current thread)
+/// cpusetsize: Size of mask buffer in bytes
+/// mask: Pointer to CPU set bitmask (output)
+/// Returns: Number of bytes written to mask
+pub fn sched_getaffinity(pid: i32, cpusetsize: usize, mask: [*]u8) SyscallError!usize {
+    const ret = primitive.syscall3(
+        syscalls.SYS_SCHED_GETAFFINITY,
+        @as(usize, @as(u32, @bitCast(pid))),
+        cpusetsize,
+        @intFromPtr(mask),
+    );
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return ret;
+}

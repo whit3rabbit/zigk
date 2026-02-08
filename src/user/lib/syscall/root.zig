@@ -225,6 +225,11 @@ pub const alarm = process.alarm;
 pub const umask = process.umask;
 pub const Utsname = process.Utsname;
 pub const uname = process.uname;
+pub const prctl = process.prctl;
+pub const PR_SET_NAME = process.PR_SET_NAME;
+pub const PR_GET_NAME = process.PR_GET_NAME;
+pub const sched_setaffinity = process.sched_setaffinity;
+pub const sched_getaffinity = process.sched_getaffinity;
 
 // Re-export Signal
 pub const kill = signal.kill;
