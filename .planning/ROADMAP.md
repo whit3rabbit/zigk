@@ -105,10 +105,12 @@ Plans:
   3. Programs can use preadv2/pwritev2 with RWF_NOWAIT and RWF_HIPRI flags for advanced I/O control
   4. Programs can copy file data to sockets via sendfile without userspace buffer copies
   5. Database workloads (SQLite, Postgres patterns) show no errors when using vectored I/O APIs
-**Plans**: TBD
+**Plans**: 3 plans
 
 Plans:
-- [ ] 05-01: TBD
+- [ ] 05-01-PLAN.md -- Core vectored/positional I/O: sys_readv, sys_pwrite64, sys_preadv, sys_pwritev + root.zig exports
+- [ ] 05-02-PLAN.md -- v2 variants + sendfile: SYS_PREADV2/PWRITEV2 numbers, sys_preadv2, sys_pwritev2, sys_sendfile
+- [ ] 05-03-PLAN.md -- Userspace wrappers + 12 integration tests covering all VIO requirements
 
 ### Phase 6: Filesystem Extras
 **Goal**: Fix *at syscall double-copy bugs and implement timestamp manipulation for filesystem completeness
@@ -179,7 +181,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9
 | 2. Credentials & Ownership | 4/4 | Complete | 2026-02-06 |
 | 3. I/O Multiplexing | 4/4 | Complete | 2026-02-07 |
 | 4. Event Notification FDs | 4/4 | Complete | 2026-02-07 |
-| 5. Vectored & Positional I/O | 0/TBD | Not started | - |
+| 5. Vectored & Positional I/O | 0/3 | Planning complete | - |
 | 6. Filesystem Extras | 3/3 | Complete | 2026-02-07 |
 | 7. Socket Extras | 0/TBD | Not started | - |
 | 8. Process Control | 0/TBD | Not started | - |
