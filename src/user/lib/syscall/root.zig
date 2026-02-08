@@ -136,6 +136,28 @@ pub const EPOLLONESHOT = io.EPOLLONESHOT;
 // Re-export select
 pub const select = io.select;
 
+// Re-export event FDs (eventfd, timerfd, signalfd)
+pub const eventfd = io.eventfd;
+pub const eventfd2 = io.eventfd2;
+pub const EFD_CLOEXEC = io.EFD_CLOEXEC;
+pub const EFD_NONBLOCK = io.EFD_NONBLOCK;
+pub const EFD_SEMAPHORE = io.EFD_SEMAPHORE;
+pub const timerfd_create = io.timerfd_create;
+pub const timerfd_settime = io.timerfd_settime;
+pub const timerfd_gettime = io.timerfd_gettime;
+pub const TFD_CLOEXEC = io.TFD_CLOEXEC;
+pub const TFD_NONBLOCK = io.TFD_NONBLOCK;
+pub const TFD_TIMER_ABSTIME = io.TFD_TIMER_ABSTIME;
+pub const CLOCK_REALTIME = io.CLOCK_REALTIME;
+pub const CLOCK_MONOTONIC = io.CLOCK_MONOTONIC;
+pub const TimeSpec = io.TimeSpec;
+pub const ITimerSpec = io.ITimerSpec;
+pub const signalfd = io.signalfd;
+pub const signalfd4 = io.signalfd4;
+pub const SFD_CLOEXEC = io.SFD_CLOEXEC;
+pub const SFD_NONBLOCK = io.SFD_NONBLOCK;
+pub const SignalFdSigInfo = io.SignalFdSigInfo;
+
 // Re-export Process
 pub const sched_yield = process.sched_yield;
 pub const exit = process.exit;
