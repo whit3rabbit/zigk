@@ -162,7 +162,10 @@ Recent decisions affecting current work:
 - ✅ v2 variants and sendfile complete (05-02) - sys_preadv2, sys_pwritev2, sys_sendfile with RWF_* flags
 - ✅ Integration tests complete (05-03) - 12 tests, userspace wrappers, RWF_* constants
 - Test count: 272 total (260 + 12 new vectored_io tests)
-- Passing tests: 2 confirmed (readv basic, readv empty vec), 10 functional but SFS-limited
+- 9/12 tests pass (all non-SFS: readv basic/empty, preadv, preadv2 flags-zero/neg1/hipri, sendfile basic/offset/invalid-fd)
+- 3/12 tests blocked by SFS deadlock (writev/readv roundtrip, pwritev, pwritev2) -- not kernel bugs
+- Tests reordered: non-SFS first to prevent deadlock from blocking other tests
+- Overall: 237 passing, 4 failing (pre-existing event_fds), 21 skipped, 3 SFS-blocked (timeout)
 
 **Phase 6 Complete (Filesystem Extras):**
 - ✅ Kernel syscall implementations complete (06-01) - readlinkat, linkat, symlinkat with kernel-space helpers
