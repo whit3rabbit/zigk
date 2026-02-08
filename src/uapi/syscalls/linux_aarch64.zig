@@ -347,6 +347,8 @@ pub const SYS_TIMERFD_CREATE: usize = 85;
 pub const SYS_TIMERFD_SETTIME: usize = 86;
 /// Get timerfd state
 pub const SYS_TIMERFD_GETTIME: usize = 87;
+/// Set file timestamps with nanosecond precision
+pub const SYS_UTIMENSAT: usize = 88;
 
 // ============================================================================
 // Scheduling
@@ -539,6 +541,8 @@ pub const SYS_ALARM: usize = 527;
 
 /// Set architecture-specific thread state (x86_64 only, use prctl on aarch64)
 pub const SYS_ARCH_PRCTL: usize = 525; // zk compat: emulated via prctl where possible
+/// Set file timestamps (legacy, microsecond - zk compat)
+pub const SYS_FUTIMESAT: usize = 528;
 
 // ============================================================================
 // Additional syscalls implemented in zk

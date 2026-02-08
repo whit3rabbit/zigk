@@ -93,6 +93,10 @@ pub const FileSystem = struct {
 
     /// Read the target of a symbolic link - optional
     readlink: ?*const fn (ctx: ?*anyopaque, path: []const u8, buf: []u8) Error!usize = null,
+
+    /// Set file timestamps - optional, null for read-only filesystems
+    /// atime/mtime of -1 means "leave unchanged" (UTIME_OMIT equivalent at VFS level)
+    set_timestamps: ?*const fn (ctx: ?*anyopaque, path: []const u8, atime_sec: i64, atime_nsec: i64, mtime_sec: i64, mtime_nsec: i64) Error!void = null,
 };
 
 /// Mount Point Structure
@@ -535,6 +539,55 @@ pub const Vfs = struct {
     /// but maintained as separate entry point for API correctness (lchown).
     pub fn chownNoFollow(path: []const u8, uid: ?u32, gid: ?u32) Error!void {
         return chown(path, uid, gid);
+    }
+
+    /// Set file timestamps with nanosecond precision
+    /// atime_sec/mtime_sec of -1 means "leave unchanged"
+    pub fn setTimestamps(path: []const u8, atime_sec: i64, atime_nsec: i64, mtime_sec: i64, mtime_nsec: i64) Error!void {
+        if (path.len == 0) return error.InvalidPath;
+        if (path[0] != '/') return error.InvalidPath;
+
+        const held = lock.acquire();
+        defer held.release();
+
+        // Find the longest matching mount point
+        var best_match: ?*const MountPoint = null;
+        var best_len: usize = 0;
+
+        for (&mounts) |*m| {
+            if (m.*) |*mount_point| {
+                if (std.mem.startsWith(u8, path, mount_point.path)) {
+                    const mp_len = mount_point.path.len;
+                    var match = false;
+                    if (path.len == mp_len) {
+                        match = true;
+                    } else if (path.len > mp_len) {
+                        if (mp_len == 1 and mount_point.path[0] == '/') {
+                            match = true;
+                        } else if (path[mp_len] == '/') {
+                            match = true;
+                        }
+                    }
+                    if (match and mp_len > best_len) {
+                        best_match = mount_point;
+                        best_len = mp_len;
+                    }
+                }
+            }
+        }
+
+        if (best_match) |mp| {
+            const set_ts_fn = mp.fs.set_timestamps orelse return error.NotSupported;
+
+            var rel_path = path[best_len..];
+            if (rel_path.len == 0) {
+                rel_path = "/";
+            }
+
+            return set_ts_fn(mp.fs.context, rel_path, atime_sec, atime_nsec, mtime_sec, mtime_nsec);
+        }
+
+        return error.NotFound;
     }
 
     /// Rename a file or directory

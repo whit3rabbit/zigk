@@ -332,6 +332,8 @@ pub const SYS_MKDIRAT: usize = 258;
 pub const SYS_MKNODAT: usize = 259;
 /// Change ownership relative to directory FD
 pub const SYS_FCHOWNAT: usize = 260;
+/// Set file timestamps (legacy, microsecond precision)
+pub const SYS_FUTIMESAT: usize = 261;
 /// Get file status relative to directory FD
 pub const SYS_NEWFSTATAT: usize = 262;
 /// Delete file/directory relative to directory FD
@@ -362,6 +364,8 @@ pub const SYS_TEE: usize = 276;
 pub const SYS_SYNC_FILE_RANGE: usize = 277;
 /// Splice user pages into pipe
 pub const SYS_VMSPLICE: usize = 278;
+/// Set file timestamps with nanosecond precision
+pub const SYS_UTIMENSAT: usize = 280;
 /// Wait for I/O events with signal mask
 pub const SYS_EPOLL_PWAIT: usize = 281;
 /// Create file descriptor for signal handling

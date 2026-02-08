@@ -22,6 +22,14 @@ pub const FileMeta = struct {
     ino: u64 = 0,
     /// Size in bytes (optional)
     size: u64 = 0,
+    /// Access time (seconds since epoch)
+    atime: i64 = 0,
+    /// Access time nanoseconds (0-999999999)
+    atime_nsec: i64 = 0,
+    /// Modification time (seconds since epoch)
+    mtime: i64 = 0,
+    /// Modification time nanoseconds (0-999999999)
+    mtime_nsec: i64 = 0,
 };
 
 // File type masks
