@@ -14,6 +14,7 @@ const at_ops_tests = @import("tests/syscall/at_ops.zig");
 const io_mux_tests = @import("tests/syscall/io_mux.zig");
 const event_fds_tests = @import("tests/syscall/event_fds.zig");
 const fs_extras_tests = @import("tests/syscall/fs_extras.zig");
+const vectored_io_tests = @import("tests/syscall/vectored_io.zig");
 const fs_tests = @import("tests/fs/basic.zig");
 const fs_error_tests = @import("tests/fs/errors.zig");
 const regression_tests = @import("tests/regression/sfs_issues.zig");
@@ -397,6 +398,20 @@ export fn main(argc: i32, argv: [*][*:0]u8) i32 {
     runner.runTest("fs_extras: utimensat invalid nsec", fs_extras_tests.testUtimensatInvalidNsec);
     runner.runTest("fs_extras: futimesat basic", fs_extras_tests.testFutimesatBasic);
     runner.runTest("fs_extras: futimesat specific time", fs_extras_tests.testFutimesatSpecificTime);
+
+    // Phase 5: Vectored & Positional I/O tests
+    runner.runTest("vectored_io: readv basic", vectored_io_tests.testReadvBasic);
+    runner.runTest("vectored_io: readv empty vec", vectored_io_tests.testReadvEmptyVec);
+    runner.runTest("vectored_io: writev then readv roundtrip", vectored_io_tests.testWritevReadv);
+    runner.runTest("vectored_io: preadv at offset", vectored_io_tests.testPreadvBasic);
+    runner.runTest("vectored_io: pwritev at offset", vectored_io_tests.testPwritevBasic);
+    runner.runTest("vectored_io: preadv2 flags zero", vectored_io_tests.testPreadv2FlagsZero);
+    runner.runTest("vectored_io: pwritev2 flags zero", vectored_io_tests.testPwritev2FlagsZero);
+    runner.runTest("vectored_io: preadv2 offset neg1", vectored_io_tests.testPreadv2OffsetNeg1);
+    runner.runTest("vectored_io: preadv2 hipri flag", vectored_io_tests.testPreadv2HipriFlag);
+    runner.runTest("vectored_io: sendfile basic", vectored_io_tests.testSendfileBasic);
+    runner.runTest("vectored_io: sendfile with offset", vectored_io_tests.testSendfileWithOffset);
+    runner.runTest("vectored_io: sendfile invalid fd", vectored_io_tests.testSendfileInvalidFd);
 
     // Stress tests
     runner.runTest("stress: write 10MB file", stress_tests.testWrite10MbFile);
