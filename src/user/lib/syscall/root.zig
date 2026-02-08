@@ -265,6 +265,20 @@ pub const getsockopt = net.getsockopt;
 pub const parseIp = net.parseIp;
 pub const SOL_SOCKET = net.SOL_SOCKET;
 pub const SO_REUSEADDR = net.SO_REUSEADDR;
+pub const AF_UNIX = net.AF_UNIX;
+pub const AF_LOCAL = net.AF_LOCAL;
+pub const SOCK_NONBLOCK = net.SOCK_NONBLOCK;
+pub const SOCK_CLOEXEC = net.SOCK_CLOEXEC;
+pub const SHUT_RD = net.SHUT_RD;
+pub const SHUT_WR = net.SHUT_WR;
+pub const SHUT_RDWR = net.SHUT_RDWR;
+pub const SCM_RIGHTS = net.SCM_RIGHTS;
+pub const MsgHdr = net.MsgHdr;
+pub const CmsgHdr = net.CmsgHdr;
+pub const MsgIovec = net.MsgIovec;
+pub const socketpair = net.socketpair;
+pub const sendmsg = net.sendmsg;
+pub const recvmsg = net.recvmsg;
 
 // Re-export Time
 pub const Timespec = time.Timespec;

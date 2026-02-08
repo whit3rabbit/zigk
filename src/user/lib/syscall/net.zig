@@ -12,6 +12,8 @@ pub const SyscallError = primitive.SyscallError;
 /// Address family constants
 pub const AF_INET: i32 = 2;
 pub const AF_INET6: i32 = 10;
+pub const AF_UNIX: i32 = 1;
+pub const AF_LOCAL: i32 = 1;  // Alias for AF_UNIX
 
 /// Socket option levels
 pub const SOL_SOCKET: i32 = 1;
@@ -27,9 +29,20 @@ pub const IPV6_MULTICAST_HOPS: i32 = 18;
 /// Socket type constants
 pub const SOCK_STREAM: i32 = 1; // TCP
 pub const SOCK_DGRAM: i32 = 2; // UDP
+pub const SOCK_NONBLOCK: i32 = 0x800;
+pub const SOCK_CLOEXEC: i32 = 0x80000;
+
+/// Socket shutdown constants
+pub const SHUT_RD: i32 = 0;
+pub const SHUT_WR: i32 = 1;
+pub const SHUT_RDWR: i32 = 2;
 
 /// Socket options
 pub const SO_REUSEADDR: i32 = 2;
+pub const SOL_SOCKET_LEVEL: i32 = 1; // Keep existing SOL_SOCKET as alias
+
+/// Ancillary data constants
+pub const SCM_RIGHTS: i32 = 1;
 
 /// Socket address structure (IPv4)
 /// Compatible with Linux sockaddr_in
@@ -110,6 +123,32 @@ pub const Ipv6Mreq = extern struct {
             @compileError("Ipv6Mreq must be 20 bytes");
         }
     }
+};
+
+/// Message header for sendmsg/recvmsg (Linux-compatible)
+pub const MsgHdr = extern struct {
+    msg_name: usize,        // Optional address (sendto/recvfrom dest/src)
+    msg_namelen: u32,       // Size of address
+    _pad0: u32 = 0,         // Padding for alignment on 64-bit
+    msg_iov: usize,         // Scatter/gather array (pointer to Iovec array)
+    msg_iovlen: usize,      // Number of iovecs
+    msg_control: usize,     // Ancillary data (pointer to cmsghdr)
+    msg_controllen: usize,  // Ancillary data buffer length
+    msg_flags: i32,         // Flags on received message
+    _pad1: u32 = 0,
+};
+
+/// Control message header for ancillary data
+pub const CmsgHdr = extern struct {
+    cmsg_len: usize,   // Data byte count including header
+    cmsg_level: i32,    // Originating protocol
+    cmsg_type: i32,     // Protocol-specific type
+};
+
+/// I/O vector for scatter-gather operations
+pub const MsgIovec = extern struct {
+    iov_base: usize,   // Starting address
+    iov_len: usize,    // Number of bytes
 };
 
 /// Create a socket
@@ -349,6 +388,49 @@ pub fn parseIp(str: []const u8) ?u32 {
     if (dot_count != 3) return null;
     ip = (ip << 8) | octet;
     return ip;
+}
+
+// =============================================================================
+// Socket Extras (socketpair, sendmsg, recvmsg)
+// =============================================================================
+
+/// Create a pair of connected sockets (AF_UNIX only)
+/// Returns two file descriptors in sv[0] and sv[1]
+pub fn socketpair(domain: i32, sock_type: i32, protocol: i32, sv: *[2]i32) SyscallError!void {
+    const ret = primitive.syscall4(
+        syscalls.SYS_SOCKETPAIR,
+        @bitCast(@as(isize, domain)),
+        @bitCast(@as(isize, sock_type)),
+        @bitCast(@as(isize, protocol)),
+        @intFromPtr(sv),
+    );
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Send a message on a socket (scatter-gather + ancillary data)
+/// Returns number of bytes sent
+pub fn sendmsg(fd: i32, msg: *const MsgHdr, flags: i32) SyscallError!usize {
+    const ret = primitive.syscall3(
+        syscalls.SYS_SENDMSG,
+        @bitCast(@as(isize, fd)),
+        @intFromPtr(msg),
+        @bitCast(@as(isize, flags)),
+    );
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return ret;
+}
+
+/// Receive a message from a socket (scatter-gather + ancillary data)
+/// Returns number of bytes received
+pub fn recvmsg(fd: i32, msg: *MsgHdr, flags: i32) SyscallError!usize {
+    const ret = primitive.syscall3(
+        syscalls.SYS_RECVMSG,
+        @bitCast(@as(isize, fd)),
+        @intFromPtr(msg),
+        @bitCast(@as(isize, flags)),
+    );
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return ret;
 }
 
 // =============================================================================
