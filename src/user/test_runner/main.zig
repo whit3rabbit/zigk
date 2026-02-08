@@ -292,6 +292,20 @@ export fn main(argc: i32, argv: [*][*:0]u8) i32 {
     runner.runTest("socket: setsockopt SO_REUSEADDR", socket_tests.testSetSockoptReuseAddr);
     runner.runTest("socket: connect to unbound port", socket_tests.testConnectToUnboundPort);
 
+    // Phase 7: Socket Extras
+    runner.runTest("socket: socketpair stream", socket_tests.testSocketpairStream);
+    runner.runTest("socket: socketpair bidirectional", socket_tests.testSocketpairBidirectional);
+    runner.runTest("socket: socketpair invalid domain", socket_tests.testSocketpairInvalidDomain);
+    runner.runTest("socket: shutdown write", socket_tests.testShutdownWrite);
+    runner.runTest("socket: shutdown rdwr", socket_tests.testShutdownRdwr);
+    runner.runTest("socket: sendto/recvfrom udp", socket_tests.testSendtoRecvfromUdp);
+    runner.runTest("socket: sendto connected", socket_tests.testSendtoConnectedSocket);
+    runner.runTest("socket: sendmsg/recvmsg basic", socket_tests.testSendmsgRecvmsgBasic);
+    runner.runTest("socket: sendmsg scatter-gather", socket_tests.testSendmsgScatterGather);
+    runner.runTest("socket: sendmsg invalid fd", socket_tests.testSendmsgInvalidFd);
+    runner.runTest("socket: shutdown non-socket", socket_tests.testShutdownNonSocket);
+    runner.runTest("socket: socketpair dgram", socket_tests.testSocketpairDgram);
+
     // FD operations tests
     runner.runTest("fd_ops: dup basic", fd_ops_tests.testDupBasic);
     runner.runTest("fd_ops: dup2 basic", fd_ops_tests.testDup2Basic);
