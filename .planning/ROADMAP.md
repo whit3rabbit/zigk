@@ -111,7 +111,7 @@ Plans:
 - [ ] 05-01: TBD
 
 ### Phase 6: Filesystem Extras
-**Goal**: Implement remaining *at family syscalls and timestamp manipulation for filesystem completeness
+**Goal**: Fix *at syscall double-copy bugs and implement timestamp manipulation for filesystem completeness
 **Depends on**: Phase 5
 **Requirements**: FS-01, FS-02, FS-03, FS-04, FS-05
 **Success Criteria** (what must be TRUE):
@@ -119,10 +119,12 @@ Plans:
   2. Programs can create hard links via linkat and symbolic links via symlinkat with AT_FDCWD and explicit dirfd support
   3. Programs can set file timestamps with nanosecond precision via utimensat (replaces futimesat)
   4. File management tools (tar, rsync patterns) work correctly with *at family syscalls
-**Plans**: TBD
+**Plans**: 3 plans
 
 Plans:
-- [ ] 06-01: TBD
+- [ ] 06-01-PLAN.md -- Fix *at double-copy bugs (linkKernel/symlinkKernel/readlinkKernel helpers) + VFS timestamp infrastructure + syscall numbers
+- [ ] 06-02-PLAN.md -- Implement sys_utimensat + sys_futimesat + userspace wrappers
+- [ ] 06-03-PLAN.md -- Integration tests: 12 tests covering readlinkat, linkat, symlinkat, utimensat, futimesat
 
 ### Phase 7: Socket Extras
 **Goal**: Implement socketpair, shutdown, and sendto/recvfrom/sendmsg/recvmsg for complete BSD socket API coverage
@@ -178,7 +180,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9
 | 3. I/O Multiplexing | 4/4 | Complete | 2026-02-07 |
 | 4. Event Notification FDs | 4/4 | Complete | 2026-02-07 |
 | 5. Vectored & Positional I/O | 0/TBD | Not started | - |
-| 6. Filesystem Extras | 0/TBD | Not started | - |
+| 6. Filesystem Extras | 0/3 | Planned | - |
 | 7. Socket Extras | 0/TBD | Not started | - |
 | 8. Process Control | 0/TBD | Not started | - |
 | 9. SysV IPC | 0/TBD | Not started | - |
