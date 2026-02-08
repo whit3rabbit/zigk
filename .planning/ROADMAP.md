@@ -167,10 +167,12 @@ Plans:
   3. Programs can create semaphore sets via semget, perform atomic operations via semop, and control semaphores via semctl
   4. Programs can create message queues via msgget, send/receive messages via msgsnd/msgrcv, and control queues via msgctl
   5. Legacy applications like Postgres (using SysV shared memory) can run without IPC-related errors
-**Plans**: TBD
+**Plans**: 3 plans
 
 Plans:
-- [ ] 09-01: TBD
+- [ ] 09-01-PLAN.md -- UAPI constants + syscall numbers (both arch) + IPC permission infrastructure + shared memory kernel implementation (shmget, shmat, shmdt, shmctl) + build.zig wiring
+- [ ] 09-02-PLAN.md -- Semaphore kernel implementation (semget, semop, semctl) + message queue kernel implementation (msgget, msgsnd, msgrcv, msgctl)
+- [ ] 09-03-PLAN.md -- Userspace wrappers (all 11 syscalls) + 12 integration tests
 
 ## Progress
 
@@ -187,8 +189,8 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9
 | 6. Filesystem Extras | 3/3 | Complete | 2026-02-07 |
 | 7. Socket Extras | 2/2 | Complete | 2026-02-08 |
 | 8. Process Control | 2/2 | Complete | 2026-02-08 |
-| 9. SysV IPC | 0/TBD | Not started | - |
+| 9. SysV IPC | 0/3 | Planned | - |
 
 ---
 *Roadmap created: 2026-02-06*
-*Last updated: 2026-02-08 (Phase 8 complete)*
+*Last updated: 2026-02-08 (Phase 9 planned)*
