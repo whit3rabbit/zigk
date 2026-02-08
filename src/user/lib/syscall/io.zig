@@ -622,6 +622,32 @@ pub fn fchmodat(dirfd: i32, path: [*:0]const u8, mode: u32, flags: i32) SyscallE
 }
 
 // =============================================================================
+// File Timestamp Syscalls
+// =============================================================================
+
+/// Special tv_nsec values for utimensat
+pub const UTIME_NOW: i64 = (1 << 30) - 1; // 0x3fffffff
+pub const UTIME_OMIT: i64 = (1 << 30) - 2; // 0x3ffffffe
+
+/// Set file timestamps with nanosecond precision relative to directory FD
+/// times: pointer to [2]Timespec (atime, mtime), or null to set both to current time
+/// flags: 0 or AT_SYMLINK_NOFOLLOW (0x100)
+pub fn utimensat(dirfd: i32, path: [*:0]const u8, times: ?*const [2]primitive.uapi.abi.Timespec, flags: i32) SyscallError!void {
+    const times_ptr: usize = if (times) |t| @intFromPtr(t) else 0;
+    const ret = primitive.syscall4(syscalls.SYS_UTIMENSAT, @bitCast(@as(isize, dirfd)), @intFromPtr(path), times_ptr, @bitCast(@as(isize, flags)));
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Set file timestamps with microsecond precision relative to directory FD (legacy)
+/// times: pointer to [2]Timeval (atime, mtime), or null to set both to current time
+/// Note: Uses Timeval from time module
+pub fn futimesat(dirfd: i32, path: [*:0]const u8, times: ?*const [2]@import("time.zig").Timeval) SyscallError!void {
+    const times_ptr: usize = if (times) |t| @intFromPtr(t) else 0;
+    const ret = primitive.syscall3(syscalls.SYS_FUTIMESAT, @bitCast(@as(isize, dirfd)), @intFromPtr(path), times_ptr);
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+// =============================================================================
 // File Descriptor Duplication & Pipes
 // =============================================================================
 
