@@ -19,7 +19,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 5: Vectored & Positional I/O** - readv/preadv/sendfile
 - [x] **Phase 6: Filesystem Extras** - readlinkat, linkat, symlinkat, utimensat
 - [x] **Phase 7: Socket Extras** - socketpair, shutdown, sendto/recvfrom, recvmsg/sendmsg
-- [ ] **Phase 8: Process Control** - prctl, sched affinity
+- [x] **Phase 8: Process Control** - prctl, sched affinity
 - [ ] **Phase 9: SysV IPC** - shared memory, semaphores, message queues
 
 ## Phase Details
@@ -154,8 +154,8 @@ Plans:
 **Plans**: 2 plans
 
 Plans:
-- [ ] 08-01-PLAN.md -- UAPI prctl constants + syscall numbers (both arch) + kernel implementations (sys_prctl, sys_sched_setaffinity, sys_sched_getaffinity)
-- [ ] 08-02-PLAN.md -- Userspace wrappers (prctl, sched_setaffinity, sched_getaffinity) + 10 integration tests
+- [x] 08-01-PLAN.md -- UAPI prctl constants + syscall numbers (both arch) + kernel implementations (sys_prctl, sys_sched_setaffinity, sys_sched_getaffinity)
+- [x] 08-02-PLAN.md -- Userspace wrappers (prctl, sched_setaffinity, sched_getaffinity) + 10 integration tests
 
 ### Phase 9: SysV IPC
 **Goal**: Implement legacy SysV IPC shared memory, semaphores, and message queues for Postgres/Redis compatibility
@@ -186,9 +186,9 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9
 | 5. Vectored & Positional I/O | 3/3 | Complete | 2026-02-08 |
 | 6. Filesystem Extras | 3/3 | Complete | 2026-02-07 |
 | 7. Socket Extras | 2/2 | Complete | 2026-02-08 |
-| 8. Process Control | 0/2 | Planned | - |
+| 8. Process Control | 2/2 | Complete | 2026-02-08 |
 | 9. SysV IPC | 0/TBD | Not started | - |
 
 ---
 *Roadmap created: 2026-02-06*
-*Last updated: 2026-02-08 (Phase 8 planned)*
+*Last updated: 2026-02-08 (Phase 8 complete)*

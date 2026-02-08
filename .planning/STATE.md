@@ -5,7 +5,7 @@
 See: .planning/PROJECT.md (updated 2026-02-06)
 
 **Core value:** Every implemented syscall works correctly on both x86_64 and aarch64, tested via the integration test harness.
-**Current focus:** Phase 7 complete. Next: Phase 8 - Process Control
+**Current focus:** Phase 8 complete. Next: Phase 9 - SysV IPC
 
 ## Current Position
 
