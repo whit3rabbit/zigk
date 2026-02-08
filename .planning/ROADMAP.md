@@ -151,10 +151,11 @@ Plans:
   1. Programs can set/get process name via prctl with PR_SET_NAME/PR_GET_NAME
   2. Programs can pin processes to specific CPU cores via sched_setaffinity and query affinity via sched_getaffinity
   3. Container-style init systems and NUMA-aware applications can control process-CPU affinity
-**Plans**: TBD
+**Plans**: 2 plans
 
 Plans:
-- [ ] 08-01: TBD
+- [ ] 08-01-PLAN.md -- UAPI prctl constants + syscall numbers (both arch) + kernel implementations (sys_prctl, sys_sched_setaffinity, sys_sched_getaffinity)
+- [ ] 08-02-PLAN.md -- Userspace wrappers (prctl, sched_setaffinity, sched_getaffinity) + 10 integration tests
 
 ### Phase 9: SysV IPC
 **Goal**: Implement legacy SysV IPC shared memory, semaphores, and message queues for Postgres/Redis compatibility
@@ -185,9 +186,9 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9
 | 5. Vectored & Positional I/O | 3/3 | Complete | 2026-02-08 |
 | 6. Filesystem Extras | 3/3 | Complete | 2026-02-07 |
 | 7. Socket Extras | 2/2 | Complete | 2026-02-08 |
-| 8. Process Control | 0/TBD | Not started | - |
+| 8. Process Control | 0/2 | Planned | - |
 | 9. SysV IPC | 0/TBD | Not started | - |
 
 ---
 *Roadmap created: 2026-02-06*
-*Last updated: 2026-02-08 (Phase 7 complete)*
+*Last updated: 2026-02-08 (Phase 8 planned)*
