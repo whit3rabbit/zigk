@@ -129,7 +129,7 @@ Plans:
 - [x] 06-03-PLAN.md -- Integration tests: 12 tests covering readlinkat, linkat, symlinkat, utimensat, futimesat
 
 ### Phase 7: Socket Extras
-**Goal**: Implement socketpair, shutdown, and sendto/recvfrom/sendmsg/recvmsg for complete BSD socket API coverage
+**Goal**: Fix IrqLock initialization blocker, validate existing socket syscall implementations, and add userspace wrappers + integration tests for complete BSD socket API coverage
 **Depends on**: Phase 6
 **Requirements**: SOCK-01, SOCK-02, SOCK-03, SOCK-04, SOCK-05, SOCK-06
 **Success Criteria** (what must be TRUE):
@@ -137,10 +137,11 @@ Plans:
   2. Programs can shutdown send/receive on sockets via shutdown with SHUT_RD/WR/RDWR
   3. Programs can send/receive datagrams with destination/source addresses via sendto/recvfrom
   4. Programs can send/receive messages with control data (ancillary data) via sendmsg/recvmsg
-**Plans**: TBD
+**Plans**: 2 plans
 
 Plans:
-- [ ] 07-01: TBD
+- [ ] 07-01-PLAN.md -- Fix IrqLock initialization ordering bug in initNetwork + verify existing 8 socket tests pass
+- [ ] 07-02-PLAN.md -- Add userspace wrappers (socketpair, sendmsg, recvmsg) + constants (AF_UNIX, SHUT_*) + 12 integration tests
 
 ### Phase 8: Process Control
 **Goal**: Implement prctl for process naming and sched_setaffinity/getaffinity for CPU pinning
@@ -183,7 +184,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9
 | 4. Event Notification FDs | 4/4 | Complete | 2026-02-07 |
 | 5. Vectored & Positional I/O | 3/3 | Complete | 2026-02-08 |
 | 6. Filesystem Extras | 3/3 | Complete | 2026-02-07 |
-| 7. Socket Extras | 0/TBD | Not started | - |
+| 7. Socket Extras | 0/2 | Not started | - |
 | 8. Process Control | 0/TBD | Not started | - |
 | 9. SysV IPC | 0/TBD | Not started | - |
 
