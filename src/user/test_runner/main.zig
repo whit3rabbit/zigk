@@ -15,6 +15,7 @@ const io_mux_tests = @import("tests/syscall/io_mux.zig");
 const event_fds_tests = @import("tests/syscall/event_fds.zig");
 const fs_extras_tests = @import("tests/syscall/fs_extras.zig");
 const vectored_io_tests = @import("tests/syscall/vectored_io.zig");
+const process_control_tests = @import("tests/syscall/process_control.zig");
 const fs_tests = @import("tests/fs/basic.zig");
 const fs_error_tests = @import("tests/fs/errors.zig");
 const regression_tests = @import("tests/regression/sfs_issues.zig");
@@ -423,10 +424,18 @@ export fn main(argc: i32, argv: [*][*:0]u8) i32 {
     runner.runTest("vectored_io: sendfile basic", vectored_io_tests.testSendfileBasic);
     runner.runTest("vectored_io: sendfile with offset", vectored_io_tests.testSendfileWithOffset);
     runner.runTest("vectored_io: sendfile invalid fd", vectored_io_tests.testSendfileInvalidFd);
-    // SFS-dependent vectored I/O tests (may hang due to cumulative SFS deadlock)
-    runner.runTest("vectored_io: writev then readv roundtrip", vectored_io_tests.testWritevReadv);
-    runner.runTest("vectored_io: pwritev at offset", vectored_io_tests.testPwritevBasic);
-    runner.runTest("vectored_io: pwritev2 flags zero", vectored_io_tests.testPwritev2FlagsZero);
+
+    // Phase 8: Process Control tests
+    runner.runTest("process_control: prctl set/get name", process_control_tests.testPrctlSetGetName);
+    runner.runTest("process_control: prctl get name default", process_control_tests.testPrctlGetNameDefault);
+    runner.runTest("process_control: prctl set name truncation", process_control_tests.testPrctlSetNameTruncation);
+    runner.runTest("process_control: prctl invalid option", process_control_tests.testPrctlInvalidOption);
+    runner.runTest("process_control: prctl set name empty", process_control_tests.testPrctlSetNameEmpty);
+    runner.runTest("process_control: sched_getaffinity basic", process_control_tests.testSchedGetaffinityBasic);
+    runner.runTest("process_control: sched_setaffinity basic", process_control_tests.testSchedSetaffinityBasic);
+    runner.runTest("process_control: sched_setaffinity multi cpu", process_control_tests.testSchedSetaffinityMultiCpu);
+    runner.runTest("process_control: sched_setaffinity no cpu0", process_control_tests.testSchedSetaffinityNoCpu0);
+    runner.runTest("process_control: sched_getaffinity size too small", process_control_tests.testSchedGetaffinitySizeTooSmall);
 
     // Stress tests
     runner.runTest("stress: write 10MB file", stress_tests.testWrite10MbFile);
@@ -438,6 +447,11 @@ export fn main(argc: i32, argv: [*][*:0]u8) i32 {
 
     // Basic sanity test
     runner.runTest("dummy: always passes", testDummy);
+
+    // SFS-dependent tests (run last, may timeout due to cumulative SFS deadlock)
+    runner.runTest("vectored_io: writev then readv roundtrip", vectored_io_tests.testWritevReadv);
+    runner.runTest("vectored_io: pwritev at offset", vectored_io_tests.testPwritevBasic);
+    runner.runTest("vectored_io: pwritev2 flags zero", vectored_io_tests.testPwritev2FlagsZero);
 
     runner.printSummary();
 
