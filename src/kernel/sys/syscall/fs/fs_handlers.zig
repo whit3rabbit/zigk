@@ -904,20 +904,13 @@ pub fn sys_unlinkat(dirfd: usize, path_ptr: usize, flags: usize) base.SyscallErr
     }
 }
 
-/// sys_link (86) - Create a hard link
-pub fn sys_link(old_ptr: usize, new_ptr: usize) base.SyscallError!usize {
+/// Internal: link using kernel-space paths (already copied from userspace).
+fn linkKernel(raw_old: []const u8, raw_new: []const u8) base.SyscallError!usize {
     const alloc = heap.allocator();
-    const old_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
-    defer alloc.free(old_buf);
-    const new_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
-    defer alloc.free(new_buf);
     const c_old_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
     defer alloc.free(c_old_buf);
     const c_new_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
     defer alloc.free(c_new_buf);
-
-    const raw_old = user_mem.copyStringFromUser(old_buf, old_ptr) catch return error.EFAULT;
-    const raw_new = user_mem.copyStringFromUser(new_buf, new_ptr) catch return error.EFAULT;
 
     if (raw_old.len == 0 or raw_new.len == 0) return error.ENOENT;
 
@@ -942,6 +935,20 @@ pub fn sys_link(old_ptr: usize, new_ptr: usize) base.SyscallError!usize {
     };
 
     return 0;
+}
+
+/// sys_link (86) - Create a hard link
+pub fn sys_link(old_ptr: usize, new_ptr: usize) base.SyscallError!usize {
+    const alloc = heap.allocator();
+    const old_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(old_buf);
+    const new_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(new_buf);
+
+    const raw_old = user_mem.copyStringFromUser(old_buf, old_ptr) catch return error.EFAULT;
+    const raw_new = user_mem.copyStringFromUser(new_buf, new_ptr) catch return error.EFAULT;
+
+    return linkKernel(raw_old, raw_new);
 }
 
 /// sys_linkat (265/37) - Create hard link relative to directory file descriptors
@@ -998,26 +1005,20 @@ pub fn sys_linkat(olddirfd: usize, oldpath_ptr: usize, newdirfd: usize, newpath_
         resolved_new = fd_syscall.resolvePathAt(newdirfd, newpath, resolved_new_buf) catch |err| return err;
     }
 
-    // Call base syscall with resolved paths
-    return sys_link(@intFromPtr(resolved_old.ptr), @intFromPtr(resolved_new.ptr));
+    // Call kernel helper with resolved paths
+    return linkKernel(resolved_old, resolved_new);
 }
 
-/// sys_symlink (88) - Create a symbolic link
-pub fn sys_symlink(target_ptr: usize, linkpath_ptr: usize) base.SyscallError!usize {
+/// Internal: symlink using kernel-space paths (already copied from userspace).
+/// Note: target is stored as-is (data, not resolved). Only raw_linkpath gets canonicalized.
+fn symlinkKernel(target: []const u8, raw_linkpath: []const u8) base.SyscallError!usize {
     const alloc = heap.allocator();
-    const target_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
-    defer alloc.free(target_buf);
-    const link_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
-    defer alloc.free(link_buf);
     const c_link_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
     defer alloc.free(c_link_buf);
 
-    const target = user_mem.copyStringFromUser(target_buf, target_ptr) catch return error.EFAULT;
-    const raw_link = user_mem.copyStringFromUser(link_buf, linkpath_ptr) catch return error.EFAULT;
+    if (target.len == 0 or raw_linkpath.len == 0) return error.ENOENT;
 
-    if (target.len == 0 or raw_link.len == 0) return error.ENOENT;
-
-    const linkpath = canonicalizePath(raw_link, c_link_buf) orelse return error.ENOENT;
+    const linkpath = canonicalizePath(raw_linkpath, c_link_buf) orelse return error.ENOENT;
 
     // Simplified permission check: check write access to the directory where link will be created.
     // For now, we stub this with a generic check or relying on VFS/FS errors.
@@ -1032,6 +1033,20 @@ pub fn sys_symlink(target_ptr: usize, linkpath_ptr: usize) base.SyscallError!usi
     };
 
     return 0;
+}
+
+/// sys_symlink (88) - Create a symbolic link
+pub fn sys_symlink(target_ptr: usize, linkpath_ptr: usize) base.SyscallError!usize {
+    const alloc = heap.allocator();
+    const target_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(target_buf);
+    const link_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(link_buf);
+
+    const target = user_mem.copyStringFromUser(target_buf, target_ptr) catch return error.EFAULT;
+    const raw_link = user_mem.copyStringFromUser(link_buf, linkpath_ptr) catch return error.EFAULT;
+
+    return symlinkKernel(target, raw_link);
 }
 
 /// sys_symlinkat (266/36) - Create symbolic link relative to directory file descriptor
@@ -1059,7 +1074,7 @@ pub fn sys_symlinkat(target_ptr: usize, newdirfd: usize, linkpath_ptr: usize) ba
 
     // Handle absolute linkpath
     if (linkpath[0] == '/') {
-        return sys_symlink(@intFromPtr(target.ptr), @intFromPtr(linkpath.ptr));
+        return symlinkKernel(target, linkpath);
     }
 
     // Resolve linkpath relative to newdirfd
@@ -1067,19 +1082,16 @@ pub fn sys_symlinkat(target_ptr: usize, newdirfd: usize, linkpath_ptr: usize) ba
     defer alloc.free(resolved_buf);
     const resolved_link = fd_syscall.resolvePathAt(newdirfd, linkpath, resolved_buf) catch |err| return err;
 
-    // Call base syscall with literal target and resolved linkpath
-    return sys_symlink(@intFromPtr(target.ptr), @intFromPtr(resolved_link.ptr));
+    // Call kernel helper with literal target and resolved linkpath
+    return symlinkKernel(target, resolved_link);
 }
 
-/// sys_readlink (89) - Read target of a symbolic link
-pub fn sys_readlink(path_ptr: usize, buf_ptr: usize, bufsiz: usize) base.SyscallError!usize {
+/// Internal: readlink using kernel-space path (already copied from userspace).
+fn readlinkKernel(raw_path: []const u8, buf_ptr: usize, bufsiz: usize) base.SyscallError!usize {
     const alloc = heap.allocator();
-    const path_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
-    defer alloc.free(path_buf);
     const canon_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
     defer alloc.free(canon_buf);
 
-    const raw_path = user_mem.copyStringFromUser(path_buf, path_ptr) catch return error.EFAULT;
     if (raw_path.len == 0) return error.ENOENT;
 
     const path = canonicalizePath(raw_path, canon_buf) orelse return error.ENOENT;
@@ -1108,6 +1120,17 @@ pub fn sys_readlink(path_ptr: usize, buf_ptr: usize, bufsiz: usize) base.Syscall
     return bytes_read;
 }
 
+/// sys_readlink (89) - Read target of a symbolic link
+pub fn sys_readlink(path_ptr: usize, buf_ptr: usize, bufsiz: usize) base.SyscallError!usize {
+    const alloc = heap.allocator();
+    const path_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(path_buf);
+
+    const raw_path = user_mem.copyStringFromUser(path_buf, path_ptr) catch return error.EFAULT;
+
+    return readlinkKernel(raw_path, buf_ptr, bufsiz);
+}
+
 /// sys_readlinkat (267/78) - Read symbolic link relative to directory file descriptor
 pub fn sys_readlinkat(dirfd: usize, path_ptr: usize, buf_ptr: usize, bufsiz: usize) base.SyscallError!usize {
 
@@ -1124,7 +1147,7 @@ pub fn sys_readlinkat(dirfd: usize, path_ptr: usize, buf_ptr: usize, bufsiz: usi
 
     // Handle absolute paths directly (bypass dirfd)
     if (path[0] == '/') {
-        return sys_readlink(@intFromPtr(path.ptr), buf_ptr, bufsiz);
+        return readlinkKernel(path, buf_ptr, bufsiz);
     }
 
     // Allocate buffer for resolved path
@@ -1134,6 +1157,6 @@ pub fn sys_readlinkat(dirfd: usize, path_ptr: usize, buf_ptr: usize, bufsiz: usi
     // Resolve path relative to dirfd
     const resolved = fd_syscall.resolvePathAt(dirfd, path, resolved_buf) catch |err| return err;
 
-    // Call base syscall with resolved path
-    return sys_readlink(@intFromPtr(resolved.ptr), buf_ptr, bufsiz);
+    // Call kernel helper with resolved path
+    return readlinkKernel(resolved, buf_ptr, bufsiz);
 }
