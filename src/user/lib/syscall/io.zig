@@ -755,7 +755,7 @@ pub fn preadv2(fd: i32, iov: []const Iovec, offset: i64, flags: u32) SyscallErro
         @bitCast(@as(isize, fd)),
         @intFromPtr(iov.ptr),
         iov.len,
-        @bitCast(@as(usize, @as(isize, offset))),
+        @bitCast(offset),
         @as(usize, flags),
     );
     if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
@@ -771,7 +771,7 @@ pub fn pwritev2(fd: i32, iov: []const Iovec, offset: i64, flags: u32) SyscallErr
         @bitCast(@as(isize, fd)),
         @intFromPtr(iov.ptr),
         iov.len,
-        @bitCast(@as(usize, @as(isize, offset))),
+        @bitCast(offset),
         @as(usize, flags),
     );
     if (primitive.isError(ret)) return primitive.errorFromReturn(ret);

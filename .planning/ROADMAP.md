@@ -16,7 +16,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 2: Credentials & Ownership** - UID/GID infrastructure + chown family
 - [x] **Phase 3: I/O Multiplexing** - epoll backend + select/pselect6
 - [x] **Phase 4: Event Notification FDs** - eventfd, timerfd, signalfd
-- [ ] **Phase 5: Vectored & Positional I/O** - readv/preadv/sendfile
+- [x] **Phase 5: Vectored & Positional I/O** - readv/preadv/sendfile
 - [x] **Phase 6: Filesystem Extras** - readlinkat, linkat, symlinkat, utimensat
 - [ ] **Phase 7: Socket Extras** - socketpair, shutdown, sendto/recvfrom, recvmsg/sendmsg
 - [ ] **Phase 8: Process Control** - prctl, sched affinity
@@ -181,7 +181,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9
 | 2. Credentials & Ownership | 4/4 | Complete | 2026-02-06 |
 | 3. I/O Multiplexing | 4/4 | Complete | 2026-02-07 |
 | 4. Event Notification FDs | 4/4 | Complete | 2026-02-07 |
-| 5. Vectored & Positional I/O | 0/3 | Planning complete | - |
+| 5. Vectored & Positional I/O | 3/3 | Complete | 2026-02-08 |
 | 6. Filesystem Extras | 3/3 | Complete | 2026-02-07 |
 | 7. Socket Extras | 0/TBD | Not started | - |
 | 8. Process Control | 0/TBD | Not started | - |

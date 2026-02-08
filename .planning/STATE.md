@@ -5,7 +5,7 @@
 See: .planning/PROJECT.md (updated 2026-02-06)
 
 **Core value:** Every implemented syscall works correctly on both x86_64 and aarch64, tested via the integration test harness.
-**Current focus:** Phase 4 complete. Phase 6 in progress - Filesystem Extras
+**Current focus:** Phase 5 and 6 complete. Next: Phase 7 - Socket Extras
 
 ## Current Position
 
