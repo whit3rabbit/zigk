@@ -352,6 +352,66 @@ pub fn timerfd_gettime(fd: i32, curr_value: *ITimerSpec) SyscallError!void {
 }
 
 // =============================================================================
+// Signal FDs
+// =============================================================================
+
+/// signalfd4 flags
+pub const SFD_CLOEXEC: u32 = 0x80000; // Close-on-exec
+pub const SFD_NONBLOCK: u32 = 0x800;  // Non-blocking mode
+
+/// Signal information structure returned by read() on signalfd
+/// Must be exactly 128 bytes to match Linux ABI
+pub const SignalFdSigInfo = extern struct {
+    ssi_signo: u32,     // Signal number
+    ssi_errno: i32,     // Error number (usually 0)
+    ssi_code: i32,      // Signal code (SI_USER, SI_KERNEL, etc.)
+    ssi_pid: u32,       // PID of sender
+    ssi_uid: u32,       // Real UID of sender
+    ssi_fd: i32,        // File descriptor (for SIGIO)
+    ssi_tid: u32,       // Kernel timer ID (for timer signals)
+    ssi_band: u32,      // Band event (for SIGIO)
+    ssi_overrun: u32,   // Timer overrun count (for timer signals)
+    ssi_trapno: u32,    // Trap number that caused signal
+    ssi_status: i32,    // Exit status or signal (for SIGCHLD)
+    ssi_int: i32,       // Integer sent with sigqueue()
+    ssi_ptr: u64,       // Pointer sent with sigqueue()
+    ssi_utime: u64,     // User CPU time consumed (for SIGCHLD)
+    ssi_stime: u64,     // System CPU time consumed (for SIGCHLD)
+    ssi_addr: u64,      // Address that caused fault
+    ssi_addr_lsb: u16,  // Least significant bit of address
+    _pad: [46]u8,       // Padding to 128 bytes
+
+    comptime {
+        const std_imported = @import("std");
+        // Verify struct layout matches Linux ABI (128 bytes exactly)
+        std_imported.debug.assert(@sizeOf(SignalFdSigInfo) == 128);
+    }
+};
+
+/// Create a signalfd or update an existing one
+/// fd: -1 to create new, >= 0 to update existing signalfd mask
+/// mask: Pointer to u64 signal mask
+/// flags: SFD_CLOEXEC | SFD_NONBLOCK
+/// Returns: file descriptor number
+pub fn signalfd4(fd: i32, mask: *const u64, flags: u32) SyscallError!i32 {
+    const ret = primitive.syscall4(
+        syscalls.SYS_SIGNALFD4,
+        @bitCast(@as(isize, fd)),
+        @intFromPtr(mask),
+        @sizeOf(u64), // sizemask parameter
+        @as(usize, flags),
+    );
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return @intCast(@as(isize, @bitCast(ret)));
+}
+
+/// Create a signalfd without flags (legacy)
+/// Equivalent to signalfd4(fd, mask, 0)
+pub fn signalfd(fd: i32, mask: *const u64) SyscallError!i32 {
+    return signalfd4(fd, mask, 0);
+}
+
+// =============================================================================
 // Memory Mapping
 // =============================================================================
 
