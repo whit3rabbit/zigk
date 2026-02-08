@@ -300,6 +300,10 @@ pub const SYS_SCHED_SETSCHEDULER: usize = 119;
 pub const SYS_SCHED_GETSCHEDULER: usize = 120;
 /// Get scheduling parameters
 pub const SYS_SCHED_GETPARAM: usize = 121;
+/// Set CPU affinity mask
+pub const SYS_SCHED_SETAFFINITY: usize = 122;
+/// Get CPU affinity mask
+pub const SYS_SCHED_GETAFFINITY: usize = 123;
 /// Get maximum priority value
 pub const SYS_SCHED_GET_PRIORITY_MAX: usize = 125;
 /// Get minimum priority value

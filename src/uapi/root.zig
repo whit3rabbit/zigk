@@ -30,6 +30,7 @@ pub const ipc_msg = @import("ipc/ipc_msg.zig");
 pub const ring = @import("ipc/ring.zig");
 pub const virt_pci = @import("virt_pci/root.zig");
 pub const time = @import("process/time.zig");
+pub const prctl = @import("prctl.zig");
 
 
 // Re-export commonly used types

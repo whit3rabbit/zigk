@@ -274,6 +274,10 @@ pub const SYS_PRCTL: usize = 157;
 pub const SYS_ARCH_PRCTL: usize = 158;
 /// Set resource limits
 pub const SYS_SETRLIMIT: usize = 160;
+/// Set CPU affinity mask
+pub const SYS_SCHED_SETAFFINITY: usize = 203;
+/// Get CPU affinity mask
+pub const SYS_SCHED_GETAFFINITY: usize = 204;
 /// Commit buffer cache to disk
 pub const SYS_SYNC: usize = 162;
 /// Set time of day (requires root)
