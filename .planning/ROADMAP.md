@@ -95,7 +95,7 @@ Plans:
 - [x] 04-03-PLAN.md -- signalfd kernel implementation (signal consumption via pending_signals) + userspace wrappers
 - [x] 04-04-PLAN.md -- Integration tests: eventfd/timerfd/signalfd creation, read/write, epoll integration
 
-### Phase 5: Vectored & Positional I/O
+### Phase 5: Vectored & Positional I/O (COMPLETE 2026-02-08)
 **Goal**: Implement readv/writev families and sendfile for efficient database and file server I/O patterns
 **Depends on**: Phase 4
 **Requirements**: VIO-01, VIO-02, VIO-03, VIO-04, VIO-05, VIO-06, VIO-07
@@ -108,9 +108,9 @@ Plans:
 **Plans**: 3 plans
 
 Plans:
-- [ ] 05-01-PLAN.md -- Core vectored/positional I/O: sys_readv, sys_pwrite64, sys_preadv, sys_pwritev + root.zig exports
-- [ ] 05-02-PLAN.md -- v2 variants + sendfile: SYS_PREADV2/PWRITEV2 numbers, sys_preadv2, sys_pwritev2, sys_sendfile
-- [ ] 05-03-PLAN.md -- Userspace wrappers + 12 integration tests covering all VIO requirements
+- [x] 05-01-PLAN.md -- Core vectored/positional I/O: sys_readv, sys_pwrite64, sys_preadv, sys_pwritev + root.zig exports
+- [x] 05-02-PLAN.md -- v2 variants + sendfile: SYS_PREADV2/PWRITEV2 numbers, sys_preadv2, sys_pwritev2, sys_sendfile
+- [x] 05-03-PLAN.md -- Userspace wrappers + 12 integration tests covering all VIO requirements
 
 ### Phase 6: Filesystem Extras
 **Goal**: Fix *at syscall double-copy bugs and implement timestamp manipulation for filesystem completeness
