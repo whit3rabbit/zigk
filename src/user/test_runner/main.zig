@@ -12,6 +12,7 @@ const time_ops_tests = @import("tests/syscall/time_ops.zig");
 const misc_tests = @import("tests/syscall/misc.zig");
 const at_ops_tests = @import("tests/syscall/at_ops.zig");
 const io_mux_tests = @import("tests/syscall/io_mux.zig");
+const event_fds_tests = @import("tests/syscall/event_fds.zig");
 const fs_tests = @import("tests/fs/basic.zig");
 const fs_error_tests = @import("tests/fs/errors.zig");
 const regression_tests = @import("tests/regression/sfs_issues.zig");
@@ -367,6 +368,20 @@ export fn main(argc: i32, argv: [*][*:0]u8) i32 {
     runner.runTest("io_mux: select timeout", io_mux_tests.testSelectTimeout);
     runner.runTest("io_mux: poll pipe events", io_mux_tests.testPollPipeEvents);
     runner.runTest("io_mux: poll pipe HUP", io_mux_tests.testPollPipeHup);
+
+    // Event notification FD tests
+    runner.runTest("event_fds: eventfd create and close", event_fds_tests.testEventfdCreateAndClose);
+    runner.runTest("event_fds: eventfd write and read", event_fds_tests.testEventfdWriteAndRead);
+    runner.runTest("event_fds: eventfd semaphore mode", event_fds_tests.testEventfdSemaphoreMode);
+    runner.runTest("event_fds: eventfd initial value", event_fds_tests.testEventfdInitialValue);
+    runner.runTest("event_fds: eventfd epoll integration", event_fds_tests.testEventfdEpollIntegration);
+    runner.runTest("event_fds: timerfd create and close", event_fds_tests.testTimerfdCreateAndClose);
+    runner.runTest("event_fds: timerfd set and get time", event_fds_tests.testTimerfdSetAndGetTime);
+    runner.runTest("event_fds: timerfd expiration", event_fds_tests.testTimerfdExpiration);
+    runner.runTest("event_fds: timerfd disarm", event_fds_tests.testTimerfdDisarm);
+    runner.runTest("event_fds: signalfd create and close", event_fds_tests.testSignalfdCreateAndClose);
+    runner.runTest("event_fds: signalfd read signal", event_fds_tests.testSignalfdReadSignal);
+    runner.runTest("event_fds: signalfd epoll integration", event_fds_tests.testSignalfdEpollIntegration);
 
     // Stress tests
     runner.runTest("stress: write 10MB file", stress_tests.testWrite10MbFile);
