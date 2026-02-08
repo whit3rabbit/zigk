@@ -100,8 +100,9 @@ Recent decisions affecting current work:
 - **06-02:** UTIME_NOW (0x3fffffff) and UTIME_OMIT (0x3ffffffe) constants per POSIX spec for timestamp control
 - **06-02:** Reuse existing Timeval type from time.zig instead of duplicating in io.zig
 - **06-02:** AT_SYMLINK_NOFOLLOW returns ENOSYS for MVP (symlink timestamp modification not supported)
-- **06-03:** Filesystem extras tests skipped pending syscall dispatch investigation - syscalls exist in fs_handlers.zig but table.zig auto-discovery not working
-- **06-03:** Skip-test pattern allows infrastructure completion without blocking on dispatch bugs
+- **06-03:** Syscall dispatch works correctly (executor agent was wrong) -- 6 tests pass, 6 skip (SFS lacks link/symlink/timestamps)
+- **06-03:** Userspace error names differ from kernel (ENOSYS->NotImplemented, EINVAL->InvalidArgument, EROFS->ReadOnlyFilesystem)
+- **06-03:** VFS NotSupported maps to EROFS (errno 30) -> ReadOnlyFilesystem in userspace tests
 
 ### Pending Todos
 
@@ -115,11 +116,10 @@ Recent decisions affecting current work:
 - Direct read tests fail silently after write succeeds - likely pointer alignment or error handling issue
 - Follow-up: Debug test infrastructure, add diagnostics, compare with passing epoll patterns
 
-**Filesystem Extras Syscall Dispatch Issue:**
-- 12 fs_extras tests skipped - syscalls (readlinkat, linkat, symlinkat, utimensat, futimesat) exist in fs_handlers.zig but not being dispatched
-- No syscall traces appear in logs despite userspace wrappers existing and tests calling them
-- Investigation needed: table.zig auto-discovery (@hasDecl(fs_handlers, name)) or explicit exports to io/root.zig
-- Workaround: Tests skipped to unblock Phase 6 completion
+**Filesystem Extras Tests (RESOLVED):**
+- Dispatch works correctly -- executor agent was wrong about it being broken
+- 6 tests pass (readlinkat, linkat cross-device, symlinkat empty, utimensat nofollow/invalid-nsec)
+- 6 tests skip (expected -- SFS lacks link, symlink, and timestamp support)
 
 ### Blockers/Concerns
 
@@ -152,9 +152,8 @@ Recent decisions affecting current work:
 - ✅ VFS timestamp infrastructure complete (06-01) - set_timestamps callback, NotSupported for read-only filesystems
 - ✅ Timestamp syscalls complete (06-02) - sys_utimensat, sys_futimesat with UTIME_NOW/UTIME_OMIT support
 - ✅ Userspace wrappers complete (06-02) - utimensat, futimesat exported in syscall root.zig
-- ⚠️ Integration tests created but skipped (06-03) - 12 tests blocked by syscall dispatch issue
-- Test count: 241 total (229 existing + 12 new, all 12 skipped pending dispatch fix)
-- **Known issue:** Syscalls exist but not being dispatched by table.zig - requires investigation
+- ✅ Integration tests complete (06-03) - 12 tests, 6 passing, 6 skipping (SFS limitations)
+- Test count: 260 total (233 passing, 4 failing pre-existing event_fds, 23 skipped)
 
 **Phase 9 Considerations (SysV IPC):**
 - SFS filesystem has close deadlock and 64-file limit
@@ -180,15 +179,16 @@ Recent decisions affecting current work:
 - No new skipped tests
 
 **Phase 6 Complete - Test Coverage:**
-- 241 total tests (229 + 12 new)
-- All filesystem extras tests created: readlinkat, linkat, symlinkat, utimensat, futimesat (12 tests)
-- Tests registered but skipped (dispatch issue prevents execution)
-- 12 new skipped tests pending syscall dispatch fix
+- 260 total tests (248 existing + 12 new)
+- All filesystem extras syscalls tested: readlinkat, linkat, symlinkat, utimensat, futimesat (12 tests)
+- 6 passing: readlinkat basic/invalid, linkat cross-device, symlinkat empty target, utimensat nofollow/invalid-nsec
+- 6 skipped: SFS lacks link, symlink, and set_timestamps support (expected limitation)
+- Overall: 233 passing, 4 failing (pre-existing event_fds), 23 skipped
 
 ## Session Continuity
 
-Last session: 2026-02-08 (plan execution)
-Stopped at: Completed 06-03-PLAN.md (filesystem extras integration tests) - Phase 6 complete
+Last session: 2026-02-08 (plan execution + test fix)
+Stopped at: Phase 6 fully complete -- all tests verified on both x86_64 and aarch64
 Resume file: None
 
 ---
