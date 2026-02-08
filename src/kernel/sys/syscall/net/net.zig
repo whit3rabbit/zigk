@@ -1966,9 +1966,9 @@ pub fn sys_socketpair(domain: usize, sock_type: usize, protocol: usize, sv_ptr: 
     };
 
     // Copy the file descriptors to user space
-    const fds: [2]i32 = .{ @intCast(fd0_num), @intCast(fd1_num) };
+    var fds: [2]i32 = .{ @intCast(fd0_num), @intCast(fd1_num) };
     const sv_uptr = user_mem.UserPtr.from(sv_ptr);
-    sv_uptr.writeValue(fds) catch {
+    _ = sv_uptr.copyFromKernel(std.mem.sliceAsBytes(&fds)) catch {
         // Clean up on failure
         _ = table.close(fd1_num);
         _ = table.close(fd0_num);
