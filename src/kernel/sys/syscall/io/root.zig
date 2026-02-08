@@ -9,8 +9,12 @@ const signalfd = @import("signalfd.zig");
 // Export public syscall handlers
 pub const sys_read = read_write.sys_read;
 pub const sys_write = read_write.sys_write;
+pub const sys_readv = read_write.sys_readv;
 pub const sys_writev = read_write.sys_writev;
 pub const sys_pread64 = read_write.sys_pread64;
+pub const sys_pwrite64 = read_write.sys_pwrite64;
+pub const sys_preadv = read_write.sys_preadv;
+pub const sys_pwritev = read_write.sys_pwritev;
 
 pub const sys_eventfd2 = eventfd.sys_eventfd2;
 pub const sys_eventfd = eventfd.sys_eventfd;
