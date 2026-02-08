@@ -1785,6 +1785,8 @@ pub fn build(b: *std.Build) void {
     syscall_fs_handlers_module.addImport("perms", perms_module);
     syscall_fs_handlers_module.addImport("vmm", vmm_module);
     syscall_fs_handlers_module.addImport("syscall_fd", syscall_fd_module);
+    syscall_fs_handlers_module.addImport("hal", hal_module);
+    syscall_fs_handlers_module.addImport("sched", sched_module);
 
     // Create syscall flock module (advisory file locking)
     const syscall_flock_module = b.createModule(.{

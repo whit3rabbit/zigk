@@ -16,6 +16,8 @@ const caps = @import("capabilities");
 const devfs = @import("devfs");
 const vmm = @import("vmm");
 const fd_syscall = @import("syscall_fd");
+const hal = @import("hal");
+const sched = @import("sched");
 
 const perms = @import("perms");
 
@@ -1159,4 +1161,252 @@ pub fn sys_readlinkat(dirfd: usize, path_ptr: usize, buf_ptr: usize, bufsiz: usi
 
     // Call kernel helper with resolved path
     return readlinkKernel(resolved, buf_ptr, bufsiz);
+}
+
+// =============================================================================
+// File Timestamp Syscalls (utimensat, futimesat)
+// =============================================================================
+
+/// Special timespec values for utimensat
+const UTIME_NOW: i64 = (1 << 30) - 1; // 0x3fffffff
+const UTIME_OMIT: i64 = (1 << 30) - 2; // 0x3ffffffe
+
+/// Get current time in nanoseconds since epoch (for UTIME_NOW)
+fn getCurrentTimeNs() u64 {
+    const freq = hal.timing.getTscFrequency();
+    if (freq > 0) {
+        const tsc = hal.timing.rdtsc();
+        const tsc_u128 = @as(u128, tsc);
+        const ns_u128 = (tsc_u128 * 1_000_000_000) / freq;
+        return @truncate(ns_u128);
+    } else {
+        // Fallback to tick count (10ms resolution)
+        const ticks = sched.getTickCount();
+        const ms = ticks *| 10; // saturating mul
+        return ms * 1_000_000; // ms to ns
+    }
+}
+
+/// sys_utimensat (280/88) - Set file timestamps with nanosecond precision
+///
+/// Args:
+///   dirfd: Directory file descriptor (or AT_FDCWD for current working directory)
+///   path_ptr: Path to file (relative or absolute)
+///   times_ptr: Pointer to [2]Timespec array ([0]=atime, [1]=mtime), or NULL to set both to current time
+///   flags: AT_SYMLINK_NOFOLLOW (0x100) or 0
+pub fn sys_utimensat(dirfd: usize, path_ptr: usize, times_ptr: usize, flags: usize) base.SyscallError!usize {
+    const AT_SYMLINK_NOFOLLOW: usize = 0x100;
+
+    // Validate flags
+    if (flags & AT_SYMLINK_NOFOLLOW != 0) {
+        return error.ENOSYS; // MVP: symlink timestamp modification not supported
+    }
+    if (flags & ~AT_SYMLINK_NOFOLLOW != 0) {
+        return error.EINVAL; // Invalid flags
+    }
+
+    const alloc = heap.allocator();
+
+    // Read timespec array from userspace (or use UTIME_NOW for both if NULL)
+    var atime_sec: i64 = undefined;
+    var atime_nsec: i64 = undefined;
+    var mtime_sec: i64 = undefined;
+    var mtime_nsec: i64 = undefined;
+
+    if (times_ptr == 0) {
+        // NULL times pointer: set both to current time
+        const now_ns = getCurrentTimeNs();
+        const now_sec = @as(i64, @intCast(now_ns / 1_000_000_000));
+        const now_nsec = @as(i64, @intCast(now_ns % 1_000_000_000));
+        atime_sec = now_sec;
+        atime_nsec = now_nsec;
+        mtime_sec = now_sec;
+        mtime_nsec = now_nsec;
+    } else {
+        // Read [2]Timespec from userspace
+        if (!base.isValidUserAccess(times_ptr, @sizeOf([2]uapi.abi.Timespec), base.AccessMode.Read)) {
+            return error.EFAULT;
+        }
+        const uptr = base.UserPtr.from(times_ptr);
+        const times = uptr.readValue([2]uapi.abi.Timespec) catch return error.EFAULT;
+
+        // Validate and process atime (times[0])
+        atime_sec = times[0].tv_sec;
+        atime_nsec = times[0].tv_nsec;
+        if (atime_nsec != UTIME_NOW and atime_nsec != UTIME_OMIT) {
+            if (atime_nsec < 0 or atime_nsec > 999_999_999) {
+                return error.EINVAL;
+            }
+        }
+
+        // Validate and process mtime (times[1])
+        mtime_sec = times[1].tv_sec;
+        mtime_nsec = times[1].tv_nsec;
+        if (mtime_nsec != UTIME_NOW and mtime_nsec != UTIME_OMIT) {
+            if (mtime_nsec < 0 or mtime_nsec > 999_999_999) {
+                return error.EINVAL;
+            }
+        }
+
+        // Resolve UTIME_NOW for atime
+        if (atime_nsec == UTIME_NOW) {
+            const now_ns = getCurrentTimeNs();
+            atime_sec = @as(i64, @intCast(now_ns / 1_000_000_000));
+            atime_nsec = @as(i64, @intCast(now_ns % 1_000_000_000));
+        } else if (atime_nsec == UTIME_OMIT) {
+            atime_sec = -1; // Convention: -1 means "leave unchanged"
+        }
+
+        // Resolve UTIME_NOW for mtime
+        if (mtime_nsec == UTIME_NOW) {
+            const now_ns = getCurrentTimeNs();
+            mtime_sec = @as(i64, @intCast(now_ns / 1_000_000_000));
+            mtime_nsec = @as(i64, @intCast(now_ns % 1_000_000_000));
+        } else if (mtime_nsec == UTIME_OMIT) {
+            mtime_sec = -1; // Convention: -1 means "leave unchanged"
+        }
+    }
+
+    // Copy path from userspace
+    const path_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(path_buf);
+
+    const raw_path = user_mem.copyStringFromUser(path_buf, path_ptr) catch |err| {
+        if (err == error.NameTooLong) return error.ENAMETOOLONG;
+        return error.EFAULT;
+    };
+
+    if (raw_path.len == 0) return error.ENOENT;
+
+    // Resolve path (absolute or relative to dirfd)
+    var resolved: []const u8 = undefined;
+    var resolved_buf: []u8 = undefined;
+    var need_free = false;
+    defer if (need_free) alloc.free(resolved_buf);
+
+    if (raw_path[0] == '/') {
+        resolved = raw_path;
+    } else {
+        resolved_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+        need_free = true;
+        resolved = fd_syscall.resolvePathAt(dirfd, raw_path, resolved_buf) catch |err| return err;
+    }
+
+    // Canonicalize the path
+    const canon_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(canon_buf);
+    const path = canonicalizePath(resolved, canon_buf) orelse return error.ENOENT;
+
+    // Call VFS setTimestamps
+    fs.vfs.Vfs.setTimestamps(path, atime_sec, atime_nsec, mtime_sec, mtime_nsec) catch |err| {
+        return switch (err) {
+            error.NotSupported => error.EROFS,
+            error.NotFound => error.ENOENT,
+            error.IOError => error.EIO,
+            else => error.EIO,
+        };
+    };
+
+    return 0;
+}
+
+/// Timeval structure for futimesat (microsecond precision, legacy)
+const Timeval = extern struct {
+    tv_sec: i64,
+    tv_usec: i64,
+};
+
+/// sys_futimesat (261/528) - Set file timestamps with microsecond precision (legacy)
+///
+/// Args:
+///   dirfd: Directory file descriptor (or AT_FDCWD for current working directory)
+///   path_ptr: Path to file (relative or absolute)
+///   times_ptr: Pointer to [2]Timeval array ([0]=atime, [1]=mtime), or NULL to set both to current time
+pub fn sys_futimesat(dirfd: usize, path_ptr: usize, times_ptr: usize) base.SyscallError!usize {
+    // If times_ptr is NULL, delegate to utimensat with NULL times
+    if (times_ptr == 0) {
+        return sys_utimensat(dirfd, path_ptr, 0, 0);
+    }
+
+    // Read [2]Timeval from userspace
+    if (!base.isValidUserAccess(times_ptr, @sizeOf([2]Timeval), base.AccessMode.Read)) {
+        return error.EFAULT;
+    }
+    const uptr = base.UserPtr.from(times_ptr);
+    const times = uptr.readValue([2]Timeval) catch return error.EFAULT;
+
+    // Validate and convert timeval to timespec
+    // Timeval has microsecond precision, Timespec has nanosecond precision
+    for (times) |tv| {
+        if (tv.tv_usec < 0 or tv.tv_usec >= 1_000_000) {
+            return error.EINVAL;
+        }
+    }
+
+    // Convert to timespec (microseconds to nanoseconds: multiply by 1000)
+    var timespec_array: [2]uapi.abi.Timespec = undefined;
+    timespec_array[0] = .{
+        .tv_sec = times[0].tv_sec,
+        .tv_nsec = times[0].tv_usec * 1000,
+    };
+    timespec_array[1] = .{
+        .tv_sec = times[1].tv_sec,
+        .tv_nsec = times[1].tv_usec * 1000,
+    };
+
+    // Allocate temporary kernel buffer to hold the timespec array
+    const alloc = heap.allocator();
+    const ts_buf = alloc.alloc(u8, @sizeOf([2]uapi.abi.Timespec)) catch return error.ENOMEM;
+    defer alloc.free(ts_buf);
+
+    // Copy timespec array to the buffer
+    const ts_ptr: *[2]uapi.abi.Timespec = @ptrCast(@alignCast(ts_buf.ptr));
+    ts_ptr.* = timespec_array;
+
+    // Copy path from userspace
+    const path_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(path_buf);
+
+    const raw_path = user_mem.copyStringFromUser(path_buf, path_ptr) catch |err| {
+        if (err == error.NameTooLong) return error.ENAMETOOLONG;
+        return error.EFAULT;
+    };
+
+    if (raw_path.len == 0) return error.ENOENT;
+
+    // Resolve path (absolute or relative to dirfd)
+    var resolved: []const u8 = undefined;
+    var resolved_buf: []u8 = undefined;
+    var need_free = false;
+    defer if (need_free) alloc.free(resolved_buf);
+
+    if (raw_path[0] == '/') {
+        resolved = raw_path;
+    } else {
+        resolved_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+        need_free = true;
+        resolved = fd_syscall.resolvePathAt(dirfd, raw_path, resolved_buf) catch |err| return err;
+    }
+
+    // Canonicalize the path
+    const canon_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(canon_buf);
+    const path = canonicalizePath(resolved, canon_buf) orelse return error.ENOENT;
+
+    // Call VFS setTimestamps with converted values
+    const atime_sec = timespec_array[0].tv_sec;
+    const atime_nsec = timespec_array[0].tv_nsec;
+    const mtime_sec = timespec_array[1].tv_sec;
+    const mtime_nsec = timespec_array[1].tv_nsec;
+
+    fs.vfs.Vfs.setTimestamps(path, atime_sec, atime_nsec, mtime_sec, mtime_nsec) catch |err| {
+        return switch (err) {
+            error.NotSupported => error.EROFS,
+            error.NotFound => error.ENOENT,
+            error.IOError => error.EIO,
+            else => error.EIO,
+        };
+    };
+
+    return 0;
 }
