@@ -82,11 +82,11 @@ Requirements for this milestone. Each maps to roadmap phases.
 
 ### Filesystem Extras
 
-- [ ] **FS-01**: readlinkat reads symlink target with dirfd
-- [ ] **FS-02**: linkat creates hard link with dirfd
-- [ ] **FS-03**: symlinkat creates symlink with dirfd
-- [ ] **FS-04**: utimensat sets file timestamps with nanosecond precision
-- [ ] **FS-05**: futimesat sets file timestamps (legacy, wraps utimensat)
+- [x] **FS-01**: readlinkat reads symlink target with dirfd
+- [x] **FS-02**: linkat creates hard link with dirfd
+- [x] **FS-03**: symlinkat creates symlink with dirfd
+- [x] **FS-04**: utimensat sets file timestamps with nanosecond precision
+- [x] **FS-05**: futimesat sets file timestamps (legacy, wraps utimensat)
 
 ### Socket Extras
 
@@ -184,11 +184,11 @@ Deferred to future milestone. Tracked but not in current roadmap.
 | Requirement | Phase | Status |
 |-------------|-------|--------|
 | STUB-01 through STUB-24 | Phase 1 | Complete |
-| CRED-01 through CRED-14 | Phase 2 | Pending |
+| CRED-01 through CRED-14 | Phase 2 | Complete |
 | MUX-01 through MUX-06 | Phase 3 | Complete |
 | EVT-01 through EVT-07 | Phase 4 | Complete |
 | VIO-01 through VIO-07 | Phase 5 | Pending |
-| FS-01 through FS-05 | Phase 6 | Pending |
+| FS-01 through FS-05 | Phase 6 | Complete |
 | SOCK-01 through SOCK-06 | Phase 7 | Pending |
 | PROC-01 through PROC-03 | Phase 8 | Pending |
 | IPC-01 through IPC-11 | Phase 9 | Pending |
