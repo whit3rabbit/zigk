@@ -508,3 +508,245 @@ pub fn sys_pwrite64(fd_num: usize, buf_ptr: usize, count: usize, offset: usize) 
 
     return bytes_written;
 }
+
+/// sys_preadv (295) - Read into multiple buffers at offset
+///
+/// Combines vectored I/O with positional access.
+/// Does not modify file position.
+pub fn sys_preadv(fd_num: usize, bvec_ptr: usize, count: usize, offset: usize) SyscallError!usize {
+    const MAX_READV_BYTES: usize = 16 * 1024 * 1024;
+
+    if (count == 0) return 0;
+    if (count > 1024) return error.EINVAL;
+
+    // Copy iovecs from user
+    const kvecs = heap.allocator().alloc(Iovec, count) catch {
+        return error.ENOMEM;
+    };
+    defer heap.allocator().free(kvecs);
+
+    const uptr = UserPtr.from(bvec_ptr);
+    _ = uptr.copyToKernel(std.mem.sliceAsBytes(kvecs)) catch return error.EFAULT;
+
+    var total_len: usize = 0;
+
+    // Validate total length doesn't overflow
+    for (kvecs) |vec| {
+        if (vec.len == 0) continue;
+        const new_total = @addWithOverflow(total_len, vec.len);
+        if (new_total[1] != 0 or new_total[0] > MAX_READV_BYTES) {
+            return error.EINVAL;
+        }
+        total_len = new_total[0];
+    }
+
+    // Get FD and validate
+    const table = base.getGlobalFdTable();
+    const fd_u32 = safeFdCast(fd_num) orelse return error.EBADF;
+    const fd = table.get(fd_u32) orelse return error.EBADF;
+
+    if (!fd.isReadable()) {
+        return error.EBADF;
+    }
+
+    if (fd.ops.read == null) {
+        return error.ESPIPE;
+    }
+
+    // Check if seekable
+    if (fd.ops.seek == null) {
+        return error.ESPIPE;
+    }
+
+    // Acquire lock to ensure atomicity of seek+read+seek
+    const held = fd.lock.acquire();
+    defer held.release();
+
+    // Save current position
+    const old_pos = fd.position;
+
+    const seek_fn = fd.ops.seek.?;
+
+    // 1. Seek to target offset
+    const res1 = seek_fn(fd, @intCast(offset), 0); // SEEK_SET
+    if (res1 < 0) return error.EINVAL;
+    fd.position = @intCast(res1);
+
+    // 2. Perform vectored read
+    var total_read: usize = 0;
+
+    for (kvecs) |vec| {
+        if (vec.len == 0) continue;
+
+        var vec_offset: usize = 0;
+        while (vec_offset < vec.len) {
+            const remaining = vec.len - vec_offset;
+            const chunk_len = @min(remaining, 64 * 1024);
+
+            const base_offset = @addWithOverflow(vec.base, vec_offset);
+            if (base_offset[1] != 0) {
+                // Restore position before error
+                _ = seek_fn(fd, @intCast(old_pos), 0);
+                fd.position = old_pos;
+                if (total_read > 0) return total_read;
+                return error.EFAULT;
+            }
+
+            const res = perform_read_locked(fd, base_offset[0], chunk_len) catch |err| {
+                // Restore position before error
+                _ = seek_fn(fd, @intCast(old_pos), 0);
+                fd.position = old_pos;
+                if (total_read > 0) return total_read;
+                return err;
+            };
+
+            const new_total = @addWithOverflow(total_read, res);
+            if (new_total[1] != 0) {
+                // Restore position
+                _ = seek_fn(fd, @intCast(old_pos), 0);
+                fd.position = old_pos;
+                return total_read;
+            }
+            total_read = new_total[0];
+            vec_offset += res;
+
+            // Short read: restore position and return
+            if (res < chunk_len) {
+                _ = seek_fn(fd, @intCast(old_pos), 0);
+                fd.position = old_pos;
+                return total_read;
+            }
+        }
+    }
+
+    // 3. Restore position
+    const res2 = seek_fn(fd, @intCast(old_pos), 0);
+    if (res2 < 0) {
+        console.err("sys_preadv: failed to restore position!", .{});
+    } else {
+        fd.position = @intCast(res2);
+    }
+
+    return total_read;
+}
+
+/// sys_pwritev (296) - Write from multiple buffers at offset
+///
+/// Combines vectored I/O with positional access.
+/// Does not modify file position.
+pub fn sys_pwritev(fd_num: usize, bvec_ptr: usize, count: usize, offset: usize) SyscallError!usize {
+    const MAX_WRITEV_BYTES: usize = 16 * 1024 * 1024;
+
+    if (count == 0) return 0;
+    if (count > 1024) return error.EINVAL;
+
+    // Copy iovecs from user
+    const kvecs = heap.allocator().alloc(Iovec, count) catch {
+        return error.ENOMEM;
+    };
+    defer heap.allocator().free(kvecs);
+
+    const uptr = UserPtr.from(bvec_ptr);
+    _ = uptr.copyToKernel(std.mem.sliceAsBytes(kvecs)) catch return error.EFAULT;
+
+    var total_len: usize = 0;
+
+    // Validate total length doesn't overflow
+    for (kvecs) |vec| {
+        if (vec.len == 0) continue;
+        const new_total = @addWithOverflow(total_len, vec.len);
+        if (new_total[1] != 0 or new_total[0] > MAX_WRITEV_BYTES) {
+            return error.EINVAL;
+        }
+        total_len = new_total[0];
+    }
+
+    // Get FD and validate
+    const table = base.getGlobalFdTable();
+    const fd_u32 = safeFdCast(fd_num) orelse return error.EBADF;
+    const fd = table.get(fd_u32) orelse return error.EBADF;
+
+    if (!fd.isWritable()) {
+        return error.EBADF;
+    }
+
+    if (fd.ops.write == null) {
+        return error.ESPIPE;
+    }
+
+    // Check if seekable
+    if (fd.ops.seek == null) {
+        return error.ESPIPE;
+    }
+
+    // Acquire lock to ensure atomicity of seek+write+seek
+    const held = fd.lock.acquire();
+    defer held.release();
+
+    // Save current position
+    const old_pos = fd.position;
+
+    const seek_fn = fd.ops.seek.?;
+
+    // 1. Seek to target offset
+    const res1 = seek_fn(fd, @intCast(offset), 0); // SEEK_SET
+    if (res1 < 0) return error.EINVAL;
+    fd.position = @intCast(res1);
+
+    // 2. Perform vectored write
+    var total_written: usize = 0;
+
+    for (kvecs) |vec| {
+        if (vec.len == 0) continue;
+
+        var vec_offset: usize = 0;
+        while (vec_offset < vec.len) {
+            const remaining = vec.len - vec_offset;
+            const chunk_len = @min(remaining, 64 * 1024);
+
+            const base_offset = @addWithOverflow(vec.base, vec_offset);
+            if (base_offset[1] != 0) {
+                // Restore position before error
+                _ = seek_fn(fd, @intCast(old_pos), 0);
+                fd.position = old_pos;
+                if (total_written > 0) return total_written;
+                return error.EFAULT;
+            }
+
+            const res = perform_write_locked(fd, base_offset[0], chunk_len) catch |err| {
+                // Restore position before error
+                _ = seek_fn(fd, @intCast(old_pos), 0);
+                fd.position = old_pos;
+                if (total_written > 0) return total_written;
+                return err;
+            };
+
+            const new_total = @addWithOverflow(total_written, res);
+            if (new_total[1] != 0) {
+                // Restore position
+                _ = seek_fn(fd, @intCast(old_pos), 0);
+                fd.position = old_pos;
+                return total_written;
+            }
+            total_written = new_total[0];
+            vec_offset += res;
+
+            // Short write: restore position and return
+            if (res < chunk_len) {
+                _ = seek_fn(fd, @intCast(old_pos), 0);
+                fd.position = old_pos;
+                return total_written;
+            }
+        }
+    }
+
+    // 3. Restore position
+    const res2 = seek_fn(fd, @intCast(old_pos), 0);
+    if (res2 < 0) {
+        console.err("sys_pwritev: failed to restore position!", .{});
+    } else {
+        fd.position = @intCast(res2);
+    }
+
+    return total_written;
+}
