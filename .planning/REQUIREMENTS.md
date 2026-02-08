@@ -62,13 +62,13 @@ Requirements for this milestone. Each maps to roadmap phases.
 
 ### Event Notification FDs
 
-- [ ] **EVT-01**: eventfd2 creates event counter fd with O_CLOEXEC/O_NONBLOCK
-- [ ] **EVT-02**: eventfd read/write semantics (counter increment/decrement/block)
-- [ ] **EVT-03**: timerfd_create creates timer fd
-- [ ] **EVT-04**: timerfd_settime arms/disarms timer with absolute or relative time
-- [ ] **EVT-05**: timerfd_gettime returns time until next expiration
-- [ ] **EVT-06**: signalfd4 creates signal fd with signal mask filter
-- [ ] **EVT-07**: All event fds integrate with epoll (pollable)
+- [x] **EVT-01**: eventfd2 creates event counter fd with O_CLOEXEC/O_NONBLOCK
+- [x] **EVT-02**: eventfd read/write semantics (counter increment/decrement/block)
+- [x] **EVT-03**: timerfd_create creates timer fd
+- [x] **EVT-04**: timerfd_settime arms/disarms timer with absolute or relative time
+- [x] **EVT-05**: timerfd_gettime returns time until next expiration
+- [x] **EVT-06**: signalfd4 creates signal fd with signal mask filter
+- [x] **EVT-07**: All event fds integrate with epoll (pollable)
 
 ### Vectored & Positional I/O
 
@@ -186,7 +186,7 @@ Deferred to future milestone. Tracked but not in current roadmap.
 | STUB-01 through STUB-24 | Phase 1 | Complete |
 | CRED-01 through CRED-14 | Phase 2 | Pending |
 | MUX-01 through MUX-06 | Phase 3 | Complete |
-| EVT-01 through EVT-07 | Phase 4 | Pending |
+| EVT-01 through EVT-07 | Phase 4 | Complete |
 | VIO-01 through VIO-07 | Phase 5 | Pending |
 | FS-01 through FS-05 | Phase 6 | Pending |
 | SOCK-01 through SOCK-06 | Phase 7 | Pending |

@@ -15,7 +15,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 1: Quick Wins - Trivial Stubs** - 14 missing syscalls (10 already implemented) returning defaults/no-ops
 - [x] **Phase 2: Credentials & Ownership** - UID/GID infrastructure + chown family
 - [x] **Phase 3: I/O Multiplexing** - epoll backend + select/pselect6
-- [ ] **Phase 4: Event Notification FDs** - eventfd, timerfd, signalfd
+- [x] **Phase 4: Event Notification FDs** - eventfd, timerfd, signalfd
 - [ ] **Phase 5: Vectored & Positional I/O** - readv/preadv/sendfile
 - [ ] **Phase 6: Filesystem Extras** - readlinkat, linkat, symlinkat, utimensat
 - [ ] **Phase 7: Socket Extras** - socketpair, shutdown, sendto/recvfrom, recvmsg/sendmsg
@@ -90,10 +90,10 @@ Plans:
 **Plans**: 4 plans
 
 Plans:
-- [ ] 04-01-PLAN.md -- UAPI constants (all three types) + eventfd kernel implementation + userspace wrappers
-- [ ] 04-02-PLAN.md -- timerfd kernel implementation (polling-based expiration) + userspace wrappers
-- [ ] 04-03-PLAN.md -- signalfd kernel implementation (signal consumption via pending_signals) + userspace wrappers
-- [ ] 04-04-PLAN.md -- Integration tests: eventfd/timerfd/signalfd creation, read/write, epoll integration
+- [x] 04-01-PLAN.md -- UAPI constants (all three types) + eventfd kernel implementation + userspace wrappers
+- [x] 04-02-PLAN.md -- timerfd kernel implementation (polling-based expiration) + userspace wrappers
+- [x] 04-03-PLAN.md -- signalfd kernel implementation (signal consumption via pending_signals) + userspace wrappers
+- [x] 04-04-PLAN.md -- Integration tests: eventfd/timerfd/signalfd creation, read/write, epoll integration
 
 ### Phase 5: Vectored & Positional I/O
 **Goal**: Implement readv/writev families and sendfile for efficient database and file server I/O patterns
@@ -176,7 +176,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9
 | 1. Quick Wins - Trivial Stubs | 4/4 | Complete | 2026-02-06 |
 | 2. Credentials & Ownership | 4/4 | Complete | 2026-02-06 |
 | 3. I/O Multiplexing | 4/4 | Complete | 2026-02-07 |
-| 4. Event Notification FDs | 0/4 | Planned | - |
+| 4. Event Notification FDs | 4/4 | Complete | 2026-02-07 |
 | 5. Vectored & Positional I/O | 0/TBD | Not started | - |
 | 6. Filesystem Extras | 0/TBD | Not started | - |
 | 7. Socket Extras | 0/TBD | Not started | - |
@@ -185,4 +185,4 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9
 
 ---
 *Roadmap created: 2026-02-06*
-*Last updated: 2026-02-07*
+*Last updated: 2026-02-08*
