@@ -9,19 +9,19 @@ See: .planning/PROJECT.md (updated 2026-02-06)
 
 ## Current Position
 
-Phase: 7 of 9 (Socket Extras)
-Plan: 2 of 2 in current phase
-Status: Phase complete
-Last activity: 2026-02-08 - Completed 07-02-PLAN.md (userspace wrappers, tests, fixed aarch64 stack overflow + shutdown)
+Phase: 8 of 9 (Process Control)
+Plan: 1 of 2 in current phase
+Status: In progress
+Last activity: 2026-02-08 - Completed 08-01-PLAN.md (prctl and CPU affinity syscalls)
 
-Progress: [████████░░] 86%
+Progress: [████████░░] 89%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 24
-- Average duration: 7.6 min
-- Total execution time: 3.04 hours
+- Total plans completed: 25
+- Average duration: 7.5 min
+- Total execution time: 3.09 hours
 
 **By Phase:**
 
@@ -34,10 +34,11 @@ Progress: [████████░░] 86%
 | 5 | 3 | 17 min | 5.7 min |
 | 6 | 3 | 56 min | 18.7 min |
 | 7 | 2 | 31 min | 15.5 min |
+| 8 | 1 | 5 min | 5 min |
 
 **Recent Trend:**
-- Last 5 plans: 05-02 (6min), 05-03 (8min), 06-03 (45min), 07-01 (5.5min), 07-02 (25min)
-- Trend: 07-02 took longer due to aarch64 stack overflow investigation + shutdown dispatch fix
+- Last 5 plans: 05-03 (8min), 06-03 (45min), 07-01 (5.5min), 07-02 (25min), 08-01 (5min)
+- Trend: 08-01 returned to fast pace, simple syscall wrappers with no architectural complexity
 
 *Updated after each plan completion*
 
@@ -119,6 +120,10 @@ Recent decisions affecting current work:
 - **07-02:** sys_shutdown needs getSocketpairHandle() - socketpair FDs use different file_ops than full UNIX sockets
 - **07-02:** Added read_shutdown_0/1 flags to UnixSocketPair - POSIX requires read to return EOF after SHUT_RD, not block forever
 - **07-02:** @memset zero-init is safe for UnixSocketPair - Spinlock, atomic.Value(bool), optional pointers all have zero = default
+- **08-01:** Process control syscalls organized in separate control.zig, re-exported through scheduling.zig for dispatch table discovery
+- **08-01:** Thread name stored in existing thread.name[32] field, implementing Linux 15 chars + null semantics
+- **08-01:** Single-CPU kernel validates CPU 0 in affinity mask, returns EINVAL if missing (no state stored)
+- **08-01:** sys_sched_getaffinity returns 128-byte buffer (1024 CPUs) with CPU 0 set
 
 ### Pending Todos
 
@@ -218,8 +223,8 @@ Recent decisions affecting current work:
 ## Session Continuity
 
 Last session: 2026-02-08 (phase execution)
-Stopped at: Phase 7 complete - all socket extras implemented and verified
-Resume file: Next phase - see ROADMAP.md for Phase 8 (Process Control)
+Stopped at: Completed 08-01-PLAN.md (prctl and CPU affinity syscalls)
+Resume file: Next: 08-02-PLAN.md (userspace wrappers and integration tests)
 
 ---
 *State initialized: 2026-02-06*
