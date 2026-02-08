@@ -400,6 +400,10 @@ pub const SYS_INOTIFY_INIT1: usize = 294;
 pub const SYS_PREADV: usize = 295;
 /// Write data from multiple buffers at offset
 pub const SYS_PWRITEV: usize = 296;
+/// Read data at offset into multiple buffers with flags
+pub const SYS_PREADV2: usize = 327;
+/// Write data from multiple buffers at offset with flags
+pub const SYS_PWRITEV2: usize = 328;
 /// Get/set resource limits for any process
 pub const SYS_PRLIMIT64: usize = 302;
 /// Sync single filesystem to disk

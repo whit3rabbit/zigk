@@ -23,6 +23,19 @@ const Iovec = extern struct {
     len: usize,
 };
 
+/// RWF flags for preadv2/pwritev2 (per-call I/O behavior modifiers)
+const RWF_HIPRI: u32 = 0x00000001; // High-priority I/O (requires polling infrastructure)
+const RWF_DSYNC: u32 = 0x00000002; // Per-write equivalent of O_DSYNC
+const RWF_SYNC: u32 = 0x00000004; // Per-write equivalent of O_SYNC
+const RWF_NOWAIT: u32 = 0x00000008; // Non-blocking I/O (fail with EAGAIN if would block)
+const RWF_APPEND: u32 = 0x00000010; // Per-write equivalent of O_APPEND
+const RWF_SUPPORTED: u32 = RWF_HIPRI | RWF_DSYNC | RWF_SYNC | RWF_NOWAIT | RWF_APPEND;
+
+/// Maximum sizes for vectored I/O operations
+const MAX_READV_BYTES: usize = 16 * 1024 * 1024;
+const MAX_WRITEV_BYTES: usize = 16 * 1024 * 1024;
+const MAX_IOVEC_COUNT: usize = 1024;
+
 /// sys_read (0) - Read from file descriptor
 ///
 /// Reads up to count bytes from fd into buf.
@@ -165,10 +178,8 @@ pub fn sys_write(fd_num: usize, buf_ptr: usize, count: usize) SyscallError!usize
 ///
 /// Returns: Total bytes written or error
 pub fn sys_writev(fd: usize, bvec_ptr: usize, count: usize) SyscallError!usize {
-    const MAX_WRITEV_BYTES: usize = 16 * 1024 * 1024;
-
     if (count == 0) return 0;
-    if (count > 1024) return error.EINVAL;
+    if (count > MAX_IOVEC_COUNT) return error.EINVAL;
 
     // Copy iovecs from user
     const kvecs = heap.allocator().alloc(Iovec, count) catch {
@@ -263,10 +274,8 @@ pub fn sys_writev(fd: usize, bvec_ptr: usize, count: usize) SyscallError!usize {
 ///
 /// Returns: Total bytes read or error
 pub fn sys_readv(fd: usize, bvec_ptr: usize, count: usize) SyscallError!usize {
-    const MAX_READV_BYTES: usize = 16 * 1024 * 1024;
-
     if (count == 0) return 0;
-    if (count > 1024) return error.EINVAL;
+    if (count > MAX_IOVEC_COUNT) return error.EINVAL;
 
     // Copy iovecs from user
     const kvecs = heap.allocator().alloc(Iovec, count) catch {
@@ -514,10 +523,8 @@ pub fn sys_pwrite64(fd_num: usize, buf_ptr: usize, count: usize, offset: usize) 
 /// Combines vectored I/O with positional access.
 /// Does not modify file position.
 pub fn sys_preadv(fd_num: usize, bvec_ptr: usize, count: usize, offset: usize) SyscallError!usize {
-    const MAX_READV_BYTES: usize = 16 * 1024 * 1024;
-
     if (count == 0) return 0;
-    if (count > 1024) return error.EINVAL;
+    if (count > MAX_IOVEC_COUNT) return error.EINVAL;
 
     // Copy iovecs from user
     const kvecs = heap.allocator().alloc(Iovec, count) catch {
@@ -635,10 +642,8 @@ pub fn sys_preadv(fd_num: usize, bvec_ptr: usize, count: usize, offset: usize) S
 /// Combines vectored I/O with positional access.
 /// Does not modify file position.
 pub fn sys_pwritev(fd_num: usize, bvec_ptr: usize, count: usize, offset: usize) SyscallError!usize {
-    const MAX_WRITEV_BYTES: usize = 16 * 1024 * 1024;
-
     if (count == 0) return 0;
-    if (count > 1024) return error.EINVAL;
+    if (count > MAX_IOVEC_COUNT) return error.EINVAL;
 
     // Copy iovecs from user
     const kvecs = heap.allocator().alloc(Iovec, count) catch {
@@ -749,4 +754,280 @@ pub fn sys_pwritev(fd_num: usize, bvec_ptr: usize, count: usize, offset: usize) 
     }
 
     return total_written;
+}
+
+/// sys_preadv2 (327) - Read into multiple buffers at offset with flags
+///
+/// Extended version of preadv with per-call RWF_* flags for I/O behavior control.
+/// offset=-1 means use current file position (like readv).
+pub fn sys_preadv2(fd_num: usize, bvec_ptr: usize, count: usize, offset: usize, flags: usize) SyscallError!usize {
+    // Validate flags
+    const flags_u32: u32 = @truncate(flags);
+    if ((flags_u32 & ~RWF_SUPPORTED) != 0) {
+        return error.ENOSYS; // Unknown flags
+    }
+
+    // RWF_HIPRI requires polling infrastructure we don't have
+    if ((flags_u32 & RWF_HIPRI) != 0) {
+        return error.ENOSYS;
+    }
+
+    // RWF_NOWAIT means fail if operation would block
+    if ((flags_u32 & RWF_NOWAIT) != 0) {
+        return error.EAGAIN; // Our I/O is synchronous
+    }
+
+    // RWF_APPEND is not valid for reads
+    if ((flags_u32 & RWF_APPEND) != 0) {
+        return error.EINVAL;
+    }
+
+    // RWF_DSYNC and RWF_SYNC accepted but ignored (no write-back cache)
+
+    // Cast offset to i64 to check for -1
+    const off_i64: i64 = @bitCast(offset);
+
+    if (off_i64 == -1) {
+        // Use current file position (like readv)
+        return sys_readv(fd_num, bvec_ptr, count);
+    } else {
+        // Use specified offset (like preadv)
+        return sys_preadv(fd_num, bvec_ptr, count, offset);
+    }
+}
+
+/// sys_pwritev2 (328) - Write from multiple buffers at offset with flags
+///
+/// Extended version of pwritev with per-call RWF_* flags for I/O behavior control.
+/// offset=-1 means use current file position (like writev).
+/// RWF_APPEND only valid with offset=-1, seeks to EOF before writing.
+pub fn sys_pwritev2(fd_num: usize, bvec_ptr: usize, count: usize, offset: usize, flags: usize) SyscallError!usize {
+    // Validate flags
+    const flags_u32: u32 = @truncate(flags);
+    if ((flags_u32 & ~RWF_SUPPORTED) != 0) {
+        return error.ENOSYS; // Unknown flags
+    }
+
+    // RWF_HIPRI requires polling infrastructure we don't have
+    if ((flags_u32 & RWF_HIPRI) != 0) {
+        return error.ENOSYS;
+    }
+
+    // RWF_NOWAIT means fail if operation would block
+    if ((flags_u32 & RWF_NOWAIT) != 0) {
+        return error.EAGAIN; // Our I/O is synchronous
+    }
+
+    // RWF_DSYNC and RWF_SYNC accepted but ignored (no write-back cache)
+
+    // Cast offset to i64 to check for -1
+    const off_i64: i64 = @bitCast(offset);
+
+    // RWF_APPEND only valid with offset=-1 (current position mode)
+    if ((flags_u32 & RWF_APPEND) != 0 and off_i64 != -1) {
+        return error.EINVAL;
+    }
+
+    if (off_i64 == -1) {
+        if ((flags_u32 & RWF_APPEND) != 0) {
+            // Seek to EOF before writing
+            // Get FD first
+            const table = base.getGlobalFdTable();
+            const fd_u32 = safeFdCast(fd_num) orelse return error.EBADF;
+            const fd = table.get(fd_u32) orelse return error.EBADF;
+
+            if (!fd.isWritable()) {
+                return error.EBADF;
+            }
+
+            if (fd.ops.seek == null) {
+                return error.ESPIPE;
+            }
+
+            // Seek to end
+            const held = fd.lock.acquire();
+            defer held.release();
+
+            const seek_fn = fd.ops.seek.?;
+            const end_pos = seek_fn(fd, 0, 2); // SEEK_END
+            if (end_pos < 0) return error.EINVAL;
+            fd.position = @intCast(end_pos);
+
+            // Now perform writev from current position (EOF)
+            // But we already hold the lock, and sys_writev will try to acquire it
+            // So we need to implement writev logic inline here
+
+            // Actually, easier: just use sys_writev since we've already seeked to EOF
+            // But unlock first
+            held.release();
+            return sys_writev(fd_num, bvec_ptr, count);
+        } else {
+            // Use current file position (like writev)
+            return sys_writev(fd_num, bvec_ptr, count);
+        }
+    } else {
+        // Use specified offset (like pwritev)
+        return sys_pwritev(fd_num, bvec_ptr, count, offset);
+    }
+}
+
+/// sys_sendfile (40) - Transfer data between file descriptors in kernel space
+///
+/// Efficiently copies data from in_fd to out_fd without userspace buffer.
+/// offset_ptr: if non-zero, pointer to u64 offset (updated after transfer).
+///             if zero, uses in_fd's current position.
+pub fn sys_sendfile(out_fd_num: usize, in_fd_num: usize, offset_ptr: usize, count: usize) SyscallError!usize {
+    if (count == 0) return 0;
+
+    // Get FDs
+    const table = base.getGlobalFdTable();
+
+    const out_fd_u32 = safeFdCast(out_fd_num) orelse return error.EBADF;
+    const out_fd = table.get(out_fd_u32) orelse return error.EBADF;
+
+    const in_fd_u32 = safeFdCast(in_fd_num) orelse return error.EBADF;
+    const in_fd = table.get(in_fd_u32) orelse return error.EBADF;
+
+    // Validate FDs
+    if (!out_fd.isWritable()) return error.EBADF;
+    if (!in_fd.isReadable()) return error.EBADF;
+
+    // in_fd must be seekable (no pipes/sockets as source)
+    if (in_fd.ops.read == null or in_fd.ops.seek == null) {
+        return error.EINVAL;
+    }
+
+    // out_fd cannot have O_APPEND flag (conflicting semantics)
+    const O_APPEND: u32 = 0x0400; // From fd.zig
+    if ((out_fd.flags & O_APPEND) != 0) {
+        return error.EINVAL;
+    }
+
+    // Handle offset parameter
+    var read_offset: u64 = 0;
+    var use_offset_ptr = false;
+
+    if (offset_ptr != 0) {
+        // Read offset from userspace
+        if (!isValidUserAccess(offset_ptr, @sizeOf(u64), AccessMode.Read)) {
+            return error.EFAULT;
+        }
+        const uptr = UserPtr.from(offset_ptr);
+        var offset_buf: [8]u8 = undefined;
+        _ = uptr.copyToKernel(&offset_buf) catch return error.EFAULT;
+        read_offset = std.mem.readInt(u64, &offset_buf, .little);
+        use_offset_ptr = true;
+    } else {
+        // Use in_fd's current position
+        read_offset = in_fd.position;
+    }
+
+    // Transfer loop with kernel buffer
+    const kbuf_size = 4096; // Page-sized chunks
+    const kbuf = heap.allocator().alloc(u8, kbuf_size) catch return error.ENOMEM;
+    defer heap.allocator().free(kbuf);
+
+    var total_sent: usize = 0;
+
+    while (total_sent < count) {
+        const remaining = count - total_sent;
+        const chunk_size = @min(remaining, kbuf_size);
+
+        // Read from in_fd at read_offset
+        const in_held = in_fd.lock.acquire();
+        const old_in_pos = in_fd.position;
+
+        const seek_fn = in_fd.ops.seek.?;
+        const seek_res = seek_fn(in_fd, @intCast(read_offset), 0); // SEEK_SET
+        if (seek_res < 0) {
+            in_held.release();
+            if (total_sent > 0) return total_sent;
+            return error.EINVAL;
+        }
+        in_fd.position = @intCast(seek_res);
+
+        const read_fn = in_fd.ops.read.?;
+        const bytes_read_raw = read_fn(in_fd, kbuf[0..chunk_size]);
+
+        // Restore position if not using offset_ptr
+        if (!use_offset_ptr) {
+            _ = seek_fn(in_fd, @intCast(old_in_pos + @as(u64, @intCast(@max(0, bytes_read_raw)))), 0);
+            in_fd.position = old_in_pos + @as(u64, @intCast(@max(0, bytes_read_raw)));
+        } else {
+            _ = seek_fn(in_fd, @intCast(old_in_pos), 0);
+            in_fd.position = old_in_pos;
+        }
+
+        in_held.release();
+
+        if (bytes_read_raw <= 0) {
+            // EOF or error
+            if (bytes_read_raw == 0) break; // EOF
+            if (total_sent > 0) return total_sent;
+            return error.EIO;
+        }
+
+        const bytes_read: usize = @intCast(bytes_read_raw);
+
+        // Write to out_fd
+        const out_held = out_fd.lock.acquire();
+        const write_fn = out_fd.ops.write orelse {
+            out_held.release();
+            if (total_sent > 0) return total_sent;
+            return error.EBADF;
+        };
+
+        const bytes_written_raw = write_fn(out_fd, kbuf[0..bytes_read]);
+        out_held.release();
+
+        if (bytes_written_raw <= 0) {
+            if (total_sent > 0) return total_sent;
+            return error.EIO;
+        }
+
+        const bytes_written: usize = @intCast(bytes_written_raw);
+
+        // Update counters
+        const new_total = @addWithOverflow(total_sent, bytes_written);
+        if (new_total[1] != 0) {
+            // Overflow
+            break;
+        }
+        total_sent = new_total[0];
+
+        const new_offset = @addWithOverflow(read_offset, bytes_written);
+        if (new_offset[1] != 0) {
+            // Offset overflow
+            break;
+        }
+        read_offset = new_offset[0];
+
+        // Short write: stop
+        if (bytes_written < bytes_read) {
+            break;
+        }
+
+        // Short read (EOF): stop
+        if (bytes_read < chunk_size) {
+            break;
+        }
+    }
+
+    // Write updated offset back to userspace if using offset_ptr
+    if (use_offset_ptr and offset_ptr != 0) {
+        if (!isValidUserAccess(offset_ptr, @sizeOf(u64), AccessMode.Write)) {
+            // Can't write back offset, but transfer succeeded
+            // Just return what we sent (Linux behavior)
+            return total_sent;
+        }
+        const uptr = UserPtr.from(offset_ptr);
+        var offset_buf: [8]u8 = undefined;
+        std.mem.writeInt(u64, &offset_buf, read_offset, .little);
+        _ = uptr.copyFromKernel(&offset_buf) catch {
+            // Can't write back, but return success
+            return total_sent;
+        };
+    }
+
+    return total_sent;
 }

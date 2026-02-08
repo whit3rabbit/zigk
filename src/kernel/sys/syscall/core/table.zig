@@ -53,7 +53,7 @@ pub export fn dispatch_syscall(frame: *SyscallFrame) callconv(.c) void {
     const syscall_num = frame.getSyscallNumber();
     // Pre-calculate valid handlers at comptime to generate clean switch cases
     const handler_entries = comptime blk: {
-        @setEvalBranchQuota(10000);
+        @setEvalBranchQuota(20000);
         const SyscallEntry = struct { value: usize, module: type, name: []const u8 };
         var entries: []const SyscallEntry = &.{};
         const decls = @typeInfo(uapi.syscalls).@"struct".decls;

@@ -15,6 +15,9 @@ pub const sys_pread64 = read_write.sys_pread64;
 pub const sys_pwrite64 = read_write.sys_pwrite64;
 pub const sys_preadv = read_write.sys_preadv;
 pub const sys_pwritev = read_write.sys_pwritev;
+pub const sys_preadv2 = read_write.sys_preadv2;
+pub const sys_pwritev2 = read_write.sys_pwritev2;
+pub const sys_sendfile = read_write.sys_sendfile;
 
 pub const sys_eventfd2 = eventfd.sys_eventfd2;
 pub const sys_eventfd = eventfd.sys_eventfd;

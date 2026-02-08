@@ -404,6 +404,10 @@ pub const SYS_GETDENTS64: usize = 61;
 pub const SYS_PREADV: usize = 69;
 /// Write data from multiple buffers at offset
 pub const SYS_PWRITEV: usize = 70;
+/// Read data at offset into multiple buffers with flags
+pub const SYS_PREADV2: usize = 286;
+/// Write data from multiple buffers at offset with flags
+pub const SYS_PWRITEV2: usize = 287;
 
 // ============================================================================
 // Misc
