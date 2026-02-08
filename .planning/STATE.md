@@ -5,23 +5,23 @@
 See: .planning/PROJECT.md (updated 2026-02-06)
 
 **Core value:** Every implemented syscall works correctly on both x86_64 and aarch64, tested via the integration test harness.
-**Current focus:** Phase 5 and 6 complete. Next: Phase 7 - Socket Extras
+**Current focus:** Phase 7 complete. Next: Phase 8 - Process Control
 
 ## Current Position
 
 Phase: 7 of 9 (Socket Extras)
-Plan: 1 of 2 in current phase
-Status: In progress
-Last activity: 2026-02-08 - Completed 07-01-PLAN.md (fixed IrqLock initialization ordering)
+Plan: 2 of 2 in current phase
+Status: Phase complete
+Last activity: 2026-02-08 - Completed 07-02-PLAN.md (userspace wrappers, tests, fixed aarch64 stack overflow + shutdown)
 
-Progress: [████████░░] 83%
+Progress: [████████░░] 86%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 23
-- Average duration: 7.2 min
-- Total execution time: 2.78 hours
+- Total plans completed: 24
+- Average duration: 7.6 min
+- Total execution time: 3.04 hours
 
 **By Phase:**
 
@@ -33,11 +33,11 @@ Progress: [████████░░] 83%
 | 4 | 4 | 24 min | 6 min |
 | 5 | 3 | 17 min | 5.7 min |
 | 6 | 3 | 56 min | 18.7 min |
-| 7 | 1 | 5.5 min | 5.5 min |
+| 7 | 2 | 31 min | 15.5 min |
 
 **Recent Trend:**
-- Last 5 plans: 05-01 (3min), 05-02 (6min), 05-03 (8min), 06-03 (45min), 07-01 (5.5min)
-- Trend: Bugfix plans are fast (5-6min), implementation plans are quick (3-8min), test debugging takes longer (45min)
+- Last 5 plans: 05-02 (6min), 05-03 (8min), 06-03 (45min), 07-01 (5.5min), 07-02 (25min)
+- Trend: 07-02 took longer due to aarch64 stack overflow investigation + shutdown dispatch fix
 
 *Updated after each plan completion*
 
@@ -115,6 +115,10 @@ Recent decisions affecting current work:
 - **05-02:** sendfile rejects O_APPEND on out_fd per Linux semantics (EINVAL, conflicting offset semantics)
 - **05-02:** Refactored MAX_*_BYTES/MAX_IOVEC_COUNT to module scope (eliminates duplication in 4 functions)
 - **07-01:** Socket subsystem init moved before all early returns in initNetwork - IrqLock must be initialized before any socket syscall executes
+- **07-02:** UnixSocketPair.initInPlace() replaces init() - 11KB struct returned by value overflows 64KB kernel stack on aarch64
+- **07-02:** sys_shutdown needs getSocketpairHandle() - socketpair FDs use different file_ops than full UNIX sockets
+- **07-02:** Added read_shutdown_0/1 flags to UnixSocketPair - POSIX requires read to return EOF after SHUT_RD, not block forever
+- **07-02:** @memset zero-init is safe for UnixSocketPair - Spinlock, atomic.Value(bool), optional pointers all have zero = default
 
 ### Pending Todos
 
@@ -135,11 +139,14 @@ Recent decisions affecting current work:
 
 ### Blockers/Concerns
 
-**Phase 7 In Progress (Socket Extras):**
-- ✅ IrqLock initialization bug FIXED (07-01)
-- Socket syscalls now functional on both architectures
-- 7 out of 8 socket tests passing (1 skip for unimplemented listen)
-- Phase 7 work is unblocked
+**Phase 7 Complete (Socket Extras):**
+- ✅ IrqLock initialization bug FIXED (07-01) - moved initSyscallOnly before early returns
+- ✅ Userspace API complete (07-02) - socketpair, sendmsg, recvmsg, AF_UNIX, SHUT_* constants
+- ✅ 12 new integration tests (07-02) - 10 pass, 1 skip, identical on both architectures
+- ✅ Fixed aarch64 stack overflow in UnixSocketPair.initInPlace (11KB by-value return)
+- ✅ Fixed shutdown dispatch for socketpair handles (getSocketpairHandle helper)
+- ✅ Fixed read-side shutdown flags (SHUT_RD/SHUT_RDWR now returns EOF on read)
+- Test count: 284 total (274 execute before SFS timeout), 248-250 passing
 
 **Phase 3 Complete (I/O Multiplexing):**
 - ✅ FileOps.poll foundation complete (03-01) - all FD types now have poll methods
@@ -210,9 +217,9 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-02-08 (plan execution)
-Stopped at: Completed 07-01-PLAN.md (IrqLock initialization fix)
-Resume file: Phase 7 in progress - next plan 07-02-PLAN.md (socket options)
+Last session: 2026-02-08 (phase execution)
+Stopped at: Phase 7 complete - all socket extras implemented and verified
+Resume file: Next phase - see ROADMAP.md for Phase 8 (Process Control)
 
 ---
 *State initialized: 2026-02-06*

@@ -18,7 +18,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 4: Event Notification FDs** - eventfd, timerfd, signalfd
 - [x] **Phase 5: Vectored & Positional I/O** - readv/preadv/sendfile
 - [x] **Phase 6: Filesystem Extras** - readlinkat, linkat, symlinkat, utimensat
-- [ ] **Phase 7: Socket Extras** - socketpair, shutdown, sendto/recvfrom, recvmsg/sendmsg
+- [x] **Phase 7: Socket Extras** - socketpair, shutdown, sendto/recvfrom, recvmsg/sendmsg
 - [ ] **Phase 8: Process Control** - prctl, sched affinity
 - [ ] **Phase 9: SysV IPC** - shared memory, semaphores, message queues
 
@@ -140,8 +140,8 @@ Plans:
 **Plans**: 2 plans
 
 Plans:
-- [ ] 07-01-PLAN.md -- Fix IrqLock initialization ordering bug in initNetwork + verify existing 8 socket tests pass
-- [ ] 07-02-PLAN.md -- Add userspace wrappers (socketpair, sendmsg, recvmsg) + constants (AF_UNIX, SHUT_*) + 12 integration tests
+- [x] 07-01-PLAN.md -- Fix IrqLock initialization ordering bug in initNetwork + verify existing 8 socket tests pass
+- [x] 07-02-PLAN.md -- Add userspace wrappers (socketpair, sendmsg, recvmsg) + constants (AF_UNIX, SHUT_*) + 12 integration tests
 
 ### Phase 8: Process Control
 **Goal**: Implement prctl for process naming and sched_setaffinity/getaffinity for CPU pinning
@@ -184,10 +184,10 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9
 | 4. Event Notification FDs | 4/4 | Complete | 2026-02-07 |
 | 5. Vectored & Positional I/O | 3/3 | Complete | 2026-02-08 |
 | 6. Filesystem Extras | 3/3 | Complete | 2026-02-07 |
-| 7. Socket Extras | 0/2 | Not started | - |
+| 7. Socket Extras | 2/2 | Complete | 2026-02-08 |
 | 8. Process Control | 0/TBD | Not started | - |
 | 9. SysV IPC | 0/TBD | Not started | - |
 
 ---
 *Roadmap created: 2026-02-06*
-*Last updated: 2026-02-08*
+*Last updated: 2026-02-08 (Phase 7 complete)*
