@@ -13,6 +13,7 @@ const misc_tests = @import("tests/syscall/misc.zig");
 const at_ops_tests = @import("tests/syscall/at_ops.zig");
 const io_mux_tests = @import("tests/syscall/io_mux.zig");
 const event_fds_tests = @import("tests/syscall/event_fds.zig");
+const fs_extras_tests = @import("tests/syscall/fs_extras.zig");
 const fs_tests = @import("tests/fs/basic.zig");
 const fs_error_tests = @import("tests/fs/errors.zig");
 const regression_tests = @import("tests/regression/sfs_issues.zig");
@@ -382,6 +383,20 @@ export fn main(argc: i32, argv: [*][*:0]u8) i32 {
     runner.runTest("event_fds: signalfd create and close", event_fds_tests.testSignalfdCreateAndClose);
     runner.runTest("event_fds: signalfd read signal", event_fds_tests.testSignalfdReadSignal);
     runner.runTest("event_fds: signalfd epoll integration", event_fds_tests.testSignalfdEpollIntegration);
+
+    // Filesystem extras tests
+    runner.runTest("fs_extras: readlinkat basic", fs_extras_tests.testReadlinkatBasic);
+    runner.runTest("fs_extras: readlinkat invalid path", fs_extras_tests.testReadlinkatInvalidPath);
+    runner.runTest("fs_extras: linkat basic", fs_extras_tests.testLinkatBasic);
+    runner.runTest("fs_extras: linkat cross device", fs_extras_tests.testLinkatCrossDevice);
+    runner.runTest("fs_extras: symlinkat basic", fs_extras_tests.testSymlinkatBasic);
+    runner.runTest("fs_extras: symlinkat empty target", fs_extras_tests.testSymlinkatEmptyTarget);
+    runner.runTest("fs_extras: utimensat null times", fs_extras_tests.testUtimensatNull);
+    runner.runTest("fs_extras: utimensat specific time", fs_extras_tests.testUtimensatSpecificTime);
+    runner.runTest("fs_extras: utimensat symlink nofollow", fs_extras_tests.testUtimensatSymlinkNofollow);
+    runner.runTest("fs_extras: utimensat invalid nsec", fs_extras_tests.testUtimensatInvalidNsec);
+    runner.runTest("fs_extras: futimesat basic", fs_extras_tests.testFutimesatBasic);
+    runner.runTest("fs_extras: futimesat specific time", fs_extras_tests.testFutimesatSpecificTime);
 
     // Stress tests
     runner.runTest("stress: write 10MB file", stress_tests.testWrite10MbFile);
