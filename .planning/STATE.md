@@ -10,18 +10,18 @@ See: .planning/PROJECT.md (updated 2026-02-06)
 ## Current Position
 
 Phase: 4 of 9 (Event Notification FDs)
-Plan: 2 of 4 in current phase
+Plan: 3 of 4 in current phase
 Status: In progress
-Last activity: 2026-02-07 - Completed 04-02-PLAN.md (timerfd implementation)
+Last activity: 2026-02-07 - Completed 04-03-PLAN.md (signalfd implementation)
 
-Progress: [████░░░░░░] 39%
+Progress: [████░░░░░░] 42%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 14
+- Total plans completed: 15
 - Average duration: 5.3 min
-- Total execution time: 1.25 hours
+- Total execution time: 1.33 hours
 
 **By Phase:**
 
@@ -30,11 +30,11 @@ Progress: [████░░░░░░] 39%
 | 1 | 4 | 21 min | 5 min |
 | 2 | 4 | 20 min | 5 min |
 | 3 | 4 | 26 min | 6.5 min |
-| 4 | 2 | 12 min | 6 min |
+| 4 | 3 | 17 min | 5.7 min |
 
 **Recent Trend:**
-- Last 5 plans: 03-03 (6min), 03-04 (9min), 04-01 (7min), 04-02 (5min)
-- Trend: Implementation plans back to 5-7min range after testing spike
+- Last 5 plans: 03-04 (9min), 04-01 (7min), 04-02 (5min), 04-03 (5min)
+- Trend: Implementation plans consistently 5min, testing plans 7-9min
 
 *Updated after each plan completion*
 
@@ -86,6 +86,10 @@ Recent decisions affecting current work:
 - **04-02:** Blocking timerfd read uses yield loop (similar to epoll_wait) with 10ms tick granularity
 - **04-02:** CLOCK_BOOTTIME mapped to CLOCK_MONOTONIC (no suspend time tracking yet)
 - **04-02:** getClockNanoseconds helper reuses hal.timing TSC and hal.rtc for time sources
+- **04-03:** Yield loop for signalfd blocking (release lock, sched.yield, retry) instead of signal delivery wakeup integration
+- **04-03:** Filter SIGKILL and SIGSTOP from mask silently (POSIX requirement, cannot be caught)
+- **04-03:** Consume signal by clearing pending_signals bit atomically during read (prevents double delivery to handler)
+- **04-03:** Only ssi_signo populated in SignalFdSigInfo (metadata requires signal queue infrastructure)
 
 ### Pending Todos
 
@@ -113,8 +117,10 @@ Recent decisions affecting current work:
 - ✅ eventfd userspace wrappers complete (04-01)
 - ✅ timerfd_create/settime/gettime syscalls complete (04-02) - polling-based expiration, one-shot/periodic timers
 - ✅ timerfd userspace wrappers complete (04-02)
+- ✅ signalfd4/signalfd syscalls complete (04-03) - signal consumption, mask filtering, epoll integration
+- ✅ signalfd userspace wrappers complete (04-03)
 - Test count: 217 (no new tests yet - Phase 4 tests in plan 04-04)
-- Next: 04-03 signalfd implementation
+- Next: 04-04 integration tests for all event FD types
 
 **Phase 9 Considerations (SysV IPC):**
 - SFS filesystem has close deadlock and 64-file limit
@@ -135,7 +141,7 @@ Recent decisions affecting current work:
 ## Session Continuity
 
 Last session: 2026-02-07 (plan execution)
-Stopped at: Completed 04-02-PLAN.md (timerfd implementation)
+Stopped at: Completed 04-03-PLAN.md (signalfd implementation)
 Resume file: None
 
 ---
