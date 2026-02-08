@@ -32,9 +32,15 @@ const SIGKILL: u64 = 9;
 const SIGSTOP: u64 = 19;
 
 /// Signalfd state
+///
+/// Lifecycle: ref_count starts at 1 (owned by the FD). Each active read/poll
+/// operation holds an additional reference. Close sets the closed flag and drops
+/// the FD's reference. The state is freed when the last reference is dropped.
 const SignalFdState = struct {
     sigmask: u64,
     lock: sync.Spinlock,
+    closed: std.atomic.Value(bool),
+    ref_count: std.atomic.Value(u32),
     blocked_readers: ?*sched.Thread,
     reader_woken: std.atomic.Value(bool),
 
@@ -42,9 +48,21 @@ const SignalFdState = struct {
         return SignalFdState{
             .sigmask = sigmask,
             .lock = .{},
+            .closed = std.atomic.Value(bool).init(false),
+            .ref_count = std.atomic.Value(u32).init(1),
             .blocked_readers = null,
             .reader_woken = std.atomic.Value(bool).init(false),
         };
+    }
+
+    fn ref(self: *SignalFdState) void {
+        _ = self.ref_count.fetchAdd(1, .monotonic);
+    }
+
+    fn unref(self: *SignalFdState) void {
+        if (self.ref_count.fetchSub(1, .acq_rel) == 1) {
+            heap.allocator().destroy(self);
+        }
     }
 };
 
@@ -61,24 +79,30 @@ fn signalfdRead(fd: *fd_mod.FileDescriptor, buf: []u8) isize {
     }
 
     const state: *SignalFdState = @ptrCast(@alignCast(fd.private_data));
+    state.ref();
+    defer state.unref();
+
     const current = sched.getCurrentThread() orelse {
         return Errno.EINVAL.toReturn();
     };
 
     while (true) {
+        if (state.closed.load(.acquire)) return Errno.EBADF.toReturn();
+
         const held = state.lock.acquire();
 
-        // Check for pending signals in our mask
-        const pending = current.pending_signals & state.sigmask;
+        // Check for pending signals in our mask (atomic load for SMP visibility)
+        const pending = @atomicLoad(u64, &current.pending_signals, .acquire) & state.sigmask;
 
         if (pending != 0) {
             // Found a signal - find first set bit
             const sig_bit = @ctz(pending);
             const signum = sig_bit + 1;
 
-            // CRITICAL: Clear the pending bit to consume the signal
-            // This prevents the signal handler from also receiving it
-            current.pending_signals &= ~(@as(u64, 1) << @intCast(sig_bit));
+            // CRITICAL: Atomically clear the pending bit to consume the signal.
+            // Must use atomicRmw because signal delivery sets bits without
+            // holding our spinlock - a plain &= would race and lose signals.
+            _ = @atomicRmw(u64, &current.pending_signals, .And, ~(@as(u64, 1) << @intCast(sig_bit)), .acq_rel);
 
             held.release();
 
@@ -116,12 +140,17 @@ fn signalfdPoll(fd: *fd_mod.FileDescriptor, requested_events: u32) u32 {
     _ = requested_events;
 
     const state: *SignalFdState = @ptrCast(@alignCast(fd.private_data));
+    state.ref();
+    defer state.unref();
+
+    if (state.closed.load(.acquire)) return 0;
+
     const current = sched.getCurrentThread() orelse return 0;
 
     var revents: u32 = 0;
 
-    // Readable if any signals in mask are pending
-    const pending = current.pending_signals & state.sigmask;
+    // Readable if any signals in mask are pending (atomic for SMP visibility)
+    const pending = @atomicLoad(u64, &current.pending_signals, .acquire) & state.sigmask;
     if (pending != 0) {
         revents |= uapi.epoll.EPOLLIN;
     }
@@ -131,7 +160,12 @@ fn signalfdPoll(fd: *fd_mod.FileDescriptor, requested_events: u32) u32 {
 
 fn signalfdClose(fd: *fd_mod.FileDescriptor) isize {
     const state: *SignalFdState = @ptrCast(@alignCast(fd.private_data));
-    heap.allocator().destroy(state);
+
+    // Mark as closed so blocked readers exit with EBADF
+    state.closed.store(true, .release);
+
+    // Drop the FD's reference. Last active operation to unref frees the state.
+    state.unref();
     return 0;
 }
 
@@ -186,8 +220,16 @@ pub fn sys_signalfd4(fd_num_raw: usize, mask_ptr: usize, mask_size: usize, flags
         if (fd.ops != &signalfd_file_ops) return error.EINVAL;
 
         const state: *SignalFdState = @ptrCast(@alignCast(fd.private_data));
+        // Hold a reference to prevent use-after-free if a concurrent close()
+        // drops the FD's reference between table.get() and lock.acquire().
+        state.ref();
+        defer state.unref();
+
         const held = state.lock.acquire();
         defer held.release();
+
+        // Check if closed between table.get() and lock acquisition
+        if (state.closed.load(.acquire)) return error.EBADF;
 
         // Update mask under lock
         state.sigmask = filtered_mask;
@@ -227,7 +269,7 @@ pub fn sys_signalfd4(fd_num_raw: usize, mask_ptr: usize, mask_size: usize, flags
     // Install in FD table
     const table = base.getGlobalFdTable();
     const new_fd_num = table.allocAndInstall(fd) orelse {
-        heap.allocator().destroy(fd);
+        // errdefer handles cleanup of fd and state
         return error.EMFILE;
     };
 

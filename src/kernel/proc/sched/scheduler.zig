@@ -682,8 +682,9 @@ fn processAlarmExpirations(now: u64) void {
             const thread: *Thread = @ptrCast(@alignCast(thread_ptr));
 
             // Set SIGALRM pending bit (signal number 14)
+            // Atomic for SMP safety - signalfd and signal handlers clear bits concurrently
             const sig_bit: u64 = @as(u64, 1) << @intCast(uapi.signal.SIGALRM - 1);
-            thread.pending_signals |= sig_bit;
+            _ = @atomicRmw(u64, &thread.pending_signals, .Or, sig_bit, .release);
 
             // Wake thread if blocked so signal handler can run
             if (thread.state == .Blocked) {

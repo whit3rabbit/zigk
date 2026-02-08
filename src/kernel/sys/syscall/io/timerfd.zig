@@ -32,9 +32,15 @@ const UserPtr = base.UserPtr;
 const Errno = uapi.errno.Errno;
 
 /// Timerfd state
+///
+/// Lifecycle: ref_count starts at 1 (owned by the FD). Each active read/poll
+/// operation holds an additional reference. Close sets the closed flag and drops
+/// the FD's reference. The state is freed when the last reference is dropped.
 const TimerFdState = struct {
     clockid: i32,
     lock: sync.Spinlock,
+    closed: std.atomic.Value(bool),
+    ref_count: std.atomic.Value(u32),
     armed: bool,
     next_expiry_ns: u64,
     interval_ns: u64,
@@ -46,6 +52,8 @@ const TimerFdState = struct {
         return TimerFdState{
             .clockid = clockid,
             .lock = .{},
+            .closed = std.atomic.Value(bool).init(false),
+            .ref_count = std.atomic.Value(u32).init(1),
             .armed = false,
             .next_expiry_ns = 0,
             .interval_ns = 0,
@@ -53,6 +61,16 @@ const TimerFdState = struct {
             .blocked_readers = null,
             .reader_woken = std.atomic.Value(bool).init(false),
         };
+    }
+
+    fn ref(self: *TimerFdState) void {
+        _ = self.ref_count.fetchAdd(1, .monotonic);
+    }
+
+    fn unref(self: *TimerFdState) void {
+        if (self.ref_count.fetchSub(1, .acq_rel) == 1) {
+            heap.allocator().destroy(self);
+        }
     }
 };
 
@@ -94,11 +112,12 @@ fn getClockNanoseconds(clockid: i32) u64 {
     return 0;
 }
 
-/// Convert timespec to nanoseconds
-fn timespecToNanoseconds(ts: uapi.abi.Timespec) u64 {
-    const sec_ns: u64 = @as(u64, @intCast(@max(0, ts.tv_sec))) * 1_000_000_000;
-    const nsec: u64 = @as(u64, @intCast(@max(0, ts.tv_nsec)));
-    return sec_ns + nsec;
+/// Convert timespec to nanoseconds, returning null on overflow
+fn timespecToNanoseconds(ts: uapi.abi.Timespec) ?u64 {
+    const secs = @as(u64, @intCast(@max(0, ts.tv_sec)));
+    const sec_ns = std.math.mul(u64, secs, 1_000_000_000) catch return null;
+    const nsec = @as(u64, @intCast(@max(0, ts.tv_nsec)));
+    return std.math.add(u64, sec_ns, nsec) catch null;
 }
 
 /// Convert nanoseconds to timespec
@@ -121,13 +140,14 @@ fn updateExpiryCount(state: *TimerFdState) void {
             // Periodic timer - calculate how many intervals elapsed
             const elapsed = now_ns - state.next_expiry_ns;
             const count: u64 = (elapsed / state.interval_ns) + 1;
-            state.expiry_count += count;
+            state.expiry_count = state.expiry_count +| count; // saturating add
 
-            // Advance next_expiry_ns by count intervals
-            state.next_expiry_ns += count * state.interval_ns;
+            // Advance next_expiry_ns by count intervals (saturating)
+            const advance = count *| state.interval_ns; // saturating mul
+            state.next_expiry_ns = state.next_expiry_ns +| advance; // saturating add
         } else {
             // One-shot timer - disarm after single expiration
-            state.expiry_count += 1;
+            state.expiry_count = state.expiry_count +| 1; // saturating add
             state.armed = false;
         }
     }
@@ -137,8 +157,12 @@ fn timerfdRead(fd: *fd_mod.FileDescriptor, buf: []u8) isize {
     if (buf.len < 8) return Errno.EINVAL.toReturn();
 
     const state: *TimerFdState = @ptrCast(@alignCast(fd.private_data));
+    state.ref();
+    defer state.unref();
 
     while (true) {
+        if (state.closed.load(.acquire)) return Errno.EBADF.toReturn();
+
         const held = state.lock.acquire();
 
         // Update expiry count based on current time
@@ -185,6 +209,10 @@ fn timerfdPoll(fd: *fd_mod.FileDescriptor, requested_events: u32) u32 {
     _ = requested_events;
 
     const state: *TimerFdState = @ptrCast(@alignCast(fd.private_data));
+    state.ref();
+    defer state.unref();
+
+    if (state.closed.load(.acquire)) return 0;
 
     const held = state.lock.acquire();
     defer held.release();
@@ -204,7 +232,21 @@ fn timerfdPoll(fd: *fd_mod.FileDescriptor, requested_events: u32) u32 {
 
 fn timerfdClose(fd: *fd_mod.FileDescriptor) isize {
     const state: *TimerFdState = @ptrCast(@alignCast(fd.private_data));
-    heap.allocator().destroy(state);
+
+    // Mark as closed and wake any blocked readers so they can exit with EBADF
+    const held = state.lock.acquire();
+    state.closed.store(true, .release);
+
+    if (state.blocked_readers) |t| {
+        state.blocked_readers = null;
+        state.reader_woken.store(true, .release);
+        sched.unblock(t);
+    }
+
+    held.release();
+
+    // Drop the FD's reference. Last active operation to unref frees the state.
+    state.unref();
     return 0;
 }
 
@@ -280,7 +322,7 @@ pub fn sys_timerfd_create(clockid: usize, flags: usize) SyscallError!usize {
     // Install in FD table
     const table = base.getGlobalFdTable();
     const fd_num = table.allocAndInstall(fd) orelse {
-        heap.allocator().destroy(fd);
+        // errdefer handles cleanup of fd and state
         return error.EMFILE;
     };
 
@@ -306,6 +348,10 @@ pub fn sys_timerfd_settime(fd_num: usize, flags: usize, new_value_ptr: usize, ol
     if (fd.ops.read != timerfdRead) return error.EINVAL;
 
     const state: *TimerFdState = @ptrCast(@alignCast(fd.private_data));
+    // Hold a reference to prevent use-after-free if a concurrent close()
+    // drops the FD's reference between table.get() and lock.acquire().
+    state.ref();
+    defer state.unref();
 
     // Read new_value from userspace
     const new_value = UserPtr.from(new_value_ptr).readValue(uapi.timerfd.ITimerSpec) catch {
@@ -324,12 +370,31 @@ pub fn sys_timerfd_settime(fd_num: usize, flags: usize, new_value_ptr: usize, ol
     const valid_flags = uapi.timerfd.TFD_TIMER_ABSTIME;
     if ((flags & ~valid_flags) != 0) return error.EINVAL;
 
+    // Validate new timespec values can be converted before taking the lock
+    const it_value_ns = timespecToNanoseconds(new_value.it_value) orelse {
+        return error.EINVAL;
+    };
+    const it_interval_ns = timespecToNanoseconds(new_value.it_interval) orelse {
+        return error.EINVAL;
+    };
+
+    // Hold the lock for the entire read-modify cycle (no release/re-acquire gap).
+    // Compute old_value under the lock, modify timer state, then release.
+    // Write old_value to userspace AFTER releasing the lock to avoid holding
+    // a spinlock during a potentially-faulting user memory access.
     const held = state.lock.acquire();
+
+    // Check if closed between table.get() and lock acquisition
+    if (state.closed.load(.acquire)) {
+        held.release();
+        return error.EBADF;
+    }
 
     // Update expiry count first for accurate old_value
     updateExpiryCount(state);
 
-    // Save old value if requested
+    // Capture old value under lock if requested
+    var old_value_local: ?uapi.timerfd.ITimerSpec = null;
     if (old_value_ptr != 0) {
         var old_value: uapi.timerfd.ITimerSpec = undefined;
 
@@ -343,24 +408,14 @@ pub fn sys_timerfd_settime(fd_num: usize, flags: usize, new_value_ptr: usize, ol
             old_value.it_value = nanosecondsToTimespec(remaining_ns);
             old_value.it_interval = nanosecondsToTimespec(state.interval_ns);
         } else {
-            // Disarmed - both zero
             old_value.it_value = .{ .tv_sec = 0, .tv_nsec = 0 };
             old_value.it_interval = .{ .tv_sec = 0, .tv_nsec = 0 };
         }
 
-        held.release();
-
-        UserPtr.from(old_value_ptr).writeValue(old_value) catch {
-            return error.EFAULT;
-        };
-
-        // Re-acquire lock
-        _ = state.lock.acquire();
+        old_value_local = old_value;
     }
 
-    // Process new value
-    const it_value_ns = timespecToNanoseconds(new_value.it_value);
-
+    // Modify timer state (still under lock)
     if (it_value_ns == 0) {
         // Disarm timer
         state.armed = false;
@@ -372,14 +427,16 @@ pub fn sys_timerfd_settime(fd_num: usize, flags: usize, new_value_ptr: usize, ol
         const now_ns = getClockNanoseconds(state.clockid);
 
         if ((flags & uapi.timerfd.TFD_TIMER_ABSTIME) != 0) {
-            // Absolute time
             state.next_expiry_ns = it_value_ns;
         } else {
-            // Relative time - add to current time
-            state.next_expiry_ns = now_ns + it_value_ns;
+            // Checked add to prevent overflow
+            state.next_expiry_ns = std.math.add(u64, now_ns, it_value_ns) catch {
+                held.release();
+                return error.EINVAL;
+            };
         }
 
-        state.interval_ns = timespecToNanoseconds(new_value.it_interval);
+        state.interval_ns = it_interval_ns;
         state.armed = true;
         state.expiry_count = 0;
 
@@ -392,6 +449,13 @@ pub fn sys_timerfd_settime(fd_num: usize, flags: usize, new_value_ptr: usize, ol
     }
 
     held.release();
+
+    // Write old_value to userspace AFTER releasing the lock
+    if (old_value_local) |ov| {
+        UserPtr.from(old_value_ptr).writeValue(ov) catch {
+            return error.EFAULT;
+        };
+    }
 
     return 0;
 }
@@ -413,8 +477,18 @@ pub fn sys_timerfd_gettime(fd_num: usize, curr_value_ptr: usize) SyscallError!us
     if (fd.ops.read != timerfdRead) return error.EINVAL;
 
     const state: *TimerFdState = @ptrCast(@alignCast(fd.private_data));
+    // Hold a reference to prevent use-after-free if a concurrent close()
+    // drops the FD's reference between table.get() and lock.acquire().
+    state.ref();
+    defer state.unref();
 
     const held = state.lock.acquire();
+
+    // Check if closed between table.get() and lock acquisition
+    if (state.closed.load(.acquire)) {
+        held.release();
+        return error.EBADF;
+    }
 
     // Update expiry count
     updateExpiryCount(state);

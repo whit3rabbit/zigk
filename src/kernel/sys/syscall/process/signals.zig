@@ -669,9 +669,10 @@ pub fn deliverSignalToThread(target: *sched.Thread, signum: u8) void {
         }
     }
 
-    // Set pending signal bit
+    // Set pending signal bit (atomic for SMP safety - signalfd and signal
+    // handlers clear bits concurrently without holding a shared lock)
     const sig_bit: u64 = @as(u64, 1) << @intCast(signum - 1);
-    target.pending_signals |= sig_bit;
+    _ = @atomicRmw(u64, &target.pending_signals, .Or, sig_bit, .release);
 
     // If thread is blocked (and not stopped), wake it to handle signal
     if (target.state == .Blocked and !target.stopped) {

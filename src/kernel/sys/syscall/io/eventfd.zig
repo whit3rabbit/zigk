@@ -29,10 +29,16 @@ const Errno = uapi.errno.Errno;
 const MAX_COUNTER: u64 = 0xfffffffffffffffe;
 
 /// Eventfd state
+///
+/// Lifecycle: ref_count starts at 1 (owned by the FD). Each active read/write/poll
+/// operation holds an additional reference. Close sets the closed flag and drops the
+/// FD's reference. The state is freed when the last reference is dropped.
 const EventFdState = struct {
     counter: std.atomic.Value(u64),
     semaphore_mode: bool,
     lock: sync.Spinlock,
+    closed: std.atomic.Value(bool),
+    ref_count: std.atomic.Value(u32),
     blocked_readers: ?*sched.Thread,
     blocked_writers: ?*sched.Thread,
     reader_woken: std.atomic.Value(bool),
@@ -43,11 +49,23 @@ const EventFdState = struct {
             .counter = std.atomic.Value(u64).init(initval),
             .semaphore_mode = semaphore_mode,
             .lock = .{},
+            .closed = std.atomic.Value(bool).init(false),
+            .ref_count = std.atomic.Value(u32).init(1),
             .blocked_readers = null,
             .blocked_writers = null,
             .reader_woken = std.atomic.Value(bool).init(false),
             .writer_woken = std.atomic.Value(bool).init(false),
         };
+    }
+
+    fn ref(self: *EventFdState) void {
+        _ = self.ref_count.fetchAdd(1, .monotonic);
+    }
+
+    fn unref(self: *EventFdState) void {
+        if (self.ref_count.fetchSub(1, .acq_rel) == 1) {
+            heap.allocator().destroy(self);
+        }
     }
 };
 
@@ -55,8 +73,12 @@ fn eventfdRead(fd: *fd_mod.FileDescriptor, buf: []u8) isize {
     if (buf.len < 8) return Errno.EINVAL.toReturn();
 
     const state: *EventFdState = @ptrCast(@alignCast(fd.private_data));
+    state.ref();
+    defer state.unref();
 
     while (true) {
+        if (state.closed.load(.acquire)) return Errno.EBADF.toReturn();
+
         const held = state.lock.acquire();
 
         const current_counter = state.counter.load(.acquire);
@@ -124,8 +146,12 @@ fn eventfdWrite(fd: *fd_mod.FileDescriptor, buf: []const u8) isize {
     if (value == 0xffffffffffffffff) return Errno.EINVAL.toReturn();
 
     const state: *EventFdState = @ptrCast(@alignCast(fd.private_data));
+    state.ref();
+    defer state.unref();
 
     while (true) {
+        if (state.closed.load(.acquire)) return Errno.EBADF.toReturn();
+
         const held = state.lock.acquire();
 
         const current_counter = state.counter.load(.acquire);
@@ -194,6 +220,10 @@ fn eventfdPoll(fd: *fd_mod.FileDescriptor, requested_events: u32) u32 {
     _ = requested_events;
 
     const state: *EventFdState = @ptrCast(@alignCast(fd.private_data));
+    state.ref();
+    defer state.unref();
+
+    if (state.closed.load(.acquire)) return 0;
 
     const current_counter = state.counter.load(.acquire);
 
@@ -214,7 +244,27 @@ fn eventfdPoll(fd: *fd_mod.FileDescriptor, requested_events: u32) u32 {
 
 fn eventfdClose(fd: *fd_mod.FileDescriptor) isize {
     const state: *EventFdState = @ptrCast(@alignCast(fd.private_data));
-    heap.allocator().destroy(state);
+
+    // Mark as closed and wake any blocked threads so they can exit with EBADF
+    const held = state.lock.acquire();
+    state.closed.store(true, .release);
+
+    if (state.blocked_readers) |t| {
+        state.blocked_readers = null;
+        state.reader_woken.store(true, .release);
+        sched.unblock(t);
+    }
+    if (state.blocked_writers) |t| {
+        state.blocked_writers = null;
+        state.writer_woken.store(true, .release);
+        sched.unblock(t);
+    }
+
+    held.release();
+
+    // Drop the FD's reference. If no active readers/writers hold a reference,
+    // this frees the state. Otherwise, the last active operation frees it.
+    state.unref();
     return 0;
 }
 
@@ -279,7 +329,7 @@ pub fn sys_eventfd2(initval: usize, flags: usize) SyscallError!usize {
     // Install in FD table
     const table = base.getGlobalFdTable();
     const fd_num = table.allocAndInstall(fd) orelse {
-        heap.allocator().destroy(fd);
+        // errdefer handles cleanup of fd and state
         return error.EMFILE;
     };
 

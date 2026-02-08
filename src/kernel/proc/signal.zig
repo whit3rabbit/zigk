@@ -95,12 +95,12 @@ fn handleSigcont(current_thread: *Thread) void {
 pub fn checkSignals(frame: *hal.idt.InterruptFrame) *hal.idt.InterruptFrame {
     const current_thread = sched.getCurrentThread() orelse return frame;
 
-    // Fast check: any pending signals?
-    if (current_thread.pending_signals == 0) return frame;
+    // Fast check: any pending signals? (atomic for SMP visibility)
+    if (@atomicLoad(u64, &current_thread.pending_signals, .acquire) == 0) return frame;
 
     // Find the first pending signal that is not blocked
     // Bit 0 corresponds to signal 1, etc.
-    const pending = current_thread.pending_signals & ~current_thread.sigmask;
+    const pending = @atomicLoad(u64, &current_thread.pending_signals, .acquire) & ~current_thread.sigmask;
     if (pending == 0) return frame;
 
     // Find lowest set bit (lowest signal number)
@@ -109,10 +109,9 @@ pub fn checkSignals(frame: *hal.idt.InterruptFrame) *hal.idt.InterruptFrame {
     const sig_bit = @ctz(pending);
     const signum = sig_bit + 1;
 
-    // Clear the pending bit
-    // Note: In a full implementation, we might leave it if it's a real-time signal
-    // or if we fail to deliver. For now, clear it to avoid loop.
-    current_thread.pending_signals &= ~(@as(u64, 1) << @truncate(sig_bit));
+    // Atomically clear the pending bit to prevent races with signal delivery
+    // and signalfd consumption on other CPUs.
+    _ = @atomicRmw(u64, &current_thread.pending_signals, .And, ~(@as(u64, 1) << @truncate(sig_bit)), .acq_rel);
 
     // Get the action for this signal
     // signal_actions index is signum-1 (0-63 for signals 1-64)
@@ -317,19 +316,20 @@ fn setupSignalFrame(frame: *hal.idt.InterruptFrame, signum: usize, action: uapi.
 pub fn checkSignalsOnSyscallExit(frame: *hal.syscall.SyscallFrame) void {
     const current_thread = sched.getCurrentThread() orelse return;
 
-    // Fast check: any pending signals?
-    if (current_thread.pending_signals == 0) return;
+    // Fast check: any pending signals? (atomic for SMP visibility)
+    if (@atomicLoad(u64, &current_thread.pending_signals, .acquire) == 0) return;
 
     // Find the first pending signal that is not blocked
-    const pending = current_thread.pending_signals & ~current_thread.sigmask;
+    const pending = @atomicLoad(u64, &current_thread.pending_signals, .acquire) & ~current_thread.sigmask;
     if (pending == 0) return;
 
     // Find lowest set bit (lowest signal number)
     const sig_bit = @ctz(pending);
     const signum: usize = sig_bit + 1;
 
-    // Clear the pending bit
-    current_thread.pending_signals &= ~(@as(u64, 1) << @truncate(sig_bit));
+    // Atomically clear the pending bit to prevent races with signal delivery
+    // and signalfd consumption on other CPUs.
+    _ = @atomicRmw(u64, &current_thread.pending_signals, .And, ~(@as(u64, 1) << @truncate(sig_bit)), .acq_rel);
 
     // Get the action for this signal
     const action = current_thread.signal_actions[signum - 1];
