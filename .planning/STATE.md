@@ -9,19 +9,19 @@ See: .planning/PROJECT.md (updated 2026-02-06)
 
 ## Current Position
 
-Phase: 6 of 9 (Filesystem Extras)
-Plan: 3 of 3 in current phase
-Status: Phase complete
-Last activity: 2026-02-08 - Completed 06-03-PLAN.md (filesystem extras integration tests)
+Phase: 5 of 9 (Vectored & Positional I/O)
+Plan: 1 of 3 in current phase
+Status: In progress
+Last activity: 2026-02-08 - Completed 05-01-PLAN.md (core vectored & positional I/O syscalls)
 
-Progress: [███████░░░] 75%
+Progress: [████████░░] 78%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 19
-- Average duration: 7.5 min
-- Total execution time: 2.38 hours
+- Total plans completed: 20
+- Average duration: 7.2 min
+- Total execution time: 2.46 hours
 
 **By Phase:**
 
@@ -31,11 +31,12 @@ Progress: [███████░░░] 75%
 | 2 | 4 | 20 min | 5 min |
 | 3 | 4 | 26 min | 6.5 min |
 | 4 | 4 | 24 min | 6 min |
+| 5 | 1 | 3 min | 3 min |
 | 6 | 3 | 56 min | 18.7 min |
 
 **Recent Trend:**
-- Last 5 plans: 04-04 (7min), 06-01 (7min), 06-02 (4min), 06-03 (45min)
-- Trend: Test plans with blocked syscalls take longer (debugging overhead)
+- Last 5 plans: 06-01 (7min), 06-02 (4min), 06-03 (45min), 05-01 (3min)
+- Trend: Implementation plans with clear patterns are fast, test debugging takes longer
 
 *Updated after each plan completion*
 
@@ -103,6 +104,9 @@ Recent decisions affecting current work:
 - **06-03:** Syscall dispatch works correctly (executor agent was wrong) -- 6 tests pass, 6 skip (SFS lacks link/symlink/timestamps)
 - **06-03:** Userspace error names differ from kernel (ENOSYS->NotImplemented, EINVAL->InvalidArgument, EROFS->ReadOnlyFilesystem)
 - **06-03:** VFS NotSupported maps to EROFS (errno 30) -> ReadOnlyFilesystem in userspace tests
+- **05-01:** Iovec struct extracted to module scope for reuse across readv/writev/preadv/pwritev (DRY principle)
+- **05-01:** Vectored I/O syscalls mirror existing patterns exactly (readv mirrors writev, pwrite64 mirrors pread64)
+- **05-01:** Positional I/O restores file position on all paths (error, overflow, short transfer) for POSIX compliance
 
 ### Pending Todos
 
@@ -147,6 +151,12 @@ Recent decisions affecting current work:
 - Test count: 229 total (217 + 12 new, 8 passing immediately, 4 failing due to test code issues)
 - **Core functionality validated:** All create/close tests pass, epoll integration tests pass, proving kernel implementations correct
 
+**Phase 5 In Progress (Vectored & Positional I/O):**
+- ✅ Core syscalls complete (05-01) - sys_readv, sys_pwrite64, sys_preadv, sys_pwritev
+- ⏳ preadv2/pwritev2 with RWF_* flags (05-02) - NOT STARTED
+- ⏳ Integration tests (05-03) - NOT STARTED
+- Test count: 260 total (no new tests yet)
+
 **Phase 6 Complete (Filesystem Extras):**
 - ✅ Kernel syscall implementations complete (06-01) - readlinkat, linkat, symlinkat with kernel-space helpers
 - ✅ VFS timestamp infrastructure complete (06-01) - set_timestamps callback, NotSupported for read-only filesystems
@@ -187,9 +197,9 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-02-08 (plan execution + test fix)
-Stopped at: Phase 6 fully complete -- all tests verified on both x86_64 and aarch64
-Resume file: None
+Last session: 2026-02-08 (plan execution)
+Stopped at: Phase 5 Plan 01 complete - sys_readv, sys_pwrite64, sys_preadv, sys_pwritev implemented
+Resume file: .planning/phases/05-vectored-positional-i-o/05-02-PLAN.md (preadv2/pwritev2 with RWF_* flags)
 
 ---
 *State initialized: 2026-02-06*
