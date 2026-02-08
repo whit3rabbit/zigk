@@ -10,18 +10,18 @@ See: .planning/PROJECT.md (updated 2026-02-06)
 ## Current Position
 
 Phase: 5 of 9 (Vectored & Positional I/O)
-Plan: 1 of 3 in current phase
+Plan: 2 of 3 in current phase
 Status: In progress
-Last activity: 2026-02-08 - Completed 05-01-PLAN.md (core vectored & positional I/O syscalls)
+Last activity: 2026-02-08 - Completed 05-02-PLAN.md (preadv2/pwritev2 with RWF_* flags, sendfile)
 
-Progress: [████████░░] 78%
+Progress: [████████░░] 79%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 20
-- Average duration: 7.2 min
-- Total execution time: 2.46 hours
+- Total plans completed: 21
+- Average duration: 7.1 min
+- Total execution time: 2.55 hours
 
 **By Phase:**
 
@@ -31,12 +31,12 @@ Progress: [████████░░] 78%
 | 2 | 4 | 20 min | 5 min |
 | 3 | 4 | 26 min | 6.5 min |
 | 4 | 4 | 24 min | 6 min |
-| 5 | 1 | 3 min | 3 min |
+| 5 | 2 | 9 min | 4.5 min |
 | 6 | 3 | 56 min | 18.7 min |
 
 **Recent Trend:**
-- Last 5 plans: 06-01 (7min), 06-02 (4min), 06-03 (45min), 05-01 (3min)
-- Trend: Implementation plans with clear patterns are fast, test debugging takes longer
+- Last 5 plans: 06-02 (4min), 06-03 (45min), 05-01 (3min), 05-02 (6min)
+- Trend: Implementation plans with clear patterns are fast (3-6min), test debugging takes longer (45min)
 
 *Updated after each plan completion*
 
@@ -107,6 +107,12 @@ Recent decisions affecting current work:
 - **05-01:** Iovec struct extracted to module scope for reuse across readv/writev/preadv/pwritev (DRY principle)
 - **05-01:** Vectored I/O syscalls mirror existing patterns exactly (readv mirrors writev, pwrite64 mirrors pread64)
 - **05-01:** Positional I/O restores file position on all paths (error, overflow, short transfer) for POSIX compliance
+- **05-02:** Return ENOSYS for unsupported RWF_* flags (HIPRI requires polling, unknown flags) - graceful degradation
+- **05-02:** Accept RWF_DSYNC/RWF_SYNC but ignore (no write-back cache in zk, direct-to-device writes)
+- **05-02:** Return EAGAIN for RWF_NOWAIT (all zk I/O is synchronous, no async/polling infrastructure)
+- **05-02:** sendfile uses 4KB kernel buffer chunks (balances memory vs syscall overhead, page-aligned for DMA)
+- **05-02:** sendfile rejects O_APPEND on out_fd per Linux semantics (EINVAL, conflicting offset semantics)
+- **05-02:** Refactored MAX_*_BYTES/MAX_IOVEC_COUNT to module scope (eliminates duplication in 4 functions)
 
 ### Pending Todos
 
@@ -153,9 +159,9 @@ Recent decisions affecting current work:
 
 **Phase 5 In Progress (Vectored & Positional I/O):**
 - ✅ Core syscalls complete (05-01) - sys_readv, sys_pwrite64, sys_preadv, sys_pwritev
-- ⏳ preadv2/pwritev2 with RWF_* flags (05-02) - NOT STARTED
+- ✅ v2 variants and sendfile complete (05-02) - sys_preadv2, sys_pwritev2, sys_sendfile with RWF_* flags
 - ⏳ Integration tests (05-03) - NOT STARTED
-- Test count: 260 total (no new tests yet)
+- Test count: 260 total (no new tests yet, integration tests deferred to 05-03)
 
 **Phase 6 Complete (Filesystem Extras):**
 - ✅ Kernel syscall implementations complete (06-01) - readlinkat, linkat, symlinkat with kernel-space helpers
@@ -198,8 +204,8 @@ Recent decisions affecting current work:
 ## Session Continuity
 
 Last session: 2026-02-08 (plan execution)
-Stopped at: Phase 5 Plan 01 complete - sys_readv, sys_pwrite64, sys_preadv, sys_pwritev implemented
-Resume file: .planning/phases/05-vectored-positional-i-o/05-02-PLAN.md (preadv2/pwritev2 with RWF_* flags)
+Stopped at: Phase 5 Plan 02 complete - sys_preadv2, sys_pwritev2, sys_sendfile implemented with RWF_* flags
+Resume file: .planning/phases/05-vectored-positional-i-o/05-03-PLAN.md (integration tests for vectored & positional I/O)
 
 ---
 *State initialized: 2026-02-06*
