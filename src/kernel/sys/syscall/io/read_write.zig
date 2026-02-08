@@ -15,6 +15,13 @@ const safeFdCast = utils.safeFdCast;
 const do_read_locked = utils.do_read_locked;
 const do_write_locked = utils.do_write_locked;
 const perform_write_locked = utils.perform_write_locked;
+const perform_read_locked = utils.perform_read_locked;
+
+/// Iovec structure for vectored I/O operations (scatter-gather)
+const Iovec = extern struct {
+    base: usize,
+    len: usize,
+};
 
 /// sys_read (0) - Read from file descriptor
 ///
@@ -158,11 +165,6 @@ pub fn sys_write(fd_num: usize, buf_ptr: usize, count: usize) SyscallError!usize
 ///
 /// Returns: Total bytes written or error
 pub fn sys_writev(fd: usize, bvec_ptr: usize, count: usize) SyscallError!usize {
-    const Iovec = extern struct {
-        base: usize,
-        len: usize,
-    };
-
     const MAX_WRITEV_BYTES: usize = 16 * 1024 * 1024;
 
     if (count == 0) return 0;
@@ -250,6 +252,108 @@ pub fn sys_writev(fd: usize, bvec_ptr: usize, count: usize) SyscallError!usize {
     }
 
     return total_written;
+}
+
+/// sys_readv (19) - Read data into multiple buffers
+///
+/// Args:
+///   fd: File descriptor
+///   bvec_ptr: Pointer to iovec array
+///   count: Number of iovec structs
+///
+/// Returns: Total bytes read or error
+pub fn sys_readv(fd: usize, bvec_ptr: usize, count: usize) SyscallError!usize {
+    const MAX_READV_BYTES: usize = 16 * 1024 * 1024;
+
+    if (count == 0) return 0;
+    if (count > 1024) return error.EINVAL;
+
+    // Copy iovecs from user
+    const kvecs = heap.allocator().alloc(Iovec, count) catch {
+        return error.ENOMEM;
+    };
+    defer heap.allocator().free(kvecs);
+
+    const uptr = UserPtr.from(bvec_ptr);
+    _ = uptr.copyToKernel(std.mem.sliceAsBytes(kvecs)) catch return error.EFAULT;
+
+    var total_read: usize = 0;
+    var total_len: usize = 0;
+
+    // Acquire FD lock once for the entire vector operation
+    // This ensures data from other threads doesn't interleave between vectors
+    const table = base.getGlobalFdTable();
+    const fd_u32 = safeFdCast(fd) orelse return error.EBADF;
+    const fd_obj = table.get(fd_u32) orelse {
+        return error.EBADF;
+    };
+
+    // Check if readable
+    if (!fd_obj.isReadable()) {
+        return error.EBADF;
+    }
+
+    // Check if read operation is supported
+    if (fd_obj.ops.read == null) {
+        return error.EBADF;
+    }
+
+    const held = fd_obj.lock.acquire();
+    defer held.release();
+
+    // Validate total length doesn't overflow
+    for (kvecs) |vec| {
+        if (vec.len == 0) continue;
+        const new_total = @addWithOverflow(total_len, vec.len);
+        if (new_total[1] != 0 or new_total[0] > MAX_READV_BYTES) {
+            return error.EINVAL;
+        }
+        total_len = new_total[0];
+    }
+
+    // Process each iovec
+    for (kvecs) |vec| {
+        if (vec.len == 0) continue;
+
+        // Perform read using our locked helper, handling chunks if needed
+        var offset: usize = 0;
+        while (offset < vec.len) {
+            // Cap to avoid huge allocations in perform_read_locked
+            const remaining = vec.len - offset;
+            const chunk_len = @min(remaining, 64 * 1024);
+
+            // Check for pointer arithmetic overflow
+            const base_offset = @addWithOverflow(vec.base, offset);
+            if (base_offset[1] != 0) {
+                // Pointer overflow - invalid iovec
+                if (total_read > 0) return total_read;
+                return error.EFAULT;
+            }
+            const current_base = base_offset[0];
+
+            const res = perform_read_locked(fd_obj, current_base, chunk_len) catch |err| {
+                if (total_read > 0) return total_read;
+                return err;
+            };
+
+            // Check for accumulation overflow
+            const new_total = @addWithOverflow(total_read, res);
+            if (new_total[1] != 0) {
+                // Overflow - return what we have so far
+                return total_read;
+            }
+            total_read = new_total[0];
+            offset += res;
+
+            // If partial read occurred (less than requested for this chunk),
+            // stop and return what we have (EOF or would block)
+            if (res < chunk_len) {
+                return total_read;
+            }
+        }
+    }
+
+    return total_read;
 }
 
 /// sys_pread64 (17) - Read from file at offset
@@ -343,4 +447,64 @@ pub fn sys_pread64(fd_num: usize, buf_ptr: usize, count: usize, offset: usize) S
     }
 
     return bytes_read;
+}
+
+/// sys_pwrite64 (18) - Write to file at offset
+///
+/// Writes to file at specified offset without modifying file position.
+/// Atomic with respect to other pread/pwrite operations.
+pub fn sys_pwrite64(fd_num: usize, buf_ptr: usize, count: usize, offset: usize) SyscallError!usize {
+    if (count == 0) {
+        return 0;
+    }
+
+    const table = base.getGlobalFdTable();
+    const fd_u32 = safeFdCast(fd_num) orelse return error.EBADF;
+    const fd = table.get(fd_u32) orelse return error.EBADF;
+
+    if (!fd.isWritable()) {
+        return error.EBADF;
+    }
+
+    if (fd.ops.write == null) {
+        return error.ESPIPE;
+    }
+
+    // Check if seekable
+    if (fd.ops.seek == null) {
+        return error.ESPIPE;
+    }
+
+    // Acquire lock to ensure atomicity of seek+write+seek
+    const held = fd.lock.acquire();
+    defer held.release();
+
+    // Save current position
+    const old_pos = fd.position;
+
+    const seek_fn = fd.ops.seek.?;
+
+    // 1. Seek to target offset
+    const res1 = seek_fn(fd, @intCast(offset), 0); // SEEK_SET
+    if (res1 < 0) return error.EINVAL;
+    fd.position = @intCast(res1);
+
+    // 2. Perform Write
+    const bytes_written = perform_write_locked(fd, buf_ptr, count) catch |err| {
+        // Restore position before error
+        _ = seek_fn(fd, @intCast(old_pos), 0);
+        fd.position = old_pos;
+        return err;
+    };
+
+    // 3. Restore position
+    const res2 = seek_fn(fd, @intCast(old_pos), 0);
+    if (res2 < 0) {
+        // Critical error: failed to restore position.
+        console.err("sys_pwrite64: failed to restore position!", .{});
+    } else {
+        fd.position = @intCast(res2);
+    }
+
+    return bytes_written;
 }
