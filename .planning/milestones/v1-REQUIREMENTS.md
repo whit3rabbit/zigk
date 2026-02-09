@@ -1,3 +1,12 @@
+# Requirements Archive: v1 POSIX Syscall Coverage
+
+**Archived:** 2026-02-09
+**Status:** SHIPPED
+
+For current requirements, see `.planning/REQUIREMENTS.md`.
+
+---
+
 # Requirements: ZK Kernel POSIX Syscall Coverage
 
 **Defined:** 2026-02-06
