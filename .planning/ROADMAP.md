@@ -20,7 +20,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 6: Filesystem Extras** - readlinkat, linkat, symlinkat, utimensat
 - [x] **Phase 7: Socket Extras** - socketpair, shutdown, sendto/recvfrom, recvmsg/sendmsg
 - [x] **Phase 8: Process Control** - prctl, sched affinity
-- [ ] **Phase 9: SysV IPC** - shared memory, semaphores, message queues
+- [x] **Phase 9: SysV IPC** - shared memory, semaphores, message queues
 
 ## Phase Details
 
@@ -157,7 +157,7 @@ Plans:
 - [x] 08-01-PLAN.md -- UAPI prctl constants + syscall numbers (both arch) + kernel implementations (sys_prctl, sys_sched_setaffinity, sys_sched_getaffinity)
 - [x] 08-02-PLAN.md -- Userspace wrappers (prctl, sched_setaffinity, sched_getaffinity) + 10 integration tests
 
-### Phase 9: SysV IPC
+### Phase 9: SysV IPC (COMPLETE 2026-02-09)
 **Goal**: Implement legacy SysV IPC shared memory, semaphores, and message queues for Postgres/Redis compatibility
 **Depends on**: Phase 8
 **Requirements**: IPC-01, IPC-02, IPC-03, IPC-04, IPC-05, IPC-06, IPC-07, IPC-08, IPC-09, IPC-10, IPC-11
@@ -170,9 +170,9 @@ Plans:
 **Plans**: 3 plans
 
 Plans:
-- [ ] 09-01-PLAN.md -- UAPI constants + syscall numbers (both arch) + IPC permission infrastructure + shared memory kernel implementation (shmget, shmat, shmdt, shmctl) + build.zig wiring
-- [ ] 09-02-PLAN.md -- Semaphore kernel implementation (semget, semop, semctl) + message queue kernel implementation (msgget, msgsnd, msgrcv, msgctl)
-- [ ] 09-03-PLAN.md -- Userspace wrappers (all 11 syscalls) + 12 integration tests
+- [x] 09-01-PLAN.md -- UAPI constants + syscall numbers (both arch) + IPC permission infrastructure + shared memory kernel implementation (shmget, shmat, shmdt, shmctl) + build.zig wiring
+- [x] 09-02-PLAN.md -- Semaphore kernel implementation (semget, semop, semctl) + message queue kernel implementation (msgget, msgsnd, msgrcv, msgctl)
+- [x] 09-03-PLAN.md -- Userspace wrappers (all 11 syscalls) + 12 integration tests
 
 ## Progress
 
@@ -189,8 +189,8 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9
 | 6. Filesystem Extras | 3/3 | Complete | 2026-02-07 |
 | 7. Socket Extras | 2/2 | Complete | 2026-02-08 |
 | 8. Process Control | 2/2 | Complete | 2026-02-08 |
-| 9. SysV IPC | 0/3 | Planned | - |
+| 9. SysV IPC | 3/3 | Complete | 2026-02-09 |
 
 ---
 *Roadmap created: 2026-02-06*
-*Last updated: 2026-02-08 (Phase 9 planned)*
+*Last updated: 2026-02-09 (Phase 9 complete -- ALL PHASES DONE)*
