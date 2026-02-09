@@ -1288,6 +1288,21 @@ pub fn build(b: *std.Build) void {
     // sched needs signal for alarm expiration (deliverSignalToThread, SIGALRM)
     sched_module.addImport("signal", signal_module);
 
+    // Create kernel IPC module (SysV IPC: shared memory, semaphores, message queues)
+    const kernel_ipc_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/ipc/root.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    kernel_ipc_module.addImport("process", process_module);
+    kernel_ipc_module.addImport("pmm", pmm_module);
+    kernel_ipc_module.addImport("hal", hal_module);
+    kernel_ipc_module.addImport("uapi", uapi_module);
+    kernel_ipc_module.addImport("user_mem", user_mem_module);
+    kernel_ipc_module.addImport("vmm", vmm_module);
+    kernel_ipc_module.addImport("sync", sync_module);
+    kernel_ipc_module.addImport("console", console_module);
+
     // Create syscall scheduling module (sched_yield, nanosleep, etc.)
     const syscall_scheduling_module = b.createModule(.{
         .root_source_file = b.path("src/kernel/sys/syscall/process/scheduling.zig"),
@@ -1643,6 +1658,18 @@ pub fn build(b: *std.Build) void {
     syscall_ipc_module.addImport("mouse", mouse_module);
     syscall_ipc_module.addImport("ipc_service", ipc_service_module);
 
+    // Create syscall SysV IPC module (shared memory, semaphores, message queues)
+    const syscall_sysv_ipc_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/sys/syscall/ipc/root.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    syscall_sysv_ipc_module.addImport("uapi", uapi_module);
+    syscall_sysv_ipc_module.addImport("user_mem", user_mem_module);
+    syscall_sysv_ipc_module.addImport("sched", sched_module);
+    syscall_sysv_ipc_module.addImport("process", process_module);
+    syscall_sysv_ipc_module.addImport("kernel_ipc", kernel_ipc_module);
+
     // Create syscall interrupt module
     const syscall_interrupt_module = b.createModule(.{
         .root_source_file = b.path("src/kernel/sys/syscall/hw/interrupt.zig"),
@@ -1827,6 +1854,7 @@ pub fn build(b: *std.Build) void {
     syscall_table_module.addImport("input", syscall_input_module);
     syscall_table_module.addImport("io_uring", syscall_io_uring_module);
     syscall_table_module.addImport("ipc", syscall_ipc_module);
+    syscall_table_module.addImport("sysv_ipc", syscall_sysv_ipc_module);
     syscall_table_module.addImport("interrupt", syscall_interrupt_module);
     syscall_table_module.addImport("port_io", syscall_port_io_module);
     syscall_table_module.addImport("mmio", syscall_mmio_module);

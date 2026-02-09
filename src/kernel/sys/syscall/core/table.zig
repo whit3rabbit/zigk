@@ -32,6 +32,7 @@ const times = @import("times");
 const itimer = @import("itimer");
 const input_handlers = @import("input");
 const ipc = @import("ipc");
+const sysv_ipc = @import("sysv_ipc");
 const interrupt = @import("interrupt");
 const port_io = @import("port_io");
 const mmio = @import("mmio");
@@ -122,6 +123,8 @@ pub export fn dispatch_syscall(frame: *SyscallFrame) callconv(.c) void {
                     mod = display;
                 } else if (@hasDecl(virt_pci, name)) {
                     mod = virt_pci;
+                } else if (@hasDecl(sysv_ipc, name)) {
+                    mod = sysv_ipc;
                 }
 
                 if (mod) |m| {
