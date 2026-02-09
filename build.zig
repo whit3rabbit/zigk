@@ -1302,6 +1302,7 @@ pub fn build(b: *std.Build) void {
     kernel_ipc_module.addImport("vmm", vmm_module);
     kernel_ipc_module.addImport("sync", sync_module);
     kernel_ipc_module.addImport("console", console_module);
+    kernel_ipc_module.addImport("heap", heap_module);
 
     // Create syscall scheduling module (sched_yield, nanosleep, etc.)
     const syscall_scheduling_module = b.createModule(.{
