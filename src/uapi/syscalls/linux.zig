@@ -60,6 +60,18 @@ pub const SYS_MSYNC: usize = 26;
 pub const SYS_MINCORE: usize = 27;
 /// Give advice about memory usage patterns
 pub const SYS_MADVISE: usize = 28;
+
+// ============================================================================
+// SysV IPC (Shared Memory)
+// ============================================================================
+
+/// Allocate shared memory segment
+pub const SYS_SHMGET: usize = 29;
+/// Attach shared memory to address space
+pub const SYS_SHMAT: usize = 30;
+/// Shared memory control operations
+pub const SYS_SHMCTL: usize = 31;
+
 /// Duplicate a file descriptor
 pub const SYS_DUP: usize = 32;
 /// Duplicate a file descriptor to specific number
@@ -124,6 +136,28 @@ pub const SYS_WAIT4: usize = 61;
 pub const SYS_KILL: usize = 62;
 /// Get system information
 pub const SYS_UNAME: usize = 63;
+
+// ============================================================================
+// SysV IPC (Semaphores and Message Queues)
+// ============================================================================
+
+/// Get semaphore set
+pub const SYS_SEMGET: usize = 64;
+/// Semaphore operations
+pub const SYS_SEMOP: usize = 65;
+/// Semaphore control
+pub const SYS_SEMCTL: usize = 66;
+/// Detach shared memory
+pub const SYS_SHMDT: usize = 67;
+/// Get message queue
+pub const SYS_MSGGET: usize = 68;
+/// Send message to queue
+pub const SYS_MSGSND: usize = 69;
+/// Receive message from queue
+pub const SYS_MSGRCV: usize = 70;
+/// Message queue control
+pub const SYS_MSGCTL: usize = 71;
+
 /// Manipulate file descriptor flags (e.g., O_NONBLOCK)
 pub const SYS_FCNTL: usize = 72;
 /// Apply or remove an advisory lock on an open file

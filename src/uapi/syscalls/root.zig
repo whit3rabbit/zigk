@@ -230,6 +230,19 @@ pub const SYS_IO_URING_ENTER = linux.SYS_IO_URING_ENTER;
 pub const SYS_IO_URING_REGISTER = linux.SYS_IO_URING_REGISTER;
 pub const SYS_CLONE3 = linux.SYS_CLONE3;
 
+// SysV IPC
+pub const SYS_SHMGET = linux.SYS_SHMGET;
+pub const SYS_SHMAT = linux.SYS_SHMAT;
+pub const SYS_SHMCTL = linux.SYS_SHMCTL;
+pub const SYS_SHMDT = linux.SYS_SHMDT;
+pub const SYS_SEMGET = linux.SYS_SEMGET;
+pub const SYS_SEMOP = linux.SYS_SEMOP;
+pub const SYS_SEMCTL = linux.SYS_SEMCTL;
+pub const SYS_MSGGET = linux.SYS_MSGGET;
+pub const SYS_MSGSND = linux.SYS_MSGSND;
+pub const SYS_MSGRCV = linux.SYS_MSGRCV;
+pub const SYS_MSGCTL = linux.SYS_MSGCTL;
+
 // ZK Custom Extensions (1000+)
 pub const SYS_DEBUG_LOG = zk.SYS_DEBUG_LOG;
 pub const SYS_GET_FB_INFO = zk.SYS_GET_FB_INFO;

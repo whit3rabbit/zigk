@@ -242,6 +242,33 @@ pub const SYS_GETGROUPS: usize = 158;
 pub const SYS_SETGROUPS: usize = 159;
 
 // ============================================================================
+// SysV IPC (Shared Memory, Semaphores, Message Queues)
+// ============================================================================
+
+/// Get message queue
+pub const SYS_MSGGET: usize = 186;
+/// Message queue control
+pub const SYS_MSGCTL: usize = 187;
+/// Receive message from queue
+pub const SYS_MSGRCV: usize = 188;
+/// Send message to queue
+pub const SYS_MSGSND: usize = 189;
+/// Get semaphore set
+pub const SYS_SEMGET: usize = 190;
+/// Semaphore control
+pub const SYS_SEMCTL: usize = 191;
+/// Semaphore operations
+pub const SYS_SEMOP: usize = 193;
+/// Allocate shared memory segment
+pub const SYS_SHMGET: usize = 194;
+/// Shared memory control operations
+pub const SYS_SHMCTL: usize = 195;
+/// Attach shared memory to address space
+pub const SYS_SHMAT: usize = 196;
+/// Detach shared memory
+pub const SYS_SHMDT: usize = 197;
+
+// ============================================================================
 // Sockets
 // ============================================================================
 

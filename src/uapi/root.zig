@@ -28,6 +28,11 @@ pub const signalfd = @import("io/signalfd.zig");
 pub const net_ipc = @import("ipc/net_ipc.zig");
 pub const ipc_msg = @import("ipc/ipc_msg.zig");
 pub const ring = @import("ipc/ring.zig");
+
+// IPC subsystem (create a namespace for IPC modules)
+pub const ipc = struct {
+    pub const sysv = @import("ipc/sysv.zig");
+};
 pub const virt_pci = @import("virt_pci/root.zig");
 pub const time = @import("process/time.zig");
 pub const prctl = @import("prctl.zig");
