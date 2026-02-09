@@ -33,12 +33,12 @@ pub fn testEventfdWriteAndRead() !void {
     if (read_bytes != 8) return error.TestFailed;
     if (read_val != 5) return error.TestFailed;
 
-    // Read again - should fail with EAGAIN (counter is now 0)
+    // Read again - should fail with WouldBlock/EAGAIN (counter is now 0)
     const read_result = syscall.read(fd, @as([*]u8, @ptrCast(&read_val)), 8);
     if (read_result) |_| {
-        return error.TestFailed; // Should have returned EAGAIN
+        return error.TestFailed;
     } else |err| {
-        if (err != error.EAGAIN) return error.TestFailed;
+        if (err != error.WouldBlock) return error.TestFailed;
     }
 }
 
@@ -70,12 +70,12 @@ pub fn testEventfdSemaphoreMode() !void {
     if (read_bytes != 8) return error.TestFailed;
     if (read_val != 1) return error.TestFailed;
 
-    // Read 4 - should fail with EAGAIN (counter is 0)
+    // Read 4 - should fail with WouldBlock/EAGAIN (counter is 0)
     const read_result = syscall.read(fd, @as([*]u8, @ptrCast(&read_val)), 8);
     if (read_result) |_| {
-        return error.TestFailed; // Should have returned EAGAIN
+        return error.TestFailed;
     } else |err| {
-        if (err != error.EAGAIN) return error.TestFailed;
+        if (err != error.WouldBlock) return error.TestFailed;
     }
 }
 
@@ -205,13 +205,13 @@ pub fn testTimerfdDisarm() !void {
     var sleep_time = syscall.Timespec{ .tv_sec = 0, .tv_nsec = 150_000_000 };
     try syscall.nanosleep(&sleep_time, null);
 
-    // Read should fail with EAGAIN (timer was disarmed)
+    // Read should fail with WouldBlock/EAGAIN (timer was disarmed)
     var expirations: u64 = 0;
     const read_result = syscall.read(fd, @as([*]u8, @ptrCast(&expirations)), 8);
     if (read_result) |_| {
-        return error.TestFailed; // Should have returned EAGAIN
+        return error.TestFailed;
     } else |err| {
-        if (err != error.EAGAIN) return error.TestFailed;
+        if (err != error.WouldBlock) return error.TestFailed;
     }
 }
 
@@ -256,12 +256,12 @@ pub fn testSignalfdReadSignal() !void {
     if (read_bytes != @sizeOf(syscall.SignalFdSigInfo)) return error.TestFailed;
     if (siginfo.ssi_signo != SIGUSR1) return error.TestFailed;
 
-    // Read again - should fail with EAGAIN (signal consumed)
+    // Read again - should fail with WouldBlock/EAGAIN (signal consumed)
     const read_result = syscall.read(fd, @as([*]u8, @ptrCast(&siginfo)), @sizeOf(syscall.SignalFdSigInfo));
     if (read_result) |_| {
-        return error.TestFailed; // Should have returned EAGAIN
+        return error.TestFailed;
     } else |err| {
-        if (err != error.EAGAIN) return error.TestFailed;
+        if (err != error.WouldBlock) return error.TestFailed;
     }
 }
 
