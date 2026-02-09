@@ -204,11 +204,15 @@ pub fn shmat(id: u32, shmaddr: usize, shmflg: u32, proc: *process.Process) !usiz
     };
 
     // Create VMA
+    // Use MAP_DEVICE (0x1000) to prevent munmap from freeing physical pages
+    // (pages belong to shared memory segment, not this process)
+    const MAP_SHARED: u32 = 0x1;
+    const MAP_DEVICE: u32 = 0x1000;
     const vma = proc.user_vmm.createVma(
         virt_addr,
         virt_addr + map_size,
         if ((shmflg & SHM_RDONLY) != 0) 0x1 else 0x3, // PROT_READ or PROT_READ|PROT_WRITE
-        0x1, // MAP_SHARED
+        MAP_SHARED | MAP_DEVICE, // Shared memory, don't free physical pages on munmap
     ) catch {
         // Rollback mapping
         var off: usize = 0;

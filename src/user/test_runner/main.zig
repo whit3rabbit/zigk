@@ -16,6 +16,7 @@ const event_fds_tests = @import("tests/syscall/event_fds.zig");
 const fs_extras_tests = @import("tests/syscall/fs_extras.zig");
 const vectored_io_tests = @import("tests/syscall/vectored_io.zig");
 const process_control_tests = @import("tests/syscall/process_control.zig");
+const sysv_ipc_tests = @import("tests/syscall/sysv_ipc.zig");
 const fs_tests = @import("tests/fs/basic.zig");
 const fs_error_tests = @import("tests/fs/errors.zig");
 const regression_tests = @import("tests/regression/sfs_issues.zig");
@@ -436,6 +437,20 @@ export fn main(argc: i32, argv: [*][*:0]u8) i32 {
     runner.runTest("process_control: sched_setaffinity multi cpu", process_control_tests.testSchedSetaffinityMultiCpu);
     runner.runTest("process_control: sched_setaffinity no cpu0", process_control_tests.testSchedSetaffinityNoCpu0);
     runner.runTest("process_control: sched_getaffinity size too small", process_control_tests.testSchedGetaffinitySizeTooSmall);
+
+    // Syscall tests - SysV IPC
+    runner.runTest("sysv_ipc: shmget creates segment", sysv_ipc_tests.testShmgetCreatesSegment);
+    runner.runTest("sysv_ipc: shmget excl fails", sysv_ipc_tests.testShmgetExclFails);
+    runner.runTest("sysv_ipc: shmat write read", sysv_ipc_tests.testShmatWriteRead);
+    runner.runTest("sysv_ipc: shmctl stat", sysv_ipc_tests.testShmctlStat);
+    runner.runTest("sysv_ipc: semget creates set", sysv_ipc_tests.testSemgetCreateSet);
+    runner.runTest("sysv_ipc: semctl set get val", sysv_ipc_tests.testSemctlSetGetVal);
+    runner.runTest("sysv_ipc: semop increment", sysv_ipc_tests.testSemopIncrement);
+    runner.runTest("sysv_ipc: semop nowait eagain", sysv_ipc_tests.testSemopNowaitEagain);
+    runner.runTest("sysv_ipc: msgget creates queue", sysv_ipc_tests.testMsggetCreateQueue);
+    runner.runTest("sysv_ipc: msgsnd recv basic", sysv_ipc_tests.testMsgsndRecvBasic);
+    runner.runTest("sysv_ipc: msgrcv type filter", sysv_ipc_tests.testMsgrcvTypeFilter);
+    runner.runTest("sysv_ipc: msgctl stat", sysv_ipc_tests.testMsgctlStat);
 
     // Stress tests
     runner.runTest("stress: write 10MB file", stress_tests.testWrite10MbFile);
