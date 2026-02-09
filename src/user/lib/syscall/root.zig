@@ -7,6 +7,7 @@ pub const time = @import("time.zig");
 const resource = @import("resource.zig");
 const io_uring = @import("io_uring.zig");
 const tty = @import("tty.zig");
+const ipc = @import("ipc.zig");
 
 // Re-export core primitives
 pub const uapi = primitive.uapi;
@@ -364,3 +365,32 @@ pub const io_uring_setup = io_uring.io_uring_setup;
 pub const io_uring_enter = io_uring.io_uring_enter;
 pub const io_uring_register = io_uring.io_uring_register;
 pub const IoUring = io_uring.IoUring;
+
+// Re-export SysV IPC
+pub const shmget = ipc.shmget;
+pub const shmat = ipc.shmat;
+pub const shmdt = ipc.shmdt;
+pub const shmctl = ipc.shmctl;
+pub const semget = ipc.semget;
+pub const semop = ipc.semop;
+pub const semctl = ipc.semctl;
+pub const msgget = ipc.msgget;
+pub const msgsnd = ipc.msgsnd;
+pub const msgrcv = ipc.msgrcv;
+pub const msgctl = ipc.msgctl;
+pub const IPC_CREAT = ipc.IPC_CREAT;
+pub const IPC_EXCL = ipc.IPC_EXCL;
+pub const IPC_NOWAIT = ipc.IPC_NOWAIT;
+pub const IPC_RMID = ipc.IPC_RMID;
+pub const IPC_SET = ipc.IPC_SET;
+pub const IPC_STAT = ipc.IPC_STAT;
+pub const IPC_PRIVATE = ipc.IPC_PRIVATE;
+pub const SHM_RDONLY = ipc.SHM_RDONLY;
+pub const SETVAL = ipc.SETVAL;
+pub const GETVAL = ipc.GETVAL;
+pub const MSG_NOERROR = ipc.MSG_NOERROR;
+pub const ShmidDs = ipc.ShmidDs;
+pub const SemidDs = ipc.SemidDs;
+pub const SemBuf = ipc.SemBuf;
+pub const MsqidDs = ipc.MsqidDs;
+pub const MsgBufHeader = ipc.MsgBufHeader;
