@@ -772,61 +772,76 @@ pub fn sfsUnlink(ctx: ?*anyopaque, path: []const u8) vfs.Error!void {
 
     const idx = found_idx orelse return vfs.Error.NotFound;
 
-    // SECURITY: Hold lock through entire unlink operation to prevent TOCTOU race
-    const lock_held = self.alloc_lock.acquire();
-    defer lock_held.release();
+    // Capture block info under lock, then free blocks OUTSIDE the lock.
+    // freeBlocks -> freeBlock acquires alloc_lock internally, so calling it
+    // while already holding alloc_lock would self-deadlock (non-reentrant spinlock).
+    var free_start: u32 = 0;
+    var free_count: u32 = 0;
+    var needs_free = false;
+    {
+        // SECURITY: Hold lock through directory mutation to prevent TOCTOU race
+        const lock_held = self.alloc_lock.acquire();
+        defer lock_held.release();
 
-    // SECURITY: Re-read the specific directory block under lock to prevent TOCTOU
-    // The entry we found in the first pass may have been modified by another thread
-    const block_idx = idx / 4;
-    const offset_in_block = (idx % 4) * 128;
-    var block_buf: [512]u8 = [_]u8{0} ** 512;
-    sfs_io.readSector(self.device_fd, self.superblock.root_dir_start + block_idx, &block_buf) catch return vfs.Error.IOError;
+        // SECURITY: Re-read the specific directory block under lock to prevent TOCTOU
+        // The entry we found in the first pass may have been modified by another thread
+        const block_idx = idx / 4;
+        const offset_in_block = (idx % 4) * 128;
+        var block_buf: [512]u8 = [_]u8{0} ** 512;
+        sfs_io.readSector(self.device_fd, self.superblock.root_dir_start + block_idx, &block_buf) catch return vfs.Error.IOError;
 
-    const e: *t.DirEntry = @ptrCast(@alignCast(&block_buf[offset_in_block]));
+        const e: *t.DirEntry = @ptrCast(@alignCast(&block_buf[offset_in_block]));
 
-    // Re-validate entry under lock: check it still exists and has the same name
-    if (e.flags != 1) {
-        return vfs.Error.NotFound;
+        // Re-validate entry under lock: check it still exists and has the same name
+        if (e.flags != 1) {
+            return vfs.Error.NotFound;
+        }
+        const e_name = std.mem.sliceTo(&e.name, 0);
+        if (!std.mem.eql(u8, e_name, name)) {
+            // Entry was replaced with a different file - race condition
+            return vfs.Error.NotFound;
+        }
+
+        const blocks_used: u32 = if (e.size == 0) 1 else (e.size + 511) / 512;
+
+        var is_open = false;
+        if (self.open_counts[idx] > 0) {
+            is_open = true;
+            self.pending_delete[idx] = true;
+            self.deferred_info[idx] = .{
+                .start_block = e.start_block,
+                .block_count = blocks_used,
+            };
+            console.info("SFS: Deferring deletion of '{s}' (open_count={},blocks={})", .{ name, self.open_counts[idx], blocks_used });
+        }
+
+        // Capture block info for freeing outside the lock
+        if (!is_open) {
+            free_start = e.start_block;
+            free_count = blocks_used;
+            needs_free = true;
+        }
+
+        // Clear directory entry while holding lock
+        e.flags = 0;
+        e.name = [_]u8{0} ** 32;
+        if (!is_open) {
+            e.start_block = 0;
+            e.size = 0;
+        }
+
+        // Write directory update while holding lock
+        sfs_io.writeSector(self.device_fd, self.superblock.root_dir_start + block_idx, &block_buf) catch return vfs.Error.IOError;
+
+        // Update superblock while holding lock
+        self.superblock.file_count = std.math.sub(u32, self.superblock.file_count, 1) catch 0;
+        sfs_io.updateSuperblock(self) catch return vfs.Error.IOError;
     }
-    const e_name = std.mem.sliceTo(&e.name, 0);
-    if (!std.mem.eql(u8, e_name, name)) {
-        // Entry was replaced with a different file - race condition
-        return vfs.Error.NotFound;
+
+    // Free blocks OUTSIDE the lock -- freeBlock acquires alloc_lock internally
+    if (needs_free) {
+        sfs_alloc.freeBlocks(self, free_start, free_count);
     }
-
-    const blocks_used: u32 = if (e.size == 0) 1 else (e.size + 511) / 512;
-
-    var is_open = false;
-    if (self.open_counts[idx] > 0) {
-        is_open = true;
-        self.pending_delete[idx] = true;
-        self.deferred_info[idx] = .{
-            .start_block = e.start_block,
-            .block_count = blocks_used,
-        };
-        console.info("SFS: Deferring deletion of '{s}' (open_count={},blocks={})", .{ name, self.open_counts[idx], blocks_used });
-    }
-
-    // Free blocks while holding lock (if not deferred)
-    if (!is_open) {
-        sfs_alloc.freeBlocks(self, e.start_block, blocks_used);
-    }
-
-    // Clear directory entry while holding lock
-    e.flags = 0;
-    e.name = [_]u8{0} ** 32;
-    if (!is_open) {
-        e.start_block = 0;
-        e.size = 0;
-    }
-
-    // Write directory update while holding lock
-    sfs_io.writeSector(self.device_fd, self.superblock.root_dir_start + block_idx, &block_buf) catch return vfs.Error.IOError;
-
-    // Update superblock while holding lock
-    self.superblock.file_count = std.math.sub(u32, self.superblock.file_count, 1) catch 0;
-    sfs_io.updateSuperblock(self) catch return vfs.Error.IOError;
 
     console.info("SFS: Unlinked '{s}'", .{name});
 }
@@ -1414,49 +1429,58 @@ pub fn truncateFd(file_desc: *fd.FileDescriptor, length: usize) !void {
     if (length > std.math.maxInt(u32)) return error.TooLarge;
     if (length > file.size) return error.TooLarge;
 
-    const held = file.fs.alloc_lock.acquire();
-    defer held.release();
-
-    if (length > file.size) return error.TooLarge;
-
-    const new_size: u32 = @intCast(length);
-    const current_blocks: u32 = if (file.size == 0) 1 else (file.size + 511) / 512;
-    const requested_blocks: u32 = if (new_size == 0) 1 else (new_size + 511) / 512;
-
-    if (requested_blocks < current_blocks) {
-        const free_start = file.start_block + requested_blocks;
-        const free_count = current_blocks - requested_blocks;
-        if (free_count > 0) {
-            sfs_alloc.freeBlocks(file.fs, free_start, free_count);
-        }
-
-        const end_block = file.start_block + current_blocks;
-        if (end_block == file.fs.superblock.next_free_block) {
-            file.fs.superblock.next_free_block = file.start_block + requested_blocks;
-            sfs_io.updateSuperblock(file.fs) catch return error.IOError;
-        }
-    }
-
-    file.size = new_size;
-
+    // Capture block info under lock, then free blocks OUTSIDE the lock.
+    // freeBlocks -> freeBlock acquires alloc_lock internally, so calling it
+    // while already holding alloc_lock would self-deadlock (non-reentrant spinlock).
+    var free_start: u32 = 0;
+    var free_count: u32 = 0;
     {
-        const fd_lock = file_desc.lock.acquire();
-        defer fd_lock.release();
-        if (file_desc.position > new_size) {
-            file_desc.position = new_size;
+        const held = file.fs.alloc_lock.acquire();
+        defer held.release();
+
+        if (length > file.size) return error.TooLarge;
+
+        const new_size: u32 = @intCast(length);
+        const current_blocks: u32 = if (file.size == 0) 1 else (file.size + 511) / 512;
+        const requested_blocks: u32 = if (new_size == 0) 1 else (new_size + 511) / 512;
+
+        if (requested_blocks < current_blocks) {
+            free_start = file.start_block + requested_blocks;
+            free_count = current_blocks - requested_blocks;
+
+            const end_block = file.start_block + current_blocks;
+            if (end_block == file.fs.superblock.next_free_block) {
+                file.fs.superblock.next_free_block = file.start_block + requested_blocks;
+                sfs_io.updateSuperblock(file.fs) catch return error.IOError;
+            }
         }
+
+        file.size = new_size;
+
+        {
+            const fd_lock = file_desc.lock.acquire();
+            defer fd_lock.release();
+            if (file_desc.position > new_size) {
+                file_desc.position = new_size;
+            }
+        }
+
+        const block_idx = file.entry_idx / 4;
+        const offset_idx = file.entry_idx % 4;
+
+        var dir_buf: [512]u8 = undefined;
+        sfs_io.readSector(file.fs.device_fd, file.fs.superblock.root_dir_start + block_idx, &dir_buf) catch return error.IOError;
+
+        const entry: *t.DirEntry = @ptrCast(@alignCast(&dir_buf[offset_idx * 128]));
+        entry.size = file.size;
+
+        sfs_io.writeSector(file.fs.device_fd, file.fs.superblock.root_dir_start + block_idx, &dir_buf) catch return error.IOError;
     }
 
-    const block_idx = file.entry_idx / 4;
-    const offset_idx = file.entry_idx % 4;
-
-    var dir_buf: [512]u8 = undefined;
-    sfs_io.readSector(file.fs.device_fd, file.fs.superblock.root_dir_start + block_idx, &dir_buf) catch return error.IOError;
-
-    const entry: *t.DirEntry = @ptrCast(@alignCast(&dir_buf[offset_idx * 128]));
-    entry.size = file.size;
-
-    sfs_io.writeSector(file.fs.device_fd, file.fs.superblock.root_dir_start + block_idx, &dir_buf) catch return error.IOError;
+    // Free blocks OUTSIDE the lock -- freeBlock acquires alloc_lock internally
+    if (free_count > 0) {
+        sfs_alloc.freeBlocks(file.fs, free_start, free_count);
+    }
 }
 
 fn sfsPoll(file_desc: *fd.FileDescriptor, requested_events: u32) u32 {

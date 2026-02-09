@@ -846,19 +846,15 @@ pub fn sys_pwritev2(fd_num: usize, bvec_ptr: usize, count: usize, offset: usize,
 
             // Seek to end
             const held = fd.lock.acquire();
-            defer held.release();
 
             const seek_fn = fd.ops.seek.?;
             const end_pos = seek_fn(fd, 0, 2); // SEEK_END
-            if (end_pos < 0) return error.EINVAL;
+            if (end_pos < 0) {
+                held.release();
+                return error.EINVAL;
+            }
             fd.position = @intCast(end_pos);
 
-            // Now perform writev from current position (EOF)
-            // But we already hold the lock, and sys_writev will try to acquire it
-            // So we need to implement writev logic inline here
-
-            // Actually, easier: just use sys_writev since we've already seeked to EOF
-            // But unlock first
             held.release();
             return sys_writev(fd_num, bvec_ptr, count);
         } else {
