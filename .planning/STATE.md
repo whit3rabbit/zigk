@@ -9,19 +9,19 @@ See: .planning/PROJECT.md (updated 2026-02-09)
 
 ## Current Position
 
-Phase: 10 of 14 -- COMPLETE (Bug Fixes & Quick Wins)
-Plan: 4 of 4 in current phase
-Status: Phase complete, verified (10/10 must-haves passed)
-Last activity: 2026-02-09 -- Phase 10 execution complete, verification passed
+Phase: 11 of 14 -- IN PROGRESS (SFS Deadlock Resolution)
+Plan: 1 of 1 in current phase -- COMPLETE
+Status: Plan 11-01 complete (2 tasks, 5 files modified)
+Last activity: 2026-02-10 -- Phase 11 Plan 01 execution complete
 
-Progress: [██████████░░░░░░░░░░] 73% (33/45 plans completed across all milestones)
+Progress: [██████████░░░░░░░░░░] 76% (34/45 plans completed across all milestones)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 33 (v1.0: 29, v1.1: 4)
-- Average duration: ~8.2 min per plan
-- Total execution time: ~4.5 hours over 4 days
+- Total plans completed: 34 (v1.0: 29, v1.1: 5)
+- Average duration: ~8.4 min per plan
+- Total execution time: ~4.6 hours over 4 days
 
 **By Phase (v1.0):**
 
@@ -45,6 +45,7 @@ Progress: [██████████░░░░░░░░░░] 73% (33
 
 | Phase | Plan | Duration | Tasks | Files |
 |-------|------|----------|-------|-------|
+| 11. SFS Deadlock Resolution | 11-01 | 10 min | 2 | 5 |
 | 10. Bug Fixes & Quick Wins | 10-04 | 2 min | 1 | 1 |
 | 10. Bug Fixes & Quick Wins | 10-03 | 10 min | 3 | 9 |
 | 10. Bug Fixes & Quick Wins | 10-02 | 9 min | 3 | 9 |
@@ -67,6 +68,9 @@ Recent decisions affecting current work:
 - [Phase 10-01]: Remove hasSetGidCapability bypass from sys_setregid -- POSIX compliance over supplementary groups
 - [Phase 10-01]: Use isValidUserPtr for string copy validation -- Assembly fixup handles demand paging
 - [Phase 10-01]: Implement FD-based SFS chown separate from path-based -- Supports fchown syscall
+- [Phase 11-01]: io_lock ordering: alloc_lock (2) before io_lock (2.5) -- Prevents deadlock in nested lock scenarios
+- [Phase 11-01]: TOCTOU re-reads remain under alloc_lock -- Single-sector reads are fast and essential for correctness
+- [Phase 11-01]: Write I/O moved outside alloc_lock with rollback -- Eliminates interrupt starvation while preserving atomicity
 
 ### Pending Todos
 
@@ -75,7 +79,7 @@ None yet (v1.1 just started).
 ### Blockers/Concerns
 
 **Known tech debt from v1.0 (now requirements for v1.1):**
-1. SFS close deadlock after 50+ operations (Phase 11 target)
+1. ~~SFS close deadlock after 50+ operations (Phase 11 target)~~ ✅ COMPLETE (11-01)
 2. timerfd/signalfd use yield-loop blocking (Phase 13 target)
 3. sendfile uses 4KB buffer copy, not zero-copy (Phase 14 target)
 4. SEM_UNDO flag accepted but not tracked (Phase 13 target)
@@ -84,21 +88,21 @@ None yet (v1.1 just started).
 7. ~~Phase 6 missing VERIFICATION.md (Phase 10 target)~~ ✅ COMPLETE (10-04)
 
 **Architecture notes:**
-- SFS has fundamental limitations: flat structure, 64-file limit, close deadlock
-- Phase 11 will address deadlock, but other limits require architecture rework (out of v1.1 scope)
+- SFS root causes fixed: position races eliminated via io_lock, interrupt starvation eliminated via lock restructuring
+- SFS still has fundamental limitations: flat structure, 64-file limit (out of v1.1 scope)
 - Wait queue infrastructure (Phase 13) is foundational for future work
 
 ## Session Continuity
 
-Last session: 2026-02-09 (Phase 10 execution)
-Stopped at: Phase 10 complete and verified
+Last session: 2026-02-10 (Phase 11 execution)
+Stopped at: Phase 11 Plan 01 complete
 Resume file: None
 
 **Next steps:**
-1. Run `/gsd:plan-phase 11` to plan SFS Deadlock Resolution
-2. Phase 11 goal: Fix SFS close deadlock blocking 16+ tests
-3. Phase 11 depends on Phase 10 (now complete)
+1. Run verification for Phase 11 to confirm deadlock is resolved
+2. If verification passes, Phase 11 is complete
+3. Continue to Phase 12 or 13 based on priority
 
 ---
 *State initialized: 2026-02-06*
-*Last updated: 2026-02-09 after Phase 10 complete*
+*Last updated: 2026-02-10 after Phase 11 Plan 01 complete*
