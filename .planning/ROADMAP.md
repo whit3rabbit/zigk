@@ -90,10 +90,11 @@ Plans:
   3. Symbolic link targets can be read via readlink/readlinkat syscalls
   4. File timestamps (atime, mtime) can be modified via utimensat/futimesat syscalls on SFS
   5. SFS link/symlink/timestamp tests unskipped and passing
-**Plans**: TBD
+**Plans**: 2 plans in 2 waves
 
 Plans:
-- [ ] 12-01: [TBD]
+- [ ] 12-01-PLAN.md -- SFS hard link and timestamp support (DirEntry nlink/atime, sfsLink, sfsSetTimestamps)
+- [ ] 12-02-PLAN.md -- SFS symbolic link support and test verification (sfsSymlink, sfsReadlink, unskip tests)
 
 #### Phase 13: Wait Queue Infrastructure
 **Goal**: Replace yield-loops with proper wait queues for blocking operations
@@ -144,10 +145,10 @@ Phases execute in numeric order: 10 -> 11 -> 12 -> 13 -> 14
 | 9. SysV IPC | v1.0 | 3/3 | Complete | 2026-02-09 |
 | 10. Bug Fixes & Quick Wins | v1.1 | 4/4 | Complete | 2026-02-09 |
 | 11. SFS Deadlock Resolution | v1.1 | 2/2 | Complete | 2026-02-10 |
-| 12. SFS Feature Expansion | v1.1 | 0/? | Not started | - |
+| 12. SFS Feature Expansion | v1.1 | 0/2 | Not started | - |
 | 13. Wait Queue Infrastructure | v1.1 | 0/? | Not started | - |
 | 14. I/O Improvements | v1.1 | 0/? | Not started | - |
 
 ---
 *Roadmap created: 2026-02-06*
-*Last updated: 2026-02-10 after Phase 11 planning complete*
+*Last updated: 2026-02-10 after Phase 12 planning complete*
