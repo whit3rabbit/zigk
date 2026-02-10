@@ -37,7 +37,22 @@ Every implemented syscall must work correctly on both x86_64 and aarch64 with ma
 
 ### Active
 
-(No active requirements -- define next milestone with `/gsd:new-milestone`)
+## Current Milestone: v1.1 Hardening & Debt Cleanup
+
+**Goal:** Fix all known bugs, eliminate tech debt from v1, and fill behavioral gaps (proper blocking, wait queues, SFS reliability).
+
+**Target features:**
+- Fix kernel bugs (setregid permissions, SFS fchown, copyStringFromUser stack buffers)
+- Fix SFS close deadlock affecting 16+ tests
+- Replace yield-loop blocking with proper wait queues (timerfd, signalfd)
+- Implement blocking behavior for semop/msgsnd/msgrcv
+- Implement SEM_UNDO tracking
+- Add sendfile zero-copy path
+- Add SFS link/symlink/timestamp support
+- Fix event FD test pointer casting issues
+- Verify/implement unchecked stub syscalls (dup3, accept4, getrlimit, setrlimit, sigaltstack, statfs, fstatfs, getresuid/getresgid)
+- Fix AT_SYMLINK_NOFOLLOW for utimensat
+- Complete Phase 6 verification documentation
 
 ### Out of Scope
 
@@ -91,4 +106,4 @@ aarch64 copy_from_user fixup and TTBR0 exec bug fixed pre-v1.
 | SEM_UNDO deferred | Requires per-process undo lists and exit cleanup | Revisit -- needed for Postgres compatibility |
 
 ---
-*Last updated: 2026-02-09 after v1 milestone*
+*Last updated: 2026-02-09 after v1.1 milestone started*
