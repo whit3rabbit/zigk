@@ -15,7 +15,7 @@ Requirements for hardening and debt cleanup. Each maps to roadmap phases.
 
 ### SFS Filesystem
 
-- [ ] **SFS-01**: SFS close operation does not deadlock after 50+ file operations
+- [x] **SFS-01**: SFS close operation does not deadlock after 50+ file operations
 - [ ] **SFS-02**: SFS supports hard link creation (link/linkat)
 - [ ] **SFS-03**: SFS supports symbolic link creation and resolution (symlink/symlinkat/readlink)
 - [ ] **SFS-04**: SFS supports file timestamp modification (utimensat/futimesat)
@@ -41,7 +41,7 @@ Requirements for hardening and debt cleanup. Each maps to roadmap phases.
 ### Test Infrastructure
 
 - [ ] **TEST-01**: 4 event FD tests pass (fix userspace pointer casting/alignment issues)
-- [ ] **TEST-02**: All tests previously skipped due to SFS deadlock now run to completion
+- [x] **TEST-02**: All tests previously skipped due to SFS deadlock now run to completion
 - [ ] **TEST-03**: SFS link/symlink/timestamp tests unskipped and passing
 
 ### Stub Verification
@@ -90,8 +90,8 @@ None -- this is a cleanup milestone.
 | STUB-06 | Phase 10 | Pending |
 | STUB-07 | Phase 10 | Pending |
 | STUB-08 | Phase 10 | Pending |
-| SFS-01 | Phase 11 | Pending |
-| TEST-02 | Phase 11 | Pending |
+| SFS-01 | Phase 11 | Complete |
+| TEST-02 | Phase 11 | Complete |
 | SFS-02 | Phase 12 | Pending |
 | SFS-03 | Phase 12 | Pending |
 | SFS-04 | Phase 12 | Pending |

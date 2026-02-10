@@ -77,8 +77,8 @@ Plans:
 **Plans**: 2 plans in 2 waves
 
 Plans:
-- [ ] 11-01-PLAN.md -- Fix SFS I/O serialization and alloc_lock restructure
-- [ ] 11-02-PLAN.md -- Add SFS rename, unskip deadlock tests, remove close workarounds
+- [x] 11-01-PLAN.md -- Fix SFS I/O serialization and alloc_lock restructure
+- [x] 11-02-PLAN.md -- Add SFS rename, unskip deadlock tests, remove close workarounds
 
 #### Phase 12: SFS Feature Expansion
 **Goal**: Add link/symlink/timestamp support to SFS
@@ -143,7 +143,7 @@ Phases execute in numeric order: 10 -> 11 -> 12 -> 13 -> 14
 | 8. Process Control | v1.0 | 2/2 | Complete | 2026-02-08 |
 | 9. SysV IPC | v1.0 | 3/3 | Complete | 2026-02-09 |
 | 10. Bug Fixes & Quick Wins | v1.1 | 4/4 | Complete | 2026-02-09 |
-| 11. SFS Deadlock Resolution | v1.1 | 0/2 | Not started | - |
+| 11. SFS Deadlock Resolution | v1.1 | 2/2 | Complete | 2026-02-10 |
 | 12. SFS Feature Expansion | v1.1 | 0/? | Not started | - |
 | 13. Wait Queue Infrastructure | v1.1 | 0/? | Not started | - |
 | 14. I/O Improvements | v1.1 | 0/? | Not started | - |
