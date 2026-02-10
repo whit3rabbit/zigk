@@ -530,22 +530,17 @@ pub fn sys_setregid(rgid: usize, egid: usize) SyscallError!usize {
     defer held.release();
 
     const old_rgid = proc.gid;
-    const old_egid = proc.egid;
     const is_privileged = proc.euid == 0;
 
-    // Check permissions
+    // Check permissions - POSIX requires rgid/egid to match current gid, egid, or sgid
     if (new_rgid != UNCHANGED) {
-        if (!is_privileged and !proc.hasSetGidCapability(new_rgid)) {
-            if (new_rgid != old_rgid and new_rgid != old_egid) {
-                return error.EPERM;
-            }
+        if (!is_privileged and !canSetGid(proc, new_rgid)) {
+            return error.EPERM;
         }
     }
     if (new_egid != UNCHANGED) {
-        if (!is_privileged and !proc.hasSetGidCapability(new_egid)) {
-            if (new_egid != old_rgid and new_egid != old_egid and new_egid != proc.sgid) {
-                return error.EPERM;
-            }
+        if (!is_privileged and !canSetGid(proc, new_egid)) {
+            return error.EPERM;
         }
     }
 
