@@ -1490,6 +1490,36 @@ fn sfsPoll(file_desc: *fd.FileDescriptor, requested_events: u32) u32 {
     return uapi.epoll.EPOLLIN | uapi.epoll.EPOLLOUT;
 }
 
+/// Change file ownership for SFS files (FD-based, for fchown syscall).
+/// SECURITY: Permission checks are performed at syscall layer (sys_fchown).
+/// This function only updates metadata on disk.
+pub fn sfsFdChown(file_desc: *fd.FileDescriptor, uid: ?u32, gid: ?u32) isize {
+    const held = file_desc.lock.acquire();
+    defer held.release();
+
+    const file: *t.SfsFile = @ptrCast(@alignCast(file_desc.private_data));
+
+    // Update in-memory metadata
+    if (uid) |new_uid| file.uid = new_uid;
+    if (gid) |new_gid| file.gid = new_gid;
+
+    // Write metadata to disk
+    // DirEntry entries are 128 bytes, 4 per 512-byte sector
+    const block_idx = file.entry_idx / 4;
+    const offset_in_block = (file.entry_idx % 4) * 128;
+
+    var sector: [512]u8 align(512) = undefined;
+    sfs_io.readSector(file.fs.device_fd, file.fs.superblock.root_dir_start + block_idx, &sector) catch return -5; // EIO
+
+    const entry: *t.DirEntry = @ptrCast(@alignCast(&sector[offset_in_block]));
+    if (uid) |new_uid| entry.uid = new_uid;
+    if (gid) |new_gid| entry.gid = new_gid;
+
+    sfs_io.writeSector(file.fs.device_fd, file.fs.superblock.root_dir_start + block_idx, &sector) catch return -5; // EIO
+
+    return 0;
+}
+
 pub const sfs_ops = fd.FileOps{
     .read = sfsRead,
     .write = sfsWrite,
@@ -1501,6 +1531,7 @@ pub const sfs_ops = fd.FileOps{
     .poll = sfsPoll,
     .truncate = sfsTruncate,
     .getdents = sfsGetdents,
+    .chown = sfsFdChown,
 };
 
 /// Get directory entries for SFS root directory
