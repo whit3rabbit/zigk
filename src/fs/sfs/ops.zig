@@ -1625,3 +1625,29 @@ fn sfsTruncate(file_desc: *fd.FileDescriptor, length: u64) error{ AccessDenied, 
         return error.IOError;
     };
 }
+
+/// SFS statfs implementation
+pub fn sfsStatfs(ctx: ?*anyopaque) vfs.Error!uapi.stat.Statfs {
+    const self: *t.SFS = @ptrCast(@alignCast(ctx.?));
+
+    // Read stats from superblock (already maintained by allocation code)
+    const total_blocks = self.superblock.total_blocks;
+    const free_blocks = self.superblock.free_blocks;
+    const file_count = self.superblock.file_count;
+    const total_inodes = @as(u32, t.MAX_FILES);
+
+    return uapi.stat.Statfs{
+        .f_type = 0x5346532f, // SFS_MAGIC (from types.zig)
+        .f_bsize = 512,
+        .f_blocks = @as(i64, total_blocks),
+        .f_bfree = @as(i64, free_blocks),
+        .f_bavail = @as(i64, free_blocks),
+        .f_files = @as(i64, total_inodes),
+        .f_ffree = @as(i64, total_inodes - file_count),
+        .f_fsid = .{ .val = .{ 0, 0 } },
+        .f_namelen = 32, // DirEntry.name field size
+        .f_frsize = 512,
+        .f_flags = 0,
+        .f_spare = [_]i64{0} ** 4,
+    };
+}

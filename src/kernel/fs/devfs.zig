@@ -613,6 +613,26 @@ fn devfsStatPath(ctx: ?*anyopaque, path: []const u8) ?vfs.FileMeta {
     }
 }
 
+/// DevFS statfs implementation
+fn devfsStatfs(ctx: ?*anyopaque) vfs.Error!uapi.stat.Statfs {
+    _ = ctx;
+    // DevFS is a virtual filesystem
+    return uapi.stat.Statfs{
+        .f_type = 0x1373, // DEVFS_MAGIC (standard Linux devtmpfs magic)
+        .f_bsize = 0,
+        .f_blocks = 0,
+        .f_bfree = 0,
+        .f_bavail = 0,
+        .f_files = 0,
+        .f_ffree = 0,
+        .f_fsid = .{ .val = .{ 0, 0 } },
+        .f_namelen = 255,
+        .f_frsize = 0,
+        .f_flags = 0,
+        .f_spare = [_]i64{0} ** 4,
+    };
+}
+
 /// DevFS filesystem interface
 pub const dev_fs = vfs.FileSystem{
     .context = null,
@@ -620,6 +640,7 @@ pub const dev_fs = vfs.FileSystem{
     .unmount = null,
     .unlink = devfsUnlink,
     .stat_path = devfsStatPath,
+    .statfs = devfsStatfs,
 };
 
 /// Create pre-opened FDs for stdin/stdout/stderr (FDs 0/1/2)
