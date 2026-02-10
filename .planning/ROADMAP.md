@@ -57,10 +57,13 @@ See milestones/v1-ROADMAP.md for full phase details.
   8. statfs/fstatfs return filesystem statistics (type, block size, free space)
   9. getresuid/getresgid return saved set-user-ID and set-group-ID values
   10. Phase 6 has a completed VERIFICATION.md documenting syscall coverage and test results
-**Plans**: TBD
+**Plans**: 4 plans in 1 wave
 
 Plans:
-- [ ] 10-01: [TBD]
+- [ ] 10-01-PLAN.md — Critical bug fixes (setregid, copyStringFromUser, SFS chown)
+- [ ] 10-02-PLAN.md — FD/Network stub verification (dup3, accept4)
+- [ ] 10-03-PLAN.md — Resource/Signal stub verification (rlimit, sigaltstack, statfs, getresuid/getresgid)
+- [ ] 10-04-PLAN.md — Phase 6 verification documentation
 
 #### Phase 11: SFS Deadlock Resolution
 **Goal**: Fix SFS close deadlock blocking 16+ tests
@@ -138,7 +141,7 @@ Phases execute in numeric order: 10 → 11 → 12 → 13 → 14
 | 7. Socket Extras | v1.0 | 2/2 | Complete | 2026-02-08 |
 | 8. Process Control | v1.0 | 2/2 | Complete | 2026-02-08 |
 | 9. SysV IPC | v1.0 | 3/3 | Complete | 2026-02-09 |
-| 10. Bug Fixes & Quick Wins | v1.1 | 0/? | Not started | - |
+| 10. Bug Fixes & Quick Wins | v1.1 | 0/4 | Ready to execute | - |
 | 11. SFS Deadlock Resolution | v1.1 | 0/? | Not started | - |
 | 12. SFS Feature Expansion | v1.1 | 0/? | Not started | - |
 | 13. Wait Queue Infrastructure | v1.1 | 0/? | Not started | - |
@@ -146,4 +149,4 @@ Phases execute in numeric order: 10 → 11 → 12 → 13 → 14
 
 ---
 *Roadmap created: 2026-02-06*
-*Last updated: 2026-02-09 after v1.1 roadmap creation*
+*Last updated: 2026-02-09 after Phase 10 planning*
