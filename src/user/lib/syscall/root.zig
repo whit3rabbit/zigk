@@ -136,6 +136,9 @@ pub const mlockall = io.mlockall;
 pub const munlockall = io.munlockall;
 pub const mincore = io.mincore;
 pub const ppoll = io.ppoll;
+pub const Statfs = io.Statfs;
+pub const statfs = io.statfs;
+pub const fstatfs = io.fstatfs;
 
 // Re-export epoll
 pub const epoll_create1 = io.epoll_create1;
@@ -346,6 +349,24 @@ pub const sched_rr_get_interval = resource.sched_rr_get_interval;
 // Resource limits
 pub const Rlimit = resource.Rlimit;
 pub const Rusage = resource.Rusage;
+pub const getrlimit = resource.getrlimit;
+pub const setrlimit = resource.setrlimit;
+pub const RLIMIT_CPU = resource.RLIMIT_CPU;
+pub const RLIMIT_FSIZE = resource.RLIMIT_FSIZE;
+pub const RLIMIT_DATA = resource.RLIMIT_DATA;
+pub const RLIMIT_STACK = resource.RLIMIT_STACK;
+pub const RLIMIT_CORE = resource.RLIMIT_CORE;
+pub const RLIMIT_RSS = resource.RLIMIT_RSS;
+pub const RLIMIT_NPROC = resource.RLIMIT_NPROC;
+pub const RLIMIT_NOFILE = resource.RLIMIT_NOFILE;
+pub const RLIMIT_MEMLOCK = resource.RLIMIT_MEMLOCK;
+pub const RLIMIT_AS = resource.RLIMIT_AS;
+pub const RLIMIT_LOCKS = resource.RLIMIT_LOCKS;
+pub const RLIMIT_SIGPENDING = resource.RLIMIT_SIGPENDING;
+pub const RLIMIT_MSGQUEUE = resource.RLIMIT_MSGQUEUE;
+pub const RLIMIT_NICE = resource.RLIMIT_NICE;
+pub const RLIMIT_RTPRIO = resource.RLIMIT_RTPRIO;
+pub const RLIMIT_RTTIME = resource.RLIMIT_RTTIME;
 pub const prlimit64 = resource.prlimit64;
 pub const getrusage = resource.getrusage;
 

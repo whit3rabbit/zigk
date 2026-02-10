@@ -920,5 +920,23 @@ pub fn ppoll(fds: [*]PollFd, nfds: usize, timeout: ?*const Timespec, sigmask: ?*
     return ret;
 }
 
+// =============================================================================
+// Filesystem Statistics (statfs, fstatfs)
+// =============================================================================
+
+pub const Statfs = uapi.stat.Statfs;
+
+/// Get filesystem statistics by path
+pub fn statfs(path: [*:0]const u8, buf: *Statfs) SyscallError!void {
+    const ret = primitive.syscall2(syscalls.SYS_STATFS, @intFromPtr(path), @intFromPtr(buf));
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Get filesystem statistics by file descriptor
+pub fn fstatfs(fd: i32, buf: *Statfs) SyscallError!void {
+    const ret = primitive.syscall2(syscalls.SYS_FSTATFS, @bitCast(@as(isize, fd)), @intFromPtr(buf));
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
 // Alias size_t to usize for compatibility if needed, but usize is standard in Zig.
 const size_t = usize;

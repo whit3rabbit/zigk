@@ -133,3 +133,63 @@ pub fn testLstatBasic() !void {
     if (st.size <= 0) return error.TestFailed;
     if (st.mode & S_IFMT != S_IFREG) return error.TestFailed;
 }
+
+// Test 13: statfs on InitRD root returns valid filesystem info
+pub fn testStatfsInitRD() !void {
+    var buf: syscall.Statfs = undefined;
+    try syscall.statfs("/", &buf);
+
+    // Verify non-zero filesystem type (RAMFS_MAGIC or similar)
+    if (buf.f_type == 0) return error.TestFailed;
+
+    // Verify block size is set
+    if (buf.f_bsize == 0) return error.TestFailed;
+
+    // Verify total blocks is non-zero (InitRD has files)
+    if (buf.f_blocks == 0) return error.TestFailed;
+}
+
+// Test 14: statfs on DevFS returns expected values
+pub fn testStatfsDevFS() !void {
+    var buf: syscall.Statfs = undefined;
+    try syscall.statfs("/dev", &buf);
+
+    // DevFS should have DEVFS_MAGIC (0x1373)
+    if (buf.f_type != 0x1373) return error.TestFailed;
+
+    // DevFS is virtual, so blocks should be zero
+    if (buf.f_blocks != 0) return error.TestFailed;
+}
+
+// Test 15: statfs on SFS returns filesystem stats
+pub fn testStatfsSFS() !void {
+    var buf: syscall.Statfs = undefined;
+    try syscall.statfs("/mnt", &buf);
+
+    // SFS should have SFS_MAGIC (0x5346532f)
+    if (buf.f_type != 0x5346532f) return error.TestFailed;
+
+    // SFS should have blocks and files
+    if (buf.f_bsize != 512) return error.TestFailed;
+    if (buf.f_blocks == 0) return error.TestFailed;
+
+    // File limit should be 64
+    if (buf.f_files != 64) return error.TestFailed;
+}
+
+// Test 16: fstatfs on open fd returns same info as statfs
+pub fn testFstatfsSFS() !void {
+    // Open a file on SFS
+    const fd = try syscall.open("/mnt", syscall.O_RDONLY, 0);
+    defer syscall.close(fd) catch {};
+
+    var buf_statfs: syscall.Statfs = undefined;
+    try syscall.statfs("/mnt", &buf_statfs);
+
+    var buf_fstatfs: syscall.Statfs = undefined;
+    try syscall.fstatfs(fd, &buf_fstatfs);
+
+    // Both should return same filesystem type
+    if (buf_statfs.f_type != buf_fstatfs.f_type) return error.TestFailed;
+    if (buf_fstatfs.f_type != 0x5346532f) return error.TestFailed;
+}

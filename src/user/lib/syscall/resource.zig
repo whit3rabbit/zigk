@@ -389,6 +389,36 @@ pub fn prlimit64(pid: u32, resource_id: u32, new_limit: ?*const Rlimit, old_limi
     if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
 }
 
+/// Get resource limit for current process
+pub fn getrlimit(resource_id: c_int, limit: *Rlimit) SyscallError!void {
+    const ret = primitive.syscall2(syscalls.SYS_GETRLIMIT, @as(usize, @intCast(resource_id)), @intFromPtr(limit));
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Set resource limit for current process
+pub fn setrlimit(resource_id: c_int, limit: *const Rlimit) SyscallError!void {
+    const ret = primitive.syscall2(syscalls.SYS_SETRLIMIT, @as(usize, @intCast(resource_id)), @intFromPtr(limit));
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Resource limit constants
+pub const RLIMIT_CPU: c_int = 0;
+pub const RLIMIT_FSIZE: c_int = 1;
+pub const RLIMIT_DATA: c_int = 2;
+pub const RLIMIT_STACK: c_int = 3;
+pub const RLIMIT_CORE: c_int = 4;
+pub const RLIMIT_RSS: c_int = 5;
+pub const RLIMIT_NPROC: c_int = 6;
+pub const RLIMIT_NOFILE: c_int = 7;
+pub const RLIMIT_MEMLOCK: c_int = 8;
+pub const RLIMIT_AS: c_int = 9;
+pub const RLIMIT_LOCKS: c_int = 10;
+pub const RLIMIT_SIGPENDING: c_int = 11;
+pub const RLIMIT_MSGQUEUE: c_int = 12;
+pub const RLIMIT_NICE: c_int = 13;
+pub const RLIMIT_RTPRIO: c_int = 14;
+pub const RLIMIT_RTTIME: c_int = 15;
+
 /// Get resource usage
 pub fn getrusage(who: usize, usage: *Rusage) SyscallError!void {
     const ret = primitive.syscall2(syscalls.SYS_GETRUSAGE, who, @intFromPtr(usage));

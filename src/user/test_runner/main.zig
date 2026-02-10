@@ -17,6 +17,7 @@ const fs_extras_tests = @import("tests/syscall/fs_extras.zig");
 const vectored_io_tests = @import("tests/syscall/vectored_io.zig");
 const process_control_tests = @import("tests/syscall/process_control.zig");
 const sysv_ipc_tests = @import("tests/syscall/sysv_ipc.zig");
+const resource_limits_tests = @import("tests/syscall/resource_limits.zig");
 const fs_tests = @import("tests/fs/basic.zig");
 const fs_error_tests = @import("tests/fs/errors.zig");
 const regression_tests = @import("tests/regression/sfs_issues.zig");
@@ -338,6 +339,17 @@ export fn main(argc: i32, argv: [*][*:0]u8) i32 {
     runner.runTest("file_info: access exists", file_info_tests.testAccessExists);
     runner.runTest("file_info: access nonexistent", file_info_tests.testAccessNonexistent);
     runner.runTest("file_info: lstat basic", file_info_tests.testLstatBasic);
+    runner.runTest("file_info: statfs InitRD", file_info_tests.testStatfsInitRD);
+    runner.runTest("file_info: statfs DevFS", file_info_tests.testStatfsDevFS);
+    runner.runTest("file_info: statfs SFS", file_info_tests.testStatfsSFS);
+    runner.runTest("file_info: fstatfs SFS", file_info_tests.testFstatfsSFS);
+
+    // Resource limits tests
+    runner.runTest("resource: getrlimit NOFILE", resource_limits_tests.testGetrlimitNofile);
+    runner.runTest("resource: getrlimit AS", resource_limits_tests.testGetrlimitAs);
+    runner.runTest("resource: setrlimit lower soft", resource_limits_tests.testSetrlimitLowerSoft);
+    runner.runTest("resource: setrlimit rejects soft>hard", resource_limits_tests.testSetrlimitRejectsSoftGreaterThanHard);
+    runner.runTest("resource: getrlimit multiple resources", resource_limits_tests.testGetrlimitMultipleResources);
 
     // Time operations tests
     runner.runTest("time_ops: nanosleep basic", time_ops_tests.testNanosleepBasic);
