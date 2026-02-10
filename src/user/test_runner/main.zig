@@ -307,6 +307,8 @@ export fn main(argc: i32, argv: [*][*:0]u8) i32 {
     runner.runTest("socket: sendmsg invalid fd", socket_tests.testSendmsgInvalidFd);
     runner.runTest("socket: shutdown non-socket", socket_tests.testShutdownNonSocket);
     runner.runTest("socket: socketpair dgram", socket_tests.testSocketpairDgram);
+    runner.runTest("socket: accept4 invalid flags", socket_tests.testAccept4InvalidFlags);
+    runner.runTest("socket: accept4 valid flags", socket_tests.testAccept4ValidFlags);
 
     // FD operations tests
     runner.runTest("fd_ops: dup basic", fd_ops_tests.testDupBasic);
@@ -319,6 +321,9 @@ export fn main(argc: i32, argv: [*][*:0]u8) i32 {
     runner.runTest("fd_ops: fcntl getflags", fd_ops_tests.testFcntlGetFlags);
     runner.runTest("fd_ops: fcntl dupfd", fd_ops_tests.testFcntlDupfd);
     runner.runTest("fd_ops: pread64 basic", fd_ops_tests.testPread64Basic);
+    runner.runTest("fd_ops: dup3 with O_CLOEXEC", fd_ops_tests.testDup3Cloexec);
+    runner.runTest("fd_ops: dup3 same fd returns EINVAL", fd_ops_tests.testDup3SameFdReturnsEinval);
+    runner.runTest("fd_ops: dup3 invalid flags", fd_ops_tests.testDup3InvalidFlags);
 
     // File info tests
     runner.runTest("file_info: stat basic file", file_info_tests.testStatBasicFile);

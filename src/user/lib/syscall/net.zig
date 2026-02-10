@@ -324,8 +324,26 @@ pub fn accept(fd: i32, addr: ?*SockAddrIn) SyscallError!i32 {
     var addrlen: u32 = @sizeOf(SockAddrIn);
     const addr_ptr: usize = if (addr) |a| @intFromPtr(a) else 0;
     const addrlen_ptr: usize = if (addr != null) @intFromPtr(&addrlen) else 0;
-    
+
     const ret = primitive.syscall3(syscalls.SYS_ACCEPT, @bitCast(@as(isize, fd)), addr_ptr, addrlen_ptr);
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return @truncate(@as(isize, @bitCast(ret)));
+}
+
+/// Accept a connection with flags (SOCK_NONBLOCK, SOCK_CLOEXEC)
+/// Returns new file descriptor for the connection
+pub fn accept4(fd: i32, addr: ?*SockAddrIn, flags: i32) SyscallError!i32 {
+    var addrlen: u32 = @sizeOf(SockAddrIn);
+    const addr_ptr: usize = if (addr) |a| @intFromPtr(a) else 0;
+    const addrlen_ptr: usize = if (addr != null) @intFromPtr(&addrlen) else 0;
+
+    const ret = primitive.syscall4(
+        syscalls.SYS_ACCEPT4,
+        @bitCast(@as(isize, fd)),
+        addr_ptr,
+        addrlen_ptr,
+        @bitCast(@as(isize, flags)),
+    );
     if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
     return @truncate(@as(isize, @bitCast(ret)));
 }

@@ -564,3 +564,47 @@ pub fn testSocketpairDgram() !void {
     if (read_n != msg.len) return error.TestFailed;
     if (!std.mem.eql(u8, buf[0..read_n], msg)) return error.TestFailed;
 }
+
+/// Test: accept4 with invalid flags returns EINVAL
+pub fn testAccept4InvalidFlags() !void {
+    // Create a listening socket
+    const listen_fd = try syscall.socket(syscall.AF_INET, syscall.SOCK_STREAM, 0);
+    defer _ = syscall.close(listen_fd) catch {};
+
+    // Bind to loopback (use helper function like other tests)
+    const localhost = syscall.parseIp("127.0.0.1") orelse return error.TestFailed;
+    var addr = syscall.SockAddrIn.init(localhost, 0); // Port 0 = let kernel assign
+    try syscall.bind(listen_fd, &addr);
+    try syscall.listen(listen_fd, 1);
+
+    // accept4 with invalid flags (beyond SOCK_CLOEXEC | SOCK_NONBLOCK) should return EINVAL
+    const invalid_flags: i32 = 0x7FFFFFFF; // All bits set
+    const result = syscall.accept4(listen_fd, null, invalid_flags);
+    if (result != error.EINVAL) return error.TestFailed;
+}
+
+/// Test: accept4 with valid flags validates (returns EAGAIN with no connection, not EINVAL)
+pub fn testAccept4ValidFlags() !void {
+    // Create a non-blocking listening socket
+    const listen_fd = try syscall.socket(syscall.AF_INET, syscall.SOCK_STREAM | syscall.SOCK_NONBLOCK, 0);
+    defer _ = syscall.close(listen_fd) catch {};
+
+    // Bind to loopback
+    const localhost = syscall.parseIp("127.0.0.1") orelse return error.TestFailed;
+    var addr = syscall.SockAddrIn.init(localhost, 0);
+    try syscall.bind(listen_fd, &addr);
+    try syscall.listen(listen_fd, 1);
+
+    // accept4 with SOCK_CLOEXEC | SOCK_NONBLOCK should be valid flags
+    // Since no connection is pending, should return EAGAIN (or WouldBlock), not EINVAL
+    const flags = syscall.SOCK_CLOEXEC | syscall.SOCK_NONBLOCK;
+    const result = syscall.accept4(listen_fd, null, flags);
+
+    // Either EAGAIN or WouldBlock is acceptable (no EINVAL means flags were valid)
+    if (result) |_| {
+        // Got a connection somehow (shouldn't happen, but not an error)
+    } else |err| {
+        // Should be EAGAIN or WouldBlock, not EINVAL
+        if (err == error.EINVAL) return error.TestFailed;
+    }
+}

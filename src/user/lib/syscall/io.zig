@@ -69,6 +69,7 @@ pub const O_CREAT: i32 = 0o100;
 pub const O_EXCL: i32 = 0o200;
 pub const O_TRUNC: i32 = 0o1000;
 pub const O_APPEND: i32 = 0o2000;
+pub const O_CLOEXEC: i32 = 0o2000000; // Close-on-exec (same as kernel's fd_mod.O_CLOEXEC)
 
 /// Seek whence constants
 pub const SEEK_SET: i32 = 0;
@@ -661,6 +662,18 @@ pub fn dup(oldfd: i32) SyscallError!i32 {
 /// Duplicate a file descriptor to a specific number
 pub fn dup2(oldfd: i32, newfd: i32) SyscallError!i32 {
     const ret = primitive.syscall2(syscalls.SYS_DUP2, @bitCast(@as(isize, oldfd)), @bitCast(@as(isize, newfd)));
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return @truncate(@as(isize, @bitCast(ret)));
+}
+
+/// Duplicate a file descriptor with flags (O_CLOEXEC)
+pub fn dup3(oldfd: i32, newfd: i32, flags: i32) SyscallError!i32 {
+    const ret = primitive.syscall3(
+        syscalls.SYS_DUP3,
+        @bitCast(@as(isize, oldfd)),
+        @bitCast(@as(isize, newfd)),
+        @bitCast(@as(isize, flags)),
+    );
     if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
     return @truncate(@as(isize, @bitCast(ret)));
 }

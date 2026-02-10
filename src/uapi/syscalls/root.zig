@@ -58,6 +58,7 @@ pub const SYS_SENDFILE = linux.SYS_SENDFILE;
 pub const SYS_SOCKET = linux.SYS_SOCKET;
 pub const SYS_CONNECT = linux.SYS_CONNECT;
 pub const SYS_ACCEPT = linux.SYS_ACCEPT;
+pub const SYS_ACCEPT4 = linux.SYS_ACCEPT4;
 pub const SYS_SENDTO = linux.SYS_SENDTO;
 pub const SYS_RECVFROM = linux.SYS_RECVFROM;
 pub const SYS_SENDMSG = linux.SYS_SENDMSG;

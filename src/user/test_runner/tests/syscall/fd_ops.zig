@@ -6,6 +6,9 @@ const F_DUPFD: i32 = 0;
 const F_GETFD: i32 = 1;
 const F_GETFL: i32 = 3;
 
+// fcntl flags
+const FD_CLOEXEC: i32 = 1;
+
 // Test 1: dup() returns a new fd that reads the same file
 pub fn testDupBasic() !void {
     const fd = try syscall.open("/shell.elf", syscall.O_RDONLY, 0);
@@ -180,4 +183,43 @@ pub fn testPread64Basic() !void {
     // File position should still be 0 (pread64 doesn't change it)
     const pos = try syscall.lseek(fd, 0, syscall.SEEK_CUR);
     if (pos != 0) return error.TestFailed;
+}
+
+// Test 11: dup3 with O_CLOEXEC sets close-on-exec flag
+pub fn testDup3Cloexec() !void {
+    const fd = try syscall.open("/shell.elf", syscall.O_RDONLY, 0);
+    defer syscall.close(fd) catch {};
+
+    // dup3 with O_CLOEXEC to a specific fd
+    const target_fd: i32 = 55;
+    const result = try syscall.dup3(fd, target_fd, syscall.O_CLOEXEC);
+    defer syscall.close(target_fd) catch {};
+
+    if (result != target_fd) return error.TestFailed;
+
+    // fcntl(F_GETFD) should return FD_CLOEXEC (1)
+    const fd_flags = try syscall.fcntl(target_fd, F_GETFD, 0);
+    if ((fd_flags & FD_CLOEXEC) == 0) return error.TestFailed;
+}
+
+// Test 12: dup3 with same oldfd and newfd returns EINVAL
+pub fn testDup3SameFdReturnsEinval() !void {
+    const fd = try syscall.open("/shell.elf", syscall.O_RDONLY, 0);
+    defer syscall.close(fd) catch {};
+
+    // dup3 with oldfd == newfd should return EINVAL (unlike dup2)
+    const result = syscall.dup3(fd, fd, 0);
+    if (result != error.EINVAL) return error.TestFailed;
+}
+
+// Test 13: dup3 with invalid flags returns EINVAL
+pub fn testDup3InvalidFlags() !void {
+    const fd = try syscall.open("/shell.elf", syscall.O_RDONLY, 0);
+    defer syscall.close(fd) catch {};
+
+    // Invalid flags beyond O_CLOEXEC should be rejected
+    const target_fd: i32 = 56;
+    const invalid_flags: usize = 0xFFFF;
+    const result = syscall.dup3(fd, target_fd, invalid_flags);
+    if (result != error.EINVAL) return error.TestFailed;
 }
