@@ -98,6 +98,7 @@ pub fn init(device_path: []const u8) !vfs.FileSystem {
         .chown = sfs_ops.sfsChown,
         .mkdir = sfs_ops.sfsMkdir,
         .rmdir = sfs_ops.sfsRmdir,
+        .rename = sfs_ops.sfsRename,
         .getdents = sfs_ops.sfsGetdents,
         .statfs = sfs_ops.sfsStatfs,
     };

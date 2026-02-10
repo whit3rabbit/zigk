@@ -1346,6 +1346,200 @@ pub fn sfsRmdir(ctx: ?*anyopaque, path: []const u8) vfs.Error!void {
     console.info("SFS: Removed directory '{s}'", .{name});
 }
 
+pub fn sfsRename(ctx: ?*anyopaque, old_path: []const u8, new_path: []const u8) vfs.Error!void {
+    const self: *t.SFS = @ptrCast(@alignCast(ctx));
+    if (!self.mounted) return vfs.Error.IOError;
+
+    // Extract names from paths (strip leading '/')
+    const old_name = if (old_path.len > 0 and old_path[0] == '/') old_path[1..] else old_path;
+    const new_name = if (new_path.len > 0 and new_path[0] == '/') new_path[1..] else new_path;
+
+    // Validate both filenames
+    if (!sfs_alloc.isValidFilename(old_name)) return vfs.Error.AccessDenied;
+    if (!sfs_alloc.isValidFilename(new_name)) return vfs.Error.AccessDenied;
+    if (old_name.len == 0 or old_name.len >= 32) return vfs.Error.NotFound;
+    if (new_name.len == 0 or new_name.len >= 32) return vfs.Error.InvalidPath;
+
+    // If same name, no-op (success)
+    if (std.mem.eql(u8, old_name, new_name)) return;
+
+    // SECURITY: Allocate directory buffer on heap to prevent stack overflow
+    const alloc = heap.allocator();
+    const dir_buf = alloc.alloc(u8, t.ROOT_DIR_BLOCKS * 512) catch return vfs.Error.NoMemory;
+    defer alloc.free(dir_buf);
+
+    // PHASE 1: Read directory UNLOCKED to find old entry and check if new name exists
+    var old_idx: ?u32 = null;
+    var new_idx: ?u32 = null;
+    {
+        sfs_io.readDirectoryAsync(self, dir_buf) catch return vfs.Error.IOError;
+
+        const total_entries = t.ROOT_DIR_BLOCKS * 4;
+        var idx: u32 = 0;
+        while (idx < total_entries) : (idx += 1) {
+            const offset = std.math.mul(usize, idx, 128) catch return vfs.Error.IOError;
+            const e: *const t.DirEntry = @ptrCast(@alignCast(&dir_buf[offset]));
+
+            if (e.flags == 1) {
+                const e_name = std.mem.sliceTo(&e.name, 0);
+                if (e_name.len >= 32) continue;
+                if (std.mem.eql(u8, e_name, old_name)) {
+                    old_idx = idx;
+                }
+                if (std.mem.eql(u8, e_name, new_name)) {
+                    new_idx = idx;
+                }
+            }
+        }
+    }
+
+    const old_entry_idx = old_idx orelse return vfs.Error.NotFound;
+
+    // Calculate block locations
+    const old_block_idx = old_entry_idx / 4;
+    const old_offset_in_block = std.math.mul(usize, old_entry_idx % 4, 128) catch return vfs.Error.IOError;
+
+    // PHASE 2: Under lock - handle rename
+    var old_block_buf: [512]u8 = [_]u8{0} ** 512;
+    var new_block_buf: [512]u8 = [_]u8{0} ** 512;
+    var new_entry_to_delete: ?struct { idx: u32, start_block: u32, block_count: u32, is_dir: bool } = null;
+    var same_block = false;
+
+    {
+        const lock_held = self.alloc_lock.acquire();
+        defer lock_held.release();
+
+        // Re-read old entry's block under lock (TOCTOU prevention)
+        sfs_io.readSector(self, self.superblock.root_dir_start + old_block_idx, &old_block_buf) catch return vfs.Error.IOError;
+
+        const old_e: *t.DirEntry = @ptrCast(@alignCast(&old_block_buf[old_offset_in_block]));
+
+        // Re-validate old entry under lock
+        if (old_e.flags != 1) {
+            return vfs.Error.NotFound;
+        }
+        const old_e_name = std.mem.sliceTo(&old_e.name, 0);
+        if (!std.mem.eql(u8, old_e_name, old_name)) {
+            return vfs.Error.NotFound;
+        }
+
+        // If new_name exists, we need to delete it first (POSIX rename semantics)
+        if (new_idx) |new_entry_idx| {
+            const new_block_idx = new_entry_idx / 4;
+            const new_offset_in_block = std.math.mul(usize, new_entry_idx % 4, 128) catch return vfs.Error.IOError;
+
+            // Check if old and new entries are in the same block
+            same_block = (old_block_idx == new_block_idx);
+
+            // Read new entry's block (might be same as old_block_buf)
+            if (same_block) {
+                @memcpy(&new_block_buf, &old_block_buf);
+            } else {
+                sfs_io.readSector(self, self.superblock.root_dir_start + new_block_idx, &new_block_buf) catch return vfs.Error.IOError;
+            }
+
+            const new_e: *t.DirEntry = @ptrCast(@alignCast(&new_block_buf[new_offset_in_block]));
+
+            // Validate new entry exists
+            if (new_e.flags != 1) {
+                // Entry disappeared - proceed with simple rename
+            } else {
+                // POSIX: Cannot rename over a directory with rename()
+                if (new_e.isDirectory()) {
+                    return vfs.Error.IsDirectory;
+                }
+
+                // Mark new entry for deletion
+                const blocks_used: u32 = if (new_e.size == 0) 1 else (new_e.size + 511) / 512;
+
+                // Check if new entry is open
+                var is_open = false;
+                if (self.open_counts[new_entry_idx] > 0) {
+                    is_open = true;
+                    self.pending_delete[new_entry_idx] = true;
+                    self.deferred_info[new_entry_idx] = .{
+                        .start_block = new_e.start_block,
+                        .block_count = blocks_used,
+                    };
+                }
+
+                // Save info for freeing outside lock
+                if (!is_open) {
+                    new_entry_to_delete = .{
+                        .idx = new_entry_idx,
+                        .start_block = new_e.start_block,
+                        .block_count = blocks_used,
+                        .is_dir = false,
+                    };
+                }
+
+                // Clear the new entry in buffer
+                new_e.flags = 0;
+                new_e.name = [_]u8{0} ** 32;
+                if (!is_open) {
+                    new_e.start_block = 0;
+                    new_e.size = 0;
+                }
+
+                // Update file count (one file deleted)
+                self.superblock.file_count = std.math.sub(u32, self.superblock.file_count, 1) catch 0;
+            }
+        }
+
+        // Now rename old entry by changing its name
+        old_e.name = [_]u8{0} ** 32;
+        @memcpy(old_e.name[0..new_name.len], new_name);
+
+        // If same block, we've already modified both entries in old_block_buf
+        if (same_block and new_idx != null) {
+            // Copy modifications from new_block_buf back to old_block_buf (they're the same block)
+            // Actually, we modified new_block_buf which is a copy, so copy it back
+            @memcpy(&old_block_buf, &new_block_buf);
+        }
+    }
+
+    // PHASE 3: Write blocks OUTSIDE lock
+    sfs_io.writeSector(self, self.superblock.root_dir_start + old_block_idx, &old_block_buf) catch |err| {
+        // Rollback on write failure
+        const held = self.alloc_lock.acquire();
+        defer held.release();
+        if (new_entry_to_delete != null or (new_idx != null and !same_block)) {
+            self.superblock.file_count = std.math.add(u32, self.superblock.file_count, 1) catch std.math.maxInt(u32);
+        }
+        return err;
+    };
+
+    // If new entry was in a different block, write that block too
+    if (new_idx != null and !same_block) {
+        const new_entry_idx = new_idx.?;
+        const new_block_idx = new_entry_idx / 4;
+        sfs_io.writeSector(self, self.superblock.root_dir_start + new_block_idx, &new_block_buf) catch |err| {
+            // Partial failure - directory blocks inconsistent
+            // Old entry renamed, but new entry not deleted
+            return err;
+        };
+    }
+
+    // Write superblock if file count changed
+    if (new_entry_to_delete != null or new_idx != null) {
+        sfs_io.updateSuperblock(self) catch |err| {
+            const held = self.alloc_lock.acquire();
+            defer held.release();
+            if (new_entry_to_delete != null or new_idx != null) {
+                self.superblock.file_count = std.math.add(u32, self.superblock.file_count, 1) catch std.math.maxInt(u32);
+            }
+            return err;
+        };
+    }
+
+    // PHASE 4: Free blocks of deleted entry OUTSIDE lock (if not open)
+    if (new_entry_to_delete) |del| {
+        sfs_alloc.freeBlocks(self, del.start_block, del.block_count);
+    }
+
+    console.info("SFS: Renamed '{s}' to '{s}'", .{ old_name, new_name });
+}
+
 pub fn sfsSeek(file_desc: *fd.FileDescriptor, offset: i64, whence: u32) isize {
     const file: *t.SfsFile = @ptrCast(@alignCast(file_desc.private_data));
     const size: i64 = @intCast(file.size);
