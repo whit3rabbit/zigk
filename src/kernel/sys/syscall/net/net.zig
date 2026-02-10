@@ -816,6 +816,11 @@ pub fn sys_accept4(fd: usize, addr_ptr: usize, addrlen_ptr: usize, flags: usize)
 
     // Extract flags
     const flags_u32 = std.math.cast(u32, flags) orelse return error.EINVAL;
+
+    // Validate flags - only SOCK_CLOEXEC and SOCK_NONBLOCK are supported
+    const valid_flags = @as(u32, @intCast(socket.SOCK_CLOEXEC)) | @as(u32, @intCast(socket.SOCK_NONBLOCK));
+    if ((flags_u32 & ~valid_flags) != 0) return error.EINVAL;
+
     const is_cloexec = (flags_u32 & @as(u32, @intCast(socket.SOCK_CLOEXEC))) != 0;
     const is_nonblock = (flags_u32 & @as(u32, @intCast(socket.SOCK_NONBLOCK))) != 0;
 
@@ -945,6 +950,16 @@ pub fn sys_accept4(fd: usize, addr_ptr: usize, addrlen_ptr: usize, flags: usize)
                 _ = socket.close(new_sock_fd) catch {};
                 return err;
             };
+
+            // Apply O_NONBLOCK to the FD if SOCK_NONBLOCK was requested
+            if (is_nonblock) {
+                const table = base.getGlobalFdTable();
+                const fd_u32 = std.math.cast(u32, new_fd_num) orelse return new_fd_num;
+                if (table.get(fd_u32)) |fd_obj| {
+                    fd_obj.flags |= fd_mod.O_NONBLOCK;
+                }
+            }
+
             return new_fd_num;
         } else |err| {
             if (err == socket.SocketError.WouldBlock and sock.blocking) {
