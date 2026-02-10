@@ -9,12 +9,12 @@ See: .planning/PROJECT.md (updated 2026-02-09)
 
 ## Current Position
 
-Phase: 11 of 14 -- COMPLETE (SFS Deadlock Resolution)
-Plan: 2 of 2 in current phase -- COMPLETE
-Status: Phase complete, verified (8/8 must-haves passed)
-Last activity: 2026-02-10 -- Phase 11 Plan 02 execution complete
+Phase: 12 of 14 -- IN PROGRESS (SFS Feature Expansion)
+Plan: 1 of 2 in current phase -- COMPLETE
+Status: Plan 01 complete, verified
+Last activity: 2026-02-10 -- Phase 12 Plan 01 execution complete
 
-Progress: [██████████░░░░░░░░░░] 78% (35/45 plans completed across all milestones)
+Progress: [██████████░░░░░░░░░░] 80% (36/45 plans completed across all milestones)
 
 ## Performance Metrics
 
@@ -45,6 +45,7 @@ Progress: [██████████░░░░░░░░░░] 78% (35
 
 | Phase | Plan | Duration | Tasks | Files |
 |-------|------|----------|-------|-------|
+| 12. SFS Feature Expansion | 12-01 | 12 min | 2 | 3 |
 | 11. SFS Deadlock Resolution | 11-02 | 9 min | 2 | 10 |
 | 11. SFS Deadlock Resolution | 11-01 | 10 min | 2 | 5 |
 | 10. Bug Fixes & Quick Wins | 10-04 | 2 min | 1 | 1 |
@@ -72,6 +73,9 @@ Recent decisions affecting current work:
 - [Phase 11-01]: io_lock ordering: alloc_lock (2) before io_lock (2.5) -- Prevents deadlock in nested lock scenarios
 - [Phase 11-01]: TOCTOU re-reads remain under alloc_lock -- Single-sector reads are fast and essential for correctness
 - [Phase 11-01]: Write I/O moved outside alloc_lock with rollback -- Eliminates interrupt starvation while preserving atomicity
+- [Phase 12-01]: Global nlink synchronization for hard links -- ALL entries sharing start_block must have identical nlink values
+- [Phase 12-01]: Hard links to directories rejected (POSIX EPERM) -- Only regular files can be hard-linked
+- [Phase 12-01]: SFS timestamps stored as u32 seconds -- Nanosecond precision lost, acceptable for SFS design
 
 ### Pending Todos
 
@@ -95,14 +99,14 @@ None yet (v1.1 just started).
 
 ## Session Continuity
 
-Last session: 2026-02-10 (Phase 11 execution)
-Stopped at: Phase 11 complete -- all 2 plans executed
+Last session: 2026-02-10 (Phase 12 execution)
+Stopped at: Phase 12 Plan 01 complete -- hard link and timestamp support implemented
 Resume file: None
 
 **Next steps:**
-1. Phase 11 SFS Deadlock Resolution is COMPLETE
-2. Continue to Phase 12 (SFS Feature Expansion) or Phase 13 (Wait Queues & Blocking) based on priority
-3. Both phases are viable next steps
+1. Phase 12 Plan 01 (Hard Links & Timestamps) is COMPLETE
+2. Continue to Phase 12 Plan 02 (remaining SFS features) or Phase 13 (Wait Queues & Blocking)
+3. SFS now supports hard links with global nlink synchronization
 
 ---
 *State initialized: 2026-02-06*
