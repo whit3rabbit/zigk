@@ -50,90 +50,153 @@ pub fn loadBitmapIntoCached(self: *t.SFS, dest: []u8) !void {
 }
 
 /// Allocate a free block from the bitmap
+/// RESTRUCTURED: Bitmap scan/mark under lock, write I/O outside lock
 pub fn allocateBlock(self: *t.SFS) !u32 {
-    const held = self.alloc_lock.acquire();
-    defer held.release();
+    var block_num: u32 = undefined;
+    var lba: u32 = undefined;
+    var sector_data: [512]u8 = undefined;
+    var allocated = false;
 
-    var using_cache = false;
-    const bitmap_buf = if (self.bitmap_cache) |cache| blk: {
-        if (!self.bitmap_cache_valid) {
-            loadBitmapIntoCached(self, cache) catch return error.IOError;
-            self.bitmap_cache_valid = true;
-        }
-        using_cache = true;
-        break :blk cache;
-    } else blk: {
-        break :blk loadBitmapBatch(self) catch return error.IOError;
-    };
+    // PHASE 1: Acquire lock, load/scan bitmap, mark bit in cache
+    {
+        const held = self.alloc_lock.acquire();
+        defer held.release();
 
-    defer if (!using_cache) heap.allocator().free(bitmap_buf);
+        var using_cache = false;
+        const bitmap_buf = if (self.bitmap_cache) |cache| blk: {
+            if (!self.bitmap_cache_valid) {
+                // Cold path: load bitmap into cache under lock
+                // Acceptable because this only happens once per mount
+                loadBitmapIntoCached(self, cache) catch return error.IOError;
+                self.bitmap_cache_valid = true;
+            }
+            using_cache = true;
+            break :blk cache;
+        } else blk: {
+            // Fallback if no cache allocated
+            break :blk loadBitmapBatch(self) catch return error.IOError;
+        };
 
-    for (bitmap_buf, 0..) |byte, global_byte_idx| {
-        if (byte != 0xFF) {
-            var bit: u3 = 0;
-            while (bit < 8) : (bit += 1) {
-                if ((byte & (@as(u8, 1) << bit)) == 0) {
-                    bitmap_buf[global_byte_idx] |= (@as(u8, 1) << bit);
+        defer if (!using_cache) heap.allocator().free(bitmap_buf);
 
-                    const bitmap_block_idx = global_byte_idx / 512;
-                    const lba = self.superblock.bitmap_start + @as(u32, @truncate(bitmap_block_idx));
-                    
-                    sfs_io.writeSector(self, lba, bitmap_buf[bitmap_block_idx * 512 ..][0..512]) catch return error.IOError;
+        // Scan for free bit
+        for (bitmap_buf, 0..) |byte, global_byte_idx| {
+            if (byte != 0xFF) {
+                var bit: u3 = 0;
+                while (bit < 8) : (bit += 1) {
+                    if ((byte & (@as(u8, 1) << bit)) == 0) {
+                        // Found free bit - mark it in the buffer
+                        bitmap_buf[global_byte_idx] |= (@as(u8, 1) << bit);
 
-                    const bitmap_offset = @as(u32, @truncate(global_byte_idx)) * 8;
-                    const bit_offset = @as(u32, bit);
-                    const total_offset = std.math.add(u32, bitmap_offset, bit_offset) catch return error.IOError;
-                    const block_num = std.math.add(u32, self.superblock.data_start, total_offset) catch return error.IOError;
+                        const bitmap_block_idx = global_byte_idx / 512;
+                        lba = self.superblock.bitmap_start + @as(u32, @truncate(bitmap_block_idx));
 
-                    if (block_num >= self.superblock.total_blocks) {
-                        bitmap_buf[global_byte_idx] &= ~(@as(u8, 1) << bit);
-                        return error.ENOSPC;
+                        const bitmap_offset = @as(u32, @truncate(global_byte_idx)) * 8;
+                        const bit_offset = @as(u32, bit);
+                        const total_offset = std.math.add(u32, bitmap_offset, bit_offset) catch return error.IOError;
+                        block_num = std.math.add(u32, self.superblock.data_start, total_offset) catch return error.IOError;
+
+                        if (block_num >= self.superblock.total_blocks) {
+                            // Undo bit mark
+                            bitmap_buf[global_byte_idx] &= ~(@as(u8, 1) << bit);
+                            return error.ENOSPC;
+                        }
+
+                        // Capture sector data to write
+                        @memcpy(&sector_data, bitmap_buf[bitmap_block_idx * 512 ..][0..512]);
+
+                        // Update free block counter in memory
+                        const sb_free = self.superblock.free_blocks;
+                        self.superblock.free_blocks = blk: {
+                            if (sb_free > 0) break :blk sb_free - 1;
+                            break :blk 0;
+                        };
+
+                        allocated = true;
+                        break;
                     }
-
-                    const sb_free = self.superblock.free_blocks;
-                    self.superblock.free_blocks = blk: {
-                        if (sb_free > 0) break :blk sb_free - 1;
-                        break :blk 0;
-                    };
-                    sfs_io.updateSuperblock(self) catch return error.IOError;
-
-                    return block_num;
                 }
+                if (allocated) break;
             }
         }
+
+        if (!allocated) return error.ENOSPC;
     }
 
-    return error.ENOSPC;
+    // PHASE 2: Write bitmap sector OUTSIDE lock
+    sfs_io.writeSector(self, lba, &sector_data) catch |err| {
+        // Rollback: re-acquire lock, undo cache bit and counter
+        const held = self.alloc_lock.acquire();
+        defer held.release();
+
+        const rel_block = block_num - self.superblock.data_start;
+        const byte_idx = rel_block / 8;
+        const bit_idx: u3 = @truncate(rel_block % 8);
+
+        if (self.bitmap_cache) |cache| {
+            if (self.bitmap_cache_valid) {
+                cache[byte_idx] &= ~(@as(u8, 1) << bit_idx);
+            }
+        }
+
+        self.superblock.free_blocks = std.math.add(u32, self.superblock.free_blocks, 1) catch std.math.maxInt(u32);
+        return err;
+    };
+
+    // PHASE 3: Write superblock OUTSIDE lock
+    sfs_io.updateSuperblock(self) catch |err| {
+        // Rollback: re-acquire lock, undo counter (bitmap already persisted - this is a partial failure state)
+        // We leave the bitmap bit set on disk but increment free_blocks counter
+        // This creates a small leak but prevents corruption
+        const held = self.alloc_lock.acquire();
+        defer held.release();
+        self.superblock.free_blocks = std.math.add(u32, self.superblock.free_blocks, 1) catch std.math.maxInt(u32);
+        return err;
+    };
+
+    return block_num;
 }
 
 /// Free a block back to the bitmap
+/// RESTRUCTURED: Write I/O happens OUTSIDE alloc_lock to prevent extended interrupt-disabled periods
 pub fn freeBlock(self: *t.SFS, block_num: u32) !void {
     if (block_num < self.superblock.data_start) return error.InvalidBlock;
 
-    const held = self.alloc_lock.acquire();
-    defer held.release();
-
+    // PHASE 1: Compute indices under lock, then release
     const rel_block = block_num - self.superblock.data_start;
     const byte_idx = rel_block / 8;
     const bit_idx: u3 = @truncate(rel_block % 8);
-    
     const bitmap_block_idx = byte_idx / 512;
     const byte_in_block = byte_idx % 512;
     const lba = self.superblock.bitmap_start + bitmap_block_idx;
 
+    // PHASE 2: Read bitmap sector OUTSIDE lock (using io_lock internally)
     var sector_buf: [512]u8 = undefined;
     sfs_io.readSector(self, lba, &sector_buf) catch return error.IOError;
 
+    // PHASE 3: Modify bitmap byte in local buffer
     sector_buf[byte_in_block] &= ~(@as(u8, 1) << bit_idx);
+
+    // PHASE 4: Write bitmap sector back OUTSIDE lock
     sfs_io.writeSector(self, lba, &sector_buf) catch return error.IOError;
 
-    if (self.bitmap_cache) |cache| {
-        if (self.bitmap_cache_valid) {
-            cache[byte_idx] &= ~(@as(u8, 1) << bit_idx);
+    // PHASE 5: Update in-memory state UNDER lock
+    {
+        const held = self.alloc_lock.acquire();
+        defer held.release();
+
+        // Update bitmap cache if valid
+        if (self.bitmap_cache) |cache| {
+            if (self.bitmap_cache_valid) {
+                cache[byte_idx] &= ~(@as(u8, 1) << bit_idx);
+            }
         }
+
+        // Update free block counter
+        self.superblock.free_blocks = std.math.add(u32, self.superblock.free_blocks, 1) catch std.math.maxInt(u32);
     }
 
-    self.superblock.free_blocks = std.math.add(u32, self.superblock.free_blocks, 1) catch std.math.maxInt(u32);
+    // PHASE 6: Persist superblock OUTSIDE lock
     sfs_io.updateSuperblock(self) catch return error.IOError;
 }
 

@@ -315,21 +315,29 @@ pub fn sfsWrite(file_desc: *fd.FileDescriptor, buf: []const u8) isize {
                 return std.math.cast(isize, written_count) orelse return -75;
             };
 
-            // PHASE 3: Acquire lock for atomic update
-            const lock_held = file.fs.alloc_lock.acquire();
-            defer lock_held.release();
+            // PHASE 3: Acquire lock, re-read for TOCTOU, modify in buffer, release lock
+            var should_write = false;
+            {
+                const lock_held = file.fs.alloc_lock.acquire();
+                defer lock_held.release();
 
-            // PHASE 4: Re-read under lock (TOCTOU prevention)
-            sfs_io.readSector(file.fs, file.fs.superblock.root_dir_start + block_idx, &dir_buf) catch {
-                return std.math.cast(isize, written_count) orelse return -75;
-            };
+                // Re-read under lock (TOCTOU prevention)
+                sfs_io.readSector(file.fs, file.fs.superblock.root_dir_start + block_idx, &dir_buf) catch {
+                    return std.math.cast(isize, written_count) orelse return -75;
+                };
 
-            // PHASE 5: Validate and update
-            const entry: *t.DirEntry = @ptrCast(@alignCast(&dir_buf[offset_in_block]));
+                // Validate and update in buffer
+                const entry: *t.DirEntry = @ptrCast(@alignCast(&dir_buf[offset_in_block]));
 
-            // SECURITY: Validate start_block to prevent wrong-file race
-            if (entry.flags == 1 and entry.start_block == file.start_block) {
-                entry.size = file.size;
+                // SECURITY: Validate start_block to prevent wrong-file race
+                if (entry.flags == 1 and entry.start_block == file.start_block) {
+                    entry.size = file.size;
+                    should_write = true;
+                }
+            }
+
+            // PHASE 4: Write directory block OUTSIDE lock
+            if (should_write) {
                 sfs_io.writeSector(file.fs, file.fs.superblock.root_dir_start + block_idx, &dir_buf) catch {
                     console.warn("SFS: Failed to write directory size update", .{});
                 };
@@ -504,32 +512,34 @@ pub fn sfsOpen(ctx: ?*anyopaque, path: []const u8, flags: u32) vfs.Error!*fd.Fil
         }
 
         // SECURITY: Handle O_TRUNC before creating file context
-        // This must be done atomically under lock to prevent TOCTOU races
         if ((flags & fd.O_TRUNC) != 0 and !entry.isDirectory()) {
             // Check if file is writable
             const access_mode = flags & fd.O_ACCMODE;
             if (access_mode == fd.O_WRONLY or access_mode == fd.O_RDWR) {
-                // Truncate file to zero
-                const held_trunc = self.alloc_lock.acquire();
-                defer held_trunc.release();
-
-                // Re-read directory entry under lock (TOCTOU prevention)
+                // Calculate block location
                 const block_idx = found_idx / 4;
                 const offset_in_block = std.math.mul(usize, found_idx % 4, 128) catch return vfs.Error.IOError;
 
+                // Acquire lock, re-read, validate, modify in buffer, release lock
                 var block_buf: [512]u8 = [_]u8{0} ** 512;
-                sfs_io.readSector(self, self.superblock.root_dir_start + block_idx, &block_buf) catch return vfs.Error.IOError;
+                {
+                    const held_trunc = self.alloc_lock.acquire();
+                    defer held_trunc.release();
 
-                const trunc_entry: *t.DirEntry = @ptrCast(@alignCast(&block_buf[offset_in_block]));
+                    // Re-read directory entry under lock (TOCTOU prevention)
+                    sfs_io.readSector(self, self.superblock.root_dir_start + block_idx, &block_buf) catch return vfs.Error.IOError;
 
-                // Validate entry still exists and matches
-                if (trunc_entry.flags != 1) return vfs.Error.NotFound;
-                if (trunc_entry.start_block != entry.start_block) return vfs.Error.NotFound;
+                    const trunc_entry: *t.DirEntry = @ptrCast(@alignCast(&block_buf[offset_in_block]));
 
-                // Update size to 0 (keep blocks allocated for simplicity)
-                trunc_entry.size = 0;
+                    // Validate entry still exists and matches
+                    if (trunc_entry.flags != 1) return vfs.Error.NotFound;
+                    if (trunc_entry.start_block != entry.start_block) return vfs.Error.NotFound;
 
-                // Write directory sector back
+                    // Update size to 0 in buffer (keep blocks allocated for simplicity)
+                    trunc_entry.size = 0;
+                }
+
+                // Write directory sector back OUTSIDE lock
                 sfs_io.writeSector(self, self.superblock.root_dir_start + block_idx, &block_buf) catch return vfs.Error.IOError;
 
                 // Update entry in our local copy so file_ctx gets correct size
@@ -636,70 +646,76 @@ pub fn sfsOpen(ctx: ?*anyopaque, path: []const u8, flags: u32) vfs.Error!*fd.Fil
             };
             console.debug("SFS: Found free slot {}", .{new_idx});
 
-            // PHASE 3: Atomic update UNDER LOCK
+            // PHASE 3: Calculate block location
+            const block_idx = new_idx / 4;
+            const offset_in_block = std.math.mul(usize, new_idx % 4, 128) catch return vfs.Error.IOError;
+
+            // PHASE 4: Acquire lock, re-read, validate, modify in buffer, update counters, release lock
             console.debug("SFS: Acquiring alloc_lock", .{});
-            const create_result: vfs.Error!void = blk: {
+            var block_buf: [512]u8 = [_]u8{0} ** 512;
+            {
                 const lock_held = self.alloc_lock.acquire();
                 defer lock_held.release();
                 console.debug("SFS: Lock acquired", .{});
 
                 // Check file count under lock
                 if (self.superblock.file_count >= t.MAX_FILES) {
-                    break :blk vfs.Error.NoMemory;
+                    return vfs.Error.NoMemory;
                 }
 
                 // Re-read SPECIFIC BLOCK under lock to validate slot still free (TOCTOU prevention)
-                const block_idx = new_idx / 4;
-                const offset_in_block = std.math.mul(usize, new_idx % 4, 128) catch break :blk vfs.Error.IOError;
-
                 console.debug("SFS: Reading block {} under lock", .{block_idx});
-                var block_buf: [512]u8 = [_]u8{0} ** 512;
                 sfs_io.readSector(self, self.superblock.root_dir_start + block_idx, &block_buf) catch {
-                    break :blk vfs.Error.IOError;
+                    return vfs.Error.IOError;
                 };
                 console.debug("SFS: Block read complete", .{});
 
                 const verify_entry: *const t.DirEntry = @ptrCast(@alignCast(&block_buf[offset_in_block]));
                 if (verify_entry.flags != 0) {
                     // Slot taken by another thread - race detected
-                    break :blk vfs.Error.NoMemory;
+                    return vfs.Error.NoMemory;
                 }
 
-                // Write new entry to block
+                // Write new entry to buffer
                 const dest: *t.DirEntry = @ptrCast(@alignCast(&block_buf[offset_in_block]));
                 dest.* = new_entry;
 
-                console.debug("SFS: Writing block {} under lock", .{block_idx});
-                // Write block back
-                sfs_io.writeSector(self, self.superblock.root_dir_start + block_idx, &block_buf) catch {
-                    break :blk vfs.Error.IOError;
-                };
-                console.debug("SFS: Block write complete", .{});
-
-                // Update superblock under lock
+                // Update superblock file count in memory
                 self.superblock.file_count += 1;
-                console.debug("SFS: Updating superblock", .{});
-                sfs_io.updateSuperblock(self) catch {
-                    self.superblock.file_count -= 1;
-                    break :blk vfs.Error.IOError;
-                };
-                console.debug("SFS: Superblock updated", .{});
 
-                // Update open count under lock
+                // Update open count in memory
                 self.open_counts[new_idx] = std.math.add(u32, self.open_counts[new_idx], 1) catch {
                     self.superblock.file_count -= 1;
-                    break :blk vfs.Error.NoMemory;
+                    return vfs.Error.NoMemory;
                 };
 
                 console.debug("SFS: Lock will be released", .{});
-                break :blk {};
-            };
-
-            console.debug("SFS: Checking create_result", .{});
-            if (create_result) |_| {} else |err| {
-                console.debug("SFS: Create failed with error", .{});
-                return err;
             }
+
+            // PHASE 5: Write directory block OUTSIDE lock
+            console.debug("SFS: Writing block {} outside lock", .{block_idx});
+            sfs_io.writeSector(self, self.superblock.root_dir_start + block_idx, &block_buf) catch |err| {
+                // Rollback on write failure
+                const held = self.alloc_lock.acquire();
+                defer held.release();
+                if (self.open_counts[new_idx] > 0) self.open_counts[new_idx] -= 1;
+                self.superblock.file_count -= 1;
+                return err;
+            };
+            console.debug("SFS: Block write complete", .{});
+
+            // PHASE 6: Write superblock OUTSIDE lock
+            console.debug("SFS: Updating superblock outside lock", .{});
+            sfs_io.updateSuperblock(self) catch |err| {
+                // Rollback on superblock write failure (directory already written - partial state)
+                const held = self.alloc_lock.acquire();
+                defer held.release();
+                if (self.open_counts[new_idx] > 0) self.open_counts[new_idx] -= 1;
+                self.superblock.file_count -= 1;
+                return err;
+            };
+            console.debug("SFS: Superblock updated", .{});
+
             console.debug("SFS: Create succeeded, allocating file context", .{});
 
             const file_ctx = alloc.create(t.SfsFile) catch {
@@ -929,34 +945,37 @@ pub fn sfsChmod(ctx: ?*anyopaque, path: []const u8, mode: u32) vfs.Error!void {
 
     const entry_idx = found_idx orelse return vfs.Error.NotFound;
 
-    // PHASE 3: Atomic update UNDER LOCK
-    const held = self.alloc_lock.acquire();
-    defer held.release();
-
-    // Re-read specific block under lock (TOCTOU prevention)
+    // PHASE 3: Calculate block location
     const block_idx = entry_idx / 4;
     const offset_in_block = std.math.mul(usize, entry_idx % 4, 128) catch return vfs.Error.IOError;
 
+    // PHASE 4: Acquire lock, re-read, validate, modify in buffer, release lock
     var block_buf: [512]u8 = [_]u8{0} ** 512;
-    sfs_io.readSector(self, self.superblock.root_dir_start + block_idx, &block_buf) catch return vfs.Error.IOError;
+    {
+        const held = self.alloc_lock.acquire();
+        defer held.release();
 
-    const e: *t.DirEntry = @ptrCast(@alignCast(&block_buf[offset_in_block]));
+        // Re-read specific block under lock (TOCTOU prevention)
+        sfs_io.readSector(self, self.superblock.root_dir_start + block_idx, &block_buf) catch return vfs.Error.IOError;
 
-    // Validate entry still exists and has same name (TOCTOU check)
-    if (e.flags != 1) {
-        return vfs.Error.NotFound;
+        const e: *t.DirEntry = @ptrCast(@alignCast(&block_buf[offset_in_block]));
+
+        // Validate entry still exists and has same name (TOCTOU check)
+        if (e.flags != 1) {
+            return vfs.Error.NotFound;
+        }
+
+        const e_name = std.mem.sliceTo(&e.name, 0);
+        if (!std.mem.eql(u8, e_name, name)) {
+            return vfs.Error.NotFound;
+        }
+
+        // Update mode in buffer
+        const file_type = e.mode & 0o170000;
+        e.mode = file_type | (mode & 0o7777);
     }
 
-    const e_name = std.mem.sliceTo(&e.name, 0);
-    if (!std.mem.eql(u8, e_name, name)) {
-        return vfs.Error.NotFound;
-    }
-
-    // Update mode
-    const file_type = e.mode & 0o170000;
-    e.mode = file_type | (mode & 0o7777);
-
-    // Write block back
+    // PHASE 5: Write block back OUTSIDE lock
     sfs_io.writeSector(self, self.superblock.root_dir_start + block_idx, &block_buf) catch return vfs.Error.IOError;
 }
 
@@ -995,34 +1014,37 @@ pub fn sfsChown(ctx: ?*anyopaque, path: []const u8, uid: ?u32, gid: ?u32) vfs.Er
 
     const entry_idx = found_idx orelse return vfs.Error.NotFound;
 
-    // PHASE 3: Atomic update UNDER LOCK
-    const held = self.alloc_lock.acquire();
-    defer held.release();
-
-    // Re-read specific block under lock (TOCTOU prevention)
+    // PHASE 3: Calculate block location
     const block_idx = entry_idx / 4;
     const offset_in_block = std.math.mul(usize, entry_idx % 4, 128) catch return vfs.Error.IOError;
 
+    // PHASE 4: Acquire lock, re-read, validate, modify in buffer, release lock
     var block_buf: [512]u8 = [_]u8{0} ** 512;
-    sfs_io.readSector(self, self.superblock.root_dir_start + block_idx, &block_buf) catch return vfs.Error.IOError;
+    {
+        const held = self.alloc_lock.acquire();
+        defer held.release();
 
-    const e: *t.DirEntry = @ptrCast(@alignCast(&block_buf[offset_in_block]));
+        // Re-read specific block under lock (TOCTOU prevention)
+        sfs_io.readSector(self, self.superblock.root_dir_start + block_idx, &block_buf) catch return vfs.Error.IOError;
 
-    // Validate entry still exists and has same name (TOCTOU check)
-    if (e.flags != 1) {
-        return vfs.Error.NotFound;
+        const e: *t.DirEntry = @ptrCast(@alignCast(&block_buf[offset_in_block]));
+
+        // Validate entry still exists and has same name (TOCTOU check)
+        if (e.flags != 1) {
+            return vfs.Error.NotFound;
+        }
+
+        const e_name = std.mem.sliceTo(&e.name, 0);
+        if (!std.mem.eql(u8, e_name, name)) {
+            return vfs.Error.NotFound;
+        }
+
+        // Update ownership in buffer
+        if (uid) |new_uid| e.uid = new_uid;
+        if (gid) |new_gid| e.gid = new_gid;
     }
 
-    const e_name = std.mem.sliceTo(&e.name, 0);
-    if (!std.mem.eql(u8, e_name, name)) {
-        return vfs.Error.NotFound;
-    }
-
-    // Update ownership
-    if (uid) |new_uid| e.uid = new_uid;
-    if (gid) |new_gid| e.gid = new_gid;
-
-    // Write block back
+    // PHASE 5: Write block back OUTSIDE lock
     sfs_io.writeSector(self, self.superblock.root_dir_start + block_idx, &block_buf) catch return vfs.Error.IOError;
 }
 
@@ -1111,65 +1133,77 @@ pub fn sfsMkdir(ctx: ?*anyopaque, path: []const u8, mode: u32) vfs.Error!void {
     };
     @memcpy(new_entry.name[0..name.len], name);
 
-    // PHASE 4: Atomic update UNDER LOCK
-    const held = self.alloc_lock.acquire();
-    defer held.release();
-
-    // Check file count limit under lock
-    if (self.superblock.file_count >= t.MAX_FILES) {
-        return vfs.Error.NoMemory;
-    }
-
-    // Re-read specific block under lock (TOCTOU prevention)
+    // PHASE 4: Calculate block location
     const block_idx = new_idx / 4;
     const offset_in_block = std.math.mul(usize, new_idx % 4, 128) catch {
         return vfs.Error.IOError;
     };
 
-    var block_buf: [512]u8 = [_]u8{0} ** 512;
     const dir_block = std.math.add(u32, self.superblock.root_dir_start, block_idx) catch {
         return vfs.Error.IOError;
     };
 
-    sfs_io.readSector(self, dir_block, &block_buf) catch {
-        return vfs.Error.IOError;
-    };
+    // PHASE 5: Acquire lock, re-read, validate, modify in buffer, update counter, release lock
+    var block_buf: [512]u8 = [_]u8{0} ** 512;
+    {
+        const held = self.alloc_lock.acquire();
+        defer held.release();
 
-    // Validate slot is still free (TOCTOU check)
-    const verify_entry: *const t.DirEntry = @ptrCast(@alignCast(&block_buf[offset_in_block]));
-    if (verify_entry.flags != 0) {
-        return vfs.Error.NoMemory; // Slot taken by another thread
-    }
+        // Check file count limit under lock
+        if (self.superblock.file_count >= t.MAX_FILES) {
+            return vfs.Error.NoMemory;
+        }
 
-    // Re-check for name conflicts in this block
-    for (0..4) |i| {
-        const check_offset = i * 128;
-        const check_entry: *const t.DirEntry = @ptrCast(@alignCast(&block_buf[check_offset]));
-        if (check_entry.flags == 1) {
-            const check_name = std.mem.sliceTo(&check_entry.name, 0);
-            if (std.mem.eql(u8, check_name, name)) {
-                return vfs.Error.AlreadyExists;
+        // Re-read specific block under lock (TOCTOU prevention)
+        sfs_io.readSector(self, dir_block, &block_buf) catch {
+            return vfs.Error.IOError;
+        };
+
+        // Validate slot is still free (TOCTOU check)
+        const verify_entry: *const t.DirEntry = @ptrCast(@alignCast(&block_buf[offset_in_block]));
+        if (verify_entry.flags != 0) {
+            return vfs.Error.NoMemory; // Slot taken by another thread
+        }
+
+        // Re-check for name conflicts in this block
+        for (0..4) |i| {
+            const check_offset = i * 128;
+            const check_entry: *const t.DirEntry = @ptrCast(@alignCast(&block_buf[check_offset]));
+            if (check_entry.flags == 1) {
+                const check_name = std.mem.sliceTo(&check_entry.name, 0);
+                if (std.mem.eql(u8, check_name, name)) {
+                    return vfs.Error.AlreadyExists;
+                }
             }
         }
+
+        // Write new entry to buffer
+        const dest: *t.DirEntry = @ptrCast(@alignCast(&block_buf[offset_in_block]));
+        dest.* = new_entry;
+
+        // Update superblock file count in memory
+        self.superblock.file_count = std.math.add(u32, self.superblock.file_count, 1) catch {
+            console.err("SFS: Integer overflow in file_count increment", .{});
+            return vfs.Error.IOError;
+        };
     }
 
-    // Write new entry
-    const dest: *t.DirEntry = @ptrCast(@alignCast(&block_buf[offset_in_block]));
-    dest.* = new_entry;
-
-    sfs_io.writeSector(self, dir_block, &block_buf) catch {
-        return vfs.Error.IOError;
-    };
-
-    // Update superblock under lock
-    self.superblock.file_count = std.math.add(u32, self.superblock.file_count, 1) catch {
-        console.err("SFS: Integer overflow in file_count increment", .{});
-        return vfs.Error.IOError;
-    };
-
-    sfs_io.updateSuperblock(self) catch {
+    // PHASE 6: Write directory block OUTSIDE lock
+    sfs_io.writeSector(self, dir_block, &block_buf) catch |err| {
+        // Rollback file_count on write failure
+        const held = self.alloc_lock.acquire();
+        defer held.release();
         self.superblock.file_count -= 1;
-        return vfs.Error.IOError;
+        return err;
+    };
+
+    // PHASE 7: Write superblock OUTSIDE lock
+    sfs_io.updateSuperblock(self) catch |err| {
+        // Rollback on superblock write failure (directory already written - partial state)
+        const held = self.alloc_lock.acquire();
+        defer held.release();
+        self.superblock.file_count -= 1;
+        return err;
     };
 
     console.info("SFS: Created directory '{s}' at slot {}", .{ name, new_idx });
@@ -1234,64 +1268,80 @@ pub fn sfsRmdir(ctx: ?*anyopaque, path: []const u8) vfs.Error!void {
 
     const idx = found_idx orelse return vfs.Error.NotFound;
 
-    // SECURITY: Hold lock through entire operation to prevent TOCTOU race
-    const lock_held = self.alloc_lock.acquire();
-    defer lock_held.release();
-
-    // SECURITY: Re-read the specific directory block under lock
-    // The entry we found may have been modified by another thread
+    // Calculate block location
     const block_idx = idx / 4;
     const offset_in_block = std.math.mul(usize, idx % 4, 128) catch return vfs.Error.IOError;
 
+    // Acquire lock, re-read, validate, modify in buffer, update counter, release lock
     var block_buf: [512]u8 = [_]u8{0} ** 512;
-    sfs_io.readSector(self, self.superblock.root_dir_start + block_idx, &block_buf) catch return vfs.Error.IOError;
+    {
+        const lock_held = self.alloc_lock.acquire();
+        defer lock_held.release();
 
-    const e: *t.DirEntry = @ptrCast(@alignCast(&block_buf[offset_in_block]));
+        // Re-read the specific directory block under lock (TOCTOU prevention)
+        sfs_io.readSector(self, self.superblock.root_dir_start + block_idx, &block_buf) catch return vfs.Error.IOError;
 
-    // SECURITY: Re-validate entry under lock - check it still exists and has the same name
-    if (e.flags != 1) {
-        return vfs.Error.NotFound;
+        const e: *t.DirEntry = @ptrCast(@alignCast(&block_buf[offset_in_block]));
+
+        // SECURITY: Re-validate entry under lock - check it still exists and has the same name
+        if (e.flags != 1) {
+            return vfs.Error.NotFound;
+        }
+
+        const e_name = std.mem.sliceTo(&e.name, 0);
+        if (!std.mem.eql(u8, e_name, name)) {
+            // Entry was replaced with a different file - race condition detected
+            return vfs.Error.NotFound;
+        }
+
+        // SECURITY: Verify entry is a directory, not a regular file
+        if (!e.isDirectory()) {
+            return vfs.Error.NotDirectory;
+        }
+
+        // SECURITY: Check if directory is currently open
+        // Validate index bounds before accessing open_counts array
+        if (idx >= t.MAX_FILES) {
+            return vfs.Error.IOError;
+        }
+
+        if (self.open_counts[idx] > 0) {
+            // Directory has active file descriptors - cannot remove
+            return vfs.Error.Busy;
+        }
+
+        // NOTE: For SFS (flat filesystem), directories don't own data blocks
+        // They are metadata-only entries (size=0, start_block=0)
+        // No block deallocation needed unlike sfsUnlink for files
+
+        // Clear directory entry in buffer
+        e.flags = 0;
+        e.name = [_]u8{0} ** 32;
+        e.start_block = 0;
+        e.size = 0;
+        e.mode = 0;
+
+        // Update superblock file count in memory
+        self.superblock.file_count = std.math.sub(u32, self.superblock.file_count, 1) catch 0;
     }
 
-    const e_name = std.mem.sliceTo(&e.name, 0);
-    if (!std.mem.eql(u8, e_name, name)) {
-        // Entry was replaced with a different file - race condition detected
-        return vfs.Error.NotFound;
-    }
+    // Write updated directory block OUTSIDE lock
+    sfs_io.writeSector(self, self.superblock.root_dir_start + block_idx, &block_buf) catch |err| {
+        // Rollback file_count on write failure
+        const held = self.alloc_lock.acquire();
+        defer held.release();
+        self.superblock.file_count = std.math.add(u32, self.superblock.file_count, 1) catch std.math.maxInt(u32);
+        return err;
+    };
 
-    // SECURITY: Verify entry is a directory, not a regular file
-    if (!e.isDirectory()) {
-        return vfs.Error.NotDirectory;
-    }
-
-    // SECURITY: Check if directory is currently open
-    // Validate index bounds before accessing open_counts array
-    if (idx >= t.MAX_FILES) {
-        return vfs.Error.IOError;
-    }
-
-    if (self.open_counts[idx] > 0) {
-        // Directory has active file descriptors - cannot remove
-        return vfs.Error.Busy;
-    }
-
-    // NOTE: For SFS (flat filesystem), directories don't own data blocks
-    // They are metadata-only entries (size=0, start_block=0)
-    // No block deallocation needed unlike sfsUnlink for files
-
-    // Clear directory entry under lock
-    e.flags = 0;
-    e.name = [_]u8{0} ** 32;
-    e.start_block = 0;
-    e.size = 0;
-    e.mode = 0;
-
-    // Write updated directory block while holding lock
-    sfs_io.writeSector(self, self.superblock.root_dir_start + block_idx, &block_buf) catch return vfs.Error.IOError;
-
-    // Update superblock file count while holding lock
-    self.superblock.file_count = std.math.sub(u32, self.superblock.file_count, 1) catch 0;
-    sfs_io.updateSuperblock(self) catch return vfs.Error.IOError;
+    // Write superblock OUTSIDE lock
+    sfs_io.updateSuperblock(self) catch |err| {
+        // Rollback on superblock write failure (directory already cleared - partial state)
+        const held = self.alloc_lock.acquire();
+        defer held.release();
+        self.superblock.file_count = std.math.add(u32, self.superblock.file_count, 1) catch std.math.maxInt(u32);
+        return err;
+    };
 
     console.info("SFS: Removed directory '{s}'", .{name});
 }
