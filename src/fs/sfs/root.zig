@@ -101,6 +101,8 @@ pub fn init(device_path: []const u8) !vfs.FileSystem {
         .rename = sfs_ops.sfsRename,
         .getdents = sfs_ops.sfsGetdents,
         .statfs = sfs_ops.sfsStatfs,
+        .link = sfs_ops.sfsLink,
+        .set_timestamps = sfs_ops.sfsSetTimestamps,
     };
 }
 

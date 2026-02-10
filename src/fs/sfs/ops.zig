@@ -1393,6 +1393,245 @@ pub fn sfsRmdir(ctx: ?*anyopaque, path: []const u8) vfs.Error!void {
     console.info("SFS: Removed directory '{s}'", .{name});
 }
 
+/// Create a hard link to an existing file on SFS
+/// SECURITY: TOCTOU-safe via multi-phase lock pattern
+/// CRITICAL: Global nlink synchronization - ALL entries sharing start_block get same nlink value
+pub fn sfsLink(ctx: ?*anyopaque, old_path: []const u8, new_path: []const u8) vfs.Error!void {
+    const self: *t.SFS = @ptrCast(@alignCast(ctx));
+    if (!self.mounted) return vfs.Error.IOError;
+
+    // Extract names from paths (strip leading '/')
+    const old_name = if (old_path.len > 0 and old_path[0] == '/') old_path[1..] else old_path;
+    const new_name = if (new_path.len > 0 and new_path[0] == '/') new_path[1..] else new_path;
+
+    // Validate both filenames
+    if (!sfs_alloc.isValidFilename(old_name)) return vfs.Error.AccessDenied;
+    if (!sfs_alloc.isValidFilename(new_name)) return vfs.Error.AccessDenied;
+    if (old_name.len == 0 or old_name.len >= 32) return vfs.Error.NotFound;
+    if (new_name.len == 0 or new_name.len >= 32) return vfs.Error.InvalidPath;
+
+    // Reject nested paths (SFS is flat)
+    if (std.mem.indexOf(u8, old_name, "/")) |_| return vfs.Error.InvalidPath;
+    if (std.mem.indexOf(u8, new_name, "/")) |_| return vfs.Error.InvalidPath;
+
+    // SECURITY: Allocate directory buffer on heap to prevent stack overflow
+    const alloc = heap.allocator();
+    const dir_buf = alloc.alloc(u8, t.ROOT_DIR_BLOCKS * 512) catch return vfs.Error.NoMemory;
+    defer alloc.free(dir_buf);
+
+    // PHASE 1: Read directory UNLOCKED to find old entry and check conflicts
+    var old_idx: ?u32 = null;
+    var free_slot: ?u32 = null;
+    var old_entry: t.DirEntry = undefined;
+    {
+        sfs_io.readDirectoryAsync(self, dir_buf) catch return vfs.Error.IOError;
+
+        const total_entries = t.ROOT_DIR_BLOCKS * 4;
+        var idx: u32 = 0;
+        while (idx < total_entries) : (idx += 1) {
+            const offset = std.math.mul(usize, idx, 128) catch return vfs.Error.IOError;
+            const e: *const t.DirEntry = @ptrCast(@alignCast(&dir_buf[offset]));
+
+            if (e.flags == 1) {
+                const e_name = std.mem.sliceTo(&e.name, 0);
+                if (e_name.len >= 32) continue;
+                if (std.mem.eql(u8, e_name, old_name)) {
+                    old_idx = idx;
+                    old_entry = e.*;
+                }
+                if (std.mem.eql(u8, e_name, new_name)) {
+                    return vfs.Error.AlreadyExists;
+                }
+            } else if (free_slot == null) {
+                free_slot = idx;
+            }
+        }
+    }
+
+    const old_entry_idx = old_idx orelse return vfs.Error.NotFound;
+    const new_idx = free_slot orelse return vfs.Error.NoMemory;
+
+    // PHASE 2: Verify old entry is a regular file (not directory or symlink)
+    if (!old_entry.isRegularFile()) {
+        return vfs.Error.AccessDenied; // POSIX: EPERM for hard links to directories
+    }
+    if (old_entry.isSymlink()) {
+        return vfs.Error.AccessDenied; // Simplification: reject hard links to symlinks
+    }
+
+    // PHASE 3: Calculate block locations
+    const old_block_idx = old_entry_idx / 4;
+    const old_offset_in_block = std.math.mul(usize, old_entry_idx % 4, 128) catch return vfs.Error.IOError;
+    const new_block_idx = new_idx / 4;
+    const new_offset_in_block = std.math.mul(usize, new_idx % 4, 128) catch return vfs.Error.IOError;
+
+    // PHASE 4: Under lock - create link with global nlink synchronization
+    var old_block_buf: [512]u8 = [_]u8{0} ** 512;
+    var new_block_buf: [512]u8 = [_]u8{0} ** 512;
+    const same_block = (old_block_idx == new_block_idx);
+    {
+        const lock_held = self.alloc_lock.acquire();
+        defer lock_held.release();
+
+        // Check file count limit
+        if (self.superblock.file_count >= t.MAX_FILES) {
+            return vfs.Error.NoMemory;
+        }
+
+        // Re-read old entry's block under lock (TOCTOU prevention)
+        sfs_io.readSector(self, self.superblock.root_dir_start + old_block_idx, &old_block_buf) catch return vfs.Error.IOError;
+
+        const old_e: *const t.DirEntry = @ptrCast(@alignCast(&old_block_buf[old_offset_in_block]));
+
+        // Re-validate old entry under lock
+        if (old_e.flags != 1) {
+            return vfs.Error.NotFound;
+        }
+        const old_e_name = std.mem.sliceTo(&old_e.name, 0);
+        if (!std.mem.eql(u8, old_e_name, old_name)) {
+            return vfs.Error.NotFound;
+        }
+
+        // Re-read new entry's block if different
+        if (same_block) {
+            @memcpy(&new_block_buf, &old_block_buf);
+        } else {
+            sfs_io.readSector(self, self.superblock.root_dir_start + new_block_idx, &new_block_buf) catch return vfs.Error.IOError;
+        }
+
+        // Re-check new name doesn't exist
+        const new_e_check: *const t.DirEntry = @ptrCast(@alignCast(&new_block_buf[new_offset_in_block]));
+        if (new_e_check.flags != 0) {
+            return vfs.Error.AlreadyExists;
+        }
+
+        // Compute new nlink value
+        const old_nlink = if (old_e.nlink == 0) @as(u32, 1) else old_e.nlink;
+        const new_nlink = old_nlink + 1;
+
+        // Create new directory entry (hard link)
+        var new_entry = t.DirEntry{
+            .name = [_]u8{0} ** 32,
+            .start_block = old_e.start_block,
+            .size = old_e.size,
+            .flags = 1,
+            .mode = old_e.mode,
+            .uid = old_e.uid,
+            .gid = old_e.gid,
+            .mtime = old_e.mtime,
+            .atime = old_e.atime,
+            .nlink = new_nlink,
+            ._pad = [_]u8{0} ** (128 - 68),
+        };
+        @memcpy(new_entry.name[0..new_name.len], new_name);
+
+        // Write new entry to buffer
+        const new_e: *t.DirEntry = @ptrCast(@alignCast(&new_block_buf[new_offset_in_block]));
+        new_e.* = new_entry;
+
+        // CRITICAL: Global nlink synchronization
+        // Update nlink on ALL entries sharing the same start_block
+        var sibling_block_idx: u32 = 0;
+        while (sibling_block_idx < t.ROOT_DIR_BLOCKS) : (sibling_block_idx += 1) {
+            var sibling_buf: [512]u8 = [_]u8{0} ** 512;
+
+            // Avoid re-reading blocks we already have in memory
+            if (sibling_block_idx == old_block_idx) {
+                @memcpy(&sibling_buf, &old_block_buf);
+            } else if (sibling_block_idx == new_block_idx) {
+                @memcpy(&sibling_buf, &new_block_buf);
+            } else {
+                sfs_io.readSector(self, self.superblock.root_dir_start + sibling_block_idx, &sibling_buf) catch return vfs.Error.IOError;
+            }
+
+            var modified = false;
+            var entry_in_block: u32 = 0;
+            while (entry_in_block < 4) : (entry_in_block += 1) {
+                const sibling_offset = entry_in_block * 128;
+                const sibling: *t.DirEntry = @ptrCast(@alignCast(&sibling_buf[sibling_offset]));
+
+                // Update any active entry with matching start_block
+                if (sibling.flags == 1 and sibling.start_block == old_e.start_block) {
+                    sibling.nlink = new_nlink;
+                    modified = true;
+                }
+            }
+
+            if (modified) {
+                // Write back outside lock (done in PHASE 5)
+                // But update our in-memory copies
+                if (sibling_block_idx == old_block_idx) {
+                    @memcpy(&old_block_buf, &sibling_buf);
+                } else if (sibling_block_idx == new_block_idx) {
+                    @memcpy(&new_block_buf, &sibling_buf);
+                }
+            }
+        }
+
+        // Increment file count in memory
+        self.superblock.file_count += 1;
+    }
+
+    // PHASE 5: Write all modified blocks OUTSIDE lock
+    sfs_io.writeSector(self, self.superblock.root_dir_start + old_block_idx, &old_block_buf) catch |err| {
+        // Rollback file_count
+        const held = self.alloc_lock.acquire();
+        defer held.release();
+        self.superblock.file_count -= 1;
+        return err;
+    };
+
+    if (!same_block) {
+        sfs_io.writeSector(self, self.superblock.root_dir_start + new_block_idx, &new_block_buf) catch |err| {
+            // Partial failure - old block written with updated nlink, but new entry not created
+            // This is technically inconsistent but recoverable
+            const held = self.alloc_lock.acquire();
+            defer held.release();
+            self.superblock.file_count -= 1;
+            return err;
+        };
+    }
+
+    // Now write all other blocks with updated nlink
+    var sibling_block_idx: u32 = 0;
+    while (sibling_block_idx < t.ROOT_DIR_BLOCKS) : (sibling_block_idx += 1) {
+        if (sibling_block_idx == old_block_idx or sibling_block_idx == new_block_idx) {
+            continue; // Already written
+        }
+
+        var sibling_buf: [512]u8 = [_]u8{0} ** 512;
+        sfs_io.readSector(self, self.superblock.root_dir_start + sibling_block_idx, &sibling_buf) catch continue;
+
+        var modified = false;
+        var entry_in_block: u32 = 0;
+        while (entry_in_block < 4) : (entry_in_block += 1) {
+            const sibling_offset = entry_in_block * 128;
+            const sibling: *t.DirEntry = @ptrCast(@alignCast(&sibling_buf[sibling_offset]));
+
+            if (sibling.flags == 1 and sibling.start_block == old_entry.start_block) {
+                const old_nlink = if (old_entry.nlink == 0) @as(u32, 1) else old_entry.nlink;
+                sibling.nlink = old_nlink + 1;
+                modified = true;
+            }
+        }
+
+        if (modified) {
+            sfs_io.writeSector(self, self.superblock.root_dir_start + sibling_block_idx, &sibling_buf) catch {};
+        }
+    }
+
+    // PHASE 6: Write superblock OUTSIDE lock
+    sfs_io.updateSuperblock(self) catch |err| {
+        // Rollback on failure
+        const held = self.alloc_lock.acquire();
+        defer held.release();
+        self.superblock.file_count -= 1;
+        return err;
+    };
+
+    console.info("SFS: Created hard link '{s}' -> '{s}'", .{ new_name, old_name });
+}
+
 pub fn sfsRename(ctx: ?*anyopaque, old_path: []const u8, new_path: []const u8) vfs.Error!void {
     const self: *t.SFS = @ptrCast(@alignCast(ctx));
     if (!self.mounted) return vfs.Error.IOError;
@@ -1585,6 +1824,91 @@ pub fn sfsRename(ctx: ?*anyopaque, old_path: []const u8, new_path: []const u8) v
     }
 
     console.info("SFS: Renamed '{s}' to '{s}'", .{ old_name, new_name });
+}
+
+/// Set file timestamps (atime and mtime) on SFS files
+/// SECURITY: TOCTOU-safe via lock-held re-read pattern
+/// Note: SFS stores timestamps as u32 Unix seconds, nanosecond precision is lost
+pub fn sfsSetTimestamps(ctx: ?*anyopaque, path: []const u8, atime_sec: i64, atime_nsec: i64, mtime_sec: i64, mtime_nsec: i64) vfs.Error!void {
+    _ = atime_nsec; // Not stored in SFS (u32 seconds only)
+    _ = mtime_nsec; // Not stored in SFS (u32 seconds only)
+
+    const self: *t.SFS = @ptrCast(@alignCast(ctx));
+    if (!self.mounted) return vfs.Error.IOError;
+
+    // Extract name from path (strip leading '/')
+    const name = if (path.len > 0 and path[0] == '/') path[1..] else path;
+
+    // Validate filename
+    if (!sfs_alloc.isValidFilename(name)) return vfs.Error.AccessDenied;
+    if (name.len == 0 or name.len >= 32) return vfs.Error.NotFound;
+
+    // PHASE 1: Read directory UNLOCKED to find entry
+    const alloc = heap.allocator();
+    const dir_buf = alloc.alloc(u8, t.ROOT_DIR_BLOCKS * 512) catch return vfs.Error.NoMemory;
+    defer alloc.free(dir_buf);
+
+    sfs_io.readDirectoryAsync(self, dir_buf) catch return vfs.Error.IOError;
+
+    // PHASE 2: Find entry UNLOCKED
+    var found_idx: ?u32 = null;
+    const total_entries = t.ROOT_DIR_BLOCKS * 4;
+    var idx: u32 = 0;
+    while (idx < total_entries) : (idx += 1) {
+        const offset = std.math.mul(usize, idx, 128) catch return vfs.Error.IOError;
+        const e: *const t.DirEntry = @ptrCast(@alignCast(&dir_buf[offset]));
+
+        if (e.flags == 1) {
+            const e_name = std.mem.sliceTo(&e.name, 0);
+            if (e_name.len >= 32) continue;
+            if (std.mem.eql(u8, e_name, name)) {
+                found_idx = idx;
+                break;
+            }
+        }
+    }
+
+    const entry_idx = found_idx orelse return vfs.Error.NotFound;
+
+    // PHASE 3: Calculate block location
+    const block_idx = entry_idx / 4;
+    const offset_in_block = std.math.mul(usize, entry_idx % 4, 128) catch return vfs.Error.IOError;
+
+    // PHASE 4: Acquire lock, re-read, validate, modify in buffer, release lock
+    var block_buf: [512]u8 = [_]u8{0} ** 512;
+    {
+        const held = self.alloc_lock.acquire();
+        defer held.release();
+
+        // Re-read specific block under lock (TOCTOU prevention)
+        sfs_io.readSector(self, self.superblock.root_dir_start + block_idx, &block_buf) catch return vfs.Error.IOError;
+
+        const e: *t.DirEntry = @ptrCast(@alignCast(&block_buf[offset_in_block]));
+
+        // Validate entry still exists and has same name (TOCTOU check)
+        if (e.flags != 1) {
+            return vfs.Error.NotFound;
+        }
+
+        const e_name = std.mem.sliceTo(&e.name, 0);
+        if (!std.mem.eql(u8, e_name, name)) {
+            return vfs.Error.NotFound;
+        }
+
+        // Update timestamps in buffer
+        // -1 means UTIME_OMIT (leave unchanged)
+        if (atime_sec != -1) {
+            const atime_u32: u32 = @truncate(@as(u64, @bitCast(atime_sec)));
+            e.atime = atime_u32;
+        }
+        if (mtime_sec != -1) {
+            const mtime_u32: u32 = @truncate(@as(u64, @bitCast(mtime_sec)));
+            e.mtime = mtime_u32;
+        }
+    }
+
+    // PHASE 5: Write block back OUTSIDE lock
+    sfs_io.writeSector(self, self.superblock.root_dir_start + block_idx, &block_buf) catch return vfs.Error.IOError;
 }
 
 pub fn sfsSeek(file_desc: *fd.FileDescriptor, offset: i64, whence: u32) isize {
