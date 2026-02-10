@@ -51,13 +51,16 @@ pub fn isValidUserPtr(ptr: usize, len: usize) bool {
 /// Returns a slice of the kernel buffer containing the string (excluding null).
 /// Returns error.Fault if a fault occurs before null is found.
 /// Returns error.NameTooLong if null is not found within the buffer.
+///
+/// SECURITY: Uses assembly fixup mechanism to handle page faults gracefully.
+/// Stack buffers declared but not yet faulted-in are supported via demand paging.
 pub fn copyStringFromUser(dest: []u8, src: usize) ![]u8 {
     if (dest.len == 0) return &[_]u8{};
     if (src == 0) return error.Fault;
 
-    // Validate pointer before casting to avoid non-canonical address panic
-    // We don't know string length yet, so check if start is in user space
-    if (!isValidUserAccess(src, 1, .Read)) return error.Fault;
+    // Fast bounds check only - assembly copy handles page faults via fixup
+    // This supports stack buffers that haven't been faulted-in yet (demand paging)
+    if (!isValidUserPtr(src, 1)) return error.Fault;
 
     // Use raw copy to pull as much as possible
     const rem = _asm_copy_from_user(dest.ptr, @ptrFromInt(src), dest.len);
