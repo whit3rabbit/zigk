@@ -10,11 +10,11 @@ See: .planning/PROJECT.md (updated 2026-02-09)
 ## Current Position
 
 Phase: 10 of 14 (Bug Fixes & Quick Wins)
-Plan: 2 of 4 in current phase
+Plan: 3 of 4 in current phase
 Status: Executing
-Last activity: 2026-02-09 -- Completed 10-01 (Bug fixes: setregid, copyStringFromUser, SFS chown)
+Last activity: 2026-02-10 -- Completed 10-02 (FD/network stubs: dup3, accept4 validation)
 
-Progress: [█████████░░░░░░░░░░░] 69% (31/45 plans completed across all milestones)
+Progress: [██████████░░░░░░░░░░] 71% (32/45 plans completed across all milestones)
 
 ## Performance Metrics
 
@@ -46,6 +46,7 @@ Progress: [█████████░░░░░░░░░░░] 69% (31
 | Phase | Plan | Duration | Tasks | Files |
 |-------|------|----------|-------|-------|
 | 10. Bug Fixes & Quick Wins | 10-04 | 2 min | 1 | 1 |
+| 10. Bug Fixes & Quick Wins | 10-02 | 9 min | 3 | 9 |
 | 10. Bug Fixes & Quick Wins | 10-01 | 4 min | 3 | 3 |
 
 ## Accumulated Context
@@ -59,6 +60,8 @@ Recent decisions affecting current work:
 - v1.0: Kernel-only memory for SysV shared memory -- Avoided SFS deadlock issues
 - v1.0: initInPlace for large structs -- Fixed aarch64 stack overflow with 11KB UnixSocketPair
 - v1.1: SFS deadlock fix EARLY in roadmap -- Unblocks 16+ tests, prerequisite for SFS feature work
+- v1.1: sys_dup3 oldfd==newfd returns EINVAL -- POSIX compliance (unlike dup2 which allows it)
+- v1.1: sys_accept4 applies O_NONBLOCK to FD flags -- Matches sys_socket behavior for consistency
 - [Phase 10-04]: Document SFS limitations as expected behavior, not bugs -- 6 tests correctly skip when operations unsupported
 - [Phase 10-01]: Remove hasSetGidCapability bypass from sys_setregid -- POSIX compliance over supplementary groups
 - [Phase 10-01]: Use isValidUserPtr for string copy validation -- Assembly fixup handles demand paging
