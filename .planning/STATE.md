@@ -10,17 +10,17 @@ See: .planning/PROJECT.md (updated 2026-02-09)
 ## Current Position
 
 Phase: 10 of 14 (Bug Fixes & Quick Wins)
-Plan: 1 of 4 in current phase
+Plan: 2 of 4 in current phase
 Status: Executing
-Last activity: 2026-02-09 -- Completed 10-04 (Phase 6 verification documentation)
+Last activity: 2026-02-09 -- Completed 10-01 (Bug fixes: setregid, copyStringFromUser, SFS chown)
 
-Progress: [█████████░░░░░░░░░░░] 67% (30/45 plans completed across all milestones)
+Progress: [█████████░░░░░░░░░░░] 69% (31/45 plans completed across all milestones)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 30 (v1.0: 29, v1.1: 1)
-- Average duration: ~7.5 min per plan
+- Total plans completed: 31 (v1.0: 29, v1.1: 2)
+- Average duration: ~7.1 min per plan
 - Total execution time: ~3.9 hours over 4 days
 
 **By Phase (v1.0):**
@@ -46,6 +46,7 @@ Progress: [█████████░░░░░░░░░░░] 67% (30
 | Phase | Plan | Duration | Tasks | Files |
 |-------|------|----------|-------|-------|
 | 10. Bug Fixes & Quick Wins | 10-04 | 2 min | 1 | 1 |
+| 10. Bug Fixes & Quick Wins | 10-01 | 4 min | 3 | 3 |
 
 ## Accumulated Context
 
@@ -58,7 +59,10 @@ Recent decisions affecting current work:
 - v1.0: Kernel-only memory for SysV shared memory -- Avoided SFS deadlock issues
 - v1.0: initInPlace for large structs -- Fixed aarch64 stack overflow with 11KB UnixSocketPair
 - v1.1: SFS deadlock fix EARLY in roadmap -- Unblocks 16+ tests, prerequisite for SFS feature work
-- [Phase 10]: Document SFS limitations as expected behavior, not bugs -- 6 tests correctly skip when operations unsupported
+- [Phase 10-04]: Document SFS limitations as expected behavior, not bugs -- 6 tests correctly skip when operations unsupported
+- [Phase 10-01]: Remove hasSetGidCapability bypass from sys_setregid -- POSIX compliance over supplementary groups
+- [Phase 10-01]: Use isValidUserPtr for string copy validation -- Assembly fixup handles demand paging
+- [Phase 10-01]: Implement FD-based SFS chown separate from path-based -- Supports fchown syscall
 
 ### Pending Todos
 
@@ -72,7 +76,7 @@ None yet (v1.1 just started).
 3. sendfile uses 4KB buffer copy, not zero-copy (Phase 14 target)
 4. SEM_UNDO flag accepted but not tracked (Phase 13 target)
 5. semop/msgsnd/msgrcv return EAGAIN/ENOMSG instead of blocking (Phase 13 target)
-6. copyStringFromUser rejects stack buffers (Phase 10 target)
+6. ~~copyStringFromUser rejects stack buffers (Phase 10 target)~~ ✅ COMPLETE (10-01)
 7. ~~Phase 6 missing VERIFICATION.md (Phase 10 target)~~ ✅ COMPLETE (10-04)
 
 **Architecture notes:**
@@ -83,13 +87,14 @@ None yet (v1.1 just started).
 ## Session Continuity
 
 Last session: 2026-02-09 (Phase 10 execution)
-Stopped at: Completed 10-04 (Phase 6 verification documentation)
+Stopped at: Completed 10-01 (Bug fixes: setregid permissions, copyStringFromUser, SFS chown)
 Resume file: None
 
 **Next steps:**
-1. Continue executing Phase 10 plans (10-01, 10-02, 10-03 remain)
-2. Focus areas: Permission checks (BUGFIX-01), SFS chown (BUGFIX-02), copyStringFromUser (BUGFIX-03), stub verification (STUB-01 through STUB-08)
+1. Continue executing Phase 10 plans (10-02, 10-03 remain)
+2. Focus areas: Stub verification (STUB-01 through STUB-08 in plans 10-02 and 10-03)
+3. All critical bug fixes from 10-01 complete (BUGFIX-01, BUGFIX-02, BUGFIX-03)
 
 ---
 *State initialized: 2026-02-06*
-*Last updated: 2026-02-09 after completing plan 10-04*
+*Last updated: 2026-02-09 after completing plan 10-01*
