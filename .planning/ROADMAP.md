@@ -60,10 +60,10 @@ See milestones/v1-ROADMAP.md for full phase details.
 **Plans**: 4 plans in 1 wave
 
 Plans:
-- [x] 10-01-PLAN.md — Critical bug fixes (setregid, copyStringFromUser, SFS chown)
-- [x] 10-02-PLAN.md — FD/Network stub verification (dup3, accept4)
-- [x] 10-03-PLAN.md — Resource/Signal stub verification (rlimit, sigaltstack, statfs, getresuid/getresgid)
-- [x] 10-04-PLAN.md — Phase 6 verification documentation
+- [x] 10-01-PLAN.md -- Critical bug fixes (setregid, copyStringFromUser, SFS chown)
+- [x] 10-02-PLAN.md -- FD/Network stub verification (dup3, accept4)
+- [x] 10-03-PLAN.md -- Resource/Signal stub verification (rlimit, sigaltstack, statfs, getresuid/getresgid)
+- [x] 10-04-PLAN.md -- Phase 6 verification documentation
 
 #### Phase 11: SFS Deadlock Resolution
 **Goal**: Fix SFS close deadlock blocking 16+ tests
@@ -74,10 +74,11 @@ Plans:
   2. SFS directories can be removed after many operations without deadlock
   3. SFS files can be renamed after many operations without deadlock
   4. All tests previously skipped due to SFS deadlock run to completion and pass
-**Plans**: TBD
+**Plans**: 2 plans in 2 waves
 
 Plans:
-- [ ] 11-01: [TBD]
+- [ ] 11-01-PLAN.md -- Fix SFS I/O serialization and alloc_lock restructure
+- [ ] 11-02-PLAN.md -- Add SFS rename, unskip deadlock tests, remove close workarounds
 
 #### Phase 12: SFS Feature Expansion
 **Goal**: Add link/symlink/timestamp support to SFS
@@ -128,7 +129,7 @@ Plans:
 ## Progress
 
 **Execution Order:**
-Phases execute in numeric order: 10 → 11 → 12 → 13 → 14
+Phases execute in numeric order: 10 -> 11 -> 12 -> 13 -> 14
 
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
@@ -142,11 +143,11 @@ Phases execute in numeric order: 10 → 11 → 12 → 13 → 14
 | 8. Process Control | v1.0 | 2/2 | Complete | 2026-02-08 |
 | 9. SysV IPC | v1.0 | 3/3 | Complete | 2026-02-09 |
 | 10. Bug Fixes & Quick Wins | v1.1 | 4/4 | Complete | 2026-02-09 |
-| 11. SFS Deadlock Resolution | v1.1 | 0/? | Not started | - |
+| 11. SFS Deadlock Resolution | v1.1 | 0/2 | Not started | - |
 | 12. SFS Feature Expansion | v1.1 | 0/? | Not started | - |
 | 13. Wait Queue Infrastructure | v1.1 | 0/? | Not started | - |
 | 14. I/O Improvements | v1.1 | 0/? | Not started | - |
 
 ---
 *Roadmap created: 2026-02-06*
-*Last updated: 2026-02-09 after Phase 10 execution complete*
+*Last updated: 2026-02-10 after Phase 11 planning complete*
