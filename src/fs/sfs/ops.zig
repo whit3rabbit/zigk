@@ -616,7 +616,9 @@ pub fn sfsOpen(ctx: ?*anyopaque, path: []const u8, flags: u32) vfs.Error!*fd.Fil
                 .uid = 0,
                 .gid = 0,
                 .mtime = 0,
-                ._pad = [_]u8{0} ** (128 - 60),
+                .atime = 0,
+                .nlink = 1,
+                ._pad = [_]u8{0} ** (128 - 68),
             };
             @memcpy(new_entry.name[0..name.len], name);
 
@@ -819,6 +821,8 @@ pub fn sfsUnlink(ctx: ?*anyopaque, path: []const u8) vfs.Error!void {
         }
 
         const blocks_used: u32 = if (e.size == 0) 1 else (e.size + 511) / 512;
+        const target_start_block = e.start_block;
+        const effective_nlink = if (e.nlink == 0) @as(u32, 1) else e.nlink;
 
         var is_open = false;
         if (self.open_counts[idx] > 0) {
@@ -831,27 +835,68 @@ pub fn sfsUnlink(ctx: ?*anyopaque, path: []const u8) vfs.Error!void {
             console.info("SFS: Deferring deletion of '{s}' (open_count={},blocks={})", .{ name, self.open_counts[idx], blocks_used });
         }
 
-        // Capture block info for freeing outside the lock
-        if (!is_open) {
-            free_start = e.start_block;
-            free_count = blocks_used;
-            needs_free = true;
+        // CRITICAL: Handle hard links with global nlink synchronization
+        if (effective_nlink > 1 and !is_open) {
+            // This file has other hard links - decrement nlink on ALL entries sharing start_block
+            // Do NOT free blocks yet
+            e.flags = 0;
+            e.name = [_]u8{0} ** 32;
+
+            // Write this block first to remove the unlinked entry
+            sfs_io.writeSector(self, self.superblock.root_dir_start + block_idx, &block_buf) catch return vfs.Error.IOError;
+
+            // Now scan ALL directory blocks to update siblings' nlink
+            const new_nlink = effective_nlink - 1;
+            var sibling_block_idx: u32 = 0;
+            while (sibling_block_idx < t.ROOT_DIR_BLOCKS) : (sibling_block_idx += 1) {
+                var sibling_buf: [512]u8 = [_]u8{0} ** 512;
+                sfs_io.readSector(self, self.superblock.root_dir_start + sibling_block_idx, &sibling_buf) catch return vfs.Error.IOError;
+
+                var modified = false;
+                var entry_in_block: u32 = 0;
+                while (entry_in_block < 4) : (entry_in_block += 1) {
+                    const sibling_offset = entry_in_block * 128;
+                    const sibling: *t.DirEntry = @ptrCast(@alignCast(&sibling_buf[sibling_offset]));
+
+                    // Update any active entry with matching start_block
+                    if (sibling.flags == 1 and sibling.start_block == target_start_block) {
+                        sibling.nlink = new_nlink;
+                        modified = true;
+                    }
+                }
+
+                if (modified) {
+                    sfs_io.writeSector(self, self.superblock.root_dir_start + sibling_block_idx, &sibling_buf) catch return vfs.Error.IOError;
+                }
+            }
+
+            // Decrement file count (one entry removed)
+            self.superblock.file_count = std.math.sub(u32, self.superblock.file_count, 1) catch 0;
+            sfs_io.updateSuperblock(self) catch return vfs.Error.IOError;
+        } else {
+            // Last link or nlink==1 - standard deletion
+            // Capture block info for freeing outside the lock
+            if (!is_open) {
+                free_start = e.start_block;
+                free_count = blocks_used;
+                needs_free = true;
+            }
+
+            // Clear directory entry while holding lock
+            e.flags = 0;
+            e.name = [_]u8{0} ** 32;
+            if (!is_open) {
+                e.start_block = 0;
+                e.size = 0;
+            }
+
+            // Write directory update while holding lock
+            sfs_io.writeSector(self, self.superblock.root_dir_start + block_idx, &block_buf) catch return vfs.Error.IOError;
+
+            // Update superblock while holding lock
+            self.superblock.file_count = std.math.sub(u32, self.superblock.file_count, 1) catch 0;
+            sfs_io.updateSuperblock(self) catch return vfs.Error.IOError;
         }
-
-        // Clear directory entry while holding lock
-        e.flags = 0;
-        e.name = [_]u8{0} ** 32;
-        if (!is_open) {
-            e.start_block = 0;
-            e.size = 0;
-        }
-
-        // Write directory update while holding lock
-        sfs_io.writeSector(self, self.superblock.root_dir_start + block_idx, &block_buf) catch return vfs.Error.IOError;
-
-        // Update superblock while holding lock
-        self.superblock.file_count = std.math.sub(u32, self.superblock.file_count, 1) catch 0;
-        sfs_io.updateSuperblock(self) catch return vfs.Error.IOError;
     }
 
     // Free blocks OUTSIDE the lock -- freeBlock acquires alloc_lock internally
@@ -1129,7 +1174,9 @@ pub fn sfsMkdir(ctx: ?*anyopaque, path: []const u8, mode: u32) vfs.Error!void {
         .uid = 0,
         .gid = 0,
         .mtime = 0,
-        ._pad = [_]u8{0} ** (128 - 60),
+        .atime = 0,
+        .nlink = 1,
+        ._pad = [_]u8{0} ** (128 - 68),
     };
     @memcpy(new_entry.name[0..name.len], name);
 
@@ -1566,10 +1613,11 @@ pub fn sfsStat(file_desc: *fd.FileDescriptor, stat_buf: *anyopaque) isize {
     const stat: *uapi.stat.Stat = @ptrCast(@alignCast(stat_buf));
 
     const metadata = refreshMetadataFromDisk(file) orelse {
+        const nlink = if (file.mode & meta.S_IFDIR != 0) @as(u32, 1) else @as(u32, 1);
         stat.* = .{
             .dev = 0,
             .ino = file.entry_idx,
-            .nlink = 1,
+            .nlink = nlink,
             .mode = file.mode,
             .uid = file.uid,
             .gid = file.gid,
@@ -1589,10 +1637,13 @@ pub fn sfsStat(file_desc: *fd.FileDescriptor, stat_buf: *anyopaque) isize {
         return 0;
     };
 
+    // Use nlink from metadata, but default to 1 if 0 (backward compat)
+    const nlink = if (metadata.nlink == 0) @as(u32, 1) else metadata.nlink;
+
     stat.* = .{
         .dev = 0,
         .ino = file.entry_idx,
-        .nlink = 1,
+        .nlink = nlink,
         .mode = metadata.mode,
         .uid = metadata.uid,
         .gid = metadata.gid,
@@ -1600,11 +1651,11 @@ pub fn sfsStat(file_desc: *fd.FileDescriptor, stat_buf: *anyopaque) isize {
         .size = @intCast(metadata.size),
         .blksize = 512,
         .blocks = @intCast((metadata.size + 511) / 512),
-        .atime = 0,
+        .atime = @intCast(metadata.atime),
         .atime_nsec = 0,
-        .mtime = 0,
+        .mtime = @intCast(metadata.mtime),
         .mtime_nsec = 0,
-        .ctime = 0,
+        .ctime = @intCast(metadata.mtime), // SFS doesn't track ctime separately
         .ctime_nsec = 0,
         .__pad0 = 0,
         .__unused = [_]i64{0} ** 3,
@@ -1661,6 +1712,9 @@ pub fn refreshMetadataFromDisk(self: *t.SfsFile) ?t.SfsFile.RefreshedMetadata {
         .mode = entry.mode,
         .uid = entry.uid,
         .gid = entry.gid,
+        .mtime = entry.mtime,
+        .atime = entry.atime,
+        .nlink = entry.nlink,
     };
 }
 

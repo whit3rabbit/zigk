@@ -44,7 +44,9 @@ pub const DirEntry = extern struct {
     uid: u32, // Owner user ID
     gid: u32, // Owner group ID
     mtime: u32, // Modification time (Unix timestamp)
-    _pad: [128 - 60]u8, // Pad to 128 bytes
+    atime: u32, // Access time (Unix timestamp)
+    nlink: u32, // Number of hard links (0 or 1 = single, >1 = hard-linked)
+    _pad: [128 - 68]u8, // Pad to 128 bytes
 
     /// Check if this is a regular file
     pub fn isRegularFile(self: *const @This()) bool {
@@ -56,11 +58,23 @@ pub const DirEntry = extern struct {
         return (self.mode & 0o170000) == 0o040000;
     }
 
+    /// Check if this is a symlink
+    pub fn isSymlink(self: *const @This()) bool {
+        return (self.mode & 0o170000) == 0o120000;
+    }
+
     /// Get permission bits only (lower 9 bits)
     pub fn getPermissions(self: *const @This()) u32 {
         return self.mode & 0o777;
     }
 };
+
+// Compile-time size validation
+comptime {
+    if (@sizeOf(DirEntry) != 128) {
+        @compileError("DirEntry size mismatch: expected 128 bytes");
+    }
+}
 
 // =============================================================================
 // Derived Constants
@@ -130,6 +144,9 @@ pub const SfsFile = struct {
         mode: u32,
         uid: u32,
         gid: u32,
+        mtime: u32,
+        atime: u32,
+        nlink: u32,
     };
 };
 
