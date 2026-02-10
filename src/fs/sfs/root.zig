@@ -31,7 +31,7 @@ pub fn init(device_path: []const u8) !vfs.FileSystem {
 
     // Read superblock (before SFS struct fully initialized, use raw device_fd)
     // TEMPORARY: Direct FD access - switch to readSector(self, ...) after init
-    var sb_buf: [512]u8 = undefined;
+    var sb_buf: [512]u8 align(4) = undefined;
     {
         const old_pos = device_fd.position;
         device_fd.position = 0;
@@ -103,6 +103,8 @@ pub fn init(device_path: []const u8) !vfs.FileSystem {
         .statfs = sfs_ops.sfsStatfs,
         .link = sfs_ops.sfsLink,
         .set_timestamps = sfs_ops.sfsSetTimestamps,
+        .symlink = sfs_ops.sfsSymlink,
+        .readlink = sfs_ops.sfsReadlink,
     };
 }
 
