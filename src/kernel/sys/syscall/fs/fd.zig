@@ -496,7 +496,14 @@ pub fn sys_creat(path_ptr: usize, mode: usize) SyscallError!usize {
 /// sys_dup3 (292) - Duplicate FD with flags
 ///
 /// Like dup2, but with flags (e.g., O_CLOEXEC)
+/// POSIX: Returns EINVAL if oldfd == newfd (unlike dup2 which allows this)
 pub fn sys_dup3(oldfd: usize, newfd: usize, flags: usize) SyscallError!usize {
+    // POSIX: dup3 returns EINVAL if oldfd == newfd
+    if (oldfd == newfd) return error.EINVAL;
+
+    // Validate flags - only O_CLOEXEC is supported
+    if ((flags & ~@as(usize, fd_mod.O_CLOEXEC)) != 0) return error.EINVAL;
+
     const result = try sys_dup2(oldfd, newfd);
 
     // SECURITY: Handle O_CLOEXEC flag
