@@ -47,10 +47,11 @@ pub fn testLinkatBasic() !void {
     const src = "/mnt/test_linkat_src";
     const dst = "/mnt/test_linkat_dst";
 
-    // Create source file (keep fd open -- SFS close deadlock workaround)
-    _ = syscall.open(src, syscall.O_WRONLY | syscall.O_CREAT | syscall.O_TRUNC, 0o644) catch {
+    // Create source file
+    const fd = syscall.open(src, syscall.O_WRONLY | syscall.O_CREAT | syscall.O_TRUNC, 0o644) catch {
         return error.SkipTest;
     };
+    syscall.close(fd) catch {};
 
     // Create hard link
     syscall.linkat(AT_FDCWD, src, AT_FDCWD, dst, 0) catch |err| {
@@ -149,10 +150,11 @@ pub fn testSymlinkatEmptyTarget() !void {
 pub fn testUtimensatNull() !void {
     const path = "/mnt/test_utime";
 
-    // Create file (keep fd open -- SFS deadlock workaround)
-    _ = syscall.open(path, syscall.O_WRONLY | syscall.O_CREAT | syscall.O_TRUNC, 0o644) catch {
+    // Create file
+    const fd = syscall.open(path, syscall.O_WRONLY | syscall.O_CREAT | syscall.O_TRUNC, 0o644) catch {
         return error.SkipTest;
     };
+    syscall.close(fd) catch {};
 
     // Set timestamps to current time (NULL times)
     syscall.utimensat(AT_FDCWD, path, null, 0) catch |err| {
@@ -230,10 +232,11 @@ pub fn testUtimensatInvalidNsec() !void {
 pub fn testFutimesatBasic() !void {
     const path = "/mnt/test_futimesat";
 
-    // Create file (keep fd open -- SFS deadlock workaround)
-    _ = syscall.open(path, syscall.O_WRONLY | syscall.O_CREAT | syscall.O_TRUNC, 0o644) catch {
+    // Create file
+    const fd = syscall.open(path, syscall.O_WRONLY | syscall.O_CREAT | syscall.O_TRUNC, 0o644) catch {
         return error.SkipTest;
     };
+    syscall.close(fd) catch {};
 
     // Set timestamps to current time (NULL times)
     syscall.futimesat(AT_FDCWD, path, null) catch |err| {

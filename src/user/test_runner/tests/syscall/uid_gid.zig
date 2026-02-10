@@ -314,7 +314,7 @@ pub fn testChownAsRoot() !void {
             // Chown to 1000:1000 (file still open - no problem)
             syscall.chown(path, 1000, 1000) catch return false;
 
-            // Don't close or unlink to avoid SFS deadlock
+            syscall.close(fd) catch return false;
             return true;
         }
     };
@@ -328,7 +328,7 @@ pub fn testChownNonOwnerFails() !void {
             const path = "/mnt/cho_test2";
             // Create file as root
             const fd = syscall.open(path, 0x241, 0o644) catch return false; // O_CREAT|O_WRONLY|O_TRUNC
-            _ = fd; // Don't close to avoid SFS deadlock
+            syscall.close(fd) catch return false;
 
             // Drop to non-root
             syscall.setuid(2000) catch return false;
@@ -358,7 +358,7 @@ pub fn testChownNonRootCanChgrpToOwnGroup() !void {
             const path = "/mnt/cho_test3";
             // Create file as root, owned by uid 1000
             const fd = syscall.open(path, 0x241, 0o644) catch return false;
-            _ = fd; // Don't close to avoid SFS deadlock
+            syscall.close(fd) catch return false;
             syscall.chown(path, 1000, 0) catch return false;
 
             // Set up uid 1000 with supplementary group 500
@@ -391,7 +391,7 @@ pub fn testChownNonRootCannotChangeUid() !void {
             const path = "/mnt/cho_test4";
             // Create file as root, owned by uid 1000
             const fd = syscall.open(path, 0x241, 0o644) catch return false;
-            _ = fd; // Don't close to avoid SFS deadlock
+            syscall.close(fd) catch return false;
             syscall.chown(path, 1000, 0) catch return false;
 
             // Become the file owner
@@ -431,7 +431,7 @@ pub fn testFchownatWithATFdcwd() !void {
             const path = "/mnt/fcat_test";
             // Create file
             const fd = syscall.open(path, 0x241, 0o644) catch return false;
-            _ = fd; // Don't close to avoid SFS deadlock
+            syscall.close(fd) catch return false;
 
             // fchownat with AT_FDCWD
             const AT_FDCWD_LOCAL: i32 = -100;
@@ -451,7 +451,7 @@ pub fn testFchownatSymlinkNofollow() !void {
             const path = "/mnt/fcat_sf";
             // Create file
             const fd = syscall.open(path, 0x241, 0o644) catch return false;
-            _ = fd; // Don't close to avoid SFS deadlock
+            syscall.close(fd) catch return false;
 
             // fchownat with AT_SYMLINK_NOFOLLOW (should work on regular file)
             const AT_FDCWD_LOCAL: i32 = -100;

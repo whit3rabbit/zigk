@@ -39,7 +39,7 @@ pub fn testWritevReadv() !void {
     const fd = syscall.open("/mnt/test_vio.txt", syscall.O_RDWR | syscall.O_CREAT | syscall.O_TRUNC, 0o644) catch {
         return error.SkipTest; // SFS may not be available
     };
-    // Do NOT close - SFS deadlock workaround
+    defer syscall.close(fd) catch {};
 
     // Write two buffers
     const msg1 = "Hello";
@@ -104,7 +104,7 @@ pub fn testPwritevBasic() !void {
     const fd = syscall.open("/mnt/test_pwv.txt", syscall.O_RDWR | syscall.O_CREAT | syscall.O_TRUNC, 0o644) catch {
         return error.SkipTest; // SFS may not be available
     };
-    // Do NOT close - SFS deadlock workaround
+    defer syscall.close(fd) catch {};
 
     // Write 10 A's
     const initial = "AAAAAAAAAA";
@@ -157,7 +157,7 @@ pub fn testPwritev2FlagsZero() !void {
     const fd = syscall.open("/mnt/test_pwv2.txt", syscall.O_RDWR | syscall.O_CREAT | syscall.O_TRUNC, 0o644) catch {
         return error.SkipTest; // SFS may not be available
     };
-    // Do NOT close - SFS deadlock workaround
+    defer syscall.close(fd) catch {};
 
     // Write 10 B's
     const initial = "BBBBBBBBBB";

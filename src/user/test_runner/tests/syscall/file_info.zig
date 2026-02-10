@@ -62,29 +62,66 @@ pub fn testStatModeDirectory() !void {
 }
 
 // Test 5: ftruncate reduces file size
-// NOTE: SFS has fstat/close deadlock issues. This test uses the existing
-// file_io truncate tests for coverage (testOpenWithTruncate). The ftruncate
-// wrapper is verified as a simple syscall2 passthrough.
 pub fn testFtruncateFile() !void {
-    return error.SkipTest;
+    const path = "/mnt/test_ftrunc.txt";
+
+    // Create file with initial content
+    const fd = try syscall.open(path, syscall.O_WRONLY | syscall.O_CREAT | syscall.O_TRUNC, 0o644);
+    defer syscall.close(fd) catch {};
+
+    // Write 20 bytes
+    const data = "12345678901234567890";
+    const written = try syscall.write(fd, data.ptr, data.len);
+    if (written != 20) return error.TestFailed;
+
+    // Truncate to 10 bytes
+    try syscall.ftruncate(fd, 10);
+
+    // Verify new size via fstat
+    var st: syscall.Stat = std.mem.zeroes(syscall.Stat);
+    try syscall.fstat(fd, &st);
+    if (st.size != 10) return error.TestFailed;
 }
 
 // Test 6: rename moves a file, old name is gone
-// SKIPPED: sys_rename deadlocks on SFS (VFS re-lock bug), and sys_renameat
-// passes kernel pointers to sys_rename which calls copyStringFromUser -> EFAULT.
-// Rename functionality is verified through the at_ops test suite once this is fixed.
 pub fn testRenameFile() !void {
-    return error.SkipTest;
+    const old_path = "/mnt/test_rename_src.txt";
+    const new_path = "/mnt/test_rename_dst.txt";
+
+    // Create source file
+    const fd = try syscall.open(old_path, syscall.O_WRONLY | syscall.O_CREAT | syscall.O_TRUNC, 0o644);
+    const data = "rename test data";
+    _ = try syscall.write(fd, data.ptr, data.len);
+    try syscall.close(fd);
+
+    // Rename the file
+    try syscall.rename(old_path, new_path);
+
+    // Verify old path no longer exists
+    const old_result = syscall.open(old_path, syscall.O_RDONLY, 0);
+    if (old_result) |_| {
+        return error.TestFailed; // Old path should not exist
+    } else |err| {
+        if (err != error.NoSuchFileOrDirectory) return error.TestFailed;
+    }
+
+    // Verify new path exists and has correct content
+    const new_fd = try syscall.open(new_path, syscall.O_RDONLY, 0);
+    defer syscall.close(new_fd) catch {};
+
+    var buf: [32]u8 = undefined;
+    const read_len = try syscall.read(new_fd, &buf, buf.len);
+    if (read_len != data.len) return error.TestFailed;
+    if (!std.mem.eql(u8, buf[0..read_len], data)) return error.TestFailed;
 }
 
 // Test 7: chmod changes mode bits
-// NOTE: Avoids explicit close() to prevent SFS close deadlock after many test operations.
-// The fd is leaked intentionally -- chmod operates on the path, not the fd.
 pub fn testChmodFile() !void {
     const path = "/mnt/test_chmod.txt";
 
-    // Create file (keep fd open to avoid SFS close deadlock)
-    _ = try syscall.open(path, syscall.O_WRONLY | syscall.O_CREAT | syscall.O_TRUNC, 0o644);
+    // Create file
+    const fd = try syscall.open(path, syscall.O_WRONLY | syscall.O_CREAT | syscall.O_TRUNC, 0o644);
+    try syscall.close(fd);
 
     // Change permissions
     try syscall.chmod(path, 0o755);
@@ -97,17 +134,43 @@ pub fn testChmodFile() !void {
 }
 
 // Test 8: unlink removes a file
-// SKIPPED: SFS has a late-stage close() deadlock after many tests.
-// unlink/rmdir wrappers are trivial syscall1 passthroughs already tested
-// by existing file_io and regression tests.
 pub fn testUnlinkFile() !void {
-    return error.SkipTest;
+    const path = "/mnt/test_unlink.txt";
+
+    // Create file
+    const fd = try syscall.open(path, syscall.O_WRONLY | syscall.O_CREAT | syscall.O_TRUNC, 0o644);
+    try syscall.close(fd);
+
+    // Unlink the file
+    try syscall.unlink(path);
+
+    // Verify file no longer exists
+    const result = syscall.open(path, syscall.O_RDONLY, 0);
+    if (result) |_| {
+        return error.TestFailed; // File should not exist
+    } else |err| {
+        if (err != error.NoSuchFileOrDirectory) return error.TestFailed;
+    }
 }
 
 // Test 9: rmdir removes an empty directory
-// SKIPPED: Same SFS late-stage deadlock issue.
 pub fn testRmdirDirectory() !void {
-    return error.SkipTest;
+    const path = "/mnt/test_rmdir_dir";
+
+    // Create directory
+    try syscall.mkdir(path, 0o755);
+
+    // Remove directory
+    try syscall.rmdir(path);
+
+    // Verify directory no longer exists
+    var st: syscall.Stat = std.mem.zeroes(syscall.Stat);
+    const result = syscall.stat(path, &st);
+    if (result) |_| {
+        return error.TestFailed; // Directory should not exist
+    } else |err| {
+        if (err != error.NoSuchFileOrDirectory) return error.TestFailed;
+    }
 }
 
 // Test 10: access(path, F_OK) for existing file

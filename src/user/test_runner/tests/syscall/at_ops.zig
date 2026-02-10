@@ -39,14 +39,14 @@ pub fn testMkdiratBasic() !void {
 }
 
 // Test 3: unlinkat(AT_FDCWD, name, 0) removes file
-// NOTE: Avoids explicit close() to prevent SFS close deadlock.
 pub fn testUnlinkatFile() !void {
     const path = "/mnt/test_unlinkat.txt";
 
-    // Create file (keep fd open to avoid SFS close deadlock)
-    _ = try syscall.open(path, syscall.O_WRONLY | syscall.O_CREAT | syscall.O_TRUNC, 0o644);
+    // Create file
+    const fd = try syscall.open(path, syscall.O_WRONLY | syscall.O_CREAT | syscall.O_TRUNC, 0o644);
+    try syscall.close(fd);
 
-    // Remove with unlinkat (POSIX allows unlink while fd open)
+    // Remove with unlinkat
     try syscall.unlinkat(AT_FDCWD, path, 0);
 
     // Verify it's gone from directory
@@ -59,27 +59,64 @@ pub fn testUnlinkatFile() !void {
 }
 
 // Test 4: unlinkat(AT_FDCWD, name, AT_REMOVEDIR) removes directory
-// SKIPPED: VFS.rmdir returns EBUSY after many SFS operations (SFS state degradation).
-// The kernel code (rmdirKernel, sys_unlinkat) is correct -- this is an SFS issue.
 pub fn testUnlinkatDir() !void {
-    return error.SkipTest;
+    const path = "/mnt/test_unlnkdir";
+
+    // Create directory
+    try syscall.mkdir(path, 0o755);
+
+    // Remove directory using unlinkat
+    try syscall.unlinkat(AT_FDCWD, path, AT_REMOVEDIR);
+
+    // Verify directory no longer exists
+    var st: syscall.Stat = std.mem.zeroes(syscall.Stat);
+    const result = syscall.stat(path, &st);
+    if (result) |_| {
+        return error.TestFailed; // Directory should not exist
+    } else |err| {
+        if (err != error.NoSuchFileOrDirectory) return error.TestFailed;
+    }
 }
 
 // Test 5: renameat(AT_FDCWD, old, AT_FDCWD, new)
-// SKIPPED: VFS.rename deadlocks on SFS due to re-lock bug.
-// The kernel pointer delegation bug was fixed, but the underlying
-// VFS re-lock deadlock remains.
 pub fn testRenameatBasic() !void {
-    return error.SkipTest;
+    const old_path = "/mnt/test_renat_src.txt";
+    const new_path = "/mnt/test_renat_dst.txt";
+
+    // Create source file
+    const fd = try syscall.open(old_path, syscall.O_WRONLY | syscall.O_CREAT | syscall.O_TRUNC, 0o644);
+    const data = "renameat test";
+    _ = try syscall.write(fd, data.ptr, data.len);
+    try syscall.close(fd);
+
+    // Rename using renameat
+    try syscall.renameat(AT_FDCWD, old_path, AT_FDCWD, new_path);
+
+    // Verify old path no longer exists
+    const old_result = syscall.open(old_path, syscall.O_RDONLY, 0);
+    if (old_result) |_| {
+        return error.TestFailed; // Old path should not exist
+    } else |err| {
+        if (err != error.NoSuchFileOrDirectory) return error.TestFailed;
+    }
+
+    // Verify new path exists
+    const new_fd = try syscall.open(new_path, syscall.O_RDONLY, 0);
+    defer syscall.close(new_fd) catch {};
+
+    var buf: [32]u8 = undefined;
+    const read_len = try syscall.read(new_fd, &buf, buf.len);
+    if (read_len != data.len) return error.TestFailed;
+    if (!std.mem.eql(u8, buf[0..read_len], data)) return error.TestFailed;
 }
 
 // Test 6: fchmodat changes permissions on an SFS file
-// NOTE: Avoids explicit close() to prevent SFS close deadlock.
 pub fn testFchmodatBasic() !void {
     const path = "/mnt/test_fchmodat.txt";
 
-    // Create file (keep fd open to avoid SFS close deadlock)
-    _ = try syscall.open(path, syscall.O_WRONLY | syscall.O_CREAT | syscall.O_TRUNC, 0o644);
+    // Create file
+    const fd = try syscall.open(path, syscall.O_WRONLY | syscall.O_CREAT | syscall.O_TRUNC, 0o644);
+    try syscall.close(fd);
 
     // Change permissions with fchmodat
     try syscall.fchmodat(AT_FDCWD, path, 0o755, 0);

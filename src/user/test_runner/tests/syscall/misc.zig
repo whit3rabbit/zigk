@@ -87,7 +87,7 @@ pub fn testGetrandomNonblocking() !void {
 }
 
 // Test 7: writev with multiple iovecs
-// NOTE: Uses O_RDWR + lseek to avoid close/reopen (SFS close deadlock).
+// NOTE: Uses O_RDWR + lseek to avoid reopening the file (efficient pattern).
 pub fn testWritevBasic() !void {
     const path = "/mnt/test_writev.txt";
 
