@@ -78,40 +78,42 @@ None -- this is a cleanup milestone.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| BUGFIX-01 | TBD | Pending |
-| BUGFIX-02 | TBD | Pending |
-| BUGFIX-03 | TBD | Pending |
-| SFS-01 | TBD | Pending |
-| SFS-02 | TBD | Pending |
-| SFS-03 | TBD | Pending |
-| SFS-04 | TBD | Pending |
-| WAIT-01 | TBD | Pending |
-| WAIT-02 | TBD | Pending |
-| WAIT-03 | TBD | Pending |
-| WAIT-04 | TBD | Pending |
-| WAIT-05 | TBD | Pending |
-| IPC-01 | TBD | Pending |
-| IPC-02 | TBD | Pending |
-| IO-01 | TBD | Pending |
-| IO-02 | TBD | Pending |
-| TEST-01 | TBD | Pending |
-| TEST-02 | TBD | Pending |
-| TEST-03 | TBD | Pending |
-| STUB-01 | TBD | Pending |
-| STUB-02 | TBD | Pending |
-| STUB-03 | TBD | Pending |
-| STUB-04 | TBD | Pending |
-| STUB-05 | TBD | Pending |
-| STUB-06 | TBD | Pending |
-| STUB-07 | TBD | Pending |
-| STUB-08 | TBD | Pending |
-| DOC-01 | TBD | Pending |
+| BUGFIX-01 | Phase 10 | Pending |
+| BUGFIX-02 | Phase 10 | Pending |
+| BUGFIX-03 | Phase 10 | Pending |
+| DOC-01 | Phase 10 | Pending |
+| STUB-01 | Phase 10 | Pending |
+| STUB-02 | Phase 10 | Pending |
+| STUB-03 | Phase 10 | Pending |
+| STUB-04 | Phase 10 | Pending |
+| STUB-05 | Phase 10 | Pending |
+| STUB-06 | Phase 10 | Pending |
+| STUB-07 | Phase 10 | Pending |
+| STUB-08 | Phase 10 | Pending |
+| SFS-01 | Phase 11 | Pending |
+| TEST-02 | Phase 11 | Pending |
+| SFS-02 | Phase 12 | Pending |
+| SFS-03 | Phase 12 | Pending |
+| SFS-04 | Phase 12 | Pending |
+| TEST-03 | Phase 12 | Pending |
+| WAIT-01 | Phase 13 | Pending |
+| WAIT-02 | Phase 13 | Pending |
+| WAIT-03 | Phase 13 | Pending |
+| WAIT-04 | Phase 13 | Pending |
+| WAIT-05 | Phase 13 | Pending |
+| IPC-01 | Phase 13 | Pending |
+| IPC-02 | Phase 13 | Pending |
+| TEST-01 | Phase 13 | Pending |
+| IO-01 | Phase 14 | Pending |
+| IO-02 | Phase 14 | Pending |
 
 **Coverage:**
 - v1.1 requirements: 28 total
-- Mapped to phases: 0
-- Unmapped: 28
+- Mapped to phases: 28
+- Unmapped: 0
+
+✓ 100% coverage validated
 
 ---
 *Requirements defined: 2026-02-09*
-*Last updated: 2026-02-09 after initial definition*
+*Last updated: 2026-02-09 after roadmap creation*
