@@ -87,8 +87,12 @@ pub const SFS = struct {
     device_fd: *fd.FileDescriptor,
     superblock: Superblock,
     /// Lock protecting superblock updates (prevents TOCTOU in file growth)
-    /// LOCK ORDERING: alloc_lock must be acquired BEFORE any FD locks
+    /// LOCK ORDERING: alloc_lock (2) must be acquired BEFORE io_lock (2.5)
+    /// alloc_lock may be held while acquiring io_lock, but NOT vice versa
     alloc_lock: sync.Spinlock = .{},
+    /// Lock serializing device I/O to prevent device_fd.position races
+    /// LOCK ORDERING: io_lock (2.5) - acquired AFTER alloc_lock if both needed
+    io_lock: sync.Spinlock = .{},
     /// AHCI port number for direct async I/O access
     port_num: u5,
     /// True while filesystem is mounted and safe to use

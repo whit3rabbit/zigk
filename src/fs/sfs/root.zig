@@ -29,12 +29,25 @@ pub fn init(device_path: []const u8) !vfs.FileSystem {
         .port_num = @intCast(@intFromPtr(device_fd.private_data) & 0x1F),
     };
 
-    // Read superblock
+    // Read superblock (before SFS struct fully initialized, use raw device_fd)
+    // TEMPORARY: Direct FD access - switch to readSector(self, ...) after init
     var sb_buf: [512]u8 = undefined;
-    sfs_io.readSector(device_fd, 0, &sb_buf) catch {
-        console.err("SFS: Failed to read superblock from {s}", .{device_path});
-        return error.IOError;
-    };
+    {
+        const old_pos = device_fd.position;
+        device_fd.position = 0;
+        if (device_fd.ops.read) |read_fn| {
+            const bytes_read = read_fn(device_fd, &sb_buf);
+            device_fd.position = old_pos;
+            if (bytes_read < 512) {
+                console.err("SFS: Failed to read superblock from {s}", .{device_path});
+                return error.IOError;
+            }
+        } else {
+            device_fd.position = old_pos;
+            console.err("SFS: No read operation available on {s}", .{device_path});
+            return error.IOError;
+        }
+    }
     self.superblock = @as(*const t.Superblock, @ptrCast(@alignCast(&sb_buf))).*;
 
     // Check magic
@@ -115,12 +128,12 @@ fn format(self: *SFS) !void {
     const zero_buf = [_]u8{0} ** 512;
     var i: u32 = 0;
     while (i < t.BITMAP_BLOCKS) : (i += 1) {
-        try sfs_io.writeSector(self.device_fd, self.superblock.bitmap_start + i, &zero_buf);
+        try sfs_io.writeSector(self, self.superblock.bitmap_start + i, &zero_buf);
     }
 
     // Clear root directory blocks
     i = 0;
     while (i < t.ROOT_DIR_BLOCKS) : (i += 1) {
-        try sfs_io.writeSector(self.device_fd, self.superblock.root_dir_start + i, &zero_buf);
+        try sfs_io.writeSector(self, self.superblock.root_dir_start + i, &zero_buf);
     }
 }

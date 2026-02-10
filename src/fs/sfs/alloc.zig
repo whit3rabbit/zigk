@@ -20,7 +20,7 @@ pub fn loadBitmapBatch(self: *t.SFS) ![]u8 {
         offset += 512;
         remaining -= 1;
     }) {
-        sfs_io.readSector(self.device_fd, lba, &sector_buf) catch {
+        sfs_io.readSector(self, lba, &sector_buf) catch {
             alloc.free(bitmap_buf);
             return error.IOError;
         };
@@ -44,7 +44,7 @@ pub fn loadBitmapIntoCached(self: *t.SFS, dest: []u8) !void {
         offset += 512;
         remaining -= 1;
     }) {
-        try sfs_io.readSector(self.device_fd, lba, &sector_buf);
+        try sfs_io.readSector(self, lba, &sector_buf);
         @memcpy(dest[offset..][0..512], &sector_buf);
     }
 }
@@ -78,7 +78,7 @@ pub fn allocateBlock(self: *t.SFS) !u32 {
                     const bitmap_block_idx = global_byte_idx / 512;
                     const lba = self.superblock.bitmap_start + @as(u32, @truncate(bitmap_block_idx));
                     
-                    sfs_io.writeSector(self.device_fd, lba, bitmap_buf[bitmap_block_idx * 512 ..][0..512]) catch return error.IOError;
+                    sfs_io.writeSector(self, lba, bitmap_buf[bitmap_block_idx * 512 ..][0..512]) catch return error.IOError;
 
                     const bitmap_offset = @as(u32, @truncate(global_byte_idx)) * 8;
                     const bit_offset = @as(u32, bit);
@@ -122,10 +122,10 @@ pub fn freeBlock(self: *t.SFS, block_num: u32) !void {
     const lba = self.superblock.bitmap_start + bitmap_block_idx;
 
     var sector_buf: [512]u8 = undefined;
-    sfs_io.readSector(self.device_fd, lba, &sector_buf) catch return error.IOError;
+    sfs_io.readSector(self, lba, &sector_buf) catch return error.IOError;
 
     sector_buf[byte_in_block] &= ~(@as(u8, 1) << bit_idx);
-    sfs_io.writeSector(self.device_fd, lba, &sector_buf) catch return error.IOError;
+    sfs_io.writeSector(self, lba, &sector_buf) catch return error.IOError;
 
     if (self.bitmap_cache) |cache| {
         if (self.bitmap_cache_valid) {

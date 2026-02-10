@@ -4,8 +4,13 @@ const console = @import("console");
 const t = @import("types.zig");
 
 /// Read a single sector - uses file descriptor operations (works with any block device)
-pub fn readSector(device_fd: *fd.FileDescriptor, lba: u32, buf: *[512]u8) t.SectorError!void {
+/// SERIALIZED: Uses io_lock to prevent device_fd.position races
+pub fn readSector(self: *t.SFS, lba: u32, buf: *[512]u8) t.SectorError!void {
+    const held = self.io_lock.acquire();
+    defer held.release();
+
     // Use file descriptor read operation - works for AHCI, VirtIO-SCSI, NVMe, etc.
+    const device_fd = self.device_fd;
     const old_pos = device_fd.position;
     device_fd.position = @as(u64, lba) * 512;
 
@@ -30,10 +35,15 @@ pub fn readSector(device_fd: *fd.FileDescriptor, lba: u32, buf: *[512]u8) t.Sect
 }
 
 /// Write a single sector - uses file descriptor operations (works with any block device)
-pub fn writeSector(device_fd: *fd.FileDescriptor, lba: u32, buf: []const u8) t.SectorError!void {
+/// SERIALIZED: Uses io_lock to prevent device_fd.position races
+pub fn writeSector(self: *t.SFS, lba: u32, buf: []const u8) t.SectorError!void {
     if (buf.len < 512) return error.IOError;
 
+    const held = self.io_lock.acquire();
+    defer held.release();
+
     // Use file descriptor write operation - works for AHCI, VirtIO-SCSI, NVMe, etc.
+    const device_fd = self.device_fd;
     const old_pos = device_fd.position;
     device_fd.position = @as(u64, lba) * 512;
 
@@ -61,7 +71,7 @@ pub fn writeSector(device_fd: *fd.FileDescriptor, lba: u32, buf: []const u8) t.S
 pub fn readSectorAsync(self: *t.SFS, lba: u32, buf: []u8) !void {
     // Use file descriptor read (works for all drivers: AHCI, VirtIO-SCSI, NVMe)
     var read_buf: [512]u8 = undefined;
-    try readSector(self.device_fd, lba, &read_buf);
+    try readSector(self, lba, &read_buf);
     @memcpy(buf[0..512], &read_buf);
 }
 
@@ -70,7 +80,7 @@ pub fn writeSectorAsync(self: *t.SFS, lba: u32, buf: []const u8) !void {
     // Use file descriptor write (works for all drivers: AHCI, VirtIO-SCSI, NVMe)
     var write_buf: [512]u8 = undefined;
     @memcpy(&write_buf, buf[0..512]);
-    try writeSector(self.device_fd, lba, &write_buf);
+    try writeSector(self, lba, &write_buf);
 }
 
 /// Read multiple sectors using FD-based I/O (driver portable)
@@ -89,7 +99,7 @@ pub fn readSectorsAsync(self: *t.SFS, lba: u32, sector_count: u16, buf: []u8) !v
         offset += 512;
         remaining -= 1;
     }) {
-        try readSector(self.device_fd, current_lba, &read_buf);
+        try readSector(self, current_lba, &read_buf);
         @memcpy(buf[offset..][0..512], &read_buf);
     }
 }
@@ -111,7 +121,7 @@ pub fn writeSectorsAsync(self: *t.SFS, lba: u32, sector_count: u16, buf: []const
         remaining -= 1;
     }) {
         @memcpy(&write_buf, buf[offset..][0..512]);
-        try writeSector(self.device_fd, current_lba, &write_buf);
+        try writeSector(self, current_lba, &write_buf);
     }
 }
 
@@ -128,5 +138,5 @@ pub fn writeDirectoryAsync(self: *t.SFS, buf: []const u8) !void {
 }
 
 pub fn updateSuperblock(self: *t.SFS) !void {
-    try writeSector(self.device_fd, 0, std.mem.asBytes(&self.superblock));
+    try writeSector(self, 0, std.mem.asBytes(&self.superblock));
 }

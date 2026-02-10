@@ -112,7 +112,7 @@ pub fn sfsRead(file_desc: *fd.FileDescriptor, buf: []u8) isize {
 
         // SECURITY: Zero-initialize to prevent information leak if read fails
         var sector_buf: [512]u8 = [_]u8{0} ** 512;
-        sfs_io.readSector(file.fs.device_fd, phys_block, &sector_buf) catch return -5;
+        sfs_io.readSector(file.fs, phys_block, &sector_buf) catch return -5;
 
         const chunk = @min(to_read - read_count, 512 - byte_offset);
         @memcpy(buf[read_count..][0..chunk], sector_buf[byte_offset..][0..chunk]);
@@ -222,7 +222,7 @@ pub fn sfsWrite(file_desc: *fd.FileDescriptor, buf: []const u8) isize {
 
             // If not starting at sector boundary, read existing data first
             if (byte_offset != 0 or (gap_end_byte - fill_pos) < (512 - byte_offset)) {
-                sfs_io.readSector(file.fs.device_fd, phys_block, &zero_sector) catch {};
+                sfs_io.readSector(file.fs, phys_block, &zero_sector) catch {};
             }
 
             // Calculate how many bytes to zero in this sector
@@ -230,7 +230,7 @@ pub fn sfsWrite(file_desc: *fd.FileDescriptor, buf: []const u8) isize {
             @memset(zero_sector[byte_offset..][0..bytes_to_zero], 0);
 
             // Write back the sector
-            sfs_io.writeSector(file.fs.device_fd, phys_block, &zero_sector) catch return -5;
+            sfs_io.writeSector(file.fs, phys_block, &zero_sector) catch return -5;
 
             // Advance to next sector or end of gap
             fill_pos = std.math.add(u64, fill_pos, bytes_to_zero) catch return -27;
@@ -287,12 +287,12 @@ pub fn sfsWrite(file_desc: *fd.FileDescriptor, buf: []const u8) isize {
 
         // SECURITY: Zero-initialize to prevent information leak if read fails or returns partial data
         var sector_buf: [512]u8 = [_]u8{0} ** 512;
-        sfs_io.readSector(file.fs.device_fd, phys_block, &sector_buf) catch {};
+        sfs_io.readSector(file.fs, phys_block, &sector_buf) catch {};
 
         const chunk = @min(buf.len - written_count, 512 - byte_offset);
         @memcpy(sector_buf[byte_offset..][0..chunk], buf[written_count..][0..chunk]);
 
-        sfs_io.writeSector(file.fs.device_fd, phys_block, &sector_buf) catch return -5;
+        sfs_io.writeSector(file.fs, phys_block, &sector_buf) catch return -5;
 
         written_count += chunk;
         current_pos += chunk;
@@ -310,7 +310,7 @@ pub fn sfsWrite(file_desc: *fd.FileDescriptor, buf: []const u8) isize {
 
             // PHASE 2: Read directory block UNLOCKED
             var dir_buf: [512]u8 = [_]u8{0} ** 512;
-            sfs_io.readSector(file.fs.device_fd, file.fs.superblock.root_dir_start + block_idx, &dir_buf) catch {
+            sfs_io.readSector(file.fs, file.fs.superblock.root_dir_start + block_idx, &dir_buf) catch {
                 // Graceful degradation: data written, metadata update failed
                 return std.math.cast(isize, written_count) orelse return -75;
             };
@@ -320,7 +320,7 @@ pub fn sfsWrite(file_desc: *fd.FileDescriptor, buf: []const u8) isize {
             defer lock_held.release();
 
             // PHASE 4: Re-read under lock (TOCTOU prevention)
-            sfs_io.readSector(file.fs.device_fd, file.fs.superblock.root_dir_start + block_idx, &dir_buf) catch {
+            sfs_io.readSector(file.fs, file.fs.superblock.root_dir_start + block_idx, &dir_buf) catch {
                 return std.math.cast(isize, written_count) orelse return -75;
             };
 
@@ -330,7 +330,7 @@ pub fn sfsWrite(file_desc: *fd.FileDescriptor, buf: []const u8) isize {
             // SECURITY: Validate start_block to prevent wrong-file race
             if (entry.flags == 1 and entry.start_block == file.start_block) {
                 entry.size = file.size;
-                sfs_io.writeSector(file.fs.device_fd, file.fs.superblock.root_dir_start + block_idx, &dir_buf) catch {
+                sfs_io.writeSector(file.fs, file.fs.superblock.root_dir_start + block_idx, &dir_buf) catch {
                     console.warn("SFS: Failed to write directory size update", .{});
                 };
             }
@@ -518,7 +518,7 @@ pub fn sfsOpen(ctx: ?*anyopaque, path: []const u8, flags: u32) vfs.Error!*fd.Fil
                 const offset_in_block = std.math.mul(usize, found_idx % 4, 128) catch return vfs.Error.IOError;
 
                 var block_buf: [512]u8 = [_]u8{0} ** 512;
-                sfs_io.readSector(self.device_fd, self.superblock.root_dir_start + block_idx, &block_buf) catch return vfs.Error.IOError;
+                sfs_io.readSector(self, self.superblock.root_dir_start + block_idx, &block_buf) catch return vfs.Error.IOError;
 
                 const trunc_entry: *t.DirEntry = @ptrCast(@alignCast(&block_buf[offset_in_block]));
 
@@ -530,7 +530,7 @@ pub fn sfsOpen(ctx: ?*anyopaque, path: []const u8, flags: u32) vfs.Error!*fd.Fil
                 trunc_entry.size = 0;
 
                 // Write directory sector back
-                sfs_io.writeSector(self.device_fd, self.superblock.root_dir_start + block_idx, &block_buf) catch return vfs.Error.IOError;
+                sfs_io.writeSector(self, self.superblock.root_dir_start + block_idx, &block_buf) catch return vfs.Error.IOError;
 
                 // Update entry in our local copy so file_ctx gets correct size
                 entry.size = 0;
@@ -654,7 +654,7 @@ pub fn sfsOpen(ctx: ?*anyopaque, path: []const u8, flags: u32) vfs.Error!*fd.Fil
 
                 console.debug("SFS: Reading block {} under lock", .{block_idx});
                 var block_buf: [512]u8 = [_]u8{0} ** 512;
-                sfs_io.readSector(self.device_fd, self.superblock.root_dir_start + block_idx, &block_buf) catch {
+                sfs_io.readSector(self, self.superblock.root_dir_start + block_idx, &block_buf) catch {
                     break :blk vfs.Error.IOError;
                 };
                 console.debug("SFS: Block read complete", .{});
@@ -671,7 +671,7 @@ pub fn sfsOpen(ctx: ?*anyopaque, path: []const u8, flags: u32) vfs.Error!*fd.Fil
 
                 console.debug("SFS: Writing block {} under lock", .{block_idx});
                 // Write block back
-                sfs_io.writeSector(self.device_fd, self.superblock.root_dir_start + block_idx, &block_buf) catch {
+                sfs_io.writeSector(self, self.superblock.root_dir_start + block_idx, &block_buf) catch {
                     break :blk vfs.Error.IOError;
                 };
                 console.debug("SFS: Block write complete", .{});
@@ -788,7 +788,7 @@ pub fn sfsUnlink(ctx: ?*anyopaque, path: []const u8) vfs.Error!void {
         const block_idx = idx / 4;
         const offset_in_block = (idx % 4) * 128;
         var block_buf: [512]u8 = [_]u8{0} ** 512;
-        sfs_io.readSector(self.device_fd, self.superblock.root_dir_start + block_idx, &block_buf) catch return vfs.Error.IOError;
+        sfs_io.readSector(self, self.superblock.root_dir_start + block_idx, &block_buf) catch return vfs.Error.IOError;
 
         const e: *t.DirEntry = @ptrCast(@alignCast(&block_buf[offset_in_block]));
 
@@ -831,7 +831,7 @@ pub fn sfsUnlink(ctx: ?*anyopaque, path: []const u8) vfs.Error!void {
         }
 
         // Write directory update while holding lock
-        sfs_io.writeSector(self.device_fd, self.superblock.root_dir_start + block_idx, &block_buf) catch return vfs.Error.IOError;
+        sfs_io.writeSector(self, self.superblock.root_dir_start + block_idx, &block_buf) catch return vfs.Error.IOError;
 
         // Update superblock while holding lock
         self.superblock.file_count = std.math.sub(u32, self.superblock.file_count, 1) catch 0;
@@ -938,7 +938,7 @@ pub fn sfsChmod(ctx: ?*anyopaque, path: []const u8, mode: u32) vfs.Error!void {
     const offset_in_block = std.math.mul(usize, entry_idx % 4, 128) catch return vfs.Error.IOError;
 
     var block_buf: [512]u8 = [_]u8{0} ** 512;
-    sfs_io.readSector(self.device_fd, self.superblock.root_dir_start + block_idx, &block_buf) catch return vfs.Error.IOError;
+    sfs_io.readSector(self, self.superblock.root_dir_start + block_idx, &block_buf) catch return vfs.Error.IOError;
 
     const e: *t.DirEntry = @ptrCast(@alignCast(&block_buf[offset_in_block]));
 
@@ -957,7 +957,7 @@ pub fn sfsChmod(ctx: ?*anyopaque, path: []const u8, mode: u32) vfs.Error!void {
     e.mode = file_type | (mode & 0o7777);
 
     // Write block back
-    sfs_io.writeSector(self.device_fd, self.superblock.root_dir_start + block_idx, &block_buf) catch return vfs.Error.IOError;
+    sfs_io.writeSector(self, self.superblock.root_dir_start + block_idx, &block_buf) catch return vfs.Error.IOError;
 }
 
 pub fn sfsChown(ctx: ?*anyopaque, path: []const u8, uid: ?u32, gid: ?u32) vfs.Error!void {
@@ -1004,7 +1004,7 @@ pub fn sfsChown(ctx: ?*anyopaque, path: []const u8, uid: ?u32, gid: ?u32) vfs.Er
     const offset_in_block = std.math.mul(usize, entry_idx % 4, 128) catch return vfs.Error.IOError;
 
     var block_buf: [512]u8 = [_]u8{0} ** 512;
-    sfs_io.readSector(self.device_fd, self.superblock.root_dir_start + block_idx, &block_buf) catch return vfs.Error.IOError;
+    sfs_io.readSector(self, self.superblock.root_dir_start + block_idx, &block_buf) catch return vfs.Error.IOError;
 
     const e: *t.DirEntry = @ptrCast(@alignCast(&block_buf[offset_in_block]));
 
@@ -1023,7 +1023,7 @@ pub fn sfsChown(ctx: ?*anyopaque, path: []const u8, uid: ?u32, gid: ?u32) vfs.Er
     if (gid) |new_gid| e.gid = new_gid;
 
     // Write block back
-    sfs_io.writeSector(self.device_fd, self.superblock.root_dir_start + block_idx, &block_buf) catch return vfs.Error.IOError;
+    sfs_io.writeSector(self, self.superblock.root_dir_start + block_idx, &block_buf) catch return vfs.Error.IOError;
 }
 
 /// Create a directory in the SFS filesystem.
@@ -1131,7 +1131,7 @@ pub fn sfsMkdir(ctx: ?*anyopaque, path: []const u8, mode: u32) vfs.Error!void {
         return vfs.Error.IOError;
     };
 
-    sfs_io.readSector(self.device_fd, dir_block, &block_buf) catch {
+    sfs_io.readSector(self, dir_block, &block_buf) catch {
         return vfs.Error.IOError;
     };
 
@@ -1157,7 +1157,7 @@ pub fn sfsMkdir(ctx: ?*anyopaque, path: []const u8, mode: u32) vfs.Error!void {
     const dest: *t.DirEntry = @ptrCast(@alignCast(&block_buf[offset_in_block]));
     dest.* = new_entry;
 
-    sfs_io.writeSector(self.device_fd, dir_block, &block_buf) catch {
+    sfs_io.writeSector(self, dir_block, &block_buf) catch {
         return vfs.Error.IOError;
     };
 
@@ -1244,7 +1244,7 @@ pub fn sfsRmdir(ctx: ?*anyopaque, path: []const u8) vfs.Error!void {
     const offset_in_block = std.math.mul(usize, idx % 4, 128) catch return vfs.Error.IOError;
 
     var block_buf: [512]u8 = [_]u8{0} ** 512;
-    sfs_io.readSector(self.device_fd, self.superblock.root_dir_start + block_idx, &block_buf) catch return vfs.Error.IOError;
+    sfs_io.readSector(self, self.superblock.root_dir_start + block_idx, &block_buf) catch return vfs.Error.IOError;
 
     const e: *t.DirEntry = @ptrCast(@alignCast(&block_buf[offset_in_block]));
 
@@ -1287,7 +1287,7 @@ pub fn sfsRmdir(ctx: ?*anyopaque, path: []const u8) vfs.Error!void {
     e.mode = 0;
 
     // Write updated directory block while holding lock
-    sfs_io.writeSector(self.device_fd, self.superblock.root_dir_start + block_idx, &block_buf) catch return vfs.Error.IOError;
+    sfs_io.writeSector(self, self.superblock.root_dir_start + block_idx, &block_buf) catch return vfs.Error.IOError;
 
     // Update superblock file count while holding lock
     self.superblock.file_count = std.math.sub(u32, self.superblock.file_count, 1) catch 0;
@@ -1379,8 +1379,8 @@ pub fn refreshSizeFromDisk(self: *t.SfsFile) ?u32 {
     const offset_idx = self.entry_idx % 4;
     var dir_buf: [512]u8 = undefined;
 
-    @import("hal").mmio.memoryBarrier(); // 
-    sfs_io.readSector(self.fs.device_fd, self.fs.superblock.root_dir_start + block_idx, &dir_buf) catch return null;
+    @import("hal").mmio.memoryBarrier(); //
+    sfs_io.readSector(self.fs, self.fs.superblock.root_dir_start + block_idx, &dir_buf) catch return null;
 
     const entry: *const t.DirEntry = @ptrCast(@alignCast(&dir_buf[offset_idx * 128]));
     if (entry.flags != 1) return null;
@@ -1402,7 +1402,7 @@ pub fn refreshMetadataFromDisk(self: *t.SfsFile) ?t.SfsFile.RefreshedMetadata {
 
     console.debug("SFS: refreshMetadata calling readSector block={}", .{block_idx});
     @import("hal").mmio.memoryBarrier(); //
-    sfs_io.readSector(self.fs.device_fd, self.fs.superblock.root_dir_start + block_idx, &dir_buf) catch return null;
+    sfs_io.readSector(self.fs, self.fs.superblock.root_dir_start + block_idx, &dir_buf) catch return null;
     console.debug("SFS: refreshMetadata readSector complete", .{});
 
     const entry: *const t.DirEntry = @ptrCast(@alignCast(&dir_buf[offset_idx * 128]));
@@ -1469,12 +1469,12 @@ pub fn truncateFd(file_desc: *fd.FileDescriptor, length: usize) !void {
         const offset_idx = file.entry_idx % 4;
 
         var dir_buf: [512]u8 = undefined;
-        sfs_io.readSector(file.fs.device_fd, file.fs.superblock.root_dir_start + block_idx, &dir_buf) catch return error.IOError;
+        sfs_io.readSector(file.fs, file.fs.superblock.root_dir_start + block_idx, &dir_buf) catch return error.IOError;
 
         const entry: *t.DirEntry = @ptrCast(@alignCast(&dir_buf[offset_idx * 128]));
         entry.size = file.size;
 
-        sfs_io.writeSector(file.fs.device_fd, file.fs.superblock.root_dir_start + block_idx, &dir_buf) catch return error.IOError;
+        sfs_io.writeSector(file.fs, file.fs.superblock.root_dir_start + block_idx, &dir_buf) catch return error.IOError;
     }
 
     // Free blocks OUTSIDE the lock -- freeBlock acquires alloc_lock internally
@@ -1509,13 +1509,13 @@ pub fn sfsFdChown(file_desc: *fd.FileDescriptor, uid: ?u32, gid: ?u32) isize {
     const offset_in_block = (file.entry_idx % 4) * 128;
 
     var sector: [512]u8 align(512) = undefined;
-    sfs_io.readSector(file.fs.device_fd, file.fs.superblock.root_dir_start + block_idx, &sector) catch return -5; // EIO
+    sfs_io.readSector(file.fs, file.fs.superblock.root_dir_start + block_idx, &sector) catch return -5; // EIO
 
     const entry: *t.DirEntry = @ptrCast(@alignCast(&sector[offset_in_block]));
     if (uid) |new_uid| entry.uid = new_uid;
     if (gid) |new_gid| entry.gid = new_gid;
 
-    sfs_io.writeSector(file.fs.device_fd, file.fs.superblock.root_dir_start + block_idx, &sector) catch return -5; // EIO
+    sfs_io.writeSector(file.fs, file.fs.superblock.root_dir_start + block_idx, &sector) catch return -5; // EIO
 
     return 0;
 }
@@ -1556,7 +1556,7 @@ pub fn sfsGetdents(file_desc: *fd.FileDescriptor, dirp: usize, count: usize) isi
     while (i < t.ROOT_DIR_BLOCKS) : (i += 1) {
         const sector = sfs.superblock.root_dir_start + i;
         const offset = i * t.SECTOR_SIZE;
-        sfs_io.readSector(sfs.device_fd, sector, dir_buf[offset..][0..t.SECTOR_SIZE]) catch return -5;
+        sfs_io.readSector(sfs, sector, dir_buf[offset..][0..t.SECTOR_SIZE]) catch return -5;
     }
 
     const entries: [*]const t.DirEntry = @ptrCast(@alignCast(dir_buf.ptr));
