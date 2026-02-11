@@ -9,19 +9,19 @@ See: .planning/PROJECT.md (updated 2026-02-09)
 
 ## Current Position
 
-Phase: 13 of 14 -- IN PROGRESS (Wait Queue Infrastructure)
-Plan: 1 of 1 in current phase -- COMPLETE
-Status: Phase 13 Plan 01 complete (2/2 tasks, all event FD tests pass)
-Last activity: 2026-02-11 -- Phase 13-01 execution complete (timerfd/signalfd WaitQueue conversion)
+Phase: 13 of 14 -- COMPLETE (Wait Queue Infrastructure)
+Plan: 2 of 2 in current phase -- COMPLETE
+Status: Phase 13 complete (both plans done: timerfd/signalfd + SysV IPC blocking)
+Last activity: 2026-02-11 -- Phase 13-02 execution complete (SEM_UNDO lifecycle hookup)
 
-Progress: [████████████░░░░░░░░] 84% (38/45 plans completed across all milestones)
+Progress: [█████████████░░░░░░░] 87% (39/45 plans completed across all milestones)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 35 (v1.0: 29, v1.1: 6)
-- Average duration: ~8.4 min per plan
-- Total execution time: ~4.7 hours over 4 days
+- Total plans completed: 39 (v1.0: 29, v1.1: 10)
+- Average duration: ~8.1 min per plan
+- Total execution time: ~5.3 hours over 4 days
 
 **By Phase (v1.0):**
 
@@ -45,6 +45,7 @@ Progress: [████████████░░░░░░░░] 84% (38
 
 | Phase | Plan | Duration | Tasks | Files |
 |-------|------|----------|-------|-------|
+| 13. Wait Queue Infrastructure | 13-02 | 3 min | 1 | 2 |
 | 13. Wait Queue Infrastructure | 13-01 | 6 min | 2 | 3 |
 | 12. SFS Feature Expansion | 12-02 | 10 min | 2 | 1 |
 | 12. SFS Feature Expansion | 12-01 | 12 min | 2 | 3 |
@@ -55,6 +56,7 @@ Progress: [████████████░░░░░░░░] 84% (38
 | 10. Bug Fixes & Quick Wins | 10-02 | 9 min | 3 | 9 |
 | 10. Bug Fixes & Quick Wins | 10-01 | 4 min | 3 | 3 |
 | Phase 13 P01 | 6 | 2 tasks | 3 files |
+| Phase 13 P02 | 3 | 1 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -84,6 +86,7 @@ Recent decisions affecting current work:
 - [Phase 12-02]: Test verification over skipping -- Updated tests to verify SFS features work instead of returning EROFS
 - [Phase 13]: signalfd uses 10ms polling timeout instead of direct signal delivery wakeup (infrastructure deferred)
 - [Phase 13]: WaitQueue replaces blocked_readers atomic fields for cleaner lifecycle management
+- [Phase 13-02]: Process lifecycle cleanup order includes SEM_UNDO after virt_pci but before resource freeing
 
 ### Pending Todos
 
@@ -95,8 +98,8 @@ None yet (v1.1 just started).
 1. ~~SFS close deadlock after 50+ operations (Phase 11 target)~~ ✅ COMPLETE (11-01)
 2. ~~timerfd/signalfd use yield-loop blocking (Phase 13 target)~~ ✅ COMPLETE (13-01)
 3. sendfile uses 4KB buffer copy, not zero-copy (Phase 14 target)
-4. SEM_UNDO flag accepted but not tracked (Phase 13 target - future plan)
-5. semop/msgsnd/msgrcv return EAGAIN/ENOMSG instead of blocking (Phase 13 target - future plan)
+4. ~~SEM_UNDO flag accepted but not tracked (Phase 13 target)~~ ✅ COMPLETE (13-02)
+5. ~~semop/msgsnd/msgrcv return EAGAIN/ENOMSG instead of blocking (Phase 13 target)~~ ✅ COMPLETE (13-01 via 4cb0c61)
 6. ~~copyStringFromUser rejects stack buffers (Phase 10 target)~~ ✅ COMPLETE (10-01)
 7. ~~Phase 6 missing VERIFICATION.md (Phase 10 target)~~ ✅ COMPLETE (10-04)
 
@@ -107,18 +110,17 @@ None yet (v1.1 just started).
 
 ## Session Continuity
 
-Last session: 2026-02-11 (Phase 13 Plan 01 execution)
-Stopped at: Completed 13-01-PLAN.md (WaitQueue conversion for timerfd/signalfd)
+Last session: 2026-02-11 (Phase 13 Plan 02 execution)
+Stopped at: Completed 13-02-PLAN.md (SysV IPC SEM_UNDO lifecycle hookup)
 Resume file: None
 
 **Next steps:**
-1. Phase 13 Plan 01 is COMPLETE
-   - timerfd blocking reads use WaitQueue with timeout calculation ✓
-   - signalfd blocking reads use WaitQueue with 10ms polling ✓
-   - All 12 event FD integration tests pass ✓
-   - CPU-wasting yield loops eliminated ✓
+1. Phase 13 is COMPLETE
+   - Plan 01: timerfd/signalfd WaitQueue conversion ✓
+   - Plan 02: SEM_UNDO cleanup on process exit ✓
+   - All wait queue infrastructure complete ✓
 2. Continue to Phase 14 (I/O Improvements - sendfile zero-copy)
-3. Future Phase 13 work: SysV IPC blocking (semop, msgsnd, msgrcv with SEM_UNDO)
+3. All v1.1 wait queue technical debt items resolved
 
 ---
 *State initialized: 2026-02-06*
