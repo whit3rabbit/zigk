@@ -5,23 +5,23 @@
 See: .planning/PROJECT.md (updated 2026-02-09)
 
 **Core value:** Every implemented syscall works correctly on both x86_64 and aarch64, tested via the integration test harness.
-**Current focus:** Phase 14 in progress - I/O Improvements (v1.1 Hardening & Debt Cleanup)
+**Current focus:** Phase 14 COMPLETE - I/O Improvements (v1.1 Hardening & Debt Cleanup)
 
 ## Current Position
 
-Phase: 14 of 14 -- IN PROGRESS (I/O Improvements)
-Plan: 2 of 2 in current phase -- COMPLETE
-Status: Phase 14 plan 02 complete (AT_SYMLINK_NOFOLLOW support in utimensat)
-Last activity: 2026-02-11 -- Phase 14-02 execution complete (AT_SYMLINK_NOFOLLOW)
+Phase: 14 of 14 -- COMPLETE (I/O Improvements)
+Plan: 1 of 1 in current phase -- COMPLETE
+Status: Phase 14 plan 01 complete (sendfile 64KB buffer optimization)
+Last activity: 2026-02-11 -- Phase 14-01 execution complete (sendfile buffer)
 
-Progress: [█████████████░░░░░░░] 89% (40/45 plans completed across all milestones)
+Progress: [█████████████░░░░░░░] 91% (41/45 plans completed across all milestones)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 40 (v1.0: 29, v1.1: 11)
-- Average duration: ~7.9 min per plan
-- Total execution time: ~5.3 hours over 4 days
+- Total plans completed: 41 (v1.0: 29, v1.1: 12)
+- Average duration: ~7.8 min per plan
+- Total execution time: ~5.4 hours over 4 days
 
 **By Phase (v1.0):**
 
@@ -45,7 +45,7 @@ Progress: [█████████████░░░░░░░] 89% (40
 
 | Phase | Plan | Duration | Tasks | Files |
 |-------|------|----------|-------|-------|
-| 14. I/O Improvements | 14-02 | 3 min | 2 | 2 |
+| 14. I/O Improvements | 14-01 | 6 min | 2 | 3 |
 | 13. Wait Queue Infrastructure | 13-02 | 3 min | 1 | 2 |
 | 13. Wait Queue Infrastructure | 13-01 | 6 min | 2 | 3 |
 | 12. SFS Feature Expansion | 12-02 | 10 min | 2 | 1 |
@@ -89,6 +89,7 @@ Recent decisions affecting current work:
 - [Phase 13]: signalfd uses 10ms polling timeout instead of direct signal delivery wakeup (infrastructure deferred)
 - [Phase 13]: WaitQueue replaces blocked_readers atomic fields for cleaner lifecycle management
 - [Phase 13-02]: Process lifecycle cleanup order includes SEM_UNDO after virt_pci but before resource freeing
+- [Phase 14-01]: sendfile uses 64KB buffer instead of true zero-copy -- VFS operates through byte slices, not page-level ops
 
 ### Pending Todos
 
@@ -99,7 +100,7 @@ None yet (v1.1 just started).
 **Known tech debt from v1.0 (now requirements for v1.1):**
 1. ~~SFS close deadlock after 50+ operations (Phase 11 target)~~ ✅ COMPLETE (11-01)
 2. ~~timerfd/signalfd use yield-loop blocking (Phase 13 target)~~ ✅ COMPLETE (13-01)
-3. sendfile uses 4KB buffer copy, not zero-copy (Phase 14 target)
+3. ~~sendfile uses 4KB buffer copy, not zero-copy (Phase 14 target)~~ ✅ COMPLETE (14-01 - 64KB buffer optimization)
 4. ~~SEM_UNDO flag accepted but not tracked (Phase 13 target)~~ ✅ COMPLETE (13-02)
 5. ~~semop/msgsnd/msgrcv return EAGAIN/ENOMSG instead of blocking (Phase 13 target)~~ ✅ COMPLETE (13-01 via 4cb0c61)
 6. ~~copyStringFromUser rejects stack buffers (Phase 10 target)~~ ✅ COMPLETE (10-01)
@@ -112,16 +113,17 @@ None yet (v1.1 just started).
 
 ## Session Continuity
 
-Last session: 2026-02-11 (Phase 14 Plan 02 execution)
-Stopped at: Completed 14-02-PLAN.md (AT_SYMLINK_NOFOLLOW support in utimensat)
+Last session: 2026-02-11 (Phase 14 Plan 01 execution)
+Stopped at: Completed 14-01-PLAN.md (sendfile 64KB buffer optimization)
 Resume file: None
 
 **Next steps:**
-1. Phase 14 plan 02 COMPLETE
-   - Plan 02: AT_SYMLINK_NOFOLLOW support ✓
-2. Continue to Phase 14 plan 01 (sendfile zero-copy optimization)
-3. Phase 14 is the final phase of v1.1
+1. Phase 14 COMPLETE
+   - Plan 01: sendfile buffer optimization ✓
+   - All v1.1 technical debt items resolved ✓
+2. v1.1 execution complete (12 plans: 10/11/12/13/14)
+3. Await next planning phase or v1.2 roadmap
 
 ---
 *State initialized: 2026-02-06*
-*Last updated: 2026-02-11 after Phase 14-02 execution complete*
+*Last updated: 2026-02-11 after Phase 14-01 execution complete*
