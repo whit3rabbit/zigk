@@ -41,8 +41,7 @@ const SignalFdState = struct {
     lock: sync.Spinlock,
     closed: std.atomic.Value(bool),
     ref_count: std.atomic.Value(u32),
-    blocked_readers: ?*sched.Thread,
-    reader_woken: std.atomic.Value(bool),
+    wait_queue: sched.WaitQueue,
 
     fn init(sigmask: u64) SignalFdState {
         return SignalFdState{
@@ -50,8 +49,7 @@ const SignalFdState = struct {
             .lock = .{},
             .closed = std.atomic.Value(bool).init(false),
             .ref_count = std.atomic.Value(u32).init(1),
-            .blocked_readers = null,
-            .reader_woken = std.atomic.Value(bool).init(false),
+            .wait_queue = .{},
         };
     }
 
@@ -125,14 +123,14 @@ fn signalfdRead(fd: *fd_mod.FileDescriptor, buf: []u8) isize {
             return Errno.EAGAIN.toReturn();
         }
 
-        // Block - use yield loop pattern (signal delivery will set pending_signals)
-        // We use a simple yield loop because we don't have signal delivery wakeup integration yet
-        held.release();
+        // Block using WaitQueue with timeout polling
+        // Use 10ms polling interval since we don't have signal-to-signalfd wakeup
+        // integration yet. This is better than yield-loop (thread truly sleeps for 10ms
+        // rather than being scheduled every tick and immediately yielding).
+        // TODO: Integrate with signal delivery to wake blocked readers immediately
+        sched.waitOnWithTimeout(&state.wait_queue, held, 10, null);
 
-        // Yield to scheduler (signal delivery may occur during another thread's execution)
-        sched.yield();
-
-        // Retry loop - will re-check pending_signals
+        // After wakeup, loop will re-acquire lock and re-check pending_signals
     }
 }
 
@@ -161,8 +159,14 @@ fn signalfdPoll(fd: *fd_mod.FileDescriptor, requested_events: u32) u32 {
 fn signalfdClose(fd: *fd_mod.FileDescriptor) isize {
     const state: *SignalFdState = @ptrCast(@alignCast(fd.private_data));
 
-    // Mark as closed so blocked readers exit with EBADF
+    // Mark as closed and wake all blocked readers so they can exit with EBADF
+    const held = state.lock.acquire();
     state.closed.store(true, .release);
+
+    // Wake all blocked readers (WaitQueue.wakeUp handles empty queue)
+    _ = state.wait_queue.wakeUp(std.math.maxInt(usize));
+
+    held.release();
 
     // Drop the FD's reference. Last active operation to unref frees the state.
     state.unref();
@@ -233,6 +237,9 @@ pub fn sys_signalfd4(fd_num_raw: usize, mask_ptr: usize, mask_size: usize, flags
 
         // Update mask under lock
         state.sigmask = filtered_mask;
+
+        // Wake blocked readers (mask changed, should re-check)
+        _ = state.wait_queue.wakeUp(1);
 
         return @intCast(fd_num);
     }
