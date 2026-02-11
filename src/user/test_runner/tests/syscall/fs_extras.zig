@@ -243,15 +243,21 @@ pub fn testUtimensatSpecificTime() !void {
     syscall.unlink(path) catch {};
 }
 
-// Test utimensat with AT_SYMLINK_NOFOLLOW returns ENOSYS (MVP limitation)
+// Test utimensat with AT_SYMLINK_NOFOLLOW sets timestamps on path entry
 pub fn testUtimensatSymlinkNofollow() !void {
-    const result = syscall.utimensat(AT_FDCWD, "/shell.elf", null, AT_SYMLINK_NOFOLLOW);
-    if (result) |_| {
+    // Create a test file on SFS to avoid modifying read-only initrd
+    const fd = syscall.open("/mnt/test_nofollow.txt", syscall.O_WRONLY | syscall.O_CREAT | syscall.O_TRUNC, 0o644) catch {
+        return error.SkipTest; // SFS not available
+    };
+    syscall.close(fd) catch {};
+
+    // Set timestamps with AT_SYMLINK_NOFOLLOW -- should succeed
+    syscall.utimensat(AT_FDCWD, "/mnt/test_nofollow.txt", null, AT_SYMLINK_NOFOLLOW) catch {
         return error.TestFailed;
-    } else |err| {
-        // ENOSYS(38)->NotImplemented
-        if (err != error.NotImplemented) return error.TestFailed;
-    }
+    };
+
+    // Clean up
+    syscall.unlink("/mnt/test_nofollow.txt") catch {};
 }
 
 // Test utimensat with invalid nanosecond value returns EINVAL
