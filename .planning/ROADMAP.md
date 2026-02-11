@@ -109,10 +109,11 @@ Plans:
   6. SEM_UNDO adjustments are tracked per-process and applied on process exit
   7. semop with IPC_NOWAIT returns EAGAIN immediately without blocking (non-blocking path preserved)
   8. 4 event FD tests pass (eventfd write/read, semaphore mode, timerfd disarm, signalfd read)
-**Plans**: TBD
+**Plans**: 2 plans in 1 wave
 
 Plans:
-- [ ] 13-01: [TBD]
+- [ ] 13-01-PLAN.md -- timerfd/signalfd wait queue conversion (replace yield-loops with WaitQueue blocking)
+- [ ] 13-02-PLAN.md -- SysV IPC blocking + SEM_UNDO (semop/msgsnd/msgrcv wait queues, per-process undo tracking)
 
 #### Phase 14: I/O Improvements
 **Goal**: Zero-copy sendfile and AT_SYMLINK_NOFOLLOW support
