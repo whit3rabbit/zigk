@@ -5,16 +5,16 @@
 See: .planning/PROJECT.md (updated 2026-02-09)
 
 **Core value:** Every implemented syscall works correctly on both x86_64 and aarch64, tested via the integration test harness.
-**Current focus:** Phase 12 complete - SFS Feature Expansion (v1.1 Hardening & Debt Cleanup)
+**Current focus:** Phase 13 in progress - Wait Queue Infrastructure (v1.1 Hardening & Debt Cleanup)
 
 ## Current Position
 
-Phase: 12 of 14 -- COMPLETE (SFS Feature Expansion)
-Plan: 2 of 2 in current phase -- COMPLETE
-Status: Phase 12 complete, verified (5/5 must-haves passed)
-Last activity: 2026-02-10 -- Phase 12 execution and verification complete
+Phase: 13 of 14 -- IN PROGRESS (Wait Queue Infrastructure)
+Plan: 1 of 1 in current phase -- COMPLETE
+Status: Phase 13 Plan 01 complete (2/2 tasks, all event FD tests pass)
+Last activity: 2026-02-11 -- Phase 13-01 execution complete (timerfd/signalfd WaitQueue conversion)
 
-Progress: [███████████░░░░░░░░░] 82% (37/45 plans completed across all milestones)
+Progress: [████████████░░░░░░░░] 84% (38/45 plans completed across all milestones)
 
 ## Performance Metrics
 
@@ -45,6 +45,7 @@ Progress: [███████████░░░░░░░░░] 82% (37
 
 | Phase | Plan | Duration | Tasks | Files |
 |-------|------|----------|-------|-------|
+| 13. Wait Queue Infrastructure | 13-01 | 6 min | 2 | 3 |
 | 12. SFS Feature Expansion | 12-02 | 10 min | 2 | 1 |
 | 12. SFS Feature Expansion | 12-01 | 12 min | 2 | 3 |
 | 11. SFS Deadlock Resolution | 11-02 | 9 min | 2 | 10 |
@@ -53,6 +54,7 @@ Progress: [███████████░░░░░░░░░] 82% (37
 | 10. Bug Fixes & Quick Wins | 10-03 | 10 min | 3 | 9 |
 | 10. Bug Fixes & Quick Wins | 10-02 | 9 min | 3 | 9 |
 | 10. Bug Fixes & Quick Wins | 10-01 | 4 min | 3 | 3 |
+| Phase 13 P01 | 6 | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -80,6 +82,8 @@ Recent decisions affecting current work:
 - [Phase 12-02]: Symlink functions pre-implemented in commit 061fd71 -- Discovered during execution, no new code needed
 - [Phase 12-02]: Symlink targets limited to 511 bytes -- Stored in single 512-byte data block
 - [Phase 12-02]: Test verification over skipping -- Updated tests to verify SFS features work instead of returning EROFS
+- [Phase 13]: signalfd uses 10ms polling timeout instead of direct signal delivery wakeup (infrastructure deferred)
+- [Phase 13]: WaitQueue replaces blocked_readers atomic fields for cleaner lifecycle management
 
 ### Pending Todos
 
@@ -89,10 +93,10 @@ None yet (v1.1 just started).
 
 **Known tech debt from v1.0 (now requirements for v1.1):**
 1. ~~SFS close deadlock after 50+ operations (Phase 11 target)~~ ✅ COMPLETE (11-01)
-2. timerfd/signalfd use yield-loop blocking (Phase 13 target)
+2. ~~timerfd/signalfd use yield-loop blocking (Phase 13 target)~~ ✅ COMPLETE (13-01)
 3. sendfile uses 4KB buffer copy, not zero-copy (Phase 14 target)
-4. SEM_UNDO flag accepted but not tracked (Phase 13 target)
-5. semop/msgsnd/msgrcv return EAGAIN/ENOMSG instead of blocking (Phase 13 target)
+4. SEM_UNDO flag accepted but not tracked (Phase 13 target - future plan)
+5. semop/msgsnd/msgrcv return EAGAIN/ENOMSG instead of blocking (Phase 13 target - future plan)
 6. ~~copyStringFromUser rejects stack buffers (Phase 10 target)~~ ✅ COMPLETE (10-01)
 7. ~~Phase 6 missing VERIFICATION.md (Phase 10 target)~~ ✅ COMPLETE (10-04)
 
@@ -103,23 +107,18 @@ None yet (v1.1 just started).
 
 ## Session Continuity
 
-Last session: 2026-02-10 (Phase 12 execution and verification)
-Stopped at: Phase 12 complete -- all must-haves verified
+Last session: 2026-02-11 (Phase 13 Plan 01 execution)
+Stopped at: Completed 13-01-PLAN.md (WaitQueue conversion for timerfd/signalfd)
 Resume file: None
 
 **Next steps:**
-1. Phase 12 SFS Feature Expansion is COMPLETE (verified 5/5)
-2. Continue to Phase 13 (Wait Queue Infrastructure) or Phase 14 (I/O Improvements)
-3. Phase 13 requires planning first (/gsd:plan-phase 13)
-
-**Next steps:**
-1. Phase 12 (SFS Feature Expansion) is COMPLETE
-   - Hard links with global nlink synchronization ✓
-   - Timestamp modification via utimensat/futimesat ✓
-   - Symbolic links with readlink support ✓
-   - Test verification updated (removed EROFS skips) ✓
-2. Continue to Phase 13 (Wait Queues & Blocking) to unblock SysV IPC and event FDs
-3. Investigate timestamp verification test failures (4 tests failing mtime checks)
+1. Phase 13 Plan 01 is COMPLETE
+   - timerfd blocking reads use WaitQueue with timeout calculation ✓
+   - signalfd blocking reads use WaitQueue with 10ms polling ✓
+   - All 12 event FD integration tests pass ✓
+   - CPU-wasting yield loops eliminated ✓
+2. Continue to Phase 14 (I/O Improvements - sendfile zero-copy)
+3. Future Phase 13 work: SysV IPC blocking (semop, msgsnd, msgrcv with SEM_UNDO)
 
 ---
 *State initialized: 2026-02-06*
