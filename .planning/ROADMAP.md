@@ -123,10 +123,11 @@ Plans:
   1. sendfile uses zero-copy path (direct page mapping from source to destination) instead of 4KB buffer copy
   2. utimensat with AT_SYMLINK_NOFOLLOW flag modifies symlink timestamps (not target)
   3. sendfile performance improves measurably on large file transfers (>1MB)
-**Plans**: TBD
+**Plans**: 2 plans in 1 wave
 
 Plans:
-- [ ] 14-01: [TBD]
+- [ ] 14-01-PLAN.md -- Optimize sendfile transfer buffer (64KB buffer, large-transfer test)
+- [ ] 14-02-PLAN.md -- Enable AT_SYMLINK_NOFOLLOW in utimensat (remove ENOSYS, update test)
 
 ## Progress
 
