@@ -5,22 +5,22 @@
 See: .planning/PROJECT.md (updated 2026-02-09)
 
 **Core value:** Every implemented syscall works correctly on both x86_64 and aarch64, tested via the integration test harness.
-**Current focus:** Phase 13 in progress - Wait Queue Infrastructure (v1.1 Hardening & Debt Cleanup)
+**Current focus:** Phase 14 in progress - I/O Improvements (v1.1 Hardening & Debt Cleanup)
 
 ## Current Position
 
-Phase: 13 of 14 -- COMPLETE (Wait Queue Infrastructure)
+Phase: 14 of 14 -- IN PROGRESS (I/O Improvements)
 Plan: 2 of 2 in current phase -- COMPLETE
-Status: Phase 13 complete (both plans done: timerfd/signalfd + SysV IPC blocking)
-Last activity: 2026-02-11 -- Phase 13-02 execution complete (SEM_UNDO lifecycle hookup)
+Status: Phase 14 plan 02 complete (AT_SYMLINK_NOFOLLOW support in utimensat)
+Last activity: 2026-02-11 -- Phase 14-02 execution complete (AT_SYMLINK_NOFOLLOW)
 
-Progress: [█████████████░░░░░░░] 87% (39/45 plans completed across all milestones)
+Progress: [█████████████░░░░░░░] 89% (40/45 plans completed across all milestones)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 39 (v1.0: 29, v1.1: 10)
-- Average duration: ~8.1 min per plan
+- Total plans completed: 40 (v1.0: 29, v1.1: 11)
+- Average duration: ~7.9 min per plan
 - Total execution time: ~5.3 hours over 4 days
 
 **By Phase (v1.0):**
@@ -45,6 +45,7 @@ Progress: [█████████████░░░░░░░] 87% (39
 
 | Phase | Plan | Duration | Tasks | Files |
 |-------|------|----------|-------|-------|
+| 14. I/O Improvements | 14-02 | 3 min | 2 | 2 |
 | 13. Wait Queue Infrastructure | 13-02 | 3 min | 1 | 2 |
 | 13. Wait Queue Infrastructure | 13-01 | 6 min | 2 | 3 |
 | 12. SFS Feature Expansion | 12-02 | 10 min | 2 | 1 |
@@ -57,6 +58,7 @@ Progress: [█████████████░░░░░░░] 87% (39
 | 10. Bug Fixes & Quick Wins | 10-01 | 4 min | 3 | 3 |
 | Phase 13 P01 | 6 | 2 tasks | 3 files |
 | Phase 13 P02 | 3 | 1 tasks | 2 files |
+| Phase 14 P02 | 221 | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -110,18 +112,16 @@ None yet (v1.1 just started).
 
 ## Session Continuity
 
-Last session: 2026-02-11 (Phase 13 Plan 02 execution)
-Stopped at: Completed 13-02-PLAN.md (SysV IPC SEM_UNDO lifecycle hookup)
+Last session: 2026-02-11 (Phase 14 Plan 02 execution)
+Stopped at: Completed 14-02-PLAN.md (AT_SYMLINK_NOFOLLOW support in utimensat)
 Resume file: None
 
 **Next steps:**
-1. Phase 13 is COMPLETE
-   - Plan 01: timerfd/signalfd WaitQueue conversion ✓
-   - Plan 02: SEM_UNDO cleanup on process exit ✓
-   - All wait queue infrastructure complete ✓
-2. Continue to Phase 14 (I/O Improvements - sendfile zero-copy)
-3. All v1.1 wait queue technical debt items resolved
+1. Phase 14 plan 02 COMPLETE
+   - Plan 02: AT_SYMLINK_NOFOLLOW support ✓
+2. Continue to Phase 14 plan 01 (sendfile zero-copy optimization)
+3. Phase 14 is the final phase of v1.1
 
 ---
 *State initialized: 2026-02-06*
-*Last updated: 2026-02-10 after Phase 13 execution complete*
+*Last updated: 2026-02-11 after Phase 14-02 execution complete*
