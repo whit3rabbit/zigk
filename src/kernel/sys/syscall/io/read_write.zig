@@ -919,15 +919,15 @@ pub fn sys_sendfile(out_fd_num: usize, in_fd_num: usize, offset_ptr: usize, coun
     }
 
     // Transfer loop with kernel buffer
-    const kbuf_size = 4096; // Page-sized chunks
-    const kbuf = heap.allocator().alloc(u8, kbuf_size) catch return error.ENOMEM;
+    const sendfile_buf_size: usize = 64 * 1024; // 64KB chunks for efficient large transfers
+    const kbuf = heap.allocator().alloc(u8, sendfile_buf_size) catch return error.ENOMEM;
     defer heap.allocator().free(kbuf);
 
     var total_sent: usize = 0;
 
     while (total_sent < count) {
         const remaining = count - total_sent;
-        const chunk_size = @min(remaining, kbuf_size);
+        const chunk_size = @min(remaining, sendfile_buf_size);
 
         // Read from in_fd at read_offset
         const in_held = in_fd.lock.acquire();
