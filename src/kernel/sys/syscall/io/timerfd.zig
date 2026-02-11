@@ -45,8 +45,7 @@ const TimerFdState = struct {
     next_expiry_ns: u64,
     interval_ns: u64,
     expiry_count: u64,
-    blocked_readers: ?*sched.Thread,
-    reader_woken: std.atomic.Value(bool),
+    wait_queue: sched.WaitQueue,
 
     fn init(clockid: i32) TimerFdState {
         return TimerFdState{
@@ -58,8 +57,7 @@ const TimerFdState = struct {
             .next_expiry_ns = 0,
             .interval_ns = 0,
             .expiry_count = 0,
-            .blocked_readers = null,
-            .reader_woken = std.atomic.Value(bool).init(false),
+            .wait_queue = .{},
         };
     }
 
@@ -187,21 +185,28 @@ fn timerfdRead(fd: *fd_mod.FileDescriptor, buf: []u8) isize {
             return Errno.EAGAIN.toReturn();
         }
 
-        // Block using yield loop (similar to epoll_wait pattern)
-        // Calculate time until next expiry
+        // Block using WaitQueue with timeout until next expiry
         if (!state.armed) {
-            // Timer not armed - would block forever
-            // For now, return EAGAIN (could also block indefinitely)
+            // Timer not armed - would block forever, return EAGAIN
             held.release();
             return Errno.EAGAIN.toReturn();
         }
 
-        held.release();
+        // Calculate timeout in ticks (1 tick = ~1ms)
+        const now_ns = getClockNanoseconds(state.clockid);
+        const timeout_ns = if (state.next_expiry_ns > now_ns)
+            state.next_expiry_ns - now_ns
+        else
+            1_000_000; // 1ms minimum if expiry is imminent
 
-        // Yield to scheduler - timer tick will wake us
-        sched.yield();
+        // Convert ns to ticks, round up to ensure we wait at least the requested time
+        const timeout_ticks = (timeout_ns + 999_999) / 1_000_000;
 
-        // Retry - check expiry again
+        // waitOnWithTimeout atomically releases the lock and blocks
+        // No futex_bucket_ptr needed since this is not a futex operation
+        sched.waitOnWithTimeout(&state.wait_queue, held, timeout_ticks, null);
+
+        // After wakeup, loop will re-acquire lock and re-check expiry_count
     }
 }
 
@@ -233,15 +238,12 @@ fn timerfdPoll(fd: *fd_mod.FileDescriptor, requested_events: u32) u32 {
 fn timerfdClose(fd: *fd_mod.FileDescriptor) isize {
     const state: *TimerFdState = @ptrCast(@alignCast(fd.private_data));
 
-    // Mark as closed and wake any blocked readers so they can exit with EBADF
+    // Mark as closed and wake all blocked readers so they can exit with EBADF
     const held = state.lock.acquire();
     state.closed.store(true, .release);
 
-    if (state.blocked_readers) |t| {
-        state.blocked_readers = null;
-        state.reader_woken.store(true, .release);
-        sched.unblock(t);
-    }
+    // Wake all blocked readers (WaitQueue.wakeUp handles empty queue)
+    _ = state.wait_queue.wakeUp(std.math.maxInt(usize));
 
     held.release();
 
@@ -440,12 +442,8 @@ pub fn sys_timerfd_settime(fd_num: usize, flags: usize, new_value_ptr: usize, ol
         state.armed = true;
         state.expiry_count = 0;
 
-        // Wake blocked readers (timer settings changed)
-        if (state.blocked_readers) |t| {
-            state.blocked_readers = null;
-            state.reader_woken.store(true, .release);
-            sched.unblock(t);
-        }
+        // Wake blocked readers (timer settings changed, should re-check)
+        _ = state.wait_queue.wakeUp(1);
     }
 
     held.release();
