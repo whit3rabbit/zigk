@@ -3,7 +3,7 @@
 ## Milestones
 
 - ✅ **v1.0 POSIX Syscall Coverage** - Phases 1-9 (shipped 2026-02-09)
-- 🚧 **v1.1 Hardening & Debt Cleanup** - Phases 10-14 (in progress)
+- ✅ **v1.1 Hardening & Debt Cleanup** - Phases 10-14 (shipped 2026-02-10)
 
 ## Phases
 
@@ -38,7 +38,7 @@ See milestones/v1-ROADMAP.md for full phase details.
 
 </details>
 
-### 🚧 v1.1 Hardening & Debt Cleanup (In Progress)
+### v1.1 Hardening & Debt Cleanup (Complete)
 
 **Milestone Goal:** Fix all known bugs, eliminate tech debt from v1, and fill behavioral gaps (proper blocking, wait queues, SFS reliability).
 
@@ -126,8 +126,8 @@ Plans:
 **Plans**: 2 plans in 1 wave
 
 Plans:
-- [ ] 14-01-PLAN.md -- Optimize sendfile transfer buffer (64KB buffer, large-transfer test)
-- [ ] 14-02-PLAN.md -- Enable AT_SYMLINK_NOFOLLOW in utimensat (remove ENOSYS, update test)
+- [x] 14-01-PLAN.md -- Optimize sendfile transfer buffer (64KB buffer, large-transfer test)
+- [x] 14-02-PLAN.md -- Enable AT_SYMLINK_NOFOLLOW in utimensat (remove ENOSYS, update test)
 
 ## Progress
 
@@ -149,8 +149,8 @@ Phases execute in numeric order: 10 -> 11 -> 12 -> 13 -> 14
 | 11. SFS Deadlock Resolution | v1.1 | 2/2 | Complete | 2026-02-10 |
 | 12. SFS Feature Expansion | v1.1 | 2/2 | Complete | 2026-02-10 |
 | 13. Wait Queue Infrastructure | v1.1 | 2/2 | Complete | 2026-02-10 |
-| 14. I/O Improvements | v1.1 | 0/? | Not started | - |
+| 14. I/O Improvements | v1.1 | 2/2 | Complete | 2026-02-10 |
 
 ---
 *Roadmap created: 2026-02-06*
-*Last updated: 2026-02-10 after Phase 13 execution complete*
+*Last updated: 2026-02-10 after Phase 14 execution complete -- v1.1 milestone complete*

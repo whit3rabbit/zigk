@@ -5,23 +5,23 @@
 See: .planning/PROJECT.md (updated 2026-02-09)
 
 **Core value:** Every implemented syscall works correctly on both x86_64 and aarch64, tested via the integration test harness.
-**Current focus:** Phase 14 COMPLETE - I/O Improvements (v1.1 Hardening & Debt Cleanup)
+**Current focus:** v1.1 Milestone COMPLETE - All phases (10-14) done
 
 ## Current Position
 
 Phase: 14 of 14 -- COMPLETE (I/O Improvements)
-Plan: 1 of 1 in current phase -- COMPLETE
-Status: Phase 14 plan 01 complete (sendfile 64KB buffer optimization)
-Last activity: 2026-02-11 -- Phase 14-01 execution complete (sendfile buffer)
+Plan: 2 of 2 in current phase -- COMPLETE
+Status: v1.1 Milestone complete (all 14 plans across 5 phases done)
+Last activity: 2026-02-10 -- Phase 14 execution complete (sendfile + utimensat)
 
-Progress: [█████████████░░░░░░░] 91% (41/45 plans completed across all milestones)
+Progress: [████████████████████] 100% (43/43 plans completed across all milestones)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 41 (v1.0: 29, v1.1: 12)
-- Average duration: ~7.8 min per plan
-- Total execution time: ~5.4 hours over 4 days
+- Total plans completed: 43 (v1.0: 29, v1.1: 14)
+- Average duration: ~7.6 min per plan
+- Total execution time: ~5.5 hours over 5 days
 
 **By Phase (v1.0):**
 
@@ -45,6 +45,7 @@ Progress: [█████████████░░░░░░░] 91% (41
 
 | Phase | Plan | Duration | Tasks | Files |
 |-------|------|----------|-------|-------|
+| 14. I/O Improvements | 14-02 | 3 min | 2 | 2 |
 | 14. I/O Improvements | 14-01 | 6 min | 2 | 3 |
 | 13. Wait Queue Infrastructure | 13-02 | 3 min | 1 | 2 |
 | 13. Wait Queue Infrastructure | 13-01 | 6 min | 2 | 3 |
@@ -56,9 +57,6 @@ Progress: [█████████████░░░░░░░] 91% (41
 | 10. Bug Fixes & Quick Wins | 10-03 | 10 min | 3 | 9 |
 | 10. Bug Fixes & Quick Wins | 10-02 | 9 min | 3 | 9 |
 | 10. Bug Fixes & Quick Wins | 10-01 | 4 min | 3 | 3 |
-| Phase 13 P01 | 6 | 2 tasks | 3 files |
-| Phase 13 P02 | 3 | 1 tasks | 2 files |
-| Phase 14 P02 | 221 | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -90,6 +88,7 @@ Recent decisions affecting current work:
 - [Phase 13]: WaitQueue replaces blocked_readers atomic fields for cleaner lifecycle management
 - [Phase 13-02]: Process lifecycle cleanup order includes SEM_UNDO after virt_pci but before resource freeing
 - [Phase 14-01]: sendfile uses 64KB buffer instead of true zero-copy -- VFS operates through byte slices, not page-level ops
+- [Phase 14-02]: AT_SYMLINK_NOFOLLOW accepted silently -- VFS already operates on literal paths without following symlinks
 
 ### Pending Todos
 
@@ -113,17 +112,21 @@ None yet (v1.1 just started).
 
 ## Session Continuity
 
-Last session: 2026-02-11 (Phase 14 Plan 01 execution)
-Stopped at: Completed 14-01-PLAN.md (sendfile 64KB buffer optimization)
+Last session: 2026-02-10 (Phase 14 execution)
+Stopped at: v1.1 Milestone COMPLETE
 Resume file: None
 
 **Next steps:**
-1. Phase 14 COMPLETE
-   - Plan 01: sendfile buffer optimization ✓
-   - All v1.1 technical debt items resolved ✓
-2. v1.1 execution complete (12 plans: 10/11/12/13/14)
-3. Await next planning phase or v1.2 roadmap
+1. v1.1 Milestone COMPLETE
+   - Phase 10: Bug Fixes & Quick Wins (4 plans)
+   - Phase 11: SFS Deadlock Resolution (2 plans)
+   - Phase 12: SFS Feature Expansion (2 plans)
+   - Phase 13: Wait Queue Infrastructure (2 plans)
+   - Phase 14: I/O Improvements (2 plans) -- Plan 01 + Plan 02 both done
+   - All 7 v1.0 tech debt items resolved
+2. Run `/gsd:complete-milestone` to archive v1.1
+3. Plan v1.2 or next milestone
 
 ---
 *State initialized: 2026-02-06*
-*Last updated: 2026-02-11 after Phase 14-01 execution complete*
+*Last updated: 2026-02-10 after Phase 14 execution complete -- v1.1 milestone done*
