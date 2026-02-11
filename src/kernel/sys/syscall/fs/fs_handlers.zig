@@ -1197,10 +1197,9 @@ fn getCurrentTimeNs() u64 {
 pub fn sys_utimensat(dirfd: usize, path_ptr: usize, times_ptr: usize, flags: usize) base.SyscallError!usize {
     const AT_SYMLINK_NOFOLLOW: usize = 0x100;
 
-    // Validate flags
-    if (flags & AT_SYMLINK_NOFOLLOW != 0) {
-        return error.ENOSYS; // MVP: symlink timestamp modification not supported
-    }
+    // Validate flags - AT_SYMLINK_NOFOLLOW is supported (VFS operates on literal paths,
+    // so symlinks are not followed by default -- the flag is accepted and the path
+    // refers to the symlink entry itself)
     if (flags & ~AT_SYMLINK_NOFOLLOW != 0) {
         return error.EINVAL; // Invalid flags
     }
