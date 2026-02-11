@@ -47,27 +47,45 @@ pub fn testLinkatBasic() !void {
     const src = "/mnt/test_linkat_src";
     const dst = "/mnt/test_linkat_dst";
 
-    // Create source file
+    // Create source file with some data
     const fd = syscall.open(src, syscall.O_WRONLY | syscall.O_CREAT | syscall.O_TRUNC, 0o644) catch {
+        return error.SkipTest;
+    };
+    const test_data = "hard link test data";
+    _ = syscall.write(fd, test_data.ptr, test_data.len) catch {
+        syscall.close(fd) catch {};
+        syscall.unlink(src) catch {};
         return error.SkipTest;
     };
     syscall.close(fd) catch {};
 
     // Create hard link
     syscall.linkat(AT_FDCWD, src, AT_FDCWD, dst, 0) catch |err| {
-        // linkat may not be supported on SFS (VFS returns NotSupported -> EROFS -> ReadOnlyFilesystem)
+        // linkat may not be supported on some filesystems
         syscall.unlink(src) catch {};
-        if (err == error.NotImplemented or err == error.PermissionDenied or err == error.OperationNotSupported or err == error.ReadOnlyFilesystem) {
+        if (err == error.NotImplemented or err == error.PermissionDenied or err == error.OperationNotSupported) {
             return error.SkipTest;
         }
         return error.TestFailed;
     };
 
-    // Verify the link exists
-    const access_result = syscall.access(dst, 0);
-    if (access_result) |_| {
-        // Success -- link exists
-    } else |_| {
+    // Verify the link exists by reading data from it
+    const read_fd = syscall.open(dst, syscall.O_RDONLY, 0) catch {
+        syscall.unlink(dst) catch {};
+        syscall.unlink(src) catch {};
+        return error.TestFailed;
+    };
+    var buf: [32]u8 = undefined;
+    const read_len = syscall.read(read_fd, &buf, buf.len) catch {
+        syscall.close(read_fd) catch {};
+        syscall.unlink(dst) catch {};
+        syscall.unlink(src) catch {};
+        return error.TestFailed;
+    };
+    syscall.close(read_fd) catch {};
+
+    // Verify data matches
+    if (read_len != test_data.len or !std.mem.eql(u8, buf[0..read_len], test_data)) {
         syscall.unlink(dst) catch {};
         syscall.unlink(src) catch {};
         return error.TestFailed;
@@ -101,18 +119,18 @@ pub fn testSymlinkatBasic() !void {
     const linkpath = "/mnt/test_symlinkat_link";
 
     syscall.symlinkat("/shell.elf", AT_FDCWD, linkpath) catch |err| {
-        // SFS may not support symlinks (VFS returns NotSupported -> EROFS -> ReadOnlyFilesystem)
-        if (err == error.NotImplemented or err == error.PermissionDenied or err == error.OperationNotSupported or err == error.ReadOnlyFilesystem) {
+        // SFS may not support symlinks on some filesystems
+        if (err == error.NotImplemented or err == error.PermissionDenied or err == error.OperationNotSupported) {
             return error.SkipTest;
         }
         return error.TestFailed;
     };
 
-    // If symlink was created, try to read it back
+    // Read symlink back to verify target
     var buf: [256]u8 = undefined;
     const len = syscall.readlink(linkpath, &buf, buf.len) catch {
         syscall.unlink(linkpath) catch {};
-        return error.SkipTest;
+        return error.TestFailed;
     };
 
     // Verify target matches
@@ -159,12 +177,25 @@ pub fn testUtimensatNull() !void {
     // Set timestamps to current time (NULL times)
     syscall.utimensat(AT_FDCWD, path, null, 0) catch |err| {
         syscall.unlink(path) catch {};
-        // EROFS(30)->ReadOnlyFilesystem if SFS doesn't implement set_timestamps
-        if (err == error.ReadOnlyFilesystem or err == error.NotImplemented or err == error.OperationNotSupported) {
+        if (err == error.NotImplemented or err == error.OperationNotSupported) {
             return error.SkipTest;
         }
         return error.TestFailed;
     };
+
+    // Verify timestamps were set by checking mtime is nonzero
+    var stat_buf: syscall.Stat = undefined;
+    const path_z: [*:0]const u8 = @ptrCast(path);
+    syscall.stat(path_z, &stat_buf) catch {
+        syscall.unlink(path) catch {};
+        return error.TestFailed;
+    };
+
+    // mtime should be nonzero after setting to current time
+    if (stat_buf.mtime == 0) {
+        syscall.unlink(path) catch {};
+        return error.TestFailed;
+    }
 
     // Cleanup
     syscall.unlink(path) catch {};
@@ -175,9 +206,10 @@ pub fn testUtimensatSpecificTime() !void {
     const path = "/mnt/test_utime_spec";
 
     // Create file
-    _ = syscall.open(path, syscall.O_WRONLY | syscall.O_CREAT | syscall.O_TRUNC, 0o644) catch {
+    const fd = syscall.open(path, syscall.O_WRONLY | syscall.O_CREAT | syscall.O_TRUNC, 0o644) catch {
         return error.SkipTest;
     };
+    syscall.close(fd) catch {};
 
     // Set specific timestamps -- use @ptrCast since syscall.Timespec (time.zig)
     // and uapi.abi.Timespec are structurally identical but different Zig types
@@ -188,12 +220,24 @@ pub fn testUtimensatSpecificTime() !void {
 
     syscall.utimensat(AT_FDCWD, path, @ptrCast(&times), 0) catch |err| {
         syscall.unlink(path) catch {};
-        // EROFS(30)->ReadOnlyFilesystem if SFS doesn't implement set_timestamps
-        if (err == error.ReadOnlyFilesystem or err == error.NotImplemented or err == error.OperationNotSupported) {
+        if (err == error.NotImplemented or err == error.OperationNotSupported) {
             return error.SkipTest;
         }
         return error.TestFailed;
     };
+
+    // Verify mtime was set to 2000000 (SFS stores as u32 seconds, nanoseconds lost)
+    var stat_buf: syscall.Stat = undefined;
+    const path_z: [*:0]const u8 = @ptrCast(path);
+    syscall.stat(path_z, &stat_buf) catch {
+        syscall.unlink(path) catch {};
+        return error.TestFailed;
+    };
+
+    if (stat_buf.mtime != 2000000) {
+        syscall.unlink(path) catch {};
+        return error.TestFailed;
+    }
 
     // Cleanup
     syscall.unlink(path) catch {};
@@ -241,8 +285,7 @@ pub fn testFutimesatBasic() !void {
     // Set timestamps to current time (NULL times)
     syscall.futimesat(AT_FDCWD, path, null) catch |err| {
         syscall.unlink(path) catch {};
-        // EROFS(30)->ReadOnlyFilesystem
-        if (err == error.ReadOnlyFilesystem or err == error.NotImplemented or err == error.OperationNotSupported) {
+        if (err == error.NotImplemented or err == error.OperationNotSupported) {
             return error.SkipTest;
         }
         return error.TestFailed;
@@ -257,9 +300,10 @@ pub fn testFutimesatSpecificTime() !void {
     const path = "/mnt/test_futimesat_spec";
 
     // Create file
-    _ = syscall.open(path, syscall.O_WRONLY | syscall.O_CREAT | syscall.O_TRUNC, 0o644) catch {
+    const fd = syscall.open(path, syscall.O_WRONLY | syscall.O_CREAT | syscall.O_TRUNC, 0o644) catch {
         return error.SkipTest;
     };
+    syscall.close(fd) catch {};
 
     // Set specific timestamps (microsecond precision)
     var times: [2]syscall.Timeval = .{
@@ -269,12 +313,24 @@ pub fn testFutimesatSpecificTime() !void {
 
     syscall.futimesat(AT_FDCWD, path, &times) catch |err| {
         syscall.unlink(path) catch {};
-        // EROFS(30)->ReadOnlyFilesystem
-        if (err == error.ReadOnlyFilesystem or err == error.NotImplemented or err == error.OperationNotSupported) {
+        if (err == error.NotImplemented or err == error.OperationNotSupported) {
             return error.SkipTest;
         }
         return error.TestFailed;
     };
+
+    // Verify mtime was set to 2000000 (SFS stores as u32 seconds, microseconds lost)
+    var stat_buf: syscall.Stat = undefined;
+    const path_z: [*:0]const u8 = @ptrCast(path);
+    syscall.stat(path_z, &stat_buf) catch {
+        syscall.unlink(path) catch {};
+        return error.TestFailed;
+    };
+
+    if (stat_buf.mtime != 2000000) {
+        syscall.unlink(path) catch {};
+        return error.TestFailed;
+    }
 
     // Cleanup
     syscall.unlink(path) catch {};
