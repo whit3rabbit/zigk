@@ -442,6 +442,7 @@ export fn main(argc: i32, argv: [*][*:0]u8) i32 {
     runner.runTest("vectored_io: sendfile basic", vectored_io_tests.testSendfileBasic);
     runner.runTest("vectored_io: sendfile with offset", vectored_io_tests.testSendfileWithOffset);
     runner.runTest("vectored_io: sendfile invalid fd", vectored_io_tests.testSendfileInvalidFd);
+    runner.runTest("vectored_io: sendfile large transfer", vectored_io_tests.testSendfileLargeTransfer);
 
     // Phase 8: Process Control tests
     runner.runTest("process_control: prctl set/get name", process_control_tests.testPrctlSetGetName);

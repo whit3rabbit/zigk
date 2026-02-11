@@ -296,3 +296,37 @@ pub fn testSendfileInvalidFd() !void {
         if (err != error.BadFileDescriptor) return error.TestFailed;
     }
 }
+
+// Test 13: sendfile large transfer - verify multi-page transfer works
+pub fn testSendfileLargeTransfer() !void {
+    // Open a large source file (shell.elf is >4KB)
+    const fd = try syscall.open("/shell.elf", syscall.O_RDONLY, 0);
+    defer syscall.close(fd) catch {};
+
+    // Create a pipe for destination
+    var pipefd: [2]i32 = undefined;
+    try syscall.pipe(&pipefd);
+    defer {
+        syscall.close(pipefd[0]) catch {};
+        syscall.close(pipefd[1]) catch {};
+    }
+
+    // Transfer 8KB (larger than old 4KB buffer, exercises multi-chunk path)
+    const transfer_size: usize = 8192;
+    var offset: u64 = 0;
+    const sent = try syscall.sendfile(pipefd[1], fd, &offset, transfer_size);
+
+    // Should have sent the requested amount (shell.elf is large enough)
+    if (sent != transfer_size) return error.TestFailed;
+
+    // Verify offset was updated
+    if (offset != transfer_size) return error.TestFailed;
+
+    // Read back from pipe and verify first bytes match ELF magic
+    var verify_buf: [4]u8 = undefined;
+    const read_bytes = try syscall.read(pipefd[0], &verify_buf, verify_buf.len);
+    if (read_bytes != 4) return error.TestFailed;
+    if (verify_buf[0] != 0x7F or verify_buf[1] != 'E' or verify_buf[2] != 'L' or verify_buf[3] != 'F') {
+        return error.TestFailed;
+    }
+}
