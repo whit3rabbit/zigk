@@ -96,12 +96,12 @@ fn statPathKernel(path: []const u8, stat_buf_ptr: usize) SyscallError!usize {
         .size = @intCast(file_meta.size),
         .blksize = 512,
         .blocks = @intCast((file_meta.size + 511) / 512),
-        .atime = 0,
-        .atime_nsec = 0,
-        .mtime = 0,
-        .mtime_nsec = 0,
-        .ctime = 0,
-        .ctime_nsec = 0,
+        .atime = file_meta.atime,
+        .atime_nsec = file_meta.atime_nsec,
+        .mtime = file_meta.mtime,
+        .mtime_nsec = file_meta.mtime_nsec,
+        .ctime = file_meta.mtime, // Use mtime as ctime (SFS doesn't track ctime)
+        .ctime_nsec = file_meta.mtime_nsec,
         .__unused = [_]i64{0} ** 3,
     };
     UserPtr.from(stat_buf_ptr).writeValue(stat_result) catch return error.EFAULT;

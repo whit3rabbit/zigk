@@ -577,7 +577,7 @@ pub const SYS_ALARM: usize = 527;
 /// Set architecture-specific thread state (x86_64 only, use prctl on aarch64)
 pub const SYS_ARCH_PRCTL: usize = 525; // zk compat: emulated via prctl where possible
 /// Set file timestamps (legacy, microsecond - zk compat)
-pub const SYS_FUTIMESAT: usize = 528;
+pub const SYS_FUTIMESAT: usize = 530; // was 528 (collided with SYS_GETPGRP)
 
 // ============================================================================
 // Additional syscalls implemented in zk

@@ -947,6 +947,9 @@ pub fn sfsStatPath(ctx: ?*anyopaque, path: []const u8) ?vfs.FileMeta {
                     .gid = e.gid,
                     .exists = true,
                     .readonly = false,
+                    .size = e.size,
+                    .mtime = @intCast(e.mtime),
+                    .atime = @intCast(e.atime),
                 };
             }
         }
