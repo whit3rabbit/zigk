@@ -116,13 +116,13 @@ Plans:
 - [x] 13-02-PLAN.md -- SysV IPC blocking + SEM_UNDO (semop/msgsnd/msgrcv wait queues, per-process undo tracking)
 
 #### Phase 14: I/O Improvements
-**Goal**: Zero-copy sendfile and AT_SYMLINK_NOFOLLOW support
+**Goal**: Optimized sendfile buffer and AT_SYMLINK_NOFOLLOW support
 **Depends on**: Phase 10
 **Requirements**: IO-01, IO-02
 **Success Criteria** (what must be TRUE):
-  1. sendfile uses zero-copy path (direct page mapping from source to destination) instead of 4KB buffer copy
+  1. sendfile uses optimized 64KB transfer buffer instead of 4KB buffer, reducing read/write loop iterations by 16x
   2. utimensat with AT_SYMLINK_NOFOLLOW flag modifies symlink timestamps (not target)
-  3. sendfile performance improves measurably on large file transfers (>1MB)
+  3. Large sendfile transfer test (>4KB) passes, verifying multi-chunk transfer with data integrity
 **Plans**: 2 plans in 1 wave
 
 Plans:

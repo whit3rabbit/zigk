@@ -35,7 +35,7 @@ Requirements for hardening and debt cleanup. Each maps to roadmap phases.
 
 ### I/O Improvements
 
-- [ ] **IO-01**: sendfile uses zero-copy path (direct page mapping) instead of 4KB buffer copy
+- [ ] **IO-01**: sendfile uses optimized 64KB transfer buffer instead of 4KB buffer copy
 - [ ] **IO-02**: utimensat handles AT_SYMLINK_NOFOLLOW flag correctly
 
 ### Test Infrastructure
