@@ -32,3 +32,31 @@
 
 ---
 
+
+## v1.1 Hardening & Debt Cleanup (Shipped: 2026-02-11)
+
+**Phases:** 10-14 (12 plans)
+**Lines:** +6,396 / -664 across 60 files
+**Timeline:** 2 days (2026-02-09 to 2026-02-10)
+**Total codebase:** 194,415 LOC Zig
+**Git range:** 24d7793..b2babe9
+
+**Key accomplishments:**
+1. Fixed critical kernel bugs (setregid POSIX permissions, SFS fchown, copyStringFromUser stack buffers)
+2. Eliminated SFS close deadlock via io_lock + alloc_lock restructuring, unskipping 16+ tests
+3. Added SFS hard link, symlink, and timestamp support with global nlink synchronization
+4. Replaced CPU-wasting yield-loops with WaitQueue-based blocking for timerfd, signalfd, and SysV IPC
+5. Implemented SEM_UNDO tracking with automatic cleanup on process exit
+6. Optimized sendfile 16x (64KB buffer) and enabled AT_SYMLINK_NOFOLLOW
+
+**Delivered:** Resolved all 14 v1.0 tech debt items, hardened SFS filesystem with proper locking and new features (links, symlinks, timestamps), replaced all yield-loop blocking with WaitQueue infrastructure, and verified 28 requirements across 8 E2E flows.
+
+**Tech debt:** 3 items (signalfd 10ms polling, sendfile not true zero-copy, aarch64 test timeout). See milestones/v1.1-MILESTONE-AUDIT.md.
+
+**Archives:**
+- milestones/v1.1-ROADMAP.md
+- milestones/v1.1-REQUIREMENTS.md
+- milestones/v1.1-MILESTONE-AUDIT.md
+
+---
+

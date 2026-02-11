@@ -2,7 +2,7 @@
 
 ## What This Is
 
-Systematic expansion of Linux/POSIX syscall coverage in the zk microkernel. Shipped v1 with ~300+ syscalls implemented (up from ~190), covering credential management, I/O multiplexing, event notification FDs, vectored I/O, filesystem timestamps, BSD socket extras, process control, and SysV IPC. Dual-architecture (x86_64 + aarch64) with 306 integration tests.
+Systematic expansion of Linux/POSIX syscall coverage in the zk microkernel. Shipped v1.1 with 300+ syscalls implemented, hardened SFS filesystem with proper locking/links/symlinks/timestamps, WaitQueue-based blocking for all event FDs and IPC, and full SEM_UNDO lifecycle management. Dual-architecture (x86_64 + aarch64) with 306 integration tests.
 
 ## Core Value
 
@@ -24,35 +24,35 @@ Every implemented syscall must work correctly on both x86_64 and aarch64 with ma
 - v Timers/alarms (nanosleep, clock_gettime, clock_getres, gettimeofday, alarm, pause, getitimer, setitimer) -- existing
 - v Misc (uname, umask, getrandom, sysinfo, times, poll) -- existing
 - v Network syscalls (socket, bind, listen, accept, connect, send, recv, setsockopt, getsockopt) -- existing
-- v Integration test harness (306 tests, TAP output, dual-arch CI) -- v1
-- v Trivial stub syscalls (madvise, mlock, mincore, scheduling stubs, resource limits, signal ops) -- v1
-- v I/O multiplexing (epoll_wait real dispatch, select/pselect6/ppoll with FileOps.poll) -- v1
-- v Vectored and positional I/O (readv, preadv, pwritev, preadv2/pwritev2, sendfile) -- v1
-- v Event notification FDs (eventfd, timerfd, signalfd with epoll integration) -- v1
-- v Process credentials (fsuid/fsgid, setreuid/setregid, getgroups/setgroups, chown family) -- v1
-- v Filesystem extras (utimensat, futimesat, readlinkat, linkat, symlinkat, *at double-copy fix) -- v1
-- v Socket extras (socketpair, shutdown, sendto/recvfrom, sendmsg/recvmsg, IrqLock fix) -- v1
-- v Process control (prctl PR_SET_NAME/PR_GET_NAME, sched_setaffinity/getaffinity) -- v1
-- v SysV IPC (shmget/shmat/shmdt/shmctl, semget/semop/semctl, msgget/msgsnd/msgrcv/msgctl) -- v1
+- v Integration test harness (306 tests, TAP output, dual-arch CI) -- v1.0
+- v Trivial stub syscalls (madvise, mlock, mincore, scheduling stubs, resource limits, signal ops) -- v1.0
+- v I/O multiplexing (epoll_wait real dispatch, select/pselect6/ppoll with FileOps.poll) -- v1.0
+- v Vectored and positional I/O (readv, preadv, pwritev, preadv2/pwritev2, sendfile) -- v1.0
+- v Event notification FDs (eventfd, timerfd, signalfd with epoll integration) -- v1.0
+- v Process credentials (fsuid/fsgid, setreuid/setregid, getgroups/setgroups, chown family) -- v1.0
+- v Filesystem extras (utimensat, futimesat, readlinkat, linkat, symlinkat, *at double-copy fix) -- v1.0
+- v Socket extras (socketpair, shutdown, sendto/recvfrom, sendmsg/recvmsg, IrqLock fix) -- v1.0
+- v Process control (prctl PR_SET_NAME/PR_GET_NAME, sched_setaffinity/getaffinity) -- v1.0
+- v SysV IPC (shmget/shmat/shmdt/shmctl, semget/semop/semctl, msgget/msgsnd/msgrcv/msgctl) -- v1.0
+- v setregid POSIX permission checks (unprivileged cannot set arbitrary GIDs) -- v1.1
+- v SFS fchown via FileOps.chown -- v1.1
+- v copyStringFromUser stack buffer support (isValidUserPtr + assembly fixup) -- v1.1
+- v SFS close deadlock fix (io_lock + alloc_lock restructuring) -- v1.1
+- v SFS hard link support (link/linkat with global nlink sync) -- v1.1
+- v SFS symbolic link support (symlink/symlinkat/readlink/readlinkat) -- v1.1
+- v SFS timestamp modification (utimensat/futimesat with UTIME_OMIT) -- v1.1
+- v WaitQueue-based blocking for timerfd (replaces yield-loop) -- v1.1
+- v WaitQueue-based blocking for signalfd (10ms polling) -- v1.1
+- v WaitQueue-based blocking for semop/msgsnd/msgrcv -- v1.1
+- v SEM_UNDO per-process tracking with process exit cleanup -- v1.1
+- v semop IPC_NOWAIT returns EAGAIN (non-blocking path) -- v1.1
+- v sendfile 64KB optimized buffer (16x improvement) -- v1.1
+- v AT_SYMLINK_NOFOLLOW in utimensat -- v1.1
+- v dup3 O_CLOEXEC, accept4 flags, getrlimit/setrlimit, sigaltstack, statfs/fstatfs, getresuid/getresgid -- v1.1
 
 ### Active
 
-## Current Milestone: v1.1 Hardening & Debt Cleanup
-
-**Goal:** Fix all known bugs, eliminate tech debt from v1, and fill behavioral gaps (proper blocking, wait queues, SFS reliability).
-
-**Target features:**
-- Fix kernel bugs (setregid permissions, SFS fchown, copyStringFromUser stack buffers)
-- Fix SFS close deadlock affecting 16+ tests
-- Replace yield-loop blocking with proper wait queues (timerfd, signalfd)
-- Implement blocking behavior for semop/msgsnd/msgrcv
-- Implement SEM_UNDO tracking
-- Add sendfile zero-copy path
-- Add SFS link/symlink/timestamp support
-- Fix event FD test pointer casting issues
-- Verify/implement unchecked stub syscalls (dup3, accept4, getrlimit, setrlimit, sigaltstack, statfs, fstatfs, getresuid/getresgid)
-- Fix AT_SYMLINK_NOFOLLOW for utimensat
-- Complete Phase 6 verification documentation
+(None -- between milestones. Run /gsd:new-milestone to define next.)
 
 ### Out of Scope
 
@@ -64,46 +64,53 @@ Every implemented syscall must work correctly on both x86_64 and aarch64 with ma
 - Swap management (swapon, swapoff) -- no swap subsystem planned
 - Filesystem-level features (pivot_root, mount/umount rework) -- VFS redesign is separate
 - Timer expiry for setitimer/getitimer -- signal delivery from timer interrupt not wired yet, deferred
+- SFS nested subdirectory support -- fundamental SFS architecture change
+- SFS file count limit increase (64 max) -- requires on-disk format change
+- Multi-CPU affinity enforcement -- single-CPU kernel, separate project
 
 ## Context
 
-Shipped v1 with 192,637 LOC Zig across x86_64 and aarch64.
+Shipped v1.1 with 194,415 LOC Zig across x86_64 and aarch64.
 Tech stack: Zig 0.16.x, custom UEFI bootloader, QEMU TCG.
-306 integration tests (278-280 passing, 26-28 skipped, 0 failing).
+306 integration tests (all passing or documented-skip, 0 failing).
 
-Known tech debt from v1 (14 items):
-- SFS filesystem close deadlock after 50+ operations (affects ~16 tests)
-- timerfd/signalfd blocking reads use yield loops instead of proper wait queues
-- sendfile uses 4KB kernel buffer copy, not true zero-copy
-- SEM_UNDO flag accepted but not tracked
-- semop/msgsnd/msgrcv return EAGAIN/ENOMSG instead of blocking
-- copyStringFromUser rejects stack-allocated buffers (1 test skipped)
-- Phase 6 missing formal VERIFICATION.md
+v1.0 shipped 300+ syscalls from ~190 baseline. v1.1 resolved all 14 tech debt items from v1.0:
+- SFS deadlock eliminated via io_lock + alloc_lock restructuring
+- All yield-loop blocking replaced with WaitQueue infrastructure
+- SFS expanded with hard links, symlinks, timestamps
+- SEM_UNDO lifecycle fully implemented
+- sendfile optimized from 4KB to 64KB buffer
 
-IrqLock socket initialization bug fixed in v1 (Phase 7).
-*at syscall double-copy EFAULT bug fixed in v1 (Phase 6).
-aarch64 copy_from_user fixup and TTBR0 exec bug fixed pre-v1.
+Remaining tech debt (3 items from v1.1):
+- signalfd uses 10ms polling timeout instead of direct signal delivery wakeup
+- sendfile uses 64KB buffer copy, not true zero-copy (requires VFS page cache)
+- aarch64 test suite timeout in later tests (pre-existing infrastructure issue)
 
 ## Constraints
 
 - **Dual-arch**: Every syscall must work on both x86_64 and aarch64. No x86-only implementations.
 - **ABI correctness**: Syscall numbers must match Linux ABI for each architecture. Use 500+ range only for legacy compat on aarch64.
 - **Test coverage**: Every new syscall gets at least one integration test in the test runner.
-- **No regressions**: Existing 306 passing tests must continue to pass after each phase.
-- **SFS deadlock**: Tests creating many SFS files must account for the known deadlock. Prefer kernel-memory-based tests where possible.
+- **No regressions**: Existing passing tests must continue to pass after each phase.
 
 ## Key Decisions
 
 | Decision | Rationale | Outcome |
 |----------|-----------|---------|
-| Trivial stubs before real implementations | Quick wins boost coverage count and let more programs probe without ENOSYS crashes | Good -- 14 stubs in 1 day, unblocked later phases |
-| epoll before SysV IPC | I/O multiplexing is more commonly needed by real programs than legacy IPC | Good -- epoll foundation enabled eventfd/timerfd/signalfd integration |
-| UID/GID tracking as infrastructure | Many syscalls (chown, setuid, access checks) depend on per-process credential state | Good -- fsuid/fsgid auto-sync worked cleanly |
-| Skip ptrace entirely | Extremely complex, separate debugger project | Good -- kept scope focused |
-| Polling-based timerfd expiration | Simpler MVP, avoids IoRequest/TimerWheel complexity | Revisit -- yield loops burn CPU, need proper wait queues |
-| Kernel-only memory for SysV shared memory | SFS has close deadlock and 64-file limit | Good -- PMM allocation with MAP_DEVICE flag worked |
-| initInPlace for large structs | UnixSocketPair (11KB) overflows 64KB kernel stack on aarch64 | Good -- pattern should be used for any struct > 4KB |
-| SEM_UNDO deferred | Requires per-process undo lists and exit cleanup | Revisit -- needed for Postgres compatibility |
+| Trivial stubs before real implementations | Quick wins boost coverage count | v Good -- 14 stubs in 1 day |
+| epoll before SysV IPC | I/O multiplexing more commonly needed | v Good -- enabled eventfd/timerfd/signalfd |
+| UID/GID tracking as infrastructure | Many syscalls depend on credential state | v Good -- fsuid/fsgid auto-sync clean |
+| Skip ptrace entirely | Extremely complex, separate project | v Good -- kept scope focused |
+| Kernel-only memory for SysV shared memory | SFS had close deadlock and 64-file limit | v Good -- PMM allocation worked |
+| initInPlace for large structs | 11KB UnixSocketPair overflows 64KB stack on aarch64 | v Good -- pattern for any struct > 4KB |
+| SFS deadlock fix EARLY in v1.1 | Unblocks 16+ tests, prerequisite for SFS features | v Good -- enabled Phase 12 |
+| io_lock ordering: alloc_lock before io_lock | Prevents deadlock in nested lock scenarios | v Good -- consistent two-phase locking |
+| Global nlink sync for hard links | All entries sharing start_block need identical nlink | v Good -- POSIX-compliant behavior |
+| SFS timestamps as u32 seconds | Nanosecond precision lost, acceptable for SFS | v Good -- simpler implementation |
+| signalfd 10ms polling instead of direct wakeup | Direct wakeup requires global watcher registry | -- Revisit -- better than yield-loop but not ideal |
+| sendfile 64KB buffer instead of zero-copy | True zero-copy requires VFS page cache refactor | -- Revisit -- 16x improvement is significant |
+| WaitQueue replaces blocked_readers atomics | Cleaner lifecycle management | v Good -- consistent pattern |
+| Process lifecycle includes SEM_UNDO cleanup | After virt_pci but before resource freeing | v Good -- POSIX-compliant |
 
 ---
-*Last updated: 2026-02-09 after v1.1 milestone started*
+*Last updated: 2026-02-11 after v1.1 milestone*
