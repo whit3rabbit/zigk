@@ -15,6 +15,7 @@ const aslr = @import("aslr");
 const signals = @import("signals");
 const types = @import("types.zig");
 const manager = @import("manager.zig");
+const kernel_ipc = @import("kernel_ipc");
 
 const Process = types.Process;
 const UserVmm = user_vmm_mod.UserVmm;
@@ -408,6 +409,13 @@ pub fn destroyProcess(proc: *Process) void {
     // Free any virtual PCI devices owned by this process.
     // This releases BAR backing memory and event ring pages.
     virt_pci.cleanupByPid(proc.pid);
+
+    // Apply SEM_UNDO adjustments to semaphores
+    // This must happen before freeing process resources but after other cleanup
+    // to ensure semaphore values are adjusted when the process exits
+    if (proc.sem_undo_count > 0) {
+        kernel_ipc.sem.applySemUndo(proc);
+    }
 
     // Reparent children to init (PID 1) per POSIX semantics
     if (proc.first_child != null) {

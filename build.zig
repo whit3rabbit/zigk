@@ -1305,6 +1305,9 @@ pub fn build(b: *std.Build) void {
     kernel_ipc_module.addImport("heap", heap_module);
     kernel_ipc_module.addImport("sched", sched_module);
 
+    // Defer process->kernel_ipc import due to definition order
+    process_module.addImport("kernel_ipc", kernel_ipc_module);
+
     // Create syscall scheduling module (sched_yield, nanosleep, etc.)
     const syscall_scheduling_module = b.createModule(.{
         .root_source_file = b.path("src/kernel/sys/syscall/process/scheduling.zig"),
