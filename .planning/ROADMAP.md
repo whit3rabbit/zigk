@@ -112,8 +112,8 @@ Plans:
 **Plans**: 2 plans in 1 wave
 
 Plans:
-- [ ] 13-01-PLAN.md -- timerfd/signalfd wait queue conversion (replace yield-loops with WaitQueue blocking)
-- [ ] 13-02-PLAN.md -- SysV IPC blocking + SEM_UNDO (semop/msgsnd/msgrcv wait queues, per-process undo tracking)
+- [x] 13-01-PLAN.md -- timerfd/signalfd wait queue conversion (replace yield-loops with WaitQueue blocking)
+- [x] 13-02-PLAN.md -- SysV IPC blocking + SEM_UNDO (semop/msgsnd/msgrcv wait queues, per-process undo tracking)
 
 #### Phase 14: I/O Improvements
 **Goal**: Zero-copy sendfile and AT_SYMLINK_NOFOLLOW support
@@ -147,9 +147,9 @@ Phases execute in numeric order: 10 -> 11 -> 12 -> 13 -> 14
 | 10. Bug Fixes & Quick Wins | v1.1 | 4/4 | Complete | 2026-02-09 |
 | 11. SFS Deadlock Resolution | v1.1 | 2/2 | Complete | 2026-02-10 |
 | 12. SFS Feature Expansion | v1.1 | 2/2 | Complete | 2026-02-10 |
-| 13. Wait Queue Infrastructure | v1.1 | 0/? | Not started | - |
+| 13. Wait Queue Infrastructure | v1.1 | 2/2 | Complete | 2026-02-10 |
 | 14. I/O Improvements | v1.1 | 0/? | Not started | - |
 
 ---
 *Roadmap created: 2026-02-06*
-*Last updated: 2026-02-10 after Phase 12 execution complete*
+*Last updated: 2026-02-10 after Phase 13 execution complete*
