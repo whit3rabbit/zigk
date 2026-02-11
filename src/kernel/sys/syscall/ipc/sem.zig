@@ -66,6 +66,7 @@ fn mapIpcError(err: anyerror) SyscallError {
         error.EFBIG => error.EFBIG,
         error.ERANGE => error.ERANGE,
         error.E2BIG => error.E2BIG,
+        error.EIDRM => error.EIDRM,
         else => error.EINVAL,
     };
 }

@@ -23,6 +23,14 @@ pub const ProcessState = enum(u8) {
     Dead,
 };
 
+/// SysV semaphore undo entry
+pub const SemUndoEntry = struct {
+    semid: u32,
+    sem_num: u16,
+    adjustment: i32,
+};
+pub const MAX_SEM_UNDO: usize = 32;
+
 /// Process - owns resources and process hierarchy
 pub const Process = struct {
     pub const MailboxLock = struct {
@@ -182,6 +190,10 @@ pub const Process = struct {
 
     /// Per-process file creation mask
     umask: u32 = 0o022,
+
+    /// SysV semaphore undo tracking (32 entries per process)
+    sem_undo_entries: [MAX_SEM_UNDO]SemUndoEntry = [_]SemUndoEntry{.{ .semid = 0, .sem_num = 0, .adjustment = 0 }} ** MAX_SEM_UNDO,
+    sem_undo_count: u32 = 0,
 
     /// SECURITY: Lock for credential fields (uid/gid/euid/egid/suid/sgid).
     /// Required to prevent TOCTOU races where concurrent setuid/setgid calls

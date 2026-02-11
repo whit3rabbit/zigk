@@ -11,6 +11,8 @@ const sched = @import("sched"); // Added for getCurrentProcess
 
 // Types
 pub const Process = types.Process;
+pub const SemUndoEntry = types.SemUndoEntry;
+pub const MAX_SEM_UNDO = types.MAX_SEM_UNDO;
 pub const ProcessState = types.ProcessState;
 pub const MailboxLock = Process.MailboxLock; // Nested in Process
 

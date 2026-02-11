@@ -5,6 +5,7 @@ const ipc_perm = @import("ipc_perm.zig");
 const uapi = @import("uapi");
 const heap = @import("heap");
 const sync = @import("sync");
+const sched = @import("sched");
 
 const IPC_PRIVATE = uapi.ipc.sysv.IPC_PRIVATE;
 const IPC_CREAT = uapi.ipc.sysv.IPC_CREAT;
@@ -37,6 +38,7 @@ const SemSet = struct {
     otime: i64,
     ctime: i64,
     in_use: bool,
+    wait_queue: sched.WaitQueue = .{},
 };
 
 var sem_sets: [SEMMNI]SemSet = [_]SemSet{.{
@@ -48,6 +50,7 @@ var sem_sets: [SEMMNI]SemSet = [_]SemSet{.{
     .otime = 0,
     .ctime = 0,
     .in_use = false,
+    .wait_queue = .{},
 }} ** SEMMNI;
 
 var sem_lock: sync.Spinlock = .{};
@@ -56,6 +59,28 @@ var sem_seq: u16 = 0;
 fn getCurrentTime() i64 {
     // Simplified: return 0 for MVP
     return 0;
+}
+
+/// Record a SEM_UNDO adjustment for a process
+fn recordSemUndo(proc: *process.Process, semid: u32, sem_num: u16, adjustment: i32) void {
+    // Search for existing entry
+    for (proc.sem_undo_entries[0..proc.sem_undo_count]) |*e| {
+        if (e.semid == semid and e.sem_num == sem_num) {
+            e.adjustment +|= adjustment; // Saturating add to prevent overflow
+            return;
+        }
+    }
+
+    // Add new entry
+    if (proc.sem_undo_count < process.MAX_SEM_UNDO) {
+        proc.sem_undo_entries[proc.sem_undo_count] = .{
+            .semid = semid,
+            .sem_num = sem_num,
+            .adjustment = adjustment,
+        };
+        proc.sem_undo_count += 1;
+    }
+    // If full, silently drop (POSIX allows this)
 }
 
 pub fn semget(key: i32, nsems: u32, flags: i32, proc: *const process.Process) !u32 {
@@ -136,82 +161,120 @@ pub fn semget(key: i32, nsems: u32, flags: i32, proc: *const process.Process) !u
     return set.id;
 }
 
-pub fn semop(id: u32, sops: []const SemBuf, proc: *const process.Process) !void {
-    const held = sem_lock.acquire();
-    defer held.release();
+pub fn semop(id: u32, sops: []const SemBuf, proc: *process.Process) !void {
+    while (true) {
+        const held = sem_lock.acquire();
 
-    // Find sem set by ID
-    const idx = ipc_perm.idToIndex(id);
-    const seq = ipc_perm.idToSeq(id);
+        // Find sem set by ID (must re-validate after wakeup)
+        const idx = ipc_perm.idToIndex(id);
+        const seq = ipc_perm.idToSeq(id);
 
-    if (idx >= SEMMNI) return error.EINVAL;
-
-    const set = &sem_sets[idx];
-    if (!set.in_use or set.perm.seq != seq) return error.EINVAL;
-
-    // Validate all operations first
-    for (sops) |sop| {
-        if (sop.sem_num >= set.nsems) return error.EFBIG;
-
-        // Check permission: sem_op >= 0 needs write, < 0 needs read
-        const mode: ipc_perm.AccessMode = if (sop.sem_op >= 0) .write else .read;
-        if (!ipc_perm.checkAccess(&set.perm, proc, mode)) {
-            return error.EACCES;
+        if (idx >= SEMMNI) {
+            held.release();
+            return error.EINVAL;
         }
-    }
 
-    const sems = set.sems orelse return error.EINVAL;
+        const set = &sem_sets[idx];
+        if (!set.in_use or set.perm.seq != seq) {
+            held.release();
+            return error.EIDRM;
+        }
 
-    // Try to apply all operations atomically
-    for (sops) |sop| {
-        const sem = &sems[sop.sem_num];
-
-        if (sop.sem_op < 0) {
-            // Decrement operation
-            const decr = @as(u32, @intCast(-sop.sem_op));
-            if (sem.semval < decr) {
-                // Would block
-                if ((sop.sem_flg & IPC_NOWAIT) != 0) {
-                    return error.EAGAIN;
-                } else {
-                    // Real blocking deferred for MVP
-                    return error.EAGAIN;
-                }
+        // Validate all operations
+        for (sops) |sop| {
+            if (sop.sem_num >= set.nsems) {
+                held.release();
+                return error.EFBIG;
             }
-        } else if (sop.sem_op == 0) {
-            // Wait for zero
-            if (sem.semval != 0) {
-                // Would block
-                if ((sop.sem_flg & IPC_NOWAIT) != 0) {
-                    return error.EAGAIN;
-                } else {
-                    // Real blocking deferred for MVP
-                    return error.EAGAIN;
-                }
+
+            // Check permission: sem_op >= 0 needs write, < 0 needs read
+            const mode: ipc_perm.AccessMode = if (sop.sem_op >= 0) .write else .read;
+            if (!ipc_perm.checkAccess(&set.perm, proc, mode)) {
+                held.release();
+                return error.EACCES;
             }
         }
-        // sem_op > 0 never blocks
-    }
 
-    // Apply all operations
-    for (sops) |sop| {
-        const sem = &sems[sop.sem_num];
+        const sems = set.sems orelse {
+            held.release();
+            return error.EINVAL;
+        };
 
-        if (sop.sem_op < 0) {
-            const decr = @as(u32, @intCast(-sop.sem_op));
-            sem.semval -= decr;
-        } else if (sop.sem_op > 0) {
-            const incr = @as(u32, @intCast(sop.sem_op));
-            sem.semval += incr;
+        // Check if all operations can proceed
+        var would_block = false;
+        for (sops) |sop| {
+            const sem = &sems[sop.sem_num];
+
+            if (sop.sem_op < 0) {
+                // Decrement operation
+                const decr = @as(u32, @intCast(-sop.sem_op));
+                if (sem.semval < decr) {
+                    would_block = true;
+                    break;
+                }
+            } else if (sop.sem_op == 0) {
+                // Wait for zero
+                if (sem.semval != 0) {
+                    would_block = true;
+                    break;
+                }
+            }
+            // sem_op > 0 never blocks
         }
-        // Update last PID
-        sem.sempid = proc.pid;
 
-        // TODO: SEM_UNDO tracking - requires per-process undo lists
-        // and cleanup on process exit. Deferred for MVP.
+        if (would_block) {
+            // Check for IPC_NOWAIT flag
+            var nowait = false;
+            for (sops) |sop| {
+                if ((sop.sem_flg & IPC_NOWAIT) != 0) {
+                    nowait = true;
+                    break;
+                }
+            }
+
+            if (nowait) {
+                held.release();
+                return error.EAGAIN;
+            } else {
+                // Block on wait queue
+                sched.waitOn(&set.wait_queue, held);
+                continue; // Retry from beginning
+            }
+        }
+
+        // All operations can proceed - apply them atomically
+        var any_increment = false;
+        for (sops) |sop| {
+            const sem = &sems[sop.sem_num];
+
+            if (sop.sem_op < 0) {
+                const decr = @as(u32, @intCast(-sop.sem_op));
+                sem.semval -= decr;
+            } else if (sop.sem_op > 0) {
+                const incr = @as(u32, @intCast(sop.sem_op));
+                sem.semval += incr;
+                any_increment = true;
+            }
+            // Update last PID
+            sem.sempid = proc.pid;
+
+            // Record SEM_UNDO if flag is set
+            if ((sop.sem_flg & uapi.ipc.sysv.SEM_UNDO) != 0) {
+                const adj = -@as(i32, sop.sem_op);
+                recordSemUndo(proc, id, sop.sem_num, adj);
+            }
+        }
+
+        set.otime = getCurrentTime();
+
+        // Wake waiting threads if we incremented any semaphore
+        if (any_increment) {
+            _ = set.wait_queue.wakeUp(set.wait_queue.count);
+        }
+
+        held.release();
+        return;
     }
-
-    set.otime = getCurrentTime();
 }
 
 pub fn semctl(id: u32, semnum: u32, cmd: i32, arg: usize, proc: *const process.Process) !usize {
@@ -290,6 +353,9 @@ pub fn semctl(id: u32, semnum: u32, cmd: i32, arg: usize, proc: *const process.P
             set.in_use = false;
             set.sems = null;
 
+            // Wake all waiting threads (they will get EIDRM on retry)
+            _ = set.wait_queue.wakeUp(std.math.maxInt(usize));
+
             return 0;
         },
         SETVAL => {
@@ -308,6 +374,9 @@ pub fn semctl(id: u32, semnum: u32, cmd: i32, arg: usize, proc: *const process.P
             sems[semnum].semval = @intCast(arg);
             set.ctime = getCurrentTime();
 
+            // Wake one waiting thread to re-check
+            _ = set.wait_queue.wakeUp(1);
+
             return 0;
         },
         GETVAL => {
@@ -324,4 +393,41 @@ pub fn semctl(id: u32, semnum: u32, cmd: i32, arg: usize, proc: *const process.P
         },
         else => return error.EINVAL,
     }
+}
+
+/// Apply SEM_UNDO adjustments when a process exits
+pub fn applySemUndo(proc: *process.Process) void {
+    const held = sem_lock.acquire();
+    defer held.release();
+
+    for (proc.sem_undo_entries[0..proc.sem_undo_count]) |entry| {
+        if (entry.adjustment == 0) continue;
+
+        const idx = ipc_perm.idToIndex(entry.semid);
+        const seq = ipc_perm.idToSeq(entry.semid);
+        if (idx >= SEMMNI) continue;
+
+        const set = &sem_sets[idx];
+        if (!set.in_use or set.perm.seq != seq) continue;
+
+        const sems = set.sems orelse continue;
+        if (entry.sem_num >= set.nsems) continue;
+
+        const sem = &sems[entry.sem_num];
+        // Apply undo: add adjustment to current value
+        if (entry.adjustment > 0) {
+            sem.semval +|= @intCast(entry.adjustment); // saturating add
+        } else {
+            const sub = @as(u32, @intCast(-entry.adjustment));
+            if (sem.semval >= sub) {
+                sem.semval -= sub;
+            } else {
+                sem.semval = 0; // Clamp to 0
+            }
+        }
+        // Wake waiters since semaphore value changed
+        _ = set.wait_queue.wakeUp(set.wait_queue.count);
+    }
+
+    proc.sem_undo_count = 0;
 }

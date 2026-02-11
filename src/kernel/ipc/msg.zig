@@ -6,6 +6,7 @@ const uapi = @import("uapi");
 const heap = @import("heap");
 const user_mem = @import("user_mem");
 const sync = @import("sync");
+const sched = @import("sched");
 
 const IPC_PRIVATE = uapi.ipc.sysv.IPC_PRIVATE;
 const IPC_CREAT = uapi.ipc.sysv.IPC_CREAT;
@@ -45,6 +46,8 @@ const MsgQueue = struct {
     rtime: i64,
     ctime: i64,
     in_use: bool,
+    send_wait_queue: sched.WaitQueue = .{},
+    recv_wait_queue: sched.WaitQueue = .{},
 };
 
 var queues: [MSGMNI]MsgQueue = [_]MsgQueue{.{
@@ -62,6 +65,8 @@ var queues: [MSGMNI]MsgQueue = [_]MsgQueue{.{
     .rtime = 0,
     .ctime = 0,
     .in_use = false,
+    .send_wait_queue = .{},
+    .recv_wait_queue = .{},
 }} ** MSGMNI;
 
 var msg_lock: sync.Spinlock = .{};
@@ -145,177 +150,213 @@ pub fn msgsnd(id: u32, msgp: usize, msgsz: usize, msgflg: i32, proc: *const proc
     // Validate size
     if (msgsz > MSGMAX) return error.EINVAL;
 
-    const held = msg_lock.acquire();
-    defer held.release();
-
-    // Find queue by ID
-    const idx = ipc_perm.idToIndex(id);
-    const seq = ipc_perm.idToSeq(id);
-
-    if (idx >= MSGMNI) return error.EINVAL;
-
-    const q = &queues[idx];
-    if (!q.in_use or q.perm.seq != seq) return error.EINVAL;
-
-    // Check write permission
-    if (!ipc_perm.checkAccess(&q.perm, proc, .write)) {
-        return error.EACCES;
-    }
-
-    // Copy message from userspace
-    // First read the header (mtype)
+    // Copy message from userspace BEFORE acquiring lock (to avoid holding spinlock during page faults)
     const user_ptr = user_mem.UserPtr.from(msgp);
     const header = user_ptr.readValue(MsgBufHeader) catch return error.EFAULT;
 
     // Validate mtype > 0
     if (header.mtype <= 0) return error.EINVAL;
 
-    // Allocate data buffer
+    // Allocate and copy data
     const data = heap.allocator().alloc(u8, msgsz) catch return error.ENOMEM;
     errdefer heap.allocator().free(data);
 
-    // Copy data (skip the 8-byte header)
     const data_ptr = user_mem.UserPtr.from(msgp + @sizeOf(MsgBufHeader));
     _ = data_ptr.copyToKernel(data) catch {
         heap.allocator().free(data);
         return error.EFAULT;
     };
 
-    // Check queue capacity
-    if (q.qbytes + msgsz > q.qbytes_max) {
-        heap.allocator().free(data);
-        if ((msgflg & IPC_NOWAIT) != 0) {
-            return error.EAGAIN;
-        } else {
-            // Real blocking deferred for MVP
-            return error.EAGAIN;
+    // Now enter the retry loop with lock
+    while (true) {
+        const held = msg_lock.acquire();
+
+        // Find queue by ID (must re-validate after wakeup)
+        const idx = ipc_perm.idToIndex(id);
+        const seq = ipc_perm.idToSeq(id);
+
+        if (idx >= MSGMNI) {
+            held.release();
+            heap.allocator().free(data);
+            return error.EINVAL;
         }
+
+        const q = &queues[idx];
+        if (!q.in_use or q.perm.seq != seq) {
+            held.release();
+            heap.allocator().free(data);
+            return error.EIDRM;
+        }
+
+        // Check write permission
+        if (!ipc_perm.checkAccess(&q.perm, proc, .write)) {
+            held.release();
+            heap.allocator().free(data);
+            return error.EACCES;
+        }
+
+        // Check queue capacity
+        if (q.qbytes + msgsz > q.qbytes_max) {
+            if ((msgflg & IPC_NOWAIT) != 0) {
+                held.release();
+                heap.allocator().free(data);
+                return error.EAGAIN;
+            } else {
+                // Block on send wait queue
+                sched.waitOn(&q.send_wait_queue, held);
+                continue; // Retry
+            }
+        }
+
+        // Capacity available - allocate KernelMsg and enqueue
+        const msg = heap.allocator().create(KernelMsg) catch {
+            held.release();
+            heap.allocator().free(data);
+            return error.ENOMEM;
+        };
+
+        msg.mtype = header.mtype;
+        msg.data = data;
+        msg.next = null;
+
+        // Append to tail
+        if (q.tail) |tail| {
+            tail.next = msg;
+        } else {
+            q.head = msg;
+        }
+        q.tail = msg;
+
+        q.qnum += 1;
+        q.qbytes += msgsz;
+        q.lspid = proc.pid;
+        q.stime = getCurrentTime();
+
+        // Wake one receiver
+        _ = q.recv_wait_queue.wakeUp(1);
+
+        held.release();
+        return;
     }
-
-    // Allocate KernelMsg
-    const msg = heap.allocator().create(KernelMsg) catch {
-        heap.allocator().free(data);
-        return error.ENOMEM;
-    };
-
-    msg.mtype = header.mtype;
-    msg.data = data;
-    msg.next = null;
-
-    // Append to tail
-    if (q.tail) |tail| {
-        tail.next = msg;
-    } else {
-        q.head = msg;
-    }
-    q.tail = msg;
-
-    q.qnum += 1;
-    q.qbytes += msgsz;
-    q.lspid = proc.pid;
-    q.stime = getCurrentTime();
 }
 
 pub fn msgrcv(id: u32, msgp: usize, msgsz: usize, msgtyp: i64, msgflg: i32, proc: *const process.Process) !usize {
-    const held = msg_lock.acquire();
-    defer held.release();
+    while (true) {
+        const held = msg_lock.acquire();
 
-    // Find queue by ID
-    const idx = ipc_perm.idToIndex(id);
-    const seq = ipc_perm.idToSeq(id);
+        // Find queue by ID (must re-validate after wakeup)
+        const idx = ipc_perm.idToIndex(id);
+        const seq = ipc_perm.idToSeq(id);
 
-    if (idx >= MSGMNI) return error.EINVAL;
+        if (idx >= MSGMNI) {
+            held.release();
+            return error.EINVAL;
+        }
 
-    const q = &queues[idx];
-    if (!q.in_use or q.perm.seq != seq) return error.EINVAL;
+        const q = &queues[idx];
+        if (!q.in_use or q.perm.seq != seq) {
+            held.release();
+            return error.EIDRM;
+        }
 
-    // Check read permission
-    if (!ipc_perm.checkAccess(&q.perm, proc, .read)) {
-        return error.EACCES;
-    }
+        // Check read permission
+        if (!ipc_perm.checkAccess(&q.perm, proc, .read)) {
+            held.release();
+            return error.EACCES;
+        }
 
-    // Search for matching message
-    var prev: ?*KernelMsg = null;
-    var curr = q.head;
+        // Search for matching message
+        var prev: ?*KernelMsg = null;
+        var curr = q.head;
 
-    while (curr) |msg| {
-        const matches = if (msgtyp == 0) true // Any type
-        else if (msgtyp > 0) msg.mtype == msgtyp // Exact match
-        else msg.mtype <= -msgtyp; // Lowest mtype <= |msgtyp|
+        while (curr) |msg| {
+            const matches = if (msgtyp == 0) true // Any type
+            else if (msgtyp > 0) msg.mtype == msgtyp // Exact match
+            else msg.mtype <= -msgtyp; // Lowest mtype <= |msgtyp|
 
-        if (matches) {
-            // Found matching message - remove from list
-            if (prev) |p| {
-                p.next = msg.next;
-            } else {
-                q.head = msg.next;
-            }
+            if (matches) {
+                // Found matching message - remove from list
+                if (prev) |p| {
+                    p.next = msg.next;
+                } else {
+                    q.head = msg.next;
+                }
 
-            if (q.tail == msg) {
-                q.tail = prev;
-            }
+                if (q.tail == msg) {
+                    q.tail = prev;
+                }
 
-            const actual_size = msg.data.len;
+                const actual_size = msg.data.len;
 
-            // Check if message too large
-            if (actual_size > msgsz) {
-                if ((msgflg & MSG_NOERROR) == 0) {
-                    // Put message back at front
+                // Check if message too large
+                if (actual_size > msgsz) {
+                    if ((msgflg & MSG_NOERROR) == 0) {
+                        // Put message back at front
+                        msg.next = q.head;
+                        q.head = msg;
+                        if (q.tail == null) q.tail = msg;
+                        held.release();
+                        return error.E2BIG;
+                    }
+                    // Truncate message
+                }
+
+                // Copy to userspace
+                const user_ptr = user_mem.UserPtr.from(msgp);
+
+                // Write header (mtype)
+                const header = MsgBufHeader{ .mtype = msg.mtype };
+                _ = user_ptr.writeValue(header) catch {
+                    // Put message back
                     msg.next = q.head;
                     q.head = msg;
                     if (q.tail == null) q.tail = msg;
-                    return error.E2BIG;
-                }
-                // Truncate message
+                    held.release();
+                    return error.EFAULT;
+                };
+
+                // Write data (min of actual_size and msgsz)
+                const copy_size = @min(actual_size, msgsz);
+                const data_ptr = user_mem.UserPtr.from(msgp + @sizeOf(MsgBufHeader));
+                _ = data_ptr.copyFromKernel(msg.data[0..copy_size]) catch {
+                    // Put message back
+                    msg.next = q.head;
+                    q.head = msg;
+                    if (q.tail == null) q.tail = msg;
+                    held.release();
+                    return error.EFAULT;
+                };
+
+                // Update queue metadata
+                q.qnum -= 1;
+                q.qbytes -= actual_size;
+                q.lrpid = proc.pid;
+                q.rtime = getCurrentTime();
+
+                // Wake one sender since space is now available
+                _ = q.send_wait_queue.wakeUp(1);
+
+                // Free message
+                heap.allocator().free(msg.data);
+                heap.allocator().destroy(msg);
+
+                held.release();
+                return copy_size;
             }
 
-            // Copy to userspace
-            const user_ptr = user_mem.UserPtr.from(msgp);
-
-            // Write header (mtype)
-            const header = MsgBufHeader{ .mtype = msg.mtype };
-            _ = user_ptr.writeValue(header) catch {
-                // Put message back
-                msg.next = q.head;
-                q.head = msg;
-                if (q.tail == null) q.tail = msg;
-                return error.EFAULT;
-            };
-
-            // Write data (min of actual_size and msgsz)
-            const copy_size = @min(actual_size, msgsz);
-            const data_ptr = user_mem.UserPtr.from(msgp + @sizeOf(MsgBufHeader));
-            _ = data_ptr.copyFromKernel(msg.data[0..copy_size]) catch {
-                // Put message back
-                msg.next = q.head;
-                q.head = msg;
-                if (q.tail == null) q.tail = msg;
-                return error.EFAULT;
-            };
-
-            // Update queue metadata
-            q.qnum -= 1;
-            q.qbytes -= actual_size;
-            q.lrpid = proc.pid;
-            q.rtime = getCurrentTime();
-
-            // Free message
-            heap.allocator().free(msg.data);
-            heap.allocator().destroy(msg);
-
-            return copy_size;
+            prev = msg;
+            curr = msg.next;
         }
 
-        prev = msg;
-        curr = msg.next;
-    }
-
-    // No matching message
-    if ((msgflg & IPC_NOWAIT) != 0) {
-        return error.ENOMSG;
-    } else {
-        // Real blocking deferred for MVP
-        return error.ENOMSG;
+        // No matching message found
+        if ((msgflg & IPC_NOWAIT) != 0) {
+            held.release();
+            return error.ENOMSG;
+        } else {
+            // Block on receive wait queue
+            sched.waitOn(&q.recv_wait_queue, held);
+            continue; // Retry
+        }
     }
 }
 
@@ -404,6 +445,10 @@ pub fn msgctl(id: u32, cmd: i32, buf_ptr: usize, proc: *const process.Process) !
             q.in_use = false;
             q.head = null;
             q.tail = null;
+
+            // Wake all waiting threads (they will get EIDRM on retry)
+            _ = q.send_wait_queue.wakeUp(std.math.maxInt(usize));
+            _ = q.recv_wait_queue.wakeUp(std.math.maxInt(usize));
 
             return 0;
         },
