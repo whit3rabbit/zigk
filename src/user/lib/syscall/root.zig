@@ -140,6 +140,12 @@ pub const Statfs = io.Statfs;
 pub const statfs = io.statfs;
 pub const fstatfs = io.fstatfs;
 
+// File synchronization
+pub const fsync = io.fsync;
+pub const fdatasync = io.fdatasync;
+pub const sync_ = io.sync_;
+pub const syncfs = io.syncfs;
+
 // Re-export epoll
 pub const epoll_create1 = io.epoll_create1;
 pub const epoll_ctl = io.epoll_ctl;

@@ -1164,6 +1164,69 @@ pub fn sys_readlinkat(dirfd: usize, path_ptr: usize, buf_ptr: usize, bufsiz: usi
 }
 
 // =============================================================================
+// File Synchronization Syscalls (fsync, fdatasync, sync, syncfs)
+// =============================================================================
+
+/// sys_fsync (74) - Synchronize file's in-core state with storage device
+///
+/// Flush file data and metadata to storage. Since this kernel has no write-back
+/// buffer cache (SFS writes go directly to disk via writeSector), the data is
+/// already on disk. This syscall validates the FD and returns success.
+///
+/// Args:
+///   fd_num: File descriptor number
+pub fn sys_fsync(fd_num: usize) base.SyscallError!usize {
+    const fd_u32 = std.math.cast(u32, fd_num) orelse return error.EBADF;
+    const table = base.getGlobalFdTable();
+    _ = table.get(fd_u32) orelse return error.EBADF;
+
+    // No buffer cache to flush -- data is already on disk
+    return 0;
+}
+
+/// sys_fdatasync (75) - Synchronize file's data with storage device
+///
+/// Flush file data only (skip non-essential metadata like atime). Since this
+/// kernel has no buffer cache, this is identical to fsync. Validate FD and
+/// return success.
+///
+/// Args:
+///   fd_num: File descriptor number
+pub fn sys_fdatasync(fd_num: usize) base.SyscallError!usize {
+    const fd_u32 = std.math.cast(u32, fd_num) orelse return error.EBADF;
+    const table = base.getGlobalFdTable();
+    _ = table.get(fd_u32) orelse return error.EBADF;
+
+    // No buffer cache to flush -- data is already on disk
+    return 0;
+}
+
+/// sys_sync (162) - Commit filesystem caches to disk
+///
+/// Flush all filesystem buffers globally. Since this kernel has no buffer cache,
+/// this is a no-op. Always succeeds per POSIX semantics.
+pub fn sys_sync() base.SyscallError!usize {
+    // No buffer cache to flush -- all writes are synchronous
+    return 0;
+}
+
+/// sys_syncfs (306) - Synchronize a filesystem
+///
+/// Flush buffers for the filesystem containing the given FD. Since this kernel
+/// has no buffer cache, this validates the FD and returns success.
+///
+/// Args:
+///   fd_num: File descriptor number
+pub fn sys_syncfs(fd_num: usize) base.SyscallError!usize {
+    const fd_u32 = std.math.cast(u32, fd_num) orelse return error.EBADF;
+    const table = base.getGlobalFdTable();
+    _ = table.get(fd_u32) orelse return error.EBADF;
+
+    // No buffer cache to flush -- data is already on disk
+    return 0;
+}
+
+// =============================================================================
 // File Timestamp Syscalls (utimensat, futimesat)
 // =============================================================================
 

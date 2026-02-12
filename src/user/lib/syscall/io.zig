@@ -938,5 +938,36 @@ pub fn fstatfs(fd: i32, buf: *Statfs) SyscallError!void {
     if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
 }
 
+// =============================================================================
+// File Synchronization Syscalls (fsync, fdatasync, sync, syncfs)
+// =============================================================================
+
+/// Synchronize a file's in-core state with storage device
+/// Flushes both data and metadata to disk
+pub fn fsync(fd: i32) SyscallError!void {
+    const ret = primitive.syscall1(syscalls.SYS_FSYNC, @bitCast(@as(isize, fd)));
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Synchronize a file's data with storage device
+/// Like fsync, but skips non-essential metadata (e.g., atime)
+pub fn fdatasync(fd: i32) SyscallError!void {
+    const ret = primitive.syscall1(syscalls.SYS_FDATASYNC, @bitCast(@as(isize, fd)));
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Commit filesystem caches to disk (global flush)
+/// Cannot fail per POSIX semantics
+pub fn sync_() void {
+    _ = primitive.syscall0(syscalls.SYS_SYNC);
+}
+
+/// Synchronize a filesystem
+/// Flushes all buffers for the filesystem containing the given fd
+pub fn syncfs(fd: i32) SyscallError!void {
+    const ret = primitive.syscall1(syscalls.SYS_SYNCFS, @bitCast(@as(isize, fd)));
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
 // Alias size_t to usize for compatibility if needed, but usize is standard in Zig.
 const size_t = usize;
