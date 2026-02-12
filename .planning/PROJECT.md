@@ -52,7 +52,15 @@ Every implemented syscall must work correctly on both x86_64 and aarch64 with ma
 
 ### Active
 
-(None -- between milestones. Run /gsd:new-milestone to define next.)
+## Current Milestone: v1.2 Systematic Syscall Coverage
+
+**Goal:** Audit the Linux ABI for commonly-needed missing syscalls, implement the highest-value ones, and expand integration test coverage for both new and existing syscalls.
+
+**Target features:**
+- Systematic audit of missing Linux syscalls vs implemented
+- Implementation of highest-value missing syscalls
+- Integration tests for new syscalls and untested existing ones
+- Dual-arch (x86_64 + aarch64) for all additions
 
 ### Out of Scope
 
