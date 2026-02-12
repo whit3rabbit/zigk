@@ -432,6 +432,16 @@ export fn main(argc: i32, argv: [*][*:0]u8) i32 {
     runner.runTest("fs_extras: futimesat basic", fs_extras_tests.testFutimesatBasic);
     runner.runTest("fs_extras: futimesat specific time", fs_extras_tests.testFutimesatSpecificTime);
 
+    // Phase 15: File Synchronization tests
+    runner.runTest("sync: fsync on regular file", fs_extras_tests.testFsyncOnRegularFile);
+    runner.runTest("sync: fsync on read-only file", fs_extras_tests.testFsyncOnReadOnlyFile);
+    runner.runTest("sync: fsync invalid fd", fs_extras_tests.testFsyncInvalidFd);
+    runner.runTest("sync: fdatasync on regular file", fs_extras_tests.testFdatasyncOnRegularFile);
+    runner.runTest("sync: fdatasync invalid fd", fs_extras_tests.testFdatasyncInvalidFd);
+    runner.runTest("sync: sync global", fs_extras_tests.testSyncGlobal);
+    runner.runTest("sync: syncfs on open file", fs_extras_tests.testSyncfsOnOpenFile);
+    runner.runTest("sync: syncfs invalid fd", fs_extras_tests.testSyncfsInvalidFd);
+
     // Phase 5: Vectored & Positional I/O tests (non-SFS first, SFS last due to deadlock)
     runner.runTest("vectored_io: readv basic", vectored_io_tests.testReadvBasic);
     runner.runTest("vectored_io: readv empty vec", vectored_io_tests.testReadvEmptyVec);

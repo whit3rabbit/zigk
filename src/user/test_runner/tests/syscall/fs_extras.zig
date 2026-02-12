@@ -341,3 +341,126 @@ pub fn testFutimesatSpecificTime() !void {
     // Cleanup
     syscall.unlink(path) catch {};
 }
+
+// FS-06: fsync, fdatasync, sync, syncfs tests
+
+/// Test fsync on a regular writable file -- should succeed
+pub fn testFsyncOnRegularFile() !void {
+    const path = "/mnt/test_fsync_file";
+
+    // Create and write to file
+    const fd = syscall.open(path, syscall.O_WRONLY | syscall.O_CREAT | syscall.O_TRUNC, 0o644) catch {
+        return error.SkipTest;
+    };
+    const test_data = "fsync test data";
+    _ = syscall.write(fd, test_data.ptr, test_data.len) catch {
+        syscall.close(fd) catch {};
+        syscall.unlink(path) catch {};
+        return error.SkipTest;
+    };
+
+    // Call fsync -- should succeed
+    syscall.fsync(fd) catch {
+        syscall.close(fd) catch {};
+        syscall.unlink(path) catch {};
+        return error.TestFailed;
+    };
+
+    // Cleanup
+    syscall.close(fd) catch {};
+    syscall.unlink(path) catch {};
+}
+
+/// Test fsync on a read-only file -- should succeed (Linux behavior)
+pub fn testFsyncOnReadOnlyFile() !void {
+    // Open InitRD file read-only
+    const fd = syscall.open("/shell.elf", syscall.O_RDONLY, 0) catch {
+        return error.SkipTest;
+    };
+
+    // Call fsync on read-only fd -- should succeed
+    syscall.fsync(fd) catch {
+        syscall.close(fd) catch {};
+        return error.TestFailed;
+    };
+
+    // Cleanup
+    syscall.close(fd) catch {};
+}
+
+/// Test fsync with invalid fd -- should return EBADF
+pub fn testFsyncInvalidFd() !void {
+    if (syscall.fsync(999)) |_| {
+        return error.TestFailed; // Should have errored
+    } else |err| {
+        if (err != error.BadFileDescriptor) return error.TestFailed;
+    }
+}
+
+/// Test fdatasync on a regular writable file -- should succeed
+pub fn testFdatasyncOnRegularFile() !void {
+    const path = "/mnt/test_fdatasync_file";
+
+    // Create and write to file
+    const fd = syscall.open(path, syscall.O_WRONLY | syscall.O_CREAT | syscall.O_TRUNC, 0o644) catch {
+        return error.SkipTest;
+    };
+    const test_data = "fdatasync test data";
+    _ = syscall.write(fd, test_data.ptr, test_data.len) catch {
+        syscall.close(fd) catch {};
+        syscall.unlink(path) catch {};
+        return error.SkipTest;
+    };
+
+    // Call fdatasync -- should succeed
+    syscall.fdatasync(fd) catch {
+        syscall.close(fd) catch {};
+        syscall.unlink(path) catch {};
+        return error.TestFailed;
+    };
+
+    // Cleanup
+    syscall.close(fd) catch {};
+    syscall.unlink(path) catch {};
+}
+
+/// Test fdatasync with invalid fd -- should return EBADF
+pub fn testFdatasyncInvalidFd() !void {
+    if (syscall.fdatasync(999)) |_| {
+        return error.TestFailed; // Should have errored
+    } else |err| {
+        if (err != error.BadFileDescriptor) return error.TestFailed;
+    }
+}
+
+/// Test sync -- global flush, always succeeds
+pub fn testSyncGlobal() !void {
+    // sync_() has void return, cannot fail
+    syscall.sync_();
+}
+
+/// Test syncfs on an open file -- should succeed
+pub fn testSyncfsOnOpenFile() !void {
+    // Open any file
+    const fd = syscall.open("/shell.elf", syscall.O_RDONLY, 0) catch {
+        return error.SkipTest;
+    };
+
+    // Call syncfs -- should succeed
+    syscall.syncfs(fd) catch {
+        syscall.close(fd) catch {};
+        return error.TestFailed;
+    };
+
+    // Cleanup
+    syscall.close(fd) catch {};
+}
+
+/// Test syncfs with invalid fd -- should return EBADF
+pub fn testSyncfsInvalidFd() !void {
+    if (syscall.syncfs(999)) |_| {
+        return error.TestFailed; // Should have errored
+    } else |err| {
+        if (err != error.BadFileDescriptor) return error.TestFailed;
+    }
+}
