@@ -105,10 +105,10 @@
   4. User can call syncfs to flush buffers for a specific mounted filesystem
   5. All sync syscalls work on both x86_64 and aarch64
 
-**Plans**: TBD
+**Plans**: 1 plan
 
 Plans:
-- [ ] 15-01: TBD
+- [ ] 15-01-PLAN.md -- Implement fsync, fdatasync, sync, syncfs syscalls with wrappers and tests
 
 #### Phase 16: Advanced File Operations
 **Goal**: File space can be pre-allocated and renamed atomically with flags
