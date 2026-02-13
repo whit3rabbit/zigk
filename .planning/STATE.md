@@ -9,19 +9,19 @@ See: .planning/PROJECT.md (updated 2026-02-11)
 
 ## Current Position
 
-Phase: 17 of 26 (Zero-Copy I/O) -- IN PROGRESS
-Plan: 1 of 1 complete
-Status: Phase complete, needs verification
-Last activity: 2026-02-13 - Phase 17-01 complete: splice, tee, vmsplice, copy_file_range syscalls
+Phase: 17 of 26 (Zero-Copy I/O) -- COMPLETE
+Plan: 2 of 2 complete
+Status: Phase fully verified, all tests passing
+Last activity: 2026-02-13 - Phase 17-02 complete: gap closure, all 10 zero_copy_io tests pass
 
-Progress: [█████████████████░░░░░░░░░░░░░░░░░░░░░░░░░] 58% (44/75+ plans complete from v1.0+v1.1+v1.2)
+Progress: [█████████████████░░░░░░░░░░░░░░░░░░░░░░░░░] 60% (45/75+ plans complete from v1.0+v1.1+v1.2)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 44 (v1.0: 29, v1.1: 12, v1.2: 3)
-- Average duration: ~7.8 min per plan
-- Total execution time: ~5.95 hours over 5 days
+- Total plans completed: 45 (v1.0: 29, v1.1: 12, v1.2: 4)
+- Average duration: ~7.9 min per plan
+- Total execution time: ~6.15 hours over 5 days
 
 **By Milestone:**
 
@@ -29,11 +29,12 @@ Progress: [█████████████████░░░░░░
 |-----------|--------|-------|----------|
 | v1.0 | 1-9 | 29 | 4 days |
 | v1.1 | 10-14 | 12 | 2 days |
-| v1.2 | 15-26 | 3 (in progress) | Started |
+| v1.2 | 15-26 | 4 (in progress) | Started |
 
 **Recent Trend:**
-- Last plan (v1.2 Phase 17-01): 11 minutes, 4 syscalls, 10 tests, dual-arch build
-- Trend: Stable velocity, comprehensive syscall coverage continuing
+- Last plan (v1.2 Phase 17-02): 11 minutes, gap closure, 10 tests passing
+- Phase 17-01: 11 minutes, 4 syscalls, 10 tests, dual-arch build
+- Trend: Stable velocity, gap closure pattern working well
 
 ## Accumulated Context
 
@@ -41,6 +42,8 @@ Progress: [█████████████████░░░░░░
 
 Recent decisions affecting current work (full log in PROJECT.md):
 
+- **v1.2 Phase 17-02**: sys_tee loop removal - peekPipeBuffer doesn't advance read_pos, single peek+write prevents data duplication
+- **v1.2 Phase 17-02**: Test reordering pattern - non-SFS tests first maximizes coverage despite SFS close deadlock
 - **v1.2 Phase 17**: Zero-copy I/O uses 64KB kernel buffer copies (same as sendfile) - No page cache means true zero-copy deferred
 - **v1.2 Phase 17**: Pipe helper functions keep pipe internals encapsulated - isPipe/getPipeHandle/read/write/peekPipeBuffer
 - **v1.2 Phase 16**: fallocate mode=0 uses fstat+truncate to extend files; SFS truncateFd now supports extension
@@ -67,9 +70,9 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-02-13
-Stopped at: Completed Phase 17-01: Zero-Copy I/O syscalls
+Stopped at: Completed Phase 17-02: Zero-Copy I/O gap closure - all tests passing
 Resume file: None
 
 ---
 *State initialized: 2026-02-06*
-*Last updated: 2026-02-12 after Phase 16 verification*
+*Last updated: 2026-02-13 after Phase 17 completion*
