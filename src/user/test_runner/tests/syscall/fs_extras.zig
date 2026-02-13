@@ -1070,37 +1070,50 @@ pub fn testCopyFileRangeBasic() !void {
 
 /// Test copy_file_range with offsets
 pub fn testCopyFileRangeWithOffsets() !void {
-    const path = "/mnt/zcio_cfo.txt";
+    const dst_path = "/mnt/zcio_cfo.txt";
 
-    // Create file with known content, keep open as O_RDWR to avoid SFS close deadlock
-    const fd = syscall.open(path, syscall.O_CREAT | syscall.O_RDWR, 0o644) catch |err| {
+    // Source: InitRD file (we'll copy from offset 10)
+    const src_fd = try syscall.open("/shell.elf", syscall.O_RDONLY, 0);
+    // Don't defer close - we'll close InitRD fd explicitly (safe, not SFS)
+
+    // Destination: SFS file, keep open as O_RDWR to avoid SFS close deadlock
+    const dst_fd = syscall.open(dst_path, syscall.O_CREAT | syscall.O_RDWR, 0o644) catch |err| {
+        syscall.close(src_fd) catch {};
         if (err == error.ReadOnlyFileSystem) return error.SkipTest;
         return err;
     };
+    // Do NOT close dst_fd (SFS deadlock avoidance)
 
-    // Write "ABCDEFGHIJ" (10 bytes)
-    _ = try syscall.write(fd, "ABCDEFGHIJ", 10);
-
-    // Copy 4 bytes from offset 3 to offset 5 (same file)
-    var off_in: u64 = 3;
+    // Copy 16 bytes from offset 10 to offset 5
+    var off_in: u64 = 10;
     var off_out: u64 = 5;
-    const copied = try syscall.copy_file_range(fd, &off_in, fd, &off_out, 4, 0);
-    if (copied != 4) return error.TestFailed;
+    const copied = syscall.copy_file_range(src_fd, &off_in, dst_fd, &off_out, 16, 0) catch |err| {
+        syscall.close(src_fd) catch {};
+        return err;
+    };
+    syscall.close(src_fd) catch {}; // Safe: InitRD close doesn't deadlock
+
+    if (copied != 16) return error.TestFailed;
 
     // Verify offsets updated
-    if (off_in != 7 or off_out != 9) return error.TestFailed;
+    if (off_in != 26 or off_out != 21) return error.TestFailed;
 
-    // Seek to 0 and read full content
-    _ = try syscall.lseek(fd, 0, 0);
-    var buf: [10]u8 = undefined;
-    const read_len = try syscall.read(fd, &buf, 10);
-    if (read_len != 10) return error.TestFailed;
+    // Verify content by reading back from offset 5
+    _ = try syscall.lseek(dst_fd, 5, 0);
+    var buf: [16]u8 = undefined;
+    const read_len = try syscall.read(dst_fd, &buf, 16);
+    if (read_len != 16) return error.TestFailed;
 
-    // After copy: "ABCDEDEFGJ" -- bytes 5-8 should be "DEFG"
-    if (!std.mem.eql(u8, buf[5..9], "DEFG")) {
+    // Verify content matches direct pread from source
+    const src_fd2 = try syscall.open("/shell.elf", syscall.O_RDONLY, 0);
+    var direct_buf: [16]u8 = undefined;
+    const direct_len = try syscall.pread64(src_fd2, &direct_buf, 16, 10);
+    syscall.close(src_fd2) catch {};
+
+    if (direct_len != 16 or !std.mem.eql(u8, &buf, &direct_buf)) {
         return error.TestFailed;
     }
-    // Leave fd open (SFS deadlock workaround)
+    // Leave dst_fd open (SFS deadlock workaround)
 }
 
 /// Test copy_file_range with invalid flags returns EINVAL
