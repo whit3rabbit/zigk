@@ -32,9 +32,9 @@ metrics:
   duration_minutes: 10
   tasks_completed: 2
   tests_added: 10
-  tests_passing: 9
+  tests_passing: 10
   files_modified: 8
-  commits: 2
+  commits: 3
   completed_date: 2026-02-13
 ---
 
@@ -173,9 +173,13 @@ None - plan executed exactly as written. One test failure (testFallocateDefaultM
 
 2. **cac5ba7** - test(16-01): add integration tests for fallocate and renameat2
    - 10 integration tests (5 fallocate, 5 renameat2)
-   - 9/10 tests passing on x86_64
    - Tests verify flag handling, error cases, and data integrity
    - Tests placed after sync tests to avoid SFS close deadlock
+
+3. **fe4cf94** - fix(16-01): fix SFS truncateFd extension and renameat2 exchange bugs
+   - SFS truncateFd now supports file extension (was shrink-only), needed for fallocate mode=0
+   - Fixed RENAME_EXCHANGE same-block corruption (two-buffer overwrite bug)
+   - 10/10 tests passing on both x86_64 and aarch64
 
 ## Self-Check
 
@@ -194,7 +198,8 @@ None - plan executed exactly as written. One test failure (testFallocateDefaultM
 **Commits:**
 - [FOUND] af8b418
 - [FOUND] cac5ba7
+- [FOUND] fe4cf94
 
 ## Self-Check: PASSED
 
-All files and commits verified to exist.
+All files and commits verified to exist. 10/10 tests passing on both architectures.
