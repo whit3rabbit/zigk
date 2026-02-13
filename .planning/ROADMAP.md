@@ -136,10 +136,11 @@ Plans:
   4. User can call copy_file_range to copy data between two files within the kernel
   5. All operations return correct byte counts and handle partial transfers
 
-**Plans**: 1 plan
+**Plans**: 2 plans
 
 Plans:
-- [ ] 17-01-PLAN.md -- Implement splice, tee, vmsplice, copy_file_range syscalls with pipe helpers and tests
+- [x] 17-01-PLAN.md -- Implement splice, tee, vmsplice, copy_file_range syscalls with pipe helpers and tests
+- [ ] 17-02-PLAN.md -- Fix tee repeated-peek bug, rewrite copy_file_range tests to avoid SFS deadlock
 
 #### Phase 18: Memory Management Extensions
 **Goal**: Advanced memory operations (anonymous files, remap, sync) are available
@@ -287,7 +288,7 @@ Plans:
 ## Progress
 
 **Execution Order:**
-Phases execute in numeric order: 15 → 16 → 17 → 18 → 19 → 20 → 21 → 22 → 23 → 24 → 25 → 26
+Phases execute in numeric order: 15 -> 16 -> 17 -> 18 -> 19 -> 20 -> 21 -> 22 -> 23 -> 24 -> 25 -> 26
 
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
@@ -307,7 +308,7 @@ Phases execute in numeric order: 15 → 16 → 17 → 18 → 19 → 20 → 21 �
 | 14. WaitQueue Blocking & Optimizations | v1.1 | 7/7 | Complete | 2026-02-11 |
 | 15. File Synchronization | v1.2 | 1/1 | Complete | 2026-02-12 |
 | 16. Advanced File Operations | v1.2 | 1/1 | Complete | 2026-02-12 |
-| 17. Zero-Copy I/O | v1.2 | 0/1 | Planned | - |
+| 17. Zero-Copy I/O | v1.2 | 1/2 | In Progress | - |
 | 18. Memory Management Extensions | v1.2 | 0/TBD | Not started | - |
 | 19. Process Control Extensions | v1.2 | 0/TBD | Not started | - |
 | 20. Signal Handling Extensions | v1.2 | 0/TBD | Not started | - |
@@ -320,4 +321,4 @@ Phases execute in numeric order: 15 → 16 → 17 → 18 → 19 → 20 → 21 �
 
 ---
 *Roadmap created: 2026-02-11*
-*Last updated: 2026-02-12*
+*Last updated: 2026-02-13*
