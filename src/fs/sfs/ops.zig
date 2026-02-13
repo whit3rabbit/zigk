@@ -1927,35 +1927,43 @@ pub fn sfsRename2(ctx: ?*anyopaque, old_path: []const u8, new_path: []const u8, 
             const lock_held = self.alloc_lock.acquire();
             defer lock_held.release();
 
-            // Re-read both blocks under lock (TOCTOU prevention)
+            // Re-read blocks under lock (TOCTOU prevention)
             sfs_io.readSector(self, self.superblock.root_dir_start + old_block_idx, &old_block_buf) catch return vfs.Error.IOError;
 
             if (same_block) {
-                @memcpy(&new_block_buf, &old_block_buf);
+                // Both entries in same sector: use single buffer for both pointers
+                const old_e: *t.DirEntry = @ptrCast(@alignCast(&old_block_buf[old_offset_in_block]));
+                const new_e: *t.DirEntry = @ptrCast(@alignCast(&old_block_buf[new_offset_in_block]));
+
+                if (old_e.flags != 1) return vfs.Error.NotFound;
+                if (new_e.flags != 1) return vfs.Error.NotFound;
+
+                const old_e_name = std.mem.sliceTo(&old_e.name, 0);
+                const new_e_name = std.mem.sliceTo(&new_e.name, 0);
+                if (!std.mem.eql(u8, old_e_name, old_name)) return vfs.Error.NotFound;
+                if (!std.mem.eql(u8, new_e_name, new_name)) return vfs.Error.NotFound;
+
+                const temp_name: [32]u8 = old_e.name;
+                old_e.name = new_e.name;
+                new_e.name = temp_name;
             } else {
+                // Different sectors: swap across two buffers
                 sfs_io.readSector(self, self.superblock.root_dir_start + new_block_idx, &new_block_buf) catch return vfs.Error.IOError;
-            }
 
-            const old_e: *t.DirEntry = @ptrCast(@alignCast(&old_block_buf[old_offset_in_block]));
-            const new_e: *t.DirEntry = @ptrCast(@alignCast(&new_block_buf[new_offset_in_block]));
+                const old_e: *t.DirEntry = @ptrCast(@alignCast(&old_block_buf[old_offset_in_block]));
+                const new_e: *t.DirEntry = @ptrCast(@alignCast(&new_block_buf[new_offset_in_block]));
 
-            // Re-validate both entries under lock
-            if (old_e.flags != 1) return vfs.Error.NotFound;
-            if (new_e.flags != 1) return vfs.Error.NotFound;
+                if (old_e.flags != 1) return vfs.Error.NotFound;
+                if (new_e.flags != 1) return vfs.Error.NotFound;
 
-            const old_e_name = std.mem.sliceTo(&old_e.name, 0);
-            const new_e_name = std.mem.sliceTo(&new_e.name, 0);
-            if (!std.mem.eql(u8, old_e_name, old_name)) return vfs.Error.NotFound;
-            if (!std.mem.eql(u8, new_e_name, new_name)) return vfs.Error.NotFound;
+                const old_e_name = std.mem.sliceTo(&old_e.name, 0);
+                const new_e_name = std.mem.sliceTo(&new_e.name, 0);
+                if (!std.mem.eql(u8, old_e_name, old_name)) return vfs.Error.NotFound;
+                if (!std.mem.eql(u8, new_e_name, new_name)) return vfs.Error.NotFound;
 
-            // Swap the names
-            const temp_name: [32]u8 = old_e.name;
-            old_e.name = new_e.name;
-            new_e.name = temp_name;
-
-            // If same block, copy modifications back
-            if (same_block) {
-                @memcpy(&old_block_buf, &new_block_buf);
+                const temp_name: [32]u8 = old_e.name;
+                old_e.name = new_e.name;
+                new_e.name = temp_name;
             }
         }
 
@@ -2194,59 +2202,142 @@ pub fn truncateFd(file_desc: *fd.FileDescriptor, length: usize) !void {
     if (file.entry_idx >= t.MAX_FILES) return error.IOError;
 
     if (length > std.math.maxInt(u32)) return error.TooLarge;
-    if (length > file.size) return error.TooLarge;
 
-    // Capture block info under lock, then free blocks OUTSIDE the lock.
-    // freeBlocks -> freeBlock acquires alloc_lock internally, so calling it
-    // while already holding alloc_lock would self-deadlock (non-reentrant spinlock).
-    var free_start: u32 = 0;
-    var free_count: u32 = 0;
-    {
-        const held = file.fs.alloc_lock.acquire();
-        defer held.release();
+    const new_size: u32 = @intCast(length);
 
-        if (length > file.size) return error.TooLarge;
-
-        const new_size: u32 = @intCast(length);
+    if (length > file.size) {
+        // Extension path: allocate blocks and zero-fill (same pattern as sfsWrite)
         const current_blocks: u32 = if (file.size == 0) 1 else (file.size + 511) / 512;
-        const requested_blocks: u32 = if (new_size == 0) 1 else (new_size + 511) / 512;
+        const requested_blocks: u32 = (new_size + 511) / 512;
 
-        if (requested_blocks < current_blocks) {
-            free_start = file.start_block + requested_blocks;
-            free_count = current_blocks - requested_blocks;
+        if (requested_blocks > current_blocks) {
+            // Allocate additional blocks under alloc_lock
+            var old_next_free: u32 = 0;
+            var blocks_added: u32 = 0;
+            {
+                const alloc_held = file.fs.alloc_lock.acquire();
+                defer alloc_held.release();
 
-            const end_block = file.start_block + current_blocks;
-            if (end_block == file.fs.superblock.next_free_block) {
-                file.fs.superblock.next_free_block = file.start_block + requested_blocks;
-                sfs_io.updateSuperblock(file.fs) catch return error.IOError;
+                // Re-check under lock
+                const cur_blocks: u32 = if (file.size == 0) 1 else (file.size + 511) / 512;
+                if (requested_blocks > cur_blocks) {
+                    const end_block = file.start_block + cur_blocks;
+                    if (end_block != file.fs.superblock.next_free_block) {
+                        if (file.size != 0) return error.IOError; // ENOSPC: file not at allocation frontier
+                    }
+
+                    blocks_added = requested_blocks - cur_blocks;
+                    if (blocks_added > file.fs.superblock.free_blocks) return error.IOError;
+
+                    const new_next_free = std.math.add(u32, file.fs.superblock.next_free_block, blocks_added) catch return error.IOError;
+                    if (new_next_free > file.fs.superblock.total_blocks) return error.IOError;
+
+                    old_next_free = file.fs.superblock.next_free_block;
+                    file.fs.superblock.next_free_block = new_next_free;
+                    file.fs.superblock.free_blocks -= blocks_added;
+                }
+            }
+
+            // Persist superblock after lock release
+            if (blocks_added > 0) {
+                sfs_io.updateSuperblock(file.fs) catch {
+                    const rollback_held = file.fs.alloc_lock.acquire();
+                    defer rollback_held.release();
+                    file.fs.superblock.next_free_block = old_next_free;
+                    file.fs.superblock.free_blocks += blocks_added;
+                    return error.IOError;
+                };
             }
         }
 
-        file.size = new_size;
+        // Zero-fill from old size to new size (prevent information leaks)
+        var fill_pos: u64 = file.size;
+        while (fill_pos < new_size) {
+            const sector_idx = @as(u32, @intCast(fill_pos / 512));
+            const sector_offset = @as(u32, @intCast(fill_pos % 512));
+            const abs_sector = file.start_block + sector_idx;
 
+            var sector_buf: [512]u8 align(4) = undefined;
+            if (sector_offset > 0) {
+                // Partial sector: read existing, zero the rest
+                sfs_io.readSector(file.fs, abs_sector, &sector_buf) catch return error.IOError;
+            } else {
+                @memset(&sector_buf, 0);
+            }
+            const fill_end = @min(512, sector_offset + (new_size - @as(u32, @intCast(fill_pos))));
+            @memset(sector_buf[sector_offset..fill_end], 0);
+            sfs_io.writeSector(file.fs, abs_sector, &sector_buf) catch return error.IOError;
+            fill_pos += (fill_end - sector_offset);
+        }
+
+        // Update size and directory entry under alloc_lock
         {
-            const fd_lock = file_desc.lock.acquire();
-            defer fd_lock.release();
-            if (file_desc.position > new_size) {
-                file_desc.position = new_size;
+            const held = file.fs.alloc_lock.acquire();
+            defer held.release();
+
+            file.size = new_size;
+
+            const block_idx = file.entry_idx / 4;
+            const offset_idx = file.entry_idx % 4;
+
+            var dir_buf: [512]u8 align(4) = undefined;
+            sfs_io.readSector(file.fs, file.fs.superblock.root_dir_start + block_idx, &dir_buf) catch return error.IOError;
+
+            const entry: *t.DirEntry = @ptrCast(@alignCast(&dir_buf[offset_idx * 128]));
+            entry.size = file.size;
+
+            sfs_io.writeSector(file.fs, file.fs.superblock.root_dir_start + block_idx, &dir_buf) catch return error.IOError;
+        }
+    } else {
+        // Shrink path: capture block info under lock, free blocks outside
+        var free_start: u32 = 0;
+        var free_count: u32 = 0;
+        {
+            const held = file.fs.alloc_lock.acquire();
+            defer held.release();
+
+            if (length > file.size) return error.TooLarge;
+
+            const current_blocks: u32 = if (file.size == 0) 1 else (file.size + 511) / 512;
+            const requested_blocks: u32 = if (new_size == 0) 1 else (new_size + 511) / 512;
+
+            if (requested_blocks < current_blocks) {
+                free_start = file.start_block + requested_blocks;
+                free_count = current_blocks - requested_blocks;
+
+                const end_block = file.start_block + current_blocks;
+                if (end_block == file.fs.superblock.next_free_block) {
+                    file.fs.superblock.next_free_block = file.start_block + requested_blocks;
+                    sfs_io.updateSuperblock(file.fs) catch return error.IOError;
+                }
             }
+
+            file.size = new_size;
+
+            {
+                const fd_lock = file_desc.lock.acquire();
+                defer fd_lock.release();
+                if (file_desc.position > new_size) {
+                    file_desc.position = new_size;
+                }
+            }
+
+            const block_idx = file.entry_idx / 4;
+            const offset_idx = file.entry_idx % 4;
+
+            var dir_buf: [512]u8 align(4) = undefined;
+            sfs_io.readSector(file.fs, file.fs.superblock.root_dir_start + block_idx, &dir_buf) catch return error.IOError;
+
+            const entry: *t.DirEntry = @ptrCast(@alignCast(&dir_buf[offset_idx * 128]));
+            entry.size = file.size;
+
+            sfs_io.writeSector(file.fs, file.fs.superblock.root_dir_start + block_idx, &dir_buf) catch return error.IOError;
         }
 
-        const block_idx = file.entry_idx / 4;
-        const offset_idx = file.entry_idx % 4;
-
-        var dir_buf: [512]u8 align(4) = undefined;
-        sfs_io.readSector(file.fs, file.fs.superblock.root_dir_start + block_idx, &dir_buf) catch return error.IOError;
-
-        const entry: *t.DirEntry = @ptrCast(@alignCast(&dir_buf[offset_idx * 128]));
-        entry.size = file.size;
-
-        sfs_io.writeSector(file.fs, file.fs.superblock.root_dir_start + block_idx, &dir_buf) catch return error.IOError;
-    }
-
-    // Free blocks OUTSIDE the lock -- freeBlock acquires alloc_lock internally
-    if (free_count > 0) {
-        sfs_alloc.freeBlocks(file.fs, free_start, free_count);
+        // Free blocks OUTSIDE the lock -- freeBlock acquires alloc_lock internally
+        if (free_count > 0) {
+            sfs_alloc.freeBlocks(file.fs, free_start, free_count);
+        }
     }
 }
 
