@@ -626,3 +626,117 @@ pub fn writeAsync(fd: *fd_mod.FileDescriptor, request: *IoRequest, buf: []const 
     pipe.pending_write = request;
     return false; // Pending
 }
+
+// =============================================================================
+// Splice API (Phase 17)
+// =============================================================================
+
+/// Check if a file descriptor is a pipe
+pub fn isPipe(fd: *fd_mod.FileDescriptor) bool {
+    return fd.ops == &pipe_ops;
+}
+
+/// Get pipe handle from FD if it's a pipe
+pub fn getPipeHandle(fd: *fd_mod.FileDescriptor) ?*PipeHandle {
+    if (!isPipe(fd)) return null;
+    return @ptrCast(@alignCast(fd.private_data));
+}
+
+/// Read from pipe buffer (kernel-side, for splice)
+/// Returns bytes read. Caller must validate handle.end == .Read before calling.
+pub fn readFromPipeBuffer(handle: *PipeHandle, buf: []u8) usize {
+    const pipe = handle.pipe;
+
+    const held = pipe.lock.acquire();
+    defer held.release();
+
+    if (pipe.data_len == 0) return 0;
+
+    const read_len = @min(buf.len, pipe.data_len);
+
+    // Handle wrap-around
+    const first_chunk = @min(read_len, PIPE_BUF_SIZE - pipe.read_pos);
+    hal.mem.copy(buf[0..first_chunk].ptr, pipe.buffer[pipe.read_pos..][0..first_chunk].ptr, first_chunk);
+
+    if (first_chunk < read_len) {
+        const second_chunk = read_len - first_chunk;
+        hal.mem.copy(buf[first_chunk..read_len].ptr, pipe.buffer[0..second_chunk].ptr, second_chunk);
+    }
+
+    pipe.read_pos = (pipe.read_pos + read_len) % PIPE_BUF_SIZE;
+    pipe.data_len -= read_len;
+
+    // Wake up writers
+    if (pipe.blocked_writers) |t| {
+        pipe.blocked_writers = null;
+        pipe.writer_woken.store(true, .release);
+        sched.unblock(t);
+    }
+
+    return read_len;
+}
+
+/// Write to pipe buffer (kernel-side, for splice)
+/// Returns bytes written. Caller must validate handle.end == .Write before calling.
+pub fn writeToPipeBuffer(handle: *PipeHandle, buf: []const u8) usize {
+    const pipe = handle.pipe;
+
+    const held = pipe.lock.acquire();
+    defer held.release();
+
+    // Check if readers exist
+    if (pipe.readers == 0) return 0;
+
+    const space = PIPE_BUF_SIZE - pipe.data_len;
+    if (space == 0) return 0;
+
+    const to_write = @min(buf.len, space);
+
+    // Handle wrap-around
+    const first_chunk = @min(to_write, PIPE_BUF_SIZE - pipe.write_pos);
+    hal.mem.copy(pipe.buffer[pipe.write_pos..][0..first_chunk].ptr, buf[0..first_chunk].ptr, first_chunk);
+
+    if (first_chunk < to_write) {
+        const second_chunk = to_write - first_chunk;
+        hal.mem.copy(pipe.buffer[0..second_chunk].ptr, buf[first_chunk..to_write].ptr, second_chunk);
+    }
+
+    pipe.write_pos = (pipe.write_pos + to_write) % PIPE_BUF_SIZE;
+    pipe.data_len += to_write;
+
+    // Wake up readers
+    if (pipe.blocked_readers) |t| {
+        pipe.blocked_readers = null;
+        pipe.reader_woken.store(true, .release);
+        sched.unblock(t);
+    }
+
+    return to_write;
+}
+
+/// Peek at pipe buffer without consuming (for tee)
+/// Returns bytes peeked. Caller must validate handle.end == .Read before calling.
+pub fn peekPipeBuffer(handle: *PipeHandle, buf: []u8) usize {
+    const pipe = handle.pipe;
+
+    const held = pipe.lock.acquire();
+    defer held.release();
+
+    if (pipe.data_len == 0) return 0;
+
+    const peek_len = @min(buf.len, pipe.data_len);
+
+    // Handle wrap-around (read from read_pos without advancing it)
+    const first_chunk = @min(peek_len, PIPE_BUF_SIZE - pipe.read_pos);
+    hal.mem.copy(buf[0..first_chunk].ptr, pipe.buffer[pipe.read_pos..][0..first_chunk].ptr, first_chunk);
+
+    if (first_chunk < peek_len) {
+        const second_chunk = peek_len - first_chunk;
+        hal.mem.copy(buf[first_chunk..peek_len].ptr, pipe.buffer[0..second_chunk].ptr, second_chunk);
+    }
+
+    // Do NOT advance read_pos or update data_len
+    // Do NOT wake writers (we didn't free any space)
+
+    return peek_len;
+}

@@ -1336,6 +1336,7 @@ pub fn build(b: *std.Build) void {
     syscall_io_module.addImport("console", console_module);
     syscall_io_module.addImport("fs", fs_module);
     syscall_io_module.addImport("heap", heap_module);
+    syscall_io_module.addImport("pipe", pipe_module);
     syscall_io_module.addImport("fd", fd_module);
     syscall_io_module.addImport("user_mem", user_mem_module);
     syscall_io_module.addImport("hal", hal_module);

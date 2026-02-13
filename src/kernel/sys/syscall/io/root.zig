@@ -5,6 +5,7 @@ const fcntl = @import("fcntl.zig");
 const eventfd = @import("eventfd.zig");
 const timerfd = @import("timerfd.zig");
 const signalfd = @import("signalfd.zig");
+const splice_mod = @import("splice.zig");
 
 // Export public syscall handlers
 pub const sys_read = read_write.sys_read;
@@ -42,3 +43,8 @@ pub const sys_chdir = dir.sys_chdir;
 
 pub const sys_fcntl = fcntl.sys_fcntl;
 pub const sys_ioctl = fcntl.sys_ioctl;
+
+pub const sys_splice = splice_mod.sys_splice;
+pub const sys_tee = splice_mod.sys_tee;
+pub const sys_vmsplice = splice_mod.sys_vmsplice;
+pub const sys_copy_file_range = splice_mod.sys_copy_file_range;
