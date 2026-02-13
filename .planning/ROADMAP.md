@@ -120,10 +120,10 @@ Plans:
   3. User can call renameat2 with RENAME_EXCHANGE to atomically swap two files
   4. Both syscalls work correctly on SFS and InitRD where applicable
 
-**Plans**: TBD
+**Plans**: 1 plan
 
 Plans:
-- [ ] 16-01: TBD
+- [ ] 16-01-PLAN.md -- Implement fallocate and renameat2 syscalls with VFS/SFS support and tests
 
 #### Phase 17: Zero-Copy I/O
 **Goal**: Data can be moved between file descriptors and pipes without user-space copies
