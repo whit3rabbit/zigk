@@ -152,10 +152,10 @@ Plans:
   3. User can call msync to flush changes in a memory-mapped region back to the underlying file
   4. memfd files can be mmap'd, written to, and shared across processes
 
-**Plans**: TBD
+**Plans**: 1 plan
 
 Plans:
-- [ ] 18-01: TBD
+- [ ] 18-01-PLAN.md -- Implement memfd_create, mremap, msync with PMM-backed memfd FileOps and tests
 
 #### Phase 19: Process Control Extensions
 **Goal**: Modern process creation and waiting mechanisms are available
@@ -309,7 +309,7 @@ Phases execute in numeric order: 15 -> 16 -> 17 -> 18 -> 19 -> 20 -> 21 -> 22 ->
 | 15. File Synchronization | v1.2 | 1/1 | Complete | 2026-02-12 |
 | 16. Advanced File Operations | v1.2 | 1/1 | Complete | 2026-02-12 |
 | 17. Zero-Copy I/O | v1.2 | 2/2 | Complete | 2026-02-13 |
-| 18. Memory Management Extensions | v1.2 | 0/TBD | Not started | - |
+| 18. Memory Management Extensions | v1.2 | 0/1 | Not started | - |
 | 19. Process Control Extensions | v1.2 | 0/TBD | Not started | - |
 | 20. Signal Handling Extensions | v1.2 | 0/TBD | Not started | - |
 | 21. I/O Multiplexing Extension | v1.2 | 0/TBD | Not started | - |
@@ -321,4 +321,4 @@ Phases execute in numeric order: 15 -> 16 -> 17 -> 18 -> 19 -> 20 -> 21 -> 22 ->
 
 ---
 *Roadmap created: 2026-02-11*
-*Last updated: 2026-02-13 (Phase 17 complete)*
+*Last updated: 2026-02-13 (Phase 18 planned)*
