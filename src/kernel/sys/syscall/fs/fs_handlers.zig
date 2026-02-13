@@ -1227,6 +1227,199 @@ pub fn sys_syncfs(fd_num: usize) base.SyscallError!usize {
 }
 
 // =============================================================================
+// Advanced File Operations (fallocate, renameat2)
+// =============================================================================
+
+/// sys_fallocate (285 on x86_64, 47 on aarch64) - Pre-allocate or manipulate file space
+///
+/// Args:
+///   fd_num: File descriptor number
+///   mode: Allocation mode flags (FALLOC_FL_KEEP_SIZE, FALLOC_FL_PUNCH_HOLE)
+///   offset_arg: Starting offset for allocation (i64)
+///   len_arg: Length of allocation (i64)
+pub fn sys_fallocate(fd_num: usize, mode: usize, offset_arg: usize, len_arg: usize) base.SyscallError!usize {
+    // Mode flags
+    const FALLOC_FL_KEEP_SIZE: usize = 0x01;
+    const FALLOC_FL_PUNCH_HOLE: usize = 0x02;
+
+    // Validate FD
+    const fd_u32 = std.math.cast(u32, fd_num) orelse return error.EBADF;
+    const table = base.getGlobalFdTable();
+    const file_desc = table.get(fd_u32) orelse return error.EBADF;
+
+    // Check fd is writable
+    if (!file_desc.isWritable()) return error.EBADF;
+
+    // Interpret offset and len as i64
+    const offset = @as(i64, @bitCast(@as(u64, offset_arg)));
+    const len = @as(i64, @bitCast(@as(u64, len_arg)));
+
+    // Validate offset and len
+    if (offset < 0) return error.EINVAL;
+    if (len <= 0) return error.EINVAL;
+
+    // Check for PUNCH_HOLE mode (not supported on SFS)
+    if (mode & FALLOC_FL_PUNCH_HOLE != 0) {
+        return error.ENOSYS;
+    }
+
+    // Check for unsupported modes (only KEEP_SIZE is supported)
+    if (mode & ~FALLOC_FL_KEEP_SIZE != 0) {
+        return error.ENOSYS;
+    }
+
+    // Calculate required size
+    const offset_u64 = @as(u64, @intCast(offset));
+    const len_u64 = @as(u64, @intCast(len));
+    const required_size = std.math.add(u64, offset_u64, len_u64) catch return error.EFBIG;
+
+    // Mode == 0: Extend file if needed (default fallocate behavior)
+    if (mode == 0) {
+        // Get current file size via stat
+        var current_size: u64 = 0;
+        if (file_desc.ops.stat) |stat_fn| {
+            var kstat = std.mem.zeroes(uapi.stat.Stat);
+            const result = stat_fn(file_desc, &kstat);
+            if (result < 0) return error.EIO;
+            current_size = @intCast(kstat.size);
+        } else {
+            return error.ENOSYS;
+        }
+
+        if (required_size > current_size) {
+            // Use truncate to extend the file
+            if (file_desc.ops.truncate) |truncate_fn| {
+                truncate_fn(file_desc, required_size) catch |err| {
+                    return switch (err) {
+                        error.AccessDenied => error.EACCES,
+                        error.IOError => error.EIO,
+                    };
+                };
+            } else {
+                return error.ENOSYS;
+            }
+        }
+    }
+
+    // Mode == FALLOC_FL_KEEP_SIZE: Space reservation hint, validate FD only
+    // Since SFS allocates on-demand, this is a no-op after validation
+
+    return 0;
+}
+
+/// Internal: rename2 using kernel-space paths with flags support
+fn renameKernel2(raw_old: []const u8, raw_new: []const u8, flags: u32) base.SyscallError!usize {
+    const alloc = heap.allocator();
+    const c_old_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(c_old_buf);
+    const c_new_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(c_new_buf);
+
+    if (raw_old.len == 0 or raw_new.len == 0) return error.ENOENT;
+
+    const old_path = canonicalizePath(raw_old, c_old_buf) orelse return error.ENOENT;
+    const new_path = canonicalizePath(raw_new, c_new_buf) orelse return error.ENOENT;
+
+    // Define RENAME flags locally
+    const RENAME_NOREPLACE: u32 = 1;
+
+    // RENAME_NOREPLACE: Fast-path check if destination exists
+    if (flags & RENAME_NOREPLACE != 0) {
+        if (fs.vfs.Vfs.statPath(new_path)) |_| {
+            return error.EEXIST;
+        }
+    }
+
+    // Permission check on old file
+    const file_meta = fs.vfs.Vfs.statPath(old_path) orelse return error.ENOENT;
+    const proc = base.getCurrentProcess();
+    if (!@import("perms").checkAccess(proc, file_meta, .Write, old_path)) {
+        return error.EACCES;
+    }
+
+    // Call VFS rename2
+    fs.vfs.Vfs.rename2(old_path, new_path, flags) catch |err| {
+        return switch (err) {
+            error.NotFound => error.ENOENT,
+            error.AccessDenied => error.EACCES,
+            error.AlreadyExists => error.EEXIST,
+            error.NotSupported => error.EROFS,
+            error.IOError => error.EIO,
+            else => error.EIO,
+        };
+    };
+
+    return 0;
+}
+
+/// sys_renameat2 (316 on x86_64, 276 on aarch64) - Rename file with flags
+///
+/// Args:
+///   olddirfd: Old directory file descriptor (or AT_FDCWD)
+///   oldpath_ptr: Old path (relative or absolute)
+///   newdirfd: New directory file descriptor (or AT_FDCWD)
+///   newpath_ptr: New path (relative or absolute)
+///   flags: RENAME_NOREPLACE, RENAME_EXCHANGE, or 0
+pub fn sys_renameat2(olddirfd: usize, oldpath_ptr: usize, newdirfd: usize, newpath_ptr: usize, flags: usize) base.SyscallError!usize {
+    const RENAME_NOREPLACE: u32 = 1;
+    const RENAME_EXCHANGE: u32 = 2;
+
+    const alloc = heap.allocator();
+
+    const old_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(old_buf);
+    const new_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+    defer alloc.free(new_buf);
+
+    const oldpath = user_mem.copyStringFromUser(old_buf, oldpath_ptr) catch |err| {
+        if (err == error.NameTooLong) return error.ENAMETOOLONG;
+        return error.EFAULT;
+    };
+    const newpath = user_mem.copyStringFromUser(new_buf, newpath_ptr) catch |err| {
+        if (err == error.NameTooLong) return error.ENAMETOOLONG;
+        return error.EFAULT;
+    };
+
+    if (oldpath.len == 0 or newpath.len == 0) return error.ENOENT;
+
+    // Validate flags (NOREPLACE and EXCHANGE are mutually exclusive)
+    const flags_u32 = std.math.cast(u32, flags) orelse return error.EINVAL;
+    if (flags_u32 & RENAME_NOREPLACE != 0 and flags_u32 & RENAME_EXCHANGE != 0) {
+        return error.EINVAL;
+    }
+
+    // Resolve old path
+    var resolved_old: []const u8 = undefined;
+    var resolved_old_buf: []u8 = undefined;
+    var need_free_old = false;
+    defer if (need_free_old) alloc.free(resolved_old_buf);
+
+    if (oldpath[0] == '/') {
+        resolved_old = oldpath;
+    } else {
+        resolved_old_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+        need_free_old = true;
+        resolved_old = fd_syscall.resolvePathAt(olddirfd, oldpath, resolved_old_buf) catch |err| return err;
+    }
+
+    // Resolve new path
+    var resolved_new: []const u8 = undefined;
+    var resolved_new_buf: []u8 = undefined;
+    var need_free_new = false;
+    defer if (need_free_new) alloc.free(resolved_new_buf);
+
+    if (newpath[0] == '/') {
+        resolved_new = newpath;
+    } else {
+        resolved_new_buf = alloc.alloc(u8, user_mem.MAX_PATH_LEN) catch return error.ENOMEM;
+        need_free_new = true;
+        resolved_new = fd_syscall.resolvePathAt(newdirfd, newpath, resolved_new_buf) catch |err| return err;
+    }
+
+    return renameKernel2(resolved_old, resolved_new, flags_u32);
+}
+
+// =============================================================================
 // File Timestamp Syscalls (utimensat, futimesat)
 // =============================================================================
 

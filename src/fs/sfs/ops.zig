@@ -1835,6 +1835,145 @@ pub fn sfsRename(ctx: ?*anyopaque, old_path: []const u8, new_path: []const u8) v
     console.info("SFS: Renamed '{s}' to '{s}'", .{ old_name, new_name });
 }
 
+/// Rename a file with flags (RENAME_NOREPLACE, RENAME_EXCHANGE)
+pub fn sfsRename2(ctx: ?*anyopaque, old_path: []const u8, new_path: []const u8, flags: u32) vfs.Error!void {
+    const self: *t.SFS = @ptrCast(@alignCast(ctx));
+    if (!self.mounted) return vfs.Error.IOError;
+
+    // Define flag constants
+    const RENAME_NOREPLACE: u32 = 1;
+    const RENAME_EXCHANGE: u32 = 2;
+
+    // Extract names from paths (strip leading '/')
+    const old_name = if (old_path.len > 0 and old_path[0] == '/') old_path[1..] else old_path;
+    const new_name = if (new_path.len > 0 and new_path[0] == '/') new_path[1..] else new_path;
+
+    // Validate both filenames
+    if (!sfs_alloc.isValidFilename(old_name)) return vfs.Error.AccessDenied;
+    if (!sfs_alloc.isValidFilename(new_name)) return vfs.Error.AccessDenied;
+    if (old_name.len == 0 or old_name.len >= 32) return vfs.Error.NotFound;
+    if (new_name.len == 0 or new_name.len >= 32) return vfs.Error.InvalidPath;
+
+    // If same name, no-op (success)
+    if (std.mem.eql(u8, old_name, new_name)) return;
+
+    // Flags == 0: Delegate to standard rename
+    if (flags == 0) {
+        return sfsRename(ctx, old_path, new_path);
+    }
+
+    // Unsupported flag combinations
+    if (flags & ~(RENAME_NOREPLACE | RENAME_EXCHANGE) != 0) {
+        return vfs.Error.NotSupported;
+    }
+
+    const alloc = heap.allocator();
+    const dir_buf = alloc.alloc(u8, t.ROOT_DIR_BLOCKS * 512) catch return vfs.Error.NoMemory;
+    defer alloc.free(dir_buf);
+
+    // PHASE 1: Read directory UNLOCKED to find both entries
+    var old_idx: ?u32 = null;
+    var new_idx: ?u32 = null;
+    {
+        sfs_io.readDirectoryAsync(self, dir_buf) catch return vfs.Error.IOError;
+
+        const total_entries = t.ROOT_DIR_BLOCKS * 4;
+        var idx: u32 = 0;
+        while (idx < total_entries) : (idx += 1) {
+            const offset = std.math.mul(usize, idx, 128) catch return vfs.Error.IOError;
+            const e: *const t.DirEntry = @ptrCast(@alignCast(&dir_buf[offset]));
+
+            if (e.flags == 1) {
+                const e_name = std.mem.sliceTo(&e.name, 0);
+                if (e_name.len >= 32) continue;
+                if (std.mem.eql(u8, e_name, old_name)) {
+                    old_idx = idx;
+                }
+                if (std.mem.eql(u8, e_name, new_name)) {
+                    new_idx = idx;
+                }
+            }
+        }
+    }
+
+    const old_entry_idx = old_idx orelse return vfs.Error.NotFound;
+
+    // RENAME_NOREPLACE: Fail if new name exists
+    if (flags & RENAME_NOREPLACE != 0) {
+        if (new_idx != null) {
+            return vfs.Error.AlreadyExists;
+        }
+        // No existing new entry, proceed with simple rename
+        return sfsRename(ctx, old_path, new_path);
+    }
+
+    // RENAME_EXCHANGE: Swap the names of two files
+    if (flags & RENAME_EXCHANGE != 0) {
+        const new_entry_idx = new_idx orelse return vfs.Error.NotFound;
+
+        // Calculate block locations
+        const old_block_idx = old_entry_idx / 4;
+        const old_offset_in_block = std.math.mul(usize, old_entry_idx % 4, 128) catch return vfs.Error.IOError;
+        const new_block_idx = new_entry_idx / 4;
+        const new_offset_in_block = std.math.mul(usize, new_entry_idx % 4, 128) catch return vfs.Error.IOError;
+
+        const same_block = (old_block_idx == new_block_idx);
+
+        var old_block_buf: [512]u8 align(4) = [_]u8{0} ** 512;
+        var new_block_buf: [512]u8 align(4) = [_]u8{0} ** 512;
+
+        // PHASE 2: Under lock - swap names
+        {
+            const lock_held = self.alloc_lock.acquire();
+            defer lock_held.release();
+
+            // Re-read both blocks under lock (TOCTOU prevention)
+            sfs_io.readSector(self, self.superblock.root_dir_start + old_block_idx, &old_block_buf) catch return vfs.Error.IOError;
+
+            if (same_block) {
+                @memcpy(&new_block_buf, &old_block_buf);
+            } else {
+                sfs_io.readSector(self, self.superblock.root_dir_start + new_block_idx, &new_block_buf) catch return vfs.Error.IOError;
+            }
+
+            const old_e: *t.DirEntry = @ptrCast(@alignCast(&old_block_buf[old_offset_in_block]));
+            const new_e: *t.DirEntry = @ptrCast(@alignCast(&new_block_buf[new_offset_in_block]));
+
+            // Re-validate both entries under lock
+            if (old_e.flags != 1) return vfs.Error.NotFound;
+            if (new_e.flags != 1) return vfs.Error.NotFound;
+
+            const old_e_name = std.mem.sliceTo(&old_e.name, 0);
+            const new_e_name = std.mem.sliceTo(&new_e.name, 0);
+            if (!std.mem.eql(u8, old_e_name, old_name)) return vfs.Error.NotFound;
+            if (!std.mem.eql(u8, new_e_name, new_name)) return vfs.Error.NotFound;
+
+            // Swap the names
+            const temp_name: [32]u8 = old_e.name;
+            old_e.name = new_e.name;
+            new_e.name = temp_name;
+
+            // If same block, copy modifications back
+            if (same_block) {
+                @memcpy(&old_block_buf, &new_block_buf);
+            }
+        }
+
+        // PHASE 3: Write blocks OUTSIDE lock
+        sfs_io.writeSector(self, self.superblock.root_dir_start + old_block_idx, &old_block_buf) catch return vfs.Error.IOError;
+
+        if (!same_block) {
+            sfs_io.writeSector(self, self.superblock.root_dir_start + new_block_idx, &new_block_buf) catch return vfs.Error.IOError;
+        }
+
+        console.info("SFS: Exchanged '{s}' <-> '{s}'", .{ old_name, new_name });
+        return;
+    }
+
+    // Should not reach here
+    return vfs.Error.NotSupported;
+}
+
 /// Set file timestamps (atime and mtime) on SFS files
 /// SECURITY: TOCTOU-safe via lock-held re-read pattern
 /// Note: SFS stores timestamps as u32 Unix seconds, nanosecond precision is lost

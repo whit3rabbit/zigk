@@ -73,6 +73,9 @@ pub const FileSystem = struct {
     /// Rename a file or directory - optional
     rename: ?*const fn (ctx: ?*anyopaque, old_path: []const u8, new_path: []const u8) Error!void = null,
 
+    /// Rename with flags (RENAME_NOREPLACE, RENAME_EXCHANGE) - optional
+    rename2: ?*const fn (ctx: ?*anyopaque, old_path: []const u8, new_path: []const u8, flags: u32) Error!void = null,
+
     /// Truncate (resize) a file - optional
     truncate: ?*const fn (ctx: ?*anyopaque, path: []const u8, length: u64) Error!void = null,
 
@@ -638,6 +641,68 @@ pub const Vfs = struct {
         if (rel_new.len == 0) rel_new = "/";
 
         return rename_fn(mp.fs.context, rel_old, rel_new);
+    }
+
+    /// Rename a file or directory with flags (RENAME_NOREPLACE, RENAME_EXCHANGE)
+    pub fn rename2(old_path: []const u8, new_path: []const u8, flags: u32) Error!void {
+        if (old_path.len == 0 or new_path.len == 0) return error.InvalidPath;
+        if (old_path[0] != '/' or new_path[0] != '/') return error.InvalidPath;
+
+        const held = lock.acquire();
+        defer held.release();
+
+        // 1. Find mount point for old_path
+        var old_idx: ?usize = null;
+        var old_best_len: usize = 0;
+        for (0..MAX_MOUNTS) |i| {
+            if (mounts[i]) |mp| {
+                if (std.mem.startsWith(u8, old_path, mp.path)) {
+                    if (mp.path.len > old_best_len) {
+                        old_idx = i;
+                        old_best_len = mp.path.len;
+                    }
+                }
+            }
+        }
+
+        // 2. Find mount point for new_path
+        var new_idx: ?usize = null;
+        var new_best_len: usize = 0;
+        for (0..MAX_MOUNTS) |i| {
+            if (mounts[i]) |mp| {
+                if (std.mem.startsWith(u8, new_path, mp.path)) {
+                    if (mp.path.len > new_best_len) {
+                        new_idx = i;
+                        new_best_len = mp.path.len;
+                    }
+                }
+            }
+        }
+
+        if (old_idx == null or new_idx == null) return error.NotFound;
+        if (old_idx != new_idx) return error.NotSupported; // Cannot rename across filesystems
+
+        const mp = &mounts[old_idx.?].?;
+
+        var rel_old = old_path[old_best_len..];
+        if (rel_old.len == 0) rel_old = "/";
+        var rel_new = new_path[new_best_len..];
+        if (rel_new.len == 0) rel_new = "/";
+
+        // If filesystem supports rename2, use it
+        if (mp.fs.rename2) |rename2_fn| {
+            return rename2_fn(mp.fs.context, rel_old, rel_new, flags);
+        }
+
+        // Fallback: if flags == 0 and filesystem has rename, use it
+        if (flags == 0) {
+            if (mp.fs.rename) |rename_fn| {
+                return rename_fn(mp.fs.context, rel_old, rel_new);
+            }
+        }
+
+        // No support for the requested operation
+        return error.NotSupported;
     }
 
     /// Truncate a file to a given length

@@ -146,6 +146,14 @@ pub const fdatasync = io.fdatasync;
 pub const sync_ = io.sync_;
 pub const syncfs = io.syncfs;
 
+// Advanced file operations
+pub const fallocate = io.fallocate;
+pub const renameat2 = io.renameat2;
+pub const FALLOC_FL_KEEP_SIZE = io.FALLOC_FL_KEEP_SIZE;
+pub const FALLOC_FL_PUNCH_HOLE = io.FALLOC_FL_PUNCH_HOLE;
+pub const RENAME_NOREPLACE = io.RENAME_NOREPLACE;
+pub const RENAME_EXCHANGE = io.RENAME_EXCHANGE;
+
 // Re-export epoll
 pub const epoll_create1 = io.epoll_create1;
 pub const epoll_ctl = io.epoll_ctl;

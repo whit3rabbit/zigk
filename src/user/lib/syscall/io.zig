@@ -969,5 +969,27 @@ pub fn syncfs(fd: i32) SyscallError!void {
     if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
 }
 
+// =============================================================================
+// Advanced File Operations (fallocate, renameat2)
+// =============================================================================
+
+pub const FALLOC_FL_KEEP_SIZE: u32 = 0x01;
+pub const FALLOC_FL_PUNCH_HOLE: u32 = 0x02;
+
+pub const RENAME_NOREPLACE: u32 = 1;
+pub const RENAME_EXCHANGE: u32 = 2;
+
+/// Pre-allocate or manipulate file space
+pub fn fallocate(fd: i32, mode: u32, offset: i64, len: i64) SyscallError!void {
+    const ret = primitive.syscall4(syscalls.SYS_FALLOCATE, @bitCast(@as(isize, fd)), @as(usize, mode), @bitCast(offset), @bitCast(len));
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Rename file with flags (RENAME_NOREPLACE, RENAME_EXCHANGE)
+pub fn renameat2(olddirfd: i32, oldpath: [*:0]const u8, newdirfd: i32, newpath: [*:0]const u8, flags: u32) SyscallError!void {
+    const ret = primitive.syscall5(syscalls.SYS_RENAMEAT2, @bitCast(@as(isize, olddirfd)), @intFromPtr(oldpath), @bitCast(@as(isize, newdirfd)), @intFromPtr(newpath), @as(usize, flags));
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
 // Alias size_t to usize for compatibility if needed, but usize is standard in Zig.
 const size_t = usize;
