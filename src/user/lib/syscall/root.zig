@@ -154,6 +154,16 @@ pub const FALLOC_FL_PUNCH_HOLE = io.FALLOC_FL_PUNCH_HOLE;
 pub const RENAME_NOREPLACE = io.RENAME_NOREPLACE;
 pub const RENAME_EXCHANGE = io.RENAME_EXCHANGE;
 
+// Zero-copy I/O
+pub const splice = io.splice;
+pub const tee = io.tee;
+pub const vmsplice = io.vmsplice;
+pub const copy_file_range = io.copy_file_range;
+pub const SPLICE_F_MOVE = io.SPLICE_F_MOVE;
+pub const SPLICE_F_NONBLOCK = io.SPLICE_F_NONBLOCK;
+pub const SPLICE_F_MORE = io.SPLICE_F_MORE;
+pub const SPLICE_F_GIFT = io.SPLICE_F_GIFT;
+
 // Re-export epoll
 pub const epoll_create1 = io.epoll_create1;
 pub const epoll_ctl = io.epoll_ctl;

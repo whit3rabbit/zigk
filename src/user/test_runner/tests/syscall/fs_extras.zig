@@ -817,3 +817,336 @@ pub fn testRenameat2InvalidFlags() !void {
         if (err != error.InvalidArgument and err != error.NotImplemented) return error.TestFailed;
     }
 }
+
+// =============================================================================
+// Zero-Copy I/O Tests (splice, tee, vmsplice, copy_file_range)
+// =============================================================================
+
+/// Test splice from file to pipe
+pub fn testSpliceFileToPipe() !void {
+    // Create pipe
+    var fds: [2]i32 = undefined;
+    _ = try syscall.pipe(&fds);
+    defer _ = syscall.close(fds[0]) catch {};
+    defer _ = syscall.close(fds[1]) catch {};
+
+    const pipe_read = fds[0];
+    const pipe_write = fds[1];
+
+    // Open a known file
+    const file_fd = try syscall.open("/shell.elf", syscall.O_RDONLY, 0);
+    defer _ = syscall.close(file_fd) catch {};
+
+    // Splice 64 bytes from file to pipe
+    const spliced = try syscall.splice(file_fd, null, pipe_write, null, 64, 0);
+    if (spliced == 0) return error.TestFailed; // Should have read something
+
+    // Read from pipe and verify length
+    var pipe_buf: [128]u8 = undefined;
+    const pipe_read_len = try syscall.read(pipe_read, &pipe_buf, pipe_buf.len);
+    if (pipe_read_len != spliced) return error.TestFailed;
+
+    // Also verify content matches direct read
+    const file_fd2 = try syscall.open("/shell.elf", syscall.O_RDONLY, 0);
+    defer _ = syscall.close(file_fd2) catch {};
+
+    var direct_buf: [128]u8 = undefined;
+    const direct_len = try syscall.read(file_fd2, &direct_buf, 64);
+    if (direct_len != spliced or !std.mem.eql(u8, pipe_buf[0..spliced], direct_buf[0..spliced])) {
+        return error.TestFailed;
+    }
+}
+
+/// Test splice from pipe to file
+pub fn testSplicePipeToFile() !void {
+    const file_path = "/mnt/zcio_spl.txt";
+
+    // Check if SFS is available
+    const test_fd = syscall.open("/mnt/test_sfs", syscall.O_CREAT | syscall.O_WRONLY, 0o644) catch |err| {
+        if (err == error.ReadOnlyFileSystem) return error.SkipTest;
+        return err;
+    };
+    _ = syscall.close(test_fd) catch {};
+    syscall.unlink("/mnt/test_sfs") catch {};
+
+    // Create pipe
+    var fds: [2]i32 = undefined;
+    _ = try syscall.pipe(&fds);
+    defer _ = syscall.close(fds[0]) catch {};
+    defer _ = syscall.close(fds[1]) catch {};
+
+    const pipe_read = fds[0];
+    const pipe_write = fds[1];
+
+    // Write data to pipe
+    const data = "Hello splice";
+    const written = try syscall.write(pipe_write, data, data.len);
+    if (written != data.len) return error.TestFailed;
+
+    // Create SFS file
+    const file_fd = try syscall.open(file_path, syscall.O_CREAT | syscall.O_WRONLY, 0o644);
+    defer {
+        _ = syscall.close(file_fd) catch {};
+        syscall.unlink(file_path) catch {};
+    }
+
+    // Splice from pipe to file
+    const spliced = try syscall.splice(pipe_read, null, file_fd, null, data.len, 0);
+    if (spliced != data.len) return error.TestFailed;
+
+    // Read file back and verify
+    const read_fd = try syscall.open(file_path, syscall.O_RDONLY, 0);
+    defer _ = syscall.close(read_fd) catch {};
+
+    var read_buf: [64]u8 = undefined;
+    const read_len = try syscall.read(read_fd, &read_buf, read_buf.len);
+    if (read_len != data.len or !std.mem.eql(u8, read_buf[0..read_len], data)) {
+        return error.TestFailed;
+    }
+}
+
+/// Test splice with offset parameter
+pub fn testSpliceWithOffset() !void {
+    // Create pipe
+    var fds: [2]i32 = undefined;
+    _ = try syscall.pipe(&fds);
+    defer _ = syscall.close(fds[0]) catch {};
+    defer _ = syscall.close(fds[1]) catch {};
+
+    const pipe_read = fds[0];
+    const pipe_write = fds[1];
+
+    // Open file
+    const file_fd = try syscall.open("/shell.elf", syscall.O_RDONLY, 0);
+    defer _ = syscall.close(file_fd) catch {};
+
+    // Splice from offset 16, 32 bytes
+    var offset: u64 = 16;
+    const spliced = try syscall.splice(file_fd, &offset, pipe_write, null, 32, 0);
+    if (spliced == 0) return error.TestFailed;
+
+    // Verify offset was updated
+    if (offset != 16 + spliced) return error.TestFailed;
+
+    // Read from pipe
+    var pipe_buf: [64]u8 = undefined;
+    const pipe_len = try syscall.read(pipe_read, &pipe_buf, pipe_buf.len);
+    if (pipe_len != spliced) return error.TestFailed;
+
+    // Verify data matches pread64 from offset 16
+    const file_fd2 = try syscall.open("/shell.elf", syscall.O_RDONLY, 0);
+    defer _ = syscall.close(file_fd2) catch {};
+
+    var direct_buf: [64]u8 = undefined;
+    const direct_len = try syscall.pread64(file_fd2, &direct_buf, 32, 16);
+    if (direct_len != spliced or !std.mem.eql(u8, pipe_buf[0..spliced], direct_buf[0..spliced])) {
+        return error.TestFailed;
+    }
+}
+
+/// Test splice with both pipes returns EINVAL
+pub fn testSpliceInvalidBothPipes() !void {
+    var fds1: [2]i32 = undefined;
+    var fds2: [2]i32 = undefined;
+    _ = try syscall.pipe(&fds1);
+    defer _ = syscall.close(fds1[0]) catch {};
+    defer _ = syscall.close(fds1[1]) catch {};
+    _ = try syscall.pipe(&fds2);
+    defer _ = syscall.close(fds2[0]) catch {};
+    defer _ = syscall.close(fds2[1]) catch {};
+
+    // Try to splice from pipe read-end to pipe write-end (should fail)
+    if (syscall.splice(fds1[0], null, fds2[1], null, 64, 0)) |_| {
+        return error.TestFailed; // Should have errored
+    } else |err| {
+        if (err != error.InvalidArgument) return error.TestFailed;
+    }
+}
+
+/// Test tee basic functionality
+pub fn testTeeBasic() !void {
+    // Create two pipes
+    var pipe_a: [2]i32 = undefined;
+    var pipe_b: [2]i32 = undefined;
+    _ = try syscall.pipe(&pipe_a);
+    defer _ = syscall.close(pipe_a[0]) catch {};
+    defer _ = syscall.close(pipe_a[1]) catch {};
+    _ = try syscall.pipe(&pipe_b);
+    defer _ = syscall.close(pipe_b[0]) catch {};
+    defer _ = syscall.close(pipe_b[1]) catch {};
+
+    // Write data to pipe_a
+    const data = "tee test data";
+    const written = try syscall.write(pipe_a[1], data, data.len);
+    if (written != data.len) return error.TestFailed;
+
+    // Tee from pipe_a read-end to pipe_b write-end
+    const teed = try syscall.tee(pipe_a[0], pipe_b[1], 128, 0);
+    if (teed != data.len) return error.TestFailed;
+
+    // Read from pipe_b - should get the teed data
+    var buf_b: [64]u8 = undefined;
+    const read_b = try syscall.read(pipe_b[0], &buf_b, buf_b.len);
+    if (read_b != data.len or !std.mem.eql(u8, buf_b[0..read_b], data)) {
+        return error.TestFailed;
+    }
+
+    // Read from pipe_a - data should still be there (tee doesn't consume)
+    var buf_a: [64]u8 = undefined;
+    const read_a = try syscall.read(pipe_a[0], &buf_a, buf_a.len);
+    if (read_a != data.len or !std.mem.eql(u8, buf_a[0..read_a], data)) {
+        return error.TestFailed;
+    }
+}
+
+/// Test vmsplice basic functionality
+pub fn testVmspliceBasic() !void {
+    // Create pipe
+    var fds: [2]i32 = undefined;
+    _ = try syscall.pipe(&fds);
+    defer _ = syscall.close(fds[0]) catch {};
+    defer _ = syscall.close(fds[1]) catch {};
+
+    // Prepare iovec with known data
+    const data = "vmsplice!";
+    var iov = [_]syscall.Iovec{
+        .{ .base = @intFromPtr(data.ptr), .len = data.len },
+    };
+
+    // Vmsplice to pipe write-end
+    const spliced = try syscall.vmsplice(fds[1], &iov, 0);
+    if (spliced != data.len) return error.TestFailed;
+
+    // Read from pipe and verify
+    var buf: [32]u8 = undefined;
+    const read_len = try syscall.read(fds[0], &buf, buf.len);
+    if (read_len != data.len or !std.mem.eql(u8, buf[0..read_len], data)) {
+        return error.TestFailed;
+    }
+}
+
+/// Test copy_file_range basic functionality
+pub fn testCopyFileRangeBasic() !void {
+    const src_path = "/mnt/zcio_src.txt";
+    const dst_path = "/mnt/zcio_dst.txt";
+
+    // Check SFS availability
+    const test_fd = syscall.open("/mnt/test_sfs", syscall.O_CREAT | syscall.O_WRONLY, 0o644) catch |err| {
+        if (err == error.ReadOnlyFileSystem) return error.SkipTest;
+        return err;
+    };
+    _ = syscall.close(test_fd) catch {};
+    syscall.unlink("/mnt/test_sfs") catch {};
+
+    // Create source file
+    const src_fd = try syscall.open(src_path, syscall.O_CREAT | syscall.O_WRONLY, 0o644);
+    const data = "copy file range test";
+    _ = try syscall.write(src_fd, data, data.len);
+    _ = syscall.close(src_fd) catch {};
+    defer syscall.unlink(src_path) catch {};
+
+    // Create dest file
+    const dst_fd = try syscall.open(dst_path, syscall.O_CREAT | syscall.O_WRONLY, 0o644);
+    _ = syscall.close(dst_fd) catch {};
+    defer syscall.unlink(dst_path) catch {};
+
+    // Copy using copy_file_range
+    const src_fd2 = try syscall.open(src_path, syscall.O_RDONLY, 0);
+    defer _ = syscall.close(src_fd2) catch {};
+    const dst_fd2 = try syscall.open(dst_path, syscall.O_WRONLY, 0);
+    defer _ = syscall.close(dst_fd2) catch {};
+
+    const copied = try syscall.copy_file_range(src_fd2, null, dst_fd2, null, data.len, 0);
+    if (copied != data.len) return error.TestFailed;
+
+    // Read dest and verify
+    const read_fd = try syscall.open(dst_path, syscall.O_RDONLY, 0);
+    defer _ = syscall.close(read_fd) catch {};
+
+    var buf: [64]u8 = undefined;
+    const read_len = try syscall.read(read_fd, &buf, buf.len);
+    if (read_len != data.len or !std.mem.eql(u8, buf[0..read_len], data)) {
+        return error.TestFailed;
+    }
+}
+
+/// Test copy_file_range with offsets
+pub fn testCopyFileRangeWithOffsets() !void {
+    const src_path = "/mnt/zcio_sr2.txt";
+    const dst_path = "/mnt/zcio_ds2.txt";
+
+    // Check SFS availability
+    const test_fd = syscall.open("/mnt/test_sfs", syscall.O_CREAT | syscall.O_WRONLY, 0o644) catch |err| {
+        if (err == error.ReadOnlyFileSystem) return error.SkipTest;
+        return err;
+    };
+    _ = syscall.close(test_fd) catch {};
+    syscall.unlink("/mnt/test_sfs") catch {};
+
+    // Create source with "ABCDEFGHIJ"
+    const src_fd = try syscall.open(src_path, syscall.O_CREAT | syscall.O_WRONLY, 0o644);
+    _ = try syscall.write(src_fd, "ABCDEFGHIJ", 10);
+    _ = syscall.close(src_fd) catch {};
+    defer syscall.unlink(src_path) catch {};
+
+    // Create dest with 10 zero bytes
+    const dst_fd = try syscall.open(dst_path, syscall.O_CREAT | syscall.O_WRONLY, 0o644);
+    _ = try syscall.write(dst_fd, &[_]u8{0} ** 10, 10);
+    _ = syscall.close(dst_fd) catch {};
+    defer syscall.unlink(dst_path) catch {};
+
+    // Copy 4 bytes from offset 3 to offset 5
+    const src_fd2 = try syscall.open(src_path, syscall.O_RDONLY, 0);
+    defer _ = syscall.close(src_fd2) catch {};
+    const dst_fd2 = try syscall.open(dst_path, syscall.O_WRONLY, 0);
+    defer _ = syscall.close(dst_fd2) catch {};
+
+    var off_in: u64 = 3;
+    var off_out: u64 = 5;
+    const copied = try syscall.copy_file_range(src_fd2, &off_in, dst_fd2, &off_out, 4, 0);
+    if (copied != 4) return error.TestFailed;
+
+    // Verify offsets updated
+    if (off_in != 7 or off_out != 9) return error.TestFailed;
+
+    // Read dest and verify bytes 5-8 are "DEFG"
+    const read_fd = try syscall.open(dst_path, syscall.O_RDONLY, 0);
+    defer _ = syscall.close(read_fd) catch {};
+
+    var buf: [10]u8 = undefined;
+    const read_len = try syscall.read(read_fd, &buf, buf.len);
+    if (read_len != 10) return error.TestFailed;
+
+    if (!std.mem.eql(u8, buf[5..9], "DEFG")) {
+        return error.TestFailed;
+    }
+}
+
+/// Test copy_file_range with invalid flags returns EINVAL
+pub fn testCopyFileRangeInvalidFlags() !void {
+    var fds: [2]i32 = undefined;
+    _ = try syscall.pipe(&fds);
+    defer _ = syscall.close(fds[0]) catch {};
+    defer _ = syscall.close(fds[1]) catch {};
+
+    // Try with flags=1 (invalid)
+    if (syscall.copy_file_range(fds[0], null, fds[1], null, 64, 1)) |_| {
+        return error.TestFailed; // Should have errored
+    } else |err| {
+        if (err != error.InvalidArgument) return error.TestFailed;
+    }
+}
+
+/// Test splice with zero length
+pub fn testSpliceZeroLength() !void {
+    var fds: [2]i32 = undefined;
+    _ = try syscall.pipe(&fds);
+    defer _ = syscall.close(fds[0]) catch {};
+    defer _ = syscall.close(fds[1]) catch {};
+
+    const file_fd = try syscall.open("/shell.elf", syscall.O_RDONLY, 0);
+    defer _ = syscall.close(file_fd) catch {};
+
+    const spliced = try syscall.splice(file_fd, null, fds[1], null, 0, 0);
+    if (spliced != 0) return error.TestFailed;
+}

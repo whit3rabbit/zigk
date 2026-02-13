@@ -991,5 +991,71 @@ pub fn renameat2(olddirfd: i32, oldpath: [*:0]const u8, newdirfd: i32, newpath: 
     if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
 }
 
+// =============================================================================
+// Zero-Copy I/O (splice, tee, vmsplice, copy_file_range)
+// =============================================================================
+
+// Zero-copy I/O constants
+pub const SPLICE_F_MOVE: u32 = 1;
+pub const SPLICE_F_NONBLOCK: u32 = 2;
+pub const SPLICE_F_MORE: u32 = 4;
+pub const SPLICE_F_GIFT: u32 = 8;
+
+/// Move data between a file descriptor and a pipe (kernel-side copy)
+pub fn splice(fd_in: i32, off_in: ?*u64, fd_out: i32, off_out: ?*u64, len: usize, flags: u32) SyscallError!size_t {
+    const ret = primitive.syscall6(
+        syscalls.SYS_SPLICE,
+        @bitCast(@as(isize, fd_in)),
+        if (off_in) |p| @intFromPtr(p) else 0,
+        @bitCast(@as(isize, fd_out)),
+        if (off_out) |p| @intFromPtr(p) else 0,
+        len,
+        @as(usize, flags),
+    );
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return ret;
+}
+
+/// Duplicate pipe data without consuming the source
+pub fn tee(fd_in: i32, fd_out: i32, len: usize, flags: u32) SyscallError!size_t {
+    const ret = primitive.syscall4(
+        syscalls.SYS_TEE,
+        @bitCast(@as(isize, fd_in)),
+        @bitCast(@as(isize, fd_out)),
+        len,
+        @as(usize, flags),
+    );
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return ret;
+}
+
+/// Splice user pages into a pipe
+pub fn vmsplice(fd: i32, iov: []const Iovec, flags: u32) SyscallError!size_t {
+    const ret = primitive.syscall4(
+        syscalls.SYS_VMSPLICE,
+        @bitCast(@as(isize, fd)),
+        @intFromPtr(iov.ptr),
+        iov.len,
+        @as(usize, flags),
+    );
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return ret;
+}
+
+/// Copy data between two files within the kernel
+pub fn copy_file_range(fd_in: i32, off_in: ?*u64, fd_out: i32, off_out: ?*u64, len: usize, flags: u32) SyscallError!size_t {
+    const ret = primitive.syscall6(
+        syscalls.SYS_COPY_FILE_RANGE,
+        @bitCast(@as(isize, fd_in)),
+        if (off_in) |p| @intFromPtr(p) else 0,
+        @bitCast(@as(isize, fd_out)),
+        if (off_out) |p| @intFromPtr(p) else 0,
+        len,
+        @as(usize, flags),
+    );
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return ret;
+}
+
 // Alias size_t to usize for compatibility if needed, but usize is standard in Zig.
 const size_t = usize;

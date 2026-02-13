@@ -454,6 +454,18 @@ export fn main(argc: i32, argv: [*][*:0]u8) i32 {
     runner.runTest("advanced_file_ops: renameat2 exchange", fs_extras_tests.testRenameat2Exchange);
     runner.runTest("advanced_file_ops: renameat2 invalid flags", fs_extras_tests.testRenameat2InvalidFlags);
 
+    // Phase 17: Zero-Copy I/O tests
+    runner.runTest("zero_copy_io: splice file to pipe", fs_extras_tests.testSpliceFileToPipe);
+    runner.runTest("zero_copy_io: splice pipe to file", fs_extras_tests.testSplicePipeToFile);
+    runner.runTest("zero_copy_io: splice with offset", fs_extras_tests.testSpliceWithOffset);
+    runner.runTest("zero_copy_io: splice invalid both pipes", fs_extras_tests.testSpliceInvalidBothPipes);
+    runner.runTest("zero_copy_io: tee basic", fs_extras_tests.testTeeBasic);
+    runner.runTest("zero_copy_io: vmsplice basic", fs_extras_tests.testVmspliceBasic);
+    runner.runTest("zero_copy_io: copy_file_range basic", fs_extras_tests.testCopyFileRangeBasic);
+    runner.runTest("zero_copy_io: copy_file_range with offsets", fs_extras_tests.testCopyFileRangeWithOffsets);
+    runner.runTest("zero_copy_io: copy_file_range invalid flags", fs_extras_tests.testCopyFileRangeInvalidFlags);
+    runner.runTest("zero_copy_io: splice zero length", fs_extras_tests.testSpliceZeroLength);
+
     // Phase 5: Vectored & Positional I/O tests (non-SFS first, SFS last due to deadlock)
     runner.runTest("vectored_io: readv basic", vectored_io_tests.testReadvBasic);
     runner.runTest("vectored_io: readv empty vec", vectored_io_tests.testReadvEmptyVec);
