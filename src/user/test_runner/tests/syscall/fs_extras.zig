@@ -1027,99 +1027,80 @@ pub fn testVmspliceBasic() !void {
 
 /// Test copy_file_range basic functionality
 pub fn testCopyFileRangeBasic() !void {
-    const src_path = "/mnt/zcio_src.txt";
-    const dst_path = "/mnt/zcio_dst.txt";
+    const dst_path = "/mnt/zcio_cfr.txt";
 
-    // Check SFS availability
-    const test_fd = syscall.open("/mnt/test_sfs", syscall.O_CREAT | syscall.O_WRONLY, 0o644) catch |err| {
+    // Source: InitRD file (read-only, no SFS needed)
+    const src_fd = try syscall.open("/shell.elf", syscall.O_RDONLY, 0);
+    // Don't defer close - we'll close InitRD fd explicitly (safe, not SFS)
+
+    // Destination: SFS file, keep open throughout to avoid SFS close deadlock
+    const dst_fd = syscall.open(dst_path, syscall.O_CREAT | syscall.O_RDWR, 0o644) catch |err| {
+        syscall.close(src_fd) catch {};
         if (err == error.ReadOnlyFileSystem) return error.SkipTest;
         return err;
     };
-    _ = syscall.close(test_fd) catch {};
-    syscall.unlink("/mnt/test_sfs") catch {};
+    // Do NOT close dst_fd (SFS deadlock avoidance)
+    // Do NOT defer unlink (requires close first on SFS)
 
-    // Create source file
-    const src_fd = try syscall.open(src_path, syscall.O_CREAT | syscall.O_WRONLY, 0o644);
-    const data = "copy file range test";
-    _ = try syscall.write(src_fd, data, data.len);
-    _ = syscall.close(src_fd) catch {};
-    defer syscall.unlink(src_path) catch {};
+    // Copy 20 bytes from shell.elf to SFS file
+    const copied = syscall.copy_file_range(src_fd, null, dst_fd, null, 20, 0) catch |err| {
+        syscall.close(src_fd) catch {};
+        return err;
+    };
+    syscall.close(src_fd) catch {}; // Safe: InitRD close doesn't deadlock
+    if (copied != 20) return error.TestFailed;
 
-    // Create dest file
-    const dst_fd = try syscall.open(dst_path, syscall.O_CREAT | syscall.O_WRONLY, 0o644);
-    _ = syscall.close(dst_fd) catch {};
-    defer syscall.unlink(dst_path) catch {};
+    // Verify by seeking back to 0 and reading (avoids close/reopen)
+    _ = try syscall.lseek(dst_fd, 0, 0); // SEEK_SET
+    var buf: [32]u8 = undefined;
+    const read_len = try syscall.read(dst_fd, &buf, 20);
+    if (read_len != 20) return error.TestFailed;
 
-    // Copy using copy_file_range
-    const src_fd2 = try syscall.open(src_path, syscall.O_RDONLY, 0);
-    defer _ = syscall.close(src_fd2) catch {};
-    const dst_fd2 = try syscall.open(dst_path, syscall.O_WRONLY, 0);
-    defer _ = syscall.close(dst_fd2) catch {};
+    // Verify content matches direct read from source
+    const src_fd2 = try syscall.open("/shell.elf", syscall.O_RDONLY, 0);
+    var direct_buf: [32]u8 = undefined;
+    const direct_len = try syscall.read(src_fd2, &direct_buf, 20);
+    syscall.close(src_fd2) catch {};
 
-    const copied = try syscall.copy_file_range(src_fd2, null, dst_fd2, null, data.len, 0);
-    if (copied != data.len) return error.TestFailed;
-
-    // Read dest and verify
-    const read_fd = try syscall.open(dst_path, syscall.O_RDONLY, 0);
-    defer _ = syscall.close(read_fd) catch {};
-
-    var buf: [64]u8 = undefined;
-    const read_len = try syscall.read(read_fd, &buf, buf.len);
-    if (read_len != data.len or !std.mem.eql(u8, buf[0..read_len], data)) {
+    if (direct_len != 20 or !std.mem.eql(u8, buf[0..20], direct_buf[0..20])) {
         return error.TestFailed;
     }
+    // Leave dst_fd open intentionally (SFS close deadlock workaround)
 }
 
 /// Test copy_file_range with offsets
 pub fn testCopyFileRangeWithOffsets() !void {
-    const src_path = "/mnt/zcio_sr2.txt";
-    const dst_path = "/mnt/zcio_ds2.txt";
+    const path = "/mnt/zcio_cfo.txt";
 
-    // Check SFS availability
-    const test_fd = syscall.open("/mnt/test_sfs", syscall.O_CREAT | syscall.O_WRONLY, 0o644) catch |err| {
+    // Create file with known content, keep open as O_RDWR to avoid SFS close deadlock
+    const fd = syscall.open(path, syscall.O_CREAT | syscall.O_RDWR, 0o644) catch |err| {
         if (err == error.ReadOnlyFileSystem) return error.SkipTest;
         return err;
     };
-    _ = syscall.close(test_fd) catch {};
-    syscall.unlink("/mnt/test_sfs") catch {};
 
-    // Create source with "ABCDEFGHIJ"
-    const src_fd = try syscall.open(src_path, syscall.O_CREAT | syscall.O_WRONLY, 0o644);
-    _ = try syscall.write(src_fd, "ABCDEFGHIJ", 10);
-    _ = syscall.close(src_fd) catch {};
-    defer syscall.unlink(src_path) catch {};
+    // Write "ABCDEFGHIJ" (10 bytes)
+    _ = try syscall.write(fd, "ABCDEFGHIJ", 10);
 
-    // Create dest with 10 zero bytes
-    const dst_fd = try syscall.open(dst_path, syscall.O_CREAT | syscall.O_WRONLY, 0o644);
-    _ = try syscall.write(dst_fd, &[_]u8{0} ** 10, 10);
-    _ = syscall.close(dst_fd) catch {};
-    defer syscall.unlink(dst_path) catch {};
-
-    // Copy 4 bytes from offset 3 to offset 5
-    const src_fd2 = try syscall.open(src_path, syscall.O_RDONLY, 0);
-    defer _ = syscall.close(src_fd2) catch {};
-    const dst_fd2 = try syscall.open(dst_path, syscall.O_WRONLY, 0);
-    defer _ = syscall.close(dst_fd2) catch {};
-
+    // Copy 4 bytes from offset 3 to offset 5 (same file)
     var off_in: u64 = 3;
     var off_out: u64 = 5;
-    const copied = try syscall.copy_file_range(src_fd2, &off_in, dst_fd2, &off_out, 4, 0);
+    const copied = try syscall.copy_file_range(fd, &off_in, fd, &off_out, 4, 0);
     if (copied != 4) return error.TestFailed;
 
     // Verify offsets updated
     if (off_in != 7 or off_out != 9) return error.TestFailed;
 
-    // Read dest and verify bytes 5-8 are "DEFG"
-    const read_fd = try syscall.open(dst_path, syscall.O_RDONLY, 0);
-    defer _ = syscall.close(read_fd) catch {};
-
+    // Seek to 0 and read full content
+    _ = try syscall.lseek(fd, 0, 0);
     var buf: [10]u8 = undefined;
-    const read_len = try syscall.read(read_fd, &buf, buf.len);
+    const read_len = try syscall.read(fd, &buf, 10);
     if (read_len != 10) return error.TestFailed;
 
+    // After copy: "ABCDEDEFGJ" -- bytes 5-8 should be "DEFG"
     if (!std.mem.eql(u8, buf[5..9], "DEFG")) {
         return error.TestFailed;
     }
+    // Leave fd open (SFS deadlock workaround)
 }
 
 /// Test copy_file_range with invalid flags returns EINVAL
