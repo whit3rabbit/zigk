@@ -442,6 +442,18 @@ export fn main(argc: i32, argv: [*][*:0]u8) i32 {
     runner.runTest("sync: syncfs on open file", fs_extras_tests.testSyncfsOnOpenFile);
     runner.runTest("sync: syncfs invalid fd", fs_extras_tests.testSyncfsInvalidFd);
 
+    // Phase 16: Advanced File Operations tests
+    runner.runTest("advanced_file_ops: fallocate default mode", fs_extras_tests.testFallocateDefaultMode);
+    runner.runTest("advanced_file_ops: fallocate keep size", fs_extras_tests.testFallocateKeepSize);
+    runner.runTest("advanced_file_ops: fallocate punch hole unsupported", fs_extras_tests.testFallocatePunchHoleUnsupported);
+    runner.runTest("advanced_file_ops: fallocate invalid fd", fs_extras_tests.testFallocateInvalidFd);
+    runner.runTest("advanced_file_ops: fallocate negative length", fs_extras_tests.testFallocateNegativeLength);
+    runner.runTest("advanced_file_ops: renameat2 default flags", fs_extras_tests.testRenameat2DefaultFlags);
+    runner.runTest("advanced_file_ops: renameat2 noreplace fail", fs_extras_tests.testRenameat2Noreplace);
+    runner.runTest("advanced_file_ops: renameat2 noreplace success", fs_extras_tests.testRenameat2NoreplaceSuccess);
+    runner.runTest("advanced_file_ops: renameat2 exchange", fs_extras_tests.testRenameat2Exchange);
+    runner.runTest("advanced_file_ops: renameat2 invalid flags", fs_extras_tests.testRenameat2InvalidFlags);
+
     // Phase 5: Vectored & Positional I/O tests (non-SFS first, SFS last due to deadlock)
     runner.runTest("vectored_io: readv basic", vectored_io_tests.testReadvBasic);
     runner.runTest("vectored_io: readv empty vec", vectored_io_tests.testReadvEmptyVec);

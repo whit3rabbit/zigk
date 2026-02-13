@@ -464,3 +464,356 @@ pub fn testSyncfsInvalidFd() !void {
         if (err != error.BadFileDescriptor) return error.TestFailed;
     }
 }
+
+// FS-07: fallocate tests
+
+/// Test fallocate with mode=0 (default mode) extends file size
+pub fn testFallocateDefaultMode() !void {
+    const path = "/mnt/falloc_test";
+
+    // Create file
+    const fd = syscall.open(path, syscall.O_WRONLY | syscall.O_CREAT | syscall.O_TRUNC, 0o644) catch {
+        return error.SkipTest;
+    };
+
+    // Pre-allocate 4096 bytes with mode=0 (should extend file)
+    syscall.fallocate(fd, 0, 0, 4096) catch |err| {
+        syscall.close(fd) catch {};
+        syscall.unlink(path) catch {};
+        if (err == error.NotImplemented) return error.SkipTest;
+        return error.TestFailed;
+    };
+
+    // Verify file size is >= 4096
+    var stat_buf: syscall.Stat = undefined;
+    syscall.fstat(fd, &stat_buf) catch {
+        syscall.close(fd) catch {};
+        syscall.unlink(path) catch {};
+        return error.TestFailed;
+    };
+
+    if (stat_buf.size < 4096) {
+        syscall.close(fd) catch {};
+        syscall.unlink(path) catch {};
+        return error.TestFailed;
+    }
+
+    // Cleanup
+    syscall.close(fd) catch {};
+    syscall.unlink(path) catch {};
+}
+
+/// Test fallocate with FALLOC_FL_KEEP_SIZE preserves file size
+pub fn testFallocateKeepSize() !void {
+    const path = "/mnt/falloc_ks";
+
+    // Create file and write 10 bytes
+    const fd = syscall.open(path, syscall.O_WRONLY | syscall.O_CREAT | syscall.O_TRUNC, 0o644) catch {
+        return error.SkipTest;
+    };
+    const test_data = "0123456789";
+    _ = syscall.write(fd, test_data.ptr, test_data.len) catch {
+        syscall.close(fd) catch {};
+        syscall.unlink(path) catch {};
+        return error.SkipTest;
+    };
+
+    // Pre-allocate 8192 bytes with KEEP_SIZE flag
+    syscall.fallocate(fd, syscall.FALLOC_FL_KEEP_SIZE, 0, 8192) catch |err| {
+        syscall.close(fd) catch {};
+        syscall.unlink(path) catch {};
+        if (err == error.NotImplemented) return error.SkipTest;
+        return error.TestFailed;
+    };
+
+    // Verify file size is still 10 bytes (not 8192)
+    var stat_buf: syscall.Stat = undefined;
+    syscall.fstat(fd, &stat_buf) catch {
+        syscall.close(fd) catch {};
+        syscall.unlink(path) catch {};
+        return error.TestFailed;
+    };
+
+    if (stat_buf.size != 10) {
+        syscall.close(fd) catch {};
+        syscall.unlink(path) catch {};
+        return error.TestFailed;
+    }
+
+    // Cleanup
+    syscall.close(fd) catch {};
+    syscall.unlink(path) catch {};
+}
+
+/// Test fallocate with PUNCH_HOLE returns error (unsupported on SFS)
+pub fn testFallocatePunchHoleUnsupported() !void {
+    const path = "/mnt/falloc_ph";
+
+    // Create file
+    const fd = syscall.open(path, syscall.O_WRONLY | syscall.O_CREAT | syscall.O_TRUNC, 0o644) catch {
+        return error.SkipTest;
+    };
+
+    // Try PUNCH_HOLE -- should fail with ENOSYS or similar
+    if (syscall.fallocate(fd, syscall.FALLOC_FL_PUNCH_HOLE | syscall.FALLOC_FL_KEEP_SIZE, 0, 512)) |_| {
+        syscall.close(fd) catch {};
+        syscall.unlink(path) catch {};
+        return error.TestFailed; // Should not succeed
+    } else |err| {
+        syscall.close(fd) catch {};
+        syscall.unlink(path) catch {};
+        // Accept ENOSYS or any error indicating unsupported operation
+        if (err != error.NotImplemented and err != error.InvalidArgument) {
+            return error.TestFailed;
+        }
+    }
+}
+
+/// Test fallocate with invalid fd returns EBADF
+pub fn testFallocateInvalidFd() !void {
+    if (syscall.fallocate(999, 0, 0, 4096)) |_| {
+        return error.TestFailed; // Should have errored
+    } else |err| {
+        if (err != error.BadFileDescriptor) return error.TestFailed;
+    }
+}
+
+/// Test fallocate with negative length returns EINVAL
+pub fn testFallocateNegativeLength() !void {
+    const path = "/mnt/falloc_neg";
+
+    const fd = syscall.open(path, syscall.O_WRONLY | syscall.O_CREAT | syscall.O_TRUNC, 0o644) catch {
+        return error.SkipTest;
+    };
+
+    if (syscall.fallocate(fd, 0, 0, -1)) |_| {
+        syscall.close(fd) catch {};
+        syscall.unlink(path) catch {};
+        return error.TestFailed; // Should have errored
+    } else |err| {
+        syscall.close(fd) catch {};
+        syscall.unlink(path) catch {};
+        if (err != error.InvalidArgument) return error.TestFailed;
+    }
+}
+
+// FS-08: renameat2 tests
+
+/// Test renameat2 with flags=0 (standard rename)
+pub fn testRenameat2DefaultFlags() !void {
+    const src = "/mnt/rn2_src";
+    const dst = "/mnt/rn2_dst";
+
+    // Create source file
+    const fd = syscall.open(src, syscall.O_WRONLY | syscall.O_CREAT | syscall.O_TRUNC, 0o644) catch {
+        return error.SkipTest;
+    };
+    const test_data = "rename2 test";
+    _ = syscall.write(fd, test_data.ptr, test_data.len) catch {
+        syscall.close(fd) catch {};
+        syscall.unlink(src) catch {};
+        return error.SkipTest;
+    };
+    syscall.close(fd) catch {};
+
+    // Rename with flags=0
+    syscall.renameat2(AT_FDCWD, src, AT_FDCWD, dst, 0) catch |err| {
+        syscall.unlink(src) catch {};
+        if (err == error.NotImplemented) return error.SkipTest;
+        return error.TestFailed;
+    };
+
+    // Verify destination exists
+    const dst_fd = syscall.open(dst, syscall.O_RDONLY, 0) catch {
+        syscall.unlink(dst) catch {};
+        return error.TestFailed;
+    };
+    syscall.close(dst_fd) catch {};
+
+    // Verify source is gone
+    if (syscall.open(src, syscall.O_RDONLY, 0)) |src_fd| {
+        syscall.close(src_fd) catch {};
+        syscall.unlink(dst) catch {};
+        return error.TestFailed;
+    } else |_| {}
+
+    // Cleanup
+    syscall.unlink(dst) catch {};
+}
+
+/// Test renameat2 with RENAME_NOREPLACE fails if destination exists
+pub fn testRenameat2Noreplace() !void {
+    const src = "/mnt/rn2_a";
+    const dst = "/mnt/rn2_b";
+
+    // Create both files
+    var fd = syscall.open(src, syscall.O_WRONLY | syscall.O_CREAT | syscall.O_TRUNC, 0o644) catch {
+        return error.SkipTest;
+    };
+    syscall.close(fd) catch {};
+
+    fd = syscall.open(dst, syscall.O_WRONLY | syscall.O_CREAT | syscall.O_TRUNC, 0o644) catch {
+        syscall.unlink(src) catch {};
+        return error.SkipTest;
+    };
+    syscall.close(fd) catch {};
+
+    // Try rename with NOREPLACE -- should fail with EEXIST
+    if (syscall.renameat2(AT_FDCWD, src, AT_FDCWD, dst, syscall.RENAME_NOREPLACE)) |_| {
+        syscall.unlink(src) catch {};
+        syscall.unlink(dst) catch {};
+        return error.TestFailed; // Should have failed
+    } else |err| {
+        if (err != error.FileExists and err != error.NotImplemented) {
+            syscall.unlink(src) catch {};
+            syscall.unlink(dst) catch {};
+            return error.TestFailed;
+        }
+        if (err == error.NotImplemented) {
+            syscall.unlink(src) catch {};
+            syscall.unlink(dst) catch {};
+            return error.SkipTest;
+        }
+    }
+
+    // Verify both files still exist
+    const src_fd = syscall.open(src, syscall.O_RDONLY, 0) catch {
+        syscall.unlink(src) catch {};
+        syscall.unlink(dst) catch {};
+        return error.TestFailed;
+    };
+    syscall.close(src_fd) catch {};
+
+    const dst_fd = syscall.open(dst, syscall.O_RDONLY, 0) catch {
+        syscall.unlink(src) catch {};
+        syscall.unlink(dst) catch {};
+        return error.TestFailed;
+    };
+    syscall.close(dst_fd) catch {};
+
+    // Cleanup
+    syscall.unlink(src) catch {};
+    syscall.unlink(dst) catch {};
+}
+
+/// Test renameat2 with RENAME_NOREPLACE succeeds if destination doesn't exist
+pub fn testRenameat2NoreplaceSuccess() !void {
+    const src = "/mnt/rn2_c";
+    const dst = "/mnt/rn2_d";
+
+    // Create only source file
+    const fd = syscall.open(src, syscall.O_WRONLY | syscall.O_CREAT | syscall.O_TRUNC, 0o644) catch {
+        return error.SkipTest;
+    };
+    syscall.close(fd) catch {};
+
+    // Rename with NOREPLACE (destination doesn't exist)
+    syscall.renameat2(AT_FDCWD, src, AT_FDCWD, dst, syscall.RENAME_NOREPLACE) catch |err| {
+        syscall.unlink(src) catch {};
+        if (err == error.NotImplemented) return error.SkipTest;
+        return error.TestFailed;
+    };
+
+    // Verify destination exists
+    const dst_fd = syscall.open(dst, syscall.O_RDONLY, 0) catch {
+        syscall.unlink(dst) catch {};
+        return error.TestFailed;
+    };
+    syscall.close(dst_fd) catch {};
+
+    // Cleanup
+    syscall.unlink(dst) catch {};
+}
+
+/// Test renameat2 with RENAME_EXCHANGE swaps two files
+pub fn testRenameat2Exchange() !void {
+    const file_x = "/mnt/rn2_x";
+    const file_y = "/mnt/rn2_y";
+
+    // Create file X with "AAA"
+    var fd = syscall.open(file_x, syscall.O_WRONLY | syscall.O_CREAT | syscall.O_TRUNC, 0o644) catch {
+        return error.SkipTest;
+    };
+    _ = syscall.write(fd, "AAA".ptr, 3) catch {
+        syscall.close(fd) catch {};
+        syscall.unlink(file_x) catch {};
+        return error.SkipTest;
+    };
+    syscall.close(fd) catch {};
+
+    // Create file Y with "BBB"
+    fd = syscall.open(file_y, syscall.O_WRONLY | syscall.O_CREAT | syscall.O_TRUNC, 0o644) catch {
+        syscall.unlink(file_x) catch {};
+        return error.SkipTest;
+    };
+    _ = syscall.write(fd, "BBB".ptr, 3) catch {
+        syscall.close(fd) catch {};
+        syscall.unlink(file_x) catch {};
+        syscall.unlink(file_y) catch {};
+        return error.SkipTest;
+    };
+    syscall.close(fd) catch {};
+
+    // Exchange X and Y
+    syscall.renameat2(AT_FDCWD, file_x, AT_FDCWD, file_y, syscall.RENAME_EXCHANGE) catch |err| {
+        syscall.unlink(file_x) catch {};
+        syscall.unlink(file_y) catch {};
+        if (err == error.NotImplemented) return error.SkipTest;
+        return error.TestFailed;
+    };
+
+    // Verify X now contains "BBB"
+    fd = syscall.open(file_x, syscall.O_RDONLY, 0) catch {
+        syscall.unlink(file_x) catch {};
+        syscall.unlink(file_y) catch {};
+        return error.TestFailed;
+    };
+    var buf_x: [4]u8 = undefined;
+    const read_x = syscall.read(fd, &buf_x, buf_x.len) catch {
+        syscall.close(fd) catch {};
+        syscall.unlink(file_x) catch {};
+        syscall.unlink(file_y) catch {};
+        return error.TestFailed;
+    };
+    syscall.close(fd) catch {};
+
+    if (read_x != 3 or !std.mem.eql(u8, buf_x[0..3], "BBB")) {
+        syscall.unlink(file_x) catch {};
+        syscall.unlink(file_y) catch {};
+        return error.TestFailed;
+    }
+
+    // Verify Y now contains "AAA"
+    fd = syscall.open(file_y, syscall.O_RDONLY, 0) catch {
+        syscall.unlink(file_x) catch {};
+        syscall.unlink(file_y) catch {};
+        return error.TestFailed;
+    };
+    var buf_y: [4]u8 = undefined;
+    const read_y = syscall.read(fd, &buf_y, buf_y.len) catch {
+        syscall.close(fd) catch {};
+        syscall.unlink(file_x) catch {};
+        syscall.unlink(file_y) catch {};
+        return error.TestFailed;
+    };
+    syscall.close(fd) catch {};
+
+    if (read_y != 3 or !std.mem.eql(u8, buf_y[0..3], "AAA")) {
+        syscall.unlink(file_x) catch {};
+        syscall.unlink(file_y) catch {};
+        return error.TestFailed;
+    }
+
+    // Cleanup
+    syscall.unlink(file_x) catch {};
+    syscall.unlink(file_y) catch {};
+}
+
+/// Test renameat2 with conflicting flags returns EINVAL
+pub fn testRenameat2InvalidFlags() !void {
+    if (syscall.renameat2(AT_FDCWD, "/mnt/dummy_x", AT_FDCWD, "/mnt/dummy_y", syscall.RENAME_NOREPLACE | syscall.RENAME_EXCHANGE)) |_| {
+        return error.TestFailed; // Should have errored
+    } else |err| {
+        if (err != error.InvalidArgument and err != error.NotImplemented) return error.TestFailed;
+    }
+}
