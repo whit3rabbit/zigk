@@ -344,42 +344,27 @@ pub fn sys_tee(
     // Must not be the same pipe
     if (in_handle.pipe == out_handle.pipe) return error.EINVAL;
 
-    // Peek and copy loop
+    // Single peek and copy (peekPipeBuffer doesn't advance read_pos, so loop would duplicate data)
     const tee_buf_size: usize = 64 * 1024;
     const kbuf = heap.allocator().alloc(u8, tee_buf_size) catch return error.ENOMEM;
     defer heap.allocator().free(kbuf);
 
-    var total_copied: usize = 0;
-
-    while (total_copied < len) {
-        const remaining = len - total_copied;
-        const chunk_size = @min(remaining, tee_buf_size);
-
-        // Peek from source pipe (without consuming)
-        const bytes_peeked = pipe_mod.peekPipeBuffer(in_handle, kbuf[0..chunk_size]);
-        if (bytes_peeked == 0) {
-            // No more data available
-            break;
-        }
-
-        // Write to dest pipe
-        const bytes_written = pipe_mod.writeToPipeBuffer(out_handle, kbuf[0..bytes_peeked]);
-        if (bytes_written == 0) {
-            // Dest pipe full
-            if (total_copied > 0) return total_copied;
-            return error.EAGAIN;
-        }
-
-        // Update counter
-        const new_total = @addWithOverflow(total_copied, bytes_written);
-        if (new_total[1] != 0) break;
-        total_copied = new_total[0];
-
-        // Short write: stop
-        if (bytes_written < bytes_peeked) break;
+    // Peek from source pipe (without consuming) - limited by requested len
+    const peek_len = @min(len, tee_buf_size);
+    const bytes_peeked = pipe_mod.peekPipeBuffer(in_handle, kbuf[0..peek_len]);
+    if (bytes_peeked == 0) {
+        // No data available
+        return 0;
     }
 
-    return total_copied;
+    // Write to dest pipe
+    const bytes_written = pipe_mod.writeToPipeBuffer(out_handle, kbuf[0..bytes_peeked]);
+    if (bytes_written == 0) {
+        // Dest pipe full, non-blocking
+        return error.EAGAIN;
+    }
+
+    return bytes_written;
 }
 
 /// sys_vmsplice (278/75) - Splice user memory into a pipe
