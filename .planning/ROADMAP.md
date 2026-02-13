@@ -123,7 +123,7 @@ Plans:
 **Plans**: 1 plan
 
 Plans:
-- [ ] 16-01-PLAN.md -- Implement fallocate and renameat2 syscalls with VFS/SFS support and tests
+- [x] 16-01-PLAN.md -- Implement fallocate and renameat2 syscalls with VFS/SFS support and tests
 
 #### Phase 17: Zero-Copy I/O
 **Goal**: Data can be moved between file descriptors and pipes without user-space copies
@@ -306,7 +306,7 @@ Phases execute in numeric order: 15 → 16 → 17 → 18 → 19 → 20 → 21 �
 | 13. SFS Symlink & Timestamp Support | v1.1 | 2/2 | Complete | 2026-02-10 |
 | 14. WaitQueue Blocking & Optimizations | v1.1 | 7/7 | Complete | 2026-02-11 |
 | 15. File Synchronization | v1.2 | 1/1 | Complete | 2026-02-12 |
-| 16. Advanced File Operations | v1.2 | 0/TBD | Not started | - |
+| 16. Advanced File Operations | v1.2 | 1/1 | Complete | 2026-02-12 |
 | 17. Zero-Copy I/O | v1.2 | 0/TBD | Not started | - |
 | 18. Memory Management Extensions | v1.2 | 0/TBD | Not started | - |
 | 19. Process Control Extensions | v1.2 | 0/TBD | Not started | - |
