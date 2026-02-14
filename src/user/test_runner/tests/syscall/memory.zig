@@ -750,8 +750,8 @@ pub fn testMremapInvalidAddr() !void {
     if (result) |_| {
         return error.TestFailed;
     } else |err| {
-        // Should fail with EFAULT or EINVAL
-        if (err != error.Fault and err != error.InvalidArgument) {
+        // Should fail with EFAULT (BadAddress) or EINVAL
+        if (err != error.BadAddress and err != error.InvalidArgument) {
             return error.TestFailed;
         }
     }
