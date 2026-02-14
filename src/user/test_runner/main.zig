@@ -230,6 +230,17 @@ export fn main(argc: i32, argv: [*][*:0]u8) i32 {
     runner.runTest("process: setsid basic", process_tests.testSetsidBasic);
     runner.runTest("process: setsid fails for group leader", process_tests.testSetsidFailsForGroupLeader);
     runner.runTest("process: getsid basic", process_tests.testGetsidBasic);
+    // Phase 19: Process Control Extensions tests
+    runner.runTest("proc_ext: clone3 basic fork", process_tests.testClone3BasicFork);
+    runner.runTest("proc_ext: clone3 invalid size", process_tests.testClone3InvalidSize);
+    runner.runTest("proc_ext: clone3 with parent tid", process_tests.testClone3WithParentTid);
+    runner.runTest("proc_ext: waitid P_PID exited", process_tests.testWaitidPidExited);
+    runner.runTest("proc_ext: waitid P_ALL", process_tests.testWaitidPAll);
+    runner.runTest("proc_ext: waitid P_PGID", process_tests.testWaitidPPgid);
+    runner.runTest("proc_ext: waitid WNOHANG", process_tests.testWaitidNohang);
+    runner.runTest("proc_ext: waitid no children", process_tests.testWaitidNoChildren);
+    runner.runTest("proc_ext: waitid invalid options", process_tests.testWaitidInvalidOptions);
+    runner.runTest("proc_ext: clone3 waitid roundtrip", process_tests.testClone3WaitidRoundtrip);
     runner.runTest("signal: kill single process", process_tests.testKillToSingleProcess);
     runner.runTest("signal: kill current process group", process_tests.testKillToCurrentProcessGroup);
     runner.runTest("signal: kill specific process group", process_tests.testKillToSpecificProcessGroup);

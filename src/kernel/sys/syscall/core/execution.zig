@@ -1144,12 +1144,43 @@ pub fn sys_clone3(frame: *hal.syscall.SyscallFrame, clone_args_ptr: usize, size:
     // Fallback for standard fork-like clone (CLONE_VM not set)
     // If exit_signal matches SIGCHLD and flags is 0 or minimal, treat as fork
     if ((flags & uapi.sched.CLONE_VM) == 0 and exit_signal == signal.SIGCHLD) {
-        return sys_fork(frame);
+        const child_pid = try sys_fork(frame);
+
+        // Handle CLONE_PARENT_SETTID even in fork path
+        if ((flags & uapi.sched.CLONE_PARENT_SETTID) != 0 or args.parent_tid != 0) {
+            const parent_tid_ptr = args.parent_tid;
+            if (parent_tid_ptr != 0) {
+                if (isValidUserAccess(parent_tid_ptr, @sizeOf(i32), AccessMode.Write)) {
+                    // Write child PID to parent's memory
+                    UserPtr.from(parent_tid_ptr).writeValue(@as(i32, @intCast(child_pid))) catch {
+                        // Note: child already created, can't easily undo fork
+                        // Linux behavior: return success but don't write
+                        return child_pid;
+                    };
+                } else {
+                    // Linux ignores EFAULT in this case after fork succeeds
+                    return child_pid;
+                }
+            }
+        }
+
+        return child_pid;
     }
 
     // If flags == 0 and exit_signal == SIGCHLD, also treat as fork
     if (flags == 0 and exit_signal == signal.SIGCHLD) {
-        return sys_fork(frame);
+        const child_pid = try sys_fork(frame);
+
+        // Check for parent_tid pointer even with flags==0
+        if (args.parent_tid != 0) {
+            if (isValidUserAccess(args.parent_tid, @sizeOf(i32), AccessMode.Write)) {
+                UserPtr.from(args.parent_tid).writeValue(@as(i32, @intCast(child_pid))) catch {
+                    return child_pid;
+                };
+            }
+        }
+
+        return child_pid;
     }
 
     // Other combinations not yet supported

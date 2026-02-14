@@ -884,3 +884,165 @@ pub fn testBackgroundProcessGroup() !void {
         }
     }
 }
+
+// =============================================================================
+// Phase 19: Process Control Extensions (clone3 and waitid)
+// =============================================================================
+
+/// Test 1: clone3 basic fork with exit_signal=SIGCHLD
+pub fn testClone3BasicFork() !void {
+    var args = syscall.CloneArgs{
+        .exit_signal = syscall.SIGCHLD,
+    };
+    const pid = try syscall.clone3(&args);
+    if (pid == 0) {
+        // Child
+        syscall.exit(7);
+    } else {
+        // Parent: wait for child
+        var status: i32 = 0;
+        const waited = try syscall.wait4(@intCast(pid), &status, 0);
+        if (waited != @as(i32, @intCast(pid))) return error.TestFailed;
+        const exit_code = (@as(u32, @bitCast(status)) >> 8) & 0xFF;
+        if (exit_code != 7) return error.TestFailed;
+    }
+}
+
+/// Test 2: clone3 with invalid size returns error
+pub fn testClone3InvalidSize() !void {
+    var args = syscall.CloneArgs{ .exit_signal = syscall.SIGCHLD };
+    const ret = syscall.syscall2(syscall.uapi.syscalls.SYS_CLONE3, @intFromPtr(&args), 4);
+    // Expect error (EINVAL)
+    if (!syscall.isError(ret)) return error.TestFailed;
+}
+
+/// Test 3: clone3 with parent_tid pointer set
+pub fn testClone3WithParentTid() !void {
+    var parent_tid: i32 = 0;
+    var args = syscall.CloneArgs{
+        .flags = 0x00100000, // CLONE_PARENT_SETTID
+        .exit_signal = syscall.SIGCHLD,
+        .parent_tid = @intFromPtr(&parent_tid),
+    };
+    const pid = try syscall.clone3(&args);
+    if (pid == 0) {
+        syscall.exit(0);
+    } else {
+        // parent_tid should have been set to child's TID/PID
+        if (parent_tid != @as(i32, @intCast(pid))) return error.TestFailed;
+        _ = try syscall.wait4(@intCast(pid), null, 0);
+    }
+}
+
+/// Test 4: waitid with P_PID waits for specific child
+pub fn testWaitidPidExited() !void {
+    const pid = try syscall.fork();
+    if (pid == 0) {
+        syscall.exit(99);
+    } else {
+        var info = syscall.SigInfo{};
+        try syscall.waitid(syscall.P_PID, @intCast(pid), &info, syscall.WEXITED);
+        // Verify siginfo fields
+        if (info.si_signo != 17) return error.TestFailed; // SIGCHLD
+        if (info.si_code != syscall.CLD_EXITED) return error.TestFailed;
+        if (info.si_pid != pid) return error.TestFailed;
+        if (info.si_status != 99) return error.TestFailed;
+    }
+}
+
+/// Test 5: waitid with P_ALL waits for any child
+pub fn testWaitidPAll() !void {
+    const pid = try syscall.fork();
+    if (pid == 0) {
+        syscall.exit(55);
+    } else {
+        var info = syscall.SigInfo{};
+        try syscall.waitid(syscall.P_ALL, 0, &info, syscall.WEXITED);
+        if (info.si_signo != 17) return error.TestFailed;
+        if (info.si_pid != pid) return error.TestFailed;
+        if (info.si_status != 55) return error.TestFailed;
+    }
+}
+
+/// Test 6: waitid with P_PGID waits for children in process group
+pub fn testWaitidPPgid() !void {
+    const pid = try syscall.fork();
+    if (pid == 0) {
+        syscall.exit(33);
+    } else {
+        var info = syscall.SigInfo{};
+        // P_PGID with id=0 means "same process group as caller"
+        try syscall.waitid(syscall.P_PGID, 0, &info, syscall.WEXITED);
+        if (info.si_signo != 17) return error.TestFailed;
+        if (info.si_pid != pid) return error.TestFailed;
+        if (info.si_status != 33) return error.TestFailed;
+    }
+}
+
+/// Test 7: waitid with WNOHANG returns immediately if no zombie
+pub fn testWaitidNohang() !void {
+    const pid = try syscall.fork();
+    if (pid == 0) {
+        syscall.sleep_ms(200) catch {};
+        syscall.exit(0);
+    } else {
+        var info = syscall.SigInfo{};
+        // WNOHANG + WEXITED: should return immediately with si_pid=0
+        try syscall.waitid(syscall.P_PID, @intCast(pid), &info, syscall.WEXITED | 1);
+        // si_pid should be 0 (no child available yet)
+        if (info.si_pid != 0) return error.TestFailed;
+        // Now wait for real
+        _ = try syscall.wait4(@intCast(pid), null, 0);
+    }
+}
+
+/// Test 8: waitid returns ECHILD when no children
+pub fn testWaitidNoChildren() !void {
+    // First reap any existing children (from previous tests)
+    while (true) {
+        var info = syscall.SigInfo{};
+        const result = syscall.waitid(syscall.P_ALL, 0, &info, syscall.WEXITED | syscall.WNOHANG);
+        if (result) |_| {
+            if (info.si_pid == 0) break; // No more children
+        } else |_| {
+            break; // Got ECHILD
+        }
+    }
+
+    // Now test that waitid returns ECHILD
+    var info = syscall.SigInfo{};
+    const result = syscall.waitid(syscall.P_ALL, 0, &info, syscall.WEXITED);
+    if (result) |_| {
+        return error.TestFailed; // Should have failed
+    } else |err| {
+        if (err != error.NoChildProcesses) return error.TestFailed;
+    }
+}
+
+/// Test 9: waitid with options=0 returns EINVAL
+pub fn testWaitidInvalidOptions() !void {
+    var info = syscall.SigInfo{};
+    const result = syscall.waitid(syscall.P_ALL, 0, &info, 0);
+    if (result) |_| {
+        return error.TestFailed;
+    } else |err| {
+        if (err != error.InvalidArgument) return error.TestFailed;
+    }
+}
+
+/// Test 10: clone3 creates child, waitid reaps it
+pub fn testClone3WaitidRoundtrip() !void {
+    var args = syscall.CloneArgs{
+        .exit_signal = syscall.SIGCHLD,
+    };
+    const pid = try syscall.clone3(&args);
+    if (pid == 0) {
+        syscall.exit(42);
+    } else {
+        var info = syscall.SigInfo{};
+        try syscall.waitid(syscall.P_PID, @intCast(pid), &info, syscall.WEXITED);
+        if (info.si_pid != pid) return error.TestFailed;
+        if (info.si_status != 42) return error.TestFailed;
+        if (info.si_code != syscall.CLD_EXITED) return error.TestFailed;
+    }
+}

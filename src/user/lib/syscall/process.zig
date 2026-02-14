@@ -374,6 +374,88 @@ pub fn waitpid(pid: i32, wstatus: ?*i32, options: u32) SyscallError!i32 {
     return try wait4(pid, wstatus, options);
 }
 
+// =============================================================================
+// Modern Process Creation (clone3)
+// =============================================================================
+
+/// Clone arguments structure (matches Linux struct clone_args)
+pub const CloneArgs = extern struct {
+    flags: u64 = 0,
+    pidfd: u64 = 0,
+    child_tid: u64 = 0,
+    parent_tid: u64 = 0,
+    exit_signal: u64 = 0,
+    stack: u64 = 0,
+    stack_size: u64 = 0,
+    tls: u64 = 0,
+    set_tid: u64 = 0,
+    set_tid_size: u64 = 0,
+    cgroup: u64 = 0,
+};
+
+/// SIGCHLD signal number
+pub const SIGCHLD: u64 = 17;
+
+/// Create a child process using clone3
+/// Returns: child PID to parent, 0 to child
+pub fn clone3(args: *const CloneArgs) SyscallError!i32 {
+    const ret = primitive.syscall2(
+        syscalls.SYS_CLONE3,
+        @intFromPtr(args),
+        @sizeOf(CloneArgs),
+    );
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return @truncate(@as(isize, @bitCast(ret)));
+}
+
+// =============================================================================
+// waitid
+// =============================================================================
+
+/// waitid idtype values
+pub const P_ALL: u32 = 0;
+pub const P_PID: u32 = 1;
+pub const P_PGID: u32 = 2;
+
+/// waitid option flags
+pub const WEXITED: u32 = 4;
+pub const WSTOPPED: u32 = 2;
+pub const WCONTINUED: u32 = 8;
+pub const WNOWAIT: u32 = 0x01000000;
+
+/// siginfo_t structure for waitid (128 bytes, Linux ABI)
+pub const SigInfo = extern struct {
+    si_signo: i32 = 0,
+    si_errno: i32 = 0,
+    si_code: i32 = 0,
+    _pad0: i32 = 0,
+    si_pid: i32 = 0,
+    si_uid: i32 = 0,
+    si_status: i32 = 0,
+    _pad: [128 - 28]u8 = [_]u8{0} ** (128 - 28),
+};
+
+/// CLD_* codes for si_code
+pub const CLD_EXITED: i32 = 1;
+pub const CLD_KILLED: i32 = 2;
+pub const CLD_DUMPED: i32 = 3;
+pub const CLD_TRAPPED: i32 = 4;
+pub const CLD_STOPPED: i32 = 5;
+pub const CLD_CONTINUED: i32 = 6;
+
+/// Wait for child process state changes (modern interface)
+/// Returns 0 on success
+pub fn waitid(idtype: u32, id: u32, info: *SigInfo, options: u32) SyscallError!void {
+    const ret = primitive.syscall5(
+        syscalls.SYS_WAITID,
+        idtype,
+        id,
+        @intFromPtr(info),
+        options,
+        0, // rusage not implemented
+    );
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
 
 /// Execute a program
 /// path: Path to executable
