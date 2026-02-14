@@ -14,6 +14,11 @@ const vmm = @import("vmm");
 const user_mem = @import("user_mem");
 const user_vmm = @import("user_vmm");
 const console = @import("console");
+const heap = @import("heap");
+const fd_mod = @import("fd");
+const sched = @import("sched");
+const sync = @import("sync");
+const hal = @import("hal");
 const SyscallError = base.SyscallError;
 
 // =============================================================================
@@ -483,4 +488,428 @@ pub fn sys_mincore(addr: usize, len: usize, vec_ptr: usize) SyscallError!usize {
     }
 
     return 0;
+}
+
+// =============================================================================
+// Advanced Memory Management (Phase 18)
+// =============================================================================
+
+/// memfd_create flags
+pub const MFD_CLOEXEC: u32 = 0x0001;
+pub const MFD_ALLOW_SEALING: u32 = 0x0002;
+
+/// msync flags
+pub const MS_ASYNC: u32 = 1;
+pub const MS_INVALIDATE: u32 = 2;
+pub const MS_SYNC: u32 = 4;
+
+/// mremap flags
+pub const MREMAP_MAYMOVE: u32 = 1;
+pub const MREMAP_FIXED: u32 = 2;
+
+/// Memfd state - manages anonymous memory-backed file descriptor
+///
+/// Lifecycle: ref_count starts at 1 (owned by the FD). Each active operation
+/// holds an additional reference. Close drops the FD's reference.
+const MemfdState = struct {
+    buffer: ?[*]u8,
+    phys_addr: u64,
+    capacity: usize,
+    size: usize,
+    ref_count: std.atomic.Value(u32),
+    lock: sync.Spinlock,
+
+    fn init(flags: u32) !*MemfdState {
+        _ = flags;
+        const state = try heap.allocator().create(MemfdState);
+        state.* = MemfdState{
+            .buffer = null,
+            .phys_addr = 0,
+            .capacity = 0,
+            .size = 0,
+            .ref_count = std.atomic.Value(u32).init(1),
+            .lock = .{},
+        };
+        return state;
+    }
+
+    fn ensureCapacity(self: *MemfdState, new_cap: usize) !void {
+        if (new_cap <= self.capacity) return;
+
+        // Page-align new capacity
+        const aligned_cap = std.mem.alignForward(usize, new_cap, pmm.PAGE_SIZE);
+        const num_pages = aligned_cap / pmm.PAGE_SIZE;
+
+        // Allocate new buffer
+        const new_phys = pmm.allocZeroedPages(num_pages) orelse return error.ENOMEM;
+        const new_buf = hal.paging.physToVirt(new_phys);
+
+        // Copy old data if any
+        if (self.buffer) |old_buf| {
+            @memcpy(new_buf[0..self.size], old_buf[0..self.size]);
+
+            // Free old pages
+            if (self.capacity > 0) {
+                const old_pages = self.capacity / pmm.PAGE_SIZE;
+                var i: usize = 0;
+                while (i < old_pages) : (i += 1) {
+                    pmm.freePage(self.phys_addr + i * pmm.PAGE_SIZE);
+                }
+            }
+        }
+
+        self.buffer = new_buf;
+        self.phys_addr = new_phys;
+        self.capacity = aligned_cap;
+    }
+
+    fn truncate(self: *MemfdState, new_size: usize) !void {
+        if (new_size > self.size) {
+            // Extending - ensure capacity and zero-fill new region
+            try self.ensureCapacity(new_size);
+            if (self.buffer) |buf| {
+                const zero_start = self.size;
+                const zero_len = new_size - self.size;
+                @memset(buf[zero_start..][0..zero_len], 0);
+            }
+        }
+        // Shrinking or same size - just update size
+        self.size = new_size;
+    }
+
+    fn ref(self: *MemfdState) void {
+        _ = self.ref_count.fetchAdd(1, .monotonic);
+    }
+
+    fn unref(self: *MemfdState) void {
+        if (self.ref_count.fetchSub(1, .acq_rel) == 1) {
+            // Free PMM pages
+            if (self.capacity > 0) {
+                const num_pages = self.capacity / pmm.PAGE_SIZE;
+                var i: usize = 0;
+                while (i < num_pages) : (i += 1) {
+                    pmm.freePage(self.phys_addr + i * pmm.PAGE_SIZE);
+                }
+            }
+            heap.allocator().destroy(self);
+        }
+    }
+};
+
+fn memfdRead(fd: *fd_mod.FileDescriptor, buf: []u8) isize {
+    const state: *MemfdState = @ptrCast(@alignCast(fd.private_data));
+    state.ref();
+    defer state.unref();
+
+    const held = state.lock.acquire();
+    defer held.release();
+
+    // Check EOF
+    if (fd.position >= state.size) return 0;
+
+    // Calculate bytes to read
+    const remaining = state.size - @as(usize, @intCast(fd.position));
+    const to_read = @min(buf.len, remaining);
+
+    // Copy from buffer
+    if (state.buffer) |src| {
+        @memcpy(buf[0..to_read], src[@as(usize, @intCast(fd.position))..][0..to_read]);
+    } else {
+        // Empty memfd - shouldn't happen if size > 0
+        return 0;
+    }
+
+    // Advance position (happens after lock release would be unsafe - TOCTOU)
+    fd.position += @intCast(to_read);
+
+    return @intCast(to_read);
+}
+
+fn memfdWrite(fd: *fd_mod.FileDescriptor, buf: []const u8) isize {
+    const state: *MemfdState = @ptrCast(@alignCast(fd.private_data));
+    state.ref();
+    defer state.unref();
+
+    const held = state.lock.acquire();
+    defer held.release();
+
+    const write_start = @as(usize, @intCast(fd.position));
+    const write_end = write_start + buf.len;
+
+    // Ensure capacity
+    state.ensureCapacity(write_end) catch return uapi.errno.Errno.ENOMEM.toReturn();
+
+    // Write data
+    if (state.buffer) |dest| {
+        @memcpy(dest[write_start..][0..buf.len], buf);
+    } else {
+        // ensureCapacity should have allocated buffer
+        return uapi.errno.Errno.EIO.toReturn();
+    }
+
+    // Update size if we extended the file
+    if (write_end > state.size) {
+        state.size = write_end;
+    }
+
+    // Advance position
+    fd.position += @intCast(buf.len);
+
+    return @intCast(buf.len);
+}
+
+fn memfdClose(fd: *fd_mod.FileDescriptor) isize {
+    const state: *MemfdState = @ptrCast(@alignCast(fd.private_data));
+    state.unref();
+    return 0;
+}
+
+fn memfdSeek(fd: *fd_mod.FileDescriptor, offset: i64, whence: u32) isize {
+    const state: *MemfdState = @ptrCast(@alignCast(fd.private_data));
+    state.ref();
+    defer state.unref();
+
+    const held = state.lock.acquire();
+    defer held.release();
+
+    const new_pos = switch (whence) {
+        0 => offset, // SEEK_SET
+        1 => @as(i64, @intCast(fd.position)) + offset, // SEEK_CUR
+        2 => @as(i64, @intCast(state.size)) + offset, // SEEK_END
+        else => return uapi.errno.Errno.EINVAL.toReturn(),
+    };
+
+    if (new_pos < 0) return uapi.errno.Errno.EINVAL.toReturn();
+
+    fd.position = @intCast(new_pos);
+    return new_pos;
+}
+
+fn memfdMmap(fd: *fd_mod.FileDescriptor, offset: usize, size: *usize) u64 {
+    _ = offset;
+    const state: *MemfdState = @ptrCast(@alignCast(fd.private_data));
+    state.ref();
+    defer state.unref();
+
+    const held = state.lock.acquire();
+    defer held.release();
+
+    if (state.buffer == null) {
+        size.* = 0;
+        return 0;
+    }
+
+    size.* = state.capacity;
+    return state.phys_addr;
+}
+
+fn memfdStat(fd: *fd_mod.FileDescriptor, stat_ptr: *anyopaque) isize {
+    const stat_buf: *uapi.stat.Stat = @ptrCast(@alignCast(stat_ptr));
+    const state: *MemfdState = @ptrCast(@alignCast(fd.private_data));
+    state.ref();
+    defer state.unref();
+
+    const held = state.lock.acquire();
+    defer held.release();
+
+    @memset(std.mem.asBytes(stat_buf), 0);
+    stat_buf.mode = 0o100600; // Regular file, owner rw
+    stat_buf.size = @intCast(state.size);
+    stat_buf.blksize = 4096;
+    stat_buf.blocks = @intCast((state.capacity + 511) / 512);
+
+    return 0;
+}
+
+fn memfdTruncate(fd: *fd_mod.FileDescriptor, length: u64) error{ AccessDenied, IOError }!void {
+    const state: *MemfdState = @ptrCast(@alignCast(fd.private_data));
+    state.ref();
+    defer state.unref();
+
+    const held = state.lock.acquire();
+    defer held.release();
+
+    state.truncate(@intCast(length)) catch return error.IOError;
+}
+
+fn memfdPoll(fd: *fd_mod.FileDescriptor, events: u32) u32 {
+    const state: *MemfdState = @ptrCast(@alignCast(fd.private_data));
+    state.ref();
+    defer state.unref();
+
+    const held = state.lock.acquire();
+    defer held.release();
+
+    var revents: u32 = 0;
+    const EPOLLIN: u32 = 0x001;
+    const EPOLLOUT: u32 = 0x004;
+
+    if ((events & EPOLLIN) != 0 and state.size > 0) {
+        revents |= EPOLLIN;
+    }
+    if ((events & EPOLLOUT) != 0) {
+        revents |= EPOLLOUT;
+    }
+
+    return revents;
+}
+
+const memfd_file_ops = fd_mod.FileOps{
+    .read = memfdRead,
+    .write = memfdWrite,
+    .close = memfdClose,
+    .seek = memfdSeek,
+    .mmap = memfdMmap,
+    .stat = memfdStat,
+    .truncate = memfdTruncate,
+    .poll = memfdPoll,
+    .ioctl = null,
+};
+
+/// sys_memfd_create (319) - Create anonymous memory-backed file descriptor
+///
+/// Args:
+///   name_ptr: Pointer to name string (informational, up to 249 chars + null)
+///   flags: MFD_CLOEXEC and/or MFD_ALLOW_SEALING
+///
+/// Returns: File descriptor number on success, error on failure
+pub fn sys_memfd_create(name_ptr: usize, flags: usize) SyscallError!usize {
+    // Validate flags
+    const valid_flags = MFD_CLOEXEC | MFD_ALLOW_SEALING;
+    if ((flags & ~valid_flags) != 0) {
+        return error.EINVAL;
+    }
+
+    // Copy name from user (informational only, don't store it)
+    var name_buf: [250]u8 = undefined;
+    _ = user_mem.copyStringFromUser(&name_buf, name_ptr) catch {
+        return error.EFAULT;
+    };
+
+    // Allocate state
+    const state = MemfdState.init(@truncate(flags)) catch return error.ENOMEM;
+    errdefer state.unref();
+
+    // Create file descriptor
+    const fd_flags = fd_mod.O_RDWR | (if ((flags & MFD_CLOEXEC) != 0) fd_mod.O_CLOEXEC else 0);
+    const file = heap.allocator().create(fd_mod.FileDescriptor) catch {
+        return error.ENOMEM;
+    };
+    errdefer heap.allocator().destroy(file);
+
+    file.* = fd_mod.FileDescriptor{
+        .ops = &memfd_file_ops,
+        .position = 0,
+        .flags = fd_flags,
+        .private_data = state,
+        .refcount = .{ .raw = 1 },
+    };
+
+    // Install in FD table
+    const fd_table = base.getGlobalFdTable();
+    const fd_num = fd_table.allocateFd() orelse {
+        return error.EMFILE;
+    };
+    fd_table.installFd(fd_num, file);
+
+    return fd_num;
+}
+
+/// sys_msync (26) - Sync memory-mapped region to storage
+///
+/// Args:
+///   addr: Start address (must be page-aligned)
+///   len: Length in bytes
+///   flags: MS_ASYNC, MS_SYNC, optionally MS_INVALIDATE
+///
+/// Returns: 0 on success, error on failure
+pub fn sys_msync(addr: usize, len: usize, flags: usize) SyscallError!usize {
+    // Validate addr is page-aligned
+    if (!std.mem.isAligned(addr, pmm.PAGE_SIZE)) {
+        return error.EINVAL;
+    }
+
+    // Validate length
+    if (len == 0) {
+        return error.EINVAL;
+    }
+
+    // Validate flags - must have exactly one of MS_ASYNC or MS_SYNC
+    const has_async = (flags & MS_ASYNC) != 0;
+    const has_sync = (flags & MS_SYNC) != 0;
+
+    if (has_async and has_sync) {
+        return error.EINVAL; // Can't have both
+    }
+    if (!has_async and !has_sync) {
+        return error.EINVAL; // Must have one
+    }
+
+    // MS_INVALIDATE is optional
+    // Validate no unknown flags
+    const valid_flags = MS_ASYNC | MS_SYNC | MS_INVALIDATE;
+    if ((flags & ~valid_flags) != 0) {
+        return error.EINVAL;
+    }
+
+    // No-op: zk has no buffer cache, data is already on disk
+    return 0;
+}
+
+/// sys_mremap (25) - Remap a virtual memory region
+///
+/// Args:
+///   old_addr: Current address (must be page-aligned)
+///   old_size: Current size
+///   new_size: Desired new size
+///   flags: MREMAP_MAYMOVE to allow moving the mapping
+///   new_addr: Target address (only if MREMAP_FIXED)
+///
+/// Returns: New address on success, error on failure
+pub fn sys_mremap(
+    old_addr: usize,
+    old_size: usize,
+    new_size: usize,
+    flags: usize,
+    new_addr: usize,
+) SyscallError!usize {
+    _ = new_addr;
+
+    // Validate parameters
+    if (old_size == 0 or new_size == 0) {
+        return error.EINVAL;
+    }
+    if (!std.mem.isAligned(old_addr, pmm.PAGE_SIZE)) {
+        return error.EINVAL;
+    }
+
+    // Validate flags - only MREMAP_MAYMOVE supported
+    // MREMAP_FIXED is complex and not required by phase spec
+    if ((flags & MREMAP_FIXED) != 0) {
+        return error.EINVAL;
+    }
+    const valid_flags = MREMAP_MAYMOVE;
+    if ((flags & ~valid_flags) != 0) {
+        return error.EINVAL;
+    }
+
+    const proc = base.getCurrentProcess();
+    const result = proc.user_vmm.mremap(
+        @intCast(old_addr),
+        old_size,
+        new_size,
+        @truncate(flags),
+    );
+
+    if (result >= 0) {
+        return @intCast(result);
+    }
+
+    const errno_val: i32 = @intCast(-result);
+    return switch (errno_val) {
+        14 => error.EFAULT,
+        12 => error.ENOMEM,
+        22 => error.EINVAL,
+        else => error.EINVAL,
+    };
 }

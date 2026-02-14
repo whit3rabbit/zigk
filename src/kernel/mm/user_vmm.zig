@@ -753,6 +753,234 @@ pub const UserVmm = struct {
         return null;
     }
 
+    /// Resize or move a memory mapping
+    /// Returns new address on success, negative errno on error
+    pub fn mremap(self: *UserVmm, old_addr: u64, old_size: usize, new_size: usize, flags: u32) isize {
+        const held = self.lock.acquireWrite();
+        defer held.release();
+
+        // Validate alignment
+        if (!paging.isPageAligned(old_addr)) {
+            return Errno.EINVAL.toReturn();
+        }
+
+        // Page-align sizes
+        const aligned_old_size = std.mem.alignForward(usize, old_size, pmm.PAGE_SIZE);
+        const aligned_new_size = std.mem.alignForward(usize, new_size, pmm.PAGE_SIZE);
+
+        // Overflow checks
+        if (old_addr > std.math.maxInt(u64) - aligned_old_size) {
+            return Errno.EINVAL.toReturn();
+        }
+        if (old_addr > std.math.maxInt(u64) - aligned_new_size) {
+            return Errno.ENOMEM.toReturn();
+        }
+
+        const old_end = old_addr + aligned_old_size;
+
+        // Find VMA containing old_addr
+        var vma = self.vma_head;
+        var target_vma: ?*Vma = null;
+        while (vma) |v| {
+            if (v.contains(old_addr)) {
+                target_vma = v;
+                break;
+            }
+            vma = v.next;
+        }
+
+        const v = target_vma orelse return Errno.EFAULT.toReturn();
+
+        // Verify VMA fully covers the old range
+        if (old_end > v.end) {
+            return Errno.EFAULT.toReturn();
+        }
+
+        // Case 1: Shrinking
+        if (aligned_new_size <= aligned_old_size) {
+            const new_end = old_addr + aligned_new_size;
+            const shrink_start = new_end;
+            const shrink_size = old_end - new_end;
+
+            // Unmap and free pages in the shrunk region
+            var offset: usize = 0;
+            while (offset < shrink_size) : (offset += pmm.PAGE_SIZE) {
+                const vaddr = shrink_start + offset;
+                if (vmm.translate(self.pml4_phys, vaddr)) |phys| {
+                    vmm.unmapPage(self.pml4_phys, vaddr) catch {};
+                    // Only free if not a device mapping
+                    if ((v.flags & MAP_DEVICE) == 0) {
+                        pmm.freePage(phys);
+                    }
+                }
+            }
+
+            // Update VMA end
+            v.end = new_end;
+            self.subTotalMapped(shrink_size);
+
+            return @intCast(old_addr);
+        }
+
+        // Case 2: Growing
+        const grow_size = aligned_new_size - aligned_old_size;
+        const new_end = old_addr + aligned_new_size;
+
+        // Check for overflow on new_end
+        if (new_end < old_addr) {
+            return Errno.ENOMEM.toReturn();
+        }
+
+        // Check if we can grow in place
+        const can_grow_in_place = blk: {
+            // Check if space after VMA is free
+            if (self.findOverlappingVma(old_end, new_end)) |_| {
+                break :blk false; // Overlap with another VMA
+            }
+            if (new_end > USER_MMAP_END) {
+                break :blk false; // Would exceed user space
+            }
+            break :blk true;
+        };
+
+        if (can_grow_in_place) {
+            // Grow in place - allocate and map new pages
+            const page_flags = v.toPageFlags();
+            var offset: usize = 0;
+            while (offset < grow_size) : (offset += pmm.PAGE_SIZE) {
+                const vaddr = old_end + offset;
+                const phys_page = pmm.allocPage() orelse {
+                    // Allocation failed - rollback
+                    var rollback: usize = 0;
+                    while (rollback < offset) : (rollback += pmm.PAGE_SIZE) {
+                        const rb_addr = old_end + rollback;
+                        if (vmm.translate(self.pml4_phys, rb_addr)) |paddr| {
+                            vmm.unmapPage(self.pml4_phys, rb_addr) catch {};
+                            pmm.freePage(paddr);
+                        }
+                    }
+                    return Errno.ENOMEM.toReturn();
+                };
+
+                // Zero the page
+                const ptr: [*]u8 = @ptrCast(hal.paging.physToVirt(phys_page));
+                hal.mem.fill(ptr, 0, pmm.PAGE_SIZE);
+
+                // Map the page
+                vmm.mapPage(self.pml4_phys, vaddr, phys_page, page_flags) catch {
+                    pmm.freePage(phys_page);
+                    // Rollback
+                    var rollback: usize = 0;
+                    while (rollback < offset) : (rollback += pmm.PAGE_SIZE) {
+                        const rb_addr = old_end + rollback;
+                        if (vmm.translate(self.pml4_phys, rb_addr)) |paddr| {
+                            vmm.unmapPage(self.pml4_phys, rb_addr) catch {};
+                            pmm.freePage(paddr);
+                        }
+                    }
+                    return Errno.ENOMEM.toReturn();
+                };
+            }
+
+            // Extend VMA
+            v.end = new_end;
+            self.total_mapped += grow_size;
+
+            return @intCast(old_addr);
+        }
+
+        // Cannot grow in place - check if MREMAP_MAYMOVE is set
+        if ((flags & 1) == 0) { // MREMAP_MAYMOVE
+            return Errno.ENOMEM.toReturn();
+        }
+
+        // Find new location
+        const new_addr = self.findFreeRange(aligned_new_size) orelse {
+            return Errno.ENOMEM.toReturn();
+        };
+
+        // Allocate and map pages at new location
+        const page_flags = v.toPageFlags();
+        var offset: usize = 0;
+        while (offset < aligned_new_size) : (offset += pmm.PAGE_SIZE) {
+            const new_vaddr = new_addr + offset;
+            const phys_page = pmm.allocPage() orelse {
+                // Rollback new mappings
+                var rollback: usize = 0;
+                while (rollback < offset) : (rollback += pmm.PAGE_SIZE) {
+                    const rb_addr = new_addr + rollback;
+                    if (vmm.translate(self.pml4_phys, rb_addr)) |paddr| {
+                        vmm.unmapPage(self.pml4_phys, rb_addr) catch {};
+                        pmm.freePage(paddr);
+                    }
+                }
+                return Errno.ENOMEM.toReturn();
+            };
+
+            // Zero the page
+            const ptr: [*]u8 = @ptrCast(hal.paging.physToVirt(phys_page));
+            hal.mem.fill(ptr, 0, pmm.PAGE_SIZE);
+
+            // Map the page
+            vmm.mapPage(self.pml4_phys, new_vaddr, phys_page, page_flags) catch {
+                pmm.freePage(phys_page);
+                // Rollback
+                var rollback: usize = 0;
+                while (rollback < offset) : (rollback += pmm.PAGE_SIZE) {
+                    const rb_addr = new_addr + rollback;
+                    if (vmm.translate(self.pml4_phys, rb_addr)) |paddr| {
+                        vmm.unmapPage(self.pml4_phys, rb_addr) catch {};
+                        pmm.freePage(paddr);
+                    }
+                }
+                return Errno.ENOMEM.toReturn();
+            };
+        }
+
+        // Copy data from old to new location (page by page)
+        offset = 0;
+        while (offset < aligned_old_size) : (offset += pmm.PAGE_SIZE) {
+            const old_vaddr = old_addr + offset;
+            const new_vaddr = new_addr + offset;
+
+            if (vmm.translate(self.pml4_phys, old_vaddr)) |old_phys| {
+                if (vmm.translate(self.pml4_phys, new_vaddr)) |new_phys| {
+                    const old_ptr = paging.physToVirt(old_phys);
+                    const new_ptr = paging.physToVirt(new_phys);
+                    @memcpy(new_ptr[0..pmm.PAGE_SIZE], old_ptr[0..pmm.PAGE_SIZE]);
+                }
+            }
+        }
+
+        // Unmap and free old pages
+        offset = 0;
+        while (offset < aligned_old_size) : (offset += pmm.PAGE_SIZE) {
+            const vaddr = old_addr + offset;
+            if (vmm.translate(self.pml4_phys, vaddr)) |phys| {
+                vmm.unmapPage(self.pml4_phys, vaddr) catch {};
+                if ((v.flags & MAP_DEVICE) == 0) {
+                    pmm.freePage(phys);
+                }
+            }
+        }
+
+        // Remove old VMA
+        self.removeVma(v);
+        self.subTotalMapped(aligned_old_size);
+        const alloc = heap.allocator();
+        alloc.destroy(v);
+
+        // Create new VMA
+        const new_vma = self.createVma(new_addr, new_addr + aligned_new_size, v.prot, v.flags) catch {
+            // This shouldn't fail as we already freed memory, but handle it
+            return Errno.ENOMEM.toReturn();
+        };
+        self.insertVma(new_vma);
+        self.total_mapped += aligned_new_size;
+
+        return @intCast(new_addr);
+    }
+
     /// Find VMA that overlaps with given range
     pub fn findOverlappingVma(self: *UserVmm, start: u64, end: u64) ?*Vma {
         var vma = self.vma_head;
