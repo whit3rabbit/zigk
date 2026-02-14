@@ -167,10 +167,10 @@ Plans:
   3. waitid supports P_PID, P_PGID, P_ALL id types
   4. Both syscalls work on x86_64 and aarch64 with identical behavior
 
-**Plans**: TBD
+**Plans**: 1 plan
 
 Plans:
-- [ ] 19-01: TBD
+- [ ] 19-01-PLAN.md -- Implement clone3 and waitid syscalls with struct-based args, siginfo_t output, and tests
 
 #### Phase 20: Signal Handling Extensions
 **Goal**: Synchronous signal waiting and queuing with extended options are available
@@ -310,7 +310,7 @@ Phases execute in numeric order: 15 -> 16 -> 17 -> 18 -> 19 -> 20 -> 21 -> 22 ->
 | 16. Advanced File Operations | v1.2 | 1/1 | Complete | 2026-02-12 |
 | 17. Zero-Copy I/O | v1.2 | 2/2 | Complete | 2026-02-13 |
 | 18. Memory Management Extensions | v1.2 | 1/1 | Complete | 2026-02-13 |
-| 19. Process Control Extensions | v1.2 | 0/TBD | Not started | - |
+| 19. Process Control Extensions | v1.2 | 0/1 | Planned | - |
 | 20. Signal Handling Extensions | v1.2 | 0/TBD | Not started | - |
 | 21. I/O Multiplexing Extension | v1.2 | 0/TBD | Not started | - |
 | 22. File Monitoring | v1.2 | 0/TBD | Not started | - |
@@ -321,4 +321,4 @@ Phases execute in numeric order: 15 -> 16 -> 17 -> 18 -> 19 -> 20 -> 21 -> 22 ->
 
 ---
 *Roadmap created: 2026-02-11*
-*Last updated: 2026-02-13 (Phase 18 planned)*
+*Last updated: 2026-02-13 (Phase 19 planned)*
