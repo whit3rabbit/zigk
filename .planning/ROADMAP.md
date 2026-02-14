@@ -170,7 +170,7 @@ Plans:
 **Plans**: 1 plan
 
 Plans:
-- [ ] 19-01-PLAN.md -- Implement clone3 and waitid syscalls with struct-based args, siginfo_t output, and tests
+- [x] 19-01-PLAN.md -- Implement clone3 and waitid syscalls with struct-based args, siginfo_t output, and tests
 
 #### Phase 20: Signal Handling Extensions
 **Goal**: Synchronous signal waiting and queuing with extended options are available
@@ -310,7 +310,7 @@ Phases execute in numeric order: 15 -> 16 -> 17 -> 18 -> 19 -> 20 -> 21 -> 22 ->
 | 16. Advanced File Operations | v1.2 | 1/1 | Complete | 2026-02-12 |
 | 17. Zero-Copy I/O | v1.2 | 2/2 | Complete | 2026-02-13 |
 | 18. Memory Management Extensions | v1.2 | 1/1 | Complete | 2026-02-13 |
-| 19. Process Control Extensions | v1.2 | 0/1 | Planned | - |
+| 19. Process Control Extensions | v1.2 | 1/1 | Complete | 2026-02-14 |
 | 20. Signal Handling Extensions | v1.2 | 0/TBD | Not started | - |
 | 21. I/O Multiplexing Extension | v1.2 | 0/TBD | Not started | - |
 | 22. File Monitoring | v1.2 | 0/TBD | Not started | - |
@@ -321,4 +321,4 @@ Phases execute in numeric order: 15 -> 16 -> 17 -> 18 -> 19 -> 20 -> 21 -> 22 ->
 
 ---
 *Roadmap created: 2026-02-11*
-*Last updated: 2026-02-13 (Phase 19 planned)*
+*Last updated: 2026-02-14 (Phase 19 complete)*
