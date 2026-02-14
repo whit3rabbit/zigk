@@ -454,6 +454,18 @@ export fn main(argc: i32, argv: [*][*:0]u8) i32 {
     runner.runTest("advanced_file_ops: renameat2 exchange", fs_extras_tests.testRenameat2Exchange);
     runner.runTest("advanced_file_ops: renameat2 invalid flags", fs_extras_tests.testRenameat2InvalidFlags);
 
+    // Phase 18: Memory Management Extension tests
+    runner.runTest("mem_ext: memfd_create basic", memory_tests.testMemfdCreateBasic);
+    runner.runTest("mem_ext: memfd_create cloexec", memory_tests.testMemfdCreateCloexec);
+    runner.runTest("mem_ext: memfd_create invalid flags", memory_tests.testMemfdCreateInvalidFlags);
+    runner.runTest("mem_ext: memfd_create read write seek", memory_tests.testMemfdCreateReadWriteSeek);
+    runner.runTest("mem_ext: memfd_create truncate", memory_tests.testMemfdCreateTruncate);
+    runner.runTest("mem_ext: memfd_create mmap", memory_tests.testMemfdCreateMmap);
+    runner.runTest("mem_ext: mremap grow", memory_tests.testMremapGrow);
+    runner.runTest("mem_ext: mremap shrink", memory_tests.testMremapShrink);
+    runner.runTest("mem_ext: mremap invalid addr", memory_tests.testMremapInvalidAddr);
+    runner.runTest("mem_ext: msync validation", memory_tests.testMsyncValidation);
+
     // Phase 17: Zero-Copy I/O tests (non-SFS first, SFS last due to close deadlock)
     runner.runTest("zero_copy_io: splice file to pipe", fs_extras_tests.testSpliceFileToPipe);
     runner.runTest("zero_copy_io: splice with offset", fs_extras_tests.testSpliceWithOffset);

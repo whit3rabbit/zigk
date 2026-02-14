@@ -803,14 +803,16 @@ pub fn sys_memfd_create(name_ptr: usize, flags: usize) SyscallError!usize {
         .flags = fd_flags,
         .private_data = state,
         .refcount = .{ .raw = 1 },
+        .lock = .{},
+        .cloexec = (flags & MFD_CLOEXEC) != 0,
     };
 
     // Install in FD table
     const fd_table = base.getGlobalFdTable();
-    const fd_num = fd_table.allocateFd() orelse {
+    const fd_num = fd_table.allocAndInstall(file) orelse {
+        // errdefer handles cleanup of file and state
         return error.EMFILE;
     };
-    fd_table.installFd(fd_num, file);
 
     return fd_num;
 }

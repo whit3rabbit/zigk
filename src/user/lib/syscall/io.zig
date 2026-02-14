@@ -507,6 +507,38 @@ pub fn msync(addr: [*]u8, length: usize, flags: i32) SyscallError!void {
     if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
 }
 
+/// MFD_CLOEXEC flag for memfd_create
+pub const MFD_CLOEXEC: u32 = 0x0001;
+/// MFD_ALLOW_SEALING flag for memfd_create
+pub const MFD_ALLOW_SEALING: u32 = 0x0002;
+
+/// MREMAP flags
+pub const MREMAP_MAYMOVE: u32 = 1;
+
+/// Create an anonymous memory-backed file descriptor
+pub fn memfd_create(name: [*:0]const u8, flags: u32) SyscallError!i32 {
+    const ret = primitive.syscall2(
+        syscalls.SYS_MEMFD_CREATE,
+        @intFromPtr(name),
+        flags,
+    );
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return @intCast(ret);
+}
+
+/// Remap a virtual memory region
+pub fn mremap(old_addr: [*]u8, old_size: usize, new_size: usize, flags: u32) SyscallError![*]u8 {
+    const ret = primitive.syscall4(
+        syscalls.SYS_MREMAP,
+        @intFromPtr(old_addr),
+        old_size,
+        new_size,
+        flags,
+    );
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return @ptrFromInt(ret);
+}
+
 // =============================================================================
 // Standard File Descriptors
 // =============================================================================

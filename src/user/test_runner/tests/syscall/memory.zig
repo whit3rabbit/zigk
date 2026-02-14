@@ -555,3 +555,233 @@ pub fn testMlockallFutureFlag() !void {
     // Unlock after test
     try syscall.munlockall();
 }
+
+// =============================================================================
+// Phase 18: Memory Management Extension Tests
+// =============================================================================
+
+// Memory Test 24: memfd_create basic operation
+pub fn testMemfdCreateBasic() !void {
+    const fd = try syscall.memfd_create("test", 0);
+    defer _ = syscall.close(fd) catch {};
+
+    // Write data
+    const data = "hello";
+    const written = try syscall.write(fd, data.ptr, data.len);
+    if (written != data.len) return error.TestFailed;
+
+    // Seek to beginning
+    _ = try syscall.lseek(fd, 0, syscall.SEEK_SET);
+
+    // Read back
+    var buf: [5]u8 = undefined;
+    const read_len = try syscall.read(fd, &buf, buf.len);
+    if (read_len != data.len) return error.TestFailed;
+    if (!std.mem.eql(u8, &buf, data)) return error.TestFailed;
+}
+
+// Memory Test 25: memfd_create with CLOEXEC flag
+pub fn testMemfdCreateCloexec() !void {
+    const fd = try syscall.memfd_create("cloexec", syscall.MFD_CLOEXEC);
+    defer _ = syscall.close(fd) catch {};
+
+    // Just verify the flag is accepted
+    if (fd < 0) return error.TestFailed;
+}
+
+// Memory Test 26: memfd_create with invalid flags
+pub fn testMemfdCreateInvalidFlags() !void {
+    const result = syscall.memfd_create("bad", 0xFFFF);
+    if (result) |_| {
+        return error.TestFailed;
+    } else |err| {
+        if (err != error.InvalidArgument) return error.TestFailed;
+    }
+}
+
+// Memory Test 27: memfd_create read/write/seek operations
+pub fn testMemfdCreateReadWriteSeek() !void {
+    const fd = try syscall.memfd_create("rwseek", 0);
+    defer _ = syscall.close(fd) catch {};
+
+    // Write 100 bytes of pattern data
+    var write_buf: [100]u8 = undefined;
+    for (&write_buf, 0..) |*b, i| {
+        b.* = @intCast(i);
+    }
+    const written = try syscall.write(fd, &write_buf, write_buf.len);
+    if (written != write_buf.len) return error.TestFailed;
+
+    // Seek to offset 50
+    const pos = try syscall.lseek(fd, 50, syscall.SEEK_SET);
+    if (pos != 50) return error.TestFailed;
+
+    // Read 50 bytes
+    var read_buf: [50]u8 = undefined;
+    const read_len = try syscall.read(fd, &read_buf, read_buf.len);
+    if (read_len != read_buf.len) return error.TestFailed;
+
+    // Verify data (should be bytes 50..99)
+    for (read_buf, 0..) |b, i| {
+        if (b != @as(u8, @intCast(i + 50))) return error.TestFailed;
+    }
+
+    // Seek to end
+    const end_pos = try syscall.lseek(fd, 0, syscall.SEEK_END);
+    if (end_pos != 100) return error.TestFailed;
+}
+
+// Memory Test 28: memfd_create truncate operations
+pub fn testMemfdCreateTruncate() !void {
+    const fd = try syscall.memfd_create("truncate", 0);
+    defer _ = syscall.close(fd) catch {};
+
+    // Write 100 bytes
+    var write_buf: [100]u8 = undefined;
+    @memset(&write_buf, 0xAA);
+    _ = try syscall.write(fd, &write_buf, write_buf.len);
+
+    // Truncate to 50
+    try syscall.ftruncate(fd, 50);
+
+    // Verify size via fstat
+    var stat_buf: syscall.Stat = undefined;
+    try syscall.fstat(fd, &stat_buf);
+    if (stat_buf.size != 50) return error.TestFailed;
+
+    // Extend to 200
+    try syscall.ftruncate(fd, 200);
+    try syscall.fstat(fd, &stat_buf);
+    if (stat_buf.size != 200) return error.TestFailed;
+}
+
+// Memory Test 29: memfd_create mmap operation
+pub fn testMemfdCreateMmap() !void {
+    const fd = try syscall.memfd_create("mmap_test", 0);
+    defer _ = syscall.close(fd) catch {};
+
+    // Write data
+    const data = "mapped data";
+    _ = try syscall.write(fd, data.ptr, data.len);
+
+    // Truncate to one page
+    try syscall.ftruncate(fd, 4096);
+
+    // mmap the fd
+    const PROT_READ = 0x1;
+    const PROT_WRITE = 0x2;
+    const MAP_SHARED = 0x01;
+    const mapped = try syscall.mmap(null, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    defer _ = syscall.munmap(mapped, 4096) catch {};
+
+    // Verify first 11 bytes match
+    if (!std.mem.eql(u8, mapped[0..data.len], data)) return error.TestFailed;
+
+    // Write via mapped memory
+    const new_data = "updated";
+    @memcpy(mapped[20..][0..new_data.len], new_data);
+
+    // Seek fd and read back
+    _ = try syscall.lseek(fd, 20, syscall.SEEK_SET);
+    var read_buf: [7]u8 = undefined;
+    const read_len = try syscall.read(fd, &read_buf, read_buf.len);
+    if (read_len != new_data.len) return error.TestFailed;
+    if (!std.mem.eql(u8, &read_buf, new_data)) return error.TestFailed;
+}
+
+// Memory Test 30: mremap grow with MREMAP_MAYMOVE
+pub fn testMremapGrow() !void {
+    const MAP_ANONYMOUS = 0x20;
+    const MAP_PRIVATE = 0x02;
+    const PROT_READ = 0x1;
+    const PROT_WRITE = 0x2;
+
+    // mmap 4096 bytes
+    const addr = try syscall.mmap(null, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, 0, 0);
+    
+    // Write pattern byte
+    addr[0] = 0x42;
+
+    // Grow to 8192 bytes with MREMAP_MAYMOVE
+    const new_addr = try syscall.mremap(addr, 4096, 8192, syscall.MREMAP_MAYMOVE);
+
+    // Verify pattern preserved
+    if (new_addr[0] != 0x42) return error.TestFailed;
+
+    // Write to new region
+    new_addr[4096] = 0x43;
+    if (new_addr[4096] != 0x43) return error.TestFailed;
+
+    // Clean up
+    _ = syscall.munmap(new_addr, 8192) catch {};
+}
+
+// Memory Test 31: mremap shrink
+pub fn testMremapShrink() !void {
+    const MAP_ANONYMOUS = 0x20;
+    const MAP_PRIVATE = 0x02;
+    const PROT_READ = 0x1;
+    const PROT_WRITE = 0x2;
+
+    // mmap 8192 bytes
+    const addr = try syscall.mmap(null, 8192, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, 0, 0);
+    
+    // Write pattern
+    addr[0] = 0x55;
+
+    // Shrink to 4096 bytes
+    const new_addr = try syscall.mremap(addr, 8192, 4096, 0);
+
+    // Should return same address when shrinking
+    if (@intFromPtr(new_addr) != @intFromPtr(addr)) return error.TestFailed;
+
+    // Verify pattern preserved
+    if (new_addr[0] != 0x55) return error.TestFailed;
+
+    // Clean up
+    _ = syscall.munmap(new_addr, 4096) catch {};
+}
+
+// Memory Test 32: mremap with invalid address
+pub fn testMremapInvalidAddr() !void {
+    const invalid_addr: [*]u8 = @ptrFromInt(0x12340000);
+    const result = syscall.mremap(invalid_addr, 4096, 8192, syscall.MREMAP_MAYMOVE);
+
+    if (result) |_| {
+        return error.TestFailed;
+    } else |err| {
+        // Should fail with EFAULT or EINVAL
+        if (err != error.Fault and err != error.InvalidArgument) {
+            return error.TestFailed;
+        }
+    }
+}
+
+// Memory Test 33: msync flag validation
+pub fn testMsyncValidation() !void {
+    const MAP_ANONYMOUS = 0x20;
+    const MAP_PRIVATE = 0x02;
+    const PROT_READ = 0x1;
+    const PROT_WRITE = 0x2;
+
+    // mmap anonymous page
+    const addr = try syscall.mmap(null, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, 0, 0);
+    defer _ = syscall.munmap(addr, 4096) catch {};
+
+    // Test with valid MS_SYNC flag
+    const MS_SYNC = 4;
+    try syscall.msync(addr, 4096, MS_SYNC);
+
+    // Test with invalid flags (both MS_SYNC and MS_ASYNC)
+    const MS_ASYNC = 1;
+    const invalid_flags = MS_SYNC | MS_ASYNC;
+    const result = syscall.msync(addr, 4096, invalid_flags);
+
+    if (result) |_| {
+        return error.TestFailed;
+    } else |err| {
+        if (err != error.InvalidArgument) return error.TestFailed;
+    }
+}
+
+const std = @import("std");
