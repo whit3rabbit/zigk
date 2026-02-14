@@ -134,6 +134,10 @@ pub const SYS_EXIT: usize = 60;
 pub const SYS_WAIT4: usize = 61;
 /// Send signal to a process
 pub const SYS_KILL: usize = 62;
+
+// Process waiting (modern interface)
+/// Wait for child process state changes (extended)
+pub const SYS_WAITID: usize = 247;
 /// Get system information
 pub const SYS_UNAME: usize = 63;
 

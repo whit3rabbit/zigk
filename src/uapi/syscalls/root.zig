@@ -77,6 +77,7 @@ pub const SYS_VFORK = linux.SYS_VFORK;
 pub const SYS_EXECVE = linux.SYS_EXECVE;
 pub const SYS_EXIT = linux.SYS_EXIT;
 pub const SYS_WAIT4 = linux.SYS_WAIT4;
+pub const SYS_WAITID = linux.SYS_WAITID;
 pub const SYS_KILL = linux.SYS_KILL;
 pub const SYS_UNAME = linux.SYS_UNAME;
 pub const SYS_FCNTL = linux.SYS_FCNTL;

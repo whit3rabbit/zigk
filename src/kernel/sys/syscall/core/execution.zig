@@ -11,6 +11,7 @@ const builtin = @import("builtin");
 const base = @import("base.zig");
 
 const uapi = @import("uapi");
+const signal = uapi.signal;
 const console = @import("console");
 const hal = @import("hal");
 const sched = @import("sched");
@@ -966,6 +967,188 @@ pub fn sys_clone(frame: *hal.syscall.SyscallFrame) SyscallError!usize {
     // Fallback for standard fork-like clone (CLONE_VM not set, etc)
     // If signals matches SIGCHLD and no other flags..
     if (flags == uapi.sched.CSIGNAL) {
+        return sys_fork(frame);
+    }
+
+    // Other combinations not yet supported
+    return error.ENOSYS;
+}
+
+/// sys_clone3 (435) - Create a child process/thread using struct-based args
+///
+/// Modern replacement for clone that uses a struct instead of register-packed arguments.
+/// Provides cleaner ABI for forward compatibility.
+pub fn sys_clone3(frame: *hal.syscall.SyscallFrame, clone_args_ptr: usize, size: usize) SyscallError!usize {
+    // Define CloneArgs struct matching Linux struct clone_args
+    const CloneArgs = extern struct {
+        flags: u64,
+        pidfd: u64,
+        child_tid: u64,
+        parent_tid: u64,
+        exit_signal: u64,
+        stack: u64,
+        stack_size: u64,
+        tls: u64,
+        set_tid: u64,
+        set_tid_size: u64,
+        cgroup: u64,
+    };
+
+    // Validate size (must be at least sizeof CloneArgs)
+    if (size < @sizeOf(CloneArgs)) {
+        return error.EINVAL;
+    }
+
+    // Read CloneArgs from userspace
+    const args = UserPtr.from(clone_args_ptr).readValue(CloneArgs) catch {
+        return error.EFAULT;
+    };
+
+    // Validate unsupported fields are zero
+    if (args.pidfd != 0 or args.set_tid != 0 or args.set_tid_size != 0 or args.cgroup != 0) {
+        return error.EINVAL;
+    }
+
+    const flags = args.flags;
+    const exit_signal = args.exit_signal;
+
+    // Check for CLONE_THREAD path
+    if ((flags & uapi.sched.CLONE_THREAD) != 0) {
+        // Multi-threading: Create a new thread in the SAME process
+        // Must also specify CLONE_VM (threads share address space) and CLONE_SIGHAND
+        if ((flags & uapi.sched.CLONE_VM) == 0 or (flags & uapi.sched.CLONE_SIGHAND) == 0) {
+            return error.EINVAL;
+        }
+
+        const parent_proc = base.getCurrentProcess();
+        const parent_thread = sched.getCurrentThread() orelse return error.ESRCH;
+
+        // Fast path: reject if process already exiting
+        if (parent_proc.state != .Running) {
+            return error.ESRCH;
+        }
+
+        // Enforce per-process thread limit and detect execve
+        const MAX_THREADS_PER_PROCESS: u32 = 256;
+        const EXECVE_IN_PROGRESS_BIT: u32 = 0x80000000;
+        var refcount = parent_proc.refcount.load(.acquire);
+        while (true) {
+            if (refcount & EXECVE_IN_PROGRESS_BIT != 0) {
+                console.warn("sys_clone3: Process pid={} has execve in progress - blocking clone", .{parent_proc.pid});
+                return error.EAGAIN;
+            }
+            if (refcount >= MAX_THREADS_PER_PROCESS) {
+                console.warn("sys_clone3: Process pid={} reached thread limit ({})", .{ parent_proc.pid, MAX_THREADS_PER_PROCESS });
+                return error.EAGAIN;
+            }
+            if (parent_proc.refcount.cmpxchgWeak(refcount, refcount + 1, .acq_rel, .acquire) == null) {
+                break;
+            }
+            refcount = parent_proc.refcount.load(.acquire);
+        }
+        errdefer _ = parent_proc.unref();
+
+        // Recheck state after refcount increment
+        if (parent_proc.state != .Running) {
+            return error.ESRCH;
+        }
+
+        // Create child thread attached to the SAME process
+        const child_thread = thread.createUserThread(
+            0, // Entry point set below
+            .{
+                .name = parent_thread.getName(),
+                .cr3 = parent_proc.cr3,
+                .user_stack_top = if (args.stack != 0) args.stack else parent_thread.user_stack_top,
+                .process = @ptrCast(parent_proc),
+            },
+        ) catch {
+            return error.ENOMEM;
+        };
+        errdefer _ = thread.destroyThread(child_thread);
+
+        // Handle CLONE_PARENT_SETTID (store child TID in parent memory)
+        if ((flags & uapi.sched.CLONE_PARENT_SETTID) != 0 or args.parent_tid != 0) {
+            const parent_tid_ptr = args.parent_tid;
+            if (isValidUserAccess(parent_tid_ptr, @sizeOf(i32), AccessMode.Write)) {
+                UserPtr.from(parent_tid_ptr).writeValue(@as(i32, @intCast(child_thread.tid))) catch {
+                    return error.EFAULT;
+                };
+            } else if (parent_tid_ptr != 0) {
+                return error.EFAULT;
+            }
+        }
+
+        // Handle CLONE_CHILD_CLEARTID (store child TID in child memory and clear on exit)
+        if ((flags & uapi.sched.CLONE_CHILD_CLEARTID) != 0 or (args.child_tid != 0 and (flags & uapi.sched.CLONE_CHILD_SETTID) == 0)) {
+            const child_tid_ptr = args.child_tid;
+            if (child_tid_ptr != 0) {
+                if (isValidUserAccess(child_tid_ptr, @sizeOf(i32), AccessMode.Write)) {
+                    UserPtr.from(child_tid_ptr).writeValue(@as(i32, @intCast(child_thread.tid))) catch {
+                        return error.EFAULT;
+                    };
+                    child_thread.clear_child_tid = child_tid_ptr;
+                } else {
+                    return error.EFAULT;
+                }
+            }
+        }
+
+        // Handle CLONE_CHILD_SETTID (store child TID in child memory)
+        if ((flags & uapi.sched.CLONE_CHILD_SETTID) != 0) {
+            const child_tid_ptr = args.child_tid;
+            if (child_tid_ptr != 0) {
+                if (isValidUserAccess(child_tid_ptr, @sizeOf(i32), AccessMode.Write)) {
+                    UserPtr.from(child_tid_ptr).writeValue(@as(i32, @intCast(child_thread.tid))) catch {
+                        return error.EFAULT;
+                    };
+                } else {
+                    return error.EFAULT;
+                }
+            }
+        }
+
+        // Copy parent's kernel stack frame to child
+        copyThreadState(frame, parent_thread, child_thread);
+
+        // Set child's return value to 0
+        setForkChildReturn(child_thread);
+
+        // If stack was provided, set it in the child's frame
+        if (args.stack != 0) {
+            const child_frame: *hal.idt.InterruptFrame = @ptrFromInt(child_thread.kernel_rsp);
+            child_frame.rsp = args.stack;
+        }
+
+        // Handle TLS setup (CLONE_SETTLS)
+        if ((flags & uapi.sched.CLONE_SETTLS) != 0 or args.tls != 0) {
+            if (args.tls != 0) {
+                child_thread.fs_base = args.tls;
+            }
+        }
+
+        // Add child thread to process/thread hierarchy
+        {
+            const held = sched.process_tree_lock.acquireWrite();
+            defer held.release();
+            thread.addChild(parent_thread, child_thread);
+        }
+
+        // Add to scheduler
+        sched.addThread(child_thread);
+
+        // Return new TID to caller
+        return child_thread.tid;
+    }
+
+    // Fallback for standard fork-like clone (CLONE_VM not set)
+    // If exit_signal matches SIGCHLD and flags is 0 or minimal, treat as fork
+    if ((flags & uapi.sched.CLONE_VM) == 0 and exit_signal == signal.SIGCHLD) {
+        return sys_fork(frame);
+    }
+
+    // If flags == 0 and exit_signal == SIGCHLD, also treat as fork
+    if (flags == 0 and exit_signal == signal.SIGCHLD) {
         return sys_fork(frame);
     }
 

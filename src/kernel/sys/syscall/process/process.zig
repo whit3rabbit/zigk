@@ -177,6 +177,199 @@ pub fn sys_wait4(pid_arg: usize, wstatus_ptr: usize, options: usize, rusage_ptr:
     }
 }
 
+/// sys_waitid (247) - Wait for child process state changes (modern interface)
+///
+/// Provides extended wait semantics with siginfo_t output and flexible id types.
+/// Returns 0 on success (unlike wait4 which returns PID).
+pub fn sys_waitid(idtype: usize, id: usize, infop: usize, options: usize, rusage_ptr: usize) SyscallError!usize {
+    _ = rusage_ptr; // rusage not implemented
+
+    // waitid idtype values
+    const P_ALL: usize = 0;
+    const P_PID: usize = 1;
+    const P_PGID: usize = 2;
+
+    // waitid option flags
+    const WEXITED: usize = 4;
+    const WSTOPPED: usize = 2;
+    const WCONTINUED: usize = 8;
+    const WNOWAIT: usize = 0x01000000;
+    const WNOHANG: usize = 1;
+
+    // siginfo_t structure (128 bytes, Linux ABI)
+    const SigInfo = extern struct {
+        si_signo: i32,
+        si_errno: i32,
+        si_code: i32,
+        _pad0: i32 = 0,
+        si_pid: i32,
+        si_uid: i32,
+        si_status: i32,
+        _pad: [128 - 28]u8 = [_]u8{0} ** (128 - 28),
+    };
+
+    // Compile-time size check
+    comptime {
+        if (@sizeOf(SigInfo) != 128) {
+            @compileError("SigInfo must be exactly 128 bytes");
+        }
+    }
+
+    // Signal codes for SIGCHLD
+    const CLD_EXITED: i32 = 1;
+    const SIGCHLD: i32 = 17;
+
+    // Validate options: must have at least one of WEXITED, WSTOPPED, WCONTINUED
+    if ((options & (WEXITED | WSTOPPED | WCONTINUED)) == 0) {
+        return error.EINVAL;
+    }
+
+    // Validate idtype
+    if (idtype != P_ALL and idtype != P_PID and idtype != P_PGID) {
+        return error.EINVAL;
+    }
+
+    // Validate infop pointer
+    if (infop == 0) {
+        return error.EFAULT;
+    }
+
+    const current_proc = base.getCurrentProcess();
+    const current_thread = sched.getCurrentThread() orelse return error.ESRCH;
+    const wnohang = (options & WNOHANG) != 0;
+    const wnowait = (options & WNOWAIT) != 0;
+
+    // Loop until we find a matching child or no children remain
+    while (true) {
+        // Disable interrupts to prevent lost wakeup race
+        hal.cpu.disableInterrupts();
+
+        var zombie_proc: ?*Process = null;
+        var has_matching_child = false;
+
+        {
+            // Acquire process tree lock (write lock if reaping, could optimize to read for WNOWAIT)
+            const held = sched.process_tree_lock.acquireWrite();
+            defer held.release();
+
+            var child = current_proc.first_child;
+            while (child) |c| {
+                const next_child = c.next_sibling;
+
+                // Check if this child matches idtype/id
+                const matches = switch (idtype) {
+                    P_ALL => true,
+                    P_PID => (c.pid == @as(u32, @truncate(id))),
+                    P_PGID => blk: {
+                        if (id == 0) {
+                            break :blk (c.pgid == current_proc.pgid);
+                        } else {
+                            break :blk (c.pgid == @as(u32, @truncate(id)));
+                        }
+                    },
+                    else => false,
+                };
+
+                if (matches) {
+                    has_matching_child = true;
+
+                    // Check for zombie if WEXITED is set
+                    if ((options & WEXITED) != 0 and c.state == .Zombie) {
+                        // If not WNOWAIT, remove zombie from list (reap it)
+                        if (!wnowait) {
+                            current_proc.removeChildLocked(c);
+                        }
+                        zombie_proc = c;
+                        break;
+                    }
+                }
+
+                child = next_child;
+            }
+        }
+
+        if (zombie_proc) |zombie| {
+            hal.cpu.enableInterrupts();
+
+            // Prepare siginfo_t
+            const reaped_pid = zombie.pid;
+            const exit_status = zombie.exit_status;
+            const exit_code: i32 = @intCast((exit_status >> 8) & 0xFF);
+
+            const info = SigInfo{
+                .si_signo = SIGCHLD,
+                .si_errno = 0,
+                .si_code = CLD_EXITED,
+                .si_pid = @intCast(reaped_pid),
+                .si_uid = @intCast(zombie.uid),
+                .si_status = exit_code,
+            };
+
+            // Write siginfo to userspace
+            UserPtr.from(infop).writeValue(info) catch {
+                // If WNOWAIT, zombie is still in list, so we can fail cleanly
+                if (wnowait) {
+                    return error.EFAULT;
+                }
+                // If we reaped, we already removed it. Clean up and return error.
+                console.warn("sys_waitid: EFAULT writing siginfo for pid={}", .{reaped_pid});
+                if (zombie.unref()) {
+                    process_mod.destroyProcess(zombie);
+                }
+                return error.EFAULT;
+            };
+
+            // If we reaped (not WNOWAIT), propagate CPU times and destroy
+            if (!wnowait) {
+                // Propagate child's CPU times to parent
+                if (sched.findThreadByTid(zombie.pid)) |child_thread| {
+                    current_proc.cutime += child_thread.utime;
+                    current_proc.cstime += child_thread.stime;
+                }
+                current_proc.cutime += zombie.cutime;
+                current_proc.cstime += zombie.cstime;
+
+                // Clean up zombie
+                if (zombie.unref()) {
+                    process_mod.destroyProcess(zombie);
+                }
+            }
+
+            // waitid returns 0 on success
+            return 0;
+        }
+
+        // No zombie found
+        if (!has_matching_child) {
+            hal.cpu.enableInterrupts();
+            return error.ECHILD;
+        }
+
+        // WNOHANG: don't block, return 0 with zeroed siginfo
+        if (wnohang) {
+            hal.cpu.enableInterrupts();
+            // Zero-fill siginfo (si_pid=0 indicates no child available)
+            const zero_info = SigInfo{
+                .si_signo = 0,
+                .si_errno = 0,
+                .si_code = 0,
+                .si_pid = 0,
+                .si_uid = 0,
+                .si_status = 0,
+            };
+            UserPtr.from(infop).writeValue(zero_info) catch {
+                return error.EFAULT;
+            };
+            return 0;
+        }
+
+        // Block and wait for child to exit
+        current_thread.wait4_waiting.store(true, .release);
+        sched.block();
+        current_thread.wait4_waiting.store(false, .release);
+    }
+}
+
 /// sys_getpid (39) - Get process ID
 ///
 /// MVP: Returns thread ID since we don't have processes yet.
