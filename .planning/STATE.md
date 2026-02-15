@@ -5,23 +5,23 @@
 See: .planning/PROJECT.md (updated 2026-02-11)
 
 **Core value:** Every implemented syscall works correctly on both x86_64 and aarch64, tested via the integration test harness.
-**Current focus:** Phase 22 planning (Phase 21 complete)
+**Current focus:** Phase 22 complete (File Monitoring - inotify)
 
 ## Current Position
 
-Phase: 21 of 26 (I/O Multiplexing Extension) -- COMPLETE
+Phase: 22 of 26 (File Monitoring) -- COMPLETE
 Plan: 1 of 1 complete
-Status: Phase complete (3/3 must-haves). 1 syscall, 5 tests, x86_64 verified.
-Last activity: 2026-02-15 - Phase 21 complete: epoll_pwait with atomic signal mask handling
+Status: Phase complete (3/3 must-haves). 3 syscalls, 10 tests (9 passed, 1 skipped), x86_64 verified.
+Last activity: 2026-02-15 - Phase 22 complete: inotify file monitoring with VFS hooks and epoll integration
 
-Progress: [████████████████████░░░░░░░░░░░░░░░░░░░░░░] 65% (49/75+ plans complete from v1.0+v1.1+v1.2)
+Progress: [█████████████████████░░░░░░░░░░░░░░░░░░░░░] 67% (50/75+ plans complete from v1.0+v1.1+v1.2)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 49 (v1.0: 29, v1.1: 12, v1.2: 8)
-- Average duration: ~8.3 min per plan
-- Total execution time: ~6.9 hours over 7 days
+- Total plans completed: 50 (v1.0: 29, v1.1: 12, v1.2: 9)
+- Average duration: ~8.1 min per plan
+- Total execution time: ~6.75 hours over 7 days
 
 **By Milestone:**
 
@@ -29,16 +29,16 @@ Progress: [████████████████████░░░
 |-----------|--------|-------|----------|
 | v1.0 | 1-9 | 29 | 4 days |
 | v1.1 | 10-14 | 12 | 2 days |
-| v1.2 | 15-26 | 8 (in progress) | Started |
+| v1.2 | 15-26 | 9 (in progress) | Started |
 
 **Recent Trend:**
-- Last plan (v1.2 Phase 21-01): 7 minutes, 1 syscall, 5 tests, x86_64 verified
+- Last plan (v1.2 Phase 22-01): 7 minutes, 3 syscalls, 10 tests (9 passed, 1 skipped), dual-arch build
+- Phase 21-01: 7 minutes, 1 syscall, 5 tests, x86_64 verified
 - Phase 20-01: 14.5 minutes, 4 syscalls, 10 tests, dual-arch
 - Phase 19-01: 13 minutes, 2 syscalls, 10 tests, dual-arch
 - Phase 18-01: 14 minutes, 3 syscalls, 10 tests, dual-arch
 - Phase 17-02: 11 minutes, gap closure, 10 tests passing
-- Phase 17-01: 11 minutes, 4 syscalls, 10 tests, dual-arch build
-- Trend: Fast execution for single-syscall atomic patterns, consistent signal/io coverage
+- Trend: Fast execution patterns, inotify VFS hooks add event-driven file monitoring
 
 ## Accumulated Context
 
@@ -70,6 +70,8 @@ Recent decisions affecting current work (full log in PROJECT.md):
 - **v1.1**: WaitQueue replaces blocked_readers atomics - Cleaner lifecycle management
 - **v1.1**: sendfile 64KB buffer instead of zero-copy - 16x improvement, deferred true zero-copy to v2
 - **v1.0**: Dual-arch testing mandatory - Every syscall tested on both x86_64 and aarch64
+- [Phase 22]: inotify MVP uses EAGAIN for empty reads instead of blocking - epoll integration primary use case
+- [Phase 22]: VFS hooks use numeric event constants to avoid circular module dependencies
 
 ### Pending Todos
 
@@ -89,9 +91,9 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-02-15
-Stopped at: Completed Phase 21: I/O Multiplexing Extension - epoll_pwait verified on x86_64
+Stopped at: Completed Phase 22 Plan 01: inotify file monitoring - 3 syscalls, 10 tests (9 passed, 1 skipped)
 Resume file: None
 
 ---
 *State initialized: 2026-02-06*
-*Last updated: 2026-02-15 after Phase 21 completion*
+*Last updated: 2026-02-15 after Phase 22-01 completion*
