@@ -282,6 +282,8 @@ pub const SYS_BIND: usize = 200;
 pub const SYS_LISTEN: usize = 201;
 /// Accept connection on socket
 pub const SYS_ACCEPT: usize = 202;
+/// Queue a signal with info to a specific thread
+pub const SYS_RT_TGSIGQUEUEINFO: usize = 240;
 /// Accept connection with flags
 pub const SYS_ACCEPT4: usize = 242;
 /// Connect socket to address

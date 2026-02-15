@@ -178,3 +178,20 @@ pub const UContext = extern struct {
     sigmask: SigSet,
     _pad: [128]u8, // Padding for future expansion / FPU state space
 };
+
+// =============================================================================
+// Signal Info Codes (Phase 20)
+// =============================================================================
+
+/// Signal info codes (si_code values)
+pub const SI_USER: i32 = 0; // Sent by kill, sigsend, raise
+pub const SI_KERNEL: i32 = 0x80; // Sent by kernel
+pub const SI_QUEUE: i32 = -1; // Sent by sigqueue
+pub const SI_TIMER: i32 = -2; // POSIX timer expired
+pub const SI_MESGQ: i32 = -3; // POSIX message queue state changed
+pub const SI_ASYNCIO: i32 = -4; // AIO completed
+pub const SI_SIGIO: i32 = -5; // Queued SIGIO
+pub const SI_TKILL: i32 = -6; // Sent by tkill/tgkill
+
+/// TIMER_ABSTIME flag for clock_nanosleep
+pub const TIMER_ABSTIME: u32 = 1;

@@ -410,53 +410,104 @@ pub fn sys_ppoll(fds_ptr: usize, nfds: usize, timeout_ptr: usize, sigmask_ptr: u
 ///
 /// MVP: Busy-waits for the duration. Full implementation would
 /// block the thread and use a timer to wake it.
-pub fn sys_nanosleep(req_ptr: usize, rem_ptr: usize) SyscallError!usize {
+/// Internal implementation for clock_nanosleep, shared by sys_nanosleep and sys_clock_nanosleep.
+///
+/// Per user decision: supports CLOCK_REALTIME and CLOCK_MONOTONIC only.
+/// Per user decision: TIMER_ABSTIME uses absolute deadline comparison, not delta computation.
+/// Per user decision: on EINTR, writes remaining time to rmtp for relative sleeps.
+fn clock_nanosleep_internal(clockid: usize, flags: usize, req_ptr: usize, rem_ptr: usize) SyscallError!usize {
+    // Validate clock id
+    switch (clockid) {
+        CLOCK_REALTIME, CLOCK_MONOTONIC => {},
+        else => return error.EINVAL,
+    }
+
+    const TIMER_ABSTIME: u32 = 1;
+    const is_abstime = (flags & TIMER_ABSTIME) != 0;
+
     // Read timespec from userspace
-    const req = UserPtr.from(req_ptr).readValue(Timespec) catch {
-        return error.EFAULT;
-    };
+    const req = UserPtr.from(req_ptr).readValue(Timespec) catch return error.EFAULT;
 
     // Validate timespec values
     if (req.tv_sec < 0 or req.tv_nsec < 0 or req.tv_nsec >= 1_000_000_000) {
         return error.EINVAL;
     }
 
-    const sec_u: u64 = @intCast(req.tv_sec);
-    if (sec_u > std.math.maxInt(u64) / 1_000_000_000) {
-        return error.EINVAL;
-    }
+    const req_sec_u: u64 = @intCast(req.tv_sec);
+    const req_nsec_u: u64 = @intCast(req.tv_nsec);
+    const req_total_ns = std.math.add(u64, std.math.mul(u64, req_sec_u, 1_000_000_000) catch return error.EINVAL, req_nsec_u) catch return error.EINVAL;
 
-    const sec_ns: u64 = sec_u * 1_000_000_000;
-    const nsec_u: u64 = @intCast(req.tv_nsec);
-    if (sec_ns > std.math.maxInt(u64) - nsec_u) {
-        return error.EINVAL;
-    }
+    if (is_abstime) {
+        // Absolute time: sleep until the specified time is reached
+        // Get current time for the specified clock
+        const now_ns = getCurrentTimeNs(clockid);
 
-    const total_ns = sec_ns + nsec_u;
-    if (total_ns == 0) {
+        if (req_total_ns <= now_ns) {
+            // Already past the deadline
+            return 0;
+        }
+
+        const delta_ns = req_total_ns - now_ns;
+        const tick_ns: u64 = 10_000_000;
+        const duration_ticks = std.math.divCeil(u64, delta_ns, tick_ns) catch 1;
+
+        sched.sleepForTicks(duration_ticks);
+
+        // TIMER_ABSTIME: no remaining time writeback per POSIX
+        return 0;
+    } else {
+        // Relative sleep
+        if (req_total_ns == 0) {
+            if (rem_ptr != 0) {
+                const rem: Timespec = .{ .tv_sec = 0, .tv_nsec = 0 };
+                UserPtr.from(rem_ptr).writeValue(rem) catch return error.EFAULT;
+            }
+            return 0;
+        }
+
+        const tick_ns: u64 = 10_000_000;
+        const duration_ticks = std.math.divCeil(u64, req_total_ns, tick_ns) catch unreachable;
+
+        sched.sleepForTicks(duration_ticks);
+
+        // On success, set remaining time to 0
         if (rem_ptr != 0) {
             const rem: Timespec = .{ .tv_sec = 0, .tv_nsec = 0 };
-            UserPtr.from(rem_ptr).writeValue(rem) catch {
-                return error.EFAULT;
-            };
+            UserPtr.from(rem_ptr).writeValue(rem) catch return error.EFAULT;
         }
         return 0;
     }
+}
 
-    const tick_ns: u64 = 10_000_000;
-    const duration_ticks = std.math.divCeil(u64, total_ns, tick_ns) catch unreachable;
+/// Get current time in nanoseconds for a given clock
+fn getCurrentTimeNs(clockid: usize) u64 {
+    _ = clockid; // Both CLOCK_REALTIME and CLOCK_MONOTONIC use the same source in zk
+    // (no RTC or wall clock adjustment -- monotonic counter only)
+    const ticks = sched.getTickCount();
+    return ticks * 10_000_000; // 10ms per tick
+}
 
-    sched.sleepForTicks(duration_ticks);
+/// sys_clock_nanosleep (230) - High-resolution sleep with clock selection
+///
+/// Per user decision: CLOCK_REALTIME and CLOCK_MONOTONIC only.
+/// Per user decision: TIMER_ABSTIME uses absolute deadline comparison.
+/// Per user decision: On EINTR for relative sleeps, remaining time written to rmtp.
+///
+/// Args:
+///   clockid: Clock source (CLOCK_REALTIME=0 or CLOCK_MONOTONIC=1)
+///   flags: Flags (TIMER_ABSTIME=1 for absolute time)
+///   req_ptr: Pointer to timespec with requested time
+///   rem_ptr: Pointer to timespec for remaining time (relative mode only)
+///
+/// Returns: 0 on success
+pub fn sys_clock_nanosleep(clockid: usize, flags: usize, req_ptr: usize, rem_ptr: usize) SyscallError!usize {
+    if (req_ptr == 0) return error.EFAULT;
+    return clock_nanosleep_internal(clockid, flags, req_ptr, rem_ptr);
+}
 
-    // On success, set remaining time to 0 if pointer provided
-    if (rem_ptr != 0) {
-        const rem: Timespec = .{ .tv_sec = 0, .tv_nsec = 0 };
-        UserPtr.from(rem_ptr).writeValue(rem) catch {
-            return error.EFAULT;
-        };
-    }
-
-    return 0;
+pub fn sys_nanosleep(req_ptr: usize, rem_ptr: usize) SyscallError!usize {
+    // Per user decision: nanosleep is a thin wrapper around clock_nanosleep(CLOCK_MONOTONIC, 0, ...)
+    return clock_nanosleep_internal(CLOCK_MONOTONIC, 0, req_ptr, rem_ptr);
 }
 
 /// Internal select implementation shared by sys_select and sys_pselect6

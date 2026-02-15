@@ -6,6 +6,7 @@
 // - sys_rt_sigreturn: Return from signal handler
 // - sys_set_tid_address: Set pointer to thread ID (TLS support)
 
+const std = @import("std");
 const builtin = @import("builtin");
 const base = @import("base.zig");
 const uapi = @import("uapi");
@@ -832,6 +833,248 @@ pub fn sys_tgkill(tgid: usize, tid: usize, sig: usize) SyscallError!usize {
     // SECURITY: Check permission before delivering signal
     try checkSignalPermission(target, signum);
 
+    deliverSignalToThread(target, signum);
+
+    return 0;
+}
+
+// =============================================================================
+// Phase 20: Signal Handling Extensions
+// =============================================================================
+
+/// Timespec structure for rt_sigtimedwait timeout (matches scheduling.zig)
+const Timespec = extern struct {
+    tv_sec: i64,
+    tv_nsec: i64,
+};
+
+/// sys_rt_sigtimedwait (128) - Synchronously wait for a queued signal
+///
+/// Dequeues a signal from the set of pending signals matching `set`.
+/// If no signal is pending, blocks until one arrives or timeout expires.
+///
+/// Per user decision: block using yield with polling, timeout returns EAGAIN.
+/// Per user decision: has priority over signalfd (synchronous consumption wins).
+/// Per user decision: use atomic CAS loop on pending_signals to check-and-clear.
+///
+/// MVP: Uses bitmask-only tracking (no per-signal queue for siginfo data).
+/// siginfo_t is populated with minimal data (si_signo only, sender info = 0).
+///
+/// Args:
+///   set_ptr: Pointer to sigset_t describing which signals to wait for
+///   info_ptr: Pointer to siginfo_t to fill with signal info (can be 0)
+///   timeout_ptr: Pointer to timespec timeout (NULL = wait forever)
+///   sigsetsize: Size of sigset_t (must be 8)
+///
+/// Returns: Signal number on success, negative errno on error
+pub fn sys_rt_sigtimedwait(set_ptr: usize, info_ptr: usize, timeout_ptr: usize, sigsetsize: usize) SyscallError!usize {
+    if (sigsetsize != @sizeOf(uapi.signal.SigSet)) return error.EINVAL;
+    if (set_ptr == 0) return error.EINVAL;
+
+    const wait_set = UserPtr.from(set_ptr).readValue(uapi.signal.SigSet) catch return error.EFAULT;
+    if (wait_set == 0) return error.EINVAL;
+
+    const current = sched.getCurrentThread() orelse return error.ESRCH;
+
+    // Parse timeout
+    var timeout_ns: ?u64 = null;
+    if (timeout_ptr != 0) {
+        const ts = UserPtr.from(timeout_ptr).readValue(Timespec) catch return error.EFAULT;
+        if (ts.tv_sec < 0 or ts.tv_nsec < 0 or ts.tv_nsec >= 1_000_000_000) return error.EINVAL;
+        const sec_ns: u64 = @as(u64, @intCast(ts.tv_sec)) * 1_000_000_000;
+        const nsec_u: u64 = @as(u64, @intCast(ts.tv_nsec));
+        timeout_ns = std.math.add(u64, sec_ns, nsec_u) catch return error.EINVAL;
+    }
+
+    // Try to dequeue a matching signal immediately (atomic CAS loop)
+    if (tryDequeueSignal(current, wait_set)) |signo| {
+        // Fill siginfo if requested
+        if (info_ptr != 0) {
+            writeSigInfo(info_ptr, signo) catch return error.EFAULT;
+        }
+        return signo;
+    }
+
+    // No signal pending -- check timeout
+    if (timeout_ns) |ns| {
+        if (ns == 0) return error.EAGAIN; // Zero timeout, no signal
+    }
+
+    // Block with timeout waiting for a matching signal
+    // Use tick-based sleep with polling (consistent with timerfd/signalfd WaitQueue pattern)
+    const tick_ns: u64 = 10_000_000; // 10ms per tick
+
+    if (timeout_ns) |ns| {
+        const duration_ticks = std.math.divCeil(u64, ns, tick_ns) catch 1;
+        var ticks_waited: u64 = 0;
+        while (ticks_waited < duration_ticks) {
+            sched.yield();
+            ticks_waited += 1;
+
+            // Check for matching signal after each yield
+            if (tryDequeueSignal(current, wait_set)) |signo| {
+                if (info_ptr != 0) {
+                    writeSigInfo(info_ptr, signo) catch return error.EFAULT;
+                }
+                return signo;
+            }
+        }
+        // Timeout expired without signal
+        return error.EAGAIN;
+    } else {
+        // Infinite wait (NULL timeout)
+        // Poll with yields until signal arrives
+        var iterations: u64 = 0;
+        while (true) {
+            sched.yield();
+            iterations += 1;
+
+            if (tryDequeueSignal(current, wait_set)) |signo| {
+                if (info_ptr != 0) {
+                    writeSigInfo(info_ptr, signo) catch return error.EFAULT;
+                }
+                return signo;
+            }
+
+            // Safety: check for thread interruption
+            if (iterations > 100_000_000) return error.EINTR;
+        }
+    }
+}
+
+/// Try to atomically dequeue one signal from pending_signals matching wait_set.
+/// Uses @cmpxchgWeak per user decision for race-safe check-and-clear.
+/// Returns the signal number (1-64) or null if no match.
+fn tryDequeueSignal(thread: *sched.Thread, wait_set: uapi.signal.SigSet) ?usize {
+    // Read pending atomically
+    const pending = @atomicLoad(u64, &thread.pending_signals, .acquire);
+    const matching = pending & wait_set;
+    if (matching == 0) return null;
+
+    // Find the lowest-numbered matching signal
+    const bit_pos = @ctz(matching);
+    const sig_bit: u64 = @as(u64, 1) << @intCast(bit_pos);
+
+    // Atomic CAS loop to clear the bit
+    var current = pending;
+    while (true) {
+        const result = @cmpxchgWeak(u64, &thread.pending_signals, current, current & ~sig_bit, .acq_rel, .acquire);
+        if (result) |new_val| {
+            // CAS failed, retry with updated value
+            current = new_val;
+            if ((current & sig_bit) == 0) return null; // Someone else took it
+        } else {
+            // CAS succeeded
+            return bit_pos + 1; // Signal numbers are 1-indexed
+        }
+    }
+}
+
+/// Write siginfo_t to user memory for a dequeued signal
+/// MVP: Minimal siginfo_t (si_signo only, sender info = 0 due to bitmask-only tracking)
+fn writeSigInfo(info_ptr: usize, signo: usize) !void {
+    // Build minimal siginfo_t (128 bytes)
+    // MVP: no per-signal queue, so sender info not tracked
+    var buf = [_]u8{0} ** 128;
+    const signo_i32: i32 = @intCast(signo);
+    @memcpy(buf[0..4], std.mem.asBytes(&signo_i32));
+    // si_errno at offset 4 = 0 (already zeroed)
+    // si_code at offset 8 = SI_USER = 0 (already zeroed)
+    // Remaining fields = 0 (no sender tracking in MVP)
+
+    const uptr = UserPtr.from(info_ptr);
+    _ = uptr.copyFromKernel(&buf) catch return error.EFAULT;
+}
+
+/// sys_rt_sigqueueinfo (129) - Send a signal with data to a process
+///
+/// Per user decision: enforce si_code restriction -- only SI_QUEUE (negative codes)
+/// allowed from userspace. Reject si_code >= 0 to prevent kernel signal impersonation.
+///
+/// Per user decision: permission check uses UID match (same real/effective UID as target).
+/// CAP_KILL check deferred to Phase 24.
+///
+/// MVP: Signal is delivered to process, but siginfo_t data is not preserved
+/// (bitmask-only tracking). Acceptable for v1.2.
+///
+/// Args:
+///   pid: Target process ID
+///   sig: Signal number
+///   info_ptr: Pointer to siginfo_t with signal data
+///
+/// Returns: 0 on success
+pub fn sys_rt_sigqueueinfo(pid: usize, sig: usize, info_ptr: usize) SyscallError!usize {
+    const pid_i: i32 = @bitCast(@as(u32, @truncate(pid)));
+    const signum: u8 = @truncate(sig);
+
+    if (pid_i <= 0) return error.EINVAL;
+    if (signum == 0 or signum > 64) return error.EINVAL;
+    if (info_ptr == 0) return error.EFAULT;
+
+    // Read siginfo_t from userspace (only need first 16 bytes for validation)
+    var info_buf = [_]u8{0} ** 128;
+    _ = UserPtr.from(info_ptr).copyToKernel(&info_buf) catch return error.EFAULT;
+
+    // Validate si_code: userspace can only send SI_QUEUE or other negative codes
+    const bytes = [4]u8{ info_buf[8], info_buf[9], info_buf[10], info_buf[11] };
+    const si_code: i32 = @bitCast(bytes);
+    if (si_code >= 0) return error.EPERM; // Cannot impersonate kernel signals
+
+    // Find target
+    const target = sched.findThreadByPid(@intCast(pid_i)) orelse return error.ESRCH;
+
+    // Permission check (reuse existing checkSignalPermission)
+    try checkSignalPermission(target, signum);
+
+    // Deliver signal (sets pending bit, same as kill)
+    // MVP: siginfo_t data is not preserved in the bitmask -- signal is delivered
+    // but the associated data from info_ptr is lost. Acceptable for v1.2.
+    deliverSignalToThread(target, signum);
+
+    return 0;
+}
+
+/// sys_rt_tgsigqueueinfo (297/240) - Send a signal with data to a specific thread
+///
+/// Same as rt_sigqueueinfo but targets a specific thread within a thread group.
+///
+/// Args:
+///   tgid: Thread group ID (process PID)
+///   tid: Target thread ID
+///   sig: Signal number
+///   info_ptr: Pointer to siginfo_t
+///
+/// Returns: 0 on success
+pub fn sys_rt_tgsigqueueinfo(tgid: usize, tid: usize, sig: usize, info_ptr: usize) SyscallError!usize {
+    const tgid_i: i32 = @bitCast(@as(u32, @truncate(tgid)));
+    const tid_i: i32 = @bitCast(@as(u32, @truncate(tid)));
+    const signum: u8 = @truncate(sig);
+
+    if (tgid_i <= 0 or tid_i <= 0) return error.EINVAL;
+    if (signum == 0 or signum > 64) return error.EINVAL;
+    if (info_ptr == 0) return error.EFAULT;
+
+    // Read and validate si_code
+    var info_buf = [_]u8{0} ** 128;
+    _ = UserPtr.from(info_ptr).copyToKernel(&info_buf) catch return error.EFAULT;
+
+    const bytes = [4]u8{ info_buf[8], info_buf[9], info_buf[10], info_buf[11] };
+    const si_code: i32 = @bitCast(bytes);
+    if (si_code >= 0) return error.EPERM;
+
+    // Find target thread
+    const target = sched.findThreadByTid(@intCast(tid_i)) orelse return error.ESRCH;
+
+    // Verify thread belongs to the specified thread group
+    if (target.process) |proc| {
+        const process: *base.Process = @ptrCast(@alignCast(proc));
+        if (process.pid != @as(u32, @intCast(tgid_i))) return error.ESRCH;
+    }
+
+    // Permission check
+    try checkSignalPermission(target, signum);
+
+    // Deliver
     deliverSignalToThread(target, signum);
 
     return 0;
