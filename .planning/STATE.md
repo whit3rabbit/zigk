@@ -9,19 +9,19 @@ See: .planning/PROJECT.md (updated 2026-02-11)
 
 ## Current Position
 
-Phase: 20 of 26 (Signal Handling Extensions) -- COMPLETE
+Phase: 21 of 26 (I/O Multiplexing Extension) -- COMPLETE
 Plan: 1 of 1 complete
-Status: Phase complete (7/7 must-haves). 4 syscalls, 10 tests, dual-arch.
-Last activity: 2026-02-15 - Phase 20 complete: rt_sigtimedwait, rt_sigqueueinfo, rt_tgsigqueueinfo, clock_nanosleep
+Status: Phase complete (3/3 must-haves). 1 syscall, 5 tests, x86_64 verified.
+Last activity: 2026-02-15 - Phase 21 complete: epoll_pwait with atomic signal mask handling
 
-Progress: [████████████████████░░░░░░░░░░░░░░░░░░░░░░] 64% (48/75+ plans complete from v1.0+v1.1+v1.2)
+Progress: [████████████████████░░░░░░░░░░░░░░░░░░░░░░] 65% (49/75+ plans complete from v1.0+v1.1+v1.2)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 48 (v1.0: 29, v1.1: 12, v1.2: 7)
-- Average duration: ~8.5 min per plan
-- Total execution time: ~6.8 hours over 7 days
+- Total plans completed: 49 (v1.0: 29, v1.1: 12, v1.2: 8)
+- Average duration: ~8.3 min per plan
+- Total execution time: ~6.9 hours over 7 days
 
 **By Milestone:**
 
@@ -29,15 +29,16 @@ Progress: [████████████████████░░░
 |-----------|--------|-------|----------|
 | v1.0 | 1-9 | 29 | 4 days |
 | v1.1 | 10-14 | 12 | 2 days |
-| v1.2 | 15-26 | 7 (in progress) | Started |
+| v1.2 | 15-26 | 8 (in progress) | Started |
 
 **Recent Trend:**
-- Last plan (v1.2 Phase 20-01): 14.5 minutes, 4 syscalls, 10 tests, dual-arch
+- Last plan (v1.2 Phase 21-01): 7 minutes, 1 syscall, 5 tests, x86_64 verified
+- Phase 20-01: 14.5 minutes, 4 syscalls, 10 tests, dual-arch
 - Phase 19-01: 13 minutes, 2 syscalls, 10 tests, dual-arch
 - Phase 18-01: 14 minutes, 3 syscalls, 10 tests, dual-arch
 - Phase 17-02: 11 minutes, gap closure, 10 tests passing
 - Phase 17-01: 11 minutes, 4 syscalls, 10 tests, dual-arch build
-- Trend: Consistent velocity, signal/process extensions with atomic patterns
+- Trend: Fast execution for single-syscall atomic patterns, consistent signal/io coverage
 
 ## Accumulated Context
 
@@ -45,6 +46,8 @@ Progress: [████████████████████░░░
 
 Recent decisions affecting current work (full log in PROJECT.md):
 
+- **v1.2 Phase 21-01**: epoll_pwait uses defer pattern for atomic signal mask swap (matches ppoll/pselect6)
+- **v1.2 Phase 21-01**: NULL sigmask path has zero overhead (direct delegation to epoll_wait)
 - **v1.2 Phase 20-01**: Bitmask-only signal tracking for MVP (no per-thread siginfo queue)
 - **v1.2 Phase 20-01**: rt_sigtimedwait uses atomic CAS loop for race-safe signal dequeue
 - **v1.2 Phase 20-01**: si_code restriction: userspace can only send negative codes (prevents kernel impersonation)
@@ -85,9 +88,9 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-02-15
-Stopped at: Completed Phase 20: Signal Handling Extensions - all verified
+Stopped at: Completed Phase 21: I/O Multiplexing Extension - epoll_pwait verified on x86_64
 Resume file: None
 
 ---
 *State initialized: 2026-02-06*
-*Last updated: 2026-02-15 after Phase 20 completion*
+*Last updated: 2026-02-15 after Phase 21 completion*
