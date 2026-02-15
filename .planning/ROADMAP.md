@@ -212,10 +212,10 @@ Plans:
   4. User can read inotify_event structures from the inotify file descriptor via read()
   5. inotify FDs work with epoll for efficient event-driven monitoring
 
-**Plans**: TBD
+**Plans**: 1 plan
 
 Plans:
-- [ ] 22-01: TBD
+- [ ] 22-01-PLAN.md -- Implement inotify subsystem with init1/add_watch/rm_watch syscalls, VFS event hooks, and integration tests
 
 #### Phase 23: POSIX Timers
 **Goal**: Per-process interval timers with signal delivery are available
