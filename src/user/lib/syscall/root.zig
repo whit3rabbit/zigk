@@ -294,8 +294,17 @@ pub const sigpending = signal.sigpending;
 pub const sigaltstack = signal.sigaltstack;
 pub const rt_sigpending = signal.rt_sigpending;
 pub const rt_sigsuspend = signal.rt_sigsuspend;
+pub const rt_sigtimedwait = signal.rt_sigtimedwait;
+pub const rt_sigqueueinfo = signal.rt_sigqueueinfo;
+pub const rt_tgsigqueueinfo = signal.rt_tgsigqueueinfo;
+pub const clock_nanosleep = signal.clock_nanosleep;
 pub const SigAction = signal.SigAction;
 pub const SigSet = signal.SigSet;
+pub const SignalSigInfo = signal.SigInfo;
+pub const SignalTimespec = signal.Timespec;
+pub const TIMER_ABSTIME = signal.TIMER_ABSTIME;
+pub const SI_USER = signal.SI_USER;
+pub const SI_QUEUE = signal.SI_QUEUE;
 
 // Re-export TTY (terminal control for job control)
 pub const tiocsctty = tty.tiocsctty;

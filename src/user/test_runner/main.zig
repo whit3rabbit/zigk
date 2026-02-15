@@ -296,6 +296,18 @@ export fn main(argc: i32, argv: [*][*:0]u8) i32 {
     runner.runTest("signal: sigaltstack setup", signal_tests.testSigaltstackSetup);
     runner.runTest("signal: multiple handlers", signal_tests.testMultipleHandlers);
 
+    // Phase 20: Signal Handling Extension tests
+    runner.runTest("signal_ext: rt_sigtimedwait immediate", signal_tests.testRtSigtimedwaitImmediate);
+    runner.runTest("signal_ext: rt_sigtimedwait timeout", signal_tests.testRtSigtimedwaitTimeout);
+    runner.runTest("signal_ext: rt_sigtimedwait clears pending", signal_tests.testRtSigtimedwaitClearsPending);
+    runner.runTest("signal_ext: rt_sigqueueinfo self", signal_tests.testRtSigqueueinfoSelf);
+    runner.runTest("signal_ext: rt_sigqueueinfo rejects positive code", signal_tests.testRtSigqueueinfoRejectsPositiveCode);
+    runner.runTest("signal_ext: rt_sigqueueinfo to child", signal_tests.testRtSigqueueinfoToChild);
+    runner.runTest("signal_ext: clock_nanosleep relative", signal_tests.testClockNanosleepRelative);
+    runner.runTest("signal_ext: clock_nanosleep realtime", signal_tests.testClockNanosleepRealtime);
+    runner.runTest("signal_ext: clock_nanosleep invalid clock", signal_tests.testClockNanosleepInvalidClock);
+    runner.runTest("signal_ext: clock_nanosleep abstime past", signal_tests.testClockNanosleepAbstimePast);
+
     // Socket tests
     runner.runTest("socket: create TCP", socket_tests.testSocketCreateTcp);
     runner.runTest("socket: create UDP", socket_tests.testSocketCreateUdp);
