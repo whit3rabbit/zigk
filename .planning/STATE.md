@@ -5,23 +5,23 @@
 See: .planning/PROJECT.md (updated 2026-02-11)
 
 **Core value:** Every implemented syscall works correctly on both x86_64 and aarch64, tested via the integration test harness.
-**Current focus:** Phase 20: Signal Handling Extensions (next)
+**Current focus:** Phase 21 or v1.2 verification (Phase 20 complete)
 
 ## Current Position
 
-Phase: 19 of 26 (Process Control Extensions) -- COMPLETE (verified)
+Phase: 20 of 26 (Signal Handling Extensions) -- COMPLETE
 Plan: 1 of 1 complete
-Status: Phase complete, verified (8/8 must-haves). Ready for Phase 20.
-Last activity: 2026-02-14 - Phase 19 verified: clone3 and waitid with 10 tests pass on both architectures
+Status: Phase complete (7/7 must-haves). 4 syscalls, 10 tests, dual-arch.
+Last activity: 2026-02-15 - Phase 20 complete: rt_sigtimedwait, rt_sigqueueinfo, rt_tgsigqueueinfo, clock_nanosleep
 
-Progress: [███████████████████░░░░░░░░░░░░░░░░░░░░░░░] 63% (47/75+ plans complete from v1.0+v1.1+v1.2)
+Progress: [████████████████████░░░░░░░░░░░░░░░░░░░░░░] 64% (48/75+ plans complete from v1.0+v1.1+v1.2)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 47 (v1.0: 29, v1.1: 12, v1.2: 6)
-- Average duration: ~8.2 min per plan
-- Total execution time: ~6.6 hours over 6 days
+- Total plans completed: 48 (v1.0: 29, v1.1: 12, v1.2: 7)
+- Average duration: ~8.5 min per plan
+- Total execution time: ~6.8 hours over 7 days
 
 **By Milestone:**
 
@@ -29,14 +29,15 @@ Progress: [███████████████████░░░░
 |-----------|--------|-------|----------|
 | v1.0 | 1-9 | 29 | 4 days |
 | v1.1 | 10-14 | 12 | 2 days |
-| v1.2 | 15-26 | 6 (in progress) | Started |
+| v1.2 | 15-26 | 7 (in progress) | Started |
 
 **Recent Trend:**
-- Last plan (v1.2 Phase 19-01): 13 minutes, 2 syscalls, 10 tests, dual-arch
+- Last plan (v1.2 Phase 20-01): 14.5 minutes, 4 syscalls, 10 tests, dual-arch
+- Phase 19-01: 13 minutes, 2 syscalls, 10 tests, dual-arch
 - Phase 18-01: 14 minutes, 3 syscalls, 10 tests, dual-arch
 - Phase 17-02: 11 minutes, gap closure, 10 tests passing
 - Phase 17-01: 11 minutes, 4 syscalls, 10 tests, dual-arch build
-- Trend: Consistent velocity, modern process control syscalls with comprehensive testing
+- Trend: Consistent velocity, signal/process extensions with atomic patterns
 
 ## Accumulated Context
 
@@ -44,6 +45,11 @@ Progress: [███████████████████░░░░
 
 Recent decisions affecting current work (full log in PROJECT.md):
 
+- **v1.2 Phase 20-01**: Bitmask-only signal tracking for MVP (no per-thread siginfo queue)
+- **v1.2 Phase 20-01**: rt_sigtimedwait uses atomic CAS loop for race-safe signal dequeue
+- **v1.2 Phase 20-01**: si_code restriction: userspace can only send negative codes (prevents kernel impersonation)
+- **v1.2 Phase 20-01**: clock_nanosleep supports CLOCK_REALTIME and CLOCK_MONOTONIC only
+- **v1.2 Phase 20-01**: sys_nanosleep delegates to clock_nanosleep_internal(CLOCK_MONOTONIC, 0)
 - **v1.2 Phase 19-01**: clone3 uses CloneArgs struct for forward-compatible ABI instead of register-packed arguments
 - **v1.2 Phase 19-01**: waitid returns 0 on success (not child PID like wait4) per Linux semantics
 - **v1.2 Phase 19-01**: clone3 fork path honors CLONE_PARENT_SETTID flag even when delegating to sys_fork
@@ -78,10 +84,10 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-02-14
-Stopped at: Completed Phase 19: Process Control Extensions - all verified
+Last session: 2026-02-15
+Stopped at: Completed Phase 20: Signal Handling Extensions - all verified
 Resume file: None
 
 ---
 *State initialized: 2026-02-06*
-*Last updated: 2026-02-14 after Phase 19 completion*
+*Last updated: 2026-02-15 after Phase 20 completion*
