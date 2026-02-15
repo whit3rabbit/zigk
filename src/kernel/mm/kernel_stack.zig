@@ -31,11 +31,10 @@ const paging = hal.paging;
 pub const PAGE_SIZE: usize = pmm.PAGE_SIZE;
 
 /// Number of pages per stack (excluding guard page).
-/// AArch64 needs more due to larger SyscallFrame (288 bytes vs 128 bytes on x86_64).
-/// This compensates for the 2.25x larger exception frames.
+/// Both architectures need 96KB due to deep syscall dispatch + SFS call chains.
 pub const STACK_PAGES: usize = switch (builtin.cpu.arch) {
-    .aarch64 => 16, // 64 KB
-    .x86_64 => 16, // 64 KB - increased from 8 pages due to deep SFS call chains
+    .aarch64 => 24, // 96 KB - increased from 16 (64KB) for expanded syscall dispatch table
+    .x86_64 => 24, // 96 KB - increased from 16 (64KB) for expanded syscall dispatch table
     else => @compileError("Unsupported architecture for kernel stacks"),
 };
 

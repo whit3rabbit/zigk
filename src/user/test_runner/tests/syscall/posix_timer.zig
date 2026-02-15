@@ -33,7 +33,7 @@ pub fn testTimerCreateInvalidClock() !void {
     if (result) |_| {
         return error.TestFailed; // Should fail
     } else |err| {
-        if (err != error.EINVAL) return error.TestFailed;
+        if (err != error.InvalidArgument) return error.TestFailed;
     }
 }
 
@@ -48,7 +48,7 @@ pub fn testTimerDelete() !void {
     if (result) |_| {
         return error.TestFailed;
     } else |err| {
-        if (err != error.EINVAL) return error.TestFailed;
+        if (err != error.InvalidArgument) return error.TestFailed;
     }
 }
 

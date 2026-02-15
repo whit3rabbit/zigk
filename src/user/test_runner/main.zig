@@ -310,18 +310,6 @@ export fn main(argc: i32, argv: [*][*:0]u8) i32 {
     runner.runTest("signal_ext: clock_nanosleep invalid clock", signal_tests.testClockNanosleepInvalidClock);
     runner.runTest("signal_ext: clock_nanosleep abstime past", signal_tests.testClockNanosleepAbstimePast);
 
-    // Phase 23: POSIX timer tests
-    runner.runTest("posix_timer: create", posix_timer_tests.testTimerCreate);
-    runner.runTest("posix_timer: create sigev_none", posix_timer_tests.testTimerCreateSigevNone);
-    runner.runTest("posix_timer: create invalid clock", posix_timer_tests.testTimerCreateInvalidClock);
-    runner.runTest("posix_timer: delete", posix_timer_tests.testTimerDelete);
-    runner.runTest("posix_timer: settime and gettime", posix_timer_tests.testTimerSetGetTime);
-    runner.runTest("posix_timer: disarm", posix_timer_tests.testTimerDisarm);
-    runner.runTest("posix_timer: settime old value", posix_timer_tests.testTimerSetTimeOldValue);
-    runner.runTest("posix_timer: getoverrun", posix_timer_tests.testTimerGetOverrun);
-    runner.runTest("posix_timer: signal delivery", posix_timer_tests.testTimerSignalDelivery);
-    runner.runTest("posix_timer: multiple timers", posix_timer_tests.testTimerMultiple);
-
     // Socket tests
     runner.runTest("socket: create TCP", socket_tests.testSocketCreateTcp);
     runner.runTest("socket: create UDP", socket_tests.testSocketCreateUdp);
@@ -347,6 +335,18 @@ export fn main(argc: i32, argv: [*][*:0]u8) i32 {
     runner.runTest("socket: socketpair dgram", socket_tests.testSocketpairDgram);
     runner.runTest("socket: accept4 invalid flags", socket_tests.testAccept4InvalidFlags);
     runner.runTest("socket: accept4 valid flags", socket_tests.testAccept4ValidFlags);
+
+    // Phase 23: POSIX timer tests
+    runner.runTest("posix_timer: create", posix_timer_tests.testTimerCreate);
+    runner.runTest("posix_timer: create sigev_none", posix_timer_tests.testTimerCreateSigevNone);
+    runner.runTest("posix_timer: create invalid clock", posix_timer_tests.testTimerCreateInvalidClock);
+    runner.runTest("posix_timer: delete", posix_timer_tests.testTimerDelete);
+    runner.runTest("posix_timer: settime and gettime", posix_timer_tests.testTimerSetGetTime);
+    runner.runTest("posix_timer: disarm", posix_timer_tests.testTimerDisarm);
+    runner.runTest("posix_timer: settime old value", posix_timer_tests.testTimerSetTimeOldValue);
+    runner.runTest("posix_timer: getoverrun", posix_timer_tests.testTimerGetOverrun);
+    runner.runTest("posix_timer: signal delivery", posix_timer_tests.testTimerSignalDelivery);
+    runner.runTest("posix_timer: multiple timers", posix_timer_tests.testTimerMultiple);
 
     // FD operations tests
     runner.runTest("fd_ops: dup basic", fd_ops_tests.testDupBasic);

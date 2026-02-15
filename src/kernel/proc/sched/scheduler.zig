@@ -1072,10 +1072,7 @@ fn processIntervalTimers(proc: *@import("process").Process, thread: *Thread, fra
             const sig_bit: u64 = @as(u64, 1) << @intCast(timer.signo - 1);
             const pending = @atomicLoad(u64, &thread.pending_signals, .acquire);
             if ((pending & sig_bit) == 0) {
-                // Signal was consumed by the signal handler
                 timer.signal_pending = false;
-                // Note: overrun_count is NOT reset here. It persists until
-                // timer_getoverrun is called or timer is re-armed.
             }
         }
 
@@ -1083,10 +1080,8 @@ fn processIntervalTimers(proc: *@import("process").Process, thread: *Thread, fra
             // Timer expired
             if (timer.notify == 0) { // SIGEV_SIGNAL
                 if (timer.signal_pending) {
-                    // Overrun: signal not yet consumed, count it
                     timer.overrun_count +|= 1;
                 } else {
-                    // Deliver signal to thread
                     const sig_bit: u64 = @as(u64, 1) << @intCast(timer.signo - 1);
                     _ = @atomicRmw(u64, &thread.pending_signals, .Or, sig_bit, .release);
                     timer.signal_pending = true;
@@ -1095,7 +1090,6 @@ fn processIntervalTimers(proc: *@import("process").Process, thread: *Thread, fra
                 timer.overrun_count +|= 1;
             }
 
-            // Reload (periodic) or disarm (one-shot)
             timer.value_ns = timer.interval_ns;
         } else {
             timer.value_ns -= TICK_MICROS * 1000;
