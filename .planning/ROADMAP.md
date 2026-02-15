@@ -196,10 +196,10 @@ Plans:
   2. Signal mask is applied before event check and restored after return, preventing TOCTTOU races
   3. Behavior matches epoll_wait when sigmask is NULL
 
-**Plans**: TBD
+**Plans**: 1 plan
 
 Plans:
-- [ ] 21-01: TBD
+- [ ] 21-01-PLAN.md -- Implement epoll_pwait syscall with signal mask atomicity, userspace wrapper, and integration tests
 
 #### Phase 22: File Monitoring
 **Goal**: File and directory changes can be monitored via inotify
