@@ -182,10 +182,10 @@ Plans:
   3. User can call clock_nanosleep to sleep using a specific clock source (CLOCK_REALTIME, CLOCK_MONOTONIC) with TIMER_ABSTIME flag
   4. Signal operations integrate correctly with existing rt_sigaction/rt_sigprocmask
 
-**Plans**: TBD
+**Plans**: 1 plan
 
 Plans:
-- [ ] 20-01: TBD
+- [ ] 20-01-PLAN.md -- Implement rt_sigtimedwait, rt_sigqueueinfo, rt_tgsigqueueinfo, clock_nanosleep with wrappers and tests
 
 #### Phase 21: I/O Multiplexing Extension
 **Goal**: epoll supports signal mask atomicity for race-free event waiting
