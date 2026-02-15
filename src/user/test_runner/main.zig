@@ -14,6 +14,7 @@ const at_ops_tests = @import("tests/syscall/at_ops.zig");
 const io_mux_tests = @import("tests/syscall/io_mux.zig");
 const event_fds_tests = @import("tests/syscall/event_fds.zig");
 const fs_extras_tests = @import("tests/syscall/fs_extras.zig");
+const inotify_tests = @import("tests/syscall/inotify.zig");
 const vectored_io_tests = @import("tests/syscall/vectored_io.zig");
 const process_control_tests = @import("tests/syscall/process_control.zig");
 const sysv_ipc_tests = @import("tests/syscall/sysv_ipc.zig");
@@ -433,6 +434,18 @@ export fn main(argc: i32, argv: [*][*:0]u8) i32 {
     runner.runTest("io_mux: epoll_pwait timeout no events", io_mux_tests.testEpollPwaitTimeoutNoEvents);
     runner.runTest("io_mux: epoll_pwait invalid sigsetsize", io_mux_tests.testEpollPwaitInvalidSigsetsize);
     runner.runTest("io_mux: epoll_pwait mask restored on success", io_mux_tests.testEpollPwaitMaskRestoredOnSuccess);
+
+    // Phase 22: inotify tests
+    runner.runTest("inotify: init creates fd", inotify_tests.testInotifyInit);
+    runner.runTest("inotify: init nonblock", inotify_tests.testInotifyInitNonblock);
+    runner.runTest("inotify: init invalid flags", inotify_tests.testInotifyInitInvalidFlags);
+    runner.runTest("inotify: add watch", inotify_tests.testInotifyAddWatch);
+    runner.runTest("inotify: rm watch", inotify_tests.testInotifyRmWatch);
+    runner.runTest("inotify: rm watch invalid", inotify_tests.testInotifyRmWatchInvalid);
+    runner.runTest("inotify: create event", inotify_tests.testInotifyCreateEvent);
+    runner.runTest("inotify: modify event", inotify_tests.testInotifyModifyEvent);
+    runner.runTest("inotify: delete event", inotify_tests.testInotifyDeleteEvent);
+    runner.runTest("inotify: works with epoll", inotify_tests.testInotifyWithEpoll);
 
     // Event notification FD tests
     runner.runTest("event_fds: eventfd create and close", event_fds_tests.testEventfdCreateAndClose);

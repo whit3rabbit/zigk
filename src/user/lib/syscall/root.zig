@@ -210,6 +210,30 @@ pub const SFD_CLOEXEC = io.SFD_CLOEXEC;
 pub const SFD_NONBLOCK = io.SFD_NONBLOCK;
 pub const SignalFdSigInfo = io.SignalFdSigInfo;
 
+// Re-export inotify
+pub const inotify_init1 = io.inotify_init1;
+pub const inotify_init = io.inotify_init;
+pub const inotify_add_watch = io.inotify_add_watch;
+pub const inotify_rm_watch = io.inotify_rm_watch;
+pub const InotifyEvent = io.InotifyEvent;
+pub const IN_ACCESS = io.IN_ACCESS;
+pub const IN_MODIFY = io.IN_MODIFY;
+pub const IN_ATTRIB = io.IN_ATTRIB;
+pub const IN_CLOSE_WRITE = io.IN_CLOSE_WRITE;
+pub const IN_CLOSE_NOWRITE = io.IN_CLOSE_NOWRITE;
+pub const IN_OPEN = io.IN_OPEN;
+pub const IN_MOVED_FROM = io.IN_MOVED_FROM;
+pub const IN_MOVED_TO = io.IN_MOVED_TO;
+pub const IN_CREATE = io.IN_CREATE;
+pub const IN_DELETE = io.IN_DELETE;
+pub const IN_DELETE_SELF = io.IN_DELETE_SELF;
+pub const IN_MOVE_SELF = io.IN_MOVE_SELF;
+pub const IN_ALL_EVENTS = io.IN_ALL_EVENTS;
+pub const IN_NONBLOCK = io.IN_NONBLOCK;
+pub const IN_CLOEXEC = io.IN_CLOEXEC;
+pub const IN_ONESHOT = io.IN_ONESHOT;
+pub const IN_MASK_ADD = io.IN_MASK_ADD;
+
 // Re-export Process
 pub const sched_yield = process.sched_yield;
 pub const exit = process.exit;

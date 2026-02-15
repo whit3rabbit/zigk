@@ -1107,3 +1107,70 @@ pub fn copy_file_range(fd_in: i32, off_in: ?*u64, fd_out: i32, off_out: ?*u64, l
 
 // Alias size_t to usize for compatibility if needed, but usize is standard in Zig.
 const size_t = usize;
+
+// =============================================================================
+// Inotify Syscalls
+// =============================================================================
+
+/// Inotify event mask constants
+pub const IN_ACCESS: u32 = 0x00000001;
+pub const IN_MODIFY: u32 = 0x00000002;
+pub const IN_ATTRIB: u32 = 0x00000004;
+pub const IN_CLOSE_WRITE: u32 = 0x00000008;
+pub const IN_CLOSE_NOWRITE: u32 = 0x00000010;
+pub const IN_OPEN: u32 = 0x00000020;
+pub const IN_MOVED_FROM: u32 = 0x00000040;
+pub const IN_MOVED_TO: u32 = 0x00000080;
+pub const IN_CREATE: u32 = 0x00000100;
+pub const IN_DELETE: u32 = 0x00000200;
+pub const IN_DELETE_SELF: u32 = 0x00000400;
+pub const IN_MOVE_SELF: u32 = 0x00000800;
+pub const IN_ALL_EVENTS: u32 = 0x00000FFF;
+pub const IN_NONBLOCK: u32 = 0x800;
+pub const IN_CLOEXEC: u32 = 0x80000;
+pub const IN_ONESHOT: u32 = 0x80000000;
+pub const IN_MASK_ADD: u32 = 0x20000000;
+
+/// inotify_event header (variable-length: followed by name[len])
+pub const InotifyEvent = extern struct {
+    wd: i32,
+    mask: u32,
+    cookie: u32,
+    len: u32,
+};
+
+/// Create an inotify instance with flags
+pub fn inotify_init1(flags: u32) SyscallError!i32 {
+    const ret = primitive.syscall1(syscalls.SYS_INOTIFY_INIT1, @as(usize, flags));
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return @intCast(ret);
+}
+
+/// Create an inotify instance (no flags)
+pub fn inotify_init() SyscallError!i32 {
+    const ret = primitive.syscall0(syscalls.SYS_INOTIFY_INIT);
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return @intCast(ret);
+}
+
+/// Add or modify a watch on an inotify instance
+pub fn inotify_add_watch(inotify_fd: i32, pathname: [*:0]const u8, mask: u32) SyscallError!i32 {
+    const ret = primitive.syscall3(
+        syscalls.SYS_INOTIFY_ADD_WATCH,
+        @bitCast(@as(isize, inotify_fd)),
+        @intFromPtr(pathname),
+        @as(usize, mask),
+    );
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return @intCast(ret);
+}
+
+/// Remove a watch from an inotify instance
+pub fn inotify_rm_watch(inotify_fd: i32, wd: i32) SyscallError!void {
+    const ret = primitive.syscall2(
+        syscalls.SYS_INOTIFY_RM_WATCH,
+        @bitCast(@as(isize, inotify_fd)),
+        @bitCast(@as(isize, wd)),
+    );
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
