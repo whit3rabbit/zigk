@@ -1345,6 +1345,50 @@ pub fn sys_epoll_wait(epfd: usize, events_ptr: usize, maxevents: usize, timeout:
     return 0;
 }
 
+/// sys_epoll_pwait (281/22) - Wait for epoll events with signal mask
+///
+/// Like epoll_wait, but atomically sets the signal mask before checking events
+/// and restores it after return. This prevents TOCTOU races where a signal
+/// arrives between sigprocmask and epoll_wait.
+///
+/// When sigmask_ptr is NULL, behaves identically to epoll_wait.
+///
+/// Args:
+///   epfd: epoll file descriptor
+///   events_ptr: Pointer to array of epoll_event structures for output
+///   maxevents: Maximum number of events to return (1-1024)
+///   timeout: Timeout in milliseconds (-1=infinite, 0=immediate, >0=ms)
+///   sigmask_ptr: Pointer to signal mask (NULL = no mask change)
+///   sigsetsize: Size of signal mask (must be 8 for u64 SigSet)
+///
+/// Returns: Number of ready file descriptors, 0 on timeout
+pub fn sys_epoll_pwait(epfd: usize, events_ptr: usize, maxevents: usize, timeout: usize, sigmask_ptr: usize, sigsetsize: usize) SyscallError!usize {
+    const thread = sched.getCurrentThread() orelse return error.ESRCH;
+
+    // Validate sigmask size if provided
+    if (sigmask_ptr != 0 and sigsetsize != 8) {
+        return error.EINVAL;
+    }
+
+    // Apply signal mask if provided (save old mask, set new mask)
+    var old_mask: u64 = 0;
+    var mask_applied = false;
+    if (sigmask_ptr != 0) {
+        const new_mask = UserPtr.from(sigmask_ptr).readValue(u64) catch {
+            return error.EFAULT;
+        };
+        old_mask = thread.sigmask;
+        thread.sigmask = new_mask;
+        mask_applied = true;
+    }
+    defer if (mask_applied) {
+        thread.sigmask = old_mask;
+    };
+
+    // Delegate to epoll_wait for the actual event waiting
+    return sys_epoll_wait(epfd, events_ptr, maxevents, timeout);
+}
+
 // =============================================================================
 // Process Control (prctl, CPU affinity) - separate module for organization
 // =============================================================================

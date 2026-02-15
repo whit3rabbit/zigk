@@ -230,3 +230,162 @@ pub fn testPollPipeHup() !void {
     if (nready != 1) return error.TestFailed;
     if ((pollfd[0].revents & syscall.POLLHUP) == 0) return error.TestFailed;
 }
+
+// =============================================================================
+// epoll_pwait tests
+// =============================================================================
+
+// Test 11: epoll_pwait with NULL sigmask behaves like epoll_wait
+pub fn testEpollPwaitNullMask() !void {
+    const epfd = try syscall.epoll_create1(0);
+    defer syscall.close(epfd) catch {};
+
+    // Create pipe and write data
+    var pipefd: [2]i32 = undefined;
+    try syscall.pipe(&pipefd);
+    defer {
+        syscall.close(pipefd[0]) catch {};
+        syscall.close(pipefd[1]) catch {};
+    }
+
+    // Add read end to epoll
+    var event = syscall.EpollEvent.init(syscall.EPOLLIN, @as(u64, @bitCast(@as(i64, pipefd[0]))));
+    _ = try syscall.epoll_ctl(epfd, syscall.EPOLL_CTL_ADD, pipefd[0], &event);
+
+    // Write data
+    const msg = "test";
+    _ = try syscall.write(pipefd[1], msg.ptr, msg.len);
+
+    // epoll_pwait with NULL sigmask should work like epoll_wait
+    var events: [4]syscall.EpollEvent = undefined;
+    const nready = try syscall.epoll_pwait(epfd, &events, 4, 0, null, 0);
+    if (nready != 1) return error.TestFailed;
+    if ((events[0].events & syscall.EPOLLIN) == 0) return error.TestFailed;
+}
+
+// Test 12: epoll_pwait with signal mask applied during wait
+pub fn testEpollPwaitWithMask() !void {
+    const epfd = try syscall.epoll_create1(0);
+    defer syscall.close(epfd) catch {};
+
+    // Create pipe
+    var pipefd: [2]i32 = undefined;
+    try syscall.pipe(&pipefd);
+    defer {
+        syscall.close(pipefd[0]) catch {};
+        syscall.close(pipefd[1]) catch {};
+    }
+
+    // Add read end to epoll
+    var event = syscall.EpollEvent.init(syscall.EPOLLIN, @as(u64, @bitCast(@as(i64, pipefd[0]))));
+    _ = try syscall.epoll_ctl(epfd, syscall.EPOLL_CTL_ADD, pipefd[0], &event);
+
+    // Write data so we get immediate return
+    const msg = "x";
+    _ = try syscall.write(pipefd[1], msg.ptr, msg.len);
+
+    // Save current sigmask
+    var old_mask: u64 = 0;
+    try syscall.sigprocmask(2, null, &old_mask); // SIG_SETMASK=2, just query
+
+    // Call epoll_pwait with a mask that blocks SIGUSR1 (bit 9, signal 10)
+    var wait_mask: u64 = old_mask | (@as(u64, 1) << 9); // Block SIGUSR1
+    var events: [4]syscall.EpollEvent = undefined;
+    const nready = try syscall.epoll_pwait(epfd, &events, 4, 0, &wait_mask, 8);
+
+    // Should still return 1 event (pipe is readable)
+    if (nready != 1) return error.TestFailed;
+
+    // After epoll_pwait returns, original mask should be restored
+    // Verify by querying current mask
+    var current_mask: u64 = 0;
+    try syscall.sigprocmask(2, null, &current_mask); // Query again
+    if (current_mask != old_mask) return error.TestFailed;
+}
+
+// Test 13: epoll_pwait timeout with no events returns 0
+pub fn testEpollPwaitTimeoutNoEvents() !void {
+    const epfd = try syscall.epoll_create1(0);
+    defer syscall.close(epfd) catch {};
+
+    // Create pipe but don't write anything
+    var pipefd: [2]i32 = undefined;
+    try syscall.pipe(&pipefd);
+    defer {
+        syscall.close(pipefd[0]) catch {};
+        syscall.close(pipefd[1]) catch {};
+    }
+
+    // Add read end to epoll
+    var event = syscall.EpollEvent.init(syscall.EPOLLIN, @as(u64, @bitCast(@as(i64, pipefd[0]))));
+    _ = try syscall.epoll_ctl(epfd, syscall.EPOLL_CTL_ADD, pipefd[0], &event);
+
+    // epoll_pwait with timeout=0 and mask should return immediately with 0
+    var mask: u64 = 0; // Empty mask (unblock all signals)
+    var events: [4]syscall.EpollEvent = undefined;
+    const nready = try syscall.epoll_pwait(epfd, &events, 4, 0, &mask, 8);
+    if (nready != 0) return error.TestFailed;
+}
+
+// Test 14: epoll_pwait with invalid sigsetsize returns EINVAL
+pub fn testEpollPwaitInvalidSigsetsize() !void {
+    const epfd = try syscall.epoll_create1(0);
+    defer syscall.close(epfd) catch {};
+
+    var mask: u64 = 0;
+    var events: [4]syscall.EpollEvent = undefined;
+
+    // sigsetsize must be 8; passing 4 should return EINVAL
+    const result = syscall.epoll_pwait(epfd, &events, 4, 0, &mask, 4);
+    if (result) |_| {
+        return error.TestFailed; // Should fail
+    } else |err| {
+        if (err != error.InvalidArgument) return error.TestFailed;
+    }
+}
+
+// Test 15: epoll_pwait mask is restored even when events are returned
+pub fn testEpollPwaitMaskRestoredOnSuccess() !void {
+    const epfd = try syscall.epoll_create1(0);
+    defer syscall.close(epfd) catch {};
+
+    var pipefd: [2]i32 = undefined;
+    try syscall.pipe(&pipefd);
+    defer {
+        syscall.close(pipefd[0]) catch {};
+        syscall.close(pipefd[1]) catch {};
+    }
+
+    // Add read end to epoll
+    var event = syscall.EpollEvent.init(syscall.EPOLLIN, @as(u64, @bitCast(@as(i64, pipefd[0]))));
+    _ = try syscall.epoll_ctl(epfd, syscall.EPOLL_CTL_ADD, pipefd[0], &event);
+
+    // Write to make pipe readable
+    const msg = "hi";
+    _ = try syscall.write(pipefd[1], msg.ptr, msg.len);
+
+    // Set a known sigmask before epoll_pwait
+    var pre_mask: u64 = @as(u64, 1) << 14; // Block signal 15 (SIGTERM)
+    try syscall.sigprocmask(2, &pre_mask, null); // SIG_SETMASK
+
+    // Call epoll_pwait with a different mask
+    var pwait_mask: u64 = @as(u64, 1) << 9; // Block SIGUSR1 during wait
+    var events: [4]syscall.EpollEvent = undefined;
+    const nready = try syscall.epoll_pwait(epfd, &events, 4, 0, &pwait_mask, 8);
+    if (nready != 1) {
+        // Restore mask before failing
+        var zero: u64 = 0;
+        _ = syscall.sigprocmask(2, &zero, null) catch {};
+        return error.TestFailed;
+    }
+
+    // After return, mask should be back to pre_mask (SIGTERM blocked)
+    var post_mask: u64 = 0;
+    try syscall.sigprocmask(2, null, &post_mask); // Query
+
+    // Clean up: unblock all
+    var zero: u64 = 0;
+    _ = syscall.sigprocmask(2, &zero, null) catch {};
+
+    if (post_mask != pre_mask) return error.TestFailed;
+}

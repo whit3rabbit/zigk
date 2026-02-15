@@ -217,6 +217,22 @@ pub fn epoll_wait(epfd: i32, events: [*]EpollEvent, maxevents: u32, timeout: i32
     return ret;
 }
 
+/// Wait for I/O events on epoll instance with signal mask
+/// When sigmask is null, behaves identically to epoll_wait.
+pub fn epoll_pwait(epfd: i32, events: [*]EpollEvent, maxevents: u32, timeout: i32, sigmask: ?*const u64, sigsetsize: usize) SyscallError!usize {
+    const ret = primitive.syscall6(
+        syscalls.SYS_EPOLL_PWAIT,
+        @bitCast(@as(isize, epfd)),
+        @intFromPtr(events),
+        @as(usize, maxevents),
+        @bitCast(@as(isize, timeout)),
+        if (sigmask) |s| @intFromPtr(s) else 0,
+        sigsetsize,
+    );
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return ret;
+}
+
 /// Epoll event structure
 pub const EpollEvent = uapi.epoll.EpollEvent;
 

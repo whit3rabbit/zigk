@@ -427,6 +427,13 @@ export fn main(argc: i32, argv: [*][*:0]u8) i32 {
     runner.runTest("io_mux: poll pipe events", io_mux_tests.testPollPipeEvents);
     runner.runTest("io_mux: poll pipe HUP", io_mux_tests.testPollPipeHup);
 
+    // Phase 21: epoll_pwait tests
+    runner.runTest("io_mux: epoll_pwait null mask", io_mux_tests.testEpollPwaitNullMask);
+    runner.runTest("io_mux: epoll_pwait with mask", io_mux_tests.testEpollPwaitWithMask);
+    runner.runTest("io_mux: epoll_pwait timeout no events", io_mux_tests.testEpollPwaitTimeoutNoEvents);
+    runner.runTest("io_mux: epoll_pwait invalid sigsetsize", io_mux_tests.testEpollPwaitInvalidSigsetsize);
+    runner.runTest("io_mux: epoll_pwait mask restored on success", io_mux_tests.testEpollPwaitMaskRestoredOnSuccess);
+
     // Event notification FD tests
     runner.runTest("event_fds: eventfd create and close", event_fds_tests.testEventfdCreateAndClose);
     runner.runTest("event_fds: eventfd write and read", event_fds_tests.testEventfdWriteAndRead);

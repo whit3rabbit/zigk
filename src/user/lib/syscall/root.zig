@@ -173,6 +173,7 @@ pub const SPLICE_F_GIFT = io.SPLICE_F_GIFT;
 pub const epoll_create1 = io.epoll_create1;
 pub const epoll_ctl = io.epoll_ctl;
 pub const epoll_wait = io.epoll_wait;
+pub const epoll_pwait = io.epoll_pwait;
 pub const EpollEvent = io.EpollEvent;
 pub const EPOLL_CTL_ADD = io.EPOLL_CTL_ADD;
 pub const EPOLL_CTL_DEL = io.EPOLL_CTL_DEL;
