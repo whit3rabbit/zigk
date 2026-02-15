@@ -215,7 +215,7 @@ Plans:
 **Plans**: 1 plan
 
 Plans:
-- [ ] 22-01-PLAN.md -- Implement inotify subsystem with init1/add_watch/rm_watch syscalls, VFS event hooks, and integration tests
+- [x] 22-01-PLAN.md -- Implement inotify subsystem with init1/add_watch/rm_watch syscalls, VFS event hooks, and integration tests
 
 #### Phase 23: POSIX Timers
 **Goal**: Per-process interval timers with signal delivery are available
@@ -229,10 +229,10 @@ Plans:
   5. User can call timer_delete to destroy a timer and free resources
   6. Timers deliver signals (SIGALRM or custom) on expiration
 
-**Plans**: TBD
+**Plans**: 1 plan
 
 Plans:
-- [ ] 23-01: TBD
+- [ ] 23-01-PLAN.md -- Implement POSIX timer syscalls with per-process storage, scheduler integration, and tests
 
 #### Phase 24: Capabilities
 **Goal**: Process capability bitmaps can be queried and modified
@@ -313,12 +313,12 @@ Phases execute in numeric order: 15 -> 16 -> 17 -> 18 -> 19 -> 20 -> 21 -> 22 ->
 | 19. Process Control Extensions | v1.2 | 1/1 | Complete | 2026-02-14 |
 | 20. Signal Handling Extensions | v1.2 | 1/1 | Complete | 2026-02-14 |
 | 21. I/O Multiplexing Extension | v1.2 | 1/1 | Complete | 2026-02-15 |
-| 22. File Monitoring | v1.2 | Complete    | 2026-02-15 | - |
-| 23. POSIX Timers | v1.2 | 0/TBD | Not started | - |
+| 22. File Monitoring | v1.2 | 1/1 | Complete | 2026-02-15 |
+| 23. POSIX Timers | v1.2 | 0/1 | Not started | - |
 | 24. Capabilities | v1.2 | 0/TBD | Not started | - |
 | 25. Seccomp | v1.2 | 0/TBD | Not started | - |
 | 26. Test Coverage Expansion | v1.2 | 0/TBD | Not started | - |
 
 ---
 *Roadmap created: 2026-02-11*
-*Last updated: 2026-02-15 (Phase 21 complete)*
+*Last updated: 2026-02-15 (Phase 23 planned)*
