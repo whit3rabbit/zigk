@@ -232,7 +232,7 @@ Plans:
 **Plans**: 1 plan
 
 Plans:
-- [ ] 23-01-PLAN.md -- Implement POSIX timer syscalls with per-process storage, scheduler integration, and tests
+- [x] 23-01-PLAN.md -- Implement POSIX timer syscalls with per-process storage, scheduler integration, and tests
 
 #### Phase 24: Capabilities
 **Goal**: Process capability bitmaps can be queried and modified
@@ -314,11 +314,11 @@ Phases execute in numeric order: 15 -> 16 -> 17 -> 18 -> 19 -> 20 -> 21 -> 22 ->
 | 20. Signal Handling Extensions | v1.2 | 1/1 | Complete | 2026-02-14 |
 | 21. I/O Multiplexing Extension | v1.2 | 1/1 | Complete | 2026-02-15 |
 | 22. File Monitoring | v1.2 | 1/1 | Complete | 2026-02-15 |
-| 23. POSIX Timers | v1.2 | 0/1 | Not started | - |
+| 23. POSIX Timers | v1.2 | 1/1 | Complete | 2026-02-15 |
 | 24. Capabilities | v1.2 | 0/TBD | Not started | - |
 | 25. Seccomp | v1.2 | 0/TBD | Not started | - |
 | 26. Test Coverage Expansion | v1.2 | 0/TBD | Not started | - |
 
 ---
 *Roadmap created: 2026-02-11*
-*Last updated: 2026-02-15 (Phase 23 planned)*
+*Last updated: 2026-02-15 (Phase 23 complete)*
