@@ -185,7 +185,7 @@ Plans:
 **Plans**: 1 plan
 
 Plans:
-- [ ] 20-01-PLAN.md -- Implement rt_sigtimedwait, rt_sigqueueinfo, rt_tgsigqueueinfo, clock_nanosleep with wrappers and tests
+- [x] 20-01-PLAN.md -- Implement rt_sigtimedwait, rt_sigqueueinfo, rt_tgsigqueueinfo, clock_nanosleep with wrappers and tests
 
 #### Phase 21: I/O Multiplexing Extension
 **Goal**: epoll supports signal mask atomicity for race-free event waiting
@@ -311,7 +311,7 @@ Phases execute in numeric order: 15 -> 16 -> 17 -> 18 -> 19 -> 20 -> 21 -> 22 ->
 | 17. Zero-Copy I/O | v1.2 | 2/2 | Complete | 2026-02-13 |
 | 18. Memory Management Extensions | v1.2 | 1/1 | Complete | 2026-02-13 |
 | 19. Process Control Extensions | v1.2 | 1/1 | Complete | 2026-02-14 |
-| 20. Signal Handling Extensions | v1.2 | 0/TBD | Not started | - |
+| 20. Signal Handling Extensions | v1.2 | 1/1 | Complete | 2026-02-14 |
 | 21. I/O Multiplexing Extension | v1.2 | 0/TBD | Not started | - |
 | 22. File Monitoring | v1.2 | 0/TBD | Not started | - |
 | 23. POSIX Timers | v1.2 | 0/TBD | Not started | - |
@@ -321,4 +321,4 @@ Phases execute in numeric order: 15 -> 16 -> 17 -> 18 -> 19 -> 20 -> 21 -> 22 ->
 
 ---
 *Roadmap created: 2026-02-11*
-*Last updated: 2026-02-14 (Phase 19 complete)*
+*Last updated: 2026-02-14 (Phase 20 complete)*
