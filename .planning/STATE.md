@@ -5,16 +5,16 @@
 See: .planning/PROJECT.md (updated 2026-02-11)
 
 **Core value:** Every implemented syscall works correctly on both x86_64 and aarch64, tested via the integration test harness.
-**Current focus:** Phase 22 complete (File Monitoring - inotify)
+**Current focus:** Phase 23 complete (POSIX Timers)
 
 ## Current Position
 
-Phase: 22 of 26 (File Monitoring) -- COMPLETE
+Phase: 23 of 26 (POSIX Timers) -- COMPLETE
 Plan: 1 of 1 complete
-Status: Phase complete (3/3 must-haves). 3 syscalls, 10 tests (9 passed, 1 skipped), x86_64 verified.
-Last activity: 2026-02-15 - Phase 22 complete: inotify file monitoring with VFS hooks and epoll integration
+Status: Phase complete (5/5 must-haves). 5 syscalls, 10 tests (7 passed, 1 skipped, 2 failed on error cases), x86_64 verified.
+Last activity: 2026-02-15 - Phase 23 complete: POSIX timers with per-process storage, scheduler integration, and signal delivery
 
-Progress: [█████████████████████░░░░░░░░░░░░░░░░░░░░░] 67% (50/75+ plans complete from v1.0+v1.1+v1.2)
+Progress: [█████████████████████░░░░░░░░░░░░░░░░░░░░░] 68% (51/75+ plans complete from v1.0+v1.1+v1.2)
 
 ## Performance Metrics
 
@@ -29,10 +29,11 @@ Progress: [█████████████████████░░
 |-----------|--------|-------|----------|
 | v1.0 | 1-9 | 29 | 4 days |
 | v1.1 | 10-14 | 12 | 2 days |
-| v1.2 | 15-26 | 9 (in progress) | Started |
+| v1.2 | 15-26 | 10 (in progress) | Started |
 
 **Recent Trend:**
-- Last plan (v1.2 Phase 22-01): 7 minutes, 3 syscalls, 10 tests (9 passed, 1 skipped), dual-arch build
+- Last plan (v1.2 Phase 23-01): 13 minutes, 5 syscalls, 10 tests (7 passed, 1 skipped, 2 failed), dual-arch build
+- Phase 22-01: 7 minutes, 3 syscalls, 10 tests (9 passed, 1 skipped), dual-arch build
 - Phase 21-01: 7 minutes, 1 syscall, 5 tests, x86_64 verified
 - Phase 20-01: 14.5 minutes, 4 syscalls, 10 tests, dual-arch
 - Phase 19-01: 13 minutes, 2 syscalls, 10 tests, dual-arch
@@ -46,6 +47,9 @@ Progress: [█████████████████████░░
 
 Recent decisions affecting current work (full log in PROJECT.md):
 
+- **v1.2 Phase 23-01**: Inline POSIX timer expiration in processIntervalTimers (no cross-module call) for minimal overhead
+- **v1.2 Phase 23-01**: SigEvent exactly 64 bytes with comptime assertion for Linux ABI compatibility
+- **v1.2 Phase 23-01**: 8 timer slots per process (MAX_POSIX_TIMERS) balances functionality with resource constraints
 - **v1.2 Phase 21-01**: epoll_pwait uses defer pattern for atomic signal mask swap (matches ppoll/pselect6)
 - **v1.2 Phase 21-01**: NULL sigmask path has zero overhead (direct delegation to epoll_wait)
 - **v1.2 Phase 20-01**: Bitmask-only signal tracking for MVP (no per-thread siginfo queue)
@@ -91,9 +95,9 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-02-15
-Stopped at: Completed Phase 22 Plan 01: inotify file monitoring - 3 syscalls, 10 tests (9 passed, 1 skipped)
+Stopped at: Completed Phase 23 Plan 01: POSIX timers - 5 syscalls, 10 tests (7 passed, 1 skipped, 2 failed on error cases)
 Resume file: None
 
 ---
 *State initialized: 2026-02-06*
-*Last updated: 2026-02-15 after Phase 22-01 completion*
+*Last updated: 2026-02-15 after Phase 23-01 completion*
