@@ -5,7 +5,7 @@
 See: .planning/PROJECT.md (updated 2026-02-11)
 
 **Core value:** Every implemented syscall works correctly on both x86_64 and aarch64, tested via the integration test harness.
-**Current focus:** Phase 21 or v1.2 verification (Phase 20 complete)
+**Current focus:** Phase 22 planning (Phase 21 complete)
 
 ## Current Position
 
@@ -79,6 +79,7 @@ None yet.
 
 **Active:**
 - signalfd uses 10ms polling timeout instead of direct signal delivery wakeup (acceptable for v1.2)
+- aarch64 test suite crashes in socket tests (PageFault in kernel space) -- pre-existing, blocks io_mux test execution on aarch64
 - aarch64 test suite timeout in later tests (pre-existing, does not block functionality)
 - sendfile uses 64KB buffer copy, not true zero-copy (requires VFS page cache, deferred to v2)
 - sendfile large transfer test causes test runner timeout on both architectures (pre-existing)

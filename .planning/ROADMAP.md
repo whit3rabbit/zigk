@@ -199,7 +199,7 @@ Plans:
 **Plans**: 1 plan
 
 Plans:
-- [ ] 21-01-PLAN.md -- Implement epoll_pwait syscall with signal mask atomicity, userspace wrapper, and integration tests
+- [x] 21-01-PLAN.md -- Implement epoll_pwait syscall with signal mask atomicity, userspace wrapper, and integration tests
 
 #### Phase 22: File Monitoring
 **Goal**: File and directory changes can be monitored via inotify
@@ -312,7 +312,7 @@ Phases execute in numeric order: 15 -> 16 -> 17 -> 18 -> 19 -> 20 -> 21 -> 22 ->
 | 18. Memory Management Extensions | v1.2 | 1/1 | Complete | 2026-02-13 |
 | 19. Process Control Extensions | v1.2 | 1/1 | Complete | 2026-02-14 |
 | 20. Signal Handling Extensions | v1.2 | 1/1 | Complete | 2026-02-14 |
-| 21. I/O Multiplexing Extension | v1.2 | 0/TBD | Not started | - |
+| 21. I/O Multiplexing Extension | v1.2 | 1/1 | Complete | 2026-02-15 |
 | 22. File Monitoring | v1.2 | 0/TBD | Not started | - |
 | 23. POSIX Timers | v1.2 | 0/TBD | Not started | - |
 | 24. Capabilities | v1.2 | 0/TBD | Not started | - |
@@ -321,4 +321,4 @@ Phases execute in numeric order: 15 -> 16 -> 17 -> 18 -> 19 -> 20 -> 21 -> 22 ->
 
 ---
 *Roadmap created: 2026-02-11*
-*Last updated: 2026-02-14 (Phase 20 complete)*
+*Last updated: 2026-02-15 (Phase 21 complete)*
