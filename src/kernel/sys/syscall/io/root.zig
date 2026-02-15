@@ -5,6 +5,7 @@ const fcntl = @import("fcntl.zig");
 const eventfd = @import("eventfd.zig");
 const timerfd = @import("timerfd.zig");
 const signalfd = @import("signalfd.zig");
+const inotify = @import("inotify.zig");
 const splice_mod = @import("splice.zig");
 
 // Export public syscall handlers
@@ -29,6 +30,11 @@ pub const sys_timerfd_gettime = timerfd.sys_timerfd_gettime;
 
 pub const sys_signalfd4 = signalfd.sys_signalfd4;
 pub const sys_signalfd = signalfd.sys_signalfd;
+
+pub const sys_inotify_init1 = inotify.sys_inotify_init1;
+pub const sys_inotify_init = inotify.sys_inotify_init;
+pub const sys_inotify_add_watch = inotify.sys_inotify_add_watch;
+pub const sys_inotify_rm_watch = inotify.sys_inotify_rm_watch;
 
 pub const sys_stat = stat.sys_stat;
 pub const sys_lstat = stat.sys_lstat;

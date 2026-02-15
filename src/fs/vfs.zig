@@ -118,6 +118,9 @@ pub const Vfs = struct {
     /// Spinlock protecting mount table operations
     var lock: sync.Spinlock = .{};
 
+    /// Hook for inotify event generation
+    pub var inotify_event_hook: ?*const fn ([]const u8, u32, ?[]const u8) void = null;
+
     /// Initialize VFS
     pub fn init() void {
         // Clear mounts
@@ -271,6 +274,14 @@ pub const Vfs = struct {
             else
                 0;
             file_desc.file_identifier = (mount_idx_u64 << 32) | file_id;
+
+            // Trigger inotify hooks if registered
+            if (inotify_event_hook) |hook| {
+                if ((flags & 0o100) != 0) { // O_CREAT
+                    hook(path, 0x00000100, null); // IN_CREATE
+                }
+                hook(path, 0x00000020, null); // IN_OPEN
+            }
 
             return file_desc;
         }
@@ -433,7 +444,14 @@ pub const Vfs = struct {
                 rel_path = "/";
             }
 
-            return unlink_fn(mp.fs.context, rel_path);
+            try unlink_fn(mp.fs.context, rel_path);
+
+            // Trigger inotify hook
+            if (inotify_event_hook) |hook| {
+                hook(path, 0x00000200, null); // IN_DELETE
+            }
+
+            return;
         }
 
         return error.NotFound;
@@ -482,7 +500,14 @@ pub const Vfs = struct {
                 rel_path = "/";
             }
 
-            return chmod_fn(mp.fs.context, rel_path, mode);
+            try chmod_fn(mp.fs.context, rel_path, mode);
+
+            // Trigger inotify hook
+            if (inotify_event_hook) |hook| {
+                hook(path, 0x00000004, null); // IN_ATTRIB
+            }
+
+            return;
         }
 
         return error.NotFound;
@@ -531,7 +556,14 @@ pub const Vfs = struct {
                 rel_path = "/";
             }
 
-            return chown_fn(mp.fs.context, rel_path, uid, gid);
+            try chown_fn(mp.fs.context, rel_path, uid, gid);
+
+            // Trigger inotify hook
+            if (inotify_event_hook) |hook| {
+                hook(path, 0x00000004, null); // IN_ATTRIB
+            }
+
+            return;
         }
 
         return error.NotFound;
@@ -640,7 +672,15 @@ pub const Vfs = struct {
         var rel_new = new_path[new_best_len..];
         if (rel_new.len == 0) rel_new = "/";
 
-        return rename_fn(mp.fs.context, rel_old, rel_new);
+        try rename_fn(mp.fs.context, rel_old, rel_new);
+
+        // Trigger inotify hooks
+        if (inotify_event_hook) |hook| {
+            hook(old_path, 0x00000040, null); // IN_MOVED_FROM
+            hook(new_path, 0x00000080, null); // IN_MOVED_TO
+        }
+
+        return;
     }
 
     /// Rename a file or directory with flags (RENAME_NOREPLACE, RENAME_EXCHANGE)
@@ -691,13 +731,29 @@ pub const Vfs = struct {
 
         // If filesystem supports rename2, use it
         if (mp.fs.rename2) |rename2_fn| {
-            return rename2_fn(mp.fs.context, rel_old, rel_new, flags);
+            try rename2_fn(mp.fs.context, rel_old, rel_new, flags);
+
+            // Trigger inotify hooks
+            if (inotify_event_hook) |hook| {
+                hook(old_path, 0x00000040, null); // IN_MOVED_FROM
+                hook(new_path, 0x00000080, null); // IN_MOVED_TO
+            }
+
+            return;
         }
 
         // Fallback: if flags == 0 and filesystem has rename, use it
         if (flags == 0) {
             if (mp.fs.rename) |rename_fn| {
-                return rename_fn(mp.fs.context, rel_old, rel_new);
+                try rename_fn(mp.fs.context, rel_old, rel_new);
+
+                // Trigger inotify hooks
+                if (inotify_event_hook) |hook| {
+                    hook(old_path, 0x00000040, null); // IN_MOVED_FROM
+                    hook(new_path, 0x00000080, null); // IN_MOVED_TO
+                }
+
+                return;
             }
         }
 
@@ -732,7 +788,14 @@ pub const Vfs = struct {
             var rel_path = path[best_len..];
             if (rel_path.len == 0) rel_path = "/";
 
-            return truncate_fn(mp.fs.context, rel_path, length);
+            try truncate_fn(mp.fs.context, rel_path, length);
+
+            // Trigger inotify hook
+            if (inotify_event_hook) |hook| {
+                hook(path, 0x00000002, null); // IN_MODIFY
+            }
+
+            return;
         }
 
         return error.NotFound;
@@ -765,7 +828,14 @@ pub const Vfs = struct {
             var rel_path = path[best_len..];
             if (rel_path.len == 0) rel_path = "/";
 
-            return mkdir_fn(mp.fs.context, rel_path, mode);
+            try mkdir_fn(mp.fs.context, rel_path, mode);
+
+            // Trigger inotify hook
+            if (inotify_event_hook) |hook| {
+                hook(path, 0x00000100, null); // IN_CREATE
+            }
+
+            return;
         }
 
         return error.NotFound;
@@ -798,7 +868,14 @@ pub const Vfs = struct {
             var rel_path = path[best_len..];
             if (rel_path.len == 0) rel_path = "/";
 
-            return rmdir_fn(mp.fs.context, rel_path);
+            try rmdir_fn(mp.fs.context, rel_path);
+
+            // Trigger inotify hook
+            if (inotify_event_hook) |hook| {
+                hook(path, 0x00000200, null); // IN_DELETE
+            }
+
+            return;
         }
 
         return error.NotFound;
