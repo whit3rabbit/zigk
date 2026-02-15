@@ -31,6 +31,26 @@ pub const SemUndoEntry = struct {
 };
 pub const MAX_SEM_UNDO: usize = 32;
 
+/// POSIX timer slot
+pub const PosixTimer = struct {
+    /// Is this timer slot in use?
+    active: bool = false,
+    /// Clock source (CLOCK_REALTIME or CLOCK_MONOTONIC)
+    clockid: usize = 0,
+    /// Signal to deliver on expiration (default SIGALRM = 14)
+    signo: u8 = 14,
+    /// Notification type (SIGEV_SIGNAL or SIGEV_NONE)
+    notify: i32 = 0,
+    /// Time until next expiration (in nanoseconds, 0 = disarmed)
+    value_ns: u64 = 0,
+    /// Interval for periodic reload (in nanoseconds, 0 = one-shot)
+    interval_ns: u64 = 0,
+    /// Overrun count (incremented when timer fires but signal still pending)
+    overrun_count: u32 = 0,
+    /// Whether the timer signal is currently pending (for overrun tracking)
+    signal_pending: bool = false,
+};
+
 /// Process - owns resources and process hierarchy
 pub const Process = struct {
     pub const MailboxLock = struct {
@@ -242,6 +262,9 @@ pub const Process = struct {
     /// ITIMER_PROF (total CPU time, delivers SIGPROF)
     itimer_prof_interval: u64 = 0,
     itimer_prof_value: u64 = 0,
+
+    /// POSIX timers (timer_create/timer_settime/etc.)
+    posix_timers: [8]PosixTimer = [_]PosixTimer{.{}} ** 8,
 
     /// Scheduler policy (SCHED_NORMAL, SCHED_RR, SCHED_FIFO, etc.)
     sched_policy: u8 = 0,

@@ -1587,6 +1587,18 @@ pub fn build(b: *std.Build) void {
     syscall_itimer_module.addImport("user_mem", user_mem_module);
     syscall_itimer_module.addImport("base.zig", syscall_base_module);
 
+    // Create syscall posix_timer module
+    const syscall_posix_timer_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/sys/syscall/misc/posix_timer.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    syscall_posix_timer_module.addImport("uapi", uapi_module);
+    syscall_posix_timer_module.addImport("user_mem", user_mem_module);
+    syscall_posix_timer_module.addImport("base.zig", syscall_base_module);
+    syscall_posix_timer_module.addImport("sched", sched_module);
+    syscall_posix_timer_module.addImport("process", process_module);
+
     // Create syscall input module (mouse/input syscalls)
     const syscall_input_module = b.createModule(.{
         .root_source_file = b.path("src/kernel/sys/syscall/hw/input.zig"),
@@ -1862,6 +1874,7 @@ pub fn build(b: *std.Build) void {
     syscall_table_module.addImport("sysinfo", syscall_sysinfo_module);
     syscall_table_module.addImport("times", syscall_times_module);
     syscall_table_module.addImport("itimer", syscall_itimer_module);
+    syscall_table_module.addImport("posix_timer", syscall_posix_timer_module);
     syscall_table_module.addImport("input", syscall_input_module);
     syscall_table_module.addImport("io_uring", syscall_io_uring_module);
     syscall_table_module.addImport("ipc", syscall_ipc_module);

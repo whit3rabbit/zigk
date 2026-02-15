@@ -66,3 +66,61 @@ pub const ITimerVal = extern struct {
 pub const ITIMER_REAL: u32 = 0; // Wall clock time (SIGALRM)
 pub const ITIMER_VIRTUAL: u32 = 1; // User CPU time (SIGVTALRM)
 pub const ITIMER_PROF: u32 = 2; // User + Kernel CPU time (SIGPROF)
+
+// =============================================================================
+// POSIX Timer API (timer_create, timer_settime, etc.)
+// =============================================================================
+
+/// ITimerspec structure (timer_settime/timer_gettime)
+/// Uses timespec for nanosecond precision
+pub const ITimerspec = extern struct {
+    /// Interval for periodic timer (reload value). Zero = one-shot.
+    it_interval: Timespec,
+    /// Time until next expiration. Zero = disarm timer.
+    it_value: Timespec,
+};
+
+/// Timespec for POSIX timers (matches Linux struct timespec)
+pub const Timespec = extern struct {
+    tv_sec: i64,
+    tv_nsec: i64,
+};
+
+/// Signal event notification structure (simplified for MVP)
+/// Linux sigevent is 64 bytes. We match that layout: sigev_value (usize=8),
+/// sigev_signo (i32=4), sigev_notify (i32=4), then padding to fill 64 bytes.
+/// NOTE: Our SigEvent is 64 bytes to match Linux struct sigevent size.
+/// We only use sigev_value/sigev_signo/sigev_notify fields; the padding
+/// covers the _sigev_un union (thread ID, function pointer, etc.) that
+/// we do not support in MVP.
+pub const SigEvent = extern struct {
+    /// Signal value (si_value) - application data passed with signal
+    sigev_value: usize,
+    /// Signal number to deliver (e.g., SIGALRM=14)
+    sigev_signo: i32,
+    /// Notification method (SIGEV_SIGNAL, SIGEV_NONE, etc.)
+    sigev_notify: i32,
+    /// Padding to match Linux 64-byte sigevent layout
+    /// 64 total - @sizeOf(usize) [8] - @sizeOf(i32) [4] - @sizeOf(i32) [4] = 48 bytes padding
+    _pad: [64 - @sizeOf(usize) - 8]u8,
+
+    comptime {
+        if (@sizeOf(SigEvent) != 64) @compileError("SigEvent must be 64 bytes to match Linux sigevent");
+    }
+};
+
+/// POSIX timer notification types
+pub const SIGEV_SIGNAL: i32 = 0; // Deliver signal on timer expiration
+pub const SIGEV_NONE: i32 = 1; // No notification (just track overruns)
+pub const SIGEV_THREAD: i32 = 2; // Call function in new thread (not supported)
+pub const SIGEV_THREAD_ID: i32 = 4; // Deliver signal to specific thread (not supported)
+
+/// Clock IDs (matching Linux values)
+pub const CLOCK_REALTIME: usize = 0;
+pub const CLOCK_MONOTONIC: usize = 1;
+
+/// Timer settime flags
+pub const TIMER_ABSTIME: u32 = 1;
+
+/// Maximum timers per process
+pub const MAX_POSIX_TIMERS: usize = 8;
