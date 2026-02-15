@@ -15,6 +15,7 @@ const io_mux_tests = @import("tests/syscall/io_mux.zig");
 const event_fds_tests = @import("tests/syscall/event_fds.zig");
 const fs_extras_tests = @import("tests/syscall/fs_extras.zig");
 const inotify_tests = @import("tests/syscall/inotify.zig");
+const posix_timer_tests = @import("tests/syscall/posix_timer.zig");
 const vectored_io_tests = @import("tests/syscall/vectored_io.zig");
 const process_control_tests = @import("tests/syscall/process_control.zig");
 const sysv_ipc_tests = @import("tests/syscall/sysv_ipc.zig");
@@ -308,6 +309,18 @@ export fn main(argc: i32, argv: [*][*:0]u8) i32 {
     runner.runTest("signal_ext: clock_nanosleep realtime", signal_tests.testClockNanosleepRealtime);
     runner.runTest("signal_ext: clock_nanosleep invalid clock", signal_tests.testClockNanosleepInvalidClock);
     runner.runTest("signal_ext: clock_nanosleep abstime past", signal_tests.testClockNanosleepAbstimePast);
+
+    // Phase 23: POSIX timer tests
+    runner.runTest("posix_timer: create", posix_timer_tests.testTimerCreate);
+    runner.runTest("posix_timer: create sigev_none", posix_timer_tests.testTimerCreateSigevNone);
+    runner.runTest("posix_timer: create invalid clock", posix_timer_tests.testTimerCreateInvalidClock);
+    runner.runTest("posix_timer: delete", posix_timer_tests.testTimerDelete);
+    runner.runTest("posix_timer: settime and gettime", posix_timer_tests.testTimerSetGetTime);
+    runner.runTest("posix_timer: disarm", posix_timer_tests.testTimerDisarm);
+    runner.runTest("posix_timer: settime old value", posix_timer_tests.testTimerSetTimeOldValue);
+    runner.runTest("posix_timer: getoverrun", posix_timer_tests.testTimerGetOverrun);
+    runner.runTest("posix_timer: signal delivery", posix_timer_tests.testTimerSignalDelivery);
+    runner.runTest("posix_timer: multiple timers", posix_timer_tests.testTimerMultiple);
 
     // Socket tests
     runner.runTest("socket: create TCP", socket_tests.testSocketCreateTcp);

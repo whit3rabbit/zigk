@@ -385,6 +385,17 @@ pub const Timeval = time.Timeval;
 pub const gettime_ms = time.gettime_ms;
 pub const getTickMs = time.getTickMs;
 
+// Re-export POSIX timers
+pub const timer_create = time.timer_create;
+pub const timer_settime = time.timer_settime;
+pub const timer_gettime = time.timer_gettime;
+pub const timer_getoverrun = time.timer_getoverrun;
+pub const timer_delete = time.timer_delete;
+pub const ITimerspec = time.ITimerspec;
+pub const SigEvent = time.SigEvent;
+pub const SIGEV_SIGNAL = time.SIGEV_SIGNAL;
+pub const SIGEV_NONE = time.SIGEV_NONE;
+
 // Re-export Resources
 pub const GRND_NONBLOCK = resource.GRND_NONBLOCK;
 pub const GRND_RANDOM = resource.GRND_RANDOM;

@@ -155,3 +155,92 @@ pub fn setitimer(which: u32, new_value: *const ITimerVal, old_value: ?*ITimerVal
     const ret = primitive.syscall3(syscalls.SYS_SETITIMER, which, @intFromPtr(new_value), old_ptr);
     if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
 }
+
+// =============================================================================
+// POSIX Timer Syscalls
+// =============================================================================
+
+/// ITimerspec for timer_settime/timer_gettime
+/// Reuses the existing Timespec (defined at top of this file) for both fields.
+pub const ITimerspec = extern struct {
+    it_interval: Timespec,
+    it_value: Timespec,
+};
+
+/// SigEvent for timer_create notification configuration
+/// Matches Linux 64-byte sigevent layout.
+pub const SigEvent = extern struct {
+    sigev_value: usize,
+    sigev_signo: i32,
+    sigev_notify: i32,
+    /// Padding: 64 total - @sizeOf(usize) [8] - @sizeOf(i32) [4] - @sizeOf(i32) [4] = 48 bytes
+    _pad: [64 - @sizeOf(usize) - 8]u8,
+
+    comptime {
+        if (@sizeOf(SigEvent) != 64) @compileError("SigEvent must be 64 bytes to match Linux sigevent");
+    }
+};
+
+/// Notification types
+pub const SIGEV_SIGNAL: i32 = 0;
+pub const SIGEV_NONE: i32 = 1;
+
+/// Clock IDs (as plain usize for syscall compatibility)
+pub const CLOCK_REALTIME: usize = 0;
+pub const CLOCK_MONOTONIC: usize = 1;
+
+/// Flags
+pub const TIMER_ABSTIME: u32 = 1;
+
+/// Create a POSIX per-process timer
+/// Returns timer ID via timerid pointer
+pub fn timer_create(clockid: usize, sevp: ?*const SigEvent, timerid: *i32) SyscallError!void {
+    const ret = primitive.syscall3(
+        syscalls.SYS_TIMER_CREATE,
+        clockid,
+        if (sevp) |s| @intFromPtr(s) else 0,
+        @intFromPtr(timerid),
+    );
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Arm or disarm a POSIX timer
+pub fn timer_settime(timerid: i32, flags: u32, new_value: *const ITimerspec, old_value: ?*ITimerspec) SyscallError!void {
+    const ret = primitive.syscall4(
+        syscalls.SYS_TIMER_SETTIME,
+        @bitCast(@as(isize, timerid)),
+        @as(usize, flags),
+        @intFromPtr(new_value),
+        if (old_value) |o| @intFromPtr(o) else 0,
+    );
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Get remaining time on a POSIX timer
+pub fn timer_gettime(timerid: i32, curr_value: *ITimerspec) SyscallError!void {
+    const ret = primitive.syscall2(
+        syscalls.SYS_TIMER_GETTIME,
+        @bitCast(@as(isize, timerid)),
+        @intFromPtr(curr_value),
+    );
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Get overrun count for a POSIX timer
+pub fn timer_getoverrun(timerid: i32) SyscallError!u32 {
+    const ret = primitive.syscall1(
+        syscalls.SYS_TIMER_GETOVERRUN,
+        @bitCast(@as(isize, timerid)),
+    );
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return @intCast(ret);
+}
+
+/// Delete a POSIX timer
+pub fn timer_delete(timerid: i32) SyscallError!void {
+    const ret = primitive.syscall1(
+        syscalls.SYS_TIMER_DELETE,
+        @bitCast(@as(isize, timerid)),
+    );
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
