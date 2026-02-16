@@ -78,7 +78,10 @@
   2. User can change working directory via fchdir with an open directory FD
   3. Per-process resource limits persist across setrlimit/getrlimit calls
   4. SeccompData structure includes instruction_pointer field for trapped syscalls
-**Plans**: TBD
+**Plans**: 2 plans
+Plans:
+- [ ] 27-01-PLAN.md -- Fix mremap edge case and implement fchdir
+- [ ] 27-02-PLAN.md -- rlimit persistence and seccomp instruction_pointer
 
 ### Phase 28: rt_sigsuspend Race Fix
 **Goal**: Fix race condition where pending signals are not delivered when rt_sigsuspend atomically restores signal mask
@@ -197,7 +200,7 @@
 | 24. Capabilities | v1.2 | 1/1 | Complete | 2026-02-16 |
 | 25. Seccomp | v1.2 | 1/1 | Complete | 2026-02-16 |
 | 26. Test Coverage Expansion | v1.2 | 2/2 | Complete | 2026-02-16 |
-| 27. Quick Wins | v1.3 | 0/? | Not started | - |
+| 27. Quick Wins | v1.3 | 0/2 | Planning | - |
 | 28. rt_sigsuspend Race Fix | v1.3 | 0/? | Not started | - |
 | 29. Siginfo Queue | v1.3 | 0/? | Not started | - |
 | 30. Signal Wakeup Integration | v1.3 | 0/? | Not started | - |
@@ -209,4 +212,4 @@
 
 ---
 *Roadmap created: 2026-02-06*
-*Last updated: 2026-02-16 after v1.3 roadmap creation*
+*Last updated: 2026-02-16 after Phase 27 planning*
