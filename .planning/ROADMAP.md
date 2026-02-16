@@ -280,10 +280,11 @@ Plans:
   8. Integration tests exist for scheduling syscalls (sched_rr_get_interval) verifying return values
   9. All new tests pass on both x86_64 and aarch64
 
-**Plans**: TBD
+**Plans**: 2 plans
 
 Plans:
-- [ ] 26-01: TBD
+- [ ] 26-01-PLAN.md -- File ownership, signal state, time setter, scheduling tests (lchown, rt_sigsuspend, settimeofday, sched_rr error, getrusage children)
+- [ ] 26-02-PLAN.md -- I/O multiplexing edge cases, memory advisory extras, resource limit edge cases (select/epoll, madvise, mincore, getrlimit)
 
 ## Progress
 
