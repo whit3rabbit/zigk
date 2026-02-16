@@ -420,6 +420,7 @@ pub const sleep_ms = time.sleep_ms;
 pub const clock_gettime = time.clock_gettime;
 pub const clock_getres = time.clock_getres;
 pub const gettimeofday = time.gettimeofday;
+pub const settimeofday = time.settimeofday;
 pub const Timeval = time.Timeval;
 pub const gettime_ms = time.gettime_ms;
 pub const getTickMs = time.getTickMs;

@@ -258,3 +258,63 @@ pub fn testPrlimit64SelfAsNonRoot() !void {
     if ((status & 0x7F) != 0) return error.TestFailed;
     if (((status >> 8) & 0xFF) != 0) return error.TestFailed;
 }
+
+// =============================================================================
+// Phase 26 Test Coverage Extension
+// =============================================================================
+
+// Test 22: sched_rr_get_interval with invalid PID returns error
+pub fn testSchedRrGetIntervalInvalidPid() !void {
+    var ts = std.mem.zeroes([16]u8); // Timespec struct (i64+i64 = 16 bytes)
+    const ptr: *anyopaque = &ts;
+    const ret = @import("syscall").syscall2(
+        @import("syscall").uapi.syscalls.SYS_SCHED_RR_GET_INTERVAL,
+        99999, // Non-existent PID
+        @intFromPtr(ptr)
+    );
+    // Should return an error (ESRCH or EINVAL)
+    if (!@import("syscall").isError(ret)) return error.TestFailed;
+}
+
+// Test 23: getrusage RUSAGE_CHILDREN variant
+pub fn testGetrusageChildren() !void {
+    var usage: syscall.Rusage = undefined;
+    // RUSAGE_CHILDREN = -1 (cast to appropriate type)
+    const RUSAGE_CHILDREN: i32 = -1;
+    syscall.getrusage(RUSAGE_CHILDREN, &usage) catch |err| {
+        if (err == error.NotImplemented) return error.SkipTest;
+        return err;
+    };
+    // Success if no error
+}
+
+// Test 24: rt_sigpending after blocking a signal shows it pending
+pub fn testRtSigpendingAfterBlock() !void {
+    const SIGUSR1 = 10;
+    const SIG_BLOCK = 0;
+    const SIG_UNBLOCK = 1;
+
+    // Block SIGUSR1
+    var set: syscall.SigSet = 0;
+    syscall.uapi.signal.sigaddset(&set, SIGUSR1);
+    try syscall.sigprocmask(SIG_BLOCK, &set, null);
+
+    // Send signal to self (becomes pending)
+    try syscall.kill(syscall.getpid(), SIGUSR1);
+
+    // Call rt_sigpending
+    var pending: syscall.SigSet = 0;
+    syscall.rt_sigpending(&pending) catch |err| {
+        _ = syscall.sigprocmask(SIG_UNBLOCK, &set, null) catch {};
+        if (err == error.NotImplemented) return error.SkipTest;
+        return err;
+    };
+
+    // Verify SIGUSR1 is in the pending set (bit 9 should be set, signal 10 - 1 = bit 9)
+    const bit_set = syscall.uapi.signal.sigismember(pending, SIGUSR1);
+
+    // Unblock to clear the signal
+    try syscall.sigprocmask(SIG_UNBLOCK, &set, null);
+
+    if (!bit_set) return error.TestFailed;
+}

@@ -58,6 +58,12 @@ pub fn gettimeofday(tv: *Timeval) SyscallError!void {
     if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
 }
 
+/// Set time of day (requires root)
+pub fn settimeofday(tv: *const Timeval) SyscallError!void {
+    const ret = primitive.syscall2(syscalls.SYS_SETTIMEOFDAY, @intFromPtr(tv), 0);
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
 /// Get monotonic time in milliseconds (convenience wrapper)
 pub fn gettime_ms() SyscallError!u64 {
     // SECURITY: Zero-initialize to prevent reading uninitialized data if

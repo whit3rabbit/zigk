@@ -508,3 +508,45 @@ pub fn testPrivilegeDropFull() !void {
     };
     try runInChild(ChildTest.run);
 }
+
+// =============================================================================
+// lchown Tests
+// =============================================================================
+
+// Test 30: lchown basic operation (root can lchown)
+pub fn testLchownBasic() !void {
+    const ChildTest = struct {
+        fn run() bool {
+            const path = "/mnt/lch_test";
+            // Create file
+            const fd = syscall.open(path, 0x241, 0o644) catch return false; // O_CREAT|O_WRONLY|O_TRUNC
+            _ = syscall.write(fd, "test", 4) catch return false;
+
+            // lchown to 1000:1000 (file still open - no problem)
+            syscall.lchown(path, 1000, 1000) catch return false;
+
+            syscall.close(fd) catch return false;
+            return true;
+        }
+    };
+    try runInChild(ChildTest.run);
+}
+
+// Test 31: lchown non-existent file returns ENOENT
+pub fn testLchownNonExistent() !void {
+    const path = "/mnt/nonexist_lchown";
+
+    // Try to lchown non-existent file
+    if (syscall.lchown(path, 1000, 1000)) |_| {
+        return error.TestFailed; // Should have failed
+    } else |err| {
+        if (err != error.FileNotFound) return error.TestFailed;
+    }
+}
+
+// Test 32: fchdir not implemented (documents coverage gap)
+pub fn testFchdirNotImplemented() !void {
+    // fchdir syscall is not implemented in the kernel yet
+    // This test documents the gap identified in TEST-01
+    return error.SkipTest;
+}
