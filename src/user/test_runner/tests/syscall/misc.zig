@@ -279,8 +279,8 @@ pub fn testSchedRrGetIntervalInvalidPid() !void {
 // Test 23: getrusage RUSAGE_CHILDREN variant
 pub fn testGetrusageChildren() !void {
     var usage: syscall.Rusage = undefined;
-    // RUSAGE_CHILDREN = -1 (cast to appropriate type)
-    const RUSAGE_CHILDREN: i32 = -1;
+    // RUSAGE_CHILDREN = -1 (cast to usize for syscall)
+    const RUSAGE_CHILDREN: usize = @bitCast(@as(isize, -1));
     syscall.getrusage(RUSAGE_CHILDREN, &usage) catch |err| {
         if (err == error.NotImplemented) return error.SkipTest;
         return err;

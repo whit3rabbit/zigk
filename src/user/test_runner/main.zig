@@ -291,6 +291,9 @@ export fn main(argc: i32, argv: [*][*:0]u8) i32 {
     runner.runTest("uid/gid: fchownat with AT_FDCWD", uid_gid_tests.testFchownatWithATFdcwd);
     runner.runTest("uid/gid: fchownat symlink nofollow", uid_gid_tests.testFchownatSymlinkNofollow);
     runner.runTest("uid/gid: privilege drop full", uid_gid_tests.testPrivilegeDropFull);
+    runner.runTest("uid/gid: lchown basic", uid_gid_tests.testLchownBasic);
+    runner.runTest("uid/gid: lchown non-existent", uid_gid_tests.testLchownNonExistent);
+    runner.runTest("uid/gid: fchdir not implemented", uid_gid_tests.testFchdirNotImplemented);
 
     // Signal handling tests
     runner.runTest("signal: sigaction install handler", signal_tests.testSigactionInstallHandler);
@@ -311,6 +314,7 @@ export fn main(argc: i32, argv: [*][*:0]u8) i32 {
     runner.runTest("signal_ext: clock_nanosleep realtime", signal_tests.testClockNanosleepRealtime);
     runner.runTest("signal_ext: clock_nanosleep invalid clock", signal_tests.testClockNanosleepInvalidClock);
     runner.runTest("signal_ext: clock_nanosleep abstime past", signal_tests.testClockNanosleepAbstimePast);
+    runner.runTest("signal: rt_sigsuspend basic", signal_tests.testRtSigsuspendBasic);
 
     // Socket tests
     runner.runTest("socket: create TCP", socket_tests.testSocketCreateTcp);
@@ -423,6 +427,9 @@ export fn main(argc: i32, argv: [*][*:0]u8) i32 {
     runner.runTest("time_ops: gettimeofday basic", time_ops_tests.testGettimeofdayBasic);
     runner.runTest("time_ops: sleep_ms basic", time_ops_tests.testSleepMsBasic);
     runner.runTest("time_ops: sched_yield", time_ops_tests.testSchedYield);
+    runner.runTest("time_ops: settimeofday basic", time_ops_tests.testSettimeofdayBasic);
+    runner.runTest("time_ops: settimeofday privilege", time_ops_tests.testSettimeofdayPrivilegeCheck);
+    runner.runTest("time_ops: settimeofday invalid", time_ops_tests.testSettimeofdayInvalidValue);
 
     // Misc syscall tests
     runner.runTest("misc: uname basic", misc_tests.testUnameBasic);
@@ -446,6 +453,9 @@ export fn main(argc: i32, argv: [*][*:0]u8) i32 {
     runner.runTest("misc: getrusage self", misc_tests.testGetrusageSelf);
     runner.runTest("misc: getrusage invalid", misc_tests.testGetrusageInvalid);
     runner.runTest("misc: rt_sigpending", misc_tests.testRtSigpending);
+    runner.runTest("misc: sched_rr_get_interval invalid pid", misc_tests.testSchedRrGetIntervalInvalidPid);
+    runner.runTest("misc: getrusage children", misc_tests.testGetrusageChildren);
+    runner.runTest("misc: rt_sigpending after block", misc_tests.testRtSigpendingAfterBlock);
 
     // AT* family tests
     runner.runTest("at_ops: fstatat basic", at_ops_tests.testFstatatBasic);

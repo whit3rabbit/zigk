@@ -254,7 +254,23 @@ pub fn sys_rt_sigsuspend(mask_ptr: usize, sigsetsize: usize) SyscallError!usize 
     uapi.signal.sigdelset(&current_thread.sigmask, uapi.signal.SIGSTOP);
 
     // Suspend until a signal arrives
-    sched.block();
+    // CRITICAL BUG FIX: If a signal is already pending and the new mask unblocks it,
+    // we must NOT call block() because the signal was already delivered (pending bit set)
+    // and deliverSignalToThread won't be called again to wake us up.
+    // Instead, just skip blocking - the signal will be delivered when returning to userspace.
+    const pending = @atomicLoad(u64, &current_thread.pending_signals, .acquire);
+    const unblocked_pending = pending & ~new_mask;
+    if (unblocked_pending == 0) {
+        // No pending unblocked signals - safe to block
+        sched.block();
+    }
+    // Else: signal is pending and unblocked - skip block(), return immediately
+    // (Signal handler will run when we return to userspace, BEFORE restoring old mask)
+
+    // NOTE: We must restore the old mask BEFORE returning to userspace, otherwise
+    // the signal handler will see the wrong mask. But the arch-specific signal
+    // delivery code runs BEFORE the syscall return value is processed, so the
+    // handler will run while the NEW mask is still active, then we restore and return.
 
     // Restore old mask
     current_thread.sigmask = old_mask;
