@@ -328,6 +328,26 @@ pub const CAP_MKNOD = process.CAP_MKNOD;
 pub const CAP_LAST_CAP = process.CAP_LAST_CAP;
 pub const CAP_FULL_SET = process.CAP_FULL_SET;
 
+// Re-export Seccomp
+pub const seccomp = process.seccomp;
+pub const SECCOMP_SET_MODE_STRICT = process.SECCOMP_SET_MODE_STRICT;
+pub const SECCOMP_SET_MODE_FILTER = process.SECCOMP_SET_MODE_FILTER;
+pub const SECCOMP_RET_KILL = process.SECCOMP_RET_KILL;
+pub const SECCOMP_RET_ERRNO = process.SECCOMP_RET_ERRNO;
+pub const SECCOMP_RET_ALLOW = process.SECCOMP_RET_ALLOW;
+pub const SECCOMP_RET_DATA = process.SECCOMP_RET_DATA;
+pub const SockFilterInsn = process.SockFilterInsn;
+pub const SockFprog = process.SockFprog;
+pub const BPF_LD = process.BPF_LD;
+pub const BPF_RET = process.BPF_RET;
+pub const BPF_JMP = process.BPF_JMP;
+pub const BPF_W = process.BPF_W;
+pub const BPF_ABS = process.BPF_ABS;
+pub const BPF_K = process.BPF_K;
+pub const BPF_JEQ = process.BPF_JEQ;
+pub const PR_SET_NO_NEW_PRIVS = process.PR_SET_NO_NEW_PRIVS;
+pub const PR_GET_NO_NEW_PRIVS = process.PR_GET_NO_NEW_PRIVS;
+
 // Re-export Signal
 pub const kill = signal.kill;
 pub const killpg = signal.killpg;

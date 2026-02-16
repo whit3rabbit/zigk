@@ -17,6 +17,7 @@ const fs_extras_tests = @import("tests/syscall/fs_extras.zig");
 const inotify_tests = @import("tests/syscall/inotify.zig");
 const posix_timer_tests = @import("tests/syscall/posix_timer.zig");
 const capabilities_tests = @import("tests/syscall/capabilities.zig");
+const seccomp_tests = @import("tests/syscall/seccomp.zig");
 const vectored_io_tests = @import("tests/syscall/vectored_io.zig");
 const process_control_tests = @import("tests/syscall/process_control.zig");
 const sysv_ipc_tests = @import("tests/syscall/sysv_ipc.zig");
@@ -360,6 +361,18 @@ export fn main(argc: i32, argv: [*][*:0]u8) i32 {
     runner.runTest("capabilities: capset other pid fails", capabilities_tests.testCapsetOtherPidFails);
     runner.runTest("capabilities: capget own pid", capabilities_tests.testCapgetOwnPid);
     runner.runTest("capabilities: set inheritable", capabilities_tests.testCapsetInheritable);
+
+    // Phase 25: Seccomp tests
+    runner.runTest("seccomp: strict allows read", seccomp_tests.testSeccompStrictAllowsRead);
+    runner.runTest("seccomp: strict allows write", seccomp_tests.testSeccompStrictAllowsWrite);
+    runner.runTest("seccomp: strict blocks getpid", seccomp_tests.testSeccompStrictBlocksGetpid);
+    runner.runTest("seccomp: filter allow all", seccomp_tests.testSeccompFilterAllowAll);
+    runner.runTest("seccomp: filter block getpid", seccomp_tests.testSeccompFilterBlockGetpid);
+    runner.runTest("seccomp: requires no_new_privs", seccomp_tests.testSeccompRequiresNoNewPrivs);
+    runner.runTest("seccomp: strict cannot be undone", seccomp_tests.testSeccompStrictCannotBeUndone);
+    runner.runTest("seccomp: filter errno value", seccomp_tests.testSeccompFilterErrno);
+    runner.runTest("seccomp: inherited on fork", seccomp_tests.testSeccompInheritedOnFork);
+    runner.runTest("seccomp: prctl no_new_privs", seccomp_tests.testPrctlNoNewPrivs);
 
     // FD operations tests
     runner.runTest("fd_ops: dup basic", fd_ops_tests.testDupBasic);

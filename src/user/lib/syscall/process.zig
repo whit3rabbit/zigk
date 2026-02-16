@@ -662,3 +662,56 @@ pub fn capset(hdrp: *const CapUserHeader, datap: [*]const CapUserData) SyscallEr
     );
     if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
 }
+
+// =============================================================================
+// Seccomp (syscall filtering)
+// =============================================================================
+
+/// Seccomp operations
+pub const SECCOMP_SET_MODE_STRICT: usize = 0;
+pub const SECCOMP_SET_MODE_FILTER: usize = 1;
+pub const SECCOMP_GET_ACTION_AVAIL: usize = 2;
+
+/// Seccomp return values
+pub const SECCOMP_RET_KILL_PROCESS: u32 = 0x80000000;
+pub const SECCOMP_RET_KILL_THREAD: u32 = 0x00000000;
+pub const SECCOMP_RET_KILL: u32 = 0x00000000;
+pub const SECCOMP_RET_ERRNO: u32 = 0x00050000;
+pub const SECCOMP_RET_ALLOW: u32 = 0x7fff0000;
+pub const SECCOMP_RET_DATA: u32 = 0x0000ffff;
+
+/// Classic BPF instruction for seccomp filters
+pub const SockFilterInsn = extern struct {
+    code: u16,
+    jt: u8,
+    jf: u8,
+    k: u32,
+};
+
+/// BPF program descriptor
+pub const SockFprog = extern struct {
+    len: u16,
+    _pad: u16 = 0,
+    _pad2: u32 = 0,
+    filter: u64,
+};
+
+/// BPF opcodes needed for test construction
+pub const BPF_LD: u16 = 0x00;
+pub const BPF_RET: u16 = 0x06;
+pub const BPF_JMP: u16 = 0x05;
+pub const BPF_W: u16 = 0x00;
+pub const BPF_ABS: u16 = 0x20;
+pub const BPF_K: u16 = 0x00;
+pub const BPF_JEQ: u16 = 0x10;
+
+/// prctl constants for no_new_privs
+pub const PR_SET_NO_NEW_PRIVS: usize = 38;
+pub const PR_GET_NO_NEW_PRIVS: usize = 39;
+
+/// Call seccomp syscall
+pub fn seccomp(op: usize, flags: usize, args: usize) SyscallError!usize {
+    const ret = primitive.syscall3(syscalls.SYS_SECCOMP, op, flags, args);
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return ret;
+}
