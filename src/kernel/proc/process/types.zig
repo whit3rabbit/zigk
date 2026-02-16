@@ -240,6 +240,17 @@ pub const Process = struct {
     supplementary_groups: [16]u32 = [_]u32{0} ** 16,
     supplementary_groups_count: u8 = 0,
 
+    /// Linux POSIX capability bitmasks
+    /// Effective: currently active capabilities (what the process can actually do)
+    /// Permitted: upper bound on effective + inheritable (can be dropped, not gained)
+    /// Inheritable: capabilities preserved across execve
+    ///
+    /// Root (uid 0) starts with CAP_FULL_SET. Non-root starts with CAP_EMPTY_SET.
+    /// Fork copies parent's caps to child. capset can drop but not add beyond permitted.
+    cap_effective: u64 = 0x1FFFFFFFFFF, // bits 0-40 set (CAP_FULL_SET)
+    cap_permitted: u64 = 0x1FFFFFFFFFF, // bits 0-40 set (CAP_FULL_SET)
+    cap_inheritable: u64 = 0, // Empty by default (Linux convention)
+
     /// Resource limits (DoS protection)
     /// Maximum virtual address space size (default 256 MB)
     rlimit_as: u64 = 256 * 1024 * 1024,

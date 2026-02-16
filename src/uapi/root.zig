@@ -37,6 +37,7 @@ pub const ipc = struct {
 pub const virt_pci = @import("virt_pci/root.zig");
 pub const time = @import("process/time.zig");
 pub const prctl = @import("prctl.zig");
+pub const capability = @import("process/capability.zig");
 
 
 // Re-export commonly used types

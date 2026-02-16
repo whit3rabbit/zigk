@@ -1376,3 +1376,205 @@ pub fn sys_setdomainname(name_ptr: usize, len: usize) SyscallError!usize {
     _ = len;
     return error.EPERM;
 }
+
+// =============================================================================
+// Capability Syscalls (capget/capset)
+// =============================================================================
+
+const cap_uapi = uapi.capability;
+
+/// sys_capget (125 on x86_64, 90 on aarch64) - Get process capabilities
+///
+/// Linux ABI: capget(cap_user_header_t *hdrp, cap_user_data_t *datap)
+///
+/// If datap is NULL, writes the preferred kernel version into hdrp->version
+/// and returns 0 (version query mode).
+///
+/// Supports v1 (32-bit, single data struct) and v3 (64-bit, two data structs).
+/// For v1: returns low 32 bits of each capability set.
+/// For v3: returns full 64 bits split across two CapUserData entries.
+pub fn sys_capget(hdrp: usize, datap: usize) SyscallError!usize {
+    if (hdrp == 0) return error.EFAULT;
+
+    // Read header from userspace
+    const hdr_uptr = UserPtr.from(hdrp);
+    var hdr = hdr_uptr.readValue(cap_uapi.CapUserHeader) catch return error.EFAULT;
+
+    // Version negotiation: if version is unrecognized, write preferred version and return EINVAL
+    const valid_version = switch (hdr.version) {
+        cap_uapi._LINUX_CAPABILITY_VERSION_1,
+        cap_uapi._LINUX_CAPABILITY_VERSION_2,
+        cap_uapi._LINUX_CAPABILITY_VERSION_3,
+        => true,
+        else => false,
+    };
+
+    if (!valid_version) {
+        // Write back preferred version so caller knows what to use
+        hdr.version = cap_uapi._LINUX_CAPABILITY_VERSION_3;
+        hdr_uptr.writeValue(hdr) catch return error.EFAULT;
+        return error.EINVAL;
+    }
+
+    // If datap is NULL, this is a version query -- return success
+    if (datap == 0) return 0;
+
+    // Find target process
+    const target_proc = if (hdr.pid == 0)
+        base.getCurrentProcess()
+    else
+        findProcessByPidForCaps(hdr.pid) orelse return error.ESRCH;
+
+    // Read capability sets from target process
+    const eff = target_proc.cap_effective;
+    const perm = target_proc.cap_permitted;
+    const inh = target_proc.cap_inheritable;
+
+    const data_uptr = UserPtr.from(datap);
+
+    if (hdr.version == cap_uapi._LINUX_CAPABILITY_VERSION_1) {
+        // v1: single data struct, low 32 bits only
+        const data = cap_uapi.CapUserData{
+            .effective = @truncate(eff),
+            .permitted = @truncate(perm),
+            .inheritable = @truncate(inh),
+        };
+        data_uptr.writeValue(data) catch return error.EFAULT;
+    } else {
+        // v3 (and v2): two data structs
+        // data[0] = low 32 bits, data[1] = high 32 bits
+        const data0 = cap_uapi.CapUserData{
+            .effective = @truncate(eff),
+            .permitted = @truncate(perm),
+            .inheritable = @truncate(inh),
+        };
+        const data1 = cap_uapi.CapUserData{
+            .effective = @truncate(eff >> 32),
+            .permitted = @truncate(perm >> 32),
+            .inheritable = @truncate(inh >> 32),
+        };
+
+        data_uptr.writeValue(data0) catch return error.EFAULT;
+        // Write second struct at offset sizeof(CapUserData)
+        const data1_uptr = UserPtr.from(datap + @sizeOf(cap_uapi.CapUserData));
+        data1_uptr.writeValue(data1) catch return error.EFAULT;
+    }
+
+    return 0;
+}
+
+/// sys_capset (126 on x86_64, 91 on aarch64) - Set process capabilities
+///
+/// Linux ABI: capset(cap_user_header_t *hdrp, const cap_user_data_t *datap)
+///
+/// Security rules (matching Linux):
+/// 1. Can only modify own capabilities (pid must be 0 or current pid)
+/// 2. New effective must be subset of new permitted
+/// 3. New permitted must be subset of old permitted (cannot gain caps)
+/// 4. New inheritable must be subset of old permitted | old inheritable
+///    (on Linux with CAP_SETPCAP; we use the permissive rule since all procs are root)
+pub fn sys_capset(hdrp: usize, datap: usize) SyscallError!usize {
+    if (hdrp == 0 or datap == 0) return error.EFAULT;
+
+    // Read header
+    const hdr_uptr = UserPtr.from(hdrp);
+    const hdr = hdr_uptr.readValue(cap_uapi.CapUserHeader) catch return error.EFAULT;
+
+    // Validate version
+    const valid_version = switch (hdr.version) {
+        cap_uapi._LINUX_CAPABILITY_VERSION_1,
+        cap_uapi._LINUX_CAPABILITY_VERSION_2,
+        cap_uapi._LINUX_CAPABILITY_VERSION_3,
+        => true,
+        else => false,
+    };
+    if (!valid_version) return error.EINVAL;
+
+    // Can only set own capabilities
+    const current_proc = base.getCurrentProcess();
+    if (hdr.pid != 0 and @as(u32, @bitCast(hdr.pid)) != current_proc.pid) {
+        return error.EPERM;
+    }
+
+    // Read new capability data
+    const data_uptr = UserPtr.from(datap);
+
+    var new_eff: u64 = 0;
+    var new_perm: u64 = 0;
+    var new_inh: u64 = 0;
+
+    if (hdr.version == cap_uapi._LINUX_CAPABILITY_VERSION_1) {
+        const data = data_uptr.readValue(cap_uapi.CapUserData) catch return error.EFAULT;
+        new_eff = data.effective;
+        new_perm = data.permitted;
+        new_inh = data.inheritable;
+    } else {
+        // v3: two data structs
+        const data0 = data_uptr.readValue(cap_uapi.CapUserData) catch return error.EFAULT;
+        const data1_uptr = UserPtr.from(datap + @sizeOf(cap_uapi.CapUserData));
+        const data1 = data1_uptr.readValue(cap_uapi.CapUserData) catch return error.EFAULT;
+
+        new_eff = @as(u64, data0.effective) | (@as(u64, data1.effective) << 32);
+        new_perm = @as(u64, data0.permitted) | (@as(u64, data1.permitted) << 32);
+        new_inh = @as(u64, data0.inheritable) | (@as(u64, data1.inheritable) << 32);
+    }
+
+    // Mask to valid capability range (bits 0 through CAP_LAST_CAP)
+    const cap_mask = cap_uapi.CAP_FULL_SET;
+    new_eff &= cap_mask;
+    new_perm &= cap_mask;
+    new_inh &= cap_mask;
+
+    // Security checks:
+
+    // Rule 1: New effective must be subset of new permitted
+    if ((new_eff & ~new_perm) != 0) return error.EPERM;
+
+    // Rule 2: New permitted must be subset of old permitted (cannot gain caps)
+    if ((new_perm & ~current_proc.cap_permitted) != 0) return error.EPERM;
+
+    // Rule 3: New inheritable -- on Linux, needs CAP_SETPCAP to add caps to inheritable
+    // that are not in permitted. Since our processes run as root (euid=0) with full caps,
+    // we use the permissive rule: new_inh must be subset of (old_permitted | old_inheritable).
+    if ((new_inh & ~(current_proc.cap_permitted | current_proc.cap_inheritable)) != 0) {
+        return error.EPERM;
+    }
+
+    // Apply new capabilities
+    current_proc.cap_effective = new_eff;
+    current_proc.cap_permitted = new_perm;
+    current_proc.cap_inheritable = new_inh;
+
+    return 0;
+}
+
+/// Find a process by PID for capget cross-process queries.
+/// Returns null if the process is not found or not accessible.
+fn findProcessByPidForCaps(pid: i32) ?*Process {
+    if (pid < 0) return null;
+
+    const target_pid: u32 = @intCast(@as(u32, @bitCast(pid)));
+    const current_proc = base.getCurrentProcess();
+
+    // Check if it is our own PID
+    if (target_pid == current_proc.pid) return current_proc;
+
+    // Check children (most common cross-process capget use case)
+    const held = sched.process_tree_lock.acquireRead();
+    defer held.release();
+
+    // Walk the process tree starting from current process's children
+    var child = current_proc.first_child;
+    while (child) |c| {
+        if (c.pid == target_pid) return c;
+        child = c.next_sibling;
+    }
+
+    // Also check parent
+    if (current_proc.parent) |parent| {
+        if (parent.pid == target_pid) return parent;
+    }
+
+    // Process not found in accessible tree
+    return null;
+}

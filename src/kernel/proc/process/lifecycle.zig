@@ -160,6 +160,10 @@ pub fn forkProcess(parent: *Process) !*Process {
         .gid = parent.gid,
         .euid = parent.euid,
         .egid = parent.egid,
+        // Inherit Linux POSIX capability bitmasks
+        .cap_effective = parent.cap_effective,
+        .cap_permitted = parent.cap_permitted,
+        .cap_inheritable = parent.cap_inheritable,
         // SECURITY: Child starts with zero DMA allocations.
         // While child inherits DmaCapability, it gets its own allocation counter.
         // This prevents the fork-multiply attack where repeated forks would allow
