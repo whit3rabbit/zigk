@@ -4,7 +4,7 @@
 
 - ✅ **v1.0 POSIX Syscall Coverage** - Phases 1-9 (shipped 2026-02-09)
 - ✅ **v1.1 Hardening & Debt Cleanup** - Phases 10-14 (shipped 2026-02-11)
-- 🚧 **v1.2 Systematic Syscall Coverage** - Phases 15-26 (in progress)
+- ✅ **v1.2 Systematic Syscall Coverage** - Phases 15-26 (shipped 2026-02-16)
 
 ## Phases
 
@@ -90,7 +90,7 @@
 
 </details>
 
-### 🚧 v1.2 Systematic Syscall Coverage (In Progress)
+### ✅ v1.2 Systematic Syscall Coverage (Shipped 2026-02-16)
 
 **Milestone Goal:** Systematic audit and implementation of missing high-value Linux syscalls across 12 categories, with comprehensive dual-arch test coverage.
 
@@ -263,7 +263,7 @@ Plans:
 **Plans**: 1 plan
 
 Plans:
-- [ ] 25-01-PLAN.md -- Implement seccomp syscall with STRICT/FILTER modes, classic BPF interpreter, dispatch hook, and tests
+- [x] 25-01-PLAN.md -- Implement seccomp syscall with STRICT/FILTER modes, classic BPF interpreter, dispatch hook, and tests
 
 #### Phase 26: Test Coverage Expansion
 **Goal**: Integration tests exist for all previously-untested existing syscalls
@@ -283,8 +283,8 @@ Plans:
 **Plans**: 2 plans
 
 Plans:
-- [ ] 26-01-PLAN.md -- File ownership, signal state, time setter, scheduling tests (lchown, rt_sigsuspend, settimeofday, sched_rr error, getrusage children)
-- [ ] 26-02-PLAN.md -- I/O multiplexing edge cases, memory advisory extras, resource limit edge cases (select/epoll, madvise, mincore, getrlimit)
+- [x] 26-01-PLAN.md -- File ownership, signal state, time setter, scheduling tests (lchown, rt_sigsuspend, settimeofday, sched_rr error, getrusage children)
+- [x] 26-02-PLAN.md -- I/O multiplexing edge cases, memory advisory extras, resource limit edge cases (select/epoll, madvise, mincore, getrlimit)
 
 ## Progress
 
@@ -316,10 +316,10 @@ Phases execute in numeric order: 15 -> 16 -> 17 -> 18 -> 19 -> 20 -> 21 -> 22 ->
 | 21. I/O Multiplexing Extension | v1.2 | 1/1 | Complete | 2026-02-15 |
 | 22. File Monitoring | v1.2 | 1/1 | Complete | 2026-02-15 |
 | 23. POSIX Timers | v1.2 | 1/1 | Complete | 2026-02-15 |
-| 24. Capabilities | v1.2 | Complete    | 2026-02-16 | - |
-| 25. Seccomp | v1.2 | Complete    | 2026-02-16 | - |
-| 26. Test Coverage Expansion | v1.2 | 0/TBD | Not started | - |
+| 24. Capabilities | v1.2 | 1/1 | Complete | 2026-02-16 |
+| 25. Seccomp | v1.2 | 1/1 | Complete | 2026-02-16 |
+| 26. Test Coverage Expansion | v1.2 | 2/2 | Complete | 2026-02-16 |
 
 ---
 *Roadmap created: 2026-02-11*
-*Last updated: 2026-02-15 (Phase 24 planned)*
+*Last updated: 2026-02-16 (Phase 26 complete -- v1.2 milestone shipped)*
