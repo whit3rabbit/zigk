@@ -297,7 +297,9 @@ export fn main(argc: i32, argv: [*][*:0]u8) i32 {
     runner.runTest("uid/gid: privilege drop full", uid_gid_tests.testPrivilegeDropFull);
     runner.runTest("uid/gid: lchown basic", uid_gid_tests.testLchownBasic);
     runner.runTest("uid/gid: lchown non-existent", uid_gid_tests.testLchownNonExistent);
-    runner.runTest("uid/gid: fchdir not implemented", uid_gid_tests.testFchdirNotImplemented);
+    runner.runTest("uid/gid: fchdir basic", uid_gid_tests.testFchdir);
+    runner.runTest("uid/gid: fchdir non-directory", uid_gid_tests.testFchdirNonDirectory);
+    runner.runTest("uid/gid: fchdir invalid fd", uid_gid_tests.testFchdirInvalidFd);
 
     // Signal handling tests
     runner.runTest("signal: sigaction install handler", signal_tests.testSigactionInstallHandler);

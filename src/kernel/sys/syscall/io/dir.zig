@@ -256,3 +256,50 @@ pub fn sys_chdir(path_ptr: usize) SyscallError!usize {
     return 0;
 }
 
+/// sys_fchdir (81 on x86_64, 50 on aarch64) - Change working directory via open FD
+pub fn sys_fchdir(fd_num: usize) SyscallError!usize {
+    // Validate FD number
+    const fd_u32 = safeFdCast(fd_num) orelse return error.EBADF;
+
+    // Get FD table and look up the FD
+    const table = base.getGlobalFdTable();
+    const fd = table.get(fd_u32) orelse return error.EBADF;
+
+    // Verify the FD is a directory
+    if (fd.ops != &fd_mod.dir_ops) {
+        return error.ENOTDIR;
+    }
+
+    // Determine the directory path from the FD's private_data (DirTag)
+    const initrd_tag_ptr: ?*anyopaque = @ptrCast(@constCast(&fd_mod.initrd_dir_tag));
+    const devfs_tag_ptr: ?*anyopaque = @ptrCast(@constCast(&fd_mod.devfs_dir_tag));
+
+    var canonical: [uapi.abi.MAX_PATH]u8 = undefined;
+    var canon_len: usize = 0;
+
+    if (fd.private_data == null or fd.private_data == initrd_tag_ptr) {
+        // InitRD root directory -> "/"
+        canonical[0] = '/';
+        canon_len = 1;
+    } else if (fd.private_data == devfs_tag_ptr) {
+        // DevFS root directory -> "/dev"
+        const dev_path = "/dev";
+        @memcpy(canonical[0..dev_path.len], dev_path);
+        canon_len = dev_path.len;
+    } else {
+        // Unknown directory tag or SFS directory
+        // For now, SFS directories are not supported via fchdir
+        // (would require storing the path in the FD or walking the VFS)
+        return error.ENOTDIR;
+    }
+
+    // Update process cwd
+    const proc = base.getCurrentProcess();
+    const held = proc.cwd_lock.acquire();
+    @memcpy(proc.cwd[0..canon_len], canonical[0..canon_len]);
+    proc.cwd_len = canon_len;
+    held.release();
+
+    return 0;
+}
+

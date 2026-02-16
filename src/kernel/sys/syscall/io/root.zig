@@ -46,6 +46,7 @@ pub const sys_fstatfs = stat.sys_fstatfs;
 pub const sys_getdents64 = dir.sys_getdents64;
 pub const sys_getcwd = dir.sys_getcwd;
 pub const sys_chdir = dir.sys_chdir;
+pub const sys_fchdir = dir.sys_fchdir;
 
 pub const sys_fcntl = fcntl.sys_fcntl;
 pub const sys_ioctl = fcntl.sys_ioctl;

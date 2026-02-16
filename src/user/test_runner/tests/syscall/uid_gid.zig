@@ -545,8 +545,75 @@ pub fn testLchownNonExistent() !void {
 }
 
 // Test 32: fchdir not implemented (documents coverage gap)
-pub fn testFchdirNotImplemented() !void {
-    // fchdir syscall is not implemented in the kernel yet
-    // This test documents the gap identified in TEST-01
-    return error.SkipTest;
+pub fn testFchdir() !void {
+    const O_RDONLY = 0;
+    const O_DIRECTORY = 0x10000;
+
+    // Save current working directory
+    var saved_cwd: [4096]u8 = undefined;
+    const saved_len = syscall.getcwd(&saved_cwd, saved_cwd.len) catch |err| {
+        if (err == error.NotImplemented) return error.SkipTest;
+        return err;
+    };
+
+    // Open root directory
+    const root_fd = syscall.open("/", O_RDONLY | O_DIRECTORY, 0) catch |err| {
+        if (err == error.NotImplemented or err == error.NotADirectory) {
+            // VFS doesn't support opening directories yet - skip test
+            return error.SkipTest;
+        }
+        return err;
+    };
+    defer _ = syscall.close(root_fd) catch {};
+
+    // Change to root via fchdir
+    syscall.fchdir(root_fd) catch |err| {
+        if (err == error.NotImplemented) return error.SkipTest;
+        return err;
+    };
+
+    // Verify we're now in root
+    var new_cwd: [4096]u8 = undefined;
+    const new_len = try syscall.getcwd(&new_cwd, new_cwd.len);
+    if (new_len != 1 or new_cwd[0] != '/') {
+        return error.TestFailed;
+    }
+
+    // Restore original cwd
+    const saved_path = saved_cwd[0..saved_len];
+    var saved_path_z: [4097]u8 = undefined;
+    @memcpy(saved_path_z[0..saved_len], saved_path);
+    saved_path_z[saved_len] = 0;
+    _ = syscall.chdir(@ptrCast(&saved_path_z)) catch {};
+}
+
+pub fn testFchdirNonDirectory() !void {
+    const O_RDONLY = 0;
+
+    // Open a regular file (not a directory)
+    const file_fd = syscall.open("/shell.elf", O_RDONLY, 0) catch |err| {
+        if (err == error.NotImplemented) return error.SkipTest;
+        return err;
+    };
+    defer _ = syscall.close(file_fd) catch {};
+
+    // fchdir should fail with ENOTDIR
+    if (syscall.fchdir(file_fd)) {
+        return error.TestFailed; // Should have failed
+    } else |err| {
+        if (err != error.NotADirectory) {
+            return error.TestFailed; // Wrong error
+        }
+    }
+}
+
+pub fn testFchdirInvalidFd() !void {
+    // fchdir with invalid FD should return EBADF
+    if (syscall.fchdir(9999)) {
+        return error.TestFailed; // Should have failed
+    } else |err| {
+        if (err != error.BadFileDescriptor) {
+            return error.TestFailed; // Wrong error
+        }
+    }
 }

@@ -130,6 +130,12 @@ pub fn chdir(path: [*:0]const u8) SyscallError!void {
     if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
 }
 
+/// Change current working directory via file descriptor
+pub fn fchdir(fd: i32) SyscallError!void {
+    const ret = primitive.syscall1(syscalls.SYS_FCHDIR, @bitCast(@as(isize, fd)));
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
 /// Get current working directory
 /// Returns the length of the path on success (excluding null terminator)
 pub fn getcwd(buf: [*]u8, size: usize) SyscallError!usize {
