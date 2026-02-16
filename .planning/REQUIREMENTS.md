@@ -66,28 +66,28 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| SIG-01 | TBD | Pending |
-| SIG-02 | TBD | Pending |
-| SIG-03 | TBD | Pending |
-| INOT-01 | TBD | Pending |
-| INOT-02 | TBD | Pending |
-| INOT-03 | TBD | Pending |
-| SECC-01 | TBD | Pending |
-| SECC-02 | TBD | Pending |
-| PTMR-01 | TBD | Pending |
-| PTMR-02 | TBD | Pending |
-| PTMR-03 | TBD | Pending |
-| RSRC-01 | TBD | Pending |
-| RSRC-02 | TBD | Pending |
-| MEM-01 | TBD | Pending |
-| ZCIO-01 | TBD | Pending |
-| ZCIO-02 | TBD | Pending |
+| MEM-01 | Phase 27 | Pending |
+| RSRC-01 | Phase 27 | Pending |
+| RSRC-02 | Phase 27 | Pending |
+| SECC-02 | Phase 27 | Pending |
+| SIG-01 | Phase 28 | Pending |
+| SIG-02 | Phase 29 | Pending |
+| SIG-03 | Phase 30 | Pending |
+| SECC-01 | Phase 30 | Pending |
+| INOT-01 | Phase 31 | Pending |
+| INOT-02 | Phase 31 | Pending |
+| INOT-03 | Phase 31 | Pending |
+| PTMR-01 | Phase 32 | Pending |
+| PTMR-02 | Phase 33 | Pending |
+| PTMR-03 | Phase 34 | Pending |
+| ZCIO-01 | Phase 35 | Pending |
+| ZCIO-02 | Phase 35 | Pending |
 
 **Coverage:**
 - v1.3 requirements: 16 total
-- Mapped to phases: 0
-- Unmapped: 16 (pending roadmap creation)
+- Mapped to phases: 16/16 (100%)
+- Unmapped: 0
 
 ---
 *Requirements defined: 2026-02-16*
-*Last updated: 2026-02-16 after initial definition*
+*Last updated: 2026-02-16 after roadmap creation*
