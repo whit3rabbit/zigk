@@ -164,6 +164,13 @@ pub fn forkProcess(parent: *Process) !*Process {
         .cap_effective = parent.cap_effective,
         .cap_permitted = parent.cap_permitted,
         .cap_inheritable = parent.cap_inheritable,
+        // Inherit seccomp state (sandboxing is inherited)
+        .seccomp_mode = parent.seccomp_mode,
+        .no_new_privs = parent.no_new_privs,
+        .seccomp_filters = parent.seccomp_filters,
+        .seccomp_filter_count = parent.seccomp_filter_count,
+        .seccomp_filter_prog_count = parent.seccomp_filter_prog_count,
+        .seccomp_filter_lengths = parent.seccomp_filter_lengths,
         // SECURITY: Child starts with zero DMA allocations.
         // While child inherits DmaCapability, it gets its own allocation counter.
         // This prevents the fork-multiply attack where repeated forks would allow

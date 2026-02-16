@@ -38,6 +38,7 @@ pub const virt_pci = @import("virt_pci/root.zig");
 pub const time = @import("process/time.zig");
 pub const prctl = @import("prctl.zig");
 pub const capability = @import("process/capability.zig");
+pub const seccomp = @import("process/seccomp.zig");
 
 
 // Re-export commonly used types

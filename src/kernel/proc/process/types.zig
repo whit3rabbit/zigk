@@ -251,6 +251,24 @@ pub const Process = struct {
     cap_permitted: u64 = 0x1FFFFFFFFFF, // bits 0-40 set (CAP_FULL_SET)
     cap_inheritable: u64 = 0, // Empty by default (Linux convention)
 
+    /// Seccomp sandboxing state
+    /// SECCOMP_MODE_DISABLED (0) = no filtering
+    /// SECCOMP_MODE_STRICT (1) = only read/write/exit/sigreturn allowed
+    /// SECCOMP_MODE_FILTER (2) = BPF program filtering
+    seccomp_mode: u8 = 0,
+    /// no_new_privs flag (required before installing seccomp filters)
+    no_new_privs: bool = false,
+    /// Seccomp BPF filter chain (stored as flat array of instructions)
+    /// Each filter is a contiguous block. Multiple filters are chained.
+    /// Maximum 256 total instructions across all filters.
+    seccomp_filters: [256]uapi.seccomp.SockFilterInsn = [_]uapi.seccomp.SockFilterInsn{.{ .code = 0, .jt = 0, .jf = 0, .k = 0 }} ** 256,
+    /// Number of valid instructions in seccomp_filters
+    seccomp_filter_count: u16 = 0,
+    /// Number of individual filter programs installed (for chaining)
+    seccomp_filter_prog_count: u8 = 0,
+    /// Lengths of each individual filter program (for chained evaluation)
+    seccomp_filter_lengths: [8]u16 = [_]u16{0} ** 8,
+
     /// Resource limits (DoS protection)
     /// Maximum virtual address space size (default 256 MB)
     rlimit_as: u64 = 256 * 1024 * 1024,

@@ -69,6 +69,19 @@ pub fn sys_prctl(option: usize, arg2: usize, arg3: usize, arg4: usize, arg5: usi
             return 0;
         },
 
+        uapi.prctl.PR_SET_NO_NEW_PRIVS => {
+            // arg2 must be 1, arg3-arg5 must be 0 (Linux requirement)
+            if (arg2 != 1) return error.EINVAL;
+            const proc = base.getCurrentProcess();
+            proc.no_new_privs = true;
+            return 0;
+        },
+
+        uapi.prctl.PR_GET_NO_NEW_PRIVS => {
+            const proc = base.getCurrentProcess();
+            return if (proc.no_new_privs) @as(usize, 1) else @as(usize, 0);
+        },
+
         else => return error.EINVAL,
     }
 }

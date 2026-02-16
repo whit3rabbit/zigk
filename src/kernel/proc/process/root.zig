@@ -51,3 +51,12 @@ pub fn getCurrentProcess() *Process {
     }
     @panic("getCurrentProcess: Thread has no process");
 }
+
+// Helper to get current process or null (for early boot/no process context)
+pub fn getCurrentProcessOrNull() ?*Process {
+    const thread = sched.getCurrentThread() orelse return null;
+    if (thread.process) |p| {
+        return @ptrCast(@alignCast(p));
+    }
+    return null;
+}

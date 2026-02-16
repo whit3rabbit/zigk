@@ -145,6 +145,29 @@ pub export fn dispatch_syscall(frame: *SyscallFrame) callconv(.c) void {
     // Syscall debug logging disabled - uncomment to enable
     // console.debug("Syscall: #{d} (args: {x} {x} {x})", .{ syscall_num, args[0], args[1], args[2] });
 
+    // Seccomp filtering -- check before executing any handler
+    const seccomp_check = blk_seccomp: {
+        const proc = process.getCurrentProcessOrNull() orelse break :blk_seccomp uapi.seccomp.SECCOMP_RET_ALLOW;
+        if (proc.seccomp_mode != 0) {
+            break :blk_seccomp process.checkSeccomp(proc, syscall_num, args);
+        }
+        break :blk_seccomp uapi.seccomp.SECCOMP_RET_ALLOW;
+    };
+
+    const seccomp_action = seccomp_check & uapi.seccomp.SECCOMP_RET_ACTION_FULL;
+    if (seccomp_action == uapi.seccomp.SECCOMP_RET_KILL_THREAD or
+        seccomp_action == uapi.seccomp.SECCOMP_RET_KILL_PROCESS) {
+        // Disallowed syscall -- return ENOSYS (SIGSYS delivery is a future enhancement)
+        frame.setReturnSigned(uapi.errno.ENOSYS.toReturn());
+        return;
+    }
+    if (seccomp_action == uapi.seccomp.SECCOMP_RET_ERRNO) {
+        const errno_val = seccomp_check & uapi.seccomp.SECCOMP_RET_DATA;
+        frame.setReturnSigned(-@as(isize, @intCast(errno_val)));
+        return;
+    }
+    // SECCOMP_RET_ALLOW: fall through to normal dispatch
+
     // Use unrolled linear dispatch to avoid switch syntax limitations
     // LLVM will optimize this into a jump table/switch
     const result = blk: {

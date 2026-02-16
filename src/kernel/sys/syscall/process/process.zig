@@ -20,6 +20,9 @@ const UserPtr = base.UserPtr;
 const isValidUserAccess = base.isValidUserAccess;
 const AccessMode = base.AccessMode;
 
+// Re-export getCurrentProcessOrNull for use by dispatch table
+pub const getCurrentProcessOrNull = process_mod.getCurrentProcessOrNull;
+
 // =============================================================================
 // Process Control
 // =============================================================================
@@ -1577,4 +1580,378 @@ fn findProcessByPidForCaps(pid: i32) ?*Process {
 
     // Process not found in accessible tree
     return null;
+}
+
+// =============================================================================
+// Seccomp Syscall Filtering
+// =============================================================================
+
+/// sys_seccomp (317 on x86_64, 277 on aarch64) - Install seccomp filters
+///
+/// Implements Linux-compatible syscall filtering for process sandboxing.
+///
+/// Modes:
+/// - SECCOMP_SET_MODE_STRICT: Only read/write/exit/sigreturn allowed
+/// - SECCOMP_SET_MODE_FILTER: Install BPF program to filter syscalls
+///
+/// Security requirements:
+/// - STRICT mode: No special requirements (can be enabled anytime)
+/// - FILTER mode: Requires no_new_privs=true OR CAP_SYS_ADMIN
+/// - Seccomp cannot be undone once enabled
+/// - Filters are inherited across fork
+///
+/// Returns: 0 on success
+pub fn sys_seccomp(op: usize, flags: usize, args_ptr: usize) SyscallError!usize {
+    const proc = base.getCurrentProcess();
+
+    switch (op) {
+        uapi.seccomp.SECCOMP_SET_MODE_STRICT => {
+            // Strict mode: flags and args must be 0
+            if (flags != 0 or args_ptr != 0) return error.EINVAL;
+
+            // Once in STRICT mode, cannot change
+            if (proc.seccomp_mode == uapi.seccomp.SECCOMP_MODE_STRICT) {
+                return 0; // Idempotent
+            }
+
+            // Cannot downgrade from FILTER to STRICT
+            if (proc.seccomp_mode == uapi.seccomp.SECCOMP_MODE_FILTER) {
+                return error.EACCES;
+            }
+
+            // Enable strict mode
+            proc.seccomp_mode = uapi.seccomp.SECCOMP_MODE_STRICT;
+            return 0;
+        },
+
+        uapi.seccomp.SECCOMP_SET_MODE_FILTER => {
+            // Filter mode requires no_new_privs or CAP_SYS_ADMIN
+            if (!proc.no_new_privs) {
+                // Check for CAP_SYS_ADMIN (bit 21)
+                const CAP_SYS_ADMIN: u64 = 1 << 21;
+                if ((proc.cap_effective & CAP_SYS_ADMIN) == 0) {
+                    return error.EACCES;
+                }
+            }
+
+            // Cannot install filters in STRICT mode
+            if (proc.seccomp_mode == uapi.seccomp.SECCOMP_MODE_STRICT) {
+                return error.EACCES;
+            }
+
+            // flags must be 0 for MVP
+            if (flags != 0) return error.EINVAL;
+
+            // args_ptr points to SockFprog in userspace
+            if (args_ptr == 0) return error.EFAULT;
+
+            // Copy SockFprog header from userspace
+            const uptr = UserPtr.from(args_ptr);
+            const fprog = uptr.readValue(uapi.seccomp.SockFprog) catch return error.EFAULT;
+
+            // Validate filter length
+            if (fprog.len == 0 or fprog.len > uapi.seccomp.BPF_MAXINSNS) {
+                return error.EINVAL;
+            }
+
+            // Check if we have space for this filter
+            const new_count = std.math.add(u16, proc.seccomp_filter_count, fprog.len) catch return error.ENOMEM;
+            if (new_count > 256) return error.ENOMEM;
+
+            // Check if we can store another filter program metadata
+            if (proc.seccomp_filter_prog_count >= 8) return error.ENOMEM;
+
+            // Copy filter instructions from userspace
+            const filter_ptr = UserPtr.from(fprog.filter);
+            const filter_size = std.math.mul(usize, @as(usize, fprog.len), @sizeOf(uapi.seccomp.SockFilterInsn)) catch return error.EINVAL;
+            if (!isValidUserAccess(fprog.filter, filter_size, .Read)) return error.EFAULT;
+
+            // Copy instructions into our filter array
+            const dest_slice = proc.seccomp_filters[proc.seccomp_filter_count..new_count];
+            const bytes_to_copy = filter_size;
+            const dest_bytes = std.mem.sliceAsBytes(dest_slice);
+            _ = filter_ptr.copyToKernel(dest_bytes[0..bytes_to_copy]) catch return error.EFAULT;
+
+            // Update filter metadata
+            proc.seccomp_filter_lengths[proc.seccomp_filter_prog_count] = fprog.len;
+            proc.seccomp_filter_prog_count += 1;
+            proc.seccomp_filter_count = new_count;
+            proc.seccomp_mode = uapi.seccomp.SECCOMP_MODE_FILTER;
+
+            return 0;
+        },
+
+        uapi.seccomp.SECCOMP_GET_ACTION_AVAIL => {
+            // flags must be 0
+            if (flags != 0) return error.EINVAL;
+
+            // args_ptr points to u32 action value
+            if (args_ptr == 0) return error.EFAULT;
+
+            const uptr = UserPtr.from(args_ptr);
+            const action = uptr.readValue(u32) catch return error.EFAULT;
+
+            // Check if action is supported
+            const action_code = action & uapi.seccomp.SECCOMP_RET_ACTION_FULL;
+            switch (action_code) {
+                uapi.seccomp.SECCOMP_RET_KILL_THREAD,
+                uapi.seccomp.SECCOMP_RET_KILL_PROCESS,
+                uapi.seccomp.SECCOMP_RET_ERRNO,
+                uapi.seccomp.SECCOMP_RET_ALLOW,
+                => return 0,
+                else => return error.EINVAL,
+            }
+        },
+
+        else => return error.EINVAL,
+    }
+}
+
+/// Check seccomp filters before syscall dispatch
+///
+/// Called by dispatch_syscall before executing any syscall handler.
+/// Returns a seccomp action code (SECCOMP_RET_*).
+///
+/// IMPORTANT: This function is called for ALL syscalls including SYS_SECCOMP.
+/// In strict mode, seccomp() itself is blocked (only read/write/exit/sigreturn allowed).
+pub fn checkSeccomp(proc: *const Process, syscall_num: usize, args: [6]usize) u32 {
+    if (proc.seccomp_mode == uapi.seccomp.SECCOMP_MODE_DISABLED) {
+        return uapi.seccomp.SECCOMP_RET_ALLOW;
+    }
+
+    if (proc.seccomp_mode == uapi.seccomp.SECCOMP_MODE_STRICT) {
+        // Strict mode: only read/write/exit/sigreturn allowed
+        // Note: We need to check both architectures' syscall numbers
+        const builtin = @import("builtin");
+        const allowed = switch (builtin.cpu.arch) {
+            .x86_64 => (syscall_num == 0 or // read
+                syscall_num == 1 or // write
+                syscall_num == 60 or // exit
+                syscall_num == 231 or // exit_group
+                syscall_num == 15), // rt_sigreturn
+            .aarch64 => (syscall_num == 63 or // read
+                syscall_num == 64 or // write
+                syscall_num == 93 or // exit
+                syscall_num == 94 or // exit_group
+                syscall_num == 139), // rt_sigreturn
+            else => false,
+        };
+
+        return if (allowed) uapi.seccomp.SECCOMP_RET_ALLOW else uapi.seccomp.SECCOMP_RET_KILL_THREAD;
+    }
+
+    if (proc.seccomp_mode == uapi.seccomp.SECCOMP_MODE_FILTER) {
+        // Build seccomp_data for BPF filters
+        const builtin = @import("builtin");
+        const arch: u32 = switch (builtin.cpu.arch) {
+            .x86_64 => uapi.seccomp.AUDIT_ARCH_X86_64,
+            .aarch64 => uapi.seccomp.AUDIT_ARCH_AARCH64,
+            else => 0,
+        };
+
+        var data = uapi.seccomp.SeccompData{
+            .nr = @intCast(@as(i32, @bitCast(@as(u32, @truncate(syscall_num))))),
+            .arch = arch,
+            .instruction_pointer = 0, // TODO: Get actual RIP/PC from frame
+            .args = args,
+        };
+
+        // Run each filter program in the chain
+        // The most restrictive result wins (lowest action value)
+        var most_restrictive: u32 = uapi.seccomp.SECCOMP_RET_ALLOW;
+        var offset: usize = 0;
+        var i: usize = 0;
+        while (i < proc.seccomp_filter_prog_count) : (i += 1) {
+            const filter_len = proc.seccomp_filter_lengths[i];
+            const filter = proc.seccomp_filters[offset .. offset + filter_len];
+            const result = runBpfFilter(filter, &data);
+
+            // Lower action value = more restrictive
+            if (result < most_restrictive) {
+                most_restrictive = result;
+            }
+
+            offset += filter_len;
+        }
+
+        return most_restrictive;
+    }
+
+    // Unknown mode: fail secure
+    return uapi.seccomp.SECCOMP_RET_KILL_PROCESS;
+}
+
+/// Classic BPF interpreter for seccomp filters
+///
+/// Executes a BPF program on the given seccomp_data.
+/// Returns a SECCOMP_RET_* action code.
+///
+/// Security: Fails secure on invalid instructions or out-of-bounds access.
+fn runBpfFilter(insns: []const uapi.seccomp.SockFilterInsn, data: *const uapi.seccomp.SeccompData) u32 {
+    // BPF registers
+    var a: u32 = 0; // Accumulator
+    var x: u32 = 0; // Index register
+    var mem: [16]u32 = [_]u32{0} ** 16; // Scratch memory
+
+    // Treat seccomp_data as a byte array for BPF_ABS loads
+    const data_bytes = std.mem.asBytes(data);
+    const data_len = @sizeOf(uapi.seccomp.SeccompData); // 64 bytes
+
+    var pc: usize = 0;
+    var steps: usize = 0;
+    const max_steps = 4096; // Prevent infinite loops
+
+    while (pc < insns.len and steps < max_steps) : (steps += 1) {
+        const insn = insns[pc];
+        const code = insn.code;
+        const k = insn.k;
+
+        // Extract opcode fields
+        const class = code & 0x07;
+        const size = code & 0x18;
+        const mode = code & 0xe0;
+        const op = code & 0xf0;
+        const src = code & 0x08;
+
+        if (class == uapi.seccomp.BPF_LD) {
+            // Load into A
+            if (mode == uapi.seccomp.BPF_ABS) {
+                // Load from seccomp_data at absolute offset k
+                if (size == uapi.seccomp.BPF_W) {
+                    // 32-bit word
+                    const offset = k;
+                    if (offset + 4 > data_len) return uapi.seccomp.SECCOMP_RET_KILL_PROCESS;
+                    a = std.mem.readInt(u32, data_bytes[offset..][0..4], .little);
+                } else if (size == uapi.seccomp.BPF_H) {
+                    // 16-bit halfword
+                    const offset = k;
+                    if (offset + 2 > data_len) return uapi.seccomp.SECCOMP_RET_KILL_PROCESS;
+                    a = std.mem.readInt(u16, data_bytes[offset..][0..2], .little);
+                } else if (size == uapi.seccomp.BPF_B) {
+                    // 8-bit byte
+                    const offset = k;
+                    if (offset + 1 > data_len) return uapi.seccomp.SECCOMP_RET_KILL_PROCESS;
+                    a = data_bytes[offset];
+                } else {
+                    return uapi.seccomp.SECCOMP_RET_KILL_PROCESS; // Invalid size
+                }
+            } else if (mode == uapi.seccomp.BPF_IMM) {
+                // Load immediate value
+                a = k;
+            } else if (mode == uapi.seccomp.BPF_MEM) {
+                // Load from scratch memory
+                if (k >= 16) return uapi.seccomp.SECCOMP_RET_KILL_PROCESS;
+                a = mem[k];
+            } else if (mode == uapi.seccomp.BPF_LEN) {
+                // Load packet length
+                a = data_len;
+            } else {
+                return uapi.seccomp.SECCOMP_RET_KILL_PROCESS; // Invalid mode
+            }
+        } else if (class == uapi.seccomp.BPF_LDX) {
+            // Load into X
+            if (mode == uapi.seccomp.BPF_IMM) {
+                x = k;
+            } else if (mode == uapi.seccomp.BPF_MEM) {
+                if (k >= 16) return uapi.seccomp.SECCOMP_RET_KILL_PROCESS;
+                x = mem[k];
+            } else if (mode == uapi.seccomp.BPF_LEN) {
+                x = data_len;
+            } else {
+                return uapi.seccomp.SECCOMP_RET_KILL_PROCESS;
+            }
+        } else if (class == uapi.seccomp.BPF_ST) {
+            // Store A to scratch memory
+            if (k >= 16) return uapi.seccomp.SECCOMP_RET_KILL_PROCESS;
+            mem[k] = a;
+        } else if (class == uapi.seccomp.BPF_STX) {
+            // Store X to scratch memory
+            if (k >= 16) return uapi.seccomp.SECCOMP_RET_KILL_PROCESS;
+            mem[k] = x;
+        } else if (class == uapi.seccomp.BPF_ALU) {
+            // Arithmetic/logic operations
+            const operand = if (src == uapi.seccomp.BPF_K) k else x;
+
+            if (op == uapi.seccomp.BPF_ADD) {
+                a = a +% operand;
+            } else if (op == uapi.seccomp.BPF_SUB) {
+                a = a -% operand;
+            } else if (op == uapi.seccomp.BPF_MUL) {
+                a = a *% operand;
+            } else if (op == uapi.seccomp.BPF_DIV) {
+                if (operand == 0) return uapi.seccomp.SECCOMP_RET_KILL_PROCESS;
+                a = a / operand;
+            } else if (op == uapi.seccomp.BPF_MOD) {
+                if (operand == 0) return uapi.seccomp.SECCOMP_RET_KILL_PROCESS;
+                a = a % operand;
+            } else if (op == uapi.seccomp.BPF_OR) {
+                a = a | operand;
+            } else if (op == uapi.seccomp.BPF_AND) {
+                a = a & operand;
+            } else if (op == uapi.seccomp.BPF_LSH) {
+                a = a << @intCast(operand);
+            } else if (op == uapi.seccomp.BPF_RSH) {
+                a = a >> @intCast(operand);
+            } else if (op == uapi.seccomp.BPF_XOR) {
+                a = a ^ operand;
+            } else if (op == uapi.seccomp.BPF_NEG) {
+                a = -%a;
+            } else {
+                return uapi.seccomp.SECCOMP_RET_KILL_PROCESS;
+            }
+        } else if (class == uapi.seccomp.BPF_JMP) {
+            // Jump instructions
+            if (op == uapi.seccomp.BPF_JA) {
+                // Unconditional jump
+                pc +%= k;
+                pc += 1;
+                continue;
+            }
+
+            // Conditional jumps
+            const operand = if (src == uapi.seccomp.BPF_K) k else x;
+            var take_jump = false;
+
+            if (op == uapi.seccomp.BPF_JEQ) {
+                take_jump = (a == operand);
+            } else if (op == uapi.seccomp.BPF_JGT) {
+                take_jump = (a > operand);
+            } else if (op == uapi.seccomp.BPF_JGE) {
+                take_jump = (a >= operand);
+            } else if (op == uapi.seccomp.BPF_JSET) {
+                take_jump = ((a & operand) != 0);
+            } else {
+                return uapi.seccomp.SECCOMP_RET_KILL_PROCESS;
+            }
+
+            if (take_jump) {
+                pc +%= insn.jt;
+            } else {
+                pc +%= insn.jf;
+            }
+            pc += 1;
+            continue;
+        } else if (class == uapi.seccomp.BPF_RET) {
+            // Return action value
+            const ret_val = if (mode == uapi.seccomp.BPF_K) k else a;
+            return ret_val;
+        } else if (class == uapi.seccomp.BPF_MISC) {
+            // Register transfer
+            if (code == uapi.seccomp.BPF_MISC | uapi.seccomp.BPF_TAX) {
+                x = a;
+            } else if (code == uapi.seccomp.BPF_MISC | uapi.seccomp.BPF_TXA) {
+                a = x;
+            } else {
+                return uapi.seccomp.SECCOMP_RET_KILL_PROCESS;
+            }
+        } else {
+            // Invalid instruction class
+            return uapi.seccomp.SECCOMP_RET_KILL_PROCESS;
+        }
+
+        pc += 1;
+    }
+
+    // Exceeded max steps or fell off end of program: fail secure
+    return uapi.seccomp.SECCOMP_RET_KILL_PROCESS;
 }
