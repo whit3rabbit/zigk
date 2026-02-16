@@ -37,6 +37,7 @@ pub const mkdir = io.mkdir;
 pub const rmdir = io.rmdir;
 pub const unlink = io.unlink;
 pub const chdir = io.chdir;
+pub const fchdir = io.fchdir;
 pub const getcwd = io.getcwd;
 pub const getdents64 = io.getdents64;
 
@@ -333,6 +334,7 @@ pub const seccomp = process.seccomp;
 pub const SECCOMP_SET_MODE_STRICT = process.SECCOMP_SET_MODE_STRICT;
 pub const SECCOMP_SET_MODE_FILTER = process.SECCOMP_SET_MODE_FILTER;
 pub const SECCOMP_RET_KILL = process.SECCOMP_RET_KILL;
+pub const SECCOMP_RET_KILL_THREAD = process.SECCOMP_RET_KILL_THREAD;
 pub const SECCOMP_RET_ERRNO = process.SECCOMP_RET_ERRNO;
 pub const SECCOMP_RET_ALLOW = process.SECCOMP_RET_ALLOW;
 pub const SECCOMP_RET_DATA = process.SECCOMP_RET_DATA;
