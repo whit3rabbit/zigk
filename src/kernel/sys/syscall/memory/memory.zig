@@ -481,6 +481,12 @@ pub fn sys_mincore(addr: usize, len: usize, vec_ptr: usize) SyscallError!usize {
         return error.EFAULT;
     }
 
+    // Validate that the address range is actually mapped in the process
+    // mincore should return ENOMEM if the range includes unmapped pages
+    if (!user_mem.isValidUserAccess(addr, len, .Read)) {
+        return error.ENOMEM;
+    }
+
     // Fill vector with 1s (all pages resident -- kernel does not swap)
     var i: usize = 0;
     while (i < page_count) : (i += 1) {
