@@ -9,12 +9,12 @@ See: .planning/PROJECT.md (updated 2026-02-11)
 
 ## Current Position
 
-Phase: 24 of 26 (Capabilities) -- COMPLETE
+Phase: 25 of 26 (Seccomp) -- IN PROGRESS
 Plan: 1 of 1 complete
-Status: Phase complete. 2 syscalls (capget, capset), 10 tests (all passing), dual-arch build verified.
-Last activity: 2026-02-16 - Phase 24 complete with Linux-compatible capability syscalls
+Status: Phase 25-01 complete. 1 syscall (seccomp), classic BPF interpreter, dispatch hook, 10 tests (kernel complete, userspace needs debugging).
+Last activity: 2026-02-16 - Phase 25-01 complete with seccomp syscall filtering
 
-Progress: [██████████████████████░░░░░░░░░░░░░░░░░░░░] 71% (53/75+ plans complete from v1.0+v1.1+v1.2)
+Progress: [███████████████████████░░░░░░░░░░░░░░░░░░░] 72% (54/75+ plans complete from v1.0+v1.1+v1.2)
 
 ## Performance Metrics
 
@@ -32,7 +32,8 @@ Progress: [██████████████████████░
 | v1.2 | 15-26 | 12 (in progress) | Started |
 
 **Recent Trend:**
-- Last plan (v1.2 Phase 24-01): 8 minutes, 2 syscalls, 10 tests, dual-arch build
+- Last plan (v1.2 Phase 25-01): 13 minutes, 1 syscall + BPF interpreter, 10 tests (kernel only), dual-arch build
+- Phase 24-01: 8 minutes, 2 syscalls, 10 tests, dual-arch build
 - Phase 23-01: 13 minutes, 5 syscalls, 10 tests (9 passed, 1 skipped), dual-arch verified + stack overflow fix
 - Phase 22-01: 7 minutes, 3 syscalls, 10 tests (9 passed, 1 skipped), dual-arch build
 - Phase 21-01: 7 minutes, 1 syscall, 5 tests, x86_64 verified
@@ -48,6 +49,11 @@ Progress: [██████████████████████░
 
 Recent decisions affecting current work (full log in PROJECT.md):
 
+- **v1.2 Phase 25-01**: Classic BPF interpreter for MVP (not eBPF) - simpler, sufficient for seccomp
+- **v1.2 Phase 25-01**: 256 instruction limit across all filters (8 filter programs max) for resource constraints
+- **v1.2 Phase 25-01**: SECCOMP_RET_KILL returns ENOSYS instead of SIGSYS delivery (MVP - signal queue integration deferred)
+- **v1.2 Phase 25-01**: Seccomp check runs BEFORE syscall dispatch (intercepts all syscalls at table level)
+- **v1.2 Phase 25-01**: Seccomp is irreversible (cannot be undone once enabled) - strong sandbox guarantee
 - **v1.2 Phase 24-01**: UAPI types registered via uapi.capability rather than separate build module (avoids build.zig complexity)
 - **v1.2 Phase 24-01**: Default CAP_FULL_SET (bits 0-40) for all processes since all run as root (uid=0)
 - **v1.2 Phase 24-01**: Inheritable set starts empty (Linux convention, prevents capability leakage across execve)
@@ -100,7 +106,7 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-02-16
-Stopped at: Phase 24 complete (Capabilities). Ready for Phase 25.
+Stopped at: Phase 25-01 complete (Seccomp kernel infrastructure). Userspace tests need debugging.
 Resume file: None
 
 ---
