@@ -5,23 +5,23 @@
 See: .planning/PROJECT.md (updated 2026-02-11)
 
 **Core value:** Every implemented syscall works correctly on both x86_64 and aarch64, tested via the integration test harness.
-**Current focus:** Phase 23 complete (POSIX Timers), ready for Phase 24
+**Current focus:** Phase 24 complete (Capabilities), ready for Phase 25
 
 ## Current Position
 
-Phase: 23 of 26 (POSIX Timers) -- COMPLETE
+Phase: 24 of 26 (Capabilities) -- COMPLETE
 Plan: 1 of 1 complete
-Status: Phase complete (5/5 must-haves). 5 syscalls, 10 tests (9 passed, 1 skipped), dual-arch verified (x86_64 + aarch64).
-Last activity: 2026-02-15 - Phase 23 complete with post-execution fixes (stack overflow, error mapping, test ordering)
+Status: Phase complete. 2 syscalls (capget, capset), 10 tests (all passing), dual-arch build verified.
+Last activity: 2026-02-16 - Phase 24 complete with Linux-compatible capability syscalls
 
-Progress: [█████████████████████░░░░░░░░░░░░░░░░░░░░░] 69% (52/75+ plans complete from v1.0+v1.1+v1.2)
+Progress: [██████████████████████░░░░░░░░░░░░░░░░░░░░] 71% (53/75+ plans complete from v1.0+v1.1+v1.2)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 51 (v1.0: 29, v1.1: 12, v1.2: 10)
-- Average duration: ~8.1 min per plan
-- Total execution time: ~6.9 hours over 7 days
+- Total plans completed: 52 (v1.0: 29, v1.1: 12, v1.2: 11)
+- Average duration: ~8.0 min per plan
+- Total execution time: ~7.0 hours over 8 days
 
 **By Milestone:**
 
@@ -29,17 +29,18 @@ Progress: [█████████████████████░░
 |-----------|--------|-------|----------|
 | v1.0 | 1-9 | 29 | 4 days |
 | v1.1 | 10-14 | 12 | 2 days |
-| v1.2 | 15-26 | 11 (in progress) | Started |
+| v1.2 | 15-26 | 12 (in progress) | Started |
 
 **Recent Trend:**
-- Last plan (v1.2 Phase 23-01): 13 minutes, 5 syscalls, 10 tests (9 passed, 1 skipped), dual-arch verified + stack overflow fix
+- Last plan (v1.2 Phase 24-01): 8 minutes, 2 syscalls, 10 tests, dual-arch build
+- Phase 23-01: 13 minutes, 5 syscalls, 10 tests (9 passed, 1 skipped), dual-arch verified + stack overflow fix
 - Phase 22-01: 7 minutes, 3 syscalls, 10 tests (9 passed, 1 skipped), dual-arch build
 - Phase 21-01: 7 minutes, 1 syscall, 5 tests, x86_64 verified
 - Phase 20-01: 14.5 minutes, 4 syscalls, 10 tests, dual-arch
 - Phase 19-01: 13 minutes, 2 syscalls, 10 tests, dual-arch
 - Phase 18-01: 14 minutes, 3 syscalls, 10 tests, dual-arch
 - Phase 17-02: 11 minutes, gap closure, 10 tests passing
-- Trend: Fast execution patterns, inotify VFS hooks add event-driven file monitoring
+- Trend: Fast execution, consistent 7-14 min per plan
 
 ## Accumulated Context
 
@@ -47,6 +48,10 @@ Progress: [█████████████████████░░
 
 Recent decisions affecting current work (full log in PROJECT.md):
 
+- **v1.2 Phase 24-01**: UAPI types registered via uapi.capability rather than separate build module (avoids build.zig complexity)
+- **v1.2 Phase 24-01**: Default CAP_FULL_SET (bits 0-40) for all processes since all run as root (uid=0)
+- **v1.2 Phase 24-01**: Inheritable set starts empty (Linux convention, prevents capability leakage across execve)
+- **v1.2 Phase 24-01**: No new dispatch table module -- functions added to existing process.zig to avoid stack growth
 - **v1.2 Phase 23-01**: Inline POSIX timer expiration in processIntervalTimers (no cross-module call) for minimal overhead
 - **v1.2 Phase 23-01**: SigEvent exactly 64 bytes with comptime assertion for Linux ABI compatibility
 - **v1.2 Phase 23-01**: 8 timer slots per process (MAX_POSIX_TIMERS) balances functionality with resource constraints
@@ -94,10 +99,10 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-02-15
-Stopped at: Phase 23 fully verified on both architectures. Ready for Phase 24 (Capabilities).
+Last session: 2026-02-16
+Stopped at: Phase 24 complete (Capabilities). Ready for Phase 25.
 Resume file: None
 
 ---
 *State initialized: 2026-02-06*
-*Last updated: 2026-02-15 after Phase 23 completion and dual-arch verification*
+*Last updated: 2026-02-16 after Phase 24 completion*
