@@ -2,7 +2,7 @@
 
 ## What This Is
 
-Systematic expansion of Linux/POSIX syscall coverage in the zk microkernel. Shipped v1.2 with 330+ syscalls implemented across 12 categories including file sync, zero-copy I/O, memory management extensions, modern process control, signal handling, POSIX timers, inotify file monitoring, Linux capabilities, and seccomp syscall filtering with a classic BPF interpreter. Dual-architecture (x86_64 + aarch64) with 203K LOC Zig and comprehensive integration test suite.
+Systematic expansion of Linux/POSIX syscall coverage in the zk microkernel. Shipped v1.2 with 330+ syscalls across 12 categories. Now hardening existing implementations: fixing architectural gaps, replacing polling with proper wakeups, adding missing syscalls, and building VFS page cache infrastructure for true zero-copy I/O. Dual-architecture (x86_64 + aarch64) with 203K LOC Zig and comprehensive integration test suite.
 
 ## Core Value
 
@@ -64,7 +64,22 @@ Every implemented syscall must work correctly on both x86_64 and aarch64 with ma
 
 ### Active
 
-(No active requirements -- next milestone not yet defined)
+<!-- v1.3 Tech Debt Cleanup -->
+- [ ] Complete inotify VFS hooks (ftruncate and remaining ops)
+- [ ] Fix rt_sigsuspend pending signal race
+- [ ] Implement per-process rlimit persistence
+- [ ] Implement SIGSYS delivery for seccomp filters
+- [ ] Build per-thread siginfo queue (replace bitmask-only tracking)
+- [ ] Increase POSIX timer resolution and per-process limit
+- [ ] Build VFS page cache for true zero-copy I/O (splice, sendfile, tee)
+- [ ] Replace signalfd 10ms polling with direct wakeup
+- [ ] Implement fchdir syscall
+- [ ] Fix testMremapInvalidAddr edge case
+- [ ] Increase inotify capacity limits
+- [ ] Add instruction_pointer to SeccompData
+- [ ] Handle inotify event queue overflow properly
+- [ ] Add SIGEV_THREAD/SIGEV_THREAD_ID to POSIX timers
+- [ ] Improve clock_nanosleep granularity
 
 ### Out of Scope
 
@@ -80,7 +95,21 @@ Every implemented syscall must work correctly on both x86_64 and aarch64 with ma
 - Multi-CPU affinity enforcement -- single-CPU kernel, separate project
 - Full seccomp BPF JIT -- v1.2 implements interpreter only, JIT is future work
 - Container/namespace support (unshare, setns) -- requires kernel architecture changes
-- True zero-copy I/O via VFS page cache -- splice/sendfile use 64KB kernel buffers for now
+- True zero-copy I/O via VFS page cache -- moved to v1.3 Active scope
+
+## Current Milestone: v1.3 Tech Debt Cleanup
+
+**Goal:** Resolve all 15 tech debt items accumulated across v1.0-v1.2, hardening existing syscall implementations with proper wakeups, signal queues, and VFS page cache infrastructure.
+
+**Target features:**
+- Complete inotify VFS hook wiring
+- Fix rt_sigsuspend signal race and build siginfo queue
+- Per-process rlimit persistence and fchdir implementation
+- SIGSYS delivery for seccomp, instruction_pointer in SeccompData
+- VFS page cache for true zero-copy splice/sendfile/tee
+- signalfd direct wakeup (replace 10ms polling)
+- POSIX timer improvements (resolution, limits, SIGEV_THREAD)
+- Edge case fixes (mremap, inotify capacity, event overflow, clock_nanosleep)
 
 ## Context
 
@@ -93,17 +122,8 @@ v1.0 shipped 300+ syscalls from ~190 baseline. v1.1 resolved all 14 v1.0 tech de
 v1.2 added 31 new syscalls across 12 categories: file sync, zero-copy I/O, memory management,
 modern process control, signal handling, POSIX timers, inotify, capabilities, and seccomp.
 
-Remaining tech debt (15 items from v1.2):
-- inotify VFS hooks incomplete (ftruncate events don't fire)
-- rt_sigsuspend pending signal race (architectural fix needed)
-- Per-process rlimit persistence not implemented
-- SIGSYS delivery not implemented for seccomp (ENOSYS used instead)
-- Bitmask-only signal tracking (no siginfo queue)
-- POSIX timer 10ms resolution, 8 per process limit
-- Zero-copy I/O uses kernel buffers (true zero-copy requires page cache)
-- signalfd uses 10ms polling timeout
-- fchdir syscall not implemented
-- See milestones/v1.2-MILESTONE-AUDIT.md for full list
+v1.3 targets all 15 tech debt items from v1.2 audit. Largest item is VFS page cache for
+true zero-copy I/O. See milestones/v1.2-MILESTONE-AUDIT.md for full debt inventory.
 
 ## Constraints
 
@@ -140,4 +160,4 @@ Remaining tech debt (15 items from v1.2):
 | inotify MVP with EAGAIN reads | epoll integration is primary use case | v Good -- avoids blocking complexity |
 
 ---
-*Last updated: 2026-02-16 after v1.2 milestone*
+*Last updated: 2026-02-16 after v1.3 milestone start*
