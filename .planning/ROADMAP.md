@@ -244,10 +244,10 @@ Plans:
   3. Capability checks integrate with existing permission checks in syscalls
   4. Capabilities support both v1 (32-bit) and v3 (64-bit) formats
 
-**Plans**: TBD
+**Plans**: 1 plan
 
 Plans:
-- [ ] 24-01: TBD
+- [ ] 24-01-PLAN.md -- Implement capget/capset syscalls with per-process bitmasks, v1/v3 format support, and tests
 
 #### Phase 25: Seccomp
 **Goal**: Syscall filtering via seccomp for sandboxing is available
@@ -315,10 +315,10 @@ Phases execute in numeric order: 15 -> 16 -> 17 -> 18 -> 19 -> 20 -> 21 -> 22 ->
 | 21. I/O Multiplexing Extension | v1.2 | 1/1 | Complete | 2026-02-15 |
 | 22. File Monitoring | v1.2 | 1/1 | Complete | 2026-02-15 |
 | 23. POSIX Timers | v1.2 | 1/1 | Complete | 2026-02-15 |
-| 24. Capabilities | v1.2 | 0/TBD | Not started | - |
+| 24. Capabilities | v1.2 | 0/1 | Planned | - |
 | 25. Seccomp | v1.2 | 0/TBD | Not started | - |
 | 26. Test Coverage Expansion | v1.2 | 0/TBD | Not started | - |
 
 ---
 *Roadmap created: 2026-02-11*
-*Last updated: 2026-02-15 (Phase 23 complete)*
+*Last updated: 2026-02-15 (Phase 24 planned)*
