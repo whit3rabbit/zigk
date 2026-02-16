@@ -9,19 +9,19 @@ See: .planning/PROJECT.md (updated 2026-02-11)
 
 ## Current Position
 
-Phase: 26 of 26 (Test Coverage Expansion) -- IN PROGRESS
-Plan: 1 of 1 complete
-Status: Phase 26-01 complete. 10 new integration tests (lchown, settimeofday, rt_sigsuspend, rt_sigpending, getrusage children, sched_rr error), settimeofday wrapper, rt_sigsuspend pending signal fix.
-Last activity: 2026-02-16 - Phase 26-01 complete with test coverage expansion
+Phase: 26 of 26 (Test Coverage Expansion) -- COMPLETE
+Plan: 2 of 2 complete
+Status: Phase 26-02 complete. 10 new edge case tests (select/epoll: nfds=0, null sets, CTL_DEL/MOD, multiple fds; memory: madvise DONTNEED, mincore unmapped; resource limits: invalid, raise soft, stack). 8 passing, 2 skipped. mincore security fix. Combined with 26-01: 20 new tests, all 8 TEST requirements covered.
+Last activity: 2026-02-16 - Phase 26-02 complete, test coverage expansion finished
 
-Progress: [████████████████████████░░░░░░░░░░░░░░░░░░] 75% (56/75+ plans complete from v1.0+v1.1+v1.2)
+Progress: [█████████████████████████░░░░░░░░░░░░░░░░░] 76% (57/75+ plans complete from v1.0+v1.1+v1.2)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 56 (v1.0: 29, v1.1: 12, v1.2: 15)
-- Average duration: ~8.1 min per plan
-- Total execution time: ~7.5 hours over 8 days
+- Total plans completed: 57 (v1.0: 29, v1.1: 12, v1.2: 16)
+- Average duration: ~8.0 min per plan
+- Total execution time: ~7.6 hours over 8 days
 
 **By Milestone:**
 
@@ -29,10 +29,11 @@ Progress: [███████████████████████
 |-----------|--------|-------|----------|
 | v1.0 | 1-9 | 29 | 4 days |
 | v1.1 | 10-14 | 12 | 2 days |
-| v1.2 | 15-26 | 15 (in progress) | Started |
+| v1.2 | 15-26 | 16 (complete) | Complete |
 
 **Recent Trend:**
-- Last plan (v1.2 Phase 26-01): 12 minutes, 10 integration tests (lchown, settimeofday, signals, misc), 1 kernel bug fix, dual-arch build
+- Last plan (v1.2 Phase 26-02): 11 minutes, 10 edge case tests (8 passing, 2 skipped), mincore security fix, dual-arch build
+- Phase 26-01: 12 minutes, 10 integration tests (lchown, settimeofday, signals, misc), 1 kernel bug fix, dual-arch build
 - Phase 25-01: 13 minutes, 1 syscall + BPF interpreter, 10 tests (all passing), dual-arch verified
 - Phase 24-01: 8 minutes, 2 syscalls, 10 tests, dual-arch build
 - Phase 23-01: 13 minutes, 5 syscalls, 10 tests (9 passed, 1 skipped), dual-arch verified + stack overflow fix
@@ -43,6 +44,7 @@ Progress: [███████████████████████
 - Phase 18-01: 14 minutes, 3 syscalls, 10 tests, dual-arch
 - Phase 17-02: 11 minutes, gap closure, 10 tests passing
 - Trend: Fast execution, consistent 7-14 min per plan
+| Phase 26 P02 | 11 | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -91,6 +93,8 @@ Recent decisions affecting current work (full log in PROJECT.md):
 - **v1.0**: Dual-arch testing mandatory - Every syscall tested on both x86_64 and aarch64
 - [Phase 22]: inotify MVP uses EAGAIN for empty reads instead of blocking - epoll integration primary use case
 - [Phase 22]: VFS hooks use numeric event constants to avoid circular module dependencies
+- [Phase 26-02]: mincore validates mapped addresses before filling residency vector (security fix)
+- [Phase 26-02]: Per-process rlimit persistence deferred (requires Process struct modification)
 
 ### Pending Todos
 
@@ -111,9 +115,9 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-02-16
-Stopped at: Phase 26-01 complete (Test Coverage Expansion). 10 new tests, 5 coverage gaps closed.
+Stopped at: Phase 26-02 complete (Test Coverage Expansion). 10 edge case tests, mincore security fix. Phase 26 complete: 20 total new tests.
 Resume file: None
 
 ---
 *State initialized: 2026-02-06*
-*Last updated: 2026-02-16 after Phase 26-01 completion*
+*Last updated: 2026-02-16 after Phase 26-02 completion*
