@@ -60,3 +60,33 @@
 
 ---
 
+
+## v1.2 Systematic Syscall Coverage (Shipped: 2026-02-16)
+
+**Phases:** 15-26 (16 plans)
+**Commits:** 71
+**Lines:** +21,822 / -420 across 104 files
+**Timeline:** 5 days (2026-02-11 to 2026-02-16)
+**Total codebase:** 203,161 LOC Zig
+**Tests:** ~123 new integration tests
+**Git range:** b2babe9..3ee2fc4
+
+**Key accomplishments:**
+1. Implemented splice/tee/vmsplice/copy_file_range, fallocate, and renameat2 for kernel-side data transfer and atomic file operations
+2. Delivered clone3 and waitid with struct-based args and siginfo_t output for modern process management
+3. Added rt_sigtimedwait, rt_sigqueueinfo, clock_nanosleep, and POSIX timers (5 syscalls) with scheduler-integrated signal delivery
+4. Built inotify file monitoring subsystem with VFS hooks, ring buffer event queue, and epoll integration
+5. Integrated Linux capability model (capget/capset) and seccomp syscall filtering with classic BPF interpreter
+6. Expanded test suite with 20 targeted coverage tests, implemented memfd_create/mremap/msync, fixed mincore security vulnerability
+
+**Delivered:** Added 31 new syscalls across 12 categories (file sync, zero-copy I/O, memory management, process control, signals, timers, monitoring, capabilities, seccomp), a BPF interpreter for syscall filtering, and comprehensive dual-arch test coverage. Total kernel syscall count now exceeds 330.
+
+**Tech debt:** 15 items (inotify VFS hooks partial, rt_sigsuspend race, zero-copy uses kernel buffers, seccomp SIGSYS not delivered, bitmask-only signals, POSIX timer limits). See milestones/v1.2-MILESTONE-AUDIT.md.
+
+**Archives:**
+- milestones/v1.2-ROADMAP.md
+- milestones/v1.2-REQUIREMENTS.md
+- milestones/v1.2-MILESTONE-AUDIT.md
+
+---
+

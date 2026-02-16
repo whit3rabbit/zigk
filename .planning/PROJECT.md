@@ -2,7 +2,7 @@
 
 ## What This Is
 
-Systematic expansion of Linux/POSIX syscall coverage in the zk microkernel. Shipped v1.1 with 300+ syscalls implemented, hardened SFS filesystem with proper locking/links/symlinks/timestamps, WaitQueue-based blocking for all event FDs and IPC, and full SEM_UNDO lifecycle management. Dual-architecture (x86_64 + aarch64) with 306 integration tests.
+Systematic expansion of Linux/POSIX syscall coverage in the zk microkernel. Shipped v1.2 with 330+ syscalls implemented across 12 categories including file sync, zero-copy I/O, memory management extensions, modern process control, signal handling, POSIX timers, inotify file monitoring, Linux capabilities, and seccomp syscall filtering with a classic BPF interpreter. Dual-architecture (x86_64 + aarch64) with 203K LOC Zig and comprehensive integration test suite.
 
 ## Core Value
 
@@ -49,18 +49,22 @@ Every implemented syscall must work correctly on both x86_64 and aarch64 with ma
 - v sendfile 64KB optimized buffer (16x improvement) -- v1.1
 - v AT_SYMLINK_NOFOLLOW in utimensat -- v1.1
 - v dup3 O_CLOEXEC, accept4 flags, getrlimit/setrlimit, sigaltstack, statfs/fstatfs, getresuid/getresgid -- v1.1
+- v File synchronization (fsync, fdatasync, sync, syncfs as validation-only) -- v1.2
+- v Advanced file operations (fallocate mode=0+KEEP_SIZE, renameat2 NOREPLACE+EXCHANGE) -- v1.2
+- v Zero-copy I/O (splice, tee, vmsplice, copy_file_range with 64KB kernel buffers) -- v1.2
+- v Memory management extensions (memfd_create PMM-backed, mremap resize/move, msync validation) -- v1.2
+- v Modern process control (clone3 struct-based, waitid with siginfo_t) -- v1.2
+- v Signal handling extensions (rt_sigtimedwait, rt_sigqueueinfo, rt_tgsigqueueinfo, clock_nanosleep) -- v1.2
+- v epoll_pwait with atomic signal mask handling -- v1.2
+- v inotify file monitoring (init1, add_watch, rm_watch, event read with VFS hooks) -- v1.2
+- v POSIX timers (timer_create/settime/gettime/getoverrun/delete with scheduler integration) -- v1.2
+- v Linux capabilities (capget/capset with v1+v3 formats, per-process bitmasks) -- v1.2
+- v Seccomp syscall filtering (STRICT mode, FILTER mode with classic BPF interpreter) -- v1.2
+- v Test coverage expansion (20 tests for lchown, settimeofday, signals, select/epoll edges, madvise, mincore, rlimit) -- v1.2
 
 ### Active
 
-## Current Milestone: v1.2 Systematic Syscall Coverage
-
-**Goal:** Audit the Linux ABI for commonly-needed missing syscalls, implement the highest-value ones, and expand integration test coverage for both new and existing syscalls.
-
-**Target features:**
-- Systematic audit of missing Linux syscalls vs implemented
-- Implementation of highest-value missing syscalls
-- Integration tests for new syscalls and untested existing ones
-- Dual-arch (x86_64 + aarch64) for all additions
+(No active requirements -- next milestone not yet defined)
 
 ### Out of Scope
 
@@ -71,28 +75,35 @@ Every implemented syscall must work correctly on both x86_64 and aarch64 with ma
 - io_uring expansion -- already has basic support, full completion is a separate effort
 - Swap management (swapon, swapoff) -- no swap subsystem planned
 - Filesystem-level features (pivot_root, mount/umount rework) -- VFS redesign is separate
-- Timer expiry for setitimer/getitimer -- signal delivery from timer interrupt not wired yet, deferred
 - SFS nested subdirectory support -- fundamental SFS architecture change
 - SFS file count limit increase (64 max) -- requires on-disk format change
 - Multi-CPU affinity enforcement -- single-CPU kernel, separate project
+- Full seccomp BPF JIT -- v1.2 implements interpreter only, JIT is future work
+- Container/namespace support (unshare, setns) -- requires kernel architecture changes
+- True zero-copy I/O via VFS page cache -- splice/sendfile use 64KB kernel buffers for now
 
 ## Context
 
-Shipped v1.1 with 194,415 LOC Zig across x86_64 and aarch64.
+Shipped v1.2 with 203,161 LOC Zig across x86_64 and aarch64.
 Tech stack: Zig 0.16.x, custom UEFI bootloader, QEMU TCG.
-306 integration tests (all passing or documented-skip, 0 failing).
+330+ syscalls implemented. Comprehensive integration test suite on both architectures.
 
-v1.0 shipped 300+ syscalls from ~190 baseline. v1.1 resolved all 14 tech debt items from v1.0:
-- SFS deadlock eliminated via io_lock + alloc_lock restructuring
-- All yield-loop blocking replaced with WaitQueue infrastructure
-- SFS expanded with hard links, symlinks, timestamps
-- SEM_UNDO lifecycle fully implemented
-- sendfile optimized from 4KB to 64KB buffer
+v1.0 shipped 300+ syscalls from ~190 baseline. v1.1 resolved all 14 v1.0 tech debt items
+(SFS deadlock, yield-loop blocking, hard links, symlinks, timestamps, SEM_UNDO).
+v1.2 added 31 new syscalls across 12 categories: file sync, zero-copy I/O, memory management,
+modern process control, signal handling, POSIX timers, inotify, capabilities, and seccomp.
 
-Remaining tech debt (3 items from v1.1):
-- signalfd uses 10ms polling timeout instead of direct signal delivery wakeup
-- sendfile uses 64KB buffer copy, not true zero-copy (requires VFS page cache)
-- aarch64 test suite timeout in later tests (pre-existing infrastructure issue)
+Remaining tech debt (15 items from v1.2):
+- inotify VFS hooks incomplete (ftruncate events don't fire)
+- rt_sigsuspend pending signal race (architectural fix needed)
+- Per-process rlimit persistence not implemented
+- SIGSYS delivery not implemented for seccomp (ENOSYS used instead)
+- Bitmask-only signal tracking (no siginfo queue)
+- POSIX timer 10ms resolution, 8 per process limit
+- Zero-copy I/O uses kernel buffers (true zero-copy requires page cache)
+- signalfd uses 10ms polling timeout
+- fchdir syscall not implemented
+- See milestones/v1.2-MILESTONE-AUDIT.md for full list
 
 ## Constraints
 
@@ -119,6 +130,14 @@ Remaining tech debt (3 items from v1.1):
 | sendfile 64KB buffer instead of zero-copy | True zero-copy requires VFS page cache refactor | -- Revisit -- 16x improvement is significant |
 | WaitQueue replaces blocked_readers atomics | Cleaner lifecycle management | v Good -- consistent pattern |
 | Process lifecycle includes SEM_UNDO cleanup | After virt_pci but before resource freeing | v Good -- POSIX-compliant |
+| File sync as validation-only | No buffer cache in zk, data already on disk | v Good -- correct semantics |
+| 64KB kernel buffer for zero-copy I/O | True zero-copy requires VFS page cache | -- Revisit -- same pattern as sendfile |
+| Classic BPF interpreter for seccomp | Simpler than eBPF, sufficient for syscall filtering | v Good -- MVP approach |
+| Seccomp ENOSYS instead of SIGSYS | Signal queue integration complex, ENOSYS sufficient | -- Revisit -- correct behavior deferred |
+| Per-process capability bitmasks | All processes run as root, CAP_FULL_SET default | v Good -- foundation for future restriction |
+| POSIX timer scheduler integration | Inline expiration check in processIntervalTimers | v Good -- minimal overhead |
+| Bitmask-only signal tracking | No per-thread siginfo queue for MVP | -- Revisit -- limits rt_sigqueueinfo usefulness |
+| inotify MVP with EAGAIN reads | epoll integration is primary use case | v Good -- avoids blocking complexity |
 
 ---
-*Last updated: 2026-02-11 after v1.1 milestone*
+*Last updated: 2026-02-16 after v1.2 milestone*
