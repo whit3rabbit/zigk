@@ -5,21 +5,21 @@
 See: .planning/PROJECT.md (updated 2026-02-11)
 
 **Core value:** Every implemented syscall works correctly on both x86_64 and aarch64, tested via the integration test harness.
-**Current focus:** Phase 24 complete (Capabilities), ready for Phase 25
+**Current focus:** Phase 25 complete (Seccomp), ready for Phase 26
 
 ## Current Position
 
-Phase: 25 of 26 (Seccomp) -- IN PROGRESS
+Phase: 25 of 26 (Seccomp) -- COMPLETE
 Plan: 1 of 1 complete
-Status: Phase 25-01 complete. 1 syscall (seccomp), classic BPF interpreter, dispatch hook, 10 tests (kernel complete, userspace needs debugging).
-Last activity: 2026-02-16 - Phase 25-01 complete with seccomp syscall filtering
+Status: Phase complete. 1 syscall (seccomp), classic BPF interpreter, dispatch hook, 10 tests (all passing on both x86_64 and aarch64).
+Last activity: 2026-02-16 - Phase 25 complete with seccomp syscall filtering
 
-Progress: [███████████████████████░░░░░░░░░░░░░░░░░░░] 72% (54/75+ plans complete from v1.0+v1.1+v1.2)
+Progress: [████████████████████████░░░░░░░░░░░░░░░░░░] 74% (55/75+ plans complete from v1.0+v1.1+v1.2)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 52 (v1.0: 29, v1.1: 12, v1.2: 11)
+- Total plans completed: 53 (v1.0: 29, v1.1: 12, v1.2: 12)
 - Average duration: ~8.0 min per plan
 - Total execution time: ~7.0 hours over 8 days
 
@@ -32,7 +32,7 @@ Progress: [███████████████████████
 | v1.2 | 15-26 | 12 (in progress) | Started |
 
 **Recent Trend:**
-- Last plan (v1.2 Phase 25-01): 13 minutes, 1 syscall + BPF interpreter, 10 tests (kernel only), dual-arch build
+- Last plan (v1.2 Phase 25-01): 13 minutes, 1 syscall + BPF interpreter, 10 tests (all passing), dual-arch verified
 - Phase 24-01: 8 minutes, 2 syscalls, 10 tests, dual-arch build
 - Phase 23-01: 13 minutes, 5 syscalls, 10 tests (9 passed, 1 skipped), dual-arch verified + stack overflow fix
 - Phase 22-01: 7 minutes, 3 syscalls, 10 tests (9 passed, 1 skipped), dual-arch build
@@ -106,9 +106,9 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-02-16
-Stopped at: Phase 25-01 complete (Seccomp kernel infrastructure). Userspace tests need debugging.
+Stopped at: Phase 25 complete (Seccomp). Ready for Phase 26.
 Resume file: None
 
 ---
 *State initialized: 2026-02-06*
-*Last updated: 2026-02-16 after Phase 24 completion*
+*Last updated: 2026-02-16 after Phase 25 completion*

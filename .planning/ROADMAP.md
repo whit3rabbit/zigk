@@ -316,7 +316,7 @@ Phases execute in numeric order: 15 -> 16 -> 17 -> 18 -> 19 -> 20 -> 21 -> 22 ->
 | 22. File Monitoring | v1.2 | 1/1 | Complete | 2026-02-15 |
 | 23. POSIX Timers | v1.2 | 1/1 | Complete | 2026-02-15 |
 | 24. Capabilities | v1.2 | Complete    | 2026-02-16 | - |
-| 25. Seccomp | v1.2 | 0/TBD | Not started | - |
+| 25. Seccomp | v1.2 | Complete    | 2026-02-16 | - |
 | 26. Test Coverage Expansion | v1.2 | 0/TBD | Not started | - |
 
 ---
