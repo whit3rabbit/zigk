@@ -247,7 +247,7 @@ Plans:
 **Plans**: 1 plan
 
 Plans:
-- [ ] 24-01-PLAN.md -- Implement capget/capset syscalls with per-process bitmasks, v1/v3 format support, and tests
+- [x] 24-01-PLAN.md -- Implement capget/capset syscalls with per-process bitmasks, v1/v3 format support, and tests
 
 #### Phase 25: Seccomp
 **Goal**: Syscall filtering via seccomp for sandboxing is available
@@ -260,10 +260,10 @@ Plans:
   4. Seccomp state is inherited across fork and enforced on both architectures
   5. Attempting a disallowed syscall results in process termination or error
 
-**Plans**: TBD
+**Plans**: 1 plan
 
 Plans:
-- [ ] 25-01: TBD
+- [ ] 25-01-PLAN.md -- Implement seccomp syscall with STRICT/FILTER modes, classic BPF interpreter, dispatch hook, and tests
 
 #### Phase 26: Test Coverage Expansion
 **Goal**: Integration tests exist for all previously-untested existing syscalls
