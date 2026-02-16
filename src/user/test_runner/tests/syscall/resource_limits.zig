@@ -83,3 +83,59 @@ pub fn testGetrlimitMultipleResources() !void {
         if (limit.rlim_cur == 0 and limit.rlim_max == 0) return error.TestFailed;
     }
 }
+
+// =============================================================================
+// Phase 26-02: Resource limit edge cases
+// =============================================================================
+
+// Test 6: getrlimit with invalid resource number should fail
+pub fn testGetrlimitInvalidResource() !void {
+    var limit: syscall.Rlimit = undefined;
+    const result = syscall.getrlimit(999, &limit); // Invalid resource
+
+    if (result) |_| {
+        return error.TestFailed; // Should have failed
+    } else |err| {
+        if (err != error.EINVAL) return error.TestFailed;
+    }
+}
+
+// Test 7: setrlimit can raise soft limit to match hard limit
+pub fn testSetrlimitRaiseSoftToHard() !void {
+    // Get current RLIMIT_NOFILE
+    var old_limit: syscall.Rlimit = undefined;
+    try syscall.getrlimit(syscall.RLIMIT_NOFILE, &old_limit);
+
+    // If soft < hard, try to raise soft to hard
+    if (old_limit.rlim_cur < old_limit.rlim_max) {
+        var new_limit: syscall.Rlimit = .{
+            .rlim_cur = old_limit.rlim_max,
+            .rlim_max = old_limit.rlim_max,
+        };
+
+        // This should succeed (raising soft to hard)
+        syscall.setrlimit(syscall.RLIMIT_NOFILE, &new_limit) catch |err| {
+            // If EPERM, that's acceptable (privilege issue)
+            if (err != error.EPERM) return err;
+            return;
+        };
+
+        // Verify it was set
+        var check_limit: syscall.Rlimit = undefined;
+        try syscall.getrlimit(syscall.RLIMIT_NOFILE, &check_limit);
+        if (check_limit.rlim_cur != new_limit.rlim_cur) return error.TestFailed;
+
+        // Restore original limit
+        _ = syscall.setrlimit(syscall.RLIMIT_NOFILE, &old_limit) catch {};
+    }
+}
+
+// Test 8: getrlimit for RLIMIT_STACK returns valid values
+pub fn testGetrlimitStack() !void {
+    var limit: syscall.Rlimit = undefined;
+    try syscall.getrlimit(syscall.RLIMIT_STACK, &limit);
+
+    // Verify soft > 0 and soft <= hard
+    if (limit.rlim_cur == 0) return error.TestFailed;
+    if (limit.rlim_cur > limit.rlim_max) return error.TestFailed;
+}

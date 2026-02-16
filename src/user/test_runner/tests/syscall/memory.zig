@@ -784,4 +784,61 @@ pub fn testMsyncValidation() !void {
     }
 }
 
+// =============================================================================
+// Phase 26-02: Memory advisory extras
+// =============================================================================
+
+// Memory Test 34: madvise DONTNEED may discard page contents
+pub fn testMadviseDontneed() !void {
+    const MAP_ANONYMOUS = 0x20;
+    const MAP_PRIVATE = 0x02;
+    const PROT_READ = 0x1;
+    const PROT_WRITE = 0x2;
+
+    const size: usize = 4096;
+
+    const addr = syscall.mmap(null, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, 0, 0) catch |err| {
+        if (err == error.NotImplemented) return error.SkipTest;
+        return err;
+    };
+    defer _ = syscall.munmap(addr, size) catch {};
+
+    // Write data to the page
+    addr[0] = 0x42;
+    addr[4095] = 0x43;
+
+    // Call madvise with MADV_DONTNEED (4)
+    // On Linux this allows the kernel to discard the pages
+    // In zk it's likely a no-op stub that just validates and succeeds
+    const MADV_DONTNEED = 4;
+    syscall.madvise(addr, size, MADV_DONTNEED) catch |err| {
+        if (err == error.NotImplemented) return error.SkipTest;
+        return err;
+    };
+
+    // Read the data back - it may or may not be zero depending on implementation
+    // Just verify no crash and madvise succeeded
+    _ = addr[0];
+    _ = addr[4095];
+}
+
+// Memory Test 35: mincore on unmapped address should fail
+pub fn testMincoreUnmappedAddr() !void {
+    // Call mincore with an obviously unmapped address
+    const unmapped_addr: [*]u8 = @ptrFromInt(0x1000);
+    var vec: [1]u8 = .{0};
+
+    const result = syscall.mincore(unmapped_addr, 4096, &vec);
+
+    if (result) |_| {
+        return error.TestFailed; // Should have failed
+    } else |err| {
+        // Should return ENOMEM or EFAULT
+        if (err != error.OutOfMemory and err != error.BadAddress) {
+            if (err == error.NotImplemented) return error.SkipTest;
+            return error.TestFailed;
+        }
+    }
+}
+
 const std = @import("std");

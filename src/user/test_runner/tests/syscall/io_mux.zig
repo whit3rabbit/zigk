@@ -389,3 +389,136 @@ pub fn testEpollPwaitMaskRestoredOnSuccess() !void {
 
     if (post_mask != pre_mask) return error.TestFailed;
 }
+
+// =============================================================================
+// Phase 26-02: select/epoll edge case tests
+// =============================================================================
+
+// Test 16: select with nfds=0 should return immediately
+pub fn testSelectNfdsZero() !void {
+    // Call select with nfds=0, all fd_sets null, timeout=0
+    var timeout: extern struct { tv_sec: i64, tv_usec: i64 } = .{ .tv_sec = 0, .tv_usec = 0 };
+    const nready = try syscall.select(0, null, null, null, @ptrCast(&timeout));
+
+    // Should return 0 (no fds to watch)
+    if (nready != 0) return error.TestFailed;
+}
+
+// Test 17: select with all null fd_sets should return 0
+pub fn testSelectNullAllSets() !void {
+    var pipefd: [2]i32 = undefined;
+    try syscall.pipe(&pipefd);
+    defer {
+        syscall.close(pipefd[0]) catch {};
+        syscall.close(pipefd[1]) catch {};
+    }
+
+    // Call select with nfds > 0 but all fd_sets null, timeout=0
+    var timeout: extern struct { tv_sec: i64, tv_usec: i64 } = .{ .tv_sec = 0, .tv_usec = 0 };
+    const nready = try syscall.select(pipefd[0] + 1, null, null, null, @ptrCast(&timeout));
+
+    // Should return 0 (nothing to watch)
+    if (nready != 0) return error.TestFailed;
+}
+
+// Test 18: epoll EPOLL_CTL_DEL removes fd from interest list
+pub fn testEpollCtlDel() !void {
+    const epfd = try syscall.epoll_create1(0);
+    defer syscall.close(epfd) catch {};
+
+    var pipefd: [2]i32 = undefined;
+    try syscall.pipe(&pipefd);
+    defer {
+        syscall.close(pipefd[0]) catch {};
+        syscall.close(pipefd[1]) catch {};
+    }
+
+    // Add read end to epoll
+    var event = syscall.EpollEvent.init(syscall.EPOLLIN, @as(u64, @bitCast(@as(i64, pipefd[0]))));
+    _ = try syscall.epoll_ctl(epfd, syscall.EPOLL_CTL_ADD, pipefd[0], &event);
+
+    // Write data to make it readable
+    const msg = "x";
+    _ = try syscall.write(pipefd[1], msg.ptr, msg.len);
+
+    // Now DEL the fd
+    _ = try syscall.epoll_ctl(epfd, syscall.EPOLL_CTL_DEL, pipefd[0], null);
+
+    // epoll_wait should return 0 (fd was removed)
+    var events: [4]syscall.EpollEvent = undefined;
+    const nready = try syscall.epoll_wait(epfd, &events, 4, 0);
+    if (nready != 0) return error.TestFailed;
+}
+
+// Test 19: epoll EPOLL_CTL_MOD changes monitored events
+pub fn testEpollCtlMod() !void {
+    const epfd = try syscall.epoll_create1(0);
+    defer syscall.close(epfd) catch {};
+
+    var pipefd: [2]i32 = undefined;
+    try syscall.pipe(&pipefd);
+    defer {
+        syscall.close(pipefd[0]) catch {};
+        syscall.close(pipefd[1]) catch {};
+    }
+
+    // Add read end monitoring EPOLLIN
+    var event = syscall.EpollEvent.init(syscall.EPOLLIN, @as(u64, @bitCast(@as(i64, pipefd[0]))));
+    _ = try syscall.epoll_ctl(epfd, syscall.EPOLL_CTL_ADD, pipefd[0], &event);
+
+    // Write data so it's readable
+    const msg = "test";
+    _ = try syscall.write(pipefd[1], msg.ptr, msg.len);
+
+    // Verify it shows up with EPOLLIN
+    var events: [4]syscall.EpollEvent = undefined;
+    var nready = try syscall.epoll_wait(epfd, &events, 4, 0);
+    if (nready != 1) return error.TestFailed;
+    if ((events[0].events & syscall.EPOLLIN) == 0) return error.TestFailed;
+
+    // Now MOD to only watch EPOLLOUT
+    var new_event = syscall.EpollEvent.init(syscall.EPOLLOUT, @as(u64, @bitCast(@as(i64, pipefd[0]))));
+    _ = try syscall.epoll_ctl(epfd, syscall.EPOLL_CTL_MOD, pipefd[0], &new_event);
+
+    // epoll_wait should return 0 (read-end is not writable)
+    nready = try syscall.epoll_wait(epfd, &events, 4, 0);
+    if (nready != 0) return error.TestFailed;
+}
+
+// Test 20: select detects multiple fds ready simultaneously
+pub fn testSelectMultipleFdsReady() !void {
+    var pipe1: [2]i32 = undefined;
+    var pipe2: [2]i32 = undefined;
+    try syscall.pipe(&pipe1);
+    defer {
+        syscall.close(pipe1[0]) catch {};
+        syscall.close(pipe1[1]) catch {};
+    }
+    try syscall.pipe(&pipe2);
+    defer {
+        syscall.close(pipe2[0]) catch {};
+        syscall.close(pipe2[1]) catch {};
+    }
+
+    // Write to both pipes
+    const msg = "x";
+    _ = try syscall.write(pipe1[1], msg.ptr, msg.len);
+    _ = try syscall.write(pipe2[1], msg.ptr, msg.len);
+
+    // Set up readfds with both read-ends
+    var readfds: [128]u8 = undefined;
+    fdZero(&readfds);
+    fdSet(&readfds, pipe1[0]);
+    fdSet(&readfds, pipe2[0]);
+
+    // Find max fd
+    const max_fd = if (pipe1[0] > pipe2[0]) pipe1[0] else pipe2[0];
+
+    // select should return 2 (both ready)
+    var timeout: extern struct { tv_sec: i64, tv_usec: i64 } = .{ .tv_sec = 0, .tv_usec = 0 };
+    const nready = try syscall.select(max_fd + 1, &readfds, null, null, @ptrCast(&timeout));
+
+    if (nready != 2) return error.TestFailed;
+    if (!fdIsSet(&readfds, pipe1[0])) return error.TestFailed;
+    if (!fdIsSet(&readfds, pipe2[0])) return error.TestFailed;
+}
