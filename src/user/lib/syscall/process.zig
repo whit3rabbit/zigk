@@ -569,3 +569,96 @@ pub fn sched_getaffinity(pid: i32, cpusetsize: usize, mask: [*]u8) SyscallError!
     if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
     return ret;
 }
+
+// =============================================================================
+// Capability Syscalls
+// =============================================================================
+
+/// Linux capability header for capget/capset
+pub const CapUserHeader = extern struct {
+    version: u32,
+    pid: i32,
+};
+
+/// Linux capability data (one entry for v1, two for v3)
+pub const CapUserData = extern struct {
+    effective: u32,
+    permitted: u32,
+    inheritable: u32,
+};
+
+/// Capability version constants
+pub const _LINUX_CAPABILITY_VERSION_1: u32 = 0x19980330;
+pub const _LINUX_CAPABILITY_VERSION_2: u32 = 0x20071026;
+pub const _LINUX_CAPABILITY_VERSION_3: u32 = 0x20080522;
+
+/// Standard Linux capability constants (correct Linux values)
+pub const CAP_CHOWN: u6 = 0;
+pub const CAP_DAC_OVERRIDE: u6 = 1;
+pub const CAP_DAC_READ_SEARCH: u6 = 2;
+pub const CAP_FOWNER: u6 = 3;
+pub const CAP_FSETID: u6 = 4;
+pub const CAP_KILL: u6 = 5;
+pub const CAP_SETGID: u6 = 6;
+pub const CAP_SETUID: u6 = 7;
+pub const CAP_SETPCAP: u6 = 8;
+pub const CAP_LINUX_IMMUTABLE: u6 = 9;
+pub const CAP_NET_BIND_SERVICE: u6 = 10;
+pub const CAP_NET_BROADCAST: u6 = 11;
+pub const CAP_NET_ADMIN: u6 = 12;
+pub const CAP_NET_RAW: u6 = 13;
+pub const CAP_IPC_LOCK: u6 = 14;
+pub const CAP_IPC_OWNER: u6 = 15;
+pub const CAP_SYS_MODULE: u6 = 16;
+pub const CAP_SYS_RAWIO: u6 = 17;
+pub const CAP_SYS_CHROOT: u6 = 18;
+pub const CAP_SYS_PTRACE: u6 = 19;
+pub const CAP_SYS_PACCT: u6 = 20;
+pub const CAP_SYS_ADMIN: u6 = 21;
+pub const CAP_SYS_BOOT: u6 = 22;
+pub const CAP_SYS_NICE: u6 = 23;
+pub const CAP_SYS_RESOURCE: u6 = 24;
+pub const CAP_SYS_TIME: u6 = 25;
+pub const CAP_SYS_TTY_CONFIG: u6 = 26;
+pub const CAP_MKNOD: u6 = 27;
+pub const CAP_LEASE: u6 = 28;
+pub const CAP_AUDIT_WRITE: u6 = 29;
+pub const CAP_AUDIT_CONTROL: u6 = 30;
+pub const CAP_SETFCAP: u6 = 31;
+pub const CAP_MAC_OVERRIDE: u6 = 32;
+pub const CAP_MAC_ADMIN: u6 = 33;
+pub const CAP_SYSLOG: u6 = 34;
+pub const CAP_WAKE_ALARM: u6 = 35;
+pub const CAP_BLOCK_SUSPEND: u6 = 36;
+pub const CAP_AUDIT_READ: u6 = 37;
+pub const CAP_PERFMON: u6 = 38;
+pub const CAP_BPF: u6 = 39;
+pub const CAP_CHECKPOINT_RESTORE: u6 = 40;
+pub const CAP_LAST_CAP: u6 = 40;
+
+/// All capabilities set (bits 0-40)
+pub const CAP_FULL_SET: u64 = (@as(u64, 1) << (@as(u7, CAP_LAST_CAP) + 1)) - 1;
+
+/// Get process capabilities
+/// hdrp: pointer to CapUserHeader (version + pid)
+/// datap: pointer to CapUserData array (1 entry for v1, 2 for v3) or null for version query
+pub fn capget(hdrp: *CapUserHeader, datap: ?[*]CapUserData) SyscallError!void {
+    const ret = primitive.syscall2(
+        syscalls.SYS_CAPGET,
+        @intFromPtr(hdrp),
+        if (datap) |d| @intFromPtr(d) else 0,
+    );
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}
+
+/// Set process capabilities
+/// hdrp: pointer to CapUserHeader (version + pid)
+/// datap: pointer to CapUserData array (1 entry for v1, 2 for v3)
+pub fn capset(hdrp: *const CapUserHeader, datap: [*]const CapUserData) SyscallError!void {
+    const ret = primitive.syscall2(
+        syscalls.SYS_CAPSET,
+        @intFromPtr(hdrp),
+        @intFromPtr(datap),
+    );
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+}

@@ -309,6 +309,25 @@ pub const PR_GET_NAME = process.PR_GET_NAME;
 pub const sched_setaffinity = process.sched_setaffinity;
 pub const sched_getaffinity = process.sched_getaffinity;
 
+// Re-export Capabilities
+pub const capget = process.capget;
+pub const capset = process.capset;
+pub const CapUserHeader = process.CapUserHeader;
+pub const CapUserData = process.CapUserData;
+pub const _LINUX_CAPABILITY_VERSION_1 = process._LINUX_CAPABILITY_VERSION_1;
+pub const _LINUX_CAPABILITY_VERSION_3 = process._LINUX_CAPABILITY_VERSION_3;
+pub const CAP_CHOWN = process.CAP_CHOWN;
+pub const CAP_DAC_OVERRIDE = process.CAP_DAC_OVERRIDE;
+pub const CAP_KILL = process.CAP_KILL;
+pub const CAP_SETGID = process.CAP_SETGID;
+pub const CAP_SETUID = process.CAP_SETUID;
+pub const CAP_SETPCAP = process.CAP_SETPCAP;
+pub const CAP_NET_RAW = process.CAP_NET_RAW;
+pub const CAP_SYS_ADMIN = process.CAP_SYS_ADMIN;
+pub const CAP_MKNOD = process.CAP_MKNOD;
+pub const CAP_LAST_CAP = process.CAP_LAST_CAP;
+pub const CAP_FULL_SET = process.CAP_FULL_SET;
+
 // Re-export Signal
 pub const kill = signal.kill;
 pub const killpg = signal.killpg;

@@ -16,6 +16,7 @@ const event_fds_tests = @import("tests/syscall/event_fds.zig");
 const fs_extras_tests = @import("tests/syscall/fs_extras.zig");
 const inotify_tests = @import("tests/syscall/inotify.zig");
 const posix_timer_tests = @import("tests/syscall/posix_timer.zig");
+const capabilities_tests = @import("tests/syscall/capabilities.zig");
 const vectored_io_tests = @import("tests/syscall/vectored_io.zig");
 const process_control_tests = @import("tests/syscall/process_control.zig");
 const sysv_ipc_tests = @import("tests/syscall/sysv_ipc.zig");
@@ -347,6 +348,18 @@ export fn main(argc: i32, argv: [*][*:0]u8) i32 {
     runner.runTest("posix_timer: getoverrun", posix_timer_tests.testTimerGetOverrun);
     runner.runTest("posix_timer: signal delivery", posix_timer_tests.testTimerSignalDelivery);
     runner.runTest("posix_timer: multiple timers", posix_timer_tests.testTimerMultiple);
+
+    // Phase 24: Capability tests
+    runner.runTest("capabilities: capget self v3", capabilities_tests.testCapgetSelf);
+    runner.runTest("capabilities: capget v1", capabilities_tests.testCapgetV1);
+    runner.runTest("capabilities: version negotiation", capabilities_tests.testCapgetVersionNegotiation);
+    runner.runTest("capabilities: version query", capabilities_tests.testCapgetVersionQuery);
+    runner.runTest("capabilities: capset drop effective", capabilities_tests.testCapsetDropEffective);
+    runner.runTest("capabilities: cannot gain permitted", capabilities_tests.testCapsetCannotGainPermitted);
+    runner.runTest("capabilities: effective subset of permitted", capabilities_tests.testCapsetEffectiveSubsetOfPermitted);
+    runner.runTest("capabilities: capset other pid fails", capabilities_tests.testCapsetOtherPidFails);
+    runner.runTest("capabilities: capget own pid", capabilities_tests.testCapgetOwnPid);
+    runner.runTest("capabilities: set inheritable", capabilities_tests.testCapsetInheritable);
 
     // FD operations tests
     runner.runTest("fd_ops: dup basic", fd_ops_tests.testDupBasic);
