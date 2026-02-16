@@ -1766,7 +1766,7 @@ pub fn sys_seccomp(op: usize, flags: usize, args_ptr: usize) SyscallError!usize 
 ///
 /// IMPORTANT: This function is called for ALL syscalls including SYS_SECCOMP.
 /// In strict mode, seccomp() itself is blocked (only read/write/exit/sigreturn allowed).
-pub fn checkSeccomp(proc: *const Process, syscall_num: usize, args: [6]usize) u32 {
+pub fn checkSeccomp(proc: *const Process, syscall_num: usize, args: [6]usize, instruction_pointer: u64) u32 {
     if (proc.seccomp_mode == uapi.seccomp.SECCOMP_MODE_DISABLED) {
         return uapi.seccomp.SECCOMP_RET_ALLOW;
     }
@@ -1804,7 +1804,7 @@ pub fn checkSeccomp(proc: *const Process, syscall_num: usize, args: [6]usize) u3
         var data = uapi.seccomp.SeccompData{
             .nr = @intCast(@as(i32, @bitCast(@as(u32, @truncate(syscall_num))))),
             .arch = arch,
-            .instruction_pointer = 0, // TODO: Get actual RIP/PC from frame
+            .instruction_pointer = instruction_pointer,
             .args = args,
         };
 

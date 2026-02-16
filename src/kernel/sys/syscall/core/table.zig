@@ -149,7 +149,7 @@ pub export fn dispatch_syscall(frame: *SyscallFrame) callconv(.c) void {
     const seccomp_check = blk_seccomp: {
         const proc = process.getCurrentProcessOrNull() orelse break :blk_seccomp uapi.seccomp.SECCOMP_RET_ALLOW;
         if (proc.seccomp_mode != 0) {
-            break :blk_seccomp process.checkSeccomp(proc, syscall_num, args);
+            break :blk_seccomp process.checkSeccomp(proc, syscall_num, args, frame.getReturnRip());
         }
         break :blk_seccomp uapi.seccomp.SECCOMP_RET_ALLOW;
     };

@@ -255,6 +255,39 @@ pub fn testSeccompInheritedOnFork() !void {
     if (exit_code != 0) return error.TestFailed;
 }
 
+pub fn testSeccompFilterInstructionPointer() !void {
+    const pid = try syscall.fork();
+    if (pid == 0) {
+        _ = syscall.prctl(syscall.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) catch {
+            syscall.exit(2);
+        };
+        // BPF: Load instruction_pointer (offset 8, low 32 bits), kill if zero, allow if non-zero
+        // This verifies the kernel actually populates instruction_pointer in SeccompData
+        var filter = [_]SockFilterInsn{
+            // Load word at offset 8 (instruction_pointer low 32 bits)
+            .{ .code = syscall.BPF_LD | syscall.BPF_W | syscall.BPF_ABS, .jt = 0, .jf = 0, .k = 8 },
+            // If zero, jump to kill (next instruction)
+            .{ .code = syscall.BPF_JMP | syscall.BPF_JEQ | syscall.BPF_K, .jt = 1, .jf = 0, .k = 0 },
+            // Non-zero: allow
+            .{ .code = syscall.BPF_RET | syscall.BPF_K, .jt = 0, .jf = 0, .k = syscall.SECCOMP_RET_ALLOW },
+            // Zero: kill (test fails)
+            .{ .code = syscall.BPF_RET | syscall.BPF_K, .jt = 0, .jf = 0, .k = syscall.SECCOMP_RET_KILL },
+        };
+        var prog = SockFprog{ .len = 4, .filter = @intFromPtr(&filter) };
+        _ = syscall.seccomp(syscall.SECCOMP_SET_MODE_FILTER, 0, @intFromPtr(&prog)) catch {
+            syscall.exit(3);
+        };
+        // If instruction_pointer is non-zero, getpid will succeed (filter allows)
+        if (rawGetpid()) |_| {
+            syscall.exit(0); // success - instruction_pointer was populated
+        } else |_| {
+            syscall.exit(1); // failure - instruction_pointer was 0, filter killed
+        }
+    }
+    const exit_code = try waitChild(pid);
+    if (exit_code != 0) return error.TestFailed;
+}
+
 pub fn testPrctlNoNewPrivs() !void {
     // This can run in the main process -- no_new_privs is harmless
     _ = try syscall.prctl(syscall.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);

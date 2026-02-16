@@ -380,6 +380,7 @@ export fn main(argc: i32, argv: [*][*:0]u8) i32 {
     runner.runTest("seccomp: strict cannot be undone", seccomp_tests.testSeccompStrictCannotBeUndone);
     runner.runTest("seccomp: filter errno value", seccomp_tests.testSeccompFilterErrno);
     runner.runTest("seccomp: inherited on fork", seccomp_tests.testSeccompInheritedOnFork);
+    runner.runTest("seccomp: filter instruction pointer", seccomp_tests.testSeccompFilterInstructionPointer);
     runner.runTest("seccomp: prctl no_new_privs", seccomp_tests.testPrctlNoNewPrivs);
 
     // FD operations tests
