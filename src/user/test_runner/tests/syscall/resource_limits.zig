@@ -107,32 +107,26 @@ pub fn testGetrlimitInvalidResource() !void {
 
 // Test 7: setrlimit can raise soft limit to match hard limit
 pub fn testSetrlimitRaiseSoftToHard() !void {
-    // SKIP: Kernel doesn't store per-process NOFILE limits yet
-    // setrlimit accepts values but doesn't persist them (see process.zig:1061-1067)
-    // Requires adding rlimit_nofile_{soft,hard} fields to Process struct
-    // Deferred - requires architectural change (Process struct modification)
-    return error.SkipTest;
+    var old_limit: syscall.Rlimit = undefined;
+    try syscall.getrlimit(syscall.RLIMIT_NOFILE, &old_limit);
 
-    // var old_limit: syscall.Rlimit = undefined;
-    // try syscall.getrlimit(syscall.RLIMIT_NOFILE, &old_limit);
+    if (old_limit.rlim_cur < old_limit.rlim_max) {
+        var new_limit: syscall.Rlimit = .{
+            .rlim_cur = old_limit.rlim_max,
+            .rlim_max = old_limit.rlim_max,
+        };
 
-    // if (old_limit.rlim_cur < old_limit.rlim_max) {
-    //     var new_limit: syscall.Rlimit = .{
-    //         .rlim_cur = old_limit.rlim_max,
-    //         .rlim_max = old_limit.rlim_max,
-    //     };
+        syscall.setrlimit(syscall.RLIMIT_NOFILE, &new_limit) catch |err| {
+            if (err != error.EPERM) return err;
+            return;
+        };
 
-    //     syscall.setrlimit(syscall.RLIMIT_NOFILE, &new_limit) catch |err| {
-    //         if (err != error.EPERM) return err;
-    //         return;
-    //     };
+        var check_limit: syscall.Rlimit = undefined;
+        try syscall.getrlimit(syscall.RLIMIT_NOFILE, &check_limit);
+        if (check_limit.rlim_cur != new_limit.rlim_cur) return error.TestFailed;
 
-    //     var check_limit: syscall.Rlimit = undefined;
-    //     try syscall.getrlimit(syscall.RLIMIT_NOFILE, &check_limit);
-    //     if (check_limit.rlim_cur != new_limit.rlim_cur) return error.TestFailed;
-
-    //     _ = syscall.setrlimit(syscall.RLIMIT_NOFILE, &old_limit) catch {};
-    // }
+        _ = syscall.setrlimit(syscall.RLIMIT_NOFILE, &old_limit) catch {};
+    }
 }
 
 // Test 8: getrlimit for RLIMIT_STACK returns valid values

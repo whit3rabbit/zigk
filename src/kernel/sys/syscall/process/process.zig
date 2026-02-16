@@ -996,22 +996,20 @@ pub fn sys_getrlimit(resource: usize, rlim_ptr: usize) SyscallError!usize {
             .rlim_max = proc.rlimit_as,
         },
         RLIMIT_STACK => .{
-            .rlim_cur = DEFAULT_STACK_LIMIT,
-            .rlim_max = RLIM_INFINITY,
+            .rlim_cur = proc.rlimit_stack_soft,
+            .rlim_max = proc.rlimit_stack_hard,
         },
         RLIMIT_NOFILE => .{
-            .rlim_cur = DEFAULT_NOFILE_SOFT,
-            .rlim_max = DEFAULT_NOFILE_HARD,
+            .rlim_cur = proc.rlimit_nofile_soft,
+            .rlim_max = proc.rlimit_nofile_hard,
         },
         RLIMIT_NPROC => .{
-            // No per-user process limit enforced yet
-            .rlim_cur = RLIM_INFINITY,
-            .rlim_max = RLIM_INFINITY,
+            .rlim_cur = proc.rlimit_nproc_soft,
+            .rlim_max = proc.rlimit_nproc_hard,
         },
         RLIMIT_CORE => .{
-            // Core dumps not implemented
-            .rlim_cur = 0,
-            .rlim_max = RLIM_INFINITY,
+            .rlim_cur = proc.rlimit_core_soft,
+            .rlim_max = proc.rlimit_core_hard,
         },
         RLIMIT_CPU, RLIMIT_FSIZE, RLIMIT_DATA, RLIMIT_RSS, RLIMIT_MEMLOCK, RLIMIT_LOCKS, RLIMIT_SIGPENDING, RLIMIT_MSGQUEUE, RLIMIT_NICE, RLIMIT_RTPRIO, RLIMIT_RTTIME => .{
             // Not tracked/enforced, return unlimited
@@ -1055,15 +1053,37 @@ pub fn sys_setrlimit(resource: usize, rlim_ptr: usize) SyscallError!usize {
             }
             proc.rlimit_as = new_limit.rlim_cur;
         },
-        RLIMIT_CORE => {
-            // Accept but don't enforce (no core dumps implemented)
-        },
-        RLIMIT_STACK, RLIMIT_NOFILE, RLIMIT_NPROC => {
-            // Accept the values but don't store them yet (would need process struct fields)
-            // Non-root cannot raise above hard limit, but we don't track hard limits per-process
-            if (proc.euid != 0) {
-                // For now, non-root can only set to existing defaults or lower
+        RLIMIT_NOFILE => {
+            // Non-root cannot raise hard limit above current hard limit
+            if (new_limit.rlim_max > proc.rlimit_nofile_hard and proc.euid != 0) {
+                return error.EPERM;
             }
+            proc.rlimit_nofile_soft = new_limit.rlim_cur;
+            proc.rlimit_nofile_hard = new_limit.rlim_max;
+        },
+        RLIMIT_STACK => {
+            // Non-root cannot raise hard limit above current hard limit
+            if (new_limit.rlim_max > proc.rlimit_stack_hard and proc.euid != 0) {
+                return error.EPERM;
+            }
+            proc.rlimit_stack_soft = new_limit.rlim_cur;
+            proc.rlimit_stack_hard = new_limit.rlim_max;
+        },
+        RLIMIT_NPROC => {
+            // Non-root cannot raise hard limit above current hard limit
+            if (new_limit.rlim_max > proc.rlimit_nproc_hard and proc.euid != 0) {
+                return error.EPERM;
+            }
+            proc.rlimit_nproc_soft = new_limit.rlim_cur;
+            proc.rlimit_nproc_hard = new_limit.rlim_max;
+        },
+        RLIMIT_CORE => {
+            // Non-root cannot raise hard limit above current hard limit
+            if (new_limit.rlim_max > proc.rlimit_core_hard and proc.euid != 0) {
+                return error.EPERM;
+            }
+            proc.rlimit_core_soft = new_limit.rlim_cur;
+            proc.rlimit_core_hard = new_limit.rlim_max;
         },
         else => {
             // Unknown or unsupported resource
@@ -1104,20 +1124,20 @@ pub fn sys_prlimit64(pid: usize, resource: usize, new_limit_ptr: usize, old_limi
                 .rlim_max = proc.rlimit_as,
             },
             RLIMIT_STACK => .{
-                .rlim_cur = DEFAULT_STACK_LIMIT,
-                .rlim_max = RLIM_INFINITY,
+                .rlim_cur = proc.rlimit_stack_soft,
+                .rlim_max = proc.rlimit_stack_hard,
             },
             RLIMIT_NOFILE => .{
-                .rlim_cur = DEFAULT_NOFILE_SOFT,
-                .rlim_max = DEFAULT_NOFILE_HARD,
+                .rlim_cur = proc.rlimit_nofile_soft,
+                .rlim_max = proc.rlimit_nofile_hard,
             },
             RLIMIT_NPROC => .{
-                .rlim_cur = RLIM_INFINITY,
-                .rlim_max = RLIM_INFINITY,
+                .rlim_cur = proc.rlimit_nproc_soft,
+                .rlim_max = proc.rlimit_nproc_hard,
             },
             RLIMIT_CORE => .{
-                .rlim_cur = 0,
-                .rlim_max = RLIM_INFINITY,
+                .rlim_cur = proc.rlimit_core_soft,
+                .rlim_max = proc.rlimit_core_hard,
             },
             RLIMIT_CPU, RLIMIT_FSIZE, RLIMIT_DATA, RLIMIT_RSS, RLIMIT_MEMLOCK, RLIMIT_LOCKS, RLIMIT_SIGPENDING, RLIMIT_MSGQUEUE, RLIMIT_NICE, RLIMIT_RTPRIO, RLIMIT_RTTIME => .{
                 .rlim_cur = RLIM_INFINITY,
@@ -1152,7 +1172,39 @@ pub fn sys_prlimit64(pid: usize, resource: usize, new_limit_ptr: usize, old_limi
                 }
                 proc.rlimit_as = new_limit.rlim_cur;
             },
-            RLIMIT_STACK, RLIMIT_NOFILE, RLIMIT_NPROC, RLIMIT_CORE, RLIMIT_CPU, RLIMIT_FSIZE, RLIMIT_DATA, RLIMIT_RSS, RLIMIT_MEMLOCK, RLIMIT_LOCKS, RLIMIT_SIGPENDING, RLIMIT_MSGQUEUE, RLIMIT_NICE, RLIMIT_RTPRIO, RLIMIT_RTTIME => {
+            RLIMIT_NOFILE => {
+                // Non-root cannot raise hard limit above current hard limit
+                if (new_limit.rlim_max > proc.rlimit_nofile_hard and caller.euid != 0) {
+                    return error.EPERM;
+                }
+                proc.rlimit_nofile_soft = new_limit.rlim_cur;
+                proc.rlimit_nofile_hard = new_limit.rlim_max;
+            },
+            RLIMIT_STACK => {
+                // Non-root cannot raise hard limit above current hard limit
+                if (new_limit.rlim_max > proc.rlimit_stack_hard and caller.euid != 0) {
+                    return error.EPERM;
+                }
+                proc.rlimit_stack_soft = new_limit.rlim_cur;
+                proc.rlimit_stack_hard = new_limit.rlim_max;
+            },
+            RLIMIT_NPROC => {
+                // Non-root cannot raise hard limit above current hard limit
+                if (new_limit.rlim_max > proc.rlimit_nproc_hard and caller.euid != 0) {
+                    return error.EPERM;
+                }
+                proc.rlimit_nproc_soft = new_limit.rlim_cur;
+                proc.rlimit_nproc_hard = new_limit.rlim_max;
+            },
+            RLIMIT_CORE => {
+                // Non-root cannot raise hard limit above current hard limit
+                if (new_limit.rlim_max > proc.rlimit_core_hard and caller.euid != 0) {
+                    return error.EPERM;
+                }
+                proc.rlimit_core_soft = new_limit.rlim_cur;
+                proc.rlimit_core_hard = new_limit.rlim_max;
+            },
+            RLIMIT_CPU, RLIMIT_FSIZE, RLIMIT_DATA, RLIMIT_RSS, RLIMIT_MEMLOCK, RLIMIT_LOCKS, RLIMIT_SIGPENDING, RLIMIT_MSGQUEUE, RLIMIT_NICE, RLIMIT_RTPRIO, RLIMIT_RTTIME => {
                 // Accept but don't enforce for MVP
             },
             else => {

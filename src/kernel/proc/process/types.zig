@@ -274,6 +274,18 @@ pub const Process = struct {
     rlimit_as: u64 = 256 * 1024 * 1024,
     /// Current resident set size (tracked for enforcement)
     rss_current: u64 = 0,
+    /// RLIMIT_NOFILE: Maximum open file descriptors
+    rlimit_nofile_soft: u64 = 1024,
+    rlimit_nofile_hard: u64 = 4096,
+    /// RLIMIT_STACK: Maximum stack size
+    rlimit_stack_soft: u64 = 8 * 1024 * 1024, // 8 MB default
+    rlimit_stack_hard: u64 = 0xFFFFFFFFFFFFFFFF, // RLIM_INFINITY
+    /// RLIMIT_NPROC: Maximum processes per user
+    rlimit_nproc_soft: u64 = 0xFFFFFFFFFFFFFFFF, // RLIM_INFINITY
+    rlimit_nproc_hard: u64 = 0xFFFFFFFFFFFFFFFF, // RLIM_INFINITY
+    /// RLIMIT_CORE: Maximum core dump size
+    rlimit_core_soft: u64 = 0,
+    rlimit_core_hard: u64 = 0xFFFFFFFFFFFFFFFF, // RLIM_INFINITY
 
     /// CPU time tracking (cumulative children times in ticks)
     /// Accumulated user time of reaped children
