@@ -207,6 +207,10 @@ export fn main(argc: i32, argv: [*][*:0]u8) i32 {
     runner.runTest("memory: mincore invalid align", memory_tests.testMincoreInvalidAlign);
     runner.runTest("memory: mlockall future flag", memory_tests.testMlockallFutureFlag);
 
+    // Phase 26-02: Memory advisory extras
+    runner.runTest("memory: madvise dontneed", memory_tests.testMadviseDontneed);
+    runner.runTest("memory: mincore unmapped addr", memory_tests.testMincoreUnmappedAddr);
+
     // Process tests
     runner.runTest("process: fork creates child", process_tests.testForkCreatesChild);
     runner.runTest("process: fork independent memory", process_tests.testForkIndependentMemory);
@@ -418,6 +422,11 @@ export fn main(argc: i32, argv: [*][*:0]u8) i32 {
     runner.runTest("resource: setrlimit rejects soft>hard", resource_limits_tests.testSetrlimitRejectsSoftGreaterThanHard);
     runner.runTest("resource: getrlimit multiple resources", resource_limits_tests.testGetrlimitMultipleResources);
 
+    // Phase 26-02: Resource limit edge cases
+    runner.runTest("resource: getrlimit invalid resource", resource_limits_tests.testGetrlimitInvalidResource);
+    runner.runTest("resource: setrlimit raise soft to hard", resource_limits_tests.testSetrlimitRaiseSoftToHard);
+    runner.runTest("resource: getrlimit stack", resource_limits_tests.testGetrlimitStack);
+
     // Time operations tests
     runner.runTest("time_ops: nanosleep basic", time_ops_tests.testNanosleepBasic);
     runner.runTest("time_ops: clock_gettime monotonic", time_ops_tests.testClockGettimeMonotonic);
@@ -483,6 +492,13 @@ export fn main(argc: i32, argv: [*][*:0]u8) i32 {
     runner.runTest("io_mux: epoll_pwait timeout no events", io_mux_tests.testEpollPwaitTimeoutNoEvents);
     runner.runTest("io_mux: epoll_pwait invalid sigsetsize", io_mux_tests.testEpollPwaitInvalidSigsetsize);
     runner.runTest("io_mux: epoll_pwait mask restored on success", io_mux_tests.testEpollPwaitMaskRestoredOnSuccess);
+
+    // Phase 26-02: select/epoll edge cases
+    runner.runTest("io_mux: select nfds zero", io_mux_tests.testSelectNfdsZero);
+    runner.runTest("io_mux: select null all sets", io_mux_tests.testSelectNullAllSets);
+    runner.runTest("io_mux: epoll ctl del", io_mux_tests.testEpollCtlDel);
+    runner.runTest("io_mux: epoll ctl mod", io_mux_tests.testEpollCtlMod);
+    runner.runTest("io_mux: select multiple fds ready", io_mux_tests.testSelectMultipleFdsReady);
 
     // Phase 22: inotify tests
     runner.runTest("inotify: init creates fd", inotify_tests.testInotifyInit);
