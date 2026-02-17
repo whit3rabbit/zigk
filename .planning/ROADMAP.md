@@ -104,7 +104,10 @@ Plans:
   2. Multiple instances of the same signal can be queued and delivered in order
   3. rt_sigqueueinfo delivers signals with correct metadata to target thread
   4. Signal handlers receive correct siginfo_t via rt_sigaction
-**Plans**: TBD
+**Plans**: 2 plans
+Plans:
+- [ ] 29-01-PLAN.md -- Core siginfo queue infrastructure and delivery/consumption wiring
+- [ ] 29-02-PLAN.md -- SA_SIGINFO handler support and integration tests
 
 ### Phase 30: Signal Wakeup Integration
 **Goal**: Use siginfo queue for direct signalfd wakeup and SIGSYS delivery
@@ -204,7 +207,7 @@ Plans:
 | 26. Test Coverage Expansion | v1.2 | 2/2 | Complete | 2026-02-16 |
 | 27. Quick Wins | v1.3 | Complete    | 2026-02-16 | - |
 | 28. rt_sigsuspend Race Fix | v1.3 | Complete    | 2026-02-17 | - |
-| 29. Siginfo Queue | v1.3 | 0/? | Not started | - |
+| 29. Siginfo Queue | v1.3 | 0/2 | Not started | - |
 | 30. Signal Wakeup Integration | v1.3 | 0/? | Not started | - |
 | 31. Inotify Completion | v1.3 | 0/? | Not started | - |
 | 32. Timer Capacity Expansion | v1.3 | 0/? | Not started | - |
@@ -214,4 +217,4 @@ Plans:
 
 ---
 *Roadmap created: 2026-02-06*
-*Last updated: 2026-02-16 after Phase 28 planning*
+*Last updated: 2026-02-17 after Phase 29 planning*
