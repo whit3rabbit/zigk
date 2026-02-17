@@ -89,6 +89,14 @@ fn signalfdRead(fd: *fd_mod.FileDescriptor, buf: []u8) isize {
 
         const held = state.lock.acquire();
 
+        // Remove any stale wait queue entry from a previous iteration.
+        // This handles the case where we were woken by sched.unblock() from
+        // signal delivery (which transitions the thread from Blocked to Ready
+        // but does NOT remove it from the WaitQueue). The wakeUp() path (from
+        // signalfdClose) properly pops the thread, so removeThread is a no-op there.
+        // removeThread returns false safely when the thread is not in the queue.
+        _ = state.wait_queue.removeThread(current);
+
         // Check for pending signals in our mask (atomic load for SMP visibility)
         const pending = @atomicLoad(u64, &current.pending_signals, .acquire) & state.sigmask;
 
@@ -129,14 +137,16 @@ fn signalfdRead(fd: *fd_mod.FileDescriptor, buf: []u8) isize {
             return Errno.EAGAIN.toReturn();
         }
 
-        // Block using WaitQueue with timeout polling
-        // Use 10ms polling interval since we don't have signal-to-signalfd wakeup
-        // integration yet. This is better than yield-loop (thread truly sleeps for 10ms
-        // rather than being scheduled every tick and immediately yielding).
-        // TODO: Integrate with signal delivery to wake blocked readers immediately
-        sched.waitOnWithTimeout(&state.wait_queue, held, 10, null);
+        // Block indefinitely until woken by signal delivery or close.
+        // Signal delivery path (deliverSignalToThreadWithInfo) calls
+        // sched.unblock(target) which transitions this thread from
+        // Blocked to Ready immediately when a signal arrives.
+        // Close path calls state.wait_queue.wakeUp() which properly
+        // pops and readies the thread.
+        // held is released by waitOn before the thread blocks.
+        sched.waitOn(&state.wait_queue, held);
 
-        // After wakeup, loop will re-acquire lock and re-check pending_signals
+        // After wakeup, loop back to re-check closed flag and pending_signals.
     }
 }
 
