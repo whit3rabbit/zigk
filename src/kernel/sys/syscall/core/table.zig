@@ -182,8 +182,12 @@ pub export fn dispatch_syscall(frame: *SyscallFrame) callconv(.c) void {
         break :blk uapi.errno.ENOSYS.toReturn();
     };
 
-    // Set return value in frame
-    frame.setReturnSigned(result);
+    // Set return value in frame.
+    // Skip for rt_sigreturn: it restores the entire frame from ucontext,
+    // and writing the dummy return value would clobber the restored rax.
+    if (syscall_num != uapi.syscalls.SYS_RT_SIGRETURN) {
+        frame.setReturnSigned(result);
+    }
 
     // Check for pending signals and deliver if necessary
     // This modifies the frame to jump to signal handler instead of returning normally

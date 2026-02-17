@@ -333,7 +333,8 @@ pub fn checkSignalsOnSyscallExit(frame: *hal.syscall.SyscallFrame) void {
     }
 
     // Fast check: any pending signals? (atomic for SMP visibility)
-    if (@atomicLoad(u64, &current_thread.pending_signals, .acquire) == 0) return;
+    const pending_check = @atomicLoad(u64, &current_thread.pending_signals, .acquire);
+    if (pending_check == 0) return;
 
     // Find the first pending signal that is not blocked
     const pending = @atomicLoad(u64, &current_thread.pending_signals, .acquire) & ~current_thread.sigmask;
@@ -388,6 +389,7 @@ pub fn checkSignalsOnSyscallExit(frame: *hal.syscall.SyscallFrame) void {
 
 /// Set up user stack for signal delivery from syscall context
 fn setupSignalFrameForSyscall(frame: *hal.syscall.SyscallFrame, current_thread: *Thread, signum: usize, action: uapi.signal.SigAction) void {
+
     // Determine which stack to use
     var sp = frame.getUserRsp();
     var using_altstack = false;

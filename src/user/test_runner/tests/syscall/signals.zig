@@ -498,11 +498,63 @@ pub fn testClockNanosleepAbstimePast() !void {
 
 // Test 17: rt_sigsuspend unblocks signal and delivers it (returns EINTR)
 pub fn testRtSigsuspendBasic() !void {
-    // SKIP: Kernel rt_sigsuspend has a race condition with already-pending signals
-    // When a signal is delivered BEFORE rt_sigsuspend is called (pending bit set),
-    // and rt_sigsuspend's new mask unblocks it, the signal should be delivered immediately.
-    // Current implementation blocks indefinitely because deliverSignalToThread was already
-    // called and won't be called again. Fix requires signal delivery check before blocking.
-    // Tracked as known limitation - test documents expected behavior.
-    return error.SkipTest;
+    const SIGUSR1 = 10;
+    const SIG_BLOCK = 0;
+    const SIG_UNBLOCK = 1;
+
+    // Reset flag
+    sigusr1_called = false;
+
+    // Install SIGUSR1 handler
+    var act = syscall.SigAction{
+        .handler = @intFromPtr(&handleSigusr1),
+        .flags = 0,
+        .restorer = 0,
+        .mask = 0,
+    };
+    try syscall.sigaction(SIGUSR1, &act, null);
+
+    // Block SIGUSR1
+    var block_set: syscall.SigSet = 0;
+    syscall.uapi.signal.sigaddset(&block_set, SIGUSR1);
+    try syscall.sigprocmask(SIG_BLOCK, &block_set, null);
+
+    // Send SIGUSR1 to self (it becomes pending because it's blocked)
+    try syscall.kill(syscall.getpid(), SIGUSR1);
+
+    // Verify signal is pending but NOT delivered yet
+    if (sigusr1_called) {
+        // Cleanup
+        _ = syscall.sigprocmask(SIG_UNBLOCK, &block_set, null) catch {};
+        return error.TestFailed;
+    }
+
+    // Call rt_sigsuspend with a mask that UNBLOCKS SIGUSR1.
+    // This should atomically swap the mask and deliver the pending signal.
+    // The empty mask (0) unblocks everything.
+    var suspend_mask: syscall.SigSet = 0; // Unblock all signals
+
+    // rt_sigsuspend always returns EINTR (per POSIX) after signal delivery
+    const result = syscall.rt_sigsuspend(&suspend_mask);
+    if (result) |_| {
+        // Should not succeed -- rt_sigsuspend always returns EINTR
+        _ = syscall.sigprocmask(SIG_UNBLOCK, &block_set, null) catch {};
+        return error.TestFailed;
+    } else |err| {
+        // EINTR maps to error.Interrupted in userspace
+        if (err != error.Interrupted) {
+            _ = syscall.sigprocmask(SIG_UNBLOCK, &block_set, null) catch {};
+            if (err == error.NotImplemented) return error.SkipTest;
+            return error.TestFailed;
+        }
+    }
+
+    // The signal handler should have been called during rt_sigsuspend
+    if (!sigusr1_called) {
+        _ = syscall.sigprocmask(SIG_UNBLOCK, &block_set, null) catch {};
+        return error.TestFailed;
+    }
+
+    // Cleanup: unblock SIGUSR1
+    _ = syscall.sigprocmask(SIG_UNBLOCK, &block_set, null) catch {};
 }

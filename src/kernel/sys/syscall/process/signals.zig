@@ -261,7 +261,6 @@ pub fn sys_rt_sigsuspend(mask_ptr: usize, sigsetsize: usize) SyscallError!usize 
     const pending = @atomicLoad(u64, &current_thread.pending_signals, .acquire);
     const unblocked_pending = pending & ~new_mask;
     if (unblocked_pending == 0) {
-        // No pending unblocked signals - safe to block
         sched.block();
     }
     // Else: signal is pending and unblocked - skip block(), return immediately
