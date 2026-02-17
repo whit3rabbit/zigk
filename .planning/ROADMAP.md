@@ -118,7 +118,9 @@ Plans:
   2. Seccomp SECCOMP_RET_KILL delivers SIGSYS to the offending thread
   3. SIGSYS signal carries correct si_syscall and si_arch in siginfo_t
   4. signalfd read returns correct signal metadata from siginfo queue
-**Plans**: TBD
+**Plans**: 1 plan
+Plans:
+- [ ] 30-01-PLAN.md -- Direct signalfd wakeup and SIGSYS delivery on seccomp KILL
 
 ### Phase 31: Inotify Completion
 **Goal**: Complete inotify implementation with full VFS hook coverage and overflow handling
@@ -208,7 +210,7 @@ Plans:
 | 27. Quick Wins | v1.3 | Complete    | 2026-02-16 | - |
 | 28. rt_sigsuspend Race Fix | v1.3 | Complete    | 2026-02-17 | - |
 | 29. Siginfo Queue | v1.3 | Complete    | 2026-02-17 | - |
-| 30. Signal Wakeup Integration | v1.3 | 0/? | Not started | - |
+| 30. Signal Wakeup Integration | v1.3 | 0/1 | Not started | - |
 | 31. Inotify Completion | v1.3 | 0/? | Not started | - |
 | 32. Timer Capacity Expansion | v1.3 | 0/? | Not started | - |
 | 33. Timer Resolution Improvement | v1.3 | 0/? | Not started | - |
@@ -217,4 +219,4 @@ Plans:
 
 ---
 *Roadmap created: 2026-02-06*
-*Last updated: 2026-02-17 after Phase 29 planning*
+*Last updated: 2026-02-17 after Phase 30 planning*
