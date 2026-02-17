@@ -1034,6 +1034,10 @@ pub fn sys_rt_sigtimedwait(set_ptr: usize, info_ptr: usize, timeout_ptr: usize, 
 /// Try to atomically dequeue one signal from pending_signals matching wait_set.
 /// Uses @cmpxchgWeak per user decision for race-safe check-and-clear.
 /// Returns KernelSigInfo with metadata (or fallback SI_USER if queue entry missing).
+///
+/// For RT signals (32-64), the bitmask bit is only cleared if there are no more
+/// entries of that signal in the queue (RT signals can have multiple queued instances).
+/// For standard signals (1-31), the bitmask bit is always cleared on dequeue.
 fn tryDequeueSignal(thread: *sched.Thread, wait_set: uapi.signal.SigSet) ?uapi.signal.KernelSigInfo {
     // Read pending atomically
     const pending = @atomicLoad(u64, &thread.pending_signals, .acquire);
@@ -1043,31 +1047,44 @@ fn tryDequeueSignal(thread: *sched.Thread, wait_set: uapi.signal.SigSet) ?uapi.s
     // Find the lowest-numbered matching signal
     const bit_pos = @ctz(matching);
     const sig_bit: u64 = @as(u64, 1) << @intCast(bit_pos);
+    const signo: u8 = @intCast(bit_pos + 1);
+    const is_rt_signal = signo >= 32;
 
-    // Atomic CAS loop to clear the bit
-    var current = pending;
-    while (true) {
-        const result = @cmpxchgWeak(u64, &thread.pending_signals, current, current & ~sig_bit, .acq_rel, .acquire);
-        if (result) |new_val| {
-            // CAS failed, retry with updated value
-            current = new_val;
-            if ((current & sig_bit) == 0) return null; // Someone else took it
-        } else {
-            // CAS succeeded -- dequeue siginfo metadata
-            const signo: u8 = @intCast(bit_pos + 1);
-            if (thread.siginfo_queue.dequeueBySignal(signo)) |si| {
-                return si;
+    // Dequeue siginfo metadata first (before touching the bitmask)
+    const si_opt = thread.siginfo_queue.dequeueBySignal(signo);
+
+    // For RT signals: only clear the bitmask bit if no more entries of this signal remain.
+    // For standard signals: always clear the bitmask bit.
+    const should_clear_bit = if (is_rt_signal)
+        !thread.siginfo_queue.hasSignal(signo)
+    else
+        true;
+
+    if (should_clear_bit) {
+        // Atomic CAS loop to clear the bitmask bit
+        var current = @atomicLoad(u64, &thread.pending_signals, .acquire);
+        while ((current & sig_bit) != 0) {
+            const result = @cmpxchgWeak(u64, &thread.pending_signals, current, current & ~sig_bit, .acq_rel, .acquire);
+            if (result) |new_val| {
+                current = new_val;
+            } else {
+                break; // CAS succeeded
             }
-            // Fallback: no siginfo entry (race or queue was full during delivery)
-            return uapi.signal.KernelSigInfo{
-                .signo = signo,
-                .code = uapi.signal.SI_USER,
-                .pid = 0,
-                .uid = 0,
-                .value = 0,
-            };
         }
     }
+
+    // Return the dequeued siginfo or a fallback
+    if (si_opt) |si| {
+        return si;
+    }
+    // Fallback: no siginfo entry (race or queue was full during delivery)
+    return uapi.signal.KernelSigInfo{
+        .signo = signo,
+        .code = uapi.signal.SI_USER,
+        .pid = 0,
+        .uid = 0,
+        .value = 0,
+    };
 }
 
 /// Write siginfo_t to user memory for a dequeued signal.

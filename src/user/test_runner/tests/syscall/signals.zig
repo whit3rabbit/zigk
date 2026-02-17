@@ -558,3 +558,232 @@ pub fn testRtSigsuspendBasic() !void {
     // Cleanup: unblock SIGUSR1
     _ = syscall.sigprocmask(SIG_UNBLOCK, &block_set, null) catch {};
 }
+
+// =============================================================================
+// Phase 29: Siginfo Queue Tests (Tests 18-21)
+// =============================================================================
+
+// Shared state for SA_SIGINFO handler tests
+var siginfo_received_signo: i32 = 0;
+var siginfo_received_code: i32 = 0;
+var siginfo_received_pid: i32 = 0;
+var siginfo_handler_called: bool = false;
+
+// SA_SIGINFO handler: receives (signum, *siginfo_t, *ucontext_t)
+// siginfo_t layout: si_signo@0, si_errno@4, si_code@8, _pad@12, si_pid@16, si_uid@20
+fn handleSigusr1WithInfo(sig: i32, info_ptr: usize, _ucontext: usize) callconv(.c) void {
+    _ = _ucontext;
+    _ = sig;
+    siginfo_handler_called = true;
+    if (info_ptr != 0) {
+        const info: *const syscall.SignalSigInfo = @ptrFromInt(info_ptr);
+        siginfo_received_signo = info.si_signo;
+        siginfo_received_code = info.si_code;
+        siginfo_received_pid = info.si_pid;
+    }
+}
+
+// Test 18: SA_SIGINFO handler receives correct metadata from kill()
+pub fn testSiginfoPidUid() !void {
+    const SIGUSR1: i32 = 10;
+    const SA_SIGINFO: u64 = 0x00000004;
+
+    // Reset state
+    siginfo_handler_called = false;
+    siginfo_received_signo = 0;
+    siginfo_received_code = 0;
+    siginfo_received_pid = 0;
+
+    // Install SA_SIGINFO handler
+    var act = syscall.SigAction{
+        .handler = @intFromPtr(&handleSigusr1WithInfo),
+        .flags = SA_SIGINFO,
+        .restorer = 0,
+        .mask = 0,
+    };
+    try syscall.sigaction(@intCast(SIGUSR1), &act, null);
+
+    // Send signal to self via kill()
+    const my_pid = syscall.getpid();
+    try syscall.kill(my_pid, SIGUSR1);
+
+    // Give handler time to execute
+    syscall.sched_yield() catch {};
+    syscall.sched_yield() catch {};
+
+    // Verify handler was called
+    if (!siginfo_handler_called) return error.TestFailed;
+
+    // Verify siginfo fields
+    if (siginfo_received_signo != SIGUSR1) return error.TestFailed;
+    // si_code should be SI_USER (0) since sent via kill()
+    if (siginfo_received_code != 0) return error.TestFailed;
+    // si_pid should be our own PID
+    if (siginfo_received_pid != my_pid) return error.TestFailed;
+
+    // Restore default handler (plain single-arg handler)
+    var default_act = syscall.SigAction{
+        .handler = @intFromPtr(&handleSigusr1),
+        .flags = 0,
+        .restorer = 0,
+        .mask = 0,
+    };
+    _ = syscall.sigaction(@intCast(SIGUSR1), &default_act, null) catch {};
+}
+
+// Test 19: rt_sigqueueinfo metadata preserved through kernel queue to rt_sigtimedwait
+pub fn testSiginfoQueueRoundTrip() !void {
+    const SIGUSR2: i32 = 12;
+    const SIG_BLOCK: i32 = 0;
+    const SIG_UNBLOCK: i32 = 1;
+
+    // Block SIGUSR2 so it stays pending
+    var set: syscall.SigSet = 0;
+    syscall.uapi.signal.sigaddset(&set, @intCast(SIGUSR2));
+    try syscall.sigprocmask(SIG_BLOCK, &set, null);
+
+    // Send signal with SI_QUEUE code and our PID
+    const my_pid = syscall.getpid();
+    var send_info = syscall.SignalSigInfo{
+        .si_signo = SIGUSR2,
+        .si_code = syscall.SI_QUEUE,
+        .si_pid = my_pid,
+        .si_uid = 0,
+    };
+
+    syscall.rt_sigqueueinfo(my_pid, SIGUSR2, &send_info) catch |err| {
+        _ = syscall.sigprocmask(SIG_UNBLOCK, &set, null) catch {};
+        if (err == error.NotImplemented) return error.SkipTest;
+        return err;
+    };
+
+    // Dequeue via rt_sigtimedwait with zero timeout (immediate)
+    var timeout = syscall.SignalTimespec{ .tv_sec = 0, .tv_nsec = 0 };
+    var recv_info: syscall.SignalSigInfo = .{};
+    const signo = syscall.rt_sigtimedwait(&set, &recv_info, &timeout) catch |err| {
+        _ = syscall.sigprocmask(SIG_UNBLOCK, &set, null) catch {};
+        if (err == error.NotImplemented) return error.SkipTest;
+        return err;
+    };
+
+    // Unblock
+    _ = syscall.sigprocmask(SIG_UNBLOCK, &set, null) catch {};
+
+    // Verify signal number
+    if (signo != @as(u32, @intCast(SIGUSR2))) return error.TestFailed;
+
+    // Verify siginfo fields preserved through queue
+    if (recv_info.si_signo != SIGUSR2) return error.TestFailed;
+    if (recv_info.si_code != syscall.SI_QUEUE) return error.TestFailed;
+    if (recv_info.si_pid != my_pid) return error.TestFailed;
+}
+
+// Test 20: Standard signal coalescing (second send while pending is a no-op)
+pub fn testSiginfoStandardCoalescing() !void {
+    const SIGUSR1: i32 = 10;
+    const SIG_BLOCK: i32 = 0;
+    const SIG_UNBLOCK: i32 = 1;
+
+    // Block SIGUSR1
+    var set: syscall.SigSet = 0;
+    syscall.uapi.signal.sigaddset(&set, @intCast(SIGUSR1));
+    try syscall.sigprocmask(SIG_BLOCK, &set, null);
+
+    // Send SIGUSR1 twice while blocked
+    try syscall.kill(syscall.getpid(), SIGUSR1);
+    try syscall.kill(syscall.getpid(), SIGUSR1);
+
+    // Dequeue via rt_sigtimedwait -- should get exactly one
+    var timeout = syscall.SignalTimespec{ .tv_sec = 0, .tv_nsec = 0 };
+    _ = syscall.rt_sigtimedwait(&set, null, &timeout) catch |err| {
+        _ = syscall.sigprocmask(SIG_UNBLOCK, &set, null) catch {};
+        if (err == error.NotImplemented) return error.SkipTest;
+        return err;
+    };
+
+    // Second dequeue should fail (no more pending)
+    const result2 = syscall.rt_sigtimedwait(&set, null, &timeout);
+    _ = syscall.sigprocmask(SIG_UNBLOCK, &set, null) catch {};
+    if (result2) |_| {
+        // Should NOT succeed -- signal was consumed, only one was pending
+        return error.TestFailed;
+    } else |err| {
+        if (err == error.NotImplemented) return error.SkipTest;
+        if (err != error.WouldBlock) return error.TestFailed;
+        // WouldBlock: correct -- no more pending signals
+    }
+}
+
+// Test 21: RT signal queuing -- multiple instances of same RT signal are queued
+pub fn testSiginfoRtSignalQueuing() !void {
+    const SIGRTMIN: i32 = 32;
+    const SIG_BLOCK: i32 = 0;
+    const SIG_UNBLOCK: i32 = 1;
+
+    // Block SIGRTMIN so signals stay pending
+    var set: syscall.SigSet = 0;
+    syscall.uapi.signal.sigaddset(&set, @intCast(SIGRTMIN));
+    try syscall.sigprocmask(SIG_BLOCK, &set, null);
+
+    // Send SIGRTMIN twice via rt_sigqueueinfo
+    const my_pid = syscall.getpid();
+
+    var send_info1 = syscall.SignalSigInfo{
+        .si_signo = SIGRTMIN,
+        .si_code = syscall.SI_QUEUE,
+        .si_pid = my_pid,
+        .si_uid = 0,
+    };
+    syscall.rt_sigqueueinfo(my_pid, SIGRTMIN, &send_info1) catch |err| {
+        _ = syscall.sigprocmask(SIG_UNBLOCK, &set, null) catch {};
+        if (err == error.NotImplemented) return error.SkipTest;
+        return err;
+    };
+
+    var send_info2 = syscall.SignalSigInfo{
+        .si_signo = SIGRTMIN,
+        .si_code = syscall.SI_QUEUE,
+        .si_pid = my_pid,
+        .si_uid = 0,
+    };
+    syscall.rt_sigqueueinfo(my_pid, SIGRTMIN, &send_info2) catch |err| {
+        _ = syscall.sigprocmask(SIG_UNBLOCK, &set, null) catch {};
+        if (err == error.NotImplemented) return error.SkipTest;
+        return err;
+    };
+
+    var timeout = syscall.SignalTimespec{ .tv_sec = 0, .tv_nsec = 0 };
+
+    // Dequeue first instance -- should succeed
+    const signo1 = syscall.rt_sigtimedwait(&set, null, &timeout) catch |err| {
+        _ = syscall.sigprocmask(SIG_UNBLOCK, &set, null) catch {};
+        if (err == error.NotImplemented) return error.SkipTest;
+        return err;
+    };
+    if (signo1 != @as(u32, @intCast(SIGRTMIN))) {
+        _ = syscall.sigprocmask(SIG_UNBLOCK, &set, null) catch {};
+        return error.TestFailed;
+    }
+
+    // Dequeue second instance -- should ALSO succeed (RT signals queue, not coalesce)
+    const signo2 = syscall.rt_sigtimedwait(&set, null, &timeout) catch |err| {
+        _ = syscall.sigprocmask(SIG_UNBLOCK, &set, null) catch {};
+        // WouldBlock here means RT signal queuing is broken (only one was delivered)
+        if (err == error.WouldBlock) return error.TestFailed;
+        if (err == error.NotImplemented) return error.SkipTest;
+        return err;
+    };
+    if (signo2 != @as(u32, @intCast(SIGRTMIN))) {
+        _ = syscall.sigprocmask(SIG_UNBLOCK, &set, null) catch {};
+        return error.TestFailed;
+    }
+
+    // Third dequeue should fail (only sent two)
+    const result3 = syscall.rt_sigtimedwait(&set, null, &timeout);
+    _ = syscall.sigprocmask(SIG_UNBLOCK, &set, null) catch {};
+    if (result3) |_| {
+        return error.TestFailed;
+    } else |_| {
+        // Expected: WouldBlock or similar -- no more pending
+    }
+}

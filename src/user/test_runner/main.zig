@@ -322,6 +322,12 @@ export fn main(argc: i32, argv: [*][*:0]u8) i32 {
     runner.runTest("signal_ext: clock_nanosleep abstime past", signal_tests.testClockNanosleepAbstimePast);
     runner.runTest("signal: rt_sigsuspend basic", signal_tests.testRtSigsuspendBasic);
 
+    // Phase 29: Siginfo Queue Tests
+    runner.runTest("siginfo_queue: SA_SIGINFO handler receives pid", signal_tests.testSiginfoPidUid);
+    runner.runTest("siginfo_queue: rt_sigqueueinfo metadata round-trip", signal_tests.testSiginfoQueueRoundTrip);
+    runner.runTest("siginfo_queue: standard signal coalescing", signal_tests.testSiginfoStandardCoalescing);
+    runner.runTest("siginfo_queue: RT signal queuing (no coalescing)", signal_tests.testSiginfoRtSignalQueuing);
+
     // Socket tests
     runner.runTest("socket: create TCP", socket_tests.testSocketCreateTcp);
     runner.runTest("socket: create UDP", socket_tests.testSocketCreateUdp);
