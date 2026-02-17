@@ -58,7 +58,7 @@
 **Milestone Goal:** Resolve all 15 tech debt items from v1.0-v1.2, hardening existing implementations with proper wakeups, signal queues, and VFS page cache infrastructure.
 
 - [x] **Phase 27: Quick Wins** - Edge case fixes and simple additions (completed 2026-02-16)
-- [ ] **Phase 28: rt_sigsuspend Race Fix** - Fix pending signal delivery race
+- [x] **Phase 28: rt_sigsuspend Race Fix** - Fix pending signal delivery race (completed 2026-02-17)
 - [ ] **Phase 29: Siginfo Queue** - Replace bitmask-only signal tracking
 - [ ] **Phase 30: Signal Wakeup Integration** - Direct wakeup for signalfd and SIGSYS delivery
 - [ ] **Phase 31: Inotify Completion** - Complete VFS hooks and overflow handling
@@ -203,7 +203,7 @@ Plans:
 | 25. Seccomp | v1.2 | 1/1 | Complete | 2026-02-16 |
 | 26. Test Coverage Expansion | v1.2 | 2/2 | Complete | 2026-02-16 |
 | 27. Quick Wins | v1.3 | Complete    | 2026-02-16 | - |
-| 28. rt_sigsuspend Race Fix | v1.3 | 0/1 | Not started | - |
+| 28. rt_sigsuspend Race Fix | v1.3 | Complete    | 2026-02-17 | - |
 | 29. Siginfo Queue | v1.3 | 0/? | Not started | - |
 | 30. Signal Wakeup Integration | v1.3 | 0/? | Not started | - |
 | 31. Inotify Completion | v1.3 | 0/? | Not started | - |
