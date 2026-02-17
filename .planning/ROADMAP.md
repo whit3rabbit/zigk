@@ -59,7 +59,7 @@
 
 - [x] **Phase 27: Quick Wins** - Edge case fixes and simple additions (completed 2026-02-16)
 - [x] **Phase 28: rt_sigsuspend Race Fix** - Fix pending signal delivery race (completed 2026-02-17)
-- [ ] **Phase 29: Siginfo Queue** - Replace bitmask-only signal tracking
+- [x] **Phase 29: Siginfo Queue** - Replace bitmask-only signal tracking (completed 2026-02-17)
 - [ ] **Phase 30: Signal Wakeup Integration** - Direct wakeup for signalfd and SIGSYS delivery
 - [ ] **Phase 31: Inotify Completion** - Complete VFS hooks and overflow handling
 - [ ] **Phase 32: Timer Capacity Expansion** - Increase per-process timer limit
@@ -207,7 +207,7 @@ Plans:
 | 26. Test Coverage Expansion | v1.2 | 2/2 | Complete | 2026-02-16 |
 | 27. Quick Wins | v1.3 | Complete    | 2026-02-16 | - |
 | 28. rt_sigsuspend Race Fix | v1.3 | Complete    | 2026-02-17 | - |
-| 29. Siginfo Queue | v1.3 | 0/2 | Not started | - |
+| 29. Siginfo Queue | v1.3 | Complete    | 2026-02-17 | - |
 | 30. Signal Wakeup Integration | v1.3 | 0/? | Not started | - |
 | 31. Inotify Completion | v1.3 | 0/? | Not started | - |
 | 32. Timer Capacity Expansion | v1.3 | 0/? | Not started | - |
