@@ -534,8 +534,15 @@ fn deliverToPgroupMember(ctx: *PgroupSignalCtx, proc: *base.Process) void {
         return;
     };
 
-    // Deliver the signal
-    deliverSignalToThread(target_thread, ctx.signum);
+    // Deliver the signal with SI_USER metadata from sender process
+    const si_pgrp = uapi.signal.KernelSigInfo{
+        .signo = ctx.signum,
+        .code = uapi.signal.SI_USER,
+        .pid = if (ctx.sender_proc) |sp| sp.pid else 0,
+        .uid = if (ctx.sender_proc) |sp| sp.uid else 0,
+        .value = 0,
+    };
+    deliverSignalToThreadWithInfo(target_thread, ctx.signum, si_pgrp);
     ctx.delivered_count.* += 1;
 }
 
@@ -608,8 +615,15 @@ fn deliverToBroadcastTarget(ctx: *BroadcastSignalCtx, proc: *base.Process) void 
         return; // Permission denied, skip this process
     };
 
-    // Deliver the signal
-    deliverSignalToThread(target_thread, ctx.signum);
+    // Deliver the signal with SI_USER metadata from sender process
+    const si_bcast = uapi.signal.KernelSigInfo{
+        .signo = ctx.signum,
+        .code = uapi.signal.SI_USER,
+        .pid = ctx.sender_proc.pid,
+        .uid = ctx.sender_proc.uid,
+        .value = 0,
+    };
+    deliverSignalToThreadWithInfo(target_thread, ctx.signum, si_bcast);
     ctx.delivered_count.* += 1;
 }
 
@@ -638,8 +652,22 @@ fn deliverSignalBroadcast(signum: u8, sender_proc: *base.Process) SyscallError!u
     return delivered_count;
 }
 
-/// Deliver a signal to a thread
+/// Deliver a signal to a thread (best-effort, no metadata).
+/// Constructs a default KernelSigInfo with SI_KERNEL code.
 pub fn deliverSignalToThread(target: *sched.Thread, signum: u8) void {
+    deliverSignalToThreadWithInfo(target, signum, null);
+}
+
+/// Deliver a signal with optional siginfo metadata.
+/// If info is null, a default KernelSigInfo with SI_KERNEL code is created.
+///
+/// INVARIANT: Enqueue happens BEFORE the atomic bitmask set so consumers always
+/// find the metadata entry ready when they see the pending bit.
+///
+/// Standard signals (1-31) coalesce: if already pending, do NOT double-enqueue.
+/// RT signals (32-64) always enqueue even if already pending.
+/// Queue overflow for general delivery (kill/tkill): best-effort silent drop.
+pub fn deliverSignalToThreadWithInfo(target: *sched.Thread, signum: u8, info: ?uapi.signal.KernelSigInfo) void {
     const signal = @import("uapi").signal;
 
     // Special handling for SIGCONT: resume stopped threads
@@ -685,9 +713,28 @@ pub fn deliverSignalToThread(target: *sched.Thread, signum: u8) void {
         }
     }
 
+    // Enqueue siginfo metadata before setting the pending bitmask bit.
+    // This ensures that when a consumer sees the pending bit, the metadata entry is ready.
+    const sig_bit: u64 = @as(u64, 1) << @intCast(signum - 1);
+    const is_rt_signal = signum >= 32;
+    const already_pending = (@atomicLoad(u64, &target.pending_signals, .acquire) & sig_bit) != 0;
+
+    if (is_rt_signal or !already_pending) {
+        // RT signals always queue; standard signals only queue if not already pending
+        const si = info orelse uapi.signal.KernelSigInfo{
+            .signo = signum,
+            .code = uapi.signal.SI_KERNEL,
+            .pid = 0,
+            .uid = 0,
+            .value = 0,
+        };
+        // Best-effort enqueue: if queue is full, signal still delivered via bitmask
+        // but metadata is lost (graceful degradation, not failure).
+        _ = target.siginfo_queue.enqueue(si);
+    }
+
     // Set pending signal bit (atomic for SMP safety - signalfd and signal
     // handlers clear bits concurrently without holding a shared lock)
-    const sig_bit: u64 = @as(u64, 1) << @intCast(signum - 1);
     _ = @atomicRmw(u64, &target.pending_signals, .Or, sig_bit, .release);
 
     // If thread is blocked (and not stopped), wake it to handle signal
@@ -761,8 +808,15 @@ pub fn sys_kill(pid: usize, sig: usize) SyscallError!usize {
     // SECURITY: Check permission before delivering signal
     try checkSignalPermission(target, signum);
 
-    // Deliver the signal
-    deliverSignalToThread(target, signum);
+    // Deliver the signal with SI_USER metadata (sender PID and UID)
+    const si = uapi.signal.KernelSigInfo{
+        .signo = signum,
+        .code = uapi.signal.SI_USER,
+        .pid = current_proc.pid,
+        .uid = current_proc.uid,
+        .value = 0,
+    };
+    deliverSignalToThreadWithInfo(target, signum, si);
 
     return 0;
 }
@@ -798,7 +852,17 @@ pub fn sys_tkill(tid: usize, sig: usize) SyscallError!usize {
     // SECURITY: Check permission before delivering signal
     try checkSignalPermission(target, signum);
 
-    deliverSignalToThread(target, signum);
+    // Deliver with SI_TKILL metadata (sender PID and UID via current thread's process)
+    const sender = sched.getCurrentThread();
+    const sender_proc: ?*base.Process = if (sender) |s| (if (s.process) |p| @ptrCast(@alignCast(p)) else null) else null;
+    const si_tkill = uapi.signal.KernelSigInfo{
+        .signo = signum,
+        .code = uapi.signal.SI_TKILL,
+        .pid = if (sender_proc) |sp| sp.pid else 0,
+        .uid = if (sender_proc) |sp| sp.uid else 0,
+        .value = 0,
+    };
+    deliverSignalToThreadWithInfo(target, signum, si_tkill);
 
     return 0;
 }
@@ -848,7 +912,17 @@ pub fn sys_tgkill(tgid: usize, tid: usize, sig: usize) SyscallError!usize {
     // SECURITY: Check permission before delivering signal
     try checkSignalPermission(target, signum);
 
-    deliverSignalToThread(target, signum);
+    // Deliver with SI_TKILL metadata
+    const current_tgkill = sched.getCurrentThread();
+    const sender_proc_tgkill: ?*base.Process = if (current_tgkill) |s| (if (s.process) |p| @ptrCast(@alignCast(p)) else null) else null;
+    const si_tgkill = uapi.signal.KernelSigInfo{
+        .signo = signum,
+        .code = uapi.signal.SI_TKILL,
+        .pid = if (sender_proc_tgkill) |sp| sp.pid else 0,
+        .uid = if (sender_proc_tgkill) |sp| sp.uid else 0,
+        .value = 0,
+    };
+    deliverSignalToThreadWithInfo(target, signum, si_tgkill);
 
     return 0;
 }
@@ -902,12 +976,12 @@ pub fn sys_rt_sigtimedwait(set_ptr: usize, info_ptr: usize, timeout_ptr: usize, 
     }
 
     // Try to dequeue a matching signal immediately (atomic CAS loop)
-    if (tryDequeueSignal(current, wait_set)) |signo| {
+    if (tryDequeueSignal(current, wait_set)) |si| {
         // Fill siginfo if requested
         if (info_ptr != 0) {
-            writeSigInfo(info_ptr, signo) catch return error.EFAULT;
+            writeSigInfo(info_ptr, &si) catch return error.EFAULT;
         }
-        return signo;
+        return si.signo;
     }
 
     // No signal pending -- check timeout
@@ -927,11 +1001,11 @@ pub fn sys_rt_sigtimedwait(set_ptr: usize, info_ptr: usize, timeout_ptr: usize, 
             ticks_waited += 1;
 
             // Check for matching signal after each yield
-            if (tryDequeueSignal(current, wait_set)) |signo| {
+            if (tryDequeueSignal(current, wait_set)) |si| {
                 if (info_ptr != 0) {
-                    writeSigInfo(info_ptr, signo) catch return error.EFAULT;
+                    writeSigInfo(info_ptr, &si) catch return error.EFAULT;
                 }
-                return signo;
+                return si.signo;
             }
         }
         // Timeout expired without signal
@@ -944,11 +1018,11 @@ pub fn sys_rt_sigtimedwait(set_ptr: usize, info_ptr: usize, timeout_ptr: usize, 
             sched.yield();
             iterations += 1;
 
-            if (tryDequeueSignal(current, wait_set)) |signo| {
+            if (tryDequeueSignal(current, wait_set)) |si| {
                 if (info_ptr != 0) {
-                    writeSigInfo(info_ptr, signo) catch return error.EFAULT;
+                    writeSigInfo(info_ptr, &si) catch return error.EFAULT;
                 }
-                return signo;
+                return si.signo;
             }
 
             // Safety: check for thread interruption
@@ -959,8 +1033,8 @@ pub fn sys_rt_sigtimedwait(set_ptr: usize, info_ptr: usize, timeout_ptr: usize, 
 
 /// Try to atomically dequeue one signal from pending_signals matching wait_set.
 /// Uses @cmpxchgWeak per user decision for race-safe check-and-clear.
-/// Returns the signal number (1-64) or null if no match.
-fn tryDequeueSignal(thread: *sched.Thread, wait_set: uapi.signal.SigSet) ?usize {
+/// Returns KernelSigInfo with metadata (or fallback SI_USER if queue entry missing).
+fn tryDequeueSignal(thread: *sched.Thread, wait_set: uapi.signal.SigSet) ?uapi.signal.KernelSigInfo {
     // Read pending atomically
     const pending = @atomicLoad(u64, &thread.pending_signals, .acquire);
     const matching = pending & wait_set;
@@ -979,23 +1053,46 @@ fn tryDequeueSignal(thread: *sched.Thread, wait_set: uapi.signal.SigSet) ?usize 
             current = new_val;
             if ((current & sig_bit) == 0) return null; // Someone else took it
         } else {
-            // CAS succeeded
-            return bit_pos + 1; // Signal numbers are 1-indexed
+            // CAS succeeded -- dequeue siginfo metadata
+            const signo: u8 = @intCast(bit_pos + 1);
+            if (thread.siginfo_queue.dequeueBySignal(signo)) |si| {
+                return si;
+            }
+            // Fallback: no siginfo entry (race or queue was full during delivery)
+            return uapi.signal.KernelSigInfo{
+                .signo = signo,
+                .code = uapi.signal.SI_USER,
+                .pid = 0,
+                .uid = 0,
+                .value = 0,
+            };
         }
     }
 }
 
-/// Write siginfo_t to user memory for a dequeued signal
-/// MVP: Minimal siginfo_t (si_signo only, sender info = 0 due to bitmask-only tracking)
-fn writeSigInfo(info_ptr: usize, signo: usize) !void {
-    // Build minimal siginfo_t (128 bytes)
-    // MVP: no per-signal queue, so sender info not tracked
+/// Write siginfo_t to user memory for a dequeued signal.
+/// Populates si_signo, si_code, si_pid, si_uid, si_value from KernelSigInfo.
+fn writeSigInfo(info_ptr: usize, si: *const uapi.signal.KernelSigInfo) !void {
+    // Build siginfo_t (128 bytes, zero-initialized for all unused fields)
+    // Layout (Linux x86_64 siginfo_t):
+    //   Offset  0: si_signo (i32)
+    //   Offset  4: si_errno (i32) = 0
+    //   Offset  8: si_code  (i32)
+    //   Offset 12: padding  (i32) = 0
+    //   Offset 16: si_pid   (i32) for SI_USER/SI_QUEUE/SI_TKILL
+    //   Offset 20: si_uid   (i32)
+    //   Offset 24: si_value (union: first 8 bytes as usize)
     var buf = [_]u8{0} ** 128;
-    const signo_i32: i32 = @intCast(signo);
+    const signo_i32: i32 = @intCast(si.signo);
     @memcpy(buf[0..4], std.mem.asBytes(&signo_i32));
     // si_errno at offset 4 = 0 (already zeroed)
-    // si_code at offset 8 = SI_USER = 0 (already zeroed)
-    // Remaining fields = 0 (no sender tracking in MVP)
+    @memcpy(buf[8..12], std.mem.asBytes(&si.code));
+    // padding at offset 12 = 0 (already zeroed)
+    const pid_i32: i32 = @bitCast(si.pid);
+    @memcpy(buf[16..20], std.mem.asBytes(&pid_i32));
+    const uid_i32: i32 = @bitCast(si.uid);
+    @memcpy(buf[20..24], std.mem.asBytes(&uid_i32));
+    @memcpy(buf[24..32], std.mem.asBytes(&si.value));
 
     const uptr = UserPtr.from(info_ptr);
     _ = uptr.copyFromKernel(&buf) catch return error.EFAULT;
@@ -1041,10 +1138,45 @@ pub fn sys_rt_sigqueueinfo(pid: usize, sig: usize, info_ptr: usize) SyscallError
     // Permission check (reuse existing checkSignalPermission)
     try checkSignalPermission(target, signum);
 
-    // Deliver signal (sets pending bit, same as kill)
-    // MVP: siginfo_t data is not preserved in the bitmask -- signal is delivered
-    // but the associated data from info_ptr is lost. Acceptable for v1.2.
-    deliverSignalToThread(target, signum);
+    // Extract sender PID/UID and si_value from the user-provided siginfo_t buffer
+    // Layout: si_signo (i32 @ 0), si_errno (i32 @ 4), si_code (i32 @ 8), padding (i32 @ 12),
+    //         si_pid (i32 @ 16), si_uid (i32 @ 20), si_value (union @ 24, first 8 bytes as usize)
+    const si_pid_bytes = [4]u8{ info_buf[16], info_buf[17], info_buf[18], info_buf[19] };
+    const si_pid: i32 = @bitCast(si_pid_bytes);
+    const si_uid_bytes = [4]u8{ info_buf[20], info_buf[21], info_buf[22], info_buf[23] };
+    const si_uid: i32 = @bitCast(si_uid_bytes);
+    const si_value_bytes = [8]u8{ info_buf[24], info_buf[25], info_buf[26], info_buf[27], info_buf[28], info_buf[29], info_buf[30], info_buf[31] };
+    const si_value: usize = @bitCast(si_value_bytes);
+
+    const si = uapi.signal.KernelSigInfo{
+        .signo = signum,
+        .code = si_code,
+        .pid = @bitCast(si_pid),
+        .uid = @bitCast(si_uid),
+        .value = si_value,
+    };
+
+    // For rt_sigqueueinfo, queue overflow MUST return EAGAIN per POSIX (SIGQUEUE_MAX enforcement).
+    // Unlike general delivery paths (kill/tkill) which use best-effort silent drop,
+    // rt_sigqueueinfo is the explicit queuing API and callers need to know when queue is full.
+    const sig_bit_q: u64 = @as(u64, 1) << @intCast(signum - 1);
+    const is_rt_signal_q = signum >= 32;
+    const already_pending_q = (@atomicLoad(u64, &target.pending_signals, .acquire) & sig_bit_q) != 0;
+
+    if (is_rt_signal_q or !already_pending_q) {
+        if (!target.siginfo_queue.enqueue(si)) {
+            // Queue full -- POSIX mandates EAGAIN for rt_sigqueueinfo overflow
+            return error.EAGAIN;
+        }
+    }
+
+    // Set pending bitmask
+    _ = @atomicRmw(u64, &target.pending_signals, .Or, sig_bit_q, .release);
+
+    // Wake target if blocked
+    if (target.state == .Blocked and !target.stopped) {
+        sched.unblock(target);
+    }
 
     return 0;
 }
@@ -1089,8 +1221,40 @@ pub fn sys_rt_tgsigqueueinfo(tgid: usize, tid: usize, sig: usize, info_ptr: usiz
     // Permission check
     try checkSignalPermission(target, signum);
 
-    // Deliver
-    deliverSignalToThread(target, signum);
+    // Extract sender metadata from user-provided siginfo_t buffer
+    const si_pid_bytes_tg = [4]u8{ info_buf[16], info_buf[17], info_buf[18], info_buf[19] };
+    const si_pid_tg: i32 = @bitCast(si_pid_bytes_tg);
+    const si_uid_bytes_tg = [4]u8{ info_buf[20], info_buf[21], info_buf[22], info_buf[23] };
+    const si_uid_tg: i32 = @bitCast(si_uid_bytes_tg);
+    const si_value_bytes_tg = [8]u8{ info_buf[24], info_buf[25], info_buf[26], info_buf[27], info_buf[28], info_buf[29], info_buf[30], info_buf[31] };
+    const si_value_tg: usize = @bitCast(si_value_bytes_tg);
+
+    const si_tg = uapi.signal.KernelSigInfo{
+        .signo = signum,
+        .code = si_code,
+        .pid = @bitCast(si_pid_tg),
+        .uid = @bitCast(si_uid_tg),
+        .value = si_value_tg,
+    };
+
+    // Return EAGAIN on queue overflow (POSIX SIGQUEUE_MAX enforcement)
+    const sig_bit_tg: u64 = @as(u64, 1) << @intCast(signum - 1);
+    const is_rt_signal_tg = signum >= 32;
+    const already_pending_tg = (@atomicLoad(u64, &target.pending_signals, .acquire) & sig_bit_tg) != 0;
+
+    if (is_rt_signal_tg or !already_pending_tg) {
+        if (!target.siginfo_queue.enqueue(si_tg)) {
+            return error.EAGAIN;
+        }
+    }
+
+    // Set pending bitmask
+    _ = @atomicRmw(u64, &target.pending_signals, .Or, sig_bit_tg, .release);
+
+    // Wake target if blocked
+    if (target.state == .Blocked and !target.stopped) {
+        sched.unblock(target);
+    }
 
     return 0;
 }

@@ -102,13 +102,19 @@ fn signalfdRead(fd: *fd_mod.FileDescriptor, buf: []u8) isize {
             // holding our spinlock - a plain &= would race and lose signals.
             _ = @atomicRmw(u64, &current.pending_signals, .And, ~(@as(u64, 1) << @intCast(sig_bit)), .acq_rel);
 
+            // Dequeue siginfo metadata from the per-thread queue
+            const si = current.siginfo_queue.dequeueBySignal(@intCast(signum));
+
             held.release();
 
-            // Build SignalFdSigInfo structure
+            // Build SignalFdSigInfo structure with metadata from siginfo queue
             var info: uapi.signalfd.SignalFdSigInfo = std.mem.zeroes(uapi.signalfd.SignalFdSigInfo);
             info.ssi_signo = @intCast(signum);
-            // For MVP, other fields (ssi_code, ssi_pid, ssi_uid) are zero
-            // Full metadata requires signal queue infrastructure (future work)
+            if (si) |s| {
+                info.ssi_code = s.code;
+                info.ssi_pid = @bitCast(s.pid);
+                info.ssi_uid = @bitCast(s.uid);
+            }
 
             // Copy to userspace buffer
             const info_bytes = std.mem.asBytes(&info);

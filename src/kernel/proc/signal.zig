@@ -113,6 +113,9 @@ pub fn checkSignals(frame: *hal.idt.InterruptFrame) *hal.idt.InterruptFrame {
     // and signalfd consumption on other CPUs.
     _ = @atomicRmw(u64, &current_thread.pending_signals, .And, ~(@as(u64, 1) << @truncate(sig_bit)), .acq_rel);
 
+    // Dequeue siginfo metadata (may be null if queue was empty/overflowed during delivery)
+    const siginfo = current_thread.siginfo_queue.dequeueBySignal(@intCast(signum));
+
     // Get the action for this signal
     // signal_actions index is signum-1 (0-63 for signals 1-64)
     const action = current_thread.signal_actions[signum - 1];
@@ -127,7 +130,7 @@ pub fn checkSignals(frame: *hal.idt.InterruptFrame) *hal.idt.InterruptFrame {
     }
 
     // Deliver signal to user handler
-    return setupSignalFrame(frame, signum, action);
+    return setupSignalFrame(frame, signum, action, siginfo);
 }
 
 /// Set up the user stack for signal delivery.
@@ -135,7 +138,10 @@ pub fn checkSignals(frame: *hal.idt.InterruptFrame) *hal.idt.InterruptFrame {
 /// Pushes a `ucontext_t` structure onto the user stack containing the current
 /// register state. Updates the interrupt frame to point RIP to the handler
 /// and RSP to the new stack location.
-fn setupSignalFrame(frame: *hal.idt.InterruptFrame, signum: usize, action: uapi.signal.SigAction) *hal.idt.InterruptFrame {
+fn setupSignalFrame(frame: *hal.idt.InterruptFrame, signum: usize, action: uapi.signal.SigAction, siginfo: ?uapi.signal.KernelSigInfo) *hal.idt.InterruptFrame {
+    // siginfo is threaded through for Plan 02 SA_SIGINFO argument passing.
+    // For now, suppress the unused variable warning.
+    _ = siginfo;
     // We need to save the current context (registers) to the user stack
     // so sigreturn can restore them later.
     // The structure we push is ucontext_t (or close approximation).
@@ -348,6 +354,9 @@ pub fn checkSignalsOnSyscallExit(frame: *hal.syscall.SyscallFrame) void {
     // and signalfd consumption on other CPUs.
     _ = @atomicRmw(u64, &current_thread.pending_signals, .And, ~(@as(u64, 1) << @truncate(sig_bit)), .acq_rel);
 
+    // Dequeue siginfo metadata (may be null if queue was empty/overflowed during delivery)
+    const siginfo = current_thread.siginfo_queue.dequeueBySignal(@intCast(signum));
+
     // Get the action for this signal
     const action = current_thread.signal_actions[signum - 1];
 
@@ -381,14 +390,17 @@ pub fn checkSignalsOnSyscallExit(frame: *hal.syscall.SyscallFrame) void {
     }
 
     // Deliver signal to user handler via setupSignalFrameForSyscall
-    setupSignalFrameForSyscall(frame, current_thread, signum, action);
+    setupSignalFrameForSyscall(frame, current_thread, signum, action, siginfo);
     // Note: setupSignalFrameForSyscall cleared has_saved_sigmask if it was set.
     // rt_sigreturn will restore the mask from ucontext.sigmask.
     // The defer at function entry handles restoration if no signal was delivered.
 }
 
 /// Set up user stack for signal delivery from syscall context
-fn setupSignalFrameForSyscall(frame: *hal.syscall.SyscallFrame, current_thread: *Thread, signum: usize, action: uapi.signal.SigAction) void {
+fn setupSignalFrameForSyscall(frame: *hal.syscall.SyscallFrame, current_thread: *Thread, signum: usize, action: uapi.signal.SigAction, siginfo: ?uapi.signal.KernelSigInfo) void {
+    // siginfo is threaded through for Plan 02 SA_SIGINFO argument passing.
+    // For now, suppress the unused variable warning.
+    _ = siginfo;
 
     // Determine which stack to use
     var sp = frame.getUserRsp();
