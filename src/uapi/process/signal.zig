@@ -195,3 +195,122 @@ pub const SI_TKILL: i32 = -6; // Sent by tkill/tgkill
 
 /// TIMER_ABSTIME flag for clock_nanosleep
 pub const TIMER_ABSTIME: u32 = 1;
+
+// =============================================================================
+// Per-Thread Signal Info Queue (Phase 29)
+// =============================================================================
+
+/// Kernel-internal siginfo entry for per-thread signal queue.
+/// Carries signal metadata through the kernel from sender to consumer.
+pub const KernelSigInfo = struct {
+    signo: u8, // Signal number (1-64)
+    code: i32, // SI_USER, SI_QUEUE, SI_KERNEL, SI_TIMER, SI_TKILL, etc.
+    pid: u32, // Sender PID (0 for kernel)
+    uid: u32, // Sender UID (0 for kernel)
+    value: usize, // si_value (union of int and pointer, use usize)
+};
+
+/// Fixed-capacity ring buffer for per-thread siginfo queue.
+/// Capacity 32 is sufficient for a microkernel (Linux defaults to 128 per UID).
+/// Standard signals (1-31) coalesce via pending_signals bitmask before enqueue.
+/// RT signals (32-64) can queue multiple instances.
+pub const SIGINFO_QUEUE_CAPACITY: usize = 32;
+
+pub const SigInfoQueue = struct {
+    entries: [SIGINFO_QUEUE_CAPACITY]KernelSigInfo,
+    head: u8, // Next slot to dequeue from
+    tail: u8, // Next slot to enqueue into
+    count: u8, // Number of entries in queue
+
+    pub fn init() SigInfoQueue {
+        return .{
+            .entries = undefined,
+            .head = 0,
+            .tail = 0,
+            .count = 0,
+        };
+    }
+
+    /// Enqueue a siginfo entry. Returns false if queue is full.
+    pub fn enqueue(self: *SigInfoQueue, info: KernelSigInfo) bool {
+        if (self.count >= SIGINFO_QUEUE_CAPACITY) return false;
+        self.entries[self.tail] = info;
+        self.tail = @intCast((@as(u16, self.tail) + 1) % SIGINFO_QUEUE_CAPACITY);
+        self.count += 1;
+        return true;
+    }
+
+    /// Dequeue the oldest entry. Returns null if empty.
+    pub fn dequeue(self: *SigInfoQueue) ?KernelSigInfo {
+        if (self.count == 0) return null;
+        const entry = self.entries[self.head];
+        self.head = @intCast((@as(u16, self.head) + 1) % SIGINFO_QUEUE_CAPACITY);
+        self.count -= 1;
+        return entry;
+    }
+
+    /// Dequeue the first entry matching a specific signal number.
+    /// Used by signal consumption paths that need a specific signal.
+    /// Returns null if no matching entry exists.
+    pub fn dequeueBySignal(self: *SigInfoQueue, signo: u8) ?KernelSigInfo {
+        if (self.count == 0) return null;
+        // Linear scan from head to find first match
+        var i: u8 = 0;
+        while (i < self.count) : (i += 1) {
+            const idx = @as(u8, @intCast((@as(u16, self.head) + i) % SIGINFO_QUEUE_CAPACITY));
+            if (self.entries[idx].signo == signo) {
+                // Found match -- remove it by shifting remaining entries
+                const result = self.entries[idx];
+                // Compact: shift entries after idx toward head
+                var j: u8 = i;
+                while (j + 1 < self.count) : (j += 1) {
+                    const src = @as(u8, @intCast((@as(u16, self.head) + j + 1) % SIGINFO_QUEUE_CAPACITY));
+                    const dst = @as(u8, @intCast((@as(u16, self.head) + j) % SIGINFO_QUEUE_CAPACITY));
+                    self.entries[dst] = self.entries[src];
+                }
+                self.count -= 1;
+                self.tail = @intCast((@as(u16, self.head) + self.count) % SIGINFO_QUEUE_CAPACITY);
+                return result;
+            }
+        }
+        return null;
+    }
+
+    /// Dequeue first entry matching any signal in the given bitmask.
+    /// Used by rt_sigtimedwait and signalfd.
+    pub fn dequeueByMask(self: *SigInfoQueue, mask: u64) ?KernelSigInfo {
+        if (self.count == 0) return null;
+        var i: u8 = 0;
+        while (i < self.count) : (i += 1) {
+            const idx = @as(u8, @intCast((@as(u16, self.head) + i) % SIGINFO_QUEUE_CAPACITY));
+            const signo = self.entries[idx].signo;
+            if (signo >= 1 and signo <= 64) {
+                const sig_bit: u64 = @as(u64, 1) << @intCast(signo - 1);
+                if ((mask & sig_bit) != 0) {
+                    const result = self.entries[idx];
+                    // Compact
+                    var j: u8 = i;
+                    while (j + 1 < self.count) : (j += 1) {
+                        const src = @as(u8, @intCast((@as(u16, self.head) + j + 1) % SIGINFO_QUEUE_CAPACITY));
+                        const dst = @as(u8, @intCast((@as(u16, self.head) + j) % SIGINFO_QUEUE_CAPACITY));
+                        self.entries[dst] = self.entries[src];
+                    }
+                    self.count -= 1;
+                    self.tail = @intCast((@as(u16, self.head) + self.count) % SIGINFO_QUEUE_CAPACITY);
+                    return result;
+                }
+            }
+        }
+        return null;
+    }
+
+    /// Check if any entry matches the given signal number (without removing).
+    pub fn hasSignal(self: *const SigInfoQueue, signo: u8) bool {
+        var i: u8 = 0;
+        while (i < self.count) : (i += 1) {
+            const idx = @as(u8, @intCast((@as(u16, self.head) + i) % SIGINFO_QUEUE_CAPACITY));
+            if (self.entries[idx].signo == signo) return true;
+        }
+        return false;
+    }
+};

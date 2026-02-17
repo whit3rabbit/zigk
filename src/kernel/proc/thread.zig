@@ -119,6 +119,11 @@ pub const Thread = struct {
     /// Pending signals bitmap
     pending_signals: u64,
 
+    /// Per-thread siginfo queue for carrying signal metadata.
+    /// Works alongside pending_signals bitmask: bitmask is fast-check,
+    /// queue carries metadata (si_code, si_pid, si_uid, si_value).
+    siginfo_queue: uapi.signal.SigInfoQueue,
+
     /// Signal actions table (index 0 is unused, 1-64 correspond to signals)
     signal_actions: [64]uapi.signal.SigAction,
 
@@ -421,6 +426,7 @@ pub fn createKernelThread(
         .process = null,
         .sigmask = 0,
         .pending_signals = 0,
+        .siginfo_queue = uapi.signal.SigInfoQueue.init(),
         .signal_actions = [_]uapi.signal.SigAction{std.mem.zeroes(uapi.signal.SigAction)} ** 64,
     };
 
@@ -586,6 +592,7 @@ pub fn createUserThread(
         .process = options.process,
         .sigmask = 0,
         .pending_signals = 0,
+        .siginfo_queue = uapi.signal.SigInfoQueue.init(),
         .signal_actions = [_]uapi.signal.SigAction{std.mem.zeroes(uapi.signal.SigAction)} ** 64,
     };
 
