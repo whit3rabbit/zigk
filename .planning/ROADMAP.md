@@ -53,7 +53,7 @@
 
 </details>
 
-### 🚧 v1.3 Tech Debt Cleanup (In Progress)
+### v1.3 Tech Debt Cleanup (In Progress)
 
 **Milestone Goal:** Resolve all 15 tech debt items from v1.0-v1.2, hardening existing implementations with proper wakeups, signal queues, and VFS page cache infrastructure.
 
@@ -91,7 +91,9 @@ Plans:
   1. rt_sigsuspend delivers signals that were pending before the mask was restored
   2. rt_sigsuspend correctly blocks until a signal is delivered
   3. Test demonstrates signal delivery during mask restoration works reliably
-**Plans**: TBD
+**Plans**: 1 plan
+Plans:
+- [ ] 28-01-PLAN.md -- Fix mask restoration race with deferred restoration pattern
 
 ### Phase 29: Siginfo Queue
 **Goal**: Replace bitmask-only signal tracking with per-thread siginfo queue to carry signal metadata
@@ -201,7 +203,7 @@ Plans:
 | 25. Seccomp | v1.2 | 1/1 | Complete | 2026-02-16 |
 | 26. Test Coverage Expansion | v1.2 | 2/2 | Complete | 2026-02-16 |
 | 27. Quick Wins | v1.3 | Complete    | 2026-02-16 | - |
-| 28. rt_sigsuspend Race Fix | v1.3 | 0/? | Not started | - |
+| 28. rt_sigsuspend Race Fix | v1.3 | 0/1 | Not started | - |
 | 29. Siginfo Queue | v1.3 | 0/? | Not started | - |
 | 30. Signal Wakeup Integration | v1.3 | 0/? | Not started | - |
 | 31. Inotify Completion | v1.3 | 0/? | Not started | - |
@@ -212,4 +214,4 @@ Plans:
 
 ---
 *Roadmap created: 2026-02-06*
-*Last updated: 2026-02-16 after Phase 27 planning*
+*Last updated: 2026-02-16 after Phase 28 planning*
