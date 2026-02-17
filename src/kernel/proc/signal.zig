@@ -139,9 +139,6 @@ pub fn checkSignals(frame: *hal.idt.InterruptFrame) *hal.idt.InterruptFrame {
 /// register state. Updates the interrupt frame to point RIP to the handler
 /// and RSP to the new stack location.
 fn setupSignalFrame(frame: *hal.idt.InterruptFrame, signum: usize, action: uapi.signal.SigAction, siginfo: ?uapi.signal.KernelSigInfo) *hal.idt.InterruptFrame {
-    // siginfo is threaded through for Plan 02 SA_SIGINFO argument passing.
-    // For now, suppress the unused variable warning.
-    _ = siginfo;
     // We need to save the current context (registers) to the user stack
     // so sigreturn can restore them later.
     // The structure we push is ucontext_t (or close approximation).
@@ -270,6 +267,38 @@ fn setupSignalFrame(frame: *hal.idt.InterruptFrame, signum: usize, action: uapi.
         return frame;
     };
 
+    // Record ucontext address for SA_SIGINFO (arg 3 = ucontext pointer)
+    const ucontext_addr = sp;
+
+    // SA_SIGINFO: push siginfo_t onto the stack and prepare 3-arg call
+    var siginfo_sp: usize = 0;
+    if ((action.flags & uapi.signal.SA_SIGINFO) != 0) {
+        const si_data = siginfo orelse uapi.signal.KernelSigInfo{
+            .signo = @intCast(signum),
+            .code = uapi.signal.SI_USER,
+            .pid = 0,
+            .uid = 0,
+            .value = 0,
+        };
+        const user_siginfo = uapi.signal.SigInfoT{
+            .si_signo = @intCast(si_data.signo),
+            .si_errno = 0,
+            .si_code = si_data.code,
+            .si_pid = @bitCast(si_data.pid),
+            .si_uid = @bitCast(si_data.uid),
+            .si_value_int = @intCast(si_data.value & 0xFFFFFFFF),
+            .si_value_ptr = si_data.value,
+        };
+        sp -= @sizeOf(uapi.signal.SigInfoT);
+        sp &= ~@as(u64, 15); // 16-byte align
+        siginfo_sp = sp;
+        UserPtr.from(sp).writeValue(user_siginfo) catch {
+            console.err("Signal: Failed to write siginfo_t to stack", .{});
+            sched.exitWithStatus(128 + 11);
+            return frame;
+        };
+    }
+
     // Push return address (trampoline)
     // If SA_RESTORER flag is set, use action.restorer
     // Otherwise, we might need a default kernel VDSO trampoline (not yet implemented)
@@ -292,7 +321,12 @@ fn setupSignalFrame(frame: *hal.idt.InterruptFrame, signum: usize, action: uapi.
     // Update interrupt frame to execute handler
     frame.rip = action.handler;
     frame.rsp = sp;
-    frame.rdi = @intCast(signum); // Arg 1: signum
+    // x86_64 C ABI: rdi = arg1, rsi = arg2, rdx = arg3
+    frame.rdi = @intCast(signum); // Arg 1: signum (always)
+    if ((action.flags & uapi.signal.SA_SIGINFO) != 0) {
+        frame.rsi = siginfo_sp;    // Arg 2: pointer to siginfo_t
+        frame.rdx = ucontext_addr; // Arg 3: pointer to ucontext_t
+    }
 
     // Clear direction flag, etc?
     frame.rflags &= ~@as(u64, 0x400); // Clear DF
@@ -398,9 +432,6 @@ pub fn checkSignalsOnSyscallExit(frame: *hal.syscall.SyscallFrame) void {
 
 /// Set up user stack for signal delivery from syscall context
 fn setupSignalFrameForSyscall(frame: *hal.syscall.SyscallFrame, current_thread: *Thread, signum: usize, action: uapi.signal.SigAction, siginfo: ?uapi.signal.KernelSigInfo) void {
-    // siginfo is threaded through for Plan 02 SA_SIGINFO argument passing.
-    // For now, suppress the unused variable warning.
-    _ = siginfo;
 
     // Determine which stack to use
     var sp = frame.getUserRsp();
@@ -492,6 +523,38 @@ fn setupSignalFrameForSyscall(frame: *hal.syscall.SyscallFrame, current_thread: 
         return;
     };
 
+    // Record ucontext address for SA_SIGINFO (arg 3 = ucontext pointer)
+    const ucontext_addr = sp;
+
+    // SA_SIGINFO: push siginfo_t onto the stack and prepare 3-arg call
+    var siginfo_sp: usize = 0;
+    if ((action.flags & uapi.signal.SA_SIGINFO) != 0) {
+        const si_data = siginfo orelse uapi.signal.KernelSigInfo{
+            .signo = @intCast(signum),
+            .code = uapi.signal.SI_USER,
+            .pid = 0,
+            .uid = 0,
+            .value = 0,
+        };
+        const user_siginfo = uapi.signal.SigInfoT{
+            .si_signo = @intCast(si_data.signo),
+            .si_errno = 0,
+            .si_code = si_data.code,
+            .si_pid = @bitCast(si_data.pid),
+            .si_uid = @bitCast(si_data.uid),
+            .si_value_int = @intCast(si_data.value & 0xFFFFFFFF),
+            .si_value_ptr = si_data.value,
+        };
+        sp -= @sizeOf(uapi.signal.SigInfoT);
+        sp &= ~@as(u64, 15); // 16-byte align
+        siginfo_sp = sp;
+        UserPtr.from(sp).writeValue(user_siginfo) catch {
+            console.err("Signal: Failed to write siginfo_t to stack", .{});
+            sched.exitWithStatus(128 + 11);
+            return;
+        };
+    }
+
     // Push return address (restorer trampoline)
     const restorer = action.restorer;
     if (restorer == 0) {
@@ -516,12 +579,21 @@ fn setupSignalFrameForSyscall(frame: *hal.syscall.SyscallFrame, current_thread: 
     frame.setReturnRip(action.handler);
     frame.setUserRsp(sp);
 
-    // First argument: signal number
-    // x86_64 C ABI: rdi = first arg. aarch64 C ABI: x0 (= frame.rax) = first arg.
+    // Set handler arguments.
+    // x86_64 C ABI: rdi=arg1, rsi=arg2, rdx=arg3.
+    // aarch64 C ABI: x0(rax)=arg1, x1(rdi)=arg2, x2(rsi)=arg3.
     if (builtin.cpu.arch == .aarch64) {
-        frame.rax = @intCast(signum);
+        frame.rax = @intCast(signum); // x0 = arg1: signum
+        if ((action.flags & uapi.signal.SA_SIGINFO) != 0) {
+            frame.rdi = siginfo_sp;    // x1 = arg2: pointer to siginfo_t
+            frame.rsi = ucontext_addr; // x2 = arg3: pointer to ucontext_t
+        }
     } else {
-        frame.rdi = @intCast(signum);
+        frame.rdi = @intCast(signum); // rdi = arg1: signum
+        if ((action.flags & uapi.signal.SA_SIGINFO) != 0) {
+            frame.rsi = siginfo_sp;    // rsi = arg2: pointer to siginfo_t
+            frame.rdx = ucontext_addr; // rdx = arg3: pointer to ucontext_t
+        }
     }
 
     if (builtin.cpu.arch == .x86_64) {

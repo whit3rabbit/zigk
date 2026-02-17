@@ -210,6 +210,46 @@ pub const KernelSigInfo = struct {
     value: usize, // si_value (union of int and pointer, use usize)
 };
 
+// =============================================================================
+// User-visible siginfo_t (Phase 29, Plan 02)
+// =============================================================================
+
+/// User-visible siginfo_t structure pushed onto user stack for SA_SIGINFO handlers.
+/// Must be 128 bytes to match Linux ABI.
+///
+/// Layout (offsets in bytes):
+///   0-3:   si_signo (i32)
+///   4-7:   si_errno (i32)
+///   8-11:  si_code  (i32)
+///  12-15:  _pad0    (i32)
+///  16-19:  si_pid   (i32)
+///  20-23:  si_uid   (i32)
+///  24-27:  si_status (i32)
+///  28-31:  _pad1    (i32)
+///  32-35:  si_value_int (i32)
+///  36-39:  _pad2    (i32)
+///  40-47:  si_value_ptr (usize, 8 bytes on 64-bit)
+///  48-127: _pad     (80 bytes remaining to reach 128 total)
+pub const SigInfoT = extern struct {
+    si_signo: i32,
+    si_errno: i32,
+    si_code: i32,
+    _pad0: i32 = 0,
+    si_pid: i32,
+    si_uid: i32,
+    si_status: i32 = 0,
+    _pad1: i32 = 0,
+    si_value_int: i32 = 0,
+    _pad2: i32 = 0,
+    si_value_ptr: usize = 0,
+    _pad: [128 - 48]u8 = [_]u8{0} ** (128 - 48),
+
+    comptime {
+        const std = @import("std");
+        std.debug.assert(@sizeOf(SigInfoT) == 128);
+    }
+};
+
 /// Fixed-capacity ring buffer for per-thread siginfo queue.
 /// Capacity 32 is sufficient for a microkernel (Linux defaults to 128 per UID).
 /// Standard signals (1-31) coalesce via pending_signals bitmask before enqueue.
