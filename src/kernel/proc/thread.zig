@@ -110,6 +110,12 @@ pub const Thread = struct {
     /// Blocked signals mask
     sigmask: uapi.signal.SigSet,
 
+    /// Saved signal mask for rt_sigsuspend deferred restoration.
+    /// When has_saved_sigmask is true, checkSignalsOnSyscallExit restores
+    /// this mask after signal delivery (not before).
+    saved_sigmask: uapi.signal.SigSet = 0,
+    has_saved_sigmask: bool = false,
+
     /// Pending signals bitmap
     pending_signals: u64,
 

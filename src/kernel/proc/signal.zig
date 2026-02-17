@@ -242,7 +242,7 @@ fn setupSignalFrame(frame: *hal.idt.InterruptFrame, signum: usize, action: uapi.
             .pad0 = 0,
             .err = frame.error_code,
             .trapno = frame.vector,
-            .oldmask = current_thread.sigmask, // Save current signal mask for restoration
+            .oldmask = if (current_thread.has_saved_sigmask) current_thread.saved_sigmask else current_thread.sigmask,
             // Save CR2 for page fault signals (SIGSEGV, SIGBUS)
             // CR2 contains the faulting virtual address
             .cr2 = if (signum == uapi.signal.SIGSEGV or signum == uapi.signal.SIGBUS)
@@ -252,7 +252,7 @@ fn setupSignalFrame(frame: *hal.idt.InterruptFrame, signum: usize, action: uapi.
             .fpstate = fpstate_addr, // Pointer to saved FPU state (or 0)
             .reserved = [_]u64{0} ** 8,
         },
-        .sigmask = sched.getCurrentThread().?.sigmask,
+        .sigmask = if (current_thread.has_saved_sigmask) current_thread.saved_sigmask else current_thread.sigmask,
         ._pad = [_]u8{0} ** 128,
     };
 
@@ -302,6 +302,12 @@ fn setupSignalFrame(frame: *hal.idt.InterruptFrame, signum: usize, action: uapi.
         current_thread.sigmask |= sig_bit;
     }
 
+    // If rt_sigsuspend saved a mask, clear the flag -- rt_sigreturn
+    // will restore the original mask from ucontext.sigmask.
+    if (current_thread.has_saved_sigmask) {
+        current_thread.has_saved_sigmask = false;
+    }
+
     return frame;
 }
 
@@ -315,6 +321,16 @@ fn setupSignalFrame(frame: *hal.idt.InterruptFrame, signum: usize, action: uapi.
 /// RCX for return RIP and R11 for RFLAGS.
 pub fn checkSignalsOnSyscallExit(frame: *hal.syscall.SyscallFrame) void {
     const current_thread = sched.getCurrentThread() orelse return;
+
+    // Restore saved signal mask from rt_sigsuspend at function exit.
+    // This runs AFTER signal delivery (if any) so the temporary mask is active
+    // during signal handler setup. The defer runs on ALL return paths.
+    defer {
+        if (current_thread.has_saved_sigmask) {
+            current_thread.sigmask = current_thread.saved_sigmask;
+            current_thread.has_saved_sigmask = false;
+        }
+    }
 
     // Fast check: any pending signals? (atomic for SMP visibility)
     if (@atomicLoad(u64, &current_thread.pending_signals, .acquire) == 0) return;
@@ -365,6 +381,9 @@ pub fn checkSignalsOnSyscallExit(frame: *hal.syscall.SyscallFrame) void {
 
     // Deliver signal to user handler via setupSignalFrameForSyscall
     setupSignalFrameForSyscall(frame, current_thread, signum, action);
+    // Note: setupSignalFrameForSyscall cleared has_saved_sigmask if it was set.
+    // rt_sigreturn will restore the mask from ucontext.sigmask.
+    // The defer at function entry handles restoration if no signal was delivered.
 }
 
 /// Set up user stack for signal delivery from syscall context
@@ -444,12 +463,12 @@ fn setupSignalFrameForSyscall(frame: *hal.syscall.SyscallFrame, current_thread: 
             .pad0 = 0,
             .err = 0,
             .trapno = 0,
-            .oldmask = current_thread.sigmask,
+            .oldmask = if (current_thread.has_saved_sigmask) current_thread.saved_sigmask else current_thread.sigmask,
             .cr2 = 0,
             .fpstate = fpstate_addr,
             .reserved = [_]u64{0} ** 8,
         },
-        .sigmask = current_thread.sigmask,
+        .sigmask = if (current_thread.has_saved_sigmask) current_thread.saved_sigmask else current_thread.sigmask,
         ._pad = [_]u8{0} ** 128,
     };
 
@@ -502,6 +521,12 @@ fn setupSignalFrameForSyscall(frame: *hal.syscall.SyscallFrame, current_thread: 
     if ((action.flags & uapi.signal.SA_NODEFER) == 0) {
         const sig_bit: u64 = @as(u64, 1) << @truncate(signum - 1);
         current_thread.sigmask |= sig_bit;
+    }
+
+    // If rt_sigsuspend saved a mask, clear the flag -- rt_sigreturn
+    // will restore the original mask from ucontext.sigmask.
+    if (current_thread.has_saved_sigmask) {
+        current_thread.has_saved_sigmask = false;
     }
 }
 

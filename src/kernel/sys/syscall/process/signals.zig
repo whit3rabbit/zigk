@@ -265,15 +265,15 @@ pub fn sys_rt_sigsuspend(mask_ptr: usize, sigsetsize: usize) SyscallError!usize 
         sched.block();
     }
     // Else: signal is pending and unblocked - skip block(), return immediately
-    // (Signal handler will run when we return to userspace, BEFORE restoring old mask)
+    // (Signal handler will run when we return to userspace)
 
-    // NOTE: We must restore the old mask BEFORE returning to userspace, otherwise
-    // the signal handler will see the wrong mask. But the arch-specific signal
-    // delivery code runs BEFORE the syscall return value is processed, so the
-    // handler will run while the NEW mask is still active, then we restore and return.
-
-    // Restore old mask
-    current_thread.sigmask = old_mask;
+    // Save old mask for deferred restoration by checkSignalsOnSyscallExit.
+    // The temp mask stays active so signal delivery can see unblocked signals.
+    // This fixes the race: previously we restored the mask HERE, before
+    // checkSignalsOnSyscallExit ran, so signals unblocked only by the temp
+    // mask got re-blocked before delivery.
+    current_thread.saved_sigmask = old_mask;
+    current_thread.has_saved_sigmask = true;
 
     // Always return EINTR (sigsuspend always fails with this errno per POSIX)
     return error.EINTR;
