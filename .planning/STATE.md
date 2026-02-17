@@ -10,16 +10,16 @@ See: .planning/PROJECT.md (updated 2026-02-16)
 ## Current Position
 
 Phase: 29 of 35 (Siginfo Queue)
-Plan: 1 completed in current phase (29-01 done)
-Status: Phase 29 plan 01 complete
-Last activity: 2026-02-17 - Completed 29-01 (per-thread siginfo queue + delivery/consumption wiring)
+Plan: 2 completed in current phase (29-01 and 29-02 done)
+Status: Phase 29 complete
+Last activity: 2026-02-17 - Completed 29-02 (SA_SIGINFO handler arg passing + integration tests)
 
-Progress: [█████████████████████░░] 80% (28/35 phases complete)
+Progress: [█████████████████████░░] 83% (29/35 phases complete)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 61 (v1.0: 29, v1.1: 12, v1.2: 16, v1.3: 4)
+- Total plans completed: 62 (v1.0: 29, v1.1: 12, v1.2: 16, v1.3: 5)
 - Average duration: ~8.2 min per plan
 - Total execution time: ~8.6 hours over 11 days
 
@@ -30,7 +30,7 @@ Progress: [█████████████████████░░
 | v1.0 | 1-9 | 29 | 4 days |
 | v1.1 | 10-14 | 12 | 2 days |
 | v1.2 | 15-26 | 16 | 5 days |
-| v1.3 | 27-35 | 4 (ongoing) | 61 min |
+| v1.3 | 27-35 | 5 (ongoing) | ~121 min |
 
 **Recent Trend:**
 - v1.2 phases averaged 1.3 plans per phase (down from 2.4 in v1.1, 3.2 in v1.0)
@@ -59,6 +59,9 @@ Recent decisions from PROJECT.md affecting v1.3:
 - **29-01**: rt_sigqueueinfo/rt_tgsigqueueinfo return EAGAIN on queue overflow (POSIX SIGQUEUE_MAX)
 - **29-01**: siginfo threaded through setupSignalFrame as optional for Plan 02 SA_SIGINFO support
 - **29-01**: SigInfoQueue capacity 32 entries; enqueue before bitmask set ensures metadata ready on consumption
+- **29-02**: SA_SIGINFO x86_64 stack layout: siginfo at top (highest addr), ucontext below, restorer at bottom; ret in handler advances RSP to ucontext for rt_sigreturn
+- **29-02**: Removed rdi/rsi/rdx zeroing from x86_64 sysretq path -- these carry SA_SIGINFO handler args (signum, siginfo_ptr, ucontext_ptr)
+- **29-02**: RT signal tryDequeueSignal: only clear bitmask bit when hasSignal() returns false after dequeue (enables multiple RT signal instances)
 
 ### Pending Todos
 
@@ -74,11 +77,11 @@ None.
 ## Session Continuity
 
 Last session: 2026-02-17 (phase 29 execution)
-Stopped at: Completed 29-01-PLAN.md (siginfo queue infrastructure)
+Stopped at: Completed 29-02-PLAN.md (SA_SIGINFO handler arg passing + integration tests; phase 29 complete)
 Resume file: None
 
-**Next action:** Proceed to next plan in phase 29 (if any), or next phase
+**Next action:** Proceed to phase 30
 
 ---
 *State initialized: 2026-02-06*
-*Last updated: 2026-02-17 after completing plan 29-01*
+*Last updated: 2026-02-17 after completing plan 29-02 (phase 29 complete)*
