@@ -156,10 +156,11 @@ Plans:
   2. clock_nanosleep wakes with sub-10ms precision for short sleeps
   3. clock_getres reports improved resolution for CLOCK_REALTIME and CLOCK_MONOTONIC
   4. Scheduler timer infrastructure supports higher frequency ticks
-**Plans**: 2 plans
+**Plans**: 3 plans
 Plans:
-- [ ] 33-01-PLAN.md -- Core 1000Hz timer frequency change (arch init, scheduler, time syscalls)
-- [ ] 33-02-PLAN.md -- Peripheral tick constant updates and sub-10ms resolution tests
+- [x] 33-01-PLAN.md -- Core 1000Hz timer frequency change (arch init, scheduler, time syscalls)
+- [x] 33-02-PLAN.md -- Peripheral tick constant updates and sub-10ms resolution tests
+- [ ] 33-03-PLAN.md -- Gap closure: fix recvfromIp() /10 divisor and strengthen timer test assertion
 
 ### Phase 34: Timer Notification Modes
 **Goal**: Add SIGEV_THREAD and SIGEV_THREAD_ID notification modes for POSIX timers
