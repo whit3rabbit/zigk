@@ -122,5 +122,5 @@ pub const CLOCK_MONOTONIC: usize = 1;
 /// Timer settime flags
 pub const TIMER_ABSTIME: u32 = 1;
 
-/// Maximum timers per process
-pub const MAX_POSIX_TIMERS: usize = 8;
+/// Maximum timers per process (matches Linux POSIX_TIMER_MAX default)
+pub const MAX_POSIX_TIMERS: usize = 32;

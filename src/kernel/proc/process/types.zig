@@ -305,7 +305,9 @@ pub const Process = struct {
     itimer_prof_value: u64 = 0,
 
     /// POSIX timers (timer_create/timer_settime/etc.)
-    posix_timers: [8]PosixTimer = [_]PosixTimer{.{}} ** 8,
+    posix_timers: [uapi.time.MAX_POSIX_TIMERS]PosixTimer = [_]PosixTimer{.{}} ** uapi.time.MAX_POSIX_TIMERS,
+    /// Number of active POSIX timer slots (used for fast-path skip in scheduler)
+    posix_timer_count: u8 = 0,
 
     /// Scheduler policy (SCHED_NORMAL, SCHED_RR, SCHED_FIFO, etc.)
     sched_policy: u8 = 0,
