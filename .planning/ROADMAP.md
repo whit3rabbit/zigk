@@ -62,7 +62,7 @@
 - [x] **Phase 29: Siginfo Queue** - Replace bitmask-only signal tracking (completed 2026-02-17)
 - [x] **Phase 30: Signal Wakeup Integration** - Direct wakeup for signalfd and SIGSYS delivery (completed 2026-02-18)
 - [x] **Phase 31: Inotify Completion** - Complete VFS hooks and overflow handling (completed 2026-02-18)
-- [ ] **Phase 32: Timer Capacity Expansion** - Increase per-process timer limit
+- [x] **Phase 32: Timer Capacity Expansion** - Increase per-process timer limit (completed 2026-02-18)
 - [ ] **Phase 33: Timer Resolution Improvement** - Improve timer and clock_nanosleep granularity
 - [ ] **Phase 34: Timer Notification Modes** - Add SIGEV_THREAD and SIGEV_THREAD_ID
 - [ ] **Phase 35: VFS Page Cache and Zero-Copy** - True zero-copy I/O infrastructure
@@ -145,7 +145,7 @@ Plans:
   3. Timer cleanup on process exit handles increased capacity correctly
 **Plans**: 1 plan
 Plans:
-- [ ] 32-01-PLAN.md -- Expand timer array to 32, add count field for scheduler fast-path, update tests
+- [x] 32-01-PLAN.md -- Expand timer array to 32, add count field for scheduler fast-path, update tests
 
 ### Phase 33: Timer Resolution Improvement
 **Goal**: Improve POSIX timer and clock_nanosleep resolution beyond 10ms tick granularity
@@ -223,4 +223,4 @@ Plans:
 
 ---
 *Roadmap created: 2026-02-06*
-*Last updated: 2026-02-17 after Phase 30 planning*
+*Last updated: 2026-02-18 after Phase 32 completion (timer capacity expansion)*
