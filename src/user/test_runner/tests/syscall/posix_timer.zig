@@ -256,7 +256,7 @@ pub fn testTimerSubTenMsInterval() !void {
     // Each sched_yield allows the timer tick ISR to run processIntervalTimers.
     // At 1000Hz with 5ms interval: 60ms / 5ms = ~12 firings = ~11 overruns.
     // At 100Hz with 10ms (5ms rounded up): 60ms / 10ms = ~6 firings = ~5 overruns.
-    // We only require >= 1 overrun to show the timer fired at all.
+    // Require >= 7 overruns to distinguish 1ms from 10ms tick rates.
     var start = syscall.Timespec{ .tv_sec = 0, .tv_nsec = 0 };
     syscall.clock_gettime(.MONOTONIC, &start) catch {};
     const start_ns: u64 = @intCast(start.tv_sec * 1_000_000_000 + start.tv_nsec);
@@ -272,17 +272,11 @@ pub fn testTimerSubTenMsInterval() !void {
 
     const overrun = try syscall.timer_getoverrun(timerid);
 
-    // At 1ms granularity: 5ms interval fires multiple times in 60ms => overrun >= 1
-    // At 10ms granularity: same minimum expectation
-    if (overrun == 0) {
-        // Timer never fired -- timer infrastructure is broken
+    // At 1ms granularity: 5ms interval over 60ms = ~12 firings = ~11 overruns.
+    // At 10ms granularity: 5ms rounds up to 10ms, 60ms / 10ms = ~6 firings = ~5 overruns.
+    // Require >= 7 to distinguish 1ms from 10ms tick rates.
+    // (Even with QEMU TCG jitter, 11 expected vs 5 expected gives clear separation at 7.)
+    if (overrun < 7) {
         return error.TestFailed;
     }
-    // Require at least 1 overrun to prove the timer fired at sub-10ms granularity
-    // (if timer only fired once in 60ms it would imply ~60ms granularity, which is wrong)
-    if (overrun < 1) {
-        return error.TestFailed;
-    }
-    // With 1ms ticks, expect many more overruns, but accept any positive number
-    // due to QEMU TCG scheduling unpredictability
 }

@@ -181,9 +181,9 @@ pub fn recvfromIp(
 
     // Fallback: poll with HLT
     const timeout_ticks: usize = if (sock.rcv_timeout_ms > 0)
-        @intCast(sock.rcv_timeout_ms / 10)
+        @intCast(sock.rcv_timeout_ms) // 1 tick = 1ms
     else
-        std.math.maxInt(usize);
+        std.math.maxInt(usize); // Infinite timeout (0 means block forever)
 
     var ticks: usize = 0;
     while (ticks < timeout_ticks) : (ticks += 1) {
