@@ -171,7 +171,10 @@ Plans:
   2. timer_create accepts SIGEV_THREAD_ID mode and delivers signal to specific thread
   3. SIGEV_THREAD notification passes correct sigval to the notification function
   4. SIGEV_THREAD_ID delivers signal to correct thread via tgkill
-**Plans**: TBD
+**Plans**: 2 plans
+Plans:
+- [ ] 34-01-PLAN.md -- Kernel infrastructure: SIGEV_THREAD/SIGEV_THREAD_ID support in timer_create and processIntervalTimers
+- [ ] 34-02-PLAN.md -- Userspace wrappers and integration tests for new notification modes
 
 ### Phase 35: VFS Page Cache and Zero-Copy
 **Goal**: Build VFS page cache infrastructure to enable true zero-copy I/O without kernel buffer copies
