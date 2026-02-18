@@ -5,21 +5,21 @@
 See: .planning/PROJECT.md (updated 2026-02-16)
 
 **Core value:** Every implemented syscall must work correctly on both x86_64 and aarch64 with matching behavior, tested via the existing integration test harness.
-**Current focus:** Phase 29 - Siginfo Queue (v1.3 Tech Debt Cleanup)
+**Current focus:** Phase 31 - TCP FIN Teardown (v1.3 Tech Debt Cleanup)
 
 ## Current Position
 
-Phase: 29 of 35 (Siginfo Queue)
-Plan: 2 completed in current phase (29-01 and 29-02 done)
-Status: Phase 29 complete
-Last activity: 2026-02-17 - Completed 29-02 (SA_SIGINFO handler arg passing + integration tests)
+Phase: 30 of 35 (Signal Wakeup Integration)
+Plan: 1 completed in current phase (30-01 done)
+Status: Phase 30 complete
+Last activity: 2026-02-17 - Completed 30-01 (signalfd direct wakeup + seccomp SIGSYS delivery)
 
-Progress: [█████████████████████░░] 83% (29/35 phases complete)
+Progress: [█████████████████████░░] 86% (30/35 phases complete)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 62 (v1.0: 29, v1.1: 12, v1.2: 16, v1.3: 5)
+- Total plans completed: 63 (v1.0: 29, v1.1: 12, v1.2: 16, v1.3: 6)
 - Average duration: ~8.2 min per plan
 - Total execution time: ~8.6 hours over 11 days
 
@@ -30,7 +30,7 @@ Progress: [█████████████████████░░
 | v1.0 | 1-9 | 29 | 4 days |
 | v1.1 | 10-14 | 12 | 2 days |
 | v1.2 | 15-26 | 16 | 5 days |
-| v1.3 | 27-35 | 5 (ongoing) | ~121 min |
+| v1.3 | 27-35 | 6 (ongoing) | ~211 min |
 
 **Recent Trend:**
 - v1.2 phases averaged 1.3 plans per phase (down from 2.4 in v1.1, 3.2 in v1.0)
@@ -62,12 +62,21 @@ Recent decisions from PROJECT.md affecting v1.3:
 - **29-02**: SA_SIGINFO x86_64 stack layout: siginfo at top (highest addr), ucontext below, restorer at bottom; ret in handler advances RSP to ucontext for rt_sigreturn
 - **29-02**: Removed rdi/rsi/rdx zeroing from x86_64 sysretq path -- these carry SA_SIGINFO handler args (signum, siginfo_ptr, ucontext_ptr)
 - **29-02**: RT signal tryDequeueSignal: only clear bitmask bit when hasSignal() returns false after dequeue (enables multiple RT signal instances)
+- **30-01**: Use sched.waitOn (indefinite block) + sched.unblock wakeup for signalfd; WaitQueue.removeThread cleans stale entries at loop top
+- **30-01**: SECCOMP_RET_KILL: deliver SIGSYS signal first, then run checkSignalsOnSyscallExit for immediate termination before userspace escape
+- **30-01**: sched.exitWithStatus must mark Process zombie for single-thread process death via signal (bypasses process.exit() path)
+- **30-01**: prlimit64 #GP crash (RAX=0xAAAAAAAA) is pre-existing -- was hidden by siginfo_queue hang in baseline; needs separate investigation
 
 ### Pending Todos
 
 None.
 
 ### Blockers/Concerns
+
+**Pre-existing prlimit64 bug:**
+- `testPrlimit64SelfAsNonRoot` crashes with #GP in kernel (RAX=0xAAAAAAAAAAAAAAAA)
+- Was hidden by siginfo_queue hang; now visible after our process zombie fix
+- Investigate before Phase 35
 
 **Phase 35 (VFS Page Cache):**
 - Largest tech debt item by far
@@ -76,12 +85,12 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-02-17 (phase 29 execution)
-Stopped at: Completed 29-02-PLAN.md (SA_SIGINFO handler arg passing + integration tests; phase 29 complete)
+Last session: 2026-02-17 (phase 30 execution)
+Stopped at: Completed 30-01-PLAN.md (signalfd direct wakeup + seccomp SIGSYS delivery; phase 30 complete)
 Resume file: None
 
-**Next action:** Proceed to phase 30
+**Next action:** Proceed to phase 31
 
 ---
 *State initialized: 2026-02-06*
-*Last updated: 2026-02-17 after completing plan 29-02 (phase 29 complete)*
+*Last updated: 2026-02-17 after completing plan 30-01 (phase 30 complete)*
