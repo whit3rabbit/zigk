@@ -9,17 +9,17 @@ See: .planning/PROJECT.md (updated 2026-02-16)
 
 ## Current Position
 
-Phase: 30 of 35 (Signal Wakeup Integration)
-Plan: 1 completed in current phase (30-01 done)
-Status: Phase 30 complete
-Last activity: 2026-02-17 - Completed 30-01 (signalfd direct wakeup + seccomp SIGSYS delivery)
+Phase: 31 of 35 (Inotify Completion)
+Plan: 1 completed in current phase (31-01 done)
+Status: Phase 31 plan 01 complete
+Last activity: 2026-02-18 - Completed 31-01 (inotify write/ftruncate/close hooks, IN_Q_OVERFLOW, capacity increase)
 
-Progress: [█████████████████████░░] 86% (30/35 phases complete)
+Progress: [█████████████████████░░] 88% (31/35 phases complete)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 63 (v1.0: 29, v1.1: 12, v1.2: 16, v1.3: 6)
+- Total plans completed: 64 (v1.0: 29, v1.1: 12, v1.2: 16, v1.3: 7)
 - Average duration: ~8.2 min per plan
 - Total execution time: ~8.6 hours over 11 days
 
@@ -30,13 +30,14 @@ Progress: [█████████████████████░░
 | v1.0 | 1-9 | 29 | 4 days |
 | v1.1 | 10-14 | 12 | 2 days |
 | v1.2 | 15-26 | 16 | 5 days |
-| v1.3 | 27-35 | 6 (ongoing) | ~211 min |
+| v1.3 | 27-35 | 7 (ongoing) | ~221 min |
 
 **Recent Trend:**
 - v1.2 phases averaged 1.3 plans per phase (down from 2.4 in v1.1, 3.2 in v1.0)
 - Trend: Improving - larger phases with focused plans
 
 *Updated after roadmap creation*
+| Phase 31-inotify-completion P01 | 10 | 2 tasks | 11 files |
 
 ## Accumulated Context
 
@@ -66,6 +67,10 @@ Recent decisions from PROJECT.md affecting v1.3:
 - **30-01**: SECCOMP_RET_KILL: deliver SIGSYS signal first, then run checkSignalsOnSyscallExit for immediate termination before userspace escape
 - **30-01**: sched.exitWithStatus must mark Process zombie for single-thread process death via signal (bypasses process.exit() path)
 - **30-01**: prlimit64 #GP crash (RAX=0xAAAAAAAA) is pre-existing -- was hidden by siginfo_queue hang in baseline; needs separate investigation
+- [Phase 31-01]: Use inotify_close_hook fn ptr on fd.zig to avoid circular dependency with inotify module
+- [Phase 31-01]: Fire inotify notifications AFTER fd.lock release to respect lock ordering (inotify acquires global_instances_lock)
+- [Phase 31-01]: IN_Q_OVERFLOW overwrites last real event in ring buffer when queue full (coalesced, no extra slot needed)
+- [Phase 31-01]: vfs_path field 128-byte fixed array on FileDescriptor for path tracking at VFS open time, no heap alloc
 
 ### Pending Todos
 
@@ -85,12 +90,12 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-02-17 (phase 30 execution)
-Stopped at: Completed 30-01-PLAN.md (signalfd direct wakeup + seccomp SIGSYS delivery; phase 30 complete)
+Last session: 2026-02-18 (phase 31 execution)
+Stopped at: Completed 31-01-PLAN.md (inotify write/ftruncate/close hooks, IN_Q_OVERFLOW, capacity increase)
 Resume file: None
 
-**Next action:** Proceed to phase 31
+**Next action:** Proceed to next plan in phase 31, or next phase
 
 ---
 *State initialized: 2026-02-06*
-*Last updated: 2026-02-17 after completing plan 30-01 (phase 30 complete)*
+*Last updated: 2026-02-18 after completing plan 31-01 (inotify completion)*
