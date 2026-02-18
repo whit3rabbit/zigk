@@ -204,14 +204,14 @@ pub fn initTimer() void {
     // Calibrate LAPIC timer against PIT/TSC
     lapic.calibrateTimer();
 
-    // Enable periodic timer at 100Hz (same as PIT)
+    // Enable periodic timer at 1000Hz for 1ms tick granularity
     // We use the dedicated TIMER_VECTOR (48)
-    lapic.enablePeriodicTimer(100, lapic.TIMER_VECTOR);
+    lapic.enablePeriodicTimer(1000, lapic.TIMER_VECTOR);
 
     // Mask the legacy PIT IRQ (IRQ0) since we are using LAPIC timer
     disableIrq(0);
 
-    console.info("APIC: LAPIC timer enabled at 100Hz (Vector {d})", .{lapic.TIMER_VECTOR});
+    console.info("APIC: LAPIC timer enabled at 1000Hz (Vector {d})", .{lapic.TIMER_VECTOR});
 }
 
 /// Check if APIC mode is active

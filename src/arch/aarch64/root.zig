@@ -281,8 +281,8 @@ pub fn init(hhdm_offset: u64) void {
     timing.initBest();
     earlyPrint("[T2]");
 
-    // Initialize periodic timer at 100Hz for scheduler
-    pit.init(100);
+    // Initialize periodic timer at 1000Hz for 1ms tick granularity
+    pit.init(1000);
 
     // Set up HHDM offset for PL011 before clearing identity mapping
     // This allows the serial driver to continue working via HHDM
