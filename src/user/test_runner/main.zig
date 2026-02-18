@@ -365,6 +365,7 @@ export fn main(argc: i32, argv: [*][*:0]u8) i32 {
     runner.runTest("posix_timer: getoverrun", posix_timer_tests.testTimerGetOverrun);
     runner.runTest("posix_timer: signal delivery", posix_timer_tests.testTimerSignalDelivery);
     runner.runTest("posix_timer: multiple timers", posix_timer_tests.testTimerMultiple);
+    runner.runTest("posix_timer: create beyond 8 timers", posix_timer_tests.testTimerBeyondEight);
 
     // Phase 24: Capability tests
     runner.runTest("capabilities: capget self v3", capabilities_tests.testCapgetSelf);

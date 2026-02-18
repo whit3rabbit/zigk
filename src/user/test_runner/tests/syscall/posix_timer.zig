@@ -9,7 +9,7 @@ const syscall = @import("syscall");
 pub fn testTimerCreate() !void {
     var timerid: i32 = -1;
     try syscall.timer_create(syscall.CLOCK_MONOTONIC, null, &timerid);
-    if (timerid < 0 or timerid >= 8) return error.TestFailed;
+    if (timerid < 0 or timerid >= 32) return error.TestFailed;
     // Clean up
     try syscall.timer_delete(timerid);
 }
@@ -199,11 +199,32 @@ pub fn testTimerMultiple() !void {
     if (timer4 != timer2) {
         // Not strictly required, but expected behavior for slot reuse
         // Don't fail -- just verify it's a valid ID
-        if (timer4 < 0 or timer4 >= 8) return error.TestFailed;
+        if (timer4 < 0 or timer4 >= 32) return error.TestFailed;
     }
 
     // Clean up
     try syscall.timer_delete(timer1);
     try syscall.timer_delete(timer3);
     try syscall.timer_delete(timer4);
+}
+
+// Test 11: Create more than 8 timers (capacity expansion test)
+pub fn testTimerBeyondEight() !void {
+    const COUNT = 9;
+    var timerids: [COUNT]i32 = undefined;
+
+    // Create 9 timers -- should all succeed (limit is now 32)
+    for (&timerids) |*tid| {
+        try syscall.timer_create(syscall.CLOCK_MONOTONIC, null, tid);
+    }
+
+    // All timer IDs must be valid (non-negative, < 32)
+    for (timerids) |tid| {
+        if (tid < 0 or tid >= 32) return error.TestFailed;
+    }
+
+    // Cleanup all timers
+    for (timerids) |tid| {
+        try syscall.timer_delete(tid);
+    }
 }
