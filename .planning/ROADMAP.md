@@ -160,7 +160,7 @@ Plans:
 Plans:
 - [x] 33-01-PLAN.md -- Core 1000Hz timer frequency change (arch init, scheduler, time syscalls)
 - [x] 33-02-PLAN.md -- Peripheral tick constant updates and sub-10ms resolution tests
-- [ ] 33-03-PLAN.md -- Gap closure: fix recvfromIp() /10 divisor and strengthen timer test assertion
+- [x] 33-03-PLAN.md -- Gap closure: fix recvfromIp() /10 divisor and strengthen timer test assertion
 
 ### Phase 34: Timer Notification Modes
 **Goal**: Add SIGEV_THREAD and SIGEV_THREAD_ID notification modes for POSIX timers
@@ -221,10 +221,10 @@ Plans:
 | 30. Signal Wakeup Integration | v1.3 | Complete    | 2026-02-18 | - |
 | 31. Inotify Completion | v1.3 | Complete    | 2026-02-18 | - |
 | 32. Timer Capacity Expansion | v1.3 | Complete    | 2026-02-18 | - |
-| 33. Timer Resolution Improvement | 2/2 | Complete   | 2026-02-18 | - |
+| 33. Timer Resolution Improvement | 3/3 | Complete   | 2026-02-18 | - |
 | 34. Timer Notification Modes | v1.3 | 0/? | Not started | - |
 | 35. VFS Page Cache and Zero-Copy | v1.3 | 0/? | Not started | - |
 
 ---
 *Roadmap created: 2026-02-06*
-*Last updated: 2026-02-18 after Phase 33 planning (timer resolution improvement)*
+*Last updated: 2026-02-18 after Phase 33-03 completion (all three plans done; recvfromIp /10 divisor fixed, timer assertion strengthened)*
