@@ -390,6 +390,7 @@ export fn main(argc: i32, argv: [*][*:0]u8) i32 {
     runner.runTest("seccomp: inherited on fork", seccomp_tests.testSeccompInheritedOnFork);
     runner.runTest("seccomp: filter instruction pointer", seccomp_tests.testSeccompFilterInstructionPointer);
     runner.runTest("seccomp: prctl no_new_privs", seccomp_tests.testPrctlNoNewPrivs);
+    runner.runTest("seccomp: SIGSYS on kill", seccomp_tests.testSeccompSigsysDelivery);
 
     // FD operations tests
     runner.runTest("fd_ops: dup basic", fd_ops_tests.testDupBasic);
@@ -534,6 +535,7 @@ export fn main(argc: i32, argv: [*][*:0]u8) i32 {
     runner.runTest("event_fds: signalfd create and close", event_fds_tests.testSignalfdCreateAndClose);
     runner.runTest("event_fds: signalfd read signal", event_fds_tests.testSignalfdReadSignal);
     runner.runTest("event_fds: signalfd epoll integration", event_fds_tests.testSignalfdEpollIntegration);
+    runner.runTest("event_fds: signalfd direct wakeup", event_fds_tests.testSignalfdDirectWakeup);
 
     // Filesystem extras tests
     runner.runTest("fs_extras: readlinkat basic", fs_extras_tests.testReadlinkatBasic);

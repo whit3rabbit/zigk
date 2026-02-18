@@ -723,6 +723,24 @@ pub fn exitWithStatus(status: i32) void {
             }
         }
 
+        // If the owning process has not already been marked Zombie (e.g. via
+        // process.exit()), do it here.  This handles the case where signal
+        // delivery terminates a thread by calling sched.exitWithStatus()
+        // directly (bypassing process.exit()), which would otherwise leave the
+        // Process in Running state so that sys_wait4 never finds a zombie child.
+        if (curr.process) |proc_opaque| {
+            const proc: *base.Process = @ptrCast(@alignCast(proc_opaque));
+            if (proc.state != .Zombie and proc.state != .Dead) {
+                // Only mark Zombie if this is the last thread in the process.
+                // refcount low 31 bits hold the thread count (layout from lifecycle.zig).
+                const refcount = proc.refcount.load(.acquire);
+                if ((refcount & 0x7FFFFFFF) == 1) {
+                    proc.exit_status = status;
+                    proc.state = .Zombie;
+                }
+            }
+        }
+
         curr.state = .Zombie;
         thread_logic.setCurrentThread(null);
 

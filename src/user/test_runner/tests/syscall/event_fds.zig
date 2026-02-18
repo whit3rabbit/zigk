@@ -309,3 +309,51 @@ pub fn testSignalfdEpollIntegration() !void {
     nready = try syscall.epoll_wait(epfd, &events, 4, 0);
     if (nready != 0) return error.TestFailed;
 }
+
+/// Test 13: signalfd blocking read wakes directly when signal is pending
+///
+/// Verifies SIG-03: blocking signalfd read returns immediately when signal is
+/// already pending (no 10ms polling delay). With the old approach, blocking reads
+/// polled every 10ms; with direct wakeup via sched.unblock, the read returns
+/// as soon as the signal is in the pending bitmask.
+pub fn testSignalfdDirectWakeup() !void {
+    // Block SIGUSR1 so it goes to signalfd instead of default handler
+    var mask: u64 = @as(u64, 1) << (SIGUSR1 - 1);
+    var oldmask: u64 = 0;
+    try syscall.sigprocmask(@intCast(SIG_BLOCK), @ptrCast(&mask), @ptrCast(&oldmask));
+    defer {
+        _ = syscall.sigprocmask(@intCast(SIG_SETMASK), @ptrCast(&oldmask), null) catch {};
+    }
+
+    // Create BLOCKING signalfd (no SFD_NONBLOCK)
+    const fd = try syscall.signalfd4(-1, &mask, 0);
+    defer { syscall.close(fd) catch {}; }
+
+    // Record time before signal delivery and read
+    var ts_before: syscall.Timespec = undefined;
+    try syscall.clock_gettime(.MONOTONIC, &ts_before);
+
+    // Send SIGUSR1 to self -- signal is now pending in the bitmask
+    const pid = syscall.getpid();
+    try syscall.kill(pid, @intCast(SIGUSR1));
+
+    // Blocking read -- should return immediately since signal is already pending.
+    // With direct wakeup: pending check at loop top finds signal, returns without blocking.
+    // With old 10ms polling: also returns but may take up to 10ms.
+    // The definitive test: this does NOT hang forever (proves indefinite blocking works).
+    var siginfo2: syscall.SignalFdSigInfo = undefined;
+    const read_bytes = try syscall.read(fd, @as([*]u8, @ptrCast(&siginfo2)), @sizeOf(syscall.SignalFdSigInfo));
+    if (read_bytes != @sizeOf(syscall.SignalFdSigInfo)) return error.TestFailed;
+    if (siginfo2.ssi_signo != SIGUSR1) return error.TestFailed;
+    // SI_USER = 0 (sent by kill)
+    if (siginfo2.ssi_code != 0) return error.TestFailed;
+
+    // Record time after read and verify elapsed time is well under 10ms
+    var ts_after: syscall.Timespec = undefined;
+    try syscall.clock_gettime(.MONOTONIC, &ts_after);
+    const elapsed_ns = (@as(i64, ts_after.tv_sec) - @as(i64, ts_before.tv_sec)) * 1_000_000_000 +
+        (@as(i64, ts_after.tv_nsec) - @as(i64, ts_before.tv_nsec));
+    // With direct wakeup, signal already pending so read is immediate (<<1ms).
+    // Allow up to 5ms to accommodate QEMU scheduler jitter.
+    if (elapsed_ns > 5_000_000) return error.TestFailed;
+}

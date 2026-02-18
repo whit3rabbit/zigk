@@ -294,3 +294,68 @@ pub fn testPrctlNoNewPrivs() !void {
     const value = try syscall.prctl(syscall.PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0);
     if (value != 1) return error.TestFailed;
 }
+
+/// Test: seccomp SECCOMP_RET_KILL delivers SIGSYS to the thread
+///
+/// Verifies SECC-01: SECCOMP_RET_KILL triggers SIGSYS delivery (not just ENOSYS return).
+/// The child installs a filter that kills getpid, then calls getpid.
+/// The parent verifies the child was killed by SIGSYS (signal 31).
+pub fn testSeccompSigsysDelivery() !void {
+    const pid = try syscall.fork();
+    if (pid == 0) {
+        // Child: install seccomp filter that kills getpid, then trigger it
+        _ = syscall.prctl(syscall.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) catch {
+            syscall.exit(1);
+        };
+
+        // BPF filter: load syscall number, if getpid -> KILL_THREAD, else ALLOW
+        const getpid_nr: u32 = @intCast(syscall.uapi.syscalls.SYS_GETPID);
+        var filter = [_]SockFilterInsn{
+            // Load syscall number (offset 0 in seccomp_data)
+            .{ .code = syscall.BPF_LD | syscall.BPF_W | syscall.BPF_ABS, .jt = 0, .jf = 0, .k = 0 },
+            // If nr == getpid, fall through to KILL; else jump to ALLOW
+            .{ .code = syscall.BPF_JMP | syscall.BPF_JEQ | syscall.BPF_K, .jt = 0, .jf = 1, .k = getpid_nr },
+            // Kill thread (triggers SIGSYS)
+            .{ .code = syscall.BPF_RET | syscall.BPF_K, .jt = 0, .jf = 0, .k = syscall.SECCOMP_RET_KILL },
+            // Allow
+            .{ .code = syscall.BPF_RET | syscall.BPF_K, .jt = 0, .jf = 0, .k = syscall.SECCOMP_RET_ALLOW },
+        };
+        var prog = SockFprog{ .len = 4, .filter = @intFromPtr(&filter) };
+        _ = syscall.seccomp(syscall.SECCOMP_SET_MODE_FILTER, 0, @intFromPtr(&prog)) catch {
+            syscall.exit(2);
+        };
+
+        // Trigger the filtered syscall -- SIGSYS should kill the child
+        // The default action for SIGSYS is Core (terminate).
+        _ = rawGetpid() catch {};
+
+        // If we reach here, SIGSYS was not delivered (unexpected)
+        syscall.exit(3);
+    }
+
+    // Parent: wait for child and verify it was killed by SIGSYS
+    var status: i32 = 0;
+    const waited = try syscall.wait4(pid, &status, 0);
+    if (waited != pid) return error.TestFailed;
+
+    // exitWithStatus(128 + SIGSYS) = exitWithStatus(159) stores status=159 directly.
+    // wait4 returns raw exit_status. For signal kills: kernel uses exitWithStatus(128 + signum).
+    // The wait4 raw status in our kernel is stored as-is (no Linux WIFEXITED encoding).
+    // Check: either child exited normally with code 0 (SIGSYS default Core action kills the
+    // process and exitWithStatus(159) gives status=159, parent sees (159>>8)&0xFF = 0)
+    // OR the raw status has signal info in low bits.
+    //
+    // Our kernel's exitWithStatus(159): stores 159 as exit_status.
+    // waitChild helper: (status >> 8) & 0xFF = (159 >> 8) & 0xFF = 0.
+    // But we need to distinguish "child exited(0)" from "killed by SIGSYS (exit_status=159)".
+    //
+    // Direct check: raw status should NOT be 0 (child never called exit(0)).
+    // If status == 0: child exited(0) = SIGSYS was NOT delivered (BUG).
+    // If status == 159: child killed by SIGSYS (128+31) = SIGSYS was delivered (PASS).
+    // If status == 1,2,3: child exited via our error paths = SIGSYS not delivered (FAIL).
+    if (status == 0 or status == 1 or status == 2 or status == 3) {
+        return error.TestFailed; // SIGSYS was not delivered
+    }
+    // status == 159 (128 + SIGSYS) means delivered correctly
+    if (status != 159) return error.TestFailed;
+}

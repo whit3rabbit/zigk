@@ -157,8 +157,21 @@ pub export fn dispatch_syscall(frame: *SyscallFrame) callconv(.c) void {
     const seccomp_action = seccomp_check & uapi.seccomp.SECCOMP_RET_ACTION_FULL;
     if (seccomp_action == uapi.seccomp.SECCOMP_RET_KILL_THREAD or
         seccomp_action == uapi.seccomp.SECCOMP_RET_KILL_PROCESS) {
-        // Disallowed syscall -- return ENOSYS (SIGSYS delivery is a future enhancement)
+        // Deliver SIGSYS to the offending thread with seccomp metadata.
+        // POSIX: SECCOMP_RET_KILL causes SIGSYS (not just ENOSYS) with si_code=SYS_SECCOMP.
+        const builtin_local = @import("builtin");
+        const si_arch: u32 = switch (builtin_local.cpu.arch) {
+            .x86_64 => uapi.seccomp.AUDIT_ARCH_X86_64,
+            .aarch64 => uapi.seccomp.AUDIT_ARCH_AARCH64,
+            else => 0,
+        };
+        signals.deliverSigsysToCurrentThread(@bitCast(@as(u32, @truncate(syscall_num))), si_arch);
+        // Set ENOSYS return value: if SIGSYS is caught, the handler sees ENOSYS.
         frame.setReturnSigned(uapi.errno.ENOSYS.toReturn());
+        // Run signal check NOW (not at the bottom of dispatch_syscall) so that the
+        // default SIGSYS action (Core = terminate) kills the thread before it can
+        // return to userspace and execute further instructions (e.g., exit(3)).
+        signal.checkSignalsOnSyscallExit(frame);
         return;
     }
     if (seccomp_action == uapi.seccomp.SECCOMP_RET_ERRNO) {

@@ -200,6 +200,9 @@ pub const TIMER_ABSTIME: u32 = 1;
 // Per-Thread Signal Info Queue (Phase 29)
 // =============================================================================
 
+/// si_code value for SIGSYS delivered by seccomp filter (Linux: SYS_SECCOMP = 1)
+pub const SYS_SECCOMP: i32 = 1;
+
 /// Kernel-internal siginfo entry for per-thread signal queue.
 /// Carries signal metadata through the kernel from sender to consumer.
 pub const KernelSigInfo = struct {
@@ -208,6 +211,8 @@ pub const KernelSigInfo = struct {
     pid: u32, // Sender PID (0 for kernel)
     uid: u32, // Sender UID (0 for kernel)
     value: usize, // si_value (union of int and pointer, use usize)
+    syscall_nr: i32 = 0, // Offending syscall number (for SIGSYS only)
+    arch: u32 = 0, // Architecture identifier (AUDIT_ARCH_*, for SIGSYS only)
 };
 
 // =============================================================================

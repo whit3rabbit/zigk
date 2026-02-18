@@ -658,6 +658,23 @@ pub fn deliverSignalToThread(target: *sched.Thread, signum: u8) void {
     deliverSignalToThreadWithInfo(target, signum, null);
 }
 
+/// Deliver SIGSYS to the current thread with seccomp metadata.
+/// Called by the syscall dispatch table when SECCOMP_RET_KILL is triggered.
+/// arch should be AUDIT_ARCH_X86_64 or AUDIT_ARCH_AARCH64.
+pub fn deliverSigsysToCurrentThread(syscall_nr: i32, arch: u32) void {
+    const current_thread = sched.getCurrentThread() orelse return;
+    const si = uapi.signal.KernelSigInfo{
+        .signo = @intCast(uapi.signal.SIGSYS),
+        .code = uapi.signal.SYS_SECCOMP,
+        .pid = 0,
+        .uid = 0,
+        .value = 0,
+        .syscall_nr = syscall_nr,
+        .arch = arch,
+    };
+    deliverSignalToThreadWithInfo(current_thread, @intCast(uapi.signal.SIGSYS), si);
+}
+
 /// Deliver a signal with optional siginfo metadata.
 /// If info is null, a default KernelSigInfo with SI_KERNEL code is created.
 ///

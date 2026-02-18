@@ -201,9 +201,34 @@ fn setupSignalFrame(frame: *hal.idt.InterruptFrame, signum: usize, action: uapi.
         return frame;
     };
 
+    // Stack layout (x86_64, low address to high):
+    //   SA_SIGINFO:    [restorer][ucontext][siginfo_t]
+    //   non-SA_SIGINFO:[restorer][ucontext]
+    //
+    // When the handler does 'ret', RSP advances past restorer to ucontext.
+    // sys_rt_sigreturn reads ucontext from RSP (= ucontext_addr).
+
+    // Step 1: For SA_SIGINFO, reserve siginfo space first (higher address).
+    var siginfo_sp: usize = 0;
+    var si_data_opt: ?uapi.signal.KernelSigInfo = null;
+    if ((action.flags & uapi.signal.SA_SIGINFO) != 0) {
+        sp -= @sizeOf(uapi.signal.SigInfoT);
+        sp &= ~@as(u64, 15); // 16-byte align
+        siginfo_sp = sp;
+        si_data_opt = siginfo orelse uapi.signal.KernelSigInfo{
+            .signo = @intCast(signum),
+            .code = uapi.signal.SI_USER,
+            .pid = 0,
+            .uid = 0,
+            .value = 0,
+        };
+    }
+
+    // Step 2: Reserve and write ucontext below siginfo (or directly below FPU area).
     const ucontext_size = @sizeOf(uapi.signal.UContext);
     sp -= ucontext_size;
     sp &= ~@as(u64, 15); // Force alignment to 16 bytes
+    const ucontext_addr = sp;
 
     // Save context to user stack
     // We need to construct UContext
@@ -267,32 +292,23 @@ fn setupSignalFrame(frame: *hal.idt.InterruptFrame, signum: usize, action: uapi.
         return frame;
     };
 
-    // Record ucontext address for SA_SIGINFO (arg 3 = ucontext pointer)
-    const ucontext_addr = sp;
-
-    // SA_SIGINFO: push siginfo_t onto the stack and prepare 3-arg call
-    var siginfo_sp: usize = 0;
+    // Step 3: Write siginfo_t at siginfo_sp (above ucontext, already allocated).
     if ((action.flags & uapi.signal.SA_SIGINFO) != 0) {
-        const si_data = siginfo orelse uapi.signal.KernelSigInfo{
-            .signo = @intCast(signum),
-            .code = uapi.signal.SI_USER,
-            .pid = 0,
-            .uid = 0,
-            .value = 0,
-        };
+        const si_data = si_data_opt.?;
         const user_siginfo = uapi.signal.SigInfoT{
             .si_signo = @intCast(si_data.signo),
             .si_errno = 0,
             .si_code = si_data.code,
             .si_pid = @bitCast(si_data.pid),
             .si_uid = @bitCast(si_data.uid),
-            .si_value_int = @intCast(si_data.value & 0xFFFFFFFF),
+            // SIGSYS: carry offending syscall number in si_value_int (for SA_SIGINFO handlers)
+            .si_value_int = if (si_data.signo == @as(u8, @intCast(uapi.signal.SIGSYS)))
+                si_data.syscall_nr
+            else
+                @intCast(si_data.value & 0xFFFFFFFF),
             .si_value_ptr = si_data.value,
         };
-        sp -= @sizeOf(uapi.signal.SigInfoT);
-        sp &= ~@as(u64, 15); // 16-byte align
-        siginfo_sp = sp;
-        UserPtr.from(sp).writeValue(user_siginfo) catch {
+        UserPtr.from(siginfo_sp).writeValue(user_siginfo) catch {
             console.err("Signal: Failed to write siginfo_t to stack", .{});
             sched.exitWithStatus(128 + 11);
             return frame;
@@ -467,10 +483,35 @@ fn setupSignalFrameForSyscall(frame: *hal.syscall.SyscallFrame, current_thread: 
         return;
     };
 
-    // Build ucontext
+    // Stack layout (low address to high):
+    //   x86_64, non-SA_SIGINFO: [ucontext]        <- sp, SP set here, ret -> nothing above
+    //   x86_64, SA_SIGINFO:     [restorer][ucontext][siginfo_t]
+    //     - SP when handler called points to restorer
+    //     - ret -> RSP = ucontext (sigreturn reads from here)
+    //   aarch64, non-SA_SIGINFO:[ucontext]         <- sp=ucontext, LR=restorer
+    //   aarch64, SA_SIGINFO:    [ucontext][siginfo_t] <- sp=ucontext, LR=restorer, x1=siginfo, x2=ucontext
+
+    // Step 1: For SA_SIGINFO, reserve siginfo space first (higher address, allocated before ucontext).
+    var siginfo_sp: usize = 0;
+    var si_data_opt: ?uapi.signal.KernelSigInfo = null;
+    if ((action.flags & uapi.signal.SA_SIGINFO) != 0) {
+        sp -= @sizeOf(uapi.signal.SigInfoT);
+        sp &= ~@as(u64, 15); // 16-byte align
+        siginfo_sp = sp;
+        si_data_opt = siginfo orelse uapi.signal.KernelSigInfo{
+            .signo = @intCast(signum),
+            .code = uapi.signal.SI_USER,
+            .pid = 0,
+            .uid = 0,
+            .value = 0,
+        };
+    }
+
+    // Step 2: Build ucontext below siginfo (or directly below FPU area).
     const ucontext_size = @sizeOf(uapi.signal.UContext);
     sp -= ucontext_size;
     sp &= ~@as(u64, 15);
+    const ucontext_addr = sp;
 
     const ucontext = uapi.signal.UContext{
         .flags = 0,
@@ -523,32 +564,23 @@ fn setupSignalFrameForSyscall(frame: *hal.syscall.SyscallFrame, current_thread: 
         return;
     };
 
-    // Record ucontext address for SA_SIGINFO (arg 3 = ucontext pointer)
-    const ucontext_addr = sp;
-
-    // SA_SIGINFO: push siginfo_t onto the stack and prepare 3-arg call
-    var siginfo_sp: usize = 0;
+    // Step 3: Write siginfo_t at siginfo_sp (above ucontext, already allocated).
     if ((action.flags & uapi.signal.SA_SIGINFO) != 0) {
-        const si_data = siginfo orelse uapi.signal.KernelSigInfo{
-            .signo = @intCast(signum),
-            .code = uapi.signal.SI_USER,
-            .pid = 0,
-            .uid = 0,
-            .value = 0,
-        };
+        const si_data = si_data_opt.?;
         const user_siginfo = uapi.signal.SigInfoT{
             .si_signo = @intCast(si_data.signo),
             .si_errno = 0,
             .si_code = si_data.code,
             .si_pid = @bitCast(si_data.pid),
             .si_uid = @bitCast(si_data.uid),
-            .si_value_int = @intCast(si_data.value & 0xFFFFFFFF),
+            // SIGSYS: carry offending syscall number in si_value_int (for SA_SIGINFO handlers)
+            .si_value_int = if (si_data.signo == @as(u8, @intCast(uapi.signal.SIGSYS)))
+                si_data.syscall_nr
+            else
+                @intCast(si_data.value & 0xFFFFFFFF),
             .si_value_ptr = si_data.value,
         };
-        sp -= @sizeOf(uapi.signal.SigInfoT);
-        sp &= ~@as(u64, 15); // 16-byte align
-        siginfo_sp = sp;
-        UserPtr.from(sp).writeValue(user_siginfo) catch {
+        UserPtr.from(siginfo_sp).writeValue(user_siginfo) catch {
             console.err("Signal: Failed to write siginfo_t to stack", .{});
             sched.exitWithStatus(128 + 11);
             return;
@@ -563,11 +595,11 @@ fn setupSignalFrameForSyscall(frame: *hal.syscall.SyscallFrame, current_thread: 
 
     if (builtin.cpu.arch == .aarch64) {
         // On aarch64, 'ret' branches to x30 (link register), not stack.
-        // Set LR to restorer. Don't push to stack -- SP must point to ucontext
-        // so sys_rt_sigreturn reads the right data.
+        // Set LR to restorer. SP must point to ucontext so sys_rt_sigreturn reads correctly.
         frame.r15 = restorer; // r15 = x30 (LR)
     } else {
         // On x86_64, 'ret' pops return address from stack.
+        // Push restorer below ucontext so that after 'ret', RSP points to ucontext.
         sp -= 8;
         UserPtr.from(sp).writeValue(restorer) catch {
             sched.exitWithStatus(128 + 11);

@@ -122,6 +122,10 @@ fn signalfdRead(fd: *fd_mod.FileDescriptor, buf: []u8) isize {
                 info.ssi_code = s.code;
                 info.ssi_pid = @bitCast(s.pid);
                 info.ssi_uid = @bitCast(s.uid);
+                // SIGSYS-specific: carry offending syscall number in ssi_int
+                if (s.signo == @as(u8, @intCast(uapi.signal.SIGSYS))) {
+                    info.ssi_int = s.syscall_nr;
+                }
             }
 
             // Copy to userspace buffer
