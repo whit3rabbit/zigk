@@ -194,7 +194,7 @@ pub const Thread = struct {
     /// SECURITY: Prevents use-after-free when findThreadByTid returns pointer after lock release
     refcount: std.atomic.Value(u32) = std.atomic.Value(u32).init(1),
 
-    /// CPU time tracking (in ticks, 100 Hz = 10ms granularity)
+    /// CPU time tracking (in ticks, 1000 Hz = 1ms granularity)
     /// User mode CPU time consumed by this thread
     utime: u64 = 0,
     /// Kernel mode CPU time consumed by this thread

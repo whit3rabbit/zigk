@@ -283,7 +283,7 @@ pub fn recvfrom(
     // Fallback: poll with HLT (no scheduler available)
     // This saves power compared to busy-spinning and respects socket timeout
     const timeout_ticks: usize = if (sock.rcv_timeout_ms > 0)
-        @intCast(sock.rcv_timeout_ms / 10) // ~10ms per tick approximation
+        @intCast(sock.rcv_timeout_ms) // 1 tick = 1ms
     else
         std.math.maxInt(usize); // Infinite timeout (0 means block forever)
 

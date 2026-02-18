@@ -1,7 +1,7 @@
 //! Process times syscall (sys_times)
 //!
 //! Returns CPU time consumed by the current process and its children.
-//! Times are measured in clock ticks (100 Hz = 10ms per tick).
+//! Times are measured in clock ticks (1000 Hz = 1ms per tick).
 
 const uapi = @import("uapi");
 const sched = @import("sched");

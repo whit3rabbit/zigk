@@ -1447,9 +1447,9 @@ fn getCurrentTimeNs() u64 {
         const ns_u128 = (tsc_u128 * 1_000_000_000) / freq;
         return @truncate(ns_u128);
     } else {
-        // Fallback to tick count (10ms resolution)
+        // Fallback to tick count (1ms resolution)
         const ticks = sched.getTickCount();
-        const ms = ticks *| 10; // saturating mul
+        const ms = ticks; // 1 tick = 1ms
         return ms * 1_000_000; // ms to ns
     }
 }

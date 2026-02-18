@@ -31,7 +31,7 @@ pub fn pollTimeoutToTicks(timeout_ms: isize) ?u64 {
     if (timeout_ms < 0) return null;
     if (timeout_ms == 0) return 0;
 
-    const tick_ms: u64 = 10;
+    const tick_ms: u64 = 1;
     const timeout_u64 = std.math.cast(u64, timeout_ms) orelse return null;
     return std.math.divCeil(u64, timeout_u64, tick_ms) catch unreachable;
 }

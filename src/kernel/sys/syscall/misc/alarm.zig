@@ -6,7 +6,7 @@
 // - One alarm per process (not per thread)
 // - Returns remaining seconds from previous alarm (0 if none)
 // - alarm(0) cancels pending alarm
-// - Precision: 10ms tick granularity (100 ticks/sec)
+// - Precision: 1ms tick granularity (1000 ticks/sec)
 //
 // SECURITY:
 // - Integer overflow protection via clamping

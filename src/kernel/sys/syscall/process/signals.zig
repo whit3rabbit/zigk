@@ -1008,7 +1008,7 @@ pub fn sys_rt_sigtimedwait(set_ptr: usize, info_ptr: usize, timeout_ptr: usize, 
 
     // Block with timeout waiting for a matching signal
     // Use tick-based sleep with polling (consistent with timerfd/signalfd WaitQueue pattern)
-    const tick_ns: u64 = 10_000_000; // 10ms per tick
+    const tick_ns: u64 = 1_000_000; // 1ms per tick
 
     if (timeout_ns) |ns| {
         const duration_ticks = std.math.divCeil(u64, ns, tick_ns) catch 1;

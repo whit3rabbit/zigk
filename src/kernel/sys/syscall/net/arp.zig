@@ -110,8 +110,8 @@ pub fn sys_arp_probe(
     sendArpProbe(iface, target_ip);
 
     // Calculate wait parameters
-    // Convert timeout_ms to ticks (assuming 10ms per tick)
-    const tick_ns: u64 = 10_000_000;
+    // Convert timeout_ms to ticks (1ms per tick at 1000Hz)
+    const tick_ns: u64 = 1_000_000;
     const poll_interval_ns = PROBE_POLL_INTERVAL_MS * 1_000_000;
     const poll_ticks = std.math.divCeil(u64, poll_interval_ns, tick_ns) catch 1;
     const total_polls = timeout / PROBE_POLL_INTERVAL_MS;
