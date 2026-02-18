@@ -428,6 +428,17 @@ pub fn destroyProcess(proc: *Process) void {
         kernel_ipc.sem.applySemUndo(proc);
     }
 
+    // Remove from parent's children list before freeing.
+    // In the normal exit path (waitpid reap), removeChildLocked was already
+    // called and proc.parent is null, so this is a no-op. But when
+    // destroyProcess is called directly (e.g. sys_fork error path after
+    // forkProcess succeeded but thread creation failed), the child is still
+    // in the parent's list. Without this, the parent retains a dangling
+    // pointer to freed memory (use-after-free).
+    if (proc.parent) |parent| {
+        parent.removeChild(proc);
+    }
+
     // Reparent children to init (PID 1) per POSIX semantics
     if (proc.first_child != null) {
         const held = sched.process_tree_lock.acquireWrite();
