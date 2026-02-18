@@ -294,7 +294,7 @@ pub fn sys_ppoll(fds_ptr: usize, nfds: usize, timeout_ptr: usize, sigmask_ptr: u
                 return 0;
             }
             // Sleep for timeout duration
-            const ticks = us / 10_000; // 10ms per tick, us to ticks
+            const ticks = us / 1_000; // 1ms per tick, us to ticks
             if (ticks > 0) {
                 sched.sleepForTicks(ticks);
             }
@@ -448,7 +448,7 @@ fn clock_nanosleep_internal(clockid: usize, flags: usize, req_ptr: usize, rem_pt
         }
 
         const delta_ns = req_total_ns - now_ns;
-        const tick_ns: u64 = 10_000_000;
+        const tick_ns: u64 = 1_000_000;
         const duration_ticks = std.math.divCeil(u64, delta_ns, tick_ns) catch 1;
 
         sched.sleepForTicks(duration_ticks);
@@ -465,7 +465,7 @@ fn clock_nanosleep_internal(clockid: usize, flags: usize, req_ptr: usize, rem_pt
             return 0;
         }
 
-        const tick_ns: u64 = 10_000_000;
+        const tick_ns: u64 = 1_000_000;
         const duration_ticks = std.math.divCeil(u64, req_total_ns, tick_ns) catch unreachable;
 
         sched.sleepForTicks(duration_ticks);
@@ -484,7 +484,7 @@ fn getCurrentTimeNs(clockid: usize) u64 {
     _ = clockid; // Both CLOCK_REALTIME and CLOCK_MONOTONIC use the same source in zk
     // (no RTC or wall clock adjustment -- monotonic counter only)
     const ticks = sched.getTickCount();
-    return ticks * 10_000_000; // 10ms per tick
+    return ticks * 1_000_000; // 1ms per tick
 }
 
 /// sys_clock_nanosleep (230) - High-resolution sleep with clock selection
@@ -760,9 +760,9 @@ fn getMonotonicTime() Timespec {
             .tv_nsec = @intCast(total_ns % 1_000_000_000),
         };
     } else {
-        // Fallback to tick count (10ms resolution)
+        // Fallback to tick count (1ms resolution, 1 tick = 1ms)
         const ticks = sched.getTickCount();
-        const ms = ticks *| 10; // saturating mul
+        const ms = ticks; // 1 tick = 1ms
         const max_sec_ms: u64 = @intCast(std.math.maxInt(i64));
         const sec_ms = ms / 1000;
         return .{
@@ -813,7 +813,7 @@ pub fn sys_clock_gettime(clk_id: usize, tp_ptr: usize) SyscallError!usize {
 
 /// sys_clock_getres (229) - Get clock resolution
 ///
-/// MVP: Returns 10ms resolution (tick-based timing)
+/// MVP: Returns 1ms resolution (tick-based timing)
 pub fn sys_clock_getres(clk_id: usize, res_ptr: usize) SyscallError!usize {
     _ = clk_id;
 
@@ -821,10 +821,10 @@ pub fn sys_clock_getres(clk_id: usize, res_ptr: usize) SyscallError!usize {
         return 0; // NULL res is valid per POSIX
     }
 
-    // Report 10ms resolution (our tick interval)
+    // Report 1ms resolution (our tick interval)
     const res = Timespec{
         .tv_sec = 0,
-        .tv_nsec = 10_000_000, // 10ms in nanoseconds
+        .tv_nsec = 1_000_000, // 1ms in nanoseconds
     };
 
     UserPtr.from(res_ptr).writeValue(res) catch {
@@ -874,9 +874,9 @@ pub fn sys_gettimeofday(tv_ptr: usize, tz_ptr: usize) SyscallError!usize {
                 .tv_usec = @intCast(total_us % 1_000_000),
             };
         } else {
-            // Fallback to tick count
+            // Fallback to tick count (1 tick = 1ms)
             const ticks = sched.getTickCount();
-            const ms = ticks *| 10;
+            const ms = ticks; // 1 tick = 1ms
             const max_sec_tv2: u64 = @intCast(std.math.maxInt(i64));
             const sec_ms2 = ms / 1000;
             tv = .{

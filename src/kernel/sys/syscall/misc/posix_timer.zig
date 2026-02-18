@@ -9,7 +9,7 @@
 //! - SIGEV_SIGNAL: Deliver specified signal on expiration (default)
 //! - SIGEV_NONE: No notification, just track overruns
 //!
-//! Precision: 10ms tick granularity (100 Hz scheduler tick).
+//! Precision: 1ms tick granularity (1000 Hz scheduler tick).
 
 const std = @import("std");
 const uapi = @import("uapi");
@@ -20,7 +20,7 @@ const SyscallError = base.SyscallError;
 const UserPtr = base.UserPtr;
 
 const MAX_POSIX_TIMERS = uapi.time.MAX_POSIX_TIMERS;
-const TICK_NS: u64 = 10_000_000; // 10ms per tick in nanoseconds
+const TICK_NS: u64 = 1_000_000; // 1ms per tick in nanoseconds
 const CLOCK_REALTIME: usize = 0;
 const CLOCK_MONOTONIC: usize = 1;
 

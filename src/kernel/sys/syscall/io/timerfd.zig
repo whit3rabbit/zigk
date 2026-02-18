@@ -16,7 +16,7 @@
 //! Design: Polling-based expiration
 //! - TimerFdState stores absolute expiration time
 //! - read() checks current time vs expiration, calculates elapsed intervals
-//! - No TimerWheel dependency - simpler implementation, 10ms granularity
+//! - No TimerWheel dependency - simpler implementation, 1ms granularity
 
 const std = @import("std");
 const base = @import("base.zig");
@@ -99,9 +99,9 @@ fn getClockNanoseconds(clockid: i32) u64 {
             const ns_u128 = (tsc_u128 * 1_000_000_000) / freq;
             return @truncate(ns_u128);
         } else {
-            // Fallback to tick count (10ms resolution)
+            // Fallback to tick count (1ms resolution, 1 tick = 1ms)
             const ticks = sched.getTickCount();
-            const ms = ticks *| 10; // saturating mul
+            const ms = ticks; // 1 tick = 1ms
             return ms * 1_000_000; // ms to ns
         }
     }

@@ -31,9 +31,9 @@ pub fn sys_sysinfo(info_ptr: usize) SyscallError!usize {
 
     var info: uapi.time.SysInfo = undefined;
 
-    // Uptime: tick_count / 100 (100 Hz = 10ms ticks)
+    // Uptime: tick_count / 1000 (1000 Hz = 1ms ticks)
     const ticks = sched.getTickCount();
-    info.uptime = @intCast(@divTrunc(ticks, 100));
+    info.uptime = @intCast(@divTrunc(ticks, 1000));
 
     // Load averages (fixed-point * 65536)
     info.loads = sched.getLoadAverages();

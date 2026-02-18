@@ -177,7 +177,7 @@ pub fn removeFromAlarmList(proc: *Process) void {
 
 /// Set or cancel an alarm for a process
 /// Returns remaining seconds from old alarm (0 if none)
-/// SECURITY: Clamps seconds to prevent overflow (max_u64 / 100)
+/// SECURITY: Clamps seconds to prevent overflow (max_u64 / 1000)
 pub fn setAlarm(proc: *Process, seconds: u64) u64 {
     const held = scheduler.alarm_lock.acquire();
     defer held.release();
@@ -188,8 +188,8 @@ pub fn setAlarm(proc: *Process, seconds: u64) u64 {
     var remaining: u64 = 0;
     if (proc.alarm_deadline > 0 and proc.alarm_deadline > current_tick) {
         const remaining_ticks = proc.alarm_deadline - current_tick;
-        // Round up: (ticks + 99) / 100 to convert 100Hz ticks to seconds
-        remaining = (remaining_ticks + 99) / 100;
+        // Round up: (ticks + 999) / 1000 to convert 1000Hz ticks to seconds
+        remaining = (remaining_ticks + 999) / 1000;
     }
 
     // Remove from alarm list if currently scheduled
@@ -199,11 +199,11 @@ pub fn setAlarm(proc: *Process, seconds: u64) u64 {
 
     // If seconds > 0, schedule new alarm
     if (seconds > 0) {
-        // Clamp to prevent overflow (max tick is max_u64, tick freq is 100Hz)
-        const max_seconds: u64 = std.math.maxInt(u64) / 100;
+        // Clamp to prevent overflow (max tick is max_u64, tick freq is 1000Hz)
+        const max_seconds: u64 = std.math.maxInt(u64) / 1000;
         const clamped_seconds = @min(seconds, max_seconds);
 
-        const duration_ticks = clamped_seconds * 100; // 100 ticks per second
+        const duration_ticks = clamped_seconds * 1000; // 1000 ticks per second
         proc.alarm_deadline = current_tick + duration_ticks;
 
         // Save current thread as alarm target
@@ -807,8 +807,8 @@ pub fn timerTick(frame: if (builtin.cpu.arch == .x86_64) *hal.interrupts.Interru
         }
     }
 
-    // Update load averages every 5 seconds (500 ticks)
-    if (local_tick_count - scheduler.load_last_update >= 500) {
+    // Update load averages every 5 seconds (5000 ticks at 1000Hz)
+    if (local_tick_count - scheduler.load_last_update >= 5000) {
         updateLoadAverages(local_tick_count);
     }
 
@@ -1036,7 +1036,7 @@ fn accumulateCpuTime(thread: *Thread, frame: *const hal.interrupts.InterruptFram
 /// Process interval timers for a process
 /// Decrements timer values and delivers signals on expiry
 fn processIntervalTimers(proc: *@import("process").Process, thread: *Thread, frame: *const hal.interrupts.InterruptFrame) void {
-    const TICK_MICROS: u64 = 10000; // 10ms per tick (100 Hz)
+    const TICK_MICROS: u64 = 1000; // 1ms per tick (1000 Hz)
     const uapi = @import("uapi");
 
     // Determine if thread is in user mode
