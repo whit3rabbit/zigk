@@ -156,7 +156,10 @@ Plans:
   2. clock_nanosleep wakes with sub-10ms precision for short sleeps
   3. clock_getres reports improved resolution for CLOCK_REALTIME and CLOCK_MONOTONIC
   4. Scheduler timer infrastructure supports higher frequency ticks
-**Plans**: TBD
+**Plans**: 2 plans
+Plans:
+- [ ] 33-01-PLAN.md -- Core 1000Hz timer frequency change (arch init, scheduler, time syscalls)
+- [ ] 33-02-PLAN.md -- Peripheral tick constant updates and sub-10ms resolution tests
 
 ### Phase 34: Timer Notification Modes
 **Goal**: Add SIGEV_THREAD and SIGEV_THREAD_ID notification modes for POSIX timers
@@ -217,10 +220,10 @@ Plans:
 | 30. Signal Wakeup Integration | v1.3 | Complete    | 2026-02-18 | - |
 | 31. Inotify Completion | v1.3 | Complete    | 2026-02-18 | - |
 | 32. Timer Capacity Expansion | v1.3 | Complete    | 2026-02-18 | - |
-| 33. Timer Resolution Improvement | v1.3 | 0/? | Not started | - |
+| 33. Timer Resolution Improvement | v1.3 | 0/2 | Not started | - |
 | 34. Timer Notification Modes | v1.3 | 0/? | Not started | - |
 | 35. VFS Page Cache and Zero-Copy | v1.3 | 0/? | Not started | - |
 
 ---
 *Roadmap created: 2026-02-06*
-*Last updated: 2026-02-18 after Phase 32 completion (timer capacity expansion)*
+*Last updated: 2026-02-18 after Phase 33 planning (timer resolution improvement)*
