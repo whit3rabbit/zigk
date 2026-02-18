@@ -66,7 +66,7 @@ Recent decisions from PROJECT.md affecting v1.3:
 - **30-01**: Use sched.waitOn (indefinite block) + sched.unblock wakeup for signalfd; WaitQueue.removeThread cleans stale entries at loop top
 - **30-01**: SECCOMP_RET_KILL: deliver SIGSYS signal first, then run checkSignalsOnSyscallExit for immediate termination before userspace escape
 - **30-01**: sched.exitWithStatus must mark Process zombie for single-thread process death via signal (bypasses process.exit() path)
-- **30-01**: prlimit64 #GP crash (RAX=0xAAAAAAAA) is pre-existing -- was hidden by siginfo_queue hang in baseline; needs separate investigation
+- **30-01**: prlimit64 #GP crash (RAX=0xAAAAAAAA) was pre-existing use-after-free in destroyProcess -- FIXED in phase 31
 - [Phase 31-01]: Use inotify_close_hook fn ptr on fd.zig to avoid circular dependency with inotify module
 - [Phase 31-01]: Fire inotify notifications AFTER fd.lock release to respect lock ordering (inotify acquires global_instances_lock)
 - [Phase 31-01]: IN_Q_OVERFLOW overwrites last real event in ring buffer when queue full (coalesced, no extra slot needed)
@@ -78,10 +78,10 @@ None.
 
 ### Blockers/Concerns
 
-**Pre-existing prlimit64 bug:**
-- `testPrlimit64SelfAsNonRoot` crashes with #GP in kernel (RAX=0xAAAAAAAAAAAAAAAA)
-- Was hidden by siginfo_queue hang; now visible after our process zombie fix
-- Investigate before Phase 35
+**prlimit64 #GP -- FIXED:**
+- Root cause: use-after-free in destroyProcess. When sys_fork failed at thread creation (TooManyThreads), the child was freed without being removed from parent's children list. Dangling pointer filled with 0xAA caused #GP on next tree traversal.
+- Fix: destroyProcess now calls parent.removeChild(proc) before freeing (commit 7809739)
+- Test still fails with OutOfMemory (thread limit exhaustion) but no longer crashes the kernel
 
 **Phase 35 (VFS Page Cache):**
 - Largest tech debt item by far
