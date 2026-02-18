@@ -19,7 +19,7 @@ const sched = @import("sched");
 const SyscallError = base.SyscallError;
 const UserPtr = base.UserPtr;
 
-const MAX_POSIX_TIMERS: usize = 8;
+const MAX_POSIX_TIMERS = uapi.time.MAX_POSIX_TIMERS;
 const TICK_NS: u64 = 10_000_000; // 10ms per tick in nanoseconds
 const CLOCK_REALTIME: usize = 0;
 const CLOCK_MONOTONIC: usize = 1;
@@ -100,6 +100,7 @@ pub fn sys_timer_create(clockid: usize, sevp_ptr: usize, timerid_ptr: usize) Sys
         .overrun_count = 0,
         .signal_pending = false,
     };
+    proc.posix_timer_count +|= 1; // saturating add (defensive)
 
     // Write timer ID to userspace
     const timerid_uptr = UserPtr.from(timerid_ptr);
@@ -285,6 +286,7 @@ pub fn sys_timer_delete(timerid: usize) SyscallError!usize {
     proc.posix_timers[timerid].interval_ns = 0;
     proc.posix_timers[timerid].overrun_count = 0;
     proc.posix_timers[timerid].signal_pending = false;
+    proc.posix_timer_count -|= 1; // saturating sub (defensive)
 
     return 0;
 }

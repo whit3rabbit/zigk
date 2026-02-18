@@ -1082,6 +1082,8 @@ fn processIntervalTimers(proc: *@import("process").Process, thread: *Thread, fra
     }
 
     // POSIX timers (timer_create/timer_settime)
+    // Fast path: skip loop entirely when no timers are active
+    if (proc.posix_timer_count == 0) return;
     for (&proc.posix_timers) |*timer| {
         if (!timer.active or timer.value_ns == 0) continue;
 
