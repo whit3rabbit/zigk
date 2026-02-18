@@ -1,7 +1,7 @@
 //! POSIX Timer syscalls (timer_create, timer_settime, timer_gettime, timer_getoverrun, timer_delete)
 //!
 //! Per-process interval timers with signal delivery on expiration.
-//! Each process has up to 8 timer slots (MAX_POSIX_TIMERS).
+//! Each process has up to MAX_POSIX_TIMERS (32) timer slots.
 //! Timer expiration is checked in the scheduler's timerTick function
 //! (inline in processIntervalTimers -- NOT via a cross-module call).
 //!
@@ -112,7 +112,7 @@ pub fn sys_timer_create(clockid: usize, sevp_ptr: usize, timerid_ptr: usize) Sys
 /// Arm or disarm a POSIX timer
 ///
 /// Arguments:
-///   timerid: Timer ID (0-7)
+///   timerid: Timer ID (0 to MAX_POSIX_TIMERS-1)
 ///   flags: TIMER_ABSTIME if new_value is absolute time
 ///   new_value_ptr: Pointer to new timer value/interval
 ///   old_value_ptr: Pointer to receive old timer value (or 0)
@@ -191,7 +191,7 @@ pub fn sys_timer_settime(timerid: usize, flags: u32, new_value_ptr: usize, old_v
 /// Get remaining time on a POSIX timer
 ///
 /// Arguments:
-///   timerid: Timer ID (0-7)
+///   timerid: Timer ID (0 to MAX_POSIX_TIMERS-1)
 ///   curr_value_ptr: Pointer to receive current timer value
 ///
 /// Returns:
@@ -238,7 +238,7 @@ pub fn sys_timer_gettime(timerid: usize, curr_value_ptr: usize) SyscallError!usi
 /// Get overrun count for a POSIX timer
 ///
 /// Arguments:
-///   timerid: Timer ID (0-7)
+///   timerid: Timer ID (0 to MAX_POSIX_TIMERS-1)
 ///
 /// Returns:
 ///   Overrun count on success
@@ -262,7 +262,7 @@ pub fn sys_timer_getoverrun(timerid: usize) SyscallError!usize {
 /// Delete a POSIX timer
 ///
 /// Arguments:
-///   timerid: Timer ID (0-7)
+///   timerid: Timer ID (0 to MAX_POSIX_TIMERS-1)
 ///
 /// Returns:
 ///   0 on success
