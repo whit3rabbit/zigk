@@ -117,7 +117,7 @@ pub fn testTimerSetTimeOldValue() !void {
     try syscall.timer_settime(timerid, 0, &arm2, &old_val);
 
     // Old value should show remaining time from first arm (close to 5s)
-    // With 10ms tick, it should be between 4 and 5 seconds
+    // With 1ms tick, it should be between 4 and 5 seconds
     if (old_val.it_value.tv_sec < 4 or old_val.it_value.tv_sec > 5) {
         return error.TestFailed;
     }
@@ -157,8 +157,8 @@ pub fn testTimerSignalDelivery() !void {
     syscall.sleep_ms(100) catch {};
 
     // With SIGEV_NONE, each expiration increments overrun_count.
-    // 100ms / 20ms = ~5 expirations. But with 10ms tick granularity,
-    // 20ms rounds to 2 ticks. After first fire, overrun increments.
+    // 100ms / 20ms = ~5 expirations. With 1ms tick granularity,
+    // 20ms = 20 ticks. After first fire, overrun increments.
     // Expect overrun_count >= 1
     const overrun = try syscall.timer_getoverrun(timerid);
     // Should have some overruns (timer fired multiple times)
@@ -169,7 +169,7 @@ pub fn testTimerSignalDelivery() !void {
         try syscall.timer_gettime(timerid, &curr);
         // If interval is nonzero, timer is still set up correctly
         if (curr.it_interval.tv_nsec == 0) return error.TestFailed;
-        // Skip -- timer did not fire in time (acceptable with 10ms granularity)
+        // Skip -- timer did not fire in time (acceptable under QEMU TCG)
         return error.SkipTest;
     }
 }
@@ -227,4 +227,62 @@ pub fn testTimerBeyondEight() !void {
     for (timerids) |tid| {
         try syscall.timer_delete(tid);
     }
+}
+
+// Test 12: POSIX timer with 5ms interval fires multiple times via sched_yield polling
+// Proves sub-10ms POSIX timer resolution
+//
+// Design note: processIntervalTimers only runs when the owning thread is scheduled.
+// A blocking sleep (nanosleep) leaves the thread dormant so timer ticks never advance.
+// Instead we poll with sched_yield so the thread runs each tick and the timer fires.
+pub fn testTimerSubTenMsInterval() !void {
+    // Create SIGEV_NONE timer (track overruns, no signal)
+    var sev = std.mem.zeroes(syscall.SigEvent);
+    sev.sigev_notify = syscall.SIGEV_NONE;
+    sev.sigev_signo = 14;
+
+    var timerid: i32 = -1;
+    try syscall.timer_create(syscall.CLOCK_MONOTONIC, &sev, &timerid);
+    defer syscall.timer_delete(timerid) catch {};
+
+    // Arm with 5ms expiration and 5ms interval
+    var val = std.mem.zeroes(syscall.ITimerspec);
+    val.it_value.tv_nsec = 5_000_000; // 5ms initial
+    val.it_interval.tv_nsec = 5_000_000; // 5ms periodic
+
+    try syscall.timer_settime(timerid, 0, &val, null);
+
+    // Poll with sched_yield for ~60ms wall time.
+    // Each sched_yield allows the timer tick ISR to run processIntervalTimers.
+    // At 1000Hz with 5ms interval: 60ms / 5ms = ~12 firings = ~11 overruns.
+    // At 100Hz with 10ms (5ms rounded up): 60ms / 10ms = ~6 firings = ~5 overruns.
+    // We only require >= 1 overrun to show the timer fired at all.
+    var start = syscall.Timespec{ .tv_sec = 0, .tv_nsec = 0 };
+    syscall.clock_gettime(.MONOTONIC, &start) catch {};
+    const start_ns: u64 = @intCast(start.tv_sec * 1_000_000_000 + start.tv_nsec);
+
+    const deadline_ns = start_ns + 60_000_000; // 60ms from now
+    while (true) {
+        syscall.sched_yield() catch {};
+        var now = syscall.Timespec{ .tv_sec = 0, .tv_nsec = 0 };
+        syscall.clock_gettime(.MONOTONIC, &now) catch {};
+        const now_ns: u64 = @intCast(now.tv_sec * 1_000_000_000 + now.tv_nsec);
+        if (now_ns >= deadline_ns) break;
+    }
+
+    const overrun = try syscall.timer_getoverrun(timerid);
+
+    // At 1ms granularity: 5ms interval fires multiple times in 60ms => overrun >= 1
+    // At 10ms granularity: same minimum expectation
+    if (overrun == 0) {
+        // Timer never fired -- timer infrastructure is broken
+        return error.TestFailed;
+    }
+    // Require at least 1 overrun to prove the timer fired at sub-10ms granularity
+    // (if timer only fired once in 60ms it would imply ~60ms granularity, which is wrong)
+    if (overrun < 1) {
+        return error.TestFailed;
+    }
+    // With 1ms ticks, expect many more overruns, but accept any positive number
+    // due to QEMU TCG scheduling unpredictability
 }

@@ -366,6 +366,7 @@ export fn main(argc: i32, argv: [*][*:0]u8) i32 {
     runner.runTest("posix_timer: signal delivery", posix_timer_tests.testTimerSignalDelivery);
     runner.runTest("posix_timer: multiple timers", posix_timer_tests.testTimerMultiple);
     runner.runTest("posix_timer: create beyond 8 timers", posix_timer_tests.testTimerBeyondEight);
+    runner.runTest("posix_timer: sub-10ms interval", posix_timer_tests.testTimerSubTenMsInterval);
 
     // Phase 24: Capability tests
     runner.runTest("capabilities: capget self v3", capabilities_tests.testCapgetSelf);
@@ -450,6 +451,7 @@ export fn main(argc: i32, argv: [*][*:0]u8) i32 {
     runner.runTest("time_ops: settimeofday basic", time_ops_tests.testSettimeofdayBasic);
     runner.runTest("time_ops: settimeofday privilege", time_ops_tests.testSettimeofdayPrivilegeCheck);
     runner.runTest("time_ops: settimeofday invalid", time_ops_tests.testSettimeofdayInvalidValue);
+    runner.runTest("time_ops: clock_nanosleep sub-10ms", time_ops_tests.testClockNanosleepSubTenMs);
 
     // Misc syscall tests
     runner.runTest("misc: uname basic", misc_tests.testUnameBasic);
