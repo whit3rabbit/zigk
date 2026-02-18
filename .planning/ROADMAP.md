@@ -143,7 +143,9 @@ Plans:
   1. Process can create more than 8 POSIX timers without EAGAIN
   2. Timer storage scales dynamically based on actual usage
   3. Timer cleanup on process exit handles increased capacity correctly
-**Plans**: TBD
+**Plans**: 1 plan
+Plans:
+- [ ] 32-01-PLAN.md -- Expand timer array to 32, add count field for scheduler fast-path, update tests
 
 ### Phase 33: Timer Resolution Improvement
 **Goal**: Improve POSIX timer and clock_nanosleep resolution beyond 10ms tick granularity
