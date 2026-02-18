@@ -10,16 +10,16 @@ See: .planning/PROJECT.md (updated 2026-02-16)
 ## Current Position
 
 Phase: 33 of 35 (Timer Resolution Improvement) - COMPLETE
-Plan: 2 completed in phase 33 (33-01 and 33-02 done)
+Plan: 3 completed in phase 33 (33-01, 33-02, and 33-03 done)
 Status: Phase 33 complete
-Last activity: 2026-02-18 - Completed 33-02 (peripheral tick constants updated to 1ms, sub-10ms resolution tests added)
+Last activity: 2026-02-18 - Completed 33-03 (recvfromIp /10 divisor removed, timer test assertion strengthened to overrun >= 7)
 
 Progress: [█████████████████████░░] 91% (32/35 phases complete)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 64 (v1.0: 29, v1.1: 12, v1.2: 16, v1.3: 7)
+- Total plans completed: 65 (v1.0: 29, v1.1: 12, v1.2: 16, v1.3: 8)
 - Average duration: ~8.2 min per plan
 - Total execution time: ~8.6 hours over 11 days
 
@@ -30,7 +30,7 @@ Progress: [█████████████████████░░
 | v1.0 | 1-9 | 29 | 4 days |
 | v1.1 | 10-14 | 12 | 2 days |
 | v1.2 | 15-26 | 16 | 5 days |
-| v1.3 | 27-35 | 7 (ongoing) | ~221 min |
+| v1.3 | 27-35 | 8 (ongoing) | ~223 min |
 
 **Recent Trend:**
 - v1.2 phases averaged 1.3 plans per phase (down from 2.4 in v1.1, 3.2 in v1.0)
@@ -41,6 +41,7 @@ Progress: [█████████████████████░░
 | Phase 32-timer-capacity-expansion P01 | 6 | 3 tasks | 6 files |
 | Phase 33-timer-resolution-improvement P01 | 5 | 2 tasks | 7 files |
 | Phase 33 P02 | 15 | 2 tasks | 11 files |
+| Phase 33 P03 | 2 | 1 task | 2 files |
 
 ## Accumulated Context
 
@@ -80,6 +81,8 @@ Recent decisions from PROJECT.md affecting v1.3:
 - [Phase 33-01]: 1 tick = 1ms identity simplifies fallback paths (ticks *| 10 becomes just ticks); load avg interval 500->5000 ticks preserves 5-second period
 - [Phase 33]: POSIX timer overrun test uses sched_yield polling: processIntervalTimers only runs for currently-scheduled thread; blocking sleep freezes timer counters
 - [Phase 33]: testClockNanosleepSubTenMs skipped on aarch64: no TSC fallback clock_gettime has QEMU TCG scheduling overhead inflating measured elapsed time beyond tight upper bounds
+- [Phase 33-03]: recvfromIp() /10 divisor was a latent bug; at 1000Hz 1 tick = 1ms so no divisor is needed; matches recvfrom() identity conversion
+- [Phase 33-03]: Timer overrun discrimination threshold of 7: midpoint between 1ms expected (~11) and 10ms expected (~5), absorbs QEMU TCG jitter
 
 ### Pending Todos
 
@@ -100,11 +103,11 @@ None.
 ## Session Continuity
 
 Last session: 2026-02-18 (phase 33 execution)
-Stopped at: Completed 33-02-PLAN.md (peripheral tick constants updated, sub-10ms resolution tests added; phase 33 complete)
+Stopped at: Completed 33-03-PLAN.md (recvfromIp /10 divisor removed, timer assertion strengthened; phase 33 fully complete)
 Resume file: None
 
 **Next action:** Proceed to phase 34 per roadmap
 
 ---
 *State initialized: 2026-02-06*
-*Last updated: 2026-02-18 after completing plan 33-02 (all tick constants at 1ms, timer resolution tests passing)*
+*Last updated: 2026-02-18 after completing plan 33-03 (recvfromIp divisor fixed, timer test assertion strengthened to overrun >= 7)*
