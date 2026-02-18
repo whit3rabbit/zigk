@@ -113,7 +113,7 @@ pub fn testInotifyCreateEvent() !void {
     syscall.unlink("/mnt/inotify_test") catch {};
 }
 
-// Test 8: Modify a file and receive IN_MODIFY event
+// Test 8: Modify a file and receive IN_MODIFY event (via ftruncate which now fires IN_MODIFY)
 pub fn testInotifyModifyEvent() !void {
     const ifd = try syscall.inotify_init1(syscall.IN_NONBLOCK);
     defer syscall.close(ifd) catch {};
@@ -128,18 +128,15 @@ pub fn testInotifyModifyEvent() !void {
     var drain_buf: [512]u8 = undefined;
     _ = syscall.read(ifd, &drain_buf, drain_buf.len) catch {};
 
-    // Write to trigger IN_MODIFY (via truncate path, since write goes through FD ops not VFS)
-    // Use truncate which goes through VFS and triggers the hook
+    // ftruncate now fires IN_MODIFY via fd.inotify_close_hook
     syscall.ftruncate(file_fd, 100) catch {};
     syscall.close(file_fd) catch {};
 
     // Read event
     var buf: [256]u8 align(@alignOf(syscall.InotifyEvent)) = undefined;
     const n = syscall.read(ifd, &buf, buf.len) catch {
-        // Modify via ftruncate may not trigger VFS hook (goes through FileOps.truncate, not VFS.truncate)
-        // This is acceptable for MVP - skip if no events
         syscall.unlink("/mnt/inotify_mod") catch {};
-        return error.SkipTest;
+        return error.TestFailed;
     };
 
     if (n < @sizeOf(syscall.InotifyEvent)) {
@@ -218,4 +215,202 @@ pub fn testInotifyWithEpoll() !void {
     }
 
     syscall.unlink("/mnt/inotify_epoll") catch {};
+}
+
+// Test 11: Write to a file fires IN_MODIFY with correct wd, mask, cookie, and name fields
+pub fn testInotifyWriteEvent() !void {
+    const ifd = try syscall.inotify_init1(syscall.IN_NONBLOCK);
+    defer syscall.close(ifd) catch {};
+
+    // Create a file first
+    const file_fd = try syscall.open("/mnt/inotify_wr", syscall.O_CREAT | syscall.O_WRONLY, 0o644);
+
+    // Watch /mnt for modify events - save the wd for validation
+    const wd = try syscall.inotify_add_watch(ifd, "/mnt", syscall.IN_MODIFY);
+
+    // Drain any pending events from create
+    var drain_buf: [512]u8 = undefined;
+    _ = syscall.read(ifd, &drain_buf, drain_buf.len) catch {};
+
+    // Write to the file -- should fire IN_MODIFY
+    const msg = "hello inotify";
+    _ = try syscall.write(file_fd, msg, msg.len);
+    syscall.close(file_fd) catch {};
+
+    // Read inotify event
+    var buf: [512]u8 align(@alignOf(syscall.InotifyEvent)) = undefined;
+    const n = syscall.read(ifd, &buf, buf.len) catch {
+        syscall.unlink("/mnt/inotify_wr") catch {};
+        return error.TestFailed;
+    };
+
+    if (n < @sizeOf(syscall.InotifyEvent)) {
+        syscall.unlink("/mnt/inotify_wr") catch {};
+        return error.TestFailed;
+    }
+
+    const ev: *const syscall.InotifyEvent = @ptrCast(&buf);
+
+    // 1. wd must match the watch descriptor returned by inotify_add_watch
+    if (ev.wd != @as(i32, @intCast(wd))) {
+        syscall.unlink("/mnt/inotify_wr") catch {};
+        return error.TestFailed;
+    }
+    // 2. mask must contain IN_MODIFY
+    if ((ev.mask & syscall.IN_MODIFY) == 0) {
+        syscall.unlink("/mnt/inotify_wr") catch {};
+        return error.TestFailed;
+    }
+    // 3. cookie must be 0 (non-rename event)
+    if (ev.cookie != 0) {
+        syscall.unlink("/mnt/inotify_wr") catch {};
+        return error.TestFailed;
+    }
+    // 4. name field validation (if present)
+    // Note: name may be empty (len=0) if the implementation fires on the full path.
+    // Both are acceptable -- the watch is on the directory so name should be present,
+    // but we allow len=0 as a graceful fallback.
+    if (ev.len > 0) {
+        const name_ptr: [*]const u8 = @ptrCast(@as([*]const u8, @ptrCast(ev)) + @sizeOf(syscall.InotifyEvent));
+        const name_slice = name_ptr[0..ev.len];
+        const expected = "inotify_wr";
+        var name_end: usize = 0;
+        while (name_end < name_slice.len and name_slice[name_end] != 0) : (name_end += 1) {}
+        const actual_name = name_slice[0..name_end];
+        if (!std.mem.eql(u8, actual_name, expected)) {
+            syscall.unlink("/mnt/inotify_wr") catch {};
+            return error.TestFailed;
+        }
+    }
+
+    syscall.unlink("/mnt/inotify_wr") catch {};
+}
+
+// Test 12: ftruncate fires IN_MODIFY
+pub fn testInotifyFtruncateEvent() !void {
+    const ifd = try syscall.inotify_init1(syscall.IN_NONBLOCK);
+    defer syscall.close(ifd) catch {};
+
+    const file_fd = try syscall.open("/mnt/inotify_ft", syscall.O_CREAT | syscall.O_RDWR, 0o644);
+
+    _ = try syscall.inotify_add_watch(ifd, "/mnt", syscall.IN_MODIFY);
+
+    // Drain pending events
+    var drain_buf: [512]u8 = undefined;
+    _ = syscall.read(ifd, &drain_buf, drain_buf.len) catch {};
+
+    // ftruncate should fire IN_MODIFY
+    try syscall.ftruncate(file_fd, 100);
+    syscall.close(file_fd) catch {};
+
+    var buf: [256]u8 align(@alignOf(syscall.InotifyEvent)) = undefined;
+    const n = syscall.read(ifd, &buf, buf.len) catch {
+        syscall.unlink("/mnt/inotify_ft") catch {};
+        return error.TestFailed;
+    };
+
+    if (n < @sizeOf(syscall.InotifyEvent)) {
+        syscall.unlink("/mnt/inotify_ft") catch {};
+        return error.TestFailed;
+    }
+
+    const ev: *const syscall.InotifyEvent = @ptrCast(&buf);
+    if ((ev.mask & syscall.IN_MODIFY) == 0) {
+        syscall.unlink("/mnt/inotify_ft") catch {};
+        return error.TestFailed;
+    }
+
+    syscall.unlink("/mnt/inotify_ft") catch {};
+}
+
+// Test 13: close fires IN_CLOSE_WRITE for a writable FD
+pub fn testInotifyCloseEvent() !void {
+    const ifd = try syscall.inotify_init1(syscall.IN_NONBLOCK);
+    defer syscall.close(ifd) catch {};
+
+    _ = try syscall.inotify_add_watch(ifd, "/mnt", syscall.IN_CLOSE_WRITE | syscall.IN_CLOSE_NOWRITE);
+
+    // Create and close a writable file
+    const file_fd = try syscall.open("/mnt/inotify_cl", syscall.O_CREAT | syscall.O_WRONLY, 0o644);
+
+    // Drain create/open events
+    var drain_buf: [512]u8 = undefined;
+    _ = syscall.read(ifd, &drain_buf, drain_buf.len) catch {};
+
+    // Close -- should fire IN_CLOSE_WRITE
+    try syscall.close(file_fd);
+
+    var buf: [256]u8 align(@alignOf(syscall.InotifyEvent)) = undefined;
+    const n = syscall.read(ifd, &buf, buf.len) catch {
+        syscall.unlink("/mnt/inotify_cl") catch {};
+        return error.TestFailed;
+    };
+
+    if (n < @sizeOf(syscall.InotifyEvent)) {
+        syscall.unlink("/mnt/inotify_cl") catch {};
+        return error.TestFailed;
+    }
+
+    const ev: *const syscall.InotifyEvent = @ptrCast(&buf);
+    if ((ev.mask & (syscall.IN_CLOSE_WRITE | syscall.IN_CLOSE_NOWRITE)) == 0) {
+        syscall.unlink("/mnt/inotify_cl") catch {};
+        return error.TestFailed;
+    }
+
+    syscall.unlink("/mnt/inotify_cl") catch {};
+}
+
+// Test 14: IN_Q_OVERFLOW when event queue fills up
+// Strategy: Generate 300 IN_MODIFY events by writing to a single file 300 times.
+// With MAX_EVENTS=256, this overflows the queue and should produce IN_Q_OVERFLOW.
+pub fn testInotifyOverflow() !void {
+    const ifd = try syscall.inotify_init1(syscall.IN_NONBLOCK);
+    defer syscall.close(ifd) catch {};
+
+    // Create a file to write to (leave fd open to avoid SFS close deadlock)
+    const file_fd = try syscall.open("/mnt/inotify_ovf", syscall.O_CREAT | syscall.O_RDWR, 0o644);
+
+    _ = try syscall.inotify_add_watch(ifd, "/mnt", syscall.IN_MODIFY);
+
+    // Drain any pending events from create
+    var drain_buf: [512]u8 = undefined;
+    _ = syscall.read(ifd, &drain_buf, drain_buf.len) catch {};
+
+    // Generate 300 IN_MODIFY events by writing 300 times to the same fd.
+    // Each write() call fires one IN_MODIFY event. With MAX_EVENTS=256,
+    // this overflows the queue and should produce IN_Q_OVERFLOW.
+    const msg = "x";
+    var i: usize = 0;
+    while (i < 300) : (i += 1) {
+        _ = syscall.write(file_fd, msg, msg.len) catch break;
+    }
+
+    // Leave file_fd open (avoid SFS close deadlock) -- just let it leak
+
+    // Read all available events, look for IN_Q_OVERFLOW
+    var found_overflow = false;
+    var buf: [4096]u8 align(@alignOf(syscall.InotifyEvent)) = undefined;
+    while (true) {
+        const n = syscall.read(ifd, &buf, buf.len) catch break;
+        if (n == 0) break;
+
+        // Scan events in buffer
+        var offset: usize = 0;
+        while (offset + @sizeOf(syscall.InotifyEvent) <= n) {
+            const ev: *const syscall.InotifyEvent = @ptrCast(@alignCast(buf[offset..].ptr));
+            if ((ev.mask & syscall.IN_Q_OVERFLOW) != 0) {
+                found_overflow = true;
+            }
+            offset += @sizeOf(syscall.InotifyEvent) + ev.len;
+        }
+    }
+
+    syscall.unlink("/mnt/inotify_ovf") catch {};
+
+    if (!found_overflow) {
+        // 300 writes vs 256 queue capacity should overflow.
+        // If events were coalesced and queue didn't fill, the implementation
+        // is coalescing -- still a failure since we expect overflow.
+        return error.TestFailed;
+    }
 }

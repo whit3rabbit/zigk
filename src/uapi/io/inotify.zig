@@ -23,6 +23,9 @@ pub const IN_CLOSE: u32 = IN_CLOSE_WRITE | IN_CLOSE_NOWRITE;
 pub const IN_MOVE: u32 = IN_MOVED_FROM | IN_MOVED_TO;
 pub const IN_ALL_EVENTS: u32 = 0x00000FFF; // All of the above
 
+/// Queue overflow: fired when event queue is full (wd = -1, no name)
+pub const IN_Q_OVERFLOW: u32 = 0x00004000;
+
 /// Special flags for inotify_add_watch
 pub const IN_ONESHOT: u32 = 0x80000000; // Only send event once
 pub const IN_MASK_ADD: u32 = 0x20000000; // Add events to existing watch mask

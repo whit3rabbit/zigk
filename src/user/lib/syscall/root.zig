@@ -234,6 +234,7 @@ pub const IN_NONBLOCK = io.IN_NONBLOCK;
 pub const IN_CLOEXEC = io.IN_CLOEXEC;
 pub const IN_ONESHOT = io.IN_ONESHOT;
 pub const IN_MASK_ADD = io.IN_MASK_ADD;
+pub const IN_Q_OVERFLOW = io.IN_Q_OVERFLOW;
 
 // Re-export Process
 pub const sched_yield = process.sched_yield;

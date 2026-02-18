@@ -521,6 +521,11 @@ export fn main(argc: i32, argv: [*][*:0]u8) i32 {
     runner.runTest("inotify: modify event", inotify_tests.testInotifyModifyEvent);
     runner.runTest("inotify: delete event", inotify_tests.testInotifyDeleteEvent);
     runner.runTest("inotify: works with epoll", inotify_tests.testInotifyWithEpoll);
+    // Phase 31: inotify completion tests (write/ftruncate/close/overflow)
+    runner.runTest("inotify: write fires IN_MODIFY with fields", inotify_tests.testInotifyWriteEvent);
+    runner.runTest("inotify: ftruncate fires IN_MODIFY", inotify_tests.testInotifyFtruncateEvent);
+    runner.runTest("inotify: close fires IN_CLOSE_WRITE", inotify_tests.testInotifyCloseEvent);
+    runner.runTest("inotify: overflow generates IN_Q_OVERFLOW", inotify_tests.testInotifyOverflow);
 
     // Event notification FD tests
     runner.runTest("event_fds: eventfd create and close", event_fds_tests.testEventfdCreateAndClose);

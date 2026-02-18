@@ -1136,6 +1136,7 @@ pub const IN_NONBLOCK: u32 = 0x800;
 pub const IN_CLOEXEC: u32 = 0x80000;
 pub const IN_ONESHOT: u32 = 0x80000000;
 pub const IN_MASK_ADD: u32 = 0x20000000;
+pub const IN_Q_OVERFLOW: u32 = 0x00004000; // Queue overflow (wd = -1)
 
 /// inotify_event header (variable-length: followed by name[len])
 pub const InotifyEvent = extern struct {

@@ -23,10 +23,10 @@ const UserPtr = user_mem.UserPtr;
 const Errno = uapi.errno.Errno;
 const Vfs = vfs_mod.vfs.Vfs;
 
-const MAX_WATCHES: usize = 32;
-const MAX_EVENTS: usize = 64;
+const MAX_WATCHES: usize = 128;
+const MAX_EVENTS: usize = 256;
 const MAX_PATH_LEN: usize = 256;
-const MAX_INSTANCES: usize = 8;
+const MAX_INSTANCES: usize = 32;
 
 // Special event flag (not in uapi, internal use)
 const IN_IGNORED: u32 = 0x00008000; // Watch was removed
@@ -158,7 +158,22 @@ fn pathMatchesWatch(event_path: []const u8, watch_path: []const u8) bool {
 }
 
 fn enqueueEvent(inst: *InotifyState, wd: i32, mask: u32, cookie: u32, name: ?[]const u8) void {
-    if (inst.event_count >= MAX_EVENTS) return; // Drop event if queue full
+    if (inst.event_count >= MAX_EVENTS) {
+        // Queue full: replace the last event with IN_Q_OVERFLOW (coalesced)
+        // Linux behavior: emit one IN_Q_OVERFLOW with wd=-1 when queue overflows.
+        // Subsequent overflows are coalesced (only one IN_Q_OVERFLOW at a time).
+        if (inst.event_count > 0) {
+            const last_idx = if (inst.event_tail == 0) MAX_EVENTS - 1 else inst.event_tail - 1;
+            if (inst.events[last_idx].mask == uapi.inotify.IN_Q_OVERFLOW) return; // Already have overflow marker
+            // Overwrite the last real event with the overflow sentinel
+            inst.events[last_idx].wd = -1;
+            inst.events[last_idx].mask = uapi.inotify.IN_Q_OVERFLOW;
+            inst.events[last_idx].cookie = 0;
+            inst.events[last_idx].name_len = 0;
+            @memset(&inst.events[last_idx].name, 0);
+        }
+        return;
+    }
     var ev = &inst.events[inst.event_tail];
     ev.wd = wd;
     ev.mask = mask;
