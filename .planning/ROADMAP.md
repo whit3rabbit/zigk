@@ -167,10 +167,10 @@ Plans:
 **Depends on**: Phase 33
 **Requirements**: PTMR-03
 **Success Criteria** (what must be TRUE):
-  1. timer_create accepts SIGEV_THREAD mode and spawns notification thread on expiration
-  2. timer_create accepts SIGEV_THREAD_ID mode and delivers signal to specific thread
-  3. SIGEV_THREAD notification passes correct sigval to the notification function
-  4. SIGEV_THREAD_ID delivers signal to correct thread via tgkill
+  1. timer_create accepts SIGEV_THREAD mode and delivers SI_TIMER signal with sigev_value to owning process (kernel-level behavior; thread spawning is glibc's responsibility)
+  2. timer_create accepts SIGEV_THREAD_ID mode and delivers signal to specific thread identified by TID
+  3. SIGEV_THREAD delivers SI_TIMER signal carrying sigev_value to any thread of the owning process
+  4. SIGEV_THREAD_ID delivers signal to correct target thread (validated at timer_create time via gettid/TID lookup)
 **Plans**: 2 plans
 Plans:
 - [ ] 34-01-PLAN.md -- Kernel infrastructure: SIGEV_THREAD/SIGEV_THREAD_ID support in timer_create and processIntervalTimers
