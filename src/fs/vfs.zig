@@ -275,6 +275,11 @@ pub const Vfs = struct {
                 0;
             file_desc.file_identifier = (mount_idx_u64 << 32) | file_id;
 
+            // Store path for inotify event generation on write/ftruncate/close
+            const path_copy_len = @min(path.len, file_desc.vfs_path.len);
+            @memcpy(file_desc.vfs_path[0..path_copy_len], path[0..path_copy_len]);
+            file_desc.vfs_path_len = @intCast(path_copy_len);
+
             // Trigger inotify hooks if registered
             if (inotify_event_hook) |hook| {
                 if ((flags & 0o100) != 0) { // O_CREAT
@@ -926,7 +931,15 @@ pub const Vfs = struct {
         var rel_new = new_path[new_best_len..];
         if (rel_new.len == 0) rel_new = "/";
 
-        return link_fn(mp.fs.context, rel_old, rel_new);
+        try link_fn(mp.fs.context, rel_old, rel_new);
+
+        // Trigger inotify hooks
+        if (inotify_event_hook) |hook| {
+            hook(new_path, 0x00000100, null); // IN_CREATE (new link)
+            hook(old_path, 0x00000004, null); // IN_ATTRIB (nlink changed)
+        }
+
+        return;
     }
 
     /// Create a symbolic link
@@ -956,7 +969,14 @@ pub const Vfs = struct {
             var rel_path = linkpath[best_len..];
             if (rel_path.len == 0) rel_path = "/";
 
-            return symlink_fn(mp.fs.context, target, rel_path);
+            try symlink_fn(mp.fs.context, target, rel_path);
+
+            // Trigger inotify hook
+            if (inotify_event_hook) |hook| {
+                hook(linkpath, 0x00000100, null); // IN_CREATE (new symlink)
+            }
+
+            return;
         }
 
         return error.NotFound;

@@ -96,6 +96,14 @@ var global_instances_lock: sync.Spinlock = .{};
 // VFS hook registration flag
 var hook_registered: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 
+/// Fire an inotify event from a file descriptor's stored path.
+/// Called by sys_write, sys_ftruncate, close path for FD-level operations.
+/// mask should be IN_MODIFY, IN_CLOSE_WRITE, IN_CLOSE_NOWRITE, etc.
+pub fn notifyFromFd(fd_ptr: *const fd_mod.FileDescriptor, mask: u32) void {
+    const path = fd_ptr.getVfsPath() orelse return;
+    notifyInotifyEvent(path, mask, null);
+}
+
 /// Called by VFS after successful filesystem mutations.
 /// path: full path of the affected file/directory
 /// mask: event type (IN_CREATE, IN_MODIFY, IN_DELETE, etc.)
@@ -275,9 +283,10 @@ pub fn sys_inotify_init1(flags: usize) SyscallError!usize {
         return error.EINVAL;
     }
 
-    // Register VFS hook on first use
+    // Register VFS and close hooks on first use
     if (!hook_registered.swap(true, .acq_rel)) {
         Vfs.inotify_event_hook = notifyInotifyEvent;
+        fd_mod.inotify_close_hook = notifyInotifyEvent;
     }
 
     // Allocate state

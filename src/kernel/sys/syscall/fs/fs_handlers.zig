@@ -18,6 +18,7 @@ const vmm = @import("vmm");
 const fd_syscall = @import("syscall_fd");
 const hal = @import("hal");
 const sched = @import("sched");
+const fd_mod = @import("fd");
 
 const perms = @import("perms");
 
@@ -658,6 +659,16 @@ pub fn sys_ftruncate(fd_num: usize, length: usize) base.SyscallError!usize {
                 error.IOError => error.EIO,
             };
         };
+
+        // Fire inotify IN_MODIFY event after successful truncate
+        // Use the inotify_close_hook (same fn pointer as VFS inotify hook)
+        // registered at sys_inotify_init1 time
+        if (file_desc.vfs_path_len > 0) {
+            if (fd_mod.inotify_close_hook) |hook| {
+                hook(file_desc.vfs_path[0..file_desc.vfs_path_len], 0x00000002, null); // IN_MODIFY
+            }
+        }
+
         return 0;
     }
 

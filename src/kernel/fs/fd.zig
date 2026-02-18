@@ -125,6 +125,11 @@ pub var devfs_dir_tag: DirTag = .devfs_root;
 /// Set by VFS.init to avoid circular dependency between fd.zig and vfs.zig
 pub var vfs_close_hook: ?*const fn (u8) void = null;
 
+/// Hook for inotify to fire IN_CLOSE_WRITE/IN_CLOSE_NOWRITE events
+/// Set by inotify on first sys_inotify_init1 call
+/// Signature: (path: []const u8, mask: u32, name: ?[]const u8) void
+pub var inotify_close_hook: ?*const fn ([]const u8, u32, ?[]const u8) void = null;
+
 /// File descriptor structure
 /// Represents an open file, device, socket, or pipe
 pub const FileDescriptor = struct {
@@ -158,6 +163,17 @@ pub const FileDescriptor = struct {
     /// Used to track advisory locks across duplicate FDs
     /// 0 = no identifier assigned (device files, sockets, etc.)
     file_identifier: u64 = 0,
+
+    /// Path stored at VFS open time for inotify event generation
+    /// Only populated for VFS-opened files (not sockets, pipes, etc.)
+    vfs_path: [128]u8 = [_]u8{0} ** 128,
+    vfs_path_len: u8 = 0,
+
+    /// Get the stored VFS path, or null if not a VFS file
+    pub fn getVfsPath(self: *const FileDescriptor) ?[]const u8 {
+        if (self.vfs_path_len == 0) return null;
+        return self.vfs_path[0..self.vfs_path_len];
+    }
 
     /// Increment reference count (atomic, thread-safe)
     pub fn ref(self: *FileDescriptor) void {
@@ -331,6 +347,14 @@ pub const FdTable = struct {
                 _ = close_fn(fd);
             }
 
+            // Fire inotify IN_CLOSE_WRITE or IN_CLOSE_NOWRITE after close_fn, before destroy
+            if (fd.vfs_path_len > 0) {
+                if (inotify_close_hook) |hook| {
+                    const mask: u32 = if (fd.isWritable()) 0x00000008 else 0x00000010; // IN_CLOSE_WRITE : IN_CLOSE_NOWRITE
+                    hook(fd.vfs_path[0..fd.vfs_path_len], mask, null);
+                }
+            }
+
             // Notify VFS to decrement open file count for this mount
             // This prevents use-after-free on unmount
             if (fd.vfs_mount_idx) |idx| {
@@ -423,6 +447,15 @@ pub const FdTable = struct {
                 if (existing_fd.ops.close) |close_fn| {
                     _ = close_fn(existing_fd);
                 }
+
+                // Fire inotify IN_CLOSE_WRITE or IN_CLOSE_NOWRITE after close_fn, before destroy
+                if (existing_fd.vfs_path_len > 0) {
+                    if (inotify_close_hook) |hook| {
+                        const mask: u32 = if (existing_fd.isWritable()) 0x00000008 else 0x00000010; // IN_CLOSE_WRITE : IN_CLOSE_NOWRITE
+                        hook(existing_fd.vfs_path[0..existing_fd.vfs_path_len], mask, null);
+                    }
+                }
+
                 if (existing_fd.vfs_mount_idx) |idx| {
                     if (vfs_close_hook) |hook| {
                         hook(idx);

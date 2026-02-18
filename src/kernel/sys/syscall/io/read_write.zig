@@ -5,6 +5,7 @@ const console = @import("console");
 const heap = @import("heap");
 const error_helpers = @import("error_helpers.zig");
 const utils = @import("utils.zig");
+const inotify = @import("inotify.zig");
 
 const SyscallError = base.SyscallError;
 const UserPtr = base.UserPtr;
@@ -158,12 +159,18 @@ pub fn sys_write(fd_num: usize, buf_ptr: usize, count: usize) SyscallError!usize
 
     console.debug("SYSCALL: sys_write acquiring fd.lock", .{});
     // Write from kernel buffer (legacy isize return from device ops)
-    // Acquire lock for atomicity
+    // Acquire lock for atomicity; release BEFORE inotify notification to avoid
+    // lock ordering issues (inotify acquires global_instances_lock)
     const held = fd.lock.acquire();
-    defer held.release();
 
     console.debug("SYSCALL: sys_write calling do_write_locked", .{});
     const bytes_written = do_write_locked(fd, kbuf);
+    held.release();
+
+    // Fire inotify IN_MODIFY AFTER lock is released
+    if (bytes_written > 0) {
+        inotify.notifyFromFd(fd, 0x00000002); // IN_MODIFY
+    }
 
     console.debug("SYSCALL: sys_write complete, bytes={}", .{bytes_written});
     return error_helpers.mapDeviceError(bytes_written);
@@ -210,12 +217,12 @@ pub fn sys_writev(fd: usize, bvec_ptr: usize, count: usize) SyscallError!usize {
     }
 
     const held = fd_obj.lock.acquire();
-    defer held.release();
 
     for (kvecs) |vec| {
         if (vec.len == 0) continue;
         const new_total = @addWithOverflow(total_len, vec.len);
         if (new_total[1] != 0 or new_total[0] > MAX_WRITEV_BYTES) {
+            held.release();
             return error.EINVAL;
         }
         total_len = new_total[0];
@@ -234,14 +241,22 @@ pub fn sys_writev(fd: usize, bvec_ptr: usize, count: usize) SyscallError!usize {
             // Check for pointer arithmetic overflow
             const base_offset = @addWithOverflow(vec.base, offset);
             if (base_offset[1] != 0) {
-                // Pointer overflow - invalid iovec
-                if (total_written > 0) return total_written;
+                // Pointer overflow - invalid iovec; release lock, fire notification if any written
+                held.release();
+                if (total_written > 0) {
+                    inotify.notifyFromFd(fd_obj, 0x00000002); // IN_MODIFY
+                    return total_written;
+                }
                 return error.EFAULT;
             }
             const current_base = base_offset[0];
 
             const res = perform_write_locked(fd_obj, current_base, chunk_len) catch |err| {
-                if (total_written > 0) return total_written;
+                held.release();
+                if (total_written > 0) {
+                    inotify.notifyFromFd(fd_obj, 0x00000002); // IN_MODIFY
+                    return total_written;
+                }
                 return err;
             };
 
@@ -249,6 +264,8 @@ pub fn sys_writev(fd: usize, bvec_ptr: usize, count: usize) SyscallError!usize {
             const new_total = @addWithOverflow(total_written, res);
             if (new_total[1] != 0) {
                 // Overflow - return what we have so far
+                held.release();
+                if (total_written > 0) inotify.notifyFromFd(fd_obj, 0x00000002); // IN_MODIFY
                 return total_written;
             }
             total_written = new_total[0];
@@ -257,11 +274,16 @@ pub fn sys_writev(fd: usize, bvec_ptr: usize, count: usize) SyscallError!usize {
             // If partial write occurred (less than requested for this chunk),
             // stop and return what we have
             if (res < chunk_len) {
+                held.release();
+                if (total_written > 0) inotify.notifyFromFd(fd_obj, 0x00000002); // IN_MODIFY
                 return total_written;
             }
         }
     }
 
+    // Release lock BEFORE inotify notification
+    held.release();
+    if (total_written > 0) inotify.notifyFromFd(fd_obj, 0x00000002); // IN_MODIFY
     return total_written;
 }
 
@@ -485,8 +507,8 @@ pub fn sys_pwrite64(fd_num: usize, buf_ptr: usize, count: usize, offset: usize) 
     }
 
     // Acquire lock to ensure atomicity of seek+write+seek
+    // Note: no defer - we release manually BEFORE inotify notification
     const held = fd.lock.acquire();
-    defer held.release();
 
     // Save current position
     const old_pos = fd.position;
@@ -495,7 +517,10 @@ pub fn sys_pwrite64(fd_num: usize, buf_ptr: usize, count: usize, offset: usize) 
 
     // 1. Seek to target offset
     const res1 = seek_fn(fd, @intCast(offset), 0); // SEEK_SET
-    if (res1 < 0) return error.EINVAL;
+    if (res1 < 0) {
+        held.release();
+        return error.EINVAL;
+    }
     fd.position = @intCast(res1);
 
     // 2. Perform Write
@@ -503,6 +528,7 @@ pub fn sys_pwrite64(fd_num: usize, buf_ptr: usize, count: usize, offset: usize) 
         // Restore position before error
         _ = seek_fn(fd, @intCast(old_pos), 0);
         fd.position = old_pos;
+        held.release();
         return err;
     };
 
@@ -515,6 +541,9 @@ pub fn sys_pwrite64(fd_num: usize, buf_ptr: usize, count: usize, offset: usize) 
         fd.position = @intCast(res2);
     }
 
+    // Release lock BEFORE inotify notification
+    held.release();
+    if (bytes_written > 0) inotify.notifyFromFd(fd, 0x00000002); // IN_MODIFY
     return bytes_written;
 }
 
@@ -685,8 +714,8 @@ pub fn sys_pwritev(fd_num: usize, bvec_ptr: usize, count: usize, offset: usize) 
     }
 
     // Acquire lock to ensure atomicity of seek+write+seek
+    // Note: no defer - we release manually BEFORE inotify notification
     const held = fd.lock.acquire();
-    defer held.release();
 
     // Save current position
     const old_pos = fd.position;
@@ -695,7 +724,10 @@ pub fn sys_pwritev(fd_num: usize, bvec_ptr: usize, count: usize, offset: usize) 
 
     // 1. Seek to target offset
     const res1 = seek_fn(fd, @intCast(offset), 0); // SEEK_SET
-    if (res1 < 0) return error.EINVAL;
+    if (res1 < 0) {
+        held.release();
+        return error.EINVAL;
+    }
     fd.position = @intCast(res1);
 
     // 2. Perform vectored write
@@ -714,7 +746,11 @@ pub fn sys_pwritev(fd_num: usize, bvec_ptr: usize, count: usize, offset: usize) 
                 // Restore position before error
                 _ = seek_fn(fd, @intCast(old_pos), 0);
                 fd.position = old_pos;
-                if (total_written > 0) return total_written;
+                held.release();
+                if (total_written > 0) {
+                    inotify.notifyFromFd(fd, 0x00000002); // IN_MODIFY
+                    return total_written;
+                }
                 return error.EFAULT;
             }
 
@@ -722,7 +758,11 @@ pub fn sys_pwritev(fd_num: usize, bvec_ptr: usize, count: usize, offset: usize) 
                 // Restore position before error
                 _ = seek_fn(fd, @intCast(old_pos), 0);
                 fd.position = old_pos;
-                if (total_written > 0) return total_written;
+                held.release();
+                if (total_written > 0) {
+                    inotify.notifyFromFd(fd, 0x00000002); // IN_MODIFY
+                    return total_written;
+                }
                 return err;
             };
 
@@ -731,6 +771,8 @@ pub fn sys_pwritev(fd_num: usize, bvec_ptr: usize, count: usize, offset: usize) 
                 // Restore position
                 _ = seek_fn(fd, @intCast(old_pos), 0);
                 fd.position = old_pos;
+                held.release();
+                if (total_written > 0) inotify.notifyFromFd(fd, 0x00000002); // IN_MODIFY
                 return total_written;
             }
             total_written = new_total[0];
@@ -740,6 +782,8 @@ pub fn sys_pwritev(fd_num: usize, bvec_ptr: usize, count: usize, offset: usize) 
             if (res < chunk_len) {
                 _ = seek_fn(fd, @intCast(old_pos), 0);
                 fd.position = old_pos;
+                held.release();
+                if (total_written > 0) inotify.notifyFromFd(fd, 0x00000002); // IN_MODIFY
                 return total_written;
             }
         }
@@ -753,6 +797,9 @@ pub fn sys_pwritev(fd_num: usize, bvec_ptr: usize, count: usize, offset: usize) 
         fd.position = @intCast(res2);
     }
 
+    // Release lock BEFORE inotify notification
+    held.release();
+    if (total_written > 0) inotify.notifyFromFd(fd, 0x00000002); // IN_MODIFY
     return total_written;
 }
 
