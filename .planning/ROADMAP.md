@@ -131,7 +131,9 @@ Plans:
   2. Event queue overflow generates IN_Q_OVERFLOW notification to userspace
   3. Inotify supports increased capacity (more instances, watches per instance, queued events)
   4. Inotify events carry correct wd, mask, cookie, and name fields
-**Plans**: TBD
+**Plans**: 1 plan
+Plans:
+- [ ] 31-01-PLAN.md -- VFS hook completion, overflow handling, capacity increase, and tests
 
 ### Phase 32: Timer Capacity Expansion
 **Goal**: Increase per-process POSIX timer limit beyond 8 timers
@@ -211,7 +213,7 @@ Plans:
 | 28. rt_sigsuspend Race Fix | v1.3 | Complete    | 2026-02-17 | - |
 | 29. Siginfo Queue | v1.3 | Complete    | 2026-02-17 | - |
 | 30. Signal Wakeup Integration | v1.3 | Complete    | 2026-02-18 | - |
-| 31. Inotify Completion | v1.3 | 0/? | Not started | - |
+| 31. Inotify Completion | v1.3 | 0/1 | Planned | - |
 | 32. Timer Capacity Expansion | v1.3 | 0/? | Not started | - |
 | 33. Timer Resolution Improvement | v1.3 | 0/? | Not started | - |
 | 34. Timer Notification Modes | v1.3 | 0/? | Not started | - |
