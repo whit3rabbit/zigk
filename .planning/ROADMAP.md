@@ -169,7 +169,7 @@ Plans:
 | 33. Timer Resolution Improvement | v1.3 | 3/3 | Complete | 2026-02-18 |
 | 34. Timer Notification Modes | v1.3 | 2/2 | Complete | 2026-02-19 |
 | 35. VFS Page Cache and Zero-Copy | v1.3 | 2/2 | Complete | 2026-02-19 |
-| 36. RTT Estimation and Congestion Module | v1.4 | 2/2 | Complete | 2026-02-19 |
+| 36. RTT Estimation and Congestion Module | v1.4 | Complete    | 2026-02-19 | 2026-02-19 |
 | 37. Dynamic Window Management and Persist Timer | v1.4 | 0/TBD | Not started | - |
 | 38. Socket Options and Raw Socket Blocking | v1.4 | 0/TBD | Not started | - |
 | 39. MSG Flags | v1.4 | 0/TBD | Not started | - |
