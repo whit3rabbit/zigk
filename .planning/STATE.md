@@ -5,21 +5,21 @@
 See: .planning/PROJECT.md (updated 2026-02-16)
 
 **Core value:** Every implemented syscall must work correctly on both x86_64 and aarch64 with matching behavior, tested via the existing integration test harness.
-**Current focus:** Phase 34 - next phase per roadmap (v1.3 Tech Debt Cleanup)
+**Current focus:** Phase 35 - VFS Page Cache and Zero-Copy (v1.3 Tech Debt Cleanup)
 
 ## Current Position
 
-Phase: 34 of 35 (Timer Notification Modes) - COMPLETE
-Plan: 2 completed in phase 34 (34-01 done, 34-02 done)
-Status: Phase 34 complete, phase 35 pending
-Last activity: 2026-02-18 - Completed 34-02 (SIGEV_THREAD/SIGEV_THREAD_ID userspace API, gettid wrapper, 4 integration tests)
+Phase: 35 of 35 (VFS Page Cache and Zero-Copy) - IN PROGRESS
+Plan: 1 of 2 completed in phase 35 (35-01 done, 35-02 pending)
+Status: Phase 35 plan 01 complete, plan 02 pending
+Last activity: 2026-02-19 - Completed 35-01 (VFS page cache infrastructure with ref-counted pages, writeback, and FdTable.close integration)
 
-Progress: [█████████████████████░░] 91% (32/35 phases complete)
+Progress: [██████████████████████░] 94% (34/35 phases in progress, 66/67 plans complete)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 65 (v1.0: 29, v1.1: 12, v1.2: 16, v1.3: 8)
+- Total plans completed: 66 (v1.0: 29, v1.1: 12, v1.2: 16, v1.3: 9)
 - Average duration: ~8.2 min per plan
 - Total execution time: ~8.6 hours over 11 days
 
@@ -30,7 +30,7 @@ Progress: [█████████████████████░░
 | v1.0 | 1-9 | 29 | 4 days |
 | v1.1 | 10-14 | 12 | 2 days |
 | v1.2 | 15-26 | 16 | 5 days |
-| v1.3 | 27-35 | 8 (ongoing) | ~223 min |
+| v1.3 | 27-35 | 9 (ongoing) | ~235 min |
 
 **Recent Trend:**
 - v1.2 phases averaged 1.3 plans per phase (down from 2.4 in v1.1, 3.2 in v1.0)
@@ -44,6 +44,7 @@ Progress: [█████████████████████░░
 | Phase 33 P03 | 2 | 1 task | 2 files |
 | Phase 34 P01 | 7 | 2 tasks | 5 files |
 | Phase 34 P02 | 468 | 2 tasks | 5 files |
+| Phase 35 P01 | 12 | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -90,6 +91,10 @@ Recent decisions from PROJECT.md affecting v1.3:
 - [Phase 34-01]: SIGEV_THREAD_ID falls back to current thread if target exited (no silent signal loss)
 - [Phase 34]: Install SIG_IGN for SIGALRM before arming signal-delivering timers in tests -- SIGEV_THREAD and SIGEV_THREAD_ID deliver real signals that terminate the process with default disposition
 - [Phase 34]: Restore SIG_DFL after each timer-fires test to avoid leaking SIG_IGN disposition into subsequent tests
+- [Phase 35-01]: Fixed-size 256-bucket hash table with linked-list chaining for page cache; MAX_CACHED_PAGES=1024 (4MB)
+- [Phase 35-01]: Lock ordering: page_cache.lock after fd.lock; lock dropped before read_fn/write_fn calls to avoid inversion
+- [Phase 35-01]: Read-ahead: 1-page prefetch on cache miss; prefetched pages start with ref_count=0 (unreferenced)
+- [Phase 35-01]: Writeback before close_fn in FdTable.close -- backing store must still be open for write_fn to succeed
 
 ### Pending Todos
 
@@ -102,19 +107,19 @@ None.
 - Fix: destroyProcess now calls parent.removeChild(proc) before freeing (commit 7809739)
 - Test still fails with OutOfMemory (thread limit exhaustion) but no longer crashes the kernel
 
-**Phase 35 (VFS Page Cache):**
-- Largest tech debt item by far
-- Requires VFS refactor for page-based I/O
-- May need to split into multiple plans
+**Phase 35 (VFS Page Cache) -- Plan 01 COMPLETE:**
+- Page cache infrastructure built (page_cache.zig with full API)
+- FdTable.close integrated with writeback/invalidate
+- Plan 02 pending: wire page cache into splice/sendfile/tee/copy_file_range
 
 ## Session Continuity
 
-Last session: 2026-02-18 (phase 34 execution)
-Stopped at: Completed 34-02-PLAN.md (SIGEV_THREAD/SIGEV_THREAD_ID userspace API, gettid wrapper, 4 integration tests)
+Last session: 2026-02-19 (phase 35 execution)
+Stopped at: Completed 35-01-PLAN.md (VFS page cache infrastructure)
 Resume file: None
 
-**Next action:** Proceed to phase 35 (VFS Page Cache - final v1.3 phase)
+**Next action:** Execute 35-02-PLAN.md (wire page cache into splice/sendfile/tee/copy_file_range)
 
 ---
 *State initialized: 2026-02-06*
-*Last updated: 2026-02-18 after completing plan 34-02 (SIGEV_THREAD/SIGEV_THREAD_ID userspace API, gettid, integration tests)*
+*Last updated: 2026-02-19 after completing plan 35-01 (VFS page cache infrastructure with ref-counted pages, writeback, FdTable.close integration)*
