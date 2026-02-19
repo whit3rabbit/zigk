@@ -6,8 +6,10 @@
 //! (inline in processIntervalTimers -- NOT via a cross-module call).
 //!
 //! Supported notification types:
-//! - SIGEV_SIGNAL: Deliver specified signal on expiration (default)
-//! - SIGEV_NONE: No notification, just track overruns
+//! - SIGEV_SIGNAL (0): Deliver specified signal on expiration (default)
+//! - SIGEV_NONE (1): No notification, just track overruns
+//! - SIGEV_THREAD (2): Kernel-level signal delivery (same as SIGEV_SIGNAL; glibc wraps in thread)
+//! - SIGEV_THREAD_ID (4): Deliver signal to a specific thread by TID
 //!
 //! Precision: 1ms tick granularity (1000 Hz scheduler tick).
 
@@ -53,27 +55,85 @@ pub fn sys_timer_create(clockid: usize, sevp_ptr: usize, timerid_ptr: usize) Sys
     var signo: u8 = 14; // Default: SIGALRM
     var notify: i32 = 0; // Default: SIGEV_SIGNAL
 
+    var target_tid: i32 = 0;
+
     if (sevp_ptr != 0) {
         const sevp_uptr = UserPtr.from(sevp_ptr);
         const sevp = sevp_uptr.readValue(uapi.time.SigEvent) catch return error.EFAULT;
 
-        // Validate notification type
-        if (sevp.sigev_notify != 0 and sevp.sigev_notify != 1) {
-            // SIGEV_THREAD (2) and SIGEV_THREAD_ID (4) not supported
+        const uapi_time = uapi.time;
+
+        // Validate notification type: accept all four POSIX modes
+        if (sevp.sigev_notify != uapi_time.SIGEV_SIGNAL and
+            sevp.sigev_notify != uapi_time.SIGEV_NONE and
+            sevp.sigev_notify != uapi_time.SIGEV_THREAD and
+            sevp.sigev_notify != uapi_time.SIGEV_THREAD_ID)
+        {
             return error.EINVAL;
         }
 
-        // Validate signal number for SIGEV_SIGNAL
-        if (sevp.sigev_notify == 0) { // SIGEV_SIGNAL
+        // Validate signal number for modes that deliver signals
+        if (sevp.sigev_notify != uapi_time.SIGEV_NONE) {
             if (sevp.sigev_signo < 1 or sevp.sigev_signo > 64) {
                 return error.EINVAL;
             }
             signo = @intCast(sevp.sigev_signo);
         }
 
+        // For SIGEV_THREAD_ID, extract and validate target thread TID
+        if (sevp.sigev_notify == uapi_time.SIGEV_THREAD_ID) {
+            target_tid = sevp.getTid();
+            if (target_tid <= 0) return error.EINVAL;
+            // Verify thread exists and belongs to this process
+            const target = sched.findThreadByTid(@intCast(target_tid)) orelse return error.EINVAL;
+            if (target.process) |target_proc_ptr| {
+                const target_proc: *@import("process").Process = @ptrCast(@alignCast(target_proc_ptr));
+                if (target_proc.pid != proc.pid) return error.EINVAL;
+            } else {
+                return error.EINVAL;
+            }
+        }
+
         notify = sevp.sigev_notify;
+
+        // Find first inactive timer slot
+        var slot_index: ?usize = null;
+        for (&proc.posix_timers, 0..) |*timer, i| {
+            if (!timer.active) {
+                slot_index = i;
+                break;
+            }
+        }
+
+        if (slot_index == null) {
+            return error.EAGAIN; // All slots full
+        }
+
+        const idx = slot_index.?;
+
+        // Initialize timer slot
+        proc.posix_timers[idx] = .{
+            .active = true,
+            .clockid = clockid,
+            .signo = signo,
+            .notify = notify,
+            .value_ns = 0,
+            .interval_ns = 0,
+            .overrun_count = 0,
+            .signal_pending = false,
+            .target_tid = target_tid,
+            .sigev_value = sevp.sigev_value,
+        };
+        proc.posix_timer_count +|= 1; // saturating add (defensive)
+
+        // Write timer ID to userspace
+        const timerid_uptr = UserPtr.from(timerid_ptr);
+        timerid_uptr.writeValue(@as(i32, @intCast(idx))) catch return error.EFAULT;
+
+        return 0;
     }
 
+    // sevp_ptr == 0: use defaults (SIGALRM via SIGEV_SIGNAL)
     // Find first inactive timer slot
     var slot_index: ?usize = null;
     for (&proc.posix_timers, 0..) |*timer, i| {
@@ -89,7 +149,7 @@ pub fn sys_timer_create(clockid: usize, sevp_ptr: usize, timerid_ptr: usize) Sys
 
     const idx = slot_index.?;
 
-    // Initialize timer slot
+    // Initialize timer slot with defaults
     proc.posix_timers[idx] = .{
         .active = true,
         .clockid = clockid,
@@ -99,6 +159,8 @@ pub fn sys_timer_create(clockid: usize, sevp_ptr: usize, timerid_ptr: usize) Sys
         .interval_ns = 0,
         .overrun_count = 0,
         .signal_pending = false,
+        .target_tid = 0,
+        .sigev_value = 0,
     };
     proc.posix_timer_count +|= 1; // saturating add (defensive)
 

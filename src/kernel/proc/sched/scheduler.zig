@@ -1084,29 +1084,81 @@ fn processIntervalTimers(proc: *@import("process").Process, thread: *Thread, fra
     // POSIX timers (timer_create/timer_settime)
     // Fast path: skip loop entirely when no timers are active
     if (proc.posix_timer_count == 0) return;
+    const signal_mod = uapi.signal;
     for (&proc.posix_timers) |*timer| {
         if (!timer.active or timer.value_ns == 0) continue;
 
-        // Check if previously pending signal was consumed (delivered or cleared)
-        if (timer.signal_pending and timer.notify == 0) {
+        // Check if previously pending signal was consumed (delivered or cleared).
+        // This allows the next expiration to deliver a fresh signal.
+        if (timer.signal_pending and
+            (timer.notify == uapi.time.SIGEV_SIGNAL or timer.notify == uapi.time.SIGEV_THREAD))
+        {
             const sig_bit: u64 = @as(u64, 1) << @intCast(timer.signo - 1);
             const pending = @atomicLoad(u64, &thread.pending_signals, .acquire);
             if ((pending & sig_bit) == 0) {
+                timer.signal_pending = false;
+            }
+        } else if (timer.signal_pending and timer.notify == uapi.time.SIGEV_THREAD_ID) {
+            // For SIGEV_THREAD_ID, check the target thread's pending signals.
+            // findThreadByTid acquires scheduler.lock internally; this is safe
+            // because processIntervalTimers is called before the scheduler lock
+            // is acquired in timerTick (at line ~819).
+            const target_t = thread_logic.findThreadByTid(@intCast(timer.target_tid));
+            if (target_t) |t| {
+                const sig_bit: u64 = @as(u64, 1) << @intCast(timer.signo - 1);
+                const pending = @atomicLoad(u64, &t.pending_signals, .acquire);
+                if ((pending & sig_bit) == 0) {
+                    timer.signal_pending = false;
+                }
+            } else {
+                // Target thread gone; clear pending to allow next delivery attempt
                 timer.signal_pending = false;
             }
         }
 
         if (timer.value_ns <= TICK_MICROS * 1000) {
             // Timer expired
-            if (timer.notify == 0) { // SIGEV_SIGNAL
+            if (timer.notify == uapi.time.SIGEV_SIGNAL or timer.notify == uapi.time.SIGEV_THREAD) {
+                // SIGEV_SIGNAL and SIGEV_THREAD: deliver to current thread
+                // (SIGEV_THREAD is handled by glibc at userspace level; kernel delivers as SIGEV_SIGNAL)
                 if (timer.signal_pending) {
                     timer.overrun_count +|= 1;
                 } else {
                     const sig_bit: u64 = @as(u64, 1) << @intCast(timer.signo - 1);
                     _ = @atomicRmw(u64, &thread.pending_signals, .Or, sig_bit, .release);
+                    // Enqueue SI_TIMER siginfo with sigev_value
+                    const si = signal_mod.KernelSigInfo{
+                        .signo = timer.signo,
+                        .code = signal_mod.SI_TIMER,
+                        .pid = 0,
+                        .uid = 0,
+                        .value = timer.sigev_value,
+                    };
+                    _ = thread.siginfo_queue.enqueue(si);
                     timer.signal_pending = true;
                 }
-            } else if (timer.notify == 1) { // SIGEV_NONE
+            } else if (timer.notify == uapi.time.SIGEV_THREAD_ID) {
+                // SIGEV_THREAD_ID: deliver signal to specific thread by TID
+                // findThreadByTid is safe here (scheduler.lock not held; see timerTick call order)
+                const target_thread = thread_logic.findThreadByTid(@intCast(timer.target_tid));
+                const actual_target = target_thread orelse thread; // fallback to current if target exited
+                if (timer.signal_pending) {
+                    timer.overrun_count +|= 1;
+                } else {
+                    const sig_bit: u64 = @as(u64, 1) << @intCast(timer.signo - 1);
+                    _ = @atomicRmw(u64, &actual_target.pending_signals, .Or, sig_bit, .release);
+                    const si = signal_mod.KernelSigInfo{
+                        .signo = timer.signo,
+                        .code = signal_mod.SI_TIMER,
+                        .pid = 0,
+                        .uid = 0,
+                        .value = timer.sigev_value,
+                    };
+                    _ = actual_target.siginfo_queue.enqueue(si);
+                    timer.signal_pending = true;
+                }
+            } else if (timer.notify == uapi.time.SIGEV_NONE) {
+                // SIGEV_NONE: no signal delivery, just count overruns
                 timer.overrun_count +|= 1;
             }
 
