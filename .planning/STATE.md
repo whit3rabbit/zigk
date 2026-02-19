@@ -5,21 +5,21 @@
 See: .planning/PROJECT.md (updated 2026-02-16)
 
 **Core value:** Every implemented syscall must work correctly on both x86_64 and aarch64 with matching behavior, tested via the existing integration test harness.
-**Current focus:** Phase 35 - VFS Page Cache and Zero-Copy (v1.3 Tech Debt Cleanup)
+**Current focus:** Phase 35 - VFS Page Cache and Zero-Copy (v1.3 Tech Debt Cleanup) - COMPLETE
 
 ## Current Position
 
-Phase: 35 of 35 (VFS Page Cache and Zero-Copy) - IN PROGRESS
-Plan: 1 of 2 completed in phase 35 (35-01 done, 35-02 pending)
-Status: Phase 35 plan 01 complete, plan 02 pending
-Last activity: 2026-02-19 - Completed 35-01 (VFS page cache infrastructure with ref-counted pages, writeback, and FdTable.close integration)
+Phase: 35 of 35 (VFS Page Cache and Zero-Copy) - COMPLETE
+Plan: 2 of 2 completed in phase 35 (35-01 done, 35-02 done)
+Status: All phases and plans complete (v1.3 milestone finished)
+Last activity: 2026-02-19 - Completed 35-02 (wire page cache into splice/sendfile/tee/copy_file_range)
 
-Progress: [██████████████████████░] 94% (34/35 phases in progress, 66/67 plans complete)
+Progress: [████████████████████████] 100% (35/35 phases complete, 67/67 plans complete)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 66 (v1.0: 29, v1.1: 12, v1.2: 16, v1.3: 9)
+- Total plans completed: 67 (v1.0: 29, v1.1: 12, v1.2: 16, v1.3: 10)
 - Average duration: ~8.2 min per plan
 - Total execution time: ~8.6 hours over 11 days
 
@@ -30,7 +30,7 @@ Progress: [██████████████████████░
 | v1.0 | 1-9 | 29 | 4 days |
 | v1.1 | 10-14 | 12 | 2 days |
 | v1.2 | 15-26 | 16 | 5 days |
-| v1.3 | 27-35 | 9 (ongoing) | ~235 min |
+| v1.3 | 27-35 | 10 | ~254 min |
 
 **Recent Trend:**
 - v1.2 phases averaged 1.3 plans per phase (down from 2.4 in v1.1, 3.2 in v1.0)
@@ -45,6 +45,7 @@ Progress: [██████████████████████░
 | Phase 34 P01 | 7 | 2 tasks | 5 files |
 | Phase 34 P02 | 468 | 2 tasks | 5 files |
 | Phase 35 P01 | 12 | 2 tasks | 4 files |
+| Phase 35 P02 | 19 | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -95,6 +96,9 @@ Recent decisions from PROJECT.md affecting v1.3:
 - [Phase 35-01]: Lock ordering: page_cache.lock after fd.lock; lock dropped before read_fn/write_fn calls to avoid inversion
 - [Phase 35-01]: Read-ahead: 1-page prefetch on cache miss; prefetched pages start with ref_count=0 (unreferenced)
 - [Phase 35-01]: Writeback before close_fn in FdTable.close -- backing store must still be open for write_fn to succeed
+- [Phase 35-02]: file_identifier == 0 gates page cache path; non-VFS files (devices, sockets) fall back to 64KB heap buffer
+- [Phase 35-02]: 4KB stack buffers for pipe-related ops (tee, splicePipeToFile) since pipe buffer max is PIPE_BUF_SIZE (4KB)
+- [Phase 35-02]: page_cache.invalidate(file_id) called after splicePipeToFile and copy_file_range writes to evict stale cached pages
 
 ### Pending Todos
 
@@ -107,19 +111,18 @@ None.
 - Fix: destroyProcess now calls parent.removeChild(proc) before freeing (commit 7809739)
 - Test still fails with OutOfMemory (thread limit exhaustion) but no longer crashes the kernel
 
-**Phase 35 (VFS Page Cache) -- Plan 01 COMPLETE:**
-- Page cache infrastructure built (page_cache.zig with full API)
-- FdTable.close integrated with writeback/invalidate
-- Plan 02 pending: wire page cache into splice/sendfile/tee/copy_file_range
+**Phase 35 (VFS Page Cache) -- COMPLETE:**
+- Plan 01: Page cache infrastructure built (page_cache.zig with full API), FdTable.close integrated with writeback/invalidate
+- Plan 02: splice, sendfile, tee, copy_file_range refactored to use page cache; 3 new integration tests added
 
 ## Session Continuity
 
 Last session: 2026-02-19 (phase 35 execution)
-Stopped at: Completed 35-01-PLAN.md (VFS page cache infrastructure)
+Stopped at: Completed 35-02-PLAN.md (zero-copy page cache integration)
 Resume file: None
 
-**Next action:** Execute 35-02-PLAN.md (wire page cache into splice/sendfile/tee/copy_file_range)
+**Next action:** v1.3 milestone complete. All 35 phases and 67 plans finished.
 
 ---
 *State initialized: 2026-02-06*
-*Last updated: 2026-02-19 after completing plan 35-01 (VFS page cache infrastructure with ref-counted pages, writeback, FdTable.close integration)*
+*Last updated: 2026-02-19 after completing plan 35-02 (splice/sendfile/tee/copy_file_range refactored to use page cache, 3 integration tests)*
