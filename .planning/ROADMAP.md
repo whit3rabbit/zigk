@@ -6,6 +6,7 @@
 - ✅ **v1.1 Hardening & Debt Cleanup** - Phases 10-14 (shipped 2026-02-11)
 - ✅ **v1.2 Systematic Syscall Coverage** - Phases 15-26 (shipped 2026-02-16)
 - ✅ **v1.3 Tech Debt Cleanup** - Phases 27-35 (shipped 2026-02-19)
+- 🚧 **v1.4 Network Stack Hardening** - Phases 36-39 (in progress)
 
 ## Phases
 
@@ -68,6 +69,64 @@
 
 </details>
 
+### v1.4 Network Stack Hardening (In Progress)
+
+**Milestone Goal:** Harden the existing TCP/UDP networking stack with correct congestion control per RFC 5681/6298/6928, dynamic window management per RFC 1122, complete socket option support (SO_RCVBUF, SO_SNDBUF, SO_REUSEPORT, TCP_CORK), MSG flag threading (MSG_PEEK, MSG_DONTWAIT, MSG_WAITALL), and raw socket blocking recv.
+
+- [ ] **Phase 36: RTT Estimation and Congestion Module** - Fix Karn's Algorithm in all retransmit paths, apply IW10, cap cwnd growth, extract congestion logic into congestion/reno.zig
+- [ ] **Phase 37: Dynamic Window Management and Persist Timer** - Wire currentRecvWindow() into ACK building, add persist timer separate from retransmit, implement SWS avoidance on both sender and receiver
+- [ ] **Phase 38: Socket Options and Raw Socket Blocking** - Implement SO_RCVBUF, SO_SNDBUF, SO_REUSEPORT, TCP_CORK, MSG_NOSIGNAL, and raw socket blocking recv
+- [ ] **Phase 39: MSG Flags** - Thread flags parameter through the TCP/UDP call stack; implement MSG_PEEK, MSG_DONTWAIT, MSG_WAITALL
+
+## Phase Details
+
+### Phase 36: RTT Estimation and Congestion Module
+**Goal**: TCP congestion control operates on a reliable RTT foundation with correct RFC-compliant algorithms
+**Depends on**: Phase 35 (v1.3 complete)
+**Requirements**: CC-01, CC-02, CC-03, CC-04, CC-05
+**Success Criteria** (what must be TRUE):
+  1. Slow-start increments cwnd by min(acked, SMSS) per ACK, not by a fixed AIMD step
+  2. New connections open with cwnd = 10*MSS (IW10) instead of the previous IW2
+  3. RTT is not sampled on retransmitted segments; rtt_seq is cleared in all retransmit paths
+  4. Congestion logic lives in congestion/reno.zig with onAck/onTimeout/onDupAck entry points callable from the existing TCP paths
+  5. cwnd cannot grow beyond 4x the send buffer size regardless of how many ACKs arrive on an idle connection
+**Plans**: TBD
+
+### Phase 37: Dynamic Window Management and Persist Timer
+**Goal**: TCP receive windows accurately reflect available buffer space and zero-window connections do not stall indefinitely
+**Depends on**: Phase 36
+**Requirements**: WIN-01, WIN-02, WIN-03, WIN-04, WIN-05
+**Success Criteria** (what must be TRUE):
+  1. Every ACK sent by the receiver carries the result of currentRecvWindow() rather than a hardcoded constant
+  2. When the receive buffer drains by at least one MSS, the receiver sends a window update ACK to the peer
+  3. A persist timer fires independently of the retransmit timer with probes capped at 60-second intervals; connections do not freeze during zero-window periods
+  4. Receiver does not reopen the window for less than min(rcv_buf/2, MSS) freed space (RFC 1122 SWS avoidance)
+  5. Sender does not transmit a segment unless it is at least SMSS bytes, at least half the peer's window, or the last data in the buffer (RFC 1122 SWS avoidance)
+**Plans**: TBD
+
+### Phase 38: Socket Options and Raw Socket Blocking
+**Goal**: Standard socket buffer options take effect and are reflected in the protocol, and raw sockets can block for incoming packets
+**Depends on**: Phase 37
+**Requirements**: BUF-01, BUF-02, BUF-03, BUF-04, BUF-05, API-04, API-05, API-06
+**Success Criteria** (what must be TRUE):
+  1. setsockopt(SO_RCVBUF) and setsockopt(SO_SNDBUF) succeed and the set value gates currentRecvWindow() and the send buffer respectively
+  2. getsockopt(SO_RCVBUF) and getsockopt(SO_SNDBUF) return double the stored value per Linux ABI convention
+  3. Multiple sockets can bind to the same address:port pair when SO_REUSEPORT is set; incoming connections are distributed FIFO among them
+  4. TCP_CORK holds data in the send buffer until a full MSS is accumulated or the cork is cleared via setsockopt; clearing the cork flushes immediately
+  5. Raw socket recv blocks until a packet arrives rather than returning WouldBlock unconditionally
+  6. MSG_NOSIGNAL suppresses SIGPIPE on write to a broken connection; the call returns EPIPE instead of delivering a signal
+**Plans**: TBD
+
+### Phase 39: MSG Flags
+**Goal**: Standard recv/send flags work correctly across TCP and UDP so protocol libraries that use MSG_PEEK, MSG_DONTWAIT, and MSG_WAITALL operate without modification
+**Depends on**: Phase 38
+**Requirements**: API-01, API-02, API-03
+**Success Criteria** (what must be TRUE):
+  1. recv() with MSG_PEEK returns data from the receive buffer without consuming it; a subsequent recv() without MSG_PEEK returns the same data
+  2. recv() with MSG_DONTWAIT returns immediately with EAGAIN if no data is available, regardless of the socket's O_NONBLOCK state
+  3. recv() with MSG_WAITALL blocks until the full requested length is received, EOF is reached, or an error occurs; SO_RCVTIMEO and EINTR terminate the wait early
+**Plans**: TBD
+
 ## Progress
 
 | Phase | Milestone | Plans Complete | Status | Completed |
@@ -107,7 +166,11 @@
 | 33. Timer Resolution Improvement | v1.3 | 3/3 | Complete | 2026-02-18 |
 | 34. Timer Notification Modes | v1.3 | 2/2 | Complete | 2026-02-19 |
 | 35. VFS Page Cache and Zero-Copy | v1.3 | 2/2 | Complete | 2026-02-19 |
+| 36. RTT Estimation and Congestion Module | v1.4 | 0/TBD | Not started | - |
+| 37. Dynamic Window Management and Persist Timer | v1.4 | 0/TBD | Not started | - |
+| 38. Socket Options and Raw Socket Blocking | v1.4 | 0/TBD | Not started | - |
+| 39. MSG Flags | v1.4 | 0/TBD | Not started | - |
 
 ---
 *Roadmap created: 2026-02-06*
-*Last updated: 2026-02-19 after v1.3 milestone completion*
+*Last updated: 2026-02-19 after v1.4 roadmap creation*

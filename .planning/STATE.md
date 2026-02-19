@@ -5,20 +5,22 @@
 See: .planning/PROJECT.md (updated 2026-02-19)
 
 **Core value:** Every implemented syscall must work correctly on both x86_64 and aarch64 with matching behavior, tested via the existing integration test harness.
-**Current focus:** v1.4 Network Stack Hardening
+**Current focus:** v1.4 Network Stack Hardening -- Phase 36: RTT Estimation and Congestion Module
 
 ## Current Position
 
-Phase: Not started (defining requirements)
-Plan: --
-Status: Defining requirements
-Last activity: 2026-02-19 -- Milestone v1.4 started
+Phase: 36 of 39 (RTT Estimation and Congestion Module)
+Plan: 0 of TBD in current phase
+Status: Ready to plan
+Last activity: 2026-02-19 -- v1.4 roadmap created (4 phases, 21 requirements mapped)
+
+Progress: [░░░░░░░░░░] 0% (v1.4 phases not started; 73/73 prior plans complete)
 
 ## Performance Metrics
 
 **Velocity:**
 - Total plans completed: 73 (v1.0: 29, v1.1: 15, v1.2: 14, v1.3: 15)
-- Total phases: 35 across 4 milestones
+- Total phases: 35 complete across 4 milestones
 - Timeline: 14 days (2026-02-06 to 2026-02-19)
 
 **By Milestone:**
@@ -34,7 +36,12 @@ Last activity: 2026-02-19 -- Milestone v1.4 started
 
 ### Decisions
 
-See PROJECT.md Key Decisions table for full history across all milestones.
+See PROJECT.md Key Decisions table for full history.
+
+Recent v1.4 decisions:
+- Option A buffer sizing (fixed 8KB arrays with rcv_buf_size cap field) -- avoids heap allocation in IRQ-context recv path and Tcb.reset() leak risk
+- SO_REUSEPORT included in Phase 38 as simplified FIFO implementation -- bind table data structure change is minimal for FIFO dispatch
+- Congestion module extraction (Phase 36) before window wiring (Phase 37) -- module boundary must exist before algorithm work; retrofitting later requires full re-audit
 
 ### Pending Todos
 
@@ -42,19 +49,17 @@ None.
 
 ### Blockers/Concerns
 
-None. All v1.3 tech debt resolved.
-
-**Remaining tech debt (minor):**
-- SIGEV_THREAD_ID does not call sched.unblock on blocked target thread (latent optimization, not correctness bug)
+- Phase 37 research flag: calculateWindowScale() call chain in options.zig:205 needs auditing to confirm how rcv_buf_size threads through rx/syn.zig. Plan-phase should include an audit pass before implementation estimate.
+- Minor v1.3 tech debt: SIGEV_THREAD_ID does not call sched.unblock on blocked target (latent optimization, not correctness bug, not blocking v1.4)
 
 ## Session Continuity
 
-Last session: 2026-02-19 (v1.3 milestone completion)
-Stopped at: Milestone archived, tagged, committed
+Last session: 2026-02-19 (v1.4 roadmap creation)
+Stopped at: ROADMAP.md written, STATE.md written, REQUIREMENTS.md traceability updated
 Resume file: None
 
-**Next action:** Define v1.4 requirements and roadmap
+**Next action:** /gsd:plan-phase 36
 
 ---
 *State initialized: 2026-02-06*
-*Last updated: 2026-02-19 after v1.4 milestone start*
+*Last updated: 2026-02-19 after v1.4 roadmap creation*

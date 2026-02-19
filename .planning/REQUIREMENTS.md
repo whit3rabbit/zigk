@@ -80,33 +80,33 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| CC-01 | -- | Pending |
-| CC-02 | -- | Pending |
-| CC-03 | -- | Pending |
-| CC-04 | -- | Pending |
-| CC-05 | -- | Pending |
-| WIN-01 | -- | Pending |
-| WIN-02 | -- | Pending |
-| WIN-03 | -- | Pending |
-| WIN-04 | -- | Pending |
-| WIN-05 | -- | Pending |
-| API-01 | -- | Pending |
-| API-02 | -- | Pending |
-| API-03 | -- | Pending |
-| API-04 | -- | Pending |
-| API-05 | -- | Pending |
-| API-06 | -- | Pending |
-| BUF-01 | -- | Pending |
-| BUF-02 | -- | Pending |
-| BUF-03 | -- | Pending |
-| BUF-04 | -- | Pending |
-| BUF-05 | -- | Pending |
+| CC-01 | Phase 36 | Pending |
+| CC-02 | Phase 36 | Pending |
+| CC-03 | Phase 36 | Pending |
+| CC-04 | Phase 36 | Pending |
+| CC-05 | Phase 36 | Pending |
+| WIN-01 | Phase 37 | Pending |
+| WIN-02 | Phase 37 | Pending |
+| WIN-03 | Phase 37 | Pending |
+| WIN-04 | Phase 37 | Pending |
+| WIN-05 | Phase 37 | Pending |
+| API-01 | Phase 39 | Pending |
+| API-02 | Phase 39 | Pending |
+| API-03 | Phase 39 | Pending |
+| API-04 | Phase 38 | Pending |
+| API-05 | Phase 38 | Pending |
+| API-06 | Phase 38 | Pending |
+| BUF-01 | Phase 38 | Pending |
+| BUF-02 | Phase 38 | Pending |
+| BUF-03 | Phase 38 | Pending |
+| BUF-04 | Phase 38 | Pending |
+| BUF-05 | Phase 38 | Pending |
 
 **Coverage:**
 - v1.4 requirements: 21 total
-- Mapped to phases: 0
-- Unmapped: 21
+- Mapped to phases: 21
+- Unmapped: 0
 
 ---
 *Requirements defined: 2026-02-19*
-*Last updated: 2026-02-19 after initial definition*
+*Last updated: 2026-02-19 after roadmap creation (full traceability added)*
