@@ -107,7 +107,7 @@ Plans:
   5. Sender does not transmit a segment unless it is at least SMSS bytes, at least half the peer's window, or the last data in the buffer (RFC 1122 SWS avoidance)
 **Plans**: 2 plans
 Plans:
-- [ ] 37-01-PLAN.md -- SWS floor in currentRecvWindow(), persist timer fields and logic, remove old zero-window probe
+- [x] 37-01-PLAN.md -- SWS floor in currentRecvWindow(), persist timer fields and logic, remove old zero-window probe (complete 2026-02-19)
 - [ ] 37-02-PLAN.md -- Sender SWS avoidance gate, post-drain window update ACK in recv()
 
 ### Phase 38: Socket Options and Raw Socket Blocking
@@ -173,10 +173,10 @@ Plans:
 | 34. Timer Notification Modes | v1.3 | 2/2 | Complete | 2026-02-19 |
 | 35. VFS Page Cache and Zero-Copy | v1.3 | 2/2 | Complete | 2026-02-19 |
 | 36. RTT Estimation and Congestion Module | v1.4 | Complete    | 2026-02-19 | 2026-02-19 |
-| 37. Dynamic Window Management and Persist Timer | v1.4 | 0/2 | Not started | - |
+| 37. Dynamic Window Management and Persist Timer | v1.4 | 1/2 | In progress | - |
 | 38. Socket Options and Raw Socket Blocking | v1.4 | 0/TBD | Not started | - |
 | 39. MSG Flags | v1.4 | 0/TBD | Not started | - |
 
 ---
 *Roadmap created: 2026-02-06*
-*Last updated: 2026-02-19 after Phase 37 planning*
+*Last updated: 2026-02-19 after Phase 37 plan 01 execution*
