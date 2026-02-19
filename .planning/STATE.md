@@ -5,22 +5,22 @@
 See: .planning/PROJECT.md (updated 2026-02-19)
 
 **Core value:** Every implemented syscall must work correctly on both x86_64 and aarch64 with matching behavior, tested via the existing integration test harness.
-**Current focus:** v1.4 Network Stack Hardening -- Phase 36: RTT Estimation and Congestion Module
+**Current focus:** v1.4 Network Stack Hardening -- Phase 36 COMPLETE, next: Phase 37 (Receive Window and Buffer Management)
 
 ## Current Position
 
-Phase: 36 of 39 (RTT Estimation and Congestion Module)
-Plan: 1 of 2 in current phase (36-01 complete)
-Status: In progress
-Last activity: 2026-02-19 -- 36-01 complete (Reno CC module created, IW10 constants, INITIAL_CWND in Tcb.init)
+Phase: 36 of 39 (RTT Estimation and Congestion Module -- COMPLETE)
+Plan: 2 of 2 in current phase (36-02 complete)
+Status: Phase 36 complete, ready for Phase 37
+Last activity: 2026-02-19 -- 36-02 complete (reno wired into all call sites, Karn's Algorithm applied)
 
-Progress: [█░░░░░░░░░] 5% (1/2 plans in phase 36; 73/73 prior plans complete)
+Progress: [██░░░░░░░░] 10% (2/2 plans in phase 36 done; 75/75 plans complete across phases 1-36)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 73 (v1.0: 29, v1.1: 15, v1.2: 14, v1.3: 15)
-- Total phases: 35 complete across 4 milestones
+- Total plans completed: 75 (v1.0: 29, v1.1: 15, v1.2: 14, v1.3: 15, v1.4-p36: 2)
+- Total phases: 36 complete across 4 milestones + phase 36
 - Timeline: 14 days (2026-02-06 to 2026-02-19)
 
 **By Milestone:**
@@ -31,6 +31,11 @@ Progress: [█░░░░░░░░░] 5% (1/2 plans in phase 36; 73/73 prio
 | v1.1 | 10-14 | 15 | 2 days |
 | v1.2 | 15-26 | 14 | 5 days |
 | v1.3 | 27-35 | 15 | 4 days |
+| v1.4 (partial) | 36 | 2 | <1 day |
+
+**Phase 36 metrics:**
+- 36-01: 2min -- Reno CC module created (congestion/reno.zig), IW10 constants, INITIAL_CWND in Tcb.init
+- 36-02: 2min -- Reno wired into all call sites, Karn's Algorithm applied
 
 ## Accumulated Context
 
@@ -45,6 +50,8 @@ Recent v1.4 decisions:
 - onTimeout resets cwnd to 1*SMSS not IW10 (RFC 5681 S3.5 mandatory; IW10 is for new connections only)
 - MAX_CWND expressed as 4*BUFFER_SIZE in source (not hardcoded 32768) -- tracks BUFFER_SIZE changes automatically
 - capCwnd is private inline fn in reno.zig -- cap is CC module detail, not a caller contract
+- Partial ACK retransmit placed BEFORE reno.onAck in established.zig -- if onAck deflates cwnd first, retransmitLoss may see insufficient window and decline
+- rtt_seq cleared in retransmitFromSeq (not only onTimeout) -- covers all three retransmit paths (timeout, partial ACK, 3-dup-ACK)
 
 ### Pending Todos
 
@@ -57,12 +64,12 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-02-19 (36-01 execution)
-Stopped at: Completed 36-01-PLAN.md (Reno CC module + IW10 constants)
+Last session: 2026-02-19 (36-02 execution)
+Stopped at: Completed 36-02-PLAN.md (reno wiring + Karn's Algorithm)
 Resume file: None
 
-**Next action:** /gsd:execute-phase 36 (plan 02)
+**Next action:** /gsd:execute-phase 37 (Phase 37: Receive Window and Buffer Management)
 
 ---
 *State initialized: 2026-02-06*
-*Last updated: 2026-02-19 after 36-01 execution*
+*Last updated: 2026-02-19 after 36-02 execution*

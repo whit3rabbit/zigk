@@ -73,7 +73,7 @@
 
 **Milestone Goal:** Harden the existing TCP/UDP networking stack with correct congestion control per RFC 5681/6298/6928, dynamic window management per RFC 1122, complete socket option support (SO_RCVBUF, SO_SNDBUF, SO_REUSEPORT, TCP_CORK), MSG flag threading (MSG_PEEK, MSG_DONTWAIT, MSG_WAITALL), and raw socket blocking recv.
 
-- [ ] **Phase 36: RTT Estimation and Congestion Module** - Fix Karn's Algorithm in all retransmit paths, apply IW10, cap cwnd growth, extract congestion logic into congestion/reno.zig
+- [x] **Phase 36: RTT Estimation and Congestion Module** - Fix Karn's Algorithm in all retransmit paths, apply IW10, cap cwnd growth, extract congestion logic into congestion/reno.zig (completed 2026-02-19)
 - [ ] **Phase 37: Dynamic Window Management and Persist Timer** - Wire currentRecvWindow() into ACK building, add persist timer separate from retransmit, implement SWS avoidance on both sender and receiver
 - [ ] **Phase 38: Socket Options and Raw Socket Blocking** - Implement SO_RCVBUF, SO_SNDBUF, SO_REUSEPORT, TCP_CORK, MSG_NOSIGNAL, and raw socket blocking recv
 - [ ] **Phase 39: MSG Flags** - Thread flags parameter through the TCP/UDP call stack; implement MSG_PEEK, MSG_DONTWAIT, MSG_WAITALL
@@ -92,8 +92,8 @@
   5. cwnd cannot grow beyond 4x the send buffer size regardless of how many ACKs arrive on an idle connection
 **Plans**: 2 plans
 Plans:
-- [ ] 36-01-PLAN.md -- Create reno.zig module, IW10 constants, Tcb.init() update
-- [ ] 36-02-PLAN.md -- Wire reno into established.zig/timers.zig, fix Karn's in data.zig
+- [x] 36-01-PLAN.md -- Create reno.zig module, IW10 constants, Tcb.init() update (complete 2026-02-19)
+- [x] 36-02-PLAN.md -- Wire reno into established.zig/timers.zig, fix Karn's in data.zig (complete 2026-02-19)
 
 ### Phase 37: Dynamic Window Management and Persist Timer
 **Goal**: TCP receive windows accurately reflect available buffer space and zero-window connections do not stall indefinitely
@@ -169,11 +169,11 @@ Plans:
 | 33. Timer Resolution Improvement | v1.3 | 3/3 | Complete | 2026-02-18 |
 | 34. Timer Notification Modes | v1.3 | 2/2 | Complete | 2026-02-19 |
 | 35. VFS Page Cache and Zero-Copy | v1.3 | 2/2 | Complete | 2026-02-19 |
-| 36. RTT Estimation and Congestion Module | 1/2 | In Progress|  | - |
+| 36. RTT Estimation and Congestion Module | v1.4 | 2/2 | Complete | 2026-02-19 |
 | 37. Dynamic Window Management and Persist Timer | v1.4 | 0/TBD | Not started | - |
 | 38. Socket Options and Raw Socket Blocking | v1.4 | 0/TBD | Not started | - |
 | 39. MSG Flags | v1.4 | 0/TBD | Not started | - |
 
 ---
 *Roadmap created: 2026-02-06*
-*Last updated: 2026-02-19 after Phase 36 planning*
+*Last updated: 2026-02-19 after Phase 36 completion*
