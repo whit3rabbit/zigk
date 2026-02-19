@@ -90,3 +90,32 @@
 
 ---
 
+
+## v1.3 Tech Debt Cleanup (Shipped: 2026-02-19)
+
+**Phases:** 27-35 (15 plans)
+**Commits:** 78
+**Lines:** +12,026 / -495 across 92 files
+**Timeline:** 4 days (2026-02-16 to 2026-02-19)
+**Total codebase:** 206,097 LOC Zig
+**Git range:** f767febd..3c23038
+
+**Key accomplishments:**
+1. Built per-thread siginfo queue (KernelSigInfo, SigInfoQueue) replacing bitmask-only signal tracking, with SA_SIGINFO three-argument handler support on both architectures
+2. Replaced signalfd 10ms polling with direct wakeup via sched.waitOn/unblock and delivered SIGSYS for seccomp SECCOMP_RET_KILL
+3. Completed inotify VFS hooks (write, ftruncate, close, link, symlink) with IN_Q_OVERFLOW handling, vfs_path tracking, and capacity increase
+4. Upgraded system timer from 100Hz to 1000Hz for 1ms tick resolution, updated all peripheral tick constants across both architectures
+5. Added SIGEV_THREAD and SIGEV_THREAD_ID notification modes for POSIX timers with sys_gettid and SI_TIMER siginfo delivery
+6. Built VFS page cache (256-bucket hash, 1024 page limit) and refactored splice/sendfile/tee/copy_file_range for true zero-copy I/O
+
+**Delivered:** Resolved all 16 v1.2 tech debt items. Signal infrastructure rebuilt from bitmask-only to full siginfo queues with direct wakeup. Timer subsystem upgraded from 10ms to 1ms resolution with expanded capacity (32 timers) and new notification modes. VFS page cache enables true zero-copy I/O. Four bonus bug fixes (destroyProcess use-after-free, rt_sigreturn rax clobber, recvfromIp /10 divisor, exitWithStatus zombie marking).
+
+**Tech debt:** 1 minor item (SIGEV_THREAD_ID does not call sched.unblock on blocked target). See milestones/v1.3-MILESTONE-AUDIT.md.
+
+**Archives:**
+- milestones/v1.3-ROADMAP.md
+- milestones/v1.3-REQUIREMENTS.md
+- milestones/v1.3-MILESTONE-AUDIT.md
+
+---
+

@@ -2,7 +2,7 @@
 
 ## What This Is
 
-Systematic expansion of Linux/POSIX syscall coverage in the zk microkernel. Shipped v1.2 with 330+ syscalls across 12 categories. Now hardening existing implementations: fixing architectural gaps, replacing polling with proper wakeups, adding missing syscalls, and building VFS page cache infrastructure for true zero-copy I/O. Dual-architecture (x86_64 + aarch64) with 203K LOC Zig and comprehensive integration test suite.
+Systematic expansion of Linux/POSIX syscall coverage in the zk microkernel. Shipped v1.3 with 330+ syscalls across 12 categories. Signal infrastructure rebuilt from bitmask-only to full siginfo queues with direct wakeup. Timer subsystem upgraded to 1ms resolution with 32-timer capacity and SIGEV_THREAD/SIGEV_THREAD_ID support. VFS page cache enables true zero-copy splice/sendfile/tee/copy_file_range. Dual-architecture (x86_64 + aarch64) with 206K LOC Zig and comprehensive integration test suite.
 
 ## Core Value
 
@@ -62,24 +62,25 @@ Every implemented syscall must work correctly on both x86_64 and aarch64 with ma
 - v Seccomp syscall filtering (STRICT mode, FILTER mode with classic BPF interpreter) -- v1.2
 - v Test coverage expansion (20 tests for lchown, settimeofday, signals, select/epoll edges, madvise, mincore, rlimit) -- v1.2
 
+- v Complete inotify VFS hooks (ftruncate, write, close, link, symlink) -- v1.3
+- v Fix rt_sigsuspend pending signal race (deferred mask restoration) -- v1.3
+- v Implement per-process rlimit persistence (soft/hard pairs) -- v1.3
+- v SIGSYS delivery for seccomp SECCOMP_RET_KILL -- v1.3
+- v Per-thread siginfo queue with SA_SIGINFO handler support -- v1.3
+- v POSIX timer resolution 1ms (1000Hz) and limit increased to 32 -- v1.3
+- v VFS page cache with true zero-copy splice/sendfile/tee/copy_file_range -- v1.3
+- v signalfd direct wakeup via sched.waitOn/unblock -- v1.3
+- v fchdir syscall via DirTag enum mapping -- v1.3
+- v mremap invalid address edge case verified (no fix needed) -- v1.3
+- v inotify capacity increased (instances, watches, queued events) -- v1.3
+- v SeccompData instruction_pointer via getReturnRip() -- v1.3
+- v inotify event queue overflow with IN_Q_OVERFLOW -- v1.3
+- v SIGEV_THREAD/SIGEV_THREAD_ID for POSIX timers -- v1.3
+- v clock_nanosleep sub-10ms granularity -- v1.3
+
 ### Active
 
-<!-- v1.3 Tech Debt Cleanup -->
-- [ ] Complete inotify VFS hooks (ftruncate and remaining ops)
-- [ ] Fix rt_sigsuspend pending signal race
-- [ ] Implement per-process rlimit persistence
-- [ ] Implement SIGSYS delivery for seccomp filters
-- [ ] Build per-thread siginfo queue (replace bitmask-only tracking)
-- [ ] Increase POSIX timer resolution and per-process limit
-- [ ] Build VFS page cache for true zero-copy I/O (splice, sendfile, tee)
-- [ ] Replace signalfd 10ms polling with direct wakeup
-- [ ] Implement fchdir syscall
-- [ ] Fix testMremapInvalidAddr edge case
-- [ ] Increase inotify capacity limits
-- [ ] Add instruction_pointer to SeccompData
-- [ ] Handle inotify event queue overflow properly
-- [ ] Add SIGEV_THREAD/SIGEV_THREAD_ID to POSIX timers
-- [ ] Improve clock_nanosleep granularity
+(None -- awaiting next milestone definition)
 
 ### Out of Scope
 
@@ -95,35 +96,21 @@ Every implemented syscall must work correctly on both x86_64 and aarch64 with ma
 - Multi-CPU affinity enforcement -- single-CPU kernel, separate project
 - Full seccomp BPF JIT -- v1.2 implements interpreter only, JIT is future work
 - Container/namespace support (unshare, setns) -- requires kernel architecture changes
-- True zero-copy I/O via VFS page cache -- moved to v1.3 Active scope
 
-## Current Milestone: v1.3 Tech Debt Cleanup
+## Last Milestone: v1.3 Tech Debt Cleanup (Shipped 2026-02-19)
 
-**Goal:** Resolve all 15 tech debt items accumulated across v1.0-v1.2, hardening existing syscall implementations with proper wakeups, signal queues, and VFS page cache infrastructure.
-
-**Target features:**
-- Complete inotify VFS hook wiring
-- Fix rt_sigsuspend signal race and build siginfo queue
-- Per-process rlimit persistence and fchdir implementation
-- SIGSYS delivery for seccomp, instruction_pointer in SeccompData
-- VFS page cache for true zero-copy splice/sendfile/tee
-- signalfd direct wakeup (replace 10ms polling)
-- POSIX timer improvements (resolution, limits, SIGEV_THREAD)
-- Edge case fixes (mremap, inotify capacity, event overflow, clock_nanosleep)
+Resolved all 16 tech debt items from v1.0-v1.2. Signal infrastructure rebuilt, timer subsystem upgraded, VFS page cache built. See MILESTONES.md for details.
 
 ## Context
 
-Shipped v1.2 with 203,161 LOC Zig across x86_64 and aarch64.
+Shipped v1.3 with 206,097 LOC Zig across x86_64 and aarch64.
 Tech stack: Zig 0.16.x, custom UEFI bootloader, QEMU TCG.
 330+ syscalls implemented. Comprehensive integration test suite on both architectures.
 
-v1.0 shipped 300+ syscalls from ~190 baseline. v1.1 resolved all 14 v1.0 tech debt items
-(SFS deadlock, yield-loop blocking, hard links, symlinks, timestamps, SEM_UNDO).
-v1.2 added 31 new syscalls across 12 categories: file sync, zero-copy I/O, memory management,
-modern process control, signal handling, POSIX timers, inotify, capabilities, and seccomp.
-
-v1.3 targets all 15 tech debt items from v1.2 audit. Largest item is VFS page cache for
-true zero-copy I/O. See milestones/v1.2-MILESTONE-AUDIT.md for full debt inventory.
+v1.0 shipped 300+ syscalls from ~190 baseline. v1.1 resolved all 14 v1.0 tech debt items.
+v1.2 added 31 new syscalls across 12 categories. v1.3 resolved all 16 v1.2 tech debt items
+(siginfo queues, signalfd wakeup, inotify VFS hooks, 1ms timers, page cache zero-copy).
+Four milestones shipped over 14 days with 73 plans across 35 phases.
 
 ## Constraints
 
@@ -146,18 +133,23 @@ true zero-copy I/O. See milestones/v1.2-MILESTONE-AUDIT.md for full debt invento
 | io_lock ordering: alloc_lock before io_lock | Prevents deadlock in nested lock scenarios | v Good -- consistent two-phase locking |
 | Global nlink sync for hard links | All entries sharing start_block need identical nlink | v Good -- POSIX-compliant behavior |
 | SFS timestamps as u32 seconds | Nanosecond precision lost, acceptable for SFS | v Good -- simpler implementation |
-| signalfd 10ms polling instead of direct wakeup | Direct wakeup requires global watcher registry | -- Revisit -- better than yield-loop but not ideal |
-| sendfile 64KB buffer instead of zero-copy | True zero-copy requires VFS page cache refactor | -- Revisit -- 16x improvement is significant |
+| signalfd 10ms polling instead of direct wakeup | Direct wakeup requires global watcher registry | v Fixed v1.3 -- sched.waitOn/unblock pattern |
+| sendfile 64KB buffer instead of zero-copy | True zero-copy requires VFS page cache refactor | v Fixed v1.3 -- page cache zero-copy |
 | WaitQueue replaces blocked_readers atomics | Cleaner lifecycle management | v Good -- consistent pattern |
 | Process lifecycle includes SEM_UNDO cleanup | After virt_pci but before resource freeing | v Good -- POSIX-compliant |
 | File sync as validation-only | No buffer cache in zk, data already on disk | v Good -- correct semantics |
-| 64KB kernel buffer for zero-copy I/O | True zero-copy requires VFS page cache | -- Revisit -- same pattern as sendfile |
+| 64KB kernel buffer for zero-copy I/O | True zero-copy requires VFS page cache | v Fixed v1.3 -- page cache with read-ahead |
 | Classic BPF interpreter for seccomp | Simpler than eBPF, sufficient for syscall filtering | v Good -- MVP approach |
-| Seccomp ENOSYS instead of SIGSYS | Signal queue integration complex, ENOSYS sufficient | -- Revisit -- correct behavior deferred |
+| Seccomp ENOSYS instead of SIGSYS | Signal queue integration complex, ENOSYS sufficient | v Fixed v1.3 -- SIGSYS delivered via siginfo queue |
 | Per-process capability bitmasks | All processes run as root, CAP_FULL_SET default | v Good -- foundation for future restriction |
 | POSIX timer scheduler integration | Inline expiration check in processIntervalTimers | v Good -- minimal overhead |
-| Bitmask-only signal tracking | No per-thread siginfo queue for MVP | -- Revisit -- limits rt_sigqueueinfo usefulness |
+| Bitmask-only signal tracking | No per-thread siginfo queue for MVP | v Fixed v1.3 -- SigInfoQueue with SA_SIGINFO |
 | inotify MVP with EAGAIN reads | epoll integration is primary use case | v Good -- avoids blocking complexity |
 
+| 1000Hz timer (1ms ticks) | Sub-10ms timer resolution needed | v Good v1.3 -- all tick constants updated |
+| Per-thread SigInfoQueue (32 entries) | Signals need metadata (si_code, si_pid) | v Good v1.3 -- enables SA_SIGINFO, SIGSYS |
+| VFS page cache (256-bucket, 1024 pages) | Zero-copy needs page references not buffer copies | v Good v1.3 -- splice/sendfile/tee/copy_file_range |
+| SIGEV_THREAD same as SIGEV_SIGNAL at kernel level | glibc handles thread callback wrapping | v Good v1.3 -- matches Linux kernel behavior |
+
 ---
-*Last updated: 2026-02-16 after v1.3 milestone start*
+*Last updated: 2026-02-19 after v1.3 milestone*
