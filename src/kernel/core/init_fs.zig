@@ -15,6 +15,7 @@ const meta = @import("fs").meta;
 const devfs = @import("devfs");
 const heap = @import("heap");
 const fd_mod = @import("fd");
+const page_cache = @import("page_cache");
 
 /// Initialize the Virtual File System and mount core filesystems
 pub fn initVfs() void {
@@ -23,6 +24,9 @@ pub fn initVfs() void {
 
     // Initialize VFS singleton
     fs.vfs.Vfs.init();
+
+    // Initialize page cache for file data caching
+    page_cache.init();
 
     // Mount InitRD at /
     fs.vfs.Vfs.mount("/", fs.vfs.initrd_fs) catch |err| {

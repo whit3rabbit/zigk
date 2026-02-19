@@ -1178,6 +1178,22 @@ pub fn build(b: *std.Build) void {
     pipe_module.addImport("hal", hal_module);
     pipe_module.addImport("io", kernel_io_module);
 
+    // Create Page Cache module (VFS page cache for zero-copy I/O)
+    const page_cache_module = b.createModule(.{
+        .root_source_file = b.path("src/kernel/fs/page_cache.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+    page_cache_module.addImport("pmm", pmm_module);
+    page_cache_module.addImport("hal", hal_module);
+    page_cache_module.addImport("heap", heap_module);
+    page_cache_module.addImport("sync", sync_module);
+    page_cache_module.addImport("fd", fd_module);
+    page_cache_module.addImport("console", console_module);
+
+    // fd needs page_cache for writeback/invalidate on close
+    fd_module.addImport("page_cache", page_cache_module);
+
     // Create Signal module
     const signal_module = b.createModule(.{
         .root_source_file = b.path("src/kernel/proc/signal.zig"),
@@ -1343,6 +1359,7 @@ pub fn build(b: *std.Build) void {
     syscall_io_module.addImport("devfs", devfs_module);
     syscall_io_module.addImport("sched", sched_module);
     syscall_io_module.addImport("sync", sync_module);
+    syscall_io_module.addImport("page_cache", page_cache_module);
 
     // Create syscall fd module (open, close, dup, pipe, lseek)
     const syscall_fd_module = b.createModule(.{
@@ -1963,6 +1980,7 @@ pub fn build(b: *std.Build) void {
     kernel.root_module.addImport("devfs", devfs_module);
     kernel.root_module.addImport("fd", fd_module);
     kernel.root_module.addImport("flock", flock_module);
+    kernel.root_module.addImport("page_cache", page_cache_module);
     kernel.root_module.addImport("io", kernel_io_module);
     kernel.root_module.addImport("capabilities", capabilities_module);
     kernel.root_module.addImport("syscall_ipc", syscall_ipc_module);

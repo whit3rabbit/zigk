@@ -18,6 +18,7 @@ const heap = @import("heap");
 const console = @import("console");
 const uapi = @import("uapi");
 const sync = @import("sync");
+const page_cache = @import("page_cache");
 
 const Errno = uapi.errno.Errno;
 
@@ -341,6 +342,17 @@ pub const FdTable = struct {
 
         // Decrement refcount (outside lock - atomic operation)
         if (fd.unref()) {
+            // Flush dirty page cache entries and invalidate cached pages for this file.
+            // Must happen BEFORE close_fn because close_fn may release the backing store.
+            if (fd.file_identifier != 0) {
+                if (fd.isWritable()) {
+                    if (fd.ops.write) |write_fn| {
+                        page_cache.writeback(fd.file_identifier, write_fn, fd);
+                    }
+                }
+                page_cache.invalidate(fd.file_identifier);
+            }
+
             // Refcount reached 0, call close op if present
             // Note: close_fn called without table lock to avoid deadlock
             if (fd.ops.close) |close_fn| {
