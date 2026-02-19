@@ -107,13 +107,20 @@ pub const SigEvent = extern struct {
     comptime {
         if (@sizeOf(SigEvent) != 64) @compileError("SigEvent must be 64 bytes to match Linux sigevent");
     }
+
+    /// Extract _sigev_un._tid from padding (used by SIGEV_THREAD_ID)
+    /// In Linux sigevent, _sigev_un._tid is at the start of the padding area
+    /// (first 4 bytes of _pad), immediately after sigev_value + sigev_signo + sigev_notify.
+    pub fn getTid(self: *const SigEvent) i32 {
+        return @as(*const i32, @ptrCast(@alignCast(&self._pad[0]))).*;
+    }
 };
 
 /// POSIX timer notification types
 pub const SIGEV_SIGNAL: i32 = 0; // Deliver signal on timer expiration
 pub const SIGEV_NONE: i32 = 1; // No notification (just track overruns)
-pub const SIGEV_THREAD: i32 = 2; // Call function in new thread (not supported)
-pub const SIGEV_THREAD_ID: i32 = 4; // Deliver signal to specific thread (not supported)
+pub const SIGEV_THREAD: i32 = 2; // Kernel-level: deliver signal (glibc wraps in thread callback)
+pub const SIGEV_THREAD_ID: i32 = 4; // Deliver signal to specific thread by TID
 
 /// Clock IDs (matching Linux values)
 pub const CLOCK_REALTIME: usize = 0;

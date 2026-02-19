@@ -394,6 +394,17 @@ pub fn sys_getppid() SyscallError!usize {
     return 0;
 }
 
+/// sys_gettid (186/178) - Get thread ID
+///
+/// Returns the caller's thread ID (TID). In a single-threaded process,
+/// the TID equals the PID. In multi-threaded processes, each thread
+/// has a unique TID. Used with SIGEV_THREAD_ID to target timer signals
+/// to a specific thread.
+pub fn sys_gettid() SyscallError!usize {
+    const thread = sched.getCurrentThread() orelse return error.ESRCH;
+    return @intCast(thread.tid);
+}
+
 /// sys_getuid (102) - Get real user ID
 pub fn sys_getuid() SyscallError!usize {
     const proc = base.getCurrentProcess();

@@ -39,7 +39,7 @@ pub const PosixTimer = struct {
     clockid: usize = 0,
     /// Signal to deliver on expiration (default SIGALRM = 14)
     signo: u8 = 14,
-    /// Notification type (SIGEV_SIGNAL or SIGEV_NONE)
+    /// Notification type (SIGEV_SIGNAL, SIGEV_NONE, SIGEV_THREAD, or SIGEV_THREAD_ID)
     notify: i32 = 0,
     /// Time until next expiration (in nanoseconds, 0 = disarmed)
     value_ns: u64 = 0,
@@ -49,6 +49,10 @@ pub const PosixTimer = struct {
     overrun_count: u32 = 0,
     /// Whether the timer signal is currently pending (for overrun tracking)
     signal_pending: bool = false,
+    /// Target thread ID for SIGEV_THREAD_ID mode (0 = deliver to any process thread)
+    target_tid: i32 = 0,
+    /// Signal value (si_value) passed with notification via siginfo
+    sigev_value: usize = 0,
 };
 
 /// Process - owns resources and process hierarchy
