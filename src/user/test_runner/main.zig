@@ -605,10 +605,14 @@ export fn main(argc: i32, argv: [*][*:0]u8) i32 {
     runner.runTest("zero_copy_io: vmsplice basic", fs_extras_tests.testVmspliceBasic);
     runner.runTest("zero_copy_io: copy_file_range invalid flags", fs_extras_tests.testCopyFileRangeInvalidFlags);
     runner.runTest("zero_copy_io: splice zero length", fs_extras_tests.testSpliceZeroLength);
+    // Phase 35-02: Page cache zero-copy tests (non-SFS, exercise page cache hit path)
+    runner.runTest("zero_copy_io: sendfile page cache", fs_extras_tests.testSendfilePageCache);
+    runner.runTest("zero_copy_io: splice page cache reuse", fs_extras_tests.testSplicePageCacheReuse);
     // SFS tests last (create SFS files, risk deadlock if test count is high)
     runner.runTest("zero_copy_io: splice pipe to file", fs_extras_tests.testSplicePipeToFile);
     runner.runTest("zero_copy_io: copy_file_range basic", fs_extras_tests.testCopyFileRangeBasic);
     runner.runTest("zero_copy_io: copy_file_range with offsets", fs_extras_tests.testCopyFileRangeWithOffsets);
+    runner.runTest("zero_copy_io: copy_file_range page cache", fs_extras_tests.testCopyFileRangePageCache);
 
     // Phase 5: Vectored & Positional I/O tests (non-SFS first, SFS last due to deadlock)
     runner.runTest("vectored_io: readv basic", vectored_io_tests.testReadvBasic);

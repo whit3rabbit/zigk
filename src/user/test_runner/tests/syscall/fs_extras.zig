@@ -1144,3 +1144,134 @@ pub fn testSpliceZeroLength() !void {
     const spliced = try syscall.splice(file_fd, null, fds[1], null, 0, 0);
     if (spliced != 0) return error.TestFailed;
 }
+
+// =============================================================================
+// Page Cache Zero-Copy Tests
+// Verify that the page cache path produces correct data by exercising
+// repeated reads from the same file offset (second read hits cache).
+// =============================================================================
+
+/// Test sendfile uses page cache: two sendfile calls from the same offset
+/// should produce identical data (second call hits page cache).
+pub fn testSendfilePageCache() !void {
+    // Open InitRD file as source
+    const file_fd = try syscall.open("/shell.elf", syscall.O_RDONLY, 0);
+    defer _ = syscall.close(file_fd) catch {};
+
+    // First sendfile: offset 0, 64 bytes -> pipe A
+    var pipe_a: [2]i32 = undefined;
+    _ = try syscall.pipe(&pipe_a);
+    defer _ = syscall.close(pipe_a[0]) catch {};
+    defer _ = syscall.close(pipe_a[1]) catch {};
+
+    var off1: u64 = 0;
+    const sent1 = try syscall.sendfile(pipe_a[1], file_fd, &off1, 64);
+    if (sent1 == 0) return error.TestFailed;
+
+    var buf1: [64]u8 = undefined;
+    const read1 = try syscall.read(pipe_a[0], &buf1, buf1.len);
+    if (read1 != sent1) return error.TestFailed;
+
+    // Second sendfile: same offset 0, 64 bytes -> pipe B (should hit page cache)
+    var pipe_b: [2]i32 = undefined;
+    _ = try syscall.pipe(&pipe_b);
+    defer _ = syscall.close(pipe_b[0]) catch {};
+    defer _ = syscall.close(pipe_b[1]) catch {};
+
+    var off2: u64 = 0;
+    const sent2 = try syscall.sendfile(pipe_b[1], file_fd, &off2, 64);
+    if (sent2 != sent1) return error.TestFailed;
+
+    var buf2: [64]u8 = undefined;
+    const read2 = try syscall.read(pipe_b[0], &buf2, buf2.len);
+    if (read2 != sent2) return error.TestFailed;
+
+    // Data from both calls must be identical
+    if (!std.mem.eql(u8, buf1[0..read1], buf2[0..read2])) {
+        return error.TestFailed;
+    }
+}
+
+/// Test splice page cache reuse: two splice calls from the same file offset
+/// should produce identical data (second call hits cached pages).
+pub fn testSplicePageCacheReuse() !void {
+    // Open InitRD file
+    const file_fd = try syscall.open("/shell.elf", syscall.O_RDONLY, 0);
+    defer _ = syscall.close(file_fd) catch {};
+
+    // First splice: 128 bytes from offset 0 -> pipe A
+    var pipe_a: [2]i32 = undefined;
+    _ = try syscall.pipe(&pipe_a);
+    defer _ = syscall.close(pipe_a[0]) catch {};
+    defer _ = syscall.close(pipe_a[1]) catch {};
+
+    var off1: u64 = 0;
+    const spliced1 = try syscall.splice(file_fd, &off1, pipe_a[1], null, 128, 0);
+    if (spliced1 == 0) return error.TestFailed;
+
+    var buf1: [128]u8 = undefined;
+    const read1 = try syscall.read(pipe_a[0], &buf1, buf1.len);
+    if (read1 != spliced1) return error.TestFailed;
+
+    // Second splice: same 128 bytes from offset 0 -> pipe B (page cache hit)
+    var pipe_b: [2]i32 = undefined;
+    _ = try syscall.pipe(&pipe_b);
+    defer _ = syscall.close(pipe_b[0]) catch {};
+    defer _ = syscall.close(pipe_b[1]) catch {};
+
+    var off2: u64 = 0;
+    const spliced2 = try syscall.splice(file_fd, &off2, pipe_b[1], null, 128, 0);
+    if (spliced2 != spliced1) return error.TestFailed;
+
+    var buf2: [128]u8 = undefined;
+    const read2 = try syscall.read(pipe_b[0], &buf2, buf2.len);
+    if (read2 != spliced2) return error.TestFailed;
+
+    // Both reads must produce identical data
+    if (!std.mem.eql(u8, buf1[0..read1], buf2[0..read2])) {
+        return error.TestFailed;
+    }
+}
+
+/// Test copy_file_range via page cache: copy from InitRD file to SFS file
+/// and verify the destination data matches a direct read of the source.
+pub fn testCopyFileRangePageCache() !void {
+    const dst_path = "/mnt/zcio_pc.txt";
+
+    // Source: InitRD file (has file_identifier, uses page cache)
+    const src_fd = try syscall.open("/shell.elf", syscall.O_RDONLY, 0);
+
+    // Destination: SFS file (keep open to avoid SFS close deadlock)
+    const dst_fd = syscall.open(dst_path, syscall.O_CREAT | syscall.O_RDWR, 0o644) catch |err| {
+        syscall.close(src_fd) catch {};
+        if (err == error.ReadOnlyFileSystem) return error.SkipTest;
+        return err;
+    };
+
+    // Copy 256 bytes from source offset 0 to destination
+    var off_in: u64 = 0;
+    const copied = syscall.copy_file_range(src_fd, &off_in, dst_fd, null, 256, 0) catch |err| {
+        syscall.close(src_fd) catch {};
+        return err;
+    };
+    syscall.close(src_fd) catch {};
+
+    if (copied != 256) return error.TestFailed;
+
+    // Read back from destination (seek to 0 first, avoid close/reopen)
+    _ = try syscall.lseek(dst_fd, 0, 0); // SEEK_SET
+    var dst_buf: [256]u8 = undefined;
+    const dst_read = try syscall.read(dst_fd, &dst_buf, 256);
+    if (dst_read != 256) return error.TestFailed;
+
+    // Read directly from source to verify
+    const src_fd2 = try syscall.open("/shell.elf", syscall.O_RDONLY, 0);
+    var src_buf: [256]u8 = undefined;
+    const src_read = try syscall.read(src_fd2, &src_buf, 256);
+    syscall.close(src_fd2) catch {};
+
+    if (src_read != 256 or !std.mem.eql(u8, dst_buf[0..256], src_buf[0..256])) {
+        return error.TestFailed;
+    }
+    // Leave dst_fd open (SFS close deadlock workaround)
+}
