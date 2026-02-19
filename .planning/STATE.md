@@ -10,17 +10,17 @@ See: .planning/PROJECT.md (updated 2026-02-19)
 ## Current Position
 
 Phase: 37 of 39 (Receive Window and Buffer Management -- in progress)
-Plan: 1 of 3 in current phase (37-01 complete)
-Status: Phase 37 plan 01 complete, ready for plan 02
-Last activity: 2026-02-19 -- 37-01 complete (SWS avoidance floor + RFC 1122 persist timer)
+Plan: 2 of 2 in current phase (37-01 and 37-02 complete -- phase 37 done)
+Status: Phase 37 complete
+Last activity: 2026-02-19 -- 37-02 complete (sender SWS avoidance gate + window update ACK in recv)
 
-Progress: [██░░░░░░░░] 10% (1/3 plans in phase 37 done; 76/77 plans complete across phases 1-37)
+Progress: [████████░░] 80% (2/2 plans in phase 37 done; 77/77 plans complete across phases 1-37)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 76 (v1.0: 29, v1.1: 15, v1.2: 14, v1.3: 15, v1.4-p36: 2, v1.4-p37: 1)
-- Total phases: 36 complete + phase 37 in progress, across 4 milestones
+- Total plans completed: 77 (v1.0: 29, v1.1: 15, v1.2: 14, v1.3: 15, v1.4-p36: 2, v1.4-p37: 2)
+- Total phases: 37 complete, across 4 milestones
 - Timeline: 14 days (2026-02-06 to 2026-02-19)
 
 **By Milestone:**
@@ -31,7 +31,7 @@ Progress: [██░░░░░░░░] 10% (1/3 plans in phase 37 done; 76/7
 | v1.1 | 10-14 | 15 | 2 days |
 | v1.2 | 15-26 | 14 | 5 days |
 | v1.3 | 27-35 | 15 | 4 days |
-| v1.4 (partial) | 36-37 | 3 | <1 day |
+| v1.4 (partial) | 36-37 | 4 | <1 day (in progress) |
 
 **Phase 36 metrics:**
 - 36-01: 2min -- Reno CC module created (congestion/reno.zig), IW10 constants, INITIAL_CWND in Tcb.init
@@ -39,6 +39,7 @@ Progress: [██░░░░░░░░] 10% (1/3 plans in phase 37 done; 76/7
 
 **Phase 37 metrics:**
 - 37-01: 2min -- SWS avoidance floor in currentRecvWindow() + RFC 1122 persist timer with 60s-capped exponential backoff
+- 37-02: 1min -- Sender SWS avoidance gate in transmitPendingData() + window update ACK in recv()
 
 ## Accumulated Context
 
@@ -58,6 +59,8 @@ Recent v1.4 decisions:
 - Persist timer uses retrans_timer == 0 mutual exclusion -- running both simultaneously causes duplicate zero-window probes
 - Persist probe sends FLAG_ACK only (no FLAG_PSH) -- RFC 1122 S4.2.2.17; probe elicits window update, not data delivery signal
 - SWS floor = min(BUFFER_SIZE/2, MSS) -- RFC 1122 S4.2.3.3; safe at SYN time since empty buffer space always exceeds floor
+- Sender SWS gate placed after Nagle check -- Nagle gates on flight_size, SWS gates on segment size vs window; both are complementary suppressors
+- Window update threshold uses c.DEFAULT_MSS (local receive MSS) not tcb.mss (peer send MSS) -- semantically correct for receive-side decision
 
 ### Pending Todos
 
@@ -71,12 +74,12 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-02-19 (37-01 execution)
-Stopped at: Completed 37-01-PLAN.md (SWS avoidance + persist timer)
+Last session: 2026-02-19 (37-02 execution)
+Stopped at: Completed 37-02-PLAN.md (sender SWS avoidance + window update ACK)
 Resume file: None
 
-**Next action:** Execute 37-02-PLAN.md (Phase 37 plan 02)
+**Next action:** Phase 37 complete. Ready for Phase 38.
 
 ---
 *State initialized: 2026-02-06*
-*Last updated: 2026-02-19 after 37-01 execution*
+*Last updated: 2026-02-19 after 37-02 execution*
