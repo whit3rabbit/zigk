@@ -186,7 +186,10 @@ Plans:
   3. sendfile transfers file data via page references without kernel buffer copy
   4. tee duplicates pipe data via page references without kernel buffer copy
   5. copy_file_range transfers file data via page cache without kernel buffer copy
-**Plans**: TBD
+**Plans**: 2 plans
+Plans:
+- [ ] 35-01-PLAN.md -- Page cache infrastructure (data structures, API, FD lifecycle integration)
+- [ ] 35-02-PLAN.md -- Refactor zero-copy syscalls to use page cache, add integration tests
 
 ## Progress
 
@@ -226,8 +229,8 @@ Plans:
 | 32. Timer Capacity Expansion | v1.3 | Complete    | 2026-02-18 | - |
 | 33. Timer Resolution Improvement | 3/3 | Complete    | 2026-02-18 | - |
 | 34. Timer Notification Modes | 2/2 | Complete    | 2026-02-19 | - |
-| 35. VFS Page Cache and Zero-Copy | v1.3 | 0/? | Not started | - |
+| 35. VFS Page Cache and Zero-Copy | v1.3 | 0/2 | Not started | - |
 
 ---
 *Roadmap created: 2026-02-06*
-*Last updated: 2026-02-18 after Phase 33-03 completion (all three plans done; recvfromIp /10 divisor fixed, timer assertion strengthened)*
+*Last updated: 2026-02-18 after Phase 35 planning (2 plans created)*
