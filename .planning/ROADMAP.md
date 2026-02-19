@@ -121,7 +121,9 @@ Plans:
   4. TCP_CORK holds data in the send buffer until a full MSS is accumulated or the cork is cleared via setsockopt; clearing the cork flushes immediately
   5. Raw socket recv blocks until a packet arrives rather than returning WouldBlock unconditionally
   6. MSG_NOSIGNAL suppresses SIGPIPE on write to a broken connection; the call returns EPIPE instead of delivering a signal
-**Plans**: TBD
+**Plans**: 2 plans
+- [ ] 38-01-PLAN.md -- Buffer options, TCP_CORK, raw blocking recv, MSG_NOSIGNAL (BUF-01/02/03/05, API-04/05/06)
+- [ ] 38-02-PLAN.md -- SO_REUSEPORT bind and FIFO listener dispatch (BUF-04)
 
 ### Phase 39: MSG Flags
 **Goal**: Standard recv/send flags work correctly across TCP and UDP so protocol libraries that use MSG_PEEK, MSG_DONTWAIT, and MSG_WAITALL operate without modification
