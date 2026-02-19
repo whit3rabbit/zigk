@@ -238,6 +238,10 @@ pub const Tcb = struct {
     // Nagle (RFC 896)
     nodelay: bool,
 
+    // Persist timer (RFC 1122 S4.2.2.17) -- separate from retransmit timer
+    persist_timer: u64,    // Ticks accumulated since persist timer armed (0 = not running)
+    persist_backoff: u8,   // Exponential backoff level (0-6, capped so interval <= 60s)
+
     // Generation counter for UAF protection (checked by connect())
     // Incremented on allocation to distinguish reused TCB memory
     generation: u64,
@@ -312,6 +316,8 @@ pub const Tcb = struct {
             .ack_pending = false,
             .ack_due = 0,
             .nodelay = false,
+            .persist_timer = 0,
+            .persist_backoff = 0,
             .generation = 0,
         };
     }
@@ -429,11 +435,17 @@ pub const Tcb = struct {
     /// must be right-shifted by our scale factor before sending in TCP header.
     pub fn currentRecvWindow(self: *const Self) u16 {
         const space = c.BUFFER_SIZE - self.recvBufferAvailable();
-        // Apply window scaling - peer will left-shift by rcv_wscale
-        const scaled = if (self.wscale_ok)
-            space >> @intCast(self.rcv_wscale)
+        // WIN-04: SWS avoidance (RFC 1122 S4.2.3.3)
+        // Suppress window advertisement if less than min(rcv_buf/2, MSS) is free.
+        // At SYN time the buffer is empty so space == BUFFER_SIZE which always
+        // exceeds the floor -- no risk of advertising 0 in SYN-ACK.
+        const sws_floor: usize = @min(c.BUFFER_SIZE / 2, @as(usize, self.mss));
+        const effective_space: usize = if (space >= sws_floor) space else 0;
+        // Apply window scaling (RFC 7323): peer left-shifts by rcv_wscale
+        const scaled: usize = if (self.wscale_ok)
+            effective_space >> @intCast(self.rcv_wscale)
         else
-            space;
+            effective_space;
         return @intCast(@min(scaled, 65535));
     }
 };
