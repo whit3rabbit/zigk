@@ -367,6 +367,10 @@ export fn main(argc: i32, argv: [*][*:0]u8) i32 {
     runner.runTest("posix_timer: multiple timers", posix_timer_tests.testTimerMultiple);
     runner.runTest("posix_timer: create beyond 8 timers", posix_timer_tests.testTimerBeyondEight);
     runner.runTest("posix_timer: sub-10ms interval", posix_timer_tests.testTimerSubTenMsInterval);
+    runner.runTest("posix_timer: create sigev_thread_id", posix_timer_tests.testTimerCreateSigevThreadId);
+    runner.runTest("posix_timer: create sigev_thread", posix_timer_tests.testTimerCreateSigevThread);
+    runner.runTest("posix_timer: sigev_thread_id fires", posix_timer_tests.testTimerSigevThreadIdFires);
+    runner.runTest("posix_timer: sigev_thread fires", posix_timer_tests.testTimerSigevThreadFires);
 
     // Phase 24: Capability tests
     runner.runTest("capabilities: capget self v3", capabilities_tests.testCapgetSelf);

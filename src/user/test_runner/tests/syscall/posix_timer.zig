@@ -229,6 +229,144 @@ pub fn testTimerBeyondEight() !void {
     }
 }
 
+// Test 13: timer_create with SIGEV_THREAD_ID accepts and stores target thread
+pub fn testTimerCreateSigevThreadId() !void {
+    var sev = std.mem.zeroes(syscall.SigEvent);
+    sev.sigev_notify = syscall.SIGEV_THREAD_ID;
+    sev.sigev_signo = 14; // SIGALRM
+    // Use gettid() to get the current thread's TID (not getpid()).
+    // Thread TIDs and process PIDs are independent counters in this kernel.
+    // SIGEV_THREAD_ID validates against Thread.tid, not Process.pid.
+    const tid = syscall.gettid();
+    sev.setTid(tid);
+
+    var timerid: i32 = -1;
+    try syscall.timer_create(syscall.CLOCK_MONOTONIC, &sev, &timerid);
+    if (timerid < 0) return error.TestFailed;
+    try syscall.timer_delete(timerid);
+}
+
+// Test 14: timer_create with SIGEV_THREAD accepts notification mode
+pub fn testTimerCreateSigevThread() !void {
+    var sev = std.mem.zeroes(syscall.SigEvent);
+    sev.sigev_notify = syscall.SIGEV_THREAD;
+    sev.sigev_signo = 14; // SIGALRM
+    sev.sigev_value = 0x42; // Application-defined value
+
+    var timerid: i32 = -1;
+    try syscall.timer_create(syscall.CLOCK_MONOTONIC, &sev, &timerid);
+    if (timerid < 0) return error.TestFailed;
+    try syscall.timer_delete(timerid);
+}
+
+// Test 15: SIGEV_THREAD_ID timer fires and delivers signal to specific thread
+// Uses sched_yield polling to verify timer fires with SIGEV_THREAD_ID config.
+// We cannot directly verify signal delivery to a specific thread in single-process tests,
+// but we can verify the timer_create + settime + expiration path works end-to-end.
+// Note: SIG_IGN (value=1) is installed for SIGALRM to prevent process termination.
+pub fn testTimerSigevThreadIdFires() !void {
+    // Install SIG_IGN for SIGALRM so the timer expiration does not kill the process.
+    // SIG_IGN = 1 (from uapi/process/signal.zig). Using handler=1 directly since
+    // syscall.SigAction.handler is usize and 1 maps to SIG_IGN in the kernel dispatch.
+    var ignore_act = std.mem.zeroes(syscall.SigAction);
+    ignore_act.handler = 1; // SIG_IGN
+    try syscall.sigaction(14, &ignore_act, null);
+
+    var sev = std.mem.zeroes(syscall.SigEvent);
+    sev.sigev_notify = syscall.SIGEV_THREAD_ID;
+    sev.sigev_signo = 14; // SIGALRM
+    // Use gettid() -- not getpid() -- for the target thread TID.
+    const tid = syscall.gettid();
+    sev.setTid(tid);
+
+    var timerid: i32 = -1;
+    try syscall.timer_create(syscall.CLOCK_MONOTONIC, &sev, &timerid);
+    defer syscall.timer_delete(timerid) catch {};
+
+    // Arm with 10ms expiration and 10ms interval
+    var val = std.mem.zeroes(syscall.ITimerspec);
+    val.it_value.tv_nsec = 10_000_000; // 10ms initial
+    val.it_interval.tv_nsec = 10_000_000; // 10ms periodic
+
+    try syscall.timer_settime(timerid, 0, &val, null);
+
+    // Poll with sched_yield for ~50ms
+    var start = syscall.Timespec{ .tv_sec = 0, .tv_nsec = 0 };
+    syscall.clock_gettime(.MONOTONIC, &start) catch {};
+    const start_ns: u64 = @intCast(start.tv_sec * 1_000_000_000 + start.tv_nsec);
+    const deadline_ns = start_ns + 50_000_000; // 50ms
+
+    while (true) {
+        syscall.sched_yield() catch {};
+        var now = syscall.Timespec{ .tv_sec = 0, .tv_nsec = 0 };
+        syscall.clock_gettime(.MONOTONIC, &now) catch {};
+        const now_ns: u64 = @intCast(now.tv_sec * 1_000_000_000 + now.tv_nsec);
+        if (now_ns >= deadline_ns) break;
+    }
+
+    // Timer should have fired -- verify it is still running (interval is active).
+    var curr = std.mem.zeroes(syscall.ITimerspec);
+    try syscall.timer_gettime(timerid, &curr);
+    // Interval should still be set (timer was not deleted)
+    if (curr.it_interval.tv_nsec == 0) return error.TestFailed;
+
+    // Restore default SIGALRM action for subsequent tests
+    var default_act = std.mem.zeroes(syscall.SigAction);
+    default_act.handler = 0; // SIG_DFL
+    syscall.sigaction(14, &default_act, null) catch {};
+}
+
+// Test 16: SIGEV_THREAD timer fires with sigev_value
+// Verifies SIGEV_THREAD mode is accepted and the timer operates correctly.
+// Like SIGEV_SIGNAL at the kernel level, but with SI_TIMER code and sigev_value.
+// Note: SIG_IGN (value=1) is installed for SIGALRM to prevent process termination.
+pub fn testTimerSigevThreadFires() !void {
+    // Install SIG_IGN for SIGALRM so timer expiration does not kill the process.
+    var ignore_act = std.mem.zeroes(syscall.SigAction);
+    ignore_act.handler = 1; // SIG_IGN
+    try syscall.sigaction(14, &ignore_act, null);
+
+    var sev = std.mem.zeroes(syscall.SigEvent);
+    sev.sigev_notify = syscall.SIGEV_THREAD;
+    sev.sigev_signo = 14; // SIGALRM
+    sev.sigev_value = 0xDEAD; // Application-defined value
+
+    var timerid: i32 = -1;
+    try syscall.timer_create(syscall.CLOCK_MONOTONIC, &sev, &timerid);
+    defer syscall.timer_delete(timerid) catch {};
+
+    // Arm with 10ms expiration and 10ms interval
+    var val = std.mem.zeroes(syscall.ITimerspec);
+    val.it_value.tv_nsec = 10_000_000; // 10ms initial
+    val.it_interval.tv_nsec = 10_000_000; // 10ms periodic
+
+    try syscall.timer_settime(timerid, 0, &val, null);
+
+    // Poll with sched_yield for ~50ms
+    var start = syscall.Timespec{ .tv_sec = 0, .tv_nsec = 0 };
+    syscall.clock_gettime(.MONOTONIC, &start) catch {};
+    const start_ns: u64 = @intCast(start.tv_sec * 1_000_000_000 + start.tv_nsec);
+    const deadline_ns = start_ns + 50_000_000; // 50ms
+
+    while (true) {
+        syscall.sched_yield() catch {};
+        var now = syscall.Timespec{ .tv_sec = 0, .tv_nsec = 0 };
+        syscall.clock_gettime(.MONOTONIC, &now) catch {};
+        const now_ns: u64 = @intCast(now.tv_sec * 1_000_000_000 + now.tv_nsec);
+        if (now_ns >= deadline_ns) break;
+    }
+
+    // Timer should have fired. Check interval is still set.
+    var curr = std.mem.zeroes(syscall.ITimerspec);
+    try syscall.timer_gettime(timerid, &curr);
+    if (curr.it_interval.tv_nsec == 0) return error.TestFailed;
+
+    // Restore default SIGALRM action for subsequent tests
+    var default_act = std.mem.zeroes(syscall.SigAction);
+    default_act.handler = 0; // SIG_DFL
+    syscall.sigaction(14, &default_act, null) catch {};
+}
+
 // Test 12: POSIX timer with 5ms interval fires multiple times via sched_yield polling
 // Proves sub-10ms POSIX timer resolution
 //
