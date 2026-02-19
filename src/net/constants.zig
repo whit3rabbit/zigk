@@ -83,6 +83,14 @@ pub const RECV_WINDOW_SIZE: u16 = 8192;
 /// Send/receive buffer sizes
 pub const BUFFER_SIZE: usize = 8192;
 
+/// Initial congestion window per RFC 6928 (IW10)
+/// Formula: min(10*MSS, max(2*MSS, 14600)) = 14600 for DEFAULT_MSS=1460
+pub const INITIAL_CWND: u32 = 14600;
+
+/// Maximum congestion window (4x send buffer size, CC-05)
+/// Prevents unbounded cwnd growth on idle connections
+pub const MAX_CWND: u32 = 4 * BUFFER_SIZE;
+
 /// Initial RTO (Retransmission Timeout) in milliseconds
 pub const INITIAL_RTO_MS: u32 = 1000;
 

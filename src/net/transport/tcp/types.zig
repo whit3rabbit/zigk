@@ -297,8 +297,8 @@ pub const Tcb = struct {
             .half_open_next = null,
             .half_open_prev = null,
             .created_at = 0, // Set when allocated
-            // Congestion Control default: 2 MSS (conservative start)
-            .cwnd = c.DEFAULT_MSS * 2,
+            // Congestion Control: IW10 per RFC 6928
+            .cwnd = c.INITIAL_CWND,
             .ssthresh = 65535,
             // RTT defaults
             .srtt = 0,
