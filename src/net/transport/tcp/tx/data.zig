@@ -56,24 +56,8 @@ pub fn transmitPendingData(tcb: *Tcb) bool {
 
     const flight_size = tcb.snd_nxt -% tcb.snd_una;
     if (flight_size >= eff_wnd) {
-        if (eff_wnd == 0 and buffered > 0) {
-            if (tcb.retrans_timer == 0) {
-                tcb.retrans_timer = 1; 
-            }
-            
-            if (flight_size == 0) {
-                 var data_buf: [1]u8 = [_]u8{0} ** 1;
-                 const idx = tcb.send_tail % c.BUFFER_SIZE;
-                 data_buf[0] = tcb.send_buf[idx];
-                 
-                 if (segment.sendSegment(tcb, TcpHeader.FLAG_ACK | TcpHeader.FLAG_PSH, tcb.snd_nxt, tcb.rcv_nxt, &data_buf)) {
-                    tcb.snd_nxt +%= 1;
-                    return true;
-                 }
-            }
-        }
-        
-        return true; 
+        // Window full or zero -- persist timer in processTimers() handles zero-window probes.
+        return true;
     }
 
     const available = eff_wnd - flight_size;

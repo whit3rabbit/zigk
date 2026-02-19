@@ -3,6 +3,7 @@ const state = @import("state.zig");
 const tx = @import("tx/root.zig");
 const types = @import("types.zig");
 const reno = @import("congestion/reno.zig");
+const segment = @import("tx/segment.zig");
 
 const socket = @import("../socket.zig");
 
@@ -78,6 +79,60 @@ pub fn processTimers() void {
             _ = tx.sendAck(tcb);
             tcb.ack_pending = false;
             tcb.ack_due = 0;
+        }
+
+        // WIN-02: Persist timer (RFC 1122 S4.2.2.17) -- separate from retransmit timer.
+        // When peer advertises zero window and we have data to send, probe independently
+        // with exponential backoff capped at 60 seconds.
+        //
+        // MUTUAL EXCLUSION: Persist timer only arms/fires when retrans_timer == 0.
+        // When the retransmit timer is active, data is in flight and the retransmit
+        // itself will probe the window when it fires. Running both simultaneously
+        // would cause duplicate probes. The retransmit path (below) already handles
+        // the case where snd_wnd is 0 during retransmission -- when the RTO fires,
+        // it calls transmitPendingData() or retransmitLoss() which re-checks the
+        // window. Once all in-flight data is ACKed (retrans_timer disarms), the
+        // persist timer takes over for zero-window probing.
+        {
+            const send_pending: usize = if (tcb.send_head >= tcb.send_tail)
+                tcb.send_head - tcb.send_tail
+            else
+                c.BUFFER_SIZE - tcb.send_tail + tcb.send_head;
+
+            if (tcb.snd_wnd == 0 and send_pending > 0 and tcb.retrans_timer == 0 and
+                (tcb.state == .Established or tcb.state == .CloseWait))
+            {
+                if (tcb.persist_timer == 0) {
+                    // Arm persist timer
+                    tcb.persist_timer = 1;
+                    tcb.persist_backoff = 0;
+                } else {
+                    tcb.persist_timer +%= state.ms_per_tick;
+                    const shift: u5 = @intCast(@min(tcb.persist_backoff, 6));
+                    const probe_interval: u64 = @min(@as(u64, tcb.rto_ms) << shift, 60_000);
+                    if (tcb.persist_timer > probe_interval) {
+                        tcb.persist_timer = 1;
+                        if (tcb.persist_backoff < 6) tcb.persist_backoff += 1;
+                        // Send 1-byte window probe from oldest unacked position.
+                        // send_tail is the correct index: it tracks the circular buffer
+                        // position of snd_una data. When ACKs arrive, established.zig
+                        // advances send_tail by the acked amount in lockstep with
+                        // snd_una. So send_buf[send_tail] is always the byte at snd_una.
+                        //
+                        // FLAG_ACK only (no FLAG_PSH). RFC 1122 S4.2.2.17 does not
+                        // require PSH on zero-window probes. PSH is for signaling the
+                        // receiver to deliver buffered data, which is not the purpose
+                        // of a probe -- the probe exists solely to elicit a window update.
+                        var probe_byte: [1]u8 = [_]u8{0};
+                        probe_byte[0] = tcb.send_buf[tcb.send_tail % c.BUFFER_SIZE];
+                        _ = segment.sendSegment(tcb, types.TcpHeader.FLAG_ACK, tcb.snd_una, tcb.rcv_nxt, &probe_byte);
+                    }
+                }
+            } else if (tcb.snd_wnd > 0) {
+                // Window reopened: disarm persist timer
+                tcb.persist_timer = 0;
+                tcb.persist_backoff = 0;
+            }
         }
 
         // Process retransmission timer
