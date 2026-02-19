@@ -9,10 +9,10 @@ See: .planning/PROJECT.md (updated 2026-02-16)
 
 ## Current Position
 
-Phase: 33 of 35 (Timer Resolution Improvement) - COMPLETE
-Plan: 3 completed in phase 33 (33-01, 33-02, and 33-03 done)
-Status: Phase 33 complete
-Last activity: 2026-02-18 - Completed 33-03 (recvfromIp /10 divisor removed, timer test assertion strengthened to overrun >= 7)
+Phase: 34 of 35 (Timer Notification Modes) - IN PROGRESS
+Plan: 1 completed in phase 34 (34-01 done, 34-02 pending)
+Status: Phase 34 in progress
+Last activity: 2026-02-19 - Completed 34-01 (SIGEV_THREAD/SIGEV_THREAD_ID timer notification modes, sys_gettid)
 
 Progress: [█████████████████████░░] 91% (32/35 phases complete)
 
@@ -42,6 +42,7 @@ Progress: [█████████████████████░░
 | Phase 33-timer-resolution-improvement P01 | 5 | 2 tasks | 7 files |
 | Phase 33 P02 | 15 | 2 tasks | 11 files |
 | Phase 33 P03 | 2 | 1 task | 2 files |
+| Phase 34 P01 | 7 | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -83,6 +84,9 @@ Recent decisions from PROJECT.md affecting v1.3:
 - [Phase 33]: testClockNanosleepSubTenMs skipped on aarch64: no TSC fallback clock_gettime has QEMU TCG scheduling overhead inflating measured elapsed time beyond tight upper bounds
 - [Phase 33-03]: recvfromIp() /10 divisor was a latent bug; at 1000Hz 1 tick = 1ms so no divisor is needed; matches recvfrom() identity conversion
 - [Phase 33-03]: Timer overrun discrimination threshold of 7: midpoint between 1ms expected (~11) and 10ms expected (~5), absorbs QEMU TCG jitter
+- [Phase 34-01]: SIGEV_THREAD is identical to SIGEV_SIGNAL at the kernel level; glibc handles thread callback wrapping in userspace
+- [Phase 34-01]: findThreadByTid safe in processIntervalTimers -- scheduler.lock acquired at timerTick line ~819, after processIntervalTimers call at line 806
+- [Phase 34-01]: SIGEV_THREAD_ID falls back to current thread if target exited (no silent signal loss)
 
 ### Pending Todos
 
@@ -102,11 +106,11 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-02-18 (phase 33 execution)
-Stopped at: Completed 33-03-PLAN.md (recvfromIp /10 divisor removed, timer assertion strengthened; phase 33 fully complete)
+Last session: 2026-02-19 (phase 34 execution)
+Stopped at: Completed 34-01-PLAN.md (SIGEV_THREAD/SIGEV_THREAD_ID timer notification modes added, sys_gettid implemented)
 Resume file: None
 
-**Next action:** Proceed to phase 34 per roadmap
+**Next action:** Proceed to 34-02 (phase 34 plan 02 - user-facing tests for SIGEV_THREAD/SIGEV_THREAD_ID)
 
 ---
 *State initialized: 2026-02-06*

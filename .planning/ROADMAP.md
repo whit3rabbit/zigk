@@ -173,7 +173,7 @@ Plans:
   4. SIGEV_THREAD_ID delivers signal to correct target thread (validated at timer_create time via gettid/TID lookup)
 **Plans**: 2 plans
 Plans:
-- [ ] 34-01-PLAN.md -- Kernel infrastructure: SIGEV_THREAD/SIGEV_THREAD_ID support in timer_create and processIntervalTimers
+- [x] 34-01-PLAN.md -- Kernel infrastructure: SIGEV_THREAD/SIGEV_THREAD_ID support in timer_create and processIntervalTimers
 - [ ] 34-02-PLAN.md -- Userspace wrappers and integration tests for new notification modes
 
 ### Phase 35: VFS Page Cache and Zero-Copy
