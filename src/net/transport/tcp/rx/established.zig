@@ -5,6 +5,7 @@ const state = @import("../state.zig");
 const tx = @import("../tx/root.zig");
 const options = @import("../options.zig");
 const socket = @import("../../socket.zig");
+const reno = @import("../congestion/reno.zig");
 
 const packet = @import("../../../core/packet.zig");
 const PacketBuffer = packet.PacketBuffer;
@@ -36,18 +37,7 @@ pub fn processEstablished(tcb: *Tcb, pkt: *PacketBuffer, tcp_hdr: *TcpHeader) Rx
             tcb.dup_ack_count = 0;
             tcb.last_ack = ack;
 
-            if (tcb.fast_recovery) {
-                if (seqGte(ack, tcb.recover)) {
-                    // Full ACK: exit fast recovery
-                    tcb.fast_recovery = false;
-                    tcb.cwnd = tcb.ssthresh;
-                } else {
-                    // Partial ACK: retransmit next segment and deflate cwnd
-                    _ = tx.retransmitLoss(tcb);
-                    tcb.cwnd = tcb.ssthresh + @as(u32, tcb.mss);
-                }
-            }
-
+            // 1. RTT sampling (must happen before snd_una update, uses rtt_seq)
             if (tcb.rtt_seq != 0 and seqGte(ack, tcb.rtt_seq)) {
                 const now = state.connection_timestamp;
                 if (now >= tcb.rtt_start) {
@@ -57,19 +47,24 @@ pub fn processEstablished(tcb: *Tcb, pkt: *PacketBuffer, tcp_hdr: *TcpHeader) Rx
                 tcb.rtt_seq = 0;
             }
 
+            // 2. Compute acked_bytes BEFORE snd_una update
             const max_ackable = tcb.snd_nxt -% tcb.snd_una;
             const acked_bytes = @min(ack -% tcb.snd_una, max_ackable);
-            if (tcb.cwnd < tcb.ssthresh) {
-                tcb.cwnd = std.math.add(u32, tcb.cwnd, @min(acked_bytes, tcb.mss)) catch std.math.maxInt(u32);
-            } else {
-                const inc = @max(1, (@as(u64, tcb.mss) * tcb.mss) / tcb.cwnd);
-                const inc_clamped: u32 = if (inc > std.math.maxInt(u32)) std.math.maxInt(u32) else @truncate(inc);
-                tcb.cwnd = std.math.add(u32, tcb.cwnd, inc_clamped) catch std.math.maxInt(u32);
+            const real_acked = ack -% tcb.snd_una;
+
+            // 3. Partial ACK retransmit BEFORE cwnd mutation (critical ordering)
+            if (tcb.fast_recovery and seqLt(ack, tcb.recover)) {
+                _ = tx.retransmitLoss(tcb);
             }
 
-            const real_acked = ack -% tcb.snd_una;
+            // 4. Update snd_una (reno.onAck reads snd_una for full ACK detection)
             tcb.snd_una = ack;
             tcb.send_tail = (tcb.send_tail + real_acked) % c.BUFFER_SIZE;
+
+            // 5. Congestion control via reno module (CC-01, CC-04, CC-05)
+            reno.onAck(tcb, acked_bytes);
+
+            // 6. Bookkeeping
             if (tcb.snd_una == tcb.snd_nxt) {
                 tcb.retrans_timer = 0;
             }
@@ -88,19 +83,18 @@ pub fn processEstablished(tcb: *Tcb, pkt: *PacketBuffer, tcp_hdr: *TcpHeader) Rx
             if (is_pure_ack) {
                 tcb.dup_ack_count +%= 1;
 
-                if (tcb.fast_recovery) {
-                    tcb.cwnd = std.math.add(u32, tcb.cwnd, tcb.mss) catch std.math.maxInt(u32);
-                    _ = tx.transmitPendingData(tcb);
-                } else if (tcb.dup_ack_count == 3) {
-                    const flight = tcb.snd_nxt -% tcb.snd_una;
-                    tcb.ssthresh = @max(flight / 2, @as(u32, tcb.mss) * 2);
-                    tcb.cwnd = tcb.ssthresh + (@as(u32, tcb.mss) * 3);
-                    tcb.fast_recovery = true;
-                    tcb.recover = tcb.snd_nxt;
+                const was_in_recovery = tcb.fast_recovery;
+                reno.onDupAck(tcb, tcb.dup_ack_count);
+
+                // Trigger retransmit when fast recovery is just entered (3 dup ACKs)
+                if (!was_in_recovery and tcb.fast_recovery) {
                     _ = tx.retransmitLoss(tcb);
                     if (tcb.retrans_timer == 0) {
                         tcb.retrans_timer = 1;
                     }
+                } else if (tcb.fast_recovery) {
+                    // Already in fast recovery, cwnd inflated by onDupAck -- try to send
+                    _ = tx.transmitPendingData(tcb);
                 }
             }
         }
