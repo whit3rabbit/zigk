@@ -9,10 +9,10 @@ See: .planning/PROJECT.md (updated 2026-02-16)
 
 ## Current Position
 
-Phase: 34 of 35 (Timer Notification Modes) - IN PROGRESS
-Plan: 1 completed in phase 34 (34-01 done, 34-02 pending)
-Status: Phase 34 in progress
-Last activity: 2026-02-19 - Completed 34-01 (SIGEV_THREAD/SIGEV_THREAD_ID timer notification modes, sys_gettid)
+Phase: 34 of 35 (Timer Notification Modes) - COMPLETE
+Plan: 2 completed in phase 34 (34-01 done, 34-02 done)
+Status: Phase 34 complete, phase 35 pending
+Last activity: 2026-02-18 - Completed 34-02 (SIGEV_THREAD/SIGEV_THREAD_ID userspace API, gettid wrapper, 4 integration tests)
 
 Progress: [█████████████████████░░] 91% (32/35 phases complete)
 
@@ -43,6 +43,7 @@ Progress: [█████████████████████░░
 | Phase 33 P02 | 15 | 2 tasks | 11 files |
 | Phase 33 P03 | 2 | 1 task | 2 files |
 | Phase 34 P01 | 7 | 2 tasks | 5 files |
+| Phase 34 P02 | 468 | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -87,6 +88,8 @@ Recent decisions from PROJECT.md affecting v1.3:
 - [Phase 34-01]: SIGEV_THREAD is identical to SIGEV_SIGNAL at the kernel level; glibc handles thread callback wrapping in userspace
 - [Phase 34-01]: findThreadByTid safe in processIntervalTimers -- scheduler.lock acquired at timerTick line ~819, after processIntervalTimers call at line 806
 - [Phase 34-01]: SIGEV_THREAD_ID falls back to current thread if target exited (no silent signal loss)
+- [Phase 34]: Install SIG_IGN for SIGALRM before arming signal-delivering timers in tests -- SIGEV_THREAD and SIGEV_THREAD_ID deliver real signals that terminate the process with default disposition
+- [Phase 34]: Restore SIG_DFL after each timer-fires test to avoid leaking SIG_IGN disposition into subsequent tests
 
 ### Pending Todos
 
@@ -106,12 +109,12 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-02-19 (phase 34 execution)
-Stopped at: Completed 34-01-PLAN.md (SIGEV_THREAD/SIGEV_THREAD_ID timer notification modes added, sys_gettid implemented)
+Last session: 2026-02-18 (phase 34 execution)
+Stopped at: Completed 34-02-PLAN.md (SIGEV_THREAD/SIGEV_THREAD_ID userspace API, gettid wrapper, 4 integration tests)
 Resume file: None
 
-**Next action:** Proceed to 34-02 (phase 34 plan 02 - user-facing tests for SIGEV_THREAD/SIGEV_THREAD_ID)
+**Next action:** Proceed to phase 35 (VFS Page Cache - final v1.3 phase)
 
 ---
 *State initialized: 2026-02-06*
-*Last updated: 2026-02-18 after completing plan 33-03 (recvfromIp divisor fixed, timer test assertion strengthened to overrun >= 7)*
+*Last updated: 2026-02-18 after completing plan 34-02 (SIGEV_THREAD/SIGEV_THREAD_ID userspace API, gettid, integration tests)*
