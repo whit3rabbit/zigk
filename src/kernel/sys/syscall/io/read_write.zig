@@ -6,6 +6,7 @@ const heap = @import("heap");
 const error_helpers = @import("error_helpers.zig");
 const utils = @import("utils.zig");
 const inotify = @import("inotify.zig");
+const page_cache = @import("page_cache");
 
 const SyscallError = base.SyscallError;
 const UserPtr = base.UserPtr;
@@ -917,6 +918,7 @@ pub fn sys_pwritev2(fd_num: usize, bvec_ptr: usize, count: usize, offset: usize,
 /// sys_sendfile (40) - Transfer data between file descriptors in kernel space
 ///
 /// Efficiently copies data from in_fd to out_fd without userspace buffer.
+/// Uses page cache for VFS source files, falls back to heap buffer for non-VFS.
 /// offset_ptr: if non-zero, pointer to u64 offset (updated after transfer).
 ///             if zero, uses in_fd's current position.
 pub fn sys_sendfile(out_fd_num: usize, in_fd_num: usize, offset_ptr: usize, count: usize) SyscallError!usize {
@@ -965,109 +967,169 @@ pub fn sys_sendfile(out_fd_num: usize, in_fd_num: usize, offset_ptr: usize, coun
         read_offset = in_fd.position;
     }
 
-    // Transfer loop with kernel buffer
-    const sendfile_buf_size: usize = 64 * 1024; // 64KB chunks for efficient large transfers
-    const kbuf = heap.allocator().alloc(u8, sendfile_buf_size) catch return error.ENOMEM;
-    defer heap.allocator().free(kbuf);
-
+    const in_file_id = in_fd.file_identifier;
     var total_sent: usize = 0;
 
-    while (total_sent < count) {
-        const remaining = count - total_sent;
-        const chunk_size = @min(remaining, sendfile_buf_size);
+    if (in_file_id != 0) {
+        // Page cache path for VFS source files
+        while (total_sent < count) {
+            const remaining = count - total_sent;
+            const chunk_size = @min(remaining, 4 * 4096); // Up to 4 pages at a time
 
-        // Read from in_fd at read_offset
-        const in_held = in_fd.lock.acquire();
-        const old_in_pos = in_fd.position;
+            const refs = page_cache.getPages(in_file_id, read_offset, chunk_size, in_fd.ops.read.?, in_fd) catch {
+                if (total_sent > 0) break;
+                return error.ENOMEM;
+            };
 
-        const seek_fn = in_fd.ops.seek.?;
-        const seek_res = seek_fn(in_fd, @intCast(read_offset), 0); // SEEK_SET
-        if (seek_res < 0) {
-            in_held.release();
-            if (total_sent > 0) return total_sent;
-            return error.EINVAL;
+            if (refs.len == 0) break;
+
+            var chunk_written: usize = 0;
+            var should_stop = false;
+            for (refs) |ref| {
+                if (ref.len == 0) {
+                    should_stop = true;
+                    break;
+                }
+                const data = page_cache.getPageData(ref.page);
+                const slice = data[ref.offset_in_page .. ref.offset_in_page + ref.len];
+
+                // Write to out_fd
+                const out_held = out_fd.lock.acquire();
+                const write_fn = out_fd.ops.write orelse {
+                    out_held.release();
+                    should_stop = true;
+                    break;
+                };
+
+                const bytes_written_raw = write_fn(out_fd, slice);
+                out_held.release();
+
+                if (bytes_written_raw <= 0) {
+                    should_stop = true;
+                    break;
+                }
+
+                const bytes_written: usize = @intCast(bytes_written_raw);
+
+                const new_chunk = @addWithOverflow(chunk_written, bytes_written);
+                if (new_chunk[1] != 0) {
+                    should_stop = true;
+                    break;
+                }
+                chunk_written = new_chunk[0];
+
+                if (bytes_written < ref.len) {
+                    should_stop = true;
+                    break;
+                }
+            }
+
+            page_cache.releasePages(refs);
+
+            if (chunk_written == 0) {
+                if (total_sent > 0) break;
+                return error.EIO;
+            }
+
+            const new_total = @addWithOverflow(total_sent, chunk_written);
+            if (new_total[1] != 0) break;
+            total_sent = new_total[0];
+
+            const new_offset = @addWithOverflow(read_offset, chunk_written);
+            if (new_offset[1] != 0) break;
+            read_offset = new_offset[0];
+
+            if (should_stop or chunk_written < chunk_size) break;
         }
-        in_fd.position = @intCast(seek_res);
 
-        const read_fn = in_fd.ops.read.?;
-        const bytes_read_raw = read_fn(in_fd, kbuf[0..chunk_size]);
-
-        // Restore position if not using offset_ptr
+        // Update file position for non-offset-ptr path
         if (!use_offset_ptr) {
-            _ = seek_fn(in_fd, @intCast(old_in_pos + @as(u64, @intCast(@max(0, bytes_read_raw)))), 0);
-            in_fd.position = old_in_pos + @as(u64, @intCast(@max(0, bytes_read_raw)));
-        } else {
-            _ = seek_fn(in_fd, @intCast(old_in_pos), 0);
-            in_fd.position = old_in_pos;
+            const in_held = in_fd.lock.acquire();
+            in_fd.position = std.math.add(u64, in_fd.position, @as(u64, @intCast(total_sent))) catch in_fd.position;
+            in_held.release();
         }
+    } else {
+        // Fallback: 64KB heap buffer for non-VFS source files
+        const sendfile_buf_size: usize = 64 * 1024;
+        const kbuf = heap.allocator().alloc(u8, sendfile_buf_size) catch return error.ENOMEM;
+        defer heap.allocator().free(kbuf);
 
-        in_held.release();
+        while (total_sent < count) {
+            const remaining = count - total_sent;
+            const chunk_size = @min(remaining, sendfile_buf_size);
 
-        if (bytes_read_raw <= 0) {
-            // EOF or error
-            if (bytes_read_raw == 0) break; // EOF
-            if (total_sent > 0) return total_sent;
-            return error.EIO;
-        }
+            const in_held = in_fd.lock.acquire();
+            const old_in_pos = in_fd.position;
 
-        const bytes_read: usize = @intCast(bytes_read_raw);
+            const seek_fn = in_fd.ops.seek.?;
+            const seek_res = seek_fn(in_fd, @intCast(read_offset), 0);
+            if (seek_res < 0) {
+                in_held.release();
+                if (total_sent > 0) break;
+                return error.EINVAL;
+            }
+            in_fd.position = @intCast(seek_res);
 
-        // Write to out_fd
-        const out_held = out_fd.lock.acquire();
-        const write_fn = out_fd.ops.write orelse {
+            const read_fn = in_fd.ops.read.?;
+            const bytes_read_raw = read_fn(in_fd, kbuf[0..chunk_size]);
+
+            if (!use_offset_ptr) {
+                _ = seek_fn(in_fd, @intCast(old_in_pos + @as(u64, @intCast(@max(0, bytes_read_raw)))), 0);
+                in_fd.position = old_in_pos + @as(u64, @intCast(@max(0, bytes_read_raw)));
+            } else {
+                _ = seek_fn(in_fd, @intCast(old_in_pos), 0);
+                in_fd.position = old_in_pos;
+            }
+
+            in_held.release();
+
+            if (bytes_read_raw <= 0) {
+                if (bytes_read_raw == 0) break;
+                if (total_sent > 0) break;
+                return error.EIO;
+            }
+
+            const bytes_read: usize = @intCast(bytes_read_raw);
+
+            const out_held = out_fd.lock.acquire();
+            const write_fn = out_fd.ops.write orelse {
+                out_held.release();
+                if (total_sent > 0) break;
+                return error.EBADF;
+            };
+
+            const bytes_written_raw = write_fn(out_fd, kbuf[0..bytes_read]);
             out_held.release();
-            if (total_sent > 0) return total_sent;
-            return error.EBADF;
-        };
 
-        const bytes_written_raw = write_fn(out_fd, kbuf[0..bytes_read]);
-        out_held.release();
+            if (bytes_written_raw <= 0) {
+                if (total_sent > 0) break;
+                return error.EIO;
+            }
 
-        if (bytes_written_raw <= 0) {
-            if (total_sent > 0) return total_sent;
-            return error.EIO;
-        }
+            const bytes_written: usize = @intCast(bytes_written_raw);
 
-        const bytes_written: usize = @intCast(bytes_written_raw);
+            const new_total = @addWithOverflow(total_sent, bytes_written);
+            if (new_total[1] != 0) break;
+            total_sent = new_total[0];
 
-        // Update counters
-        const new_total = @addWithOverflow(total_sent, bytes_written);
-        if (new_total[1] != 0) {
-            // Overflow
-            break;
-        }
-        total_sent = new_total[0];
+            const new_offset = @addWithOverflow(read_offset, bytes_written);
+            if (new_offset[1] != 0) break;
+            read_offset = new_offset[0];
 
-        const new_offset = @addWithOverflow(read_offset, bytes_written);
-        if (new_offset[1] != 0) {
-            // Offset overflow
-            break;
-        }
-        read_offset = new_offset[0];
-
-        // Short write: stop
-        if (bytes_written < bytes_read) {
-            break;
-        }
-
-        // Short read (EOF): stop
-        if (bytes_read < chunk_size) {
-            break;
+            if (bytes_written < bytes_read) break;
+            if (bytes_read < chunk_size) break;
         }
     }
 
     // Write updated offset back to userspace if using offset_ptr
     if (use_offset_ptr and offset_ptr != 0) {
         if (!isValidUserAccess(offset_ptr, @sizeOf(u64), AccessMode.Write)) {
-            // Can't write back offset, but transfer succeeded
-            // Just return what we sent (Linux behavior)
             return total_sent;
         }
         const uptr = UserPtr.from(offset_ptr);
         var offset_buf: [8]u8 = undefined;
         std.mem.writeInt(u64, &offset_buf, read_offset, .little);
         _ = uptr.copyFromKernel(&offset_buf) catch {
-            // Can't write back, but return success
             return total_sent;
         };
     }
