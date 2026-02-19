@@ -70,6 +70,18 @@ pub fn transmitPendingData(tcb: *Tcb) bool {
         return true;
     }
 
+    // RFC 1122 S4.2.3.4 Sender SWS avoidance:
+    // Do not send a segment unless it is a full MSS, covers at least half the
+    // peer's advertised window, or exhausts all remaining data in the send buffer.
+    // This is additive to Nagle -- Nagle gates on flight_size, SWS gates on segment size.
+    const is_full_segment = send_len >= @as(usize, effective_mss);
+    const half_wnd: usize = if (tcb.snd_wnd > 1) @as(usize, tcb.snd_wnd / 2) else 1;
+    const is_half_window = send_len >= half_wnd;
+    const is_last_data = send_len == buffered;
+    if (!is_full_segment and !is_half_window and !is_last_data) {
+        return true; // Hold back: sender SWS avoidance
+    }
+
     if (send_len == 0) return true;
 
     var data_buf: [c.MAX_TCP_PAYLOAD]u8 = [_]u8{0} ** c.MAX_TCP_PAYLOAD;
