@@ -205,11 +205,28 @@ pub fn recv(tcb: *Tcb, buf: []u8) TcpError!usize {
     const available = tcb.recvBufferAvailable();
 
     if (available > 0) {
+        // WIN-03: Snapshot buffer occupancy before drain (unscaled bytes)
+        const old_used = tcb.recvBufferAvailable();
+
         const copy_len = @min(buf.len, available);
 
         for (0..copy_len) |i| {
             buf[i] = tcb.recv_buf[tcb.recv_tail];
             tcb.recv_tail = (tcb.recv_tail + 1) % c.BUFFER_SIZE;
+        }
+
+        // WIN-03: Send window update ACK if freed space grew by >= DEFAULT_MSS.
+        // Use c.DEFAULT_MSS (local receive MSS) rather than tcb.mss (peer's
+        // send MSS). The receive-side window update threshold should be based
+        // on our local MSS, not what the peer advertised it can accept.
+        // Compare in unscaled bytes to avoid window-scaling arithmetic.
+        // currentRecvWindow() (called by sendAck -> sendSegment) already
+        // includes the WIN-04 SWS floor, so the ACK will carry the correct
+        // (possibly zero) window value.
+        const new_used = tcb.recvBufferAvailable();
+        const freed: usize = if (old_used > new_used) old_used - new_used else 0;
+        if (freed >= @as(usize, c.DEFAULT_MSS)) {
+            _ = tx.sendAck(tcb);
         }
 
         return copy_len;
