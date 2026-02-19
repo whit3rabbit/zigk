@@ -90,7 +90,10 @@
   3. RTT is not sampled on retransmitted segments; rtt_seq is cleared in all retransmit paths
   4. Congestion logic lives in congestion/reno.zig with onAck/onTimeout/onDupAck entry points callable from the existing TCP paths
   5. cwnd cannot grow beyond 4x the send buffer size regardless of how many ACKs arrive on an idle connection
-**Plans**: TBD
+**Plans**: 2 plans
+Plans:
+- [ ] 36-01-PLAN.md -- Create reno.zig module, IW10 constants, Tcb.init() update
+- [ ] 36-02-PLAN.md -- Wire reno into established.zig/timers.zig, fix Karn's in data.zig
 
 ### Phase 37: Dynamic Window Management and Persist Timer
 **Goal**: TCP receive windows accurately reflect available buffer space and zero-window connections do not stall indefinitely
@@ -166,11 +169,11 @@
 | 33. Timer Resolution Improvement | v1.3 | 3/3 | Complete | 2026-02-18 |
 | 34. Timer Notification Modes | v1.3 | 2/2 | Complete | 2026-02-19 |
 | 35. VFS Page Cache and Zero-Copy | v1.3 | 2/2 | Complete | 2026-02-19 |
-| 36. RTT Estimation and Congestion Module | v1.4 | 0/TBD | Not started | - |
+| 36. RTT Estimation and Congestion Module | v1.4 | 0/2 | Not started | - |
 | 37. Dynamic Window Management and Persist Timer | v1.4 | 0/TBD | Not started | - |
 | 38. Socket Options and Raw Socket Blocking | v1.4 | 0/TBD | Not started | - |
 | 39. MSG Flags | v1.4 | 0/TBD | Not started | - |
 
 ---
 *Roadmap created: 2026-02-06*
-*Last updated: 2026-02-19 after v1.4 roadmap creation*
+*Last updated: 2026-02-19 after Phase 36 planning*
