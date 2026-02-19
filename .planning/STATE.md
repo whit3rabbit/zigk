@@ -5,15 +5,14 @@
 See: .planning/PROJECT.md (updated 2026-02-19)
 
 **Core value:** Every implemented syscall must work correctly on both x86_64 and aarch64 with matching behavior, tested via the existing integration test harness.
-**Current focus:** Planning next milestone
+**Current focus:** v1.4 Network Stack Hardening
 
 ## Current Position
 
-Phase: 35 of 35 complete
-Status: v1.3 milestone shipped. All milestones through v1.3 archived.
-Last activity: 2026-02-19 - Completed v1.3 milestone archival
-
-Progress: [########################] 100% (35/35 phases complete, 73/73 plans complete across 4 milestones)
+Phase: Not started (defining requirements)
+Plan: --
+Status: Defining requirements
+Last activity: 2026-02-19 -- Milestone v1.4 started
 
 ## Performance Metrics
 
@@ -54,8 +53,8 @@ Last session: 2026-02-19 (v1.3 milestone completion)
 Stopped at: Milestone archived, tagged, committed
 Resume file: None
 
-**Next action:** `/gsd:new-milestone` to define next milestone scope
+**Next action:** Define v1.4 requirements and roadmap
 
 ---
 *State initialized: 2026-02-06*
-*Last updated: 2026-02-19 after v1.3 milestone completion*
+*Last updated: 2026-02-19 after v1.4 milestone start*

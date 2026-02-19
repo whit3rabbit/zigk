@@ -80,7 +80,10 @@ Every implemented syscall must work correctly on both x86_64 and aarch64 with ma
 
 ### Active
 
-(None -- awaiting next milestone definition)
+- [ ] TCP congestion control (slow start, congestion avoidance, fast retransmit/recovery per RFC 5681)
+- [ ] Dynamic TCP window management (replace fixed 8KB with proper sliding windows and flow control)
+- [ ] Socket API completeness (MSG_PEEK, MSG_DONTWAIT, MSG_WAITALL, SO_REUSEPORT, TCP_CORK, raw socket recv)
+- [ ] Buffer and queue sizing (configurable SO_SNDBUF/SO_RCVBUF, increased accept backlog, RX queue expansion)
 
 ### Out of Scope
 
@@ -96,6 +99,18 @@ Every implemented syscall must work correctly on both x86_64 and aarch64 with ma
 - Multi-CPU affinity enforcement -- single-CPU kernel, separate project
 - Full seccomp BPF JIT -- v1.2 implements interpreter only, JIT is future work
 - Container/namespace support (unshare, setns) -- requires kernel architecture changes
+
+## Current Milestone: v1.4 Network Stack Hardening
+
+**Goal:** Harden the existing TCP/UDP networking stack with proper congestion control, dynamic window management, complete socket API flags, and configurable buffer sizing.
+
+**Target features:**
+- TCP congestion control (RFC 5681: slow start, congestion avoidance, fast retransmit, fast recovery)
+- Dynamic TCP send/receive windows replacing fixed 8KB buffers
+- Socket message flags (MSG_PEEK, MSG_DONTWAIT, MSG_WAITALL) and options (SO_REUSEPORT, TCP_CORK)
+- Raw socket recv implementation
+- Configurable SO_SNDBUF/SO_RCVBUF with per-socket buffer management
+- Increased accept backlog and RX queue capacity
 
 ## Last Milestone: v1.3 Tech Debt Cleanup (Shipped 2026-02-19)
 
@@ -152,4 +167,4 @@ Four milestones shipped over 14 days with 73 plans across 35 phases.
 | SIGEV_THREAD same as SIGEV_SIGNAL at kernel level | glibc handles thread callback wrapping | v Good v1.3 -- matches Linux kernel behavior |
 
 ---
-*Last updated: 2026-02-19 after v1.3 milestone*
+*Last updated: 2026-02-19 after v1.4 milestone start*
