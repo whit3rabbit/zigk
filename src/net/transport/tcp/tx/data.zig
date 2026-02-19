@@ -116,6 +116,9 @@ pub fn retransmitLoss(tcb: *Tcb) bool {
 }
 
 pub fn retransmitFromSeq(tcb: *Tcb, seq: u32) bool {
+    // RFC 6298 S5: Karn's Algorithm -- do not sample RTT on retransmitted segments
+    tcb.rtt_seq = 0;
+
     const buffered = bufferedBytes(tcb);
     if (buffered == 0) return false;
 

@@ -2,6 +2,7 @@ const c = @import("constants.zig");
 const state = @import("state.zig");
 const tx = @import("tx/root.zig");
 const types = @import("types.zig");
+const reno = @import("congestion/reno.zig");
 
 const socket = @import("../socket.zig");
 
@@ -111,10 +112,8 @@ pub fn processTimers() void {
             tcb.rto_ms = @min(tcb.rto_ms * 2, c.MAX_RTO_MS);
             tcb.retrans_timer = 1;
 
-            // Congestion Control: Loss detected -> Collapse cwnd
-            const flight_size = tcb.snd_nxt -% tcb.snd_una;
-            tcb.ssthresh = @max(flight_size / 2, @as(u32, tcb.mss) * 2);
-            tcb.cwnd = tcb.mss;
+            // Congestion Control: Loss detected -> reno.onTimeout
+            reno.onTimeout(tcb);
 
             // Retransmit based on state
             switch (tcb.state) {
