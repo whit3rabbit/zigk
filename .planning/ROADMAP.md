@@ -105,7 +105,10 @@ Plans:
   3. A persist timer fires independently of the retransmit timer with probes capped at 60-second intervals; connections do not freeze during zero-window periods
   4. Receiver does not reopen the window for less than min(rcv_buf/2, MSS) freed space (RFC 1122 SWS avoidance)
   5. Sender does not transmit a segment unless it is at least SMSS bytes, at least half the peer's window, or the last data in the buffer (RFC 1122 SWS avoidance)
-**Plans**: TBD
+**Plans**: 2 plans
+Plans:
+- [ ] 37-01-PLAN.md -- SWS floor in currentRecvWindow(), persist timer fields and logic, remove old zero-window probe
+- [ ] 37-02-PLAN.md -- Sender SWS avoidance gate, post-drain window update ACK in recv()
 
 ### Phase 38: Socket Options and Raw Socket Blocking
 **Goal**: Standard socket buffer options take effect and are reflected in the protocol, and raw sockets can block for incoming packets
@@ -170,10 +173,10 @@ Plans:
 | 34. Timer Notification Modes | v1.3 | 2/2 | Complete | 2026-02-19 |
 | 35. VFS Page Cache and Zero-Copy | v1.3 | 2/2 | Complete | 2026-02-19 |
 | 36. RTT Estimation and Congestion Module | v1.4 | Complete    | 2026-02-19 | 2026-02-19 |
-| 37. Dynamic Window Management and Persist Timer | v1.4 | 0/TBD | Not started | - |
+| 37. Dynamic Window Management and Persist Timer | v1.4 | 0/2 | Not started | - |
 | 38. Socket Options and Raw Socket Blocking | v1.4 | 0/TBD | Not started | - |
 | 39. MSG Flags | v1.4 | 0/TBD | Not started | - |
 
 ---
 *Roadmap created: 2026-02-06*
-*Last updated: 2026-02-19 after Phase 36 completion*
+*Last updated: 2026-02-19 after Phase 37 planning*
