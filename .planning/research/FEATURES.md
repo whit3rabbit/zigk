@@ -1,677 +1,321 @@
-# Linux Syscall Coverage Analysis for zk Kernel
+# Feature Research
 
-## Executive Summary
+**Domain:** TCP/UDP Network Stack Hardening -- Microkernel (zk)
+**Researched:** 2026-02-19
+**Confidence:** HIGH (code audit + RFC verification)
 
-This document categorizes the 230 unimplemented Linux syscalls (out of 420 total) by importance for real-world program compatibility. Research shows that **only ~160 syscalls are needed to run complex applications** like Redis, SQLite, NGINX, and Python (per Unikraft study), suggesting zk's current 190 syscalls already cover most critical functionality.
+## Context: What Already Exists
 
-## Methodology
+The existing zk network stack has:
+- TCP: full RFC 793 state machine, SYN/FIN handshake, retransmission with exponential backoff,
+  delayed ACK (200ms), MSS negotiation, window scaling option (negotiated but rcv_wnd fixed at 8KB),
+  SACK, timestamps, keepalive, Nagle, fast retransmit (3 dup-ACK), fast recovery (NewReno partial)
+- Congestion fields already in TCB: `cwnd`, `ssthresh`, `srtt`, `rttvar`, RTT estimation
+  (Jacobson/Karels), slow-start vs congestion-avoidance branching, fast recovery state machine
+- UDP: IPv4/IPv6, checksum validation, multicast, security-sensitive port detection
+- Socket API: socket, bind, listen, accept/accept4, connect, sendto, recvfrom, sendmsg/recvmsg,
+  setsockopt, getsockopt, shutdown, socketpair, poll
+- Socket options implemented: SO_REUSEADDR, SO_BROADCAST, SO_RCVTIMEO, SO_SNDTIMEO,
+  TCP_NODELAY, IP_TOS, IP_TTL, multicast group ops, IP_RECVTOS
+- `flags` parameter in sys_recvfrom is accepted but IGNORED (`_ = flags;` at line 547 of net.zig)
+- Buffer sizes: fixed 8KB send and receive buffers per TCB (BUFFER_SIZE = 8192)
+- ACCEPT_QUEUE_SIZE = 8, SOCKET_RX_QUEUE_SIZE = 8
 
-Analysis based on:
-- Real-world syscall tracing of common programs (busybox, dash, coreutils, musl-linked binaries)
-- Server application requirements (nginx, redis, python, curl)
-- Linux kernel documentation and implementation complexity
-- Industry research (Unikraft compatibility studies, strace frequency analysis)
-
-## Current Status: 190/420 Syscalls Implemented
-
-**Already in zk:**
-- File I/O: open, openat, read, write, close, lseek, dup, dup2, pipe, pipe2, fcntl, pread64, writev, flock, stat, fstat, lstat, chmod, access, truncate, rename, link, symlink, readlink
-- Directory: mkdir, rmdir, chdir, getcwd, getdents64
-- *at family: fstatat, mkdirat, unlinkat, renameat, fchmodat, faccessat
-- Memory: mmap, munmap, brk, mprotect
-- Process: fork, execve, clone, wait4, exit, exit_group, getpid, getppid, setpgid, getpgid, getpgrp, setsid, getsid
-- Signals: rt_sigaction, rt_sigprocmask, rt_sigreturn, kill, tgkill
-- Time: nanosleep, clock_gettime, clock_getres, gettimeofday, alarm, pause, getitimer, setitimer
-- Network: socket, bind, listen, accept, connect, send, recv, setsockopt, getsockopt
-- Misc: uname, umask, getrandom, sysinfo, times, poll, ioctl (partial)
-
----
-
-## Category 1: Table Stakes (Critical - Programs Crash Without These)
-
-These syscalls are called frequently by common programs. Missing implementations cause immediate failures with ENOSYS errors.
-
-### 1.1 I/O Multiplexing (CRITICAL)
-Programs that handle multiple connections or file descriptors simultaneously require these. Absence breaks servers and async I/O patterns.
-
-| Syscall | Complexity | Users | Implementation Notes |
-|---------|------------|-------|---------------------|
-| **epoll_create** | Medium | nginx, redis, python (asyncio), node.js | Core event loop primitive. Creates epoll instance. |
-| **epoll_create1** | Trivial | Modern programs (post-2008) | Like epoll_create but supports O_CLOEXEC flag. |
-| **epoll_ctl** | Medium | All epoll users | Modifies epoll interest list. Needs per-fd tracking. |
-| **epoll_wait** | Medium | All epoll users | Blocks until events ready. Scheduler integration required. |
-| **epoll_pwait** | Medium | Signal-aware async programs | epoll_wait + sigmask atomicity. |
-| **select** | Medium | Legacy programs, shell scripts | Older multiplexing API. Less efficient than epoll. |
-| **pselect6** | Medium | Signal-safe select users | select + sigmask atomicity. |
-| **poll** | Trivial | Already implemented (in misc) | Similar to select but different API. |
-| **ppoll** | Trivial | Signal-safe poll users | poll + sigmask atomicity. |
-
-**Priority: HIGHEST** - epoll family required for modern server software.
-
-**Dependencies:**
-- Needs: File descriptor event notification infrastructure
-- Builds on: Existing poll() implementation
-- Scheduler: Must integrate with blocking/wakeup mechanisms
-
-### 1.2 Vectored I/O (HIGH)
-Essential for efficient bulk I/O operations. Used by databases, file servers, network stacks.
-
-| Syscall | Complexity | Users | Implementation Notes |
-|---------|------------|-------|---------------------|
-| **readv** | Trivial | nginx, databases, network daemons | Multi-buffer read. Iterate iovec array. |
-| **preadv** | Trivial | Databases (SQLite, Postgres) | readv + offset (no lseek needed). |
-| **preadv2** | Medium | Modern databases | preadv + flags (RWF_HIPRI, RWF_NOWAIT). |
-| **pwritev** | Trivial | Databases, loggers | writev + offset. |
-| **pwritev2** | Medium | Modern databases | pwritev + flags. |
-
-**Priority: HIGH** - Required for database and network performance.
-
-**Dependencies:**
-- Needs: iovec struct handling, multi-buffer validation
-- Builds on: Existing read/write/writev infrastructure
-
-### 1.3 Zero-Copy I/O (MEDIUM)
-Performance optimization for file serving and proxying.
-
-| Syscall | Complexity | Medium | Users | Implementation Notes |
-|---------|------------|--------|-------|---------------------|
-| **sendfile** | Medium | nginx, Apache, file servers | Copy between file descriptors in kernel space. |
-| **splice** | Medium | Proxies, data pipelines | Move data between pipes/files without userspace copy. |
-| **tee** | Low | Log multiplexing | Duplicate pipe data. |
-| **vmsplice** | Low | Rare (specialized pipe users) | Splice user pages into pipe. |
-
-**Priority: MEDIUM** - Nice performance boost but not required for correctness.
-
-**Dependencies:**
-- Needs: Kernel buffer management, pipe infrastructure
-- Builds on: Existing pipe implementation
-
-### 1.4 Modern fd Creation (HIGH)
-Programs expect these for race-free fd creation with flags.
-
-| Syscall | Complexity | Users | Implementation Notes |
-|---------|------------|-------|---------------------|
-| **dup3** | Trivial | Modern programs using O_CLOEXEC | dup2 + O_CLOEXEC flag support. |
-| **accept4** | Trivial | Network servers | accept + O_CLOEXEC/O_NONBLOCK flags. |
-
-**Priority: HIGH** - Standard pattern in modern code.
-
-**Dependencies:**
-- Builds on: Existing dup2/accept implementations
-- Just adds flag handling
-
-### 1.5 Resource Limits (HIGH)
-Almost all programs query limits at startup (stack size, fd limits, etc.).
-
-| Syscall | Complexity | Users | Implementation Notes |
-|---------|------------|-------|---------------------|
-| **getrlimit** | Trivial | Almost all programs | Return per-process resource limits. |
-| **setrlimit** | Trivial | Shells, daemons | Set resource limits. |
-| **prlimit64** | Trivial | Modern programs (glibc 2.13+) | Combines get/setrlimit, supports other PIDs. |
-
-**Priority: HIGH** - Called by musl/glibc startup code.
-
-**Dependencies:**
-- Needs: Per-process rlimit tracking
-- Integration: Process control block
-
-### 1.6 Event Notification FDs (MEDIUM-HIGH)
-Modern async I/O patterns rely on these.
-
-| Syscall | Complexity | Users | Implementation Notes |
-|---------|------------|-------|---------------------|
-| **eventfd** | Low | Threading libraries, event loops | Lightweight event counter as fd. |
-| **eventfd2** | Trivial | Modern programs | eventfd + O_CLOEXEC/O_NONBLOCK flags. |
-| **signalfd** | Medium | Async signal handling | Converts signals to readable fd events. |
-| **signalfd4** | Trivial | Modern programs | signalfd + flags. |
-| **timerfd_create** | Medium | Event loops with timers | Creates timer as fd. |
-| **timerfd_settime** | Medium | All timerfd users | Arms/disarms timer. |
-| **timerfd_gettime** | Trivial | Timer query | Returns time until expiration. |
-
-**Priority: MEDIUM-HIGH** - Required for modern async frameworks (node.js, tokio, asyncio).
-
-**Dependencies:**
-- Needs: fd-based event infrastructure
-- Integration: epoll support (to monitor these fds)
+The critical gap: the congestion fields exist and are partially wired (cwnd used to gate
+transmitPendingData, ssthresh used in ACK processing) but the receive window (rcv_wnd) is
+hardcoded as a fixed 8KB constant. It never grows. The `flags` parameter to recv is silently
+discarded. SO_RCVBUF/SO_SNDBUF do not exist.
 
 ---
 
-## Category 2: Important (Needed for Specific Program Categories)
+## Feature Landscape
 
-Missing these breaks specific classes of programs but not general-purpose utilities.
+### Table Stakes (Users Expect These)
 
-### 2.1 Advanced Process Control (HIGH)
-Required for containers, systemd-style init, and CPU-bound workloads.
+These are features that userspace programs running on a POSIX-compatible kernel assume work
+correctly. Programs that use them will silently misbehave or hard-fail without them.
 
-| Syscall | Complexity | Users | Implementation Notes |
-|---------|------------|-------|---------------------|
-| **prctl** | Medium | systemd, containers, security tools | ~40 operations. Start with PR_SET_NAME, PR_GET_NAME. |
-| **sched_setaffinity** | Medium | NUMA-aware apps, CPU pinning | Bind process to CPU cores. |
-| **sched_getaffinity** | Trivial | CPU topology queries | Return affinity mask. |
-| **sched_setscheduler** | Medium | Real-time apps | Set SCHED_FIFO, SCHED_RR policies. |
-| **sched_getscheduler** | Trivial | Scheduler queries | Return current policy. |
-| **sched_setparam** | Low | Priority tuning | Set scheduling parameters. |
-| **sched_getparam** | Trivial | Priority queries | Get scheduling parameters. |
-| **sched_get_priority_max** | Trivial | RT policy queries | Return max priority for policy. |
-| **sched_get_priority_min** | Trivial | RT policy queries | Return min priority for policy. |
+| Feature | Why Expected | Complexity | Notes |
+|---------|--------------|------------|-------|
+| MSG_PEEK | Protocol framing code (HTTP parsers, TLS, custom protocols) uses peek to read a header without consuming it, then issues a full read. Without it, applications using libc or any non-trivial protocol library break. | LOW | Implementation: pass a copy of recv_tail to the copy loop; do not advance recv_tail after read. The TCB circular buffer already has the primitives (recv_head, recv_tail). No buffer allocation needed. Dependency: none. |
+| MSG_DONTWAIT | Per-call non-blocking flag. Standard pattern for event loops: programs set O_NONBLOCK on the fd, or pass MSG_DONTWAIT per-call. Without it, any program using non-blocking I/O on a per-operation basis fails. Many userspace event loops use this instead of O_NONBLOCK. | LOW | Implementation: check this flag before the blocking path; if set, return EAGAIN immediately instead of sleeping. The blocking check is already in tcp_api.zig and udp_api.zig. Requires threading the flags value from sys_recvfrom into socket.recvfromIp. |
+| MSG_WAITALL | Guarantees the full requested length is returned (blocks until buffer is full, or error/EOF). Used by protocols that know exact message lengths (binary protocols, TLS record layers). Without it, short reads silently truncate. | MEDIUM | Implementation: loop the recv call accumulating bytes until len satisfied or EAGAIN/EOF. Requires a retry loop in the kernel recv path. Interacts with timeout (SO_RCVTIMEO must still work). |
+| Dynamic receive window (rcv_wnd reflects actual buffer state) | The existing rcv_wnd is hardcoded to 8192 at initialization and never changes. currentRecvWindow() already computes the correct value from buffer space but it is unclear if this value is actually being sent in ACKs. A fixed window prevents the peer from sending more than 8KB in flight, which caps throughput. Any peer doing window-based flow control (all standard TCP stacks) is throttled. | LOW | Implementation: ensure ACK segments use currentRecvWindow() return value rather than the tcb.rcv_wnd constant. The function already exists and does the right math. This is a wiring fix, not a new feature. |
+| SO_RCVBUF / SO_SNDBUF | Programs that tune socket buffer sizes (databases, file transfer tools, high-throughput servers) call setsockopt(SO_RCVBUF) before connect/listen. The Linux default is to allow setting these. Without them, setsockopt returns EINVAL for these options, which some programs treat as fatal. | MEDIUM | Implementation: add SO_RCVBUF=8 and SO_SNDBUF=7 constants to socket types.zig, handle in options.zig setsockopt. The hard part is whether buffer size actually changes the backing array (requires dynamic allocation or a maximum cap). Easiest approach: accept the value and store it, but enforce a maximum (e.g., 256KB). Changing actual buffer size at runtime requires TCB buffer to be heap-allocated rather than fixed array. |
+| TCP congestion window actually gates send (cwnd is wired) | cwnd exists in the TCB and transmitPendingData does compute eff_wnd = min(snd_wnd, cwnd). The slow-start / congestion-avoidance branching in established.zig processEstablished is present. However, initial cwnd = 2 * MSS (2920 bytes) is very conservative and the code does not implement IW10 (RFC 6928). The congestion control is structurally correct per the code audit but needs verification that cwnd updates happen on all ACK paths (particularly in timers.zig for RTO expiry). | LOW | Audit-only task: verify timers.zig halves cwnd and resets ssthresh on RTO expiry. The ACK path in established.zig appears correct. |
 
-**Priority: HIGH for containers/init, MEDIUM otherwise**
+### Differentiators (Competitive Advantage)
 
-**Dependencies:**
-- Needs: Scheduler policy support (SCHED_FIFO, SCHED_RR)
-- Integration: Per-process scheduling state
+Features that set the zk network stack apart from a bare-minimum TCP implementation. Not
+strictly required for POSIX compliance but expected by higher-throughput workloads.
 
-### 2.2 File Ownership & Permissions (MEDIUM)
-Needed by package managers, backup tools, file servers.
+| Feature | Value Proposition | Complexity | Notes |
+|---------|-------------------|------------|-------|
+| TCP_CORK | Allows applications to batch writes into a single full-MSS segment. Used by HTTP/1.1 sendfile emulation, databases writing headers then body, any scatter-gather protocol pattern. The effect is: while CORK is set, hold data in the kernel send buffer and never send a segment smaller than MSS. When uncorked, flush immediately. | MEDIUM | Implementation: add `cork: bool` field to TCB (similar to existing `nodelay: bool`). Modify transmitPendingData to refuse to send if cork is true AND data < MSS AND no window pressure. Add TCP_CORK = 3 to socket options. Add IPPROTO_TCP setsockopt handler. Interaction: TCP_CORK takes priority over Nagle. TCP_CORK + TCP_NODELAY together should mean: cork wins (hold until uncorked), then when uncorked flush immediately without Nagle delay. |
+| SO_REUSEPORT | Allows multiple listening sockets on the same port. Enables multi-worker server design where N threads each call accept() on the same port. The kernel distributes incoming connections by 4-tuple hash. Without it, the standard worker-pool architecture requires a single accept thread passing sockets via IPC. | HIGH | Implementation: requires changes to the listen TCB lookup in tcp.zig. When SO_REUSEPORT is set, a new listen() on an already-listening port must succeed (not EADDRINUSE) and must be added to a reuseport group. Incoming SYN packets must hash to one of the group members. Requires a reuseport group data structure in tcp/state.zig. This is non-trivial because the current architecture has one listen TCB per port. |
+| Configurable buffer sizes (actually resize at runtime) | If SO_RCVBUF/SO_SNDBUF are implemented as store-only with a fixed cap, programs that need large buffers (bulk file transfer, high-bandwidth connections) cannot benefit. True dynamic sizing means the TCB send_buf and recv_buf should be heap-allocated slices rather than fixed arrays. | HIGH | Implementation: convert `send_buf: [c.BUFFER_SIZE]u8` and `recv_buf: [c.BUFFER_SIZE]u8` in Tcb struct from fixed arrays to `[]u8` heap-allocated slices. This touches every place these buffers are accessed. Risk: changes the TCB size significantly (from ~20KB to a pointer + length), affects alignment, and requires careful allocator management. The entire TCB pool would need rethinking since TCBs are currently value types. Recommend defer to v2 unless a concrete use case demands it. |
+| TCP initial window IW10 (RFC 6928) | Modern Linux and BSD stacks default to 10 MSS initial window instead of 2. This matters for latency of short connections (most HTTP requests). The current IW2 means 5x more RTT to fill the pipe on a 14KB response. | LOW | Implementation: change `.cwnd = c.DEFAULT_MSS * 2` to `.cwnd = c.DEFAULT_MSS * 10` in Tcb.init(). One-line change. RFC 6928 says IW10 is the recommended default. No negative interactions with existing code. |
 
-| Syscall | Complexity | Users | Implementation Notes |
-|---------|------------|-------|---------------------|
-| **chown** | Trivial | coreutils (chown), tar, rsync | Change file owner/group. |
-| **fchown** | Trivial | Same | fd-based chown. |
-| **lchown** | Trivial | Same | Don't follow symlinks. |
-| **fchownat** | Trivial | Modern file tools | chown with *at semantics. |
-| **setuid** | Low | Login programs, sudo | Set real/effective UID. |
-| **setgid** | Low | Login programs, sudo | Set real/effective GID. |
-| **setreuid** | Low | Privilege management | Set real+effective UID atomically. |
-| **setregid** | Low | Privilege management | Set real+effective GID atomically. |
-| **setresuid** | Low | Secure privilege dropping | Set real+effective+saved UID. |
-| **setresgid** | Low | Secure privilege dropping | Set real+effective+saved GID. |
-| **getresuid** | Trivial | Query privilege state | Get all three UIDs. |
-| **getresgid** | Trivial | Query privilege state | Get all three GIDs. |
-| **getgroups** | Trivial | Permission checks | Get supplementary groups. |
-| **setgroups** | Low | Login/init | Set supplementary groups. |
+### Anti-Features (Commonly Requested, Often Problematic)
 
-**Priority: MEDIUM** - Required for multi-user systems and file management tools.
-
-**Dependencies:**
-- Needs: Filesystem uid/gid support
-- Security: Capability checks for setuid/setgid
-
-### 2.3 Filesystem Metadata (MEDIUM)
-Used by df, du, mount tools.
-
-| Syscall | Complexity | Users | Implementation Notes |
-|---------|------------|-------|---------------------|
-| **statfs** | Low | df, du, mount | Return filesystem stats (blocks, inodes). |
-| **fstatfs** | Low | Same | fd-based statfs. |
-
-**Priority: MEDIUM** - Common utilities but can stub with fake data initially.
-
-**Dependencies:**
-- Needs: Filesystem superblock metadata
-- Per-FS: Each filesystem type must report stats
-
-### 2.4 Remaining *at Syscalls (LOW-MEDIUM)
-Complete the *at family for modern POSIX compliance.
-
-| Syscall | Complexity | Users | Implementation Notes |
-|---------|------------|-------|---------------------|
-| **readlinkat** | Trivial | Modern coreutils | readlink with dirfd. |
-| **linkat** | Trivial | Modern coreutils | link with dirfd. |
-| **symlinkat** | Trivial | Modern coreutils | symlink with dirfd. |
-| **utimensat** | Low | Modern touch/tar | Set file times with nanosecond precision. |
-
-**Priority: LOW-MEDIUM** - Mostly for newer coreutils versions.
-
-**Dependencies:**
-- Builds on: Existing syscall implementations
-- Just adds *at semantics (dirfd resolution)
-
-### 2.5 IPC - Unix Sockets (HIGH for local IPC)
-
-| Syscall | Complexity | Users | Implementation Notes |
-|---------|------------|-------|---------------------|
-| **socketpair** | Low | IPC between related processes | Creates connected socket pair (AF_UNIX). |
-| **shutdown** | Trivial | Graceful connection shutdown | SHUT_RD, SHUT_WR, SHUT_RDWR on sockets. |
-| **recvfrom** | Trivial | UDP, raw sockets | recv + source address. |
-| **sendto** | Trivial | UDP, raw sockets | send + destination address. |
-| **recvmsg** | Medium | Advanced socket I/O | Receive with control messages (SCM_RIGHTS). |
-| **sendmsg** | Medium | Advanced socket I/O | Send with control messages. |
-
-**Priority: HIGH for IPC, MEDIUM for network**
-
-**Dependencies:**
-- Builds on: Existing socket infrastructure
-- Advanced: recvmsg/sendmsg need control message handling (fd passing)
-
-### 2.6 Resource Accounting (LOW-MEDIUM)
-
-| Syscall | Complexity | Users | Implementation Notes |
-|---------|------------|-------|---------------------|
-| **getrusage** | Low | time command, profilers | Return CPU time, memory usage stats. |
-
-**Priority: LOW-MEDIUM** - Useful for diagnostics but not critical.
-
-**Dependencies:**
-- Needs: Per-process accounting (already have some in sysinfo/times)
+| Feature | Why Requested | Why Problematic | Alternative |
+|---------|---------------|-----------------|-------------|
+| CUBIC or BBR congestion control | Modern Linux uses CUBIC by default; BBR is used by Google. Users assume a "real" stack uses these. | For a microkernel with 256 max TCBs and a flat LAN or loopback use case, the difference between NewReno and CUBIC is unmeasurable. CUBIC requires cubic polynomial calculation per ACK. BBR requires packet pacing, which needs per-packet timestamps and a shaper. Both add hundreds of lines of code and new failure modes for negligible benefit in the target deployment context (single-machine OS, QEMU networking). | Complete the RFC 5681 NewReno implementation correctly. That is the correct choice for this context. |
+| MSG_OOB (out-of-band / urgent data) | Some old protocols (rsh, rlogin, some databases) use TCP urgent data. It is a POSIX-required flag. | TCP urgent data is widely considered a design mistake. RFC 6093 (2011) strongly recommends against new implementations. No modern application uses it. Implementing it correctly requires maintaining a separate urgent pointer in the TCB and special-casing the receive path. | Return EOPNOTSUPP. Document that OOB is not implemented. No known application running on zk needs it. |
+| IP_PKTINFO / IP_RECVORIGDSTADDR | Allows servers to know which local address a packet arrived on (useful for transparent proxying, DNS servers with multiple IPs). | zk currently has a single network interface. Multi-homing is not supported. These options require attaching ancillary data (cmsg) to every recvmsg call, which complicates the receive path significantly. | Stub the setsockopt call to succeed silently. Applications that use these typically check the cmsg on recvmsg; if no cmsg is returned they fall back to other methods. |
+| SO_LINGER with l_onoff=1 | Causes close() to block until all data is flushed or timeout expires. Some servers use this to guarantee data delivery before close. | In a single-address-space microkernel, a blocking close() is a scheduler-level problem. The thread calling close() must sleep while the TCP retransmit loop drains the send buffer. This interacts badly with the current TCB lifecycle (TCB is freed by the close path). Requires a new TCB state where the socket is closed but the TCB lingers until send_buf is empty. | Implement SO_LINGER as store-only (accept the setsockopt) but behave as l_onoff=0 (non-lingering close). Applications that rely on linger for correctness are rare and typically have other mechanisms. |
 
 ---
 
-## Category 3: Nice to Have (Rarely Called, Can Be Stubs)
+## Feature Dependencies
 
-These syscalls are called infrequently or have workarounds. Can return ENOSYS initially.
+```
+MSG_PEEK
+    requires: recv_tail not advanced on peek (trivial, buffer already supports this)
+    no upstream dependencies
 
-### 3.1 Advanced Memory (LOW)
+MSG_DONTWAIT
+    requires: flags parameter threaded from sys_recvfrom -> recvfromIp -> socket recv
+    no upstream dependencies
 
-| Syscall | Complexity | Users | Implementation Notes |
-|---------|------------|-------|---------------------|
-| **madvise** | Low | Performance hints | MADV_DONTNEED, MADV_WILLNEED. Can ignore. |
-| **mlock** | Low | Security-sensitive data | Lock pages in RAM. |
-| **munlock** | Trivial | Unlock mlock. |
-| **mlockall** | Low | Real-time systems | Lock all process memory. |
-| **munlockall** | Trivial | Unlock mlockall. |
-| **mincore** | Low | Page cache queries | Check if pages are in RAM. |
-| **msync** | Medium | mmap'd file coherency | Flush mmap'd changes to disk. |
-| **mremap** | Medium | Realloc for mmap | Resize/move memory mapping. |
-| **remap_file_pages** | Low | **DEPRECATED** (since Linux 3.16) | Nonlinear mappings. Don't implement. |
+MSG_WAITALL
+    requires: MSG_DONTWAIT (needs EAGAIN detection to know when to retry)
+    requires: SO_RCVTIMEO interaction (must respect timeout even in waitall loop)
 
-**Priority: LOW** - Performance hints can be ignored, locking rarely used outside RT systems.
+Dynamic rcv_wnd
+    requires: currentRecvWindow() to be called at ACK-send time (function exists)
+    enhances: MSG_WAITALL (peer can send more, less stalling)
+    enhances: SO_RCVBUF (if buffer is larger, window can advertise larger)
 
-**Dependencies:**
-- madvise: Can be no-op initially
-- mlock: Needs page pinning if implemented
-- msync: Requires page cache flush
+SO_RCVBUF / SO_SNDBUF (store-and-cap)
+    requires: Dynamic rcv_wnd (otherwise storing the value has no effect on peer)
+    no upstream dependencies for the store-only version
 
-### 3.2 File Locking (LOW)
+TCP_CORK
+    requires: nodelay field pattern in TCB (already exists as model)
+    conflicts with: TCP_NODELAY (precedence rule: cork wins while active)
+    enhances: application-level scatter-gather (HTTP headers + body as single segment)
 
-| Syscall | Complexity | Users | Implementation Notes |
-|---------|------------|-------|---------------------|
-| **flock** | Already implemented | File locking primitive. |
-| **fcntl** (F_SETLK) | Already implemented (partial) | POSIX record locking. |
+SO_REUSEPORT
+    requires: listen TCB group data structure (new)
+    requires: 4-tuple hash distribution at SYN receive time
+    conflicts with: SO_REUSEADDR (different semantics; both can be set but mean different things)
 
-**Status:** Already have flock. fcntl record locking may need expansion.
+IW10 (RFC 6928)
+    requires: nothing (one constant change)
+    enhances: short connection latency
+```
 
-### 3.3 Directory Change Notification (LOW)
+### Dependency Notes
 
-| Syscall | Complexity | Users | Implementation Notes |
-|---------|------------|-------|---------------------|
-| **inotify_init** | Medium | File watchers (editors, build tools) | Create inotify instance. |
-| **inotify_init1** | Trivial | Modern programs | inotify_init + O_CLOEXEC. |
-| **inotify_add_watch** | Medium | All inotify users | Watch file/directory for changes. |
-| **inotify_rm_watch** | Trivial | Stop watching. |
+- **MSG_WAITALL requires MSG_DONTWAIT pattern:** To implement the waitall retry loop, the inner
+  recv call must be able to return EAGAIN without sleeping, so the outer loop can accumulate bytes
+  and retry. This means MSG_DONTWAIT semantics must exist internally even if not exposed.
 
-**Priority: LOW** - Useful for development tools but not critical.
+- **Dynamic rcv_wnd and SO_RCVBUF are linked:** If SO_RCVBUF stores a size but rcv_wnd always
+  advertises 8KB, SO_RCVBUF has no effect. The two features must ship together or the store-only
+  SO_RCVBUF is misleading.
 
-**Dependencies:**
-- Needs: Filesystem event hooks (on write, unlink, rename, etc.)
-- Complex: Cross-filesystem coordination
-
-### 3.4 Extended Attributes (LOW)
-
-| Syscall | Complexity | Users | Implementation Notes |
-|---------|------------|-------|---------------------|
-| **setxattr** | Low | SELinux, capabilities, user metadata | Set extended attribute. |
-| **lsetxattr** | Low | Don't follow symlinks. |
-| **fsetxattr** | Low | fd-based setxattr. |
-| **getxattr** | Low | Get extended attribute. |
-| **lgetxattr** | Low | Don't follow symlinks. |
-| **fgetxattr** | Low | fd-based getxattr. |
-| **listxattr** | Low | List all xattrs. |
-| **llistxattr** | Low | Don't follow symlinks. |
-| **flistxattr** | Low | fd-based listxattr. |
-| **removexattr** | Low | Remove xattr. |
-| **lremovexattr** | Low | Don't follow symlinks. |
-| **fremovexattr** | Low | fd-based removexattr. |
-
-**Priority: LOW** - Needed for SELinux, capabilities (security), user metadata.
-
-**Dependencies:**
-- Needs: Per-file xattr storage in filesystem
-- SFS: Would need schema change
-- InitRD: Read-only, can't support
-
-### 3.5 Quotas (LOW)
-
-| Syscall | Complexity | Users | Implementation Notes |
-|---------|------------|-------|---------------------|
-| **quotactl** | Medium | Multi-user systems with disk quotas | Manage filesystem quotas. |
-
-**Priority: LOW** - Not needed for single-user or embedded systems.
+- **TCP_CORK conflicts with TCP_NODELAY:** When both are set, cork takes precedence (hold data).
+  When cork is cleared, flush immediately (nodelay behavior). This is consistent with Linux.
 
 ---
 
-## Category 4: Not Needed (Legacy, Deprecated, or Very Specialized)
+## MVP Definition
 
-These syscalls can safely return ENOSYS or be stubbed indefinitely.
+The milestone adds these features to an already-working TCP stack. The goal is POSIX compliance
+for userspace programs that use standard socket patterns.
 
-### 4.1 SysV IPC (DEPRECATED - Use POSIX Alternatives)
+### Launch With (milestone core)
 
-**Status:** SysV IPC is superseded by POSIX IPC (which is already thread-safe and better designed).
+These are the features that fix active breakage -- programs that call these APIs and get wrong
+behavior today:
 
-| Syscall | Replacement | Notes |
-|---------|-------------|-------|
-| shmget, shmat, shmdt, shmctl | POSIX shm_open + mmap | SysV shared memory. |
-| semget, semop, semctl | POSIX sem_open, sem_wait | SysV semaphores. |
-| msgget, msgsnd, msgrcv, msgctl | POSIX mq_open, mq_send | SysV message queues. |
+- [ ] MSG_PEEK -- required by any protocol parser that peeks at headers before consuming
+- [ ] MSG_DONTWAIT -- required by non-blocking event loop patterns (per-call, not O_NONBLOCK)
+- [ ] MSG_WAITALL -- required by binary protocol readers that expect exact-length reads
+- [ ] Dynamic rcv_wnd wiring -- required for any connection to reach throughput above 8KB in flight
+- [ ] IW10 (RFC 6928) -- one-line fix, dramatically improves short connection latency
 
-**Priority: DO NOT IMPLEMENT** - Advise users to use POSIX IPC (via mmap, pipes, Unix sockets).
+### Add After Core Flags Work
 
-**Rationale:**
-- SysV IPC is NOT thread-safe
-- POSIX alternatives are cleaner and more secure
-- Modern programs avoid SysV IPC
-- See: System V IPC has effectively been replaced by POSIX IPC
+These improve throughput and server architecture but do not cause hard failures without them:
 
-### 4.2 Legacy Process/Signal (OBSOLETE)
+- [ ] SO_RCVBUF / SO_SNDBUF (store-and-cap, not dynamic resize) -- needed when programs check
+  for EINVAL on these options
+- [ ] TCP_CORK -- needed for high-throughput HTTP-style server workloads
 
-| Syscall | Status | Notes |
-|---------|--------|-------|
-| **signal** | Use rt_sigaction | Deprecated signal handler API. |
-| **sigprocmask** | Use rt_sigprocmask | Deprecated signal masking. |
-| **sigreturn** | Use rt_sigreturn | Legacy signal return. |
-| **sigpending** | Use rt_sigpending | Legacy pending signals query. |
-| **sigsuspend** | Use rt_sigsuspend | Legacy signal wait. |
-| **sigaction** | Use rt_sigaction | Legacy sigaction. |
+### Future Consideration (v2+)
 
-**Priority: DO NOT IMPLEMENT** - zk already has rt_* versions.
+These require significant architectural changes and are not needed for the current milestone:
 
-### 4.3 Obsolete System Calls
-
-| Syscall | Status | Notes |
-|---------|--------|-------|
-| **uselib** | **REMOVED** (Linux 5.1) | Load shared library. Use dlopen. |
-| **_sysctl** | **REMOVED** (Linux 5.5) | Deprecated kernel param interface. Use /proc/sys. |
-| **remap_file_pages** | **DEPRECATED** (Linux 3.16) | Nonlinear mappings. Never implement. |
-| **create_module**, **delete_module**, **init_module**, **finit_module** | Kernel modules | Not applicable to microkernel architecture. |
-| **ioperm**, **iopl** | x86-specific I/O port access | Use /dev/port or capabilities. |
-| **modify_ldt** | x86 LDT manipulation | Rare, security risk. |
-| **vm86**, **vm86old** | x86 VM86 mode | 16-bit DOS emulation. |
-
-**Priority: DO NOT IMPLEMENT**
-
-### 4.4 Architecture-Specific (Not Portable)
-
-| Syscall | Architecture | Notes |
-|---------|--------------|-------|
-| **arch_prctl** | x86_64 only | Set FS/GS base registers. Already implemented? |
-| **iopl**, **ioperm** | x86 only | I/O port permissions. |
-| **vm86** | x86 only | Virtual 8086 mode. |
-| **s390_***, **ppc_***, **arm_*** | Arch-specific | Ignore if not on that arch. |
-
-**Priority: LOW** - Implement only if needed for specific architecture support.
-
-### 4.5 Containers/Namespaces (Specialized)
-
-| Syscall | Complexity | Users | Notes |
-|---------|------------|-------|-------|
-| **unshare** | High | Containers (Docker, LXC) | Create new namespaces. |
-| **setns** | Medium | Container tools | Enter existing namespace. |
-| **clone3** | High | Modern clone API | Extended clone with struct args. |
-| **pivot_root** | Medium | Container init | Change root mount. |
-
-**Priority: LOW initially, HIGH if targeting container support**
-
-**Rationale:** Containers are a major use case but require extensive namespace infrastructure. Defer until core functionality is solid.
+- [ ] SO_REUSEPORT -- requires reuseport group data structure and SYN distribution changes; defer
+  until multi-worker server workloads are a stated goal
+- [ ] True dynamic buffer resize (heap-allocated TCB buffers) -- requires TCB struct refactor;
+  defer until a concrete workload shows 8KB or 256KB cap is insufficient
 
 ---
 
-## Implementation Roadmap
+## Feature Prioritization Matrix
 
-### Phase 1: Core Multiplexing (Highest Impact)
-**Goal:** Enable nginx, redis, modern network servers.
+| Feature | User Value | Implementation Cost | Priority |
+|---------|------------|---------------------|----------|
+| MSG_PEEK | HIGH | LOW | P1 |
+| MSG_DONTWAIT | HIGH | LOW | P1 |
+| MSG_WAITALL | HIGH | MEDIUM | P1 |
+| Dynamic rcv_wnd (wiring fix) | HIGH | LOW | P1 |
+| IW10 initial window | MEDIUM | LOW | P1 |
+| SO_RCVBUF / SO_SNDBUF (store-and-cap) | MEDIUM | LOW | P2 |
+| TCP_CORK | MEDIUM | MEDIUM | P2 |
+| SO_REUSEPORT | MEDIUM | HIGH | P3 |
+| True dynamic buffer resize | LOW | HIGH | P3 |
 
-1. epoll family (epoll_create1, epoll_ctl, epoll_wait, epoll_pwait)
-2. select, pselect6
-3. eventfd2, signalfd4, timerfd_*
-4. accept4, dup3 (modern fd creation)
-
-**Estimated effort:** 2-3 weeks
-**Unlocks:** Modern async I/O patterns, event loops
-
-### Phase 2: Efficient I/O (Performance)
-**Goal:** Database and bulk I/O performance.
-
-1. readv, preadv, preadv2
-2. pwritev, pwritev2
-3. sendfile (for file serving)
-4. getrlimit, setrlimit, prlimit64 (resource limits)
-
-**Estimated effort:** 1 week
-**Unlocks:** Database compatibility, file server performance
-
-### Phase 3: Process & Resource Control (Multi-user)
-**Goal:** Init systems, containers, security.
-
-1. prctl (start with PR_SET_NAME, PR_GET_NAME)
-2. sched_setaffinity, sched_getaffinity
-3. chown family (chown, fchown, lchown, fchownat)
-4. setuid/setgid family
-5. getrusage
-
-**Estimated effort:** 2 weeks
-**Unlocks:** systemd-style init, privilege management
-
-### Phase 4: Filesystem Completeness (Compatibility)
-**Goal:** Full coreutils, file manager support.
-
-1. statfs, fstatfs
-2. Remaining *at syscalls (readlinkat, linkat, symlinkat, utimensat)
-3. socketpair, shutdown (for IPC)
-4. recvmsg, sendmsg (for fd passing)
-
-**Estimated effort:** 1-2 weeks
-**Unlocks:** Advanced file tools, IPC-heavy applications
-
-### Phase 5: Optional Enhancements (Polish)
-**Goal:** Development tools, advanced features.
-
-1. inotify family (file change monitoring)
-2. splice, tee (zero-copy pipe operations)
-3. Extended attributes (if security model requires)
-4. Advanced memory (madvise, mlock - performance hints)
-
-**Estimated effort:** 2-3 weeks
-**Unlocks:** IDEs, build tools, security frameworks
+**Priority key:**
+- P1: Must have for milestone -- fixes active breakage
+- P2: Should have -- improves compliance and throughput
+- P3: Defer -- significant cost for narrow use case
 
 ---
 
-## Complexity Ratings Explained
+## Implementation Notes Per Feature
 
-**Trivial (1-2 days):**
-- Simple wrappers around existing functionality
-- Examples: dup3 (dup2 + flags), accept4 (accept + flags), trivial getters
+### MSG_PEEK (P1, LOW complexity)
 
-**Low (3-5 days):**
-- Single-purpose syscall with straightforward logic
-- Examples: chown, statfs, eventfd
+Current state: `flags` is accepted by sys_recvfrom but `_ = flags;` discards it entirely.
 
-**Medium (1-2 weeks):**
-- Requires new infrastructure or moderate state management
-- Examples: epoll_ctl (per-fd event tracking), sendfile (kernel buffer copy), prctl (multiple operations)
+What to do:
+1. Define `MSG_PEEK: u32 = 0x0002` in socket/types.zig (Linux constant).
+2. Pass flags from sys_recvfrom into the socket recvfromIp call signature.
+3. In the TCP recv path (tcp_api.zig), if MSG_PEEK is set, copy bytes from recv_buf starting at
+   recv_tail but do NOT advance recv_tail after the copy. This is a read-only operation on the
+   circular buffer.
+4. For UDP, the rx_queue entry must not be dequeued; copy from rx_queue[rx_tail] without
+   advancing rx_tail.
 
-**High (2-4 weeks):**
-- Major subsystem or extensive state machine
-- Examples: Full epoll implementation, namespace support, futex (complex synchronization)
+Edge case: MSG_PEEK with a buffer smaller than available data should return as much as fits
+(same as a normal read), not peek at more than requested.
+
+### MSG_DONTWAIT (P1, LOW complexity)
+
+Current state: The blocking check in tcp_api.zig checks `sock.blocking`. The per-call flag would
+override this for one call.
+
+What to do:
+1. Define `MSG_DONTWAIT: u32 = 0x0040` in socket/types.zig (Linux constant).
+2. Pass effective_blocking = sock.blocking AND NOT(flags & MSG_DONTWAIT) into the recv path.
+3. If effective_blocking is false and no data is available, return EAGAIN immediately.
+4. Same for UDP: if MSG_DONTWAIT and rx_count == 0, return EAGAIN.
+
+Note: MSG_DONTWAIT does not set O_NONBLOCK on the file descriptor permanently. It only affects
+the single call. Subsequent calls without MSG_DONTWAIT block normally.
+
+### MSG_WAITALL (P1, MEDIUM complexity)
+
+Current state: The recv path returns whatever is available (partial reads are possible).
+
+What to do:
+1. Define `MSG_WAITALL: u32 = 0x0100` in socket/types.zig (Linux constant).
+2. In the TCP recv path: if MSG_WAITALL is set and received < requested, accumulate into kbuf
+   and loop. On each iteration, check SO_RCVTIMEO deadline. Break on EOF (FIN received) or
+   connection error.
+3. POSIX allows MSG_WAITALL to return less than requested on signal or disconnect. Implement
+   the loop in the syscall layer (sys_recvfrom) rather than deep in the socket layer, so signal
+   checking (pending_signals) can be done between iterations.
+4. For UDP, MSG_WAITALL applies to a single datagram: block until one datagram arrives, return
+   the whole datagram (truncated if buf is too small). Do not aggregate multiple datagrams.
+
+### Dynamic rcv_wnd Wiring (P1, LOW complexity)
+
+Current state: `tcb.rcv_wnd` is initialized to `c.RECV_WINDOW_SIZE` (8192) and is written into
+ACK segment headers. `currentRecvWindow()` computes the correct scaled value from free buffer
+space but may not be the value actually sent.
+
+What to do:
+1. Audit tx/control.zig and tx/segment.zig to confirm which value goes into the TCP window field
+   of outgoing segments.
+2. Replace any use of `tcb.rcv_wnd` in ACK building with `tcb.currentRecvWindow()`.
+3. The `rcv_wnd` field in the TCB can remain as the cached last-advertised value (useful for
+   detecting window update necessity), but the value sent in the wire header should always be
+   computed from actual buffer state.
+
+Risk: none. currentRecvWindow() already handles window scaling correctly.
+
+### IW10 (P1, LOW complexity)
+
+Change in types.zig Tcb.init():
+```
+// Before
+.cwnd = c.DEFAULT_MSS * 2,
+
+// After (RFC 6928)
+.cwnd = c.DEFAULT_MSS * 10,
+```
+
+Also update the comment above it. No other changes needed.
+
+### SO_RCVBUF / SO_SNDBUF (P2, LOW complexity for store-and-cap)
+
+Current state: setsockopt returns EINVAL for these option numbers.
+
+What to do:
+1. Add `SO_RCVBUF: i32 = 8` and `SO_SNDBUF: i32 = 7` to socket/types.zig.
+2. Add `rcv_buf_size: u32` and `snd_buf_size: u32` fields to Socket struct with defaults of 8192.
+3. Handle in options.zig setsockopt: read the i32 value, clamp to [1024, 262144], store in socket.
+4. On TCP connect/accept, copy rcv_buf_size to tcb.rcv_wnd initialization.
+5. getsockopt should return the stored value (Linux returns 2x the requested value to account for
+   overhead; implement the same doubling for compatibility).
+
+Do NOT change the actual buffer array size. The backing array stays at 8KB. This satisfies programs
+that check for EINVAL but does not provide larger actual buffers. Document this limitation.
+
+### TCP_CORK (P2, MEDIUM complexity)
+
+Current state: No cork support. Nagle is the only send-coalescing mechanism.
+
+What to do:
+1. Add `TCP_CORK: i32 = 3` to socket/types.zig.
+2. Add `cork: bool` field to TCB struct (default false).
+3. In options.zig, handle IPPROTO_TCP / TCP_CORK: copy to tcb.cork.
+4. In transmitPendingData (tx/data.zig), add check:
+   if tcb.cork and send_len < effective_mss and flight_size > 0, return true (hold).
+5. When cork is cleared (setsockopt TCP_CORK 0), call transmitPendingData immediately to flush.
+6. Precedence: cork takes priority over Nagle. When cork is cleared, if nodelay is true,
+   transmit immediately without any Nagle delay.
 
 ---
 
-## Testing Strategy
+## Competitor Feature Analysis (Reference Stacks)
 
-### Compatibility Tiers
-
-**Tier 1: Shell & Coreutils (Current + Phase 1)**
-- Target: busybox, dash, coreutils
-- Required: Current syscalls + epoll + select + resource limits
-- Test: Boot to shell, run basic commands
-
-**Tier 2: Network Servers (Phase 1 + Phase 2)**
-- Target: nginx (static files), redis (no persistence)
-- Required: + vectored I/O, sendfile, event notification fds
-- Test: Serve files, handle 1000 concurrent connections
-
-**Tier 3: Databases (Phase 2 + Phase 3)**
-- Target: SQLite, simple key-value stores
-- Required: + preadv2/pwritev2, process control
-- Test: ACID transactions, concurrent access
-
-**Tier 4: Language Runtimes (Phase 1-4)**
-- Target: Python, Ruby (limited stdlib)
-- Required: Full async I/O, IPC, filesystem metadata
-- Test: Run test suites, simple web frameworks
-
-**Tier 5: Containers (Phase 5+)**
-- Target: Docker, LXC
-- Required: Namespaces, cgroups, pivot_root
-- Test: Run containerized workloads
-
-### Syscall Tracing for Validation
-
-Use strace on target programs to verify syscall coverage:
-
-```bash
-# Trace nginx startup and request handling
-strace -c -f nginx -g 'daemon off;'
-
-# Trace redis-server
-strace -c redis-server --daemonize no
-
-# Trace Python importing common libraries
-strace -c python3 -c "import socket, asyncio, multiprocessing"
-
-# Summary of coreutils
-for cmd in ls cat grep find tar; do
-    strace -c $cmd [args] 2>&1 | head -20
-done
-```
-
-Focus on syscalls with:
-- High call count (frequency)
-- Non-zero error count (programs expect these to work)
-- Called during startup (blocking progress)
-
----
-
-## Dependencies Between Syscalls
-
-### Event Infrastructure
-```
-epoll_create1
-  └─ epoll_ctl
-      └─ epoll_wait / epoll_pwait
-          ├─ eventfd2 (events to monitor)
-          ├─ signalfd4 (events to monitor)
-          └─ timerfd_create (events to monitor)
-```
-
-### Vectored I/O Evolution
-```
-readv ──┐
-        ├─ preadv ── preadv2 (adds flags)
-writev ─┘
-        └─ pwritev ── pwritev2 (adds flags)
-```
-
-### Modern fd Creation
-```
-dup ── dup2 ── dup3 (adds O_CLOEXEC)
-accept ────── accept4 (adds O_CLOEXEC/O_NONBLOCK)
-pipe ──────── pipe2 (adds O_CLOEXEC/O_NONBLOCK, already implemented)
-```
-
-### Resource Limits
-```
-getrlimit ──┐
-            ├─ prlimit64 (combines both, supports other PIDs)
-setrlimit ──┘
-```
-
-### Signal Handling
-```
-rt_sigaction (already implemented)
-  └─ signalfd4 (converts signals to fd events)
-      └─ requires epoll for async monitoring
-```
-
----
-
-## Notes on Specific Syscalls
-
-### futex (Not Covered Above - Deserves Special Mention)
-
-**Complexity:** **VERY HIGH** (4-6 weeks)
-**Users:** pthread mutexes, condition variables, Go runtime, Rust async
-**Status:** **Critical but complex**
-
-futex is the foundation of all modern userspace synchronization primitives. It's used by:
-- glibc/musl pthread implementation
-- Go scheduler
-- Rust tokio runtime
-- Any language with threading
-
-**Implementation challenges:**
-- Must be atomic (FUTEX_WAIT checks value, adds to queue, releases lock atomically)
-- Hash table of futex queues (keyed by address)
-- Priority inheritance (FUTEX_LOCK_PI) for real-time
-- Timeout support (absolute/relative time)
-- Requeue operations (FUTEX_CMP_REQUEUE for condition variables)
-- Signal handling (EINTR semantics)
-
-**Recommendation:**
-- **Phase 1.5** (between Phase 1 and 2): Implement basic FUTEX_WAIT, FUTEX_WAKE first
-- Defer advanced operations (FUTEX_LOCK_PI, FUTEX_REQUEUE) to Phase 5
-- See: "Futexes Are Tricky" (Ulrich Drepper) for implementation guide
-
----
-
-## Quick Reference: Missing Syscalls by Category
-
-### Critical (Implement First)
-- epoll_create1, epoll_ctl, epoll_wait, epoll_pwait
-- select, pselect6
-- readv, preadv, preadv2, pwritev, pwritev2
-- getrlimit, setrlimit, prlimit64
-- eventfd2, signalfd4, timerfd_create, timerfd_settime, timerfd_gettime
-- accept4, dup3
-- **futex** (FUTEX_WAIT, FUTEX_WAKE minimum)
-
-### Important (Second Priority)
-- sendfile, splice, tee
-- prctl, sched_setaffinity, sched_getaffinity
-- chown, fchown, lchown, fchownat
-- setuid, setgid, setreuid, setregid, setresuid, setresgid, getresuid, getresgid
-- getgroups, setgroups
-- statfs, fstatfs
-- readlinkat, linkat, symlinkat, utimensat
-- socketpair, shutdown, recvfrom, sendto, recvmsg, sendmsg
-- getrusage
-
-### Nice to Have (Lower Priority)
-- inotify_init1, inotify_add_watch, inotify_rm_watch
-- madvise, mlock, munlock, mlockall, munlockall, mincore, msync, mremap
-- Extended attributes (setxattr family)
-- ppoll (poll + sigmask)
-
-### Don't Implement
-- SysV IPC (shmget, semget, msgget families) - use POSIX alternatives
-- Legacy signal syscalls (signal, sigaction) - use rt_* versions
-- Obsolete (uselib, _sysctl, remap_file_pages)
-- Kernel modules (create_module, etc.) - microkernel doesn't need
-- Architecture-specific (vm86, iopl) - unless required for arch support
+| Feature | Linux 6.x | lwIP 2.2 | Our Approach |
+|---------|-----------|----------|--------------|
+| MSG_PEEK | Full support | Partial (TCP only) | Implement for TCP + UDP |
+| MSG_DONTWAIT | Full support | Via SO_NONBLOCK only | Implement per-call flag |
+| MSG_WAITALL | Full support | Not supported | Implement for TCP |
+| Dynamic rcv_wnd | Auto-tuning | Fixed | Wire existing currentRecvWindow() |
+| SO_RCVBUF | Dynamic, doubles value | Fixed buffers | Store-and-cap |
+| TCP_CORK | Full support | Not supported | Implement basic version |
+| SO_REUSEPORT | Full support | Not supported | Defer |
+| IW10 | Default since 3.0 | Configurable | Change constant |
 
 ---
 
 ## Sources
 
-Research based on:
-- [BusyBox - The Swiss Army Knife of Embedded Linux](https://busybox.net/downloads/BusyBox.html)
-- [musl libc - Design Concepts](https://wiki.musl-libc.org/design-concepts.html)
-- [Strace: A Deep Dive into System Call Tracing](https://medium.com/@nuwanwe/strace-a-deep-dive-into-system-call-tracing-9ec9fc77c745)
-- [Unikraft Compatibility - 160+ syscalls for complex apps](https://unikraft.org/docs/concepts/compatibility)
-- [Async IO on Linux: select, poll, and epoll](https://jvns.ca/blog/2017/06/03/async-io-on-linux--select--poll--and-epoll/)
-- [getrlimit(2) - Linux manual page](https://man7.org/linux/man-pages/man2/getrlimit.2.html)
-- [socketpair(2) - Linux manual page](https://man7.org/linux/man-pages/man2/socketpair.2.html)
-- [chown(2) - Linux manual page](https://man7.org/linux/man-pages/man2/chown.2.html)
-- [eventfd(2) - Linux manual page](https://man7.org/linux/man-pages/man2/eventfd.2.html)
-- [System V IPC and POSIX IPC](http://ranler.github.io/2013/07/01/System-V-and-POSIX-IPC/)
-- [Scheduler-Related System Calls - Linux Process Scheduler](https://www.informit.com/articles/article.aspx?p=101760&seqNum=5)
-- [symlink(7) - Linux manual page](https://man7.org/linux/man-pages/man7/symlink.7.html)
-- [statfs(2) - Linux manual page](https://www.man7.org/linux/man-pages/man2/statfs.2.html)
-- [futex(2) - Linux manual page](https://man7.org/linux/man-pages/man2/futex.2.html)
-- [Basics of Futexes](https://eli.thegreenplace.net/2018/basics-of-futexes/)
-- [pipe(2) - Linux manual page (O_CLOEXEC)](https://man7.org/linux/man-pages/man2/pipe.2.html)
+- RFC 5681: TCP Congestion Control (cwnd/ssthresh update rules) -- https://datatracker.ietf.org/doc/html/rfc5681
+- RFC 6928: Increasing TCP's Initial Window -- https://datatracker.ietf.org/doc/html/rfc6928
+- RFC 7323: TCP Extensions for High Performance (window scaling, timestamps)
+- Linux recv(2) manual page (MSG_PEEK, MSG_DONTWAIT, MSG_WAITALL semantics) -- https://man7.org/linux/man-pages/man2/recv.2.html
+- Linux socket(7) manual page (SO_RCVBUF, SO_SNDBUF behavior) -- https://man7.org/linux/man-pages/man7/socket.7.html
+- Linux tcp(7) manual page (TCP_CORK, TCP_NODELAY interaction) -- https://man7.org/linux/man-pages/man7/tcp.7.html
+- TCP_CORK behavior analysis -- https://baus.net/on-tcp_cork/
+- SO_REUSEPORT LWN article -- https://lwn.net/Articles/542629/
+- Code audit: src/net/transport/tcp/types.zig (Tcb struct, cwnd/ssthresh fields confirmed present)
+- Code audit: src/net/transport/tcp/tx/data.zig (transmitPendingData, Nagle check confirmed)
+- Code audit: src/net/transport/tcp/rx/established.zig (ACK processing, cwnd update confirmed)
+- Code audit: src/kernel/sys/syscall/net/net.zig (sys_recvfrom flags discarded at line 547)
+- Code audit: src/net/transport/socket/options.zig (existing setsockopt handlers)
+- Code audit: src/net/constants.zig (BUFFER_SIZE=8192, RECV_WINDOW_SIZE=8192)
 
 ---
-
-**Document Version:** 1.0
-**Last Updated:** 2026-02-06
-**Author:** Claude (Sonnet 4.5) via Project Research Agent
+*Feature research for: TCP/UDP Network Stack Hardening -- zk Microkernel*
+*Researched: 2026-02-19*

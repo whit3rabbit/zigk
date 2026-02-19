@@ -1,959 +1,403 @@
-# Linux Syscall Implementation Pitfalls
+# Pitfalls Research: TCP/UDP Network Stack Hardening
 
-**Domain:** Linux syscall implementation for hobby OS projects
-**Researched:** 2026-02-06
-**Confidence:** HIGH (based on Linux kernel documentation, security research, real-world bugs)
+**Domain:** Adding TCP congestion control, dynamic window management, and socket buffer resizing to an existing Zig microkernel network stack
+**Researched:** 2026-02-19
+**Confidence:** HIGH (grounded in the actual zk codebase; pitfalls verified against real code patterns)
 
-## Executive Summary
+---
 
-Implementing Linux-compatible syscalls is deceptively difficult. While the interface appears simple (6 arguments in, integer out), subtle ABI mismatches, concurrency bugs, and security vulnerabilities plague even experienced kernel developers. This document catalogs the most common and severe pitfalls discovered across 20+ years of Linux kernel development and hobby OS projects.
+## Context: What the Existing Code Looks Like
 
-**Critical insight:** Most bugs are not in complex logic but in the boundary between user and kernel space. The three most dangerous categories are:
+Before reading the pitfalls, understand these fixed points in the current design:
 
-1. **User Memory Access Violations** (30% of CVEs in syscall handlers)
-2. **ABI Structure Mismatches** (silent data corruption, difficult to debug)
-3. **TOCTOU Race Conditions** (exploitable security holes)
+- `BUFFER_SIZE = 8192` is a comptime constant embedded in `[c.BUFFER_SIZE]u8` arrays directly **inside** the `Tcb` struct (types.zig:190,196). Replacing these with pointers requires `Tcb.init()` to be rewritten, every buffer access site to handle null, and the TCB size changes from ~22KB to a smaller header with heap allocations.
+- `c.BUFFER_SIZE` appears in 18 source locations. It is not abstracted behind a function or field -- it is a literal type-level constant in array lengths.
+- The global `state.lock` (IrqLock) wraps the entire TCP state machine. Per-TCB `mutex` (Spinlock) is nested inside. Lock order is strict: `state.lock` before `tcb.mutex`. Any new dynamic allocation must respect this order.
+- `processTimers()` iterates all 256 TCBs every timer tick. Linear scan cost grows with TCB count -- adding per-connection timers for congestion control (persist timer, keepalive) increases this cost.
+- `cwnd`, `ssthresh`, `srtt`, `rttvar` already exist in the TCB but are not enforced at all call sites. The congestion control logic in `rx/established.zig` is correct RFC 5681 but uses integer overflow for AIMD increment (line 65-67) that saturates to `maxInt(u32)` rather than clamping sensibly.
+- `currentRecvWindow()` in types.zig computes the receive window from `c.BUFFER_SIZE` at runtime but the window scale is fixed at `calculateWindowScale(c.BUFFER_SIZE)` in options.zig:205, computed once at SYN time. If buffer size changes after handshake, the scale factor is wrong.
+
+---
 
 ## Critical Pitfalls
 
-These mistakes cause security vulnerabilities, data corruption, or system crashes. Each has been exploited in the wild.
-
----
-
-### Pitfall 1: Direct User Pointer Dereference
+### Pitfall 1: Replacing Fixed Buffer Arrays with Slices Breaks `Tcb.init()` and `Tcb.reset()`
 
 **What goes wrong:**
-Kernel code dereferences a user-provided pointer without validation. This allows unprivileged processes to:
-- Read kernel memory (information leak)
-- Write kernel memory (privilege escalation)
-- Crash the kernel (denial of service)
-
-**Example:**
-```zig
-// WRONG: Direct dereference
-pub fn sys_read(fd: usize, buf_ptr: usize, count: usize) SyscallError!usize {
-    const buf: [*]u8 = @ptrFromInt(buf_ptr);
-    @memcpy(buf[0..count], kernel_data); // EXPLOITABLE
-}
-
-// CORRECT: Validate first
-pub fn sys_read(fd: usize, buf_ptr: usize, count: usize) SyscallError!usize {
-    if (!user_mem.isValidUserAccess(buf_ptr, count, .Write)) {
-        return error.EFAULT;
-    }
-    user_mem.copyToUser(buf_ptr, kernel_data, count) catch return error.EFAULT;
-}
-```
+`Tcb.init()` currently returns a `Self` by value containing `[8192]u8` arrays. If you change `send_buf` and `recv_buf` from arrays to slices (`[]u8`), the init function must allocate memory, which means it needs an allocator, which means every caller that does `tcb.* = Tcb.init()` breaks. Worse, `Tcb.reset()` calls `self.* = Self.init()` -- this would leak the old buffers every time a connection closes.
 
 **Why it happens:**
-Kernel code runs in privileged mode with access to all memory. Without explicit checks, the MMU allows kernel code to access both kernel and user addresses. Attackers pass kernel addresses (e.g., `0xffff8000_12345000`) to read/modify kernel data.
+The pattern `self.* = Self.init()` for reset is common in Zig and works correctly for value types. Adding heap-allocated fields converts a "copy to zero" into a "leak old + allocate new" operation unless the reset is explicitly rewritten.
 
-**Consequences:**
-- CVE-2017-11176: Linux mq_notify allowed writing 128 bytes to arbitrary kernel address
-- Dozens of similar CVEs each year in Linux drivers and syscalls
+**How to avoid:**
+Do not change the reset pattern until buffer lifecycle is fully designed. Options:
+1. Keep `send_buf`/`recv_buf` as fixed arrays but make them optional (`?[]u8`) with a fallback to stack-allocated 8KB when `setsockopt(SO_SNDBUF)` is not called. This keeps `Tcb.init()` trivial.
+2. Write a `Tcb.deinit(allocator)` that frees buffers, and replace all `Tcb.reset()` calls with `tcb.deinit(allocator); tcb.* = Tcb.init();`.
+3. Use a two-field approach: `send_buf_fixed: [BUFFER_SIZE]u8` as default, `send_buf_dyn: ?[]u8` as override. `sendBuf()` returns `if (send_buf_dyn) |d| d else &send_buf_fixed`. This avoids breaking existing code but increases struct size.
 
-**Prevention:**
-1. **Never use `@ptrFromInt` on user-provided addresses** without validation
-2. Always call `isValidUserAccess(ptr, len, mode)` first
-3. Use `copyFromUser`/`copyToUser` wrappers that handle page faults gracefully
-4. Enable SMAP (Supervisor Mode Access Prevention) on x86_64 if available
+**Warning signs:**
+- Any call to `freeTcb` that does not call `Tcb.deinit` first after adding dynamic buffers.
+- `Tcb.reset()` still present and called without freeing slices.
+- Tests passing on the happy path but leaking on connection reset/timeout.
 
-**Detection:**
-- Test with address `0xffff0000_00000000` (kernel space on x86_64)
-- Test with address `0xdeadbeef` (unmapped)
-- Test with length causing overflow: `ptr=0x7fff_ffff_f000, len=0x2000`
-- Use address sanitizers in kernel testing
-
-**Affected syscall categories:**
-- All I/O syscalls (read, write, readv, writev, pread64, pwrite64)
-- Network syscalls (send, recv, sendto, recvfrom, sendmsg, recvmsg)
-- File stat syscalls (stat, fstat, fstatat, getdents64)
-- Process info (wait4, getrusage, times, sysinfo)
-
-**References:**
-- [Linux Kernel System Calls Documentation](https://linux-kernel-labs.github.io/refs/heads/master/lectures/syscalls.html)
-- [Hardened User Copy](https://lwn.net/Articles/695991/)
+**Phase to address:** The buffer resizing phase. Requires an explicit design decision before any code changes. Do not proceed with buffer changes until `Tcb.deinit` exists.
 
 ---
 
-### Pitfall 2: Time-of-Check to Time-of-Use (TOCTOU) Races
+### Pitfall 2: Window Scale Factor Locked at Connection Setup, Invalid After Buffer Resize
 
 **What goes wrong:**
-Kernel validates user data, then uses it later. Between validation and use, a malicious userspace thread modifies the data. This bypasses security checks.
-
-**Example:**
-```zig
-// WRONG: Check then use (vulnerable)
-pub fn sys_execve(path_ptr: usize, argv_ptr: usize, envp_ptr: usize) SyscallError!usize {
-    if (!user_mem.isValidUserPtr(path_ptr, 256)) return error.EFAULT;
-    // ... other code ...
-    // TIME PASSES - attacker thread runs and modifies path_ptr memory
-    const path = copyStringFromUser(path_ptr); // Reads DIFFERENT data!
-}
-
-// CORRECT: Copy once, use kernel copy
-pub fn sys_execve(path_ptr: usize, argv_ptr: usize, envp_ptr: usize) SyscallError!usize {
-    var path_buf: [256]u8 = undefined;
-    const path = copyStringFromUser(path_ptr, &path_buf) catch return error.EFAULT;
-    // Use path_buf from here on - immune to userspace changes
-}
-```
+`rcv_wscale` is negotiated in the SYN/SYN-ACK handshake (options.zig:205) based on `c.BUFFER_SIZE`. It tells the peer "shift your receive window advertisement left by N bits." If you resize the buffer after the handshake, the scale factor is now wrong -- the peer continues sending window advertisements assuming the original scale, but the actual buffer is larger (or smaller).
 
 **Why it happens:**
-Kernel assumes user memory is stable during syscall execution. In reality, other threads (or signal handlers) can modify it. The check passes, then the data changes before use.
+RFC 7323 requires window scale to be agreed once at connection setup. You cannot renegotiate. The scale factor encodes the ratio between actual buffer capacity and the 16-bit window field. Changing buffer size without changing scale breaks this ratio permanently for the lifetime of the connection.
 
-**Consequences:**
-- "Double-fetch" vulnerabilities: [USENIX study](https://www.usenix.org/sites/default/files/conference/protected-files/usenixsecurity_slides_wang_pengfei_.pdf) found hundreds in Linux, Android, FreeBSD
-- Privilege escalation: pass pointer to `/bin/true`, change to `/bin/sh` after permission check
-- Kernel memory corruption: pass valid size, change to huge size after bound check
+**How to avoid:**
+- For new connections, compute `rcv_wscale` from the configured socket buffer size, not from `c.BUFFER_SIZE`. This means reading `SO_RCVBUF` at `listen()`/`connect()` time.
+- Never allow buffer resize after the handshake completes for the current connection. `setsockopt(SO_RCVBUF)` on an established connection should either be rejected with `EINVAL`, apply only to new connections, or -- if you want Linux behavior -- silently clamp and apply the new buffer size without changing the scale.
+- If you grow the buffer without changing scale: advertised window will saturate at `65535 << rcv_wscale`. This is a correctness bug but not a crash. The connection works but cannot use the extra buffer space.
+- If you shrink the buffer without changing scale: the peer may send data faster than the buffer can hold. `currentRecvWindow()` computes from actual free space, so the window advertisement will still be correct, but the scale computation in the TX path may produce a window value that overflows u16 when shifted.
 
-**Prevention:**
-1. **Copy user data to kernel memory immediately** at syscall entry
-2. Never access user memory multiple times for the same logical operation
-3. If multiple accesses are required, use kernel copy exclusively after first copy
-4. For complex structures: `copyFromUser` entire struct, then operate on kernel copy
+**Warning signs:**
+- `currentRecvWindow()` returning 0 when the buffer has space (integer cast overflow).
+- Transfer throughput does not improve after increasing buffer size on an established connection.
+- Peer sends data at rate higher than buffer capacity immediately after buffer shrink.
 
-**Detection:**
-- Write test with two threads: one calls syscall, other modifies buffer in tight loop
-- Use memory synchronization barriers to force race window
-- Kernel instrumentation: log each `copy_from_user` call with unique ID, detect duplicates
-
-**Affected syscall categories:**
-- All syscalls taking struct pointers (stat, ioctl, setsockopt, sysinfo)
-- String path syscalls (open, stat, execve, mount)
-- Array pointer syscalls (writev, sendmsg, execve argv/envp)
-
-**References:**
-- [Exploiting Races in System Call Wrappers](https://lwn.net/Articles/245630/)
-- [Double-Fetch Bug Study](https://www.usenix.org/sites/default/files/conference/protected-files/usenixsecurity_slides_wang_pengfei_.pdf)
+**Phase to address:** Window management phase. The `calculateWindowScale` call in options.zig must be made dependent on the per-socket configured buffer size before the handshake phase of that function.
 
 ---
 
-### Pitfall 3: Using `memcpy` Instead of `copy_from_user`/`copy_to_user`
+### Pitfall 3: `send_acked` Pointer Becomes Invalid When Buffer Pointer Changes
 
 **What goes wrong:**
-Kernel uses fast `memcpy` or direct pointer access instead of specialized user memory copy functions. This crashes when user pages are swapped out or triggers SMAP violations.
-
-**Example:**
-```zig
-// WRONG: Direct memcpy (will crash)
-pub fn sys_read(fd: usize, buf_ptr: usize, count: usize) SyscallError!usize {
-    const buf: [*]u8 = @ptrFromInt(buf_ptr);
-    @memcpy(buf[0..count], kernel_data); // PAGE FAULT if swapped out
-}
-
-// CORRECT: Use copy_to_user
-pub fn sys_read(fd: usize, buf_ptr: usize, count: usize) SyscallError!usize {
-    user_mem.copyToUser(buf_ptr, kernel_data, count) catch return error.EFAULT;
-}
-```
+`Tcb` has three pointers into the send buffer: `send_head`, `send_tail`, and `send_acked`. These are byte offsets into `send_buf` modulo `BUFFER_SIZE`. If you change the buffer size (either in place by reallocation, or by replacing the pointer), `send_head % new_size` and `send_tail % new_size` no longer point to the same data -- the circular buffer has been logically corrupted.
 
 **Why it happens:**
-User pages are pageable and can be swapped to disk. A page fault during `memcpy` in kernel mode is fatal unless the kernel has page fault fixup handlers. Additionally, SMAP (Supervisor Mode Access Prevention) causes GPF if kernel directly accesses user pages without using special instructions.
+A circular buffer with modulo arithmetic encodes position as an absolute offset that wraps at capacity. Changing capacity retroactively invalidates all existing position encodings. The offset `send_acked = 4100` means "byte 4100 % 8192 = 4100" in an 8KB buffer. In a 16KB buffer, the same offset still points to the same physical byte, but the logical interpretation (bytes from tail to head vs. bytes in flight) is now computed incorrectly.
 
-**Consequences:**
-- Kernel panic when user buffer is swapped out
-- SMAP violation: General Protection Fault (#GP)
-- Security: kernel stack/register leaks if `memcpy` copies less than expected
+**How to avoid:**
+Buffer resize must be done atomically with a position recalculation. The correct procedure is:
+```
+1. Acquire tcb.mutex
+2. Drain/copy existing buffered bytes: compute logical content as contiguous slice
+3. Allocate new buffer
+4. Copy content to start of new buffer
+5. Reset send_head = content_length, send_tail = 0, send_acked = 0
+6. Replace buffer pointer, update BUFFER_SIZE reference
+7. Release mutex
+```
+This is complex under the existing lock hierarchy. Any shortcut (e.g., just replacing the pointer without recalculating offsets) will corrupt the buffer.
 
-**Prevention:**
-1. **Never use `memcpy`, `@memcpy`, or direct pointer access** for user addresses
-2. Always use `copyFromUser`/`copyToUser` wrappers
-3. These wrappers handle:
-   - Page fault fixup (gracefully return EFAULT)
-   - SMAP-safe unprivileged access instructions (`ldtr`/`sttr` on ARM, `STAC`/`CLAC` on x86)
-   - Partial copy handling
+**Warning signs:**
+- Data corruption (wrong bytes sent) after buffer resize with data in flight.
+- Retransmission of wrong data after resize.
+- `bufferedBytes()` in tx/data.zig returning values larger than the buffer.
 
-**Detection:**
-- Enable SMAP in CPU (x86_64: CR4.SMAP bit)
-- Test with swapped-out memory (use `madvise(MADV_DONTNEED)` from userspace)
-- Kernel should not crash, should return EFAULT
-
-**Affected syscall categories:**
-- ALL syscalls touching user memory
-
-**References:**
-- [Complicated History of a Simple Linux Kernel API](https://grsecurity.net/complicated_history_simple_linux_kernel_api)
+**Phase to address:** Buffer resizing phase. Must be treated as an atomic operation with position renormalization. Flag this as requiring a specific test: send 4KB, resize to 16KB, send 4KB more, verify all 8KB received in order.
 
 ---
 
-### Pitfall 4: Linux ABI Struct Layout Mismatches
+### Pitfall 4: `cwnd` Growing Without Bound Under Sustained ACKs (Missing Max Cap)
 
 **What goes wrong:**
-Kernel uses kernel-internal struct definitions that differ from userspace libc definitions. When kernel writes to user buffer using wrong layout, data is corrupted or shifted.
-
-**Example:**
+The congestion avoidance increment in rx/established.zig:65-67 is:
 ```zig
-// WRONG: Using kernel's internal struct stat
-const KernelStat = extern struct {
-    st_dev: u64,
-    st_ino: u64,
-    // ... kernel layout
-};
+const inc = @max(1, (@as(u64, tcb.mss) * tcb.mss) / tcb.cwnd);
+const inc_clamped: u32 = if (inc > std.math.maxInt(u32)) std.math.maxInt(u32) else @truncate(inc);
+tcb.cwnd = std.math.add(u32, tcb.cwnd, inc_clamped) catch std.math.maxInt(u32);
+```
+This correctly uses `std.math.add` to saturate at `maxInt(u32)` (~4GB). However, there is no upper bound on `cwnd` relative to the actual send buffer size. Once `cwnd > BUFFER_SIZE`, it has no effect (the send buffer is the bottleneck). A `cwnd` of 4GB wastes comparison operations every retransmit and can trigger u32 overflow in `eff_wnd` calculations:
+```zig
+const eff_wnd = @min(@as(u32, tcb.snd_wnd), tcb.cwnd); // Both u32, safe
+const flight_size = tcb.snd_nxt -% tcb.snd_una; // Wrapping subtraction
+if (flight_size >= eff_wnd) { // Can be wrong if eff_wnd = maxInt(u32)
+```
+If `cwnd` reaches `maxInt(u32)` and `snd_wnd` is also large, `eff_wnd` stays sane. But if you introduce a 64-bit `cwnd` (e.g., for large buffers), the `@min` comparisons must be widened consistently.
 
-pub fn sys_stat(path_ptr: usize, statbuf_ptr: usize) SyscallError!usize {
-    var kstat: KernelStat = getFileInfo(path);
-    copyToUser(statbuf_ptr, &kstat, @sizeOf(KernelStat)); // WRONG SIZE/LAYOUT
-}
+**How to avoid:**
+Cap `cwnd` at `max(send_buffer_size, snd_wnd * 2)` during AIMD. Linux caps at 1GB. A reasonable cap for zk is `min(BUFFER_SIZE * 4, snd_wnd * 4)` since there's no reason to have a `cwnd` larger than what can actually be buffered and sent.
 
-// CORRECT: Use Linux UAPI struct stat definition
-const LinuxStat = extern struct {
-    st_dev: u64,
-    st_ino: u64,
-    st_nlink: usize,
-    st_mode: u32,
-    st_uid: u32,
-    st_gid: u32,
-    __pad0: u32,
-    st_rdev: u64,
-    st_size: i64,
-    st_blksize: isize,
-    st_blocks: i64,
-    st_atim: timespec,
-    st_mtim: timespec,
-    st_ctim: timespec,
-    __unused: [3]i64,
+**Warning signs:**
+- `cwnd` growing to `maxInt(u32)` in long-lived idle connections with no data loss.
+- Adding larger buffer sizes causes cwnd to overflow u32 when treated as byte count.
+
+**Phase to address:** Congestion control hardening phase. Add `cwnd = @min(cwnd, MAX_CWND)` at the end of the AIMD update path.
+
+---
+
+### Pitfall 5: Partial ACK Deflation in Fast Recovery Sets `cwnd` Below `mss`
+
+**What goes wrong:**
+In rx/established.zig:47, partial ACK during fast recovery does:
+```zig
+tcb.cwnd = tcb.ssthresh + @as(u32, tcb.mss);
+```
+This is the Reno partial ACK deflation. However, `ssthresh` at fast recovery entry is set to `max(flight / 2, mss * 2)`. If there is only 1 MSS in flight when duplicate ACKs arrive, `ssthresh = mss * 2` and `cwnd = mss * 3` at recovery entry, then on partial ACK `cwnd = mss * 2 + mss = mss * 3`. This is actually correct. The bug manifests differently: if `ssthresh` was set to exactly `mss * 2` and then `ssthresh + mss` is `mss * 3`, the window never deflates below `mss * 2` even when `flight_size = 0`. This prevents proper stall detection.
+
+The real risk: when implementing NewReno or CUBIC later, the partial ACK handling must be rewritten. The current Reno implementation is tightly coupled to the specific cwnd arithmetic. Adding a different algorithm means untangling these values without breaking the existing fast recovery state machine.
+
+**How to avoid:**
+Isolate congestion control state into a separate struct at the design phase:
+```zig
+pub const CongestionState = struct {
+    cwnd: u32,
+    ssthresh: u32,
+    algorithm: enum { Reno, NewReno, CUBIC },
+    // algorithm-specific state
+    fast_recovery: bool,
+    recover: u32,
+    dup_ack_count: u8,
 };
 ```
+The `Tcb` holds a `CongestionState` and calls `cc.onAck()`, `cc.onLoss()`, `cc.onDupAck()`. This makes algorithm replacement surgical rather than a diff across the entire RX path.
 
-**Why it happens:**
-The Linux UAPI (userspace API) has evolved over 30+ years. Struct definitions in `<linux/stat.h>` have padding for future expansion and architecture-specific layout. Many hobby OS developers copy glibc struct definitions, which differ from kernel UAPI.
+**Warning signs:**
+- Fast recovery state machine behaving differently after adding a second algorithm.
+- `cwnd` and `ssthresh` being modified from two code paths simultaneously (one in established.zig, one in the new algorithm).
 
-**Specific examples:**
-- `struct stat`: Kernel adds `__pad0` between `st_gid` and `st_rdev` for alignment
-- `struct timespec`: Changed from `{long tv_sec; long tv_nsec}` to handle Y2038
-- `socklen_t`: Is `u32` in kernel UAPI, but often mistakenly treated as `usize` (8 bytes)
-
-**Consequences:**
-- Silent data corruption: userspace reads wrong fields
-- Off-by-N-bytes errors in struct members
-- `socklen_t` mismatch: reading 8 bytes from 4-byte stack variable reads garbage
-
-**Prevention:**
-1. **Use official Linux UAPI headers** (`include/uapi/linux/`) as source of truth
-2. For each struct-taking syscall, verify layout with:
-   ```bash
-   pahole -C struct_stat /usr/lib/debug/vmlinux
-   ```
-3. Match sizes exactly: `readValue(u32)` for `socklen_t`, not `readValue(usize)`
-4. Test on both 32-bit and 64-bit architectures
-
-**Detection:**
-- Write userspace test that checks each struct field offset and size
-- Compare against known-good Linux values
-- Test with `-m32` (32-bit) and `-m64` (64-bit) binaries
-
-**Affected syscall categories:**
-- File stat syscalls (stat, fstat, fstatat, statfs)
-- Socket syscalls (getsockopt, setsockopt, getsockname, getpeername, accept)
-- Time syscalls (clock_gettime, gettimeofday, nanosleep)
-- Process info (wait4, getrusage, times, sysinfo, uname)
-
-**References:**
-- [Linux UAPI Headers](https://www.kernel.org/doc/html/v4.12/process/adding-syscalls.html)
-- [Definitive Guide to Linux System Calls](https://blog.packagecloud.io/the-definitive-guide-to-linux-system-calls/)
+**Phase to address:** Congestion control phase. The struct isolation should be done first, before implementing any new algorithm.
 
 ---
 
-### Pitfall 5: Architecture-Specific Syscall Number Collisions
+### Pitfall 6: RTT Measurement With Retransmitted Segments (Karn's Algorithm Not Applied)
 
 **What goes wrong:**
-Different architectures use different syscall numbers for the same syscall. If syscall dispatch table uses a comptime reflection mechanism, two `SYS_*` constants with the same numeric value cause one handler to be silently dropped.
+The current RTT measurement in rx/established.zig:51-58 updates the RTO when `ack >= rtt_seq`. This is correct for new transmissions. However, `rtt_seq` is set in tx/data.zig:97-100 as the sequence number of the front of the next segment. If that segment is retransmitted (timer expiry or fast retransmit) and then ACKed, the RTT sample is the time from the *original* send, not the retransmit. This overestimates RTT after loss events.
 
-**Example:**
-```zig
-// In linux_aarch64.zig - WRONG (collision)
-pub const SYS_GETPGID: usize = 155; // Native aarch64
-pub const SYS_GETPGRP: usize = 155; // Legacy compat - SAME NUMBER!
+RFC 6298 (Karn's Algorithm): do not use RTT samples from retransmitted segments. Reset `rtt_seq = 0` whenever a segment is retransmitted.
 
-// Comptime dispatch table (table.zig)
-inline for (comptime std.meta.declarations(uapi.syscalls)) |decl| {
-    if (decl.data == 155) {
-        // Which handler? First match wins, second is lost!
-    }
-}
+Currently, `retransmitFromSeq()` in tx/data.zig and `retransmitLoss()` do not clear `rtt_seq`. The timer expiry path in timers.zig:118-130 also does not clear `rtt_seq`.
 
-// CORRECT: Assign unique numbers
-pub const SYS_GETPGID: usize = 155; // Native aarch64
-pub const SYS_GETPGRP: usize = 500; // Legacy compat in 500+ range
-```
+**How to avoid:**
+Add `tcb.rtt_seq = 0` and `tcb.rtt_start = 0` in:
+1. `retransmitFromSeq()` in tx/data.zig
+2. The RTO timer expiry branch in timers.zig (before the retransmit call)
+3. Fast retransmit in rx/established.zig before calling `retransmitLoss()`
 
-**Why it happens:**
-aarch64 Linux ABI omits many legacy x86_64 syscalls (`open`, `pipe`, `stat`, `fork`, `getpgrp`). Hobby kernels often want to support both for ease of porting. If legacy syscalls are assigned numbers that collide with native aarch64 syscalls, the comptime dispatch silently picks one.
+**Warning signs:**
+- RTO inflating abnormally after a single loss event.
+- `srtt` growing without bound after a period of congestion.
+- The connection recovering from loss but then transmitting very slowly for minutes.
 
-**Consequences:**
-- `getpgid(pid)` dispatches to `sys_getpgrp()` (no args) - wrong handler, crash
-- Syscall appears to work on x86_64, mysteriously fails on aarch64
-- No compile-time warning - collision is at runtime in dispatch table
-
-**Prevention:**
-1. **Maintain strict syscall number uniqueness** per architecture
-2. Use 500-599 range for legacy compat syscalls on aarch64
-3. Add compile-time assertion to check for duplicates:
-   ```zig
-   comptime {
-       var seen = std.AutoHashMap(usize, []const u8).init(allocator);
-       for (std.meta.declarations(uapi.syscalls)) |decl| {
-           if (seen.get(decl.data)) |existing| {
-               @compileError("Syscall collision: " ++ existing ++ " and " ++ decl.name);
-           }
-           seen.put(decl.data, decl.name);
-       }
-   }
-   ```
-
-**Detection:**
-- Run syscall with argument on aarch64, verify it receives the argument
-- Test all syscalls on both x86_64 and aarch64
-- Use `syscall_query.py --check-collisions`
-
-**Affected syscall categories:**
-- Legacy syscalls on aarch64: `open`, `pipe`, `stat`, `lstat`, `access`, `fork`, `getpgrp`
-
-**References:**
-- [Linux System Call Table for Several Architectures](https://marcin.juszkiewicz.com.pl/download/tables/syscalls.html)
-- [Chromium OS Syscall Table](https://chromium.googlesource.com/chromiumos/docs/+/master/constants/syscalls.md)
+**Phase to address:** RTT estimation hardening. This is a correctness fix that should be applied before congestion control is extended, because incorrect RTT makes all congestion control decisions wrong.
 
 ---
 
-### Pitfall 6: Errno Sign Convention Mistakes
+### Pitfall 7: Dynamic Buffer Allocation Fails Under `state.lock` (IrqLock = Interrupts Disabled)
 
 **What goes wrong:**
-Kernel returns positive errno instead of negative, or returns -errno when syscall succeeds. Userspace misinterprets result.
+`state.lock` is an `IrqLock` that disables interrupts while held. The heap allocator (`tcp_allocator`) is accessed while holding this lock in `allocateTcb()`. If you add `SO_RCVBUF`/`SO_SNDBUF` resizing that calls `heap.allocator().alloc()` while holding `state.lock`, and the allocator internally tries to acquire another lock (e.g., `pmm.lock`), you will deadlock or violate the lock ordering documented in CLAUDE.md (lock order: `tcp_state.lock` at position 5, `pmm.lock` at position 10 -- so pmm can be acquired under tcp_state.lock in the ordering).
 
-**Example:**
-```zig
-// WRONG: Returning positive errno
-pub fn sys_open(path_ptr: usize, flags: usize, mode: usize) SyscallError!usize {
-    if (bad_path) return 2; // EPERM = 2, but should be error.EPERM
-}
+The actual risk is different: with interrupts disabled, any allocation that requires a page fault or sleeps (even briefly) is illegal. The heap allocator in this kernel does not sleep, but `pmm.allocZeroedPages` must not be called from interrupt context with interrupts disabled. Check `heap.allocator()` implementation carefully before allocating under IrqLock.
 
-// WRONG: Returning negative on success
-pub fn sys_read(fd: usize, buf_ptr: usize, count: usize) SyscallError!usize {
-    const bytes_read = file.read(buf);
-    return -bytes_read; // WRONG SIGN
-}
+**How to avoid:**
+- Pre-allocate buffers at socket creation time (`socket()` syscall), not at first send/recv or at `setsockopt`.
+- If resizing is done on-demand, release `state.lock` before allocating, then re-acquire and validate the TCB still exists before installing the new buffer.
+- Use the pattern from `freeTcb()`: collect work items to do after lock release, then do them outside the lock.
 
-// CORRECT: Use error union
-pub fn sys_open(path_ptr: usize, flags: usize, mode: usize) SyscallError!usize {
-    if (bad_path) return error.EPERM; // Dispatcher converts to -1
-    return fd; // Success: return FD number
-}
-```
+**Warning signs:**
+- Deadlock in `setsockopt(SO_RCVBUF)` with another thread holding `pmm.lock`.
+- Interrupt latency spike when buffer allocation happens during a connection-heavy workload.
+- `alloc` called from timer interrupt context (processTimers holds state.lock).
 
-**Convention:**
-- Kernel returns: **RAX >= 0 = success**, **RAX in [-4095, -1] = -errno**
-- Error range is precisely -4095 to -1 (highest 4095 errno codes)
-- Values below -4095 are valid return values (e.g., large file offsets)
-
-**Why it happens:**
-Confusion between kernel-internal representation (error union) and ABI (negative errno). Some hobby OS projects return positive errno directly, which userspace interprets as success.
-
-**Special case: `getpriority()`**
-Returns priority in range [-20, 19]. Since -1 to -20 overlap errno range, Linux uses a special convention: kernel returns `20 - priority` (range [0, 39]), and libc subtracts 20.
-
-**Consequences:**
-- Userspace thinks syscall succeeded when it failed
-- Userspace thinks syscall failed when it succeeded
-- Incorrect errno values confuse error handling
-
-**Prevention:**
-1. **Use error unions** (`SyscallError!usize`) for all handlers
-2. Let dispatch layer convert error to negative errno
-3. Never manually return negative values for errors
-4. Test with syscalls that can return large positive values (lseek, mmap)
-
-**Detection:**
-- Test syscall failure cases, verify errno is set correctly in userspace
-- Test syscall success with large return values (mmap address `0x7fff_0000_0000`)
-- Use strace equivalent to log raw syscall return values
-
-**Affected syscall categories:**
-- All syscalls (universal convention)
-
-**References:**
-- [Linux System Calls, Error Numbers, and In-Band Signaling](https://nullprogram.com/blog/2016/09/23/)
-- [Linux Kernel: System Calls](https://www.win.tue.nl/~aeb/linux/lk/lk-4.html)
+**Phase to address:** Buffer resizing phase. Design the allocation site before writing any code. Never allocate under IrqLock unless the allocator is provably interrupt-safe.
 
 ---
 
-## Moderate Pitfalls
-
-These mistakes cause functional bugs, crashes, or data corruption but are not typically security vulnerabilities.
-
----
-
-### Pitfall 7: Syscall Interruption by Signals (EINTR Handling)
+### Pitfall 8: `send_tail` Advanced by ACK Without Checking `send_acked` (In-Flight Data Clobbered)
 
 **What goes wrong:**
-Blocking syscall does not handle signal delivery correctly. Either:
-1. Syscall returns EINTR, but userspace expects auto-restart
-2. Syscall hangs forever, ignoring signals
-
-**Example:**
+In rx/established.zig:70-72:
 ```zig
-// WRONG: No EINTR handling
-pub fn sys_read(fd: usize, buf_ptr: usize, count: usize) SyscallError!usize {
-    while (file.buffer_empty) {
-        sched.block(); // Blocked forever, even if signal delivered
-    }
-}
-
-// CORRECT: Check for signals
-pub fn sys_read(fd: usize, buf_ptr: usize, count: usize) SyscallError!usize {
-    while (file.buffer_empty) {
-        sched.block();
-        if (current_process.has_pending_signal()) {
-            // Check SA_RESTART flag for the signal
-            if (should_restart) {
-                continue; // Restart syscall
-            } else {
-                return error.EINTR; // Interrupt syscall
-            }
-        }
-    }
-}
+const real_acked = ack -% tcb.snd_una;
+tcb.snd_una = ack;
+tcb.send_tail = (tcb.send_tail + real_acked) % c.BUFFER_SIZE;
 ```
+This advances `send_tail` by the ACKed byte count. `send_tail` is the read pointer for bytes to send/retransmit. `send_acked` is tracked separately (api.zig:185 shows it used for write position). The `send_tail` advancement assumes the circular buffer arithmetic is correct -- specifically that `real_acked` cannot exceed the actual buffered content.
 
-**Linux behavior:**
-- When signal delivered during blocking syscall:
-  - If `SA_RESTART` flag set: kernel auto-restarts syscall (invisible to userspace)
-  - If `SA_RESTART` not set: kernel returns EINTR, userspace must retry
-- POSIX defines which syscalls support restart (read, write, wait, etc.)
-- Some syscalls NEVER restart: `select`, `poll`, `epoll_wait`, `sigtimedwait`
+If `real_acked` wraps (i.e., `ack -% snd_una` produces a value larger than the buffered data due to a rogue ACK or a bug), `send_tail` jumps past `send_head`, making the buffer appear empty when it is not, and subsequent sends will overwrite unacknowledged data.
 
-**Why it happens:**
-Signal delivery is complex. Hobby kernels often:
-1. Forget to check for signals in blocking syscalls
-2. Always return EINTR (annoying for userspace)
-3. Never return EINTR (breaking signal handling)
+With dynamic buffer sizes, if the buffer has been resized between the original send and the ACK, `real_acked` may be valid but the modulo with the old `BUFFER_SIZE` is wrong.
 
-**Consequences:**
-- Syscall hangs forever, even with `SIGKILL` (unkillable process)
-- Syscall always returns EINTR, breaking apps that expect restart
-- Race condition: signal delivered between syscall check and block
+**How to avoid:**
+Add an assertion (or runtime check in debug builds):
+```zig
+const buffered = bufferedBytes(tcb); // from tx/data.zig
+if (real_acked > buffered) {
+    // Rogue ACK or state corruption -- reset connection
+    tcb.state = .Closed;
+    return .Continue;
+}
+tcb.send_tail = (tcb.send_tail + real_acked) % effective_buf_size;
+```
+For dynamic buffers, `effective_buf_size` must come from the TCB's current buffer size field, not from the comptime constant `c.BUFFER_SIZE`.
 
-**Prevention:**
-1. **Check for signals** at every block point in syscall
-2. Respect `SA_RESTART` flag from signal handler registration
-3. For non-restartable syscalls, always return EINTR if signal pending
-4. Document which syscalls support restart
+**Warning signs:**
+- Data received by peer out of order or duplicated after an ACK.
+- `bufferedBytes()` returning values larger than buffer capacity.
+- SACK blocks referencing sequence ranges that were already ACKed.
 
-**Detection:**
-- Test: send SIGUSR1 during `read()` with and without `SA_RESTART`
-- Test: send SIGKILL to process blocked in syscall - should terminate immediately
-- Test: `select()` with timeout, send signal - should return EINTR, not restart
-
-**Affected syscall categories:**
-- All blocking syscalls: read, write, accept, recv, wait, sleep, select, futex
-
-**References:**
-- [Interrupted System Call in Linux](https://www.baeldung.com/linux/system-call-interrupt)
-- [Signals and System Call Restarting](https://yarchive.net/comp/linux/signals_restart.html)
+**Phase to address:** Buffer resizing phase. This check must be added when `c.BUFFER_SIZE` is replaced with a runtime value.
 
 ---
 
-### Pitfall 8: File Descriptor Inheritance and `O_CLOEXEC` Races
+### Pitfall 9: `processTimers()` Stack Allocation Scales With `MAX_TCBS`
 
 **What goes wrong:**
-File descriptor leaks to child process after `fork()` + `exec()` because `O_CLOEXEC` flag not set atomically. This is a race condition in multithreaded programs.
-
-**Example:**
+`processTimers()` in timers.zig:15 allocates:
 ```zig
-// WRONG: Non-atomic FD_CLOEXEC setting
-pub fn sys_open(path_ptr: usize, flags: usize, mode: usize) SyscallError!usize {
-    const fd = allocate_fd();
-    // ... open file ...
-    // TIME PASSES - another thread forks!
-    if (flags & O_CLOEXEC != 0) {
-        set_cloexec(fd); // Too late - child already has FD
-    }
-    return fd;
-}
+var wake_list: [c.MAX_TCBS]?*anyopaque = undefined;
+```
+`MAX_TCBS = 256`, so this is `256 * 8 = 2048` bytes on the stack. The function already holds `state.lock` (IrqLock, interrupts disabled), so the stack frame is allocated in a restricted context. If you increase `MAX_TCBS` to support more connections (a natural consequence of dynamic buffers reducing per-connection overhead), this stack allocation grows linearly.
 
-// CORRECT: Set close-on-exec atomically
-pub fn sys_open(path_ptr: usize, flags: usize, mode: usize) SyscallError!usize {
-    const fd = allocate_fd();
-    if (flags & O_CLOEXEC != 0) {
-        fd_table.set_cloexec_flag(fd); // Set BEFORE file is visible
-    }
-    // ... open file ...
-    return fd;
-}
+At 1024 TCBs: 8KB just for `wake_list`. The kernel stack is 96KB (24 pages), but the dispatch stack depth is already deep at timer interrupt entry. The "comptime dispatch table expansion = stack overflow" pattern from MEMORY.md is the precedent here.
+
+**How to avoid:**
+Change `wake_list` to a fixed small array (e.g., 32 entries) and process in batches, or use a static global wake buffer protected by its own lock (safe because `processTimers` is always called from a single timer context in this single-CPU kernel).
+
+```zig
+// Static buffer - safe for single-CPU kernel
+var wake_list: [64]?*anyopaque = undefined; // Fixed size
+var wake_count: usize = 0;
+// If wake_count >= 64: release lock, wake batch, re-acquire, continue
 ```
 
-**Why it happens:**
-In multithreaded programs:
-1. Thread A calls `open()` without `O_CLOEXEC`, gets FD 3
-2. Thread A calls `fcntl(3, F_SETFD, FD_CLOEXEC)` to set flag
-3. Between steps 1 and 2, Thread B calls `fork()` + `exec()`
-4. Child process inherits FD 3 without `FD_CLOEXEC` set
+**Warning signs:**
+- Double fault or kernel stack guard hit after increasing `MAX_TCBS`.
+- Stack corruption manifesting as wrong TCB state after a timer tick with many simultaneous timeouts.
 
-**Consequences:**
-- File descriptor leaks to unrelated child processes
-- Security: child process gains access to files it shouldn't have
-- Resource leak: FD stays open in multiple processes
-- OpenBSD bug: `fork()` without `exec()` didn't close FDs with `FD_CLOEXEC`
-
-**Prevention:**
-1. **Support `O_CLOEXEC` flag** in `open()`, `socket()`, `pipe2()`, `dup3()`
-2. Set close-on-exec flag **before** FD is visible to other threads
-3. When `exec()` called, iterate FD table and close all FDs with `FD_CLOEXEC`
-4. Document that `O_CLOEXEC` is preferred over post-open `fcntl()`
-
-**Detection:**
-- Multithreaded test: thread A opens file, thread B continuously forks
-- Child process lists its open FDs (`/proc/self/fd` equivalent)
-- Verify child does NOT have parent's file descriptors
-
-**Affected syscall categories:**
-- `open`, `openat`, `creat`
-- `socket`, `socketpair`, `accept`, `accept4`
-- `pipe`, `pipe2`
-- `dup`, `dup2`, `dup3`
-
-**References:**
-- [PEP 446: Make Newly Created File Descriptors Non-Inheritable](https://peps.python.org/pep-0446/)
-- [File Descriptors During fork() and exec()](https://tzimmermann.org/2017/08/17/file-descriptors-during-fork-and-exec/)
+**Phase to address:** Any phase that increases `MAX_TCBS`. If dynamic buffers reduce per-connection overhead enough to warrant more connections, address the wake_list size first.
 
 ---
 
-### Pitfall 9: `mmap()` Alignment, Overflow, and Partial `munmap()`
+### Pitfall 10: Persist Timer Logic Missing -- Zero-Window Deadlock
 
 **What goes wrong:**
-`mmap()` syscall does not enforce page alignment, allows integer overflow in size calculations, or `munmap()` fails to handle partial unmapping of regions.
+When `snd_wnd = 0` (peer's receive buffer is full), `transmitPendingData` returns early (tx/data.zig:58-76) and sets `retrans_timer = 1`. The RTO timer fires and retransmits a zero-window probe. However, the retransmit path in timers.zig:120-130 handles the `.Established` case by either using SACK retransmit or resetting `snd_nxt = snd_una` and calling `transmitPendingData`. If `snd_wnd` is still 0 when `transmitPendingData` is called, it hits the `eff_wnd == 0` branch and sends a 1-byte probe (lines 63-72). This is correct.
 
-**Example:**
-```zig
-// WRONG: No alignment check
-pub fn sys_mmap(addr: usize, len: usize, prot: usize, flags: usize, fd: usize, offset: usize) SyscallError!usize {
-    const virt_addr = vmm.allocate(addr, len); // Not page-aligned!
-    return virt_addr;
-}
+The bug is that the RTO exponential backoff applies to the persist probe -- the same timer backs off to 64 seconds. RFC 1122 requires a persist timer that probes at 5-60 second intervals (not the full RTO backoff schedule). Using RTO backoff for zero-window probing means after a few probe failures, the probe interval is minutes, effectively freezing the connection.
 
-// WRONG: Integer overflow
-pub fn sys_mmap(addr: usize, len: usize, ...) SyscallError!usize {
-    const end_addr = addr + len; // Wraps to 0 if addr + len > 2^64
-    if (end_addr < addr) return error.EINVAL; // TOO LATE - already wrapped
-}
+**How to avoid:**
+Separate the persist timer from the retransmission timer. When `snd_wnd = 0`:
+- Do not start the retrans timer in the normal sense.
+- Start a persist timer that fires every `min(rto_ms, PERSIST_MAX_MS)` seconds.
+- Do not apply exponential backoff to the persist interval (or apply a much gentler cap, e.g., 60s max).
+- Reset persist timer when a non-zero window update arrives.
 
-// CORRECT: Use checked arithmetic
-pub fn sys_mmap(addr: usize, len: usize, ...) SyscallError!usize {
-    if (addr % PAGE_SIZE != 0) return error.EINVAL;
-    if (offset % PAGE_SIZE != 0) return error.EINVAL;
+**Warning signs:**
+- Connection "frozen" for minutes when peer's buffer temporarily fills.
+- `retrans_count` incrementing on zero-window probes, eventually triggering MAX_RETRIES reset.
+- Connection reset by kernel after peer's buffer opens up but before the next probe fires.
 
-    const end_addr = std.math.add(usize, addr, len) catch return error.EINVAL;
-    // ... rest of mmap ...
-}
-```
-
-**Partial munmap issue:**
-Linux allows unmapping part of a region:
-```
-Region: [0x1000 - 0x5000]  (4 pages)
-munmap(0x2000, 0x2000)     (middle 2 pages)
-Result: [0x1000-0x2000] and [0x4000-0x5000]  (TWO regions)
-```
-
-This requires **splitting the VMA** (Virtual Memory Area) structure. If kernel runs out of memory to allocate new VMA, `munmap()` must return `ENOMEM` (counter-intuitive for a "free" operation).
-
-**Why it happens:**
-- Page alignment is critical for MMU but easy to forget
-- Integer overflow in address arithmetic is subtle
-- VMA splitting requires memory allocation, which can fail
-
-**Consequences:**
-- Misaligned mappings confuse page tables, cause MMU faults
-- Overflow allows mapping over kernel space or wrapping addresses
-- `munmap()` failure leaves memory in inconsistent state
-
-**Prevention:**
-1. **Validate alignment** of `addr`, `len`, and `offset` (must be multiple of `PAGE_SIZE`)
-2. **Use checked arithmetic** for all address calculations
-3. Handle VMA splits in `munmap()` - may return `ENOMEM`
-4. Zero-initialize newly mapped pages to avoid leaking kernel memory
-
-**Detection:**
-- Test with `addr` = 0x1001 (not page-aligned) - should return EINVAL
-- Test with `len` = MAX_USIZE - addr + 1 (overflow) - should return EINVAL
-- Test `munmap()` of middle of region, verify two regions remain
-
-**Affected syscall categories:**
-- `mmap`, `munmap`, `mremap`, `mprotect`
-
-**References:**
-- [mmap(2) Linux Manual](https://man7.org/linux/man-pages/man2/mmap.2.html)
-- [User-Space Page Fault Handling](https://lwn.net/Articles/550555/)
+**Phase to address:** Window management phase. Persist timer is tightly coupled to zero-window logic.
 
 ---
 
-### Pitfall 10: `fork()` / `clone()` Register and TLS Corruption
+## Technical Debt Patterns
 
-**What goes wrong:**
-Child process after `fork()` has corrupted registers, stack pointer, or thread-local storage (TLS). This manifests as:
-- Child crashes with segfault immediately
-- Child has wrong stack (reads parent's stack)
-- Child TLS points to parent's TLS (corrupts thread-local variables)
-
-**Example:**
-```zig
-// WRONG: Swapping CS and SS registers (real bug from zk kernel)
-pub fn fork() SyscallError!usize {
-    // ... copy process ...
-    child_regs.cs = parent_regs.ss; // WRONG ORDER
-    child_regs.ss = parent_regs.cs; // WRONG ORDER
-    return child_pid;
-}
-
-// CORRECT: Preserve all segment registers exactly
-pub fn fork() SyscallError!usize {
-    child_regs.cs = parent_regs.cs;
-    child_regs.ss = parent_regs.ss;
-    child_regs.ds = parent_regs.ds;
-    child_regs.es = parent_regs.es;
-    child_regs.fs = parent_regs.fs; // TLS segment
-    child_regs.gs = parent_regs.gs;
-}
-```
-
-**TLS handling on x86_64:**
-- Thread-local variables stored in segment pointed to by `FS` register
-- `arch_prctl(ARCH_SET_FS, addr)` sets FS base to TLS address
-- Child process must get its own TLS block, not parent's
-- `clone()` with `CLONE_SETTLS` flag provides TLS address in 6th argument
-
-**TLS handling on aarch64:**
-- Thread pointer in `TPIDR_EL0` register
-- `clone()` TLS argument sets this register in child
-
-**Why it happens:**
-- Register saving/restoring in assembly has subtle mistakes
-- TLS setup is architecture-specific and poorly documented
-- Stack switching requires precise pointer arithmetic
-
-**Consequences:**
-- Child crashes with GPF (General Protection Fault) on x86_64
-- Child crashes with data abort on aarch64
-- Thread-local variables corrupted across processes
-
-**Prevention:**
-1. **Save ALL registers** in syscall entry, including segment registers
-2. For `fork()`: Copy parent's entire register state to child
-3. For `clone()`: Set up new stack pointer and TLS from arguments
-4. Test with `fork()` followed by accessing thread-local variable in child
-
-**Detection:**
-- Test: `fork()` then child calls `pthread_self()` - should not crash
-- Test: `clone()` with custom stack - verify child uses new stack
-- Use debugger to inspect register state in child immediately after fork
-
-**Affected syscall categories:**
-- `fork`, `vfork`, `clone`, `clone3`
-
-**References:**
-- [Deep Dive into Thread Local Storage](https://chao-tic.github.io/blog/2018/12/25/tls)
-- [Linux fork System Call and Its Pitfalls](https://devarea.com/linux-fork-system-call-and-its-pitfalls/)
+| Shortcut | Immediate Benefit | Long-term Cost | When Acceptable |
+|----------|-------------------|----------------|-----------------|
+| Keep `c.BUFFER_SIZE` as comptime in buffer arithmetic | No code changes needed | Cannot support per-socket buffer sizes; window scale is wrong for non-default buffers | Only until buffer resizing phase |
+| Use `cwnd = mss` on loss without per-algorithm state | Simple code, correct for Reno | Cannot add CUBIC without rewriting the RX path | Never -- struct isolation has no downside |
+| Track RTT on retransmitted segments (Karn's violation) | One less conditional | RTT inflates post-loss, causing conservative RTO, hurting throughput | Never -- this is an RFC violation |
+| Single `retrans_timer` for both retransmit and persist | Fewer timer fields | Zero-window deadlock under backoff | Never -- separate timers have independent purposes |
+| `maxInt(u32)` saturation for cwnd | No overflow | cwnd becomes meaningless at >4GB; comparison semantics change | Acceptable only if BUFFER_SIZE cap is also applied |
 
 ---
 
-### Pitfall 11: Socket Option Type Size Mismatches (`socklen_t`)
+## Integration Gotchas
 
-**What goes wrong:**
-`socklen_t` is `u32` (4 bytes), but kernel treats it as `usize` (8 bytes). When reading/writing socket option lengths, kernel reads/writes wrong number of bytes, picking up garbage from stack.
-
-**Example:**
-```zig
-// WRONG: Using usize for socklen_t
-pub fn sys_getsockopt(sockfd: usize, level: usize, optname: usize, optval_ptr: usize, optlen_ptr: usize) SyscallError!usize {
-    var optlen: usize = readValue(usize, optlen_ptr); // Reads 8 bytes
-    // ... get option ...
-    writeValue(usize, optlen_ptr, new_len); // Writes 8 bytes
-}
-
-// CORRECT: Match Linux ABI exactly
-pub fn sys_getsockopt(sockfd: usize, level: usize, optname: usize, optval_ptr: usize, optlen_ptr: usize) SyscallError!usize {
-    var optlen: u32 = readValue(u32, optlen_ptr); // Reads 4 bytes
-    // ... get option ...
-    writeValue(u32, optlen_ptr, @as(u32, @intCast(new_len))); // Writes 4 bytes
-}
-```
-
-**Why it happens:**
-`socklen_t` is defined as `u32` in Linux UAPI for ABI stability (prevents breaking when pointer size changes). Kernel developers mistakenly use `size_t` or `usize`, which is 8 bytes on 64-bit systems.
-
-**Consequences:**
-- Reading 8 bytes from 4-byte stack variable reads garbage from adjacent stack slots
-- May work on x86_64 (adjacent bytes often zero) but fails on aarch64
-- Security: information leak if adjacent stack contains sensitive data
-
-**Prevention:**
-1. **Match exact C type sizes** from Linux UAPI headers
-2. `socklen_t` = `u32` (4 bytes)
-3. `size_t` = `usize` (8 bytes on 64-bit)
-4. `ssize_t` = `isize` (8 bytes on 64-bit)
-
-**Detection:**
-- Test on both x86_64 and aarch64 - behavior may differ
-- Initialize stack with known pattern, verify no extra bytes read
-- Use memory sanitizer to catch out-of-bounds reads
-
-**Affected syscall categories:**
-- `getsockopt`, `setsockopt`
-- `getsockname`, `getpeername`, `accept`
-
-**References:**
-- [Linux Socket Manual Page](https://www.man7.org/linux/man-pages/man7/socket.7.html)
+| Integration Point | Common Mistake | Correct Approach |
+|-------------------|----------------|------------------|
+| `SO_SNDBUF`/`SO_RCVBUF` setsockopt | Apply new size immediately to established connection | Apply to new buffer allocation; do not resize in place; note that Linux doubles the value internally |
+| `currentRecvWindow()` with new buffer size | Forget to update `rcv_wscale` in the TCB | `rcv_wscale` must match the configured buffer at SYN time; expose a `tcb.effectiveBufferSize()` used by both window computation and modulo arithmetic |
+| `calculateWindowScale()` in options.zig:205 | Pass `c.BUFFER_SIZE` (comptime) | Pass `tcb.recv_buf_size` (runtime from socket option) |
+| Congestion control in the ACK path | Modify `cwnd` before `send_tail` advancement | The order in established.zig is significant; cwnd update must see the new `snd_una` value |
+| Adding CUBIC `K` and `W_max` fields to `Tcb` | Add directly to TCB struct | Put in `CongestionState` sub-struct; TCB at ~22KB is already large; adding 64 bytes per connection for unused fields is waste |
+| `options.zig:205` window scale calculation | Called from SYN processing before socket buffer size is known | Pass socket's configured `rcv_buf_size` through the call chain from `rx/syn.zig` |
 
 ---
 
-## Minor Pitfalls
+## Performance Traps
 
-These mistakes cause annoyance or incorrect behavior but are typically easy to fix.
-
----
-
-### Pitfall 12: Syscall Name to Number Dispatch Mismatch
-
-**What goes wrong:**
-Syscall number constant name doesn't match handler function name. Comptime dispatch table fails to find handler, returns `ENOSYS`.
-
-**Example:**
-```zig
-// In uapi/syscalls/linux.zig
-pub const SYS_NEWFSTATAT: usize = 262;
-
-// In syscall/io/root.zig
-pub fn sys_fstatat(...) { } // Name mismatch!
-
-// Dispatch table converts SYS_NEWFSTATAT -> "sys_newfstatat" (not found)
-```
-
-**Why it happens:**
-Linux uses different names for syscall number constants and handler functions due to historical evolution. `newfstatat` vs `fstatat`, `_llseek` vs `lseek`, etc.
-
-**Prevention:**
-1. Add alias in handler module:
-   ```zig
-   pub const sys_newfstatat = sys_fstatat;
-   ```
-2. Or use explicit dispatch table instead of reflection
-
-**Detection:**
-- Test each syscall from userspace, verify not ENOSYS
-- Automated: parse syscall table, verify all numbers have handlers
-
-**Affected syscall categories:**
-- Any syscall with historical naming differences
+| Trap | Symptoms | Prevention | When It Breaks |
+|------|----------|------------|----------------|
+| Linear TCB scan in `processTimers` | Timer tick takes proportionally longer with more connections | Indexed timer wheel (even a simple 8-bucket wheel by next-expiry-second) | At ~128 active connections with frequent short RTOs |
+| Per-byte copy loop in `send()`/`recv()` (api.zig:183-186,210-213) | CPU-bound send throughput, not I/O bound | `@memcpy` with wrapped-buffer handling for the two-segment circular buffer case | Any bulk transfer >1MB with small MSS |
+| `for (0..send_len)` copy in `transmitPendingData` (tx/data.zig:91-94) | Same as above but in TX path | Split into two `@memcpy` calls: `buf[tail..min(tail+len, cap)]` then `buf[0..remainder]` | Measurable at 100MB+ throughput |
+| `isTcbValid()` linear scan on every `connect()` poll (tcp_api.zig:229) | O(n) per wakeup check while blocked on connect | Generation counter check (already in TCB) is sufficient for UAF safety; can skip `isTcbValid()` when generation matches | At 100+ concurrent connecting sockets |
+| `OooBlock` with `[MAX_TCP_PAYLOAD]u8` inline (types.zig:123) | Each OOO block is 1466 bytes; 4 blocks = 5864 bytes per TCB in the struct | Allocate OOO blocks from a pool; or reduce to 2 blocks with coalescing | With dynamic buffers where OOO depth increases |
 
 ---
 
-### Pitfall 13: Blocking Syscall in Non-Blocking Mode
+## Security Mistakes
 
-**What goes wrong:**
-Syscall blocks even though file descriptor has `O_NONBLOCK` flag set. Userspace expects `EAGAIN` immediately.
-
-**Example:**
-```zig
-// WRONG: Ignoring O_NONBLOCK
-pub fn sys_read(fd: usize, buf_ptr: usize, count: usize) SyscallError!usize {
-    const file = get_file(fd);
-    while (file.buffer_empty) {
-        sched.block(); // Blocks forever, even if O_NONBLOCK set
-    }
-}
-
-// CORRECT: Check non-blocking flag
-pub fn sys_read(fd: usize, buf_ptr: usize, count: usize) SyscallError!usize {
-    const file = get_file(fd);
-    if (file.buffer_empty) {
-        if (file.flags & O_NONBLOCK != 0) {
-            return error.EAGAIN; // Return immediately
-        }
-        sched.block();
-    }
-}
-```
-
-**Prevention:**
-1. Check `O_NONBLOCK` flag before any block operation
-2. Return `EAGAIN` or `EWOULDBLOCK` immediately if non-blocking
-3. Test with `fcntl(F_SETFL, O_NONBLOCK)` then syscall
-
-**Affected syscall categories:**
-- `read`, `write`, `accept`, `connect`, `recv`, `send`
+| Mistake | Risk | Prevention |
+|---------|------|------------|
+| Accepting peer's window scale without validation | Peer advertises scale=14; computed `snd_wnd = raw_window << 14` overflows u32 | Clamp: `scale = @min(snd_wscale, c.TCP_MAX_WSCALE)` -- already done in established.zig:123 but verify in SYN-ACK processing path |
+| Advertising window larger than actual buffer | Peer sends data faster than buffer can absorb; data silently dropped | `currentRecvWindow()` must compute from actual free space, not from nominal buffer size |
+| `real_acked` without upper-bound check | Rogue ACK advances `send_tail` past valid data, enabling write-after-send | Add: `if (real_acked > bufferedBytes(tcb)) return error; // reset connection` |
+| Zero-initializing large dynamic buffers at allocation | `pmm.allocZeroedPages` is safe; `heap.allocator().alloc()` with `[_]u8{0}` is a zeroing loop that holds `state.lock` | Allocate with `alloc(u8, size)` outside the lock, then `@memset` outside the lock |
+| Window shrinking: advertising smaller window than already in flight | Peer may have sent more data than the shrunken buffer can hold | Never advertise a window smaller than `rcv_nxt + outstanding_data - recv_buf_start`; the RFC calls this "SWS avoidance" |
 
 ---
 
-### Pitfall 14: Incorrect Handling of Zero-Length Operations
+## "Looks Done But Isn't" Checklist
 
-**What goes wrong:**
-Syscall with `count=0` crashes or returns error instead of succeeding with 0.
-
-**Example:**
-```zig
-// WRONG: Crash on zero-length
-pub fn sys_read(fd: usize, buf_ptr: usize, count: usize) SyscallError!usize {
-    const buf = @as([*]u8, @ptrFromInt(buf_ptr))[0..count]; // count=0 OK
-    return file.read(buf); // But this might assert(len > 0)
-}
-
-// CORRECT: Handle zero-length explicitly
-pub fn sys_read(fd: usize, buf_ptr: usize, count: usize) SyscallError!usize {
-    if (count == 0) return 0; // Success, read 0 bytes
-    // ... rest of implementation ...
-}
-```
-
-**Prevention:**
-1. Test every I/O syscall with `count=0`
-2. Should succeed and return 0 (not error)
-
-**Affected syscall categories:**
-- All I/O syscalls: `read`, `write`, `send`, `recv`, `pread`, `pwrite`
+- [ ] **Congestion control:** `cwnd` is updated but there is no upper bound relative to buffer size -- verify `cwnd = @min(cwnd, send_buf_size * N)` is applied.
+- [ ] **RTT measurement:** `rtt_seq = 0` is set in all retransmit paths (both timer expiry and fast retransmit) -- verify in timers.zig and rx/established.zig.
+- [ ] **Buffer resize:** `Tcb.reset()` frees old dynamic buffer before zeroing -- verify `deinit()` is called, not just `self.* = init()`.
+- [ ] **Window scale:** `rcv_wscale` is computed from the runtime buffer size, not from `c.BUFFER_SIZE` -- verify in options.zig:205.
+- [ ] **Persist timer:** Zero-window detection does not apply exponential backoff beyond 60s -- verify `retrans_count` is not incremented for zero-window probes.
+- [ ] **`send_tail` arithmetic:** The modulo uses the TCB's current effective buffer size, not the comptime constant -- verify in rx/established.zig:72.
+- [ ] **`processTimers` wake_list:** Stack size of `[MAX_TCBS]?*anyopaque` is bounded -- verify when increasing `MAX_TCBS`.
+- [ ] **`SO_SNDBUF` doubling:** Linux silently doubles `SO_SNDBUF` values (for bookkeeping overhead). If you implement `getsockopt(SO_SNDBUF)`, it should return double what `setsockopt` received. Userspace applications depend on this.
+- [ ] **Both architectures:** `snd_wscale` shift (`<< scale`) and window scale option parsing behave identically on x86_64 and aarch64 -- the existing `@min(tcb.snd_wscale, 14)` cast in established.zig:123 is `@intCast` which must not truncate on aarch64.
 
 ---
 
-### Pitfall 15: Missing `AT_FDCWD` Handling in `*at` Syscalls
+## Recovery Strategies
 
-**What goes wrong:**
-`openat(AT_FDCWD, "/path", ...)` treats `AT_FDCWD` as file descriptor -100, fails with `EBADF`.
-
-**Example:**
-```zig
-// WRONG: No special handling for AT_FDCWD
-pub fn sys_openat(dirfd: usize, path_ptr: usize, flags: usize, mode: usize) SyscallError!usize {
-    const dir = fd_table.get(dirfd) orelse return error.EBADF; // Fails if dirfd=AT_FDCWD
-    // ... resolve path relative to dir ...
-}
-
-// CORRECT: Handle AT_FDCWD
-pub fn sys_openat(dirfd: usize, path_ptr: usize, flags: usize, mode: usize) SyscallError!usize {
-    if (dirfd == AT_FDCWD) {
-        // Use current working directory
-        return sys_open(path_ptr, flags, mode);
-    }
-    const dir = fd_table.get(dirfd) orelse return error.EBADF;
-    // ... rest ...
-}
-```
-
-**Prevention:**
-1. All `*at` syscalls must check for `AT_FDCWD` constant (-100)
-2. When `dirfd == AT_FDCWD`, use current working directory
-3. Test: `openat(AT_FDCWD, ...)` should behave like `open(...)`
-
-**Affected syscall categories:**
-- `openat`, `mkdirat`, `unlinkat`, `fstatat`, `renameat`, `fchmodat`, `faccessat`
+| Pitfall | Recovery Cost | Recovery Steps |
+|---------|---------------|----------------|
+| Broken `Tcb.reset()` leaks buffers | MEDIUM | Add `deinit(allocator)` to Tcb; audit all `freeTcb` calls to ensure deinit precedes them |
+| Wrong `send_tail` after buffer resize | HIGH | Connection must be torn down and re-established; no in-place fix; add the buffer_size field validation check first |
+| `cwnd` saturated at maxInt(u32) | LOW | Add cap: `cwnd = @min(cwnd, MAX_CWND)` at end of AIMD path; existing connections recover at next loss event |
+| RTT inflated by retransmit samples | LOW | Add `rtt_seq = 0` in retransmit paths; existing connections self-correct within a few RTT measurements |
+| Zero-window deadlock from RTO backoff | HIGH | Requires persist timer separation; no in-place workaround |
+| `processTimers` stack overflow from large `MAX_TCBS` | HIGH | Reduce `wake_list` to fixed size before increasing `MAX_TCBS`; a double fault is the diagnostic |
 
 ---
 
-## Phase-Specific Warnings
+## Pitfall-to-Phase Mapping
 
-| Syscall Category | Likely Pitfall | Mitigation |
-|------------------|---------------|------------|
-| **File I/O** | User pointer dereference | Always use `copyFromUser`/`copyToUser` |
-| **Networking** | `socklen_t` size mismatch | Use `u32`, not `usize` |
-| **Process** | `fork()` register corruption | Copy ALL registers, including segments |
-| **Memory** | `mmap()` alignment and overflow | Validate page alignment, use checked arithmetic |
-| **Signals** | EINTR handling inconsistency | Check signals at every block point, respect `SA_RESTART` |
-| **File Descriptors** | `O_CLOEXEC` race condition | Set flag atomically during `open()` |
-| **Directory Ops** | `AT_FDCWD` not handled | Check for `-100` constant in all `*at` syscalls |
+| Pitfall | Prevention Phase | Verification |
+|---------|------------------|--------------|
+| `Tcb.init()`/`reset()` buffer lifecycle | Buffer resizing design (before coding) | Test: create connection, resize buffer, close -- verify no heap leak via allocator accounting |
+| Window scale locked at handshake | Window management phase | Test: configure `SO_RCVBUF = 65536`, connect, verify `rcv_wscale = 1` negotiated |
+| `send_tail` corruption on resize | Buffer resizing phase | Test: 4KB in-flight, resize to 16KB, verify all data received correctly |
+| `cwnd` unbounded growth | Congestion control hardening | Test: long idle connection, verify `cwnd <= MAX_CWND` after 10 minutes |
+| Partial ACK deflation coupling | Congestion control phase (struct isolation first) | Test: add NewReno without changing existing Reno test results |
+| Karn's Algorithm missing | RTT estimation fix (before congestion control) | Test: introduce packet loss, verify RTO does not grow beyond 3x base after recovery |
+| Allocation under IrqLock | Buffer resizing phase design | Code review: no `alloc()` call between `lock.acquire()` and `lock.release()` in any path that could hold IrqLock |
+| `send_tail` without upper-bound check | Buffer resizing phase | Test: send crafted rogue ACK (sequence above snd_nxt), verify connection resets gracefully |
+| `processTimers` wake_list stack | Any phase increasing `MAX_TCBS` | Test: 256 simultaneous connections timing out, verify no double fault |
+| Persist timer missing | Window management phase | Test: fill peer buffer, pause peer reading for 30s, verify connection still alive after peer resumes |
 
-## Testing Strategy by Pitfall
-
-### High-Priority Tests (Catch Critical Pitfalls)
-
-1. **User Pointer Validation** (Pitfall 1)
-   - Test with kernel address: `0xffff0000_00000000`
-   - Test with NULL: `0x0`
-   - Test with unmapped: `0xdeadbeef`
-   - Test with overflow: `ptr=0x7fff_ffff_f000, len=0x2000`
-
-2. **TOCTOU Races** (Pitfall 2)
-   - Multithreaded test: thread A syscalls, thread B modifies buffer
-   - Measure: syscall should fail or use original data, never modified data
-
-3. **Struct Layout** (Pitfall 4)
-   - For each struct syscall, compare field offsets with Linux
-   - Test on both 32-bit and 64-bit
-   - Test with known-good values, verify each field
-
-4. **Errno Conventions** (Pitfall 6)
-   - Test failure cases, verify errno matches Linux
-   - Test success with large return values (lseek, mmap)
-   - Never see positive errno as return value
-
-### Architecture-Specific Tests
-
-1. **x86_64**
-   - Test with SMAP enabled (user pointer access should use special instructions)
-   - Test segment register preservation in fork
-
-2. **aarch64**
-   - Test syscall number uniqueness (no collisions)
-   - Test TLS register (`TPIDR_EL0`) in fork/clone
-   - Test `socklen_t` on stack (catches adjacent garbage reads)
-
-## Summary of Categories and Prevalence
-
-| Pitfall Category | Frequency in Hobby OS | Severity | Detection Difficulty |
-|------------------|----------------------|----------|---------------------|
-| User pointer dereference | Very High | Critical | Easy (crashes) |
-| TOCTOU races | High | Critical | Hard (intermittent) |
-| Struct layout mismatches | High | Moderate | Medium (silent corruption) |
-| ABI calling convention | Medium | Moderate | Easy (wrong values) |
-| Signal handling (EINTR) | Medium | Moderate | Medium (hangs or interrupts) |
-| Integer overflow | Medium | High | Medium (rare edge cases) |
-| Architecture differences | High on multi-arch | High | Hard (works on one arch) |
-| FD inheritance (O_CLOEXEC) | Low | Low | Hard (multithreaded race) |
+---
 
 ## Sources
 
-This research synthesizes findings from:
+- zk codebase, verified 2026-02-19: `src/net/transport/tcp/` (types.zig, state.zig, constants.zig, rx/established.zig, tx/data.zig, timers.zig, api.zig), `src/net/transport/socket/tcp_api.zig`, `src/net/core/pool.zig`
+- RFC 793: Transmission Control Protocol (state machine, sequence arithmetic)
+- RFC 6298: Computing TCP's Retransmission Timer (Karn's Algorithm, section 5)
+- RFC 7323: TCP Extensions for High Performance (window scale, timestamp semantics)
+- RFC 5681: TCP Congestion Control (slow start, congestion avoidance, fast retransmit/recovery)
+- RFC 1122: Requirements for Internet Hosts (persist timer, section 4.2.2.17)
+- MEMORY.md (zk project): "Comptime Dispatch Table Expansion = Stack Overflow" pattern
+- CLAUDE.md (zk project): Lock ordering table, security standards, stack size history
 
-### Linux Kernel Documentation
-- [System Calls Lecture](https://linux-kernel-labs.github.io/refs/heads/master/lectures/syscalls.html)
-- [Adding a New System Call](https://www.kernel.org/doc/html/v4.12/process/adding-syscalls.html)
-- [Syscall Manual Page](https://www.man7.org/linux/man-pages/man2/syscall.2.html)
+---
 
-### Security Research
-- [Hardened User Copy](https://lwn.net/Articles/695991/)
-- [Complicated History of a Simple Linux Kernel API](https://grsecurity.net/complicated_history_simple_linux_kernel_api)
-- [Double-Fetch Bugs Study (USENIX)](https://www.usenix.org/sites/default/files/conference/protected-files/usenixsecurity_slides_wang_pengfei_.pdf)
-- [Exploiting Races in System Call Wrappers](https://lwn.net/Articles/245630/)
-
-### Syscall Reference Tables
-- [Linux Syscall Table for Several Architectures](https://marcin.juszkiewicz.com.pl/download/tables/syscalls.html)
-- [Chromium OS Syscall Table](https://chromium.googlesource.com/chromiumos/docs/+/master/constants/syscalls.md)
-- [Searchable Linux Syscall Table for x86_64](https://filippo.io/linux-syscall-table/)
-
-### Error Handling
-- [Linux System Calls, Error Numbers, and In-Band Signaling](https://nullprogram.com/blog/2016/09/23/)
-- [The Linux Kernel: System Calls](https://www.win.tue.nl/~aeb/linux/lk/lk-4.html)
-
-### Signal Handling
-- [Interrupted System Call in Linux](https://www.baeldung.com/linux/system-call-interrupt)
-- [Signals and System Call Restarting](https://yarchive.net/comp/linux/signals_restart.html)
-- [When and How Are System Calls Interrupted?](https://linuxvox.com/blog/when-and-how-are-system-calls-interrupted/)
-
-### File Descriptors
-- [PEP 446: Make Newly Created File Descriptors Non-Inheritable](https://peps.python.org/pep-0446/)
-- [File Descriptors During fork() and exec()](https://tzimmermann.org/2017/08/17/file-descriptors-during-fork-and-exec/)
-- [When to Use O_CLOEXEC](https://linuxvox.com/blog/when-should-i-use-o-cloexec-when-i-open-file-in-linux/)
-
-### Memory Management
-- [mmap(2) Linux Manual](https://man7.org/linux/man-pages/man2/mmap.2.html)
-- [User-Space Page Fault Handling](https://lwn.net/Articles/550555/)
-
-### Process Management
-- [Deep Dive into Thread Local Storage](https://chao-tic.github.io/blog/2018/12/25/tls)
-- [Linux fork System Call and Its Pitfalls](https://devarea.com/linux-fork-system-call-and-its-pitfalls/)
-- [The Difference Between fork(), vfork(), exec() and clone()](https://www.baeldung.com/linux/fork-vfork-exec-clone)
-
-### Networking
-- [SO_REUSEPORT Socket Option](https://lwn.net/Articles/542629/)
-- [The Difference Between SO_REUSEADDR and SO_REUSEPORT](https://www.baeldung.com/linux/socket-options-difference)
-
-### General Guides
-- [The Definitive Guide to Linux System Calls](https://blog.packagecloud.io/the-definitive-guide-to-linux-system-calls/)
-- [System Calls Under The Hood](https://juliensobczak.com/inspect/2021/08/10/linux-system-calls-under-the-hood/)
+*Pitfalls research for: TCP/UDP network stack hardening milestone (zk microkernel)*
+*Researched: 2026-02-19*

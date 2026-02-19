@@ -1,454 +1,443 @@
-# Syscall Implementation Architecture: Dependency Chains and Phase Ordering
+# Architecture Research: TCP/UDP Network Stack Hardening
 
-**Research Focus:** Architecture dimension for syscall implementation ordering
-**Domain:** Microkernel syscall expansion (from 190 to ~300 syscalls)
-**Researched:** 2026-02-06
-**Overall Confidence:** HIGH (based on kernel source analysis + Linux documentation)
+**Domain:** TCP congestion control, dynamic windows, socket API completeness, configurable buffers
+**Researched:** 2026-02-19
+**Confidence:** HIGH (based on direct source analysis of existing ~4200 LOC TCP implementation)
 
-## Executive Summary
+---
 
-The zk kernel has solid infrastructure for the next 100+ syscalls. The key insight is that **infrastructure dependencies are more critical than cross-syscall dependencies**. Most missing syscalls require minimal new kernel subsystems - the process model (uid/gid tracking), file descriptor table, VFS, signal infrastructure, and memory management are all production-ready.
+## Existing Architecture Inventory
 
-The primary blockers are:
-1. **Credential tracking** (uid/gid already in Process struct, but setuid/setgid helpers needed)
-2. **Epoll backend plumbing** (epoll syscalls exist but need poll method implementations in FileOps)
-3. **SysV IPC allocators** (kernel heap is ready, need shared memory segments and semaphore arrays)
+This milestone adds features to an already-functional TCP stack. Understanding what exists is mandatory before deciding what to build.
 
-Unlike typical kernel development, zk's **comptime dispatch table** means syscalls can be implemented in any order - the table auto-discovers handlers by reflection. This enables maximum parallelization.
+### What Already Exists in TCB (types.zig)
 
-## Infrastructure Inventory (What Already Exists)
+The `Tcb` struct already has:
 
-### Process Model (src/kernel/proc/process/types.zig)
-- **Status:** PRODUCTION READY
-- **Capabilities:**
-  - Full uid/gid/euid/egid/suid/sgid tracking (fields exist in Process struct)
-  - Supplementary groups array (16 groups max)
-  - Credential lock (cred_lock) for TOCTOU protection
-  - Process groups (pgid) and sessions (sid)
-  - Parent/child hierarchy with zombie reaping
-  - Refcounting for multi-threaded processes
-- **Missing:** Helper functions for credential manipulation (setuid logic, permission checks)
-- **Implication:** User/group syscalls (113-124) require only thin wrappers around existing fields
+```
+Congestion Control:
+  cwnd: u32          -- Congestion window (bytes), initialized to DEFAULT_MSS * 2
+  ssthresh: u32      -- Slow start threshold, initialized to 65535
+  srtt: u32          -- Smoothed RTT (Jacobson/Karels, scaled by 8)
+  rttvar: u32        -- RTT variance (scaled by 4)
+  rtt_seq: u32       -- Sequence number being timed
+  rtt_start: u64     -- Timestamp when rtt_seq was sent
+  last_ack: u32      -- For dup ACK tracking
+  dup_ack_count: u8  -- Duplicate ACK counter
+  fast_recovery: bool -- In fast recovery (RFC 6582)
+  recover: u32       -- Recovery point sequence number
 
-### File Descriptor System (src/kernel/fs/fd.zig)
-- **Status:** PRODUCTION READY
-- **Capabilities:**
-  - FileOps vtable with read/write/close/seek/stat/ioctl/mmap
-  - **poll method** already defined in FileOps (line 86-88)
-  - FdTable per-process (256 FDs max)
-  - Reference counting for dup/fork
-  - Close-on-exec (O_CLOEXEC) support
-  - Atomic allocAndInstall for race-free FD allocation
-- **Missing:** poll method implementations in specific file types (pipe, socket, regular file)
-- **Implication:** epoll works at the FD layer; individual file types need poll implementations
+Buffers (FIXED at compile time):
+  send_buf: [BUFFER_SIZE]u8  -- 8192 bytes, embedded in struct
+  recv_buf: [BUFFER_SIZE]u8  -- 8192 bytes, embedded in struct
+  BUFFER_SIZE = 8192 (net/constants.zig)
+  RECV_WINDOW_SIZE: u16 = 8192
 
-### Epoll Infrastructure (src/kernel/sys/syscall/process/scheduling.zig:620-750)
-- **Status:** SYSCALLS EXIST, BACKEND INCOMPLETE
-- **Capabilities:**
-  - sys_epoll_create1 (allocates EpollInstance, creates FD)
-  - sys_epoll_ctl (ADD/MOD/DEL entries)
-  - sys_epoll_wait (polls entries, returns ready events)
-- **Architecture:**
-  - EpollInstance stores up to MAX_EPOLL_FDS (1024) monitored file descriptors
-  - Each entry has fd, events mask, user data
-  - epoll_wait iterates entries and calls fd.ops.poll() if available
-- **Missing:**
-  - FileOps.poll implementations for pipes, sockets, regular files
-  - Edge-triggered (EPOLLET) support (currently level-triggered only)
-- **Implication:** Epoll syscalls are 80% done; need to implement poll methods in 5-6 file types
+Window:
+  rcv_wnd: u16       -- Our advertised window
+  snd_wnd: u32       -- Peer's window (scaled)
+  wscale_ok: bool    -- Window scaling negotiated
+  snd_wscale: u8     -- Peer's scale factor
+  rcv_wscale: u8     -- Our scale factor
 
-### Signal Infrastructure (src/kernel/sys/syscall/process/signals.zig)
-- **Status:** PRODUCTION READY
-- **Capabilities:**
-  - Full signal delivery (rt_sigaction, rt_sigprocmask, rt_sigreturn)
-  - Signal masks per thread
-  - Signal frame setup for both x86_64 and aarch64
-  - EINTR handling on syscall return
-- **Missing:** sigaltstack, rt_sigtimedwait, rt_sigsuspend (deferred, low priority)
-- **Implication:** signalfd/timerfd can be layered on top without modifying signal core
-
-### Memory Management (src/kernel/mm/)
-- **Status:** PRODUCTION READY
-- **Capabilities:**
-  - mmap/munmap/mprotect/brk fully implemented
-  - UserVmm per-process with VMA tracking
-  - Page table management (CR3/TTBR0 switching)
-  - DMA allocator (pmm.allocZeroedPages)
-  - IOMMU support
-- **Missing:**
-  - SysV shared memory segment allocator (needs IPC namespace)
-  - Swap support (low priority for microkernel)
-- **Implication:** Shared memory syscalls need a segment table, not new memory primitives
-
-### Filesystem (src/kernel/fs/)
-- **Status:** PRODUCTION READY (VFS + SFS + InitRD + DevFS)
-- **Capabilities:**
-  - VFS layer with mount points
-  - SFS (Simple Filesystem) for /mnt
-  - InitRD (read-only USTAR) for /
-  - DevFS for /dev
-  - Path resolution, directory operations, stat, fstat
-- **Missing:**
-  - Extended attributes (xattr) - entire subsystem (deferred, low priority)
-  - inotify event queue (needs new kernel structure)
-- **Implication:** xattr and inotify are independent feature additions, not blockers for other syscalls
-
-## Dependency Chain Analysis
-
-### Tier 0: Independent (No Cross-Dependencies)
-
-These syscalls can be implemented in **any order** and in **parallel**. They depend only on existing kernel infrastructure.
-
-| Syscall Group | Count | Infrastructure Dependency | Parallel-Safe? |
-|---------------|-------|---------------------------|----------------|
-| User/Group IDs | 8 | Process.uid/gid fields | Yes |
-| File locking (flock) | Already done | FdTable | N/A |
-| Resource limits | 4 | Process.rlimit_as field | Yes |
-| System info | 1 (syslog) | Kernel ring buffer | Yes |
-| Filesystem (mknod, utime) | 2 | VFS | Yes |
-| Privileged ops (reboot, iopl) | 4 | HAL | Yes |
-
-**Implementation Notes:**
-- **User/Group IDs (113-124):** All fields exist in Process struct. Need helper functions:
-  - `checkCredentialPermission(target_uid, euid, uid)` - POSIX setuid rules
-  - `setCredentials(ruid, euid, suid)` - atomic update with cred_lock
-  - No cross-syscall dependencies; each function is self-contained
-- **Resource limits (97-98, 160, 302):** getrlimit/setrlimit/prlimit64 read/write Process.rlimit_as. Extend to cover RLIMIT_NOFILE, RLIMIT_NPROC.
-
-### Tier 1: Light Dependencies (Require Simple Helpers)
-
-These syscalls depend on **new helper structures** but not on other syscalls.
-
-| Syscall Group | Depends On | Blocker Type |
-|---------------|------------|--------------|
-| Scheduler params (142-148) | Process.sched_policy field | New field + sched.c integration |
-| Timer FDs (283, 286-287) | Timer queue + FdTable | New TimerFd struct |
-| Event FDs (284, 290) | FdTable only | New EventFd struct (atomic counter) |
-| Signal FDs (282, 289) | Signal infrastructure | New SignalFd struct (sigset_t filter) |
-
-**Architecture Pattern:**
-All *fd syscalls (timerfd, eventfd, signalfd) follow the same template:
-1. Allocate instance struct on kernel heap
-2. Create FileDescriptor with custom ops vtable
-3. Install in FdTable with allocAndInstall
-4. Return fd number
-
-**Example (eventfd):**
-```zig
-pub const EventFd = struct {
-    counter: std.atomic.Value(u64),
-    semaphore_mode: bool, // EFD_SEMAPHORE flag
-};
-
-pub fn sys_eventfd2(initval: usize, flags: usize) SyscallError!usize {
-    const efd = heap.allocator().create(EventFd) catch return error.ENOMEM;
-    efd.* = .{ .counter = .{ .raw = initval }, .semaphore_mode = (flags & EFD_SEMAPHORE) != 0 };
-    const fd = heap.allocator().create(FileDescriptor) catch return error.ENOMEM;
-    fd.* = .{ .ops = &eventfd_ops, .private_data = efd, ... };
-    return base.getGlobalFdTable().allocAndInstall(fd) orelse error.EMFILE;
-}
+TCP Options already negotiated:
+  SACK, timestamps, MSS, window scaling
 ```
 
-Each *fd type needs 4 FileOps methods: read, write, close, poll (for epoll integration).
+### What Already Works in the TCP State Machine
 
-### Tier 2: Epoll Backend (Requires FileOps.poll Implementations)
+From reading `rx/established.zig` and `tx/data.zig`:
 
-Epoll syscalls (232-233, 281, 291) **already exist** but need poll methods in file types.
+- Slow start and congestion avoidance are **implemented** (the cwnd/ssthresh update logic in processEstablished)
+- Fast retransmit/recovery (RFC 6582) is **implemented** (dup_ack_count, fast_recovery, recover fields)
+- RTT estimation via Jacobson/Karels is **implemented** (updateRto in types.zig)
+- SACK-aware retransmit selection is **implemented** (selectRetransmitSeq in tx/data.zig)
+- Nagle's algorithm is **implemented** (nodelay field, check in transmitPendingData)
+- Delayed ACK is **implemented** (ack_pending, ack_due, scheduleAck)
+- Exponential backoff on timeout is **implemented** (timers.zig)
+- Window update tracking (snd_wl1/snd_wl2) is **implemented** (processEstablished)
 
-| File Type | Location | poll Method Status |
-|-----------|----------|-------------------|
-| Pipe | src/kernel/fs/pipe.zig | MISSING (needs read_pos != write_pos check) |
-| Socket | src/net/transport/socket/fd.zig | MISSING (needs recv_queue check) |
-| Regular File | src/kernel/fs/ | MISSING (always return EPOLLIN \| EPOLLOUT) |
-| EventFd | NEW | MISSING (needs counter != 0 check) |
-| TimerFd | NEW | MISSING (needs expiry_time <= now check) |
-| SignalFd | NEW | MISSING (needs sigpending & mask check) |
+### What is Missing or Incomplete
 
-**Implementation Pattern (pipe example):**
-```zig
-pub fn pipe_poll(fd: *FileDescriptor, events: u32) u32 {
-    const pipe = @as(*Pipe, @ptrCast(@alignCast(fd.private_data)));
-    var ready: u32 = 0;
-    if (events & EPOLLIN != 0) {
-        if (pipe.read_pos != pipe.write_pos) ready |= EPOLLIN; // Data available
-        if (pipe.writers == 0) ready |= EPOLLHUP; // All writers closed
-    }
-    if (events & EPOLLOUT != 0) {
-        if (pipe.write_pos - pipe.read_pos < PIPE_BUF_SIZE) ready |= EPOLLOUT; // Space available
-    }
-    return ready;
-}
+Based on code analysis:
+
+1. **Dynamic buffer sizing:** Buffers are fixed 8KB arrays embedded in the Tcb struct. Cannot resize without restructuring Tcb.
+2. **SO_RCVBUF/SO_SNDBUF socket options:** Options struct in socket/options.zig does not handle these options (falls through to `InvalidArg`).
+3. **MSG_* flags on send/recv:** `tcpSend` and `tcpRecv` in socket/tcp_api.zig take `[]u8` slices, no flags parameter. The syscall layer calls these without flag support.
+4. **MSG_PEEK:** Cannot peek without consuming from the circular buffer.
+5. **MSG_WAITALL:** No partial-read loop in tcpRecv.
+6. **MSG_DONTWAIT:** No per-call non-blocking override distinct from socket-level O_NONBLOCK.
+7. **sendmsg/recvmsg syscalls:** These are separate from send/recv; the scatter-gather iovec path is not connected to TCP.
+8. **Configurable accept queue:** ACCEPT_QUEUE_SIZE is a compile-time constant (8), stored per-socket as `backlog: u16` but the backing array is fixed-size.
+9. **sendSegment lacks TCP options in data segments:** `setDataOffsetFlags(5, flags)` hardcodes 5 words (no options). Timestamp option would require 12 bytes extra per segment.
+10. **cwnd initial value:** Starting at `DEFAULT_MSS * 2` rather than the RFC 6928 recommended initial window of min(4*SMSS, max(2*SMSS, 4380)) for modern stacks.
+
+---
+
+## Component Boundaries and Integration Points
+
+### System Overview
+
+```
+Userspace syscall path:
+  sys_send(fd, buf, len, flags)
+       |
+  socket/tcp_api.tcpSend(sock_fd, data)       <-- NO flags today
+       |
+  tcp/api.send(tcb, data)
+       |
+  tx/data.transmitPendingData(tcb)            <-- cwnd/snd_wnd gate
+       |
+  tx/segment.sendSegment(tcb, flags, seq, ack, data)
+       |
+  iface.transmit(buf)
+
+Receive path:
+  e1000e IRQ -> rx/root.processPacket
+                    |
+              rx/established.processEstablished(tcb, pkt, hdr)
+                    |
+            [update cwnd on ACK, buffer data into recv_buf]
+                    |
+              socket/tcp_api.completePendingRecv OR
+              tcb.recv_buf += data (wakes blocked thread)
+
+Timer path:
+  timer tick -> tcp/timers.processTimers()
+                    |
+              [retransmit, backoff, cwnd collapse on timeout]
 ```
 
-**Critical for:** epoll_wait to return meaningful results. Without poll methods, epoll_wait always returns 0 (no ready fds).
+### Component Responsibility Map
 
-### Tier 3: SysV IPC (Requires New Allocators)
+| Component | File | Current Responsibility | Change Needed? |
+|-----------|------|----------------------|----------------|
+| TCB struct | tcp/types.zig | Per-connection state + congestion fields | Add configurable buffer pointers |
+| Constants | net/constants.zig | BUFFER_SIZE, RECV_WINDOW_SIZE, MAX_TCBS | Add configurable defaults |
+| TX data | tcp/tx/data.zig | Segment selection, cwnd/snd_wnd gating, Nagle | Add congestion algorithm hooks |
+| RX established | tcp/rx/established.zig | ACK processing, cwnd update, data delivery | Add MSG_PEEK support at buffer level |
+| Timers | tcp/timers.zig | Retransmit, state GC, delayed ACK | Add keepalive timer |
+| TCP API | tcp/api.zig | send/recv/connect/listen public interface | No change needed |
+| Socket API | socket/tcp_api.zig | Syscall-to-TCP bridge, blocking logic | Add flags parameter to tcpSend/tcpRecv |
+| Socket options | socket/options.zig | setsockopt/getsockopt dispatch | Add SO_RCVBUF, SO_SNDBUF, TCP_KEEPIDLE |
+| Socket types | socket/types.zig | Socket struct definition | Add rcv_buf_size, snd_buf_size fields |
+| Socket state | socket/state.zig | Socket table, port allocation | No change needed |
 
-SysV IPC syscalls (29-31, 64-71) need kernel-global tables for segments/semaphores/message queues.
+---
 
-**Shared Memory Architecture:**
+## Feature Integration Architecture
+
+### Feature 1: Configurable Send/Receive Buffers
+
+**The core problem:** `send_buf` and `recv_buf` are fixed-size arrays embedded directly in the Tcb struct. Changing them means:
+
+Option A -- Heap-allocated buffers (recommended):
+- Add `send_buf_ptr: ?[]u8` and `recv_buf_ptr: ?[]u8` to Tcb
+- During TCB allocation, allocate from tcp_allocator at configured size
+- Fall back to inline stack buffers if allocation fails
+- `sendBufferSpace()` and `recvBufferAvailable()` already exist as methods -- update them to use dynamic size
+- `currentRecvWindow()` must reflect actual buffer capacity, not BUFFER_SIZE constant
+
+Option B -- Keep fixed buffers, change the constant:
+- Change BUFFER_SIZE from 8192 to a larger value
+- Simpler, but bloats every TCB regardless of actual need
+- With 256 max TCBs, 64KB per TCB = 16MB just for buffers -- acceptable on this hardware
+
+**Recommendation: Option B for send/recv buffers, but expose the constant as a tunable default.**
+
+The Socket struct can carry `rcv_buf_size` and `snd_buf_size` fields (settable via SO_RCVBUF/SO_SNDBUF). When a new TCB is created for a socket, the socket's buffer size preference is passed to the TCB. The TCB still uses static arrays at BUFFER_SIZE bytes; the socket-level preference gates how much of that space is advertised in rcv_wnd.
+
+This avoids heap allocation in the critical receive path while still giving userspace control over the effective window.
+
+**Integration point:** `tcp/api.zig:listenIp()` and `connectIp()` -- pass desired buffer sizes from socket to TCB at construction. `types.Tcb:currentRecvWindow()` -- cap to min(actual_space, configured_rcv_buf).
+
+**Data flow change:**
 ```
-Global Structure: ShmTable
-  - Array of ShmSegment (fixed size, e.g., 1024 entries)
-  - Each segment has:
-    - key: i32 (IPC_PRIVATE or user-chosen key)
-    - size: usize
-    - permissions: mode_t
-    - phys_pages: []u64 (DMA-allocated pages)
-    - attach_count: u32
-    - owner_uid/gid: u32
-  - Lock: RwLock (shmget/shmctl use write, shmat uses read)
-```
-
-**Syscall Dependencies:**
-1. **shmget (29):** Allocate segment, return shmid. Uses pmm.allocZeroedPages.
-2. **shmat (30):** Map segment into process address space. Depends on shmget. Uses UserVmm.mapRange.
-3. **shmdt (67):** Unmap segment. Depends on shmat. Uses UserVmm.unmapRange.
-4. **shmctl (31):** Control operations (IPC_RMID, IPC_STAT). Depends on shmget.
-
-**Implementation Order:** shmget -> shmat/shmctl -> shmdt (attach_count must reach 0 before free).
-
-**Similar pattern for semaphores (64-66) and message queues (68-71).**
-
-### Tier 4: Extended Features (Require Infrastructure Additions)
-
-These are **deferred** because they need significant new kernel subsystems.
-
-| Syscall Group | Infrastructure Needed | Estimated Complexity |
-|---------------|----------------------|---------------------|
-| Extended Attributes (188-199) | Xattr storage per inode | HIGH (VFS extension) |
-| Inotify (253-255, 294) | Event queue + watch tree | MEDIUM (new subsystem) |
-| File cloning (326) | COW page tables | HIGH (requires COW support) |
-| Namespace ops (272, 308) | Namespace isolation | HIGH (major feature) |
-| Seccomp (317) | BPF interpreter | HIGH (security model) |
-
-**Recommendation:** Defer Tier 4 until Phases 1-3 complete. These are **independent features**, not dependencies for other syscalls.
-
-## Recommended Phase Structure
-
-### Phase 1: Credential System (1-2 days)
-**Goal:** Make uid/gid syscalls production-ready.
-
-**Tasks:**
-1. Add helper functions to Process module:
-   - `setUidSafe(proc, ruid, euid, suid)` - atomic update with cred_lock
-   - `setGidSafe(proc, rgid, egid, sgid)` - atomic update with cred_lock
-   - `checkSetuidPermission(proc, target_uid)` - POSIX rules (euid=0 or euid=target_uid)
-2. Implement syscall wrappers:
-   - sys_setreuid (113), sys_setregid (114) - set real+effective
-   - sys_getgroups (115), sys_setgroups (116) - supplementary groups
-   - sys_setfsuid (122), sys_setfsgid (123) - filesystem uid/gid
-3. Add tests to test_runner:
-   - testSetuid, testSetgid, testGetgroups (privileged and unprivileged)
-
-**Dependencies:** None (all fields exist in Process struct).
-**Parallelizable:** Can implement setuid/setgid/groups functions concurrently.
-**Output:** 6 syscalls (113-116, 122-123) move from missing to implemented.
-
-### Phase 2: Epoll Backend (2-3 days)
-**Goal:** Make epoll_wait return actual ready events.
-
-**Tasks:**
-1. Implement FileOps.poll for existing file types:
-   - Pipe (pipe.zig): Check read_pos != write_pos (EPOLLIN), buffer space (EPOLLOUT)
-   - Socket (socket/fd.zig): Check recv_queue.len > 0 (EPOLLIN), send_queue space (EPOLLOUT)
-   - Regular File (always ready for read/write)
-2. Add inotify stubs (return -ENOSYS for now, but allocate FD):
-   - sys_inotify_init (253), sys_inotify_init1 (294) - allocate InotifyInstance
-   - sys_inotify_add_watch (254) - return -ENOSYS (watch not implemented)
-   - sys_inotify_rm_watch (255) - return -ENOSYS
-3. Add tests:
-   - testEpollPipe (write to pipe, epoll_wait returns EPOLLIN)
-   - testEpollSocket (recv data, epoll_wait returns EPOLLIN)
-
-**Dependencies:** Requires epoll syscalls (already implemented).
-**Parallelizable:** Pipe and socket poll methods are independent.
-**Output:** Epoll moves from "syscalls exist" to "functionally complete". Inotify stubs allow programs to call inotify_init without ENOSYS.
-
-### Phase 3: *fd Syscalls (3-4 days)
-**Goal:** Add eventfd, timerfd, signalfd for modern async patterns.
-
-**Tasks:**
-1. Implement EventFd (284, 290):
-   - Struct with atomic counter, semaphore_mode flag
-   - read: decrement counter (block if 0 and O_NONBLOCK not set)
-   - write: increment counter
-   - poll: return EPOLLIN if counter > 0
-2. Implement TimerFd (283, 286-287):
-   - Struct with expiry_time, interval, clockid
-   - read: return number of expirations since last read
-   - write: not allowed (return EINVAL)
-   - poll: return EPOLLIN if expired
-   - Integrate with timer tick handler (check all timerfd instances on each tick)
-3. Implement SignalFd (282, 289):
-   - Struct with sigset_t mask
-   - read: dequeue signal from thread.sigpending if in mask
-   - write: not allowed
-   - poll: return EPOLLIN if pending & mask != 0
-
-**Dependencies:** Requires epoll backend (Phase 2) for poll methods to be useful.
-**Parallelizable:** All three *fd types are independent.
-**Output:** 6 syscalls (282-284, 286-287, 289-290). Modern async I/O complete (epoll + eventfd + timerfd).
-
-### Phase 4: SysV IPC (4-5 days)
-**Goal:** Add shared memory, semaphores, message queues for legacy compatibility.
-
-**Tasks:**
-1. Design global IPC structures (src/kernel/proc/ipc/):
-   - ShmTable (shared memory segments)
-   - SemTable (semaphore sets)
-   - MsgTable (message queues)
-   - Each with fixed-size array (e.g., 256 entries) + RwLock
-2. Implement shared memory (29-31, 67):
-   - sys_shmget: Allocate segment (use pmm.allocZeroedPages), return shmid
-   - sys_shmat: Map into UserVmm, increment attach_count
-   - sys_shmdt: Unmap, decrement attach_count
-   - sys_shmctl: IPC_STAT (copy metadata), IPC_RMID (mark for deletion)
-3. Implement semaphores (64-66):
-   - sys_semget: Allocate semaphore set (array of counters)
-   - sys_semop: Atomic increment/decrement (block if would go negative)
-   - sys_semctl: GETVAL, SETVAL, IPC_RMID
-4. Implement message queues (68-71):
-   - sys_msgget: Allocate queue (linked list of messages)
-   - sys_msgsnd: Append message (block if queue full)
-   - sys_msgrcv: Dequeue message (block if queue empty)
-   - sys_msgctl: IPC_STAT, IPC_RMID
-
-**Dependencies:** None (uses existing PMM and UserVmm).
-**Parallelizable:** Shared memory, semaphores, message queues are independent (separate tables).
-**Output:** 12 syscalls (29-31, 64-71, 67). SysV IPC complete (required for PostgreSQL, Redis).
-
-### Phase 5: Scheduler Extensions (2-3 days)
-**Goal:** Add scheduler parameter syscalls for real-time apps.
-
-**Tasks:**
-1. Add sched_policy field to Process struct (or Thread struct?)
-2. Implement syscalls:
-   - sys_sched_setparam (142), sys_sched_getparam (143)
-   - sys_sched_setscheduler (144), sys_sched_getscheduler (145)
-   - sys_sched_get_priority_max (146), sys_sched_get_priority_min (147)
-   - sys_sched_rr_get_interval (148)
-3. Integrate with scheduler (src/kernel/proc/sched/):
-   - If policy == SCHED_FIFO, disable preemption timer
-   - If policy == SCHED_RR, adjust time slice based on priority
-   - If policy == SCHED_OTHER (default), use existing round-robin
-
-**Dependencies:** None (extends existing scheduler).
-**Parallelizable:** All syscalls are thin wrappers around scheduler state.
-**Output:** 7 syscalls (142-148). Real-time scheduling complete.
-
-### Phase 6: Miscellaneous (2-3 days)
-**Goal:** Mop up remaining high-value syscalls.
-
-**Tasks:**
-1. Filesystem:
-   - sys_mknod (133): Create device files (extend DevFS)
-   - sys_utime (132): Change timestamps (extend stat structure)
-2. Privileged operations:
-   - sys_reboot (169): Call hal.reboot()
-   - sys_syslog (103): Read from kernel ring buffer
-3. Resource limits:
-   - sys_getrlimit (97), sys_setrlimit (160), sys_prlimit64 (302)
-   - Extend Process.rlimit_as to cover RLIMIT_NOFILE, RLIMIT_NPROC, RLIMIT_CPU
-
-**Dependencies:** None.
-**Parallelizable:** All tasks are independent.
-**Output:** ~10 syscalls. Brings total to ~250 implemented (from 190).
-
-## Build Order Implications
-
-### Comptime Dispatch Advantage
-The zk syscall table (`src/kernel/sys/syscall/core/table.zig`) uses **comptime reflection** to auto-discover handlers. This means:
-
-1. **No registration needed:** Just define `pub fn sys_foo(...)` in any handler module, and the table finds it.
-2. **Namespace isolation:** Each phase can use a separate .zig file (e.g., credentials.zig, eventfd.zig) without merge conflicts.
-3. **Incremental testing:** Add syscalls one at a time, rebuild, test. No "big bang" integration.
-
-**Critical for parallel work:** Multiple developers can implement syscalls in different modules simultaneously without touching the same files.
-
-### Architecture-Specific Considerations
-The kernel already handles x86_64/aarch64 differences at compile time:
-- Syscall numbers: `src/uapi/syscalls/root.zig` selects linux.zig or linux_aarch64.zig
-- Register conventions: `src/arch/*/asm_helpers.S` marshals arguments
-- Page tables: `hal.paging.writeCr3` (x86_64) vs `hal.paging.writeTtbr0` (aarch64)
-
-**Implication:** Syscall handlers are architecture-agnostic. No per-arch code needed for Phases 1-6.
-
-### Testing Strategy
-The existing test framework (`src/user/test_runner/`) runs 186 tests across 15 categories. For each phase:
-
-1. **Unit tests:** Add to test_runner/tests/ (e.g., credentials_test.zig)
-2. **Integration tests:** Use existing multi-process test harness (fork + waitpid)
-3. **CI validation:** `RUN_BOTH=true ./scripts/run_tests.sh` tests both architectures
-
-**Test coverage goal:** Every new syscall gets at least 2 tests (success case + error case).
-
-## Known Pitfalls and Mitigations
-
-### Pitfall 1: Credential TOCTOU Races
-**What:** Two threads call setuid concurrently, observe inconsistent uid/euid during permission checks.
-**Prevention:** Process.cred_lock must be held for the entire check-and-set operation.
-```zig
-pub fn setUidSafe(proc: *Process, ruid: u32, euid: u32, suid: u32) void {
-    const held = proc.cred_lock.acquire();
-    defer held.release();
-    proc.uid = ruid;
-    proc.euid = euid;
-    proc.suid = suid;
-}
+Before: rcv_wnd = min(BUFFER_SIZE - used, 65535)
+After:  rcv_wnd = min(configured_rcv_buf - used, BUFFER_SIZE - used, 65535)
 ```
 
-### Pitfall 2: Epoll Edge-Triggered Starvation
-**What:** If epoll is edge-triggered (EPOLLET), failing to drain a socket fully will miss future wakeups.
-**Prevention:** Current implementation is level-triggered only. Document that EPOLLET is not yet supported.
+### Feature 2: MSG_* Flags on Send/Recv
 
-### Pitfall 3: SysV IPC Key Collisions
-**What:** Two processes call shmget(key=42, ...) and expect separate segments.
-**Prevention:** IPC_PRIVATE (key == 0) allocates unique segment. For shared keys, check ShmTable for existing entry with matching key.
+**Integration approach:** Thread flags through the call stack without restructuring it.
 
-### Pitfall 4: TimerFd Timer List Traversal
-**What:** Checking all timerfd instances on every timer tick is O(n). If n=1000, this dominates tick time.
-**Prevention:** Use a min-heap keyed by expiry_time. Only check root of heap on each tick.
+The syscall dispatcher at `src/kernel/sys/syscall/fs/network.zig` (or equivalent) calls socket-layer functions. The socket TCP API functions need a `flags: u32` parameter added.
 
-### Pitfall 5: Signal Mask Corruption in SignalFd
-**What:** signalfd modifies thread.sigmask to block signals, but doesn't restore on close.
-**Prevention:** SignalFd should NOT modify thread.sigmask. It only filters which signals are read from sigpending.
+**Files to modify in order:**
+1. `socket/tcp_api.zig`: Add `flags: u32` to `tcpSend()` and `tcpRecv()` signatures
+2. `tcp/api.zig`: Add `flags: u32` to public `send()` and `recv()` -- pass through to implementation
+3. Syscall layer (sys/syscall/fs/network.zig): Pass MSG flags from userspace to socket layer
 
-## Cross-Architecture Validation
+**Flag behaviors:**
 
-All phases must pass tests on **both x86_64 and aarch64**. Known architecture-specific issues:
+| Flag | Value | Send behavior | Recv behavior |
+|------|-------|---------------|---------------|
+| MSG_DONTWAIT | 0x40 | Return WouldBlock if send buffer full | Return WouldBlock if recv buffer empty |
+| MSG_WAITALL | 0x100 | N/A | Loop until buf is full or connection closes |
+| MSG_PEEK | 0x02 | N/A | Copy from recv_buf without advancing recv_tail |
+| MSG_NOSIGNAL | 0x4000 | Suppress SIGPIPE on broken pipe | N/A |
+| MSG_MORE | 0x8000 | Hint more data coming (suppress Nagle flush) | N/A |
 
-1. **aarch64 syscall number collisions:** SysV IPC syscalls have different numbers. The dispatch table uses Linux-official numbers from linux_aarch64.zig.
-2. **aarch64 compat stubs:** Legacy syscalls (open, pipe, getpgrp) use 500+ range on aarch64. These redirect to modern equivalents (openat, pipe2, getpgid).
-3. **x86_64-only syscalls:** iopl (172), ioperm (173), modify_ldt (154) are x86_64-specific. Return ENOSYS on aarch64.
+**MSG_PEEK implementation detail:** The circular buffer in Tcb does not support peek natively. Add a `peekFromRecvBuf(tcb, buf)` function that reads from recv_tail without modifying it. This is a pure read -- no lock concern beyond the existing TCB mutex.
 
-**Validation:** `RUN_BOTH=true ./scripts/run_tests.sh` runs full test suite on both architectures in CI.
+**MSG_WAITALL implementation detail:** Add a loop in `tcpRecv()` that re-blocks if `received < requested` and the connection is still open. Must handle partial delivery (connection closes mid-loop returns what was received, not error).
+
+**MSG_DONTWAIT implementation detail:** Override the socket's `blocking` field for the duration of one call. Simplest approach: pass a local `effective_blocking = sock.blocking && !(flags & MSG_DONTWAIT)` into the blocking decision.
+
+### Feature 3: Congestion Control Improvements
+
+**What exists:** Slow start, AIMD congestion avoidance, and RFC 6582 fast recovery are all implemented in `rx/established.zig`. The code is correct per RFC 5681 but has two gaps:
+
+1. **Initial window size:** RFC 6928 recommends IW = min(4*SMSS, max(2*SMSS, 4380)). Current code uses `DEFAULT_MSS * 2` (2920 bytes). Updating to RFC 6928 is a one-line change in `types.Tcb.init()`.
+
+2. **Congestion window accounting in retransmit path:** When `timers.processTimers()` fires, it collapses cwnd to mss and calls `transmitPendingData`. This is correct. No change needed.
+
+3. **Missing: ECN (Explicit Congestion Notification):** RFC 3168. Not in scope for this milestone unless explicitly requested.
+
+**Integration point:** The cwnd update logic in `rx/established.zig:processEstablished()` lines 62-68. The congestion algorithm is tightly coupled to the ACK processing loop. To allow future algorithm swapping (Cubic, BBR), extract the cwnd update logic into a `congestion.zig` module with a function pointer or comptime-selectable algorithm.
+
+**Recommended structure:**
+
+```
+src/net/transport/tcp/
+  congestion/
+    root.zig      -- algorithm selection (comptime or runtime)
+    reno.zig      -- RFC 5681 New Reno (current behavior, extracted)
+    cubic.zig     -- future: RFC 8312 CUBIC
+```
+
+This is preparation work. For this milestone, extract current logic into `congestion/reno.zig` and call it from `rx/established.zig`. The behavior does not change; the structure enables future work without rewriting the state machine.
+
+**Integration points for extraction:**
+- `rx/established.zig:processEstablished()`: Replace inline cwnd update with `congestion.onAck(tcb, acked_bytes)`
+- `timers.zig:processTimers()`: Replace inline `tcb.ssthresh = ...; tcb.cwnd = tcb.mss` with `congestion.onTimeout(tcb)`
+- `rx/established.zig`: Replace fast recovery entry with `congestion.onDupAck(tcb, dup_count)`
+
+### Feature 4: Dynamic Window Management
+
+**What exists:** `currentRecvWindow()` in `types.Tcb` correctly computes the advertised window based on buffer space. Window scaling negotiation exists. The window update tracking (snd_wl1/snd_wl2) is correct.
+
+**What is missing:**
+
+1. **Window auto-tuning:** Linux adjusts rcv_wnd based on observed bandwidth-delay product. This is optional for this milestone. The simpler approach is to just allow userspace to configure rcv_buf_size via SO_RCVBUF (Feature 1 above), which indirectly sets the maximum window.
+
+2. **Zero window probing:** When the receive buffer fills and we advertise a zero window, the remote side stops sending. When buffer space opens, we must send a window update. Currently, the code sends an ACK after each data delivery, which implicitly updates the window. This is correct but may delay window opening. Add an explicit window update when a blocked reader drains a significant amount of buffer space (threshold: when space opens by >= MSS).
+
+**Integration point for window update:** `tcp/api.zig:recv()` -- after copying data out of `recv_buf`, check if `currentRecvWindow()` has increased by >= MSS since the last ACK sent, and if so, call `tx.sendAck(tcb)` to advertise the new window.
+
+**Data flow change:**
+```
+After recv() drains data from recv_buf:
+  old_window = tcb.rcv_wnd (as advertised in last ACK)
+  new_window = tcb.currentRecvWindow()
+  if new_window - old_window >= tcb.mss:
+      tx.sendAck(tcb)  -- window update
+      tcb.rcv_wnd = new_window  -- track what we advertised
+```
+
+**Tracking last-advertised window:** Add `last_rcv_wnd: u16` to Tcb. Updated every time sendAck or sendSegment is called. Compare against currentRecvWindow() in recv() to decide if update is needed.
+
+---
+
+## New vs Modified Components
+
+### Files Modified (not new)
+
+| File | Change | Risk |
+|------|--------|------|
+| `net/constants.zig` | Increase BUFFER_SIZE default, add TCP_KEEPIDLE_DEFAULT | Low |
+| `net/transport/tcp/types.zig` | Add `last_rcv_wnd`, `congestion_algo` enum, `configured_rcv_buf`/`snd_buf` | Medium (struct size change) |
+| `net/transport/tcp/rx/established.zig` | Replace inline cwnd logic with congestion.onAck call; add window update after delivery | Medium |
+| `net/transport/tcp/tx/data.zig` | No change needed for core logic | None |
+| `net/transport/tcp/timers.zig` | Replace inline congestion logic with congestion.onTimeout; add keepalive timer logic | Low |
+| `net/transport/socket/types.zig` | Add `rcv_buf_size: usize`, `snd_buf_size: usize` to Socket struct | Low |
+| `net/transport/socket/options.zig` | Add SO_RCVBUF, SO_SNDBUF, TCP_KEEPIDLE, TCP_INFO cases | Low |
+| `net/transport/socket/tcp_api.zig` | Add `flags: u32` to tcpSend/tcpRecv; implement MSG_PEEK, MSG_WAITALL, MSG_DONTWAIT, MSG_MORE | Medium |
+
+### Files Added (new)
+
+| File | Purpose |
+|------|---------|
+| `net/transport/tcp/congestion/root.zig` | Algorithm selection, shared types |
+| `net/transport/tcp/congestion/reno.zig` | RFC 5681 New Reno (extracted from established.zig) |
+
+---
+
+## Build Order (Dependency-Aware)
+
+The features have the following dependency graph:
+
+```
+Feature 1 (Configurable Buffers)
+  -- required by --> Feature 4 (Dynamic Windows) [rcv_buf_size controls max window]
+  -- independent of --> Feature 2 (MSG flags)
+  -- independent of --> Feature 3 (Congestion refactor)
+
+Feature 2 (MSG flags)
+  -- independent of --> Features 1, 3, 4
+  -- required by --> any userspace program using sendmsg/recvmsg with flags
+
+Feature 3 (Congestion extraction)
+  -- independent of --> Features 1, 2, 4
+  -- enables future --> CUBIC, BBR algorithms
+
+Feature 4 (Dynamic Windows)
+  -- requires --> Feature 1 (needs rcv_buf_size to compute effective window)
+```
+
+**Recommended build order:**
+
+Phase 1: Congestion algorithm extraction (Feature 3)
+- Extract reno.zig from established.zig with no behavior change
+- This is refactoring only; cannot break existing behavior
+- No dependency on other features
+- Provides the clean structure that future phases build on
+
+Phase 2: Configurable buffers + socket options (Feature 1)
+- Add SO_RCVBUF/SO_SNDBUF to socket/options.zig
+- Add `rcv_buf_size`/`snd_buf_size` to Socket struct
+- Pass buffer size preference into TCB at connect/accept time
+- Cap advertised window to configured size in currentRecvWindow()
+
+Phase 3: Dynamic window updates (Feature 4)
+- Add last_rcv_wnd tracking to Tcb
+- Add window update trigger in tcp/api.recv() after buffer drain
+- Validate: zero window probe followed by window open advertisement
+
+Phase 4: MSG flags (Feature 2)
+- Add flags parameter through tcp_api.tcpSend/tcpRecv -> tcp/api.send/recv
+- Implement MSG_PEEK (peekFromRecvBuf helper)
+- Implement MSG_WAITALL (loop in recv until buffer full)
+- Implement MSG_DONTWAIT (per-call blocking override)
+- Implement MSG_MORE (suppress Nagle flush hint on send)
+
+---
+
+## Structural Constraints
+
+### TCB Struct Size Warning
+
+The TCB struct currently embeds two 8192-byte buffers inline, making each TCB approximately 16.5KB. With 256 max TCBs, this is 4MB of kernel heap. If BUFFER_SIZE is increased (e.g., to 32KB for better throughput), each TCB becomes ~64.5KB and the pool costs 16MB. This is still acceptable on x86_64 but check AArch64 heap limits.
+
+The kernel stack overflow risk documented in CLAUDE.md (dispatch table expansion = stack overflow) does not apply here since we are not adding new syscall modules. But large struct initialization in kernel code can still cause stack pressure -- use `@memset` initialization pattern documented for `UnixSocketPair`.
+
+### Lock Order Compliance
+
+The existing lock hierarchy places `tcp_state.lock` (global TCP state) above `sock.lock` (per-socket lock). All new code must respect this:
+
+- Acquire `tcp_state.lock` first if touching TCB pool
+- Acquire `sock.lock` second if touching socket RX queue
+- Never acquire `tcp_state.lock` while holding `sock.lock`
+
+The MSG_WAITALL blocking loop must release all locks before calling `block_fn()` and re-acquire after waking -- same pattern as the existing `accept()` blocking loop in `tcp_api.zig`.
+
+### Zig 0.16.x Specific
+
+The `std.mem.trimRight` removal noted in CLAUDE.md does not affect network code. The `std.atomic.compilerFence` removal is already worked around in existing code with `asm volatile ("" ::: "memory")`. No new compatibility concerns for the features in this milestone.
+
+---
+
+## Data Flow Diagrams
+
+### Current Send Path (with new features marked)
+
+```
+sys_send(fd, buf, len, flags)
+    |
+    v
+tcpSend(sock_fd, data, flags)    <-- [NEW: add flags param]
+    |
+    +-- MSG_DONTWAIT? Override sock.blocking for this call
+    +-- MSG_MORE? Set tcb.cork hint before sending
+    |
+    v
+tcp.send(tcb, data, flags)       <-- [NEW: add flags param]
+    |
+    v
+Copy data into tcb.send_buf (gated by snd_buf_size)  <-- [NEW: size gate]
+    |
+    v
+transmitPendingData(tcb)
+    |
+    +-- effective_window = min(snd_wnd, cwnd)
+    +-- Nagle check (unless MSG_MORE bypasses)
+    |
+    v
+sendSegment(tcb, flags, seq, ack, data)
+    |
+    v
+iface.transmit(buf)
+```
+
+### Current Receive Path (with new features marked)
+
+```
+e1000e IRQ -> processEstablished(tcb, pkt, hdr)
+    |
+    v
+ACK processing:
+    congestion.onAck(tcb, acked_bytes)   <-- [NEW: extracted call]
+    window update tracking
+    |
+    v
+Data delivery to recv_buf
+    |
+    v
+After delivery: check if window opened by >= MSS
+    if yes: tx.sendAck(tcb)              <-- [NEW: window update]
+    |
+    v
+Wake blocked reader (tcb.blocked_thread)
+
+------ (later, reader wakes) ------
+
+tcpRecv(sock_fd, buf, flags)             <-- [NEW: add flags param]
+    |
+    +-- MSG_PEEK? Call peekFromRecvBuf(), skip advance of recv_tail
+    +-- MSG_WAITALL? Loop until buf full or EOF
+    +-- MSG_DONTWAIT? Set effective_blocking=false
+    |
+    v
+tcp.recv(tcb, buf) -- copy from recv_buf, advance recv_tail
+    |
+    v
+After drain: check window update trigger  <-- [NEW]
+```
+
+---
+
+## Anti-Patterns to Avoid
+
+### Anti-Pattern 1: Dynamic Buffer Allocation in RX IRQ Context
+
+The IRQ handler (`processEstablished`) runs with the TCP global lock held and IRQs disabled. Calling `heap.allocator().alloc()` in this path will deadlock if the PMM lock is currently held by another CPU.
+
+Do not attempt to resize buffers during packet processing. All buffer sizing decisions must happen at socket creation time or via setsockopt before the connection is established.
+
+### Anti-Pattern 2: Holding tcp_state.lock During MSG_WAITALL Loop
+
+The MSG_WAITALL blocking loop must not hold `tcp_state.lock` while sleeping. The pattern from the accept() implementation is correct: release all locks, register blocked_thread, call block_fn(), then re-acquire locks and re-check state.
+
+### Anti-Pattern 3: Modifying Congestion State Outside TCB Mutex
+
+The `cwnd`, `ssthresh`, `dup_ack_count`, `fast_recovery`, and `recover` fields in Tcb are protected by `tcb.mutex`. Any new congestion functions must be called with `tcb.mutex` held. The current code acquires the mutex in processEstablished before touching these fields.
+
+### Anti-Pattern 4: Hardcoding Buffer Size in New Code
+
+No new file should reference `constants.BUFFER_SIZE` for window calculation. Use `tcb.configured_rcv_buf` (or the equivalent new field) so that setsockopt changes take effect. Constants.BUFFER_SIZE remains the maximum allocation size -- the configured value is the effective window cap.
+
+---
 
 ## Sources
 
-- [epoll(7) - Linux Manual Page](https://man7.org/linux/man-pages/man7/epoll.7.html)
-- [Linux Kernel eventpoll.c](https://github.com/torvalds/linux/blob/master/fs/eventpoll.c)
-- [futex(2) - Linux Manual Page](https://man7.org/linux/man-pages/man2/futex.2.html)
-- [eventfd(2) - Linux Manual Page](https://man7.org/linux/man-pages/man2/eventfd.2.html)
-- [sysvipc(7) - Linux Manual Page](https://man7.org/linux/man-pages/man7/sysvipc.7.html)
-- [System V IPC - Programming Interfaces Guide](https://docs.oracle.com/cd/E23824_01/html/821-1602/svipc-2.html)
-- [inotify(7) - Linux Manual Page](https://man7.org/linux/man-pages/man7/inotify.7.html)
+- Direct source analysis: `src/net/transport/tcp/` (~4200 LOC)
+- RFC 5681: TCP Congestion Control (New Reno behavior, confirmed matches existing implementation)
+- RFC 6928: Increasing TCP's Initial Window (IW recommendation)
+- RFC 6582: New Reno Modification to TCP's Fast Recovery Algorithm (confirmed implemented)
+- RFC 793: TCP state machine (base reference, implemented in rx/ and tx/)
+- RFC 7323: TCP Extensions for High Performance (window scaling, timestamps -- already negotiated)
 
-## Summary
+---
 
-**Key Finding:** The zk kernel's infrastructure is **production-ready** for 200+ additional syscalls. The bottleneck is not missing subsystems, but implementation time.
-
-**Architecture Advantages:**
-1. Comptime dispatch enables **fully parallelizable** implementation (no merge conflicts)
-2. Existing subsystems (Process, FdTable, VFS, Signals) cover 90% of syscall needs
-3. Cross-architecture support is compile-time automatic (no per-syscall arch code)
-
-**Recommended Ordering:**
-1. **Phase 1 (Credentials):** Unlocks setuid/setgid programs
-2. **Phase 2 (Epoll Backend):** Completes existing epoll syscalls
-3. **Phase 3 (*fd Syscalls):** Modern async I/O (eventfd, timerfd, signalfd)
-4. **Phase 4 (SysV IPC):** Legacy compatibility (PostgreSQL, Redis)
-5. **Phase 5 (Scheduler):** Real-time scheduling
-6. **Phase 6 (Misc):** Cleanup remaining high-value syscalls
-
-**Timeline:** 15-20 days for Phases 1-6 (200+ syscalls). Tier 4 (xattr, inotify, namespaces) deferred as independent features.
+*Architecture research for: TCP/UDP network stack hardening milestone*
+*Researched: 2026-02-19*
