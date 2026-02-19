@@ -225,7 +225,7 @@ Plans:
 | 31. Inotify Completion | v1.3 | Complete    | 2026-02-18 | - |
 | 32. Timer Capacity Expansion | v1.3 | Complete    | 2026-02-18 | - |
 | 33. Timer Resolution Improvement | 3/3 | Complete    | 2026-02-18 | - |
-| 34. Timer Notification Modes | 2/2 | Complete   | 2026-02-19 | - |
+| 34. Timer Notification Modes | 2/2 | Complete    | 2026-02-19 | - |
 | 35. VFS Page Cache and Zero-Copy | v1.3 | 0/? | Not started | - |
 
 ---
