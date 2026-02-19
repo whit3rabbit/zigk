@@ -48,6 +48,14 @@ pub fn getppid() i32 {
     return @truncate(@as(isize, @bitCast(ret)));
 }
 
+/// Get thread ID
+/// Returns the caller's thread ID. In a single-threaded process, TID == PID.
+/// In multi-threaded processes, each thread has a unique TID.
+pub fn gettid() i32 {
+    const ret = primitive.syscall0(syscalls.SYS_GETTID);
+    return @truncate(@as(isize, @bitCast(ret)));
+}
+
 // =============================================================================
 // Process Groups and Sessions
 // =============================================================================

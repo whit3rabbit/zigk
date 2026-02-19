@@ -182,6 +182,13 @@ pub const SigEvent = extern struct {
     /// Padding: 64 total - @sizeOf(usize) [8] - @sizeOf(i32) [4] - @sizeOf(i32) [4] = 48 bytes
     _pad: [64 - @sizeOf(usize) - 8]u8,
 
+    /// Set _sigev_un._tid in padding (used by SIGEV_THREAD_ID)
+    /// The TID is stored in the first 4 bytes of _pad, matching the kernel getTid() layout.
+    pub fn setTid(self: *SigEvent, tid: i32) void {
+        const ptr: *i32 = @ptrCast(@alignCast(&self._pad[0]));
+        ptr.* = tid;
+    }
+
     comptime {
         if (@sizeOf(SigEvent) != 64) @compileError("SigEvent must be 64 bytes to match Linux sigevent");
     }
@@ -190,6 +197,8 @@ pub const SigEvent = extern struct {
 /// Notification types
 pub const SIGEV_SIGNAL: i32 = 0;
 pub const SIGEV_NONE: i32 = 1;
+pub const SIGEV_THREAD: i32 = 2;
+pub const SIGEV_THREAD_ID: i32 = 4;
 
 /// Clock IDs (as plain usize for syscall compatibility)
 pub const CLOCK_REALTIME: usize = 0;

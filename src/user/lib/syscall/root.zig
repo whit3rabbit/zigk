@@ -245,6 +245,7 @@ pub const ARCH_SET_FS = process.ARCH_SET_FS;
 pub const ARCH_GET_FS = process.ARCH_GET_FS;
 pub const getpid = process.getpid;
 pub const getppid = process.getppid;
+pub const gettid = process.gettid;
 pub const getpgid = process.getpgid;
 pub const getpgrp = process.getpgrp;
 pub const setpgid = process.setpgid;
@@ -438,6 +439,8 @@ pub const ITimerspec = time.ITimerspec;
 pub const SigEvent = time.SigEvent;
 pub const SIGEV_SIGNAL = time.SIGEV_SIGNAL;
 pub const SIGEV_NONE = time.SIGEV_NONE;
+pub const SIGEV_THREAD = time.SIGEV_THREAD;
+pub const SIGEV_THREAD_ID = time.SIGEV_THREAD_ID;
 
 // Re-export Resources
 pub const GRND_NONBLOCK = resource.GRND_NONBLOCK;
