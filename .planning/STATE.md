@@ -9,12 +9,12 @@ See: .planning/PROJECT.md (updated 2026-02-19)
 
 ## Current Position
 
-Phase: 37 of 39 (Receive Window and Buffer Management -- in progress)
-Plan: 2 of 2 in current phase (37-01 and 37-02 complete -- phase 37 done)
-Status: Phase 37 complete
-Last activity: 2026-02-19 -- 37-02 complete (sender SWS avoidance gate + window update ACK in recv)
+Phase: 38 of 39 (Socket Options and Raw Socket Blocking -- in progress)
+Plan: 1 of 2 in current phase (38-01 complete)
+Status: Phase 38 in progress
+Last activity: 2026-02-20 -- 38-01 complete (SO_RCVBUF, SO_SNDBUF, TCP_CORK, blocking raw recv, MSG_NOSIGNAL)
 
-Progress: [████████░░] 80% (2/2 plans in phase 37 done; 77/77 plans complete across phases 1-37)
+Progress: [████████░░] 82% (1/2 plans in phase 38 done; 78/79 plans complete across phases 1-38)
 
 ## Performance Metrics
 
@@ -41,6 +41,9 @@ Progress: [████████░░] 80% (2/2 plans in phase 37 done; 77/7
 - 37-01: 2min -- SWS avoidance floor in currentRecvWindow() + RFC 1122 persist timer with 60s-capped exponential backoff
 - 37-02: 1min -- Sender SWS avoidance gate in transmitPendingData() + window update ACK in recv()
 
+**Phase 38 metrics:**
+- 38-01: 7min -- SO_RCVBUF/SO_SNDBUF/TCP_CORK/MSG_NOSIGNAL + queue size increases + blocking raw recv
+
 ## Accumulated Context
 
 ### Decisions
@@ -50,6 +53,9 @@ See PROJECT.md Key Decisions table for full history.
 Recent v1.4 decisions:
 - Option A buffer sizing (fixed 8KB arrays with rcv_buf_size cap field) -- avoids heap allocation in IRQ-context recv path and Tcb.reset() leak risk
 - SO_REUSEPORT included in Phase 38 as simplified FIFO implementation -- bind table data structure change is minimal for FIFO dispatch
+- sendBufferSpace() sentinel slot preserved when applying snd_buf_size cap (used+1>=limit) to prevent head==tail ambiguity
+- sws_floor uses effective_buf (not c.BUFFER_SIZE) in currentRecvWindow() -- prevents zero-window stall when rcv_buf_size < BUFFER_SIZE/2
+- signals import added to syscall_net_module in build.zig to enable SIGPIPE delivery from sys_sendto and socketWrite
 - Congestion module extraction (Phase 36) before window wiring (Phase 37) -- module boundary must exist before algorithm work; retrofitting later requires full re-audit
 - onTimeout resets cwnd to 1*SMSS not IW10 (RFC 5681 S3.5 mandatory; IW10 is for new connections only)
 - MAX_CWND expressed as 4*BUFFER_SIZE in source (not hardcoded 32768) -- tracks BUFFER_SIZE changes automatically
@@ -74,12 +80,12 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-02-19 (37-02 execution)
-Stopped at: Completed 37-02-PLAN.md (sender SWS avoidance + window update ACK)
+Last session: 2026-02-20 (38-01 execution)
+Stopped at: Completed 38-01-PLAN.md (SO_RCVBUF, SO_SNDBUF, TCP_CORK, MSG_NOSIGNAL, blocking raw recv)
 Resume file: None
 
-**Next action:** Phase 37 complete. Ready for Phase 38.
+**Next action:** Continue Phase 38 with 38-02-PLAN.md (SO_REUSEPORT).
 
 ---
 *State initialized: 2026-02-06*
-*Last updated: 2026-02-19 after 37-02 execution*
+*Last updated: 2026-02-20 after 38-01 execution*

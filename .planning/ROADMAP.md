@@ -122,7 +122,7 @@ Plans:
   5. Raw socket recv blocks until a packet arrives rather than returning WouldBlock unconditionally
   6. MSG_NOSIGNAL suppresses SIGPIPE on write to a broken connection; the call returns EPIPE instead of delivering a signal
 **Plans**: 2 plans
-- [ ] 38-01-PLAN.md -- Buffer options, TCP_CORK, raw blocking recv, MSG_NOSIGNAL (BUF-01/02/03/05, API-04/05/06)
+- [x] 38-01-PLAN.md -- Buffer options, TCP_CORK, raw blocking recv, MSG_NOSIGNAL (BUF-01/02/03/05, API-04/05/06)
 - [ ] 38-02-PLAN.md -- SO_REUSEPORT bind and FIFO listener dispatch (BUF-04)
 
 ### Phase 39: MSG Flags
