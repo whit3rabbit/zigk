@@ -390,6 +390,7 @@ pub const socket = net.socket;
 pub const bind = net.bind;
 pub const sendto = net.sendto;
 pub const recvfrom = net.recvfrom;
+pub const recvfromFlags = net.recvfromFlags;
 pub const listen = net.listen;
 pub const accept = net.accept;
 pub const accept4 = net.accept4;
@@ -415,6 +416,10 @@ pub const MsgIovec = net.MsgIovec;
 pub const socketpair = net.socketpair;
 pub const sendmsg = net.sendmsg;
 pub const recvmsg = net.recvmsg;
+// MSG flags for recv operations (Phase 39)
+pub const MSG_PEEK = net.MSG_PEEK;
+pub const MSG_DONTWAIT = net.MSG_DONTWAIT;
+pub const MSG_WAITALL = net.MSG_WAITALL;
 
 // Re-export Time
 pub const Timespec = time.Timespec;

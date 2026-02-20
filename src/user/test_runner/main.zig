@@ -354,6 +354,13 @@ export fn main(argc: i32, argv: [*][*:0]u8) i32 {
     runner.runTest("socket: accept4 invalid flags", socket_tests.testAccept4InvalidFlags);
     runner.runTest("socket: accept4 valid flags", socket_tests.testAccept4ValidFlags);
 
+    // Phase 39: MSG flag tests (MSG_PEEK, MSG_DONTWAIT, MSG_WAITALL)
+    runner.runTest("socket: MSG_PEEK UDP peek-without-consume", socket_tests.testMsgPeekUdp);
+    runner.runTest("socket: MSG_PEEK TCP peek-without-consume", socket_tests.testMsgPeekTcp);
+    runner.runTest("socket: MSG_DONTWAIT returns EAGAIN", socket_tests.testMsgDontwaitEagain);
+    runner.runTest("socket: MSG_WAITALL TCP accumulation", socket_tests.testMsgWaitallTcp);
+    runner.runTest("socket: MSG_WAITALL ignored for UDP", socket_tests.testMsgWaitallIgnoredUdp);
+
     // Phase 23: POSIX timer tests
     runner.runTest("posix_timer: create", posix_timer_tests.testTimerCreate);
     runner.runTest("posix_timer: create sigev_none", posix_timer_tests.testTimerCreateSigevNone);

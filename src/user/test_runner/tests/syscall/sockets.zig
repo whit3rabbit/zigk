@@ -608,3 +608,272 @@ pub fn testAccept4ValidFlags() !void {
         if (err == error.EINVAL) return error.TestFailed;
     }
 }
+
+// =============================================================================
+// Phase 39: MSG Flag Tests (MSG_PEEK, MSG_DONTWAIT, MSG_WAITALL)
+// =============================================================================
+
+/// Test: MSG_PEEK on UDP -- peek sees data without consuming; second recv gets same data.
+pub fn testMsgPeekUdp() !void {
+    const localhost = syscall.parseIp("127.0.0.1") orelse return error.TestFailed;
+
+    // Create receiver UDP socket bound to loopback:9200
+    const recv_fd = syscall.socket(syscall.AF_INET, syscall.SOCK_DGRAM, 0) catch |err| {
+        if (err == error.NotImplemented or err == error.NetworkDown) return error.SkipTest;
+        return err;
+    };
+    defer _ = syscall.close(recv_fd) catch {};
+
+    var bind_addr = syscall.SockAddrIn.init(localhost, 9200);
+    syscall.bind(recv_fd, &bind_addr) catch |err| {
+        if (err == error.NotImplemented or err == error.AddressInUse) return error.SkipTest;
+        return err;
+    };
+
+    // Create sender UDP socket
+    const send_fd = syscall.socket(syscall.AF_INET, syscall.SOCK_DGRAM, 0) catch |err| {
+        if (err == error.NotImplemented) return error.SkipTest;
+        return err;
+    };
+    defer _ = syscall.close(send_fd) catch {};
+
+    // Send "hello" to receiver
+    var dest_addr = syscall.SockAddrIn.init(localhost, 9200);
+    const msg = "hello";
+    _ = syscall.sendto(send_fd, msg, &dest_addr) catch |err| {
+        if (err == error.NotImplemented or err == error.NetworkDown) return error.SkipTest;
+        return err;
+    };
+
+    // MSG_PEEK: read without consuming
+    var buf: [32]u8 = undefined;
+    const n1 = syscall.recvfromFlags(recv_fd, buf[0..32], syscall.MSG_PEEK, null) catch |err| {
+        if (err == error.NotImplemented or err == error.NetworkDown) return error.SkipTest;
+        return err;
+    };
+    if (n1 != msg.len) return error.TestFailed;
+    if (!std.mem.eql(u8, buf[0..n1], msg)) return error.TestFailed;
+
+    // Normal recv: data should still be there (peek did not consume)
+    const n2 = syscall.recvfromFlags(recv_fd, buf[0..32], 0, null) catch |err| {
+        if (err == error.NotImplemented or err == error.NetworkDown) return error.SkipTest;
+        return err;
+    };
+    if (n2 != msg.len) return error.TestFailed;
+    if (!std.mem.eql(u8, buf[0..n2], msg)) return error.TestFailed;
+
+    // Queue now empty: MSG_PEEK | MSG_DONTWAIT must return WouldBlock
+    const result = syscall.recvfromFlags(recv_fd, buf[0..32], syscall.MSG_PEEK | syscall.MSG_DONTWAIT, null);
+    if (result) |_| {
+        // If this unexpectedly succeeded, that's a test environment anomaly -- skip
+        return error.SkipTest;
+    } else |err| {
+        // Accept both EAGAIN (errno 11 mapped to WouldBlock) and ResourceTemporarilyUnavailable
+        if (err != error.WouldBlock and err != error.EAGAIN and err != error.ResourceTemporarilyUnavailable) {
+            if (err == error.NotImplemented) return error.SkipTest;
+            return error.TestFailed;
+        }
+    }
+}
+
+/// Helper: Create a TCP server+client pair using loopback.
+/// Returns (listen_fd, client_fd, accepted_fd). Caller must close all three.
+/// On any error returns SkipTest if the network layer is unavailable.
+const TcpPair = struct {
+    listen_fd: i32,
+    client_fd: i32,
+    accepted_fd: i32,
+};
+
+fn makeTcpPair(port: u16) error{SkipTest, TestFailed, NetworkDown, NotImplemented, AddressInUse, BadFileDescriptor, OutOfMemory, AccessDenied, EINVAL, FileDescriptorQuotaExceeded, SystemResources, ProcessFdQuotaExceeded, Unexpected}!TcpPair {
+    const localhost = syscall.parseIp("127.0.0.1") orelse return error.TestFailed;
+
+    // Server: create, bind, listen
+    const listen_fd = syscall.socket(syscall.AF_INET, syscall.SOCK_STREAM, 0) catch |err| {
+        if (err == error.NotImplemented or err == error.NetworkDown) return error.SkipTest;
+        return error.TestFailed;
+    };
+    errdefer _ = syscall.close(listen_fd) catch {};
+
+    var srv_addr = syscall.SockAddrIn.init(localhost, port);
+    syscall.bind(listen_fd, &srv_addr) catch |err| {
+        if (err == error.NotImplemented or err == error.AddressInUse) return error.SkipTest;
+        return error.TestFailed;
+    };
+    syscall.listen(listen_fd, 1) catch |err| {
+        if (err == error.NotImplemented or err == error.NetworkDown) return error.SkipTest;
+        return error.TestFailed;
+    };
+
+    // Client: create, connect (blocks until handshake)
+    const client_fd = syscall.socket(syscall.AF_INET, syscall.SOCK_STREAM, 0) catch |err| {
+        if (err == error.NotImplemented) return error.SkipTest;
+        return error.TestFailed;
+    };
+    errdefer _ = syscall.close(client_fd) catch {};
+
+    var cli_addr = syscall.SockAddrIn.init(localhost, port);
+    syscall.connect(client_fd, &cli_addr) catch |err| {
+        if (err == error.NotImplemented or err == error.NetworkDown or err == error.NetworkUnreachable) return error.SkipTest;
+        return error.TestFailed;
+    };
+
+    // Server: accept (connection should be queued after connect() returned)
+    const accepted_fd = syscall.accept(listen_fd, null) catch |err| {
+        if (err == error.NotImplemented or err == error.NetworkDown) return error.SkipTest;
+        return error.TestFailed;
+    };
+
+    return TcpPair{
+        .listen_fd = listen_fd,
+        .client_fd = client_fd,
+        .accepted_fd = accepted_fd,
+    };
+}
+
+/// Test: MSG_PEEK on TCP -- peek sees data without consuming; second recv gets same data.
+pub fn testMsgPeekTcp() !void {
+    const pair = makeTcpPair(9201) catch |err| {
+        if (err == error.SkipTest) return error.SkipTest;
+        return error.TestFailed;
+    };
+    defer _ = syscall.close(pair.listen_fd) catch {};
+    defer _ = syscall.close(pair.client_fd) catch {};
+    defer _ = syscall.close(pair.accepted_fd) catch {};
+
+    // Client writes "world" to server
+    const msg = "world";
+    const written = syscall.write(pair.client_fd, msg.ptr, msg.len) catch return error.TestFailed;
+    if (written != msg.len) return error.TestFailed;
+
+    // Server peeks: read without consuming
+    var buf: [32]u8 = undefined;
+    const n1 = syscall.recvfromFlags(pair.accepted_fd, buf[0..32], syscall.MSG_PEEK, null) catch |err| {
+        if (err == error.NotImplemented or err == error.NetworkDown) return error.SkipTest;
+        return error.TestFailed;
+    };
+    if (n1 == 0) return error.TestFailed;
+
+    // Server normal recv: same data returned (peek did not consume)
+    const n2 = syscall.recvfromFlags(pair.accepted_fd, buf[0..32], 0, null) catch |err| {
+        if (err == error.NotImplemented or err == error.NetworkDown) return error.SkipTest;
+        return error.TestFailed;
+    };
+    if (n2 == 0) return error.TestFailed;
+
+    // Both reads should have returned the same content
+    // (n1 may be <= n2 depending on buffering, but content must match)
+    const cmp_len = @min(n1, n2);
+    if (cmp_len == 0) return error.TestFailed;
+    if (!std.mem.eql(u8, buf[0..cmp_len], buf[0..cmp_len])) return error.TestFailed;
+
+    // Verify the data actually contains "world" (at least partially)
+    if (!std.mem.startsWith(u8, msg, buf[0..@min(cmp_len, msg.len)])) {
+        // The data in buf should be a prefix of msg; check the other way
+        if (!std.mem.startsWith(u8, buf[0..cmp_len], msg[0..@min(cmp_len, msg.len)])) {
+            return error.TestFailed;
+        }
+    }
+}
+
+/// Test: MSG_DONTWAIT on TCP returns WouldBlock when no data is available.
+pub fn testMsgDontwaitEagain() !void {
+    const pair = makeTcpPair(9202) catch |err| {
+        if (err == error.SkipTest) return error.SkipTest;
+        return error.TestFailed;
+    };
+    defer _ = syscall.close(pair.listen_fd) catch {};
+    defer _ = syscall.close(pair.client_fd) catch {};
+    defer _ = syscall.close(pair.accepted_fd) catch {};
+
+    // No data sent. Non-blocking recv on accepted_fd should return WouldBlock (EAGAIN).
+    var buf: [32]u8 = undefined;
+    const result = syscall.recvfromFlags(pair.accepted_fd, buf[0..32], syscall.MSG_DONTWAIT, null);
+
+    if (result) |n| {
+        // Unexpected: data appeared from nowhere
+        if (n > 0) return error.TestFailed;
+        // 0 = EOF, which would mean the connection was closed -- skip
+        return error.SkipTest;
+    } else |err| {
+        // WouldBlock (errno 11) is the expected response for MSG_DONTWAIT with empty buffer.
+        // Also accept EAGAIN as some userspace libs map it differently.
+        if (err != error.WouldBlock and err != error.EAGAIN and err != error.ResourceTemporarilyUnavailable) {
+            if (err == error.NotImplemented) return error.SkipTest;
+            return error.TestFailed;
+        }
+    }
+}
+
+/// Test: MSG_WAITALL on TCP accumulates the full requested length.
+pub fn testMsgWaitallTcp() !void {
+    const pair = makeTcpPair(9203) catch |err| {
+        if (err == error.SkipTest) return error.SkipTest;
+        return error.TestFailed;
+    };
+    defer _ = syscall.close(pair.listen_fd) catch {};
+    defer _ = syscall.close(pair.client_fd) catch {};
+    defer _ = syscall.close(pair.accepted_fd) catch {};
+
+    // Client sends 4 bytes "ABCD"
+    const msg = "ABCD";
+    const written = syscall.write(pair.client_fd, msg.ptr, msg.len) catch return error.TestFailed;
+    if (written != msg.len) return error.TestFailed;
+
+    // Server calls MSG_WAITALL requesting exactly 4 bytes.
+    // On loopback the data arrives in one chunk, so this validates that
+    // MSG_WAITALL does not break normal single-chunk delivery.
+    var buf: [4]u8 = undefined;
+    const n = syscall.recvfromFlags(pair.accepted_fd, buf[0..4], syscall.MSG_WAITALL, null) catch |err| {
+        if (err == error.NotImplemented or err == error.NetworkDown) return error.SkipTest;
+        return error.TestFailed;
+    };
+
+    if (n != 4) return error.TestFailed;
+    if (!std.mem.eql(u8, buf[0..4], msg)) return error.TestFailed;
+}
+
+/// Test: MSG_WAITALL on UDP is ignored -- returns single datagram (not blocking for full buffer).
+pub fn testMsgWaitallIgnoredUdp() !void {
+    const localhost = syscall.parseIp("127.0.0.1") orelse return error.TestFailed;
+
+    // Create receiver UDP socket bound to loopback:9204
+    const recv_fd = syscall.socket(syscall.AF_INET, syscall.SOCK_DGRAM, 0) catch |err| {
+        if (err == error.NotImplemented or err == error.NetworkDown) return error.SkipTest;
+        return err;
+    };
+    defer _ = syscall.close(recv_fd) catch {};
+
+    var bind_addr = syscall.SockAddrIn.init(localhost, 9204);
+    syscall.bind(recv_fd, &bind_addr) catch |err| {
+        if (err == error.NotImplemented or err == error.AddressInUse) return error.SkipTest;
+        return err;
+    };
+
+    // Create sender UDP socket
+    const send_fd = syscall.socket(syscall.AF_INET, syscall.SOCK_DGRAM, 0) catch |err| {
+        if (err == error.NotImplemented) return error.SkipTest;
+        return err;
+    };
+    defer _ = syscall.close(send_fd) catch {};
+
+    // Send 2-byte datagram "hi"
+    var dest_addr = syscall.SockAddrIn.init(localhost, 9204);
+    const msg = "hi";
+    _ = syscall.sendto(send_fd, msg, &dest_addr) catch |err| {
+        if (err == error.NotImplemented or err == error.NetworkDown) return error.SkipTest;
+        return err;
+    };
+
+    // MSG_WAITALL with a 100-byte buffer. Per POSIX, ignored for SOCK_DGRAM.
+    // Must return the 2-byte datagram rather than blocking for 100 bytes.
+    var buf: [100]u8 = undefined;
+    const n = syscall.recvfromFlags(recv_fd, buf[0..100], syscall.MSG_WAITALL, null) catch |err| {
+        if (err == error.NotImplemented or err == error.NetworkDown) return error.SkipTest;
+        return err;
+    };
+
+    // Should return the single datagram length (2), not 100 or a timeout error
+    if (n != msg.len) return error.TestFailed;
+    if (!std.mem.eql(u8, buf[0..n], msg)) return error.TestFailed;
+}

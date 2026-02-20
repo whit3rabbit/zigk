@@ -9,8 +9,8 @@
 //! by using a separate VA range where guard pages are truly unmapped.
 //!
 //! Layout per stack slot:
-//!   - x86_64:  9 pages = 36KB (1 guard + 8 stack)
-//!   - AArch64: 17 pages = 68KB (1 guard + 16 stack)
+//!   - x86_64:  49 pages = 196KB (1 guard + 48 stack)
+//!   - AArch64: 49 pages = 196KB (1 guard + 48 stack)
 //!
 //! Stack grows downward (high to low addresses), so overflow writes into
 //! the guard page trigger #PF. stack_top is the initial RSP value.
@@ -31,10 +31,11 @@ const paging = hal.paging;
 pub const PAGE_SIZE: usize = pmm.PAGE_SIZE;
 
 /// Number of pages per stack (excluding guard page).
-/// Both architectures need 96KB due to deep syscall dispatch + SFS call chains.
+/// Both architectures need 192KB due to deep syscall dispatch + SFS call chains.
+/// Increased from 96KB (24 pages) in Phase 39 after dispatch table expansion caused double faults.
 pub const STACK_PAGES: usize = switch (builtin.cpu.arch) {
-    .aarch64 => 24, // 96 KB - increased from 16 (64KB) for expanded syscall dispatch table
-    .x86_64 => 24, // 96 KB - increased from 16 (64KB) for expanded syscall dispatch table
+    .aarch64 => 48, // 192 KB - increased from 24 (96KB) for expanded syscall dispatch table (Phase 39)
+    .x86_64 => 48, // 192 KB - increased from 24 (96KB) for expanded syscall dispatch table (Phase 39)
     else => @compileError("Unsupported architecture for kernel stacks"),
 };
 
