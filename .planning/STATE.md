@@ -5,16 +5,16 @@
 See: .planning/PROJECT.md (updated 2026-02-19)
 
 **Core value:** Every implemented syscall must work correctly on both x86_64 and aarch64 with matching behavior, tested via the existing integration test harness.
-**Current focus:** v1.4 Network Stack Hardening -- Phase 38 complete (Socket Options and Raw Socket Blocking)
+**Current focus:** v1.4 Network Stack Hardening -- Phase 39 complete (MSG flags: MSG_PEEK, MSG_DONTWAIT, MSG_WAITALL)
 
 ## Current Position
 
-Phase: 39 of 39 (MSG_PEEK and MSG_DONTWAIT flag support)
-Plan: 1 of 1 in current phase (39-01 complete)
-Status: Phase 39 plan 01 complete
-Last activity: 2026-02-19 -- 39-01 complete (MSG_PEEK/MSG_DONTWAIT recv flags, TCP/UDP peek support, userspace wrappers)
+Phase: 39 of 39 (MSG_PEEK, MSG_DONTWAIT, MSG_WAITALL flag support)
+Plan: 2 of 2 in current phase (39-01 and 39-02 complete)
+Status: Phase 39 complete -- all plans done
+Last activity: 2026-02-20 -- 39-02 complete (MSG_WAITALL tcpRecvWaitall, integration tests, kernel stack 192KB)
 
-Progress: [██████████] 100% (1/1 plans in phase 39 done; 81/81 plans complete across phases 1-39)
+Progress: [██████████] 100% (2/2 plans in phase 39 done; 82/82 plans complete across phases 1-39)
 
 ## Performance Metrics
 
@@ -47,6 +47,7 @@ Progress: [██████████] 100% (1/1 plans in phase 39 done; 81/
 
 **Phase 39 metrics:**
 - 39-01: 6min -- MSG_PEEK/MSG_DONTWAIT/MSG_WAITALL constants + TCP/UDP peek support + flags threaded through recv stack + userspace recvfromFlags wrappers
+- 39-02: ~30min -- tcpRecvWaitall accumulation loop + MSG_WAITALL dispatch + 5 integration tests + kernel stack 96KB->192KB fix
 
 ## Accumulated Context
 
@@ -59,7 +60,10 @@ Recent v1.4 decisions (Phase 39):
 - TCP peek uses local_tail copy to iterate recv_buf without writing back tcb.recv_tail; no window update ACK
 - sys_recvfrom now dispatches TCP and UDP separately (pre-existing bug: SOCK_STREAM was routed through UDP recvfromIp which accesses UDP rx_queue, not TCP recv_buf)
 - MSG_NOSIGNAL honored in sys_sendmsg TCP send path (SIGPIPE suppression)
-- MSG_WAITALL constant defined (0x0100) but implementation deferred to plan 39-02
+- MSG_WAITALL implemented as tcpRecvWaitall accumulation loop with SO_RCVTIMEO total-wait timeout
+- MSG_WAITALL ignored for SOCK_DGRAM per POSIX (datagrams are atomic, partial returns undefined)
+- Flag priority: MSG_PEEK > MSG_DONTWAIT > MSG_WAITALL > default blocking (matches Linux behavior)
+- Kernel stack increased 96KB->192KB (24->48 pages) to fix pre-existing double fault from comptime dispatch table expansion across phases 24-39
 - signals import added to msg.zig (already in syscall_net_module build.zig deps)
 
 Previous v1.4 decisions:
@@ -95,12 +99,12 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-02-19 (39-01 execution)
-Stopped at: Completed 39-01-PLAN.md (MSG_PEEK/MSG_DONTWAIT recv flags, TCP/UDP peek, userspace wrappers)
+Last session: 2026-02-20 (39-02 execution)
+Stopped at: Completed 39-02-PLAN.md (MSG_WAITALL tcpRecvWaitall, integration tests, kernel stack fix)
 Resume file: None
 
-**Next action:** Phase 39 complete. All plans across all phases complete (81/81).
+**Next action:** Phase 39 complete. All plans across all phases complete (82/82).
 
 ---
 *State initialized: 2026-02-06*
-*Last updated: 2026-02-20 after 38-02 execution*
+*Last updated: 2026-02-20 after 39-02 execution*
