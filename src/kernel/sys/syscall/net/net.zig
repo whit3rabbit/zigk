@@ -47,13 +47,18 @@ fn getCurrentThread() ?*anyopaque {
     return @ptrCast(t);
 }
 
+/// Check pending signals on current thread -- callback for socket scheduler shim
+fn hasPendingSignalImpl() bool {
+    return hasPendingSignal();
+}
+
 /// Initialize network syscall layer (called once at boot)
 /// Sets up scheduler integration for blocking socket I/O
 var initialized: bool = false;
 
 pub fn init() void {
     if (!initialized) {
-        socket.setSchedulerFunctions(wakeBlockedThread, blockCurrentThread, getCurrentThread);
+        socket.setSchedulerFunctions(wakeBlockedThread, blockCurrentThread, getCurrentThread, hasPendingSignalImpl);
         initialized = true;
     }
 }
@@ -617,6 +622,9 @@ pub fn sys_recvfrom(
                             sock_for_type.blocked_thread = current;
                             sched.block();
                             sock_for_type.blocked_thread = null;
+                            if (hasPendingSignal()) {
+                                return error.EINTR;
+                            }
                             continue;
                         }
                         return socketErrorToSyscallError(err);
@@ -633,6 +641,9 @@ pub fn sys_recvfrom(
             // MSG_WAITALL on TCP: accumulate until buf full, EOF, timeout, or signal.
             // tcpRecvWaitall blocks internally using the socket's scheduler integration.
             received = socket.tcpRecvWaitall(ctx.socket_idx, kbuf) catch |err| {
+                // If tcpRecvWaitall returned WouldBlock because of a pending signal,
+                // convert to EINTR (WouldBlock maps to EAGAIN by default).
+                if (hasPendingSignal()) return error.EINTR;
                 return socketErrorToSyscallError(err);
             };
         } else {
@@ -654,6 +665,9 @@ pub fn sys_recvfrom(
                         sock_for_type.blocked_thread = current;
                         sched.block();
                         sock_for_type.blocked_thread = null;
+                        if (hasPendingSignal()) {
+                            return error.EINTR;
+                        }
                         continue;
                     }
                     return socketErrorToSyscallError(err);

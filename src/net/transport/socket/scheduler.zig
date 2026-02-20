@@ -10,6 +10,7 @@ pub const ThreadPtr = ?*anyopaque;
 pub const WakeFn = *const fn (ThreadPtr) void;
 pub const BlockFn = *const fn () void;
 pub const GetCurrentThreadFn = *const fn () ThreadPtr;
+pub const HasPendingSignalFn = *const fn () bool;
 
 /// Protects all function pointer reads and writes
 var lock: sync.Spinlock = .{};
@@ -17,15 +18,17 @@ var lock: sync.Spinlock = .{};
 var wake_thread_fn: ?WakeFn = null;
 var block_thread_fn: ?BlockFn = null;
 var get_current_thread_fn: ?GetCurrentThreadFn = null;
+var has_pending_signal_fn: ?HasPendingSignalFn = null;
 
 /// Set the scheduler callback functions.
 /// Called once during kernel init before any socket operations.
-pub fn setSchedulerFunctions(wake: WakeFn, block: BlockFn, getCurrent: GetCurrentThreadFn) void {
+pub fn setSchedulerFunctions(wake: WakeFn, block: BlockFn, getCurrent: GetCurrentThreadFn, hasPending: HasPendingSignalFn) void {
     const held = lock.acquire();
     defer held.release();
     wake_thread_fn = wake;
     block_thread_fn = block;
     get_current_thread_fn = getCurrent;
+    has_pending_signal_fn = hasPending;
 }
 
 /// Wake a blocked thread. Safe to call from any context.
@@ -51,4 +54,13 @@ pub fn currentThreadFn() ?GetCurrentThreadFn {
     const held = lock.acquire();
     defer held.release();
     return get_current_thread_fn;
+}
+
+/// Check if the current thread has pending unmasked signals.
+/// Returns false if no callback is registered (safe default: do not interrupt).
+pub fn hasPendingSignal() bool {
+    const held = lock.acquire();
+    defer held.release();
+    if (has_pending_signal_fn) |f| return f();
+    return false;
 }

@@ -553,6 +553,12 @@ pub fn tcpRecvWaitall(sock_fd: usize, buf: []u8) errors.SocketError!usize {
                     sock.blocked_thread = null;
                     platform.cpu.restoreInterrupts(irq_state);
 
+                    // Check for pending signal after wakeup.
+                    if (scheduler.hasPendingSignal()) {
+                        if (offset > 0) return offset;
+                        return errors.SocketError.WouldBlock;
+                    }
+
                     // After wakeup: check timeout and continue to retry receive.
                     if (timeout_us > 0 and clock.hasTimedOut(start_tsc, timeout_us)) {
                         if (offset > 0) return offset;
@@ -582,6 +588,8 @@ pub fn tcpRecvWaitall(sock_fd: usize, buf: []u8) errors.SocketError!usize {
     }
 
     // Fallback: HLT-based polling (no scheduler available).
+    // No signal check needed: without a scheduler, hasPendingSignal() always
+    // returns false and signal delivery is not operational.
     const timeout_ticks: usize = if (sock.rcv_timeout_ms > 0)
         @intCast(sock.rcv_timeout_ms) // 1 tick = 1ms
     else
