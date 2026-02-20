@@ -76,7 +76,7 @@
 - [x] **Phase 36: RTT Estimation and Congestion Module** - Fix Karn's Algorithm in all retransmit paths, apply IW10, cap cwnd growth, extract congestion logic into congestion/reno.zig (completed 2026-02-19)
 - [x] **Phase 37: Dynamic Window Management and Persist Timer** - Wire currentRecvWindow() into ACK building, add persist timer separate from retransmit, implement SWS avoidance on both sender and receiver (completed 2026-02-19)
 - [x] **Phase 38: Socket Options and Raw Socket Blocking** - Implement SO_RCVBUF, SO_SNDBUF, SO_REUSEPORT, TCP_CORK, MSG_NOSIGNAL, and raw socket blocking recv (completed 2026-02-20)
-- [ ] **Phase 39: MSG Flags** - Thread flags parameter through the TCP/UDP call stack; implement MSG_PEEK, MSG_DONTWAIT, MSG_WAITALL
+- [x] **Phase 39: MSG Flags** - Thread flags parameter through the TCP/UDP call stack; implement MSG_PEEK, MSG_DONTWAIT, MSG_WAITALL (completed 2026-02-20)
 
 ## Phase Details
 
@@ -181,7 +181,7 @@ Plans:
 | 36. RTT Estimation and Congestion Module | v1.4 | Complete    | 2026-02-19 | 2026-02-19 |
 | 37. Dynamic Window Management and Persist Timer | 2/2 | Complete    | 2026-02-19 | - |
 | 38. Socket Options and Raw Socket Blocking | v1.4 | Complete    | 2026-02-20 | 2026-02-20 |
-| 39. MSG Flags | v1.4 | 2/3 | In progress | - |
+| 39. MSG Flags | 3/3 | Complete   | 2026-02-20 | - |
 
 ---
 *Roadmap created: 2026-02-06*

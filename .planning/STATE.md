@@ -5,16 +5,16 @@
 See: .planning/PROJECT.md (updated 2026-02-19)
 
 **Core value:** Every implemented syscall must work correctly on both x86_64 and aarch64 with matching behavior, tested via the existing integration test harness.
-**Current focus:** v1.4 Network Stack Hardening -- Phase 39 complete (MSG flags: MSG_PEEK, MSG_DONTWAIT, MSG_WAITALL)
+**Current focus:** v1.4 Network Stack Hardening -- Phase 39 complete (MSG flags: MSG_PEEK, MSG_DONTWAIT, MSG_WAITALL, EINTR gap closed)
 
 ## Current Position
 
-Phase: 39 of 39 (MSG_PEEK, MSG_DONTWAIT, MSG_WAITALL flag support)
-Plan: 2 of 2 in current phase (39-01 and 39-02 complete)
+Phase: 39 of 39 (MSG_PEEK, MSG_DONTWAIT, MSG_WAITALL flag support + EINTR gap closure)
+Plan: 3 of 3 in current phase (39-01, 39-02, and 39-03 complete)
 Status: Phase 39 complete -- all plans done
-Last activity: 2026-02-20 -- 39-02 complete (MSG_WAITALL tcpRecvWaitall, integration tests, kernel stack 192KB)
+Last activity: 2026-02-20 -- 39-03 complete (hasPendingSignal callback + EINTR checks in MSG_PEEK, MSG_WAITALL, default TCP recv loops)
 
-Progress: [██████████] 100% (2/2 plans in phase 39 done; 82/82 plans complete across phases 1-39)
+Progress: [██████████] 100% (3/3 plans in phase 39 done; 83/83 plans complete across phases 1-39)
 
 ## Performance Metrics
 
@@ -48,6 +48,7 @@ Progress: [██████████] 100% (2/2 plans in phase 39 done; 82/
 **Phase 39 metrics:**
 - 39-01: 6min -- MSG_PEEK/MSG_DONTWAIT/MSG_WAITALL constants + TCP/UDP peek support + flags threaded through recv stack + userspace recvfromFlags wrappers
 - 39-02: ~30min -- tcpRecvWaitall accumulation loop + MSG_WAITALL dispatch + 5 integration tests + kernel stack 96KB->192KB fix
+- 39-03: 2min -- hasPendingSignal callback in socket scheduler shim + EINTR checks in MSG_PEEK, MSG_WAITALL, and default TCP recv blocking loops
 
 ## Accumulated Context
 
@@ -65,6 +66,9 @@ Recent v1.4 decisions (Phase 39):
 - Flag priority: MSG_PEEK > MSG_DONTWAIT > MSG_WAITALL > default blocking (matches Linux behavior)
 - Kernel stack increased 96KB->192KB (24->48 pages) to fix pre-existing double fault from comptime dispatch table expansion across phases 24-39
 - signals import added to msg.zig (already in syscall_net_module build.zig deps)
+- hasPendingSignal callback stored in scheduler.zig shim behind spinlock -- same pattern as existing wake/block/getCurrent callbacks
+- tcpRecvWaitall returns WouldBlock on signal; syscall layer converts to EINTR -- keeps transport layer independent of syscall error vocabulary
+- HLT fallback path in tcpRecvWaitall intentionally excludes signal check -- no signal delivery without scheduler; comment added
 
 Previous v1.4 decisions:
 - Option A buffer sizing (fixed 8KB arrays with rcv_buf_size cap field) -- avoids heap allocation in IRQ-context recv path and Tcb.reset() leak risk
@@ -99,12 +103,12 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-02-20 (39-02 execution)
-Stopped at: Completed 39-02-PLAN.md (MSG_WAITALL tcpRecvWaitall, integration tests, kernel stack fix)
+Last session: 2026-02-20 (39-03 execution)
+Stopped at: Completed 39-03-PLAN.md (hasPendingSignal callback + EINTR checks for MSG_PEEK, MSG_WAITALL, default TCP recv loops)
 Resume file: None
 
-**Next action:** Phase 39 complete. All plans across all phases complete (82/82).
+**Next action:** Phase 39 complete. All plans across all phases complete (83/83). EINTR gap for MSG_WAITALL is fully closed.
 
 ---
 *State initialized: 2026-02-06*
-*Last updated: 2026-02-20 after 39-02 execution*
+*Last updated: 2026-02-20 after 39-03 execution*
