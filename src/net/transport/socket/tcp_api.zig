@@ -1,5 +1,6 @@
 // TCP-facing socket helpers.
 
+const std = @import("std");
 const tcp = @import("../tcp.zig");
 const types = @import("types.zig");
 const state = @import("state.zig");
@@ -7,6 +8,8 @@ const tcp_state = @import("../tcp/state.zig");
 const errors = @import("errors.zig");
 const scheduler = @import("scheduler.zig");
 const ipv6_transmit = @import("../../ipv6/ipv6/transmit.zig");
+const platform = @import("../../platform.zig");
+const clock = @import("../../clock.zig");
 
 /// Mark socket as listening for connections (TCP only)
 pub fn listen(sock_fd: usize, backlog_arg: usize) errors.SocketError!void {
@@ -488,6 +491,132 @@ pub fn tcpRecv(sock_fd: usize, buf: []u8) errors.SocketError!usize {
             else => errors.SocketError.NetworkUnreachable,
         };
     };
+}
+
+/// TCP receive with MSG_WAITALL semantics (for connected SOCK_STREAM sockets).
+///
+/// Accumulates bytes into buf until buf.len bytes are received, EOF (FIN), timeout,
+/// or signal interruption -- whichever comes first. Returns the number of bytes
+/// actually accumulated. Per POSIX MSG_WAITALL semantics:
+///   - Returns buf.len if all bytes arrive before EOF/timeout/signal.
+///   - Returns partial count on EOF (FIN), SO_RCVTIMEO expiry, or signal if bytes > 0.
+///   - Returns TimedOut if no bytes received before SO_RCVTIMEO expiry.
+///   - Returns WouldBlock if no bytes received and a signal is pending (caller maps to EINTR).
+///
+/// Locking: acquires sock once; tcp.recv acquires tcp_state.lock + tcb.mutex internally.
+/// Blocking uses sock.lock (level 6), held only briefly to set blocked_thread before
+/// releasing and calling block_fn(). This is the same pattern as udp_api.recvfromIp.
+pub fn tcpRecvWaitall(sock_fd: usize, buf: []u8) errors.SocketError!usize {
+    // Acquire socket reference for the duration of the accumulation loop.
+    const sock = state.acquireSocket(sock_fd) orelse return errors.SocketError.BadFd;
+    defer state.releaseSocket(sock);
+
+    if (sock.sock_type != types.SOCK_STREAM) {
+        return errors.SocketError.TypeNotSupported;
+    }
+
+    const tcb = sock.tcb orelse return errors.SocketError.NotConnected;
+
+    // SO_RCVTIMEO: convert ms to us; 0 means block indefinitely.
+    const timeout_us: u64 = if (sock.rcv_timeout_ms > 0)
+        std.math.mul(u64, sock.rcv_timeout_ms, 1000) catch std.math.maxInt(u64)
+    else
+        0;
+    const start_tsc = clock.rdtsc();
+
+    var offset: usize = 0;
+
+    // Prefer scheduler-based blocking if available.
+    if (scheduler.blockFn()) |block_fn| {
+        const get_current = scheduler.currentThreadFn() orelse return errors.SocketError.SystemError;
+
+        while (offset < buf.len) {
+            // Check SO_RCVTIMEO before attempting receive.
+            if (timeout_us > 0 and clock.hasTimedOut(start_tsc, timeout_us)) {
+                if (offset > 0) return offset;
+                return errors.SocketError.TimedOut;
+            }
+
+            // Attempt to receive into the remaining slice.
+            const n = tcp.recv(tcb, buf[offset..]) catch |err| switch (err) {
+                tcp.TcpError.WouldBlock => {
+                    // No data yet. Enter blocking sub-loop.
+                    // Disable interrupts, lock sock, register blocked_thread,
+                    // then release lock and call block_fn() atomically.
+                    const irq_state = platform.cpu.disableInterruptsSaveFlags();
+                    {
+                        const held = sock.lock.acquire();
+                        sock.blocked_thread = get_current();
+                        held.release();
+                    }
+                    block_fn();
+                    sock.blocked_thread = null;
+                    platform.cpu.restoreInterrupts(irq_state);
+
+                    // After wakeup: check timeout and continue to retry receive.
+                    if (timeout_us > 0 and clock.hasTimedOut(start_tsc, timeout_us)) {
+                        if (offset > 0) return offset;
+                        return errors.SocketError.TimedOut;
+                    }
+                    continue;
+                },
+                tcp.TcpError.NotConnected => {
+                    if (offset > 0) return offset;
+                    return errors.SocketError.NotConnected;
+                },
+                else => {
+                    if (offset > 0) return offset;
+                    return errors.SocketError.NetworkUnreachable;
+                },
+            };
+
+            if (n == 0) {
+                // EOF (FIN received): return whatever we have.
+                break;
+            }
+
+            offset += n;
+        }
+
+        return offset;
+    }
+
+    // Fallback: HLT-based polling (no scheduler available).
+    const timeout_ticks: usize = if (sock.rcv_timeout_ms > 0)
+        @intCast(sock.rcv_timeout_ms) // 1 tick = 1ms
+    else
+        std.math.maxInt(usize);
+
+    var ticks: usize = 0;
+    while (offset < buf.len and ticks < timeout_ticks) {
+        const n = tcp.recv(tcb, buf[offset..]) catch |err| switch (err) {
+            tcp.TcpError.WouldBlock => {
+                platform.cpu.enableInterrupts();
+                platform.cpu.halt();
+                ticks += 1;
+                continue;
+            },
+            tcp.TcpError.NotConnected => {
+                if (offset > 0) return offset;
+                return errors.SocketError.NotConnected;
+            },
+            else => {
+                if (offset > 0) return offset;
+                return errors.SocketError.NetworkUnreachable;
+            },
+        };
+
+        if (n == 0) {
+            break; // EOF
+        }
+        offset += n;
+    }
+
+    if (offset == 0 and ticks >= timeout_ticks and sock.rcv_timeout_ms > 0) {
+        return errors.SocketError.TimedOut;
+    }
+
+    return offset;
 }
 
 // =============================================================================

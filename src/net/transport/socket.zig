@@ -109,6 +109,7 @@ pub const queueAcceptConnection = root.queueAcceptConnection;
 pub const tcpSend = root.tcpSend;
 pub const tcpRecv = root.tcpRecv;
 pub const tcpPeek = root.tcpPeek;
+pub const tcpRecvWaitall = root.tcpRecvWaitall;
 
 // TCP async path (Phase 2)
 pub const acceptAsync = root.acceptAsync;

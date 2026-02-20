@@ -112,6 +112,7 @@ pub const queueAcceptConnection = tcp_api.queueAcceptConnection;
 pub const tcpSend = tcp_api.tcpSend;
 pub const tcpRecv = tcp_api.tcpRecv;
 pub const tcpPeek = tcp_api.tcpPeek;
+pub const tcpRecvWaitall = tcp_api.tcpRecvWaitall;
 
 // TCP async path (Phase 2)
 pub const acceptAsync = tcp_api.acceptAsync;

@@ -629,6 +629,12 @@ pub fn sys_recvfrom(
                 if (err == socket.SocketError.WouldBlock) return error.EAGAIN;
                 return socketErrorToSyscallError(err);
             };
+        } else if ((recv_flags & socket.MSG_WAITALL) != 0) {
+            // MSG_WAITALL on TCP: accumulate until buf full, EOF, timeout, or signal.
+            // tcpRecvWaitall blocks internally using the socket's scheduler integration.
+            received = socket.tcpRecvWaitall(ctx.socket_idx, kbuf) catch |err| {
+                return socketErrorToSyscallError(err);
+            };
         } else {
             // Default blocking TCP recv (blocking loop handled inside socket layer / syscall)
             while (true) {
@@ -656,6 +662,7 @@ pub fn sys_recvfrom(
         }
     } else {
         // UDP / SOCK_RAW path: pass flags through to recvfromIp
+        // MSG_WAITALL ignored for SOCK_DGRAM per POSIX (returns single datagram as normal).
         received = socket.recvfromIp(ctx.socket_idx, kbuf, &src_ip, &src_port, recv_flags) catch |err| {
             return socketErrorToSyscallError(err);
         };
