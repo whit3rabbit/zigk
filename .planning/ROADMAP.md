@@ -181,7 +181,7 @@ Plans:
 | 36. RTT Estimation and Congestion Module | v1.4 | Complete    | 2026-02-19 | 2026-02-19 |
 | 37. Dynamic Window Management and Persist Timer | 2/2 | Complete    | 2026-02-19 | - |
 | 38. Socket Options and Raw Socket Blocking | v1.4 | Complete    | 2026-02-20 | 2026-02-20 |
-| 39. MSG Flags | 3/3 | Complete   | 2026-02-20 | - |
+| 39. MSG Flags | 3/3 | Complete    | 2026-02-20 | - |
 
 ---
 *Roadmap created: 2026-02-06*
