@@ -33,6 +33,7 @@ pub const IPPROTO_ICMPV6 = root.IPPROTO_ICMPV6;
 pub const TCP_NODELAY = root.TCP_NODELAY;
 pub const TCP_CORK = root.TCP_CORK;
 pub const SO_REUSEADDR = root.SO_REUSEADDR;
+pub const SO_REUSEPORT = root.SO_REUSEPORT;
 pub const SO_SNDBUF = root.SO_SNDBUF;
 pub const SO_RCVBUF = root.SO_RCVBUF;
 pub const SO_BROADCAST = root.SO_BROADCAST;

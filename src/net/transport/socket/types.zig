@@ -68,6 +68,7 @@ pub const SO_RCVBUF: i32 = 8;
 pub const SO_PEERCRED: i32 = 17; // Retrieve peer credentials (AF_UNIX only)
 pub const SO_RCVTIMEO: i32 = 20;
 pub const SO_SNDTIMEO: i32 = 21;
+pub const SO_REUSEPORT: i32 = 15; // Allow multiple sockets to bind same addr:port
 
 /// Message flags
 pub const MSG_NOSIGNAL: u32 = 0x4000;
@@ -201,6 +202,8 @@ pub const Socket = struct {
 
     /// Allow address reuse (SO_REUSEADDR)
     so_reuseaddr: bool,
+    /// Allow multiple sockets to bind same addr:port (SO_REUSEPORT)
+    so_reuseport: bool,
     /// Disable Nagle's algorithm (TCP_NODELAY)
     tcp_nodelay: bool,
     /// TCP_CORK: hold sub-MSS segments until full MSS or cork cleared
@@ -275,6 +278,7 @@ pub const Socket = struct {
             .ttl = 64, // DEFAULT_TTL
             .so_broadcast = false,
             .so_reuseaddr = false,
+            .so_reuseport = false,
             .tcp_nodelay = false,
             .tcp_cork = false,
             .rcv_buf_size = 0,

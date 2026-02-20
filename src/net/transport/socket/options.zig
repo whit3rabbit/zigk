@@ -47,6 +47,11 @@ pub fn setsockopt(sock_fd: usize, level: i32, optname: i32, optval: [*]const u8,
                 const val: *const i32 = @ptrCast(@alignCast(optval));
                 sock.so_reuseaddr = (val.* != 0);
             },
+            types.SO_REUSEPORT => {
+                if (optlen < 4) return errors.SocketError.InvalidArg;
+                const val: *const i32 = @ptrCast(@alignCast(optval));
+                sock.so_reuseport = (val.* != 0);
+            },
             types.SO_RCVBUF => {
                 if (optlen < 4) return errors.SocketError.InvalidArg;
                 const val: *const i32 = @ptrCast(@alignCast(optval));
@@ -270,6 +275,12 @@ pub fn getsockopt(sock_fd: usize, level: i32, optname: i32, optval: [*]u8, optle
                 if (optlen.* < 4) return errors.SocketError.InvalidArg;
                 const val: *i32 = @ptrCast(@alignCast(optval));
                 val.* = if (sock.so_reuseaddr) 1 else 0;
+                optlen.* = 4;
+            },
+            types.SO_REUSEPORT => {
+                if (optlen.* < 4) return errors.SocketError.InvalidArg;
+                const val: *i32 = @ptrCast(@alignCast(optval));
+                val.* = if (sock.so_reuseport) 1 else 0;
                 optlen.* = 4;
             },
             types.SO_RCVBUF => {

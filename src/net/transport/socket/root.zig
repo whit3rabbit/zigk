@@ -36,6 +36,7 @@ pub const IPPROTO_ICMPV6 = types.IPPROTO_ICMPV6;
 pub const TCP_NODELAY = types.TCP_NODELAY;
 pub const TCP_CORK = types.TCP_CORK;
 pub const SO_REUSEADDR = types.SO_REUSEADDR;
+pub const SO_REUSEPORT = types.SO_REUSEPORT;
 pub const SO_SNDBUF = types.SO_SNDBUF;
 pub const SO_RCVBUF = types.SO_RCVBUF;
 pub const SO_BROADCAST = types.SO_BROADCAST;

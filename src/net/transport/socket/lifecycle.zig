@@ -123,18 +123,24 @@ fn bindInternal(sock_fd: usize, port: u16, ip: types.IpAddr) errors.SocketError!
 }
 
 /// Check if this socket can reuse the address of another socket.
-/// Implements POSIX SO_REUSEADDR semantics:
-/// 1. Both sockets must have SO_REUSEADDR set
-/// 2. For TCP: TIME_WAIT always allows reuse (server restart case)
-/// 3. For TCP: Cannot have two listeners on same addr:port
-/// 4. For UDP: Just require both SO_REUSEADDR (load balancing use case)
+/// Implements POSIX SO_REUSEADDR and SO_REUSEPORT semantics:
+/// 1. SO_REUSEPORT: if both sockets have it set, always allow (even two LISTENs)
+/// 2. SO_REUSEADDR: both must have it; TIME_WAIT allows reuse; no two LISTENs
+/// 3. For UDP: just require both SO_REUSEADDR (load balancing use case)
 fn canReuseAddress(new_sock: *types.Socket, existing: *types.Socket) bool {
-    // Both sockets must have SO_REUSEADDR set
+    // SO_REUSEPORT: if both sockets have it set, always allow (even two LISTENs on same port).
+    // This is the primary mechanism for multi-process/multi-thread load balancing.
+    // SO_REUSEPORT check is first and is a blanket allow, bypassing TCP-specific restrictions.
+    if (new_sock.so_reuseport and existing.so_reuseport) {
+        return true;
+    }
+
+    // SO_REUSEADDR path: both sockets must have it set
     if (!new_sock.so_reuseaddr or !existing.so_reuseaddr) {
         return false;
     }
 
-    // TCP-specific rules
+    // TCP-specific rules (SO_REUSEADDR path only)
     if (new_sock.sock_type == types.SOCK_STREAM and existing.sock_type == types.SOCK_STREAM) {
         // TIME_WAIT always allows reuse - this is the primary use case for
         // SO_REUSEADDR: allowing a server to restart and rebind immediately
@@ -144,8 +150,8 @@ fn canReuseAddress(new_sock: *types.Socket, existing: *types.Socket) bool {
             }
         }
 
-        // CRITICAL: Prevent two LISTEN sockets on same addr:port.
-        // This would cause ambiguous connection acceptance (which listener gets SYN?).
+        // CRITICAL: Prevent two LISTEN sockets on same addr:port with only SO_REUSEADDR.
+        // (SO_REUSEPORT case is handled above -- it allows two LISTENs explicitly.)
         // Note: At bind() time, sockets typically don't have a TCB yet - the TCB and
         // Listen state are set later via listen() syscall. So most binds succeed here.
         const new_is_listen = if (new_sock.tcb) |tcb| tcb.state == tcp.TcpState.Listen else false;
