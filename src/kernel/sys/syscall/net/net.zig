@@ -18,6 +18,7 @@ const user_mem = @import("user_mem");
 const fd_mod = @import("fd");
 const heap = @import("heap");
 const base = @import("base.zig");
+const signals_mod = @import("signals");
 
 // Import extracted modules
 const poll_mod = @import("poll.zig");
@@ -195,6 +196,12 @@ fn socketWrite(fd: *FileDescriptor, buf: []const u8) isize {
 
     if (sock.sock_type == socket.SOCK_STREAM) {
         const bytes = socket.tcpSend(ctx.socket_idx, buf) catch |err| {
+            // POSIX: sys_write on a broken TCP connection delivers SIGPIPE unconditionally.
+            // (No MSG_NOSIGNAL flag is available for write(); use send() with MSG_NOSIGNAL instead.)
+            if (err == socket.SocketError.ConnectionReset) {
+                deliverSigpipe();
+                return Errno.EPIPE.toReturn();
+            }
             return socket.errorToErrno(err);
         };
         return @intCast(bytes);
@@ -438,7 +445,7 @@ pub fn sys_sendto(
     dest_addr_ptr: usize,
     addrlen: usize,
 ) SyscallError!usize {
-    _ = flags; // Flags ignored for MVP
+    const send_flags: u32 = @truncate(flags);
 
     const ctx = getSocketContext(fd) orelse {
         return error.ENOTSOCK;
@@ -499,6 +506,10 @@ pub fn sys_sendto(
         }
 
         const sent = socket.sendto(ctx.socket_idx, kbuf, &kdest_addr) catch |err| {
+            if (shouldDeliverSigpipe(err, send_flags)) {
+                deliverSigpipe();
+                return error.EPIPE;
+            }
             return socketErrorToSyscallError(err);
         };
         return sent;
@@ -520,6 +531,10 @@ pub fn sys_sendto(
         }
 
         const sent = socket.sendto6(ctx.socket_idx, kbuf, &kdest_addr6) catch |err| {
+            if (shouldDeliverSigpipe(err, send_flags)) {
+                deliverSigpipe();
+                return error.EPIPE;
+            }
             return socketErrorToSyscallError(err);
         };
         return sent;
@@ -2036,4 +2051,23 @@ pub fn sys_socketpair(domain: usize, sock_type: usize, protocol: usize, sv_ptr: 
     };
 
     return 0;
+}
+
+// =============================================================================
+// SIGPIPE Helpers (MSG_NOSIGNAL support)
+// =============================================================================
+
+/// Returns true if SIGPIPE should be delivered for this socket error.
+/// err: connection-related SocketError from a send call
+/// send_flags: flags from sys_sendto (MSG_NOSIGNAL suppresses delivery)
+fn shouldDeliverSigpipe(err: socket.SocketError, send_flags: u32) bool {
+    const is_broken = (err == socket.SocketError.ConnectionReset);
+    return is_broken and ((send_flags & socket.MSG_NOSIGNAL) == 0);
+}
+
+/// Deliver SIGPIPE (signal 13) to the current thread.
+/// Per POSIX, write/send on a broken connection delivers SIGPIPE unless suppressed.
+fn deliverSigpipe() void {
+    const current = sched.getCurrentThread() orelse return;
+    signals_mod.deliverSignalToThread(current, 13); // SIGPIPE = 13
 }

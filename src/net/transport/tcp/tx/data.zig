@@ -70,6 +70,14 @@ pub fn transmitPendingData(tcb: *Tcb) bool {
         return true;
     }
 
+    // TCP_CORK: hold data until full MSS or cork cleared via setsockopt.
+    // Unlike Nagle (which only gates when data is in flight), cork unconditionally
+    // holds sub-MSS segments. When cork is cleared, setsockopt calls
+    // transmitPendingData() directly to flush.
+    if (tcb.tcp_cork and send_len < effective_mss) {
+        return true;
+    }
+
     // RFC 1122 S4.2.3.4 Sender SWS avoidance:
     // Do not send a segment unless it is a full MSS, covers at least half the
     // peer's advertised window, or exhausts all remaining data in the send buffer.

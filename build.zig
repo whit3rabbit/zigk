@@ -1644,6 +1644,7 @@ pub fn build(b: *std.Build) void {
     syscall_net_module.addImport("fd", fd_module);
     syscall_net_module.addImport("capabilities", capabilities_module);
     syscall_net_module.addImport("console", console_module);
+    syscall_net_module.addImport("signals", syscall_signals_module);
 
     // Create syscall io_uring module (async I/O syscalls)
     const syscall_io_uring_module = b.createModule(.{

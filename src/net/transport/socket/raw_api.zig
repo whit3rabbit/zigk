@@ -119,6 +119,7 @@ pub fn sendtoRaw(
 /// Receive raw packet from socket
 /// Returns the ICMP payload (without IP header) in the provided buffer.
 /// src_addr is filled with the source IP address.
+/// Blocks until a packet arrives if sock.blocking is true.
 pub fn recvfromRaw(
     sock_fd: usize,
     buf: []u8,
@@ -127,44 +128,64 @@ pub fn recvfromRaw(
 ) errors.SocketError!usize {
     _ = flags; // TODO: Handle MSG_DONTWAIT, MSG_PEEK
 
-    const sock = state.acquireSocket(sock_fd) orelse return errors.SocketError.BadFd;
-    defer state.releaseSocket(sock);
-
-    // Validate this is a raw socket
-    if (sock.sock_type != types.SOCK_RAW) {
-        return errors.SocketError.TypeNotSupported;
+    // Validate type using a quick acquire/release before the loop
+    {
+        const sock_check = state.acquireSocket(sock_fd) orelse return errors.SocketError.BadFd;
+        const ok = (sock_check.sock_type == types.SOCK_RAW);
+        state.releaseSocket(sock_check);
+        if (!ok) return errors.SocketError.TypeNotSupported;
     }
 
-    // Try to dequeue a packet
-    const held = sock.lock.acquire();
-    defer held.release();
+    while (true) {
+        const sock = state.acquireSocket(sock_fd) orelse return errors.SocketError.BadFd;
 
-    var ip_addr: types.IpAddr = .none;
-    var src_port: u16 = 0;
+        const held = sock.lock.acquire();
 
-    if (sock.dequeuePacketIp(buf, &ip_addr, &src_port)) |len| {
-        if (src_addr) |addr| {
-            addr.* = types.SockAddrIn{
-                .family = types.AF_INET,
-                .port = 0, // Raw sockets don't have ports
-                .addr = switch (ip_addr) {
-                    .v4 => |v4| v4,
-                    else => 0,
-                },
-                .zero = [_]u8{0} ** 8,
-            };
+        var ip_addr: types.IpAddr = .none;
+        var src_port: u16 = 0;
+
+        if (sock.dequeuePacketIp(buf, &ip_addr, &src_port)) |len| {
+            held.release();
+            state.releaseSocket(sock);
+            if (src_addr) |addr| {
+                addr.* = types.SockAddrIn{
+                    .family = types.AF_INET,
+                    .port = 0, // Raw sockets don't have ports
+                    .addr = switch (ip_addr) {
+                        .v4 => |v4| v4,
+                        else => 0,
+                    },
+                    .zero = [_]u8{0} ** 8,
+                };
+            }
+            return len;
         }
-        return len;
-    }
 
-    // No data available
-    if (!sock.blocking) {
-        return errors.SocketError.WouldBlock;
-    }
+        if (!sock.blocking) {
+            held.release();
+            state.releaseSocket(sock);
+            return errors.SocketError.WouldBlock;
+        }
 
-    // Blocking mode - would need to sleep and wait
-    // For now, return would-block (TODO: implement blocking raw recv)
-    return errors.SocketError.WouldBlock;
+        // Blocking mode: sleep until packet delivered by network stack.
+        // CRITICAL: release locks BEFORE calling block_fn() to prevent deadlock.
+        if (types.scheduler.blockFn()) |block_fn| {
+            const get_current = types.scheduler.currentThreadFn() orelse {
+                held.release();
+                state.releaseSocket(sock);
+                return errors.SocketError.SystemError;
+            };
+            sock.blocked_thread = get_current();
+            held.release();
+            state.releaseSocket(sock);
+            block_fn();
+            continue; // Re-acquire and re-check
+        } else {
+            held.release();
+            state.releaseSocket(sock);
+            return errors.SocketError.WouldBlock;
+        }
+    }
 }
 
 /// Send raw ICMPv6 packet to IPv6 destination
@@ -274,6 +295,7 @@ pub fn sendtoRaw6(
 /// Receive raw ICMPv6 packet from socket
 /// Returns the ICMPv6 payload (without IPv6 header) in the provided buffer.
 /// src_addr is filled with the source IPv6 address.
+/// Blocks until a packet arrives if sock.blocking is true.
 pub fn recvfromRaw6(
     sock_fd: usize,
     buf: []u8,
@@ -282,43 +304,63 @@ pub fn recvfromRaw6(
 ) errors.SocketError!usize {
     _ = flags; // TODO: Handle MSG_DONTWAIT, MSG_PEEK
 
-    const sock = state.acquireSocket(sock_fd) orelse return errors.SocketError.BadFd;
-    defer state.releaseSocket(sock);
-
-    // Validate this is a raw socket
-    if (sock.sock_type != types.SOCK_RAW) {
-        return errors.SocketError.TypeNotSupported;
+    // Validate type using a quick acquire/release before the loop
+    {
+        const sock_check = state.acquireSocket(sock_fd) orelse return errors.SocketError.BadFd;
+        const ok = (sock_check.sock_type == types.SOCK_RAW);
+        state.releaseSocket(sock_check);
+        if (!ok) return errors.SocketError.TypeNotSupported;
     }
 
-    // Try to dequeue a packet
-    const held = sock.lock.acquire();
-    defer held.release();
+    while (true) {
+        const sock = state.acquireSocket(sock_fd) orelse return errors.SocketError.BadFd;
 
-    var ip_addr: types.IpAddr = .none;
-    var src_port: u16 = 0;
+        const held = sock.lock.acquire();
 
-    if (sock.dequeuePacketIp(buf, &ip_addr, &src_port)) |len| {
-        if (src_addr) |addr| {
-            addr.* = types.SockAddrIn6{
-                .family = types.AF_INET6,
-                .port = 0, // Raw sockets don't have ports
-                .flowinfo = 0,
-                .addr = switch (ip_addr) {
-                    .v6 => |v6| v6,
-                    else => [_]u8{0} ** 16,
-                },
-                .scope_id = 0,
-            };
+        var ip_addr: types.IpAddr = .none;
+        var src_port: u16 = 0;
+
+        if (sock.dequeuePacketIp(buf, &ip_addr, &src_port)) |len| {
+            held.release();
+            state.releaseSocket(sock);
+            if (src_addr) |addr| {
+                addr.* = types.SockAddrIn6{
+                    .family = types.AF_INET6,
+                    .port = 0, // Raw sockets don't have ports
+                    .flowinfo = 0,
+                    .addr = switch (ip_addr) {
+                        .v6 => |v6| v6,
+                        else => [_]u8{0} ** 16,
+                    },
+                    .scope_id = 0,
+                };
+            }
+            return len;
         }
-        return len;
-    }
 
-    // No data available
-    if (!sock.blocking) {
-        return errors.SocketError.WouldBlock;
-    }
+        if (!sock.blocking) {
+            held.release();
+            state.releaseSocket(sock);
+            return errors.SocketError.WouldBlock;
+        }
 
-    // Blocking mode - would need to sleep and wait
-    // For now, return would-block (TODO: implement blocking raw recv)
-    return errors.SocketError.WouldBlock;
+        // Blocking mode: sleep until packet delivered by network stack.
+        // CRITICAL: release locks BEFORE calling block_fn() to prevent deadlock.
+        if (types.scheduler.blockFn()) |block_fn| {
+            const get_current = types.scheduler.currentThreadFn() orelse {
+                held.release();
+                state.releaseSocket(sock);
+                return errors.SocketError.SystemError;
+            };
+            sock.blocked_thread = get_current();
+            held.release();
+            state.releaseSocket(sock);
+            block_fn();
+            continue; // Re-acquire and re-check
+        } else {
+            held.release();
+            state.releaseSocket(sock);
+            return errors.SocketError.WouldBlock;
+        }
+    }
 }
