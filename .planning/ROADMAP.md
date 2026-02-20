@@ -135,7 +135,7 @@ Plans:
   3. recv() with MSG_WAITALL blocks until the full requested length is received, EOF is reached, or an error occurs; SO_RCVTIMEO and EINTR terminate the wait early
 **Plans**: 2 plans
 Plans:
-- [ ] 39-01-PLAN.md -- MSG_PEEK and MSG_DONTWAIT flag constants, peek functions, flags plumbing (API-01, API-02)
+- [x] 39-01-PLAN.md -- MSG_PEEK and MSG_DONTWAIT flag constants, peek functions, flags plumbing (API-01, API-02)
 - [ ] 39-02-PLAN.md -- MSG_WAITALL accumulation loop, integration tests for all three flags (API-03)
 
 ## Progress
@@ -180,8 +180,8 @@ Plans:
 | 36. RTT Estimation and Congestion Module | v1.4 | Complete    | 2026-02-19 | 2026-02-19 |
 | 37. Dynamic Window Management and Persist Timer | 2/2 | Complete    | 2026-02-19 | - |
 | 38. Socket Options and Raw Socket Blocking | v1.4 | Complete    | 2026-02-20 | 2026-02-20 |
-| 39. MSG Flags | v1.4 | 0/2 | Not started | - |
+| 39. MSG Flags | v1.4 | 1/2 | In progress | - |
 
 ---
 *Roadmap created: 2026-02-06*
-*Last updated: 2026-02-20 after Phase 38 plan 02 execution*
+*Last updated: 2026-02-19 after Phase 39 plan 01 execution*

@@ -9,12 +9,12 @@ See: .planning/PROJECT.md (updated 2026-02-19)
 
 ## Current Position
 
-Phase: 38 of 39 (Socket Options and Raw Socket Blocking -- COMPLETE)
-Plan: 2 of 2 in current phase (38-02 complete)
-Status: Phase 38 complete; ready for Phase 39
-Last activity: 2026-02-20 -- 38-02 complete (SO_REUSEPORT blanket bind allow, FIFO dispatch via listen_accept_count)
+Phase: 39 of 39 (MSG_PEEK and MSG_DONTWAIT flag support)
+Plan: 1 of 1 in current phase (39-01 complete)
+Status: Phase 39 plan 01 complete
+Last activity: 2026-02-19 -- 39-01 complete (MSG_PEEK/MSG_DONTWAIT recv flags, TCP/UDP peek support, userspace wrappers)
 
-Progress: [█████████░] 92% (2/2 plans in phase 38 done; 80/80 plans complete across phases 1-38)
+Progress: [██████████] 100% (1/1 plans in phase 39 done; 81/81 plans complete across phases 1-39)
 
 ## Performance Metrics
 
@@ -45,13 +45,24 @@ Progress: [█████████░] 92% (2/2 plans in phase 38 done; 80/8
 - 38-01: 7min -- SO_RCVBUF/SO_SNDBUF/TCP_CORK/MSG_NOSIGNAL + queue size increases + blocking raw recv
 - 38-02: 2min -- SO_REUSEPORT blanket bind allow in canReuseAddress() + FIFO dispatch via listen_accept_count
 
+**Phase 39 metrics:**
+- 39-01: 6min -- MSG_PEEK/MSG_DONTWAIT/MSG_WAITALL constants + TCP/UDP peek support + flags threaded through recv stack + userspace recvfromFlags wrappers
+
 ## Accumulated Context
 
 ### Decisions
 
 See PROJECT.md Key Decisions table for full history.
 
-Recent v1.4 decisions:
+Recent v1.4 decisions (Phase 39):
+- MSG_DONTWAIT overrides sock.blocking per-call only (sock.blocking field not mutated)
+- TCP peek uses local_tail copy to iterate recv_buf without writing back tcb.recv_tail; no window update ACK
+- sys_recvfrom now dispatches TCP and UDP separately (pre-existing bug: SOCK_STREAM was routed through UDP recvfromIp which accesses UDP rx_queue, not TCP recv_buf)
+- MSG_NOSIGNAL honored in sys_sendmsg TCP send path (SIGPIPE suppression)
+- MSG_WAITALL constant defined (0x0100) but implementation deferred to plan 39-02
+- signals import added to msg.zig (already in syscall_net_module build.zig deps)
+
+Previous v1.4 decisions:
 - Option A buffer sizing (fixed 8KB arrays with rcv_buf_size cap field) -- avoids heap allocation in IRQ-context recv path and Tcb.reset() leak risk
 - SO_REUSEPORT included in Phase 38 as simplified FIFO implementation -- bind table data structure change is minimal for FIFO dispatch
 - sendBufferSpace() sentinel slot preserved when applying snd_buf_size cap (used+1>=limit) to prevent head==tail ambiguity
@@ -84,11 +95,11 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-02-20 (38-02 execution)
-Stopped at: Completed 38-02-PLAN.md (SO_REUSEPORT blanket bind allow, FIFO dispatch via listen_accept_count)
+Last session: 2026-02-19 (39-01 execution)
+Stopped at: Completed 39-01-PLAN.md (MSG_PEEK/MSG_DONTWAIT recv flags, TCP/UDP peek, userspace wrappers)
 Resume file: None
 
-**Next action:** Begin Phase 39.
+**Next action:** Phase 39 complete. All plans across all phases complete (81/81).
 
 ---
 *State initialized: 2026-02-06*
