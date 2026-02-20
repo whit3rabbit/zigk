@@ -123,7 +123,7 @@ Plans:
   6. MSG_NOSIGNAL suppresses SIGPIPE on write to a broken connection; the call returns EPIPE instead of delivering a signal
 **Plans**: 2 plans
 - [x] 38-01-PLAN.md -- Buffer options, TCP_CORK, raw blocking recv, MSG_NOSIGNAL (BUF-01/02/03/05, API-04/05/06)
-- [ ] 38-02-PLAN.md -- SO_REUSEPORT bind and FIFO listener dispatch (BUF-04)
+- [x] 38-02-PLAN.md -- SO_REUSEPORT bind and FIFO listener dispatch (BUF-04)
 
 ### Phase 39: MSG Flags
 **Goal**: Standard recv/send flags work correctly across TCP and UDP so protocol libraries that use MSG_PEEK, MSG_DONTWAIT, and MSG_WAITALL operate without modification
@@ -176,9 +176,9 @@ Plans:
 | 35. VFS Page Cache and Zero-Copy | v1.3 | 2/2 | Complete | 2026-02-19 |
 | 36. RTT Estimation and Congestion Module | v1.4 | Complete    | 2026-02-19 | 2026-02-19 |
 | 37. Dynamic Window Management and Persist Timer | 2/2 | Complete    | 2026-02-19 | - |
-| 38. Socket Options and Raw Socket Blocking | v1.4 | 0/TBD | Not started | - |
+| 38. Socket Options and Raw Socket Blocking | v1.4 | 2/2 | Complete | 2026-02-20 |
 | 39. MSG Flags | v1.4 | 0/TBD | Not started | - |
 
 ---
 *Roadmap created: 2026-02-06*
-*Last updated: 2026-02-19 after Phase 37 plan 01 execution*
+*Last updated: 2026-02-20 after Phase 38 plan 02 execution*

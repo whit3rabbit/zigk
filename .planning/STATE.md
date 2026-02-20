@@ -5,16 +5,16 @@
 See: .planning/PROJECT.md (updated 2026-02-19)
 
 **Core value:** Every implemented syscall must work correctly on both x86_64 and aarch64 with matching behavior, tested via the existing integration test harness.
-**Current focus:** v1.4 Network Stack Hardening -- Phase 37 in progress (Receive Window and Buffer Management)
+**Current focus:** v1.4 Network Stack Hardening -- Phase 38 complete (Socket Options and Raw Socket Blocking)
 
 ## Current Position
 
-Phase: 38 of 39 (Socket Options and Raw Socket Blocking -- in progress)
-Plan: 1 of 2 in current phase (38-01 complete)
-Status: Phase 38 in progress
-Last activity: 2026-02-20 -- 38-01 complete (SO_RCVBUF, SO_SNDBUF, TCP_CORK, blocking raw recv, MSG_NOSIGNAL)
+Phase: 38 of 39 (Socket Options and Raw Socket Blocking -- COMPLETE)
+Plan: 2 of 2 in current phase (38-02 complete)
+Status: Phase 38 complete; ready for Phase 39
+Last activity: 2026-02-20 -- 38-02 complete (SO_REUSEPORT blanket bind allow, FIFO dispatch via listen_accept_count)
 
-Progress: [████████░░] 82% (1/2 plans in phase 38 done; 78/79 plans complete across phases 1-38)
+Progress: [█████████░] 92% (2/2 plans in phase 38 done; 80/80 plans complete across phases 1-38)
 
 ## Performance Metrics
 
@@ -43,6 +43,7 @@ Progress: [████████░░] 82% (1/2 plans in phase 38 done; 78/7
 
 **Phase 38 metrics:**
 - 38-01: 7min -- SO_RCVBUF/SO_SNDBUF/TCP_CORK/MSG_NOSIGNAL + queue size increases + blocking raw recv
+- 38-02: 2min -- SO_REUSEPORT blanket bind allow in canReuseAddress() + FIFO dispatch via listen_accept_count
 
 ## Accumulated Context
 
@@ -56,6 +57,9 @@ Recent v1.4 decisions:
 - sendBufferSpace() sentinel slot preserved when applying snd_buf_size cap (used+1>=limit) to prevent head==tail ambiguity
 - sws_floor uses effective_buf (not c.BUFFER_SIZE) in currentRecvWindow() -- prevents zero-window stall when rcv_buf_size < BUFFER_SIZE/2
 - signals import added to syscall_net_module in build.zig to enable SIGPIPE delivery from sys_sendto and socketWrite
+- SO_REUSEPORT check is FIRST in canReuseAddress() as blanket allow, bypassing all TCP restrictions including two-listener block
+- listen_accept_count on Tcb (not Socket) avoids circular import and lock ordering concern between tcp_state.lock (5) and socket/state.lock (6)
+- listen_accept_count incremented by scanning listen_tcbs in handleSynReceivedEstablished() after queueAcceptConnection -- O(N) over listeners, negligible cost
 - Congestion module extraction (Phase 36) before window wiring (Phase 37) -- module boundary must exist before algorithm work; retrofitting later requires full re-audit
 - onTimeout resets cwnd to 1*SMSS not IW10 (RFC 5681 S3.5 mandatory; IW10 is for new connections only)
 - MAX_CWND expressed as 4*BUFFER_SIZE in source (not hardcoded 32768) -- tracks BUFFER_SIZE changes automatically
@@ -80,12 +84,12 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-02-20 (38-01 execution)
-Stopped at: Completed 38-01-PLAN.md (SO_RCVBUF, SO_SNDBUF, TCP_CORK, MSG_NOSIGNAL, blocking raw recv)
+Last session: 2026-02-20 (38-02 execution)
+Stopped at: Completed 38-02-PLAN.md (SO_REUSEPORT blanket bind allow, FIFO dispatch via listen_accept_count)
 Resume file: None
 
-**Next action:** Continue Phase 38 with 38-02-PLAN.md (SO_REUSEPORT).
+**Next action:** Begin Phase 39.
 
 ---
 *State initialized: 2026-02-06*
-*Last updated: 2026-02-20 after 38-01 execution*
+*Last updated: 2026-02-20 after 38-02 execution*
