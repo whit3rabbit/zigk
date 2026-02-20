@@ -133,10 +133,11 @@ Plans:
   1. recv() with MSG_PEEK returns data from the receive buffer without consuming it; a subsequent recv() without MSG_PEEK returns the same data
   2. recv() with MSG_DONTWAIT returns immediately with EAGAIN if no data is available, regardless of the socket's O_NONBLOCK state
   3. recv() with MSG_WAITALL blocks until the full requested length is received, EOF is reached, or an error occurs; SO_RCVTIMEO and EINTR terminate the wait early
-**Plans**: 2 plans
+**Plans**: 3 plans
 Plans:
 - [x] 39-01-PLAN.md -- MSG_PEEK and MSG_DONTWAIT flag constants, peek functions, flags plumbing (API-01, API-02)
-- [ ] 39-02-PLAN.md -- MSG_WAITALL accumulation loop, integration tests for all three flags (API-03)
+- [x] 39-02-PLAN.md -- MSG_WAITALL accumulation loop, integration tests for all three flags (API-03)
+- [ ] 39-03-PLAN.md -- Gap closure: EINTR signal checks in MSG_WAITALL and MSG_PEEK blocking loops (API-01, API-02, API-03)
 
 ## Progress
 
@@ -180,7 +181,7 @@ Plans:
 | 36. RTT Estimation and Congestion Module | v1.4 | Complete    | 2026-02-19 | 2026-02-19 |
 | 37. Dynamic Window Management and Persist Timer | 2/2 | Complete    | 2026-02-19 | - |
 | 38. Socket Options and Raw Socket Blocking | v1.4 | Complete    | 2026-02-20 | 2026-02-20 |
-| 39. MSG Flags | v1.4 | 1/2 | In progress | - |
+| 39. MSG Flags | v1.4 | 2/3 | In progress | - |
 
 ---
 *Roadmap created: 2026-02-06*
