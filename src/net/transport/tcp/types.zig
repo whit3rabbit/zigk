@@ -238,6 +238,14 @@ pub const Tcb = struct {
     // Nagle (RFC 896)
     nodelay: bool,
 
+    // Buffer size caps (SO_RCVBUF / SO_SNDBUF via setsockopt)
+    // 0 means use c.BUFFER_SIZE (physical buffer size)
+    rcv_buf_size: u32,
+    snd_buf_size: u32,
+
+    // TCP_CORK: hold sub-MSS segments until full MSS or cork cleared
+    tcp_cork: bool,
+
     // Persist timer (RFC 1122 S4.2.2.17) -- separate from retransmit timer
     persist_timer: u64,    // Ticks accumulated since persist timer armed (0 = not running)
     persist_backoff: u8,   // Exponential backoff level (0-6, capped so interval <= 60s)
@@ -316,6 +324,9 @@ pub const Tcb = struct {
             .ack_pending = false,
             .ack_due = 0,
             .nodelay = false,
+            .rcv_buf_size = 0,
+            .snd_buf_size = 0,
+            .tcp_cork = false,
             .persist_timer = 0,
             .persist_backoff = 0,
             .generation = 0,
@@ -402,13 +413,24 @@ pub const Tcb = struct {
         return self.local_addr.isV6() and self.remote_addr.isV6();
     }
 
+    /// Effective send buffer limit (capped by snd_buf_size if set via SO_SNDBUF)
+    pub fn sendBufferLimit(self: *const Self) usize {
+        return if (self.snd_buf_size == 0)
+            c.BUFFER_SIZE
+        else
+            @min(@as(usize, self.snd_buf_size), c.BUFFER_SIZE);
+    }
+
     /// Calculate bytes available in send buffer
+    /// Respects snd_buf_size cap from SO_SNDBUF while preserving circular buffer invariant.
     pub fn sendBufferSpace(self: *const Self) usize {
-        if (self.send_head >= self.send_tail) {
-            return c.BUFFER_SIZE - (self.send_head - self.send_tail) - 1;
-        } else {
-            return self.send_tail - self.send_head - 1;
-        }
+        const limit = self.sendBufferLimit();
+        const used = if (self.send_head >= self.send_tail)
+            self.send_head - self.send_tail
+        else
+            c.BUFFER_SIZE - self.send_tail + self.send_head;
+        // Preserve sentinel slot (used + 1 >= limit) to prevent head==tail ambiguity
+        return if (used + 1 >= limit) 0 else limit - used - 1;
     }
 
     /// Calculate bytes available to read from receive buffer
@@ -434,12 +456,21 @@ pub const Tcb = struct {
     /// When window scaling is negotiated (RFC 7323), the advertised window
     /// must be right-shifted by our scale factor before sending in TCP header.
     pub fn currentRecvWindow(self: *const Self) u16 {
-        const space = c.BUFFER_SIZE - self.recvBufferAvailable();
+        // Effective buffer is capped by rcv_buf_size if set (SO_RCVBUF).
+        // CRITICAL: sws_floor must use effective_buf not c.BUFFER_SIZE.
+        // If rcv_buf_size is small (e.g., 1024), a floor of BUFFER_SIZE/2
+        // would exceed the cap and always produce window=0.
+        const effective_buf: usize = if (self.rcv_buf_size == 0)
+            c.BUFFER_SIZE
+        else
+            @min(@as(usize, self.rcv_buf_size), c.BUFFER_SIZE);
+        const avail = self.recvBufferAvailable();
+        const space = effective_buf - @min(avail, effective_buf);
         // WIN-04: SWS avoidance (RFC 1122 S4.2.3.3)
         // Suppress window advertisement if less than min(rcv_buf/2, MSS) is free.
-        // At SYN time the buffer is empty so space == BUFFER_SIZE which always
+        // At SYN time the buffer is empty so space == effective_buf which always
         // exceeds the floor -- no risk of advertising 0 in SYN-ACK.
-        const sws_floor: usize = @min(c.BUFFER_SIZE / 2, @as(usize, self.mss));
+        const sws_floor: usize = @min(effective_buf / 2, @as(usize, self.mss));
         const effective_space: usize = if (space >= sws_floor) space else 0;
         // Apply window scaling (RFC 7323): peer left-shifts by rcv_wscale
         const scaled: usize = if (self.wscale_ok)

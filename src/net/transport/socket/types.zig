@@ -58,13 +58,19 @@ pub const IPPROTO_ICMPV6: i32 = 58;
 
 /// IPPROTO_TCP options
 pub const TCP_NODELAY: i32 = 1;
+pub const TCP_CORK: i32 = 3;
 
 /// SOL_SOCKET options
 pub const SO_REUSEADDR: i32 = 2;
 pub const SO_BROADCAST: i32 = 6;
+pub const SO_SNDBUF: i32 = 7;
+pub const SO_RCVBUF: i32 = 8;
 pub const SO_PEERCRED: i32 = 17; // Retrieve peer credentials (AF_UNIX only)
 pub const SO_RCVTIMEO: i32 = 20;
 pub const SO_SNDTIMEO: i32 = 21;
+
+/// Message flags
+pub const MSG_NOSIGNAL: u32 = 0x4000;
 
 /// IPPROTO_IP options
 pub const IP_TOS: i32 = 1;
@@ -87,10 +93,10 @@ pub const MAX_MULTICAST_GROUPS: usize = 8;
 pub const MAX_SOCKETS: usize = 1024;
 
 /// Maximum packets in socket receive queue
-pub const SOCKET_RX_QUEUE_SIZE: usize = 8;
+pub const SOCKET_RX_QUEUE_SIZE: usize = 64;
 
 /// Maximum pending connections for listen()
-pub const ACCEPT_QUEUE_SIZE: usize = 8;
+pub const ACCEPT_QUEUE_SIZE: usize = 128;
 
 /// Maximum packet size (re-exported from core/packet for convenience)
 pub const MAX_PACKET_SIZE: usize = packet.MAX_PACKET_SIZE;
@@ -197,6 +203,12 @@ pub const Socket = struct {
     so_reuseaddr: bool,
     /// Disable Nagle's algorithm (TCP_NODELAY)
     tcp_nodelay: bool,
+    /// TCP_CORK: hold sub-MSS segments until full MSS or cork cleared
+    tcp_cork: bool,
+    /// Receive buffer size cap in bytes (0 = use default BUFFER_SIZE)
+    rcv_buf_size: u32,
+    /// Send buffer size cap in bytes (0 = use default BUFFER_SIZE)
+    snd_buf_size: u32,
 
     /// Multicast group memberships (IP addresses in host byte order)
     /// 0 = unused slot
@@ -264,6 +276,9 @@ pub const Socket = struct {
             .so_broadcast = false,
             .so_reuseaddr = false,
             .tcp_nodelay = false,
+            .tcp_cork = false,
+            .rcv_buf_size = 0,
+            .snd_buf_size = 0,
             // Multicast
             .multicast_groups = [_]u32{0} ** MAX_MULTICAST_GROUPS,
             .multicast_count = 0,

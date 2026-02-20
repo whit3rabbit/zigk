@@ -1,8 +1,10 @@
 // Socket option plumbing (setsockopt/getsockopt) plus timeout helpers.
 
+const std = @import("std");
 const types = @import("types.zig");
 const state = @import("state.zig");
 const errors = @import("errors.zig");
+const tcp_constants = @import("../tcp/constants.zig");
 
 /// Set socket option
 /// level: SOL_SOCKET, IPPROTO_IP, IPPROTO_TCP
@@ -44,6 +46,26 @@ pub fn setsockopt(sock_fd: usize, level: i32, optname: i32, optval: [*]const u8,
                 if (optlen < 4) return errors.SocketError.InvalidArg;
                 const val: *const i32 = @ptrCast(@alignCast(optval));
                 sock.so_reuseaddr = (val.* != 0);
+            },
+            types.SO_RCVBUF => {
+                if (optlen < 4) return errors.SocketError.InvalidArg;
+                const val: *const i32 = @ptrCast(@alignCast(optval));
+                if (val.* < 0) return errors.SocketError.InvalidArg;
+                const requested: u32 = @intCast(@min(@as(u64, @intCast(val.*)), @as(u64, tcp_constants.BUFFER_SIZE)));
+                sock.rcv_buf_size = @max(256, requested);
+                if (sock.tcb) |tcb| {
+                    tcb.rcv_buf_size = sock.rcv_buf_size;
+                }
+            },
+            types.SO_SNDBUF => {
+                if (optlen < 4) return errors.SocketError.InvalidArg;
+                const val: *const i32 = @ptrCast(@alignCast(optval));
+                if (val.* < 0) return errors.SocketError.InvalidArg;
+                const requested: u32 = @intCast(@min(@as(u64, @intCast(val.*)), @as(u64, tcp_constants.BUFFER_SIZE)));
+                sock.snd_buf_size = @max(256, requested);
+                if (sock.tcb) |tcb| {
+                    tcb.snd_buf_size = sock.snd_buf_size;
+                }
             },
             else => return errors.SocketError.InvalidArg,
         }
@@ -131,6 +153,22 @@ pub fn setsockopt(sock_fd: usize, level: i32, optname: i32, optval: [*]const u8,
                 sock.tcp_nodelay = (val.* != 0);
                 if (sock.tcb) |tcb| {
                     tcb.nodelay = sock.tcp_nodelay;
+                }
+            },
+            types.TCP_CORK => {
+                if (optlen < 4) return errors.SocketError.InvalidArg;
+                const val: *const i32 = @ptrCast(@alignCast(optval));
+                const new_cork = (val.* != 0);
+                sock.tcp_cork = new_cork;
+                if (sock.tcb) |tcb| {
+                    tcb.tcp_cork = new_cork;
+                    // When cork is cleared, flush pending data.
+                    // We are under sock.lock. transmitPendingData does not acquire
+                    // tcb.mutex -- it is called from the owning thread context here.
+                    if (!new_cork) {
+                        const tx_data = @import("../tcp/tx/data.zig");
+                        _ = tx_data.transmitPendingData(tcb);
+                    }
                 }
             },
             else => return errors.SocketError.InvalidArg,
@@ -234,6 +272,22 @@ pub fn getsockopt(sock_fd: usize, level: i32, optname: i32, optval: [*]u8, optle
                 val.* = if (sock.so_reuseaddr) 1 else 0;
                 optlen.* = 4;
             },
+            types.SO_RCVBUF => {
+                if (optlen.* < 4) return errors.SocketError.InvalidArg;
+                const val: *i32 = @ptrCast(@alignCast(optval));
+                // Linux ABI: getsockopt returns 2x the stored value
+                const stored: u32 = if (sock.rcv_buf_size == 0) @intCast(tcp_constants.BUFFER_SIZE) else sock.rcv_buf_size;
+                val.* = @intCast(@min(@as(u64, stored) * 2, @as(u64, std.math.maxInt(i32))));
+                optlen.* = 4;
+            },
+            types.SO_SNDBUF => {
+                if (optlen.* < 4) return errors.SocketError.InvalidArg;
+                const val: *i32 = @ptrCast(@alignCast(optval));
+                // Linux ABI: getsockopt returns 2x the stored value
+                const stored: u32 = if (sock.snd_buf_size == 0) @intCast(tcp_constants.BUFFER_SIZE) else sock.snd_buf_size;
+                val.* = @intCast(@min(@as(u64, stored) * 2, @as(u64, std.math.maxInt(i32))));
+                optlen.* = 4;
+            },
             else => return errors.SocketError.InvalidArg,
         }
     } else if (level == types.IPPROTO_IP) {
@@ -257,6 +311,12 @@ pub fn getsockopt(sock_fd: usize, level: i32, optname: i32, optval: [*]u8, optle
                 if (optlen.* < 4) return errors.SocketError.InvalidArg;
                 const val: *i32 = @ptrCast(@alignCast(optval));
                 val.* = if (sock.tcp_nodelay) 1 else 0;
+                optlen.* = 4;
+            },
+            types.TCP_CORK => {
+                if (optlen.* < 4) return errors.SocketError.InvalidArg;
+                const val: *i32 = @ptrCast(@alignCast(optval));
+                val.* = if (sock.tcp_cork) 1 else 0;
                 optlen.* = 4;
             },
             else => return errors.SocketError.InvalidArg,
