@@ -44,6 +44,9 @@ pub const SO_PEERCRED = types.SO_PEERCRED;
 pub const SO_RCVTIMEO = types.SO_RCVTIMEO;
 pub const SO_SNDTIMEO = types.SO_SNDTIMEO;
 pub const MSG_NOSIGNAL = types.MSG_NOSIGNAL;
+pub const MSG_PEEK = types.MSG_PEEK;
+pub const MSG_DONTWAIT = types.MSG_DONTWAIT;
+pub const MSG_WAITALL = types.MSG_WAITALL;
 pub const IP_TOS = types.IP_TOS;
 pub const IP_TTL = types.IP_TTL;
 pub const IP_ADD_MEMBERSHIP = types.IP_ADD_MEMBERSHIP;
@@ -108,6 +111,7 @@ pub const checkConnectStatus = tcp_api.checkConnectStatus;
 pub const queueAcceptConnection = tcp_api.queueAcceptConnection;
 pub const tcpSend = tcp_api.tcpSend;
 pub const tcpRecv = tcp_api.tcpRecv;
+pub const tcpPeek = tcp_api.tcpPeek;
 
 // TCP async path (Phase 2)
 pub const acceptAsync = tcp_api.acceptAsync;

@@ -117,12 +117,16 @@ pub fn sendto6(
     return errors.SocketError.NetworkUnreachable;
 }
 
-/// Receive UDP datagram with dual-stack support (returns IpAddr)
+/// Receive UDP datagram with dual-stack support (returns IpAddr).
+/// flags: bitmask of MSG_PEEK, MSG_DONTWAIT, etc.
+///   MSG_DONTWAIT: return immediately if no data (overrides sock.blocking)
+///   MSG_PEEK: read packet without consuming it from the queue
 pub fn recvfromIp(
     sock_fd: usize,
     buf: []u8,
     src_addr: ?*IpAddr,
     src_port: ?*u16,
+    flags: u32,
 ) errors.SocketError!usize {
     const sock = state.acquireSocket(sock_fd) orelse return errors.SocketError.BadFd;
     defer state.releaseSocket(sock);
@@ -130,12 +134,21 @@ pub fn recvfromIp(
     var ip_addr: IpAddr = .none;
     var port: u16 = 0;
 
+    const is_peek = (flags & types.MSG_PEEK) != 0;
+    // MSG_DONTWAIT overrides the socket's blocking mode for this call only.
+    const is_nonblocking = !sock.blocking or ((flags & types.MSG_DONTWAIT) != 0);
+
     // Non-blocking: check queue and return immediately
-    if (!sock.blocking) {
+    if (is_nonblocking) {
         const held = sock.lock.acquire();
         defer held.release();
 
-        if (sock.dequeuePacketIp(buf, &ip_addr, &port)) |len| {
+        const result = if (is_peek)
+            sock.peekPacketIp(buf, &ip_addr, &port)
+        else
+            sock.dequeuePacketIp(buf, &ip_addr, &port);
+
+        if (result) |len| {
             if (src_addr) |addr| addr.* = ip_addr;
             if (src_port) |p| p.* = port;
             return len;
@@ -162,7 +175,11 @@ pub fn recvfromIp(
             {
                 const held = sock.lock.acquire();
                 sock.blocked_thread = get_current();
-                if (sock.dequeuePacketIp(buf, &ip_addr, &port)) |len| {
+                const result = if (is_peek)
+                    sock.peekPacketIp(buf, &ip_addr, &port)
+                else
+                    sock.dequeuePacketIp(buf, &ip_addr, &port);
+                if (result) |len| {
                     sock.blocked_thread = null;
                     held.release();
                     platform.cpu.restoreInterrupts(irq_state);
@@ -189,7 +206,11 @@ pub fn recvfromIp(
     while (ticks < timeout_ticks) : (ticks += 1) {
         {
             const held = sock.lock.acquire();
-            if (sock.dequeuePacketIp(buf, &ip_addr, &port)) |len| {
+            const result = if (is_peek)
+                sock.peekPacketIp(buf, &ip_addr, &port)
+            else
+                sock.dequeuePacketIp(buf, &ip_addr, &port);
+            if (result) |len| {
                 held.release();
                 if (src_addr) |addr| addr.* = ip_addr;
                 if (src_port) |p| p.* = port;

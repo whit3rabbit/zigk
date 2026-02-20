@@ -25,6 +25,7 @@ pub const close = root.close;
 pub const sendFinPacket = root.sendFinPacket;
 pub const send = root.send;
 pub const recv = root.recv;
+pub const peek = root.peek;
 pub const processTimers = root.processTimers;
 pub const handleIcmpError = root.handleIcmpError;
 pub const TcpError = root.TcpError;

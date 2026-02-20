@@ -58,6 +58,7 @@ pub const close = api.close;
 pub const sendFinPacket = api.sendFinPacket;
 pub const send = api.send;
 pub const recv = api.recv;
+pub const peek = api.peek;
 
 // Timer hooks
 pub const processTimers = timers.processTimers;

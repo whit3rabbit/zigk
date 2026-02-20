@@ -446,6 +446,28 @@ pub fn tcpSend(sock_fd: usize, data: []const u8) errors.SocketError!usize {
     };
 }
 
+/// TCP peek (for connected SOCK_STREAM sockets) - reads without consuming data.
+/// Returns data from the receive buffer without advancing recv_tail or sending a
+/// window update ACK. A subsequent tcpRecv (or tcpPeek) will return the same data.
+pub fn tcpPeek(sock_fd: usize, buf: []u8) errors.SocketError!usize {
+    const sock = state.acquireSocket(sock_fd) orelse return errors.SocketError.BadFd;
+    defer state.releaseSocket(sock);
+
+    if (sock.sock_type != types.SOCK_STREAM) {
+        return errors.SocketError.TypeNotSupported;
+    }
+
+    const tcb = sock.tcb orelse return errors.SocketError.NotConnected;
+
+    return tcp.peek(tcb, buf) catch |err| {
+        return switch (err) {
+            tcp.TcpError.NotConnected => errors.SocketError.NotConnected,
+            tcp.TcpError.WouldBlock => errors.SocketError.WouldBlock,
+            else => errors.SocketError.NetworkUnreachable,
+        };
+    };
+}
+
 /// TCP receive (for connected SOCK_STREAM sockets)
 pub fn tcpRecv(sock_fd: usize, buf: []u8) errors.SocketError!usize {
     const sock = state.acquireSocket(sock_fd) orelse return errors.SocketError.BadFd;

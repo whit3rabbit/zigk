@@ -191,6 +191,49 @@ pub fn send(tcb: *Tcb, data: []const u8) TcpError!usize {
     return copy_len;
 }
 
+/// Peek at received data without consuming it.
+/// Identical to recv() except:
+///   - Does NOT advance tcb.recv_tail (data stays in buffer)
+///   - Does NOT send a window update ACK
+/// The same lock acquisition pattern as recv() is used.
+pub fn peek(tcb: *Tcb, buf: []u8) TcpError!usize {
+    // SECURITY FIX: Use Held pattern for proper IRQ state management.
+    var state_held = state.lock.acquire();
+    const tcb_held = tcb.mutex.acquire();
+    state_held.release();
+    defer tcb_held.release();
+
+    if (tcb.closing) return TcpError.ConnectionReset;
+
+    const available = tcb.recvBufferAvailable();
+
+    if (available > 0) {
+        const copy_len = @min(buf.len, available);
+
+        // Use a LOCAL copy of recv_tail to iterate -- do NOT write back to tcb.recv_tail.
+        var local_tail = tcb.recv_tail;
+        for (0..copy_len) |i| {
+            buf[i] = tcb.recv_buf[local_tail];
+            local_tail = (local_tail + 1) % c.BUFFER_SIZE;
+        }
+
+        // Do NOT update tcb.recv_tail.
+        // Do NOT send window update ACK.
+
+        return copy_len;
+    }
+
+    // No data available - check channel state
+    switch (tcb.state) {
+        // Clean disconnect / EOF
+        .CloseWait, .LastAck, .Closing, .TimeWait, .Closed => return 0,
+        // Connected but empty - Wait
+        .Established, .FinWait1, .FinWait2 => return TcpError.WouldBlock,
+        // Not connected logic
+        .Listen, .SynSent, .SynReceived => return TcpError.NotConnected,
+    }
+}
+
 /// Receive data from a connection
 pub fn recv(tcb: *Tcb, buf: []u8) TcpError!usize {
     // SECURITY FIX: Use Held pattern for proper IRQ state management.

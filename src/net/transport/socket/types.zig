@@ -72,6 +72,9 @@ pub const SO_REUSEPORT: i32 = 15; // Allow multiple sockets to bind same addr:po
 
 /// Message flags
 pub const MSG_NOSIGNAL: u32 = 0x4000;
+pub const MSG_PEEK: u32 = 0x0002;
+pub const MSG_DONTWAIT: u32 = 0x0040;
+pub const MSG_WAITALL: u32 = 0x0100;
 
 /// IPPROTO_IP options
 pub const IP_TOS: i32 = 1;
@@ -452,6 +455,34 @@ pub const Socket = struct {
         self.rx_tail = (self.rx_tail + 1) % SOCKET_RX_QUEUE_SIZE;
         self.rx_count -= 1;
 
+        return copy_len;
+    }
+
+    /// Peek at a received packet (dual-stack version) without consuming it.
+    /// Reads the front-of-queue packet into buf but does NOT advance rx_tail,
+    /// decrement rx_count, or clear entry.valid.
+    /// Must be called with sock.lock held (same as dequeuePacketIp).
+    pub fn peekPacketIp(self: *Self, buf: []u8, src_addr: ?*IpAddr, src_port: ?*u16) ?usize {
+        if (self.rx_count == 0) {
+            return null;
+        }
+
+        const entry = &self.rx_queue[self.rx_tail];
+        if (!entry.valid) {
+            return null;
+        }
+
+        const copy_len = @min(entry.len, buf.len);
+        @memcpy(buf[0..copy_len], entry.data[0..copy_len]);
+
+        if (src_addr) |addr| {
+            addr.* = entry.src_addr;
+        }
+        if (src_port) |port| {
+            port.* = entry.src_port;
+        }
+
+        // Do NOT modify rx_tail, rx_count, or entry.valid -- this is a peek.
         return copy_len;
     }
 

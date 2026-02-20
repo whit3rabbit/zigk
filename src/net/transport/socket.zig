@@ -41,6 +41,9 @@ pub const SO_PEERCRED = root.SO_PEERCRED;
 pub const SO_RCVTIMEO = root.SO_RCVTIMEO;
 pub const SO_SNDTIMEO = root.SO_SNDTIMEO;
 pub const MSG_NOSIGNAL = root.MSG_NOSIGNAL;
+pub const MSG_PEEK = root.MSG_PEEK;
+pub const MSG_DONTWAIT = root.MSG_DONTWAIT;
+pub const MSG_WAITALL = root.MSG_WAITALL;
 pub const IP_TOS = root.IP_TOS;
 pub const IP_TTL = root.IP_TTL;
 pub const IP_ADD_MEMBERSHIP = root.IP_ADD_MEMBERSHIP;
@@ -105,6 +108,7 @@ pub const checkConnectStatus = root.checkConnectStatus;
 pub const queueAcceptConnection = root.queueAcceptConnection;
 pub const tcpSend = root.tcpSend;
 pub const tcpRecv = root.tcpRecv;
+pub const tcpPeek = root.tcpPeek;
 
 // TCP async path (Phase 2)
 pub const acceptAsync = root.acceptAsync;
