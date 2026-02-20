@@ -342,17 +342,31 @@ pub fn findTcb(local_ip: u32, local_port: u16, remote_ip: u32, remote_port: u16)
 /// Returns a listener bound to exact address, or to unspecified address (wildcard)
 /// Prefers exact IP match over wildcard.
 /// For wildcard listeners, also checks address family compatibility.
+///
+/// SO_REUSEPORT FIFO dispatch: when multiple listeners share a port, the one
+/// with the lowest listen_accept_count is selected (least-loaded approximation).
+/// listen_accept_count is incremented in handleSynReceivedEstablished() when a
+/// connection is queued into the listener's accept queue. No lock is needed
+/// since listen_accept_count is only a load-balancing heuristic -- slight staleness
+/// is acceptable.
 pub fn findListeningTcbIp(local_port: u16, local_addr: IpAddr) ?*Tcb {
+    var exact_match: ?*Tcb = null;
+    var exact_accept: usize = std.math.maxInt(usize);
     var any_match: ?*Tcb = null;
+    var any_accept: usize = std.math.maxInt(usize);
 
     for (listen_tcbs.items) |tcb| {
         if (tcb.local_port == local_port and tcb.state == .Listen) {
-            // Check for exact address match
+            const ac = tcb.listen_accept_count;
+
+            // Check for exact address match -- prefer lowest accept_count
             if (tcb.local_addr.eql(local_addr)) {
-                return tcb; // Exact match found
-            }
+                if (ac < exact_accept) {
+                    exact_match = tcb;
+                    exact_accept = ac;
+                }
             // Check for wildcard match with address family compatibility
-            if (tcb.local_addr.isUnspecified()) {
+            } else if (tcb.local_addr.isUnspecified()) {
                 // .none accepts any family
                 // .v4 with 0.0.0.0 accepts IPv4 only
                 // .v6 with :: accepts IPv6 only (unless IPV6_V6ONLY is false)
@@ -361,13 +375,14 @@ pub fn findListeningTcbIp(local_port: u16, local_addr: IpAddr) ?*Tcb {
                     .v4 => local_addr.isV4(),
                     .v6 => local_addr.isV6(),
                 };
-                if (family_match) {
+                if (family_match and ac < any_accept) {
                     any_match = tcb;
+                    any_accept = ac;
                 }
             }
         }
     }
-    return any_match;
+    return exact_match orelse any_match;
 }
 
 /// Find listening TCB by local port and local IP (IPv4 wrapper for backward compatibility)

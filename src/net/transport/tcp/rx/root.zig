@@ -321,6 +321,23 @@ fn handleSynReceivedEstablished(tcb: *Tcb) bool {
         }
 
         if (socket.queueAcceptConnection(parent_idx, tcb)) {
+            // SO_REUSEPORT FIFO dispatch: increment the listening TCB's accept
+            // count so findListeningTcbIp can route new SYNs to the least-loaded
+            // listener. Scan listen_tcbs to find the parent (O(N) over listeners,
+            // typically 1-5 entries). Runs under state.lock held by caller.
+            {
+                const state_held = state.lock.acquire();
+                defer state_held.release();
+                for (state.listen_tcbs.items) |listen_tcb| {
+                    if (listen_tcb.parent_socket) |ps| {
+                        if (ps == parent_idx and listen_tcb.state == .Listen) {
+                            listen_tcb.listen_accept_count += 1;
+                            break;
+                        }
+                    }
+                }
+            }
+
             if (socket.acquireSocket(parent_idx)) |parent_sock| {
                 defer socket.releaseSocket(parent_sock);
                 if (parent_sock.blocked_thread) |thread| {

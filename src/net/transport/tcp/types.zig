@@ -254,6 +254,12 @@ pub const Tcb = struct {
     // Incremented on allocation to distinguish reused TCB memory
     generation: u64,
 
+    // SO_REUSEPORT FIFO dispatch counter (listening TCBs only)
+    // Incremented each time a connection is accepted into this listener's accept queue.
+    // findListeningTcbIp uses this to route new SYNs to the least-loaded listener
+    // when multiple listeners share a port via SO_REUSEPORT.
+    listen_accept_count: usize,
+
     const Self = @This();
 
     pub fn init() Self {
@@ -330,6 +336,7 @@ pub const Tcb = struct {
             .persist_timer = 0,
             .persist_backoff = 0,
             .generation = 0,
+            .listen_accept_count = 0,
         };
     }
 
