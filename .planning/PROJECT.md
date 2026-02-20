@@ -83,7 +83,15 @@ Every implemented syscall must work correctly on both x86_64 and aarch64 with ma
 
 ### Active
 
-(None -- planning next milestone)
+- [ ] Fix stale tcb.blocked_thread on EINTR (INT-01)
+- [ ] SO_RCVBUF/SO_SNDBUF pre-connect propagation to Tcb.init()
+- [ ] TCP_CORK uncork flush tcb.mutex acquisition
+- [ ] MSG_DONTWAIT/MSG_PEEK for raw sockets
+- [ ] Remove dead Tcb.send_acked field
+- [ ] Fix slab_bench.zig std.time.Timer Zig 0.16.x compat
+- [ ] Update v1.4 REQUIREMENTS.md checkboxes, SUMMARY frontmatter, ROADMAP.md formatting
+- [ ] Configure QEMU loopback networking for test environment
+- [ ] Verify network features under live loopback (8 items from v1.4 audit)
 
 ### Out of Scope
 
@@ -103,6 +111,15 @@ Every implemented syscall must work correctly on both x86_64 and aarch64 with ma
 - CUBIC/BBR congestion control -- zero benefit in QEMU loopback; add when real-hardware networking supported
 - True dynamic buffer resize (heap-allocated TCB buffers) -- requires TCB struct refactor across 18 BUFFER_SIZE sites
 - Multipath TCP (MPTCP) -- requires scheduler-level subflow management
+
+## Current Milestone: v1.5 Tech Debt Cleanup
+
+**Goal:** Resolve all 18 v1.4 tech debt items -- code fixes, documentation gaps, and QEMU loopback networking to enable live verification of network features.
+
+**Target features:**
+- Fix 6 code defects (EINTR cleanup, buffer propagation, locking, raw socket flags, dead code, Zig compat)
+- Clean up 3 documentation gaps (requirements checkboxes, SUMMARY frontmatter, ROADMAP formatting)
+- Configure QEMU loopback networking and verify 8 network features live
 
 ## Last Milestone: v1.4 Network Stack Hardening (Shipped 2026-02-20)
 
@@ -168,4 +185,4 @@ Known issues: kernel stack at 192KB due to comptime dispatch table growth; 18 v1
 | Kernel stack 96KB to 192KB | Comptime dispatch table expansion across phases 24-39 | v Good v1.4 -- resolved double fault regression |
 
 ---
-*Last updated: 2026-02-20 after v1.4 milestone*
+*Last updated: 2026-02-20 after v1.5 milestone start*
