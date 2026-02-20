@@ -119,3 +119,32 @@
 
 ---
 
+
+## v1.4 Network Stack Hardening (Shipped: 2026-02-20)
+
+**Phases:** 36-39 (9 plans)
+**Commits:** 42
+**Lines:** +6,864 / -196 across 56 files
+**Timeline:** 2 days (2026-02-19 to 2026-02-20)
+**Total codebase:** 212,270 LOC Zig
+**Git range:** 911e8f2..35a13c3
+
+**Key accomplishments:**
+1. Created TCP Reno congestion control module (RFC 5681/6928) with IW10 initial window, Karn's Algorithm in all retransmit paths, and MAX_CWND cap
+2. Implemented dynamic receive window management with SWS avoidance on both sender and receiver, and independent persist timer with 60s-capped exponential backoff (RFC 1122)
+3. Added configurable socket buffer options (SO_RCVBUF, SO_SNDBUF with Linux ABI doubling, SO_REUSEPORT with FIFO dispatch, TCP_CORK with flush-on-uncork)
+4. Threaded MSG_PEEK, MSG_DONTWAIT, MSG_WAITALL flags through TCP and UDP recv stack with correct per-flag semantics
+5. Implemented raw socket blocking recv via scheduler wake pattern and MSG_NOSIGNAL/SIGPIPE suppression
+6. Added signal-aware recv loops with hasPendingSignal callback for EINTR support in all TCP blocking paths
+
+**Delivered:** Hardened the TCP/UDP networking stack with RFC-compliant congestion control, dynamic window management, complete socket option support, and MSG flag threading. All 21 requirements satisfied across 4 phases. Kernel stack increased to 192KB to accommodate comptime dispatch table growth.
+
+**Tech debt:** 18 items (8 human verification items requiring live QEMU networking, 1 low-severity stale blocked_thread pointer on EINTR, 2 minor integration concerns, documentation gaps). See milestones/v1.4-MILESTONE-AUDIT.md.
+
+**Archives:**
+- milestones/v1.4-ROADMAP.md
+- milestones/v1.4-REQUIREMENTS.md
+- milestones/v1.4-MILESTONE-AUDIT.md
+
+---
+

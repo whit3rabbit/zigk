@@ -2,7 +2,7 @@
 
 ## What This Is
 
-Systematic expansion of Linux/POSIX syscall coverage in the zk microkernel. Shipped v1.3 with 330+ syscalls across 12 categories. Signal infrastructure rebuilt from bitmask-only to full siginfo queues with direct wakeup. Timer subsystem upgraded to 1ms resolution with 32-timer capacity and SIGEV_THREAD/SIGEV_THREAD_ID support. VFS page cache enables true zero-copy splice/sendfile/tee/copy_file_range. Dual-architecture (x86_64 + aarch64) with 206K LOC Zig and comprehensive integration test suite.
+Systematic expansion of Linux/POSIX syscall coverage in the zk microkernel. Shipped v1.4 with 330+ syscalls across 12 categories plus hardened TCP/UDP networking. TCP stack now has RFC-compliant Reno congestion control, dynamic window management with SWS avoidance, configurable buffer sizing, and full MSG flag support. Dual-architecture (x86_64 + aarch64) with 212K LOC Zig and comprehensive integration test suite.
 
 ## Core Value
 
@@ -61,7 +61,6 @@ Every implemented syscall must work correctly on both x86_64 and aarch64 with ma
 - v Linux capabilities (capget/capset with v1+v3 formats, per-process bitmasks) -- v1.2
 - v Seccomp syscall filtering (STRICT mode, FILTER mode with classic BPF interpreter) -- v1.2
 - v Test coverage expansion (20 tests for lchown, settimeofday, signals, select/epoll edges, madvise, mincore, rlimit) -- v1.2
-
 - v Complete inotify VFS hooks (ftruncate, write, close, link, symlink) -- v1.3
 - v Fix rt_sigsuspend pending signal race (deferred mask restoration) -- v1.3
 - v Implement per-process rlimit persistence (soft/hard pairs) -- v1.3
@@ -77,13 +76,14 @@ Every implemented syscall must work correctly on both x86_64 and aarch64 with ma
 - v inotify event queue overflow with IN_Q_OVERFLOW -- v1.3
 - v SIGEV_THREAD/SIGEV_THREAD_ID for POSIX timers -- v1.3
 - v clock_nanosleep sub-10ms granularity -- v1.3
+- v TCP congestion control (Reno: slow start, congestion avoidance, fast retransmit/recovery per RFC 5681, IW10 per RFC 6928) -- v1.4
+- v Dynamic TCP window management (currentRecvWindow() in all ACKs, SWS avoidance, independent persist timer per RFC 1122) -- v1.4
+- v Socket API completeness (MSG_PEEK, MSG_DONTWAIT, MSG_WAITALL with EINTR, SO_REUSEPORT, TCP_CORK, MSG_NOSIGNAL, raw socket blocking recv) -- v1.4
+- v Buffer and queue sizing (SO_RCVBUF/SO_SNDBUF with Linux ABI doubling, RX queue 64, accept backlog 128) -- v1.4
 
 ### Active
 
-- [ ] TCP congestion control (slow start, congestion avoidance, fast retransmit/recovery per RFC 5681)
-- [ ] Dynamic TCP window management (replace fixed 8KB with proper sliding windows and flow control)
-- [ ] Socket API completeness (MSG_PEEK, MSG_DONTWAIT, MSG_WAITALL, SO_REUSEPORT, TCP_CORK, raw socket recv)
-- [ ] Buffer and queue sizing (configurable SO_SNDBUF/SO_RCVBUF, increased accept backlog, RX queue expansion)
+(None -- planning next milestone)
 
 ### Out of Scope
 
@@ -99,33 +99,28 @@ Every implemented syscall must work correctly on both x86_64 and aarch64 with ma
 - Multi-CPU affinity enforcement -- single-CPU kernel, separate project
 - Full seccomp BPF JIT -- v1.2 implements interpreter only, JIT is future work
 - Container/namespace support (unshare, setns) -- requires kernel architecture changes
+- MSG_OOB / TCP urgent data -- RFC 6093 recommends against new implementations
+- CUBIC/BBR congestion control -- zero benefit in QEMU loopback; add when real-hardware networking supported
+- True dynamic buffer resize (heap-allocated TCB buffers) -- requires TCB struct refactor across 18 BUFFER_SIZE sites
+- Multipath TCP (MPTCP) -- requires scheduler-level subflow management
 
-## Current Milestone: v1.4 Network Stack Hardening
+## Last Milestone: v1.4 Network Stack Hardening (Shipped 2026-02-20)
 
-**Goal:** Harden the existing TCP/UDP networking stack with proper congestion control, dynamic window management, complete socket API flags, and configurable buffer sizing.
-
-**Target features:**
-- TCP congestion control (RFC 5681: slow start, congestion avoidance, fast retransmit, fast recovery)
-- Dynamic TCP send/receive windows replacing fixed 8KB buffers
-- Socket message flags (MSG_PEEK, MSG_DONTWAIT, MSG_WAITALL) and options (SO_REUSEPORT, TCP_CORK)
-- Raw socket recv implementation
-- Configurable SO_SNDBUF/SO_RCVBUF with per-socket buffer management
-- Increased accept backlog and RX queue capacity
-
-## Last Milestone: v1.3 Tech Debt Cleanup (Shipped 2026-02-19)
-
-Resolved all 16 tech debt items from v1.0-v1.2. Signal infrastructure rebuilt, timer subsystem upgraded, VFS page cache built. See MILESTONES.md for details.
+Hardened TCP/UDP networking stack with RFC-compliant Reno congestion control, dynamic window management, complete socket options, and MSG flag threading. All 21 requirements satisfied. See MILESTONES.md for details.
 
 ## Context
 
-Shipped v1.3 with 206,097 LOC Zig across x86_64 and aarch64.
+Shipped v1.4 with 212,270 LOC Zig across x86_64 and aarch64.
 Tech stack: Zig 0.16.x, custom UEFI bootloader, QEMU TCG.
 330+ syscalls implemented. Comprehensive integration test suite on both architectures.
 
 v1.0 shipped 300+ syscalls from ~190 baseline. v1.1 resolved all 14 v1.0 tech debt items.
-v1.2 added 31 new syscalls across 12 categories. v1.3 resolved all 16 v1.2 tech debt items
-(siginfo queues, signalfd wakeup, inotify VFS hooks, 1ms timers, page cache zero-copy).
-Four milestones shipped over 14 days with 73 plans across 35 phases.
+v1.2 added 31 new syscalls across 12 categories. v1.3 resolved all 16 v1.2 tech debt items.
+v1.4 hardened TCP/UDP stack with congestion control, window management, socket options, MSG flags.
+Five milestones shipped over 16 days with 82 plans across 39 phases.
+
+Known issues: kernel stack at 192KB due to comptime dispatch table growth; 18 v1.4 tech debt items
+(primarily human verification items requiring live QEMU networking, plus documentation gaps).
 
 ## Constraints
 
@@ -160,11 +155,17 @@ Four milestones shipped over 14 days with 73 plans across 35 phases.
 | POSIX timer scheduler integration | Inline expiration check in processIntervalTimers | v Good -- minimal overhead |
 | Bitmask-only signal tracking | No per-thread siginfo queue for MVP | v Fixed v1.3 -- SigInfoQueue with SA_SIGINFO |
 | inotify MVP with EAGAIN reads | epoll integration is primary use case | v Good -- avoids blocking complexity |
-
 | 1000Hz timer (1ms ticks) | Sub-10ms timer resolution needed | v Good v1.3 -- all tick constants updated |
 | Per-thread SigInfoQueue (32 entries) | Signals need metadata (si_code, si_pid) | v Good v1.3 -- enables SA_SIGINFO, SIGSYS |
 | VFS page cache (256-bucket, 1024 pages) | Zero-copy needs page references not buffer copies | v Good v1.3 -- splice/sendfile/tee/copy_file_range |
 | SIGEV_THREAD same as SIGEV_SIGNAL at kernel level | glibc handles thread callback wrapping | v Good v1.3 -- matches Linux kernel behavior |
+| Extracted congestion/reno.zig before window wiring | Module boundary must exist before algorithm work | v Good v1.4 -- clean separation |
+| Fixed 8KB arrays with rcv_buf_size cap field | Avoids heap allocation in IRQ-context recv path | v Good v1.4 -- no Tcb.reset() leak risk |
+| SO_REUSEPORT blanket bind allow with FIFO dispatch | Minimal data structure change for bind table | v Good v1.4 -- listen_accept_count on Tcb avoids lock ordering issues |
+| Persist timer separate from retransmit timer | Running both causes duplicate zero-window probes | v Good v1.4 -- mutual exclusion via retrans_timer==0 |
+| Sender SWS gate after Nagle check | Complementary suppressors: Nagle gates on flight_size, SWS on segment size | v Good v1.4 -- both coexist cleanly |
+| hasPendingSignal callback in scheduler shim | Socket layer stays independent of syscall error vocabulary | v Good v1.4 -- transport returns WouldBlock, syscall converts to EINTR |
+| Kernel stack 96KB to 192KB | Comptime dispatch table expansion across phases 24-39 | v Good v1.4 -- resolved double fault regression |
 
 ---
-*Last updated: 2026-02-19 after v1.4 milestone start*
+*Last updated: 2026-02-20 after v1.4 milestone*
