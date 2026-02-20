@@ -22,6 +22,7 @@ const fd_mod = @import("fd");
 const sched = @import("sched");
 const thread = @import("thread");
 const Thread = thread.Thread;
+const signals_mod = @import("signals");
 
 const isValidUserAccess = user_mem.isValidUserAccess;
 const AccessMode = user_mem.AccessMode;
@@ -374,7 +375,7 @@ pub fn sys_sendmsg(
     unix_socket_ops: *const fd_mod.FileOps,
     unix_socket_full_ops: *const fd_mod.FileOps,
 ) SyscallError!usize {
-    _ = flags; // Flags ignored for MVP (MSG_DONTWAIT, MSG_NOSIGNAL, etc.)
+    const send_flags: u32 = @truncate(flags);
 
     // Read msghdr from userspace
     const msg = user_mem.copyStructFromUser(MsgHdr, user_mem.UserPtr.from(msg_ptr)) catch {
@@ -474,6 +475,14 @@ pub fn sys_sendmsg(
 
         if (sock.sock_type == socket.SOCK_STREAM) {
             const sent = socket.tcpSend(ctx.socket_idx, kbuf) catch |err| {
+                // POSIX: sendmsg on a broken TCP connection delivers SIGPIPE unless
+                // MSG_NOSIGNAL is set in the flags.
+                if (err == socket.SocketError.ConnectionReset) {
+                    if ((send_flags & socket.MSG_NOSIGNAL) == 0) {
+                        deliverSigpipe();
+                    }
+                    return error.EPIPE;
+                }
                 return socketErrorToSyscallError(err);
             };
             return sent;
@@ -482,6 +491,12 @@ pub fn sys_sendmsg(
             return error.EDESTADDRREQ;
         }
     }
+}
+
+/// Deliver SIGPIPE (signal 13) to the current thread.
+fn deliverSigpipe() void {
+    const current = sched.getCurrentThread() orelse return;
+    signals_mod.deliverSignalToThread(current, 13); // SIGPIPE = 13
 }
 
 /// Send message on UNIX domain socket with SCM_RIGHTS and SCM_CREDENTIALS support
@@ -635,7 +650,7 @@ pub fn sys_recvmsg(
     unix_socket_ops: *const fd_mod.FileOps,
     unix_socket_full_ops: *const fd_mod.FileOps,
 ) SyscallError!usize {
-    _ = flags; // Flags ignored for MVP (MSG_PEEK, MSG_WAITALL, etc.)
+    const recv_flags: u32 = @truncate(flags);
 
     // Read msghdr from userspace
     var msg = user_mem.copyStructFromUser(MsgHdr, user_mem.UserPtr.from(msg_ptr)) catch {
@@ -715,13 +730,34 @@ pub fn sys_recvmsg(
 
     var received: usize = 0;
     if (sock.sock_type == socket.SOCK_STREAM) {
-        received = socket.tcpRecv(ctx.socket_idx, kbuf) catch |err| {
-            return socketErrorToSyscallError(err);
-        };
+        // TCP path: dispatch MSG_PEEK and MSG_DONTWAIT
+        if ((recv_flags & socket.MSG_PEEK) != 0) {
+            received = socket.tcpPeek(ctx.socket_idx, kbuf) catch |err| {
+                if (err == socket.SocketError.WouldBlock) return error.EAGAIN;
+                return socketErrorToSyscallError(err);
+            };
+        } else {
+            received = socket.tcpRecv(ctx.socket_idx, kbuf) catch |err| {
+                if (err == socket.SocketError.WouldBlock and (recv_flags & socket.MSG_DONTWAIT) != 0) {
+                    return error.EAGAIN;
+                }
+                return socketErrorToSyscallError(err);
+            };
+        }
     } else {
-        received = socket.recvfrom(ctx.socket_idx, kbuf, src_addr_arg) catch |err| {
+        // UDP path: thread flags through recvfromIp
+        var udp_src_ip: socket.IpAddr = .none;
+        var udp_src_port: u16 = 0;
+        received = socket.recvfromIp(ctx.socket_idx, kbuf, &udp_src_ip, &udp_src_port, recv_flags) catch |err| {
             return socketErrorToSyscallError(err);
         };
+        // Update ksrc_addr from actual IP source for UDP
+        if (src_addr_arg != null) {
+            switch (udp_src_ip) {
+                .v4 => |v4| ksrc_addr = socket.SockAddrIn.init(v4, udp_src_port),
+                else => {},
+            }
+        }
     }
 
     // Scatter received data into user iovecs

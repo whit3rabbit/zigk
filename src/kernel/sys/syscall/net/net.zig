@@ -559,7 +559,7 @@ pub fn sys_recvfrom(
     src_addr_ptr: usize,
     addrlen_ptr: usize,
 ) SyscallError!usize {
-    _ = flags;
+    const recv_flags: u32 = @truncate(flags);
 
     const ctx = getSocketContext(fd) orelse {
         return error.ENOTSOCK;
@@ -580,9 +580,86 @@ pub fn sys_recvfrom(
     var src_ip: socket.IpAddr = .none;
     var src_port: u16 = 0;
 
-    const received = socket.recvfromIp(ctx.socket_idx, kbuf, &src_ip, &src_port) catch |err| {
-        return socketErrorToSyscallError(err);
+    // Get socket type to dispatch appropriately
+    const sock_for_type = socket.getSocket(ctx.socket_idx) orelse {
+        return error.EBADF;
     };
+
+    var received: usize = 0;
+
+    if (sock_for_type.sock_type == socket.SOCK_STREAM) {
+        // TCP path: dispatch MSG_PEEK and MSG_DONTWAIT appropriately
+        if ((recv_flags & socket.MSG_PEEK) != 0) {
+            // MSG_PEEK on TCP: block until data available (unless MSG_DONTWAIT), then peek
+            if ((recv_flags & socket.MSG_DONTWAIT) != 0 or !sock_for_type.blocking) {
+                // Non-blocking peek
+                received = socket.tcpPeek(ctx.socket_idx, kbuf) catch |err| {
+                    if (err == socket.SocketError.WouldBlock) return error.EAGAIN;
+                    return socketErrorToSyscallError(err);
+                };
+            } else {
+                // Blocking peek: block until data arrives, then peek
+                while (true) {
+                    const peek_result = socket.tcpPeek(ctx.socket_idx, kbuf);
+                    if (peek_result) |n| {
+                        received = n;
+                        break;
+                    } else |err| {
+                        if (err == socket.SocketError.WouldBlock) {
+                            // Block until woken by incoming data
+                            const current = sched.getCurrentThread() orelse {
+                                return error.EAGAIN;
+                            };
+                            _ = hal.cpu.disableInterrupts();
+                            if (socket.getTcb(ctx.socket_idx)) |tcb| {
+                                tcb.blocked_thread = current;
+                            }
+                            sock_for_type.blocked_thread = current;
+                            sched.block();
+                            sock_for_type.blocked_thread = null;
+                            continue;
+                        }
+                        return socketErrorToSyscallError(err);
+                    }
+                }
+            }
+        } else if ((recv_flags & socket.MSG_DONTWAIT) != 0) {
+            // MSG_DONTWAIT on TCP: one non-blocking attempt
+            received = socket.tcpRecv(ctx.socket_idx, kbuf) catch |err| {
+                if (err == socket.SocketError.WouldBlock) return error.EAGAIN;
+                return socketErrorToSyscallError(err);
+            };
+        } else {
+            // Default blocking TCP recv (blocking loop handled inside socket layer / syscall)
+            while (true) {
+                const tcp_result = socket.tcpRecv(ctx.socket_idx, kbuf);
+                if (tcp_result) |n| {
+                    received = n;
+                    break;
+                } else |err| {
+                    if (err == socket.SocketError.WouldBlock and sock_for_type.blocking) {
+                        const current = sched.getCurrentThread() orelse {
+                            return error.EAGAIN;
+                        };
+                        _ = hal.cpu.disableInterrupts();
+                        if (socket.getTcb(ctx.socket_idx)) |tcb| {
+                            tcb.blocked_thread = current;
+                        }
+                        sock_for_type.blocked_thread = current;
+                        sched.block();
+                        sock_for_type.blocked_thread = null;
+                        continue;
+                    }
+                    return socketErrorToSyscallError(err);
+                }
+            }
+        }
+    } else {
+        // UDP / SOCK_RAW path: pass flags through to recvfromIp
+        received = socket.recvfromIp(ctx.socket_idx, kbuf, &src_ip, &src_port, recv_flags) catch |err| {
+            return socketErrorToSyscallError(err);
+        };
+    }
 
     if (received > 0) {
         const user_ptr = user_mem.UserPtr.from(buf_ptr);

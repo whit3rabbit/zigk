@@ -26,6 +26,11 @@ pub const IPV6_JOIN_GROUP: i32 = 20;
 pub const IPV6_LEAVE_GROUP: i32 = 21;
 pub const IPV6_MULTICAST_HOPS: i32 = 18;
 
+/// Message flags (for recv/recvfrom flags parameter)
+pub const MSG_PEEK: u32 = 0x0002;
+pub const MSG_DONTWAIT: u32 = 0x0040;
+pub const MSG_WAITALL: u32 = 0x0100;
+
 /// Socket type constants
 pub const SOCK_STREAM: i32 = 1; // TCP
 pub const SOCK_DGRAM: i32 = 2; // UDP
@@ -212,6 +217,28 @@ pub fn recvfrom(fd: i32, buf: []u8, src_addr: ?*SockAddrIn) SyscallError!usize {
     return ret;
 }
 
+/// Receive data from socket with explicit flags parameter.
+/// Supports MSG_PEEK (inspect without consuming) and MSG_DONTWAIT (non-blocking).
+/// Returns number of bytes received.
+/// src_addr is filled with sender's address if non-null.
+pub fn recvfromFlags(fd: i32, buf: []u8, flags: u32, src_addr: ?*SockAddrIn) SyscallError!usize {
+    var addrlen: u32 = @sizeOf(SockAddrIn);
+    const src_addr_ptr: usize = if (src_addr) |a| @intFromPtr(a) else 0;
+    const addrlen_ptr: usize = if (src_addr != null) @intFromPtr(&addrlen) else 0;
+
+    const ret = primitive.syscall6(
+        syscalls.SYS_RECVFROM,
+        @bitCast(@as(isize, fd)),
+        @intFromPtr(buf.ptr),
+        buf.len,
+        @as(usize, flags),
+        src_addr_ptr,
+        addrlen_ptr,
+    );
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return ret;
+}
+
 // =============================================================================
 // IPv6 Socket Operations
 // =============================================================================
@@ -257,6 +284,27 @@ pub fn recvfrom6(fd: i32, buf: []u8, src_addr: ?*SockAddrIn6) SyscallError!usize
         @intFromPtr(buf.ptr),
         buf.len,
         0, // flags
+        src_addr_ptr,
+        addrlen_ptr,
+    );
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return ret;
+}
+
+/// Receive data from IPv6 socket with explicit flags parameter.
+/// Supports MSG_PEEK (inspect without consuming) and MSG_DONTWAIT (non-blocking).
+/// Returns number of bytes received.
+pub fn recvfrom6Flags(fd: i32, buf: []u8, flags: u32, src_addr: ?*SockAddrIn6) SyscallError!usize {
+    var addrlen: u32 = @sizeOf(SockAddrIn6);
+    const src_addr_ptr: usize = if (src_addr) |a| @intFromPtr(a) else 0;
+    const addrlen_ptr: usize = if (src_addr != null) @intFromPtr(&addrlen) else 0;
+
+    const ret = primitive.syscall6(
+        syscalls.SYS_RECVFROM,
+        @bitCast(@as(isize, fd)),
+        @intFromPtr(buf.ptr),
+        buf.len,
+        @as(usize, flags),
         src_addr_ptr,
         addrlen_ptr,
     );
