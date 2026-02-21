@@ -10,11 +10,11 @@ See: .planning/PROJECT.md (updated 2026-02-20)
 ## Current Position
 
 Phase: 40 of 43 (Network Code Fixes)
-Plan: 0 of TBD in current phase
-Status: Ready to plan
-Last activity: 2026-02-20 -- v1.5 roadmap created (4 phases, 12 requirements)
+Plan: 2 of TBD in current phase
+Status: In progress
+Last activity: 2026-02-21 -- 40-02 complete (TCP_CORK mutex fix + raw socket MSG_DONTWAIT/MSG_PEEK)
 
-Progress: [░░░░░░░░░░] 0% (v1.5 milestone; 82/82+ plans complete overall)
+Progress: [██░░░░░░░░] ~20% (v1.5 milestone; 84/84+ plans complete overall)
 
 ## Performance Metrics
 
@@ -32,6 +32,7 @@ Progress: [░░░░░░░░░░] 0% (v1.5 milestone; 82/82+ plans comp
 | v1.2 | 15-26 | 14 | 5 days |
 | v1.3 | 27-35 | 15 | 4 days |
 | v1.4 | 36-39 | 9 | 2 days |
+| v1.5 (in progress) | 40-43 | 4+ | ongoing |
 
 ## Accumulated Context
 
@@ -42,6 +43,10 @@ See PROJECT.md Key Decisions table for full history.
 Recent decisions affecting v1.5:
 - [Phase 40 prereq]: hasPendingSignal callback approach means blocked_thread must be cleared on EINTR -- the stale pointer is a real use-after-free risk on retry
 - [Phase 42]: QEMU loopback only (guest-internal); no TAP/host-to-guest networking needed for verification
+- [Phase 40-network-code-fixes]: TCP_CORK flush acquires tcb.mutex before transmitPendingData -- lock order: sock.lock (L6) -> tcb.mutex (L7)
+- [Phase 40-network-code-fixes]: MSG_DONTWAIT in raw socket recv uses OR semantics with sock.blocking for WouldBlock decision
+- [Phase 40-01]: Re-fetch TCB via socket.getTcb() after sched.block() to avoid stale pointer use-after-free on EINTR retry
+- [Phase 40-01]: Propagate rcv_buf_size and snd_buf_size to TCB in all four connect paths; listen() path excluded as accepted connections inherit from listening TCB
 
 ### Pending Todos
 
@@ -54,12 +59,12 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-02-20 (v1.5 roadmap creation)
-Stopped at: Roadmap written, ready to plan Phase 40
+Last session: 2026-02-21 (Phase 40 plan 02 execution)
+Stopped at: Completed 40-02-PLAN.md
 Resume file: None
 
-**Next action:** `/gsd:plan-phase 40`
+**Next action:** Continue Phase 40 remaining plans
 
 ---
 *State initialized: 2026-02-06*
-*Last updated: 2026-02-20 after v1.5 roadmap creation*
+*Last updated: 2026-02-21 after 40-02 completion*
