@@ -7,6 +7,7 @@
 - v1.2 **Systematic Syscall Coverage** -- Phases 15-26 (shipped 2026-02-16)
 - v1.3 **Tech Debt Cleanup** -- Phases 27-35 (shipped 2026-02-19)
 - v1.4 **Network Stack Hardening** -- Phases 36-39 (shipped 2026-02-20)
+- v1.5 **Tech Debt Cleanup** -- Phases 40-43 (in progress)
 
 ## Phases
 
@@ -79,6 +80,66 @@
 
 </details>
 
+### v1.5 Tech Debt Cleanup (In Progress)
+
+**Milestone Goal:** Resolve all 18 v1.4 tech debt items -- fix 6 code defects, clean up 3 documentation gaps, configure QEMU loopback networking, and verify 8 network features live.
+
+- [ ] **Phase 40: Network Code Fixes** - Fix 4 TCP/raw socket defects from v1.4 audit
+- [ ] **Phase 41: Code Cleanup and Documentation** - Remove dead code, fix Zig compat, update 3 archived milestone docs
+- [ ] **Phase 42: QEMU Loopback Setup** - Configure loopback networking in QEMU test environment for both architectures
+- [ ] **Phase 43: Network Feature Verification** - Verify 8 network features under live loopback; unskip 5 MSG flag tests
+
+## Phase Details
+
+### Phase 40: Network Code Fixes
+**Goal**: All 4 network defects identified in the v1.4 audit are corrected in the codebase
+**Depends on**: Nothing (independent code fixes)
+**Requirements**: NET-01, NET-02, NET-03, NET-04
+**Success Criteria** (what must be TRUE):
+  1. tcb.blocked_thread is cleared to null before EINTR is returned in both MSG_PEEK blocking and default TCP blocking recv paths, preventing stale pointer dereference on retry
+  2. A socket with SO_RCVBUF or SO_SNDBUF set before connect() passes those buffer sizes into Tcb.init() so the configured sizes take effect on the connection
+  3. TCP_CORK uncork flush holds tcb.mutex before calling transmitPendingData(), matching the locking pattern used in all other TCB mutation paths
+  4. Raw socket recv path checks MSG_DONTWAIT and MSG_PEEK flags and behaves identically to TCP recv (non-blocking return and peek-without-consume respectively)
+**Plans**: TBD
+
+### Phase 41: Code Cleanup and Documentation
+**Goal**: Dead code is removed, the Zig 0.16.x compat issue is fixed, and all 3 v1.4 documentation gaps are closed
+**Depends on**: Nothing (independent of Phase 40)
+**Requirements**: CLN-01, CLN-02, DOC-01, DOC-02, DOC-03
+**Success Criteria** (what must be TRUE):
+  1. Tcb.send_acked field no longer exists in types.zig; all references compile cleanly
+  2. `zig build test` completes without error (slab_bench.zig no longer uses the removed std.time.Timer API)
+  3. v1.4 REQUIREMENTS.md has all previously-satisfied requirement checkboxes marked as checked
+  4. All 9 v1.4 plan SUMMARY files have the requirements_completed frontmatter field populated with a non-empty value
+  5. ROADMAP.md phase 37 and phase 39 progress table rows have correct formatting matching all other rows
+**Plans**: TBD
+
+### Phase 42: QEMU Loopback Setup
+**Goal**: The QEMU test environment has functional loopback networking on both x86_64 and aarch64, enabling guest-internal TCP/UDP connections
+**Depends on**: Phase 40
+**Requirements**: TST-01
+**Success Criteria** (what must be TRUE):
+  1. `zig build run -Darch=x86_64` with loopback networking launches QEMU with a virtual loopback adapter visible to the kernel
+  2. `zig build run -Darch=aarch64` with loopback networking launches QEMU with the same loopback configuration
+  3. A test program can open a TCP socket, bind to 127.0.0.1, connect to itself, and exchange data without errors on both architectures
+**Plans**: TBD
+
+### Phase 43: Network Feature Verification
+**Goal**: All 8 network features from the v1.4 audit are confirmed working under live loopback; the 5 MSG flag tests run and pass
+**Depends on**: Phase 42, Phase 40
+**Requirements**: TST-02, TST-03
+**Success Criteria** (what must be TRUE):
+  1. Zero-window recovery test completes: sender blocked on zero-window receive window, then unblocked when receiver opens window, with no hang or panic
+  2. SWS avoidance test confirms small writes are coalesced until the window or Nagle threshold is satisfied
+  3. Raw socket blocking recv returns data when a packet arrives (no busy-spin, no hang)
+  4. SO_REUSEPORT test confirms connections are distributed across multiple listening sockets bound to the same port
+  5. SIGPIPE is delivered on write to a closed socket; MSG_NOSIGNAL suppresses it and returns EPIPE instead
+  6. MSG_PEEK on UDP does not consume the datagram; MSG_DONTWAIT on an empty socket returns EAGAIN immediately
+  7. MSG_WAITALL on TCP accumulates across multiple segments until the full requested byte count is delivered
+  8. SO_RCVTIMEO combined with MSG_WAITALL times out and returns a partial count when the deadline expires before full data arrives
+  9. All 5 MSG flag integration tests in the test runner execute and report pass (not skipped) on both x86_64 and aarch64
+**Plans**: TBD
+
 ## Progress
 
 | Phase | Milestone | Plans Complete | Status | Completed |
@@ -122,7 +183,11 @@
 | 37. Dynamic Window Management and Persist Timer | v1.4 | 2/2 | Complete | 2026-02-19 |
 | 38. Socket Options and Raw Socket Blocking | v1.4 | 2/2 | Complete | 2026-02-20 |
 | 39. MSG Flags | v1.4 | 3/3 | Complete | 2026-02-20 |
+| 40. Network Code Fixes | v1.5 | 0/TBD | Not started | - |
+| 41. Code Cleanup and Documentation | v1.5 | 0/TBD | Not started | - |
+| 42. QEMU Loopback Setup | v1.5 | 0/TBD | Not started | - |
+| 43. Network Feature Verification | v1.5 | 0/TBD | Not started | - |
 
 ---
 *Roadmap created: 2026-02-06*
-*Last updated: 2026-02-20 after v1.4 milestone completion*
+*Last updated: 2026-02-20 after v1.5 roadmap creation*

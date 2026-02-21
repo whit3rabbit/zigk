@@ -45,24 +45,24 @@ None -- this is a cleanup milestone.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| NET-01 | TBD | Pending |
-| NET-02 | TBD | Pending |
-| NET-03 | TBD | Pending |
-| NET-04 | TBD | Pending |
-| CLN-01 | TBD | Pending |
-| CLN-02 | TBD | Pending |
-| DOC-01 | TBD | Pending |
-| DOC-02 | TBD | Pending |
-| DOC-03 | TBD | Pending |
-| TST-01 | TBD | Pending |
-| TST-02 | TBD | Pending |
-| TST-03 | TBD | Pending |
+| NET-01 | Phase 40 | Pending |
+| NET-02 | Phase 40 | Pending |
+| NET-03 | Phase 40 | Pending |
+| NET-04 | Phase 40 | Pending |
+| CLN-01 | Phase 41 | Pending |
+| CLN-02 | Phase 41 | Pending |
+| DOC-01 | Phase 41 | Pending |
+| DOC-02 | Phase 41 | Pending |
+| DOC-03 | Phase 41 | Pending |
+| TST-01 | Phase 42 | Pending |
+| TST-02 | Phase 43 | Pending |
+| TST-03 | Phase 43 | Pending |
 
 **Coverage:**
 - v1.5 requirements: 12 total
-- Mapped to phases: 0
-- Unmapped: 12
+- Mapped to phases: 12
+- Unmapped: 0
 
 ---
 *Requirements defined: 2026-02-20*
-*Last updated: 2026-02-20 after initial definition*
+*Last updated: 2026-02-20 after roadmap creation (traceability complete)*
