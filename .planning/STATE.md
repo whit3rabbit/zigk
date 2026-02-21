@@ -5,14 +5,14 @@
 See: .planning/PROJECT.md (updated 2026-02-20)
 
 **Core value:** Every implemented syscall must work correctly on both x86_64 and aarch64 with matching behavior, tested via the existing integration test harness.
-**Current focus:** Phase 40 -- Network Code Fixes
+**Current focus:** Phase 41 -- Code Cleanup and Documentation
 
 ## Current Position
 
-Phase: 40 of 43 (Network Code Fixes)
-Plan: 2 of TBD in current phase
+Phase: 41 of 43 (Code Cleanup and Documentation)
+Plan: 1 of TBD in current phase
 Status: In progress
-Last activity: 2026-02-21 -- 40-02 complete (TCP_CORK mutex fix + raw socket MSG_DONTWAIT/MSG_PEEK)
+Last activity: 2026-02-21 -- 41-01 complete (removed dead Tcb.send_acked field; fixed slab_bench std.time.Timer for Zig 0.16.x)
 
 Progress: [██░░░░░░░░] ~20% (v1.5 milestone; 84/84+ plans complete overall)
 
@@ -47,6 +47,7 @@ Recent decisions affecting v1.5:
 - [Phase 40-network-code-fixes]: MSG_DONTWAIT in raw socket recv uses OR semantics with sock.blocking for WouldBlock decision
 - [Phase 40-01]: Re-fetch TCB via socket.getTcb() after sched.block() to avoid stale pointer use-after-free on EINTR retry
 - [Phase 40-01]: Propagate rcv_buf_size and snd_buf_size to TCB in all four connect paths; listen() path excluded as accepted connections inherit from listening TCB
+- [Phase 41-01]: Use @bitCast (not @intCast) for timespec sec/nsec to u64 -- avoids runtime panic on theoretically-signed values
 
 ### Pending Todos
 
@@ -54,17 +55,17 @@ None.
 
 ### Blockers/Concerns
 
-- Pre-existing: `zig build test` fails in tests/unit/slab_bench.zig:29 (std.time.Timer removed in Zig 0.16.x) -- addressed by CLN-02 in Phase 41
+- RESOLVED (41-01): `zig build test` slab_bench.zig std.time.Timer error -- fixed with clock_gettime helper
 - Phase 43 depends on Phase 42 (loopback setup) AND Phase 40 (code fixes) being complete before verification can run
 
 ## Session Continuity
 
-Last session: 2026-02-21 (Phase 40 plan 02 execution)
-Stopped at: Completed 40-02-PLAN.md
+Last session: 2026-02-21 (Phase 41 plan 01 execution)
+Stopped at: Completed 41-01-PLAN.md
 Resume file: None
 
-**Next action:** Continue Phase 40 remaining plans
+**Next action:** Continue Phase 41 remaining plans
 
 ---
 *State initialized: 2026-02-06*
-*Last updated: 2026-02-21 after 40-02 completion*
+*Last updated: 2026-02-21 after 41-01 completion*
