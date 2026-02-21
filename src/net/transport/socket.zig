@@ -140,9 +140,7 @@ pub const getpeername6 = root.getpeername6;
 
 // Raw socket path (SOCK_RAW for ping/traceroute)
 pub const sendtoRaw = root.sendtoRaw;
-pub const recvfromRaw = root.recvfromRaw;
 pub const sendtoRaw6 = root.sendtoRaw6;
-pub const recvfromRaw6 = root.recvfromRaw6;
 
 // Errors
 pub const SocketError = root.SocketError;
