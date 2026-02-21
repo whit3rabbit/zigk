@@ -156,7 +156,9 @@ Plans:
   1. ROADMAP.md Phase 41 progress row has correct v1.5 milestone column, Plans Complete shows 2/2, and Plan 41-01 checkbox is checked
   2. REQUIREMENTS.md traceability table shows `[x] Satisfied` for all 9 completed requirements (NET-01 through NET-04, CLN-01, CLN-02, DOC-01, DOC-02, DOC-03)
   3. raw_api.recvfromRaw and recvfromRaw6 are either wired into sys_recvfrom SOCK_RAW dispatch path or removed as dead code
-**Plans**: TBD
+**Plans:** 1 plan
+Plans:
+- [ ] 44-01-PLAN.md -- Fix ROADMAP/REQUIREMENTS tracking and remove recvfromRaw dead code
 
 ## Progress
 
