@@ -5,16 +5,16 @@
 See: .planning/PROJECT.md (updated 2026-02-20)
 
 **Core value:** Every implemented syscall must work correctly on both x86_64 and aarch64 with matching behavior, tested via the existing integration test harness.
-**Current focus:** Phase 41 -- Code Cleanup and Documentation
+**Current focus:** Phase 44 -- Audit Gap Closure
 
 ## Current Position
 
-Phase: 41 of 43 (Code Cleanup and Documentation)
-Plan: 2 of 2 in current phase
-Status: In progress
-Last activity: 2026-02-21 -- 41-02 complete (updated v1.4 REQUIREMENTS.md checkboxes, SUMMARY frontmatter, ROADMAP formatting)
+Phase: 44 of 44 (Audit Gap Closure)
+Plan: 1 of 1 in current phase
+Status: Complete
+Last activity: 2026-02-21 -- 44-01 complete (fixed ROADMAP Phase 41 row, marked 9 requirements Satisfied, removed dead recvfromRaw code)
 
-Progress: [██░░░░░░░░] ~20% (v1.5 milestone; 84/84+ plans complete overall)
+Progress: [███░░░░░░░] ~30% (v1.5 milestone; 85/85+ plans complete overall)
 
 ## Performance Metrics
 
@@ -34,6 +34,7 @@ Progress: [██░░░░░░░░] ~20% (v1.5 milestone; 84/84+ plans co
 | v1.4 | 36-39 | 9 | 2 days |
 | v1.5 (in progress) | 40-43 | 4+ | ongoing |
 | Phase 41 P02 | 2 | 3 tasks | 6 files |
+| Phase 44 P01 | 3 | 3 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -51,6 +52,7 @@ Recent decisions affecting v1.5:
 - [Phase 41-01]: Use @bitCast (not @intCast) for timespec sec/nsec to u64 -- avoids runtime panic on theoretically-signed values
 - [Phase 41]: 39-01-SUMMARY.md requirements-completed was in block sequence format; converted to inline array matching established style
 - [Phase 41]: 38-01-SUMMARY.md had different frontmatter style (metrics: block); placed requirements-completed before metrics block per placement rule
+- [Phase 44-01]: Remove recvfromRaw/recvfromRaw6 as dead code -- SOCK_RAW recv routes through udp_api.recvfromIp which already handles MSG_DONTWAIT/MSG_PEEK independently
 
 ### Pending Todos
 
@@ -63,12 +65,12 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-02-21 (Phase 41 plan 02 execution)
-Stopped at: Completed 41-02-PLAN.md
+Last session: 2026-02-21 (Phase 44 plan 01 execution)
+Stopped at: Completed 44-01-PLAN.md
 Resume file: None
 
-**Next action:** Proceed to Phase 42 (QEMU Loopback Setup)
+**Next action:** Proceed to Phase 42 (QEMU Loopback Setup) -- Phase 44 complete, phases 42/43 still pending
 
 ---
 *State initialized: 2026-02-06*
-*Last updated: 2026-02-21 after 41-02 completion*
+*Last updated: 2026-02-21 after 44-01 completion*

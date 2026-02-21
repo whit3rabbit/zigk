@@ -158,7 +158,7 @@ Plans:
   3. raw_api.recvfromRaw and recvfromRaw6 are either wired into sys_recvfrom SOCK_RAW dispatch path or removed as dead code
 **Plans:** 1 plan
 Plans:
-- [ ] 44-01-PLAN.md -- Fix ROADMAP/REQUIREMENTS tracking and remove recvfromRaw dead code
+- [x] 44-01-PLAN.md -- Fix ROADMAP/REQUIREMENTS tracking and remove recvfromRaw dead code
 
 ## Progress
 
@@ -207,8 +207,8 @@ Plans:
 | 41. Code Cleanup and Documentation | v1.5 | 2/2 | Complete | 2026-02-21 |
 | 42. QEMU Loopback Setup | v1.5 | 0/TBD | Not started | - |
 | 43. Network Feature Verification | v1.5 | 0/TBD | Not started | - |
-| 44. Audit Gap Closure | v1.5 | 0/TBD | Not started | - |
+| 44. Audit Gap Closure | v1.5 | 1/1 | Complete | 2026-02-21 |
 
 ---
 *Roadmap created: 2026-02-06*
-*Last updated: 2026-02-20 after v1.5 roadmap creation*
+*Last updated: 2026-02-21 after Phase 44 gap closure completion*
