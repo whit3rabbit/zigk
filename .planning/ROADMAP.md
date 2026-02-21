@@ -85,7 +85,7 @@
 **Milestone Goal:** Resolve all 18 v1.4 tech debt items -- fix 6 code defects, clean up 3 documentation gaps, configure QEMU loopback networking, and verify 8 network features live.
 
 - [x] **Phase 40: Network Code Fixes** - Fix 4 TCP/raw socket defects from v1.4 audit (completed 2026-02-21)
-- [ ] **Phase 41: Code Cleanup and Documentation** - Remove dead code, fix Zig compat, update 3 archived milestone docs
+- [x] **Phase 41: Code Cleanup and Documentation** - Remove dead code, fix Zig compat, update 3 archived milestone docs (completed 2026-02-21)
 - [ ] **Phase 42: QEMU Loopback Setup** - Configure loopback networking in QEMU test environment for both architectures
 - [ ] **Phase 43: Network Feature Verification** - Verify 8 network features under live loopback; unskip 5 MSG flag tests
 
@@ -190,7 +190,7 @@ Plans:
 | 38. Socket Options and Raw Socket Blocking | v1.4 | 2/2 | Complete | 2026-02-20 |
 | 39. MSG Flags | v1.4 | 3/3 | Complete | 2026-02-20 |
 | 40. Network Code Fixes | v1.5 | 2/2 | Complete | 2026-02-21 |
-| 41. Code Cleanup and Documentation | 1/2 | In Progress|  | - |
+| 41. Code Cleanup and Documentation | 1/2 | Complete    | 2026-02-21 | - |
 | 42. QEMU Loopback Setup | v1.5 | 0/TBD | Not started | - |
 | 43. Network Feature Verification | v1.5 | 0/TBD | Not started | - |
 
