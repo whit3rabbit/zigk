@@ -19,6 +19,12 @@ fn initSlab() void {
     slab.init();
 }
 
+fn nanoTimestamp() u64 {
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts);
+    return @as(u64, @bitCast(@as(i64, ts.sec))) * std.time.ns_per_s + @as(u64, @bitCast(@as(i64, ts.nsec)));
+}
+
 test "slab: alloc/free micro benchmark (10k x 64B)" {
     initSlab();
 
@@ -26,18 +32,21 @@ test "slab: alloc/free micro benchmark (10k x 64B)" {
     const ptrs = try testing.allocator.alloc([]u8, iterations);
     defer testing.allocator.free(ptrs);
 
-    var timer = try std.time.Timer.start();
+    const t0 = nanoTimestamp();
     for (ptrs) |*slot| {
         const buf = slab.alloc(64) orelse return error.OutOfMemory;
         slot.* = buf;
     }
-    const alloc_ns = timer.lap();
+    const t1 = nanoTimestamp();
 
     for (ptrs) |buf| {
         const ok = slab.free(buf);
         try testing.expect(ok);
     }
-    const free_ns = timer.lap();
+    const t2 = nanoTimestamp();
+
+    const alloc_ns = t1 - t0;
+    const free_ns = t2 - t1;
 
     std.log.info("slab 64B: alloc {d} ns, free {d} ns, total {d} ns (10k)", .{
         alloc_ns,

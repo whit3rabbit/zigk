@@ -190,7 +190,6 @@ pub const Tcb = struct {
     send_buf: [c.BUFFER_SIZE]u8,
     send_head: usize, // Write position (next byte to buffer)
     send_tail: usize, // Read position (next byte to send/retransmit)
-    send_acked: usize, // Position of oldest unacked byte
 
     // Receive buffer (circular)
     recv_buf: [c.BUFFER_SIZE]u8,
@@ -305,7 +304,6 @@ pub const Tcb = struct {
             .send_buf = [_]u8{0} ** c.BUFFER_SIZE,
             .send_head = 0,
             .send_tail = 0,
-            .send_acked = 0,
             .recv_buf = [_]u8{0} ** c.BUFFER_SIZE,
             .recv_head = 0,
             .recv_tail = 0,
