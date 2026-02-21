@@ -168,10 +168,13 @@ pub fn setsockopt(sock_fd: usize, level: i32, optname: i32, optval: [*]const u8,
                 if (sock.tcb) |tcb| {
                     tcb.tcp_cork = new_cork;
                     // When cork is cleared, flush pending data.
-                    // We are under sock.lock. transmitPendingData does not acquire
-                    // tcb.mutex -- it is called from the owning thread context here.
+                    // Acquire tcb.mutex to match locking pattern of all other
+                    // TCB mutation paths (RX processing, timer retransmit, send).
+                    // Lock order: sock.lock (level 6) -> tcb.mutex (level 7).
                     if (!new_cork) {
                         const tx_data = @import("../tcp/tx/data.zig");
+                        const tcb_held = tcb.mutex.acquire();
+                        defer tcb_held.release();
                         _ = tx_data.transmitPendingData(tcb);
                     }
                 }
