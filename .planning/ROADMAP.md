@@ -86,7 +86,7 @@
 
 - [x] **Phase 40: Network Code Fixes** - Fix 4 TCP/raw socket defects from v1.4 audit (completed 2026-02-21)
 - [x] **Phase 41: Code Cleanup and Documentation** - Remove dead code, fix Zig compat, update 3 archived milestone docs (completed 2026-02-21)
-- [ ] **Phase 42: QEMU Loopback Setup** - Configure loopback networking in QEMU test environment for both architectures
+- [x] **Phase 42: QEMU Loopback Setup** - Configure loopback networking in QEMU test environment for both architectures (completed 2026-02-21)
 - [ ] **Phase 43: Network Feature Verification** - Verify 8 network features under live loopback; unskip 5 MSG flag tests
 - [x] **Phase 44: Audit Gap Closure** - Fix ROADMAP/REQUIREMENTS formatting, update satisfied checkboxes, resolve raw_api dead code (completed 2026-02-21)
 
@@ -129,9 +129,9 @@ Plans:
   1. `zig build run -Darch=x86_64` with loopback networking launches QEMU with a virtual loopback adapter visible to the kernel
   2. `zig build run -Darch=aarch64` with loopback networking launches QEMU with the same loopback configuration
   3. A test program can open a TCP socket, bind to 127.0.0.1, connect to itself, and exchange data without errors on both architectures
-**Plans:** 1 plan
+**Plans:** 1/1 plans complete
 Plans:
-- [ ] 42-01-PLAN.md -- Initialize loopback interface and full network stack at kernel boot
+- [x] 42-01-PLAN.md -- Initialize loopback interface and full network stack at kernel boot
 
 ### Phase 43: Network Feature Verification
 **Goal**: All 8 network features from the v1.4 audit are confirmed working under live loopback; the 5 MSG flag tests run and pass
