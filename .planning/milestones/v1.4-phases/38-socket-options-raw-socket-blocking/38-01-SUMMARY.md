@@ -28,6 +28,7 @@ decisions:
   - "recvfromRaw blocking loop validates sock_type before loop via initial check, avoiding re-check under lock on every iteration"
   - "signals import added to syscall_net_module in build.zig for SIGPIPE delivery from sys_sendto and socketWrite"
   - "MSG_NOSIGNAL and new socket option constants exported through all three layers: types.zig -> root.zig -> socket.zig"
+requirements-completed: [BUF-01, BUF-02, BUF-03, BUF-05, API-04, API-05, API-06]
 metrics:
   duration: "7 minutes"
   completed_date: "2026-02-20"

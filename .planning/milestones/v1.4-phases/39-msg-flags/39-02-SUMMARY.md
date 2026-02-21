@@ -47,6 +47,8 @@ key-decisions:
   - "Kernel stack increased from 96KB (24 pages) to 192KB (48 pages) to fix dispatch table stack overflow"
   - "Integration tests skip when loopback network unavailable -- same behavior as existing socket networking tests"
 
+requirements-completed: [API-03]
+
 # Metrics
 duration: ~30min (including stack overflow investigation)
 completed: 2026-02-20

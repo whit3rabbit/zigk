@@ -62,9 +62,7 @@ patterns-established:
   - "Flag threading: flags: u32 parameter added to socket layer functions, threaded from syscall to implementation"
   - "Non-blocking override: is_nonblocking = !sock.blocking or ((flags & MSG_DONTWAIT) != 0)"
 
-requirements-completed:
-  - API-01
-  - API-02
+requirements-completed: [API-01, API-02]
 
 # Metrics
 duration: 6min
