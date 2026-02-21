@@ -186,7 +186,7 @@ Plans:
 | 37. Dynamic Window Management and Persist Timer | v1.4 | 2/2 | Complete | 2026-02-19 |
 | 38. Socket Options and Raw Socket Blocking | v1.4 | 2/2 | Complete | 2026-02-20 |
 | 39. MSG Flags | v1.4 | 3/3 | Complete | 2026-02-20 |
-| 40. Network Code Fixes | 2/2 | Complete   | 2026-02-21 | - |
+| 40. Network Code Fixes | 2/2 | Complete    | 2026-02-21 | - |
 | 41. Code Cleanup and Documentation | v1.5 | 0/TBD | Not started | - |
 | 42. QEMU Loopback Setup | v1.5 | 0/TBD | Not started | - |
 | 43. Network Feature Verification | v1.5 | 0/TBD | Not started | - |
