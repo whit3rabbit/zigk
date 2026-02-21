@@ -88,7 +88,7 @@
 - [x] **Phase 41: Code Cleanup and Documentation** - Remove dead code, fix Zig compat, update 3 archived milestone docs (completed 2026-02-21)
 - [ ] **Phase 42: QEMU Loopback Setup** - Configure loopback networking in QEMU test environment for both architectures
 - [ ] **Phase 43: Network Feature Verification** - Verify 8 network features under live loopback; unskip 5 MSG flag tests
-- [ ] **Phase 44: Audit Gap Closure** - Fix ROADMAP/REQUIREMENTS formatting, update satisfied checkboxes, resolve raw_api dead code
+- [x] **Phase 44: Audit Gap Closure** - Fix ROADMAP/REQUIREMENTS formatting, update satisfied checkboxes, resolve raw_api dead code (completed 2026-02-21)
 
 ## Phase Details
 
@@ -156,7 +156,7 @@ Plans:
   1. ROADMAP.md Phase 41 progress row has correct v1.5 milestone column, Plans Complete shows 2/2, and Plan 41-01 checkbox is checked
   2. REQUIREMENTS.md traceability table shows `[x] Satisfied` for all 9 completed requirements (NET-01 through NET-04, CLN-01, CLN-02, DOC-01, DOC-02, DOC-03)
   3. raw_api.recvfromRaw and recvfromRaw6 are either wired into sys_recvfrom SOCK_RAW dispatch path or removed as dead code
-**Plans:** 1 plan
+**Plans:** 1/1 plans complete
 Plans:
 - [x] 44-01-PLAN.md -- Fix ROADMAP/REQUIREMENTS tracking and remove recvfromRaw dead code
 
@@ -207,7 +207,7 @@ Plans:
 | 41. Code Cleanup and Documentation | v1.5 | 2/2 | Complete | 2026-02-21 |
 | 42. QEMU Loopback Setup | v1.5 | 0/TBD | Not started | - |
 | 43. Network Feature Verification | v1.5 | 0/TBD | Not started | - |
-| 44. Audit Gap Closure | v1.5 | 1/1 | Complete | 2026-02-21 |
+| 44. Audit Gap Closure | v1.5 | Complete    | 2026-02-21 | 2026-02-21 |
 
 ---
 *Roadmap created: 2026-02-06*
