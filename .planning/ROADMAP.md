@@ -84,7 +84,7 @@
 
 **Milestone Goal:** Resolve all 18 v1.4 tech debt items -- fix 6 code defects, clean up 3 documentation gaps, configure QEMU loopback networking, and verify 8 network features live.
 
-- [ ] **Phase 40: Network Code Fixes** - Fix 4 TCP/raw socket defects from v1.4 audit
+- [x] **Phase 40: Network Code Fixes** - Fix 4 TCP/raw socket defects from v1.4 audit (completed 2026-02-21)
 - [ ] **Phase 41: Code Cleanup and Documentation** - Remove dead code, fix Zig compat, update 3 archived milestone docs
 - [ ] **Phase 42: QEMU Loopback Setup** - Configure loopback networking in QEMU test environment for both architectures
 - [ ] **Phase 43: Network Feature Verification** - Verify 8 network features under live loopback; unskip 5 MSG flag tests
@@ -100,7 +100,7 @@
   2. A socket with SO_RCVBUF or SO_SNDBUF set before connect() passes those buffer sizes into Tcb.init() so the configured sizes take effect on the connection
   3. TCP_CORK uncork flush holds tcb.mutex before calling transmitPendingData(), matching the locking pattern used in all other TCB mutation paths
   4. Raw socket recv path checks MSG_DONTWAIT and MSG_PEEK flags and behaves identically to TCP recv (non-blocking return and peek-without-consume respectively)
-**Plans:** 2 plans
+**Plans:** 2/2 plans complete
 Plans:
 - [ ] 40-01-PLAN.md -- Fix stale blocked_thread pointer on EINTR and buffer size propagation on connect
 - [ ] 40-02-PLAN.md -- Fix TCP_CORK uncork locking and raw socket MSG_DONTWAIT/MSG_PEEK flags
@@ -186,7 +186,7 @@ Plans:
 | 37. Dynamic Window Management and Persist Timer | v1.4 | 2/2 | Complete | 2026-02-19 |
 | 38. Socket Options and Raw Socket Blocking | v1.4 | 2/2 | Complete | 2026-02-20 |
 | 39. MSG Flags | v1.4 | 3/3 | Complete | 2026-02-20 |
-| 40. Network Code Fixes | v1.5 | 0/TBD | Not started | - |
+| 40. Network Code Fixes | 2/2 | Complete   | 2026-02-21 | - |
 | 41. Code Cleanup and Documentation | v1.5 | 0/TBD | Not started | - |
 | 42. QEMU Loopback Setup | v1.5 | 0/TBD | Not started | - |
 | 43. Network Feature Verification | v1.5 | 0/TBD | Not started | - |
