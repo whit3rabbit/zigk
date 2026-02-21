@@ -116,9 +116,9 @@ Plans:
   3. v1.4 REQUIREMENTS.md has all previously-satisfied requirement checkboxes marked as checked
   4. All 9 v1.4 plan SUMMARY files have the requirements_completed frontmatter field populated with a non-empty value
   5. ROADMAP.md phase 37 and phase 39 progress table rows have correct formatting matching all other rows
-**Plans**: 2 plans
+**Plans:** 2/2 plans complete
 Plans:
-- [ ] 41-01-PLAN.md -- Remove dead Tcb.send_acked field and fix slab_bench Timer API for Zig 0.16.x
+- [x] 41-01-PLAN.md -- Remove dead Tcb.send_acked field and fix slab_bench Timer API for Zig 0.16.x
 - [x] 41-02-PLAN.md -- Update v1.4 REQUIREMENTS.md checkboxes, SUMMARY frontmatter, and ROADMAP formatting
 
 ### Phase 42: QEMU Loopback Setup
@@ -204,7 +204,7 @@ Plans:
 | 38. Socket Options and Raw Socket Blocking | v1.4 | 2/2 | Complete | 2026-02-20 |
 | 39. MSG Flags | v1.4 | 3/3 | Complete | 2026-02-20 |
 | 40. Network Code Fixes | v1.5 | 2/2 | Complete | 2026-02-21 |
-| 41. Code Cleanup and Documentation | 1/2 | Complete    | 2026-02-21 | - |
+| 41. Code Cleanup and Documentation | v1.5 | 2/2 | Complete | 2026-02-21 |
 | 42. QEMU Loopback Setup | v1.5 | 0/TBD | Not started | - |
 | 43. Network Feature Verification | v1.5 | 0/TBD | Not started | - |
 | 44. Audit Gap Closure | v1.5 | 0/TBD | Not started | - |
