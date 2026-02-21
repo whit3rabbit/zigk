@@ -115,7 +115,10 @@ Plans:
   3. v1.4 REQUIREMENTS.md has all previously-satisfied requirement checkboxes marked as checked
   4. All 9 v1.4 plan SUMMARY files have the requirements_completed frontmatter field populated with a non-empty value
   5. ROADMAP.md phase 37 and phase 39 progress table rows have correct formatting matching all other rows
-**Plans**: TBD
+**Plans**: 2 plans
+Plans:
+- [ ] 41-01-PLAN.md -- Remove dead Tcb.send_acked field and fix slab_bench Timer API for Zig 0.16.x
+- [ ] 41-02-PLAN.md -- Update v1.4 REQUIREMENTS.md checkboxes, SUMMARY frontmatter, and ROADMAP formatting
 
 ### Phase 42: QEMU Loopback Setup
 **Goal**: The QEMU test environment has functional loopback networking on both x86_64 and aarch64, enabling guest-internal TCP/UDP connections
