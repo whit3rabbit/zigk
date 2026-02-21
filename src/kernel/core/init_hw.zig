@@ -382,20 +382,32 @@ pub fn initNetwork() void {
     console.print("\n");
     console.info("Initializing network subsystem...", .{});
 
-    // Initialize Socket Subsystem FIRST (before PCI/NIC).
-    // Socket syscalls need lock initialization even without a network stack.
-    // This MUST happen before any early return, otherwise IrqLock panics.
-    net.transport.initSyscallOnly(heap.allocator());
-    console.debug("[NETSTACK] Socket subsystem initialized (syscall-only mode)", .{});
+    // Initialize loopback interface FIRST (before PCI/NIC and before full stack init).
+    // Loopback is a pure software interface -- no hardware required.
+    const loopback_iface = net.loopback.init();
+    console.debug("[NETSTACK] Loopback interface (lo0) initialized: 127.0.0.1", .{});
+
+    // Initialize the full network stack with loopback as the default interface.
+    // This initializes: packet pool, IPv4/ARP layer, socket subsystem, TCP subsystem,
+    // and mDNS responder. It also sets the global interface pointer so that TCP/UDP
+    // socket operations no longer return NetworkDown.
+    // 1000 ticks/sec matches the kernel's 1kHz scheduler tick rate.
+    net.init(loopback_iface, heap.allocator(), 1000, net.defaultClock());
+    console.debug("[NETSTACK] Full network stack initialized with loopback interface", .{});
 
     // 1. Get RSDP for PCI ECAM
     if (rsdp_address == 0) {
-        console.warn("RSDP not found, network disabled.", .{});
+        console.warn("RSDP not found, PCI/NIC enumeration skipped (loopback still active).", .{});
+        // Register tick callback for network timers even without a physical NIC
+        sched.setTickCallback(combinedTickCallback);
+        console.debug("[NETSTACK] Registered tick callback for network timers", .{});
         return;
     }
     // 2. Initialize PCI
     const pci_res = pci.initFromAcpi(heap.allocator(), rsdp_address) catch |err| {
-        console.err("PCI init failed: {}", .{err});
+        console.err("PCI init failed: {} (loopback still active)", .{err});
+        sched.setTickCallback(combinedTickCallback);
+        console.debug("[NETSTACK] Registered tick callback for network timers", .{});
         return;
     };
 
@@ -449,8 +461,14 @@ pub fn initNetwork() void {
         console.debug("[NETSTACK] NIC available, no in-kernel stack (userspace driver expected)", .{});
         _ = nic_driver; // Unused
     } else {
-        console.warn("Network stack skipped (no NIC driver)", .{});
+        console.info("No NIC driver found; loopback-only networking active.", .{});
     }
+
+    // Register combined tick callback for network timers (TCP retransmission, ARP expiry,
+    // mDNS) and USB polling on aarch64. Must be registered after initNetwork() completes
+    // so that net.tick() has a fully initialized stack to operate on.
+    sched.setTickCallback(combinedTickCallback);
+    console.debug("[NETSTACK] Registered tick callback for network timers", .{});
 }
 
 /// Initialize USB subsystem (XHCI/EHCI)
@@ -471,25 +489,39 @@ pub fn initUsb() void {
 
     usb.initFromPci(devices, pci.PciAccess{ .ecam = ecam });
 
-    // On aarch64, MSI-X interrupts don't work (LAPIC is x86-specific).
-    // Register a tick callback to poll XHCI events periodically.
-    // This is essential for USB keyboard input to work on aarch64.
+    // NOTE: aarch64 USB polling is handled by combinedTickCallback registered in initNetwork().
+    // combinedTickCallback checks for MSI-X availability and falls back to polling on aarch64.
+    // We do not register a separate tick callback here -- the single tick_callback slot is
+    // already occupied by combinedTickCallback which covers both network timers and USB polling.
     if (builtin.cpu.arch == .aarch64) {
         if (usb.xhci.getController()) |ctrl| {
             if (ctrl.msix_vectors == null) {
-                // In polling mode - register tick callback
-                sched.setTickCallback(usbPollTickCallback);
-                console.info("USB: Registered tick callback for aarch64 polling", .{});
+                console.info("USB: aarch64 polling mode -- covered by combinedTickCallback", .{});
             }
         }
     }
 }
 
-/// Tick callback to poll USB events on aarch64 (where MSI-X is unavailable)
+/// Combined tick callback: drives network timers and USB polling.
+/// - net.tick() is called unconditionally on both x86_64 and aarch64 to advance TCP timers
+///   (retransmission, keepalive, connection timeout), ARP cache expiry, and mDNS timers.
+/// - USB polling is only needed on aarch64 where MSI-X is unavailable; x86_64 uses MSI-X ISRs.
+/// This function replaces the old usbPollTickCallback so both subsystems share the single
+/// tick_callback slot provided by the scheduler.
 var usb_poll_counter: u32 = 0;
-fn usbPollTickCallback() void {
-    _ = usb.xhci.pollEvents();
-    usb_poll_counter +%= 1;
+fn combinedTickCallback() void {
+    // Network stack timers (TCP retransmission, ARP expiry, mDNS)
+    net.tick();
+
+    // USB event polling -- only needed on aarch64 where MSI-X interrupts are unavailable.
+    if (comptime builtin.cpu.arch == .aarch64) {
+        if (usb.xhci.getController()) |ctrl| {
+            if (ctrl.msix_vectors == null) {
+                _ = usb.xhci.pollEvents();
+                usb_poll_counter +%= 1;
+            }
+        }
+    }
 }
 
 /// Initialize Audio subsystem (VirtIO-Sound, HDA, AC97)
