@@ -126,7 +126,8 @@ pub fn recvfromRaw(
     src_addr: ?*types.SockAddrIn,
     flags: u32,
 ) errors.SocketError!usize {
-    _ = flags; // TODO: Handle MSG_DONTWAIT, MSG_PEEK
+    const is_nonblocking = (flags & types.MSG_DONTWAIT) != 0;
+    const is_peek = (flags & types.MSG_PEEK) != 0;
 
     // Validate type using a quick acquire/release before the loop
     {
@@ -144,7 +145,12 @@ pub fn recvfromRaw(
         var ip_addr: types.IpAddr = .none;
         var src_port: u16 = 0;
 
-        if (sock.dequeuePacketIp(buf, &ip_addr, &src_port)) |len| {
+        const maybe_len = if (is_peek)
+            sock.peekPacketIp(buf, &ip_addr, &src_port)
+        else
+            sock.dequeuePacketIp(buf, &ip_addr, &src_port);
+
+        if (maybe_len) |len| {
             held.release();
             state.releaseSocket(sock);
             if (src_addr) |addr| {
@@ -161,7 +167,7 @@ pub fn recvfromRaw(
             return len;
         }
 
-        if (!sock.blocking) {
+        if (is_nonblocking or !sock.blocking) {
             held.release();
             state.releaseSocket(sock);
             return errors.SocketError.WouldBlock;
@@ -302,7 +308,8 @@ pub fn recvfromRaw6(
     src_addr: ?*types.SockAddrIn6,
     flags: u32,
 ) errors.SocketError!usize {
-    _ = flags; // TODO: Handle MSG_DONTWAIT, MSG_PEEK
+    const is_nonblocking = (flags & types.MSG_DONTWAIT) != 0;
+    const is_peek = (flags & types.MSG_PEEK) != 0;
 
     // Validate type using a quick acquire/release before the loop
     {
@@ -320,7 +327,12 @@ pub fn recvfromRaw6(
         var ip_addr: types.IpAddr = .none;
         var src_port: u16 = 0;
 
-        if (sock.dequeuePacketIp(buf, &ip_addr, &src_port)) |len| {
+        const maybe_len = if (is_peek)
+            sock.peekPacketIp(buf, &ip_addr, &src_port)
+        else
+            sock.dequeuePacketIp(buf, &ip_addr, &src_port);
+
+        if (maybe_len) |len| {
             held.release();
             state.releaseSocket(sock);
             if (src_addr) |addr| {
@@ -338,7 +350,7 @@ pub fn recvfromRaw6(
             return len;
         }
 
-        if (!sock.blocking) {
+        if (is_nonblocking or !sock.blocking) {
             held.release();
             state.releaseSocket(sock);
             return errors.SocketError.WouldBlock;
