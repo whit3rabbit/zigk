@@ -215,6 +215,8 @@ pub fn connect(sock_fd: usize, dest_addr: *const types.SockAddrIn) errors.Socket
 
     // Copy socket options to TCB
     tcb.tos = sock.tos;
+    tcb.rcv_buf_size = sock.rcv_buf_size;
+    tcb.snd_buf_size = sock.snd_buf_size;
 
     // Capture generation for race checking
     const tcb_gen = tcb.generation;
@@ -329,6 +331,8 @@ pub fn connect6(sock_fd: usize, dest_addr: *const types.SockAddrIn6) errors.Sock
 
     // Copy socket options to TCB
     tcb.tos = sock.tos;
+    tcb.rcv_buf_size = sock.rcv_buf_size;
+    tcb.snd_buf_size = sock.snd_buf_size;
 
     // Capture generation for race checking
     const tcb_gen = tcb.generation;
@@ -845,6 +849,8 @@ pub fn connectAsync(sock_fd: usize, request: *IoRequest, dest_addr: *const types
 
     sock.tcb = tcb;
     tcb.tos = sock.tos;
+    tcb.rcv_buf_size = sock.rcv_buf_size;
+    tcb.snd_buf_size = sock.snd_buf_size;
 
     // Store socket index in TCB for async completion lookup
     tcb.parent_socket = sock_fd;
@@ -912,6 +918,8 @@ pub fn connectAsync6(sock_fd: usize, request: *IoRequest, dest_addr: *const type
     sock.family = types.AF_INET6;
     sock.local_addr = local_addr;
     tcb.tos = sock.tos;
+    tcb.rcv_buf_size = sock.rcv_buf_size;
+    tcb.snd_buf_size = sock.snd_buf_size;
 
     // Store socket index in TCB for async completion lookup
     tcb.parent_socket = sock_fd;
