@@ -7,21 +7,21 @@
 
 ### Network Code Fixes
 
-- [ ] **NET-01**: tcb.blocked_thread is cleared before returning EINTR in MSG_PEEK blocking and default TCP blocking recv paths (net.zig:619-627, 662-670)
-- [ ] **NET-02**: setsockopt SO_RCVBUF/SO_SNDBUF values set before connect() are propagated to Tcb.init()
-- [ ] **NET-03**: TCP_CORK uncork flush acquires tcb.mutex before calling transmitPendingData()
-- [ ] **NET-04**: Raw sockets support MSG_DONTWAIT and MSG_PEEK flags in recv path (raw_api.zig)
+- [x] **NET-01**: tcb.blocked_thread is cleared before returning EINTR in MSG_PEEK blocking and default TCP blocking recv paths (net.zig:619-627, 662-670)
+- [x] **NET-02**: setsockopt SO_RCVBUF/SO_SNDBUF values set before connect() are propagated to Tcb.init()
+- [x] **NET-03**: TCP_CORK uncork flush acquires tcb.mutex before calling transmitPendingData()
+- [x] **NET-04**: Raw sockets support MSG_DONTWAIT and MSG_PEEK flags in recv path (raw_api.zig)
 
 ### Code Cleanup
 
-- [ ] **CLN-01**: Dead field Tcb.send_acked is removed from types.zig
-- [ ] **CLN-02**: slab_bench.zig compiles on Zig 0.16.x (std.time.Timer replacement)
+- [x] **CLN-01**: Dead field Tcb.send_acked is removed from types.zig
+- [x] **CLN-02**: slab_bench.zig compiles on Zig 0.16.x (std.time.Timer replacement)
 
 ### Documentation
 
-- [ ] **DOC-01**: v1.4 REQUIREMENTS.md checkboxes updated to reflect satisfied requirements
-- [ ] **DOC-02**: SUMMARY frontmatter requirements_completed field populated in all 9 v1.4 plan SUMMARYs
-- [ ] **DOC-03**: ROADMAP.md phase 37/39 progress table formatting corrected
+- [x] **DOC-01**: v1.4 REQUIREMENTS.md checkboxes updated to reflect satisfied requirements
+- [x] **DOC-02**: SUMMARY frontmatter requirements_completed field populated in all 9 v1.4 plan SUMMARYs
+- [x] **DOC-03**: ROADMAP.md phase 37/39 progress table formatting corrected
 
 ### Test Infrastructure
 
@@ -45,15 +45,15 @@ None -- this is a cleanup milestone.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| NET-01 | Phase 40 | Pending |
-| NET-02 | Phase 40 | Pending |
-| NET-03 | Phase 40 | Pending |
-| NET-04 | Phase 40 | Pending |
-| CLN-01 | Phase 41 | Pending |
-| CLN-02 | Phase 41 | Pending |
-| DOC-01 | Phase 41 | Pending |
-| DOC-02 | Phase 41 | Pending |
-| DOC-03 | Phase 44 | Pending |
+| NET-01 | Phase 40 | Satisfied |
+| NET-02 | Phase 40 | Satisfied |
+| NET-03 | Phase 40 | Satisfied |
+| NET-04 | Phase 40 | Satisfied |
+| CLN-01 | Phase 41 | Satisfied |
+| CLN-02 | Phase 41 | Satisfied |
+| DOC-01 | Phase 41 | Satisfied |
+| DOC-02 | Phase 41 | Satisfied |
+| DOC-03 | Phase 41, 44 | Satisfied |
 | TST-01 | Phase 42 | Pending |
 | TST-02 | Phase 43 | Pending |
 | TST-03 | Phase 43 | Pending |
@@ -65,4 +65,4 @@ None -- this is a cleanup milestone.
 
 ---
 *Requirements defined: 2026-02-20*
-*Last updated: 2026-02-20 after roadmap creation (traceability complete)*
+*Last updated: 2026-02-21 after Phase 44 gap closure (9 requirements marked Satisfied)*
