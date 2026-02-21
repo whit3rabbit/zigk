@@ -7,7 +7,7 @@
 - v1.2 **Systematic Syscall Coverage** -- Phases 15-26 (shipped 2026-02-16)
 - v1.3 **Tech Debt Cleanup** -- Phases 27-35 (shipped 2026-02-19)
 - v1.4 **Network Stack Hardening** -- Phases 36-39 (shipped 2026-02-20)
-- v1.5 **Tech Debt Cleanup** -- Phases 40-43 (in progress)
+- v1.5 **Tech Debt Cleanup** -- Phases 40-44 (in progress)
 
 ## Phases
 
@@ -88,6 +88,7 @@
 - [x] **Phase 41: Code Cleanup and Documentation** - Remove dead code, fix Zig compat, update 3 archived milestone docs (completed 2026-02-21)
 - [ ] **Phase 42: QEMU Loopback Setup** - Configure loopback networking in QEMU test environment for both architectures
 - [ ] **Phase 43: Network Feature Verification** - Verify 8 network features under live loopback; unskip 5 MSG flag tests
+- [ ] **Phase 44: Audit Gap Closure** - Fix ROADMAP/REQUIREMENTS formatting, update satisfied checkboxes, resolve raw_api dead code
 
 ## Phase Details
 
@@ -146,6 +147,17 @@ Plans:
   9. All 5 MSG flag integration tests in the test runner execute and report pass (not skipped) on both x86_64 and aarch64
 **Plans**: TBD
 
+### Phase 44: Audit Gap Closure
+**Goal**: All audit-identified documentation gaps, tech debt, and dead code are resolved so the milestone can close cleanly
+**Depends on**: Phase 41 (builds on partial DOC-03 work)
+**Requirements**: DOC-03
+**Gap Closure**: Closes gaps from v1.5 audit
+**Success Criteria** (what must be TRUE):
+  1. ROADMAP.md Phase 41 progress row has correct v1.5 milestone column, Plans Complete shows 2/2, and Plan 41-01 checkbox is checked
+  2. REQUIREMENTS.md traceability table shows `[x] Satisfied` for all 9 completed requirements (NET-01 through NET-04, CLN-01, CLN-02, DOC-01, DOC-02, DOC-03)
+  3. raw_api.recvfromRaw and recvfromRaw6 are either wired into sys_recvfrom SOCK_RAW dispatch path or removed as dead code
+**Plans**: TBD
+
 ## Progress
 
 | Phase | Milestone | Plans Complete | Status | Completed |
@@ -193,6 +205,7 @@ Plans:
 | 41. Code Cleanup and Documentation | 1/2 | Complete    | 2026-02-21 | - |
 | 42. QEMU Loopback Setup | v1.5 | 0/TBD | Not started | - |
 | 43. Network Feature Verification | v1.5 | 0/TBD | Not started | - |
+| 44. Audit Gap Closure | v1.5 | 0/TBD | Not started | - |
 
 ---
 *Roadmap created: 2026-02-06*

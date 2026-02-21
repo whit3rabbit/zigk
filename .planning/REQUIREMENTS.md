@@ -53,7 +53,7 @@ None -- this is a cleanup milestone.
 | CLN-02 | Phase 41 | Pending |
 | DOC-01 | Phase 41 | Pending |
 | DOC-02 | Phase 41 | Pending |
-| DOC-03 | Phase 41 | Pending |
+| DOC-03 | Phase 44 | Pending |
 | TST-01 | Phase 42 | Pending |
 | TST-02 | Phase 43 | Pending |
 | TST-03 | Phase 43 | Pending |
