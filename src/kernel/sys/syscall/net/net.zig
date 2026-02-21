@@ -622,6 +622,10 @@ pub fn sys_recvfrom(
                             sock_for_type.blocked_thread = current;
                             sched.block();
                             sock_for_type.blocked_thread = null;
+                            // Clear tcb.blocked_thread to prevent stale pointer on retry
+                            if (socket.getTcb(ctx.socket_idx)) |tcb| {
+                                tcb.blocked_thread = null;
+                            }
                             if (hasPendingSignal()) {
                                 return error.EINTR;
                             }
@@ -665,6 +669,10 @@ pub fn sys_recvfrom(
                         sock_for_type.blocked_thread = current;
                         sched.block();
                         sock_for_type.blocked_thread = null;
+                        // Clear tcb.blocked_thread to prevent stale pointer on retry
+                        if (socket.getTcb(ctx.socket_idx)) |tcb| {
+                            tcb.blocked_thread = null;
+                        }
                         if (hasPendingSignal()) {
                             return error.EINTR;
                         }
