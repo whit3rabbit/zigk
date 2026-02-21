@@ -100,7 +100,10 @@
   2. A socket with SO_RCVBUF or SO_SNDBUF set before connect() passes those buffer sizes into Tcb.init() so the configured sizes take effect on the connection
   3. TCP_CORK uncork flush holds tcb.mutex before calling transmitPendingData(), matching the locking pattern used in all other TCB mutation paths
   4. Raw socket recv path checks MSG_DONTWAIT and MSG_PEEK flags and behaves identically to TCP recv (non-blocking return and peek-without-consume respectively)
-**Plans**: TBD
+**Plans:** 2 plans
+Plans:
+- [ ] 40-01-PLAN.md -- Fix stale blocked_thread pointer on EINTR and buffer size propagation on connect
+- [ ] 40-02-PLAN.md -- Fix TCP_CORK uncork locking and raw socket MSG_DONTWAIT/MSG_PEEK flags
 
 ### Phase 41: Code Cleanup and Documentation
 **Goal**: Dead code is removed, the Zig 0.16.x compat issue is fixed, and all 3 v1.4 documentation gaps are closed
