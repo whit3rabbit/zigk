@@ -10,9 +10,9 @@ See: .planning/PROJECT.md (updated 2026-02-20)
 ## Current Position
 
 Phase: 41 of 43 (Code Cleanup and Documentation)
-Plan: 1 of TBD in current phase
+Plan: 2 of 2 in current phase
 Status: In progress
-Last activity: 2026-02-21 -- 41-01 complete (removed dead Tcb.send_acked field; fixed slab_bench std.time.Timer for Zig 0.16.x)
+Last activity: 2026-02-21 -- 41-02 complete (updated v1.4 REQUIREMENTS.md checkboxes, SUMMARY frontmatter, ROADMAP formatting)
 
 Progress: [██░░░░░░░░] ~20% (v1.5 milestone; 84/84+ plans complete overall)
 
@@ -33,6 +33,7 @@ Progress: [██░░░░░░░░] ~20% (v1.5 milestone; 84/84+ plans co
 | v1.3 | 27-35 | 15 | 4 days |
 | v1.4 | 36-39 | 9 | 2 days |
 | v1.5 (in progress) | 40-43 | 4+ | ongoing |
+| Phase 41 P02 | 2 | 3 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -48,6 +49,8 @@ Recent decisions affecting v1.5:
 - [Phase 40-01]: Re-fetch TCB via socket.getTcb() after sched.block() to avoid stale pointer use-after-free on EINTR retry
 - [Phase 40-01]: Propagate rcv_buf_size and snd_buf_size to TCB in all four connect paths; listen() path excluded as accepted connections inherit from listening TCB
 - [Phase 41-01]: Use @bitCast (not @intCast) for timespec sec/nsec to u64 -- avoids runtime panic on theoretically-signed values
+- [Phase 41]: 39-01-SUMMARY.md requirements-completed was in block sequence format; converted to inline array matching established style
+- [Phase 41]: 38-01-SUMMARY.md had different frontmatter style (metrics: block); placed requirements-completed before metrics block per placement rule
 
 ### Pending Todos
 
@@ -60,12 +63,12 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-02-21 (Phase 41 plan 01 execution)
-Stopped at: Completed 41-01-PLAN.md
+Last session: 2026-02-21 (Phase 41 plan 02 execution)
+Stopped at: Completed 41-02-PLAN.md
 Resume file: None
 
-**Next action:** Continue Phase 41 remaining plans
+**Next action:** Proceed to Phase 42 (QEMU Loopback Setup)
 
 ---
 *State initialized: 2026-02-06*
-*Last updated: 2026-02-21 after 41-01 completion*
+*Last updated: 2026-02-21 after 41-02 completion*
