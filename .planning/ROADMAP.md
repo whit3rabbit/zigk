@@ -102,8 +102,8 @@
   4. Raw socket recv path checks MSG_DONTWAIT and MSG_PEEK flags and behaves identically to TCP recv (non-blocking return and peek-without-consume respectively)
 **Plans:** 2/2 plans complete
 Plans:
-- [ ] 40-01-PLAN.md -- Fix stale blocked_thread pointer on EINTR and buffer size propagation on connect
-- [ ] 40-02-PLAN.md -- Fix TCP_CORK uncork locking and raw socket MSG_DONTWAIT/MSG_PEEK flags
+- [x] 40-01-PLAN.md -- Fix stale blocked_thread pointer on EINTR and buffer size propagation on connect
+- [x] 40-02-PLAN.md -- Fix TCP_CORK uncork locking and raw socket MSG_DONTWAIT/MSG_PEEK flags
 
 ### Phase 41: Code Cleanup and Documentation
 **Goal**: Dead code is removed, the Zig 0.16.x compat issue is fixed, and all 3 v1.4 documentation gaps are closed
@@ -118,7 +118,7 @@ Plans:
 **Plans**: 2 plans
 Plans:
 - [ ] 41-01-PLAN.md -- Remove dead Tcb.send_acked field and fix slab_bench Timer API for Zig 0.16.x
-- [ ] 41-02-PLAN.md -- Update v1.4 REQUIREMENTS.md checkboxes, SUMMARY frontmatter, and ROADMAP formatting
+- [x] 41-02-PLAN.md -- Update v1.4 REQUIREMENTS.md checkboxes, SUMMARY frontmatter, and ROADMAP formatting
 
 ### Phase 42: QEMU Loopback Setup
 **Goal**: The QEMU test environment has functional loopback networking on both x86_64 and aarch64, enabling guest-internal TCP/UDP connections
@@ -189,8 +189,8 @@ Plans:
 | 37. Dynamic Window Management and Persist Timer | v1.4 | 2/2 | Complete | 2026-02-19 |
 | 38. Socket Options and Raw Socket Blocking | v1.4 | 2/2 | Complete | 2026-02-20 |
 | 39. MSG Flags | v1.4 | 3/3 | Complete | 2026-02-20 |
-| 40. Network Code Fixes | 2/2 | Complete    | 2026-02-21 | - |
-| 41. Code Cleanup and Documentation | v1.5 | 0/TBD | Not started | - |
+| 40. Network Code Fixes | v1.5 | 2/2 | Complete | 2026-02-21 |
+| 41. Code Cleanup and Documentation | 1/2 | In Progress|  | - |
 | 42. QEMU Loopback Setup | v1.5 | 0/TBD | Not started | - |
 | 43. Network Feature Verification | v1.5 | 0/TBD | Not started | - |
 
