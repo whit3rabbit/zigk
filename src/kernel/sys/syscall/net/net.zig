@@ -293,10 +293,10 @@ pub fn sys_socket(domain: usize, sock_type: usize, protocol: usize) SyscallError
         }
     }
 
-    // For network sockets, pass the masked type to the socket layer
+    // For network sockets, pass only the base type (without flag bits) to the socket layer
     const sock_idx = socket.socket(
         domain_u16,
-        @intCast(sock_type_u32 & 0xFFFF), // Lower 16 bits include type + NONBLOCK flag
+        type_masked,
         protocol_u16,
     ) catch |err| {
         return socketErrorToSyscallError(err);
@@ -306,6 +306,18 @@ pub fn sys_socket(domain: usize, sock_type: usize, protocol: usize) SyscallError
         _ = socket.close(sock_idx) catch {};
         return err;
     };
+
+    // Apply SOCK_NONBLOCK: set O_NONBLOCK on fd and non-blocking on socket
+    if (is_nonblock) {
+        if (socket.getSocket(sock_idx)) |sock| {
+            sock.blocking = false;
+        }
+        const table = base.getGlobalFdTable();
+        const fd_u32 = std.math.cast(u32, fd_num) orelse return fd_num;
+        if (table.get(fd_u32)) |fd_obj| {
+            fd_obj.flags |= fd_mod.O_NONBLOCK;
+        }
+    }
 
     return fd_num;
 }
