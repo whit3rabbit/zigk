@@ -143,7 +143,7 @@ pub fn sendReply(iface: *Interface, target_mac: [6]u8, target_ip: u32) void {
     // SECURITY: Zero-init outgoing packet buffer to prevent kernel stack leaks in ReleaseFast
     var buf: [core_packet.ETH_HEADER_SIZE + @sizeOf(ArpHeader)]u8 = [_]u8{0} ** (core_packet.ETH_HEADER_SIZE + @sizeOf(ArpHeader));
 
-    const eth: *EthernetHeader = @ptrCast(@alignCast(&buf[0]));
+    const eth: *align(1) EthernetHeader = @ptrCast(&buf[0]);
     @memcpy(&eth.dst_mac, &target_mac);
     @memcpy(&eth.src_mac, &iface.mac_addr);
     eth.setEthertype(ethernet.ETHERTYPE_ARP);
@@ -169,7 +169,7 @@ pub fn sendRequest(iface: *Interface, target_ip: u32) void {
     // SECURITY: Zero-init outgoing packet buffer to prevent kernel stack leaks in ReleaseFast
     var buf: [core_packet.ETH_HEADER_SIZE + @sizeOf(ArpHeader)]u8 = [_]u8{0} ** (core_packet.ETH_HEADER_SIZE + @sizeOf(ArpHeader));
 
-    const eth: *EthernetHeader = @ptrCast(@alignCast(&buf[0]));
+    const eth: *align(1) EthernetHeader = @ptrCast(&buf[0]);
     @memcpy(&eth.dst_mac, &ethernet.BROADCAST_MAC);
     @memcpy(&eth.src_mac, &iface.mac_addr);
     eth.setEthertype(ethernet.ETHERTYPE_ARP);
@@ -199,6 +199,11 @@ pub fn resolve(ip: u32) ?[6]u8 {
 
 /// Internal resolve without locking
 pub fn resolveUnlocked(ip: u32) ?[6]u8 {
+    // Loopback addresses (127.x.x.x) don't need ARP -- the loopback driver
+    // strips the Ethernet header, so any MAC works. Return zeros to avoid
+    // sending ARP requests that nobody will answer.
+    if ((ip >> 24) == 127) return [_]u8{0} ** 6;
+
     if (cache.findEntry(ip)) |entry| {
         if (entry.state == .reachable or entry.state == .stale) {
             return entry.mac_addr;

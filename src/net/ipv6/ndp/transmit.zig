@@ -83,13 +83,13 @@ fn sendNs(iface: *Interface, target_addr: [16]u8, is_dad: bool) bool {
     const dst_mac = ipv6_types.multicastToMac(dst_addr);
 
     // Build Ethernet header
-    const eth: *packet.EthernetHeader = @ptrCast(@alignCast(&buf[0]));
+    const eth: *align(1) packet.EthernetHeader = @ptrCast(&buf[0]);
     @memcpy(&eth.dst_mac, &dst_mac);
     @memcpy(&eth.src_mac, &iface.mac_addr);
     eth.setEthertype(ethernet.ETHERTYPE_IPV6);
 
     // Build IPv6 header
-    const ip6: *Ipv6Header = @ptrCast(@alignCast(&buf[eth_len]));
+    const ip6: *align(1) Ipv6Header = @ptrCast(&buf[eth_len]);
     ip6.* = std.mem.zeroes(Ipv6Header);
     ip6.setVersionTcFlow(6, 0, 0);
     ip6.setPayloadLength(@intCast(icmpv6_len));
@@ -107,14 +107,14 @@ fn sendNs(iface: *Interface, target_addr: [16]u8, is_dad: bool) bool {
 
     // Build NS header
     const ns_offset = icmpv6_offset + icmpv6_hdr_len;
-    const ns: *types.NeighborSolicitationHeader = @ptrCast(@alignCast(&buf[ns_offset]));
+    const ns: *align(1) types.NeighborSolicitationHeader = @ptrCast(&buf[ns_offset]);
     ns.reserved = 0;
     ns.target_addr = target_addr;
 
     // Add Source Link-Layer Address option (unless DAD)
     if (!is_dad) {
         const opt_offset = ns_offset + ns_hdr_len;
-        const slla: *types.LinkLayerAddressOption = @ptrCast(@alignCast(&buf[opt_offset]));
+        const slla: *align(1) types.LinkLayerAddressOption = @ptrCast(&buf[opt_offset]);
         slla.opt_type = types.OPT_SOURCE_LINK_ADDR;
         slla.length = 1; // 8 bytes
         @memcpy(&slla.addr, &iface.mac_addr);
@@ -183,13 +183,13 @@ pub fn sendNeighborAdvertisement(
     }
 
     // Build Ethernet header
-    const eth: *packet.EthernetHeader = @ptrCast(@alignCast(&buf[0]));
+    const eth: *align(1) packet.EthernetHeader = @ptrCast(&buf[0]);
     @memcpy(&eth.dst_mac, &dst_mac);
     @memcpy(&eth.src_mac, &iface.mac_addr);
     eth.setEthertype(ethernet.ETHERTYPE_IPV6);
 
     // Build IPv6 header
-    const ip6: *Ipv6Header = @ptrCast(@alignCast(&buf[eth_len]));
+    const ip6: *align(1) Ipv6Header = @ptrCast(&buf[eth_len]);
     ip6.* = std.mem.zeroes(Ipv6Header);
     ip6.setVersionTcFlow(6, 0, 0);
     ip6.setPayloadLength(@intCast(icmpv6_len));
@@ -207,13 +207,13 @@ pub fn sendNeighborAdvertisement(
 
     // Build NA header
     const na_offset = icmpv6_offset + icmpv6_hdr_len;
-    const na: *types.NeighborAdvertisementHeader = @ptrCast(@alignCast(&buf[na_offset]));
+    const na: *align(1) types.NeighborAdvertisementHeader = @ptrCast(&buf[na_offset]);
     na.setFlags(false, solicited, override); // Router flag = false (we're not a router)
     na.target_addr = advertised_addr;
 
     // Add Target Link-Layer Address option
     const opt_offset = na_offset + na_hdr_len;
-    const tlla: *types.LinkLayerAddressOption = @ptrCast(@alignCast(&buf[opt_offset]));
+    const tlla: *align(1) types.LinkLayerAddressOption = @ptrCast(&buf[opt_offset]);
     tlla.opt_type = types.OPT_TARGET_LINK_ADDR;
     tlla.length = 1; // 8 bytes
     @memcpy(&tlla.addr, &iface.mac_addr);
@@ -268,13 +268,13 @@ pub fn sendRouterSolicitation(iface: *Interface) bool {
     const dst_mac = ipv6_types.multicastToMac(dst_addr);
 
     // Build Ethernet header
-    const eth: *packet.EthernetHeader = @ptrCast(@alignCast(&buf[0]));
+    const eth: *align(1) packet.EthernetHeader = @ptrCast(&buf[0]);
     @memcpy(&eth.dst_mac, &dst_mac);
     @memcpy(&eth.src_mac, &iface.mac_addr);
     eth.setEthertype(ethernet.ETHERTYPE_IPV6);
 
     // Build IPv6 header
-    const ip6: *Ipv6Header = @ptrCast(@alignCast(&buf[eth_len]));
+    const ip6: *align(1) Ipv6Header = @ptrCast(&buf[eth_len]);
     ip6.* = std.mem.zeroes(Ipv6Header);
     ip6.setVersionTcFlow(6, 0, 0);
     ip6.setPayloadLength(@intCast(icmpv6_len));
@@ -292,13 +292,13 @@ pub fn sendRouterSolicitation(iface: *Interface) bool {
 
     // Build RS header
     const rs_offset = icmpv6_offset + icmpv6_hdr_len;
-    const rs: *types.RouterSolicitationHeader = @ptrCast(@alignCast(&buf[rs_offset]));
+    const rs: *align(1) types.RouterSolicitationHeader = @ptrCast(&buf[rs_offset]);
     rs.reserved = 0;
 
     // Add Source Link-Layer Address option if we have a source address
     if (has_link_local) {
         const opt_offset = rs_offset + rs_hdr_len;
-        const slla: *types.LinkLayerAddressOption = @ptrCast(@alignCast(&buf[opt_offset]));
+        const slla: *align(1) types.LinkLayerAddressOption = @ptrCast(&buf[opt_offset]);
         slla.opt_type = types.OPT_SOURCE_LINK_ADDR;
         slla.length = 1; // 8 bytes
         @memcpy(&slla.addr, &iface.mac_addr);

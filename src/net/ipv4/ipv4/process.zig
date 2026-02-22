@@ -154,7 +154,7 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
     // Standard Processing (No Reassembly)
     pkt.transport_offset = pkt.ip_offset + header_len;
     pkt.ip_protocol = ip.protocol;
-    
+
     switch (ip.protocol) {
         types.PROTO_ICMP => return icmp.processPacket(iface, pkt),
         types.PROTO_UDP => return udp.processPacket(iface, pkt),

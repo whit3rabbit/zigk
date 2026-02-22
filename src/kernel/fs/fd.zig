@@ -530,11 +530,8 @@ pub const FdTable = struct {
 
 /// Create a new FileDescriptor
 pub fn createFd(ops: *const FileOps, flags: u32, private_data: ?*anyopaque) !*FileDescriptor {
-    console.debug("FD: createFd called", .{});
     const alloc = heap.allocator();
-    console.debug("FD: Got allocator, allocating descriptor", .{});
     const fd = try alloc.create(FileDescriptor);
-    console.debug("FD: Descriptor allocated, initializing", .{});
     fd.* = FileDescriptor{
         .ops = ops,
         .private_data = private_data,
@@ -546,7 +543,6 @@ pub fn createFd(ops: *const FileOps, flags: u32, private_data: ?*anyopaque) !*Fi
         // SECURITY: Set cloexec flag based on O_CLOEXEC in open flags
         .cloexec = (flags & O_CLOEXEC) != 0,
     };
-    console.debug("FD: Returning descriptor", .{});
     return fd;
 }
 

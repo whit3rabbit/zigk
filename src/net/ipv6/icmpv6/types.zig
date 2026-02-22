@@ -35,19 +35,19 @@ pub const Icmpv6EchoHeader = extern struct {
     identifier: u16,
     sequence: u16,
 
-    pub fn getIdentifier(self: *const Icmpv6EchoHeader) u16 {
+    pub fn getIdentifier(self: *align(1) const Icmpv6EchoHeader) u16 {
         return @byteSwap(self.identifier);
     }
 
-    pub fn getSequence(self: *const Icmpv6EchoHeader) u16 {
+    pub fn getSequence(self: *align(1) const Icmpv6EchoHeader) u16 {
         return @byteSwap(self.sequence);
     }
 
-    pub fn setIdentifier(self: *Icmpv6EchoHeader, val: u16) void {
+    pub fn setIdentifier(self: *align(1) Icmpv6EchoHeader, val: u16) void {
         self.identifier = @byteSwap(val);
     }
 
-    pub fn setSequence(self: *Icmpv6EchoHeader, val: u16) void {
+    pub fn setSequence(self: *align(1) Icmpv6EchoHeader, val: u16) void {
         self.sequence = @byteSwap(val);
     }
 };

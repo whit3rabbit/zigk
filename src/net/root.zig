@@ -57,8 +57,12 @@ pub fn init(iface: *Interface, allocator: std.mem.Allocator, ticks_per_sec: u32,
     // Clear ARP cache (redundant if init clears it, but kept for logic)
     ipv4.arp.clearCache();
 
-    // Initialize mDNS responder
-    mdns.init(iface, allocator);
+    // NOTE: mDNS responder init skipped. mdns.init() creates a UDP socket
+    // and enters probing state, but mdns.tick() cannot run from ISR context
+    // (it calls recvfrom which acquires socket locks). mDNS is a LAN service
+    // discovery protocol -- not useful on a loopback-only interface.
+    // TODO: Initialize mDNS when a physical NIC is available and a kernel
+    // thread can drive the tick loop.
 
     // Mark interface as up
     iface.up();
@@ -69,12 +73,22 @@ pub fn processFrame(iface: *Interface, pkt: *PacketBuffer) bool {
 }
 
 /// System timer tick handler
-/// Called from kernel scheduler timer interrupt
+/// Called from kernel scheduler timer interrupt (ISR context).
+/// All functions called here MUST be ISR-safe: no blocking, no socket ops, no sleeping.
 pub fn tick() void {
     ipv4.arp.tick();
     transport.tcp.tick();
-    mdns.tick();
-
-    // Process async I/O timer expirations (Phase 2)
     io.timerTick();
+
+    // Process deferred loopback packets. Loopback transmit queues packets
+    // instead of processing inline to avoid re-entrant deadlock on state.lock.
+    // drain() may enqueue additional packets (e.g. RST replies) which are
+    // processed in the same drain call.
+    loopback.drain();
+
+    // NOTE: mdns.tick() is intentionally NOT called here.
+    // It calls processIncoming() which does udp_api.recvfrom() -- a socket
+    // receive that acquires locks and may block. Calling from ISR context
+    // deadlocks if the interrupted code holds a socket lock.
+    // mDNS requires a dedicated kernel thread or deferred work context.
 }

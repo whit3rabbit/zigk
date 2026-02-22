@@ -60,13 +60,13 @@ pub fn sendSegment(
     if (total_len > buf.len) return false;
 
     // Build Ethernet header
-    const eth: *EthernetHeader = @ptrCast(@alignCast(&buf[0]));
+    const eth: *align(1) EthernetHeader = @ptrCast(&buf[0]);
     @memcpy(&eth.dst_mac, &dst_mac);
     @memcpy(&eth.src_mac, &iface.mac_addr);
     eth.setEthertype(ethernet.ETHERTYPE_IPV4);
 
     // Build IP header
-    const ip: *Ipv4Header = @ptrCast(@alignCast(&buf[packet.ETH_HEADER_SIZE]));
+    const ip: *align(1) Ipv4Header = @ptrCast(&buf[packet.ETH_HEADER_SIZE]);
     ip.version_ihl = 0x45;
     ip.tos = tcb.tos; // Use socket's ToS/DSCP value
     ip.setTotalLength(@intCast(ip_len)); // Safe: validated ip_len <= 65535 above
@@ -77,11 +77,11 @@ pub fn sendSegment(
     ip.checksum = 0;
     ip.setSrcIp(tcb.getLocalIpV4());
     ip.setDstIp(tcb.getRemoteIpV4());
-    ip.checksum = checksum.ipChecksum(buf[packet.ETH_HEADER_SIZE..][0..packet.IP_HEADER_SIZE]);
+    ip.checksum = @byteSwap(checksum.ipChecksum(buf[packet.ETH_HEADER_SIZE..][0..packet.IP_HEADER_SIZE]));
 
     // Build TCP header
     const tcp_offset = packet.ETH_HEADER_SIZE + packet.IP_HEADER_SIZE;
-    const tcp: *TcpHeader = @ptrCast(@alignCast(&buf[tcp_offset]));
+    const tcp: *align(1) TcpHeader = @ptrCast(&buf[tcp_offset]);
     tcp.setSrcPort(tcb.local_port);
     tcp.setDstPort(tcb.remote_port);
     tcp.setSeqNum(seq);
@@ -98,7 +98,7 @@ pub fn sendSegment(
 
     // Calculate TCP checksum
     const tcp_segment = buf[tcp_offset..][0..tcp_len];
-    tcp.checksum = checksum.tcpChecksum(ip.src_ip, ip.dst_ip, tcp_segment);
+    tcp.checksum = @byteSwap(checksum.tcpChecksum(ip.getSrcIp(), ip.getDstIp(), tcp_segment));
 
     // Transmit or Queue
     if (have_mac) {
@@ -184,13 +184,13 @@ pub fn sendSegment6(
     if (total_len > buf.len) return false;
 
     // Build Ethernet header
-    const eth: *EthernetHeader = @ptrCast(@alignCast(&buf[0]));
+    const eth: *align(1) EthernetHeader = @ptrCast(&buf[0]);
     @memcpy(&eth.dst_mac, &dst_mac);
     @memcpy(&eth.src_mac, &iface.mac_addr);
     eth.setEthertype(ethernet.ETHERTYPE_IPV6);
 
     // Build IPv6 header
-    const ip6: *Ipv6Header = @ptrCast(@alignCast(&buf[packet.ETH_HEADER_SIZE]));
+    const ip6: *align(1) Ipv6Header = @ptrCast(&buf[packet.ETH_HEADER_SIZE]);
     ip6.setVersionTcFlow(6, tcb.tos, 0);
     ip6.setPayloadLength(@intCast(tcp_len));
     ip6.next_header = ipv6_types.PROTO_TCP;
@@ -200,7 +200,7 @@ pub fn sendSegment6(
 
     // Build TCP header
     const tcp_offset = packet.ETH_HEADER_SIZE + packet.IPV6_HEADER_SIZE;
-    const tcp: *TcpHeader = @ptrCast(@alignCast(&buf[tcp_offset]));
+    const tcp: *align(1) TcpHeader = @ptrCast(&buf[tcp_offset]);
     tcp.setSrcPort(tcb.local_port);
     tcp.setDstPort(tcb.remote_port);
     tcp.setSeqNum(seq);
@@ -217,7 +217,7 @@ pub fn sendSegment6(
 
     // Calculate TCP checksum with IPv6 pseudo-header
     const tcp_segment = buf[tcp_offset..][0..tcp_len];
-    tcp.checksum = checksum.tcpChecksum6(local_v6, remote_v6, tcp_segment);
+    tcp.checksum = @byteSwap(checksum.tcpChecksum6(local_v6, remote_v6, tcp_segment));
 
     // Transmit
     if (have_mac) {

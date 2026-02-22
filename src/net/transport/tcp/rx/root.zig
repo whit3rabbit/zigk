@@ -231,6 +231,18 @@ pub fn processPacket6(iface: *Interface, pkt: *PacketBuffer) bool {
 
 /// Process packet for established (non-LISTEN) connections
 fn processEstablishedPacket(tcb: *Tcb, pkt: *PacketBuffer, tcp_hdr: *TcpHeader) RxAction {
+    // RFC 793: SYN-SENT has special processing that must run BEFORE the
+    // general sequence number acceptability check. In SYN-SENT, rcv_nxt
+    // hasn't been initialized yet (still 0), so the standard acceptability
+    // test would reject the SYN-ACK's random ISN, triggering an ACK storm.
+    if (tcb.state == .SynSent) {
+        // Handle RST in SYN-SENT per RFC 793: connection refused
+        if (tcp_hdr.hasFlag(TcpHeader.FLAG_RST)) {
+            return handleRst(tcb);
+        }
+        return syn.processSynSent(tcb, pkt, tcp_hdr);
+    }
+
     const seq = tcp_hdr.getSeqNum();
     const seg_len = tx.calculateSegmentLength(pkt, tcp_hdr);
     const rcv_wnd = tcb.currentRecvWindow();
@@ -289,7 +301,7 @@ fn processEstablishedPacket(tcb: *Tcb, pkt: *PacketBuffer, tcp_hdr: *TcpHeader) 
     }
 
     switch (tcb.state) {
-        .SynSent => return syn.processSynSent(tcb, pkt, tcp_hdr),
+        .SynSent => unreachable, // handled early above
         .SynReceived => return .Continue, // handled in processPacket with state.lock held
         .Established => return established.processEstablished(tcb, pkt, tcp_hdr),
         .FinWait1 => return established.processFinWait1(tcb, tcp_hdr),

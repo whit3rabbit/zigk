@@ -233,6 +233,7 @@ pub fn connect(sock_fd: usize, dest_addr: *const types.SockAddrIn) errors.Socket
                 const connect_held = tcp_state.lock.acquire();
                 const still_valid = tcp_state.isTcbValid(tcb) and sock.tcb == tcb and tcb.generation == tcb_gen;
                 if (!still_valid) {
+                    sock.tcb = null;
                     connect_held.release();
                     return errors.SocketError.ConnectionRefused;
                 }
@@ -265,13 +266,19 @@ pub fn connect(sock_fd: usize, dest_addr: *const types.SockAddrIn) errors.Socket
         defer final_held.release();
         const final_tcb = sock.tcb;
         if (final_tcb == null) break :blk .Closed;
-        if (!tcp_state.isTcbValid(final_tcb.?)) break :blk .Closed;
+        if (!tcp_state.isTcbValid(final_tcb.?)) {
+            sock.tcb = null;
+            break :blk .Closed;
+        }
         break :blk final_tcb.?.state;
     };
 
     switch (final_state) {
         .Established => return,
-        .Closed => return errors.SocketError.ConnectionRefused,
+        .Closed => {
+            sock.tcb = null;
+            return errors.SocketError.ConnectionRefused;
+        },
         .SynSent => return errors.SocketError.WouldBlock, // Should not happen if we blocked
         else => return, // Other states might imply connected or closing
     }
@@ -349,6 +356,7 @@ pub fn connect6(sock_fd: usize, dest_addr: *const types.SockAddrIn6) errors.Sock
                 const connect_held = tcp_state.lock.acquire();
                 const still_valid = tcp_state.isTcbValid(tcb) and sock.tcb == tcb and tcb.generation == tcb_gen;
                 if (!still_valid) {
+                    sock.tcb = null;
                     connect_held.release();
                     return errors.SocketError.ConnectionRefused;
                 }
@@ -378,13 +386,19 @@ pub fn connect6(sock_fd: usize, dest_addr: *const types.SockAddrIn6) errors.Sock
         defer final_held.release();
         const final_tcb = sock.tcb;
         if (final_tcb == null) break :blk .Closed;
-        if (!tcp_state.isTcbValid(final_tcb.?)) break :blk .Closed;
+        if (!tcp_state.isTcbValid(final_tcb.?)) {
+            sock.tcb = null;
+            break :blk .Closed;
+        }
         break :blk final_tcb.?.state;
     };
 
     switch (final_state) {
         .Established => return,
-        .Closed => return errors.SocketError.ConnectionRefused,
+        .Closed => {
+            sock.tcb = null;
+            return errors.SocketError.ConnectionRefused;
+        },
         .SynSent => return errors.SocketError.WouldBlock,
         else => return,
     }
@@ -551,10 +565,13 @@ pub fn tcpRecvWaitall(sock_fd: usize, buf: []u8) errors.SocketError!usize {
                     {
                         const held = sock.lock.acquire();
                         sock.blocked_thread = get_current();
+                        // TCP RX path wakes tcb.blocked_thread, not sock.blocked_thread
+                        tcb.blocked_thread = sock.blocked_thread;
                         held.release();
                     }
                     block_fn();
                     sock.blocked_thread = null;
+                    tcb.blocked_thread = null;
                     platform.cpu.restoreInterrupts(irq_state);
 
                     // Check for pending signal after wakeup.

@@ -213,13 +213,13 @@ fn handleEchoRequest(iface: *Interface, req_pkt: *PacketBuffer, icmp_len: usize)
     }
 
     // Build Ethernet header
-    const reply_eth: *EthernetHeader = @ptrCast(@alignCast(&reply_buf[0]));
+    const reply_eth: *align(1) EthernetHeader = @ptrCast(&reply_buf[0]);
     @memcpy(&reply_eth.dst_mac, &dst_mac);
     @memcpy(&reply_eth.src_mac, &iface.mac_addr);
     reply_eth.setEthertype(ethernet.ETHERTYPE_IPV4);
 
     // Build IP header
-    const reply_ip: *Ipv4Header = @ptrCast(@alignCast(&reply_buf[eth_len]));
+    const reply_ip: *align(1) Ipv4Header = @ptrCast(&reply_buf[eth_len]);
     reply_ip.version_ihl = 0x45; // Version 4, IHL 5
     reply_ip.tos = 0;
     // SECURITY: Checked arithmetic per CLAUDE.md to prevent u16 overflow truncation.
@@ -235,10 +235,10 @@ fn handleEchoRequest(iface: *Interface, req_pkt: *PacketBuffer, icmp_len: usize)
     reply_ip.setDstIp(src_ip);
 
     // Calculate IP checksum
-    reply_ip.checksum = checksum.ipChecksum(reply_buf[eth_len..][0..ip_len]);
+    reply_ip.checksum = @byteSwap(checksum.ipChecksum(reply_buf[eth_len..][0..ip_len]));
 
     // Build ICMP reply
-    const reply_icmp: *IcmpHeader = @ptrCast(@alignCast(&reply_buf[eth_len + ip_len]));
+    const reply_icmp: *align(1) IcmpHeader = @ptrCast(&reply_buf[eth_len + ip_len]);
     reply_icmp.icmp_type = TYPE_ECHO_REPLY;
     reply_icmp.code = 0;
     reply_icmp.checksum = 0;
@@ -259,7 +259,7 @@ fn handleEchoRequest(iface: *Interface, req_pkt: *PacketBuffer, icmp_len: usize)
 
     // Calculate ICMP checksum
     const reply_icmp_data = reply_buf[eth_len + ip_len ..][0..icmp_len];
-    reply_icmp.checksum = checksum.icmpChecksum(reply_icmp_data);
+    reply_icmp.checksum = @byteSwap(checksum.icmpChecksum(reply_icmp_data));
 
     // Transmit reply
     return iface.transmit(reply_buf[0..total_len]);
@@ -458,13 +458,13 @@ pub fn sendEchoRequest(
     }
 
     // Build Ethernet header
-    const eth: *EthernetHeader = @ptrCast(@alignCast(&buf[0]));
+    const eth: *align(1) EthernetHeader = @ptrCast(&buf[0]);
     @memcpy(&eth.dst_mac, &dst_mac);
     @memcpy(&eth.src_mac, &iface.mac_addr);
     eth.setEthertype(ethernet.ETHERTYPE_IPV4);
 
     // Build IP header
-    const ip: *Ipv4Header = @ptrCast(@alignCast(&buf[eth_len]));
+    const ip: *align(1) Ipv4Header = @ptrCast(&buf[eth_len]);
     ip.version_ihl = 0x45;
     ip.tos = 0;
     // SECURITY: Checked arithmetic per CLAUDE.md to prevent u16 overflow truncation.
@@ -478,10 +478,10 @@ pub fn sendEchoRequest(
     ip.checksum = 0;
     ip.setSrcIp(iface.ip_addr);
     ip.setDstIp(dst_ip);
-    ip.checksum = checksum.ipChecksum(buf[eth_len..][0..ip_len]);
+    ip.checksum = @byteSwap(checksum.ipChecksum(buf[eth_len..][0..ip_len]));
 
     // Build ICMP header
-    const icmp_hdr: *IcmpHeader = @ptrCast(@alignCast(&buf[eth_len + ip_len]));
+    const icmp_hdr: *align(1) IcmpHeader = @ptrCast(&buf[eth_len + ip_len]);
     icmp_hdr.icmp_type = TYPE_ECHO_REQUEST;
     icmp_hdr.code = 0;
     icmp_hdr.checksum = 0;
@@ -494,7 +494,7 @@ pub fn sendEchoRequest(
     }
 
     // Calculate ICMP checksum
-    icmp_hdr.checksum = checksum.icmpChecksum(buf[eth_len + ip_len ..][0..icmp_len]);
+    icmp_hdr.checksum = @byteSwap(checksum.icmpChecksum(buf[eth_len + ip_len ..][0..icmp_len]));
 
     // Transmit
     return iface.transmit(buf[0..total_len]);
@@ -544,13 +544,13 @@ pub fn sendDestUnreachable(
     }
 
     // Build Ethernet header
-    const eth: *EthernetHeader = @ptrCast(@alignCast(&buf[0]));
+    const eth: *align(1) EthernetHeader = @ptrCast(&buf[0]);
     @memcpy(&eth.dst_mac, &dst_mac);
     @memcpy(&eth.src_mac, &iface.mac_addr);
     eth.setEthertype(ethernet.ETHERTYPE_IPV4);
 
     // Build IP header
-    const ip: *Ipv4Header = @ptrCast(@alignCast(&buf[eth_len]));
+    const ip: *align(1) Ipv4Header = @ptrCast(&buf[eth_len]);
     ip.version_ihl = 0x45;
     ip.tos = 0;
     // SECURITY: Checked arithmetic per CLAUDE.md to prevent u16 overflow truncation.
@@ -564,10 +564,10 @@ pub fn sendDestUnreachable(
     ip.checksum = 0;
     ip.setSrcIp(iface.ip_addr);
     ip.setDstIp(src_ip);
-    ip.checksum = checksum.ipChecksum(buf[eth_len..][0..ip_len]);
+    ip.checksum = @byteSwap(checksum.ipChecksum(buf[eth_len..][0..ip_len]));
 
     // Build ICMP header
-    const icmp_hdr: *IcmpHeader = @ptrCast(@alignCast(&buf[eth_len + ip_len]));
+    const icmp_hdr: *align(1) IcmpHeader = @ptrCast(&buf[eth_len + ip_len]);
     icmp_hdr.icmp_type = TYPE_DEST_UNREACHABLE;
     icmp_hdr.code = code;
     icmp_hdr.checksum = 0;
@@ -579,7 +579,7 @@ pub fn sendDestUnreachable(
     @memcpy(buf[eth_len + ip_len + packet.ICMP_HEADER_SIZE ..][0..orig_data_len], orig_data);
 
     // Calculate ICMP checksum
-    icmp_hdr.checksum = checksum.icmpChecksum(buf[eth_len + ip_len ..][0..icmp_len]);
+    icmp_hdr.checksum = @byteSwap(checksum.icmpChecksum(buf[eth_len + ip_len ..][0..icmp_len]));
 
     // Transmit
     return iface.transmit(buf[0..total_len]);

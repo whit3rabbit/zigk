@@ -67,13 +67,13 @@ pub fn sendEchoReply(
     };
 
     // Build Ethernet header
-    const eth: *packet.EthernetHeader = @ptrCast(@alignCast(&buf[0]));
+    const eth: *align(1) packet.EthernetHeader = @ptrCast(&buf[0]);
     @memcpy(&eth.dst_mac, &dst_mac);
     @memcpy(&eth.src_mac, &iface.mac_addr);
     eth.setEthertype(ethernet.ETHERTYPE_IPV6);
 
     // Build IPv6 header
-    const ip6: *Ipv6Header = @ptrCast(@alignCast(&buf[eth_len]));
+    const ip6: *align(1) Ipv6Header = @ptrCast(&buf[eth_len]);
     ip6.* = std.mem.zeroes(Ipv6Header);
     ip6.setVersionTcFlow(6, 0, 0);
     ip6.setPayloadLength(@intCast(icmpv6_len));
@@ -83,7 +83,7 @@ pub fn sendEchoReply(
     ip6.dst_addr = dst_addr;
 
     // Build ICMPv6 Echo Reply header
-    const icmpv6: *types.Icmpv6EchoHeader = @ptrCast(@alignCast(&buf[eth_len + ipv6_len]));
+    const icmpv6: *align(1) types.Icmpv6EchoHeader = @ptrCast(&buf[eth_len + ipv6_len]);
     icmpv6.msg_type = types.TYPE_ECHO_REPLY;
     icmpv6.code = 0;
     icmpv6.checksum = 0;
@@ -138,13 +138,13 @@ pub fn sendEchoRequest(
     };
 
     // Build Ethernet header
-    const eth: *packet.EthernetHeader = @ptrCast(@alignCast(&buf[0]));
+    const eth: *align(1) packet.EthernetHeader = @ptrCast(&buf[0]);
     @memcpy(&eth.dst_mac, &dst_mac);
     @memcpy(&eth.src_mac, &iface.mac_addr);
     eth.setEthertype(ethernet.ETHERTYPE_IPV6);
 
     // Build IPv6 header
-    const ip6: *Ipv6Header = @ptrCast(@alignCast(&buf[eth_len]));
+    const ip6: *align(1) Ipv6Header = @ptrCast(&buf[eth_len]);
     ip6.* = std.mem.zeroes(Ipv6Header);
     ip6.setVersionTcFlow(6, 0, 0);
     ip6.setPayloadLength(@intCast(icmpv6_len));
@@ -154,7 +154,7 @@ pub fn sendEchoRequest(
     ip6.dst_addr = dst_addr;
 
     // Build ICMPv6 Echo Request header
-    const icmpv6: *types.Icmpv6EchoHeader = @ptrCast(@alignCast(&buf[eth_len + ipv6_len]));
+    const icmpv6: *align(1) types.Icmpv6EchoHeader = @ptrCast(&buf[eth_len + ipv6_len]);
     icmpv6.msg_type = types.TYPE_ECHO_REQUEST;
     icmpv6.code = 0;
     icmpv6.checksum = 0;
@@ -193,7 +193,7 @@ pub fn sendDestUnreachable(
     if (orig_ip6.next_header == ipv6_types.PROTO_ICMPV6) {
         const orig_icmpv6_offset = original_pkt.transport_offset;
         if (orig_icmpv6_offset + types.ICMPV6_HEADER_SIZE <= original_pkt.len) {
-            const orig_icmpv6: *const types.Icmpv6Header = @ptrCast(@alignCast(&original_pkt.data[orig_icmpv6_offset]));
+            const orig_icmpv6: *const align(1) types.Icmpv6Header = @ptrCast(&original_pkt.data[orig_icmpv6_offset]);
             if (types.isErrorMessage(orig_icmpv6.msg_type)) {
                 return false;
             }
@@ -301,13 +301,13 @@ fn sendError(
     };
 
     // Build Ethernet header
-    const eth: *packet.EthernetHeader = @ptrCast(@alignCast(&buf[0]));
+    const eth: *align(1) packet.EthernetHeader = @ptrCast(&buf[0]);
     @memcpy(&eth.dst_mac, &dst_mac);
     @memcpy(&eth.src_mac, &iface.mac_addr);
     eth.setEthertype(ethernet.ETHERTYPE_IPV6);
 
     // Build IPv6 header
-    const ip6: *Ipv6Header = @ptrCast(@alignCast(&buf[eth_len]));
+    const ip6: *align(1) Ipv6Header = @ptrCast(&buf[eth_len]);
     ip6.* = std.mem.zeroes(Ipv6Header);
     ip6.setVersionTcFlow(6, 0, 0);
     ip6.setPayloadLength(@intCast(icmpv6_len));

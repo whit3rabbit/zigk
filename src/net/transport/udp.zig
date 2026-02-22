@@ -119,8 +119,10 @@ pub fn processPacket(iface: *Interface, pkt: *PacketBuffer) bool {
         // Use safe slice access from packet buffer
         const udp_data = pkt.data[pkt.transport_offset..][0..udp_len];
         // Use stored IPs from packet metadata to support reassembled packets
+        // Verification: compute checksum over segment WITH checksum field included.
+        // If valid, ones' complement sum = 0xFFFF (same approach as TCP verification).
         const calc_checksum = checksum.udpChecksum(pkt.src_ip, pkt.dst_ip, udp_data);
-        if (udp_hdr.checksum != calc_checksum) {
+        if (calc_checksum != 0xFFFF) {
             // Checksum mismatch
             return false;
         }
@@ -198,8 +200,10 @@ pub fn processPacket6(iface: *Interface, pkt: *PacketBuffer) bool {
     // Use safe slice access from packet buffer
     const udp_data = pkt.data[pkt.transport_offset..][0..udp_len];
     // Use IPv6 pseudo-header for checksum
+    // Verification: compute checksum over segment WITH checksum field included.
+    // If valid, ones' complement sum = 0xFFFF.
     const calc_checksum = checksum.udpChecksum6(ip6.src_addr, ip6.dst_addr, udp_data);
-    if (udp_hdr.checksum != calc_checksum) {
+    if (calc_checksum != 0xFFFF) {
         // Checksum mismatch
         return false;
     }
@@ -284,13 +288,13 @@ pub fn sendDatagramWithTos(
     }
 
     // Build Ethernet header
-    const eth: *EthernetHeader = @ptrCast(@alignCast(&buf[0]));
+    const eth: *align(1) EthernetHeader = @ptrCast(&buf[0]);
     @memcpy(&eth.dst_mac, &dst_mac);
     @memcpy(&eth.src_mac, &iface.mac_addr);
     eth.setEthertype(ethernet.ETHERTYPE_IPV4);
 
     // Build IP header
-    const ip: *Ipv4Header = @ptrCast(@alignCast(&buf[eth_len]));
+    const ip: *align(1) Ipv4Header = @ptrCast(&buf[eth_len]);
     ip.version_ihl = 0x45;
     ip.tos = tos;
     // SAFETY: Truncation is safe because data.len <= MAX_UDP_PAYLOAD (1472) is validated
@@ -303,10 +307,10 @@ pub fn sendDatagramWithTos(
     ip.checksum = 0;
     ip.setSrcIp(iface.ip_addr);
     ip.setDstIp(dst_ip);
-    ip.checksum = checksum.ipChecksum(buf[eth_len..][0..ip_len]);
+    ip.checksum = @byteSwap(checksum.ipChecksum(buf[eth_len..][0..ip_len]));
 
     // Build UDP header
-    const udp_hdr: *UdpHeader = @ptrCast(@alignCast(&buf[eth_len + ip_len]));
+    const udp_hdr: *align(1) UdpHeader = @ptrCast(&buf[eth_len + ip_len]);
     udp_hdr.setSrcPort(src_port);
     udp_hdr.setDstPort(dst_port);
     // SAFETY: Truncation is safe because data.len <= MAX_UDP_PAYLOAD (1472) is validated
@@ -321,7 +325,7 @@ pub fn sendDatagramWithTos(
 
     // Calculate UDP checksum (with pseudo-header)
     const udp_data = buf[eth_len + ip_len ..][0..udp_len];
-    udp_hdr.checksum = checksum.udpChecksum(ip.src_ip, ip.dst_ip, udp_data);
+    udp_hdr.checksum = @byteSwap(checksum.udpChecksum(ip.getSrcIp(), ip.getDstIp(), udp_data));
 
     // Transmit or Queue
     if (have_mac) {
@@ -422,13 +426,13 @@ pub fn sendDatagram6WithTrafficClass(
     }
 
     // Build Ethernet header
-    const eth: *EthernetHeader = @ptrCast(@alignCast(&buf[0]));
+    const eth: *align(1) EthernetHeader = @ptrCast(&buf[0]);
     @memcpy(&eth.dst_mac, &dst_mac);
     @memcpy(&eth.src_mac, &iface.mac_addr);
     eth.setEthertype(ethernet.ETHERTYPE_IPV6);
 
     // Build IPv6 header
-    const ip6: *Ipv6Header = @ptrCast(@alignCast(&buf[eth_len]));
+    const ip6: *align(1) Ipv6Header = @ptrCast(&buf[eth_len]);
     ip6.setVersionTcFlow(6, traffic_class, 0);
     // SAFETY: Truncation is safe because data.len <= MAX_UDP6_PAYLOAD is validated
     // at function entry. Max udp_len = 8 + MAX_UDP6_PAYLOAD fits in u16.
@@ -439,7 +443,7 @@ pub fn sendDatagram6WithTrafficClass(
     ip6.dst_addr = dst_addr;
 
     // Build UDP header
-    const udp_hdr: *UdpHeader = @ptrCast(@alignCast(&buf[eth_len + ip6_len]));
+    const udp_hdr: *align(1) UdpHeader = @ptrCast(&buf[eth_len + ip6_len]);
     udp_hdr.setSrcPort(src_port);
     udp_hdr.setDstPort(dst_port);
     // SAFETY: Same as above, udp_len fits in u16
@@ -453,7 +457,7 @@ pub fn sendDatagram6WithTrafficClass(
 
     // Calculate UDP checksum with IPv6 pseudo-header (MANDATORY for IPv6)
     const udp_data = buf[eth_len + ip6_len ..][0..udp_len];
-    udp_hdr.checksum = checksum.udpChecksum6(src_addr, dst_addr, udp_data);
+    udp_hdr.checksum = @byteSwap(checksum.udpChecksum6(src_addr, dst_addr, udp_data));
 
     // IPv6 UDP checksum of 0 is invalid, use 0xFFFF instead (RFC 8200)
     if (udp_hdr.checksum == 0) {

@@ -184,7 +184,7 @@ pub const NeighborAdvertisementHeader = extern struct {
         return (@byteSwap(self.flags_reserved) & 0x20000000) != 0;
     }
 
-    pub fn setFlags(self: *NeighborAdvertisementHeader, router: bool, solicited: bool, override: bool) void {
+    pub fn setFlags(self: *align(1) NeighborAdvertisementHeader, router: bool, solicited: bool, override: bool) void {
         var flags: u32 = 0;
         if (router) flags |= 0x80000000;
         if (solicited) flags |= 0x40000000;

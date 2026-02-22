@@ -54,12 +54,12 @@ pub fn sendSyn(tcb: *Tcb) bool {
 
     if (total_len > buf.len) return false;
 
-    const eth: *EthernetHeader = @ptrCast(@alignCast(&buf[0]));
+    const eth: *align(1) EthernetHeader = @ptrCast(&buf[0]);
     @memcpy(&eth.dst_mac, &dst_mac);
     @memcpy(&eth.src_mac, &iface.mac_addr);
     eth.setEthertype(ethernet.ETHERTYPE_IPV4);
 
-    const ip: *Ipv4Header = @ptrCast(@alignCast(&buf[packet.ETH_HEADER_SIZE]));
+    const ip: *align(1) Ipv4Header = @ptrCast(&buf[packet.ETH_HEADER_SIZE]);
     ip.version_ihl = 0x45;
     ip.tos = tcb.tos;
     ip.setTotalLength(@intCast(ip_len));
@@ -70,10 +70,10 @@ pub fn sendSyn(tcb: *Tcb) bool {
     ip.checksum = 0;
     ip.setSrcIp(tcb.getLocalIpV4());
     ip.setDstIp(tcb.getRemoteIpV4());
-    ip.checksum = checksum.ipChecksum(buf[packet.ETH_HEADER_SIZE..][0..packet.IP_HEADER_SIZE]);
+    ip.checksum = @byteSwap(checksum.ipChecksum(buf[packet.ETH_HEADER_SIZE..][0..packet.IP_HEADER_SIZE]));
 
     const tcp_offset = packet.ETH_HEADER_SIZE + packet.IP_HEADER_SIZE;
-    const tcp_hdr: *TcpHeader = @ptrCast(@alignCast(&buf[tcp_offset]));
+    const tcp_hdr: *align(1) TcpHeader = @ptrCast(&buf[tcp_offset]);
     tcp_hdr.setSrcPort(tcb.local_port);
     tcp_hdr.setDstPort(tcb.remote_port);
     tcp_hdr.setSeqNum(tcb.iss);
@@ -89,7 +89,7 @@ pub fn sendSyn(tcb: *Tcb) bool {
     }
 
     const tcp_segment = buf[tcp_offset..][0..tcp_len];
-    tcp_hdr.checksum = checksum.tcpChecksum(ip.src_ip, ip.dst_ip, tcp_segment);
+    tcp_hdr.checksum = @byteSwap(checksum.tcpChecksum(ip.getSrcIp(), ip.getDstIp(), tcp_segment));
 
     if (have_mac) {
         return iface.transmit(buf[0..total_len]);
@@ -137,12 +137,12 @@ pub fn sendSynAckWithOptions(tcb: *Tcb, peer_opts: ?*const options.TcpOptions) b
 
     if (total_len > buf.len) return false;
 
-    const eth: *EthernetHeader = @ptrCast(@alignCast(&buf[0]));
+    const eth: *align(1) EthernetHeader = @ptrCast(&buf[0]);
     @memcpy(&eth.dst_mac, &dst_mac);
     @memcpy(&eth.src_mac, &iface.mac_addr);
     eth.setEthertype(ethernet.ETHERTYPE_IPV4);
 
-    const ip: *Ipv4Header = @ptrCast(@alignCast(&buf[packet.ETH_HEADER_SIZE]));
+    const ip: *align(1) Ipv4Header = @ptrCast(&buf[packet.ETH_HEADER_SIZE]);
     ip.version_ihl = 0x45;
     ip.tos = tcb.tos;
     ip.setTotalLength(@intCast(ip_len));
@@ -153,10 +153,10 @@ pub fn sendSynAckWithOptions(tcb: *Tcb, peer_opts: ?*const options.TcpOptions) b
     ip.checksum = 0;
     ip.setSrcIp(tcb.getLocalIpV4());
     ip.setDstIp(tcb.getRemoteIpV4());
-    ip.checksum = checksum.ipChecksum(buf[packet.ETH_HEADER_SIZE..][0..packet.IP_HEADER_SIZE]);
+    ip.checksum = @byteSwap(checksum.ipChecksum(buf[packet.ETH_HEADER_SIZE..][0..packet.IP_HEADER_SIZE]));
 
     const tcp_offset = packet.ETH_HEADER_SIZE + packet.IP_HEADER_SIZE;
-    const tcp_hdr: *TcpHeader = @ptrCast(@alignCast(&buf[tcp_offset]));
+    const tcp_hdr: *align(1) TcpHeader = @ptrCast(&buf[tcp_offset]);
     tcp_hdr.setSrcPort(tcb.local_port);
     tcp_hdr.setDstPort(tcb.remote_port);
     tcp_hdr.setSeqNum(tcb.iss);
@@ -172,7 +172,7 @@ pub fn sendSynAckWithOptions(tcb: *Tcb, peer_opts: ?*const options.TcpOptions) b
     }
 
     const tcp_segment = buf[tcp_offset..][0..tcp_len];
-    tcp_hdr.checksum = checksum.tcpChecksum(ip.src_ip, ip.dst_ip, tcp_segment);
+    tcp_hdr.checksum = @byteSwap(checksum.tcpChecksum(ip.getSrcIp(), ip.getDstIp(), tcp_segment));
 
     if (have_mac) {
         return iface.transmit(buf[0..total_len]);
@@ -227,12 +227,12 @@ pub fn sendRstForPacket(iface: *interface.Interface, pkt: *const PacketBuffer, t
 
     const total_len = packet.ETH_HEADER_SIZE + packet.IP_HEADER_SIZE + c.TCP_HEADER_SIZE;
 
-    const eth: *EthernetHeader = @ptrCast(@alignCast(&buf[0]));
+    const eth: *align(1) EthernetHeader = @ptrCast(&buf[0]);
     @memcpy(&eth.dst_mac, &dst_mac);
     @memcpy(&eth.src_mac, &iface.mac_addr);
     eth.setEthertype(ethernet.ETHERTYPE_IPV4);
 
-    const ip: *Ipv4Header = @ptrCast(@alignCast(&buf[packet.ETH_HEADER_SIZE]));
+    const ip: *align(1) Ipv4Header = @ptrCast(&buf[packet.ETH_HEADER_SIZE]);
     ip.version_ihl = 0x45;
     ip.tos = 0;
     ip.setTotalLength(@intCast(packet.IP_HEADER_SIZE + c.TCP_HEADER_SIZE));
@@ -243,10 +243,10 @@ pub fn sendRstForPacket(iface: *interface.Interface, pkt: *const PacketBuffer, t
     ip.checksum = 0;
     ip.setSrcIp(ip_hdr.getDstIp());
     ip.setDstIp(ip_hdr.getSrcIp());
-    ip.checksum = checksum.ipChecksum(buf[packet.ETH_HEADER_SIZE..][0..packet.IP_HEADER_SIZE]);
+    ip.checksum = @byteSwap(checksum.ipChecksum(buf[packet.ETH_HEADER_SIZE..][0..packet.IP_HEADER_SIZE]));
 
     const tcp_offset = packet.ETH_HEADER_SIZE + packet.IP_HEADER_SIZE;
-    const tcp: *TcpHeader = @ptrCast(@alignCast(&buf[tcp_offset]));
+    const tcp: *align(1) TcpHeader = @ptrCast(&buf[tcp_offset]);
     tcp.setSrcPort(tcp_hdr.getDstPort());
     tcp.setDstPort(tcp_hdr.getSrcPort());
 
@@ -266,7 +266,7 @@ pub fn sendRstForPacket(iface: *interface.Interface, pkt: *const PacketBuffer, t
     tcp.urgent_ptr = 0;
 
     const tcp_segment = buf[tcp_offset..][0..c.TCP_HEADER_SIZE];
-    tcp.checksum = checksum.tcpChecksum(ip.src_ip, ip.dst_ip, tcp_segment);
+    tcp.checksum = @byteSwap(checksum.tcpChecksum(ip.getSrcIp(), ip.getDstIp(), tcp_segment));
 
     return iface.transmit(buf[0..total_len]);
 }
@@ -300,12 +300,12 @@ fn sendAckWithOptions(tcb: *Tcb) bool {
 
     if (total_len > buf.len) return false;
 
-    const eth: *EthernetHeader = @ptrCast(@alignCast(&buf[0]));
+    const eth: *align(1) EthernetHeader = @ptrCast(&buf[0]);
     @memcpy(&eth.dst_mac, &dst_mac);
     @memcpy(&eth.src_mac, &iface.mac_addr);
     eth.setEthertype(ethernet.ETHERTYPE_IPV4);
 
-    const ip: *Ipv4Header = @ptrCast(@alignCast(&buf[packet.ETH_HEADER_SIZE]));
+    const ip: *align(1) Ipv4Header = @ptrCast(&buf[packet.ETH_HEADER_SIZE]);
     ip.version_ihl = 0x45;
     ip.tos = tcb.tos;
     ip.setTotalLength(@intCast(ip_len));
@@ -316,10 +316,10 @@ fn sendAckWithOptions(tcb: *Tcb) bool {
     ip.checksum = 0;
     ip.setSrcIp(tcb.getLocalIpV4());
     ip.setDstIp(tcb.getRemoteIpV4());
-    ip.checksum = checksum.ipChecksum(buf[packet.ETH_HEADER_SIZE..][0..packet.IP_HEADER_SIZE]);
+    ip.checksum = @byteSwap(checksum.ipChecksum(buf[packet.ETH_HEADER_SIZE..][0..packet.IP_HEADER_SIZE]));
 
     const tcp_offset = packet.ETH_HEADER_SIZE + packet.IP_HEADER_SIZE;
-    const tcp_hdr: *TcpHeader = @ptrCast(@alignCast(&buf[tcp_offset]));
+    const tcp_hdr: *align(1) TcpHeader = @ptrCast(&buf[tcp_offset]);
     tcp_hdr.setSrcPort(tcb.local_port);
     tcp_hdr.setDstPort(tcb.remote_port);
     tcp_hdr.setSeqNum(tcb.snd_nxt);
@@ -335,7 +335,7 @@ fn sendAckWithOptions(tcb: *Tcb) bool {
     }
 
     const tcp_segment = buf[tcp_offset..][0..tcp_len];
-    tcp_hdr.checksum = checksum.tcpChecksum(ip.src_ip, ip.dst_ip, tcp_segment);
+    tcp_hdr.checksum = @byteSwap(checksum.tcpChecksum(ip.getSrcIp(), ip.getDstIp(), tcp_segment));
 
     if (have_mac) {
         return iface.transmit(buf[0..total_len]);
@@ -409,13 +409,13 @@ fn sendSyn6(tcb: *Tcb) bool {
     if (total_len > buf.len) return false;
 
     // Build Ethernet header
-    const eth: *EthernetHeader = @ptrCast(@alignCast(&buf[0]));
+    const eth: *align(1) EthernetHeader = @ptrCast(&buf[0]);
     @memcpy(&eth.dst_mac, &dst_mac);
     @memcpy(&eth.src_mac, &iface.mac_addr);
     eth.setEthertype(ethernet.ETHERTYPE_IPV6);
 
     // Build IPv6 header
-    const ip6: *Ipv6Header = @ptrCast(@alignCast(&buf[packet.ETH_HEADER_SIZE]));
+    const ip6: *align(1) Ipv6Header = @ptrCast(&buf[packet.ETH_HEADER_SIZE]);
     ip6.setVersionTcFlow(6, tcb.tos, 0);
     ip6.setPayloadLength(@intCast(tcp_len));
     ip6.next_header = ipv6_types.PROTO_TCP;
@@ -425,7 +425,7 @@ fn sendSyn6(tcb: *Tcb) bool {
 
     // Build TCP header
     const tcp_off = packet.ETH_HEADER_SIZE + packet.IPV6_HEADER_SIZE;
-    const tcp_hdr: *TcpHeader = @ptrCast(@alignCast(&buf[tcp_off]));
+    const tcp_hdr: *align(1) TcpHeader = @ptrCast(&buf[tcp_off]);
     tcp_hdr.setSrcPort(tcb.local_port);
     tcp_hdr.setDstPort(tcb.remote_port);
     tcp_hdr.setSeqNum(tcb.iss);
@@ -442,7 +442,7 @@ fn sendSyn6(tcb: *Tcb) bool {
 
     // Calculate TCP checksum with IPv6 pseudo-header
     const tcp_segment = buf[tcp_off..][0..tcp_len];
-    tcp_hdr.checksum = checksum.tcpChecksum6(local_v6, remote_v6, tcp_segment);
+    tcp_hdr.checksum = @byteSwap(checksum.tcpChecksum6(local_v6, remote_v6, tcp_segment));
 
     return iface.transmit(buf[0..total_len]);
 }
@@ -497,13 +497,13 @@ fn sendSynAckWithOptions6(tcb: *Tcb, peer_opts: ?*const options.TcpOptions) bool
     if (total_len > buf.len) return false;
 
     // Build Ethernet header
-    const eth: *EthernetHeader = @ptrCast(@alignCast(&buf[0]));
+    const eth: *align(1) EthernetHeader = @ptrCast(&buf[0]);
     @memcpy(&eth.dst_mac, &dst_mac);
     @memcpy(&eth.src_mac, &iface.mac_addr);
     eth.setEthertype(ethernet.ETHERTYPE_IPV6);
 
     // Build IPv6 header
-    const ip6: *Ipv6Header = @ptrCast(@alignCast(&buf[packet.ETH_HEADER_SIZE]));
+    const ip6: *align(1) Ipv6Header = @ptrCast(&buf[packet.ETH_HEADER_SIZE]);
     ip6.setVersionTcFlow(6, tcb.tos, 0);
     ip6.setPayloadLength(@intCast(tcp_len));
     ip6.next_header = ipv6_types.PROTO_TCP;
@@ -513,7 +513,7 @@ fn sendSynAckWithOptions6(tcb: *Tcb, peer_opts: ?*const options.TcpOptions) bool
 
     // Build TCP header
     const tcp_off = packet.ETH_HEADER_SIZE + packet.IPV6_HEADER_SIZE;
-    const tcp_hdr: *TcpHeader = @ptrCast(@alignCast(&buf[tcp_off]));
+    const tcp_hdr: *align(1) TcpHeader = @ptrCast(&buf[tcp_off]);
     tcp_hdr.setSrcPort(tcb.local_port);
     tcp_hdr.setDstPort(tcb.remote_port);
     tcp_hdr.setSeqNum(tcb.iss);
@@ -530,7 +530,7 @@ fn sendSynAckWithOptions6(tcb: *Tcb, peer_opts: ?*const options.TcpOptions) bool
 
     // Calculate TCP checksum with IPv6 pseudo-header
     const tcp_segment = buf[tcp_off..][0..tcp_len];
-    tcp_hdr.checksum = checksum.tcpChecksum6(local_v6, remote_v6, tcp_segment);
+    tcp_hdr.checksum = @byteSwap(checksum.tcpChecksum6(local_v6, remote_v6, tcp_segment));
 
     return iface.transmit(buf[0..total_len]);
 }
@@ -585,13 +585,13 @@ fn sendAckWithOptions6(tcb: *Tcb) bool {
     if (total_len > buf.len) return false;
 
     // Build Ethernet header
-    const eth: *EthernetHeader = @ptrCast(@alignCast(&buf[0]));
+    const eth: *align(1) EthernetHeader = @ptrCast(&buf[0]);
     @memcpy(&eth.dst_mac, &dst_mac);
     @memcpy(&eth.src_mac, &iface.mac_addr);
     eth.setEthertype(ethernet.ETHERTYPE_IPV6);
 
     // Build IPv6 header
-    const ip6: *Ipv6Header = @ptrCast(@alignCast(&buf[packet.ETH_HEADER_SIZE]));
+    const ip6: *align(1) Ipv6Header = @ptrCast(&buf[packet.ETH_HEADER_SIZE]);
     ip6.setVersionTcFlow(6, tcb.tos, 0);
     ip6.setPayloadLength(@intCast(tcp_len));
     ip6.next_header = ipv6_types.PROTO_TCP;
@@ -601,7 +601,7 @@ fn sendAckWithOptions6(tcb: *Tcb) bool {
 
     // Build TCP header
     const tcp_off = packet.ETH_HEADER_SIZE + packet.IPV6_HEADER_SIZE;
-    const tcp_hdr: *TcpHeader = @ptrCast(@alignCast(&buf[tcp_off]));
+    const tcp_hdr: *align(1) TcpHeader = @ptrCast(&buf[tcp_off]);
     tcp_hdr.setSrcPort(tcb.local_port);
     tcp_hdr.setDstPort(tcb.remote_port);
     tcp_hdr.setSeqNum(tcb.snd_nxt);
@@ -618,7 +618,7 @@ fn sendAckWithOptions6(tcb: *Tcb) bool {
 
     // Calculate TCP checksum with IPv6 pseudo-header
     const tcp_segment = buf[tcp_off..][0..tcp_len];
-    tcp_hdr.checksum = checksum.tcpChecksum6(local_v6, remote_v6, tcp_segment);
+    tcp_hdr.checksum = @byteSwap(checksum.tcpChecksum6(local_v6, remote_v6, tcp_segment));
 
     return iface.transmit(buf[0..total_len]);
 }
@@ -658,13 +658,13 @@ pub fn sendRstForPacket6(iface: *interface.Interface, pkt: *const PacketBuffer, 
     const total_len = packet.ETH_HEADER_SIZE + packet.IPV6_HEADER_SIZE + c.TCP_HEADER_SIZE;
 
     // Build Ethernet header
-    const eth: *EthernetHeader = @ptrCast(@alignCast(&buf[0]));
+    const eth: *align(1) EthernetHeader = @ptrCast(&buf[0]);
     @memcpy(&eth.dst_mac, &dst_mac);
     @memcpy(&eth.src_mac, &iface.mac_addr);
     eth.setEthertype(ethernet.ETHERTYPE_IPV6);
 
     // Build IPv6 header
-    const ip6: *Ipv6Header = @ptrCast(@alignCast(&buf[packet.ETH_HEADER_SIZE]));
+    const ip6: *align(1) Ipv6Header = @ptrCast(&buf[packet.ETH_HEADER_SIZE]);
     ip6.setVersionTcFlow(6, 0, 0);
     ip6.setPayloadLength(c.TCP_HEADER_SIZE);
     ip6.next_header = ipv6_types.PROTO_TCP;
@@ -674,7 +674,7 @@ pub fn sendRstForPacket6(iface: *interface.Interface, pkt: *const PacketBuffer, 
 
     // Build TCP header
     const tcp_off = packet.ETH_HEADER_SIZE + packet.IPV6_HEADER_SIZE;
-    const tcp: *TcpHeader = @ptrCast(@alignCast(&buf[tcp_off]));
+    const tcp: *align(1) TcpHeader = @ptrCast(&buf[tcp_off]);
     tcp.setSrcPort(tcp_hdr.getDstPort());
     tcp.setDstPort(tcp_hdr.getSrcPort());
 
@@ -695,7 +695,7 @@ pub fn sendRstForPacket6(iface: *interface.Interface, pkt: *const PacketBuffer, 
 
     // Calculate TCP checksum with IPv6 pseudo-header
     const tcp_segment = buf[tcp_off..][0..c.TCP_HEADER_SIZE];
-    tcp.checksum = checksum.tcpChecksum6(src_v6, dst_v6, tcp_segment);
+    tcp.checksum = @byteSwap(checksum.tcpChecksum6(src_v6, dst_v6, tcp_segment));
 
     return iface.transmit(buf[0..total_len]);
 }

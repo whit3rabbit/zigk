@@ -187,17 +187,14 @@ fn openPath(path: []const u8, flags: usize, mode: usize) SyscallError!usize {
     const alloc = heap.allocator();
     errdefer alloc.destroy(fd);
 
-    console.debug("SYSCALL: VFS open succeeded, checking stat", .{});
     // SECURITY: Re-check permissions after open to mitigate TOCTOU.
     // Compare dev+ino to detect symlink swap attacks.
     // We use fstat on the opened FD to verify the actual file identity.
     if (fd.ops.stat) |stat_fn| {
-        console.debug("SYSCALL: Calling stat_fn", .{});
         // SECURITY AUDIT (2024-12): Zero-init to prevent kernel stack leak if stat_fn
         // partially populates the struct or fails silently.
         var stat_buf = std.mem.zeroes(uapi.stat.Stat);
         const stat_result = stat_fn(fd, &stat_buf);
-        console.debug("SYSCALL: stat_fn returned {}", .{stat_result});
         if (stat_result == 0) {
             // SECURITY: If we had initial stat, verify dev+ino match.
             // A mismatch indicates the file was swapped (symlink attack).
@@ -247,19 +244,13 @@ fn openPath(path: []const u8, flags: usize, mode: usize) SyscallError!usize {
         // relies on filesystem-level checks)
     }
 
-    console.debug("SYSCALL: Getting FD table", .{});
     const table = base.getGlobalFdTable();
-
-    console.debug("SYSCALL: Calling allocAndInstall", .{});
     // SECURITY: Use atomic allocAndInstall to prevent race between
     // allocFdNum and install where another thread could steal the slot
     const fd_num = table.allocAndInstall(fd) orelse {
-        console.debug("SYSCALL: allocAndInstall failed", .{});
         alloc.destroy(fd);
         return error.EMFILE;
     };
-
-    console.debug("SYSCALL: allocAndInstall returned fd={}", .{fd_num});
     return fd_num;
 }
 

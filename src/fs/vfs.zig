@@ -255,15 +255,12 @@ pub const Vfs = struct {
             // For dev mount (/dev), path "/dev/null" -> rel_path "/null".
 
             const file_desc = try mp.fs.open(mp.fs.context, rel_path, flags);
-            @import("console").debug("VFS: FS open returned, tracking open file", .{});
 
             // Track open file for unmount protection
             mp.open_files += 1;
-            @import("console").debug("VFS: Incremented open_files, storing mount idx", .{});
 
             // Store mount index in FD for close tracking
             file_desc.vfs_mount_idx = @intCast(idx);
-            @import("console").debug("VFS: Returning file descriptor", .{});
 
             // Assign file identifier for flock
             // Composite key: (mount_idx << 32) | file_id

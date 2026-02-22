@@ -1,23 +1,34 @@
 // Loopback Interface Implementation
 //
 // Virtual network interface for local (127.x.x.x) traffic.
-// Packets transmitted on loopback are injected directly back into the receive path.
+// Packets transmitted on loopback are queued and processed asynchronously
+// during the next net.tick() call, preventing re-entrant deadlocks.
 //
 // Design:
 // - Implements standard Interface abstraction (no special casing in IP layer)
-// - Transmit callback re-injects packet to IPv4 processPacket
-// - No actual hardware, just memory copy
-// - Packet processing is SYNCHRONOUS - protocol handlers must copy data before returning
+// - Transmit callback queues packet for deferred processing
+// - drain() processes queued packets outside any caller lock context
+// - No actual hardware, just memory copy + deferred inject
 //
-// Note: The loopback interface is separate from the physical NIC interface.
-// Traffic to 127.x.x.x should be routed through this interface.
+// Why async: Synchronous loopback re-enters the TCP/UDP RX path from within
+// the TX path. TCP functions like connectIp() and close() hold state.lock
+// while calling transmit. The RX path also acquires state.lock, causing
+// deadlock on a non-reentrant spinlock. Deferring processing to drain()
+// (called from the timer tick) breaks this lock cycle.
 
 const std = @import("std");
 const Interface = @import("../core/interface.zig").Interface;
 const packet = @import("../core/packet.zig");
 const PacketBuffer = packet.PacketBuffer;
 const ipv4 = @import("../ipv4/root.zig").ipv4;
-const heap = @import("heap");
+const sync = @import("../sync.zig");
+
+
+/// Maximum IP packet size we'll queue (covers any standard MTU)
+const MAX_QUEUED_PKT: usize = 2048;
+
+/// Queue depth -- enough for typical request/response exchanges
+const QUEUE_DEPTH: usize = 32;
 
 /// Loopback interface instance
 var loopback_interface: Interface = undefined;
@@ -25,6 +36,17 @@ var loopback_interface: Interface = undefined;
 /// Atomic initialization flag for thread-safe access
 /// Uses acquire/release semantics to ensure all interface fields are visible
 var initialized: std.atomic.Value(bool) = .{ .raw = false };
+
+// ---------------------------------------------------------------------------
+// Packet queue (static ring buffer, no heap allocation)
+// ---------------------------------------------------------------------------
+
+var pkt_bufs: [QUEUE_DEPTH][MAX_QUEUED_PKT]u8 = undefined;
+var pkt_lens: [QUEUE_DEPTH]usize = [_]usize{0} ** QUEUE_DEPTH;
+var q_head: usize = 0;
+var q_tail: usize = 0;
+var q_count: usize = 0;
+var q_lock: sync.Spinlock = .{};
 
 /// Initialize the loopback interface
 /// Returns pointer to the interface for registration
@@ -61,14 +83,10 @@ pub fn getInterface() ?*Interface {
 }
 
 /// Loopback transmit function
-/// Instead of sending to hardware, inject directly into receive path
-///
-/// OWNERSHIP: This function allocates packet_data and pkt, passes them to processPacket
-/// for SYNCHRONOUS processing, then frees both. Protocol handlers MUST copy any data
-/// they need before returning - they cannot retain references to the PacketBuffer.
+/// Strips Ethernet header and queues the IP packet for deferred processing.
+/// Returns true on success (packet queued), false if queue is full or packet invalid.
 fn loopbackTransmit(data: []const u8) bool {
-    // Skip Ethernet header (14 bytes) to get IP packet
-    // Loopback doesn't really need Ethernet, but sendPacket adds it
+    // Strip Ethernet header (14 bytes) to get IP packet
     const eth_header_size: usize = 14;
 
     if (data.len <= eth_header_size) {
@@ -77,36 +95,72 @@ fn loopbackTransmit(data: []const u8) bool {
 
     const ip_data = data[eth_header_size..];
 
-    // Validate minimum IPv4 header length to prevent OOB reads in protocol handlers
+    // Validate minimum IPv4 header length
     if (ip_data.len < packet.IP_HEADER_SIZE) {
         return false;
     }
 
-    // Allocate buffer for packet data
-    const allocator = heap.allocator();
-    const packet_data = allocator.alloc(u8, ip_data.len) catch return false;
-    // Note: No defer - we explicitly manage lifetime after synchronous processPacket
-    @memcpy(packet_data, ip_data);
-
-    // Allocate new PacketBuffer
-    var pkt = allocator.create(PacketBuffer) catch {
-        allocator.free(packet_data);
+    // Reject oversized packets
+    if (ip_data.len > MAX_QUEUED_PKT) {
         return false;
-    };
+    }
 
-    // Initialize PacketBuffer
-    pkt.* = PacketBuffer.init(packet_data, ip_data.len);
-    pkt.eth_offset = 0; // No Ethernet header
-    pkt.ip_offset = 0;  // IP starts at 0
+    const held = q_lock.acquire();
+    defer held.release();
 
-    // Process as incoming IP packet (SYNCHRONOUS - handlers must copy data)
-    const result = ipv4.processPacket(&loopback_interface, pkt);
+    if (q_count >= QUEUE_DEPTH) {
+        return false; // Queue full, drop packet (TCP will retransmit)
+    }
 
-    // Clean up - safe because processPacket is synchronous and handlers copy data
-    allocator.destroy(pkt);
-    allocator.free(packet_data);
+    @memcpy(pkt_bufs[q_tail][0..ip_data.len], ip_data);
+    pkt_lens[q_tail] = ip_data.len;
+    q_tail = (q_tail + 1) % QUEUE_DEPTH;
+    q_count += 1;
 
-    return result;
+    return true;
+}
+
+/// Process queued loopback packets.
+/// Called from net.tick() in timer ISR context. Each dequeued packet is
+/// injected into ipv4.processPacket as if it arrived from the network.
+///
+/// Re-entrant safe: if processPacket triggers another transmit on loopback
+/// (e.g. RST reply), the new packet is appended to the tail while we
+/// consume from the head. Limited to MAX_DRAIN_PER_TICK to prevent
+/// infinite packet storms (e.g. ACK loops) from stalling the ISR.
+pub fn drain() void {
+    const MAX_DRAIN_PER_TICK: usize = 64;
+    var processed: usize = 0;
+
+    while (processed < MAX_DRAIN_PER_TICK) {
+        var local_buf: [MAX_QUEUED_PKT]u8 = undefined;
+        var local_len: usize = 0;
+
+        {
+            const held = q_lock.acquire();
+            if (q_count == 0) {
+                held.release();
+                return;
+            }
+            local_len = pkt_lens[q_head];
+            @memcpy(local_buf[0..local_len], pkt_bufs[q_head][0..local_len]);
+            q_head = (q_head + 1) % QUEUE_DEPTH;
+            q_count -= 1;
+            held.release();
+        }
+
+        processed += 1;
+
+        // Create stack-allocated PacketBuffer pointing to local data.
+        // Safe because ipv4.processPacket is synchronous -- handlers
+        // must copy any data they need before returning.
+        const data_slice = local_buf[0..local_len];
+        var pkt = PacketBuffer.init(data_slice, local_len);
+        pkt.eth_offset = 0; // No Ethernet header
+        pkt.ip_offset = 0; // IP starts at 0
+
+        _ = ipv4.processPacket(&loopback_interface, &pkt);
+    }
 }
 
 /// Check if an IP address belongs to the loopback range (127.x.x.x)

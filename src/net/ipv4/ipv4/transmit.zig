@@ -69,7 +69,7 @@ pub fn buildPacketWithTos(
     ip_hdr.setDstIp(dst_ip);
 
     const header_bytes = pkt.data[pkt.ip_offset..][0..packet.IP_HEADER_SIZE];
-    ip_hdr.checksum = checksum.ipChecksum(header_bytes);
+    ip_hdr.checksum = @byteSwap(checksum.ipChecksum(header_bytes));
 
     return true;
 }
@@ -192,7 +192,7 @@ fn sendFragmentedPacket(iface: *Interface, pkt: *PacketBuffer, dst_mac: [6]u8) b
         frag_pkt.transport_offset = frag_ip_offset + ip_header_len;
         
         // Copy original IP header
-        const frag_ip: *Ipv4Header = @ptrCast(@alignCast(&frag_buf[frag_ip_offset]));
+        const frag_ip: *align(1) Ipv4Header = @ptrCast(&frag_buf[frag_ip_offset]);
         frag_ip.* = orig_ip.*;
         
         // Update Total Length for this fragment
@@ -210,7 +210,7 @@ fn sendFragmentedPacket(iface: *Interface, pkt: *PacketBuffer, dst_mac: [6]u8) b
         // Recalculate Checksum
         frag_ip.checksum = 0;
         const header_bytes = frag_buf[frag_ip_offset..][0..ip_header_len];
-        frag_ip.checksum = checksum.ipChecksum(header_bytes);
+        frag_ip.checksum = @byteSwap(checksum.ipChecksum(header_bytes));
         
         // Copy Payload Chunk
         const payload_dest = frag_ip_offset + ip_header_len;

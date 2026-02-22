@@ -272,7 +272,7 @@ fn sendFragmentedPacket(iface: *Interface, pkt: *PacketBuffer, dst_mac: [6]u8) b
         frag_pkt.ip_offset = frag_ip_offset;
 
         // Copy original IPv6 header
-        const frag_ip6: *Ipv6Header = @ptrCast(@alignCast(&frag_buf[frag_ip_offset]));
+        const frag_ip6: *align(1) Ipv6Header = @ptrCast(&frag_buf[frag_ip_offset]);
         frag_ip6.* = ip6_hdr.*;
 
         // Update payload length (fragment header + fragment data)

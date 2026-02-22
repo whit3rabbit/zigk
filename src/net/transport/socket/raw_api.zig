@@ -80,13 +80,13 @@ pub fn sendtoRaw(
     }
 
     // Build Ethernet header
-    const eth: *packet.EthernetHeader = @ptrCast(@alignCast(&buf[0]));
+    const eth: *align(1) packet.EthernetHeader = @ptrCast(&buf[0]);
     @memcpy(&eth.dst_mac, &dst_mac);
     @memcpy(&eth.src_mac, &iface.mac_addr);
     eth.setEthertype(ethernet.ETHERTYPE_IPV4);
 
     // Build IP header
-    const ip: *packet.Ipv4Header = @ptrCast(@alignCast(&buf[eth_len]));
+    const ip: *align(1) packet.Ipv4Header = @ptrCast(&buf[eth_len]);
     ip.version_ihl = 0x45; // Version 4, IHL 5 (no options)
     ip.tos = sock.tos;
     ip.setTotalLength(@truncate(ip_len + icmp_len));
@@ -103,7 +103,7 @@ pub fn sendtoRaw(
     @memcpy(buf[eth_len + ip_len ..][0..icmp_len], data);
 
     // Calculate ICMP checksum if user provided 0
-    const icmp_hdr: *packet.IcmpHeader = @ptrCast(@alignCast(&buf[eth_len + ip_len]));
+    const icmp_hdr: *align(1) packet.IcmpHeader = @ptrCast(&buf[eth_len + ip_len]);
     if (icmp_hdr.checksum == 0) {
         icmp_hdr.checksum = checksum_mod.icmpChecksum(buf[eth_len + ip_len ..][0..icmp_len]);
     }
@@ -169,13 +169,13 @@ pub fn sendtoRaw6(
     }
 
     // Build Ethernet header
-    const eth: *packet.EthernetHeader = @ptrCast(@alignCast(&buf[0]));
+    const eth: *align(1) packet.EthernetHeader = @ptrCast(&buf[0]);
     @memcpy(&eth.dst_mac, &dst_mac);
     @memcpy(&eth.src_mac, &iface.mac_addr);
     eth.setEthertype(ethernet.ETHERTYPE_IPV6);
 
     // Build IPv6 header
-    const ip6: *packet.Ipv6Header = @ptrCast(@alignCast(&buf[eth_len]));
+    const ip6: *align(1) packet.Ipv6Header = @ptrCast(&buf[eth_len]);
 
     // Select source address based on destination scope (RFC 6724)
     const src_ipv6 = ipv6_mod.ipv6.transmit.selectSourceAddress(iface, dst_ipv6) orelse {
@@ -203,7 +203,7 @@ pub fn sendtoRaw6(
 
     // Calculate ICMPv6 checksum if user provided 0
     // ICMPv6 checksum includes pseudo-header (src, dst, length, next header)
-    const icmp6_hdr: *ipv6_mod.icmpv6.Icmpv6Header = @ptrCast(@alignCast(&buf[eth_len + ip6_len]));
+    const icmp6_hdr: *align(1) ipv6_mod.icmpv6.Icmpv6Header = @ptrCast(&buf[eth_len + ip6_len]);
     if (icmp6_hdr.checksum == 0) {
         icmp6_hdr.checksum = checksum_mod.icmpv6Checksum(
             src_ipv6,

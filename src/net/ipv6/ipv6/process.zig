@@ -334,7 +334,7 @@ test "parseExtensionHeaders with no extensions" {
     pkt.ip_offset = 0;
 
     // Set up minimal IPv6 header
-    const ip6: *Ipv6Header = @ptrCast(@alignCast(&buf[0]));
+    const ip6: *align(1) Ipv6Header = @ptrCast(&buf[0]);
     ip6.* = std.mem.zeroes(Ipv6Header);
     ip6.setVersion(6);
     ip6.setPayloadLength(20);
@@ -356,7 +356,7 @@ test "extension header DoS limit" {
     pkt.ip_offset = 0;
 
     // Set up IPv6 header pointing to chain of Hop-by-Hop options
-    const ip6: *Ipv6Header = @ptrCast(@alignCast(&buf[0]));
+    const ip6: *align(1) Ipv6Header = @ptrCast(&buf[0]);
     ip6.* = std.mem.zeroes(Ipv6Header);
     ip6.setVersion(6);
     ip6.setPayloadLength(400);
