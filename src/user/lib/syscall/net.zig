@@ -30,12 +30,21 @@ pub const IPV6_MULTICAST_HOPS: i32 = 18;
 pub const MSG_PEEK: u32 = 0x0002;
 pub const MSG_DONTWAIT: u32 = 0x0040;
 pub const MSG_WAITALL: u32 = 0x0100;
+pub const MSG_NOSIGNAL: u32 = 0x4000;
 
 /// Socket type constants
 pub const SOCK_STREAM: i32 = 1; // TCP
 pub const SOCK_DGRAM: i32 = 2; // UDP
+pub const SOCK_RAW: i32 = 3; // Raw socket
 pub const SOCK_NONBLOCK: i32 = 0x800;
 pub const SOCK_CLOEXEC: i32 = 0x80000;
+
+/// Protocol constants
+pub const IPPROTO_ICMP: i32 = 1;
+
+/// Additional socket options
+pub const SO_REUSEPORT: i32 = 15;
+pub const SO_RCVTIMEO: i32 = 20;
 
 /// Socket shutdown constants
 pub const SHUT_RD: i32 = 0;
@@ -189,6 +198,22 @@ pub fn sendto(fd: i32, buf: []const u8, dest_addr: *const SockAddrIn) SyscallErr
         @intFromPtr(buf.ptr),
         buf.len,
         0, // flags
+        @intFromPtr(dest_addr),
+        @sizeOf(SockAddrIn),
+    );
+    if (primitive.isError(ret)) return primitive.errorFromReturn(ret);
+    return ret;
+}
+
+/// Send data on socket to destination with explicit flags (e.g., MSG_NOSIGNAL)
+/// Returns number of bytes sent
+pub fn sendtoFlags(fd: i32, buf: []const u8, flags: u32, dest_addr: *const SockAddrIn) SyscallError!usize {
+    const ret = primitive.syscall6(
+        syscalls.SYS_SENDTO,
+        @bitCast(@as(isize, fd)),
+        @intFromPtr(buf.ptr),
+        buf.len,
+        @as(usize, flags),
         @intFromPtr(dest_addr),
         @sizeOf(SockAddrIn),
     );

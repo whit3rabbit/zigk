@@ -420,6 +420,13 @@ pub const recvmsg = net.recvmsg;
 pub const MSG_PEEK = net.MSG_PEEK;
 pub const MSG_DONTWAIT = net.MSG_DONTWAIT;
 pub const MSG_WAITALL = net.MSG_WAITALL;
+// Phase 43: additional constants and wrappers
+pub const MSG_NOSIGNAL = net.MSG_NOSIGNAL;
+pub const SOCK_RAW = net.SOCK_RAW;
+pub const IPPROTO_ICMP = net.IPPROTO_ICMP;
+pub const SO_REUSEPORT = net.SO_REUSEPORT;
+pub const SO_RCVTIMEO = net.SO_RCVTIMEO;
+pub const sendtoFlags = net.sendtoFlags;
 
 // Re-export Time
 pub const Timespec = time.Timespec;
