@@ -26,8 +26,8 @@
 ### Test Infrastructure
 
 - [x] **TST-01**: QEMU test environment has loopback networking configured for both x86_64 and aarch64
-- [ ] **TST-02**: 8 network features verified under live loopback (zero-window recovery, SWS avoidance, raw socket blocking recv, SO_REUSEPORT distribution, SIGPIPE/MSG_NOSIGNAL, MSG_PEEK+DONTWAIT UDP, MSG_WAITALL multi-segment, SO_RCVTIMEO+MSG_WAITALL)
-- [ ] **TST-03**: 5 MSG flag integration tests pass (unskipped) in QEMU test environment
+- [x] **TST-02**: 8 network features verified under live loopback (zero-window recovery, SWS avoidance, raw socket blocking recv, SO_REUSEPORT distribution, SIGPIPE/MSG_NOSIGNAL, MSG_PEEK+DONTWAIT UDP, MSG_WAITALL multi-segment, SO_RCVTIMEO+MSG_WAITALL)
+- [x] **TST-03**: 5 MSG flag integration tests pass (unskipped) in QEMU test environment
 
 ## Future Requirements
 
@@ -55,8 +55,8 @@ None -- this is a cleanup milestone.
 | DOC-02 | Phase 41 | Satisfied |
 | DOC-03 | Phase 41, 44 | Satisfied |
 | TST-01 | Phase 42 | Satisfied |
-| TST-02 | Phase 43 | Pending |
-| TST-03 | Phase 43 | Pending |
+| TST-02 | Phase 43 | Complete (2026-02-22) |
+| TST-03 | Phase 43 | Complete (2026-02-22) |
 
 **Coverage:**
 - v1.5 requirements: 12 total

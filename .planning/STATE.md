@@ -5,23 +5,23 @@
 See: .planning/PROJECT.md (updated 2026-02-20)
 
 **Core value:** Every implemented syscall must work correctly on both x86_64 and aarch64 with matching behavior, tested via the existing integration test harness.
-**Current focus:** Phase 42 -- QEMU Loopback Setup (complete with bug fixes); Phase 43 -- Socket Test Verification (goals already achieved by Phase 42 bug fixes)
+**Current focus:** Phase 43 -- Network Feature Verification (complete); Phase 44 -- v1.5 Milestone Audit
 
 ## Current Position
 
-Phase: 42 of 44 (QEMU Loopback Setup)
+Phase: 43 of 44 (Network Feature Verification)
 Plan: 1 of 1 in current phase
-Status: Complete (verified, all success criteria passed)
-Last activity: 2026-02-21 -- 42-01 complete with extensive bug fixes; loopback fully functional on both architectures
+Status: Complete (verified, all 8 new tests pass on both x86_64 and aarch64)
+Last activity: 2026-02-22 -- 43-01 complete; 8 network feature tests added; x86_64 463/480, aarch64 460/480
 
-Progress: [████░░░░░░] ~35% (v1.5 milestone; 86/86+ plans complete overall)
+Progress: [████░░░░░░] ~40% (v1.5 milestone; 87/87+ plans complete overall)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 82 (v1.0: 29, v1.1: 15, v1.2: 14, v1.3: 15, v1.4: 9)
-- Total phases: 39 complete, across 5 milestones
-- Timeline: 16 days (2026-02-06 to 2026-02-21)
+- Total plans completed: 83 (v1.0: 29, v1.1: 15, v1.2: 14, v1.3: 15, v1.4: 9, v1.5: 1)
+- Total phases: 40 complete, across 5 milestones
+- Timeline: 17 days (2026-02-06 to 2026-02-22)
 
 **By Milestone:**
 
@@ -41,6 +41,9 @@ Progress: [████░░░░░░] ~35% (v1.5 milestone; 86/86+ plans co
 See PROJECT.md Key Decisions table for full history.
 
 Recent decisions affecting v1.5:
+- [Phase 43-01]: SO_RCVTIMEO test uses EOF (SHUT_WR) not TSC timeout -- QEMU TCG has uncalibrated TSC so timers never fire; EOF is reliable
+- [Phase 43-01]: SOCK_NONBLOCK fix applied -- sys_socket now sets sock.blocking=false + O_NONBLOCK when SOCK_NONBLOCK requested
+- [Phase 43-01]: Single-threaded test constraint: SWS avoidance and MSG_WAITALL tests send all bytes atomically to avoid concurrent send+recv deadlock
 - [Phase 42]: Make loopback async (queue + drain) to prevent re-entrant deadlocks
 - [Phase 42]: Apply @byteSwap to all checksum stores -- onesComplement() computes big-endian, struct fields are native-endian
 - [Phase 42]: Handle SYN_SENT before sequence acceptability check -- rcv_nxt=0 rejects random ISN
@@ -65,12 +68,12 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-02-21 (Phase 42 complete with bug fixes)
-Stopped at: All Phase 42 work complete, verification passed
+Last session: 2026-02-22 (Phase 43-01 complete)
+Stopped at: Completed 43-01-PLAN.md
 Resume file: None
 
-**Next action:** Phase 43 (Socket Test Verification) -- note that Phase 42 bug fixes have already achieved most of Phase 43's goals (all socket tests pass). Consider whether Phase 43 needs separate execution or can be marked complete based on Phase 42 results.
+**Next action:** Phase 44 -- v1.5 Milestone Audit (if it exists in .planning/phases/)
 
 ---
 *State initialized: 2026-02-06*
-*Last updated: 2026-02-21 after 42-01 completion and verification*
+*Last updated: 2026-02-22 after 43-01 completion -- 8 network feature tests added and verified*

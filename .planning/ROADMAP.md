@@ -87,7 +87,7 @@
 - [x] **Phase 40: Network Code Fixes** - Fix 4 TCP/raw socket defects from v1.4 audit (completed 2026-02-21)
 - [x] **Phase 41: Code Cleanup and Documentation** - Remove dead code, fix Zig compat, update 3 archived milestone docs (completed 2026-02-21)
 - [x] **Phase 42: QEMU Loopback Setup** - Configure loopback networking in QEMU test environment for both architectures (completed 2026-02-21)
-- [ ] **Phase 43: Network Feature Verification** - Verify 8 network features under live loopback; unskip 5 MSG flag tests
+- [x] **Phase 43: Network Feature Verification** - Verify 8 network features under live loopback; unskip 5 MSG flag tests (completed 2026-02-22)
 - [x] **Phase 44: Audit Gap Closure** - Fix ROADMAP/REQUIREMENTS formatting, update satisfied checkboxes, resolve raw_api dead code (completed 2026-02-21)
 
 ## Phase Details
@@ -149,7 +149,7 @@ Plans:
   9. All 5 MSG flag integration tests in the test runner execute and report pass (not skipped) on both x86_64 and aarch64
 **Plans:** 1 plan
 Plans:
-- [ ] 43-01-PLAN.md -- Add userspace wrappers, write 8 network verification tests, run on both architectures
+- [x] 43-01-PLAN.md -- Add userspace wrappers, write 8 network verification tests, run on both architectures
 
 ### Phase 44: Audit Gap Closure
 **Goal**: All audit-identified documentation gaps, tech debt, and dead code are resolved so the milestone can close cleanly
@@ -209,10 +209,10 @@ Plans:
 | 39. MSG Flags | v1.4 | 3/3 | Complete | 2026-02-20 |
 | 40. Network Code Fixes | v1.5 | 2/2 | Complete | 2026-02-21 |
 | 41. Code Cleanup and Documentation | v1.5 | 2/2 | Complete | 2026-02-21 |
-| 42. QEMU Loopback Setup | v1.5 | 0/TBD | Not started | - |
-| 43. Network Feature Verification | v1.5 | 0/1 | Not started | - |
+| 42. QEMU Loopback Setup | v1.5 | 1/1 | Complete | 2026-02-21 |
+| 43. Network Feature Verification | v1.5 | 1/1 | Complete | 2026-02-22 |
 | 44. Audit Gap Closure | v1.5 | Complete    | 2026-02-21 | 2026-02-21 |
 
 ---
 *Roadmap created: 2026-02-06*
-*Last updated: 2026-02-21 after Phase 44 gap closure completion*
+*Last updated: 2026-02-22 after Phase 43 network feature verification completion*
