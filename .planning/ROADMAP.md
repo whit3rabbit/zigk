@@ -147,10 +147,11 @@ Plans:
   7. MSG_WAITALL on TCP accumulates across multiple segments until the full requested byte count is delivered
   8. SO_RCVTIMEO combined with MSG_WAITALL times out and returns a partial count when the deadline expires before full data arrives
   9. All 5 MSG flag integration tests in the test runner execute and report pass (not skipped) on both x86_64 and aarch64
-**Plans:** 2/2 plans complete
+**Plans:** 3 plans (2 complete, 1 pending)
 Plans:
 - [x] 43-01-PLAN.md -- Add userspace wrappers, write 8 network verification tests, run on both architectures
-- [ ] 43-02-PLAN.md -- Gap closure: strengthen SIGPIPE assertion, SWS multi-write, MSG_WAITALL multi-segment, raw socket traffic
+- [x] 43-02-PLAN.md -- Gap closure: strengthen SIGPIPE assertion, SWS multi-write, MSG_WAITALL multi-segment, raw socket traffic
+- [ ] 43-03-PLAN.md -- Gap closure: raw socket ICMP echo round-trip over loopback (SC3 blocking recv with data)
 
 ### Phase 44: Audit Gap Closure
 **Goal**: All audit-identified documentation gaps, tech debt, and dead code are resolved so the milestone can close cleanly
