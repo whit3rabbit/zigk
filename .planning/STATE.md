@@ -5,21 +5,21 @@
 See: .planning/PROJECT.md (updated 2026-02-20)
 
 **Core value:** Every implemented syscall must work correctly on both x86_64 and aarch64 with matching behavior, tested via the existing integration test harness.
-**Current focus:** Phase 43 -- Network Feature Verification (complete); Phase 44 -- v1.5 Milestone Audit
+**Current focus:** Phase 43 -- Network Feature Verification (complete, all 3 plans done); Phase 44 -- v1.5 Milestone Audit
 
 ## Current Position
 
 Phase: 43 of 44 (Network Feature Verification)
-Plan: 2 of 2 in current phase
-Status: Complete (verified, all 8 Phase 43 tests pass on both x86_64 and aarch64)
-Last activity: 2026-02-22 -- 43-02 complete; 4 verification gaps closed; x86_64 463/480, aarch64 460/480
+Plan: 3 of 3 in current phase (43-01, 43-02, 43-03 all complete)
+Status: Complete (verified, all 8 Phase 43 tests pass on both x86_64 and aarch64; SC3 gap closed)
+Last activity: 2026-02-22 -- 43-03 complete; sendtoRaw checksum fix; raw socket ICMP echo round-trip test PASS; x86_64 463/480, aarch64 460/480
 
-Progress: [████░░░░░░] ~40% (v1.5 milestone; 87/87+ plans complete overall)
+Progress: [████░░░░░░] ~42% (v1.5 milestone; 88/88+ plans complete overall)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 83 (v1.0: 29, v1.1: 15, v1.2: 14, v1.3: 15, v1.4: 9, v1.5: 1)
+- Total plans completed: 84 (v1.0: 29, v1.1: 15, v1.2: 14, v1.3: 15, v1.4: 9, v1.5: 2)
 - Total phases: 40 complete, across 5 milestones
 - Timeline: 17 days (2026-02-06 to 2026-02-22)
 
@@ -41,6 +41,8 @@ Progress: [████░░░░░░] ~40% (v1.5 milestone; 87/87+ plans co
 See PROJECT.md Key Decisions table for full history.
 
 Recent decisions affecting v1.5:
+- [Phase 43-03]: sendtoRaw IP and ICMP checksums both required @byteSwap -- same bug family as Phase 42; packet was silently dropped at IPv4 RX checksum verification
+- [Phase 43-03]: Blocking recv in recvfromIp uses sched.block() -> enableAndHalt (STI; HLT), not schedule_sync(); loopback drain fires on LAPIC timer tick (~10ms at 100Hz)
 - [Phase 43-02]: processTimers() must be in net.tick() -- was defined/exported but never called; no delayed ACK ever fired
 - [Phase 43-02]: SIGPIPE test uses AF_UNIX socketpair -- TCP FIN_WAIT2 ignores data without RST; socketpair gives synchronous EPIPE
 - [Phase 43-02]: MSG_WAITALL as implicit sleep -- no sleep_ms between writes; recv blocking allows timer to fire delayed ACK
@@ -64,6 +66,7 @@ None.
 
 ### Blockers/Concerns
 
+- RESOLVED (43-03): sendtoRaw missing @byteSwap on IP/ICMP checksums -- fixed; raw socket ICMP echo round-trip now works
 - RESOLVED (42): Checksum byte-order bug across entire network TX stack -- fixed with @byteSwap
 - RESOLVED (42): TCP SYN_SENT ACK storm on loopback -- fixed by reordering state machine check
 - RESOLVED (42): MSG_WAITALL blocks forever -- fixed by setting tcb.blocked_thread
@@ -71,12 +74,12 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-02-22 (Phase 43-02 complete)
-Stopped at: Completed 43-02-PLAN.md
+Last session: 2026-02-22 (Phase 43-03 complete)
+Stopped at: Completed 43-03-PLAN.md
 Resume file: None
 
 **Next action:** Phase 44 -- v1.5 Milestone Audit (if it exists in .planning/phases/)
 
 ---
 *State initialized: 2026-02-06*
-*Last updated: 2026-02-22 after 43-02 completion -- 4 verification gaps closed; processTimers wired into net.tick()*
+*Last updated: 2026-02-22 after 43-03 completion -- sendtoRaw checksum fix; SC3 gap closed; all 8 Phase 43 tests pass on both architectures*
