@@ -361,6 +361,16 @@ export fn main(argc: i32, argv: [*][*:0]u8) i32 {
     runner.runTest("socket: MSG_WAITALL TCP accumulation", socket_tests.testMsgWaitallTcp);
     runner.runTest("socket: MSG_WAITALL ignored for UDP", socket_tests.testMsgWaitallIgnoredUdp);
 
+    // Phase 43: Network Feature Verification (8 features under live loopback)
+    runner.runTest("socket: zero-window recovery", socket_tests.testZeroWindowRecovery);
+    runner.runTest("socket: SWS avoidance small writes", socket_tests.testSwsAvoidance);
+    runner.runTest("socket: raw socket blocking recv", socket_tests.testRawSocketBlockingRecv);
+    runner.runTest("socket: SO_REUSEPORT dual bind", socket_tests.testSoReuseport);
+    runner.runTest("socket: SIGPIPE and MSG_NOSIGNAL", socket_tests.testSigpipeMsgNosignal);
+    runner.runTest("socket: MSG_DONTWAIT UDP empty returns EAGAIN", socket_tests.testMsgDontwaitUdpEmpty);
+    runner.runTest("socket: MSG_WAITALL multi-segment", socket_tests.testMsgWaitallMultiSegment);
+    runner.runTest("socket: SO_RCVTIMEO with MSG_WAITALL", socket_tests.testSoRcvtimeoMsgWaitall);
+
     // Phase 23: POSIX timer tests
     runner.runTest("posix_timer: create", posix_timer_tests.testTimerCreate);
     runner.runTest("posix_timer: create sigev_none", posix_timer_tests.testTimerCreateSigevNone);
