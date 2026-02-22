@@ -97,7 +97,7 @@ pub fn sendtoRaw(
     ip.checksum = 0;
     ip.setSrcIp(iface.ip_addr);
     ip.setDstIp(dst_ip);
-    ip.checksum = checksum_mod.ipChecksum(buf[eth_len..][0..ip_len]);
+    ip.checksum = @byteSwap(checksum_mod.ipChecksum(buf[eth_len..][0..ip_len]));
 
     // Copy ICMP data from userspace
     @memcpy(buf[eth_len + ip_len ..][0..icmp_len], data);
@@ -105,7 +105,7 @@ pub fn sendtoRaw(
     // Calculate ICMP checksum if user provided 0
     const icmp_hdr: *align(1) packet.IcmpHeader = @ptrCast(&buf[eth_len + ip_len]);
     if (icmp_hdr.checksum == 0) {
-        icmp_hdr.checksum = checksum_mod.icmpChecksum(buf[eth_len + ip_len ..][0..icmp_len]);
+        icmp_hdr.checksum = @byteSwap(checksum_mod.icmpChecksum(buf[eth_len + ip_len ..][0..icmp_len]));
     }
 
     // Transmit
