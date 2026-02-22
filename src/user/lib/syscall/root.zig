@@ -424,8 +424,10 @@ pub const MSG_WAITALL = net.MSG_WAITALL;
 pub const MSG_NOSIGNAL = net.MSG_NOSIGNAL;
 pub const SOCK_RAW = net.SOCK_RAW;
 pub const IPPROTO_ICMP = net.IPPROTO_ICMP;
+pub const IPPROTO_TCP = net.IPPROTO_TCP;
 pub const SO_REUSEPORT = net.SO_REUSEPORT;
 pub const SO_RCVTIMEO = net.SO_RCVTIMEO;
+pub const TCP_NODELAY = net.TCP_NODELAY;
 pub const sendtoFlags = net.sendtoFlags;
 
 // Re-export Time

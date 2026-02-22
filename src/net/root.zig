@@ -77,8 +77,14 @@ pub fn processFrame(iface: *Interface, pkt: *PacketBuffer) bool {
 /// All functions called here MUST be ISR-safe: no blocking, no socket ops, no sleeping.
 pub fn tick() void {
     ipv4.arp.tick();
+    // Increment connection_timestamp first so ack_due comparisons are current.
     transport.tcp.tick();
     io.timerTick();
+
+    // Process TCP timers: delayed ACKs, retransmission timeouts, persist probes.
+    // Must run after tcp.tick() (which increments connection_timestamp) and before
+    // loopback.drain() so that ACKs queued here are delivered in the same tick.
+    transport.tcpProcessTimers();
 
     // Process deferred loopback packets. Loopback transmit queues packets
     // instead of processing inline to avoid re-entrant deadlock on state.lock.

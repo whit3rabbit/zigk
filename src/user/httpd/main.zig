@@ -270,6 +270,7 @@ fn printError(err: syscall.SyscallError) void {
         error.IllegalSeek => "ESPIPE",
         error.ReadOnlyFilesystem => "EROFS",
         error.TooManyLinks => "EMLINK",
+        error.BrokenPipe => "EPIPE",
         error.FilenameTooLong => "ENAMETOOLONG",
         error.NotImplemented => "ENOSYS",
         error.DirectoryNotEmpty => "ENOTEMPTY",

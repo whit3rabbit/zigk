@@ -101,6 +101,7 @@ pub const SyscallError = error{
     IllegalSeek,             // 29
     ReadOnlyFilesystem,      // 30
     TooManyLinks,            // 31
+    BrokenPipe,              // 32
     FilenameTooLong,         // 36
     NotImplemented,          // 38
     DirectoryNotEmpty,       // 39
@@ -155,6 +156,7 @@ pub fn errorFromReturn(ret: usize) SyscallError {
         29 => error.IllegalSeek,
         30 => error.ReadOnlyFilesystem,
         31 => error.TooManyLinks,
+        32 => error.BrokenPipe,
         36 => error.FilenameTooLong,
         38 => error.NotImplemented,
         39 => error.DirectoryNotEmpty,

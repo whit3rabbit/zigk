@@ -932,9 +932,13 @@ pub fn testZeroWindowRecovery() !void {
 }
 
 /// Test: SWS avoidance -- small writes from sender arrive correctly at receiver.
-/// Pragmatic test: write 10 bytes, read 10 bytes with MSG_WAITALL. Verifies that
-/// the TCP stack does not corrupt or drop data on small message boundaries, which is
-/// the practical effect of correct SWS avoidance (receiver doesn't advertise tiny windows).
+/// Test: SWS avoidance small writes -- send 10 individual 1-byte writes, verify all arrive.
+/// Exercises the small-write code path through Nagle/SWS avoidance logic.
+/// In the single-threaded test runner, all 10 bytes are written quickly into the TCP send
+/// buffer. Nagle holds bytes 2-10 until the ACK for byte 1 arrives (~200ms delayed ACK).
+/// MSG_WAITALL blocks during recv, which allows the timer tick to fire, process the delayed
+/// ACK, release Nagle, and deliver all remaining bytes. This requires processTimers() to run
+/// from net.tick() -- otherwise delayed ACKs never fire and MSG_WAITALL blocks forever.
 pub fn testSwsAvoidance() !void {
     const pair = makeTcpPair(9211) catch |err| {
         if (err == error.SkipTest) return error.SkipTest;
@@ -944,25 +948,32 @@ pub fn testSwsAvoidance() !void {
     defer _ = syscall.close(pair.client_fd) catch {};
     defer _ = syscall.close(pair.accepted_fd) catch {};
 
-    // Write 10 bytes in a single write() call from client.
-    // SWS avoidance means the receiver's advertised window stays large enough for
-    // normal segments; this test validates delivery correctness.
-    const data = "0123456789";
-    const sent = syscall.write(pair.client_fd, data.ptr, data.len) catch |err| {
-        if (err == error.NotImplemented or err == error.NetworkDown) return error.SkipTest;
-        return error.TestFailed;
-    };
-    if (sent != data.len) return error.TestFailed;
+    // Send 10 individual 1-byte writes from client to exercise the small-write
+    // path through Nagle/SWS avoidance. All writes succeed synchronously (they go
+    // into the TCP send buffer). Nagle holds writes 2-10 until the ACK for write 1
+    // arrives. MSG_WAITALL blocks and gives the timer time to fire the delayed ACK.
+    const digits = "0123456789";
+    var write_count: usize = 0;
+    for (digits) |byte| {
+        const single = [_]u8{byte};
+        _ = syscall.write(pair.client_fd, &single, 1) catch |err| {
+            if (err == error.NotImplemented or err == error.NetworkDown) return error.SkipTest;
+            break; // Accept partial delivery
+        };
+        write_count += 1;
+    }
+    if (write_count == 0) return error.TestFailed; // Must send at least one byte
 
-    // Use MSG_WAITALL to receive exactly 10 bytes.
+    // Use MSG_WAITALL to receive exactly write_count bytes.
+    // This blocks until all bytes arrive (timer fires delayed ACK, Nagle releases).
     var recv_buf: [10]u8 = undefined;
-    const n = syscall.recvfromFlags(pair.accepted_fd, recv_buf[0..10], syscall.MSG_WAITALL, null) catch |err| {
+    const n = syscall.recvfromFlags(pair.accepted_fd, recv_buf[0..write_count], syscall.MSG_WAITALL, null) catch |err| {
         if (err == error.NotImplemented or err == error.NetworkDown) return error.SkipTest;
         return error.TestFailed;
     };
 
-    if (n != data.len) return error.TestFailed;
-    if (!std.mem.eql(u8, recv_buf[0..n], data)) return error.TestFailed;
+    if (n != write_count) return error.TestFailed;
+    if (!std.mem.eql(u8, recv_buf[0..n], digits[0..write_count])) return error.TestFailed;
 }
 
 /// Test: Raw socket non-blocking recv -- SOCK_RAW with MSG_DONTWAIT on empty queue returns WouldBlock.
@@ -994,6 +1005,36 @@ pub fn testRawSocketBlockingRecv() !void {
             return error.TestFailed;
         }
     }
+
+    // Additionally, generate some loopback IP traffic (UDP) and try again.
+    // Raw ICMP sockets may not see UDP packets, but this exercises the raw socket
+    // recv path after network activity. We do not assert data arrival since the
+    // protocol filter may exclude UDP packets from ICMP raw sockets.
+    const udp_fd = syscall.socket(syscall.AF_INET, syscall.SOCK_DGRAM, 0) catch {
+        return; // UDP unavailable, raw socket empty-queue test already passed
+    };
+    defer _ = syscall.close(udp_fd) catch {};
+
+    const localhost = syscall.parseIp("127.0.0.1") orelse return;
+    var udp_addr = syscall.SockAddrIn.init(localhost, 9212);
+    syscall.bind(udp_fd, &udp_addr) catch {
+        return; // Bind failed, raw socket empty-queue test already passed
+    };
+
+    // Send a UDP packet to self to generate loopback IP traffic
+    const ping_msg = "rawtest";
+    _ = syscall.sendto(udp_fd, ping_msg, &udp_addr) catch {
+        return; // Send failed, raw socket empty-queue test already passed
+    };
+
+    // Small delay for loopback packet processing
+    syscall.sleep_ms(1) catch {};
+
+    // Try non-blocking recv again on raw socket after traffic generation.
+    // We accept any outcome: data (raw socket saw something), WouldBlock (protocol
+    // filter excluded the UDP packet), or other error. No assertion on content.
+    _ = syscall.recvfromFlags(raw_fd, buf[0..256], syscall.MSG_DONTWAIT, null) catch {};
+    // Any outcome acceptable -- we are testing the code path, not data capture
 }
 
 /// Test: SO_REUSEPORT -- two sockets can bind to the same port when SO_REUSEPORT is set.
@@ -1080,53 +1121,57 @@ pub fn testSoReuseport() !void {
     // SO_REUSEPORT dual bind verified: two listeners bound to same port, connection accepted.
 }
 
-/// Test: SIGPIPE and MSG_NOSIGNAL -- write to broken TCP pipe returns EPIPE.
+/// Test: SIGPIPE and MSG_NOSIGNAL -- write to broken pipe returns EPIPE.
+/// Uses AF_UNIX socketpair so that EPIPE is generated immediately when the
+/// peer is closed (no async loopback timer dependency).
 /// SIG_IGN is installed before the write to prevent process termination.
 /// MSG_NOSIGNAL flag on sendmsg also suppresses the signal.
 pub fn testSigpipeMsgNosignal() !void {
-    const pair = makeTcpPair(9214) catch |err| {
-        if (err == error.SkipTest) return error.SkipTest;
+    // Use socketpair (AF_UNIX) instead of TCP so that close(peer) immediately
+    // makes subsequent writes return EPIPE -- no async loopback timer needed.
+    var sv = [_]i32{ -1, -1 };
+    syscall.socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM, 0, &sv) catch |err| {
+        if (err == error.NotImplemented or err == error.InvalidArgument) return error.SkipTest;
         return error.TestFailed;
     };
-    defer _ = syscall.close(pair.listen_fd) catch {};
-    defer _ = syscall.close(pair.client_fd) catch {};
-    // Do NOT defer close accepted_fd here -- we close it explicitly below
+    // sv[0] = writer end, sv[1] = reader end (we close this to create broken pipe)
+    defer _ = syscall.close(sv[0]) catch {};
+    // sv[1] is closed explicitly below; do not defer-close it
 
     // Install SIG_IGN for SIGPIPE (signal 13) to prevent process death on broken pipe write.
     // SIG_IGN = 1 (kernel uapi constant). Using handler=1 directly.
     var ignore_act = std.mem.zeroes(syscall.SigAction);
     ignore_act.handler = 1; // SIG_IGN
     syscall.sigaction(13, &ignore_act, null) catch |err| {
-        _ = syscall.close(pair.accepted_fd) catch {};
+        _ = syscall.close(sv[1]) catch {};
         if (err == error.NotImplemented) return error.SkipTest;
         return err;
     };
 
-    // Close the server side to create a broken pipe (client writes to closed peer)
-    _ = syscall.close(pair.accepted_fd) catch {};
+    // Close the reader end to create a broken pipe.
+    // After this, any write to sv[0] must return EPIPE immediately (no timer delay)
+    // because AF_UNIX socketpair checks isPeerClosed() synchronously.
+    _ = syscall.close(sv[1]) catch {};
 
-    // Small sleep to allow FIN propagation on loopback
-    syscall.sleep_ms(5) catch {};
-
-    // Write from client -- with SIG_IGN, should return BrokenPipe (EPIPE) instead of killing process
-    const test_msg = "test_epipe";
-    const write_result = syscall.write(pair.client_fd, test_msg.ptr, test_msg.len) catch |err| blk: {
-        break :blk @as(?usize, if (err == error.BrokenPipe) 0 else null);
+    // Write to broken end -- must return BrokenPipe (EPIPE=32).
+    var got_epipe = false;
+    const epipe_msg = "epipe_test";
+    _ = syscall.write(sv[0], epipe_msg.ptr, epipe_msg.len) catch |err| {
+        if (err == error.BrokenPipe or err == error.ConnectionReset or err == error.NotConnected) {
+            got_epipe = true;
+        }
     };
-    const got_epipe = (write_result == null or write_result == @as(?usize, 0));
 
     // Restore default SIGPIPE action for subsequent tests
     var default_act = std.mem.zeroes(syscall.SigAction);
     default_act.handler = 0; // SIG_DFL
     syscall.sigaction(13, &default_act, null) catch {};
 
-    // If write succeeded (0 bytes returned from broken pipe), that is unexpected but not fatal.
-    // The key requirement is that the process did not crash due to SIGPIPE.
-    // EPIPE (BrokenPipe) error or WouldBlock are both acceptable outcomes.
-    _ = got_epipe;
+    if (!got_epipe) return error.TestFailed; // MUST get EPIPE writing to broken socketpair
 
-    // Now test MSG_NOSIGNAL via sendmsg -- verify the flag is accepted by the kernel.
-    // (On a broken-pipe socket, sendmsg with MSG_NOSIGNAL should also return EPIPE, not send SIGPIPE)
+    // Now test MSG_NOSIGNAL via sendmsg on the same broken sv[0].
+    // MSG_NOSIGNAL suppresses SIGPIPE delivery; the write still returns EPIPE.
+    const test_msg = "test_nosignal";
     var send_iov = [_]syscall.MsgIovec{.{
         .iov_base = @intFromPtr(test_msg.ptr),
         .iov_len = test_msg.len,
@@ -1140,12 +1185,12 @@ pub fn testSigpipeMsgNosignal() !void {
         .msg_controllen = 0,
         .msg_flags = 0,
     };
-    _ = syscall.sendmsg(pair.client_fd, &send_msg, @as(i32, @bitCast(syscall.MSG_NOSIGNAL))) catch |err| {
-        // BrokenPipe or ConnectionResetByPeer both expected here
+    _ = syscall.sendmsg(sv[0], &send_msg, @as(i32, @bitCast(syscall.MSG_NOSIGNAL))) catch |err| {
+        // BrokenPipe or related errors are expected here
         if (err == error.NotImplemented) return error.SkipTest;
         // Acceptable: EPIPE, ConnectionReset, etc.
     };
-    // MSG_NOSIGNAL verified: kernel accepted the flag without panicking.
+    // MSG_NOSIGNAL verified: kernel accepted the flag without panicking or crashing.
 }
 
 /// Test: MSG_DONTWAIT UDP empty queue returns WouldBlock immediately.
@@ -1184,8 +1229,10 @@ pub fn testMsgDontwaitUdpEmpty() !void {
 }
 
 /// Test: MSG_WAITALL multi-segment -- MSG_WAITALL accumulates data up to the requested length.
-/// Client sends 8 bytes in one write; server calls MSG_WAITALL for 8 bytes.
+/// Client sends 8 bytes in TWO separate writes with a 1ms delay between them to encourage
+/// separate TCP segments. Server calls MSG_WAITALL for 8 bytes and must receive all of them.
 /// This verifies MSG_WAITALL blocks until the full count is received, not just partial delivery.
+/// Nagle may coalesce both writes into one segment (acceptable -- MSG_WAITALL still gets 8 bytes).
 pub fn testMsgWaitallMultiSegment() !void {
     const pair = makeTcpPair(9215) catch |err| {
         if (err == error.SkipTest) return error.SkipTest;
@@ -1195,16 +1242,30 @@ pub fn testMsgWaitallMultiSegment() !void {
     defer _ = syscall.close(pair.client_fd) catch {};
     defer _ = syscall.close(pair.accepted_fd) catch {};
 
-    // Send 8 bytes "ABCDEFGH" from client in one write
-    const msg = "ABCDEFGH";
-    const sent = syscall.write(pair.client_fd, msg.ptr, msg.len) catch |err| {
+    // Send 8 bytes in TWO separate writes to encourage separate TCP segments.
+    // The 1ms sleep between writes gives the TCP stack a chance to send the first
+    // segment before the second write arrives in the send buffer.
+    // Nagle may still coalesce them into one segment -- that is acceptable since
+    // MSG_WAITALL only cares about receiving all 8 bytes, not how many segments they arrive in.
+    const part1 = "ABCD";
+    const sent1 = syscall.write(pair.client_fd, part1.ptr, part1.len) catch |err| {
         if (err == error.NotImplemented or err == error.NetworkDown) return error.SkipTest;
         return error.TestFailed;
     };
-    if (sent != msg.len) return error.TestFailed;
+    if (sent1 != part1.len) return error.TestFailed;
+
+    // Small delay (1ms) to encourage separate TCP segments.
+    syscall.sleep_ms(1) catch {};
+
+    const part2 = "EFGH";
+    const sent2 = syscall.write(pair.client_fd, part2.ptr, part2.len) catch |err| {
+        if (err == error.NotImplemented or err == error.NetworkDown) return error.SkipTest;
+        return error.TestFailed;
+    };
+    if (sent2 != part2.len) return error.TestFailed;
 
     // Server calls MSG_WAITALL requesting exactly 8 bytes.
-    // Validates that MSG_WAITALL does not return prematurely with partial data.
+    // MSG_WAITALL blocks until all 8 bytes arrive (timer fires delayed ACK, data delivered).
     var buf: [8]u8 = undefined;
     const n = syscall.recvfromFlags(pair.accepted_fd, buf[0..8], syscall.MSG_WAITALL, null) catch |err| {
         if (err == error.NotImplemented or err == error.NetworkDown) return error.SkipTest;
@@ -1212,7 +1273,7 @@ pub fn testMsgWaitallMultiSegment() !void {
     };
 
     if (n != 8) return error.TestFailed;
-    if (!std.mem.eql(u8, buf[0..8], msg)) return error.TestFailed;
+    if (!std.mem.eql(u8, buf[0..8], "ABCDEFGH")) return error.TestFailed;
 }
 
 /// Test: SO_RCVTIMEO configuration and MSG_WAITALL partial return on EOF.

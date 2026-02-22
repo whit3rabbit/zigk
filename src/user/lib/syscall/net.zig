@@ -46,6 +46,9 @@ pub const IPPROTO_ICMP: i32 = 1;
 pub const SO_REUSEPORT: i32 = 15;
 pub const SO_RCVTIMEO: i32 = 20;
 
+/// TCP-level socket options (used with IPPROTO_TCP as level)
+pub const TCP_NODELAY: i32 = 1; // Disable Nagle's algorithm for immediate small-write sending
+
 /// Socket shutdown constants
 pub const SHUT_RD: i32 = 0;
 pub const SHUT_WR: i32 = 1;
