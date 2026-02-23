@@ -107,49 +107,49 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| BUILD-01 | -- | Pending |
-| BUILD-02 | -- | Pending |
-| BUILD-03 | -- | Pending |
-| MOUNT-01 | -- | Pending |
-| MOUNT-02 | -- | Pending |
-| MOUNT-03 | -- | Pending |
-| MOUNT-04 | -- | Pending |
-| INODE-01 | -- | Pending |
-| INODE-02 | -- | Pending |
-| INODE-03 | -- | Pending |
-| INODE-04 | -- | Pending |
-| INODE-05 | -- | Pending |
-| DIR-01 | -- | Pending |
-| DIR-02 | -- | Pending |
-| DIR-03 | -- | Pending |
-| DIR-04 | -- | Pending |
-| DIR-05 | -- | Pending |
-| ALLOC-01 | -- | Pending |
-| ALLOC-02 | -- | Pending |
-| ALLOC-03 | -- | Pending |
-| ALLOC-04 | -- | Pending |
-| FILE-01 | -- | Pending |
-| FILE-02 | -- | Pending |
-| FILE-03 | -- | Pending |
-| FILE-04 | -- | Pending |
-| FILE-05 | -- | Pending |
-| DWRITE-01 | -- | Pending |
-| DWRITE-02 | -- | Pending |
-| DWRITE-03 | -- | Pending |
-| DWRITE-04 | -- | Pending |
-| DWRITE-05 | -- | Pending |
-| META-01 | -- | Pending |
-| META-02 | -- | Pending |
-| META-03 | -- | Pending |
-| META-04 | -- | Pending |
-| MIGRATE-01 | -- | Pending |
-| MIGRATE-02 | -- | Pending |
+| BUILD-01 | Phase 45 | Pending |
+| BUILD-02 | Phase 45 | Pending |
+| BUILD-03 | Phase 45 | Pending |
+| MOUNT-01 | Phase 46 | Pending |
+| MOUNT-02 | Phase 46 | Pending |
+| MOUNT-03 | Phase 46 | Pending |
+| MOUNT-04 | Phase 46 | Pending |
+| INODE-01 | Phase 47 | Pending |
+| INODE-02 | Phase 47 | Pending |
+| INODE-03 | Phase 47 | Pending |
+| INODE-04 | Phase 47 | Pending |
+| INODE-05 | Phase 48 | Pending |
+| DIR-01 | Phase 48 | Pending |
+| DIR-02 | Phase 48 | Pending |
+| DIR-03 | Phase 48 | Pending |
+| DIR-04 | Phase 48 | Pending |
+| DIR-05 | Phase 48 | Pending |
+| ALLOC-01 | Phase 49 | Pending |
+| ALLOC-02 | Phase 49 | Pending |
+| ALLOC-03 | Phase 49 | Pending |
+| ALLOC-04 | Phase 49 | Pending |
+| FILE-01 | Phase 50 | Pending |
+| FILE-02 | Phase 50 | Pending |
+| FILE-03 | Phase 50 | Pending |
+| FILE-04 | Phase 50 | Pending |
+| FILE-05 | Phase 50 | Pending |
+| DWRITE-01 | Phase 51 | Pending |
+| DWRITE-02 | Phase 51 | Pending |
+| DWRITE-03 | Phase 51 | Pending |
+| DWRITE-04 | Phase 51 | Pending |
+| DWRITE-05 | Phase 51 | Pending |
+| META-01 | Phase 52 | Pending |
+| META-02 | Phase 52 | Pending |
+| META-03 | Phase 52 | Pending |
+| META-04 | Phase 52 | Pending |
+| MIGRATE-01 | Phase 53 | Pending |
+| MIGRATE-02 | Phase 53 | Pending |
 
 **Coverage:**
 - v2.0 requirements: 37 total
-- Mapped to phases: 0
-- Unmapped: 37
+- Mapped to phases: 37
+- Unmapped: 0
 
 ---
 *Requirements defined: 2026-02-22*
-*Last updated: 2026-02-22 after initial definition*
+*Last updated: 2026-02-22 after roadmap creation (all 37 requirements mapped)*
