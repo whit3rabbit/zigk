@@ -18,7 +18,7 @@ Requirements for ext2 filesystem implementation. Each maps to roadmap phases.
 - [x] **MOUNT-01**: Kernel parses ext2 superblock, validates magic (0xEF53), and derives block size
 - [x] **MOUNT-02**: Kernel reads block group descriptor table and validates group counts
 - [x] **MOUNT-03**: Kernel checks INCOMPAT feature flags and refuses to mount unsupported features
-- [ ] **MOUNT-04**: ext2 filesystem registers with VFS and mounts at a writable mount point
+- [x] **MOUNT-04**: ext2 filesystem registers with VFS and mounts at a writable mount point
 
 ### Inode and Block I/O
 
@@ -113,7 +113,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | MOUNT-01 | Phase 46 | Complete |
 | MOUNT-02 | Phase 46 | Complete |
 | MOUNT-03 | Phase 46 | Complete |
-| MOUNT-04 | Phase 46 | Pending |
+| MOUNT-04 | Phase 46 | Complete |
 | INODE-01 | Phase 47 | Pending |
 | INODE-02 | Phase 47 | Pending |
 | INODE-03 | Phase 47 | Pending |
