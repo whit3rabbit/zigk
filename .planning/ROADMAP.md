@@ -145,7 +145,9 @@ Plans:
   2. A file using only direct blocks (<=48KB at 4KB blocks) reads back correctly byte-for-byte
   3. A file using singly indirect blocks (up to ~4MB) reads back correctly byte-for-byte
   4. A file using doubly indirect blocks (up to ~4GB) reads back correctly byte-for-byte
-**Plans**: TBD
+**Plans:** 1 plan
+Plans:
+- [ ] 47-01-PLAN.md -- ext2 inode read, block resolution (all indirection levels), root dir scan, test image population, userspace tests
 
 ### Phase 48: Directory Traversal, Path Resolution, and Inode Cache
 **Goal**: Users can open, stat, and list files and directories at arbitrary nesting depth on the ext2 mount, with fast symlink resolution and an inode cache eliminating redundant disk reads.
@@ -266,7 +268,7 @@ Plans:
 | 44. Audit Gap Closure | v1.5 | 1/1 | Complete | 2026-02-21 |
 | 45. Build Infrastructure | 2/2 | Complete    | 2026-02-23 | - |
 | 46. Superblock Parse and Read-Only Mount | 2/2 | Complete    | 2026-02-23 | - |
-| 47. Inode Read and Indirect Block Resolution | v2.0 | 0/TBD | Not started | - |
+| 47. Inode Read and Indirect Block Resolution | v2.0 | 0/1 | Planned | - |
 | 48. Directory Traversal, Path Resolution, and Inode Cache | v2.0 | 0/TBD | Not started | - |
 | 49. Block and Inode Bitmap Allocation | v2.0 | 0/TBD | Not started | - |
 | 50. File Write Operations | v2.0 | 0/TBD | Not started | - |
