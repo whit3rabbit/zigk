@@ -2819,10 +2819,12 @@ pub fn build(b: *std.Build) void {
             "-drive", "file=sfs.img,format=raw,if=none,id=sfsdisk",
             "-device", "scsi-hd,drive=sfsdisk,bus=scsi0.0",
         });
-        // ext2 storage disk: second LUN on existing scsi0 (aarch64)
+        // ext2 storage disk: second LUN on existing scsi0 (aarch64).
+        // Explicit scsi-id=1 ensures ext2disk gets SCSI target 1 (SFS is target 0).
+        // Without explicit IDs, QEMU auto-assignment may not match kernel expectations.
         run_cmd.addArgs(&.{
             "-drive", "file=ext2.img,format=raw,if=none,id=ext2disk",
-            "-device", "scsi-hd,drive=ext2disk,bus=scsi0.0",
+            "-device", "scsi-hd,drive=ext2disk,bus=scsi0.0,scsi-id=1",
         });
     }
 

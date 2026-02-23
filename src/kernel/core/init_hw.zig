@@ -780,6 +780,11 @@ pub fn initStorage() void {
             });
 
             if (virtio_scsi.initFromPci(dev, pci.PciAccess{ .ecam = ecam })) |controller| {
+                // aarch64: LUN 0 = SFS (registered in devfs), LUN 1 = ext2 (accessed directly).
+                // x86_64: LUN 0 = ext2 only (SFS uses AHCI). Skip devfs registration for the
+                //         ext2 LUN to avoid overwriting AHCI's /dev/sda entry.
+                const ext2_lun_idx: u8 = if (builtin.cpu.arch == .aarch64) 1 else 0;
+
                 // Report detected LUNs
                 var lun_count: u8 = 0;
                 for (0..controller.getLunCount()) |i| {
@@ -795,10 +800,17 @@ pub fn initStorage() void {
                                 &lun_info.product,
                             });
 
-                            // Scan for partitions on this LUN
-                            partitions.scanAndRegisterVirtioScsi(@intCast(i)) catch |err| {
-                                console.warn("  Partition scan failed for LUN{d}: {}", .{ i, err });
-                            };
+                            // Scan for partitions on this LUN, but skip the ext2 LUN.
+                            // The ext2 LUN is accessed directly via ext2_block_dev and must
+                            // not be registered in devfs under sd* to avoid conflicting with
+                            // the AHCI /dev/sda entry on x86_64.
+                            if (@as(u8, @intCast(i)) != ext2_lun_idx) {
+                                partitions.scanAndRegisterVirtioScsi(@intCast(i)) catch |err| {
+                                    console.warn("  Partition scan failed for LUN{d}: {}", .{ i, err });
+                                };
+                            } else {
+                                console.info("  LUN{d}: reserved for ext2 (skipping devfs registration)", .{i});
+                            }
 
                             lun_count += 1;
                         }
@@ -810,7 +822,6 @@ pub fn initStorage() void {
                 // Register ext2 BlockDevice from the appropriate LUN.
                 // aarch64: LUN 0 = SFS, LUN 1 = ext2 (both on same scsi0).
                 // x86_64: LUN 0 = ext2 (SFS uses AHCI, not VirtIO-SCSI).
-                const ext2_lun_idx: u8 = if (builtin.cpu.arch == .aarch64) 1 else 0;
                 if (lun_count > ext2_lun_idx) {
                     ext2_block_dev = virtio_scsi.block_adapter.asBlockDevice(controller, ext2_lun_idx) catch |err| blk: {
                         console.warn("ext2: failed to create BlockDevice for LUN {d}: {}", .{ ext2_lun_idx, err });
