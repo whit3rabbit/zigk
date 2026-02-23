@@ -5,14 +5,14 @@
 See: .planning/PROJECT.md (updated 2026-02-22)
 
 **Core value:** Every implemented syscall must work correctly on both x86_64 and aarch64 with matching behavior, tested via the existing integration test harness.
-**Current focus:** v2.0 ext2 Filesystem -- Phase 45: Build Infrastructure
+**Current focus:** v2.0 ext2 Filesystem -- Phase 46: Superblock Parse and RO Mount
 
 ## Current Position
 
-Phase: 45 of 53 (Build Infrastructure)
-Plan: 2 of TBD in current phase
+Phase: 46 of 53 (Superblock Parse and RO Mount)
+Plan: 1 of TBD in current phase
 Status: In progress
-Last activity: 2026-02-23 -- 45-02 complete (BlockDevice vtable + ext2 on-disk types)
+Last activity: 2026-02-23 -- 46-01 complete (VirtIO-SCSI BlockDevice adapter + ext2 mount module)
 
 Progress: [░░░░░░░░░░] 2% (v2.0, 2 plans complete) | 44/44 phases complete (prior milestones)
 
@@ -35,6 +35,7 @@ Progress: [░░░░░░░░░░] 2% (v2.0, 2 plans complete) | 44/44 p
 | v1.5 | 40-44 | 9 | 3 days |
 | v2.0 | 45-53 | TBD | - |
 | Phase 45 P02 | 3 | 3 tasks | 3 files |
+| Phase 46-superblock-parse-ro-mount P01 | 3 | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -55,6 +56,8 @@ Recent decisions relevant to v2.0:
 - [45-02] DirEntry is extern struct with 8-byte header only; name lives inline in block buffer after header
 - [45-02] SUPPORTED_INCOMPAT = INCOMPAT_FILETYPE only; mke2fs enables this by default
 - [45-02] s_log_frag_size typed as u32 (not i32) for extern struct compatibility in Zig
+- [Phase 46-superblock-parse-ro-mount]: block_adapter.zig is separate from adapter.zig (FileOps/devfs); block_adapter provides BlockDevice vtable for filesystem layer
+- [Phase 46-superblock-parse-ro-mount]: Phase 46 ext2Open returns NotFound for all reads (no inode resolution); write flags return AccessDenied
 
 ### Pending Todos
 
@@ -71,11 +74,11 @@ None.
 ## Session Continuity
 
 Last session: 2026-02-23
-Stopped at: 45-02 complete -- BlockDevice vtable + ext2 on-disk types committed, both archs build clean
+Stopped at: Completed 46-01-PLAN.md
 Resume file: None
 
-**Next action:** Continue Phase 45 plans (45-03+) or plan Phase 46 (ext2 superblock parsing)
+**Next action:** Continue Phase 46 plans (46-02+) -- wire block_adapter and ext2_mount into kernel boot sequence
 
 ---
 *State initialized: 2026-02-06*
-*Last updated: 2026-02-23 after 45-01 and 45-02 completion*
+*Last updated: 2026-02-23 after 46-01 completion*

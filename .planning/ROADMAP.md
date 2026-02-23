@@ -131,7 +131,7 @@ Plans:
   2. Kernel panics or logs a clear error and refuses to mount if INCOMPAT feature flags contain unknown bits
   3. ext2 filesystem appears at /mnt2 in the VFS mount table alongside SFS at /mnt
   4. Block group descriptor table is read and group count matches the image geometry
-**Plans:** 2 plans
+**Plans:** 1/2 plans executed
 Plans:
 - [ ] 46-01-PLAN.md -- SCSI BlockDevice adapter + ext2 superblock parse, BGDT read, VFS adapter
 - [ ] 46-02-PLAN.md -- Wire ext2 mount into boot sequence (init_hw, init_fs, main)
@@ -265,7 +265,7 @@ Plans:
 | 43. Network Feature Verification | v1.5 | 3/3 | Complete | 2026-02-22 |
 | 44. Audit Gap Closure | v1.5 | 1/1 | Complete | 2026-02-21 |
 | 45. Build Infrastructure | 2/2 | Complete    | 2026-02-23 | - |
-| 46. Superblock Parse and Read-Only Mount | v2.0 | 0/TBD | Not started | - |
+| 46. Superblock Parse and Read-Only Mount | 1/2 | In Progress|  | - |
 | 47. Inode Read and Indirect Block Resolution | v2.0 | 0/TBD | Not started | - |
 | 48. Directory Traversal, Path Resolution, and Inode Cache | v2.0 | 0/TBD | Not started | - |
 | 49. Block and Inode Bitmap Allocation | v2.0 | 0/TBD | Not started | - |
