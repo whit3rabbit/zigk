@@ -2941,11 +2941,41 @@ pub fn build(b: *std.Build) void {
     create_disk_img.step.dependOn(&create_esp_cmd.step);
     create_disk_img.step.dependOn(&install_disk_image_tool.step);
 
+    // Create ext2.img (64MB ext2 disk image for Phase 45+ ext2 filesystem work)
+    const ext2_img_mb: u32 = 64;
+    _ = ext2_img_mb; // used in script below via string literal
+    const ext2_script =
+        \\set -e
+        \\if [ -f ext2.img.stamp ]; then
+        \\    echo "ext2.img already exists (stamp found), skipping creation"
+        \\    exit 0
+        \\fi
+        \\MKE2FS=""
+        \\if [ -x "/opt/homebrew/opt/e2fsprogs/sbin/mke2fs" ]; then
+        \\    MKE2FS="/opt/homebrew/opt/e2fsprogs/sbin/mke2fs"
+        \\elif [ -x "/usr/local/opt/e2fsprogs/sbin/mke2fs" ]; then
+        \\    MKE2FS="/usr/local/opt/e2fsprogs/sbin/mke2fs"
+        \\else
+        \\    MKE2FS=$(which mke2fs 2>/dev/null || true)
+        \\fi
+        \\if [ -z "$MKE2FS" ]; then
+        \\    echo "ERROR: mke2fs not found. On macOS: brew install e2fsprogs"
+        \\    exit 1
+        \\fi
+        \\echo "Creating ext2.img (64MB) using $MKE2FS..."
+        \\dd if=/dev/zero of=ext2.img bs=1M count=64 2>/dev/null
+        \\"$MKE2FS" -t ext2 -b 4096 -L "zk-ext2" -m 0 ext2.img
+        \\touch ext2.img.stamp
+        \\echo "ext2.img created successfully"
+    ;
+    const create_ext2_cmd = b.addSystemCommand(&.{ "sh", "-c", ext2_script });
+
     if (run_iso) {
         run_cmd.step.dependOn(&iso_cmd.step);
     } else {
         run_cmd.step.dependOn(&create_disk_img.step);
     }
+    run_cmd.step.dependOn(&create_ext2_cmd.step);
 
     const run_step = b.step("run", "Build and run the kernel in QEMU (UEFI)");
     run_step.dependOn(&run_cmd.step);

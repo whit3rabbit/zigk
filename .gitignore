@@ -11,6 +11,7 @@ zig-out/
 *.bin
 *.iso
 *.img
+*.stamp
 
 # ISO staging directory (created by zig build iso)
 iso_root/
