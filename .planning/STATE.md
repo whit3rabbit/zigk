@@ -5,14 +5,14 @@
 See: .planning/PROJECT.md (updated 2026-02-22)
 
 **Core value:** Every implemented syscall must work correctly on both x86_64 and aarch64 with matching behavior, tested via the existing integration test harness.
-**Current focus:** v2.0 ext2 Filesystem -- Phase 46: Superblock Parse and RO Mount
+**Current focus:** v2.0 ext2 Filesystem -- Phase 47: Inode Read and Indirect Block Resolution
 
 ## Current Position
 
-Phase: 46 of 53 (Superblock Parse and RO Mount)
-Plan: 2 of TBD in current phase
-Status: In progress (Phase 46 complete - 2 plans done)
-Last activity: 2026-02-23 -- 46-02 complete (boot wiring: ext2 mounts at /mnt2 on x86_64, block_device module, devfs naming fix)
+Phase: 47 of 53 (Inode Read and Indirect Block Resolution)
+Plan: 1 of 1 in current phase (Phase 47 complete)
+Status: In progress (Phase 47 complete - 1 plan done)
+Last activity: 2026-02-23 -- 47-01 complete (inode.zig: readInode, resolveBlock, lookupInRootDir; ext2Open wired; 6 integration tests all pass)
 
 Progress: [░░░░░░░░░░] 2% (v2.0, 2 plans complete) | 44/44 phases complete (prior milestones)
 
@@ -37,6 +37,7 @@ Progress: [░░░░░░░░░░] 2% (v2.0, 2 plans complete) | 44/44 p
 | Phase 45 P02 | 3 | 3 tasks | 3 files |
 | Phase 46-superblock-parse-ro-mount P01 | 3 | 2 tasks | 4 files |
 | Phase 46-superblock-parse-ro-mount P02 | 24 | 2 tasks | 7 files |
+| Phase 47 P01 | 15 | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -61,6 +62,9 @@ Recent decisions relevant to v2.0:
 - [Phase 46-superblock-parse-ro-mount]: Phase 46 ext2Open returns NotFound for all reads (no inode resolution); write flags return AccessDenied
 - [Phase 46-superblock-parse-ro-mount]: block_device_module is standalone in build.zig (shared between fs and virtio_scsi) to avoid circular imports
 - [Phase 46-superblock-parse-ro-mount]: ext2 LUN skips devfs partition scan to prevent AHCI /dev/sda shadowing on x86_64
+- [Phase 47]: Piped stdin to debugfs (not -R) for macOS Homebrew e2fsprogs 1.47.x write compatibility
+- [Phase 47]: python3 bytearray() for hello.txt generation avoids shell history expansion of '!'
+- [Phase 47]: ext2.img.populated.stamp separate from ext2.img.stamp for idempotent population
 
 ### Pending Todos
 
@@ -78,11 +82,11 @@ None.
 ## Session Continuity
 
 Last session: 2026-02-23
-Stopped at: Completed 46-02-PLAN.md
+Stopped at: Completed 47-01-PLAN.md
 Resume file: None
 
-**Next action:** Phase 46 complete. Begin Phase 47 (inode traversal) -- implement inode lookup using BGDT + block reads to replace ext2Open stub that currently returns NotFound
+**Next action:** Phase 47 complete. Begin Phase 48 (inode cache + full path traversal) -- implement multi-component path resolution and getdents for ext2 directories.
 
 ---
 *State initialized: 2026-02-06*
-*Last updated: 2026-02-23 after 46-02 completion*
+*Last updated: 2026-02-23 after 47-01 completion*

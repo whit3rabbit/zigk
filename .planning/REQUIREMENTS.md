@@ -22,10 +22,10 @@ Requirements for ext2 filesystem implementation. Each maps to roadmap phases.
 
 ### Inode and Block I/O
 
-- [ ] **INODE-01**: Kernel reads inodes by number with correct 1-based offset calculation
-- [ ] **INODE-02**: Kernel resolves file data via direct blocks (i_block[0..11])
-- [ ] **INODE-03**: Kernel resolves file data via singly indirect blocks (i_block[12])
-- [ ] **INODE-04**: Kernel resolves file data via doubly indirect blocks (i_block[13])
+- [x] **INODE-01**: Kernel reads inodes by number with correct 1-based offset calculation
+- [x] **INODE-02**: Kernel resolves file data via direct blocks (i_block[0..11])
+- [x] **INODE-03**: Kernel resolves file data via singly indirect blocks (i_block[12])
+- [x] **INODE-04**: Kernel resolves file data via doubly indirect blocks (i_block[13])
 - [ ] **INODE-05**: Inode cache (fixed-size LRU) avoids redundant disk reads during path traversal
 
 ### Directory and Path Resolution
@@ -114,10 +114,10 @@ Which phases cover which requirements. Updated during roadmap creation.
 | MOUNT-02 | Phase 46 | Complete |
 | MOUNT-03 | Phase 46 | Complete |
 | MOUNT-04 | Phase 46 | Complete |
-| INODE-01 | Phase 47 | Pending |
-| INODE-02 | Phase 47 | Pending |
-| INODE-03 | Phase 47 | Pending |
-| INODE-04 | Phase 47 | Pending |
+| INODE-01 | Phase 47 | Complete |
+| INODE-02 | Phase 47 | Complete |
+| INODE-03 | Phase 47 | Complete |
+| INODE-04 | Phase 47 | Complete |
 | INODE-05 | Phase 48 | Pending |
 | DIR-01 | Phase 48 | Pending |
 | DIR-02 | Phase 48 | Pending |
