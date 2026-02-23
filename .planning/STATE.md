@@ -10,9 +10,9 @@ See: .planning/PROJECT.md (updated 2026-02-22)
 ## Current Position
 
 Phase: 46 of 53 (Superblock Parse and RO Mount)
-Plan: 1 of TBD in current phase
-Status: In progress
-Last activity: 2026-02-23 -- 46-01 complete (VirtIO-SCSI BlockDevice adapter + ext2 mount module)
+Plan: 2 of TBD in current phase
+Status: In progress (Phase 46 complete - 2 plans done)
+Last activity: 2026-02-23 -- 46-02 complete (boot wiring: ext2 mounts at /mnt2 on x86_64, block_device module, devfs naming fix)
 
 Progress: [░░░░░░░░░░] 2% (v2.0, 2 plans complete) | 44/44 phases complete (prior milestones)
 
@@ -36,6 +36,7 @@ Progress: [░░░░░░░░░░] 2% (v2.0, 2 plans complete) | 44/44 p
 | v2.0 | 45-53 | TBD | - |
 | Phase 45 P02 | 3 | 3 tasks | 3 files |
 | Phase 46-superblock-parse-ro-mount P01 | 3 | 2 tasks | 4 files |
+| Phase 46-superblock-parse-ro-mount P02 | 24 | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -58,6 +59,8 @@ Recent decisions relevant to v2.0:
 - [45-02] s_log_frag_size typed as u32 (not i32) for extern struct compatibility in Zig
 - [Phase 46-superblock-parse-ro-mount]: block_adapter.zig is separate from adapter.zig (FileOps/devfs); block_adapter provides BlockDevice vtable for filesystem layer
 - [Phase 46-superblock-parse-ro-mount]: Phase 46 ext2Open returns NotFound for all reads (no inode resolution); write flags return AccessDenied
+- [Phase 46-superblock-parse-ro-mount]: block_device_module is standalone in build.zig (shared between fs and virtio_scsi) to avoid circular imports
+- [Phase 46-superblock-parse-ro-mount]: ext2 LUN skips devfs partition scan to prevent AHCI /dev/sda shadowing on x86_64
 
 ### Pending Todos
 
@@ -70,15 +73,16 @@ None.
 - QEMU TCG uncalibrated TSC prevents timer-based test paths -- unrelated to filesystem work
 - Phase 49 (bitmap allocation) needs explicit lock interaction design before coding: alloc_lock + group_lock + io_lock when falling back to adjacent block groups
 - Phase 51 (directory rename) needs explicit algorithm design: RENAME_NOREPLACE/RENAME_EXCHANGE with entry split/merge on excess rec_len
+- aarch64 ext2 LUN: VirtIO-SCSI sequential scan reports BAD_TARGET for SCSI target 1 even with explicit scsi-id=1; ext2 gracefully skips on aarch64 (warning logged). Root cause unknown -- QEMU 10.x HVF VirtIO-SCSI multi-target behavior needs investigation before Phase 47.
 
 ## Session Continuity
 
 Last session: 2026-02-23
-Stopped at: Completed 46-01-PLAN.md
+Stopped at: Completed 46-02-PLAN.md
 Resume file: None
 
-**Next action:** Continue Phase 46 plans (46-02+) -- wire block_adapter and ext2_mount into kernel boot sequence
+**Next action:** Phase 46 complete. Begin Phase 47 (inode traversal) -- implement inode lookup using BGDT + block reads to replace ext2Open stub that currently returns NotFound
 
 ---
 *State initialized: 2026-02-06*
-*Last updated: 2026-02-23 after 46-01 completion*
+*Last updated: 2026-02-23 after 46-02 completion*

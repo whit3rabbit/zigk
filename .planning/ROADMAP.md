@@ -97,7 +97,7 @@
 **Milestone Goal:** Replace SFS with a full ext2 filesystem giving zk proper hierarchical directories, long filenames, and correct POSIX filesystem semantics. SFS remains at /mnt through Phases 45-52; Phase 53 switches the mount point and migrates all tests.
 
 - [x] **Phase 45: Build Infrastructure** - ext2 disk image created at build time, QEMU drive attached, BlockDevice abstraction in place (completed 2026-02-23)
-- [ ] **Phase 46: Superblock Parse and Read-Only Mount** - ext2 mounts at /mnt2 with validated superblock, feature flags enforced
+- [x] **Phase 46: Superblock Parse and Read-Only Mount** - ext2 mounts at /mnt2 with validated superblock, feature flags enforced (completed 2026-02-23)
 - [ ] **Phase 47: Inode Read and Indirect Block Resolution** - inode reads correct for all indirection levels, root directory inode accessible
 - [ ] **Phase 48: Directory Traversal, Path Resolution, and Inode Cache** - multi-level paths resolve, getdents works, stat returns correct metadata, inode cache live
 - [ ] **Phase 49: Block and Inode Bitmap Allocation** - alloc and free primitives correct with two-phase lock pattern, superblock counters update atomically
@@ -131,7 +131,7 @@ Plans:
   2. Kernel panics or logs a clear error and refuses to mount if INCOMPAT feature flags contain unknown bits
   3. ext2 filesystem appears at /mnt2 in the VFS mount table alongside SFS at /mnt
   4. Block group descriptor table is read and group count matches the image geometry
-**Plans:** 1/2 plans executed
+**Plans:** 2/2 plans complete
 Plans:
 - [ ] 46-01-PLAN.md -- SCSI BlockDevice adapter + ext2 superblock parse, BGDT read, VFS adapter
 - [ ] 46-02-PLAN.md -- Wire ext2 mount into boot sequence (init_hw, init_fs, main)
@@ -265,7 +265,7 @@ Plans:
 | 43. Network Feature Verification | v1.5 | 3/3 | Complete | 2026-02-22 |
 | 44. Audit Gap Closure | v1.5 | 1/1 | Complete | 2026-02-21 |
 | 45. Build Infrastructure | 2/2 | Complete    | 2026-02-23 | - |
-| 46. Superblock Parse and Read-Only Mount | 1/2 | In Progress|  | - |
+| 46. Superblock Parse and Read-Only Mount | 2/2 | Complete   | 2026-02-23 | - |
 | 47. Inode Read and Indirect Block Resolution | v2.0 | 0/TBD | Not started | - |
 | 48. Directory Traversal, Path Resolution, and Inode Cache | v2.0 | 0/TBD | Not started | - |
 | 49. Block and Inode Bitmap Allocation | v2.0 | 0/TBD | Not started | - |
