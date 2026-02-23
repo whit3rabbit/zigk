@@ -117,7 +117,10 @@
   2. QEMU launches with ext2.img attached as a block device on both x86_64 and aarch64
   3. The kernel can call BlockDevice read/write with an explicit LBA and get the correct sector without position state races
   4. `extern struct` on-disk types in types.zig pass `comptime` size assertions at compile time
-**Plans**: TBD
+**Plans:** 2 plans
+Plans:
+- [ ] 45-01-PLAN.md -- ext2 disk image creation and QEMU attachment
+- [ ] 45-02-PLAN.md -- BlockDevice abstraction and ext2 on-disk types
 
 ### Phase 46: Superblock Parse and Read-Only Mount
 **Goal**: The kernel can parse an ext2 superblock, validate the magic number and feature flags, derive filesystem geometry, and register the filesystem with VFS for read-only access at /mnt2.
@@ -258,7 +261,7 @@
 | 42. QEMU Loopback Setup | v1.5 | 1/1 | Complete | 2026-02-21 |
 | 43. Network Feature Verification | v1.5 | 3/3 | Complete | 2026-02-22 |
 | 44. Audit Gap Closure | v1.5 | 1/1 | Complete | 2026-02-21 |
-| 45. Build Infrastructure | v2.0 | 0/TBD | Not started | - |
+| 45. Build Infrastructure | v2.0 | 0/2 | Not started | - |
 | 46. Superblock Parse and Read-Only Mount | v2.0 | 0/TBD | Not started | - |
 | 47. Inode Read and Indirect Block Resolution | v2.0 | 0/TBD | Not started | - |
 | 48. Directory Traversal, Path Resolution, and Inode Cache | v2.0 | 0/TBD | Not started | - |
@@ -270,4 +273,4 @@
 
 ---
 *Roadmap created: 2026-02-06*
-*Last updated: 2026-02-22 -- v2.0 roadmap added (Phases 45-53)*
+*Last updated: 2026-02-22 -- Phase 45 planned (2 plans)*
