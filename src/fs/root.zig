@@ -21,4 +21,5 @@ pub const vboxsf = @import("vboxsf.zig");
 pub const hgfs = @import("hgfs.zig");
 pub const block_device = @import("block_device.zig");
 pub const ext2 = @import("ext2/types.zig");
+pub const ext2_mount = @import("ext2/mount.zig");
 
