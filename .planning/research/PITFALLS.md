@@ -1,8 +1,8 @@
-# Pitfalls Research: TCP/UDP Network Stack Hardening
+# Pitfalls Research
 
-**Domain:** Adding TCP congestion control, dynamic window management, and socket buffer resizing to an existing Zig microkernel network stack
-**Researched:** 2026-02-19
-**Confidence:** HIGH (grounded in the actual zk codebase; pitfalls verified against real code patterns)
+**Domain:** ext2 filesystem implementation in an existing Zig microkernel (zk)
+**Researched:** 2026-02-22
+**Confidence:** HIGH (based on direct codebase analysis + ext2 specification knowledge)
 
 ---
 
@@ -10,286 +10,433 @@
 
 Before reading the pitfalls, understand these fixed points in the current design:
 
-- `BUFFER_SIZE = 8192` is a comptime constant embedded in `[c.BUFFER_SIZE]u8` arrays directly **inside** the `Tcb` struct (types.zig:190,196). Replacing these with pointers requires `Tcb.init()` to be rewritten, every buffer access site to handle null, and the TCB size changes from ~22KB to a smaller header with heap allocations.
-- `c.BUFFER_SIZE` appears in 18 source locations. It is not abstracted behind a function or field -- it is a literal type-level constant in array lengths.
-- The global `state.lock` (IrqLock) wraps the entire TCP state machine. Per-TCB `mutex` (Spinlock) is nested inside. Lock order is strict: `state.lock` before `tcb.mutex`. Any new dynamic allocation must respect this order.
-- `processTimers()` iterates all 256 TCBs every timer tick. Linear scan cost grows with TCB count -- adding per-connection timers for congestion control (persist timer, keepalive) increases this cost.
-- `cwnd`, `ssthresh`, `srtt`, `rttvar` already exist in the TCB but are not enforced at all call sites. The congestion control logic in `rx/established.zig` is correct RFC 5681 but uses integer overflow for AIMD increment (line 65-67) that saturates to `maxInt(u32)` rather than clamping sensibly.
-- `currentRecvWindow()` in types.zig computes the receive window from `c.BUFFER_SIZE` at runtime but the window scale is fixed at `calculateWindowScale(c.BUFFER_SIZE)` in options.zig:205, computed once at SYN time. If buffer size changes after handshake, the scale factor is wrong.
+- SFS uses 512-byte "sectors" as its block unit; `readSector`/`writeSector` in `sfs/io.zig` operate on exactly 512 bytes. ext2 uses 1024, 2048, or 4096-byte logical blocks that map to multiple 512-byte sectors.
+- The VFS `open()` callback receives a **relative path with leading slash** -- for a mount at `/mnt`, the path `/mnt/foo/bar` becomes `/foo/bar`. ext2 must parse this starting from the root inode (inode 2), not search for a string `"/foo/bar"`.
+- SFS allocates files contiguously from `start_block`. ext2 inode block pointers (`i_block[0..14]`) are not contiguous and require translation through direct/indirect tables for every block access.
+- The kernel has documented lock ordering (CLAUDE.md): `alloc_lock` (2) before `io_lock` (2.5). SFS fixed a close deadlock in v1.1 by restructuring bitmap I/O outside the allocation lock. ext2 has the same vulnerability with more places where I/O can nest inside allocation locks.
+- The page cache uses `FileDescriptor.file_identifier` as its cache key. SFS computes this as a pointer-based hash. ext2 must use a stable identifier -- inode numbers are the right choice.
+- `initBlockFs()` in `init_fs.zig` opens `/dev/sda` to mount SFS. There is currently no build step that produces a pre-formatted ext2 image or adds a second drive to the QEMU invocation for ext2 testing.
 
 ---
 
 ## Critical Pitfalls
 
-### Pitfall 1: Replacing Fixed Buffer Arrays with Slices Breaks `Tcb.init()` and `Tcb.reset()`
+### Pitfall 1: Locking Deadlock From Block I/O Called Inside an Allocation Lock
 
 **What goes wrong:**
-`Tcb.init()` currently returns a `Self` by value containing `[8192]u8` arrays. If you change `send_buf` and `recv_buf` from arrays to slices (`[]u8`), the init function must allocate memory, which means it needs an allocator, which means every caller that does `tcb.* = Tcb.init()` breaks. Worse, `Tcb.reset()` calls `self.* = Self.init()` -- this would leak the old buffers every time a connection closes.
+ext2 block and inode allocation read bitmaps and group descriptors from disk. If these disk reads happen while the allocation lock is held, and the disk I/O path internally acquires `io_lock`, the kernel deadlocks. This is the exact bug SFS suffered before the v1.1 fix (`sfs/alloc.zig` restructuring: bitmap scan under lock, I/O outside lock).
+
+ext2 has more allocation touchpoints than SFS:
+- Block allocation reads the block bitmap, then writes it, then writes the group descriptor, then writes the superblock
+- Inode allocation reads the inode bitmap, then writes it, then writes the group descriptor, then initializes the inode block
+- Any of these disk reads nested inside a held allocation lock re-creates the deadlock
 
 **Why it happens:**
-The pattern `self.* = Self.init()` for reset is common in Zig and works correctly for value types. Adding heap-allocated fields converts a "copy to zero" into a "leak old + allocate new" operation unless the reset is explicitly rewritten.
+The natural implementation reads the bitmap inside the allocation function, which is called inside an allocation lock. SFS started with the same pattern and deadlocked after ~50 operations. ext2 has a more complex allocation path with more I/O sites.
 
 **How to avoid:**
-Do not change the reset pattern until buffer lifecycle is fully designed. Options:
-1. Keep `send_buf`/`recv_buf` as fixed arrays but make them optional (`?[]u8`) with a fallback to stack-allocated 8KB when `setsockopt(SO_SNDBUF)` is not called. This keeps `Tcb.init()` trivial.
-2. Write a `Tcb.deinit(allocator)` that frees buffers, and replace all `Tcb.reset()` calls with `tcb.deinit(allocator); tcb.* = Tcb.init();`.
-3. Use a two-field approach: `send_buf_fixed: [BUFFER_SIZE]u8` as default, `send_buf_dyn: ?[]u8` as override. `sendBuf()` returns `if (send_buf_dyn) |d| d else &send_buf_fixed`. This avoids breaking existing code but increases struct size.
+Follow the two-phase pattern from `sfs/alloc.zig`:
+1. Under `alloc_lock`: scan in-memory bitmap cache, mark the bit, record the LBA to write
+2. Release `alloc_lock`
+3. Write dirty bitmap sector to disk (this internally uses `io_lock`)
+4. Write group descriptor update to disk
+5. Write superblock update to disk
+6. Re-acquire `alloc_lock` only to update in-memory counters on rollback
+
+Define a lock hierarchy for ext2 and document it in the struct definition:
+```
+ext2.alloc_lock      (position 2.0 -- bitmap and inode allocation)
+ext2.group_lock      (position 2.25 -- group descriptor updates, acquired under alloc_lock)
+ext2.inode_lock      (position 2.5 -- per-inode metadata, replaces SFS io_lock role)
+```
+Never hold a higher-numbered lock while acquiring a lower-numbered one.
 
 **Warning signs:**
-- Any call to `freeTcb` that does not call `Tcb.deinit` first after adding dynamic buffers.
-- `Tcb.reset()` still present and called without freeing slices.
-- Tests passing on the happy path but leaking on connection reset/timeout.
+- QEMU hangs with no kernel panic after creating several files in ext2
+- The test runner reaches the 90-second timeout instead of a test failure message
+- `console.info("ext2: allocating block...")` appears but the completion log never follows
 
-**Phase to address:** The buffer resizing phase. Requires an explicit design decision before any code changes. Do not proceed with buffer changes until `Tcb.deinit` exists.
+**Phase to address:** Block device abstraction and ext2 allocation (Phase 1).
 
 ---
 
-### Pitfall 2: Window Scale Factor Locked at Connection Setup, Invalid After Buffer Resize
+### Pitfall 2: Using ext2 Block Number as a 512-Byte LBA Causes Silent Data Corruption
 
 **What goes wrong:**
-`rcv_wscale` is negotiated in the SYN/SYN-ACK handshake (options.zig:205) based on `c.BUFFER_SIZE`. It tells the peer "shift your receive window advertisement left by N bits." If you resize the buffer after the handshake, the scale factor is now wrong -- the peer continues sending window advertisements assuming the original scale, but the actual buffer is larger (or smaller).
+ext2 block numbers are logical block numbers, not 512-byte sector numbers. For a 1024-byte ext2 block, logical block 1 is at byte offset 1024 = LBA 2. For 4096-byte blocks, logical block 1 is at byte offset 4096 = LBA 8. Passing an ext2 block number directly to `readSector(lba)` reads from the wrong disk location. The superblock is always at byte 1024 (not at LBA 1) -- this is the first thing to break.
 
 **Why it happens:**
-RFC 7323 requires window scale to be agreed once at connection setup. You cannot renegotiate. The scale factor encodes the ratio between actual buffer capacity and the 16-bit window field. Changing buffer size without changing scale breaks this ratio permanently for the lifetime of the connection.
+SFS conflates "block" with "512-byte sector". The entire SFS I/O layer passes sector numbers. ext2 has a `s_log_block_size` field in the superblock: `block_size = 1024 << s_log_block_size`. An implementation that copies the SFS pattern and passes ext2 block numbers to `readSector` has a factor-of-`sectors_per_block` error in every disk access.
 
 **How to avoid:**
-- For new connections, compute `rcv_wscale` from the configured socket buffer size, not from `c.BUFFER_SIZE`. This means reading `SO_RCVBUF` at `listen()`/`connect()` time.
-- Never allow buffer resize after the handshake completes for the current connection. `setsockopt(SO_RCVBUF)` on an established connection should either be rejected with `EINVAL`, apply only to new connections, or -- if you want Linux behavior -- silently clamp and apply the new buffer size without changing the scale.
-- If you grow the buffer without changing scale: advertised window will saturate at `65535 << rcv_wscale`. This is a correctness bug but not a crash. The connection works but cannot use the extra buffer space.
-- If you shrink the buffer without changing scale: the peer may send data faster than the buffer can hold. `currentRecvWindow()` computes from actual free space, so the window advertisement will still be correct, but the scale computation in the TX path may produce a window value that overflows u16 when shifted.
-
-**Warning signs:**
-- `currentRecvWindow()` returning 0 when the buffer has space (integer cast overflow).
-- Transfer throughput does not improve after increasing buffer size on an established connection.
-- Peer sends data at rate higher than buffer capacity immediately after buffer shrink.
-
-**Phase to address:** Window management phase. The `calculateWindowScale` call in options.zig must be made dependent on the per-socket configured buffer size before the handshake phase of that function.
-
----
-
-### Pitfall 3: `send_acked` Pointer Becomes Invalid When Buffer Pointer Changes
-
-**What goes wrong:**
-`Tcb` has three pointers into the send buffer: `send_head`, `send_tail`, and `send_acked`. These are byte offsets into `send_buf` modulo `BUFFER_SIZE`. If you change the buffer size (either in place by reallocation, or by replacing the pointer), `send_head % new_size` and `send_tail % new_size` no longer point to the same data -- the circular buffer has been logically corrupted.
-
-**Why it happens:**
-A circular buffer with modulo arithmetic encodes position as an absolute offset that wraps at capacity. Changing capacity retroactively invalidates all existing position encodings. The offset `send_acked = 4100` means "byte 4100 % 8192 = 4100" in an 8KB buffer. In a 16KB buffer, the same offset still points to the same physical byte, but the logical interpretation (bytes from tail to head vs. bytes in flight) is now computed incorrectly.
-
-**How to avoid:**
-Buffer resize must be done atomically with a position recalculation. The correct procedure is:
-```
-1. Acquire tcb.mutex
-2. Drain/copy existing buffered bytes: compute logical content as contiguous slice
-3. Allocate new buffer
-4. Copy content to start of new buffer
-5. Reset send_head = content_length, send_tail = 0, send_acked = 0
-6. Replace buffer pointer, update BUFFER_SIZE reference
-7. Release mutex
-```
-This is complex under the existing lock hierarchy. Any shortcut (e.g., just replacing the pointer without recalculating offsets) will corrupt the buffer.
-
-**Warning signs:**
-- Data corruption (wrong bytes sent) after buffer resize with data in flight.
-- Retransmission of wrong data after resize.
-- `bufferedBytes()` in tx/data.zig returning values larger than the buffer.
-
-**Phase to address:** Buffer resizing phase. Must be treated as an atomic operation with position renormalization. Flag this as requiring a specific test: send 4KB, resize to 16KB, send 4KB more, verify all 8KB received in order.
-
----
-
-### Pitfall 4: `cwnd` Growing Without Bound Under Sustained ACKs (Missing Max Cap)
-
-**What goes wrong:**
-The congestion avoidance increment in rx/established.zig:65-67 is:
+Create a block conversion function used by all ext2 I/O:
 ```zig
-const inc = @max(1, (@as(u64, tcb.mss) * tcb.mss) / tcb.cwnd);
-const inc_clamped: u32 = if (inc > std.math.maxInt(u32)) std.math.maxInt(u32) else @truncate(inc);
-tcb.cwnd = std.math.add(u32, tcb.cwnd, inc_clamped) catch std.math.maxInt(u32);
-```
-This correctly uses `std.math.add` to saturate at `maxInt(u32)` (~4GB). However, there is no upper bound on `cwnd` relative to the actual send buffer size. Once `cwnd > BUFFER_SIZE`, it has no effect (the send buffer is the bottleneck). A `cwnd` of 4GB wastes comparison operations every retransmit and can trigger u32 overflow in `eff_wnd` calculations:
-```zig
-const eff_wnd = @min(@as(u32, tcb.snd_wnd), tcb.cwnd); // Both u32, safe
-const flight_size = tcb.snd_nxt -% tcb.snd_una; // Wrapping subtraction
-if (flight_size >= eff_wnd) { // Can be wrong if eff_wnd = maxInt(u32)
-```
-If `cwnd` reaches `maxInt(u32)` and `snd_wnd` is also large, `eff_wnd` stays sane. But if you introduce a 64-bit `cwnd` (e.g., for large buffers), the `@min` comparisons must be widened consistently.
-
-**How to avoid:**
-Cap `cwnd` at `max(send_buffer_size, snd_wnd * 2)` during AIMD. Linux caps at 1GB. A reasonable cap for zk is `min(BUFFER_SIZE * 4, snd_wnd * 4)` since there's no reason to have a `cwnd` larger than what can actually be buffered and sent.
-
-**Warning signs:**
-- `cwnd` growing to `maxInt(u32)` in long-lived idle connections with no data loss.
-- Adding larger buffer sizes causes cwnd to overflow u32 when treated as byte count.
-
-**Phase to address:** Congestion control hardening phase. Add `cwnd = @min(cwnd, MAX_CWND)` at the end of the AIMD update path.
-
----
-
-### Pitfall 5: Partial ACK Deflation in Fast Recovery Sets `cwnd` Below `mss`
-
-**What goes wrong:**
-In rx/established.zig:47, partial ACK during fast recovery does:
-```zig
-tcb.cwnd = tcb.ssthresh + @as(u32, tcb.mss);
-```
-This is the Reno partial ACK deflation. However, `ssthresh` at fast recovery entry is set to `max(flight / 2, mss * 2)`. If there is only 1 MSS in flight when duplicate ACKs arrive, `ssthresh = mss * 2` and `cwnd = mss * 3` at recovery entry, then on partial ACK `cwnd = mss * 2 + mss = mss * 3`. This is actually correct. The bug manifests differently: if `ssthresh` was set to exactly `mss * 2` and then `ssthresh + mss` is `mss * 3`, the window never deflates below `mss * 2` even when `flight_size = 0`. This prevents proper stall detection.
-
-The real risk: when implementing NewReno or CUBIC later, the partial ACK handling must be rewritten. The current Reno implementation is tightly coupled to the specific cwnd arithmetic. Adding a different algorithm means untangling these values without breaking the existing fast recovery state machine.
-
-**How to avoid:**
-Isolate congestion control state into a separate struct at the design phase:
-```zig
-pub const CongestionState = struct {
-    cwnd: u32,
-    ssthresh: u32,
-    algorithm: enum { Reno, NewReno, CUBIC },
-    // algorithm-specific state
-    fast_recovery: bool,
-    recover: u32,
-    dup_ack_count: u8,
-};
-```
-The `Tcb` holds a `CongestionState` and calls `cc.onAck()`, `cc.onLoss()`, `cc.onDupAck()`. This makes algorithm replacement surgical rather than a diff across the entire RX path.
-
-**Warning signs:**
-- Fast recovery state machine behaving differently after adding a second algorithm.
-- `cwnd` and `ssthresh` being modified from two code paths simultaneously (one in established.zig, one in the new algorithm).
-
-**Phase to address:** Congestion control phase. The struct isolation should be done first, before implementing any new algorithm.
-
----
-
-### Pitfall 6: RTT Measurement With Retransmitted Segments (Karn's Algorithm Not Applied)
-
-**What goes wrong:**
-The current RTT measurement in rx/established.zig:51-58 updates the RTO when `ack >= rtt_seq`. This is correct for new transmissions. However, `rtt_seq` is set in tx/data.zig:97-100 as the sequence number of the front of the next segment. If that segment is retransmitted (timer expiry or fast retransmit) and then ACKed, the RTT sample is the time from the *original* send, not the retransmit. This overestimates RTT after loss events.
-
-RFC 6298 (Karn's Algorithm): do not use RTT samples from retransmitted segments. Reset `rtt_seq = 0` whenever a segment is retransmitted.
-
-Currently, `retransmitFromSeq()` in tx/data.zig and `retransmitLoss()` do not clear `rtt_seq`. The timer expiry path in timers.zig:118-130 also does not clear `rtt_seq`.
-
-**How to avoid:**
-Add `tcb.rtt_seq = 0` and `tcb.rtt_start = 0` in:
-1. `retransmitFromSeq()` in tx/data.zig
-2. The RTO timer expiry branch in timers.zig (before the retransmit call)
-3. Fast retransmit in rx/established.zig before calling `retransmitLoss()`
-
-**Warning signs:**
-- RTO inflating abnormally after a single loss event.
-- `srtt` growing without bound after a period of congestion.
-- The connection recovering from loss but then transmitting very slowly for minutes.
-
-**Phase to address:** RTT estimation hardening. This is a correctness fix that should be applied before congestion control is extended, because incorrect RTT makes all congestion control decisions wrong.
-
----
-
-### Pitfall 7: Dynamic Buffer Allocation Fails Under `state.lock` (IrqLock = Interrupts Disabled)
-
-**What goes wrong:**
-`state.lock` is an `IrqLock` that disables interrupts while held. The heap allocator (`tcp_allocator`) is accessed while holding this lock in `allocateTcb()`. If you add `SO_RCVBUF`/`SO_SNDBUF` resizing that calls `heap.allocator().alloc()` while holding `state.lock`, and the allocator internally tries to acquire another lock (e.g., `pmm.lock`), you will deadlock or violate the lock ordering documented in CLAUDE.md (lock order: `tcp_state.lock` at position 5, `pmm.lock` at position 10 -- so pmm can be acquired under tcp_state.lock in the ordering).
-
-The actual risk is different: with interrupts disabled, any allocation that requires a page fault or sleeps (even briefly) is illegal. The heap allocator in this kernel does not sleep, but `pmm.allocZeroedPages` must not be called from interrupt context with interrupts disabled. Check `heap.allocator()` implementation carefully before allocating under IrqLock.
-
-**How to avoid:**
-- Pre-allocate buffers at socket creation time (`socket()` syscall), not at first send/recv or at `setsockopt`.
-- If resizing is done on-demand, release `state.lock` before allocating, then re-acquire and validate the TCB still exists before installing the new buffer.
-- Use the pattern from `freeTcb()`: collect work items to do after lock release, then do them outside the lock.
-
-**Warning signs:**
-- Deadlock in `setsockopt(SO_RCVBUF)` with another thread holding `pmm.lock`.
-- Interrupt latency spike when buffer allocation happens during a connection-heavy workload.
-- `alloc` called from timer interrupt context (processTimers holds state.lock).
-
-**Phase to address:** Buffer resizing phase. Design the allocation site before writing any code. Never allocate under IrqLock unless the allocator is provably interrupt-safe.
-
----
-
-### Pitfall 8: `send_tail` Advanced by ACK Without Checking `send_acked` (In-Flight Data Clobbered)
-
-**What goes wrong:**
-In rx/established.zig:70-72:
-```zig
-const real_acked = ack -% tcb.snd_una;
-tcb.snd_una = ack;
-tcb.send_tail = (tcb.send_tail + real_acked) % c.BUFFER_SIZE;
-```
-This advances `send_tail` by the ACKed byte count. `send_tail` is the read pointer for bytes to send/retransmit. `send_acked` is tracked separately (api.zig:185 shows it used for write position). The `send_tail` advancement assumes the circular buffer arithmetic is correct -- specifically that `real_acked` cannot exceed the actual buffered content.
-
-If `real_acked` wraps (i.e., `ack -% snd_una` produces a value larger than the buffered data due to a rogue ACK or a bug), `send_tail` jumps past `send_head`, making the buffer appear empty when it is not, and subsequent sends will overwrite unacknowledged data.
-
-With dynamic buffer sizes, if the buffer has been resized between the original send and the ACK, `real_acked` may be valid but the modulo with the old `BUFFER_SIZE` is wrong.
-
-**How to avoid:**
-Add an assertion (or runtime check in debug builds):
-```zig
-const buffered = bufferedBytes(tcb); // from tx/data.zig
-if (real_acked > buffered) {
-    // Rogue ACK or state corruption -- reset connection
-    tcb.state = .Closed;
-    return .Continue;
+fn ext2BlockToLba(block_num: u32, block_size: u32) u64 {
+    const sectors_per_block = block_size / 512;  // 2 for 1KB, 8 for 4KB
+    return @as(u64, block_num) * sectors_per_block;
 }
-tcb.send_tail = (tcb.send_tail + real_acked) % effective_buf_size;
 ```
-For dynamic buffers, `effective_buf_size` must come from the TCB's current buffer size field, not from the comptime constant `c.BUFFER_SIZE`.
+Standardize on 4096-byte blocks for all ext2 images created with `mkfs.ext2`. This simplifies the conversion to `lba = block_num * 8`. Validate `s_log_block_size` on mount and refuse to mount if block_size > 4096 or < 1024.
 
 **Warning signs:**
-- Data received by peer out of order or duplicated after an ACK.
-- `bufferedBytes()` returning values larger than buffer capacity.
-- SACK blocks referencing sequence ranges that were already ACKed.
+- Superblock magic check (`0xEF53`) fails even on a correctly formatted image
+- Reading the root inode (inode 2) returns a struct with `i_mode = 0` or garbage type bits
+- `statfs` reports `total_blocks` equal to `disk_sectors / block_size` but the value is off by the `sectors_per_block` factor
 
-**Phase to address:** Buffer resizing phase. This check must be added when `c.BUFFER_SIZE` is replaced with a runtime value.
+**Phase to address:** ext2 superblock parsing and block I/O layer (Phase 1).
 
 ---
 
-### Pitfall 9: `processTimers()` Stack Allocation Scales With `MAX_TCBS`
+### Pitfall 3: Inode Number Off-by-One Corrupts All Inode Table Accesses
 
 **What goes wrong:**
-`processTimers()` in timers.zig:15 allocates:
-```zig
-var wake_list: [c.MAX_TCBS]?*anyopaque = undefined;
-```
-`MAX_TCBS = 256`, so this is `256 * 8 = 2048` bytes on the stack. The function already holds `state.lock` (IrqLock, interrupts disabled), so the stack frame is allocated in a restricted context. If you increase `MAX_TCBS` to support more connections (a natural consequence of dynamic buffers reducing per-connection overhead), this stack allocation grows linearly.
+ext2 inode numbers are 1-based (root directory = inode 2; the first allocatable inode is 11 by convention for rev1 filesystems). If the implementation treats inode numbers as 0-based when computing the inode table offset, every single inode access is off by one entry, reading the wrong inode for every operation.
 
-At 1024 TCBs: 8KB just for `wake_list`. The kernel stack is 96KB (24 pages), but the dispatch stack depth is already deep at timer interrupt entry. The "comptime dispatch table expansion = stack overflow" pattern from MEMORY.md is the precedent here.
+**Why it happens:**
+Zig arrays are 0-indexed. The natural implementation:
+```zig
+const inode_idx = inode_num;  // WRONG: inode 2 -> index 2 (third entry, not second)
+```
+The correct formula:
+```zig
+const local_inode_idx = (inode_num - 1) % inodes_per_group;
+```
+The off-by-one is subtle because inode 2 (root) read at index 2 instead of index 1 may happen to contain valid-looking data in a freshly formatted small filesystem, causing the bug to pass initial tests and only manifest with larger directory trees or specific inode layouts.
 
 **How to avoid:**
-Change `wake_list` to a fixed small array (e.g., 32 entries) and process in batches, or use a static global wake buffer protected by its own lock (safe because `processTimers` is always called from a single timer context in this single-CPU kernel).
-
+Always subtract 1 when converting inode number to table index:
 ```zig
-// Static buffer - safe for single-CPU kernel
-var wake_list: [64]?*anyopaque = undefined; // Fixed size
-var wake_count: usize = 0;
-// If wake_count >= 64: release lock, wake batch, re-acquire, continue
+fn inodeTableIndex(inode_num: u32, inodes_per_group: u32) u32 {
+    // inode_num is 1-based; table is 0-indexed
+    return (inode_num - 1) % inodes_per_group;
+}
 ```
+Add a comptime assertion or runtime panic in debug builds: `if (inode_num == 0) @panic("ext2: inode 0 is reserved and invalid")`.
 
 **Warning signs:**
-- Double fault or kernel stack guard hit after increasing `MAX_TCBS`.
-- Stack corruption manifesting as wrong TCB state after a timer tick with many simultaneous timeouts.
+- Root directory (`/mnt`) always returns ENOENT on a freshly formatted image
+- `readdir` returns entries but the inode numbers in each `dirent` do not match the expected file
+- `stat` on a regular file returns `st_mode` with directory bits set
 
-**Phase to address:** Any phase that increases `MAX_TCBS`. If dynamic buffers reduce per-connection overhead enough to warrant more connections, address the wake_list size first.
+**Phase to address:** Inode read/write implementation (Phase 2).
 
 ---
 
-### Pitfall 10: Persist Timer Logic Missing -- Zero-Window Deadlock
+### Pitfall 4: Directory Entry Scan Uses name_len Instead of rec_len as Stride
 
 **What goes wrong:**
-When `snd_wnd = 0` (peer's receive buffer is full), `transmitPendingData` returns early (tx/data.zig:58-76) and sets `retrans_timer = 1`. The RTO timer fires and retransmits a zero-window probe. However, the retransmit path in timers.zig:120-130 handles the `.Established` case by either using SACK retransmit or resetting `snd_nxt = snd_una` and calling `transmitPendingData`. If `snd_wnd` is still 0 when `transmitPendingData` is called, it hits the `eff_wnd == 0` branch and sends a 1-byte probe (lines 63-72). This is correct.
+ext2 directory entries have variable length. The `rec_len` field of each entry is the actual offset to the next entry. The last entry in a block has `rec_len` set to fill the remaining space to end-of-block. If the implementation uses `name_len` rounded up to 4 bytes as the stride instead of `rec_len`, it desynchronizes from the directory layout and misreads all subsequent entries.
 
-The bug is that the RTO exponential backoff applies to the persist probe -- the same timer backs off to 64 seconds. RFC 1122 requires a persist timer that probes at 5-60 second intervals (not the full RTO backoff schedule). Using RTO backoff for zero-window probing means after a few probe failures, the probe interval is minutes, effectively freezing the connection.
+**Why it happens:**
+The minimum size of a directory entry is `8 + name_len` bytes rounded to a 4-byte boundary. This equals `rec_len` for all entries except the last, where the last entry's `rec_len` covers all unused space to end-of-block. A naive implementation computes stride as `(8 + name_len + 3) & ~3` which equals `rec_len` for all entries except the last one, causing it to walk off into unused space at the end of the block.
 
 **How to avoid:**
-Separate the persist timer from the retransmission timer. When `snd_wnd = 0`:
-- Do not start the retrans timer in the normal sense.
-- Start a persist timer that fires every `min(rto_ms, PERSIST_MAX_MS)` seconds.
-- Do not apply exponential backoff to the persist interval (or apply a much gentler cap, e.g., 60s max).
-- Reset persist timer when a non-zero window update arrives.
+Always use `rec_len` as the stride, never compute stride from `name_len`:
+```zig
+var offset: usize = 0;
+while (offset + 8 <= block_size) {
+    const entry = parseEntry(block_data[offset..]);
+    if (entry.rec_len < 8 or entry.rec_len % 4 != 0 or offset + entry.rec_len > block_size) {
+        // Corrupt directory block
+        return error.IOError;
+    }
+    if (entry.inode != 0) {
+        // Valid entry -- process it
+    }
+    offset += entry.rec_len;  // NOT: (8 + entry.name_len + 3) & ~3
+}
+```
 
 **Warning signs:**
-- Connection "frozen" for minutes when peer's buffer temporarily fills.
-- `retrans_count` incrementing on zero-window probes, eventually triggering MAX_RETRIES reset.
-- Connection reset by kernel after peer's buffer opens up but before the next probe fires.
+- `getdents64` returns an incomplete file list from a directory
+- The last file alphabetically in a directory block is always missing
+- Directory iteration loops indefinitely (offset wraps around inside the block)
 
-**Phase to address:** Window management phase. Persist timer is tightly coupled to zero-window logic.
+**Phase to address:** Directory entry iteration and `getdents` implementation (Phase 3).
+
+---
+
+### Pitfall 5: Indirect Block Chain Not Fully Implemented Causes Silent Truncation
+
+**What goes wrong:**
+ext2 inodes have 12 direct block pointers (`i_block[0..11]`), one single-indirect (`i_block[12]`), one double-indirect (`i_block[13]`), and one triple-indirect (`i_block[14]`). An implementation that handles only direct and single-indirect blocks silently truncates reads and writes for files larger than `(12 + block_size/4) * block_size` bytes. For 4096-byte blocks this is `(12 + 1024) * 4096 = 4,243,456` bytes (~4MB). For 1024-byte blocks it is only `(12 + 256) * 1024 = 274,432` bytes (~268KB). Tests with small files pass; large file tests silently return short reads.
+
+**Why it happens:**
+Single-indirect support is enough to pass a majority of unit tests with small files. Double and triple indirect blocks are easy to defer. The failure is silent: a 10MB file write succeeds (the write loop returns the correct count) but subsequent reads stop at the single-indirect boundary with no error.
+
+**How to avoid:**
+Implement all four indirection levels before writing any I/O test. Structure the block resolution as a single function covering all levels:
+```zig
+fn getBlockForLogicalIndex(inode: *Ext2Inode, block_idx: u32, fs: *Ext2Fs) !u32 {
+    const ptrs_per_block = fs.block_size / 4;
+    if (block_idx < 12) return inode.i_block[block_idx];
+    const idx = block_idx - 12;
+    if (idx < ptrs_per_block) return resolveIndirect(inode.i_block[12], idx, fs);
+    // double indirect
+    const idx2 = idx - ptrs_per_block;
+    if (idx2 < ptrs_per_block * ptrs_per_block) return resolveDoubleIndirect(...);
+    // triple indirect
+    return resolveTripleIndirect(...);
+}
+```
+
+**Warning signs:**
+- Write of 5MB succeeds, subsequent read returns only 4MB with no error
+- `stat` shows `st_size` = 5MB but `read()` loop terminates early
+- Large file stress test hangs or returns ENOSPC at a suspiciously round size
+
+**Phase to address:** ext2 file I/O with block mapping (Phase 2 or 3).
+
+---
+
+### Pitfall 6: Bitmap Written Without Flushing Group Descriptor Creates Filesystem Inconsistency
+
+**What goes wrong:**
+After allocating a block or inode, three structures must be updated on disk in order: (1) the bitmap, (2) the group descriptor (`bg_free_blocks_count` or `bg_free_inodes_count`), and (3) the superblock (`s_free_blocks_count`). Skipping step 2 leaves the bitmap and superblock in agreement but the group descriptor wrong. After QEMU restart, `e2fsck` reports "Group descriptor X has bad block count" and either refuses to mount or repairs by recomputing from the bitmap -- overwriting the "correct" count with something that may disagree.
+
+**Why it happens:**
+SFS has no group descriptors. The SFS pattern is: write bitmap, write superblock. ext2 requires the intermediate group descriptor write. The group descriptor step is the most commonly skipped because it is easy to forget it exists.
+
+**How to avoid:**
+After every bitmap modification, write three sectors in order:
+1. Block or inode bitmap (marks the allocation)
+2. Group descriptor sector (updates free count for the block group)
+3. Superblock sector (updates global free count and `s_wtime`)
+
+Make the three-step flush a single function that cannot be called partially. Do not make step 2 optional or "optimize" it away.
+
+**Warning signs:**
+- Running `e2fsck` on the QEMU disk image after a test run reports errors in group descriptors
+- After kernel restart (new QEMU session), `statfs` shows different free block count than during the previous session
+- `df` inside the kernel shows wrong available space after many file creates and deletes
+
+**Phase to address:** Block and inode allocation (Phase 2).
+
+---
+
+### Pitfall 7: VFS Relative Path Parsing Logic Does Not Handle Multi-Level Paths Correctly
+
+**What goes wrong:**
+The VFS `open()` strips the mount prefix and passes a leading-slash relative path to the filesystem callback (e.g., `/mnt/foo/bar` becomes `/foo/bar`). An ext2 implementation that splits this on `/` must handle the empty component from the leading slash correctly. If the split logic includes an empty leading component and starts searching from inode 2 for a file named `""`, the first lookup fails and the entire path resolution returns ENOENT.
+
+**Why it happens:**
+`std.mem.split(u8, "/foo/bar", "/")` produces `["", "foo", "bar"]`. The first component is an empty string. An implementation that calls `lookupName(current_dir_inode, "")` will not find `""` in the directory entries and returns ENOENT. The simple fix (skip empty components) must also correctly handle `/` (root), `//`, and paths with trailing slashes.
+
+**How to avoid:**
+Use a tokenizer that skips empty components:
+```zig
+var it = std.mem.tokenizeScalar(u8, rel_path, '/');
+var current_inode: u32 = ROOT_INODE;  // inode 2
+while (it.next()) |component| {
+    if (component.len == 0) continue;
+    current_inode = try lookupDirEntry(current_inode, component, fs);
+}
+```
+Test the VFS integration with: root open (`/`), one level (`/file`), two levels (`/dir/file`), three levels (`/a/b/c`), and paths with trailing slashes (`/dir/`).
+
+**Warning signs:**
+- Opening `/mnt` (the mount point itself) succeeds but opening any path under `/mnt` returns ENOENT
+- Files at the top level of the ext2 root directory cannot be found, but `getdents` lists them
+- Paths with exactly two levels work; paths with three or more levels always fail
+
+**Phase to address:** ext2 path resolution and directory lookup (Phase 3).
+
+---
+
+### Pitfall 8: FileDescriptor.position Cannot Substitute for ext2 Block Offset Resolution
+
+**What goes wrong:**
+SFS reads file data as `phys_sector = start_block + (file_desc.position / 512)`. This works because SFS allocates files contiguously. ext2 does not guarantee contiguous block allocation. Using `file_desc.position / block_size` as a direct inode block index is correct only when the file has never been written out of order and the filesystem has never been fragmented. After any file deletion and re-use of freed blocks, block allocation is non-contiguous and this calculation returns the wrong physical block.
+
+**Why it happens:**
+The SFS pattern is deeply ingrained. If `sfsRead` is copied as a starting point for `ext2Read`, the `start_block + offset/512` line is the first thing to copy and the last thing to audit. The bug is invisible for freshly formatted images where files are created in order.
+
+**How to avoid:**
+ext2 read/write must call `getBlockForLogicalIndex(inode, position / block_size, fs)` for every block access. There is no shortcut. The inode's `i_block[15]` array is the only valid source of block numbers:
+```zig
+const block_idx: u32 = @intCast(file_desc.position / fs.block_size);
+const phys_block = try getBlockForLogicalIndex(inode, block_idx, fs);
+const lba = ext2BlockToLba(phys_block, fs.block_size);
+try readBlock(fs, lba, sector_buf[0..fs.block_size]);
+```
+
+**Warning signs:**
+- Read/write works on freshly created files but fails after delete + recreate on the same filesystem
+- Data read from a fragmented file contains blocks from previously deleted files
+- Writes to a file that was truncated then extended return garbage in the re-extended region
+
+**Phase to address:** ext2 file I/O (Phase 3).
+
+---
+
+### Pitfall 9: Page Cache file_identifier Collision With SFS or Between ext2 Files
+
+**What goes wrong:**
+The page cache uses `FileDescriptor.file_identifier` to key cached pages. The VFS assigns this as `(mount_idx << 32) | (ptr & 0xFFFFFFFF)` where `ptr` is the lower 32 bits of the `private_data` pointer. If ext2 uses the same pointer-based scheme, and the heap allocator reuses a pointer that was previously associated with a different file, the page cache returns stale data from the old file for the new file's reads.
+
+**Why it happens:**
+The current VFS code in `vfs.zig:269-273` computes `file_identifier` from the private_data pointer for all filesystems. SFS works with this because SFS files are long-lived objects tied to fixed disk positions. ext2 files may be opened and closed repeatedly, with `private_data` pointers being reused by the heap allocator. Two different ext2 files at different times could get the same `file_identifier` if they share a recycled pointer.
+
+**How to avoid:**
+ext2 must override `file_identifier` after the VFS assigns it, using the stable inode number:
+```zig
+// After VFS.open() returns the FileDescriptor:
+file_desc.file_identifier = (@as(u64, file_desc.vfs_mount_idx) << 32) | @as(u64, inode_num);
+```
+Inode numbers are unique and stable within a mounted filesystem, making this collision-free as long as the mount point is consistent.
+
+**Warning signs:**
+- `splice` or `sendfile` between two ext2 files returns data from the wrong file
+- After deleting a file and creating a new one with the same name, reads of the new file return data from the old file
+- Page cache hit rate is unexpectedly high for newly created files (hitting old entries)
+
+**Phase to address:** ext2 VFS integration and file open path (Phase 3).
+
+---
+
+### Pitfall 10: QEMU Disk Image Setup Is Missing -- All ext2 Tests Silently Return ENOENT
+
+**What goes wrong:**
+`initBlockFs()` fails silently if `/dev/sda` does not contain a valid ext2 filesystem -- it logs a warning and returns without mounting `/mnt`. If the QEMU invocation for ext2 testing does not include a pre-formatted ext2 image as a drive, the kernel runs without `/mnt` mounted and every ext2 integration test returns ENOENT. This looks like ext2 implementation bugs rather than a missing disk image, causing significant debugging confusion.
+
+**Why it happens:**
+The current build system creates `disk.img` only for the UEFI ESP boot partition. There is no build step to create an ext2 data partition image or add a second drive to the QEMU command. The `mkfs.ext2` tool is also not available by default on macOS -- it requires Homebrew `e2fsprogs`.
+
+**How to avoid:**
+Add a host-side build step in `build.zig` that creates a pre-formatted ext2 image:
+```bash
+# Requires: brew install e2fsprogs
+dd if=/dev/zero of=ext2_data.img bs=1M count=64
+/opt/homebrew/opt/e2fsprogs/bin/mkfs.ext2 -b 4096 -L "zk-data" ext2_data.img
+```
+Add this image to the QEMU invocation as a second drive:
+```
+-drive if=none,format=raw,id=ext2disk,file=ext2_data.img
+-device virtio-blk-pci,drive=ext2disk
+```
+This appears as `/dev/sdb` (AHCI port 1) or the VirtIO block device. Update `initBlockFs()` to try both `/dev/sda` and `/dev/sdb`, or make the device path configurable. Add a check in the build step that fails with a clear message if `mkfs.ext2` is not found rather than producing an unformatted image.
+
+**Warning signs:**
+- All ext2 integration tests return ENOENT with no other error
+- The kernel boot log shows `"SFS: Failed to initialize on /dev/sda"` but no ext2 init messages
+- `statfs("/mnt")` returns ENOENT
+
+**Phase to address:** Build system and QEMU disk image setup (Phase 1, prerequisite to all other phases).
+
+---
+
+## Moderate Pitfalls
+
+### Pitfall 11: aarch64 Struct Alignment Faults on Packed ext2 On-Disk Structures
+
+**What goes wrong:**
+ext2 on-disk structures contain u16 fields at byte offsets that are not 4-byte aligned (e.g., `bg_free_blocks_count` in the group descriptor is at offset 12, which is 4-byte aligned, but other fields like `bg_used_dirs_count` at offset 16 and various u16 fields in directory entries are packed without natural alignment). On aarch64, accessing a u32 at a non-4-byte-aligned virtual address causes an alignment fault (`DataAlignmentFault`) that the x86_64 hardware handles transparently.
+
+**Why it happens:**
+The project already has a documented instance of this: `socklen_t` reads as `u32` instead of `usize` after the kernel read 8 bytes from a 4-byte stack variable on aarch64. ext2 on-disk structures have the same property: they are defined by the spec with specific byte offsets, not by Zig's natural alignment rules. Using `extern struct` with `@sizeOf` assertions is the correct pattern (matching CLAUDE.md's `extern struct` for hardware structures rule), but it is easy to miss individual fields.
+
+**How to avoid:**
+Use `extern struct` for all ext2 on-disk types and add comptime size assertions for each:
+```zig
+pub const Ext2Superblock = extern struct {
+    s_inodes_count: u32,
+    s_blocks_count: u32,
+    // ... all 204 bytes
+};
+comptime { std.debug.assert(@sizeOf(Ext2Superblock) == 1024); }
+
+pub const Ext2GroupDesc = extern struct {
+    bg_block_bitmap: u32,
+    bg_inode_bitmap: u32,
+    bg_inode_table: u32,
+    bg_free_blocks_count: u16,
+    bg_free_inodes_count: u16,
+    bg_used_dirs_count: u16,
+    bg_pad: u16,
+    bg_reserved: [3]u32,
+};
+comptime { std.debug.assert(@sizeOf(Ext2GroupDesc) == 32); }
+```
+For directory entries with variable-length `name` fields, use `std.mem.readInt(u16, entry_bytes[6..8], .little)` for `rec_len` rather than struct field access to avoid alignment issues at arbitrary offsets within a directory block.
+
+**Warning signs:**
+- Tests pass on x86_64 but produce `DataAlignmentFault` or wrong field values on aarch64
+- Superblock magic check passes on x86_64 but fails on aarch64 on the same image
+- Group descriptor free block count is 0 on aarch64 but correct on x86_64
+
+**Phase to address:** ext2 on-disk type definitions (Phase 1).
+
+---
+
+### Pitfall 12: inode.i_size_high Is Ignored, Causing Wrong st_size for Rev1 Filesystems
+
+**What goes wrong:**
+`mkfs.ext2` creates rev1 filesystems by default. In rev1, the `i_dir_acl` field in the inode is repurposed as `i_size_high` for regular files -- the upper 32 bits of a 64-bit file size. An implementation that reads only `i_size` (the lower 32 bits) correctly reports file sizes up to 4GB but silently returns wrong sizes for files that have `i_size_high != 0`, and also misinterprets the field for directories (where `i_dir_acl` retains its original meaning).
+
+**Why it happens:**
+Most ext2 documentation focuses on rev0 where `i_size` is the only size field. The rev1 extension is a footnote. Since test files are small, `i_size_high` is always 0 and the bug is invisible. However, the rev1 flag must still be checked because the field interpretation depends on it.
+
+**How to avoid:**
+On mount, read `s_rev_level` from the superblock. Store it in the ext2 mount instance. When computing file size:
+```zig
+fn getInodeSize(inode: *Ext2Inode, rev: u32) u64 {
+    const lower: u64 = inode.i_size;
+    if (rev >= 1 and isRegularFile(inode.i_mode)) {
+        return ((@as(u64, inode.i_dir_acl) << 32) | lower);
+    }
+    return lower;
+}
+```
+`mkfs.ext2` on modern Linux creates `s_rev_level = 1` with `s_first_ino = 11`. The test image will be rev1.
+
+**Warning signs:**
+- `stat` returns `st_size = 0` even for files the kernel just wrote with verified content
+- Large file write returns correct byte count but `fstat` shows wrong `st_size`
+- `s_rev_level` from the superblock is 1 but the code path for rev0 is used
+
+**Phase to address:** Inode structure definition and size computation (Phase 2).
+
+---
+
+### Pitfall 13: Parent Directory mtime/ctime Not Updated After File Create or Delete
+
+**What goes wrong:**
+When a file is created or deleted inside a directory, the parent directory inode's `i_mtime` (modification time) and `i_ctime` (change time) must be updated and written back to disk. SFS stores mtime only in the `DirEntry` for the file itself, not on the directory. ext2 directory inodes have their own full inode with timestamps. Skipping the parent inode timestamp update causes `stat` on the directory to show stale timestamps, breaking tests that check directory mtime after file operations and breaking the existing inotify hooks that read mtime.
+
+**Why it happens:**
+SFS has no directory inode concept -- directories are flat tables. Copying the SFS pattern for ext2 means implementing file inode updates but forgetting that the parent directory is also an inode that needs updating. This is invisible until a test explicitly checks the parent directory's mtime.
+
+**How to avoid:**
+After writing a directory entry (create or delete marker), immediately read the parent directory's inode, update `i_mtime = current_time`, `i_ctime = current_time`, and write it back to disk. Factor this into a helper called from every directory-modifying operation: `create`, `unlink`, `rename`, `mkdir`, `rmdir`.
+
+**Warning signs:**
+- `stat` on a directory shows `st_mtime` unchanged after creating a file inside it
+- inotify tests that watch a directory for IN_CREATE see the event but subsequent stat shows old mtime
+- `ls -la` on the directory always shows the same timestamp regardless of file creates/deletes
+
+**Phase to address:** Directory modification operations (Phase 3).
+
+---
+
+### Pitfall 14: Newly Allocated Blocks Not Zeroed Before User Data Is Written
+
+**What goes wrong:**
+When ext2 allocates a new block for a file or directory, the physical disk sectors at that location may contain data from a previously deleted file. If the implementation writes user data into the new block starting at offset 0 but does not zero the rest of the block, the unwritten portion of the last block leaks data from deleted files to the new file owner.
+
+For directory blocks, the uninitialized portion will contain garbage `rec_len` values that cause the directory scanner to walk off into garbage data.
+
+**Why it happens:**
+SFS sequential allocation starts fresh data at the end of the allocated region so prior content is only accessible before the file's `size` and is bounded by the read path. ext2 block allocation can return any free block, including one from a recently deleted large file.
+
+**How to avoid:**
+CLAUDE.md rule: "Zero-initialize destination buffers before initiating DMA or hardware reads." Extend this to block allocation: `@memset(block_buf, 0)` before writing any new block, including directory blocks. The DMA hygiene principle applies here.
+
+**Warning signs:**
+- `getdents64` on a newly created directory returns garbage entries after the `.` and `..` entries
+- Files read beyond their EOF position return non-zero bytes
+- `e2fsck` reports "directory entry has non-zero name_len but inode 0" in newly created directories
+
+**Phase to address:** Block allocation and initial block write (Phase 2).
 
 ---
 
@@ -297,24 +444,28 @@ Separate the persist timer from the retransmission timer. When `snd_wnd = 0`:
 
 | Shortcut | Immediate Benefit | Long-term Cost | When Acceptable |
 |----------|-------------------|----------------|-----------------|
-| Keep `c.BUFFER_SIZE` as comptime in buffer arithmetic | No code changes needed | Cannot support per-socket buffer sizes; window scale is wrong for non-default buffers | Only until buffer resizing phase |
-| Use `cwnd = mss` on loss without per-algorithm state | Simple code, correct for Reno | Cannot add CUBIC without rewriting the RX path | Never -- struct isolation has no downside |
-| Track RTT on retransmitted segments (Karn's violation) | One less conditional | RTT inflates post-loss, causing conservative RTO, hurting throughput | Never -- this is an RFC violation |
-| Single `retrans_timer` for both retransmit and persist | Fewer timer fields | Zero-window deadlock under backoff | Never -- separate timers have independent purposes |
-| `maxInt(u32)` saturation for cwnd | No overflow | cwnd becomes meaningless at >4GB; comparison semantics change | Acceptable only if BUFFER_SIZE cap is also applied |
+| Only direct + single-indirect blocks | Simpler initial code, passes small-file tests | Silent truncation for files > 4MB; must fix before large-file tests | Only if explicitly tracked and deferred |
+| Skip group descriptor flush | Fewer I/O operations | `e2fsck` errors after restart; bitmap/descriptor inconsistency | Never -- corrupts on-disk state |
+| Read `i_size` (32-bit) only, ignore `i_size_high` | Simpler inode code | Wrong `st_size` for files > 4GB; rev1 filesystem may behave incorrectly | Only if rev0 image explicitly forced |
+| Hardcode 4096-byte block size | No block-size conversion code needed | Cannot mount ext2 images with 1024-byte blocks | Acceptable for v2.0 if documented in mount error message |
+| Pointer-based `file_identifier` (copied from SFS) | No change to VFS integration | Stale page cache hits after pointer reuse | Never -- inode number is the correct key |
+| In-memory inode cache with no eviction | Faster repeated lookups | Memory grows unbounded; kernel heap exhausted in long test runs | Acceptable for v2.0 only if bounded by a fixed array size |
 
 ---
 
 ## Integration Gotchas
 
-| Integration Point | Common Mistake | Correct Approach |
-|-------------------|----------------|------------------|
-| `SO_SNDBUF`/`SO_RCVBUF` setsockopt | Apply new size immediately to established connection | Apply to new buffer allocation; do not resize in place; note that Linux doubles the value internally |
-| `currentRecvWindow()` with new buffer size | Forget to update `rcv_wscale` in the TCB | `rcv_wscale` must match the configured buffer at SYN time; expose a `tcb.effectiveBufferSize()` used by both window computation and modulo arithmetic |
-| `calculateWindowScale()` in options.zig:205 | Pass `c.BUFFER_SIZE` (comptime) | Pass `tcb.recv_buf_size` (runtime from socket option) |
-| Congestion control in the ACK path | Modify `cwnd` before `send_tail` advancement | The order in established.zig is significant; cwnd update must see the new `snd_una` value |
-| Adding CUBIC `K` and `W_max` fields to `Tcb` | Add directly to TCB struct | Put in `CongestionState` sub-struct; TCB at ~22KB is already large; adding 64 bytes per connection for unused fields is waste |
-| `options.zig:205` window scale calculation | Called from SYN processing before socket buffer size is known | Pass socket's configured `rcv_buf_size` through the call chain from `rx/syn.zig` |
+| Integration | Common Mistake | Correct Approach |
+|-------------|----------------|------------------|
+| VFS `open` callback | Treating `rel_path` as already-stripped mount prefix when it still has a leading `/` | VFS strips mount prefix but preserves leading slash; parse `/foo/bar` starting from root inode 2 |
+| VFS `getdents` callback | Using `file_desc.position` as a directory block offset directly | Store block index and intra-block offset in ext2 private_data; `position` is a byte offset into the logical directory stream |
+| VFS `stat_path` callback | Returning `FileMeta.ino = 0` | Set `ino = inode_num`; the field exists in `FileMeta` for TOCTOU detection |
+| page cache `file_identifier` | Inheriting the SFS pointer-based ID | Override after VFS assigns it: `(mount_idx << 32) | inode_num` |
+| SFS I/O pattern | Calling `readBlock` inside an allocation lock | Two-phase pattern: compute LBA under lock, do I/O outside lock |
+| `initBlockFs()` device path | Hardcoding `/dev/sda` for ext2 | Use `/dev/sdb` if ext2 is a second drive, or make device path configurable via build option |
+| `FileOps.truncate` | Not zeroing extended blocks on `ftruncate` growth | Zero-fill all newly allocated blocks; prevents data leak from freed blocks |
+| inotify hooks | Calling `vfs_event_hook` inside a filesystem lock | The VFS calls hooks after filesystem operations return; do not call from inside ext2 functions |
+| `FileOps.getdents` | Storing directory scan state only in `file_desc.position` | ext2 directory iteration requires both a block index and an intra-block offset; use private_data for state |
 
 ---
 
@@ -322,11 +473,11 @@ Separate the persist timer from the retransmission timer. When `snd_wnd = 0`:
 
 | Trap | Symptoms | Prevention | When It Breaks |
 |------|----------|------------|----------------|
-| Linear TCB scan in `processTimers` | Timer tick takes proportionally longer with more connections | Indexed timer wheel (even a simple 8-bucket wheel by next-expiry-second) | At ~128 active connections with frequent short RTOs |
-| Per-byte copy loop in `send()`/`recv()` (api.zig:183-186,210-213) | CPU-bound send throughput, not I/O bound | `@memcpy` with wrapped-buffer handling for the two-segment circular buffer case | Any bulk transfer >1MB with small MSS |
-| `for (0..send_len)` copy in `transmitPendingData` (tx/data.zig:91-94) | Same as above but in TX path | Split into two `@memcpy` calls: `buf[tail..min(tail+len, cap)]` then `buf[0..remainder]` | Measurable at 100MB+ throughput |
-| `isTcbValid()` linear scan on every `connect()` poll (tcp_api.zig:229) | O(n) per wakeup check while blocked on connect | Generation counter check (already in TCB) is sufficient for UAF safety; can skip `isTcbValid()` when generation matches | At 100+ concurrent connecting sockets |
-| `OooBlock` with `[MAX_TCP_PAYLOAD]u8` inline (types.zig:123) | Each OOO block is 1466 bytes; 4 blocks = 5864 bytes per TCB in the struct | Allocate OOO blocks from a pool; or reduce to 2 blocks with coalescing | With dynamic buffers where OOO depth increases |
+| One `readSector` call per 512-byte chunk of a block | Extremely slow directory traversal and inode reads | Batch reads using `readSectorsAsync` for multi-sector blocks; `sectors_per_block` reads at once | Immediately visible in stress tests (100 files) |
+| Re-reading group descriptor from disk for every alloc | Allocation collapse under create-heavy workload | Cache all group descriptors in memory in a fixed array at mount time | Any test creating > 10 files |
+| No in-memory inode cache | Each `stat` or `open` requires 2-3 disk reads | Cache a bounded set of recently used inodes by inode number | Stress tests with 100 files |
+| Byte-by-byte copy in directory entry scan | `getdents` is slow for directories with many entries | Read full directory block into a heap buffer, scan in memory | Directories with > 20 entries |
+| Writing group descriptor + superblock on every write call | Write throughput collapses for small sequential writes | Defer group descriptor / superblock flush to explicit `fsync` or periodic writeback | Write-heavy benchmarks |
 
 ---
 
@@ -334,25 +485,28 @@ Separate the persist timer from the retransmission timer. When `snd_wnd = 0`:
 
 | Mistake | Risk | Prevention |
 |---------|------|------------|
-| Accepting peer's window scale without validation | Peer advertises scale=14; computed `snd_wnd = raw_window << 14` overflows u32 | Clamp: `scale = @min(snd_wscale, c.TCP_MAX_WSCALE)` -- already done in established.zig:123 but verify in SYN-ACK processing path |
-| Advertising window larger than actual buffer | Peer sends data faster than buffer can absorb; data silently dropped | `currentRecvWindow()` must compute from actual free space, not from nominal buffer size |
-| `real_acked` without upper-bound check | Rogue ACK advances `send_tail` past valid data, enabling write-after-send | Add: `if (real_acked > bufferedBytes(tcb)) return error; // reset connection` |
-| Zero-initializing large dynamic buffers at allocation | `pmm.allocZeroedPages` is safe; `heap.allocator().alloc()` with `[_]u8{0}` is a zeroing loop that holds `state.lock` | Allocate with `alloc(u8, size)` outside the lock, then `@memset` outside the lock |
-| Window shrinking: advertising smaller window than already in flight | Peer may have sent more data than the shrunken buffer can hold | Never advertise a window smaller than `rcv_nxt + outstanding_data - recv_buf_start`; the RFC calls this "SWS avoidance" |
+| Trusting `s_blocks_count` from disk without bounds checking | Malicious image causes OOB block reads; arbitrary kernel memory read | Validate: `s_blocks_count <= device_capacity_in_blocks`; panic or ENODEV if not |
+| Trusting `rec_len` in directory entries without bounds check | Crafted image causes infinite loop or OOB read in directory scan | Require `rec_len >= 8`, `rec_len % 4 == 0`, and `offset + rec_len <= block_size` |
+| Trusting inode `i_block` pointers without range check | Indirect block pointer outside filesystem reads arbitrary disk sectors | After resolving each block pointer, verify `0 < block_num < s_blocks_count` |
+| Not zeroing newly allocated blocks | Data from previously freed files leaks to new file owner | `@memset(block_buf, 0)` before writing new block; matches CLAUDE.md DMA hygiene rule |
+| Not validating `i_mode` file type before operations | Directory inode opened as regular file; type confusion exploits | Check `i_mode & S_IFMT` matches expected type at the start of every `open` |
+| Path component traversal via `..` | Access to parent directory outside mount point | Validate each path component is not `..`; or implement POSIX `..` resolution bounded to mount root |
 
 ---
 
 ## "Looks Done But Isn't" Checklist
 
-- [ ] **Congestion control:** `cwnd` is updated but there is no upper bound relative to buffer size -- verify `cwnd = @min(cwnd, send_buf_size * N)` is applied.
-- [ ] **RTT measurement:** `rtt_seq = 0` is set in all retransmit paths (both timer expiry and fast retransmit) -- verify in timers.zig and rx/established.zig.
-- [ ] **Buffer resize:** `Tcb.reset()` frees old dynamic buffer before zeroing -- verify `deinit()` is called, not just `self.* = init()`.
-- [ ] **Window scale:** `rcv_wscale` is computed from the runtime buffer size, not from `c.BUFFER_SIZE` -- verify in options.zig:205.
-- [ ] **Persist timer:** Zero-window detection does not apply exponential backoff beyond 60s -- verify `retrans_count` is not incremented for zero-window probes.
-- [ ] **`send_tail` arithmetic:** The modulo uses the TCB's current effective buffer size, not the comptime constant -- verify in rx/established.zig:72.
-- [ ] **`processTimers` wake_list:** Stack size of `[MAX_TCBS]?*anyopaque` is bounded -- verify when increasing `MAX_TCBS`.
-- [ ] **`SO_SNDBUF` doubling:** Linux silently doubles `SO_SNDBUF` values (for bookkeeping overhead). If you implement `getsockopt(SO_SNDBUF)`, it should return double what `setsockopt` received. Userspace applications depend on this.
-- [ ] **Both architectures:** `snd_wscale` shift (`<< scale`) and window scale option parsing behave identically on x86_64 and aarch64 -- the existing `@min(tcb.snd_wscale, 14)` cast in established.zig:123 is `@intCast` which must not truncate on aarch64.
+- [ ] **Block number conversion**: `LBA = block_num * (block_size / 512)`, not `block_num` directly -- verify by reading the ext2 superblock at LBA 2 (byte offset 1024)
+- [ ] **Inode 1-based indexing**: All table offset calculations use `inode_num - 1` -- verify root directory (inode 2) resolves to the correct inode table entry
+- [ ] **Block allocation flush order**: Superblock AND group descriptor BOTH written after every alloc/free -- verify with `e2fsck` after a test run
+- [ ] **Indirect blocks**: All three levels (single/double/triple) implemented -- verify with a file larger than 1MB
+- [ ] **Directory entry stride**: `rec_len` used as stride (not computed from `name_len`) -- verify with `hexdump` showing last entry fills block
+- [ ] **64-bit file size**: `i_size_high` combined with `i_size` for regular files on rev1 -- verify `stat` returns correct `st_size` for files the kernel just wrote
+- [ ] **Parent directory timestamps**: `i_mtime` updated on parent dir inode after create/delete -- verify `stat` on the directory shows updated mtime
+- [ ] **aarch64 alignment**: All struct fields verified with comptime size assertions -- verify by running full test suite on aarch64 with no `DataAlignmentFault`
+- [ ] **Page cache file_identifier**: Uses inode number not pointer -- verify delete + recreate same-named file shows no stale page cache hits
+- [ ] **QEMU disk image in build**: `mkfs.ext2` step in `build.zig` and second drive in QEMU args -- verify kernel log shows successful ext2 mount
+- [ ] **Newly allocated blocks zeroed**: New file and directory blocks start as all zeros -- verify freshly created directory has no garbage entries after `.` and `..`
 
 ---
 
@@ -360,12 +514,13 @@ Separate the persist timer from the retransmission timer. When `snd_wnd = 0`:
 
 | Pitfall | Recovery Cost | Recovery Steps |
 |---------|---------------|----------------|
-| Broken `Tcb.reset()` leaks buffers | MEDIUM | Add `deinit(allocator)` to Tcb; audit all `freeTcb` calls to ensure deinit precedes them |
-| Wrong `send_tail` after buffer resize | HIGH | Connection must be torn down and re-established; no in-place fix; add the buffer_size field validation check first |
-| `cwnd` saturated at maxInt(u32) | LOW | Add cap: `cwnd = @min(cwnd, MAX_CWND)` at end of AIMD path; existing connections recover at next loss event |
-| RTT inflated by retransmit samples | LOW | Add `rtt_seq = 0` in retransmit paths; existing connections self-correct within a few RTT measurements |
-| Zero-window deadlock from RTO backoff | HIGH | Requires persist timer separation; no in-place workaround |
-| `processTimers` stack overflow from large `MAX_TCBS` | HIGH | Reduce `wake_list` to fixed size before increasing `MAX_TCBS`; a double fault is the diagnostic |
+| Deadlock from wrong lock ordering | MEDIUM | Restructure allocation into two phases (compute under lock, I/O outside); pattern is established in `sfs/alloc.zig` |
+| Block size mismatch discovered after implementation | HIGH | Add `sectors_per_block` multiplier to every LBA computation; requires auditing all I/O call sites in ext2 |
+| Inode off-by-one discovered after implementation | MEDIUM | Add `-1` to all inode table index computations; ~5-10 sites; comptime assert catches it early |
+| Directory stride wrong | LOW | Single function change in `getdents` iterator |
+| Bitmap without group descriptor flush | MEDIUM | Add group descriptor write after every bitmap write; 2-4 new write sites |
+| Missing QEMU disk image | LOW | Add `mkfs.ext2` build step, update QEMU args; one-time change |
+| Stale page cache from pointer-based ID | MEDIUM | Override `file_identifier` in ext2 `open` path; one function change |
 
 ---
 
@@ -373,31 +528,32 @@ Separate the persist timer from the retransmission timer. When `snd_wnd = 0`:
 
 | Pitfall | Prevention Phase | Verification |
 |---------|------------------|--------------|
-| `Tcb.init()`/`reset()` buffer lifecycle | Buffer resizing design (before coding) | Test: create connection, resize buffer, close -- verify no heap leak via allocator accounting |
-| Window scale locked at handshake | Window management phase | Test: configure `SO_RCVBUF = 65536`, connect, verify `rcv_wscale = 1` negotiated |
-| `send_tail` corruption on resize | Buffer resizing phase | Test: 4KB in-flight, resize to 16KB, verify all data received correctly |
-| `cwnd` unbounded growth | Congestion control hardening | Test: long idle connection, verify `cwnd <= MAX_CWND` after 10 minutes |
-| Partial ACK deflation coupling | Congestion control phase (struct isolation first) | Test: add NewReno without changing existing Reno test results |
-| Karn's Algorithm missing | RTT estimation fix (before congestion control) | Test: introduce packet loss, verify RTO does not grow beyond 3x base after recovery |
-| Allocation under IrqLock | Buffer resizing phase design | Code review: no `alloc()` call between `lock.acquire()` and `lock.release()` in any path that could hold IrqLock |
-| `send_tail` without upper-bound check | Buffer resizing phase | Test: send crafted rogue ACK (sequence above snd_nxt), verify connection resets gracefully |
-| `processTimers` wake_list stack | Any phase increasing `MAX_TCBS` | Test: 256 simultaneous connections timing out, verify no double fault |
-| Persist timer missing | Window management phase | Test: fill peer buffer, pause peer reading for 30s, verify connection still alive after peer resumes |
+| Lock ordering deadlock | Phase 1: Block abstraction layer | No QEMU hangs under file-create stress; lock ordering documented in ext2 struct definition |
+| Block size mismatch | Phase 1: Superblock parsing | `e2fsck` on image after test run reports zero errors; LBA of superblock is 2 (not 1) |
+| Inode off-by-one | Phase 2: Inode read/write | Root directory (inode 2) resolves correctly; `stat /mnt` succeeds |
+| Directory rec_len stride | Phase 3: Directory lookup | `getdents` returns all files; last file in a block is visible |
+| Indirect blocks incomplete | Phase 2/3: File I/O | 2MB write/read round-trip passes; large-file stress test passes |
+| Bitmap without group desc flush | Phase 2: Allocation | `e2fsck` after test run reports zero errors; remount shows correct free count |
+| VFS relative path parsing | Phase 3: VFS integration | Three-level nested path resolves correctly; root open works |
+| file_desc.position vs block mapping | Phase 3: File I/O | Fragmented file read-after-write succeeds; `lseek` + partial read is correct |
+| Page cache ID collision | Phase 3: VFS integration | Delete + recreate file; no stale cache hits |
+| Missing QEMU disk image | Phase 1: Build system | QEMU boot log shows ext2 mount success; kernel log has no ENOENT for `/dev/sda` |
+| aarch64 struct alignment | Phase 1: Type definitions | All tests pass on aarch64; no `DataAlignmentFault` |
+| i_size_high | Phase 2: Inode types | `stat` on written file returns correct size; rev1 flag checked on mount |
+| Parent dir timestamp update | Phase 3: Directory modification | `stat` on parent dir after file create shows updated mtime |
+| Newly allocated block not zeroed | Phase 2: Block allocation | New file read contains no garbage data from prior filesystem content |
 
 ---
 
 ## Sources
 
-- zk codebase, verified 2026-02-19: `src/net/transport/tcp/` (types.zig, state.zig, constants.zig, rx/established.zig, tx/data.zig, timers.zig, api.zig), `src/net/transport/socket/tcp_api.zig`, `src/net/core/pool.zig`
-- RFC 793: Transmission Control Protocol (state machine, sequence arithmetic)
-- RFC 6298: Computing TCP's Retransmission Timer (Karn's Algorithm, section 5)
-- RFC 7323: TCP Extensions for High Performance (window scale, timestamp semantics)
-- RFC 5681: TCP Congestion Control (slow start, congestion avoidance, fast retransmit/recovery)
-- RFC 1122: Requirements for Internet Hosts (persist timer, section 4.2.2.17)
-- MEMORY.md (zk project): "Comptime Dispatch Table Expansion = Stack Overflow" pattern
-- CLAUDE.md (zk project): Lock ordering table, security standards, stack size history
+- Direct codebase analysis: `src/fs/sfs/` (all files), `src/fs/vfs.zig`, `src/kernel/fs/fd.zig`, `src/kernel/fs/page_cache.zig`, `src/drivers/storage/ahci/root.zig`, `src/kernel/core/init_fs.zig`
+- Existing locking fix: SFS close deadlock resolution documented in `PROJECT.md` (v1.1) and `MEMORY.md`
+- Kernel memory file: `MEMORY.md` -- SFS Close Deadlock, socklen_t aarch64 alignment bug patterns
+- CLAUDE.md: Lock ordering table, security standards (DMA hygiene, integer safety), SFS filesystem layout
+- ext2 specification: "The Second Extended Filesystem" (rev0 and rev1 on-disk format)
+- Linux kernel source: `fs/ext2/` (inode.c, dir.c, balloc.c, ialloc.c) for reference implementation patterns
 
 ---
-
-*Pitfalls research for: TCP/UDP network stack hardening milestone (zk microkernel)*
-*Researched: 2026-02-19*
+*Pitfalls research for: ext2 filesystem implementation in zk microkernel*
+*Researched: 2026-02-22*
