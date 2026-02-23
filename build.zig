@@ -2810,6 +2810,20 @@ pub fn build(b: *std.Build) void {
             "-drive", "file=sfs.img,format=raw,if=none,id=sfsdisk",
             "-device", "scsi-hd,drive=sfsdisk,bus=scsi0.0",
         });
+        // ext2 storage disk: second LUN on existing scsi0 (aarch64)
+        run_cmd.addArgs(&.{
+            "-drive", "file=ext2.img,format=raw,if=none,id=ext2disk",
+            "-device", "scsi-hd,drive=ext2disk,bus=scsi0.0",
+        });
+    }
+
+    // ext2 storage disk (x86_64): new VirtIO-SCSI controller (SFS uses AHCI on boot disk)
+    if (target_arch == .x86_64) {
+        run_cmd.addArgs(&.{
+            "-device", "virtio-scsi-pci,id=scsi0",
+            "-drive", "file=ext2.img,format=raw,if=none,id=ext2disk",
+            "-device", "scsi-hd,drive=ext2disk,bus=scsi0.0",
+        });
     }
 
     // USB hub and storage (x86_64 only for now)
