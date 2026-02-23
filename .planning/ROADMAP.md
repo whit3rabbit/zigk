@@ -131,7 +131,10 @@ Plans:
   2. Kernel panics or logs a clear error and refuses to mount if INCOMPAT feature flags contain unknown bits
   3. ext2 filesystem appears at /mnt2 in the VFS mount table alongside SFS at /mnt
   4. Block group descriptor table is read and group count matches the image geometry
-**Plans**: TBD
+**Plans:** 2 plans
+Plans:
+- [ ] 46-01-PLAN.md -- SCSI BlockDevice adapter + ext2 superblock parse, BGDT read, VFS adapter
+- [ ] 46-02-PLAN.md -- Wire ext2 mount into boot sequence (init_hw, init_fs, main)
 
 ### Phase 47: Inode Read and Indirect Block Resolution
 **Goal**: The kernel can read any inode by number with correct 1-based offset calculation and resolve file data through all indirection levels (direct, single-indirect, double-indirect).
