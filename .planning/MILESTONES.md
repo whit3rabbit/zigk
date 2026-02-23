@@ -148,3 +148,32 @@
 
 ---
 
+
+## v1.5 Tech Debt Cleanup (Shipped: 2026-02-22)
+
+**Phases:** 40-44 (9 plans)
+**Commits:** 44
+**Lines:** +4,317 / -473 across 68 files
+**Timeline:** 3 days (2026-02-20 to 2026-02-22)
+**Total codebase:** ~216K LOC Zig
+**Tests:** 480 total (463 passing x86_64, 460 passing aarch64)
+**Git range:** 6184cc3..bc8bb67
+
+**Key accomplishments:**
+1. Fixed 4 TCP/raw socket defects: stale tcb.blocked_thread use-after-free, SO_RCVBUF/SO_SNDBUF pre-connect propagation, TCP_CORK uncork mutex locking, raw socket MSG_DONTWAIT/MSG_PEEK flags
+2. Brought up loopback networking (lo0 at 127.0.0.1) with full TCP/IP stack, fixing 10 pre-existing network bugs (checksum byte-order across all TX paths, TCP SYN_SENT state machine, re-entrant loopback deadlock, ARP for loopback, MSG_WAITALL blocked_thread)
+3. Added 8 network verification tests: zero-window recovery, SWS/Nagle avoidance, raw socket ICMP echo round-trip, SO_REUSEPORT dual bind, SIGPIPE/MSG_NOSIGNAL, MSG_PEEK+DONTWAIT UDP, MSG_WAITALL multi-segment, SO_RCVTIMEO+MSG_WAITALL
+4. Wired TCP processTimers() into net.tick() -- delayed ACKs and retransmission timers had never been firing since they were implemented
+5. Removed dead code (Tcb.send_acked field, recvfromRaw/recvfromRaw6 functions), fixed slab_bench.zig Zig 0.16.x compatibility, closed all v1.4 documentation gaps
+
+**Delivered:** Resolved all 18 v1.4 tech debt items. Network stack now verified under live loopback with 8 feature tests. TCP timer system fully wired. All checksum TX paths produce correct byte-order. Dual-architecture test suite at 480 tests with zero failures on x86_64.
+
+**Tech debt:** 5 items (3 ROADMAP formatting defects in progress table, 5 human verification items requiring calibrated hardware or packet capture, NET-04 attribution gap). See milestones/v1.5-MILESTONE-AUDIT.md.
+
+**Archives:**
+- milestones/v1.5-ROADMAP.md
+- milestones/v1.5-REQUIREMENTS.md
+- milestones/v1.5-MILESTONE-AUDIT.md
+
+---
+

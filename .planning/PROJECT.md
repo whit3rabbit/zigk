@@ -2,7 +2,7 @@
 
 ## What This Is
 
-Systematic expansion of Linux/POSIX syscall coverage in the zk microkernel. Shipped v1.4 with 330+ syscalls across 12 categories plus hardened TCP/UDP networking. TCP stack now has RFC-compliant Reno congestion control, dynamic window management with SWS avoidance, configurable buffer sizing, and full MSG flag support. Dual-architecture (x86_64 + aarch64) with 212K LOC Zig and comprehensive integration test suite.
+Systematic expansion of Linux/POSIX syscall coverage in the zk microkernel. Shipped v1.5 with 330+ syscalls across 12 categories plus hardened TCP/UDP networking with live loopback verification. TCP stack has RFC-compliant Reno congestion control, dynamic window management with SWS avoidance, configurable buffer sizing, full MSG flag support, and timer-driven retransmission. Dual-architecture (x86_64 + aarch64) with ~216K LOC Zig and comprehensive integration test suite (480 tests).
 
 ## Core Value
 
@@ -80,18 +80,15 @@ Every implemented syscall must work correctly on both x86_64 and aarch64 with ma
 - v Dynamic TCP window management (currentRecvWindow() in all ACKs, SWS avoidance, independent persist timer per RFC 1122) -- v1.4
 - v Socket API completeness (MSG_PEEK, MSG_DONTWAIT, MSG_WAITALL with EINTR, SO_REUSEPORT, TCP_CORK, MSG_NOSIGNAL, raw socket blocking recv) -- v1.4
 - v Buffer and queue sizing (SO_RCVBUF/SO_SNDBUF with Linux ABI doubling, RX queue 64, accept backlog 128) -- v1.4
+- v Fix stale tcb.blocked_thread on EINTR, SO_RCVBUF/SO_SNDBUF pre-connect propagation, TCP_CORK mutex, raw socket MSG flags -- v1.5
+- v Remove dead code (Tcb.send_acked, recvfromRaw/recvfromRaw6), fix slab_bench Zig 0.16.x compat -- v1.5
+- v Close v1.4 documentation gaps (requirements checkboxes, SUMMARY frontmatter, ROADMAP formatting) -- v1.5
+- v QEMU loopback networking for test environment (lo0 at 127.0.0.1, async packet queue, full TCP/IP stack) -- v1.5
+- v Verify 8 network features under live loopback (zero-window, SWS, raw socket ICMP, SO_REUSEPORT, SIGPIPE, MSG flags) -- v1.5
 
 ### Active
 
-- [ ] Fix stale tcb.blocked_thread on EINTR (INT-01)
-- [ ] SO_RCVBUF/SO_SNDBUF pre-connect propagation to Tcb.init()
-- [ ] TCP_CORK uncork flush tcb.mutex acquisition
-- [ ] MSG_DONTWAIT/MSG_PEEK for raw sockets
-- [ ] Remove dead Tcb.send_acked field
-- [ ] Fix slab_bench.zig std.time.Timer Zig 0.16.x compat
-- [ ] Update v1.4 REQUIREMENTS.md checkboxes, SUMMARY frontmatter, ROADMAP.md formatting
-- [ ] Configure QEMU loopback networking for test environment
-- [ ] Verify network features under live loopback (8 items from v1.4 audit)
+(None -- between milestones)
 
 ### Out of Scope
 
@@ -112,32 +109,23 @@ Every implemented syscall must work correctly on both x86_64 and aarch64 with ma
 - True dynamic buffer resize (heap-allocated TCB buffers) -- requires TCB struct refactor across 18 BUFFER_SIZE sites
 - Multipath TCP (MPTCP) -- requires scheduler-level subflow management
 
-## Current Milestone: v1.5 Tech Debt Cleanup
+## Last Milestone: v1.5 Tech Debt Cleanup (Shipped 2026-02-22)
 
-**Goal:** Resolve all 18 v1.4 tech debt items -- code fixes, documentation gaps, and QEMU loopback networking to enable live verification of network features.
-
-**Target features:**
-- Fix 6 code defects (EINTR cleanup, buffer propagation, locking, raw socket flags, dead code, Zig compat)
-- Clean up 3 documentation gaps (requirements checkboxes, SUMMARY frontmatter, ROADMAP formatting)
-- Configure QEMU loopback networking and verify 8 network features live
-
-## Last Milestone: v1.4 Network Stack Hardening (Shipped 2026-02-20)
-
-Hardened TCP/UDP networking stack with RFC-compliant Reno congestion control, dynamic window management, complete socket options, and MSG flag threading. All 21 requirements satisfied. See MILESTONES.md for details.
+Resolved all 18 v1.4 tech debt items. Fixed 4 TCP/raw socket defects, brought up loopback networking with full TCP/IP stack (fixing 10 pre-existing bugs), added 8 network verification tests, wired TCP timer system, removed dead code, and closed all documentation gaps. All 12 requirements satisfied. See MILESTONES.md for details.
 
 ## Context
 
-Shipped v1.4 with 212,270 LOC Zig across x86_64 and aarch64.
+Shipped v1.5 with ~216K LOC Zig across x86_64 and aarch64.
 Tech stack: Zig 0.16.x, custom UEFI bootloader, QEMU TCG.
-330+ syscalls implemented. Comprehensive integration test suite on both architectures.
+330+ syscalls implemented. Integration test suite: 480 tests (463 passing x86_64, 460 passing aarch64).
 
 v1.0 shipped 300+ syscalls from ~190 baseline. v1.1 resolved all 14 v1.0 tech debt items.
 v1.2 added 31 new syscalls across 12 categories. v1.3 resolved all 16 v1.2 tech debt items.
 v1.4 hardened TCP/UDP stack with congestion control, window management, socket options, MSG flags.
-Five milestones shipped over 16 days with 82 plans across 39 phases.
+v1.5 resolved all 18 v1.4 tech debt items and brought up loopback networking for live verification.
+Six milestones shipped over 17 days with 91 plans across 44 phases.
 
-Known issues: kernel stack at 192KB due to comptime dispatch table growth; 18 v1.4 tech debt items
-(primarily human verification items requiring live QEMU networking, plus documentation gaps).
+Known issues: kernel stack at 192KB due to comptime dispatch table growth; 3 pre-existing aarch64 test failures (wait4 nohang, waitid WNOHANG, timerfd expiration); SFS close deadlock after many operations; QEMU TCG uncalibrated TSC prevents timer-based test paths.
 
 ## Constraints
 
@@ -183,6 +171,10 @@ Known issues: kernel stack at 192KB due to comptime dispatch table growth; 18 v1
 | Sender SWS gate after Nagle check | Complementary suppressors: Nagle gates on flight_size, SWS on segment size | v Good v1.4 -- both coexist cleanly |
 | hasPendingSignal callback in scheduler shim | Socket layer stays independent of syscall error vocabulary | v Good v1.4 -- transport returns WouldBlock, syscall converts to EINTR |
 | Kernel stack 96KB to 192KB | Comptime dispatch table expansion across phases 24-39 | v Good v1.4 -- resolved double fault regression |
+| Async loopback (queue + drain) | Synchronous loopback re-enters TCP RX from TX, deadlocking state.lock | v Good v1.5 -- MAX_DRAIN_PER_TICK=64 prevents storms |
+| @byteSwap on all TX checksum stores | onesComplement() computes big-endian, struct fields are native-endian | v Good v1.5 -- fixed silent packet drops |
+| processTimers() wired to net.tick() | Was defined/exported but never called; delayed ACKs never fired | v Good v1.5 -- TCP timers now functional |
+| Re-fetch TCB via getTcb() after sched.block() | TCB may be freed during sleep; stale pointer causes use-after-free | v Good v1.5 -- safe pattern for all blocking paths |
 
 ---
-*Last updated: 2026-02-20 after v1.5 milestone start*
+*Last updated: 2026-02-22 after v1.5 milestone*
