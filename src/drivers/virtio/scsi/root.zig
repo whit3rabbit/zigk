@@ -31,6 +31,7 @@ pub const lun = @import("lun.zig");
 pub const queue = @import("queue.zig");
 pub const adapter = @import("adapter.zig");
 pub const irq = @import("irq.zig");
+pub const block_adapter = @import("block_adapter.zig");
 
 // ============================================================================
 // Error Types
