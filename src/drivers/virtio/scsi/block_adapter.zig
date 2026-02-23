@@ -9,12 +9,12 @@
 
 const std = @import("std");
 const root = @import("root.zig");
-const fs = @import("fs");
 const heap = @import("heap");
 
-const BlockDevice = fs.block_device.BlockDevice;
-const BlockDeviceError = fs.block_device.BlockDeviceError;
-const SECTOR_SIZE = fs.block_device.SECTOR_SIZE;
+const block_device = @import("block_device");
+const BlockDevice = block_device.BlockDevice;
+const BlockDeviceError = block_device.BlockDeviceError;
+const SECTOR_SIZE = block_device.SECTOR_SIZE;
 
 // ============================================================================
 // Adapter context

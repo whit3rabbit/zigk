@@ -663,6 +663,13 @@ pub fn build(b: *std.Build) void {
     nvme_module.addImport("dma", dma_module);
     nvme_module.addImport("iommu", kernel_iommu_module);
 
+    // Create block_device module (shared between fs and virtio_scsi to avoid circular dep)
+    const block_device_module = b.createModule(.{
+        .root_source_file = b.path("src/fs/block_device.zig"),
+        .target = kernel_target,
+        .optimize = optimize,
+    });
+
     // Create VirtIO-SCSI driver module (VirtIO SCSI storage controller)
     const virtio_scsi_module = b.createModule(.{
         .root_source_file = b.path("src/drivers/virtio/scsi/root.zig"),
@@ -681,6 +688,7 @@ pub fn build(b: *std.Build) void {
     virtio_scsi_module.addImport("sync", sync_module);
     virtio_scsi_module.addImport("dma", dma_module);
     virtio_scsi_module.addImport("iommu", kernel_iommu_module);
+    virtio_scsi_module.addImport("block_device", block_device_module);
 
     // Create USB driver module (XHCI/EHCI host controllers)
     const usb_module = b.createModule(.{
@@ -740,6 +748,7 @@ pub fn build(b: *std.Build) void {
     }
     fs_module.addImport("nvme", nvme_module);
     fs_module.addImport("virtio_scsi", virtio_scsi_module);
+    fs_module.addImport("block_device", block_device_module);
 
     fs_module.addImport("sync", sync_module);
 

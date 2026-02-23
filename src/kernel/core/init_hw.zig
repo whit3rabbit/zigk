@@ -70,6 +70,10 @@ pub var virtio_rng_driver: ?*virtio.VirtioRngDriver = null;
 /// VirtualBox VMMDev driver (for Guest Additions / shared folders)
 pub var vmmdev_driver: ?*vmmdev.VmmDevDevice = null;
 
+/// BlockDevice for the ext2 disk, populated during initStorage() from VirtIO-SCSI LUN.
+/// null if no ext2 disk is present (QEMU not configured with ext2.img).
+pub var ext2_block_dev: ?fs.block_device.BlockDevice = null;
+
 /// Detected hypervisor type
 pub var detected_hypervisor: hal.hypervisor.HypervisorType = .none;
 
@@ -802,6 +806,20 @@ pub fn initStorage() void {
                 }
 
                 console.info("Storage: VirtIO-SCSI initialized with {d} LUNs", .{lun_count});
+
+                // Register ext2 BlockDevice from the appropriate LUN.
+                // aarch64: LUN 0 = SFS, LUN 1 = ext2 (both on same scsi0).
+                // x86_64: LUN 0 = ext2 (SFS uses AHCI, not VirtIO-SCSI).
+                const ext2_lun_idx: u8 = if (builtin.cpu.arch == .aarch64) 1 else 0;
+                if (lun_count > ext2_lun_idx) {
+                    ext2_block_dev = virtio_scsi.block_adapter.asBlockDevice(controller, ext2_lun_idx) catch |err| blk: {
+                        console.warn("ext2: failed to create BlockDevice for LUN {d}: {}", .{ ext2_lun_idx, err });
+                        break :blk null;
+                    };
+                    if (ext2_block_dev != null) {
+                        console.info("ext2: BlockDevice registered from VirtIO-SCSI LUN {d}", .{ext2_lun_idx});
+                    }
+                }
 
                 // Register interrupt handler (MSI-X preferred, legacy fallback)
                 virtio_scsi.irq.setupMsix(controller, pci.PciAccess{ .ecam = ecam }) catch {};

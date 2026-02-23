@@ -14,8 +14,8 @@ const fd = @import("fd");
 const heap = @import("heap");
 const console = @import("console");
 
-const BlockDevice = @import("../block_device.zig").BlockDevice;
-const SECTOR_SIZE = @import("../block_device.zig").SECTOR_SIZE;
+const BlockDevice = @import("block_device").BlockDevice;
+const SECTOR_SIZE = @import("block_device").SECTOR_SIZE;
 
 // ============================================================================
 // Error types
@@ -105,7 +105,7 @@ pub fn readBgdt(
     const bgdt_bytes = std.math.mul(usize, group_count, @sizeOf(types.GroupDescriptor)) catch return error.InvalidSuperblock;
     const bgdt_sectors = (bgdt_bytes + SECTOR_SIZE - 1) / SECTOR_SIZE;
 
-    const raw_buf = allocator.alignedAlloc(u8, 4, bgdt_sectors * SECTOR_SIZE) catch return error.OutOfMemory;
+    const raw_buf = allocator.alignedAlloc(u8, .@"4", bgdt_sectors * SECTOR_SIZE) catch return error.OutOfMemory;
     errdefer allocator.free(raw_buf);
 
     dev.readSectors(bgdt_lba, @intCast(bgdt_sectors), raw_buf) catch return error.IOError;
@@ -179,7 +179,7 @@ pub fn init(dev: BlockDevice) !vfs.FileSystem {
         .superblock = sb,
         .block_groups = groups,
         .block_size = sb.blockSize(),
-        .sectors_per_block = sb.blockSize() / SECTOR_SIZE,
+        .sectors_per_block = @intCast(sb.blockSize() / SECTOR_SIZE),
         .group_count = sb.groupCount(),
         .inode_size = inode_size,
     };

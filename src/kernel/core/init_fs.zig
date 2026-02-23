@@ -66,6 +66,31 @@ pub fn initBlockFs() void {
     if (builtin.mode == .Debug) testBlockFs();
 }
 
+/// Initialize and mount the ext2 filesystem at /mnt2.
+/// Requires storage drivers to be initialized first (ext2_block_dev populated).
+pub fn initExt2Fs() void {
+    console.print("\n");
+    console.info("Initializing ext2 filesystem...", .{});
+
+    const init_hw = @import("init_hw.zig");
+    const dev = init_hw.ext2_block_dev orelse {
+        console.warn("ext2: no block device available -- skipping /mnt2 mount", .{});
+        return;
+    };
+
+    const ext2_fs = fs.ext2_mount.init(dev) catch |err| {
+        console.err("ext2: init failed: {}", .{err});
+        return;
+    };
+
+    fs.vfs.Vfs.mount("/mnt2", ext2_fs) catch |err| {
+        console.err("ext2: mount at /mnt2 failed: {}", .{err});
+        return;
+    };
+
+    console.info("ext2: mounted at /mnt2 (read-only)", .{});
+}
+
 /// Simple read/write test for the mounted block filesystem
 fn testBlockFs() void {
     console.info("SFS: Running read/write test...", .{});

@@ -443,6 +443,9 @@ export fn _start(boot_info: *BootInfo.BootInfo) callconv(.c) noreturn {
     init_fs.initBlockFs();
     if (boot_logo_active) boot_logo_instance.tick();
 
+    init_fs.initExt2Fs();
+    if (boot_logo_active) boot_logo_instance.tick();
+
     // Fade out boot logo and enable graphics console
     if (boot_logo_active) {
         boot_logo_instance.fadeOut();
