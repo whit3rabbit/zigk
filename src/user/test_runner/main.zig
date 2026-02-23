@@ -27,6 +27,7 @@ const fs_error_tests = @import("tests/fs/errors.zig");
 const regression_tests = @import("tests/regression/sfs_issues.zig");
 const edge_case_tests = @import("tests/fs/edge_cases.zig");
 const stress_tests = @import("tests/fs/stress.zig");
+const ext2_tests = @import("tests/fs/ext2_basic.zig");
 
 const TestRunner = struct {
     passed: usize = 0,
@@ -138,6 +139,14 @@ export fn main(argc: i32, argv: [*][*:0]u8) i32 {
     runner.runTest("initrd: read ELF file", fs_tests.testInitrdReadFile);
     runner.runTest("sfs: create and write file", fs_tests.testSfsCreateFile);
     runner.runTest("devfs: list devices", fs_tests.testDevfsListDevices);
+
+    // ext2 filesystem tests (Phase 47 -- skipped on aarch64, ext2 not mounted)
+    runner.runTest("ext2: read root inode", ext2_tests.testExt2ReadRootInode);
+    runner.runTest("ext2: read direct blocks", ext2_tests.testExt2ReadDirectBlocks);
+    runner.runTest("ext2: read single-indirect", ext2_tests.testExt2ReadSingleIndirect);
+    runner.runTest("ext2: read double-indirect", ext2_tests.testExt2ReadDoubleIndirect);
+    runner.runTest("ext2: seek and read", ext2_tests.testExt2SeekAndRead);
+    runner.runTest("ext2: stat file", ext2_tests.testExt2StatFile);
 
     // Error handling tests
     runner.runTest("error: open nonexistent file", fs_error_tests.testOpenNonexistentFile);
