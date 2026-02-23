@@ -48,6 +48,9 @@ Recent decisions relevant to v2.0:
 - Phase 48 combines inode cache with directory traversal (cache validates against working traversal code)
 - Two-phase alloc lock pattern from sfs/alloc.zig applied to Phase 49 (prevents close-deadlock recurrence)
 - Phase 53 is one atomic commit switching mount point and migrating tests (avoids CI gap)
+- [45-01] Stamp file sentinel (ext2.img.stamp) guards idempotency of mke2fs invocation across zig build run calls
+- [45-01] Homebrew mke2fs paths checked before system PATH to avoid Android SDK mke2fs shadowing on macOS
+- [45-01] aarch64: ext2disk is second LUN on existing scsi0 (no second controller); x86_64: new scsi0 controller for ext2disk
 - [45-02] SECTOR_SIZE (512) used for all LBA arithmetic; sector_size field is informational for alignment only
 - [45-02] DirEntry is extern struct with 8-byte header only; name lives inline in block buffer after header
 - [45-02] SUPPORTED_INCOMPAT = INCOMPAT_FILETYPE only; mke2fs enables this by default
@@ -75,4 +78,4 @@ Resume file: None
 
 ---
 *State initialized: 2026-02-06*
-*Last updated: 2026-02-23 after 45-02 completion*
+*Last updated: 2026-02-23 after 45-01 and 45-02 completion*
