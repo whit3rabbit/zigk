@@ -88,7 +88,12 @@ Every implemented syscall must work correctly on both x86_64 and aarch64 with ma
 
 ### Active
 
-(None -- between milestones)
+- [ ] ext2 filesystem implementation (read + write)
+- [ ] Block device abstraction layer
+- [ ] Nested directory support with full POSIX path depth
+- [ ] ext2 disk image creation in build system
+- [ ] VFS integration and mount at writable mount point
+- [ ] Incremental test migration from SFS to ext2
 
 ### Out of Scope
 
@@ -108,6 +113,19 @@ Every implemented syscall must work correctly on both x86_64 and aarch64 with ma
 - CUBIC/BBR congestion control -- zero benefit in QEMU loopback; add when real-hardware networking supported
 - True dynamic buffer resize (heap-allocated TCB buffers) -- requires TCB struct refactor across 18 BUFFER_SIZE sites
 - Multipath TCP (MPTCP) -- requires scheduler-level subflow management
+
+## Current Milestone: v2.0 ext2 Filesystem
+
+**Goal:** Replace SFS with a full ext2 filesystem implementation, giving zk proper hierarchical directories, long filenames, and correct POSIX filesystem semantics.
+
+**Target features:**
+- ext2 on-disk format parsing (superblock, block groups, inodes, directory entries)
+- Clean block device abstraction layer (replacing SFS direct port access)
+- Read-write support with block/inode allocation and bitmap management
+- Full POSIX directory nesting (no artificial depth limits)
+- VFS integration matching existing FileSystem interface
+- Build system ext2 image creation (mkfs.ext2 on host)
+- Incremental migration path (ext2 alongside SFS, tests migrate over time)
 
 ## Last Milestone: v1.5 Tech Debt Cleanup (Shipped 2026-02-22)
 
@@ -177,4 +195,4 @@ Known issues: kernel stack at 192KB due to comptime dispatch table growth; 3 pre
 | Re-fetch TCB via getTcb() after sched.block() | TCB may be freed during sleep; stale pointer causes use-after-free | v Good v1.5 -- safe pattern for all blocking paths |
 
 ---
-*Last updated: 2026-02-22 after v1.5 milestone*
+*Last updated: 2026-02-22 after v2.0 milestone start*

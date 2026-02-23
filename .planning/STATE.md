@@ -5,16 +5,14 @@
 See: .planning/PROJECT.md (updated 2026-02-22)
 
 **Core value:** Every implemented syscall must work correctly on both x86_64 and aarch64 with matching behavior, tested via the existing integration test harness.
-**Current focus:** v1.5 milestone shipped. Planning next milestone.
+**Current focus:** v2.0 ext2 Filesystem
 
 ## Current Position
 
-Phase: 44 of 44 (all v1.5 phases complete)
-Plan: All plans complete
-Status: v1.5 milestone shipped (2026-02-22)
-Last activity: 2026-02-22 -- v1.5 milestone audit passed (tech_debt), milestone archived
-
-Progress: [##########] 100% (v1.5 milestone complete)
+Phase: Not started (defining requirements)
+Plan: --
+Status: Defining requirements
+Last activity: 2026-02-22 -- Milestone v2.0 started
 
 ## Performance Metrics
 
@@ -46,18 +44,18 @@ None.
 
 ### Blockers/Concerns
 
-- Test suite hangs at "sendfile large transfer" due to pre-existing SFS close deadlock (documented in MEMORY.md)
-- 3 pre-existing aarch64 test failures (wait4 nohang, waitid WNOHANG, timerfd expiration) -- unrelated to any milestone work
-- QEMU TCG uncalibrated TSC prevents timer-based test paths (SO_RCVTIMEO)
+- SFS close deadlock after many operations (documented in MEMORY.md) -- ext2 should resolve this
+- 3 pre-existing aarch64 test failures (wait4 nohang, waitid WNOHANG, timerfd expiration) -- unrelated to filesystem work
+- QEMU TCG uncalibrated TSC prevents timer-based test paths
 
 ## Session Continuity
 
-Last session: 2026-02-22 (v1.5 milestone shipped)
-Stopped at: Milestone complete
+Last session: 2026-02-22 (v2.0 milestone started)
+Stopped at: Defining requirements
 Resume file: None
 
-**Next action:** /gsd:new-milestone -- start next milestone
+**Next action:** Define requirements, then create roadmap
 
 ---
 *State initialized: 2026-02-06*
-*Last updated: 2026-02-22 after v1.5 milestone completion*
+*Last updated: 2026-02-22 after v2.0 milestone start*
