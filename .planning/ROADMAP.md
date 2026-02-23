@@ -96,7 +96,7 @@
 
 **Milestone Goal:** Replace SFS with a full ext2 filesystem giving zk proper hierarchical directories, long filenames, and correct POSIX filesystem semantics. SFS remains at /mnt through Phases 45-52; Phase 53 switches the mount point and migrates all tests.
 
-- [ ] **Phase 45: Build Infrastructure** - ext2 disk image created at build time, QEMU drive attached, BlockDevice abstraction in place
+- [x] **Phase 45: Build Infrastructure** - ext2 disk image created at build time, QEMU drive attached, BlockDevice abstraction in place (completed 2026-02-23)
 - [ ] **Phase 46: Superblock Parse and Read-Only Mount** - ext2 mounts at /mnt2 with validated superblock, feature flags enforced
 - [ ] **Phase 47: Inode Read and Indirect Block Resolution** - inode reads correct for all indirection levels, root directory inode accessible
 - [ ] **Phase 48: Directory Traversal, Path Resolution, and Inode Cache** - multi-level paths resolve, getdents works, stat returns correct metadata, inode cache live
@@ -117,7 +117,7 @@
   2. QEMU launches with ext2.img attached as a block device on both x86_64 and aarch64
   3. The kernel can call BlockDevice read/write with an explicit LBA and get the correct sector without position state races
   4. `extern struct` on-disk types in types.zig pass `comptime` size assertions at compile time
-**Plans:** 2 plans
+**Plans:** 2/2 plans complete
 Plans:
 - [ ] 45-01-PLAN.md -- ext2 disk image creation and QEMU attachment
 - [ ] 45-02-PLAN.md -- BlockDevice abstraction and ext2 on-disk types
@@ -261,7 +261,7 @@ Plans:
 | 42. QEMU Loopback Setup | v1.5 | 1/1 | Complete | 2026-02-21 |
 | 43. Network Feature Verification | v1.5 | 3/3 | Complete | 2026-02-22 |
 | 44. Audit Gap Closure | v1.5 | 1/1 | Complete | 2026-02-21 |
-| 45. Build Infrastructure | v2.0 | 0/2 | Not started | - |
+| 45. Build Infrastructure | 2/2 | Complete   | 2026-02-23 | - |
 | 46. Superblock Parse and Read-Only Mount | v2.0 | 0/TBD | Not started | - |
 | 47. Inode Read and Indirect Block Resolution | v2.0 | 0/TBD | Not started | - |
 | 48. Directory Traversal, Path Resolution, and Inode Cache | v2.0 | 0/TBD | Not started | - |

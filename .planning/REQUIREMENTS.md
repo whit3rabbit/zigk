@@ -11,7 +11,7 @@ Requirements for ext2 filesystem implementation. Each maps to roadmap phases.
 
 - [ ] **BUILD-01**: Build system creates a pre-formatted ext2 disk image via host mkfs.ext2
 - [ ] **BUILD-02**: QEMU launches with ext2 image attached as a block device on both x86_64 and aarch64
-- [ ] **BUILD-03**: BlockDevice abstraction provides driver-portable read/write by LBA without position state races
+- [x] **BUILD-03**: BlockDevice abstraction provides driver-portable read/write by LBA without position state races
 
 ### Read-Only Mount
 
@@ -109,7 +109,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 |-------------|-------|--------|
 | BUILD-01 | Phase 45 | Pending |
 | BUILD-02 | Phase 45 | Pending |
-| BUILD-03 | Phase 45 | Pending |
+| BUILD-03 | Phase 45 | Complete |
 | MOUNT-01 | Phase 46 | Pending |
 | MOUNT-02 | Phase 46 | Pending |
 | MOUNT-03 | Phase 46 | Pending |
