@@ -2995,12 +2995,78 @@ pub fn build(b: *std.Build) void {
     ;
     const create_ext2_cmd = b.addSystemCommand(&.{ "sh", "-c", ext2_script });
 
+    // Populate ext2.img with test files for Phase 47 inode/block resolution tests.
+    // Uses a separate stamp (ext2.img.populated.stamp) so the population step is
+    // idempotent even if ext2.img is recreated without running the population step.
+    //
+    // Files written:
+    //   hello.txt   -- 13 bytes "Hello, ext2!\n" (direct blocks only, INODE-02)
+    //   medium.bin  -- 102400 bytes (100KB, repeating 0x00..0xFF, single-indirect, INODE-03)
+    //   large.bin   -- 5242880 bytes (5MB, repeating 0x00..0xFF, double-indirect, INODE-04)
+    //
+    // NOTE: Uses piped debugfs commands (not -R) because debugfs -R silently
+    // fails to write files on macOS Homebrew e2fsprogs 1.47.x.
+    // Uses python3 with explicit bytes() for hello.txt to avoid shell quoting
+    // issues with '!' triggering history expansion in interactive shells.
+    const ext2_populate_script =
+        \\set -e
+        \\if [ -f ext2.img.populated.stamp ]; then
+        \\    echo "ext2.img already populated (stamp found), skipping population"
+        \\    exit 0
+        \\fi
+        \\if [ ! -f ext2.img.stamp ]; then
+        \\    echo "ERROR: ext2.img.stamp not found -- run image creation first"
+        \\    exit 1
+        \\fi
+        \\# Find debugfs alongside mke2fs
+        \\DEBUGFS=""
+        \\if [ -x "/opt/homebrew/opt/e2fsprogs/sbin/debugfs" ]; then
+        \\    DEBUGFS="/opt/homebrew/opt/e2fsprogs/sbin/debugfs"
+        \\elif [ -x "/usr/local/opt/e2fsprogs/sbin/debugfs" ]; then
+        \\    DEBUGFS="/usr/local/opt/e2fsprogs/sbin/debugfs"
+        \\else
+        \\    DEBUGFS=$(which debugfs 2>/dev/null || true)
+        \\fi
+        \\if [ -z "$DEBUGFS" ]; then
+        \\    echo "WARNING: debugfs not found -- ext2 test files not populated (ext2 tests will skip)"
+        \\    touch ext2.img.populated.stamp
+        \\    exit 0
+        \\fi
+        \\# Check python3 availability (needed for deterministic binary pattern generation)
+        \\if ! python3 --version >/dev/null 2>&1; then
+        \\    echo "WARNING: python3 not found -- ext2 test files not populated (ext2 tests will skip)"
+        \\    touch ext2.img.populated.stamp
+        \\    exit 0
+        \\fi
+        \\echo "Populating ext2.img with test files using $DEBUGFS..."
+        \\# Create temp directory for staging files
+        \\TMPDIR_EXT2=$(mktemp -d /tmp/zk_ext2_XXXXXX)
+        \\trap 'rm -rf "$TMPDIR_EXT2"' EXIT
+        \\# hello.txt: 13 bytes "Hello, ext2!\n"
+        \\# Use explicit byte values to avoid shell history expansion of '!'
+        \\python3 -c "import sys; sys.stdout.buffer.write(bytearray([72,101,108,108,111,44,32,101,120,116,50,33,10]))" > "$TMPDIR_EXT2/hello.txt"
+        \\# medium.bin: 102400 bytes (100KB) repeating 0x00..0xFF pattern (single-indirect)
+        \\python3 -c "import sys; sys.stdout.buffer.write(bytes(range(256)) * 400)" > "$TMPDIR_EXT2/medium.bin"
+        \\# large.bin: 5242880 bytes (5MB) repeating 0x00..0xFF pattern (double-indirect)
+        \\python3 -c "import sys; sys.stdout.buffer.write(bytes(range(256)) * 20480)" > "$TMPDIR_EXT2/large.bin"
+        \\# Write files into ext2.img using piped debugfs commands.
+        \\# Note: debugfs -R "write ..." silently fails on macOS Homebrew 1.47.x;
+        \\# piped stdin commands work correctly.
+        \\printf 'write %s hello.txt\nwrite %s medium.bin\nwrite %s large.bin\n' \
+        \\    "$TMPDIR_EXT2/hello.txt" "$TMPDIR_EXT2/medium.bin" "$TMPDIR_EXT2/large.bin" \
+        \\    | "$DEBUGFS" -w ext2.img 2>/dev/null
+        \\touch ext2.img.populated.stamp
+        \\echo "ext2.img populated successfully (hello.txt=13B, medium.bin=100KB, large.bin=5MB)"
+    ;
+    const populate_ext2_cmd = b.addSystemCommand(&.{ "sh", "-c", ext2_populate_script });
+    populate_ext2_cmd.step.dependOn(&create_ext2_cmd.step);
+
     if (run_iso) {
         run_cmd.step.dependOn(&iso_cmd.step);
     } else {
         run_cmd.step.dependOn(&create_disk_img.step);
     }
-    run_cmd.step.dependOn(&create_ext2_cmd.step);
+    run_cmd.step.dependOn(&populate_ext2_cmd.step);
 
     const run_step = b.step("run", "Build and run the kernel in QEMU (UEFI)");
     run_step.dependOn(&run_cmd.step);
@@ -3110,6 +3176,7 @@ pub fn build(b: *std.Build) void {
         "scripts/run_tests.sh",
     });
     test_kernel_cmd.step.dependOn(b.getInstallStep());
+    test_kernel_cmd.step.dependOn(&populate_ext2_cmd.step);
 
     const test_kernel_step = b.step("test-kernel", "Run integration tests in QEMU");
     test_kernel_step.dependOn(&test_kernel_cmd.step);

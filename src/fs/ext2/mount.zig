@@ -1,11 +1,12 @@
 //! ext2 filesystem mount module.
 //!
 //! Provides superblock parsing, block group descriptor table (BGDT) reading,
-//! and a VFS FileSystem adapter for Phase 46 read-only ext2 support.
+//! and a VFS FileSystem adapter for ext2 read-only support.
 //!
-//! Phase 46 is intentionally read-only: open() returns NotFound (no inode
-//! resolution yet), writes return AccessDenied, and all write-side vtable
-//! slots are null.  Full inode traversal arrives in Phase 47.
+//! Phase 47 updates:
+//!   - ext2Open now resolves single-component paths via root directory scan
+//!   - ext2StatPath now returns real inode metadata
+//!   - inode.zig provides readInode, resolveBlock, file ops, and lookupInRootDir
 
 const std = @import("std");
 const types = @import("types.zig");
@@ -13,6 +14,7 @@ const vfs = @import("../vfs.zig");
 const fd = @import("fd");
 const heap = @import("heap");
 const console = @import("console");
+const inode_mod = @import("inode.zig");
 
 const BlockDevice = @import("block_device").BlockDevice;
 const SECTOR_SIZE = @import("block_device").SECTOR_SIZE;
@@ -130,21 +132,114 @@ pub fn readBgdt(
 // ============================================================================
 
 fn ext2Open(ctx: ?*anyopaque, path: []const u8, flags: u32) vfs.Error!*fd.FileDescriptor {
-    _ = ctx;
-    _ = path;
-    // Phase 46: no inode resolution yet.
-    // Reject write attempts; return NotFound for everything else.
+    const fs: *Ext2Fs = @ptrCast(@alignCast(ctx.?));
+
+    // Phase 47: ext2 is read-only. Reject any write-mode open.
     const O_ACCMODE: u32 = 0o3;
     const O_RDONLY: u32 = 0;
     if ((flags & O_ACCMODE) != O_RDONLY) return error.AccessDenied;
-    return error.NotFound;
+
+    // Strip leading "/" from the VFS-relative path.
+    // VFS strips the mount prefix "/mnt2" before calling open; the remainder
+    // is either "/" (open the root directory itself) or "/filename".
+    var rel_path = path;
+    if (rel_path.len > 0 and rel_path[0] == '/') {
+        rel_path = rel_path[1..];
+    }
+
+    // Opening the root directory itself ("/mnt2" -> rel_path "" or "/").
+    if (rel_path.len == 0) {
+        // Return a directory FD for the root inode.
+        return openRootDir(fs, flags);
+    }
+
+    // Single-component lookup in the root directory.
+    // Full multi-level path traversal is Phase 48.
+    const inum = inode_mod.lookupInRootDir(fs, rel_path) catch |err| {
+        return switch (err) {
+            error.NotFound => error.NotFound,
+            error.AccessDenied => error.AccessDenied,
+            error.OutOfMemory => error.NoMemory,
+            else => error.IOError,
+        };
+    };
+
+    // Create a FileDescriptor for the found inode.
+    const file_fd = inode_mod.openInode(fs, inum, flags) catch |err| {
+        return switch (err) {
+            error.OutOfMemory => error.NoMemory,
+            else => error.IOError,
+        };
+    };
+
+    return file_fd;
+}
+
+/// Open the ext2 root directory (inode 2) and return a directory FD.
+///
+/// Phase 47 returns a simple directory-tag FD. Full getdents support
+/// for ext2 directories is Phase 48.
+fn openRootDir(fs: *Ext2Fs, flags: u32) vfs.Error!*fd.FileDescriptor {
+    _ = fs; // Root dir inode read deferred to getdents (Phase 48)
+    const tag_ptr: ?*anyopaque = @ptrCast(@constCast(&fd.initrd_dir_tag));
+    return fd.createFd(&fd.dir_ops, flags, tag_ptr) catch return error.NoMemory;
 }
 
 fn ext2StatPath(ctx: ?*anyopaque, path: []const u8) ?vfs.FileMeta {
-    _ = ctx;
-    _ = path;
-    // Phase 46: no inode lookup yet.
-    return null;
+    const fs: *Ext2Fs = @ptrCast(@alignCast(ctx.?));
+
+    // Strip leading "/" from VFS-relative path.
+    var rel_path = path;
+    if (rel_path.len > 0 and rel_path[0] == '/') {
+        rel_path = rel_path[1..];
+    }
+
+    // Root directory stat.
+    if (rel_path.len == 0) {
+        // Read root inode (inode 2) for accurate metadata.
+        const root_inode = inode_mod.readInode(fs, 2) catch {
+            return vfs.FileMeta{
+                .mode = @import("fs_meta").S_IFDIR | 0o755,
+                .uid = 0,
+                .gid = 0,
+                .exists = true,
+                .readonly = true,
+            };
+        };
+        return vfs.FileMeta{
+            .mode = @import("fs_meta").S_IFDIR | (@as(u32, root_inode.i_mode) & 0o777),
+            .uid = @as(u32, root_inode.i_uid),
+            .gid = @as(u32, root_inode.i_gid),
+            .exists = true,
+            .readonly = true,
+            .ino = types.ROOT_INODE,
+            .size = @as(u64, root_inode.i_size),
+        };
+    }
+
+    // Single-component file lookup.
+    const inum = inode_mod.lookupInRootDir(fs, rel_path) catch return null;
+    const file_inode = inode_mod.readInode(fs, inum) catch return null;
+
+    // Determine file type from inode mode upper nibble.
+    const file_type: u32 = switch (file_inode.i_mode & types.S_IFMT) {
+        types.S_IFDIR => @import("fs_meta").S_IFDIR,
+        types.S_IFREG => @import("fs_meta").S_IFREG,
+        types.S_IFLNK => @import("fs_meta").S_IFLNK,
+        else => @import("fs_meta").S_IFREG,
+    };
+
+    return vfs.FileMeta{
+        .mode = file_type | (@as(u32, file_inode.i_mode) & 0o777),
+        .uid = @as(u32, file_inode.i_uid),
+        .gid = @as(u32, file_inode.i_gid),
+        .exists = true,
+        .readonly = true,
+        .ino = @as(u64, inum),
+        .size = @as(u64, file_inode.i_size),
+        .atime = @intCast(file_inode.i_atime),
+        .mtime = @intCast(file_inode.i_mtime),
+    };
 }
 
 fn ext2Unmount(ctx: ?*anyopaque) void {
