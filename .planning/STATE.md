@@ -5,16 +5,16 @@
 See: .planning/PROJECT.md (updated 2026-02-22)
 
 **Core value:** Every implemented syscall must work correctly on both x86_64 and aarch64 with matching behavior, tested via the existing integration test harness.
-**Current focus:** v2.0 ext2 Filesystem -- Phase 47: Inode Read and Indirect Block Resolution
+**Current focus:** v2.0 ext2 Filesystem -- Phase 48: Directory Traversal, Path Resolution, Inode Cache
 
 ## Current Position
 
-Phase: 47 of 53 (Inode Read and Indirect Block Resolution)
-Plan: 1 of 1 in current phase (Phase 47 complete)
-Status: In progress (Phase 47 complete - 1 plan done)
-Last activity: 2026-02-23 -- 47-01 complete (inode.zig: readInode, resolveBlock, lookupInRootDir; ext2Open wired; 6 integration tests all pass)
+Phase: 48 of 53 (Directory Traversal, Path Resolution, Inode Cache)
+Plan: 1 of 1 in current phase (Phase 48 complete)
+Status: In progress (Phase 48 complete - 1 plan done)
+Last activity: 2026-02-24 -- 48-01 complete (resolvePath, inode cache, getdents, readlink, statfs; 7 new tests all pass, 176 total)
 
-Progress: [░░░░░░░░░░] 2% (v2.0, 2 plans complete) | 44/44 phases complete (prior milestones)
+Progress: [██░░░░░░░░] 3% (v2.0, 3 plans complete) | 44/44 phases complete (prior milestones)
 
 ## Performance Metrics
 
@@ -38,6 +38,7 @@ Progress: [░░░░░░░░░░] 2% (v2.0, 2 plans complete) | 44/44 p
 | Phase 46-superblock-parse-ro-mount P01 | 3 | 2 tasks | 4 files |
 | Phase 46-superblock-parse-ro-mount P02 | 24 | 2 tasks | 7 files |
 | Phase 47 P01 | 15 | 2 tasks | 5 files |
+| Phase 48 P01 | 18 | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -49,6 +50,9 @@ Recent decisions relevant to v2.0:
 - ext2 mounts at /mnt2 during Phases 45-52 (SFS stays at /mnt to keep 186 tests passing)
 - 4KB block size for test images (aligns with page cache, reduces multi-sector reads)
 - Phase 48 combines inode cache with directory traversal (cache validates against working traversal code)
+- [Phase 48]: nlink added to FileMeta (default 1) -- ext2 populates from i_links_count, stat uses meta.nlink
+- [Phase 48]: resolvePath does NOT follow symlinks during traversal (correct behavior, future enhancement)
+- [Phase 48]: ext2 directory FDs use ext2_dir_ops vtable with getdents callback (separate from file ops)
 - Two-phase alloc lock pattern from sfs/alloc.zig applied to Phase 49 (prevents close-deadlock recurrence)
 - Phase 53 is one atomic commit switching mount point and migrating tests (avoids CI gap)
 - [45-01] Stamp file sentinel (ext2.img.stamp) guards idempotency of mke2fs invocation across zig build run calls
@@ -81,12 +85,12 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-02-23
-Stopped at: Completed 47-01-PLAN.md
+Last session: 2026-02-24
+Stopped at: Completed 48-01-PLAN.md
 Resume file: None
 
-**Next action:** Phase 47 complete. Begin Phase 48 (inode cache + full path traversal) -- implement multi-component path resolution and getdents for ext2 directories.
+**Next action:** Phase 48 complete. Begin Phase 49 (bitmap allocation, write support) -- implement block/inode bitmap allocation and ext2 write operations.
 
 ---
 *State initialized: 2026-02-06*
-*Last updated: 2026-02-23 after 47-01 completion*
+*Last updated: 2026-02-24 after 48-01 completion*
