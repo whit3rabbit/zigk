@@ -20,6 +20,10 @@ pub const FileMeta = struct {
     dev: u64 = 0,
     /// SECURITY: Inode number for TOCTOU detection
     ino: u64 = 0,
+    /// Hard link count. Defaults to 1 (correct for regular files).
+    /// Directories report >= 2 (self "." + parent entry).
+    /// Populated by filesystems that track link counts (e.g., ext2 i_links_count).
+    nlink: u32 = 1,
     /// Size in bytes (optional)
     size: u64 = 0,
     /// Access time (seconds since epoch)

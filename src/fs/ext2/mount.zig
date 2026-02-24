@@ -235,6 +235,7 @@ fn ext2StatPath(ctx: ?*anyopaque, path: []const u8) ?vfs.FileMeta {
             .exists = true,
             .readonly = true,
             .ino = types.ROOT_INODE,
+            .nlink = @as(u32, root_inode.i_links_count),
             .size = @as(u64, root_inode.i_size),
         };
     }
@@ -258,6 +259,7 @@ fn ext2StatPath(ctx: ?*anyopaque, path: []const u8) ?vfs.FileMeta {
         .exists = true,
         .readonly = true,
         .ino = @as(u64, inum),
+        .nlink = @as(u32, file_inode.i_links_count),
         .size = @as(u64, file_inode.i_size),
         .atime = @intCast(file_inode.i_atime),
         .mtime = @intCast(file_inode.i_mtime),

@@ -87,7 +87,7 @@ fn statPathKernel(path: []const u8, stat_buf_ptr: usize) SyscallError!usize {
     const stat_result: uapi.stat.Stat = .{
         .dev = file_meta.dev,
         .ino = file_meta.ino,
-        .nlink = 1,
+        .nlink = file_meta.nlink,
         .mode = file_meta.mode,
         .uid = file_meta.uid,
         .gid = file_meta.gid,
