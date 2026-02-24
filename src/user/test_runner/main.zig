@@ -148,6 +148,15 @@ export fn main(argc: i32, argv: [*][*:0]u8) i32 {
     runner.runTest("ext2: seek and read", ext2_tests.testExt2SeekAndRead);
     runner.runTest("ext2: stat file", ext2_tests.testExt2StatFile);
 
+    // ext2 Phase 48 tests: directory traversal, getdents, readlink, statfs
+    runner.runTest("ext2: open nested path", ext2_tests.testExt2OpenNestedPath);
+    runner.runTest("ext2: getdents lists directory", ext2_tests.testExt2GetdentsListsDirectory);
+    runner.runTest("ext2: getdents subdirectory", ext2_tests.testExt2GetdentsSubdir);
+    runner.runTest("ext2: readlink fast symlink", ext2_tests.testExt2Readlink);
+    runner.runTest("ext2: stat nested file", ext2_tests.testExt2StatNestedFile);
+    runner.runTest("ext2: stat directory", ext2_tests.testExt2StatDirectory);
+    runner.runTest("ext2: statfs", ext2_tests.testExt2Statfs);
+
     // Error handling tests
     runner.runTest("error: open nonexistent file", fs_error_tests.testOpenNonexistentFile);
     runner.runTest("error: read from write-only fd", fs_error_tests.testReadFromWriteOnlyFd);
