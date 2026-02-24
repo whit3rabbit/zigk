@@ -1,6 +1,6 @@
 //! ext2 inode read and block resolution.
 //!
-//! Implements Phase 47 inode-based file I/O for the ext2 filesystem:
+//! Implements Phase 47+48 inode-based file I/O for the ext2 filesystem:
 //!   - readInode: locate and read an inode from the inode table using BGDT
 //!   - resolveBlock: translate a logical file block to a physical disk block
 //!     through direct, single-indirect, and double-indirect block trees
@@ -9,8 +9,14 @@
 //!   - lookupInRootDir: single-level directory scan (inode 2 entries only)
 //!   - openInode: create a FileDescriptor for a given inode number
 //!
-//! Phase 47 scope: read-only, root directory lookup only. Full path traversal
-//! and write support are Phase 48 and Phase 49 respectively.
+//! Phase 48 additions:
+//!   - INODE_CACHE_SIZE / InodeCacheEntry: 16-entry LRU inode cache (INODE-05)
+//!   - getCachedInode: cache-backed inode read (wraps readInode)
+//!   - lookupInDir: generic directory entry scan for any directory inode (DIR-01)
+//!   - resolvePath: multi-component path traversal calling lookupInDir (DIR-01)
+//!   - Ext2DirFd / ext2_dir_ops: directory FD private data and FileOps (DIR-02)
+//!   - ext2GetdentsFromFd: walk directory entries by rec_len, emit Dirent64 (DIR-02)
+//!   - openDirInode: open a directory inode as a directory FD
 //!
 //! Security rules applied:
 //!   - All block buffers are heap-allocated (never stack) to prevent overflow
@@ -26,6 +32,8 @@ const console = @import("console");
 const uapi = @import("uapi");
 const meta = @import("fs_meta");
 const vfs = @import("../vfs.zig");
+
+// uapi.stat and uapi.dirent are needed for Stat and Dirent64 in Phase 48 functions.
 
 const mount = @import("mount.zig");
 const Ext2Fs = mount.Ext2Fs;
@@ -535,6 +543,452 @@ pub fn openInode(fs: *Ext2Fs, inum: u32, flags: u32) !*fd.FileDescriptor {
     };
 
     const file_desc = fd.createFd(&ext2_file_ops, flags, file_ctx) catch {
+        return error.OutOfMemory;
+    };
+
+    return file_desc;
+}
+
+// ============================================================================
+// Phase 48: Inode LRU Cache (INODE-05)
+// ============================================================================
+
+/// Number of entries in the fixed-size LRU inode cache.
+/// 16 entries handles a typical path depth of a/b/c/d (5 inodes) with room
+/// for parent inodes being re-read during concurrent getdents operations.
+/// Size contribution to Ext2Fs: 16 * (4 + 128 + 8) = 2240 bytes (heap-allocated).
+pub const INODE_CACHE_SIZE: usize = 16;
+
+/// One slot in the inode LRU cache.
+/// inum == 0 is the empty-slot sentinel (safe since ext2 inode numbering is 1-based).
+pub const InodeCacheEntry = struct {
+    inum: u32, // 0 = empty slot
+    inode: types.Inode,
+    lru_gen: u64, // higher = more recently used; 0 = never used
+};
+
+/// Return the inode for `inum`, using the LRU cache to avoid redundant disk reads.
+///
+/// Cache probe is O(INODE_CACHE_SIZE) = O(16) -- negligible for this use case.
+/// On miss, calls readInode and evicts the oldest (lowest lru_gen) slot.
+///
+/// Security: inum == 0 returns error.InvalidInode (0 is the empty-slot sentinel).
+pub fn getCachedInode(fs: *Ext2Fs, inum: u32) Ext2Error!types.Inode {
+    if (inum == 0) return error.InvalidInode;
+
+    // Linear probe: find cache hit or track oldest slot for eviction.
+    var oldest_gen: u64 = std.math.maxInt(u64);
+    var oldest_slot: usize = 0;
+
+    for (&fs.inode_cache, 0..) |*entry, i| {
+        if (entry.inum == inum) {
+            // Cache hit: bump LRU generation and return cached inode.
+            fs.inode_cache_gen += 1;
+            entry.lru_gen = fs.inode_cache_gen;
+            console.debug("ext2: inode cache HIT inum={d} gen={d}", .{ inum, entry.lru_gen });
+            return entry.inode;
+        }
+        if (entry.lru_gen < oldest_gen) {
+            oldest_gen = entry.lru_gen;
+            oldest_slot = i;
+        }
+    }
+
+    // Cache miss: read from disk, evict oldest slot.
+    console.debug("ext2: inode cache MISS inum={d}, evicting slot {d} (inum={d})", .{
+        inum, oldest_slot, fs.inode_cache[oldest_slot].inum,
+    });
+    const inode = try readInode(fs, inum);
+
+    fs.inode_cache_gen += 1;
+    fs.inode_cache[oldest_slot] = .{
+        .inum = inum,
+        .inode = inode,
+        .lru_gen = fs.inode_cache_gen,
+    };
+
+    return inode;
+}
+
+// ============================================================================
+// Phase 48: Generic Directory Scan (DIR-01)
+// ============================================================================
+
+/// Scan a directory inode for an entry with the given name.
+///
+/// This is a generalization of lookupInRootDir: it takes a pre-read directory
+/// inode instead of always reading inode 2. Supports all indirection levels
+/// via resolveBlock (Phase 47).
+///
+/// Returns the inode number of the matching entry, or error.NotFound.
+///
+/// CRITICAL: Always walks by entry.rec_len, never by computed name_len+8.
+/// The last entry in each directory block has rec_len padded to the block end.
+pub fn lookupInDir(fs: *Ext2Fs, dir_inode: *const types.Inode, name: []const u8) Ext2Error!u32 {
+    if (!dir_inode.isDir()) return error.NotFound;
+    if (name.len == 0 or name.len > 255) return error.NotFound;
+
+    // Count blocks needed: ceil(i_size / block_size).
+    const dir_blocks: u32 = if (dir_inode.i_size == 0)
+        0
+    else
+        (dir_inode.i_size + fs.block_size - 1) / fs.block_size;
+
+    // SECURITY: Heap-allocate block buffer -- 4KB on kernel stack overflows aarch64.
+    const alloc = heap.allocator();
+    const block_buf = alloc.alloc(u8, fs.block_size) catch return error.OutOfMemory;
+    defer alloc.free(block_buf);
+
+    var lb: u32 = 0;
+    while (lb < dir_blocks) : (lb += 1) {
+        const phys_block = try resolveBlock(fs, dir_inode, lb);
+        if (phys_block == 0) continue; // sparse directory block (unusual but handle)
+
+        @memset(block_buf, 0); // DMA hygiene
+        const lba = std.math.mul(u64, @as(u64, phys_block), @as(u64, fs.sectors_per_block)) catch {
+            return error.IOError;
+        };
+        fs.dev.readSectors(lba, fs.sectors_per_block, block_buf) catch {
+            console.err("ext2: lookupInDir: readSectors lba={d} failed", .{lba});
+            return error.IOError;
+        };
+
+        // Walk directory entries in this block by rec_len.
+        var offset: u32 = 0;
+        while (offset < fs.block_size) {
+            // Ensure at least the 8-byte DirEntry header fits.
+            if (offset + @sizeOf(types.DirEntry) > fs.block_size) break;
+
+            const entry: *const types.DirEntry = @ptrCast(@alignCast(block_buf[offset..].ptr));
+
+            // rec_len == 0 would loop forever: break to next block.
+            if (entry.rec_len == 0) break;
+
+            if (entry.inode != 0 and entry.name_len > 0) {
+                const name_start = offset + @sizeOf(types.DirEntry);
+                const name_end = name_start + @as(u32, entry.name_len);
+
+                if (name_end <= fs.block_size) {
+                    const entry_name = block_buf[name_start..name_end];
+                    if (std.mem.eql(u8, entry_name, name)) {
+                        console.debug("ext2: lookupInDir: found '{s}' -> inode {d}", .{ name, entry.inode });
+                        return entry.inode;
+                    }
+                }
+            }
+
+            // CRITICAL: stride by rec_len, NOT by computed align(8+name_len, 4).
+            offset += entry.rec_len;
+        }
+    }
+
+    console.debug("ext2: lookupInDir: '{s}' not found", .{name});
+    return error.NotFound;
+}
+
+// ============================================================================
+// Phase 48: Multi-Component Path Resolution (DIR-01)
+// ============================================================================
+
+/// Resolve a multi-component path relative to the ext2 root directory.
+///
+/// Starts from ROOT_INODE (inode 2) and iterates lookupInDir for each
+/// '/' separated component. Returns the inode number of the final component.
+///
+/// Returns ROOT_INODE for empty path (root itself).
+///
+/// NOTE: Does NOT follow symlinks during traversal (Phase 48 scope).
+/// If an intermediate path component is a symlink, the next component's
+/// isDir() check will fail with error.NotFound (symlinks are not directories).
+/// Symlink following during traversal is a future enhancement.
+///
+/// Safety: Component count is limited to 255 to prevent infinite loops from
+/// circular structures (no symlink following means no true loops, but limit
+/// is cheap insurance).
+pub fn resolvePath(fs: *Ext2Fs, path: []const u8) Ext2Error!u32 {
+    var current_inum: u32 = types.ROOT_INODE;
+
+    // Strip leading '/'.
+    var remaining = path;
+    if (remaining.len > 0 and remaining[0] == '/') {
+        remaining = remaining[1..];
+    }
+
+    // Root itself.
+    if (remaining.len == 0) return current_inum;
+
+    // Walk each path component.
+    var component_count: usize = 0;
+    var it = std.mem.tokenizeScalar(u8, remaining, '/');
+    while (it.next()) |component| {
+        if (component.len == 0) continue; // Skip empty components (double-slash)
+        if (component.len > 255) return error.NotFound; // ext2 name_len is u8
+
+        component_count += 1;
+        if (component_count > 255) {
+            console.err("ext2: resolvePath: path depth > 255 components", .{});
+            return error.NotFound;
+        }
+
+        // Read the current directory inode (cached).
+        const dir_inode = try getCachedInode(fs, current_inum);
+
+        // Each intermediate component must be a directory.
+        if (!dir_inode.isDir()) {
+            console.debug("ext2: resolvePath: component '{s}': inode {d} is not a directory", .{
+                component, current_inum,
+            });
+            return error.NotFound;
+        }
+
+        // Look up the next component in the current directory.
+        current_inum = try lookupInDir(fs, &dir_inode, component);
+    }
+
+    return current_inum;
+}
+
+// ============================================================================
+// Phase 48: Directory FD (Ext2DirFd) and FileOps (ext2_dir_ops) (DIR-02)
+// ============================================================================
+
+/// Private data for directory FileDescriptors opened on ext2 directories.
+const Ext2DirFd = struct {
+    /// Back-pointer to the mounted filesystem state.
+    fs: *Ext2Fs,
+    /// Inode number of the open directory.
+    dir_inode_num: u32,
+    /// Cached copy of the directory inode (read at open time).
+    dir_inode: types.Inode,
+};
+
+/// FileOps vtable for ext2 directory FileDescriptors.
+///
+/// read/write/seek are null (directories are not read/seeked directly).
+/// getdents is the primary operation for directory FDs.
+pub const ext2_dir_ops = fd.FileOps{
+    .read = null,
+    .write = null,
+    .close = ext2DirClose,
+    .seek = null,
+    .stat = ext2DirStat,
+    .ioctl = null,
+    .mmap = null,
+    .poll = null,
+    .truncate = null,
+    .getdents = ext2GetdentsFromFd,
+    .chown = null,
+};
+
+/// Release the Ext2DirFd private data on FD close.
+fn ext2DirClose(file_desc: *fd.FileDescriptor) isize {
+    if (file_desc.private_data) |ptr| {
+        const dir: *Ext2DirFd = @ptrCast(@alignCast(ptr));
+        heap.allocator().destroy(dir);
+        file_desc.private_data = null;
+    }
+    return 0;
+}
+
+/// Return stat metadata for an open directory FD.
+fn ext2DirStat(file_desc: *fd.FileDescriptor, stat_buf: *anyopaque) isize {
+    const dir: *Ext2DirFd = @ptrCast(@alignCast(file_desc.private_data.?));
+    const inode = &dir.dir_inode;
+
+    // SECURITY: Use std.mem.zeroes to prevent information leaks from padding fields.
+    var st = std.mem.zeroes(uapi.stat.Stat);
+
+    st.ino = @as(u64, dir.dir_inode_num);
+    st.mode = @as(u32, inode.i_mode); // includes S_IFDIR type bits + permissions
+    st.nlink = @as(u64, inode.i_links_count);
+    st.uid = @as(u32, inode.i_uid);
+    st.gid = @as(u32, inode.i_gid);
+    st.size = @intCast(inode.i_size);
+    st.blksize = @intCast(dir.fs.block_size);
+    st.blocks = @intCast(inode.i_blocks); // 512-byte units per ext2 spec
+    st.atime = @intCast(inode.i_atime);
+    st.mtime = @intCast(inode.i_mtime);
+    st.ctime = @intCast(inode.i_ctime);
+
+    @memcpy(
+        @as([*]u8, @ptrCast(stat_buf))[0..@sizeOf(uapi.stat.Stat)],
+        std.mem.asBytes(&st),
+    );
+
+    return 0;
+}
+
+// ============================================================================
+// Phase 48: getdents for ext2 directory FDs (DIR-02)
+// ============================================================================
+
+/// Read directory entries from an ext2 directory FD into a userspace buffer.
+///
+/// Uses file_desc.position as an absolute byte offset into the directory data.
+/// Walks DirEntry records by rec_len (CRITICAL: never by computed name_len+8).
+/// The last entry in each directory block has rec_len padded to the block end;
+/// walking by computed size silently misses it.
+///
+/// Writes Dirent64 entries to the userspace buffer at `dirp`. The buffer is
+/// validated by sys_getdents64 before this function is called.
+///
+/// Returns bytes written, or negative errno on error.
+fn ext2GetdentsFromFd(file_desc: *fd.FileDescriptor, dirp: usize, count: usize) isize {
+    const dir: *Ext2DirFd = @ptrCast(@alignCast(file_desc.private_data.?));
+    const fs = dir.fs;
+    const dir_inode = &dir.dir_inode;
+
+    // Use absolute byte offset in directory data as position.
+    var abs_offset: u64 = file_desc.position;
+    const dir_size: u64 = @as(u64, dir_inode.i_size);
+
+    if (abs_offset >= dir_size) return 0; // EOF
+
+    // SECURITY: Heap-allocate block buffer (4KB on kernel stack overflows aarch64).
+    const alloc = heap.allocator();
+    const block_buf = alloc.alloc(u8, fs.block_size) catch return -12; // ENOMEM
+    defer alloc.free(block_buf);
+
+    // Userspace buffer pointer (validated by sys_getdents64 caller).
+    const user_buf: [*]volatile u8 = @ptrFromInt(dirp);
+    var bytes_written: usize = 0;
+
+    while (abs_offset < dir_size) {
+        // Compute which directory block covers the current absolute byte offset.
+        const logical_block: u32 = @intCast(abs_offset / fs.block_size);
+        const byte_in_block: u32 = @intCast(abs_offset % fs.block_size);
+
+        const phys_block = resolveBlock(fs, dir_inode, logical_block) catch return -5; // EIO
+        if (phys_block == 0) {
+            // Sparse directory block: advance past it.
+            abs_offset = (@as(u64, logical_block) + 1) * fs.block_size;
+            continue;
+        }
+
+        @memset(block_buf, 0); // DMA hygiene
+        const lba = std.math.mul(u64, @as(u64, phys_block), @as(u64, fs.sectors_per_block)) catch {
+            return -5; // EIO (overflow)
+        };
+        fs.dev.readSectors(lba, fs.sectors_per_block, block_buf) catch {
+            console.err("ext2: getdents: readSectors lba={d} failed", .{lba});
+            return -5; // EIO
+        };
+
+        // Walk entries in this block starting at byte_in_block.
+        var block_offset: u32 = byte_in_block;
+        while (block_offset < fs.block_size) {
+            // Ensure at least the 8-byte DirEntry header fits.
+            if (block_offset + @sizeOf(types.DirEntry) > fs.block_size) break;
+
+            const entry: *const types.DirEntry = @ptrCast(@alignCast(block_buf[block_offset..].ptr));
+
+            // rec_len == 0: corrupt or end-of-block sentinel.
+            if (entry.rec_len == 0) break;
+
+            const next_block_offset = block_offset + entry.rec_len;
+
+            if (entry.inode != 0 and entry.name_len > 0) {
+                const name_start: u32 = block_offset + @sizeOf(types.DirEntry);
+                const name_len: usize = @as(usize, entry.name_len);
+                const name_end: u32 = name_start + @as(u32, @intCast(name_len));
+
+                if (name_end <= fs.block_size) {
+                    const name = block_buf[name_start..name_end];
+
+                    // Compute output Dirent64 size: header + name + null + 8-byte align.
+                    const d_reclen_raw = @sizeOf(uapi.dirent.Dirent64) + name_len + 1;
+                    const aligned_reclen = std.mem.alignForward(usize, d_reclen_raw, 8);
+
+                    if (bytes_written + aligned_reclen > count) {
+                        // Buffer full: stop before this entry, preserve position.
+                        // Position points to the start of this entry in directory data.
+                        const entry_abs_pos = (@as(u64, logical_block) * fs.block_size) +
+                            @as(u64, block_offset);
+                        file_desc.position = entry_abs_pos;
+                        return std.math.cast(isize, bytes_written) orelse -75; // EOVERFLOW
+                    }
+
+                    // Map ext2 file_type to POSIX DT_* constants.
+                    const d_type: u8 = switch (entry.file_type) {
+                        types.FT_REG_FILE => uapi.dirent.DT_REG,
+                        types.FT_DIR => uapi.dirent.DT_DIR,
+                        types.FT_SYMLINK => uapi.dirent.DT_LNK,
+                        types.FT_CHRDEV => uapi.dirent.DT_CHR,
+                        types.FT_BLKDEV => uapi.dirent.DT_BLK,
+                        types.FT_FIFO => uapi.dirent.DT_FIFO,
+                        types.FT_SOCK => uapi.dirent.DT_SOCK,
+                        else => uapi.dirent.DT_UNKNOWN,
+                    };
+
+                    // d_off: cookie pointing to the next entry (absolute byte offset).
+                    const next_entry_abs: u64 = (@as(u64, logical_block) * fs.block_size) +
+                        @as(u64, next_block_offset);
+
+                    const ent = uapi.dirent.Dirent64{
+                        .d_ino = @as(u64, entry.inode),
+                        .d_off = @intCast(next_entry_abs),
+                        .d_reclen = @intCast(aligned_reclen),
+                        .d_type = d_type,
+                        .d_name = undefined,
+                    };
+
+                    // Write Dirent64 header (excluding the zero-length d_name field).
+                    const ent_bytes = std.mem.asBytes(&ent);
+                    for (ent_bytes, 0..) |byte, j| user_buf[bytes_written + j] = byte;
+
+                    // Write filename bytes after the header.
+                    const name_offset_in_output = bytes_written + @offsetOf(uapi.dirent.Dirent64, "d_name");
+                    for (name, 0..) |byte, j| user_buf[name_offset_in_output + j] = byte;
+                    // Null terminator after the name.
+                    user_buf[name_offset_in_output + name_len] = 0;
+
+                    bytes_written += aligned_reclen;
+                }
+            }
+
+            // CRITICAL: stride by rec_len. The last entry in each block has
+            // rec_len padded to fill remaining block space (not align(8+name_len,4)).
+            block_offset = next_block_offset;
+        }
+
+        // Advance to the next directory block.
+        abs_offset = (@as(u64, logical_block) + 1) * fs.block_size;
+    }
+
+    file_desc.position = abs_offset;
+    return std.math.cast(isize, bytes_written) orelse -75; // EOVERFLOW
+}
+
+// ============================================================================
+// Phase 48: openDirInode -- open a directory inode as a directory FD
+// ============================================================================
+
+/// Open directory inode `inum` and return a new FileDescriptor with ext2_dir_ops.
+///
+/// Reads the inode via getCachedInode, verifies it is a directory, allocates
+/// an Ext2DirFd on the heap, and creates a FileDescriptor.
+/// Uses errdefer for cleanup on failure.
+pub fn openDirInode(fs: *Ext2Fs, inum: u32, flags: u32) Ext2Error!*fd.FileDescriptor {
+    const inode = try getCachedInode(fs, inum);
+
+    if (!inode.isDir()) {
+        console.err("ext2: openDirInode: inode {d} is not a directory (mode=0x{X:0>4})", .{
+            inum, inode.i_mode,
+        });
+        return error.NotFound;
+    }
+
+    const alloc = heap.allocator();
+    const dir_ctx = try alloc.create(Ext2DirFd);
+    errdefer alloc.destroy(dir_ctx);
+
+    dir_ctx.* = .{
+        .fs = fs,
+        .dir_inode_num = inum,
+        .dir_inode = inode,
+    };
+
+    const file_desc = fd.createFd(&ext2_dir_ops, flags, dir_ctx) catch {
         return error.OutOfMemory;
     };
 

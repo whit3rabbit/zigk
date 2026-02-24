@@ -2995,14 +2995,19 @@ pub fn build(b: *std.Build) void {
     ;
     const create_ext2_cmd = b.addSystemCommand(&.{ "sh", "-c", ext2_script });
 
-    // Populate ext2.img with test files for Phase 47 inode/block resolution tests.
+    // Populate ext2.img with test files for Phase 47+48 inode/block resolution tests.
     // Uses a separate stamp (ext2.img.populated.stamp) so the population step is
     // idempotent even if ext2.img is recreated without running the population step.
     //
+    // NOTE: To force re-population after content changes, delete the stamp:
+    //   rm ext2.img.populated.stamp && zig build
+    //
     // Files written:
-    //   hello.txt   -- 13 bytes "Hello, ext2!\n" (direct blocks only, INODE-02)
-    //   medium.bin  -- 102400 bytes (100KB, repeating 0x00..0xFF, single-indirect, INODE-03)
-    //   large.bin   -- 5242880 bytes (5MB, repeating 0x00..0xFF, double-indirect, INODE-04)
+    //   hello.txt          -- 13 bytes "Hello, ext2!\n" (direct blocks only, INODE-02)
+    //   medium.bin         -- 102400 bytes (100KB, repeating 0x00..0xFF, single-indirect, INODE-03)
+    //   large.bin          -- 5242880 bytes (5MB, repeating 0x00..0xFF, double-indirect, INODE-04)
+    //   a/b/c/file.txt     -- 17 bytes "nested ext2 file\n" (DIR-01: multi-component path)
+    //   link_to_hello      -- fast symlink -> /mnt2/hello.txt (DIR-03: readlink)
     //
     // NOTE: Uses piped debugfs commands (not -R) because debugfs -R silently
     // fails to write files on macOS Homebrew e2fsprogs 1.47.x.
@@ -3049,14 +3054,18 @@ pub fn build(b: *std.Build) void {
         \\python3 -c "import sys; sys.stdout.buffer.write(bytes(range(256)) * 400)" > "$TMPDIR_EXT2/medium.bin"
         \\# large.bin: 5242880 bytes (5MB) repeating 0x00..0xFF pattern (double-indirect)
         \\python3 -c "import sys; sys.stdout.buffer.write(bytes(range(256)) * 20480)" > "$TMPDIR_EXT2/large.bin"
-        \\# Write files into ext2.img using piped debugfs commands.
+        \\# nested.txt: 17 bytes "nested ext2 file\n" for a/b/c/file.txt (DIR-01)
+        \\python3 -c "import sys; sys.stdout.buffer.write(b'nested ext2 file\n')" > "$TMPDIR_EXT2/nested.txt"
+        \\# Write Phase 47+48 files into ext2.img using piped debugfs commands.
         \\# Note: debugfs -R "write ..." silently fails on macOS Homebrew 1.47.x;
         \\# piped stdin commands work correctly.
-        \\printf 'write %s hello.txt\nwrite %s medium.bin\nwrite %s large.bin\n' \
-        \\    "$TMPDIR_EXT2/hello.txt" "$TMPDIR_EXT2/medium.bin" "$TMPDIR_EXT2/large.bin" \
+        \\# Phase 48: mkdir requires creating each directory level separately.
+        \\# debugfs does NOT support mkdir a/b (nested creation in one command).
+        \\printf 'write %s hello.txt\nwrite %s medium.bin\nwrite %s large.bin\nmkdir a\nmkdir a/b\nmkdir a/b/c\nwrite %s a/b/c/file.txt\nsymlink link_to_hello /mnt2/hello.txt\n' \
+        \\    "$TMPDIR_EXT2/hello.txt" "$TMPDIR_EXT2/medium.bin" "$TMPDIR_EXT2/large.bin" "$TMPDIR_EXT2/nested.txt" \
         \\    | "$DEBUGFS" -w ext2.img 2>/dev/null
         \\touch ext2.img.populated.stamp
-        \\echo "ext2.img populated successfully (hello.txt=13B, medium.bin=100KB, large.bin=5MB)"
+        \\echo "ext2.img populated successfully (hello.txt=13B, medium.bin=100KB, large.bin=5MB, a/b/c/file.txt=17B, link_to_hello->symlink)"
     ;
     const populate_ext2_cmd = b.addSystemCommand(&.{ "sh", "-c", ext2_populate_script });
     populate_ext2_cmd.step.dependOn(&create_ext2_cmd.step);
