@@ -32,10 +32,12 @@ Thumbs.db
 
 # Temporary files
 *.tmp
-*.xml
-*.txt
 *.tar
 *.tar.gz
+
+# Test/debug binaries
+test_debug_alloc
+
 # Environment files
 .env
 .env.*

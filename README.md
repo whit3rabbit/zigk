@@ -1,129 +1,144 @@
 # ZK
+
 [![ISO Release Build](https://github.com/whit3rabbit/zigk/actions/workflows/build-iso.yml/badge.svg?event=release)](https://github.com/whit3rabbit/zigk/actions/workflows/build-iso.yml)
 [![CI](https://github.com/whit3rabbit/zigk/actions/workflows/ci.yml/badge.svg)](https://github.com/whit3rabbit/zigk/actions/workflows/ci.yml)
 
 ZK is a 64-bit modular monolithic operating system kernel written in Zig. It targets both **x86_64** (AMD64) and **AArch64** (ARMv8-A) architectures, featuring a custom UEFI bootloader and a unified Hardware Abstraction Layer (HAL).
 
-While the project uses a clean module structure to separate concerns, it operates as a monolithic kernel. Device drivers, the network stack, and file system logic run in kernel space (Ring 0 / EL1) to maximize performance and simplify hardware access.
+Device drivers, the network stack, and file system logic run in kernel space (Ring 0 / EL1) to maximize performance and simplify hardware access.
 
 ## Architecture
 
-ZK is designed with a modular monolithic architecture. Unlike a microkernel, essential system services and drivers are compiled directly into the kernel binary.
-
 - **Privilege Level:** Drivers (Network, Storage, GPU) and the TCP/IP stack execute in Ring 0 (x86) or EL1 (ARM).
-- **Memory Model:** The kernel utilizes a Higher Half Direct Map (HHDM) for physical memory access.
-- **System Calls:** Userspace interacts with the kernel via a Linux-compatible syscall ABI (interrupt 0x80/syscall instruction) rather than IPC message passing.
-- **Further reading:** Boot flow and memory layout are detailed in [docs/BOOT.md](docs/BOOT.md) and [docs/BOOT_ARCHITECTURE.md](docs/BOOT_ARCHITECTURE.md). The HAL boundary and directory map are in [docs/FILESYSTEM.md](docs/FILESYSTEM.md).
+- **Memory Model:** Higher Half Direct Map (HHDM) for physical memory access.
+- **System Calls:** Linux-compatible syscall ABI (`syscall` instruction / `svc #0`) rather than IPC message passing.
+- **Further reading:** [docs/BOOT.md](docs/BOOT.md), [docs/BOOT_ARCHITECTURE.md](docs/BOOT_ARCHITECTURE.md), [docs/FILESYSTEM.md](docs/FILESYSTEM.md)
 
 ## Features
 
-### Best Features
+Full details in [docs/FEATURES.md](docs/FEATURES.md).
 
-A quick overview of the capabilities detailed in [docs/FEATURES.md](docs/FEATURES.md):
+### Core
 
-#### 🏗️ Architecture & Core
-- **Dual-Arch Support**: Single codebase for **x86_64** and **AArch64** with a unified, zero-cost HAL.
-- **Security First**: KASLR, Stack Canaries, Hardware Entropy (RDRAND/FEAT_RNG), and strict User/Kernel isolation (SMAP/PAN).
-- **Modern Memory**: Higher-Half Direct Map (HHDM), IOMMU protection (VT-d), and slab-like kernel heap allocator.
+- **Dual-arch:** Single codebase for x86_64 and AArch64 with a zero-cost HAL.
+- **Security:** KASLR, stack canaries, hardware entropy (RDRAND/FEAT_RNG), SMAP/PAN user/kernel isolation, capability-based access control.
+- **Memory:** HHDM, IOMMU protection (VT-d), slab-like kernel heap allocator.
+- **Scheduler:** Preemptive multitasking with per-CPU run queues.
+- **Syscalls:** 100+ Linux-compatible syscalls including `io_uring`, `epoll`, `signalfd`, `eventfd`, `timerfd`.
 
-#### 🌐 Networking
-- **Zero-Copy Stack**: In-kernel TCP/IP (RFC 793) designed for performance with zero-copy packet processing.
-- **High Performance**: NAPI-style interrupt handling and ring-buffer IPC (128-byte cache line alignment).
-- **Drivers**: Intel E1000e (PCIe), VirtIO-Net, and Loopback.
+### Networking
 
-#### 🎮 Graphics & Userspace
-- **Graphics**: VirtIO-GPU 2D acceleration, UEFI Framebuffer, and redundant "Double-Fault" display handling.
-- **Doom Port**: Runs vanilla Doom with music and sound effects to demonstrate system stability and audio/video subsystems.
-- **Linux Compatibility**: `io_uring` support, standard libc (musl-like), and ELF64 loader.
+- **Zero-copy TCP/IP** stack (RFC 793) with NAPI-style interrupt coalescing.
+- **Drivers:** Intel E1000e (PCIe), VirtIO-Net, Loopback.
+- **Protocols:** IPv4, TCP, UDP, ARP, ICMP, DNS, mDNS, DHCP.
 
-#### 🔌 Hardware Support
-- **USB Stack**: Native xHCI (USB 3.0) and EHCI (USB 2.0) support.
-- **Storage**: AHCI (SATA) driver with DMA Scatter/Gather and async I/O.
-- **Audio**: Intel HDA and AC97 drivers for high-fidelity sound.
+### Storage and Filesystems
 
-## Build and Run
+- **AHCI (SATA):** DMA scatter/gather, async I/O via kernel reactor.
+- **Filesystems:** InitRD (USTAR, read-only), SFS (simple writable), ext2 (read/write), DevFS, VFS layer.
+- **VirtIO-9P:** Host-guest shared folders.
 
-See [docs/BUILD.md](docs/BUILD.md) for platform-specific notes and Docker-based builds.
+### Graphics and Userspace
 
-### Requirements
-- Zig 0.16.x
-- QEMU (for emulation)
+- **Graphics:** VirtIO-GPU 2D acceleration, UEFI framebuffer, Bochs BGA, Cirrus, QXL.
+- **Audio:** Intel HDA and AC97 drivers.
+- **Doom:** Runs vanilla Doom with music and sound effects.
+- **Userspace:** ELF64 loader, musl-like libc, interactive shell.
+
+### Hardware
+
+- **USB:** Native xHCI (USB 3.0) and EHCI (USB 2.0).
+- **Input:** PS/2 keyboard, USB HID.
+- **Serial:** 16550 UART (x86), PL011 (ARM).
+
+## Requirements
+
+- [Zig 0.16.x](https://ziglang.org/download/)
+- [QEMU](https://www.qemu.org/) (for emulation)
 - xorriso (for ISO generation)
 
-### Compilation
-
-To build the kernel, userspace programs, and generate the bootable ISO:
+## Quick Start
 
 ```bash
-# Build for x86_64 (default)
-zig build -Darch=x86_64 -Doptimize=ReleaseSafe
+# Build and run (defaults to x86_64, boots Doom)
+make run
+
+# Build and run the shell
+make run-shell
 
 # Build for AArch64
-zig build -Darch=aarch64 -Doptimize=ReleaseSafe
+make build ARCH=aarch64
+
+# Run tests
+make test
+
+# See all targets
+make help
 ```
 
-**Dual-Architecture Support:** The build system produces architecture-named kernel binaries (`kernel-x86_64.elf`, `kernel-aarch64.elf`) that coexist in `zig-out/bin/`. You can build for both architectures without overwrites:
+Or use `zig build` directly:
 
 ```bash
-zig build -Darch=x86_64 && zig build -Darch=aarch64
-ls zig-out/bin/kernel-*.elf  # Both exist
+zig build -Darch=x86_64              # Build kernel
+zig build run -Darch=x86_64          # Build and run in QEMU
+zig build iso -Darch=x86_64          # Build bootable UEFI ISO
+zig build test                        # Run unit tests
 ```
 
-Architecture-specific build targets:
+The build system produces architecture-named binaries (`kernel-x86_64.elf`, `kernel-aarch64.elf`) that coexist in `zig-out/bin/`.
 
-| Target | Description |
+## Running with QEMU
+
+The build system configures QEMU automatically: networking (user mode with port 8080 forwarded to guest 80), KVM/HVF acceleration, and device flags.
+
+| Option | Example |
 | :--- | :--- |
-| `iso -Darch=x86_64` | Build bootable x86_64 UEFI ISO |
-| `iso -Darch=aarch64` | Build bootable AArch64 UEFI ISO |
-| `run -Darch=x86_64` | Build and run x86_64 kernel in QEMU |
-| `run -Darch=aarch64` | Build and run AArch64 kernel in QEMU |
+| Boot target | `-Ddefault-boot=shell` (shell, doom, test_runner) |
+| Firmware override | `-Dbios=/path/to/OVMF.fd` |
+| Disk boot | `-Drun-iso=false` |
+| Headless | `-Dheadless=true` |
+| Shared folder | `-Dvirtfs=/tmp/share` |
+| Serial console | `-Dqemu-args="-nographic"` (Ctrl+A X to exit) |
 
-### Running with QEMU
+## Testing
 
-The build system wraps QEMU for easy testing. The `run` steps automatically configure networking (user mode), KVM/HVF acceleration, and device flags.
+~492 integration tests across 29 files, covering syscalls, filesystem operations, and regressions. Both architectures fully passing.
 
-| Command | Architecture | Description |
-| :--- | :--- | :--- |
-| `zig build run -Darch=x86_64` | x86_64 | Runs in QEMU (uses KVM on Linux, HVF on macOS if avail) |
-| `zig build run -Darch=aarch64` | AArch64 | Runs in QEMU (uses HVF on Apple Silicon, TCG otherwise) |
-
-#### Common Options
-
-**Boot Target**:
-Choose what to boot into with `-Ddefault-boot`:
 ```bash
-zig build run -Darch=x86_64 -Ddefault-boot=shell  # Interactive shell
-zig build run -Darch=x86_64 -Ddefault-boot=doom   # Doom (default)
+make test                # Run tests for default arch (x86_64)
+make test ARCH=aarch64   # Run tests for AArch64
+make test-both           # Run tests for both architectures
+make test-unit           # Run Zig unit tests
 ```
 
-**Networking**:
-By default, port **8080** on localhost is forwarded to guest port **80**.
-- Access the web server: `http://localhost:8080`
+See [docs/BUILD.md](docs/BUILD.md) for CI and Docker-based builds.
 
-**Firmware Overrides**:
-If the auto-detection fails or you want to test specific firmware:
+## Docker
+
 ```bash
-zig build run -Darch=x86_64 -Dbios=/path/to/OVMF.fd
+make docker-build        # Build the container
+make docker-run          # Build kernel inside Docker
 ```
 
-**Boot from Disk Image**:
-To boot from the GPT-partitioned disk (`disk.img`) instead of the ISO:
+Or manually:
+
 ```bash
-zig build run -Darch=x86_64 -Drun-iso=false
+docker build -t zk-builder .
+docker run --rm -v $(pwd):/workspace zk-builder zig build -Darch=x86_64
 ```
 
-**Headless Mode**:
-To run without a display (useful for CI):
-```bash
-zig build run -Darch=x86_64 -Dheadless=true
-```
+## Documentation
 
-## Roadmap
-
-- **SMP:** Symmetric Multiprocessing support.
-- **VFS:** Abstract Virtual File System to unify InitRD and AHCI storage.
-- **Dynamic Linking:** Support for shared object (`.so`) loading.
-- ~~**VirtIO Net:** Paravirtualized network driver implementation.~~ (Done)
+| Document | Description |
+| :--- | :--- |
+| [docs/FEATURES.md](docs/FEATURES.md) | Full feature list |
+| [docs/BOOT.md](docs/BOOT.md) | Boot flow |
+| [docs/BOOT_ARCHITECTURE.md](docs/BOOT_ARCHITECTURE.md) | Memory layout |
+| [docs/FILESYSTEM.md](docs/FILESYSTEM.md) | HAL boundary, directory map |
+| [docs/SYSCALL.md](docs/SYSCALL.md) | Syscall reference |
+| [docs/DRIVERS.md](docs/DRIVERS.md) | Driver documentation |
+| [docs/GRAPHICS.md](docs/GRAPHICS.md) | Graphics subsystem |
+| [docs/BUILD.md](docs/BUILD.md) | Build system, Docker, CI |
 
 ## License
 
