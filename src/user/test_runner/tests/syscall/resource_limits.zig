@@ -37,7 +37,7 @@ pub fn testSetrlimitLowerSoft() !void {
         // This should succeed (lowering soft limit)
         syscall.setrlimit(syscall.RLIMIT_NOFILE, &new_limit) catch |err| {
             // If we can't set it, that's okay - just verify the call doesn't crash
-            if (err != error.EPERM) return err;
+            if (err != error.PermissionDenied) return err;
             return;
         };
 
@@ -63,7 +63,7 @@ pub fn testSetrlimitRejectsSoftGreaterThanHard() !void {
     if (result) |_| {
         return error.TestFailed; // Should have failed
     } else |err| {
-        if (err != error.EINVAL) return error.TestFailed;
+        if (err != error.InvalidArgument) return error.TestFailed;
     }
 }
 
@@ -117,7 +117,7 @@ pub fn testSetrlimitRaiseSoftToHard() !void {
         };
 
         syscall.setrlimit(syscall.RLIMIT_NOFILE, &new_limit) catch |err| {
-            if (err != error.EPERM) return err;
+            if (err != error.PermissionDenied) return err;
             return;
         };
 

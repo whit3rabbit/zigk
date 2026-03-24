@@ -85,7 +85,9 @@ pub const PageTableEntry = packed struct(u64) {
             .phys_addr_bits = @truncate(phys_addr >> PAGE_SHIFT),
             .accessed = true,
             .shareability = 0b11, // Inner Shareable
-            .attr_index = if (flags.cache_disable) 0 else 1,
+            // MAIR index: 0=Device-nGnRnE, 1=Normal WB, 2=Normal NC
+            // write_through selects NC (index 2) for framebuffer/MMIO coherency
+            .attr_index = if (flags.cache_disable) 0 else if (flags.write_through) 2 else 1,
             .user_accessible = flags.user, // Software flag for VMM tracking
             .writable = flags.writable, // Software flag for VMM tracking
         };

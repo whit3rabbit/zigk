@@ -209,7 +209,7 @@ pub fn testDup3SameFdReturnsEinval() !void {
 
     // dup3 with oldfd == newfd should return EINVAL (unlike dup2)
     const result = syscall.dup3(fd, fd, 0);
-    if (result != error.EINVAL) return error.TestFailed;
+    if (result != error.InvalidArgument) return error.TestFailed;
 }
 
 // Test 13: dup3 with invalid flags returns EINVAL
@@ -221,5 +221,5 @@ pub fn testDup3InvalidFlags() !void {
     const target_fd: i32 = 56;
     const invalid_flags: usize = 0xFFFF;
     const result = syscall.dup3(fd, target_fd, invalid_flags);
-    if (result != error.EINVAL) return error.TestFailed;
+    if (result != error.InvalidArgument) return error.TestFailed;
 }

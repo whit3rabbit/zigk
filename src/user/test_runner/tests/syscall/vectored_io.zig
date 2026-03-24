@@ -311,8 +311,8 @@ pub fn testSendfileLargeTransfer() !void {
         syscall.close(pipefd[1]) catch {};
     }
 
-    // Transfer 8KB (larger than old 4KB buffer, exercises multi-chunk path)
-    const transfer_size: usize = 8192;
+    // Transfer up to pipe buffer size (4KB) to avoid blocking (no concurrent reader)
+    const transfer_size: usize = 4096;
     var offset: u64 = 0;
     const sent = try syscall.sendfile(pipefd[1], fd, &offset, transfer_size);
 

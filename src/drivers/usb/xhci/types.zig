@@ -93,9 +93,9 @@ pub const Controller = struct {
         // Memory barrier to ensure TRB writes are visible to hardware before doorbell
         // Critical on aarch64 where memory ordering is weaker than x86
         if (builtin.cpu.arch == .aarch64) {
-            asm volatile ("dsb sy" ::: "memory");
+            asm volatile ("dsb sy" ::: .{ .memory = true });
         } else {
-            asm volatile ("" ::: "memory");
+            asm volatile ("" ::: .{ .memory = true });
         }
 
         const db_base = self.doorbell_base + (@as(u64, slot_id) * @sizeOf(u32));
@@ -106,7 +106,7 @@ pub const Controller = struct {
         // DSB after doorbell write to ensure write reaches the device
         // On aarch64, device writes need explicit ordering
         if (builtin.cpu.arch == .aarch64) {
-            asm volatile ("dsb sy" ::: "memory");
+            asm volatile ("dsb sy" ::: .{ .memory = true });
         }
     }
 

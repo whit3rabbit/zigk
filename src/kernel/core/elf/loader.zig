@@ -391,7 +391,7 @@ fn loadSegment(
 
     // Allocate and map pages
     const alloc = heap.allocator();
-    var mapped_pages = std.ArrayListUnmanaged(u64){};
+    var mapped_pages: std.ArrayListUnmanaged(u64) = .empty;
     defer mapped_pages.deinit(alloc);
 
     var page_index: usize = 0;

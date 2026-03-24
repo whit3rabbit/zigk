@@ -77,7 +77,7 @@ pub const MAX_ARP_ENTRIES: usize = 256;
 pub const ARP_HASH_SIZE: usize = 512;
 
 /// Global ARP cache list
-pub var arp_cache: std.ArrayListUnmanaged(ArpEntry) = .{};
+pub var arp_cache: std.ArrayListUnmanaged(ArpEntry) = .empty;
 pub var arp_allocator: std.mem.Allocator = undefined;
 
 /// SECURITY: Track count of incomplete entries for DoS protection.
@@ -338,7 +338,7 @@ pub fn updateCache(iface: *Interface, ip: u32, mac: [6]u8, state: ArpState) !Pen
 /// Initialize ARP subsystem
 pub fn init(allocator: std.mem.Allocator, ticks_per_sec: u32) void {
     arp_allocator = allocator;
-    arp_cache = .{};
+    arp_cache = .empty;
     if (ticks_per_sec > 0 and ticks_per_sec <= 1_000_000) {
         monitor.ticks_per_second = ticks_per_sec;
     }

@@ -3,9 +3,16 @@
 [![ISO Release Build](https://github.com/whit3rabbit/zigk/actions/workflows/build-iso.yml/badge.svg?event=release)](https://github.com/whit3rabbit/zigk/actions/workflows/build-iso.yml)
 [![CI](https://github.com/whit3rabbit/zigk/actions/workflows/ci.yml/badge.svg)](https://github.com/whit3rabbit/zigk/actions/workflows/ci.yml)
 
+> Built with **Zig 0.16.x** (nightly). See [ziglang.org/download](https://ziglang.org/download/) for installation.
+
 ZK is a 64-bit modular monolithic operating system kernel written in Zig. It targets both **x86_64** (AMD64) and **AArch64** (ARMv8-A) architectures, featuring a custom UEFI bootloader and a unified Hardware Abstraction Layer (HAL).
 
 Device drivers, the network stack, and file system logic run in kernel space (Ring 0 / EL1) to maximize performance and simplify hardware access.
+
+<p align="center">
+  <img src="assets/zk-loading.png" width="400" alt="ZK boot screen" />
+  <img src="assets/doom-running.png" width="400" alt="Doom running on ZK" />
+</p>
 
 ## Architecture
 
@@ -24,7 +31,7 @@ Full details in [docs/FEATURES.md](docs/FEATURES.md).
 - **Security:** KASLR, stack canaries, hardware entropy (RDRAND/FEAT_RNG), SMAP/PAN user/kernel isolation, capability-based access control.
 - **Memory:** HHDM, IOMMU protection (VT-d), slab-like kernel heap allocator.
 - **Scheduler:** Preemptive multitasking with per-CPU run queues.
-- **Syscalls:** 100+ Linux-compatible syscalls including `io_uring`, `epoll`, `signalfd`, `eventfd`, `timerfd`.
+- **Syscalls:** 269 Linux-compatible syscalls including `io_uring`, `epoll`, `signalfd`, `eventfd`, `timerfd`.
 
 ### Networking
 
@@ -100,6 +107,26 @@ The build system configures QEMU automatically: networking (user mode with port 
 | Shared folder | `-Dvirtfs=/tmp/share` |
 | Serial console | `-Dqemu-args="-nographic"` (Ctrl+A X to exit) |
 
+<details>
+<summary>Running Doom</summary>
+
+Download the shareware WAD file and place it in the initrd:
+
+```bash
+wget https://github.com/Akbar30Bill/DOOM_wads/raw/refs/heads/master/doom.wad -O initrd_contents/doom1.wad
+```
+
+Then build and run:
+
+```bash
+make run                             # x86_64 (default boot is Doom)
+make run ARCH=aarch64                # or on AArch64
+```
+
+See [docs/DOOM.md](docs/DOOM.md) for controls, audio setup, and troubleshooting.
+
+</details>
+
 ## Testing
 
 ~492 integration tests across 29 files, covering syscalls, filesystem operations, and regressions. Both architectures fully passing.
@@ -132,13 +159,21 @@ docker run --rm -v $(pwd):/workspace zk-builder zig build -Darch=x86_64
 | Document | Description |
 | :--- | :--- |
 | [docs/FEATURES.md](docs/FEATURES.md) | Full feature list |
+| [docs/BUILD.md](docs/BUILD.md) | Build system, Docker, CI |
 | [docs/BOOT.md](docs/BOOT.md) | Boot flow |
 | [docs/BOOT_ARCHITECTURE.md](docs/BOOT_ARCHITECTURE.md) | Memory layout |
+| [docs/MEMORY.md](docs/MEMORY.md) | Memory management |
 | [docs/FILESYSTEM.md](docs/FILESYSTEM.md) | HAL boundary, directory map |
-| [docs/SYSCALL.md](docs/SYSCALL.md) | Syscall reference |
+| [docs/SYSCALL.md](docs/SYSCALL.md) | Syscall reference (269 syscalls) |
+| [docs/MISSING_SYSCALLS.md](docs/MISSING_SYSCALLS.md) | Unimplemented syscalls |
 | [docs/DRIVERS.md](docs/DRIVERS.md) | Driver documentation |
 | [docs/GRAPHICS.md](docs/GRAPHICS.md) | Graphics subsystem |
-| [docs/BUILD.md](docs/BUILD.md) | Build system, Docker, CI |
+| [docs/KEYBOARD.md](docs/KEYBOARD.md) | Keyboard input handling |
+| [docs/ASYNC.md](docs/ASYNC.md) | Async I/O and io_uring |
+| [docs/network.md](docs/network.md) | Network stack |
+| [docs/DOOM.md](docs/DOOM.md) | Doom port setup and usage |
+| [docs/PLANNED_FEATURES.md](docs/PLANNED_FEATURES.md) | Planned features |
+| [docs/ZIG.md](docs/ZIG.md) | Zig language notes |
 
 ## License
 

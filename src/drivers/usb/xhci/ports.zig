@@ -133,7 +133,7 @@ pub fn handlePortStatusChange(ctrl: *Controller, port_id: u8) void {
 
     const port_base = ctrl.op_base + regs.portBaseOffset(port_id);
     const port_dev = MmioDevice(regs.PortReg).init(port_base, 0x10);
-    var portsc = port_dev.readTyped(.portsc, regs.PortSc);
+    const portsc = port_dev.readTyped(.portsc, regs.PortSc);
 
     // Handle Connection Status Change
     if (portsc.csc) {

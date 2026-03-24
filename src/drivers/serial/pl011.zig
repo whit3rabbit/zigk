@@ -58,14 +58,14 @@ fn getUartAddr() u64 {
 
 fn writeReg(offset: u32, val: u32) void {
     const addr: *volatile u32 = @ptrFromInt(getUartAddr() + offset);
-    asm volatile ("dsb sy" ::: "memory");
+    asm volatile ("dsb sy" ::: .{ .memory = true });
     addr.* = val;
-    asm volatile ("dsb sy" ::: "memory");
+    asm volatile ("dsb sy" ::: .{ .memory = true });
 }
 
 fn readReg(offset: u32) u32 {
     const addr: *volatile u32 = @ptrFromInt(getUartAddr() + offset);
-    asm volatile ("dsb sy" ::: "memory");
+    asm volatile ("dsb sy" ::: .{ .memory = true });
     return addr.*;
 }
 

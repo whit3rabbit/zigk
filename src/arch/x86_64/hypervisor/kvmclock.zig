@@ -243,7 +243,7 @@ pub fn getSystemTimeNs() ?u64 {
 
         // Compiler barrier before version recheck
         // Compiler fence to prevent reordering (Zig 0.16.x: std.atomic.compilerFence removed)
-        asm volatile ("" ::: "memory");
+        asm volatile ("" ::: .{ .memory = true });
 
         // Verify version hasn't changed
         const v2 = @atomicLoad(u32, &info.version, .acquire);
@@ -343,7 +343,7 @@ fn readWallClockRaw() ?struct { sec: u32, nsec: u32 } {
         const nsec = wc.nsec;
 
         // Compiler fence to prevent reordering (Zig 0.16.x: std.atomic.compilerFence removed)
-        asm volatile ("" ::: "memory");
+        asm volatile ("" ::: .{ .memory = true });
 
         const v2 = @atomicLoad(u32, &wc.version, .acquire);
         if (v1 != v2) continue;

@@ -117,6 +117,9 @@ pub const UsbDevice = struct {
 
     const Self = @This();
 
+    /// Pages needed for UsbDevice allocation (struct is 4312 bytes, exceeds single 4KB page)
+    pub const PAGES_NEEDED = std.mem.alignForward(usize, @sizeOf(Self), 4096) / 4096;
+
     /// Device state during enumeration and lifecycle
     pub const DeviceState = enum {
         /// Slot enabled, not yet addressed
@@ -308,11 +311,11 @@ pub const UsbDevice = struct {
 
     /// Allocate and initialize a new USB device
     pub fn init(bdf: iommu.DeviceBdf, slot_id: u8, port: u8, speed: context.Speed, parent: ?*UsbDevice, parent_port: u8, route_string: u20) !*Self {
-        // Allocate device structure from PMM
-        const dev_page = pmm.allocZeroedPages(1) orelse return error.OutOfMemory;
+        // Allocate device structure from PMM (struct is >4KB, needs multiple pages)
+        const dev_page = pmm.allocZeroedPages(PAGES_NEEDED) orelse return error.OutOfMemory;
         const dev_virt = @intFromPtr(hal.paging.physToVirt(dev_page));
         const device: *Self = @ptrFromInt(dev_virt);
-        errdefer pmm.freePages(dev_page, 1);
+        errdefer pmm.freePages(dev_page, PAGES_NEEDED);
 
         // Allocate Device Context (IOMMU-aware)
         const dc = try context.DeviceContext.alloc(bdf);
@@ -738,9 +741,9 @@ pub const UsbDevice = struct {
         }
         pmm.freePages(self.report_buffer_phys, 1);
 
-        // Free the device structure itself
+        // Free the device structure itself (uses PAGES_NEEDED, matching init allocation)
         const dev_phys = hal.paging.virtToPhys(@intFromPtr(self));
-        pmm.freePages(dev_phys, 1);
+        pmm.freePages(dev_phys, PAGES_NEEDED);
     }
 
     /// Free all device resources

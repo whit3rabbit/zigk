@@ -43,14 +43,14 @@ pub fn sys_fcntl(fd_num: usize, cmd: usize, arg: usize) SyscallError!usize {
 
     // F_GETFD (1)
     if (cmd == 1) {
-        // Return flags (FD_CLOEXEC)
-        // We don't track FD_CLOEXEC in flags yet (it's separate from O_ flags).
-        return 0;
+        // Return FD_CLOEXEC flag (bit 0)
+        return if (fd.cloexec) 1 else 0;
     }
 
     // F_SETFD (2)
     if (cmd == 2) {
-        // Set flags
+        // Set FD_CLOEXEC flag (bit 0 of arg)
+        fd.cloexec = (arg & 1) != 0;
         return 0;
     }
 

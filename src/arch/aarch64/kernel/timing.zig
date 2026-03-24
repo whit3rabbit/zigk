@@ -21,17 +21,17 @@ fn earlyPrint(msg: []const u8) void {
     for (msg) |c| {
         // Wait for TX FIFO to have space
         while (true) {
-            asm volatile ("dsb sy" ::: "memory");
+            asm volatile ("dsb sy" ::: .{ .memory = true });
             const fr_ptr: *volatile u32 = @ptrFromInt(UART_BASE + FR);
             if ((fr_ptr.* & FR_TXFF) == 0) break;
-            asm volatile ("isb" ::: "memory");
+            asm volatile ("isb" ::: .{ .memory = true });
         }
         const dr_ptr: *volatile u32 = @ptrFromInt(UART_BASE + DR);
         dr_ptr.* = c;
-        asm volatile ("dsb sy" ::: "memory");
+        asm volatile ("dsb sy" ::: .{ .memory = true });
     }
-    asm volatile ("dsb sy" ::: "memory");
-    asm volatile ("isb" ::: "memory");
+    asm volatile ("dsb sy" ::: .{ .memory = true });
+    asm volatile ("isb" ::: .{ .memory = true });
 }
 
 /// Available clock sources for aarch64

@@ -149,7 +149,7 @@ fn vfsOpen(ctx: ?*anyopaque, path: []const u8, flags: u32) vfs.Error!*fd.FileDes
     }
 
     // Determine open mode
-    var mode = hgfs.OpenMode{
+    const mode = hgfs.OpenMode{
         .read = access_mode == fd.O_RDONLY or access_mode == fd.O_RDWR,
         .write = access_mode == fd.O_WRONLY or access_mode == fd.O_RDWR,
         .create = creating,

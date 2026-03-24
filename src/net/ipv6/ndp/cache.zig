@@ -46,7 +46,7 @@ pub const UPDATE_RATE_LIMIT: u64 = 100;
 // =============================================================================
 
 /// Neighbor cache storage
-pub var neighbor_cache: std.ArrayListUnmanaged(NeighborEntry) = .{};
+pub var neighbor_cache: std.ArrayListUnmanaged(NeighborEntry) = .empty;
 
 /// Allocator for cache operations
 pub var cache_allocator: std.mem.Allocator = undefined;
@@ -337,7 +337,7 @@ pub fn queuePacket(entry: *NeighborEntry, data: []const u8) bool {
 /// Initialize the neighbor cache subsystem
 pub fn init(allocator: std.mem.Allocator) void {
     cache_allocator = allocator;
-    neighbor_cache = .{};
+    neighbor_cache = .empty;
     incomplete_entry_count = 0;
 
     for (&hash_table) |*bucket| {

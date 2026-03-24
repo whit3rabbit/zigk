@@ -629,11 +629,11 @@ pub const VirtioGpuDriver = struct {
         self.fb_phys = 0;
 
         // Prepare SG list and track allocated pages for cleanup on error
-        var entries = std.ArrayListUnmanaged(VirtioGpuMemEntry){};
+        var entries: std.ArrayListUnmanaged(VirtioGpuMemEntry) = .empty;
         defer entries.deinit(allocator);
 
         // Security: Track allocated physical pages for proper cleanup on failure
-        var allocated_pages = std.ArrayListUnmanaged(u64){};
+        var allocated_pages: std.ArrayListUnmanaged(u64) = .empty;
         defer allocated_pages.deinit(allocator);
 
         const kernel_pml4 = vmm.getKernelPml4();
@@ -1044,10 +1044,10 @@ pub const VirtioGpuDriver = struct {
         }
 
         // Step 4: Allocate new framebuffer pages
-        var entries = std.ArrayListUnmanaged(VirtioGpuMemEntry){};
+        var entries: std.ArrayListUnmanaged(VirtioGpuMemEntry) = .empty;
         defer entries.deinit(allocator);
 
-        var allocated_pages = std.ArrayListUnmanaged(u64){};
+        var allocated_pages: std.ArrayListUnmanaged(u64) = .empty;
         defer allocated_pages.deinit(allocator);
 
         const cleanup = struct {

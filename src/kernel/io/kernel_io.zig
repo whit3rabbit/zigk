@@ -279,7 +279,7 @@ test "KernelIo basic init" {
     var reactor: Reactor = undefined;
     reactor.init();
 
-    var kio = KernelIo.init(&reactor);
+    const kio = KernelIo.init(&reactor);
     try std.testing.expect(kio.reactor == &reactor);
 }
 

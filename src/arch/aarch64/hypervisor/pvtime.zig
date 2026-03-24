@@ -235,7 +235,7 @@ pub fn getStolenTimeNs() ?u64 {
         const stolen = info.stolen_time_ns;
 
         // Compiler barrier (Zig 0.16.x: std.atomic.compilerFence removed)
-        asm volatile ("" ::: "memory");
+        asm volatile ("" ::: .{ .memory = true });
 
         // Verify sequence hasn't changed
         const seq2 = @atomicLoad(u32, &info.seq, .acquire);

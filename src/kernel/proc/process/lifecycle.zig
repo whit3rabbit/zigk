@@ -71,7 +71,7 @@ pub fn createProcess(parent: ?*Process) !*Process {
         .refcount = std.atomic.Value(u32).init(1),
         .heap_start = 0,
         .heap_break = 0,
-        .capabilities = .{},
+        .capabilities = .empty,
         .uid = 0,
         .gid = 0,
         .euid = 0,

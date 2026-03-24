@@ -13,7 +13,7 @@ pub const Tcb = types.Tcb;
 pub const IpAddr = types.IpAddr;
 
 /// TCB pool (list of active TCBs)
-pub var tcb_pool: std.ArrayListUnmanaged(*Tcb) = .{};
+pub var tcb_pool: std.ArrayListUnmanaged(*Tcb) = .empty;
 pub var tcp_allocator: std.mem.Allocator = undefined;
 
 /// TX Buffer Pool (64 x 2048 = 128KB)
@@ -32,7 +32,7 @@ pub fn freeTxBuffer(buf: []u8) void {
 pub var tcb_hash: [c.TCB_HASH_SIZE]?*Tcb = [_]?*Tcb{null} ** c.TCB_HASH_SIZE;
 
 /// Listening TCBs
-pub var listen_tcbs: std.ArrayListUnmanaged(*Tcb) = .{};
+pub var listen_tcbs: std.ArrayListUnmanaged(*Tcb) = .empty;
 
 /// Global network interface
 pub var global_iface: ?*Interface = null;
@@ -157,8 +157,8 @@ pub fn init(iface: *Interface, allocator: std.mem.Allocator, ticks_per_sec: u32)
 
     global_iface = iface;
     tcp_allocator = allocator;
-    tcb_pool = .{};
-    listen_tcbs = .{};
+    tcb_pool = .empty;
+    listen_tcbs = .empty;
 
     // Clear hash table
     for (&tcb_hash) |*entry| {

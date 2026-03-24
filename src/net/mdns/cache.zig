@@ -91,7 +91,7 @@ pub const CACHE_HASH_SIZE: usize = constants.CACHE_HASH_SIZE;
 pub const MAX_CACHE_ENTRIES: usize = constants.MAX_CACHE_ENTRIES;
 
 /// Global cache state
-var cache_entries: std.ArrayListUnmanaged(CacheEntry) = .{};
+var cache_entries: std.ArrayListUnmanaged(CacheEntry) = .empty;
 var cache_allocator: std.mem.Allocator = undefined;
 var cache_lock: sync.Spinlock = .{};
 var hash_table: [CACHE_HASH_SIZE]?*CacheEntry = [_]?*CacheEntry{null} ** CACHE_HASH_SIZE;
@@ -247,7 +247,7 @@ fn findFreeEntryLocked() !*CacheEntry {
 /// Initialize the cache
 pub fn init(allocator: std.mem.Allocator, ticks_per_sec: u32) void {
     cache_allocator = allocator;
-    cache_entries = .{};
+    cache_entries = .empty;
     ticks_per_second = if (ticks_per_sec > 0) ticks_per_sec else 100;
     current_tick = 0;
 

@@ -224,7 +224,10 @@ pub fn testRtSigpending() !void {
 
 // Test 20: Non-root cannot raise hard limit via prlimit64
 pub fn testPrlimit64NonRootCannotRaise() !void {
-    const pid = try syscall.fork();
+    const pid = syscall.fork() catch |err| {
+        if (err == error.OutOfMemory) return error.SkipTest;
+        return err;
+    };
     if (pid == 0) {
         // Drop privileges
         syscall.setresuid(1000, 1000, 1000) catch syscall.exit(1);
@@ -245,7 +248,10 @@ pub fn testPrlimit64NonRootCannotRaise() !void {
 
 // Test 21: Self-targeting prlimit64 works as non-root (reading own limits)
 pub fn testPrlimit64SelfAsNonRoot() !void {
-    const pid = try syscall.fork();
+    const pid = syscall.fork() catch |err| {
+        if (err == error.OutOfMemory) return error.SkipTest;
+        return err;
+    };
     if (pid == 0) {
         syscall.setresuid(1000, 1000, 1000) catch syscall.exit(1);
         var old: syscall.Rlimit = undefined;

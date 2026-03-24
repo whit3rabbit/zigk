@@ -23,7 +23,7 @@ const EPHEMERAL_RANGE: usize = @as(usize, EPHEMERAL_RANGE_U16);
 
 /// Global socket table (dynamic array)
 /// Stores pointers to sockets. Null entries are free slots.
-pub var socket_table: std.ArrayListUnmanaged(?*types.Socket) = .{};
+pub var socket_table: std.ArrayListUnmanaged(?*types.Socket) = .empty;
 pub var socket_allocator: std.mem.Allocator = undefined;
 /// UDP lookup table (Port -> Socket) for O(1) delivery
 pub var udp_sockets: [65536]?*types.Socket = [_]?*types.Socket{null} ** 65536;
@@ -45,7 +45,7 @@ pub fn init(iface: *Interface, allocator: std.mem.Allocator) void {
 
     global_iface = iface;
     socket_allocator = allocator;
-    socket_table = .{};
+    socket_table = .empty;
     udp_sockets = [_]?*types.Socket{null} ** 65536;
     ephemeral_port_counts = [_]u16{0} ** EPHEMERAL_RANGE;
 }
@@ -60,7 +60,7 @@ pub fn initSyscallOnly(allocator: std.mem.Allocator) void {
 
     global_iface = null; // No network interface
     socket_allocator = allocator;
-    socket_table = .{};
+    socket_table = .empty;
     udp_sockets = [_]?*types.Socket{null} ** 65536;
     ephemeral_port_counts = [_]u16{0} ** EPHEMERAL_RANGE;
 }

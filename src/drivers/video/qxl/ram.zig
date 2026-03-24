@@ -232,7 +232,7 @@ pub const RamManager = struct {
         self.header.memslot_config.slots_end = phys_end;
 
         // Memory barrier to ensure writes are visible
-        asm volatile ("" ::: "memory");
+        asm volatile ("" ::: .{ .memory = true });
 
         console.info("QXL RAM: Memslot {} configured: 0x{x}-0x{x}", .{
             slot_id,
@@ -266,7 +266,7 @@ pub const RamManager = struct {
         };
 
         // Memory barrier before updating producer
-        asm volatile ("" ::: "memory");
+        asm volatile ("" ::: .{ .memory = true });
 
         // Update producer index
         self.cmd_prod = @intCast(next_prod);
@@ -292,7 +292,7 @@ pub const RamManager = struct {
         const addr = self.release_ring[self.release_cons];
 
         // Memory barrier after read
-        asm volatile ("" ::: "memory");
+        asm volatile ("" ::: .{ .memory = true });
 
         // Update consumer index
         self.release_cons = @intCast((self.release_cons + 1) % RELEASE_RING_SIZE);

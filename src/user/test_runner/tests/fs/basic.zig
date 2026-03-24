@@ -16,7 +16,7 @@ pub fn testInitrdReadFile() !void {
 
 pub fn testSfsCreateFile() !void {
     const fd = syscall.open("/mnt/test.txt", 0x241, 0o644) catch |err| {  // O_WRONLY|O_CREAT|O_TRUNC
-        return if (err == error.EROFS or err == error.ENOENT) {} else err; // Skip
+        return if (err == error.ReadOnlyFilesystem or err == error.NoSuchFileOrDirectory) {} else err; // Skip
     };
     defer syscall.close(fd) catch {};
 

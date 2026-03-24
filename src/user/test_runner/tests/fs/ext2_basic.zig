@@ -23,13 +23,19 @@ const syscall = @import("syscall");
 
 // Minimal Dirent64 layout for parsing getdents64 output.
 // Must match uapi.dirent.Dirent64 (d_ino u64, d_off i64, d_reclen u16, d_type u8).
+// d_name starts at byte offset 19 (NOT @sizeOf which pads to 24 for alignment).
 const DirentHeader = extern struct {
     d_ino: u64,
     d_off: i64,
     d_reclen: u16,
     d_type: u8,
-    // d_name follows immediately after this header in the buffer.
+    // d_name follows immediately at offset 19. @sizeOf gives 24 due to padding.
+    // Use DIRENT_NAME_OFFSET to get the correct name start within a buffer.
 };
+
+// Byte offset of d_name within a Dirent64 record.
+// d_ino (8) + d_off (8) + d_reclen (2) + d_type (1) = 19.
+const DIRENT_NAME_OFFSET: usize = 19;
 
 // DT_* constants for d_type.
 const DT_DIR: u8 = 4;
@@ -275,15 +281,17 @@ pub fn testExt2GetdentsListsDirectory() anyerror!void {
     var found_a_dir = false;
 
     while (offset < bytes) {
-        if (offset + @sizeOf(DirentHeader) > bytes) break;
+        if (offset + DIRENT_NAME_OFFSET > bytes) break;
         const hdr: *align(1) const DirentHeader = @ptrCast(&buf[offset]);
         if (hdr.d_reclen == 0) break;
 
-        // Name starts immediately after the DirentHeader.
-        const name_start = offset + @sizeOf(DirentHeader);
+        // Name starts at DIRENT_NAME_OFFSET (19 bytes into the entry).
+        // NOTE: @sizeOf(DirentHeader) = 24 due to alignment padding, but name
+        // is at the actual field offset of 19. Use DIRENT_NAME_OFFSET here.
+        const name_start = offset + DIRENT_NAME_OFFSET;
         // Find null terminator (name is null-terminated per Dirent64 layout).
         var name_end = name_start;
-        while (name_end < bytes and buf[name_end] != 0) : (name_end += 1) {}
+        while (name_end < offset + hdr.d_reclen and name_end < bytes and buf[name_end] != 0) : (name_end += 1) {}
         const name = buf[name_start..name_end];
 
         if (std.mem.eql(u8, name, "hello.txt")) {
@@ -321,13 +329,13 @@ pub fn testExt2GetdentsSubdir() anyerror!void {
     var found_b = false;
 
     while (offset < bytes) {
-        if (offset + @sizeOf(DirentHeader) > bytes) break;
+        if (offset + DIRENT_NAME_OFFSET > bytes) break;
         const hdr: *align(1) const DirentHeader = @ptrCast(&buf[offset]);
         if (hdr.d_reclen == 0) break;
 
-        const name_start = offset + @sizeOf(DirentHeader);
+        const name_start = offset + DIRENT_NAME_OFFSET;
         var name_end = name_start;
-        while (name_end < bytes and buf[name_end] != 0) : (name_end += 1) {}
+        while (name_end < offset + hdr.d_reclen and name_end < bytes and buf[name_end] != 0) : (name_end += 1) {}
         const name = buf[name_start..name_end];
 
         if (std.mem.eql(u8, name, "b") and hdr.d_type == DT_DIR) {

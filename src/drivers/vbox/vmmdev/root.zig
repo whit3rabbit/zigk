@@ -217,13 +217,13 @@ pub const VmmDevDevice = struct {
         @memcpy(req_buf[0..req_size], req_bytes[0..req_size]);
 
         // Memory barrier before submission
-        asm volatile ("" ::: "memory");
+        asm volatile ("" ::: .{ .memory = true });
 
         // Submit request by writing physical address to REQUEST register
         self.mmio.write(.REQUEST, @truncate(req_phys));
 
         // Memory barrier after submission
-        asm volatile ("" ::: "memory");
+        asm volatile ("" ::: .{ .memory = true });
 
         // Poll for completion (VMMDev is synchronous)
         // The device writes the result directly to the request buffer
@@ -267,13 +267,13 @@ pub const VmmDevDevice = struct {
         @memcpy(req_buf[0..req_size], req_bytes[0..req_size]);
 
         // Memory barrier before submission
-        asm volatile ("" ::: "memory");
+        asm volatile ("" ::: .{ .memory = true });
 
         // Submit request
         self.mmio.write(.REQUEST, @truncate(req_phys));
 
         // Memory barrier after submission
-        asm volatile ("" ::: "memory");
+        asm volatile ("" ::: .{ .memory = true });
 
         // Poll for completion
         var timeout: u32 = 100000;
@@ -385,13 +385,13 @@ pub const VmmDevDevice = struct {
         @memcpy(req_buf[0..call_buf.len], call_buf);
 
         // Memory barrier
-        asm volatile ("" ::: "memory");
+        asm volatile ("" ::: .{ .memory = true });
 
         // Submit
         self.mmio.write(.REQUEST, @truncate(req_phys));
 
         // Memory barrier
-        asm volatile ("" ::: "memory");
+        asm volatile ("" ::: .{ .memory = true });
 
         // Poll for completion
         var timeout: u32 = 500000; // Longer timeout for HGCM calls

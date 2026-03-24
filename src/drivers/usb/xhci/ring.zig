@@ -244,9 +244,9 @@ pub const ConsumerRing = struct {
         // On x86_64, PCIe snooping handles this automatically, but we still
         // use a compiler barrier to prevent reordering.
         if (builtin.cpu.arch == .aarch64) {
-            asm volatile ("dsb sy" ::: "memory");
+            asm volatile ("dsb sy" ::: .{ .memory = true });
         } else {
-            asm volatile ("" ::: "memory");
+            asm volatile ("" ::: .{ .memory = true });
         }
 
         // Security: Validate bounds before accessing trbs array

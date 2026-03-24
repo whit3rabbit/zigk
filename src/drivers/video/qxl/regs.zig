@@ -118,10 +118,10 @@ pub const IoAccess = struct {
 pub inline fn memoryBarrier() void {
     if (builtin.cpu.arch == .x86_64) {
         // mfence ensures all stores are visible
-        asm volatile ("mfence" ::: "memory");
+        asm volatile ("mfence" ::: .{ .memory = true });
     } else if (builtin.cpu.arch == .aarch64) {
         // DMB SY - Data Memory Barrier, full system
-        asm volatile ("dmb sy" ::: "memory");
+        asm volatile ("dmb sy" ::: .{ .memory = true });
     } else {
         @compileError("Unsupported architecture");
     }

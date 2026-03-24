@@ -47,8 +47,10 @@ build.zig
     |       |-- syscall_times_module       -> sys/syscall/misc/times.zig
     |       |-- syscall_itimer_module      -> sys/syscall/misc/itimer.zig
     |       |-- syscall_display_module     -> sys/syscall/hw/display.zig
+    |       |-- syscall_posix_timer_module -> sys/syscall/misc/posix_timer.zig
     |       |-- syscall_flock_module       -> sys/syscall/fs/flock.zig
-    |       `-- syscall_io_uring_module    -> sys/syscall/io_uring/root.zig
+    |       |-- syscall_io_uring_module    -> sys/syscall/io_uring/root.zig
+    |       `-- syscall_sysv_ipc_module    -> sys/syscall/ipc/root.zig
     |
     +-- syscall_table_module (src/kernel/sys/syscall/core/table.zig)
             |-- Imports all handler modules
@@ -172,14 +174,15 @@ src/kernel/sys/syscall/
         error_helpers.zig - Error handling utilities
 
     process/        - Process management
-        process.zig    - Process lifecycle (exit, wait4, getpid, getppid, getuid, getgid)
-        signals.zig    - Signal handling (rt_sigprocmask, rt_sigaction, rt_sigreturn)
-        scheduling.zig - Scheduler (sched_yield, nanosleep, select, clock_gettime)
+        process.zig    - Process lifecycle (exit, wait4, waitid, getpid, getppid, getuid, setreuid, etc.)
+        signals.zig    - Signal handling (rt_sigprocmask, rt_sigaction, rt_sigreturn, rt_tgsigqueueinfo)
+        scheduling.zig - Scheduler (sched_yield, sched_setparam, nanosleep, pselect6, ppoll, clock_gettime)
+        control.zig    - CPU affinity (sched_setaffinity, sched_getaffinity)
 
     fs/             - Filesystem syscalls
         fd.zig         - File descriptors (open, close, dup, dup2, pipe, lseek)
         flock.zig      - File locking (flock)
-        fs_handlers.zig- Filesystem operations (mount, umount, mkdirat, unlinkat)
+        fs_handlers.zig- Filesystem operations (mount, umount, mkdirat, unlinkat, utimensat, futimesat)
 
     memory/         - Memory management
         memory.zig     - Memory ops (mmap, mprotect, munmap, brk)
@@ -198,8 +201,14 @@ src/kernel/sys/syscall/
         hypervisor.zig - Hypervisor access (VMware hypercall, detection)
         virt_pci.zig   - Virtual PCI device emulation (create, BAR, caps, MMIO)
 
+    ipc/            - SysV IPC
+        shm.zig        - Shared memory (shmget, shmat, shmctl, shmdt)
+        sem.zig        - Semaphores (semget, semop, semctl)
+        msg.zig        - Message queues (msgget, msgsnd, msgrcv, msgctl)
+
     io/             - Async I/O
         root.zig       - I/O operations (read, write, writev, stat, fstat, ioctl, fcntl)
+        read_write.zig - Vectored I/O (preadv2, pwritev2)
 
     io_uring/       - io_uring subsystem
         root.zig       - io_uring dispatch
@@ -285,6 +294,9 @@ Example differences:
 | 26 | msync | (addr, len, flags) -> int | memory.zig (-) |
 | 27 | mincore | (addr, len, vec) -> int | memory.zig (-) |
 | 28 | madvise | (addr, len, advice) -> int | memory.zig (-) |
+| 29 | shmget | (key, size, shmflg) -> int | shm.zig |
+| 30 | shmat | (shmid, shmaddr, shmflg) -> addr | shm.zig |
+| 31 | shmctl | (shmid, cmd, buf) -> int | shm.zig |
 | 32 | dup | (oldfd) -> newfd | fd.zig |
 | 33 | dup2 | (oldfd, newfd) -> int | fd.zig |
 | 34 | pause | () -> int | scheduling.zig |
@@ -317,6 +329,14 @@ Example differences:
 | 61 | wait4 | (pid, wstatus, options, rusage) -> pid_t | process.zig |
 | 62 | kill | (pid, sig) -> int | signals.zig |
 | 63 | uname | (name) -> int | process.zig |
+| 64 | semget | (key, nsems, semflg) -> int | sem.zig |
+| 65 | semop | (semid, sops, nsops) -> int | sem.zig |
+| 66 | semctl | (semid, semnum, cmd, arg) -> int | sem.zig |
+| 67 | shmdt | (shmaddr) -> int | shm.zig |
+| 68 | msgget | (key, msgflg) -> int | msg.zig |
+| 69 | msgsnd | (msqid, msgp, msgsz, msgflg) -> int | msg.zig |
+| 70 | msgrcv | (msqid, msgp, msgsz, msgtyp, msgflg) -> ssize_t | msg.zig |
+| 71 | msgctl | (msqid, cmd, buf) -> int | msg.zig |
 | 73 | flock | (fd, operation) -> int | flock.zig |
 | 72 | fcntl | (fd, cmd, arg) -> int | io.zig |
 | 74 | fsync | (fd) -> int | io.zig |
@@ -357,11 +377,17 @@ Example differences:
 | 110 | getppid | () -> pid_t | process.zig |
 | 111 | getpgrp | () -> pid_t | process.zig |
 | 112 | setsid | () -> pid_t | process.zig |
+| 113 | setreuid | (ruid, euid) -> int | process.zig |
+| 114 | setregid | (rgid, egid) -> int | process.zig |
+| 115 | getgroups | (size, list) -> int | process.zig |
+| 116 | setgroups | (size, list) -> int | process.zig |
 | 117 | setresuid | (ruid, euid, suid) -> int | process.zig |
 | 118 | getresuid | (ruid, euid, suid) -> int | process.zig |
 | 119 | setresgid | (rgid, egid, sgid) -> int | process.zig |
 | 120 | getresgid | (rgid, egid, sgid) -> int | process.zig |
 | 121 | getpgid | (pid) -> pid_t | process.zig |
+| 122 | setfsuid | (fsuid) -> int | process.zig |
+| 123 | setfsgid | (fsgid) -> int | process.zig |
 | 124 | getsid | (pid) -> pid_t | process.zig |
 | 125 | capget | (hdr, data) -> int | - |
 | 126 | capset | (hdr, data) -> int | - |
@@ -372,6 +398,13 @@ Example differences:
 | 131 | sigaltstack | (ss, old_ss) -> int | signals.zig (-) |
 | 137 | statfs | (path, buf) -> int | io.zig |
 | 138 | fstatfs | (fd, buf) -> int | io.zig |
+| 142 | sched_setparam | (pid, param) -> int | scheduling.zig |
+| 143 | sched_getparam | (pid, param) -> int | scheduling.zig |
+| 144 | sched_setscheduler | (pid, policy, param) -> int | scheduling.zig |
+| 145 | sched_getscheduler | (pid) -> int | scheduling.zig |
+| 146 | sched_get_priority_max | (policy) -> int | scheduling.zig |
+| 147 | sched_get_priority_min | (policy) -> int | scheduling.zig |
+| 148 | sched_rr_get_interval | (pid, tp) -> int | scheduling.zig |
 | 149 | mlock | (addr, len) -> int | memory.zig (-) |
 | 150 | munlock | (addr, len) -> int | memory.zig (-) |
 | 151 | mlockall | (flags) -> int | memory.zig (-) |
@@ -388,6 +421,8 @@ Example differences:
 | 186 | gettid | () -> pid_t | signals.zig |
 | 200 | tkill | (tid, sig) -> int | signals.zig |
 | 202 | futex | (uaddr, op, val, timeout, uaddr2, val3) -> int | scheduling.zig |
+| 203 | sched_setaffinity | (pid, cpusetsize, mask) -> int | control.zig |
+| 204 | sched_getaffinity | (pid, cpusetsize, mask) -> int | control.zig |
 | 217 | getdents64 | (fd, dirp, count) -> int | io.zig |
 | 218 | set_tid_address | (tidptr) -> pid_t | signals.zig |
 | 222 | timer_create | (clockid, sevp, timerid) -> int | scheduling.zig (-) |
@@ -402,6 +437,7 @@ Example differences:
 | 232 | epoll_wait | (epfd, events, max, timeout) -> int | scheduling.zig |
 | 233 | epoll_ctl | (epfd, op, fd, event) -> int | scheduling.zig |
 | 234 | tgkill | (tgid, tid, sig) -> int | signals.zig |
+| 247 | waitid | (idtype, id, infop, options, rusage) -> int | process.zig |
 | 253 | inotify_init | () -> fd | - |
 | 254 | inotify_add_watch | (fd, path, mask) -> wd | - |
 | 255 | inotify_rm_watch | (fd, wd) -> int | - |
@@ -409,6 +445,7 @@ Example differences:
 | 258 | mkdirat | (dfd, path, mode) -> int | fs_handlers.zig |
 | 259 | mknodat | (dfd, path, mode, dev) -> int | - |
 | 260 | fchownat | (dfd, path, uid, gid, flags) -> int | io.zig |
+| 261 | futimesat | (dfd, path, times) -> int | fs_handlers.zig |
 | 262 | newfstatat | (dfd, path, statbuf, flags) -> int | io.zig |
 | 263 | unlinkat | (dfd, path, flags) -> int | fs_handlers.zig |
 | 264 | renameat | (olddfd, old, newdfd, new) -> int | fs_handlers.zig |
@@ -417,11 +454,14 @@ Example differences:
 | 267 | readlinkat | (dfd, path, buf, size) -> ssize_t | io.zig |
 | 268 | fchmodat | (dfd, path, mode, flags) -> int | fs_handlers.zig |
 | 269 | faccessat | (dfd, path, mode, flags) -> int | fd.zig |
+| 270 | pselect6 | (nfds, r, w, e, timeout, sigmask) -> int | scheduling.zig |
+| 271 | ppoll | (fds, nfds, timeout, sigmask, sigsetsize) -> int | scheduling.zig |
 | 272 | unshare | (flags) -> int | - |
 | 275 | splice | (fd_in, off_in, fd_out, off_out, len, flags) -> ssize_t | - |
 | 276 | tee | (fd_in, fd_out, len, flags) -> ssize_t | - |
 | 277 | sync_file_range | (fd, off, nbytes, flags) -> int | - |
 | 278 | vmsplice | (fd, iov, nr, flags) -> ssize_t | - |
+| 280 | utimensat | (dfd, path, times, flags) -> int | fs_handlers.zig |
 | 281 | epoll_pwait | (epfd, events, max, timeout, sigmask, size) -> int | scheduling.zig (-) |
 | 282 | signalfd | (fd, mask, flags) -> fd | - |
 | 283 | timerfd_create | (clockid, flags) -> fd | - |
@@ -438,6 +478,7 @@ Example differences:
 | 294 | inotify_init1 | (flags) -> fd | - |
 | 295 | preadv | (fd, iov, iovcnt, off) -> ssize_t | - |
 | 296 | pwritev | (fd, iov, iovcnt, off) -> ssize_t | - |
+| 297 | rt_tgsigqueueinfo | (tgid, tid, sig, info) -> int | signals.zig |
 | 302 | prlimit64 | (pid, resource, new, old) -> int | process.zig (-) |
 | 306 | syncfs | (fd) -> int | - |
 | 308 | setns | (fd, nstype) -> int | - |
@@ -446,6 +487,8 @@ Example differences:
 | 318 | getrandom | (buf, count, flags) -> ssize_t | random.zig |
 | 319 | memfd_create | (name, flags) -> fd | - |
 | 326 | copy_file_range | (fd_in, off_in, fd_out, off_out, len, flags) -> ssize_t | - |
+| 327 | preadv2 | (fd, iov, iovcnt, off, flags) -> ssize_t | read_write.zig |
+| 328 | pwritev2 | (fd, iov, iovcnt, off, flags) -> ssize_t | read_write.zig |
 | 425 | io_uring_setup | (entries, params) -> int | - |
 | 426 | io_uring_enter | (fd, submit, complete, flags, sig) -> int | - |
 | 427 | io_uring_register | (fd, opcode, arg, nr_args) -> int | - |

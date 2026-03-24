@@ -184,7 +184,7 @@ pub fn initFromBootInfo(boot_info: anytype) void {
 fn delay(count: u32) void {
     var i: u32 = 0;
     while (i < count) : (i += 1) {
-        asm volatile ("isb" ::: "memory");
+        asm volatile ("isb" ::: .{ .memory = true });
     }
 }
 
@@ -254,29 +254,29 @@ fn initCoreHardcoded() void {
 
 fn writeGicdDirect(base: u64, offset: u32, val: u32) void {
     const addr: *volatile u32 = @ptrFromInt(base + offset);
-    asm volatile ("dsb sy" ::: "memory");
-    asm volatile ("isb" ::: "memory");
+    asm volatile ("dsb sy" ::: .{ .memory = true });
+    asm volatile ("isb" ::: .{ .memory = true });
     addr.* = val;
-    asm volatile ("dsb sy" ::: "memory");
-    asm volatile ("isb" ::: "memory");
+    asm volatile ("dsb sy" ::: .{ .memory = true });
+    asm volatile ("isb" ::: .{ .memory = true });
 }
 
 fn readGicdDirect(base: u64, offset: u32) u32 {
     const addr: *volatile u32 = @ptrFromInt(base + offset);
-    asm volatile ("dsb sy" ::: "memory");
-    asm volatile ("isb" ::: "memory");
+    asm volatile ("dsb sy" ::: .{ .memory = true });
+    asm volatile ("isb" ::: .{ .memory = true });
     const val = addr.*;
-    asm volatile ("dsb sy" ::: "memory");
+    asm volatile ("dsb sy" ::: .{ .memory = true });
     return val;
 }
 
 fn writeGiccDirect(base: u64, offset: u32, val: u32) void {
     const addr: *volatile u32 = @ptrFromInt(base + offset);
-    asm volatile ("dsb sy" ::: "memory");
-    asm volatile ("isb" ::: "memory");
+    asm volatile ("dsb sy" ::: .{ .memory = true });
+    asm volatile ("isb" ::: .{ .memory = true });
     addr.* = val;
-    asm volatile ("dsb sy" ::: "memory");
-    asm volatile ("isb" ::: "memory");
+    asm volatile ("dsb sy" ::: .{ .memory = true });
+    asm volatile ("isb" ::: .{ .memory = true });
 }
 
 /// Write to GICD during initialization (before pointer is published)
@@ -285,11 +285,11 @@ fn writeGicdInit(offset: u32, val: u32) void {
     const phys = gic_config_storage.gicd_base + offset;
     const addr: *volatile u32 = @ptrFromInt(phys);
     // DSB+ISB sequence for QEMU TCG stability
-    asm volatile ("dsb sy" ::: "memory");
-    asm volatile ("isb" ::: "memory");
+    asm volatile ("dsb sy" ::: .{ .memory = true });
+    asm volatile ("isb" ::: .{ .memory = true });
     addr.* = val;
-    asm volatile ("dsb sy" ::: "memory");
-    asm volatile ("isb" ::: "memory");
+    asm volatile ("dsb sy" ::: .{ .memory = true });
+    asm volatile ("isb" ::: .{ .memory = true });
 }
 
 fn earlyPrintHex(val: u32) void {
@@ -310,10 +310,10 @@ fn earlyPrintHex(val: u32) void {
 fn readGicdInit(offset: u32) u32 {
     const phys = gic_config_storage.gicd_base + offset;
     const addr: *volatile u32 = @ptrFromInt(phys);
-    asm volatile ("dsb sy" ::: "memory");
-    asm volatile ("isb" ::: "memory");
+    asm volatile ("dsb sy" ::: .{ .memory = true });
+    asm volatile ("isb" ::: .{ .memory = true });
     const val = addr.*;
-    asm volatile ("dsb sy" ::: "memory");
+    asm volatile ("dsb sy" ::: .{ .memory = true });
     return val;
 }
 
@@ -322,11 +322,11 @@ fn readGicdInit(offset: u32) u32 {
 fn writeGiccInit(offset: u32, val: u32) void {
     const phys = gic_config_storage.gicc_base + offset;
     const addr: *volatile u32 = @ptrFromInt(phys);
-    asm volatile ("dsb sy" ::: "memory");
-    asm volatile ("isb" ::: "memory");
+    asm volatile ("dsb sy" ::: .{ .memory = true });
+    asm volatile ("isb" ::: .{ .memory = true });
     addr.* = val;
-    asm volatile ("dsb sy" ::: "memory");
-    asm volatile ("isb" ::: "memory");
+    asm volatile ("dsb sy" ::: .{ .memory = true });
+    asm volatile ("isb" ::: .{ .memory = true });
 }
 
 /// Core GIC initialization (called after addresses are set in gic_config_storage)

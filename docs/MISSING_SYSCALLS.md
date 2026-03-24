@@ -7,8 +7,8 @@ This document lists Linux x86_64 syscalls not yet implemented in zk.
 | Metric | Count |
 |--------|-------|
 | Linux x86_64 syscalls | 420 |
-| Implemented in zk | 190 (45%) |
-| Missing | 230 |
+| Implemented in zk | 224 (53%) |
+| Missing | 196 |
 
 All implemented syscalls use **correct Linux x86_64 numbers**. ZK extensions (1000+) do not conflict with Linux.
 
@@ -62,6 +62,27 @@ These 500+ numbers are zk-specific compatibility extensions, NOT part of the Lin
 - **Low**: Legacy, deprecated, or rarely used
 
 ## Recently Implemented
+
+### 2026-02-22: SysV IPC, Scheduler, User/Group IDs, and More
+
+34 new syscalls implemented across multiple subsystems.
+
+**SysV IPC** (11 syscalls in `src/kernel/sys/syscall/ipc/`):
+- Shared Memory: `shmget` (29), `shmat` (30), `shmctl` (31), `shmdt` (67)
+- Semaphores: `semget` (64), `semop` (65), `semctl` (66)
+- Message Queues: `msgget` (68), `msgsnd` (69), `msgrcv` (70), `msgctl` (71)
+
+**User/Group ID Management** (6 syscalls in `process/process.zig`):
+- `setreuid` (113), `setregid` (114), `getgroups` (115), `setgroups` (116), `setfsuid` (122), `setfsgid` (123)
+
+**Scheduler** (9 syscalls in `scheduling.zig` and `control.zig`):
+- `sched_setparam` (142), `sched_getparam` (143), `sched_setscheduler` (144), `sched_getscheduler` (145)
+- `sched_get_priority_max` (146), `sched_get_priority_min` (147), `sched_rr_get_interval` (148)
+- `sched_setaffinity` (203), `sched_getaffinity` (204)
+
+**Additional** (8 syscalls):
+- `waitid` (247), `pselect6` (270), `ppoll` (271), `futimesat` (261)
+- `utimensat` (280), `rt_tgsigqueueinfo` (297), `preadv2` (327), `pwritev2` (328)
 
 ### 2026-02-05: Expanded Test Coverage & Kernel Bug Fixes
 
@@ -120,33 +141,17 @@ Multi-process support syscalls:
 
 ## Missing by Category
 
-### SysV IPC - Shared Memory (High Priority)
+### ~~SysV IPC - Shared Memory~~ (DONE)
 
-Required for legacy IPC. Consider implementing for PostgreSQL, Redis compatibility.
+All implemented in `src/kernel/sys/syscall/ipc/`: shmget, shmat, shmctl, shmdt.
 
-| # | Name | Description |
-|---|------|-------------|
-| 29 | `shmget` | Allocate shared memory segment |
-| 30 | `shmat` | Attach shared memory segment |
-| 31 | `shmctl` | Shared memory control operations |
-| 67 | `shmdt` | Detach shared memory segment |
+### ~~SysV IPC - Semaphores~~ (DONE)
 
-### SysV IPC - Semaphores (Medium Priority)
+All implemented in `src/kernel/sys/syscall/ipc/`: semget, semop, semctl.
 
-| # | Name | Description |
-|---|------|-------------|
-| 64 | `semget` | Get semaphore set |
-| 65 | `semop` | Semaphore operations |
-| 66 | `semctl` | Semaphore control operations |
+### ~~SysV IPC - Message Queues~~ (DONE)
 
-### SysV IPC - Message Queues (Medium Priority)
-
-| # | Name | Description |
-|---|------|-------------|
-| 68 | `msgget` | Get message queue |
-| 69 | `msgsnd` | Send message to queue |
-| 70 | `msgrcv` | Receive message from queue |
-| 71 | `msgctl` | Message queue control |
+All implemented in `src/kernel/sys/syscall/ipc/`: msgget, msgsnd, msgrcv, msgctl.
 
 ### ~~Timers & Alarms~~ (DONE)
 
@@ -156,32 +161,13 @@ All implemented: `pause` (scheduling.zig), `alarm` (alarm.zig), `getitimer`/`set
 
 All implemented: `setpgid`, `getpgrp`, `setsid`, `getpgid`, `getsid` (process.zig).
 
-### User/Group IDs (Medium Priority)
+### ~~User/Group IDs~~ (DONE)
 
-Required for privilege dropping, setuid programs.
+All implemented in `process/process.zig`: setreuid, setregid, getgroups, setgroups, setfsuid, setfsgid.
 
-| # | Name | Description |
-|---|------|-------------|
-| 113 | `setreuid` | Set real/effective UID |
-| 114 | `setregid` | Set real/effective GID |
-| 115 | `getgroups` | Get supplementary groups |
-| 116 | `setgroups` | Set supplementary groups |
-| 122 | `setfsuid` | Set filesystem UID |
-| 123 | `setfsgid` | Set filesystem GID |
+### ~~Scheduler~~ (DONE)
 
-### Scheduler (Medium Priority)
-
-Required for real-time applications, priority management.
-
-| # | Name | Description |
-|---|------|-------------|
-| 142 | `sched_setparam` | Set scheduling parameters |
-| 143 | `sched_getparam` | Get scheduling parameters |
-| 144 | `sched_setscheduler` | Set scheduling policy |
-| 145 | `sched_getscheduler` | Get scheduling policy |
-| 146 | `sched_get_priority_max` | Get max priority for policy |
-| 147 | `sched_get_priority_min` | Get min priority for policy |
-| 148 | `sched_rr_get_interval` | Get round-robin time quantum |
+All implemented in `scheduling.zig` and `control.zig`: sched_setparam, sched_getparam, sched_setscheduler, sched_getscheduler, sched_get_priority_max, sched_get_priority_min, sched_rr_get_interval, sched_setaffinity, sched_getaffinity.
 
 ### Extended Attributes (Low Priority)
 
@@ -275,15 +261,13 @@ These syscalls are deprecated or obsolete in modern Linux.
 
 All implemented: flock, pause, alarm, setpgid/getpgid, setsid/getsid.
 
-### ~~Phase 2: System Compatibility~~ (MOSTLY COMPLETE)
+### ~~Phase 2: System Compatibility~~ (COMPLETE)
 
-Implemented: sysinfo, times, getitimer/setitimer. Remaining: User/group ID syscalls (113-116).
+All implemented: sysinfo, times, getitimer/setitimer, setreuid/setregid, getgroups/setgroups, setfsuid/setfsgid.
 
-### Phase 3: Advanced Features
+### ~~Phase 3: Advanced Features~~ (COMPLETE)
 
-1. SysV shared memory (29-31, 67)
-2. SysV semaphores (64-66)
-3. Scheduler syscalls (142-148)
+All implemented: SysV shared memory (29-31, 67), SysV semaphores (64-66), SysV message queues (68-71), scheduler syscalls (142-148, 203-204).
 
 ### Not Recommended
 

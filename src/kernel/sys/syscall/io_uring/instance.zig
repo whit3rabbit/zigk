@@ -324,7 +324,7 @@ pub fn freeInstance(idx: usize) void {
     const lock_state = acquirePoolLock();
     defer releasePoolLock(lock_state);
 
-    var inst = &instances[idx];
+    const inst = &instances[idx];
     if (!inst.allocated) return;
 
     // Free any pending requests

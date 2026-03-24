@@ -604,6 +604,10 @@ pub fn testRenameat2DefaultFlags() !void {
     const src = "/mnt/rn2_src";
     const dst = "/mnt/rn2_dst";
 
+    // Cleanup stale files from previous failed runs
+    syscall.unlink(src) catch {};
+    syscall.unlink(dst) catch {};
+
     // Create source file
     const fd = syscall.open(src, syscall.O_WRONLY | syscall.O_CREAT | syscall.O_TRUNC, 0o644) catch {
         return error.SkipTest;
@@ -863,7 +867,7 @@ pub fn testSplicePipeToFile() !void {
 
     // Check if SFS is available
     const test_fd = syscall.open("/mnt/test_sfs", syscall.O_CREAT | syscall.O_WRONLY, 0o644) catch |err| {
-        if (err == error.ReadOnlyFileSystem) return error.SkipTest;
+        if (err == error.ReadOnlyFilesystem) return error.SkipTest;
         return err;
     };
     _ = syscall.close(test_fd) catch {};
@@ -1036,7 +1040,7 @@ pub fn testCopyFileRangeBasic() !void {
     // Destination: SFS file, keep open throughout to avoid SFS close deadlock
     const dst_fd = syscall.open(dst_path, syscall.O_CREAT | syscall.O_RDWR, 0o644) catch |err| {
         syscall.close(src_fd) catch {};
-        if (err == error.ReadOnlyFileSystem) return error.SkipTest;
+        if (err == error.ReadOnlyFilesystem) return error.SkipTest;
         return err;
     };
     // Do NOT close dst_fd (SFS deadlock avoidance)
@@ -1079,7 +1083,7 @@ pub fn testCopyFileRangeWithOffsets() !void {
     // Destination: SFS file, keep open as O_RDWR to avoid SFS close deadlock
     const dst_fd = syscall.open(dst_path, syscall.O_CREAT | syscall.O_RDWR, 0o644) catch |err| {
         syscall.close(src_fd) catch {};
-        if (err == error.ReadOnlyFileSystem) return error.SkipTest;
+        if (err == error.ReadOnlyFilesystem) return error.SkipTest;
         return err;
     };
     // Do NOT close dst_fd (SFS deadlock avoidance)
@@ -1244,7 +1248,7 @@ pub fn testCopyFileRangePageCache() !void {
     // Destination: SFS file (keep open to avoid SFS close deadlock)
     const dst_fd = syscall.open(dst_path, syscall.O_CREAT | syscall.O_RDWR, 0o644) catch |err| {
         syscall.close(src_fd) catch {};
-        if (err == error.ReadOnlyFileSystem) return error.SkipTest;
+        if (err == error.ReadOnlyFilesystem) return error.SkipTest;
         return err;
     };
 

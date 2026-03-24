@@ -190,7 +190,7 @@ pub const Process = struct {
     /// This invariant allows lock-free iteration in has*Capability() functions.
     /// If dynamic capability modification is ever added (e.g., cap_grant syscall),
     /// a reader-writer lock MUST be added to prevent TOCTOU races during iteration.
-    capabilities: std.ArrayListUnmanaged(capabilities.Capability) = .{},
+    capabilities: std.ArrayListUnmanaged(capabilities.Capability) = .empty,
 
     /// SECURITY: Cumulative DMA pages allocated by this process.
     dma_allocated_pages: u32 = 0,

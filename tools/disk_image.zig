@@ -78,9 +78,9 @@ fn readAll(io: std.Io, file: std.Io.File, buf: []u8) !usize {
 }
 
 pub fn main(init: std.process.Init) !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    var da = std.heap.DebugAllocator(.{}){};
+    defer _ = da.deinit();
+    const allocator = da.allocator();
 
     const io = init.io;
 

@@ -58,84 +58,27 @@ zig build run -Darch=x86_64 -Ddefault-boot=shell -Dqemu-args="-nographic"
 The build system automatically configures explicit chardev with `signal=off` for proper stdin handling on macOS when `-nographic` is detected. Press `Ctrl+A X` to exit QEMU in this mode.
 Note: `-Ddisplay=sdl` and `-Ddisplay=gtk` are NOT available on Homebrew QEMU (macOS only has cocoa).
 
-## Zig 0.16.x Compatibility Notes
+## Zig 0.16.x Gotchas
 
-### Breaking API Changes from 0.15.x
-
-**build.zig changes:**
-- `std.fs.accessAbsolute(path, flags)` removed - use `std.c.access(path.ptr, std.c.F_OK)` with `[:0]const u8` paths
-- `compile.addAssemblyFile(...)` deprecated - use `compile.root_module.addAssemblyFile(...)`
-- `compile.addCSourceFile(...)` deprecated - use `compile.root_module.addCSourceFile(...)`
-- `compile.addCSourceFiles(...)` deprecated - use `compile.root_module.addCSourceFiles(...)`
-- `compile.addIncludePath(...)` deprecated - use `compile.root_module.addIncludePath(...)`
-- `compile.linkLibC()` deprecated - use `compile.root_module.link_libc = true`
-- `setLinkerScript` remains on Step.Compile (not deprecated)
-
-**Standard library changes:**
-- `std.atomic.compilerFence(.seq_cst)` removed - use `asm volatile ("" ::: "memory")`
-- `std.mem.trimRight(T, slice, chars)` removed - implement manually or use helper function
-- `std.meta.intToEnum(Enum, int)` removed - use `std.enums.fromInt(Enum, int)` which returns `?Enum`
-- `std.fs.cwd()` removed - filesystem APIs moved to `std.Io.Dir` with required `Io` context parameter
-
-**Pattern for file existence check in build.zig:**
-```zig
-fn fileExists(path: [:0]const u8) bool {
-    return std.c.access(path.ptr, std.c.F_OK) == 0;
-}
-```
-
-**Pattern for compiler fence:**
-```zig
-// Instead of: std.atomic.compilerFence(.seq_cst)
-asm volatile ("" ::: "memory");
-```
+Key API differences from 0.15.x (already applied in codebase, listed to prevent regressions):
+- `std.atomic.compilerFence` removed: use `asm volatile ("" ::: "memory")`
+- `std.meta.intToEnum` removed: use `std.enums.fromInt()` (returns `?Enum`)
+- `std.fs.cwd()` removed: filesystem APIs require `Io` context
+- `compile.addAssemblyFile/addCSourceFile/linkLibC` deprecated: use `compile.root_module.*` variants
+- File existence in build.zig: `std.c.access(path.ptr, std.c.F_OK) == 0`
 
 ## Testing Infrastructure
 
 **Test Runner**: Userspace test harness at `src/user/test_runner/`.
-**Test Suite**: Integration tests in `src/user/test_runner/tests/` (186 tests, 166 passing, 20 skipped).
+**Test Suite**: Integration tests in `src/user/test_runner/tests/` (29 files across 3 directories).
 **Automation**: `scripts/run_tests.sh` with 90s timeout for CI.
 **Boot Target**: `-Ddefault-boot=test_runner` auto-runs tests.
 **CI**: GitHub Actions workflow (`.github/workflows/ci.yml`) runs on every PR/push.
-**Coverage**: 95+ syscalls tested, 15 test categories, both x86_64 and aarch64.
-**Documentation**: See `TODO_TESTING_INFRA.md` for detailed test inventory and roadmap.
 
-### Running Tests
-```bash
-# Quick test (single architecture)
-zig build test-kernel                                    # Runs for default arch (x86_64)
-./scripts/run_tests.sh                                   # Same, via script (90s timeout)
-
-# Test specific architecture
-ARCH=x86_64 ./scripts/run_tests.sh                       # x86_64 tests only
-ARCH=aarch64 ./scripts/run_tests.sh                      # aarch64 tests only
-
-# Multi-architecture CI mode
-RUN_BOTH=true ./scripts/run_tests.sh                     # Both x86_64 AND aarch64
-
-# Manual debugging
-zig build run -Darch=x86_64 -Ddefault-boot=test_runner   # x86_64 with GUI/serial
-zig build run -Darch=aarch64 -Ddefault-boot=test_runner  # aarch64 with GUI/serial
-
-# Unit tests
-zig build test                                           # Host-based Zig unit tests
-```
-
-### Test Categories (186 tests)
-- **Filesystem** (15 tests): VFS, SFS, InitRD, DevFS operations
-- **Syscalls - Directory Ops** (4 tests): chdir, getcwd, getdents64
-- **Syscalls - File I/O** (10 tests): open, read, write, lseek, truncate, append
-- **Syscalls - FD Ops** (10 tests): dup, dup2, pipe, pipe2, fcntl, pread64
-- **Syscalls - File Info** (12 tests): stat, fstat, lstat, chmod, access, truncate, rename
-- **Syscalls - Time Ops** (8 tests): nanosleep, clock_gettime, clock_getres, gettimeofday, sched_yield
-- **Syscalls - Misc** (8 tests): uname, umask, getrandom, writev, poll
-- **Syscalls - AT* Family** (6 tests): fstatat, mkdirat, unlinkat, renameat, fchmodat
-- **Error Handling** (12 tests): Invalid FDs, permissions, boundary checks
-- **Regression Tests** (6 tests): SFS deadlocks, TOCTOU races, error codes
-- **Edge Cases** (10 tests): Block boundaries, zero-length ops, filename limits
-- **Memory** (10 tests): mmap, munmap, brk, protections, overflow checks
-- **Process** (19 tests): fork, exec, wait, exit, getpid, alarm, sysinfo, times, itimer, process groups/sessions
-- **Stress Tests** (6 tests): Large files (10MB), 100 files, concurrent ops
+### Test Files (29 files in 3 directories)
+- **fs/**: basic, ext2_basic, edge_cases, errors, stress
+- **syscall/**: at_ops, capabilities, dir_ops, event_fds, fd_ops, file_info, file_ops, fs_extras, inotify, io_mux, memory, misc, posix_timer, process, process_control, resource_limits, seccomp, signals, sockets, sysv_ipc, time_ops, uid_gid, vectored_io
+- **regression/**: sfs_issues
 
 ### Architecture Support
 - **x86_64**: Full test coverage, all tests passing
@@ -153,21 +96,6 @@ zig build test                                           # Host-based Zig unit t
    - **Action**: Do not attempt to fix - documented test environment limitation, not a kernel bug
 2. **SFS-related skips** (16 tests): Tests that require SFS file close/rmdir/rename after many operations are skipped due to SFS close deadlock and VFS re-lock bugs. These are SFS limitations, not syscall bugs. Affected tests: ftruncate, rename, unlink, rmdir (file_info); unlinkat dir, renameat (at_ops); and others.
 3. **Pre-existing skips** (3 tests): Earlier process and filesystem tests skipped for known limitations.
-
-**Fixed Tests (aarch64-specific)**:
-1. **process: exec replaces process** (`testExecReplacesProcess`) -- FIXED
-   - **Previously**: `PageFault: addr 478000 not in any VMA (SIGSEGV)` on aarch64 only
-   - **Root Causes** (two bugs found):
-     1. **Missing copy_from_user fixup on aarch64**: The aarch64 data abort handler did not check
-        if the fault occurred during `_asm_copy_from_user` (which uses `ldtrb` unprivileged loads).
-        On x86_64, the exception handler redirects faults in this range to a fixup handler; on aarch64,
-        the fault fell through to the page fault handler, which saw "not in any VMA" and killed the process.
-        The fault happened when `copyStringFromUser` read argv past the end of mapped user memory.
-        **Fix**: `src/arch/aarch64/kernel/interrupts/root.zig` -- added fixup check matching x86_64.
-     2. **Wrong page table register in sys_execve**: `sys_execve` called `writeCr3()` which writes TTBR1_EL1
-        (kernel page table). On aarch64, user-space pages are walked via TTBR0_EL1. The scheduler already
-        used `writeTtbr0()` for context switches, but sys_execve did not.
-        **Fix**: `src/kernel/sys/syscall/core/execution.zig` -- use `writeTtbr0` on aarch64.
 
 **Test Environment Notes**:
 - Process spawn behavior: New processes get `pgid = pid` and `sid = pid` (become session leaders)
@@ -391,7 +319,7 @@ High-throughput drivers (VirtIO, Netstack) use shared memory rings, **not** io_u
 
 ## Syscall Implementation
 
-*   **Location**: `src/kernel/sys/syscall/` (organized into subdirectories: core/, fs/, memory/, process/, net/, hw/, io/, io_uring/, misc/)
+*   **Location**: `src/kernel/sys/syscall/` (organized into subdirectories: core/, fs/, hw/, io/, io_uring/, ipc/, memory/, misc/, net/, process/)
 *   **Return Type**: Must be `SyscallError!usize`.
 *   **Dispatch**: Auto-registered in `core/table.zig`.
 
@@ -429,6 +357,14 @@ zk uses a multi-filesystem VFS architecture with distinct mount points:
 | `/dev` | DevFS | Virtual | Device files |
 | `/mnt` | SFS | Read-write | Persistent storage (/dev/sda) |
 
+**Additional filesystem implementations** (in `src/fs/`):
+- **ext2**: Read-only ext2 support (inode, mount, types). Has dedicated tests (`ext2_basic.zig`).
+- **VirtIO-9P** (`virtio9p.zig`): Host-guest shared folders via `-Dvirtfs=` flag.
+- **VirtioFS** (`virtiofs.zig`): FUSE-based host-guest filesystem.
+- **VBoxSF** (`vboxsf.zig`): VirtualBox shared folders.
+- **HGFS** (`hgfs.zig`): VMware Host-Guest filesystem.
+- **Partitions**: GPT and MBR parsing (`src/fs/partitions/`).
+
 **Important**: Directory operations (mkdir/rmdir) only work on writable filesystems.
 *   **InitRD (/)**: Read-only by design for security. Attempting `mkdir /testdir` returns EROFS.
 *   **SFS (/mnt)**: Fully writable. Commands like `mkdir /mnt/testdir` work correctly.
@@ -456,6 +392,22 @@ rmdir /mnt/mydir
 *   **Design**: Fixed-size FD table (`MAX_FDS` entries) per process. Shared FDs via reference counting (for `fork` and `dup`). Standard I/O (stdin, stdout, stderr) pre-populated at slots 0, 1, 2.
 
 ## Drivers
+
+**Subsystems** (`src/drivers/`):
+| Subsystem | Drivers | Notes |
+|-----------|---------|-------|
+| `audio/` | AC97, HDA | Sound cards |
+| `input/` | PS/2, VMMouse | Keyboard + mouse (layouts in `layouts/`) |
+| `net/` | e1000e | Intel Gigabit NIC |
+| `serial/` | UART 16550, PL011 | x86_64 and aarch64 serial |
+| `storage/` | AHCI, IDE, NVMe | Block devices |
+| `usb/` | xHCI, EHCI | USB host controllers + class drivers |
+| `video/` | BGA, Cirrus, QXL, SVGA, VirtIO-GPU | Framebuffer + console |
+| `pci/` | ECAM, Legacy | PCI enumeration and access |
+| `virtio/` | 9P, RNG, SCSI, Sound, Input, FS | VirtIO device types |
+| `virt_pci/` | -- | VirtIO PCI transport |
+| `vbox/` | VMMDev, Shared Folders | VirtualBox guest |
+| `vmware/` | HGFS | VMware guest (host-guest FS) |
 
 ### 1. Driver Registration & Lifecycle
 *   **Location**: Drivers live in `src/drivers/<subsystem>/<driver_name>/`.

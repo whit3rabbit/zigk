@@ -540,7 +540,7 @@ pub fn testLchownNonExistent() !void {
     if (syscall.lchown(path, 1000, 1000)) |_| {
         return error.TestFailed; // Should have failed
     } else |err| {
-        if (err != error.FileNotFound) return error.TestFailed;
+        if (err != error.NoSuchFileOrDirectory) return error.TestFailed;
     }
 }
 

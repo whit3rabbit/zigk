@@ -139,10 +139,10 @@ pub const RegisterAccess = struct {
 pub inline fn memoryBarrier() void {
     if (builtin.cpu.arch == .x86_64) {
         // x86 has strong memory ordering, but mfence ensures visibility
-        asm volatile ("mfence" ::: "memory");
+        asm volatile ("mfence" ::: .{ .memory = true });
     } else if (builtin.cpu.arch == .aarch64) {
         // DMB SY - Data Memory Barrier, full system
-        asm volatile ("dmb sy" ::: "memory");
+        asm volatile ("dmb sy" ::: .{ .memory = true });
     } else {
         @compileError("Unsupported architecture");
     }

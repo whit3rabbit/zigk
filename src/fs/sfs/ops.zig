@@ -670,8 +670,6 @@ pub fn sfsOpen(ctx: ?*anyopaque, path: []const u8, flags: u32) vfs.Error!*fd.Fil
                 sfs_io.readSector(self, self.superblock.root_dir_start + block_idx, &block_buf) catch {
                     return vfs.Error.IOError;
                 };
-                console.debug("SFS: Block read complete", .{});
-
                 const verify_entry: *const t.DirEntry = @ptrCast(@alignCast(&block_buf[offset_in_block]));
                 if (verify_entry.flags != 0) {
                     // Slot taken by another thread - race detected
@@ -685,17 +683,21 @@ pub fn sfsOpen(ctx: ?*anyopaque, path: []const u8, flags: u32) vfs.Error!*fd.Fil
                 // Update superblock file count in memory
                 self.superblock.file_count += 1;
 
-                // Update open count in memory
-                self.open_counts[new_idx] = std.math.add(u32, self.open_counts[new_idx], 1) catch {
-                    self.superblock.file_count -= 1;
-                    return vfs.Error.NoMemory;
-                };
+                // Clear stale pending_delete state from previous file at this slot.
+                // When a file is unlinked while open, pending_delete is set. The
+                // directory entry's flags are cleared to 0 on disk, making the slot
+                // appear free. If the close that should clear pending_delete never
+                // runs (FD leak), the stale pending_delete blocks future opens of
+                // any new file created at this slot.
+                self.pending_delete[new_idx] = false;
+                self.deferred_info[new_idx] = .{ .start_block = 0, .block_count = 0 };
 
-                console.debug("SFS: Lock will be released", .{});
+                // Set open count (not increment -- fresh file at this slot)
+                self.open_counts[new_idx] = 1;
+
             }
 
             // PHASE 5: Write directory block OUTSIDE lock
-            console.debug("SFS: Writing block {} outside lock", .{block_idx});
             sfs_io.writeSector(self, self.superblock.root_dir_start + block_idx, &block_buf) catch |err| {
                 // Rollback on write failure
                 const held = self.alloc_lock.acquire();
@@ -1781,16 +1783,19 @@ pub fn sfsRename(ctx: ?*anyopaque, old_path: []const u8, new_path: []const u8) v
             }
         }
 
-        // Now rename old entry by changing its name
+        // Now rename old entry by changing its name.
+        // If same_block and new_idx != null, new_e's modifications were made on
+        // new_block_buf (a separate copy). We must merge those changes into
+        // old_block_buf first, THEN apply the rename on old_block_buf so it
+        // doesn't get reverted.
+        if (same_block and new_idx != null) {
+            // Copy the cleared new_entry from new_block_buf into old_block_buf
+            const new_offset = (new_idx.? % 4) * 128;
+            @memcpy(old_block_buf[new_offset..][0..128], new_block_buf[new_offset..][0..128]);
+        }
+
         old_e.name = [_]u8{0} ** 32;
         @memcpy(old_e.name[0..new_name.len], new_name);
-
-        // If same block, we've already modified both entries in old_block_buf
-        if (same_block and new_idx != null) {
-            // Copy modifications from new_block_buf back to old_block_buf (they're the same block)
-            // Actually, we modified new_block_buf which is a copy, so copy it back
-            @memcpy(&old_block_buf, &new_block_buf);
-        }
     }
 
     // PHASE 3: Write blocks OUTSIDE lock
@@ -1832,7 +1837,6 @@ pub fn sfsRename(ctx: ?*anyopaque, old_path: []const u8, new_path: []const u8) v
         sfs_alloc.freeBlocks(self, del.start_block, del.block_count);
     }
 
-    console.info("SFS: Renamed '{s}' to '{s}'", .{ old_name, new_name });
 }
 
 /// Rename a file with flags (RENAME_NOREPLACE, RENAME_EXCHANGE)
