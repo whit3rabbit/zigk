@@ -2738,7 +2738,7 @@ pub fn build(b: *std.Build) void {
             "-smp", "1", // Single-core for initial bring-up
             "-no-reboot",
             "-no-shutdown",
-            "-accel", "hvf", // Use Hypervisor.framework on Apple Silicon
+            "-accel", if (host_os == .macos) "hvf" else "tcg",
         });
     } else {
         // x86_64-specific QEMU options
@@ -2779,9 +2779,14 @@ pub fn build(b: *std.Build) void {
             "-no-reboot",
             "-no-shutdown",
             "-accel", "tcg,thread=multi",
-            // USB Mass Storage (optional)
-            "-drive", "if=none,id=usbdisk,format=raw,file=usb_disk.img",
         });
+        // USB Mass Storage (optional, only if usb_disk.img exists)
+        const has_usb_disk = fileExists("usb_disk.img");
+        if (has_usb_disk) {
+            run_cmd.addArgs(&.{
+                "-drive", "if=none,id=usbdisk,format=raw,file=usb_disk.img",
+            });
+        }
     }
 
     if (run_iso) {
@@ -2839,8 +2844,8 @@ pub fn build(b: *std.Build) void {
         });
     }
 
-    // USB hub and storage (x86_64 only for now)
-    if (target_arch == .x86_64) {
+    // USB hub and storage (x86_64 only, requires usb_disk.img)
+    if (target_arch == .x86_64 and fileExists("usb_disk.img")) {
         if (qemu_usb_hub) {
             run_cmd.addArgs(&.{
                 "-device", "usb-hub,bus=xhci.0,id=hub0",
