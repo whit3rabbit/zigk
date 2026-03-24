@@ -8,7 +8,7 @@ on:
   workflow_dispatch:  # Allow manual triggering
 
 env:
-  ZIG_VERSION: "0.16.0"  # Update as needed
+  ZIG_VERSION: "master"  # Nightly: project tracks 0.16.x dev
 
 jobs:
   # Unit tests (fast, run on host)
@@ -20,7 +20,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Setup Zig
-        uses: goto-bus-stop/setup-zig@v2
+        uses: mlugg/setup-zig@v2
         with:
           version: ${{ env.ZIG_VERSION }}
 
@@ -42,7 +42,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Setup Zig
-        uses: goto-bus-stop/setup-zig@v2
+        uses: mlugg/setup-zig@v2
         with:
           version: ${{ env.ZIG_VERSION }}
 
@@ -98,7 +98,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Setup Zig
-        uses: goto-bus-stop/setup-zig@v2
+        uses: mlugg/setup-zig@v2
         with:
           version: ${{ env.ZIG_VERSION }}
 

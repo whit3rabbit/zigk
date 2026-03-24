@@ -2646,6 +2646,7 @@ pub fn build(b: *std.Build) void {
     const efi_loader_ext = b.fmt("{s}.efi", .{efi_loader_name});
     const iso_script = b.fmt(
         \\set -e && \
+        \\echo "=== Building UEFI ISO ===" >&2 && \
         \\rm -rf iso_root efi.img && \
         \\mkdir -p iso_root/EFI/BOOT && \
         \\cp zig-out/bin/{s} iso_root/EFI/BOOT/{s} && \
@@ -2667,10 +2668,10 @@ pub fn build(b: *std.Build) void {
         \\    done; \
         \\fi && \
         \\if [ "$(ls -A .zig-cache/initrd_root 2>/dev/null)" ]; then \
-        \\    echo "Creating initrd.tar..." && \
+        \\    echo "Creating initrd.tar..." >&2 && \
         \\    tar --format=ustar -cvf "$tmp_initrd" -C .zig-cache/initrd_root .; \
         \\fi && \
-        \\echo "Creating EFI boot image..." && \
+        \\echo "Creating EFI boot image..." >&2 && \
         \\dd if=/dev/zero of=efi.img bs=1M count=128 2>/dev/null && \
         \\mformat -i efi.img -F :: && \
         \\mmd -i efi.img ::/EFI && \
@@ -2690,7 +2691,7 @@ pub fn build(b: *std.Build) void {
         \\    -isohybrid-gpt-basdat \
         \\    iso_root -o zk.iso && \
         \\rm -f efi.img && \
-        \\echo "UEFI ISO created: zk.iso"
+        \\echo "UEFI ISO created: zk.iso" >&2
     , .{ efi_loader_ext, efi_boot_file, kernel_elf_name, efi_loader_ext, efi_loader_name, efi_loader_ext, efi_boot_file, kernel_elf_name });
     const iso_cmd = b.addSystemCommand(&.{ "sh", "-c", iso_script });
     // TEMP: Commented out due to zig cc cache issues
@@ -2934,7 +2935,7 @@ pub fn build(b: *std.Build) void {
         \\    done; \
         \\fi && \
         \\if [ "$(ls -A .zig-cache/initrd_root 2>/dev/null)" ]; then \
-        \\    echo "Creating initrd.tar..." && \
+        \\    echo "Creating initrd.tar..." >&2 && \
         \\    tar --format=ustar -cvf "$tmp_initrd" -C .zig-cache/initrd_root .; \
         \\fi && \
         \\if [ -f "$tmp_initrd" ]; then \
@@ -2972,7 +2973,7 @@ pub fn build(b: *std.Build) void {
     const ext2_script =
         \\set -e
         \\if [ -f ext2.img.stamp ]; then
-        \\    echo "ext2.img already exists (stamp found), skipping creation"
+        \\    echo "ext2.img already exists (stamp found), skipping creation" >&2
         \\    exit 0
         \\fi
         \\MKE2FS=""
@@ -2984,14 +2985,14 @@ pub fn build(b: *std.Build) void {
         \\    MKE2FS=$(which mke2fs 2>/dev/null || true)
         \\fi
         \\if [ -z "$MKE2FS" ]; then
-        \\    echo "ERROR: mke2fs not found. On macOS: brew install e2fsprogs"
+        \\    echo "ERROR: mke2fs not found. On macOS: brew install e2fsprogs" >&2
         \\    exit 1
         \\fi
-        \\echo "Creating ext2.img (64MB) using $MKE2FS..."
+        \\echo "Creating ext2.img (64MB) using $MKE2FS..." >&2
         \\dd if=/dev/zero of=ext2.img bs=1M count=64 2>/dev/null
         \\"$MKE2FS" -t ext2 -b 4096 -L "zk-ext2" -m 0 ext2.img
         \\touch ext2.img.stamp
-        \\echo "ext2.img created successfully"
+        \\echo "ext2.img created successfully" >&2
     ;
     const create_ext2_cmd = b.addSystemCommand(&.{ "sh", "-c", ext2_script });
 
@@ -3016,11 +3017,11 @@ pub fn build(b: *std.Build) void {
     const ext2_populate_script =
         \\set -e
         \\if [ -f ext2.img.populated.stamp ]; then
-        \\    echo "ext2.img already populated (stamp found), skipping population"
+        \\    echo "ext2.img already populated (stamp found), skipping population" >&2
         \\    exit 0
         \\fi
         \\if [ ! -f ext2.img.stamp ]; then
-        \\    echo "ERROR: ext2.img.stamp not found -- run image creation first"
+        \\    echo "ERROR: ext2.img.stamp not found -- run image creation first" >&2
         \\    exit 1
         \\fi
         \\# Find debugfs alongside mke2fs
@@ -3033,17 +3034,17 @@ pub fn build(b: *std.Build) void {
         \\    DEBUGFS=$(which debugfs 2>/dev/null || true)
         \\fi
         \\if [ -z "$DEBUGFS" ]; then
-        \\    echo "WARNING: debugfs not found -- ext2 test files not populated (ext2 tests will skip)"
+        \\    echo "WARNING: debugfs not found -- ext2 test files not populated (ext2 tests will skip)" >&2
         \\    touch ext2.img.populated.stamp
         \\    exit 0
         \\fi
         \\# Check python3 availability (needed for deterministic binary pattern generation)
         \\if ! python3 --version >/dev/null 2>&1; then
-        \\    echo "WARNING: python3 not found -- ext2 test files not populated (ext2 tests will skip)"
+        \\    echo "WARNING: python3 not found -- ext2 test files not populated (ext2 tests will skip)" >&2
         \\    touch ext2.img.populated.stamp
         \\    exit 0
         \\fi
-        \\echo "Populating ext2.img with test files using $DEBUGFS..."
+        \\echo "Populating ext2.img with test files using $DEBUGFS..." >&2
         \\# Create temp directory for staging files
         \\TMPDIR_EXT2=$(mktemp -d /tmp/zk_ext2_XXXXXX)
         \\trap 'rm -rf "$TMPDIR_EXT2"' EXIT
@@ -3065,7 +3066,7 @@ pub fn build(b: *std.Build) void {
         \\    "$TMPDIR_EXT2/hello.txt" "$TMPDIR_EXT2/medium.bin" "$TMPDIR_EXT2/large.bin" "$TMPDIR_EXT2/nested.txt" \
         \\    | "$DEBUGFS" -w ext2.img 2>/dev/null
         \\touch ext2.img.populated.stamp
-        \\echo "ext2.img populated successfully (hello.txt=13B, medium.bin=100KB, large.bin=5MB, a/b/c/file.txt=17B, link_to_hello->symlink)"
+        \\echo "ext2.img populated successfully (hello.txt=13B, medium.bin=100KB, large.bin=5MB, a/b/c/file.txt=17B, link_to_hello->symlink)" >&2
     ;
     const populate_ext2_cmd = b.addSystemCommand(&.{ "sh", "-c", ext2_populate_script });
     populate_ext2_cmd.step.dependOn(&create_ext2_cmd.step);
