@@ -70,6 +70,7 @@ fn detectHostOvmf(host_os: std.Target.Os.Tag, target_arch: std.Target.Cpu.Arch) 
             // x86_64 UEFI firmware paths on Linux
             const pair_paths = [_]struct { code: [:0]const u8, vars: [:0]const u8 }{
                 .{ .code = "/usr/share/OVMF/OVMF_CODE.fd", .vars = "/usr/share/OVMF/OVMF_VARS.fd" },
+                .{ .code = "/usr/share/OVMF/OVMF_CODE_4M.fd", .vars = "/usr/share/OVMF/OVMF_VARS_4M.fd" },
                 .{ .code = "/usr/share/OVMF/OVMF_CODE.secboot.fd", .vars = "/usr/share/OVMF/OVMF_VARS.secboot.fd" },
                 .{ .code = "/usr/share/edk2/ovmf/OVMF_CODE.fd", .vars = "/usr/share/edk2/ovmf/OVMF_VARS.fd" },
                 .{ .code = "/usr/share/edk2/ovmf/OVMF_CODE.secboot.fd", .vars = "/usr/share/edk2/ovmf/OVMF_VARS.secboot.fd" },

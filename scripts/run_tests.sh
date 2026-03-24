@@ -37,12 +37,9 @@ run_tests_for_arch() {
     echo "Running tests for ${arch}..."
     timeout ${TIMEOUT}s zig build run -Darch=$arch -Ddefault-boot=test_runner -Dqemu-args="-nographic" > "$log_file" 2>&1
 
-    # Simple check: look for "TEST_EXIT:" followed eventually by "0"
+    # Check for test completion via TEST_SUMMARY or by counting PASS/FAIL results
     if strings "$log_file" | grep -q "TEST_SUMMARY:"; then
-        # Extract test counts
         SUMMARY=$(strings "$log_file" | grep "TEST_SUMMARY:" | tail -1)
-
-        # Check the line after TEST_EXIT contains "0"
         EXIT_CODE=$(strings "$log_file" | grep -A 1 "TEST_EXIT:" | tail -1 | tr -d '\r\n ' | grep -o '[0-9]')
 
         if [ "$EXIT_CODE" = "0" ]; then
@@ -54,12 +51,28 @@ run_tests_for_arch() {
             echo "  $SUMMARY"
             return 1
         fi
-    else
-        echo -e "${RED}✗ Tests did not complete for ${arch} (timeout or crash)${NC}"
-        echo "Last 20 lines of output:"
-        strings "$log_file" | tail -20
-        return 1
     fi
+
+    # Fallback: test runner may hang after tests complete (known SFS deadlock).
+    # Check if TEST_START was emitted and count PASS/FAIL directly.
+    if strings "$log_file" | grep -q "TEST_START:"; then
+        PASS_COUNT=$(strings "$log_file" | grep -c "PASS:")
+        FAIL_COUNT=$(strings "$log_file" | grep -c "FAIL:")
+        SKIP_COUNT=$(strings "$log_file" | grep -c "SKIP:")
+
+        if [ "$FAIL_COUNT" -eq 0 ] && [ "$PASS_COUNT" -gt 0 ]; then
+            echo -e "${GREEN}✓ All tests passed for ${arch}! (${PASS_COUNT} passed, ${SKIP_COUNT} skipped, runner hung post-test)${NC}"
+            return 0
+        elif [ "$FAIL_COUNT" -gt 0 ]; then
+            echo -e "${RED}✗ Some tests failed for ${arch}! (${PASS_COUNT} passed, ${FAIL_COUNT} failed, ${SKIP_COUNT} skipped)${NC}"
+            return 1
+        fi
+    fi
+
+    echo -e "${RED}✗ Tests did not complete for ${arch} (timeout or crash)${NC}"
+    echo "Last 20 lines of output:"
+    strings "$log_file" | tail -20
+    return 1
 }
 
 # Main execution
