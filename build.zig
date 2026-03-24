@@ -192,8 +192,7 @@ pub fn build(b: *std.Build) void {
     const qemu_virtfs = b.option([]const u8, "virtfs", "Share host directory via VirtIO-9P (e.g. /tmp/share)") orelse null;
     const default_audio: []const u8 = switch (host_os) {
         .macos => "coreaudio",
-        .linux => "pa",
-        else => "none",
+        else => "none", // Use -Daudio=pa on Linux desktops with PulseAudio
     };
     const qemu_audio = b.option([]const u8, "audio", "QEMU audio backend (none, coreaudio, pa, file)") orelse default_audio;
     const qemu_extra_args = b.option([]const u8, "qemu-args", "Extra QEMU arguments (e.g. -nographic for serial console mode)");
@@ -2884,7 +2883,11 @@ pub fn build(b: *std.Build) void {
         if (std.mem.endsWith(u8, bios_path, ".fd") or std.mem.endsWith(u8, bios_path, ".FD")) {
             run_cmd.addArgs(&.{ "-drive", b.fmt("if=pflash,format=raw,readonly=on,file={s}", .{bios_path}) });
             if (qemu_vars) |vars_path| {
-                run_cmd.addArgs(&.{ "-drive", b.fmt("if=pflash,format=raw,file={s}", .{vars_path}) });
+                // QEMU pflash vars must be writable; system-installed copies may be read-only.
+                // Copy to a local writable path so QEMU can update UEFI variable storage.
+                const copy_vars = b.addSystemCommand(&.{ "cp", "-f", vars_path, "uefi_vars_local.fd" });
+                run_cmd.step.dependOn(&copy_vars.step);
+                run_cmd.addArgs(&.{ "-drive", "if=pflash,format=raw,file=uefi_vars_local.fd" });
             }
         } else {
             run_cmd.addArgs(&.{ "-bios", bios_path });
