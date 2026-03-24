@@ -6,8 +6,9 @@ const OvmfPaths = struct {
 };
 
 fn fileExists(path: [:0]const u8) bool {
-    // Use std.c.access for Zig 0.16.x compatibility (std.fs.cwd() was deprecated)
-    return std.c.access(path.ptr, std.c.F_OK) == 0;
+    // Open and immediately leak the fd; this is a build script, not a long-running process.
+    _ = std.posix.openatZ(std.posix.AT.FDCWD, path, .{}, 0) catch return false;
+    return true;
 }
 
 fn detectHostOvmf(host_os: std.Target.Os.Tag, target_arch: std.Target.Cpu.Arch) OvmfPaths {
