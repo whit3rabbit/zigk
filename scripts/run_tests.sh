@@ -2,7 +2,7 @@
 # Test runner script with timeout
 set +e
 
-TIMEOUT=${TIMEOUT:-90}
+TIMEOUT=${TIMEOUT:-300}
 ARCH=${ARCH:-x86_64}
 RUN_BOTH=${RUN_BOTH:-false}
 

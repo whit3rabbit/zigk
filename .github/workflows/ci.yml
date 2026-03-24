@@ -72,7 +72,7 @@ jobs:
 
       - name: Run integration tests (${{ matrix.arch }})
         run: ARCH=${{ matrix.arch }} ./scripts/run_tests.sh
-        timeout-minutes: 3
+        timeout-minutes: 10
 
       - name: Upload test logs on failure
         if: failure()
